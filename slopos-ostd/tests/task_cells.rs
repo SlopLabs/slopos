@@ -12,7 +12,7 @@
 use slopos_ostd::KArc;
 use slopos_ostd::task::HostStack;
 use slopos_ostd::task::kernel_task::TaskInner;
-use slopos_ostd::task::{CWD_MAX, CurrentTask, SwitchWindow};
+use slopos_ostd::task::{CurrentTask, SwitchWindow};
 
 type HostTask = TaskInner<(), ()>;
 
@@ -35,99 +35,6 @@ fn current_task_is_none_without_a_pcr() {
     assert!(CurrentTask::<HostStack, HostStack>::get().is_none());
 }
 
-#[test]
-fn cwd_round_trips_through_a_witness() {
-    let task = fresh();
-    let w = window(&task);
-
-    assert!(task.set_cwd(&w, b"/usr/local/share"));
-    task.with_cwd(&w, |bytes| {
-        assert_eq!(bytes, b"/usr/local/share\0");
-    });
-
-    // A shorter path must republish the length, not leave the old tail visible.
-    assert!(task.set_cwd(&w, b"/tmp"));
-    task.with_cwd(&w, |bytes| {
-        assert_eq!(bytes, b"/tmp\0");
-    });
-}
-
-/// `CWD_MAX` counts the NUL, so `CWD_MAX - 1` is the longest path that fits
-/// and an over-long one must be refused rather than silently truncated onto a
-/// shorter directory.
-#[test]
-fn the_cwd_boundary_is_the_buffer_less_its_nul() {
-    static LONGEST: [u8; CWD_MAX - 1] = [b'x'; CWD_MAX - 1];
-    static TOO_LONG: [u8; CWD_MAX] = [b'x'; CWD_MAX];
-
-    let task = fresh();
-    let w = window(&task);
-
-    assert!(task.set_cwd(&w, b"/keep"));
-    assert!(
-        !task.set_cwd(&w, &TOO_LONG),
-        "{CWD_MAX} bytes leaves no room for NUL"
-    );
-    task.with_cwd(&w, |bytes| assert_eq!(bytes, b"/keep\0"));
-
-    assert!(task.set_cwd(&w, &LONGEST), "{} bytes fit", CWD_MAX - 1);
-    task.with_cwd(&w, |bytes| {
-        assert_eq!(bytes.len(), CWD_MAX);
-        assert_eq!(&bytes[..CWD_MAX - 1], &LONGEST[..]);
-        assert_eq!(bytes[CWD_MAX - 1], 0, "the longest path keeps its NUL");
-    });
-}
-
-/// The buffer is allocated on first use, so a failing allocator must produce a
-/// refusal that leaves the task at the directory it had.
-#[test]
-fn a_failed_lazy_allocation_is_a_refusal() {
-    let task = fresh();
-    let w = window(&task);
-
-    slopos_ostd::task::fail_next_cwd_alloc_for_test();
-    assert!(
-        !task.set_cwd(&w, b"/usr"),
-        "a failed cwd allocation must refuse the change"
-    );
-    task.with_cwd(&w, |bytes| assert_eq!(bytes, b"/\0"));
-
-    // The poison is consumed by the refusal it caused, not sticky.
-    assert!(task.set_cwd(&w, b"/usr"));
-    task.with_cwd(&w, |bytes| assert_eq!(bytes, b"/usr\0"));
-}
-
-/// A shared buffer would make a forked child's working directory track its
-/// parent's.
-#[test]
-fn cells_are_per_task() {
-    let first = fresh();
-    let second = fresh();
-    let w1 = window(&first);
-    let w2 = window(&second);
-
-    assert!(first.set_cwd(&w1, b"/first"));
-    assert!(second.set_cwd(&w2, b"/second"));
-
-    first.with_cwd(&w1, |b| assert_eq!(b, b"/first\0"));
-    second.with_cwd(&w2, |b| assert_eq!(b, b"/second\0"));
-}
-
-/// Two witnesses for one task coexist in the kernel — an interrupt handler
-/// above a syscall on the same task — and both authorise the same storage.
-#[test]
-fn two_witnesses_for_one_task_agree() {
-    let task = fresh();
-    let outer = window(&task);
-    let inner = window(&task);
-
-    assert!(task.set_cwd(&outer, b"/via-outer"));
-    task.with_cwd(&inner, |b| assert_eq!(b, b"/via-outer\0"));
-
-    assert!(task.set_cwd(&inner, b"/via-inner"));
-    task.with_cwd(&outer, |b| assert_eq!(b, b"/via-inner\0"));
-}
-
 /// A witness is a safety argument, so one naming the wrong task is unsound
 /// rather than merely wrong: the owner check must be loud, not silent.
 #[test]
@@ -138,5 +45,5 @@ fn a_witness_for_another_task_is_refused() {
     let w = window(&first);
     // The owner check is a debug assertion; in release it compiles out and the
     // type-level sealing of `TaskExclusive` is what remains.
-    second.set_cwd(&w, b"/nope");
+    let _ = second.user_ctx(&w);
 }

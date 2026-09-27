@@ -41,12 +41,12 @@ use crate::syscall::net_handlers::{
 use crate::syscall::net_query_handlers::syscall_net_query;
 pub use crate::syscall::pidfd_handlers::syscall_pidfd_open;
 pub use crate::syscall::process_handlers::{
-    syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_execve, syscall_fork, syscall_futex,
-    syscall_getcpu, syscall_getcwd, syscall_getegid, syscall_geteuid, syscall_getgid,
-    syscall_getpgid, syscall_getpid, syscall_getppid, syscall_getsid, syscall_gettid,
-    syscall_getuid, syscall_prlimit64, syscall_sched_getaffinity, syscall_sched_setaffinity,
-    syscall_setpgid, syscall_setsid, syscall_sigdefault, syscall_spawn_path, syscall_vhangup,
-    syscall_wait4,
+    syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_execve, syscall_fchdir, syscall_fork,
+    syscall_futex, syscall_getcpu, syscall_getcwd, syscall_getegid, syscall_geteuid,
+    syscall_getgid, syscall_getpgid, syscall_getpid, syscall_getppid, syscall_getsid,
+    syscall_gettid, syscall_getuid, syscall_prlimit64, syscall_sched_getaffinity,
+    syscall_sched_setaffinity, syscall_setpgid, syscall_setsid, syscall_sigdefault,
+    syscall_spawn_path, syscall_vhangup, syscall_wait4,
 };
 pub use crate::syscall::ring_handlers::{
     syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
@@ -158,6 +158,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_FTRUNCATE]         => syscall_ftruncate,         "ftruncate";
     [SYSCALL_GETCWD]            => syscall_getcwd,            "getcwd";
     [SYSCALL_CHDIR]             => syscall_chdir,             "chdir";
+    [SYSCALL_FCHDIR]            => syscall_fchdir,            "fchdir";
     [SYSCALL_RENAME]            => syscall_rename,            "rename";
     [SYSCALL_MKDIR]             => syscall_mkdir,             "mkdir";
     [SYSCALL_RMDIR]             => syscall_rmdir,             "rmdir";
@@ -314,7 +315,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 155;
+pub const SYSCALL_ENTRY_COUNT: usize = 156;
 
 /// The recorded shape of the classification.
 ///
@@ -325,7 +326,7 @@ pub const SYSCALL_ENTRY_COUNT: usize = 155;
 const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::Unimplemented, 0),
     (Capability::NoneSelf, 46),
-    (Capability::NoneFd, 71),
+    (Capability::NoneFd, 72),
     (Capability::NoneRelation, 15),
     (Capability::Power, 3),
     (Capability::Launch, 0),

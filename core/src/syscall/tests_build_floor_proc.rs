@@ -41,7 +41,8 @@ use crate::syscall::core_handlers::{
 };
 use crate::syscall::dispatch::dispatch_handler;
 use crate::syscall::process_handlers::{
-    syscall_chdir, syscall_futex, syscall_getpid, syscall_getppid, syscall_gettid, syscall_wait4,
+    syscall_chdir, syscall_fchdir, syscall_futex, syscall_getpid, syscall_getppid, syscall_gettid,
+    syscall_wait4,
 };
 use crate::tests::helpers::dummy_task_entry;
 
@@ -1358,7 +1359,7 @@ fn current_cwd_copy(buf: &mut [u8; 128]) -> usize {
     let Some(current) = Current::get() else {
         return 0;
     };
-    current.task().with_cwd(&current, |cwd| {
+    current.task().with_cwd(|cwd| {
         let trimmed = match cwd.iter().position(|&b| b == 0) {
             Some(end) => &cwd[..end],
             None => cwd,
@@ -1486,6 +1487,60 @@ pub fn test_chdir_stores_the_walked_path_not_the_lexical_one() -> TestResult {
     pass!()
 }
 
+/// `fchdir` takes the directory an open descriptor names, and refuses one
+/// that names no directory.
+pub fn test_fchdir_moves_to_the_descriptors_directory() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let Some(fx) = build_page_fixture() else {
+        return fail!("could not build the page fixture");
+    };
+    if !make_task_current(fx.task_id) {
+        park_bootstrap_on_current_cpu();
+        fx.teardown();
+        return fail!("could not dispatch the fixture task as current");
+    }
+
+    let open = |path: &[u8], flags: u32| {
+        crate::syscall::fs::at_handlers::open_at(fx.table, path, b"/", flags, 0).ok()
+    };
+    let dir_fd = open(
+        b"/dev",
+        slopos_abi::fs::O_RDONLY | slopos_abi::fs::O_DIRECTORY,
+    );
+    let file_fd = open(b"/dev/null", slopos_abi::fs::O_RDONLY);
+    let moved = dir_fd.map(|fd| fx.call(syscall_fchdir, [fd, 0, 0, 0, 0, 0]));
+    let mut stored = [0u8; 128];
+    let stored_len = current_cwd_copy(&mut stored);
+    let not_dir = file_fd.map(|fd| fx.call(syscall_fchdir, [fd, 0, 0, 0, 0, 0]));
+    let bad = fx.call(syscall_fchdir, [9999, 0, 0, 0, 0, 0]);
+    let mut after = [0u8; 128];
+    let after_len = current_cwd_copy(&mut after);
+
+    park_bootstrap_on_current_cpu();
+    fx.teardown();
+
+    assert_eq_test!(moved, Some(0), "fchdir on a directory descriptor failed");
+    assert_test!(
+        &stored[..stored_len] == b"/dev",
+        "fchdir did not move to /dev"
+    );
+    assert_eq_test!(
+        not_dir,
+        Some(Errno::ENOTDIR.as_u64()),
+        "fchdir on a non-directory must be ENOTDIR"
+    );
+    assert_eq_test!(
+        bad,
+        Errno::EBADF.as_u64(),
+        "fchdir on a closed fd must be EBADF"
+    );
+    assert_test!(
+        &after[..after_len] == b"/dev",
+        "a refused fchdir moved the cwd"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_waitpid_returns_the_pid_and_writes_an_exited_status,
     suite = syscall_proc_build_floor
@@ -1588,6 +1643,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_chdir_validates_and_canonicalises,
+    suite = syscall_proc_build_floor
+);
+slopos_testing::stest!(
+    name = test_fchdir_moves_to_the_descriptors_directory,
     suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(

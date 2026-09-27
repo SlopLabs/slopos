@@ -17,11 +17,10 @@ pub fn workspace() -> Result<String, &'static str> {
 }
 
 /// `scripts/selfhost.sh <args>` in the tree at `root`, run as the guest's
-/// developer runs it.
+/// developer runs it: executed directly, so its `#!/bin/sh` picks the shell.
 pub fn selfhost(root: &str, args: &[&str]) -> Command {
-    let mut cmd = Command::new("/bin/shell");
-    cmd.arg("scripts/selfhost.sh")
-        .args(args)
+    let mut cmd = Command::new(format!("{root}/scripts/selfhost.sh"));
+    cmd.args(args)
         .current_dir(root)
         .env("KERNEL_CARGO_TIMINGS", "1")
         .stdin(Stdio::null());

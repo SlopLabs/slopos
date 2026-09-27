@@ -257,6 +257,9 @@ pub const SYSCALL_GETCWD: u64 = 79;
 /// `chdir(path)` — resolves against the old cwd and stores the walked path.
 pub const SYSCALL_CHDIR: u64 = 80;
 
+/// `fchdir(fd)` — the directory an open descriptor names becomes the cwd.
+pub const SYSCALL_FCHDIR: u64 = 81;
+
 /// `rename(old: *const u8, new: *const u8)` — atomic, same-device only
 /// (`EXDEV`).
 pub const SYSCALL_RENAME: u64 = 82;

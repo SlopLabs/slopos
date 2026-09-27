@@ -1,14 +1,14 @@
 #!/bin/sh
 # Build a kernel in the guest and try it from the spare boot slot.
 #
-# Usage: shell scripts/selfhost.sh build|install [release|dev|tests]
+# Usage: scripts/selfhost.sh build|install [release|dev|tests]
 #
 # `install` arms one boot of the new kernel: `bootctl reboot` tries it and
 # `bootctl commit` keeps it; without the commit the next boot is the default.
 set -eu
 
 usage() {
-    echo "usage: shell scripts/selfhost.sh build|install [release|dev|tests]" >&2
+    echo "usage: scripts/selfhost.sh build|install [release|dev|tests]" >&2
     exit 2
 }
 
@@ -40,7 +40,7 @@ export KERNEL_RELEASE="$release"
 unset LD_LIBRARY_PATH
 
 cd "$REPO_ROOT"
-shell scripts/build_kernel.sh builddir builddir/target "$features"
+scripts/build_kernel.sh builddir builddir/target "$features"
 [ "$1" = install ] || exit 0
 
 elf="$REPO_ROOT/builddir/kernel-$variant.elf"

@@ -603,6 +603,12 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn fchdir(fd: i32) -> Result<(), Errno> {
+        let ret = unsafe { syscall1(SYSCALL_FCHDIR, fd as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn getcwd(buf: *mut u8, size: usize) -> Result<usize, Errno> {
         let ret = unsafe { syscall2(SYSCALL_GETCWD, buf as u64, size as u64) };
         let val = to_result(ret)?;

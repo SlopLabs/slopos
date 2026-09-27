@@ -1588,7 +1588,7 @@ pub fn task_fork(
 
     // `clone_from_raw` cleared both rather than own a duplicated heap pointer.
     // POSIX: a forked child inherits handlers, but not a shared table.
-    if !install_private_sighand(child, parent) || !child.clone_cwd_from(parent) {
+    if !install_private_sighand(child, parent) || !child.inherit_fs_from(parent, false) {
         klog_info!("task_fork: signal table / cwd allocation failed");
         return INVALID_TASK_ID;
     }
@@ -1687,6 +1687,8 @@ fn thread_group_real_parent(is_thread: bool, tgid: u32) -> Option<TaskRef> {
     let leader = task_find_by_id(tgid)?;
     task_find_by_id(leader.parent_task_id())
 }
+
+const CLONE_FS_OR_THREAD: u64 = slopos_abi::syscall::CLONE_FS | slopos_abi::syscall::CLONE_THREAD;
 
 pub fn task_clone(
     parent: &Task,
@@ -1788,7 +1790,9 @@ pub fn task_clone(
     } else {
         install_private_sighand(child, parent)
     };
-    if !sighand_ok || !child.clone_cwd_from(parent) {
+    // A thread shares its process's working directory whether or not the
+    // caller also said `CLONE_FS`: the cwd is a per-process property.
+    if !sighand_ok || !child.inherit_fs_from(parent, flags & CLONE_FS_OR_THREAD != 0) {
         klog_info!("task_clone: signal table / cwd allocation failed");
         return Err(ERRNO_ENOMEM);
     }

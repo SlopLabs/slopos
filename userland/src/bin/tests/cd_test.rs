@@ -88,6 +88,54 @@ fn std_canonicalize_resolves_against_the_cwd() -> bool {
     }
 }
 
+/// The working directory belongs to the process: a thread's `chdir` moves
+/// every thread, as `CLONE_FS` gives a Linux thread.
+fn a_threads_chdir_moves_the_whole_process() -> bool {
+    if env::set_current_dir("/").is_err() {
+        return false;
+    }
+    let moved = std::thread::spawn(|| env::set_current_dir("/tmp").is_ok()).join();
+    let here = env::current_dir();
+    let back = std::thread::spawn(env::current_dir).join();
+    let _ = env::set_current_dir("/");
+    let tmp = Some(std::path::Path::new("/tmp"));
+    match (moved, here, back) {
+        (Ok(true), Ok(here), Ok(Ok(back))) => {
+            let ok = Some(here.as_path()) == tmp && Some(back.as_path()) == tmp;
+            if !ok {
+                eprintln!(
+                    "cd_test: after a thread's chdir the process is at {here:?}, a new thread at {back:?}"
+                );
+            }
+            ok
+        }
+        other => {
+            eprintln!("cd_test: thread chdir failed: {other:?}");
+            false
+        }
+    }
+}
+
+/// `fchdir` moves to the directory an open descriptor names.
+fn fchdir_moves_to_an_open_directory() -> bool {
+    use std::os::fd::AsRawFd;
+    let _ = env::set_current_dir("/");
+    let Ok(dir) = fs::File::open("/tmp") else {
+        return false;
+    };
+    // SAFETY: `dir` is an open descriptor for the duration of the call.
+    let rc = unsafe { slopos_slibc::ffi::syscalls::fchdir(dir.as_raw_fd()) };
+    let here = env::current_dir();
+    let _ = env::set_current_dir("/");
+    match here {
+        Ok(here) if rc == 0 && here.to_str() == Some("/tmp") => true,
+        other => {
+            eprintln!("cd_test: fchdir returned {rc}, cwd {other:?}");
+            false
+        }
+    }
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("std_cd_into_every_listed_dir", std_cd_into_every_listed_dir),
@@ -99,6 +147,14 @@ fn main() {
         (
             "std_canonicalize_resolves_against_the_cwd",
             std_canonicalize_resolves_against_the_cwd,
+        ),
+        (
+            "a_threads_chdir_moves_the_whole_process",
+            a_threads_chdir_moves_the_whole_process,
+        ),
+        (
+            "fchdir_moves_to_an_open_directory",
+            fchdir_moves_to_an_open_directory,
         ),
     ]);
 }

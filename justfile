@@ -131,7 +131,7 @@ coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp 
 # they are libraries, not programs, and out of the shipped image entirely.
 test_shared_objects := "libdltest.so libc++.so libcxxtest.so libdlsearch-fixture.so libdlrunpath.so libdlplain.so"
 
-test_userland_bins := userland_bins + " dl_probe dl_test dl_search_origin dl_search_rpath dl_search_runpath dl_secure_probe cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test install_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test libc_abi_test devdisk_test selfhost_test buildloop_test exit_stress_test"
+test_userland_bins := userland_bins + " dl_probe dl_test dl_search_origin dl_search_rpath dl_search_runpath dl_secure_probe cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test script_exec_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test install_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test libc_abi_test devdisk_test selfhost_test buildloop_test exit_stress_test"
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
@@ -369,7 +369,7 @@ boot:
     head="$(git rev-parse HEAD 2>/dev/null || true)"
     [ "$base" = "$head" ] ||
         echo "boot: /devel/src/slopos is ${base:-not seeded}, HEAD is ${head:-unknown}; just reset devdisk reseeds it" >&2
-    echo "boot: in the guest, cd /devel/src/slopos && shell scripts/selfhost.sh install; then bootctl reboot"
+    echo "boot: in the guest, cd /devel/src/slopos && scripts/selfhost.sh install; then bootctl reboot"
     QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" \
         just _qemu-boot "interactive" "${VIDEO:-1}" {{boot_disk}} {{fs_image_persist}} BOOT_DISK_IMG={{boot_disk}} {{net_env}}
 

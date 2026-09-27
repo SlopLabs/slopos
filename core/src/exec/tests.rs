@@ -559,6 +559,166 @@ pub fn test_program_path_resolves_against_the_cwd() -> TestResult {
     }
 }
 
+/// The `#!` line is an interpreter and at most one argument, the rest of the
+/// line unsplit; a line with no interpreter, or a header whose interpreter
+/// runs off its end, is `ENOEXEC`.
+pub fn test_shebang_line_is_one_interpreter_and_one_argument() -> TestResult {
+    use super::script::{SCRIPT_HEADER_MAX, ShebangLine, parse_shebang};
+    use slopos_testing::assert_test;
+
+    let line = |interpreter: &'static [u8], argument: Option<&'static [u8]>| {
+        Ok(Some(ShebangLine {
+            interpreter,
+            argument,
+        }))
+    };
+    assert_test!(
+        parse_shebang(b"\x7fELF\x02\x01") == Ok(None),
+        "ELF is no script"
+    );
+    assert_test!(
+        parse_shebang(b"#!/bin/sh\necho") == line(b"/bin/sh", None),
+        "plain"
+    );
+    assert_test!(
+        parse_shebang(b"#! \t/usr/bin/env  python3 -u \t\nx")
+            == line(b"/usr/bin/env", Some(b"python3 -u")),
+        "the argument must be the rest of the line, trimmed and unsplit"
+    );
+    assert_test!(
+        parse_shebang(b"#!/bin/sh") == line(b"/bin/sh", None),
+        "a short file needs no newline"
+    );
+    assert_test!(
+        parse_shebang(b"#!/bin/sh\0 -x\n") == line(b"/bin/sh", None),
+        "a NUL ends the line"
+    );
+    assert_test!(
+        parse_shebang(b"#! \t \n/bin/sh\n") == Err(Errno::ENOEXEC),
+        "no interpreter"
+    );
+    assert_test!(parse_shebang(b"#!") == Err(Errno::ENOEXEC), "an empty line");
+
+    let Ok(mut long) = slopos_ostd::KVec::filled(b'a', SCRIPT_HEADER_MAX) else {
+        return TestResult::Fail;
+    };
+    long[..3].copy_from_slice(b"#!/");
+    assert_test!(
+        parse_shebang(long.as_slice()) == Err(Errno::ENOEXEC),
+        "an interpreter running off the header may have been cut"
+    );
+    long[..11].copy_from_slice(b"#!/bin/sh x");
+    match parse_shebang(long.as_slice()) {
+        Ok(Some(ShebangLine {
+            interpreter: b"/bin/sh",
+            argument: Some(arg),
+        })) if arg.len() == SCRIPT_HEADER_MAX - 3 - 8 => {}
+        _ => {
+            klog_info!("EXEC_TEST: BUG - a whole interpreter with a cut argument was refused");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Writes an executable file under the scratch directory.
+fn stage_exec_file(path: &[u8], body: &[u8], mode: u16) -> bool {
+    let Ok(handle) = slopos_fs::vfs::vfs_open(path, true) else {
+        return false;
+    };
+    if handle.write(0, body) != Ok(body.len()) {
+        return false;
+    }
+    slopos_fs::fileio::file_chmod_at(path, b"/", mode, slopos_fs::vfs::path::RESOLVE_FOLLOW) == 0
+}
+
+/// `#!` resolution follows the chain to the binary that runs it, rebuilds
+/// `argv` as the interpreter sees it, keys authority on the interpreter, and
+/// bounds the chain.
+pub fn test_script_exec_resolves_to_its_interpreter() -> TestResult {
+    use super::script::resolve_exec;
+    use slopos_testing::assert_test;
+    const DIR: &[u8] = b"/tmp/shebang";
+
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return TestResult::Skipped;
+    }
+    let _ = slopos_fs::vfs::vfs_mkdir(DIR);
+    let staged = stage_exec_file(b"/tmp/shebang/interp", b"not a script", 0o755)
+        && stage_exec_file(
+            b"/tmp/shebang/script",
+            b"#!/tmp/shebang/interp -x y\n",
+            0o755,
+        )
+        && stage_exec_file(b"/tmp/shebang/outer", b"#!/tmp/shebang/script\n", 0o755)
+        && stage_exec_file(b"/tmp/shebang/rel", b"#!interp\n", 0o755)
+        && stage_exec_file(b"/tmp/shebang/self", b"#!/tmp/shebang/self\n", 0o755)
+        && stage_exec_file(b"/tmp/shebang/orphan", b"#!/tmp/shebang/none\n", 0o755)
+        && stage_exec_file(b"/tmp/shebang/closed", b"#!/tmp/shebang/interp\n", 0o644);
+    assert_test!(staged, "could not stage the scripts");
+
+    let argv_of = |path: &[u8], argv: &[&[u8]], want_image: &[u8], want: &[&[u8]]| {
+        let Ok(program) = resolve_exec(path, DIR) else {
+            return false;
+        };
+        let ok = program.image.as_bytes() == want_image
+            && matches!(program.argv(Some(argv)), Ok(Some(got)) if got.as_slice() == want);
+        ok
+    };
+    const INTERP: &[u8] = b"/tmp/shebang/interp";
+    assert_test!(
+        argv_of(
+            b"script",
+            &[b"s0", b"a1", b"a2"],
+            INTERP,
+            &[INTERP, b"-x y", b"script", b"a1", b"a2"]
+        ),
+        "a script must run its interpreter with its path as passed and argv[1..]"
+    );
+    assert_test!(
+        argv_of(
+            b"outer",
+            &[b"o0", b"z"],
+            INTERP,
+            &[INTERP, b"-x y", b"/tmp/shebang/script", b"outer", b"z"]
+        ),
+        "a nested chain must unwind into one argument vector"
+    );
+    assert_test!(
+        argv_of(b"rel", &[b"r0"], INTERP, &[b"interp", b"rel"]),
+        "a relative interpreter resolves against the cwd and is passed as written"
+    );
+    assert_test!(
+        argv_of(b"interp", &[b"i0", b"q"], INTERP, &[b"i0", b"q"]),
+        "a file that is no script keeps the caller's argv"
+    );
+    assert_test!(
+        resolve_exec(b"self", DIR).err() == Some(Errno::ELOOP),
+        "a script that names itself must end in ELOOP"
+    );
+    assert_test!(
+        resolve_exec(b"orphan", DIR).err() == Some(Errno::ENOENT),
+        "a missing interpreter is ENOENT"
+    );
+    assert_test!(
+        resolve_exec(b"closed", DIR).err() == Some(Errno::ENOEXEC),
+        "a script needs execute permission as a binary does"
+    );
+
+    // The grant is looked up for the image, so a script naming the shell
+    // runs with exactly the shell's grant.
+    if super::resolve_program(b"/bin/shell", b"/").is_ok()
+        && stage_exec_file(b"/tmp/shebang/launcher", b"#!/bin/shell\n", 0o755)
+    {
+        let image = resolve_exec(b"launcher", DIR).map(|p| p.image);
+        assert_test!(
+            matches!(&image, Ok(image) if image.as_bytes() == b"/bin/shell"),
+            "a #!/bin/shell script must load the shell"
+        );
+    }
+    TestResult::Pass
+}
+
 /// Reaped, not invented: a pid out of the air is only absent by luck.
 pub fn test_process_vm_root_absent_for_a_reaped_process() -> TestResult {
     let _scope = KernelTestScope::enter();
@@ -1197,6 +1357,14 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_program_path_resolves_against_the_cwd,
+    suite = exec
+);
+slopos_testing::stest!(
+    name = test_shebang_line_is_one_interpreter_and_one_argument,
+    suite = exec
+);
+slopos_testing::stest!(
+    name = test_script_exec_resolves_to_its_interpreter,
     suite = exec
 );
 slopos_testing::stest!(

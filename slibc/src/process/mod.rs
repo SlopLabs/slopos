@@ -10,7 +10,7 @@ pub mod wait;
 use core::ptr;
 
 use crate::env::environ;
-use crate::errno::{self, EINVAL, ENOENT};
+use crate::errno::{self, EACCES, EINVAL, ENOENT, ENOEXEC, ENOTDIR};
 use crate::pal::{Pal, Sys};
 use crate::string::u_strlen;
 
@@ -58,26 +58,28 @@ pub unsafe extern "C" fn execv(path: *const u8, argv: *const *const u8) -> i32 {
 /// Search `PATH` for `file`, then exec; a `file` containing `/` is used as-is.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 {
-    if file.is_null() {
-        errno::errno_set(EINVAL.raw());
+    execvpe(file, argv, environ as *const *const u8)
+}
+
+/// `execvp` with an explicit environment.
+///
+/// POSIX: a file the system cannot execute (`ENOEXEC`) is run as a shell
+/// script, `/bin/sh file args...`. A candidate that is missing or not
+/// permitted moves the search on; any other failure ends it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execvpe(
+    file: *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
+) -> i32 {
+    if file.is_null() || *file == 0 {
+        errno::errno_set(if file.is_null() { EINVAL } else { ENOENT }.raw());
         return -1;
     }
 
     let file_len = u_strlen(file);
-
-    let has_slash = {
-        let mut found = false;
-        for i in 0..file_len {
-            if *file.add(i) == b'/' {
-                found = true;
-                break;
-            }
-        }
-        found
-    };
-
-    if has_slash {
-        return execv(file, argv);
+    if core::slice::from_raw_parts(file, file_len).contains(&b'/') {
+        return exec_or_sh(file, argv, envp);
     }
 
     let path_val = crate::env::getenv(b"PATH\0".as_ptr());
@@ -88,33 +90,99 @@ pub unsafe extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 
 
     let path_len = u_strlen(path_val);
     let mut buf = [0u8; 4096];
-
+    let mut last = ENOENT;
     let mut seg_start = 0usize;
-    while seg_start < path_len {
+    while seg_start <= path_len {
         let mut seg_end = seg_start;
         while seg_end < path_len && *path_val.add(seg_end) != b':' {
             seg_end += 1;
         }
-
-        let dir_len = seg_end - seg_start;
-        let total = dir_len + 1 + file_len + 1;
-
-        if total <= buf.len() {
-            ptr::copy_nonoverlapping(path_val.add(seg_start), buf.as_mut_ptr(), dir_len);
+        // POSIX: an empty PATH element names the current directory.
+        let (dir, dir_len) = if seg_end == seg_start {
+            (b".".as_ptr(), 1)
+        } else {
+            (path_val.add(seg_start).cast_const(), seg_end - seg_start)
+        };
+        let total = dir_len + 1 + file_len;
+        if total < buf.len() {
+            ptr::copy_nonoverlapping(dir, buf.as_mut_ptr(), dir_len);
             buf[dir_len] = b'/';
             ptr::copy_nonoverlapping(file, buf.as_mut_ptr().add(dir_len + 1), file_len);
-            buf[dir_len + 1 + file_len] = 0;
-
-            let ret = execv(buf.as_ptr(), argv);
-            let _ = ret;
+            buf[total] = 0;
+            exec_or_sh(buf.as_ptr(), argv, envp);
+            let e = errno::Errno(errno::errno_get());
+            if e != ENOENT && e != ENOTDIR && e != EACCES {
+                return -1;
+            }
+            last = e;
         }
-
         seg_start = seg_end + 1;
     }
 
-    errno::errno_set(ENOENT.raw());
+    errno::errno_set(last.raw());
     -1
 }
+
+/// `execlp(file, arg0, ..., NULL)`: [`execvp`] over the argument list.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execlp(file: *const u8, arg0: *const u8, mut args: ...) -> i32 {
+    let mut argc = 1usize;
+    if !arg0.is_null() {
+        let mut probe = args.clone();
+        while !probe.next_arg::<*const u8>().is_null() {
+            argc += 1;
+        }
+    }
+    let argv = crate::mem::malloc::alloc((argc + 1) * size_of::<*const u8>()) as *mut *const u8;
+    if argv.is_null() {
+        return -1;
+    }
+    *argv = arg0;
+    if !arg0.is_null() {
+        for i in 1..argc {
+            *argv.add(i) = args.next_arg::<*const u8>();
+        }
+    }
+    *argv.add(argc) = ptr::null();
+    let rc = execvp(file, argv);
+    let saved = errno::errno_get();
+    crate::mem::malloc::dealloc(argv.cast());
+    errno::errno_set(saved);
+    rc
+}
+
+/// `execve`, and on `ENOEXEC` the same file as a script of `/bin/sh`, whose
+/// argument vector is `/bin/sh`, `path`, then `argv[1..]`.
+unsafe fn exec_or_sh(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32 {
+    execve(path, argv, envp);
+    if errno::errno_get() != ENOEXEC.raw() {
+        return -1;
+    }
+    let mut rest = 0usize;
+    if !argv.is_null() && !(*argv).is_null() {
+        while !(*argv.add(1 + rest)).is_null() {
+            rest += 1;
+        }
+    }
+    let sh_argv = crate::mem::malloc::alloc((rest + 3) * size_of::<*const u8>()) as *mut *const u8;
+    if sh_argv.is_null() {
+        return -1;
+    }
+    *sh_argv = SH_PATH.as_ptr();
+    *sh_argv.add(1) = path;
+    for i in 0..rest {
+        *sh_argv.add(2 + i) = *argv.add(1 + i);
+    }
+    *sh_argv.add(2 + rest) = ptr::null();
+    execve(SH_PATH.as_ptr(), sh_argv, envp);
+    let saved = errno::errno_get();
+    crate::mem::malloc::dealloc(sh_argv.cast());
+    errno::errno_set(saved);
+    -1
+}
+
+/// The shell POSIX has `execvp` hand a file it cannot execute.
+pub(crate) const SH_PATH: &[u8] = b"/bin/sh\0";
 
 /// Returns the child PID on success, -1 on error.
 #[unsafe(no_mangle)]

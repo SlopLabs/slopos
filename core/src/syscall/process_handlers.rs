@@ -32,7 +32,7 @@ use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr as MmUserPtr;
 
 use crate::exec;
-use crate::syscall::args::{UserBytes, UserPath, UserPtr};
+use crate::syscall::args::{Fd, UserBytes, UserPath, UserPtr};
 use crate::syscall::common::{
     USER_PATH_MAX, syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
 };
@@ -597,8 +597,9 @@ define_syscall!(syscall_execve
         Err(err) => return SyscallResult::Err(err),
     };
     // Resolved against the caller's cwd here: `do_exec` cannot see the cwd,
-    // and the grant lookup below keys on the canonical name.
-    let program = match ctx.with_cwd(|cwd| exec::resolve_program(path.as_bytes(), cwd)) {
+    // and the grant lookup below keys on the canonical name of the file
+    // loaded, which for a script is its interpreter.
+    let program = match ctx.with_cwd(|cwd| exec::resolve_exec(path.as_bytes(), cwd)) {
         Ok(program) => program,
         Err(e) => {
             return SyscallResult::Err(e);
@@ -629,13 +630,17 @@ define_syscall!(syscall_execve
         None
     };
 
-    let argv_refs = match argv_storage
+    let caller_argv = match argv_storage
         .as_ref()
         .map(|values| KVec::<&[u8]>::from_iter_fallible(values.iter().map(|v| v.as_slice())))
     {
         Some(Ok(refs)) => Some(refs),
         Some(Err(_)) => return SyscallResult::Err(Errno::ENOMEM),
         None => None,
+    };
+    let argv_refs = match program.argv(caller_argv.as_deref()) {
+        Ok(argv) => argv,
+        Err(e) => return SyscallResult::Err(e),
     };
     let envp_refs = match envp_storage
         .as_ref()
@@ -661,7 +666,7 @@ define_syscall!(syscall_execve
 
     let exec_result = exec::do_exec(
         process_id,
-        &program,
+        &program.image,
         argv_refs.as_deref(),
         envp_refs.as_deref(),
         &mut entry_point,
@@ -691,7 +696,7 @@ define_syscall!(syscall_execve
             // Here rather than in `do_exec`: past every fallible step, before
             // the new image's first instruction.
             {
-                let (granted_flags, _) = exec::grants::grant_for(program.as_bytes());
+                let (granted_flags, _) = exec::grants::grant_for(program.image.as_bytes());
                 let granted = slopos_ostd::authority::caps_from_task_flags(
                     granted_flags | slopos_abi::task::TASK_FLAG_USER_MODE,
                 );
@@ -1032,20 +1037,33 @@ define_syscall!(syscall_chdir
         return Err(Errno::EINVAL);
     }
     let canon = ctx.with_cwd(|cwd| resolve_new_cwd(path.as_bytes(), cwd))?;
-    // The store, unlike the read, genuinely needs the owner's witness.
+    store_cwd(&canon)
+});
+
+define_syscall!(syscall_fchdir
+    (ctx, fd: Fd)
+    cap(NoneFd)
+    requires(let pid: process_id)
+    -> Result<(), Errno>
+{
+    let canon = slopos_fs::fileio::with_fd_dir_path(pid, fd.raw(), |dir| resolve_new_cwd(b".", dir))??;
+    store_cwd(&canon)
+});
+
+/// Installing a first context is the owner's alone, hence the witness.
+fn store_cwd(canon: &CanonPath) -> Result<(), Errno> {
     let current = Current::get().ok_or(Errno::EINVAL)?;
     if !current.task().set_cwd(&current, canon.as_bytes()) {
         return Err(Errno::ENOMEM);
     }
     Ok(())
-});
+}
 
 define_syscall!(syscall_getcwd
     (ctx, buf: UserBytes) cap(NoneSelf)
     -> Result<u64, Errno>
 {
-    let current = Current::get().ok_or(Errno::EINVAL)?;
-    current.task().with_cwd(&current, |cwd| {
+    ctx.with_cwd(|cwd| {
         if buf.len() < cwd.len() {
             return Err(Errno::ERANGE);
         }

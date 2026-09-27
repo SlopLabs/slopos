@@ -12,7 +12,7 @@ use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFd
 use slopos_abi::task::{TASK_FLAG_NEW_PGRP, TaskPriority};
 
 use crate::env::environ;
-use crate::errno::{EACCES, EBADF, EINVAL, ENOENT, ENOMEM, ENOTDIR, Errno};
+use crate::errno::{EACCES, EBADF, EINVAL, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, Errno};
 use crate::pal::{Pal, Sys};
 use crate::signal::{SIG_DFL, SIG_SETMASK, signal, sigprocmask};
 use crate::string::{strdup, u_strlen};
@@ -648,8 +648,13 @@ unsafe fn spawn_direct(
         },
     };
     let argc = count_strings(argv) as u32;
+    // As `execvp`: under a search, a file that is not an executable image is
+    // run as `/bin/sh file args...`.
     let launch =
-        |path: *const u8, len: usize| Sys::spawn_path(path, len, argv, argc, &kernel_attrs);
+        |path: *const u8, len: usize| match Sys::spawn_path(path, len, argv, argc, &kernel_attrs) {
+            Err(e) if e == ENOEXEC && search => spawn_as_script(path, argv, argc, &kernel_attrs),
+            other => other,
+        };
 
     let file_len = u_strlen(file);
     if !search || core::slice::from_raw_parts(file, file_len).contains(&b'/') {
@@ -689,6 +694,29 @@ unsafe fn spawn_direct(
         seg_start = seg_end + 1;
     }
     Err(last)
+}
+
+unsafe fn spawn_as_script(
+    path: *const u8,
+    argv: *const *const u8,
+    argc: u32,
+    attrs: &SpawnAttrs,
+) -> Result<pid_t, Errno> {
+    let rest = (argc as usize).saturating_sub(1);
+    let sh_argv = crate::mem::malloc::alloc((rest + 3) * size_of::<*const u8>()) as *mut *const u8;
+    if sh_argv.is_null() {
+        return Err(ENOMEM);
+    }
+    let sh = crate::process::SH_PATH;
+    *sh_argv = sh.as_ptr();
+    *sh_argv.add(1) = path;
+    for i in 0..rest {
+        *sh_argv.add(2 + i) = *argv.add(1 + i);
+    }
+    *sh_argv.add(2 + rest) = ptr::null();
+    let result = Sys::spawn_path(sh.as_ptr(), sh.len() - 1, sh_argv, rest as u32 + 2, attrs);
+    crate::mem::malloc::dealloc(sh_argv.cast());
+    result
 }
 
 unsafe fn spawn_via_fork(

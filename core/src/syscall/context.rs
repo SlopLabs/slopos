@@ -128,17 +128,10 @@ impl<'a> SyscallContext<'a> {
             .ok_or(Errno::ESRCH)
     }
 
-    /// The caller's working directory, NUL-terminated.
-    ///
-    /// A cwd is readable only through its owner's witness, which a context
-    /// built by [`from_task_ref`](Self::from_task_ref) does not have. `/` is
-    /// every task's initial value, so the fallback is the answer for a task
-    /// that never called `chdir`, not a fabrication.
+    /// The caller's working directory, NUL-terminated: its process's, which
+    /// every thread shares.
     pub fn with_cwd<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
-        match Current::get() {
-            Some(current) if current.id() == self.task_id => self.task.with_cwd(&current, f),
-            _ => f(b"/\0"),
-        }
+        self.task.with_cwd(f)
     }
 
     pub fn vm_space(&self) -> Result<KArc<VmSpace>, Errno> {

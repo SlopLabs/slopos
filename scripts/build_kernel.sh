@@ -3,7 +3,7 @@
 #
 # Usage: build_kernel.sh <build_dir> <cargo_target_dir> [features]
 #
-# POSIX sh using only the coreutils, because the guest runs it with /bin/shell
+# POSIX sh using only the coreutils, because the guest runs it with /bin/sh
 # and has no bash, rustup, python or LLVM binutils. What only the host does —
 # ensure_toolchain.sh before, the ELF gates after — lives in the justfile.
 #

@@ -23,6 +23,7 @@ crate::utest!(
 );
 crate::utest!(name = utest_https_transfer, bin = "/bin/transfer_test");
 crate::utest!(name = utest_cd, bin = "/bin/cd_test");
+crate::utest!(name = utest_script_exec, bin = "/bin/script_exec_test");
 crate::utest!(name = utest_buildctl, bin = "/bin/buildctl_test");
 crate::utest!(name = utest_coreutils, bin = "/bin/coreutils_test");
 crate::utest!(name = utest_dl, bin = "/bin/dl_test");

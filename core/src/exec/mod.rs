@@ -1,6 +1,7 @@
 //! exec() syscall implementation for loading and executing ELF binaries from filesystem.
 
 pub mod grants;
+pub mod script;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 #[cfg(feature = "test-hooks")]
@@ -49,6 +50,7 @@ use slopos_sched::scheduler::publish_new_task;
 use slopos_sched::task::{SpawnGuard, link_child, task_build, task_find_by_id, task_terminate};
 use slopos_sched::task::{TaskEntry, task_default_signals_in_mask, task_entry_from_kernel_va};
 
+pub use script::{ExecProgram, resolve_exec};
 pub use slopos_abi::spawn::{EXEC_MAX_ARG_BYTES, EXEC_MAX_ARG_PAGES, EXEC_MAX_ARG_STRLEN};
 
 /// Pointers walked before a user array missing its NULL is given up on. A loop
@@ -304,9 +306,14 @@ pub fn spawn_program_with_cwd(
 ) -> Result<u32, Errno> {
     let result = (|| {
         // Resolved once, here: the grant table, the task name and the loader
-        // must all agree on which file this is.
-        let program = resolve_program(path, cwd)?;
-        let normalized_path = program.as_bytes();
+        // must all agree on which file this is — for a script, its
+        // interpreter.
+        let program = resolve_exec(path, cwd)?;
+        let normalized_path = program.image.as_bytes();
+        let argv = program.argv(argv)?;
+        if !exec_arg_bytes_fit(argv.as_deref(), envp) {
+            return Err(Errno::E2BIG);
+        }
 
         // Privilege enters a spawn only here — the syscall boundary already
         // refused every privileged bit the caller asked for, so flags follow
@@ -379,8 +386,8 @@ pub fn spawn_program_with_cwd(
 
         exec_image(
             child_table,
-            &program,
-            argv,
+            &program.image,
+            argv.as_deref(),
             envp,
             granted_flags != 0,
             &mut entry,
@@ -524,9 +531,9 @@ pub fn resolve_program(path: &[u8], cwd: &[u8]) -> Result<CanonPath, Errno> {
     Ok(canon)
 }
 
-/// `program` is [`resolve_program`]'s output, not a caller's spelling: the
-/// type is what stops a relative path reaching the loader, which resolves
-/// against `/`.
+/// `program` is the image [`resolve_exec`] chose, not a caller's spelling:
+/// the type is what stops a relative path reaching the loader, which
+/// resolves against `/`.
 ///
 /// `execve`'s road: it can only narrow the caller's authority, so it never
 /// confers a grant and the image never runs `AT_SECURE`.

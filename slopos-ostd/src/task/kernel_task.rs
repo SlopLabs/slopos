@@ -31,6 +31,7 @@ use crate::task::fpu::{FPU_STATE_SIZE, FpuState, LEGACY_FCW_OFFSET, LEGACY_MXCSR
 use crate::task::fpu_owner::{
     FPU_CPU_NONE, fpu_owner_assert_may_take, fpu_owner_take, fpu_owner_yield_after_save,
 };
+use crate::task::fs_context::FsContext;
 use crate::task::job_control::ProcessGroup;
 use crate::task::link_roles::{
     CleanupRole, FutexRole, ReadyQueueRole, ReclaimRole, RemoteWakeRole, SiblingRole,
@@ -107,39 +108,6 @@ impl TaskContext {
 /// [`crate::task::switch`]; its layout and the matching naked-asm offsets are
 /// [`crate::task::TaskContext`]'s.
 pub type SwitchContext = crate::task::TaskContext;
-
-/// Capacity of a task's working-directory buffer, NUL terminator included.
-/// Heap-backed rather than inline: 4 KiB would not fit `Task`'s 8 KiB budget.
-pub const CWD_MAX: usize = slopos_abi::fs::USER_PATH_MAX;
-
-/// Working-directory storage, allocated on a task's first
-/// [`TaskInner::set_cwd`]. A task with none is at `/`.
-type CwdBuf = [u8; CWD_MAX];
-
-fn cwd_buf_init() -> impl Init<CwdBuf, AllocError> {
-    // SAFETY: the closure writes every byte of the slot.
-    unsafe {
-        init_from_closure(|slot: *mut CwdBuf| -> Result<(), AllocError> {
-            core::ptr::write_bytes(slot.cast::<u8>(), 0, CWD_MAX);
-            Ok(())
-        })
-    }
-}
-
-/// Forces the next lazy cwd allocation to fail, so the refusal path is
-/// reachable without exhausting the heap. Consumed by the refusal it causes.
-#[cfg(any(test, feature = "test-helpers"))]
-static CWD_ALLOC_FAILS: AtomicBool = AtomicBool::new(false);
-
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn fail_next_cwd_alloc_for_test() {
-    CWD_ALLOC_FAILS.store(true, Ordering::Release);
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-fn cwd_alloc_is_poisoned() -> bool {
-    CWD_ALLOC_FAILS.swap(false, Ordering::AcqRel)
-}
 
 /// Initialise an [`FpuState`] directly at `ptr`, avoiding the 2.6 KiB rvalue
 /// on the caller's stack that [`FpuState::new`] would materialise.
@@ -496,12 +464,10 @@ pub struct TaskInner<K, U> {
     /// task in the session through a *shared* snapshot of the task table and
     /// clears the field on each, concurrently with those tasks reading it.
     pub controlling_tty: AtomicU16,
-    /// Working-directory path, NUL-terminated. Only the owning task reads or
-    /// writes it, so the cell's witness is always a `CurrentTask`.
-    pub cwd: TaskOwnCell<Option<KBox<CwdBuf>>>,
-    /// Length of `cwd` up to but not including the NUL. Atomic so it can be
-    /// published after the bytes.
-    pub cwd_len: AtomicU16,
+    /// Filesystem context (the working directory), shared with every task
+    /// cloned with `CLONE_FS` and copied by `fork` and spawn. Empty for a task
+    /// that never had one, which is at `/`.
+    fs: RcuArcSlot<FsContext>,
     /// User-space address to clear (and futex-wake) on thread exit. Atomic
     /// because the exit path runs on whichever task called `task_terminate` —
     /// not necessarily this one.
@@ -1013,99 +979,83 @@ impl<K, U> TaskInner<K, U> {
         self.switch_ctx.get_ptr(witness)
     }
 
-    /// Replace the working directory; the length is published after the bytes.
-    ///
-    /// Returns false if `path` does not fit with its NUL terminator, or if the
-    /// lazily-allocated buffer could not be obtained.
+    /// The filesystem context this task shares, if it has one.
     #[inline]
+    pub fn fs_context(&self) -> Option<crate::KArc<FsContext>> {
+        self.fs.load()
+    }
+
+    /// Call `f` with the working directory, NUL included; a task with no
+    /// context is at `/`.
+    #[inline]
+    pub fn with_cwd<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        match self.fs.load() {
+            Some(fs) => fs.with_cwd(f),
+            None => f(b"/\0"),
+        }
+    }
+
+    /// Move the working directory of every task sharing this one's context.
+    ///
+    /// Returns false if `path` does not fit with its NUL terminator or could
+    /// not be allocated. The witness is what makes installing a first context
+    /// race-free: only the owner writes its own slot once it is published.
     pub fn set_cwd(&self, witness: &impl TaskExclusive<K, U>, path: &[u8]) -> bool {
         debug_assert!(
             core::ptr::eq(witness.witnessed(), self),
             "witness names a different task"
         );
-        // SAFETY: the witness proves exclusive access to this task's `cwd`,
-        // and the contract on `with_cwd` forbids re-entering through a second
-        // witness while this borrow is live.
-        let slot = unsafe { &mut *self.cwd.get_ptr(witness) };
-        Self::write_cwd_slot(slot, &self.cwd_len, path)
-    }
-
-    #[inline]
-    pub fn set_cwd_exclusive(&mut self, path: &[u8]) -> bool {
-        let len = &self.cwd_len;
-        Self::write_cwd_slot(self.cwd.get_mut(), len, path)
-    }
-
-    fn write_cwd_slot(slot: &mut Option<KBox<CwdBuf>>, len: &AtomicU16, path: &[u8]) -> bool {
-        if path.len() + 1 > CWD_MAX {
-            return false;
-        }
-        let buf = match slot {
-            Some(buf) => buf,
-            none => {
-                #[cfg(any(test, feature = "test-helpers"))]
-                if cwd_alloc_is_poisoned() {
-                    return false;
+        match self.fs.load() {
+            Some(fs) => fs.set_cwd(path),
+            None => match FsContext::try_new(Some(path)) {
+                Ok(fs) => {
+                    self.fs.store(Some(fs));
+                    true
                 }
-                let Ok(fresh) = KBox::try_init::<AllocError>(cwd_buf_init()) else {
-                    return false;
-                };
-                *none = Some(fresh);
-                none.as_mut().expect("just installed")
-            }
-        };
-        buf[..path.len()].copy_from_slice(path);
-        buf[path.len()] = 0;
-        len.store(path.len() as u16, Ordering::Release);
-        true
-    }
-
-    /// Call `f` with the working directory including its NUL terminator; a
-    /// task that has never set one is at `/`.
-    ///
-    /// `f` must not take a second witness on this task and re-enter, or the
-    /// borrow handed out here would alias.
-    #[inline]
-    pub fn with_cwd<R>(&self, witness: &impl TaskExclusive<K, U>, f: impl FnOnce(&[u8]) -> R) -> R {
-        debug_assert!(
-            core::ptr::eq(witness.witnessed(), self),
-            "witness names a different task"
-        );
-        // SAFETY: as `set_cwd`; a shared derivation of the same cell.
-        let slot = unsafe { &*self.cwd.get_ptr(witness) };
-        match slot {
-            Some(buf) => {
-                let len = self.cwd_len.load(Ordering::Acquire) as usize;
-                f(&buf[..(len + 1).min(CWD_MAX)])
-            }
-            None => f(b"/\0"),
+                Err(_) => false,
+            },
         }
     }
 
-    /// Copy `other`'s working directory into this task's own buffer.
-    pub fn clone_cwd_from(&mut self, other: &Self) -> bool {
-        let published = (other.cwd_len.load(Ordering::Acquire) as usize).min(CWD_MAX - 1);
-        // SAFETY: a shared read of a cell only the source task writes, and the
-        // source task is the caller. The borrow covers a distinct allocation
-        // from the destination written below.
-        let source = unsafe { &*other.cwd.as_ptr_racy() };
-        let Some(buf) = source.as_deref() else {
-            // An unallocated slot already means `/`, but a destination that
-            // has a buffer must be rewritten: republishing the length alone
-            // would leave its old bytes visible.
-            let len = &self.cwd_len;
-            let slot = self.cwd.get_mut();
-            if slot.is_some() {
-                return Self::write_cwd_slot(slot, len, b"/");
+    /// Give a not-yet-published task a private context at `path`.
+    pub fn set_cwd_exclusive(&mut self, path: &[u8]) -> bool {
+        match FsContext::try_new(Some(path)) {
+            Ok(fs) => {
+                drop(self.fs.replace_exclusive(Some(fs)));
+                true
             }
-            return true;
+            Err(_) => false,
+        }
+    }
+
+    /// Arm a not-yet-published child's context from `parent`, which must be
+    /// the calling task: the same object when `share` (`CLONE_FS`), otherwise
+    /// a private copy. A sharing parent with none gets one first, so both
+    /// sides hold the same object from here on.
+    ///
+    /// Out of line: the clone path's frame is measured against the 2 KiB gate.
+    #[inline(never)]
+    pub fn inherit_fs_from(&mut self, parent: &Self, share: bool) -> bool {
+        let inherited = match (parent.fs.load(), share) {
+            (Some(fs), true) => fs,
+            (Some(fs), false) => match fs.try_copy() {
+                Ok(copy) => copy,
+                Err(_) => return false,
+            },
+            (None, true) => match FsContext::try_new(None) {
+                Ok(fresh) => {
+                    parent.fs.store(Some(fresh.clone()));
+                    fresh
+                }
+                Err(_) => return false,
+            },
+            (None, false) => {
+                drop(self.fs.replace_exclusive(None));
+                return true;
+            }
         };
-        let path_len = buf[..published]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(published);
-        let len = &self.cwd_len;
-        Self::write_cwd_slot(self.cwd.get_mut(), len, &buf[..path_len])
+        drop(self.fs.replace_exclusive(Some(inherited)));
+        true
     }
 
     #[inline]
@@ -1344,8 +1294,7 @@ impl<K, U> TaskInner<K, U> {
             pgid: AtomicU32::new(INVALID_TASK_ID),
             sid: AtomicU32::new(INVALID_TASK_ID),
             controlling_tty: AtomicU16::new(TTY_INDEX_NONE),
-            cwd: TaskOwnCell::new(None),
-            cwd_len: AtomicU16::new(1),
+            fs: RcuArcSlot::empty(),
             clear_child_tid: AtomicU64::new(0),
             time_slice: AtomicU64::new(0),
             time_slice_remaining: AtomicU64::new(0),
@@ -1441,8 +1390,7 @@ impl<K, U> TaskInner<K, U> {
                 // owner agreement check on the boot CPU.
                 addr_of_mut!((*slot).fpu_last_cpu).write(AtomicI32::new(FPU_CPU_NONE));
 
-                addr_of_mut!((*slot).cwd_len).write(AtomicU16::new(1));
-                addr_of_mut!((*slot).cwd).write(TaskOwnCell::new(None));
+                addr_of_mut!((*slot).fs).write(RcuArcSlot::empty());
 
                 fpu_reset_in_place(addr_of_mut!((*slot).fpu_state).cast::<FpuState>());
 
@@ -1709,7 +1657,7 @@ impl<K, U> TaskInner<K, U> {
         drop(self.unsafe_stack.take());
         drop(self.sighand.take());
         drop(self.process_group.replace_exclusive(None));
-        drop(self.cwd.get_mut().take());
+        drop(self.fs.replace_exclusive(None));
         drop(self.test_reports.get_mut().take());
 
         // SAFETY: Both pointers are valid, non-overlapping TaskInner
@@ -1740,7 +1688,7 @@ impl<K, U> TaskInner<K, U> {
             // Both hold a heap pointer the bytewise copy duplicated: overwrite
             // rather than drop. The clone path re-arms each explicitly.
             core::ptr::write(&mut self.sighand as *mut _, None);
-            core::ptr::write(&mut self.cwd as *mut _, TaskOwnCell::new(None));
+            core::ptr::write(&mut self.fs as *mut _, RcuArcSlot::empty());
         }
         self.ready_link.reset();
         self.remote_inbox_link.reset();
@@ -1779,7 +1727,6 @@ impl<K, U> TaskInner<K, U> {
         // inheriting a CPU index would let it agree with a slot that names the
         // *parent* and skip a restore it genuinely needs.
         self.fpu_last_cpu = AtomicI32::new(FPU_CPU_NONE);
-        self.cwd_len = AtomicU16::new(1);
         // Job-control reports and the exit signal belong to the exit the
         // *parent* is waiting on, not to a task that has not run yet.
         self.stop_report = AtomicU8::new(0);

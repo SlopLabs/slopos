@@ -379,6 +379,16 @@ for bin in "${BINS[@]}"; do
     install_binary "$src" "$dst"
 done
 
+# POSIX names the shell `sh`, and `#!/bin/sh` is how every script asks for
+# it. A symlink, so the exec grant keyed on `/bin/shell` follows the name.
+for bin in "${BINS[@]}"; do
+    if [ "$bin" = "shell" ]; then
+        debugfs -w -R "rm /bin/sh" "$IMAGE_PATH" >/dev/null 2>&1 || true
+        debugfs -w -R "symlink /bin/sh shell" "$IMAGE_PATH" >/dev/null
+        echo "Installed /bin/sh -> shell"
+    fi
+done
+
 # The multicall binary's names. A symlink, not a copy: fifty-odd copies of std
 # would be ~8 MiB of a 32 MiB root, and `argv[0]` selects the tool anyway.
 # `debugfs symlink` writes a fast symlink, so a name costs an inode and no block.

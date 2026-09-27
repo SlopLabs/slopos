@@ -899,12 +899,12 @@ pub unsafe extern "C" fn mknodat(
     }
 }
 
-/// Changing directory by descriptor needs either an `fchdir` syscall or a
-/// `/proc/self/fd` to `readlink`; SlopOS has neither, and a descriptor cannot
-/// be turned back into a path from userland.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fchdir(_fd: c_int) -> c_int {
-    fail(ENOSYS, -1)
+pub unsafe extern "C" fn fchdir(fd: c_int) -> c_int {
+    match Sys::fchdir(fd) {
+        Ok(()) => 0,
+        Err(e) => fail(e, -1),
+    }
 }
 
 /// There is no per-process root: the mount table is global, so a `chroot`

@@ -15,6 +15,7 @@ pub mod drop_context;
 pub mod exit_info;
 pub mod fpu;
 pub mod fpu_owner;
+pub mod fs_context;
 pub mod handles;
 pub mod job_control;
 pub mod kernel_task;
@@ -36,10 +37,11 @@ pub use drop_context::{
     assert_task_drop_context, drop_context_is_safe, drop_off_lock, run_off_lock,
 };
 pub use exit_info::ExitInfo;
-pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
 #[cfg(any(test, feature = "test-helpers"))]
-pub use kernel_task::fail_next_cwd_alloc_for_test;
-pub use kernel_task::{CWD_MAX, SchedPlacement, SigHandTable};
+pub use fs_context::fail_next_cwd_alloc_for_test;
+pub use fs_context::{CWD_MAX, CwdPath, FsContext};
+pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
+pub use kernel_task::{SchedPlacement, SigHandTable};
 pub use link_roles::{CleanupRole, FutexRole, ReadyQueueRole, RemoteWakeRole, SiblingRole};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use pcr_ty::HostStack;

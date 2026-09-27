@@ -442,8 +442,8 @@ mod tests {
         }
     }
 
-    /// The owner check in `set_cwd`/`with_cwd` refuses a witness that names
-    /// another task.
+    /// The owner check in the witness-taking task methods refuses a witness
+    /// that names another task.
     #[test]
     fn a_witness_names_exactly_one_task() {
         let first = fresh();

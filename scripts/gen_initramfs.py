@@ -99,6 +99,11 @@ def main() -> None:
         dest = b"/sbin/init" if name == "init" else b"/bin/" + name.encode()
         entries.append((dest, MODE_EXEC, read_file(src)))
 
+    # POSIX names the shell `sh`, and `#!/bin/sh` is how every script asks
+    # for it; a symlink, so the grant keyed on `/bin/shell` follows the name.
+    if "shell" in bins:
+        entries.append((b"/bin/sh", MODE_LINK, b"shell"))
+
     # The utility names, as symlinks to the multicall binary, so a RAM-only
     # boot has the `/bin` build_fs_image.sh gives the disk root. `newc` stores
     # a symlink's target as the record's body.

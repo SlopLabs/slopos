@@ -22,9 +22,9 @@ use slopos_abi::signal::{
     sig_default_ignores,
 };
 use slopos_abi::syscall::{
-    ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
-    F_GETFL, F_SETFD, FD_CLOEXEC, FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NOCTTY,
-    O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_EXIT, SYSCALL_FUTEX,
+    ARCH_GET_FS, ARCH_SET_FS, CLONE_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM,
+    ERRNO_EAGAIN, F_GETFL, F_SETFD, FD_CLOEXEC, FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE,
+    O_NOCTTY, O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_EXIT, SYSCALL_FUTEX,
     SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_OPENAT, SYSCALL_PIPE, SYSCALL_PIPE2,
     SYSCALL_POLL, SYSCALL_PRIVATE_BASE, SYSCALL_PRIVATE_END, SYSCALL_READ, SYSCALL_RT_SIGACTION,
     SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
@@ -2062,8 +2062,7 @@ fn user_irq_frame(rip: u64, rsp: u64) -> KBox<slopos_arch::InterruptFrame> {
     frame
 }
 
-/// A regression in the cell's bounds handling or in its
-/// publish-length-after-bytes ordering surfaces as a corrupted path in
+/// A regression in the path's bounds handling surfaces as a corrupted path in
 /// userland, not as a fault.
 pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
     static LONGEST: [u8; slopos_ostd::task::CWD_MAX - 1] = [b'a'; slopos_ostd::task::CWD_MAX - 1];
@@ -2082,21 +2081,17 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
         return TestResult::Fail;
     };
 
-    let initial_ok = current
-        .task()
-        .with_cwd(&current, |cwd| cwd == b"/\0".as_slice());
+    let initial_ok = current.task().with_cwd(|cwd| cwd == b"/\0".as_slice());
     assert_test!(initial_ok, "fresh task cwd is not \"/\"");
 
-    // The storage is lazy: the first `set_cwd` is where a task meets a
-    // failing allocator.
+    // A kernel task has no context until its first `set_cwd`, which is
+    // where it meets a failing allocator.
     slopos_ostd::task::fail_next_cwd_alloc_for_test();
     assert_test!(
         !current.task().set_cwd(&current, b"/usr/share"),
         "a failed cwd allocation must refuse the change"
     );
-    let still_root = current
-        .task()
-        .with_cwd(&current, |cwd| cwd == b"/\0".as_slice());
+    let still_root = current.task().with_cwd(|cwd| cwd == b"/\0".as_slice());
     assert_test!(still_root, "a refused allocation moved the cwd anyway");
 
     assert_test!(
@@ -2105,7 +2100,7 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
     );
     let round_trip = current
         .task()
-        .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice());
+        .with_cwd(|cwd| cwd == b"/usr/share\0".as_slice());
     assert_test!(round_trip, "cwd did not round-trip through the cell");
 
     // `CWD_MAX` bytes leave no room for the NUL; one fewer is the longest
@@ -2116,16 +2111,16 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
     );
     let unchanged = current
         .task()
-        .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice());
+        .with_cwd(|cwd| cwd == b"/usr/share\0".as_slice());
     assert_test!(unchanged, "a rejected set_cwd still mutated the buffer");
 
     assert_test!(
         current.task().set_cwd(&current, &LONGEST),
         "set_cwd rejected the longest path that fits"
     );
-    let longest_ok = current.task().with_cwd(&current, |cwd| {
-        cwd.len() == MAX && cwd[..MAX - 1] == LONGEST[..] && cwd[MAX - 1] == 0
-    });
+    let longest_ok = current
+        .task()
+        .with_cwd(|cwd| cwd.len() == MAX && cwd[..MAX - 1] == LONGEST[..] && cwd[MAX - 1] == 0);
     assert_test!(longest_ok, "the longest cwd did not round-trip whole");
 
     drop(current);
@@ -6976,9 +6971,8 @@ pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> Test
     TestResult::Pass
 }
 
-/// The exact-slice compare catches a copied buffer with an uncopied `cwd_len`:
-/// `with_cwd` slices by the length, so a stale one surfaces as a truncated or
-/// over-long path rather than a fault.
+/// A forked child starts where its parent is and then owns its own working
+/// directory: a shared context would make the child's `chdir` move the parent.
 pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6991,7 +6985,7 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
         current.task().set_cwd(&current, b"/usr/share")
             && current
                 .task()
-                .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice())
+                .with_cwd(|cwd| cwd == b"/usr/share\0".as_slice())
     });
     park_bootstrap_on_current_cpu();
     assert_test!(seeded, "could not seed the parent cwd");
@@ -7004,13 +6998,11 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
     let inherited = Current::get().is_some_and(|current| {
         current
             .task()
-            .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice())
+            .with_cwd(|cwd| cwd == b"/usr/share\0".as_slice())
     });
     let child_moved = Current::get().is_some_and(|current| {
         current.task().set_cwd(&current, b"/tmp")
-            && current
-                .task()
-                .with_cwd(&current, |cwd| cwd == b"/tmp\0".as_slice())
+            && current.task().with_cwd(|cwd| cwd == b"/tmp\0".as_slice())
     });
     park_bootstrap_on_current_cpu();
 
@@ -7018,7 +7010,7 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
     let parent_unchanged = Current::get().is_some_and(|current| {
         current
             .task()
-            .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice())
+            .with_cwd(|cwd| cwd == b"/usr/share\0".as_slice())
     });
     park_bootstrap_on_current_cpu();
 
@@ -7029,8 +7021,66 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
     assert_test!(child_moved, "the child could not change its own cwd");
     assert_test!(
         parent_unchanged,
-        "the child's chdir moved the parent — the cwd cell is shared, not copied"
+        "the child's chdir moved the parent — the cwd context is shared, not copied"
     );
+    TestResult::Pass
+}
+
+/// The working directory is per process: a `chdir` on any thread moves every
+/// thread, and a `CLONE_FS` child shares it too, while a clone without either
+/// gets a copy that diverges.
+pub fn test_clone_shares_cwd_with_threads_and_clone_fs() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
+    let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
+
+    make_task_current(parent_id);
+    let seeded =
+        Current::get().is_some_and(|current| current.task().set_cwd(&current, b"/usr/share"));
+    park_bootstrap_on_current_cpu();
+    assert_test!(seeded, "could not seed the parent cwd");
+
+    let clone_blocked = |flags: u64| match task_clone(&parent_guard, None, flags, 0, 0, 0, 0) {
+        Ok(id) => {
+            task_set_state(id, TaskStatus::Blocked);
+            id
+        }
+        Err(_) => INVALID_TASK_ID,
+    };
+    let thread_id = clone_blocked(CLONE_VM | CLONE_SIGHAND | CLONE_THREAD);
+    let fs_id = clone_blocked(CLONE_VM | CLONE_FS);
+    let private_id = clone_blocked(CLONE_VM);
+    let ids = [thread_id, fs_id, private_id];
+    if ids.contains(&INVALID_TASK_ID) {
+        for id in ids.into_iter().filter(|&id| id != INVALID_TASK_ID) {
+            task_terminate(id);
+        }
+        task_terminate(parent_id);
+        return TestResult::Fail;
+    }
+
+    make_task_current(thread_id);
+    let moved = Current::get().is_some_and(|current| current.task().set_cwd(&current, b"/tmp"));
+    park_bootstrap_on_current_cpu();
+
+    let cwd_is = |id: u32, want: &[u8]| {
+        task_find_by_id(id).is_some_and(|task| task.with_cwd(|cwd| cwd == want))
+    };
+    let parent_moved = cwd_is(parent_id, b"/tmp\0");
+    let fs_moved = cwd_is(fs_id, b"/tmp\0");
+    let private_kept = cwd_is(private_id, b"/usr/share\0");
+
+    for id in ids {
+        task_terminate(id);
+    }
+    task_terminate(parent_id);
+
+    assert_test!(moved, "the thread could not chdir");
+    assert_test!(parent_moved, "a thread's chdir did not move its process");
+    assert_test!(fs_moved, "a CLONE_FS child does not share the cwd");
+    assert_test!(private_kept, "a clone without CLONE_FS shares the cwd");
     TestResult::Pass
 }
 
@@ -7214,6 +7264,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_fork_child_inherits_and_then_diverges_from_parent_cwd,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_clone_shares_cwd_with_threads_and_clone_fs,
     suite = syscall_valid
 );
 /// `rt_sigaction` bounds the signal number against `NSIG`, not a literal 64:

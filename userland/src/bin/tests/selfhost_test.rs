@@ -30,7 +30,7 @@ fn guest_builds(variant: &str, clean: bool) -> bool {
     let status = match status {
         Ok(status) => status,
         Err(e) => {
-            note(&format!("spawning /bin/shell: {e}"));
+            note(&format!("spawning selfhost.sh: {e}"));
             return false;
         }
     };

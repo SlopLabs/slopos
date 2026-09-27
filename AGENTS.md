@@ -277,7 +277,7 @@ directory, into `builddir/devdisk.patch` for `git apply`; `just
 devdisk-export-file` copies one file out behind the same refusals.
 
 **The kernel builds in the guest.** `scripts/build_kernel.sh` is POSIX sh
-that runs under `/bin/shell` with the coreutils and nothing else; what only
+that runs under `/bin/sh` with the coreutils and nothing else; what only
 the host has — `ensure_toolchain.sh` before, the ELF gates after
 (`scripts/check_kernel_elf_gates.sh`) — lives in the justfile's `_kernel`
 recipe. The embedded symbol table comes from `tools/kallsyms`, an ELF reader
@@ -305,7 +305,7 @@ holder, each one through the device's exclusive claim, so a mounted device
 answers `EBUSY`. UEFI variables are read and written on a kernel thread — the
 firmware is mapped only into the kernel master address space and may use the
 vector registers — and only under the Boot Loader Interface's and SlopOS's own
-vendor GUIDs. In the guest, `shell scripts/selfhost.sh install` is the one
+vendor GUIDs. In the guest, `scripts/selfhost.sh install` is the one
 command for the whole of it: it builds with the dev disk's toolchain, installs
 into the slot that is not the default and arms the one-shot boot.
 `selfhost_test` and `install_test` run that script as a person at the shell
