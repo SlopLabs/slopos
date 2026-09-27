@@ -2,7 +2,7 @@ use slopos_abi::Errno;
 use slopos_abi::file_ops::FileKind;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::net::{AF_INET, AF_UNIX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
-use slopos_abi::syscall::{MsgHdr, SCM_MAX_FDS};
+use slopos_abi::syscall::{MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS};
 use slopos_abi::unix::SockAddrUn;
 use slopos_fs::fileio::FdTable;
 use slopos_mm::user_copy::{
@@ -17,6 +17,7 @@ use slopos_ostd::KVec;
 
 use crate::syscall::args::{Fd, UserBytes, UserPtr};
 use crate::syscall::common::{errno_from_neg, errno_from_neg64};
+use crate::syscall::fs::path_handlers::raise_sigpipe_on_epipe;
 
 fn rc_i32_to_unit(rc: i32) -> Result<(), Errno> {
     if rc < 0 {
@@ -72,6 +73,12 @@ fn check_msg_flags(flags: u32) -> Result<(), Errno> {
     } else {
         Err(Errno::EINVAL)
     }
+}
+
+/// A send's flags: `MSG_NOSIGNAL` on top of none. A socket send here never
+/// raises `SIGPIPE`, so the one thing the bit asks for already holds.
+fn check_send_flags(flags: u32) -> Result<(), Errno> {
+    check_msg_flags(flags & !MSG_NOSIGNAL)
 }
 
 define_syscall!(syscall_socket
@@ -327,6 +334,21 @@ define_syscall!(syscall_connect
     }
 });
 
+/// A send that fails with `EPIPE` raises `SIGPIPE` at the sender, as POSIX
+/// `send()` has it, unless the caller passed `MSG_NOSIGNAL`.
+fn sigpipe_unless_nosignal(
+    ctx: &crate::syscall::context::SyscallContext<'_>,
+    flags: u32,
+    sent: Result<u64, Errno>,
+) -> Result<u64, Errno> {
+    if let Err(errno) = sent
+        && flags & MSG_NOSIGNAL == 0
+    {
+        raise_sigpipe_on_epipe(ctx, errno);
+    }
+    sent
+}
+
 // A null `addr` is `send(2)`: with the `send` slot retired that is the only
 // spelling left for it, so AF_UNIX takes it too. At most 4096 payload bytes
 // move per call; the short count is the caller's to loop on.
@@ -336,8 +358,20 @@ define_syscall!(syscall_sendto
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    check_msg_flags(flags)?;
-    let sock_fd = socket_fd_for(process_id, fd.raw())?;
+    check_send_flags(flags)?;
+    let sent = sendto_impl(process_id, fd, buf, addr_ptr, addr_len);
+    sigpipe_unless_nosignal(ctx, flags, sent)
+});
+
+#[inline(never)]
+fn sendto_impl(
+    table: FdTable,
+    fd: Fd,
+    buf: UserBytes,
+    addr_ptr: u64,
+    addr_len: u64,
+) -> Result<u64, Errno> {
+    let sock_fd = socket_fd_for(table, fd.raw())?;
 
     let len = buf.len().min(4096);
     let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
@@ -362,7 +396,8 @@ define_syscall!(syscall_sendto
             if (addr_len as usize) < core::mem::size_of::<SockAddrIn>() {
                 return Err(Errno::EINVAL);
             }
-            let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let user_addr =
+                MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             if sock_addr.family != AF_INET {
                 return Err(Errno::EAFNOSUPPORT);
@@ -375,7 +410,7 @@ define_syscall!(syscall_sendto
             ))
         }
     }
-});
+}
 
 // A null `src` is `recv(2)`, the only spelling left for it. At most 4096
 // payload bytes move per call; the short count is the caller's to loop on.
@@ -608,9 +643,14 @@ define_syscall!(syscall_sendmsg
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    check_msg_flags(flags)?;
+    check_send_flags(flags)?;
+    let sent = sendmsg_impl(process_id, fd, msg_ptr);
+    sigpipe_unless_nosignal(ctx, flags, sent)
+});
 
-    let sock_fd = socket_fd_for(process_id, fd.raw())?;
+#[inline(never)]
+fn sendmsg_impl(table: FdTable, fd: Fd, msg_ptr: UserPtr<MsgHdr>) -> Result<u64, Errno> {
+    let sock_fd = socket_fd_for(table, fd.raw())?;
     let sh = match sock_fd {
         SocketFd::Unix(sh) => sh,
         SocketFd::Inet(_) => return Err(Errno::ENOTSOCK),
@@ -631,20 +671,15 @@ define_syscall!(syscall_sendmsg
     // description per POSIX fd-passing semantics; on error the vec drops them.
     let mut files: KVec<slopos_fs::LeafFileRef> =
         KVec::with_capacity(SCM_MAX_FDS).map_err(|_| Errno::ENOMEM)?;
-    collect_scm_rights(process_id, &msg, &mut files)?;
+    collect_scm_rights(table, &msg, &mut files)?;
 
-    let rc = unix_socket::unix_sendmsg(
-        sh,
-        &scratch[..staged],
-        &mut files,
-        process_id.account(),
-    );
+    let rc = unix_socket::unix_sendmsg(sh, &scratch[..staged], &mut files, table.account());
     if rc < 0 {
         // Uncommitted aliases drop with `files`.
         return Err(errno_from_neg(rc));
     }
     Ok(rc as u64)
-});
+}
 
 #[inline(never)]
 fn recvmsg_impl(table: FdTable, fd: Fd, msg_ptr: UserPtr<MsgHdr>) -> Result<u64, Errno> {

@@ -9,6 +9,7 @@ use crate::codec::Encode;
 use crate::connection::Connection;
 use crate::types::{Event, ProtocolError, Request};
 use slopos_abi::net::AF_UNIX;
+use slopos_abi::syscall::MSG_NOSIGNAL;
 use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -54,7 +55,7 @@ impl WriteBuf {
     /// - `Err(…)`    — hard error (disconnected / IO).
     fn flush(&mut self, fd: i32) -> Result<bool, ProtocolError> {
         while self.len > 0 {
-            match Sys::send(fd, self.data.as_ptr(), self.len, 0) {
+            match Sys::send(fd, self.data.as_ptr(), self.len, MSG_NOSIGNAL as i32) {
                 Ok(n) if n > 0 => {
                     let remaining = self.len - n;
                     if remaining > 0 {

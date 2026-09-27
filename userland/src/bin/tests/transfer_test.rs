@@ -1,6 +1,7 @@
 //! Getting bytes in and out of the machine: TLS to a server, `curl https` to
-//! a file, and `nc` as a byte pipe, all against peers this test runs on
-//! loopback so no case depends on the host's network.
+//! a file, `nc` as a byte pipe, and `send`'s `SIGPIPE` and `MSG_NOSIGNAL`, all
+//! against peers this test runs on loopback so no case depends on the host's
+//! network.
 //!
 //! The server is the TLS crate's test server under a root minted here, so the
 //! client under test is the one `curl` ships, anchored on a root the shipped
@@ -11,15 +12,20 @@ use slopos_userland as _;
 use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use slopos_abi::signal::SIGPIPE;
+use slopos_abi::syscall::MSG_NOSIGNAL;
 use slopos_slibc::test_harness::note;
 use slopos_tls_core::pem;
 use slopos_tls_core::server::{Server, ServerConfig};
 use slopos_tls_core::testpki::{self, AltName, Key, Profile};
+use slopos_userland::syscall::error::SyscallError;
+use slopos_userland::syscall::{core as sys_core, net, process};
 use slopos_userland::tls::{self, CipherSuite, ClientConfig, TlsStream, TrustStore};
 
 const WORK: &str = "/tmp/transfer";
@@ -454,6 +460,82 @@ fn nc_keeps_sending_after_the_peer_half_closes() -> bool {
     }
 }
 
+/// A connected loopback pair: the connecting end, then the accepted one.
+fn loopback_pair() -> Option<(TcpStream, TcpStream)> {
+    let (l, port) = listener()?;
+    let client = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|e| note(&format!("connect: {e}")))
+        .ok()?;
+    let server = accept(&l).map_err(|e| note(&e)).ok()?;
+    Some((client, server))
+}
+
+/// `MSG_NOSIGNAL` is a send flag the kernel takes; any other still refuses
+/// the call rather than being dropped.
+fn send_takes_msg_nosignal() -> bool {
+    let Some((client, mut server)) = loopback_pair() else {
+        return false;
+    };
+    let fd = client.as_raw_fd();
+    let sent = net::send(fd, b"x", MSG_NOSIGNAL);
+    if sent != Ok(1) {
+        note(&format!("send with MSG_NOSIGNAL answered {sent:?}"));
+        return false;
+    }
+    let mut got = [0u8; 1];
+    if server.read_exact(&mut got).is_err() || got != *b"x" {
+        note("the peer did not read the byte sent with MSG_NOSIGNAL");
+        return false;
+    }
+    const MSG_OOB: u32 = 1;
+    let oob = net::send(fd, b"x", MSG_OOB | MSG_NOSIGNAL);
+    oob == Err(SyscallError::EINVAL) || {
+        note(&format!("send with MSG_OOB answered {oob:?}"));
+        false
+    }
+}
+
+/// How a child that left `SIGPIPE` at its default ends after sending with
+/// `flags` on a stream it has shut down for writing: exit 0 if the send
+/// answered `EPIPE`, 1 for any other answer, 2 if it never got that far.
+fn sender_after_shutdown(flags: u32) -> Option<process::WaitStatus> {
+    let child = process::fork();
+    if child == 0 {
+        process::default_signal(SIGPIPE);
+        let Some((client, _server)) = loopback_pair() else {
+            sys_core::exit_with_code(2);
+        };
+        if client.shutdown(Shutdown::Write).is_err() {
+            sys_core::exit_with_code(2);
+        }
+        let sent = net::send(client.as_raw_fd(), b"x", flags);
+        sys_core::exit_with_code(if sent == Err(SyscallError::EPIPE) {
+            0
+        } else {
+            1
+        });
+    }
+    process::waitpid(child as u32).map(|(_, s)| process::wait_status(s))
+}
+
+/// POSIX `send()`: `EPIPE` on a stream shut down for writing raises `SIGPIPE`.
+fn send_after_shutdown_raises_sigpipe() -> bool {
+    let fate = sender_after_shutdown(0);
+    matches!(fate, Some(process::WaitStatus::Signalled(SIGPIPE))) || {
+        note(&format!("the sender was not killed by SIGPIPE: {fate:?}"));
+        false
+    }
+}
+
+/// The same send with `MSG_NOSIGNAL` answers `EPIPE` and the sender lives.
+fn msg_nosignal_send_after_shutdown_is_epipe() -> bool {
+    let fate = sender_after_shutdown(MSG_NOSIGNAL);
+    matches!(fate, Some(process::WaitStatus::Exited(0))) || {
+        note(&format!("the MSG_NOSIGNAL sender ended {fate:?}"));
+        false
+    }
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         (
@@ -472,6 +554,15 @@ fn main() {
         (
             "nc_keeps_sending_after_the_peer_half_closes",
             nc_keeps_sending_after_the_peer_half_closes,
+        ),
+        ("send_takes_msg_nosignal", send_takes_msg_nosignal),
+        (
+            "send_after_shutdown_raises_sigpipe",
+            send_after_shutdown_raises_sigpipe,
+        ),
+        (
+            "msg_nosignal_send_after_shutdown_is_epipe",
+            msg_nosignal_send_after_shutdown_is_epipe,
         ),
     ]);
 }

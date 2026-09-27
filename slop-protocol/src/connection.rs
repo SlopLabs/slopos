@@ -13,7 +13,8 @@ use slopos_abi::fs::UserIovec;
 use slopos_abi::syscall::posix::{F_SETFL, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_abi::syscall::types::UserPollFd;
 use slopos_abi::syscall::{
-    CMSG_DATA_OFFSET, CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS, SOL_SOCKET, cmsg_len, cmsg_space,
+    CMSG_DATA_OFFSET, CmsgHdr, MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS, SOL_SOCKET, cmsg_len,
+    cmsg_space,
 };
 use slopos_slibc::errno;
 use slopos_slibc::pal::{Pal, Sys};
@@ -104,7 +105,7 @@ impl Connection {
         while sent < total {
             let ptr = unsafe { buf.as_ptr().add(sent) };
             let remaining = total - sent;
-            match Sys::send(self.fd, ptr, remaining, 0) {
+            match Sys::send(self.fd, ptr, remaining, MSG_NOSIGNAL as i32) {
                 Ok(n) if n > 0 => sent += n,
                 Ok(0) => return Err(ProtocolError::Disconnected),
                 Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {
@@ -155,7 +156,7 @@ impl Connection {
         // one sendmsg; a short write here commits the fd plus `n` bytes and the
         // tail must still be drained below, or the receiver's framing desyncs.
         let mut sent = loop {
-            match Sys::sendmsg(self.fd, &msg_hdr, 0) {
+            match Sys::sendmsg(self.fd, &msg_hdr, MSG_NOSIGNAL as i32) {
                 Ok(n) if n > 0 => break n,
                 Ok(_) => return Err(ProtocolError::Disconnected),
                 Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {
@@ -168,7 +169,7 @@ impl Connection {
         while sent < total {
             let ptr = unsafe { buf.as_ptr().add(sent) };
             let remaining = total - sent;
-            match Sys::send(self.fd, ptr, remaining, 0) {
+            match Sys::send(self.fd, ptr, remaining, MSG_NOSIGNAL as i32) {
                 Ok(n) if n > 0 => sent += n,
                 Ok(_) => return Err(ProtocolError::Disconnected),
                 Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {

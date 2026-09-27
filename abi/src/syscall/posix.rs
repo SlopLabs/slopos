@@ -168,6 +168,10 @@ pub const SCM_MAX_FDS: usize = 4;
 /// item, so some were discarded. Linux's `MSG_CTRUNC`.
 pub const MSG_CTRUNC: i32 = 0x08;
 
+/// Send flag: a send on a stream that is no longer connected fails with
+/// `EPIPE` without raising `SIGPIPE`. Linux's `MSG_NOSIGNAL`.
+pub const MSG_NOSIGNAL: u32 = 0x4000;
+
 /// `sendmsg`/`recvmsg` message header. Linux x86-64 `struct msghdr`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
