@@ -156,6 +156,8 @@ pub trait Pal {
         sigsetsize: usize,
     ) -> Result<(), Errno>;
     fn kill(pid: i32, sig: i32) -> Result<(), Errno>;
+    /// Signal thread `tid` of thread group `tgid`.
+    fn tgkill(tgid: i32, tid: i32, sig: i32) -> Result<(), Errno>;
     fn rt_sigreturn() -> !;
     fn sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack) -> Result<(), Errno>;
 

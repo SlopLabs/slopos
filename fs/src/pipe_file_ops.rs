@@ -8,9 +8,19 @@ use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
 use slopos_ostd::KArc;
 use slopos_ostd::process::quota::{AliasOf, FileBacking};
 use slopos_ostd::sync::BUS;
+use slopos_ostd::sync::wait_queue::WaitAbort;
 
 use crate::pipe;
 use crate::pipe::PipeHandle;
+
+/// A blocked pipe transfer a signal cut short restarts under `SA_RESTART` and
+/// is `EINTR` otherwise, as POSIX has it; one a kill cut short is `EINTR`.
+fn interrupted(abort: WaitAbort) -> isize {
+    match abort {
+        WaitAbort::Interrupted => Errno::ERESTARTSYS.as_isize(),
+        _ => Errno::EINTR.as_isize(),
+    }
+}
 
 pub struct PipeReadOps;
 pub struct PipeWriteOps;
@@ -246,18 +256,15 @@ impl FileOps for PipeReadOps {
                 return Errno::EAGAIN.as_isize();
             }
 
-            if BUS
-                .subscribe(read_ev(h))
-                .wait_event(|| {
-                    // A vanished slot falls out of the wait so the next
-                    // iteration's lookup reports EBADF.
-                    pipe::with_pipe(h, |slot| slot.len > 0 || slot.writers == 0).unwrap_or(true)
-                })
-                .is_err()
-            {
-                // Nothing transferred: the short-count return above already
-                // took that case.
-                return Errno::EINTR.as_isize();
+            let waited = BUS.subscribe(read_ev(h)).wait_event_interruptible(|| {
+                // A vanished slot falls out of the wait so the next
+                // iteration's lookup reports EBADF.
+                pipe::with_pipe(h, |slot| slot.len > 0 || slot.writers == 0).unwrap_or(true)
+            });
+            // Nothing transferred: the short-count return above already took
+            // that case.
+            if let Err(abort) = waited {
+                return interrupted(abort);
             }
         }
     }
@@ -365,15 +372,14 @@ impl FileOps for PipeWriteOps {
                 if scheduler_is_enabled() == 0 {
                     return Errno::EAGAIN.as_isize();
                 }
-                if BUS
+                if let Err(abort) = BUS
                     .subscribe(write_ev(h))
-                    .wait_event(drain_or_close)
-                    .is_err()
+                    .wait_event_interruptible(drain_or_close)
                 {
                     return if total > 0 {
                         total as isize
                     } else {
-                        Errno::EINTR.as_isize()
+                        interrupted(abort)
                     };
                 }
                 continue;
@@ -460,15 +466,14 @@ impl FileOps for PipeWriteOps {
             if scheduler_is_enabled() == 0 {
                 return Errno::EAGAIN.as_isize();
             }
-            if BUS
+            if let Err(abort) = BUS
                 .subscribe(write_ev(h))
-                .wait_event(drain_or_close)
-                .is_err()
+                .wait_event_interruptible(drain_or_close)
             {
                 return if total > 0 {
                     total as isize
                 } else {
-                    Errno::EINTR.as_isize()
+                    interrupted(abort)
                 };
             }
         }

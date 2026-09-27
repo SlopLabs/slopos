@@ -20,11 +20,15 @@
 # an equal-priority task and an enqueue behind a running task began kicking an
 # idle CPU: more of the userland suite's children overlap, and 14 once the
 # flusher wrote data without the mount lock and file faults stopped sharing
-# one I/O mutex. The process row fell
+# one I/O mutex, and 16 once `pthread_kill` reached a thread: the libc ABI
+# test holds one of its own blocked, and a jobserver helper thread that used
+# to outlive its process by a second of failed shutdown now exits with it, so
+# the children the suite starts overlap differently. The process row fell
 # from 256 to 20 because an exited process is now torn down and retired
 # instead of leaking until shutdown, and rose to 21 with that same scheduling
 # change, since its peak is how many exited children are still being torn
-# down while the next ones start. The commitpages row
+# down while the next ones start, and to 23 with the same `pthread_kill`
+# change. The commitpages row
 # after userland is the build-loop tests reserving six tenths of the
 # headroom, which moves with usable memory and with what else holds a
 # promise at that moment: three captures measured 120 266, 120 318 and
@@ -78,9 +82,9 @@ post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
-post-userland-tests	process	21
+post-userland-tests	process	23
 post-userland-tests	residentpages	160371
-post-userland-tests	task	14
+post-userland-tests	task	16
 
 # The charge path's cost, as ratios rather than cycle counts. A cycle
 # count here measures the accelerator: the same tree reports ~1500

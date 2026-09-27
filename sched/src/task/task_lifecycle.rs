@@ -2232,6 +2232,33 @@ pub fn task_group_signal_from(tid: u32, signum: u8, sender: u32) -> usize {
     signaled
 }
 
+/// Post `signum` to the one thread `tid` of thread group `tgid`, for `tgkill`.
+/// Stop, continue and `SIGKILL` act on the whole group, as POSIX has them.
+/// `false` when `tid` is not a live member of `tgid`.
+pub fn task_thread_signal_from(tgid: u32, tid: u32, signum: u8, sender: u32) -> bool {
+    if slopos_abi::signal::sig_bit(signum) == 0 {
+        return false;
+    }
+    let Some(target) = task_find_by_id(tid) else {
+        return false;
+    };
+    if group_id_of(&target) != tgid || target.is_exited() {
+        return false;
+    }
+    let group_wide = signum == slopos_abi::signal::SIGKILL
+        || matches!(
+            slopos_abi::signal::sig_default_action(signum),
+            slopos_abi::signal::SigDefault::Stop | slopos_abi::signal::SigDefault::Continue
+        );
+    if group_wide {
+        return task_group_signal_from(tid, signum, sender) != 0;
+    }
+    if slopos_ostd::task::ops::task_signal_post_from(&target, signum, sender) {
+        let _ = scheduler::unblock_task(&target);
+    }
+    true
+}
+
 /// Put a stopped task back on a runqueue so it can reach a delivery point.
 ///
 /// The wake path proper ([`scheduler::unblock_task`]) only moves

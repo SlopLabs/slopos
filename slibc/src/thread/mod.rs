@@ -17,7 +17,7 @@ pub mod tls;
 
 use core::ffi::{c_char, c_int, c_void};
 
-use crate::errno::{EINVAL, ENOSYS, ESRCH, errno_set};
+use crate::errno::{EINVAL, ESRCH, errno_set};
 use crate::pal::{Pal, Sys};
 
 use tcb::Tcb;
@@ -280,10 +280,11 @@ pub unsafe extern "C" fn pthread_kill(thread: pthread_t, sig: c_int) -> c_int {
     if core::ptr::read_volatile(&(*tcb).child_tid) == 0 && (*tcb).tid == 0 {
         return ESRCH.raw();
     }
-    if sig == 0 {
-        return 0;
+    // `tid` is the kernel id the clone published, which `tgkill` names.
+    match Sys::tgkill(Sys::getpid(), (*tcb).tid, sig) {
+        Ok(()) => 0,
+        Err(e) => e.raw(),
     }
-    ENOSYS.raw()
 }
 
 #[unsafe(no_mangle)]

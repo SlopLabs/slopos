@@ -53,7 +53,7 @@ pub use crate::syscall::ring_handlers::{
 };
 use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
-    syscall_sigaltstack,
+    syscall_sigaltstack, syscall_tgkill,
 };
 pub use crate::syscall::signalfd_handlers::syscall_signalfd4;
 pub use crate::syscall::test_handlers::{
@@ -193,6 +193,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_CLOCK_SETTIME]     => syscall_clock_settime,     "clock_settime";
     [SYSCALL_CLOCK_GETTIME]     => syscall_clock_gettime,     "clock_gettime";
     [SYSCALL_EXIT_GROUP]        => syscall_exit_group,        "exit_group";
+    [SYSCALL_TGKILL]            => syscall_tgkill,            "tgkill";
     [SYSCALL_OPENAT]            => syscall_openat,            "openat";
     [SYSCALL_MKDIRAT]           => syscall_mkdirat,           "mkdirat";
     [SYSCALL_NEWFSTATAT]        => syscall_newfstatat,        "newfstatat";
@@ -313,7 +314,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 154;
+pub const SYSCALL_ENTRY_COUNT: usize = 155;
 
 /// The recorded shape of the classification.
 ///
@@ -325,7 +326,7 @@ const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::Unimplemented, 0),
     (Capability::NoneSelf, 46),
     (Capability::NoneFd, 71),
-    (Capability::NoneRelation, 14),
+    (Capability::NoneRelation, 15),
     (Capability::Power, 3),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),

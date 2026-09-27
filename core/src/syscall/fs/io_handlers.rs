@@ -87,6 +87,9 @@ define_syscall!(syscall_writev
         return Ok(0);
     }
     let bytes = slopos_fs::fileio::file_write_fd(pid, fd.raw(), &io_buf);
+    if bytes == -512 {
+        return Err(Errno::ERESTARTSYS);
+    }
     if bytes < 0 {
         Err(errno_from_neg(bytes as i32))
     } else {

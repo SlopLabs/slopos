@@ -303,6 +303,79 @@ fn attr_init_reports_a_guard_page() -> bool {
     true
 }
 
+static USR2_COUNT: AtomicU32 = AtomicU32::new(0);
+
+extern "C" fn on_usr2(_sig: i32, _info: *mut UserSiginfo, _uc: *mut c_void) {
+    USR2_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A signal `pthread_kill` sends one thread interrupts that thread's blocking
+/// `read`. The jobserver crate shuts its helper thread down exactly this way,
+/// retrying every 10 ms for a second, so a `pthread_kill` that never delivers
+/// costs every rustc with codegen work a second at exit.
+fn pthread_kill_interrupts_a_blocked_read() -> bool {
+    use std::io::Read;
+    use std::os::unix::thread::JoinHandleExt;
+    use std::time::{Duration, Instant};
+
+    USR2_COUNT.store(0, Ordering::SeqCst);
+    let act = SigAction {
+        sa_sigaction: on_usr2 as *const () as usize,
+        sa_mask: SigSet::empty(),
+        sa_flags: SA_SIGINFO as i32,
+        sa_restorer: None,
+    };
+    if unsafe { signal::sigaction(SIGUSR2, &act, ptr::null_mut()) } != 0 {
+        eprintln!("libc_abi_test: installing the SIGUSR2 handler failed");
+        return false;
+    }
+    let (mut reader, mut writer) = match std::io::pipe() {
+        Ok(ends) => ends,
+        Err(e) => {
+            eprintln!("libc_abi_test: pipe failed: {e:?}");
+            return false;
+        }
+    };
+    let done = Arc::new(AtomicU32::new(0));
+    let flag = Arc::clone(&done);
+    let handle = thread::spawn(move || {
+        let mut byte = [0u8; 1];
+        let interrupted = matches!(
+            reader.read(&mut byte),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted
+        );
+        flag.store(1, Ordering::SeqCst);
+        interrupted
+    });
+    let thread = handle.as_pthread_t() as slopos_slibc::thread::pthread_t;
+    let start = Instant::now();
+    while done.load(Ordering::SeqCst) == 0 && start.elapsed() < Duration::from_secs(2) {
+        let rc = unsafe { slopos_slibc::thread::pthread_kill(thread, SIGUSR2) };
+        if rc != 0 {
+            eprintln!("libc_abi_test: pthread_kill answered {rc}");
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let took = start.elapsed();
+    if done.load(Ordering::SeqCst) == 0 {
+        let _ = std::io::Write::write_all(&mut writer, b"x");
+    }
+    let interrupted = handle.join().unwrap_or(false);
+    if !interrupted || USR2_COUNT.load(Ordering::SeqCst) == 0 {
+        eprintln!(
+            "libc_abi_test: the blocked read was not interrupted (handler ran {} times, {took:?})",
+            USR2_COUNT.load(Ordering::SeqCst)
+        );
+        return false;
+    }
+    if took > Duration::from_millis(500) {
+        eprintln!("libc_abi_test: interrupting the blocked read took {took:?}");
+        return false;
+    }
+    true
+}
+
 // ---------------------------------------------------------------------------
 // `readdir` against the kernel's own records.
 // ---------------------------------------------------------------------------
@@ -1305,6 +1378,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "attr_init_reports_a_guard_page",
         attr_init_reports_a_guard_page,
+    ),
+    (
+        "pthread_kill_interrupts_a_blocked_read",
+        pthread_kill_interrupts_a_blocked_read,
     ),
     (
         "read_dir_names_match_getdents64",

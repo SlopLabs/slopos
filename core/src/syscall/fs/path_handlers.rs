@@ -62,6 +62,9 @@ define_syscall!(syscall_write
     let count = buf.len();
     let io_buf = UserReadBuf::new(buf.base_u64(), count).ok_or(Errno::EFAULT)?;
     let bytes = file_write_fd(pid, fd.raw(), &io_buf);
+    if bytes == -512 {
+        return Err(Errno::ERESTARTSYS);
+    }
     if bytes < 0 {
         Err(Errno::from_raw(bytes as i32).unwrap_or(Errno::EINVAL))
     } else {

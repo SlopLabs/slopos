@@ -771,6 +771,12 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn tgkill(tgid: i32, tid: i32, sig: i32) -> Result<(), Errno> {
+        let ret = unsafe { syscall3(SYSCALL_TGKILL, tgid as u64, tid as u64, sig as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn rt_sigreturn() -> ! {
         unsafe {
             syscall0(SYSCALL_RT_SIGRETURN);

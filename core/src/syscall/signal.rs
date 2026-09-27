@@ -28,7 +28,7 @@ use slopos_sched::scheduler::{schedule, unblock_task};
 use slopos_sched::task::{
     task_find_by_id, task_for_each_active, task_group_fatal_signal, task_group_signal_from,
     task_group_stop, task_kill_and_wake, task_resume_if_stopped, task_signal_post_from,
-    task_terminate,
+    task_terminate, task_thread_signal_from,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
@@ -399,6 +399,42 @@ define_syscall!(syscall_kill
 
     // A self-kill returns normally and dies one frame later, in the signal
     // delivery at the end of `syscall_handle`.
+    SyscallResult::Ok(0)
+});
+
+define_syscall!(syscall_tgkill
+    (ctx, raw_tgid: i64, raw_tid: i64, sig: u64) cap(NoneRelation)
+    -> SyscallResult
+{
+    let sender = match ctx.task().tgid {
+        INVALID_TASK_ID => ctx.task_id(),
+        tgid => tgid,
+    };
+    if raw_tgid <= 0 || raw_tid <= 0 || raw_tgid > i32::MAX as i64 || raw_tid > i32::MAX as i64 {
+        return SyscallResult::Err(Errno::EINVAL);
+    }
+    let (tgid, tid) = (raw_tgid as u32, raw_tid as u32);
+    // Authorized on the named thread, as `kill` authorizes on the named task.
+    let target = match crate::syscall::signalable::resolve_signal_target(ctx.task().flags, tid) {
+        Ok(target) => target,
+        Err(e) => return SyscallResult::Err(e),
+    };
+    let group = match target.task().tgid {
+        INVALID_TASK_ID => target.id(),
+        tgid => tgid,
+    };
+    if group != tgid {
+        return SyscallResult::Err(Errno::ESRCH);
+    }
+    if sig == 0 {
+        return SyscallResult::Ok(0);
+    }
+    let Some(signum) = parse_signum(sig) else {
+        return SyscallResult::Err(Errno::EINVAL);
+    };
+    if !task_thread_signal_from(tgid, tid, signum, sender) {
+        return SyscallResult::Err(Errno::ESRCH);
+    }
     SyscallResult::Ok(0)
 });
 

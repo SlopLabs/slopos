@@ -392,6 +392,11 @@ pub const SYSCALL_CLOCK_GETTIME: u64 = 228;
 /// `exit_group(code)` — terminate every task in the caller's thread group.
 pub const SYSCALL_EXIT_GROUP: u64 = 231;
 
+/// `tgkill(tgid, tid, signum)` — signal one thread, `tid`, of thread group
+/// `tgid`; `ESRCH` when `tid` is not in it. Stop, continue and `SIGKILL` act on
+/// the whole process, as from `kill`. `signum` 0 only probes.
+pub const SYSCALL_TGKILL: u64 = 234;
+
 /// `openat(dirfd, path: *const u8, flags, mode)`. `AT_FDCWD` selects the
 /// caller's cwd.
 pub const SYSCALL_OPENAT: u64 = 257;
