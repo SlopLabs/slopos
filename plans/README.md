@@ -16,7 +16,7 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
-| `self-hosting.md` | SlopOS as a development machine: the loop as it stands, what keeps development out of the guest (git, `#!`, the userland build), bare metal |
+| `self-hosting.md` | SlopOS as a development machine: the closed loop, a toolchain that only adds the target with ports compiled unmodified, git in the guest, the whole tree built in the guest, bare metal |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
