@@ -1,0 +1,32 @@
+--- a/llvm/lib/MC/TargetRegistry.cpp
++++ b/llvm/lib/MC/TargetRegistry.cpp
+@@ -16,7 +16,6 @@
+ #include "llvm/MC/MCLFI.h"
+ #include "llvm/MC/MCObjectStreamer.h"
+ #include "llvm/MC/MCObjectWriter.h"
+-#include "llvm/Support/Regex.h"
+ #include "llvm/Support/raw_ostream.h"
+ #include <cassert>
+ #include <vector>
+@@ -29,8 +28,19 @@
+   if (Features.empty())
+     return true;
+ 
+-  static const llvm::Regex pattern("^([+-][^,]+)(,[+-][^,]+)*,?$");
+-  return pattern.match(Features);
++  // ^([+-][^,]+)(,[+-][^,]+)*,?$ without a regex: this runs for every target
++  // machine created, and matching the pattern dominated it for a long list.
++  StringRef Rest = Features;
++  Rest.consume_back(",");
++  for (;;) {
++    size_t Comma = Rest.find(',');
++    StringRef Elem = Rest.take_front(Comma);
++    if (Elem.size() < 2 || (Elem[0] != '+' && Elem[0] != '-'))
++      return false;
++    if (Comma == StringRef::npos)
++      return true;
++    Rest = Rest.drop_front(Comma + 1);
++  }
+ }
+ 
+ MCStreamer *Target::createMCObjectStreamer(

@@ -195,8 +195,9 @@ symbol table (46 070 symbols).
    - the shell blocking in `wait4` instead of polling;
    - CRC-32 eight bytes at a time for the journal (17 s of kernel time);
    - LLVM's `ClearImpliedBits`, exponential over x86's feature graph and 7% of
-     user time with SSE disabled, rewritten level by level
-     (`toolchain/llvm-rustc/0002`).
+     user time with SSE disabled, rewritten level by level — still first at
+     5.8% — and then as each feature table's implication closures, computed
+     once per process (`toolchain/llvm-rustc/0002`).
 
    Then from 161 s to 88 s (`just bench-selfhost`, which boots the optimized
    tests kernel with `prof=on` and symbolizes the profile with
@@ -300,7 +301,8 @@ Neither Redox nor Asterinas rebuilds its own compiler.
 - **Linking and panics.** Hosted programs link through `cc` and unwind, as on
   Redox; the system's own binaries pin `rust-lld` and abort. `rustc_llvm` picks
   `libc++` for `slopos`, as it does for FreeBSD, rather than `llvm.use-libcxx`,
-  which would force it on the Linux stage1 compiler too.
+  which would force it on the Linux stage1 compiler too — and links it
+  statically, as libLLVM does, under `llvm.static-libstdcpp`.
 - **C++ runtime.** LLVM's libc++ and libc++abi in one `libc++.so`, settled by
   cross-building it: `libstdc++` comes out of a GCC cross-compiler's
   bootstrap, a second toolchain to pin and keep, where libc++ is built by the

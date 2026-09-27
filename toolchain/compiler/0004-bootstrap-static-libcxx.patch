@@ -1,0 +1,17 @@
+--- a/src/bootstrap/src/core/build_steps/compile.rs
++++ b/src/bootstrap/src/core/build_steps/compile.rs
+@@ -1489,8 +1489,12 @@
+         && !target.contains("apple")
+         && !target.contains("solaris")
+     {
+-        let libstdcxx_name =
+-            if target.contains("windows-gnullvm") { "libc++.a" } else { "libstdc++.a" };
++        // The targets whose `rustc_llvm` links `c++` rather than `stdc++`.
++        let libstdcxx_name = if target.contains("windows-gnullvm") || target.contains("slopos") {
++            "libc++.a"
++        } else {
++            "libstdc++.a"
++        };
+         let file = compiler_file(
+             builder,
+             &builder.cxx(target).unwrap(),

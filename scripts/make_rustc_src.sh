@@ -32,6 +32,10 @@ set -euo pipefail
 # the hash of toolchain/{compiler,cargo,crates,libc}/, of this script — its
 # --exclude set decides what the tree holds — and of toolchain/PIN's channel
 # and libc lines, so a second run with unchanged inputs exits immediately.
+# A run that does rebuild the tree carries it over the previous one by
+# content (scripts/lib/tree_sync.sh), so a bootstrap build directory
+# recompiles only what an edit changed, and the `src/llvm-project/` and
+# `library/` a bootstrap run staged survive it — each holds its own stamp.
 #
 # Usage: make_rustc_src.sh
 #
@@ -43,6 +47,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 . "$SCRIPT_DIR/lib/toolchain_pin.sh"
+. "$SCRIPT_DIR/lib/tree_sync.sh"
 
 case "${1:-}" in
     "") ;;
@@ -115,7 +120,8 @@ fi
 
 command -v git >/dev/null 2>&1 || die "git is required to apply the compiler fork (git apply)"
 
-rm -rf "$SRC" "$SRC.part"
+rm -rf "$SRC.part"
+ts_set_aside "$SRC"
 mkdir -p "$SRC.part"
 tar -xf "$TARBALL" -C "$SRC.part" --strip-components=1 \
     --exclude 'rustc-nightly-src/vendor' \
@@ -198,6 +204,11 @@ for patch in "$REPO_ROOT/$TP_LLVM_RUSTC_OVERLAY_REL"/*.patch; do
 done
 rm -rf "$PROBE"
 trap - EXIT INT TERM
+
+KEEP=()
+[ ! -f "$SRC.prev/src/llvm-project/.slopos-port-stamp" ] || KEEP+=(--exclude=/src/llvm-project)
+[ ! -f "$SRC.prev/library/.slopos-std-stamp" ] || KEEP+=(--exclude=/library)
+ts_carry_over "$SRC" "${KEEP[@]}" || die "could not carry $TP_RUSTC_SRC_REL over the previous tree"
 
 printf '%s\n' "$STAMP_WANT" > "$STAMP"
 

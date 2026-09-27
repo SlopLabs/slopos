@@ -55,7 +55,8 @@ gives `build.tool.<name>` a `default-features` key, because bootstrap could
 add features to a tool and not drop one, and `0003` maps the tuple to a
 `CMAKE_SYSTEM_NAME` — an unrecognised one falls back to `Generic`, which
 loses `LLVM_ON_UNIX` and with it every `Unix/*.inc` file the LLVM port
-patches. All three are pinned by `toolchain/compiler/PIN` and materialised by
+patches; `0004` came later, to link the C++ runtime statically (below). All
+four are pinned by `toolchain/compiler/PIN` and materialised by
 `scripts/make_rustc_src.sh` into `third_party/slopos-rustc-src` (265 MB
 fetched, 656 MiB on disk, ~17 s; `just rustc-src`, removed by `just
 distclean`). The sysroot above cannot carry it — it is a clone of a *built*
@@ -213,7 +214,14 @@ hand-written link line and `panic = abort` — `build_userland.sh` puts
 panic=abort`) on every build line — which is why `userland.ld` still discards
 `.eh_frame`. The compiler links LLVM against `libc++`: `rustc_llvm` picks it
 for `slopos` as it does for FreeBSD, and `llvm.use-libcxx` is not set because it
-would do the same to the Linux stage1 compiler.
+would do the same to the Linux stage1 compiler. `llvm.static-libstdcpp` links
+it statically into libLLVM, which exports it to libclang-cpp and the LLVM
+executables (one copy, because libc++'s error categories are compared by
+address), and into librustc_driver (`toolchain/compiler/0004` has bootstrap
+find `libc++.a`), with `-Bsymbolic` for LLVM's shared objects and
+`-Bsymbolic-functions` for the Rust ones, and every SlopOS object of the
+toolchain is linked with `-z pack-relative-relocs` (`DT_RELR`, which slibc's
+loader applies).
 
 **The result lands on a dev disk.** `scripts/build_devdisk.sh` (`just
 _fs-image-devdisk`) builds `fs/assets/ext2-devdisk.img`, a preserved,

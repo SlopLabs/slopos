@@ -50,6 +50,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 . "$SCRIPT_DIR/lib/toolchain_pin.sh"
+. "$SCRIPT_DIR/lib/tree_sync.sh"
 
 die() {
     echo "$SELF: $1" >&2
@@ -114,7 +115,9 @@ eval "$CXX_TOOLS"
 # the sysroot's, since both trees hold the same two patches and an edit to
 # either must re-stage this one. A directory-existence check alone would
 # leave either silently describing the previous fork. Re-staging re-extracts
-# first, because the patches do not apply twice.
+# first, because the patches do not apply twice, and then carries the result
+# over the previous tree by content, so the build directory recompiles only
+# the files a patch edit changed.
 # ---------------------------------------------------------------------------
 CHANNEL="$(tp_channel "$REPO_ROOT")"
 TARBALL="$REPO_ROOT/third_party/rustc-src-$CHANNEL.tar.xz"
@@ -132,7 +135,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
     command -v git >/dev/null 2>&1 || die "git is required to apply the forks"
 
     if [ "$(cat "$LLVM_STAMP" 2>/dev/null)" != "$LLVM_STAMP_WANT" ]; then
-        rm -rf "$SRC/src/llvm-project"
+        ts_set_aside "$SRC/src/llvm-project"
         echo "$SELF: extracting rustc's llvm-project (about 1.4 GB on disk)..." >&2
         tar -xf "$TARBALL" -C "$SRC" --strip-components=1 'rustc-nightly-src/src/llvm-project' ||
             die "failed to unpack src/llvm-project"
@@ -141,13 +144,15 @@ if [ "$DRY_RUN" -eq 0 ]; then
         [ "$LLVM_PATCHES" != "0" ] ||
             die "no patches under $TP_LLVM_RUSTC_OVERLAY_REL/ — an unported LLVM has no SlopOS triple"
         printf '%s\n' "$LLVM_STAMP_WANT" >"$LLVM_STAMP"
+        ts_carry_over "$SRC/src/llvm-project" || die "could not carry src/llvm-project over the previous tree"
         # Bootstrap keys its LLVM stamp on the llvm-project commit, which a
-        # tarball does not carry, so it would never rebuild a changed port.
-        rm -f "$RUSTC_BUILD"/*/llvm/.llvm-stamp
+        # tarball does not carry, so it would never rebuild a changed port;
+        # its lld stamp is on existence alone.
+        rm -f "$RUSTC_BUILD"/*/llvm/.llvm-stamp "$RUSTC_BUILD"/*/lld/.lld-stamp
     fi
 
     if [ "$(cat "$LIBRARY_STAMP" 2>/dev/null)" != "$STD_STAMP_WANT" ]; then
-        rm -rf "$SRC/library"
+        ts_set_aside "$SRC/library"
         tar -xf "$TARBALL" -C "$SRC" --strip-components=1 'rustc-nightly-src/library' ||
             die "failed to unpack library/"
         tp_unpack_libc_crate "$REPO_ROOT" "$SRC/library/libc" ||
@@ -161,6 +166,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
         [ "$LIBC_PATCHES" != "0" ] && [ "$STD_PATCHES" != "0" ] ||
             die "no std or libc patches applied — an unpatched library/ has no slopos std"
         printf '%s\n' "$STD_STAMP_WANT" >"$LIBRARY_STAMP"
+        ts_carry_over "$SRC/library" || die "could not carry library/ over the previous tree"
     fi
 fi
 
@@ -178,13 +184,16 @@ done
 [ -f "$RELEASE_DIR/libc.a" ] || die "no libc.a in $RELEASE_DIR — run a tests userland build first"
 [ -f "$CXX_DIR/lib/libc++.so" ] || die "no C++ runtime — run scripts/make_slopos_cxx.sh"
 
+# Copied with their times: every object of the cross LLVM depends on these
+# headers, so a copy dated now would make ninja recompile all of it on every
+# run whose LLVM step is due.
 rm -rf "$SYSROOT"
 mkdir -p "$SYSROOT/lib" "$SYSROOT/include"
-cp "$BUILD_DIR/libc.so" "$BUILD_DIR/crt0.o" "$BUILD_DIR/libbuiltins.a" "$SYSROOT/lib/"
-cp "$RELEASE_DIR/libc.a" "$SYSROOT/lib/"
-cp "$CXX_DIR/lib/libc++.so" "$CXX_DIR/lib/libc++.a" "$SYSROOT/lib/"
-cp -r "$REPO_ROOT/slibc/include/." "$SYSROOT/include/"
-cp -r "$CXX_DIR/include/c++" "$SYSROOT/include/c++"
+cp -p "$BUILD_DIR/libc.so" "$BUILD_DIR/crt0.o" "$BUILD_DIR/libbuiltins.a" "$SYSROOT/lib/"
+cp -p "$RELEASE_DIR/libc.a" "$SYSROOT/lib/"
+cp -p "$CXX_DIR/lib/libc++.so" "$CXX_DIR/lib/libc++.a" "$SYSROOT/lib/"
+cp -rp "$REPO_ROOT/slibc/include/." "$SYSROOT/include/"
+cp -rp "$CXX_DIR/include/c++" "$SYSROOT/include/c++"
 
 # slibc is one library: there is no separate libm, libdl, libpthread or
 # librt, and a build system that probes for them finds the host's unless
@@ -257,6 +266,7 @@ set -- \$expanded
 linking=1
 shared=0
 static=0
+static_cxx=0
 carry=0
 drop=0
 remaining=\$#
@@ -285,11 +295,26 @@ while [ "\$remaining" -gt 0 ]; do
             ;;
         -shared) shared=1 ;;
         -static) static=1 ;;
+        -static-libstdc++) static_cxx=1 ;;
     esac
     set -- "\$@" "\$arg"
 done
 
 if [ "\$linking" -eq 0 ]; then
+    # \`toolchains::SlopOS\` looks \`-print-file-name\` up in the sysroot's
+    # \`lib/\`; the host driver has no library path for this triple and answers
+    # with the bare name. It is how bootstrap finds \`libc++.a\` for a
+    # \`rustc_llvm\` that links the C++ runtime statically.
+    for arg in "\$@"; do
+        case "\$arg" in
+            -print-file-name=*)
+                if [ -f "\$sysroot/lib/\${arg#-print-file-name=}" ]; then
+                    printf '%s\n' "\$sysroot/lib/\${arg#-print-file-name=}"
+                    exit 0
+                fi
+                ;;
+        esac
+    done
     exec $compiler \$cflags "\$@"
 fi
 
@@ -362,7 +387,13 @@ if [ "\$static" -eq 0 ]; then
     set -- "\$@" -Wl,-z,now
     [ "\$shared" -eq 1 ] || set -- "\$@" -Wl,--dynamic-linker=/lib/ld-slopos.so.1
 fi
-set -- "\$@" $stdlib_libs -lc "\$sysroot/lib/libbuiltins.a"
+# \`-static-libstdc++\` is what clang's GNU toolchains make of it: the C++
+# runtime alone out of its archive, everything else still shared.
+cxx_libs="$stdlib_libs"
+if [ "\$static_cxx" -eq 1 ] && [ "\$static" -eq 0 ] && [ -n "\$cxx_libs" ]; then
+    cxx_libs="-Wl,-Bstatic \$cxx_libs -Wl,-Bdynamic"
+fi
+set -- "\$@" \$cxx_libs -lc "\$sysroot/lib/libbuiltins.a"
 status=0
 $compiler "\$@" || status=\$?
 rm -rf "\$tmp"
@@ -418,11 +449,35 @@ clang = true
 link-shared = true
 targets = "X86"
 ninja = true
+# libc++ is linked statically, with \`-Bsymbolic\`: upstream's release
+# configuration (\`-Wl,-Bsymbolic -static-libstdc++\`), and 0004 in
+# toolchain/compiler/ makes \`rustc_llvm\` take \`libc++.a\` the same way. The
+# loader binds eagerly, so every interposable name libLLVM used of its own —
+# 5,381 symbolic relocations — was looked up anew at every start, and a
+# shared libc++ was one more object to map and bind. libLLVM exports the
+# runtime it links, and libclang-cpp, clang and lld, which list libLLVM before
+# \`libc++.a\`, bind to that one copy: libc++'s error categories are
+# singletons compared by address, and with a copy each, clang took LLVM's
+# ENOENT for an error that is not ENOENT and failed on the first header its
+# resource directory does not carry. librustc_driver does keep its own copy
+# (\`rustc_llvm\`'s archive is read before libLLVM), which is sound because
+# the wrapper only tests the error codes LLVM hands it for zero and no
+# exception crosses the two: LLVM builds with \`LLVM_ENABLE_EH\` off, and
+# neither it nor the wrapper references a personality routine. On the build
+# triple this links the stage1 LLVM against the host's \`libstdc++.a\`, as a
+# Rust release does.
+static-libstdcpp = true
 # A cross find_package searches the *host*: without an empty find root,
 # FindZLIB and friends take /usr/include, and a wchar.h that reaches glibc's
 # mbstate_t collides with slibc's. Measured: it is what stopped the cross
 # LLVM.
-build-config = { CMAKE_FIND_ROOT_PATH = "$OUT/find-root", CMAKE_FIND_ROOT_PATH_MODE_INCLUDE = "ONLY", CMAKE_FIND_ROOT_PATH_MODE_LIBRARY = "ONLY", CMAKE_FIND_ROOT_PATH_MODE_PROGRAM = "NEVER", LLVM_ENABLE_ZLIB = "OFF", LLVM_ENABLE_ZSTD = "OFF", LLVM_ENABLE_TERMINFO = "OFF", LLVM_ENABLE_LIBXML2 = "OFF", LLVM_ENABLE_LIBEDIT = "OFF", LLVM_ENABLE_LIBPFM = "OFF", LLVM_ENABLE_BACKTRACES = "OFF", LLVM_ENABLE_CRASH_OVERRIDES = "OFF" }
+#
+# \`LLVM_LINKER_SUPPORTS_B_SYMBOLIC_FUNCTIONS\` off: libLLVM's and
+# libclang-cpp's own link options add \`-Bsymbolic-functions\` after the
+# \`-Bsymbolic\` above, and the linker keeps the last of the two, so the
+# objects came out with every data reference to themselves still
+# interposable — 3,857 \`GLOB_DAT\`s in libLLVM, measured.
+build-config = { CMAKE_FIND_ROOT_PATH = "$OUT/find-root", CMAKE_FIND_ROOT_PATH_MODE_INCLUDE = "ONLY", CMAKE_FIND_ROOT_PATH_MODE_LIBRARY = "ONLY", CMAKE_FIND_ROOT_PATH_MODE_PROGRAM = "NEVER", LLVM_ENABLE_ZLIB = "OFF", LLVM_ENABLE_ZSTD = "OFF", LLVM_ENABLE_TERMINFO = "OFF", LLVM_ENABLE_LIBXML2 = "OFF", LLVM_ENABLE_LIBEDIT = "OFF", LLVM_ENABLE_LIBPFM = "OFF", LLVM_ENABLE_BACKTRACES = "OFF", LLVM_ENABLE_CRASH_OVERRIDES = "OFF", LLVM_LINKER_SUPPORTS_B_SYMBOLIC_FUNCTIONS = "OFF" }
 
 [rust]
 channel = "nightly"
@@ -440,6 +495,14 @@ ar = "$LLVM_AR"
 ranlib = "$LLVM_AR"
 linker = "$WRAPPER_DIR/$TARGET-clang"
 crt-static = false
+# Link-time only, so what the compiler generates is untouched.
+# \`-Bsymbolic-functions\`: a call from one of librustc_driver's crates to
+# another went through the PLT to a symbol the loader resolved back into the
+# same object — 10,363 of its 11,137 \`JUMP_SLOT\`s. Upstream gets the same
+# from \`-Zdefault-visibility=protected\`, which bootstrap ties to linking with
+# its own lld. \`-z pack-relative-relocs\`: relative relocations as \`DT_RELR\`
+# bitmaps rather than 24-byte \`RELA\` entries, which slibc's loader applies.
+rustflags = ["-Clink-arg=-Wl,-Bsymbolic-functions", "-Clink-arg=-Wl,-z,pack-relative-relocs"]
 
 [install]
 # Both, and both under the build directory: bootstrap asserts it can write
@@ -459,7 +522,11 @@ fi
 # must not leave a prefix the dev disk would take for a toolchain.
 PREFIX="$OUT/install.partial"
 rm -rf "$PREFIX"
-(cd "$SRC" && python3 x.py install --config "$CONFIG" --jobs "$JOBS" "${XPY_ARGS[@]}")
+# `DT_RELR` for LLVM's objects too. bootstrap reads `LDFLAGS_<triple>` for
+# the CMake builds of that triple alone, where `llvm.ldflags` would reach the
+# build triple's LLVM and put a `GLIBC_ABI_DT_RELR` requirement on it.
+(cd "$SRC" && env "LDFLAGS_${TARGET//-/_}=-Wl,-z,pack-relative-relocs" \
+    python3 x.py install --config "$CONFIG" --jobs "$JOBS" "${XPY_ARGS[@]}")
 
 # `x.py install` ships no clang, and a Linux std a SlopOS-hosted compiler has
 # no use for. The target sysroot goes into the same prefix, so the clang
@@ -477,9 +544,6 @@ ln -sfn "$CLANG_BIN" "$PREFIX/bin/clang"
 ln -sfn clang "$PREFIX/bin/clang++"
 ln -sfn clang "$PREFIX/bin/cc"
 ln -sfn clang++ "$PREFIX/bin/c++"
-# rust-lld and llvm-tools find their own copy of libLLVM through
-# `$ORIGIN/../lib`, and it needs the C++ runtime from the same directory.
-ln -sfn ../../../libc++.so "$PREFIX/lib/rustlib/$TARGET/lib/libc++.so"
 ln -sfn "../lib/rustlib/$TARGET/bin/rust-lld" "$PREFIX/bin/ld.lld"
 printf '%s\n' '--sysroot=<CFGDIR>/..' >"$PREFIX/bin/$TARGET.cfg"
 printf '%s\n' "@$TARGET.cfg" >"$PREFIX/bin/$TARGET-clang.cfg"
