@@ -215,6 +215,32 @@ LLVM-exception OR Apache-2.0 OR MIT`). Every added line is © 2025–2026 The
 SlopOS Authors; the crates themselves remain © their authors, and none is
 vendored into this repository.
 
+The C libraries cargo links for its network features are built from pinned,
+unmodified upstream release tarballs by `scripts/build_recipes.sh`; each
+recipe records the tarball's URL and SHA-256, and none is vendored into this
+repository. They reach the toolchain install and the dev disk only, and each
+remains © its authors under its own licence:
+
+- zlib (`toolchain/recipes/zlib/`): © Jean-loup Gailly and Mark Adler, `Zlib`.
+- nghttp2 (`toolchain/recipes/nghttp2/`): © the nghttp2 contributors, `MIT`.
+  cargo's `libnghttp2-sys` also compiles a bundled copy of the same library
+  into cargo itself, under the same licence.
+- OpenSSL (`toolchain/recipes/openssl/`): © The OpenSSL Project Authors,
+  `Apache-2.0`. `toolchain/recipes/openssl/slopos.conf`, the target
+  definition passed to its `Configure`, is © 2025–2026 The SlopOS Authors,
+  `Apache-2.0`, like the project it configures.
+- curl (`toolchain/recipes/curl/`), libcurl only: © Daniel Stenberg and the
+  curl contributors, the `curl` licence (MIT-style).
+- libssh2 (`toolchain/recipes/libssh2/`): © the libssh2 contributors,
+  `BSD-3-Clause`.
+- libgit2 (`toolchain/recipes/libgit2/`): © the libgit2 contributors,
+  `GPL-2.0-only WITH GCC-exception-2.0` — the linking exception is what lets
+  cargo link it. The build also compiles code libgit2 bundles, each under its
+  own licence as listed in libgit2's `COPYING`: llhttp (`MIT`), PCRE2
+  (`BSD-3-Clause`), xdiff from LibXDiff (`LGPL-2.1-or-later`), ntlmclient
+  (`MIT`), the SHA-1 collision detection code (`MIT`) and wildmatch (BSD).
+  Its bundled zlib is not compiled; the zlib recipe is linked instead.
+
 `tools/kallsyms`, which builds the kernel's symbol table on the host and in
 the guest, carries a Rust v0 symbol demangler derived from LLVM's
 `llvm/lib/Demangle/RustDemangle.cpp`, and its test data is LLVM's
