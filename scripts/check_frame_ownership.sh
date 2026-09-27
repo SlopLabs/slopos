@@ -74,7 +74,9 @@ NOFREE_PATHS='mm/src/process_vm.rs mm/src/user_mappings.rs'
 # ---------------------------------------------------------------------------
 # Check 1 — a fallible step between the claim and the PTE store.
 #
-# From a `claim_user_paddr(` to the `map(`/`replace(` that consumes the frame,
+# From a `claim_user_paddr(` to the `map(`/`map_each(`/`replace(` that consumes
+# the frame — `map_each` takes an iterator of claimed frames and hands the
+# refused one back, dropping the ones it never reached —
 # no `?` and no `return Err`. The window closes at the consuming call, or
 # after 40 lines (no claim-to-map span in the tree is near that).
 # ---------------------------------------------------------------------------
@@ -95,8 +97,8 @@ scan_claim_window() {
                     next
                 }
                 # The consuming call closes the window.
-                if ($0 ~ /(cursor|cur)\.(map|replace)(::|[[:space:]]*\()/ ||
-                    $0 ~ /ostd_map_4kb_user[[:space:]]*\(/ ||
+                if ($0 ~ /(cursor|cur)\.(map|map_each|replace)(::|[[:space:]]*\()/ ||
+                    $0 ~ /ostd_map(_each)?_4kb_user[[:space:]]*\(/ ||
                     $0 ~ /ostd_replace_4kb_user[[:space:]]*\(/) { inwin = 0; next }
                 if ($0 ~ /\?;[[:space:]]*$/ || $0 ~ /\?[[:space:]]*$/ ||
                     $0 ~ /^[[:space:]]*return Err/) {
