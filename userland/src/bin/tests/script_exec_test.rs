@@ -183,6 +183,20 @@ fn posix_spawnp_runs_a_plain_file_under_sh() -> bool {
     true
 }
 
+/// The shell itself runs a file the kernel refuses as `ENOEXEC` as a script.
+fn the_shell_runs_a_plain_file_as_a_script() -> bool {
+    let Some(path) = install("plain_shell", "echo \"$0|$1\"\n", 0o755) else {
+        return false;
+    };
+    let got = stdout_of(Command::new("/bin/sh").args(["-c", &format!("{path} z")]));
+    let want = format!("{path}|z\n");
+    if got.as_deref() != Some(want.as_str()) {
+        eprintln!("script_exec_test: got {got:?}, want {want:?}");
+        return false;
+    }
+    true
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         (
@@ -208,6 +222,10 @@ fn main() {
         (
             "posix_spawnp_runs_a_plain_file_under_sh",
             posix_spawnp_runs_a_plain_file_under_sh,
+        ),
+        (
+            "the_shell_runs_a_plain_file_as_a_script",
+            the_shell_runs_a_plain_file_as_a_script,
         ),
     ]);
 }

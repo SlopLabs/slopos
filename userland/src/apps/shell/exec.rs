@@ -1332,20 +1332,7 @@ fn become_command(cmd: &Command) -> ! {
             sys_core::exit_with_code(traps::run_exit_trap(status));
         }
 
-        let mut path_buf = buffers::path_scratch();
-        if !resolve_exec_path(&argv[0], &mut path_buf) {
-            shell_error_named(&argv[0], b"not found");
-            sys_core::exit_with_code(STATUS_NOT_FOUND);
-        }
-        let (argv_owned, argv_ptrs) = build_c_argv(&argv);
-        let (envp_owned, envp_ptrs) = build_c_envp();
-        let rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
-        drop(argv_owned);
-        drop(envp_owned);
-        if rc < 0 {
-            shell_error_named(&argv[0], b"cannot execute");
-        }
-        sys_core::exit_with_code(STATUS_CANNOT_EXECUTE);
+        exec_external(&argv);
     }
 
     install_redirects_in_child(&cmd.redirects);
@@ -1354,6 +1341,36 @@ fn become_command(cmd: &Command) -> ! {
         other => run_compound(other),
     };
     sys_core::exit_with_code(traps::run_exit_trap(outcome.status));
+}
+
+/// The tail of a forked child running an external program. A file the kernel
+/// refuses as `ENOEXEC` runs as a script of this shell (XCU 2.9.1.1).
+fn exec_external(argv: &[Vec<u8>]) -> ! {
+    let mut path_buf = buffers::path_scratch();
+    if !resolve_exec_path(&argv[0], &mut path_buf) {
+        shell_error_named(&argv[0], b"not found");
+        sys_core::exit_with_code(STATUS_NOT_FOUND);
+    }
+    let (envp_owned, envp_ptrs) = build_c_envp();
+    let (argv_owned, argv_ptrs) = build_c_argv(argv);
+    let mut rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+    drop(argv_owned);
+    if rc == slopos_abi::Errno::ENOEXEC.raw() as i64 {
+        let path_len = path_buf
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(path_buf.len());
+        let mut sh_argv = vec![b"sh".to_vec(), path_buf[..path_len].to_vec()];
+        sh_argv.extend_from_slice(&argv[1..]);
+        let (sh_owned, sh_ptrs) = build_c_argv(&sh_argv);
+        rc = process::execve(b"/bin/sh\0".as_ptr(), sh_ptrs.as_ptr(), envp_ptrs.as_ptr());
+        drop(sh_owned);
+    }
+    drop(envp_owned);
+    if rc < 0 {
+        shell_error_named(&argv[0], b"cannot execute");
+    }
+    sys_core::exit_with_code(STATUS_CANNOT_EXECUTE);
 }
 
 /// Run one command in a fork of this shell — a subshell, a pipeline stage that
@@ -1406,20 +1423,7 @@ fn spawn_external(
         child_setup(0, !background);
         apply_assignments(pairs, false);
         install_redirects_in_child(&cmd.redirects);
-        let mut path_buf = buffers::path_scratch();
-        if !resolve_exec_path(&argv[0], &mut path_buf) {
-            shell_error_named(&argv[0], b"not found");
-            sys_core::exit_with_code(STATUS_NOT_FOUND);
-        }
-        let (argv_owned, argv_ptrs) = build_c_argv(argv);
-        let (envp_owned, envp_ptrs) = build_c_envp();
-        let rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
-        drop(argv_owned);
-        drop(envp_owned);
-        if rc < 0 {
-            shell_error_named(&argv[0], b"cannot execute");
-        }
-        sys_core::exit_with_code(STATUS_CANNOT_EXECUTE);
+        exec_external(argv);
     }
     let child = pid as u32;
     if super::is_interactive() {
