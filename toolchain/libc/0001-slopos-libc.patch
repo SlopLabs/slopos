@@ -83,10 +83,10 @@ index 6c64020..0ec764e 100644
          pub use self::redox::*;
 diff --git a/src/unix/slopos/mod.rs b/src/unix/slopos/mod.rs
 new file mode 100644
-index 0000000..a4a206e
+index 0000000..db3439f
 --- /dev/null
 +++ b/src/unix/slopos/mod.rs
-@@ -0,0 +1,2019 @@
+@@ -0,0 +1,2063 @@
 +//! SlopOS, over the `slibc` C library.
 +//!
 +//! * Headers: `slibc/include`
@@ -589,7 +589,7 @@ index 0000000..a4a206e
 +pub const NCCS: usize = 19;
 +
 +/// SlopOS has no realtime signals; that is a stated divergence, not an omission.
-+pub const NSIG: c_int = 32;
++pub const NSIG: c_int = 65;
 +
 +pub const SIGHUP: c_int = 1;
 +pub const SIGINT: c_int = 2;
@@ -1402,6 +1402,8 @@ index 0000000..a4a206e
 +pub const PTHREAD_MUTEX_RECURSIVE: c_int = 1;
 +pub const PTHREAD_MUTEX_ERRORCHECK: c_int = 2;
 +pub const PTHREAD_MUTEX_DEFAULT: c_int = PTHREAD_MUTEX_NORMAL;
++pub const PTHREAD_PROCESS_PRIVATE: c_int = 0;
++pub const PTHREAD_PROCESS_SHARED: c_int = 1;
 +pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = pthread_mutex_t { __size: [0; 5] };
 +pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = pthread_cond_t { __size: [0; 6] };
 +pub const PTHREAD_RWLOCK_INITIALIZER: pthread_rwlock_t = pthread_rwlock_t { __size: [0; 7] };
@@ -1474,6 +1476,16 @@ index 0000000..a4a206e
 +}
 +
 +safe_f! {
++    /// The lowest realtime signal an application may use, as slibc reports it.
++    pub safe fn SIGRTMIN() -> c_int {
++        unsafe { __libc_current_sigrtmin() }
++    }
++
++    /// The highest realtime signal.
++    pub safe fn SIGRTMAX() -> c_int {
++        unsafe { __libc_current_sigrtmax() }
++    }
++
 +    pub const safe fn WIFEXITED(status: c_int) -> bool {
 +        (status & 0x7f) == 0
 +    }
@@ -1544,6 +1556,14 @@ index 0000000..a4a206e
 +
 +#[repr(C)]
 +#[derive(Copy, Clone)]
++struct sifields_rt {
++    si_pid: crate::pid_t,
++    si_uid: crate::uid_t,
++    si_value: crate::sigval,
++}
++
++#[repr(C)]
++#[derive(Copy, Clone)]
 +struct sifields_sigfault {
 +    si_addr: *mut c_void,
 +}
@@ -1552,6 +1572,7 @@ index 0000000..a4a206e
 +#[derive(Copy, Clone)]
 +union sifields {
 +    _align_pointer: *mut c_void,
++    rt: sifields_rt,
 +    sigchld: sifields_sigchld,
 +    sigfault: sifields_sigfault,
 +}
@@ -1578,6 +1599,13 @@ index 0000000..a4a206e
 +    /// As [`siginfo_t::si_pid`].
 +    pub unsafe fn si_status(&self) -> c_int {
 +        self.sifields().sigchld.si_status
++    }
++
++    /// # Safety
++    ///
++    /// The signal must carry a value: `si_code` is `SI_QUEUE`.
++    pub unsafe fn si_value(&self) -> crate::sigval {
++        self.sifields().rt.si_value
 +    }
 +
 +    /// # Safety
@@ -1824,6 +1852,8 @@ index 0000000..a4a206e
 +    pub fn sigprocmask(how: c_int, set: *const sigset_t, oset: *mut sigset_t) -> c_int;
 +    pub fn sigpending(set: *mut sigset_t) -> c_int;
 +    pub fn sigsuspend(set: *const sigset_t) -> c_int;
++    pub fn __libc_current_sigrtmin() -> c_int;
++    pub fn __libc_current_sigrtmax() -> c_int;
 +
 +    pub fn clock_gettime(clk_id: clockid_t, tp: *mut crate::timespec) -> c_int;
 +    pub fn clock_settime(clk_id: clockid_t, tp: *const crate::timespec) -> c_int;
@@ -1947,6 +1977,11 @@ index 0000000..a4a206e
 +    pub fn pthread_mutexattr_init(attr: *mut pthread_mutexattr_t) -> c_int;
 +    pub fn pthread_mutexattr_destroy(attr: *mut pthread_mutexattr_t) -> c_int;
 +    pub fn pthread_mutexattr_settype(attr: *mut pthread_mutexattr_t, ty: c_int) -> c_int;
++    pub fn pthread_mutexattr_setpshared(attr: *mut pthread_mutexattr_t, pshared: c_int) -> c_int;
++    pub fn pthread_mutexattr_getpshared(
++        attr: *const pthread_mutexattr_t,
++        pshared: *mut c_int,
++    ) -> c_int;
 +    pub fn pthread_cond_init(cond: *mut pthread_cond_t, attr: *const pthread_condattr_t) -> c_int;
 +    pub fn pthread_cond_destroy(cond: *mut pthread_cond_t) -> c_int;
 +    pub fn pthread_cond_wait(cond: *mut pthread_cond_t, lock: *mut pthread_mutex_t) -> c_int;
@@ -1960,6 +1995,9 @@ index 0000000..a4a206e
 +    pub fn pthread_condattr_init(attr: *mut pthread_condattr_t) -> c_int;
 +    pub fn pthread_condattr_destroy(attr: *mut pthread_condattr_t) -> c_int;
 +    pub fn pthread_condattr_setclock(attr: *mut pthread_condattr_t, clock_id: clockid_t) -> c_int;
++    pub fn pthread_condattr_setpshared(attr: *mut pthread_condattr_t, pshared: c_int) -> c_int;
++    pub fn pthread_condattr_getpshared(attr: *const pthread_condattr_t, pshared: *mut c_int)
++        -> c_int;
 +    pub fn pthread_rwlock_init(
 +        lock: *mut pthread_rwlock_t,
 +        attr: *const pthread_rwlockattr_t,
@@ -1972,6 +2010,12 @@ index 0000000..a4a206e
 +    pub fn pthread_rwlock_unlock(lock: *mut pthread_rwlock_t) -> c_int;
 +    pub fn pthread_rwlockattr_init(attr: *mut pthread_rwlockattr_t) -> c_int;
 +    pub fn pthread_rwlockattr_destroy(attr: *mut pthread_rwlockattr_t) -> c_int;
++    pub fn pthread_rwlockattr_setpshared(attr: *mut pthread_rwlockattr_t, pshared: c_int)
++        -> c_int;
++    pub fn pthread_rwlockattr_getpshared(
++        attr: *const pthread_rwlockattr_t,
++        pshared: *mut c_int,
++    ) -> c_int;
 +
 +    pub fn sem_init(sem: *mut sem_t, pshared: c_int, value: c_uint) -> c_int;
 +    pub fn sem_destroy(sem: *mut sem_t) -> c_int;

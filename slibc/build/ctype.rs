@@ -174,6 +174,11 @@ impl Types {
         if self.typedefs.contains(ty) {
             return Ok(ty.to_string());
         }
+        // The contract declares POSIX's `union sigval` as a one-pointer
+        // struct; the header emits the union, so its uses must name one.
+        if ty == "sigval" {
+            return Ok("union sigval".to_string());
+        }
         if self.struct_tags.contains(ty) {
             return Ok(format!("struct {ty}"));
         }

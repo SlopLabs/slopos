@@ -234,7 +234,13 @@ impl World<'_> {
                         ));
                     }
                 }
-                let _ = writeln!(out, "#define {name}({}) {body}", params.join(", "));
+                // A Rust function of no arguments is a C name, not a call:
+                // `SIGRTMIN` is spelled without parentheses.
+                if params.is_empty() {
+                    let _ = writeln!(out, "#define {name} {body}");
+                } else {
+                    let _ = writeln!(out, "#define {name}({}) {body}", params.join(", "));
+                }
             }
         }
 

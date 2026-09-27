@@ -74,7 +74,7 @@ struct sigevent {
 #define ILL_ILLOPN (2)
 #define ILL_PRVOPC (5)
 #define MINSIGSTKSZ (8192)
-#define NSIG (32)
+#define NSIG (65)
 #define SA_NOCLDSTOP (0x00000001)
 #define SA_NOCLDWAIT (0x00000002)
 #define SA_NODEFER (0x40000000)
@@ -137,6 +137,9 @@ struct sigevent {
 #define SS_DISABLE (2)
 #define SS_ONSTACK (1)
 
+#define SIGRTMIN (__libc_current_sigrtmin())
+#define SIGRTMAX (__libc_current_sigrtmax())
+
 int kill(pid_t pid, int sig);
 int killpg(pid_t pgrp, int sig);
 int raise(int sig);
@@ -150,8 +153,11 @@ int sigismember(const sigset_t *set, int sig);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oset);
 int sigpending(sigset_t *set);
 int sigsuspend(const sigset_t *set);
+int __libc_current_sigrtmin(void);
+int __libc_current_sigrtmax(void);
 sighandler_t signal(int signum, sighandler_t handler);
 char *strsignal(int sig);
+int sigqueue(pid_t pid, int sig, union sigval value);
 
 #ifdef __cplusplus
 }

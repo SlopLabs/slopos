@@ -48,6 +48,8 @@ typedef struct {
 #define PTHREAD_MUTEX_NORMAL (0)
 #define PTHREAD_MUTEX_RECURSIVE (1)
 #define PTHREAD_ONCE_INIT { { 0 } }
+#define PTHREAD_PROCESS_PRIVATE (0)
+#define PTHREAD_PROCESS_SHARED (1)
 #define PTHREAD_RWLOCK_INITIALIZER { { 0 } }
 
 int pthread_create(pthread_t *native, const pthread_attr_t *attr, void * (*f)(void *), void *value);
@@ -80,6 +82,8 @@ int pthread_mutex_unlock(pthread_mutex_t *lock);
 int pthread_mutexattr_init(pthread_mutexattr_t *attr);
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
 int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int ty);
+int pthread_mutexattr_setpshared(pthread_mutexattr_t *attr, int pshared);
+int pthread_mutexattr_getpshared(const pthread_mutexattr_t *attr, int *pshared);
 int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr);
 int pthread_cond_destroy(pthread_cond_t *cond);
 int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *lock);
@@ -89,6 +93,8 @@ int pthread_cond_broadcast(pthread_cond_t *cond);
 int pthread_condattr_init(pthread_condattr_t *attr);
 int pthread_condattr_destroy(pthread_condattr_t *attr);
 int pthread_condattr_setclock(pthread_condattr_t *attr, clockid_t clock_id);
+int pthread_condattr_setpshared(pthread_condattr_t *attr, int pshared);
+int pthread_condattr_getpshared(const pthread_condattr_t *attr, int *pshared);
 int pthread_rwlock_init(pthread_rwlock_t *lock, const pthread_rwlockattr_t *attr);
 int pthread_rwlock_destroy(pthread_rwlock_t *lock);
 int pthread_rwlock_rdlock(pthread_rwlock_t *lock);
@@ -98,6 +104,8 @@ int pthread_rwlock_trywrlock(pthread_rwlock_t *lock);
 int pthread_rwlock_unlock(pthread_rwlock_t *lock);
 int pthread_rwlockattr_init(pthread_rwlockattr_t *attr);
 int pthread_rwlockattr_destroy(pthread_rwlockattr_t *attr);
+int pthread_rwlockattr_setpshared(pthread_rwlockattr_t *attr, int pshared);
+int pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *attr, int *pshared);
 int pthread_equal(pthread_t t1, pthread_t t2);
 int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *detachstate);
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate);
