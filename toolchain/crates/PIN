@@ -14,7 +14,7 @@
 # check-cfg entry a crate carries for a target_os rustc does not know yet.
 # Only the versions the compiler and cargo build for a SlopOS host are here,
 # measured with `cargo tree --target x86_64-unknown-slopos -e normal,no-proc-macro`
-# over `rustc-main`, `rustdoc-tool` and `cargo --no-default-features`:
+# over `rustc-main`, `rustdoc-tool` and `cargo` with its default features:
 #
 #   getrandom 0.2.17, 0.4.3   cargo           libc `getrandom` backend
 #   getrandom 0.3.3           rustc, rustdoc  libc `getrandom` backend
@@ -23,6 +23,9 @@
 #   rustix 1.1.2, 1.1.4       rustc / cargo   ioctl opcode type
 #   errno 0.3.14              both            `__errno_location`
 #   stacker 0.1.21            rustdoc         `pthread_getattr_np` stack limit
+#   socket2 0.6.4 (via curl)  cargo           the socket options SlopOS's libc
+#                                             lacks, as for Redox; `size_t`
+#                                             `msg_iovlen`
 #
 # getrandom 0.2.16 and 0.4.3 in rustc's lock, 0.3.4 in cargo's, and nix
 # 0.31.3 are locked but never built for the SlopOS host, so they stay
@@ -41,6 +44,7 @@ crate=rustix 1.1.2 cd15f8a2c5551a84d56efdc1cd049089e409ac19a3072d5037a17fd70719f
 crate=rustix 1.1.4 b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190
 crate=errno 0.3.14 39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb
 crate=stacker 0.1.21 cddb07e32ddb770749da91081d8d0ac3a16f1a569a18b20348cd371f5dead06b
+crate=socket2 0.6.4 52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51
 patch_sha256=toolchain/crates/getrandom-0.2.17.patch:1b77f048eb8e72d74c8997984f7f0d4a90afcb25213bce766555debfc7416d0a
 patch_sha256=toolchain/crates/getrandom-0.3.3.patch:8e2fe753afc9a77ff2a1fc141624af9e2f936c755eea41a2486cd353564d611b
 patch_sha256=toolchain/crates/getrandom-0.4.3.patch:25bc6f562eb752d3ec5e0bbd36725b44be0d7cb0b94725761b85b1ed43d62730
@@ -50,4 +54,5 @@ patch_sha256=toolchain/crates/rustix-1.1.2.patch:1dc30164e6268be0272e4b1aa25a457
 patch_sha256=toolchain/crates/rustix-1.1.4.patch:919197ac92acfc756c5a67cd1e8eea85412230caa473638d1a95eb1640d429ab
 patch_sha256=toolchain/crates/errno-0.3.14.patch:6517cc485f7f08f2aa8b30c6adb95e8ae90e74c5d1a3e5fb9f3677625fd44134
 patch_sha256=toolchain/crates/stacker-0.1.21.patch:cb75eea839e7a52ed2b9861d6ed73196eeb78d1d448bb2c7ac73fdc81cbdd956
-patch_sha256=toolchain/crates/wiring/0001-patch-crates-io.patch:c79001ef05ab3ebc106ae68711c4b68e1f11763d9f60a036b9ceb3c530a699d2
+patch_sha256=toolchain/crates/socket2-0.6.4.patch:65a796d5c84c2a5ed407bf5c4d5644dfd0cc6d0293d4dd3c4a598ced088fc8f5
+patch_sha256=toolchain/crates/wiring/0001-patch-crates-io.patch:ea3f91fe6f44dd1e05f98729d8f62e4a8e58bfa2cb1ff084bcf6863599f38222

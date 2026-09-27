@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 598ea31..1ab0cd6 100644
+index 598ea31..01b4b16 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -1383,11 +1383,9 @@ dependencies = [
@@ -77,7 +77,7 @@ index 598ea31..1ab0cd6 100644
   "cc",
   "cfg-if",
 diff --git a/Cargo.toml b/Cargo.toml
-index 63d96ff..c72162b 100644
+index 63d96ff..7dafdf1 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -85,5 +85,13 @@ codegen-units = 1
@@ -96,7 +96,7 @@ index 63d96ff..c72162b 100644
 +stacker = { path = "slopos-crates/stacker-0.1.21" }
  
 diff --git a/src/tools/cargo/Cargo.lock b/src/tools/cargo/Cargo.lock
-index 1fd6f0c..cad85e7 100644
+index 1fd6f0c..5b1e357 100644
 --- a/src/tools/cargo/Cargo.lock
 +++ b/src/tools/cargo/Cargo.lock
 @@ -1282,11 +1282,9 @@ dependencies = [
@@ -157,11 +157,20 @@ index 1fd6f0c..cad85e7 100644
  ]
  
  [[package]]
+@@ -4628,8 +4618,6 @@ dependencies = [
+ [[package]]
+ name = "socket2"
+ version = "0.6.4"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
+ dependencies = [
+  "libc",
+  "windows-sys 0.61.2",
 diff --git a/src/tools/cargo/Cargo.toml b/src/tools/cargo/Cargo.toml
-index c4d226f..6db078f 100644
+index b0f7315..e9d3720 100644
 --- a/src/tools/cargo/Cargo.toml
 +++ b/src/tools/cargo/Cargo.toml
-@@ -315,3 +315,11 @@ http-transport-reqwest = ["network", "gix/blocking-http-transport-reqwest"]
+@@ -298,3 +298,12 @@ http-transport-reqwest = ["gix/blocking-http-transport-reqwest"]
  
  [lints]
  workspace = true
@@ -173,3 +182,4 @@ index c4d226f..6db078f 100644
 +getrandom04 = { path = "../../../slopos-crates/getrandom-0.4.3", package = "getrandom" }
 +libc = { path = "../../../slopos-crates/libc" }
 +rustix = { path = "../../../slopos-crates/rustix-1.1.4" }
++socket2 = { path = "../../../slopos-crates/socket2-0.6.4" }

@@ -543,7 +543,80 @@ fn cargo_builds_a_crate() -> bool {
     ran.ok("ladder") && ran.stdout == "build-script 42\n"
 }
 
-/// Rung 4: clang finds its resource directory and its config through its own
+const FETCH_MAIN: &str = "fn main() {
+    println!(\"{}\", greeting::greeting());
+}
+";
+
+/// Rung 4: cargo resolves a `git` dependency on the bare repository the
+/// volume carries, fetching it through libgit2 into a `CARGO_HOME` of its
+/// own, so the fetch is never a cache hit. Not `--offline`, which refuses
+/// every git fetch; nothing here names a registry, so nothing leaves the
+/// machine.
+fn cargo_fetches_a_git_dependency() -> bool {
+    let prefix = match prefix() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let Some(repo) = fs::read_to_string(marker_path()).ok().and_then(|text| {
+        text.lines()
+            .find_map(|l| l.strip_prefix("git ").map(str::to_owned))
+    }) else {
+        note("the volume carries no git fixture");
+        return true;
+    };
+    let url = format!("file://{MOUNT_POINT}/{repo}");
+    let manifest = format!(
+        "[package]\nname = \"fetch\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ngreeting = {{ git = \"{url}\" }}\n\n[workspace]\n"
+    );
+    let Some(dir) = scratch(
+        "git",
+        &[
+            ("Cargo.toml", manifest.as_str()),
+            ("src/main.rs", FETCH_MAIN),
+        ],
+    ) else {
+        return false;
+    };
+    let cargo_home = format!("{dir}/cargo-home");
+    let Some(built) = run(
+        &prefix,
+        &dir,
+        &format!("{prefix}/bin/cargo"),
+        &["build"],
+        &[
+            ("CARGO_HOME", cargo_home.as_str()),
+            ("CARGO_NET_OFFLINE", "false"),
+            ("CARGO_NET_GIT_FETCH_WITH_CLI", "false"),
+        ],
+    ) else {
+        return false;
+    };
+    if !built.ok("cargo build with a git dependency") {
+        return false;
+    }
+    let lock = fs::read_to_string(format!("{dir}/Cargo.lock")).unwrap_or_default();
+    if !lock.contains(&format!("source = \"git+{url}#")) {
+        note(&format!("Cargo.lock does not pin greeting to {url}"));
+        return false;
+    }
+    let Some(ran) = run(
+        &prefix,
+        &dir,
+        &format!("{dir}/target/debug/fetch"),
+        &[],
+        &[],
+    ) else {
+        return false;
+    };
+    note(&format!(
+        "cargo build with a git dependency in {} ms",
+        built.took.as_millis()
+    ));
+    ran.ok("fetch") && ran.stdout == "fetched through libgit2\n"
+}
+
+/// Rung 5: clang finds its resource directory and its config through its own
 /// path, compiles C and C++, and links both against the prefix's sysroot.
 fn clang_links_c_and_cxx() -> bool {
     let prefix = match prefix() {
@@ -598,6 +671,10 @@ fn main() {
         ("toolchain_starts", toolchain_starts),
         ("rustc_links_a_program", rustc_links_a_program),
         ("cargo_builds_a_crate", cargo_builds_a_crate),
+        (
+            "cargo_fetches_a_git_dependency",
+            cargo_fetches_a_git_dependency,
+        ),
         ("clang_links_c_and_cxx", clang_links_c_and_cxx),
     ]);
 }

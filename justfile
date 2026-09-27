@@ -606,7 +606,7 @@ test-capacity: _build-run-tests _fs-image-capacity
 
 # Separate from `just test` because the volume is opt-in; `just test` runs the
 # same utest with nothing attached and it passes by saying so.
-[doc("Dev-disk check at 4G: boot with the toolchain volume mounted at /devel by label from the cmdline, read its inventory back, grade its source tree, remount it, and climb the toolchain ladder (rustc, rustc+cc, cargo with a build script and a proc macro, clang); a volume this run created must export no changes")]
+[doc("Dev-disk check at 4G: boot with the toolchain volume mounted at /devel by label from the cmdline, read its inventory back, grade its source tree, remount it, and climb the toolchain ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2, clang); a volume this run created must export no changes")]
 test-devdisk: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail

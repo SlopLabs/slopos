@@ -275,8 +275,9 @@ inventory and the source tree, unmounts `/devel` and mounts it again by label
 — the second mount is the point, because a leaked write claim answers
 `AlreadyClaimed` forever — and then climbs the toolchain ladder: `rustc
 --version` under `LD_DEBUG=statistics`, rustc linking a program through `cc`,
-cargo building a crate with a build script and a proc macro, and clang
-compiling C and C++.
+cargo building a crate with a build script and a proc macro, cargo fetching a
+`git = "file:///devel/git/greeting.git"` dependency through libgit2 from the
+bare repository a new volume carries, and clang compiling C and C++.
 
 **The source rides the same volume.** A new dev disk is seeded with
 `src/slopos`: the committed `HEAD`, the vendored crates, a

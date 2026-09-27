@@ -42,6 +42,11 @@ set -euo pipefail
 # edits against. A preserved volume keeps the guest's tree, so the marker
 # records only that it is there.
 #
+# A new volume also carries `git/greeting.git`, a bare repository holding one
+# library crate, which `devdisk_test` depends on by `git = "file:///devel/..."`
+# so cargo fetches it through libgit2 with no network. Made with the host's
+# `git` at a fixed date, so it is the same repository every time.
+#
 # The volume is labelled `slopos-dev`: the guest's disk letters are probe
 # order, so the boot finds it with `mount=LABEL=slopos-dev:/devel`.
 
@@ -140,6 +145,31 @@ seed_source() {
 }
 [ -f "$IMAGE_PATH" ] || seed_source
 
+GIT_FIXTURE_REL="git/greeting.git"
+stage_git_fixture() {
+    local work="$BUILD_DIR/devdisk-git"
+    command -v git >/dev/null 2>&1 || die "git is required to stage $GIT_FIXTURE_REL"
+    rm -rf "$work"
+    mkdir -p "$work/src" "$STAGE/$(dirname "$GIT_FIXTURE_REL")"
+    printf '%s\n' '[package]' 'name = "greeting"' 'version = "0.1.0"' 'edition = "2021"' \
+        >"$work/Cargo.toml"
+    printf '%s\n' 'pub fn greeting() -> &'"'"'static str {' '    "fetched through libgit2"' '}' \
+        >"$work/src/lib.rs"
+    (
+        cd "$work"
+        export GIT_AUTHOR_NAME="The SlopOS Authors" GIT_AUTHOR_EMAIL="devdisk@slopos.invalid"
+        export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+        export GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z"
+        git init -q -b main .
+        git add Cargo.toml src/lib.rs
+        git -c commit.gpgsign=false commit -q -m "greeting: the dev disk's git fixture"
+    ) || die "could not make the git fixture in $work"
+    git clone -q --bare --no-hardlinks "$work" "$STAGE/$GIT_FIXTURE_REL" ||
+        die "could not clone the git fixture into $STAGE/$GIT_FIXTURE_REL"
+    rm -rf "$work"
+}
+[ -f "$IMAGE_PATH" ] || stage_git_fixture
+
 # Where the host keeps its owned sysroot, so the tree's scripts find the
 # guest's toolchain where they find the host's.
 TOOLCHAIN_REL="src/slopos/third_party/rust-slopos"
@@ -225,6 +255,9 @@ MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
         echo "source src/slopos"
     else
         echo "$SELF: $IMAGE_PATH predates the seeded source tree; a new volume carries one" >&2
+    fi
+    if image_holds_dir "$GIT_FIXTURE_REL"; then
+        echo "git $GIT_FIXTURE_REL"
     fi
     inventory lib "$STAGE/lib" 0
     if [ -n "${TOOLCHAIN_STAGE:-}" ]; then

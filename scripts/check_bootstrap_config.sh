@@ -27,6 +27,12 @@ set -euo pipefail
 #     purpose — SlopOS to compile, Linux to link — and either half silently
 #     regressing gives a host-shaped object or a `gcc`-driven link.
 #
+# An installed toolchain is graded too: every object may need only libraries
+# the toolchain ships — its own, slibc, the C++ runtime and the sonames the
+# recipes under `toolchain/recipes/` declare — and `bin/cargo` must need
+# libcurl and libgit2, because `curl-sys` that cannot find the recipe builds
+# its own copy into cargo and says nothing.
+#
 # `skipped` without a materialised source tree or a staged target sysroot;
 # the CI step that has both passes `--require`. A first run downloads
 # bootstrap's stage0 compiler (~200 MB).
@@ -67,7 +73,12 @@ WRAPPER_CXX="$GATE/bin/$TARGET-clang++"
 INSTALL="${SLOPOS_TOOLCHAIN_INSTALL:-$BUILD_DIR/slopos-toolchain/install}"
 # Every library an installed object may need. Anything else is a host library
 # the cross link reached, which the guest does not have.
-ALLOWED_NEEDED='^(libc\.so|libc\+\+\.so|libLLVM[-.].*|libclang-cpp\.so.*|librustc_driver-[0-9a-f]+\.so|libstd-[0-9a-f]+\.so)$'
+RECIPE_SONAMES="$(sed -n 's/^soname=//p' "$REPO_ROOT"/toolchain/recipes/*/recipe | LC_ALL=C sort -u)"
+ALLOWED_NEEDED="^(libc\\.so|libc\\+\\+\\.so|libLLVM[-.].*|libclang-cpp\\.so.*|librustc_driver-[0-9a-f]+\\.so|libstd-[0-9a-f]+\\.so$(
+    printf '|%s' $(printf '%s\n' "$RECIPE_SONAMES" | sed 's/[.+]/\\&/g')
+))\$"
+# What cargo links from the recipes rather than from a bundled copy.
+CARGO_NEEDS="libcurl.so.4 libgit2.so.1.9"
 
 # Each step the cross-build exists to produce, as bootstrap spells it. The
 # triple is on the right of the arrow because these are the steps built *for*
@@ -283,6 +294,14 @@ grade_install() {
             echo "  ${file#"$dir"/} carries R_X86_64_TLSDESC, which the loader does not bind" >&2
             bad=1
         fi
+        if [ "${file#"$dir"/}" = bin/cargo ]; then
+            for lib in $CARGO_NEEDS; do
+                printf '%s\n' "$needed" | grep -qxF "$lib" || {
+                    echo "  bin/cargo does not need $lib: it was built with a bundled copy, not the recipe" >&2
+                    bad=1
+                }
+            done
+        fi
         [ -n "$needed" ] || continue
         rm -f "$cache/unfound"
         unbound="$(dynsyms "$file" undefined |
@@ -470,6 +489,31 @@ self_test() {
     install_case unbound 'nothing it needs defines: h' unbound.so \
         "$scratch/calls-h.c" -L"$lib" -l:libc.so
     install_case tlsdesc 'R_X86_64_TLSDESC' tls.so "$scratch/tls.s"
+
+    # A recipe's soname is one the toolchain ships; a cargo that does not
+    # need both recipe libraries linked a bundled copy of one.
+    if $so -Wl,-soname,libcurl.so.4 "$scratch/f.c" -o "$lib/libcurl.so.4" &&
+        $so "$scratch/calls-f.c" -Wl,-rpath,'$ORIGIN' -L"$lib" -l:libcurl.so.4 -o "$lib/curl-user.so" &&
+        grade_install "$scratch/install" 2>/dev/null; then
+        echo "  case recipe-library: accepted an object needing a recipe's soname"
+    else
+        echo "$SELF --self-test: an object needing a recipe's soname was not built or was rejected" >&2
+        failed=1
+    fi
+    mkdir -p "$scratch/install/bin"
+    if $so "$scratch/calls-f.c" -Wl,-rpath,'$ORIGIN/../lib' -L"$lib" -l:libcurl.so.4 \
+        -o "$scratch/install/bin/cargo"; then
+        why="$(grade_install "$scratch/install" 2>&1 || true)"
+        if printf '%s\n' "$why" | grep -q 'bin/cargo does not need libgit2'; then
+            echo "  case bundled-libgit2: rejected a cargo that does not need libgit2"
+        else
+            echo "$SELF --self-test: case bundled-libgit2 was not rejected" >&2
+            failed=1
+        fi
+    else
+        echo "$SELF --self-test: case bundled-libgit2: the fixture did not build" >&2
+        failed=1
+    fi
 
     rm -rf "$scratch"
     trap - EXIT INT TERM
