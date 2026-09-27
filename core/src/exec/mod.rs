@@ -211,24 +211,20 @@ pub(crate) fn apply_fd_actions(
     Ok(())
 }
 
+/// The basename of the path as passed, cut to fit as Linux cuts `comm`.
 fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], Errno> {
     let trimmed = trim_nul_bytes(path);
-    if trimmed.is_empty() {
-        return Err(Errno::ENAMETOOLONG);
-    }
-
     let basename_start = trimmed
         .iter()
         .rposition(|&b| b == b'/')
         .map_or(0, |idx| idx + 1);
     let basename = &trimmed[basename_start..];
-
-    if basename.is_empty() || basename.len() >= TASK_NAME_MAX_LEN {
+    if basename.is_empty() {
         return Err(Errno::ENAMETOOLONG);
     }
-
+    let len = basename.len().min(TASK_NAME_MAX_LEN - 1);
     let mut name = [0u8; TASK_NAME_MAX_LEN];
-    name[..basename.len()].copy_from_slice(basename);
+    name[..len].copy_from_slice(&basename[..len]);
     Ok(name)
 }
 
@@ -305,9 +301,9 @@ pub fn spawn_program_with_cwd(
     cwd: &[u8],
 ) -> Result<u32, Errno> {
     let result = (|| {
-        // Resolved once, here: the grant table, the task name and the loader
-        // must all agree on which file this is — for a script, its
-        // interpreter.
+        // Resolved once, here: the grant table and the loader must agree on
+        // which file this is — for a script, its interpreter. The task is
+        // named after the path as passed, as Linux names `comm`.
         let program = resolve_exec(path, cwd)?;
         let normalized_path = program.image.as_bytes();
         let argv = program.argv(argv)?;
@@ -345,7 +341,7 @@ pub fn spawn_program_with_cwd(
         }
 
         flags |= TASK_FLAG_USER_MODE;
-        let task_name = task_name_from_path(normalized_path)?;
+        let task_name = task_name_from_path(path)?;
         let user_code_entry: TaskEntry = task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
 
         // Unregistered and singly owned until `task_commit`, so no lookup,
@@ -522,10 +518,8 @@ pub fn resolve_program(path: &[u8], cwd: &[u8]) -> Result<CanonPath, Errno> {
     let (_, canon) = resolve_path_canon_at(trimmed, cwd, RESOLVE_FOLLOW).map_err(|e| match e {
         VfsError::NotFound | VfsError::NotDirectory => Errno::ENOENT,
         VfsError::NameTooLong => Errno::ENAMETOOLONG,
-        VfsError::IsDirectory
-        | VfsError::PermissionDenied
-        | VfsError::TooManySymlinks
-        | VfsError::InvalidPath => Errno::ENOEXEC,
+        VfsError::IsDirectory | VfsError::PermissionDenied => Errno::EACCES,
+        VfsError::TooManySymlinks | VfsError::InvalidPath => Errno::ENOEXEC,
         _ => Errno::EIO,
     })?;
     Ok(canon)
@@ -603,16 +597,18 @@ fn exec_image(
 /// push its caller over the 2 KiB stack gate.
 #[inline(never)]
 fn open_executable(path: &[u8]) -> Result<(VfsHandle, u64), Errno> {
+    // `execve(2)`: a file that is not regular or has no execute bit is
+    // `EACCES`, which a `PATH` search passes over rather than running it as a
+    // shell script as it would an `ENOEXEC`.
     let handle = vfs_open(path, false).map_err(|e| match e {
         slopos_fs::VfsError::NotFound => Errno::ENOENT,
-        slopos_fs::VfsError::IsDirectory => Errno::ENOEXEC,
-        slopos_fs::VfsError::PermissionDenied => Errno::ENOEXEC,
+        slopos_fs::VfsError::IsDirectory | slopos_fs::VfsError::PermissionDenied => Errno::EACCES,
         _ => Errno::EIO,
     })?;
 
     let stat = handle.fs.stat(handle.inode).map_err(|_| Errno::EIO)?;
-    if (stat.mode & 0o111) == 0 {
-        return Err(Errno::ENOEXEC);
+    if stat.file_type != slopos_fs::FileType::Regular || (stat.mode & 0o111) == 0 {
+        return Err(Errno::EACCES);
     }
     if stat.size == 0 || stat.size > EXEC_MAX_ELF_SIZE as u64 {
         return Err(Errno::ENOEXEC);

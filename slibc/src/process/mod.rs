@@ -66,7 +66,9 @@ pub unsafe extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 
 ///
 /// POSIX: a file the system cannot execute (`ENOEXEC`) is run as a shell
 /// script, `/bin/sh file args...`. A candidate that is missing or not
-/// permitted moves the search on; any other failure ends it.
+/// permitted moves the search on; any other failure ends it. A search that
+/// execs nothing fails `EACCES` if any candidate was not permitted, as
+/// glibc and musl do.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execvpe(
     file: *const u8,
@@ -115,7 +117,9 @@ pub unsafe extern "C" fn execvpe(
             if e != ENOENT && e != ENOTDIR && e != EACCES {
                 return -1;
             }
-            last = e;
+            if last != EACCES {
+                last = e;
+            }
         }
         seg_start = seg_end + 1;
     }

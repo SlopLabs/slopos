@@ -607,6 +607,19 @@ pub fn test_shebang_line_is_one_interpreter_and_one_argument() -> TestResult {
         parse_shebang(long.as_slice()) == Err(Errno::ENOEXEC),
         "an interpreter running off the header may have been cut"
     );
+    let whole = |parsed: Result<Option<ShebangLine<'_>>, Errno>| {
+        matches!(parsed, Ok(Some(ShebangLine { interpreter, argument: None }))
+            if interpreter.len() == SCRIPT_HEADER_MAX - 3)
+    };
+    assert_test!(
+        whole(parse_shebang(&long[..SCRIPT_HEADER_MAX - 1])),
+        "a 255-byte file is terminated by the header's zero padding"
+    );
+    long[SCRIPT_HEADER_MAX - 1] = b' ';
+    assert_test!(
+        whole(parse_shebang(long.as_slice())),
+        "a blank in the header's last byte terminates the interpreter"
+    );
     long[..11].copy_from_slice(b"#!/bin/sh x");
     match parse_shebang(long.as_slice()) {
         Ok(Some(ShebangLine {
@@ -701,8 +714,12 @@ pub fn test_script_exec_resolves_to_its_interpreter() -> TestResult {
         "a missing interpreter is ENOENT"
     );
     assert_test!(
-        resolve_exec(b"closed", DIR).err() == Some(Errno::ENOEXEC),
-        "a script needs execute permission as a binary does"
+        resolve_exec(b"closed", DIR).err() == Some(Errno::EACCES),
+        "a script needs execute permission as a binary does, and lacking it is EACCES"
+    );
+    assert_test!(
+        resolve_exec(b"/tmp", DIR).err() == Some(Errno::EACCES),
+        "a directory is not executable: EACCES, not ENOEXEC"
     );
 
     // The grant is looked up for the image, so a script naming the shell

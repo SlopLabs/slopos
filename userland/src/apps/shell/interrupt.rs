@@ -19,6 +19,7 @@ static IN_FORKED_CHILD: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn record_sigint(_signum: i32) {
     INTERRUPT_STATE.store(true, Ordering::Release);
+    super::traps::wake_waiter();
 }
 
 /// Install the flag-setting SIGINT handler.

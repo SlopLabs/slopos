@@ -13,3 +13,10 @@ use slopos_abi::syscall::SYSCALL_PIDFD_OPEN;
 pub fn pidfd_open(pid: u32) -> i32 {
     unsafe { syscall2(SYSCALL_PIDFD_OPEN, pid as u64, 0) as i32 }
 }
+
+/// [`pidfd_open`], owned; `None` on any error.
+pub fn pidfd_open_owned(pid: u32) -> Option<super::OwnedFd> {
+    let fd = pidfd_open(pid);
+    // SAFETY: a non-negative return is a descriptor the kernel just opened.
+    (fd >= 0).then(|| unsafe { super::OwnedFd::from_raw(fd) })
+}

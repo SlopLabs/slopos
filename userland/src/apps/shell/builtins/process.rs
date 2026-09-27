@@ -1,7 +1,8 @@
-use slopos_abi::signal::{NSIG, SIGCONT, SIGSTOP, SIGTERM, SIGTSTP, SIGTTIN, SIGTTOU};
+use slopos_abi::signal::{NSIG, SIGCONT, SIGSTOP, SIGTERM, SIGTSTP, SIGTTIN, SIGTTOU, WNOHANG};
+use slopos_abi::syscall::{POLLIN, UserPollFd};
 use slopos_shell_core::trap::signal_by_name;
 
-use crate::syscall::process;
+use crate::syscall::{SyscallError, fs, pidfd, process};
 
 use super::super::display::{COLOR_ERROR_RED, shell_error_named, shell_write_idx};
 use super::super::exec;
@@ -215,22 +216,48 @@ pub fn cmd_wait(argc: i32, argv: &[&[u8]]) -> i32 {
         shell_write_idx(b"wait: invalid pid\n", COLOR_ERROR_RED);
         return 1;
     };
+    // POSIX: a trapped signal ends the wait at once, with a status above 128;
+    // its action runs as soon as `wait` returns. Its handler also writes to
+    // the wake pipe, so a signal landing after the check below and before
+    // `poll` blocks leaves the pipe readable and still ends the wait.
+    let wake = traps::WakePipe::arm();
+    let child = pidfd::pidfd_open_owned(pid);
+    let mut block = wake.is_none() || child.is_none();
     loop {
-        let mut status = 0i32;
-        let rc = process::waitpid_raw(pid as i32, &mut status, 0);
-        if rc > 0 {
-            return process::wait_status(status).exit_code().unwrap_or(-1);
-        }
-        if rc != slopos_abi::Errno::EINTR.raw() as i64 {
-            return -1;
-        }
-        // POSIX: a trapped signal ends the wait at once, with a status above
-        // 128; its action runs as soon as `wait` returns.
         if let Some(signum) = traps::pending_signal() {
             return 128 + signum as i32;
         }
         if interrupt::take_pending() {
             return interrupt::EXIT_INTERRUPTED;
+        }
+        let mut status = 0i32;
+        let rc = process::waitpid_raw(pid as i32, &mut status, if block { 0 } else { WNOHANG });
+        if rc > 0 {
+            return process::wait_status(status).exit_code().unwrap_or(-1);
+        }
+        if rc < 0 && rc != slopos_abi::Errno::EINTR.raw() as i64 {
+            return -1;
+        }
+        if let (0, Some(wake), Some(child)) = (rc, &wake, &child) {
+            let mut fds = [
+                UserPollFd {
+                    fd: child.raw(),
+                    events: POLLIN,
+                    revents: 0,
+                },
+                UserPollFd {
+                    fd: wake.fd(),
+                    events: POLLIN,
+                    revents: 0,
+                },
+            ];
+            match fs::poll(&mut fds, -1) {
+                // An exited child is reaped at once by a blocking wait.
+                Ok(_) if fds[0].revents != 0 => block = true,
+                Ok(_) => wake.drain(),
+                Err(e) if e == SyscallError::EINTR => {}
+                Err(_) => block = true,
+            }
         }
     }
 }

@@ -663,6 +663,20 @@ fn trap_interrupts_wait() -> bool {
     )
 }
 
+/// A trapped signal that lands after the last trap drain and before `wait`
+/// blocks still ends it: the command substitution in `wait`'s own operand
+/// signals the shell, so the signal is recorded before `wait` runs and no
+/// drain comes between.
+fn trap_before_wait_blocks() -> bool {
+    expect_output(
+        "trap_before_wait_blocks",
+        b"trap 'echo trapped' USR1\n\
+          sleep 5 >/dev/null &\nsp=$!\n\
+          wait $(kill -USR1 $$; echo $sp)\necho wait=$?\nkill $sp\n",
+        b"trapped\nwait=138\n",
+    )
+}
+
 /// An action that exits is how a script handles a fatal signal, and the
 /// `EXIT` trap still runs.
 fn trap_exit_from_a_signal_action() -> bool {
@@ -904,6 +918,7 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ),
     ("trap_signal_actions", trap_signal_actions),
     ("trap_interrupts_wait", trap_interrupts_wait),
+    ("trap_before_wait_blocks", trap_before_wait_blocks),
     (
         "trap_exit_from_a_signal_action",
         trap_exit_from_a_signal_action,

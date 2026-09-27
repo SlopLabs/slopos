@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use slopos_abi::signal::{SIGINT, SIGKILL, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SigSet, sig_bit};
 use slopos_shell_core::trap::{self, Action, Condition, MAX_SIGNAL};
 
-use crate::syscall::process;
+use crate::syscall::{OwnedFd, RawFd, fs, process};
 
 use super::{exec, interrupt};
 
@@ -29,8 +29,55 @@ static STATUS_BEFORE_ACTION: AtomicI32 = AtomicI32::new(-1);
 static PROBED: AtomicU64 = AtomicU64::new(0);
 static IGNORED_ON_ENTRY: AtomicU64 = AtomicU64::new(0);
 
+/// Write end of the pipe a blocking `wait` polls beside its child, or -1.
+static WAKE_FD: AtomicI32 = AtomicI32::new(-1);
+
 extern "C" fn record_trap(signum: i32) {
     PENDING.fetch_or(sig_bit(signum as u8), Ordering::Release);
+    wake_waiter();
+}
+
+/// Called from a signal handler after its record is stored, so a waiter that
+/// checked the record just before this signal still wakes.
+pub(super) fn wake_waiter() {
+    let fd = WAKE_FD.load(Ordering::Acquire);
+    if fd >= 0 {
+        let _ = fs::write_slice(fd, &[0]);
+    }
+}
+
+/// While armed, a trapped signal or an interrupt makes [`WakePipe::fd`]
+/// readable, which a `poll` that has not yet blocked cannot miss.
+pub struct WakePipe {
+    read: OwnedFd,
+    _write: OwnedFd,
+}
+
+impl WakePipe {
+    pub fn arm() -> Option<Self> {
+        let flags = (slopos_abi::syscall::O_NONBLOCK | slopos_abi::syscall::O_CLOEXEC) as u32;
+        let (read, write) = fs::pipe2(flags).ok()?;
+        WAKE_FD.store(write.raw(), Ordering::Release);
+        Some(Self {
+            read,
+            _write: write,
+        })
+    }
+
+    pub fn fd(&self) -> RawFd {
+        self.read.raw()
+    }
+
+    pub fn drain(&self) {
+        let mut buf = [0u8; 16];
+        while matches!(fs::read_slice(self.read.raw(), &mut buf), Ok(n) if n > 0) {}
+    }
+}
+
+impl Drop for WakePipe {
+    fn drop(&mut self) {
+        WAKE_FD.store(-1, Ordering::Release);
+    }
 }
 
 fn slot(condition: Condition) -> usize {

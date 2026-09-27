@@ -687,7 +687,11 @@ unsafe fn spawn_direct(
             buf[total] = 0;
             match launch(buf.as_ptr(), total) {
                 Ok(child) => return Ok(child),
-                Err(e) if e == ENOENT || e == ENOTDIR || e == EACCES => last = e,
+                Err(e) if e == ENOENT || e == ENOTDIR || e == EACCES => {
+                    if last != EACCES {
+                        last = e;
+                    }
+                }
                 Err(e) => return Err(e),
             }
         }

@@ -5,7 +5,7 @@
 use slopos_userland as _;
 
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
-use slopos_userland::syscall::process;
+use slopos_userland::syscall::{UserTaskEntry, core as sys_core, process};
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -13,6 +13,7 @@ use std::process::Command;
 
 const DIR: &str = "/tmp/script_exec";
 const ENOEXEC: i32 = 8;
+const EACCES: i32 = 13;
 
 fn install(name: &str, body: &str, mode: u32) -> Option<String> {
     let _ = fs::create_dir_all(DIR);
@@ -141,6 +142,40 @@ fn execvp_runs_a_plain_file_under_sh() -> bool {
     true
 }
 
+/// A `PATH` candidate that exists but may not be executed makes the search
+/// fail with `EACCES` even when a later directory has no such file.
+fn execvp_keeps_eacces_over_a_later_miss() -> bool {
+    let _ = fs::create_dir_all(format!("{DIR}/denied"));
+    if install("denied/vp_denied", "exit 0\n", 0o644).is_none() {
+        return false;
+    }
+    let saved = std::env::var_os("PATH");
+    // SAFETY: single-threaded test binary.
+    unsafe { std::env::set_var("PATH", format!("{DIR}/denied:{DIR}/absent")) };
+    let pid = process::fork();
+    if pid == 0 {
+        let argv: [*const u8; 2] = [b"vp_denied\0".as_ptr(), core::ptr::null()];
+        // SAFETY: the name is NUL-terminated and the vector is NULL-ended.
+        unsafe { slopos_slibc::process::execvp(b"vp_denied\0".as_ptr(), argv.as_ptr()) };
+        slopos_userland::syscall::core::exit_with_code(slopos_slibc::errno_get());
+    }
+    match saved {
+        // SAFETY: as above.
+        Some(v) => unsafe { std::env::set_var("PATH", v) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+    let code = if pid < 0 {
+        -1
+    } else {
+        process::wait_exit_code(pid as u32)
+    };
+    if code != EACCES {
+        eprintln!("script_exec_test: execvp exited {code}, want EACCES");
+        return false;
+    }
+    true
+}
+
 /// `posix_spawnp` searches `PATH` as `execvp` does, fallback included.
 fn posix_spawnp_runs_a_plain_file_under_sh() -> bool {
     let out = format!("{DIR}/spawnp.out");
@@ -197,6 +232,48 @@ fn the_shell_runs_a_plain_file_as_a_script() -> bool {
     true
 }
 
+/// As Linux names `comm`, a spawned script's task carries the script's
+/// name, not its interpreter's. `read` on a pipe this test holds keeps the
+/// task alive until the listing is taken.
+fn a_spawned_script_is_named_after_itself() -> bool {
+    let Some(path) = install("named_probe", "#!/bin/sh\nread x\n", 0o755) else {
+        return false;
+    };
+    let Ok((rd, wr)) = slopos_userland::syscall::fs::pipe() else {
+        return false;
+    };
+    let argv = [b"named_probe\0".as_ptr()];
+    let pid = process::spawn_path_with_actions(
+        path.as_bytes(),
+        &argv,
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &[process::clone_fd(rd.raw(), 0)],
+        0,
+    );
+    drop(rd);
+    if pid <= 0 {
+        eprintln!("script_exec_test: spawn of a script returned {pid}");
+        return false;
+    }
+    let mut tasks = vec![UserTaskEntry::default(); 1024];
+    let count = sys_core::process_list(&mut tasks).clamp(0, tasks.len() as i64) as usize;
+    let name = tasks[..count]
+        .iter()
+        .find(|t| t.task_id == pid as u32)
+        .map(|t| {
+            let end = t.name.iter().position(|&b| b == 0).unwrap_or(t.name.len());
+            String::from_utf8_lossy(&t.name[..end]).into_owned()
+        });
+    drop(wr);
+    let _ = process::wait_exit_code(pid as u32);
+    if name.as_deref() != Some("named_probe") {
+        eprintln!("script_exec_test: the script's task is named {name:?}");
+        return false;
+    }
+    true
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         (
@@ -220,12 +297,20 @@ fn main() {
             execvp_runs_a_plain_file_under_sh,
         ),
         (
+            "execvp_keeps_eacces_over_a_later_miss",
+            execvp_keeps_eacces_over_a_later_miss,
+        ),
+        (
             "posix_spawnp_runs_a_plain_file_under_sh",
             posix_spawnp_runs_a_plain_file_under_sh,
         ),
         (
             "the_shell_runs_a_plain_file_as_a_script",
             the_shell_runs_a_plain_file_as_a_script,
+        ),
+        (
+            "a_spawned_script_is_named_after_itself",
+            a_spawned_script_is_named_after_itself,
         ),
     ]);
 }

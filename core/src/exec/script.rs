@@ -120,21 +120,21 @@ pub fn parse_shebang(header: &[u8]) -> Result<Option<ShebangLine<'_>>, Errno> {
     let Some(body) = header.strip_prefix(b"#!") else {
         return Ok(None);
     };
-    // The last header byte is the terminator a C string of the header keeps,
-    // so a line without a newline ends one short of it.
-    let window = &body[..body.len().min(SCRIPT_HEADER_MAX - 3)];
-    let line = match body[..body.len().min(SCRIPT_HEADER_MAX - 2)]
-        .iter()
-        .position(|&b| b == b'\n')
-    {
+    // Linux reads the header into a zero-filled 256-byte buffer and ends a
+    // line without a newline one byte short of it, so a shorter header is
+    // terminated by its padding and only a full one must terminate the
+    // interpreter itself, possibly in that last byte.
+    let full = &body[..body.len().min(SCRIPT_HEADER_MAX - 2)];
+    let window = &full[..full.len().min(SCRIPT_HEADER_MAX - 3)];
+    let line = match full.iter().position(|&b| b == b'\n') {
         Some(nl) => &body[..nl],
         None => {
-            if header.len() >= SCRIPT_HEADER_MAX - 1 {
-                let start = window
+            if header.len() >= SCRIPT_HEADER_MAX {
+                let start = full
                     .iter()
                     .position(|&b| !is_blank(b))
                     .ok_or(Errno::ENOEXEC)?;
-                let terminated = window[start..].iter().any(|&b| is_blank(b) || b == 0);
+                let terminated = full[start..].iter().any(|&b| is_blank(b) || b == 0);
                 if !terminated {
                     return Err(Errno::ENOEXEC);
                 }
