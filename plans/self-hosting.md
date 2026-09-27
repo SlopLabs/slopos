@@ -81,14 +81,19 @@ The patches today, by what they do:
    - no `mkfifo`, and the shell has no `trap`.
 
    One user, uid 0, stays until a port needs more.
-4. **A fork a large process can afford.** A forked copy is charged to the
-   commit ledger as its pages are written, as Linux's default overcommit does;
-   `mmap` and `brk` stay charged when they are made. Unix software assumes a
-   fork is cheap (make, shells, git, cargo's `pre_exec` children), and charging
-   a gigabyte compiler's copy up front is why the jobserver port exists, which
-   goes. With no OOM killer, a refusal lands as `SIGBUS` at the write that
-   needed the page, as a refused stack growth does today; a fork that execs
-   right away writes almost nothing.
+4. **A fork a large process can afford, and an OOM killer behind it.**
+   Linux's model whole, not half: a forked copy is charged as its pages are
+   written, and when a write finds no page the kernel kills a victim instead
+   of faulting whoever wrote. Unix software assumes a cheap fork (make,
+   shells, git, cargo's `pre_exec` children); charging a gigabyte compiler's
+   copy up front is why the jobserver port exists, which goes. `mmap` and
+   `brk` stay charged when they are made, so only forked copies, stack growth
+   and `MAP_NORESERVE` can outrun memory, and the killer is a backstop rather
+   than routine. It takes the largest resident user process by the quota
+   ledger's resident pages, never init, and kills it the way every kill works
+   (a flag the victim unwinds from, I8); the faulting write waits for the
+   frames and retries. Refused stack growth goes through it too, not
+   `SIGBUS`.
 5. **No speed patches of our own.** Upstream `llvm-rustc/0002,0003` or drop
    them and take the cost in build time.
 
@@ -191,7 +196,8 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 - **ABI.** Linux x86-64 syscall numbers, no Linux binary compatibility. Unlike
   Asterinas, which runs stock NixOS gcc and git, every tool here is compiled
   for SlopOS; unlike a fork, it is compiled unchanged.
-- **Memory.** A commit ledger, not swap; a forked copy is charged as written.
+- **Memory.** A commit ledger, not swap; a forked copy is charged as written,
+  with an OOM killer behind it.
 - **The dev loop.** One development machine (`just boot`, and `just
   boot-fast` to skip the wheel) and one live artifact (`just iso`); knobs
   (`KERNEL_RELEASE`, `VIDEO`, `ports`, `DEBUG`, `ROULETTE`) rather than more
