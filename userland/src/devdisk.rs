@@ -24,10 +24,6 @@ pub fn selfhost(root: &str, args: &[&str]) -> Command {
         .args(args)
         .current_dir(root)
         .env("KERNEL_CARGO_TIMINGS", "1")
-        // Pinned, as the host's reference build pins it: cargo's default
-        // depends on `CI`, and the profile is hashed into every crate's
-        // metadata.
-        .env("CARGO_INCREMENTAL", "1")
         .stdin(Stdio::null());
     cmd
 }

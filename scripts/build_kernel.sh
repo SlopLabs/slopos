@@ -89,7 +89,7 @@ CARGO_TARGET_DIR="$CARGO_TARGET_DIR" $CARGO build --locked --release -p slopos-k
 KALLSYMS="$CARGO_TARGET_DIR/release/kallsyms"
 
 # trim-paths so no absolute path of this checkout or its sysroot reaches the
-# image: two checkouts, or the host and the guest, then build the same bytes.
+# image.
 # The future-incompat notice is core's stdarch enabling `sse` on this soft-float
 # target (rust#117938): upstream's to fix, and repeated on every build.
 build_kernel_once() {

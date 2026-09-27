@@ -29,12 +29,6 @@ TP_LIBRARY_REL="lib/rustlib/src/rust/library"
 TP_COMPILER_OVERLAY_REL="toolchain/compiler"
 TP_COMPILER_PIN_REL="toolchain/compiler/PIN"
 
-# The cargo fork lands inside the compiler fork's tree, at `src/tools/cargo`,
-# because the rustc source tarball already carries cargo's sources.
-TP_CARGO_OVERLAY_REL="toolchain/cargo"
-TP_CARGO_PIN_REL="toolchain/cargo/PIN"
-TP_CARGO_TREE_REL="src/tools/cargo"
-
 # The llvm-project fork: a fourth tree, pinned beside the tarball it patches.
 TP_LLVM_OVERLAY_REL="toolchain/llvm"
 TP_LLVM_PIN_REL="toolchain/cxx/PIN"
@@ -142,19 +136,17 @@ tp_pin_crates() {
 }
 
 tp_pin_files() {
-    printf '%s\n%s\n%s\n%s\n' "$TP_PIN_REL" "$TP_COMPILER_PIN_REL" "$TP_CARGO_PIN_REL" \
-        "$TP_CRATES_PIN_REL"
+    printf '%s\n%s\n%s\n' "$TP_PIN_REL" "$TP_COMPILER_PIN_REL" "$TP_CRATES_PIN_REL"
 }
 
 # Each fork is pinned beside the tree it is applied to, so that editing one
-# does not restamp another: the compiler fork's own PIN, the cargo fork's
-# own, the crate ports' own, the llvm-project fork's beside the tarball both
+# does not restamp another: the compiler fork's own PIN, the crate ports'
+# own, the llvm-project fork's beside the tarball both
 # it and the C++ runtime are cut from, and the std and libc forks in the
 # sysroot's.
 tp_patch_pin_file() {
     case "$1" in
         "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_COMPILER_PIN_REL" ;;
-        "$TP_CARGO_OVERLAY_REL/"*) printf '%s\n' "$TP_CARGO_PIN_REL" ;;
         "$TP_CRATES_OVERLAY_REL/"*) printf '%s\n' "$TP_CRATES_PIN_REL" ;;
         "$TP_LLVM_RUSTC_OVERLAY_REL/"*) printf '%s\n' "$TP_COMPILER_PIN_REL" ;;
         "$TP_LLVM_OVERLAY_REL/"*) printf '%s\n' "$TP_LLVM_PIN_REL" ;;
@@ -162,10 +154,9 @@ tp_patch_pin_file() {
     esac
 }
 
-# All seven forks live here: `toolchain/rust/` patches the std source tree,
+# All six forks live here: `toolchain/rust/` patches the std source tree,
 # `toolchain/libc/` the unpacked libc crate, `toolchain/compiler/` rustc's own
-# sources, `toolchain/cargo/` cargo's inside them, `toolchain/crates/` the
-# crates.io crates both of those depend on, `toolchain/llvm/` the pinned
+# sources, `toolchain/crates/` the crates.io crates rustc and cargo depend on, `toolchain/llvm/` the pinned
 # llvm-project the C++ runtime is built from, and `toolchain/llvm-rustc/` the
 # one rustc ships.
 tp_patch_files() {
@@ -175,8 +166,7 @@ tp_patch_files() {
 
 tp_patch_tree_rel() {
     case "$1" in
-        "$TP_COMPILER_OVERLAY_REL/"* | "$TP_CARGO_OVERLAY_REL/"* | "$TP_LLVM_RUSTC_OVERLAY_REL/"* | \
-            "$TP_CRATES_OVERLAY_REL/"*)
+        "$TP_COMPILER_OVERLAY_REL/"* | "$TP_LLVM_RUSTC_OVERLAY_REL/"* | "$TP_CRATES_OVERLAY_REL/"*)
             printf '%s\n' "$TP_RUSTC_SRC_REL"
             ;;
         # The llvm fork's tree is `third_party/llvm-project-<version>.src`,
@@ -197,7 +187,6 @@ tp_patch_apply_dir() {
     case "$rel" in
         "$TP_OVERLAY_REL/libc/"*) printf '%s/libc\n' "$library" ;;
         "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_RUSTC_SRC_REL" ;;
-        "$TP_CARGO_OVERLAY_REL/"*) printf '%s/%s\n' "$TP_RUSTC_SRC_REL" "$TP_CARGO_TREE_REL" ;;
         "$TP_CRATES_WIRING_REL/"*) printf '%s\n' "$TP_RUSTC_SRC_REL" ;;
         "$TP_CRATES_OVERLAY_REL/"*)
             printf '%s/%s/%s\n' "$TP_RUSTC_SRC_REL" "$TP_CRATES_TREE_REL" "$(basename "$rel" .patch)"
@@ -252,9 +241,9 @@ tp_hash_lines() {
 # A stamp is one sha256 over what a materialised tree was built from, keyed by
 # path so a rename is a change. Each tree stamps its own inputs and nothing
 # else: the sysroot is `toolchain/{PIN,rust,libc}`, and the compiler source
-# tree is `toolchain/{compiler,cargo,crates,libc}/` plus the lines it shares
+# tree is `toolchain/{compiler,crates,libc}/` plus the lines it shares
 # with that PIN — the channel and the libc crate its ports' libc is cut from.
-# A std patch, a cargo patch and a C++ pin bump therefore restamp one tree,
+# A std patch, a compiler patch and a C++ pin bump therefore restamp one tree,
 # the other tree and neither; a libc patch restamps both.
 tp_stamp() {
     {
@@ -272,8 +261,8 @@ tp_rustc_stamp() {
         printf 'libc_checksum=%s\n' "$(tp_pin_value "$1/$TP_PIN_REL" libc_checksum)"
         tp_materialiser_hash "$1" make_rustc_src.sh
         tp_materialiser_hash "$1" lib/toolchain_pin.sh
-        (cd "$1" && find "$TP_COMPILER_OVERLAY_REL" "$TP_CARGO_OVERLAY_REL" \
-            "$TP_CRATES_OVERLAY_REL" "$TP_OVERLAY_REL/libc" -type f -print) | tp_hash_lines "$1"
+        (cd "$1" && find "$TP_COMPILER_OVERLAY_REL" "$TP_CRATES_OVERLAY_REL" \
+            "$TP_OVERLAY_REL/libc" -type f -print) | tp_hash_lines "$1"
     } | tp_sha256_stream
 }
 

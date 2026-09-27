@@ -21,15 +21,14 @@ set -euo pipefail
 #                     separately in toolchain/cxx/PIN, and a bootstrap run
 #                     takes LLVM from `download-ci-llvm` or from that tarball.
 #
-# The tree carries three forks: `toolchain/compiler/`; in `src/tools/cargo`,
-# `toolchain/cargo/` (see toolchain/cargo/PIN for what that one is for); and
-# `toolchain/crates/`, ports of crates.io crates both workspaces depend on,
+# The tree carries two forks: `toolchain/compiler/` (with rustc's bundled
+# LLVM's, `toolchain/llvm-rustc/`) and `toolchain/crates/`, ports of crates.io crates both workspaces depend on,
 # unpacked from their pinned `.crate` files into `slopos-crates/` beside a
 # copy of the libc fork, and wired into both workspaces by the
 # `[patch.crates-io]` in `toolchain/crates/wiring/`. See toolchain/crates/PIN.
 #
 # Idempotent: the stamp at third_party/slopos-rustc-src/.slopos-stamp records
-# the hash of toolchain/{compiler,cargo,crates,libc}/, of this script — its
+# the hash of toolchain/{compiler,crates,libc}/, of this script — its
 # --exclude set decides what the tree holds — and of toolchain/PIN's channel
 # and libc lines, so a second run with unchanged inputs exits immediately.
 # A run that does rebuild the tree carries it over the previous one by
@@ -61,13 +60,11 @@ die() {
 
 PIN="$REPO_ROOT/$TP_PIN_REL"
 COMPILER_PIN="$REPO_ROOT/$TP_COMPILER_PIN_REL"
-CARGO_PIN="$REPO_ROOT/$TP_CARGO_PIN_REL"
 CRATES_PIN="$REPO_ROOT/$TP_CRATES_PIN_REL"
 SRC="$REPO_ROOT/$TP_RUSTC_SRC_REL"
 STAMP="$SRC/$TP_STAMP_NAME"
 
 [ -f "$COMPILER_PIN" ] || die "missing $TP_COMPILER_PIN_REL — the compiler fork (PIN + patch) is tracked in-repo"
-[ -f "$CARGO_PIN" ] || die "missing $TP_CARGO_PIN_REL — the cargo fork (PIN + patch) is tracked in-repo"
 [ -f "$CRATES_PIN" ] || die "missing $TP_CRATES_PIN_REL — the crate ports (PIN + patches) are tracked in-repo"
 
 STAMP_WANT="$(tp_rustc_stamp "$REPO_ROOT")"
@@ -138,12 +135,6 @@ if [ "$PATCHES" = "0" ]; then
     die "no patches under $TP_COMPILER_OVERLAY_REL/ — an unpatched tree has no slopos target"
 fi
 
-CARGO_PATCHES="$(tp_apply_patches "$REPO_ROOT" "$TP_CARGO_OVERLAY_REL/")" ||
-    die "the cargo fork did not apply"
-if [ "$CARGO_PATCHES" = "0" ]; then
-    die "no patches under $TP_CARGO_OVERLAY_REL/ — an unpatched cargo has no offline build"
-fi
-
 # The crate ports, each unpacked from the `.crate` its patch is cut against,
 # and the libc fork beside them: the compiler and cargo resolve crates.io
 # `libc`, and bootstrap's own `library/libc` exists only once a bootstrap run
@@ -212,4 +203,4 @@ ts_carry_over "$SRC" "${KEEP[@]}" || die "could not carry $TP_RUSTC_SRC_REL over
 
 printf '%s\n' "$STAMP_WANT" > "$STAMP"
 
-echo "$SELF: materialised $TP_RUSTC_SRC_REL from $CHANNEL — $PATCHES compiler, $CARGO_PATCHES cargo, $CRATE_PATCHES crate-port patch(es) (stamp $STAMP_WANT)"
+echo "$SELF: materialised $TP_RUSTC_SRC_REL from $CHANNEL — $PATCHES compiler, $CRATE_PATCHES crate-port patch(es) (stamp $STAMP_WANT)"

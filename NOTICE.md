@@ -206,9 +206,8 @@ distributed. Each keeps its upstream licence: rustc and cargo `MIT OR
 Apache-2.0`, LLVM, clang and lld `Apache-2.0 WITH LLVM-exception`.
 
 Beyond the forks above, that build applies patches of the same shape, each
-written to be contributed upstream and licensed as the project it patches: the
-cargo fork (`toolchain/cargo/`, `MIT OR Apache-2.0`), rustc's own llvm-project
-port (`toolchain/llvm-rustc/`, `Apache-2.0 WITH LLVM-exception`), and
+written to be contributed upstream and licensed as the project it patches:
+rustc's own llvm-project port (`toolchain/llvm-rustc/`, `Apache-2.0 WITH LLVM-exception`), and
 `target_os = "slopos"` ports of crates the compiler and cargo depend on
 (`toolchain/crates/`): `getrandom`, `errno` and `stacker` (`MIT OR
 Apache-2.0`), `libloading` (ISC), `nix` (MIT) and `rustix` (`Apache-2.0 WITH

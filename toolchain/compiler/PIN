@@ -6,7 +6,7 @@
 #
 # The channel is not repeated here: it lives in `toolchain/PIN`, held equal to
 # `rust-toolchain.toml`, and the source tarball's URL is derived from it. What
-# this file adds is the tarball's checksum and seven patches.
+# this file adds is the tarball's checksum and four patches.
 #
 # 0001 makes `x86_64-unknown-slopos` a built-in target rather than a JSON
 # file — the one thing bootstrap's `--host` cannot resolve without. 0003
@@ -16,17 +16,13 @@
 # `Generic`, which loses `LLVM_ON_UNIX` and with it every `Unix/*.inc` file
 # the LLVM port patches.
 #
-# 0002 gives `build.tool.<name>` a `default-features` key: bootstrap can add
-# features to a tool and had no way to drop one, and dropping cargo's is how
-# a host with no libcurl, libgit2 or OpenSSL gets a cargo at all.
-#
 # 0004 lets `llvm.static-libstdcpp` build a `rustc_llvm` that links `c++`:
 # bootstrap asks the target's C++ compiler where `libstdc++.a` is and hands
 # the directory to `rustc_llvm`, which then links `static=c++` out of it —
 # and a SlopOS sysroot has `libc++.a` and no `libstdc++.a`. It names the
 # archive for `slopos` as bootstrap already does for `windows-gnullvm`.
 #
-# The fifth patch is the SlopOS LLVM port a second time, because the port has
+# The fourth patch is the SlopOS LLVM port a second time, because the port has
 # to exist in two llvm-project trees and they are different versions.
 # `toolchain/llvm/` cuts it against the 18.1.8 release `toolchain/cxx/PIN`
 # names, the tree the C++ runtime is built from; rustc bundles its own LLVM at
@@ -39,25 +35,8 @@
 # it a `--host=x86_64-unknown-slopos` run reaches `llvm::Llvm` and stops in
 # `llvm/ADT/bit.h` looking for `machine/endian.h`, which is the port's first
 # hunk.
-#
-# The sixth is a fix rather than a port: `ClearImpliedBits` walked every path
-# of x86's feature-implication graph, and a kernel target that disables SSE
-# made it the hottest function in the guest's kernel build, 7% of all user
-# time; scanning the table once per level of the graph still left it first,
-# at 5.8%. `llvm-rustc/0002` computes each feature table's transitive
-# implication closures once, so clearing a feature is one bitset `and` and
-# setting one is an `or` per implied feature.
-#
-# The seventh, `llvm-rustc/0003`, is the same kind of fix: every target
-# machine checks its feature string against `^([+-][^,]+)(,[+-][^,]+)*,?$`
-# with LLVM's regex engine, whose `sstep` was the next LLVM symbol in the
-# guest's profile. A loop over the comma-separated items accepts exactly the
-# same strings. Both apply to that tree alone.
 rustc_src_sha256=83e1649371c2b85317974ead0c9786766c090dc1b79afe41c8e7091f009da478
 patch_sha256=toolchain/compiler/0001-slopos-target.patch:3b6baf7d1c5134ee437b88b24cd068e25248309186c1fdb5f912c348befeec03
-patch_sha256=toolchain/compiler/0002-bootstrap-tool-default-features.patch:982a8055cbd929cdbf4447b56626297c882b60b35965bbd070690413b3350882
 patch_sha256=toolchain/compiler/0003-bootstrap-cmake-system-name.patch:16989f469122ffa26e9a88349756e6ce4dc93c6dec7bbe874e8319a9490971fc
 patch_sha256=toolchain/compiler/0004-bootstrap-static-libcxx.patch:1f11a25951d3d5c3800977bb731b7f1c2d439e444c0a685c11a41e84b6f6e591
 patch_sha256=toolchain/llvm-rustc/0001-slopos-support.patch:98965e5f5f80f7b08463558e42acec8e2d056652b98543065c9b368d32be6cf2
-patch_sha256=toolchain/llvm-rustc/0002-mc-feature-implication-closures.patch:152f3d9a7e0edabf2a136ad5d6041660fedd02376d66d5cf61ca91f3ae1c8245
-patch_sha256=toolchain/llvm-rustc/0003-mc-feature-list-format-without-regex.patch:b649fac47a41972893ee9150c2f8957f2ab49bebc9ea7a16386a46218116562d

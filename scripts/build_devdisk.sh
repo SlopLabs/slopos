@@ -140,9 +140,8 @@ seed_source() {
 }
 [ -f "$IMAGE_PATH" ] || seed_source
 
-# Where the host keeps its owned sysroot: cargo hashes a path source inside the
-# workspace by its workspace-relative path, so std's crates get the same
-# identity on both machines only if they sit at the same place in both trees.
+# Where the host keeps its owned sysroot, so the tree's scripts find the
+# guest's toolchain where they find the host's.
 TOOLCHAIN_REL="src/slopos/third_party/rust-slopos"
 if [ -n "${TOOLCHAIN_STAGE:-}" ] && [ ! -f "$IMAGE_PATH" ]; then
     [ -d "$TOOLCHAIN_STAGE" ] ||
@@ -214,13 +213,6 @@ inventory() {
     done
 }
 
-# The guest's compiler must name itself as the host's does, since a kernel it
-# builds matches a host build only then; `devdisk_test` compares the two.
-if [ -n "${TOOLCHAIN_STAGE:-}" ]; then
-    HOST_RUSTC_VERSION="$(rustc +slopos --version)" ||
-        die "no slopos toolchain registered — run scripts/make_slopos_sysroot.sh"
-fi
-
 MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
 {
     echo "$MARKER 1"
@@ -238,7 +230,6 @@ MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
     if [ -n "${TOOLCHAIN_STAGE:-}" ]; then
         image_holds_dir "$TOOLCHAIN_REL" || stale "$TOOLCHAIN_REL"
         echo "toolchain $TOOLCHAIN_REL"
-        echo "rustc-version $HOST_RUSTC_VERSION"
         inventory "$TOOLCHAIN_REL/bin" "$TOOLCHAIN_STAGE/bin" 1
         inventory "$TOOLCHAIN_REL/lib" "$TOOLCHAIN_STAGE/lib" 1
     fi

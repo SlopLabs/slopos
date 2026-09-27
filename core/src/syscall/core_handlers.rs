@@ -117,8 +117,7 @@ const KERNEL_VERSION: &str = concat!("SlopOS ", env!("CARGO_PKG_VERSION"), " deb
 const KERNEL_VERSION: &str = concat!("SlopOS ", env!("CARGO_PKG_VERSION"), " release");
 
 /// Set by whoever builds the kernel to tell one build of a tree from another;
-/// part of `uname -v` and the boot log. Unset on every build that is compared
-/// with another for identity.
+/// part of `uname -v` and the boot log.
 pub const BUILD_TAG: Option<&str> = option_env!("SLOPOS_BUILD_TAG");
 
 fn set_uts_field(field: &mut [u8; 65], value: &str) {

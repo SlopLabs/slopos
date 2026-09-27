@@ -408,15 +408,6 @@ fn toolchain_starts() -> bool {
         return false;
     }
     let version = rustc.stdout.trim_end();
-    let host = fs::read_to_string(marker_path()).ok().and_then(|text| {
-        text.lines()
-            .find_map(|l| l.strip_prefix("rustc-version "))
-            .map(str::to_owned)
-    });
-    if host.as_deref() != Some(version) {
-        note(&format!("guest {version:?}, host {host:?}"));
-        return false;
-    }
     let bound = rustc
         .stderr
         .lines()

@@ -434,12 +434,6 @@ jobs:
           scripts/check_rustc_target.sh --self-test
           scripts/check_rustc_target.sh --require
 
-      - name: Cargo fork against its `network` cut
-        if: ${{ !cancelled() && steps.rustc-src.outcome == 'success' }}
-        run: |
-          scripts/check_cargo_fork.sh --self-test
-          scripts/check_cargo_fork.sh --require
-
       - name: Count compiler cache misses
         id: ccache
         if: always()

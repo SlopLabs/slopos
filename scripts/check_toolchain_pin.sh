@@ -27,7 +27,7 @@
 #      crate port must also name, on a `crate=` line, the `.crate` it is cut
 #      against, and every `crate=` line must have its port.
 #   3. A materialised tree — `third_party/rust-slopos` for the std and libc
-#      forks, `third_party/slopos-rustc-src` for the compiler, cargo and crate
+#      forks, `third_party/slopos-rustc-src` for the compiler and crate
 #      forks and its copy of libc — carries a stamp its overlay no longer
 #      hashes to, or is missing a file its patches create.
 #   4. A linked `slopos` toolchain points somewhere other than
@@ -163,9 +163,8 @@ EOF
             want="$(tp_stamp "$root")"
             maker="scripts/make_slopos_sysroot.sh"
         elif [ ! -d "$root/$TP_COMPILER_OVERLAY_REL" ] ||
-            [ ! -d "$root/$TP_CARGO_OVERLAY_REL" ] ||
             [ ! -d "$root/$TP_CRATES_OVERLAY_REL" ]; then
-            fail "$tree_rel is materialised with no $TP_COMPILER_OVERLAY_REL/, $TP_CARGO_OVERLAY_REL/ or $TP_CRATES_OVERLAY_REL/ to have built it — delete it"
+            fail "$tree_rel is materialised with no $TP_COMPILER_OVERLAY_REL/ or $TP_CRATES_OVERLAY_REL/ to have built it — delete it"
             continue
         else
             want="$(tp_rustc_stamp "$root")"
@@ -258,7 +257,7 @@ if [ "$SELF_TEST" -eq 1 ]; then
     plant() {
         local root="$1"
         mkdir -p "$root/toolchain/rust" "$root/toolchain/libc" \
-            "$root/toolchain/compiler" "$root/toolchain/cargo"
+            "$root/toolchain/compiler"
         cat > "$root/rust-toolchain.toml" <<'FIXTURE'
 [toolchain]
 channel = "nightly-2026-09-03"
@@ -306,20 +305,6 @@ FIXTURE
 rustc_src_sha256=$(printf '%064d' 0)
 patch_sha256=toolchain/compiler/0001-slopos-target.patch:$(tp_sha256_file "$root/toolchain/compiler/0001-slopos-target.patch")
 patch_sha256=toolchain/llvm-rustc/0001-slopos-support.patch:$(tp_sha256_file "$root/toolchain/llvm-rustc/0001-slopos-support.patch")
-FIXTURE
-        # The cargo fork shares the compiler fork's tree, one directory down,
-        # and is pinned separately. It creates a file too, so the
-        # materialisation check has to find that one under `src/tools/cargo`
-        # rather than at the tree root.
-        cat > "$root/toolchain/cargo/0001-slopos-cargo.patch" <<'FIXTURE'
---- a/Cargo.toml
-+++ b/Cargo.toml
---- /dev/null
-+++ b/src/sources/unavailable.rs
-FIXTURE
-        cat > "$root/toolchain/cargo/PIN" <<FIXTURE
-# fixture
-patch_sha256=toolchain/cargo/0001-slopos-cargo.patch:$(tp_sha256_file "$root/toolchain/cargo/0001-slopos-cargo.patch")
 FIXTURE
         # The llvm fork, pinned in a third PIN beside the tarball it patches.
         # It creates no file, so the materialisation check has nothing to look
@@ -377,8 +362,6 @@ FIXTURE
         tp_stamp "$root" > "$root/$TP_SYSROOT_REL/$TP_STAMP_NAME"
         mkdir -p "$src/compiler/rustc_target/src/spec/targets"
         touch "$src/compiler/rustc_target/src/spec/targets/x86_64_unknown_slopos.rs"
-        mkdir -p "$src/$TP_CARGO_TREE_REL/src/sources"
-        touch "$src/$TP_CARGO_TREE_REL/src/sources/unavailable.rs"
         mkdir -p "$src/$TP_LLVM_RUSTC_TREE_REL/clang/lib/Driver/ToolChains"
         touch "$src/$TP_LLVM_RUSTC_TREE_REL/clang/lib/Driver/ToolChains/SlopOS.cpp"
         mkdir -p "$src/$TP_CRATES_TREE_REL/demo-1.0.0/src" "$src/$TP_CRATES_TREE_REL/libc/src/unix/slopos"
@@ -471,17 +454,6 @@ FIXTURE
     run_case stale-rustc-src 1 "$TP_RUSTC_SRC_REL is stale" \
         "rejects a source tree whose stamp predates the compiler fork"
 
-    root="$(fixture cargo-patch-drift)"
-    echo "+++ b/Cargo.toml" >> "$root/toolchain/cargo/0001-slopos-cargo.patch"
-    run_case cargo-patch-drift 1 'toolchain/cargo/0001-slopos-cargo\.patch does not match its pin' \
-        "rejects a cargo patch edited without its own PIN"
-
-    root="$(fixture cargo-half-applied)"
-    materialise "$root"
-    rm -f "$root/$TP_RUSTC_SRC_REL/$TP_CARGO_TREE_REL/src/sources/unavailable.rs"
-    run_case cargo-half-applied 1 'src/tools/cargo/src/sources/unavailable\.rs \(toolchain/cargo/' \
-        "rejects a source tree whose cargo half never got patched"
-
     # The crate ports: a port edited without its PIN, a port with no `.crate`
     # to be cut against, a `.crate` with no port, and a port or the source
     # tree's libc copy that never landed.
@@ -573,7 +545,7 @@ FIXTURE
         echo "  case libc-edit-stales-both: a libc edit restamps the sysroot and the source tree"
     fi
 
-    for half in compiler cargo crates; do
+    for half in compiler crates; do
         root="$(fixture "rustc-src-without-$half")"
         materialise "$root"
         rm -rf "$root/toolchain/$half"

@@ -12,11 +12,10 @@ set -euo pipefail
 # sentence is novel — it is how every cross-hosted Rust distribution is
 # produced — and everything in it depends on what this tree already has: a
 # built-in target rustc can resolve, a C library and a C++ runtime for the
-# triple, a dynamic loader, and a cargo whose C-backed dependencies are
-# behind a feature.
+# triple, and a dynamic loader.
 #
-# Three things bootstrap cannot work out for itself, and this script supplies
-# all three:
+# Two things bootstrap cannot work out for itself, and this script supplies
+# both:
 #
 #   * A C and C++ compiler for the target. `[target.<triple>].cc` is a program
 #     name with no room for flags, and the host clang has no SlopOS toolchain
@@ -26,9 +25,6 @@ set -euo pipefail
 #     executable link is the half that matters: CMake's `try_compile` probes
 #     link, and a probe that fails to link is a capability LLVM then builds
 #     without.
-#   * `--no-default-features` for cargo. `build.tool.<name>.features` can only
-#     add, so `toolchain/compiler/0002-bootstrap-tool-default-features.patch`
-#     adds the key this config sets.
 #   * An LLVM for the host triple. `llvm.download-ci-llvm` serves the build
 #     triple only, so LLVM is built from source for SlopOS, with clang and lld
 #     in the same pass.
@@ -510,8 +506,6 @@ target = ["$HOST_TRIPLE", "$TARGET"]
 extended = true
 tools = ["cargo", "src"]
 $(rbs_build_settings)
-[build.tool.cargo]
-default-features = false
 
 [llvm]
 clang = true

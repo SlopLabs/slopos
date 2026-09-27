@@ -28,9 +28,8 @@ set -euo pipefail
 #
 # The workload is the guest's own (`selfhost_test`): `scripts/build_kernel.sh`
 # for the dev and then the tests kernel into one empty target directory, with
-# the cargo fork (`scripts/make_host_cargo.sh`), the vendored sources and
-# `CARGO_INCREMENTAL=1`, the way `just test-selfhost` builds its reference. A
-# stage sysroot's `lib/rustlib/src/rust` is the patched source tree, which is
+# the stage's own cargo (the stage0 one x.py downloads) and the vendored
+# sources. A stage sysroot's `lib/rustlib/src/rust` is the patched source tree, which is
 # what `-Zbuild-std` reads.
 #
 # A profile keys each function by its symbol and a hash of its control flow.
@@ -212,9 +211,6 @@ xpy() {
     (cd "$SRC" && RUSTC_WRAPPER="$WRAPPER" python3 x.py "$@" --config "$CONFIG" --jobs "$JOBS")
 }
 
-"$SCRIPT_DIR/make_host_cargo.sh" >/dev/null
-HOST_CARGO="$BUILD_DIR/host-cargo/cargo"
-
 # The guest's build, on the compiler in sysroot `$1`; both kernels' output
 # in `<out>/workload.log`.
 workload() {
@@ -225,8 +221,8 @@ workload() {
     sed "s|^directory = \"|directory = \"$REPO_ROOT/|" "$REPO_ROOT/.cargo/vendor.toml" >"$work/cargo-home/config.toml"
     for features in "" "slopos-testing/qemu-exit kernel/tests"; do
         (cd "$REPO_ROOT" && env -u KERNEL_RELEASE -u KERNEL_SAFESTACK -u KERNEL_RUSTFLAGS \
-            -u RUSTC_WRAPPER -u RUSTFLAGS -u LLVM_PROFILE_FILE CARGO_INCREMENTAL=1 \
-            CARGO="$HOST_CARGO" CARGO_HOME="$work/cargo-home" RUSTC="$sysroot/bin/rustc" \
+            -u RUSTC_WRAPPER -u RUSTFLAGS -u LLVM_PROFILE_FILE \
+            CARGO="$STAGE/stage0/bin/cargo" CARGO_HOME="$work/cargo-home" RUSTC="$sysroot/bin/rustc" \
             RUST_TARGET=targets/x86_64-slos.json \
             scripts/build_kernel.sh "$work" "$work/target" "$features") >>"$work.log" 2>&1 || {
             tail -n 30 "$work.log" >&2

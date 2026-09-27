@@ -626,18 +626,13 @@ test-devdisk: _build-run-tests
     [ ! -s "{{build_dir}}/devdisk-check.patch" ] ||
         { echo "FAIL: the source tree seeded this run exports as changed — see {{build_dir}}/devdisk-check.patch" >&2; exit 1; }
 
-# The whole self-hosting loop: the guest builds both kernels with the staged
-# toolchain, and the host grades what came out. Identity is against a host
-# build, so the guest's tree and the host's must be one commit, and the host's
-# cargo must hash as the guest's does: the fork's, from vendored sources, into
-# a target directory as empty as the guest's was, with none of the kernel knobs
-# the guest's environment lacks.
-[doc("Self-hosting check: the guest builds the dev and tests kernels off the dev disk; the host holds the volume to e2fsck, runs the ELF gates on both, the kernel suite on the tests kernel, and compares the dev kernel with its own build of the same commit")]
+# The whole self-hosting loop: the guest builds both kernels of HEAD with the
+# staged toolchain, and the host grades what came out.
+[doc("Self-hosting check: the guest builds the dev and tests kernels off the dev disk; the host holds the volume to e2fsck, runs the ELF gates on both and the kernel suite on the tests kernel")]
 test-selfhost: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
-    git diff --quiet HEAD || { echo "FAIL: the host builds its working tree and the guest builds HEAD; commit or stash first" >&2; exit 1; }
     just _fs-image-devdisk
     base="$(debugfs -R 'cat /src/slopos/.slopos-base' "{{fs_image_devdisk}}" 2>/dev/null)"
     [ "$base" = "$(git rev-parse HEAD)" ] ||
@@ -662,26 +657,11 @@ test-selfhost: _build-run-tests
             "{{fs_image_devdisk}}" "$guest/kernel-$variant.elf"
         scripts/check_kernel_elf_gates.sh "$guest" "$variant"
     done
-    scripts/ensure_toolchain.sh
-    scripts/make_host_cargo.sh
-    reference="$PWD/{{build_dir}}/selfhost-reference"
-    rm -rf "$reference"
-    mkdir -p "$reference/cargo-home"
-    # A config file, as the guest's is: a `--config` ahead of the subcommand is
-    # dropped once build_kernel.sh passes its own after it.
-    sed "s|^directory = \"|directory = \"$PWD/|" .cargo/vendor.toml >"$reference/cargo-home/config.toml"
-    # CARGO_INCREMENTAL pinned as the guest pins it: cargo defaults it off
-    # under CI=true, and the profile it lands in is hashed into -C metadata.
-    env -u KERNEL_RELEASE -u KERNEL_SAFESTACK -u KERNEL_RUSTFLAGS CARGO_INCREMENTAL=1 \
-        CARGO="$PWD/{{build_dir}}/host-cargo/cargo" CARGO_HOME="$reference/cargo-home" \
-        RUSTC="$(rustup which --toolchain slopos rustc)" RUST_TARGET={{rust_target}} \
-        scripts/build_kernel.sh "$reference" "$reference/target"
-    scripts/compare_kernel_elf.sh "$reference/kernel-dev.elf" "$guest/kernel-dev.elf"
     just test-elf "ELF=$guest/kernel-tests.elf"
 
 # The self-hosting build as a benchmark: the guest half of test-selfhost on
 # whatever the tree holds now, from an empty target directory, with prof=on.
-# No identity check, so it runs on an uncommitted kernel against the source
+# No HEAD check, so it runs on an uncommitted kernel against the source
 # the dev disk already carries. The libc.so the boot ran is kept beside the
 # log: user ticks symbolize against the objects that took them.
 [doc("Benchmark the guest's kernel build: boot the optimized tests kernel with the dev disk and prof=on, build the dev and tests kernels from clean, and summarize where the time went (builddir/bench-selfhost.log)")]
@@ -805,10 +785,6 @@ check-offline-build: vendor
 rustc-src:
     scripts/make_rustc_src.sh
 
-[doc("Hold the cargo fork's `network` cut to dropping every C library and still compiling. Needs `just rustc-src` first.")]
-check-cargo-fork:
-    scripts/check_cargo_fork.sh --require
-
 [doc("Cross-build the Rust toolchain that runs on SlopOS. Hours of CPU; `just check-bootstrap-config` is the affordable half. `--pgo` builds it as a Rust release is (ThinLTO, one codegen unit, PGO with the profiles `just toolchain-profile` gathers, made first when missing or stale).")]
 toolchain *ARGS:
     scripts/bootstrap_slopos_toolchain.sh {{ARGS}}
@@ -880,7 +856,6 @@ check-framekernel-gates:
     scripts/check_cxx_pin.sh --self-test
     scripts/check_llvm_port.sh --self-test
     scripts/check_clang_driver.sh --self-test
-    scripts/check_cargo_fork.sh --self-test
     scripts/check_bootstrap_config.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
@@ -892,7 +867,6 @@ check-framekernel-gates:
     scripts/check_cxx_pin.sh
     scripts/check_llvm_port.sh
     scripts/check_clang_driver.sh
-    scripts/check_cargo_fork.sh
     scripts/check_bootstrap_config.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
@@ -997,7 +971,7 @@ clean:
     fi
     {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}}
     rm -f {{build_dir}}/kernel-*.elf
-    rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port {{build_dir}}/gates/clang-driver {{build_dir}}/gates/cargo-fork {{build_dir}}/gates/bootstrap-config {{build_dir}}/gates/offline-build
+    rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port {{build_dir}}/gates/clang-driver {{build_dir}}/gates/bootstrap-config {{build_dir}}/gates/offline-build
 
 [doc("Full clean including ISOs, images, and logs")]
 distclean: clean
