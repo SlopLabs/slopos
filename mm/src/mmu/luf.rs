@@ -1,25 +1,25 @@
 //! Lazy Unmap Flush (LUF) — the local half of tearing down a user mapping.
 //!
-//! The unmapping CPU stops resolving the address here, with one `invlpg`.
-//! Holding the frame back until no peer still caches it belongs to
-//! [`super::quiesce`]; no shootdown IPI is sent.
+//! The unmapping CPU's own invalidation belongs to the cursor: each entry's
+//! clear is ordered before the unmap hook runs, and the local invalidation is
+//! complete by the time the range operation returns. Holding the frame back
+//! until no peer still caches it belongs to [`super::quiesce`]; no shootdown
+//! IPI is sent.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_abi::addr::VirtAddr;
 use slopos_arch::pcr::MAX_CPUS;
 
-/// Tear down the calling CPU's cached translation for `vaddr`, and record that
-/// peers have *not* been told.
+/// Record that peers have *not* been told `mm_ctx_handle` lost a translation.
 ///
-/// Unconditional: a `munmap` and a later dereference on the same CPU must
-/// fault. `INVLPG` targets whatever PCID is currently loaded, so it is a no-op
-/// when this CPU is running another address space; the quiesce epoch covers
-/// that CPU when it next acks.
-pub fn queue_unmap(vaddr: VirtAddr, mm_ctx_handle: u64) {
-    slopos_arch::cpu::tlb::invlpg(vaddr.as_u64());
+/// Runs once per page a range teardown clears, so a stamp already this new is
+/// only read: the RMW would bounce a line every unmapping CPU shares.
+pub fn queue_unmap(mm_ctx_handle: u64) {
     let epoch = super::quiesce::note_deferred_unmap();
-    CTX_DEFERRED[ctx_slot(mm_ctx_handle)].fetch_max(epoch, Ordering::AcqRel);
+    let slot = &CTX_DEFERRED[ctx_slot(mm_ctx_handle)];
+    if slot.load(Ordering::Acquire) < epoch {
+        slot.fetch_max(epoch, Ordering::AcqRel);
+    }
 }
 
 /// Address spaces tracked individually; context handles that share a slot

@@ -120,7 +120,8 @@ pub enum Step {
     /// missing intermediate top-down, then installs the leaf and leaks one
     /// `UFrame` ref — unless the leaf is already present, where the `Overlap`
     /// guard refuses rather than leak twice. The argument type is what makes
-    /// the installed leaf insensitive.
+    /// the installed leaf insensitive. `map_each` takes this step once per
+    /// item, through the same guard.
     Map,
     /// `CursorMut::map_kernel::<S, M: AnyFrameMeta>(Frame<M>, prop)`. Same
     /// walk, guard and accounting as `Map`, but over a sensitive `Frame<M>`.
@@ -134,10 +135,11 @@ pub enum Step {
     /// `CursorMut::unmap::<S, M>()`. Clears a present leaf, reclaiming one ref
     /// only if the entry says it owns one: the not-present guard refuses a
     /// double-free, the software bit refuses a free of a slot never taken.
-    /// Intermediates stay linked until `VmSpace::drop`.
+    /// Intermediates stay linked until `VmSpace::drop`. `unmap_present` takes
+    /// this step once per present 4 KiB leaf, through the same guards.
     Unmap,
     /// `CursorMut::protect::<S>(prop)`. Leaf flags only: no structural change,
-    /// no ref movement.
+    /// no ref movement. `update_present` takes it for each leaf it rewrites.
     Protect,
     /// A map attempt the cursor **refuses**: `Overlap` on a present leaf, or
     /// `IntermediateAllocFailed` / `PathCorrupt` out of the Create-mode walk

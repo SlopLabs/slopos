@@ -78,8 +78,11 @@ pub fn current_epoch() -> u64 {
 pub fn note_deferred_unmap() -> u64 {
     let epoch = EPOCH.load(Ordering::Acquire);
     // Monotone: a concurrent advance must not walk the stamp backwards and
-    // shorten the window a frame is protected for.
-    LAST_DEFERRED_EPOCH.fetch_max(epoch, Ordering::AcqRel);
+    // shorten the window a frame is protected for. A stamp already this new
+    // is only read, sparing a range teardown one contended RMW per page.
+    if LAST_DEFERRED_EPOCH.load(Ordering::Acquire) < epoch {
+        LAST_DEFERRED_EPOCH.fetch_max(epoch, Ordering::AcqRel);
+    }
     epoch
 }
 

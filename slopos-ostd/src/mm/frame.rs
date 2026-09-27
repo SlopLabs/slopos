@@ -33,6 +33,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize,
 
 use slopos_abi::addr::PhysAddr;
 
+use crate::mm::uframe::{AnyUFrameMeta, UFrame};
 use crate::sync::BspToken;
 
 pub type Paddr = PhysAddr;
@@ -1291,8 +1292,15 @@ impl<M: AnyFrameMeta, S: init_state::InitState> core::fmt::Debug for Frame<M, S>
     }
 }
 
-impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
-    fn drop(&mut self) {
+impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
+    /// Give up this reference and, if it was the last, the page the
+    /// allocator is owed — for the caller to return rather than this.
+    pub(crate) fn release(self) -> Option<Paddr> {
+        core::mem::ManuallyDrop::new(self).release_ref()
+    }
+
+    /// The body of `drop`, up to returning the page.
+    fn release_ref(&self) -> Option<Paddr> {
         // SAFETY: `ptr` points at a live `MetaSlot` for as long as
         // `ref_count > 0`, which is true while this `Frame` is alive.
         let slot = unsafe { &*self.ptr };
@@ -1300,7 +1308,7 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
         // (0), which we then own exclusively for teardown; the Release here
         // pairs with the Acquire fence below.
         if slot.ref_count.fetch_sub(1, Ordering::Release) != 1 {
-            return;
+            return None;
         }
         core::sync::atomic::fence(Ordering::Acquire);
         let vt = slot.vtable.load(Ordering::Acquire);
@@ -1319,9 +1327,72 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
         }
         slot.vtable.store(core::ptr::null_mut(), Ordering::Release);
         slot.ref_count.store(REF_COUNT_UNUSED, Ordering::Release);
-        if return_page {
+        return_page.then_some(paddr)
+    }
+}
+
+impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
+    fn drop(&mut self) {
+        if let Some(paddr) = self.release_ref() {
             return_frame_to_allocator(paddr);
         }
+    }
+}
+
+/// Pages a batch holds before handing them to the allocator.
+const RETURN_BATCH_PAGES: usize = 8;
+
+/// Frames dropped together, whose freed pages reach the allocator in one
+/// [`FrameAlloc::dealloc_batch`] per [`RETURN_BATCH_PAGES`] rather than one
+/// `dealloc` each. A page is returned no earlier than dropping its frame
+/// would have, and no later than the batch's own drop.
+pub struct FrameReturnBatch {
+    pages: [Paddr; RETURN_BATCH_PAGES],
+    len: usize,
+}
+
+impl FrameReturnBatch {
+    pub const fn new() -> Self {
+        Self {
+            pages: [Paddr::NULL; RETURN_BATCH_PAGES],
+            len: 0,
+        }
+    }
+
+    /// Drop `frame`, holding back the page it frees.
+    pub fn drop_frame<M: AnyUFrameMeta>(&mut self, frame: UFrame<M>) {
+        let Some(paddr) = frame.into_frame().release() else {
+            return;
+        };
+        self.pages[self.len] = paddr;
+        self.len += 1;
+        if self.len == RETURN_BATCH_PAGES {
+            self.flush();
+        }
+    }
+
+    /// Return every page held so far.
+    pub fn flush(&mut self) {
+        let pages = &self.pages[..self.len];
+        self.len = 0;
+        if pages.is_empty() {
+            return;
+        }
+        if let Some(alloc) = crate::mm::frame_alloc::current_frame_allocator() {
+            alloc.dealloc_batch(pages);
+        }
+    }
+}
+
+impl Default for FrameReturnBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for FrameReturnBatch {
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 
@@ -1370,6 +1441,14 @@ impl FrameAllocOptions {
 pub trait FrameAlloc: Send + Sync + 'static {
     fn alloc(&self, opts: FrameAllocOptions) -> Option<Paddr>;
     fn dealloc(&self, paddr: Paddr, size_pages: usize);
+
+    /// Return each of `pages`, single pages all, as `dealloc` would: one call
+    /// for a batch lets the allocator take its lock once.
+    fn dealloc_batch(&self, pages: &[Paddr]) {
+        for &paddr in pages {
+            self.dealloc(paddr, 1);
+        }
+    }
 }
 
 #[cfg(test)]

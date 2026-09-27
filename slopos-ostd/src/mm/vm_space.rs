@@ -28,7 +28,7 @@
 //! `verification/STATUS.md` for the gap vs. CortenMM's fine-grained
 //! per-PT-page locking.
 
-use core::ops::Range;
+use core::ops::{ControlFlow, Range};
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -37,10 +37,11 @@ use crate::arch::x86_64::cr3::{Pcid, write_cr3_pcid};
 use crate::mm::frame::{AnyFrameMeta, Frame, FrameAllocOptions, Paddr, PageTableMeta};
 use crate::mm::frame_alloc::current_frame_allocator;
 use crate::mm::page_property::PageProperty;
-use crate::mm::page_size::PageSize;
+use crate::mm::page_size::{PageSize, Size4Kb};
 use crate::mm::page_table::{
-    PAGE_SIZE_4KB, PageTableLevel, PteFlags, WalkMode, WalkOutcome, charge_page_table_frame,
-    entry_in_table, read_leaf, reclaim_leaked_frame, refund_page_table_frame, walk_to_leaf,
+    PAGE_SIZE_4KB, PAGE_TABLE_ENTRIES, PageTableLevel, Pte, PteFlags, WalkMode, WalkOutcome,
+    charge_page_table_frame, entry_in_table, read_leaf, reclaim_leaked_frame,
+    refund_page_table_frame, walk_to_leaf,
 };
 use crate::mm::tlb;
 use crate::mm::uframe::{AnyUFrameMeta, UFrame};
@@ -205,8 +206,15 @@ pub fn activate_kernel_master_cr3() {
 /// callbacks.
 pub trait CursorUnmapHook: Send + Sync {
     /// Fired at the end of [`CursorMut::unmap`] for entries that had
-    /// the `USER` bit set.
+    /// the `USER` bit set, after the entry's clear and before the frame is
+    /// handed back. This CPU's invalidation of `vaddr` is complete by the
+    /// time the unmapping operation returns, not necessarily by this call.
     fn after_unmap(&self, vaddr: VirtAddr, paddr: PhysAddr, mm_ctx_handle: u64);
+
+    /// Invalidate this CPU's translations in place of a range operation's
+    /// per-page local invalidation: at least every one an `invlpg` would
+    /// reach, i.e. the context CR3 carries.
+    fn flush_local(&self);
 
     /// Fired at the start of [`VmSpace::activate`].
     fn on_activate(&self, mm_ctx_handle: u64);
@@ -491,17 +499,9 @@ impl VmSpace {
 
     /// A user leaf appeared (`delta > 0`) or left. Saturating rather than
     /// wrapping: a miscount must not read as four billion pages.
-    fn note_resident(&self, delta: i32) {
-        if delta >= 0 {
-            self.resident.fetch_add(delta as u32, Ordering::Relaxed);
-        } else {
-            let dropped = (-delta) as u32;
-            let _ = self
-                .resident
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                    Some(cur.saturating_sub(dropped))
-                });
-        }
+    fn note_resident(&mut self, delta: i32) {
+        let resident = self.resident.get_mut();
+        *resident = resident.saturating_add_signed(delta);
     }
 }
 
@@ -771,7 +771,17 @@ impl<'a> CursorMut<'a> {
             Ok(leaf) => leaf,
             Err(e) => return Err((frame, e)),
         };
-        let pte = entry_in_table(leaf_table_phys, leaf_index);
+        self.place_leaf::<S, M>(entry_in_table(leaf_table_phys, leaf_index), frame, prop)
+    }
+
+    /// Install `frame` in the leaf entry `pte`, which covers the cursor's
+    /// vaddr at size `S`.
+    fn place_leaf<S: PageSize, M: AnyUFrameMeta>(
+        &mut self,
+        pte: Pte,
+        frame: UFrame<M>,
+        prop: PageProperty,
+    ) -> Result<(), (UFrame<M>, MapError)> {
         if pte.is_present() {
             // VERIFIED: `verification/proofs/vm_space_cursor.rs`
             // (`broken_double_leak_violates_refcount`) proves this
@@ -1146,8 +1156,19 @@ impl<'a> CursorMut<'a> {
         if !pte.is_present() {
             return Ok(None);
         }
-        // A size mismatch would already have failed the `S::LEVEL`
-        // check above.
+        self.take_leaf::<S, M>(pte, None)
+    }
+
+    /// Clear the present leaf `pte`, which maps the cursor's vaddr at size
+    /// `S`, and reclaim the reference `map` leaked into it. `Ok(None)` for a
+    /// `map_io` leaf, which holds none.
+    fn take_leaf<S: PageSize, M: AnyFrameMeta>(
+        &mut self,
+        pte: Pte,
+        range: Option<&mut RangeInvalidation>,
+    ) -> Result<Option<Frame<M>>, MapError> {
+        // A size mismatch would already have failed the caller's
+        // `S::LEVEL` check.
         debug_assert_eq!(pte.is_huge(), S::HUGE_BIT);
 
         let paddr = pte.address();
@@ -1158,7 +1179,10 @@ impl<'a> CursorMut<'a> {
         pte.clear();
         // Local invalidation only; cross-CPU shootdown is the
         // consumer's responsibility.
-        flush_leaf_local::<S>(self.cur);
+        match range {
+            Some(range) => range.invalidate(self.cur),
+            None => flush_leaf_local::<S>(self.cur),
+        }
         self.dirty = true;
 
         if owns_no_ref {
@@ -1183,7 +1207,7 @@ impl<'a> CursorMut<'a> {
 
         // VERIFIED: `verification/proofs/vm_space_cursor.rs` (REF)
         // proves `unmap` of a present leaf reclaims exactly one ref and
-        // that the not-present guard above prevents a double-free.
+        // that the not-present guard in every caller prevents a double-free.
         // SAFETY: at `map` time we leaked exactly one ref to this slot
         // via `Frame::into_raw`; clearing the PTE above removes the only
         // path that held it, and `from_raw_at` re-wraps without bumping
@@ -1231,6 +1255,18 @@ impl<'a> CursorMut<'a> {
         if leaf_level != S::LEVEL {
             return Err(MapError::SizeMismatch);
         }
+        self.rewrite_leaf::<S>(pte, prop, None);
+        Ok(())
+    }
+
+    /// Rewrite the present leaf `pte`, which maps the cursor's vaddr at size
+    /// `S`, to `prop`, keeping its frame.
+    fn rewrite_leaf<S: PageSize>(
+        &mut self,
+        pte: Pte,
+        prop: PageProperty,
+        range: Option<&mut RangeInvalidation>,
+    ) {
         let mut flags = prop.to_leaf_flags();
         if !flags.contains(PteFlags::PRESENT) {
             flags |= PteFlags::PRESENT;
@@ -1239,9 +1275,11 @@ impl<'a> CursorMut<'a> {
             flags |= PteFlags::HUGE;
         }
         pte.set_flags_only(flags);
-        flush_leaf_local::<S>(self.cur);
+        match range {
+            Some(range) => range.invalidate(self.cur),
+            None => flush_leaf_local::<S>(self.cur),
+        }
         self.dirty = true;
-        Ok(())
     }
 }
 
@@ -1253,6 +1291,44 @@ fn flush_leaf_local<S: PageSize>(start: VirtAddr) {
     while offset < S::BYTES {
         tlb::flush_local(VirtAddr::new(start.as_u64() + offset));
         offset += PAGE_SIZE_4KB;
+    }
+}
+
+/// This CPU's invalidation across a range: an `invlpg` per leaf until that
+/// costs more than invalidating the whole context once, which [`Self::finish`]
+/// then does. Past that point a leaf's clear is only fenced, which is all the
+/// unmap hook needs of the invalidation: the clear ordered before its reads.
+struct RangeInvalidation {
+    leaves: usize,
+    hook: Option<&'static dyn CursorUnmapHook>,
+}
+
+impl RangeInvalidation {
+    /// Where one `invlpg` per leaf starts to cost more than a context flush.
+    const LEAF_LIMIT: usize = 32;
+
+    fn new() -> Self {
+        Self {
+            leaves: 0,
+            hook: current_cursor_unmap_hook(),
+        }
+    }
+
+    fn invalidate(&mut self, vaddr: VirtAddr) {
+        self.leaves += 1;
+        if self.leaves <= Self::LEAF_LIMIT || self.hook.is_none() {
+            tlb::flush_local(vaddr);
+        } else {
+            core::sync::atomic::fence(Ordering::SeqCst);
+        }
+    }
+
+    fn finish(self) {
+        if self.leaves > Self::LEAF_LIMIT
+            && let Some(hook) = self.hook
+        {
+            hook.flush_local();
+        }
     }
 }
 
@@ -1313,6 +1389,168 @@ impl CursorMut<'_> {
             remaining -= S::BYTES;
         }
         Ok(())
+    }
+
+    /// Unmap every present 4 KiB leaf from the cursor to `range.end`,
+    /// descending once per leaf table, and hand each frame to `each` in the
+    /// state [`Self::unmap`] returns it in: gone from this CPU's TLB only.
+    /// Huge leaves stay mapped. On error the cursor rests on the leaf that
+    /// failed, and every leaf before it is gone.
+    pub fn unmap_present<M: AnyUFrameMeta>(
+        &mut self,
+        mut each: impl FnMut(VirtAddr, UFrame<M>),
+    ) -> Result<(), MapError> {
+        let mut local = RangeInvalidation::new();
+        let unmapped = self.unmap_present_into(&mut local, &mut each);
+        local.finish();
+        unmapped
+    }
+
+    fn unmap_present_into<M: AnyUFrameMeta>(
+        &mut self,
+        local: &mut RangeInvalidation,
+        each: &mut impl FnMut(VirtAddr, UFrame<M>),
+    ) -> Result<(), MapError> {
+        while let Some((table, first, last)) = self.next_leaf_table()? {
+            let base = self.cur.as_u64() - first as u64 * PAGE_SIZE_4KB;
+            for index in first..last {
+                let pte = entry_in_table(table, index);
+                if !pte.is_present() {
+                    continue;
+                }
+                self.cur = VirtAddr::new(base + index as u64 * PAGE_SIZE_4KB);
+                if let Some(frame) = self.take_leaf::<Size4Kb, M>(pte, Some(local))? {
+                    each(self.cur, UFrame::from_frame(frame));
+                }
+            }
+            self.cur = VirtAddr::new(base + last as u64 * PAGE_SIZE_4KB);
+        }
+        Ok(())
+    }
+
+    /// Offer every present 4 KiB leaf from the cursor to `range.end` to `f`,
+    /// descending once per leaf table; `Continue(Some(prop))` rewrites the
+    /// leaf as [`Self::protect`] would. Huge leaves are not offered.
+    /// `Ok(false)` when `f` broke off, with the cursor on the leaf it refused.
+    pub fn update_present(
+        &mut self,
+        mut f: impl FnMut(CursorEntry) -> ControlFlow<(), Option<PageProperty>>,
+    ) -> Result<bool, MapError> {
+        let mut local = RangeInvalidation::new();
+        let completed = self.update_present_into(&mut local, &mut f);
+        local.finish();
+        completed
+    }
+
+    fn update_present_into(
+        &mut self,
+        local: &mut RangeInvalidation,
+        f: &mut impl FnMut(CursorEntry) -> ControlFlow<(), Option<PageProperty>>,
+    ) -> Result<bool, MapError> {
+        while let Some((table, first, last)) = self.next_leaf_table()? {
+            let base = self.cur.as_u64() - first as u64 * PAGE_SIZE_4KB;
+            for index in first..last {
+                let pte = entry_in_table(table, index);
+                if !pte.is_present() {
+                    continue;
+                }
+                self.cur = VirtAddr::new(base + index as u64 * PAGE_SIZE_4KB);
+                let entry = CursorEntry {
+                    vaddr: self.cur,
+                    paddr: Some(pte.address()),
+                    property: PageProperty::from_leaf_flags(pte.flags()),
+                    level: PageTableLevel::One,
+                };
+                match f(entry) {
+                    ControlFlow::Break(()) => return Ok(false),
+                    ControlFlow::Continue(Some(prop)) => {
+                        self.rewrite_leaf::<Size4Kb>(pte, prop, Some(local))
+                    }
+                    ControlFlow::Continue(None) => {}
+                }
+            }
+            self.cur = VirtAddr::new(base + last as u64 * PAGE_SIZE_4KB);
+        }
+        Ok(true)
+    }
+
+    /// Map each `(vaddr, frame, prop)` as [`Self::map::<Size4Kb>`] would at
+    /// `vaddr`, descending once per leaf table while consecutive vaddrs share
+    /// one. Returns how many were mapped. A refusal hands back the frame and
+    /// the vaddr it was refused at; an iterator passed by `&mut` keeps the
+    /// items not reached.
+    pub fn map_each<M, I>(&mut self, items: I) -> Result<usize, (UFrame<M>, VirtAddr, MapError)>
+    where
+        M: AnyUFrameMeta,
+        I: IntoIterator<Item = (VirtAddr, UFrame<M>, PageProperty)>,
+    {
+        // The 2 MiB block last descended into, its leaf table, and whether
+        // that descent made the path user-reachable.
+        let mut last: Option<(u64, Paddr, bool)> = None;
+        let mut count = 0usize;
+        for (vaddr, frame, prop) in items {
+            if let Err(e) = self.seek(vaddr) {
+                return Err((frame, vaddr, e));
+            }
+            if vaddr.as_u64() >= self.range.end.as_u64() {
+                return Err((frame, vaddr, MapError::OutOfBounds));
+            }
+            let block = vaddr.as_u64() & PageTableLevel::Two.align_mask();
+            let table = match last {
+                Some((b, table, user)) if b == block && (user || !prop.user) => table,
+                _ => match self.walk_to_leaf_for_map::<Size4Kb>(prop.user) {
+                    Ok((table, _)) => {
+                        last = Some((block, table, prop.user));
+                        table
+                    }
+                    Err(e) => return Err((frame, vaddr, e)),
+                },
+            };
+            let pte = entry_in_table(table, PageTableLevel::One.index_of(vaddr));
+            self.place_leaf::<Size4Kb, M>(pte, frame, prop)
+                .map_err(|(frame, e)| (frame, vaddr, e))?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Descend from the cursor to the next 4 KiB leaf table under the range,
+    /// stepping over absent subtrees and huge leaves whole. Returns the table
+    /// and the index span `[first, last)` of it the range covers, with the
+    /// cursor on `first`; `None`, with the cursor at `range.end`, once there is
+    /// none.
+    fn next_leaf_table(&mut self) -> Result<Option<(Paddr, usize, usize)>, MapError> {
+        let end = self.range.end.as_u64();
+        while self.cur.as_u64() < end {
+            let skip = match walk_to_leaf(
+                self.space.pml4_paddr(),
+                self.cur,
+                false,
+                WalkMode::Mutate,
+                PageTableLevel::One,
+            )
+            .map_err(map_walk_err)?
+            {
+                WalkOutcome::LeafTable {
+                    leaf_table_phys,
+                    leaf_index,
+                    leaf_level: PageTableLevel::One,
+                } => {
+                    let span = ((PAGE_TABLE_ENTRIES - leaf_index) as u64 * PAGE_SIZE_4KB)
+                        .min(end - self.cur.as_u64());
+                    let last = leaf_index + (span / PAGE_SIZE_4KB) as usize;
+                    return Ok(Some((leaf_table_phys, leaf_index, last)));
+                }
+                WalkOutcome::LeafTable { leaf_level, .. } => leaf_level,
+                WalkOutcome::NotPresent { stopped_at } => stopped_at,
+            };
+            self.cur = match (self.cur.as_u64() & skip.align_mask()).checked_add(skip.entry_size())
+            {
+                Some(next) if next < end => VirtAddr::new(next),
+                _ => self.range.end,
+            };
+        }
+        Ok(None)
     }
 }
 

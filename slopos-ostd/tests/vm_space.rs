@@ -4,14 +4,15 @@
 //! gate, which every test acquires so global OSTD state is serialised. Tests
 //! use disjoint `vaddr` ranges so they never see each other's mappings.
 
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::arch::x86_64::cr3::Pcid;
 use slopos_ostd::mm::frame::{
-    AnonymousMeta, Frame, FrameAlloc, FrameAllocOptions, KernelMeta, MetaSlot, Paddr,
-    init_meta_slots,
+    AnonymousMeta, Frame, FrameAlloc, FrameAllocOptions, FrameReturnBatch, KernelMeta, MetaSlot,
+    Paddr, init_meta_slots,
 };
 use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 use slopos_ostd::mm::page_property::PageProperty;
@@ -52,10 +53,18 @@ impl FrameAlloc for BumpAlloc {
         Some(paddr)
     }
 
-    fn dealloc(&self, _paddr: Paddr, _size_pages: usize) {
-        // Bump allocator: leak.
+    fn dealloc(&self, paddr: Paddr, _size_pages: usize) {
+        // Bump allocator: leak, noting what came back.
+        RETURNED.lock().unwrap().push(vec![paddr]);
+    }
+
+    fn dealloc_batch(&self, pages: &[Paddr]) {
+        RETURNED.lock().unwrap().push(pages.to_vec());
     }
 }
+
+/// Each `dealloc` / `dealloc_batch` call's pages, in call order.
+static RETURNED: Mutex<Vec<Vec<Paddr>>> = Mutex::new(Vec::new());
 
 /// Reserve a 2 MiB-aligned page-index region and return its head paddr.
 fn alloc_2mb_aligned_paddr() -> Paddr {
@@ -536,6 +545,7 @@ fn drop_user_half_returns_intermediate_tables_to_allocator() {
 struct CountingUnmapHook {
     after_unmap_calls: AtomicU64,
     on_activate_calls: AtomicU64,
+    flush_local_calls: AtomicU64,
     last_after_vaddr: AtomicU64,
     last_after_paddr: AtomicU64,
     last_after_handle: AtomicU64,
@@ -545,6 +555,7 @@ struct CountingUnmapHook {
 static COUNTING_HOOK: CountingUnmapHook = CountingUnmapHook {
     after_unmap_calls: AtomicU64::new(0),
     on_activate_calls: AtomicU64::new(0),
+    flush_local_calls: AtomicU64::new(0),
     last_after_vaddr: AtomicU64::new(0),
     last_after_paddr: AtomicU64::new(0),
     last_after_handle: AtomicU64::new(0),
@@ -561,6 +572,9 @@ impl CursorUnmapHook for CountingUnmapHook {
             .store(paddr.as_u64(), Ordering::Relaxed);
         self.last_after_handle
             .store(mm_ctx_handle, Ordering::Relaxed);
+    }
+    fn flush_local(&self) {
+        self.flush_local_calls.fetch_add(1, Ordering::Relaxed);
     }
     fn on_activate(&self, mm_ctx_handle: u64) {
         self.on_activate_calls.fetch_add(1, Ordering::Relaxed);
@@ -1048,4 +1062,275 @@ fn page_table_frames_are_charged_and_given_back() {
 
     drop(space);
     assert_eq!(kernelmeta(), baseline, "every page-table charge came back");
+}
+
+fn map_4kb(space: &mut VmSpace, vaddr: u64) -> Paddr {
+    let frame = fresh_user_frame();
+    let paddr = frame.paddr();
+    let mut cur = space
+        .cursor_mut(VirtAddr::new(vaddr)..VirtAddr::new(vaddr + 0x1000))
+        .unwrap();
+    cur.map::<Size4Kb, _>(frame, PageProperty::USER_RW).unwrap();
+    paddr
+}
+
+#[test]
+fn unmap_present_takes_every_4kb_leaf_across_tables_and_keeps_huge_ones() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+    let start = 0x0000_0006_0000_0000_u64;
+    // Last page of one leaf table, first of the next, and one a PDPT away.
+    let leaves = [
+        start + 0x1F_F000,
+        start + 0x20_0000,
+        start + 0x4000_0000 + 0x3000,
+    ];
+    let paddrs = leaves.map(|va| map_4kb(&mut space, va));
+    let huge_at = start + 0x60_0000;
+    let huge = alloc_2mb_aligned_paddr();
+    {
+        let mut cur = space
+            .cursor_mut(VirtAddr::new(huge_at)..VirtAddr::new(huge_at + 0x20_0000))
+            .unwrap();
+        cur.map::<Size2Mb, _>(
+            UFrame::<AnonymousMeta>::from_unused(huge, AnonymousMeta::default()).unwrap(),
+            PageProperty::USER_RW,
+        )
+        .unwrap();
+    }
+    let resident = space.resident_pages();
+    let end = VirtAddr::new(start + 0x8000_0000);
+
+    let mut taken = Vec::new();
+    {
+        let mut cur = space.cursor_mut(VirtAddr::new(start)..end).unwrap();
+        cur.unmap_present::<AnonymousMeta>(|va, frame| {
+            assert_eq!(frame.reference_count(), 1);
+            taken.push((va.as_u64(), frame.paddr()));
+        })
+        .unwrap();
+        assert_eq!(cur.vaddr(), end);
+    }
+
+    let expected: Vec<_> = leaves.iter().copied().zip(paddrs).collect();
+    assert_eq!(taken, expected);
+    assert_eq!(space.resident_pages(), resident - 3);
+    for va in leaves {
+        assert_eq!(resolve(&space, VirtAddr::new(va)), None);
+    }
+    assert_eq!(resolve(&space, VirtAddr::new(huge_at)), Some(huge));
+}
+
+#[test]
+fn update_present_rewrites_what_it_is_told_and_stops_where_refused() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+    let start = 0x0000_0006_8000_0000_u64;
+    let leaves = [start, start + 0x1000, start + 0x40_0000];
+    for va in leaves {
+        map_4kb(&mut space, va);
+    }
+    let end = VirtAddr::new(start + 0x80_0000);
+
+    let mut seen = Vec::new();
+    let completed = {
+        let mut cur = space.cursor_mut(VirtAddr::new(start)..end).unwrap();
+        let completed = cur
+            .update_present(|entry| {
+                seen.push(entry.vaddr.as_u64());
+                match seen.len() {
+                    1 => ControlFlow::Continue(Some(PageProperty::USER_RO)),
+                    2 => ControlFlow::Continue(None),
+                    _ => ControlFlow::Break(()),
+                }
+            })
+            .unwrap();
+        assert_eq!(cur.vaddr().as_u64(), leaves[2]);
+        completed
+    };
+
+    assert!(!completed);
+    assert_eq!(seen, leaves);
+    let write_at = |va: u64| {
+        let cur = space
+            .cursor(VirtAddr::new(va)..VirtAddr::new(va + 0x1000))
+            .unwrap();
+        cur.query().unwrap().property.write
+    };
+    assert!(!write_at(leaves[0]));
+    assert!(write_at(leaves[1]));
+    assert!(write_at(leaves[2]));
+}
+
+#[test]
+fn map_each_hands_back_the_refused_frame_and_keeps_what_landed() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+    let start = 0x0000_0007_0000_0000_u64;
+    let taken = start + 0x20_0000;
+    map_4kb(&mut space, taken);
+
+    let frames: Vec<_> = (0..3).map(|_| fresh_user_frame()).collect();
+    let paddrs: Vec<_> = frames.iter().map(|f| f.paddr()).collect();
+    let vaddrs = [start + 0x1F_F000, start, taken];
+    let items = vaddrs
+        .iter()
+        .zip(frames)
+        .map(|(va, f)| (VirtAddr::new(*va), f, PageProperty::USER_RW));
+
+    let refused = {
+        let mut cur = space
+            .cursor_mut(VirtAddr::new(start)..VirtAddr::new(start + 0x40_0000))
+            .unwrap();
+        cur.map_each(items).unwrap_err()
+    };
+
+    assert_eq!(refused.0.paddr(), paddrs[2]);
+    assert_eq!(refused.1, VirtAddr::new(taken));
+    assert_eq!(refused.2, MapError::Overlap);
+    assert_eq!(resolve(&space, VirtAddr::new(vaddrs[0])), Some(paddrs[0]));
+    assert_eq!(resolve(&space, VirtAddr::new(vaddrs[1])), Some(paddrs[1]));
+}
+
+#[test]
+fn frame_return_batch_returns_each_freed_page_once_and_no_shared_one() {
+    let _g = setup();
+    let frames: Vec<_> = (0..10).map(|_| fresh_user_frame()).collect();
+    let paddrs: Vec<_> = frames.iter().map(|f| f.paddr()).collect();
+    let shared = UFrame::<AnonymousMeta>::from_in_use(paddrs[3]).unwrap();
+    RETURNED.lock().unwrap().clear();
+
+    let mut batch = FrameReturnBatch::new();
+    for frame in frames {
+        batch.drop_frame(frame);
+    }
+    let full: Vec<_> = paddrs.iter().copied().filter(|p| *p != paddrs[3]).collect();
+    assert_eq!(*RETURNED.lock().unwrap(), vec![full[..8].to_vec()]);
+
+    drop(batch);
+    assert_eq!(
+        *RETURNED.lock().unwrap(),
+        vec![full[..8].to_vec(), full[8..].to_vec()]
+    );
+
+    drop(shared);
+    assert_eq!(RETURNED.lock().unwrap().last(), Some(&vec![paddrs[3]]));
+}
+
+#[test]
+fn a_long_range_unmap_flushes_the_context_once_instead_of_per_page() {
+    let _g = setup();
+    install_hook_once();
+    let mut space = VmSpace::new().unwrap();
+    let start = 0x0000_0007_8000_0000_u64;
+    let unmap_counting = |space: &mut VmSpace, pages: u64| {
+        for i in 0..pages {
+            map_4kb(space, start + i * 0x1000);
+        }
+        let hooks = COUNTING_HOOK.after_unmap_calls.load(Ordering::Relaxed);
+        let flushes = COUNTING_HOOK.flush_local_calls.load(Ordering::Relaxed);
+        let mut cur = space
+            .cursor_mut(VirtAddr::new(start)..VirtAddr::new(start + 0x20_0000))
+            .unwrap();
+        cur.unmap_present::<AnonymousMeta>(|_, frame| drop(frame))
+            .unwrap();
+        (
+            COUNTING_HOOK.after_unmap_calls.load(Ordering::Relaxed) - hooks,
+            COUNTING_HOOK.flush_local_calls.load(Ordering::Relaxed) - flushes,
+        )
+    };
+
+    assert_eq!(unmap_counting(&mut space, 32), (32, 0));
+    assert_eq!(unmap_counting(&mut space, 33), (33, 1));
+}
+
+/// The raw entry at `index` of the page table at `table`.
+fn raw_entry(table: PhysAddr, index: usize) -> u64 {
+    // SAFETY: `table` is a live page-table frame in the arena and
+    // `index < 512`; this thread holds the setup gate.
+    unsafe { arena_entry_ptr(table, index).read_volatile() }
+}
+
+#[test]
+fn map_each_redescends_for_a_user_item_after_a_kernel_one_in_the_same_block() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+    let start = 0x0000_0008_0000_0000_u64;
+    let (kernel_va, user_va) = (start, start + 0x1000);
+    let items = [
+        (
+            VirtAddr::new(kernel_va),
+            fresh_user_frame(),
+            PageProperty::KERNEL_RW,
+        ),
+        (
+            VirtAddr::new(user_va),
+            fresh_user_frame(),
+            PageProperty::USER_RW,
+        ),
+    ];
+
+    let mapped = {
+        let mut cur = space
+            .cursor_mut(VirtAddr::new(start)..VirtAddr::new(start + 0x20_0000))
+            .unwrap();
+        cur.map_each(items).unwrap()
+    };
+    assert_eq!(mapped, 2);
+
+    let va = VirtAddr::new(user_va);
+    let user = PteFlags::USER.bits();
+    let pml4e = raw_entry(space.pml4_paddr(), PageTableLevel::Four.index_of(va));
+    let pdpte = raw_entry(
+        PhysAddr::new(pml4e & PteFlags::ADDRESS_MASK),
+        PageTableLevel::Three.index_of(va),
+    );
+    let pde = raw_entry(
+        PhysAddr::new(pdpte & PteFlags::ADDRESS_MASK),
+        PageTableLevel::Two.index_of(va),
+    );
+    let pt = PhysAddr::new(pde & PteFlags::ADDRESS_MASK);
+    assert_ne!(pml4e & user, 0, "PML4E lacks USER");
+    assert_ne!(pdpte & user, 0, "PDPTE lacks USER");
+    assert_ne!(pde & user, 0, "PDE lacks USER");
+    assert_ne!(raw_entry(pt, PageTableLevel::One.index_of(va)) & user, 0);
+    assert_eq!(
+        raw_entry(pt, PageTableLevel::One.index_of(VirtAddr::new(kernel_va))) & user,
+        0
+    );
+}
+
+#[test]
+fn a_long_range_update_flushes_the_context_once_instead_of_per_page() {
+    let _g = setup();
+    install_hook_once();
+    let mut space = VmSpace::new().unwrap();
+    let start = 0x0000_0008_8000_0000_u64;
+    let mut rewrite_counting = |pages: u64| {
+        for i in 0..pages {
+            let va = start + i * 0x1000;
+            if resolve(&space, VirtAddr::new(va)).is_none() {
+                map_4kb(&mut space, va);
+            }
+        }
+        let flushes = COUNTING_HOOK.flush_local_calls.load(Ordering::Relaxed);
+        let mut rewritten = 0u64;
+        let mut cur = space
+            .cursor_mut(VirtAddr::new(start)..VirtAddr::new(start + pages * 0x1000))
+            .unwrap();
+        let completed = cur
+            .update_present(|_| {
+                rewritten += 1;
+                ControlFlow::Continue(Some(PageProperty::USER_RO))
+            })
+            .unwrap();
+        assert!(completed);
+        (
+            rewritten,
+            COUNTING_HOOK.flush_local_calls.load(Ordering::Relaxed) - flushes,
+        )
+    };
+
+    assert_eq!(rewrite_counting(32), (32, 0));
+    assert_eq!(rewrite_counting(33), (33, 1));
 }

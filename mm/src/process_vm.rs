@@ -1,12 +1,13 @@
 use core::ffi::c_int;
+use core::ops::ControlFlow;
 use slopos_ostd::lock_class;
 
 use slopos_abi::quota::CommitPagesAxis;
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleError, PROCESS_VM_SLOT_BITS};
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::frame::{AnonymousMeta, Paddr};
-use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::mm::frame::{AnonymousMeta, FrameReturnBatch, Paddr, RingMeta};
+use slopos_ostd::mm::uframe::{AnyUFrameMeta, UFrame};
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 use slopos_ostd::panic::AbortOnUnwind;
 use slopos_ostd::process::quota::Reservation;
@@ -27,8 +28,8 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
 use crate::tlb::TlbProcessKey;
 use crate::user_mappings::{
-    ostd_map_4kb_user, ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared, ostd_mark_cow_4kb,
-    ostd_next_leaf_4kb, ostd_protect_range_4kb, ostd_unmap_4kb_user,
+    ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared, ostd_map_each_4kb_user,
+    ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_unmap_present_4kb, ostd_visit_mark_cow_4kb,
 };
 use crate::vma_region::{
     Commit, FileMapRef, ProtectError, Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion,
@@ -726,30 +727,28 @@ fn unmap_and_free_range_inner(
         .vm_space
         .as_mut()
         .expect("unmap_and_free_range_inner: vm_space present for live process");
-    unmap_present_leaves(vm_space, start, end, ostd_unmap_4kb_user).map_err(|e| e.err)
+    unmap_present_leaves::<AnonymousMeta>(vm_space, start, end).map_err(|e| e.err)
 }
 
-/// Unmap each present 4 KiB leaf of `[start, end)` with `unmap`, stepping over
-/// empty subtrees, and count the leaves `unmap` found.
-fn unmap_present_leaves(
+/// Unmap each present 4 KiB leaf of `[start, end)`, stepping over empty
+/// subtrees, and count the frames it released.
+fn unmap_present_leaves<M: AnyUFrameMeta>(
     vm_space: &mut KArc<VmSpace>,
     start: u64,
     end: u64,
-    unmap: fn(&mut KArc<VmSpace>, VirtAddr) -> Result<bool, MapError>,
 ) -> Result<u32, UnmapRegionError> {
-    let end = VirtAddr::new(end);
-    let mut from = VirtAddr::new(start);
     let mut unmapped = 0u32;
-    while let Some((va, _, _)) = ostd_next_leaf_4kb(vm_space, from, end)
-        .map_err(|err| unmap_region_error(err, from.as_u64(), unmapped))?
-    {
-        from = VirtAddr::new(va.as_u64() + PAGE_SIZE_4KB);
-        match unmap(vm_space, va) {
-            Ok(true) => unmapped += 1,
-            Ok(false) => {}
-            Err(err) => return Err(unmap_region_error(err, va.as_u64(), unmapped)),
-        }
-    }
+    let mut returns = FrameReturnBatch::new();
+    ostd_unmap_present_4kb::<M>(
+        vm_space,
+        VirtAddr::new(start),
+        VirtAddr::new(end),
+        |_, frame| {
+            unmapped += 1;
+            returns.drop_frame(frame);
+        },
+    )
+    .map_err(|(err, at)| unmap_region_error(err, at.as_u64(), unmapped))?;
     Ok(unmapped)
 }
 
@@ -966,7 +965,7 @@ fn unmap_and_free_range_dir(
     if !vma_range_valid(start, end) {
         return Ok(0);
     }
-    unmap_present_leaves(vm_space, start, end, ostd_unmap_4kb_user)
+    unmap_present_leaves::<AnonymousMeta>(vm_space, start, end)
 }
 
 /// Unmap a SlopRing mapping range. Each page's PTE holds its own ref on the
@@ -984,15 +983,7 @@ fn unmap_ring_range_dir(
     // The cursor-unmap issues only a local INVLPG, and a ring region is
     // routinely re-created at the same VA, so a migrated task could read the
     // prior ring's stale translation without a process-wide shootdown.
-    flushed_after(
-        key,
-        unmap_present_leaves(
-            vm_space,
-            start,
-            end,
-            crate::user_mappings::ostd_unmap_ring_4kb_user,
-        ),
-    )
+    flushed_after(key, unmap_present_leaves::<RingMeta>(vm_space, start, end))
 }
 
 fn flushed_after(
@@ -1023,7 +1014,7 @@ fn unmap_range_nofree_dir(
     }
     flushed_after(
         key,
-        unmap_present_leaves(vm_space, start, end, ostd_unmap_4kb_user),
+        unmap_present_leaves::<AnonymousMeta>(vm_space, start, end),
     )
 }
 
@@ -2935,34 +2926,34 @@ fn clone_cow_snapshot_parent(
         }
         let mut snapshot: ClonePageChunks = KVec::new();
         let is_shared = region.is_shared();
-        let end = VirtAddr::new(vma_end);
-        let mut from = VirtAddr::new(vma_start);
-        while let Some((vaddr, phys, flags)) =
-            ostd_next_leaf_4kb(parent_vm_space_ref, from, end).ok()?
-        {
-            from = VirtAddr::new(vaddr.as_u64() + PAGE_SIZE_4KB);
-            if !is_shared && !flags.contains(PageFlags::USER) {
-                continue;
-            }
-            let frame = match UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(phys.as_u64())) {
-                Ok(frame) => frame,
-                Err(err) => {
-                    klog_info!(
-                        "process_vm_clone_cow: parent page {:#x} has no live frame: {:?}",
-                        vaddr.as_u64(),
-                        err
-                    );
-                    return None;
+        let walked = ostd_visit_mark_cow_4kb(
+            parent_vm_space_ref,
+            VirtAddr::new(vma_start),
+            VirtAddr::new(vma_end),
+            |vaddr, phys, flags| {
+                if !is_shared && !flags.contains(PageFlags::USER) {
+                    return ControlFlow::Continue(false);
                 }
-            };
-            push_clone_snapshot(&mut snapshot, (vaddr.as_u64(), frame, flags.bits())).ok()?;
-            // Read-only pages too: an `mprotect` that later widens the range
-            // must not make a frame the child also maps writable here.
-            if !is_shared && !flags.contains(PageFlags::COW) {
-                if let Err(err) = ostd_mark_cow_4kb(parent_vm_space_ref, vaddr) {
-                    klog_info!("process_vm_clone_cow: parent COW mark failed: {:?}", err);
-                    return None;
+                let Some(frame) = snapshot_frame(vaddr, phys) else {
+                    return ControlFlow::Break(());
+                };
+                if push_clone_snapshot(&mut snapshot, (vaddr.as_u64(), frame, flags.bits()))
+                    .is_err()
+                {
+                    return ControlFlow::Break(());
                 }
+                // Read-only pages too: an `mprotect` that later widens the
+                // range must not make a frame the child also maps writable
+                // here.
+                ControlFlow::Continue(!is_shared && !flags.contains(PageFlags::COW))
+            },
+        );
+        match walked {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(err) => {
+                klog_info!("process_vm_clone_cow: parent COW mark failed: {:?}", err);
+                return None;
             }
         }
         vmas.push((vma_start, vma_end, region.clone(), snapshot))
@@ -2982,23 +2973,42 @@ fn clone_cow_snapshot_parent(
     ))
 }
 
+/// A reference on the frame the parent maps at `vaddr`, for the child to map.
+fn snapshot_frame(vaddr: VirtAddr, phys: PhysAddr) -> Option<UFrame<AnonymousMeta>> {
+    match UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(phys.as_u64())) {
+        Ok(frame) => Some(frame),
+        Err(err) => {
+            klog_info!(
+                "process_vm_clone_cow: parent page {:#x} has no live frame: {:?}",
+                vaddr.as_u64(),
+                err
+            );
+            None
+        }
+    }
+}
+
 /// Maps the parent's pages into the child verbatim: no COW marker, the child
 /// shares the same memfd pages. `Err(())` on the first failure.
 #[inline(never)]
 fn clone_cow_walk_shared_vma(
     child_vm_space: &mut KArc<VmSpace>,
+    start: u64,
+    end: u64,
     snapshot: ClonePageChunks,
 ) -> Result<u32, ()> {
-    let mut cow_pages: u32 = 0;
-    for (addr, frame, flags_bits) in snapshot.into_iter().flatten() {
-        let vaddr = VirtAddr::new(addr);
-        if let Err((_, err)) = ostd_map_4kb_user(child_vm_space, vaddr, frame, flags_bits) {
-            klog_info!("clone_cow shared: OSTD child map failed: {:?}", err);
-            return Err(());
-        }
-        cow_pages += 1;
-    }
-    Ok(cow_pages)
+    let pages = snapshot
+        .into_iter()
+        .flatten()
+        .map(|(addr, frame, flags_bits)| (VirtAddr::new(addr), frame, flags_bits));
+    ostd_map_each_4kb_user(
+        child_vm_space,
+        VirtAddr::new(start),
+        VirtAddr::new(end),
+        pages,
+    )
+    .map(|n| n as u32)
+    .map_err(|(err, _)| klog_info!("clone_cow shared: OSTD child map failed: {:?}", err))
 }
 
 /// Maps the captured parent pages into the child with `WRITABLE` cleared and
@@ -3007,29 +3017,31 @@ fn clone_cow_walk_shared_vma(
 #[inline(never)]
 fn clone_cow_walk_anon_vma(
     child_vm_space: &mut KArc<VmSpace>,
+    start: u64,
+    end: u64,
     snapshot: ClonePageChunks,
 ) -> Result<u32, ()> {
-    let mut cow_pages: u32 = 0;
-    for (addr, frame, flags_bits) in snapshot.into_iter().flatten() {
-        let vaddr = VirtAddr::new(addr);
-        let parent_flags = PageFlags::from_bits_truncate(flags_bits);
-        if !parent_flags.contains(PageFlags::USER) {
-            continue;
-        }
-
-        let child_flags = (flags_bits & !PageFlags::WRITABLE.bits())
-            | PageFlags::COW.bits()
-            | PageFlags::USER.bits()
-            | PageFlags::PRESENT.bits();
-
-        if let Err((_, err)) = ostd_map_4kb_user(child_vm_space, vaddr, frame, child_flags) {
-            klog_info!("clone_cow anon: OSTD child map failed: {:?}", err);
-            return Err(());
-        }
-
-        cow_pages += 1;
-    }
-    Ok(cow_pages)
+    let pages = snapshot
+        .into_iter()
+        .flatten()
+        .filter(|(_, _, flags_bits)| {
+            PageFlags::from_bits_truncate(*flags_bits).contains(PageFlags::USER)
+        })
+        .map(|(addr, frame, flags_bits)| {
+            let child_flags = (flags_bits & !PageFlags::WRITABLE.bits())
+                | PageFlags::COW.bits()
+                | PageFlags::USER.bits()
+                | PageFlags::PRESENT.bits();
+            (VirtAddr::new(addr), frame, child_flags)
+        });
+    ostd_map_each_4kb_user(
+        child_vm_space,
+        VirtAddr::new(start),
+        VirtAddr::new(end),
+        pages,
+    )
+    .map(|n| n as u32)
+    .map_err(|(err, _)| klog_info!("clone_cow anon: OSTD child map failed: {:?}", err))
 }
 
 /// Returns the child pid, or `INVALID_PROCESS_ID`.
@@ -3126,9 +3138,9 @@ fn clone_cow_populate_child(
             .expect("clone_cow: child vm_space populated above");
 
         let walked = if is_shared_vma {
-            clone_cow_walk_shared_vma(child_vm_space_for_vma, snapshot)
+            clone_cow_walk_shared_vma(child_vm_space_for_vma, vma_start, vma_end, snapshot)
         } else {
-            clone_cow_walk_anon_vma(child_vm_space_for_vma, snapshot)
+            clone_cow_walk_anon_vma(child_vm_space_for_vma, vma_start, vma_end, snapshot)
         };
 
         match walked {

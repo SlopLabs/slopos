@@ -11,12 +11,15 @@ use super::luf;
 pub struct LufHook;
 
 impl CursorUnmapHook for LufHook {
-    fn after_unmap(&self, vaddr: VirtAddr, paddr: PhysAddr, mm_ctx_handle: u64) {
+    fn after_unmap(&self, _vaddr: VirtAddr, _paddr: PhysAddr, mm_ctx_handle: u64) {
         // Unconditional, including the kernel master (`mm_ctx_handle == 0`):
         // gating on the handle would let an address space that never got one
         // skip arming the quarantine, releasing a frame that still needed it.
-        let _ = paddr;
-        luf::queue_unmap(vaddr, mm_ctx_handle);
+        luf::queue_unmap(mm_ctx_handle);
+    }
+
+    fn flush_local(&self) {
+        super::asid::flush_pcid(super::read_cr3_value().pcid().raw());
     }
 
     fn on_activate(&self, mm_ctx_handle: u64) {

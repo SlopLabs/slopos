@@ -628,6 +628,86 @@ impl BuddyInner {
             remaining -= block_pages;
         }
     }
+
+    fn free_locked(&mut self, table: &RawTable<PageFrame>, cpu: usize, phys_addr: PhysAddr) -> i32 {
+        let frame_num = self.phys_to_frame(phys_addr);
+        if !self.is_valid_frame(frame_num) {
+            return -1;
+        }
+
+        let Some(frame) = self.frame_desc_mut(table, frame_num) else {
+            return -1;
+        };
+        if !BuddyInner::frame_state_is_allocated(frame.state) {
+            return 0;
+        }
+        if frame.state == PAGE_FRAME_PCP {
+            return 0;
+        }
+
+        let order = frame.order as u32;
+
+        // Ahead of the PCP magazine as well as the free lists: the magazine
+        // is a reuse path too, and a frame re-handed-out from it never
+        // touches the buddy at all.
+        if crate::mmu::quiesce::quarantine_required() {
+            let pages = BuddyInner::order_block_pages(order);
+            self.allocated_frames = self.allocated_frames.saturating_sub(pages);
+            self.quarantine_push(table, frame_num, order);
+            // Pay down the release debt on every free; otherwise a workload
+            // that never idles parks memory until allocations fail.
+            self.quarantine_release_some(table, QUARANTINE_RELEASE_PER_FREE);
+            if self.quarantine_frames >= QUARANTINE_ADVANCE_FRAMES {
+                crate::mmu::quiesce::request_advance();
+            }
+            return 0;
+        }
+
+        let is_pcp_candidate = order == 0 && frame.state == PAGE_FRAME_ALLOCATED && pcp::is_live();
+
+        if is_pcp_candidate {
+            if let Some(cache) = pcp::cache_mut(cpu) {
+                if cache.count < pcp::PCP_HIGH_WATERMARK {
+                    if let Some(desc) = self.frame_desc_mut(table, frame_num) {
+                        desc.state = PAGE_FRAME_PCP;
+                        desc.next_free = INVALID_PAGE_FRAME;
+                    }
+                    cache.stack[cache.count as usize] = frame_num;
+                    cache.count += 1;
+                    cache
+                        .free_count
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+                    if cache.count > pcp::PCP_HIGH_WATERMARK {
+                        let to_drain = (cache.count - pcp::PCP_HIGH_WATERMARK / 2)
+                            .min(pcp::PCP_BATCH_SIZE)
+                            as usize;
+                        let mut batch = [INVALID_PAGE_FRAME; pcp::PCP_BATCH_SIZE as usize];
+                        let mut drained = 0usize;
+                        while drained < to_drain && cache.count > 0 {
+                            cache.count -= 1;
+                            batch[drained] = cache.stack[cache.count as usize];
+                            cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
+                            drained += 1;
+                        }
+                        if drained > 0 {
+                            self.free_batch_from_pcp(table, &batch[..drained]);
+                        }
+                    }
+                    return 0;
+                }
+            }
+        }
+
+        if let Some(frame) = self.frame_desc_mut(table, frame_num) {
+            let pages = BuddyInner::order_block_pages(order);
+            frame.flags = 0;
+            frame.state = PAGE_FRAME_FREE;
+            self.allocated_frames = self.allocated_frames.saturating_sub(pages);
+            self.insert_block_coalescing(table, frame_num, order);
+        }
+        0
+    }
 }
 
 pub struct BuddyAllocator {
@@ -981,87 +1061,18 @@ impl BuddyAllocator {
     pub fn free_phys(&self, phys_addr: PhysAddr) -> i32 {
         let _no_migrate = PreemptGuard::new();
         let cpu = slopos_arch::pcr::get_current_cpu();
+        self.with_locked(|inner, table| inner.free_locked(table, cpu, phys_addr))
+    }
 
+    /// [`Self::free_phys`] for each of `pages`, under one hold of the lock.
+    fn free_phys_batch(&self, pages: &[PhysAddr]) {
+        let _no_migrate = PreemptGuard::new();
+        let cpu = slopos_arch::pcr::get_current_cpu();
         self.with_locked(|inner, table| {
-            let frame_num = inner.phys_to_frame(phys_addr);
-            if !inner.is_valid_frame(frame_num) {
-                return -1;
+            for &phys_addr in pages {
+                let _ = inner.free_locked(table, cpu, phys_addr);
             }
-
-            let Some(frame) = inner.frame_desc_mut(table, frame_num) else {
-                return -1;
-            };
-            if !BuddyInner::frame_state_is_allocated(frame.state) {
-                return 0;
-            }
-            if frame.state == PAGE_FRAME_PCP {
-                return 0;
-            }
-
-            let order = frame.order as u32;
-
-            // Ahead of the PCP magazine as well as the free lists: the magazine
-            // is a reuse path too, and a frame re-handed-out from it never
-            // touches the buddy at all.
-            if crate::mmu::quiesce::quarantine_required() {
-                let pages = BuddyInner::order_block_pages(order);
-                inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
-                inner.quarantine_push(table, frame_num, order);
-                // Pay down the release debt on every free; otherwise a workload
-                // that never idles parks memory until allocations fail.
-                inner.quarantine_release_some(table, QUARANTINE_RELEASE_PER_FREE);
-                if inner.quarantine_frames >= QUARANTINE_ADVANCE_FRAMES {
-                    crate::mmu::quiesce::request_advance();
-                }
-                return 0;
-            }
-
-            let is_pcp_candidate =
-                order == 0 && frame.state == PAGE_FRAME_ALLOCATED && pcp::is_live();
-
-            if is_pcp_candidate {
-                if let Some(cache) = pcp::cache_mut(cpu) {
-                    if cache.count < pcp::PCP_HIGH_WATERMARK {
-                        if let Some(desc) = inner.frame_desc_mut(table, frame_num) {
-                            desc.state = PAGE_FRAME_PCP;
-                            desc.next_free = INVALID_PAGE_FRAME;
-                        }
-                        cache.stack[cache.count as usize] = frame_num;
-                        cache.count += 1;
-                        cache
-                            .free_count
-                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
-                        if cache.count > pcp::PCP_HIGH_WATERMARK {
-                            let to_drain = (cache.count - pcp::PCP_HIGH_WATERMARK / 2)
-                                .min(pcp::PCP_BATCH_SIZE)
-                                as usize;
-                            let mut batch = [INVALID_PAGE_FRAME; pcp::PCP_BATCH_SIZE as usize];
-                            let mut drained = 0usize;
-                            while drained < to_drain && cache.count > 0 {
-                                cache.count -= 1;
-                                batch[drained] = cache.stack[cache.count as usize];
-                                cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
-                                drained += 1;
-                            }
-                            if drained > 0 {
-                                inner.free_batch_from_pcp(table, &batch[..drained]);
-                            }
-                        }
-                        return 0;
-                    }
-                }
-            }
-
-            if let Some(frame) = inner.frame_desc_mut(table, frame_num) {
-                let pages = BuddyInner::order_block_pages(order);
-                frame.flags = 0;
-                frame.state = PAGE_FRAME_FREE;
-                inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
-                inner.insert_block_coalescing(table, frame_num, order);
-            }
-            0
-        })
+        });
     }
 
     /// Promote the proven-safe batch into the releasable backlog. O(1); the
@@ -1278,6 +1289,10 @@ impl FrameAlloc for BuddyAllocator {
 
     fn dealloc(&self, paddr: Paddr, _size_pages: usize) {
         let _ = self.free_phys(paddr);
+    }
+
+    fn dealloc_batch(&self, pages: &[Paddr]) {
+        self.free_phys_batch(pages);
     }
 }
 

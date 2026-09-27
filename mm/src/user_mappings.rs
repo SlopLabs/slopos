@@ -7,6 +7,8 @@
 //! per-process lock for exactly as long as the cursor is open — see
 //! `process_vm::process_vm_with_vm_space`.
 
+use core::ops::ControlFlow;
+
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::klog_warn;
 use slopos_ostd::mm::KArc;
@@ -14,7 +16,7 @@ use slopos_ostd::mm::frame::{AnonymousMeta, FrameError, Paddr, RingMeta};
 use slopos_ostd::mm::page_property::{CachePolicy, PageProperty};
 use slopos_ostd::mm::page_size::Size4Kb;
 use slopos_ostd::mm::page_table::PteFlags;
-use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::mm::uframe::{AnyUFrameMeta, UFrame};
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
@@ -416,13 +418,17 @@ pub fn ostd_mark_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<(
         Err(_) => return Ok(()),
     };
     if cur.paddr.is_some() && cur.level == slopos_ostd::mm::page_table::PageTableLevel::One {
-        let mut prop = cur.property;
-        prop.write = false;
-        // Bit 0 of `software` ↔ PTE bit 9 ↔ legacy `PageFlags::COW`.
-        prop.software |= 0b001;
-        cursor.protect::<Size4Kb>(prop)?;
+        cursor.protect::<Size4Kb>(cow_marked(cur.property))?;
     }
     Ok(())
+}
+
+/// `prop` without `WRITABLE` and with the COW software bit set.
+fn cow_marked(mut prop: PageProperty) -> PageProperty {
+    prop.write = false;
+    // Bit 0 of `software` ↔ PTE bit 9 ↔ legacy `PageFlags::COW`.
+    prop.software |= 0b001;
+    prop
 }
 
 /// Resolve a copy-on-write page for the single-ref case: set `WRITABLE` and
@@ -518,6 +524,75 @@ pub fn ostd_next_leaf_4kb(
             }
         }
     }
+}
+
+/// Unmap every present 4 KiB leaf of `[start, end)` in one pass over its leaf
+/// tables, handing each frame to `each` as [`ostd_unmap_4kb_user_take`] would.
+/// An address space with nothing mapped there is not waited on. `Err` names
+/// the address the failure struck at; every leaf below it is gone.
+pub fn ostd_unmap_present_4kb<M: AnyUFrameMeta>(
+    vm_space: &mut KArc<VmSpace>,
+    start: VirtAddr,
+    end: VirtAddr,
+    each: impl FnMut(VirtAddr, UFrame<M>),
+) -> Result<(), (MapError, VirtAddr)> {
+    let Some((first, _, _)) = ostd_next_leaf_4kb(vm_space, start, end).map_err(|e| (e, start))?
+    else {
+        return Ok(());
+    };
+    let vs = vm_space_get_mut(vm_space).map_err(|e| (e, first))?;
+    let mut cursor = vs.cursor_mut(first..end).map_err(|e| (e, first))?;
+    cursor.unmap_present(each).map_err(|e| (e, cursor.vaddr()))
+}
+
+/// Offer every present 4 KiB leaf of `[start, end)` to `visit` as
+/// `(vaddr, paddr, flags)`, in one pass over its leaf tables, and mark
+/// copy-on-write, as [`ostd_mark_cow_4kb`] does, each one it answers
+/// `Continue(true)` for. `Ok(false)` when `visit` broke off.
+pub fn ostd_visit_mark_cow_4kb(
+    vm_space: &mut KArc<VmSpace>,
+    start: VirtAddr,
+    end: VirtAddr,
+    mut visit: impl FnMut(VirtAddr, PhysAddr, PageFlags) -> ControlFlow<(), bool>,
+) -> Result<bool, MapError> {
+    let Some((first, _, _)) = ostd_next_leaf_4kb(vm_space, start, end)? else {
+        return Ok(true);
+    };
+    let vs = vm_space_get_mut(vm_space)?;
+    let mut cursor = vs.cursor_mut(first..end)?;
+    cursor.update_present(|entry| {
+        let Some(paddr) = entry.paddr else {
+            return ControlFlow::Continue(None);
+        };
+        let flags = property_to_page_flags(entry.property);
+        match visit(entry.vaddr, PhysAddr::new(paddr.as_u64()), flags) {
+            ControlFlow::Continue(mark) => {
+                ControlFlow::Continue(mark.then(|| cow_marked(entry.property)))
+            }
+            ControlFlow::Break(()) => ControlFlow::Break(()),
+        }
+    })
+}
+
+/// Map each `(vaddr, frame, flags)` into `[start, end)` as
+/// [`ostd_map_4kb_user`] would, descending once per leaf table the vaddrs
+/// share. Returns how many were mapped; `Err` names the vaddr refused, whose
+/// frame is dropped with the items not reached.
+pub fn ostd_map_each_4kb_user(
+    vm_space: &mut KArc<VmSpace>,
+    start: VirtAddr,
+    end: VirtAddr,
+    items: impl IntoIterator<Item = (VirtAddr, UFrame<AnonymousMeta>, u64)>,
+) -> Result<usize, (MapError, VirtAddr)> {
+    let vs = vm_space_get_mut(vm_space).map_err(|e| (e, start))?;
+    let mut cursor = vs.cursor_mut(start..end).map_err(|e| (e, start))?;
+    cursor
+        .map_each(
+            items
+                .into_iter()
+                .map(|(va, frame, flags)| (va, frame, page_flags_to_property(flags))),
+        )
+        .map_err(|(_, va, e)| (e, va))
 }
 
 /// Physical address backing the 4 KiB user leaf at `va`, or `PhysAddr::null()`
