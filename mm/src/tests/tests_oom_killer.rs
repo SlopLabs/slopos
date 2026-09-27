@@ -22,7 +22,7 @@ use crate::page_fault::{FaultOutcome, try_resolve_user_fault};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::{
     ProcessVm, create_process_vm, destroy_process_vm, pack_process_vm_handle, process_vm_handle,
-    process_vm_mmap,
+    process_vm_mmap, process_vm_released, unbind_process_vm,
 };
 
 const MADE: usize = 3;
@@ -31,6 +31,8 @@ static MADE_PIDS: [AtomicU32; MADE] = [const { AtomicU32::new(INVALID_PROCESS_ID
 static EXEMPT_PID: AtomicU32 = AtomicU32::new(INVALID_PROCESS_ID);
 static DYING_MASK: AtomicU32 = AtomicU32::new(0);
 static KILL_CALLS: AtomicU32 = AtomicU32::new(0);
+/// Made processes whose last task leaves just before the kill reaches it.
+static GONE_MASK: AtomicU32 = AtomicU32::new(0);
 
 fn made_index(pid: u32) -> Option<usize> {
     MADE_PIDS
@@ -59,6 +61,9 @@ impl OomOps for MadeOnly {
     fn kill(&self, process: &Process) -> Option<Killed> {
         let index = made_index(process.id())?;
         DYING_MASK.fetch_or(1 << index, Ordering::AcqRel);
+        if GONE_MASK.load(Ordering::Acquire) & (1 << index) != 0 {
+            return None;
+        }
         KILL_CALLS.fetch_add(1, Ordering::AcqRel);
         let mut name = [0u8; TASK_NAME_MAX_LEN];
         name[..8].copy_from_slice(b"oom-test");
@@ -84,6 +89,7 @@ impl Ladder {
         EXEMPT_PID.store(INVALID_PROCESS_ID, Ordering::Release);
         DYING_MASK.store(0, Ordering::Release);
         KILL_CALLS.store(0, Ordering::Release);
+        GONE_MASK.store(0, Ordering::Release);
         let mut ladder = Self {
             pids: [INVALID_PROCESS_ID; MADE],
             restore: oom_swap_ops(Some(&MADE_ONLY)),
@@ -240,11 +246,95 @@ pub fn test_oom_waits_for_one_victim_at_a_time() -> TestResult {
     pass!()
 }
 
+/// A victim unbound from its slot still holds the choice until the frames
+/// it held are back, and only then does the next largest go.
+pub fn test_oom_victim_holds_the_choice_until_its_frames_are_back() -> TestResult {
+    let Some(mut ladder) = Ladder::new() else {
+        return fail!("could not build three address spaces");
+    };
+    let (Some(middle), Some(large)) = (ladder.vm(1), ladder.vm(2)) else {
+        return fail!("a made address space has no handle");
+    };
+
+    let first = decide(&MADE_ONLY, OomTrigger::Frames);
+    let unbound = unbind_process_vm(resolve_pid(ladder.pids[2]));
+    ladder.pids[2] = INVALID_PROCESS_ID;
+    let released_while_returning = process_vm_released(large);
+    let while_returning = decide(&MADE_ONLY, OomTrigger::Frames);
+    let unbound_at_all = unbound.is_some();
+    drop(unbound);
+    let released_after = process_vm_released(large);
+    let after = decide(&MADE_ONLY, OomTrigger::Frames);
+    drop(ladder);
+
+    assert_test!(unbound_at_all, "the victim's slot would not unbind");
+    assert_test!(
+        first == Decision::Await(large),
+        "the first shortage decided {:?}, want the largest",
+        first
+    );
+    assert_test!(
+        !released_while_returning && while_returning == Decision::Await(large),
+        "with the victim's frames still out, it counted released: {}, and the \
+         killer decided {:?}",
+        released_while_returning,
+        while_returning
+    );
+    assert_test!(
+        released_after && after == Decision::Await(middle),
+        "with the frames back, released: {}, decided {:?}, want the next largest",
+        released_after,
+        after
+    );
+    pass!()
+}
+
+/// A victim whose last task left before the kill reached it holds the choice
+/// as a killed one does, and counts as no kill.
+pub fn test_oom_victim_with_no_task_left_still_holds_the_choice() -> TestResult {
+    let Some(ladder) = Ladder::new() else {
+        return fail!("could not build three address spaces");
+    };
+    let Some(large) = ladder.vm(2) else {
+        return fail!("a made address space has no handle");
+    };
+    GONE_MASK.store(1 << 2, Ordering::Release);
+    let kills_before = crate::oom::oom_stats().kills;
+
+    let first = decide(&MADE_ONLY, OomTrigger::Commit);
+    let again = decide(&MADE_ONLY, OomTrigger::Commit);
+    let kills = KILL_CALLS.load(Ordering::Acquire);
+    let counted = crate::oom::oom_stats().kills - kills_before;
+    drop(ladder);
+
+    assert_test!(
+        first == Decision::Await(large) && again == Decision::Await(large),
+        "decided {:?} and then {:?}, want the taskless victim both times",
+        first,
+        again
+    );
+    assert_test!(
+        kills == 0 && counted == 0,
+        "{} kills reached a task and {} were counted, want none",
+        kills,
+        counted
+    );
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_oom_takes_the_largest_killable_process,
     suite = oom_killer
 );
 slopos_testing::stest!(
     name = test_oom_waits_for_one_victim_at_a_time,
+    suite = oom_killer
+);
+slopos_testing::stest!(
+    name = test_oom_victim_holds_the_choice_until_its_frames_are_back,
+    suite = oom_killer
+);
+slopos_testing::stest!(
+    name = test_oom_victim_with_no_task_left_still_holds_the_choice,
     suite = oom_killer
 );

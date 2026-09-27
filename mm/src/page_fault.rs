@@ -3,6 +3,7 @@ use slopos_abi::task::TaskFaultReason;
 use slopos_ostd::handle::HandleError;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::sync::wait_queue::current_task_is_killed;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, WaitAbort, WaitQueue};
 use slopos_ostd::{klog_info, klog_warn, lock_class};
 
@@ -346,11 +347,12 @@ pub fn complete_file_fault(
     }
 }
 
-/// Whether a populate may block: to read a file-backed page in, or to nap
-/// while a peer holds the address space.
+/// Whether a populate may block: to read a file-backed page in, to wait for
+/// the OOM killer, or to nap while a peer holds the address space.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileIo {
-    /// Leave a file-backed page absent, and spin rather than nap.
+    /// Leave a file-backed page absent, fail a write that found no page, and
+    /// spin rather than nap.
     Refuse,
     /// Block as the user fault would: the caller holds no spinning lock and no
     /// lock the filesystem read takes.
@@ -371,20 +373,23 @@ fn resolve_for_populate(
     task_id: u32,
     io: FileIo,
 ) -> PopulateStep {
-    let mut outcome = match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
+    let outcome = match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
         FaultOutcome::NeedsIo(plan) if io == FileIo::Read => {
             complete_file_fault(process_vm_handle, &plan, page, task_id)
         }
         outcome => outcome,
     };
-    if let FaultOutcome::OutOfMemory(trigger) = outcome
-        && io == FileIo::Read
-    {
-        outcome = out_of_memory_fault(trigger);
-    }
     match outcome {
         FaultOutcome::Resolved => PopulateStep::Resolved,
         FaultOutcome::Retry => PopulateStep::Retry,
+        // The killer has already waited for memory, so the page is looked at
+        // again at once, unless the wait ended in this task's own kill.
+        FaultOutcome::OutOfMemory(trigger) if io == FileIo::Read => {
+            match out_of_memory_fault(trigger) {
+                FaultOutcome::Retry if !current_task_is_killed() => PopulateStep::Resolved,
+                _ => PopulateStep::GiveUp,
+            }
+        }
         FaultOutcome::NeedsIo(_)
         | FaultOutcome::OutOfMemory(_)
         | FaultOutcome::Interrupted

@@ -65,6 +65,10 @@ pub struct ProcessVm {
     stack_start: u64,
     stack_end: u64,
     flags: u32,
+    /// The generation whose address space was unbound here and whose frames
+    /// the unbinding caller is still returning. Outlives the binding, so the
+    /// killer can tell a victim still being returned from one that is gone.
+    releasing: Option<u64>,
 }
 
 impl ProcessVm {
@@ -83,6 +87,7 @@ impl ProcessVm {
             stack_start: 0,
             stack_end: 0,
             flags: 0,
+            releasing: None,
         }
     }
 
@@ -1791,59 +1796,75 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
 }
 
 pub fn destroy_process_vm(process: ProcessId) -> c_int {
-    let slot = match find_slot_for_pid(process) {
-        Some(s) => s,
-        None => return 0,
-    };
-
-    {
-        let guard = PROCESS_VMS[slot].lock();
-        if guard.process_id == INVALID_PROCESS_ID {
-            return 0;
-        }
+    if let Some(unbound) = unbind_process_vm(process) {
+        drop(unbound);
+        klog_debug!("destroy_process_vm({}): page table cleanup done", process);
     }
-    klog_debug!("Destroying process VM space for PID {}", process.id());
-    let released: Option<KArc<Process>>;
-    let space: Option<KArc<VmSpace>>;
-
-    {
-        let mut proc = PROCESS_VMS[slot].lock();
-        if proc.process_id != process.id() {
-            return 0;
-        }
-
-        klog_debug!("destroy_process_vm({}): teardown_process_mappings", process);
-        teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
-        // Cleared while the slot is still bound, after the shootdown above has
-        // landed: otherwise the next occupant inherits this one's CPU set and
-        // shoots down CPUs that never mapped it.
-        tlb::unregister_process_tlb(slot_tlb_key(slot));
-        space = proc.vm_space.take();
-
-        proc.process_id = INVALID_PROCESS_ID;
-        proc.generation = 0;
-        proc.flags = 0;
-        // Released below, off the slot lock: this can be the last reference,
-        // and `Process::drop` returns the id to an allocator no lock here
-        // covers.
-        released = proc.process.take();
-    }
-
-    // Off the slot lock, which masks interrupts: the last reference frees every
-    // frame and page table, and a compiler's are a gigabyte.
-    drop(space);
-    klog_debug!("destroy_process_vm({}): page table cleanup done", process);
-    crate::oom::note_released();
-
-    // Retired after the unbind, so the id outlives every translation to the
-    // address space it named.
-    if let Some(process) = released.as_ref()
-        && let Some(handle) = process.handle()
-    {
-        slopos_ostd::process::process_retire(handle);
-    }
-    drop(released);
     0
+}
+
+/// An address space unbound from its slot whose frames are not back yet.
+/// Dropping it returns them, then tells the killer they are.
+pub(crate) struct Unbound {
+    slot: usize,
+    generation: u64,
+    space: Option<KArc<VmSpace>>,
+    process: Option<KArc<Process>>,
+}
+
+impl Drop for Unbound {
+    fn drop(&mut self) {
+        // Off the slot lock, which masks interrupts: the last reference frees
+        // every frame and page table, and a compiler's are a gigabyte.
+        drop(self.space.take());
+        {
+            let mut proc = PROCESS_VMS[self.slot].lock();
+            if proc.releasing == Some(self.generation) {
+                proc.releasing = None;
+            }
+        }
+        crate::oom::note_released();
+
+        // Retired after the unbind, so the id outlives every translation to the
+        // address space it named.
+        if let Some(process) = self.process.as_ref()
+            && let Some(handle) = process.handle()
+        {
+            slopos_ostd::process::process_retire(handle);
+        }
+    }
+}
+
+/// Tear down `process`'s mappings and unbind its slot, leaving the frames to
+/// the returned [`Unbound`]. `None` when the slot is not bound to it.
+pub(crate) fn unbind_process_vm(process: ProcessId) -> Option<Unbound> {
+    let slot = find_slot_for_pid(process)?;
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process.id() {
+        return None;
+    }
+    klog_debug!("destroy_process_vm({}): teardown_process_mappings", process);
+    teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
+    // Cleared while the slot is still bound, after the shootdown above has
+    // landed: otherwise the next occupant inherits this one's CPU set and
+    // shoots down CPUs that never mapped it.
+    tlb::unregister_process_tlb(slot_tlb_key(slot));
+    let generation = proc.generation;
+    let space = proc.vm_space.take();
+    proc.releasing = Some(generation);
+    proc.process_id = INVALID_PROCESS_ID;
+    proc.generation = 0;
+    proc.flags = 0;
+    // Released off the slot lock by the `Unbound`: this can be the last
+    // reference, and `Process::drop` returns the id to an allocator no lock
+    // here covers.
+    let process = proc.process.take();
+    Some(Unbound {
+        slot,
+        generation,
+        space,
+        process,
+    })
 }
 
 pub fn process_vm_alloc(process: ProcessId, size: u64, flags: u32) -> u64 {
@@ -2016,7 +2037,14 @@ pub(crate) fn for_each_resident(mut f: impl FnMut(Handle<ProcessVm>, &KArc<Proce
 /// Whether the address space `handle` named has been torn down, and with it
 /// every frame and every promise it held.
 pub(crate) fn process_vm_released(handle: Handle<ProcessVm>) -> bool {
-    process_vm_with_handle(handle, |proc| proc.vm_space.is_none()).unwrap_or(true)
+    let Some(vm) = PROCESS_VMS.get(handle.slot() as usize) else {
+        return true;
+    };
+    let guard = vm.lock();
+    if guard.process_id != INVALID_PROCESS_ID && guard.generation == handle.generation() {
+        return guard.vm_space.is_none();
+    }
+    guard.releasing != Some(handle.generation())
 }
 
 pub fn get_current_process_id() -> u32 {

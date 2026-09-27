@@ -2,25 +2,38 @@
 
 use core::ffi::c_char;
 use core::ptr;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_abi::quota::{QuotaMode, ResourceKind};
 use slopos_abi::signal::{
     MINSIGSTKSZ, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_SIGINFO, SEGV_MAPERR, SI_ADDR_OFFSET,
     SIG_DFL, SIGCONT, SIGSEGV, SIGSTOP, SIGTERM, SIGTSTP, SIGUSR1, SS_DISABLE, SS_ONSTACK,
     SignalFrame, UserSigAltStack, UserSiginfo, UserUcontext, sig_bit,
 };
-use slopos_abi::syscall::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
+use slopos_abi::syscall::{
+    CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE,
+};
 use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskExitReason, TaskStatus,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN,
+    TaskExitReason, TaskStatus,
 };
 use slopos_fs::fileio::FdTable;
 use slopos_kernel_services::driver_runtime::{signal_process_group, signal_session};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+use slopos_mm::oom::{Killed, OomOps, Standing, oom_forget_victim_for_test, oom_swap_ops};
+use slopos_mm::page_fault::{FaultOutcome, try_resolve_user_fault};
 use slopos_mm::paging_defs::PageFlags;
-use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
+use slopos_mm::process_vm::{
+    create_process_vm, destroy_process_vm, pack_process_vm_handle, process_vm_alloc,
+    process_vm_get_stack_top, process_vm_handle, process_vm_mmap,
+};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::KBox;
+use slopos_ostd::process::quota::{
+    quota_mode, root as quota_root, set_limit, set_quota_mode, stats,
+};
+use slopos_ostd::process::{Process, ProcessId};
 use slopos_ostd::task::SchedPlacement;
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::task;
@@ -1925,6 +1938,176 @@ pub fn test_sent_signals_carry_the_real_sender() -> TestResult {
     pass!()
 }
 
+static OOM_VICTIM_PID: AtomicU32 = AtomicU32::new(INVALID_PROCESS_ID);
+static OOM_CEILING: AtomicU32 = AtomicU32::new(u32::MAX);
+static OOM_KILLS: AtomicU32 = AtomicU32::new(0);
+
+/// The killer's task side for the test below: only the scratch victim may be
+/// taken, and taking it gives back the commit ceiling and the victim's
+/// address space, as its exit would.
+struct ScratchVictim;
+
+static SCRATCH_VICTIM: ScratchVictim = ScratchVictim;
+
+impl OomOps for ScratchVictim {
+    fn standing(&self, process: &Process) -> Standing {
+        if process.id() == OOM_VICTIM_PID.load(Ordering::Acquire) {
+            Standing::Killable
+        } else {
+            Standing::Exempt
+        }
+    }
+
+    fn kill(&self, process: &Process) -> Option<Killed> {
+        if process.id() != OOM_VICTIM_PID.load(Ordering::Acquire) {
+            return None;
+        }
+        OOM_KILLS.fetch_add(1, Ordering::AcqRel);
+        set_limit(
+            quota_root(),
+            ResourceKind::CommitPages,
+            OOM_CEILING.load(Ordering::Acquire),
+        );
+        if let Some(id) = ProcessId::resolve(process.id()) {
+            destroy_process_vm(id);
+        }
+        Some(Killed {
+            pid: process.id(),
+            name: [0; TASK_NAME_MAX_LEN],
+        })
+    }
+}
+
+/// An address space holding one written page, for the killer to choose.
+fn scratch_victim() -> Option<ProcessId> {
+    let id = ProcessId::resolve(create_process_vm())?;
+    let addr = process_vm_mmap(
+        id,
+        0,
+        4096,
+        PROT_READ | PROT_WRITE,
+        MAP_ANONYMOUS | MAP_PRIVATE,
+        -1,
+        0,
+    );
+    let packed = pack_process_vm_handle(process_vm_handle(id)?);
+    // 0x06: a user write to an absent page.
+    let written =
+        addr != 0 && try_resolve_user_fault(addr, 0x06, packed, 1) == FaultOutcome::Resolved;
+    if !written {
+        destroy_process_vm(id);
+        return None;
+    }
+    Some(id)
+}
+
+fn is_cow_in(table: FdTable, addr: u64) -> bool {
+    table.process().is_some_and(|process| {
+        slopos_mm::process_vm::process_vm_with_vm_space(process, |vs| {
+            slopos_mm::user_mappings::ostd_get_pte_flags_4kb(
+                vs,
+                slopos_abi::addr::VirtAddr::new(addr),
+            )
+        })
+        .flatten()
+        .is_some_and(|flags| flags.contains(PageFlags::COW))
+    })
+}
+
+/// A forked child's signal frame lands on stack pages it still shares with
+/// its parent. With the commit ceiling full, the copy that frame needs is the
+/// OOM killer's to find, as the child's own write would be, not a refused
+/// push that ends in `SIGSEGV`.
+pub fn test_sigframe_on_a_shared_forked_stack_waits_for_the_killer() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create the parent");
+    let parent = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
+    let Some(parent_table) = fdtable_of(parent_id) else {
+        drop(parent);
+        return fail_and_clean(&[parent_id]);
+    };
+    let stack_top = process_vm_get_stack_top(parent_table.process().expect("a live process"));
+    let rsp = stack_top.wrapping_sub(0x200);
+    let frame_page = crate::syscall::signal::sigframe_base_for_stack_top(rsp) & !0xFFF;
+    let parent_wrote = (frame_page..rsp)
+        .step_by(4096)
+        .all(|page| user_copy_out(parent_table, page, &0u64));
+
+    let child_id = task_fork(&parent, None);
+    drop(parent);
+    if !parent_wrote || child_id == INVALID_TASK_ID {
+        return fail_and_clean(&[parent_id]);
+    }
+    task_set_state(child_id, TaskStatus::Blocked);
+    let child = assert_some!(task_find_by_id(child_id), "child lookup failed");
+    let Some(child_table) = fdtable_of(child_id) else {
+        drop(child);
+        return fail_and_clean(&[child_id, parent_id]);
+    };
+    let shared = is_cow_in(child_table, frame_page);
+    let Some(victim) = scratch_victim() else {
+        drop(child);
+        return fail_and_clean(&[child_id, parent_id]);
+    };
+    if !shared || !install_action(child_id, SIGUSR1, 0) || !task::task_signal_post(&child, SIGUSR1)
+    {
+        destroy_process_vm(victim);
+        drop(child);
+        return fail_and_clean(&[child_id, parent_id]);
+    }
+
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rsp = rsp;
+    frame.regs_mut().rip = 0x5000_7777;
+
+    OOM_VICTIM_PID.store(victim.id(), Ordering::Release);
+    OOM_KILLS.store(0, Ordering::Release);
+    let restore_mode = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    let commit = stats(quota_root(), ResourceKind::CommitPages);
+    let ceiling = commit.map_or(u32::MAX, |s| s.limit);
+    OOM_CEILING.store(ceiling, Ordering::Release);
+    let restore_ops = oom_swap_ops(Some(&SCRATCH_VICTIM));
+    oom_forget_victim_for_test();
+    set_limit(
+        quota_root(),
+        ResourceKind::CommitPages,
+        commit.map_or(0, |s| s.used),
+    );
+
+    let delivered = deliver_pending_signal_as_current(child_id, child_table, &frame);
+
+    set_limit(quota_root(), ResourceKind::CommitPages, ceiling);
+    oom_forget_victim_for_test();
+    oom_swap_ops(restore_ops);
+    set_quota_mode(restore_mode);
+    OOM_VICTIM_PID.store(INVALID_PROCESS_ID, Ordering::Release);
+    destroy_process_vm(victim);
+    let kills = OOM_KILLS.load(Ordering::Acquire);
+    let child_killed = child.is_killed();
+    let broken = !is_cow_in(child_table, frame_page);
+    drop(child);
+    task_terminate(child_id);
+    task_terminate(parent_id);
+
+    assert_test!(delivered, "the delivery did not run");
+    assert_eq_test!(
+        frame.rip(),
+        TEST_HANDLER,
+        "the frame push was refused instead of waiting for the killer"
+    );
+    assert_eq_test!(kills, 1, "the killer must take exactly one victim");
+    assert_test!(
+        broken && !child_killed,
+        "after the kill the child's stack page is still shared: {}, the child killed: {}",
+        !broken,
+        child_killed
+    );
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_realtime_signals_queue_and_standard_ones_coalesce,
     suite = syscall_signal_build_floor
@@ -1935,6 +2118,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_sent_signals_carry_the_real_sender,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_sigframe_on_a_shared_forked_stack_waits_for_the_killer,
     suite = syscall_signal_build_floor
 );
 

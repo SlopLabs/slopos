@@ -1104,7 +1104,7 @@ fn unmap_present_takes_every_4kb_leaf_across_tables_and_keeps_huge_ones() {
     let mut taken = Vec::new();
     {
         let mut cur = space.cursor_mut(VirtAddr::new(start)..end).unwrap();
-        cur.unmap_present::<AnonymousMeta>(|va, frame| {
+        cur.unmap_present::<AnonymousMeta>(|va, _, frame| {
             assert_eq!(frame.reference_count(), 1);
             taken.push((va.as_u64(), frame.paddr()));
         })
@@ -1232,7 +1232,7 @@ fn a_long_range_unmap_flushes_the_context_once_instead_of_per_page() {
         let mut cur = space
             .cursor_mut(VirtAddr::new(start)..VirtAddr::new(start + 0x20_0000))
             .unwrap();
-        cur.unmap_present::<AnonymousMeta>(|_, frame| drop(frame))
+        cur.unmap_present::<AnonymousMeta>(|_, _, frame| drop(frame))
             .unwrap();
         (
             COUNTING_HOOK.after_unmap_calls.load(Ordering::Relaxed) - hooks,

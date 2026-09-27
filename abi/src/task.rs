@@ -385,7 +385,11 @@ pub enum TaskFaultReason {
     /// instead — only init and the dying were left. Distinct from
     /// [`UserPage`](Self::UserPage) so `waitpid` can tell "the machine was
     /// short of memory" from "the program was wrong". Reported as `SIGKILL`,
-    /// the signal the killer's victims die of.
+    /// the signal the killer's victims die of. The task's own write only: a
+    /// kernel write made for it that finds the same — or that runs where it
+    /// cannot wait for the killer, under a spinlock, a preemption pin or with
+    /// interrupts masked — answers a user copy's `EFAULT`, or fails a signal
+    /// frame's push into `SIGSEGV`.
     UserOom = 5,
 }
 

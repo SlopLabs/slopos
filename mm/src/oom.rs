@@ -19,7 +19,7 @@ use slopos_ostd::handle::Handle;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::process::Process;
 use slopos_ostd::sync::wait_queue::current_task_is_killed;
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitAbort, WaitQueue};
 use slopos_ostd::{klog_warn, lock_class};
 
 use crate::process_vm::{ProcessVm, for_each_resident, process_vm_released};
@@ -131,8 +131,8 @@ pub fn oom_stats() -> OomStats {
     }
 }
 
-/// An address space was torn down: whoever waits for a victim's memory looks
-/// again.
+/// An address space's frames are back: whoever waits for a victim's memory
+/// looks again.
 pub fn note_released() {
     RELEASED.wake_all();
 }
@@ -166,8 +166,16 @@ pub fn out_of_memory(trigger: OomTrigger) -> OomVerdict {
         Decision::NoVictim => return OomVerdict::Unresolved,
     };
     // Bounded, and killable: a victim is woken out of this by its own kill.
-    let _ = RELEASED.wait_event_timeout(|| process_vm_released(awaited), RELEASE_WAIT_MS);
-    OomVerdict::Retry
+    match RELEASED.wait_event_timeout(|| process_vm_released(awaited), RELEASE_WAIT_MS) {
+        // The frames are back, or a round is spent: the write looks again, and
+        // a round's end is what lets a victim outstay its grace.
+        Ok(()) | Err(WaitAbort::Timeout) => OomVerdict::Retry,
+        // The writer unwinds on the way back to the write.
+        Err(WaitAbort::Killed) => OomVerdict::Retry,
+        // Nothing to park: the write retries rather than failing a program
+        // for memory the victim is still returning.
+        Err(WaitAbort::NoRuntime | WaitAbort::Interrupted) => OomVerdict::Retry,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,17 +207,21 @@ pub(crate) fn decide(ops: &dyn OomOps, trigger: OomTrigger) -> Decision {
         report_no_victim(trigger);
         return Decision::NoVictim;
     };
-    let Some(killed) = ops.kill(&chosen.process) else {
-        // Its last task left between the choice and the kill; its address
-        // space is on its way out regardless.
-        return Decision::Await(chosen.vm);
+    let pid = match ops.kill(&chosen.process) {
+        Some(killed) => {
+            KILLS.fetch_add(1, Ordering::AcqRel);
+            LAST_VICTIM.store(killed.pid, Ordering::Release);
+            report_kill(&killed, chosen.resident, trigger);
+            killed.pid
+        }
+        // Its last task left between the choice and the kill. Nothing was
+        // killed, but its memory is on its way back all the same, so it holds
+        // the choice exactly as a victim would.
+        None => chosen.process.id(),
     };
-    KILLS.fetch_add(1, Ordering::AcqRel);
-    LAST_VICTIM.store(killed.pid, Ordering::Release);
-    report_kill(&killed, chosen.resident, trigger);
     *current = Some(Victim {
         vm: chosen.vm,
-        pid: killed.pid,
+        pid,
         killed_ms: now,
         grace_ends_ms: now.saturating_add(VICTIM_GRACE_MS),
     });

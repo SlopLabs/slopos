@@ -1024,15 +1024,49 @@ fn force_death_on_frame_fault(task_ref: &Task) {
 /// Resolve the frame's pages as a user write would, so the copies below meet
 /// a present, writable leaf. `#[inline(never)]` for the same frame-size
 /// reason as [`push_siginfo`].
+///
+/// A forked child's first write to a still-shared stack page is charged here,
+/// so the populate may have to wait for the OOM killer, or for a file read.
+/// Delivery on a trap's way out runs one level into interrupt nesting with
+/// interrupts masked, and the wait runs in the window the `#PF` path opens
+/// for the same two: out of nesting, interrupts on. Only a delivery under a
+/// preemption pin cannot wait, and keeps to what needs none.
 #[inline(never)]
 fn populate_sigframe_range(task_ref: &Task, frame_addr: u64) -> bool {
-    slopos_mm::page_fault::populate_user_range_for_write(
-        task_ref.process_vm_handle_raw(),
-        frame_addr,
-        SIGFRAME_TOTAL,
-        task_ref.task_id,
-        slopos_mm::page_fault::FileIo::Refuse,
-    )
+    use slopos_arch::cpu;
+    use slopos_mm::page_fault::FileIo;
+    use slopos_ostd::cpu::x86_64::pcr::{
+        interrupt_nesting_depth, interrupt_nesting_enter, interrupt_nesting_exit,
+    };
+
+    let populate = |io| {
+        slopos_mm::page_fault::populate_user_range_for_write(
+            task_ref.process_vm_handle_raw(),
+            frame_addr,
+            SIGFRAME_TOTAL,
+            task_ref.task_id,
+            io,
+        )
+    };
+    let nested = interrupt_nesting_depth();
+    if nested > 1 || slopos_ostd::cpu::preempt::PreemptGuard::is_active() {
+        return populate(FileIo::Refuse);
+    }
+    let masked = !cpu::are_interrupts_enabled();
+    if nested == 1 {
+        interrupt_nesting_exit();
+    }
+    if masked {
+        cpu::enable_interrupts();
+    }
+    let populated = populate(FileIo::Read);
+    if masked {
+        cpu::disable_interrupts();
+    }
+    if nested == 1 {
+        interrupt_nesting_enter();
+    }
+    populated
 }
 
 fn deliver_pending_signal_core(
@@ -1091,6 +1125,15 @@ fn deliver_pending_signal_core(
     // Anything else gets one deferral and then dies, as Linux's
     // `force_sigsegv` does — a signal retried forever is never reported.
     let refuse = |task_ref: &Task| {
+        // Killed while the frame waited for memory, perhaps as the victim:
+        // it dies of the kill, not of the push.
+        if task_ref.is_killed() {
+            let task_id = task_ref.task_id;
+            if task_terminate(task_id) == 0 {
+                schedule();
+            }
+            return;
+        }
         if fault_signal || task_ref.note_sigframe_push_failure() >= 2 {
             force_death_on_frame_fault(task_ref);
             return;

@@ -507,15 +507,26 @@ ceiling refusing its page or the buddy empty after reclaim, `mm::oom` kills
 instead of faulting the writer, as Linux's OOM killer does: the largest
 resident user process by the ledger's `ResidentPages` row, never init, killed
 the way every kill works (the flag each thread unwinds from, I8). The writer
-drops the address space, waits — killable, bounded — for the victim's to be
-torn down, and writes again; while a victim is dying nobody picks a second,
-and one still holding its memory five seconds after the kill stops holding
-back the next choice. Only when nothing but init and the dying is left does
-the write fail, as a `SIGKILL` (`TaskFaultReason::UserOom`). An `exec` is
-charged beside the image it replaces: the segments, interpreter and stack are
-sized from the headers and charged before the old image is released, then
-advanced to the loader, so a program that cannot fit is the caller's `ENOMEM`
-rather than a fault in a process that no longer has a program. slibc
+drops the address space, waits — killable, bounded — for the victim's frames
+to be back (noted once the teardown has dropped the address space, not
+inferred from the slot's unbind), and writes again; while a victim is dying
+nobody picks a second — a victim whose last task left before the kill reached
+it included — and one still holding its memory five seconds after the kill
+stops holding back the next choice. Only when nothing but init and the dying
+is left does the write fail, as a `SIGKILL` (`TaskFaultReason::UserOom`). A
+write the kernel makes for the task takes the same road wherever it may
+block: a user copy from a syscall, and the signal frame, whose delivery on a
+trap's way out steps out of interrupt nesting with interrupts on for it, as
+the `#PF` path does. It is refused only where no wait is possible: a copy
+made under a spinlock or preemption pin, in an interrupt handler or with
+interrupts masked answers `EFAULT` — the frame copies that follow delivery's
+populate are such copies, and meet the pages it made writable — and a frame
+the killer found nothing to free for fails the push, ending in `SIGSEGV` as
+Linux's `force_sigsegv` does. An `exec` is charged beside the image it
+replaces: the segments, interpreter and stack are sized from the headers and
+charged before the old image is released, then advanced to the loader, so a
+program that cannot fit is the caller's `ENOMEM` rather than a fault in a
+process that no longer has a program. slibc
 implements the `posix_spawn` family over the kernel's `spawn` primitive — the
 child's descriptor table is computed in the parent and handed over whole, and
 no address space is copied at all — and the std fork takes that road for
