@@ -17,10 +17,10 @@ scripts, a 410 MB target directory, 42 s at `-j20` on the host, and a 1.2 GiB
 peak for its largest single compile (`core`). The toolchain that runs it is a
 717 MB prefix — `librustc_driver` 140 MB, `libLLVM.so` and `libclang-cpp.so`
 79 MB each (X86 only), cargo 31 MB — built from a clean tree in 3 h 30 min at
-`-j4`. The same dev kernel builds on the host in 45 s at `-j4`; in the guest,
-at four vCPUs, it takes about 88 s under KVM (160 s and 600 s before the two
-rounds of work in "Closing the loop") and 136 + 90 min under TCG, measured
-before that work.
+`-j4`. The same dev kernel builds on the host in 49 s at `-j4` on four
+pinned cores; in the guest, at four vCPUs, it takes about 75 s under KVM (88,
+160 and 600 s before the rounds of work in "Closing the loop") and 136 + 90
+min under TCG, measured before that work.
 
 **Theme.** SlopOS's limits are appliance-sized constants and policies, not
 architectural mistakes. The work is widening under proof — quantities derived
@@ -220,12 +220,29 @@ symbol table (46 070 symbols).
    - an interrupt-delivered wake preempts an equal-priority task, and an
      enqueue behind a running task kicks an idle CPU to steal it.
 
-   What is left, per `prof=on`: the large crates compile 1.5–1.7× slower
-   than on the host (4 KiB pages only; kernel time is a fifth of the busy
-   time, half of it faults), the incremental second pass that embeds the
-   symbol table takes 16 s against 5 (process startup and metadata
-   operations, each of which still takes its mount's one lock), and `rustc
-   --version` takes 168 ms against 31, binding 206 k relocations.
+   Then from 88 s to 75 s:
+   - LLVM linked with a static libc++, `-Bsymbolic` and `DT_RELR`: `rustc
+     --version` 135 ms → 73 ms, symbol lookups at startup 22 k → 3 k;
+   - the ext2 log gathers the operations still in its ring into one
+     transaction and rewrites a block already logged there in place:
+     15 k small metadata operations wrote 340 MiB with 819 barriers, now
+     2.5 MiB with 4; create 263 µs → 13 µs;
+   - per-mount name and attribute caches answer a warm path walk without
+     the mount lock: 5.5 M acquisitions per bench → 0.5 M;
+   - a file fault fills its pages from the block cache in one pass, and the
+     loader reads a writable segment instead of mapping it (840 COW faults
+     per rustc, gone);
+   - unmap, exec reset and fork walk each leaf page table once, fault-around
+     maps its window in one walk from one frame batch; the jobserver port
+     lets cargo spawn rustc with `posix_spawn` instead of fork + exec;
+   - an idle-gated clean stamp, and a mutex that spins before it sleeps.
+
+   What is left is mostly the compiler, not the kernel. The host's 49 s is
+   rustup's dist build, with PGO, BOLT, ThinLTO, `codegen-units=1` and
+   jemalloc; the SlopOS-hosted compiler has none of them. The same host
+   build with bootstrap's plain Linux stage1 compiler, the same source and
+   configuration, takes 64.8 s and 133 s of user time: against that the
+   guest's 75 s is 15% slower, and its user time 5%.
 
 ---
 
