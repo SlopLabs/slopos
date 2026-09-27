@@ -6,7 +6,7 @@
 //! `t`, `T`, `w` or `W` at a kernel address, in llvm-nm's order, without
 //! LLVM's `.llvm.<hash>` promotion suffix, deduplicated
 //! by address and name. `<out.rs>` is rewritten only when the table changed,
-//! so the second kernel build is a cache hit whenever the symbols are stable.
+//! so a kernel build whose table is already its own is a cache hit.
 //! Dependency-free, so it builds for the Linux host and the SlopOS guest alike.
 
 mod demangle;

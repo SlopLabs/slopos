@@ -76,9 +76,8 @@ fi
 KERNEL_ELF="$BUILD_DIR/kernel-$VARIANT.elf"
 rm -f "$BUILD_DIR/kernel" "$KERNEL_ELF"
 
-# The kernel embeds a symbol table generated from its own ELF. Both passes
-# point slopos-ostd's build script at this file, which it tracks by content, so
-# the second pass is a cache hit unless the symbols moved. Keyed by variant so
+# The kernel embeds a symbol table generated from its own ELF, and
+# slopos-ostd's build script tracks this file by content. Keyed by variant so
 # the variants' different symbol sets do not invalidate each other.
 KSYMS_RS="$BUILD_DIR/kallsyms-$VARIANT.rs"
 if [ ! -f "$KSYMS_RS" ]; then
@@ -119,8 +118,17 @@ build_kernel_once() {
     fi
 }
 
-build_kernel_once
-"$KALLSYMS" "$KERNEL_ELF" "$KSYMS_RS"
-build_kernel_once
-
-echo "build_kernel: $VARIANT kernel -> $KERNEL_ELF"
+# Embedding the table can move code, so build until the ELF carries its own.
+for pass in 1 2 3 4; do
+    build_kernel_once
+    cp "$KSYMS_RS" "$KSYMS_RS.built"
+    "$KALLSYMS" "$KERNEL_ELF" "$KSYMS_RS"
+    if cmp -s "$KSYMS_RS" "$KSYMS_RS.built"; then
+        rm -f "$KSYMS_RS.built"
+        echo "build_kernel: $VARIANT kernel -> $KERNEL_ELF"
+        exit 0
+    fi
+done
+rm -f "$KSYMS_RS.built"
+echo "build_kernel: the symbol table did not settle in $pass builds" >&2
+exit 1
