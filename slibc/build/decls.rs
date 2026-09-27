@@ -1336,15 +1336,16 @@ pub const HEADERS: &[HeaderSpec] = &[
         path: "signal.h",
         summary: "signals",
         includes: &["sys/types.h"],
-        // `siginfo_t` before `sigaction`: the handler slot names it.
+        // `sigval` before `siginfo_t`, whose payload names it, and `siginfo_t`
+        // before `sigaction`, whose handler slot names it.
         types: &[
             "sig_atomic_t",
             "sighandler_t",
             "sigset_t",
+            "sigval",
             "siginfo_t",
             "sigaction",
             "stack_t",
-            "sigval",
             "sigevent",
         ],
         consts: &[

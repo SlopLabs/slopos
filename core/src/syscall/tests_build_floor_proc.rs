@@ -1254,6 +1254,75 @@ pub fn test_futex_key_carries_the_address_space() -> TestResult {
     pass!()
 }
 
+/// A waiter requeued from a shared key onto a private one, and back, lives in
+/// the destination's bucket afterwards: its own unlink — what a timeout or a
+/// signal does — finds it there, and leaves neither bucket holding it.
+pub fn test_futex_requeue_moves_waiters_between_key_kinds() -> TestResult {
+    use slopos_sched::futex::{
+        FutexKey, futex_keys_share_bucket_for_test, futex_park_for_test,
+        futex_remove_self_for_test, futex_requeue, futex_waiters_for_test,
+    };
+    let _fixture = SyscallFixture::new();
+
+    let id = create_kernel_task();
+    if id == INVALID_TASK_ID {
+        return fail!("could not create the waiter");
+    }
+    let addr = 0x5300_0000u64;
+    let shared = FutexKey::shared(0x7700_0000_0001, 0x40);
+    let current = make_task_current(id);
+    // The waiter's own address space: a kernel task's, taken while current.
+    let private = FutexKey::private(addr);
+    let distinct = !futex_keys_share_bucket_for_test(shared, private);
+
+    let parked = current && futex_park_for_test(shared);
+    let to_private = futex_requeue(shared, 0, private, 0, 1, None);
+    let moved_to_private = (
+        futex_waiters_for_test(shared),
+        futex_waiters_for_test(private),
+    );
+    let unlinked_from_private = futex_remove_self_for_test(private);
+    let left_on_private = futex_waiters_for_test(private);
+
+    let reparked = futex_park_for_test(private);
+    let to_shared = futex_requeue(private, addr, shared, 0, 1, None);
+    let moved_to_shared = (
+        futex_waiters_for_test(private),
+        futex_waiters_for_test(shared),
+    );
+    let unlinked_from_shared = futex_remove_self_for_test(shared);
+    let left_on_shared = futex_waiters_for_test(shared);
+
+    park_bootstrap_on_current_cpu();
+    task_terminate(id);
+
+    assert_test!(distinct, "the two keys must hash to different buckets");
+    assert_test!(parked && reparked, "could not park the waiter");
+    assert_eq_test!(to_private, 1, "shared-to-private requeue moved nothing");
+    assert_eq_test!(
+        moved_to_private,
+        (0, 1),
+        "the waiter is not on the private key"
+    );
+    assert_test!(
+        unlinked_from_private,
+        "the waiter could not unlink itself from the private bucket"
+    );
+    assert_eq_test!(left_on_private, 0, "the unlink left the waiter queued");
+    assert_eq_test!(to_shared, 1, "private-to-shared requeue moved nothing");
+    assert_eq_test!(
+        moved_to_shared,
+        (0, 1),
+        "the waiter is not on the shared key"
+    );
+    assert_test!(
+        unlinked_from_shared,
+        "the waiter could not unlink itself from the shared bucket"
+    );
+    assert_eq_test!(left_on_shared, 0, "the unlink left the waiter queued");
+    pass!()
+}
+
 type SharedWord = Result<Option<slopos_mm::process_vm::SharedFutexWord>, ()>;
 
 /// What each address space derives for the memfd word, its neighbour, its own
@@ -1826,6 +1895,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_futex_key_carries_the_address_space,
+    suite = syscall_proc_build_floor
+);
+slopos_testing::stest!(
+    name = test_futex_requeue_moves_waiters_between_key_kinds,
     suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(

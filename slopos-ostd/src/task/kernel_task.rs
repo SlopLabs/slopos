@@ -36,7 +36,7 @@ use crate::task::job_control::ProcessGroup;
 use crate::task::link_roles::{
     CleanupRole, FutexRole, ReadyQueueRole, ReclaimRole, RemoteWakeRole, SiblingRole,
 };
-use crate::task::sigqueue::SigQueue;
+use crate::task::sigqueue::PendingSignals;
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
@@ -560,13 +560,20 @@ pub struct TaskInner<K, U> {
     /// value, so no task is accidentally omnipotent and none is accidentally
     /// powerless.
     pub caps: AtomicU64,
-    /// Bitmask of pending signals: bit `n - 1` for signal `n`. What each set
-    /// bit carries lives in [`sigqueue`](Self::sigqueue), whose lock every
-    /// writer of this word holds; readers probe it lock-free.
-    pub signal_pending: AtomicU64,
-    /// The `siginfo` records behind `signal_pending`, allocated on the first
-    /// signal that carries one.
-    pub(crate) sigqueue: SpinLock<Option<KBox<SigQueue>>>,
+    /// Signals sent to this thread alone.
+    pub(crate) pending: PendingSignals,
+    /// Signals sent to this thread's process, shared by every thread of the
+    /// group; one thread that does not block a signal takes it. `None` only
+    /// for a task that never registered.
+    ///
+    /// Written only through `&mut self`, like [`sighand`](Self::sighand).
+    pub(crate) shared_pending: Option<crate::KArc<PendingSignals>>,
+    /// This thread was picked to take its process's pending signals. Only a
+    /// picked thread acts on them at a delivery point or has a wait cut short
+    /// by them, so the thread a send chose is the one that runs the handler,
+    /// not whichever sibling reaches a boundary first. Cleared when it looks
+    /// and finds none it may take.
+    pub(crate) picked_for_shared: AtomicBool,
     /// The task is marked for death: every blocking primitive but the bounded
     /// uninterruptible tier aborts rather than parks. A word of its own, not a
     /// bit of any signal set, so no mask userland writes can name it.
@@ -723,11 +730,6 @@ pub const TTY_INDEX_NONE: u16 = u16::MAX;
 /// constructors so a task's class does not depend on which one built it.
 const TEST_REPORTS_CLASS: &crate::sync::lock_tracking::LockClassKey =
     crate::lock_class!("Task.test_reports", LOCK_LEVEL_RESOURCE);
-
-/// One class for every task's `sigqueue`. A leaf: nothing is acquired under
-/// it, and a post publishes its wake only after releasing it.
-const SIGQUEUE_CLASS: &crate::sync::lock_tracking::LockClassKey =
-    crate::lock_class!("Task.sigqueue", LOCK_LEVEL_RESOURCE);
 
 impl<K, U> TaskInner<K, U> {
     /// This task's FS segment base (TLS pointer).
@@ -1086,9 +1088,18 @@ impl<K, U> TaskInner<K, U> {
         self.signal_blocked.load(Ordering::Acquire)
     }
 
+    /// Replace the blocked set. Unblocking a signal the process has pending
+    /// picks this thread to take it, as a send would have had it not blocked.
+    /// A caller that blocks one it was picked for hands it on (the scheduler's
+    /// `task_set_signal_blocked`).
     #[inline]
     pub fn set_signal_blocked(&self, mask: SigSet) {
         self.signal_blocked.store(mask, Ordering::Release);
+        if let Some(shared) = self.shared_pending.as_deref()
+            && shared.bits() & !mask != 0
+        {
+            self.picked_for_shared.store(true, Ordering::Release);
+        }
     }
 
     /// This task's controlling terminal, if any.
@@ -1338,8 +1349,9 @@ impl<K, U> TaskInner<K, U> {
             fpu_last_cpu: AtomicI32::new(FPU_CPU_NONE),
             migration_count: AtomicU32::new(0),
             caps: AtomicU64::new(CAPS_UNSET),
-            signal_pending: AtomicU64::new(0),
-            sigqueue: SpinLock::new(None, SIGQUEUE_CLASS),
+            pending: PendingSignals::new(),
+            shared_pending: None,
+            picked_for_shared: AtomicBool::new(false),
             killed: AtomicBool::new(false),
             signal_blocked: AtomicU64::new(SIG_EMPTY),
             sighand: None,
@@ -1426,7 +1438,7 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).process_group).write(RcuArcSlot::empty());
                 addr_of_mut!((*slot).caps).write(AtomicU64::new(CAPS_UNSET));
                 addr_of_mut!((*slot).test_reports).write(SpinLock::new(None, TEST_REPORTS_CLASS));
-                addr_of_mut!((*slot).sigqueue).write(SpinLock::new(None, SIGQUEUE_CLASS));
+                PendingSignals::init_zeroed_in_place(addr_of_mut!((*slot).pending));
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
                 addr_of_mut!((*slot).signal_blocked).write(AtomicU64::new(SIG_EMPTY));
@@ -1687,7 +1699,10 @@ impl<K, U> TaskInner<K, U> {
         drop(self.process_group.replace_exclusive(None));
         drop(self.fs.replace_exclusive(None));
         drop(self.test_reports.get_mut().take());
-        drop(self.sigqueue.get_mut().take());
+        drop(self.pending.take_store());
+        // The slot's own group set, not the parent's: a fork starts a process
+        // with nothing pending, and a thread clone swaps in the parent's.
+        let shared_pending = self.shared_pending.take();
 
         // SAFETY: Both pointers are valid, non-overlapping TaskInner
         // instances. The caller guarantees exclusive write access to
@@ -1706,11 +1721,9 @@ impl<K, U> TaskInner<K, U> {
                 SpinLock::new(None, TEST_REPORTS_CLASS),
             );
             // Pending signals are not inherited, and the copy duplicated the
-            // parent's heap pointer.
-            core::ptr::write(
-                &mut self.sigqueue as *mut _,
-                SpinLock::new(None, SIGQUEUE_CLASS),
-            );
+            // parent's heap pointers.
+            core::ptr::write(&mut self.pending as *mut _, PendingSignals::new());
+            core::ptr::write(&mut self.shared_pending as *mut _, shared_pending);
             self.abi.unsafe_stack_sp = 0;
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
             core::ptr::write(&mut self.state as *mut _, TaskState::invalid());
@@ -1753,8 +1766,8 @@ impl<K, U> TaskInner<K, U> {
         // explicitly, because an omission from this list is invisible in review
         // and is how an entitlement leaks into a child.
         self.caps = AtomicU64::new(other.caps.load(Ordering::Acquire));
-        self.signal_pending = AtomicU64::new(0);
         self.killed = AtomicBool::new(false);
+        self.picked_for_shared = AtomicBool::new(false);
         // A child is handed its own existence reference at registration;
         // inheriting the parent's `true` would let its reap take back a
         // reference never given, dropping the count below what owners hold.

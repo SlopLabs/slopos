@@ -26,6 +26,7 @@
 #include <semaphore.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1709,6 +1710,46 @@ static int signal_sender(void) {
     return 1;
 }
 
+static volatile int queued_seen, queued_code, queued_int;
+static void *volatile queued_ptr;
+
+static void on_queued(int sig, siginfo_t *info, void *uc) {
+    (void)sig;
+    (void)uc;
+    queued_code = info->si_code;
+    queued_int = info->si_value.sival_int;
+    queued_ptr = info->si_value.sival_ptr;
+    queued_seen++;
+}
+
+_Static_assert(offsetof(siginfo_t, si_value) == 24, "si_value is not at Linux's offset");
+_Static_assert(sizeof(siginfo_t) == 128, "siginfo_t is not Linux's 128 bytes");
+
+// A `SA_SIGINFO` handler reads the value `sigqueue` sent, through both arms.
+static int queued_value(void) {
+    struct sigaction act;
+    memset(&act, 0, sizeof act);
+    act.sa_sigaction = on_queued;
+    act.sa_flags = SA_SIGINFO;
+    sigemptyset(&act.sa_mask);
+    if (sigaction(SIGRTMIN, &act, NULL) != 0) {
+        return fail("could not catch SIGRTMIN");
+    }
+    union sigval value = {.sival_int = 0x5a17};
+    if (sigqueue(getpid(), SIGRTMIN, value) != 0 || queued_seen != 1 ||
+        queued_code != SI_QUEUE || queued_int != 0x5a17) {
+        signal(SIGRTMIN, SIG_DFL);
+        return fail("si_value.sival_int is not the value sigqueue sent");
+    }
+    value.sival_ptr = (void *)&queued_seen;
+    int sent = sigqueue(getpid(), SIGRTMIN, value);
+    signal(SIGRTMIN, SIG_DFL);
+    if (sent != 0 || queued_seen != 2 || queued_ptr != (void *)&queued_seen) {
+        return fail("si_value.sival_ptr is not the pointer sigqueue sent");
+    }
+    return 1;
+}
+
 static sem_t handler_sem;
 
 static void on_post(int sig) {
@@ -1994,6 +2035,7 @@ static int run(void) {
         semaphores,      case_and_bits,       unbuffered,
         locked_pages,    waited_signal,       child_times,
         logging,         addresses,           conversion,
+        queued_value,
     };
     for (size_t i = 0; i < sizeof checks / sizeof checks[0]; i++) {
         check = (int)i + 1;

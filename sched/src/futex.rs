@@ -456,6 +456,12 @@ pub fn futex_wake_one(uaddr: u64) -> i64 {
     futex_wake(FutexKey::private(uaddr), 1, FUTEX_BITSET_MATCH_ANY)
 }
 
+/// Whether two keys hash to one bucket.
+#[cfg(feature = "test-hooks")]
+pub fn futex_keys_share_bucket_for_test(a: FutexKey, b: FutexKey) -> bool {
+    a.bucket() == b.bucket()
+}
+
 /// Waiters parked on `key`.
 #[cfg(feature = "test-hooks")]
 pub fn futex_waiters_for_test(key: FutexKey) -> usize {

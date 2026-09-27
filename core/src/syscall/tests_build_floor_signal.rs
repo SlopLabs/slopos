@@ -418,11 +418,13 @@ pub fn test_kill_reaches_a_non_leader_thread() -> TestResult {
 
     assert_test!(
         (thread.signal_pending() & sig_bit(SIGTERM)) != 0,
-        "kill(pid) must reach every thread of the group"
+        "kill(pid) must be pending for every thread of the group"
     );
+    let taken_by_thread = thread.dequeue_signal(!thread.signal_blocked()).is_some();
+    let taken_by_leader = leader.dequeue_signal(!leader.signal_blocked()).is_some();
     assert_test!(
-        (leader.signal_pending() & sig_bit(SIGTERM)) != 0,
-        "kill(pid) must also reach the named thread"
+        taken_by_thread && !taken_by_leader,
+        "one kill(pid) must be taken by one thread, not by each"
     );
 
     drop(leader);
@@ -1765,8 +1767,8 @@ pub fn test_realtime_signals_queue_and_standard_ones_coalesce() -> TestResult {
     let coalesced = task_signal_post_info(&task, SIGUSR1, SigInfo::sent(SI_USER, 11, 0, 0));
     let mut order = [(0u8, 0u32, 0u64); 5];
     for slot in order.iter_mut() {
-        if let Some((signum, info)) = task.dequeue_signal(u64::MAX) {
-            *slot = (signum, info.pid, info.value);
+        if let Some(taken) = task.dequeue_signal(u64::MAX) {
+            *slot = (taken.signum, taken.info.pid, taken.info.value);
         }
     }
     let drained = task.dequeue_signal(u64::MAX).is_none() && task.signal_pending() == 0;
@@ -1881,15 +1883,19 @@ pub fn test_sent_signals_carry_the_real_sender() -> TestResult {
     let forged_user = write_info(SI_USER) && queue(SIGRTMIN) == eperm;
     let forged_tkill = write_info(SI_TKILL) && queue(SIGRTMIN) == eperm;
     let queued = write_info(SI_QUEUE) && queue(SIGRTMIN) == 0;
-    let got_queued = target_task.dequeue_signal(u64::MAX);
+    let taken = |task: &slopos_sched::task::TaskRef| {
+        task.dequeue_signal(u64::MAX)
+            .map(|taken| (taken.signum, taken.info))
+    };
+    let got_queued = taken(&target_task);
     let killed = call_as(syscall_kill, sender, [target as u64, SIGUSR1 as u64, 0, 0]) == 0;
-    let got_kill = target_task.dequeue_signal(u64::MAX);
+    let got_kill = taken(&target_task);
     let tkilled = call_as(
         syscall_tgkill,
         sender,
         [target as u64, target as u64, SIGUSR1 as u64, 0],
     ) == 0;
-    let got_tkill = target_task.dequeue_signal(u64::MAX);
+    let got_tkill = taken(&target_task);
     let own = write_info(SI_USER)
         && call_as(
             syscall_rt_sigqueueinfo,
@@ -1929,6 +1935,405 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_sent_signals_carry_the_real_sender,
+    suite = syscall_signal_build_floor
+);
+
+/// A process of `N` threads: the leader, then `N - 1` `CLONE_THREAD` siblings.
+fn spawn_threads<const N: usize>() -> Option<[u32; N]> {
+    let mut ids = [INVALID_TASK_ID; N];
+    ids[0] = create_test_user_task();
+    let leader = task_find_by_id(ids[0])?;
+    for slot in ids.iter_mut().skip(1) {
+        *slot = task_clone(
+            &leader,
+            None,
+            CLONE_VM | CLONE_SIGHAND | CLONE_THREAD,
+            0,
+            0,
+            0,
+            0,
+        )
+        .unwrap_or(INVALID_TASK_ID);
+    }
+    drop(leader);
+    if ids.contains(&INVALID_TASK_ID) {
+        terminate_all(&ids);
+        return None;
+    }
+    Some(ids)
+}
+
+fn terminate_all(ids: &[u32]) {
+    for &id in ids.iter().filter(|&&id| id != INVALID_TASK_ID) {
+        task_terminate(id);
+    }
+}
+
+/// `sigqueue(pid, signum, value)` from `sender`, whose scratch word at `page`
+/// carries the record. Returns RAX.
+fn sigqueue_as(sender: u32, page: u64, pid: u32, signum: u8, value: u64) -> u64 {
+    use slopos_abi::signal::{SI_QUEUE, SigInfo};
+    let Some(table) = fdtable_of(sender) else {
+        return u64::MAX;
+    };
+    let info = UserSiginfo::from_info(signum as i32, &SigInfo::sent(SI_QUEUE, 0, 0, value));
+    if !user_copy_out(table, page, &info) {
+        return u64::MAX;
+    }
+    call_as(
+        syscall_rt_sigqueueinfo,
+        sender,
+        [pid as u64, signum as u64, page, 0],
+    )
+}
+
+/// What `task` takes next with its own mask, as `(signal, value)`.
+fn take_next(task_id: u32) -> Option<(u8, u64)> {
+    let task = task_find_by_id(task_id)?;
+    task.dequeue_signal(!task.signal_blocked())
+        .map(|taken| (taken.signum, taken.info.value))
+}
+
+/// One `sigqueue` to a three-thread process runs one handler: the instance
+/// lands once, on the set the threads share, and the thread that takes it
+/// leaves nothing for the others.
+pub fn test_one_sigqueue_to_a_process_is_taken_once() -> TestResult {
+    use slopos_abi::signal::SIGRTMIN;
+    let _fixture = SyscallFixture::new();
+
+    let Some(ids) = spawn_threads::<3>() else {
+        return TestResult::Fail;
+    };
+    let Some(page) = fdtable_of(ids[0]).and_then(|table| map_user_rw_region(table, 1)) else {
+        return fail_and_clean(&ids);
+    };
+    // Sent by a sibling, as a watchdog thread does: the leader the pid names
+    // is the one picked, not the sender that reaches a boundary first.
+    let sent = sigqueue_as(ids[1], page, ids[0], SIGRTMIN, 0x5eed);
+    let picked = ids.map(|id| {
+        task_find_by_id(id).is_some_and(|t| slopos_sched::task::task_has_deliverable_signal(&t))
+    });
+    let taken = ids.map(take_next);
+    terminate_all(&ids);
+
+    assert_eq_test!(sent, 0, "sigqueue to the process failed");
+    assert_eq_test!(
+        picked,
+        [true, false, false],
+        "only the named thread may act on it"
+    );
+    let takers = taken.iter().flatten().count();
+    assert_eq_test!(takers, 1, "each thread took its own copy of one sigqueue");
+    assert_eq_test!(
+        taken.iter().flatten().next().copied(),
+        Some((SIGRTMIN, 0x5eed)),
+        "the taker must see the queued value"
+    );
+    pass!()
+}
+
+/// Worker threads that block a signal leave it to the thread that handles
+/// it: forty `sigqueue`s — past `SIGQUEUE_MAX` — to a process whose leader and
+/// one worker block `SIGRTMIN` all succeed, and the one unblocked thread takes
+/// each, in order, as it arrives.
+pub fn test_blocked_threads_leave_process_signals_to_the_unblocked_one() -> TestResult {
+    use slopos_abi::signal::SIGRTMIN;
+    let _fixture = SyscallFixture::new();
+
+    let Some(ids) = spawn_threads::<3>() else {
+        return TestResult::Fail;
+    };
+    let [leader, worker, handler] = ids;
+    let Some(page) = fdtable_of(leader).and_then(|table| map_user_rw_region(table, 1)) else {
+        return fail_and_clean(&ids);
+    };
+    for id in [leader, worker] {
+        if let Some(task) = task_find_by_id(id) {
+            task.set_signal_blocked(sig_bit(SIGRTMIN));
+        }
+    }
+
+    let (mut sent, mut in_order, mut elsewhere) = (0usize, 0usize, 0usize);
+    for value in 0..40u64 {
+        if sigqueue_as(leader, page, leader, SIGRTMIN, value) == 0 {
+            sent += 1;
+        }
+        if take_next(handler) == Some((SIGRTMIN, value)) {
+            in_order += 1;
+        }
+        elsewhere += [leader, worker]
+            .map(|id| take_next(id).is_some() as usize)
+            .iter()
+            .sum::<usize>();
+    }
+    let parked = [leader, worker]
+        .map(|id| task_find_by_id(id).map_or(0, |task| task.queued_realtime_signals()));
+    terminate_all(&ids);
+
+    assert_eq_test!(sent, 40, "a blocked thread's backlog refused a sigqueue");
+    assert_eq_test!(
+        in_order,
+        40,
+        "the unblocked thread must take each, in order"
+    );
+    assert_eq_test!(elsewhere, 0, "a thread blocking the signal took it");
+    assert_eq_test!(
+        parked,
+        [0, 0],
+        "an instance was parked on a blocking thread"
+    );
+    pass!()
+}
+
+/// A process signal every thread blocks stays pending for all of them,
+/// deliverable to none, until one unblocks it; that one takes it.
+pub fn test_a_signal_every_thread_blocks_goes_to_the_first_to_unblock() -> TestResult {
+    use slopos_abi::signal::SIGRTMIN;
+    use slopos_sched::task::task_has_deliverable_signal;
+    let _fixture = SyscallFixture::new();
+
+    let Some(ids) = spawn_threads::<3>() else {
+        return TestResult::Fail;
+    };
+    let Some(page) = fdtable_of(ids[0]).and_then(|table| map_user_rw_region(table, 1)) else {
+        return fail_and_clean(&ids);
+    };
+    let threads = ids.map(task_find_by_id);
+    let bit = sig_bit(SIGRTMIN);
+    for task in threads.iter().flatten() {
+        task.set_signal_blocked(bit);
+    }
+    let sent = sigqueue_as(ids[0], page, ids[0], SIGRTMIN, 77);
+    let pending_for_all = threads
+        .iter()
+        .all(|t| t.as_ref().is_some_and(|t| t.signal_pending() & bit != 0));
+    let deliverable_before = threads
+        .iter()
+        .flatten()
+        .filter(|t| task_has_deliverable_signal(t))
+        .count();
+    let blocked_takes = ids.map(take_next);
+
+    if let Some(unblocker) = &threads[2] {
+        unblocker.set_signal_blocked(0);
+    }
+    let deliverable_after = threads
+        .each_ref()
+        .map(|t| t.as_ref().is_some_and(|t| task_has_deliverable_signal(t)));
+    let taken = take_next(ids[2]);
+    let left = threads
+        .iter()
+        .flatten()
+        .any(|t| t.signal_pending() & bit != 0);
+    drop(threads);
+    terminate_all(&ids);
+
+    assert_eq_test!(sent, 0, "sigqueue to the process failed");
+    assert_test!(
+        pending_for_all,
+        "the signal must be pending for every thread"
+    );
+    assert_eq_test!(deliverable_before, 0, "a thread blocking it could take it");
+    assert_eq_test!(blocked_takes, [None; 3], "a blocking thread took it");
+    assert_eq_test!(
+        deliverable_after,
+        [false, false, true],
+        "only the thread that unblocked it may take it"
+    );
+    assert_eq_test!(taken, Some((SIGRTMIN, 77)), "the unblocker must take it");
+    assert_test!(!left, "a taken instance must leave the process");
+    pass!()
+}
+
+/// Past the queue limit a `kill` still pends, its record lost, as Linux has
+/// it; `sigqueue` and `tgkill` are refused with `EAGAIN`.
+pub fn test_only_a_kill_pends_past_the_queue_limit() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMAX, SIGRTMIN, SigInfo};
+    use slopos_sched::task::{SignalPost, task_signal_post_info};
+    let _fixture = SyscallFixture::new();
+
+    let sender = create_test_user_task();
+    let target = create_test_user_task();
+    let ids = [sender, target];
+    if ids.contains(&INVALID_TASK_ID) {
+        return fail_and_clean(&ids);
+    }
+    let Some(page) = fdtable_of(sender).and_then(|table| map_user_rw_region(table, 1)) else {
+        return fail_and_clean(&ids);
+    };
+    let Some(target_task) = task_find_by_id(target) else {
+        return fail_and_clean(&ids);
+    };
+    let eagain = slopos_abi::Errno::EAGAIN.as_u64();
+
+    let filled = (0..SIGQUEUE_MAX)
+        .filter(|&i| sigqueue_as(sender, page, target, SIGRTMAX, i as u64) == 0)
+        .count();
+    let queued_past = sigqueue_as(sender, page, target, SIGRTMAX, 99);
+    let kill = |signum: u8| call_as(syscall_kill, sender, [target as u64, signum as u64, 0, 0]);
+    let killed_same = kill(SIGRTMAX);
+    let killed_other = kill(SIGRTMAX - 1);
+    let kill_pending = target_task.signal_pending() & sig_bit(SIGRTMAX - 1) != 0;
+
+    let own_filled = (0..SIGQUEUE_MAX)
+        .filter(|_| {
+            task_signal_post_info(&target_task, SIGRTMIN, SigInfo::sent(SI_QUEUE, 1, 0, 0))
+                == SignalPost::Pending
+        })
+        .count();
+    let tkilled_past = call_as(
+        syscall_tgkill,
+        sender,
+        [target as u64, target as u64, SIGRTMIN as u64, 0],
+    );
+    drop(target_task);
+    terminate_all(&ids);
+
+    assert_eq_test!(
+        filled,
+        SIGQUEUE_MAX,
+        "the process queue must take SIGQUEUE_MAX"
+    );
+    assert_eq_test!(
+        queued_past,
+        eagain,
+        "a sigqueue past the limit must be EAGAIN"
+    );
+    assert_eq_test!(killed_same, 0, "a kill past the limit must succeed");
+    assert_eq_test!(killed_other, 0, "a kill of another RT signal must succeed");
+    assert_test!(kill_pending, "the kill past the limit must pend");
+    assert_eq_test!(
+        own_filled,
+        SIGQUEUE_MAX,
+        "the thread queue must take SIGQUEUE_MAX"
+    );
+    assert_eq_test!(
+        tkilled_past,
+        eagain,
+        "a tgkill past the limit must be EAGAIN"
+    );
+    pass!()
+}
+
+/// An instance a delivery took and could not use goes back ahead of the rest,
+/// even when a sender refilled the queue behind it meanwhile.
+pub fn test_a_requeued_instance_survives_a_refilled_queue() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMIN, SigInfo};
+    use slopos_sched::task::{SignalPost, task_signal_post_info};
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    let Some(task) = task_find_by_id(task_id) else {
+        return fail_and_clean(&[task_id]);
+    };
+    let post = |value: u64| {
+        task_signal_post_info(&task, SIGRTMIN, SigInfo::sent(SI_QUEUE, 1, 0, value))
+            == SignalPost::Pending
+    };
+    let filled = (0..SIGQUEUE_MAX as u64).filter(|&v| post(v)).count();
+    let taken = task.dequeue_signal(u64::MAX);
+    let refilled = post(100);
+    if let Some(taken) = &taken {
+        task.requeue_signal(taken);
+    }
+    let mut order = [u64::MAX; SIGQUEUE_MAX + 2];
+    let mut drained = 0usize;
+    for slot in order.iter_mut() {
+        let Some(next) = task.dequeue_signal(u64::MAX) else {
+            break;
+        };
+        *slot = next.info.value;
+        drained += 1;
+    }
+    drop(task);
+    task_terminate(task_id);
+
+    assert_eq_test!(filled, SIGQUEUE_MAX, "the queue must fill");
+    assert_test!(
+        refilled,
+        "the slot a delivery freed must take a new instance"
+    );
+    assert_eq_test!(drained, SIGQUEUE_MAX + 1, "an instance was lost");
+    let expected = (0..SIGQUEUE_MAX as u64).chain([100]);
+    assert_test!(
+        order
+            .iter()
+            .copied()
+            .zip(expected)
+            .all(|(got, want)| got == want),
+        "the requeued instance must come back first"
+    );
+    pass!()
+}
+
+/// `SIGPIPE` for a write nobody will read names the writer itself as its
+/// sender, as a `kill` to itself would: `SI_USER` and the writer's own pid.
+pub fn test_sigpipe_names_the_writer_as_sender() -> TestResult {
+    use slopos_abi::signal::{SI_USER, SIGPIPE, SigInfo};
+    use slopos_fs::fileio::{file_close_fd, file_pipe_create};
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    let (Some(task), Some(table)) = (task_find_by_id(task_id), fdtable_of(task_id)) else {
+        return fail_and_clean(&[task_id]);
+    };
+    let (mut read_fd, mut write_fd) = (-1, -1);
+    let piped = file_pipe_create(table, 0, &mut read_fd, &mut write_fd) == 0
+        && file_close_fd(table, read_fd) == 0;
+    let page = map_user_rw_region(table, 1).unwrap_or(0);
+    let wrote = call_as(
+        crate::syscall::fs::path_handlers::syscall_write,
+        task_id,
+        [write_fd as u64, page, 8, 0],
+    );
+    let pid = call_as(
+        crate::syscall::process_handlers::syscall_getpid,
+        task_id,
+        [0; 4],
+    );
+    let taken = task
+        .dequeue_signal(sig_bit(SIGPIPE))
+        .map(|taken| (taken.signum, taken.info));
+    let _ = file_close_fd(table, write_fd);
+    drop(task);
+    task_terminate(task_id);
+
+    assert_test!(piped && page != 0, "could not build the broken pipe");
+    assert_eq_test!(
+        wrote,
+        slopos_abi::Errno::EPIPE.as_u64(),
+        "the write must fail EPIPE"
+    );
+    assert_eq_test!(
+        taken,
+        Some((SIGPIPE, SigInfo::sent(SI_USER, pid as u32, 0, 0))),
+        "SIGPIPE must be SI_USER from the writer's own pid"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_one_sigqueue_to_a_process_is_taken_once,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_blocked_threads_leave_process_signals_to_the_unblocked_one,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_signal_every_thread_blocks_goes_to_the_first_to_unblock,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_only_a_kill_pends_past_the_queue_limit,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_requeued_instance_survives_a_refilled_queue,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_sigpipe_names_the_writer_as_sender,
     suite = syscall_signal_build_floor
 );
 

@@ -6,8 +6,8 @@ use slopos_abi::signal::{
     REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RAX, REG_RBP, REG_RBX, REG_RCX, REG_RDI,
     REG_RDX, REG_RIP, REG_RSI, REG_RSP, REG_TRAPNO, SA_NODEFER, SA_ONSTACK, SA_RESETHAND,
     SA_SIGINFO, SI_TKILL, SI_USER, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIG_UNCATCHABLE,
-    SIGKILL, SIGSEGV, SS_DISABLE, SS_ONSTACK, SigDefault, SigInfo, SigSet, SignalFrame,
-    UserSigAltStack, UserSigaction, UserSiginfo, UserUcontext, sig_bit, sig_default_action,
+    SIGSEGV, SS_DISABLE, SS_ONSTACK, SigDefault, SigInfo, SigSet, SignalFrame, UserSigAltStack,
+    UserSigaction, UserSiginfo, UserUcontext, sig_bit, sig_default_action,
 };
 use slopos_abi::task::{
     INVALID_TASK_ID, SPAWN_PRIVILEGED, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason,
@@ -18,17 +18,17 @@ use slopos_mm::user_copy::{
 use slopos_mm::user_ptr::{UserBytes, UserPtr as MmUserPtr};
 use slopos_ostd::irq::InterruptFrame;
 use slopos_ostd::task::FPU_STATE_SIZE;
+use slopos_ostd::task::sigqueue::DequeuedSignal;
 use slopos_ostd::user::context::{
     USER_RFLAGS_FORCED, USER_RFLAGS_PERMITTED, UserContext, UserRegs,
 };
 
 use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::result::SyscallResult;
-use slopos_sched::scheduler::{schedule, unblock_task};
+use slopos_sched::scheduler::schedule;
 use slopos_sched::task::{
     SignalPost, task_find_by_id, task_for_each_active, task_group_fatal_signal,
-    task_group_signal_info, task_group_stop, task_kill_and_wake, task_resume_if_stopped,
-    task_signal_post_info, task_terminate, task_thread_signal_info,
+    task_group_signal_info, task_group_stop, task_terminate, task_thread_signal_info,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
@@ -41,7 +41,7 @@ fn parse_signum(raw: u64) -> Option<u8> {
     }
 }
 
-/// Heap-backed list of unique task IDs.
+/// Heap-backed list of unique process IDs.
 struct TargetSet {
     ids: slopos_ostd::KVec<u32>,
 }
@@ -129,8 +129,9 @@ fn collect_targets_for_group(pgid: u32, caller_flags: u16, targets: &mut TargetS
         if !signal_may_name(task.flags) || task.pgid() != pgid {
             return;
         }
-        if signal_permitted(caller_flags, task.task_id, task.flags) {
-            targets.push(task.task_id);
+        let group = sender_pid(task);
+        if signal_permitted(caller_flags, group, task.flags) {
+            targets.push(group);
         } else {
             denied = true;
         }
@@ -139,20 +140,18 @@ fn collect_targets_for_group(pgid: u32, caller_flags: u16, targets: &mut TargetS
 }
 
 fn collect_targets_for_all(
-    exclude_task_id: u32,
+    exclude_group: u32,
     caller_flags: u16,
     targets: &mut TargetSet,
 ) -> Fanout {
     let mut denied = false;
     task_for_each_active(|task| {
-        if !signal_may_name(task.flags)
-            || task.task_id == INVALID_TASK_ID
-            || task.task_id == exclude_task_id
-        {
+        let group = sender_pid(task);
+        if !signal_may_name(task.flags) || group == INVALID_TASK_ID || group == exclude_group {
             return;
         }
-        if signal_permitted(caller_flags, task.task_id, task.flags) {
-            targets.push(task.task_id);
+        if signal_permitted(caller_flags, group, task.flags) {
+            targets.push(group);
         } else {
             denied = true;
         }
@@ -244,7 +243,7 @@ define_syscall!(syscall_rt_sigprocmask
             SIG_SETMASK => blocked = set,
             _ => return Err(Errno::EINVAL),
         }
-        task_ref.set_signal_blocked(blocked & !SIG_UNCATCHABLE);
+        slopos_sched::task::task_set_signal_blocked(task_ref, blocked & !SIG_UNCATCHABLE);
     }
 
     Ok(())
@@ -285,9 +284,9 @@ define_syscall!(syscall_kill
         let Some(signum) = parse_signum(sig) else {
             return SyscallResult::Err(Errno::EINVAL);
         };
-        // POSIX `kill(pid)` names a *process*: the signal reaches every thread
-        // in the group. The permission relation is answered once, on the named
-        // task — a thread-group fan-out crosses no session.
+        // POSIX `kill(pid)` names a *process*: one thread of the group takes
+        // the signal. The permission relation is answered once, on the named
+        // task — a thread-group send crosses no session.
         let post = task_group_signal_info(target.id(), signum, info);
         if post.reached == 0 {
             return SyscallResult::Err(Errno::ESRCH);
@@ -313,7 +312,7 @@ define_syscall!(syscall_kill
         if caller_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_all(caller_id, caller_flags, &mut targets)
+        collect_targets_for_all(sender_pid(ctx.task()), caller_flags, &mut targets)
     } else {
         if pid == i32::MIN {
             return SyscallResult::Err(Errno::ESRCH);
@@ -345,47 +344,13 @@ define_syscall!(syscall_kill
         return SyscallResult::Err(Errno::EINVAL);
     };
 
-    // A stop or a continue is a state change of a whole *process*, applied per
-    // thread group even when the selector named one thread. Idempotent, so a
-    // group with several matching threads still stops once.
-    let job_control = matches!(
-        sig_default_action(signum),
-        SigDefault::Stop | SigDefault::Continue
-    );
-
     let mut signaled = 0usize;
-
-    for target_id in targets.iter() {
-        let Some(target) = task_find_by_id(*target_id) else {
-            continue;
-        };
-
-        if job_control {
-            if task_group_signal_info(*target_id, signum, info).reached != 0 {
-                signaled += 1;
-            }
-            continue;
-        }
-
-        if signum == SIGKILL {
-            // SIG_UNCATCHABLE is stripped from every mask and rt_sigaction
-            // refuses a handler, so SIGKILL is always deliverable. The kill
-            // flag is what a target parked in a blocking primitive sees: it
-            // unwinds by returning rather than being abandoned mid-stack.
-            let _ = task_signal_post_info(&target, SIGKILL, info);
-            task_kill_and_wake(&target);
-            // A stopped target reaches no boundary at which to act on the kill
-            // flag until something resumes it.
-            task_resume_if_stopped(&target);
+    for group in targets.iter() {
+        // Keyed on the group id, not a lookup of the leader: a reaped leader's
+        // threads are still the process.
+        if task_group_signal_info(*group, signum, info).reached != 0 {
             signaled += 1;
-            continue;
         }
-
-        // POSIX: kill() succeeds even when the disposition discards the signal.
-        if task_signal_post_info(&target, signum, info).is_pending() {
-            let _ = unblock_task(&target);
-        }
-        signaled += 1;
     }
 
     if signaled == 0 {
@@ -431,8 +396,9 @@ define_syscall!(syscall_tgkill
     }
 });
 
-/// `si_pid` for a signal `task` sends: its process, as `getpid` names it.
-fn sender_pid(task: &Task) -> u32 {
+/// `si_pid` for a signal `task` sends, and the process a target task belongs
+/// to: its thread group, as `getpid` names it.
+pub(crate) fn sender_pid(task: &Task) -> u32 {
     match task.tgid {
         INVALID_TASK_ID => task.task_id,
         tgid => tgid,
@@ -639,6 +605,7 @@ define_syscall!(syscall_rt_sigreturn (ctx) cap(NoneSelf)
     // Committed in one IRQ-off window: a context switch between the copy-in and
     // the XRSTOR would save the live register file over the staged image. FPU
     // before GPRs, so a refused frame leaves the task exactly where it was.
+    let blocked_before = current.task().signal_blocked();
     let committed = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         if !stage_fpu_from_sigframe(&current, rsp, xcr0) {
             return false;
@@ -676,6 +643,11 @@ define_syscall!(syscall_rt_sigreturn (ctx) cap(NoneSelf)
     if !committed {
         return SyscallResult::Err(Errno::EFAULT);
     }
+    // Outside the IRQ-off window: handing a signal on walks the thread group.
+    slopos_sched::task::task_hand_on_newly_blocked(
+        ctx.task(),
+        ctx.task().signal_blocked() & !blocked_before,
+    );
 
     // sigreturn fully replaced the user-mode register state — the
     // dispatcher must not overwrite RAX after we return.
@@ -847,8 +819,8 @@ enum SignalDisposition {
         bit: u64,
         action: SignalAction,
         saved_mask: SigSet,
-        /// What the instance carried, requeued if the frame cannot be pushed.
-        info: SigInfo,
+        /// The instance taken, requeued if the frame cannot be pushed.
+        taken: DequeuedSignal,
         /// The fault's `(si_code, si_addr)` when this is a fault signal.
         fault: Option<(i32, u64)>,
     },
@@ -873,9 +845,10 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
         return SignalDisposition::Done;
     }
 
-    let Some((signum, info)) = task_ref.dequeue_signal(!task_ref.signal_blocked()) else {
+    let Some(taken) = task_ref.take_deliverable_signal(!task_ref.signal_blocked()) else {
         return SignalDisposition::Done;
     };
+    let (signum, info) = (taken.signum, taken.info);
     let bit = sig_bit(signum);
 
     let idx = (signum - 1) as usize;
@@ -927,7 +900,7 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
         bit,
         action,
         saved_mask: task_ref.signal_blocked(),
-        info,
+        taken,
         fault: task_ref.fault_siginfo_for(signum),
     }
 }
@@ -1068,7 +1041,7 @@ fn deliver_pending_signal_core(
 ) {
     let task_ref = current.task();
 
-    let (signum, bit, action, saved_mask, info, fault) = match claim_pending_signal(task_ref) {
+    let (signum, bit, action, saved_mask, taken, fault) = match claim_pending_signal(task_ref) {
         SignalDisposition::Done => {
             // A task marked for death leaves here rather than returning to
             // userland; the mark is deliberately not a signal. This frame
@@ -1100,9 +1073,9 @@ fn deliver_pending_signal_core(
             bit,
             action,
             saved_mask,
-            info,
+            taken,
             fault,
-        } => (signum, bit, action, saved_mask, info, fault),
+        } => (signum, bit, action, saved_mask, taken, fault),
     };
 
     let regs_snapshot = regs.snapshot();
@@ -1122,7 +1095,7 @@ fn deliver_pending_signal_core(
             force_death_on_frame_fault(task_ref);
             return;
         }
-        task_ref.requeue_signal(signum, info);
+        task_ref.requeue_signal(&taken);
     };
 
     // The copies below refuse an absent or write-protected leaf rather than
@@ -1151,15 +1124,19 @@ fn deliver_pending_signal_core(
     }
 
     if (action.flags & SA_SIGINFO) != 0
-        && (!push_siginfo(sigframe_siginfo_addr(sigframe_addr), signum, &info, fault)
-            || !push_ucontext(
-                sigframe_ucontext_addr(sigframe_addr),
-                &regs_snapshot,
-                saved_mask,
-                task_ref.sigaltstack(),
-                task_ref.rsp_on_sigaltstack(regs_snapshot.rsp),
-                si_addr,
-            ))
+        && (!push_siginfo(
+            sigframe_siginfo_addr(sigframe_addr),
+            signum,
+            &taken.info,
+            fault,
+        ) || !push_ucontext(
+            sigframe_ucontext_addr(sigframe_addr),
+            &regs_snapshot,
+            saved_mask,
+            task_ref.sigaltstack(),
+            task_ref.rsp_on_sigaltstack(regs_snapshot.rsp),
+            si_addr,
+        ))
     {
         refuse(task_ref);
         return;
@@ -1188,7 +1165,7 @@ fn deliver_pending_signal_core(
     if (action.flags & SA_NODEFER) == 0 {
         blocked |= bit;
     }
-    task_ref.set_signal_blocked(blocked & !SIG_UNCATCHABLE);
+    slopos_sched::task::task_set_signal_blocked(task_ref, blocked & !SIG_UNCATCHABLE);
 
     let mut redirected = regs_snapshot;
     redirected.rsp = frame_addr;

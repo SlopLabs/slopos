@@ -6,7 +6,7 @@ use slopos_abi::task::TaskExitReason;
 use slopos_ostd::task::{ProcessGroup, Session};
 use slopos_ostd::{KArc, KWeak};
 
-use super::task_ops::{task_signal_post_info, task_wake_all_waiters};
+use super::task_ops::task_wake_all_waiters;
 use super::task_table::{task_find_by_id, task_for_each_active, with_task_manager};
 use super::{INVALID_TASK_ID, Task};
 
@@ -84,11 +84,13 @@ pub(super) fn notify_parent_of_child_exit(task: &Task) {
         return;
     }
 
-    let Some(parent) = task_find_by_id(parent_task_id) else {
-        return;
-    };
-
-    let _ = task_signal_post_info(&parent, SIGCHLD, child_exit_info(task));
+    // Process-directed, as POSIX has `SIGCHLD`: any thread of the parent's
+    // group that does not block it takes it.
+    let _ = super::task_lifecycle::task_group_signal_info(
+        parent_task_id,
+        SIGCHLD,
+        child_exit_info(task),
+    );
     // Published unconditionally rather than only when a waiter exists: the
     // waiter registers before it scans, so a publish that races registration
     // costs a re-scan rather than a lost wakeup.

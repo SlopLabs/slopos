@@ -10,6 +10,7 @@ use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SigInfo, SigSet, sig_bit, sig_is_realtime};
 
 use crate::task::kernel_task::TaskInner;
+use crate::task::sigqueue::PendingSignals;
 
 pub const TASK_EXIT_CLEANUP_RESOURCES: u8 = 1 << 0;
 pub const TASK_EXIT_CLEANUP_VM: u8 = 1 << 1;
@@ -124,7 +125,8 @@ pub enum SignalPost {
     /// Discarded: ignored at the send, a standard signal already pending, or
     /// not a signal at all. Not an error: `kill` succeeds either way.
     Dropped,
-    /// A realtime instance past the queue limit — `EAGAIN` for `sigqueue`.
+    /// A realtime instance past the queue limit from a sender that may not
+    /// overflow it — `EAGAIN`.
     QueueFull,
 }
 
@@ -141,7 +143,7 @@ pub fn task_signal_post<K, U>(task: &TaskInner<K, U>, signum: u8) -> bool {
     task_signal_post_info(task, signum, SigInfo::KERNEL).is_pending()
 }
 
-/// Post one instance of `signum` carrying `info` to `task`.
+/// Post one instance of `signum` carrying `info` to the thread `task` alone.
 ///
 /// The disposition-aware chokepoint every signal *send* routes through. A
 /// signal that would be discarded anyway — handler is `SIG_IGN`, or `SIG_DFL`
@@ -160,12 +162,36 @@ pub fn task_signal_post_info<K, U>(
     signum: u8,
     info: SigInfo,
 ) -> SignalPost {
+    let outcome = post_into(task.own_signals(), task, signum, info);
+    if outcome.is_pending() {
+        BUS.publish(signal_pending_event(task.task_id));
+    }
+    outcome
+}
+
+/// Post one instance of `signum` carrying `info` to `task`'s process: its
+/// thread group's shared set, which any one member not blocking the signal
+/// takes. The disposition is judged against `task`, the thread the sender
+/// named. Wakes nobody: the caller knows the group and picks the thread.
+pub fn task_group_post_info<K, U>(task: &TaskInner<K, U>, signum: u8, info: SigInfo) -> SignalPost {
+    match task.shared_signals() {
+        Some(shared) => post_into(shared, task, signum, info),
+        None => task_signal_post_info(task, signum, info),
+    }
+}
+
+fn post_into<K, U>(
+    set: &PendingSignals,
+    task: &TaskInner<K, U>,
+    signum: u8,
+    info: SigInfo,
+) -> SignalPost {
     let bit = sig_bit(signum);
     if bit == 0 {
         return SignalPost::Dropped;
     }
     let realtime = sig_is_realtime(signum);
-    if !realtime && task.signal_pending() & bit != 0 {
+    if !realtime && set.bits() & bit != 0 {
         return SignalPost::Dropped;
     }
     if (task.signal_blocked() & bit) == 0 {
@@ -178,16 +204,13 @@ pub fn task_signal_post_info<K, U>(
             return SignalPost::Dropped;
         }
     }
-    let spare = if (realtime || info != SigInfo::KERNEL) && !task.has_sigqueue() {
+    let spare = if (realtime || info != SigInfo::KERNEL) && !set.has_store() {
         crate::KBox::zeroed().ok()
     } else {
         None
     };
-    let (outcome, unused) = task.enqueue_signal(signum, info, spare);
+    let (outcome, unused) = set.enqueue(signum, info, spare);
     drop(unused);
-    if outcome.is_pending() {
-        BUS.publish(signal_pending_event(task.task_id));
-    }
     outcome
 }
 
@@ -280,9 +303,11 @@ pub fn task_clone_from<K, U>(dest: &mut TaskInner<K, U>, other: &TaskInner<K, U>
     unsafe { dest.clone_from_raw(other) };
 }
 
+/// Whether a delivery point would act on a signal for `task`; see
+/// [`TaskInner::has_deliverable_signal`].
 #[inline]
 pub fn task_has_deliverable_signal<K, U>(task: &TaskInner<K, U>) -> bool {
-    (task.signal_pending() & !task.signal_blocked()) != 0
+    task.has_deliverable_signal()
 }
 
 // ---------------------------------------------------------------------------

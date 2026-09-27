@@ -2,7 +2,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
-use slopos_abi::signal::SigInfo;
+use slopos_abi::signal::{SigInfo, SigSet};
 
 use slopos_arch::cpu;
 use slopos_ostd::KArc;
@@ -1018,6 +1018,17 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
         super::enforce_zombie_budget(&parent);
     }
 
+    // A thread picked for its process's signals hands them on rather than
+    // taking them into its grave.
+    if task.is_picked_for_shared_signals()
+        && let Some(shared) = task.shared_signals()
+    {
+        let released = shared.bits() & !task.signal_blocked();
+        if released != 0 {
+            task_retarget_shared_signals(task, released);
+        }
+    }
+
     let should_hangup = if task.task_id != INVALID_TASK_ID
         && task.is_session_leader()
         && let Some(tty_idx) = task.controlling_tty()
@@ -1520,6 +1531,16 @@ fn install_private_sighand(child: &mut Task, parent: &Task) -> bool {
     }
 }
 
+/// A thread takes the signals sent to its process from the one set every
+/// member shares; anything else keeps the fresh set `allocate_task` gave it.
+/// Out of line so the handle stays out of `task_clone`'s frame.
+#[inline(never)]
+fn join_parent_signal_group(child: &mut Task, parent: &Task) {
+    if let Some(shared) = parent.shared_signals_handle() {
+        child.set_shared_signals(shared);
+    }
+}
+
 pub fn task_fork(
     parent: &Task,
     parent_user_ctx: Option<&slopos_ostd::user::context::UserContext>,
@@ -1793,6 +1814,9 @@ pub fn task_clone(
     } else {
         install_private_sighand(child, parent)
     };
+    if is_thread {
+        join_parent_signal_group(child, parent);
+    }
     // A thread shares its process's working directory whether or not the
     // caller also said `CLONE_FS`: the cwd is a per-process property.
     if !sighand_ok || !child.inherit_fs_from(parent, flags & CLONE_FS_OR_THREAD != 0) {
@@ -2022,6 +2046,109 @@ fn has_user_handler(member: &Task, signum: u8) -> bool {
     )
 }
 
+/// A live user-mode member of `tgid`: `named` when it is one, else the first
+/// the walk finds.
+fn live_member(tgid: u32, named: u32) -> Option<TaskRef> {
+    if let Some(task) = task_find_by_id(named)
+        && (task.flags & TASK_FLAG_USER_MODE) != 0
+        && group_id_of(&task) == tgid
+        && !task.is_exited()
+    {
+        return Some(task);
+    }
+    let mut found = None;
+    for_each_group_member(tgid, |member| {
+        if found.is_none() && !member.is_exited() {
+            found = Some(member.clone());
+        }
+    });
+    found
+}
+
+/// Post one instance of `signum` to thread group `tgid`'s shared set, and wake
+/// the thread that is to take it: `named` when it does not block the signal,
+/// else the first member that does not. When every member blocks it, the
+/// instance waits for whichever unblocks it, or reads it through a signalfd,
+/// first. Every member's signalfd poller is woken either way.
+fn group_post(tgid: u32, named: u32, signum: u8, info: SigInfo) -> GroupPost {
+    let mut post = GroupPost {
+        reached: 0,
+        queue_full: false,
+    };
+    let Some(carrier) = live_member(tgid, named) else {
+        return post;
+    };
+    let outcome = slopos_ostd::task::ops::task_group_post_info(&carrier, signum, info);
+    drop(carrier);
+    post.queue_full = outcome == SignalPost::QueueFull;
+    let pending = outcome.is_pending();
+    let bit = slopos_abi::signal::sig_bit(signum);
+    let mut taker: Option<TaskRef> = None;
+    for_each_group_member(tgid, |member| {
+        if member.is_exited() {
+            return;
+        }
+        // POSIX: `kill` succeeds even when the disposition discards the signal.
+        post.reached += 1;
+        if !pending {
+            return;
+        }
+        slopos_ostd::sync::BUS
+            .publish(slopos_ostd::task::ops::signal_pending_event(member.task_id));
+        if member.signal_blocked() & bit == 0 && (taker.is_none() || member.task_id == named) {
+            taker = Some(member.clone());
+        }
+    });
+    if let Some(taker) = taker {
+        taker.pick_for_shared_signals();
+        let _ = scheduler::unblock_task(&taker);
+    }
+    post
+}
+
+/// Pick, for each of the process signals in `released` that `task` will no
+/// longer take, a sibling that does not block it, and wake that sibling —
+/// `task` just blocked them, or is exiting.
+pub fn task_retarget_shared_signals(task: &Task, released: SigSet) {
+    let mut released = released;
+    for_each_group_member(group_id_of(task), |member| {
+        if released == 0 || member.task_id == task.task_id || member.is_exited() {
+            return;
+        }
+        let takes = released & !member.signal_blocked();
+        if takes == 0 {
+            return;
+        }
+        released &= !takes;
+        member.pick_for_shared_signals();
+        let _ = scheduler::unblock_task(member);
+    });
+}
+
+/// Replace `task`'s blocked set, handing any pending process signal it now
+/// blocks to a sibling that does not.
+pub fn task_set_signal_blocked(task: &Task, mask: SigSet) {
+    let newly_blocked = mask & !task.signal_blocked();
+    task.set_signal_blocked(mask);
+    task_hand_on_newly_blocked(task, newly_blocked);
+}
+
+/// After `task` blocked `newly_blocked`, hand any of them its process has
+/// pending to a sibling that does not block it.
+pub fn task_hand_on_newly_blocked(task: &Task, newly_blocked: SigSet) {
+    let released = task
+        .shared_signals()
+        .map_or(0, |shared| shared.bits() & newly_blocked);
+    if released != 0 {
+        task_retarget_shared_signals(task, released);
+    }
+}
+
+/// Whether `tgid`'s shared disposition table catches `signum`.
+fn group_handles(tgid: u32, named: u32, signum: u8) -> bool {
+    live_member(tgid, named).is_some_and(|member| has_user_handler(&member, signum))
+}
+
 /// Park every member of `tid`'s thread group in [`TaskStatus::Stopped`].
 ///
 /// Idempotent. Returns the number of members the stop reached.
@@ -2041,7 +2168,8 @@ fn task_group_stop_members(tid: u32, stop_signal: u8, info: SigInfo) -> usize {
         return 0;
     }
     let tgid = thread_group_of(tid);
-    let catchable = (bit & slopos_abi::signal::SIG_UNCATCHABLE) == 0;
+    let caught =
+        (bit & slopos_abi::signal::SIG_UNCATCHABLE) == 0 && group_handles(tgid, tid, stop_signal);
     let cont_bit = slopos_abi::signal::sig_bit(slopos_abi::signal::SIGCONT);
     let current_addr = TaskAddr::current();
     let mut acted = 0usize;
@@ -2062,12 +2190,7 @@ fn task_group_stop_members(tid: u32, stop_signal: u8, info: SigInfo) -> usize {
         member.clear_signal_pending(cont_bit);
         let _ = member.take_continue_report();
 
-        if catchable && has_user_handler(member, stop_signal) {
-            if slopos_ostd::task::ops::task_signal_post_info(member, stop_signal, info).is_pending()
-            {
-                let _ = scheduler::unblock_task(member);
-            }
-            acted += 1;
+        if caught {
             return;
         }
         if member.is_stopped() {
@@ -2109,6 +2232,12 @@ fn task_group_stop_members(tid: u32, stop_signal: u8, info: SigInfo) -> usize {
             reporter = Some(member.clone());
         }
     });
+
+    if caught {
+        // Taken by one thread's handler, like any other process-directed
+        // signal: no member stops.
+        return group_post(tgid, tid, stop_signal, info).reached;
+    }
 
     if acted == 0 {
         return 0;
@@ -2190,17 +2319,18 @@ pub fn task_group_continue(tid: u32) -> bool {
 /// How a signal sent to a whole thread group landed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct GroupPost {
-    /// Members that took the signal, including those whose disposition
-    /// discarded it.
+    /// Live members the send found, including when the disposition discarded
+    /// the signal; 0 is `ESRCH`.
     pub reached: usize,
-    /// Some member's realtime queue was full, so its instance was lost.
+    /// The process's realtime queue was full and the sender may not overflow
+    /// it, so the instance was refused.
     pub queue_full: bool,
 }
 
-/// Post `signum` to every task in the thread group containing `tid`, as the
+/// Send `signum` to the process — the thread group — containing `tid`, as the
 /// kernel's own.
 ///
-/// Returns how many tasks took the signal. Job-control signals are acted on
+/// Returns how many members the send found. Job-control signals are acted on
 /// here rather than at a delivery point: a stopped task reaches no delivery
 /// point, so a `SIGCONT` that only pended could never resume it.
 pub fn task_group_signal(tid: u32, signum: u8) -> usize {
@@ -2208,7 +2338,8 @@ pub fn task_group_signal(tid: u32, signum: u8) -> usize {
 }
 
 /// [`task_group_signal`] for an instance carrying `info`, which a sent signal
-/// fills from its sender.
+/// fills from its sender. One instance lands on the group's shared set for one
+/// thread to take; only `SIGKILL`, stop and continue act on every member.
 pub fn task_group_signal_info(tid: u32, signum: u8, info: SigInfo) -> GroupPost {
     let mut post = GroupPost {
         reached: 0,
@@ -2230,30 +2361,21 @@ pub fn task_group_signal_info(tid: u32, signum: u8, info: SigInfo) -> GroupPost 
         _ => {}
     }
 
+    if signum != slopos_abi::signal::SIGKILL {
+        return group_post(tgid, tid, signum, info);
+    }
     for_each_group_member(tgid, |member| {
         if member.is_exited() {
             return;
         }
-        if signum == slopos_abi::signal::SIGKILL {
-            // Always deliverable: `SIG_UNCATCHABLE` is stripped from every
-            // mask and refused by `rt_sigaction`.
-            let _ = slopos_ostd::task::ops::task_signal_post_info(member, signum, info);
-            slopos_ostd::task::ops::task_kill_and_wake(member);
-            // POSIX: `SIGKILL` and `SIGCONT` are the only signals that resume
-            // a stopped process, and a stopped task reaches no delivery point
-            // at which to act on the kill.
-            task_resume_if_stopped(member);
-            post.reached += 1;
-            return;
-        }
-        match slopos_ostd::task::ops::task_signal_post_info(member, signum, info) {
-            SignalPost::Pending => {
-                let _ = scheduler::unblock_task(member);
-            }
-            SignalPost::QueueFull => post.queue_full = true,
-            SignalPost::Dropped => {}
-        }
-        // POSIX: `kill` succeeds even when the disposition discards the signal.
+        // Always deliverable: `SIG_UNCATCHABLE` is stripped from every mask
+        // and refused by `rt_sigaction`.
+        let _ = slopos_ostd::task::ops::task_signal_post_info(member, signum, info);
+        slopos_ostd::task::ops::task_kill_and_wake(member);
+        // POSIX: `SIGKILL` and `SIGCONT` are the only signals that resume a
+        // stopped process, and a stopped task reaches no delivery point at
+        // which to act on the kill.
+        task_resume_if_stopped(member);
         post.reached += 1;
     });
     post

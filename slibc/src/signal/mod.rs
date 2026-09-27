@@ -436,9 +436,18 @@ pub extern "C" fn __libc_current_sigrtmax() -> c_int {
     slopos_abi::signal::SIGRTMAX as c_int
 }
 
+/// POSIX: in a threaded process `raise` is `pthread_kill(pthread_self())`, so
+/// the handler runs in the caller before `raise` returns. A `kill` of its own
+/// pid would let whichever thread got there first take it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn raise(sig: c_int) -> c_int {
-    kill(Sys::getpid(), sig)
+    match Sys::tgkill(Sys::getpid(), Sys::gettid(), sig) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
 }
 
 /// Abort the process — sends SIGABRT, then force-exits if the handler returns.

@@ -1,5 +1,3 @@
-use core::sync::atomic::Ordering;
-
 use slopos_abi::Errno;
 use slopos_abi::signal::{SA_RESTART, SIG_DFL, SIG_IGN};
 use slopos_abi::syscall::ERRNO_ERESTARTSYS;
@@ -142,32 +140,13 @@ fn handle_erestartsys(task_ref: &Task, user_ctx: &UserContext, sysno: u64) {
          it must return EINTR so the remaining time is not re-armed"
     );
 
-    let pending = task_ref.signal_pending.load(Ordering::Acquire);
-    let blocked = task_ref.signal_blocked();
-    let deliverable = pending & !blocked;
-    let (handler, flags) = if deliverable == 0 {
-        (0u64, 0u64)
-    } else {
-        let signum = (deliverable.trailing_zeros() + 1) as u8;
-        let idx = (signum as usize).wrapping_sub(1);
-        match task_ref.signal_action(idx) {
-            Some(action) => (action.handler, action.flags),
-            None => (0u64, 0u64),
-        }
-    };
-
-    let should_restart = if deliverable == 0 {
-        true
-    } else {
-        let is_user_handler = handler != SIG_DFL && handler != SIG_IGN;
-        if !is_user_handler {
-            true
-        } else if (flags & SA_RESTART) != 0 {
-            true
-        } else {
-            false
-        }
-    };
+    // Nothing deliverable reads as `SIG_DFL`, which restarts too.
+    let (handler, flags) = task_ref
+        .next_signal(!task_ref.signal_blocked())
+        .and_then(|signum| task_ref.signal_action((signum as usize).wrapping_sub(1)))
+        .map_or((SIG_DFL, 0), |action| (action.handler, action.flags));
+    let is_user_handler = handler != SIG_DFL && handler != SIG_IGN;
+    let should_restart = !is_user_handler || (flags & SA_RESTART) != 0;
 
     if should_restart {
         let mut regs = user_ctx.regs();

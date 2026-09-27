@@ -75,14 +75,22 @@ define_syscall!(syscall_write
 });
 
 /// A write refused because nothing will ever read it also raises `SIGPIPE` at
-/// the writer, per POSIX `write()`; the caller sees `EPIPE` only when that
-/// signal is ignored, blocked or caught.
+/// the writing thread, per POSIX `write()`; the caller sees `EPIPE` only when
+/// that signal is ignored, blocked or caught. Linux reports it as a `kill`
+/// from the writer itself: `SI_USER` and the writer's own pid.
 pub(crate) fn raise_sigpipe_on_epipe(
     ctx: &crate::syscall::context::SyscallContext<'_>,
     errno: Errno,
 ) {
     if errno == Errno::EPIPE {
-        let _ = slopos_sched::task::task_signal_post(ctx.task(), slopos_abi::signal::SIGPIPE);
+        let task = ctx.task();
+        let info = slopos_abi::signal::SigInfo::sent(
+            slopos_abi::signal::SI_USER,
+            crate::syscall::signal::sender_pid(task),
+            0,
+            0,
+        );
+        let _ = slopos_sched::task::task_signal_post_info(task, slopos_abi::signal::SIGPIPE, info);
     }
 }
 

@@ -9,8 +9,10 @@ pub const NSIG: usize = 64;
 pub const SIGRTMIN: u8 = 32;
 pub const SIGRTMAX: u8 = NSIG as u8;
 
-/// Realtime instances one task may hold queued at once (POSIX
-/// `_POSIX_SIGQUEUE_MAX`). A send past it fails with `EAGAIN`.
+/// Realtime instances one pending set may hold queued at once (POSIX
+/// `_POSIX_SIGQUEUE_MAX`): a process's for signals sent to it, a thread's for
+/// signals sent to that thread. See [`SigInfo::survives_queue_overflow`] for
+/// what a send past it does.
 pub const SIGQUEUE_MAX: usize = 32;
 
 #[inline]
@@ -83,6 +85,14 @@ impl SigInfo {
             value,
         }
     }
+
+    /// Whether an instance past [`SIGQUEUE_MAX`] still pends, its record lost,
+    /// rather than failing with `EAGAIN`. Linux lets a `kill` and the kernel's
+    /// own signals overflow; `sigqueue`, `tgkill` and any other sender fail.
+    #[inline]
+    pub const fn survives_queue_overflow(&self) -> bool {
+        self.code == SI_USER || self.code == SI_KERNEL
+    }
 }
 
 /// One drained signal, returned by `read()` on a `FileKind::Signalfd`: Linux
@@ -115,10 +125,11 @@ impl SignalfdSiginfo {
 
     /// The record for `signo` taken with `info`. The union word lands where
     /// its `si_code` says it lives: `ssi_status` for a child's report,
-    /// `ssi_int`/`ssi_ptr` for a queued value.
+    /// `ssi_int`/`ssi_ptr` for any sender-supplied code, which is where a
+    /// handler's `si_value` finds it too.
     pub const fn new(signo: u8, info: &SigInfo) -> Self {
         let child = signo == SIGCHLD && info.code > 0;
-        let queued = info.code == SI_QUEUE;
+        let queued = info.code < 0;
         Self {
             ssi_signo: signo as u32,
             ssi_errno: 0,
@@ -508,4 +519,27 @@ pub struct SignalFrame {
     pub rflags: u64,
     /// Saved signal mask (restored by sigreturn).
     pub saved_mask: SigSet,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A signalfd reader sees the value a handler would, for every code a
+    /// sender may supply, and a kill's record carries none.
+    #[test]
+    fn signalfd_record_carries_the_value_of_every_sender_supplied_code() {
+        const SI_TIMER: i32 = -2;
+        const SI_MESGQ: i32 = -3;
+        const SI_ASYNCIO: i32 = -4;
+        for code in [SI_QUEUE, SI_TIMER, SI_MESGQ, SI_ASYNCIO] {
+            let info = SigInfo::sent(code, 7, 0, 0x1_2345_6789);
+            let record = SignalfdSiginfo::new(SIGRTMIN, &info);
+            let handler = UserSiginfo::from_info(SIGRTMIN as i32, &info);
+            assert_eq!(record.ssi_ptr, handler.si_value(), "code {code}");
+            assert_eq!(record.ssi_int, 0x2345_6789, "code {code}");
+        }
+        let kill = SignalfdSiginfo::new(SIGUSR1, &SigInfo::sent(SI_USER, 7, 0, 0));
+        assert_eq!((kill.ssi_int, kill.ssi_ptr), (0, 0));
+    }
 }

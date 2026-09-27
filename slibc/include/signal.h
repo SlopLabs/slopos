@@ -18,24 +18,35 @@ typedef void (*sighandler_t)(int);
 typedef struct {
     unsigned long __val[16];
 } sigset_t;
+union sigval {
+    int sival_int;
+    void *sival_ptr;
+};
 struct __slibc_siginfo_kill {
-    int __si_fill;
     pid_t __si_pid;
     uid_t __si_uid;
     int __si_status;
+};
+struct __slibc_siginfo_rt {
+    pid_t __si_pid;
+    uid_t __si_uid;
+    union sigval __si_value;
 };
 typedef struct {
     int si_signo;
     int si_errno;
     int si_code;
+    int __si_fill;
     union {
-        int _pad[29];
+        int _pad[28];
         struct __slibc_siginfo_kill __si_fields;
+        struct __slibc_siginfo_rt __si_rt;
     };
 } __slibc_aligned(8) siginfo_t;
 #define si_pid __si_fields.__si_pid
 #define si_uid __si_fields.__si_uid
 #define si_status __si_fields.__si_status
+#define si_value __si_rt.__si_value
 struct sigaction {
     union {
         sighandler_t sa_handler;
@@ -50,10 +61,6 @@ typedef struct {
     int ss_flags;
     size_t ss_size;
 } stack_t;
-union sigval {
-    int sival_int;
-    void *sival_ptr;
-};
 struct sigevent {
     union sigval sigev_value;
     int sigev_signo;

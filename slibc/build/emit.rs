@@ -627,24 +627,32 @@ const HANDLER_SLOT: &str = "    union {
 /// `siginfo_t`'s payload is 29 opaque ints in the contract, which is the
 /// `libc` crate's shape; the Rust side reads it through accessor methods. C
 /// names the fields, so the header overlays them on the same bytes, at Linux's
-/// offsets: the union behind the three header ints starts at 16, one int into
-/// `_pad`. A tagged struct declared outside the union, and macros for the
-/// member names as glibc has them, keep this standard C++ as well as C.
+/// offsets: one int of padding at 12, then the union at 16 — eight-aligned,
+/// because a queued signal's `si_value` is a `union sigval` at 24. Tagged
+/// structs declared outside the union, and macros for the member names as
+/// glibc has them, keep this standard C++ as well as C.
 const SIGINFO_KILL: &str = "struct __slibc_siginfo_kill {
-    int __si_fill;
     pid_t __si_pid;
     uid_t __si_uid;
     int __si_status;
 };
+struct __slibc_siginfo_rt {
+    pid_t __si_pid;
+    uid_t __si_uid;
+    union sigval __si_value;
+};
 ";
-const SIGINFO_PAYLOAD: &str = "    union {
-        int _pad[29];
+const SIGINFO_PAYLOAD: &str = "    int __si_fill;
+    union {
+        int _pad[28];
         struct __slibc_siginfo_kill __si_fields;
+        struct __slibc_siginfo_rt __si_rt;
     };
 ";
 const SIGINFO_MEMBERS: &str = "#define si_pid __si_fields.__si_pid
 #define si_uid __si_fields.__si_uid
 #define si_status __si_fields.__si_status
+#define si_value __si_rt.__si_value
 ";
 
 /// POSIX's `union sigval`. The contract has the pointer arm only, as the

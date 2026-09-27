@@ -1,5 +1,6 @@
 //! `FileKind::Signalfd` file operations: a pollable view of the owner task's
-//! pending signals, filtered to a subscribed mask.
+//! pending signals — its own and its process's — filtered to a subscribed
+//! mask.
 //!
 //! Paired with the caller blocking those signals (`rt_sigprocmask`), delivery
 //! becomes in-band: `(pending & !blocked)` excludes them from the harvest's
@@ -62,10 +63,10 @@ impl FileOps for SignalfdFileOps {
         };
         // Never blocks: readiness comes from poll_events, so an empty read is
         // EAGAIN rather than a sleep.
-        let Some((signum, info)) = task.dequeue_signal(state.mask) else {
+        let Some(taken) = task.dequeue_signal(state.mask) else {
             return Errno::EAGAIN.as_isize();
         };
-        let record = SignalfdSiginfo::new(signum, &info);
+        let record = SignalfdSiginfo::new(taken.signum, &taken.info);
         match buf.copy_in(0, &record.to_bytes()) {
             Ok(n) => n as isize,
             Err(e) => e.as_isize(),

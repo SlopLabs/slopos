@@ -7,17 +7,15 @@
 
 use core::sync::atomic::Ordering;
 
-use slopos_abi::signal::{SigInfo, SigSet, sig_bit, sig_is_realtime};
+use slopos_abi::signal::SigSet;
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 
-use crate::KBox;
 use crate::sync::LinkError;
 use crate::sync::intrusive::Link;
 use crate::task::exit_info::ExitInfo;
 use crate::task::kernel_task::{SchedPlacement, SigHandTable, SignalAction, TaskInner};
 use crate::task::link_roles::{CleanupRole, ReclaimRole, RemoteWakeRole};
-use crate::task::ops::SignalPost;
-use crate::task::sigqueue::SigQueue;
+use crate::task::sigqueue::{DequeuedSignal, PendingSignals};
 
 /// `SIGKILL` for a write the OOM killer could not serve: it dies the way the
 /// killer's victims do, not with a catchable error its handler cannot fix.
@@ -202,19 +200,47 @@ impl<K, U> TaskInner<K, U> {
         sid != 0 && sid == self.task_id
     }
 
+    /// Signals pending for this thread: its own and its process's.
     #[inline]
     pub fn signal_pending(&self) -> SigSet {
-        self.signal_pending.load(Ordering::Acquire)
+        self.pending.bits()
+            | self
+                .shared_pending
+                .as_deref()
+                .map_or(0, PendingSignals::bits)
     }
 
-    /// Overwrite the pending set, dropping the records of every signal it
-    /// clears.
+    /// The set of signals sent to this thread alone.
+    #[inline]
+    pub fn own_signals(&self) -> &PendingSignals {
+        &self.pending
+    }
+
+    /// The set of signals sent to this thread's process, shared by its group.
+    #[inline]
+    pub fn shared_signals(&self) -> Option<&PendingSignals> {
+        self.shared_pending.as_deref()
+    }
+
+    #[inline]
+    pub fn shared_signals_handle(&self) -> Option<crate::KArc<PendingSignals>> {
+        self.shared_pending.clone()
+    }
+
+    /// Join a thread group's shared set. `&mut self` for the reason
+    /// [`set_sighand`](Self::set_sighand) gives.
+    #[inline]
+    pub fn set_shared_signals(&mut self, set: crate::KArc<PendingSignals>) {
+        self.shared_pending = Some(set);
+    }
+
+    /// Make `value` this thread's own pending set and drop from the shared one
+    /// every signal `value` lacks, with the records of each signal cleared.
     pub fn set_signal_pending(&self, value: SigSet) {
-        let mut store = self.sigqueue.lock();
-        if let Some(queue) = store.as_deref_mut() {
-            queue.forget(!value);
+        self.pending.set(value);
+        if let Some(shared) = self.shared_signals() {
+            let _ = shared.clear(!value);
         }
-        self.signal_pending.store(value, Ordering::Release);
     }
 
     /// Whether this task has been marked for death.
@@ -226,102 +252,109 @@ impl<K, U> TaskInner<K, U> {
         self.killed.load(Ordering::Acquire)
     }
 
-    /// Clear `bits` from the pending set with every record they carried,
-    /// returning the previous set.
+    /// Clear `bits` from this thread's own set and its process's, with every
+    /// record they carried, returning the previous union.
     pub fn clear_signal_pending(&self, bits: SigSet) -> SigSet {
-        let mut store = self.sigqueue.lock();
-        if let Some(queue) = store.as_deref_mut() {
-            queue.forget(bits);
-        }
-        self.signal_pending.fetch_and(!bits, Ordering::AcqRel)
+        let shared = self.shared_signals().map_or(0, |shared| shared.clear(bits));
+        self.pending.clear(bits) | shared
     }
 
-    /// Raise `bits` in the pending set with no record, so each delivers as
-    /// [`SigInfo::KERNEL`]. Returns the previous set.
+    /// Raise `bits` in this thread's own set with no record, so each delivers
+    /// as [`SigInfo::KERNEL`](slopos_abi::signal::SigInfo::KERNEL). Returns the
+    /// previous own set.
     pub fn raise_signal_pending(&self, bits: SigSet) -> SigSet {
-        let _store = self.sigqueue.lock();
-        self.signal_pending.fetch_or(bits, Ordering::AcqRel)
+        self.pending.raise(bits)
     }
 
-    /// Whether the record store exists yet.
+    /// Pick this thread to take its process's pending signals.
     #[inline]
-    pub(crate) fn has_sigqueue(&self) -> bool {
-        self.sigqueue.lock().is_some()
+    pub fn pick_for_shared_signals(&self) {
+        self.picked_for_shared.store(true, Ordering::Release);
     }
 
-    /// Make one instance of `signum` pending with `info`, installing `spare` as
-    /// the record store if there is none yet. Hands back what it did and the
-    /// spare if unused, for the caller to drop outside the lock.
-    pub(crate) fn enqueue_signal(
-        &self,
-        signum: u8,
-        info: SigInfo,
-        spare: Option<KBox<SigQueue>>,
-    ) -> (SignalPost, Option<KBox<SigQueue>>) {
-        let bit = sig_bit(signum);
-        let mut store = self.sigqueue.lock();
-        let mut spare = spare;
-        if store.is_none() {
-            *store = spare.take();
-        }
-        if !sig_is_realtime(signum) {
-            // Standard signals coalesce: the first sender's record stands.
-            if self.signal_pending.load(Ordering::Acquire) & bit != 0 {
-                return (SignalPost::Dropped, spare);
-            }
-            if let Some(queue) = store.as_deref_mut() {
-                queue.record(signum, info);
-            }
+    #[inline]
+    pub fn is_picked_for_shared_signals(&self) -> bool {
+        self.picked_for_shared.load(Ordering::Acquire)
+    }
+
+    /// Whether a delivery point would act on a signal: one of this thread's
+    /// own it does not block, or, when picked, one of its process's.
+    pub fn has_deliverable_signal(&self) -> bool {
+        self.next_signal(!self.signal_blocked()).is_some()
+    }
+
+    /// The signal [`take_deliverable_signal`](Self::take_deliverable_signal)
+    /// would take for `mask`, left pending.
+    pub fn next_signal(&self, mask: SigSet) -> Option<u8> {
+        let own = self.pending.bits() & mask;
+        let pending = if own != 0 {
+            own
+        } else if self.is_picked_for_shared_signals() {
+            self.shared_signals().map_or(0, PendingSignals::bits) & mask
         } else {
-            let Some(queue) = store.as_deref_mut() else {
-                return (SignalPost::QueueFull, spare);
-            };
-            if !queue.push(signum, info, false) {
-                return (SignalPost::QueueFull, spare);
-            }
-        }
-        self.signal_pending.fetch_or(bit, Ordering::AcqRel);
-        (SignalPost::Pending, spare)
+            0
+        };
+        (pending != 0).then(|| (pending.trailing_zeros() + 1) as u8)
     }
 
-    /// Take the lowest-numbered pending signal in `mask` with the record the
-    /// instance carries. Its bit clears unless another instance stays queued.
-    pub fn dequeue_signal(&self, mask: SigSet) -> Option<(u8, SigInfo)> {
-        let mut store = self.sigqueue.lock();
-        let pending = self.signal_pending.load(Ordering::Acquire) & mask;
-        if pending == 0 {
+    /// What a delivery point takes for `mask`: the lowest-numbered of this
+    /// thread's own pending signals, else, when it was picked, the lowest of
+    /// its process's. Finding none of the latter ends the pick.
+    pub fn take_deliverable_signal(&self, mask: SigSet) -> Option<DequeuedSignal> {
+        if let Some((signum, info)) = self.pending.dequeue(mask) {
+            return Some(DequeuedSignal {
+                signum,
+                info,
+                shared: false,
+            });
+        }
+        // Cleared before the look, so a send that lands after it picks this
+        // thread again rather than being lost to a stale clear.
+        if !self.picked_for_shared.swap(false, Ordering::AcqRel) {
             return None;
         }
-        let signum = (pending.trailing_zeros() + 1) as u8;
-        let (info, more) = match store.as_deref_mut() {
-            Some(queue) => queue.take(signum),
-            None => (SigInfo::KERNEL, false),
+        let (signum, info) = self.shared_signals()?.dequeue(mask)?;
+        self.pick_for_shared_signals();
+        Some(DequeuedSignal {
+            signum,
+            info,
+            shared: true,
+        })
+    }
+
+    /// Take one pending signal in `mask` with the record the instance carries,
+    /// picked or not, as a `signalfd` read or `sigwait` does: the
+    /// lowest-numbered of this thread's own, else the lowest of its process's.
+    /// Its bit clears unless another instance stays queued.
+    pub fn dequeue_signal(&self, mask: SigSet) -> Option<DequeuedSignal> {
+        if let Some((signum, info)) = self.pending.dequeue(mask) {
+            return Some(DequeuedSignal {
+                signum,
+                info,
+                shared: false,
+            });
+        }
+        let (signum, info) = self.shared_signals()?.dequeue(mask)?;
+        Some(DequeuedSignal {
+            signum,
+            info,
+            shared: true,
+        })
+    }
+
+    /// Put back an instance a delivery took and could not use, into the set it
+    /// came from, ahead of any later instance of its signal.
+    pub fn requeue_signal(&self, taken: &DequeuedSignal) {
+        let set = match self.shared_signals() {
+            Some(shared) if taken.shared => shared,
+            _ => &self.pending,
         };
-        if !more {
-            self.signal_pending
-                .fetch_and(!sig_bit(signum), Ordering::AcqRel);
-        }
-        Some((signum, info))
+        set.requeue(taken.signum, taken.info);
     }
 
-    /// Put back an instance [`dequeue_signal`](Self::dequeue_signal) took and
-    /// delivery could not use, ahead of any later one.
-    pub fn requeue_signal(&self, signum: u8, info: SigInfo) {
-        let mut store = self.sigqueue.lock();
-        if let Some(queue) = store.as_deref_mut() {
-            if sig_is_realtime(signum) {
-                let _ = queue.push(signum, info, true);
-            } else {
-                queue.record(signum, info);
-            }
-        }
-        self.signal_pending
-            .fetch_or(sig_bit(signum), Ordering::AcqRel);
-    }
-
-    /// Realtime instances queued on this task, of every signal.
+    /// Realtime instances queued on this thread's own set, of every signal.
     pub fn queued_realtime_signals(&self) -> usize {
-        self.sigqueue.lock().as_deref().map_or(0, SigQueue::queued)
+        self.pending.queued()
     }
 
     /// `None` for a task built without one — a bootstrap stub, or a clone

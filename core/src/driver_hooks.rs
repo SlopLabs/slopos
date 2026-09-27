@@ -1,6 +1,6 @@
 use core::ops::ControlFlow;
 
-use slopos_abi::signal::{SIG_IGN, SigDefault, sig_bit, sig_default_action};
+use slopos_abi::signal::{SIG_IGN, sig_bit};
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
 use slopos_kernel_services::driver_runtime::{
     DriverRuntimeServices, register_driver_runtime_services,
@@ -11,7 +11,7 @@ use slopos_ostd::KArc;
 use slopos_ostd::sync::NO_POLL_ERA;
 use slopos_ostd::task::ProcessGroup;
 use slopos_sched::scheduler;
-use slopos_sched::task::{self, TaskRef, task_has_deliverable_signal, task_signal_post};
+use slopos_sched::task::{self, TaskRef, task_has_deliverable_signal};
 use slopos_sched::task_struct::Current;
 
 fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>> {
@@ -31,33 +31,17 @@ fn runtime_unblock_task(task_id: u32) -> i32 {
     scheduler::unblock_task_id(task_id)
 }
 
-/// Post `signum` to every task `selects` accepts, reporting whether the
-/// selector matched anything.
+/// Send `signum` to every process with a task `selects` accepts, reporting
+/// whether the selector matched anything.
 ///
-/// Stop and continue go through [`task::task_group_signal`]: `unblock_task`
+/// Through [`task::task_group_signal`], once per process: one thread takes an
+/// ordinary signal, and stop and continue are acted on here — `unblock_task`
 /// refuses a task that is not `Blocked`, and a pending `SIGCONT` is dropped at
 /// the delivery point, so a stopped job would stay parked forever.
 ///
-/// The group fan-out runs after the walk because it can park the caller, and a
-/// park inside the visitor would hold the registry snapshot across the switch.
+/// The sends run after the walk because a stop can park the caller, and a park
+/// inside the visitor would hold the registry snapshot across the switch.
 fn signal_matching_tasks(signum: u8, selects: impl Fn(&TaskRef) -> bool) -> bool {
-    if !matches!(
-        sig_default_action(signum),
-        SigDefault::Stop | SigDefault::Continue
-    ) {
-        let mut matched = false;
-        task::task_for_each_active(|candidate| {
-            if !selects(candidate) {
-                return;
-            }
-            if task_signal_post(candidate, signum) {
-                let _ = scheduler::unblock_task(candidate);
-            }
-            matched = true;
-        });
-        return matched;
-    }
-
     let mut groups = slopos_ostd::KVec::<(u32, u32)>::new();
     task::task_for_each_active(|candidate| {
         if !selects(candidate) {

@@ -734,9 +734,17 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
     let value = KArc::get_mut(&mut task).expect("fresh task allocation must be unique");
     value.task_id = id;
     // Every registered task owns a disposition table: a `None` would make a
-    // signal silently undeliverable rather than defaulted.
-    match slopos_ostd::task::SigHandTable::try_new_default() {
-        Ok(table) => value.set_sighand(table),
+    // signal silently undeliverable rather than defaulted. The same goes for
+    // the process-wide pending set, which a thread clone replaces with its
+    // parent's.
+    let tables = slopos_ostd::task::SigHandTable::try_new_default().and_then(|table| {
+        slopos_ostd::task::sigqueue::PendingSignals::try_new_shared().map(|shared| (table, shared))
+    });
+    match tables {
+        Ok((table, shared)) => {
+            value.set_sighand(table);
+            value.set_shared_signals(shared);
+        }
         Err(_) => {
             with_task_manager(|mgr| mgr.num_tasks = mgr.num_tasks.saturating_sub(1));
             return Err(TaskAllocError::NoFreeSlot);
