@@ -165,15 +165,15 @@ stage_git_fixture() {
         >"$work/src/lib.rs"
     (
         cd "$work"
+        export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
         export GIT_AUTHOR_NAME="The SlopOS Authors" GIT_AUTHOR_EMAIL="devdisk@slopos.invalid"
         export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
         export GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z"
-        git init -q -b main .
-        git add Cargo.toml src/lib.rs
-        git -c commit.gpgsign=false commit -q -m "greeting: the dev disk's git fixture"
-    ) || die "could not make the git fixture in $work"
-    git clone -q --bare --no-hardlinks "$work" "$STAGE/$GIT_FIXTURE_REL" ||
-        die "could not clone the git fixture into $STAGE/$GIT_FIXTURE_REL"
+        git init -q -b main . &&
+            git add Cargo.toml src/lib.rs &&
+            git commit -q -m "greeting: the dev disk's git fixture" &&
+            git clone -q --bare --no-hardlinks "$work" "$STAGE/$GIT_FIXTURE_REL"
+    ) || die "could not make the git fixture in $STAGE/$GIT_FIXTURE_REL"
     rm -rf "$work"
 }
 [ -f "$IMAGE_PATH" ] || stage_git_fixture
