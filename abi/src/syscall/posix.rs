@@ -26,6 +26,9 @@ pub const SO_SNDBUF: i32 = 7;
 pub const SO_RCVBUF: i32 = 8;
 /// Enable keepalive probes.
 pub const SO_KEEPALIVE: i32 = 9;
+/// Urgent data stays in the ordinary stream. Always on: TCP here reads an
+/// urgent byte as a byte of the stream and keeps no out-of-band queue.
+pub const SO_OOBINLINE: i32 = 10;
 /// Receive timeout (value: [`Timeval`]).
 pub const SO_RCVTIMEO: i32 = 20;
 /// Send timeout (value: [`Timeval`]).

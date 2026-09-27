@@ -23,9 +23,10 @@
 #   rustix 1.1.2, 1.1.4       rustc / cargo   ioctl opcode type
 #   errno 0.3.14              both            `__errno_location`
 #   stacker 0.1.21            rustdoc         `pthread_getattr_np` stack limit
-#   socket2 0.6.4 (via curl)  cargo           the socket options SlopOS's libc
-#                                             lacks, as for Redox; `size_t`
-#                                             `msg_iovlen`
+#   socket2 0.6.4 (via curl)  cargo           IP_RECVTOS, IPV6_RECVTCLASS,
+#                                             source-specific multicast and
+#                                             SOCK_RDM, excluded as for
+#                                             Redox; `size_t` `msg_iovlen`
 #
 # getrandom 0.2.16 and 0.4.3 in rustc's lock, 0.3.4 in cargo's, and nix
 # 0.31.3 are locked but never built for the SlopOS host, so they stay
@@ -54,5 +55,5 @@ patch_sha256=toolchain/crates/rustix-1.1.2.patch:1dc30164e6268be0272e4b1aa25a457
 patch_sha256=toolchain/crates/rustix-1.1.4.patch:919197ac92acfc756c5a67cd1e8eea85412230caa473638d1a95eb1640d429ab
 patch_sha256=toolchain/crates/errno-0.3.14.patch:6517cc485f7f08f2aa8b30c6adb95e8ae90e74c5d1a3e5fb9f3677625fd44134
 patch_sha256=toolchain/crates/stacker-0.1.21.patch:cb75eea839e7a52ed2b9861d6ed73196eeb78d1d448bb2c7ac73fdc81cbdd956
-patch_sha256=toolchain/crates/socket2-0.6.4.patch:65a796d5c84c2a5ed407bf5c4d5644dfd0cc6d0293d4dd3c4a598ced088fc8f5
+patch_sha256=toolchain/crates/socket2-0.6.4.patch:05a578f90e50484a626d8d1d46d5f24a7a3c1f40e36a95d8266b708dcfb57886
 patch_sha256=toolchain/crates/wiring/0001-patch-crates-io.patch:ea3f91fe6f44dd1e05f98729d8f62e4a8e58bfa2cb1ff084bcf6863599f38222

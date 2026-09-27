@@ -249,6 +249,38 @@ pub fn test_unknown_option_returns_einval() -> TestResult {
     pass!()
 }
 
+pub fn test_so_oobinline_is_always_on() -> TestResult {
+    reset();
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
+    if idx < 0 {
+        return fail!("socket_create failed");
+    }
+    let sock_idx = idx as u32;
+
+    let mut buf = [0u8; 4];
+    assert_eq_test!(
+        socket_getsockopt(sock_idx, SOL_SOCKET, SO_OOBINLINE, &mut buf),
+        4
+    );
+    assert_eq_test!(i32::from_ne_bytes(buf), 1, "urgent data is inline");
+    assert_eq_test!(
+        socket_setsockopt(sock_idx, SOL_SOCKET, SO_OOBINLINE, &1i32.to_ne_bytes()),
+        0
+    );
+    assert_test!(
+        socket_setsockopt(sock_idx, SOL_SOCKET, SO_OOBINLINE, &0i32.to_ne_bytes()) < 0,
+        "an out-of-band queue is refused, not pretended"
+    );
+    assert_eq_test!(
+        socket_getsockopt(sock_idx, SOL_SOCKET, SO_OOBINLINE, &mut buf),
+        4
+    );
+    assert_eq_test!(i32::from_ne_bytes(buf), 1, "still inline after the refusal");
+
+    let _ = socket_close(sock_idx);
+    pass!()
+}
+
 slopos_testing::stest!(name = test_so_reuseaddr_roundtrip, suite = socket_option);
 slopos_testing::stest!(name = test_socket_option_roundtrips, suite = socket_option);
 slopos_testing::stest!(name = test_so_rcvbuf_validation, suite = socket_option);
@@ -263,3 +295,4 @@ slopos_testing::stest!(
     name = test_unknown_option_returns_einval,
     suite = socket_option
 );
+slopos_testing::stest!(name = test_so_oobinline_is_always_on, suite = socket_option);

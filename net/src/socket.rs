@@ -3174,6 +3174,12 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                 sock.options.keepalive = v != 0;
                 0
             }
+            SO_OOBINLINE => {
+                if val.len() < 4 || i32::from_ne_bytes([val[0], val[1], val[2], val[3]]) == 0 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                0
+            }
             _ => errno_i32(ERRNO_EINVAL),
         },
         IPPROTO_TCP => match optname {
@@ -3262,6 +3268,13 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 }
                 let v: i32 = if sock.options.keepalive { 1 } else { 0 };
                 out[..4].copy_from_slice(&v.to_ne_bytes());
+                4
+            }
+            SO_OOBINLINE => {
+                if out.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                out[..4].copy_from_slice(&1i32.to_ne_bytes());
                 4
             }
             _ => errno_i32(ERRNO_EINVAL),

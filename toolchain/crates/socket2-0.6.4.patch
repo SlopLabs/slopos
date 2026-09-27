@@ -1,25 +1,7 @@
 diff --git a/src/socket.rs b/src/socket.rs
-index defbb1e..d54c288 100644
+index defbb1e..6549895 100644
 --- a/src/socket.rs
 +++ b/src/socket.rs
-@@ -972,7 +972,7 @@ impl Socket {
-     /// For more information about this option, see [`set_out_of_band_inline`].
-     ///
-     /// [`set_out_of_band_inline`]: Socket::set_out_of_band_inline
--    #[cfg(not(any(target_os = "redox", target_os = "wasi")))]
-+    #[cfg(not(any(target_os = "redox", target_os = "slopos", target_os = "wasi")))]
-     pub fn out_of_band_inline(&self) -> io::Result<bool> {
-         unsafe {
-             getsockopt::<c_int>(self.as_raw(), sys::SOL_SOCKET, sys::SO_OOBINLINE)
-@@ -986,7 +986,7 @@ impl Socket {
-     /// receive data stream. Otherwise, out-of-band data is passed only when the
-     /// `MSG_OOB` flag is set during receiving. As per RFC6093, TCP sockets
-     /// using the Urgent mechanism are encouraged to set this flag.
--    #[cfg(not(any(target_os = "redox", target_os = "wasi")))]
-+    #[cfg(not(any(target_os = "redox", target_os = "slopos", target_os = "wasi")))]
-     pub fn set_out_of_band_inline(&self, oob_inline: bool) -> io::Result<()> {
-         unsafe {
-             setsockopt(
 @@ -1422,6 +1422,7 @@ impl Socket {
          target_os = "netbsd",
          target_os = "openbsd",
@@ -69,18 +51,9 @@ index defbb1e..d54c288 100644
          target_os = "haiku",
          target_os = "hurd",
 diff --git a/src/sys/unix.rs b/src/sys/unix.rs
-index be9b6da..14a4340 100644
+index be9b6da..e9408ac 100644
 --- a/src/sys/unix.rs
 +++ b/src/sys/unix.rs
-@@ -132,7 +132,7 @@ pub(crate) use libc::{
-     target_os = "horizon"
- )))]
- pub(crate) use libc::MSG_TRUNC;
--#[cfg(not(any(target_os = "redox", target_os = "wasi")))]
-+#[cfg(not(any(target_os = "redox", target_os = "slopos", target_os = "wasi")))]
- pub(crate) use libc::SO_OOBINLINE;
- // Used in `Socket`.
- #[cfg(not(target_os = "nto"))]
 @@ -167,6 +167,7 @@ pub(crate) use libc::IPV6_RECVHOPLIMIT;
      target_os = "netbsd",
      target_os = "openbsd",
