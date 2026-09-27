@@ -12,7 +12,7 @@ use slopos_ostd::{klog_info, klog_warn};
 
 use slopos_kernel_services::platform;
 
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicPtr};
 
 /// Per-CPU: this CPU's idle path armed a LAPIC one-shot for the next sleep-queue
 /// deadline. The first timer ISR restores periodic mode and clears the flag.
@@ -1343,9 +1343,8 @@ pub(crate) fn finish_pending_switch(cpu_id: usize) {
     finish_switch(cpu_id, TaskRef::from_placement(node));
 }
 
-/// Scoped interrupt-enable window for the idle dispatcher's deferred-drop work,
-/// which needs IF set where the scheduler loop leaves it clear. Sound only on
-/// the CPU's non-migrating idle stack.
+/// Scoped interrupt-enable window for deferred-drop work reached with
+/// interrupts clear: the scheduler loop's tail and every switch's resume path.
 pub(crate) struct RestoreInterruptState {
     disable_on_drop: bool,
 }
@@ -1372,43 +1371,122 @@ impl Drop for RestoreInterruptState {
     }
 }
 
+/// Corpses handed on by a task that was already running a post-switch cleanup.
+/// Global, like the graveyard: the next cleanup on any CPU takes them, so a
+/// corpse never waits for the task that queued it to run again.
+static CLEANUP_QUEUE: AtomicPtr<Task> = AtomicPtr::new(core::ptr::null_mut());
+
 /// Release the outgoing dispatch reference from this CPU's deferred slot;
 /// `false` if none was parked.
 ///
 /// Called once each switch path has left the interrupts-off window, which is
-/// what makes it the right place for a dead task's cleanup.
+/// what makes it the right place for a dead task's cleanup. The cleanup runs
+/// preemptible, so a switch can land inside it and resume the task back here;
+/// that resume queues its corpse rather than nesting a second cleanup, whose
+/// frames would otherwise pile up one per resume until the stack overflows.
 #[inline]
 pub(crate) fn drain_previous_task() -> bool {
-    let previous = slopos_arch::pcr::take_previous_task().cast::<Task>();
-    let Some(node) = NonNull::new(previous) else {
-        return false;
-    };
+    let current = Current::get();
+    drain_previous_task_for(current.as_ref().map(|current| current.task()))
+}
 
-    // Sampled before the release — afterwards the pointer must not be touched.
-    let dispatch_ref = TaskRef::from_placement(node);
-    let needs_cleanup = matches!(
-        dispatch_ref.status(),
-        TaskStatus::Terminated | TaskStatus::Zombie
-    );
-    if needs_cleanup {
+/// [`drain_previous_task`] for `runner`, the task whose stack this is; `None`
+/// on a bootstrap stub.
+pub(crate) fn drain_previous_task_for(runner: Option<&Task>) -> bool {
+    let previous = slopos_arch::pcr::take_previous_task().cast::<Task>();
+    let parked = !previous.is_null();
+    let corpse = NonNull::new(previous).and_then(|node| {
+        let dispatch_ref = TaskRef::from_placement(node);
+        if dispatch_ref.is_exited() {
+            Some(dispatch_ref)
+        } else {
+            super::task::task_put(dispatch_ref);
+            None
+        }
+    });
+
+    if runner.is_some_and(|task| task.running_cleanup()) {
+        if let Some(corpse) = corpse {
+            queue_cleanup(corpse);
+        }
+    } else if corpse.is_some() || !CLEANUP_QUEUE.load(Ordering::Acquire).is_null() {
+        run_cleanups(runner, corpse);
+    }
+    parked
+}
+
+/// Clean up `first`, then every queued corpse, with `runner` marked as running
+/// a cleanup for the whole span.
+fn run_cleanups(runner: Option<&Task>, first: Option<TaskRef>) {
+    let mark = |running: bool| {
+        if let Some(task) = runner {
+            task.set_running_cleanup(running);
+        }
+    };
+    mark(true);
+    if let Some(corpse) = first {
+        cleanup_corpse(corpse);
+    }
+    loop {
+        // Interrupts off from the empty check to the unmark: a switch between
+        // them would queue a corpse this cleanup has already stopped looking for.
+        let head = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+            let head = CLEANUP_QUEUE.swap(core::ptr::null_mut(), Ordering::AcqRel);
+            if head.is_null() {
+                mark(false);
+            }
+            head
+        });
+        if head.is_null() {
+            return;
+        }
+        let (mut cursor, _) =
+            slopos_ostd::task::reverse_detached_chain::<Task, slopos_ostd::task::CleanupRole>(head);
+        while let Some(node) = NonNull::new(cursor) {
+            let corpse = TaskRef::from_placement(node);
+            cursor = corpse.cleanup_link().load();
+            corpse.cleanup_link().mark_unlinked();
+            cleanup_corpse(corpse);
+        }
+    }
+}
+
+fn cleanup_corpse(corpse: TaskRef) {
+    {
         // Not in the switch tail: `destroy_process_vm` takes a lock and waits
         // for cross-CPU TLB acks, neither of which is legal with interrupts
-        // off. Runs on the successor's stack, so the dying task's is free (I3).
+        // off. Never on the dying task's own stack (I3).
         let _window = RestoreInterruptState::open_window();
         slopos_ostd::task::run_off_lock(|| {
-            super::task::cleanup_current_task_after_switch(&dispatch_ref);
+            super::task::cleanup_current_task_after_switch(&corpse);
         });
     }
-    super::task::task_put(dispatch_ref);
-    if needs_cleanup {
-        super::task::arm_deferred_reap();
+    super::task::task_put(corpse);
+    super::task::arm_deferred_reap();
+}
+
+/// Park `corpse` in [`CLEANUP_QUEUE`]. Allocation- and lock-free, as the
+/// switch resume path it runs on requires.
+fn queue_cleanup(corpse: TaskRef) {
+    let claimed = corpse.cleanup_link().try_mark_linked();
+    debug_assert!(claimed, "a corpse was queued for cleanup twice");
+    let node = corpse.into_placement();
+    loop {
+        let head = CLEANUP_QUEUE.load(Ordering::Acquire);
+        // The queue's reference, parked above, keeps this borrow live.
+        slopos_ostd::task::with_parked_node(node, |task| task.cleanup_link().store_relaxed(head));
+        if CLEANUP_QUEUE
+            .compare_exchange_weak(head, node.as_ptr(), Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return;
+        }
+        core::hint::spin_loop();
     }
-    true
 }
 
 /// Reap terminated tasks whose reap was refused while they were dispatch-pinned.
-/// Runs under the same idle-stack interrupt-window contract as
-/// [`drain_previous_task`].
+/// Runs under the same interrupt-window contract as [`drain_previous_task`].
 pub(crate) fn drain_deferred_task_reclaim() {
     let retire = super::task::task_reap_pending();
     let destroy = super::task::task_graveyard_pending();

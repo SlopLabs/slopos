@@ -1,7 +1,8 @@
 //! The account arena: one `.bss` row per process plus the kernel's root.
 //!
 //! Charging walks *up* a bounded chain of atomics and takes no lock at all, so
-//! it cannot close a cycle with the subsystem lock a charge site holds.
+//! it cannot close a cycle with the subsystem lock a charge site holds. The one
+//! wait it has, for a release in progress ([`WALKERS`]), holds no lock either.
 //!
 //! A row is named by a generation-stamped [`AccountId`], never by a counted
 //! reference: a counted reference inside a [`Charge`](super::Charge) would make
@@ -19,8 +20,11 @@ use slopos_abi::quota::{KIND_COUNT, QuotaMode, ResourceKind, Scope};
 
 use super::axis::Refundable;
 use super::token::Reservation;
+use crate::cpu::x86_64::interrupts::IrqDisabled;
+use crate::cpu::x86_64::pcr::{self, MAX_CPUS};
 use crate::process::AccountId;
 use crate::process::account::{MAX_ACCOUNTS, ROOT_ACCOUNT_SLOT, root_account};
+use crate::sync::CacheAligned;
 use crate::util::static_table::StaticTable;
 
 /// Rows on the longest permitted root-to-leaf chain.
@@ -312,6 +316,91 @@ pub fn root() -> AccountId {
     root_account()
 }
 
+/// Charge and refund walks in flight, one counter per CPU.
+///
+/// A walk reads a row's parent edge and then acts on the row it names, while
+/// [`account_release`] re-points those edges and moves the released row's
+/// balance up. Interleaved, a child's refund reaches its grandparent both
+/// through its own walk and inside the released balance, and the ancestors
+/// underflow. So a release waits for every walk to finish and holds new ones
+/// off; walks never wait for each other.
+static WALKERS: [CacheAligned<AtomicU32>; MAX_CPUS] =
+    [const { CacheAligned(AtomicU32::new(0)) }; MAX_CPUS];
+
+/// Held by the one release in progress.
+static RELEASING: AtomicBool = AtomicBool::new(false);
+
+/// Run one charge or refund walk. Interrupts off pins it to this CPU's counter
+/// and keeps it short, which is what bounds a release's wait.
+fn walk<R>(f: impl FnOnce() -> R) -> R {
+    IrqDisabled::with(|_irq| {
+        let _walking = Walking::enter(&WALKERS[pcr::current_cpu_id().min(MAX_CPUS - 1)].0);
+        f()
+    })
+}
+
+/// One walk counted on its CPU's slot. Released by `Drop`, so a walk that
+/// panics does not leave every later release waiting for it.
+struct Walking(&'static AtomicU32);
+
+impl Walking {
+    fn enter(walkers: &'static AtomicU32) -> Self {
+        loop {
+            walkers.fetch_add(1, Ordering::SeqCst);
+            if !RELEASING.load(Ordering::SeqCst) {
+                return Self(walkers);
+            }
+            walkers.fetch_sub(1, Ordering::Release);
+            while RELEASING.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
+impl Drop for Walking {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// Run `f` with no walk in flight on any CPU. `f` must not walk itself.
+fn exclusive<R>(f: impl FnOnce() -> R) -> R {
+    IrqDisabled::with(|_irq| {
+        let _releasing = Releasing::acquire();
+        f()
+    })
+}
+
+/// [`RELEASING`] held, with every walk that started before it finished.
+/// Released by `Drop`, for the same reason as [`Walking`].
+struct Releasing;
+
+impl Releasing {
+    fn acquire() -> Self {
+        while RELEASING
+            .compare_exchange_weak(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // Every slot: an AP reads its own CPU id through GS before it raises
+        // the CPU count, so the count does not bound where a walk can be.
+        for walkers in &WALKERS {
+            while walkers.0.load(Ordering::SeqCst) != 0 {
+                core::hint::spin_loop();
+            }
+        }
+        Self
+    }
+}
+
+impl Drop for Releasing {
+    fn drop(&mut self) {
+        RELEASING.store(false, Ordering::Release);
+    }
+}
+
 /// Bind a row for `id`, debiting through `parent`.
 ///
 /// The parent edge is written here and never again — the accounting tree *is*
@@ -321,49 +410,53 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
     if id.is_none() || slot >= MAX_ACCOUNTS {
         return Err(AccountCreateError::OutOfBounds);
     }
+    // A walk, so a release of `parent` either sees this row live and adopts it
+    // or has finished before the parent row is read here.
+    walk(|| {
+        let (parent_row, parent_slot, depth) = if parent.is_none() {
+            (None, NO_PARENT, ROOT_DEPTH_REMAINING)
+        } else {
+            let parent_row = row_for(parent).ok_or(AccountCreateError::NoParent)?;
+            let remaining = parent_row.depth_remaining.load(Ordering::Acquire);
+            if remaining == 0 {
+                return Err(AccountCreateError::TooDeep);
+            }
+            (Some(parent_row), parent.slot(), remaining - 1)
+        };
 
-    let (parent_row, parent_slot, depth) = if parent.is_none() {
-        (None, NO_PARENT, ROOT_DEPTH_REMAINING)
-    } else {
-        let parent_row = row_for(parent).ok_or(AccountCreateError::NoParent)?;
-        let remaining = parent_row.depth_remaining.load(Ordering::Acquire);
-        if remaining == 0 {
-            return Err(AccountCreateError::TooDeep);
+        ROWS_IN_USE.fetch_max(slot + 1, Ordering::Release);
+        let row = &ACCOUNTS[slot];
+        row.reset_counters();
+        // The root is deliberately exempt from the per-kind process defaults:
+        // it is the sum of every principal, so a per-principal ceiling applied
+        // to it would refuse the machine's own aggregate. Its limits come from
+        // measured RAM.
+        if slot != ROOT_ACCOUNT_SLOT as usize {
+            for kind in ResourceKind::ALL {
+                row.limit[kind.index()].store(process_default_limit(kind), Ordering::Relaxed);
+            }
         }
-        (Some(parent_row), parent.slot(), remaining - 1)
-    };
-
-    ROWS_IN_USE.fetch_max(slot + 1, Ordering::Release);
-    let row = &ACCOUNTS[slot];
-    row.reset_counters();
-    // The root is deliberately exempt from the per-kind process defaults: it is
-    // the sum of every principal, so a per-principal ceiling applied to it would
-    // refuse the machine's own aggregate. Its limits come from measured RAM.
-    if slot != ROOT_ACCOUNT_SLOT as usize {
-        for kind in ResourceKind::ALL {
-            row.limit[kind.index()].store(process_default_limit(kind), Ordering::Relaxed);
+        row.parent.store(
+            pack_parent(
+                parent_slot,
+                if parent.is_none() {
+                    0
+                } else {
+                    parent.generation()
+                },
+            ),
+            Ordering::Relaxed,
+        );
+        row.depth_remaining.store(depth, Ordering::Relaxed);
+        // Generation before `live`: a reader checks liveness first, so this
+        // order never exposes a live row carrying its predecessor's generation.
+        row.generation.store(id.generation(), Ordering::Release);
+        row.live.store(true, Ordering::Release);
+        if let Some(parent_row) = parent_row {
+            parent_row.child_added();
         }
-    }
-    row.parent.store(
-        pack_parent(
-            parent_slot,
-            if parent.is_none() {
-                0
-            } else {
-                parent.generation()
-            },
-        ),
-        Ordering::Relaxed,
-    );
-    row.depth_remaining.store(depth, Ordering::Relaxed);
-    // Generation before `live`: a reader checks liveness first, so this order
-    // never exposes a live row carrying its predecessor's generation.
-    row.generation.store(id.generation(), Ordering::Release);
-    row.live.store(true, Ordering::Release);
-    if let Some(parent_row) = parent_row {
-        parent_row.child_added();
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Release the row `id` names.
@@ -373,60 +466,61 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
 /// the generation compare and does nothing — which is what makes a leaked
 /// charge self-healing.
 pub fn account_release(id: AccountId) {
-    let Some(row) = row_for(id) else {
-        return;
-    };
+    // Outside the gate, whose body must not walk: the refund walks up through
+    // the still-live row like any other, so the balance moved below excludes it.
+    super::disk::release(id);
+    exclusive(|| {
+        let Some(row) = row_for(id) else {
+            return;
+        };
 
-    // Live children go to the grandparent before this row goes dark, so what
-    // they charged through here stays counted above and their later refunds
-    // still reach it. Only this row's own share moves up.
-    let grandparent = parent_of(row);
-    let grandparent_row = row_for(grandparent);
-    let mut children_used = [0u32; KIND_COUNT];
-    if row.children.load(Ordering::Acquire) != 0 {
-        for (child_slot, child) in rows_in_use() {
-            if child_slot as u32 == id.slot() || !child.live.load(Ordering::Acquire) {
-                continue;
+        // Live children go to the grandparent before this row goes dark, so
+        // what they charged through here stays counted above and their later
+        // refunds still reach it. Only this row's own share moves up.
+        let grandparent = parent_of(row);
+        let grandparent_row = row_for(grandparent);
+        let mut children_used = [0u32; KIND_COUNT];
+        if row.children.load(Ordering::Acquire) != 0 {
+            for (child_slot, child) in rows_in_use() {
+                if child_slot as u32 == id.slot() || !child.live.load(Ordering::Acquire) {
+                    continue;
+                }
+                if parent_of(child) != id {
+                    continue;
+                }
+                adopt(child, grandparent);
+                if let Some(grandparent_row) = grandparent_row {
+                    grandparent_row.child_added();
+                }
+                for kind in ResourceKind::ALL {
+                    let idx = kind.index();
+                    children_used[idx] = children_used[idx]
+                        .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
+                }
             }
-            if parent_of(child) != id {
-                continue;
-            }
-            adopt(child, grandparent);
-            if let Some(grandparent_row) = grandparent_row {
-                grandparent_row.child_added();
-            }
+        }
+
+        // Dark first: the audit counts a live row among its parent's children,
+        // so crediting the parent ahead of it dips the parent below their sum.
+        row.live.store(false, Ordering::Release);
+
+        if !grandparent.is_none() {
             for kind in ResourceKind::ALL {
                 let idx = kind.index();
-                children_used[idx] = children_used[idx]
-                    .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
+                let own = usage_used(row.usage[idx].load(Ordering::Acquire))
+                    .saturating_sub(children_used[idx]);
+                if own != 0 {
+                    credit_chain(grandparent, kind, own);
+                }
             }
         }
-    }
-
-    // Dark first: the audit counts a live row among its parent's children, so
-    // crediting the parent ahead of it dips the parent below their sum.
-    row.live.store(false, Ordering::Release);
-
-    // Before the outstanding amounts move up: inheriting the disk row would
-    // bill the parent for blocks nothing can attribute to anyone.
-    super::disk::release(id);
-
-    if !grandparent.is_none() {
-        for kind in ResourceKind::ALL {
-            let idx = kind.index();
-            let own = usage_used(row.usage[idx].load(Ordering::Acquire))
-                .saturating_sub(children_used[idx]);
-            if own != 0 {
-                credit_chain(grandparent, kind, own);
-            }
+        if let Some(grandparent_row) = grandparent_row {
+            grandparent_row.child_removed();
         }
-    }
-    if let Some(grandparent_row) = grandparent_row {
-        grandparent_row.child_removed();
-    }
 
-    row.generation.store(0, Ordering::Release);
-    row.reset_counters();
+        row.generation.store(0, Ordering::Release);
+        row.reset_counters();
+    });
 }
 
 /// Release whichever account currently occupies `slot`, whatever its
@@ -484,47 +578,50 @@ pub fn try_charge<A: Refundable>(
     let kind = A::KIND;
     let mode = quota_mode();
     let subtree = kind.scope() == Scope::Subtree;
-    let mut charged: [AccountId; MAX_ACCOUNT_DEPTH as usize] =
-        [AccountId::NONE; MAX_ACCOUNT_DEPTH as usize];
-    let mut depth = 0usize;
+    walk(|| {
+        let mut charged: [AccountId; MAX_ACCOUNT_DEPTH as usize] =
+            [AccountId::NONE; MAX_ACCOUNT_DEPTH as usize];
+        let mut depth = 0usize;
 
-    let leaf = row_for(account).filter(|_| !subtree);
-    if let Some(leaf) = leaf
-        && charge_own(leaf, kind, n, mode, true).is_err()
-    {
-        return Err(TryChargeError {
-            refused_by: account,
-            kind,
-            errno: kind.errno(),
-        });
-    }
-
-    let mut current = account;
-    while depth < MAX_ACCOUNT_DEPTH as usize {
-        let Some(row) = row_for(current) else {
-            break;
-        };
-        // The root's ceilings are the machine's, and bound everything charged.
-        let bounded = subtree || current.slot() == ROOT_ACCOUNT_SLOT;
-        if let Err(()) = charge_row(row, kind, n, mode, bounded) {
-            if let Some(leaf) = leaf {
-                release_own(leaf, kind, n);
-            }
-            unwind(&charged[..depth], kind, n);
+        let leaf = row_for(account).filter(|_| !subtree);
+        if let Some(leaf) = leaf
+            && charge_own(leaf, kind, n, mode, true).is_err()
+        {
             return Err(TryChargeError {
-                refused_by: current,
+                refused_by: account,
                 kind,
                 errno: kind.errno(),
             });
         }
-        charged[depth] = current;
-        depth += 1;
 
-        current = parent_of(row);
-        if current.is_none() {
-            break;
+        let mut current = account;
+        while depth < MAX_ACCOUNT_DEPTH as usize {
+            let Some(row) = row_for(current) else {
+                break;
+            };
+            // The root's ceilings are the machine's, and bound everything charged.
+            let bounded = subtree || current.slot() == ROOT_ACCOUNT_SLOT;
+            if let Err(()) = charge_row(row, kind, n, mode, bounded) {
+                if let Some(leaf) = leaf {
+                    release_own(leaf, kind, n);
+                }
+                unwind(&charged[..depth], kind, n);
+                return Err(TryChargeError {
+                    refused_by: current,
+                    kind,
+                    errno: kind.errno(),
+                });
+            }
+            charged[depth] = current;
+            depth += 1;
+
+            current = parent_of(row);
+            if current.is_none() {
+                break;
+            }
         }
-    }
+        Ok(())
+    })?;
 
     Ok(Reservation::new(account, n))
 }
@@ -532,18 +629,21 @@ pub fn try_charge<A: Refundable>(
 /// Give `n` units of `kind` back to `account` and every ancestor.
 ///
 /// Bounds-checked, generation-compared, and a defined no-op on mismatch. No
-/// lock, no allocation, no wait — which is what makes it legal from every
-/// context a destructor can run in.
+/// lock and no allocation, and the one wait is for a release already running
+/// interrupts-off — which is what makes it legal from every context a
+/// destructor can run in.
 pub(super) fn refund_raw(account: AccountId, kind: ResourceKind, n: u32) {
     if n == 0 {
         return;
     }
-    if kind.scope() == Scope::Principal
-        && let Some(row) = row_for(account)
-    {
-        release_own(row, kind, n);
-    }
-    credit_chain(account, kind, n);
+    walk(|| {
+        if kind.scope() == Scope::Principal
+            && let Some(row) = row_for(account)
+        {
+            release_own(row, kind, n);
+        }
+        credit_chain(account, kind, n);
+    });
 }
 
 /// Credit `used` on `from` and every ancestor, leaving every `own` alone: the

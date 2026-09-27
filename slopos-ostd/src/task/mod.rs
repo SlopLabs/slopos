@@ -40,7 +40,7 @@ pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_g
 #[cfg(any(test, feature = "test-helpers"))]
 pub use kernel_task::fail_next_cwd_alloc_for_test;
 pub use kernel_task::{CWD_MAX, SchedPlacement, SigHandTable};
-pub use link_roles::{FutexRole, ReadyQueueRole, RemoteWakeRole, SiblingRole};
+pub use link_roles::{CleanupRole, FutexRole, ReadyQueueRole, RemoteWakeRole, SiblingRole};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use pcr_ty::HostStack;
 pub use pcr_ty::{PcrStackTy, PcrTaskType};

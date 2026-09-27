@@ -1,13 +1,13 @@
 //! Ownership hand-off between a `KArc<Task>` and a scheduler placement slot.
 //!
 //! The scheduler's placement containers — the per-CPU ready queue, the
-//! remote-wake inbox, the deferred previous-task slot, and the wait maps — hold
-//! their member task by an intrusive link (or map entry) plus one strong
-//! reference *parked* as a raw pointer, and these primitives are the sole
-//! sanctioned way to move a strong reference into and out of such a slot. They
-//! balance one-to-one: an unmatched park inflates the task's strong count
-//! forever, so the allocation never returns to the heap; a double reclaim frees
-//! one reference too many.
+//! remote-wake inbox, the deferred previous-task slot, the post-switch cleanup
+//! queue, and the wait maps — hold their member task by an intrusive link (or
+//! map entry) plus one strong reference *parked* as a raw pointer, and these
+//! primitives are the sole sanctioned way to move a strong reference into and
+//! out of such a slot. They balance one-to-one: an unmatched park inflates the
+//! task's strong count forever, so the allocation never returns to the heap; a
+//! double reclaim frees one reference too many.
 //!
 //! # The existence reference
 //!

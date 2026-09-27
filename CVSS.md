@@ -2,6 +2,19 @@
 
 **No finding is open.**
 
+Fixed 2026-09-27, both **pre-existing**, reachable by any user and availability
+defects at most, so neither is an entry. A dead task's post-switch teardown
+runs preemptible in its successor, and a switch that landed inside it resumed
+the successor there, where it tore down the next corpse on top of the first:
+under a spawn-and-exit storm the teardowns nested until the 32 KiB kernel stack
+overflowed into a double fault. A resume inside a teardown now queues its corpse
+for the one already running (`test_corpse_is_queued_inside_a_running_cleanup`).
+With that, `exit_stress_test` ran to its end and found the second: an account
+release re-pointed a child's parent edge under a refund walk in flight, and the
+child's pages reached the root both through that walk and inside the released
+balance — an underflow that panics the tests kernel and silently skews the
+ledger in a release one. A release now waits out the walks in flight.
+
 Swept 2026-09-16: the editor — `editor-core`'s buffer, lexer, search and tree
 model, the new `appkit` surfaces, the fd-based clipboard transfer in
 `windowing`, and the editor's own filesystem boundary, every one of which reads

@@ -37,3 +37,8 @@ pub enum FutexRole {}
 /// count is already zero and the pusher owns the allocation outright, whereas
 /// every other role obeys "linked implies owned".
 pub enum ReclaimRole {}
+
+/// Role tag for the queue of dead tasks whose post-switch cleanup waits for a
+/// context that is not already running one. Linked implies owned: the queue
+/// parks one strong reference per corpse.
+pub enum CleanupRole {}

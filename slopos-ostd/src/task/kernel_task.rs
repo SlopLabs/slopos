@@ -33,7 +33,7 @@ use crate::task::fpu_owner::{
 };
 use crate::task::job_control::ProcessGroup;
 use crate::task::link_roles::{
-    FutexRole, ReadyQueueRole, ReclaimRole, RemoteWakeRole, SiblingRole,
+    CleanupRole, FutexRole, ReadyQueueRole, ReclaimRole, RemoteWakeRole, SiblingRole,
 };
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
@@ -662,6 +662,13 @@ pub struct TaskInner<K, U> {
     /// the pusher won the final release, so the count is already zero and the
     /// pusher owns the allocation outright. That is why it gets its own role.
     pub reclaim_link: Link<TaskInner<K, U>, ReclaimRole>,
+    /// Membership in the scheduler's queue of dead tasks waiting for their
+    /// post-switch cleanup. Linked implies owned.
+    pub cleanup_link: Link<TaskInner<K, U>, CleanupRole>,
+    /// Set while this task runs a dead predecessor's post-switch cleanup. A
+    /// switch that resumes it inside one queues the new corpse instead of
+    /// starting a second cleanup on this stack. Only the task itself touches it.
+    pub running_cleanup: AtomicBool,
     /// Membership in a futex wait bucket. Doubly linked so a waiter that is
     /// woken by a signal, a kill or a timeout unlinks itself in O(1) without
     /// naming which bucket holds it.
@@ -1298,6 +1305,10 @@ impl<K, U> TaskInner<K, U> {
             !self.reclaim_link.is_linked(),
             "task dropped while still parked in the reclaim queue"
         );
+        debug_assert!(
+            !self.cleanup_link.is_linked(),
+            "task dropped while still queued for its post-switch cleanup"
+        );
     }
 }
 
@@ -1378,6 +1389,8 @@ impl<K, U> TaskInner<K, U> {
             futex_addr: AtomicU64::new(0),
             futex_bitset: AtomicU32::new(0),
             reclaim_link: Link::new(),
+            cleanup_link: Link::new(),
+            running_cleanup: AtomicBool::new(false),
             sched_placement: AtomicU8::new(SchedPlacement::Nascent.as_u8()),
             parked_wait_queue: AtomicPtr::new(ptr::null_mut()),
             recovery_depth: AtomicU32::new(0),
@@ -1667,6 +1680,8 @@ impl<K, U> TaskInner<K, U> {
         self.remote_inbox_link.reset();
         self.sibling_link.reset();
         self.reclaim_link.reset();
+        self.cleanup_link.reset();
+        self.running_cleanup.store(false, Ordering::Relaxed);
         // Nascent, not None: a task that has been reset for (re)construction
         // has not been published, and None is also a blocked task's placement.
         self.sched_placement
@@ -1731,6 +1746,8 @@ impl<K, U> TaskInner<K, U> {
         self.remote_inbox_link.reset();
         self.sibling_link.reset();
         self.reclaim_link.reset();
+        self.cleanup_link.reset();
+        self.running_cleanup = AtomicBool::new(false);
         // A fresh child starts parentless; the spawn path publishes the real
         // parent edge via `link_child` after registration.
         self.set_parent_task_id(INVALID_TASK_ID);
@@ -1812,6 +1829,12 @@ impl<K, U> crate::task::DLinkProvider<FutexRole> for TaskInner<K, U> {
 impl<K, U> crate::task::LinkProvider<ReclaimRole> for TaskInner<K, U> {
     fn link(&self) -> &Link<Self, ReclaimRole> {
         &self.reclaim_link
+    }
+}
+
+impl<K, U> crate::task::LinkProvider<CleanupRole> for TaskInner<K, U> {
+    fn link(&self) -> &Link<Self, CleanupRole> {
+        &self.cleanup_link
     }
 }
 

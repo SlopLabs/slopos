@@ -14,7 +14,7 @@ use crate::sync::LinkError;
 use crate::sync::intrusive::Link;
 use crate::task::exit_info::ExitInfo;
 use crate::task::kernel_task::{SchedPlacement, SigHandTable, SignalAction, TaskInner};
-use crate::task::link_roles::{ReclaimRole, RemoteWakeRole};
+use crate::task::link_roles::{CleanupRole, ReclaimRole, RemoteWakeRole};
 
 /// `SIGBUS` for an out-of-memory demand fault: the mapping exists and the
 /// access is legal, but no page can be produced, which is the bus-error case.
@@ -644,6 +644,25 @@ impl<K, U> TaskInner<K, U> {
     #[inline]
     pub fn reclaim_link(&self) -> &Link<TaskInner<K, U>, ReclaimRole> {
         &self.reclaim_link
+    }
+
+    /// This task's link in the queue of corpses awaiting post-switch cleanup.
+    #[inline]
+    pub fn cleanup_link(&self) -> &Link<TaskInner<K, U>, CleanupRole> {
+        &self.cleanup_link
+    }
+
+    /// Whether this task is running a dead predecessor's post-switch cleanup.
+    /// Relaxed: only the task itself reads or writes it, and a switch orders
+    /// everything it did before it resumes elsewhere.
+    #[inline]
+    pub fn running_cleanup(&self) -> bool {
+        self.running_cleanup.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn set_running_cleanup(&self, running: bool) {
+        self.running_cleanup.store(running, Ordering::Relaxed);
     }
 
     // `TaskContext` is `#[repr(C, packed)]`, so its `u64` fields carry no

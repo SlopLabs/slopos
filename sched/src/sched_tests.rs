@@ -111,6 +111,62 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A task resumed inside a post-switch cleanup queues its dead predecessor
+/// rather than nesting a second cleanup on its stack; the next cleanup collects it.
+pub fn test_corpse_is_queued_inside_a_running_cleanup() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let (Ok(runner), Ok(arc)) = (
+        KArc::try_init(Task::init_invalid()),
+        KArc::try_init(Task::init_invalid()),
+    ) else {
+        return TestResult::Fail;
+    };
+    if !arc.try_transition_to(TaskStatus::Ready) || !arc.terminate() {
+        klog_info!("SCHED_TEST: could not make a corpse");
+        return TestResult::Fail;
+    }
+    let witness = arc.clone();
+    let strong_before = KArc::strong_count(&witness);
+
+    let parked = task_placement_leak(arc);
+    if slopos_arch::pcr::defer_previous_task(parked.as_ptr().cast()).is_err() {
+        klog_info!("SCHED_TEST: previous-task slot was already occupied");
+        drop(task_placement_reclaim(parked));
+        return TestResult::Fail;
+    }
+
+    runner.set_running_cleanup(true);
+    let drained = scheduler::drain_previous_task_for(Some(&*runner));
+    let queued =
+        witness.cleanup_link().is_linked() && KArc::strong_count(&witness) == strong_before;
+    runner.set_running_cleanup(false);
+
+    // No predecessor this time: the drain runs for the queue alone.
+    let _ = scheduler::drain_previous_task_for(Some(&*runner));
+    let collected =
+        !witness.cleanup_link().is_linked() && KArc::strong_count(&witness) == strong_before - 1;
+    let unmarked = !runner.running_cleanup();
+
+    if drained && queued && collected && unmarked {
+        TestResult::Pass
+    } else {
+        klog_info!(
+            "SCHED_TEST: drained={} queued={} collected={} unmarked={} strong={}",
+            drained,
+            queued,
+            collected,
+            unmarked,
+            KArc::strong_count(&witness)
+        );
+        TestResult::Fail
+    }
+}
+
+slopos_testing::stest!(
+    name = test_corpse_is_queued_inside_a_running_cleanup,
+    suite = sched_core
+);
+
 /// A final release in a context that cannot run the `Task` destructor parks the
 /// task rather than destroying it inline; the drain then destroys it once.
 ///

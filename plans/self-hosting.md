@@ -72,7 +72,7 @@ The mechanisms and their invariants live in the code and in `AGENTS.md`.
 | The toolchain is cross-built into one prefix | `scripts/check_bootstrap_config.sh`, `scripts/check_cargo_fork.sh`, `scripts/check_toolchain_pin.sh` | `scripts/bootstrap_slopos_toolchain.sh`, `toolchain/crates/` |
 | The dev disk carries it, mounts at boot, and runs it | `just test-devdisk` (inventory, source, remount, the toolchain ladder), `mount_test` | `scripts/build_devdisk.sh`, `boot/src/early_init.rs`, `fs/src/vfs/init.rs` |
 | The kernel build needs no host tool | `just build`; `slopos-kallsyms` tests; two checkouts build identical ELFs | `scripts/build_kernel.sh`, `tools/kallsyms/`, `scripts/compare_kernel_elf.sh` |
-| The build loop holds | `buildloop_test`, `exit_stress_test`, `test_blocking_populate_outlasts_a_long_reader`, `test_user_copy_retries_a_copy_that_faulted_midway`; the guest builds both kernels | `mm/src/{commit,vma_region,page_fault,user_copy,user_mappings}.rs`, `slibc/src/process/spawn.rs` |
+| The build loop holds | `buildloop_test`, `exit_stress_test`, `test_blocking_populate_outlasts_a_long_reader`, `test_user_copy_retries_a_copy_that_faulted_midway`, `test_corpse_is_queued_inside_a_running_cleanup`; the guest builds both kernels | `mm/src/{commit,vma_region,page_fault,user_copy,user_mappings}.rs`, `slibc/src/process/spawn.rs`, `sched/src/scheduler.rs` |
 | A mount has one writeback pass | `test_ext2_sync_finishes_the_open_pass_instead_of_opening_one`, `test_ext2_journal_headroom_is_restored_off_the_mount_lock` | `fs/src/ext2_vfs.rs` |
 | A kernel installs into a boot slot and rolls back | `just test-install`, `just test-install-guest`, `slopos-fat-core` host tests, `test_devfs_block_node_writes_through_the_claim` | `fat-core/`, `userland/src/apps/bootctl.rs`, `core/src/efivar.rs`, `fs/src/devfs/`, `scripts/build_bootdisk.sh` |
 | Code gets in and out | `scripts/check_offline_build.sh`, `transfer_test` | `.cargo/vendor.toml`, `scripts/{make_vendor,export_devdisk}.sh`, `tls-core/` |
@@ -370,6 +370,15 @@ Neither Redox nor Asterinas rebuilds its own compiler.
   copies run with preemption off and none can start while that lock is held.
   Linux faults under a shared `mmap_lock` with page-table locks, and Asterinas
   locks page-table nodes; this is the coarse form of the same exclusion.
+- **Post-switch cleanup** of a dead task runs in its successor, preemptible,
+  and never nests: a task resumed inside one queues its new corpse for the
+  cleanup already running. Nested, each resume stacked another teardown, and
+  an idle CPU under `exit_stress` overflowed its 32 KiB stack.
+- **Account release against quota walks.** Charges and refunds stay lock-free
+  and never wait on each other; a release waits out the walks in flight and
+  holds new ones off, the per-CPU-reader shape of Linux's `percpu_rw_semaphore`.
+  A release that re-pointed a child's parent edge under a refund walk credited
+  the child's pages to the root twice.
 - **Dev disk.** Mounted from the command line, trailer-less, seeded from `HEAD`
   and carried back out as a patch; no host share on the build path.
 - **Kernel build.** One POSIX `sh` driver and one Rust symbol-table tool, on

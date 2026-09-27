@@ -95,8 +95,8 @@ pub struct TaskOwn {
     /// `KArcInner::strong` — the total live strong reference count.
     pub strong: nat,
     /// How many of `strong` are parked in placement containers: ready queue,
-    /// remote inbox, deferred previous-task slot, children list, wait maps,
-    /// futex buckets.
+    /// remote inbox, deferred previous-task slot, post-switch cleanup queue,
+    /// children list, wait maps, futex buckets.
     pub containers: nat,
     /// How many of `strong` are caller-held handles: `TaskRef` lookup guards,
     /// the live dispatch reference, the reap's temporary upgrade, `PendingTask`.
