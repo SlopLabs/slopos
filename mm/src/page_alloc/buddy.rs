@@ -868,6 +868,16 @@ impl BuddyAllocator {
     /// Raw multi-page entry point — bootstrap escape and policy-flag opt-out.
     /// The result is always zero-scrubbed.
     pub fn alloc_raw(&self, count: u32, flags: u32) -> PhysAddr {
+        self.alloc_block(count, flags, true)
+    }
+
+    /// One order-0 page the buddy does *not* scrub: it may hold whatever its
+    /// previous owner left. See [`super::alloc_kernel_page_unscrubbed`].
+    pub fn alloc_unscrubbed_page(&self) -> PhysAddr {
+        self.alloc_block(1, 0, false)
+    }
+
+    fn alloc_block(&self, count: u32, flags: u32, scrub: bool) -> PhysAddr {
         if count == 0 {
             return PhysAddr::NULL;
         }
@@ -941,8 +951,9 @@ impl BuddyAllocator {
             } else {
                 BuddyInner::order_block_pages(order)
             };
+            let scrubbed = if scrub { span_pages } else { 0 };
             let mut ok = true;
-            for i in 0..span_pages {
+            for i in 0..scrubbed {
                 let page_phys = phys_addr.offset(i as u64 * PAGE_SIZE_4KB);
                 if zero_physical_page(page_phys) != 0 {
                     klog_info!(
@@ -1245,8 +1256,10 @@ impl FrameAlloc for BuddyAllocator {
             opts.align_pages, 1,
             "BuddyAllocator only supports align_pages == 1"
         );
-        // The buddy unconditionally scrubs; `opts.zeroing` is a type-level
-        // audit signal, not a runtime perf escape.
+        // Scrubbed whatever `opts.zeroing` says: it is a type-level audit
+        // signal here. The one unscrubbed allocation does not come through this
+        // trait: `alloc_kernel_page_unscrubbed`, whose caller overwrites every
+        // byte before the page is readable.
         let count = u32::try_from(opts.size_pages.max(1)).ok()?;
         let mut flags = 0u32;
         if opts.no_pcp {

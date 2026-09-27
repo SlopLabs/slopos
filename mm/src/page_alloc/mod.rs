@@ -66,6 +66,15 @@ pub fn alloc_kernel_page() -> PhysAddr {
     Frame::<KernelMeta>::alloc_release_phys(FrameAllocOptions::single())
 }
 
+/// One order-0 page the buddy skipped scrubbing: it may still hold its previous
+/// owner's bytes. The one exception to the allocator's zero-on-alloc rule, for
+/// a caller that overwrites every byte before anything else can read the page
+/// (the file-mapping fill, whose `FillWindow` zeroes whatever its read did not
+/// write). Everyone else wants [`alloc_kernel_page`].
+pub fn alloc_kernel_page_unscrubbed() -> PhysAddr {
+    BUDDY_ALLOCATOR.alloc_unscrubbed_page()
+}
+
 /// Typestate-checked single-page kernel allocation with caller-supplied options.
 pub fn alloc_kernel_page_with(opts: slopos_ostd::mm::frame::FrameAllocOptions) -> PhysAddr {
     use slopos_ostd::mm::frame::{Frame, KernelMeta};

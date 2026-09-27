@@ -3,9 +3,11 @@
 //! **A per-inode page set is the authority for the pages it holds populated
 //! while a shared mapping is live.** Nothing here maps an ext2 `BlockCache`
 //! frame, so the block cache stays the single device-facing cache, at the cost
-//! of one 4 KiB copy per mapped page. `read(2)` and `write(2)` are routed
-//! through the set for the ranges it covers ([`read_through`],
-//! [`write_through`]), and writeback goes out through [`FileSystem::write`].
+//! of one 4 KiB copy per mapped page: a fault reads through
+//! [`FileSystem::read_pages`] straight into the frames it publishes. `read(2)`
+//! and `write(2)` are routed through the set for the ranges it covers
+//! ([`read_through`], [`write_through`]), and writeback goes out through
+//! [`FileSystem::write`].
 //!
 //! A mapping reserves an *extent* ([`reserve_range`]) and populates nothing;
 //! frames arrive from [`fault_page_in_set`], which runs on the faulting task's
@@ -62,7 +64,7 @@ use slopos_abi::addr::PhysAddr;
 use slopos_abi::quota::PinnedBytesAxis;
 use slopos_mm::filemap_hook::FileMapOps;
 use slopos_mm::hhdm::PhysAddrHhdm;
-use slopos_mm::page_alloc::{alloc_kernel_page, get_page_allocator_stats};
+use slopos_mm::page_alloc::{alloc_kernel_page_unscrubbed, get_page_allocator_stats};
 use slopos_mm::vma_region::FileMapRef;
 use slopos_ostd::mm::frame::{claim_owned_anon_page, release_owned_anon_page};
 use slopos_ostd::process::AccountId;
@@ -788,59 +790,185 @@ fn read_into_set(map: FileMapRef, page_index: u64) -> Result<PhysAddr, FileMapEr
     }
     let wide = window.min(size.div_ceil(PAGE_SIZE) - page_index).max(1);
 
-    // Readahead is best effort: a wide buffer the heap cannot find, or a
-    // write to the file racing the read, costs it and nothing else.
-    let (mut pages, mut staging) = match KVec::<u8>::zeroed(wide as usize * PAGE_SIZE_USIZE) {
-        Ok(buf) => (wide, buf),
-        Err(_) => (
-            1,
-            KVec::<u8>::zeroed(PAGE_SIZE_USIZE).map_err(|_| FileMapError::NoMemory)?,
-        ),
-    };
-    let writes = write_seq(inode).load(Ordering::Acquire);
-    read_range_into(fs, inode, page_index, size, staging.as_mut_slice())?;
-    if writes & 1 != 0 || write_seq(inode).load(Ordering::Acquire) != writes {
-        pages = 1;
-    }
-    publish_read(map, page_index, pages, staging.as_slice())
+    fill_window(map, page_index, fs, inode, wide as usize)
 }
 
-/// Install the faulting page from `staging`, then as many of the `pages - 1`
-/// read ahead of it as find a frame and room.
+/// Read up to `wide` pages from `page_index` into fresh frames and publish
+/// them. Its own frame: the window's frame list lives here.
 #[inline(never)]
+fn fill_window(
+    map: FileMapRef,
+    page_index: u64,
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+    wide: usize,
+) -> Result<PhysAddr, FileMapError> {
+    // Readahead is best effort: frames the allocator cannot find, or a write
+    // to the file racing the read, cost it and nothing else.
+    let mut fill = FillWindow::new();
+    fill.claim(wide)?;
+    let writes = write_seq(inode).load(Ordering::Acquire);
+    let filled = fill.read(fs, inode, page_index * PAGE_SIZE)?;
+    if writes & 1 != 0 || write_seq(inode).load(Ordering::Acquire) != writes {
+        fill.truncate(1);
+    }
+    publish_read(map, page_index, fill.publish(filled)?)
+}
+
+/// Install the faulting page, then as many of the pages read ahead of it as
+/// find room.
 fn publish_read(
     map: FileMapRef,
     page_index: u64,
-    pages: u64,
-    staging: &[u8],
+    mut pages: FilledPages<'_>,
 ) -> Result<PhysAddr, FileMapError> {
-    let answer = install_filled(map, page_index, &staging[..PAGE_SIZE_USIZE])?;
-    // Best effort: a readahead page that finds no frame or no room is simply
-    // left for its own fault.
-    for k in 1..pages {
-        let bytes = &staging[k as usize * PAGE_SIZE_USIZE..][..PAGE_SIZE_USIZE];
-        let Ok(extra) = claim_page() else {
+    let first = pages.next().ok_or(FileMapError::NoMemory)?;
+    let answer = install_page(map, page_index, first)?;
+    // Best effort: a readahead page that finds no room is left for its own
+    // fault, and the frames after it go back with `pages`.
+    for k in 1.. {
+        let Some(extra) = pages.next() else {
             break;
         };
-        if fill_frame(extra, bytes).is_err() || !install_readahead(map, page_index + k, extra) {
+        if !install_readahead(map, page_index + k, extra) {
             break;
         }
     }
     Ok(answer)
 }
 
-#[inline(never)]
-fn install_filled(
-    map: FileMapRef,
-    page_index: u64,
-    bytes: &[u8],
-) -> Result<PhysAddr, FileMapError> {
-    let pa = claim_page()?;
-    if let Err(e) = fill_frame(pa, bytes) {
-        release_owned_anon_page(pa);
-        return Err(e);
+const FILL_PAGES: usize = READAHEAD_PAGES as usize;
+
+/// Frames claimed for one fill and not yet publishable. They come from
+/// [`alloc_kernel_page_unscrubbed`], so each may still hold its previous
+/// owner's bytes; dropping the window gives them back unread, and
+/// [`Self::publish`] is the only way one leaves otherwise. That is what makes
+/// skipping the scrub safe: `publish` zeroes every byte the read did not
+/// write, so a published frame holds the file's bytes and zeros, nothing else.
+struct FillWindow {
+    frames: [PhysAddr; FILL_PAGES],
+    len: usize,
+}
+
+impl FillWindow {
+    fn new() -> Self {
+        Self {
+            frames: [PhysAddr::NULL; FILL_PAGES],
+            len: 0,
+        }
     }
-    install_page(map, page_index, pa)
+
+    /// The faulting page's frame, then up to `want - 1` more as they come.
+    fn claim(&mut self, want: usize) -> Result<(), FileMapError> {
+        while self.len < want.min(FILL_PAGES) {
+            match claim_unscrubbed_page() {
+                Ok(pa) => {
+                    self.frames[self.len] = pa;
+                    self.len += 1;
+                }
+                Err(e) if self.len == 0 => return Err(e),
+                Err(_) => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Read the file from `offset` straight into the frames, one filesystem
+    /// call for the window. Answers the bytes written from the first frame on.
+    #[inline(never)]
+    fn read(
+        &mut self,
+        fs: &'static dyn FileSystem,
+        inode: InodeId,
+        offset: u64,
+    ) -> Result<usize, FileMapError> {
+        let len = self.len;
+        let mut views: [&mut [u8]; FILL_PAGES] = Default::default();
+        for (view, frame) in views.iter_mut().zip(self.frames[..len].iter_mut()) {
+            *view = frame_bytes(frame).ok_or(FileMapError::Io)?;
+        }
+        let filled = fs
+            .read_pages(inode, offset, &mut views[..len])
+            .map_err(|_| FileMapError::Io)?;
+        Ok(filled.min(len * PAGE_SIZE_USIZE))
+    }
+
+    /// Give back every frame from the `keep`-th on.
+    fn truncate(&mut self, keep: usize) {
+        while self.len > keep {
+            self.len -= 1;
+            release_owned_anon_page(self.frames[self.len]);
+        }
+    }
+
+    /// Zero each frame past its share of the `filled` bytes the read wrote,
+    /// and only then hand the frames out. The window is spent: the frames and
+    /// the duty to give back any not installed pass to the answer.
+    fn publish(&mut self, filled: usize) -> Result<FilledPages<'_>, FileMapError> {
+        for k in 0..self.len {
+            let written = filled.saturating_sub(k * PAGE_SIZE_USIZE);
+            match frame_bytes(&mut self.frames[k]) {
+                Some(bytes) => {
+                    if let Some(tail) = bytes.get_mut(written..) {
+                        tail.fill(0);
+                    }
+                }
+                None => {
+                    self.truncate(k);
+                    break;
+                }
+            }
+        }
+        if self.len == 0 {
+            return Err(FileMapError::Io);
+        }
+        let len = core::mem::replace(&mut self.len, 0);
+        Ok(FilledPages {
+            frames: &self.frames[..len],
+            next: 0,
+        })
+    }
+}
+
+impl Drop for FillWindow {
+    fn drop(&mut self) {
+        self.truncate(0);
+    }
+}
+
+/// The frames [`FillWindow::publish`] made safe to map, in page order. Those
+/// not taken go back to the allocator.
+struct FilledPages<'a> {
+    frames: &'a [PhysAddr],
+    next: usize,
+}
+
+impl FilledPages<'_> {
+    fn next(&mut self) -> Option<PhysAddr> {
+        let pa = *self.frames.get(self.next)?;
+        self.next += 1;
+        Some(pa)
+    }
+}
+
+impl Drop for FilledPages<'_> {
+    fn drop(&mut self) {
+        while let Some(pa) = self.next() {
+            release_owned_anon_page(pa);
+        }
+    }
+}
+
+/// The 4 KiB behind `frame`, borrowed for as long as the slot holding it is:
+/// a window owns its frames outright until it publishes them, so the slot's
+/// `&mut` is the frame's.
+fn frame_bytes(frame: &mut PhysAddr) -> Option<&mut [u8]> {
+    let ptr = frame.try_to_virt()?.as_mut_ptr::<u8>();
+    Some(slopos_ostd::util::ptr_buf::anchored_buf_mut(
+        frame,
+        ptr,
+        PAGE_SIZE_USIZE,
+    ))
 }
 
 /// The frames the set holds for `out.len()` pages from `first_page`, null
@@ -997,9 +1125,10 @@ fn install_readahead(map: FileMapRef, page_index: u64, pa: PhysAddr) -> bool {
 }
 
 /// One owned frame, claimed the way a memfd claims its pages, so it outlives
-/// every mapping of it and aliasing it into a user PTE is legal.
-fn claim_page() -> Result<PhysAddr, FileMapError> {
-    let pa = alloc_kernel_page();
+/// every mapping of it and aliasing it into a user PTE is legal. Unscrubbed:
+/// only a [`FillWindow`] holds one before it is overwritten.
+fn claim_unscrubbed_page() -> Result<PhysAddr, FileMapError> {
+    let pa = alloc_kernel_page_unscrubbed();
     if pa.is_null() {
         return Err(FileMapError::NoMemory);
     }
@@ -1029,39 +1158,6 @@ pub fn around_uncovered_write<R>(inode: InodeId, write: impl FnOnce() -> R) -> R
     let result = write();
     seq.fetch_add(1, Ordering::AcqRel);
     result
-}
-
-/// Read the file from page `page` into `staging`, whole pages, zero-filling
-/// past EOF.
-#[inline(never)]
-fn read_range_into(
-    fs: &'static dyn FileSystem,
-    inode: InodeId,
-    page: u64,
-    size: u64,
-    staging: &mut [u8],
-) -> Result<(), FileMapError> {
-    let offset = page * PAGE_SIZE;
-    let want = usize::try_from(size - offset)
-        .unwrap_or(usize::MAX)
-        .min(staging.len());
-    let mut done = 0usize;
-    while done < want {
-        match fs.read(inode, offset + done as u64, &mut staging[done..want]) {
-            Ok(0) => break,
-            Ok(n) => done += n,
-            Err(_) => return Err(FileMapError::Io),
-        }
-    }
-    Ok(())
-}
-
-fn fill_frame(pa: PhysAddr, bytes: &[u8]) -> Result<(), FileMapError> {
-    let virt = pa.try_to_virt().ok_or(FileMapError::Io)?;
-    if !slopos_ostd::mm::hhdm_bytes::write_bytes(virt, 0, bytes) {
-        return Err(FileMapError::Io);
-    }
-    Ok(())
 }
 
 /// Add `pages` mapping references; `false` if the handle is stale.
@@ -1231,8 +1327,8 @@ fn drop_set(entry: &mut PageSet) {
         if pa.is_null() {
             continue;
         }
-        // The set's own MetaSlot ref, claimed in `claim_page`; with no mapping
-        // left this is the last, so the frame returns to the buddy.
+        // The set's own MetaSlot ref, claimed in `claim_unscrubbed_page`; with
+        // no mapping left this is the last, so the frame returns to the buddy.
         release_owned_anon_page(*pa);
     }
     entry.pages = KVec::new();

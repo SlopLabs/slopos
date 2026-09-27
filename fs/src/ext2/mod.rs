@@ -1248,6 +1248,17 @@ impl<'a> Ext2Fs<'a> {
         offset: u64,
         buffer: &mut [u8],
     ) -> Result<usize, Ext2Error> {
+        self.read_file_pages(ino, offset, &mut [buffer])
+    }
+
+    /// [`Self::read_file`] into `pages` back to back, one inode lookup for the
+    /// lot: see [`crate::vfs::FileSystem::read_pages`].
+    pub fn read_file_pages(
+        &mut self,
+        ino: u32,
+        offset: u64,
+        pages: &mut [&mut [u8]],
+    ) -> Result<usize, Ext2Error> {
         if self.journal_inode == Some(ino) {
             return Err(Ext2Error::Immutable);
         }
@@ -1255,7 +1266,7 @@ impl<'a> Ext2Fs<'a> {
         file::read_file(
             &inode,
             offset,
-            buffer,
+            pages,
             &mut *self.cache,
             self.device,
             &self.geom,

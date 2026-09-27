@@ -298,6 +298,34 @@ pub trait FileSystem: Send + Sync {
     /// count read may be short at EOF.
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize>;
 
+    /// [`Self::read`] from `offset` into `pages` back to back, as if they were
+    /// one buffer: each is filled whole before the next is begun. Answers the
+    /// bytes written counting from the start of `pages[0]`, short only at EOF;
+    /// nothing past that count is touched. The page-set fill reads into frames
+    /// the allocator did not scrub and zeroes exactly what lies past the count,
+    /// so a count larger than what was written publishes stale memory.
+    ///
+    /// The default loops [`Self::read`]; a filesystem overrides it to take its
+    /// lock once for the whole window.
+    fn read_pages(&self, inode: InodeId, offset: u64, pages: &mut [&mut [u8]]) -> VfsResult<usize> {
+        let mut done = 0usize;
+        for page in pages.iter_mut() {
+            let mut filled = 0usize;
+            while filled < page.len() {
+                let n = self.read(inode, offset + done as u64, &mut page[filled..])?;
+                if n == 0 {
+                    return Ok(done);
+                }
+                // The count is what the fill trusts; a read over-reporting must
+                // not stretch it past the bytes actually written.
+                let n = n.min(page.len() - filled);
+                filled += n;
+                done += n;
+            }
+        }
+        Ok(done)
+    }
+
     /// `buf` is always kernel memory: the [`FileOps`] layer above stages
     /// user-space I/O, so filesystem code never touches a user address.
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize>;

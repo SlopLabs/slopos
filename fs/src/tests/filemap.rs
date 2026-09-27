@@ -131,6 +131,10 @@ impl FileSystem for TestFs {
         with_ext2(|fs| fs.read_file(inode as u32, offset, buf))
     }
 
+    fn read_pages(&self, inode: InodeId, offset: u64, pages: &mut [&mut [u8]]) -> VfsResult<usize> {
+        with_ext2(|fs| fs.read_file_pages(inode as u32, offset, pages))
+    }
+
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
         with_ext2(|fs| fs.write_file(inode as u32, offset, buf))
     }
@@ -1600,5 +1604,209 @@ fn parked_fault_body(inode: InodeId) -> TestResult {
 
 slopos_testing::stest!(
     name = test_filemap_fault_on_a_parked_set_holds_its_frames,
+    suite = fs
+);
+
+/// [`TestFs`] with a `stat` that promises [`SHORT_FS_PAGES`] pages whatever
+/// the file holds, so a fill's read comes back short of what it asked for —
+/// what a truncate racing the fault looks like from the page set.
+struct ShortFs;
+
+static SHORT_FS: ShortFs = ShortFs;
+
+const SHORT_FS_PAGES: usize = 3;
+
+impl FileSystem for ShortFs {
+    fn name(&self) -> &'static str {
+        "ext2-filemap-short"
+    }
+
+    fn root_inode(&self) -> InodeId {
+        TEST_FS.root_inode()
+    }
+
+    fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
+        TEST_FS.lookup(parent, name)
+    }
+
+    fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
+        TEST_FS.stat(inode)?;
+        Ok(FileStat::new_file(inode, (SHORT_FS_PAGES * PAGE) as u64))
+    }
+
+    fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
+        TEST_FS.read(inode, offset, buf)
+    }
+
+    fn read_pages(&self, inode: InodeId, offset: u64, pages: &mut [&mut [u8]]) -> VfsResult<usize> {
+        TEST_FS.read_pages(inode, offset, pages)
+    }
+
+    fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
+        TEST_FS.write(inode, offset, buf)
+    }
+
+    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
+        TEST_FS.create(parent, name, file_type)
+    }
+
+    fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
+        TEST_FS.unlink(parent, name)
+    }
+
+    fn readdir(
+        &self,
+        inode: InodeId,
+        offset: usize,
+        callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
+    ) -> VfsResult<usize> {
+        TEST_FS.readdir(inode, offset, callback)
+    }
+}
+
+/// Frames the dirtying pass left holding [`STALE_BYTE`]: the pool the fill
+/// should draw its unscrubbed frames from.
+const DIRTIED_FRAMES: usize = 32;
+const STALE_BYTE: u8 = 0xA5;
+
+/// Attempts at getting the fill onto a dirtied frame: a free may land in the
+/// TLB quarantine rather than the per-CPU cache, or the task migrate between
+/// the free and the fault.
+const DIRTY_ATTEMPTS: usize = 16;
+
+/// A fill reads into frames the allocator did not scrub, so everything its
+/// read did not write must be zero before the page is mapped: the tail past
+/// EOF in the last page, and whole pages a short read never reached. The
+/// frames are dirtied and freed first, so the fill takes one that held another
+/// owner's bytes.
+pub fn test_filemap_fill_zeroes_what_the_read_did_not_write() -> TestResult {
+    if !ensure_mount() {
+        return slopos_testing::fail!("could not build the fixture image");
+    }
+    const LEN: usize = PAGE + 100;
+    let inode = match seed_file(b"dirtyfill", LEN, 71) {
+        Ok(i) => i,
+        Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
+    };
+    let verdict = dirty_fill_body(inode, LEN);
+    filemap::forget_inode(&SHORT_FS, inode);
+    drop_file(b"dirtyfill");
+    verdict
+}
+
+#[inline(never)]
+fn dirty_fill_body(inode: InodeId, len: usize) -> TestResult {
+    let Some(expected) = pattern(len, 71) else {
+        return slopos_testing::fail!("pattern alloc failed");
+    };
+    let mut seen = match KVec::<u8>::zeroed(SHORT_FS_PAGES * PAGE) {
+        Ok(v) => v,
+        Err(_) => return slopos_testing::fail!("staging alloc failed"),
+    };
+    for _ in 0..DIRTY_ATTEMPTS {
+        match dirty_fill_attempt(inode, expected.as_slice(), seen.as_mut_slice()) {
+            Ok(true) => return TestResult::Pass,
+            Ok(false) => {}
+            Err(failed) => return failed,
+        }
+    }
+    slopos_testing::fail!(
+        "no fill in {} attempts reused a dirtied frame, so none was checked",
+        DIRTY_ATTEMPTS
+    )
+}
+
+/// One fill after a dirtying pass. `Ok(false)`: the pages were right, but none
+/// of the zeroed ones sat on a dirtied frame, so nothing was proved.
+#[inline(never)]
+fn dirty_fill_attempt(
+    inode: InodeId,
+    expected: &[u8],
+    seen: &mut [u8],
+) -> Result<bool, TestResult> {
+    let len = expected.len();
+    let mut dirtied = [slopos_abi::addr::PhysAddr::NULL; DIRTIED_FRAMES];
+    if !dirty_and_free(&mut dirtied) {
+        return Err(slopos_testing::fail!("could not dirty frames to reuse"));
+    }
+    let map = filemap::reserve_range(
+        &SHORT_FS,
+        inode,
+        0,
+        SHORT_FS_PAGES as u32,
+        false,
+        AccountId::NONE,
+    )
+    .map_err(|e| slopos_testing::fail!("reserve_range refused: {:?}", e))?;
+    let faulted = filemap::fault_page_in_set(map, 0);
+    let mut held = [slopos_abi::addr::PhysAddr::NULL; SHORT_FS_PAGES];
+    filemap::resident_in_set(map, 0, &mut held);
+    let served = filemap::read_through(&SHORT_FS, inode, 0, seen);
+    filemap::release(map, SHORT_FS_PAGES as u32 + u32::from(faulted.is_ok()));
+    filemap::drain_pending();
+    filemap::forget_inode(&SHORT_FS, inode);
+
+    if let Err(e) = faulted {
+        return Err(slopos_testing::fail!("faulting page 0 failed: {:?}", e));
+    }
+    if held.iter().any(|pa| pa.is_null()) {
+        return Err(slopos_testing::fail!(
+            "the fault did not read the promised pages ahead"
+        ));
+    }
+    if served != Some(SHORT_FS_PAGES * PAGE) {
+        return Err(slopos_testing::fail!("the set served {:?} bytes", served));
+    }
+    if &seen[..len] != expected {
+        return Err(slopos_testing::fail!(
+            "the filled pages do not hold the file's bytes"
+        ));
+    }
+    if let Some(at) = seen[len..].iter().position(|b| *b != 0) {
+        return Err(slopos_testing::fail!(
+            "byte {} past what the read wrote is {:#x}, not zero",
+            len + at,
+            seen[len + at]
+        ));
+    }
+    // Only a stale frame under the zeroed pages makes the checks above mean
+    // anything.
+    Ok(held[1..].iter().any(|pa| dirtied.contains(pa)))
+}
+
+/// Take frames, fill them with [`STALE_BYTE`], and free them, most recent
+/// last, so the next allocations on this CPU hand them back.
+#[inline(never)]
+fn dirty_and_free(out: &mut [slopos_abi::addr::PhysAddr]) -> bool {
+    use slopos_mm::hhdm::PhysAddrHhdm;
+    let mut ok = true;
+    for slot in out.iter_mut() {
+        let pa = slopos_mm::page_alloc::alloc_kernel_page();
+        if pa.is_null() {
+            ok = false;
+            break;
+        }
+        *slot = pa;
+        match pa.try_to_virt() {
+            Some(virt) => {
+                slopos_ostd::mm::hhdm_bytes::fill_bytes(virt, 0, PAGE, STALE_BYTE);
+            }
+            None => ok = false,
+        }
+    }
+    // Past the TLB quarantine's window, so the frees land on this CPU's page
+    // cache, which hands the most recent back first, rather than parking
+    // until an epoch nobody here waits for.
+    for _ in 0..2 {
+        let _ = slopos_mm::mmu::quiesce::force_close_epoch_for_test();
+    }
+    for pa in out.iter().rev().filter(|pa| !pa.is_null()) {
+        slopos_mm::page_alloc::free_page_frame(*pa);
+    }
+    ok
+}
+
+slopos_testing::stest!(
+    name = test_filemap_fill_zeroes_what_the_read_did_not_write,
     suite = fs
 );

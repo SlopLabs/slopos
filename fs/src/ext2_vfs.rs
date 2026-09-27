@@ -734,6 +734,10 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         self.with_ext2(|fs| fs.read_file(inode as u32, offset, buf))
     }
 
+    fn read_pages(&self, inode: InodeId, offset: u64, pages: &mut [&mut [u8]]) -> VfsResult<usize> {
+        self.with_ext2(|fs| fs.read_file_pages(inode as u32, offset, pages))
+    }
+
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
         self.with_ext2(|fs| fs.write_file(inode as u32, offset, buf))
     }

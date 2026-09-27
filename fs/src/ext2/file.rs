@@ -15,10 +15,14 @@ const DIRECT_RUN_MAX: u32 = 64;
 /// cache's own misses.
 const DIRECT_RUN_MIN: u32 = 4;
 
+/// Read from `offset` into `segs` back to back, as one buffer: the whole read
+/// under the caller's one hold of the mount, straight from the block cache and
+/// the device into the destination. Answers the bytes written, counted from the
+/// start of `segs[0]`.
 pub fn read_file(
     inode: &Inode,
     offset: u64,
-    buffer: &mut [u8],
+    segs: &mut [&mut [u8]],
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
     geom: &Ext2Geometry,
@@ -29,10 +33,16 @@ pub fn read_file(
         return Err(Ext2Error::NotFile);
     }
     let file_size = inode.size;
-    if offset >= file_size || buffer.is_empty() {
+    let room: usize = segs.iter().map(|s| s.len()).sum();
+    if offset >= file_size || room == 0 {
         return Ok(0);
     }
-    let max_len = cmp::min(buffer.len() as u64, file_size - offset) as usize;
+    let max_len = cmp::min(room as u64, file_size - offset) as usize;
+    let mut out = Scatter {
+        segs,
+        seg: 0,
+        at: 0,
+    };
     let mut read_total = 0usize;
     let mut file_offset = offset;
 
@@ -47,11 +57,16 @@ pub fn read_file(
             let run = direct_run(inode, fb, phys, whole, cache, device, geom, owner)?;
             if run > 0 {
                 let len = run as usize * block_size as usize;
-                let span = &mut buffer[read_total..read_total + len];
-                device
-                    .read_at(phys.to_disk_offset(block_size).raw(), span)
-                    .map_err(Ext2Error::from)?;
-                cache.install_clean_run(phys, span, owner);
+                let at = phys.to_disk_offset(block_size).raw();
+                let span = out.contiguous();
+                if span.len() >= len {
+                    let span = &mut span[..len];
+                    device.read_at(at, span).map_err(Ext2Error::from)?;
+                    cache.install_clean_run(phys, span, owner);
+                    out.advance(len);
+                } else {
+                    read_run_scattered(at, len, phys, &mut out, cache, device, owner)?;
+                }
                 read_total += len;
                 file_offset += len as u64;
                 continue;
@@ -59,16 +74,95 @@ pub fn read_file(
         }
         if phys.is_valid() {
             let blk = cache.get_data(phys, device, owner)?;
-            buffer[read_total..read_total + to_copy]
-                .copy_from_slice(&blk.data()[block_off..block_off + to_copy]);
+            out.put(&blk.data()[block_off..block_off + to_copy]);
         } else {
-            buffer[read_total..read_total + to_copy].fill(0);
+            out.zero(to_copy);
         }
 
         read_total += to_copy;
         file_offset += to_copy as u64;
     }
     Ok(read_total)
+}
+
+/// A run the destination holds in more than one piece — a window of page
+/// frames — still goes to the device as one request: staged, cached, then
+/// scattered, which a request per piece would cost a device round trip each.
+#[inline(never)]
+fn read_run_scattered(
+    at: u64,
+    len: usize,
+    phys: BlockNum,
+    out: &mut Scatter<'_, '_>,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    owner: BlockOwner,
+) -> Result<(), Ext2Error> {
+    let mut staged = slopos_ostd::KVec::<u8>::zeroed(len).map_err(|_| Ext2Error::OutOfMemory)?;
+    device
+        .read_at(at, staged.as_mut_slice())
+        .map_err(Ext2Error::from)?;
+    cache.install_clean_run(phys, staged.as_slice(), owner);
+    out.put(staged.as_slice());
+    Ok(())
+}
+
+/// The destination of a [`read_file`]: `segs` back to back, written in order.
+struct Scatter<'a, 'b> {
+    segs: &'a mut [&'b mut [u8]],
+    seg: usize,
+    at: usize,
+}
+
+impl Scatter<'_, '_> {
+    /// What is left of the current piece, skipping any already full.
+    fn contiguous(&mut self) -> &mut [u8] {
+        while self.seg < self.segs.len() && self.at == self.segs[self.seg].len() {
+            self.seg += 1;
+            self.at = 0;
+        }
+        match self.segs.get_mut(self.seg) {
+            Some(seg) => &mut seg[self.at..],
+            None => &mut [],
+        }
+    }
+
+    fn advance(&mut self, mut n: usize) {
+        while n > 0 {
+            let step = cmp::min(n, self.contiguous().len());
+            if step == 0 {
+                return;
+            }
+            self.at += step;
+            n -= step;
+        }
+    }
+
+    fn put(&mut self, mut src: &[u8]) {
+        while !src.is_empty() {
+            let dst = self.contiguous();
+            let step = cmp::min(src.len(), dst.len());
+            if step == 0 {
+                return;
+            }
+            dst[..step].copy_from_slice(&src[..step]);
+            self.at += step;
+            src = &src[step..];
+        }
+    }
+
+    fn zero(&mut self, mut n: usize) {
+        while n > 0 {
+            let dst = self.contiguous();
+            let step = cmp::min(n, dst.len());
+            if step == 0 {
+                return;
+            }
+            dst[..step].fill(0);
+            self.at += step;
+            n -= step;
+        }
+    }
 }
 
 /// How many whole blocks from `first` a read may take off the device in one
