@@ -1,7 +1,5 @@
-//! `<strings.h>`: case-insensitive comparison and `ffs`.
-//!
-//! The only locale is the POSIX one, whose case mapping is ASCII's, so the
-//! `_l` forms take a locale and read nothing from it.
+//! The only locale is POSIX's, whose case mapping is ASCII's, so the `_l`
+//! forms ignore theirs.
 
 use core::ffi::c_int;
 
@@ -53,7 +51,6 @@ pub unsafe extern "C" fn strncasecmp_l(
     compare(a, b, n)
 }
 
-/// The 1-based index of the least significant set bit, 0 for 0.
 #[unsafe(no_mangle)]
 pub extern "C" fn ffs(i: c_int) -> c_int {
     if i == 0 {

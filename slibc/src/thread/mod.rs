@@ -54,8 +54,6 @@ pub const PTHREAD_NAME_MAX: usize = 16;
 pub const PTHREAD_PROCESS_PRIVATE: i32 = 0;
 pub const PTHREAD_PROCESS_SHARED: i32 = 1;
 
-/// A `*_setpshared` argument as a flag, or `None` for anything but the two
-/// values POSIX names.
 pub(crate) fn pshared_flag(pshared: i32) -> Option<bool> {
     match pshared {
         PTHREAD_PROCESS_PRIVATE => Some(false),
@@ -289,8 +287,6 @@ pub unsafe extern "C" fn pthread_getname_np(
     0
 }
 
-/// A signal to one thread, through `tgkill`: the receiver's `si_code` is
-/// `SI_TKILL`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_kill(thread: pthread_t, sig: c_int) -> c_int {
     if thread == 0 {

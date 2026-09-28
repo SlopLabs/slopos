@@ -1,9 +1,8 @@
-//! `posix_spawn(3)` over the kernel's spawn primitive, which builds the child
-//! from an explicit descriptor list: the parent's table is walked here, the
-//! file actions applied to that copy, and what the child would hold at `exec`
-//! is what it is handed. No address space is duplicated, not even
-//! copy-on-write, which is what makes this cheaper than `fork`; attributes
-//! the primitive cannot express fall back to fork and exec.
+//! `posix_spawn(3)` over the kernel's spawn primitive: the file actions are
+//! applied to a copy of the parent's descriptor table, and the child is
+//! handed the result. No address space is duplicated, which is what makes
+//! this cheaper than `fork`; attributes the primitive cannot express fall
+//! back to fork and exec.
 
 use core::ffi::{c_int, c_short, c_void};
 use core::ptr;
@@ -648,8 +647,6 @@ unsafe fn spawn_direct(
         },
     };
     let argc = count_strings(argv) as u32;
-    // As `execvp`: under a search, a file that is not an executable image is
-    // run as `/bin/sh file args...`.
     let launch =
         |path: *const u8, len: usize| match Sys::spawn_path(path, len, argv, argc, &kernel_attrs) {
             Err(e) if e == ENOEXEC && search => spawn_as_script(path, argv, argc, &kernel_attrs),
@@ -670,17 +667,11 @@ unsafe fn spawn_as_script(
     attrs: &SpawnAttrs,
 ) -> Result<pid_t, Errno> {
     let rest = (argc as usize).saturating_sub(1);
-    let sh_argv = crate::mem::malloc::alloc((rest + 3) * size_of::<*const u8>()) as *mut *const u8;
+    let sh_argv = crate::process::script_argv(path, argv, rest);
     if sh_argv.is_null() {
         return Err(ENOMEM);
     }
     let sh = crate::process::SH_PATH;
-    *sh_argv = sh.as_ptr();
-    *sh_argv.add(1) = path;
-    for i in 0..rest {
-        *sh_argv.add(2 + i) = *argv.add(1 + i);
-    }
-    *sh_argv.add(2 + rest) = ptr::null();
     let result = Sys::spawn_path(sh.as_ptr(), sh.len() - 1, sh_argv, rest as u32 + 2, attrs);
     crate::mem::malloc::dealloc(sh_argv.cast());
     result

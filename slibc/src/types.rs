@@ -70,10 +70,8 @@ pub struct posix_spawn_file_actions_t {
     pub __pad: [c_int; 16],
 }
 
-/// `sigset_t` is 128 bytes — glibc's `_SIGSET_NWORDS`, and what the target's
-/// `libc` declares — while the kernel's mask is a single `u64`. Signals
-/// `1..=64` exist, so word 0 is the whole mask the kernel understands and
-/// signal `n` is its bit `n - 1`; the other fifteen words name nothing.
+/// 128 bytes, as glibc and the target's `libc` declare it, while the kernel's
+/// mask is one `u64`: word 0 is all of it, signal `n` at bit `n - 1`.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct sigset_t {
@@ -91,7 +89,6 @@ impl sigset_t {
         self.__val[0]
     }
 
-    /// True when a bit past signal 64 is set: it names no signal at all.
     #[inline]
     pub fn has_unsupported_bits(&self) -> bool {
         self.__val[1..].iter().any(|&w| w != 0)
@@ -111,11 +108,9 @@ impl Default for sigset_t {
     }
 }
 
-/// One past the highest signal number, glibc's `_NSIG`: signals are
-/// `1..NSIG`, where the kernel's own constant names the highest (64).
+/// One past the highest signal number, glibc's `_NSIG`.
 pub const NSIG: c_int = slopos_abi::signal::NSIG as c_int + 1;
 
-/// `union sigval`: what `sigqueue` sends and a handler reads as `si_value`.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union sigval {

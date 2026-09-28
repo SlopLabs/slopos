@@ -1,16 +1,13 @@
-//! The `<netdb.h>` lookups besides `getaddrinfo`: `getnameinfo`, and the
-//! older `gethostbyname` and `getservbyname` with `h_errno`.
-//!
-//! There is no reverse resolver and no services database, so a host is
-//! named by its numeric form and a service by its port number, as
-//! `getnameinfo` does when a name cannot be found.
+//! `getnameinfo`, `gethostbyname` and `getservbyname`. There is no reverse
+//! resolver and no services database: a host is its numeric form and a
+//! service its port number.
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int};
 
 use slopos_slibc_core::inet;
 
-use super::addr::{AF_INET, AF_INET6, SOCK_STREAM};
+use super::addr::{AF_INET, AF_INET6, SOCK_STREAM, SockAddrIn};
 use super::dns::{
     AddrInfo, EAI_AGAIN, EAI_BADFLAGS, EAI_FAIL, EAI_FAMILY, EAI_MEMORY, EAI_NONAME, freeaddrinfo,
     getaddrinfo,
@@ -36,7 +33,6 @@ pub const NO_DATA: c_int = 4;
 #[thread_local]
 static mut H_ERRNO: c_int = 0;
 
-/// The thread's `h_errno`, which `<netdb.h>` spells as a macro over this.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __h_errno_location() -> *mut c_int {
     &raw mut H_ERRNO
@@ -63,7 +59,6 @@ pub struct Servent {
 
 const NAME_MAX: usize = 256;
 
-/// The one static result POSIX lets `gethostbyname` overwrite on each call.
 struct HostResult {
     entry: Hostent,
     name: [u8; NAME_MAX],
@@ -74,9 +69,8 @@ struct HostResult {
 
 struct HostSlot(UnsafeCell<HostResult>);
 
-// SAFETY: POSIX has `gethostbyname` return one static result that each call
-// overwrites; it is not required to be thread-safe, and callers that share it
-// across threads serialise themselves.
+// SAFETY: POSIX lets `gethostbyname` return one static result that each call
+// overwrites and does not require it to be thread-safe.
 unsafe impl Sync for HostSlot {}
 
 static HOST: HostSlot = HostSlot(UnsafeCell::new(HostResult {
@@ -93,9 +87,6 @@ static HOST: HostSlot = HostSlot(UnsafeCell::new(HostResult {
     aliases: [core::ptr::null_mut(); 1],
 }));
 
-/// An IPv4 address for `name` through `getaddrinfo`, or null with
-/// `h_errno` set.
-///
 /// # Safety
 /// `name` is NUL-terminated.
 #[unsafe(no_mangle)]
@@ -119,12 +110,8 @@ pub unsafe extern "C" fn gethostbyname(name: *const c_char) -> *mut Hostent {
         return core::ptr::null_mut();
     }
     let result = &mut *HOST.0.get();
-    // `sin_addr` sits four bytes into a `sockaddr_in`.
-    core::ptr::copy_nonoverlapping(
-        (*found).ai_addr.cast::<u8>().add(4),
-        result.addr.as_mut_ptr(),
-        4,
-    );
+    let sin = (*found).ai_addr.cast::<SockAddrIn>().read_unaligned();
+    result.addr = sin.sin_addr.to_ne_bytes();
     freeaddrinfo(found);
 
     let len = u_strlen(name.cast()).min(NAME_MAX - 1);
@@ -142,7 +129,7 @@ pub unsafe extern "C" fn gethostbyname(name: *const c_char) -> *mut Hostent {
     &mut result.entry
 }
 
-/// No services database: every name is not found.
+/// There is no services database: every name is not found.
 ///
 /// # Safety
 /// Any arguments; neither is read.
@@ -154,7 +141,6 @@ pub unsafe extern "C" fn getservbyname(
     core::ptr::null_mut()
 }
 
-/// Copies `text` and a terminator into `dst`, or answers `EAI_OVERFLOW`.
 unsafe fn put(text: &[u8], dst: *mut c_char, len: u32) -> Result<(), c_int> {
     if text.len() >= len as usize {
         return Err(EAI_OVERFLOW);

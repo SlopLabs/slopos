@@ -56,8 +56,6 @@ fn test_fork_pipe_echo_tee() -> bool {
     true
 }
 
-/// A process-shared mutex and semaphore in one `MAP_SHARED` region, which the
-/// forked child sees at the same address but through its own address space.
 #[repr(C)]
 struct Rendezvous {
     mutex: pthread_mutex_t,
@@ -81,8 +79,8 @@ fn deadline_after_secs(secs: i64) -> Timespec {
     }
 }
 
-/// Reap `pid` within `secs`, or kill it: a child parked on a futex nobody can
-/// wake would otherwise hang the suite. The wait status, or `None` on timeout.
+/// The wait status, or `None` after killing a child still running at `secs`:
+/// one parked on a futex nobody can wake would otherwise hang the suite.
 fn reap_within(pid: i32, secs: u32) -> Option<i32> {
     let mut status = 0;
     for _ in 0..secs * 100 {
@@ -101,9 +99,8 @@ fn reap_within(pid: i32, secs: u32) -> Option<i32> {
     None
 }
 
-/// The parent holds a `PTHREAD_PROCESS_SHARED` mutex; the child posts a shared
-/// semaphore, then blocks on the mutex in the kernel. Only a futex keyed on
-/// the shared object lets the parent's unlock wake it.
+/// The child blocks in the kernel on a mutex the parent holds; only a futex
+/// keyed on the shared object lets the parent's unlock wake it.
 fn pshared_rendezvous(region: u64, label: &str) -> bool {
     let shared = region as *mut Rendezvous;
     // SAFETY: `region` is a fresh, zero-filled, writable mapping of
@@ -148,8 +145,8 @@ fn pshared_rendezvous(region: u64, label: &str) -> bool {
             let _ = reap_within(pid, 0);
             return false;
         }
-        // Unlocking before the child parks proves nothing: wait until its
-        // lock attempt has marked the mutex contended.
+        // Unlocking before the child parks proves nothing: wait for its lock
+        // attempt to mark the mutex contended (state 2).
         let mut contended = false;
         for _ in 0..200 {
             if (*shared).mutex.state.load(Ordering::SeqCst) == 2 {

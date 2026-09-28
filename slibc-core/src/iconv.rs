@@ -1,8 +1,5 @@
-//! The codesets `iconv` (POSIX `<iconv.h>`) converts between, one character
-//! at a time: every conversion goes through a Unicode scalar value.
-//!
-//! All of them are stateless, so a conversion descriptor carries nothing but
-//! its two codesets and a shift-state reset has nothing to reset.
+//! The codesets `iconv` converts between, one character at a time through a
+//! Unicode scalar value. All are stateless.
 
 use crate::utf8::{self, MbState, Step};
 
@@ -17,9 +14,8 @@ pub enum Charset {
     Utf32Be,
 }
 
-/// The codeset a name spells. Case and the `-`/`_` separators are ignored,
-/// so `utf8`, `UTF-8` and `Utf_8` are one name. `WCHAR_T` is this target's
-/// 32-bit little-endian `wchar_t`.
+/// The codeset `name` spells, ignoring case and `-`/`_`. `WCHAR_T` is this
+/// target's 32-bit little-endian `wchar_t`.
 pub fn charset(name: &[u8]) -> Option<Charset> {
     let mut key = [0u8; 24];
     let mut len = 0;

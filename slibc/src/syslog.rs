@@ -1,7 +1,5 @@
-//! `<syslog.h>`. The logging facility is the kernel log: each message is one
-//! `klog_write`, formatted `<priority>ident[pid]: message` as RFC 3164 lays a
-//! record out. `LOG_CONS` falls back to the console when the kernel refuses
-//! the write, and `LOG_PERROR` copies the message to standard error.
+//! `<syslog.h>` over the kernel log: one `klog_write` per message, laid out
+//! `<priority>ident[pid]: message` as RFC 3164 has it.
 
 use core::ffi::{VaList, c_char, c_int};
 use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
@@ -56,9 +54,6 @@ static OPTIONS: AtomicI32 = AtomicI32::new(0);
 static FACILITY: AtomicI32 = AtomicI32::new(LOG_USER);
 static MASK: AtomicI32 = AtomicI32::new(0xff);
 
-/// `ident` is kept by pointer, as POSIX has `openlog` do: the caller's
-/// string must outlive the log.
-///
 /// # Safety
 /// `ident` is null or a NUL-terminated string that stays valid.
 #[unsafe(no_mangle)]
@@ -77,7 +72,6 @@ pub unsafe extern "C" fn closelog() {
     FACILITY.store(LOG_USER, Ordering::Relaxed);
 }
 
-/// Answers the previous mask; a zero `mask` changes nothing.
 #[unsafe(no_mangle)]
 pub extern "C" fn setlogmask(mask: c_int) -> c_int {
     if mask == 0 {
@@ -129,14 +123,12 @@ impl Line {
     }
 }
 
-/// `format` with every `%m` replaced by the text of `errno` as it was on
-/// entry, which is the one conversion `syslog` adds to `printf`'s.
+/// `format` with each `%m` replaced by `errno`'s text, escaped for `printf`.
 unsafe fn expand_m(format: *const u8, errno: c_int, out: &mut Line) {
     let mut p = format;
     while *p != 0 {
         if *p == b'%' && *p.add(1) == b'm' {
             let text = crate::error::SyscallError::from_errno(errno).as_str();
-            // A `%` in the substituted text would be read as a conversion.
             for &b in text.as_bytes() {
                 out.push(if b == b'%' {
                     b"%%"

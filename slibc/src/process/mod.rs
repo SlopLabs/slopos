@@ -62,8 +62,6 @@ pub unsafe extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 
     execvpe(file, argv, environ as *const *const u8)
 }
 
-/// `execvp` with an explicit environment. A file the system cannot execute
-/// (`ENOEXEC`) runs as `/bin/sh file args...`, as POSIX asks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execvpe(
     file: *const u8,
@@ -88,10 +86,9 @@ pub unsafe extern "C" fn execvpe(
     -1
 }
 
-/// POSIX command search: `file` joined to each `PATH` element in turn (an
-/// empty element is the cwd; an unset `PATH` is [`DEFAULT_PATH`]) until
-/// `attempt` succeeds or fails with anything but a miss. A search that finds
-/// nothing fails `EACCES` if any candidate was not permitted.
+/// POSIX command search: `file` under each `PATH` element (an empty one is
+/// the cwd; an unset `PATH` is [`DEFAULT_PATH`]) until `attempt` succeeds or
+/// fails with anything but a miss; `EACCES` if a miss was not permitted.
 pub(crate) unsafe fn search_path<T>(
     file: *const u8,
     file_len: usize,
@@ -136,7 +133,6 @@ pub(crate) unsafe fn search_path<T>(
     Err(last)
 }
 
-/// `execlp(file, arg0, ..., NULL)`: [`execvp`] over the argument list.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execlp(file: *const u8, arg0: *const u8, mut args: ...) -> i32 {
     let mut argc = 1usize;
@@ -164,8 +160,7 @@ pub unsafe extern "C" fn execlp(file: *const u8, arg0: *const u8, mut args: ...)
     rc
 }
 
-/// `execve`, and on `ENOEXEC` the same file as a script of `/bin/sh`, whose
-/// argument vector is `/bin/sh`, `path`, then `argv[1..]`.
+/// On `ENOEXEC`, runs `path` as a `/bin/sh` script, as POSIX asks.
 unsafe fn exec_or_sh(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32 {
     execve(path, argv, envp);
     if errno::errno_get() != ENOEXEC.raw() {
@@ -177,16 +172,10 @@ unsafe fn exec_or_sh(path: *const u8, argv: *const *const u8, envp: *const *cons
             rest += 1;
         }
     }
-    let sh_argv = crate::mem::malloc::alloc((rest + 3) * size_of::<*const u8>()) as *mut *const u8;
+    let sh_argv = script_argv(path, argv, rest);
     if sh_argv.is_null() {
         return -1;
     }
-    *sh_argv = SH_PATH.as_ptr();
-    *sh_argv.add(1) = path;
-    for i in 0..rest {
-        *sh_argv.add(2 + i) = *argv.add(1 + i);
-    }
-    *sh_argv.add(2 + rest) = ptr::null();
     execve(SH_PATH.as_ptr(), sh_argv, envp);
     let saved = errno::errno_get();
     crate::mem::malloc::dealloc(sh_argv.cast());
@@ -194,10 +183,28 @@ unsafe fn exec_or_sh(path: *const u8, argv: *const *const u8, envp: *const *cons
     -1
 }
 
-/// The shell POSIX has `execvp` hand a file it cannot execute.
+/// `/bin/sh`, `path`, then the `rest` arguments after `argv[0]`, null-ended,
+/// in a `malloc` block; null when out of memory.
+pub(crate) unsafe fn script_argv(
+    path: *const u8,
+    argv: *const *const u8,
+    rest: usize,
+) -> *mut *const u8 {
+    let sh_argv = crate::mem::malloc::alloc((rest + 3) * size_of::<*const u8>()) as *mut *const u8;
+    if sh_argv.is_null() {
+        return sh_argv;
+    }
+    *sh_argv = SH_PATH.as_ptr();
+    *sh_argv.add(1) = path;
+    for i in 0..rest {
+        *sh_argv.add(2 + i) = *argv.add(1 + i);
+    }
+    *sh_argv.add(2 + rest) = ptr::null();
+    sh_argv
+}
+
 pub(crate) const SH_PATH: &[u8] = b"/bin/sh\0";
 
-/// `confstr(_CS_PATH)`: where a search looks when `PATH` is unset.
 pub(crate) const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin\0";
 
 /// Returns the child PID on success, -1 on error.

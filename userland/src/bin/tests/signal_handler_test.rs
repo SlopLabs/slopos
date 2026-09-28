@@ -317,9 +317,8 @@ fn test_signal_preserves_mxcsr() -> bool {
     true
 }
 
-/// `rt_sigaction` must take every signal up to 64, the last realtime one, and
-/// reject a number past it with `EINVAL` rather than indexing off the end of
-/// the 64-entry action table.
+/// `rt_sigaction` takes every signal up to 64 and refuses a number past it
+/// with `EINVAL`.
 ///
 /// Issued as a raw syscall because libc's `sigaction()` never produces one; the
 /// query-only form (`new == 0`, `old != 0`) reaches the table read before any
@@ -367,9 +366,8 @@ extern "C" fn on_queued(sig: i32, info: *mut UserSiginfo, _uc: *mut core::ffi::c
     row[3].store(info.si_value() as u32, Ordering::SeqCst);
 }
 
-/// `sigqueue` round trip: three instances queued while blocked — two of
-/// `SIGRTMIN`, one of `SIGRTMIN+1`, sent in the order +1, 0, 0 — arrive on
-/// unblock lowest signal first and FIFO within one, each with its own
+/// Two `SIGRTMIN` and one `SIGRTMIN+1`, queued while blocked in the order +1,
+/// 0, 0, arrive lowest signal first and FIFO within one, each with its own
 /// `si_value`, `SI_QUEUE` and this process as `si_pid`.
 fn test_sigqueue_delivers_every_instance_in_order() -> bool {
     use slopos_slibc::signal::{__libc_current_sigrtmin, SI_QUEUE};

@@ -35,15 +35,13 @@ pub struct pthread_mutex_t {
     /// and write happens with the lock held.
     pub count: i32,
     pub kind: c_int,
-    /// Nonzero for `PTHREAD_PROCESS_SHARED`: the futex calls name the shared
-    /// object the word lives in rather than this address space.
     pub pshared: c_int,
     pub _pad: c_int,
     pub _reserved: [u64; 2],
 }
 
-/// The mutex kind, with [`MUTEXATTR_PSHARED`] folded in: the target's `libc`
-/// gives the attribute four bytes.
+/// The target's `libc` gives the attribute four bytes, so
+/// [`MUTEXATTR_PSHARED`] rides in `kind`.
 #[repr(C)]
 pub struct pthread_mutexattr_t {
     pub kind: c_int,

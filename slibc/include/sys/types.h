@@ -38,8 +38,7 @@
 #  endif
 #endif
 
-/* The BSD spellings every Unix C library still has: OpenSSH's code, and
- * libssh2's copy of it, declares with nothing else. */
+/* BSD spellings that OpenSSH and libssh2 declare with nothing else. */
 typedef unsigned char u_char;
 typedef unsigned short u_short;
 typedef unsigned int u_int;

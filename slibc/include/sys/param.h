@@ -10,8 +10,7 @@
 #include <sys/types.h>
 #include <limits.h>
 
-/* Not POSIX, but every Unix C library has it and OpenSSL includes it
- * unconditionally. */
+/* Not POSIX, but every Unix C library has it and OpenSSL includes it. */
 #define MAXPATHLEN PATH_MAX
 #define MAXHOSTNAMELEN 64
 #define NBBY 8

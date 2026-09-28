@@ -37,8 +37,7 @@ fn test_sigchld_inband() -> bool {
     let ready =
         matches!(fs::poll(&mut pfds, 5000), Ok(n) if n >= 1) && (pfds[0].revents & POLLIN) != 0;
 
-    // Linux's `signalfd_siginfo`: signo at 0, code at 8, pid at 12, status
-    // at 40, little-endian.
+    // Linux's `signalfd_siginfo` offsets, little-endian.
     let mut buf = [0u8; SignalfdSiginfo::SERIALIZED_LEN];
     let full = matches!(fs::read_slice(sfd, &mut buf), Ok(n) if n == buf.len());
     let word = |at: usize| u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]);

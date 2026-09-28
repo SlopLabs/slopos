@@ -1,5 +1,3 @@
-//! `inet_pton` and `inet_ntop`, over `slopos_slibc_core::inet`.
-
 use core::ffi::{c_char, c_int, c_void};
 
 use slopos_slibc_core::inet;
@@ -11,9 +9,6 @@ use crate::string::u_strlen;
 pub const INET_ADDRSTRLEN: c_int = 16;
 pub const INET6_ADDRSTRLEN: c_int = 46;
 
-/// 1 with the address in `dst`, 0 for text that is not one, -1 with
-/// `EAFNOSUPPORT` for a family other than `AF_INET` or `AF_INET6`.
-///
 /// # Safety
 /// `src` is NUL-terminated; `dst` holds an `in_addr` or an `in6_addr`.
 #[unsafe(no_mangle)]
@@ -41,8 +36,6 @@ pub unsafe extern "C" fn inet_pton(af: c_int, src: *const c_char, dst: *mut c_vo
     }
 }
 
-/// `dst`, or null with `EAFNOSUPPORT` or `ENOSPC`.
-///
 /// # Safety
 /// `src` holds an `in_addr` or an `in6_addr`; `dst` has `size` bytes.
 #[unsafe(no_mangle)]

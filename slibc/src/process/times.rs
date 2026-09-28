@@ -1,10 +1,6 @@
-//! `times(3)` and the child accounting behind its `tms_cutime`/`tms_cstime`.
-//!
-//! The kernel reports a process's CPU time as one clock
-//! (`CLOCK_PROCESS_CPUTIME_ID`) with no user/system split, so all of it is
-//! `tms_utime`. A child's time is what `wait4` hands back for it; every wait
-//! in this library goes through [`reap`], which adds a terminated child's to
-//! the process's total whether or not the caller asked for its usage.
+//! `times(3)`. The kernel's process CPU clock has no user/system split, so
+//! all of it is `tms_utime`. Every wait goes through [`reap`], which adds a
+//! terminated child's time to `tms_cutime`/`tms_cstime`.
 
 use core::ffi::{c_int, c_long};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -18,7 +14,7 @@ use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, Timespec};
 static CHILD_USER_US: AtomicU64 = AtomicU64::new(0);
 static CHILD_SYSTEM_US: AtomicU64 = AtomicU64::new(0);
 
-/// `sysconf(_SC_CLK_TCK)`: the unit of every `clock_t` below.
+/// `sysconf(_SC_CLK_TCK)`.
 const TICKS_PER_SEC: u64 = 1000;
 
 fn micros(tv: &timeval) -> u64 {
@@ -27,7 +23,7 @@ fn micros(tv: &timeval) -> u64 {
         .saturating_add(tv.tv_usec.max(0) as u64)
 }
 
-/// `wait4(2)`, recording the CPU time of a child that terminated.
+/// `wait4(2)`, adding a terminated child's CPU time to the child totals.
 ///
 /// # Safety
 /// `status` and `usage` are null or writable.
@@ -75,7 +71,7 @@ pub struct Tms {
     pub tms_cstime: c_long,
 }
 
-/// Fills `buf` and answers the ticks since an arbitrary fixed point (boot).
+/// Measures elapsed ticks from boot.
 ///
 /// # Safety
 /// `buf` is writable.

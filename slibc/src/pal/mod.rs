@@ -9,10 +9,8 @@ use slopos_abi::signal::{UserSigAltStack, UserSiginfo};
 use slopos_abi::spawn::SpawnAttrs;
 use slopos_abi::syscall::{Timespec, UserUtsname};
 
-/// Which futex a wait or wake names: this address space's word
-/// (`FUTEX_PRIVATE_FLAG`), or, for an object made `PTHREAD_PROCESS_SHARED`,
-/// the word of the shared object it lives in, which every process mapping
-/// that object meets.
+/// What keys a futex: this address space's word, or, for a
+/// `PTHREAD_PROCESS_SHARED` object, the shared object every mapping meets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FutexScope {
     Private,
@@ -179,8 +177,7 @@ pub trait Pal {
         sigsetsize: usize,
     ) -> Result<(), Errno>;
     fn rt_sigpending(set: *mut u64, sigsetsize: usize) -> Result<(), Errno>;
-    /// Take a pending signal of `set`, waiting up to `timeout` (forever when
-    /// null); the signal number.
+    /// A null `timeout` waits forever.
     fn rt_sigtimedwait(
         set: *const u64,
         info: *mut UserSiginfo,
@@ -190,7 +187,6 @@ pub trait Pal {
     fn kill(pid: i32, sig: i32) -> Result<(), Errno>;
     /// Signal thread `tid` of thread group `tgid`.
     fn tgkill(tgid: i32, tid: i32, sig: i32) -> Result<(), Errno>;
-    /// Queue `sig` on process `pid` with `info`'s code and value.
     fn rt_sigqueueinfo(pid: i32, sig: i32, info: *const UserSiginfo) -> Result<(), Errno>;
     fn rt_sigreturn() -> !;
     fn sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack) -> Result<(), Errno>;
@@ -309,6 +305,5 @@ pub trait Pal {
     /// completed. `Err` means the kernel was not booted with `tests=on`.
     fn run_userland_tests() -> Result<(), Errno>;
 
-    /// One line to the kernel log, which is where `syslog` writes.
     fn klog_write(buf: &[u8]) -> Result<usize, Errno>;
 }

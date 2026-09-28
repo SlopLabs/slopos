@@ -20,7 +20,6 @@ pub struct pthread_cond_t {
     /// set by `pthread_condattr_setclock`.
     pub clock: c_int,
     pub mutex: *mut pthread_mutex_t,
-    /// Nonzero for `PTHREAD_PROCESS_SHARED`, as `pthread_mutex_t`'s.
     pub pshared: c_int,
     pub _pad: c_int,
     pub _reserved: [u64; 3],
@@ -29,8 +28,8 @@ pub struct pthread_cond_t {
 unsafe impl Send for pthread_cond_t {}
 unsafe impl Sync for pthread_cond_t {}
 
-/// The clock, with [`CONDATTR_PSHARED`] folded in: the target's `libc` gives
-/// the attribute four bytes.
+/// The target's `libc` gives the attribute four bytes, so
+/// [`CONDATTR_PSHARED`] rides in `clock`.
 #[repr(C)]
 pub struct pthread_condattr_t {
     pub clock: c_int,

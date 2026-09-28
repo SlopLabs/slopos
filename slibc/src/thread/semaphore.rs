@@ -7,9 +7,8 @@ use crate::errno::{EAGAIN, EINTR, EINVAL, EOVERFLOW, ETIMEDOUT, Errno, errno_set
 use crate::pal::{FutexScope, Pal, Sys};
 use crate::time::Timespec;
 
-/// The value, then how many threads sleep on it, as in musl, then whether it
-/// is process-shared; the rest pads to the 32 bytes the target's `libc`
-/// declares.
+/// musl's value and sleeper count, then the process-shared flag, padded to
+/// the 32 bytes the target's `libc` declares.
 #[repr(C)]
 pub struct sem_t {
     value: AtomicU32,
@@ -47,8 +46,6 @@ fn try_take(sem: &sem_t) -> bool {
     false
 }
 
-/// A nonzero `pshared` makes every wait and post name the shared object the
-/// semaphore lives in, so processes mapping that object share it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_init(sem: *mut sem_t, pshared: c_int, value: c_uint) -> c_int {
     if sem.is_null() || value > SEM_VALUE_MAX {

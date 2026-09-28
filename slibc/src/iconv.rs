@@ -1,8 +1,5 @@
-//! `<iconv.h>`, over `slopos_slibc_core::iconv`.
-//!
-//! Every codeset is stateless, so a descriptor is its two codesets and
-//! nothing else, and it is spelled in the pointer value itself: `iconv_open`
-//! allocates nothing and `iconv_close` has nothing to free.
+//! `<iconv.h>`. Every codeset is stateless, so a descriptor is just its two
+//! codesets, spelled in the pointer value: `iconv_open` allocates nothing.
 
 use core::ffi::{c_char, c_int, c_void};
 
@@ -37,8 +34,6 @@ fn descriptor(cd: *mut c_void) -> Option<(Charset, Charset)> {
     Some((*CHARSETS.get(from - 1)?, *CHARSETS.get(to - 1)?))
 }
 
-/// `(iconv_t)-1` with `EINVAL` for a codeset this library cannot convert.
-///
 /// # Safety
 /// Both names are NUL-terminated.
 #[unsafe(no_mangle)]
@@ -66,9 +61,8 @@ pub extern "C" fn iconv_close(cd: *mut c_void) -> c_int {
     0
 }
 
-/// Converts as much of the input as fits. A character the target codeset
-/// has no identical character for becomes `?` and is counted in the return
-/// value, POSIX's "implementation-defined conversion".
+/// A character the target codeset lacks becomes `?` and is counted in the
+/// return value, POSIX's "implementation-defined conversion".
 ///
 /// # Safety
 /// The four pointers describe live buffers as POSIX has them.
@@ -84,7 +78,7 @@ pub unsafe extern "C" fn iconv(
         errno_set(EBADF.raw());
         return usize::MAX;
     };
-    // No shift state to return to the initial one.
+    // A null input asks for a shift-state reset, and there is no shift state.
     if inbuf.is_null() || (*inbuf).is_null() {
         return 0;
     }

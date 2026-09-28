@@ -971,24 +971,21 @@ pub unsafe extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c
     }
 }
 
-/// `mlock(2)`. Nothing here is ever paged out — there is no swap, and a
-/// page stays in its frame from first touch until it is unmapped — so a
-/// mapped range is already as resident as a lock would make it. What is left
-/// is POSIX's `ENOMEM` for a range that is not wholly mapped, which the
-/// kernel's `msync` answers without writing anything back for anonymous
-/// memory. The address is rounded down to its page, as POSIX allows.
+/// With no swap every mapped page is already resident, so only POSIX's
+/// `ENOMEM` for a range that is not wholly mapped remains.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mlock(addr: *const c_void, len: usize) -> c_int {
-    check_locked_range(addr, len)
+    require_mapped(addr, len)
 }
 
-/// `munlock(2)`: the same range check, and nothing to release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn munlock(addr: *const c_void, len: usize) -> c_int {
-    check_locked_range(addr, len)
+    require_mapped(addr, len)
 }
 
-unsafe fn check_locked_range(addr: *const c_void, len: usize) -> c_int {
+/// `msync(MS_ASYNC)` checks the range and writes nothing back for anonymous
+/// memory. The address is rounded down to its page, as POSIX allows.
+unsafe fn require_mapped(addr: *const c_void, len: usize) -> c_int {
     let page = slopos_abi::PAGE_SIZE as usize;
     let offset = addr as usize & (page - 1);
     let Some(span) = len.checked_add(offset) else {

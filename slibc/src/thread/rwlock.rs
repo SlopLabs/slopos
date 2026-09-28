@@ -34,7 +34,6 @@ pub struct pthread_rwlock_t {
     /// one word, the same sequence changes the word, so the compare fails and
     /// the reader retries instead of sleeping.
     pub state: AtomicI32,
-    /// Nonzero for `PTHREAD_PROCESS_SHARED`, as `pthread_mutex_t`'s.
     pub pshared: u32,
     pub _reserved: [u64; 6],
 }

@@ -50,12 +50,12 @@ pub struct HeaderSpec {
     pub raw_unguarded: &'static [&'static str],
 }
 
-/// The items the contract reaches through `crate::`, and the ones only slibc's
-/// own entry points use, as `name: <rust type>` for a typedef and
+/// The items the contract reaches through `crate::`, plus those only slibc's
+/// own entry points use: `name: <rust type>` for a typedef,
 /// `struct name { field: ty, ... }` for a struct.
 ///
-/// All are upstream `libc`'s shared `src/unix/mod.rs`
-/// definitions for x86-64, unmodified: the SlopOS patch adds a per-OS module arm and a
+/// All are upstream `libc`'s shared `src/unix/mod.rs` definitions for x86-64,
+/// unmodified: the SlopOS patch adds a per-OS module arm and a
 /// `#[link]` arm and touches no type or struct definition, so there is no
 /// creation hunk to read them out of. `size_t`/`ssize_t` are the crate
 /// prelude's. `build.rs` pins the three that `slopos-abi` also defines with a
@@ -289,8 +289,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#  endif",
             "#endif",
             "",
-            "/* The BSD spellings every Unix C library still has: OpenSSH's code, and",
-            " * libssh2's copy of it, declares with nothing else. */",
+            "/* BSD spellings that OpenSSH and libssh2 declare with nothing else. */",
             "typedef unsigned char u_char;",
             "typedef unsigned short u_short;",
             "typedef unsigned int u_int;",
@@ -1441,10 +1440,8 @@ pub const HEADERS: &[HeaderSpec] = &[
         // it tests `CLOCK_MONOTONIC` having included only this and
         // `<unistd.h>`, and takes a `#error` when neither defines it.
         //
-        // `<sys/select.h>` too, which POSIX lets this header make visible and
-        // every Unix C library does: programs take `select` and `fd_set` from
-        // here. `timeval` lives there, which POSIX also has define it, so the
-        // include finds it whichever of the two a program names first.
+        // `<sys/select.h>` too, as every Unix C library makes it visible here:
+        // programs take `select`, `fd_set` and `timeval` from this header.
         includes: &["sys/types.h", "time.h", "sys/select.h"],
         types: &[],
         consts: &[],
@@ -1512,9 +1509,8 @@ pub const HEADERS: &[HeaderSpec] = &[
     HeaderSpec {
         path: "sys/socket.h",
         summary: "sockets",
-        // `<fcntl.h>` because `SOCK_CLOEXEC` and `SOCK_NONBLOCK` are spelled
-        // as `O_CLOEXEC` and `O_NONBLOCK`, which must be defined wherever the
-        // two are used.
+        // `<fcntl.h>` for the `O_CLOEXEC`/`O_NONBLOCK` that `SOCK_CLOEXEC` and
+        // `SOCK_NONBLOCK` are spelled as.
         includes: &["sys/types.h", "sys/uio.h", "fcntl.h"],
         types: &[
             "linger",
@@ -1605,9 +1601,8 @@ pub const HEADERS: &[HeaderSpec] = &[
         functions: &[],
         extra: &[],
         variables: &[],
-        // POSIX's `IN6_IS_ADDR_*` tests, over the address's bytes (RFC 4291
-        // section 2). Macros with no contract item behind them: a
-        // `const fn` in the `libc` crate would be a different thing to call.
+        // POSIX's `IN6_IS_ADDR_*` tests (RFC 4291 section 2): C macros, as no
+        // contract item stands behind them.
         raw: &[
             "#define __SLIBC_IN6_ZERO8(a) (((a)->s6_addr[0] | (a)->s6_addr[1] | (a)->s6_addr[2] | (a)->s6_addr[3] | (a)->s6_addr[4] | (a)->s6_addr[5] | (a)->s6_addr[6] | (a)->s6_addr[7]) == 0)",
             "#define IN6_IS_ADDR_UNSPECIFIED(a) (__SLIBC_IN6_ZERO8(a) && (((a)->s6_addr[8] | (a)->s6_addr[9] | (a)->s6_addr[10] | (a)->s6_addr[11] | (a)->s6_addr[12] | (a)->s6_addr[13] | (a)->s6_addr[14] | (a)->s6_addr[15]) == 0))",
@@ -1724,8 +1719,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[
-            "/* Not POSIX, but every Unix C library has it and OpenSSL includes it",
-            " * unconditionally. */",
+            "/* Not POSIX, but every Unix C library has it and OpenSSL includes it. */",
             "#define MAXPATHLEN PATH_MAX",
             "#define MAXHOSTNAMELEN 64",
             "#define NBBY 8",

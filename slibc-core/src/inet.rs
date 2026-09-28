@@ -1,9 +1,8 @@
-//! Internet address text forms, for `inet_pton` and `inet_ntop` (POSIX
-//! `<arpa/inet.h>`): dotted decimal for IPv4, RFC 4291 section 2.2 for
-//! reading IPv6 and RFC 5952 section 4 for writing it.
+//! Address text for `inet_pton`/`inet_ntop`: RFC 4291 section 2.2 to read
+//! IPv6, RFC 5952 section 4 to write it.
 
-/// `ddd.ddd.ddd.ddd`: exactly four decimal parts, each 0..=255 and at most
-/// three digits. Unlike `inet_addr`, no shorter forms and no octal or hex.
+/// Exactly four decimal parts of at most three digits, each 0..=255: unlike
+/// `inet_addr`, no shorter forms and no octal or hex.
 pub fn parse_ipv4(text: &[u8]) -> Option<[u8; 4]> {
     let mut out = [0u8; 4];
     let mut parts = text.split(|&b| b == b'.');
@@ -23,9 +22,8 @@ pub fn parse_ipv4(text: &[u8]) -> Option<[u8; 4]> {
     Some(out)
 }
 
-/// Eight groups of one to four hex digits, one `::` standing for one or more
-/// zero groups, and optionally a dotted-decimal IPv4 address as the last 32
-/// bits.
+/// Eight groups of one to four hex digits, one `::` for one or more zero
+/// groups, optionally ending in a dotted-decimal IPv4 address.
 pub fn parse_ipv6(text: &[u8]) -> Option<[u8; 16]> {
     let mut groups = [0u16; 8];
     let mut count = 0usize;
@@ -49,8 +47,6 @@ pub fn parse_ipv6(text: &[u8]) -> Option<[u8; 16]> {
         }
         let digits = &text[start..i];
         if i < text.len() && text[i] == b'.' {
-            // An embedded IPv4 address is the last thing in the text and
-            // fills two groups.
             if count > 6 {
                 return None;
             }
@@ -166,8 +162,7 @@ impl Cursor<'_> {
     }
 }
 
-/// Writes `addr` as dotted decimal into `out`; the length written, or `None`
-/// if `out` is too small.
+/// Dotted decimal into `out`; the length, or `None` if it does not fit.
 pub fn format_ipv4(addr: [u8; 4], out: &mut [u8]) -> Option<usize> {
     let mut cursor = Cursor { out, len: 0 };
     cursor.ipv4(addr)?;

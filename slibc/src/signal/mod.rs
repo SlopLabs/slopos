@@ -6,12 +6,9 @@
 //! the translation between them, and the kernel structs are not changed to
 //! suit libc.
 //!
-//! The kernel accepts signals `1..=64`, bit `N-1` of its mask; `32..=64` are
-//! realtime. So the whole of a `sigset_t` that can mean anything lives in
-//! word 0, and libc refuses exactly what the kernel refuses: a signal
-//! *number* outside that range is `EINVAL`, and a *mask* word above it is
-//! dropped, because a set bit for a signal that cannot be raised has nothing
-//! to block.
+//! The kernel takes signals `1..=64` as bit `N-1` of its mask, so word 0 of a
+//! `sigset_t` is all that can mean anything: a signal *number* outside that
+//! range is `EINVAL`, and higher mask words are dropped, as they block nothing.
 
 pub mod tests;
 pub mod wait;
@@ -84,7 +81,6 @@ pub type SigHandler = unsafe extern "C" fn(i32);
 /// The kernel's `sigsetsize` argument: it accepts 8 and nothing else.
 const SIGSET_SIZE: usize = mem::size_of::<u64>();
 
-/// Highest signal number the kernel accepts; `NSIG` is one past it.
 const SIGNAL_MAX: c_int = crate::types::NSIG - 1;
 
 #[inline]
@@ -124,10 +120,10 @@ pub unsafe extern "C" fn signal(signum: c_int, handler: usize) -> usize {
 
 /// Examine or change a signal action.
 ///
-/// The libc-declared `sa_mask` is 128 bytes and the kernel's is 8; only bits
-/// for signals `1..=64` survive the narrowing, which is every signal that
-/// exists. `sa_restorer` is injected when the caller left it null and the
-/// handler is catchable — without one the kernel refuses the install.
+/// The libc-declared `sa_mask` is 128 bytes and the kernel's is 8, which hold
+/// every signal that exists. `sa_restorer` is injected when the caller left it
+/// null and the handler is catchable — without one the kernel refuses the
+/// install.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(
     signum: c_int,
@@ -212,8 +208,7 @@ pub unsafe extern "C" fn sigemptyset(set: *mut sigset_t) -> c_int {
     0
 }
 
-/// Fills the bits for the signals that exist, and no others: a bit past
-/// signal 64 names nothing.
+/// Only the 64 signals that exist: a bit past them names nothing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigfillset(set: *mut sigset_t) -> c_int {
     if set.is_null() {
@@ -323,8 +318,6 @@ unsafe fn mask_op(how: c_int, set: *const sigset_t, oldset: *mut sigset_t) -> c_
     }
 }
 
-/// The signals pending for the caller, its own and its process's, that it
-/// blocks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigpending(set: *mut sigset_t) -> c_int {
     if set.is_null() {
@@ -410,10 +403,6 @@ pub unsafe extern "C" fn killpg(pgrp: i32, sig: c_int) -> c_int {
     kill(if pgrp == 0 { 0 } else { -pgrp }, sig)
 }
 
-/// `sigqueue(3)`: send `sig` to process `pid` carrying `value`, which the
-/// receiver reads as `si_value` beside `si_code == SI_QUEUE`. A realtime
-/// signal queues one instance per call; past the kernel's queue limit this is
-/// `EAGAIN`. The kernel fills in `si_pid` and `si_uid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigqueue(pid: i32, sig: c_int, value: sigval) -> c_int {
     let info = UserSiginfo::from_info(sig, &SigInfo::sent(SI_QUEUE, 0, 0, value.sival_ptr as u64));
@@ -426,23 +415,20 @@ pub unsafe extern "C" fn sigqueue(pid: i32, sig: c_int, value: sigval) -> c_int 
     }
 }
 
-/// The lowest realtime signal an application may use: `SIGRTMIN` expands to
-/// this call, as in glibc. slibc takes none of the kernel's realtime signals
-/// for itself, so it is the kernel's `SIGRTMIN`, 32.
+/// `SIGRTMIN` expands to this call, as in glibc; slibc reserves none of the
+/// kernel's realtime signals, so it is the kernel's `SIGRTMIN`.
 #[unsafe(no_mangle)]
 pub extern "C" fn __libc_current_sigrtmin() -> c_int {
     slopos_abi::signal::SIGRTMIN as c_int
 }
 
-/// The highest realtime signal, `SIGRTMAX`: 64.
 #[unsafe(no_mangle)]
 pub extern "C" fn __libc_current_sigrtmax() -> c_int {
     slopos_abi::signal::SIGRTMAX as c_int
 }
 
-/// POSIX: in a threaded process `raise` is `pthread_kill(pthread_self())`, so
-/// the handler runs in the caller before `raise` returns. A `kill` of its own
-/// pid would let whichever thread got there first take it.
+/// Signals the calling thread, as POSIX asks, so the handler runs before
+/// `raise` returns; a `kill` of the pid could be taken by any thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn raise(sig: c_int) -> c_int {
     match Sys::tgkill(Sys::getpid(), Sys::gettid(), sig) {

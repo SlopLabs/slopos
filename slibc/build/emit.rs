@@ -234,8 +234,7 @@ impl World<'_> {
                         ));
                     }
                 }
-                // A Rust function of no arguments is a C name, not a call:
-                // `SIGRTMIN` is spelled without parentheses.
+                // Object-like, as C spells `SIGRTMIN`.
                 if params.is_empty() {
                     let _ = writeln!(out, "#define {name} {body}");
                 } else {
@@ -624,13 +623,11 @@ const HANDLER_SLOT: &str = "    union {
     };
 ";
 
-/// `siginfo_t`'s payload is 29 opaque ints in the contract, which is the
-/// `libc` crate's shape; the Rust side reads it through accessor methods. C
-/// names the fields, so the header overlays them on the same bytes, at Linux's
-/// offsets: one int of padding at 12, then the union at 16 — eight-aligned,
-/// because a queued signal's `si_value` is a `union sigval` at 24. Tagged
-/// structs declared outside the union, and macros for the member names as
-/// glibc has them, keep this standard C++ as well as C.
+/// `siginfo_t`'s payload is 29 opaque ints in the contract, the `libc` crate's
+/// shape. The header overlays C's field names at Linux's offsets: one int of
+/// padding at 12, the union at 16, eight-aligned for the `union sigval`
+/// `si_value` at 24. Tagged structs outside the union and glibc's member-name
+/// macros keep this valid C++ as well as C.
 const SIGINFO_KILL: &str = "struct __slibc_siginfo_kill {
     pid_t __si_pid;
     uid_t __si_uid;

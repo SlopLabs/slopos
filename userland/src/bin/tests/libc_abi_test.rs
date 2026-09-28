@@ -671,8 +671,6 @@ fn sigset_narrows_signal_n_to_bit_n_minus_one() -> bool {
         return false;
     }
 
-    // Signal 0 is `kill`'s existence probe and never a set member; `NSIG` is
-    // one past the last signal, glibc's convention.
     let nsig = slopos_slibc::types::NSIG;
     if unsafe { signal::sigaddset(&mut set, 0) } != -1
         || unsafe { signal::sigaddset(&mut set, nsig) } != -1
@@ -691,8 +689,6 @@ fn sigset_narrows_signal_n_to_bit_n_minus_one() -> bool {
         return false;
     }
 
-    // `sigfillset` fills only what can be raised: a bit past signal 64 is a
-    // promise to block something that cannot arrive.
     if unsafe { signal::sigfillset(&mut set) } != 0
         || unsafe { signal::sigismember(&set, SIGUSR2) } != 1
         || set.has_unsupported_bits()

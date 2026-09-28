@@ -1725,7 +1725,6 @@ static void on_queued(int sig, siginfo_t *info, void *uc) {
 _Static_assert(offsetof(siginfo_t, si_value) == 24, "si_value is not at Linux's offset");
 _Static_assert(sizeof(siginfo_t) == 128, "siginfo_t is not Linux's 128 bytes");
 
-// A `SA_SIGINFO` handler reads the value `sigqueue` sent, through both arms.
 static int queued_value(void) {
     struct sigaction act;
     memset(&act, 0, sizeof act);
@@ -1799,8 +1798,6 @@ static int semaphores(void) {
     return sem_destroy(&sem) == 0 ? 1 : fail("sem_destroy failed");
 }
 
-// What curl, OpenSSL and libgit2 need from the C library beyond what rustc's
-// own dependencies did.
 static int case_and_bits(void) {
     if (strcasecmp("HeLLo", "hello") != 0 || strcasecmp("apple", "BANANA") >= 0 ||
         strcasecmp("Zed", "abc") <= 0 || strncasecmp("CONTENT-type", "content-TYPO", 10) != 0 ||
@@ -1870,8 +1867,6 @@ static void *interrupt_later(void *arg) {
     return NULL;
 }
 
-// `sigwait` takes a signal that is already pending, and parks for one sent
-// after it began, as a thread that owns the process's signals does.
 static int waited_signal(void) {
     sigset_t set, old, pending;
     sigemptyset(&set);
@@ -1951,7 +1946,6 @@ static int waited_signal(void) {
     return interrupted ? 1 : fail("a caught signal did not interrupt sigtimedwait with EINTR");
 }
 
-// The parent's child totals grow only by what a reaped child burned.
 static int child_times(void) {
     struct tms before, after;
     if (times(&before) == (clock_t)-1) {
@@ -1981,7 +1975,6 @@ static int child_times(void) {
     return 1;
 }
 
-// LOG_PERROR copies the message, without its priority, to stderr.
 static int logging(void) {
     int pipefd[2], saved = dup(2);
     if (saved < 0 || pipe(pipefd) != 0 || dup2(pipefd[1], 2) != 2) {

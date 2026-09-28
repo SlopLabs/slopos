@@ -1,7 +1,3 @@
-//! `sigwait(3)`, `sigwaitinfo(2)` and `sigtimedwait(2)`, all over
-//! `rt_sigtimedwait`, which takes a pending signal of the set off the caller's
-//! pending signals, its own or its process's, and waits for one when none is.
-
 use core::ffi::c_int;
 use core::ptr;
 
@@ -12,9 +8,6 @@ use crate::time::Timespec;
 use crate::types::sigset_t;
 use slopos_abi::signal::UserSiginfo;
 
-/// Returns the signal number, or -1 with `errno` set: `EAGAIN` once `timeout`
-/// passes, `EINTR` when a caught signal outside `set` is delivered first.
-///
 /// # Safety
 /// `set` points to a `sigset_t`; `info`, when not null, to a writable
 /// `siginfo_t`; `timeout`, when not null, to a `timespec`.
@@ -32,8 +25,6 @@ pub unsafe extern "C" fn sigtimedwait(
     Sys::rt_sigtimedwait(&raw const mask, info, timeout, SIGSET_SIZE).unwrap_or(-1)
 }
 
-/// [`sigtimedwait`] with no timeout.
-///
 /// # Safety
 /// As [`sigtimedwait`].
 #[unsafe(no_mangle)]
@@ -41,8 +32,6 @@ pub unsafe extern "C" fn sigwaitinfo(set: *const sigset_t, info: *mut UserSiginf
     sigtimedwait(set, info, ptr::null())
 }
 
-/// Returns 0 with the signal in `*sig`, or an error number; never `EINTR`.
-///
 /// # Safety
 /// `set` points to a `sigset_t`, `sig` to writable storage.
 #[unsafe(no_mangle)]
