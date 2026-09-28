@@ -43,8 +43,9 @@
 # charged its sizer's resident pages at ftruncate rather than when mapped: the
 # OOM tests size 64-page memfds per process, and one row holds a 2048-page
 # memfd. The kernelmeta row after the kernel tests measured 6230 and 6192 in
-# two captures once the OOM and signal tests spawned more processes, and the
-# cap is the larger. The pages row
+# two captures once the OOM and signal tests spawned more processes, then
+# 6290, 6229 and 6283 in three once slibc gained the functions git needs, and
+# the cap is the largest. The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
 # the row counts twice: captures measured 538 714, 535 332, 538 832, 539 004
@@ -74,7 +75,7 @@ post-kernel-tests	commitpages	2560
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	6230
+post-kernel-tests	kernelmeta	6290
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	539006
 post-kernel-tests	pinnedbytes	4
