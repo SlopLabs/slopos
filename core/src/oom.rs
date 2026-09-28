@@ -1,5 +1,6 @@
-//! The task side of the OOM killer: who is init, who is already dying, and
-//! how a victim dies. Which process is the victim is `slopos_mm::oom`'s call.
+//! The task side of the OOM killer: who is init, who is already dying, who is
+//! shielded from the writer, and how a victim dies. Which process is the
+//! victim is `slopos_mm::oom`'s call.
 //!
 //! Every walk here is heapless: the killer runs when the heap is dry, and a
 //! walk that could not pay for its snapshot would see no task at all.
@@ -10,10 +11,13 @@ use slopos_abi::signal::SigInfo;
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_mm::oom::{Killed, OomOps, Standing};
 use slopos_ostd::process::Process;
+use slopos_sched::scheduler::current_task_flags;
 use slopos_sched::task::{
     TaskRef, task_find_by_id, task_for_each_enumerable_heapless, task_sigkill_member,
     task_try_for_each_enumerable_heapless,
 };
+
+use crate::syscall::signal::signal_dominates;
 
 pub struct TaskOomOps;
 
@@ -32,30 +36,36 @@ fn group_id(task: &TaskRef) -> u32 {
     }
 }
 
-/// `process`'s standing when `init` is init's task id: exempt if init runs
-/// in it, dying once every task it has left is killed.
-pub fn standing_of(process: &Process, init: u32) -> Standing {
+/// `process`'s standing with a writer holding `writer_flags` when `init` is
+/// init's task id: exempt if init runs in it, dying once every task it has
+/// left is killed, shielded if a live one holds privileged flags the writer
+/// lacks — the relation `kill` refuses on.
+pub fn standing_of(process: &Process, init: u32, writer_flags: u16) -> Standing {
     if init != INVALID_TASK_ID && task_find_by_id(init).is_some_and(|t| in_process(&t, process)) {
         return Standing::Exempt;
     }
     let mut live = false;
+    let mut shielded = false;
     task_try_for_each_enumerable_heapless(|task| {
         if in_process(task, process) && !task.is_killed() {
             live = true;
-            return ControlFlow::Break(());
+            shielded |= !signal_dominates(writer_flags, task.flags);
+            if shielded {
+                return ControlFlow::Break(());
+            }
         }
         ControlFlow::Continue(())
     });
-    if live {
-        Standing::Killable
-    } else {
-        Standing::Dying
+    match (live, shielded) {
+        (false, _) => Standing::Dying,
+        (true, true) => Standing::Shielded,
+        (true, false) => Standing::Killable,
     }
 }
 
 impl OomOps for TaskOomOps {
     fn standing(&self, process: &Process) -> Standing {
-        standing_of(process, crate::exec::init_task_id())
+        standing_of(process, crate::exec::init_task_id(), current_task_flags())
     }
 
     fn kill(&self, process: &Process) -> Option<Killed> {

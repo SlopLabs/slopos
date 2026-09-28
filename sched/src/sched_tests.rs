@@ -7824,7 +7824,7 @@ slopos_testing::stest!(
 /// Emits `QUOTACOST:` lines rather than asserting a bound: the ceiling lives in
 /// `scripts/gates/quota/<variant>.txt`.
 pub fn test_quota_charge_cost() -> TestResult {
-    use slopos_abi::quota::{FdSlot, QuotaMode, ResourceKind};
+    use slopos_abi::quota::{FdSlot, QuotaMode};
     use slopos_ostd::process::quota::{Charge, quota_mode, set_quota_mode, try_charge};
 
     // Reported as the minimum over batches: `rdtsc` counts host wall time, which only ever inflates.
@@ -7837,9 +7837,10 @@ pub fn test_quota_charge_cost() -> TestResult {
         return TestResult::Fail;
     };
 
-    // Grown until the arena refuses rather than to a computed bound:
-    // `account_create` enforces `MAX_ACCOUNT_DEPTH`, and a spawn past it still
-    // succeeds — it just leaves the process with an account that names no row.
+    // Grown until the walk stops lengthening rather than to a computed bound:
+    // a spawn past `MAX_ACCOUNT_DEPTH` debits through an ancestor with room,
+    // so its walk is no longer than its spawner's.
+    let depth_of = slopos_ostd::process::quota::account_depth;
     let mut chain = slopos_ostd::KVec::new();
     let mut deepest = shallow.account();
     loop {
@@ -7847,7 +7848,7 @@ pub fn test_quota_charge_cost() -> TestResult {
             break;
         };
         let candidate = child.account();
-        if slopos_ostd::process::quota::stats(candidate, ResourceKind::FdSlot).is_none() {
+        if depth_of(candidate) <= depth_of(deepest) {
             if let Some(handle) = child.handle() {
                 slopos_ostd::process::process_retire(handle);
             }
@@ -7860,10 +7861,7 @@ pub fn test_quota_charge_cost() -> TestResult {
     }
     let depth = chain.len() as u32 + 1;
 
-    // A row that does not exist makes `try_charge` return immediately, so a
-    // chain built past `MAX_ACCOUNT_DEPTH` would measure the *absence* of a
-    // walk and report it as a fast one.
-    if slopos_ostd::process::quota::stats(deepest, ResourceKind::FdSlot).is_none() {
+    if depth_of(deepest).is_none() {
         klog_info!("QUOTACOST: the deepest account has no row; nothing to measure");
         return TestResult::Fail;
     }
@@ -7956,6 +7954,92 @@ pub fn test_quota_charge_cost() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_quota_charge_cost, suite = sched_core);
+
+/// No spawn depth escapes the ledger: a process spawned past
+/// `MAX_ACCOUNT_DEPTH` still has a row, its commit is its own and reaches its
+/// ancestors, and an ancestor's ceiling refuses it.
+pub fn test_quota_a_spawn_past_the_depth_bound_is_still_charged() -> TestResult {
+    use slopos_abi::quota::{CommitPagesAxis, QuotaMode, ResourceKind};
+    use slopos_ostd::process::quota::{
+        Charge, MAX_ACCOUNT_DEPTH, account_depth, held_by, quota_mode, set_limit, set_quota_mode,
+        stats, try_charge,
+    };
+
+    const CEILING: u32 = 4;
+
+    let Some(scratch) = QuotaScratch::new() else {
+        klog_info!("QUOTA_TEST: could not register a process");
+        return TestResult::Fail;
+    };
+    // The scratch process sits one below the root, so this many more reach
+    // one past the bound.
+    const SPAWNS: usize = MAX_ACCOUNT_DEPTH as usize - 1;
+    let mut chain = slopos_ostd::KVec::new();
+    let mut spawner = scratch.account();
+    let mut deepest = scratch.account();
+    for _ in 0..SPAWNS {
+        let Ok(child) = slopos_ostd::process::process_spawn(None, deepest) else {
+            break;
+        };
+        spawner = deepest;
+        deepest = child.account();
+        if chain.push(child).is_err() {
+            break;
+        }
+    }
+    let spawned = chain.len();
+    let past_the_bound = account_depth(spawner) == Some(MAX_ACCOUNT_DEPTH);
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(scratch.account(), ResourceKind::CommitPages, CEILING);
+    let held = try_charge::<CommitPagesAxis>(deepest, CEILING - 1).map(Charge::commit);
+    let own = held_by(deepest, ResourceKind::CommitPages);
+    let reached = stats(scratch.account(), ResourceKind::CommitPages).map_or(0, |s| s.used);
+    let over = try_charge::<CommitPagesAxis>(deepest, 2).map(Charge::commit);
+    let refused_by_scratch = over
+        .as_ref()
+        .is_err_and(|error| error.refused_by == scratch.account());
+    drop(over);
+    let charged = held.is_ok();
+    drop(held);
+    let after = stats(scratch.account(), ResourceKind::CommitPages).map_or(0, |s| s.used);
+    set_quota_mode(restore);
+
+    for child in chain.iter().rev() {
+        if let Some(handle) = child.handle() {
+            slopos_ostd::process::process_retire(handle);
+        }
+    }
+    drop(chain);
+
+    if spawned != SPAWNS || !past_the_bound {
+        klog_info!("QUOTA_TEST: spawned {spawned} deep, want {SPAWNS} past the depth bound");
+        return TestResult::Fail;
+    }
+    if !charged || own != CEILING - 1 || reached != CEILING - 1 {
+        klog_info!(
+            "QUOTA_TEST: the deepest process owns {own} committed pages and its ancestor \
+             sees {reached}, want {}",
+            CEILING - 1
+        );
+        return TestResult::Fail;
+    }
+    if !refused_by_scratch {
+        klog_info!("QUOTA_TEST: a charge past the ancestor's ceiling was not refused by it");
+        return TestResult::Fail;
+    }
+    if after != 0 {
+        klog_info!("QUOTA_TEST: the ancestor holds {after} pages after the refund");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_quota_a_spawn_past_the_depth_bound_is_still_charged,
+    suite = sched_core
+);
 
 /// A `Normal` task that never blocks must not starve a `Low` task forever.
 ///

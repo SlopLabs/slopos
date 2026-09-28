@@ -1,4 +1,4 @@
-//! The OOM killer's choice: the killable process holding the most resident
+//! The OOM killer's choice: the killable process owing the most committed
 //! pages, one victim at a time, and another once a victim outstays its grace.
 //!
 //! The task side is swapped for one that names exactly the processes a test
@@ -76,8 +76,8 @@ impl OomOps for MadeOnly {
 
 static MADE_ONLY: MadeOnly = MadeOnly;
 
-/// Three address spaces, each holding more resident pages than the last,
-/// with the killer's task side swapped for [`MadeOnly`] until drop.
+/// Three address spaces, each owing more committed pages than the last, with
+/// the killer's task side swapped for [`MadeOnly`] until drop.
 struct Ladder {
     pids: [u32; MADE],
     restore: Option<&'static dyn OomOps>,

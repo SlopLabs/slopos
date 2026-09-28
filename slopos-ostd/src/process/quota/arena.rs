@@ -27,12 +27,18 @@ use crate::process::account::{MAX_ACCOUNTS, ROOT_ACCOUNT_SLOT, root_account};
 use crate::sync::CacheAligned;
 use crate::util::static_table::StaticTable;
 
-/// Rows on the longest permitted root-to-leaf chain.
+/// Rows on the longest root-to-leaf chain.
 ///
-/// Bounded so every hierarchical walk terminates in a fixed stack frame, and
-/// creation at the bound is refused rather than silently re-homed. The debit
-/// walk runs at most this many iterations, so a longer chain would have
+/// Bounded so every hierarchical walk terminates in a fixed stack frame. The
+/// debit walk runs at most this many iterations, so a longer chain would have
 /// ancestors that never get debited — a ceiling that silently does not apply.
+/// A row created beneath one already at the bound therefore debits through
+/// that row's nearest ancestor with room below it: the chain stops growing,
+/// and the new row still reaches the root and every ceiling on the way. Only
+/// the spawner's own subtree totals miss it. Refusing the row instead would
+/// leave the process's account naming nothing, and a charge against nothing
+/// debits nothing, so every process below the bound would escape every
+/// ceiling, the machine's commit ceiling included.
 pub const MAX_ACCOUNT_DEPTH: u8 = 8;
 
 /// Levels a root may have beneath it: the chain length minus the root itself.
@@ -54,9 +60,9 @@ struct AccountRow {
     /// `used` in the low half, `peak` in the high half: one compare-exchange
     /// installs both, so no reader can observe `used > peak`.
     usage: [AtomicU64; KIND_COUNT],
-    /// This row's own process's share of `used`: what a [`Scope::Principal`]
-    /// ceiling is compared against, since `used` also counts descendants.
-    /// Kept for those kinds only.
+    /// This row's own process's share of `used`, its descendants' debits
+    /// excluded: what a [`Scope::Principal`] ceiling is compared against, and
+    /// what [`held_by`] reports.
     own: [AtomicU32; KIND_COUNT],
     limit: [AtomicU32; KIND_COUNT],
     denials: [AtomicU32; KIND_COUNT],
@@ -259,9 +265,6 @@ pub struct TryChargeError {
 pub enum AccountCreateError {
     /// The slot index is outside the arena.
     OutOfBounds,
-    /// The parent is at [`MAX_ACCOUNT_DEPTH`], so a child of it would make a
-    /// walk unbounded.
-    TooDeep,
     /// The parent designator names no live row.
     NoParent,
 }
@@ -401,10 +404,13 @@ impl Drop for Releasing {
     }
 }
 
-/// Bind a row for `id`, debiting through `parent`.
+/// Bind a row for `id`, debiting through `parent`, or through `parent`'s
+/// nearest ancestor with room below it when `parent` is at
+/// [`MAX_ACCOUNT_DEPTH`].
 ///
-/// The parent edge is written here and never again — the accounting tree *is*
-/// the spawn tree, and no syscall mints an account.
+/// The parent edge is written here and changes only when that parent is
+/// released. The accounting tree is the spawn tree, flattened at the bound,
+/// and no syscall mints an account.
 pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCreateError> {
     let slot = id.slot() as usize;
     if id.is_none() || slot >= MAX_ACCOUNTS {
@@ -413,15 +419,19 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
     // A walk, so a release of `parent` either sees this row live and adopts it
     // or has finished before the parent row is read here.
     walk(|| {
-        let (parent_row, parent_slot, depth) = if parent.is_none() {
-            (None, NO_PARENT, ROOT_DEPTH_REMAINING)
+        let (parent_row, adopter, depth) = if parent.is_none() {
+            (None, AccountId::NONE, ROOT_DEPTH_REMAINING)
         } else {
-            let parent_row = row_for(parent).ok_or(AccountCreateError::NoParent)?;
-            let remaining = parent_row.depth_remaining.load(Ordering::Acquire);
-            if remaining == 0 {
-                return Err(AccountCreateError::TooDeep);
+            let mut adopter = parent;
+            let mut adopter_row = row_for(parent).ok_or(AccountCreateError::NoParent)?;
+            // Ends: every row has less room than the row it debits through,
+            // and the root has room.
+            while adopter_row.depth_remaining.load(Ordering::Acquire) == 0 {
+                adopter = parent_of(adopter_row);
+                adopter_row = row_for(adopter).ok_or(AccountCreateError::NoParent)?;
             }
-            (Some(parent_row), parent.slot(), remaining - 1)
+            let remaining = adopter_row.depth_remaining.load(Ordering::Acquire);
+            (Some(adopter_row), adopter, remaining - 1)
         };
 
         ROWS_IN_USE.fetch_max(slot + 1, Ordering::Release);
@@ -436,17 +446,7 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
                 row.limit[kind.index()].store(process_default_limit(kind), Ordering::Relaxed);
             }
         }
-        row.parent.store(
-            pack_parent(
-                parent_slot,
-                if parent.is_none() {
-                    0
-                } else {
-                    parent.generation()
-                },
-            ),
-            Ordering::Relaxed,
-        );
+        adopt(row, adopter);
         row.depth_remaining.store(depth, Ordering::Relaxed);
         // Generation before `live`: a reader checks liveness first, so this
         // order never exposes a live row carrying its predecessor's generation.
@@ -583,9 +583,9 @@ pub fn try_charge<A: Refundable>(
             [AccountId::NONE; MAX_ACCOUNT_DEPTH as usize];
         let mut depth = 0usize;
 
-        let leaf = row_for(account).filter(|_| !subtree);
+        let leaf = row_for(account);
         if let Some(leaf) = leaf
-            && charge_own(leaf, kind, n, mode, true).is_err()
+            && charge_own(leaf, kind, n, mode, !subtree).is_err()
         {
             return Err(TryChargeError {
                 refused_by: account,
@@ -637,9 +637,7 @@ pub(super) fn refund_raw(account: AccountId, kind: ResourceKind, n: u32) {
         return;
     }
     walk(|| {
-        if kind.scope() == Scope::Principal
-            && let Some(row) = row_for(account)
-        {
+        if let Some(row) = row_for(account) {
             release_own(row, kind, n);
         }
         credit_chain(account, kind, n);
@@ -836,6 +834,19 @@ pub fn stats(id: AccountId, kind: ResourceKind) -> Option<KindStats> {
         peak: usage_peak(usage),
         denials: row.denials[idx].load(Ordering::Acquire),
     })
+}
+
+/// What `id`'s own process holds of `kind`, its descendants' holdings
+/// excluded: a charge counts here only on the account it was taken against.
+/// Zero for a stale or absent account.
+pub fn held_by(id: AccountId, kind: ResourceKind) -> u32 {
+    row_for(id).map_or(0, |row| row.own[kind.index()].load(Ordering::Acquire))
+}
+
+/// Rows a charge against `id` debits, its own included, at most
+/// [`MAX_ACCOUNT_DEPTH`]. `None` for a stale or absent account.
+pub fn account_depth(id: AccountId) -> Option<u8> {
+    row_for(id).map(|row| MAX_ACCOUNT_DEPTH - row.depth_remaining.load(Ordering::Acquire))
 }
 
 /// Visit every live row, lowest slot first, with its id and parent.

@@ -506,16 +506,31 @@ asking for the fault-time road on purpose, and a sparse gigabyte is what a
 runtime's address-space reservation looks like. So only forked copies, stack
 growth and `MAP_NORESERVE` can outrun memory, and when such a write finds the
 ceiling refusing its page or the buddy empty after reclaim, `mm::oom` kills
-instead of faulting the writer, as Linux's OOM killer does: the largest
-resident user process by the ledger's `ResidentPages` row, never init, killed
-the way every kill works (the flag each thread unwinds from, I8). The writer
+instead of faulting the writer, as Linux's OOM killer does. The victim is the
+process whose own account owes the most `CommitPages`, which counts a memfd
+toward whoever sized it, mapped or not, and a shared page toward no mapper:
+present leaves count a shared page in every mapper and a held memfd in none,
+so any process could pad another's count and make it the victim. The ledger
+keeps each row's own share beside the subtree total (`quota::held_by`), so a
+child's promises are the child's, and a process spawned past
+`MAX_ACCOUNT_DEPTH` still gets a row, debiting through its nearest ancestor
+with room, so no fork depth escapes the ceiling or the measure. Among those
+owing anything, the
+processes the writer could `kill` (`signal_dominates` on the writer's flags)
+come first; one holding privileged flags the writer lacks is taken only when
+none of them owes a page — never while the writer itself owes one — because
+Linux's absolute `oom_score_adj=-1000` would leave a leaking system service
+failing every write on the machine rather than dying. Init never is. The
+victim is killed the way every kill works (the flag each thread unwinds from,
+I8). The writer
 drops the address space, waits — killable, bounded — for the victim's frames
 to be back (noted once the teardown has dropped the address space, not
 inferred from the slot's unbind), and writes again; while a victim is dying
 nobody picks a second — a victim whose last task left before the kill reached
 it included — and one still holding its memory five seconds after the kill
-stops holding back the next choice. Only when nothing but init and the dying
-is left does the write fail, as a `SIGKILL` (`TaskFaultReason::UserOom`). A
+stops holding back the next choice. Only when nothing but init, the dying and
+processes owing nothing is left does the write fail, as a `SIGKILL`
+(`TaskFaultReason::UserOom`). A
 write the kernel makes for the task takes the same road wherever it may
 block: a user copy from a syscall, and the signal frame, whose delivery on a
 trap's way out steps out of interrupt nesting with interrupts on for it, as

@@ -4,25 +4,34 @@
 //! page can be missing only where it is charged as it is written: a forked
 //! copy, stack growth, `MAP_NORESERVE`. When such a write finds the commit
 //! ceiling refusing its page, or the buddy empty after reclaim, the writer is
-//! not faulted for it. The process holding the most resident pages is killed
-//! instead — never init, never a kernel task, which has no address space —
-//! and the writer waits for that process's address space to be torn down,
-//! then writes again. That is the behaviour Linux documents for its OOM
-//! killer, down to its two guards: while a victim is still dying nobody picks
-//! a second, and a victim that frees nothing within [`VICTIM_GRACE_MS`] stops
-//! holding the others back.
+//! not faulted for it. A process is killed instead and the writer waits for
+//! that process's address space to be torn down, then writes again. That is
+//! the behaviour Linux documents for its OOM killer, down to its two guards:
+//! while a victim is still dying nobody picks a second, and a victim that
+//! frees nothing within [`VICTIM_GRACE_MS`] stops holding the others back.
+//!
+//! The victim is the process whose own account owes the most committed pages
+//! — its private mappings, the forked pages it holds as its own, and every
+//! memfd it sized, mapped or not. A shared page is charged once, to whoever
+//! sized it, so mapping another process's memory never makes the mapper the
+//! victim. Among them, the processes the writer could `kill` come first; one
+//! holding privileged flags the writer lacks is taken only when none of those
+//! owes anything, and init, like a kernel task, which has no address space,
+//! never is.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_abi::quota::ResourceKind;
 use slopos_abi::task::{INVALID_TASK_ID, TASK_NAME_MAX_LEN};
 use slopos_ostd::handle::Handle;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::process::Process;
+use slopos_ostd::process::quota::held_by;
 use slopos_ostd::sync::wait_queue::current_task_is_killed;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitAbort, WaitQueue};
 use slopos_ostd::{klog_warn, lock_class};
 
-use crate::process_vm::{ProcessVm, for_each_resident, process_vm_released};
+use crate::process_vm::{ProcessVm, for_each_bound, process_vm_released};
 
 /// What a write found missing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,13 +51,16 @@ impl OomTrigger {
     }
 }
 
-/// Where a process stands with the killer.
+/// Where a process stands with the killer, as seen from the writer it serves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
     /// Never a victim: init.
     Exempt,
     /// Every task already killed or gone: a second kill frees nothing sooner.
     Dying,
+    /// Holds privileged flags the writer lacks, which `kill` would refuse it:
+    /// taken only when no [`Killable`](Self::Killable) process owes anything.
+    Shielded,
     Killable,
 }
 
@@ -61,6 +73,8 @@ pub struct Killed {
 
 /// The part of the killer that needs tasks, which `mm` sits below.
 pub trait OomOps: Sync {
+    /// Where `process` stands with the writer the killer runs for — the task
+    /// whose write found no page, which is the one running.
     fn standing(&self, process: &Process) -> Standing;
 
     /// Kill every task of `process` the way `SIGKILL` does: a flag each one
@@ -143,8 +157,8 @@ pub enum OomVerdict {
     /// Write again: memory was freed, a victim died or is dying, or the writer
     /// is itself killed and unwinds before it gets there.
     Retry,
-    /// Nothing may be killed — only init and the dying are left — so the
-    /// write cannot be served.
+    /// Nothing may be killed — only init, the dying and processes owing no
+    /// committed page are left — so the write cannot be served.
     Unresolved,
 }
 
@@ -211,7 +225,7 @@ pub(crate) fn decide(ops: &dyn OomOps, trigger: OomTrigger) -> Decision {
         Some(killed) => {
             KILLS.fetch_add(1, Ordering::AcqRel);
             LAST_VICTIM.store(killed.pid, Ordering::Release);
-            report_kill(&killed, chosen.resident, trigger);
+            report_kill(&killed, &chosen, trigger);
             killed.pid
         }
         // Its last task left between the choice and the kill. Nothing was
@@ -238,6 +252,12 @@ pub fn oom_decide_for_test(ops: &dyn OomOps, trigger: OomTrigger) -> Option<Hand
     }
 }
 
+/// The address space [`decide`] would take next, with nothing killed.
+#[cfg(feature = "test-hooks")]
+pub fn oom_choose_for_test(ops: &dyn OomOps) -> Option<Handle<ProcessVm>> {
+    choose_victim(ops).map(|candidate| candidate.vm)
+}
+
 /// Forget the victim being waited for, so a test starts from none.
 #[cfg(feature = "test-hooks")]
 pub fn oom_forget_victim_for_test() {
@@ -256,49 +276,64 @@ pub fn oom_expire_victim_for_test() {
     }
 }
 
-/// A process the killer may take.
+/// A process the killer may take, with what its own account owes.
 pub(crate) struct Candidate {
     pub vm: Handle<ProcessVm>,
     pub process: KArc<Process>,
-    pub resident: u32,
+    pub owed: u32,
+    pub standing: Standing,
 }
 
-/// The killable process holding the most resident pages, as the ledger's
-/// `ResidentPages` row counts them; a tie goes to the one met first, and a
-/// process holding none is never worth a kill.
+/// The process whose own account owes the most committed pages among those
+/// the writer may kill or, only when none of those owes any, among those
+/// shielded from it. A tie goes to the one met first, and a process owing
+/// nothing is never worth a kill: killing it would free no promise.
 pub(crate) fn choose_victim(ops: &dyn OomOps) -> Option<Candidate> {
-    let mut best: Option<Candidate> = None;
-    for_each_resident(|vm, process, resident| {
-        if resident == 0 || best.as_ref().is_some_and(|b| b.resident >= resident) {
+    let mut killable: Option<Candidate> = None;
+    let mut shielded: Option<Candidate> = None;
+    for_each_bound(|vm, process| {
+        let owed = held_by(process.account(), ResourceKind::CommitPages);
+        let outranks = |best: &Option<Candidate>| best.as_ref().is_none_or(|b| owed > b.owed);
+        if owed == 0 || !outranks(&killable) {
             return;
         }
-        if ops.standing(process) != Standing::Killable {
-            return;
-        }
-        best = Some(Candidate {
+        let standing = ops.standing(process);
+        let best = match standing {
+            Standing::Killable => &mut killable,
+            Standing::Shielded if killable.is_none() && outranks(&shielded) => &mut shielded,
+            _ => return,
+        };
+        *best = Some(Candidate {
             vm,
             process: process.clone(),
-            resident,
+            owed,
+            standing,
         });
     });
-    best
+    killable.or(shielded)
 }
 
 /// Out of line and `#[cold]`: `format_args!` builds its argument array in the
 /// caller's frame, which is measured against the 2 KiB stack gate.
 #[cold]
 #[inline(never)]
-fn report_kill(killed: &Killed, resident: u32, trigger: OomTrigger) {
+fn report_kill(killed: &Killed, chosen: &Candidate, trigger: OomTrigger) {
     let len = killed
         .name
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(killed.name.len());
+    let resort = if chosen.standing == Standing::Shielded {
+        " (privileged: nothing the writer may signal owed a page)"
+    } else {
+        ""
+    };
     klog_warn!(
-        "OOM: killed pid {} ('{}') holding {} resident pages: {}",
+        "OOM: killed pid {} ('{}') owing {} committed pages{}: {}",
         killed.pid,
         core::str::from_utf8(&killed.name[..len]).unwrap_or("?"),
-        resident,
+        chosen.owed,
+        resort,
         trigger.describe()
     );
 }

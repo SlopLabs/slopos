@@ -1,27 +1,42 @@
 //! The task side of the OOM killer: init is never a victim, a process whose
-//! tasks are all killed is already dying, and a kill is the kill flag.
+//! tasks are all killed is already dying, a process the writer could not
+//! signal is taken last, and a kill is the kill flag.
 
 use core::ffi::c_char;
 use core::ptr;
 
-use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
-use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
+use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE};
+use slopos_abi::task::{
+    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_LAUNCH,
+    TASK_FLAG_USER_MODE,
+};
+use slopos_mm::memfd::{memfd_create, memfd_ftruncate};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::oom::{
-    Killed, OomOps, OomTrigger, Standing, oom_decide_for_test, oom_forget_victim_for_test,
+    Killed, OomOps, OomTrigger, Standing, oom_choose_for_test, oom_decide_for_test,
+    oom_forget_victim_for_test,
 };
 use slopos_mm::page_fault::{FaultOutcome, try_resolve_user_fault};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
-use slopos_mm::process_vm::{pack_process_vm_handle, process_vm_handle, process_vm_mmap};
-use slopos_ostd::process::{Process, ProcessId};
+use slopos_mm::process_vm::{
+    ProcessVm, pack_process_vm_handle, process_vm_handle, process_vm_mmap, process_vm_mmap_shared,
+};
+use slopos_ostd::KArc;
+use slopos_ostd::handle::Handle;
+use slopos_ostd::process::quota::FileBacking;
+use slopos_ostd::process::{AccountId, Process, ProcessId};
 use slopos_sched::task::{
-    fail_task_snapshots_for_test, task_create, task_find_by_id, task_terminate,
+    TaskRef, fail_task_snapshots_for_test, task_create, task_find_by_id, task_terminate,
 };
 use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
 use crate::oom::{OOM_OPS, standing_of};
+
+const UNGRANTED: u16 = TASK_FLAG_USER_MODE;
+/// The compositor's flag word.
+const PRIVILEGED: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR | TASK_FLAG_LAUNCH;
 
 fn create_user_task() -> u32 {
     task_create(
@@ -50,11 +65,11 @@ pub fn test_oom_spares_init_and_passes_over_the_dying() -> TestResult {
         return fail!("the user task has no process");
     };
 
-    let plain = standing_of(&process, INVALID_TASK_ID);
-    let as_init = standing_of(&process, task_id);
+    let plain = standing_of(&process, INVALID_TASK_ID, UNGRANTED);
+    let as_init = standing_of(&process, task_id, PRIVILEGED);
     let killed = OOM_OPS.kill(&process);
     let marked = task.is_killed();
-    let after_kill = standing_of(&process, INVALID_TASK_ID);
+    let after_kill = standing_of(&process, INVALID_TASK_ID, PRIVILEGED);
     let second = OOM_OPS.kill(&process);
 
     drop(task);
@@ -89,21 +104,34 @@ slopos_testing::stest!(
     suite = oom_killer
 );
 
-/// The real task side, confined to one process so nothing else bound at the
-/// time can be chosen.
-struct Only(u32);
+/// The real task side, seen from a writer holding `writer`, confined to the
+/// processes a test made so nothing else bound at the time can be chosen.
+struct Among {
+    members: [u32; 2],
+    writer: u16,
+}
 
-impl OomOps for Only {
+impl Among {
+    fn one(pid: u32, writer: u16) -> Self {
+        Self {
+            members: [pid, INVALID_PROCESS_ID],
+            writer,
+        }
+    }
+}
+
+impl OomOps for Among {
     fn standing(&self, process: &Process) -> Standing {
-        if process.id() == self.0 {
-            standing_of(process, INVALID_TASK_ID)
+        if self.members.contains(&process.id()) {
+            standing_of(process, INVALID_TASK_ID, self.writer)
         } else {
             Standing::Exempt
         }
     }
 
     fn kill(&self, process: &Process) -> Option<Killed> {
-        (process.id() == self.0)
+        self.members
+            .contains(&process.id())
             .then(|| OOM_OPS.kill(process))
             .flatten()
     }
@@ -160,7 +188,7 @@ pub fn test_oom_kills_the_hog_without_a_task_snapshot() -> TestResult {
 
     oom_forget_victim_for_test();
     fail_task_snapshots_for_test(true);
-    let awaited = oom_decide_for_test(&Only(process.id()), OomTrigger::Frames);
+    let awaited = oom_decide_for_test(&Among::one(process.id(), UNGRANTED), OomTrigger::Frames);
     fail_task_snapshots_for_test(false);
     oom_forget_victim_for_test();
     let marked = task.is_killed();
@@ -182,5 +210,204 @@ pub fn test_oom_kills_the_hog_without_a_task_snapshot() -> TestResult {
 
 slopos_testing::stest!(
     name = test_oom_kills_the_hog_without_a_task_snapshot,
+    suite = oom_killer
+);
+
+/// A user task and its process, terminated on drop.
+struct Member {
+    task_id: u32,
+    task: Option<TaskRef>,
+    process: KArc<Process>,
+    designator: ProcessId,
+}
+
+impl Member {
+    fn spawn(flags: u16) -> Option<Self> {
+        let task_id = task_create(
+            b"OomMember\0".as_ptr() as *const c_char,
+            slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+            ptr::null_mut(),
+            1,
+            flags,
+        );
+        if task_id == INVALID_TASK_ID {
+            return None;
+        }
+        let member = task_find_by_id(task_id).and_then(|task| {
+            let process = task.process()?;
+            let designator = ProcessId::of(&process)?;
+            Some(Self {
+                task_id,
+                task: Some(task),
+                process,
+                designator,
+            })
+        });
+        if member.is_none() {
+            task_terminate(task_id);
+        }
+        member
+    }
+
+    fn pid(&self) -> u32 {
+        self.process.id()
+    }
+
+    fn vm(&self) -> Option<Handle<ProcessVm>> {
+        process_vm_handle(self.designator)
+    }
+
+    fn killed(&self) -> bool {
+        self.task.as_ref().is_some_and(|task| task.is_killed())
+    }
+}
+
+impl Drop for Member {
+    fn drop(&mut self) {
+        drop(self.task.take());
+        task_terminate(self.task_id);
+    }
+}
+
+/// A memfd of `pages` sized on `account`, as `ftruncate` sizes one, closed
+/// when its backing drops.
+fn sized_memfd(account: AccountId, pages: usize) -> Option<(usize, KArc<dyn FileBacking>)> {
+    let (handle, _ops, backing) = memfd_create(0, account)?;
+    (memfd_ftruncate(handle, pages * PAGE_SIZE_4KB as usize, account) == 0)
+        .then_some((handle, backing))
+}
+
+/// SLOPOS-2026-0058's scenario. An ungranted process holds a memfd it never
+/// mapped and a surface a privileged one maps beside a few pages of its own,
+/// so that one counts every surface page as resident, and the ungranted
+/// process's write finds the ceiling full. Both memfds are the ungranted
+/// process's promises: it is taken, and the process it could not signal is
+/// left alone.
+pub fn test_oom_takes_the_holder_not_the_privileged_mapper() -> TestResult {
+    const HOARD: usize = 48;
+    const SURFACE: usize = 64;
+    let _scope = KernelTestScope::new();
+
+    let (Some(writer), Some(mapper)) = (Member::spawn(UNGRANTED), Member::spawn(PRIVILEGED)) else {
+        return fail!("could not create the two user tasks");
+    };
+    let account = writer.process.account();
+    let hoard = sized_memfd(account, HOARD);
+    let sized = hoard.is_some();
+    let surface = sized_memfd(account, SURFACE);
+    let mapped = surface.as_ref().is_some_and(|(handle, _)| {
+        process_vm_mmap_shared(
+            mapper.designator,
+            0,
+            (SURFACE as u64) * PAGE_SIZE_4KB,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            0,
+            *handle,
+        ) != 0
+    });
+    let working = touch_fresh_pages(mapper.designator, mapper.task_id, 4);
+    let (writer_vm, mapper_vm) = (writer.vm(), mapper.vm());
+
+    oom_forget_victim_for_test();
+    let ops = Among {
+        members: [writer.pid(), mapper.pid()],
+        writer: UNGRANTED,
+    };
+    let awaited = oom_decide_for_test(&ops, OomTrigger::Commit);
+    oom_forget_victim_for_test();
+    let (writer_killed, mapper_killed) = (writer.killed(), mapper.killed());
+
+    drop(mapper);
+    drop(writer);
+    drop(surface);
+    drop(hoard);
+
+    assert_test!(
+        sized && mapped && working && writer_vm.is_some() && mapper_vm.is_some(),
+        "could not size the memfds, map the surface and touch the mapper's pages"
+    );
+    assert_test!(
+        awaited == writer_vm && writer_killed,
+        "the killer awaited {:?} (the writer is {:?}, the mapper {:?}); writer killed: {}",
+        awaited,
+        writer_vm,
+        mapper_vm,
+        writer_killed
+    );
+    assert_test!(
+        !mapper_killed,
+        "the privileged mapper was killed for memory it only mapped"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_oom_takes_the_holder_not_the_privileged_mapper,
+    suite = oom_killer
+);
+
+/// However much more a privileged process owes, a writer that could not
+/// signal it takes what it may signal first; a writer holding its flags
+/// weighs it like any other; and when it is the only process owing anything,
+/// it is taken rather than the write failing.
+pub fn test_oom_takes_a_process_the_writer_may_not_signal_only_last() -> TestResult {
+    const OWN: usize = 16;
+    const PRIVATE: u64 = 64;
+    let _scope = KernelTestScope::new();
+
+    let (Some(writer), Some(privileged)) = (Member::spawn(UNGRANTED), Member::spawn(PRIVILEGED))
+    else {
+        return fail!("could not create the two user tasks");
+    };
+    let own = sized_memfd(writer.process.account(), OWN);
+    let sized = own.is_some();
+    let touched = touch_fresh_pages(privileged.designator, privileged.task_id, PRIVATE);
+    let (writer_vm, privileged_vm) = (writer.vm(), privileged.vm());
+    let both = [writer.pid(), privileged.pid()];
+
+    let as_ungranted = oom_choose_for_test(&Among {
+        members: both,
+        writer: UNGRANTED,
+    });
+    let as_privileged = oom_choose_for_test(&Among {
+        members: both,
+        writer: PRIVILEGED,
+    });
+    let last_resort = oom_choose_for_test(&Among::one(privileged.pid(), UNGRANTED));
+
+    drop(privileged);
+    drop(writer);
+    drop(own);
+
+    assert_test!(
+        sized && touched && writer_vm.is_some() && privileged_vm.is_some(),
+        "could not make the privileged process owe its pages"
+    );
+    assert_test!(
+        as_ungranted == writer_vm,
+        "an ungranted writer's killer chose {:?}, want the writer's {:?}, not the \
+         privileged {:?}",
+        as_ungranted,
+        writer_vm,
+        privileged_vm
+    );
+    assert_test!(
+        as_privileged == privileged_vm,
+        "a privileged writer's killer chose {:?}, want the larger {:?}",
+        as_privileged,
+        privileged_vm
+    );
+    assert_test!(
+        last_resort == privileged_vm,
+        "with nothing else owing, chose {:?}, want the privileged {:?}",
+        last_resort,
+        privileged_vm
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_oom_takes_a_process_the_writer_may_not_signal_only_last,
     suite = oom_killer
 );

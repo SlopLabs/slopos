@@ -2012,10 +2012,9 @@ pub fn get_process_vm_stats() -> ProcessVmStats {
     }
 }
 
-/// Visit every bound address space with its process and the resident pages
-/// the ledger holds for it. `f` runs off the slot lock, so it may take locks
-/// the address-space operations are ordered after.
-pub(crate) fn for_each_resident(mut f: impl FnMut(Handle<ProcessVm>, &KArc<Process>, u32)) {
+/// Visit every bound address space with its process. `f` runs off the slot
+/// lock, so it may take locks the address-space operations are ordered after.
+pub(crate) fn for_each_bound(mut f: impl FnMut(Handle<ProcessVm>, &KArc<Process>)) {
     for (slot, vm) in PROCESS_VMS.iter().enumerate() {
         let seen = {
             let guard = vm.lock();
@@ -2023,13 +2022,12 @@ pub(crate) fn for_each_resident(mut f: impl FnMut(Handle<ProcessVm>, &KArc<Proce
                 (Some(process), Some(_)) => Some((
                     Handle::from_parts(slot as u32, guard.generation),
                     process.clone(),
-                    guard.vma_map.resident_pages(),
                 )),
                 _ => None,
             }
         };
-        if let Some((handle, process, resident)) = seen {
-            f(handle, &process, resident);
+        if let Some((handle, process)) = seen {
+            f(handle, &process);
         }
     }
 }

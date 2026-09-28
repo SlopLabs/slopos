@@ -34,9 +34,10 @@ mod token;
 
 pub use arena::{
     AccountCreateError, KindStats, LedgerFault, MAX_ACCOUNT_DEPTH, NO_LIMIT, PagesReconciler,
-    TryChargeError, account_count, account_create, account_release, account_release_by_slot,
-    for_each_account, ledger_audit, quota_mode, register_pages_reconciler, reset_for_test, root,
-    set_derived_process_limit, set_limit, set_quota_mode, stats, try_charge,
+    TryChargeError, account_count, account_create, account_depth, account_release,
+    account_release_by_slot, for_each_account, held_by, ledger_audit, quota_mode,
+    register_pages_reconciler, reset_for_test, root, set_derived_process_limit, set_limit,
+    set_quota_mode, stats, try_charge,
 };
 pub use axis::{Refundable, ResourceAxis};
 pub use charged::{
@@ -132,6 +133,36 @@ mod tests {
         drop(held);
         assert_eq!(used(child, ResourceKind::Process), 0);
         assert_eq!(used(parent, ResourceKind::Process), 0);
+    }
+
+    /// A subtree-bounded kind still names its holder: a child's commit is the
+    /// child's alone, and a charge the machine refuses leaves no share behind.
+    #[test]
+    fn a_subtree_charge_is_held_by_its_own_account_alone() {
+        use slopos_abi::quota::CommitPagesAxis;
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        set_limit(root(), ResourceKind::CommitPages, 10);
+
+        let parents = Charge::commit(try_charge::<CommitPagesAxis>(parent, 2).expect("parent"));
+        let childs = Charge::commit(try_charge::<CommitPagesAxis>(child, 7).expect("child"));
+        assert_eq!(used(parent, ResourceKind::CommitPages), 9);
+        assert_eq!(held_by(parent, ResourceKind::CommitPages), 2);
+        assert_eq!(held_by(child, ResourceKind::CommitPages), 7);
+
+        try_charge::<CommitPagesAxis>(child, 2).expect_err("the machine is full");
+        assert_eq!(
+            held_by(child, ResourceKind::CommitPages),
+            7,
+            "a refused charge must leave the holder's share as it was"
+        );
+
+        drop(childs);
+        assert_eq!(held_by(child, ResourceKind::CommitPages), 0);
+        assert_eq!(held_by(parent, ResourceKind::CommitPages), 2);
+        drop(parents);
+        assert_eq!(held_by(parent, ResourceKind::CommitPages), 0);
     }
 
     /// A per-process ceiling is an `RLIMIT_*`: what a child holds is its own,
@@ -373,20 +404,35 @@ mod tests {
         assert_eq!(used(a, ResourceKind::FdSlot), 0);
     }
 
+    /// A process spawned below the bound still gets a row, debiting through
+    /// its spawner's nearest ancestor with room: the walk stays bounded, and
+    /// the machine's ceiling still refuses it, charge and refund alike.
     #[test]
-    fn the_tree_is_bounded_and_creation_at_the_bound_is_refused() {
+    fn creation_below_the_bound_debits_through_the_nearest_ancestor_with_room() {
+        use slopos_abi::quota::CommitPagesAxis;
         let _f = fixture();
-        let mut parent = root();
+        let mut chain = [root(); MAX_ACCOUNT_DEPTH as usize];
         // The root occupies one level, so MAX_ACCOUNT_DEPTH - 1 more fit.
-        for slot in 1..MAX_ACCOUNT_DEPTH as u32 {
-            parent = account(slot, parent);
+        for slot in 1..MAX_ACCOUNT_DEPTH as usize {
+            chain[slot] = account(slot as u32, chain[slot - 1]);
         }
-        let id = AccountId::from_parts(MAX_ACCOUNT_DEPTH as u32, alloc_generation_for_test());
-        assert_eq!(
-            account_create(id, parent).err(),
-            Some(AccountCreateError::TooDeep),
-            "an unbounded walk must be refused at creation, not discovered at charge time"
-        );
+        let bottom = chain[MAX_ACCOUNT_DEPTH as usize - 1];
+        let below = account(MAX_ACCOUNT_DEPTH as u32, bottom);
+        let further = account(MAX_ACCOUNT_DEPTH as u32 + 1, below);
+        assert_eq!(account_depth(below), Some(MAX_ACCOUNT_DEPTH));
+        assert_eq!(account_depth(further), Some(MAX_ACCOUNT_DEPTH));
+
+        set_limit(root(), ResourceKind::CommitPages, 10);
+        let held = Charge::commit(try_charge::<CommitPagesAxis>(further, 6).expect("charge"));
+        assert_eq!(used(root(), ResourceKind::CommitPages), 6, "the root pays");
+        assert_eq!(held_by(further, ResourceKind::CommitPages), 6);
+        let refused = try_charge::<CommitPagesAxis>(further, 5).expect_err("the machine is full");
+        assert_eq!(refused.refused_by, root());
+
+        drop(held);
+        assert_eq!(used(root(), ResourceKind::CommitPages), 0);
+        assert_eq!(used(chain[1], ResourceKind::CommitPages), 0);
+        assert_eq!(held_by(further, ResourceKind::CommitPages), 0);
     }
 
     #[test]

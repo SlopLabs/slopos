@@ -202,9 +202,10 @@ fn new_process(
         release_process_id(id);
         ProcessAllocError::OutOfMemory
     })?;
-    // A depth refusal leaves an account naming no row, which every arena
-    // operation treats as a vacuous success; the charges still reach whichever
-    // ancestors do have rows.
+    // Refused only for an out-of-range slot or a spawner account whose row is
+    // gone; either leaves the process an account naming no row, and a charge
+    // against no row debits nothing at all. A spawner at `MAX_ACCOUNT_DEPTH`
+    // is no refusal: the row debits through its nearest ancestor with room.
     let _ = quota::account_create(account, account_parent);
     Ok(process)
 }
