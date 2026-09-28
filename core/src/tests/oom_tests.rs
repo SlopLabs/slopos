@@ -65,11 +65,11 @@ pub fn test_oom_spares_init_and_passes_over_the_dying() -> TestResult {
         return fail!("the user task has no process");
     };
 
-    let plain = standing_of(&process, INVALID_TASK_ID, UNGRANTED);
-    let as_init = standing_of(&process, task_id, PRIVILEGED);
+    let plain = standing_of(&process, INVALID_TASK_ID, INVALID_TASK_ID, UNGRANTED);
+    let as_init = standing_of(&process, task_id, INVALID_TASK_ID, PRIVILEGED);
     let killed = OOM_OPS.kill(&process);
     let marked = task.is_killed();
-    let after_kill = standing_of(&process, INVALID_TASK_ID, PRIVILEGED);
+    let after_kill = standing_of(&process, INVALID_TASK_ID, INVALID_TASK_ID, PRIVILEGED);
     let second = OOM_OPS.kill(&process);
 
     drop(task);
@@ -108,6 +108,9 @@ slopos_testing::stest!(
 struct Among {
     members: [u32; 2],
     writer: u16,
+    /// Init's task id, and the writer's: a test's writer is init only when
+    /// this names a task.
+    init: u32,
 }
 
 impl Among {
@@ -115,6 +118,7 @@ impl Among {
         Self {
             members: [pid, INVALID_PROCESS_ID],
             writer,
+            init: INVALID_TASK_ID,
         }
     }
 }
@@ -122,7 +126,7 @@ impl Among {
 impl OomOps for Among {
     fn standing(&self, process: &Process) -> Standing {
         if self.members.contains(&process.id()) {
-            standing_of(process, INVALID_TASK_ID, self.writer)
+            standing_of(process, self.init, self.init, self.writer)
         } else {
             Standing::Exempt
         }
@@ -310,6 +314,7 @@ pub fn test_oom_takes_the_holder_not_the_mapper() -> TestResult {
     let ops = Among {
         members: [holder.pid(), mapper.pid()],
         writer: UNGRANTED,
+        init: INVALID_TASK_ID,
     };
     let for_commit = oom_choose_for_test(&ops, OomTrigger::Commit);
     let for_frames = oom_choose_for_test(&ops, OomTrigger::Frames);
@@ -363,6 +368,7 @@ pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult 
         &Among {
             members: both,
             writer: UNGRANTED,
+            init: INVALID_TASK_ID,
         },
         OomTrigger::Commit,
     );
@@ -370,6 +376,7 @@ pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult 
         &Among {
             members: both,
             writer: PRIVILEGED,
+            init: INVALID_TASK_ID,
         },
         OomTrigger::Commit,
     );
@@ -418,5 +425,60 @@ pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult 
 
 slopos_testing::stest!(
     name = test_oom_never_takes_a_process_the_writer_may_not_signal,
+    suite = oom_killer
+);
+
+/// Init's write is the exception: nothing is shielded from it, so with only a
+/// privileged holder left the holder is taken rather than init failing.
+pub fn test_oom_init_takes_a_holder_it_could_not_signal() -> TestResult {
+    const PRIVATE: u64 = 64;
+    let _scope = KernelTestScope::new();
+
+    let (Some(init), Some(privileged)) = (Member::spawn(UNGRANTED), Member::spawn(PRIVILEGED))
+    else {
+        return fail!("could not create the two user tasks");
+    };
+    let touched = touch_fresh_pages(privileged.designator, privileged.task_id, PRIVATE);
+    let privileged_vm = privileged.vm();
+    let as_init = Among {
+        members: [init.pid(), privileged.pid()],
+        writer: UNGRANTED,
+        init: init.task_id,
+    };
+
+    let for_commit = oom_choose_for_test(&as_init, OomTrigger::Commit);
+    oom_forget_victim_for_test();
+    let for_frames = oom_decide_for_test(&as_init, OomTrigger::Frames);
+    oom_forget_victim_for_test();
+    let privileged_killed = privileged.killed();
+    let init_killed = init.killed();
+
+    drop(privileged);
+    drop(init);
+
+    assert_test!(
+        touched && privileged_vm.is_some(),
+        "could not make the privileged process hold its pages"
+    );
+    assert_test!(
+        for_commit == privileged_vm,
+        "init's killer chose {:?} for the ceiling, want the privileged holder {:?}",
+        for_commit,
+        privileged_vm
+    );
+    assert_test!(
+        for_frames == privileged_vm && privileged_killed && !init_killed,
+        "init's killer awaited {:?} for the frames, want {:?}; the holder killed: {}, \
+         init killed: {}",
+        for_frames,
+        privileged_vm,
+        privileged_killed,
+        init_killed
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_oom_init_takes_a_holder_it_could_not_signal,
     suite = oom_killer
 );
