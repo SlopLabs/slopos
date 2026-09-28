@@ -41,9 +41,9 @@ typedef struct {
     unsigned int __size[1];
 } pthread_once_t;
 
-#define PTHREAD_CREATE_JOINABLE (0)
-#define PTHREAD_CREATE_DETACHED (1)
 #define PTHREAD_COND_INITIALIZER { { 0 } }
+#define PTHREAD_CREATE_DETACHED (1)
+#define PTHREAD_CREATE_JOINABLE (0)
 #define PTHREAD_MUTEX_DEFAULT (PTHREAD_MUTEX_NORMAL)
 #define PTHREAD_MUTEX_ERRORCHECK (2)
 #define PTHREAD_MUTEX_INITIALIZER { { 0 } }

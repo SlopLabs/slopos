@@ -54,7 +54,7 @@ pub struct HeaderSpec {
 /// own entry points use, as `name: <rust type>` for a typedef and
 /// `struct name { field: ty, ... }` for a struct.
 ///
-/// All but the last two are upstream `libc`'s shared `src/unix/mod.rs`
+/// All are upstream `libc`'s shared `src/unix/mod.rs`
 /// definitions for x86-64, unmodified: the SlopOS patch adds a per-OS module arm and a
 /// `#[link]` arm and touches no type or struct definition, so there is no
 /// creation hunk to read them out of. `size_t`/`ssize_t` are the crate
@@ -93,10 +93,6 @@ pub const SHARED_TYPES: &[&str] = &[
      h_length: c_int, h_addr_list: *mut *mut c_char }",
     "struct servent { s_name: *mut c_char, s_aliases: *mut *mut c_char, s_port: c_int, \
      s_proto: *mut c_char }",
-    // POSIX types with no `libc` crate spelling for this target: C11 7.14's
-    // `sig_atomic_t` and `<iconv.h>`'s descriptor.
-    "sig_atomic_t: c_int",
-    "iconv_t: *mut c_void",
 ];
 
 /// `va_list` is not a contract type and cannot be: the `libc` crate has no
@@ -917,13 +913,10 @@ pub const HEADERS: &[HeaderSpec] = &[
         consts: &[],
         slibc_consts: &[],
         macros: &[],
-        functions: &[],
+        functions: &["ffs", "strcasecmp_l", "strncasecmp_l"],
         extra: &[
-            "ffs(i: c_int) -> c_int",
             "strcasecmp(a: *const c_char, b: *const c_char) -> c_int",
             "strncasecmp(a: *const c_char, b: *const c_char, n: size_t) -> c_int",
-            "strcasecmp_l(a: *const c_char, b: *const c_char, loc: locale_t) -> c_int",
-            "strncasecmp_l(a: *const c_char, b: *const c_char, n: size_t, loc: locale_t) -> c_int",
         ],
         variables: &[],
         raw: &[],
@@ -1183,6 +1176,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "execv",
             "execve",
             "execvp",
+            "execvpe",
             "_exit",
             "alarm",
             "gethostname",
@@ -1193,6 +1187,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "sleep(seconds: c_uint) -> c_uint",
             "usleep(usec: useconds_t) -> c_int",
             "getsid(pid: pid_t) -> pid_t",
+            "execlp(file: *const c_char, arg0: *const c_char, ...) -> c_int",
             "pathconf(path: *const c_char, name: c_int) -> c_long",
             "fpathconf(fd: c_int, name: c_int) -> c_long",
             // Here as well as in `<sys/random.h>`, which is what glibc does:
@@ -1378,12 +1373,12 @@ pub const HEADERS: &[HeaderSpec] = &[
             "sigsuspend",
             "__libc_current_sigrtmin",
             "__libc_current_sigrtmax",
+            "sigwait",
         ],
         extra: &[
             "signal(signum: c_int, handler: sighandler_t) -> sighandler_t",
             "strsignal(sig: c_int) -> *mut c_char",
             "sigqueue(pid: pid_t, sig: c_int, value: sigval) -> c_int",
-            "sigwait(set: *const sigset_t, sig: *mut c_int) -> c_int",
         ],
         variables: &[],
         raw: &[],
@@ -1637,7 +1632,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         summary: "system error logging",
         includes: &["sys/types.h", "stdio.h"],
         types: &[],
-        consts: &[],
+        consts: &["LOG_CRON", "LOG_AUTHPRIV", "LOG_FTP", "LOG_PERROR"],
         slibc_consts: &[
             "LOG_EMERG",
             "LOG_ALERT",
@@ -1656,9 +1651,6 @@ pub const HEADERS: &[HeaderSpec] = &[
             "LOG_LPR",
             "LOG_NEWS",
             "LOG_UUCP",
-            "LOG_CRON",
-            "LOG_AUTHPRIV",
-            "LOG_FTP",
             "LOG_LOCAL0",
             "LOG_LOCAL1",
             "LOG_LOCAL2",
@@ -1672,7 +1664,6 @@ pub const HEADERS: &[HeaderSpec] = &[
             "LOG_ODELAY",
             "LOG_NDELAY",
             "LOG_NOWAIT",
-            "LOG_PERROR",
         ],
         macros: &[],
         functions: &[],
@@ -1712,12 +1703,8 @@ pub const HEADERS: &[HeaderSpec] = &[
         consts: &[],
         slibc_consts: &[],
         macros: &[],
-        functions: &[],
-        extra: &[
-            "iconv_open(tocode: *const c_char, fromcode: *const c_char) -> iconv_t",
-            "iconv(cd: iconv_t, inbuf: *mut *mut c_char, inbytesleft: *mut size_t, outbuf: *mut *mut c_char, outbytesleft: *mut size_t) -> size_t",
-            "iconv_close(cd: iconv_t) -> c_int",
-        ],
+        functions: &["iconv_open", "iconv", "iconv_close"],
+        extra: &[],
         variables: &[],
         raw: &[],
         raw_unguarded: &[],
@@ -1773,7 +1760,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         consts: &[],
         slibc_consts: &[],
         macros: &[],
-        functions: &[],
+        functions: &["inet_pton", "inet_ntop"],
         extra: &[
             "htonl(hostlong: u32) -> u32",
             "htons(hostshort: u16) -> u16",
@@ -1781,9 +1768,6 @@ pub const HEADERS: &[HeaderSpec] = &[
             "ntohs(netshort: u16) -> u16",
             "inet_addr(cp: *const c_char) -> in_addr_t",
             "inet_ntoa(addr: in_addr) -> *mut c_char",
-            "inet_pton(af: c_int, src: *const c_char, dst: *mut c_void) -> c_int",
-            "inet_ntop(af: c_int, src: *const c_void, dst: *mut c_char, size: socklen_t) \
-             -> *const c_char",
         ],
         variables: &[],
         raw: &[],
@@ -1794,25 +1778,25 @@ pub const HEADERS: &[HeaderSpec] = &[
         summary: "name resolution",
         includes: &["sys/socket.h", "netinet/in.h"],
         types: &["addrinfo", "hostent", "servent"],
-        consts: &["AI_*", "EAI_*", "NI_*"],
-        slibc_consts: &[
-            "NI_NUMERICHOST",
-            "NI_NUMERICSERV",
-            "NI_NOFQDN",
-            "NI_NAMEREQD",
-            "NI_DGRAM",
-            "NI_NUMERICSCOPE",
+        consts: &[
+            "AI_*",
+            "EAI_*",
+            "NI_*",
             "HOST_NOT_FOUND",
             "TRY_AGAIN",
             "NO_RECOVERY",
             "NO_DATA",
         ],
+        slibc_consts: &[],
         macros: &[],
-        functions: &["getaddrinfo", "freeaddrinfo", "gai_strerror"],
+        functions: &[
+            "getaddrinfo",
+            "freeaddrinfo",
+            "gai_strerror",
+            "getnameinfo",
+            "gethostbyname",
+        ],
         extra: &[
-            "getnameinfo(sa: *const sockaddr, salen: socklen_t, host: *mut c_char, \
-             hostlen: socklen_t, serv: *mut c_char, servlen: socklen_t, flags: c_int) -> c_int",
-            "gethostbyname(name: *const c_char) -> *mut hostent",
             "getservbyname(name: *const c_char, proto: *const c_char) -> *mut servent",
             "__h_errno_location() -> *mut c_int",
         ],
@@ -2097,7 +2081,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "pthread_once_t",
         ],
         consts: &["PTHREAD_*"],
-        slibc_consts: &["PTHREAD_CREATE_JOINABLE", "PTHREAD_CREATE_DETACHED"],
+        slibc_consts: &[],
         macros: &[],
         functions: &[
             "pthread_create",

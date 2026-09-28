@@ -34,9 +34,6 @@ extern "C" {
 #define LOG_LPR (48)
 #define LOG_NEWS (56)
 #define LOG_UUCP (64)
-#define LOG_CRON (72)
-#define LOG_AUTHPRIV (80)
-#define LOG_FTP (88)
 #define LOG_LOCAL0 (128)
 #define LOG_LOCAL1 (136)
 #define LOG_LOCAL2 (144)
@@ -50,6 +47,9 @@ extern "C" {
 #define LOG_ODELAY (0x04)
 #define LOG_NDELAY (0x08)
 #define LOG_NOWAIT (0x10)
+#define LOG_AUTHPRIV (80)
+#define LOG_CRON (72)
+#define LOG_FTP (88)
 #define LOG_PERROR (0x20)
 
 void openlog(const char *ident, int option, int facility);

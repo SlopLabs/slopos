@@ -163,10 +163,10 @@ int sigpending(sigset_t *set);
 int sigsuspend(const sigset_t *set);
 int __libc_current_sigrtmin(void);
 int __libc_current_sigrtmax(void);
+int sigwait(const sigset_t *set, int *sig);
 sighandler_t signal(int signum, sighandler_t handler);
 char *strsignal(int sig);
 int sigqueue(pid_t pid, int sig, union sigval value);
-int sigwait(const sigset_t *set, int *sig);
 
 #ifdef __cplusplus
 }

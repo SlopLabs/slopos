@@ -88,6 +88,7 @@ struct ucred {
 #define SO_ERROR (4)
 #define SO_KEEPALIVE (9)
 #define SO_LINGER (13)
+#define SO_OOBINLINE (10)
 #define SO_PASSCRED (16)
 #define SO_PEERCRED (17)
 #define SO_RCVBUF (8)

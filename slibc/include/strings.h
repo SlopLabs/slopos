@@ -15,10 +15,10 @@ extern "C" {
 #endif
 
 int ffs(int i);
+int strcasecmp_l(const char *s1, const char *s2, locale_t loc);
+int strncasecmp_l(const char *s1, const char *s2, size_t n, locale_t loc);
 int strcasecmp(const char *a, const char *b);
 int strncasecmp(const char *a, const char *b, size_t n);
-int strcasecmp_l(const char *a, const char *b, locale_t loc);
-int strncasecmp_l(const char *a, const char *b, size_t n, locale_t loc);
 
 #ifdef __cplusplus
 }

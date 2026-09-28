@@ -83,10 +83,10 @@ index 6c64020..0ec764e 100644
          pub use self::redox::*;
 diff --git a/src/unix/slopos/mod.rs b/src/unix/slopos/mod.rs
 new file mode 100644
-index 0000000..db3439f
+index 0000000..9892cd2
 --- /dev/null
 +++ b/src/unix/slopos/mod.rs
-@@ -0,0 +1,2063 @@
+@@ -0,0 +1,2126 @@
 +//! SlopOS, over the `slibc` C library.
 +//!
 +//! * Headers: `slibc/include`
@@ -141,6 +141,8 @@ index 0000000..db3439f
 +pub type jmp_buf = [__jmp_buf_tag; 1];
 +pub type sigjmp_buf = [__jmp_buf_tag; 1];
 +pub type fexcept_t = c_ushort;
++pub type sig_atomic_t = c_int;
++pub type iconv_t = *mut c_void;
 +
 +extern_ty! {
 +    pub type FILE;
@@ -588,7 +590,7 @@ index 0000000..db3439f
 +/// glibc's userspace 32.
 +pub const NCCS: usize = 19;
 +
-+/// SlopOS has no realtime signals; that is a stated divergence, not an omission.
++/// One past the highest signal number, 64, as glibc and musl define it.
 +pub const NSIG: c_int = 65;
 +
 +pub const SIGHUP: c_int = 1;
@@ -980,6 +982,7 @@ index 0000000..db3439f
 +pub const SO_SNDBUF: c_int = 7;
 +pub const SO_RCVBUF: c_int = 8;
 +pub const SO_KEEPALIVE: c_int = 9;
++pub const SO_OOBINLINE: c_int = 10;
 +pub const SO_LINGER: c_int = 13;
 +pub const SO_REUSEPORT: c_int = 15;
 +pub const SO_PASSCRED: c_int = 16;
@@ -1058,6 +1061,23 @@ index 0000000..db3439f
 +
 +pub const NI_MAXHOST: socklen_t = 1025;
 +pub const NI_MAXSERV: socklen_t = 32;
++
++pub const NI_NUMERICHOST: c_int = 0x01;
++pub const NI_NUMERICSERV: c_int = 0x02;
++pub const NI_NOFQDN: c_int = 0x04;
++pub const NI_NAMEREQD: c_int = 0x08;
++pub const NI_DGRAM: c_int = 0x10;
++pub const NI_NUMERICSCOPE: c_int = 0x100;
++
++pub const HOST_NOT_FOUND: c_int = 1;
++pub const TRY_AGAIN: c_int = 2;
++pub const NO_RECOVERY: c_int = 3;
++pub const NO_DATA: c_int = 4;
++
++pub const LOG_CRON: c_int = 72;
++pub const LOG_AUTHPRIV: c_int = 80;
++pub const LOG_FTP: c_int = 88;
++pub const LOG_PERROR: c_int = 0x20;
 +
 +pub const WNOHANG: c_int = 1;
 +
@@ -1402,6 +1422,8 @@ index 0000000..db3439f
 +pub const PTHREAD_MUTEX_RECURSIVE: c_int = 1;
 +pub const PTHREAD_MUTEX_ERRORCHECK: c_int = 2;
 +pub const PTHREAD_MUTEX_DEFAULT: c_int = PTHREAD_MUTEX_NORMAL;
++pub const PTHREAD_CREATE_JOINABLE: c_int = 0;
++pub const PTHREAD_CREATE_DETACHED: c_int = 1;
 +pub const PTHREAD_PROCESS_PRIVATE: c_int = 0;
 +pub const PTHREAD_PROCESS_SHARED: c_int = 1;
 +pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = pthread_mutex_t { __size: [0; 5] };
@@ -1803,6 +1825,11 @@ index 0000000..db3439f
 +        envp: *const *const c_char,
 +    ) -> c_int;
 +    pub fn execvp(file: *const c_char, argv: *const *const c_char) -> c_int;
++    pub fn execvpe(
++        file: *const c_char,
++        argv: *const *const c_char,
++        envp: *const *const c_char,
++    ) -> c_int;
 +    pub fn waitpid(pid: crate::pid_t, status: *mut c_int, options: c_int) -> crate::pid_t;
 +    pub fn wait(status: *mut c_int) -> crate::pid_t;
 +    pub fn wait4(
@@ -1852,6 +1879,7 @@ index 0000000..db3439f
 +    pub fn sigprocmask(how: c_int, set: *const sigset_t, oset: *mut sigset_t) -> c_int;
 +    pub fn sigpending(set: *mut sigset_t) -> c_int;
 +    pub fn sigsuspend(set: *const sigset_t) -> c_int;
++    pub fn sigwait(set: *const sigset_t, sig: *mut c_int) -> c_int;
 +    pub fn __libc_current_sigrtmin() -> c_int;
 +    pub fn __libc_current_sigrtmax() -> c_int;
 +
@@ -1927,6 +1955,23 @@ index 0000000..db3439f
 +    ) -> c_int;
 +    pub fn freeaddrinfo(res: *mut addrinfo);
 +    pub fn gai_strerror(errcode: c_int) -> *const c_char;
++    pub fn getnameinfo(
++        sa: *const sockaddr,
++        salen: socklen_t,
++        host: *mut c_char,
++        hostlen: socklen_t,
++        serv: *mut c_char,
++        servlen: socklen_t,
++        flags: c_int,
++    ) -> c_int;
++    pub fn gethostbyname(name: *const c_char) -> *mut crate::hostent;
++    pub fn inet_pton(af: c_int, src: *const c_char, dst: *mut c_void) -> c_int;
++    pub fn inet_ntop(
++        af: c_int,
++        src: *const c_void,
++        dst: *mut c_char,
++        size: socklen_t,
++    ) -> *const c_char;
 +    pub fn if_nametoindex(ifname: *const c_char) -> c_uint;
 +    pub fn if_indextoname(ifindex: c_uint, ifname: *mut c_char) -> *mut c_char;
 +
@@ -2057,6 +2102,24 @@ index 0000000..db3439f
 +    pub fn strtoull(s: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_ulonglong;
 +    pub fn strtod(s: *const c_char, endptr: *mut *mut c_char) -> c_double;
 +    pub fn strtof(s: *const c_char, endptr: *mut *mut c_char) -> c_float;
++    pub fn strcasecmp_l(s1: *const c_char, s2: *const c_char, loc: locale_t) -> c_int;
++    pub fn strncasecmp_l(
++        s1: *const c_char,
++        s2: *const c_char,
++        n: size_t,
++        loc: locale_t,
++    ) -> c_int;
++    pub fn ffs(i: c_int) -> c_int;
++
++    pub fn iconv_open(tocode: *const c_char, fromcode: *const c_char) -> iconv_t;
++    pub fn iconv(
++        cd: iconv_t,
++        inbuf: *mut *mut c_char,
++        inbytesleft: *mut size_t,
++        outbuf: *mut *mut c_char,
++        outbytesleft: *mut size_t,
++    ) -> size_t;
++    pub fn iconv_close(cd: iconv_t) -> c_int;
 +    pub fn atof(s: *const c_char) -> c_double;
 +
 +    pub fn isalnum(c: c_int) -> c_int;
