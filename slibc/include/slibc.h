@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fenv.h>
+#include <grp.h>
 #include <iconv.h>
 #include <inttypes.h>
 #include <langinfo.h>
@@ -68,6 +69,7 @@
 #include <time.h>
 #include <uchar.h>
 #include <unistd.h>
+#include <utime.h>
 #include <wchar.h>
 #include <wctype.h>
 

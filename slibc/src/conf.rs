@@ -6,7 +6,7 @@ use crate::errno::{EINVAL, EIO, ENAMETOOLONG, ERANGE, errno_set};
 use crate::pal::raw::syscall6;
 use crate::pal::{Pal, Sys};
 use crate::thread::tcb::{STRERROR_BUF, Tcb};
-use crate::types::{passwd, uid_t, utsname as Utsname};
+use crate::types::{gid_t, group, passwd, uid_t, utsname as Utsname};
 
 pub const _SC_ARG_MAX: c_int = 0;
 pub const _SC_CLK_TCK: c_int = 2;
@@ -240,6 +240,151 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut passwd {
         return core::ptr::null_mut();
     }
     result
+}
+
+/// `getpwuid(3)`: [`getpwuid_r`] into the same static storage as
+/// [`getpwnam`]. A uid with no row is `NULL` with `errno` untouched.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwuid(uid: uid_t) -> *mut passwd {
+    let mut result = core::ptr::null_mut();
+    let rc = getpwuid_r(
+        uid,
+        &raw mut PW_ROW,
+        (&raw mut PW_ROW_BUF).cast(),
+        PASSWD_BUF_MIN,
+        &mut result,
+    );
+    if rc != 0 {
+        errno_set(rc);
+        return core::ptr::null_mut();
+    }
+    result
+}
+
+const GR_NAME: &[u8] = b"root\0";
+const GR_PASSWD: &[u8] = b"x\0";
+const PTR: usize = size_of::<*mut c_char>();
+
+/// Bytes `getgrgid_r` needs for its one row: the NULL-terminated, empty
+/// member list, the slack to align it, and the two strings.
+const GROUP_BUF_MIN: usize = PTR + (PTR - 1) + GR_NAME.len() + GR_PASSWD.len();
+
+/// `getgrgid_r(3)`. As the passwd database, there is one row, gid 0 named
+/// `root`, with no members; any other gid is success with a null `*result`.
+///
+/// # Safety
+/// `buf` addresses `buflen` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrgid_r(
+    gid: gid_t,
+    grp: *mut group,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut group,
+) -> c_int {
+    if grp.is_null() || buf.is_null() || result.is_null() {
+        return EINVAL.raw();
+    }
+    *result = core::ptr::null_mut();
+    if gid != 0 {
+        return 0;
+    }
+    let base = buf as *mut u8;
+    let pad = base.align_offset(PTR);
+    if pad > PTR - 1 || buflen < GROUP_BUF_MIN - (PTR - 1) + pad {
+        return ERANGE.raw();
+    }
+
+    let members = base.add(pad) as *mut *mut c_char;
+    *members = core::ptr::null_mut();
+    let mut at = pad + PTR;
+    for (field, text) in [
+        (&raw mut (*grp).gr_name, GR_NAME),
+        (&raw mut (*grp).gr_passwd, GR_PASSWD),
+    ] {
+        let dst = base.add(at);
+        core::ptr::copy_nonoverlapping(text.as_ptr(), dst, text.len());
+        *field = dst as *mut c_char;
+        at += text.len();
+    }
+    (*grp).gr_gid = 0;
+    (*grp).gr_mem = members;
+    *result = grp;
+    0
+}
+
+/// `getgrnam_r(3)`. The one row is named `root`; any other name is success
+/// with a null `*result`.
+///
+/// # Safety
+/// `name` is a NUL-terminated C string; `buf` addresses `buflen` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrnam_r(
+    name: *const c_char,
+    grp: *mut group,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut group,
+) -> c_int {
+    if name.is_null() || grp.is_null() || buf.is_null() || result.is_null() {
+        return EINVAL.raw();
+    }
+    let bytes = name as *const u8;
+    let requested = crate::string::slice_from_cstr(bytes, crate::string::u_strlen(bytes));
+    if requested != &GR_NAME[..GR_NAME.len() - 1] {
+        *result = core::ptr::null_mut();
+        return 0;
+    }
+    getgrgid_r(0, grp, buf, buflen, result)
+}
+
+static mut GR_ROW: group = group {
+    gr_name: core::ptr::null_mut(),
+    gr_passwd: core::ptr::null_mut(),
+    gr_gid: 0,
+    gr_mem: core::ptr::null_mut(),
+};
+static mut GR_ROW_BUF: [u8; GROUP_BUF_MIN] = [0; GROUP_BUF_MIN];
+
+unsafe fn group_static(rc: c_int, result: *mut group) -> *mut group {
+    if rc != 0 {
+        errno_set(rc);
+        return core::ptr::null_mut();
+    }
+    result
+}
+
+/// `getgrgid(3)`: [`getgrgid_r`] into static storage. A gid with no row is
+/// `NULL` with `errno` untouched.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrgid(gid: gid_t) -> *mut group {
+    let mut result = core::ptr::null_mut();
+    let rc = getgrgid_r(
+        gid,
+        &raw mut GR_ROW,
+        (&raw mut GR_ROW_BUF).cast(),
+        GROUP_BUF_MIN,
+        &mut result,
+    );
+    group_static(rc, result)
+}
+
+/// `getgrnam(3)`: [`getgrnam_r`] into static storage. A name with no row is
+/// `NULL` with `errno` untouched.
+///
+/// # Safety
+/// `name` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut group {
+    let mut result = core::ptr::null_mut();
+    let rc = getgrnam_r(
+        name,
+        &raw mut GR_ROW,
+        (&raw mut GR_ROW_BUF).cast(),
+        GROUP_BUF_MIN,
+        &mut result,
+    );
+    group_static(rc, result)
 }
 
 /// `getentropy(3)`. POSIX caps one call at 256 bytes, and the kernel's

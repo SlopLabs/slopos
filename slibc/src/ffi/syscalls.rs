@@ -1182,6 +1182,34 @@ unsafe fn utimes_at(
     utimensat(AT_FDCWD, path, widened.as_ptr(), flags)
 }
 
+/// `utime(3)`: whole seconds, so each stamp's nanoseconds are zero. A null
+/// `times` means "now".
+///
+/// # Safety
+/// `path` is a NUL-terminated C string; `times`, if not null, addresses a
+/// `struct utimbuf`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn utime(path: *const c_char, times: *const crate::types::utimbuf) -> c_int {
+    if times.is_null() {
+        return utimensat(AT_FDCWD, path, core::ptr::null(), 0);
+    }
+    let stamps = [
+        Timespec {
+            tv_sec: (*times).actime,
+            tv_nsec: 0,
+        },
+        Timespec {
+            tv_sec: (*times).modtime,
+            tv_nsec: 0,
+        },
+    ];
+    utimensat(AT_FDCWD, path, stamps.as_ptr(), 0)
+}
+
+pub const S_ISUID: mode_t = 0o4000;
+pub const S_ISGID: mode_t = 0o2000;
+pub const S_ISVTX: mode_t = 0o1000;
+
 const POSIX_FADV_NOREUSE: c_int = 5;
 
 /// `posix_fadvise(2)`. The kernel keeps no per-file access-pattern state, so

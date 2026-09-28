@@ -168,19 +168,36 @@ pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
             p = p.add(1);
         }
 
+        // C11 7.21.6.1 p5: a `*` takes the width or precision from an `int`
+        // argument; a negative width is the `-` flag, a negative precision
+        // none at all.
         let mut width: i32 = 0;
-        while (*p).is_ascii_digit() {
-            width = width * 10 + (*p - b'0') as i32;
+        if *p == b'*' {
+            let arg = ap.next_arg::<i32>();
+            if arg < 0 {
+                flags |= FLAG_LEFT;
+            }
+            width = arg.checked_abs().unwrap_or(i32::MAX);
             p = p.add(1);
+        } else {
+            while (*p).is_ascii_digit() {
+                width = width * 10 + (*p - b'0') as i32;
+                p = p.add(1);
+            }
         }
 
         let mut precision: i32 = -1;
         if *p == b'.' {
             p = p.add(1);
-            precision = 0;
-            while (*p).is_ascii_digit() {
-                precision = precision * 10 + (*p - b'0') as i32;
+            if *p == b'*' {
+                precision = ap.next_arg::<i32>().max(-1);
                 p = p.add(1);
+            } else {
+                precision = 0;
+                while (*p).is_ascii_digit() {
+                    precision = precision * 10 + (*p - b'0') as i32;
+                    p = p.add(1);
+                }
             }
         }
 

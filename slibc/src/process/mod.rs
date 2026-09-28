@@ -133,8 +133,14 @@ pub(crate) unsafe fn search_path<T>(
     Err(last)
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn execlp(file: *const u8, arg0: *const u8, mut args: ...) -> i32 {
+/// Gathers `arg0` and the variadic pointers after it, through the null that
+/// ends them, into a malloc'd argv, then runs `exec` on it. The list is
+/// consumed past its null, so `execle` reads `envp` next.
+unsafe fn exec_list(
+    arg0: *const u8,
+    args: &mut core::ffi::VaList<'_>,
+    exec: impl FnOnce(*const *const u8, &mut core::ffi::VaList<'_>) -> i32,
+) -> i32 {
     let mut argc = 1usize;
     if !arg0.is_null() {
         let mut probe = args.clone();
@@ -148,16 +154,36 @@ pub unsafe extern "C" fn execlp(file: *const u8, arg0: *const u8, mut args: ...)
     }
     *argv = arg0;
     if !arg0.is_null() {
-        for i in 1..argc {
+        for i in 1..=argc {
             *argv.add(i) = args.next_arg::<*const u8>();
         }
     }
     *argv.add(argc) = ptr::null();
-    let rc = execvp(file, argv);
+    let rc = exec(argv, args);
     let saved = errno::errno_get();
     crate::mem::malloc::dealloc(argv.cast());
     errno::errno_set(saved);
     rc
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execlp(file: *const u8, arg0: *const u8, mut args: ...) -> i32 {
+    exec_list(arg0, &mut args, |argv, _| execvp(file, argv))
+}
+
+/// `execl(3)`: [`execv`] with the argument list spelled out.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execl(path: *const u8, arg0: *const u8, mut args: ...) -> i32 {
+    exec_list(arg0, &mut args, |argv, _| execv(path, argv))
+}
+
+/// `execle(3)`: [`execve`] with the argument list spelled out and the
+/// environment after its terminating null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execle(path: *const u8, arg0: *const u8, mut args: ...) -> i32 {
+    exec_list(arg0, &mut args, |argv, rest| {
+        execve(path, argv, rest.next_arg::<*const *const u8>())
+    })
 }
 
 /// On `ENOEXEC`, runs `path` as a `/bin/sh` script, as POSIX asks.

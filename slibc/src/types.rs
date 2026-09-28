@@ -245,6 +245,22 @@ pub struct passwd {
     pub pw_shell: *mut c_char,
 }
 
+/// `struct group`.
+#[repr(C)]
+pub struct group {
+    pub gr_name: *mut c_char,
+    pub gr_passwd: *mut c_char,
+    pub gr_gid: gid_t,
+    pub gr_mem: *mut *mut c_char,
+}
+
+/// `struct utimbuf`.
+#[repr(C)]
+pub struct utimbuf {
+    pub actime: time_t,
+    pub modtime: time_t,
+}
+
 /// `DIR` is opaque to C. The definition lives in [`crate::io::dir`].
 pub enum DIR {}
 

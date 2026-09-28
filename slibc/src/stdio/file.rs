@@ -8,7 +8,7 @@ use super::{
     FILE_FLAG_OWNED_FD, FILE_FLAG_READABLE, FILE_FLAG_READING, FILE_FLAG_WRITABLE,
     FILE_FLAG_WRITING, SEEK_CUR, SEEK_END, SEEK_SET, WalkMode, registry,
 };
-use crate::ffi::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+use crate::ffi::{O_APPEND, O_CLOEXEC, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
 use crate::mem::malloc;
 use crate::pal::Sys;
 
@@ -136,6 +136,81 @@ pub unsafe extern "C" fn fclose(stream: *mut FILE) -> i32 {
     }
 
     ret
+}
+
+/// `freopen(3)`. The new file is installed at the stream's old descriptor
+/// number, so `freopen(path, "w", stderr)` leaves fd 2 on `path`. A null
+/// `path` changes the open descriptor's status flags to `mode`'s. On failure
+/// the stream is closed.
+///
+/// # Safety
+/// `stream` is an open stream; `path`, if not null, and `mode` are
+/// NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn freopen(path: *const u8, mode: *const u8, stream: *mut FILE) -> *mut FILE {
+    if stream.is_null() {
+        crate::errno::errno_set(crate::errno::EINVAL.raw());
+        return ptr::null_mut();
+    }
+    let Some((oflags, fflags)) = parse_mode(mode) else {
+        fclose(stream);
+        crate::errno::errno_set(crate::errno::EINVAL.raw());
+        return ptr::null_mut();
+    };
+    let cloexec =
+        if crate::string::slice_from_cstr(mode, crate::string::u_strlen(mode)).contains(&b'e') {
+            O_CLOEXEC
+        } else {
+            0
+        };
+
+    (*stream).lock.lock();
+    let f = &mut *stream;
+    // POSIX: a failure to flush is ignored.
+    if f.flags & FILE_FLAG_WRITING != 0 {
+        let _ = f.flush_write_buf();
+    }
+    if f.flags & FILE_FLAG_READING != 0 {
+        f.discard_read_ahead();
+    }
+
+    let installed = if path.is_null() {
+        let fd_flags = if cloexec != 0 {
+            slopos_abi::syscall::FD_CLOEXEC
+        } else {
+            0
+        };
+        Sys::fcntl(f.fd, slopos_abi::syscall::F_SETFD as i32, fd_flags).and_then(|_| {
+            Sys::fcntl(
+                f.fd,
+                slopos_abi::syscall::F_SETFL as i32,
+                (oflags & !(O_CREAT | O_TRUNC)) as u64,
+            )
+        })
+    } else {
+        Sys::open(path, oflags | cloexec, 0o666).and_then(|fd| {
+            if fd == f.fd {
+                return Ok(fd);
+            }
+            let moved = Sys::dup3(fd, f.fd, cloexec);
+            let _ = Sys::close(fd);
+            moved
+        })
+    };
+
+    if let Err(e) = installed {
+        (*stream).lock.unlock();
+        fclose(stream);
+        crate::errno::errno_set(e.raw());
+        return ptr::null_mut();
+    }
+
+    f.buf_pos = 0;
+    f.buf_len = 0;
+    f.ungot_len = 0;
+    f.flags = (f.flags & (super::FILE_FLAG_LINKED | FILE_FLAG_HEAP | FILE_FLAG_OWNED_FD)) | fflags;
+    (*stream).lock.unlock();
+    stream
 }
 
 unsafe fn fread_core(ptr: *mut u8, size: usize, nmemb: usize, stream: *mut FILE) -> usize {

@@ -131,3 +131,82 @@ pub unsafe extern "C" fn cfsetospeed(termios: *mut UserTermios, speed: u32) -> i
     (*termios).c_ospeed = speed;
     0
 }
+
+/// `tcgetpgrp(3)`: the terminal's foreground process group.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcgetpgrp(fd: i32) -> i32 {
+    let mut pgrp = 0i32;
+    match Sys::ioctl(fd, slopos_abi::syscall::TIOCGPGRP, (&raw mut pgrp) as u64) {
+        Ok(_) => pgrp,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}
+
+/// `tcsetpgrp(3)`: make `pgrp` the terminal's foreground process group.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcsetpgrp(fd: i32, pgrp: i32) -> i32 {
+    match Sys::ioctl(fd, slopos_abi::syscall::TIOCSPGRP, (&raw const pgrp) as u64) {
+        Ok(_) => 0,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}
+
+static mut PASSWORD: [u8; 128] = [0; 128];
+
+/// `getpass(3)`: prompt on the controlling terminal (stderr if there is none)
+/// and read a line from it (stdin if none) with echo off. The answer, newline
+/// dropped, lives in static storage; `NULL` on a read error.
+///
+/// # Safety
+/// `prompt` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpass(prompt: *const u8) -> *mut u8 {
+    let flags = crate::ffi::O_RDWR | slopos_abi::syscall::O_NOCTTY as i32 | crate::ffi::O_CLOEXEC;
+    let tty = Sys::open(b"/dev/tty\0".as_ptr(), flags, 0).ok();
+    let (input, output) = match tty {
+        Some(fd) => (fd, fd),
+        None => (0, 2),
+    };
+
+    let mut saved = core::mem::MaybeUninit::<UserTermios>::uninit();
+    let restore = Sys::ioctl(input, TCGETS, saved.as_mut_ptr() as u64).is_ok();
+    if restore {
+        let mut quiet = saved.assume_init();
+        quiet.c_lflag.remove(LocalFlags::ECHO);
+        quiet.c_lflag.insert(LocalFlags::ICANON);
+        let _ = Sys::ioctl(input, TCSETSF, (&raw const quiet) as u64);
+    }
+
+    if !prompt.is_null() {
+        let _ = Sys::write(output, prompt, crate::string::u_strlen(prompt));
+    }
+    let buf = (&raw mut PASSWORD).cast::<u8>();
+    let answer = match Sys::read(input, buf, 128) {
+        Ok(mut len) => {
+            if (len > 0 && *buf.add(len - 1) == b'\n') || len == 128 {
+                len -= 1;
+            }
+            *buf.add(len) = 0;
+            buf
+        }
+        Err(e) => {
+            errno_set(e.raw());
+            core::ptr::null_mut()
+        }
+    };
+
+    if restore {
+        let _ = Sys::ioctl(input, TCSETSF, saved.as_ptr() as u64);
+    }
+    let _ = Sys::write(output, b"\n".as_ptr(), 1);
+    if let Some(fd) = tty {
+        let _ = Sys::close(fd);
+    }
+    answer
+}

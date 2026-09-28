@@ -36,21 +36,31 @@ use slopos_abi::syscall::{
     SCM_RIGHTS, SOL_SOCKET, cmsg_len, cmsg_space,
 };
 use slopos_abi::unix::SockAddrUn;
-use slopos_slibc::conf::{_SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN, _SC_PAGESIZE, sysconf};
-use slopos_slibc::errno::{EBUSY, ETIMEDOUT};
-use slopos_slibc::ffi::syscalls::{mmap, mprotect, munmap, realpath, slopos_getdents64};
-use slopos_slibc::ffi::{O_DIRECTORY, O_RDONLY, close, open};
+use slopos_slibc::conf::{
+    _SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN, _SC_PAGESIZE, getgrgid, getgrgid_r, getgrnam,
+    sysconf,
+};
+use slopos_slibc::errno::{EBUSY, EINVAL, ERANGE, ETIMEDOUT};
+use slopos_slibc::ffi::syscalls::{mmap, mprotect, munmap, realpath, slopos_getdents64, utime};
+use slopos_slibc::ffi::{O_DIRECTORY, O_RDONLY, close, open, write};
 use slopos_slibc::io::dirent::DirentIter;
 use slopos_slibc::net::{
     AF_UNIX, SOCK_STREAM, accept, bind, connect, listen, recvmsg, sendmsg, socket,
 };
+use slopos_slibc::process::{_exit, WEXITSTATUS, WIFEXITED, execl, execle, fork, waitpid};
 use slopos_slibc::signal::{self, SIG_DFL, SIGSEGV, SIGUSR1, SIGUSR2};
+use slopos_slibc::stdio::{self, chars::fputs, file::fflush, file::fileno, file::freopen};
+use slopos_slibc::stdlib::temp::{mkdtemp, mkstemp};
 use slopos_slibc::test_harness::note;
 use slopos_slibc::thread::{
-    pthread_attr_t, pthread_cond_t, pthread_mutex_t, pthread_rwlock_t, pthread_self,
+    PTHREAD_CANCEL_DISABLE, PTHREAD_CANCEL_ENABLE, pthread_attr_t, pthread_cond_t, pthread_mutex_t,
+    pthread_rwlock_t, pthread_self, pthread_setcancelstate,
 };
 use slopos_slibc::time::{CLOCK_REALTIME, Timespec, clock_gettime};
-use slopos_slibc::types::{dirent, sigaction as SigAction, sigset_t as SigSet, stack_t};
+use slopos_slibc::types::{
+    dirent, group, sigaction as SigAction, sigset_t as SigSet, stack_t, utimbuf,
+};
+use slopos_slibc::{errno_get, errno_set};
 
 /// Writable on the disk root and on the initramfs alike, as the other userland
 /// tests use `/var/<name>`.
@@ -1359,6 +1369,291 @@ fn a_c_program_uses_the_whole_libc_surface() -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The C surface git reaches for: temporary names, stamps, stream redirection,
+// the group database, cancel state and the list-form execs.
+// ---------------------------------------------------------------------------
+
+fn c_path(path: &str) -> Vec<u8> {
+    let mut bytes = path.as_bytes().to_vec();
+    bytes.push(0);
+    bytes
+}
+
+fn c_str_of(ptr: *const u8) -> String {
+    unsafe { std::ffi::CStr::from_ptr(ptr.cast()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn filled_name(template: &[u8]) -> String {
+    String::from_utf8_lossy(&template[..template.len() - 1]).into_owned()
+}
+
+/// Two calls on the same template make two distinct entries, private to the
+/// owner; a template without six trailing `X` is refused and left as it was.
+fn mkstemp_and_mkdtemp_make_private_unique_names() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if !work_dir() {
+        return false;
+    }
+    let base = format!("{WORK}/tmpXXXXXX");
+    let mut first = c_path(&base);
+    let mut second = c_path(&base);
+    let fd1 = unsafe { mkstemp(first.as_mut_ptr().cast()) };
+    let fd2 = unsafe { mkstemp(second.as_mut_ptr().cast()) };
+    let (a, b) = (filled_name(&first), filled_name(&second));
+    let files_ok = fd1 >= 0
+        && fd2 >= 0
+        && a != b
+        && !a.ends_with("XXXXXX")
+        && [&a, &b].iter().all(|p| {
+            fs::metadata(p)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o777 == 0o600)
+                .unwrap_or(false)
+        });
+    close(fd1);
+    close(fd2);
+    let _ = fs::remove_file(&a);
+    let _ = fs::remove_file(&b);
+    if !files_ok {
+        note(&format!("mkstemp gave fds {fd1}/{fd2}, names {a} and {b}"));
+        return false;
+    }
+
+    let mut dir = c_path(&base);
+    let made = unsafe { mkdtemp(dir.as_mut_ptr().cast()) };
+    let d = filled_name(&dir);
+    let dir_ok = made == dir.as_mut_ptr().cast()
+        && fs::metadata(&d)
+            .map(|m| m.is_dir() && m.permissions().mode() & 0o777 == 0o700)
+            .unwrap_or(false);
+    let _ = fs::remove_dir(&d);
+    if !dir_ok {
+        note(&format!("mkdtemp answered {made:?} for {d}"));
+        return false;
+    }
+
+    let bad = format!("{WORK}/badXXXXX");
+    let mut template = c_path(&bad);
+    let fd = unsafe { mkstemp(template.as_mut_ptr().cast()) };
+    let err = errno_get();
+    if fd != -1 || err != EINVAL.raw() || template != c_path(&bad) {
+        note(&format!(
+            "a five-X template gave fd {fd}, errno {err}, now {}",
+            filled_name(&template)
+        ));
+        return false;
+    }
+    true
+}
+
+/// The stamps `utime` sets are the ones `stat` reads back, in whole seconds;
+/// a null `times` is the current time.
+fn utime_sets_the_stamps_stat_reads() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if !work_dir() {
+        return false;
+    }
+    let path = format!("{WORK}/utime");
+    if fs::write(&path, b"x").is_err() {
+        return false;
+    }
+    let c = c_path(&path);
+    let times = utimbuf {
+        actime: 1_000_000,
+        modtime: 2_000_000,
+    };
+    let set = unsafe { utime(c.as_ptr().cast(), &times) };
+    let meta = fs::metadata(&path);
+    let stamped = matches!(&meta, Ok(m) if m.atime() == 1_000_000 && m.mtime() == 2_000_000
+        && m.atime_nsec() == 0 && m.mtime_nsec() == 0);
+    if set != 0 || !stamped {
+        note(&format!("utime returned {set}; stat reads {meta:?}"));
+        let _ = fs::remove_file(&path);
+        return false;
+    }
+
+    let mut now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe { clock_gettime(CLOCK_REALTIME, &mut now) };
+    let set = unsafe { utime(c.as_ptr().cast(), ptr::null()) };
+    let mtime = fs::metadata(&path).map(|m| m.mtime()).unwrap_or(0);
+    let _ = fs::remove_file(&path);
+    if set != 0 || (mtime - now.tv_sec).abs() > 5 {
+        note(&format!(
+            "utime(NULL) returned {set}; mtime {mtime}, clock {}",
+            now.tv_sec
+        ));
+        return false;
+    }
+    true
+}
+
+/// `freopen` onto `stderr` and `stdout` keeps fds 2 and 1, so a raw `write`
+/// to the number lands in the new file after the stream's own bytes. Run in
+/// a child, whose standard streams can be given away.
+fn freopen_keeps_the_descriptor_number() -> bool {
+    if !work_dir() {
+        return false;
+    }
+    let err_path = format!("{WORK}/freopen-err");
+    let out_path = format!("{WORK}/freopen-out");
+    let (err_c, out_c) = (c_path(&err_path), c_path(&out_path));
+
+    let pid = unsafe { fork() };
+    if pid == 0 {
+        unsafe {
+            let mut code = 0;
+            for (path, stream, fd, code_bit) in
+                [(&err_c, stdio::stderr, 2, 1), (&out_c, stdio::stdout, 1, 2)]
+            {
+                let got = freopen(path.as_ptr(), b"w\0".as_ptr(), stream);
+                if got != stream || fileno(stream) != fd {
+                    code |= code_bit;
+                    continue;
+                }
+                fputs(b"via-stdio\n\0".as_ptr(), stream);
+                fflush(stream);
+                write(fd, b"via-fd\n".as_ptr().cast(), 7);
+            }
+            _exit(code);
+        }
+    }
+    let mut status = 0;
+    let reaped = unsafe { waitpid(pid, &mut status, 0) };
+    let err_text = fs::read_to_string(&err_path).unwrap_or_default();
+    let out_text = fs::read_to_string(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(&err_path);
+    let _ = fs::remove_file(&out_path);
+    let want = "via-stdio\nvia-fd\n";
+    if reaped != pid
+        || !WIFEXITED(status)
+        || WEXITSTATUS(status) != 0
+        || err_text != want
+        || out_text != want
+    {
+        note(&format!(
+            "child status {status:#x}; stderr file {err_text:?}, stdout file {out_text:?}"
+        ));
+        return false;
+    }
+    true
+}
+
+/// One row, gid 0 named `root`, with an empty NULL-terminated member list.
+/// A gid with no row is NULL without touching `errno`; a short buffer for
+/// the `_r` form is `ERANGE`.
+fn group_database_has_the_one_root_row() -> bool {
+    let row_ok = |g: *mut group| {
+        !g.is_null()
+            && unsafe {
+                (*g).gr_gid == 0
+                    && c_str_of((*g).gr_name.cast()) == "root"
+                    && !(*g).gr_mem.is_null()
+                    && (*(*g).gr_mem).is_null()
+            }
+    };
+    if !row_ok(unsafe { getgrgid(0) }) || !row_ok(unsafe { getgrnam(c"root".as_ptr()) }) {
+        note("getgrgid(0) or getgrnam(\"root\") is not the root row");
+        return false;
+    }
+    errno_set(1234);
+    let missing = unsafe { getgrgid(1) };
+    let absent_name = unsafe { getgrnam(c"wheel".as_ptr()) };
+    if !missing.is_null() || !absent_name.is_null() || errno_get() != 1234 {
+        note(&format!(
+            "a missing row answered {missing:?}/{absent_name:?}, errno {}",
+            errno_get()
+        ));
+        return false;
+    }
+
+    let mut row: group = unsafe { mem::zeroed() };
+    let mut result: *mut group = ptr::dangling_mut();
+    let mut small = [0u8; 4];
+    let rc = unsafe { getgrgid_r(0, &mut row, small.as_mut_ptr().cast(), 4, &mut result) };
+    if rc != ERANGE.raw() {
+        note(&format!("getgrgid_r into 4 bytes returned {rc}"));
+        return false;
+    }
+    true
+}
+
+/// The state is per thread, the previous value comes back, and a value that
+/// is neither of the two is `EINVAL`.
+fn pthread_setcancelstate_round_trips_per_thread() -> bool {
+    let mut old = -1;
+    let first = unsafe { pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &mut old) };
+    if first != 0 || old != PTHREAD_CANCEL_ENABLE {
+        note(&format!("disabling returned {first}, old {old}"));
+        return false;
+    }
+    let seen_by_peer = thread::spawn(|| {
+        let mut peer_old = -1;
+        unsafe { pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &mut peer_old) };
+        peer_old
+    })
+    .join()
+    .unwrap_or(-1);
+    let bad = unsafe { pthread_setcancelstate(7, &mut old) };
+    let back = unsafe { pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &mut old) };
+    if seen_by_peer != PTHREAD_CANCEL_ENABLE
+        || bad != EINVAL.raw()
+        || back != 0
+        || old != PTHREAD_CANCEL_DISABLE
+    {
+        note(&format!(
+            "peer saw {seen_by_peer}, 7 returned {bad}, restoring returned {back} old {old}"
+        ));
+        return false;
+    }
+    true
+}
+
+/// `execl` hands its list to the program as argv and `execle` also the
+/// environment after the list's null: `sh -c 'exit ...'` reports both back
+/// in the exit status.
+fn execl_and_execle_pass_the_list_as_argv() -> bool {
+    let run = |with_env: bool| -> i32 {
+        let pid = unsafe { fork() };
+        if pid == 0 {
+            unsafe {
+                let sh = c"/bin/sh".as_ptr().cast::<u8>();
+                let dash_c = c"-c".as_ptr().cast::<u8>();
+                let end = ptr::null::<u8>();
+                if with_env {
+                    let env = [c"CODE=9".as_ptr().cast::<u8>(), end];
+                    execle(
+                        sh,
+                        c"sh".as_ptr().cast(),
+                        dash_c,
+                        c"exit $CODE".as_ptr(),
+                        end,
+                        env.as_ptr(),
+                    );
+                } else {
+                    execl(sh, c"sh".as_ptr().cast(), dash_c, c"exit 7".as_ptr(), end);
+                }
+                _exit(127);
+            }
+        }
+        let mut status = 0;
+        if unsafe { waitpid(pid, &mut status, 0) } != pid || !WIFEXITED(status) {
+            return -1;
+        }
+        WEXITSTATUS(status)
+    };
+    let (plain, with_env) = (run(false), run(true));
+    if plain != 7 || with_env != 9 {
+        note(&format!("execl exited {plain}, execle exited {with_env}"));
+        return false;
+    }
+    true
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     (
         "zeroed_pthread_locks_work_without_init",
@@ -1423,6 +1718,30 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "a_c_program_uses_the_whole_libc_surface",
         a_c_program_uses_the_whole_libc_surface,
+    ),
+    (
+        "mkstemp_and_mkdtemp_make_private_unique_names",
+        mkstemp_and_mkdtemp_make_private_unique_names,
+    ),
+    (
+        "utime_sets_the_stamps_stat_reads",
+        utime_sets_the_stamps_stat_reads,
+    ),
+    (
+        "freopen_keeps_the_descriptor_number",
+        freopen_keeps_the_descriptor_number,
+    ),
+    (
+        "group_database_has_the_one_root_row",
+        group_database_has_the_one_root_row,
+    ),
+    (
+        "pthread_setcancelstate_round_trips_per_thread",
+        pthread_setcancelstate_round_trips_per_thread,
+    ),
+    (
+        "execl_and_execle_pass_the_list_as_argv",
+        execl_and_execle_pass_the_list_as_argv,
     ),
 ];
 

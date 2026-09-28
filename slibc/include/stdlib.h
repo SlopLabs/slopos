@@ -94,6 +94,9 @@ long strtol_l(const char *s, char **endptr, int base, locale_t loc);
 unsigned long strtoul_l(const char *s, char **endptr, int base, locale_t loc);
 long long strtoll_l(const char *s, char **endptr, int base, locale_t loc);
 unsigned long long strtoull_l(const char *s, char **endptr, int base, locale_t loc);
+int mkstemp(char *tmpl);
+int mkostemp(char *tmpl, int flags);
+char *mkdtemp(char *tmpl);
 
 #ifdef __cplusplus
 }

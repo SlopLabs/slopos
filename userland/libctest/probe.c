@@ -2115,6 +2115,22 @@ static int conversion(void) {
     return 1;
 }
 
+// A `*` width or precision comes from an `int` argument; a negative width is
+// the `-` flag and a negative precision none. git names every pack index with
+// `%.*s`.
+static int star_widths(void) {
+    char out[32];
+    if (snprintf(out, sizeof out, "[%*d|%-*d|%*d]", 4, 7, 3, 8, -3, 9) != 14 ||
+        strcmp(out, "[   7|8  |9  ]") != 0) {
+        return fail("a * width was not taken from its argument");
+    }
+    if (snprintf(out, sizeof out, "%.*s|%.*s|%*.*f", 4, "packfile", -1, "all", 6, 2, 1.5) != 15 ||
+        strcmp(out, "pack|all|  1.50") != 0) {
+        return fail("a * precision was not taken from its argument");
+    }
+    return 1;
+}
+
 static int run(void) {
     static int (*const checks[])(void) = {
         jumps,           mask_jumps,          calendar,
@@ -2129,7 +2145,7 @@ static int run(void) {
         semaphores,      case_and_bits,       unbuffered,
         locked_pages,    waited_signal,       child_times,
         logging,         addresses,           conversion,
-        queued_value,
+        queued_value,    star_widths,
     };
     for (size_t i = 0; i < sizeof checks / sizeof checks[0]; i++) {
         check = (int)i + 1;

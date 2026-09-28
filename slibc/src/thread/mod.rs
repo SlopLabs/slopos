@@ -287,6 +287,51 @@ pub unsafe extern "C" fn pthread_getname_np(
     0
 }
 
+pub const PTHREAD_CANCEL_ENABLE: c_int = 0;
+pub const PTHREAD_CANCEL_DISABLE: c_int = 1;
+pub const PTHREAD_CANCEL_DEFERRED: c_int = 0;
+pub const PTHREAD_CANCEL_ASYNCHRONOUS: c_int = 1;
+
+/// Before TLS is up there is only the main thread and no TCB to hold its
+/// cancel state and type.
+static mut CANCEL_FALLBACK: [u8; 2] = [0; 2];
+
+/// Swaps this thread's cancel state (`which == 0`) or type (`which == 1`).
+unsafe fn swap_cancel(which: usize, value: c_int, old: *mut c_int) -> c_int {
+    if !(0..=1).contains(&value) {
+        return EINVAL.raw();
+    }
+    let slot = if tls::tls_is_initialized() {
+        let tcb = Tcb::current();
+        if which == 0 {
+            &raw mut (*tcb).cancel_state
+        } else {
+            &raw mut (*tcb).cancel_type
+        }
+    } else {
+        (&raw mut CANCEL_FALLBACK).cast::<u8>().add(which)
+    };
+    if !old.is_null() {
+        *old = *slot as c_int;
+    }
+    *slot = value as u8;
+    0
+}
+
+/// `pthread_setcancelstate(3)`. There is no `pthread_cancel`, so nothing
+/// ever requests cancellation; the state is kept only to be reported back.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, oldstate: *mut c_int) -> c_int {
+    swap_cancel(0, state, oldstate)
+}
+
+/// `pthread_setcanceltype(3)`. Kept and reported back, as
+/// [`pthread_setcancelstate`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_setcanceltype(kind: c_int, oldtype: *mut c_int) -> c_int {
+    swap_cancel(1, kind, oldtype)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_kill(thread: pthread_t, sig: c_int) -> c_int {
     if thread == 0 {

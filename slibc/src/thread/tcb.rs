@@ -21,7 +21,11 @@ pub struct Tcb {
     pub start_arg: *mut u8,
     pub retval: *mut u8,
     pub detached: bool,
-    _pad: [u8; 3],
+    /// `pthread_setcancelstate`'s value.
+    pub cancel_state: u8,
+    /// `pthread_setcanceltype`'s value.
+    pub cancel_type: u8,
+    _pad: [u8; 1],
     /// Kernel writes 0 here on exit (`CLONE_CHILD_CLEARTID`) + futex-wakes it.
     pub child_tid: i32,
     /// `strerror`'s per-thread answer. Not a `#[thread_local]`: LLVM can
@@ -63,7 +67,9 @@ impl Tcb {
             start_arg: ptr::null_mut(),
             retval: ptr::null_mut(),
             detached: false,
-            _pad: [0; 3],
+            cancel_state: 0,
+            cancel_type: 0,
+            _pad: [0; 1],
             child_tid: 0,
             strerror_buf: [0; STRERROR_BUF],
             thread_local_keys: [ptr::null_mut(); PTHREAD_KEYS_MAX],

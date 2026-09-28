@@ -7,6 +7,7 @@
 #![allow(non_camel_case_types)]
 
 pub mod sort;
+pub mod temp;
 
 use core::ffi::{c_int, c_long, c_longlong, c_ulong};
 

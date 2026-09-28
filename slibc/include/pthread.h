@@ -41,6 +41,10 @@ typedef struct {
     unsigned int __size[1];
 } pthread_once_t;
 
+#define PTHREAD_CANCEL_ENABLE (0)
+#define PTHREAD_CANCEL_DISABLE (1)
+#define PTHREAD_CANCEL_DEFERRED (0)
+#define PTHREAD_CANCEL_ASYNCHRONOUS (1)
 #define PTHREAD_COND_INITIALIZER { { 0 } }
 #define PTHREAD_CREATE_DETACHED (1)
 #define PTHREAD_CREATE_JOINABLE (0)
@@ -111,6 +115,8 @@ int pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *attr, int *pshared
 int pthread_equal(pthread_t t1, pthread_t t2);
 int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *detachstate);
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate);
+int pthread_setcancelstate(int state, int *oldstate);
+int pthread_setcanceltype(int kind, int *oldtype);
 
 #ifdef __cplusplus
 }

@@ -112,6 +112,12 @@ pub unsafe extern "C" fn wait4(
     }
 }
 
+/// `<sys/time.h>`'s timer names, Linux's values. Declared so a program that
+/// names them compiles; with no `setitimer` there is nothing to pass them to.
+pub const ITIMER_REAL: c_int = 0;
+pub const ITIMER_VIRTUAL: c_int = 1;
+pub const ITIMER_PROF: c_int = 2;
+
 /// There is no per-process interval timer and no `setitimer`, so an alarm
 /// cannot be armed. `alarm` has no failure return of its own — 0 means "none
 /// was pending" — so the refusal is reported through `errno` alone.

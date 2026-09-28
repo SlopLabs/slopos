@@ -34,6 +34,7 @@ int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpat
 void clearerr(FILE *stream);
 int fclose(FILE *stream);
 FILE *fdopen(int fd, const char *mode);
+FILE *freopen(const char *path, const char *mode, FILE *stream);
 int feof(FILE *stream);
 int ferror(FILE *stream);
 int fflush(FILE *stream);

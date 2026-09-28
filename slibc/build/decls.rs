@@ -93,6 +93,10 @@ pub const SHARED_TYPES: &[&str] = &[
      h_length: c_int, h_addr_list: *mut *mut c_char }",
     "struct servent { s_name: *mut c_char, s_aliases: *mut *mut c_char, s_port: c_int, \
      s_proto: *mut c_char }",
+    "struct group { gr_name: *mut c_char, gr_passwd: *mut c_char, gr_gid: gid_t, \
+     gr_mem: *mut *mut c_char }",
+    "struct utimbuf { actime: time_t, modtime: time_t }",
+    "struct itimerval { it_interval: timeval, it_value: timeval }",
 ];
 
 /// `va_list` is not a contract type and cannot be: the `libc` crate has no
@@ -996,6 +1000,9 @@ pub const HEADERS: &[HeaderSpec] = &[
              -> c_longlong",
             "strtoull_l(s: *const c_char, endptr: *mut *mut c_char, base: c_int, loc: locale_t) \
              -> c_ulonglong",
+            "mkstemp(tmpl: *mut c_char) -> c_int",
+            "mkostemp(tmpl: *mut c_char, flags: c_int) -> c_int",
+            "mkdtemp(tmpl: *mut c_char) -> *mut c_char",
         ],
         variables: &[],
         // `MB_CUR_MAX` has type `size_t` (C11 7.22 p2) and may not exceed
@@ -1038,6 +1045,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "clearerr(stream: *mut FILE)",
             "fclose(stream: *mut FILE) -> c_int",
             "fdopen(fd: c_int, mode: *const c_char) -> *mut FILE",
+            "freopen(path: *const c_char, mode: *const c_char, stream: *mut FILE) -> *mut FILE",
             "feof(stream: *mut FILE) -> c_int",
             "ferror(stream: *mut FILE) -> c_int",
             "fflush(stream: *mut FILE) -> c_int",
@@ -1187,6 +1195,11 @@ pub const HEADERS: &[HeaderSpec] = &[
             "usleep(usec: useconds_t) -> c_int",
             "getsid(pid: pid_t) -> pid_t",
             "execlp(file: *const c_char, arg0: *const c_char, ...) -> c_int",
+            "execl(path: *const c_char, arg0: *const c_char, ...) -> c_int",
+            "execle(path: *const c_char, arg0: *const c_char, ...) -> c_int",
+            "tcgetpgrp(fd: c_int) -> pid_t",
+            "tcsetpgrp(fd: c_int, pgrp: pid_t) -> c_int",
+            "getpass(prompt: *const c_char) -> *mut c_char",
             "pathconf(path: *const c_char, name: c_int) -> c_long",
             "fpathconf(fd: c_int, name: c_int) -> c_long",
             // Here as well as in `<sys/random.h>`, which is what glibc does:
@@ -1257,7 +1270,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         includes: &["sys/types.h", "time.h", "sys/time.h"],
         types: &["stat", "stat64"],
         consts: &["S_I*", "UTIME_*"],
-        slibc_consts: &[],
+        slibc_consts: &["S_ISUID", "S_ISGID", "S_ISVTX"],
         macros: &[],
         functions: &[
             "stat",
@@ -1443,9 +1456,9 @@ pub const HEADERS: &[HeaderSpec] = &[
         // `<sys/select.h>` too, as every Unix C library makes it visible here:
         // programs take `select`, `fd_set` and `timeval` from this header.
         includes: &["sys/types.h", "time.h", "sys/select.h"],
-        types: &[],
+        types: &["itimerval"],
         consts: &[],
-        slibc_consts: &[],
+        slibc_consts: &["ITIMER_REAL", "ITIMER_VIRTUAL", "ITIMER_PROF"],
         macros: &[],
         functions: &["gettimeofday", "lutimes"],
         extra: &[],
@@ -2011,7 +2024,43 @@ pub const HEADERS: &[HeaderSpec] = &[
             "getpwnam_r(name: *const c_char, pwd: *mut passwd, buf: *mut c_char, \
              buflen: size_t, result: *mut *mut passwd) -> c_int",
             "getpwnam(name: *const c_char) -> *mut passwd",
+            "getpwuid(uid: uid_t) -> *mut passwd",
         ],
+        variables: &[],
+        raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "grp.h",
+        summary: "group database",
+        includes: &["sys/types.h"],
+        types: &["group"],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[
+            "getgrgid(gid: gid_t) -> *mut group",
+            "getgrnam(name: *const c_char) -> *mut group",
+            "getgrgid_r(gid: gid_t, grp: *mut group, buf: *mut c_char, buflen: size_t, \
+             result: *mut *mut group) -> c_int",
+            "getgrnam_r(name: *const c_char, grp: *mut group, buf: *mut c_char, \
+             buflen: size_t, result: *mut *mut group) -> c_int",
+        ],
+        variables: &[],
+        raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "utime.h",
+        summary: "file access and modification times",
+        includes: &["sys/types.h"],
+        types: &["utimbuf"],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &["utime(path: *const c_char, times: *const utimbuf) -> c_int"],
         variables: &[],
         raw: &[],
         raw_unguarded: &[],
@@ -2078,7 +2127,12 @@ pub const HEADERS: &[HeaderSpec] = &[
             "pthread_once_t",
         ],
         consts: &["PTHREAD_*"],
-        slibc_consts: &[],
+        slibc_consts: &[
+            "PTHREAD_CANCEL_ENABLE",
+            "PTHREAD_CANCEL_DISABLE",
+            "PTHREAD_CANCEL_DEFERRED",
+            "PTHREAD_CANCEL_ASYNCHRONOUS",
+        ],
         macros: &[],
         functions: &[
             "pthread_create",
@@ -2141,6 +2195,8 @@ pub const HEADERS: &[HeaderSpec] = &[
             "pthread_attr_getdetachstate(attr: *const pthread_attr_t, \
              detachstate: *mut c_int) -> c_int",
             "pthread_attr_setdetachstate(attr: *mut pthread_attr_t, detachstate: c_int) -> c_int",
+            "pthread_setcancelstate(state: c_int, oldstate: *mut c_int) -> c_int",
+            "pthread_setcanceltype(kind: c_int, oldtype: *mut c_int) -> c_int",
         ],
         variables: &[],
         raw: &[],

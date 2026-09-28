@@ -54,6 +54,9 @@ struct stat64 {
     long __unused[3];
 };
 
+#define S_ISUID (04000)
+#define S_ISGID (02000)
+#define S_ISVTX (01000)
 #define S_IFBLK (0060000)
 #define S_IFCHR (0020000)
 #define S_IFDIR (0040000)
