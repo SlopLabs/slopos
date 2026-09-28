@@ -510,30 +510,31 @@ process whose own account holds the most of what the write found missing:
 `ResidentPages` for an empty buddy, `CommitPages` for a full ceiling — a
 process that promised itself a gigabyte and touched none of it frees no frame,
 and one holding frames promised elsewhere frees no promise. Both rows count a
-memfd toward whoever sized it, mapped or not, and a shared page toward no
-mapper: a shared memfd or ring region is populated whole from `mmap` to unmap,
-so `VmaMap` subtracts its span from the leaves it syncs, and the sizer's
-memfd holds the frames charge beside the commit one. Present leaves would
-count a shared page in every mapper and a held memfd in none, so any process
-could pad another's count and make it the victim. The ledger keeps each row's
-own share beside the subtree total (`quota::held_by`), so a child's holdings
-are the child's, and a process spawned past `MAX_ACCOUNT_DEPTH` still gets a
-row, debiting through its nearest ancestor with room, so no fork depth escapes
-the ceiling or the measure. A memfd outlives its sizer whenever another
-process holds its fd, and a released row's own share is credited out of every
-ancestor, so the address-space teardown hands each memfd its dying process
-sized to the account that process debited through (`ChargeSlot::bequeath`):
-the ceiling keeps counting it, the killer weighs it on that holder, and it
-leaves the ledger when the memfd goes. Only processes the writer could `kill`
-(`signal_dominates` on the writer's flags) are ever taken, as Linux's
+memfd toward whoever sized it, mapped or not, and a shared memfd or ring page
+toward no mapper: such a region is populated whole from `mmap` to unmap, so
+`VmaMap` subtracts its span from the leaves it syncs, and the sizer's memfd
+holds the frames charge beside the commit one. Present leaves would count a
+shared page in every mapper and a held memfd in none, so any process could pad
+another's count and make it the victim. A file page counts toward each process
+that faulted it in, which only its own faults can do. The ledger keeps each
+row's own share beside the subtree total (`quota::held_by`), so a child's
+holdings are the child's, and a process spawned past `MAX_ACCOUNT_DEPTH` still
+gets a row, debiting through its nearest ancestor with room, so no fork depth
+escapes the ceiling or the measure. A memfd outlives its sizer whenever another
+process holds its fd, so the sizer's address-space teardown hands each memfd it
+sized to the root (`ChargeSlot::bequeath`): the root is never released, so the
+machine's ceiling keeps counting it until the memfd goes, and it is no
+process's own, since no death gives it back. Only processes the writer could
+`kill` (`signal_dominates` on the writer's flags) are ever taken, as Linux's
 `oom_score_adj=-1000` is absolute: one holding privileged flags the writer
 lacks is never killed for its write, so a leaking privileged service is taken
 by its own write, once it is the heaviest process it may signal, and an
-unprivileged writer dies rather than take it. Init never is. The
-victim is killed the way every kill works (the flag each thread unwinds from,
-I8). The writer
-drops the address space, waits — killable, bounded — for the victim's frames
-to be back (noted once the teardown has dropped the address space, not
+unprivileged writer dies rather than take it. Init's own write is the
+exception, shielded from nothing, since it cannot be impersonated and its
+death takes the machine down; init itself is never taken. The victim is
+killed the way every kill works (the flag each thread unwinds from, I8). The
+writer drops the address space, waits — killable, bounded — for the victim's
+frames to be back (noted once the teardown has dropped the address space, not
 inferred from the slot's unbind), and writes again; while a victim is dying
 nobody picks a second — a victim whose last task left before the kill reached
 it included — and one still holding its memory five seconds after the kill

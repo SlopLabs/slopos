@@ -15,11 +15,15 @@
 //! ceiling. A frame shortage is not served by killing a process that promised
 //! itself a gigabyte and touched none of it, nor a full ceiling by killing one
 //! whose frames were promised to someone else. Either measure counts a memfd
-//! toward whoever sized it, mapped or not, and a shared page toward no mapper,
-//! so mapping another process's memory never makes the mapper the victim. Only
-//! a process the writer could `kill` is ever taken: one holding privileged
-//! flags the writer lacks is as safe from the killer as from the writer, and
-//! init, like a kernel task, which has no address space, never is.
+//! toward whoever sized it, mapped or not, and toward nobody once the sizer is
+//! gone, since no death gives it back. A page of a shared memfd or ring counts
+//! toward no mapper, so mapping another process's memory never makes the
+//! mapper the victim; a file page counts toward each process that faulted it
+//! in. Only a process the writer could `kill` is ever taken: one holding
+//! privileged flags the writer lacks is as safe from the killer as from the
+//! writer, unless the writer is init, whose failed write would take the
+//! machine down. Init itself, like a kernel task, which has no address space,
+//! never is.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
