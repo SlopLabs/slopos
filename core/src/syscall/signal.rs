@@ -883,6 +883,9 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
     {
         return SignalDisposition::Done;
     }
+    if let Some(signum) = task_ref.take_group_stop() {
+        return SignalDisposition::Stop { signum };
+    }
 
     let Some(taken) = task_ref.take_deliverable_signal(!task_ref.signal_blocked()) else {
         return SignalDisposition::Done;

@@ -71,6 +71,7 @@ pub fn syscall_handle(user_ctx: &UserContext) {
 
     let entry = syscall_lookup(sysno);
     let handler = entry.and_then(|e| e.handler);
+    let mut restartable = false;
 
     match handler {
         Some(func) => {
@@ -91,6 +92,7 @@ pub fn syscall_handle(user_ctx: &UserContext) {
             }
             let result = func(&ctx);
             slopos_sched::profile::note_syscall(sysno, began);
+            restartable = result == SyscallResult::Err(Errno::ERESTARTSYS);
             ctx.write_result(result);
         }
         None => {
@@ -103,16 +105,26 @@ pub fn syscall_handle(user_ctx: &UserContext) {
         }
     }
 
-    return_from_syscall(&current, user_ctx, sysno);
+    return_from_syscall(&current, user_ctx, sysno, restartable);
 }
 
 /// Deliver what is pending on `sysno`'s way out, settling an `ERESTARTSYS` it
 /// returned on the signal the delivery takes.
-pub(crate) fn return_from_syscall(current: &Current, user_ctx: &UserContext, sysno: u64) {
+///
+/// `restartable` is whether the handler itself returned `ERESTARTSYS`, not
+/// whether `rax` reads -512: `rt_sigreturn` may restore a user `rax` of that
+/// value, which Linux keeps from rewinding with `orig_ax = -1`.
+pub(crate) fn return_from_syscall(
+    current: &Current,
+    user_ctx: &UserContext,
+    sysno: u64,
+    restartable: bool,
+) {
     crate::syscall::signal::deliver_pending_signal_on_syscall_exit(current, user_ctx, |restart| {
-        settle_erestartsys(user_ctx, sysno, restart);
+        if restartable {
+            settle_erestartsys(user_ctx, sysno, restart);
+        }
     });
-    debug_assert_erestartsys_not_leaked(user_ctx);
 }
 
 /// The x86_64 `syscall` instruction is 2 bytes (`0F 05`), so rewinding
@@ -134,9 +146,7 @@ const TIMEOUT_BEARING: &[u64] = &[
 /// Runs before the signal frame is built, so the frame captures the rewound
 /// state.
 fn settle_erestartsys(user_ctx: &UserContext, sysno: u64, restart: bool) {
-    if user_ctx.rax() != ERRNO_ERESTARTSYS {
-        return;
-    }
+    debug_assert_eq!(user_ctx.rax(), ERRNO_ERESTARTSYS);
     debug_assert!(
         !TIMEOUT_BEARING.contains(&sysno),
         "syscall {sysno} returned ERESTARTSYS with a caller-supplied timeout; \
@@ -149,14 +159,6 @@ fn settle_erestartsys(user_ctx: &UserContext, sysno: u64, restart: bool) {
         regs.rax = sysno;
         user_ctx.set_regs(regs);
     } else {
-        user_ctx.set_rax(Errno::EINTR.as_u64());
-    }
-}
-
-/// Last resort: `ERESTARTSYS` must never reach userland, so convert it.
-fn debug_assert_erestartsys_not_leaked(user_ctx: &UserContext) {
-    let rax = user_ctx.rax();
-    if rax == ERRNO_ERESTARTSYS {
         user_ctx.set_rax(Errno::EINTR.as_u64());
     }
 }

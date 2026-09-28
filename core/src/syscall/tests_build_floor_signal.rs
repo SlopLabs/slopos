@@ -1343,6 +1343,153 @@ pub fn test_one_stop_publishes_one_report() -> TestResult {
     pass!()
 }
 
+/// A group stop reaches a running member that blocks the stop signal, as
+/// Linux's does; the report waits for that member to park.
+pub fn test_group_stop_reaches_a_member_blocking_the_signal() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let Some((leader_id, thread_id)) = spawn_thread_group() else {
+        return TestResult::Fail;
+    };
+    let ids = [thread_id, leader_id];
+    let (Some(leader), Some(thread)) = (task_find_by_id(leader_id), task_find_by_id(thread_id))
+    else {
+        return fail_and_clean(&ids);
+    };
+    thread.set_signal_blocked(sig_bit(SIGTSTP));
+    let running = task_set_state(thread_id, TaskStatus::Running) == 0;
+    let sent = task_group_signal(leader_id, SIGTSTP) != 0;
+    let leader_stopped = leader.is_stopped();
+    let early_report = leader.has_stop_report();
+    let asked = slopos_sched::task::task_has_deliverable_signal(&thread);
+
+    // The member's own return to user: the join is claimed through its mask,
+    // and its park completes the stop.
+    let ready = task_set_state(thread_id, TaskStatus::Ready) == 0;
+    let claimed = crate::syscall::signal::claim_pending_signal_for_test(&thread);
+    let parked = task_group_stop(thread_id, SIGTSTP);
+    let thread_stopped = thread.is_stopped();
+    let report = leader.take_stop_report();
+    let resumed = task_group_continue(leader_id);
+    drop((leader, thread));
+    terminate_all(&ids);
+
+    assert_test!(running && ready, "could not stage the sibling");
+    assert_test!(sent, "SIGTSTP reached no member");
+    assert_test!(leader_stopped, "the leader must be Stopped");
+    assert_test!(!early_report, "the report must wait for the running member");
+    assert_test!(asked, "the blocking member was never asked to stop");
+    assert_test!(claimed, "the blocking member's boundary must take the stop");
+    assert_test!(parked && thread_stopped, "the blocking member must park");
+    assert_eq_test!(report, Some(SIGTSTP), "the stopped group must report");
+    assert_test!(resumed, "SIGCONT must resume the group");
+    pass!()
+}
+
+/// A stop signal every member blocks only pends: nothing stopped, so the
+/// group's unconsumed `WCONTINUED` report stands.
+pub fn test_a_pending_blocked_stop_keeps_the_continue_report() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let stopped = task_group_stop(task_id, SIGSTOP);
+    let continued = task_group_continue(task_id);
+    task.set_signal_blocked(sig_bit(SIGTSTP));
+    let sent = task_group_signal(task_id, SIGTSTP) != 0;
+    let still_running = !task.is_stopped();
+    let pending = task.signal_pending() & sig_bit(SIGTSTP) != 0;
+    let report = task.take_continue_report();
+    drop(task);
+    task_terminate(task_id);
+
+    assert_test!(stopped && continued, "could not stage a continue report");
+    assert_test!(sent, "SIGTSTP reached no member");
+    assert_test!(still_running && pending, "a blocked SIGTSTP must only pend");
+    assert_test!(
+        report,
+        "the continue report must survive a stop that stopped nothing"
+    );
+    pass!()
+}
+
+/// `tgkill` of a stop signal the named thread blocks pends on that thread and
+/// wakes it, as every other `tgkill` does: it may have unblocked the signal
+/// and gone to sleep since its mask was read.
+pub fn test_a_directed_blocked_stop_wakes_its_target() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let Some((leader_id, thread_id)) = spawn_thread_group() else {
+        return TestResult::Fail;
+    };
+    let ids = [thread_id, leader_id];
+    let Some(thread) = task_find_by_id(thread_id) else {
+        return fail_and_clean(&ids);
+    };
+    thread.set_signal_blocked(sig_bit(SIGTSTP));
+    // Stand in for a published thread asleep in an interruptible wait; a wake
+    // refuses a nascent one.
+    let _ = slopos_sched::scheduler::clear_nascent_for_test(thread_id);
+    let _ = task_set_state(thread_id, TaskStatus::Ready);
+    let running = task_set_state(thread_id, TaskStatus::Running);
+    let sleeping = task_set_state(thread_id, TaskStatus::Blocked);
+    let blocked = running == 0 && sleeping == 0;
+    let post = slopos_sched::task::task_thread_signal_info(
+        leader_id,
+        thread_id,
+        SIGTSTP,
+        slopos_abi::signal::SigInfo::KERNEL,
+    );
+    let status = thread.status();
+    let pending = thread.signal_pending() & sig_bit(SIGTSTP) != 0;
+    drop(thread);
+    terminate_all(&ids);
+
+    assert_test!(blocked, "could not put the target to sleep");
+    assert_test!(post.is_some(), "tgkill found no target");
+    assert_test!(pending, "the stop must pend on the named thread");
+    assert_eq_test!(status, TaskStatus::Ready, "the target must be woken");
+    pass!()
+}
+
+/// An unblocked stop signal set to `SIG_IGN` is discarded at the send.
+pub fn test_an_ignored_stop_signal_is_discarded() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let ignored = task.set_signal_action(
+        (SIGTSTP - 1) as usize,
+        SignalAction {
+            handler: slopos_abi::signal::SIG_IGN,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        },
+    );
+    let reached = task_group_signal(task_id, SIGTSTP);
+    let stopped = task.is_stopped();
+    let pending = task.signal_pending() & sig_bit(SIGTSTP) != 0;
+    let report = task.has_stop_report();
+    drop(task);
+    task_terminate(task_id);
+
+    assert_test!(ignored, "installing SIG_IGN failed");
+    assert_eq_test!(
+        reached,
+        1,
+        "kill of an ignored signal still reaches the process"
+    );
+    assert_test!(!stopped, "an ignored SIGTSTP must not stop the process");
+    assert_test!(
+        !pending && !report,
+        "an ignored SIGTSTP must leave no trace"
+    );
+    pass!()
+}
+
 /// On-stack is a property of the interrupted stack pointer: a stored flag the
 /// inner return retires would base the next frame at the top of the stack the
 /// outer handler is still running on, overwriting it.
@@ -1719,6 +1866,22 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_one_stop_publishes_one_report,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_group_stop_reaches_a_member_blocking_the_signal,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_pending_blocked_stop_keeps_the_continue_report,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_directed_blocked_stop_wakes_its_target,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_an_ignored_stop_signal_is_discarded,
     suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
@@ -3552,7 +3715,8 @@ slopos_testing::stest!(
     suite = syscall_signal_build_floor
 );
 
-/// Run `sysno`'s way back to userland as `task_id`, as `syscall_handle` ends.
+/// Run the way back to userland of a `sysno` that returned `ERESTARTSYS` as
+/// `task_id`, as `syscall_handle` ends.
 #[must_use]
 fn return_from_syscall_as_current(
     task_id: u32,
@@ -3565,13 +3729,84 @@ fn return_from_syscall_as_current(
     }
     let returned = match Current::get() {
         Some(current) => with_user_process_context(table, || {
-            crate::syscall::dispatch::return_from_syscall(&current, ctx, sysno)
+            crate::syscall::dispatch::return_from_syscall(&current, ctx, sysno, true)
         })
         .is_some(),
         None => false,
     };
     park_bootstrap_on_current_cpu();
     returned
+}
+
+/// A user `rax` of -512 that `rt_sigreturn` restores is the interrupted
+/// code's value, not a restart request: the delivery on its own way out must
+/// neither rewind into another `rt_sigreturn` nor rewrite it to `EINTR`.
+pub fn test_sigreturn_restoring_erestartsys_does_not_restart() -> TestResult {
+    use slopos_abi::signal::SA_RESTART;
+    use slopos_abi::syscall::{ERRNO_ERESTARTSYS, SYSCALL_RT_SIGRETURN};
+    const INTERRUPTED_RIP: u64 = 0x5000_6006;
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let Some(table) = fdtable_of(task_id) else {
+        return fail_and_clean(&[task_id]);
+    };
+    assert_test!(
+        install_action(task_id, SIGUSR1, SA_RESTART),
+        "installing a SIGUSR1 handler failed"
+    );
+    assert_test!(task::task_signal_post(&task, SIGUSR1), "SIGUSR1 must pend");
+
+    let stack_top = process_vm_get_stack_top(table.process().expect("a live process"));
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rsp = stack_top.wrapping_sub(0x200);
+    frame.regs_mut().rip = INTERRUPTED_RIP;
+    assert_test!(
+        deliver_pending_signal_as_current(task_id, table, &frame),
+        "delivering SIGUSR1 failed"
+    );
+    let sigframe_addr = frame.rsp().wrapping_add(8);
+    let Some(mut sigframe) = user_copy_in::<SignalFrame>(table, sigframe_addr) else {
+        drop(task);
+        return fail_and_clean(&[task_id]);
+    };
+    sigframe.rax = ERRNO_ERESTARTSYS;
+    assert_test!(
+        user_copy_out(table, sigframe_addr, &sigframe),
+        "rewriting the sigframe's rax failed"
+    );
+    // Blocked by the running handler; the restored mask makes it deliverable
+    // on rt_sigreturn's own way out.
+    assert_test!(
+        task::task_signal_post(&task, SIGUSR1),
+        "SIGUSR1 must pend again"
+    );
+
+    frame.regs_mut().rsp = sigframe_addr;
+    frame.regs_mut().rax = SYSCALL_RT_SIGRETURN;
+    let handled = make_task_current(task_id)
+        && with_user_process_context(table, || crate::syscall::dispatch::syscall_handle(&frame))
+            .is_some();
+    park_bootstrap_on_current_cpu();
+    let saved = user_copy_in::<SignalFrame>(table, frame.rsp().wrapping_add(8))
+        .map(|saved| (saved.rip, saved.rax));
+    drop(task);
+    task_terminate(task_id);
+
+    assert_test!(handled, "rt_sigreturn did not run");
+    assert_eq_test!(
+        frame.rip(),
+        TEST_HANDLER,
+        "the second SIGUSR1 must be delivered"
+    );
+    assert_eq_test!(
+        saved,
+        Some((INTERRUPTED_RIP, ERRNO_ERESTARTSYS)),
+        "the restored registers must reach the next frame untouched"
+    );
+    pass!()
 }
 
 /// `ERESTARTSYS` is settled on the signal the way out takes, as Linux's
@@ -3842,6 +4077,10 @@ pub fn test_a_lost_standard_record_reads_as_a_kill_from_no_one() -> TestResult {
 
 slopos_testing::stest!(
     name = test_erestartsys_is_settled_on_the_signal_taken,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_sigreturn_restoring_erestartsys_does_not_restart,
     suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(

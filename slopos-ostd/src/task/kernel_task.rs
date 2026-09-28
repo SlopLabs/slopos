@@ -619,6 +619,10 @@ pub struct TaskInner<K, U> {
     pub(crate) stop_report: AtomicU8,
     /// `SIGCONT` counterpart of [`stop_report`](Self::stop_report).
     pub(crate) continue_report: AtomicU8,
+    /// A group stop this thread must join at its next return to user: the
+    /// stop signal number, or 0 for none. Not a pending signal, so the
+    /// thread's mask cannot hold it off, as Linux's `JOBCTL_STOP_PENDING`.
+    pub(crate) group_stop: AtomicU8,
     /// Signal whose default action killed this task, or 0 for an ordinary
     /// exit.
     pub(crate) exit_signal: AtomicU8,
@@ -1382,6 +1386,7 @@ impl<K, U> TaskInner<K, U> {
             sighand: None,
             stop_report: AtomicU8::new(0),
             continue_report: AtomicU8::new(0),
+            group_stop: AtomicU8::new(0),
             exit_signal: AtomicU8::new(0),
             sigaltstack_sp: AtomicU64::new(0),
             sigaltstack_size: AtomicU64::new(0),
@@ -1806,6 +1811,7 @@ impl<K, U> TaskInner<K, U> {
         // *parent* is waiting on, not to a task that has not run yet.
         self.stop_report = AtomicU8::new(0);
         self.continue_report = AtomicU8::new(0);
+        self.group_stop = AtomicU8::new(0);
         self.exit_signal = AtomicU8::new(0);
         // POSIX: an alternate signal stack is not inherited across fork, and a
         // thread starts off-stack.

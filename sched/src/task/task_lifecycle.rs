@@ -2031,15 +2031,6 @@ fn publish_job_control_report(tgid: u32, reporter: &Task, stop_signal: Option<u8
     }
 }
 
-fn has_user_handler(member: &Task, signum: u8) -> bool {
-    matches!(
-        member.signal_handler((signum - 1) as usize),
-        Some(handler)
-            if handler != slopos_abi::signal::SIG_DFL
-                && handler != slopos_abi::signal::SIG_IGN
-    )
-}
-
 /// A live user-mode member of `tgid`: `named` when it is one, else the first
 /// the walk finds.
 fn live_member(tgid: u32, named: u32) -> Option<TaskRef> {
@@ -2198,28 +2189,15 @@ fn blocked_by_every_member(tgid: u32, bit: SigSet) -> bool {
     members != 0 && blocking == members
 }
 
-/// Whether `tgid`'s shared disposition table catches `signum`.
-fn group_handles(tgid: u32, named: u32, signum: u8) -> bool {
-    live_member(tgid, named).is_some_and(|member| has_user_handler(&member, signum))
-}
-
-/// Park every member of `tid`'s thread group in [`TaskStatus::Stopped`].
+/// Send the stop signal `stop_signal` to `tid`'s thread group (`directed`:
+/// through `tgkill` to that one thread), returning how many members it
+/// reached.
 ///
-/// Idempotent. Returns the number of members the stop reached.
-///
-/// Where a member is decides how it stops: a member that is executing is poked
-/// and parks itself at its next return-to-user boundary rather than being
-/// descheduled mid-syscall; anything else is parked here.
-///
-/// **Parks the calling task last, and does not return until the group is
-/// resumed**, which is what makes `kill(getpid(), SIGSTOP)` stop the caller.
-///
-/// The `WUNTRACED` report is published once per stop, by the last member the
-/// stop has to park.
-///
-/// A stop signal its target blocks (`directed`, else every member) stops
-/// nothing here: as on Linux it pends for a delivery point, so `sigwait` and a
-/// signalfd can take it instead.
+/// Decided at the send, as Linux's `prepare_signal` and `sig_ignored` do: an
+/// ignored one is discarded, a caught one pends for a handler, and one its
+/// target blocks (`directed`, else every member) pends for a delivery point,
+/// so `sigwait` and a signalfd can take it instead. Anything else stops the
+/// group through [`task_group_stop`].
 fn task_group_stop_members(
     tid: u32,
     stop_signal: u8,
@@ -2232,20 +2210,78 @@ fn task_group_stop_members(
     }
     let tgid = thread_group_of(tid);
     let catchable = (bit & slopos_abi::signal::SIG_UNCATCHABLE) == 0;
-    let caught = catchable && group_handles(tgid, tid, stop_signal);
+    let handler =
+        live_member(tgid, tid).and_then(|member| member.signal_handler((stop_signal - 1) as usize));
+    let caught = catchable
+        && matches!(handler, Some(h) if h != slopos_abi::signal::SIG_DFL
+            && h != slopos_abi::signal::SIG_IGN);
     let blocked = catchable
         && !caught
         && match directed {
             Some(thread) => thread.signal_blocked() & bit != 0,
             None => blocked_by_every_member(tgid, bit),
         };
+    let ignored = catchable && !caught && !blocked && handler == Some(slopos_abi::signal::SIG_IGN);
+
     let cont_bit = slopos_abi::signal::sig_bit(slopos_abi::signal::SIGCONT);
+    let mut live = 0usize;
+    for_each_group_member(tgid, |member| {
+        if member.is_exited() {
+            return;
+        }
+        live += 1;
+        member.clear_signal_pending(cont_bit);
+    });
+
+    if ignored {
+        return live;
+    }
+    if blocked {
+        return match directed {
+            Some(thread) => {
+                let post = slopos_ostd::task::ops::task_signal_post_info(thread, stop_signal, info);
+                if post.is_pending() {
+                    let _ = scheduler::unblock_task(thread);
+                }
+                1
+            }
+            None => group_post(tgid, tid, stop_signal, info).reached,
+        };
+    }
+    if caught {
+        // Taken by one thread's handler, like any other process-directed
+        // signal: no member stops.
+        return group_post(tgid, tid, stop_signal, info).reached;
+    }
+    task_group_stop_all(tid, stop_signal)
+}
+
+/// Park every member of `tid`'s thread group in [`TaskStatus::Stopped`],
+/// whatever each one blocks, as Linux's group stop does.
+///
+/// Idempotent. Returns the number of members the stop reached.
+///
+/// Where a member is decides how it stops: a member that is executing is asked
+/// to join and parks itself at its next return-to-user boundary rather than
+/// being descheduled mid-syscall; anything else is parked here.
+///
+/// **Parks the calling task last, and does not return until the group is
+/// resumed**, which is what makes `kill(getpid(), SIGSTOP)` stop the caller.
+///
+/// The `WUNTRACED` report is published once per stop, by the last member the
+/// stop has to park.
+fn task_group_stop_all(tid: u32, stop_signal: u8) -> usize {
+    let bit = slopos_abi::signal::sig_bit(stop_signal);
+    if bit == 0 {
+        return 0;
+    }
+    let tgid = thread_group_of(tid);
     let current_addr = TaskAddr::current();
     let mut acted = 0usize;
-    // Members this call moved into the stop: one that merely took the signal
-    // for its handler, or was already stopped, is no state change to report.
+    // Members this call moved into the stop: one already stopped is no state
+    // change to report.
     let mut transitions = 0usize;
-    // Members left running with the stop pending. The report waits for them.
+    // Members left running with the stop requested. The report waits for them.
     let mut poked = 0usize;
     let mut park_self = false;
     let mut reporter: Option<TaskRef> = None;
@@ -2256,17 +2292,14 @@ fn task_group_stop_members(
         }
         // A stop retires an unconsumed continue: they are opposite states of
         // one process, and the later one wins.
-        member.clear_signal_pending(cont_bit);
         let _ = member.take_continue_report();
 
-        if caught || blocked {
-            return;
-        }
         if member.is_stopped() {
             acted += 1;
             return;
         }
         if current_addr == Some(TaskAddr::of(member)) {
+            let _ = member.take_group_stop();
             member.clear_signal_pending(bit);
             park_self = true;
             acted += 1;
@@ -2275,7 +2308,11 @@ fn task_group_stop_members(
             return;
         }
         if member.on_cpu() || member.is_running() {
-            slopos_ostd::task::ops::task_signal_raise(member, bit);
+            member.request_group_stop(stop_signal);
+            // Request then wake, against a member that blocked in an
+            // interruptible wait after the status read above.
+            core::sync::atomic::fence(Ordering::SeqCst);
+            let _ = scheduler::unblock_task(member);
             if let Some(cpu) = scheduler::cpu_running_task(TaskAddr::of(member)) {
                 crate::lifecycle::send_reschedule_ipi(cpu);
             }
@@ -2284,6 +2321,7 @@ fn task_group_stop_members(
             return;
         }
         if member.mark_stopped() {
+            let _ = member.take_group_stop();
             // Consumed by the park itself: leaving it pending would re-stop the
             // member at its first delivery point after a SIGCONT.
             member.clear_signal_pending(bit);
@@ -2301,21 +2339,6 @@ fn task_group_stop_members(
             reporter = Some(member.clone());
         }
     });
-
-    if blocked {
-        return match directed {
-            Some(thread) => {
-                let _ = slopos_ostd::task::ops::task_signal_post_info(thread, stop_signal, info);
-                1
-            }
-            None => group_post(tgid, tid, stop_signal, info).reached,
-        };
-    }
-    if caught {
-        // Taken by one thread's handler, like any other process-directed
-        // signal: no member stops.
-        return group_post(tgid, tid, stop_signal, info).reached;
-    }
 
     if acted == 0 {
         return 0;
@@ -2345,10 +2368,11 @@ fn task_group_stop_members(
     acted
 }
 
-/// Job control. Idempotent; see [`task_group_stop_members`] for the mechanics
-/// and the caller-parks-last rule.
+/// Stop `tid`'s thread group on a stop signal a delivery point took, or on a
+/// group stop the caller was asked to join. Idempotent; see
+/// [`task_group_stop_all`] for the mechanics and the caller-parks-last rule.
 pub fn task_group_stop(tid: u32, stop_signal: u8) -> bool {
-    task_group_stop_members(tid, stop_signal, SigInfo::KERNEL, None) != 0
+    task_group_stop_all(tid, stop_signal) != 0
 }
 
 /// Resume every stopped member of `tid`'s thread group, and retire any pending
@@ -2370,6 +2394,7 @@ pub fn task_group_continue(tid: u32) -> bool {
             return;
         }
         member.clear_signal_pending(stop_bits);
+        let _ = member.take_group_stop();
         if !member.is_stopped() {
             return;
         }

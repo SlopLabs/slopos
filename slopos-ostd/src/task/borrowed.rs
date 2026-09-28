@@ -297,9 +297,11 @@ impl<K, U> TaskInner<K, U> {
     }
 
     /// Whether a delivery point would act on a signal: one of this thread's
-    /// own it does not block, or, when picked, one of its process's.
+    /// own it does not block, or, when picked, one of its process's, or a
+    /// group stop it has to join.
     pub fn has_deliverable_signal(&self) -> bool {
-        self.next_signal(!self.signal_blocked()).is_some()
+        self.group_stop.load(Ordering::Acquire) != 0
+            || self.next_signal(!self.signal_blocked()).is_some()
     }
 
     /// The signal [`take_deliverable_signal`](Self::take_deliverable_signal)
@@ -450,6 +452,22 @@ impl<K, U> TaskInner<K, U> {
     #[inline]
     pub fn take_continue_report(&self) -> bool {
         self.continue_report.swap(0, Ordering::AcqRel) != 0
+    }
+
+    /// Ask this thread to join its group's stop by `stop_signal` at its next
+    /// return to user, whatever it blocks.
+    #[inline]
+    pub fn request_group_stop(&self, stop_signal: u8) {
+        self.group_stop.store(stop_signal, Ordering::Release);
+    }
+
+    /// Take the group stop this thread was asked to join, if any.
+    #[inline]
+    pub fn take_group_stop(&self) -> Option<u8> {
+        match self.group_stop.swap(0, Ordering::AcqRel) {
+            0 => None,
+            signum => Some(signum),
+        }
     }
 
     #[inline]
