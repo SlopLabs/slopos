@@ -1133,7 +1133,7 @@ define_syscall!(syscall_clone
     }
 });
 
-fn read_timeout(addr: u64) -> Result<Timespec, Errno> {
+pub(crate) fn read_timeout(addr: u64) -> Result<Timespec, Errno> {
     let ptr = MmUserPtr::<Timespec>::try_new(addr).map_err(|_| Errno::EFAULT)?;
     let ts = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
     if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
@@ -1142,7 +1142,7 @@ fn read_timeout(addr: u64) -> Result<Timespec, Errno> {
     Ok(ts)
 }
 
-fn timespec_to_ms(ts: &Timespec) -> u64 {
+pub(crate) fn timespec_to_ms(ts: &Timespec) -> u64 {
     (ts.tv_sec as u64)
         .saturating_mul(1_000)
         .saturating_add((ts.tv_nsec as u64).div_ceil(1_000_000))

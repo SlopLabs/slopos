@@ -1330,7 +1330,8 @@ pub const HEADERS: &[HeaderSpec] = &[
     HeaderSpec {
         path: "signal.h",
         summary: "signals",
-        includes: &["sys/types.h"],
+        // `time.h` for the `struct timespec` `sigtimedwait` takes.
+        includes: &["sys/types.h", "time.h"],
         // `sigval` before `siginfo_t`, whose payload names it, and `siginfo_t`
         // before `sigaction`, whose handler slot names it.
         types: &[
@@ -1379,6 +1380,9 @@ pub const HEADERS: &[HeaderSpec] = &[
             "signal(signum: c_int, handler: sighandler_t) -> sighandler_t",
             "strsignal(sig: c_int) -> *mut c_char",
             "sigqueue(pid: pid_t, sig: c_int, value: sigval) -> c_int",
+            "sigwaitinfo(set: *const sigset_t, info: *mut siginfo_t) -> c_int",
+            "sigtimedwait(set: *const sigset_t, info: *mut siginfo_t, timeout: *const timespec) \
+             -> c_int",
         ],
         variables: &[],
         raw: &[],

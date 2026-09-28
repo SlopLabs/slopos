@@ -7,14 +7,17 @@
 //! probes read; its [`SigQueue`] says what each set bit carries. Standard
 //! signals coalesce — one record per signal, the first sender's — and realtime
 //! ones queue every instance in arrival order, up to [`SIGQUEUE_MAX`], as
-//! POSIX has them. A bit set with no record (the kernel raised it, the store
-//! was never needed, or a `kill` overflowed the queue) delivers as
-//! [`SigInfo::KERNEL`].
+//! POSIX has them. A standard signal's bit set with no record — the kernel
+//! raised it, and the store was never needed — delivers as
+//! [`SigInfo::KERNEL`]; a realtime instance with none, one a `kill` pended past
+//! the queue limit, delivers as a `kill` from no one (`SI_USER`, pid 0).
 
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_abi::signal::{SIGQUEUE_MAX, SIGRTMIN, SigInfo, SigSet, sig_bit, sig_is_realtime};
+use slopos_abi::signal::{
+    SI_USER, SIGQUEUE_MAX, SIGRTMIN, SigInfo, SigSet, sig_bit, sig_is_realtime,
+};
 
 use crate::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use crate::task::ops::SignalPost;
@@ -33,6 +36,19 @@ const STANDARD: usize = (SIGRTMIN - 1) as usize;
 /// One slot past the send limit, so an instance a delivery took and has to put
 /// back still fits after a sender refilled the queue behind it.
 const RT_CAPACITY: usize = SIGQUEUE_MAX + 1;
+
+/// What a realtime instance that lost its record reports, as Linux does:
+/// a sent signal from no one, never one the kernel raised.
+const LOST_RECORD: SigInfo = SigInfo::sent(SI_USER, 0, 0, 0);
+
+/// The record of a pending `signo` whose store holds none for it.
+fn unrecorded(signo: u8) -> SigInfo {
+    if sig_is_realtime(signo) {
+        LOST_RECORD
+    } else {
+        SigInfo::KERNEL
+    }
+}
 
 /// Allocated zeroed on the first signal that carries a record; all-zero is
 /// the empty store.
@@ -104,7 +120,7 @@ impl SigQueue {
         }
         let len = self.rt_len as usize;
         let Some(at) = self.rt[..len].iter().position(|e| e.signo == signo) else {
-            return (SigInfo::KERNEL, false);
+            return (LOST_RECORD, false);
         };
         let info = self.rt[at].info;
         self.rt.copy_within(at + 1..len, at);
@@ -270,7 +286,7 @@ impl PendingSignals {
         let signum = (pending.trailing_zeros() + 1) as u8;
         let (info, more) = match store.as_deref_mut() {
             Some(queue) => queue.take(signum),
-            None => (SigInfo::KERNEL, false),
+            None => (unrecorded(signum), false),
         };
         if !more {
             self.bits.fetch_and(!sig_bit(signum), Ordering::AcqRel);

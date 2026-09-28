@@ -2159,6 +2159,31 @@ pub fn task_hand_on_newly_blocked(task: &Task, newly_blocked: SigSet) {
     }
 }
 
+/// Take one of `task`'s pending signals in `mask`, blocked or not, as a
+/// `signalfd` read or `sigtimedwait` does, waiting for one to be sent when
+/// none is: forever, or for `timeout_ms`. Interruptible.
+pub fn task_wait_for_signal(
+    task: &Task,
+    mask: SigSet,
+    timeout_ms: Option<u64>,
+) -> slopos_ostd::sync::wait_queue::WaitResult<slopos_ostd::task::sigqueue::DequeuedSignal> {
+    use slopos_ostd::sync::wait_queue::WaitAbort;
+    let arrival = slopos_ostd::sync::BUS
+        .subscribe(slopos_ostd::task::ops::signal_pending_event(task.task_id));
+    let take = || task.dequeue_signal(mask);
+    let waited = match timeout_ms {
+        None => arrival.wait_event_interruptible_until(take),
+        Some(ms) => arrival.wait_event_interruptible_timeout_until(take, ms),
+    };
+    match waited {
+        Err(WaitAbort::Killed) => Err(WaitAbort::Killed),
+        // A signal of `mask` the caller does not block interrupts the wait
+        // before the take can see it; it is taken, not delivered.
+        Err(abort) => task.dequeue_signal(mask).ok_or(abort),
+        taken => taken,
+    }
+}
+
 /// Whether `tgid`'s shared disposition table catches `signum`.
 fn group_handles(tgid: u32, named: u32, signum: u8) -> bool {
     live_member(tgid, named).is_some_and(|member| has_user_handler(&member, signum))

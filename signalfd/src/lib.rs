@@ -2,9 +2,10 @@
 //! into in-band ring/poll events.
 //!
 //! `signalfd(mask)` returns an fd that becomes `POLLIN`-ready when a signal in
-//! `mask` is pending for the calling task; combined with the caller blocking
-//! those signals (`rt_sigprocmask`), a reactor harvests them as completions
-//! instead of being interrupted out-of-band with `EINTR`.
+//! `mask` is pending for the task polling it, its own or its process's;
+//! combined with that task blocking those signals (`rt_sigprocmask`), a
+//! reactor harvests them as completions instead of being interrupted
+//! out-of-band with `EINTR`.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -17,18 +18,16 @@ pub use file_ops::SIGNALFD_FILE_OPS;
 use slopos_abi::Errno;
 use slopos_fs::fileio::FdTable;
 
-/// Create a signalfd owned by `owner_task_id` watching the signals in `mask`.
-/// Returns the new fd (`>= 0`) or a negated errno.
-pub fn signalfd_create(table: FdTable, owner_task_id: u32, mask: u64) -> i32 {
+/// Create a signalfd in `table` watching the signals in `mask`, its open file
+/// `O_NONBLOCK` when `nonblock` and its descriptor close-on-exec when
+/// `cloexec`. Returns the new fd (`>= 0`) or a negated errno.
+pub fn signalfd_create(table: FdTable, mask: u64, nonblock: bool, cloexec: bool) -> i32 {
     let Ok(reservation) =
         slopos_ostd::process::quota::try_charge::<slopos_abi::quota::ObjectRow>(table.account(), 1)
     else {
         return Errno::ENFILE.raw();
     };
-    let Some(raw_handle) = registry::insert(registry::SignalfdState {
-        owner_task_id,
-        mask,
-    }) else {
+    let Some(raw_handle) = registry::insert(registry::SignalfdState { mask }) else {
         return Errno::ENOMEM.raw();
     };
     // A failed allocation leaves no backing to run the entry's `Drop`, so the
@@ -46,11 +45,15 @@ pub fn signalfd_create(table: FdTable, owner_task_id: u32, mask: u64) -> i32 {
         };
     // On install failure the fd layer drops the backing, which removes the
     // registry entry; no manual cleanup here.
-    slopos_fs::fileio_open_fd_with_ops(
+    slopos_fs::fileio_open_fd_with_ops_nonblock(
         table,
         &file_ops::SIGNALFD_FILE_OPS,
         raw_handle,
         Some(backing),
-        slopos_fs::FdFlags::NONE,
+        slopos_fs::FdFlags {
+            cloexec,
+            close_on_fork: false,
+        },
+        nonblock,
     )
 }

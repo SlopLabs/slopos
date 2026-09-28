@@ -53,8 +53,9 @@ pub use crate::syscall::ring_handlers::{
     syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
 };
 use crate::syscall::signal::{
-    syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigqueueinfo,
-    syscall_rt_sigreturn, syscall_rt_tgsigqueueinfo, syscall_sigaltstack, syscall_tgkill,
+    syscall_kill, syscall_rt_sigaction, syscall_rt_sigpending, syscall_rt_sigprocmask,
+    syscall_rt_sigqueueinfo, syscall_rt_sigreturn, syscall_rt_sigtimedwait,
+    syscall_rt_tgsigqueueinfo, syscall_sigaltstack, syscall_tgkill,
 };
 pub use crate::syscall::signalfd_handlers::syscall_signalfd4;
 pub use crate::syscall::test_handlers::{
@@ -178,6 +179,8 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_SETSID]            => syscall_setsid,            "setsid";
     [SYSCALL_GETPGID]           => syscall_getpgid,           "getpgid";
     [SYSCALL_GETSID]            => syscall_getsid,            "getsid";
+    [SYSCALL_RT_SIGPENDING]     => syscall_rt_sigpending,     "rt_sigpending";
+    [SYSCALL_RT_SIGTIMEDWAIT]   => syscall_rt_sigtimedwait,   "rt_sigtimedwait";
     [SYSCALL_RT_SIGQUEUEINFO]   => syscall_rt_sigqueueinfo,   "rt_sigqueueinfo";
     [SYSCALL_SIGALTSTACK]       => syscall_sigaltstack,       "sigaltstack";
     [SYSCALL_MKNOD]             => syscall_mknod,             "mknod";
@@ -320,7 +323,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 160;
+pub const SYSCALL_ENTRY_COUNT: usize = 162;
 
 /// The recorded shape of the classification.
 ///
@@ -330,7 +333,7 @@ pub const SYSCALL_ENTRY_COUNT: usize = 160;
 /// construction and the assert below holds it there.
 const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::Unimplemented, 0),
-    (Capability::NoneSelf, 46),
+    (Capability::NoneSelf, 48),
     (Capability::NoneFd, 74),
     (Capability::NoneRelation, 17),
     (Capability::Power, 3),

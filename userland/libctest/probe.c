@@ -1848,22 +1848,107 @@ static int locked_pages(void) {
     return 1;
 }
 
+static void *send_later(void *arg) {
+    struct timespec pause = {0, 50 * 1000 * 1000};
+    nanosleep(&pause, NULL);
+    union sigval value = {.sival_int = 0x51};
+    sigqueue(getpid(), *(int *)arg, value);
+    return NULL;
+}
+
+static volatile int interrupter_seen;
+
+static void on_interrupter(int sig) {
+    (void)sig;
+    interrupter_seen++;
+}
+
+static void *interrupt_later(void *arg) {
+    struct timespec pause = {0, 50 * 1000 * 1000};
+    nanosleep(&pause, NULL);
+    pthread_kill(*(pthread_t *)arg, SIGUSR1);
+    return NULL;
+}
+
+// `sigwait` takes a signal that is already pending, and parks for one sent
+// after it began, as a thread that owns the process's signals does.
 static int waited_signal(void) {
-    sigset_t set, old;
+    sigset_t set, old, pending;
     sigemptyset(&set);
     sigaddset(&set, SIGUSR1);
     sigaddset(&set, SIGUSR2);
+    sigaddset(&set, SIGRTMIN);
     if (sigprocmask(SIG_BLOCK, &set, &old) != 0 || raise(SIGUSR2) != 0) {
         return fail("could not leave SIGUSR2 pending");
     }
+    sigemptyset(&pending);
+    if (sigpending(&pending) != 0 || !sigismember(&pending, SIGUSR2)) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        return fail("sigpending did not report the blocked pending signal");
+    }
     int sig = 0;
     if (sigwait(&set, &sig) != 0 || sig != SIGUSR2) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
         return fail("sigwait did not take the pending signal");
     }
-    sigset_t pending;
-    sigpending(&pending);
+    sigemptyset(&pending);
+    if (sigpending(&pending) != 0 || sigismember(&pending, SIGUSR2)) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        return fail("sigwait left its signal pending");
+    }
+
+    int queued = SIGRTMIN;
+    pthread_t sender;
+    sig = 0;
+    if (pthread_create(&sender, NULL, send_later, &queued) != 0) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        return fail("could not start the sending thread");
+    }
+    int waited = sigwait(&set, &sig);
+    pthread_join(sender, NULL);
+    if (waited != 0 || sig != SIGRTMIN) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        return fail("sigwait did not wait for a signal sent after it began");
+    }
+
+    siginfo_t info;
+    memset(&info, 0, sizeof info);
+    if (pthread_create(&sender, NULL, send_later, &queued) != 0) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        return fail("could not start the sending thread");
+    }
+    waited = sigwaitinfo(&set, &info);
+    pthread_join(sender, NULL);
+    if (waited != SIGRTMIN || info.si_signo != SIGRTMIN || info.si_code != SI_QUEUE ||
+        info.si_value.sival_int != 0x51 || info.si_pid != getpid()) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        return fail("sigwaitinfo did not return the queued record");
+    }
+
+    struct timespec brief = {0, 20 * 1000 * 1000};
+    if (sigtimedwait(&set, NULL, &brief) != -1 || errno != EAGAIN) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        return fail("sigtimedwait with nothing sent did not time out with EAGAIN");
+    }
+
+    sigset_t caught, quiet;
+    sigemptyset(&caught);
+    sigaddset(&caught, SIGUSR1);
+    sigemptyset(&quiet);
+    sigaddset(&quiet, SIGUSR2);
+    pthread_t self = pthread_self();
+    struct timespec patient = {5, 0};
+    int interrupted = signal(SIGUSR1, on_interrupter) != SIG_ERR &&
+                      sigprocmask(SIG_UNBLOCK, &caught, NULL) == 0 &&
+                      pthread_create(&sender, NULL, interrupt_later, &self) == 0;
+    if (interrupted) {
+        int ret = sigtimedwait(&quiet, NULL, &patient);
+        interrupted = ret == -1 && errno == EINTR && interrupter_seen == 1;
+        pthread_join(sender, NULL);
+    }
+    signal(SIGUSR1, SIG_DFL);
     sigprocmask(SIG_SETMASK, &old, NULL);
-    return sigismember(&pending, SIGUSR2) ? fail("sigwait left its signal pending") : 1;
+    return interrupted ? 1 : fail("a caught signal did not interrupt sigtimedwait with EINTR");
 }
 
 // The parent's child totals grow only by what a reaped child burned.

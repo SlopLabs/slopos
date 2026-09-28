@@ -8,6 +8,7 @@
 #define _SLIBC_SIGNAL_H
 
 #include <sys/types.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -167,6 +168,8 @@ int sigwait(const sigset_t *set, int *sig);
 sighandler_t signal(int signum, sighandler_t handler);
 char *strsignal(int sig);
 int sigqueue(pid_t pid, int sig, union sigval value);
+int sigwaitinfo(const sigset_t *set, siginfo_t *info);
+int sigtimedwait(const sigset_t *set, siginfo_t *info, const struct timespec *timeout);
 
 #ifdef __cplusplus
 }

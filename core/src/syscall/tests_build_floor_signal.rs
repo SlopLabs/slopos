@@ -2,7 +2,7 @@
 
 use core::ffi::c_char;
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::quota::{QuotaMode, ResourceKind};
 use slopos_abi::signal::{
@@ -47,7 +47,8 @@ use slopos_testing::{TestResult, assert_eq_test, assert_some, assert_test, pass}
 
 use crate::syscall::signal::{
     deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill,
-    syscall_rt_sigqueueinfo, syscall_rt_sigreturn, syscall_sigaltstack, syscall_tgkill,
+    syscall_rt_sigpending, syscall_rt_sigprocmask, syscall_rt_sigqueueinfo, syscall_rt_sigreturn,
+    syscall_rt_sigtimedwait, syscall_sigaltstack, syscall_tgkill,
 };
 use crate::tests::helpers::install_static_program;
 
@@ -2515,10 +2516,11 @@ pub fn test_a_signal_every_thread_blocks_goes_to_the_first_to_unblock() -> TestR
     pass!()
 }
 
-/// Past the queue limit a `kill` still pends, its record lost, as Linux has
-/// it; `sigqueue` and `tgkill` are refused with `EAGAIN`.
+/// Past the queue limit a `kill` still pends, its record lost — delivered as
+/// `SI_USER` from pid 0, as Linux has it; `sigqueue` and `tgkill` are refused
+/// with `EAGAIN`.
 pub fn test_only_a_kill_pends_past_the_queue_limit() -> TestResult {
-    use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMAX, SIGRTMIN, SigInfo};
+    use slopos_abi::signal::{SI_QUEUE, SI_USER, SIGQUEUE_MAX, SIGRTMAX, SIGRTMIN, SigInfo};
     use slopos_sched::task::{SignalPost, task_signal_post_info};
     let _fixture = SyscallFixture::new();
 
@@ -2544,6 +2546,9 @@ pub fn test_only_a_kill_pends_past_the_queue_limit() -> TestResult {
     let killed_same = kill(SIGRTMAX);
     let killed_other = kill(SIGRTMAX - 1);
     let kill_pending = target_task.signal_pending() & sig_bit(SIGRTMAX - 1) != 0;
+    let lost = target_task
+        .dequeue_signal(sig_bit(SIGRTMAX - 1))
+        .map(|taken| taken.info);
 
     let own_filled = (0..SIGQUEUE_MAX)
         .filter(|_| {
@@ -2572,6 +2577,11 @@ pub fn test_only_a_kill_pends_past_the_queue_limit() -> TestResult {
     assert_eq_test!(killed_same, 0, "a kill past the limit must succeed");
     assert_eq_test!(killed_other, 0, "a kill of another RT signal must succeed");
     assert_test!(kill_pending, "the kill past the limit must pend");
+    assert_eq_test!(
+        lost,
+        Some(SigInfo::sent(SI_USER, 0, 0, 0)),
+        "an instance past the limit must report a kill from no one, not the kernel"
+    );
     assert_eq_test!(
         own_filled,
         SIGQUEUE_MAX,
@@ -2888,6 +2898,690 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_sigpipe_names_the_writer_as_sender,
+    suite = syscall_signal_build_floor
+);
+
+/// What `task` takes at a delivery point with its own mask, as
+/// `(signal, value)`: a process signal only once it was picked for it.
+fn take_deliverable(task_id: u32) -> Option<(u8, u64)> {
+    let task = task_find_by_id(task_id)?;
+    task.take_deliverable_signal(!task.signal_blocked())
+        .map(|taken| (taken.signum, taken.info.value))
+}
+
+/// A process signal the send handed to the thread it named moves to a sibling
+/// when that thread blocks it through `rt_sigprocmask` before taking it, and
+/// the sibling's delivery takes the instance.
+pub fn test_blocking_a_picked_signal_hands_it_to_a_sibling() -> TestResult {
+    use slopos_abi::signal::{SIG_BLOCK, SIGRTMIN};
+    use slopos_sched::task::task_has_deliverable_signal;
+    let _fixture = SyscallFixture::new();
+
+    let Some(ids) = spawn_threads::<2>() else {
+        return TestResult::Fail;
+    };
+    let [named, sibling] = ids;
+    let Some(table) = fdtable_of(named) else {
+        return fail_and_clean(&ids);
+    };
+    let Some(page) = map_user_rw_region(table, 1) else {
+        return fail_and_clean(&ids);
+    };
+    let deliverable =
+        |id: u32| task_find_by_id(id).is_some_and(|task| task_has_deliverable_signal(&task));
+    let sent = sigqueue_as(sibling, page, named, SIGRTMIN, 0x7a11);
+    let picked_before = ids.map(deliverable);
+    let mask_addr = page + 256;
+    let staged = user_copy_out(table, mask_addr, &sig_bit(SIGRTMIN));
+    let blocked = call_as(
+        syscall_rt_sigprocmask,
+        named,
+        [SIG_BLOCK as u64, mask_addr, 0, 8],
+    );
+    let picked_after = ids.map(deliverable);
+    let taken = ids.map(take_deliverable);
+    terminate_all(&ids);
+
+    assert_eq_test!(sent, 0, "sigqueue to the process failed");
+    assert_eq_test!(
+        picked_before,
+        [true, false],
+        "the send must hand the signal to the thread it named"
+    );
+    assert_test!(staged, "could not stage the mask");
+    assert_eq_test!(blocked, 0, "rt_sigprocmask(SIG_BLOCK) failed");
+    assert_eq_test!(
+        picked_after,
+        [false, true],
+        "blocking a picked signal must hand it to the sibling"
+    );
+    assert_eq_test!(
+        taken,
+        [None, Some((SIGRTMIN, 0x7a11))],
+        "the sibling's delivery must take the instance"
+    );
+    pass!()
+}
+
+/// `rt_sigpending` reports the caller's pending signals, its own and its
+/// process's, that it blocks — nothing it would deliver, and no sibling's own.
+pub fn test_sigpending_reports_the_blocked_pending_signals() -> TestResult {
+    use slopos_abi::signal::{SIGRTMIN, SIGUSR2, SigInfo};
+    use slopos_sched::task::task_signal_post_info;
+    let _fixture = SyscallFixture::new();
+
+    let Some(ids) = spawn_threads::<2>() else {
+        return TestResult::Fail;
+    };
+    let [leader, sibling] = ids;
+    let Some(table) = fdtable_of(leader) else {
+        return fail_and_clean(&ids);
+    };
+    let Some(page) = map_user_rw_region(table, 1) else {
+        return fail_and_clean(&ids);
+    };
+    let (own, shared, unblocked) = (sig_bit(SIGUSR1), sig_bit(SIGRTMIN), sig_bit(SIGUSR2));
+    let posted = match (task_find_by_id(leader), task_find_by_id(sibling)) {
+        (Some(leader_task), Some(sibling_task)) => {
+            leader_task.set_signal_blocked(own | shared);
+            sibling_task.set_signal_blocked(shared);
+            task_signal_post_info(&leader_task, SIGUSR1, SigInfo::KERNEL).is_pending()
+                && task_signal_post_info(&leader_task, SIGUSR2, SigInfo::KERNEL).is_pending()
+        }
+        _ => false,
+    };
+    let sent = sigqueue_as(sibling, page, leader, SIGRTMIN, 0);
+    let set_addr = page + 256;
+    let pending_of = |id: u32| {
+        let rax = call_as(syscall_rt_sigpending, id, [set_addr, 8, 0, 0]);
+        (rax, user_copy_in::<u64>(table, set_addr))
+    };
+    let leaders = pending_of(leader);
+    let siblings = pending_of(sibling);
+    let short = call_as(syscall_rt_sigpending, leader, [set_addr, 4, 0, 0]);
+    terminate_all(&ids);
+
+    assert_test!(posted, "could not leave the thread's own signals pending");
+    assert_eq_test!(sent, 0, "sigqueue to the process failed");
+    assert_eq_test!(
+        leaders,
+        (0, Some(own | shared)),
+        "the leader's blocked pending set"
+    );
+    assert_test!(
+        leaders.1.unwrap_or(0) & unblocked == 0,
+        "an unblocked signal was reported"
+    );
+    assert_eq_test!(
+        siblings,
+        (0, Some(shared)),
+        "the sibling's blocked pending set"
+    );
+    assert_eq_test!(
+        short,
+        slopos_abi::Errno::EINVAL.as_u64(),
+        "a sigsetsize other than 8 must be EINVAL"
+    );
+    pass!()
+}
+
+/// `rt_sigtimedwait` hands realtime instances out in the order they were
+/// sent, each with its own record, lowest signal first; a zero timeout with
+/// nothing left is `EAGAIN`.
+pub fn test_sigtimedwait_takes_realtime_instances_in_order() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SIGRTMIN};
+    use slopos_abi::syscall::Timespec;
+    let _fixture = SyscallFixture::new();
+
+    let Some(ids) = spawn_threads::<2>() else {
+        return TestResult::Fail;
+    };
+    let [leader, sibling] = ids;
+    let Some(table) = fdtable_of(leader) else {
+        return fail_and_clean(&ids);
+    };
+    let Some(page) = map_user_rw_region(table, 1) else {
+        return fail_and_clean(&ids);
+    };
+    let set = sig_bit(SIGRTMIN) | sig_bit(SIGRTMIN + 1);
+    for id in ids {
+        if let Some(task) = task_find_by_id(id) {
+            task.set_signal_blocked(set);
+        }
+    }
+    let sends = [
+        sigqueue_as(sibling, page, leader, SIGRTMIN + 1, 3),
+        sigqueue_as(sibling, page, leader, SIGRTMIN, 1),
+        sigqueue_as(sibling, page, leader, SIGRTMIN, 2),
+    ];
+    let (set_addr, info_addr, zero_addr) = (page + 256, page + 512, page + 1024);
+    let staged = user_copy_out(table, set_addr, &set)
+        && user_copy_out(
+            table,
+            zero_addr,
+            &Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+        );
+    let mut taken = [(0u64, 0i32, 0i32, 0u64, 0u32); 3];
+    for slot in taken.iter_mut() {
+        let rax = call_as(syscall_rt_sigtimedwait, leader, [set_addr, info_addr, 0, 8]);
+        if let Some(info) = user_copy_in::<UserSiginfo>(table, info_addr) {
+            *slot = (
+                rax,
+                info.si_signo,
+                info.si_code,
+                info.si_value(),
+                info.si_pid(),
+            );
+        }
+    }
+    let drained = call_as(
+        syscall_rt_sigtimedwait,
+        leader,
+        [set_addr, info_addr, zero_addr, 8],
+    );
+    terminate_all(&ids);
+
+    assert_eq_test!(sends, [0, 0, 0], "a sigqueue to the process failed");
+    assert_test!(staged, "could not stage the set and timeout");
+    let rt = SIGRTMIN as u64;
+    let pid = leader;
+    assert_eq_test!(
+        taken[0],
+        (rt, rt as i32, SI_QUEUE, 1, pid),
+        "SIGRTMIN's first instance"
+    );
+    assert_eq_test!(
+        taken[1],
+        (rt, rt as i32, SI_QUEUE, 2, pid),
+        "SIGRTMIN's second instance"
+    );
+    assert_eq_test!(
+        taken[2],
+        (rt + 1, rt as i32 + 1, SI_QUEUE, 3, pid),
+        "SIGRTMIN+1's instance"
+    );
+    assert_eq_test!(
+        drained,
+        slopos_abi::Errno::EAGAIN.as_u64(),
+        "a zero timeout with nothing pending must be EAGAIN"
+    );
+    pass!()
+}
+
+/// One instance sent to a process is taken by one waiter: any thread's
+/// `rt_sigtimedwait`, picked or not, and no other thread's after it.
+pub fn test_sigtimedwait_takes_a_process_instance_once() -> TestResult {
+    use slopos_abi::signal::SIGRTMIN;
+    use slopos_abi::syscall::Timespec;
+    let _fixture = SyscallFixture::new();
+
+    let Some(ids) = spawn_threads::<3>() else {
+        return TestResult::Fail;
+    };
+    let Some(table) = fdtable_of(ids[0]) else {
+        return fail_and_clean(&ids);
+    };
+    let Some(page) = map_user_rw_region(table, 1) else {
+        return fail_and_clean(&ids);
+    };
+    let bit = sig_bit(SIGRTMIN);
+    for id in ids {
+        if let Some(task) = task_find_by_id(id) {
+            task.set_signal_blocked(bit);
+        }
+    }
+    let sent = sigqueue_as(ids[0], page, ids[0], SIGRTMIN, 0x0dd);
+    let (set_addr, zero_addr) = (page + 256, page + 512);
+    let staged = user_copy_out(table, set_addr, &bit)
+        && user_copy_out(
+            table,
+            zero_addr,
+            &Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+        );
+    let takes = [ids[2], ids[0], ids[1]]
+        .map(|id| call_as(syscall_rt_sigtimedwait, id, [set_addr, 0, zero_addr, 8]));
+    let left = ids
+        .map(task_find_by_id)
+        .iter()
+        .flatten()
+        .any(|task| task.signal_pending() & bit != 0);
+    terminate_all(&ids);
+
+    assert_eq_test!(sent, 0, "sigqueue to the process failed");
+    assert_test!(staged, "could not stage the set and timeout");
+    let eagain = slopos_abi::Errno::EAGAIN.as_u64();
+    assert_eq_test!(
+        takes,
+        [SIGRTMIN as u64, eagain, eagain],
+        "exactly the first waiter must take the instance"
+    );
+    assert_test!(!left, "a taken instance must leave the process");
+    pass!()
+}
+
+const WAITER_BUDGET_MS: u64 = 5_000;
+
+static WAITER_TASK: AtomicU32 = AtomicU32::new(INVALID_TASK_ID);
+static WAITER_CALLER: AtomicU32 = AtomicU32::new(INVALID_TASK_ID);
+static WAITER_ARGS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static WAITER_RESULT: AtomicU64 = AtomicU64::new(0);
+static WAITER_SIGNO: AtomicU32 = AtomicU32::new(0);
+static WAITER_ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
+static WAITER_DONE: AtomicBool = AtomicBool::new(false);
+
+fn spin_until(done: impl Fn() -> bool, budget_ms: u64) -> bool {
+    use slopos_kernel_services::clock::uptime_ms;
+    let deadline = uptime_ms().saturating_add(budget_ms);
+    while !done() {
+        if uptime_ms() > deadline {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+    true
+}
+
+fn waiter_body(wait: impl FnOnce() -> u64) {
+    use slopos_kernel_services::clock::uptime_ms;
+    WAITER_TASK.store(slopos_arch::pcr::current_task_id(), Ordering::Release);
+    let started = uptime_ms();
+    let result = wait();
+    WAITER_ELAPSED_MS.store(uptime_ms() - started, Ordering::Release);
+    WAITER_RESULT.store(result, Ordering::Release);
+    WAITER_DONE.store(true, Ordering::Release);
+}
+
+fn sigtimedwait_waiter() {
+    waiter_body(|| {
+        let args = WAITER_ARGS
+            .each_ref()
+            .map(|arg| arg.load(Ordering::Acquire));
+        call_as(
+            syscall_rt_sigtimedwait,
+            WAITER_CALLER.load(Ordering::Acquire),
+            args,
+        )
+    });
+}
+
+/// Reads the signalfd `WAITER_ARGS[0]` of `caller`'s table as itself, the task
+/// a signalfd serves, blocking the watched `WAITER_ARGS[1]` so they wait.
+fn signalfd_waiter() {
+    waiter_body(|| {
+        let caller = WAITER_CALLER.load(Ordering::Acquire);
+        let (Some(table), Some(current)) = (fdtable_of(caller), Current::get()) else {
+            return u64::MAX;
+        };
+        current
+            .task()
+            .set_signal_blocked(WAITER_ARGS[1].load(Ordering::Acquire));
+        let mut record = [0u8; slopos_abi::signal::SignalfdSiginfo::SERIALIZED_LEN];
+        let fd = WAITER_ARGS[0].load(Ordering::Acquire) as i32;
+        let read = slopos_fs::fileio::file_read_fd(
+            table,
+            fd,
+            &mut slopos_abi::io::KernelIoBuf::new(&mut record),
+        );
+        WAITER_SIGNO.store(
+            u32::from_ne_bytes([record[0], record[1], record[2], record[3]]),
+            Ordering::Release,
+        );
+        read as u64
+    });
+}
+
+/// Run `waiter` as `caller` on a kernel thread of its own, since only a task
+/// can sleep, and return once it has parked on its own or `caller`'s signal
+/// event, or finished: `false` when it did neither.
+fn start_waiter(waiter: fn(), caller: u32, args: [u64; 4]) -> bool {
+    use slopos_ostd::sync::BUS;
+    use slopos_ostd::task::ops::signal_pending_event;
+    WAITER_DONE.store(false, Ordering::Release);
+    WAITER_TASK.store(INVALID_TASK_ID, Ordering::Release);
+    WAITER_SIGNO.store(0, Ordering::Release);
+    WAITER_CALLER.store(caller, Ordering::Release);
+    for (slot, value) in WAITER_ARGS.iter().zip(args) {
+        slot.store(value, Ordering::Release);
+    }
+    let priority = slopos_abi::task::TaskPriority::Normal;
+    if slopos_ostd::task::spawn("sigwait-waiter", waiter, priority).is_err() {
+        return false;
+    }
+    spin_until(
+        || {
+            let waiter = WAITER_TASK.load(Ordering::Acquire);
+            WAITER_DONE.load(Ordering::Acquire)
+                || BUS.has_waiters(signal_pending_event(caller))
+                || (waiter != INVALID_TASK_ID && BUS.has_waiters(signal_pending_event(waiter)))
+        },
+        WAITER_BUDGET_MS,
+    )
+}
+
+/// The waiter's result and how long it waited, or `None` when it never
+/// finished; it is then killed, so it cannot outlive the test.
+fn finish_waiter() -> Option<(u64, u64)> {
+    let done = || WAITER_DONE.load(Ordering::Acquire);
+    if !spin_until(done, WAITER_BUDGET_MS) {
+        if let Some(waiter) = task_find_by_id(WAITER_TASK.load(Ordering::Acquire)) {
+            slopos_ostd::task::ops::task_kill_and_wake(&*waiter);
+        }
+        let _ = spin_until(done, WAITER_BUDGET_MS);
+        return None;
+    }
+    Some((
+        WAITER_RESULT.load(Ordering::Acquire),
+        WAITER_ELAPSED_MS.load(Ordering::Acquire),
+    ))
+}
+
+/// A user task, never run, blocking `blocked`, with one scratch page.
+fn idle_caller(blocked: u64) -> Option<(u32, FdTable, u64)> {
+    let id = create_test_user_task();
+    if id == INVALID_TASK_ID {
+        return None;
+    }
+    let ready = task_find_by_id(id).and_then(|task| {
+        task.set_signal_blocked(blocked);
+        let table = fdtable_of(id)?;
+        Some((id, table, map_user_rw_region(table, 1)?))
+    });
+    if ready.is_none() {
+        task_terminate(id);
+    }
+    ready
+}
+
+/// `rt_sigtimedwait` with nothing pending sleeps until another task sends a
+/// signal of its set, then returns that signal, taken.
+pub fn test_sigtimedwait_sleeps_until_a_signal_is_sent() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SIGRTMIN, SigInfo};
+    let bit = sig_bit(SIGRTMIN);
+    let Some((caller, table, page)) = idle_caller(bit) else {
+        return TestResult::Fail;
+    };
+    let staged = user_copy_out(table, page, &bit);
+    let parked = staged && start_waiter(sigtimedwait_waiter, caller, [page, 0, 0, 8]);
+    let early = WAITER_DONE.load(Ordering::Acquire);
+    let reached =
+        task::task_group_signal_info(caller, SIGRTMIN, SigInfo::sent(SI_QUEUE, 7, 0, 5)).reached;
+    let finished = finish_waiter();
+    let left = task_find_by_id(caller).map_or(0, |task| task.signal_pending() & bit);
+    task_terminate(caller);
+
+    assert_test!(parked, "the waiter never began to wait");
+    assert_test!(!early, "rt_sigtimedwait returned with nothing sent");
+    assert_eq_test!(reached, 1, "the send reached no thread");
+    assert_eq_test!(
+        finished.map(|(rax, _)| rax),
+        Some(SIGRTMIN as u64),
+        "the waiter must wake with the signal sent"
+    );
+    assert_eq_test!(left, 0, "the waited signal must be taken");
+    pass!()
+}
+
+/// `rt_sigtimedwait` with nothing sent is `EAGAIN` once its timeout passes,
+/// and not before.
+pub fn test_sigtimedwait_times_out_with_eagain() -> TestResult {
+    use slopos_abi::signal::SIGRTMIN;
+    use slopos_abi::syscall::Timespec;
+    const TIMEOUT_MS: u64 = 30;
+    let bit = sig_bit(SIGRTMIN);
+    let Some((caller, table, page)) = idle_caller(bit) else {
+        return TestResult::Fail;
+    };
+    let timeout = Timespec {
+        tv_sec: 0,
+        tv_nsec: (TIMEOUT_MS * 1_000_000) as i64,
+    };
+    let staged = user_copy_out(table, page, &bit) && user_copy_out(table, page + 64, &timeout);
+    let started = staged && start_waiter(sigtimedwait_waiter, caller, [page, 0, page + 64, 8]);
+    let finished = finish_waiter();
+    task_terminate(caller);
+
+    assert_test!(started, "the waiter never began to wait");
+    let Some((rax, elapsed)) = finished else {
+        return slopos_testing::fail!("the timed wait never ended");
+    };
+    assert_eq_test!(
+        rax,
+        slopos_abi::Errno::EAGAIN.as_u64(),
+        "a timed-out wait must be EAGAIN"
+    );
+    assert_test!(elapsed >= TIMEOUT_MS, "the wait ended before its timeout");
+    pass!()
+}
+
+/// A `read` on a signalfd without `O_NONBLOCK` and nothing pending sleeps
+/// until a watched signal is sent to the reader, then returns its record.
+pub fn test_a_blocking_signalfd_read_sleeps_until_a_signal_is_sent() -> TestResult {
+    use slopos_abi::signal::{SI_USER, SigInfo, SignalfdSiginfo};
+    use slopos_sched::task::task_signal_post_info;
+    let bit = sig_bit(SIGUSR1);
+    let Some((caller, table, _page)) = idle_caller(bit) else {
+        return TestResult::Fail;
+    };
+    let fd = slopos_signalfd::signalfd_create(table, bit, false, false);
+    let parked = fd >= 0 && start_waiter(signalfd_waiter, caller, [fd as u64, bit, 0, 0]);
+    let early = WAITER_DONE.load(Ordering::Acquire);
+    let posted = task_find_by_id(WAITER_TASK.load(Ordering::Acquire)).is_some_and(|reader| {
+        task_signal_post_info(&reader, SIGUSR1, SigInfo::sent(SI_USER, 9, 0, 0)).is_pending()
+    });
+    let finished = finish_waiter();
+    let signo = WAITER_SIGNO.load(Ordering::Acquire);
+    if fd >= 0 {
+        let _ = slopos_fs::fileio::file_close_fd(table, fd);
+    }
+    task_terminate(caller);
+
+    assert_test!(parked, "the reader never began to wait");
+    assert_test!(!early, "the read returned with nothing sent");
+    assert_test!(posted, "the signal did not pend on the reader");
+    assert_eq_test!(
+        finished.map(|(read, _)| read),
+        Some(SignalfdSiginfo::SERIALIZED_LEN as u64),
+        "the reader must wake with one record"
+    );
+    assert_eq_test!(signo, SIGUSR1 as u32, "the record names another signal");
+    pass!()
+}
+
+/// `(read result, signal read)` of `fd` in `table`, read as `reader`.
+fn read_signalfd_as(reader: u32, table: FdTable, fd: i32) -> Option<(isize, u32)> {
+    if !make_task_current(reader) {
+        return None;
+    }
+    let mut record = [0u8; slopos_abi::signal::SignalfdSiginfo::SERIALIZED_LEN];
+    let read = slopos_fs::fileio::file_read_fd(
+        table,
+        fd,
+        &mut slopos_abi::io::KernelIoBuf::new(&mut record),
+    );
+    park_bootstrap_on_current_cpu();
+    Some((
+        read,
+        u32::from_ne_bytes([record[0], record[1], record[2], record[3]]),
+    ))
+}
+
+/// A signalfd serves the task using it, not the one that created it, as
+/// Linux's does: another process holding the descriptor — a forked child —
+/// polls and reads its own signals, and never drains the creator's.
+pub fn test_a_signalfd_serves_the_task_using_it() -> TestResult {
+    use slopos_abi::signal::{SIGUSR2, SigInfo};
+    use slopos_abi::syscall::{POLLIN, SFD_NONBLOCK};
+    use slopos_sched::task::task_signal_post_info;
+    let _fixture = SyscallFixture::new();
+
+    let creator = create_test_user_task();
+    let holder = create_test_user_task();
+    let ids = [creator, holder];
+    if ids.contains(&INVALID_TASK_ID) {
+        return fail_and_clean(&ids);
+    }
+    let Some(table) = fdtable_of(creator) else {
+        return fail_and_clean(&ids);
+    };
+    let Some(page) = map_user_rw_region(table, 1) else {
+        return fail_and_clean(&ids);
+    };
+    let mask = sig_bit(SIGUSR1) | sig_bit(SIGUSR2);
+    let staged = user_copy_out(table, page, &mask);
+    let fd = call_as(
+        crate::syscall::signalfd_handlers::syscall_signalfd4,
+        creator,
+        [-1i64 as u64, page, 8, SFD_NONBLOCK as u64],
+    ) as i64 as i32;
+    let posted = [(creator, SIGUSR1), (holder, SIGUSR2)]
+        .iter()
+        .all(|&(id, signum)| {
+            task_find_by_id(id).is_some_and(|task| {
+                task.set_signal_blocked(mask);
+                task_signal_post_info(&task, signum, SigInfo::KERNEL).is_pending()
+            })
+        });
+    let polled_as_holder =
+        make_task_current(holder) && slopos_fs::fileio::file_poll_fd(table, fd, POLLIN) == POLLIN;
+    park_bootstrap_on_current_cpu();
+    let holders = read_signalfd_as(holder, table, fd);
+    let holders_again = read_signalfd_as(holder, table, fd);
+    let polled_empty =
+        make_task_current(holder) && slopos_fs::fileio::file_poll_fd(table, fd, POLLIN) == 0;
+    park_bootstrap_on_current_cpu();
+    let creators = read_signalfd_as(creator, table, fd);
+    terminate_all(&ids);
+
+    let record = slopos_abi::signal::SignalfdSiginfo::SERIALIZED_LEN as isize;
+    assert_test!(staged, "could not stage the mask");
+    assert_test!(fd >= 0, "signalfd4(SFD_NONBLOCK) failed");
+    assert_test!(posted, "could not leave the signals pending");
+    assert_test!(polled_as_holder, "the holder's own signal must poll ready");
+    assert_eq_test!(
+        holders,
+        Some((record, SIGUSR2 as u32)),
+        "the holder must read its own signal"
+    );
+    assert_eq_test!(
+        holders_again.map(|(read, _)| read),
+        Some(slopos_abi::Errno::EAGAIN.raw() as isize),
+        "the holder must not drain the creator's signal"
+    );
+    assert_test!(
+        polled_empty,
+        "the creator's signal must not poll ready for the holder"
+    );
+    assert_eq_test!(
+        creators,
+        Some((record, SIGUSR1 as u32)),
+        "the creator's signal must wait for the creator"
+    );
+    pass!()
+}
+
+/// `signalfd4` takes `SFD_NONBLOCK` and `SFD_CLOEXEC`, Linux's values, onto the
+/// open file and the descriptor, and refuses any other flag.
+pub fn test_signalfd4_takes_nonblock_and_cloexec() -> TestResult {
+    use slopos_abi::syscall::{
+        F_GETFD, F_GETFL, FD_CLOEXEC, O_NONBLOCK, SFD_CLOEXEC, SFD_NONBLOCK,
+    };
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let Some(table) = fdtable_of(task_id) else {
+        return fail_and_clean(&[task_id]);
+    };
+    let Some(page) = map_user_rw_region(table, 1) else {
+        return fail_and_clean(&[task_id]);
+    };
+    let staged = user_copy_out(table, page, &sig_bit(SIGUSR1));
+    let open = |flags: u32| {
+        call_as(
+            crate::syscall::signalfd_handlers::syscall_signalfd4,
+            task_id,
+            [-1i64 as u64, page, 8, flags as u64],
+        )
+    };
+    let fcntl =
+        |fd: u64, cmd: u64| call_as(crate::syscall::fs::syscall_fcntl, task_id, [fd, cmd, 0, 0]);
+    let both = open(SFD_NONBLOCK | SFD_CLOEXEC);
+    let plain = open(0);
+    let refused = open(0x1);
+    let both_fl = fcntl(both, F_GETFL);
+    let both_fd = fcntl(both, F_GETFD);
+    let plain_fl = fcntl(plain, F_GETFL);
+    let plain_fd = fcntl(plain, F_GETFD);
+    task_terminate(task_id);
+
+    assert_test!(staged, "could not stage the mask");
+    assert_test!(
+        (both as i64) >= 0 && (plain as i64) >= 0,
+        "signalfd4 failed"
+    );
+    assert_eq_test!(
+        refused,
+        slopos_abi::Errno::EINVAL.as_u64(),
+        "an unknown flag must be EINVAL"
+    );
+    assert_test!(
+        both_fl & O_NONBLOCK != 0,
+        "SFD_NONBLOCK must set O_NONBLOCK"
+    );
+    assert_test!(both_fd & FD_CLOEXEC != 0, "SFD_CLOEXEC must set FD_CLOEXEC");
+    assert_test!(
+        plain_fl & O_NONBLOCK == 0,
+        "no flag must leave the file blocking"
+    );
+    assert_test!(
+        plain_fd & FD_CLOEXEC == 0,
+        "no flag must leave the fd inherited"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_blocking_a_picked_signal_hands_it_to_a_sibling,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_sigpending_reports_the_blocked_pending_signals,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_sigtimedwait_takes_realtime_instances_in_order,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_sigtimedwait_takes_a_process_instance_once,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_sigtimedwait_sleeps_until_a_signal_is_sent,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_sigtimedwait_times_out_with_eagain,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_blocking_signalfd_read_sleeps_until_a_signal_is_sent,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_signalfd_serves_the_task_using_it,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_signalfd4_takes_nonblock_and_cloexec,
     suite = syscall_signal_build_floor
 );
 

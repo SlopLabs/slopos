@@ -24,11 +24,14 @@ use slopos_ostd::user::context::{
 };
 
 use crate::syscall::args::{Signum, UserPtr};
+use crate::syscall::process_handlers::{read_timeout, timespec_to_ms};
 use crate::syscall::result::SyscallResult;
+use slopos_ostd::sync::wait_queue::WaitAbort;
 use slopos_sched::scheduler::schedule;
 use slopos_sched::task::{
     SignalPost, task_find_by_id, task_for_each_active, task_group_fatal_signal,
     task_group_signal_info, task_group_stop, task_terminate, task_thread_signal_info,
+    task_wait_for_signal,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
@@ -247,6 +250,50 @@ define_syscall!(syscall_rt_sigprocmask
     }
 
     Ok(())
+});
+
+define_syscall!(syscall_rt_sigpending
+    (ctx, set_ptr: UserPtr<SigSet>, sigsetsize: u64)
+    cap(NoneSelf)
+    -> Result<(), Errno>
+{
+    if sigsetsize != core::mem::size_of::<SigSet>() as u64 {
+        return Err(Errno::EINVAL);
+    }
+    let task_ref = ctx.task();
+    let pending = task_ref.signal_pending() & task_ref.signal_blocked();
+    copy_to_user(set_ptr.inner(), &pending).map_err(|_| Errno::EFAULT)
+});
+
+define_syscall!(syscall_rt_sigtimedwait
+    (ctx, set_ptr: UserPtr<SigSet>, info_ptr: Option<UserPtr<UserSiginfo>>, timeout_ptr: u64,
+     sigsetsize: u64)
+    cap(NoneSelf)
+    -> Result<u64, Errno>
+{
+    if sigsetsize != core::mem::size_of::<SigSet>() as u64 {
+        return Err(Errno::EINVAL);
+    }
+    let mask = copy_from_user(set_ptr.inner()).map_err(|_| Errno::EFAULT)? & !SIG_UNCATCHABLE;
+    let timeout_ms = match timeout_ptr {
+        0 => None,
+        addr => Some(timespec_to_ms(&read_timeout(addr)?)),
+    };
+    let task_ref = ctx.task();
+    // A zero timeout is a poll: `EAGAIN`, never `EINTR`, when nothing waits.
+    let taken = if timeout_ms == Some(0) {
+        task_ref.dequeue_signal(mask).ok_or(Errno::EAGAIN)?
+    } else {
+        task_wait_for_signal(task_ref, mask, timeout_ms).map_err(|abort| match abort {
+            WaitAbort::Timeout => Errno::EAGAIN,
+            _ => Errno::EINTR,
+        })?
+    };
+    if let Some(out) = info_ptr {
+        let record = UserSiginfo::from_info(taken.signum as i32, &taken.info);
+        copy_to_user(out.inner(), &record).map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(taken.signum as u64)
 });
 
 define_syscall!(syscall_kill

@@ -178,6 +178,15 @@ pub trait Pal {
         oldset: *mut u64,
         sigsetsize: usize,
     ) -> Result<(), Errno>;
+    fn rt_sigpending(set: *mut u64, sigsetsize: usize) -> Result<(), Errno>;
+    /// Take a pending signal of `set`, waiting up to `timeout` (forever when
+    /// null); the signal number.
+    fn rt_sigtimedwait(
+        set: *const u64,
+        info: *mut UserSiginfo,
+        timeout: *const Timespec,
+        sigsetsize: usize,
+    ) -> Result<i32, Errno>;
     fn kill(pid: i32, sig: i32) -> Result<(), Errno>;
     /// Signal thread `tid` of thread group `tgid`.
     fn tgkill(tgid: i32, tid: i32, sig: i32) -> Result<(), Errno>;
@@ -300,9 +309,6 @@ pub trait Pal {
     /// completed. `Err` means the kernel was not booted with `tests=on`.
     fn run_userland_tests() -> Result<(), Errno>;
 
-    /// `signalfd4(-1, mask, 8, flags)`: a new descriptor whose `read` takes
-    /// one pending signal in `mask` off the caller's pending set.
-    fn signalfd(mask: u64, flags: u32) -> Result<i32, Errno>;
     /// One line to the kernel log, which is where `syslog` writes.
     fn klog_write(buf: &[u8]) -> Result<usize, Errno>;
 }

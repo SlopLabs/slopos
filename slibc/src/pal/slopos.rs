@@ -789,6 +789,30 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn rt_sigpending(set: *mut u64, sigsetsize: usize) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_RT_SIGPENDING, set as u64, sigsetsize as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn rt_sigtimedwait(
+        set: *const u64,
+        info: *mut UserSiginfo,
+        timeout: *const Timespec,
+        sigsetsize: usize,
+    ) -> Result<i32, Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_RT_SIGTIMEDWAIT,
+                set as u64,
+                info as u64,
+                timeout as u64,
+                sigsetsize as u64,
+            )
+        };
+        Ok(to_result(ret)? as i32)
+    }
+
     fn kill(pid: i32, sig: i32) -> Result<(), Errno> {
         let ret = unsafe { syscall2(SYSCALL_KILL, pid as u64, sig as u64) };
         to_result(ret)?;
@@ -1249,20 +1273,6 @@ impl Pal for Sys {
         let ret = unsafe { syscall0(SYSCALL_RUN_USERLAND_TESTS) };
         to_result(ret)?;
         Ok(())
-    }
-
-    fn signalfd(mask: u64, flags: u32) -> Result<i32, Errno> {
-        let set = mask;
-        let ret = unsafe {
-            syscall4(
-                SYSCALL_SIGNALFD4,
-                -1i64 as u64,
-                &raw const set as u64,
-                core::mem::size_of::<u64>() as u64,
-                u64::from(flags),
-            )
-        };
-        Ok(to_result(ret)? as i32)
     }
 
     fn klog_write(buf: &[u8]) -> Result<usize, Errno> {

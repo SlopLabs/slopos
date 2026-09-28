@@ -259,9 +259,9 @@ impl<K, U> TaskInner<K, U> {
         self.pending.clear(bits) | shared
     }
 
-    /// Raise `bits` in this thread's own set with no record, so each delivers
-    /// as [`SigInfo::KERNEL`](slopos_abi::signal::SigInfo::KERNEL). Returns the
-    /// previous own set.
+    /// Raise `bits` in this thread's own set with no record, so each standard
+    /// one delivers as [`SigInfo::KERNEL`](slopos_abi::signal::SigInfo::KERNEL).
+    /// Returns the previous own set.
     pub fn raise_signal_pending(&self, bits: SigSet) -> SigSet {
         self.pending.raise(bits)
     }

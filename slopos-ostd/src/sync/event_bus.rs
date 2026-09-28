@@ -297,4 +297,28 @@ impl Subscription {
         self.queue
             .wait_event_interruptible_timeout(condition, timeout_ms)
     }
+
+    /// Generic-return [`wait_event_interruptible`](Self::wait_event_interruptible).
+    #[inline]
+    pub fn wait_event_interruptible_until<F, R>(&self, condition: F) -> WaitResult<R>
+    where
+        F: FnMut() -> Option<R>,
+    {
+        self.queue.wait_event_interruptible_until(condition)
+    }
+
+    /// Timed generic-return
+    /// [`wait_event_interruptible`](Self::wait_event_interruptible).
+    #[inline]
+    pub fn wait_event_interruptible_timeout_until<F, R>(
+        &self,
+        condition: F,
+        timeout_ms: u64,
+    ) -> WaitResult<R>
+    where
+        F: FnMut() -> Option<R>,
+    {
+        self.queue
+            .wait_event_interruptible_timeout_until(condition, timeout_ms)
+    }
 }

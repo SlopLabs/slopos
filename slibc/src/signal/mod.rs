@@ -19,7 +19,7 @@ pub mod wait;
 use core::ffi::{c_char, c_int, c_uint};
 use core::mem;
 
-use crate::errno::{EINTR, EINVAL, ENOSYS, errno_set};
+use crate::errno::{EINTR, EINVAL, errno_set};
 use crate::pal::slopos::signal_restorer_addr;
 use crate::pal::{Pal, Sys};
 use crate::types::{sigaction as SigAction, sigset_t, sigval, stack_t};
@@ -323,16 +323,20 @@ unsafe fn mask_op(how: c_int, set: *const sigset_t, oldset: *mut sigset_t) -> c_
     }
 }
 
-/// SlopOS has no `rt_sigpending`: the pending set lives only in the task
-/// struct and no syscall publishes it, so there is nothing to report.
+/// The signals pending for the caller, its own and its process's, that it
+/// blocks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigpending(set: *mut sigset_t) -> c_int {
     if set.is_null() {
         errno_set(EINVAL.raw());
         return -1;
     }
-    errno_set(ENOSYS.raw());
-    -1
+    let mut pending = 0u64;
+    if Sys::rt_sigpending(&raw mut pending, SIGSET_SIZE).is_err() {
+        return -1;
+    }
+    *set = sigset_t::from_kernel_mask(pending);
+    0
 }
 
 /// Replace the mask and block until a signal arrives, then restore it.

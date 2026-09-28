@@ -1505,11 +1505,25 @@ pub fn fileio_open_fd_with_ops(
     backing: Option<KArc<dyn FileBacking>>,
     fd_flags: FdFlags,
 ) -> i32 {
+    fileio_open_fd_with_ops_nonblock(table, ops, handle, backing, fd_flags, false)
+}
+
+/// [`fileio_open_fd_with_ops`] whose open file starts with `O_NONBLOCK` set
+/// when `nonblock`, as a `*_NONBLOCK` creation flag asks.
+pub fn fileio_open_fd_with_ops_nonblock(
+    table: FdTable,
+    ops: &'static dyn FileOps,
+    handle: usize,
+    backing: Option<KArc<dyn FileBacking>>,
+    fd_flags: FdFlags,
+    nonblock: bool,
+) -> i32 {
+    let status = if nonblock { O_NONBLOCK as u32 } else { 0 };
     install_fd_entry(
         table,
         ops,
         handle,
-        OpenMode::READ | OpenMode::WRITE,
+        (OpenMode::READ | OpenMode::WRITE).with_raw(status),
         fd_flags,
         None,
         backing,

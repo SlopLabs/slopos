@@ -18,7 +18,6 @@ const SLOT_BITS: u32 = 12;
 /// borrow.
 #[derive(Clone, Copy)]
 pub struct SignalfdState {
-    pub owner_task_id: u32,
     pub mask: u64,
 }
 

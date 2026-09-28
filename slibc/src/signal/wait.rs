@@ -1,14 +1,45 @@
-//! `sigwait(3)`, over a signalfd: reading one takes a pending signal of its
-//! mask off the caller's pending set, which is what `sigwait` is. The
-//! signals in `set` are blocked by the caller, as POSIX requires, so none of
-//! them is delivered to a handler while the read waits.
+//! `sigwait(3)`, `sigwaitinfo(2)` and `sigtimedwait(2)`, all over
+//! `rt_sigtimedwait`, which takes a pending signal of the set off the caller's
+//! pending signals, its own or its process's, and waits for one when none is.
 
 use core::ffi::c_int;
+use core::ptr;
 
-use crate::errno::{EINTR, EINVAL};
+use super::SIGSET_SIZE;
+use crate::errno::{EINTR, EINVAL, errno_set};
 use crate::pal::{Pal, Sys};
+use crate::time::Timespec;
 use crate::types::sigset_t;
-use slopos_abi::signal::SignalfdSiginfo;
+use slopos_abi::signal::UserSiginfo;
+
+/// Returns the signal number, or -1 with `errno` set: `EAGAIN` once `timeout`
+/// passes, `EINTR` when a caught signal outside `set` is delivered first.
+///
+/// # Safety
+/// `set` points to a `sigset_t`; `info`, when not null, to a writable
+/// `siginfo_t`; `timeout`, when not null, to a `timespec`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigtimedwait(
+    set: *const sigset_t,
+    info: *mut UserSiginfo,
+    timeout: *const Timespec,
+) -> c_int {
+    if set.is_null() || (*set).has_unsupported_bits() {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    let mask = (*set).kernel_mask();
+    Sys::rt_sigtimedwait(&raw const mask, info, timeout, SIGSET_SIZE).unwrap_or(-1)
+}
+
+/// [`sigtimedwait`] with no timeout.
+///
+/// # Safety
+/// As [`sigtimedwait`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigwaitinfo(set: *const sigset_t, info: *mut UserSiginfo) -> c_int {
+    sigtimedwait(set, info, ptr::null())
+}
 
 /// Returns 0 with the signal in `*sig`, or an error number; never `EINTR`.
 ///
@@ -16,30 +47,18 @@ use slopos_abi::signal::SignalfdSiginfo;
 /// `set` points to a `sigset_t`, `sig` to writable storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigwait(set: *const sigset_t, sig: *mut c_int) -> c_int {
-    if set.is_null() || sig.is_null() {
+    if set.is_null() || sig.is_null() || (*set).has_unsupported_bits() {
         return EINVAL.raw();
     }
     let mask = (*set).kernel_mask();
-    if mask == 0 || (*set).has_unsupported_bits() {
-        return EINVAL.raw();
-    }
-    let fd = match Sys::signalfd(mask, 0) {
-        Ok(fd) => fd,
-        Err(e) => return e.raw(),
-    };
-    let mut record = [0u8; SignalfdSiginfo::SERIALIZED_LEN];
-    let result = loop {
-        match Sys::read(fd, record.as_mut_ptr(), record.len()) {
-            Ok(n) if n == record.len() => {
-                let signo = u32::from_ne_bytes([record[0], record[1], record[2], record[3]]);
-                *sig = signo as c_int;
-                break 0;
+    loop {
+        match Sys::rt_sigtimedwait(&raw const mask, ptr::null_mut(), ptr::null(), SIGSET_SIZE) {
+            Ok(signo) => {
+                *sig = signo;
+                return 0;
             }
-            Ok(_) => break EINVAL.raw(),
             Err(e) if e.raw() == EINTR.raw() => continue,
-            Err(e) => break e.raw(),
+            Err(e) => return e.raw(),
         }
-    };
-    let _ = Sys::close(fd);
-    result
+    }
 }

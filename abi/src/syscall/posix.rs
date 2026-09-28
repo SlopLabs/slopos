@@ -161,6 +161,11 @@ pub const O_NONBLOCK: u64 = 0x800;
 pub const O_NOCTTY: u64 = 0x100;
 pub const O_CLOEXEC: u64 = 0x80_000;
 
+/// `signalfd4` flags, Linux's values: the descriptor's `O_NONBLOCK` and
+/// `O_CLOEXEC`.
+pub const SFD_NONBLOCK: u32 = O_NONBLOCK as u32;
+pub const SFD_CLOEXEC: u32 = O_CLOEXEC as u32;
+
 /// Ancillary data type: pass file descriptors.
 pub const SCM_RIGHTS: i32 = 1;
 
