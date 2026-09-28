@@ -88,8 +88,6 @@ fn std_canonicalize_resolves_against_the_cwd() -> bool {
     }
 }
 
-/// The working directory belongs to the process: a thread's `chdir` moves
-/// every thread, as `CLONE_FS` gives a Linux thread.
 fn a_threads_chdir_moves_the_whole_process() -> bool {
     if env::set_current_dir("/").is_err() {
         return false;
@@ -116,7 +114,6 @@ fn a_threads_chdir_moves_the_whole_process() -> bool {
     }
 }
 
-/// `fchdir` moves to the directory an open descriptor names.
 fn fchdir_moves_to_an_open_directory() -> bool {
     use std::os::fd::AsRawFd;
     let _ = env::set_current_dir("/");

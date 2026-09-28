@@ -211,7 +211,7 @@ pub(crate) fn apply_fd_actions(
     Ok(())
 }
 
-/// The basename of the path as passed, cut to fit as Linux cuts `comm`.
+/// Basename of `path`, truncated as Linux truncates `comm`.
 fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], Errno> {
     let trimmed = trim_nul_bytes(path);
     let basename_start = trimmed
@@ -228,9 +228,8 @@ fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], Errno> {
     Ok(name)
 }
 
-/// `execve`'s rename, which spawn's naming of its child matches: the path as
-/// passed, so a script is named after itself. A path that resolved has a
-/// basename. Out of line to keep the name off `execve`'s measured frame.
+/// Name `task` after `path` as passed, so a script is named after itself.
+/// Out of line to keep the name off `execve`'s measured frame.
 #[inline(never)]
 pub fn name_task_after(task: &slopos_sched::task_struct::Task, path: &[u8]) {
     if let Ok(name) = task_name_from_path(path) {
@@ -311,9 +310,8 @@ pub fn spawn_program_with_cwd(
     cwd: &[u8],
 ) -> Result<u32, Errno> {
     let result = (|| {
-        // Resolved once, here: the grant table and the loader must agree on
-        // which file this is — for a script, its interpreter. The task is
-        // named after the path as passed, as Linux names `comm`.
+        // Resolved once so the grant table and the loader agree on the file:
+        // for a script, its interpreter. `comm` takes the path as passed.
         let program = resolve_exec(path, cwd)?;
         let normalized_path = program.image.as_bytes();
         let argv = program.argv(argv)?;
@@ -329,8 +327,7 @@ pub fn spawn_program_with_cwd(
         // A raise needs `Launch`; an ordinary spawn raises nothing and needs
         // no right. Not an intersection with the spawner's own authority: the
         // shell holds no display authority, so `/bin/roulette` could not draw.
-        // A spawner that may not raise gets the image without its grant, never
-        // more than its own `execve` would hold, rather than a refusal:
+        // A spawner that may not raise gets the image ungranted, not a refusal:
         // `/bin/sh` and every `#!/bin/sh` script load the granted shell.
         if granted_flags != 0 {
             let spawner_may_launch = match task_find_by_id(parent_task_id) {
@@ -611,9 +608,8 @@ fn exec_image(
 /// push its caller over the 2 KiB stack gate.
 #[inline(never)]
 fn open_executable(path: &[u8]) -> Result<(VfsHandle, u64), Errno> {
-    // `execve(2)`: a file that is not regular or has no execute bit is
-    // `EACCES`, which a `PATH` search passes over rather than running it as a
-    // shell script as it would an `ENOEXEC`.
+    // `EACCES`, not `ENOEXEC`: a `PATH` search skips the former but runs the
+    // latter as a shell script.
     let handle = vfs_open(path, false).map_err(|e| match e {
         slopos_fs::VfsError::NotFound => Errno::ENOENT,
         slopos_fs::VfsError::IsDirectory | slopos_fs::VfsError::PermissionDenied => Errno::EACCES,

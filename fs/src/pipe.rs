@@ -71,10 +71,8 @@ impl PipeHandle {
     }
 }
 
-/// The filesystem node a named pipe belongs to.
-///
-/// Every opener holds the node open, so the inode cannot be freed and its
-/// number handed to another file while a pipe carries this key.
+/// The node a named pipe belongs to. Every opener holds it open, so its inode
+/// number cannot be reused while a pipe carries this key.
 #[derive(Clone, Copy)]
 pub(crate) struct FifoNode {
     pub(crate) fs: &'static dyn FileSystem,
@@ -93,14 +91,13 @@ pub(crate) struct Pipe {
     pub(crate) len: usize,
     pub(crate) readers: u32,
     pub(crate) writers: u32,
-    /// Opens of each end so far, so a FIFO opener blocked for a partner is
-    /// released by one that arrived and left again before it looked.
+    /// Opens of each end ever, so a blocked FIFO opener sees a partner that
+    /// came and went before it looked.
     pub(crate) reader_opens: u32,
     pub(crate) writer_opens: u32,
-    /// `None` for `pipe2`'s anonymous pipes.
     pub(crate) fifo: Option<FifoNode>,
     buffer: KVec<u8>,
-    /// The registry row and its buffer, charged to the `pipe2` caller.
+    /// The registry row and its buffer, charged to the pipe's creator.
     ///
     /// Here rather than in either backing: a pipe has **two** backings releasing
     /// into **one** slot, so a charge in each would refund twice, and a charge
@@ -213,7 +210,6 @@ fn new_pipe(account: AccountId) -> Option<Pipe> {
     Some(Pipe::new(buffer, Charge::commit(reservation)))
 }
 
-/// What a FIFO opener found when it joined the node's pipe.
 pub(crate) struct FifoJoined {
     pub(crate) handle: PipeHandle,
     /// The partner end's open count at the join, for [`fifo_partner_arrived`].
@@ -221,9 +217,8 @@ pub(crate) struct FifoJoined {
     pub(crate) partner_present: bool,
 }
 
-/// Join the pipe `node`'s openers share, making it if this is the first open,
-/// and count the caller as the ends it asked for. A non-blocking writer with no
-/// reader joins nothing and is `ENXIO`, per Linux fifo(7).
+/// Join, or create, the pipe `node`'s openers share, as the ends asked for. A
+/// non-blocking writer with no reader is `ENXIO`, per Linux fifo(7).
 pub(crate) fn fifo_join(
     node: FifoNode,
     account: AccountId,
@@ -276,8 +271,8 @@ pub(crate) fn fifo_join(
     }
 }
 
-/// Whether the partner a blocked FIFO opener waits for has come, now or in
-/// between: `reader` is the waiter's own end. A pipe that is gone releases it.
+/// Whether a blocked FIFO opener's partner is present or came and went since
+/// the join; `reader` is the waiter's end. A vanished pipe releases it.
 pub(crate) fn fifo_partner_arrived(handle: PipeHandle, reader: bool, opens_at_join: u32) -> bool {
     with_pipe(handle, |p| {
         if reader {
@@ -305,12 +300,8 @@ pub(crate) fn with_pipe_mut<R>(handle: PipeHandle, f: impl FnOnce(&mut Pipe) -> 
     Some(f(pipe))
 }
 
-/// Retire one end of `handle`, removing the pipe once neither end is held.
-/// Answers whether that was the last of this end.
-///
-/// One lock hold for both: a FIFO opener finds a pipe by its node, so a pipe
-/// left in the table between the last close and its removal could be joined
-/// and then pulled out from under the joiner.
+/// Retire one end, removing the pipe once neither end is held; answers whether
+/// it was the last of this end. One lock hold, so no opener joins a dying pipe.
 pub(crate) fn retire_end(handle: PipeHandle, reader: bool) -> bool {
     let Some(internal) = handle.to_internal() else {
         return false;

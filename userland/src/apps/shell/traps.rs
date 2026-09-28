@@ -1,9 +1,5 @@
-//! Trap state and delivery (POSIX XCU 2.14 `trap`).
-//!
-//! A caught signal's handler only records it; the action runs at the next safe
-//! point — after the command in progress completes — in the shell's own
-//! context, so it can read and set the shell's variables. The operand grammar
-//! lives in [`slopos_shell_core::trap`].
+//! Trap state and delivery (POSIX XCU 2.14). A handler only records its signal;
+//! the action runs after the command in progress, in the shell's own context.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -22,8 +18,7 @@ static TABLE: Mutex<Vec<Option<Vec<u8>>>> = Mutex::new(Vec::new());
 static PENDING: AtomicU64 = AtomicU64::new(0);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// `$?` as it was when the running action began, which is the status an
-/// argument-less `exit` inside the action uses; negative outside any action.
+/// `$?` when the running action began; negative outside any action.
 static STATUS_BEFORE_ACTION: AtomicI32 = AtomicI32::new(-1);
 
 static PROBED: AtomicU64 = AtomicU64::new(0);
@@ -97,9 +92,8 @@ fn store(condition: Condition, action: Option<Vec<u8>>) {
 }
 
 /// POSIX: a signal ignored on entry to a non-interactive shell can be neither
-/// trapped nor reset. The shell has changed no disposition of its own before
-/// the first `trap` touching a signal, so that is when entry state is read —
-/// and std's `SIGPIPE` reset is off for this binary (`build_userland.sh`).
+/// trapped nor reset. Probed at its first `trap`, before the shell changed it;
+/// std's `SIGPIPE` reset is off for this binary (`build_userland.sh`).
 fn ignored_on_entry(signum: u8) -> bool {
     if super::is_interactive() {
         return false;
@@ -187,10 +181,8 @@ fn ignored_signals(table: &[Option<Vec<u8>>]) -> SigSet {
     mask
 }
 
-/// Enter a subshell (POSIX XCU 2.12): caught traps revert to the default
-/// action, ignored ones stay ignored, and nothing the parent had pending runs
-/// here. `also_default` names further signals to reset unless ignored by a
-/// trap.
+/// Enter a subshell (POSIX XCU 2.12): caught traps revert, ignored ones stay,
+/// nothing pending runs; `also_default` resets unless a trap ignores it.
 pub fn enter_subshell(also_default: SigSet) {
     let mut table = TABLE.lock().unwrap();
     let mut reset = also_default;
@@ -251,9 +243,8 @@ fn command_for(signum: u8) -> Option<Vec<u8>> {
         .cloned()
 }
 
-/// Run the action of every trapped signal received since the last call, in
-/// signal order. Not re-entered: a signal arriving during an action is taken
-/// when that action ends.
+/// Run the action of each trapped signal received since the last call, in
+/// signal order; one arriving during an action is taken when it ends.
 pub fn run_pending() {
     if !any_pending() || RUNNING.swap(true, Ordering::AcqRel) {
         return;

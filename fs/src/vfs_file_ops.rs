@@ -84,8 +84,7 @@ pub fn vfs_open_handle_flags(
         .map(|opened| opened.handle)
 }
 
-/// A registered vnode handle, and whether the node is a FIFO — which is opened
-/// as a pipe rather than read through the filesystem.
+/// A registered vnode handle; a FIFO opens as a pipe, not through the filesystem.
 pub struct OpenedVnode {
     pub handle: usize,
     pub fifo: bool,

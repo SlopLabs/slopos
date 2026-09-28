@@ -1,10 +1,6 @@
-//! `#!` dispatch, with the interpreter-script semantics Linux documents for
-//! `execve(2)`: the first line names an interpreter and at most one argument,
-//! and the interpreter runs with the script's path as its operand.
-//!
-//! Authority follows the file actually loaded: the grant table is consulted
-//! for the interpreter this resolves to, never for the script, so running a
-//! script is exactly as privileged as running `interp script`.
+//! `#!` dispatch per Linux `execve(2)`: an interpreter and at most one
+//! argument, run with the script's path as its operand. Grants key on the
+//! interpreter, never the script, so a script is as privileged as `interp script`.
 
 use slopos_abi::Errno;
 use slopos_fs::vfs::CanonPath;
@@ -12,20 +8,18 @@ use slopos_ostd::KVec;
 
 use super::{open_executable, read_exact_at, resolve_program, trim_nul_bytes};
 
-/// Bytes of a file examined for a `#!` line, the interpreter-script header
-/// size `execve(2)` documents.
+/// Bytes examined for a `#!` line: Linux's `BINPRM_BUF_SIZE`.
 pub const SCRIPT_HEADER_MAX: usize = 256;
 
-/// Scripts an exec may pass through before the interpreter must be a binary;
-/// one more is `ELOOP`, as `execve(2)` documents for Linux.
+/// Scripts an exec may pass through; one more is `ELOOP`, as on Linux.
 pub const SCRIPT_NESTING_MAX: usize = 5;
 
 /// A program after `#!` dispatch.
 pub struct ExecProgram {
     /// The file the loader maps and the grant table is keyed on.
     pub image: CanonPath,
-    /// What the interpreter chain puts in front of the caller's `argv[1..]`;
-    /// empty when `image` is the file the caller named.
+    /// Words the interpreter chain puts before the caller's `argv[1..]`;
+    /// empty for a binary.
     prefix: KVec<KVec<u8>>,
 }
 
@@ -54,8 +48,7 @@ impl ExecProgram {
 }
 
 /// Resolve `path` against `cwd` and follow its `#!` chain to the binary that
-/// runs it. Interpreters named relatively resolve against `cwd`, as `execve`
-/// opens them.
+/// runs it. Relative interpreters resolve against `cwd`, as Linux's do.
 #[inline(never)]
 pub fn resolve_exec(path: &[u8], cwd: &[u8]) -> Result<ExecProgram, Errno> {
     let mut image = resolve_program(path, cwd)?;
@@ -92,7 +85,6 @@ fn push(list: &mut KVec<KVec<u8>>, word: KVec<u8>) -> Result<(), Errno> {
     list.push(word).map_err(|_| Errno::ENOMEM)
 }
 
-/// The script must be executable and non-empty exactly as a binary must.
 fn read_header(image: &CanonPath) -> Result<KVec<u8>, Errno> {
     let (handle, size) = open_executable(image.as_bytes())?;
     let len = (size as usize).min(SCRIPT_HEADER_MAX);
@@ -120,10 +112,8 @@ pub fn parse_shebang(header: &[u8]) -> Result<Option<ShebangLine<'_>>, Errno> {
     let Some(body) = header.strip_prefix(b"#!") else {
         return Ok(None);
     };
-    // Linux reads the header into a zero-filled 256-byte buffer and ends a
-    // line without a newline one byte short of it, so a shorter header is
-    // terminated by its padding and only a full one must terminate the
-    // interpreter itself, possibly in that last byte.
+    // Linux reads a zero-padded 256-byte buffer and ends an unterminated line
+    // one byte short of it, so only a full header can cut the interpreter.
     let full = &body[..body.len().min(SCRIPT_HEADER_MAX - 2)];
     let window = &full[..full.len().min(SCRIPT_HEADER_MAX - 3)];
     let line = match full.iter().position(|&b| b == b'\n') {

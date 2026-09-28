@@ -35,8 +35,8 @@ use slopos_testing::{assert_test, fail, pass};
 use crate::oom::{OOM_OPS, standing_of};
 
 const UNGRANTED: u16 = TASK_FLAG_USER_MODE;
-/// The compositor's flag word.
 const PRIVILEGED: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR | TASK_FLAG_LAUNCH;
+const WRITE_USER_ABSENT: u64 = 0x06;
 
 fn create_user_task() -> u32 {
     task_create(
@@ -104,8 +104,7 @@ slopos_testing::stest!(
     suite = oom_killer
 );
 
-/// The real task side, seen from a writer holding `writer`, confined to the
-/// processes a test made so nothing else bound at the time can be chosen.
+/// The real task side, confined to the processes a test made.
 struct Among {
     members: [u32; 2],
     writer: u16,
@@ -137,7 +136,6 @@ impl OomOps for Among {
     }
 }
 
-/// Map `pages` fresh pages into `process` and write every one.
 fn touch_fresh_pages(process: ProcessId, task_id: u32, pages: u64) -> bool {
     let addr = process_vm_mmap(
         process,
@@ -154,14 +152,16 @@ fn touch_fresh_pages(process: ProcessId, task_id: u32, pages: u64) -> bool {
     let packed = pack_process_vm_handle(handle);
     addr != 0
         && (0..pages).all(|page| {
-            // 0x06: a user write to an absent page.
-            try_resolve_user_fault(addr + page * PAGE_SIZE_4KB, 0x06, packed, task_id)
-                == FaultOutcome::Resolved
+            try_resolve_user_fault(
+                addr + page * PAGE_SIZE_4KB,
+                WRITE_USER_ABSENT,
+                packed,
+                task_id,
+            ) == FaultOutcome::Resolved
         })
 }
 
-/// The killer runs when the heap is dry, so neither its choice nor its kill
-/// may rest on a task-registry snapshot the heap has to pay for.
+/// The killer runs with the heap dry, so it must not need a task snapshot.
 pub fn test_oom_kills_the_hog_without_a_task_snapshot() -> TestResult {
     let _scope = KernelTestScope::new();
 
@@ -213,7 +213,6 @@ slopos_testing::stest!(
     suite = oom_killer
 );
 
-/// A user task and its process, terminated on drop.
 struct Member {
     task_id: u32,
     task: Option<TaskRef>,

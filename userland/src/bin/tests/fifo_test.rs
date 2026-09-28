@@ -1,6 +1,5 @@
-//! Named pipes end to end, through slibc's `mkfifo`/`mknodat` and std's file
-//! calls: the node on the ext2 root (`/var`) and on the RAM filesystem behind
-//! `/tmp`, Linux fifo(7)'s open rules, and the pipe the openers share.
+//! Named pipes through slibc's `mkfifo`/`mknodat` and std, on the ext2 root
+//! (`/var`) and the RAM filesystem behind `/tmp`.
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -25,8 +24,7 @@ const EXT2_DIR: &str = "/var/fifo_test";
 const TMP_DIR: &str = "/tmp/fifo_test";
 const AT_FDCWD: i32 = slopos_abi::fs::AT_FDCWD;
 
-/// How long a case waits for another task to reach a blocking call, and how
-/// many such waits it spends before calling the task stuck.
+/// A wait for another task to block, and how many before it counts as stuck.
 const SETTLE_MS: u32 = 50;
 const PATIENCE: u32 = 100;
 
@@ -127,8 +125,6 @@ fn fifo_on_tmp() -> bool {
     made_node_is_a_fifo(TMP_DIR)
 }
 
-/// Linux mknod(2): no filesystem here stores a device or socket node, and a
-/// type that is none of the known ones is not a node at all.
 fn mknod_refuses_other_node_kinds() -> bool {
     let path = fresh(TMP_DIR, "kinds");
     if make_node(&path, S_IFCHR | 0o600) != Err(EPERM.raw()) {
@@ -158,8 +154,6 @@ fn nonblocking_writer_without_reader_is_enxio() -> bool {
     rc == Some(ENXIO.raw()) || fail(&format!("open(O_WRONLY|O_NONBLOCK) answered {rc:?}"))
 }
 
-/// A reader that asks not to wait does not, and with no writer ever opened it
-/// reads end of file rather than `EAGAIN`.
 fn nonblocking_reader_opens_at_once() -> bool {
     let path = fresh(EXT2_DIR, "nbread");
     if make_fifo(&path, 0o600).is_err() {
@@ -191,9 +185,6 @@ fn read_write_open_does_not_block() -> bool {
     round_trip || fail("an O_RDWR descriptor did not read back its own write")
 }
 
-/// Two opens of one path are one pipe; a drained pipe with its writer still
-/// open is `EAGAIN` to a non-blocking reader, and end of file once the last
-/// writer has closed.
 fn openers_share_one_pipe_until_eof() -> bool {
     let path = fresh(EXT2_DIR, "share");
     if make_fifo(&path, 0o600).is_err() {
@@ -239,7 +230,6 @@ fn write_without_reader_is_epipe() -> bool {
     rc == Some(EPIPE.raw()) || fail(&format!("write with no reader answered {rc:?}"))
 }
 
-/// The same write kills a writer that left `SIGPIPE` at its default.
 fn write_without_reader_raises_sigpipe() -> bool {
     let path = fresh(TMP_DIR, "sigpipe");
     if make_fifo(&path, 0o600).is_err() {
@@ -264,7 +254,6 @@ fn write_without_reader_raises_sigpipe() -> bool {
         || fail("the writer was not killed by SIGPIPE")
 }
 
-/// Polls `done` until it is set or patience runs out.
 fn settled(done: &AtomicI32) -> bool {
     for _ in 0..PATIENCE {
         if done.load(Ordering::SeqCst) != 0 {
@@ -275,8 +264,7 @@ fn settled(done: &AtomicI32) -> bool {
     false
 }
 
-/// A blocking open of `waiter` blocks until the other end arrives. A thread
-/// left stuck by a failure dies with the process.
+/// A thread left stuck by a failure dies with the process.
 fn blocking_open_is_released_by_partner(waiter: Access, partner: Access, dir: &str) -> bool {
     let path = fresh(dir, "block");
     if make_fifo(&path, 0o600).is_err() {
@@ -315,8 +303,6 @@ fn blocking_writer_is_released_by_reader() -> bool {
 
 extern "C" fn on_sigusr1(_sig: i32) {}
 
-/// A signal cuts a blocked open short with `EINTR` when its handler did not
-/// ask for `SA_RESTART`.
 fn blocked_open_is_interrupted_by_a_signal() -> bool {
     let path = fresh(TMP_DIR, "eintr");
     if make_fifo(&path, 0o600).is_err() {
@@ -362,7 +348,6 @@ fn blocked_open_is_interrupted_by_a_signal() -> bool {
     code == Some(0) || fail(&format!("the interrupted open's child answered {code:?}"))
 }
 
-/// A kill ends a task blocked in open.
 fn blocked_open_yields_to_a_kill() -> bool {
     let path = fresh(EXT2_DIR, "kill");
     if make_fifo(&path, 0o600).is_err() {
@@ -381,7 +366,6 @@ fn blocked_open_yields_to_a_kill() -> bool {
         || fail("the blocked opener did not die of the kill")
 }
 
-/// The pipe goes when its last opener closes: the next open starts empty.
 fn contents_are_discarded_after_the_last_close() -> bool {
     let path = fresh(EXT2_DIR, "discard");
     if make_fifo(&path, 0o600).is_err() {
@@ -407,8 +391,6 @@ fn contents_are_discarded_after_the_last_close() -> bool {
     rc == Some(EAGAIN.raw()) || fail("a reopened FIFO still held the old contents")
 }
 
-/// Openers keep their pipe across an unlink; a new node at the same name is
-/// a different pipe, and a rename keeps the same one.
 fn unlink_and_rename_keep_open_pipes() -> bool {
     let path = fresh(EXT2_DIR, "unlinked");
     let moved = fresh(EXT2_DIR, "renamed");
@@ -447,8 +429,6 @@ fn unlink_and_rename_keep_open_pipes() -> bool {
         || fail(&format!("the renamed node's new opener got {got:?}"))
 }
 
-/// `O_CREAT` and `O_TRUNC` on an existing FIFO open it as one, truncating
-/// nothing; the descriptor cannot seek and `fstat`s as the node.
 fn existing_fifo_opens_as_a_pipe() -> bool {
     let path = fresh(TMP_DIR, "creat");
     if make_fifo(&path, 0o620).is_err() {

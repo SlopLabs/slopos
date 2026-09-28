@@ -128,8 +128,8 @@ impl<'a> SyscallContext<'a> {
             .ok_or(Errno::ESRCH)
     }
 
-    /// The caller's working directory, NUL-terminated: its process's, which
-    /// every thread shares.
+    /// The caller's process's working directory, shared by its threads;
+    /// NUL-terminated.
     pub fn with_cwd<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
         self.task.with_cwd(f)
     }

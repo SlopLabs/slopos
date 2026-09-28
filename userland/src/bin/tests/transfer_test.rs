@@ -1,7 +1,5 @@
-//! Getting bytes in and out of the machine: TLS to a server, `curl https` to
-//! a file, `nc` as a byte pipe, and `send`'s `SIGPIPE` and `MSG_NOSIGNAL`, all
-//! against peers this test runs on loopback so no case depends on the host's
-//! network.
+//! Bytes in and out of the machine (TLS, `curl https`, `nc`, `send`'s `SIGPIPE`
+//! and `MSG_NOSIGNAL`) against loopback peers, never the host's network.
 //!
 //! The server is the TLS crate's test server under a root minted here, so the
 //! client under test is the one `curl` ships, anchored on a root the shipped
@@ -470,8 +468,6 @@ fn loopback_pair() -> Option<(TcpStream, TcpStream)> {
     Some((client, server))
 }
 
-/// `MSG_NOSIGNAL` is a send flag the kernel takes; any other still refuses
-/// the call rather than being dropped.
 fn send_takes_msg_nosignal() -> bool {
     let Some((client, mut server)) = loopback_pair() else {
         return false;
@@ -495,9 +491,6 @@ fn send_takes_msg_nosignal() -> bool {
     }
 }
 
-/// How a child that left `SIGPIPE` at its default ends after sending with
-/// `flags` on a stream it has shut down for writing: exit 0 if the send
-/// answered `EPIPE`, 1 for any other answer, 2 if it never got that far.
 fn sender_after_shutdown(flags: u32) -> Option<process::WaitStatus> {
     let child = process::fork();
     if child == 0 {
@@ -518,7 +511,6 @@ fn sender_after_shutdown(flags: u32) -> Option<process::WaitStatus> {
     process::waitpid(child as u32).map(|(_, s)| process::wait_status(s))
 }
 
-/// POSIX `send()`: `EPIPE` on a stream shut down for writing raises `SIGPIPE`.
 fn send_after_shutdown_raises_sigpipe() -> bool {
     let fate = sender_after_shutdown(0);
     matches!(fate, Some(process::WaitStatus::Signalled(SIGPIPE))) || {
@@ -527,7 +519,6 @@ fn send_after_shutdown_raises_sigpipe() -> bool {
     }
 }
 
-/// The same send with `MSG_NOSIGNAL` answers `EPIPE` and the sender lives.
 fn msg_nosignal_send_after_shutdown_is_epipe() -> bool {
     let fate = sender_after_shutdown(MSG_NOSIGNAL);
     matches!(fate, Some(process::WaitStatus::Exited(0))) || {

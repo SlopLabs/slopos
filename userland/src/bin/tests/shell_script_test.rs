@@ -152,7 +152,6 @@ fn expect_status(name: &str, script: &[u8], want: i32) -> bool {
     true
 }
 
-/// Output and status from one run, for cases whose point is the pair.
 fn expect_output_and_status(name: &str, script: &[u8], want: &[u8], want_status: i32) -> bool {
     let Some((got, status)) = run_script(script) else {
         return false;
@@ -608,9 +607,6 @@ fn a_syntax_error_does_not_run_anything() -> bool {
 // trap
 // ---------------------------------------------------------------------------
 
-/// The `EXIT` trap runs once as the shell ends, with the exit status in `$?`;
-/// only an `exit n` inside it changes that status, and an `exit` inside it
-/// does not run it again.
 fn trap_exit_runs_once_with_the_exit_status() -> bool {
     expect_output_and_status(
         "trap_exit_at_end",
@@ -634,9 +630,6 @@ fn trap_exit_runs_once_with_the_exit_status() -> bool {
     )
 }
 
-/// A caught signal's action runs once the command that was running completes,
-/// before the next one, and leaves `$?` as it found it. `''` ignores the
-/// signal; `-` gives it back its default action, which ends the shell.
 fn trap_signal_actions() -> bool {
     expect_output_and_status(
         "trap_signal_actions",
@@ -650,8 +643,6 @@ fn trap_signal_actions() -> bool {
     )
 }
 
-/// `wait` returns as soon as a trapped signal arrives, with a status above
-/// 128, and the action runs right after it.
 fn trap_interrupts_wait() -> bool {
     expect_output(
         "trap_interrupts_wait",
@@ -663,10 +654,8 @@ fn trap_interrupts_wait() -> bool {
     )
 }
 
-/// A trapped signal that lands after the last trap drain and before `wait`
-/// blocks still ends it: the command substitution in `wait`'s own operand
-/// signals the shell, so the signal is recorded before `wait` runs and no
-/// drain comes between.
+/// The command substitution in `wait`'s operand signals the shell after the
+/// last trap drain and before `wait` blocks.
 fn trap_before_wait_blocks() -> bool {
     expect_output(
         "trap_before_wait_blocks",
@@ -677,8 +666,6 @@ fn trap_before_wait_blocks() -> bool {
     )
 }
 
-/// An action that exits is how a script handles a fatal signal, and the
-/// `EXIT` trap still runs.
 fn trap_exit_from_a_signal_action() -> bool {
     expect_output_and_status(
         "trap_exit_from_a_signal_action",
@@ -688,9 +675,6 @@ fn trap_exit_from_a_signal_action() -> bool {
     )
 }
 
-/// The listing reads back as commands; a leading number makes every operand a
-/// condition to reset; a bad condition fails the builtin without stopping the
-/// others; and a subshell keeps only the ignored traps.
 fn trap_listing_and_operands() -> bool {
     expect_output(
         "trap_listing_and_operands",
@@ -707,10 +691,8 @@ fn trap_listing_and_operands() -> bool {
     )
 }
 
-/// std ignores `SIGPIPE` before `main`; the shell must not, or a script could
-/// never trap it and every command it runs would inherit it ignored. What
-/// the shell was given it passes on: a `PIPE` ignored by the parent shell
-/// stays ignored, and untrappable, in the next.
+/// std ignores `SIGPIPE` before `main`; the shell must pass on what it was
+/// given instead, so a `PIPE` its parent ignored stays ignored and untrappable.
 fn trap_pipe_follows_the_disposition_on_entry() -> bool {
     expect_output(
         "trap_pipe_follows_the_disposition_on_entry",
@@ -722,8 +704,7 @@ fn trap_pipe_follows_the_disposition_on_entry() -> bool {
     )
 }
 
-/// A command the shell runs keeps `SIGPIPE` at its default, so a writer whose
-/// reader left dies of it; inheriting it ignored, this loop never ends.
+/// A writer that inherited `SIGPIPE` ignored would loop forever.
 fn a_writer_to_a_closed_pipe_dies_of_sigpipe() -> bool {
     expect_output(
         "a_writer_to_a_closed_pipe_dies_of_sigpipe",
@@ -737,9 +718,6 @@ fn a_writer_to_a_closed_pipe_dies_of_sigpipe() -> bool {
 // Command search and wait
 // ---------------------------------------------------------------------------
 
-/// XBD 8.3: `PATH` is searched for an *executable* file, so a same-named file
-/// without the execute bit earlier on it is passed over; found only that way,
-/// the command fails 126, and not found at all, 127.
 fn path_search_skips_a_file_it_cannot_execute() -> bool {
     use std::os::unix::fs::PermissionsExt;
     let stage = |path: &str, body: &str, mode: u32| {
@@ -763,9 +741,6 @@ fn path_search_skips_a_file_it_cannot_execute() -> bool {
     )
 }
 
-/// POSIX `wait`: no operand waits for every child and answers 0; operands
-/// are waited for in turn and the last one's status is the answer; one this
-/// shell no longer knows is 127.
 fn wait_takes_every_child_or_each_operand() -> bool {
     expect_output(
         "wait_takes_every_child_or_each_operand",
@@ -780,7 +755,6 @@ fn wait_takes_every_child_or_each_operand() -> bool {
     )
 }
 
-/// A trapped signal ends an operand-less `wait` as it ends one for a pid.
 fn trap_interrupts_wait_for_every_child() -> bool {
     expect_output(
         "trap_interrupts_wait_for_every_child",

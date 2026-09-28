@@ -177,8 +177,7 @@ pub fn vfs_mkdir_at(path: &[u8], cwd: &[u8], mode: Option<u16>) -> VfsResult<()>
     create_node_at(path, cwd, FileType::Directory, mode)
 }
 
-/// `mknodat(2)` for the node kinds a filesystem here stores: a regular file or
-/// a FIFO. The mode lands on the new inode, as [`vfs_mkdir_at`]'s does.
+/// `mknodat(2)` for a regular file or FIFO, the only node kinds stored here.
 pub fn vfs_mknod_at(path: &[u8], cwd: &[u8], file_type: FileType, mode: u16) -> VfsResult<()> {
     if !matches!(file_type, FileType::Regular | FileType::Pipe) {
         return Err(VfsError::NotSupported);

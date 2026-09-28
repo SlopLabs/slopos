@@ -15,8 +15,9 @@ pub fn kill_task(id: u32) -> bool {
         .is_some_and(|task| slopos_sched::task::task_kill_and_wake(&*task))
 }
 
-/// The ELF header and the one program header.
-const STATIC_EXEC_HEADERS: usize = 64 + 56;
+const ELF64_EHDR_SIZE: usize = 64;
+const ELF64_PHDR_SIZE: usize = 56;
+const STATIC_EXEC_HEADERS: usize = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE;
 const STATIC_EXEC_CODE_MAX: usize = 64;
 
 /// Write `code` at `path` as an executable static `ET_EXEC` whose one
@@ -37,9 +38,9 @@ pub fn install_static_program(path: &[u8], code: &[u8]) -> bool {
     elf[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
     elf[20..24].copy_from_slice(&1u32.to_le_bytes());
     elf[24..32].copy_from_slice(&entry.to_le_bytes());
-    elf[32..40].copy_from_slice(&64u64.to_le_bytes());
-    elf[52..54].copy_from_slice(&64u16.to_le_bytes());
-    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+    elf[32..40].copy_from_slice(&(ELF64_EHDR_SIZE as u64).to_le_bytes());
+    elf[52..54].copy_from_slice(&(ELF64_EHDR_SIZE as u16).to_le_bytes());
+    elf[54..56].copy_from_slice(&(ELF64_PHDR_SIZE as u16).to_le_bytes());
     elf[56..58].copy_from_slice(&1u16.to_le_bytes());
     elf[64..68].copy_from_slice(&1u32.to_le_bytes());
     elf[68..72].copy_from_slice(&5u32.to_le_bytes());

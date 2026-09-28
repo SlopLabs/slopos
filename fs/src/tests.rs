@@ -3866,9 +3866,7 @@ fn expect_sealed(device: &MemoryBlockDevice, path: &[u8]) -> TestResult {
     }
 }
 
-/// A FIFO is the record Linux's `mkfifo` writes: an inode of type `S_IFIFO`
-/// owning no block, named by an `EXT2_FT_FIFO` entry, which a later mount reads
-/// back as such and whose removal frees no block.
+/// The on-disk record is the one Linux's `mkfifo` writes.
 pub fn test_ext2_fifo_is_a_blockless_fifo_record() -> TestResult {
     let Some(device) = phase3_image(b"f.txt", b"x") else {
         return TestResult::Skipped;

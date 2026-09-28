@@ -1,8 +1,6 @@
-//! The build loop's plumbing, as cargo and rustc use it: a jobserver's
-//! tokens crossing `exec`, `std`'s file locks between processes, an rlib
-//! mapped read-only, a memory budget that refuses at `mmap` rather than
-//! killing a process at its first touch, a fork a large process can afford,
-//! and the OOM killer behind the copy that fork did not charge.
+//! The build loop's plumbing as cargo and rustc use it: jobserver tokens across
+//! `exec`, `std` file locks, a read-only rlib mapping, a commit budget refusing
+//! at `mmap`, a fork a large process can afford, and the OOM killer behind it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -442,8 +440,6 @@ fn reserve_most_of_the_headroom() -> Result<Option<(u64, u64)>, String> {
     }
 }
 
-/// A fork owes nothing for its copy, so a process holding most of the
-/// headroom forks as freely as a small one.
 fn test_a_large_process_forks_without_owing_its_copy() -> bool {
     let (addr, len) = match reserve_most_of_the_headroom() {
         Ok(Some(held)) => held,
@@ -479,9 +475,8 @@ const HOG_SLACK: u64 = 3072;
 /// Pages the hog places after the fork, to stay the largest process.
 const HOG_EXTRA: u64 = 1024;
 
-/// The hog: promise nearly all the headroom, write part of it, fork, grow
-/// past the child, then wait. The child writes its copy past the ceiling and
-/// reports on stdout once every page is its own.
+/// Promise nearly all the headroom, write part, fork, grow past the child, wait.
+/// The child writes its copy past the ceiling and prints `copy-written`.
 fn hog_mode() -> i32 {
     let info = sys_info();
     let headroom = info.commit_headroom_pages as u64;
@@ -526,9 +521,6 @@ fn hog_mode() -> i32 {
     0
 }
 
-/// A forked child writing its copy past the ceiling costs the largest
-/// process — the hog that forked it — exactly one kill, and the child's
-/// write then proceeds; the runner and init live on, and so does the machine.
 fn test_the_oom_killer_takes_the_largest_and_the_writer_proceeds() -> bool {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Stdio;

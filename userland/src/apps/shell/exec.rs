@@ -1037,9 +1037,8 @@ fn install_redirects_in_child(redirects: &[Redirect]) {
 // Program resolution
 // ---------------------------------------------------------------------------
 
-/// XBD 8.3: the first candidate that is an executable file wins. A regular
-/// file lacking execute permission is passed over, and named only when no
-/// directory has a better one, so running it fails as 126 rather than 127.
+/// XBD 8.3: the first executable candidate wins. A non-executable regular file
+/// is named only when nothing better exists, so it fails 126 rather than 127.
 fn resolve_via_path(name: &[u8], tmp: &mut [u8]) -> bool {
     let Some(path_value) = env::get(b"PATH") else {
         return false;

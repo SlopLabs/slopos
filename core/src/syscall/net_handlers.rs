@@ -75,8 +75,6 @@ fn check_msg_flags(flags: u32) -> Result<(), Errno> {
     }
 }
 
-/// A send's flags: `MSG_NOSIGNAL` on top of none; `sigpipe_unless_nosignal`
-/// honours it.
 fn check_send_flags(flags: u32) -> Result<(), Errno> {
     check_msg_flags(flags & !MSG_NOSIGNAL)
 }
@@ -334,8 +332,6 @@ define_syscall!(syscall_connect
     }
 });
 
-/// A send that fails with `EPIPE` raises `SIGPIPE` at the sender, as POSIX
-/// `send()` has it, unless the caller passed `MSG_NOSIGNAL`.
 fn sigpipe_unless_nosignal(
     ctx: &crate::syscall::context::SyscallContext<'_>,
     flags: u32,

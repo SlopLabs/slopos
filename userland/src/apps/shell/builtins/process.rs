@@ -209,10 +209,8 @@ pub fn cmd_bg(argc: i32, argv: &[&[u8]]) -> i32 {
     0
 }
 
-/// `wait [pid|%job...]` (POSIX): with no operand, every child; otherwise each
-/// operand in turn, answering the last one's status and 127 for one this
-/// shell does not know. A trapped signal ends the wait at once with a status
-/// above 128, and its action runs as soon as `wait` returns.
+/// `wait [pid|%job...]` (POSIX): every child, or each operand in turn with the
+/// last one's status, 127 if unknown. A trapped signal ends it at once.
 pub fn cmd_wait(argc: i32, argv: &[&[u8]]) -> i32 {
     let argc = (argc.max(0) as usize).min(argv.len());
     if argc < 2 {
@@ -338,8 +336,7 @@ impl Drop for ChildExitWake {
     }
 }
 
-/// POSIX: every child this shell has, known to the job table or not, and then
-/// status 0.
+/// POSIX: every child, in the job table or not; then status 0.
 fn wait_for_every_child() -> i32 {
     let wake = traps::WakePipe::arm();
     let notify = ChildExitWake::install();
@@ -389,8 +386,7 @@ pub fn cmd_exit(argc: i32, argv: &[&[u8]]) -> i32 {
             }
         }
     } else {
-        // POSIX: inside a trap action, the last command is the one that ran
-        // before the action.
+        // POSIX: in a trap action, the status from before the action.
         traps::status_before_action().unwrap_or_else(super::super::last_exit_code)
     };
 

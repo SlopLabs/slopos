@@ -1508,8 +1508,7 @@ pub fn fileio_open_fd_with_ops(
     fileio_open_fd_with_ops_nonblock(table, ops, handle, backing, fd_flags, false)
 }
 
-/// [`fileio_open_fd_with_ops`] whose open file starts with `O_NONBLOCK` set
-/// when `nonblock`, as a `*_NONBLOCK` creation flag asks.
+/// [`fileio_open_fd_with_ops`], with `O_NONBLOCK` set on the open file when `nonblock`.
 pub fn fileio_open_fd_with_ops_nonblock(
     table: FdTable,
     ops: &'static dyn FileOps,

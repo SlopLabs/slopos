@@ -1677,8 +1677,7 @@ impl<'a> Ext2Fs<'a> {
             .map(|n| n.raw())
     }
 
-    /// A named pipe: an inode with no data blocks, whose contents live only in
-    /// the kernel's pipe object while it is open.
+    /// A named pipe: a blockless inode whose data lives in the kernel's pipe.
     #[inline(never)]
     pub fn create_fifo(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
         self.check_writable()?;

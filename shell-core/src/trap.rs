@@ -1,8 +1,5 @@
-//! The operand grammar of the `trap` special builtin (POSIX XCU 2.14 `trap`)
-//! and the signal names it shares with `kill`.
-//!
-//! Only the reading and writing of operands lives here; installing handlers
-//! and running actions is the userland shell's.
+//! Operand grammar of the `trap` special builtin (POSIX XCU 2.14) and the
+//! signal names it shares with `kill`. The userland shell runs the actions.
 
 use alloc::vec::Vec;
 
@@ -12,7 +9,7 @@ use slopos_abi::signal::{
     SIGUSR2, SIGWINCH,
 };
 
-/// Signal names without the `SIG` prefix, upper case as POSIX spells them.
+/// Signal names without the `SIG` prefix.
 pub const SIGNAL_NAMES: &[(&str, u8)] = &[
     ("HUP", SIGHUP),
     ("INT", SIGINT),
@@ -60,7 +57,6 @@ pub fn signal_name(signum: u8) -> Option<&'static str> {
         .map(|&(name, _)| name)
 }
 
-/// What a `trap` condition operand designates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Condition {
     Exit,
@@ -87,13 +83,10 @@ pub fn parse_condition(text: &[u8]) -> Option<Condition> {
     signal_by_name(text).map(Condition::Signal)
 }
 
-/// POSIX: when the first operand is an unsigned decimal integer, every
-/// operand is a condition and each is reset.
 pub fn is_unsigned_integer(text: &[u8]) -> bool {
     !text.is_empty() && text.iter().all(u8::is_ascii_digit)
 }
 
-/// What a `trap` action operand asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action<'a> {
     Default,
@@ -109,8 +102,7 @@ pub fn classify_action(text: &[u8]) -> Action<'_> {
     }
 }
 
-/// Append `value` single-quoted so the shell reads it back unchanged: each
-/// `'` becomes `'\''`.
+/// Append `value` single-quoted, each `'` as `'\''`.
 pub fn push_single_quoted(out: &mut Vec<u8>, value: &[u8]) {
     out.push(b'\'');
     for &b in value {
@@ -123,8 +115,7 @@ pub fn push_single_quoted(out: &mut Vec<u8>, value: &[u8]) {
     out.push(b'\'');
 }
 
-/// One line of `trap`'s listing, `trap -- 'action' NAME\n`, in a form the
-/// shell can read back as a command. An ignored condition's action is `''`.
+/// One re-inputtable line of `trap`'s listing: `trap -- 'action' NAME\n`.
 pub fn listing_line(out: &mut Vec<u8>, action: &[u8], condition: Condition) {
     out.extend_from_slice(b"trap -- ");
     push_single_quoted(out, action);

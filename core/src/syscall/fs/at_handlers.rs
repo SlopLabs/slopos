@@ -64,11 +64,8 @@ pub(crate) fn mkdir_at(path: &[u8], cwd: &[u8], mode: u32) -> Result<(), Errno> 
     slopos_fs::vfs::vfs_mkdir_at(path, cwd, Some((mode & 0o7777) as u16)).map_err(|e| e.to_errno())
 }
 
-/// `mknodat(2)` for what a filesystem here can store, with Linux's errors for
-/// the rest: a type 0 is a regular file, a device node is `EPERM` as it is to
-/// a caller without `CAP_MKNOD`, a socket node is `EPERM` as it is on a
-/// filesystem that cannot hold one, and anything else is `EINVAL`. `dev` is
-/// only meaningful to a device node, so it is never read.
+/// `mknodat(2)` for regular files and FIFOs, the only nodes stored here. Device
+/// and socket nodes are `EPERM`, as on Linux without `CAP_MKNOD`; others `EINVAL`.
 pub(crate) fn mknod_at(path: &[u8], cwd: &[u8], mode: u32) -> Result<(), Errno> {
     let file_type = match mode & S_IFMT {
         0 | S_IFREG => slopos_fs::FileType::Regular,

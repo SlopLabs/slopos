@@ -5,10 +5,8 @@ use slopos_userland::devdisk::{selfhost, workspace};
 use std::fs;
 use std::time::Instant;
 
-/// The dev disk's kernel build, timed; with no dev disk there is nothing to
-/// build and the test passes by saying so. `clean` starts from an empty target
-/// directory and no symbol table, so the time measures a whole build rather
-/// than whatever the last boot left behind.
+/// The dev disk's kernel build, timed; with no dev disk it passes. `clean`
+/// drops the target directory and symbol table so the time is a whole build.
 fn guest_builds(variant: &str, clean: bool) -> bool {
     let root = match workspace() {
         Ok(root) => root,

@@ -14,9 +14,7 @@ use slopos_ostd::sync::wait_queue::WaitAbort;
 use crate::pipe;
 use crate::pipe::{FifoNode, PipeHandle};
 
-/// A blocked pipe transfer or FIFO open a signal cut short restarts under
-/// `SA_RESTART` and is `EINTR` otherwise, as POSIX has it; one a kill cut short
-/// is `EINTR`.
+/// A signal restarts the wait under `SA_RESTART` (`ERESTARTSYS`); a kill is `EINTR`.
 fn interrupted_errno(abort: WaitAbort) -> Errno {
     match abort {
         WaitAbort::Interrupted => Errno::ERESTARTSYS,
@@ -126,11 +124,8 @@ pub(crate) fn pipe_backings(
     Some((read, write))
 }
 
-/// Owner of one FIFO opener's ends and of its hold on the filesystem node.
-///
-/// The ends are released in `drop`, before the node reference field is: the
-/// pipe is keyed on the node, so it must be gone before the inode can be freed
-/// and its number reused.
+/// One FIFO opener's ends and its hold on the node. `drop` retires the ends
+/// before `node` drops, so the pipe keyed on the inode dies before it can be reused.
 #[derive(slopos_ostd::Charged)]
 pub(crate) struct FifoBacking {
     handle: PipeHandle,
@@ -156,13 +151,9 @@ impl Drop for FifoBacking {
     }
 }
 
-/// Open the FIFO at `node` with Linux fifo(7)'s rules: every opener of the
-/// node shares one pipe, which lives while any of them holds it; a reader
-/// waits for a writer and a writer for a reader unless `nonblock`, when a
-/// reader succeeds at once and a writer is `ENXIO`; `O_RDWR` never waits.
-///
-/// `vnode` is the opener's hold on the node, kept for as long as the ends are.
-/// Answers the ops, handle and backing for the new description.
+/// Open the FIFO at `node` per Linux fifo(7): openers share one pipe, and each
+/// end waits for the other unless `nonblock` (a writer is then `ENXIO`) or
+/// `O_RDWR`. `vnode` is the opener's hold on the node, kept as long as the ends.
 pub(crate) fn fifo_open(
     node: FifoNode,
     vnode: KArc<dyn FileBacking>,
@@ -225,9 +216,8 @@ fn pipe_release_writer(h: PipeHandle) {
     }
 }
 
-/// What `fstat` says about any end: a named pipe's own node, and for an
-/// anonymous one a FIFO whose size is what is buffered. A jobserver client
-/// checks exactly this before trusting an inherited fd.
+/// A named pipe stats as its node, an anonymous one as a FIFO sized by what is
+/// buffered: a jobserver client checks this before trusting an inherited fd.
 fn pipe_stat(handle: usize, out: &mut UserFsStat) -> i32 {
     let h = PipeHandle::from_usize(handle);
     let Some((buffered, fifo)) = pipe::with_pipe(h, |slot| (slot.len, slot.fifo)) else {
@@ -329,8 +319,6 @@ fn pipe_read(handle: usize, buf: &mut dyn IoBufWrite, flags: u32) -> isize {
     }
 }
 
-/// Room in the buffer, or no reader left to fill it for: either lets a
-/// blocked writer make progress, by pushing more or by reporting `EPIPE`.
 fn pipe_writable_or_broken(h: PipeHandle) -> bool {
     pipe::with_pipe(h, |slot| {
         slot.len < pipe::PIPE_BUFFER_SIZE || slot.readers == 0

@@ -231,10 +231,8 @@ fn granted_binaries_are_sealed() -> bool {
 /// `Launch` bounds the raise site: spawning a privileged path does not confer
 /// its grant on a caller that may not launch.
 ///
-/// The utest runner spawns test binaries with TASK_FLAG_SYSTEM, which implies
-/// Launch -- so this binary *can* spawn a granted path, and that is what the
-/// first half checks. The other half runs in a child of this one, which holds
-/// no Launch: see [`spawns_without_launch`].
+/// The utest runner's TASK_FLAG_SYSTEM implies Launch, so this binary can spawn
+/// a granted path; the half without Launch is [`spawns_without_launch`].
 fn launch_bounds_the_raise_site() -> bool {
     // /bin/halt would power the machine off, so name a path that carries a
     // grant but does nothing on its own -- /bin/keymap, which holds
@@ -267,10 +265,8 @@ fn launch_bounds_the_raise_site() -> bool {
 const SELF: &str = "/bin/spawn_privilege_test";
 const WITHOUT_LAUNCH: &str = "--without-launch";
 
-/// Run in a child of the test, which holds no Launch. A granted path it
-/// spawns runs without the grant, as its own `execve` of it would, rather
-/// than being refused: `/bin/sh` is the granted shell, and a `#!/bin/sh`
-/// script loads it too.
+/// Runs in a child without Launch. A granted path it spawns runs ungranted, as
+/// its own `execve` would, rather than being refused; `#!/bin/sh` scripts too.
 fn spawns_without_launch() -> i32 {
     // AT_SECURE reads 0 only in an image that ran without its grant.
     let probe = Command::new("/bin/dl_secure_probe")

@@ -74,10 +74,8 @@ define_syscall!(syscall_write
     }
 });
 
-/// A write refused because nothing will ever read it also raises `SIGPIPE` at
-/// the writing thread, per POSIX `write()`; the caller sees `EPIPE` only when
-/// that signal is ignored, blocked or caught. Linux reports it as a `kill`
-/// from the writer itself: `SI_USER` and the writer's own pid.
+/// POSIX `write()`: `EPIPE` also raises `SIGPIPE` at the writing thread, sent
+/// as Linux sends it, as a `kill` from the writer itself.
 pub(crate) fn raise_sigpipe_on_epipe(
     ctx: &crate::syscall::context::SyscallContext<'_>,
     errno: Errno,

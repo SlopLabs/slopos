@@ -1,6 +1,5 @@
-//! `#!` dispatch and the `/bin/sh` fallback, through the entry points a port
-//! reaches: `std::process::Command`, the raw `spawn_path` syscall, and
-//! slibc's `execvp` and `posix_spawnp`.
+//! `#!` dispatch and the `/bin/sh` fallback through `Command`, raw
+//! `spawn_path`, and slibc's `execvp` and `posix_spawnp`.
 
 use slopos_userland as _;
 
@@ -42,8 +41,6 @@ fn stdout_of(cmd: &mut Command) -> Option<String> {
     }
 }
 
-/// The interpreter gets the script's path as passed and then `argv[1..]`;
-/// the script's own `argv[0]` is dropped.
 fn a_script_runs_under_its_interpreter() -> bool {
     let Some(path) = install("hello", "#!/bin/sh\necho \"$0|$1|$2\"\n", 0o755) else {
         return false;
@@ -72,8 +69,6 @@ fn the_interpreter_argument_is_one_word() -> bool {
     true
 }
 
-/// A script's interpreter may itself be a script, and the chain unwinds into
-/// one argument vector.
 fn a_nested_script_chain_unwinds() -> bool {
     let Some(inner) = install("inner", "#!/bin/sh\necho \"$0|$1|$2\"\n", 0o755) else {
         return false;
@@ -90,7 +85,6 @@ fn a_nested_script_chain_unwinds() -> bool {
     true
 }
 
-/// Neither ELF nor `#!`: the kernel answers `ENOEXEC` and runs nothing.
 fn a_plain_text_file_is_enoexec_to_the_kernel() -> bool {
     let Some(path) = install("plain_raw", "echo should not run\n", 0o755) else {
         return false;
@@ -114,7 +108,6 @@ fn marker_after(out: &str) -> Option<String> {
     fs::read_to_string(out).ok()
 }
 
-/// POSIX `execvp`: a file the system cannot execute runs as `/bin/sh file`.
 fn execvp_runs_a_plain_file_under_sh() -> bool {
     let out = format!("{DIR}/execvp.out");
     let _ = fs::remove_file(&out);
@@ -165,8 +158,6 @@ fn execvp_searches_the_default_path_without_path() -> bool {
     true
 }
 
-/// A `PATH` candidate that exists but may not be executed makes the search
-/// fail with `EACCES` even when a later directory has no such file.
 fn execvp_keeps_eacces_over_a_later_miss() -> bool {
     let _ = fs::create_dir_all(format!("{DIR}/denied"));
     if install("denied/vp_denied", "exit 0\n", 0o644).is_none() {
@@ -199,7 +190,6 @@ fn execvp_keeps_eacces_over_a_later_miss() -> bool {
     true
 }
 
-/// `posix_spawnp` searches `PATH` as `execvp` does, fallback included.
 fn posix_spawnp_runs_a_plain_file_under_sh() -> bool {
     let out = format!("{DIR}/spawnp.out");
     let _ = fs::remove_file(&out);
@@ -241,7 +231,6 @@ fn posix_spawnp_runs_a_plain_file_under_sh() -> bool {
     true
 }
 
-/// The shell itself runs a file the kernel refuses as `ENOEXEC` as a script.
 fn the_shell_runs_a_plain_file_as_a_script() -> bool {
     let Some(path) = install("plain_shell", "echo \"$0|$1\"\n", 0o755) else {
         return false;
@@ -255,9 +244,7 @@ fn the_shell_runs_a_plain_file_as_a_script() -> bool {
     true
 }
 
-/// As Linux names `comm`, a spawned script's task carries the script's
-/// name, not its interpreter's. `read` on a pipe this test holds keeps the
-/// task alive until the listing is taken.
+/// `read` on a pipe this test holds keeps the task alive until it is listed.
 fn a_spawned_script_is_named_after_itself() -> bool {
     let Some(path) = install("named_probe", "#!/bin/sh\nread x\n", 0o755) else {
         return false;
@@ -298,9 +285,7 @@ fn task_name(pid: u32) -> Option<String> {
     })
 }
 
-/// `execve` renames the task as spawn names one: after the path it was
-/// given, so a script after itself. Polled, because the forked child still
-/// carries this test's name until its `execve` lands.
+/// Polled: the forked child carries this test's name until its `execve` lands.
 fn an_execed_script_is_named_after_itself() -> bool {
     let Some(path) = install("exec_named", "#!/bin/sh\nread x\n", 0o755) else {
         return false;

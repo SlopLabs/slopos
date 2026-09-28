@@ -597,9 +597,8 @@ define_syscall!(syscall_execve
         Ok(path) => path,
         Err(err) => return SyscallResult::Err(err),
     };
-    // Resolved against the caller's cwd here: `do_exec` cannot see the cwd,
-    // and the grant lookup below keys on the canonical name of the file
-    // loaded, which for a script is its interpreter.
+    // Resolved here: `do_exec` cannot see the cwd, and the grant lookup below
+    // keys on the file loaded, for a script its interpreter.
     let program = match ctx.with_cwd(|cwd| exec::resolve_exec(path.as_bytes(), cwd)) {
         Ok(program) => program,
         Err(e) => {
@@ -1052,7 +1051,6 @@ define_syscall!(syscall_fchdir
     store_cwd(&canon)
 });
 
-/// Installing a first context is the owner's alone, hence the witness.
 fn store_cwd(canon: &CanonPath) -> Result<(), Errno> {
     let current = Current::get().ok_or(Errno::EINVAL)?;
     if !current.task().set_cwd(&current, canon.as_bytes()) {
@@ -1176,10 +1174,8 @@ fn futex_timeout_ms(addr: u64, absolute: bool, realtime: bool) -> Result<Option<
     Ok(Some(remaining_ns.div_ceil(1_000_000)))
 }
 
-/// The key a futex op on `uaddr` names. Without `FUTEX_PRIVATE_FLAG` a word
-/// in a `MAP_SHARED` mapping of a shared object is keyed on the object, so
-/// another process mapping it elsewhere meets it; everything else keys on this
-/// address space, as the flag would.
+/// Without `FUTEX_PRIVATE_FLAG`, a word in a `MAP_SHARED` object mapping keys
+/// on the object so other processes meet it; all else keys on this address space.
 fn futex_key(
     ctx: &crate::syscall::context::SyscallContext,
     uaddr: u64,

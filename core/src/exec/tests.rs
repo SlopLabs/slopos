@@ -559,9 +559,6 @@ pub fn test_program_path_resolves_against_the_cwd() -> TestResult {
     }
 }
 
-/// The `#!` line is an interpreter and at most one argument, the rest of the
-/// line unsplit; a line with no interpreter, or a header whose interpreter
-/// runs off its end, is `ENOEXEC`.
 pub fn test_shebang_line_is_one_interpreter_and_one_argument() -> TestResult {
     use super::script::{SCRIPT_HEADER_MAX, ShebangLine, parse_shebang};
     use slopos_testing::assert_test;
@@ -634,7 +631,6 @@ pub fn test_shebang_line_is_one_interpreter_and_one_argument() -> TestResult {
     TestResult::Pass
 }
 
-/// Writes an executable file under the scratch directory.
 fn stage_exec_file(path: &[u8], body: &[u8], mode: u16) -> bool {
     let Ok(handle) = slopos_fs::vfs::vfs_open(path, true) else {
         return false;
@@ -645,9 +641,6 @@ fn stage_exec_file(path: &[u8], body: &[u8], mode: u16) -> bool {
     slopos_fs::fileio::file_chmod_at(path, b"/", mode, slopos_fs::vfs::path::RESOLVE_FOLLOW) == 0
 }
 
-/// `#!` resolution follows the chain to the binary that runs it, rebuilds
-/// `argv` as the interpreter sees it, keys authority on the interpreter, and
-/// bounds the chain.
 pub fn test_script_exec_resolves_to_its_interpreter() -> TestResult {
     use super::script::resolve_exec;
     use slopos_testing::assert_test;
@@ -721,16 +714,13 @@ pub fn test_script_exec_resolves_to_its_interpreter() -> TestResult {
         resolve_exec(b"/tmp", DIR).err() == Some(Errno::EACCES),
         "a directory is not executable: EACCES, not ENOEXEC"
     );
-    // A loop is not a file the kernel failed to recognise: ENOEXEC would send
-    // a `PATH` search on to run it as a shell script.
+    // `ENOEXEC` would make a `PATH` search run the loop as a shell script.
     let _ = slopos_fs::vfs::vfs_symlink(b"/tmp/shebang/loop", b"/tmp/shebang/loop");
     assert_test!(
         resolve_exec(b"loop", DIR).err() == Some(Errno::ELOOP),
         "a symlink loop is ELOOP, as execve(2) answers it"
     );
 
-    // The grant is looked up for the image, so a script naming the shell
-    // runs with exactly the shell's grant.
     if super::resolve_program(b"/bin/shell", b"/").is_ok()
         && stage_exec_file(b"/tmp/shebang/launcher", b"#!/bin/shell\n", 0o755)
     {

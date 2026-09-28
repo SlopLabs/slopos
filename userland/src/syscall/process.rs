@@ -383,8 +383,7 @@ pub fn default_signal(signum: u8) -> i32 {
     }
 }
 
-/// The installed handler for `signum` (`SIG_DFL`, `SIG_IGN` or a function) —
-/// a query-only `rt_sigaction`.
+/// `signum`'s installed handler: `SIG_DFL`, `SIG_IGN` or a function.
 #[inline(always)]
 pub fn signal_handler(signum: u8) -> Option<u64> {
     let mut old = UserSigaction {
@@ -405,7 +404,6 @@ pub fn signal_handler(signum: u8) -> Option<u64> {
     (rc == 0).then_some(old.sa_handler)
 }
 
-/// Whether `signum` is currently ignored.
 #[inline(always)]
 pub fn signal_ignored(signum: u8) -> bool {
     signal_handler(signum) == Some(SIG_IGN)
