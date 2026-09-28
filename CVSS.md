@@ -15,6 +15,31 @@ child's pages reached the root both through that walk and inside the released
 balance — an underflow that panics the tests kernel and silently skews the
 ledger in a release one. A release now waits out the walks in flight.
 
+Swept 2026-09-28: the POSIX surface ports expect and the memory policy
+behind a cheap fork — `rt_sigqueueinfo`/`rt_tgsigqueueinfo` and their
+forgery rule, the per-process shared signal set, `rt_sigtimedwait`,
+signalfd, process-shared futex keys, `#!` dispatch and grant narrowing on
+spawn, FIFOs, `fchdir`, lazy fork charging and the OOM killer, and the
+recipe driver as supply chain. One guaranteed defect (confidence 83,
+`AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H`, 5.5): the OOM killer weighed
+processes by present pages and exempted only init, so an unprivileged
+process could size unmapped memfds, fault a forked copy past the ceiling
+and have the kernel SIGKILL the compositor, which `kill` refuses it. The
+killer now weighs what each process's own account holds of the kind that
+ran short and never takes a process the writer may not signal, except on
+init's own write. Fixed inside the same unreleased change, so not an
+entry. Two pre-existing holes surfaced with it and are closed: a process
+nested past `MAX_ACCOUNT_DEPTH` got no ledger row and escaped every quota
+and the commit ceiling, and a memfd whose sizer exited kept its frames
+while its charge was credited out of every ancestor
+(`test_oom_an_orphaned_memfd_stays_charged_to_nobody`). Below the bar and
+fixed: a `kill` past a realtime queue delivered as `SI_KERNEL`, a
+signalfd serving its creator rather than its reader, FIFO end counts that
+saturated at 65 535, and recipe fetches that followed non-https
+redirects. Process-shared futex waiters on a file any process can map are
+reachable by every process, as on Linux; SlopOS has no file permissions to
+narrow it.
+
 Swept 2026-09-16: the editor — `editor-core`'s buffer, lexer, search and tree
 model, the new `appkit` surfaces, the fd-based clipboard transfer in
 `windowing`, and the editor's own filesystem boundary, every one of which reads
