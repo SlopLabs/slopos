@@ -48,6 +48,9 @@ capacity_stage        := build_dir / "capacity-stage"
 # The dev disk: the workbench volume a cross-built toolchain lands on.
 # Preserved, because what the guest wrote to a workbench survives a rebuild.
 fs_image_devdisk      := fs_image_dir / "ext2-devdisk.img"
+# What the guest pushes lands here, outside the disk, so discarding the disk
+# keeps it.
+devdisk_push_repo     := fs_image_dir / "devdisk.git"
 dev_disk_size         := env("DEV_DISK_SIZE", "8G")
 # A compiler session: the `core` compile peaks at 1.15 GiB anonymous, and the
 # file map's per-process cap is usable memory / 8 — 512 MiB at 4G, which the
@@ -222,29 +225,17 @@ _fs-image-devdisk: _build-userland-tests
     DEV_DISK_SIZE={{dev_disk_size}} DEV_DISK_INODE_RATIO={{dev_disk_inode_ratio}} \
         scripts/build_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}"
 
-[doc("Discard a persistent disk so the next just boot builds it fresh: root (/) or devdisk (/devel, reseeded from HEAD with the installed toolchain; the guest's edits are kept in builddir/devdisk-<base>.patch)")]
+[doc("Discard a persistent disk so the next just boot builds it fresh: root (/) or devdisk (/devel, a fresh clone of HEAD with the installed toolchain; what the guest has not pushed goes with it)")]
 reset DISK:
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{DISK}}" in
         root) img="{{fs_image_persist}}" ;;
-        devdisk)
-            img="{{fs_image_devdisk}}"
-            base="$(debugfs -R 'cat /src/slopos/.slopos-base' "$img" 2>/dev/null || true)"
-            if [ -n "$base" ]; then
-                patch="{{build_dir}}/devdisk-$base.patch"
-                scripts/export_devdisk.sh "$img" "$patch"
-                [ -s "$patch" ] || rm -f "$patch"
-            fi
-            ;;
+        devdisk) img="{{fs_image_devdisk}}" ;;
         *) echo "usage: just reset root|devdisk" >&2; exit 2 ;;
     esac
     rm -f "$img" "$img.stamp"
     echo "reset: discarded $img; the next just boot builds a fresh one"
-
-[doc("Write the guest's edits to the dev disk's src/slopos as a patch against the commit it was seeded from")]
-devdisk-export:
-    scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/devdisk.patch"
 
 # Parsed here: after the recipe name, just passes `NAME=value` through as a
 # literal argument rather than setting anything.
@@ -265,7 +256,7 @@ devdisk-export-file +ARGS:
         echo "usage: just devdisk-export-file PATH=<path on the volume> OUT=<host path>" >&2
         exit 2
     fi
-    scripts/export_devdisk.sh --file "$file" "{{fs_image_devdisk}}" "$out"
+    scripts/export_devdisk.sh "$file" "{{fs_image_devdisk}}" "$out"
 
 _initramfs: _build-userland
     COREUTILS_LINKS="{{coreutils_tools}}" scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
@@ -365,12 +356,9 @@ boot:
         fi
     done
     just _boot-disk-dev $refresh
-    base="$(debugfs -R 'cat /src/slopos/.slopos-base' "{{fs_image_devdisk}}" 2>/dev/null || true)"
-    head="$(git rev-parse HEAD 2>/dev/null || true)"
-    [ "$base" = "$head" ] ||
-        echo "boot: /devel/src/slopos is ${base:-not seeded}, HEAD is ${head:-unknown}; just reset devdisk reseeds it" >&2
-    echo "boot: in the guest, cd /devel/src/slopos && scripts/selfhost.sh install; then bootctl reboot"
-    QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" \
+    echo "boot: in the guest: cd /devel/src/slopos; export PATH=/devel/src/slopos/third_party/rust-slopos/bin:\$PATH; git pull; scripts/selfhost.sh install; bootctl reboot"
+    echo "boot: the guest's git push lands in {{devdisk_push_repo}}; git fetch {{devdisk_push_repo}} <branch> takes it"
+    QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" GIT_PUSH_REPO="$PWD/{{devdisk_push_repo}}" \
         just _qemu-boot "interactive" "${VIDEO:-1}" {{boot_disk}} {{fs_image_persist}} BOOT_DISK_IMG={{boot_disk}} {{net_env}}
 
 [doc("just boot without the Wheel of Fate")]
@@ -404,30 +392,30 @@ test-install:
     [ "$missing" = 0 ] || exit 1
     echo "test-install: installed, tried, committed and rolled back (qemu rc=$rc); log in $log"
 
-[doc("Guest install check: the guest builds a kernel on the dev disk, installs it into slot b, boots it, commits it, and rolls back a slot that panics")]
+[doc("Guest install check: the guest takes HEAD over git, builds it on the dev disk, installs it into slot b and boots it; that kernel pushes a commit the host fetches; then it commits the slot and rolls back a slot that panics")]
 test-install-guest:
     #!/usr/bin/env bash
     set -euo pipefail
     [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
     git diff --quiet HEAD || { echo "FAIL: slot a is built from the working tree and the guest builds HEAD; commit or stash first" >&2; exit 1; }
+    head="$(git rev-parse HEAD)"
     just _fs-image-devdisk
-    base="$(debugfs -R 'cat /src/slopos/.slopos-base' "{{fs_image_devdisk}}" 2>/dev/null)"
-    [ "$base" = "$(git rev-parse HEAD)" ] ||
-        { echo "FAIL: the dev disk was seeded from ${base:-nothing}, not HEAD; export its edits, then discard it" >&2; exit 1; }
     # Slot a is the optimized tests kernel, as for test-selfhost: it is the
     # machine that runs the build.
     KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} tests.run=*ext2_aaa*,*install*" \
         BOOTDISK_PANIC_ENTRY=1 just _boot-disk
     log="{{build_dir}}/install-guest.log"
+    push="$PWD/{{build_dir}}/install-guest-push.git"
+    rm -rf "$push"
     rc=0
     # The self-hosting budget: under TCG the guest's build alone takes hours.
     timeout "${INSTALL_TIMEOUT_SECS:-28800}" \
         just _qemu-boot "test" "0" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} \
-        DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
+        DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" GIT_PUSH_REPO="$push" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         >"$log" 2>&1 || rc=$?
     missing=0
-    for marker in "INSTALL-BUILT guest-" "INSTALL-STAGE 1: rebooting into slopos-b" "INSTALL-BOOTED " \
-        "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" "ok 1 - boot_slot_install_commit_rollback"; do
+    for marker in "INSTALL-COMMIT $head" "INSTALL-BUILT guest-" "INSTALL-STAGE 1: rebooting into slopos-b" "INSTALL-BOOTED " \
+        "INSTALL-PUSHED " "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" "ok 1 - boot_slot_install_commit_rollback"; do
         grep -aqF "$marker" "$log" || { echo "FAIL: '$marker' not in $log" >&2; missing=1; }
     done
     grep -aq "not ok" "$log" && { echo "FAIL: a test failed; see $log" >&2; missing=1; }
@@ -436,16 +424,20 @@ test-install-guest:
     tag="$(grep -aoE 'INSTALL-BUILT guest-[0-9]+' "$log" | head -n1 | cut -d' ' -f2)"
     booted="$(grep -aE "BOOT: kernel .*/boot/b/kernel.elf \([0-9]+ bytes\), build tag $tag\b" "$log" | head -n1 || true)"
     [ -n "$booted" ] || { echo "FAIL: no boot of /boot/b/kernel.elf reports build tag $tag" >&2; exit 1; }
+    read -r _ pushed ref < <(grep -aoE 'INSTALL-PUSHED [0-9a-f]{40} [^[:space:]]+' "$log" | head -n1)
+    git fetch -q "$push" "refs/heads/$ref"
+    [ "$(git rev-parse FETCH_HEAD)" = "$pushed" ] && [ "$(git rev-parse FETCH_HEAD^)" = "$head" ] ||
+        { echo "FAIL: $ref in $push is not the guest's commit $pushed on $head" >&2; exit 1; }
     guest="{{build_dir}}/guest"
     mkdir -p "$guest"
-    scripts/export_devdisk.sh --file src/slopos/builddir/kernel-tests.elf "{{fs_image_devdisk}}" "$guest/installed.elf"
+    scripts/export_devdisk.sh src/slopos/builddir/kernel-tests.elf "{{fs_image_devdisk}}" "$guest/installed.elf"
     mcopy -o -i "{{boot_disk}}@@1M" ::/boot/b/kernel.elf "$guest/slot-b.elf"
     cmp "$guest/installed.elf" "$guest/slot-b.elf" ||
         { echo "FAIL: slot b does not hold the kernel the guest built" >&2; exit 1; }
     size="$(stat -c %s "$guest/installed.elf")"
     grep -qF "($size bytes)" <<<"$booted" ||
         { echo "FAIL: the booted kernel's size is not the guest build's $size bytes: $booted" >&2; exit 1; }
-    echo "test-install-guest: the guest built $tag ($size bytes), booted it from slot b, committed it and rolled back a panicking slot (qemu rc=$rc); log in $log"
+    echo "test-install-guest: the guest built $head as $tag ($size bytes), booted it from slot b, pushed $pushed, committed the slot and rolled back a panicking slot (qemu rc=$rc); log in $log"
 
 [doc("Boot the live ISO headless for BOOT_LOG_TIMEOUT seconds, serial log in test_output.log; fails unless /sbin/init launched")]
 boot-log: iso
@@ -606,7 +598,7 @@ test-capacity: _build-run-tests _fs-image-capacity
 
 # Separate from `just test` because the volume is opt-in; `just test` runs the
 # same utest with nothing attached and it passes by saying so.
-[doc("Dev-disk check at 4G: boot with the toolchain volume mounted at /devel by label from the cmdline, read its inventory back, grade its source tree, remount it, and climb the toolchain ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang); a volume this run created must export no changes")]
+[doc("Dev-disk check at 4G: boot with the toolchain volume mounted at /devel by label from the cmdline, read its inventory back, grade its source tree, remount it, and climb the toolchain ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host); a volume this run created must show a clean git status")]
 test-devdisk: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
@@ -614,55 +606,55 @@ test-devdisk: _build-run-tests
     [ -e "{{fs_image_devdisk}}" ] || fresh=1
     just _fs-image-devdisk
     TEST_CMDLINE="{{dev_test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
+    push="$PWD/{{build_dir}}/devdisk-push.git"
+    rm -rf "$push"
     rc=0
-    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
+    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" GIT_PUSH_REPO="$push" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
         --timeout-secs 3600 --silence-secs 1800 --raw --no-color > {{build_dir}}/devdisk.log 2>&1 || rc=$?
     tail -n 30 {{build_dir}}/devdisk.log
     [ "$rc" -eq 0 ] || { echo "FAIL: the dev-disk boot exited $rc — full log in {{build_dir}}/devdisk.log" >&2; exit 1; }
     scripts/check_fs_image.sh "{{fs_image_devdisk}}"
-    [ "$fresh" -eq 1 ] || exit 0
-    scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/devdisk-check.patch"
-    [ ! -s "{{build_dir}}/devdisk-check.patch" ] ||
-        { echo "FAIL: the source tree seeded this run exports as changed — see {{build_dir}}/devdisk-check.patch" >&2; exit 1; }
+    # git rides the toolchain, so a volume without one has no status to show.
+    [ "$fresh" -eq 1 ] && { [ -n "${TOOLCHAIN_STAGE:-}" ] || [ -d "{{toolchain_install}}" ]; } || exit 0
+    grep -aq 'git_reads_the_clone_and_reaches_the_host # git status: clean' {{build_dir}}/devdisk.log ||
+        { echo "FAIL: the clone seeded this run is not clean in the guest — see {{build_dir}}/devdisk.log" >&2; exit 1; }
 
-[doc("Self-hosting check: the guest builds the dev and tests kernels off the dev disk; the host holds the volume to e2fsck, runs the ELF gates on both and the kernel suite on the tests kernel")]
+[doc("Self-hosting check: the guest takes HEAD over git and builds the dev and tests kernels off the dev disk; the host holds the volume to e2fsck, runs the ELF gates on both and the kernel suite on the tests kernel")]
 test-selfhost: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
     git diff --quiet HEAD || { echo "FAIL: the guest builds HEAD and the host grades it with the working tree's gates and tests; commit or stash first" >&2; exit 1; }
+    head="$(git rev-parse HEAD)"
     just _fs-image-devdisk
-    base="$(debugfs -R 'cat /src/slopos/.slopos-base' "{{fs_image_devdisk}}" 2>/dev/null)"
-    [ "$base" = "$(git rev-parse HEAD)" ] ||
-        { echo "FAIL: the dev disk was seeded from ${base:-nothing}, not HEAD; export its edits, then discard it" >&2; exit 1; }
-    scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/selfhost-edits.patch"
-    [ ! -s "{{build_dir}}/selfhost-edits.patch" ] ||
-        { echo "FAIL: the guest's tree carries edits HEAD lacks — see {{build_dir}}/selfhost-edits.patch" >&2; exit 1; }
     # The machine running the build boots the optimized tests kernel: a
     # dev-profile one spends ten times as long in every syscall and fault.
     KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
     rc=0
-    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
+    push="$PWD/{{build_dir}}/selfhost-push.git"
+    rm -rf "$push"
+    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" GIT_PUSH_REPO="$push" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
         --timeout-secs "${SELFHOST_TIMEOUT_SECS:-28800}" --silence-secs 0 --raw --no-color > {{build_dir}}/selfhost.log 2>&1 || rc=$?
     tail -n 30 {{build_dir}}/selfhost.log
     [ "$rc" -eq 0 ] || { echo "FAIL: the self-hosting boot exited $rc — full log in {{build_dir}}/selfhost.log" >&2; exit 1; }
+    grep -aqF "guest_takes_the_host_head # SELFHOST-COMMIT $head" {{build_dir}}/selfhost.log ||
+        { echo "FAIL: the guest did not build $head — see {{build_dir}}/selfhost.log" >&2; exit 1; }
     scripts/check_fs_image.sh "{{fs_image_devdisk}}"
     guest="{{build_dir}}/guest"
     mkdir -p "$guest"
     for variant in dev tests; do
-        scripts/export_devdisk.sh --file "src/slopos/builddir/kernel-$variant.elf" \
+        scripts/export_devdisk.sh "src/slopos/builddir/kernel-$variant.elf" \
             "{{fs_image_devdisk}}" "$guest/kernel-$variant.elf"
         scripts/check_kernel_elf_gates.sh "$guest" "$variant"
     done
     just test-elf "ELF=$guest/kernel-tests.elf"
 
-# The self-hosting build as a benchmark: the guest half of test-selfhost on
-# whatever the tree holds now, from an empty target directory, with prof=on.
-# No HEAD check, so it runs on an uncommitted kernel against the source
-# the dev disk already carries. The libc.so the boot ran is kept beside the
-# log: user ticks symbolize against the objects that took them.
+# The self-hosting build as a benchmark: the guest half of test-selfhost, from
+# an empty target directory, with prof=on. No clean-tree check, so it runs on
+# an uncommitted kernel; the guest builds HEAD. The libc.so the boot ran is
+# kept beside the log: user ticks symbolize against the objects that took them.
 [doc("Benchmark the guest's kernel build: boot the optimized tests kernel with the dev disk and prof=on, build the dev and tests kernels from clean, and summarize where the time went (builddir/bench-selfhost.log)")]
 bench-selfhost: _build-run-tests
     #!/usr/bin/env bash
@@ -672,7 +664,9 @@ bench-selfhost: _build-run-tests
     KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} ${BENCH_PROF-prof=on} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
     cp {{build_dir}}/libc.so {{build_dir}}/bench-libc.so
     rc=0
-    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
+    push="$PWD/{{build_dir}}/bench-push.git"
+    rm -rf "$push"
+    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" GIT_PUSH_REPO="$push" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
         --timeout-secs "${SELFHOST_TIMEOUT_SECS:-28800}" --silence-secs 0 --raw --no-color > {{build_dir}}/bench-selfhost.log 2>&1 || rc=$?
     [ "$rc" -eq 0 ] || { tail -n 30 {{build_dir}}/bench-selfhost.log; echo "FAIL: the benchmark boot exited $rc — full log in {{build_dir}}/bench-selfhost.log" >&2; exit 1; }
@@ -792,7 +786,7 @@ toolchain *ARGS:
 toolchain-profile *ARGS:
     scripts/make_toolchain_profile.sh {{ARGS}}
 
-[doc("Build the C libraries under toolchain/recipes/ (zlib, nghttp2, OpenSSL, curl, libssh2, libgit2) for SlopOS from their pinned tarballs into builddir/slopos-recipes/prefix; names build only those and what they depend on")]
+[doc("Build the recipes under toolchain/recipes/ (zlib, nghttp2, OpenSSL, curl, libssh2, libgit2, git) for SlopOS from their pinned tarballs into builddir/slopos-recipes/prefix; names build only those and what they depend on")]
 recipes *NAMES: _build-userland-tests
     BUILD_DIR={{build_dir}} scripts/build_recipes.sh {{NAMES}}
 

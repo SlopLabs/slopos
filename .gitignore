@@ -47,6 +47,8 @@ fs/assets/ext2-persist.img
 fs/assets/ext2-capacity.img
 fs/assets/ext2-devdisk.img
 fs/assets/*.img.stamp
+# What the dev disk's guest pushes (`just boot`'s git peer).
+fs/assets/devdisk.git/
 
 # Editor/IDE config
 .vscode/

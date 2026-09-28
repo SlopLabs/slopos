@@ -223,8 +223,9 @@ fn registry_packages(lock: &str) -> Vec<(&str, &str, &str)> {
     out
 }
 
-/// The copy of the source tree that reached the guest needs no registry: its
-/// config reads a vendor directory holding every locked crate by checksum.
+/// The tree that reached the guest needs no registry: the config in the
+/// directory above it reads a vendor directory holding every locked crate by
+/// checksum.
 fn devdisk_source_is_vendored() -> bool {
     if let Err(verdict) = *DEV_DISK {
         return verdict;
@@ -246,10 +247,15 @@ fn devdisk_source_is_vendored() -> bool {
 
 fn grade_source(source: &str) -> bool {
     let root = format!("{MOUNT_POINT}/{source}");
-    let config = match fs::read_to_string(format!("{root}/.cargo/config.toml")) {
+    let Some((above, _)) = source.rsplit_once('/') else {
+        note(&format!("{source} has no directory above it to configure"));
+        return false;
+    };
+    let base = format!("{MOUNT_POINT}/{above}");
+    let config = match fs::read_to_string(format!("{base}/.cargo/config.toml")) {
         Ok(config) => config,
         Err(e) => {
-            note(&format!("{source}/.cargo/config.toml: {e}"));
+            note(&format!("{above}/.cargo/config.toml: {e}"));
             return false;
         }
     };
@@ -257,14 +263,14 @@ fn grade_source(source: &str) -> bool {
         Some(dir) if config.contains("replace-with = \"vendored-sources\"") => dir,
         _ => {
             note(&format!(
-                "{source}/.cargo/config.toml reads no vendored sources"
+                "{above}/.cargo/config.toml reads no vendored sources"
             ));
             return false;
         }
     };
     let (lock, std_lock) = match (
         fs::read_to_string(format!("{root}/Cargo.lock")),
-        fs::read_to_string(format!("{root}/{vendor}/library.lock")),
+        fs::read_to_string(format!("{base}/{vendor}/library.lock")),
     ) {
         (Ok(l), Ok(s)) => (l, s),
         (l, s) => {
@@ -287,7 +293,7 @@ fn grade_source(source: &str) -> bool {
     }
     let packages: Vec<_> = workspace.into_iter().chain(std).collect();
     for (name, version, checksum) in &packages {
-        let manifest = format!("{root}/{vendor}/{name}-{version}/.cargo-checksum.json");
+        let manifest = format!("{base}/{vendor}/{name}-{version}/.cargo-checksum.json");
         match fs::read_to_string(&manifest) {
             Ok(json) if json.contains(&format!("\"package\":\"{checksum}\"")) => {}
             Ok(_) => {
@@ -986,6 +992,52 @@ fn clang_links_c_and_cxx() -> bool {
     })
 }
 
+/// Rung 7: git reads the clone the volume was seeded with and reaches the
+/// checkout the host serves. The note says whether the tree is pristine, which
+/// the host holds a volume it has just created to.
+fn git_reads_the_clone_and_reaches_the_host() -> bool {
+    let prefix = match prefix() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let Some(source) = marker_entry("source") else {
+        note("the volume carries no source tree");
+        return true;
+    };
+    let root = format!("{MOUNT_POINT}/{source}");
+    let git = format!("{prefix}/bin/git");
+    let Some(status) = run(&prefix, &root, &git, &["status", "--porcelain"], &[]) else {
+        return false;
+    };
+    if !status.ok("git status") {
+        return false;
+    }
+    let tree = match status.stdout.lines().count() {
+        0 => format!("clean in {} ms", status.took.as_millis()),
+        n => format!(
+            "{n} changes, first {:?}",
+            status.stdout.lines().next().unwrap_or_default()
+        ),
+    };
+    let Some(remote) = run(
+        &prefix,
+        &root,
+        &git,
+        &["ls-remote", "origin", "HEAD"],
+        &[("GIT_TERMINAL_PROMPT", "0")],
+    ) else {
+        return false;
+    };
+    if !remote.ok("git ls-remote origin HEAD") {
+        return false;
+    }
+    note(&format!(
+        "git status: {tree}; origin HEAD is {}",
+        remote.stdout.split_whitespace().next().unwrap_or("-")
+    ));
+    true
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("devdisk_inventory_reads_back", devdisk_inventory_reads_back),
@@ -1003,5 +1055,9 @@ fn main() {
         ),
         ("cargo_fetches_over_https", cargo_fetches_over_https),
         ("clang_links_c_and_cxx", clang_links_c_and_cxx),
+        (
+            "git_reads_the_clone_and_reaches_the_host",
+            git_reads_the_clone_and_reaches_the_host,
+        ),
     ]);
 }

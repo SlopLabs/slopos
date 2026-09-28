@@ -26,9 +26,10 @@ set -euo pipefail
 #
 # Environment:
 #   DEV_DISK_SIZE - volume size (default: 8G). The toolchain is ~0.7 GB, the
-#                   seeded source with its sysroot ~1.2 GB, and each kernel
-#                   variant built in the guest ~1.6 GB of target directory. A
-#                   preserved smaller volume is grown in place with `resize2fs`.
+#                   seeded clone with its history and sysroot ~1.6 GB, and
+#                   each kernel variant built in the guest ~1.6 GB of target
+#                   directory. A preserved smaller volume is grown in place
+#                   with `resize2fs`.
 #   DEV_DISK_INODE_RATIO - bytes of volume per inode (default: 16384, the
 #                   mke2fs default). The C++ headers alone are ~1000 files.
 #   TOOLCHAIN_STAGE - a cross-built toolchain prefix, staged on a new volume
@@ -36,11 +37,15 @@ set -euo pipefail
 #                   sysroot alone, which is what a run before the toolchain
 #                   exists wants.
 #
-# A new volume is also seeded with `src/slopos`: the committed HEAD, the
-# vendored crates, a `.cargo/config.toml` that reads them with no registry, and
-# `.slopos-base`, the commit `scripts/export_devdisk.sh` diffs the guest's
-# edits against. A preserved volume keeps the guest's tree, so the marker
-# records only that it is there.
+# A new volume is also seeded with `src/slopos`, a clone of this checkout at
+# HEAD whose `origin` is the checkout `qemu_run.sh` serves the guest and whose
+# `host` remote, the push default, is the repository it pushes into; the
+# vendored crates beside it; and `src/.cargo/config.toml`, which points cargo
+# anywhere below `src/` at them with no registry and leaves the clone's own
+# `.cargo/config.toml` as committed. Everything the volume holds is owned by
+# uid 0, the guest's only user, since git refuses a repository its user does
+# not own. A preserved volume keeps the guest's tree, so the marker records
+# only that it is there.
 #
 # A new volume also carries `git/greeting.git`, a bare repository of one crate
 # that `devdisk_test` fetches through libgit2, made at a fixed date so it is
@@ -122,30 +127,43 @@ cp -a "$CXX_DIR/include/c++/v1/." "$STAGE/include/c++/v1/"
     missing "$CXX_DIR/licenses" "scripts/make_slopos_cxx.sh '${RELEASE_DIR}'"
 cp -a "$CXX_DIR/licenses" "$STAGE/licenses"
 
-VENDOR_REL="$(. "$SCRIPT_DIR/lib/toolchain_pin.sh" && tp_vendor_rel "$REPO_ROOT")" ||
+. "$SCRIPT_DIR/lib/toolchain_pin.sh"
+VENDOR_REL="$(tp_vendor_rel "$REPO_ROOT")" ||
     die ".cargo/vendor.toml names no vendored-sources directory"
+SOURCE_REL="src/slopos"
+# `qemu_run.sh`'s git peer: this checkout on the default port, the push
+# repository on 9419.
+GIT_PEER="git://10.0.2.4"
+NEW_VOLUME=0
+[ -f "$IMAGE_PATH" ] || NEW_VOLUME=1
 
 seed_source() {
-    local base src
-    base="$(git -C "$REPO_ROOT" rev-parse --verify HEAD 2>/dev/null)" ||
-        die "the dev disk seeds src/slopos from git HEAD, and $REPO_ROOT is not a git checkout"
+    local src="$STAGE/$SOURCE_REL" config="$STAGE/src/.cargo/config.toml" key value
+    git -C "$REPO_ROOT" rev-parse --verify -q HEAD >/dev/null ||
+        die "the dev disk clones src/slopos from this checkout, which has no HEAD"
     git -C "$REPO_ROOT" diff --quiet HEAD -- Cargo.lock .cargo rust-toolchain.toml toolchain/PIN ||
         die "Cargo.lock, .cargo/ or the toolchain pin differ from HEAD; commit or stash them, since the vendored crates must be the ones src/slopos names"
     [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] ||
-        echo "$SELF: the working tree has uncommitted changes; src/slopos is cut from HEAD ($base) without them" >&2
+        echo "$SELF: the working tree has uncommitted changes; src/slopos is cloned at HEAD without them" >&2
     "$SCRIPT_DIR/make_vendor.sh"
-    src="$STAGE/src/slopos"
-    mkdir -p "$src/.cargo" "$src/$(dirname "$VENDOR_REL")"
-    git -C "$REPO_ROOT" archive --format=tar "$base" | tar -x -C "$src"
+    git clone -q --no-local "$REPO_ROOT" "$src" || die "could not clone $REPO_ROOT into $src"
+    git -C "$src" remote set-url origin "$GIT_PEER/slopos"
+    git -C "$src" remote add host "$GIT_PEER:9419/slopos"
+    git -C "$src" config remote.pushDefault host
+    git -C "$src" config push.default current
+    for key in user.name user.email; do
+        value="$(git -C "$REPO_ROOT" config "$key" || true)"
+        [ -z "$value" ] || git -C "$src" config "$key" "$value"
+    done
+    mkdir -p "$src/$(dirname "$VENDOR_REL")" "$(dirname "$config")"
     cp -a "$REPO_ROOT/$VENDOR_REL" "$src/$VENDOR_REL"
-    {
-        git -C "$REPO_ROOT" show "$base:.cargo/config.toml"
-        echo
-        git -C "$REPO_ROOT" show "$base:.cargo/vendor.toml"
-    } >"$src/.cargo/config.toml"
-    echo "$base" >"$src/.slopos-base"
+    # Relative to `src/`, the directory holding this config's `.cargo`.
+    sed -e '/^#/d' -e "s|^directory = \"$VENDOR_REL\"\$|directory = \"slopos/$VENDOR_REL\"|" \
+        "$REPO_ROOT/.cargo/vendor.toml" >"$config"
+    grep -qxF "directory = \"slopos/$VENDOR_REL\"" "$config" ||
+        die "could not point $config at slopos/$VENDOR_REL"
 }
-[ -f "$IMAGE_PATH" ] || seed_source
+[ "$NEW_VOLUME" -eq 0 ] || seed_source
 
 GIT_FIXTURE_REL="git/greeting.git"
 stage_git_fixture() {
@@ -170,7 +188,7 @@ stage_git_fixture() {
     ) || die "could not make the git fixture in $STAGE/$GIT_FIXTURE_REL"
     rm -rf "$work"
 }
-[ -f "$IMAGE_PATH" ] || stage_git_fixture
+[ "$NEW_VOLUME" -eq 0 ] || stage_git_fixture
 
 REGISTRY_REL="registry"
 REGISTRY_ORIGIN="https://127.0.0.1:4433"
@@ -232,12 +250,12 @@ EOF
     head -c 39 "$sec1" | tail -c 32 >"$reg/server.key"
     rm -rf "$work"
 }
-[ -f "$IMAGE_PATH" ] || stage_registry
+[ "$NEW_VOLUME" -eq 0 ] || stage_registry
 
 # Where the host keeps its owned sysroot, so the tree's scripts find the
 # guest's toolchain where they find the host's.
-TOOLCHAIN_REL="src/slopos/third_party/rust-slopos"
-if [ -n "${TOOLCHAIN_STAGE:-}" ] && [ ! -f "$IMAGE_PATH" ]; then
+TOOLCHAIN_REL="$SOURCE_REL/$TP_SYSROOT_REL"
+if [ -n "${TOOLCHAIN_STAGE:-}" ] && [ "$NEW_VOLUME" -eq 1 ]; then
     [ -d "$TOOLCHAIN_STAGE" ] ||
         die "TOOLCHAIN_STAGE='$TOOLCHAIN_STAGE' is not a directory"
     mkdir -p "$STAGE/$TOOLCHAIN_REL"
@@ -254,6 +272,19 @@ VERITY=off \
 PRESERVE_FS_IMAGE=1 \
 FS_POPULATE_DIR="$STAGE" \
     "$SCRIPT_DIR/build_fs_image.sh" "$IMAGE_PATH" "$BUILD_DIR"
+
+# One `debugfs` for every inode: mkfs copied the host user's ids.
+if [ "$NEW_VOLUME" -eq 1 ]; then
+    [ -z "$(find "$STAGE" -name '*["\\]*' -print -quit)" ] &&
+        [ "$(find "$STAGE" -print | wc -l)" -eq "$(find "$STAGE" -print0 | tr -cd '\0' | wc -c)" ] ||
+        die "a staged name holds a quote, backslash or newline, which debugfs cannot take"
+    OWNERS="$BUILD_DIR/devdisk-owners.debugfs"
+    (cd "$STAGE" && find . -printf 'sif "/%P" uid 0\nsif "/%P" gid 0\n') >"$OWNERS"
+    debugfs -w -f "$OWNERS" "$IMAGE_PATH" >/dev/null 2>"$OWNERS.log"
+    ! grep -v '^debugfs [0-9]' "$OWNERS.log" | grep -q . ||
+        die "debugfs could not give the volume to uid 0: $(grep -v '^debugfs [0-9]' "$OWNERS.log" | head -n 3)"
+    rm -f "$OWNERS" "$OWNERS.log"
+fi
 
 # The inventory is measured on the finished volume, never on the stage. A
 # preserved image is not repopulated, and `build_fs_image.sh` refreshes
@@ -315,8 +346,11 @@ MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
         image_holds_dir "$rel" || stale "$rel"
         printf 'dir %s\n' "$rel"
     done
-    if image_holds_dir src/slopos; then
-        echo "source src/slopos"
+    if image_holds_dir "$SOURCE_REL/.git"; then
+        echo "source $SOURCE_REL"
+    elif image_holds_dir "$SOURCE_REL"; then
+        echo "$SELF: its $SOURCE_REL is a copy; debugfs -R 'rdump /$SOURCE_REL <dir>' saves it" >&2
+        stale "a git clone at $SOURCE_REL"
     else
         echo "$SELF: $IMAGE_PATH predates the seeded source tree; a new volume carries one" >&2
     fi

@@ -20,6 +20,7 @@ set -euo pipefail
 #   DEV_DISK_IMG, BOOT_DISK_IMG, QEMU_ALLOW_REBOOT,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
+#   GIT_PUSH_REPO,
 #   BOOT_LOG_TIMEOUT, LOG_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,6 +105,13 @@ NET_PORTS="${NET_PORTS:-7777,8080,8081}"
 ECHO_PEER_ADDR="${ECHO_PEER_ADDR:-10.0.2.100}"
 ECHO_PEER_PORT="${ECHO_PEER_PORT:-9999}"
 ECHO_PEER_CMD="${ECHO_PEER_CMD:-/bin/cat}"
+
+# With GIT_PUSH_REPO, the guest fetches this checkout from
+# git://10.0.2.4/ and pushes into the bare repository GIT_PUSH_REPO names,
+# made if absent, at git://10.0.2.4:9419/. The dev disk's clone names both,
+# so the address is fixed; the echo peer's rules above bound it.
+GIT_PUSH_REPO="${GIT_PUSH_REPO:-}"
+GIT_PEER_ADDR="10.0.2.4"
 
 OVMF_DIR="${OVMF_DIR:-${REPO_ROOT}/third_party/ovmf}"
 OVMF_CODE="${OVMF_DIR}/OVMF_CODE.fd"
@@ -457,6 +465,30 @@ if [ ! -x "$ECHO_PEER_CMD" ]; then
 fi
 NET_GUESTFWD=",guestfwd=tcp:${ECHO_PEER_ADDR}:${ECHO_PEER_PORT}-cmd:${ECHO_PEER_CMD}"
 
+# ── Git peer ─────────────────────────────────────────────────────────────────
+# The echo peer's mechanism: SLIRP runs one `git daemon --inetd` per
+# connection, so nothing listens on the host. Each daemon serves one
+# repository whatever path is asked for, and only the push repository's
+# daemon runs receive-pack. `--log-destination=none` because the daemon's
+# stderr is the guest's socket.
+NET_GITFWD=""
+if [ -n "$GIT_PUSH_REPO" ]; then
+    command -v git >/dev/null 2>&1 || { echo "qemu_run.sh: GIT_PUSH_REPO needs git on PATH" >&2; exit 1; }
+    case "$GIT_PUSH_REPO" in
+        /*) ;;
+        *) echo "qemu_run.sh: GIT_PUSH_REPO=$GIT_PUSH_REPO is not an absolute path" >&2; exit 1 ;;
+    esac
+    for path in "$REPO_ROOT" "$GIT_PUSH_REPO"; do
+        case "$path" in
+            *[,\'\"\\[:space:]]*) echo "qemu_run.sh: QEMU's option syntax cannot carry the path $path" >&2; exit 1 ;;
+        esac
+    done
+    [ -d "$GIT_PUSH_REPO" ] || git init -q --bare "$GIT_PUSH_REPO"
+    git_daemon="git daemon --inetd --export-all --informative-errors --log-destination=none"
+    NET_GITFWD=",guestfwd=tcp:${GIT_PEER_ADDR}:9418-cmd:${git_daemon} --forbid-override=receive-pack --interpolated-path=${REPO_ROOT}"
+    NET_GITFWD+=",guestfwd=tcp:${GIT_PEER_ADDR}:9419-cmd:${git_daemon} --enable=receive-pack --interpolated-path=${GIT_PUSH_REPO}"
+fi
+
 # ── Debug-mode plumbing ─────────────────────────────────────────────────────
 # Set QEMU_DEBUG=1 to enable the QEMU monitor on a Unix socket plus the GDB
 # stub on TCP :1234. The monitor lets you run `info cpus`, `info registers`,
@@ -550,7 +582,7 @@ QEMU_ARGS+=(
     # No `dns=`: it sets the guest-visible address of SLIRP's own stub, not an
     # upstream to forward to, so naming a public resolver moves the stub
     # somewhere nothing replies from and every lookup times out.
-    -netdev "user,id=slopnet0${NET_HOSTFWD}${NET_GUESTFWD}"
+    -netdev "user,id=slopnet0${NET_HOSTFWD}${NET_GUESTFWD}${NET_GITFWD}"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=${BOOT_ORDER},menu=off"
     "${SERIAL_ARGS[@]}"

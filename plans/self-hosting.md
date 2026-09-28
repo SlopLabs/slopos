@@ -12,38 +12,50 @@ POSIX semantics.
 
 ## Where it stands
 
-The loop is closed:
+The loop is closed, and source moves through it by git:
 
 ```sh
 just boot                                   # host: the development machine (just boot-fast: no wheel)
-cd /devel/src/slopos                        # guest
+cd /devel/src/slopos                        # guest: a clone of the host's checkout
+export PATH=/devel/src/slopos/third_party/rust-slopos/bin:$PATH
+git pull                                    # take the host's commits
 scripts/selfhost.sh install                 # build the kernel, put it in the spare slot
 bootctl reboot                              # try it once
 bootctl commit                              # keep it; a reboot without this, or a panic, falls back
+git commit -am '...' && git push            # hand a change back
 ```
 
 `just boot` boots this build's kernel from an A/B boot disk it rebuilds every
-run, with `/` on a persistent disk and the dev disk (toolchain and a source
-tree cut from `HEAD`) at `/devel`. The host owns the boot disk and the
-binaries it installs on `/`; the guest owns everything else on both disks.
-`just test-selfhost` and `just test-install-guest` run the command above in the
-guest and grade it: the guest's kernels pass the ELF gates and the kernel
-suite, and a kernel the guest built boots, commits and rolls back.
+run, with `/` on a persistent disk and the dev disk at `/devel`: the toolchain,
+and a clone of the host's checkout whose `origin` is that checkout and whose
+push remote is a bare repository beside the dev disk
+(`fs/assets/devdisk.git`; `git fetch fs/assets/devdisk.git <branch>` on the
+host). SLIRP runs one `git daemon --inetd` on the host per connection the
+guest opens to `git://10.0.2.4/`, so nothing listens on the host and the
+guest reaches exactly two repositories: the checkout read-only, the push
+repository with receive-pack. The host owns the boot disk and the binaries it
+installs on `/`; the guest owns everything else on both disks. `just
+test-selfhost` and `just test-install-guest` run the loop in the guest and
+grade it: the guest fetches the commit under test, its kernels pass the ELF
+gates and the kernel suite, and a kernel the guest built boots, pushes a
+commit the host fetches, commits and rolls back.
 
 Every patch under `toolchain/` teaches its project the `slopos` target and
-nothing else. A library joins as a recipe under `toolchain/recipes/`: a
-pinned tarball, its checksum and a build template that
+nothing else. A library or tool joins as a recipe under `toolchain/recipes/`:
+a pinned tarball, its checksum and a build template that
 `scripts/build_recipes.sh` compiles against slibc, and that
 `scripts/check_recipes.sh` holds to leaving the source as shipped. Cargo builds
 with its default features against the zlib, nghttp2, OpenSSL, libcurl, libssh2
 and libgit2 recipes; in the guest it resolves a git dependency through libgit2
-and fetches a crate over HTTPS through libcurl and OpenSSL.
+and fetches a crate over HTTPS through libcurl and OpenSSL. Git 2.55 is a meson
+recipe beside them, built for the toolchain's place in the guest.
 
 A port finds the POSIX it expects: one working directory per process, `#!`
 scripts and `/bin/sh`, process-shared futexes, 64 signals with queued realtime
-ones and `sigqueue`, FIFOs, and `trap` in the shell. A fork owes its copy as
-the child writes it, and a write that finds no page makes the OOM killer take
-the process holding most of what ran short, among those the writer may
+ones and `sigqueue`, FIFOs, `trap` in the shell, and the group database,
+`utime`, `mkstemp`, `freopen` and `execl` git reached for. A fork owes its copy
+as the child writes it, and a write that finds no page makes the OOM killer
+take the process holding most of what ran short, among those the writer may
 signal, instead of faulting the writer.
 
 The guest builds the dev kernel in about 62 s at four vCPUs and 8G under KVM
@@ -57,36 +69,11 @@ and the dev disk remounts read-only. `test-install-guest` and `test-selfhost`
 need `DEV_QEMU_MEM=8G` until the cap is sized for a linker and a refused fault
 in one process stops failing a whole mount.
 
-## Phase 1: git in the guest
+**Open: the vendored crates do not travel.** The dev disk is seeded with the
+crates `Cargo.lock` names, and the guest builds with no registry, so a commit
+that moves `Cargo.lock` builds in the guest only on a fresh dev disk.
 
-**Outcome:** `/devel/src/slopos` is a git clone, and code moves between host
-and guest by fetch and push, never by copying the tree.
-
-Today a dev disk is seeded once from `git archive HEAD`, records the commit in
-`.slopos-base`, gets its edits out through `just devdisk-export` (debugfs after
-the guest shuts down), and picks up host commits only through `just reset
-devdisk`, which throws away the guest's build cache. Redox, Asterinas (PR
-#3749) and SerenityOS (#12303) all bridge with git over the network instead.
-
-1. **Git as a recipe.** C git over the zlib recipe, built unmodified. Its
-   licence, GPL-2.0-only, is no obstacle when the tree holds a recipe and no
-   git source; it ships as a separate program with a `NOTICE.md` entry.
-2. **The host serves its checkout.** `just boot` runs `git daemon` on the
-   host so the guest reaches it through SLIRP (`git://10.0.2.2/`), which needs
-   neither TLS nor libcurl; pushes land in a host-side bare repository.
-3. **The dev disk holds a clone.** A new dev disk clones instead of copying;
-   the offline vendor configuration moves into the guest's `CARGO_HOME`, so
-   `.cargo/config.toml` stays as committed and `git status` stays clean.
-4. **Retire the copy.** Delete `.slopos-base`, the `git archive` seeding,
-   `export_devdisk.sh`'s patch mode, `just devdisk-export`, the edit export in
-   `just reset devdisk` and the `HEAD` note `just boot` prints.
-   `test-selfhost` has the guest fetch the commit under test instead of
-   requiring a disk seeded from it.
-
-**Exit:** the guest pulls a host commit, builds and boots it, commits a change,
-and the host fetches that commit, with no debugfs and no reseed on the way.
-
-## Phase 2: the whole tree builds in the guest
+## Phase 1: the whole tree builds in the guest
 
 `build_userland.sh` is bash and the C++ runtime build is CMake and Ninja, so
 the guest can rebuild the kernel but not `init`, the shell, the coreutils or
@@ -96,7 +83,7 @@ forces the decision the loop avoids today: the host refreshes every binary it
 built on each `just boot`, so a guest-installed `/bin` must either win or be
 declared the guest's.
 
-## Phase 3: bare metal (not committed)
+## Phase 2: bare metal (not committed)
 
 `just iso` builds the bare-metal artifact: kernel and initramfs, running from
 RAM, keeping nothing. You can *try* SlopOS on hardware; you can *develop* there
@@ -115,9 +102,9 @@ The verified image (`fs/assets/ext2.img`, `verity=require`) backs no boot; the
 suite mounts it to exercise verity. Decide whether it becomes the bare-metal
 read-only root or goes.
 
-## Phase 4: the toolchain rebuilds itself (not committed)
+## Phase 3: the toolchain rebuilds itself (not committed)
 
-Rebuilding LLVM and rustc in the guest needs Python beside Phase 2's CMake and
+Rebuilding LLVM and rustc in the guest needs Python beside Phase 1's CMake and
 Ninja, tens of gigabytes and hours of CPU, and `-Zbuild-std` until the target is
 tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 
@@ -131,7 +118,8 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 - Task ownership I1 to I8; no `async fn` in a kernel crate.
 - GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source in this tree; a
   recipe names a tarball and carries none of it. A third-party program shipped
-  on an image needs a `NOTICE.md` entry.
+  on an image needs a `NOTICE.md` entry. Git is GPL-2.0-only and links slibc,
+  so it goes onto nothing but a dev disk built where it is used.
 - Ratchets are measurements: re-measure with the gate's `--emit-allowlist` and
   name the change that moved it.
 - The verified image stays read-only and attested. Anything writable is a
@@ -143,7 +131,9 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
   missing function goes into slibc or the kernel once, with POSIX semantics,
   instead of into each program that calls it. A library or tool is a recipe
   (tarball, checksum, template): the shape of Redox's cookbook without its
-  patch list.
+  patch list — Redox's git carries one, where SlopOS's git brought `<utime.h>`,
+  `<grp.h>`, `mkstemp`, `freopen`, `execl`, `getpass` and
+  `pthread_setcancelstate` into slibc.
 - **Toolchain.** LLVM cross-built from Linux into one prefix; the compiler's
   crates ported by PR-shaped patches pinned by checksum. Cranelift and wild
   were measured against this kernel and do not reach it;
@@ -165,10 +155,15 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
   rebuilds the boot disk on every `just boot`, so a stale kernel never boots by
   accident.
 - **Tests drive the human entry point.** The guest-side tests call
-  `scripts/selfhost.sh`, so the loop you run is the loop `just test-selfhost`
-  and `just test-install-guest` grade.
+  `scripts/selfhost.sh` and take the host's commits with `git fetch`, so the
+  loop you run is the loop `just test-selfhost` and `just test-install-guest`
+  grade.
 - **Source bridge.** Git over the network, not a shared filesystem: no 9p or
-  virtio-fs on the build path.
+  virtio-fs on the build path, and no copying the tree. The host is the
+  remote, where Asterinas's self-hosting demo and SerenityOS clone from the
+  internet over HTTPS: `git://` over SLIRP needs neither TLS nor libcurl, and a
+  `guestfwd` per repository runs the daemon only when the guest connects. The
+  guest pushes into a bare repository, never into the checkout.
 - **Kernel build.** One POSIX sh driver and one Rust symbol-table tool on both
   machines, rebuilt until the embedded table is the kernel's own. The guest's
   kernel is graded by the gates and the suite, not by identity with the
