@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use slopos_abi::quota::{QuotaMode, ResourceKind};
 use slopos_abi::signal::{
     MINSIGSTKSZ, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_SIGINFO, SEGV_MAPERR, SI_ADDR_OFFSET,
-    SIG_DFL, SIGCONT, SIGSEGV, SIGSTOP, SIGTERM, SIGTSTP, SIGUSR1, SS_DISABLE, SS_ONSTACK,
+    SIG_DFL, SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, SIGTERM, SIGTSTP, SIGUSR1, SS_DISABLE, SS_ONSTACK,
     SignalFrame, UserSigAltStack, UserSiginfo, UserUcontext, sig_bit,
 };
 use slopos_abi::syscall::{
@@ -46,9 +46,10 @@ use slopos_sched::task_struct::{Current, SignalAction};
 use slopos_testing::{TestResult, assert_eq_test, assert_some, assert_test, pass};
 
 use crate::syscall::signal::{
-    deliver_pending_signal, syscall_kill, syscall_rt_sigqueueinfo, syscall_rt_sigreturn,
-    syscall_sigaltstack, syscall_tgkill,
+    deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill,
+    syscall_rt_sigqueueinfo, syscall_rt_sigreturn, syscall_sigaltstack, syscall_tgkill,
 };
+use crate::tests::helpers::install_static_program;
 
 type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 
@@ -2014,11 +2015,52 @@ fn is_cow_in(table: FdTable, addr: u64) -> bool {
     })
 }
 
+#[derive(Clone, Copy)]
+enum Delivery {
+    SyscallExit,
+    IrqExit,
+}
+
+/// Deliver as a trap's way out does, one level into interrupt nesting with
+/// interrupts masked, then restore the bootstrap current-task pointer.
+#[must_use]
+fn deliver_on_irq_exit_as_current(
+    task_id: u32,
+    table: FdTable,
+    frame: &mut slopos_arch::InterruptFrame,
+) -> bool {
+    use slopos_arch::cpu;
+    use slopos_ostd::cpu::x86_64::pcr::{interrupt_nesting_enter, interrupt_nesting_exit};
+
+    if !make_task_current(task_id) {
+        return false;
+    }
+    let frame = ptr::from_mut(frame);
+    let delivered = with_user_process_context(table, || {
+        let unmasked = cpu::are_interrupts_enabled();
+        cpu::disable_interrupts();
+        interrupt_nesting_enter();
+        deliver_pending_signal_on_irq_exit(frame);
+        interrupt_nesting_exit();
+        if unmasked {
+            cpu::enable_interrupts();
+        }
+    })
+    .is_some();
+    park_bootstrap_on_current_cpu();
+    delivered
+}
+
 /// A forked child's signal frame lands on stack pages it still shares with
 /// its parent. With the commit ceiling full, the copy that frame needs is the
 /// OOM killer's to find, as the child's own write would be, not a refused
 /// push that ends in `SIGSEGV`.
 pub fn test_sigframe_on_a_shared_forked_stack_waits_for_the_killer() -> TestResult {
+    sigframe_on_a_shared_forked_stack(Delivery::SyscallExit)
+}
+
+fn sigframe_on_a_shared_forked_stack(delivery: Delivery) -> TestResult {
+    const INTERRUPTED_RIP: u64 = 0x5000_7777;
     let _fixture = SyscallFixture::new();
 
     let parent_id = create_test_user_task();
@@ -2058,9 +2100,15 @@ pub fn test_sigframe_on_a_shared_forked_stack_waits_for_the_killer() -> TestResu
         return fail_and_clean(&[child_id, parent_id]);
     }
 
-    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
-    frame.regs_mut().rsp = rsp;
-    frame.regs_mut().rip = 0x5000_7777;
+    let mut ctx: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    ctx.regs_mut().rsp = rsp;
+    ctx.regs_mut().rip = INTERRUPTED_RIP;
+    let mut trap: KBox<slopos_arch::InterruptFrame> = KBox::zeroed().expect("alloc");
+    trap.rip = INTERRUPTED_RIP;
+    trap.rsp = rsp;
+    trap.cs = 0x23;
+    trap.ss = 0x1B;
+    trap.rflags = 0x202;
 
     OOM_VICTIM_PID.store(victim.id(), Ordering::Release);
     OOM_KILLS.store(0, Ordering::Release);
@@ -2077,7 +2125,16 @@ pub fn test_sigframe_on_a_shared_forked_stack_waits_for_the_killer() -> TestResu
         commit.map_or(0, |s| s.used),
     );
 
-    let delivered = deliver_pending_signal_as_current(child_id, child_table, &frame);
+    let (delivered, resumed_at) = match delivery {
+        Delivery::SyscallExit => (
+            deliver_pending_signal_as_current(child_id, child_table, &ctx),
+            ctx.rip(),
+        ),
+        Delivery::IrqExit => (
+            deliver_on_irq_exit_as_current(child_id, child_table, &mut trap),
+            trap.rip,
+        ),
+    };
 
     set_limit(quota_root(), ResourceKind::CommitPages, ceiling);
     oom_forget_victim_for_test();
@@ -2094,7 +2151,7 @@ pub fn test_sigframe_on_a_shared_forked_stack_waits_for_the_killer() -> TestResu
 
     assert_test!(delivered, "the delivery did not run");
     assert_eq_test!(
-        frame.rip(),
+        resumed_at,
         TEST_HANDLER,
         "the frame push was refused instead of waiting for the killer"
     );
@@ -2106,6 +2163,128 @@ pub fn test_sigframe_on_a_shared_forked_stack_waits_for_the_killer() -> TestResu
         child_killed
     );
     pass!()
+}
+
+const FAULTER_PATH: &[u8] = b"/tmp/abandoned_trap_faulter";
+/// `ud2`: the task dies inside its own `#UD` handler.
+const FAULTER: [u8; 2] = [0x0f, 0x0b];
+const SPINNER_PATH: &[u8] = b"/tmp/abandoned_trap_spinner";
+/// `setpgid(0, 0)`, then `jmp $`: past the syscall it enters the kernel only
+/// through an interrupt.
+const SPINNER: [u8; 13] = [
+    0x31, 0xff, // xor edi, edi
+    0x31, 0xf6, // xor esi, esi
+    0xb8, 0x6d, 0x00, 0x00, 0x00, // mov eax, SYS_setpgid
+    0x0f, 0x05, // syscall
+    0xeb, 0xfe, // jmp $
+];
+const PROBE_BUDGET_MS: u64 = 5_000;
+
+fn wait_until(done: impl Fn() -> bool) -> bool {
+    use slopos_kernel_services::platform::get_time_ms;
+    let deadline = get_time_ms().saturating_add(PROBE_BUDGET_MS);
+    while !done() && get_time_ms() < deadline {
+        slopos_sched::scheduler::sleep_current_task_ms(1);
+    }
+    done()
+}
+
+/// Run `path` until it dies, `kill` ending it if it would not end itself, and
+/// reap it. Answers the CPU it died on.
+fn run_probe_to_death(
+    path: &[u8],
+    parent: u32,
+    kill: fn(&slopos_sched::task_struct::Task) -> bool,
+) -> Option<usize> {
+    let pid = crate::exec::spawn_program_with_attrs(
+        path,
+        None,
+        None,
+        slopos_abi::task::TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &[],
+        0,
+        None,
+        parent,
+    )
+    .ok()?;
+    let probe = task_find_by_id(pid)?;
+    let died = kill(&probe) && wait_until(|| probe.exit_info_is_set());
+    let cpu = probe.last_cpu() as usize;
+    drop(probe);
+    if !died {
+        slopos_ostd::klog_info!("ABANDONED_TRAP: the probe never died");
+        task_terminate(pid);
+    }
+    let _ = task_consume_zombie(pid);
+    died.then_some(cpu)
+}
+
+/// `SIGKILL` as the OOM killer sends it, once the spinner is past its one
+/// syscall, and a reschedule kick to its CPU: that interrupt is then the only
+/// way into the kernel, so the kill is taken on its way out.
+fn kill_once_spinning(spinner: &slopos_sched::task_struct::Task) -> bool {
+    use slopos_kernel_services::platform::get_time_ms;
+    let spinning = wait_until(|| spinner.pgid() == spinner.task_id);
+    let settled = get_time_ms().saturating_add(20);
+    wait_until(|| get_time_ms() >= settled);
+    if !spinning || task::task_group_signal(spinner.task_id, SIGKILL) == 0 {
+        return false;
+    }
+    slopos_sched::scheduler::send_reschedule_ipi(spinner.last_cpu() as usize);
+    true
+}
+
+/// Sampled, since an interrupt the CPU is taking right now is a level too.
+fn leaves_interrupt_nesting(cpu: usize) -> bool {
+    let depth = || {
+        slopos_ostd::cpu::x86_64::pcr::get_pcr(cpu).map_or(u32::MAX, |pcr| {
+            pcr.interrupt_nesting.load(Ordering::Acquire)
+        })
+    };
+    if wait_until(|| depth() == 0) {
+        return true;
+    }
+    slopos_ostd::klog_info!(
+        "ABANDONED_TRAP: CPU {} stays {} deep in interrupt nesting",
+        cpu,
+        depth()
+    );
+    false
+}
+
+/// A task that dies inside a trap — of its own fault, or of a kill taken on
+/// the way out of an interrupt — never returns through the trap's exit, so
+/// never leaves its interrupt nesting. The level is the task's: the CPU it
+/// died on leaves interrupt context, and a frame push at a trap's depth on a
+/// shared stack still waits for the OOM killer rather than being refused.
+pub fn test_an_abandoned_trap_leaves_its_cpu_out_of_interrupt_nesting() -> TestResult {
+    let parent = Current::get().map_or(INVALID_TASK_ID, |current| current.id());
+    assert_test!(
+        install_static_program(FAULTER_PATH, &FAULTER)
+            && install_static_program(SPINNER_PATH, &SPINNER),
+        "could not write the probes"
+    );
+    let killed_on = run_probe_to_death(SPINNER_PATH, parent, kill_once_spinning);
+    let killed_left = killed_on.is_some_and(leaves_interrupt_nesting);
+    let faulted_on = run_probe_to_death(FAULTER_PATH, parent, |_| true);
+    let faulted_left = faulted_on.is_some_and(leaves_interrupt_nesting);
+    let _ = slopos_fs::vfs::vfs_unlink(FAULTER_PATH);
+    let _ = slopos_fs::vfs::vfs_unlink(SPINNER_PATH);
+
+    assert_test!(killed_on.is_some(), "the spinner was not killed");
+    assert_test!(
+        killed_left,
+        "a kill on an interrupt's way out left CPU {:?} in interrupt nesting",
+        killed_on
+    );
+    assert_test!(faulted_on.is_some(), "the faulter did not die");
+    assert_test!(
+        faulted_left,
+        "a task dead of its own #UD left CPU {:?} in interrupt nesting",
+        faulted_on
+    );
+    sigframe_on_a_shared_forked_stack(Delivery::IrqExit)
 }
 
 slopos_testing::stest!(
@@ -2122,6 +2301,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_sigframe_on_a_shared_forked_stack_waits_for_the_killer,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_an_abandoned_trap_leaves_its_cpu_out_of_interrupt_nesting,
     suite = syscall_signal_build_floor
 );
 

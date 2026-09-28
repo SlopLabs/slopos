@@ -1106,6 +1106,16 @@ pub fn interrupt_nesting_depth() -> u32 {
         .unwrap_or(0)
 }
 
+/// Only the context-switch swap may use this, with IRQs disabled: installs the
+/// incoming task's depth and its `in_interrupt` mirror.
+#[inline]
+pub(crate) fn interrupt_nesting_store(depth: u32) {
+    if let Some(pcr) = current_pcr_local() {
+        pcr.interrupt_nesting.store(depth, Ordering::SeqCst);
+        pcr.in_interrupt.store(depth != 0, Ordering::SeqCst);
+    }
+}
+
 #[inline]
 pub fn in_interrupt_context() -> bool {
     current_pcr_local()

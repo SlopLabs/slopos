@@ -447,6 +447,7 @@ pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContex
         rflags: 0x02,
         rip: entry,
         preempt_count: 0,
+        interrupt_nesting: 0,
     }
 }
 

@@ -81,14 +81,17 @@ pub unsafe extern "sysv64" fn switch_registers(prev: *mut TaskContext, next: *co
     );
 }
 
-/// Context switch with per-task preempt-count save/restore.
+/// Context switch with per-task preempt-count and interrupt-nesting
+/// save/restore.
 ///
-/// `preempt_count` is logically owned by the task but cached in the per-CPU
-/// PCR (see [`TaskContext`]). This is the *only* switch entry point the
-/// scheduler should use: it brackets the raw [`switch_registers`] swap with a
-/// save of the live count into `prev` and a load of `next`'s into the PCR, so a
+/// Both counts are logically owned by the task but cached in the per-CPU PCR
+/// (see [`TaskContext`]). This is the *only* switch entry point the scheduler
+/// should use: it brackets the raw [`switch_registers`] swap with a save of the
+/// live counts into `prev` and a load of `next`'s into the PCR, so a
 /// preempt/lock guard's increment and its matching decrement balance against
-/// the same logical counter even if the task migrates while the guard is held.
+/// the same logical counter even if the task migrates while the guard is held,
+/// and a task switched away for good from inside a trap — killed or faulted on
+/// the trap's way out — leaves no nesting level on the CPU.
 ///
 /// `prev` may be null for the first switch out of the boot context.
 ///
@@ -112,16 +115,19 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
     // Single-instruction gs-relative accesses keep every preempt-count touch
     // migration-atomic by construction rather than by the assert above.
     let live = pcr::preempt_count_get();
+    let live_nesting = pcr::interrupt_nesting_depth();
     if !prev.is_null() {
         // SAFETY: caller guarantees `prev` is a valid, exclusively-owned
         // context for the duration of the switch.
         unsafe {
             (*prev).preempt_count = live as u64;
+            (*prev).interrupt_nesting = live_nesting as u64;
         }
     }
     // SAFETY: caller guarantees `next` is a valid context.
-    let restored = unsafe { (*next).preempt_count } as u32;
-    pcr::preempt_count_set(restored);
+    let (restored, nesting) = unsafe { ((*next).preempt_count, (*next).interrupt_nesting) };
+    pcr::preempt_count_set(restored as u32);
+    pcr::interrupt_nesting_store(nesting as u32);
 
     // SAFETY: `switch_registers` has this function's own documented
     // preconditions — IRQs off, sole accessor, both contexts valid — forwarded

@@ -8,9 +8,10 @@ use core::mem::offset_of;
 
 /// Callee-saved register snapshot for software context switch.
 ///
-/// `preempt_count` is a property of the *task*, cached in the per-CPU PCR for
-/// cheap guard inc/dec; every switch swaps it with the PCR so a guard's
-/// increment and decrement stay balanced across a migration.
+/// `preempt_count` and `interrupt_nesting` are properties of the *task*,
+/// cached in the per-CPU PCR; every switch swaps them with the PCR, so each
+/// increment balances its decrement across a migration, and a task that dies
+/// inside a trap takes the trap's level with it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TaskContext {
@@ -26,6 +27,9 @@ pub struct TaskContext {
     /// Saved per-task preemption-disable count, swapped with the PCR by
     /// `switch_context`.
     pub preempt_count: u64,
+    /// Saved interrupt-nesting depth, swapped with the PCR by
+    /// `switch_context`.
+    pub interrupt_nesting: u64,
 }
 
 impl TaskContext {
@@ -43,6 +47,7 @@ impl TaskContext {
             rflags: 0x202,
             rip: 0,
             preempt_count: 0,
+            interrupt_nesting: 0,
         }
     }
 
@@ -61,11 +66,12 @@ impl TaskContext {
             rflags: 0x202,
             rip: trampoline,
             preempt_count: 0,
+            interrupt_nesting: 0,
         }
     }
 }
 
-const _: () = assert!(core::mem::size_of::<TaskContext>() == 80);
+const _: () = assert!(core::mem::size_of::<TaskContext>() == 88);
 const _: () = assert!(offset_of!(TaskContext, rbx) == 0);
 const _: () = assert!(offset_of!(TaskContext, r12) == 8);
 const _: () = assert!(offset_of!(TaskContext, r13) == 16);
@@ -75,9 +81,10 @@ const _: () = assert!(offset_of!(TaskContext, rbp) == 40);
 const _: () = assert!(offset_of!(TaskContext, rsp) == 48);
 const _: () = assert!(offset_of!(TaskContext, rflags) == 56);
 const _: () = assert!(offset_of!(TaskContext, rip) == 64);
-// `preempt_count` lives past the asm-visible register block; the switch
-// asm never touches it, so its offset is not part of the asm contract.
+// The per-task counts live past the asm-visible register block; the switch
+// asm never touches them, so their offsets are not part of the asm contract.
 const _: () = assert!(offset_of!(TaskContext, preempt_count) == 72);
+const _: () = assert!(offset_of!(TaskContext, interrupt_nesting) == 80);
 
 #[cfg(test)]
 mod tests {
