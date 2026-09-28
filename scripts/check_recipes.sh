@@ -6,7 +6,8 @@
 #     names the recipe's `version`, so what is built is what was reviewed;
 #   - a `license`, a `template` the driver knows (`cmake`, `openssl`), and
 #     at least one `soname`; no key the driver does not read;
-#   - every `depends` names another recipe;
+#   - `depends` is at most one line, every word of it names another recipe,
+#     and no recipe depends on itself through them;
 #   - no file in the recipe's directory but `recipe` and the `config` it
 #     declares, and never a `*.patch` or `*.diff`: a build that needs an edit
 #     to upstream is a slibc or kernel finding, fixed there;
@@ -17,9 +18,11 @@
 #     or a search root that finds a host's package in place of the recipe's
 #     each change what is built while every file stays pristine. So a
 #     `cmake` arg is `-D<NAME>=<value>`, where a `CMAKE_*` name is one of
-#     `CMAKE_ARG_NAMES`, a project name names no flag, file, program or
-#     search root (`PROJECT_ARG_DENY`), and the value is a word or a path
-#     under `/etc`, where the SlopOS image keeps configuration; an `openssl`
+#     `CMAKE_ARG_NAMES`, a project name names no flag, file, program,
+#     directory or search root (`PROJECT_ARG_DENY`; `PROJECT_ARG_ALLOW` is
+#     the run-time CA directory, a path the library reads on SlopOS), and
+#     the value is a word or a path under `/etc`, where the SlopOS image
+#     keeps configuration; an `openssl`
 #     arg is `no-*`, `enable-*`, `shared`, `threads` or `--openssldir=` under
 #     `/etc`;
 #   - an `openssl` recipe's `config`, which `Configure` evaluates as Perl, is
@@ -51,7 +54,8 @@ TEMPLATES="cmake openssl"
 RECIPE_KEYS="version url sha256 license template depends soname arg config target"
 
 CMAKE_ARG_NAMES='^CMAKE_(BUILD_TYPE|POSITION_INDEPENDENT_CODE|(REQUIRE|DISABLE)_FIND_PACKAGE_[A-Za-z0-9_]+|INSTALL_(BINDIR|SBINDIR|LIBEXECDIR|SYSCONFDIR|DATAROOTDIR|DATADIR|INCLUDEDIR|DOCDIR|MANDIR))$'
-PROJECT_ARG_DENY='(FLAGS|DEFINITIONS|DEFINES|INCLUDE|LAUNCHER|COMPILER|LINKER|TOOLCHAIN|COMMAND|SCRIPT|MODULE|EXECUTABLE|PROGRAM|_DIRS?$|_ROOT(_DIR)?$|_LIBRAR(Y|IES)$|_FILE$|_HINTS?$)'
+PROJECT_ARG_DENY='(FLAGS|DEFINITIONS|DEFINES|INCLUDE|LAUNCHER|COMPILER|LINKER|TOOLCHAIN|COMMAND|SCRIPT|MODULE|EXECUTABLE|PROGRAM|FETCHCONTENT|_DIR|_ROOT|_PATH$|_LIBRAR(Y|IES)(_RELEASE|_DEBUG)?$|_FILE$|_HINTS?$)'
+PROJECT_ARG_ALLOW='^[A-Z0-9]+_CA_PATH$'
 WORD='^[A-Za-z0-9_][A-Za-z0-9_.,+:-]*$'
 ETC_PATH='^/etc(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)+$'
 RELATIVE_DIR='^[a-z0-9_]+(/[a-z0-9_+-][a-z0-9_.+-]*)*$'
@@ -192,7 +196,7 @@ check_cmake_arg() {
                 fail "$name: arg '$arg' names an install directory that is not relative to the prefix"
             return 0
         fi
-    elif [[ "$var" =~ $PROJECT_ARG_DENY ]]; then
+    elif [[ "$var" =~ $PROJECT_ARG_DENY && ! "$var" =~ $PROJECT_ARG_ALLOW ]]; then
         fail "$name: arg '$arg' names a flag, file, program or search root"
     fi
     [[ "$value" =~ $WORD || "$value" =~ $ETC_PATH ]] ||
@@ -237,6 +241,7 @@ check_recipe() {
         *" $template "*) ;;
         *) fail "$name: unknown template '$template' (known: $TEMPLATES)" ;;
     esac
+    [ "$(values "$file" depends | wc -l)" -le 1 ] || fail "$name: more than one depends"
     for dep in $(values "$file" depends); do
         [ -f "$root/toolchain/recipes/$dep/recipe" ] || fail "$name: depends on $dep, which is no recipe"
     done
@@ -318,6 +323,22 @@ check_tree() {
     local name
     for name in "${names[@]}"; do
         check_recipe "$root" "$name"
+    done
+    declare -A state=()
+    check_cycle() {
+        local at="$1" dep
+        case "${state[$at]:-}" in
+            done) return 0 ;;
+            active) fail "$at: the recipes depend on each other in a cycle through it" ;;
+        esac
+        state[$at]=active
+        for dep in $(values "$root/toolchain/recipes/$at/recipe" depends); do
+            check_cycle "$dep"
+        done
+        state[$at]=done
+    }
+    for name in "${names[@]}"; do
+        check_cycle "$name"
     done
     local built
     built="$(check_stamps "$root" "$out" "$root/scripts/build_recipes.sh" "${names[@]}")" || exit 1
@@ -414,6 +435,9 @@ EOF
     reject_edit 's/^template=.*/template=autotools/' "an unknown template"
     reject_edit '/^license=/d' "a recipe with no license"
     reject_edit '$ a depends=gamma' "a dependency on no recipe"
+    reject_edit '$ a depends=alpha' "a recipe that depends on itself" "in a cycle"
+    reject_edit '$ a depends=beta' "two recipes that depend on each other" "in a cycle"
+    reject_beta '$ a depends=alpha' "a second depends line" "more than one depends"
     reject_edit '/^soname=/d' "a recipe with no soname" "no soname"
     reject_edit 's|^soname=.*|soname=../../libz.so|' "a soname that is a path" "is not lib<name>.so"
     reject_edit '$ a cflags=-include /etc/shim.h' "a key the driver does not read" "not one of the keys"
@@ -434,6 +458,13 @@ EOF
     reject_edit '$ a arg=-DFOO:FILEPATH=/etc/x' "a typed -D" "is not -D<NAME>=<value>"
     reject_edit '$ a arg=-DZLIB_DIR=/etc/evil' "a package config search root" "names a flag, file"
     reject_edit '$ a arg=-DOPENSSL_ROOT_DIR=/etc/ssl' "a find root for a host package" "names a flag, file"
+    reject_edit '$ a arg=-DOPENSSL_ROOT=/etc/ssl' "a find root without _DIR" "names a flag, file"
+    reject_edit '$ a arg=-DFETCHCONTENT_SOURCE_DIR_FOO=/etc/x' "a FetchContent source override" "names a flag, file"
+    reject_edit '$ a arg=-DFETCHCONTENT_FULLY_DISCONNECTED=ON' "a FetchContent setting" "names a flag, file"
+    reject_edit '$ a arg=-DFOO_SOURCE_DIR_BAR=/etc/x' "a source directory override" "names a flag, file"
+    reject_edit '$ a arg=-DFOO_PATH=/etc/x' "a search path" "names a flag, file"
+    reject_edit '$ a arg=-DZLIB_LIBRARY_RELEASE=/etc/x' "a release library override" "names a flag, file"
+    reject_edit '$ a arg=-DZLIB_LIBRARY_DEBUG=/etc/x' "a debug library override" "names a flag, file"
     reject_edit '$ a arg=-DEXTRA_CFLAGS=O2' "a project's flags variable" "names a flag, file"
     reject_edit '$ a arg=-DFOO=-include/etc/shim.h' "a flag passed as a value" "neither a word nor a path"
     reject_edit '$ a arg=-DFOO=ON;-include;/etc/shim.h' "a CMake list smuggling a flag" "neither a word nor a path"

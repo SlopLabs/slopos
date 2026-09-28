@@ -45,7 +45,6 @@ for library in libc.so crt0.o libbuiltins.a; do
     [ -f "$BUILD_DIR/$library" ] ||
         die "no $library in $BUILD_DIR — run a tests userland build first"
 done
-[ -f "$RELEASE_DIR/libc.a" ] || die "no libc.a in $RELEASE_DIR — run a tests userland build first"
 [ -f "$CXX_DIR/lib/libc++.so" ] || die "no C++ runtime — run scripts/make_slopos_cxx.sh"
 
 # `--print-abi-flags` and not a literal: the rune-table flag decides the width
@@ -69,6 +68,7 @@ if [ "${1:-}" = "--print-stamp" ]; then
 fi
 
 [ $# -eq 2 ] || die "usage: $SELF.sh <sysroot> <bin dir> | --print-stamp"
+[ -f "$RELEASE_DIR/libc.a" ] || die "no libc.a in $RELEASE_DIR — run a tests userland build first"
 SYSROOT="$1"
 WRAPPER_DIR="$2"
 case "$SYSROOT$WRAPPER_DIR" in

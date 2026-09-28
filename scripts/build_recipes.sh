@@ -208,6 +208,21 @@ CMAKE
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
 
+# The stamp records no environment, so the build reads none: CMake seeds
+# its compilers, flags and search paths from these, OpenSSL's Configure its
+# tools and flags, clang its include and library paths, and `find_package`
+# a `<Package>_ROOT`.
+unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LDLIBS ASFLAGS ARFLAGS RCFLAGS \
+    CC CXX CPP AS AR RANLIB LD NM OBJCOPY OBJDUMP STRIP RC MT CROSS_COMPILE PERL HASHBANGPERL \
+    CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH LIBRARY_PATH COMPILER_PATH \
+    GCC_EXEC_PREFIX CCC_OVERRIDE_OPTIONS SDKROOT MAKEFLAGS MFLAGS MAKEFILES GNUMAKEFLAGS \
+    NINJA_STATUS DESTDIR
+for var in $(compgen -e); do
+    case "$var" in
+        CMAKE_* | *_ROOT) unset "$var" ;;
+    esac
+done
+
 # ---------------------------------------------------------------------------
 # One recipe.
 # ---------------------------------------------------------------------------
