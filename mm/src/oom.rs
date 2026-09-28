@@ -228,6 +228,16 @@ pub(crate) fn decide(ops: &dyn OomOps, trigger: OomTrigger) -> Decision {
     Decision::Await(chosen.vm)
 }
 
+/// [`decide`] for a test outside `mm`: the address space the writer would
+/// wait for, `None` for anything else.
+#[cfg(feature = "test-hooks")]
+pub fn oom_decide_for_test(ops: &dyn OomOps, trigger: OomTrigger) -> Option<Handle<ProcessVm>> {
+    match decide(ops, trigger) {
+        Decision::Await(vm) => Some(vm),
+        Decision::Abandoned | Decision::NoVictim => None,
+    }
+}
+
 /// Forget the victim being waited for, so a test starts from none.
 #[cfg(feature = "test-hooks")]
 pub fn oom_forget_victim_for_test() {

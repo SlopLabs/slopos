@@ -287,6 +287,16 @@ impl TaskRegistry {
                     .map(|arc| (entry.id, TaskRef::new(arc)))
             })
     }
+
+    /// Occupied slots from spine index `from` on, with their index.
+    fn entries_from(&self, from: usize) -> impl Iterator<Item = (usize, &RegistryEntry)> + '_ {
+        self.slots[from.min(self.high_water)..self.high_water]
+            .iter()
+            .enumerate()
+            .filter_map(move |(offset, slot)| {
+                slot.as_ref().map(|entry| (from + offset, entry.get()))
+            })
+    }
 }
 
 pub(super) struct TaskManagerInner {
@@ -930,6 +940,10 @@ pub fn task_try_for_each_active(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) 
     // converges.
     let mut capacity = with_task_manager(|mgr| mgr.registry.len()).max(1);
     let tasks = loop {
+        #[cfg(feature = "test-hooks")]
+        if TASK_SNAPSHOT_ALLOC_FAILS.load(Ordering::Acquire) {
+            return;
+        }
         let mut tasks = match KVec::<TaskRef>::with_capacity(capacity) {
             Ok(tasks) => tasks,
             Err(_) => return,
@@ -937,7 +951,7 @@ pub fn task_try_for_each_active(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) 
         let seen = with_task_manager(|mgr| {
             let mut seen = 0usize;
             for task in mgr.iter_tasks() {
-                if task.status() == TaskStatus::Invalid || task.task_id == INVALID_TASK_ID {
+                if !is_active(&task) {
                     continue;
                 }
                 seen += 1;
@@ -959,6 +973,70 @@ pub fn task_try_for_each_active(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) 
             return;
         }
     }
+}
+
+fn is_active(task: &Task) -> bool {
+    task.status() != TaskStatus::Invalid && task.task_id != INVALID_TASK_ID
+}
+
+/// [`task_try_for_each_enumerable`] that never touches the heap, for a caller
+/// that runs when it is dry: the OOM killer.
+///
+/// Guards are taken a fixed batch at a time into the frame, each batch resuming
+/// at the spine slot after the last, and `f` runs off the registry lock as in
+/// the snapshot walk. A registration landing behind the cursor mid-walk is
+/// missed, as a snapshot taken before it would miss it.
+pub fn task_try_for_each_enumerable_heapless(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) {
+    const BATCH: usize = 16;
+    let mut from = 0usize;
+    loop {
+        let mut batch: [Option<TaskRef>; BATCH] = [const { None }; BATCH];
+        let resume = with_task_manager(|mgr| {
+            let mut taken = 0usize;
+            for (slot, entry) in mgr.registry.entries_from(from) {
+                if taken == BATCH {
+                    return Some(slot);
+                }
+                // Registered, so the existence reference keeps this upgrade
+                // from failing and a filtered guard's drop from being final.
+                let Some(task) = entry.weak.upgrade().map(TaskRef::new) else {
+                    continue;
+                };
+                if is_active(&task) && !task.is_exited() {
+                    batch[taken] = Some(task);
+                    taken += 1;
+                }
+            }
+            None
+        });
+        for task in batch.iter().flatten() {
+            if f(task).is_break() {
+                return;
+            }
+        }
+        let Some(slot) = resume else {
+            return;
+        };
+        from = slot;
+    }
+}
+
+/// [`task_try_for_each_enumerable_heapless`] without early exit.
+pub fn task_for_each_enumerable_heapless(mut f: impl FnMut(&TaskRef)) {
+    task_try_for_each_enumerable_heapless(|task| {
+        f(task);
+        ControlFlow::Continue(())
+    });
+}
+
+/// Makes every registry snapshot's allocation fail while set, so a walk that
+/// must not depend on the heap can be shown not to.
+#[cfg(feature = "test-hooks")]
+static TASK_SNAPSHOT_ALLOC_FAILS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "test-hooks")]
+pub fn fail_task_snapshots_for_test(fail: bool) {
+    TASK_SNAPSHOT_ALLOC_FAILS.store(fail, Ordering::Release);
 }
 
 /// Return `(live, remaining_capacity, terminated, active)` for diagnostics.

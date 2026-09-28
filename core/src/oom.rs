@@ -1,15 +1,18 @@
 //! The task side of the OOM killer: who is init, who is already dying, and
 //! how a victim dies. Which process is the victim is `slopos_mm::oom`'s call.
+//!
+//! Every walk here is heapless: the killer runs when the heap is dry, and a
+//! walk that could not pay for its snapshot would see no task at all.
 
 use core::ops::ControlFlow;
 
-use slopos_abi::signal::SIGKILL;
+use slopos_abi::signal::SigInfo;
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_mm::oom::{Killed, OomOps, Standing};
 use slopos_ostd::process::Process;
 use slopos_sched::task::{
-    TaskRef, task_find_by_id, task_for_each_enumerable, task_group_signal,
-    task_try_for_each_enumerable,
+    TaskRef, task_find_by_id, task_for_each_enumerable_heapless, task_sigkill_member,
+    task_try_for_each_enumerable_heapless,
 };
 
 pub struct TaskOomOps;
@@ -36,7 +39,7 @@ pub fn standing_of(process: &Process, init: u32) -> Standing {
         return Standing::Exempt;
     }
     let mut live = false;
-    task_try_for_each_enumerable(|task| {
+    task_try_for_each_enumerable_heapless(|task| {
         if in_process(task, process) && !task.is_killed() {
             live = true;
             return ControlFlow::Break(());
@@ -57,7 +60,9 @@ impl OomOps for TaskOomOps {
 
     fn kill(&self, process: &Process) -> Option<Killed> {
         let mut killed: Option<Killed> = None;
-        task_for_each_enumerable(|task| {
+        // Thread by thread, not a group signal per thread group: the group
+        // walk snapshots the registry on the heap.
+        task_for_each_enumerable_heapless(|task| {
             if !in_process(task, process) || task.is_killed() {
                 return;
             }
@@ -67,10 +72,7 @@ impl OomOps for TaskOomOps {
                     name: task.name.get(),
                 });
             }
-            // Every thread group sharing the address space, as `SIGKILL` to
-            // each would: a group's first kill marks all its members, so the
-            // walk signals each group once.
-            task_group_signal(task.task_id, SIGKILL);
+            task_sigkill_member(task, SigInfo::KERNEL);
         });
         killed
     }

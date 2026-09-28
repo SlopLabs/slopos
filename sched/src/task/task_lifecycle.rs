@@ -2383,17 +2383,25 @@ pub fn task_group_signal_info(tid: u32, signum: u8, info: SigInfo) -> GroupPost 
         if member.is_exited() {
             return;
         }
-        // Always deliverable: `SIG_UNCATCHABLE` is stripped from every mask
-        // and refused by `rt_sigaction`.
-        let _ = slopos_ostd::task::ops::task_signal_post_info(member, signum, info);
-        slopos_ostd::task::ops::task_kill_and_wake(member);
-        // POSIX: `SIGKILL` and `SIGCONT` are the only signals that resume a
-        // stopped process, and a stopped task reaches no delivery point at
-        // which to act on the kill.
-        task_resume_if_stopped(member);
+        task_sigkill_member(member, info);
         post.reached += 1;
     });
     post
+}
+
+/// Land `SIGKILL` on one thread as a group-wide kill lands on each member:
+/// posted, the kill flag set and woken, and a stopped thread resumed to act on
+/// it. Allocates nothing for [`SigInfo::KERNEL`].
+pub fn task_sigkill_member(member: &TaskRef, info: SigInfo) {
+    // Always deliverable: `SIG_UNCATCHABLE` is stripped from every mask and
+    // refused by `rt_sigaction`.
+    let _ =
+        slopos_ostd::task::ops::task_signal_post_info(member, slopos_abi::signal::SIGKILL, info);
+    slopos_ostd::task::ops::task_kill_and_wake(member);
+    // POSIX: `SIGKILL` and `SIGCONT` are the only signals that resume a
+    // stopped process, and a stopped task reaches no delivery point at which
+    // to act on the kill.
+    task_resume_if_stopped(member);
 }
 
 /// Post `signum` carrying `info` to the one thread `tid` of thread group
