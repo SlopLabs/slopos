@@ -114,10 +114,10 @@ if [ ! -f "$CRT0_OBJ" ]; then
     exit 1
 fi
 
-# Build main userland binaries
+# Build main userland binaries. The shell is built on its own below.
 BIN_ARGS=()
 for bin in $BINS; do
-    BIN_ARGS+=(--bin "$bin")
+    [ "$bin" = shell ] || BIN_ARGS+=(--bin "$bin")
 done
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
@@ -132,6 +132,24 @@ $CARGO +slopos build --locked \
     "${BIN_ARGS[@]}" \
     --no-default-features \
     --release
+
+# std sets SIGPIPE to SIG_IGN before `main`, and a shell must instead keep
+# the disposition its parent gave it and pass it on to every command (POSIX:
+# a signal ignored on entry stays ignored, and one that was not is not).
+# `cargo rustc` because the flag belongs to the binary alone.
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+RUSTFLAGS="$USERLAND_RUSTFLAGS" \
+$CARGO +slopos rustc --locked \
+    -Zbuild-std="$BUILD_STD" \
+    -Zbuild-std-features=compiler-builtins-mem \
+    -Zunstable-options \
+    -Zjson-target-spec \
+    --target "$USERLAND_TARGET" \
+    --package slopos-userland \
+    --bin shell \
+    --no-default-features \
+    --release \
+    -- -Zon-broken-pipe=inherit
 
 # Copy built binaries
 RELEASE_DIR="${CARGO_TARGET_DIR}/${USERLAND_TRIPLE}/release"

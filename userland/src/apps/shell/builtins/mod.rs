@@ -197,9 +197,9 @@ pub static BUILTINS: &[BuiltinEntry] = &[
     },
     BuiltinEntry {
         name: "wait",
-        desc: "Wait for process to exit",
-        usage: "wait <pid>",
-        detail: "Block the shell until the process with the given\nPID exits. Returns that process's exit status.",
+        desc: "Wait for processes to exit",
+        usage: "wait [pid|%job...]",
+        detail: "Block the shell until each given process or job exits,\nor every child when none is given. Returns the last\none's exit status, 127 for one that is not a child.",
         category: Process,
         func: process::cmd_wait,
     },

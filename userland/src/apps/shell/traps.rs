@@ -98,7 +98,8 @@ fn store(condition: Condition, action: Option<Vec<u8>>) {
 
 /// POSIX: a signal ignored on entry to a non-interactive shell can be neither
 /// trapped nor reset. The shell has changed no disposition of its own before
-/// the first `trap` touching a signal, so that is when entry state is read.
+/// the first `trap` touching a signal, so that is when entry state is read —
+/// and std's `SIGPIPE` reset is off for this binary (`build_userland.sh`).
 fn ignored_on_entry(signum: u8) -> bool {
     if super::is_interactive() {
         return false;

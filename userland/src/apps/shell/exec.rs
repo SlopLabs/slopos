@@ -1037,6 +1037,9 @@ fn install_redirects_in_child(redirects: &[Redirect]) {
 // Program resolution
 // ---------------------------------------------------------------------------
 
+/// XBD 8.3: the first candidate that is an executable file wins. A regular
+/// file lacking execute permission is passed over, and named only when no
+/// directory has a better one, so running it fails as 126 rather than 127.
 fn resolve_via_path(name: &[u8], tmp: &mut [u8]) -> bool {
     let Some(path_value) = env::get(b"PATH") else {
         return false;
@@ -1045,6 +1048,7 @@ fn resolve_via_path(name: &[u8], tmp: &mut [u8]) -> bool {
         return false;
     }
 
+    let mut not_executable: Option<Vec<u8>> = None;
     for dir in path_value.split(|&b| b == b':') {
         let dir: &[u8] = if dir.is_empty() { b"." } else { dir };
         let mut candidate = Vec::with_capacity(dir.len() + name.len() + 2);
@@ -1058,11 +1062,23 @@ fn resolve_via_path(name: &[u8], tmp: &mut [u8]) -> bool {
         }
         let mut stat = UserFsStat::default();
         // A directory on `PATH` is not a command.
-        if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_ok() && stat.is_file() {
+        if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_err() || !stat.is_file() {
+            continue;
+        }
+        if stat.st_mode & 0o111 != 0 {
             return true;
         }
+        if not_executable.is_none()
+            && let Some(end) = tmp.iter().position(|&b| b == 0)
+        {
+            not_executable = Some(tmp[..=end].to_vec());
+        }
     }
-    false
+    let Some(path) = not_executable else {
+        return false;
+    };
+    tmp[..path.len()].copy_from_slice(&path);
+    true
 }
 
 /// Resolve a command name to a path the loader will accept. A name holding a

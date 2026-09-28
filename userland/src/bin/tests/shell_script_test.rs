@@ -707,6 +707,91 @@ fn trap_listing_and_operands() -> bool {
     )
 }
 
+/// std ignores `SIGPIPE` before `main`; the shell must not, or a script could
+/// never trap it and every command it runs would inherit it ignored. What
+/// the shell was given it passes on: a `PIPE` ignored by the parent shell
+/// stays ignored, and untrappable, in the next.
+fn trap_pipe_follows_the_disposition_on_entry() -> bool {
+    expect_output(
+        "trap_pipe_follows_the_disposition_on_entry",
+        b"trap 'echo caught' PIPE\nkill -PIPE $$\n\
+          /bin/sh -c 'trap \"echo inner\" PIPE; kill -PIPE $$; echo inner-after'\n\
+          trap '' PIPE\n\
+          /bin/sh -c 'trap \"echo no\" PIPE; kill -PIPE $$; echo kept'\n",
+        b"caught\ninner\ninner-after\nkept\n",
+    )
+}
+
+/// A command the shell runs keeps `SIGPIPE` at its default, so a writer whose
+/// reader left dies of it; inheriting it ignored, this loop never ends.
+fn a_writer_to_a_closed_pipe_dies_of_sigpipe() -> bool {
+    expect_output(
+        "a_writer_to_a_closed_pipe_dies_of_sigpipe",
+        b"(/bin/sh -c 'while :; do echo y; done'; echo $? > /tmp/sh_pipe_status) | head -n 1\n\
+          cat /tmp/sh_pipe_status\n",
+        b"y\n141\n",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Command search and wait
+// ---------------------------------------------------------------------------
+
+/// XBD 8.3: `PATH` is searched for an *executable* file, so a same-named file
+/// without the execute bit earlier on it is passed over; found only that way,
+/// the command fails 126, and not found at all, 127.
+fn path_search_skips_a_file_it_cannot_execute() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let stage = |path: &str, body: &str, mode: u32| {
+        std::fs::write(path, body).is_ok()
+            && std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).is_ok()
+    };
+    let _ = std::fs::create_dir_all("/tmp/sh_path/a");
+    let _ = std::fs::create_dir_all("/tmp/sh_path/b");
+    if !stage("/tmp/sh_path/a/prog", "echo from-a\n", 0o644)
+        || !stage("/tmp/sh_path/b/prog", "#!/bin/sh\necho from-b\n", 0o755)
+    {
+        eprintln!("shell_script_test: could not stage the PATH fixtures");
+        return false;
+    }
+    expect_output(
+        "path_search_skips_a_file_it_cannot_execute",
+        b"PATH=/tmp/sh_path/a:/tmp/sh_path/b\nprog\n\
+          PATH=/tmp/sh_path/a\nprog 2>/dev/null\necho $?\n\
+          sh_path_absent 2>/dev/null\necho $?\n",
+        b"from-b\n126\n127\n",
+    )
+}
+
+/// POSIX `wait`: no operand waits for every child and answers 0; operands
+/// are waited for in turn and the last one's status is the answer; one this
+/// shell no longer knows is 127.
+fn wait_takes_every_child_or_each_operand() -> bool {
+    expect_output(
+        "wait_takes_every_child_or_each_operand",
+        b"rm -f /tmp/sh_wait_a /tmp/sh_wait_b\n\
+          (sleep 1; echo a > /tmp/sh_wait_a) &\n\
+          (sleep 1; echo b > /tmp/sh_wait_b) &\n\
+          wait\necho all=$?\ncat /tmp/sh_wait_a /tmp/sh_wait_b\n\
+          (exit 3) &\np1=$!\n(sleep 1; exit 5) &\np2=$!\n\
+          wait $p1 $p2\necho last=$?\n\
+          wait $p1\necho gone=$?\n",
+        b"all=0\na\nb\nlast=5\ngone=127\n",
+    )
+}
+
+/// A trapped signal ends an operand-less `wait` as it ends one for a pid.
+fn trap_interrupts_wait_for_every_child() -> bool {
+    expect_output(
+        "trap_interrupts_wait_for_every_child",
+        b"trap 'echo trapped' USR1\n\
+          sleep 5 >/dev/null &\nsp=$!\n\
+          (sleep 1; kill -USR1 $$) &\n\
+          wait\necho wait=$?\nkill $sp\n",
+        b"trapped\nwait=138\n",
+    )
+}
+
 // ---------------------------------------------------------------------------
 // The interactive path
 // ---------------------------------------------------------------------------
@@ -924,6 +1009,26 @@ const CASES: &[(&str, fn() -> bool)] = &[
         trap_exit_from_a_signal_action,
     ),
     ("trap_listing_and_operands", trap_listing_and_operands),
+    (
+        "trap_pipe_follows_the_disposition_on_entry",
+        trap_pipe_follows_the_disposition_on_entry,
+    ),
+    (
+        "a_writer_to_a_closed_pipe_dies_of_sigpipe",
+        a_writer_to_a_closed_pipe_dies_of_sigpipe,
+    ),
+    (
+        "path_search_skips_a_file_it_cannot_execute",
+        path_search_skips_a_file_it_cannot_execute,
+    ),
+    (
+        "wait_takes_every_child_or_each_operand",
+        wait_takes_every_child_or_each_operand,
+    ),
+    (
+        "trap_interrupts_wait_for_every_child",
+        trap_interrupts_wait_for_every_child,
+    ),
     (
         "the_interactive_prompt_continues_an_unfinished_command",
         the_interactive_prompt_continues_an_unfinished_command,
