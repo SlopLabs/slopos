@@ -112,6 +112,7 @@ pub fn task_signal_raise<K, U>(task: &TaskInner<K, U>, mask: u64) -> u64 {
 /// next return-to-user boundary.
 pub fn task_kill_and_wake<K, U>(task: &TaskInner<K, U>) -> bool {
     let first = !task.killed.swap(true, Ordering::AcqRel);
+    task.group_stop.store(0, Ordering::Release);
     BUS.publish(signal_pending_event(task.task_id));
     let _ = crate::sync::wait_queue::unblock_task_by_id(task.task_id);
     first

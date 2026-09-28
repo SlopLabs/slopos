@@ -994,6 +994,10 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
 
     let plan = stamp_exit_state(task, now);
 
+    if let Some(stop_signal) = task.take_group_stop() {
+        task_complete_group_stop_on_exit(task, stop_signal);
+    }
+
     scheduler::cancel_sleep(resolved_id);
 
     // A `wait_event*` node lives on the dying task's kernel stack, which is
@@ -2028,6 +2032,28 @@ fn publish_job_control_report(tgid: u32, reporter: &Task, stop_signal: Option<u8
     slopos_ostd::sync::BUS.publish(slopos_ostd::task::ops::child_exit_event(tgid));
     if parent != INVALID_TASK_ID {
         slopos_ostd::sync::BUS.publish(slopos_ostd::task::ops::any_child_exit_event(parent));
+    }
+}
+
+/// A member asked to join a group stop exits instead of parking: when every
+/// other live member is already stopped, the stop is complete and nobody else
+/// will publish its `WUNTRACED` report, as Linux's `exit_signals`.
+fn task_complete_group_stop_on_exit(task: &Task, stop_signal: u8) {
+    let tgid = group_id_of(task);
+    let mut reporter: Option<TaskRef> = None;
+    let mut all_stopped = true;
+    for_each_group_member(tgid, |member| {
+        if member.is_exited() || core::ptr::eq::<Task>(&**member, task) {
+            return;
+        }
+        if member.is_stopped() {
+            reporter.get_or_insert_with(|| member.clone());
+        } else {
+            all_stopped = false;
+        }
+    });
+    if all_stopped && let Some(reporter) = reporter.as_deref() {
+        publish_job_control_report(tgid, reporter, Some(stop_signal));
     }
 }
 

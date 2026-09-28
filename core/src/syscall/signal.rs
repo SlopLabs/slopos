@@ -883,7 +883,9 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
     {
         return SignalDisposition::Done;
     }
-    if let Some(signum) = task_ref.take_group_stop() {
+    if !task_ref.is_killed()
+        && let Some(signum) = task_ref.take_group_stop()
+    {
         return SignalDisposition::Stop { signum };
     }
 

@@ -1343,6 +1343,68 @@ pub fn test_one_stop_publishes_one_report() -> TestResult {
     pass!()
 }
 
+/// A member SIGKILLed while its stop join is outstanding dies at its delivery
+/// point instead of joining the stop.
+pub fn test_a_kill_outranks_an_outstanding_stop_join() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let Some((leader_id, thread_id)) = spawn_thread_group() else {
+        return TestResult::Fail;
+    };
+    let ids = [thread_id, leader_id];
+    let (Some(leader), Some(thread)) = (task_find_by_id(leader_id), task_find_by_id(thread_id))
+    else {
+        return fail_and_clean(&ids);
+    };
+    let running = task_set_state(thread_id, TaskStatus::Running) == 0;
+    let stopped = task_group_stop(leader_id, SIGTSTP);
+    slopos_sched::task::task_sigkill_member(&thread, slopos_abi::signal::SigInfo::KERNEL);
+    let ready = task_set_state(thread_id, TaskStatus::Ready) == 0;
+    let claimed = crate::syscall::signal::claim_pending_signal_for_test(&thread);
+    let kill_taken = thread.signal_pending() & sig_bit(slopos_abi::signal::SIGKILL) == 0;
+    let thread_stopped = thread.is_stopped();
+    let _ = task_group_continue(leader_id);
+    drop((leader, thread));
+    terminate_all(&ids);
+
+    assert_test!(running && ready && stopped, "could not stage the group");
+    assert_test!(claimed, "the delivery point must act on the kill");
+    assert_test!(
+        kill_taken,
+        "the delivery point joined the stop, not the kill"
+    );
+    assert_test!(!thread_stopped, "a killed member must not park");
+    pass!()
+}
+
+/// A poked member that exits instead of parking completes the stop when every
+/// other member is already stopped.
+pub fn test_a_poked_member_exiting_completes_the_stop() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let Some((leader_id, thread_id)) = spawn_thread_group() else {
+        return TestResult::Fail;
+    };
+    let ids = [thread_id, leader_id];
+    let Some(leader) = task_find_by_id(leader_id) else {
+        return fail_and_clean(&ids);
+    };
+    let running = task_set_state(thread_id, TaskStatus::Running) == 0;
+    let stopped = task_group_stop(leader_id, SIGTSTP);
+    let early_report = leader.has_stop_report();
+    let ready = task_set_state(thread_id, TaskStatus::Ready) == 0;
+    task_terminate(thread_id);
+    let report = leader.take_stop_report();
+    let _ = task_group_continue(leader_id);
+    drop(leader);
+    terminate_all(&ids);
+
+    assert_test!(running && ready && stopped, "could not stage the group");
+    assert_test!(!early_report, "the report must wait for the poked member");
+    assert_eq_test!(report, Some(SIGTSTP), "the completed stop must report");
+    pass!()
+}
+
 /// A group stop reaches a running member that blocks the stop signal, as
 /// Linux's does; the report waits for that member to park.
 pub fn test_group_stop_reaches_a_member_blocking_the_signal() -> TestResult {
@@ -1858,6 +1920,14 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_a_group_exit_outranks_a_signal_the_sibling_had_pending,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_kill_outranks_an_outstanding_stop_join,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_poked_member_exiting_completes_the_stop,
     suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
