@@ -133,9 +133,7 @@ pub(crate) unsafe fn search_path<T>(
     Err(last)
 }
 
-/// Gathers `arg0` and the variadic pointers after it, through the null that
-/// ends them, into a malloc'd argv, then runs `exec` on it. The list is
-/// consumed past its null, so `execle` reads `envp` next.
+/// The list is consumed through its null, so `execle` reads `envp` next.
 unsafe fn exec_list(
     arg0: *const u8,
     args: &mut core::ffi::VaList<'_>,

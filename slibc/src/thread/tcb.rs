@@ -21,9 +21,7 @@ pub struct Tcb {
     pub start_arg: *mut u8,
     pub retval: *mut u8,
     pub detached: bool,
-    /// `pthread_setcancelstate`'s value.
     pub cancel_state: u8,
-    /// `pthread_setcanceltype`'s value.
     pub cancel_type: u8,
     _pad: [u8; 1],
     /// Kernel writes 0 here on exit (`CLONE_CHILD_CLEARTID`) + futex-wakes it.

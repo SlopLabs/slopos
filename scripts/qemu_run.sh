@@ -106,10 +106,8 @@ ECHO_PEER_ADDR="${ECHO_PEER_ADDR:-10.0.2.100}"
 ECHO_PEER_PORT="${ECHO_PEER_PORT:-9999}"
 ECHO_PEER_CMD="${ECHO_PEER_CMD:-/bin/cat}"
 
-# With GIT_PUSH_REPO, the guest fetches this checkout from
-# git://10.0.2.4/ and pushes into the bare repository GIT_PUSH_REPO names,
-# made if absent, at git://10.0.2.4:9419/. The dev disk's clone names both,
-# so the address is fixed; the echo peer's rules above bound it.
+# The dev disk's clone names git://10.0.2.4/ and git://10.0.2.4:9419/, so the
+# git peer's address is fixed.
 GIT_PUSH_REPO="${GIT_PUSH_REPO:-}"
 GIT_PEER_ADDR="10.0.2.4"
 
@@ -467,11 +465,12 @@ NET_GUESTFWD=",guestfwd=tcp:${ECHO_PEER_ADDR}:${ECHO_PEER_PORT}-cmd:${ECHO_PEER_
 
 # ── Git peer ─────────────────────────────────────────────────────────────────
 # The echo peer's mechanism: SLIRP runs one `git daemon --inetd` per
-# connection, so nothing listens on the host. Each daemon serves one git
-# directory: the path template covers a request that names a host, and the
-# strict allowlist one that does not, which the template leaves alone. Only
-# the push repository's daemon runs receive-pack. `--log-destination=none`
-# keeps `--inetd` from logging every connection to the host's syslog.
+# connection, so nothing listens on the host. The guest fetches this checkout
+# and pushes into GIT_PUSH_REPO, a bare repository made if absent. Each daemon
+# serves one git directory: the path template covers a request that names a
+# host, and the strict allowlist one that does not, which the template leaves
+# alone. `--log-destination=none` keeps `--inetd` from logging every
+# connection to the host's syslog.
 NET_GITFWD=""
 if [ -n "$GIT_PUSH_REPO" ]; then
     command -v git >/dev/null 2>&1 || { echo "qemu_run.sh: GIT_PUSH_REPO needs git on PATH" >&2; exit 1; }
@@ -480,9 +479,13 @@ if [ -n "$GIT_PUSH_REPO" ]; then
         *) echo "qemu_run.sh: GIT_PUSH_REPO=$GIT_PUSH_REPO is not an absolute path" >&2; exit 1 ;;
     esac
     [ -d "$GIT_PUSH_REPO" ] || git init -q --bare "$GIT_PUSH_REPO"
-    checkout_dir="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir)" &&
-        push_dir="$(git -C "$GIT_PUSH_REPO" rev-parse --absolute-git-dir)" ||
-        { echo "qemu_run.sh: the git peer needs $REPO_ROOT and $GIT_PUSH_REPO to be repositories" >&2; exit 1; }
+    checkout_dir="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir)" ||
+        { echo "qemu_run.sh: the git peer serves $REPO_ROOT, which is not a git checkout" >&2; exit 1; }
+    # A directory inside a repository resolves to that repository's.
+    push_dir="$(cd "$GIT_PUSH_REPO" && pwd -P)"
+    [ "$(git -C "$push_dir" rev-parse --is-bare-repository 2>/dev/null)" = true ] &&
+        [ "$(git -C "$push_dir" rev-parse --absolute-git-dir)" = "$push_dir" ] ||
+        { echo "qemu_run.sh: GIT_PUSH_REPO=$GIT_PUSH_REPO is not a bare repository of its own" >&2; exit 1; }
     # QEMU splits options on commas, libslirp parses the command as a shell
     # line, and the daemon expands `%` in its path template.
     for path in "$checkout_dir" "$push_dir"; do

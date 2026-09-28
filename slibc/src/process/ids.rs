@@ -112,8 +112,7 @@ pub unsafe extern "C" fn wait4(
     }
 }
 
-/// `<sys/time.h>`'s timer names, Linux's values. Declared so a program that
-/// names them compiles; with no `setitimer` there is nothing to pass them to.
+/// Linux's values; there is no `setitimer` to take them.
 pub const ITIMER_REAL: c_int = 0;
 pub const ITIMER_VIRTUAL: c_int = 1;
 pub const ITIMER_PROF: c_int = 2;

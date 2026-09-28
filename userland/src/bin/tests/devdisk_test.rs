@@ -993,8 +993,8 @@ fn clang_links_c_and_cxx() -> bool {
 }
 
 /// Rung 7: git reads the clone the volume was seeded with and reaches the
-/// checkout the host serves. The note says whether the tree is pristine, which
-/// the host holds a volume it has just created to.
+/// checkout the host serves; the host holds a volume it has just created to a
+/// clean status.
 fn git_reads_the_clone_and_reaches_the_host() -> bool {
     let prefix = match prefix() {
         Ok(p) => p,

@@ -8,7 +8,6 @@ use crate::ffi::{O_CREAT, O_EXCL, O_RDWR};
 use crate::pal::{Pal, Sys};
 
 const SUFFIX: usize = 6;
-/// Names tried before giving up with `EEXIST`.
 const ATTEMPTS: usize = 100;
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 

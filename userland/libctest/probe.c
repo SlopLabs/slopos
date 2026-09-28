@@ -2115,10 +2115,8 @@ static int conversion(void) {
     return 1;
 }
 
-// A `*` width or precision comes from an `int` argument; a negative width is
-// the `-` flag and a negative precision none. A precision bounds what `%s`
-// reads, so the argument may end at an unmapped page with no NUL (C11
-// 7.21.6.1 p8). git names every pack index with `%.*s`.
+// git names every pack index with `%.*s`. A precision bounds what `%s` reads,
+// so the argument may end at an unmapped page with no NUL (C11 7.21.6.1 p8).
 static int star_widths(void) {
     char out[32];
     if (snprintf(out, sizeof out, "[%*d|%-*d|%*d]", 4, 7, 3, 8, -3, 9) != 14 ||

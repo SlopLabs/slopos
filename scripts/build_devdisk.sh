@@ -264,6 +264,12 @@ if [ -n "${TOOLCHAIN_STAGE:-}" ] && [ "$NEW_VOLUME" -eq 1 ]; then
         cp -af "$TOOLCHAIN_STAGE/." "$STAGE/$TOOLCHAIN_REL/"
 fi
 
+if [ "$NEW_VOLUME" -eq 1 ]; then
+    [ -z "$(find "$STAGE" -name '*["\\]*' -print -quit)" ] &&
+        [ "$(find "$STAGE" -print | wc -l)" -eq "$(find "$STAGE" -print0 | tr -cd '\0' | wc -c)" ] ||
+        die "a staged name holds a quote, backslash or newline, which debugfs cannot take"
+fi
+
 echo "$SELF: staged $(du -sh "$STAGE" | cut -f1) for $IMAGE_PATH"
 
 FS_IMAGE_SIZE="$DEV_DISK_SIZE" \
@@ -274,16 +280,16 @@ PRESERVE_FS_IMAGE=1 \
 FS_POPULATE_DIR="$STAGE" \
     "$SCRIPT_DIR/build_fs_image.sh" "$IMAGE_PATH" "$BUILD_DIR"
 
-# One `debugfs` for every inode: mkfs copied the host user's ids.
+# One `debugfs` for every inode: mkfs copied the host user's ids. A failed pass
+# discards the image, which the next run would otherwise preserve as it is.
 if [ "$NEW_VOLUME" -eq 1 ]; then
-    [ -z "$(find "$STAGE" -name '*["\\]*' -print -quit)" ] &&
-        [ "$(find "$STAGE" -print | wc -l)" -eq "$(find "$STAGE" -print0 | tr -cd '\0' | wc -c)" ] ||
-        die "a staged name holds a quote, backslash or newline, which debugfs cannot take"
     OWNERS="$BUILD_DIR/devdisk-owners.debugfs"
     (cd "$STAGE" && find . -printf 'sif "/%P" uid 0\nsif "/%P" gid 0\n') >"$OWNERS"
     debugfs -w -f "$OWNERS" "$IMAGE_PATH" >/dev/null 2>"$OWNERS.log"
-    ! grep -v '^debugfs [0-9]' "$OWNERS.log" | grep -q . ||
-        die "debugfs could not give the volume to uid 0: $(grep -v '^debugfs [0-9]' "$OWNERS.log" | head -n 3)"
+    if grep -v '^debugfs [0-9]' "$OWNERS.log" | grep -q .; then
+        rm -f "$IMAGE_PATH" "$IMAGE_PATH.stamp"
+        die "debugfs could not give the volume to uid 0, so it is discarded: $(grep -v '^debugfs [0-9]' "$OWNERS.log" | head -n 3)"
+    fi
     rm -f "$OWNERS" "$OWNERS.log"
 fi
 
@@ -367,7 +373,7 @@ MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
         echo "toolchain $TOOLCHAIN_REL"
         inventory "$TOOLCHAIN_REL/bin" "$TOOLCHAIN_STAGE/bin" 1
         inventory "$TOOLCHAIN_REL/lib" "$TOOLCHAIN_STAGE/lib" 1
-        # `bin/git` is a symlink the walk above skips; the program is here.
+        # A recipe's program is a symlink in `bin/`, which the walk skips.
         for dir in "$TOOLCHAIN_STAGE"/libexec/*/; do
             [ -d "$dir" ] || continue
             inventory "$TOOLCHAIN_REL/libexec/$(basename "$dir")" "$dir" 1

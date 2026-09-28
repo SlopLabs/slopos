@@ -157,7 +157,8 @@ pub unsafe extern "C" fn tcsetpgrp(fd: i32, pgrp: i32) -> i32 {
     }
 }
 
-static mut PASSWORD: [u8; 128] = [0; 128];
+const PASSWORD_MAX: usize = 128;
+static mut PASSWORD: [u8; PASSWORD_MAX] = [0; PASSWORD_MAX];
 
 /// `getpass(3)`: prompt on the controlling terminal (stderr if there is none)
 /// and read a line from it (stdin if none) with echo off. The answer, newline
@@ -186,19 +187,33 @@ pub unsafe extern "C" fn getpass(prompt: *const u8) -> *mut u8 {
     if !prompt.is_null() {
         let _ = Sys::write(output, prompt, crate::string::u_strlen(prompt));
     }
+    // A byte at a time: without a terminal nothing ends a read at the line.
     let buf = (&raw mut PASSWORD).cast::<u8>();
-    let answer = match Sys::read(input, buf, 128) {
-        Ok(mut len) => {
-            if (len > 0 && *buf.add(len - 1) == b'\n') || len == 128 {
-                len -= 1;
+    let mut len = 0usize;
+    let mut failed = None;
+    loop {
+        let mut byte = 0u8;
+        match Sys::read(input, &raw mut byte, 1) {
+            Ok(0) => break,
+            Ok(_) if byte == b'\n' => break,
+            Ok(_) if len < PASSWORD_MAX - 1 => {
+                *buf.add(len) = byte;
+                len += 1;
             }
-            *buf.add(len) = 0;
-            buf
+            Ok(_) => {}
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
         }
-        Err(e) => {
+    }
+    *buf.add(len) = 0;
+    let answer = match failed {
+        Some(e) => {
             errno_set(e.raw());
             core::ptr::null_mut()
         }
+        None => buf,
     };
 
     if restore {
