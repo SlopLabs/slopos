@@ -5,9 +5,9 @@ use slopos_abi::signal::{
     MINSIGSTKSZ, NSIG, REG_CR2, REG_CSGSFS, REG_EFL, REG_ERR, REG_OLDMASK, REG_R8, REG_R9, REG_R10,
     REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RAX, REG_RBP, REG_RBX, REG_RCX, REG_RDI,
     REG_RDX, REG_RIP, REG_RSI, REG_RSP, REG_TRAPNO, SA_NODEFER, SA_ONSTACK, SA_RESETHAND,
-    SA_SIGINFO, SI_TKILL, SI_USER, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIG_UNCATCHABLE,
-    SIGSEGV, SS_DISABLE, SS_ONSTACK, SigDefault, SigInfo, SigSet, SignalFrame, UserSigAltStack,
-    UserSigaction, UserSiginfo, UserUcontext, sig_bit, sig_default_action,
+    SA_RESTART, SA_SIGINFO, SI_TKILL, SI_USER, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK,
+    SIG_UNCATCHABLE, SIGSEGV, SS_DISABLE, SS_ONSTACK, SigDefault, SigInfo, SigSet, SignalFrame,
+    UserSigAltStack, UserSigaction, UserSiginfo, UserUcontext, sig_bit, sig_default_action,
 };
 use slopos_abi::task::{
     INVALID_TASK_ID, SPAWN_PRIVILEGED, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason,
@@ -1116,13 +1116,23 @@ fn populate_sigframe_range(task_ref: &Task, frame_addr: u64) -> bool {
     populated
 }
 
+/// `settle` learns, before any frame is built, whether a syscall the delivery
+/// interrupted restarts: decided on the signal this delivery took, so an
+/// instance a sibling's `sigwait` took first restarts it rather than failing
+/// it with no handler run.
 fn deliver_pending_signal_core(
     current: &slopos_sched::task_struct::Current,
     regs: &mut impl UserRegView,
+    settle: impl FnOnce(bool),
 ) {
     let task_ref = current.task();
 
-    let (signum, bit, action, saved_mask, taken, fault) = match claim_pending_signal(task_ref) {
+    let disposition = claim_pending_signal(task_ref);
+    settle(!matches!(
+        &disposition,
+        SignalDisposition::Handle { action, .. } if (action.flags & SA_RESTART) == 0
+    ));
+    let (signum, bit, action, saved_mask, taken, fault) = match disposition {
         SignalDisposition::Done => {
             // A task marked for death leaves here rather than returning to
             // userland; the mark is deliberately not a signal. This frame
@@ -1309,7 +1319,17 @@ pub fn deliver_pending_signal(
     current: &slopos_sched::task_struct::Current,
     user_ctx: &UserContext,
 ) {
-    deliver_pending_signal_core(current, &mut UserContextRegs { ctx: user_ctx });
+    deliver_pending_signal_core(current, &mut UserContextRegs { ctx: user_ctx }, |_| {});
+}
+
+/// [`deliver_pending_signal`] on a syscall's way out: `settle(true)` restarts
+/// the syscall, `settle(false)` fails it with `EINTR`.
+pub fn deliver_pending_signal_on_syscall_exit(
+    current: &slopos_sched::task_struct::Current,
+    user_ctx: &UserContext,
+    settle: impl FnOnce(bool),
+) {
+    deliver_pending_signal_core(current, &mut UserContextRegs { ctx: user_ctx }, settle);
 }
 
 /// Deliver a pending signal on the IRQ/timer/IPI return-to-user path.
@@ -1338,5 +1358,5 @@ pub fn deliver_pending_signal_on_irq_exit(frame: *mut InterruptFrame) {
     };
 
     let mut view = InterruptFrameRegs { frame: frame_ref };
-    deliver_pending_signal_core(&current, &mut view);
+    deliver_pending_signal_core(&current, &mut view, |_| {});
 }

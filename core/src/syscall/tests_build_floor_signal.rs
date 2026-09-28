@@ -3585,5 +3585,317 @@ slopos_testing::stest!(
     suite = syscall_signal_build_floor
 );
 
+/// Run `sysno`'s way back to userland as `task_id`, as `syscall_handle` ends.
+#[must_use]
+fn return_from_syscall_as_current(
+    task_id: u32,
+    table: FdTable,
+    ctx: &UserContext,
+    sysno: u64,
+) -> bool {
+    if !make_task_current(task_id) {
+        return false;
+    }
+    let returned = match Current::get() {
+        Some(current) => with_user_process_context(table, || {
+            crate::syscall::dispatch::return_from_syscall(&current, ctx, sysno)
+        })
+        .is_some(),
+        None => false,
+    };
+    park_bootstrap_on_current_cpu();
+    returned
+}
+
+/// An `ERESTARTSYS` is settled on the signal the way out takes, as Linux
+/// settles it on `get_signal`'s: a process instance a sibling's `sigtimedwait`
+/// took first leaves nothing to run, so the syscall restarts rather than
+/// failing `EINTR` with no handler run; one it does take fails it `EINTR`
+/// when caught without `SA_RESTART`, and restarts it under the handler with.
+pub fn test_erestartsys_is_settled_on_the_signal_taken() -> TestResult {
+    use slopos_abi::signal::SA_RESTART;
+    use slopos_abi::syscall::{ERRNO_ERESTARTSYS, SYSCALL_WRITE};
+    const SYSCALL_RIP: u64 = 0x5000_3002;
+    let _fixture = SyscallFixture::new();
+
+    let Some((leader_id, thread_id)) = spawn_thread_group() else {
+        return TestResult::Fail;
+    };
+    let ids = [thread_id, leader_id];
+    let (Some(leader), Some(thread), Some(table)) = (
+        task_find_by_id(leader_id),
+        task_find_by_id(thread_id),
+        fdtable_of(leader_id),
+    ) else {
+        return fail_and_clean(&ids);
+    };
+    let bit = sig_bit(SIGUSR1);
+    // The sibling sits in `sigtimedwait({SIGUSR1})`, which blocks it.
+    thread.set_signal_blocked(bit);
+    let stack_top = process_vm_get_stack_top(table.process().expect("a live process"));
+    let interrupted = || -> KBox<UserContext> {
+        let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+        frame.regs_mut().rax = ERRNO_ERESTARTSYS;
+        frame.regs_mut().rip = SYSCALL_RIP;
+        frame.regs_mut().rsp = stack_top.wrapping_sub(0x200);
+        frame
+    };
+    let saved_frame = |frame: &UserContext| {
+        user_copy_in::<SignalFrame>(table, frame.rsp().wrapping_add(8))
+            .map(|saved| (saved.rip, saved.rax))
+    };
+
+    let installed = install_action(leader_id, SIGUSR1, 0);
+    let sent = task_group_signal(leader_id, SIGUSR1) != 0;
+    let picked = leader.has_deliverable_signal();
+    let stolen = thread.dequeue_signal(bit).map(|taken| taken.signum);
+    let robbed = interrupted();
+    let robbed_returned = return_from_syscall_as_current(leader_id, table, &robbed, SYSCALL_WRITE);
+
+    let resent = task_group_signal(leader_id, SIGUSR1) != 0;
+    let caught = interrupted();
+    let caught_returned = return_from_syscall_as_current(leader_id, table, &caught, SYSCALL_WRITE);
+    let caught_saved = saved_frame(&caught);
+
+    leader.set_signal_blocked(0);
+    let restarting = install_action(leader_id, SIGUSR1, SA_RESTART);
+    let sent_again = task_group_signal(leader_id, SIGUSR1) != 0;
+    let restarted = interrupted();
+    let restarted_returned =
+        return_from_syscall_as_current(leader_id, table, &restarted, SYSCALL_WRITE);
+    let restarted_saved = saved_frame(&restarted);
+    drop((leader, thread));
+    terminate_all(&ids);
+
+    assert_test!(installed && restarting, "installing a handler failed");
+    assert_test!(sent && resent && sent_again, "the sends reached no thread");
+    assert_test!(picked, "the send must pick the leader");
+    assert_eq_test!(stolen, Some(SIGUSR1), "the sibling must take the instance");
+    assert_test!(
+        robbed_returned && caught_returned && restarted_returned,
+        "the way out did not run"
+    );
+    assert_eq_test!(
+        (robbed.rip(), robbed.rax()),
+        (SYSCALL_RIP - 2, SYSCALL_WRITE),
+        "with the instance taken by a sibling the syscall must restart"
+    );
+    assert_eq_test!(caught.rip(), TEST_HANDLER, "the handler must run");
+    assert_eq_test!(
+        caught_saved,
+        Some((SYSCALL_RIP, slopos_abi::Errno::EINTR.as_u64())),
+        "a handler without SA_RESTART must return EINTR"
+    );
+    assert_eq_test!(
+        restarted.rip(),
+        TEST_HANDLER,
+        "the SA_RESTART handler must run"
+    );
+    assert_eq_test!(
+        restarted_saved,
+        Some((SYSCALL_RIP - 2, SYSCALL_WRITE)),
+        "an SA_RESTART handler must return into the restarted syscall"
+    );
+    pass!()
+}
+
+/// `signalfd4` drops `SIGKILL` and `SIGSTOP` from its mask, as Linux does: a
+/// read never takes either.
+pub fn test_signalfd4_never_watches_kill_or_stop() -> TestResult {
+    use slopos_abi::syscall::SFD_NONBLOCK;
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let (Some(task), Some(table)) = (task_find_by_id(task_id), fdtable_of(task_id)) else {
+        return fail_and_clean(&[task_id]);
+    };
+    let Some(page) = map_user_rw_region(table, 1) else {
+        return fail_and_clean(&[task_id]);
+    };
+    let uncatchable = sig_bit(SIGKILL) | sig_bit(SIGSTOP);
+    let staged = user_copy_out(table, page, &(uncatchable | sig_bit(SIGUSR1)));
+    let fd = call_as(
+        crate::syscall::signalfd_handlers::syscall_signalfd4,
+        task_id,
+        [-1i64 as u64, page, 8, SFD_NONBLOCK as u64],
+    ) as i64 as i32;
+    let _ = task.raise_signal_pending(uncatchable);
+    let read = read_signalfd_as(task_id, table, fd);
+    let left = task.signal_pending() & uncatchable;
+    let _ = task.clear_signal_pending(uncatchable);
+    let posted = task::task_signal_post(&task, SIGUSR1);
+    let watched = read_signalfd_as(task_id, table, fd);
+    drop(task);
+    task_terminate(task_id);
+
+    assert_test!(staged, "could not stage the mask");
+    assert_test!(fd >= 0, "signalfd4 failed");
+    assert_eq_test!(
+        read.map(|(read, _)| read),
+        Some(slopos_abi::Errno::EAGAIN.raw() as isize),
+        "a signalfd must not read SIGKILL or SIGSTOP"
+    );
+    assert_eq_test!(left, uncatchable, "both must stay pending");
+    assert_test!(posted, "SIGUSR1 must pend");
+    assert_eq_test!(
+        watched,
+        Some((
+            slopos_abi::signal::SignalfdSiginfo::SERIALIZED_LEN as isize,
+            SIGUSR1 as u32
+        )),
+        "the rest of the mask must still be watched"
+    );
+    pass!()
+}
+
+/// A stop signal blocked where it is sent stops nothing at the send: it pends
+/// for `sigwait` or a signalfd to take, or to stop the group when a thread
+/// unblocks it — the process's when every thread blocks it, the thread's own
+/// when `tgkill` names one that does.
+pub fn test_a_blocked_stop_signal_pends_instead_of_stopping() -> TestResult {
+    use slopos_abi::signal::{SI_TKILL, SIGTTIN, SigInfo};
+    let _fixture = SyscallFixture::new();
+
+    let Some((leader_id, thread_id)) = spawn_thread_group() else {
+        return TestResult::Fail;
+    };
+    let ids = [thread_id, leader_id];
+    let (Some(leader), Some(thread)) = (task_find_by_id(leader_id), task_find_by_id(thread_id))
+    else {
+        return fail_and_clean(&ids);
+    };
+    let tstp = sig_bit(SIGTSTP);
+    leader.set_signal_blocked(tstp);
+    thread.set_signal_blocked(tstp);
+
+    let reached = task_group_signal(leader_id, SIGTSTP);
+    let stopped_by_send = leader.is_stopped() || thread.is_stopped();
+    let pending = leader.signal_pending() & tstp;
+    let waited = thread.dequeue_signal(tstp).map(|taken| taken.signum);
+    let stopped_by_wait = leader.is_stopped() || thread.is_stopped();
+
+    let resent = task_group_signal(leader_id, SIGTSTP) != 0;
+    task::task_set_signal_blocked(&leader, 0);
+    let deliverable = leader.has_deliverable_signal();
+    let _ = leader.clear_signal_pending(tstp);
+
+    let ttin = sig_bit(SIGTTIN);
+    thread.set_signal_blocked(ttin);
+    let directed = task::task_thread_signal_info(
+        leader_id,
+        thread_id,
+        SIGTTIN,
+        SigInfo::sent(SI_TKILL, leader_id, 0, 0),
+    );
+    let stopped_by_tgkill = leader.is_stopped() || thread.is_stopped();
+    let own = thread.dequeue_signal(ttin).map(|taken| taken.signum);
+    let leaders = leader.signal_pending() & ttin;
+
+    let reposted = task_group_signal(leader_id, SIGTSTP) != 0;
+    let stopped_unblocked = leader.is_stopped() && thread.is_stopped();
+    let _ = task_group_continue(leader_id);
+    drop((leader, thread));
+    terminate_all(&ids);
+
+    assert_eq_test!(reached, 2, "the send must reach both threads");
+    assert_test!(
+        !stopped_by_send,
+        "a blocked SIGTSTP must not stop the group"
+    );
+    assert_eq_test!(pending, tstp, "a blocked SIGTSTP must pend");
+    assert_eq_test!(waited, Some(SIGTSTP), "sigwait must take a blocked SIGTSTP");
+    assert_test!(!stopped_by_wait, "a SIGTSTP taken by sigwait stops nothing");
+    assert_test!(resent, "the second send reached no thread");
+    assert_test!(
+        deliverable,
+        "unblocking must leave the pending SIGTSTP for delivery to act on"
+    );
+    assert_eq_test!(
+        directed,
+        Some(slopos_sched::task::SignalPost::Pending),
+        "tgkill of a blocked SIGTTIN must pend"
+    );
+    assert_test!(
+        !stopped_by_tgkill,
+        "tgkill of a SIGTTIN its thread blocks must not stop the group"
+    );
+    assert_eq_test!(
+        own,
+        Some(SIGTTIN),
+        "the SIGTTIN must pend on the thread named"
+    );
+    assert_eq_test!(leaders, 0, "the SIGTTIN must not pend for the process");
+    assert_test!(
+        reposted && stopped_unblocked,
+        "a SIGTSTP a thread does not block must still stop the group at the send"
+    );
+    pass!()
+}
+
+/// A standard signal a process sent whose record store could not be
+/// allocated reports a `kill` from no one (`SI_USER`, pid 0), as Linux does;
+/// one the kernel raised keeps `SI_KERNEL`.
+pub fn test_a_lost_standard_record_reads_as_a_kill_from_no_one() -> TestResult {
+    use slopos_abi::signal::{CLD_EXITED, SI_KERNEL, SI_QUEUE, SI_USER, SIGCHLD, SigInfo};
+    use slopos_ostd::task::ops::inject_sigqueue_store_alloc_failures;
+    use slopos_sched::task::task_signal_post_info;
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let Some(task) = task_find_by_id(task_id) else {
+        return fail_and_clean(&[task_id]);
+    };
+    task.set_signal_blocked(sig_bit(SIGCHLD));
+    inject_sigqueue_store_alloc_failures(2);
+    let posts = [
+        task_signal_post_info(&task, SIGUSR1, SigInfo::sent(SI_QUEUE, 42, 7, 9)),
+        task_signal_post_info(&task, SIGCHLD, SigInfo::sent(CLD_EXITED, 43, 0, 0)),
+    ];
+    inject_sigqueue_store_alloc_failures(0);
+    let user = task.dequeue_signal(u64::MAX).map(|t| (t.signum, t.info));
+    let child = task.dequeue_signal(u64::MAX).map(|t| (t.signum, t.info));
+    drop(task);
+    task_terminate(task_id);
+
+    assert_test!(
+        posts.iter().all(|post| post.is_pending()),
+        "both signals must pend without a record"
+    );
+    assert_eq_test!(
+        user,
+        Some((SIGUSR1, SigInfo::sent(SI_USER, 0, 0, 0))),
+        "a lost sender's record must read as SI_USER from pid 0"
+    );
+    assert_eq_test!(
+        child.map(|(signum, info)| (signum, info.code)),
+        Some((SIGCHLD, SI_KERNEL)),
+        "a lost kernel record must keep SI_KERNEL"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_erestartsys_is_settled_on_the_signal_taken,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_signalfd4_never_watches_kill_or_stop,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_blocked_stop_signal_pends_instead_of_stopping,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_lost_standard_record_reads_as_a_kill_from_no_one,
+    suite = syscall_signal_build_floor
+);
+
 #[allow(dead_code)]
 const _UNUSED: Ordering = Ordering::Relaxed;

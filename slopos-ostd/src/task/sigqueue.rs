@@ -9,11 +9,13 @@
 //! ones queue every instance in arrival order, up to [`SIGQUEUE_MAX`], as
 //! POSIX has them. A standard signal's bit set with no record — the kernel
 //! raised it, and the store was never needed — delivers as
-//! [`SigInfo::KERNEL`]; a realtime instance with none, one a `kill` pended past
-//! the queue limit, delivers as a `kill` from no one (`SI_USER`, pid 0).
+//! [`SigInfo::KERNEL`]; an instance a sender's record was lost for — a
+//! standard one whose store could not be allocated, a realtime one a `kill`
+//! pended past the queue limit — delivers as a `kill` from no one (`SI_USER`,
+//! pid 0).
 
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::signal::{
     SI_USER, SIGQUEUE_MAX, SIGRTMIN, SigInfo, SigSet, sig_bit, sig_is_realtime,
@@ -37,9 +39,24 @@ const STANDARD: usize = (SIGRTMIN - 1) as usize;
 /// back still fits after a sender refilled the queue behind it.
 const RT_CAPACITY: usize = SIGQUEUE_MAX + 1;
 
-/// What a realtime instance that lost its record reports, as Linux does:
+/// What an instance that lost its sender's record reports, as Linux does:
 /// a sent signal from no one, never one the kernel raised.
 const LOST_RECORD: SigInfo = SigInfo::sent(SI_USER, 0, 0, 0);
+
+/// Bit `n - 1` for standard signal `n`, `0` for a realtime one.
+fn standard_bit(signo: u8) -> u32 {
+    if sig_is_realtime(signo) {
+        0
+    } else {
+        sig_bit(signo) as u32
+    }
+}
+
+/// Whether a process sent `info`, as Linux's `SI_FROMUSER` reads it: only
+/// such a record, lost, reads back as [`LOST_RECORD`].
+fn sent_by_user(info: &SigInfo) -> bool {
+    info.code <= 0
+}
 
 /// The record of a pending `signo` whose store holds none for it.
 fn unrecorded(signo: u8) -> SigInfo {
@@ -167,6 +184,10 @@ const SIGQUEUE_CLASS: &crate::sync::lock_tracking::LockClassKey =
 pub struct PendingSignals {
     /// Every writer holds `store`'s lock; readers probe it lock-free.
     bits: AtomicU64,
+    /// Standard signals a process sent, pending with a record no store could
+    /// keep.
+    /// Written only under `store`'s lock.
+    lost: AtomicU32,
     store: SpinLock<Option<KBox<SigQueue>>>,
 }
 
@@ -174,6 +195,7 @@ impl PendingSignals {
     pub const fn new() -> Self {
         Self {
             bits: AtomicU64::new(0),
+            lost: AtomicU32::new(0),
             store: SpinLock::new(None, SIGQUEUE_CLASS),
         }
     }
@@ -210,6 +232,7 @@ impl PendingSignals {
         if let Some(queue) = store.as_deref_mut() {
             queue.forget(!value);
         }
+        self.lost.fetch_and(value as u32, Ordering::Relaxed);
         self.bits.store(value, Ordering::Release);
     }
 
@@ -219,6 +242,7 @@ impl PendingSignals {
         if let Some(queue) = store.as_deref_mut() {
             queue.forget(bits);
         }
+        self.lost.fetch_and(!(bits as u32), Ordering::Relaxed);
         self.bits.fetch_and(!bits, Ordering::AcqRel)
     }
 
@@ -260,8 +284,12 @@ impl PendingSignals {
             if self.bits.load(Ordering::Acquire) & bit != 0 {
                 return (SignalPost::Dropped, spare);
             }
-            if let Some(queue) = store.as_deref_mut() {
-                queue.record(signum, info);
+            match store.as_deref_mut() {
+                Some(queue) => queue.record(signum, info),
+                None if sent_by_user(&info) => {
+                    self.lost.fetch_or(standard_bit(signum), Ordering::Relaxed);
+                }
+                None => {}
             }
         } else {
             let queued = store
@@ -288,6 +316,12 @@ impl PendingSignals {
             Some(queue) => queue.take(signum),
             None => (unrecorded(signum), false),
         };
+        let lost = standard_bit(signum);
+        let info = if self.lost.fetch_and(!lost, Ordering::Relaxed) & lost != 0 {
+            LOST_RECORD
+        } else {
+            info
+        };
         if !more {
             self.bits.fetch_and(!sig_bit(signum), Ordering::AcqRel);
         }
@@ -299,14 +333,17 @@ impl PendingSignals {
     /// has no room left for it.
     pub(crate) fn requeue(&self, signum: u8, info: SigInfo) -> bool {
         let mut store = self.store.lock();
-        if let Some(queue) = store.as_deref_mut() {
-            if sig_is_realtime(signum) {
+        match store.as_deref_mut() {
+            Some(queue) if sig_is_realtime(signum) => {
                 if !queue.push_front(signum, info) {
                     return false;
                 }
-            } else {
-                queue.record(signum, info);
             }
+            Some(queue) => queue.record(signum, info),
+            None if sent_by_user(&info) => {
+                self.lost.fetch_or(standard_bit(signum), Ordering::Relaxed);
+            }
+            None => {}
         }
         self.bits.fetch_or(sig_bit(signum), Ordering::AcqRel);
         true

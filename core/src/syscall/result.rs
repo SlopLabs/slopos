@@ -15,7 +15,7 @@ pub enum SyscallResult {
     /// Success — write `rax = value`.
     Ok(u64),
     /// Failure — write `rax = errno.as_u64()`; `Errno::ERESTARTSYS` becomes the
-    /// `ERRNO_ERESTARTSYS` sentinel `handle_erestartsys` resolves into a
+    /// `ERRNO_ERESTARTSYS` sentinel `settle_erestartsys` resolves into a
     /// transparent restart or `EINTR`.
     Err(Errno),
     /// Handler already wrote (or rewrote) the user-mode register state

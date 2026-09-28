@@ -1,9 +1,8 @@
 use slopos_abi::Errno;
-use slopos_abi::signal::{SA_RESTART, SIG_DFL, SIG_IGN};
 use slopos_abi::syscall::ERRNO_ERESTARTSYS;
 use slopos_abi::task::TASK_FLAG_USER_MODE;
 use slopos_ostd::user::context::UserContext;
-use slopos_sched::task_struct::Task;
+use slopos_sched::task_struct::{Current, Task};
 
 use slopos_ostd::authority::{AuthorityDecision, decide};
 
@@ -93,12 +92,6 @@ pub fn syscall_handle(user_ctx: &UserContext) {
             let result = func(&ctx);
             slopos_sched::profile::note_syscall(sysno, began);
             ctx.write_result(result);
-
-            // Must precede `deliver_pending_signal` so the signal frame
-            // captures the rewound state.
-            handle_erestartsys(task, user_ctx, sysno);
-
-            debug_assert_erestartsys_not_leaked(user_ctx);
         }
         None => {
             if entry.is_none() {
@@ -110,7 +103,16 @@ pub fn syscall_handle(user_ctx: &UserContext) {
         }
     }
 
-    crate::syscall::signal::deliver_pending_signal(&current, user_ctx);
+    return_from_syscall(&current, user_ctx, sysno);
+}
+
+/// Deliver what is pending on `sysno`'s way out, settling an `ERESTARTSYS` it
+/// returned on the signal the delivery takes.
+pub(crate) fn return_from_syscall(current: &Current, user_ctx: &UserContext, sysno: u64) {
+    crate::syscall::signal::deliver_pending_signal_on_syscall_exit(current, user_ctx, |restart| {
+        settle_erestartsys(user_ctx, sysno, restart);
+    });
+    debug_assert_erestartsys_not_leaked(user_ctx);
 }
 
 /// The x86_64 `syscall` instruction is 2 bytes (`0F 05`), so rewinding
@@ -129,9 +131,10 @@ const TIMEOUT_BEARING: &[u64] = &[
     slopos_abi::syscall::SYSCALL_RING_ENTER,
 ];
 
-fn handle_erestartsys(task_ref: &Task, user_ctx: &UserContext, sysno: u64) {
-    let result = user_ctx.rax();
-    if result != ERRNO_ERESTARTSYS {
+/// Runs before the signal frame is built, so the frame captures the rewound
+/// state.
+fn settle_erestartsys(user_ctx: &UserContext, sysno: u64, restart: bool) {
+    if user_ctx.rax() != ERRNO_ERESTARTSYS {
         return;
     }
     debug_assert!(
@@ -140,15 +143,7 @@ fn handle_erestartsys(task_ref: &Task, user_ctx: &UserContext, sysno: u64) {
          it must return EINTR so the remaining time is not re-armed"
     );
 
-    // Nothing deliverable reads as `SIG_DFL`, which restarts too.
-    let (handler, flags) = task_ref
-        .next_signal(!task_ref.signal_blocked())
-        .and_then(|signum| task_ref.signal_action((signum as usize).wrapping_sub(1)))
-        .map_or((SIG_DFL, 0), |action| (action.handler, action.flags));
-    let is_user_handler = handler != SIG_DFL && handler != SIG_IGN;
-    let should_restart = !is_user_handler || (flags & SA_RESTART) != 0;
-
-    if should_restart {
+    if restart {
         let mut regs = user_ctx.regs();
         regs.rip = regs.rip.wrapping_sub(SYSCALL_INSN_SIZE);
         regs.rax = sysno;

@@ -2184,6 +2184,23 @@ pub fn task_wait_for_signal(
     }
 }
 
+/// Whether every live member of `tgid` blocks `bit`, so a process-directed
+/// instance can only wait, pending, for one to unblock it or take it.
+fn blocked_by_every_member(tgid: u32, bit: SigSet) -> bool {
+    let mut members = 0usize;
+    let mut blocking = 0usize;
+    for_each_group_member(tgid, |member| {
+        if member.is_exited() {
+            return;
+        }
+        members += 1;
+        if member.signal_blocked() & bit != 0 {
+            blocking += 1;
+        }
+    });
+    members != 0 && blocking == members
+}
+
 /// Whether `tgid`'s shared disposition table catches `signum`.
 fn group_handles(tgid: u32, named: u32, signum: u8) -> bool {
     live_member(tgid, named).is_some_and(|member| has_user_handler(&member, signum))
@@ -2202,14 +2219,30 @@ fn group_handles(tgid: u32, named: u32, signum: u8) -> bool {
 ///
 /// The `WUNTRACED` report is published once per stop, by the last member the
 /// stop has to park.
-fn task_group_stop_members(tid: u32, stop_signal: u8, info: SigInfo) -> usize {
+///
+/// A stop signal the thread it is sent to blocks — `directed`, else every
+/// member — stops nothing here: it pends, and stops the group when a thread
+/// takes it at a delivery point, as Linux does, so `sigwait` and a signalfd
+/// can take it instead.
+fn task_group_stop_members(
+    tid: u32,
+    stop_signal: u8,
+    info: SigInfo,
+    directed: Option<&TaskRef>,
+) -> usize {
     let bit = slopos_abi::signal::sig_bit(stop_signal);
     if bit == 0 {
         return 0;
     }
     let tgid = thread_group_of(tid);
-    let caught =
-        (bit & slopos_abi::signal::SIG_UNCATCHABLE) == 0 && group_handles(tgid, tid, stop_signal);
+    let catchable = (bit & slopos_abi::signal::SIG_UNCATCHABLE) == 0;
+    let caught = catchable && group_handles(tgid, tid, stop_signal);
+    let blocked = catchable
+        && !caught
+        && match directed {
+            Some(thread) => thread.signal_blocked() & bit != 0,
+            None => blocked_by_every_member(tgid, bit),
+        };
     let cont_bit = slopos_abi::signal::sig_bit(slopos_abi::signal::SIGCONT);
     let current_addr = TaskAddr::current();
     let mut acted = 0usize;
@@ -2230,7 +2263,7 @@ fn task_group_stop_members(tid: u32, stop_signal: u8, info: SigInfo) -> usize {
         member.clear_signal_pending(cont_bit);
         let _ = member.take_continue_report();
 
-        if caught {
+        if caught || blocked {
             return;
         }
         if member.is_stopped() {
@@ -2273,6 +2306,15 @@ fn task_group_stop_members(tid: u32, stop_signal: u8, info: SigInfo) -> usize {
         }
     });
 
+    if blocked {
+        return match directed {
+            Some(thread) => {
+                let _ = slopos_ostd::task::ops::task_signal_post_info(thread, stop_signal, info);
+                1
+            }
+            None => group_post(tgid, tid, stop_signal, info).reached,
+        };
+    }
     if caught {
         // Taken by one thread's handler, like any other process-directed
         // signal: no member stops.
@@ -2310,7 +2352,7 @@ fn task_group_stop_members(tid: u32, stop_signal: u8, info: SigInfo) -> usize {
 /// Job control. Idempotent; see [`task_group_stop_members`] for the mechanics
 /// and the caller-parks-last rule.
 pub fn task_group_stop(tid: u32, stop_signal: u8) -> bool {
-    task_group_stop_members(tid, stop_signal, SigInfo::KERNEL) != 0
+    task_group_stop_members(tid, stop_signal, SigInfo::KERNEL, None) != 0
 }
 
 /// Resume every stopped member of `tid`'s thread group, and retire any pending
@@ -2392,7 +2434,7 @@ pub fn task_group_signal_info(tid: u32, signum: u8, info: SigInfo) -> GroupPost 
 
     match slopos_abi::signal::sig_default_action(signum) {
         slopos_abi::signal::SigDefault::Stop => {
-            post.reached = task_group_stop_members(tid, signum, info);
+            post.reached = task_group_stop_members(tid, signum, info, None);
             return post;
         }
         slopos_abi::signal::SigDefault::Continue => {
@@ -2445,11 +2487,13 @@ pub fn task_thread_signal_info(
     if group_id_of(&target) != tgid || target.is_exited() {
         return None;
     }
+    let default = slopos_abi::signal::sig_default_action(signum);
+    if default == slopos_abi::signal::SigDefault::Stop {
+        return (task_group_stop_members(tid, signum, info, Some(&target)) != 0)
+            .then_some(SignalPost::Pending);
+    }
     let group_wide = signum == slopos_abi::signal::SIGKILL
-        || matches!(
-            slopos_abi::signal::sig_default_action(signum),
-            slopos_abi::signal::SigDefault::Stop | slopos_abi::signal::SigDefault::Continue
-        );
+        || default == slopos_abi::signal::SigDefault::Continue;
     if group_wide {
         return (task_group_signal_info(tid, signum, info).reached != 0)
             .then_some(SignalPost::Pending);

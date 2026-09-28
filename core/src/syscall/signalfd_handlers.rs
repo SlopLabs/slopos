@@ -2,7 +2,7 @@
 //! `slopos-signalfd` crate.
 
 use slopos_abi::Errno;
-use slopos_abi::signal::SigSet;
+use slopos_abi::signal::{SIG_UNCATCHABLE, SigSet};
 use slopos_abi::syscall::{SFD_CLOEXEC, SFD_NONBLOCK};
 use slopos_mm::user_copy::copy_from_user;
 
@@ -26,7 +26,7 @@ define_syscall!(syscall_signalfd4
         return Err(Errno::EINVAL);
     }
     let mask = mask.ok_or(Errno::EFAULT)?;
-    let watched = copy_from_user(mask.inner()).map_err(|_| Errno::EFAULT)?;
+    let watched = copy_from_user(mask.inner()).map_err(|_| Errno::EFAULT)? & !SIG_UNCATCHABLE;
     let created = slopos_signalfd::signalfd_create(
         process_id,
         watched,

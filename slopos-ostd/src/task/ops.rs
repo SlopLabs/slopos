@@ -205,13 +205,34 @@ fn post_into<K, U>(
         }
     }
     let spare = if (realtime || info != SigInfo::KERNEL) && !set.has_store() {
-        crate::KBox::zeroed().ok()
+        alloc_sigqueue_store()
     } else {
         None
     };
     let (outcome, unused) = set.enqueue(signum, info, spare);
     drop(unused);
     outcome
+}
+
+fn alloc_sigqueue_store() -> Option<crate::KBox<crate::task::sigqueue::SigQueue>> {
+    #[cfg(feature = "test-helpers")]
+    if INJECTED_STORE_ALLOC_FAILURES
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+        .is_ok()
+    {
+        return None;
+    }
+    crate::KBox::zeroed().ok()
+}
+
+#[cfg(feature = "test-helpers")]
+static INJECTED_STORE_ALLOC_FAILURES: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Fail the next `count` record store allocations a signal send makes.
+#[cfg(feature = "test-helpers")]
+pub fn inject_sigqueue_store_alloc_failures(count: u32) {
+    INJECTED_STORE_ALLOC_FAILURES.store(count, Ordering::Relaxed);
 }
 
 #[inline]
