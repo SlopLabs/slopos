@@ -266,15 +266,34 @@ impl<K, U> TaskInner<K, U> {
         self.pending.raise(bits)
     }
 
-    /// Pick this thread to take its process's pending signals.
-    #[inline]
-    pub fn pick_for_shared_signals(&self) {
+    /// Pick this thread to take its process's pending signals. `false` when it
+    /// has exited: its exit may have looked for a pick before this one
+    /// landed, so the caller hands the signals to a sibling instead.
+    #[must_use]
+    pub fn pick_for_shared_signals(&self) -> bool {
         self.picked_for_shared.store(true, Ordering::Release);
+        // Pairs with the fence in `shared_signals_left_by_exit`: this read
+        // sees the exit, or that exit's read of the pick sees this one.
+        core::sync::atomic::fence(Ordering::SeqCst);
+        !self.is_exited()
     }
 
     #[inline]
-    pub fn is_picked_for_shared_signals(&self) -> bool {
+    fn is_picked_for_shared_signals(&self) -> bool {
         self.picked_for_shared.load(Ordering::Acquire)
+    }
+
+    /// The process signals this thread was picked for and does not block,
+    /// which it must hand on rather than take into its grave. Called once its
+    /// terminal status is published.
+    pub fn shared_signals_left_by_exit(&self) -> SigSet {
+        // Status store then pick load, against `pick_for_shared_signals`.
+        core::sync::atomic::fence(Ordering::SeqCst);
+        if !self.is_picked_for_shared_signals() {
+            return 0;
+        }
+        self.shared_signals()
+            .map_or(0, |shared| shared.bits() & !self.signal_blocked())
     }
 
     /// Whether a delivery point would act on a signal: one of this thread's
@@ -314,7 +333,7 @@ impl<K, U> TaskInner<K, U> {
             return None;
         }
         let (signum, info) = self.shared_signals()?.dequeue(mask)?;
-        self.pick_for_shared_signals();
+        self.picked_for_shared.store(true, Ordering::Release);
         Some(DequeuedSignal {
             signum,
             info,
@@ -343,13 +362,15 @@ impl<K, U> TaskInner<K, U> {
     }
 
     /// Put back an instance a delivery took and could not use, into the set it
-    /// came from, ahead of any later instance of its signal.
-    pub fn requeue_signal(&self, taken: &DequeuedSignal) {
+    /// came from, ahead of any later instance of its signal. `false`, with
+    /// nothing changed, when there is no room left to put it back.
+    #[must_use]
+    pub fn requeue_signal(&self, taken: &DequeuedSignal) -> bool {
         let set = match self.shared_signals() {
             Some(shared) if taken.shared => shared,
             _ => &self.pending,
         };
-        set.requeue(taken.signum, taken.info);
+        set.requeue(taken.signum, taken.info)
     }
 
     /// Realtime instances queued on this thread's own set, of every signal.

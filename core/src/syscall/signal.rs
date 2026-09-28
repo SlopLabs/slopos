@@ -1123,7 +1123,8 @@ fn deliver_pending_signal_core(
     // A push that faults while delivering a *fault* signal must kill rather
     // than re-pend: the interrupted instruction re-executes and faults again.
     // Anything else gets one deferral and then dies, as Linux's
-    // `force_sigsegv` does — a signal retried forever is never reported.
+    // `force_sigsegv` does — a signal retried forever is never reported. So
+    // does one whose queue has no room left to take it back.
     let refuse = |task_ref: &Task| {
         // Killed while the frame waited for memory, perhaps as the victim:
         // it dies of the kill, not of the push.
@@ -1134,11 +1135,12 @@ fn deliver_pending_signal_core(
             }
             return;
         }
-        if fault_signal || task_ref.note_sigframe_push_failure() >= 2 {
+        if fault_signal
+            || task_ref.note_sigframe_push_failure() >= 2
+            || !task_ref.requeue_signal(&taken)
+        {
             force_death_on_frame_fault(task_ref);
-            return;
         }
-        task_ref.requeue_signal(&taken);
     };
 
     // The copies below refuse an absent or write-protected leaf rather than

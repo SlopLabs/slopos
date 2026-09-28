@@ -604,7 +604,7 @@ pub fn task_build(
     // reference to a task that already owns its process lease. Allocation under
     // the guard is fine — interrupts stay on, so cross-CPU TLB acks still land.
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
-    let mut pending = match allocate_task() {
+    let mut pending = match allocate_task(flags & TASK_FLAG_USER_MODE != 0) {
         Ok(pending) => pending,
         Err(TaskAllocError::MaxTasks) => {
             klog_info!("task_create: Maximum tasks reached");
@@ -1017,15 +1017,9 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
         super::enforce_zombie_budget(&parent);
     }
 
-    // A thread picked for its process's signals hands them on rather than
-    // taking them into its grave.
-    if task.is_picked_for_shared_signals()
-        && let Some(shared) = task.shared_signals()
-    {
-        let released = shared.bits() & !task.signal_blocked();
-        if released != 0 {
-            task_retarget_shared_signals(task, released);
-        }
+    let orphaned = task.shared_signals_left_by_exit();
+    if orphaned != 0 {
+        task_retarget_shared_signals(task, orphaned);
     }
 
     let should_hangup = if task.task_id != INVALID_TASK_ID
@@ -1531,7 +1525,7 @@ fn install_private_sighand(child: &mut Task, parent: &Task) -> bool {
 }
 
 /// A thread takes the signals sent to its process from the one set every
-/// member shares; anything else keeps the fresh set `allocate_task` gave it.
+/// member shares; a new process keeps the fresh set `allocate_task` gave it.
 /// Out of line so the handle stays out of `task_clone`'s frame.
 #[inline(never)]
 fn join_parent_signal_group(child: &mut Task, parent: &Task) {
@@ -1593,7 +1587,7 @@ pub fn task_fork(
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
-    let mut pending = match allocate_task() {
+    let mut pending = match allocate_task(true) {
         Ok(pending) => pending,
         Err(_) => {
             klog_info!("task_fork: no free task slots");
@@ -1790,7 +1784,7 @@ pub fn task_clone(
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
-    let mut pending = match allocate_task() {
+    let mut pending = match allocate_task(!is_thread) {
         Ok(pending) => pending,
         Err(_) => return Err(ERRNO_EAGAIN),
     };
@@ -2081,6 +2075,11 @@ fn group_post(tgid: u32, named: u32, signum: u8, info: SigInfo) -> GroupPost {
     drop(carrier);
     post.queue_full = outcome == SignalPost::QueueFull;
     let pending = outcome.is_pending();
+    if pending {
+        // Post then read masks, against `set_signal_blocked`'s store then
+        // read of the set: at least one side sees the other.
+        core::sync::atomic::fence(Ordering::SeqCst);
+    }
     let bit = slopos_abi::signal::sig_bit(signum);
     let mut taker: Option<TaskRef> = None;
     for_each_group_member(tgid, |member| {
@@ -2099,28 +2098,44 @@ fn group_post(tgid: u32, named: u32, signum: u8, info: SigInfo) -> GroupPost {
         }
     });
     if let Some(taker) = taker {
-        taker.pick_for_shared_signals();
-        let _ = scheduler::unblock_task(&taker);
+        task_pick_for_shared_signals(&taker, bit);
     }
     post
+}
+
+/// Pick `taker` for its process's pending `bits` and wake it, or, when it
+/// exited after it was chosen, a sibling that does not block them.
+pub fn task_pick_for_shared_signals(taker: &TaskRef, bits: SigSet) {
+    if !pick_and_wake(taker) {
+        task_retarget_shared_signals(taker, bits);
+    }
+}
+
+/// `false` when `member` had exited, so the pick counts for nothing.
+fn pick_and_wake(member: &TaskRef) -> bool {
+    if !member.pick_for_shared_signals() {
+        return false;
+    }
+    let _ = scheduler::unblock_task(member);
+    true
 }
 
 /// Pick, for each of the process signals in `released` that `task` will no
 /// longer take, a sibling that does not block it, and wake that sibling —
 /// `task` just blocked them, or is exiting.
 pub fn task_retarget_shared_signals(task: &Task, released: SigSet) {
+    // `released` was read from the shared set: a member whose mask the walk
+    // reads stale sees those bits after its change (`set_signal_blocked`).
+    core::sync::atomic::fence(Ordering::SeqCst);
     let mut released = released;
     for_each_group_member(group_id_of(task), |member| {
         if released == 0 || member.task_id == task.task_id || member.is_exited() {
             return;
         }
         let takes = released & !member.signal_blocked();
-        if takes == 0 {
-            return;
+        if takes != 0 && pick_and_wake(member) {
+            released &= !takes;
         }
-        released &= !takes;
-        member.pick_for_shared_signals();
-        let _ = scheduler::unblock_task(member);
     });
 }
 

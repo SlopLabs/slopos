@@ -2420,9 +2420,9 @@ pub fn test_a_requeued_instance_survives_a_refilled_queue() -> TestResult {
     let filled = (0..SIGQUEUE_MAX as u64).filter(|&v| post(v)).count();
     let taken = task.dequeue_signal(u64::MAX);
     let refilled = post(100);
-    if let Some(taken) = &taken {
-        task.requeue_signal(taken);
-    }
+    let put_back = taken
+        .as_ref()
+        .is_some_and(|taken| task.requeue_signal(taken));
     let mut order = [u64::MAX; SIGQUEUE_MAX + 2];
     let mut drained = 0usize;
     for slot in order.iter_mut() {
@@ -2440,6 +2440,7 @@ pub fn test_a_requeued_instance_survives_a_refilled_queue() -> TestResult {
         refilled,
         "the slot a delivery freed must take a new instance"
     );
+    assert_test!(put_back, "the reserve slot must take the instance back");
     assert_eq_test!(drained, SIGQUEUE_MAX + 1, "an instance was lost");
     let expected = (0..SIGQUEUE_MAX as u64).chain([100]);
     assert_test!(
@@ -2449,6 +2450,177 @@ pub fn test_a_requeued_instance_survives_a_refilled_queue() -> TestResult {
             .zip(expected)
             .all(|(got, want)| got == want),
         "the requeued instance must come back first"
+    );
+    pass!()
+}
+
+/// Two threads each putting back an instance of their process's full
+/// realtime queue cannot both have its one reserve slot: the second is
+/// refused, and every instance a sender was told had queued survives.
+pub fn test_a_second_put_back_into_a_full_process_queue_is_refused() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMIN, SigInfo};
+    use slopos_ostd::task::ops::task_group_post_info;
+    use slopos_sched::task::SignalPost;
+    let _fixture = SyscallFixture::new();
+
+    let Some(ids) = spawn_threads::<2>() else {
+        return TestResult::Fail;
+    };
+    let (Some(first), Some(second)) = (task_find_by_id(ids[0]), task_find_by_id(ids[1])) else {
+        return fail_and_clean(&ids);
+    };
+    let post = |value: u64| {
+        task_group_post_info(&first, SIGRTMIN, SigInfo::sent(SI_QUEUE, 1, 0, value))
+            == SignalPost::Pending
+    };
+    let filled = (0..SIGQUEUE_MAX as u64).filter(|&v| post(v)).count();
+    let taken = [
+        first.dequeue_signal(u64::MAX),
+        second.dequeue_signal(u64::MAX),
+    ];
+    let refilled = [post(100), post(101)];
+    let put_back = [
+        taken[0].as_ref().is_some_and(|t| first.requeue_signal(t)),
+        taken[1].as_ref().is_some_and(|t| second.requeue_signal(t)),
+    ];
+    let mut order = [u64::MAX; SIGQUEUE_MAX + 2];
+    let mut drained = 0usize;
+    for slot in order.iter_mut() {
+        let Some(next) = first.dequeue_signal(u64::MAX) else {
+            break;
+        };
+        *slot = next.info.value;
+        drained += 1;
+    }
+    drop((first, second));
+    terminate_all(&ids);
+
+    assert_eq_test!(filled, SIGQUEUE_MAX, "the process queue must fill");
+    assert_eq_test!(
+        refilled,
+        [true, true],
+        "the slots two deliveries freed must take new instances"
+    );
+    assert_eq_test!(
+        put_back,
+        [true, false],
+        "only one put-back fits the reserve slot"
+    );
+    assert_eq_test!(drained, SIGQUEUE_MAX + 1, "an accepted instance was lost");
+    let expected = [0]
+        .into_iter()
+        .chain(2..SIGQUEUE_MAX as u64)
+        .chain([100, 101]);
+    assert_test!(
+        order
+            .iter()
+            .copied()
+            .zip(expected)
+            .all(|(got, want)| got == want),
+        "the put-back must come first and every accepted instance follow"
+    );
+    pass!()
+}
+
+/// A thread a sender chose that exits before the pick lands — its exit looked
+/// for a pick and found none — does not take the signal into its grave: the
+/// pick moves to a sibling that does not block it.
+pub fn test_a_pick_landing_after_the_takers_exit_moves_to_a_sibling() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SIGRTMIN, SigInfo};
+    use slopos_ostd::task::ops::task_group_post_info;
+    use slopos_sched::task::{
+        SignalPost, task_has_deliverable_signal, task_pick_for_shared_signals,
+    };
+    let _fixture = SyscallFixture::new();
+
+    let Some(ids) = spawn_threads::<3>() else {
+        return TestResult::Fail;
+    };
+    let [leader, chosen, sibling] = ids;
+    let (Some(leader_task), Some(chosen_task), Some(sibling_task)) = (
+        task_find_by_id(leader),
+        task_find_by_id(chosen),
+        task_find_by_id(sibling),
+    ) else {
+        return fail_and_clean(&ids);
+    };
+    let bit = sig_bit(SIGRTMIN);
+    leader_task.set_signal_blocked(bit);
+    let posted = task_group_post_info(
+        &leader_task,
+        SIGRTMIN,
+        SigInfo::sent(SI_QUEUE, 1, 0, 0x7a11),
+    );
+    task_terminate(chosen);
+    let exited = chosen_task.is_exited();
+    task_pick_for_shared_signals(&chosen_task, bit);
+    let deliverable = [&leader_task, &sibling_task].map(|task| task_has_deliverable_signal(task));
+    drop((leader_task, chosen_task, sibling_task));
+    terminate_all(&[leader, sibling]);
+
+    assert_eq_test!(
+        posted,
+        SignalPost::Pending,
+        "the post to the process failed"
+    );
+    assert_test!(exited, "the chosen thread must have exited");
+    assert_eq_test!(
+        deliverable,
+        [false, true],
+        "the signal must pass to the sibling that does not block it"
+    );
+    pass!()
+}
+
+/// A forked process starts a pending set of its own, which the threads it
+/// then creates share: a signal sent to it is pending for its thread, and not
+/// for the process it was forked from.
+pub fn test_a_forked_process_shares_its_own_signal_set_with_its_threads() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SIGRTMIN, SigInfo};
+    use slopos_ostd::task::ops::task_group_post_info;
+    use slopos_sched::task::SignalPost;
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    let Some(parent) = task_find_by_id(parent_id) else {
+        return fail_and_clean(&[parent_id]);
+    };
+    let child_id = task_fork(&parent, None);
+    drop(parent);
+    let thread_id = task_find_by_id(child_id)
+        .and_then(|child| {
+            task_clone(
+                &child,
+                None,
+                CLONE_VM | CLONE_SIGHAND | CLONE_THREAD,
+                0,
+                0,
+                0,
+                0,
+            )
+            .ok()
+        })
+        .unwrap_or(INVALID_TASK_ID);
+    let ids = [thread_id, child_id, parent_id];
+    if ids.contains(&INVALID_TASK_ID) {
+        return fail_and_clean(&ids);
+    }
+    let posted = task_find_by_id(child_id)
+        .map(|child| task_group_post_info(&child, SIGRTMIN, SigInfo::sent(SI_QUEUE, 1, 0, 0)));
+    let bit = sig_bit(SIGRTMIN);
+    let pending =
+        ids.map(|id| task_find_by_id(id).is_some_and(|task| task.signal_pending() & bit != 0));
+    terminate_all(&ids);
+
+    assert_eq_test!(
+        posted,
+        Some(SignalPost::Pending),
+        "the post to the forked process failed"
+    );
+    assert_eq_test!(
+        pending,
+        [true, true, false],
+        "the forked process and its thread must share one set of their own"
     );
     pass!()
 }
@@ -2517,6 +2689,18 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_a_requeued_instance_survives_a_refilled_queue,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_second_put_back_into_a_full_process_queue_is_refused,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_pick_landing_after_the_takers_exit_moves_to_a_sibling,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_a_forked_process_shares_its_own_signal_set_with_its_threads,
     suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(

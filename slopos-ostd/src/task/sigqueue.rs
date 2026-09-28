@@ -72,18 +72,22 @@ impl SigQueue {
         true
     }
 
-    /// Put an instance back at the head. Never refused: the reserve slot takes
-    /// it, and should that be spoken for too, the newest queued record makes
-    /// room, so an older instance is never lost to a later one.
-    pub(crate) fn push_front(&mut self, signo: u8, info: SigInfo) {
-        let len = (self.rt_len as usize).min(RT_CAPACITY - 1);
+    /// Put an instance back at the head. `false` when the reserve slot is
+    /// spoken for too: making room would drop an instance a sender was told
+    /// had queued.
+    pub(crate) fn push_front(&mut self, signo: u8, info: SigInfo) -> bool {
+        let len = self.rt_len as usize;
+        if len >= RT_CAPACITY {
+            return false;
+        }
         self.rt.copy_within(0..len, 1);
         self.rt[0] = RtEntry {
             signo,
             _pad: [0; 7],
             info,
         };
-        self.rt_len = (len + 1) as u32;
+        self.rt_len += 1;
+        true
     }
 
     /// The record the next delivery of `signo` carries, removed, and whether
@@ -275,17 +279,21 @@ impl PendingSignals {
     }
 
     /// Put back an instance [`dequeue`](Self::dequeue) took, ahead of any later
-    /// one of its signal.
-    pub(crate) fn requeue(&self, signum: u8, info: SigInfo) {
+    /// one of its signal. `false`, with nothing changed, when a realtime queue
+    /// has no room left for it.
+    pub(crate) fn requeue(&self, signum: u8, info: SigInfo) -> bool {
         let mut store = self.store.lock();
         if let Some(queue) = store.as_deref_mut() {
             if sig_is_realtime(signum) {
-                queue.push_front(signum, info);
+                if !queue.push_front(signum, info) {
+                    return false;
+                }
             } else {
                 queue.record(signum, info);
             }
         }
         self.bits.fetch_or(sig_bit(signum), Ordering::AcqRel);
+        true
     }
 }
 

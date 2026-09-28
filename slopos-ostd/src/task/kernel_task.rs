@@ -590,8 +590,8 @@ pub struct TaskInner<K, U> {
     /// Signals sent to this thread alone.
     pub(crate) pending: PendingSignals,
     /// Signals sent to this thread's process, shared by every thread of the
-    /// group; one thread that does not block a signal takes it. `None` only
-    /// for a task that never registered.
+    /// group; one thread that does not block a signal takes it. `None` for a
+    /// kernel task, which heads no process, and for one never registered.
     ///
     /// Written only through `&mut self`, like [`sighand`](Self::sighand).
     pub(crate) shared_pending: Option<crate::KArc<PendingSignals>>,
@@ -1122,6 +1122,9 @@ impl<K, U> TaskInner<K, U> {
     #[inline]
     pub fn set_signal_blocked(&self, mask: SigSet) {
         self.signal_blocked.store(mask, Ordering::Release);
+        // Pairs with the fence a sender takes before reading masks: it sees
+        // `mask`, or the shared-set reads from here on see its post.
+        core::sync::atomic::fence(Ordering::SeqCst);
         if let Some(shared) = self.shared_pending.as_deref()
             && shared.bits() & !mask != 0
         {
@@ -1727,8 +1730,9 @@ impl<K, U> TaskInner<K, U> {
         drop(self.fs.replace_exclusive(None));
         drop(self.test_reports.get_mut().take());
         drop(self.pending.take_store());
-        // The slot's own group set, not the parent's: a fork starts a process
-        // with nothing pending, and a thread clone swaps in the parent's.
+        // The slot's own group set, not the parent's: a new process starts
+        // with nothing pending, and a thread has none until it joins its
+        // parent's.
         let shared_pending = self.shared_pending.take();
 
         // SAFETY: Both pointers are valid, non-overlapping TaskInner

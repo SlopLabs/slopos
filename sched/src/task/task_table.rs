@@ -697,7 +697,9 @@ impl Drop for PendingTask {
 }
 
 /// Reserve capacity and allocate one task without publishing it to lookups.
-pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
+/// One that `starts_process` also gets the pending set its process's threads
+/// will share; a thread joins its parent's, and a kernel task has none.
+pub(super) fn allocate_task(starts_process: bool) -> Result<PendingTask, TaskAllocError> {
     if !ensure_registry_allocated() {
         return Err(TaskAllocError::NoFreeSlot);
     }
@@ -734,16 +736,21 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
     let value = KArc::get_mut(&mut task).expect("fresh task allocation must be unique");
     value.task_id = id;
     // Every registered task owns a disposition table: a `None` would make a
-    // signal silently undeliverable rather than defaulted. The same goes for
-    // the process-wide pending set, which a thread clone replaces with its
-    // parent's.
+    // signal silently undeliverable rather than defaulted.
     let tables = slopos_ostd::task::SigHandTable::try_new_default().and_then(|table| {
-        slopos_ostd::task::sigqueue::PendingSignals::try_new_shared().map(|shared| (table, shared))
+        let shared = if starts_process {
+            Some(slopos_ostd::task::sigqueue::PendingSignals::try_new_shared()?)
+        } else {
+            None
+        };
+        Ok((table, shared))
     });
     match tables {
         Ok((table, shared)) => {
             value.set_sighand(table);
-            value.set_shared_signals(shared);
+            if let Some(shared) = shared {
+                value.set_shared_signals(shared);
+            }
         }
         Err(_) => {
             with_task_manager(|mgr| mgr.num_tasks = mgr.num_tasks.saturating_sub(1));
@@ -808,7 +815,7 @@ pub fn task_live_cap_rejects_for_test() -> bool {
         mgr.num_tasks = MAX_TASKS as u32;
         snapshot
     });
-    let result = allocate_task();
+    let result = allocate_task(false);
     let unchanged = with_task_manager(|mgr| {
         let unchanged = mgr.next_task_id == saved_next && mgr.registry.len() == saved_entries;
         mgr.num_tasks = saved_live;
@@ -825,7 +832,7 @@ pub fn task_live_cap_rejects_for_test() -> bool {
 #[cfg(feature = "test-hooks")]
 pub fn task_clone_from_releases_slot_sighand_for_test(parent_id: u32) -> Option<bool> {
     let parent = task_find_by_id(parent_id)?;
-    let mut pending = allocate_task().ok()?;
+    let mut pending = allocate_task(true).ok()?;
     let child = pending.as_mut();
     let table = child.sighand_handle()?;
     if KArc::strong_count(&table) != 2 {
