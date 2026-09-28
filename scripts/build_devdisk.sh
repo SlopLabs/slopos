@@ -25,10 +25,10 @@ set -euo pipefail
 # in the guest.
 #
 # Environment:
-#   DEV_DISK_SIZE - volume size (default: 4G). A cross-built toolchain with
-#                   clang is ~0.9 GB, the seeded source ~0.05 GB, and each
-#                   kernel variant built in the guest ~0.41 GB. A preserved
-#                   smaller volume is grown in place with `resize2fs`.
+#   DEV_DISK_SIZE - volume size (default: 8G). The toolchain is ~0.7 GB, the
+#                   seeded source with its sysroot ~1.2 GB, and each kernel
+#                   variant built in the guest ~1.6 GB of target directory. A
+#                   preserved smaller volume is grown in place with `resize2fs`.
 #   DEV_DISK_INODE_RATIO - bytes of volume per inode (default: 16384, the
 #                   mke2fs default). The C++ headers alone are ~1000 files.
 #   TOOLCHAIN_STAGE - a cross-built toolchain prefix, staged on a new volume
@@ -59,7 +59,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE_PATH="${1:?Usage: build_devdisk.sh <image_path> <build_dir>}"
 BUILD_DIR="$(cd "${2:?Usage: build_devdisk.sh <image_path> <build_dir>}" && pwd)"
 
-DEV_DISK_SIZE="${DEV_DISK_SIZE:-4G}"
+DEV_DISK_SIZE="${DEV_DISK_SIZE:-8G}"
 DEV_DISK_LABEL="slopos-dev"
 DEV_DISK_INODE_RATIO="${DEV_DISK_INODE_RATIO:-16384}"
 

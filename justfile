@@ -48,7 +48,7 @@ capacity_stage        := build_dir / "capacity-stage"
 # The dev disk: the workbench volume a cross-built toolchain lands on.
 # Preserved, because what the guest wrote to a workbench survives a rebuild.
 fs_image_devdisk      := fs_image_dir / "ext2-devdisk.img"
-dev_disk_size         := env("DEV_DISK_SIZE", "4G")
+dev_disk_size         := env("DEV_DISK_SIZE", "8G")
 # A compiler session: the `core` compile peaks at 1.15 GiB anonymous, and the
 # file map's per-process cap is usable memory / 8 — 512 MiB at 4G, which the
 # kernel's link needs and 2G does not give.
