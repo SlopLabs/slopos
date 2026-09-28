@@ -29,15 +29,22 @@
 # change, since its peak is how many exited children are still being torn
 # down while the next ones start, and to 23 with the same `pthread_kill`
 # change. The commitpages row
-# after userland is the build-loop tests reserving six tenths of the
-# headroom, which moves with usable memory and with what else holds a
-# promise at that moment: three captures measured 120 266, 120 318 and
-# 120 319, then two captures of the in-guest toolchain work 120 602 each, then
-# 121 633 once slibc's allocator became a per-thread segment allocator, whose
-# 4 MiB segments are promised whole, and the cap is the largest. The expected refusals are the kernel stest that lowers the
-# root ceiling and over-asks once, then the build-loop utest: its over-ask is
-# refused twice, because the mmap handler reclaims and retries a refused
-# request once, and its fork past the ceiling is refused once. The pages row
+# after userland is the build-loop OOM test's hog, which promises the whole
+# headroom less 3072 pages so its forked child's writes outrun the ceiling:
+# two captures measured 193 853 each. The expected refusals count through
+# both phases. The kernel phase refuses four: the stest that lowers the root
+# ceiling and over-asks once, the forked child's write past a full ceiling
+# (tests_commit), and the COW signal frame pushed into a full ceiling on the
+# syscall-exit and the IRQ-exit roads (tests_build_floor_signal). The userland
+# phase adds three: the build-loop over-ask is refused twice, because the mmap
+# handler reclaims and retries a refused request once, and the hog's forked
+# child has one write refused before the OOM killer takes the hog. The
+# residentpages row after the kernel tests rose from 772 to 2049 once a memfd
+# charged its sizer's resident pages at ftruncate rather than when mapped: the
+# OOM tests size 64-page memfds per process, and one row holds a 2048-page
+# memfd. The kernelmeta row after the kernel tests measured 6230 and 6192 in
+# two captures once the OOM and signal tests spawned more processes, and the
+# cap is the larger. The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
 # the row counts twice: captures measured 538 714, 535 332, 538 832, 539 004
@@ -55,8 +62,8 @@ max-denials 0
 
 # The refusals the suite provokes on purpose, held to their exact count:
 # fewer means a test stopped refusing, more means something else was.
-expect-denials post-kernel-tests commitpages 1
-expect-denials post-userland-tests commitpages 4
+expect-denials post-kernel-tests commitpages 4
+expect-denials post-userland-tests commitpages 7
 
 require-phase boot
 require-phase post-kernel-tests
@@ -67,14 +74,14 @@ post-kernel-tests	commitpages	2560
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	6120
+post-kernel-tests	kernelmeta	6230
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	539006
 post-kernel-tests	pinnedbytes	4
 post-kernel-tests	process	14
-post-kernel-tests	residentpages	772
+post-kernel-tests	residentpages	2049
 post-kernel-tests	task	8
-post-userland-tests	commitpages	121633
+post-userland-tests	commitpages	193853
 post-userland-tests	custody	8
 post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256
