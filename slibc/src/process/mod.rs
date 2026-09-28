@@ -62,13 +62,8 @@ pub unsafe extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 
     execvpe(file, argv, environ as *const *const u8)
 }
 
-/// `execvp` with an explicit environment.
-///
-/// POSIX: a file the system cannot execute (`ENOEXEC`) is run as a shell
-/// script, `/bin/sh file args...`. A candidate that is missing or not
-/// permitted moves the search on; any other failure ends it. A search that
-/// execs nothing fails `EACCES` if any candidate was not permitted, as
-/// glibc and musl do.
+/// `execvp` with an explicit environment. A file the system cannot execute
+/// (`ENOEXEC`) runs as `/bin/sh file args...`, as POSIX asks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execvpe(
     file: *const u8,
@@ -85,12 +80,27 @@ pub unsafe extern "C" fn execvpe(
         return exec_or_sh(file, argv, envp);
     }
 
-    let path_val = crate::env::getenv(b"PATH\0".as_ptr());
-    if path_val.is_null() {
-        errno::errno_set(ENOENT.raw());
-        return -1;
-    }
+    let Err(e) = search_path(file, file_len, |path, _| {
+        exec_or_sh(path, argv, envp);
+        Err::<core::convert::Infallible, _>(errno::Errno(errno::errno_get()))
+    });
+    errno::errno_set(e.raw());
+    -1
+}
 
+/// POSIX command search: `file` joined to each `PATH` element in turn (an
+/// empty element is the cwd; an unset `PATH` is [`DEFAULT_PATH`]) until
+/// `attempt` succeeds or fails with anything but a miss. A search that finds
+/// nothing fails `EACCES` if any candidate was not permitted.
+pub(crate) unsafe fn search_path<T>(
+    file: *const u8,
+    file_len: usize,
+    mut attempt: impl FnMut(*const u8, usize) -> Result<T, errno::Errno>,
+) -> Result<T, errno::Errno> {
+    let mut path_val = crate::env::getenv(b"PATH\0".as_ptr()).cast_const();
+    if path_val.is_null() {
+        path_val = DEFAULT_PATH.as_ptr();
+    }
     let path_len = u_strlen(path_val);
     let mut buf = [0u8; 4096];
     let mut last = ENOENT;
@@ -100,11 +110,10 @@ pub unsafe extern "C" fn execvpe(
         while seg_end < path_len && *path_val.add(seg_end) != b':' {
             seg_end += 1;
         }
-        // POSIX: an empty PATH element names the current directory.
         let (dir, dir_len) = if seg_end == seg_start {
             (b".".as_ptr(), 1)
         } else {
-            (path_val.add(seg_start).cast_const(), seg_end - seg_start)
+            (path_val.add(seg_start), seg_end - seg_start)
         };
         let total = dir_len + 1 + file_len;
         if total < buf.len() {
@@ -112,20 +121,19 @@ pub unsafe extern "C" fn execvpe(
             buf[dir_len] = b'/';
             ptr::copy_nonoverlapping(file, buf.as_mut_ptr().add(dir_len + 1), file_len);
             buf[total] = 0;
-            exec_or_sh(buf.as_ptr(), argv, envp);
-            let e = errno::Errno(errno::errno_get());
-            if e != ENOENT && e != ENOTDIR && e != EACCES {
-                return -1;
-            }
-            if last != EACCES {
-                last = e;
+            match attempt(buf.as_ptr(), total) {
+                Ok(done) => return Ok(done),
+                Err(e) if e == ENOENT || e == ENOTDIR || e == EACCES => {
+                    if last != EACCES {
+                        last = e;
+                    }
+                }
+                Err(e) => return Err(e),
             }
         }
         seg_start = seg_end + 1;
     }
-
-    errno::errno_set(last.raw());
-    -1
+    Err(last)
 }
 
 /// `execlp(file, arg0, ..., NULL)`: [`execvp`] over the argument list.
@@ -188,6 +196,9 @@ unsafe fn exec_or_sh(path: *const u8, argv: *const *const u8, envp: *const *cons
 
 /// The shell POSIX has `execvp` hand a file it cannot execute.
 pub(crate) const SH_PATH: &[u8] = b"/bin/sh\0";
+
+/// `confstr(_CS_PATH)`: where a search looks when `PATH` is unset.
+pub(crate) const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin\0";
 
 /// Returns the child PID on success, -1 on error.
 #[unsafe(no_mangle)]

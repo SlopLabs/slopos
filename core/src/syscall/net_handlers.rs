@@ -75,8 +75,8 @@ fn check_msg_flags(flags: u32) -> Result<(), Errno> {
     }
 }
 
-/// A send's flags: `MSG_NOSIGNAL` on top of none. A socket send here never
-/// raises `SIGPIPE`, so the one thing the bit asks for already holds.
+/// A send's flags: `MSG_NOSIGNAL` on top of none; `sigpipe_unless_nosignal`
+/// honours it.
 fn check_send_flags(flags: u32) -> Result<(), Errno> {
     check_msg_flags(flags & !MSG_NOSIGNAL)
 }

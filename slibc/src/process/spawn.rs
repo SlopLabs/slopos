@@ -12,7 +12,7 @@ use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFd
 use slopos_abi::task::{TASK_FLAG_NEW_PGRP, TaskPriority};
 
 use crate::env::environ;
-use crate::errno::{EACCES, EBADF, EINVAL, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, Errno};
+use crate::errno::{EBADF, EINVAL, ENOEXEC, ENOMEM, Errno};
 use crate::pal::{Pal, Sys};
 use crate::signal::{SIG_DFL, SIG_SETMASK, signal, sigprocmask};
 use crate::string::{strdup, u_strlen};
@@ -660,44 +660,7 @@ unsafe fn spawn_direct(
     if !search || core::slice::from_raw_parts(file, file_len).contains(&b'/') {
         return launch(file, file_len);
     }
-    let path_val = crate::env::getenv(b"PATH\0".as_ptr());
-    if path_val.is_null() {
-        return Err(ENOENT);
-    }
-    let path_len = u_strlen(path_val);
-    let mut buf = [0u8; 4096];
-    let mut last = ENOENT;
-    let mut seg_start = 0usize;
-    while seg_start <= path_len {
-        let mut seg_end = seg_start;
-        while seg_end < path_len && *path_val.add(seg_end) != b':' {
-            seg_end += 1;
-        }
-        // POSIX: an empty PATH element names the current directory.
-        let (dir, dir_len) = if seg_end == seg_start {
-            (b".".as_ptr(), 1)
-        } else {
-            (path_val.add(seg_start).cast_const(), seg_end - seg_start)
-        };
-        let total = dir_len + 1 + file_len;
-        if total < buf.len() {
-            ptr::copy_nonoverlapping(dir, buf.as_mut_ptr(), dir_len);
-            buf[dir_len] = b'/';
-            ptr::copy_nonoverlapping(file, buf.as_mut_ptr().add(dir_len + 1), file_len);
-            buf[total] = 0;
-            match launch(buf.as_ptr(), total) {
-                Ok(child) => return Ok(child),
-                Err(e) if e == ENOENT || e == ENOTDIR || e == EACCES => {
-                    if last != EACCES {
-                        last = e;
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        seg_start = seg_end + 1;
-    }
-    Err(last)
+    crate::process::search_path(file, file_len, launch)
 }
 
 unsafe fn spawn_as_script(

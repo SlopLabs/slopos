@@ -142,6 +142,29 @@ fn execvp_runs_a_plain_file_under_sh() -> bool {
     true
 }
 
+/// With `PATH` unset, the search takes `confstr(_CS_PATH)`'s `/bin:/usr/bin`.
+fn execvp_searches_the_default_path_without_path() -> bool {
+    let pid = process::fork();
+    if pid == 0 {
+        // SAFETY: the forked child is single-threaded.
+        unsafe { std::env::remove_var("PATH") };
+        let argv: [*const u8; 2] = [b"true\0".as_ptr(), core::ptr::null()];
+        // SAFETY: NUL-terminated file, NULL-ended argv.
+        unsafe { slopos_slibc::process::execvp(b"true\0".as_ptr(), argv.as_ptr()) };
+        slopos_userland::syscall::core::exit_with_code(127);
+    }
+    let status = if pid < 0 {
+        -1
+    } else {
+        process::wait_exit_code(pid as u32)
+    };
+    if status != 0 {
+        eprintln!("script_exec_test: execvp without PATH exited {status}");
+        return false;
+    }
+    true
+}
+
 /// A `PATH` candidate that exists but may not be executed makes the search
 /// fail with `EACCES` even when a later directory has no such file.
 fn execvp_keeps_eacces_over_a_later_miss() -> bool {
@@ -337,6 +360,10 @@ fn main() {
         (
             "execvp_runs_a_plain_file_under_sh",
             execvp_runs_a_plain_file_under_sh,
+        ),
+        (
+            "execvp_searches_the_default_path_without_path",
+            execvp_searches_the_default_path_without_path,
         ),
         (
             "execvp_keeps_eacces_over_a_later_miss",
