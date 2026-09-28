@@ -280,11 +280,9 @@ fn sized_memfd(account: AccountId, pages: usize) -> Option<(usize, KArc<dyn File
         .then_some((handle, backing))
 }
 
-/// SLOPOS-2026-0058's scenario. One process holds a memfd it never mapped and
-/// a surface another maps beside a few pages of its own, so that one counts
-/// every surface page among its present leaves. Both memfds are the holder's
-/// promises and the holder's frames: it is taken whichever ran short, and the
-/// mapper is not.
+/// One process sizes a memfd it never maps and a surface another maps beside a
+/// few pages of its own. Both memfds are the sizer's promises and frames, so it
+/// is taken whichever ran short, and the mapper is not.
 pub fn test_oom_takes_the_holder_not_the_mapper() -> TestResult {
     const HOARD: usize = 48;
     const SURFACE: usize = 64;

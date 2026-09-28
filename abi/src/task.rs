@@ -381,18 +381,13 @@ pub enum TaskFaultReason {
     UserGp = 2,
     UserUd = 3,
     UserDeviceNa = 4,
-    /// A write found no page and the OOM killer had nothing it could take
-    /// instead — only init, the dying, processes holding privileged flags the
-    /// writer lacks and processes holding none of what the write lacked were
-    /// left: failing the writer, never killing a process it may not signal,
-    /// as Linux spares `oom_score_adj=-1000`. Distinct from
-    /// [`UserPage`](Self::UserPage) so `waitpid` can tell "the machine was
-    /// short of memory" from "the program was wrong". Reported as `SIGKILL`,
-    /// the signal the killer's victims die of. The task's own write only: a
-    /// kernel write made for it that finds the same — or that runs where it
-    /// cannot wait for the killer, under a spinlock, a preemption pin or with
-    /// interrupts masked — answers a user copy's `EFAULT`, or fails a signal
-    /// frame's push into `SIGSEGV`.
+    /// The task's own write found no page and the OOM killer had nothing it
+    /// could take for it. Reported as `SIGKILL`, the signal the killer's
+    /// victims die of, and distinct from [`UserPage`](Self::UserPage) so
+    /// `waitpid` can tell a machine short of memory from a wrong program. A
+    /// kernel write made for the task that finds the same, or cannot wait for
+    /// the killer, answers a user copy's `EFAULT` or fails a signal frame's
+    /// push into `SIGSEGV`.
     UserOom = 5,
 }
 

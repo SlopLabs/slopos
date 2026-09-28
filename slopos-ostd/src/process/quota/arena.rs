@@ -29,16 +29,11 @@ use crate::util::static_table::StaticTable;
 
 /// Rows on the longest root-to-leaf chain.
 ///
-/// Bounded so every hierarchical walk terminates in a fixed stack frame. The
-/// debit walk runs at most this many iterations, so a longer chain would have
-/// ancestors that never get debited — a ceiling that silently does not apply.
-/// A row created beneath one already at the bound therefore debits through
-/// that row's nearest ancestor with room below it: the chain stops growing,
-/// and the new row still reaches the root and every ceiling on the way. Only
-/// the spawner's own subtree totals miss it. Refusing the row instead would
-/// leave the process's account naming nothing, and a charge against nothing
-/// debits nothing, so every process below the bound would escape every
-/// ceiling, the machine's commit ceiling included.
+/// Bounded so every hierarchical walk terminates in a fixed stack frame. A row
+/// created beneath one already at the bound debits through that row's nearest
+/// ancestor with room, so it still reaches the root and every ceiling on the
+/// way; only the spawner's own subtree totals miss it. Refusing the row would
+/// leave the process charging nothing, past every ceiling.
 pub const MAX_ACCOUNT_DEPTH: u8 = 8;
 
 /// Levels a root may have beneath it: the chain length minus the root itself.
@@ -461,10 +456,10 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
 
 /// Release the row `id` names.
 ///
-/// Its live children are handed to its parent and its own outstanding amounts
-/// move one hop up. The row itself goes dark, so a refund arriving later fails
-/// the generation compare and does nothing — which is what makes a leaked
-/// charge self-healing.
+/// Its live children are handed to its parent, and its own outstanding share
+/// is credited out of every ancestor. The row itself goes dark, so a refund
+/// arriving later fails the generation compare and does nothing — which is
+/// what makes a leaked charge self-healing.
 pub fn account_release(id: AccountId) {
     // Outside the gate, whose body must not walk: the refund walks up through
     // the still-live row like any other, so the balance moved below excludes it.
@@ -476,7 +471,7 @@ pub fn account_release(id: AccountId) {
 
         // Live children go to the grandparent before this row goes dark, so
         // what they charged through here stays counted above and their later
-        // refunds still reach it. Only this row's own share moves up.
+        // refunds still reach it. Only this row's own share leaves.
         let grandparent = parent_of(row);
         let grandparent_row = row_for(grandparent);
         let mut children_used = [0u32; KIND_COUNT];

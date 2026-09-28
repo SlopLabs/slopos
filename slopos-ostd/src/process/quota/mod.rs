@@ -4,8 +4,8 @@
 //! An account is a row in a fixed `.bss` arena named by a generation-stamped
 //! [`AccountId`](crate::process::AccountId), one per
 //! [`Process`](crate::process::Process) plus one kernel-owned root. Its parent
-//! edge is set once at creation and never re-homed, so charge migration is
-//! unrepresentable.
+//! edge is set at creation and re-pointed only when that parent is released,
+//! to the grandparent.
 //!
 //! [`try_charge`] debits the leaf and every ancestor and hands back a linear
 //! [`Reservation`]; the charged object's constructor consumes that reservation

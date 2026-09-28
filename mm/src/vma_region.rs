@@ -322,7 +322,7 @@ impl VmaRegion {
 
     /// `true` iff an object elsewhere owns the frames and this region maps
     /// every one of them from its `mmap` to its unmap: a shared memfd, a ring.
-    /// Its leaves are that object's frames, counted toward whoever sized it.
+    /// Its leaves are that object's frames, never counted toward the mapper.
     pub fn borrows_frames(&self) -> bool {
         matches!(
             self.backing,
@@ -435,9 +435,8 @@ pub struct VmaMap {
     account: AccountId,
     charge: ChargeSlot<PagesAxis>,
     commit: ChargeSlot<CommitPagesAxis>,
-    /// Frames this address space holds as its own: the address space's count
-    /// of present user leaves, synced, less the leaves of the objects it
-    /// borrows, whose frames are their sizer's.
+    /// Frames this address space holds as its own: its synced count of present
+    /// user leaves less those of the objects it borrows.
     resident: ChargeSlot<ResidentPagesAxis>,
     /// The most leaves this process has held at once, across `execve`.
     peak_resident: u32,

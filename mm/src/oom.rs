@@ -209,13 +209,11 @@ fn serve(ops: &dyn OomOps, trigger: OomTrigger) -> OomVerdict {
     };
     // Bounded, and killable: a victim is woken out of this by its own kill.
     match RELEASED.wait_event_timeout(|| process_vm_released(awaited), RELEASE_WAIT_MS) {
-        // The frames are back, or a round is spent: the write looks again, and
-        // a round's end is what lets a victim outstay its grace.
+        // A round's end is what lets a victim outstay its grace.
         Ok(()) | Err(WaitAbort::Timeout) => OomVerdict::Retry,
-        // The writer unwinds on the way back to the write.
+        // The writer unwinds on its way back to the write.
         Err(WaitAbort::Killed) => OomVerdict::Retry,
-        // Nothing to park: the write retries rather than failing a program
-        // for memory the victim is still returning.
+        // Nothing to park on: retry rather than fail for memory on its way back.
         Err(WaitAbort::NoRuntime | WaitAbort::Interrupted) => OomVerdict::Retry,
     }
 }
@@ -263,9 +261,7 @@ pub(crate) fn decide(ops: &dyn OomOps, trigger: OomTrigger) -> Decision {
             report_kill(&killed, &chosen, trigger);
             killed.pid
         }
-        // Its last task left between the choice and the kill. Nothing was
-        // killed, but its memory is on its way back all the same, so it holds
-        // the choice exactly as a victim would.
+        // Its last task left before the kill; its memory is on its way back.
         None => chosen.process.id(),
     };
     *current = Some(Victim {
