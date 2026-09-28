@@ -1343,8 +1343,6 @@ pub fn test_one_stop_publishes_one_report() -> TestResult {
     pass!()
 }
 
-/// A member SIGKILLed while its stop join is outstanding dies at its delivery
-/// point instead of joining the stop.
 pub fn test_a_kill_outranks_an_outstanding_stop_join() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1377,8 +1375,6 @@ pub fn test_a_kill_outranks_an_outstanding_stop_join() -> TestResult {
     pass!()
 }
 
-/// A poked member that exits instead of parking completes the stop when every
-/// other member is already stopped.
 pub fn test_a_poked_member_exiting_completes_the_stop() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1405,8 +1401,7 @@ pub fn test_a_poked_member_exiting_completes_the_stop() -> TestResult {
     pass!()
 }
 
-/// A group stop reaches a running member that blocks the stop signal, as
-/// Linux's does; the report waits for that member to park.
+/// The report waits for the blocking member to park.
 pub fn test_group_stop_reaches_a_member_blocking_the_signal() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1448,8 +1443,6 @@ pub fn test_group_stop_reaches_a_member_blocking_the_signal() -> TestResult {
     pass!()
 }
 
-/// A stop signal every member blocks only pends: nothing stopped, so the
-/// group's unconsumed `WCONTINUED` report stands.
 pub fn test_a_pending_blocked_stop_keeps_the_continue_report() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1476,9 +1469,8 @@ pub fn test_a_pending_blocked_stop_keeps_the_continue_report() -> TestResult {
     pass!()
 }
 
-/// `tgkill` of a stop signal the named thread blocks pends on that thread and
-/// wakes it, as every other `tgkill` does: it may have unblocked the signal
-/// and gone to sleep since its mask was read.
+/// The target may have unblocked the signal and gone to sleep since its mask
+/// was read.
 pub fn test_a_directed_blocked_stop_wakes_its_target() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1515,7 +1507,6 @@ pub fn test_a_directed_blocked_stop_wakes_its_target() -> TestResult {
     pass!()
 }
 
-/// An unblocked stop signal set to `SIG_IGN` is discarded at the send.
 pub fn test_an_ignored_stop_signal_is_discarded() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3808,9 +3799,8 @@ fn return_from_syscall_as_current(
     returned
 }
 
-/// A user `rax` of -512 that `rt_sigreturn` restores is the interrupted
-/// code's value, not a restart request: the delivery on its own way out must
-/// neither rewind into another `rt_sigreturn` nor rewrite it to `EINTR`.
+/// A restored user `rax` of -512 is the interrupted code's value, not a restart
+/// request.
 pub fn test_sigreturn_restoring_erestartsys_does_not_restart() -> TestResult {
     use slopos_abi::signal::SA_RESTART;
     use slopos_abi::syscall::{ERRNO_ERESTARTSYS, SYSCALL_RT_SIGRETURN};
