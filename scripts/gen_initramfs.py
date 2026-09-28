@@ -99,8 +99,7 @@ def main() -> None:
         dest = b"/sbin/init" if name == "init" else b"/bin/" + name.encode()
         entries.append((dest, MODE_EXEC, read_file(src)))
 
-    # POSIX names the shell `sh`, and `#!/bin/sh` is how every script asks
-    # for it; a symlink, so the grant keyed on `/bin/shell` follows the name.
+    # A symlink, so the exec grant keyed on `/bin/shell` follows `/bin/sh`.
     if "shell" in bins:
         entries.append((b"/bin/sh", MODE_LINK, b"shell"))
 

@@ -7,21 +7,16 @@ set -euo pipefail
 # Usage: make_slopos_cross.sh <sysroot> <bin dir>
 #        make_slopos_cross.sh --print-stamp
 #
-# `scripts/bootstrap_slopos_toolchain.sh` hands the wrappers to bootstrap and
-# `scripts/build_recipes.sh` builds the recipes with them. Each passes its own
-# two directories, because assembling a sysroot starts by deleting it and a
-# recipe build must not do that under a running `x.py`.
+# Callers pass their own directories: assembling a sysroot deletes it, which
+# must not happen under a running `x.py`.
 #
-# `--print-stamp` digests what an object built with this compiler depends on:
-# this file, the host tools, slibc's headers, the C++ runtime's stamp and ABI
-# flags, the start file and builtins archive linked into every executable, and
-# the *names* `libc.so` defines. Names and not bytes: a shared library built
-# here links `libc.so` rather than copying it, so only a new or vanished
-# function can change what a configure probe finds. `libc.a` is left out for
-# the same reason: nothing built with this compiler links it.
+# `--print-stamp` digests this file, the host tools, slibc's headers, the C++
+# runtime's stamp and ABI flags, crt0 and builtins, and the symbol *names*
+# `libc.so` defines: objects built here link it, so only a new or vanished
+# function changes what a probe finds. Nothing built here links `libc.a`.
 #
-# Needs a tests userland build in the build directory (`BUILD_DIR`, default
-# builddir) and the C++ runtime (`scripts/make_slopos_cxx.sh`).
+# Needs a tests userland build in `BUILD_DIR` (default builddir) and the C++
+# runtime (`scripts/make_slopos_cxx.sh`).
 
 SELF="make_slopos_cross"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,10 +42,8 @@ for library in libc.so crt0.o libbuiltins.a; do
 done
 [ -f "$CXX_DIR/lib/libc++.so" ] || die "no C++ runtime — run scripts/make_slopos_cxx.sh"
 
-# `--print-abi-flags` and not a literal: the rune-table flag decides the width
-# and bits of `ctype_base::mask`, a type passed by value, so a consumer that
-# omits it disagrees with the runtime about it — and libc++'s own `__locale`
-# then names glibc's `_ISalpha` and does not compile at all.
+# Not a literal: the rune-table flag sets the layout of `ctype_base::mask`, a
+# by-value type, so omitting it breaks the ABI and libc++'s `__locale`.
 CXX_ABI_FLAGS="$("$SCRIPT_DIR/make_slopos_cxx.sh" --print-abi-flags)"
 
 if [ "${1:-}" = "--print-stamp" ]; then
@@ -75,16 +68,8 @@ case "$SYSROOT$WRAPPER_DIR" in
     *[[:space:]]*) die "the wrapper cannot take a path containing whitespace: $SYSROOT $WRAPPER_DIR" ;;
 esac
 
-# ---------------------------------------------------------------------------
-# The target sysroot: what a cross compiler for this triple needs to find.
-# Assembled rather than pointed at, because the pieces live in three places —
-# the userland build's output, slibc's generated headers, and the cross-built
-# C++ runtime.
-#
-# Copied with their times: every object of the cross LLVM depends on these
-# headers, so a copy dated now would make ninja recompile all of it on every
-# run whose LLVM step is due.
-# ---------------------------------------------------------------------------
+# Copied with their times, or ninja recompiles the whole cross LLVM, which
+# depends on these headers.
 rm -rf "$SYSROOT"
 mkdir -p "$SYSROOT/lib" "$SYSROOT/include" "$WRAPPER_DIR"
 cp -p "$BUILD_DIR/libc.so" "$BUILD_DIR/crt0.o" "$BUILD_DIR/libbuiltins.a" "$SYSROOT/lib/"
@@ -94,32 +79,18 @@ cp -rp "$REPO_ROOT/slibc/include/." "$SYSROOT/include/"
 cp -rp "$CXX_DIR/include/c++" "$SYSROOT/include/c++"
 SYSROOT="$(cd "$SYSROOT" && pwd)"
 
-# slibc is one library: there is no separate libm, libdl, libpthread or
-# librt, and a build system that probes for them finds the host's unless
-# something answers. Empty archives are what musl-derived sysroots answer
-# with, and they turn a probe that would link against glibc into one that
-# links against nothing.
+# slibc has no separate libm, libdl, libpthread or librt; empty archives, as
+# musl-derived sysroots ship, stop a probe for them finding the host's.
 for stub in m dl pthread rt util; do
     "$LLVM_AR" crs "$SYSROOT/lib/lib$stub.a"
 done
 
-# ---------------------------------------------------------------------------
-# The compiler wrapper. It is `toolchains::SlopOS` written in shell, and it
-# goes away the day a clang built from `toolchain/llvm/` is the one running
-# the build.
-#
-# It compiles and links in two invocations, with two different triples, and
-# that is the whole reason it exists. Compilation must name SlopOS, or the
-# preprocessor defines `__linux__` and LLVM takes `/proc/self/exe` and
-# `sched_getaffinity` paths this system has not got. Linking must not: the
-# host clang has no SlopOS toolchain, so for that triple it hands the link to
-# `gcc`, which would make a host GCC a build requirement
-# `scripts/cxx_host_tools.sh` deliberately does not have and would put the
-# host's library directories on the line. Naming a triple clang does have a
-# toolchain for keeps `ld.lld` the linker, and `--sysroot` confines the search
-# to this sysroot — `-lm` against the host's libm is then a link error rather
-# than a binary that dies on SlopOS.
-# ---------------------------------------------------------------------------
+# `toolchains::SlopOS` in shell, until a clang built from `toolchain/llvm/`
+# runs the build. It compiles and links with different triples: compiling
+# must name SlopOS or `__linux__` is defined, and the host clang has no SlopOS
+# toolchain, so linking with that triple would hand off to host `gcc` and its
+# library paths. Linking as the host triple keeps `ld.lld`, and `--sysroot`
+# makes a stray `-lm` a link error.
 write_wrapper() {
     local path="$1" compiler="$2" stdlib="$3" stdlib_libs="${4:-}"
     cat >"$path" <<WRAPPER
@@ -130,9 +101,8 @@ sysroot="$SYSROOT"
 cflags="--target=$TARGET -D__slopos__ -nostdlibinc $stdlib -isystem \$sysroot/include"
 cflags="\$cflags -Wno-unused-command-line-argument"
 
-# Response files are expanded first: CMake writes one when a link line grows
-# past the argument limit, and a scan that sees only \`@file\` classifies a
-# link as a compile and hands the whole thing to the host driver.
+# Expand response files first, or a long CMake link line (\`@file\`) is taken
+# for a compile.
 expanded=""
 for arg in "\$@"; do
     case "\$arg" in
@@ -147,15 +117,9 @@ done
 # shellcheck disable=SC2086
 set -- \$expanded
 
-# A caller's own \`--target\` is dropped rather than overridden. The \`cc\`
-# crate appends one built from Cargo's \`CARGO_CFG_TARGET_*\`, which spells
-# the environment as a fourth component — \`x86_64-unknown-slopos-slibc\` —
-# and clang reads that as a version field and refuses the triple. Measured:
-# it is what stopped \`compiler_builtins\`' build script.
-#
-# \`-Xlinker\`, \`-Xassembler\` and \`-Xpreprocessor\` take an operand that is
-# a flag for *that* tool, so it is carried through without being read as one
-# of ours: \`-Xlinker -E\` is \`--export-dynamic\`, not \`clang -E\`.
+# A caller's \`--target\` is dropped: the \`cc\` crate passes
+# \`x86_64-unknown-slopos-slibc\`, which clang rejects as a triple.
+# \`-X<tool>\` operands belong to that tool: \`-Xlinker -E\` is not \`clang -E\`.
 linking=1
 shared=0
 static=0
@@ -194,10 +158,8 @@ while [ "\$remaining" -gt 0 ]; do
 done
 
 if [ "\$linking" -eq 0 ]; then
-    # \`toolchains::SlopOS\` looks \`-print-file-name\` up in the sysroot's
-    # \`lib/\`; the host driver has no library path for this triple and answers
-    # with the bare name. It is how bootstrap finds \`libc++.a\` for a
-    # \`rustc_llvm\` that links the C++ runtime statically.
+    # The host driver answers \`-print-file-name\` with the bare name for this
+    # triple; bootstrap needs the sysroot path to find \`libc++.a\`.
     for arg in "\$@"; do
         case "\$arg" in
             -print-file-name=*)
@@ -211,11 +173,8 @@ if [ "\$linking" -eq 0 ]; then
     exec $compiler \$cflags "\$@"
 fi
 
-# A link invocation may still carry sources — CMake's \`try_compile\` is
-# exactly that shape. Each is compiled for SlopOS first; what reaches the
-# link is objects only. Anything that is neither a source, an input file nor
-# a linker argument reaches both phases, because \`-O2\`, \`-g\` and \`-flto\`
-# all mean something to each.
+# A link may carry sources (CMake's \`try_compile\`): compile them for SlopOS
+# first. Other flags (\`-O2\`, \`-g\`, \`-flto\`) go to both phases.
 objects=""
 link_args=""
 compile_args=""
@@ -267,9 +226,7 @@ for source in \$sources; do
 done
 [ -n "\$output" ] || output=a.out
 
-# Objects ahead of \`-l\` and \`.a\`: archive resolution is order-sensitive, and
-# a \`try_compile\` with \`CMAKE_REQUIRED_LIBRARIES\` is one source plus one
-# \`-l\`.
+# Objects ahead of \`-l\` and \`.a\`: archive resolution is order-sensitive.
 set -- --target=$HOST_TRIPLE --sysroot="\$sysroot" --gcc-toolchain="\$sysroot" -fuse-ld=lld -nostdlib \\
     -Wno-unused-command-line-argument -L"\$sysroot/lib" \\
     \$objects \$link_args -o "\$output" -Wl,--eh-frame-hdr
@@ -280,8 +237,7 @@ if [ "\$static" -eq 0 ]; then
     set -- "\$@" -Wl,-z,now
     [ "\$shared" -eq 1 ] || set -- "\$@" -Wl,--dynamic-linker=/lib/ld-slopos.so.1
 fi
-# \`-static-libstdc++\` is what clang's GNU toolchains make of it: the C++
-# runtime alone out of its archive, everything else still shared.
+# As clang's GNU toolchains do: only the C++ runtime is linked statically.
 cxx_libs="$stdlib_libs"
 if [ "\$static_cxx" -eq 1 ] && [ "\$static" -eq 0 ] && [ -n "\$cxx_libs" ]; then
     cxx_libs="-Wl,-Bstatic \$cxx_libs -Wl,-Bdynamic"

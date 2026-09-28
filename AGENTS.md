@@ -16,10 +16,9 @@ Kernel sources are split by subsystem: `boot/`, `mm/`, `drivers/`, `sched/`, `vi
 (`targets/x86_64-unknown-slopos.json`) are both built by `cargo +slopos`
 against an *owned* sysroot at `third_party/rust-slopos` — the kernel too, so
 one toolchain builds everything and the dev disk carries it at the same
-workspace-relative path: `trim-paths` makes a path inside the workspace
-relative, so a kernel's panic locations read the same wherever it was built.
-That sysroot is a
-hardlink clone of the pinned rustup toolchain whose `lib/rustlib/src` is a
+workspace-relative path: `trim-paths` makes a kernel's panic locations read
+the same wherever it was built. That sysroot is a hardlink clone of the
+pinned rustup toolchain whose `lib/rustlib/src` is a
 real copy carrying two pinned forks — `rust-lang/rust`'s `library/` and
 `rust-lang/libc` — applied from the patches under `toolchain/{rust,libc}`,
 because `-Zbuild-std` reads std from the invoking sysroot's source tree and
@@ -53,8 +52,9 @@ through rustc's own built-in list, so hosting a compiler needs
 sources, with `0003`, which maps the tuple to a `CMAKE_SYSTEM_NAME` — an
 unrecognised one falls back to `Generic`, which loses `LLVM_ON_UNIX` and with
 it every `Unix/*.inc` file the LLVM port patches — and `0004`, which links the
-C++ runtime statically (below). All three, and `toolchain/llvm-rustc/0001-slopos-support.patch` (the LLVM port in
-rustc's bundled llvm-project), are pinned by `toolchain/compiler/PIN` and materialised by
+C++ runtime statically (below). All three, and
+`toolchain/llvm-rustc/0001-slopos-support.patch` (the LLVM port in rustc's
+bundled llvm-project), are pinned by `toolchain/compiler/PIN` and materialised by
 `scripts/make_rustc_src.sh` into `third_party/slopos-rustc-src` (265 MB
 fetched, 656 MiB on disk, ~17 s; `just rustc-src`, removed by `just
 distclean`). The sysroot above cannot carry it — it is a clone of a *built*
@@ -205,21 +205,20 @@ loader applies).
 
 **The C libraries cargo's network features link are recipes.**
 `toolchain/recipes/<name>/recipe` pins an upstream release tarball (URL,
-SHA-256, licence) and names a build template (`cmake` or `openssl`), its
-configure arguments and the recipes it depends on: zlib, nghttp2, OpenSSL,
-curl, libssh2 and libgit2. `scripts/build_recipes.sh` (`just recipes`) builds
-them shared, `-z defs` and `$ORIGIN`-rpathed, with the compiler
-`scripts/make_slopos_cross.sh` assembles (the target sysroot and the
-`x86_64-unknown-slopos-clang{,++}` wrappers bootstrap also uses) into
-`builddir/slopos-recipes/prefix`, caching tarballs in `third_party/recipes/`;
-bootstrap copies the prefix into the target sysroot, so the libraries reach
-the toolchain install and the dev disk. **No patch, ever:** a recipe is the
-tarball and its template, and a build that would need an edit to upstream is
-a slibc or kernel finding, fixed there. `scripts/check_recipes.sh` holds the
-shape, and holds every `arg` and the OpenSSL target definition to a grammar
-that can carry no code — a compiler flag, a CMake script, a launcher or a
-search root edits what is built without touching a file — and the driver
-fails any build that leaves the unpacked tree other than the tarball made it.
+SHA-256, licence), a build template (`cmake` or `openssl`), its configure
+arguments and its dependencies: zlib, nghttp2, OpenSSL, curl, libssh2 and
+libgit2. `scripts/build_recipes.sh` (`just recipes`) builds them shared,
+`-z defs` and `$ORIGIN`-rpathed into `builddir/slopos-recipes/prefix`, with
+the target sysroot and `x86_64-unknown-slopos-clang{,++}` wrappers that
+`scripts/make_slopos_cross.sh` assembles for bootstrap too; tarballs are
+cached in `third_party/recipes/`. Bootstrap copies the prefix into the target
+sysroot, so the libraries reach the toolchain install and the dev disk.
+**No patch, ever:** a build that would need an edit to upstream is a slibc or
+kernel finding, fixed there. `scripts/check_recipes.sh` holds the shape and
+holds every `arg` and the OpenSSL target definition to a grammar that can
+carry no code (a flag, CMake script, launcher or search root edits what is
+built without touching a file); the driver fails any build that changes the
+unpacked tree.
 
 **`just toolchain --pgo` builds the compiler as a Rust release is.** ThinLTO
 and one codegen unit for rustc's crates, ThinLTO for LLVM, and
@@ -232,7 +231,8 @@ rust-lang's opt-dist with this repository's kernel build as the workload: in
 `builddir/slopos-pgo-build`, a Linux-hosted build of the same sources with
 the same settings builds an instrumented LLVM under a stage1 compiler and runs
 `scripts/build_kernel.sh` for the dev and tests kernels on it (the guest's
-`selfhost_test` build, with the stage's own cargo and the vendored sources), then an
+`selfhost_test` build, with the stage's own cargo and the vendored sources),
+then an
 instrumented stage2 compiler over the optimised LLVM and runs it again. The
 merged profiles land in `builddir/slopos-pgo`: LLVM's merged by the host's
 `llvm-profdata`, because the host clang compiled the instrumented objects and
@@ -241,7 +241,8 @@ toolchain --pgo` makes them first when they are missing or stale — a stamp
 over the compiler tree's source stamps, the host clang, the shared settings,
 the wrapper and the script's `PROFILE_FLOW`, not over the kernel — and `just
 toolchain-profile --optimized-host` builds the Linux-hosted twin with them.
-Timed on the dev kernel from an empty target directory (four P-cores): rustup's dist rustc 50.4 s wall / 117 s user, the plain stage1
+Timed on the dev kernel from an empty target directory (four P-cores):
+rustup's dist rustc 50.4 s wall / 117 s user, the plain stage1
 65.6 s / 137 s, the PGO twin 49.8 s / 102 s. A profile is keyed by symbol,
 and cargo hashes the target triple into `-C metadata`, rustc hashes that into
 every crate's `StableCrateId`, and every v0 symbol carries it: out of one tree
@@ -278,12 +279,10 @@ inventory and the source tree, unmounts `/devel` and mounts it again by label
 `AlreadyClaimed` forever — and then climbs the toolchain ladder: `rustc
 --version` under `LD_DEBUG=statistics`, rustc linking a program through `cc`,
 cargo building a crate with a build script and a proc macro, cargo fetching a
-`git = "file:///devel/git/greeting.git"` dependency through libgit2 from the
-bare repository a new volume carries, cargo fetching a crate through libcurl
-and OpenSSL from the sparse registry a new volume carries under `registry/`,
-served over TLS on loopback by the TLS crate's test server and verified
-against a test root the host's `openssl` minted for that volume (the image's
-own CA bundle must refuse it first), and clang compiling C and C++.
+`git = "file:///devel/git/greeting.git"` dependency through libgit2, cargo
+fetching a crate through libcurl and OpenSSL from the volume's `registry/`,
+served over loopback TLS and verified against a per-volume test root (the
+image's own CA bundle must refuse it first), and clang compiling C and C++.
 
 **The source rides the same volume.** A new dev disk is seeded with
 `src/slopos`: the committed `HEAD`, the vendored crates, a

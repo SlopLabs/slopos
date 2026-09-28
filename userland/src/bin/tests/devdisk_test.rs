@@ -559,11 +559,9 @@ const FETCH_MAIN: &str = "fn main() {
 }
 ";
 
-/// Rung 4: cargo resolves a `git` dependency on the bare repository the
-/// volume carries, fetching it through libgit2 into a `CARGO_HOME` of its
-/// own, so the fetch is never a cache hit. Not `--offline`, which refuses
-/// every git fetch; nothing here names a registry, so nothing leaves the
-/// machine.
+/// Rung 4: cargo fetches a `git` dependency from the volume's bare repository
+/// through libgit2, into a fresh `CARGO_HOME` so it is never a cache hit. Not
+/// `--offline`, which refuses every git fetch.
 fn cargo_fetches_a_git_dependency() -> bool {
     let prefix = match prefix() {
         Ok(p) => p,
@@ -624,8 +622,7 @@ fn cargo_fetches_a_git_dependency() -> bool {
     ran.ok("fetch") && ran.stdout == "fetched through libgit2\n"
 }
 
-/// Every loopback read gives up after this, so a client that never hangs up
-/// fails the rung rather than hanging it.
+/// Bounds every loopback read, so a client that never hangs up fails the rung.
 const IO_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
@@ -643,7 +640,7 @@ fn served_file(www: &str, path: &str) -> Option<Vec<u8>> {
     fs::read(format!("{www}{path}")).ok()
 }
 
-/// One client: HTTP/1.1 GETs, kept alive, over the TLS crate's test server.
+/// One client's kept-alive HTTP/1.1 GETs.
 fn serve_connection(mut sock: TcpStream, www: &str, chain: &[Vec<u8>], key: &[u8]) -> Connection {
     let mut conn = Connection::default();
     if let Err(e) = sock
@@ -719,8 +716,7 @@ fn serve_connection(mut sock: TcpStream, www: &str, chain: &[Vec<u8>], key: &[u8
     }
 }
 
-/// Serves every connection `listener` takes until `stop`, each on its own
-/// thread, so a connection curl keeps alive never holds up the next one.
+/// A thread per connection, so one curl keeps alive never blocks the next.
 fn serve_registry(
     listener: &TcpListener,
     www: &str,
@@ -765,11 +761,10 @@ fn alpn_list(offered: &[Vec<u8>]) -> String {
     names.join(", ")
 }
 
-/// Rung 5: cargo fetches a crate from the sparse registry the volume carries,
-/// served over TLS on loopback by the TLS crate's test server, so the index
-/// and the download go through libcurl and OpenSSL, verified against the
-/// volume's test root. The image's own CA bundle, which lacks that root, must
-/// refuse the same server first, or the verification proves nothing.
+/// Rung 5: cargo fetches a crate from the volume's sparse registry over
+/// loopback TLS, through libcurl and OpenSSL, trusting the volume's test root.
+/// The image's own CA bundle must refuse the same server first, or the
+/// verification proves nothing.
 fn cargo_fetches_over_https() -> bool {
     let prefix = match prefix() {
         Ok(p) => p,
@@ -880,10 +875,8 @@ fn cargo_fetches_over_https() -> bool {
             .trim()
             .to_owned()
     };
-    // 60 is CURLE_PEER_FAILED_VERIFICATION: the handshake reached the
-    // certificate and OpenSSL rejected it, not a missing bundle or a refused
-    // connection.
-    if refused.code == Some(0) || !refused.stderr.contains("[60]") {
+    const CURLE_PEER_FAILED_VERIFICATION: &str = "[60]";
+    if refused.code == Some(0) || !refused.stderr.contains(CURLE_PEER_FAILED_VERIFICATION) {
         note(&format!(
             "without the root, cargo exited {:?}: {} (see {log_path})",
             refused.code,

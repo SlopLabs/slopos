@@ -2,44 +2,25 @@
 # Hold every recipe under toolchain/recipes/ to the shape build_recipes.sh
 # promises: a pinned upstream tarball built by a template, and nothing else.
 #
-#   - one `sha256` of 64 lowercase hex digits and one `https://` `url` that
-#     names the recipe's `version`, so what is built is what was reviewed;
-#   - a `license`, a `template` the driver knows (`cmake`, `openssl`), and
-#     at least one `soname`; no key the driver does not read;
-#   - `depends` is at most one line, every word of it names another recipe,
-#     and no recipe depends on itself through them;
-#   - no file in the recipe's directory but `recipe` and the `config` it
-#     declares, and never a `*.patch` or `*.diff`: a build that needs an edit
-#     to upstream is a slibc or kernel finding, fixed there;
-#   - every `arg` chooses among upstream's own options and can carry no code.
-#     An edit to upstream needs no file: a compiler flag (`-include`, a
-#     `-D` renaming a function), a CMake script (`CMAKE_PROJECT_INCLUDE`, a
-#     toolchain file, a `-C` cache script), a launcher that rewrites sources
-#     or a search root that finds a host's package in place of the recipe's
-#     each change what is built while every file stays pristine. So a
-#     `cmake` arg is `-D<NAME>=<value>`, where a `CMAKE_*` name is one of
-#     `CMAKE_ARG_NAMES`, a project name names no flag, file, program,
-#     directory or search root (`PROJECT_ARG_DENY`; `PROJECT_ARG_ALLOW` is
-#     the run-time CA directory, a path the library reads on SlopOS), and
-#     the value is a word or a path under `/etc`, where the SlopOS image
-#     keeps configuration; an `openssl`
-#     arg is `no-*`, `enable-*`, `shared`, `threads` or `--openssldir=` under
-#     `/etc`;
-#   - an `openssl` recipe's `config`, which `Configure` evaluates as Perl, is
-#     data: one `my %targets = (...)` entry, the recipe's `target`, whose
-#     fields are `CONFIG_FIELDS` set to strings, lists and Configure's own
-#     `picker`/`threads`/`add`, whose strings interpolate nothing, and whose
-#     flags are optimisation, warning, PIC, `-pthread`, a library, an
-#     upper-case configuration macro or the `$ORIGIN` run path;
+#   - one lowercase-hex `sha256` and one `https://` `url` naming `version`;
+#   - a `license`, a known `template`, at least one `soname`, no unread key;
+#   - at most one `depends` line, naming other recipes, acyclic;
+#   - no file but `recipe` and its declared `config`; never a patch: an edit
+#     to upstream is a slibc or kernel finding;
+#   - every `arg` picks among upstream's options and carries no code, since a
+#     flag, CMake script, launcher or search root edits what is built with
+#     every file pristine. A `cmake` arg is `-D<NAME>=<value>`: `CMAKE_*`
+#     names from `CMAKE_ARG_NAMES`, project names outside `PROJECT_ARG_DENY`
+#     (bar `PROJECT_ARG_ALLOW`), values a word or an `/etc` path. An `openssl`
+#     arg is `no-*`, `enable-*`, `shared`, `threads` or `--openssldir=/etc/..`;
+#   - an `openssl` `config`, which `Configure` evaluates as Perl, is data: one
+#     `%targets` entry for `target`, `CONFIG_FIELDS` only, non-interpolating
+#     strings, and only benign flags;
 #   - a NOTICE.md entry naming `toolchain/recipes/<name>/`;
-#   - a recipe that has been built carries the stamp
-#     `build_recipes.sh --print-stamp` computes for it now, so a prefix left
-#     behind by other inputs is not graded as this tree's. Asked of the
-#     driver rather than recomputed here. Nothing built is the CI case and
-#     skips this half.
+#   - a built recipe carries the stamp `build_recipes.sh --print-stamp` gives
+#     now (skipped when nothing is built, as in CI).
 #
-# The driver proves the rest: a build that leaves the unpacked tree other
-# than the tarball made it fails there, however the edit got in.
+# The driver fails any build that changes the unpacked tree.
 #
 # Usage: check_recipes.sh
 #        check_recipes.sh --self-test
@@ -63,9 +44,8 @@ FILE_NAME='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
 SONAME='^lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*$'
 CONFIG_FIELDS="inherit_from bn_ops asm_arch perlasm_scheme thread_scheme dso_scheme shared_target CFLAGS cflags CXXFLAGS cxxflags cppflags lib_cppflags lflags ex_libs shared_cflag shared_ldflag"
 
-# Reads the config without running it: a tokenizer and a recursive descent
-# over the one shape a target definition takes. `$1` the file, `$2` the
-# target it must define, `$3` the fields it may set.
+# Parses the config without running it. `$1` the file, `$2` the target it must
+# define, `$3` the fields it may set.
 read -r -d '' CONFIG_GRAMMAR <<'PERL' || true
 use strict;
 use warnings;
@@ -173,7 +153,6 @@ values() {
     sed -n "s/^$2=\\(.*\\)\$/\\1/p" "$1"
 }
 
-# The one value of `key`, or a failure naming the recipe.
 single() {
     local file="$1" key="$2" name="$3" found
     found="$(values "$file" "$key")"
@@ -285,7 +264,6 @@ check_recipe() {
         fail "$name: no NOTICE.md entry naming \`toolchain/recipes/$name/\`"
 }
 
-# Each built recipe's stamp against the driver's answer for the tree now.
 check_stamps() {
     local root="$1" out="$2" maker="$3"
     local built=() name
@@ -350,8 +328,7 @@ self_test() {
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' RETURN
 
-    # alpha and beta take the tree's own arguments and target definition, so
-    # the grammar is held to accept what the recipes really pass.
+    # alpha and beta take the tree's real args and target definition.
     local r="$tmp/toolchain/recipes" real
     mkdir -p "$r/alpha" "$r/beta" "$tmp/out" "$tmp/scripts"
     cat >"$r/alpha/recipe" <<'EOF'
@@ -396,8 +373,7 @@ EOF
             *) fail "--self-test: $1 printed more than its OK line: $out" ;;
         esac
     }
-    # A rejection for another reason reads the same as one for this, so a
-    # case that names its reason must be rejected for it.
+    # A rejection for another reason would read the same, so check the reason.
     expect_reject() {
         local why
         if why="$(check_tree "$tmp" "$tmp/out" 2>&1 >/dev/null)"; then
@@ -406,7 +382,6 @@ EOF
         [ -z "${2:-}" ] || printf '%s\n' "$why" | grep -qF -- "$2" ||
             fail "--self-test: $1 was rejected, but not for '$2': $why"
     }
-    # Applies a sed expression to a fixture file, expects a rejection, undoes.
     reject_in() {
         cp "$1" "$tmp/saved"
         sed -i "$2" "$1"
@@ -443,7 +418,7 @@ EOF
     reject_edit '$ a cflags=-include /etc/shim.h' "a key the driver does not read" "not one of the keys"
     reject_edit '$ a config=x.conf' "a config on a cmake recipe" "are for the openssl template"
 
-    # The review's bypasses, each of which edits what is built without a file.
+    # Each of these edits what is built without a file.
     reject_edit '$ a arg=-DCMAKE_C_FLAGS=-include /etc/shim.h -Dregcomp_l=my_regcomp' \
         "a header forced in through CMAKE_C_FLAGS" "not one of the CMake variables"
     reject_edit '$ a arg=-DCMAKE_PROJECT_INCLUDE=/etc/evil.cmake' \
@@ -481,7 +456,6 @@ EOF
     reject_beta 's|^config=.*|config=../alpha/recipe|' "a config outside the recipe" "is not a file name"
     reject_beta '/^target=/d' "an openssl recipe with no target" "no target"
 
-    # `Configure` evaluates the config, so each of these would run or inject.
     reject_conf '1 i system("sed -i s/foo/bar/ crypto/x.c");' "a config that runs a command" "expected 'my'"
     reject_conf '$ a do "/etc/evil.pl";' "a config that loads more Perl" "text follows"
     reject_conf '/=> {/a CC => "sh -c evil",' "a compiler command" "'CC' is not a field"

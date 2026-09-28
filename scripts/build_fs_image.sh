@@ -379,8 +379,7 @@ for bin in "${BINS[@]}"; do
     install_binary "$src" "$dst"
 done
 
-# POSIX names the shell `sh`, and `#!/bin/sh` is how every script asks for
-# it. A symlink, so the exec grant keyed on `/bin/shell` follows the name.
+# A symlink, so the exec grant keyed on `/bin/shell` follows `/bin/sh`.
 for bin in "${BINS[@]}"; do
     if [ "$bin" = "shell" ]; then
         debugfs -w -R "rm /bin/sh" "$IMAGE_PATH" >/dev/null 2>&1 || true

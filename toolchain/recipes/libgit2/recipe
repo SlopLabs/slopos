@@ -4,9 +4,6 @@
 # and builds its bundled copy otherwise. The tarball is GitHub's archive of
 # the release tag, which is the only form libgit2 publishes.
 #
-# The library only: the `git2` command line and the clar test suite are
-# programs of their own.
-#
 #   CMAKE_REQUIRE_FIND_PACKAGE_ZLIB   libgit2 compiles its bundled zlib when
 #                                     `find_package(ZLIB)` fails and says so
 #                                     only in a status line; required, a

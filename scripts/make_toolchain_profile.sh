@@ -29,8 +29,8 @@ set -euo pipefail
 # The workload is the guest's own (`selfhost_test`): `scripts/build_kernel.sh`
 # for the dev and then the tests kernel into one empty target directory, with
 # the stage's own cargo (the stage0 one x.py downloads) and the vendored
-# sources. A stage sysroot's `lib/rustlib/src/rust` is the patched source tree, which is
-# what `-Zbuild-std` reads.
+# sources. A stage sysroot's `lib/rustlib/src/rust` is the patched source
+# tree, which is what `-Zbuild-std` reads.
 #
 # A profile keys each function by its symbol and a hash of its control flow.
 # The symbols match only because both builds compile every crate through

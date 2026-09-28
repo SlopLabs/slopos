@@ -8,37 +8,23 @@ set -euo pipefail
 #
 # One bootstrap invocation, `--build=x86_64-unknown-linux-gnu
 # --host=x86_64-unknown-slopos`, producing rustc, cargo, rust-lld, clang and
-# libLLVM for SlopOS out of `third_party/slopos-rustc-src`. Nothing in that
-# sentence is novel — it is how every cross-hosted Rust distribution is
-# produced — and everything in it depends on what this tree already has: a
-# built-in target rustc can resolve, a C library and a C++ runtime for the
-# triple, and a dynamic loader.
+# libLLVM for SlopOS out of `third_party/slopos-rustc-src`. This script
+# supplies what bootstrap cannot work out itself:
 #
-# Two things bootstrap cannot work out for itself, and this script supplies
-# both:
-#
-#   * A C and C++ compiler for the target. `[target.<triple>].cc` is a program
-#     name with no room for flags, and the host clang has no SlopOS toolchain
-#     to find `crt0.o` and `-lc` with — `toolchains::SlopOS` is in the port,
-#     which only a clang built *from* this tree carries. So the wrapper
-#     `scripts/make_slopos_cross.sh` writes stands in, exactly as Motor OS's
-#     `motor-clang` does, and completing an
-#     executable link is the half that matters: CMake's `try_compile` probes
-#     link, and a probe that fails to link is a capability LLVM then builds
-#     without.
+#   * A C and C++ compiler for the target. `[target.<triple>].cc` takes no
+#     flags, and only a clang built from this tree knows SlopOS, so the
+#     wrapper from `scripts/make_slopos_cross.sh` stands in (as Motor OS's
+#     `motor-clang` does). It must complete executable links: a CMake probe
+#     that fails to link is a capability LLVM builds without.
 #   * An LLVM for the host triple. `llvm.download-ci-llvm` serves the build
-#     triple only, so LLVM is built from source for SlopOS, with clang and lld
-#     in the same pass.
+#     triple only, so LLVM is built from source with clang and lld.
 #
-# cargo's network features link the C libraries `scripts/build_recipes.sh`
-# builds (zlib, nghttp2, OpenSSL, curl, libssh2, libgit2). Their shared
-# libraries and headers join the target sysroot, so the wrapper links them
-# with nothing but its own search path — as `libz-sys` probes `-lz` — and
-# they reach the install beside cargo. Each `-sys` crate is pointed at them
-# for the SlopOS target alone; `libnghttp2-sys` has no such option and
-# compiles its bundled copy, which `curl-sys` links only when it builds its
-# own libcurl. `scripts/check_bootstrap_config.sh` holds the installed cargo
-# to the recipes.
+# cargo's network features link the libraries `scripts/build_recipes.sh`
+# builds; they join the target sysroot and the install beside cargo, and each
+# `-sys` crate is pointed at them for the SlopOS target alone.
+# `libnghttp2-sys` cannot be and compiles its bundled copy, which `curl-sys`
+# links only when it builds its own libcurl.
+# `scripts/check_bootstrap_config.sh` holds the installed cargo to the recipes.
 #
 # `--dry-run` runs bootstrap's own dry run: it validates the config, resolves
 # `--host` through the compiler's built-in target list, and walks the step
@@ -132,10 +118,8 @@ BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/builddir}"
 SRC="$REPO_ROOT/$TP_RUSTC_SRC_REL"
 OUT="${SLOPOS_TOOLCHAIN_OUT:-$BUILD_DIR/slopos-toolchain}"
 SYSROOT="${SLOPOS_SYSROOT:-$BUILD_DIR/slopos-sysroot}"
-# Physical: bootstrap installs the SlopOS libLLVM by mapping the host
-# `llvm-config --libfiles` paths, which are physical, out of this directory,
-# and through a symlinked build directory the mapping misses and ships the
-# Linux one.
+# Physical: bootstrap maps the host's physical `llvm-config --libfiles` paths
+# to install libLLVM, and through a symlink would ship the Linux one.
 RUSTC_BUILD="$(mkdir -p "$BUILD_DIR/slopos-rustc-build" && cd -P "$BUILD_DIR/slopos-rustc-build" && pwd)"
 JOBS="${BOOTSTRAP_JOBS:-$(nproc)}"
 
@@ -224,23 +208,15 @@ if [ "$SOURCES_ONLY" -eq 1 ]; then
     exit 0
 fi
 
-# ---------------------------------------------------------------------------
-# The target sysroot and the compiler wrapper bootstrap hands to CMake and to
-# every `-sys` build script, from `scripts/make_slopos_cross.sh`.
-# ---------------------------------------------------------------------------
 WRAPPER_DIR="$OUT/bin"
 mkdir -p "$OUT/find-root"
 BUILD_DIR="$BUILD_DIR" "$SCRIPT_DIR/make_slopos_cross.sh" "$SYSROOT" "$WRAPPER_DIR" ||
     die "could not assemble the target sysroot and compiler wrapper"
 CXX_ABI_FLAGS="$("$SCRIPT_DIR/make_slopos_cxx.sh" --print-abi-flags)"
 
-# ---------------------------------------------------------------------------
-# The recipes; a dry run compiles nothing and only names their prefix.
-# `curl-sys` asks `curl-config --features` whether the libcurl pkg-config
-# found has HTTP2, and `curl-config` is a PATH lookup; the one here answers
-# for the SlopOS target and hands any other build script the next one on
-# PATH, so the build triple's cargo never reads the recipe's.
-# ---------------------------------------------------------------------------
+# A dry run builds no recipes. `curl-sys` runs `curl-config --features` from
+# PATH; this one answers for the SlopOS target and defers to the next on PATH
+# for any other.
 RECIPES_DIR="${SLOPOS_RECIPES_DIR:-$BUILD_DIR/slopos-recipes}"
 RECIPES_PREFIX="$RECIPES_DIR/prefix"
 if [ "$DRY_RUN" -eq 0 ]; then
@@ -386,11 +362,8 @@ else
     rbs_forget_llvm "$RUSTC_BUILD" "$TARGET"
 fi
 
-# Nor does cargo see the recipes change: a `-sys` build script keeps the
-# answer pkg-config gave it, and pkg-config names no file for cargo to watch,
-# so a rebuilt prefix would ship beside a cargo linked against the last one.
-# The SlopOS tools are cleared whenever the recipes' stamps are not the ones
-# they were built against.
+# Cargo cannot see the recipes change (pkg-config names no file to watch), so
+# the SlopOS tools are cleared when the recipes' stamps differ.
 RECIPES_STAMP="$(BUILD_DIR="$BUILD_DIR" SLOPOS_RECIPES_DIR="$RECIPES_DIR" \
     "$SCRIPT_DIR/build_recipes.sh" --print-stamp | sha256sum)"
 if [ "$(cat "$RUSTC_BUILD/.slopos-recipes" 2>/dev/null)" != "$RECIPES_STAMP" ]; then
@@ -409,12 +382,10 @@ rm -rf "$PREFIX"
 # the CMake builds of that triple alone, where `llvm.ldflags` would reach the
 # build triple's LLVM and put a `GLIBC_ABI_DT_RELR` requirement on it.
 #
-# The recipes, for the SlopOS target's build scripts: the pkg-config crate
-# and openssl-sys read target-suffixed variables, so the build triple keeps
-# the host's libraries. `LIBGIT2_NO_VENDOR` and `LIBSSH2_SYS_USE_PKG_CONFIG`
-# have no such form and are set for the whole build; only SlopOS's cargo
-# builds libgit2-sys or libssh2-sys, and `LIBGIT2_NO_VENDOR` makes a libgit2
-# pkg-config cannot find a failed build rather than a bundled copy.
+# pkg-config and openssl-sys read target-suffixed variables, so the build
+# triple keeps the host's libraries. `LIBGIT2_NO_VENDOR` and
+# `LIBSSH2_SYS_USE_PKG_CONFIG` have no such form; only SlopOS's cargo builds
+# those crates, and `LIBGIT2_NO_VENDOR` turns a missing libgit2 into a failure.
 (cd "$SRC" && env "LDFLAGS_${TARGET_SUFFIX}=-Wl,-z,pack-relative-relocs" \
     "PKG_CONFIG_ALLOW_CROSS_${TARGET_SUFFIX}=1" \
     "PKG_CONFIG_LIBDIR_${TARGET_SUFFIX}=$RECIPES_PREFIX/lib/pkgconfig" \

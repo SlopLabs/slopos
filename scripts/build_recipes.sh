@@ -6,14 +6,10 @@ set -euo pipefail
 # Usage: build_recipes.sh [<name>...]
 #        build_recipes.sh --print-stamp [<name>...]
 #
-# A recipe is a pinned upstream tarball, its checksum, the recipes it needs,
-# and one of the build templates below — and nothing else: no patch, no edit
-# to the unpacked source. A build that would need one is a finding against
-# slibc or the kernel, fixed there. `scripts/check_recipes.sh` holds every
-# recipe to that shape, and this driver proves it of every build: both
-# templates build out of the unpacked tree, and a recipe whose configure,
-# build or install leaves that tree other than the tarball unpacked it — a
-# byte, a mode, a file, or a change time — fails.
+# A recipe is a pinned upstream tarball, its checksum, its dependencies and a
+# build template — no patches: a build that needs one is a slibc or kernel
+# finding. `scripts/check_recipes.sh` checks that shape; this driver fails any
+# build that changes the unpacked tree (byte, mode, file or change time).
 #
 # `toolchain/recipes/<name>/recipe` is `key=value`, one per line, `#`
 # comments ignored:
@@ -35,23 +31,14 @@ set -euo pipefail
 #   openssl   `Configure --config=<file> <target>`, `make build_sw`,
 #             `make install_sw`.
 #
-# Everything builds shared, into one prefix (`<recipes dir>/prefix`) with a
-# `$ORIGIN` run path, and every shared object is linked `-z defs`: a symbol
-# no library on its line defines — a libc function slibc lacks — fails the
-# build here rather than a `dlopen` on SlopOS. `bootstrap_slopos_toolchain.sh`
-# copies the prefix's runtime libraries and headers into the target sysroot,
-# and so into the toolchain install and the dev disk.
+# Everything builds shared into `<recipes dir>/prefix` with a `$ORIGIN` run
+# path and `-z defs`, so a libc function slibc lacks fails here rather than at
+# `dlopen` on SlopOS. Each recipe's stamp covers its directory, this file,
+# `make_slopos_cross.sh --print-stamp`, the host tools, the prefix and its
+# dependencies' stamps; `--print-stamp` prints `<name> <stamp>` per recipe.
 #
-# Idempotent: a stamp per recipe over its directory, this file, the cross
-# compiler's inputs (`make_slopos_cross.sh --print-stamp`), the host build
-# tools, the prefix and the stamps of the recipes it depends on. A rebuilt
-# recipe removes the files it installed last time before installing again.
-# `--print-stamp` prints `<name> <stamp>` for each recipe instead of
-# building.
-#
-# Tarballs are cached in third_party/recipes/ as `<name>-<version>.<ext>`.
-# An offline checkout pre-populates that directory or points `<NAME>_URL`
-# (`ZLIB_URL`, `OPENSSL_URL`, ...) at a local copy.
+# Tarballs are cached in third_party/recipes/; offline, pre-populate it or set
+# `<NAME>_URL` (`ZLIB_URL`, ...) to a local copy.
 #
 # Environment:
 #   BUILD_DIR            where the userland build staged libc (default: builddir)
@@ -89,7 +76,6 @@ case "$OUT" in
     *[[:space:]]*) die "the recipe tree cannot live at a path containing whitespace: $OUT" ;;
 esac
 
-# The first value of `key`, and every value of it.
 recipe_value() {
     sed -n "s/^$2=\\(.*\\)\$/\\1/p" "$RECIPES/$1/recipe" | head -n 1
 }
@@ -101,7 +87,6 @@ all_recipes() {
     (cd "$RECIPES" && for dir in */; do printf '%s\n' "${dir%/}"; done) | LC_ALL=C sort
 }
 
-# Depth-first, dependencies first; a cycle is an error rather than a hang.
 ORDER=()
 declare -A VISIT=()
 visit() {
@@ -126,10 +111,7 @@ for name in "$@"; do
     visit "$name"
 done
 
-# ---------------------------------------------------------------------------
-# Host tools. `cxx_host_tools.sh` answers for the compiler the wrapper runs;
-# the build systems are named here and go into the stamp with their versions.
-# ---------------------------------------------------------------------------
+# The build systems join the stamp with their versions.
 CXX_TOOLS="$("$SCRIPT_DIR/cxx_host_tools.sh")"
 eval "$CXX_TOOLS"
 . "$SCRIPT_DIR/lib/rustc_build_settings.sh"
@@ -168,21 +150,17 @@ if [ "$PRINT_STAMP" -eq 1 ]; then
     exit 0
 fi
 
-# ---------------------------------------------------------------------------
-# The cross compiler, in a sysroot of the recipes' own: assembling one starts
-# by deleting it, and bootstrap's may be under a running x.py.
-# ---------------------------------------------------------------------------
+# A sysroot of the recipes' own: assembling one deletes it, and bootstrap's
+# may be in use by a running x.py.
 BUILD_DIR="$BUILD_DIR" "$SCRIPT_DIR/make_slopos_cross.sh" "$CROSS/sysroot" "$CROSS/bin" ||
     die "could not assemble the cross compiler"
 SYSROOT="$CROSS/sysroot"
 CC_WRAPPER="$CROSS/bin/$TARGET-clang"
 CXX_WRAPPER="$CROSS/bin/$TARGET-clang++"
 
-# `Linux` because CMake's `UNIX` and its ELF/GNU-ld platform rules come with
-# it, as for LLVM (`toolchain/compiler/0003`) and the C++ runtime; the
-# compiler still defines `__slopos__` and not `__linux__`. The find roots keep
-# every probe inside the sysroot and the prefix, so a library the host has
-# and SlopOS lacks is a probe that fails rather than a build that links it.
+# `Linux` for CMake's `UNIX` and ELF/GNU-ld rules; the compiler still defines
+# `__slopos__`, not `__linux__`. The find roots make a library SlopOS lacks a
+# failed probe rather than a link against the host's.
 mkdir -p "$PREFIX"
 cat >"$CROSS/toolchain.cmake" <<CMAKE
 # Generated by scripts/$SELF.sh — do not edit.
@@ -208,10 +186,7 @@ CMAKE
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
 
-# The stamp records no environment, so the build reads none: CMake seeds
-# its compilers, flags and search paths from these, OpenSSL's Configure its
-# tools and flags, clang its include and library paths, and `find_package`
-# a `<Package>_ROOT`.
+# The stamp records no environment, so the build must read none.
 unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LDLIBS ASFLAGS ARFLAGS RCFLAGS \
     CC CXX CPP AS AR RANLIB LD NM OBJCOPY OBJDUMP STRIP RC MT CROSS_COMPILE PERL HASHBANGPERL \
     CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH LIBRARY_PATH COMPILER_PATH \
@@ -223,9 +198,6 @@ for var in $(compgen -e); do
     esac
 done
 
-# ---------------------------------------------------------------------------
-# One recipe.
-# ---------------------------------------------------------------------------
 fetch() {
     local name="$1" version url sha ext file var got
     version="$(recipe_value "$name" version)"
@@ -292,10 +264,8 @@ template_openssl() {
         { tail -n 20 "$work/install.log" >&2; die "$name: install failed; see $work/install.log"; }
 }
 
-# The unpacked tree as the tarball made it: every entry's path, type, mode,
-# change time and link target, then every file's checksum. No write can set
-# a change time back, so an edit a build makes and then undoes is caught as
-# surely as one it leaves.
+# Change times catch an edit the build makes and then undoes: no write can set
+# one back.
 source_manifest() {
     (cd "$1" && find . -printf '%p %y %m %C@ %l\n' | LC_ALL=C sort &&
         find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum)

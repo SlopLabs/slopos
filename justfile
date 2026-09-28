@@ -626,8 +626,6 @@ test-devdisk: _build-run-tests
     [ ! -s "{{build_dir}}/devdisk-check.patch" ] ||
         { echo "FAIL: the source tree seeded this run exports as changed — see {{build_dir}}/devdisk-check.patch" >&2; exit 1; }
 
-# The whole self-hosting loop: the guest builds both kernels of HEAD with the
-# staged toolchain, and the host grades what came out.
 [doc("Self-hosting check: the guest builds the dev and tests kernels off the dev disk; the host holds the volume to e2fsck, runs the ELF gates on both and the kernel suite on the tests kernel")]
 test-selfhost: _build-run-tests
     #!/usr/bin/env bash

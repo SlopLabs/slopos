@@ -28,18 +28,13 @@ set -euo pipefail
 #     regressing gives a host-shaped object or a `gcc`-driven link.
 #
 # An installed toolchain is graded too: every object may need only libraries
-# the toolchain ships — its own, slibc, the C++ runtime and the sonames the
-# recipes under `toolchain/recipes/` declare — and `bin/cargo` must run the
-# recipes rather than a copy a `-sys` crate bundled, which none of them says
-# it did: `curl-sys`, `libgit2-sys`, `libssh2-sys` and `libz-sys` each build
-# their own when pkg-config does not answer. Cargo is linked `--as-needed`,
-# and a bundled copy linked into it is exported to the recipe libraries that
-# need the same names, so needing a soname proves nothing on its own. What
-# does: cargo needs each recipe library it calls, its closure through its
-# run path reaches every recipe library, no object in that closure but a
-# library itself defines the library's symbols — in `.dynsym` or `.symtab`,
-# cargo included — and each recipe library needs a library of every recipe
-# it depends on.
+# the toolchain ships (its own, slibc, the C++ runtime, the recipes'
+# sonames), and `bin/cargo` must use the recipes, not a copy a `-sys` crate
+# bundled. Cargo links `--as-needed` and a bundled copy is exported to the
+# recipe libraries, so needing a soname proves nothing alone. The proof:
+# cargo needs each recipe library it calls, its closure reaches every recipe
+# library, nothing else in it defines their symbols (`.dynsym` or `.symtab`),
+# and each recipe library needs its dependencies'.
 #
 # `skipped` without a materialised source tree or a staged target sysroot;
 # the CI step that has both passes `--require`. A first run downloads
@@ -95,9 +90,8 @@ libssh2.so.1 libssh2_init libssh2_exit
 libcurl.so.4 curl_easy_init
 libgit2.so.1.9 git_libgit2_init
 "
-# The recipe libraries cargo calls itself: `curl` and `git2`, and libssh2 and
-# OpenSSL for the `libssh2_exit` and `OPENSSL_init_ssl` libgit2-sys's `init`
-# reaches. zlib, nghttp2 and libcrypto it reaches through them.
+# libssh2 and OpenSSL for `libssh2_exit` and `OPENSSL_init_ssl`, which
+# libgit2-sys's `init` calls; the other recipes are reached through these.
 CARGO_NEEDS="libcurl.so.4 libgit2.so.1.9 libssh2.so.1 libssl.so.3"
 # `<soname> <sonames of one recipe it depends on>`, a line per dependency.
 RECIPE_DEPENDS="$(
@@ -274,9 +268,8 @@ resolve_needed() {
     return 1
 }
 
-# Every object in the DT_NEEDED closure of `$2`, once each, as the loader
-# finds them. A name the object's search path cannot find is written to
-# `$1/unfound`.
+# The DT_NEEDED closure of `$2` as the loader resolves it; unresolved names go
+# to `$1/unfound`.
 closure_objects() {
     local cache="$1" queue="$2" seen path name found
     seen=" "
@@ -300,8 +293,7 @@ closure_objects() {
     done
 }
 
-# The names an object may bind to: its own and those of everything in its
-# DT_NEEDED closure.
+# The names an object may bind to: its own and its closure's.
 closure_defined() {
     local cache="$1" path key
     for path in $(closure_objects "$cache" "$2"); do
@@ -311,8 +303,7 @@ closure_defined() {
     done | sort -u
 }
 
-# Every name an object defines, exported or not: a copy linked in with
-# hidden visibility is in `.symtab` alone.
+# Including hidden ones: a copy linked in hidden is in `.symtab` alone.
 all_defined() {
     readelf -sW "$1" | awk '
         NF >= 8 && $1 ~ /:$/ && $7 != "UND" {
@@ -329,7 +320,7 @@ recipe_symbols_of() {
     printf '%s\n' "$RECIPE_SYMBOLS" | awk -v s="$1" '$1 == s { for (i = 2; i <= NF; i++) print $i }'
 }
 
-# `bin/cargo` at `$1`, needing `$2`, against the recipes; see the header.
+# `$1` the cargo binary, `$2` its DT_NEEDED; see the header.
 grade_cargo() {
     local file="$1" needed="$2" cache="$3" bad=0 lib soname object key owner sym closure reached
     for lib in $CARGO_NEEDS; do
@@ -598,10 +589,8 @@ self_test() {
         "$scratch/calls-h.c" -L"$lib" -l:libc.so
     install_case tlsdesc 'R_X86_64_TLSDESC' tls.so "$scratch/tls.s"
 
-    # The recipe libraries and a cargo linked against them, from the recipes'
-    # own data: each library defines its RECIPE_SYMBOLS and needs every
-    # library of the recipes it depends on. Each case then swaps one object
-    # for the shape a bundled copy leaves.
+    # Recipe libraries and a cargo built from the recipes' data; each case
+    # swaps one object for the shape a bundled copy leaves.
     recipe_stub() {
         local dir="$1" soname="$2" src="$scratch/stub-$2.c" sym owner deps dep link=()
         shift 2

@@ -114,7 +114,7 @@ if [ ! -f "$CRT0_OBJ" ]; then
     exit 1
 fi
 
-# Build main userland binaries. The shell is built on its own below.
+# The shell is built on its own below.
 BIN_ARGS=()
 for bin in $BINS; do
     [ "$bin" = shell ] || BIN_ARGS+=(--bin "$bin")
@@ -133,10 +133,8 @@ $CARGO +slopos build --locked \
     --no-default-features \
     --release
 
-# std sets SIGPIPE to SIG_IGN before `main`, and a shell must instead keep
-# the disposition its parent gave it and pass it on to every command (POSIX:
-# a signal ignored on entry stays ignored, and one that was not is not).
-# `cargo rustc` because the flag belongs to the binary alone.
+# std ignores SIGPIPE before `main`; a POSIX shell must inherit its parent's
+# disposition and pass it on. `cargo rustc` scopes the flag to this binary.
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$USERLAND_RUSTFLAGS" \
 $CARGO +slopos rustc --locked \

@@ -42,18 +42,12 @@ set -euo pipefail
 # edits against. A preserved volume keeps the guest's tree, so the marker
 # records only that it is there.
 #
-# A new volume also carries `git/greeting.git`, a bare repository holding one
-# library crate, which `devdisk_test` depends on by `git = "file:///devel/..."`
-# so cargo fetches it through libgit2 with no network. Made with the host's
-# `git` at a fixed date, so it is the same repository every time.
-#
-# And `registry/`, a sparse registry holding one crate, which `devdisk_test`
-# serves over TLS on the guest's loopback so cargo fetches it through libcurl
-# and OpenSSL. `registry/www` is what is served; `ca.pem` is the root cargo is
-# told to trust, and `server.der` and `server.key` (the raw P-256 scalar the
-# TLS crate's test server takes) are the certificate it serves. The keys are
-# made fresh with the host's `openssl` each time a volume is created and the
-# root's key is thrown away, so nothing here is a secret worth keeping.
+# A new volume also carries `git/greeting.git`, a bare repository of one crate
+# that `devdisk_test` fetches through libgit2, made at a fixed date so it is
+# reproducible; and `registry/`, a sparse registry of one crate it serves over
+# loopback TLS for libcurl and OpenSSL: `www` is served, `ca.pem` is the root
+# to trust, `server.der`/`server.key` (raw P-256 scalar) the served identity.
+# The keys are fresh per volume and the root's key is discarded.
 #
 # The volume is labelled `slopos-dev`: the guest's disk letters are probe
 # order, so the boot finds it with `mount=LABEL=slopos-dev:/devel`.

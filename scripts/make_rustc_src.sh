@@ -22,7 +22,8 @@ set -euo pipefail
 #                     takes LLVM from `download-ci-llvm` or from that tarball.
 #
 # The tree carries two forks: `toolchain/compiler/` (with rustc's bundled
-# LLVM's, `toolchain/llvm-rustc/`) and `toolchain/crates/`, ports of crates.io crates both workspaces depend on,
+# LLVM's, `toolchain/llvm-rustc/`) and `toolchain/crates/`, ports of
+# crates.io crates both workspaces depend on,
 # unpacked from their pinned `.crate` files into `slopos-crates/` beside a
 # copy of the libc fork, and wired into both workspaces by the
 # `[patch.crates-io]` in `toolchain/crates/wiring/`. See toolchain/crates/PIN.

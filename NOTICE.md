@@ -207,13 +207,13 @@ Apache-2.0`, LLVM, clang and lld `Apache-2.0 WITH LLVM-exception`.
 
 Beyond the forks above, that build applies patches of the same shape, each
 written to be contributed upstream and licensed as the project it patches:
-rustc's own llvm-project port (`toolchain/llvm-rustc/`, `Apache-2.0 WITH LLVM-exception`), and
-`target_os = "slopos"` ports of crates the compiler and cargo depend on
-(`toolchain/crates/`): `getrandom`, `errno`, `stacker` and `socket2`
-(`MIT OR Apache-2.0`), `libloading` (ISC), `nix` (MIT) and `rustix` (`Apache-2.0 WITH
-LLVM-exception OR Apache-2.0 OR MIT`). Every added line is © 2025–2026 The
-SlopOS Authors; the crates themselves remain © their authors, and none is
-vendored into this repository.
+rustc's own llvm-project port (`toolchain/llvm-rustc/`, `Apache-2.0 WITH
+LLVM-exception`), and `target_os = "slopos"` ports of crates the compiler and
+cargo depend on (`toolchain/crates/`): `getrandom`, `errno`, `stacker` and
+`socket2` (`MIT OR Apache-2.0`), `libloading` (ISC), `nix` (MIT) and `rustix`
+(`Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`). Every added line is
+© 2025–2026 The SlopOS Authors; the crates themselves remain © their authors,
+and none is vendored into this repository.
 
 The C libraries cargo links for its network features are built from pinned,
 unmodified upstream release tarballs by `scripts/build_recipes.sh`; each
