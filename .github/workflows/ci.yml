@@ -325,8 +325,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang-18 lld-18 llvm-18 cmake ninja-build ccache pkg-config
-          for tool in clang-18 clang++-18 ld.lld-18 llvm-ar-18 ccache pkg-config; do
+            clang-18 lld-18 llvm-18 cmake meson ninja-build ccache pkg-config
+          for tool in clang-18 clang++-18 ld.lld-18 llvm-ar-18 meson ccache pkg-config; do
             command -v "$tool" >/dev/null || { echo "::error::$tool not installed"; exit 1; }
           done
           {

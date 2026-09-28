@@ -1,0 +1,24 @@
+# git: the guest's source tree fetches from and pushes to the host over
+# `git://`, which needs no transport beyond a socket.
+#
+#   auto_features=disabled   every optional feature, several of which would
+#                            take the host's Perl, Python or Tcl for the
+#                            guest's.
+#   rust, curl, expat        the three features on by default: Rust through
+#                            the host's cargo, and the HTTP transports.
+#   https_backend=none       found OpenSSL would otherwise be linked in for
+#                            the HTTP transports this build leaves out.
+#   tests                    the suite needs Perl.
+version=2.55.0
+url=https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz
+sha256=457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357
+license=GPL-2.0-only
+template=meson
+depends=zlib
+program=bin/git
+arg=-Dauto_features=disabled
+arg=-Drust=disabled
+arg=-Dcurl=disabled
+arg=-Dexpat=disabled
+arg=-Dhttps_backend=none
+arg=-Dtests=false

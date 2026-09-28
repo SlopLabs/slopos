@@ -3,7 +3,8 @@
 # promises: a pinned upstream tarball built by a template, and nothing else.
 #
 #   - one lowercase-hex `sha256` and one `https://` `url` naming `version`;
-#   - a `license`, a known `template`, at least one `soname`, no unread key;
+#   - a `license`, a known `template`, at least one `soname` or `program`, no
+#     unread key;
 #   - at most one `depends` line, naming other recipes, acyclic;
 #   - no file but `recipe` and its declared `config`; never a patch: an edit
 #     to upstream is a slibc or kernel finding;
@@ -11,8 +12,10 @@
 #     flag, CMake script, launcher or search root edits what is built with
 #     every file pristine. A `cmake` arg is `-D<NAME>=<value>`: `CMAKE_*`
 #     names from `CMAKE_ARG_NAMES`, project names outside `PROJECT_ARG_DENY`
-#     (bar `PROJECT_ARG_ALLOW`), values a word or an `/etc` path. An `openssl`
-#     arg is `no-*`, `enable-*`, `shared`, `threads` or `--openssldir=/etc/..`;
+#     (bar `PROJECT_ARG_ALLOW`), values a word or an `/etc` path. A `meson`
+#     arg is the same shape: built-in options from `MESON_ARG_NAMES`, project
+#     options outside `MESON_PROJECT_DENY`. An `openssl` arg is `no-*`,
+#     `enable-*`, `shared`, `threads` or `--openssldir=/etc/..`;
 #   - an `openssl` `config`, which `Configure` evaluates as Perl, is data: one
 #     `%targets` entry for `target`, `CONFIG_FIELDS` only, non-interpolating
 #     strings, and only benign flags;
@@ -31,17 +34,21 @@ SELF="check_recipes"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-TEMPLATES="cmake openssl"
-RECIPE_KEYS="version url sha256 license template depends soname arg config target"
+TEMPLATES="cmake meson openssl"
+RECIPE_KEYS="version url sha256 license template depends soname program arg config target"
 
 CMAKE_ARG_NAMES='^CMAKE_(BUILD_TYPE|POSITION_INDEPENDENT_CODE|(REQUIRE|DISABLE)_FIND_PACKAGE_[A-Za-z0-9_]+|INSTALL_(BINDIR|SBINDIR|LIBEXECDIR|SYSCONFDIR|DATAROOTDIR|DATADIR|INCLUDEDIR|DOCDIR|MANDIR))$'
 PROJECT_ARG_DENY='(FLAGS|DEFINITIONS|DEFINES|INCLUDE|LAUNCHER|COMPILER|LINKER|TOOLCHAIN|COMMAND|SCRIPT|MODULE|EXECUTABLE|PROGRAM|FETCHCONTENT|_DIR|_ROOT|_PATH$|_LIBRAR(Y|IES)(_RELEASE|_DEBUG)?$|_FILE$|_HINTS?$)'
 PROJECT_ARG_ALLOW='^[A-Z0-9]+_CA_PATH$'
+MESON_BUILTIN='^(prefix|bindir|datadir|includedir|infodir|libdir|licensedir|libexecdir|localedir|localstatedir|mandir|sbindir|sharedstatedir|sysconfdir|auto_features|backend|genvslite|buildtype|debug|default_library|default_both_libraries|errorlogs|install_umask|layout|optimization|prefer_static|stdsplit|strip|unity|unity_size|warning_level|werror|wrap_mode|force_fallback_for|vsenv|pkg_config_path|cmake_prefix_path)$|^(b|c|cpp|objc|objcpp|fortran|d|rust|cuda|cython|java|vala|nasm|masm|swift|python)_'
+MESON_ARG_NAMES='^(auto_features|b_ndebug)$'
+MESON_PROJECT_DENY='(args|flags|define|include|launcher|compiler|linker|toolchain|command|script|path|dir|file|bin|prefix|editor|pager|environment|shell|exe|program|tool)'
 WORD='^[A-Za-z0-9_][A-Za-z0-9_.,+:-]*$'
 ETC_PATH='^/etc(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)+$'
 RELATIVE_DIR='^[a-z0-9_]+(/[a-z0-9_+-][a-z0-9_.+-]*)*$'
 FILE_NAME='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
 SONAME='^lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*$'
+PROGRAM='^(bin|libexec)(/[A-Za-z0-9_][A-Za-z0-9_.+-]*)+$'
 CONFIG_FIELDS="inherit_from bn_ops asm_arch perlasm_scheme thread_scheme dso_scheme shared_target CFLAGS cflags CXXFLAGS cxxflags cppflags lib_cppflags lflags ex_libs shared_cflag shared_ldflag"
 
 # Parses the config without running it. `$1` the file, `$2` the target it must
@@ -182,6 +189,22 @@ check_cmake_arg() {
         fail "$name: arg '$arg' has a value that is neither a word nor a path under /etc"
 }
 
+check_meson_arg() {
+    local name="$1" arg="$2" var value
+    [[ "$arg" =~ ^-D([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] ||
+        fail "$name: arg '$arg' is not -D<name>=<value>, the one form a meson recipe passes"
+    var="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    if [[ "$var" =~ $MESON_BUILTIN ]]; then
+        [[ "$var" =~ $MESON_ARG_NAMES ]] ||
+            fail "$name: arg '$arg' sets $var, which is not one of the meson built-in options a recipe may set"
+    elif [[ "${var,,}" =~ $MESON_PROJECT_DENY ]]; then
+        fail "$name: arg '$arg' names a flag, file, program or search root"
+    fi
+    [[ "$value" =~ $WORD || "$value" =~ $ETC_PATH ]] ||
+        fail "$name: arg '$arg' has a value that is neither a word nor a path under /etc"
+}
+
 check_openssl_arg() {
     local name="$1" arg="$2"
     case "$arg" in
@@ -205,7 +228,7 @@ check_recipe() {
             fail "$name: '$line' is not one of the keys the driver reads ($RECIPE_KEYS)"
     done <"$file"
 
-    local version url sha256 template config target dep soname arg
+    local version url sha256 template config target dep soname program arg
     # `|| exit`: a self-test runs this under `if`, where `set -e` is off.
     version="$(single "$file" version "$name")" || exit 1
     url="$(single "$file" url "$name")" || exit 1
@@ -224,10 +247,13 @@ check_recipe() {
     for dep in $(values "$file" depends); do
         [ -f "$root/toolchain/recipes/$dep/recipe" ] || fail "$name: depends on $dep, which is no recipe"
     done
-    [ -n "$(values "$file" soname)" ] || fail "$name: no soname"
+    [ -n "$(values "$file" soname)$(values "$file" program)" ] || fail "$name: no soname or program"
     while IFS= read -r soname; do
         [[ "$soname" =~ $SONAME ]] || fail "$name: soname '$soname' is not lib<name>.so[.<n>...]"
     done < <(values "$file" soname)
+    while IFS= read -r program; do
+        [[ "$program" =~ $PROGRAM ]] || fail "$name: program '$program' is not a path under bin/ or libexec/"
+    done < <(values "$file" program)
 
     config="$(values "$file" config)"
     target="$(values "$file" target)"
@@ -328,9 +354,9 @@ self_test() {
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' RETURN
 
-    # alpha and beta take the tree's real args and target definition.
+    # alpha, beta and delta take the tree's real args and target definition.
     local r="$tmp/toolchain/recipes" real
-    mkdir -p "$r/alpha" "$r/beta" "$tmp/out" "$tmp/scripts"
+    mkdir -p "$r/alpha" "$r/beta" "$r/delta" "$tmp/out" "$tmp/scripts"
     cat >"$r/alpha/recipe" <<'EOF'
 # a comment
 version=1.2.3
@@ -350,9 +376,19 @@ config=target.conf
 depends=alpha
 soname=libbeta.so.3
 EOF
+    cat >"$r/delta/recipe" <<'EOF'
+version=0.9
+url=https://example.org/delta-0.9.tar.xz
+sha256=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+license=GPL-2.0-only
+template=meson
+depends=alpha
+program=bin/delta
+EOF
     for real in "$REPO_ROOT"/toolchain/recipes/*/recipe; do
         case "$(values "$real" template)" in
             cmake) grep '^arg=' "$real" >>"$r/alpha/recipe" ;;
+            meson) grep '^arg=' "$real" >>"$r/delta/recipe" ;;
             openssl)
                 grep '^arg=\|^target=' "$real" >>"$r/beta/recipe"
                 cp "$(dirname "$real")/$(values "$real" config)" "$r/beta/target.conf"
@@ -360,7 +396,7 @@ EOF
         esac
     done
     [ -f "$r/beta/target.conf" ] || fail "--self-test: the tree has no openssl recipe to take a target definition from"
-    printf '`toolchain/recipes/alpha/` and `toolchain/recipes/beta/`\n' >"$tmp/NOTICE.md"
+    printf '`toolchain/recipes/alpha/`, `toolchain/recipes/beta/`, `toolchain/recipes/delta/`\n' >"$tmp/NOTICE.md"
     printf '#!/bin/sh\nshift\nfor n; do echo "$n good"; done\n' >"$tmp/scripts/build_recipes.sh"
     chmod +x "$tmp/scripts/build_recipes.sh"
 
@@ -394,6 +430,9 @@ EOF
     reject_beta() {
         reject_in "$r/beta/recipe" "$@"
     }
+    reject_delta() {
+        reject_in "$r/delta/recipe" "$@"
+    }
     reject_conf() {
         reject_in "$r/beta/target.conf" "$@"
     }
@@ -413,7 +452,7 @@ EOF
     reject_edit '$ a depends=alpha' "a recipe that depends on itself" "in a cycle"
     reject_edit '$ a depends=beta' "two recipes that depend on each other" "in a cycle"
     reject_beta '$ a depends=alpha' "a second depends line" "more than one depends"
-    reject_edit '/^soname=/d' "a recipe with no soname" "no soname"
+    reject_edit '/^soname=/d' "a recipe with no soname or program" "no soname or program"
     reject_edit 's|^soname=.*|soname=../../libz.so|' "a soname that is a path" "is not lib<name>.so"
     reject_edit '$ a cflags=-include /etc/shim.h' "a key the driver does not read" "not one of the keys"
     reject_edit '$ a config=x.conf' "a config on a cmake recipe" "are for the openssl template"
@@ -456,6 +495,24 @@ EOF
     reject_beta 's|^config=.*|config=../alpha/recipe|' "a config outside the recipe" "is not a file name"
     reject_beta '/^target=/d' "an openssl recipe with no target" "no target"
 
+    reject_delta '$ a arg=-Dc_args=-include/etc/shim.h' "a header forced in through c_args" \
+        "not one of the meson built-in options"
+    reject_delta '$ a arg=-Dc_link_args=-Wl,--wrap=regcomp' "a symbol wrapped at link time" \
+        "not one of the meson built-in options"
+    reject_delta '$ a arg=-Dprefix=/etc' "a second prefix" "not one of the meson built-in options"
+    reject_delta '$ a arg=-Dwrap_mode=forcefallback' "a bundled dependency" "not one of the meson built-in options"
+    reject_delta '$ a arg=-Dpkg_config_path=/etc/pc' "a pkg-config search root" "not one of the meson built-in options"
+    reject_delta '$ a arg=-Dbuild.c_args=x' "a build-machine option" "is not -D<name>=<value>"
+    reject_delta '$ a arg=-Dzlib:tests=true' "a subproject option" "is not -D<name>=<value>"
+    reject_delta '$ a arg=--cross-file=/etc/other.ini' "a second cross file" "is not -D<name>=<value>"
+    reject_delta '$ a arg=-Dsane_tool_path=/etc/bin' "a project search path" "names a flag, file"
+    reject_delta '$ a arg=-Ddefault_pager=cat' "a project program" "names a flag, file"
+    reject_delta '$ a arg=-Dcontrib=[completion]' "a meson array literal" "neither a word nor a path"
+    reject_delta 's|^program=.*|program=../bin/delta|' "a program outside the prefix" "not a path under bin/"
+    reject_delta 's|^program=.*|program=/bin/delta|' "an absolute program path" "not a path under bin/"
+    reject_delta 's|^program=.*|program=share/delta|' "a program outside bin/ and libexec/" "not a path under bin/"
+    reject_delta '$ a target=x' "a target on a meson recipe" "are for the openssl template"
+
     reject_conf '1 i system("sed -i s/foo/bar/ crypto/x.c");' "a config that runs a command" "expected 'my'"
     reject_conf '$ a do "/etc/evil.pl";' "a config that loads more Perl" "text follows"
     reject_conf '/=> {/a CC => "sh -c evil",' "a compiler command" "'CC' is not a field"
@@ -494,7 +551,7 @@ EOF
 
     printf '`toolchain/recipes/alpha/`\n' >"$tmp/NOTICE.md"
     expect_reject "a recipe with no NOTICE.md entry"
-    printf '`toolchain/recipes/alpha/` and `toolchain/recipes/beta/`\n' >"$tmp/NOTICE.md"
+    printf '`toolchain/recipes/alpha/`, `toolchain/recipes/beta/`, `toolchain/recipes/delta/`\n' >"$tmp/NOTICE.md"
 
     mkdir -p "$tmp/out/alpha"
     echo good >"$tmp/out/alpha/stamp"

@@ -5,6 +5,7 @@ set -euo pipefail
 #
 # Usage: build_recipes.sh [<name>...]
 #        build_recipes.sh --print-stamp [<name>...]
+#        build_recipes.sh --install-programs <prefix>
 #
 # A recipe is a pinned upstream tarball, its checksum, its dependencies and a
 # build template — no patches: a build that needs one is a slibc or kernel
@@ -15,9 +16,11 @@ set -euo pipefail
 # comments ignored:
 #
 #   version, url, sha256, license   the tarball and what it is
-#   template                        `cmake` or `openssl`
+#   template                        `cmake`, `meson` or `openssl`
 #   depends                         recipes built first, space-separated
 #   soname                          each shared library it must install
+#   program                         each program it must install, relative
+#                                   to the prefix
 #   arg                             one argument to the template's configure
 #   config, target                  `openssl`: the out-of-tree target
 #                                   definition beside the recipe, and the
@@ -28,14 +31,23 @@ set -euo pipefail
 #   cmake     configure with a toolchain file naming the SlopOS compiler
 #             wrapper and confining every search to the target sysroot and
 #             the recipe prefix, build with Ninja, install.
+#   meson     configure with a cross file naming the same, no subproject
+#             fallback, and `--prefix` the guest path of the toolchain the
+#             programs are installed into, since a program finds its own files
+#             through its compiled-in prefix; build with Ninja, install.
 #   openssl   `Configure --config=<file> <target>`, `make build_sw`,
 #             `make install_sw`.
 #
-# Everything builds shared into `<recipes dir>/prefix` with a `$ORIGIN` run
-# path and `-z defs`, so a libc function slibc lacks fails here rather than at
-# `dlopen` on SlopOS. Each recipe's stamp covers its directory, this file,
-# `make_slopos_cross.sh --print-stamp`, the host tools, the prefix and its
+# Everything builds shared into `<recipes dir>/prefix` with `-z defs`, so a
+# libc function slibc lacks fails here rather than at `dlopen` on SlopOS. A
+# library's run path is `$ORIGIN`; a program's reaches `lib/` from `bin/` or
+# `libexec/<name>/`. Each recipe's stamp covers its directory, this file,
+# `make_slopos_cross.sh --print-stamp`, the host tools, the prefixes and its
 # dependencies' stamps; `--print-stamp` prints `<name> <stamp>` per recipe.
+#
+# `--install-programs` copies what each built recipe that declares a program
+# installed outside `include/` and `lib/` into another prefix; its libraries
+# travel with the target sysroot.
 #
 # Tarballs are cached in third_party/recipes/; offline, pre-populate it or set
 # `<NAME>_URL` (`ZLIB_URL`, ...) to a local copy.
@@ -55,10 +67,17 @@ die() {
 }
 
 PRINT_STAMP=0
-if [ "${1:-}" = "--print-stamp" ]; then
-    PRINT_STAMP=1
-    shift
-fi
+INSTALL_PROGRAMS=""
+case "${1:-}" in
+    --print-stamp)
+        PRINT_STAMP=1
+        shift
+        ;;
+    --install-programs)
+        INSTALL_PROGRAMS="${2:?usage: $SELF.sh --install-programs <prefix>}"
+        shift 2
+        ;;
+esac
 
 RECIPES="$REPO_ROOT/toolchain/recipes"
 CACHE="$REPO_ROOT/third_party/recipes"
@@ -81,6 +100,16 @@ recipe_value() {
 }
 recipe_values() {
     sed -n "s/^$2=\\(.*\\)\$/\\1/p" "$RECIPES/$1/recipe"
+}
+
+installed() {
+    local name="$1" soname program
+    for soname in $(recipe_values "$name" soname); do
+        [ -e "$PREFIX/lib/$soname" ] || return 1
+    done
+    for program in $(recipe_values "$name" program); do
+        [ -e "$PREFIX/$program" ] || return 1
+    done
 }
 
 all_recipes() {
@@ -111,17 +140,34 @@ for name in "$@"; do
     visit "$name"
 done
 
+if [ -n "$INSTALL_PROGRAMS" ]; then
+    for name in "${ORDER[@]}"; do
+        [ -n "$(recipe_values "$name" program)" ] || continue
+        [ -f "$OUT/$name/manifest" ] && installed "$name" ||
+            die "$name is not built into $PREFIX — run build_recipes.sh $name first"
+        while IFS= read -r rel; do
+            case "$rel" in include/* | lib/*) continue ;; esac
+            mkdir -p "$INSTALL_PROGRAMS/$(dirname "$rel")"
+            cp -a --remove-destination "$PREFIX/$rel" "$INSTALL_PROGRAMS/$rel"
+        done <"$OUT/$name/manifest"
+    done
+    exit 0
+fi
+
 # The build systems join the stamp with their versions.
 CXX_TOOLS="$("$SCRIPT_DIR/cxx_host_tools.sh")"
 eval "$CXX_TOOLS"
 . "$SCRIPT_DIR/lib/rustc_build_settings.sh"
+. "$SCRIPT_DIR/lib/toolchain_pin.sh"
+# Where build_devdisk.sh stages the toolchain, as the guest mounts it.
+GUEST_PREFIX="/devel/src/slopos/$TP_SYSROOT_REL"
 eval "$(rbs_llvm_archivers "$LLVM_AR")" || die "no llvm-ranlib beside $LLVM_AR"
 LLVM_AR="$RBS_AR"
 LLVM_RANLIB="$RBS_RANLIB"
-for tool in cmake ninja make perl; do
+for tool in cmake meson ninja make perl; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is required to build the recipes"
 done
-HOST_TOOLS="$(cmake --version | head -n 1; ninja --version; make --version | head -n 1; perl -e 'print "perl $]\n"')"
+HOST_TOOLS="$(cmake --version | head -n 1; meson --version; ninja --version; make --version | head -n 1; perl -e 'print "perl $]\n"')"
 
 CROSS_STAMP="$(BUILD_DIR="$BUILD_DIR" "$SCRIPT_DIR/make_slopos_cross.sh" --print-stamp)" ||
     die "the cross compiler's inputs are not there — see above"
@@ -132,7 +178,7 @@ stamp_want() {
     local name="$1" dep
     if [ -z "${WANT[$name]:-}" ]; then
         WANT[$name]="$(
-            printf '%s\n' "$DRIVER_STAMP" "$CROSS_STAMP" "$HOST_TOOLS" "$PREFIX"
+            printf '%s\n' "$DRIVER_STAMP" "$CROSS_STAMP" "$HOST_TOOLS" "$PREFIX" "$GUEST_PREFIX"
             (cd "$RECIPES/$name" && find . -type f -print | LC_ALL=C sort | xargs sha256sum)
             for dep in $(recipe_value "$name" depends); do
                 printf 'depends %s %s\n' "$dep" "$(stamp_want "$dep")"
@@ -181,6 +227,27 @@ set(CMAKE_MODULE_LINKER_FLAGS_INIT "-Wl,-z,defs")
 set(CMAKE_INSTALL_RPATH "\$ORIGIN")
 set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 CMAKE
+
+# meson looks a target program with no `[binaries]` entry up on the host's
+# PATH, so a recipe disables what would take the host's Perl or Tcl for the
+# guest's. The run path reaches `lib/` from `bin/`, `lib/` and `libexec/<name>/`.
+cat >"$CROSS/meson.ini" <<MESON
+# Generated by scripts/$SELF.sh — do not edit.
+[binaries]
+c = '$CC_WRAPPER'
+cpp = '$CXX_WRAPPER'
+ar = '$LLVM_AR'
+pkg-config = '$(command -v pkg-config)'
+
+[built-in options]
+c_link_args = ['-Wl,-rpath,\$ORIGIN/../lib:\$ORIGIN/../../lib']
+
+[host_machine]
+system = 'slopos'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+MESON
 
 # pkg-config sees the prefix and nothing else.
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
@@ -246,6 +313,27 @@ template_cmake() {
         { tail -n 20 "$work/install.log" >&2; die "$name: install failed; see $work/install.log"; }
 }
 
+# Staged under the guest prefix and moved to where the other recipes install,
+# so the rest of the driver sees one layout.
+template_meson() {
+    local name="$1" work="$2" args=() stray
+    mapfile -t args < <(recipe_values "$name" arg)
+    meson setup "$work/build" "$work/src" --cross-file "$CROSS/meson.ini" \
+        --prefix="$GUEST_PREFIX" --libdir=lib --buildtype=release \
+        --default-library=shared --wrap-mode=nofallback \
+        "${args[@]}" >"$work/configure.log" 2>&1 ||
+        { tail -n 40 "$work/configure.log" >&2; die "$name: configure failed; see $work/configure.log"; }
+    ninja -C "$work/build" -j "$JOBS" >"$work/build.log" 2>&1 ||
+        { tail -n 40 "$work/build.log" >&2; die "$name: build failed; see $work/build.log"; }
+    DESTDIR="$work/staged" meson install -C "$work/build" --no-rebuild >"$work/install.log" 2>&1 ||
+        { tail -n 20 "$work/install.log" >&2; die "$name: install failed; see $work/install.log"; }
+    [ -d "$work/staged$GUEST_PREFIX" ] || die "$name: the install put nothing under $GUEST_PREFIX"
+    mkdir -p "$(dirname "$work/dest$PREFIX")"
+    mv "$work/staged$GUEST_PREFIX" "$work/dest$PREFIX"
+    stray="$(find "$work/staged" ! -type d -print | head -n 5)"
+    [ -z "$stray" ] || die "$name: the install wrote outside $GUEST_PREFIX: $stray"
+}
+
 template_openssl() {
     local name="$1" work="$2" config target args=()
     config="$(recipe_value "$name" config)"
@@ -294,16 +382,10 @@ build_recipe() {
     [ -d "$work/dest$PREFIX" ] || die "$name: the install put nothing under $PREFIX"
     (cd "$work/dest$PREFIX" && find . ! -type d -print | sed 's|^\./||' | LC_ALL=C sort) >"$work/manifest"
     cp -a "$work/dest$PREFIX/." "$PREFIX/"
-    installed "$name" || die "$name: installed no lib/$(recipe_values "$name" soname | tr '\n' ' ')"
-    rm -rf "$work/src" "$work/build" "$work/dest" "$work/source.manifest" "$work/source.diff"
+    installed "$name" ||
+        die "$name: installed no $(recipe_values "$name" soname | sed 's|^|lib/|' | tr '\n' ' ')$(recipe_values "$name" program | tr '\n' ' ')"
+    rm -rf "$work/src" "$work/build" "$work/staged" "$work/dest" "$work/source.manifest" "$work/source.diff"
     printf '%s\n' "$want" >"$work/stamp"
-}
-
-installed() {
-    local name="$1" soname
-    for soname in $(recipe_values "$name" soname); do
-        [ -e "$PREFIX/lib/$soname" ] || return 1
-    done
 }
 
 for name in "${ORDER[@]}"; do

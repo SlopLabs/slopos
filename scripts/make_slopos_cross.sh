@@ -102,20 +102,23 @@ cflags="--target=$TARGET -D__slopos__ -nostdlibinc $stdlib -isystem \$sysroot/in
 cflags="\$cflags -Wno-unused-command-line-argument"
 
 # Expand response files first, or a long CMake link line (\`@file\`) is taken
-# for a compile.
-expanded=""
-for arg in "\$@"; do
+# for a compile. Every other argument is kept whole: git passes
+# \`-DPAGER_ENV="LESS=FRX LV=-c"\`.
+remaining=\$#
+while [ "\$remaining" -gt 0 ]; do
+    arg="\$1"
+    shift
+    remaining=\$((remaining - 1))
     case "\$arg" in
         @*)
             file="\${arg#@}"
             [ -f "\$file" ] || { echo "\$0: no response file \$file" >&2; exit 1; }
-            expanded="\$expanded \$(tr '\n' ' ' <"\$file")"
+            # shellcheck disable=SC2046
+            set -- "\$@" \$(tr '\n' ' ' <"\$file")
             ;;
-        *) expanded="\$expanded \$arg" ;;
+        *) set -- "\$@" "\$arg" ;;
     esac
 done
-# shellcheck disable=SC2086
-set -- \$expanded
 
 # A caller's \`--target\` is dropped: the \`cc\` crate passes
 # \`x86_64-unknown-slopos-slibc\`, which clang rejects as a triple.

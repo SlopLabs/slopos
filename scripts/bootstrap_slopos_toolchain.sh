@@ -23,8 +23,9 @@ set -euo pipefail
 # builds; they join the target sysroot and the install beside cargo, and each
 # `-sys` crate is pointed at them for the SlopOS target alone.
 # `libnghttp2-sys` cannot be and compiles its bundled copy, which `curl-sys`
-# links only when it builds its own libcurl.
-# `scripts/check_bootstrap_config.sh` holds the installed cargo to the recipes.
+# links only when it builds its own libcurl. A recipe's programs (git) join the
+# install too. `scripts/check_bootstrap_config.sh` holds the installed cargo to
+# the recipes.
 #
 # `--dry-run` runs bootstrap's own dry run: it validates the config, resolves
 # `--host` through the compiler's built-in target list, and walks the step
@@ -363,9 +364,13 @@ else
 fi
 
 # Cargo cannot see the recipes change (pkg-config names no file to watch), so
-# the SlopOS tools are cleared when the recipes' stamps differ.
+# the SlopOS tools are cleared when the stamps of the libraries differ.
+LIBRARY_RECIPES=()
+for recipe in "$REPO_ROOT"/toolchain/recipes/*/recipe; do
+    grep -q '^soname=' "$recipe" && LIBRARY_RECIPES+=("$(basename "$(dirname "$recipe")")")
+done
 RECIPES_STAMP="$(BUILD_DIR="$BUILD_DIR" SLOPOS_RECIPES_DIR="$RECIPES_DIR" \
-    "$SCRIPT_DIR/build_recipes.sh" --print-stamp | sha256sum)"
+    "$SCRIPT_DIR/build_recipes.sh" --print-stamp "${LIBRARY_RECIPES[@]}" | sha256sum)"
 if [ "$(cat "$RUSTC_BUILD/.slopos-recipes" 2>/dev/null)" != "$RECIPES_STAMP" ]; then
     if compgen -G "$RUSTC_BUILD/*/stage[1-9]-tools/$TARGET" >/dev/null; then
         echo "$SELF: the recipes changed since cargo was built; clearing the $TARGET tools" >&2
@@ -407,6 +412,8 @@ cp -a "$LLVM_DIR"/lib/libclang-cpp.so* "$PREFIX/lib/"
 cp -a "$LLVM_DIR/lib/clang" "$PREFIX/lib/"
 cp -a "$SYSROOT/lib/." "$PREFIX/lib/"
 cp -a "$SYSROOT/include" "$PREFIX/"
+BUILD_DIR="$BUILD_DIR" SLOPOS_RECIPES_DIR="$RECIPES_DIR" "$SCRIPT_DIR/build_recipes.sh" \
+    --install-programs "$PREFIX" || die "could not install the recipes' programs"
 ln -sfn "$CLANG_BIN" "$PREFIX/bin/clang"
 ln -sfn clang "$PREFIX/bin/clang++"
 ln -sfn clang "$PREFIX/bin/cc"
