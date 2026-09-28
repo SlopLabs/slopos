@@ -658,13 +658,3 @@ index 2b0c779..cd081c9 100644
      target_os = "fuchsia",
      target_os = "emscripten",
      target_os = "aix",
-@@ -585,7 +594,8 @@ impl SigSet {
- 
-     /// Suspends execution of the calling thread until one of the signals in the
-     /// signal mask becomes pending, and returns the accepted signal.
--    #[cfg(not(target_os = "redox"))] // RedoxFS does not yet support sigwait
-+    // RedoxFS does not yet support sigwait, and neither does slibc.
-+    #[cfg(not(any(target_os = "redox", target_os = "slopos")))]
-     pub fn wait(&self) -> Result<Signal> {
-         use std::convert::TryFrom;
- 

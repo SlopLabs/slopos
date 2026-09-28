@@ -50,11 +50,10 @@ target is enough to build *for*; bootstrap's `--host` resolves a triple
 through rustc's own built-in list, so hosting a compiler needs
 `x86_64-unknown-slopos` to be a built-in spec. That is
 `toolchain/compiler/0001-slopos-target.patch` over the pinned nightly's
-sources, with a patch the first bootstrap run asked for: `0003` maps the tuple to a
-`CMAKE_SYSTEM_NAME` — an unrecognised one falls back to `Generic`, which
-loses `LLVM_ON_UNIX` and with it every `Unix/*.inc` file the LLVM port
-patches; `0004` came later, to link the C++ runtime statically (below). All
-three, and `toolchain/llvm-rustc/0001-slopos-support.patch` (the LLVM port in
+sources, with `0003`, which maps the tuple to a `CMAKE_SYSTEM_NAME` — an
+unrecognised one falls back to `Generic`, which loses `LLVM_ON_UNIX` and with
+it every `Unix/*.inc` file the LLVM port patches — and `0004`, which links the
+C++ runtime statically (below). All three, and `toolchain/llvm-rustc/0001-slopos-support.patch` (the LLVM port in
 rustc's bundled llvm-project), are pinned by `toolchain/compiler/PIN` and materialised by
 `scripts/make_rustc_src.sh` into `third_party/slopos-rustc-src` (265 MB
 fetched, 656 MiB on disk, ~17 s; `just rustc-src`, removed by `just

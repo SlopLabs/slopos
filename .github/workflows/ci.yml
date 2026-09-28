@@ -325,8 +325,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang-18 lld-18 llvm-18 cmake ninja-build ccache
-          for tool in clang-18 clang++-18 ld.lld-18 llvm-ar-18 ccache; do
+            clang-18 lld-18 llvm-18 cmake ninja-build ccache pkg-config
+          for tool in clang-18 clang++-18 ld.lld-18 llvm-ar-18 ccache pkg-config; do
             command -v "$tool" >/dev/null || { echo "::error::$tool not installed"; exit 1; }
           done
           {
@@ -369,6 +369,13 @@ jobs:
           path: third_party/rustc-src-*.tar.xz
           key: rustc-src-${{ hashFiles('rust-toolchain.toml') }}
 
+      - name: Cache the pinned recipe tarballs
+        uses: actions/cache@v6
+        with:
+          path: third_party/recipes
+          key: recipes-src-${{ hashFiles('toolchain/recipes/**') }}
+          restore-keys: recipes-src-
+
       - name: Restore the compiler cache
         uses: actions/cache/restore@v6
         with:
@@ -410,6 +417,14 @@ jobs:
       - name: C++ runtime against the C library it links
         if: ${{ !cancelled() && steps.userland.outcome == 'success' }}
         run: scripts/check_cxx_pin.sh
+
+      # Every recipe links `-z defs` against this commit's libc.so, so a
+      # symbol slibc lost fails here rather than hours into `just toolchain`.
+      - name: Recipes against slibc
+        if: ${{ !cancelled() && steps.userland.outcome == 'success' }}
+        run: |
+          scripts/build_recipes.sh
+          scripts/check_recipes.sh
 
       # `--self-test` here rather than in the gates job: that job has no tree,
       # where the self-test's rejection cases can only report themselves
