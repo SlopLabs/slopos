@@ -57,7 +57,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 IMAGE_PATH="${1:?Usage: build_devdisk.sh <image_path> <build_dir>}"
-BUILD_DIR="${2:?Usage: build_devdisk.sh <image_path> <build_dir>}"
+BUILD_DIR="$(cd "${2:?Usage: build_devdisk.sh <image_path> <build_dir>}" && pwd)"
 
 DEV_DISK_SIZE="${DEV_DISK_SIZE:-4G}"
 DEV_DISK_LABEL="slopos-dev"
