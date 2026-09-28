@@ -43,10 +43,11 @@ A port finds the POSIX it expects: one working directory per process, `#!`
 scripts and `/bin/sh`, process-shared futexes, 64 signals with queued realtime
 ones and `sigqueue`, FIFOs, and `trap` in the shell. A fork owes its copy as
 the child writes it, and a write that finds no page makes the OOM killer take
-the largest resident process instead of faulting the writer.
+the process holding most of what ran short, among those the writer may
+signal, instead of faulting the writer.
 
-The guest builds the dev kernel in about 75 s at four vCPUs under KVM against
-49 s for rustup's dist compiler on the same four cores; the gap is the
+The guest builds the dev kernel in about 62 s at four vCPUs and 8G under KVM
+against 49 s for rustup's dist compiler on the same four cores; the gap is the
 compiler's build settings, not the kernel.
 
 **Open defect: the tests kernel does not link at the default 4G.** Its link
