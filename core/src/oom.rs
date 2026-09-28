@@ -64,7 +64,7 @@ impl OomOps for TaskOomOps {
             if killed.is_none() {
                 killed = Some(Killed {
                     pid: group_id(task),
-                    name: task.name,
+                    name: task.name.get(),
                 });
             }
             // Every thread group sharing the address space, as `SIGKILL` to

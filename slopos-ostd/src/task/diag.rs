@@ -118,7 +118,7 @@ where
     unsafe {
         Some(TaskDiag {
             id,
-            name: addr_of!((*task).name).read_volatile(),
+            name: (*addr_of!((*task).name)).get(),
             kernel_stack_base: addr_of!((*task).kernel_stack_base).read_volatile(),
             kernel_stack_top: addr_of!((*task).kernel_stack_top).read_volatile(),
             flags: addr_of!((*task).flags).read_volatile(),

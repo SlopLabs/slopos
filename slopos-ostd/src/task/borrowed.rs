@@ -656,12 +656,6 @@ impl<K, U> TaskInner<K, U> {
         (self.kernel_stack_base, self.kernel_stack_top)
     }
 
-    /// The raw, NUL-padded name bytes.
-    #[inline]
-    pub fn name_bytes(&self) -> &[u8] {
-        &self.name
-    }
-
     /// Take this task's `SYSCALL_TEST_REPORT` ring, leaving the slot empty.
     ///
     /// The taker is a foreign task draining a corpse while the owner installs

@@ -545,7 +545,7 @@ pub fn task_registry_reset(freeze: &crate::task::KernelIoFreeze) -> c_int {
                 klog_debug!(
                     "task_registry_reset: preserving {} ('{}')",
                     id,
-                    bytes_as_str(&task.name)
+                    bytes_as_str(&task.name.get())
                 );
             } else if retire.push(id).is_err() {
                 return true;

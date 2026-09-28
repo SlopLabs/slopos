@@ -480,21 +480,21 @@ fn strand_sweep_task(task: &super::task::Task, now: u64) {
         1 => slopos_ostd::klog_info!(
             "STRAND: task {} '{}' Blocked(Sleep) NO ENTRY now={} placement={:?}",
             task_id,
-            task_name_str(task),
+            slopos_ostd::string::bytes_as_str(&task.name.get()),
             now,
             task.sched_placement()
         ),
         2 => slopos_ostd::klog_info!(
             "STRAND: task {} '{}' entry OVERDUE wake@{} now={}",
             task_id,
-            task_name_str(task),
+            slopos_ostd::string::bytes_as_str(&task.name.get()),
             detail,
             now
         ),
         _ => slopos_ostd::klog_info!(
             "STRAND: task {} '{}' Ready with placement=None (publish lost)",
             task_id,
-            task_name_str(task)
+            slopos_ostd::string::bytes_as_str(&task.name.get())
         ),
     }
 }
@@ -517,10 +517,6 @@ static STRAND_EPOCH: [AtomicU32; MAX_TASKS] = {
     const ZERO: AtomicU32 = AtomicU32::new(0);
     [ZERO; MAX_TASKS]
 };
-
-fn task_name_str(task: &super::task::Task) -> &str {
-    core::str::from_utf8(task.name_bytes()).unwrap_or("?")
-}
 
 /// Snapshot before the queue lock: the stop registry is the same lock level.
 pub fn reset_sleep_queue() {

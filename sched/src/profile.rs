@@ -280,7 +280,7 @@ pub fn note_tick(rip: u64, cs: u64) {
     if cs & 3 == 3 {
         time.user.fetch_add(1, Ordering::Relaxed);
         if let Some(current) = Current::get() {
-            USER_TASKS.bump(name_key(&current.task().name));
+            USER_TASKS.bump(name_key(&current.task().name.get()));
         }
         USER_RIPS.bump(rip >> 6 | 1 << 63);
         return;

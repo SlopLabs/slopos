@@ -561,16 +561,15 @@ fn init_task_context(task: &mut Task) {
     task.context.get_mut().cr3 = 0;
 }
 
-/// Copy the NUL-terminated `src` into `dest`, truncating to
-/// `TASK_NAME_MAX_LEN-1` bytes and zero-padding the tail. A null `src` clears
-/// `dest`.
-fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
-    *dest = [0u8; TASK_NAME_MAX_LEN];
-    let Some(bytes) = slopos_ostd::util::cstr::cstr_from_kernel_ptr(src) else {
-        return;
-    };
-    let take = core::cmp::min(bytes.len(), TASK_NAME_MAX_LEN - 1);
-    dest[..take].copy_from_slice(&bytes[..take]);
+/// The NUL-terminated `src`, truncated to `TASK_NAME_MAX_LEN-1` bytes and
+/// zero-padded. A null `src` is the empty name.
+fn name_from_cstr(src: *const c_char) -> [u8; TASK_NAME_MAX_LEN] {
+    let mut name = [0u8; TASK_NAME_MAX_LEN];
+    if let Some(bytes) = slopos_ostd::util::cstr::cstr_from_kernel_ptr(src) {
+        let take = core::cmp::min(bytes.len(), TASK_NAME_MAX_LEN - 1);
+        name[..take].copy_from_slice(&bytes[..take]);
+    }
+    name
 }
 
 /// Build a task and hand back the token that solely owns it.
@@ -652,7 +651,7 @@ pub fn task_build(
 
     let task_ref = pending.as_mut();
     task_ref.task_id = task_id;
-    copy_name(&mut task_ref.name, name);
+    task_ref.name.set(&name_from_cstr(name));
     // Status stays Blocked (set during allocation) until fully initialised.
     task_ref.priority = TaskPriority::from_u8(priority);
     task_ref.flags = flags;
@@ -744,7 +743,7 @@ pub fn task_commit(pending: PendingTask) -> Option<TaskRef> {
 
     klog_debug!(
         "Created task '{}' with ID {}",
-        bytes_as_str(&registered.name),
+        bytes_as_str(&registered.name.get()),
         task_id
     );
 
@@ -833,7 +832,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
     klog_debug!(
         "Terminating task '{}' (ID {})",
-        bytes_as_str(&task.name),
+        bytes_as_str(&task.name.get()),
         resolved_id
     );
 

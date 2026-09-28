@@ -261,7 +261,7 @@ pub(super) fn install_idle_task(cpu_id: usize, task: &Task) {
         "install_idle_task() must receive a kernel-mode task"
     );
     debug_assert!(
-        name_looks_idle(task.name_bytes()),
+        name_looks_idle(&task.name.get()),
         "install_idle_task() must receive a task named idle/<n>"
     );
     slopos_arch::pcr::set_idle_task(cpu_id, core::ptr::from_ref(task).cast::<()>().cast_mut());

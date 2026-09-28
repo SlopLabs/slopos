@@ -72,7 +72,7 @@ fn run_zombies(kc: &mut KConsole<'_>) {
             kc,
             "  task {:>3} '{}' {:?} reaper={} code={} reason={:?} exited_at={}",
             task.task_id,
-            bytes_as_str(&task.name),
+            bytes_as_str(&task.name.get()),
             task.status(),
             if reaper == slopos_abi::task::INVALID_TASK_ID {
                 -1i64
@@ -163,7 +163,7 @@ fn dump_one(kc: &mut KConsole<'_>, t: &Task) {
         kc,
         "  task {:>3} '{}' status={:?} reason={:?} placement={:?} on_cpu={} pid={} pgid={} sid={} last_run={}",
         t.task_id,
-        bytes_as_str(&t.name),
+        bytes_as_str(&t.name.get()),
         t.status(),
         t.load_block_reason(),
         t.sched_placement(),

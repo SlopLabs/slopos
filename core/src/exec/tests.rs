@@ -721,6 +721,13 @@ pub fn test_script_exec_resolves_to_its_interpreter() -> TestResult {
         resolve_exec(b"/tmp", DIR).err() == Some(Errno::EACCES),
         "a directory is not executable: EACCES, not ENOEXEC"
     );
+    // A loop is not a file the kernel failed to recognise: ENOEXEC would send
+    // a `PATH` search on to run it as a shell script.
+    let _ = slopos_fs::vfs::vfs_symlink(b"/tmp/shebang/loop", b"/tmp/shebang/loop");
+    assert_test!(
+        resolve_exec(b"loop", DIR).err() == Some(Errno::ELOOP),
+        "a symlink loop is ELOOP, as execve(2) answers it"
+    );
 
     // The grant is looked up for the image, so a script naming the shell
     // runs with exactly the shell's grant.

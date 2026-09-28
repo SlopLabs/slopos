@@ -714,6 +714,7 @@ define_syscall!(syscall_execve
                 }
             }
 
+            exec::name_task_after(ctx.task(), path.as_bytes());
             slopos_sched::task::task_cleanup_for_exec(task_id);
 
             // SIG_DFL so no stale handler pointer survives into the new image;

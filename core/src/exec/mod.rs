@@ -228,6 +228,16 @@ fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], Errno> {
     Ok(name)
 }
 
+/// `execve`'s rename, which spawn's naming of its child matches: the path as
+/// passed, so a script is named after itself. A path that resolved has a
+/// basename. Out of line to keep the name off `execve`'s measured frame.
+#[inline(never)]
+pub fn name_task_after(task: &slopos_sched::task_struct::Task, path: &[u8]) {
+    if let Ok(name) = task_name_from_path(path) {
+        task.name.set(&name);
+    }
+}
+
 struct InheritedJobControl {
     pgid: u32,
     sid: u32,
@@ -314,11 +324,14 @@ pub fn spawn_program_with_cwd(
         // Privilege enters a spawn only here — the syscall boundary already
         // refused every privileged bit the caller asked for, so flags follow
         // the program, not the requester.
-        let (granted_flags, granted_priority) = grants::grant_for(normalized_path);
+        let (mut granted_flags, mut granted_priority) = grants::grant_for(normalized_path);
 
         // A raise needs `Launch`; an ordinary spawn raises nothing and needs
         // no right. Not an intersection with the spawner's own authority: the
         // shell holds no display authority, so `/bin/roulette` could not draw.
+        // A spawner that may not raise gets the image without its grant, never
+        // more than its own `execve` would hold, rather than a refusal:
+        // `/bin/sh` and every `#!/bin/sh` script load the granted shell.
         if granted_flags != 0 {
             let spawner_may_launch = match task_find_by_id(parent_task_id) {
                 Some(parent) => slopos_ostd::authority::mask_permits(
@@ -331,7 +344,8 @@ pub fn spawn_program_with_cwd(
                 None => true,
             };
             if !spawner_may_launch {
-                return Err(Errno::ENOEXEC);
+                granted_flags = 0;
+                granted_priority = None;
             }
         }
 
@@ -516,10 +530,10 @@ pub fn resolve_program(path: &[u8], cwd: &[u8]) -> Result<CanonPath, Errno> {
         return Err(Errno::ENAMETOOLONG);
     }
     let (_, canon) = resolve_path_canon_at(trimmed, cwd, RESOLVE_FOLLOW).map_err(|e| match e {
-        VfsError::NotFound | VfsError::NotDirectory => Errno::ENOENT,
+        VfsError::NotFound | VfsError::NotDirectory | VfsError::InvalidPath => Errno::ENOENT,
         VfsError::NameTooLong => Errno::ENAMETOOLONG,
         VfsError::IsDirectory | VfsError::PermissionDenied => Errno::EACCES,
-        VfsError::TooManySymlinks | VfsError::InvalidPath => Errno::ENOEXEC,
+        VfsError::TooManySymlinks => Errno::ELOOP,
         _ => Errno::EIO,
     })?;
     Ok(canon)

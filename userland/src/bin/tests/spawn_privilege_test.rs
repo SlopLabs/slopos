@@ -23,6 +23,9 @@ const UNDEFINED_FLAG: u16 = 1 << SPAWN_RESERVED.trailing_zeros();
 use slopos_userland::syscall::process;
 use slopos_userland::syscall::raw::syscall5;
 
+use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
+
 const EPERM: i32 = -1;
 const EINVAL: i32 = -22;
 const ENOENT: i32 = -2;
@@ -229,12 +232,10 @@ fn granted_binaries_are_sealed() -> bool {
 /// its grant on a caller that may not launch.
 ///
 /// The utest runner spawns test binaries with TASK_FLAG_SYSTEM, which implies
-/// Launch -- so this binary *can* spawn /bin/halt, and that is what the first
-/// half checks. The refusal half is exercised by a grandchild: an ordinary
-/// program spawned from here holds no Launch, and its own attempt to spawn a
-/// privileged path must fail.
+/// Launch -- so this binary *can* spawn a granted path, and that is what the
+/// first half checks. The other half runs in a child of this one, which holds
+/// no Launch: see [`spawns_without_launch`].
 fn launch_bounds_the_raise_site() -> bool {
-    // This caller holds SYSTEM, hence Launch: a privileged spawn succeeds.
     // /bin/halt would power the machine off, so name a path that carries a
     // grant but does nothing on its own -- /bin/keymap, which holds
     // CONSOLE_ADMIN and exits after printing the layout.
@@ -254,10 +255,50 @@ fn launch_bounds_the_raise_site() -> bool {
     }
     let _ = process::waitpid(tid as u32);
 
-    // The refusal half is unreachable here: nothing in the tests image both
-    // attempts a privileged spawn and lacks Launch. Left unasserted rather
-    // than faked — a probe that cannot fail is worse than no probe.
-    true
+    match Command::new(SELF).arg(WITHOUT_LAUNCH).status() {
+        Ok(status) if status.success() => true,
+        other => {
+            eprintln!("spawn_privilege_test: the child without Launch reported {other:?}");
+            false
+        }
+    }
+}
+
+const SELF: &str = "/bin/spawn_privilege_test";
+const WITHOUT_LAUNCH: &str = "--without-launch";
+
+/// Run in a child of the test, which holds no Launch. A granted path it
+/// spawns runs without the grant, as its own `execve` of it would, rather
+/// than being refused: `/bin/sh` is the granted shell, and a `#!/bin/sh`
+/// script loads it too.
+fn spawns_without_launch() -> i32 {
+    // AT_SECURE reads 0 only in an image that ran without its grant.
+    let probe = Command::new("/bin/dl_secure_probe")
+        .args(["self", "/bin/dl_secure_probe", "0"])
+        .status();
+    if !matches!(probe, Ok(status) if status.success()) {
+        eprintln!("spawn_privilege_test: the granted probe ran as {probe:?}");
+        return 1;
+    }
+
+    // SAFETY: nothing else runs in this process yet.
+    unsafe { std::env::set_var("PATH", "/bin") };
+    let sh = Command::new("sh").args(["-c", "exit 7"]).status();
+    if !matches!(&sh, Ok(status) if status.code() == Some(7)) {
+        eprintln!("spawn_privilege_test: `sh -c` without Launch ran as {sh:?}");
+        return 2;
+    }
+
+    let script = "/tmp/spawn_priv_script";
+    let staged = std::fs::write(script, "#!/bin/sh\nexit 9\n").is_ok()
+        && std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).is_ok();
+    let run = staged.then(|| Command::new(script).status());
+    let _ = std::fs::remove_file(script);
+    if !matches!(&run, Some(Ok(status)) if status.code() == Some(9)) {
+        eprintln!("spawn_privilege_test: a #!/bin/sh script without Launch ran as {run:?}");
+        return 3;
+    }
+    0
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[
@@ -307,5 +348,8 @@ fn grant_directories_are_sealed() -> bool {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(WITHOUT_LAUNCH) {
+        std::process::exit(spawns_without_launch());
+    }
     slopos_slibc::test_harness::run(CASES);
 }

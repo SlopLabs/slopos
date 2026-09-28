@@ -42,7 +42,7 @@ pub use exit_info::ExitInfo;
 pub use fs_context::fail_next_cwd_alloc_for_test;
 pub use fs_context::{CWD_MAX, CwdPath, FsContext};
 pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
-pub use kernel_task::{SchedPlacement, SigHandTable};
+pub use kernel_task::{SchedPlacement, SigHandTable, TaskName};
 pub use link_roles::{CleanupRole, FutexRole, ReadyQueueRole, RemoteWakeRole, SiblingRole};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use pcr_ty::HostStack;

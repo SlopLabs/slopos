@@ -345,6 +345,33 @@ impl SchedPlacement {
 // The `offset_of!`-based layout razors live in the kernel-side shim, where the
 // concrete `Task` alias is in scope so `offset_of!` resolves.
 
+/// A task's NUL-padded name. `execve` rewrites it while other CPUs list it, so
+/// a reader racing that rename may see a torn mix of the two names.
+#[repr(transparent)]
+pub struct TaskName([AtomicU8; TASK_NAME_MAX_LEN]);
+
+impl TaskName {
+    pub const fn new() -> Self {
+        Self([const { AtomicU8::new(0) }; TASK_NAME_MAX_LEN])
+    }
+
+    pub fn get(&self) -> [u8; TASK_NAME_MAX_LEN] {
+        core::array::from_fn(|i| self.0[i].load(Ordering::Relaxed))
+    }
+
+    pub fn set(&self, name: &[u8; TASK_NAME_MAX_LEN]) {
+        for (cell, &byte) in self.0.iter().zip(name) {
+            cell.store(byte, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Default for TaskName {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Generic kernel task control block.
 ///
 /// `K` is the kernel-mode stack handle and `U` the SafeStack data ("unsafe")
@@ -365,7 +392,7 @@ pub struct TaskInner<K, U> {
     /// `offset_of!(Task, abi) == 0` razor enforces it.
     pub abi: TaskAbi,
     pub task_id: u32,
-    pub name: [u8; TASK_NAME_MAX_LEN],
+    pub name: TaskName,
     /// Fused (status, reason, epoch) atomic word, so a stale reason can never be
     /// observed outliving its status. Bit layout in `crate::task::state`.
     state: TaskState,
@@ -1301,7 +1328,7 @@ impl<K, U> TaskInner<K, U> {
         Self {
             abi: TaskAbi { unsafe_stack_sp: 0 },
             task_id: INVALID_TASK_ID,
-            name: [0; TASK_NAME_MAX_LEN],
+            name: TaskName::new(),
             state: TaskState::invalid(),
             priority: TaskPriority::Normal,
             flags: 0,

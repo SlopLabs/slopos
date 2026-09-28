@@ -177,7 +177,7 @@ pub(crate) fn terminate_user_task(
     let detail_str = detail.to_str().unwrap_or("<invalid utf-8>");
     let cr2 = fault_addr;
     let (rip, rsp, vec, err) = (frame.rip, frame.rsp, frame.vector, frame.error_code);
-    let name_raw = task_ref.name_bytes();
+    let name_raw = task_ref.name.get();
     let name_len = name_raw
         .iter()
         .position(|&b| b == 0)

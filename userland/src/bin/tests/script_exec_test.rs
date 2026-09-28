@@ -256,19 +256,61 @@ fn a_spawned_script_is_named_after_itself() -> bool {
         eprintln!("script_exec_test: spawn of a script returned {pid}");
         return false;
     }
-    let mut tasks = vec![UserTaskEntry::default(); 1024];
-    let count = sys_core::process_list(&mut tasks).clamp(0, tasks.len() as i64) as usize;
-    let name = tasks[..count]
-        .iter()
-        .find(|t| t.task_id == pid as u32)
-        .map(|t| {
-            let end = t.name.iter().position(|&b| b == 0).unwrap_or(t.name.len());
-            String::from_utf8_lossy(&t.name[..end]).into_owned()
-        });
+    let name = task_name(pid as u32);
     drop(wr);
     let _ = process::wait_exit_code(pid as u32);
     if name.as_deref() != Some("named_probe") {
         eprintln!("script_exec_test: the script's task is named {name:?}");
+        return false;
+    }
+    true
+}
+
+fn task_name(pid: u32) -> Option<String> {
+    let mut tasks = vec![UserTaskEntry::default(); 1024];
+    let count = sys_core::process_list(&mut tasks).clamp(0, tasks.len() as i64) as usize;
+    tasks[..count].iter().find(|t| t.task_id == pid).map(|t| {
+        let end = t.name.iter().position(|&b| b == 0).unwrap_or(t.name.len());
+        String::from_utf8_lossy(&t.name[..end]).into_owned()
+    })
+}
+
+/// `execve` renames the task as spawn names one: after the path it was
+/// given, so a script after itself. Polled, because the forked child still
+/// carries this test's name until its `execve` lands.
+fn an_execed_script_is_named_after_itself() -> bool {
+    let Some(path) = install("exec_named", "#!/bin/sh\nread x\n", 0o755) else {
+        return false;
+    };
+    let Ok((rd, wr)) = slopos_userland::syscall::fs::pipe() else {
+        return false;
+    };
+    let file = format!("{path}\0");
+    let pid = process::fork();
+    if pid == 0 {
+        let _ = slopos_userland::syscall::fs::dup2(rd.raw(), 0);
+        drop((rd, wr));
+        let argv: [*const u8; 2] = [b"exec_named\0".as_ptr(), core::ptr::null()];
+        let envp: [*const u8; 1] = [core::ptr::null()];
+        process::execve(file.as_ptr(), argv.as_ptr(), envp.as_ptr());
+        sys_core::exit_with_code(127);
+    }
+    drop(rd);
+    if pid < 0 {
+        return false;
+    }
+    let mut name = None;
+    for _ in 0..2000 {
+        name = task_name(pid as u32);
+        if name.as_deref() == Some("exec_named") {
+            break;
+        }
+        sys_core::sleep_ms(1);
+    }
+    drop(wr);
+    let _ = process::wait_exit_code(pid as u32);
+    if name.as_deref() != Some("exec_named") {
+        eprintln!("script_exec_test: the exec'd script's task is named {name:?}");
         return false;
     }
     true
@@ -311,6 +353,10 @@ fn main() {
         (
             "a_spawned_script_is_named_after_itself",
             a_spawned_script_is_named_after_itself,
+        ),
+        (
+            "an_execed_script_is_named_after_itself",
+            an_execed_script_is_named_after_itself,
         ),
     ]);
 }
