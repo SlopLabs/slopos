@@ -51,10 +51,17 @@ pub fn stdout_of(mut cmd: Command, what: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The host's `HEAD`, checked out in a tree by [`take_host_head`], and what the
+/// tree had checked out before: its branch, or its commit when detached.
+pub struct HostHead {
+    pub commit: String,
+    pub before: String,
+}
+
 /// Check out the host checkout's `HEAD` in the tree at `root`, as its
-/// developer takes the host's commits, and answer it. A tree with uncommitted
-/// edits is refused: they would be built with it.
-pub fn take_host_head(root: &str) -> Result<String, String> {
+/// developer takes the host's commits. A tree with uncommitted edits is
+/// refused: they would be built with it.
+pub fn take_host_head(root: &str) -> Result<HostHead, String> {
     let edits = stdout_of(
         git(
             root,
@@ -66,6 +73,16 @@ pub fn take_host_head(root: &str) -> Result<String, String> {
     if !edits.is_empty() {
         return Err(format!("the tree carries uncommitted edits:\n{edits}"));
     }
+    let before = stdout_of(
+        git(root, root, &["symbolic-ref", "-q", "--short", "HEAD"]),
+        "git symbolic-ref HEAD",
+    )
+    .or_else(|_| {
+        stdout_of(
+            git(root, root, &["rev-parse", "HEAD"]),
+            "git rev-parse HEAD",
+        )
+    })?;
     stdout_of(
         git(root, root, &["fetch", "-q", "origin", "HEAD"]),
         "git fetch origin HEAD",
@@ -74,9 +91,21 @@ pub fn take_host_head(root: &str) -> Result<String, String> {
         git(root, root, &["checkout", "-q", "--detach", "FETCH_HEAD"]),
         "git checkout FETCH_HEAD",
     )?;
-    stdout_of(
+    let commit = stdout_of(
         git(root, root, &["rev-parse", "HEAD"]),
         "git rev-parse HEAD",
+    )?;
+    Ok(HostHead {
+        commit: commit.trim().to_owned(),
+        before: before.trim().to_owned(),
+    })
+}
+
+/// Check `what`, a [`HostHead::before`], out again in the tree at `root`.
+pub fn check_out(root: &str, what: &str) -> Result<(), String> {
+    stdout_of(
+        git(root, root, &["checkout", "-q", what, "--"]),
+        "git checkout",
     )
-    .map(|commit| commit.trim().to_owned())
+    .map(drop)
 }

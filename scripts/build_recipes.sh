@@ -164,10 +164,10 @@ GUEST_PREFIX="/devel/src/slopos/$TP_SYSROOT_REL"
 eval "$(rbs_llvm_archivers "$LLVM_AR")" || die "no llvm-ranlib beside $LLVM_AR"
 LLVM_AR="$RBS_AR"
 LLVM_RANLIB="$RBS_RANLIB"
-for tool in cmake meson ninja make perl; do
+for tool in cmake meson ninja make perl pkg-config; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is required to build the recipes"
 done
-HOST_TOOLS="$(cmake --version | head -n 1; meson --version; ninja --version; make --version | head -n 1; perl -e 'print "perl $]\n"')"
+HOST_TOOLS="$(cmake --version | head -n 1; meson --version; ninja --version; make --version | head -n 1; perl -e 'print "perl $]\n"'; pkg-config --version)"
 
 CROSS_STAMP="$(BUILD_DIR="$BUILD_DIR" "$SCRIPT_DIR/make_slopos_cross.sh" --print-stamp)" ||
     die "the cross compiler's inputs are not there — see above"

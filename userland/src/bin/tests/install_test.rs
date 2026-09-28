@@ -4,8 +4,9 @@
 //! non-volatile UEFI variable says which stage the last boot reached.
 //!
 //! 0 (booted `slopos-a`): with a dev disk at `/devel`, check out the host's
-//!   `HEAD` there, build the tests kernel under a fresh build tag and install
-//!   it into slot b; without one, clone slot a into b. Boot b once.
+//!   `HEAD` there, build the tests kernel under a fresh build tag, install it
+//!   into slot b and return the tree to its own checkout; without one, clone
+//!   slot a into b. Boot b once.
 //! 1 (booted `slopos-b`, default still a): the running kernel carries the tag
 //!   stage 0 built it with, if it built one, and then commits a change on the
 //!   host's `HEAD` and pushes it to the host; commit b, boot `slopos-bad` once
@@ -18,7 +19,9 @@
 use slopos_userland as _;
 
 use slopos_slibc::test_harness::note;
-use slopos_userland::devdisk::{DEVEL, git, selfhost, stdout_of, take_host_head, workspace};
+use slopos_userland::devdisk::{
+    DEVEL, check_out, git, selfhost, stdout_of, take_host_head, workspace,
+};
 use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
 use slopos_userland::syscall::efi::{efivar_get, efivar_set};
@@ -105,8 +108,9 @@ fn running_version() -> String {
     String::from_utf8_lossy(&uts.version[..len]).into_owned()
 }
 
-/// Build the host's `HEAD` on the dev disk under a fresh tag and install it
-/// into slot b; `None` when no dev disk is attached.
+/// Build the host's `HEAD` on the dev disk under a fresh tag, install it into
+/// slot b and check the tree's own checkout out again; `None` when no dev
+/// disk is attached.
 fn install_guest_build() -> Option<bool> {
     let root = match workspace() {
         Ok(root) => root,
@@ -115,30 +119,36 @@ fn install_guest_build() -> Option<bool> {
             return None;
         }
     };
-    match take_host_head(&root) {
-        Ok(commit) => println!("INSTALL-COMMIT {commit}"),
+    let head = match take_host_head(&root) {
+        Ok(head) => head,
         Err(why) => {
             note(&why);
             return Some(false);
         }
-    }
+    };
+    println!("INSTALL-COMMIT {}", head.commit);
     let tag = format!("guest-{}", clock_gettime_ns());
     let _ = std::fs::remove_file(format!("{root}/builddir/kernel-tests.elf"));
     let started = Instant::now();
     let status = selfhost(&root, &["install", "tests"])
         .env("SLOPOS_BUILD_TAG", &tag)
         .status();
+    let returned = check_out(&root, &head.before);
     if !matches!(status, Ok(s) if s.success()) {
         note(&format!("selfhost.sh install tests: {status:?}"));
+        return Some(false);
+    }
+    if let Err(why) = returned {
+        note(&why);
         return Some(false);
     }
     println!("INSTALL-BUILT {tag} in {} s", started.elapsed().as_secs());
     Some(set_var(TAG, tag.as_bytes()))
 }
 
-/// Commit a change on the tree's checkout in a scratch clone, which leaves
-/// the developer's tree alone, and push it to the tree's `host` remote as
-/// `install-test/<tag>`.
+/// Commit a change on the host `HEAD` stage 0 fetched in a scratch clone,
+/// which leaves the developer's tree alone, and push it to the tree's `host`
+/// remote as `install-test/<tag>`.
 fn push_guest_commit(tag: &str) -> Result<String, String> {
     let root = workspace().map_err(str::to_owned)?;
     let clone = format!("{DEVEL}/ladder/install-push");
@@ -147,9 +157,25 @@ fn push_guest_commit(tag: &str) -> Result<String, String> {
         git(&root, &root, &["remote", "get-url", "--push", "host"]),
         "git remote",
     )?;
+    let fetched = stdout_of(
+        git(&root, &root, &["rev-parse", "FETCH_HEAD"]),
+        "git rev-parse",
+    )?;
     stdout_of(
-        git(&root, &root, &["clone", "-q", "--shared", &root, &clone]),
+        git(
+            &root,
+            &root,
+            &["clone", "-q", "--shared", "--no-checkout", &root, &clone],
+        ),
         "git clone",
+    )?;
+    stdout_of(
+        git(
+            &root,
+            &clone,
+            &["checkout", "-q", "--detach", fetched.trim()],
+        ),
+        "git checkout",
     )?;
     std::fs::write(format!("{clone}/GUEST-COMMIT"), format!("{tag}\n"))
         .map_err(|e| format!("writing GUEST-COMMIT: {e}"))?;

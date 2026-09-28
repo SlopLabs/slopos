@@ -478,9 +478,11 @@ if [ -n "$GIT_PUSH_REPO" ]; then
         /*) ;;
         *) echo "qemu_run.sh: GIT_PUSH_REPO=$GIT_PUSH_REPO is not an absolute path" >&2; exit 1 ;;
     esac
+    # QEMU splits options on commas, libslirp parses the command as a shell
+    # line, and the daemon expands `%` in its path template.
     for path in "$REPO_ROOT" "$GIT_PUSH_REPO"; do
         case "$path" in
-            *[,\'\"\\[:space:]]*) echo "qemu_run.sh: QEMU's option syntax cannot carry the path $path" >&2; exit 1 ;;
+            *[,%\'\"\\[:space:]]*) echo "qemu_run.sh: the git peer cannot serve the path $path" >&2; exit 1 ;;
         esac
     done
     [ -d "$GIT_PUSH_REPO" ] || git init -q --bare "$GIT_PUSH_REPO"

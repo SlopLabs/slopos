@@ -366,6 +366,11 @@ MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
         echo "toolchain $TOOLCHAIN_REL"
         inventory "$TOOLCHAIN_REL/bin" "$TOOLCHAIN_STAGE/bin" 1
         inventory "$TOOLCHAIN_REL/lib" "$TOOLCHAIN_STAGE/lib" 1
+        # `bin/git` is a symlink the walk above skips; the program is here.
+        for dir in "$TOOLCHAIN_STAGE"/libexec/*/; do
+            [ -d "$dir" ] || continue
+            inventory "$TOOLCHAIN_REL/libexec/$(basename "$dir")" "$dir" 1
+        done
     fi
 } >"$MARKER_FILE"
 
