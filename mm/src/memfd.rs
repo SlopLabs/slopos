@@ -12,7 +12,7 @@ use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::{S_IFREG, UserFsStat};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::pixel::PixelFormat;
-use slopos_abi::quota::{CommitPagesAxis, ObjectRow};
+use slopos_abi::quota::{CommitPagesAxis, ObjectRow, ResidentPagesAxis};
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::frame::{claim_owned_anon_page, release_owned_anon_page};
@@ -58,6 +58,9 @@ pub struct MemfdObject {
     map_count: u32,
     /// The backing pages' promise against the commit ceiling, the sizer's.
     commit: ChargeSlot<CommitPagesAxis>,
+    /// The backing pages as frames held, the sizer's too, and nobody's who
+    /// only maps them.
+    frames: ChargeSlot<ResidentPagesAxis>,
 }
 
 static MEMFD_REGISTRY: SpinLock<Option<HandleTable<MemfdObject>>> =
@@ -153,6 +156,7 @@ pub fn memfd_create(
             refcount: 1,
             map_count: 0,
             commit: ChargeSlot::empty(),
+            frames: ChargeSlot::empty(),
         })
         .ok()
         .map(|h| h.pack(SLOT_BITS))
@@ -173,7 +177,7 @@ pub fn memfd_create(
 
 /// Set the size of a memfd; one-shot, refused once the size is non-zero.
 /// Allocates the contiguous physical pages eagerly, promised against
-/// `account`'s commit first.
+/// `account`'s commit first and held as `account`'s frames.
 pub fn memfd_ftruncate(handle: usize, size: usize, account: AccountId) -> c_int {
     let h = handle_from_raw(handle);
     if size == 0 || size > MAX_MEMFD_SIZE {
@@ -184,6 +188,9 @@ pub fn memfd_ftruncate(handle: usize, size: usize, account: AccountId) -> c_int 
     let page_count = (aligned_size / PAGE_SIZE_4KB as usize) as u32;
 
     let Ok(commit) = try_charge::<CommitPagesAxis>(account, page_count) else {
+        return Errno::ENOMEM.raw();
+    };
+    let Ok(frames) = try_charge::<ResidentPagesAxis>(account, page_count) else {
         return Errno::ENOMEM.raw();
     };
     let phys = alloc_kernel_pages(page_count);
@@ -225,6 +232,7 @@ pub fn memfd_ftruncate(handle: usize, size: usize, account: AccountId) -> c_int 
             obj.size = aligned_size;
             obj.pages = page_count;
             obj.commit.put(commit);
+            obj.frames.put(frames);
             // Published under the lock, in lock-step with the table view, so a
             // lock-free reader never sees a sized memfd with a zeroed atomic.
             MEMFD_PHYS[slot].store(phys.as_u64(), Ordering::Release);
@@ -306,6 +314,22 @@ pub fn memfd_release(handle: usize) {
         }
         try_cleanup(t, h);
     });
+}
+
+/// Hand every memfd `dying` sized to the account `dying` debits through. The
+/// sizer's process is gone, but the frames stay while any fd or mapping holds
+/// them, and a charge left on its account would be credited back out of every
+/// ancestor when that account is released: memory the ceiling and the killer
+/// no longer see.
+pub(crate) fn memfd_bequeath(dying: AccountId) {
+    let registry = MEMFD_REGISTRY.lock();
+    let Some(table) = registry.as_ref() else {
+        return;
+    };
+    for (_, object) in table.iter() {
+        object.commit.bequeath(dying);
+        object.frames.bequeath(dying);
+    }
 }
 
 pub fn memfd_size(handle: usize) -> usize {

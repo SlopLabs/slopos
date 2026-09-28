@@ -10,14 +10,16 @@
 //! while a victim is still dying nobody picks a second, and a victim that
 //! frees nothing within [`VICTIM_GRACE_MS`] stops holding the others back.
 //!
-//! The victim is the process whose own account owes the most committed pages
-//! — its private mappings, the forked pages it holds as its own, and every
-//! memfd it sized, mapped or not. A shared page is charged once, to whoever
-//! sized it, so mapping another process's memory never makes the mapper the
-//! victim. Among them, the processes the writer could `kill` come first; one
-//! holding privileged flags the writer lacks is taken only when none of those
-//! owes anything, and init, like a kernel task, which has no address space,
-//! never is.
+//! The victim is the process whose own account holds the most of what the
+//! write found missing: frames for an empty buddy, committed pages for a full
+//! ceiling. A frame shortage is not served by killing a process that promised
+//! itself a gigabyte and touched none of it, nor a full ceiling by killing one
+//! whose frames were promised to someone else. Either measure counts a memfd
+//! toward whoever sized it, mapped or not, and a shared page toward no mapper,
+//! so mapping another process's memory never makes the mapper the victim. Only
+//! a process the writer could `kill` is ever taken: one holding privileged
+//! flags the writer lacks is as safe from the killer as from the writer, and
+//! init, like a kernel task, which has no address space, never is.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -49,6 +51,22 @@ impl OomTrigger {
             Self::Frames => "no free frame after reclaim",
         }
     }
+
+    /// The ledger row a victim is weighed by: what its death gives back to a
+    /// write that found this missing.
+    fn weight(self) -> ResourceKind {
+        match self {
+            Self::Commit => ResourceKind::CommitPages,
+            Self::Frames => ResourceKind::ResidentPages,
+        }
+    }
+
+    fn measure(self) -> &'static str {
+        match self {
+            Self::Commit => "committed pages",
+            Self::Frames => "frames",
+        }
+    }
 }
 
 /// Where a process stands with the killer, as seen from the writer it serves.
@@ -59,7 +77,8 @@ pub enum Standing {
     /// Every task already killed or gone: a second kill frees nothing sooner.
     Dying,
     /// Holds privileged flags the writer lacks, which `kill` would refuse it:
-    /// taken only when no [`Killable`](Self::Killable) process owes anything.
+    /// never a victim of this writer's write, as `oom_score_adj=-1000` is
+    /// never one on Linux.
     Shielded,
     Killable,
 }
@@ -157,8 +176,9 @@ pub enum OomVerdict {
     /// Write again: memory was freed, a victim died or is dying, or the writer
     /// is itself killed and unwinds before it gets there.
     Retry,
-    /// Nothing may be killed — only init, the dying and processes owing no
-    /// committed page are left — so the write cannot be served.
+    /// Nothing may be killed — only init, the dying, processes the writer may
+    /// not signal and processes holding none of what is missing are left — so
+    /// the write cannot be served.
     Unresolved,
 }
 
@@ -174,6 +194,10 @@ pub fn out_of_memory(trigger: OomTrigger) -> OomVerdict {
     let Some(ops) = ops() else {
         return OomVerdict::Unresolved;
     };
+    serve(ops, trigger)
+}
+
+fn serve(ops: &dyn OomOps, trigger: OomTrigger) -> OomVerdict {
     let awaited = match decide(ops, trigger) {
         Decision::Await(vm) => vm,
         Decision::Abandoned => return OomVerdict::Retry,
@@ -190,6 +214,13 @@ pub fn out_of_memory(trigger: OomTrigger) -> OomVerdict {
         // for memory the victim is still returning.
         Err(WaitAbort::NoRuntime | WaitAbort::Interrupted) => OomVerdict::Retry,
     }
+}
+
+/// What [`out_of_memory`] answers a write once reclaim has failed, with `ops`
+/// as the task side.
+#[cfg(feature = "test-hooks")]
+pub fn oom_serve_for_test(ops: &dyn OomOps, trigger: OomTrigger) -> OomVerdict {
+    serve(ops, trigger)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,7 +248,7 @@ pub(crate) fn decide(ops: &dyn OomOps, trigger: OomTrigger) -> Decision {
         }
         *current = None;
     }
-    let Some(chosen) = choose_victim(ops) else {
+    let Some(chosen) = choose_victim(ops, trigger) else {
         report_no_victim(trigger);
         return Decision::NoVictim;
     };
@@ -254,8 +285,8 @@ pub fn oom_decide_for_test(ops: &dyn OomOps, trigger: OomTrigger) -> Option<Hand
 
 /// The address space [`decide`] would take next, with nothing killed.
 #[cfg(feature = "test-hooks")]
-pub fn oom_choose_for_test(ops: &dyn OomOps) -> Option<Handle<ProcessVm>> {
-    choose_victim(ops).map(|candidate| candidate.vm)
+pub fn oom_choose_for_test(ops: &dyn OomOps, trigger: OomTrigger) -> Option<Handle<ProcessVm>> {
+    choose_victim(ops, trigger).map(|candidate| candidate.vm)
 }
 
 /// Forget the victim being waited for, so a test starts from none.
@@ -276,41 +307,36 @@ pub fn oom_expire_victim_for_test() {
     }
 }
 
-/// A process the killer may take, with what its own account owes.
+/// A process the killer may take, with how much of the missing kind its own
+/// account holds.
 pub(crate) struct Candidate {
     pub vm: Handle<ProcessVm>,
     pub process: KArc<Process>,
-    pub owed: u32,
-    pub standing: Standing,
+    pub held: u32,
 }
 
-/// The process whose own account owes the most committed pages among those
-/// the writer may kill or, only when none of those owes any, among those
-/// shielded from it. A tie goes to the one met first, and a process owing
-/// nothing is never worth a kill: killing it would free no promise.
-pub(crate) fn choose_victim(ops: &dyn OomOps) -> Option<Candidate> {
-    let mut killable: Option<Candidate> = None;
-    let mut shielded: Option<Candidate> = None;
+/// The process the writer may kill whose own account holds the most of what
+/// `trigger` found missing. A tie goes to the one met first, and a process
+/// holding none is never worth a kill: killing it would free nothing the
+/// write is waiting for.
+pub(crate) fn choose_victim(ops: &dyn OomOps, trigger: OomTrigger) -> Option<Candidate> {
+    let weight = trigger.weight();
+    let mut best: Option<Candidate> = None;
     for_each_bound(|vm, process| {
-        let owed = held_by(process.account(), ResourceKind::CommitPages);
-        let outranks = |best: &Option<Candidate>| best.as_ref().is_none_or(|b| owed > b.owed);
-        if owed == 0 || !outranks(&killable) {
+        let held = held_by(process.account(), weight);
+        if held == 0 || best.as_ref().is_some_and(|b| b.held >= held) {
             return;
         }
-        let standing = ops.standing(process);
-        let best = match standing {
-            Standing::Killable => &mut killable,
-            Standing::Shielded if killable.is_none() && outranks(&shielded) => &mut shielded,
-            _ => return,
-        };
-        *best = Some(Candidate {
+        if ops.standing(process) != Standing::Killable {
+            return;
+        }
+        best = Some(Candidate {
             vm,
             process: process.clone(),
-            owed,
-            standing,
+            held,
         });
     });
-    killable.or(shielded)
+    best
 }
 
 /// Out of line and `#[cold]`: `format_args!` builds its argument array in the
@@ -323,17 +349,12 @@ fn report_kill(killed: &Killed, chosen: &Candidate, trigger: OomTrigger) {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(killed.name.len());
-    let resort = if chosen.standing == Standing::Shielded {
-        " (privileged: nothing the writer may signal owed a page)"
-    } else {
-        ""
-    };
     klog_warn!(
-        "OOM: killed pid {} ('{}') owing {} committed pages{}: {}",
+        "OOM: killed pid {} ('{}') holding {} {}: {}",
         killed.pid,
         core::str::from_utf8(&killed.name[..len]).unwrap_or("?"),
-        chosen.owed,
-        resort,
+        chosen.held,
+        trigger.measure(),
         trigger.describe()
     );
 }
@@ -352,7 +373,8 @@ fn report_stuck_victim(pid: u32, held_ms: u64) {
 #[inline(never)]
 fn report_no_victim(trigger: OomTrigger) {
     klog_warn!(
-        "OOM: {} and nothing is left to kill; the write fails",
-        trigger.describe()
+        "OOM: {} and nothing the writer may kill holds any {}; the write fails",
+        trigger.describe(),
+        trigger.measure()
     );
 }

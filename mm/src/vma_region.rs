@@ -320,6 +320,16 @@ impl VmaRegion {
         matches!(self.backing, RegionBacking::Ring)
     }
 
+    /// `true` iff an object elsewhere owns the frames and this region maps
+    /// every one of them from its `mmap` to its unmap: a shared memfd, a ring.
+    /// Its leaves are that object's frames, counted toward whoever sized it.
+    pub fn borrows_frames(&self) -> bool {
+        matches!(
+            self.backing,
+            RegionBacking::SharedMemfd { .. } | RegionBacking::Ring
+        )
+    }
+
     pub fn memfd_handle(&self) -> Option<MemfdHandle> {
         match &self.backing {
             RegionBacking::SharedMemfd { handle } => Some(*handle),
@@ -415,6 +425,9 @@ pub struct VmaMap {
     mapped_pages: u32,
     extent_pages: u32,
     frame_pages: u32,
+    /// Pages spanned by regions that [borrow their frames](VmaRegion::borrows_frames),
+    /// which are exactly their present leaves.
+    borrowed_pages: u32,
     /// Commit advanced to the loader ahead of the frames it will place.
     prepaid: u32,
     /// The account [`mapped_pages`](Self::mapped_pages) is charged to, kept
@@ -422,8 +435,9 @@ pub struct VmaMap {
     account: AccountId,
     charge: ChargeSlot<PagesAxis>,
     commit: ChargeSlot<CommitPagesAxis>,
-    /// Resident pages, synced from the address space's own leaf count: the
-    /// cursor is the only place a user leaf appears, so a second count drifts.
+    /// Frames this address space holds as its own: the address space's count
+    /// of present user leaves, synced, less the leaves of the objects it
+    /// borrows, whose frames are their sizer's.
     resident: ChargeSlot<ResidentPagesAxis>,
     /// The most leaves this process has held at once, across `execve`.
     peak_resident: u32,
@@ -437,6 +451,7 @@ impl VmaMap {
             extent_pages: 0,
             prepaid: 0,
             frame_pages: 0,
+            borrowed_pages: 0,
             account: AccountId::NONE,
             charge: ChargeSlot::empty(),
             commit: ChargeSlot::empty(),
@@ -484,21 +499,23 @@ impl VmaMap {
     }
 
     /// Bring the resident charge in line with the address space's own count of
-    /// present user leaves.
+    /// present user leaves, less those of the objects it borrows. Charged to
+    /// the mapper, a shared page would let any process that can hand another a
+    /// memfd make that process the heaviest.
     ///
     /// Called leaving every hold of the per-process lock, so the ledger lags a
     /// mapping change by at most one hold. The axis is unlimited by default: a
     /// report of what is held, not a second ceiling on top of `Pages`.
     pub fn sync_resident(&mut self, resident: u32) {
         self.peak_resident = self.peak_resident.max(resident);
+        let own = resident.saturating_sub(self.borrowed_pages);
         let held = self.resident.amount();
-        if resident > held {
-            if let Ok(reservation) = try_charge::<ResidentPagesAxis>(self.account, resident - held)
-            {
+        if own > held {
+            if let Ok(reservation) = try_charge::<ResidentPagesAxis>(self.account, own - held) {
                 self.resident.grow(reservation);
             }
-        } else if resident < held {
-            self.resident.shrink(held - resident);
+        } else if own < held {
+            self.resident.shrink(held - own);
         }
     }
 
@@ -583,6 +600,9 @@ impl VmaMap {
         if region.commit == Commit::Extent {
             self.extent_pages = self.extent_pages.saturating_add(pages);
         }
+        if region.borrows_frames() {
+            self.borrowed_pages = self.borrowed_pages.saturating_add(pages);
+        }
         self.map.insert(start, (end, region));
     }
 
@@ -593,6 +613,9 @@ impl VmaMap {
         self.mapped_pages = self.mapped_pages.saturating_sub(pages);
         if region.commit == Commit::Extent {
             self.extent_pages = self.extent_pages.saturating_sub(pages);
+        }
+        if region.borrows_frames() {
+            self.borrowed_pages = self.borrowed_pages.saturating_sub(pages);
         }
         Some((end, region))
     }
@@ -999,6 +1022,7 @@ impl VmaMap {
         self.mapped_pages = 0;
         self.extent_pages = 0;
         self.frame_pages = 0;
+        self.borrowed_pages = 0;
         self.prepaid = 0;
         self.charge.take();
         self.commit.take();

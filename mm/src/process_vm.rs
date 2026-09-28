@@ -1827,10 +1827,13 @@ impl Drop for Unbound {
 
         // Retired after the unbind, so the id outlives every translation to the
         // address space it named.
-        if let Some(process) = self.process.as_ref()
-            && let Some(handle) = process.handle()
-        {
-            slopos_ostd::process::process_retire(handle);
+        if let Some(process) = self.process.as_ref() {
+            // No task of the process is left to size another, and its account
+            // is still live, so the hand-over reaches a row.
+            crate::memfd::memfd_bequeath(process.account());
+            if let Some(handle) = process.handle() {
+                slopos_ostd::process::process_retire(handle);
+            }
         }
     }
 }
@@ -2012,17 +2015,24 @@ pub fn get_process_vm_stats() -> ProcessVmStats {
     }
 }
 
-/// Visit every bound address space with its process. `f` runs off the slot
-/// lock, so it may take locks the address-space operations are ordered after.
+/// Visit every bound address space with its process, its resident charge
+/// brought up to date first: a hold that mapped or unmapped without syncing
+/// would otherwise leave the ledger's frames stale until the next one. `f`
+/// runs off the slot lock, so it may take locks the address-space operations
+/// are ordered after.
 pub(crate) fn for_each_bound(mut f: impl FnMut(Handle<ProcessVm>, &KArc<Process>)) {
     for (slot, vm) in PROCESS_VMS.iter().enumerate() {
         let seen = {
-            let guard = vm.lock();
+            let mut guard = vm.lock();
             match (&guard.process, &guard.vm_space) {
-                (Some(process), Some(_)) => Some((
-                    Handle::from_parts(slot as u32, guard.generation),
-                    process.clone(),
-                )),
+                (Some(process), Some(_)) => {
+                    let seen = (
+                        Handle::from_parts(slot as u32, guard.generation),
+                        process.clone(),
+                    );
+                    guard.sync_resident_charge();
+                    Some(seen)
+                }
                 _ => None,
             }
         };

@@ -644,6 +644,34 @@ pub(super) fn refund_raw(account: AccountId, kind: ResourceKind, n: u32) {
     });
 }
 
+/// Move `n` units of `kind` held as `from`'s own to the account `from` debits
+/// through, answering that heir, or [`AccountId::NONE`] when `from` names no
+/// live row or is the root. Every ancestor of `from` already counts the amount,
+/// so only two rows move: `from` stops holding it, and its heir holds it as
+/// its own. No ceiling is consulted — every level admitted the amount when it
+/// was charged — and each row's `used` stays at least what debits through it.
+pub(super) fn bequeath_raw(from: AccountId, kind: ResourceKind, n: u32) -> AccountId {
+    walk(|| {
+        let Some(row) = row_for(from) else {
+            return AccountId::NONE;
+        };
+        let heir = parent_of(row);
+        let Some(heir_row) = row_for(heir) else {
+            return AccountId::NONE;
+        };
+        if n != 0 {
+            release_own(row, kind, n);
+            release_row(row, kind, n);
+            let _ = heir_row.own[kind.index()].try_update(
+                Ordering::Release,
+                Ordering::Relaxed,
+                |own| Some(own.saturating_add(n)),
+            );
+        }
+        heir
+    })
+}
+
 /// Credit `used` on `from` and every ancestor, leaving every `own` alone: the
 /// charge being credited was not `from`'s own.
 fn credit_chain(from: AccountId, kind: ResourceKind, n: u32) {

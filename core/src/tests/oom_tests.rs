@@ -1,6 +1,6 @@
 //! The task side of the OOM killer: init is never a victim, a process whose
 //! tasks are all killed is already dying, a process the writer could not
-//! signal is taken last, and a kill is the kill flag.
+//! signal is never taken, and a kill is the kill flag.
 
 use core::ffi::c_char;
 use core::ptr;
@@ -13,8 +13,8 @@ use slopos_abi::task::{
 use slopos_mm::memfd::{memfd_create, memfd_ftruncate};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::oom::{
-    Killed, OomOps, OomTrigger, Standing, oom_choose_for_test, oom_decide_for_test,
-    oom_forget_victim_for_test,
+    Killed, OomOps, OomTrigger, OomVerdict, Standing, oom_choose_for_test, oom_decide_for_test,
+    oom_forget_victim_for_test, oom_serve_for_test,
 };
 use slopos_mm::page_fault::{FaultOutcome, try_resolve_user_fault};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
@@ -276,21 +276,20 @@ fn sized_memfd(account: AccountId, pages: usize) -> Option<(usize, KArc<dyn File
         .then_some((handle, backing))
 }
 
-/// SLOPOS-2026-0058's scenario. An ungranted process holds a memfd it never
-/// mapped and a surface a privileged one maps beside a few pages of its own,
-/// so that one counts every surface page as resident, and the ungranted
-/// process's write finds the ceiling full. Both memfds are the ungranted
-/// process's promises: it is taken, and the process it could not signal is
-/// left alone.
-pub fn test_oom_takes_the_holder_not_the_privileged_mapper() -> TestResult {
+/// SLOPOS-2026-0058's scenario. One process holds a memfd it never mapped and
+/// a surface another maps beside a few pages of its own, so that one counts
+/// every surface page among its present leaves. Both memfds are the holder's
+/// promises and the holder's frames: it is taken whichever ran short, and the
+/// mapper is not.
+pub fn test_oom_takes_the_holder_not_the_mapper() -> TestResult {
     const HOARD: usize = 48;
     const SURFACE: usize = 64;
     let _scope = KernelTestScope::new();
 
-    let (Some(writer), Some(mapper)) = (Member::spawn(UNGRANTED), Member::spawn(PRIVILEGED)) else {
+    let (Some(holder), Some(mapper)) = (Member::spawn(UNGRANTED), Member::spawn(UNGRANTED)) else {
         return fail!("could not create the two user tasks");
     };
-    let account = writer.process.account();
+    let account = holder.process.account();
     let hoard = sized_memfd(account, HOARD);
     let sized = hoard.is_some();
     let surface = sized_memfd(account, SURFACE);
@@ -306,51 +305,46 @@ pub fn test_oom_takes_the_holder_not_the_privileged_mapper() -> TestResult {
         ) != 0
     });
     let working = touch_fresh_pages(mapper.designator, mapper.task_id, 4);
-    let (writer_vm, mapper_vm) = (writer.vm(), mapper.vm());
+    let (holder_vm, mapper_vm) = (holder.vm(), mapper.vm());
 
-    oom_forget_victim_for_test();
     let ops = Among {
-        members: [writer.pid(), mapper.pid()],
+        members: [holder.pid(), mapper.pid()],
         writer: UNGRANTED,
     };
-    let awaited = oom_decide_for_test(&ops, OomTrigger::Commit);
-    oom_forget_victim_for_test();
-    let (writer_killed, mapper_killed) = (writer.killed(), mapper.killed());
+    let for_commit = oom_choose_for_test(&ops, OomTrigger::Commit);
+    let for_frames = oom_choose_for_test(&ops, OomTrigger::Frames);
 
     drop(mapper);
-    drop(writer);
+    drop(holder);
     drop(surface);
     drop(hoard);
 
     assert_test!(
-        sized && mapped && working && writer_vm.is_some() && mapper_vm.is_some(),
+        sized && mapped && working && holder_vm.is_some() && mapper_vm.is_some(),
         "could not size the memfds, map the surface and touch the mapper's pages"
     );
     assert_test!(
-        awaited == writer_vm && writer_killed,
-        "the killer awaited {:?} (the writer is {:?}, the mapper {:?}); writer killed: {}",
-        awaited,
-        writer_vm,
-        mapper_vm,
-        writer_killed
-    );
-    assert_test!(
-        !mapper_killed,
-        "the privileged mapper was killed for memory it only mapped"
+        for_commit == holder_vm && for_frames == holder_vm,
+        "the killer chose {:?} for the ceiling and {:?} for the frames (the holder is \
+         {:?}, the mapper {:?})",
+        for_commit,
+        for_frames,
+        holder_vm,
+        mapper_vm
     );
     pass!()
 }
 
 slopos_testing::stest!(
-    name = test_oom_takes_the_holder_not_the_privileged_mapper,
+    name = test_oom_takes_the_holder_not_the_mapper,
     suite = oom_killer
 );
 
-/// However much more a privileged process owes, a writer that could not
-/// signal it takes what it may signal first; a writer holding its flags
-/// weighs it like any other; and when it is the only process owing anything,
-/// it is taken rather than the write failing.
-pub fn test_oom_takes_a_process_the_writer_may_not_signal_only_last() -> TestResult {
+/// A process holding privileged flags the writer lacks is never taken for it,
+/// however much it holds: with nothing else left the write fails — the
+/// writer's `UserOom` — and the privileged process lives. A writer holding
+/// those flags weighs it like any other.
+pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult {
     const OWN: usize = 16;
     const PRIVATE: u64 = 64;
     let _scope = KernelTestScope::new();
@@ -359,21 +353,32 @@ pub fn test_oom_takes_a_process_the_writer_may_not_signal_only_last() -> TestRes
     else {
         return fail!("could not create the two user tasks");
     };
-    let own = sized_memfd(writer.process.account(), OWN);
+    let own = sized_memfd(privileged.process.account(), OWN);
     let sized = own.is_some();
     let touched = touch_fresh_pages(privileged.designator, privileged.task_id, PRIVATE);
     let (writer_vm, privileged_vm) = (writer.vm(), privileged.vm());
     let both = [writer.pid(), privileged.pid()];
 
-    let as_ungranted = oom_choose_for_test(&Among {
-        members: both,
-        writer: UNGRANTED,
-    });
-    let as_privileged = oom_choose_for_test(&Among {
-        members: both,
-        writer: PRIVILEGED,
-    });
-    let last_resort = oom_choose_for_test(&Among::one(privileged.pid(), UNGRANTED));
+    let as_ungranted = oom_choose_for_test(
+        &Among {
+            members: both,
+            writer: UNGRANTED,
+        },
+        OomTrigger::Commit,
+    );
+    let as_privileged = oom_choose_for_test(
+        &Among {
+            members: both,
+            writer: PRIVILEGED,
+        },
+        OomTrigger::Commit,
+    );
+    let alone = Among::one(privileged.pid(), UNGRANTED);
+    oom_forget_victim_for_test();
+    let for_commit = oom_serve_for_test(&alone, OomTrigger::Commit);
+    let for_frames = oom_serve_for_test(&alone, OomTrigger::Frames);
+    oom_forget_victim_for_test();
+    let privileged_killed = privileged.killed();
 
     drop(privileged);
     drop(writer);
@@ -381,11 +386,11 @@ pub fn test_oom_takes_a_process_the_writer_may_not_signal_only_last() -> TestRes
 
     assert_test!(
         sized && touched && writer_vm.is_some() && privileged_vm.is_some(),
-        "could not make the privileged process owe its pages"
+        "could not make the privileged process hold its pages"
     );
     assert_test!(
         as_ungranted == writer_vm,
-        "an ungranted writer's killer chose {:?}, want the writer's {:?}, not the \
+        "an ungranted writer's killer chose {:?}, want the writer's own {:?}, not the \
          privileged {:?}",
         as_ungranted,
         writer_vm,
@@ -398,15 +403,20 @@ pub fn test_oom_takes_a_process_the_writer_may_not_signal_only_last() -> TestRes
         privileged_vm
     );
     assert_test!(
-        last_resort == privileged_vm,
-        "with nothing else owing, chose {:?}, want the privileged {:?}",
-        last_resort,
-        privileged_vm
+        for_commit == OomVerdict::Unresolved && for_frames == OomVerdict::Unresolved,
+        "with only the privileged process left, the ungranted write got {:?} for the \
+         ceiling and {:?} for the frames, want it failed",
+        for_commit,
+        for_frames
+    );
+    assert_test!(
+        !privileged_killed,
+        "the privileged process was killed for a write that could not signal it"
     );
     pass!()
 }
 
 slopos_testing::stest!(
-    name = test_oom_takes_a_process_the_writer_may_not_signal_only_last,
+    name = test_oom_never_takes_a_process_the_writer_may_not_signal,
     suite = oom_killer
 );

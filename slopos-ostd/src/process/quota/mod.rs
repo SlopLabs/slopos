@@ -587,6 +587,48 @@ mod tests {
         assert_eq!(used(a, ResourceKind::FdSlot), 0);
     }
 
+    /// A charge whose object outlives its account is handed to the account's
+    /// parent before the release, so the ceiling keeps counting it and its
+    /// refund still reaches a live row; the dying account's other charges are
+    /// credited back up as ever.
+    #[test]
+    fn a_bequeathed_charge_outlives_its_account_and_still_refunds() {
+        use slopos_abi::quota::CommitPagesAxis;
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        set_limit(root(), ResourceKind::CommitPages, 10);
+
+        let object: ChargeSlot<CommitPagesAxis> = ChargeSlot::empty();
+        object.put(try_charge::<CommitPagesAxis>(child, 6).expect("the object's"));
+        let parents: ChargeSlot<CommitPagesAxis> = ChargeSlot::empty();
+        parents.put(try_charge::<CommitPagesAxis>(parent, 1).expect("the parent's"));
+        let dies_with = Charge::commit(try_charge::<CommitPagesAxis>(child, 2).expect("own"));
+
+        object.bequeath(child);
+        parents.bequeath(child);
+        assert_eq!(object.account(), parent);
+        assert_eq!(parents.account(), parent, "a slot charged elsewhere stays");
+        assert_eq!(held_by(child, ResourceKind::CommitPages), 2);
+        assert_eq!(held_by(parent, ResourceKind::CommitPages), 7);
+        assert_eq!(used(child, ResourceKind::CommitPages), 2);
+        assert_eq!(used(parent, ResourceKind::CommitPages), 9);
+        assert_eq!(used(root(), ResourceKind::CommitPages), 9);
+        assert_eq!(ledger_audit(|_| {}), 0);
+
+        account_release(child);
+        drop(dies_with);
+        assert_eq!(used(root(), ResourceKind::CommitPages), 7);
+        try_charge::<CommitPagesAxis>(parent, 4).expect_err("the object still fills the machine");
+        assert_eq!(ledger_audit(|_| {}), 0);
+
+        object.take();
+        assert_eq!(held_by(parent, ResourceKind::CommitPages), 1);
+        assert_eq!(used(root(), ResourceKind::CommitPages), 1);
+        parents.take();
+        assert_eq!(used(root(), ResourceKind::CommitPages), 0);
+    }
+
     /// Refusing would leave a process that had already been released unable to
     /// close its own descriptors.
     #[test]

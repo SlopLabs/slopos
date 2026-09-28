@@ -382,7 +382,10 @@ pub enum TaskFaultReason {
     UserUd = 3,
     UserDeviceNa = 4,
     /// A write found no page and the OOM killer had nothing it could take
-    /// instead — only init and the dying were left. Distinct from
+    /// instead — only init, the dying, processes holding privileged flags the
+    /// writer lacks and processes holding none of what the write lacked were
+    /// left: failing the writer, never killing a process it may not signal,
+    /// as Linux spares `oom_score_adj=-1000`. Distinct from
     /// [`UserPage`](Self::UserPage) so `waitpid` can tell "the machine was
     /// short of memory" from "the program was wrong". Reported as `SIGKILL`,
     /// the signal the killer's victims die of. The task's own write only: a

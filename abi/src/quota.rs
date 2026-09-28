@@ -31,8 +31,10 @@ pub enum ResourceKind {
     /// Filesystem blocks allocated on a mounted disk. A block is 1-4 KiB, so
     /// it is neither a bare count nor a page.
     DiskBlocks = 8,
-    /// Pages a process has populated — RSS. [`ResourceKind::Pages`] counts what
-    /// is *mapped*, which under demand paging is no evidence of memory held.
+    /// Frames a process holds as its own: its present user leaves but those
+    /// of a shared memfd or ring it maps, plus the pages of every memfd it
+    /// sized, mapped or not. [`ResourceKind::Pages`] counts what is *mapped*,
+    /// which under demand paging is no evidence of memory held.
     ResidentPages = 9,
     /// Pages of private memory the kernel has promised a frame for: a lazy
     /// mapping's whole extent at creation, an eagerly placed page as it

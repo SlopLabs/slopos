@@ -38,8 +38,8 @@ fn group_id(task: &TaskRef) -> u32 {
 
 /// `process`'s standing with a writer holding `writer_flags` when `init` is
 /// init's task id: exempt if init runs in it, dying once every task it has
-/// left is killed, shielded if a live one holds privileged flags the writer
-/// lacks — the relation `kill` refuses on.
+/// left is killed, shielded — never taken for this writer — if a live one
+/// holds privileged flags the writer lacks, the relation `kill` refuses on.
 pub fn standing_of(process: &Process, init: u32, writer_flags: u16) -> Standing {
     if init != INVALID_TASK_ID && task_find_by_id(init).is_some_and(|t| in_process(&t, process)) {
         return Standing::Exempt;

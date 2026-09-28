@@ -1,19 +1,23 @@
-//! The OOM killer's choice: the killable process owing the most committed
-//! pages, one victim at a time, and another once a victim outstays its grace.
+//! The OOM killer's choice: the killable process holding the most of what the
+//! write found missing, one victim at a time, and another once a victim
+//! outstays its grace.
 //!
 //! The task side is swapped for one that names exactly the processes a test
 //! made, so nothing else bound at the time can be chosen.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_abi::quota::ResourceKind;
 use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use slopos_abi::task::{INVALID_PROCESS_ID, TASK_NAME_MAX_LEN};
 use slopos_ostd::handle::Handle;
-use slopos_ostd::process::Process;
+use slopos_ostd::process::quota::{held_by, root, stats};
+use slopos_ostd::process::{Process, ProcessId, process_spawn};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
 use super::tests::resolve_pid;
+use crate::memfd::{memfd_create, memfd_ftruncate};
 use crate::oom::{
     Decision, Killed, OomOps, OomTrigger, Standing, choose_victim, decide,
     oom_expire_victim_for_test, oom_forget_victim_for_test, oom_swap_ops,
@@ -21,8 +25,9 @@ use crate::oom::{
 use crate::page_fault::{FaultOutcome, try_resolve_user_fault};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::{
-    ProcessVm, create_process_vm, destroy_process_vm, pack_process_vm_handle, process_vm_handle,
-    process_vm_mmap, process_vm_released, unbind_process_vm,
+    ProcessVm, create_process_vm, create_process_vm_for, destroy_process_vm,
+    pack_process_vm_handle, process_vm_handle, process_vm_mmap, process_vm_released,
+    unbind_process_vm,
 };
 
 const MADE: usize = 3;
@@ -84,23 +89,34 @@ struct Ladder {
 }
 
 impl Ladder {
-    fn new() -> Option<Self> {
+    /// No address space yet, with the task side swapped.
+    fn bare() -> Self {
         oom_forget_victim_for_test();
         EXEMPT_PID.store(INVALID_PROCESS_ID, Ordering::Release);
         DYING_MASK.store(0, Ordering::Release);
         KILL_CALLS.store(0, Ordering::Release);
         GONE_MASK.store(0, Ordering::Release);
-        let mut ladder = Self {
+        Self {
             pids: [INVALID_PROCESS_ID; MADE],
             restore: oom_swap_ops(Some(&MADE_ONLY)),
-        };
+        }
+    }
+
+    /// A fresh address space on `rung`, one the task side names.
+    fn make(&mut self, rung: usize) -> Option<u32> {
+        let pid = create_process_vm();
+        if pid == INVALID_PROCESS_ID {
+            return None;
+        }
+        self.pids[rung] = pid;
+        MADE_PIDS[rung].store(pid, Ordering::Release);
+        Some(pid)
+    }
+
+    fn new() -> Option<Self> {
+        let mut ladder = Self::bare();
         for (rung, extra) in [16u64, 48, 96].into_iter().enumerate() {
-            let pid = create_process_vm();
-            if pid == INVALID_PROCESS_ID {
-                return None;
-            }
-            ladder.pids[rung] = pid;
-            MADE_PIDS[rung].store(pid, Ordering::Release);
+            let pid = ladder.make(rung)?;
             if !touch_fresh_pages(pid, extra) {
                 return None;
             }
@@ -150,8 +166,8 @@ fn touch_fresh_pages(pid: u32, pages: u64) -> bool {
         })
 }
 
-fn chosen_pid() -> Option<u32> {
-    choose_victim(&MADE_ONLY).map(|candidate| candidate.process.id())
+fn chosen_pid(trigger: OomTrigger) -> Option<u32> {
+    choose_victim(&MADE_ONLY, trigger).map(|candidate| candidate.process.id())
 }
 
 /// The largest killable process is the victim; init, however large, never
@@ -162,13 +178,13 @@ pub fn test_oom_takes_the_largest_killable_process() -> TestResult {
     };
     let [small, middle, large] = ladder.pids;
 
-    let first = chosen_pid();
+    let first = chosen_pid(OomTrigger::Commit);
     EXEMPT_PID.store(large, Ordering::Release);
-    let beside_init = chosen_pid();
+    let beside_init = chosen_pid(OomTrigger::Commit);
     DYING_MASK.fetch_or(1 << 1, Ordering::AcqRel);
-    let beside_the_dying = chosen_pid();
+    let beside_the_dying = chosen_pid(OomTrigger::Commit);
     DYING_MASK.fetch_or(1 << 0, Ordering::AcqRel);
-    let none_left = chosen_pid();
+    let none_left = chosen_pid(OomTrigger::Commit);
     drop(ladder);
 
     assert_test!(
@@ -322,6 +338,143 @@ pub fn test_oom_victim_with_no_task_left_still_holds_the_choice() -> TestResult 
     pass!()
 }
 
+/// A frame shortage takes the process holding the frames, not one that
+/// promised itself more and touched none of it; a full ceiling takes the one
+/// that promised.
+pub fn test_oom_weighs_each_shortage_by_what_it_lacks() -> TestResult {
+    const TOUCHED: u64 = 64;
+    const PROMISED: u64 = 1024;
+    let mut made = Ladder::bare();
+    let (Some(holder), Some(promiser)) = (made.make(0), made.make(1)) else {
+        return fail!("could not build two address spaces");
+    };
+    let touched = touch_fresh_pages(holder, TOUCHED);
+    let promised = process_vm_mmap(
+        resolve_pid(promiser),
+        0,
+        PROMISED * PAGE_SIZE_4KB,
+        PROT_READ | PROT_WRITE,
+        MAP_ANONYMOUS | MAP_PRIVATE,
+        -1,
+        0,
+    ) != 0;
+    let for_frames = chosen_pid(OomTrigger::Frames);
+    let for_commit = chosen_pid(OomTrigger::Commit);
+    drop(made);
+
+    assert_test!(
+        touched && promised,
+        "could not touch the holder's pages and promise the promiser's"
+    );
+    assert_test!(
+        for_frames == Some(holder),
+        "a frame shortage chose {:?}, want the holder {}, not the promiser {}",
+        for_frames,
+        holder,
+        promiser
+    );
+    assert_test!(
+        for_commit == Some(promiser),
+        "a full ceiling chose {:?}, want the promiser {}",
+        for_commit,
+        promiser
+    );
+    pass!()
+}
+
+/// A memfd sized by a process that has since exited, and held open by
+/// another, keeps its frames. So it stays charged — to the account the sizer
+/// debited through, where the ceiling still counts it and the killer weighs
+/// it — and leaves the ledger only when the memfd goes.
+pub fn test_oom_an_exited_sizers_memfd_stays_charged() -> TestResult {
+    const PAGES: u32 = 64;
+    let mut made = Ladder::bare();
+    let (Some(holder), Some(bystander)) = (made.make(0), made.make(1)) else {
+        return fail!("could not build two address spaces");
+    };
+    let account = resolve_pid(holder).account();
+    let baseline =
+        touch_fresh_pages(holder, 1) && touch_fresh_pages(bystander, 1 + u64::from(PAGES / 2));
+    let Ok(sizer) = process_spawn(None, account) else {
+        return fail!("could not spawn the sizer beneath the holder");
+    };
+    let sizer_account = sizer.account();
+    let bound = create_process_vm_for(sizer.clone()).is_some();
+    let memfd = memfd_create(0, account);
+    let sized = memfd.as_ref().map_or(-1, |(handle, _, _)| {
+        memfd_ftruncate(
+            *handle,
+            PAGES as usize * PAGE_SIZE_4KB as usize,
+            sizer_account,
+        )
+    });
+
+    let committed = |id| held_by(id, ResourceKind::CommitPages);
+    let frames = |id| held_by(id, ResourceKind::ResidentPages);
+    let root_used = || stats(root(), ResourceKind::CommitPages).map_or(0, |s| s.used);
+    let before = (committed(account), frames(account));
+    let sizer_own = committed(sizer_account);
+    let root_before = root_used();
+
+    if let Some(id) = ProcessId::of(&sizer) {
+        destroy_process_vm(id);
+    }
+    drop(sizer);
+    let released = stats(sizer_account, ResourceKind::CommitPages).is_none();
+    let root_after_exit = root_used();
+    let after_exit = (committed(account), frames(account));
+    let for_commit = chosen_pid(OomTrigger::Commit);
+    let for_frames = chosen_pid(OomTrigger::Frames);
+
+    drop(memfd);
+    let after_close = (committed(account), frames(account));
+    let root_after_close = root_used();
+    drop(made);
+
+    assert_test!(
+        baseline && bound && sized == 0,
+        "could not touch the baselines, bind the sizer and size the memfd: {}",
+        sized
+    );
+    assert_test!(released, "the sizer's account outlived its process");
+    assert_test!(
+        root_after_exit + sizer_own == root_before + PAGES,
+        "the machine counted {} committed pages after the sizer left, want {} \
+         ({} before, the sizer's own {} less the memfd's {})",
+        root_after_exit,
+        (root_before + PAGES).saturating_sub(sizer_own),
+        root_before,
+        sizer_own,
+        PAGES
+    );
+    assert_test!(
+        after_exit == (before.0 + PAGES, before.1 + PAGES),
+        "the holder's account holds {:?} after the sizer left, want {:?} + {}",
+        after_exit,
+        before,
+        PAGES
+    );
+    assert_test!(
+        for_commit == Some(holder) && for_frames == Some(holder),
+        "the killer chose {:?} for the ceiling and {:?} for the frames, want the \
+         holder {} over the bystander {}",
+        for_commit,
+        for_frames,
+        holder,
+        bystander
+    );
+    assert_test!(
+        after_close == before && root_after_close + PAGES == root_after_exit,
+        "closing the memfd left the holder at {:?} (want {:?}) and the machine at {} \
+         (want {})",
+        after_close,
+        before,
+        root_after_close,
+        root_after_exit.saturating_sub(PAGES)
+    );
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_oom_takes_the_largest_killable_process,
     suite = oom_killer
@@ -336,5 +489,13 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_oom_victim_with_no_task_left_still_holds_the_choice,
+    suite = oom_killer
+);
+slopos_testing::stest!(
+    name = test_oom_weighs_each_shortage_by_what_it_lacks,
+    suite = oom_killer
+);
+slopos_testing::stest!(
+    name = test_oom_an_exited_sizers_memfd_stays_charged,
     suite = oom_killer
 );
