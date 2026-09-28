@@ -56,10 +56,11 @@ pub struct MemfdObject {
     /// Mapped pages referencing this memfd; pages are freed only once both
     /// this and `refcount` reach zero.
     map_count: u32,
-    /// The backing pages' promise against the commit ceiling, the sizer's.
+    /// The backing pages' promise against the commit ceiling: the sizer's
+    /// while it lives, then the root's.
     commit: ChargeSlot<CommitPagesAxis>,
-    /// The backing pages as frames held, the sizer's too, and nobody's who
-    /// only maps them.
+    /// The backing pages as frames held, charged as `commit` is, never to a
+    /// process that only maps them.
     frames: ChargeSlot<ResidentPagesAxis>,
 }
 
@@ -316,11 +317,9 @@ pub fn memfd_release(handle: usize) {
     });
 }
 
-/// Hand every memfd `dying` sized to the account `dying` debits through. The
-/// sizer's process is gone, but the frames stay while any fd or mapping holds
-/// them, and a charge left on its account would be credited back out of every
-/// ancestor when that account is released: memory the ceiling and the killer
-/// no longer see.
+/// Hand every memfd `dying` sized to the root. The frames stay while any fd or
+/// mapping holds them, so the ceiling must keep counting them, but no death
+/// gives them back, so no process is weighed for them.
 pub(crate) fn memfd_bequeath(dying: AccountId) {
     let registry = MEMFD_REGISTRY.lock();
     let Some(table) = registry.as_ref() else {

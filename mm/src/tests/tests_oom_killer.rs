@@ -383,20 +383,20 @@ pub fn test_oom_weighs_each_shortage_by_what_it_lacks() -> TestResult {
 }
 
 /// A memfd sized by a process that has since exited, and held open by
-/// another, keeps its frames. So it stays charged — to the account the sizer
-/// debited through, where the ceiling still counts it and the killer weighs
-/// it — and leaves the ledger only when the memfd goes.
-pub fn test_oom_an_exited_sizers_memfd_stays_charged() -> TestResult {
+/// another, keeps its frames. The machine's ceiling keeps counting them after
+/// the sizer's parent exits too, no process is weighed for them, since no
+/// death gives them back, and they leave the ledger only when the memfd goes.
+pub fn test_oom_an_orphaned_memfd_stays_charged_to_nobody() -> TestResult {
     const PAGES: u32 = 64;
     let mut made = Ladder::bare();
-    let (Some(holder), Some(bystander)) = (made.make(0), made.make(1)) else {
+    let (Some(parent), Some(bystander)) = (made.make(0), made.make(1)) else {
         return fail!("could not build two address spaces");
     };
-    let account = resolve_pid(holder).account();
+    let account = resolve_pid(parent).account();
     let baseline =
-        touch_fresh_pages(holder, 1) && touch_fresh_pages(bystander, 1 + u64::from(PAGES / 2));
+        touch_fresh_pages(parent, 1) && touch_fresh_pages(bystander, 1 + u64::from(PAGES / 2));
     let Ok(sizer) = process_spawn(None, account) else {
-        return fail!("could not spawn the sizer beneath the holder");
+        return fail!("could not spawn the sizer beneath the parent");
     };
     let sizer_account = sizer.account();
     let bound = create_process_vm_for(sizer.clone()).is_some();
@@ -420,14 +420,20 @@ pub fn test_oom_an_exited_sizers_memfd_stays_charged() -> TestResult {
         destroy_process_vm(id);
     }
     drop(sizer);
-    let released = stats(sizer_account, ResourceKind::CommitPages).is_none();
-    let root_after_exit = root_used();
-    let after_exit = (committed(account), frames(account));
+    let sizer_released = stats(sizer_account, ResourceKind::CommitPages).is_none();
+    let root_after_sizer = root_used();
+    let after_sizer = (committed(account), frames(account));
     let for_commit = chosen_pid(OomTrigger::Commit);
     let for_frames = chosen_pid(OomTrigger::Frames);
 
+    let parent_own = committed(account);
+    destroy_process_vm(resolve_pid(parent));
+    made.pids[0] = INVALID_PROCESS_ID;
+    MADE_PIDS[0].store(INVALID_PROCESS_ID, Ordering::Release);
+    let parent_released = stats(account, ResourceKind::CommitPages).is_none();
+    let root_after_parent = root_used();
+
     drop(memfd);
-    let after_close = (committed(account), frames(account));
     let root_after_close = root_used();
     drop(made);
 
@@ -436,41 +442,51 @@ pub fn test_oom_an_exited_sizers_memfd_stays_charged() -> TestResult {
         "could not touch the baselines, bind the sizer and size the memfd: {}",
         sized
     );
-    assert_test!(released, "the sizer's account outlived its process");
     assert_test!(
-        root_after_exit + sizer_own == root_before + PAGES,
+        sizer_released && parent_released,
+        "an account outlived its process: the sizer's released {}, the parent's {}",
+        sizer_released,
+        parent_released
+    );
+    assert_test!(
+        root_after_sizer + sizer_own == root_before + PAGES,
         "the machine counted {} committed pages after the sizer left, want {} \
          ({} before, the sizer's own {} less the memfd's {})",
-        root_after_exit,
+        root_after_sizer,
         (root_before + PAGES).saturating_sub(sizer_own),
         root_before,
         sizer_own,
         PAGES
     );
     assert_test!(
-        after_exit == (before.0 + PAGES, before.1 + PAGES),
-        "the holder's account holds {:?} after the sizer left, want {:?} + {}",
-        after_exit,
-        before,
+        after_sizer == before,
+        "the parent holds {:?} after the sizer left, want its own {:?}",
+        after_sizer,
+        before
+    );
+    assert_test!(
+        for_commit == Some(bystander) && for_frames == Some(bystander),
+        "the killer chose {:?} for the ceiling and {:?} for the frames, want the \
+         bystander {} over the parent {}",
+        for_commit,
+        for_frames,
+        bystander,
+        parent
+    );
+    assert_test!(
+        root_after_parent + parent_own == root_after_sizer,
+        "the machine counted {} committed pages after the parent left, want {} \
+         (the parent's own {} gone, the memfd's {} kept)",
+        root_after_parent,
+        root_after_sizer.saturating_sub(parent_own),
+        parent_own,
         PAGES
     );
     assert_test!(
-        for_commit == Some(holder) && for_frames == Some(holder),
-        "the killer chose {:?} for the ceiling and {:?} for the frames, want the \
-         holder {} over the bystander {}",
-        for_commit,
-        for_frames,
-        holder,
-        bystander
-    );
-    assert_test!(
-        after_close == before && root_after_close + PAGES == root_after_exit,
-        "closing the memfd left the holder at {:?} (want {:?}) and the machine at {} \
-         (want {})",
-        after_close,
-        before,
+        root_after_close + PAGES == root_after_parent,
+        "closing the memfd left the machine at {}, want {}",
         root_after_close,
-        root_after_exit.saturating_sub(PAGES)
+        root_after_parent.saturating_sub(PAGES)
     );
     pass!()
 }
@@ -496,6 +512,6 @@ slopos_testing::stest!(
     suite = oom_killer
 );
 slopos_testing::stest!(
-    name = test_oom_an_exited_sizers_memfd_stays_charged,
+    name = test_oom_an_orphaned_memfd_stays_charged_to_nobody,
     suite = oom_killer
 );

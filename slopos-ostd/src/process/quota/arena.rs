@@ -644,24 +644,30 @@ pub(super) fn refund_raw(account: AccountId, kind: ResourceKind, n: u32) {
     });
 }
 
-/// Move `n` units of `kind` held as `from`'s own to the account `from` debits
-/// through, answering that heir, or [`AccountId::NONE`] when `from` names no
-/// live row or is the root. Every ancestor of `from` already counts the amount,
-/// so only two rows move: `from` stops holding it, and its heir holds it as
-/// its own. No ceiling is consulted — every level admitted the amount when it
-/// was charged — and each row's `used` stays at least what debits through it.
+/// Move `n` units of `kind` held as `from`'s own to the root, answering the
+/// root, or [`AccountId::NONE`] when `from` names no live row. The root, which
+/// is never released, keeps counting the amount against the machine's
+/// ceiling; every row between stops counting it, so no release credits it out
+/// again, and it is no process's own. No ceiling is consulted: the root
+/// admitted the amount when it was charged.
 pub(super) fn bequeath_raw(from: AccountId, kind: ResourceKind, n: u32) -> AccountId {
+    let heir = root();
     walk(|| {
         let Some(row) = row_for(from) else {
             return AccountId::NONE;
         };
-        let heir = parent_of(row);
-        let Some(heir_row) = row_for(heir) else {
-            return AccountId::NONE;
-        };
-        if n != 0 {
-            release_own(row, kind, n);
+        release_own(row, kind, n);
+        let mut current = from;
+        let mut depth = 0usize;
+        while current != heir && depth < MAX_ACCOUNT_DEPTH as usize {
+            let Some(row) = row_for(current) else {
+                break;
+            };
             release_row(row, kind, n);
+            current = parent_of(row);
+            depth += 1;
+        }
+        if let Some(heir_row) = row_for(heir) {
             let _ = heir_row.own[kind.index()].try_update(
                 Ordering::Release,
                 Ordering::Relaxed,

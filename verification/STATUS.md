@@ -202,15 +202,16 @@ logic only**. What it does not reach, and what is audited instead:
   to the root, so its charges still meet the ceiling; what the window can
   still cost is the share that release moved up once already.
 - `ChargeSlot::bequeath`, which hands a charge an object holds past its
-  account's release to the account that one debits through. The model's
-  charge names one leaf for its whole life, so the hand-over is not a `Step`.
-  It moves nothing any ancestor sees: the dying row's `used` and own share
-  drop by the amount and its heir's own share rises by it, so every row still
-  holds at least what debits through it and no `used` or ceiling comparison
-  above the dying row changes. The refund then walks from the heir like any
-  other. Held by `test_oom_an_exited_sizers_memfd_stays_charged` in the tests
-  kernel, the host test beside `bequeath_raw`, and the audit's
-  `AncestorUnderCount`, not by Verus.
+  account's release to the root. The model's charge names one leaf for its
+  whole life, so the hand-over is not a `Step`. The root's `used` does not
+  move, so no ceiling comparison against it changes; every row below it
+  drops `used` by the amount, the dying row its own share too, leaf first so
+  each row still holds at least what debits through it, and the root's own
+  share rises by it. The root is never released, so no release credits the
+  amount out while the object lives, and the refund walks from the root like
+  any other. Held by `test_oom_an_orphaned_memfd_stays_charged_to_nobody` in
+  the tests kernel, the `ChargeSlot::bequeath` host tests in `quota/mod.rs`,
+  and the audit's `AncestorUnderCount`, not by Verus.
 - That a `Charge` lives in exactly one field for exactly its object's
   lifetime. That is a syntactic property of the tree, enforced by
   `scripts/check_charge_linearity.sh`, not a property of the state machine.

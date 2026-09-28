@@ -346,14 +346,14 @@ impl<A: Refundable> ChargeSlot<A> {
     }
 
     /// Hand this slot's charge from `dying`, an account about to be released
-    /// under an object that outlives it, to the account `dying` debits
-    /// through. Every ancestor keeps counting it and a later refund finds a
-    /// live row, where one against `dying` would be a no-op after the release
-    /// had already credited the amount out of every ancestor. A slot charged
-    /// to anyone else is left alone.
+    /// under an object that outlives it, to the root. The machine's ceiling
+    /// keeps counting it and a later refund finds a live row, where one
+    /// against `dying` would be a no-op after the release had already credited
+    /// the amount out of every ancestor; no process holds it as its own. A
+    /// slot charged to anyone else is left alone.
     ///
     /// The caller serialises every operation on this slot: a `take` racing the
-    /// hand-over would refund `dying` for a charge the heir now holds.
+    /// hand-over would refund `dying` for a charge the root now holds.
     pub fn bequeath(&self, dying: AccountId) {
         if dying.is_none() || self.account.load(Ordering::Acquire) != dying.raw() {
             return;
