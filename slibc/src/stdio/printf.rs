@@ -448,21 +448,15 @@ pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
 
             b's' => {
                 let s_ptr: *const u8 = ap.next_arg::<*const u8>();
-                let (actual, mut slen) = if s_ptr.is_null() {
+                // C11 7.21.6.1 p8: with a precision the argument need not be
+                // NUL-terminated, so nothing past it is read.
+                let (actual, slen) = if s_ptr.is_null() {
                     null_string(precision)
+                } else if precision >= 0 {
+                    (s_ptr, crate::string::u_strnlen(s_ptr, precision as usize))
                 } else {
-                    let mut len = 0usize;
-                    let mut q = s_ptr;
-                    while *q != 0 {
-                        len += 1;
-                        q = q.add(1);
-                    }
-                    (s_ptr, len)
+                    (s_ptr, crate::string::u_strlen(s_ptr))
                 };
-
-                if precision >= 0 && (precision as usize) < slen {
-                    slen = precision as usize;
-                }
 
                 let pad = if (width as usize) > slen {
                     width as usize - slen

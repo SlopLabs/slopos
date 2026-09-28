@@ -424,7 +424,10 @@ test-install-guest:
     tag="$(grep -aoE 'INSTALL-BUILT guest-[0-9]+' "$log" | head -n1 | cut -d' ' -f2)"
     booted="$(grep -aE "BOOT: kernel .*/boot/b/kernel.elf \([0-9]+ bytes\), build tag $tag\b" "$log" | head -n1 || true)"
     [ -n "$booted" ] || { echo "FAIL: no boot of /boot/b/kernel.elf reports build tag $tag" >&2; exit 1; }
+    # The ref comes from what the guest printed, so only the shape install_test
+    # gives it reaches `git fetch` in this checkout.
     read -r _ pushed ref < <(grep -aoE 'INSTALL-PUSHED [0-9a-f]{40} [^[:space:]]+' "$log" | head -n1)
+    [ "$ref" = "install-test/$tag" ] || { echo "FAIL: the guest pushed '$ref', not install-test/$tag" >&2; exit 1; }
     git fetch -q "$push" "refs/heads/$ref"
     [ "$(git rev-parse FETCH_HEAD)" = "$pushed" ] && [ "$(git rev-parse FETCH_HEAD^)" = "$head" ] ||
         { echo "FAIL: $ref in $push is not the guest's commit $pushed on $head" >&2; exit 1; }

@@ -37,10 +37,11 @@ set -euo pipefail
 #                   sysroot alone, which is what a run before the toolchain
 #                   exists wants.
 #
-# A new volume is also seeded with `src/slopos`, a clone of this checkout at
-# HEAD whose `origin` is the checkout `qemu_run.sh` serves the guest and whose
-# `host` remote, the push default, is the repository it pushes into; the
-# vendored crates beside it; and `src/.cargo/config.toml`, which points cargo
+# A new volume is also seeded with `src/slopos`, a clone of this checkout with
+# HEAD's branch checked out, whose `origin` is the checkout `qemu_run.sh`
+# serves the guest and whose `host` remote, the push default, is the
+# repository it pushes into; the vendored crates in its ignored
+# `third_party/vendor`; and `src/.cargo/config.toml`, which points cargo
 # anywhere below `src/` at them with no registry and leaves the clone's own
 # `.cargo/config.toml` as committed. Everything the volume holds is owned by
 # uid 0, the guest's only user, since git refuses a repository its user does

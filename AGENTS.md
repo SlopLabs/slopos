@@ -295,10 +295,11 @@ image's own CA bundle must refuse it first), clang compiling C and C++, and
 git reading the clone and reaching the host's checkout.
 
 **The source moves by git.** A new dev disk is seeded with `src/slopos`, a
-clone of the checkout at `HEAD` (`git clone --no-local`, so the history is
-the reachable objects and nothing else), with the vendored crates beside it
-and the offline vendor configuration in `src/.cargo/config.toml`, above the
-tree, where cargo reads it for any directory below while the clone's own
+clone of the checkout with `HEAD`'s branch checked out (`git clone
+--no-local`, so the history is what the branches and tags reach and nothing
+else), the vendored crates in its ignored `third_party/vendor`, and the
+offline vendor configuration in `src/.cargo/config.toml`, above the tree,
+where cargo reads it for any directory below while the clone's own
 `.cargo/config.toml` stays as committed. The volume is given to uid 0, the
 guest's only user: `mkfs -d` copies the host's ids, and git refuses a
 repository its user does not own. The clone's `origin` is
@@ -307,8 +308,11 @@ repository its user does not own. The clone's `origin` is
 SLIRP `guestfwd` rules, as for the echo peer, each running one `git daemon
 --inetd` per connection — one serving this checkout read-only, one serving
 the bare repository `GIT_PUSH_REPO` names with receive-pack — so nothing
-listens on the host and each daemon reaches one repository whatever path is
-asked for. `just boot` names `fs/assets/devdisk.git`, which `just reset
+listens on the host. Each daemon is pinned to its git directory twice: its
+`--interpolated-path` answers a request that names a host, which every git
+client sends, and `--strict-paths` with that directory as the whole allowlist
+refuses a hand-made request that names none and so bypasses the template.
+`just boot` names `fs/assets/devdisk.git`, which `just reset
 devdisk` keeps; the tests name a scratch repository under `builddir/`. In the
 guest, `git pull` takes the host's commits and `git push` hands the guest's
 back (`git fetch fs/assets/devdisk.git <branch>` on the host). A preserved

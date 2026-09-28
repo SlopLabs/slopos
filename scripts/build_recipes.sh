@@ -240,7 +240,8 @@ ar = '$LLVM_AR'
 pkg-config = '$(command -v pkg-config)'
 
 [built-in options]
-c_link_args = ['-Wl,-rpath,\$ORIGIN/../lib:\$ORIGIN/../../lib']
+c_link_args = ['-Wl,-z,defs', '-Wl,-rpath,\$ORIGIN/../lib:\$ORIGIN/../../lib']
+cpp_link_args = ['-Wl,-z,defs', '-Wl,-rpath,\$ORIGIN/../lib:\$ORIGIN/../../lib']
 
 [host_machine]
 system = 'slopos'

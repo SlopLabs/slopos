@@ -2116,8 +2116,9 @@ static int conversion(void) {
 }
 
 // A `*` width or precision comes from an `int` argument; a negative width is
-// the `-` flag and a negative precision none. git names every pack index with
-// `%.*s`.
+// the `-` flag and a negative precision none. A precision bounds what `%s`
+// reads, so the argument may end at an unmapped page with no NUL (C11
+// 7.21.6.1 p8). git names every pack index with `%.*s`.
 static int star_widths(void) {
     char out[32];
     if (snprintf(out, sizeof out, "[%*d|%-*d|%*d]", 4, 7, 3, 8, -3, 9) != 14 ||
@@ -2127,6 +2128,18 @@ static int star_widths(void) {
     if (snprintf(out, sizeof out, "%.*s|%.*s|%*.*f", 4, "packfile", -1, "all", 6, 2, 1.5) != 15 ||
         strcmp(out, "pack|all|  1.50") != 0) {
         return fail("a * precision was not taken from its argument");
+    }
+    long page = sysconf(_SC_PAGESIZE);
+    char *map = mmap(NULL, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                     -1, 0);
+    if (map == MAP_FAILED || munmap(map + page, (size_t)page) != 0) {
+        return fail("could not map a page before a hole");
+    }
+    memcpy(map + page - 4, "tail", 4);
+    int wrote = snprintf(out, sizeof out, "%.*s", 4, map + page - 4);
+    munmap(map, (size_t)page);
+    if (wrote != 4 || strcmp(out, "tail") != 0) {
+        return fail("%.*s of an unterminated array did not stop at the precision");
     }
     return 1;
 }

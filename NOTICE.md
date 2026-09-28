@@ -255,14 +255,15 @@ remains © its authors under its own licence:
   framework.
 
 git (`toolchain/recipes/git/`), the program the guest's source tree fetches and
-pushes with, is built the same way from its pinned release tarball and reaches
-the same two places: © Linus Torvalds and the git contributors,
-`GPL-2.0-only`. The build also compiles code git bundles under other licences:
-xdiff, `list.h` and the glibc regex in `compat/regex/` (`LGPL-2.1-or-later`),
-and the SHA-1 collision detection code (`MIT`). The binary links slibc's
-`libc.so`, and GPL-2.0-only and GPL-3.0-or-later code cannot be combined in a
-distributed work, which is why git goes onto nothing but a dev disk built where
-it is used.
+pushes with, is built the same way from its pinned release tarball: © Linus
+Torvalds and the git contributors, `GPL-2.0-only`. The build also compiles code
+git bundles under other licences: xdiff, `list.h`, `compat/obstack.c` and the
+glibc regex in `compat/regex/` (`LGPL-2.1-or-later`), `ewah/`
+(`GPL-2.0-or-later`), `reftable/` (© Google LLC, `BSD-3-Clause`) and the
+SHA-1 collision detection code (`MIT`). The binary links slibc's `libc.so`,
+and GPL-2.0-only and GPL-3.0-or-later code cannot be combined in a distributed
+work, so git goes onto nothing but the toolchain install and a dev disk, both
+built where they are used.
 
 `tools/kallsyms`, which builds the kernel's symbol table on the host and in
 the guest, carries a Rust v0 symbol demangler derived from LLVM's

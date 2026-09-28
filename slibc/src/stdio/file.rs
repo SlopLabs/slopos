@@ -208,7 +208,20 @@ pub unsafe extern "C" fn freopen(path: *const u8, mode: *const u8, stream: *mut 
     f.buf_pos = 0;
     f.buf_len = 0;
     f.ungot_len = 0;
-    f.flags = (f.flags & (super::FILE_FLAG_LINKED | FILE_FLAG_HEAP | FILE_FLAG_OWNED_FD)) | fflags;
+    let mut owned = f.flags & FILE_FLAG_OWNED_FD;
+    if !path.is_null() {
+        // The stream owns what it opened, a standard one included, and buffers
+        // it by what it now is, as `fopen` would.
+        owned = FILE_FLAG_OWNED_FD;
+        if f.mode != BufferMode::None {
+            f.mode = if crate::io::shim::isatty(f.fd) != 0 {
+                BufferMode::Line
+            } else {
+                BufferMode::Full
+            };
+        }
+    }
+    f.flags = (f.flags & (super::FILE_FLAG_LINKED | FILE_FLAG_HEAP)) | owned | fflags;
     (*stream).lock.unlock();
     stream
 }

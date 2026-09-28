@@ -467,10 +467,11 @@ NET_GUESTFWD=",guestfwd=tcp:${ECHO_PEER_ADDR}:${ECHO_PEER_PORT}-cmd:${ECHO_PEER_
 
 # ── Git peer ─────────────────────────────────────────────────────────────────
 # The echo peer's mechanism: SLIRP runs one `git daemon --inetd` per
-# connection, so nothing listens on the host. Each daemon serves one
-# repository whatever path is asked for, and only the push repository's
-# daemon runs receive-pack. `--log-destination=none` because the daemon's
-# stderr is the guest's socket.
+# connection, so nothing listens on the host. Each daemon serves one git
+# directory: the path template covers a request that names a host, and the
+# strict allowlist one that does not, which the template leaves alone. Only
+# the push repository's daemon runs receive-pack. `--log-destination=none`
+# keeps `--inetd` from logging every connection to the host's syslog.
 NET_GITFWD=""
 if [ -n "$GIT_PUSH_REPO" ]; then
     command -v git >/dev/null 2>&1 || { echo "qemu_run.sh: GIT_PUSH_REPO needs git on PATH" >&2; exit 1; }
@@ -478,17 +479,20 @@ if [ -n "$GIT_PUSH_REPO" ]; then
         /*) ;;
         *) echo "qemu_run.sh: GIT_PUSH_REPO=$GIT_PUSH_REPO is not an absolute path" >&2; exit 1 ;;
     esac
+    [ -d "$GIT_PUSH_REPO" ] || git init -q --bare "$GIT_PUSH_REPO"
+    checkout_dir="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir)" &&
+        push_dir="$(git -C "$GIT_PUSH_REPO" rev-parse --absolute-git-dir)" ||
+        { echo "qemu_run.sh: the git peer needs $REPO_ROOT and $GIT_PUSH_REPO to be repositories" >&2; exit 1; }
     # QEMU splits options on commas, libslirp parses the command as a shell
     # line, and the daemon expands `%` in its path template.
-    for path in "$REPO_ROOT" "$GIT_PUSH_REPO"; do
+    for path in "$checkout_dir" "$push_dir"; do
         case "$path" in
             *[,%\'\"\\[:space:]]*) echo "qemu_run.sh: the git peer cannot serve the path $path" >&2; exit 1 ;;
         esac
     done
-    [ -d "$GIT_PUSH_REPO" ] || git init -q --bare "$GIT_PUSH_REPO"
-    git_daemon="git daemon --inetd --export-all --informative-errors --log-destination=none"
-    NET_GITFWD=",guestfwd=tcp:${GIT_PEER_ADDR}:9418-cmd:${git_daemon} --forbid-override=receive-pack --interpolated-path=${REPO_ROOT}"
-    NET_GITFWD+=",guestfwd=tcp:${GIT_PEER_ADDR}:9419-cmd:${git_daemon} --enable=receive-pack --interpolated-path=${GIT_PUSH_REPO}"
+    git_daemon="git daemon --inetd --strict-paths --export-all --log-destination=none --init-timeout=30 --timeout=600"
+    NET_GITFWD=",guestfwd=tcp:${GIT_PEER_ADDR}:9418-cmd:${git_daemon} --forbid-override=receive-pack --interpolated-path=${checkout_dir} ${checkout_dir}"
+    NET_GITFWD+=",guestfwd=tcp:${GIT_PEER_ADDR}:9419-cmd:${git_daemon} --enable=receive-pack --interpolated-path=${push_dir} ${push_dir}"
 fi
 
 # ── Debug-mode plumbing ─────────────────────────────────────────────────────
