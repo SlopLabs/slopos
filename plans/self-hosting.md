@@ -17,7 +17,7 @@ The loop is closed:
 ```sh
 just boot                                   # host: the development machine (just boot-fast: no wheel)
 cd /devel/src/slopos                        # guest
-shell scripts/selfhost.sh install           # build the kernel, put it in the spare slot
+scripts/selfhost.sh install                 # build the kernel, put it in the spare slot
 bootctl reboot                              # try it once
 bootctl commit                              # keep it; a reboot without this, or a panic, falls back
 ```
@@ -30,6 +30,21 @@ binaries it installs on `/`; the guest owns everything else on both disks.
 guest and grade it: the guest's kernels pass the ELF gates and the kernel
 suite, and a kernel the guest built boots, commits and rolls back.
 
+Every patch under `toolchain/` teaches its project the `slopos` target and
+nothing else. A library joins as a recipe under `toolchain/recipes/`: a
+pinned tarball, its checksum and a build template that
+`scripts/build_recipes.sh` compiles against slibc, and that
+`scripts/check_recipes.sh` holds to leaving the source as shipped. Cargo builds
+with its default features against the zlib, nghttp2, OpenSSL, libcurl, libssh2
+and libgit2 recipes; in the guest it resolves a git dependency through libgit2
+and fetches a crate over HTTPS through libcurl and OpenSSL.
+
+A port finds the POSIX it expects: one working directory per process, `#!`
+scripts and `/bin/sh`, process-shared futexes, 64 signals with queued realtime
+ones and `sigqueue`, FIFOs, and `trap` in the shell. A fork owes its copy as
+the child writes it, and a write that finds no page makes the OOM killer take
+the largest resident process instead of faulting the writer.
+
 The guest builds the dev kernel in about 75 s at four vCPUs under KVM against
 49 s for rustup's dist compiler on the same four cores; the gap is the
 compiler's build settings, not the kernel.
@@ -41,73 +56,7 @@ and the dev disk remounts read-only. `test-install-guest` and `test-selfhost`
 need `DEV_QEMU_MEM=8G` until the cap is sized for a linker and a refused fault
 in one process stops failing a whole mount.
 
-## Phase 1: the toolchain adds a target and nothing else
-
-**Outcome:** every patch under `toolchain/` only teaches its project the
-`slopos` target, is shaped as the upstream PR it wants to be, and a program or
-library joins SlopOS as a recipe (a pinned tarball, its checksum and a build
-command) with no patch at all.
-
-The patches today, by what they do:
-
-| Kind | Patches | Fate |
-|---|---|---|
-| Teach the target | `compiler/0001,0003,0004`, `rust/0001`, `libc/0001`, `llvm/*`, `llvm-rustc/0001`, `crates/*` but jobserver, `crates/wiring` | stay until upstream takes them |
-| Stand in for missing libraries | `cargo/0001` (the `network` cut), `compiler/0002` (exists only to drop that default feature) | remove |
-| Work around SlopOS's memory policy | `crates/jobserver` (no `pre_exec`, so a large process never forks) | remove |
-| Speed LLVM up | `llvm-rustc/0002,0003` | drop |
-| Make the host's and the guest's builds identical | `cargo/0002` (no host triple in `-C metadata`) | drop, with the identity check |
-
-1. **Recipes.** One place and one driver that fetch a pinned upstream
-   tarball, check it, and build it with the SlopOS clang against slibc into a
-   prefix the dev disk carries. A recipe that needs a source patch is a
-   finding against slibc or the kernel, not a patch to carry.
-2. **Cargo's network, unpatched.** zlib, nghttp2, OpenSSL, libcurl, libssh2
-   and libgit2 as recipes; cargo built with its default features;
-   `cargo/0001` and `compiler/0002` deleted. OpenSSL is not a choice: on a
-   Unix target `git2` (cargo enables `https` and `ssh`), `libgit2-sys` and
-   `libssh2-sys` depend on it, and curl takes it by default, so rustls would
-   cost a patch to cargo's manifest and still ship OpenSSL. OpenSSL 3 is
-   Apache-2.0, which GPL-3.0 takes; SlopOS's own programs keep `tls-core`.
-3. **POSIX where SlopOS approximates it.** Each deviation is either fixed or a
-   port breaks on it:
-   - the working directory is per-thread, not per-process;
-   - `execve` has no `#!` dispatch and there is no `/bin/sh`, so every script
-     runs as `shell script.sh`;
-   - futexes are private only, so process-shared mutexes and semaphores are
-     refused;
-   - `NSIG` is 32: no realtime signals, no `sigqueue`, and `si_pid` only from
-     `kill`;
-   - no `mkfifo`, and the shell has no `trap`.
-
-   One user, uid 0, stays until a port needs more.
-4. **A fork a large process can afford, and an OOM killer behind it.**
-   Linux's model whole, not half: a forked copy is charged as its pages are
-   written, and when a write finds no page the kernel kills a victim instead
-   of faulting whoever wrote. Unix software assumes a cheap fork (make,
-   shells, git, cargo's `pre_exec` children); charging a gigabyte compiler's
-   copy up front is why the jobserver port exists, which goes. `mmap` and
-   `brk` stay charged when they are made, so only forked copies, stack growth
-   and `MAP_NORESERVE` can outrun memory, and the killer is a backstop rather
-   than routine. It takes the largest resident user process by the quota
-   ledger's resident pages, never init, and kills it the way every kill works
-   (a flag the victim unwinds from, I8); the faulting write waits for the
-   frames and retries. Refused stack growth goes through it too, not
-   `SIGBUS`.
-5. **Drop the speed patches.** `llvm-rustc/0002,0003` go, and the guest's
-   build pays for the feature-string work they cut.
-6. **Drop build identity.** The guest's kernel no longer has to match the
-   host's byte for byte; the ELF gates and the kernel suite on the guest's
-   tests kernel grade it. `cargo/0002` goes, and with it `test-selfhost`'s host
-   reference build, `compare_kernel_elf.sh`, the `CARGO_INCREMENTAL` pins, and
-   `devdisk_test` holding the guest rustc's version string to the host's.
-   `make_host_cargo.sh` stays only while the PGO profile flow needs a cargo
-   built from the fork.
-
-**Exit:** `toolchain/` holds only target patches, and cargo builds with
-default features from recipes that carry no patch.
-
-## Phase 2: git in the guest
+## Phase 1: git in the guest
 
 **Outcome:** `/devel/src/slopos` is a git clone, and code moves between host
 and guest by fetch and push, never by copying the tree.
@@ -118,10 +67,9 @@ the guest shuts down), and picks up host commits only through `just reset
 devdisk`, which throws away the guest's build cache. Redox, Asterinas (PR
 #3749) and SerenityOS (#12303) all bridge with git over the network instead.
 
-1. **Git as the first recipe.** C git with zlib, built unmodified under
-   Phase 1. Its licence, GPL-2.0-only, is no obstacle when the tree holds a
-   recipe and no git source; it ships as a separate program with a
-   `NOTICE.md` entry.
+1. **Git as a recipe.** C git over the zlib recipe, built unmodified. Its
+   licence, GPL-2.0-only, is no obstacle when the tree holds a recipe and no
+   git source; it ships as a separate program with a `NOTICE.md` entry.
 2. **The host serves its checkout.** `just boot` runs `git daemon` on the
    host so the guest reaches it through SLIRP (`git://10.0.2.2/`), which needs
    neither TLS nor libcurl; pushes land in a host-side bare repository.
@@ -137,17 +85,17 @@ devdisk`, which throws away the guest's build cache. Redox, Asterinas (PR
 **Exit:** the guest pulls a host commit, builds and boots it, commits a change,
 and the host fetches that commit, with no debugfs and no reseed on the way.
 
-## Phase 3: the whole tree builds in the guest
+## Phase 2: the whole tree builds in the guest
 
 `build_userland.sh` is bash and the C++ runtime build is CMake and Ninja, so
 the guest can rebuild the kernel but not `init`, the shell, the coreutils or
-`libc.so`. With Phase 1, bash, CMake and Ninja are recipes like any other.
-`selfhost.sh` then gains a verb that installs the userland into `/`, which
+`libc.so`. Bash, CMake and Ninja join as recipes like any other, and
+`selfhost.sh` gains a verb that installs the userland into `/`, which
 forces the decision the loop avoids today: the host refreshes every binary it
 built on each `just boot`, so a guest-installed `/bin` must either win or be
 declared the guest's.
 
-## Phase 4: bare metal (not committed)
+## Phase 3: bare metal (not committed)
 
 `just iso` builds the bare-metal artifact: kernel and initramfs, running from
 RAM, keeping nothing. You can *try* SlopOS on hardware; you can *develop* there
@@ -166,9 +114,9 @@ The verified image (`fs/assets/ext2.img`, `verity=require`) backs no boot; the
 suite mounts it to exercise verity. Decide whether it becomes the bare-metal
 read-only root or goes.
 
-## Phase 5: the toolchain rebuilds itself (not committed)
+## Phase 4: the toolchain rebuilds itself (not committed)
 
-Rebuilding LLVM and rustc in the guest needs Python beside Phase 3's CMake and
+Rebuilding LLVM and rustc in the guest needs Python beside Phase 2's CMake and
 Ninja, tens of gigabytes and hours of CPU, and `-Zbuild-std` until the target is
 tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 
@@ -192,7 +140,9 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 
 - **Ports compile unmodified.** A patch teaches a project the target; a
   missing function goes into slibc or the kernel once, with POSIX semantics,
-  instead of into each program that calls it.
+  instead of into each program that calls it. A library or tool is a recipe
+  (tarball, checksum, template): the shape of Redox's cookbook without its
+  patch list.
 - **Toolchain.** LLVM cross-built from Linux into one prefix; the compiler's
   crates ported by PR-shaped patches pinned by checksum. Cranelift and wild
   were measured against this kernel and do not reach it;

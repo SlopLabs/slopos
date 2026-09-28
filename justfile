@@ -385,7 +385,7 @@ boot-debug:
 boot-live: iso
     just _qemu-boot "interactive" "${VIDEO:-1}" {{iso}} {{fs_image}} QEMU_NO_ROOT_DISK=1 {{net_env}}
 
-[doc("Phase 1: install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics, across the reboots of one QEMU")]
+[doc("Install check: install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics, across the reboots of one QEMU")]
 test-install:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -404,7 +404,7 @@ test-install:
     [ "$missing" = 0 ] || exit 1
     echo "test-install: installed, tried, committed and rolled back (qemu rc=$rc); log in $log"
 
-[doc("Phase 1's exit criterion: the guest builds a kernel on the dev disk, installs it into slot b, boots it, commits it, and rolls back a slot that panics")]
+[doc("Guest install check: the guest builds a kernel on the dev disk, installs it into slot b, boots it, commits it, and rolls back a slot that panics")]
 test-install-guest:
     #!/usr/bin/env bash
     set -euo pipefail

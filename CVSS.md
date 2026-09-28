@@ -194,7 +194,7 @@ forked child stored to its `PROT_READ` pages
 with them: the COW copy, the ring and the shared `memfd` mapping now take their
 leaf flags from the region they map (`test_cow_copy_keeps_the_region_no_execute`).
 
-Swept 2026-09-26, second pass: Phase 1's install path — raw writes to
+Swept 2026-09-26, second pass: the install path — raw writes to
 `/dev/vd*` nodes, UEFI variables from user space, `bootctl`, and `fat-core`
 parsing an ESP it did not write. Two reviewers. Raw writes are held to a
 `Mount` or `SYSTEM` holder and to the device's exclusive claim, so a mounted
