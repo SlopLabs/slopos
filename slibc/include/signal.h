@@ -165,11 +165,11 @@ int sigsuspend(const sigset_t *set);
 int __libc_current_sigrtmin(void);
 int __libc_current_sigrtmax(void);
 int sigwait(const sigset_t *set, int *sig);
+int sigwaitinfo(const sigset_t *set, siginfo_t *info);
+int sigtimedwait(const sigset_t *set, siginfo_t *info, const struct timespec *timeout);
 sighandler_t signal(int signum, sighandler_t handler);
 char *strsignal(int sig);
 int sigqueue(pid_t pid, int sig, union sigval value);
-int sigwaitinfo(const sigset_t *set, siginfo_t *info);
-int sigtimedwait(const sigset_t *set, siginfo_t *info, const struct timespec *timeout);
 
 #ifdef __cplusplus
 }

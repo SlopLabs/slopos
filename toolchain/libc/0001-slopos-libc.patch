@@ -83,10 +83,10 @@ index 6c64020..0ec764e 100644
          pub use self::redox::*;
 diff --git a/src/unix/slopos/mod.rs b/src/unix/slopos/mod.rs
 new file mode 100644
-index 0000000..9892cd2
+index 0000000..f015119
 --- /dev/null
 +++ b/src/unix/slopos/mod.rs
-@@ -0,0 +1,2126 @@
+@@ -0,0 +1,2132 @@
 +//! SlopOS, over the `slibc` C library.
 +//!
 +//! * Headers: `slibc/include`
@@ -1880,6 +1880,12 @@ index 0000000..9892cd2
 +    pub fn sigpending(set: *mut sigset_t) -> c_int;
 +    pub fn sigsuspend(set: *const sigset_t) -> c_int;
 +    pub fn sigwait(set: *const sigset_t, sig: *mut c_int) -> c_int;
++    pub fn sigwaitinfo(set: *const sigset_t, info: *mut siginfo_t) -> c_int;
++    pub fn sigtimedwait(
++        set: *const sigset_t,
++        info: *mut siginfo_t,
++        timeout: *const crate::timespec,
++    ) -> c_int;
 +    pub fn __libc_current_sigrtmin() -> c_int;
 +    pub fn __libc_current_sigrtmax() -> c_int;
 +
