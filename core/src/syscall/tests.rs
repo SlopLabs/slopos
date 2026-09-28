@@ -7270,9 +7270,8 @@ slopos_testing::stest!(
     name = test_clone_shares_cwd_with_threads_and_clone_fs,
     suite = syscall_valid
 );
-/// `rt_sigaction` bounds the signal number at `NSIG`, the last realtime
-/// signal: the handler indexes `[SignalActionCell; NSIG]` with `signum - 1`,
-/// and the `old_act` read happens before every other validation.
+/// The handler indexes `[SignalActionCell; NSIG]` with `signum - 1`, and reads
+/// `old_act` before every other validation.
 pub fn test_rt_sigaction_bounds_signum_at_nsig() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -7368,9 +7367,8 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 
-/// The kill flag is not a signal and no signal word reaches it: every one of
-/// the 64 pending bits can be set and cleared through the public writers
-/// without marking the task, and none of them clears the mark once set.
+/// Setting and clearing any of the 64 pending bits through the public writers
+/// never marks the task killed, nor clears the mark once set.
 pub fn test_kill_flag_is_outside_every_signal_word() -> TestResult {
     let _fixture = SyscallFixture::new();
 

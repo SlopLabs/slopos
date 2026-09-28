@@ -1,18 +1,12 @@
-//! Pending signals and the `siginfo` each pending instance carries to
-//! delivery.
+//! Pending signals and the `siginfo` each pending instance carries.
 //!
-//! A [`PendingSignals`] is one pending set: a thread's own, for signals sent to
-//! that thread, or its thread group's, shared by every member, for signals sent
-//! to the process. Its word is what the lock-free "anything to deliver?"
-//! probes read; its [`SigQueue`] says what each set bit carries. Standard
-//! signals coalesce — one record per signal, the first sender's — and realtime
-//! ones queue every instance in arrival order, up to [`SIGQUEUE_MAX`], as
-//! POSIX has them. A standard signal's bit set with no record — the kernel
-//! raised it, and the store was never needed — delivers as
-//! [`SigInfo::KERNEL`]; an instance a sender's record was lost for — a
-//! standard one whose store could not be allocated, a realtime one a `kill`
-//! pended past the queue limit — delivers as a `kill` from no one (`SI_USER`,
-//! pid 0).
+//! A [`PendingSignals`] is one pending set: a thread's own, or its thread
+//! group's shared one. Lock-free "anything to deliver?" probes read its word;
+//! its [`SigQueue`] holds the records. Standard signals coalesce on the first
+//! sender's record; realtime ones queue every instance FIFO up to
+//! [`SIGQUEUE_MAX`]. A standard bit with no record delivers as
+//! [`SigInfo::KERNEL`]; an instance whose sender's record was lost delivers as
+//! a `kill` from no one (`SI_USER`, pid 0).
 
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -185,8 +179,7 @@ pub struct PendingSignals {
     /// Every writer holds `store`'s lock; readers probe it lock-free.
     bits: AtomicU64,
     /// Standard signals a process sent, pending with a record no store could
-    /// keep.
-    /// Written only under `store`'s lock.
+    /// keep. Written only under `store`'s lock.
     lost: AtomicU32,
     store: SpinLock<Option<KBox<SigQueue>>>,
 }
@@ -264,9 +257,8 @@ impl PendingSignals {
     /// the record store if there is none yet. Hands back what it did and the
     /// spare if unused, for the caller to drop outside the lock.
     ///
-    /// A realtime instance past the limit is refused unless its sender is one
-    /// POSIX lets overflow ([`SigInfo::survives_queue_overflow`]); that one pends
-    /// without its record.
+    /// A realtime instance past the limit is refused unless
+    /// [`SigInfo::survives_queue_overflow`]; then it pends without its record.
     pub(crate) fn enqueue(
         &self,
         signum: u8,

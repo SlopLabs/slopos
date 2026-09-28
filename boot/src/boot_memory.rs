@@ -134,7 +134,7 @@ fn boot_step_register_reclaimers_fn(ctx: &mut BootCtx<'_, BspInit>) {
     );
 }
 
-/// The ceiling, and the killer behind the pages it does not cover.
+/// Install the commit ceiling and the OOM killer that backs it.
 fn boot_step_commit_ledger_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let pages = slopos_mm::page_alloc::get_page_allocator_stats();
     let usable = pages.free.saturating_add(pages.allocated);

@@ -31,16 +31,11 @@ fn runtime_unblock_task(task_id: u32) -> i32 {
     scheduler::unblock_task_id(task_id)
 }
 
-/// Send `signum` to every process with a task `selects` accepts, reporting
-/// whether the selector matched anything.
+/// Send `signum` through [`task::task_group_signal`] once to every process
+/// with a task `selects` accepts, reporting whether any matched.
 ///
-/// Through [`task::task_group_signal`], once per process: one thread takes an
-/// ordinary signal, and stop and continue are acted on here — `unblock_task`
-/// refuses a task that is not `Blocked`, and a pending `SIGCONT` is dropped at
-/// the delivery point, so a stopped job would stay parked forever.
-///
-/// The sends run after the walk because a stop can park the caller, and a park
-/// inside the visitor would hold the registry snapshot across the switch.
+/// The sends run after the walk: a stop can park the caller, and a park inside
+/// the visitor would hold the registry snapshot across the switch.
 fn signal_matching_tasks(signum: u8, selects: impl Fn(&TaskRef) -> bool) -> bool {
     let mut groups = slopos_ostd::KVec::<(u32, u32)>::new();
     task::task_for_each_active(|candidate| {

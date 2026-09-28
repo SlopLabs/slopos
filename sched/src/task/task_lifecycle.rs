@@ -1525,9 +1525,9 @@ fn install_private_sighand(child: &mut Task, parent: &Task) -> bool {
     }
 }
 
-/// A thread takes the signals sent to its process from the one set every
-/// member shares; a new process keeps the fresh set `allocate_task` gave it.
-/// Out of line so the handle stays out of `task_clone`'s frame.
+/// A thread joins the pending set its process shares; a new process keeps its
+/// own from `allocate_task`. Out of line to keep the handle off `task_clone`'s
+/// frame.
 #[inline(never)]
 fn join_parent_signal_group(child: &mut Task, parent: &Task) {
     if let Some(shared) = parent.shared_signals_handle() {
@@ -2059,11 +2059,9 @@ fn live_member(tgid: u32, named: u32) -> Option<TaskRef> {
     found
 }
 
-/// Post one instance of `signum` to thread group `tgid`'s shared set, and wake
-/// the thread that is to take it: `named` when it does not block the signal,
-/// else the first member that does not. When every member blocks it, the
-/// instance waits for whichever unblocks it, or reads it through a signalfd,
-/// first. Every member's signalfd poller is woken either way.
+/// Post one instance of `signum` to `tgid`'s shared set and wake its taker:
+/// `named` unless it blocks the signal, else the first member that does not;
+/// if all block it, it waits. Every member's signalfd poller is woken.
 fn group_post(tgid: u32, named: u32, signum: u8, info: SigInfo) -> GroupPost {
     let mut post = GroupPost {
         reached: 0,
@@ -2121,9 +2119,8 @@ fn pick_and_wake(member: &TaskRef) -> bool {
     true
 }
 
-/// Pick, for each of the process signals in `released` that `task` will no
-/// longer take, a sibling that does not block it, and wake that sibling —
-/// `task` just blocked them, or is exiting.
+/// For each process signal in `released` that `task` just blocked or leaves by
+/// exiting, pick and wake a sibling that does not block it.
 pub fn task_retarget_shared_signals(task: &Task, released: SigSet) {
     // `released` was read from the shared set: a member whose mask the walk
     // reads stale sees those bits after its change (`set_signal_blocked`).
@@ -2159,9 +2156,9 @@ pub fn task_hand_on_newly_blocked(task: &Task, newly_blocked: SigSet) {
     }
 }
 
-/// Take one of `task`'s pending signals in `mask`, blocked or not, as a
-/// `signalfd` read or `sigtimedwait` does, waiting for one to be sent when
-/// none is: forever, or for `timeout_ms`. Interruptible.
+/// Take one of `task`'s pending signals in `mask`, blocked or not, as
+/// `signalfd` and `sigtimedwait` do, waiting up to `timeout_ms` (`None`:
+/// forever). Interruptible.
 pub fn task_wait_for_signal(
     task: &Task,
     mask: SigSet,
@@ -2220,10 +2217,9 @@ fn group_handles(tgid: u32, named: u32, signum: u8) -> bool {
 /// The `WUNTRACED` report is published once per stop, by the last member the
 /// stop has to park.
 ///
-/// A stop signal the thread it is sent to blocks — `directed`, else every
-/// member — stops nothing here: it pends, and stops the group when a thread
-/// takes it at a delivery point, as Linux does, so `sigwait` and a signalfd
-/// can take it instead.
+/// A stop signal its target blocks (`directed`, else every member) stops
+/// nothing here: as on Linux it pends for a delivery point, so `sigwait` and a
+/// signalfd can take it instead.
 fn task_group_stop_members(
     tid: u32,
     stop_signal: u8,
@@ -2409,12 +2405,9 @@ pub struct GroupPost {
     pub queue_full: bool,
 }
 
-/// Send `signum` to the process — the thread group — containing `tid`, as the
-/// kernel's own.
-///
-/// Returns how many members the send found. Job-control signals are acted on
-/// here rather than at a delivery point: a stopped task reaches no delivery
-/// point, so a `SIGCONT` that only pended could never resume it.
+/// Send `signum` as the kernel to the thread group containing `tid`, returning
+/// how many members it found. Job control acts here, not at a delivery point,
+/// which a stopped task never reaches.
 pub fn task_group_signal(tid: u32, signum: u8) -> usize {
     task_group_signal_info(tid, signum, SigInfo::KERNEL).reached
 }

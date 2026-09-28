@@ -331,9 +331,8 @@ define_syscall!(syscall_kill
         let Some(signum) = parse_signum(sig) else {
             return SyscallResult::Err(Errno::EINVAL);
         };
-        // POSIX `kill(pid)` names a *process*: one thread of the group takes
-        // the signal. The permission relation is answered once, on the named
-        // task — a thread-group send crosses no session.
+        // `kill(pid)` names a process; permission was answered once, on the
+        // named task, since a thread-group send crosses no session.
         let post = task_group_signal_info(target.id(), signum, info);
         if post.reached == 0 {
             return SyscallResult::Err(Errno::ESRCH);
@@ -443,8 +442,7 @@ define_syscall!(syscall_tgkill
     }
 });
 
-/// `si_pid` for a signal `task` sends, and the process a target task belongs
-/// to: its thread group, as `getpid` names it.
+/// The process `task` belongs to, as `getpid` names it.
 pub(crate) fn sender_pid(task: &Task) -> u32 {
     match task.tgid {
         INVALID_TASK_ID => task.task_id,
@@ -452,13 +450,9 @@ pub(crate) fn sender_pid(task: &Task) -> u32 {
     }
 }
 
-/// The record a `rt_sigqueueinfo`/`rt_tgsigqueueinfo` caller supplied at
-/// `uinfo`, for delivery to process `target_tgid`.
-///
-/// Linux's forgery rule: an `si_code` at or above 0 is the kernel's to write
-/// (`SI_USER`, `SI_KERNEL`, a fault or child code) and `SI_TKILL` is
-/// `tgkill`'s, so either aimed at another process is `EPERM`. `si_pid` and
-/// `si_uid` are the kernel's in every case, whatever the caller wrote.
+/// The record a `rt_(tg)sigqueueinfo` caller supplied at `uinfo`. Linux's
+/// forgery rule: an `si_code` at or above 0, or `SI_TKILL`, aimed at another
+/// process is `EPERM`; `si_pid`/`si_uid` are always the kernel's.
 #[inline(never)]
 fn queued_info(caller: &Task, uinfo: u64, target_tgid: u32) -> Result<SigInfo, Errno> {
     let ptr = MmUserPtr::<UserSiginfo>::try_new(uinfo).map_err(|_| Errno::EFAULT)?;
@@ -477,7 +471,6 @@ define_syscall!(syscall_rt_sigqueueinfo
     if raw_tgid <= 0 || raw_tgid > i32::MAX as i64 {
         return SyscallResult::Err(Errno::ESRCH);
     }
-    // Resolved and authorized as `kill(pid)` is: `pid` names a process.
     let target = match crate::syscall::signalable::resolve_signal_target(
         ctx.task().flags,
         raw_tgid as u32,
@@ -513,7 +506,6 @@ define_syscall!(syscall_rt_tgsigqueueinfo
         return SyscallResult::Err(Errno::EINVAL);
     }
     let (tgid, tid) = (raw_tgid as u32, raw_tid as u32);
-    // Authorized on the named thread, as `tgkill` is.
     let target = match crate::syscall::signalable::resolve_signal_target(ctx.task().flags, tid) {
         Ok(target) => target,
         Err(e) => return SyscallResult::Err(e),
@@ -1072,12 +1064,9 @@ fn force_death_on_frame_fault(task_ref: &Task) {
 /// a present, writable leaf. `#[inline(never)]` for the same frame-size
 /// reason as [`push_siginfo`].
 ///
-/// A forked child's first write to a still-shared stack page is charged here,
-/// so the populate may have to wait for the OOM killer, or for a file read.
-/// Delivery on a trap's way out runs one level into interrupt nesting with
-/// interrupts masked, and the wait runs in the window the `#PF` path opens
-/// for the same two: out of nesting, interrupts on. Only a delivery under a
-/// preemption pin cannot wait, and keeps to what needs none.
+/// A still-shared stack page may make the populate wait (OOM killer, file
+/// read), so it steps out to the `#PF` path's window — out of interrupt
+/// nesting, interrupts on — unless under a preemption pin.
 #[inline(never)]
 fn populate_sigframe_range(task_ref: &Task, frame_addr: u64) -> bool {
     use slopos_arch::cpu;
@@ -1116,10 +1105,8 @@ fn populate_sigframe_range(task_ref: &Task, frame_addr: u64) -> bool {
     populated
 }
 
-/// `settle` learns, before any frame is built, whether a syscall the delivery
-/// interrupted restarts: decided on the signal this delivery took, so an
-/// instance a sibling's `sigwait` took first restarts it rather than failing
-/// it with no handler run.
+/// `settle(restart)` runs before any frame is built, decided on the signal
+/// actually taken: one a sibling's `sigwait` took first restarts the syscall.
 fn deliver_pending_signal_core(
     current: &slopos_sched::task_struct::Current,
     regs: &mut impl UserRegView,

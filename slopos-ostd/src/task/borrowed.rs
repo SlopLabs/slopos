@@ -341,9 +341,8 @@ impl<K, U> TaskInner<K, U> {
         })
     }
 
-    /// Take one pending signal in `mask` with the record the instance carries,
-    /// picked or not, as a `signalfd` read or `sigwait` does: the
-    /// lowest-numbered of this thread's own, else the lowest of its process's.
+    /// Take one pending signal in `mask`, picked or not, as `signalfd` and
+    /// `sigwait` do: the lowest of this thread's own, else of its process's.
     /// Its bit clears unless another instance stays queued.
     pub fn dequeue_signal(&self, mask: SigSet) -> Option<DequeuedSignal> {
         if let Some((signum, info)) = self.pending.dequeue(mask) {

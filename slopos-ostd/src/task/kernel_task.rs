@@ -589,21 +589,18 @@ pub struct TaskInner<K, U> {
     pub caps: AtomicU64,
     /// Signals sent to this thread alone.
     pub(crate) pending: PendingSignals,
-    /// Signals sent to this thread's process, shared by every thread of the
-    /// group; one thread that does not block a signal takes it. `None` for a
-    /// kernel task, which heads no process, and for one never registered.
-    ///
-    /// Written only through `&mut self`, like [`sighand`](Self::sighand).
+    /// Signals sent to this thread's process, shared by the group; one thread
+    /// not blocking a signal takes it. `None` for a kernel task or one never
+    /// registered. Written only through `&mut self`, like
+    /// [`sighand`](Self::sighand).
     pub(crate) shared_pending: Option<crate::KArc<PendingSignals>>,
-    /// This thread was picked to take its process's pending signals. Only a
-    /// picked thread acts on them at a delivery point or has a wait cut short
-    /// by them, so the thread a send chose is the one that runs the handler,
-    /// not whichever sibling reaches a boundary first. Cleared when it looks
-    /// and finds none it may take.
+    /// Picked to take its process's pending signals: only a picked thread acts
+    /// on them or has a wait cut short by them, so the thread a send chose
+    /// runs the handler. Cleared when it looks and finds none it may take.
     pub(crate) picked_for_shared: AtomicBool,
     /// The task is marked for death: every blocking primitive but the bounded
-    /// uninterruptible tier aborts rather than parks. A word of its own, not a
-    /// bit of any signal set, so no mask userland writes can name it.
+    /// uninterruptible tier aborts rather than parks. Not a signal bit, so no
+    /// mask userland writes can name it.
     pub killed: AtomicBool,
     /// Bitmask of blocked signals. Atomic because `task_signal_post` reads it
     /// from whichever CPU is sending while the owner writes it in
@@ -1080,12 +1077,10 @@ impl<K, U> TaskInner<K, U> {
         }
     }
 
-    /// Arm a not-yet-published child's context from `parent`, which must be
-    /// the calling task: the same object when `share` (`CLONE_FS`), otherwise
-    /// a private copy. A sharing parent with none gets one first, so both
-    /// sides hold the same object from here on.
-    ///
-    /// Out of line: the clone path's frame is measured against the 2 KiB gate.
+    /// Arm a not-yet-published child's context from `parent`, the calling
+    /// task: shared when `share` (`CLONE_FS`), else a private copy; a sharing
+    /// parent with none gets one first. Out of line: the clone path's frame is
+    /// measured against the 2 KiB gate.
     #[inline(never)]
     pub fn inherit_fs_from(&mut self, parent: &Self, share: bool) -> bool {
         let inherited = match (parent.fs.load(), share) {

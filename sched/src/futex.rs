@@ -7,14 +7,11 @@
 //! refuse the surplus waiter, and every userland futex wrapper discards that
 //! error and retries — turning a blocked waiter into a full-core busy-spin.
 //!
-//! A private futex is keyed on the pair (address space, virtual address),
-//! never on the address alone: the same number names a different word in
-//! every process, so an address-only key would let one process's
-//! `FUTEX_REQUEUE` restamp a foreign waiter onto a word its own `FUTEX_WAKE`
-//! can never match again. A shared one (no `FUTEX_PRIVATE_FLAG`, on a word in
-//! a `MAP_SHARED` mapping of a shared object) is keyed on (object, byte
-//! offset), so processes mapping one object at different addresses meet; the
-//! syscall layer derives which, as Linux's documented futex key does.
+//! A private futex is keyed on (address space, virtual address), never the
+//! address alone: an address-only key would let one process's `FUTEX_REQUEUE`
+//! restamp a foreign waiter onto a word its own `FUTEX_WAKE` can never match.
+//! A shared one (no `FUTEX_PRIVATE_FLAG`, on a `MAP_SHARED` object mapping) is
+//! keyed on (object, byte offset), so every process mapping the object meets.
 
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
@@ -63,16 +60,12 @@ fn unlink_waiter(bucket: &FutexBucket, task: NonNull<crate::task_struct::Task>) 
     true
 }
 
-/// Names a futex. A private key is the pair (address space, futex word) — see
-/// the module doc. A shared key is (backing object, byte offset), so every
-/// address space mapping that object at any address names the same word.
+/// Names a futex; see the module doc for the two key kinds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FutexKey {
     shared: bool,
-    /// The address space's packed `process_vm` handle (0 for a kernel task),
-    /// generation-checked so a reused `ProcessVm` slot never aliases the one
-    /// it replaced; or the shared object's identity, which is generation-
-    /// checked the same way.
+    /// A generation-checked `process_vm` handle (0 for a kernel task), or the
+    /// shared object's likewise generation-checked identity.
     space: u64,
     /// The virtual address, or the byte offset into the shared object.
     addr: u64,
@@ -345,9 +338,8 @@ fn wake_matching(bucket: &FutexBucket, key: FutexKey, max_wake: u32, bitset: u32
 }
 
 /// FUTEX_REQUEUE / FUTEX_CMP_REQUEUE: wake up to `max_wake` waiters on
-/// `src`, then move up to `max_requeue` of the remainder onto `dst`. The two
-/// keys need not be of one kind: a shared word's waiters can be moved onto a
-/// private one and back, as on Linux.
+/// `src`, then move up to `max_requeue` of the remainder onto `dst`. Keys of
+/// either kind mix, as on Linux.
 ///
 /// `expected` is `Some` for `FUTEX_CMP_REQUEUE`, whose compare of `*uaddr`
 /// (the word `src` names) happens under the bucket lock. Returns woken +

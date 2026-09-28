@@ -1254,9 +1254,8 @@ pub fn test_futex_key_carries_the_address_space() -> TestResult {
     pass!()
 }
 
-/// A waiter requeued from a shared key onto a private one, and back, lives in
-/// the destination's bucket afterwards: its own unlink — what a timeout or a
-/// signal does — finds it there, and leaves neither bucket holding it.
+/// A waiter requeued between a shared and a private key lives in the
+/// destination's bucket: its own unlink (a timeout, a signal) finds it there.
 pub fn test_futex_requeue_moves_waiters_between_key_kinds() -> TestResult {
     use slopos_sched::futex::{
         FutexKey, futex_keys_share_bucket_for_test, futex_park_for_test,
@@ -1395,10 +1394,9 @@ fn wake_across_spaces(
     (parked, private_wake, shared_wake, left)
 }
 
-/// Without `FUTEX_PRIVATE_FLAG`, a word in a `MAP_SHARED` memfd mapping is
-/// keyed on the memfd and the byte offset: two address spaces mapping it at
-/// different addresses derive one key, and a wake from one reaches a waiter
-/// parked by the other. Private anonymous memory keeps its per-space key.
+/// Without `FUTEX_PRIVATE_FLAG`, a `MAP_SHARED` memfd word is keyed on the
+/// memfd and offset, so spaces mapping it at different addresses meet; private
+/// anonymous memory keeps its per-space key.
 pub fn test_shared_futex_keys_on_the_backing_object() -> TestResult {
     let _fixture = SyscallFixture::new();
     let (Some(a), Some(b)) = (build_page_fixture(), build_page_fixture()) else {

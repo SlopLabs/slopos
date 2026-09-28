@@ -982,10 +982,9 @@ fn is_active(task: &Task) -> bool {
 /// [`task_try_for_each_enumerable`] that never touches the heap, for a caller
 /// that runs when it is dry: the OOM killer.
 ///
-/// Guards are taken a fixed batch at a time into the frame, each batch resuming
-/// at the spine slot after the last, and `f` runs off the registry lock as in
-/// the snapshot walk. A registration landing behind the cursor mid-walk is
-/// missed, as a snapshot taken before it would miss it.
+/// Guards are taken a fixed batch at a time into the frame and `f` runs off
+/// the registry lock; a registration landing behind the cursor mid-walk is
+/// missed, as a snapshot would miss it.
 pub fn task_try_for_each_enumerable_heapless(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) {
     const BATCH: usize = 16;
     let mut from = 0usize;

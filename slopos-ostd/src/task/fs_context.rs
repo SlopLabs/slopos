@@ -1,10 +1,9 @@
 //! A process's filesystem context: its working directory.
 //!
-//! One [`FsContext`] is shared by every task that shares it through
-//! `CLONE_FS` (every thread of a process), so a `chdir` from any of them moves
-//! all of them; `fork` and spawn copy it. The path it holds is immutable once
-//! published and replaced whole, so a reader racing a `chdir` on another
-//! thread sees either the old path or the new one, never a mix.
+//! One [`FsContext`] is shared through `CLONE_FS` (every thread of a process),
+//! so a `chdir` from any sharer moves all; `fork` and spawn copy it. The path
+//! is immutable once published and replaced whole, so a racing reader sees
+//! the old path or the new one, never a mix.
 
 #[cfg(any(test, feature = "test-helpers"))]
 use core::sync::atomic::{AtomicBool, Ordering};

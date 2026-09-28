@@ -320,21 +320,20 @@ pub const SYSCALL_GETPGID: u64 = 121;
 /// `getsid(pid)`.
 pub const SYSCALL_GETSID: u64 = 124;
 
-/// `rt_sigpending(set: *mut SigSet, sigsetsize)` — the signals pending for the
-/// caller, its own and its process's, that it blocks; `sigsetsize` must be 8.
+/// `rt_sigpending(set: *mut SigSet, sigsetsize)` — the caller's blocked
+/// pending signals, its own and its process's; `sigsetsize` must be 8.
 pub const SYSCALL_RT_SIGPENDING: u64 = 127;
 
 /// `rt_sigtimedwait(set: *const SigSet, info: *mut UserSiginfo, timeout: *const
-/// Timespec, sigsetsize) -> signum` — take a pending signal of `set`, blocked
-/// or not, waiting for one when none is: `EAGAIN` once the relative `timeout`
-/// passes (a null one waits forever), `EINTR` when a signal outside `set` is
-/// delivered first. `SIGKILL` and `SIGSTOP` cannot be waited for.
+/// Timespec, sigsetsize) -> signum` — take a pending signal of `set`, waiting
+/// if none: `EAGAIN` after the relative `timeout` (null waits forever),
+/// `EINTR` if a signal outside `set` is delivered first.
 pub const SYSCALL_RT_SIGTIMEDWAIT: u64 = 128;
 
 /// `rt_sigqueueinfo(tgid, sig, info: *const UserSiginfo)` — queue `sig` on
-/// process `tgid` with `info`'s `si_code` and `si_value`. The kernel fills
-/// `si_pid`/`si_uid`; an `si_code` at or above 0, or `SI_TKILL`, aimed at
-/// another process is `EPERM`. `EAGAIN` past the realtime queue limit.
+/// process `tgid` with `info`'s `si_code` and `si_value`; the kernel fills
+/// `si_pid`/`si_uid`. `EPERM` for an `si_code` at or above 0, or `SI_TKILL`,
+/// aimed at another process; `EAGAIN` past the realtime queue limit.
 pub const SYSCALL_RT_SIGQUEUEINFO: u64 = 129;
 
 /// `sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack)` —
@@ -468,14 +467,11 @@ pub const SYSCALL_FACCESSAT: u64 = 269;
 /// `times` means both now.
 pub const SYSCALL_UTIMENSAT: u64 = 280;
 
-/// `signalfd4(fd, mask: *const SigSet, sizemask, flags) -> fd` that becomes
-/// `POLLIN`-ready while a signal in `mask` is pending for the task polling it,
-/// its own or its process's, and whose `read` takes one of them as a
-/// `SignalfdSiginfo`, waiting for one unless the descriptor is `O_NONBLOCK`.
-/// `flags` takes `SFD_NONBLOCK` and `SFD_CLOEXEC`. `fd` must be -1 (this
-/// kernel cannot re-arm an existing descriptor) and `sizemask` must be 8. Pair
-/// with blocking those signals so they queue as in-band ring/poll events
-/// instead of interrupting waits with `EINTR`.
+/// `signalfd4(fd, mask: *const SigSet, sizemask, flags) -> fd`, `POLLIN`-ready
+/// while a signal in `mask` is pending for the poller or its process; `read`
+/// takes one as a `SignalfdSiginfo`. `flags`: `SFD_NONBLOCK`, `SFD_CLOEXEC`.
+/// `fd` must be -1 (no re-arming) and `sizemask` 8. Block the signals so they
+/// queue instead of interrupting waits with `EINTR`.
 pub const SYSCALL_SIGNALFD4: u64 = 289;
 
 /// `dup3(oldfd, newfd, flags)`.

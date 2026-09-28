@@ -145,17 +145,14 @@ pub fn task_signal_post<K, U>(task: &TaskInner<K, U>, signum: u8) -> bool {
 
 /// Post one instance of `signum` carrying `info` to the thread `task` alone.
 ///
-/// The disposition-aware chokepoint every signal *send* routes through. A
-/// signal that would be discarded anyway — handler is `SIG_IGN`, or `SIG_DFL`
-/// with a default of [`SigDefault::Ignore`](slopos_abi::signal::SigDefault::Ignore) — and is **not blocked** is
-/// dropped here instead of being left pending, so it never spuriously wakes a
-/// blocked task only to be consumed as a no-op at the delivery point. Blocked
-/// signals always pend regardless of disposition: a `signalfd` reader or a
-/// later-installed handler may still drain them after unblocking.
+/// The disposition-aware chokepoint every signal *send* routes through. An
+/// unblocked signal that would be discarded anyway (`SIG_IGN`, or `SIG_DFL`
+/// defaulting to ignore) is dropped here, so it never spuriously wakes a
+/// blocked task. Blocked signals always pend: a `signalfd` reader or a
+/// later-installed handler may still drain them.
 ///
-/// A record store is allocated here, before the lock, the first time an
-/// instance carries more than the kernel's own record; a sender that raises
-/// only [`SigInfo::KERNEL`] standard signals (an interrupt handler) never
+/// The record store is allocated before the lock on the first instance that
+/// carries more than [`SigInfo::KERNEL`], so an interrupt handler never
 /// allocates.
 pub fn task_signal_post_info<K, U>(
     task: &TaskInner<K, U>,

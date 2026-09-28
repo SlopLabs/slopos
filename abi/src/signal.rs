@@ -1,18 +1,15 @@
 //! POSIX signal ABI definitions shared between kernel and userland.
 
-/// Signals are numbered `1..=NSIG`; signal 0 is reserved for error checking in
-/// `kill()`. Linux's kernel numbering: 64 signals in one 64-bit set.
+/// Signals are numbered `1..=NSIG`; signal 0 is `kill()`'s existence probe.
 pub const NSIG: usize = 64;
 
-/// Signals `SIGRTMIN..=SIGRTMAX` are realtime: every instance queues with its
-/// own `siginfo`. The kernel's bounds; a libc may reserve some at the bottom.
+/// Realtime signals: each instance queues with its own `siginfo`. A libc may
+/// reserve the lowest few for itself.
 pub const SIGRTMIN: u8 = 32;
 pub const SIGRTMAX: u8 = NSIG as u8;
 
-/// Realtime instances one pending set may hold queued at once (POSIX
-/// `_POSIX_SIGQUEUE_MAX`): a process's for signals sent to it, a thread's for
-/// signals sent to that thread. See [`SigInfo::survives_queue_overflow`] for
-/// what a send past it does.
+/// Realtime instances one pending set, a process's or a thread's, may hold.
+/// See [`SigInfo::survives_queue_overflow`] for a send past it.
 pub const SIGQUEUE_MAX: usize = 32;
 
 #[inline]
@@ -51,9 +48,8 @@ pub type SigSet = u64;
 
 pub const SIG_EMPTY: SigSet = 0;
 
-/// What one pending signal instance carries to delivery: `si_code`, the
-/// sender's `si_pid`/`si_uid`, and the union's second word — `si_value` for a
-/// queued signal, `si_status` for `SIGCHLD`.
+/// What a pending signal instance carries: `si_code`, the sender's
+/// `si_pid`/`si_uid`, and `si_value` (queued) or `si_status` (`SIGCHLD`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SigInfo {
@@ -65,7 +61,6 @@ pub struct SigInfo {
 }
 
 impl SigInfo {
-    /// A signal the kernel raised on its own account.
     pub const KERNEL: Self = Self {
         code: SI_KERNEL,
         pid: 0,
@@ -74,7 +69,6 @@ impl SigInfo {
         value: 0,
     };
 
-    /// A signal process `pid` sent with `code`, carrying `value`.
     #[inline]
     pub const fn sent(code: i32, pid: u32, uid: u32, value: u64) -> Self {
         Self {
@@ -86,17 +80,17 @@ impl SigInfo {
         }
     }
 
-    /// Whether an instance past [`SIGQUEUE_MAX`] still pends, its record lost,
-    /// rather than failing with `EAGAIN`. Linux lets a `kill` and the kernel's
-    /// own signals overflow; `sigqueue`, `tgkill` and any other sender fail.
+    /// Whether an instance past [`SIGQUEUE_MAX`] pends without its record
+    /// rather than failing `EAGAIN`: Linux lets `kill` and kernel signals
+    /// overflow.
     #[inline]
     pub const fn survives_queue_overflow(&self) -> bool {
         self.code == SI_USER || self.code == SI_KERNEL
     }
 }
 
-/// One drained signal, returned by `read()` on a `FileKind::Signalfd`: Linux
-/// x86-64's `struct signalfd_siginfo`, 128 bytes.
+/// One signal as `read()` on a signalfd returns it: Linux x86-64's
+/// `struct signalfd_siginfo`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignalfdSiginfo {
@@ -123,10 +117,8 @@ pub struct SignalfdSiginfo {
 impl SignalfdSiginfo {
     pub const SERIALIZED_LEN: usize = 128;
 
-    /// The record for `signo` taken with `info`. The union word lands where
-    /// its `si_code` says it lives: `ssi_status` for a child's report,
-    /// `ssi_int`/`ssi_ptr` for any sender-supplied code, which is where a
-    /// handler's `si_value` finds it too.
+    /// The record for `signo` taken with `info`: the union word goes to
+    /// `ssi_status` for a child's report, `ssi_int`/`ssi_ptr` for a sender's.
     pub const fn new(signo: u8, info: &SigInfo) -> Self {
         let child = signo == SIGCHLD && info.code > 0;
         let queued = info.code < 0;
@@ -191,7 +183,6 @@ pub const fn sig_bit(signum: u8) -> SigSet {
     }
 }
 
-// Every bit of a `SigSet` is a signal: nothing kernel-private shares the word.
 const _: () = assert!(NSIG == SigSet::BITS as usize);
 const _: () = assert!(sig_bit(NSIG as u8) == 1 << 63);
 
@@ -233,8 +224,8 @@ const _: () = assert!(
     "UserSigAltStack must match the Linux x86-64 stack_t"
 );
 
-/// `si_code` values. Linux numbering: a code at or above 0 is the kernel's
-/// to write, which is why `rt_sigqueueinfo` refuses one from userland.
+/// `si_code` values, Linux numbering. Codes at or above 0 are the kernel's
+/// alone to write.
 pub const SI_USER: i32 = 0;
 pub const SI_KERNEL: i32 = 0x80;
 pub const SI_QUEUE: i32 = -1;
@@ -307,9 +298,7 @@ impl UserSiginfo {
         }
     }
 
-    /// The `siginfo` for an instance that carried `info`: `si_pid` and
-    /// `si_uid` share the union's first word, low half and high half, and
-    /// `si_value`/`si_status` is the second.
+    /// The `siginfo` a handler receives for an instance that carried `info`.
     #[inline]
     pub const fn from_info(si_signo: i32, info: &SigInfo) -> Self {
         let mut out = Self::new(
@@ -525,8 +514,6 @@ pub struct SignalFrame {
 mod tests {
     use super::*;
 
-    /// A signalfd reader sees the value a handler would, for every code a
-    /// sender may supply, and a kill's record carries none.
     #[test]
     fn signalfd_record_carries_the_value_of_every_sender_supplied_code() {
         const SI_TIMER: i32 = -2;

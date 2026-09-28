@@ -1574,10 +1574,8 @@ pub fn test_a_thread_is_not_its_creators_child() -> TestResult {
     pass!()
 }
 
-/// `rt_sigreturn` restores the blocked mask from a sigframe the caller wrote,
-/// so a user-authored word reaches `signal_blocked` directly: all 64 bits are
-/// signals, realtime ones included, the uncatchable pair is stripped, and no
-/// value of it can mark the task killed.
+/// A user-authored sigframe mask reaches `signal_blocked` whole — all 64 bits,
+/// less the uncatchable pair — and no value of it marks the task killed.
 pub fn test_sigreturn_restores_a_full_mask_without_the_kill_flag() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1759,9 +1757,8 @@ fn call_as(handler: crate::syscall::common::SyscallHandler, caller: u32, args: [
     frame.rax()
 }
 
-/// Realtime instances queue each with its own record, FIFO per signal, and
-/// the lowest-numbered pending signal is delivered first — standard before
-/// realtime. A standard signal sent twice coalesces into the first sender's.
+/// Realtime instances queue FIFO, each with its own record, lowest signal
+/// first; a repeated standard signal keeps the first sender's record.
 pub fn test_realtime_signals_queue_and_standard_ones_coalesce() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SI_USER, SIGRTMIN, SigInfo};
     use slopos_sched::task::{SignalPost, task_signal_post_info};
@@ -1820,8 +1817,7 @@ pub fn test_realtime_signals_queue_and_standard_ones_coalesce() -> TestResult {
     pass!()
 }
 
-/// A task holds at most `SIGQUEUE_MAX` realtime instances; the next is
-/// refused, and a delivery makes room again.
+/// The surplus past `SIGQUEUE_MAX` is refused until a delivery makes room.
 pub fn test_realtime_queue_limit_refuses_the_surplus() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMAX, SigInfo};
     use slopos_sched::task::{SignalPost, task_signal_post_info};
@@ -1860,10 +1856,8 @@ pub fn test_realtime_queue_limit_refuses_the_surplus() -> TestResult {
     pass!()
 }
 
-/// `rt_sigqueueinfo` takes `si_code` and `si_value` from the caller but never
-/// `si_pid`, and refuses a kernel-owned code or `SI_TKILL` aimed at another
-/// process. `kill` and `tgkill` report their sender with `SI_USER` and
-/// `SI_TKILL`.
+/// `rt_sigqueueinfo` takes `si_code`/`si_value` but never `si_pid`, refusing
+/// forged codes aimed elsewhere; `kill`/`tgkill` report `SI_USER`/`SI_TKILL`.
 pub fn test_sent_signals_carry_the_real_sender() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SI_TKILL, SI_USER, SIGRTMIN, SigInfo, UserSiginfo};
     let _fixture = SyscallFixture::new();
@@ -1944,9 +1938,8 @@ static OOM_VICTIM_PID: AtomicU32 = AtomicU32::new(INVALID_PROCESS_ID);
 static OOM_CEILING: AtomicU32 = AtomicU32::new(u32::MAX);
 static OOM_KILLS: AtomicU32 = AtomicU32::new(0);
 
-/// The killer's task side for the test below: only the scratch victim may be
-/// taken, and taking it gives back the commit ceiling and the victim's
-/// address space, as its exit would.
+/// The killer's task side: only the scratch victim may be taken, and taking it
+/// frees what its exit would.
 struct ScratchVictim;
 
 static SCRATCH_VICTIM: ScratchVictim = ScratchVictim;
@@ -1980,6 +1973,8 @@ impl OomOps for ScratchVictim {
     }
 }
 
+const USER_WRITE_TO_ABSENT_PAGE: u64 = 0x06;
+
 /// An address space holding one written page, for the killer to choose.
 fn scratch_victim() -> Option<ProcessId> {
     let id = ProcessId::resolve(create_process_vm())?;
@@ -1993,9 +1988,9 @@ fn scratch_victim() -> Option<ProcessId> {
         0,
     );
     let packed = pack_process_vm_handle(process_vm_handle(id)?);
-    // 0x06: a user write to an absent page.
-    let written =
-        addr != 0 && try_resolve_user_fault(addr, 0x06, packed, 1) == FaultOutcome::Resolved;
+    let written = addr != 0
+        && try_resolve_user_fault(addr, USER_WRITE_TO_ABSENT_PAGE, packed, 1)
+            == FaultOutcome::Resolved;
     if !written {
         destroy_process_vm(id);
         return None;
@@ -2052,10 +2047,9 @@ fn deliver_on_irq_exit_as_current(
     delivered
 }
 
-/// A forked child's signal frame lands on stack pages it still shares with
-/// its parent. With the commit ceiling full, the copy that frame needs is the
-/// OOM killer's to find, as the child's own write would be, not a refused
-/// push that ends in `SIGSEGV`.
+/// With the commit ceiling full, a forked child's frame push onto a
+/// still-shared stack page waits for the OOM killer instead of ending in
+/// `SIGSEGV`.
 pub fn test_sigframe_on_a_shared_forked_stack_waits_for_the_killer() -> TestResult {
     sigframe_on_a_shared_forked_stack(Delivery::SyscallExit)
 }
@@ -2221,9 +2215,8 @@ fn run_probe_to_death(
     died.then_some(cpu)
 }
 
-/// `SIGKILL` as the OOM killer sends it, once the spinner is past its one
-/// syscall, and a reschedule kick to its CPU: that interrupt is then the only
-/// way into the kernel, so the kill is taken on its way out.
+/// Send `SIGKILL` as the OOM killer does once the spinner is past its syscall,
+/// then kick its CPU, so the kill is taken on an interrupt's way out.
 fn kill_once_spinning(spinner: &slopos_sched::task_struct::Task) -> bool {
     use slopos_kernel_services::platform::get_time_ms;
     let spinning = wait_until(|| spinner.pgid() == spinner.task_id);
@@ -2254,11 +2247,9 @@ fn leaves_interrupt_nesting(cpu: usize) -> bool {
     false
 }
 
-/// A task that dies inside a trap — of its own fault, or of a kill taken on
-/// the way out of an interrupt — never returns through the trap's exit, so
-/// never leaves its interrupt nesting. The level is the task's: the CPU it
-/// died on leaves interrupt context, and a frame push at a trap's depth on a
-/// shared stack still waits for the OOM killer rather than being refused.
+/// A task dying inside a trap never leaves its interrupt nesting; its CPU must
+/// still leave interrupt context, and a later frame push at trap depth on a
+/// shared stack still waits for the OOM killer.
 pub fn test_an_abandoned_trap_leaves_its_cpu_out_of_interrupt_nesting() -> TestResult {
     let parent = Current::get().map_or(INVALID_TASK_ID, |current| current.id());
     assert_test!(
@@ -2365,9 +2356,6 @@ fn take_next(task_id: u32) -> Option<(u8, u64)> {
         .map(|taken| (taken.signum, taken.info.value))
 }
 
-/// One `sigqueue` to a three-thread process runs one handler: the instance
-/// lands once, on the set the threads share, and the thread that takes it
-/// leaves nothing for the others.
 pub fn test_one_sigqueue_to_a_process_is_taken_once() -> TestResult {
     use slopos_abi::signal::SIGRTMIN;
     let _fixture = SyscallFixture::new();
@@ -2403,10 +2391,8 @@ pub fn test_one_sigqueue_to_a_process_is_taken_once() -> TestResult {
     pass!()
 }
 
-/// Worker threads that block a signal leave it to the thread that handles
-/// it: forty `sigqueue`s — past `SIGQUEUE_MAX` — to a process whose leader and
-/// one worker block `SIGRTMIN` all succeed, and the one unblocked thread takes
-/// each, in order, as it arrives.
+/// Forty `sigqueue`s (past `SIGQUEUE_MAX`) to a process whose other threads
+/// block `SIGRTMIN` all succeed, and the unblocked thread takes each in order.
 pub fn test_blocked_threads_leave_process_signals_to_the_unblocked_one() -> TestResult {
     use slopos_abi::signal::SIGRTMIN;
     let _fixture = SyscallFixture::new();
@@ -2456,8 +2442,6 @@ pub fn test_blocked_threads_leave_process_signals_to_the_unblocked_one() -> Test
     pass!()
 }
 
-/// A process signal every thread blocks stays pending for all of them,
-/// deliverable to none, until one unblocks it; that one takes it.
 pub fn test_a_signal_every_thread_blocks_goes_to_the_first_to_unblock() -> TestResult {
     use slopos_abi::signal::SIGRTMIN;
     use slopos_sched::task::task_has_deliverable_signal;
@@ -2516,9 +2500,8 @@ pub fn test_a_signal_every_thread_blocks_goes_to_the_first_to_unblock() -> TestR
     pass!()
 }
 
-/// Past the queue limit a `kill` still pends, its record lost — delivered as
-/// `SI_USER` from pid 0, as Linux has it; `sigqueue` and `tgkill` are refused
-/// with `EAGAIN`.
+/// Past the limit a `kill` pends without its record (`SI_USER`, pid 0, as on
+/// Linux); `sigqueue` and `tgkill` get `EAGAIN`.
 pub fn test_only_a_kill_pends_past_the_queue_limit() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SI_USER, SIGQUEUE_MAX, SIGRTMAX, SIGRTMIN, SigInfo};
     use slopos_sched::task::{SignalPost, task_signal_post_info};
@@ -2595,8 +2578,7 @@ pub fn test_only_a_kill_pends_past_the_queue_limit() -> TestResult {
     pass!()
 }
 
-/// An instance a delivery took and could not use goes back ahead of the rest,
-/// even when a sender refilled the queue behind it meanwhile.
+/// A requeued instance goes back ahead of those queued behind it meanwhile.
 pub fn test_a_requeued_instance_survives_a_refilled_queue() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMIN, SigInfo};
     use slopos_sched::task::{SignalPost, task_signal_post_info};
@@ -2647,9 +2629,8 @@ pub fn test_a_requeued_instance_survives_a_refilled_queue() -> TestResult {
     pass!()
 }
 
-/// Two threads each putting back an instance of their process's full
-/// realtime queue cannot both have its one reserve slot: the second is
-/// refused, and every instance a sender was told had queued survives.
+/// Of two threads putting back into a full process queue only one gets its
+/// reserve slot, and no instance a sender was told had queued is lost.
 pub fn test_a_second_put_back_into_a_full_process_queue_is_refused() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMIN, SigInfo};
     use slopos_ostd::task::ops::task_group_post_info;
@@ -2715,9 +2696,8 @@ pub fn test_a_second_put_back_into_a_full_process_queue_is_refused() -> TestResu
     pass!()
 }
 
-/// A thread a sender chose that exits before the pick lands — its exit looked
-/// for a pick and found none — does not take the signal into its grave: the
-/// pick moves to a sibling that does not block it.
+/// A picked thread that exits before the pick lands does not take the signal
+/// with it: the pick moves to a sibling that does not block it.
 pub fn test_a_pick_landing_after_the_takers_exit_moves_to_a_sibling() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGRTMIN, SigInfo};
     use slopos_ostd::task::ops::task_group_post_info;
@@ -2765,9 +2745,8 @@ pub fn test_a_pick_landing_after_the_takers_exit_moves_to_a_sibling() -> TestRes
     pass!()
 }
 
-/// A forked process starts a pending set of its own, which the threads it
-/// then creates share: a signal sent to it is pending for its thread, and not
-/// for the process it was forked from.
+/// A forked process gets its own pending set, shared by its threads: a signal
+/// sent to it is not pending for its parent.
 pub fn test_a_forked_process_shares_its_own_signal_set_with_its_threads() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGRTMIN, SigInfo};
     use slopos_ostd::task::ops::task_group_post_info;
@@ -2818,8 +2797,7 @@ pub fn test_a_forked_process_shares_its_own_signal_set_with_its_threads() -> Tes
     pass!()
 }
 
-/// `SIGPIPE` for a write nobody will read names the writer itself as its
-/// sender, as a `kill` to itself would: `SI_USER` and the writer's own pid.
+/// As a `kill` to itself would: `SI_USER` and the writer's own pid.
 pub fn test_sigpipe_names_the_writer_as_sender() -> TestResult {
     use slopos_abi::signal::{SI_USER, SIGPIPE, SigInfo};
     use slopos_fs::fileio::{file_close_fd, file_pipe_create};
@@ -2909,9 +2887,7 @@ fn take_deliverable(task_id: u32) -> Option<(u8, u64)> {
         .map(|taken| (taken.signum, taken.info.value))
 }
 
-/// A process signal the send handed to the thread it named moves to a sibling
-/// when that thread blocks it through `rt_sigprocmask` before taking it, and
-/// the sibling's delivery takes the instance.
+/// Blocking it through `rt_sigprocmask` before taking it moves the pick.
 pub fn test_blocking_a_picked_signal_hands_it_to_a_sibling() -> TestResult {
     use slopos_abi::signal::{SIG_BLOCK, SIGRTMIN};
     use slopos_sched::task::task_has_deliverable_signal;
@@ -3025,9 +3001,8 @@ pub fn test_sigpending_reports_the_blocked_pending_signals() -> TestResult {
     pass!()
 }
 
-/// `rt_sigtimedwait` hands realtime instances out in the order they were
-/// sent, each with its own record, lowest signal first; a zero timeout with
-/// nothing left is `EAGAIN`.
+/// Lowest signal first, each instance in send order with its own record; a
+/// zero timeout with nothing left is `EAGAIN`.
 pub fn test_sigtimedwait_takes_realtime_instances_in_order() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGRTMIN};
     use slopos_abi::syscall::Timespec;
@@ -3236,9 +3211,8 @@ fn signalfd_waiter() {
     });
 }
 
-/// Run `waiter` as `caller` on a kernel thread of its own, since only a task
-/// can sleep, and return once it has parked on its own or `caller`'s signal
-/// event, or finished: `false` when it did neither.
+/// Run `waiter` as `caller` on its own kernel thread, since only a task can
+/// sleep; `false` if it neither parked on a signal event nor finished.
 fn start_waiter(waiter: fn(), caller: u32, args: [u64; 4]) -> bool {
     use slopos_ostd::sync::BUS;
     use slopos_ostd::task::ops::signal_pending_event;
@@ -3298,8 +3272,6 @@ fn idle_caller(blocked: u64) -> Option<(u32, FdTable, u64)> {
     ready
 }
 
-/// `rt_sigtimedwait` with nothing pending sleeps until another task sends a
-/// signal of its set, then returns that signal, taken.
 pub fn test_sigtimedwait_sleeps_until_a_signal_is_sent() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGRTMIN, SigInfo};
     let bit = sig_bit(SIGRTMIN);
@@ -3327,8 +3299,7 @@ pub fn test_sigtimedwait_sleeps_until_a_signal_is_sent() -> TestResult {
     pass!()
 }
 
-/// `rt_sigtimedwait` with nothing sent is `EAGAIN` once its timeout passes,
-/// and not before.
+/// `EAGAIN` comes once the timeout passes, and not before.
 pub fn test_sigtimedwait_times_out_with_eagain() -> TestResult {
     use slopos_abi::signal::SIGRTMIN;
     use slopos_abi::syscall::Timespec;
@@ -3359,8 +3330,6 @@ pub fn test_sigtimedwait_times_out_with_eagain() -> TestResult {
     pass!()
 }
 
-/// A `read` on a signalfd without `O_NONBLOCK` and nothing pending sleeps
-/// until a watched signal is sent to the reader, then returns its record.
 pub fn test_a_blocking_signalfd_read_sleeps_until_a_signal_is_sent() -> TestResult {
     use slopos_abi::signal::{SI_USER, SigInfo, SignalfdSiginfo};
     use slopos_sched::task::task_signal_post_info;
@@ -3411,9 +3380,8 @@ fn read_signalfd_as(reader: u32, table: FdTable, fd: i32) -> Option<(isize, u32)
     ))
 }
 
-/// A signalfd serves the task using it, not the one that created it, as
-/// Linux's does: another process holding the descriptor — a forked child —
-/// polls and reads its own signals, and never drains the creator's.
+/// As on Linux, a forked child holding the descriptor polls and reads its own
+/// signals, never the creator's.
 pub fn test_a_signalfd_serves_the_task_using_it() -> TestResult {
     use slopos_abi::signal::{SIGUSR2, SigInfo};
     use slopos_abi::syscall::{POLLIN, SFD_NONBLOCK};
@@ -3485,8 +3453,7 @@ pub fn test_a_signalfd_serves_the_task_using_it() -> TestResult {
     pass!()
 }
 
-/// `signalfd4` takes `SFD_NONBLOCK` and `SFD_CLOEXEC`, Linux's values, onto the
-/// open file and the descriptor, and refuses any other flag.
+/// Onto the open file and the descriptor; any other flag is refused.
 pub fn test_signalfd4_takes_nonblock_and_cloexec() -> TestResult {
     use slopos_abi::syscall::{
         F_GETFD, F_GETFL, FD_CLOEXEC, O_NONBLOCK, SFD_CLOEXEC, SFD_NONBLOCK,
@@ -3607,11 +3574,9 @@ fn return_from_syscall_as_current(
     returned
 }
 
-/// An `ERESTARTSYS` is settled on the signal the way out takes, as Linux
-/// settles it on `get_signal`'s: a process instance a sibling's `sigtimedwait`
-/// took first leaves nothing to run, so the syscall restarts rather than
-/// failing `EINTR` with no handler run; one it does take fails it `EINTR`
-/// when caught without `SA_RESTART`, and restarts it under the handler with.
+/// `ERESTARTSYS` is settled on the signal the way out takes, as Linux's
+/// `get_signal` does: none left (a sibling's `sigtimedwait` took it) restarts,
+/// a caught one fails `EINTR` unless `SA_RESTART`.
 pub fn test_erestartsys_is_settled_on_the_signal_taken() -> TestResult {
     use slopos_abi::signal::SA_RESTART;
     use slopos_abi::syscall::{ERRNO_ERESTARTSYS, SYSCALL_WRITE};
@@ -3699,8 +3664,6 @@ pub fn test_erestartsys_is_settled_on_the_signal_taken() -> TestResult {
     pass!()
 }
 
-/// `signalfd4` drops `SIGKILL` and `SIGSTOP` from its mask, as Linux does: a
-/// read never takes either.
 pub fn test_signalfd4_never_watches_kill_or_stop() -> TestResult {
     use slopos_abi::syscall::SFD_NONBLOCK;
     let _fixture = SyscallFixture::new();
@@ -3751,10 +3714,8 @@ pub fn test_signalfd4_never_watches_kill_or_stop() -> TestResult {
     pass!()
 }
 
-/// A stop signal blocked where it is sent stops nothing at the send: it pends
-/// for `sigwait` or a signalfd to take, or to stop the group when a thread
-/// unblocks it — the process's when every thread blocks it, the thread's own
-/// when `tgkill` names one that does.
+/// A blocked stop signal stops nothing at the send: it pends for `sigwait` or
+/// a signalfd, or stops the group (or the `tgkill`ed thread) once unblocked.
 pub fn test_a_blocked_stop_signal_pends_instead_of_stopping() -> TestResult {
     use slopos_abi::signal::{SI_TKILL, SIGTTIN, SigInfo};
     let _fixture = SyscallFixture::new();
@@ -3835,9 +3796,8 @@ pub fn test_a_blocked_stop_signal_pends_instead_of_stopping() -> TestResult {
     pass!()
 }
 
-/// A standard signal a process sent whose record store could not be
-/// allocated reports a `kill` from no one (`SI_USER`, pid 0), as Linux does;
-/// one the kernel raised keeps `SI_KERNEL`.
+/// A process-sent standard signal whose record could not be allocated reads
+/// as a `kill` from pid 0, as on Linux; a kernel one keeps `SI_KERNEL`.
 pub fn test_a_lost_standard_record_reads_as_a_kill_from_no_one() -> TestResult {
     use slopos_abi::signal::{CLD_EXITED, SI_KERNEL, SI_QUEUE, SI_USER, SIGCHLD, SigInfo};
     use slopos_ostd::task::ops::inject_sigqueue_store_alloc_failures;

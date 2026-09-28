@@ -84,8 +84,6 @@ pub(super) fn notify_parent_of_child_exit(task: &Task) {
         return;
     }
 
-    // Process-directed, as POSIX has `SIGCHLD`: any thread of the parent's
-    // group that does not block it takes it.
     let _ = super::task_lifecycle::task_group_signal_info(
         parent_task_id,
         SIGCHLD,
@@ -97,9 +95,8 @@ pub(super) fn notify_parent_of_child_exit(task: &Task) {
     slopos_ostd::sync::BUS.publish(slopos_ostd::task::ops::any_child_exit_event(parent_task_id));
 }
 
-/// The `SIGCHLD` record for `task`'s exit: `CLD_KILLED` and the signal for a
-/// death by signal, else `CLD_EXITED` and the exit code, as `waitpid` reports
-/// them. There are no core dumps, so never `CLD_DUMPED`.
+/// The `SIGCHLD` record for `task`'s exit, as `waitpid` reports it; never
+/// `CLD_DUMPED`, as there are no core dumps.
 fn child_exit_info(task: &Task) -> SigInfo {
     let reason = TaskExitReason::from_u16(task.exit_reason.load(Ordering::Acquire));
     let signal = task.exit_signal();

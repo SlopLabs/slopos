@@ -1,7 +1,7 @@
 //! `FileKind::Signalfd` file operations: a pollable view of the pending
-//! signals of the task using the descriptor — its own and its process's —
-//! filtered to a subscribed mask. Like Linux's, a descriptor inherited across
-//! `fork` serves the child's signals, never its creator's.
+//! signals of the task using the descriptor, its own and its process's,
+//! filtered to a subscribed mask. As on Linux, an inherited descriptor serves
+//! the child's signals, never its creator's.
 //!
 //! Paired with the caller blocking those signals (`rt_sigprocmask`), delivery
 //! becomes in-band: `(pending & !blocked)` excludes them from the harvest's
