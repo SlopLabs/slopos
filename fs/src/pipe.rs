@@ -91,8 +91,8 @@ pub(crate) struct Pipe {
     read_pos: usize,
     write_pos: usize,
     pub(crate) len: usize,
-    pub(crate) readers: u16,
-    pub(crate) writers: u16,
+    pub(crate) readers: u32,
+    pub(crate) writers: u32,
     /// Opens of each end so far, so a FIFO opener blocked for a partner is
     /// released by one that arrived and left again before it looked.
     pub(crate) reader_opens: u32,
@@ -127,11 +127,11 @@ impl Pipe {
 
     fn attach(&mut self, reads: bool, writes: bool) {
         if reads {
-            self.readers = self.readers.saturating_add(1);
+            self.readers += 1;
             self.reader_opens = self.reader_opens.wrapping_add(1);
         }
         if writes {
-            self.writers = self.writers.saturating_add(1);
+            self.writers += 1;
             self.writer_opens = self.writer_opens.wrapping_add(1);
         }
     }

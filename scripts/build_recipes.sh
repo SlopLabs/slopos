@@ -239,11 +239,15 @@ fetch() {
     esac
     file="$CACHE/$name-$version.$ext"
     var="$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')_URL"
-    url="${!var:-$url}"
+    protocols=(--proto =https --proto-redir =https)
+    if [ -n "${!var:-}" ]; then
+        url="${!var}"
+        protocols=()
+    fi
     if [ ! -f "$file" ]; then
         mkdir -p "$CACHE"
         echo "$SELF: fetching $url" >&2
-        curl -L --fail --show-error "$url" -o "$file.part" || die "could not fetch $url
+        curl -L "${protocols[@]}" --fail --show-error "$url" -o "$file.part" || die "could not fetch $url
        An offline checkout pre-populates third_party/recipes/$(basename "$file"),
        or points $var at a local copy."
         mv "$file.part" "$file"
