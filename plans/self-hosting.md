@@ -73,7 +73,96 @@ in one process stops failing a whole mount.
 crates `Cargo.lock` names, and the guest builds with no registry, so a commit
 that moves `Cargo.lock` builds in the guest only on a fresh dev disk.
 
-## Phase 1: the whole tree builds in the guest
+## Phase 1: SlopOS ships its own tools (not committed; decisions open)
+
+The target: in `just boot`, `git clone https://github.com/SlopLabs/slopos`
+anywhere on `/`, find `git`, `cargo` and `rustc` on the default `PATH`, run
+`scripts/selfhost.sh install` from that clone, reboot, and find the clone still
+there. The dev disk's first job, carrying source in and patches out, ended
+with git; what keeps the tools on it now is below.
+
+What is known:
+
+- **Where the tools are.** Only on the dev disk, at
+  `/devel/src/slopos/third_party/rust-slopos` (748M), because
+  `selfhost.sh` looks for the toolchain inside the checkout, where the host
+  keeps its sysroot, and git's meson prefix is compiled in as that path.
+- **`PATH`.** The shell defaults to `/bin:/sbin`
+  (`userland/src/apps/shell/env.rs`), slibc's `execvp` fallback and
+  `_CS_PATH` to `/bin:/usr/bin` (`slibc/src/process/mod.rs`; no `/usr/bin`
+  exists), the coreutils to `/bin:/sbin`. The shell reads no startup file and
+  the root has no `/usr/local`. Every system surveyed puts extra tools where
+  the default `PATH` already looks: Redox and SerenityOS install into the root
+  (`/usr/bin`; `/usr/local`, with `PATH=/bin:/usr/bin:/usr/local/bin`),
+  ChromeOS bind-mounts its dev-tools partition at `/usr/local`, NixOS and so
+  Asterinas NixOS link a profile at `/run/current-system/sw/bin`.
+- **A link is enough.** `exec` resolves symlinks and passes the canonical path
+  as `AT_EXECFN` (`core/src/exec/mod.rs`), and slibc's loader takes `$ORIGIN`
+  from it, so rustc, cargo, clang and git (`RUNPATH $ORIGIN/../lib`) reached
+  through a link load from their real prefix. The initramfs unpacker skips
+  symlinks.
+- **Licence.** Git is GPL-2.0-only and links slibc, which is GPL-3.0-or-later,
+  so `NOTICE.md` keeps git off every distributed image. rustc, cargo, clang and
+  lld are shippable as they are; cargo's libgit2 carries the GCC linking
+  exception.
+- **HTTPS.** Git's recipe disables curl, so it clones only from the host's
+  `git://` daemon, and GitHub turned `git://` off in March 2022. The curl and
+  OpenSSL recipes exist and cargo already fetches over HTTPS in the guest, from
+  a loopback registry. The guest takes a nameserver from DHCP and trusts
+  `/etc/ssl/certs/ca-certificates.crt`; no test reaches GitHub or crates.io
+  over the real internet, and `dns_resolve_test` is known-failing in a
+  full-suite boot.
+- **Persistence.** Under `just boot`, `/` is `fs/assets/ext2-persist.img`:
+  writable, preserved across builds, grown with `resize2fs`, 512M by default.
+  The host refreshes its binaries on it on every boot. `just test-persist`
+  already grades a write surviving a power-off.
+- **Crates.** A clone carries no `third_party/vendor`; the guest builds from
+  the crates seeded onto the dev disk.
+- **Build graph.** `just toolchain` is hours cold and needs the host's clang,
+  CMake and Ninja; `just build`, `just test` and CI's boot lane do not depend
+  on it and must not start to.
+- **The live ISO.** 28M, of which the initramfs is 13M, unpacked into RAM and
+  keeping nothing; the toolchain alone is 748M.
+
+The work, once the decisions below are made:
+
+1. **Relicense slibc** so git may link it on a distributed image. The closure
+   of `libc.so` is slibc, `slibc-core`, `slopos-abi`, crt0 and the builtins
+   beside vendored `libm` and `unwinding` (`MIT OR Apache-2.0`).
+2. **Git over HTTPS:** enable curl in the recipe, and whatever slibc and the
+   network stack the transport reaches for, graded against a real remote.
+3. **One default `PATH`** for the shell, slibc and the coreutils, naming
+   `/usr/local/bin` after `/bin` and `/sbin`, so a writable disk cannot shadow
+   the system's tools.
+4. **The toolchain as its own prefix at `/usr/local`**, installed onto the
+   persistent root in QEMU; `selfhost.sh` takes the toolchain on `PATH`
+   instead of `<checkout>/third_party/rust-slopos`. A guest kernel's `core`
+   panic paths then differ from a host build's, which nothing grades.
+5. **A clone on `/` survives a reboot**, graded like `test-persist`, with a
+   root large enough for a checkout and its target directory.
+
+Open, to discuss:
+
+- **slibc's licence.** `MIT`, or `MIT OR Apache-2.0` as the Rust ecosystem
+  does. Not Apache-2.0 alone: it is incompatible with GPL-2.0-only, which is
+  the case this is for. `slopos-abi` is shared with the kernel, so it is either
+  relicensed with slibc or split. Does the rest of the tree stay
+  GPL-3.0-or-later?
+- **What ships in RAM and what is fetched later.** Installers keep the live
+  image small and download the rest: Asterinas NixOS's installer downloads
+  its packages, Redox's `pkg` fetches from `static.redox-os.org`, ChromeOS
+  `dev_install` fetches the dev tools into `/usr/local`. For SlopOS that means
+  choosing among the toolchain as a package fetched over HTTPS after boot
+  (a format, a host, verification), a second ISO flavour carrying it, and a
+  compressed image; and deciding what the base ISO carries for the long term.
+- **Crates in the guest:** crates.io over HTTPS, or a vendored mirror that
+  travels with the toolchain.
+- **The dev disk:** kept as a workspace that survives `just reset root`, as
+  `/home` does, or dropped. Phase 3's installer assumes a `/devel` partition.
+- **Size of the persistent root:** raise the 512M default, or grow it on
+  demand.
+
+## Phase 2: the whole tree builds in the guest
 
 `build_userland.sh` is bash and the C++ runtime build is CMake and Ninja, so
 the guest can rebuild the kernel but not `init`, the shell, the coreutils or
@@ -83,7 +172,7 @@ forces the decision the loop avoids today: the host refreshes every binary it
 built on each `just boot`, so a guest-installed `/bin` must either win or be
 declared the guest's.
 
-## Phase 2: bare metal (not committed)
+## Phase 3: bare metal (not committed)
 
 `just iso` builds the bare-metal artifact: kernel and initramfs, running from
 RAM, keeping nothing. You can *try* SlopOS on hardware; you can *develop* there
@@ -102,9 +191,9 @@ The verified image (`fs/assets/ext2.img`, `verity=require`) backs no boot; the
 suite mounts it to exercise verity. Decide whether it becomes the bare-metal
 read-only root or goes.
 
-## Phase 3: the toolchain rebuilds itself (not committed)
+## Phase 4: the toolchain rebuilds itself (not committed)
 
-Rebuilding LLVM and rustc in the guest needs Python beside Phase 1's CMake and
+Rebuilding LLVM and rustc in the guest needs Python beside Phase 2's CMake and
 Ninja, tens of gigabytes and hours of CPU, and `-Zbuild-std` until the target is
 tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 
@@ -119,7 +208,8 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 - GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source in this tree; a
   recipe names a tarball and carries none of it. A third-party program shipped
   on an image needs a `NOTICE.md` entry. Git is GPL-2.0-only and links slibc,
-  so it goes onto nothing but a dev disk built where it is used.
+  so until Phase 1 relicenses slibc it goes onto nothing but a disk built where
+  it is used.
 - Ratchets are measurements: re-measure with the gate's `--emit-allowlist` and
   name the change that moved it.
 - The verified image stays read-only and attested. Anything writable is a
