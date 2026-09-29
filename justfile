@@ -857,6 +857,7 @@ check-framekernel-gates:
     scripts/check_clang_driver.sh --self-test
     scripts/check_bootstrap_config.sh --self-test
     scripts/check_recipes.sh --self-test
+    scripts/check_libc_license.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_offline_build.sh --self-test
@@ -869,6 +870,7 @@ check-framekernel-gates:
     scripts/check_clang_driver.sh
     scripts/check_bootstrap_config.sh
     scripts/check_recipes.sh
+    scripts/check_libc_license.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
     scripts/check_no_kernel_async.sh

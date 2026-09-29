@@ -2,7 +2,7 @@
 name = "slopos-slibc"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "slibc - SlopOS Rust-native C standard library for userland"
 # Generates slibc/include/**: the C headers for `libc.a`, rendered from the
 # `src/unix/slopos/mod.rs` creation hunk of toolchain/libc/*.patch, plus the

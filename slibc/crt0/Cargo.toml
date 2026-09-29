@@ -2,7 +2,7 @@
 name = "slopos-crt0"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "crt0 - SlopOS process entry object (_start) for slibc-linked programs"
 
 # The artifact is not the rlib: `scripts/build_userland.sh` runs

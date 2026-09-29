@@ -2,7 +2,7 @@
 name = "slopos-slibc-cdylib"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "libc.so - slibc as the shared C library and the program interpreter"
 
 # One artifact is both the C library and `ld-slopos.so.1`, which is what musl

@@ -14,7 +14,8 @@ PARTICULAR PURPOSE. See the GNU General Public License for more details.
 You should have received a copy of the GNU General Public License along with
 this program. If not, see <https://www.gnu.org/licenses/>.
 
-The full license text is in [`LICENSE`](LICENSE).
+The full license text is in [`LICENSE`](LICENSE). The C library is licensed
+apart from the rest; see [The C library](#the-c-library).
 
 ## Authorship and provenance
 
@@ -92,6 +93,33 @@ carrying no per-file copyright header to carry over. The unmodified upstream
 sources remain © The Rust Project Contributors and © The `rust-lang/libc`
 Developers respectively.
 
+## The C library
+
+SlopOS's C library is licensed **`MIT OR Apache-2.0`**, © 2025–2026 The SlopOS
+Authors. It is [`slibc/`](slibc/), [`slibc-core/`](slibc-core/) and
+[`abi/`](abi/), the last holding the kernel–userland ABI definitions the kernel
+links too. Together they build `libc.so`, which is also the program interpreter
+`ld-slopos.so.1`; `libc.a`; `crt0.o`; `libbuiltins.a`; and the headers in
+`slibc/include/`. Each of the three directories carries `LICENSE-MIT` and
+`LICENSE-APACHE`. The rest of this tree remains GPL-3.0-or-later.
+
+Every program on SlopOS links this library, git among them, and git is
+GPL-2.0-only: it can be combined with neither GPL-3.0-or-later code nor
+Apache-2.0 alone, so whoever distributes it takes the MIT option. The headers
+are rendered from the `libc` fork's `src/unix/slopos/` module, itself `MIT OR
+Apache-2.0` (above). Beside its own crates the library links `libm`,
+`unwinding`, `gimli` and `bitflags` (below) and, from the pinned standard
+library, `core` and `alloc` (`MIT OR Apache-2.0`, with `core`'s Unicode tables
+`Unicode-3.0`) and `compiler_builtins` (`MIT AND Apache-2.0 WITH LLVM-exception
+AND (MIT OR Apache-2.0)`), whose compiler-rt part carries the LLVM exception
+that provides for combination with GPLv2 code. [`slibc/NOTICE`](slibc/NOTICE)
+gives each of those its notice, and every image that carries `libc.so` carries
+it and both licence texts in `/usr/share/licenses/slibc/`.
+`scripts/check_libc_license.sh` fails the gates when MIT does not satisfy the
+licence of a crate `cargo metadata` resolves for the library, when a
+third-party one has no entry there, or when a source file under the three
+directories includes one from outside them.
+
 ## Components linked into SlopOS binaries
 
 Each component below is dual-licensed `MIT OR Apache-2.0` unless noted. **SlopOS
@@ -127,7 +155,10 @@ CORE-MATH project. musl's own notice records that much of the math library code
 is `Copyright © 1993,2004 Sun Microsystems`, `© 2003-2011 David Schultz`,
 `© 2003-2009 Steven G. Kargl`, `© 2003-2009 Bruce D. Evans`, `© 2008 Stephen
 L. Moshier`, or `© 2017-2018 Arm Limited`, as labelled in the individual source
-files.
+files. Its `exp2` and `exp2f` are `BSD-2-Clause`, © 2005 David Schultz, and
+its `cbrt` is CORE-MATH's, © 2021-2022 Alexei Sibidanov;
+[`slibc/NOTICE`](slibc/NOTICE) reproduces the notices those files and the Sun
+Microsystems ones carry.
 
 The MIT License permission notice, applying to every component in this section:
 
@@ -260,10 +291,8 @@ Torvalds and the git contributors, `GPL-2.0-only`. The build also compiles code
 git bundles under other licences: xdiff, `list.h`, `compat/obstack.c` and the
 glibc regex in `compat/regex/` (`LGPL-2.1-or-later`), `ewah/`
 (`GPL-2.0-or-later`), `reftable/` (© Google LLC, `BSD-3-Clause`) and the
-SHA-1 collision detection code (`MIT`). The binary links slibc's `libc.so`,
-and GPL-2.0-only and GPL-3.0-or-later code cannot be combined in a distributed
-work, so git goes onto nothing but the toolchain install and a dev disk, both
-built where they are used.
+SHA-1 collision detection code (`MIT`). The binary links zlib, and the C
+library under its MIT option (above).
 
 `tools/kallsyms`, which builds the kernel's symbol table on the host and in
 the guest, carries a Rust v0 symbol demangler derived from LLVM's

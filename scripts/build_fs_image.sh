@@ -75,6 +75,9 @@ FS_LABEL="${FS_LABEL:-}"
 # disk (`mount=LABEL=slopos-dev:/devel`). Mirrors gen_initramfs.py's EMPTY_DIRS.
 ROOT_DIRS=(/etc /var /home /devel)
 
+# Mirrors gen_initramfs.py's SLIBC_LICENSES.
+SLIBC_LICENSES=(LICENSE-MIT LICENSE-APACHE NOTICE)
+
 # macOS: extend PATH to find e2fsprogs tools installed via Homebrew
 if [ "$(uname -s)" = "Darwin" ]; then
     BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
@@ -128,6 +131,9 @@ build_stamp() {
                  "${REPO_ROOT}/assets/certs"/* "${REPO_ROOT}/assets/logo.png"; do
         [ -f "$asset" ] || continue
         sha256sum "$asset" | cut -d' ' -f1
+    done
+    for text in "${SLIBC_LICENSES[@]}"; do
+        sha256sum "${REPO_ROOT}/slibc/$text" 2>/dev/null | cut -d' ' -f1 || echo missing
     done
 }
 
@@ -448,6 +454,16 @@ FONTS_DIR="${REPO_ROOT}/assets/fonts"
 
 mkdir_p /usr
 mkdir_p /usr/share
+
+if [ -f "${BUILD_DIR}/libc.so" ]; then
+    mkdir_p /usr/share/licenses
+    mkdir_p /usr/share/licenses/slibc
+    for text in "${SLIBC_LICENSES[@]}"; do
+        [ -f "${REPO_ROOT}/slibc/$text" ] || { echo "build_fs_image: slibc/$text is missing" >&2; exit 1; }
+        install_file "${REPO_ROOT}/slibc/$text" "/usr/share/licenses/slibc/$text"
+        echo "Installed license: /usr/share/licenses/slibc/$text"
+    done
+fi
 
 # The C++ runtime's license texts, beside the library they cover, for the same
 # reason the fonts below carry theirs. Only the -tests recipes stage them,

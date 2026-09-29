@@ -33,6 +33,8 @@ MODE_LINK = S_IFLNK | 0o777  # utility names -> the multicall binary
 # writable. `/devel` is the mount point `mount=LABEL=slopos-dev:/devel` needs.
 EMPTY_DIRS = (b"/etc", b"/var", b"/home", b"/devel")
 
+SLIBC_LICENSES = ("LICENSE-MIT", "LICENSE-APACHE", "NOTICE")
+
 # Mirror the kernel's per-component name cap (fs/src/lib.rs MAX_NAME_LEN).
 MAX_NAME_LEN = 255
 
@@ -122,6 +124,9 @@ def main() -> None:
             entries.append((b"/lib/" + so.encode(), MODE_EXEC, read_file(src)))
     if os.path.isfile(os.path.join(build_dir, "libc.so")):
         entries.append((b"/lib/ld-slopos.so.1", MODE_LINK, b"libc.so"))
+        for fname in SLIBC_LICENSES:
+            dest = b"/usr/share/licenses/slibc/" + fname.encode()
+            entries.append((dest, MODE_DATA, read_file(os.path.join(repo_root, "slibc", fname))))
 
     # The C++ runtime's license texts, beside the library they cover, for the
     # same reason the fonts below carry theirs. Staged by the -tests recipes
