@@ -2,7 +2,7 @@
 name = "slopos-slibc-builtins"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "libbuiltins.a - compiler-rt's helper routines, position independent"
 
 # The archive a shared object takes compiler-rt from. `libc.a` carries the same

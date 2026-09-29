@@ -289,6 +289,7 @@ Same debt as always. It just arrives faster now.
   <b>GPL-3.0-or-later</b><br/>
   <sub>
     Copyright © 2025–2026 The SlopOS Authors. See <a href="LICENSE">LICENSE</a>.<br/>
+    The C library (<code>slibc/</code>, <code>slibc-core/</code>, <code>abi/</code>) is MIT OR Apache-2.0.<br/>
     Third-party components shipped with SlopOS are listed in
     <a href="NOTICE.md">NOTICE.md</a>. SlopOS is an independent from-scratch
     kernel and contains no code copied from any other operating system.

@@ -2,7 +2,7 @@
 name = "slopos-slibc-staticlib"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "libc.a - slibc packaged as a linkable C archive for C consumers"
 
 # `libc.a`, the archive a `cc`-style link line finds via `-lc`. It exists as a
