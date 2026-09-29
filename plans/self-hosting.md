@@ -48,7 +48,11 @@ a pinned tarball, its checksum and a build template that
 with its default features against the zlib, nghttp2, OpenSSL, libcurl, libssh2
 and libgit2 recipes; in the guest it resolves a git dependency through libgit2
 and fetches a crate over HTTPS through libcurl and OpenSSL. Git 2.55 is a meson
-recipe beside them, built for the toolchain's place in the guest.
+recipe beside them, built for the toolchain's place in the guest. Every one
+of them links the C library, which is `MIT OR Apache-2.0` so that git, being
+GPL-2.0-only, may be passed on with the library it links;
+`scripts/check_libc_license.sh` holds every crate `cargo metadata` resolves for
+the library to MIT.
 
 A port finds the POSIX it expects: one working directory per process, `#!`
 scripts and `/bin/sh`, process-shared futexes, 64 signals with queued realtime
@@ -73,13 +77,12 @@ in one process stops failing a whole mount.
 crates `Cargo.lock` names, and the guest builds with no registry, so a commit
 that moves `Cargo.lock` builds in the guest only on a fresh dev disk.
 
-## Phase 1: SlopOS ships its own tools (not committed; decisions open)
+## Phase 1: SlopOS ships its own tools
 
 The target: in `just boot`, `git clone https://github.com/SlopLabs/slopos`
 anywhere on `/`, find `git`, `cargo` and `rustc` on the default `PATH`, run
 `scripts/selfhost.sh install` from that clone, reboot, and find the clone still
-there. The dev disk's first job, carrying source in and patches out, ended
-with git; what keeps the tools on it now is below.
+there.
 
 What is known:
 
@@ -101,10 +104,9 @@ What is known:
   from it, so rustc, cargo, clang and git (`RUNPATH $ORIGIN/../lib`) reached
   through a link load from their real prefix. The initramfs unpacker skips
   symlinks.
-- **Licence.** Git is GPL-2.0-only and links slibc, which is GPL-3.0-or-later,
-  so `NOTICE.md` keeps git off every distributed image. rustc, cargo, clang and
-  lld are shippable as they are; cargo's libgit2 carries the GCC linking
-  exception.
+- **Licence.** rustc, cargo, clang, lld and git are shippable as they are;
+  cargo's libgit2 carries the GCC linking exception. What git links must be
+  GPL-2.0-compatible, and OpenSSL 3 is Apache-2.0, which is not.
 - **HTTPS.** Git's recipe disables curl, so it clones only from the host's
   `git://` daemon, and GitHub turned `git://` off in March 2022. The curl and
   OpenSSL recipes exist and cargo already fetches over HTTPS in the guest, from
@@ -114,53 +116,50 @@ What is known:
   full-suite boot.
 - **Persistence.** Under `just boot`, `/` is `fs/assets/ext2-persist.img`:
   writable, preserved across builds, grown with `resize2fs`, 512M by default.
-  The host refreshes its binaries on it on every boot. `just test-persist`
-  already grades a write surviving a power-off.
+  The host refreshes its binaries on it on every boot, and `gen_verity.py`
+  reads the whole image into memory and hashes every block each time. `just
+  test-persist` already grades a write surviving a power-off.
 - **Crates.** A clone carries no `third_party/vendor`; the guest builds from
-  the crates seeded onto the dev disk.
+  the crates seeded onto the dev disk. `-Zbuild-std` resolves std's own
+  dependencies from crates.io too.
 - **Build graph.** `just toolchain` is hours cold and needs the host's clang,
   CMake and Ninja; `just build`, `just test` and CI's boot lane do not depend
   on it and must not start to.
 - **The live ISO.** 28M, of which the initramfs is 13M, unpacked into RAM and
-  keeping nothing; the toolchain alone is 748M.
+  keeping nothing; the toolchain alone is 748M. Neither Arch's installer ISO
+  nor Ubuntu's desktop ISO carries a compiler or git.
 
-The work, once the decisions below are made:
+The work:
 
-1. **Relicense slibc** so git may link it on a distributed image. The closure
-   of `libc.so` is slibc, `slibc-core`, `slopos-abi`, crt0 and the builtins
-   beside vendored `libm` and `unwinding` (`MIT OR Apache-2.0`).
-2. **Git over HTTPS:** enable curl in the recipe, and whatever slibc and the
-   network stack the transport reaches for, graded against a real remote.
-3. **One default `PATH`** for the shell, slibc and the coreutils, naming
+1. **Git over HTTPS:** enable curl in the recipe and move the one libcurl from
+   OpenSSL to an mbedTLS recipe (`Apache-2.0 OR GPL-2.0-or-later`), plus
+   whatever slibc and the network stack the transport reaches for, graded
+   against a real remote. Cargo's registry traffic moves with the libcurl;
+   OpenSSL stays for libgit2 and libssh2.
+2. **One default `PATH`** for the shell, slibc and the coreutils, naming
    `/usr/local/bin` after `/bin` and `/sbin`, so a writable disk cannot shadow
    the system's tools.
-4. **The toolchain as its own prefix at `/usr/local`**, installed onto the
-   persistent root in QEMU; `selfhost.sh` takes the toolchain on `PATH`
-   instead of `<checkout>/third_party/rust-slopos`. A guest kernel's `core`
-   panic paths then differ from a host build's, which nothing grades.
-5. **A clone on `/` survives a reboot**, graded like `test-persist`, with a
-   root large enough for a checkout and its target directory.
-
-Open, to discuss:
-
-- **slibc's licence.** `MIT`, or `MIT OR Apache-2.0` as the Rust ecosystem
-  does. Not Apache-2.0 alone: it is incompatible with GPL-2.0-only, which is
-  the case this is for. `slopos-abi` is shared with the kernel, so it is either
-  relicensed with slibc or split. Does the rest of the tree stay
-  GPL-3.0-or-later?
-- **What ships in RAM and what is fetched later.** Installers keep the live
-  image small and download the rest: Asterinas NixOS's installer downloads
-  its packages, Redox's `pkg` fetches from `static.redox-os.org`, ChromeOS
-  `dev_install` fetches the dev tools into `/usr/local`. For SlopOS that means
-  choosing among the toolchain as a package fetched over HTTPS after boot
-  (a format, a host, verification), a second ISO flavour carrying it, and a
-  compressed image; and deciding what the base ISO carries for the long term.
-- **Crates in the guest:** crates.io over HTTPS, or a vendored mirror that
-  travels with the toolchain.
-- **The dev disk:** kept as a workspace that survives `just reset root`, as
-  `/home` does, or dropped. Phase 3's installer assumes a `/devel` partition.
-- **Size of the persistent root:** raise the 512M default, or grow it on
-  demand.
+3. **The toolchain as its own prefix at `/usr/local`**, installed onto the
+   persistent root in QEMU by the host that built it, with each project's
+   licence text; `selfhost.sh` takes the toolchain on `PATH` instead of
+   `<checkout>/third_party/rust-slopos`. A guest kernel's `core` panic paths
+   then differ from a host build's, which nothing grades.
+4. **A clone on `/` survives a reboot**, graded like `test-persist`. Before a
+   boot the host grows the root with `resize2fs` whenever its free space is
+   under a floor sized for a checkout and its target directory, and
+   `gen_verity.py`'s cost follows the blocks in use rather than the image.
+5. **crates.io in the guest:** a clone's cargo resolves `Cargo.lock` over
+   HTTPS as the host's does, which closes the vendored crates' open item
+   above. The tests keep building from the vendored crates with no registry.
+6. **The dev disk goes** once the root holds the toolchain and a clone.
+   `just boot` seeds that clone on `/` with the `origin` and `host` remotes the
+   dev disk's carries. `test-selfhost`, `test-install-guest` and
+   `bench-selfhost` boot a root of their own, built only by their recipes as
+   `test-capacity` builds its volume, carrying the toolchain and a clone the
+   host seeds with its vendored crates, so `just test` never depends on `just
+   toolchain`; the dev-disk test's git repository and loopback registry move
+   to that root. `/devel` and `just test-devdisk` go. A user who wants a
+   separate volume makes one; `mount(2)` and `mount=` attach any ext2 device.
 
 ## Phase 2: the whole tree builds in the guest
 
@@ -180,9 +179,10 @@ once it keeps what you write:
 
 1. **Storage.** NVMe first, then AHCI. QEMU emulates both, so write and test
    the driver in QEMU and let `just boot` attach its disks through it.
-2. **An installer.** From the live ISO: partition a disk GPT (ESP, `/`,
-   `/devel`), copy the running root, write the ESP with `fat-core` as `bootctl`
-   does. That is Linux 0.12's route and Redox's installer's.
+2. **An installer.** From the live ISO: partition a disk GPT (ESP, `/`), copy
+   the running root, write the ESP with `fat-core` as `bootctl` does. That is
+   Linux 0.12's route and Redox's installer's. Once item 3's NIC works, the
+   toolchain comes over the local network from the machine that built it.
 3. **The rest of a real machine.** PCI without MCFG, x2APIC, a real NIC,
    USB HID input (`plans/usb-xhci.md`), ACPI SCI/GPE, and a log sink other than
    COM1.
@@ -205,11 +205,11 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
   chunked or page-list design; `MAX_ALLOC_SIZE` stays 1 MiB.
 - Stack frames stay under 2 KiB, against a 4 KiB guard page.
 - Task ownership I1 to I8; no `async fn` in a kernel crate.
-- GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source in this tree; a
+- GPL-3.0-or-later, and `MIT OR Apache-2.0` for the C library, which takes
+  nothing copyleft. No verbatim GPL-2.0-only or CDDL source in this tree; a
   recipe names a tarball and carries none of it. A third-party program shipped
-  on an image needs a `NOTICE.md` entry. Git is GPL-2.0-only and links slibc,
-  so until Phase 1 relicenses slibc it goes onto nothing but a disk built where
-  it is used.
+  on an image needs a `NOTICE.md` entry, and what a GPL-2.0-only one links must
+  be GPL-2.0-compatible.
 - Ratchets are measurements: re-measure with the gate's `--emit-allowlist` and
   name the change that moved it.
 - The verified image stays read-only and attested. Anything writable is a
@@ -235,6 +235,26 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
   for SlopOS; unlike a fork, it is compiled unchanged.
 - **Memory.** A commit ledger, not swap; a forked copy is charged as written,
   with an OOM killer behind it.
+- **Licensing.** The tree is GPL-3.0-or-later and the C library `MIT OR
+  Apache-2.0`: slibc, `slibc-core` and `slopos-abi`, which the kernel shares
+  and which is permissive whole rather than split, as Redox's `redox_syscall`
+  is. The pair is the Rust ecosystem's and the `libc` fork's, and its MIT side
+  is what a GPL-2.0-only program takes. relibc and musl are MIT, and Linux's
+  UAPI headers carry the syscall note, for the same reason.
+- **Git never links OpenSSL.** OpenSSL 3 is Apache-2.0, which GPL-2.0-only
+  code cannot be combined with, so git's HTTPS goes through libcurl on mbedTLS
+  and nothing else it loads links OpenSSL. Debian and Ubuntu give git a GnuTLS
+  libcurl, but libldap brings OpenSSL back, and they, Fedora and Arch rely on
+  reading OpenSSL as a system library under GPLv2, which a git copyright
+  holder disputes (Debian #1094969).
+- **Distribution.** Local while SlopOS is pre-alpha: no package host. The ISO
+  carries what a distribution's installer ISO does — the system, not a
+  compiler or git — and the toolchain reaches a disk from the machine that
+  built it.
+- **Crates.** crates.io over HTTPS in the guest, as on the host; the tests and
+  CI build from the vendored crates with no registry.
+- **Disks.** One persistent root, grown on demand the way SerenityOS grows its
+  image, and no dev disk: a separate volume is the user's to make.
 - **The dev loop.** One development machine (`just boot`, and `just
   boot-fast` to skip the wheel) and one live artifact (`just iso`); knobs
   (`KERNEL_RELEASE`, `VIDEO`, `ports`, `DEBUG`, `ROULETTE`) rather than more
@@ -249,11 +269,12 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
   loop you run is the loop `just test-selfhost` and `just test-install-guest`
   grade.
 - **Source bridge.** Git over the network, not a shared filesystem: no 9p or
-  virtio-fs on the build path, and no copying the tree. The host is the
-  remote, where Asterinas's self-hosting demo and SerenityOS clone from the
-  internet over HTTPS: `git://` over SLIRP needs neither TLS nor libcurl, and a
-  `guestfwd` per repository runs the daemon only when the guest connects. The
-  guest pushes into a bare repository, never into the checkout.
+  virtio-fs on the build path, and no copying the tree. For the dev loop and
+  the tests the host is the remote, where Asterinas's self-hosting demo and
+  SerenityOS clone from the internet over HTTPS: `git://` over SLIRP needs
+  neither TLS nor libcurl, and a `guestfwd` per repository runs the daemon
+  only when the guest connects. The guest pushes into a bare repository, never
+  into the checkout.
 - **Kernel build.** One POSIX sh driver and one Rust symbol-table tool on both
   machines, rebuilt until the embedded table is the kernel's own. The guest's
   kernel is graded by the gates and the suite, not by identity with the
