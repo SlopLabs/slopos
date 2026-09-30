@@ -1,5 +1,4 @@
 use slopos_abi::Errno;
-use slopos_abi::syscall::ERRNO_ERESTARTSYS;
 use slopos_abi::task::TASK_FLAG_USER_MODE;
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::task_struct::{Current, Task};
@@ -10,6 +9,7 @@ use crate::syscall::common::SyscallEntry;
 use crate::syscall::context::SyscallContext;
 use crate::syscall::handlers::syscall_lookup;
 use crate::syscall::result::SyscallResult;
+use crate::syscall::signal::Delivered;
 
 /// Whether `task` may invoke the operation `entry` classifies.
 ///
@@ -71,7 +71,7 @@ pub fn syscall_handle(user_ctx: &UserContext) {
 
     let entry = syscall_lookup(sysno);
     let handler = entry.and_then(|e| e.handler);
-    let mut restartable = false;
+    let mut restartable = None;
 
     match handler {
         Some(func) => {
@@ -92,7 +92,10 @@ pub fn syscall_handle(user_ctx: &UserContext) {
             }
             let result = func(&ctx);
             slopos_sched::profile::note_syscall(sysno, began);
-            restartable = result == SyscallResult::Err(Errno::ERESTARTSYS);
+            restartable = match result {
+                SyscallResult::Err(e @ (Errno::ERESTARTSYS | Errno::ERESTARTNOHAND)) => Some(e),
+                _ => None,
+            };
             ctx.write_result(result);
         }
         None => {
@@ -108,51 +111,59 @@ pub fn syscall_handle(user_ctx: &UserContext) {
     return_from_syscall(&current, user_ctx, sysno, restartable);
 }
 
-/// Deliver what is pending on `sysno`'s way out, settling an `ERESTARTSYS` it
-/// returned on the signal the delivery takes.
+/// Deliver what is pending on `sysno`'s way out, settling an `ERESTARTSYS` or
+/// `ERESTARTNOHAND` it returned on what the delivery did.
 ///
-/// `restartable` is whether the handler itself returned `ERESTARTSYS`, not
-/// whether `rax` reads -512: `rt_sigreturn` may restore a user `rax` of that
-/// value, which Linux keeps from rewinding with `orig_ax = -1`.
+/// `restartable` is what the handler itself returned, not what `rax` reads:
+/// `rt_sigreturn` may restore a user `rax` of that value, which Linux keeps
+/// from rewinding with `orig_ax = -1`.
 pub(crate) fn return_from_syscall(
     current: &Current,
     user_ctx: &UserContext,
     sysno: u64,
-    restartable: bool,
+    restartable: Option<Errno>,
 ) {
-    crate::syscall::signal::deliver_pending_signal_on_syscall_exit(current, user_ctx, |restart| {
-        if restartable {
-            settle_erestartsys(user_ctx, sysno, restart);
-        }
-    });
+    crate::syscall::signal::deliver_pending_signal_on_syscall_exit(
+        current,
+        user_ctx,
+        |delivered| {
+            if let Some(kind) = restartable {
+                settle_restart(user_ctx, sysno, kind, delivered);
+            }
+        },
+    );
 }
 
 /// The x86_64 `syscall` instruction is 2 bytes (`0F 05`), so rewinding
 /// `frame.rip` by that points back at it for transparent re-execution.
 const SYSCALL_INSN_SIZE: u64 = 2;
 
-/// Syscalls that carry a caller-supplied timeout.
+/// Syscalls that carry a caller-supplied timeout they do not hand back.
 ///
 /// A restart re-arms the *original* timeout, so under signal pressure each
 /// delivery starts a fresh full-length wait. These must report `EINTR`.
 const TIMEOUT_BEARING: &[u64] = &[
     slopos_abi::syscall::SYSCALL_NANOSLEEP,
     slopos_abi::syscall::SYSCALL_POLL,
-    slopos_abi::syscall::SYSCALL_SELECT,
     slopos_abi::syscall::SYSCALL_FUTEX,
     slopos_abi::syscall::SYSCALL_RING_ENTER,
 ];
 
 /// Runs before the signal frame is built, so the frame captures the rewound
 /// state.
-fn settle_erestartsys(user_ctx: &UserContext, sysno: u64, restart: bool) {
-    debug_assert_eq!(user_ctx.rax(), ERRNO_ERESTARTSYS);
+fn settle_restart(user_ctx: &UserContext, sysno: u64, kind: Errno, delivered: Delivered) {
+    debug_assert_eq!(user_ctx.rax(), kind.as_u64());
     debug_assert!(
         !TIMEOUT_BEARING.contains(&sysno),
-        "syscall {sysno} returned ERESTARTSYS with a caller-supplied timeout; \
+        "syscall {sysno} returned {kind:?} with a caller-supplied timeout; \
          it must return EINTR so the remaining time is not re-armed"
     );
 
+    let restart = match (kind, delivered) {
+        (_, Delivered::Nothing) => true,
+        (Errno::ERESTARTNOHAND, Delivered::Handler { .. }) => false,
+        (_, Delivered::Handler { restarting }) => restarting,
+    };
     if restart {
         let mut regs = user_ctx.regs();
         regs.rip = regs.rip.wrapping_sub(SYSCALL_INSN_SIZE);

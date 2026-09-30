@@ -534,7 +534,7 @@ fn check_abi(
             signatures.push((contract::parse_signature(declaration)?, true));
         }
         for variable in spec.variables {
-            let (name, ty) = world.variable(variable)?;
+            let emit::Variable { name, ty, .. } = world.variable(variable)?;
             signatures.push((
                 contract::Signature {
                     name: name.to_string(),

@@ -354,3 +354,9 @@ pub const FUTEX_BITSET_MATCH_ANY: u32 = u32::MAX;
 /// arch_prctl sub-commands (Linux-compatible values)
 pub const ARCH_SET_FS: u64 = 0x1002;
 pub const ARCH_GET_FS: u64 = 0x1003;
+
+/// `getpriority`/`setpriority` selectors: a process, a process group, or
+/// every process of a user.
+pub const PRIO_PROCESS: u64 = 0;
+pub const PRIO_PGRP: u64 = 1;
+pub const PRIO_USER: u64 = 2;

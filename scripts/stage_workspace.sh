@@ -11,12 +11,13 @@ set -euo pipefail
 # default, the repository it pushes into; it takes this checkout's user.name
 # and user.email.
 #
-# `--vendored` adds the vendored crates in the clone's ignored
-# `third_party/vendor` and `<dir>/.cargo/config.toml`, which points cargo
+# `--vendored` adds the vendored crates, in the clone's ignored
+# `third_party/vendor`; `<dir>/.cargo/config.toml`, which points cargo
 # anywhere below `<dir>` at them with no registry and leaves the clone's own
-# `.cargo/config.toml` as committed: a root the tests build on reads no
-# registry. Without it the clone resolves its crates from crates.io, as this
-# checkout does.
+# `.cargo/config.toml` as committed; and the llvm-project tarball the C++
+# runtime is built from. A root the tests build on then reads no network.
+# Without it the clone resolves its crates from crates.io and fetches the
+# tarball, as this checkout does.
 
 SELF="stage_workspace"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,3 +73,8 @@ config="$DIR/.cargo/config.toml"
 sed -e '/^#/d' -e "s|^directory = \"$VENDOR_REL\"\$|directory = \"slopos/$VENDOR_REL\"|" \
     "$REPO_ROOT/.cargo/vendor.toml" >"$config"
 grep -qxF "directory = \"slopos/$VENDOR_REL\"" "$config" || die "could not point $config at slopos/$VENDOR_REL"
+
+tarball="$("$SCRIPT_DIR/make_slopos_cxx.sh" --fetch-source)" ||
+    die "could not provide the llvm-project tarball toolchain/cxx/PIN names"
+mkdir -p "$src/third_party"
+cp "$tarball" "$src/third_party/"

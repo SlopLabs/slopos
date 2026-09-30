@@ -4,7 +4,8 @@
 //! object uses: a call out to the executable (`JUMP_SLOT` against the global
 //! scope), a pointer to its own data (`RELATIVE`), a thread-local
 //! (`DTPMOD64`/`DTPOFF64` and `__tls_get_addr`), a `DT_NEEDED` on the C
-//! library, and a `DT_INIT_ARRAY` constructor.
+//! library, and a `DT_INIT_ARRAY` constructor. It also registers fork
+//! handlers, which must go when it is unloaded.
 
 #![cfg_attr(target_os = "slopos", no_std)]
 #![allow(unsafe_op_in_unsafe_fn)]
@@ -18,6 +19,11 @@ mod probe {
         /// Defined by `dl_probe`, which links `--export-dynamic` for it.
         fn dl_probe_callback(value: c_int) -> c_int;
         fn strlen(s: *const c_char) -> usize;
+        fn pthread_atfork(
+            prepare: Option<extern "C" fn()>,
+            parent: Option<extern "C" fn()>,
+            child: Option<extern "C" fn()>,
+        ) -> c_int;
     }
 
     #[unsafe(no_mangle)]
@@ -77,6 +83,13 @@ mod probe {
     #[unsafe(no_mangle)]
     pub extern "C" fn dltest_strlen(s: *const c_char) -> usize {
         unsafe { strlen(s) }
+    }
+
+    extern "C" fn on_fork() {}
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn dltest_register_fork_handlers() -> c_int {
+        unsafe { pthread_atfork(Some(on_fork), Some(on_fork), Some(on_fork)) }
     }
 
     #[panic_handler]

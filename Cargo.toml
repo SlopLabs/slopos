@@ -47,6 +47,7 @@ members = [
   "slopos-rt",
   "hermetic",
   "verification",
+  "tools/initramfs",
   "tools/kallsyms"
 ]
 # Pinned TCB annexes: their content hash IS the pin (scripts/check_vendor_pin.sh),

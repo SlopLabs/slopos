@@ -6,7 +6,9 @@ use core::{
 };
 
 use limine::{
-    BaseRevision, RequestsEndMarker, RequestsStartMarker, memmap,
+    BaseRevision, RequestsEndMarker, RequestsStartMarker,
+    file::File as LimineFile,
+    memmap,
     request::{
         BootloaderInfoRequest, DateAtBootRequest, EfiMemmapRequest, EfiRequest,
         ExecutableAddressRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest,
@@ -252,6 +254,13 @@ fn build_system_info() -> SystemInfo {
             kernel_file.data().len(),
             slopos_core::syscall::core_handlers::BUILD_TAG.unwrap_or("-")
         );
+        if let Some(module) = initramfs_module() {
+            klog_info!(
+                "BOOT: base {} ({} bytes)",
+                module.path(),
+                module.data().len()
+            );
+        }
         let cmdline_str = kernel_file.cmdline();
         if !cmdline_str.is_empty() {
             info.cmdline_ptr = KernelSync::new(cmdline_str.as_ptr() as *const c_char);
@@ -343,13 +352,16 @@ pub fn boot_info() -> slopos_ostd::boot_info::BootInfo {
 /// A `newc` cpio archive declared in `limine.conf` as `module_string: initramfs`.
 /// `'static` because Limine keeps module memory mapped for the kernel's lifetime.
 pub fn initramfs() -> Option<&'static [u8]> {
-    let response = MODULES_REQUEST.response()?;
-    let modules = response.modules();
+    initramfs_module().map(|module| module.data())
+}
+
+fn initramfs_module() -> Option<&'static LimineFile> {
+    let modules = MODULES_REQUEST.response()?.modules();
     modules
         .iter()
+        .copied()
         .find(|module| module.cmdline() == "initramfs")
-        .or_else(|| modules.first())
-        .map(|module| module.data())
+        .or_else(|| modules.first().copied())
 }
 
 pub fn is_framebuffer_available() -> i32 {

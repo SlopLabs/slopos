@@ -16,7 +16,7 @@ use core::ffi::{c_int, c_void};
 
 use crate::ffi::size_t;
 
-type Compar = unsafe extern "C" fn(*const c_void, *const c_void) -> c_int;
+pub(crate) type Compar = unsafe extern "C" fn(*const c_void, *const c_void) -> c_int;
 
 /// Ranges this short go to binary insertion sort instead of partitioning.
 /// `array_pod_sort` nearly always lands here.

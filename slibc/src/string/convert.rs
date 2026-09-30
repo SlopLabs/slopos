@@ -35,6 +35,11 @@ pub unsafe extern "C" fn atol(s: *const u8) -> i64 {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn atoll(s: *const u8) -> i64 {
+    strtol(s, core::ptr::null_mut(), 10)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtol(s: *const u8, endptr: *mut *const u8, base: i32) -> i64 {
     if s.is_null() {
         if !endptr.is_null() {

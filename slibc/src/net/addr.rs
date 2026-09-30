@@ -158,3 +158,34 @@ pub unsafe extern "C" fn inet_ntoa(addr: u32) -> *const u8 {
     (*buf)[pos] = 0;
     (*buf).as_ptr()
 }
+
+pub const IP_UNBLOCK_SOURCE: i32 = 37;
+pub const IP_BLOCK_SOURCE: i32 = 38;
+pub const IP_ADD_SOURCE_MEMBERSHIP: i32 = 39;
+pub const IP_DROP_SOURCE_MEMBERSHIP: i32 = 40;
+pub const MCAST_JOIN_GROUP: i32 = 42;
+pub const MCAST_BLOCK_SOURCE: i32 = 43;
+pub const MCAST_UNBLOCK_SOURCE: i32 = 44;
+pub const MCAST_LEAVE_GROUP: i32 = 45;
+pub const MCAST_JOIN_SOURCE_GROUP: i32 = 46;
+pub const MCAST_LEAVE_SOURCE_GROUP: i32 = 47;
+/// RFC 3493's names for `IPV6_ADD_MEMBERSHIP` and `IPV6_DROP_MEMBERSHIP`.
+pub const IPV6_JOIN_GROUP: i32 = 20;
+pub const IPV6_LEAVE_GROUP: i32 = 21;
+
+#[allow(non_camel_case_types)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct in6_addr {
+    pub s6_addr: [u8; 16],
+}
+
+/// `::`, the IPv6 wildcard address.
+#[unsafe(no_mangle)]
+pub static in6addr_any: in6_addr = in6_addr { s6_addr: [0; 16] };
+
+/// `::1`.
+#[unsafe(no_mangle)]
+pub static in6addr_loopback: in6_addr = in6_addr {
+    s6_addr: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+};

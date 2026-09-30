@@ -114,8 +114,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/slopos-cxx
-          key: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-${{ hashFiles('toolchain/cxx/PIN', 'scripts/make_slopos_cxx.sh', 'scripts/build_userland.sh', 'slibc/include/**', 'slibc/builtins/**', 'rust-toolchain.toml', 'toolchain/rust/**', 'toolchain/libc/**', 'targets/x86_64-unknown-slopos.json', 'Cargo.toml', 'Cargo.lock') }}
+          key: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-${{ hashFiles('toolchain/cxx/**', 'toolchain/cmake/**', 'scripts/make_slopos_cxx.sh', 'scripts/build_userland.sh', 'slibc/include/**', 'slibc/builtins/**', 'rust-toolchain.toml', 'toolchain/rust/**', 'toolchain/libc/**', 'targets/x86_64-unknown-slopos.json', 'Cargo.toml', 'Cargo.lock') }}
           restore-keys: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-
+
+      # The self-hosting root carries it, so its guest builds the C++ runtime
+      # offline; a warm runtime cache never fetches it.
+      - name: Cache the pinned llvm-project tarball
+        uses: actions/cache@v6
+        with:
+          path: third_party/llvm-project-*.src.tar.xz
+          key: llvm-project-src-${{ hashFiles('toolchain/cxx/PIN') }}
 
       - name: Restore the Rust compiler cache
         uses: ./.github/actions/sccache-restore
@@ -304,12 +312,14 @@ jobs:
   toolchain:
     name: Toolchain port
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # A cold compiler cache puts ~42 CPU-minutes of clang back in this job.
-    timeout-minutes: 40
+    # A cold compiler cache puts ~42 CPU-minutes of clang back in this job,
+    # and the recipes' own translation units beside it.
+    timeout-minutes: 60
     env:
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_MAXSIZE: 1G
+      SLOPOS_CROSS_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 2G
 
     steps:
       - name: Checkout repository
@@ -352,7 +362,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: third_party/slopos-cxx
-          key: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-${{ hashFiles('toolchain/cxx/PIN', 'scripts/make_slopos_cxx.sh', 'scripts/build_userland.sh', 'slibc/include/**', 'slibc/builtins/**', 'rust-toolchain.toml', 'toolchain/rust/**', 'toolchain/libc/**', 'targets/x86_64-unknown-slopos.json', 'Cargo.toml', 'Cargo.lock') }}
+          key: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-${{ hashFiles('toolchain/cxx/**', 'toolchain/cmake/**', 'scripts/make_slopos_cxx.sh', 'scripts/build_userland.sh', 'slibc/include/**', 'slibc/builtins/**', 'rust-toolchain.toml', 'toolchain/rust/**', 'toolchain/libc/**', 'targets/x86_64-unknown-slopos.json', 'Cargo.toml', 'Cargo.lock') }}
           restore-keys: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-
 
       # Tarballs only: the unpacked trees and the probes' build directories are

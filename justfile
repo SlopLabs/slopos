@@ -24,9 +24,6 @@ fs_image_size    := env("FS_IMAGE_SIZE", "32M")
 # 819-block reserve once `libc++.so` was on it, which refuses the filler before
 # it has written anything.
 fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "80M")
-# `test_userland_bins` feeds `initramfs-tests.cpio` too, so `bigprog_test`
-# costs ~25 MB of guest RAM on every test boot as well (~39 MB of cpio against
-# `qemu_mem`'s 512M).
 # Sized on its own: this disk holds work, not the shipped appliance root. No
 # longer capped at 1 GiB — the verity hash array is chunked, so what bounds it
 # is the 4 bytes of resident hash per 4 KiB block the machine's RAM can hold,
@@ -48,15 +45,16 @@ capacity_stage        := build_dir / "capacity-stage"
 # The toolchain a root carries at /usr/local: the one `just toolchain` built,
 # unless TOOLCHAIN_STAGE names another. A root without one builds all the same.
 toolchain_install     := env("TOOLCHAIN_STAGE", build_dir / "slopos-toolchain/install")
-# Free space a root keeps for a checkout and its target directory: a clean
-# dev and tests kernel build leaves 2.9G there. A root with less is grown.
-root_free_floor       := env("ROOT_FREE_FLOOR", "4G")
+# Free space a root keeps for a checkout's builds: a clean dev and tests system
+# build, kernels, userlands, bases and the C++ runtime, holds 3.8G of it. A root
+# with less is grown.
+root_free_floor       := env("ROOT_FREE_FLOOR", "6G")
 # The log both roots carry: sized for the volume the floor grows a root into,
 # not the size it starts at.
 root_journal_size     := "64M"
 # The self-hosting root the toolchain, self-hosting and guest-install checks
-# boot: the persistent root's shape, the tests userland and a clone seeded
-# with the vendored crates. Rebuilt every run, as the tests image is.
+# boot: the persistent root's shape and a clone seeded with the vendored crates,
+# under the tests base. Rebuilt every run, as the tests image is.
 fs_image_selfhost     := fs_image_dir / "ext2-selfhost.img"
 selfhost_stage        := build_dir / "selfhost-stage"
 # Outside the root, so `just reset root` keeps what the guest pushed.
@@ -128,18 +126,10 @@ roulette_flag := if roulette =~ '^(0|false|off|no|skip)$' { "roulette=skip" } el
 boot_cmdline_effective := trim(replace(boot_cmdline + " " + debug_flag + " " + roulette_flag, "  ", " "))
 dev_boot_cmdline := trim(replace("tests=off " + debug_flag + " " + roulette_flag, "  ", " "))
 
-userland_bins      := "init shell coreutils terminal compositor roulette halt bootctl editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke"
-
-# The multicall utility binary's installed names. `/bin/<name>` is a symlink to
-# `/bin/coreutils`, which dispatches on `argv[0]` — one binary rather than
-# fifty-odd copies of std. This list is the *installed* set; the binary's own
-# table is the implemented set, and `coreutils_test` fails if they disagree.
-coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less"
-# Shared objects the suite dlopens. Kept out of `userland_bins`' shape because
-# they are libraries, not programs, and out of the shipped image entirely.
-test_shared_objects := "libdltest.so libc++.so libcxxtest.so libdlsearch-fixture.so libdlrunpath.so libdlplain.so"
-
-test_userland_bins := userland_bins + " dl_probe dl_test dl_search_origin dl_search_rpath dl_search_runpath dl_secure_probe cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test script_exec_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test install_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test fifo_test session_smoke_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test reboot_clone_test libc_abi_test toolchain_test selfhost_test buildloop_test exit_stress_test"
+userland_bins       := `. scripts/lib/base.sh && printf %s "$BASE_PROGRAMS"`
+coreutils_tools     := `. scripts/lib/base.sh && printf %s "$COREUTILS_TOOLS"`
+test_userland_bins  := `. scripts/lib/base.sh && printf %s "$BASE_TEST_PROGRAMS"`
+test_shared_objects := `. scripts/lib/base.sh && printf %s "$BASE_TEST_SHARED_OBJECTS"`
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
@@ -148,15 +138,16 @@ setup:
     mkdir -p {{build_dir}}
     CARGO_TARGET_DIR={{cargo_target_dir}} {{cargo}} +{{rust_channel}} metadata --locked --format-version 1 >/dev/null
 
-# Not the pinned rustup channel: the userland target builds on the owned
-# `slopos` sysroot (scripts/make_slopos_sysroot.sh), which carries the pinned
-# std and libc forks that `-Zbuild-std` resolves this target's std from.
+# The host's half of a userland build; the guest runs scripts/build_userland.sh
+# alone. `+slopos` is the owned sysroot ensure_toolchain.sh materialises, whose
+# pinned std and libc forks `-Zbuild-std` resolves this target's std from.
 _build-userland:
-    CARGO={{cargo}} USERLAND_TARGET={{userland_target}} \
+    scripts/ensure_toolchain.sh
+    CARGO="{{cargo}} +slopos" USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}"
 
 _build-userland-tests: _build-userland
-    CARGO={{cargo}} USERLAND_TARGET={{userland_target}} \
+    CARGO="{{cargo}} +slopos" USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" --test
 
 # `VERITY=off` for the tests image because the suite writes to it; the
@@ -174,10 +165,11 @@ _fs-image-tests: _build-userland-tests
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
 # `VERITY=rw`: writable, and attested wherever no boot rewrote a block. The
+# system is the boot slot's base, mounted over the root's base directories; the
 # toolchain at /usr/local is the host's, replaced when it changes; the clone at
 # /src/slopos is the guest's once seeded, so it is staged only for a root
 # without one.
-_fs-image-persist: _build-userland
+_fs-image-persist:
     #!/usr/bin/env bash
     set -euo pipefail
     seed=""
@@ -185,25 +177,24 @@ _fs-image-persist: _build-userland
         scripts/stage_workspace.sh "{{build_dir}}/workspace"
         seed="{{build_dir}}/workspace:/src"
     fi
-    FS_IMAGE_SIZE={{persist_image_size}} FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=1 \
-        COREUTILS_LINKS="{{coreutils_tools}}" FS_HOST_TREES="{{toolchain_install}}:/usr/local" FS_SEED_TREES="$seed" FS_FREE_FLOOR={{root_free_floor}} \
-        scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}" {{userland_bins}}
+    FS_IMAGE_SIZE={{persist_image_size}} FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=1 FS_BASE=boot \
+        FS_HOST_TREES="{{toolchain_install}}:/usr/local" FS_SEED_TREES="$seed" FS_FREE_FLOOR={{root_free_floor}} \
+        scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}"
     rm -rf "{{build_dir}}/workspace"
 
-# The tests userland on the persistent root's shape, with the clone seeded
-# with the vendored crates, so a build in the guest reads no registry, and
-# the fixtures the toolchain ladder fetches from.
-_fs-image-selfhost: _build-userland-tests
+# The persistent root's shape, with the clone seeded `--vendored`, so a build
+# in the guest reads no network, and the fixtures the toolchain ladder fetches
+# from. The tests base comes from the boot module.
+_fs-image-selfhost:
     #!/usr/bin/env bash
     set -euo pipefail
     rm -rf "{{selfhost_stage}}"
     scripts/stage_workspace.sh "{{selfhost_stage}}/src" --vendored
     scripts/stage_ladder_fixtures.sh "{{selfhost_stage}}/ladder"
-    FS_IMAGE_SIZE=1G FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=0 COREUTILS_LINKS="{{coreutils_tools}}" \
-        EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" \
+    FS_IMAGE_SIZE=1G FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=0 FS_BASE=boot \
         FS_HOST_TREES="{{toolchain_install}}:/usr/local {{selfhost_stage}}/ladder:/srv/ladder" \
         FS_SEED_TREES="{{selfhost_stage}}/src:/src" FS_FREE_FLOOR={{root_free_floor}} \
-        scripts/build_fs_image.sh "{{fs_image_selfhost}}" "{{build_dir}}" {{test_userland_bins}}
+        scripts/build_fs_image.sh "{{fs_image_selfhost}}" "{{build_dir}}"
     rm -rf "{{selfhost_stage}}"
 
 # The capacity volume: a filesystem two orders of magnitude past the appliance
@@ -413,7 +404,7 @@ test-install:
     [ "$missing" = 0 ] || exit 1
     echo "test-install: installed, tried, committed and rolled back (qemu rc=$rc); log in $log"
 
-[doc("Guest install check: the guest takes HEAD over git, builds it on the self-hosting root, installs it into slot b and boots it; that kernel pushes a commit the host fetches; then it commits the slot and rolls back a slot that panics")]
+[doc("Guest install check: the guest takes HEAD over git, builds its kernel and base on the self-hosting root, installs them into slot b and boots them; that system pushes a commit the host fetches; then it commits the slot and rolls back a slot that panics")]
 test-install-guest:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -436,7 +427,7 @@ test-install-guest:
         >"$log" 2>&1 || rc=$?
     missing=0
     for marker in "INSTALL-COMMIT $head" "INSTALL-BUILT guest-" "INSTALL-STAGE 1: rebooting into slopos-b" "INSTALL-BOOTED " \
-        "INSTALL-PUSHED " "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" "ok 1 - boot_slot_install_commit_rollback"; do
+        "INSTALL-BASE guest-" "INSTALL-PUSHED " "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" "ok 1 - boot_slot_install_commit_rollback"; do
         grep -aqF "$marker" "$log" || { echo "FAIL: '$marker' not in $log" >&2; missing=1; }
     done
     grep -aq "not ok" "$log" && { echo "FAIL: a test failed; see $log" >&2; missing=1; }
@@ -455,13 +446,20 @@ test-install-guest:
     guest="{{build_dir}}/guest"
     mkdir -p "$guest"
     scripts/export_fs_file.sh src/slopos/builddir/kernel-tests.elf "{{fs_image_selfhost}}" "$guest/installed.elf"
+    scripts/export_fs_file.sh src/slopos/builddir/initramfs-tests.cpio "{{fs_image_selfhost}}" "$guest/installed.cpio"
     mcopy -o -i "{{boot_disk}}@@1M" ::/boot/b/kernel.elf "$guest/slot-b.elf"
+    mcopy -o -i "{{boot_disk}}@@1M" ::/boot/b/base.img "$guest/slot-b.cpio"
     cmp "$guest/installed.elf" "$guest/slot-b.elf" ||
         { echo "FAIL: slot b does not hold the kernel the guest built" >&2; exit 1; }
+    cmp "$guest/installed.cpio" "$guest/slot-b.cpio" ||
+        { echo "FAIL: slot b does not hold the base the guest built" >&2; exit 1; }
     size="$(stat -c %s "$guest/installed.elf")"
     grep -qF "($size bytes)" <<<"$booted" ||
         { echo "FAIL: the booted kernel's size is not the guest build's $size bytes: $booted" >&2; exit 1; }
-    echo "test-install-guest: the guest built $head as $tag ($size bytes), booted it from slot b, pushed $pushed, committed the slot and rolled back a panicking slot (qemu rc=$rc); log in $log"
+    base_size="$(stat -c %s "$guest/installed.cpio")"
+    grep -aqE "BOOT: base .*/boot/b/base.img \($base_size bytes\)" "$log" ||
+        { echo "FAIL: no boot of /boot/b/base.img reports the guest build's $base_size bytes" >&2; exit 1; }
+    echo "test-install-guest: the guest built $head as $tag (kernel $size bytes, base $base_size bytes), booted it from slot b, pushed $pushed, committed the slot and rolled back a panicking slot (qemu rc=$rc); log in $log"
 
 [doc("Boot the live ISO headless for BOOT_LOG_TIMEOUT seconds, serial log in test_output.log; fails unless /sbin/init launched")]
 boot-log: iso
@@ -564,14 +562,27 @@ test-json PATH: _build-run-tests
 test-userland-only: _iso-tests-userland-only _build-run-tests
     {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
 
-[doc("Run the suite on a tests kernel built elsewhere, e.g. by the guest, without building one: just test-elf ELF=builddir/guest-tests.elf ['glob']")]
-test-elf ELF FILTER='': _fs-image _fs-image-tests _initramfs-tests _build-run-tests
-    KERNEL_ELF="{{ trim_start_match(ELF, 'ELF=') }}" LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
+# Parsed here: after the recipe name, just passes `NAME=value` through as a
+# literal argument rather than setting anything.
+[positional-arguments]
+[doc("Run the suite on a tests kernel built elsewhere, e.g. by the guest, without building one: just test-elf [ELF=]builddir/guest-tests.elf [BASE=<tests base.cpio>] ['glob']")]
+test-elf +ARGS: _fs-image _fs-image-tests _initramfs-tests _build-run-tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    elf="" base="{{initramfs_tests}}" filter=""
+    for arg in "$@"; do
+        case "$arg" in
+            ELF=*) elf="${arg#ELF=}" ;;
+            BASE=*) base="${arg#BASE=}" ;;
+            *) if [ -z "$elf" ] && [ -f "$arg" ]; then elf="$arg"; else filter="$arg"; fi ;;
+        esac
+    done
+    [ -n "$elf" ] || { echo "usage: just test-elf ELF=<kernel> [BASE=<tests base.cpio>] ['glob']" >&2; exit 2; }
+    KERNEL_ELF="$elf" LIMINE_DIR={{limine_dir}} INITRAMFS_FILE="$base" \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
-        scripts/build_iso.sh "{{iso_elf_tests}}" "{{build_dir}}" \
-            "{{test_cmdline_effective}}{{ if FILTER != '' { ' tests.run=' + FILTER } else { '' } }}"
+        scripts/build_iso.sh "{{iso_elf_tests}}" "{{build_dir}}" "{{test_cmdline_effective}}${filter:+ tests.run=$filter}"
     {{build_dir}}/run_tests --no-build --iso "{{iso_elf_tests}}" --fs-image "{{fs_image_tests}}"
 
 # In the body, not a dependency: `_iso-tests` rebuilds the fs image, which must not happen between the boots.
@@ -624,7 +635,7 @@ test-capacity: _build-run-tests _fs-image-capacity
 # leaves a clone on /, the second reads it back and climbs the ladder again.
 # Separate from `just test`, which runs the same utests on a root with no
 # toolchain and no clone, and they pass by saying so.
-[doc("Toolchain check at 4G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, git cloning GitHub and cargo resolving the lockfiles from crates.io over HTTPS), and find a clone made on / intact after a power-off")]
+[doc("Toolchain check at 4G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph and a CMake project), and find a clone made on / intact after a power-off")]
 test-toolchain: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
@@ -656,7 +667,7 @@ test-toolchain: _build-run-tests
         { echo "FAIL: boot 1 committed '${written:-nothing}' in /home/clone and boot 2 found '${survived:-nothing}'" >&2; exit 1; }
     echo "test-toolchain: the ladder held on both boots, and the clone's commit $written survived the power-off"
 
-[doc("Self-hosting check: the guest takes HEAD over git and builds the dev and tests kernels on the self-hosting root; the host holds the root to e2fsck, runs the ELF gates on both and the kernel suite on the tests kernel")]
+[doc("Self-hosting check: the guest takes HEAD over git and builds the dev and tests systems — kernel, userland and base — on the self-hosting root; the host holds the root to e2fsck, runs the ELF gates on both kernels and the suite on the guest's tests kernel and base")]
 test-selfhost: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
@@ -685,7 +696,8 @@ test-selfhost: _build-run-tests
             "{{fs_image_selfhost}}" "$guest/kernel-$variant.elf"
         scripts/check_kernel_elf_gates.sh "$guest" "$variant"
     done
-    just test-elf "ELF=$guest/kernel-tests.elf"
+    scripts/export_fs_file.sh src/slopos/builddir/initramfs-tests.cpio "{{fs_image_selfhost}}" "$guest/initramfs-tests.cpio"
+    just test-elf "ELF=$guest/kernel-tests.elf" "BASE=$guest/initramfs-tests.cpio"
 
 # The self-hosting build as a benchmark: the guest half of test-selfhost, with
 # prof=on. No clean-tree check, so it runs on an uncommitted kernel; the guest
@@ -708,9 +720,9 @@ bench-selfhost: _build-run-tests
     [ "$rc" -eq 0 ] || { tail -n 30 {{build_dir}}/bench-selfhost.log; echo "FAIL: the benchmark boot exited $rc — full log in {{build_dir}}/bench-selfhost.log" >&2; exit 1; }
     python3 scripts/prof_report.py {{build_dir}}/bench-selfhost.log --libc {{build_dir}}/bench-libc.so --lib-dir {{toolchain_install}}/lib
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, kallsyms, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-http-core -p slopos-fat-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-http-core -p slopos-fat-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

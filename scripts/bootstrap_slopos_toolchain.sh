@@ -156,8 +156,8 @@ eval "$CXX_TOOLS"
 # ---------------------------------------------------------------------------
 CHANNEL="$(tp_channel "$REPO_ROOT")"
 TARBALL="$REPO_ROOT/third_party/rustc-src-$CHANNEL.tar.xz"
-LIBRARY_STAMP="$SRC/library/.slopos-std-stamp"
-STD_STAMP_WANT="$(tp_stamp "$REPO_ROOT")"
+LIBRARY_STAMP="$SRC/library/$TP_STD_STAMP_NAME"
+STD_STAMP_WANT="$(tp_std_stamp "$REPO_ROOT")"
 LLVM_STAMP="$SRC/src/llvm-project/.slopos-port-stamp"
 LLVM_STAMP_WANT="$(
     cd "$REPO_ROOT" && find "$TP_LLVM_RUSTC_OVERLAY_REL" -type f -print |
@@ -429,6 +429,11 @@ ln -sfn clang "$PREFIX/bin/clang++"
 ln -sfn clang "$PREFIX/bin/cc"
 ln -sfn clang++ "$PREFIX/bin/c++"
 ln -sfn "../lib/rustlib/$TARGET/bin/rust-lld" "$PREFIX/bin/ld.lld"
+# The archiver next to the compiler, where CMake and the C++ runtime's build
+# look for it; llvm-ar answers as ranlib by its name.
+[ -x "$PREFIX/lib/rustlib/$TARGET/bin/llvm-ar" ] || die "no llvm-ar among the installed llvm-tools"
+ln -sfn "../lib/rustlib/$TARGET/bin/llvm-ar" "$PREFIX/bin/llvm-ar"
+ln -sfn llvm-ar "$PREFIX/bin/llvm-ranlib"
 printf '%s\n' '--sysroot=<CFGDIR>/..' >"$PREFIX/bin/$TARGET.cfg"
 printf '%s\n' "@$TARGET.cfg" >"$PREFIX/bin/$TARGET-clang.cfg"
 printf '%s\n' "@$TARGET.cfg" $CXX_ABI_FLAGS >"$PREFIX/bin/$TARGET-clang++.cfg"

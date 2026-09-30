@@ -1,5 +1,6 @@
 #![allow(non_camel_case_types)]
 
+pub mod atfork;
 pub mod condvar;
 pub mod create;
 pub(crate) mod futex;
@@ -378,4 +379,82 @@ pub unsafe extern "C" fn sched_getaffinity(
     core::ptr::write_bytes(out, 0, cpusetsize);
     core::ptr::copy_nonoverlapping(mask.as_ptr(), out, written.min(cpusetsize));
     0
+}
+
+/// The one scheduling policy there is: time-sharing, whose only priority is 0.
+pub const SCHED_OTHER: c_int = 0;
+/// Real-time, as [`SCHED_RR`] is: both known, with Linux's range 1..=99, so
+/// that `pthread_setschedparam` refuses them with `ENOTSUP`, not `EINVAL`.
+pub const SCHED_FIFO: c_int = 1;
+pub const SCHED_RR: c_int = 2;
+
+fn policy_priority_range(policy: c_int) -> Result<(c_int, c_int), c_int> {
+    match policy {
+        SCHED_OTHER => Ok((0, 0)),
+        SCHED_FIFO | SCHED_RR => Ok((1, 99)),
+        _ => Err(EINVAL.raw()),
+    }
+}
+
+/// `sched_get_priority_min(2)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn sched_get_priority_min(policy: c_int) -> c_int {
+    policy_priority_range(policy).map_or_else(
+        |rc| {
+            errno_set(rc);
+            -1
+        },
+        |(min, _)| min,
+    )
+}
+
+/// `sched_get_priority_max(2)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn sched_get_priority_max(policy: c_int) -> c_int {
+    policy_priority_range(policy).map_or_else(
+        |rc| {
+            errno_set(rc);
+            -1
+        },
+        |(_, max)| max,
+    )
+}
+
+/// `pthread_getschedparam(3)`: every thread runs `SCHED_OTHER` at 0.
+///
+/// # Safety
+/// `policy` and `param` are writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_getschedparam(
+    _thread: pthread_t,
+    policy: *mut c_int,
+    param: *mut crate::types::sched_param,
+) -> c_int {
+    if policy.is_null() || param.is_null() {
+        return EINVAL.raw();
+    }
+    *policy = SCHED_OTHER;
+    (*param).sched_priority = 0;
+    0
+}
+
+/// `pthread_setschedparam(3)`: `SCHED_OTHER` at 0 is what every thread
+/// already has; a real-time policy is `ENOTSUP`, anything else `EINVAL`.
+///
+/// # Safety
+/// `param` addresses a `struct sched_param`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_setschedparam(
+    _thread: pthread_t,
+    policy: c_int,
+    param: *const crate::types::sched_param,
+) -> c_int {
+    if param.is_null() {
+        return EINVAL.raw();
+    }
+    match (policy, (*param).sched_priority) {
+        (SCHED_OTHER, 0) => 0,
+        (SCHED_FIFO | SCHED_RR, _) => crate::errno::ENOTSUP.raw(),
+        _ => EINVAL.raw(),
+    }
 }

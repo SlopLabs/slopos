@@ -427,6 +427,7 @@ pub fn spawn_program_with_cwd(
         let inherited = parent_ref
             .as_ref()
             .map(|parent| resolve_inherited_job_control(parent, task_id, flags));
+        let nice = parent_ref.as_ref().map_or(0, |parent| parent.nice());
 
         // Authority enters here, from the program-identity grant applied
         // above -- the single raise site. Stamped on the child before it is
@@ -439,6 +440,7 @@ pub fn spawn_program_with_cwd(
             child.context.get_mut().rip = entry;
             child.context.get_mut().rsp = stack_ptr;
             child.set_fs_base(tls_tp);
+            child.set_nice(nice);
 
             // The kernel stack stays as `task_build` left it; the iretq frame
             // is rebuilt from `user_ctx` on every round trip.

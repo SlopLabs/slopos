@@ -36,6 +36,7 @@ pub mod signal;
 pub mod stdio;
 pub mod stdlib;
 pub mod string;
+pub mod sysinfo;
 pub mod syslog;
 pub mod test_harness;
 pub mod thread;

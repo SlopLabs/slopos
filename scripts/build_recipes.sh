@@ -7,10 +7,11 @@ set -euo pipefail
 #        build_recipes.sh --print-stamp [<name>...]
 #        build_recipes.sh --install-programs <prefix>
 #
-# A recipe is a pinned upstream tarball, its checksum, its dependencies and a
-# build template — no patches: a build that needs one is a slibc or kernel
-# finding. `scripts/check_recipes.sh` checks that shape; this driver fails any
-# build that changes the unpacked tree (byte, mode, file or change time).
+# A recipe is a pinned upstream tarball, its checksum, its dependencies, a
+# build template and at most the patches that teach the project the target: a
+# build that needs any other edit is a slibc or kernel finding.
+# `scripts/check_recipes.sh` checks that shape; this driver fails any build
+# that changes the patched tree (byte, mode, file or change time).
 #
 # `toolchain/recipes/<name>/recipe` is `key=value`, one per line, `#`
 # comments ignored:
@@ -18,27 +19,34 @@ set -euo pipefail
 #   version, url, sha256, license   the tarball and what it is
 #   license_file                    each licence text in the tarball, installed
 #                                   as share/licenses/<name>/<its path there>
-#   template                        `cmake`, `meson` or `openssl`
+#   template                        `cmake`, `meson`, `openssl` or `autotools`
 #   depends                         recipes built first, space-separated
 #   soname                          each shared library it must install
 #   program                         each program it must install, relative
 #                                   to the prefix
 #   arg                             one argument to the template's configure
+#   patch                           a patch beside the recipe, applied to the
+#                                   unpacked tree in the order given
 #   config, target                  `openssl`: the out-of-tree target
 #                                   definition beside the recipe, and the
 #                                   target it defines
 #
 # Templates:
 #
-#   cmake     configure with a toolchain file naming the SlopOS compiler
-#             wrapper and confining every search to the target sysroot and
-#             the recipe prefix, build with Ninja, install.
-#   meson     configure with a cross file naming the same, no subproject
-#             fallback, and `--prefix` the guest path of the toolchain the
-#             programs are installed into, since a program finds its own files
-#             through its compiled-in prefix; build with Ninja, install.
-#   openssl   `Configure --config=<file> <target>`, `make build_sw`,
-#             `make install_sw`.
+#   cmake      configure with a toolchain file naming the SlopOS compiler
+#              wrapper and the `SlopOS` system of `toolchain/cmake/Platform/`,
+#              and confining every search to the target sysroot and the
+#              recipe prefix; build with Ninja, install.
+#   meson      configure with a cross file naming the same, no subproject
+#              fallback, and `--prefix` the guest path of the toolchain the
+#              programs are installed into, since a program finds its own
+#              files through its compiled-in prefix; build with Ninja, install.
+#   openssl    `Configure --config=<file> <target>`, `make build_sw`,
+#              `make install_sw`.
+#   autotools  `configure` out of tree for `--host` the target, its canonical
+#              name taken as the `ac_cv_host` cache answer because upstream's
+#              `config.sub` lists the systems it knows, and `--prefix` the
+#              guest path, as for meson; `make`, `make install`.
 #
 # Everything builds shared into `<recipes dir>/prefix` with `-z defs`, so a
 # libc function slibc lacks fails here rather than at `dlopen` on SlopOS. A
@@ -164,10 +172,11 @@ CXX_TOOLS="$("$SCRIPT_DIR/cxx_host_tools.sh")"
 eval "$CXX_TOOLS"
 . "$SCRIPT_DIR/lib/rustc_build_settings.sh"
 GUEST_PREFIX=/usr/local
+BUILD_TRIPLE=x86_64-pc-linux-gnu
 eval "$(rbs_llvm_archivers "$LLVM_AR")" || die "no llvm-ranlib beside $LLVM_AR"
 LLVM_AR="$RBS_AR"
 LLVM_RANLIB="$RBS_RANLIB"
-for tool in cmake meson ninja make perl pkg-config; do
+for tool in cmake meson ninja make perl pkg-config git; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is required to build the recipes"
 done
 HOST_TOOLS="$(cmake --version | head -n 1; meson --version; ninja --version; make --version | head -n 1; perl -e 'print "perl $]\n"'; pkg-config --version)"
@@ -175,6 +184,8 @@ HOST_TOOLS="$(cmake --version | head -n 1; meson --version; ninja --version; mak
 CROSS_STAMP="$(BUILD_DIR="$BUILD_DIR" "$SCRIPT_DIR/make_slopos_cross.sh" --print-stamp)" ||
     die "the cross compiler's inputs are not there — see above"
 DRIVER_STAMP="$(sha256sum "$SCRIPT_DIR/$SELF.sh" | cut -d' ' -f1)"
+CMAKE_PLATFORM="$REPO_ROOT/toolchain/cmake"
+CMAKE_PLATFORM_STAMP="$(cd "$CMAKE_PLATFORM" && find . -type f -print | LC_ALL=C sort | xargs sha256sum)"
 
 declare -A WANT=()
 stamp_want() {
@@ -183,6 +194,7 @@ stamp_want() {
         WANT[$name]="$(
             printf '%s\n' "$DRIVER_STAMP" "$CROSS_STAMP" "$HOST_TOOLS" "$PREFIX" "$GUEST_PREFIX"
             (cd "$RECIPES/$name" && find . -type f -print | LC_ALL=C sort | xargs sha256sum)
+            [ "$(recipe_value "$name" template)" != cmake ] || printf '%s\n' "$CMAKE_PLATFORM_STAMP"
             for dep in $(recipe_value "$name" depends); do
                 printf 'depends %s %s\n' "$dep" "$(stamp_want "$dep")"
             done
@@ -207,14 +219,16 @@ SYSROOT="$CROSS/sysroot"
 CC_WRAPPER="$CROSS/bin/$TARGET-clang"
 CXX_WRAPPER="$CROSS/bin/$TARGET-clang++"
 
-# `Linux` for CMake's `UNIX` and ELF/GNU-ld rules; the compiler still defines
-# `__slopos__`, not `__linux__`. The find roots make a library SlopOS lacks a
-# failed probe rather than a link against the host's.
+# The find roots make a library SlopOS lacks a failed probe rather than a link
+# against the host's, and the prefix's programs, which run only on SlopOS, are
+# never what a build finds to run. A program's run path reaches `lib/` from
+# `bin/`.
 mkdir -p "$PREFIX"
 cat >"$CROSS/toolchain.cmake" <<CMAKE
 # Generated by scripts/$SELF.sh — do not edit.
-set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_NAME SlopOS)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
+list(APPEND CMAKE_MODULE_PATH "$CMAKE_PLATFORM")
 set(CMAKE_C_COMPILER "$CC_WRAPPER")
 set(CMAKE_CXX_COMPILER "$CXX_WRAPPER")
 set(CMAKE_AR "$LLVM_AR")
@@ -222,12 +236,13 @@ set(CMAKE_RANLIB "$LLVM_RANLIB")
 set(CMAKE_FIND_ROOT_PATH "$SYSROOT" "$PREFIX")
 set(CMAKE_PREFIX_PATH "$PREFIX")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_IGNORE_PATH "$PREFIX/bin" "$PREFIX/sbin" "$PREFIX/libexec")
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 set(CMAKE_SHARED_LINKER_FLAGS_INIT "-Wl,-z,defs")
 set(CMAKE_MODULE_LINKER_FLAGS_INIT "-Wl,-z,defs")
-set(CMAKE_INSTALL_RPATH "\$ORIGIN")
+set(CMAKE_INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../lib")
 set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 CMAKE
 
@@ -317,8 +332,6 @@ template_cmake() {
         { tail -n 20 "$work/install.log" >&2; die "$name: install failed; see $work/install.log"; }
 }
 
-# Staged under the guest prefix and moved to where the other recipes install,
-# so the rest of the driver sees one layout.
 template_meson() {
     local name="$1" work="$2" args=() stray
     mapfile -t args < <(recipe_values "$name" arg)
@@ -331,6 +344,32 @@ template_meson() {
         { tail -n 40 "$work/build.log" >&2; die "$name: build failed; see $work/build.log"; }
     DESTDIR="$work/staged" meson install -C "$work/build" --no-rebuild >"$work/install.log" 2>&1 ||
         { tail -n 20 "$work/install.log" >&2; die "$name: install failed; see $work/install.log"; }
+    unstage "$name" "$work"
+}
+
+# Staged under the guest prefix, like meson's.
+template_autotools() {
+    local name="$1" work="$2" args=()
+    mapfile -t args < <(recipe_values "$name" arg)
+    mkdir -p "$work/build"
+    (cd "$work/build" &&
+        "$work/src/configure" --build="$BUILD_TRIPLE" --host="$TARGET" ac_cv_host="$TARGET" \
+            --prefix="$GUEST_PREFIX" --libdir="$GUEST_PREFIX/lib" \
+            CC="$CC_WRAPPER" CXX="$CXX_WRAPPER" AR="$LLVM_AR" RANLIB="$LLVM_RANLIB" \
+            CFLAGS=-O2 CXXFLAGS=-O2 CC_FOR_BUILD="$CLANG" \
+            "${args[@]}") >"$work/configure.log" 2>&1 ||
+        { tail -n 40 "$work/configure.log" >&2; die "$name: configure failed; see $work/configure.log"; }
+    make -C "$work/build" -j "$JOBS" >"$work/build.log" 2>&1 ||
+        { tail -n 40 "$work/build.log" >&2; die "$name: build failed; see $work/build.log"; }
+    make -C "$work/build" DESTDIR="$work/staged" install >"$work/install.log" 2>&1 ||
+        { tail -n 20 "$work/install.log" >&2; die "$name: install failed; see $work/install.log"; }
+    unstage "$name" "$work"
+}
+
+# Moves what a template installed under the guest prefix to where the other
+# recipes install, so the rest of the driver sees one layout.
+unstage() {
+    local name="$1" work="$2" stray
     [ -d "$work/staged$GUEST_PREFIX" ] || die "$name: the install put nothing under $GUEST_PREFIX"
     mkdir -p "$(dirname "$work/dest$PREFIX")"
     mv "$work/staged$GUEST_PREFIX" "$work/dest$PREFIX"
@@ -356,6 +395,22 @@ template_openssl() {
         { tail -n 20 "$work/install.log" >&2; die "$name: install failed; see $work/install.log"; }
 }
 
+# `git apply` under a ceiling, so the checkout around the build tree is never
+# taken for the repository the patch applies to.
+# `--whitespace=nowarn` overrides an `apply.whitespace` a user's git config
+# sets, which would rewrite the lines a patch adds.
+apply_patches() {
+    local name="$1" src="$2" patch
+    for patch in $(recipe_values "$name" patch); do
+        (cd "$src" && GIT_CEILING_DIRECTORIES="$(dirname "$src")" \
+            git apply -p1 --whitespace=nowarn "$RECIPES/$name/$patch") ||
+            die "$name: $patch does not apply to $(recipe_value "$name" version)"
+        (cd "$src" && GIT_CEILING_DIRECTORIES="$(dirname "$src")" \
+            git apply -p1 --reverse --check "$RECIPES/$name/$patch" >/dev/null 2>&1) ||
+            die "$name: $patch reported success but is not applied"
+    done
+}
+
 # Change times catch an edit the build makes and then undoes: no write can set
 # one back.
 source_manifest() {
@@ -375,12 +430,13 @@ build_recipe() {
     fi
     rm -rf "$work"
     mkdir -p "$work/src"
-    tar -xf "$tarball" -C "$work/src" --strip-components=1 || die "$name: could not unpack $tarball"
+    tar -xf "$tarball" -C "$work/src" --strip-components=1 --no-same-owner || die "$name: could not unpack $tarball"
+    apply_patches "$name" "$work/src"
     source_manifest "$work/src" >"$work/source.manifest"
     "template_$template" "$name" "$work"
     source_manifest "$work/src" | diff "$work/source.manifest" - >"$work/source.diff" || {
         head -n 20 "$work/source.diff" >&2
-        die "$name: the build changed the upstream source tree; recipes build it unmodified — see $work/source.diff"
+        die "$name: the build changed the source tree; recipes build it as the patches leave it — see $work/source.diff"
     }
 
     [ -d "$work/dest$PREFIX" ] || die "$name: the install put nothing under $PREFIX"

@@ -1,6 +1,7 @@
 //! System configuration and the odds and ends that belong to no subsystem.
 
 use core::ffi::{c_char, c_int, c_long};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::errno::{EINVAL, EIO, ENAMETOOLONG, ERANGE, errno_set};
 use crate::pal::raw::syscall6;
@@ -17,6 +18,8 @@ pub const _SC_GETPW_R_SIZE_MAX: c_int = 70;
 pub const _SC_THREAD_STACK_MIN: c_int = 75;
 pub const _SC_NPROCESSORS_CONF: c_int = 83;
 pub const _SC_NPROCESSORS_ONLN: c_int = 84;
+pub const _SC_PHYS_PAGES: c_int = 85;
+pub const _SC_AVPHYS_PAGES: c_int = 86;
 pub const _SC_SYMLOOP_MAX: c_int = 173;
 pub const _SC_HOST_NAME_MAX: c_int = 180;
 
@@ -60,6 +63,8 @@ pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
             Ok(0) | Err(_) => 1,
             Ok(n) => n as c_long,
         },
+        _SC_PHYS_PAGES => crate::sysinfo::phys_pages(),
+        _SC_AVPHYS_PAGES => crate::sysinfo::avphys_pages(),
         _SC_OPEN_MAX => {
             let mut lim = crate::types::rlimit {
                 rlim_cur: 0,
@@ -385,6 +390,57 @@ pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut group {
         &mut result,
     );
     group_static(rc, result)
+}
+
+/// `getpagesize(3)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn getpagesize() -> c_int {
+    slopos_abi::PAGE_SIZE as c_int
+}
+
+static PW_ROW_TAKEN: AtomicBool = AtomicBool::new(false);
+static GR_ROW_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// `setpwent(3)`: rewind [`getpwent`].
+#[unsafe(no_mangle)]
+pub extern "C" fn setpwent() {
+    PW_ROW_TAKEN.store(false, Ordering::Relaxed);
+}
+
+/// `endpwent(3)`: as [`setpwent`]; there is no file to close.
+#[unsafe(no_mangle)]
+pub extern "C" fn endpwent() {
+    setpwent();
+}
+
+/// `getpwent(3)`: the passwd database's one row, then `NULL`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwent() -> *mut passwd {
+    if PW_ROW_TAKEN.swap(true, Ordering::Relaxed) {
+        return core::ptr::null_mut();
+    }
+    getpwuid(0)
+}
+
+/// `setgrent(3)`: rewind [`getgrent`].
+#[unsafe(no_mangle)]
+pub extern "C" fn setgrent() {
+    GR_ROW_TAKEN.store(false, Ordering::Relaxed);
+}
+
+/// `endgrent(3)`: as [`setgrent`].
+#[unsafe(no_mangle)]
+pub extern "C" fn endgrent() {
+    setgrent();
+}
+
+/// `getgrent(3)`: the group database's one row, then `NULL`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrent() -> *mut group {
+    if GR_ROW_TAKEN.swap(true, Ordering::Relaxed) {
+        return core::ptr::null_mut();
+    }
+    getgrgid(0)
 }
 
 /// `getentropy(3)`. POSIX caps one call at 256 bytes, and the kernel's

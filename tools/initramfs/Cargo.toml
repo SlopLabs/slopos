@@ -1,0 +1,16 @@
+[package]
+name = "slopos-initramfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The boot module's base image, packed as a newc cpio on whichever machine builds it"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "initramfs"
+path = "src/main.rs"
+
+[dependencies]

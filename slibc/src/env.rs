@@ -180,21 +180,42 @@ pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
 }
 
 /// Write the absolute working directory into `buf` (`size` bytes including
-/// the NUL). Returns `buf`, or null with errno set.
+/// the NUL). Returns `buf`, or null with errno set. A null `buf` is an
+/// allocation the caller frees, of `size` bytes, or of what the path needs when
+/// `size` is 0, as glibc and musl answer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getcwd(buf: *mut u8, size: usize) -> *mut u8 {
-    if buf.is_null() || size == 0 {
-        errno::errno_set(EINVAL.raw());
+    if !buf.is_null() {
+        if size == 0 {
+            errno::errno_set(EINVAL.raw());
+            return ptr::null_mut();
+        }
+        return match Sys::getcwd(buf, size) {
+            Ok(_) => buf,
+            Err(e) => {
+                errno::errno_set(e.raw());
+                ptr::null_mut()
+            }
+        };
+    }
+    let mut path = [0u8; slopos_abi::fs::USER_PATH_MAX + 1];
+    let limit = if size == 0 {
+        path.len()
+    } else {
+        size.min(path.len())
+    };
+    if let Err(e) = Sys::getcwd(path.as_mut_ptr(), limit) {
+        errno::errno_set(e.raw());
         return ptr::null_mut();
     }
-
-    match Sys::getcwd(buf, size) {
-        Ok(_) => buf,
-        Err(e) => {
-            errno::errno_set(e.raw());
-            ptr::null_mut()
-        }
+    let len = u_strlen(path.as_ptr()) + 1;
+    let out = malloc::alloc(if size == 0 { len } else { size }) as *mut u8;
+    if out.is_null() {
+        errno::errno_set(ENOMEM.raw());
+        return ptr::null_mut();
     }
+    u_memcpy(out.cast(), path.as_ptr().cast(), len);
+    out
 }
 
 /// Change the working directory. Returns 0, or -1 with errno set.

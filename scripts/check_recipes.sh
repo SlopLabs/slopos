@@ -1,14 +1,27 @@
 #!/usr/bin/env bash
 # Hold every recipe under toolchain/recipes/ to the shape build_recipes.sh
-# promises: a pinned upstream tarball built by a template, and nothing else.
+# promises: a pinned upstream tarball built by a template, patched at most to
+# name the target.
 #
 #   - one lowercase-hex `sha256` and one `https://` `url` naming `version`;
 #   - a `license`, at least one `license_file` naming a file inside the
 #     tarball, a known `template`, at least one `soname` or `program`, no
 #     unread key;
 #   - at most one `depends` line, naming other recipes, acyclic;
-#   - no file but `recipe` and its declared `config`; never a patch: an edit
-#     to upstream is a slibc or kernel finding;
+#   - no file but `recipe`, its declared `config` and its declared `patch`es;
+#   - a patch has the shape of one that only teaches the project the target,
+#     which review holds it to: it is named `NNNN-slopos-<what>.patch`; it
+#     creates or extends files and never deletes, renames or changes the mode
+#     of one; each run of removed lines is replaced where it stood, line for
+#     line, by added lines that start with them; it patches each file it
+#     names in one section, with at least one hunk; and every hunk names
+#     SlopOS in a line it adds or in the path of the file it creates. A recipe
+#     under a licence this tree may not hold the text of (GPL-2.0-only, CDDL)
+#     carries none, since a diff's context is upstream's own lines. Anything
+#     more an upstream build needs is a slibc or kernel finding;
+#   - a patch that touches `Modules/Platform/` only creates files there, and
+#     exactly the files of `toolchain/cmake/Platform/`, byte for byte, so the
+#     platform CMake learns is the one the recipes configure with;
 #   - every `arg` picks among upstream's options and carries no code, since a
 #     flag, CMake script, launcher or search root edits what is built with
 #     every file pristine. A `cmake` arg is `-D<NAME>=<value>`: `CMAKE_*`
@@ -19,7 +32,12 @@
 #     A `meson`
 #     arg is the same shape: built-in options from `MESON_ARG_NAMES`, project
 #     options outside `MESON_PROJECT_DENY`. An `openssl` arg is `no-*`,
-#     `enable-*`, `shared`, `threads` or `--openssldir=/etc/..`;
+#     `enable-*`, `shared`, `threads` or `--openssldir=/etc/..`. An
+#     `autotools` arg is `--enable-<name>` or `--with-<name>`, with at most a
+#     word for its value, `--disable-<name>` or `--without-<name>`, or
+#     `<prefix>_cv_<name>=<word>`, a configure test's answer, other than one
+#     for a program, a path, a precious variable or the system names the
+#     template owns;
 #   - an `openssl` `config`, which `Configure` evaluates as Perl, is data: one
 #     `%targets` entry for `target`, `CONFIG_FIELDS` only, non-interpolating
 #     strings, and only benign flags;
@@ -33,7 +51,7 @@
 #     symbol table or defines, even locally, a symbol an incompatible recipe's
 #     library exports: git links no OpenSSL, dynamically or as a static copy.
 #
-# The driver fails any build that changes the unpacked tree.
+# The driver fails any build that changes the patched tree.
 #
 # Usage: check_recipes.sh
 #        check_recipes.sh --self-test
@@ -44,10 +62,16 @@ SELF="check_recipes"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-TEMPLATES="cmake meson openssl"
-RECIPE_KEYS="version url sha256 license license_file template depends soname program arg config target"
+TEMPLATES="cmake meson openssl autotools"
+RECIPE_KEYS="version url sha256 license license_file template depends soname program arg patch config target"
 
-CMAKE_ARG_NAMES='^CMAKE_(BUILD_TYPE|POSITION_INDEPENDENT_CODE|(REQUIRE|DISABLE)_FIND_PACKAGE_[A-Za-z0-9_]+|INSTALL_(BINDIR|SBINDIR|LIBEXECDIR|SYSCONFDIR|DATAROOTDIR|DATADIR|INCLUDEDIR|DOCDIR|MANDIR))$'
+CMAKE_ARG_NAMES='^CMAKE_(BUILD_TYPE|POSITION_INDEPENDENT_CODE|(REQUIRE|DISABLE)_FIND_PACKAGE_[A-Za-z0-9_]+|USE_SYSTEM_[A-Z0-9_]+|INSTALL_(BINDIR|SBINDIR|LIBEXECDIR|SYSCONFDIR|DATAROOTDIR|DATADIR|INCLUDEDIR|DOCDIR|MANDIR)|DOC_DIR)$'
+# CMake's own project names its install directories without `INSTALL_`.
+CMAKE_DIR_NAMES='^CMAKE_(INSTALL_[A-Z]+|DOC_DIR)$'
+AUTOTOOLS_SWITCH='^--(enable|disable|with|without)-([a-z0-9][a-z0-9_-]*)(=(.*))?$'
+AUTOTOOLS_CACHE='^([a-z][a-z0-9]*)_cv_([A-Za-z0-9_]+)=(.*)$'
+AUTOTOOLS_CACHE_DENY='^(prog_|path_|env_|host$|build$|target$)'
+PATCH_NAME='^[0-9]{4}-slopos-[a-z0-9-]+\.patch$'
 PROJECT_ARG_DENY='(FLAGS|DEFINITIONS|DEFINES|INCLUDE|LAUNCHER|COMPILER|LINKER|TOOLCHAIN|COMMAND|SCRIPT|MODULE|EXECUTABLE|FETCHCONTENT|_DIR|_ROOT|_PATH$|_FILE$|_HINTS?$)'
 PROJECT_ARG_ALLOW='^[A-Z0-9]+_CA_PATH$'
 PROJECT_ARTIFACT_DENY='(PROGRAM|_LIBRAR(Y|IES)(_RELEASE|_DEBUG)?$)'
@@ -200,7 +224,7 @@ check_cmake_arg() {
     if [[ "$var" == CMAKE_* ]]; then
         [[ "$var" =~ $CMAKE_ARG_NAMES ]] ||
             fail "$name: arg '$arg' sets $var, which is not one of the CMake variables a recipe may set"
-        if [[ "$var" == CMAKE_INSTALL_* ]]; then
+        if [[ "$var" =~ $CMAKE_DIR_NAMES ]]; then
             [[ "$value" =~ $RELATIVE_DIR ]] ||
                 fail "$name: arg '$arg' names an install directory that is not relative to the prefix"
             return 0
@@ -239,6 +263,132 @@ check_openssl_arg() {
     fail "$name: arg '$arg' is not an OpenSSL feature switch (no-*, enable-*, shared, threads) or an --openssldir under /etc"
 }
 
+check_autotools_arg() {
+    local name="$1" arg="$2" kind value
+    if [[ "$arg" =~ $AUTOTOOLS_SWITCH ]]; then
+        kind="${BASH_REMATCH[1]}"
+        value="${BASH_REMATCH[3]-}"
+        [ -z "$value" ] || [[ "$kind" == enable || "$kind" == with ]] ||
+            fail "$name: arg '$arg' gives a value to a switch that turns something off"
+        [ -z "$value" ] || [[ "${value#=}" =~ $WORD ]] ||
+            fail "$name: arg '$arg' has a value that is not a word"
+        return 0
+    fi
+    if [[ "$arg" =~ $AUTOTOOLS_CACHE ]]; then
+        kind="${BASH_REMATCH[2]}"
+        value="${BASH_REMATCH[3]}"
+        [[ ! "$kind" =~ $AUTOTOOLS_CACHE_DENY ]] ||
+            fail "$name: arg '$arg' answers for a program, a path or a system name"
+        [[ "$value" =~ $WORD ]] ||
+            fail "$name: arg '$arg' has a value that is not a word"
+        return 0
+    fi
+    fail "$name: arg '$arg' is not an --enable/--disable/--with/--without switch or a <prefix>_cv_<name> answer"
+}
+
+# Holds a unified diff to the one shape a target patch has. Arguments: the
+# patch, and the toolchain/cmake/Platform directory whose files a patch
+# creating `Modules/Platform/` files must reproduce.
+read -r -d '' PATCH_GRAMMAR <<'PERL' || true
+use strict;
+use warnings;
+my ($file, $platform) = @ARGV;
+sub bad { print STDERR "  $file: $_[0]\n"; exit 1 }
+open(my $fh, '<', $file) or bad("cannot be read");
+my @lines = <$fh>;
+chomp @lines;
+my (%created, %seen, $path, $creating, @ops, $in_hunk, $old_left, $new_left, $header, $hunks);
+sub finish_hunk {
+    return unless $in_hunk;
+    bad("a hunk in $path ends early") if $old_left != 0 || $new_left != 0;
+    my @added = map { $_->[1] } grep { $_->[0] eq '+' } @ops;
+    for (my $at = 0; $at < @ops;) {
+        if ($ops[$at][0] ne '-') { $at++; next }
+        my (@gone, @came);
+        push @gone, $ops[$at++][1] while $at < @ops && $ops[$at][0] eq '-';
+        push @came, $ops[$at++][1] while $at < @ops && $ops[$at][0] eq '+';
+        for my $n (0 .. $#gone) {
+            (my $stem = $gone[$n]) =~ s/\s+$//;
+            bad("$path loses '$gone[$n]', which the line added in its place does not start with")
+                unless $n < @came && index($came[$n], $stem) == 0;
+        }
+    }
+    bad("a hunk in $path does not name the target")
+        unless ($creating && $path =~ /slopos/i) || grep { /slopos/i } @added;
+    $created{$path} .= join('', map { "$_\n" } @added) if $creating;
+    @ops = ();
+    $in_hunk = 0;
+}
+for (my $i = 0; $i < @lines; $i++) {
+    my $l = $lines[$i];
+    if ($in_hunk && ($old_left > 0 || $new_left > 0)) {
+        if ($l =~ /^-(.*)$/) { push @ops, ['-', $1]; $old_left--; next }
+        if ($l =~ /^\+(.*)$/) { push @ops, ['+', $1]; $new_left--; next }
+        if ($l =~ /^ (.*)$/ || $l eq '') { push @ops, [' ', $1 // '']; $old_left--; $new_left--; next }
+        if ($l =~ /^\\ No newline/) { next }
+        bad("'$l' is neither context nor an added or removed line");
+    }
+    if ($l =~ /^\\ No newline/) { next }
+    if ($l =~ /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/) {
+        finish_hunk();
+        bad("a hunk before any file") unless defined $path;
+        $hunks++;
+        ($old_left, $new_left, $in_hunk) = (defined $2 ? $2 : 1, defined $4 ? $4 : 1, 1);
+        next;
+    }
+    finish_hunk();
+    if ($l =~ /^diff --git /) {
+        bad("'$header' has no diff after it: a file made empty, or changed in mode alone")
+            if defined $header;
+        $header = $l;
+        next;
+    }
+    if ($l =~ /^index [0-9a-f]+\.\.[0-9a-f]+(?: 100644)?$/) { next }
+    if ($l =~ /^new file mode 100644$/) { next }
+    if ($l =~ /^(deleted file mode|old mode|new mode|similarity index|rename from|rename to|copy from|copy to|Binary files|GIT binary patch)/) {
+        bad("'$l': a target patch creates and extends files, nothing else");
+    }
+    if ($l =~ /^--- (\S+)/) {
+        bad("$path is given no hunk") if defined $path && !$hunks;
+        ($header, $hunks) = (undef, 0);
+        my $old = $1;
+        my $next = $i + 1 < @lines ? $lines[$i + 1] : '';
+        bad("'$l' is not followed by its '+++' line") unless $next =~ /^\+\+\+ (\S+)/;
+        my $new = $1;
+        bad("$old is deleted") if $new eq '/dev/null';
+        bad("'$new' is not a b/ path inside the tree")
+            unless $new =~ m{^b/([A-Za-z0-9_.+/-]+)$} && $1 !~ m{(^|/)\.{0,2}(/|$)};
+        $path = $1;
+        $creating = $old eq '/dev/null';
+        bad("$path is renamed from $old") if !$creating && $old ne "a/$path";
+        bad("$path is patched in two sections") if $seen{$path}++;
+        bad("$path is CMake's own platform file, which a patch only adds to")
+            if !$creating && $path =~ m{^Modules/Platform/};
+        $i++;
+        next;
+    }
+    bad("'$l' is not part of a unified diff");
+}
+finish_hunk();
+bad("'$header' has no diff after it: a file made empty, or changed in mode alone") if defined $header;
+bad("no file is patched") unless defined $path;
+bad("$path is given no hunk") unless $hunks;
+my @platform_files = grep { m{^Modules/Platform/} } sort keys %created;
+if (@platform_files) {
+    opendir(my $dh, $platform) or bad("$platform cannot be read");
+    my @want = sort grep { !/^\./ } readdir($dh);
+    my @have = map { (my $n = $_) =~ s{^Modules/Platform/}{}; $n } @platform_files;
+    bad("creates Modules/Platform/{" . join(',', @have) . "}, not toolchain/cmake/Platform's {" . join(',', @want) . "}")
+        unless "@have" eq "@want";
+    for my $name (@want) {
+        open(my $pf, '<', "$platform/$name") or bad("$platform/$name cannot be read");
+        my $body = do { local $/; <$pf> };
+        bad("Modules/Platform/$name is not toolchain/cmake/Platform/$name")
+            unless $body eq $created{"Modules/Platform/$name"};
+    }
+}
+PERL
+
 check_recipe() {
     local root="$1" name="$2"
     local dir="$root/toolchain/recipes/$name" file="$root/toolchain/recipes/$name/recipe"
@@ -252,12 +402,12 @@ check_recipe() {
             fail "$name: '$line' is not one of the keys the driver reads ($RECIPE_KEYS)"
     done <"$file"
 
-    local version url sha256 template config target dep soname program arg
+    local version url sha256 license template config target dep soname program arg
     # `|| exit`: a self-test runs this under `if`, where `set -e` is off.
     version="$(single "$file" version "$name")" || exit 1
     url="$(single "$file" url "$name")" || exit 1
     sha256="$(single "$file" sha256 "$name")" || exit 1
-    single "$file" license "$name" >/dev/null
+    license="$(single "$file" license "$name")" || exit 1
     [ -n "$(values "$file" license_file)" ] || fail "$name: no license_file"
     local text
     while IFS= read -r text; do
@@ -284,6 +434,20 @@ check_recipe() {
         [[ "$program" =~ $PROGRAM ]] || fail "$name: program '$program' is not a path under bin/ or libexec/"
     done < <(values "$file" program)
 
+    local patch
+    # A diff carries upstream's own lines, which this tree may not hold under
+    # a licence GPL-3.0-or-later code cannot take in.
+    if [ -n "$(values "$file" patch)" ] && [[ "$license" =~ GPL-2\.0-only|GPL-2\.0$|CDDL ]]; then
+        fail "$name: a patch copies $license lines into this tree"
+    fi
+    while IFS= read -r patch; do
+        [[ "$patch" =~ $PATCH_NAME ]] || fail "$name: patch '$patch' is not named NNNN-slopos-<what>.patch"
+        [ -f "$dir/$patch" ] || fail "$name: declared patch $patch is missing"
+        command -v perl >/dev/null 2>&1 || fail "$name: perl is needed to read $patch"
+        perl -e "$PATCH_GRAMMAR" "$dir/$patch" "$root/toolchain/cmake/Platform" ||
+            fail "$name: $patch does more than teach the project the target"
+    done < <(values "$file" patch)
+
     config="$(values "$file" config)"
     target="$(values "$file" target)"
     if [ "$template" = openssl ]; then
@@ -301,12 +465,10 @@ check_recipe() {
     local entry base
     while IFS= read -r -d '' entry; do
         base="${entry#"$dir"/}"
-        case "$base" in
-            *.patch | *.diff) fail "$name: carries a patch ($base); recipes build upstream unmodified" ;;
-        esac
         [ "$base" = recipe ] && continue
         [ -n "$config" ] && [ "$base" = "$config" ] && continue
-        fail "$name: $base is neither the recipe nor its declared config"
+        values "$file" patch | grep -qxF -- "$base" && continue
+        fail "$name: $base is neither the recipe nor a file it declares"
     done < <(find "$dir" -mindepth 1 -print0)
     if [ -n "$config" ]; then
         [ -f "$dir/$config" ] || fail "$name: declared config $config is missing"
@@ -534,9 +696,12 @@ self_test() {
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' RETURN
 
-    # alpha, beta and delta take the tree's real args and target definition.
+    # alpha, beta, delta and gamma take the tree's real args and target
+    # definition; alpha carries a patch shaped as a target patch is.
     local r="$tmp/toolchain/recipes" real
-    mkdir -p "$r/alpha" "$r/beta" "$r/delta" "$tmp/out" "$tmp/scripts"
+    mkdir -p "$r/alpha" "$r/beta" "$r/delta" "$r/gamma" "$tmp/out" "$tmp/scripts" \
+        "$tmp/toolchain/cmake/Platform"
+    printf 'set(SLOPOS 1)\n' >"$tmp/toolchain/cmake/Platform/SlopOS.cmake"
     cat >"$r/alpha/recipe" <<'EOF'
 # a comment
 version=1.2.3
@@ -546,6 +711,33 @@ license=MIT
 license_file=LICENSE
 template=cmake
 soname=libalpha.so.1
+patch=0001-slopos-port.patch
+EOF
+    cat >"$r/alpha/0001-slopos-port.patch" <<'EOF'
+diff --git a/src/os.h b/src/os.h
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,3 +1,4 @@
+ #if defined(__linux__) || \
+-    defined(__FreeBSD__)
++    defined(__FreeBSD__) || \
++    defined(__slopos__)
+ #endif
+diff --git a/Modules/Platform/SlopOS.cmake b/Modules/Platform/SlopOS.cmake
+new file mode 100644
+--- /dev/null
++++ b/Modules/Platform/SlopOS.cmake
+@@ -0,0 +1 @@
++set(SLOPOS 1)
+EOF
+    cat >"$r/gamma/recipe" <<'EOF'
+version=2.0
+url=https://example.org/gamma-2.0.tar.gz
+sha256=1111111111111111111111111111111111111111111111111111111111111111
+license=GPL-3.0-or-later
+license_file=COPYING
+template=autotools
+program=bin/gamma
 EOF
     cat >"$r/beta/recipe" <<'EOF'
 version=4.5
@@ -573,6 +765,7 @@ EOF
         case "$(values "$real" template)" in
             cmake) grep '^arg=' "$real" >>"$r/alpha/recipe" ;;
             meson) grep '^arg=' "$real" >>"$r/delta/recipe" ;;
+            autotools) grep '^arg=' "$real" >>"$r/gamma/recipe" ;;
             openssl)
                 grep '^arg=\|^target=' "$real" >>"$r/beta/recipe"
                 cp "$(dirname "$real")/$(values "$real" config)" "$r/beta/target.conf"
@@ -580,7 +773,10 @@ EOF
         esac
     done
     [ -f "$r/beta/target.conf" ] || fail "--self-test: the tree has no openssl recipe to take a target definition from"
-    printf '`toolchain/recipes/alpha/`, `toolchain/recipes/beta/`, `toolchain/recipes/delta/`\n' >"$tmp/NOTICE.md"
+    notice() {
+        printf '`toolchain/recipes/alpha/`, `toolchain/recipes/beta/`, `toolchain/recipes/delta/`, `toolchain/recipes/gamma/`\n' >"$tmp/NOTICE.md"
+    }
+    notice
     printf '#!/bin/sh\nshift\nfor n; do echo "$n good"; done\n' >"$tmp/scripts/build_recipes.sh"
     chmod +x "$tmp/scripts/build_recipes.sh"
 
@@ -620,6 +816,19 @@ EOF
     reject_conf() {
         reject_in "$r/beta/target.conf" "$@"
     }
+    reject_gamma() {
+        reject_in "$r/gamma/recipe" "$@"
+    }
+    reject_patch() {
+        reject_in "$r/alpha/0001-slopos-port.patch" "$@"
+    }
+    # The whole patch from stdin, for a shape no sed of the fixture makes.
+    reject_patch_as() {
+        cp "$r/alpha/0001-slopos-port.patch" "$tmp/saved"
+        cat >"$r/alpha/0001-slopos-port.patch"
+        expect_reject "$1" "$2"
+        cp "$tmp/saved" "$r/alpha/0001-slopos-port.patch"
+    }
 
     expect_ok "a well-formed pair of recipes with nothing built"
 
@@ -630,13 +839,13 @@ EOF
     reject_edit 's/^sha256=.*/&\n&/' "a recipe with two sha256 lines"
     reject_edit 's|^url=https:|url=http:|' "a plain-http url"
     reject_edit 's|alpha-1.2.3|alpha-1.2.4|' "a url naming another version"
-    reject_edit 's/^template=.*/template=autotools/' "an unknown template"
+    reject_edit 's/^template=.*/template=scons/' "an unknown template"
     reject_edit '/^license=/d' "a recipe with no license"
     reject_edit '/^license_file=/d' "a recipe with no licence text" "no license_file"
     reject_edit 's|^license_file=.*|license_file=/etc/LICENSE|' "an absolute licence path" "not a path inside the tarball"
     reject_edit 's|^license_file=.*|license_file=../LICENSE|' "a licence path climbing out" "not a path inside the tarball"
     reject_edit 's|^license_file=.*|license_file=a/../../LICENSE|' "a licence path climbing out midway" "not a path inside the tarball"
-    reject_edit '$ a depends=gamma' "a dependency on no recipe"
+    reject_edit '$ a depends=epsilon' "a dependency on no recipe"
     reject_edit '$ a depends=alpha' "a recipe that depends on itself" "in a cycle"
     reject_edit '$ a depends=beta' "two recipes that depend on each other" "in a cycle"
     reject_beta '$ a depends=alpha' "a second depends line" "more than one depends"
@@ -706,6 +915,166 @@ EOF
     reject_delta 's|^program=.*|program=share/delta|' "a program outside bin/ and libexec/" "not a path under bin/"
     reject_delta '$ a target=x' "a target on a meson recipe" "are for the openssl template"
 
+    reject_gamma '$ a arg=--prefix=/etc' "a second prefix" "is not an --enable"
+    reject_gamma '$ a arg=CFLAGS=-include/etc/shim.h' "a CFLAGS assignment" "is not an --enable"
+    reject_gamma '$ a arg=CC=gcc' "a compiler" "is not an --enable"
+    reject_gamma '$ a arg=ac_cv_prog_CC=gcc' "a program found by a cache answer" "answers for a program"
+    reject_gamma '$ a arg=ac_cv_path_PERL=perl' "a path found by a cache answer" "answers for a program"
+    reject_gamma '$ a arg=ac_cv_host=x86_64-pc-linux-gnu' "a system name the template owns" "answers for a program"
+    reject_gamma '$ a arg=ac_cv_env_CFLAGS_value=-O0' "a precious variable" "answers for a program"
+    reject_gamma '$ a arg=--with-curses=/usr/lib' "a host path as a switch's value" "not a word"
+    reject_gamma '$ a arg=--enable-foo=-include/etc/shim.h' "a flag as a switch's value" "not a word"
+    reject_gamma '$ a arg=--disable-foo=yes' "a value on a switch that turns something off" "turns something off"
+    reject_gamma '$ a arg=bash_cv_x=a;b' "a cache answer that is not a word" "not a word"
+    reject_edit '$ a arg=-DCMAKE_DOC_DIR=../doc' "a documentation directory outside the prefix" \
+        "not relative to the prefix"
+
+    reject_patch_as "a patch that deletes a line" "loses '    b();'" <<'EOF'
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,3 +1,3 @@
+ a(); /* slopos */
+-    b();
++/* slopos */
+ c();
+EOF
+    reject_patch_as "two removed lines one added line extends" "loses '}'" <<'EOF'
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,3 +1,2 @@
+ a();
+-}
+-}
++} /* slopos */
+EOF
+    reject_patch_as "a line moved past another" "loses '#endif'" <<'EOF'
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,2 +1,2 @@
+-#endif
+ b();
++#endif /* slopos */
+EOF
+    reject_patch_as "a hunk that names the target only in context" "does not name the target" <<'EOF'
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,1 +1,2 @@
+ #if defined(__slopos__)
++#define PORTED 1
+EOF
+    reject_patch_as "an edit to CMake's own platform file" "a patch only adds to" <<'EOF'
+--- a/Modules/Platform/UnixPaths.cmake
++++ b/Modules/Platform/UnixPaths.cmake
+@@ -1,1 +1,2 @@
+ set(UNIX 1)
++set(SLOPOS_EXTRA 1)
+EOF
+    reject_patch_as "one file patched in two sections" "patched in two sections" <<'EOF'
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,1 +1,2 @@
+ a();
++b(); /* slopos */
+--- a/src/os.h
++++ b/src/os.h
+@@ -2,1 +2,2 @@
+ b(); /* slopos */
++c(); /* slopos */
+EOF
+    reject_patch_as "a path with a '.' component" "not a b/ path" <<'EOF'
+--- a/src/./os.h
++++ b/src/./os.h
+@@ -1,1 +1,2 @@
+ a();
++b(); /* slopos */
+EOF
+    reject_patch_as "a hunk before any file" "a hunk before any file" <<'EOF'
+@@ -1,1 +1,2 @@
+ a();
++b(); /* slopos */
+EOF
+    reject_patch_as "a '---' line with no '+++'" "is not followed by its '+++' line" <<'EOF'
+--- a/src/os.h
+@@ -1,1 +1,2 @@
+EOF
+    reject_patch_as "a hunk that ends early" "ends early" <<'EOF'
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,2 +1,3 @@
+ a();
++b(); /* slopos */
+EOF
+    reject_patch_as "a line outside any diff" "is not part of a unified diff" <<'EOF'
+Subject: [PATCH] port
+EOF
+    reject_patch_as "an empty patch" "no file is patched" </dev/null
+    reject_patch_as "a file created empty" "has no diff after it" <<'EOF'
+diff --git a/src/slopos.h b/src/slopos.h
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/os.h b/src/os.h
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,1 +1,2 @@
+ a();
++b(); /* slopos */
+EOF
+    reject_patch_as "a file created empty at the end" "has no diff after it" <<'EOF'
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,1 +1,2 @@
+ a();
++b(); /* slopos */
+diff --git a/src/slopos.h b/src/slopos.h
+new file mode 100644
+EOF
+    reject_patch_as "a file header with no hunk" "is given no hunk" <<'EOF'
+--- /dev/null
++++ b/src/slopos.h
+--- a/src/os.h
++++ b/src/os.h
+@@ -1,1 +1,2 @@
+ a();
++b(); /* slopos */
+EOF
+    reject_delta '$ a patch=0001-slopos-port.patch' "a patch on a GPL-2.0-only recipe" "copies GPL-2.0-only lines"
+    reject_patch_as "a mode change" "creates and extends files" <<'EOF'
+diff --git a/configure b/configure
+old mode 100644
+new mode 100755
+EOF
+    reject_patch_as "a new file created executable" "is not part of a unified diff" <<'EOF'
+diff --git a/src/slopos.c b/src/slopos.c
+new file mode 100755
+--- /dev/null
++++ b/src/slopos.c
+@@ -0,0 +1 @@
++int x;
+EOF
+    reject_patch 's/defined(__slopos__)/defined(__plan9__)/' "a hunk that does not name the target" \
+        "does not name the target"
+    reject_patch 's/^+    defined(__FreeBSD__) || \\$/+    defined(__NetBSD__) || \\/' \
+        "a line rewritten rather than extended" "which the line added in its place does not start with"
+    reject_patch 's|^+++ b/src/os.h$|+++ /dev/null|' "a patch that deletes a file" "is deleted"
+    reject_patch 's|^--- a/src/os.h$|--- a/src/old.h|' "a patch that renames a file" "is renamed from"
+    reject_patch '0,/^new file mode 100644$/s//deleted file mode 100644/' "a deleted-file header" \
+        "creates and extends files"
+    reject_patch 's|^+++ b/src/os.h$|+++ b/../etc/os.h|' "a path climbing out of the tree" "not a b/ path"
+    reject_patch 's/^+set(SLOPOS 1)$/+set(SLOPOS 2)/' "a platform file unlike toolchain/cmake's" \
+        "is not toolchain/cmake/Platform/SlopOS.cmake"
+    printf 'set(SLOPOS_C 1)\n' >"$tmp/toolchain/cmake/Platform/SlopOS-C.cmake"
+    expect_reject "a platform module the patch does not create" "not toolchain/cmake/Platform's"
+    rm "$tmp/toolchain/cmake/Platform/SlopOS-C.cmake"
+    cp "$r/alpha/0001-slopos-port.patch" "$tmp/saved"
+    printf '%s\n' 'diff --git a/Modules/Platform/Extra.cmake b/Modules/Platform/Extra.cmake' \
+        'new file mode 100644' '--- /dev/null' '+++ b/Modules/Platform/Extra.cmake' '@@ -0,0 +1 @@' \
+        '+set(SLOPOS_EXTRA 1)' >>"$r/alpha/0001-slopos-port.patch"
+    expect_reject "a platform module toolchain/cmake does not carry" "not toolchain/cmake/Platform's"
+    cp "$tmp/saved" "$r/alpha/0001-slopos-port.patch"
+    reject_edit 's/^patch=.*/patch=port.patch/' "a patch named other than NNNN-slopos-*" "is not named NNNN-slopos"
+    reject_edit 's/^patch=.*/patch=0002-slopos-other.patch/' "a declared patch that is missing" "is missing"
+    reject_edit '/^patch=/d' "a patch the recipe does not declare" "neither the recipe nor a file it declares"
+
     reject_conf '1 i system("sed -i s/foo/bar/ crypto/x.c");' "a config that runs a command" "expected 'my'"
     reject_conf '$ a do "/etc/evil.pl";' "a config that loads more Perl" "text follows"
     reject_conf '/=> {/a CC => "sh -c evil",' "a compiler command" "'CC' is not a field"
@@ -723,9 +1092,9 @@ EOF
     reject_conf '/=> {/a perlasm_scheme => "../../evil",' "a path where a word belongs" "is not a word"
     reject_conf 's/^\( *\)"[^"]*" => {/\1"other" => {/' "a definition of another target" "the recipe's target is"
 
-    : >"$r/alpha/0001-fix.patch"
-    expect_reject "a recipe carrying a .patch"
-    rm "$r/alpha/0001-fix.patch"
+    : >"$r/alpha/0002-slopos-fix.patch"
+    expect_reject "an undeclared patch beside a recipe"
+    rm "$r/alpha/0002-slopos-fix.patch"
     : >"$r/alpha/fix.diff"
     expect_reject "a recipe carrying a .diff"
     rm "$r/alpha/fix.diff"
@@ -744,7 +1113,7 @@ EOF
 
     printf '`toolchain/recipes/alpha/`\n' >"$tmp/NOTICE.md"
     expect_reject "a recipe with no NOTICE.md entry"
-    printf '`toolchain/recipes/alpha/`, `toolchain/recipes/beta/`, `toolchain/recipes/delta/`\n' >"$tmp/NOTICE.md"
+    notice
 
     mkdir -p "$tmp/out/alpha"
     echo good >"$tmp/out/alpha/stamp"

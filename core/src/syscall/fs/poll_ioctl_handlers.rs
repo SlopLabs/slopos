@@ -5,11 +5,12 @@ use slopos_fs::fileio::FdTable;
 
 use slopos_abi::Errno;
 use slopos_abi::signal::SIGTTOU;
+use slopos_abi::signal::SigSet;
 use slopos_abi::syscall::{
     F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, FIOCLEX, FIONBIO, FIONCLEX, FIONREAD, O_NONBLOCK,
     POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCEXCL, TIOCGETD,
     TIOCGEXCL, TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGPTPEER, TIOCGSID, TIOCGWINSZ, TIOCNOTTY,
-    TIOCNXCL, TIOCOUTQ, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK, UserPollFd,
+    TIOCNXCL, TIOCOUTQ, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK, Timespec, UserPollFd,
     UserTermios, UserTimeval, UserWinsize,
 };
 
@@ -28,6 +29,7 @@ use slopos_mm::user_copy::{
 use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 
 use crate::syscall::args::{Fd, UserPtr};
+use crate::syscall::signal::{finish_sigmask_wait, swap_sigmask_for_wait};
 
 const SELECT_MAX_FDS: usize = 256;
 
@@ -245,13 +247,19 @@ fn poll_to_select_mask(
 /// the untokened block still runs, and the registrations made above are still
 /// on their queues, so the wait degrades to the pre-token behaviour (a wake
 /// landing in the register-block gap is dropped and the iteration sleeps out
-/// its budget) rather than breaking. With nothing registered no queue can wake
-/// us, leaving only a short timed delay.
+/// its budget) rather than breaking. Descriptors that registered nothing leave
+/// only a short timed delay; no descriptors at all is a plain sleep, which a
+/// signal ends.
 ///
-/// `#[inline(never)]`: inlined into both loops it pushed `syscall_select`'s
-/// frame past the 2 KiB stack gate.
+/// `#[inline(never)]`: inlined into both loops it pushed `select_fds`'s frame
+/// past the 2 KiB stack gate.
 #[inline(never)]
-fn poll_park(waiter: Option<&slopos_ostd::sync::PollWaiter>, registered: bool, sleep_ms: u32) {
+fn poll_park(
+    waiter: Option<&slopos_ostd::sync::PollWaiter>,
+    registered: bool,
+    watched: bool,
+    sleep_ms: u32,
+) {
     match (waiter, registered) {
         (Some(waiter), true) => {
             waiter.block(sleep_ms);
@@ -260,55 +268,162 @@ fn poll_park(waiter: Option<&slopos_ostd::sync::PollWaiter>, registered: bool, s
         (None, true) => {
             slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
         }
+        (_, false) if !watched => {
+            use slopos_ostd::sync::wait_queue::WaitAbort;
+            let slept = slopos_sched::task_struct::Current::get().map(|current| {
+                slopos_ostd::sync::BUS
+                    .subscribe(slopos_ostd::task::ops::signal_pending_event(current.id()))
+                    .wait_event_interruptible_timeout_until(|| None::<()>, u64::from(sleep_ms))
+            });
+            match slept {
+                // The poll loop's own abort check answers a kill or a signal,
+                // and its clock the deadline.
+                Some(
+                    Ok(()) | Err(WaitAbort::Killed | WaitAbort::Interrupted | WaitAbort::Timeout),
+                ) => {}
+                None | Some(Err(WaitAbort::NoRuntime)) => {
+                    slopos_kernel_services::platform::timer_poll_delay_ms(1)
+                }
+            }
+        }
         (_, false) => slopos_kernel_services::platform::timer_poll_delay_ms(1),
     }
 }
 
-/// How long `select` may park before it must re-derive its own deadline. Its
-/// own function because the arithmetic's locals otherwise land on the
-/// handler's frame, which sits against the 2 KiB gate.
+/// How long a `poll` or `select` may park before it must re-derive its own
+/// deadline; `timeout_ms < 0` is no deadline. Its own function because the
+/// arithmetic's locals otherwise land on the callers' frames, which sit
+/// against the 2 KiB gate.
 #[inline(never)]
-fn select_sleep_slice(timeout_ms: i64, start_ms: u64) -> u32 {
+fn sleep_slice(timeout_ms: i64, start_ms: u64) -> u32 {
+    const SLICE_MS: i64 = 500;
     if timeout_ms < 0 {
-        return 500;
+        return SLICE_MS as u32;
     }
+    remaining_ms(timeout_ms, start_ms).min(SLICE_MS) as u32
+}
+
+/// `timeout_ms` is caller-supplied and saturates at `i64::MAX`, so a clock read
+/// backwards between the two samples counts as no time elapsed rather than
+/// overflowing the subtraction.
+fn remaining_ms(timeout_ms: i64, start_ms: u64) -> i64 {
     let elapsed = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64;
-    (timeout_ms.saturating_sub(elapsed.max(0)).max(0) as u32).min(500)
+    timeout_ms.saturating_sub(elapsed.max(0)).max(0)
+}
+
+/// Hand a `ppoll`/`pselect6` timeout's remaining time back, as Linux does;
+/// answers whether the caller's timeout now reads it.
+#[inline(never)]
+fn write_timespec_remaining(
+    timeout: Option<UserPtr<Timespec>>,
+    timeout_ms: i64,
+    start_ms: u64,
+) -> bool {
+    let Some(ptr) = timeout else {
+        return true;
+    };
+    let remaining = remaining_ms(timeout_ms, start_ms);
+    let ts = Timespec {
+        tv_sec: remaining / 1000,
+        tv_nsec: (remaining % 1000) * 1_000_000,
+    };
+    copy_to_user(ptr.inner(), &ts).is_ok()
 }
 
 /// Hand `select`'s remaining time back, as POSIX and Linux both do: a caller
 /// retrying around a wake must not restart the full timeout each pass.
+/// Answers whether the caller's timeout now reads it.
 #[inline(never)]
 fn write_timeout_remaining(
     timeout: Option<UserPtr<UserTimeval>>,
     timeout_ms: i64,
     start_ms: u64,
-) -> Result<(), Errno> {
+) -> bool {
     let Some(ptr) = timeout else {
-        return Ok(());
+        return true;
     };
-    // `timeout_ms` is caller-supplied and saturates at `i64::MAX`, so a clock
-    // that ever reads backwards between the two samples must give "no time
-    // left" rather than overflow the subtraction.
-    let elapsed = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64;
-    let remaining = timeout_ms.saturating_sub(elapsed.max(0)).max(0);
+    let remaining = remaining_ms(timeout_ms, start_ms);
     let tv = UserTimeval {
         tv_sec: remaining / 1000,
         tv_usec: (remaining % 1000) * 1000,
     };
-    copy_to_user(ptr.inner(), &tv).map_err(|_| Errno::EFAULT)
+    copy_to_user(ptr.inner(), &tv).is_ok()
+}
+
+/// A wait a signal cut short restarts, if no handler runs, only once the
+/// caller's timeout reads what remains; one the kernel could not write back
+/// ends with `EINTR` instead of restarting whole, as on Linux.
+fn restart_with_remaining<T>(
+    result: Result<T, Errno>,
+    remaining_written: bool,
+) -> Result<T, Errno> {
+    match result {
+        Err(Errno::EINTR) if remaining_written => Err(Errno::ERESTARTNOHAND),
+        other => other,
+    }
 }
 
 define_syscall!(syscall_poll
-    (ctx, base_ptr: u64, nfds: u64, timeout_ms_raw: i64)
+    (ctx, base_ptr: u64, nfds: u64, timeout_ms: i64)
     cap(NoneFd)
     requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {
-    let nfds = nfds as usize;
-    let timeout_ms = timeout_ms_raw;
+    poll_fds(pid, base_ptr, nfds as usize, timeout_ms)
+});
 
-    if base_ptr == 0 || nfds > SELECT_MAX_FDS {
+define_syscall!(syscall_ppoll
+    (ctx, base_ptr: u64, nfds: u64, timeout: Option<UserPtr<Timespec>>, sigmask: u64,
+     sigsetsize: u64)
+    cap(NoneFd)
+    requires(let task_id: task_id, let pid: process_id)
+    -> Result<u64, Errno>
+{
+    let timeout_ms = timespec_timeout_ms(timeout)?;
+    let mask = wait_sigmask(sigmask, sigsetsize)?;
+    let start_ms = slopos_kernel_services::platform::get_time_ms();
+    let task = ctx.task();
+    if let Some(mask) = mask {
+        swap_sigmask_for_wait(task, mask);
+    }
+    let outcome = poll_fds(pid, base_ptr, nfds as usize, timeout_ms);
+    let written = write_timespec_remaining(timeout, timeout_ms, start_ms);
+    finish_sigmask_wait(task, restart_with_remaining(outcome, written))
+});
+
+/// A `ppoll`/`pselect6` timeout in whole milliseconds, rounded up so a wait
+/// never ends early; `-1` for none.
+#[inline(never)]
+fn timespec_timeout_ms(timeout: Option<UserPtr<Timespec>>) -> Result<i64, Errno> {
+    let Some(ptr) = timeout else {
+        return Ok(-1);
+    };
+    let ts = copy_from_user(ptr.inner()).map_err(|_| Errno::EFAULT)?;
+    if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+        return Err(Errno::EINVAL);
+    }
+    Ok(ts
+        .tv_sec
+        .saturating_mul(1000)
+        .saturating_add((ts.tv_nsec as u64).div_ceil(1_000_000) as i64))
+}
+
+fn wait_sigmask(ptr: u64, size: u64) -> Result<Option<SigSet>, Errno> {
+    if ptr == 0 {
+        return Ok(None);
+    }
+    if size != core::mem::size_of::<SigSet>() as u64 {
+        return Err(Errno::EINVAL);
+    }
+    let user = MmUserPtr::<SigSet>::try_new(ptr).map_err(|_| Errno::EFAULT)?;
+    copy_from_user(user).map(Some).map_err(|_| Errno::EFAULT)
+}
+
+#[inline(never)]
+fn poll_fds(pid: FdTable, base_ptr: u64, nfds: usize, timeout_ms: i64) -> Result<u64, Errno> {
+    // No array at all is `poll(NULL, 0, t)`, a sleep; a null one that claims
+    // entries faults at its first copy.
+    if nfds > SELECT_MAX_FDS {
         return Err(Errno::EINVAL);
     }
 
@@ -399,33 +514,95 @@ define_syscall!(syscall_poll
             }
         }
 
-        let sleep_ms = if timeout_ms < 0 {
-            500u32
-        } else {
-            let remaining = timeout_ms
-                - (slopos_kernel_services::platform::get_time_ms()
-                    .wrapping_sub(start_ms) as i64);
-            (remaining.max(0) as u32).min(500)
-        };
-
-        poll_park(waiter.as_ref(), reg_count > 0, sleep_ms);
-
-        cleanup(reg_count, registered_ofis);
+        let sleep_ms = sleep_slice(timeout_ms, start_ms);
 
         if slopos_kernel_services::driver_runtime::current_task_wait_aborted() {
+            cleanup(reg_count, registered_ofis);
             return Err(Errno::EINTR);
         }
+        let watched = poll_fds[..nfds].iter().any(|pfd| pfd.fd >= 0);
+        poll_park(waiter.as_ref(), reg_count > 0, watched, sleep_ms);
+
+        cleanup(reg_count, registered_ofis);
     }
-});
+}
 
 define_syscall!(syscall_select
-    (ctx, nfds_raw: u64, rd_ptr: u64, wr_ptr: u64, ex_ptr: u64,
+    (ctx, nfds: u64, rd_ptr: u64, wr_ptr: u64, ex_ptr: u64,
      timeout: Option<UserPtr<UserTimeval>>)
     cap(NoneFd)
     requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {
-    let nfds = nfds_raw as usize;
+    let timeout_ms = match timeout {
+        None => -1i64,
+        Some(ptr) => {
+            let tv = copy_from_user(ptr.inner()).map_err(|_| Errno::EFAULT)?;
+            if tv.tv_sec < 0 || tv.tv_usec < 0 {
+                return Err(Errno::EINVAL);
+            }
+            tv.tv_sec
+                .saturating_mul(1000)
+                .saturating_add(tv.tv_usec / 1000)
+        }
+    };
+
+    let start_ms = slopos_kernel_services::platform::get_time_ms();
+
+    let sets = FdSets { rd_ptr, wr_ptr, ex_ptr };
+    let outcome = select_fds(pid, nfds as usize, &sets, timeout_ms, start_ms);
+    let written = write_timeout_remaining(timeout, timeout_ms, start_ms);
+    restart_with_remaining(outcome, written)
+});
+
+define_syscall!(syscall_pselect6
+    (ctx, nfds: u64, rd_ptr: u64, wr_ptr: u64, ex_ptr: u64,
+     timeout: Option<UserPtr<Timespec>>, sig: u64)
+    cap(NoneFd)
+    requires(let task_id: task_id, let pid: process_id)
+    -> Result<u64, Errno>
+{
+    let timeout_ms = timespec_timeout_ms(timeout)?;
+    let mask = match sig {
+        0 => None,
+        addr => {
+            let pair = MmUserPtr::<[u64; 2]>::try_new(addr).map_err(|_| Errno::EFAULT)?;
+            let [ptr, size] = copy_from_user(pair).map_err(|_| Errno::EFAULT)?;
+            wait_sigmask(ptr, size)?
+        }
+    };
+    let start_ms = slopos_kernel_services::platform::get_time_ms();
+    let task = ctx.task();
+    if let Some(mask) = mask {
+        swap_sigmask_for_wait(task, mask);
+    }
+    let sets = FdSets { rd_ptr, wr_ptr, ex_ptr };
+    let outcome = select_fds(pid, nfds as usize, &sets, timeout_ms, start_ms);
+    let written = write_timespec_remaining(timeout, timeout_ms, start_ms);
+    finish_sigmask_wait(task, restart_with_remaining(outcome, written))
+});
+
+/// The caller's three descriptor sets, each 0 for none.
+#[derive(Clone, Copy)]
+struct FdSets {
+    rd_ptr: u64,
+    wr_ptr: u64,
+    ex_ptr: u64,
+}
+
+#[inline(never)]
+fn select_fds(
+    pid: FdTable,
+    nfds: usize,
+    sets: &FdSets,
+    timeout_ms: i64,
+    start_ms: u64,
+) -> Result<u64, Errno> {
+    let FdSets {
+        rd_ptr,
+        wr_ptr,
+        ex_ptr,
+    } = *sets;
     if nfds > SELECT_MAX_FDS {
         return Err(Errno::EINVAL);
     }
@@ -443,7 +620,8 @@ define_syscall!(syscall_select
         except_out: [u8; FDSET_BYTES],
         registered_ofis: [u64; SELECT_MAX_FDS],
     }
-    let mut scratch_box = slopos_ostd::KBox::<SelectScratch>::zeroed().map_err(|_| Errno::ENOMEM)?;
+    let mut scratch_box =
+        slopos_ostd::KBox::<SelectScratch>::zeroed().map_err(|_| Errno::ENOMEM)?;
     let scratch: &mut SelectScratch = &mut *scratch_box;
 
     if rd_ptr != 0 {
@@ -480,27 +658,11 @@ define_syscall!(syscall_select
         registered_ofis,
     } = scratch;
 
-    let timeout_ms = match timeout {
-        None => -1i64,
-        Some(ptr) => {
-            let tv = copy_from_user(ptr.inner()).map_err(|_| Errno::EFAULT)?;
-            if tv.tv_sec < 0 || tv.tv_usec < 0 {
-                return Err(Errno::EINVAL);
-            }
-            tv.tv_sec
-                .saturating_mul(1000)
-                .saturating_add(tv.tv_usec / 1000)
-        }
-    };
-
-    let start_ms = slopos_kernel_services::platform::get_time_ms();
-
-    // See `syscall_poll` for why the token spans the whole call.
+    // See `poll_fds` for why the token spans the whole call.
     let waiter = slopos_ostd::sync::PollWaiter::new();
 
-    // One call site each for the copy-out and the timeout writeback: four
-    // duplicated exit sequences spilled enough live state to put this frame
-    // over the 2 KiB stack gate.
+    // One call site for the copy-out: four duplicated exit sequences spilled
+    // enough live state to put this frame over the 2 KiB stack gate.
     struct SelectOut {
         rd_ptr: u64,
         wr_ptr: u64,
@@ -543,6 +705,7 @@ define_syscall!(syscall_select
 
         let mut ready = 0u64;
         let mut reg_count = 0usize;
+        let mut watched = false;
 
         for fd in 0..nfds {
             let want_r = rd_ptr != 0 && fdset_test(&read_in[..bytes_len], fd);
@@ -551,6 +714,7 @@ define_syscall!(syscall_select
             if !(want_r || want_w || want_e) {
                 continue;
             }
+            watched = true;
 
             let mut mask = 0u16;
             if want_r {
@@ -564,8 +728,7 @@ define_syscall!(syscall_select
             }
 
             let result = file_poll_fused(pid, fd as c_int, mask);
-            let (rdy_r, rdy_w, rdy_e) =
-                poll_to_select_mask(result.revents, want_r, want_w, want_e);
+            let (rdy_r, rdy_w, rdy_e) = poll_to_select_mask(result.revents, want_r, want_w, want_e);
             if rdy_r {
                 fdset_set(&mut read_out[..bytes_len], fd);
                 ready += 1;
@@ -607,30 +770,21 @@ define_syscall!(syscall_select
             }
         }
 
-        let sleep_ms = select_sleep_slice(timeout_ms, start_ms);
-
-        poll_park(waiter.as_ref(), reg_count > 0, sleep_ms);
-
-        cleanup(reg_count, registered_ofis);
-
         if slopos_kernel_services::driver_runtime::current_task_wait_aborted() {
+            cleanup(reg_count, registered_ofis);
             break Err(Errno::EINTR);
         }
+        let sleep_ms = sleep_slice(timeout_ms, start_ms);
+        poll_park(waiter.as_ref(), reg_count > 0, watched, sleep_ms);
+
+        cleanup(reg_count, registered_ofis);
     };
 
     if outcome.is_ok() {
         copy_out_select_results(&out, read_out, write_out, except_out)?;
     }
-    let writeback = write_timeout_remaining(timeout, timeout_ms, start_ms);
-    if outcome.is_ok() {
-        // A timeval in read-only memory must not undo a select that already
-        // reported readiness and mutated the caller's fd sets — Linux swallows
-        // exactly this failure in `poll_select_finish`.
-        outcome
-    } else {
-        writeback.and(outcome)
-    }
-});
+    outcome
+}
 
 /// The three ioctls Linux answers in the fd layer rather than in the file's own
 /// `ioctl`: two descriptor flags and one open-file status flag. `None` means

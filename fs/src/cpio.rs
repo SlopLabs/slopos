@@ -6,9 +6,7 @@
 
 use slopos_ostd::{KVec, klog_info};
 
-use crate::vfs::{
-    VfsError, VfsOpenFlags, vfs_mkdir, vfs_open_flags, vfs_set_mode, vfs_set_sealed, vfs_symlink,
-};
+use crate::vfs::{VfsError, VfsOpenFlags, vfs_mkdir, vfs_open_flags, vfs_set_mode, vfs_symlink};
 use crate::{MAX_NAME_LEN, MAX_PATH_LEN};
 use slopos_abi::fs::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
 
@@ -32,6 +30,12 @@ pub enum CpioError {
     BadField,
     /// A path component exceeded [`MAX_NAME_LEN`] (or the path [`MAX_PATH_LEN`]).
     NameTooLong,
+    /// A path climbs with `..`, or passes through a file as if it were a
+    /// directory, or an entry changes what kind of file a path names.
+    BadPath,
+    NoMemory,
+    /// The base was indexed once already.
+    Installed,
     /// A VFS operation failed while materializing an entry.
     Vfs(VfsError),
 }
@@ -67,7 +71,7 @@ fn parse_hex8(field: &[u8]) -> Result<u32, CpioError> {
 }
 
 /// The stored name is NUL-terminated within its `namesize` field.
-fn nul_terminated(bytes: &[u8]) -> &[u8] {
+pub(crate) fn nul_terminated(bytes: &[u8]) -> &[u8] {
     match bytes.iter().position(|&b| b == 0) {
         Some(i) => &bytes[..i],
         None => bytes,
@@ -77,9 +81,9 @@ fn nul_terminated(bytes: &[u8]) -> &[u8] {
 /// Walk every record of a `newc` cpio archive, invoking `f` for each entry up
 /// to (but not including) the `TRAILER!!!` sentinel. Returns the number of
 /// entries visited.
-pub fn for_each_cpio_entry<F>(archive: &[u8], mut f: F) -> Result<usize, CpioError>
+pub fn for_each_cpio_entry<'a, F>(archive: &'a [u8], mut f: F) -> Result<usize, CpioError>
 where
-    F: FnMut(&CpioEntry) -> Result<(), CpioError>,
+    F: FnMut(&CpioEntry<'a>) -> Result<(), CpioError>,
 {
     let mut pos = 0usize;
     let mut count = 0usize;
@@ -164,27 +168,17 @@ fn parse_record(archive: &[u8], pos: usize) -> Result<Option<CpioRecord<'_>>, Cp
     }))
 }
 
-/// Directories holding program-identity grant paths. Sealed after the unpack:
-/// a sealed binary cannot be overwritten, but an unsealed parent could be
-/// renamed aside and a fresh `/bin/halt` planted under the path the grant is
-/// keyed on. Sealing the parent closes create, unlink and rename beneath it.
-const SEALED_DIRS: &[&[u8]] = &[b"/bin", b"/sbin", b"/lib"];
-
-/// Unpack a `newc` cpio archive into the currently mounted root filesystem,
-/// creating directories and files via the VFS. Returns the number of entries
-/// materialized (directories + regular files; other types are skipped).
-pub fn unpack_cpio_into_root(archive: &[u8]) -> Result<usize, CpioError> {
-    let created = unpack_entries(archive)?;
-    for dir in SEALED_DIRS {
-        match vfs_set_sealed(dir) {
-            Ok(()) | Err(VfsError::NotFound) => {}
-            Err(e) => return Err(CpioError::Vfs(e)),
-        }
-    }
-    Ok(created)
+fn in_base(path: &[u8]) -> bool {
+    slopos_abi::fs::BASE_DIRS.iter().any(|dir| {
+        path.starts_with(dir.as_bytes()) && (path.len() == dir.len() || path[dir.len()] == b'/')
+    })
 }
 
-fn unpack_entries(archive: &[u8]) -> Result<usize, CpioError> {
+/// Unpack what a `newc` cpio archive holds outside the base directories into
+/// the currently mounted root filesystem, through the VFS; the base's own are
+/// served from the archive by [`crate::basefs`]. Returns the number of entries
+/// materialized (directories, regular files and symlinks).
+pub fn unpack_cpio_into_root(archive: &[u8]) -> Result<usize, CpioError> {
     let mut created = 0usize;
     // One buffer for the whole archive: `MAX_PATH_LEN` is 4096 and a kernel
     // frame is bounded at 2 KiB.
@@ -197,6 +191,9 @@ fn unpack_entries(archive: &[u8]) -> Result<usize, CpioError> {
         };
         let path = &buf.as_slice()[..len];
         validate_components(path)?;
+        if in_base(path) {
+            return Ok(());
+        }
 
         match entry.mode & S_IFMT {
             S_IFDIR => {
@@ -258,10 +255,6 @@ fn make_symlink(path: &[u8], target: &[u8]) -> Result<(), CpioError> {
     if target.is_empty() {
         return Err(CpioError::BadField);
     }
-    // Not sealed: `vfs_set_sealed` follows its final component, so sealing a
-    // symlink seals what it points at. `/lib/ld-slopos.so.1` is protected by
-    // `/lib` being in `SEALED_DIRS`, which refuses the unlink and the rename
-    // a re-point needs.
     match vfs_symlink(target, path) {
         Ok(()) | Err(VfsError::AlreadyExists) => Ok(()),
         Err(e) => Err(CpioError::Vfs(e)),
@@ -332,10 +325,5 @@ fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), CpioError> {
     }
 
     // The VFS create path defaults regular files to 0o644, losing the exec bit.
-    vfs_set_mode(path, (mode & 0o7777) as u16).map_err(CpioError::Vfs)?;
-    // Seal last: contents and mode must be final first. Program-identity
-    // privilege is keyed on a path, so a writable unpacked binary hands every
-    // grant to whoever overwrites it.
-    vfs_set_sealed(path).map_err(CpioError::Vfs)?;
-    Ok(())
+    vfs_set_mode(path, (mode & 0o7777) as u16).map_err(CpioError::Vfs)
 }

@@ -255,3 +255,95 @@ const fn align_up(value: usize, align: usize) -> usize {
 // left doing pointless work.
 const _: () = assert!(DIRENT_NAME_OFFSET != DIRENT_D_NAME_OFFSET);
 const _: () = assert!(DIR_NAME_MAX + 1 == 256);
+
+type DirentCompare = unsafe extern "C" fn(*mut *const dirent, *mut *const dirent) -> c_int;
+
+/// `scandir(3)`: every entry of `path` that `filter` keeps (all when null),
+/// each a `malloc`ed copy, in an array sorted by `compar` (unsorted when
+/// null). The number of entries, or -1 with nothing left allocated.
+///
+/// # Safety
+/// `path` is a NUL-terminated C string; `namelist` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scandir(
+    path: *const c_char,
+    namelist: *mut *mut *mut dirent,
+    filter: Option<unsafe extern "C" fn(*const dirent) -> c_int>,
+    compar: Option<unsafe extern "C" fn(*mut *const dirent, *mut *const dirent) -> c_int>,
+) -> c_int {
+    if namelist.is_null() {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    let entry_errno = crate::errno::errno_get();
+    let dirp = opendir(path);
+    if dirp.is_null() {
+        return -1;
+    }
+    let mut list: *mut *mut dirent = core::ptr::null_mut();
+    let mut len = 0usize;
+    let mut cap = 0usize;
+    let failed = loop {
+        crate::errno::errno_set(0);
+        let entry = readdir(dirp);
+        if entry.is_null() {
+            break crate::errno::errno_get() != 0;
+        }
+        if let Some(keep) = filter
+            && keep(entry) == 0
+        {
+            continue;
+        }
+        if len == cap {
+            cap = (cap * 2).max(16);
+            let grown = malloc::realloc(list.cast(), cap * size_of::<*mut dirent>());
+            if grown.is_null() {
+                break true;
+            }
+            list = grown.cast();
+        }
+        let copy = malloc::alloc(size_of::<dirent>()).cast::<dirent>();
+        if copy.is_null() {
+            break true;
+        }
+        core::ptr::copy_nonoverlapping(entry, copy, 1);
+        *list.add(len) = copy;
+        len += 1;
+    };
+    let saved = crate::errno::errno_get();
+    closedir(dirp);
+    if failed {
+        for i in 0..len {
+            malloc::dealloc((*list.add(i)).cast());
+        }
+        malloc::dealloc(list.cast());
+        errno_set(if saved == 0 { ENOMEM.raw() } else { saved });
+        return -1;
+    }
+    if let Some(compar) = compar {
+        crate::stdlib::sort::qsort(
+            list.cast(),
+            len,
+            size_of::<*mut dirent>(),
+            Some(core::mem::transmute::<
+                DirentCompare,
+                crate::stdlib::sort::Compar,
+            >(compar)),
+        );
+    }
+    *namelist = list;
+    crate::errno::errno_set(entry_errno);
+    len as c_int
+}
+
+/// `alphasort(3)`: [`scandir`]'s comparison by name, in collation order.
+///
+/// # Safety
+/// Both arguments address pointers to entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alphasort(a: *mut *const dirent, b: *mut *const dirent) -> c_int {
+    crate::string::strcoll(
+        (&raw const (**a).d_name).cast(),
+        (&raw const (**b).d_name).cast(),
+    )
+}

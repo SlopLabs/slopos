@@ -10,6 +10,7 @@
 //! lives in [`crate::io::misc`] — passes the caller's pointer through
 //! untouched.
 
+pub mod pty;
 #[allow(dead_code)]
 pub(crate) mod shim;
 pub mod tests;
@@ -17,7 +18,8 @@ pub mod tests;
 use crate::errno::errno_set;
 use crate::pal::{Pal, Sys};
 use slopos_abi::syscall::{
-    InputFlags, LocalFlags, OutputFlags, TCGETS, TCSETS, TCSETSF, TCSETSW, UserTermios, VMIN, VTIME,
+    InputFlags, LocalFlags, OutputFlags, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC,
+    UserTermios, VMIN, VTIME,
 };
 
 pub const TCSANOW: i32 = 0;
@@ -130,6 +132,41 @@ pub unsafe extern "C" fn cfsetospeed(termios: *mut UserTermios, speed: u32) -> i
     }
     (*termios).c_ospeed = speed;
     0
+}
+
+fn tty_ioctl(fd: i32, request: u64, arg: u64) -> i32 {
+    match Sys::ioctl(fd, request, arg) {
+        Ok(_) => 0,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}
+
+/// `tcflow(3)`: suspend or restart output (`TCOOFF`, `TCOON`) or send
+/// STOP/START to the other end (`TCIOFF`, `TCION`).
+#[unsafe(no_mangle)]
+pub extern "C" fn tcflow(fd: i32, action: i32) -> i32 {
+    tty_ioctl(fd, TCXONC, action as u64)
+}
+
+/// `tcflush(3)`: discard what is queued (`TCIFLUSH`, `TCOFLUSH`, `TCIOFLUSH`).
+#[unsafe(no_mangle)]
+pub extern "C" fn tcflush(fd: i32, queue: i32) -> i32 {
+    tty_ioctl(fd, TCFLSH, queue as u64)
+}
+
+/// `tcdrain(3)`: wait until everything written has been sent.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcdrain(fd: i32) -> i32 {
+    tty_ioctl(fd, TCSBRK, 1)
+}
+
+/// `tcsendbreak(3)`. The duration is the implementation's, as POSIX allows.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcsendbreak(fd: i32, _duration: i32) -> i32 {
+    tty_ioctl(fd, TCSBRK, 0)
 }
 
 /// `tcgetpgrp(3)`: the terminal's foreground process group.

@@ -90,6 +90,14 @@ pub enum TypeDef<'a> {
     Raw(&'a str),
 }
 
+/// A header's `extern` object: its name, whether C may write it, and its Rust
+/// type.
+pub struct Variable<'entry> {
+    pub name: &'entry str,
+    pub read_only: bool,
+    pub ty: String,
+}
+
 /// Everything a header needs to render, looked up by name.
 pub struct World<'a> {
     pub types: Types,
@@ -246,12 +254,17 @@ impl World<'_> {
         if !spec.variables.is_empty() {
             out.push('\n');
             for variable in spec.variables {
-                let (name, ty) = self.variable(variable)?;
+                let Variable {
+                    name,
+                    read_only,
+                    ty,
+                } = self.variable(variable)?;
                 let declaration = self
                     .types
                     .declare(&ty, name)
                     .map_err(|err| format!("{}: variable `{name}`: {err}", spec.path))?;
-                let _ = writeln!(out, "extern {declaration};");
+                let qualifier = if read_only { "const " } else { "" };
+                let _ = writeln!(out, "extern {qualifier}{declaration};");
             }
         }
 
@@ -287,16 +300,29 @@ impl World<'_> {
 
     /// A `variables` entry: `"name"` takes its type from the contract's own
     /// `extern` declaration, and `"name: <rust type>"` declares a slibc object
-    /// the contract has no reason to mention (`stdin` and friends).
-    pub fn variable<'entry>(&self, entry: &'entry str) -> Result<(&'entry str, String), String> {
+    /// the contract has no reason to mention (`stdin` and friends), read-only
+    /// as `"name: const <rust type>"`.
+    pub fn variable<'entry>(&self, entry: &'entry str) -> Result<Variable<'entry>, String> {
         match entry.split_once(':') {
-            Some((name, ty)) => Ok((name.trim(), ty.trim().to_string())),
+            Some((name, ty)) => {
+                let ty = ty.trim();
+                let read_only = ty.strip_prefix("const ");
+                Ok(Variable {
+                    name: name.trim(),
+                    read_only: read_only.is_some(),
+                    ty: read_only.unwrap_or(ty).to_string(),
+                })
+            }
             None => {
                 let name = entry.trim();
                 let item = self.statics.get(name).ok_or_else(|| {
                     format!("`{name}` is not declared as an object by the contract")
                 })?;
-                Ok((name, item.ty.clone()))
+                Ok(Variable {
+                    name,
+                    read_only: false,
+                    ty: item.ty.clone(),
+                })
             }
         }
     }

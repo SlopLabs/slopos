@@ -559,6 +559,33 @@ impl<K, U> TaskInner<K, U> {
     }
 
     #[inline]
+    pub fn nice(&self) -> i8 {
+        self.nice.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn set_nice(&self, nice: i8) {
+        self.nice.store(nice, Ordering::Relaxed);
+    }
+
+    /// Arm `mask` to be reinstated once the current syscall returns to user
+    /// space, replacing any armed before.
+    #[inline]
+    pub fn set_restore_sigmask(&self, mask: SigSet) {
+        self.restore_sigmask.store(mask, Ordering::Relaxed);
+        self.restore_sigmask_armed.store(true, Ordering::Relaxed);
+    }
+
+    /// Disarm and return the mask [`set_restore_sigmask`](Self::set_restore_sigmask)
+    /// armed, if any.
+    #[inline]
+    pub fn take_restore_sigmask(&self) -> Option<SigSet> {
+        self.restore_sigmask_armed
+            .swap(false, Ordering::Relaxed)
+            .then(|| self.restore_sigmask.load(Ordering::Relaxed))
+    }
+
+    #[inline]
     pub fn set_fault_siginfo(&self, signum: u8, si_code: i32, si_addr: u64) {
         self.fault_si_code.store(si_code as u32, Ordering::Relaxed);
         self.fault_si_addr.store(si_addr, Ordering::Relaxed);

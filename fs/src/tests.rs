@@ -2420,6 +2420,165 @@ slopos_testing::stest!(name = test_cpio_truncated_header);
 slopos_testing::stest!(name = test_cpio_bad_magic);
 slopos_testing::stest!(name = test_cpio_truncated_data);
 
+const T_S_IFLNK: u32 = 0o120000;
+
+type NewcEntry = (&'static [u8], u32, &'static [u8]);
+
+const fn newc_align(n: usize) -> usize {
+    (n + 3) & !3
+}
+
+const fn newc_len(entries: &[NewcEntry]) -> usize {
+    let (mut len, mut i) = (0, 0);
+    while i < entries.len() {
+        let (name, _, data) = entries[i];
+        len = newc_align(newc_align(len + 110 + name.len() + 1) + data.len());
+        i += 1;
+    }
+    len
+}
+
+/// A `newc` archive built at compile time, so a fixture holds no heap for the
+/// rest of the boot.
+const fn newc<const N: usize>(entries: &[NewcEntry]) -> [u8; N] {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = [0u8; N];
+    let (mut at, mut i) = (0, 0);
+    while i < entries.len() {
+        let (name, mode, data) = entries[i];
+        let magic = b"070701";
+        let mut k = 0;
+        while k < 6 {
+            out[at + k] = magic[k];
+            k += 1;
+        }
+        at += 6;
+        let fields = [
+            0,
+            mode,
+            0,
+            0,
+            1,
+            0,
+            data.len() as u32,
+            0,
+            0,
+            0,
+            0,
+            name.len() as u32 + 1,
+            0,
+        ];
+        let mut f = 0;
+        while f < fields.len() {
+            let mut digit = 0;
+            while digit < 8 {
+                out[at + digit] = HEX[((fields[f] >> (28 - 4 * digit)) & 0xf) as usize];
+                digit += 1;
+            }
+            at += 8;
+            f += 1;
+        }
+        k = 0;
+        while k < name.len() {
+            out[at + k] = name[k];
+            k += 1;
+        }
+        at = newc_align(at + name.len() + 1);
+        k = 0;
+        while k < data.len() {
+            out[at + k] = data[k];
+            k += 1;
+        }
+        at = newc_align(at + data.len());
+        i += 1;
+    }
+    out
+}
+
+const BASE_SAMPLE_ENTRIES: [NewcEntry; 5] = [
+    (b"usr/share/doc/readme", T_S_IFREG | 0o644, b"read me"),
+    (b"bin/tool", T_S_IFREG | 0o755, b"#!tool"),
+    (b"bin/sh", T_S_IFLNK | 0o777, b"tool"),
+    (b"bin/alpha", T_S_IFREG | 0o755, b""),
+    (b"TRAILER!!!", 0, b""),
+];
+static BASE_SAMPLE: [u8; newc_len(&BASE_SAMPLE_ENTRIES)] = newc(&BASE_SAMPLE_ENTRIES);
+
+const CLIMBING_ENTRIES: [NewcEntry; 2] = [
+    (b"bin/../etc/passwd", T_S_IFREG | 0o644, b"root"),
+    (b"TRAILER!!!", 0, b""),
+];
+static CLIMBING: [u8; newc_len(&CLIMBING_ENTRIES)] = newc(&CLIMBING_ENTRIES);
+
+/// The base answers from the archive where it lies: directories the archive
+/// only implies, a file's bytes at any offset, a symlink's target, a sorted
+/// listing, every inode sealed, and no way to change any of it.
+pub fn test_basefs_serves_an_archive_in_place() -> TestResult {
+    use crate::basefs::BaseFs;
+    use crate::vfs::{FileSystem, VfsError};
+    let base = BaseFs::new();
+
+    if base.install(&BASE_SAMPLE) != Ok(8) {
+        return slopos_testing::fail!("the sample did not index as eight entries");
+    }
+    let (Ok(bin), Ok(tool), Ok(doc)) = (
+        base.resolve(b"/bin"),
+        base.resolve(b"/bin/tool"),
+        base.resolve(b"/usr/share/doc"),
+    ) else {
+        return slopos_testing::fail!("a path the archive names or implies did not resolve");
+    };
+    let stat = base.stat(tool);
+    if !matches!(&stat, Ok(s) if s.file_type == FileType::Regular && s.size == 6 && s.mode == 0o755 && s.sealed)
+        || !matches!(base.stat(doc), Ok(s) if s.file_type == FileType::Directory)
+    {
+        return slopos_testing::fail!("stat disagrees with the archive");
+    }
+    let mut buf = [0u8; 16];
+    if base.read(tool, 0, &mut buf) != Ok(6)
+        || &buf[..6] != b"#!tool"
+        || base.read(tool, 2, &mut buf) != Ok(4)
+        || &buf[..4] != b"tool"
+        || base.read(tool, 9, &mut buf) != Ok(0)
+    {
+        return slopos_testing::fail!("a read did not return the archive's bytes");
+    }
+    let sh = base.lookup(bin, b"sh");
+    let mut target = [0u8; 8];
+    if !matches!(sh.and_then(|sh| base.readlink(sh, &mut target)), Ok(4)) || &target[..4] != b"tool"
+    {
+        return slopos_testing::fail!("the symlink does not name its target");
+    }
+    let mut names: KVec<KVec<u8>> = KVec::new();
+    let listed = base.readdir(bin, 0, &mut |name, _, _| {
+        let mut owned = KVec::new();
+        owned.extend_from_slice(name).is_ok() && names.push(owned).is_ok()
+    });
+    let expected: [&[u8]; 5] = [b".", b"..", b"alpha", b"sh", b"tool"];
+    if listed != Ok(5) || names.iter().map(|n| n.as_slice()).ne(expected) {
+        return slopos_testing::fail!("the listing is not the directory's entries in order");
+    }
+    if base.lookup(bin, b"..") != Ok(base.root_inode())
+        || base.write(tool, 0, b"x") != Err(VfsError::ReadOnly)
+        || base.create(bin, b"new", FileType::Regular) != Err(VfsError::ReadOnly)
+        || base.unlink(bin, b"tool") != Err(VfsError::ReadOnly)
+    {
+        return slopos_testing::fail!("the base let itself be changed or walked out of");
+    }
+    TestResult::Pass
+}
+
+/// An archive whose path climbs out with `..` is no base.
+pub fn test_basefs_refuses_a_climbing_path() -> TestResult {
+    match crate::basefs::BaseFs::new().install(&CLIMBING) {
+        Err(CpioError::BadPath) => TestResult::Pass,
+        other => slopos_testing::fail!("installed a climbing path: {:?}", other),
+    }
+}
+
+slopos_testing::stest!(name = test_basefs_serves_an_archive_in_place);
+slopos_testing::stest!(name = test_basefs_refuses_a_climbing_path);
+
 /// A process may hold `FILEIO_MAX_OPEN_FILES` descriptors and no more, which
 /// also pins that the heap-backed table is built at its full size rather than
 /// grown under whatever lock happens to be held when a descriptor arrives.

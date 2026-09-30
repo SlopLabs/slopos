@@ -76,6 +76,9 @@ pub fn set_verity_required(required: bool) {
 /// Set once the initramfs is unpacked, so [`boot_step_fs_init`] demotes the ext2
 /// disk to a `/mnt` secondary instead of replacing `/`.
 static ROOTFS_IS_RAMFS: AtomicBool = AtomicBool::new(false);
+/// The boot module's base is indexed for a disk root, which `fs init` mounts
+/// it over once the disk is `/`.
+static BASE_OVER_DISK: AtomicBool = AtomicBool::new(false);
 
 pub fn set_root_mode(mode: u8) {
     ROOT_MODE.store(mode, Ordering::Relaxed);
@@ -160,6 +163,14 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                 " (read-only)"
             }
         );
+        if let Some(archive) = archive
+            && writable_disk
+        {
+            if !install_base(archive) {
+                return -1;
+            }
+            BASE_OVER_DISK.store(true, Ordering::Relaxed);
+        }
         return 0;
     }
 
@@ -183,9 +194,8 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     match slopos_fs::unpack_cpio_into_root(archive) {
         Ok(entries) => {
             klog_info!(
-                "ROOTFS: unpacked {} initramfs entries ({} bytes) into RAM root",
-                entries,
-                archive.len()
+                "ROOTFS: unpacked {} initramfs entries into RAM root",
+                entries
             );
         }
         Err(e) => {
@@ -193,8 +203,45 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
             return -1;
         }
     }
+    if !install_base(archive) || mount_base() != 0 {
+        return -1;
+    }
 
     ROOTFS_IS_RAMFS.store(true, Ordering::Relaxed);
+    0
+}
+
+fn install_base(archive: &'static [u8]) -> bool {
+    match slopos_fs::basefs::BASE_FS.install(archive) {
+        Ok(entries) => {
+            klog_info!(
+                "ROOTFS: the boot module's base holds {} entries ({} bytes)",
+                entries,
+                archive.len()
+            );
+            true
+        }
+        Err(e) => {
+            klog_info!("ROOTFS: the boot module is no base: {:?}", e);
+            false
+        }
+    }
+}
+
+fn mount_base() -> i32 {
+    for dir in slopos_abi::fs::BASE_DIRS {
+        match slopos_fs::vfs::init::vfs_mount_base_dir(dir.as_bytes()) {
+            Ok(()) | Err(slopos_fs::vfs::VfsError::NotFound) => {}
+            Err(e) => {
+                klog_info!("VFS: failed to mount the base at {}: {:?}", dir, e);
+                return -1;
+            }
+        }
+    }
+    klog_info!(
+        "VFS: the base from the boot module is at {:?}",
+        slopos_abi::fs::BASE_DIRS
+    );
     0
 }
 
@@ -510,6 +557,9 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                             "read-write"
                         },
                     );
+                    if BASE_OVER_DISK.load(Ordering::Relaxed) && mount_base() != 0 {
+                        return -1;
+                    }
                 }
                 Err(e) => {
                     klog_info!("VFS: failed to install ext2 root: {:?}", e);

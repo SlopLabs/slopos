@@ -59,3 +59,25 @@ pub extern "C" fn ffs(i: c_int) -> c_int {
         i.trailing_zeros() as c_int + 1
     }
 }
+
+/// `bcopy(3)`: `memmove` with the arguments the other way round.
+///
+/// # Safety
+/// `src` and `dst` address `n` bytes each; they may overlap.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bcopy(
+    src: *const core::ffi::c_void,
+    dst: *mut core::ffi::c_void,
+    n: usize,
+) {
+    core::ptr::copy(src as *const u8, dst as *mut u8, n);
+}
+
+/// `bzero(3)`.
+///
+/// # Safety
+/// `s` addresses `n` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bzero(s: *mut core::ffi::c_void, n: usize) {
+    core::ptr::write_bytes(s as *mut u8, 0, n);
+}

@@ -20,8 +20,8 @@
 #
 # The four failures:
 #   1. `toolchain/PIN`'s channel disagrees with `rust-toolchain.toml`.
-#   2. A `toolchain/**/*.patch` file's sha256 disagrees with the line in its
-#      own PIN — `toolchain/compiler/PIN` for the compiler fork,
+#   2. A fork's `toolchain/**/*.patch` file's sha256 disagrees with the line
+#      in its own PIN — `toolchain/compiler/PIN` for the compiler fork,
 #      `toolchain/crates/PIN` for the crate ports, `toolchain/PIN` for std and
 #      libc — or has no line, or a line names a patch that is not there. A
 #      crate port must also name, on a `crate=` line, the `.crate` it is cut

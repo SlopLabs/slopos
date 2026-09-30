@@ -21,7 +21,10 @@ pub use wait::{WEXITSTATUS, WIFCONTINUED, WIFEXITED, WIFSIGNALED, WIFSTOPPED, WS
 /// Returns the child PID to the parent, 0 to the child, -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fork() -> i32 {
-    match Sys::fork() {
+    crate::thread::atfork::before_fork();
+    let result = Sys::fork();
+    crate::thread::atfork::after_fork(matches!(result, Ok(0)));
+    match result {
         Ok(pid) => pid,
         Err(e) => {
             errno::errno_set(e.raw());

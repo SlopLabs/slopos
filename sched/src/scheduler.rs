@@ -2176,7 +2176,9 @@ pub fn scheduler_timer_tick() {
         if running_idle {
             sched.increment_idle_time();
         }
+        sched.set_runnable_sample(sched.queued_count() + u32::from(!running_idle));
     });
+    crate::loadavg::tick(cpu_id, super::sleep::sleep_queue_now_ms());
 
     let preempt_active = PreemptGuard::is_active();
 

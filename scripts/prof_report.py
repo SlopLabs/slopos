@@ -115,7 +115,7 @@ def main():
 
     print("== build times")
     for l in lines:
-        m = re.search(r"guest_builds_the_(\w+)_kernel # (.*)", l)
+        m = re.search(r"guest_builds_the_(\w+)_system # (.*)", l)
         if m:
             print(f"  {m.group(1):6s} {m.group(2)}")
 

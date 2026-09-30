@@ -196,3 +196,38 @@ unsafe fn lookup(name: *const c_char, table: &[&[u8]]) -> c_int {
         None => 0,
     }
 }
+
+/// `wcwidth(3)` in the C locale: a column for each printable character, none
+/// for NUL, and -1 for anything this locale does not call printable.
+#[unsafe(no_mangle)]
+pub extern "C" fn wcwidth(c: super::wchar_t) -> c_int {
+    match c {
+        0 => 0,
+        _ if iswprint(c as wint_t) != 0 => 1,
+        _ => -1,
+    }
+}
+
+/// `wcswidth(3)`: the columns of the first `n` characters of `s`, or -1 if
+/// one of them has no width.
+///
+/// # Safety
+/// `s` is a NUL-terminated wide string or addresses at least `n` characters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcswidth(s: *const super::wchar_t, n: usize) -> c_int {
+    if s.is_null() {
+        return 0;
+    }
+    let mut columns: c_int = 0;
+    for i in 0..n {
+        let c = *s.add(i);
+        if c == 0 {
+            break;
+        }
+        match wcwidth(c) {
+            -1 => return -1,
+            w => columns = columns.saturating_add(w),
+        }
+    }
+    columns
+}

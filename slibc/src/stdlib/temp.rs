@@ -1,9 +1,9 @@
-//! `mkstemp`, `mkostemp` and `mkdtemp`: a unique name made from a template's
-//! trailing `XXXXXX`.
+//! `mkstemp`, `mkostemp`, `mkdtemp` and `mktemp`: a unique name made from a
+//! template's trailing `XXXXXX`.
 
 use core::ffi::{c_char, c_int};
 
-use crate::errno::{EEXIST, EINVAL, Errno, errno_set};
+use crate::errno::{EEXIST, EINVAL, ENOENT, Errno, errno_set};
 use crate::ffi::{O_CREAT, O_EXCL, O_RDWR};
 use crate::pal::{Pal, Sys};
 
@@ -88,4 +88,31 @@ pub unsafe extern "C" fn mkdtemp(template: *mut c_char) -> *mut c_char {
     } else {
         template
     }
+}
+
+/// `mktemp(3)`: a name no file has at the moment of the check, which a
+/// caller that then creates it races every other process for. On failure the
+/// template becomes the empty string.
+///
+/// # Safety
+/// `template` is a writable NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mktemp(template: *mut c_char) -> *mut c_char {
+    let rc = fill_and_create(template, |path| {
+        let mut st = slopos_abi::fs::UserFsStat::default();
+        match Sys::fstatat(
+            slopos_abi::fs::AT_FDCWD,
+            path,
+            &raw mut st,
+            slopos_abi::fs::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Ok(()) => Err(EEXIST),
+            Err(e) if e == ENOENT => Ok(0),
+            Err(e) => Err(e),
+        }
+    });
+    if rc < 0 && !template.is_null() {
+        *template = 0;
+    }
+    template
 }

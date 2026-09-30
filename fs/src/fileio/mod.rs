@@ -972,6 +972,12 @@ impl FileOps for LocalTtyOps {
 
 /// Linux's TTY major. The minor is the index the `FileOps` handle carries.
 pub const TTY_DEVICE_MAJOR: u32 = 4;
+/// Linux's first Unix98 pseudo-terminal slave major: `/dev/pts/<n>` is
+/// `(136, n)`.
+pub const PTY_SLAVE_MAJOR: u32 = 136;
+/// A master is `/dev/ptmx`'s device, `(5, 2)`, as on Linux.
+pub const PTMX_MAJOR: u32 = 5;
+pub const PTMX_MINOR: usize = 2;
 
 /// The single producer of a character device's `fstat`: it has no
 /// [`FileStat`](crate::vfs::FileStat) to go through `FileStat::fill_user_stat`,

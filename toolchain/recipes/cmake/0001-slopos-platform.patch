@@ -1,0 +1,102 @@
+diff --git a/Modules/Platform/SlopOS-Clang-ASM.cmake b/Modules/Platform/SlopOS-Clang-ASM.cmake
+new file mode 100644
+index 0000000..ec53c44
+--- /dev/null
++++ b/Modules/Platform/SlopOS-Clang-ASM.cmake
+@@ -0,0 +1,2 @@
++include(Platform/SlopOS-Clang)
++__slopos_compiler_clang(ASM)
+diff --git a/Modules/Platform/SlopOS-Clang-C.cmake b/Modules/Platform/SlopOS-Clang-C.cmake
+new file mode 100644
+index 0000000..42c623c
+--- /dev/null
++++ b/Modules/Platform/SlopOS-Clang-C.cmake
+@@ -0,0 +1,2 @@
++include(Platform/SlopOS-Clang)
++__slopos_compiler_clang(C)
+diff --git a/Modules/Platform/SlopOS-Clang-CXX.cmake b/Modules/Platform/SlopOS-Clang-CXX.cmake
+new file mode 100644
+index 0000000..d438b2e
+--- /dev/null
++++ b/Modules/Platform/SlopOS-Clang-CXX.cmake
+@@ -0,0 +1,2 @@
++include(Platform/SlopOS-Clang)
++__slopos_compiler_clang(CXX)
+diff --git a/Modules/Platform/SlopOS-Clang.cmake b/Modules/Platform/SlopOS-Clang.cmake
+new file mode 100644
+index 0000000..f6fa3b0
+--- /dev/null
++++ b/Modules/Platform/SlopOS-Clang.cmake
+@@ -0,0 +1,15 @@
++include_guard()
++
++macro(__slopos_compiler_clang lang)
++  set(CMAKE_SHARED_LIBRARY_RUNTIME_${lang}_FLAG "-Wl,-rpath,")
++  set(CMAKE_SHARED_LIBRARY_RUNTIME_${lang}_FLAG_SEP ":")
++  set(CMAKE_SHARED_LIBRARY_RPATH_LINK_${lang}_FLAG "-Wl,-rpath-link,")
++  set(CMAKE_SHARED_LIBRARY_SONAME_${lang}_FLAG "-Wl,-soname,")
++  set(CMAKE_EXE_EXPORTS_${lang}_FLAG "-Wl,--export-dynamic")
++  foreach(type SHARED_LIBRARY SHARED_MODULE EXE)
++    set(CMAKE_${type}_LINK_STATIC_${lang}_FLAGS "-Wl,-Bstatic")
++    set(CMAKE_${type}_LINK_DYNAMIC_${lang}_FLAGS "-Wl,-Bdynamic")
++  endforeach()
++  set(CMAKE_LINK_GROUP_USING_RESCAN "LINKER:--start-group" "LINKER:--end-group")
++  set(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
++endmacro()
+diff --git a/Modules/Platform/SlopOS-Initialize.cmake b/Modules/Platform/SlopOS-Initialize.cmake
+new file mode 100644
+index 0000000..4e502aa
+--- /dev/null
++++ b/Modules/Platform/SlopOS-Initialize.cmake
+@@ -0,0 +1,2 @@
++set(SLOPOS 1)
++set(UNIX 1)
+diff --git a/Modules/Platform/SlopOS.cmake b/Modules/Platform/SlopOS.cmake
+new file mode 100644
+index 0000000..fcfde25
+--- /dev/null
++++ b/Modules/Platform/SlopOS.cmake
+@@ -0,0 +1,7 @@
++# dlopen and friends are libc.so's own.
++set(CMAKE_DL_LIBS "")
++set(CMAKE_SHARED_LIBRARY_RPATH_ORIGIN_TOKEN "\$ORIGIN")
++set(CMAKE_SHARED_LIBRARY_SUFFIX ".so")
++set(CMAKE_PLATFORM_USES_PATH_WHEN_NO_SONAME 1)
++
++include(Platform/UnixPaths)
+diff --git a/Utilities/cmlibuv/CMakeLists.txt b/Utilities/cmlibuv/CMakeLists.txt
+index f095c30..1308102 100644
+--- a/Utilities/cmlibuv/CMakeLists.txt
++++ b/Utilities/cmlibuv/CMakeLists.txt
+@@ -327,6 +327,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
+     )
+ endif()
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL "SlopOS")
++  list(APPEND uv_headers
++    include/uv/posix.h
++    )
++  list(APPEND uv_sources
++    src/unix/posix-hrtime.c
++    src/unix/posix-poll.c
++    src/unix/no-fsevents.c
++    src/unix/no-proctitle.c
++    )
++endif()
++
+ include_directories(
+   ${uv_includes}
+   ${KWSYS_HEADER_ROOT}
+diff --git a/Utilities/cmlibuv/include/uv/unix.h b/Utilities/cmlibuv/include/uv/unix.h
+index 93daee7..22d83d2 100644
+--- a/Utilities/cmlibuv/include/uv/unix.h
++++ b/Utilities/cmlibuv/include/uv/unix.h
+@@ -75,6 +75,8 @@
+       defined(__QNX__)    || \
+       defined(__GNU__)
+ # include "posix.h"
++#elif defined(__slopos__)
++# include "posix.h"
+ #endif
+ 
+ #ifndef NI_MAXHOST

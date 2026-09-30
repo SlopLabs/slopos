@@ -9,7 +9,7 @@ pub use crate::syscall::core_handlers::{
     syscall_clock_gettime, syscall_clock_settime, syscall_cpu_info, syscall_ctty_read,
     syscall_efivar_get, syscall_efivar_set, syscall_exit, syscall_exit_group, syscall_klog_write,
     syscall_nanosleep, syscall_percpu_stats, syscall_process_list, syscall_reboot,
-    syscall_sched_yield, syscall_sys_info, syscall_uname,
+    syscall_sched_yield, syscall_sys_info, syscall_sysinfo, syscall_uname,
 };
 use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
@@ -19,11 +19,11 @@ use crate::syscall::fs::{
     syscall_getdents64, syscall_ioctl, syscall_link, syscall_linkat, syscall_lseek, syscall_lstat,
     syscall_mkdir, syscall_mkdirat, syscall_mknod, syscall_mknodat, syscall_mount,
     syscall_newfstatat, syscall_open, syscall_openat, syscall_pipe, syscall_pipe2, syscall_poll,
-    syscall_pread64, syscall_pwrite64, syscall_read, syscall_readlink, syscall_readlinkat,
-    syscall_readv, syscall_rename, syscall_renameat, syscall_rmdir, syscall_select, syscall_stat,
-    syscall_statfs, syscall_symlink, syscall_symlinkat, syscall_sync, syscall_truncate,
-    syscall_umount2, syscall_unlink, syscall_unlinkat, syscall_utimensat, syscall_write,
-    syscall_writev,
+    syscall_ppoll, syscall_pread64, syscall_pselect6, syscall_pwrite64, syscall_read,
+    syscall_readlink, syscall_readlinkat, syscall_readv, syscall_rename, syscall_renameat,
+    syscall_rmdir, syscall_select, syscall_stat, syscall_statfs, syscall_symlink,
+    syscall_symlinkat, syscall_sync, syscall_truncate, syscall_umount2, syscall_unlink,
+    syscall_unlinkat, syscall_utimensat, syscall_write, syscall_writev,
 };
 use crate::syscall::keymap_handlers::{syscall_keymap_get_name, syscall_keymap_load};
 pub use crate::syscall::memory_handlers::{
@@ -42,20 +42,21 @@ use crate::syscall::net_handlers::{
 };
 use crate::syscall::net_query_handlers::syscall_net_query;
 pub use crate::syscall::pidfd_handlers::syscall_pidfd_open;
+use crate::syscall::priority_handlers::{syscall_getpriority, syscall_setpriority};
 pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_execve, syscall_fchdir, syscall_fork,
     syscall_futex, syscall_getcpu, syscall_getcwd, syscall_getegid, syscall_geteuid,
     syscall_getgid, syscall_getpgid, syscall_getpid, syscall_getppid, syscall_getsid,
     syscall_gettid, syscall_getuid, syscall_prlimit64, syscall_sched_getaffinity,
     syscall_sched_setaffinity, syscall_setpgid, syscall_setsid, syscall_sigdefault,
-    syscall_spawn_path, syscall_vhangup, syscall_wait4,
+    syscall_spawn_path, syscall_umask, syscall_vhangup, syscall_wait4,
 };
 pub use crate::syscall::ring_handlers::{
     syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
 };
 use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigpending, syscall_rt_sigprocmask,
-    syscall_rt_sigqueueinfo, syscall_rt_sigreturn, syscall_rt_sigtimedwait,
+    syscall_rt_sigqueueinfo, syscall_rt_sigreturn, syscall_rt_sigsuspend, syscall_rt_sigtimedwait,
     syscall_rt_tgsigqueueinfo, syscall_sigaltstack, syscall_tgkill,
 };
 pub use crate::syscall::signalfd_handlers::syscall_signalfd4;
@@ -171,6 +172,8 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_READLINK]          => syscall_readlink,          "readlink";
     [SYSCALL_CHMOD]             => syscall_chmod,             "chmod";
     [SYSCALL_FCHMOD]            => syscall_fchmod,            "fchmod";
+    [SYSCALL_SYSINFO]           => syscall_sysinfo,           "sysinfo";
+    [SYSCALL_UMASK]             => syscall_umask,             "umask";
     [SYSCALL_GETUID]            => syscall_getuid,            "getuid";
     [SYSCALL_GETGID]            => syscall_getgid,            "getgid";
     [SYSCALL_GETEUID]           => syscall_geteuid,           "geteuid";
@@ -182,11 +185,14 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_GETSID]            => syscall_getsid,            "getsid";
     [SYSCALL_RT_SIGPENDING]     => syscall_rt_sigpending,     "rt_sigpending";
     [SYSCALL_RT_SIGTIMEDWAIT]   => syscall_rt_sigtimedwait,   "rt_sigtimedwait";
+    [SYSCALL_RT_SIGSUSPEND]     => syscall_rt_sigsuspend,     "rt_sigsuspend";
     [SYSCALL_RT_SIGQUEUEINFO]   => syscall_rt_sigqueueinfo,   "rt_sigqueueinfo";
     [SYSCALL_SIGALTSTACK]       => syscall_sigaltstack,       "sigaltstack";
     [SYSCALL_MKNOD]             => syscall_mknod,             "mknod";
     [SYSCALL_STATFS]            => syscall_statfs,            "statfs";
     [SYSCALL_FSTATFS]           => syscall_fstatfs,           "fstatfs";
+    [SYSCALL_GETPRIORITY]       => syscall_getpriority,       "getpriority";
+    [SYSCALL_SETPRIORITY]       => syscall_setpriority,       "setpriority";
     [SYSCALL_VHANGUP]           => syscall_vhangup,           "vhangup";
     [SYSCALL_ARCH_PRCTL]        => syscall_arch_prctl,        "arch_prctl";
     [SYSCALL_SYNC]              => syscall_sync,              "sync";
@@ -213,6 +219,8 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_READLINKAT]        => syscall_readlinkat,        "readlinkat";
     [SYSCALL_FCHMODAT]          => syscall_fchmodat,          "fchmodat";
     [SYSCALL_FACCESSAT]         => syscall_faccessat,         "faccessat";
+    [SYSCALL_PSELECT6]          => syscall_pselect6,          "pselect6";
+    [SYSCALL_PPOLL]             => syscall_ppoll,             "ppoll";
     [SYSCALL_UTIMENSAT]         => syscall_utimensat,         "utimensat";
     [SYSCALL_ACCEPT4]           => syscall_accept4,           "accept4";
     [SYSCALL_SIGNALFD4]         => syscall_signalfd4,         "signalfd4";
@@ -325,7 +333,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 163;
+pub const SYSCALL_ENTRY_COUNT: usize = 170;
 
 /// The recorded shape of the classification.
 ///
@@ -335,9 +343,9 @@ pub const SYSCALL_ENTRY_COUNT: usize = 163;
 /// construction and the assert below holds it there.
 const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::Unimplemented, 0),
-    (Capability::NoneSelf, 48),
-    (Capability::NoneFd, 75),
-    (Capability::NoneRelation, 17),
+    (Capability::NoneSelf, 51),
+    (Capability::NoneFd, 77),
+    (Capability::NoneRelation, 19),
     (Capability::Power, 3),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),

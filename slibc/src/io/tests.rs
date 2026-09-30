@@ -120,7 +120,8 @@ pub fn run_io_tests() -> (u32, u32) {
         shim::access_cstr(b"/nonexistent_path_xyz\0", 0) == -1
     );
 
-    check!("umask_returns_0022", shim::umask(0) == 0o022);
+    let mask = shim::umask(0o077);
+    check!("umask_answers_the_old_mask", shim::umask(mask) == 0o077);
 
     check!(
         "chmod_nonexistent_fails",

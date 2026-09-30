@@ -1,3 +1,4 @@
+use crate::vfs::canon::CanonPath;
 use crate::vfs::mount::{MAX_MOUNTS, MountTable, with_mount_table};
 use crate::vfs::path::{
     RESOLVE_FOLLOW, RESOLVE_NOFOLLOW_FINAL, ResolvedPath, resolve_parent_at, resolve_path,
@@ -426,7 +427,10 @@ pub fn vfs_rmdir_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
     // after a symlink names a different directory, and the mount table is
     // keyed on the real one.
     match resolve_path_canon_at(path, cwd, RESOLVE_NOFOLLOW_FINAL) {
-        Ok((_, canon)) if crate::vfs::mount::mount_at(canon.as_bytes()).is_some() => {
+        Ok((resolved, canon))
+            if crate::vfs::mount::mount_at(canon.as_bytes()).is_some()
+                || holds_pinned_mount(&resolved, &canon) =>
+        {
             return Err(VfsError::Busy);
         }
         Ok(_) | Err(VfsError::NotFound) => {}
@@ -488,6 +492,22 @@ pub fn vfs_readlink_at(path: &[u8], cwd: &[u8], buf: &mut [u8]) -> VfsResult<usi
     resolved.fs.readlink(resolved.inode, buf)
 }
 
+/// Whether moving what a walk reached would move a pinned mount point or a
+/// directory on its path: by the path the walk ends on, or by identity for
+/// one reached through another mount of the same filesystem.
+fn holds_pinned_mount(resolved: &ResolvedPath, canon: &CanonPath) -> bool {
+    crate::vfs::mount::leads_to_pinned_mount(canon.as_bytes())
+        || crate::vfs::mount::is_pinned_dir(resolved.fs, resolved.inode)
+}
+
+fn leads_to_pinned_mount_at(path: &[u8], cwd: &[u8]) -> VfsResult<bool> {
+    match resolve_path_canon_at(path, cwd, RESOLVE_NOFOLLOW_FINAL) {
+        Ok((resolved, canon)) => Ok(holds_pinned_mount(&resolved, &canon)),
+        Err(VfsError::NotFound) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
     vfs_rename_at(old_path, b"/", new_path, b"/")
 }
@@ -505,6 +525,9 @@ pub fn vfs_rename_at(
         || path_is_sealed_at(new_path, new_cwd, RESOLVE_NOFOLLOW_FINAL)
     {
         return Err(VfsError::PermissionDenied);
+    }
+    if leads_to_pinned_mount_at(old_path, old_cwd)? {
+        return Err(VfsError::Busy);
     }
     let (old_parent, old_name) = resolve_parent_at(old_path, old_cwd)?;
     let (new_parent, new_name) = resolve_parent_at(new_path, new_cwd)?;

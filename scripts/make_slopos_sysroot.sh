@@ -61,6 +61,7 @@ PIN="$REPO_ROOT/$TP_PIN_REL"
 OVERLAY="$REPO_ROOT/$TP_OVERLAY_REL"
 SYSROOT="$REPO_ROOT/$TP_SYSROOT_REL"
 STAMP="$SYSROOT/$TP_STAMP_NAME"
+STD_STAMP="$SYSROOT/$TP_LIBRARY_REL/$TP_STD_STAMP_NAME"
 
 [ -d "$OVERLAY" ] || die "missing $TP_OVERLAY_REL/ — the fork overlay (PIN + patches) is tracked in-repo; check out the tree that carries it"
 [ -f "$PIN" ] || die "missing $TP_PIN_REL — the fork overlay (PIN + patches) is tracked in-repo; check out the tree that carries it"
@@ -78,6 +79,7 @@ if [ "$PIN_CHANNEL" != "$CHANNEL" ]; then
 fi
 
 STAMP_WANT="$(tp_stamp "$REPO_ROOT")"
+STD_STAMP_WANT="$(tp_std_stamp "$REPO_ROOT")"
 
 # ---------------------------------------------------------------------------
 # Registration. `rustup toolchain link` is a symlink, so an already-correct
@@ -104,6 +106,8 @@ register() {
 # points at builds nothing.
 # ---------------------------------------------------------------------------
 if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$STAMP_WANT" ]; then
+    [ "$(cat "$STD_STAMP" 2>/dev/null)" = "$STD_STAMP_WANT" ] ||
+        printf '%s\n' "$STD_STAMP_WANT" >"$STD_STAMP"
     register
     echo "$SELF: $TP_SYSROOT_REL up to date, linked as +$TP_TOOLCHAIN_NAME (stamp $STAMP_WANT)"
     exit 0
@@ -206,6 +210,7 @@ fi
 # ---------------------------------------------------------------------------
 # Stamp last: a tree that failed halfway through must not look finished.
 # ---------------------------------------------------------------------------
+printf '%s\n' "$STD_STAMP_WANT" >"$STD_STAMP"
 printf '%s\n' "$STAMP_WANT" > "$STAMP"
 register
 

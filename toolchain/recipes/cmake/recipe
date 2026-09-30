@@ -1,0 +1,33 @@
+# CMake: what the C++ runtime configures with in the guest, and the build
+# system of most C and C++ projects. Its libuv chooses an event loop by system
+# name and has none for one it does not know, so 0001-slopos-platform.patch
+# names SlopOS there, taking the poll loop QNX and GNU/Hurd take, and adds
+# `Modules/Platform/SlopOS*.cmake`, the files of `toolchain/cmake/Platform/`.
+#
+#   CMAKE_USE_SYSTEM_CURL, _ZLIB   the curl and zlib recipes rather than the
+#                                  copies CMake bundles.
+#   CMAKE_DOC_DIR                  under share/, as every other recipe's.
+#   BUILD_TESTING                  off: the suite is not installed.
+version=4.4.3
+url=https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3.tar.gz
+sha256=c46400618b4f1f2b43507f24fb22f3ae830c3416cf23b776e16e1d413aa892f0
+license=BSD-3-Clause
+license_file=LICENSE.rst
+license_file=Source/kwsys/Copyright.txt
+license_file=Utilities/cmbzip2/LICENSE
+license_file=Utilities/cmexpat/COPYING
+license_file=Utilities/cmjsoncpp/LICENSE
+license_file=Utilities/cmlibarchive/COPYING
+license_file=Utilities/cmliblzma/COPYING
+license_file=Utilities/cmlibrhash/COPYING
+license_file=Utilities/cmlibuv/LICENSE
+license_file=Utilities/cmzstd/LICENSE
+template=cmake
+depends=curl zlib
+patch=0001-slopos-platform.patch
+program=bin/cmake
+program=bin/ctest
+arg=-DCMAKE_USE_SYSTEM_CURL=ON
+arg=-DCMAKE_USE_SYSTEM_ZLIB=ON
+arg=-DCMAKE_DOC_DIR=share/doc/cmake-4.4
+arg=-DBUILD_TESTING=OFF

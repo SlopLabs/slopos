@@ -174,6 +174,18 @@ impl UserFsStat {
     }
 }
 
+/// The directories of a boot's base, served from the boot module and mounted
+/// read-only over whatever `/` is, so the system is the boot slot's and the
+/// root holds what the machine wrote.
+pub const BASE_DIRS: [&str; 6] = [
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/usr/bin",
+    "/usr/share",
+    "/etc/ssl",
+];
+
 pub const AT_FDCWD: i32 = -100;
 pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
 pub const AT_REMOVEDIR: u32 = 0x200;

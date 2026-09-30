@@ -38,6 +38,8 @@ void rewinddir(DIR *dirp);
 int dirfd(DIR *dirp);
 long telldir(DIR *dirp);
 void seekdir(DIR *dirp, long loc);
+int scandir(const char *path, struct dirent ***namelist, int (*filter)(const struct dirent *), int (*compar)(const struct dirent **, const struct dirent **));
+int alphasort(const struct dirent **a, const struct dirent **b);
 
 #ifdef __cplusplus
 }

@@ -27,11 +27,14 @@ llvm_sha256=0b58557a6d32ceee97c8d533a59b9212d87e0fc4d2833924eb6c611247db2f2a
 # the functional gate (`cxx_test` throws across a `dlopen` boundary and
 # `cxx_static_probe` links the archives), not this line.
 clang_major_min=18
-clang_major_tested=18 22
+clang_major_tested=18 22 23
 
 # The SlopOS port of llvm-project: the two places LLVM dispatches on the OS
 # without a default a new one can take, plus the Triple and clang target that
-# make `__slopos__` a macro a cross-built compiler predefines. Upstream-shaped
+# make `__slopos__` a macro a cross-built compiler predefines, and the
+# `config.guess` entry that names a SlopOS host to the runtimes' configure,
+# which the guest's build of them runs. Upstream-shaped
 # and upstream-sized — it is the diff a tier-3 OS port PR carries.
 patch_sha256=toolchain/llvm/0001-slopos-support.patch:9027a833fafa9cdeeb4f2268e153498856733f0898a14e9de311e248e01055fb
 patch_sha256=toolchain/llvm/0002-slopos-clang-driver.patch:610f94c724fd5c8cf17e0c3adb28e951af1d427b494d3de9e726782cc1bdc924
+patch_sha256=toolchain/llvm/0003-slopos-config-guess.patch:a10a102994900faa0ff70c92c4e918556be40d6d5a4d04ae549ce799feebc187

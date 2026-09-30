@@ -199,7 +199,7 @@ trap - EXIT INT TERM
 
 KEEP=()
 [ ! -f "$SRC.prev/src/llvm-project/.slopos-port-stamp" ] || KEEP+=(--exclude=/src/llvm-project)
-[ ! -f "$SRC.prev/library/.slopos-std-stamp" ] || KEEP+=(--exclude=/library)
+[ ! -f "$SRC.prev/library/$TP_STD_STAMP_NAME" ] || KEEP+=(--exclude=/library)
 ts_carry_over "$SRC" "${KEEP[@]}" || die "could not carry $TP_RUSTC_SRC_REL over the previous tree"
 
 printf '%s\n' "$STAMP_WANT" > "$STAMP"

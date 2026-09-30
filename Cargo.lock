@@ -237,6 +237,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-initramfs"
+version = "0.1.0"
+
+[[package]]
 name = "slopos-kallsyms"
 version = "0.1.0"
 

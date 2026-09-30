@@ -173,7 +173,7 @@ fn walk(path: &[u8], flags: u32) -> VfsResult<Step> {
     let root = mount_at(b"/").ok_or(VfsError::NotFound)?;
     let mut cur = Ancestor {
         fs: root.fs,
-        inode: root.fs.root_inode(),
+        inode: root.root,
         mount_flags: root.flags,
         canon_len: 1,
     };
@@ -210,7 +210,7 @@ fn walk(path: &[u8], flags: u32) -> VfsResult<Step> {
             }
             cur = Ancestor {
                 fs: crossed.fs,
-                inode: crossed.fs.root_inode(),
+                inode: crossed.root,
                 mount_flags: crossed.flags,
                 canon_len: canon.len(),
             };

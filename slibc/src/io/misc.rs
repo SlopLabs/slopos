@@ -21,10 +21,10 @@ pub unsafe extern "C" fn access(path: *const u8, mode: i32) -> i32 {
     }
 }
 
-/// Stub: the mask is ignored; always reports 0o022.
+/// `umask(2)`: set the process's file creation mask, answering the old one.
 #[unsafe(no_mangle)]
-pub extern "C" fn umask(_mask: u32) -> u32 {
-    0o022
+pub extern "C" fn umask(mask: u32) -> u32 {
+    Sys::umask(mask)
 }
 
 #[unsafe(no_mangle)]
@@ -242,4 +242,21 @@ pub unsafe extern "C" fn ttyname_r(fd: c_int, buf: *mut c_char, buflen: usize) -
     }
 
     ENODEV.raw()
+}
+
+/// The longest answer [`ttyname_r`] gives: a name in `/dev/pts`.
+const TTYNAME_MAX: usize = b"/dev/pts/".len() + slopos_abi::fs::USER_NAME_MAX + 1;
+static mut TTYNAME: [u8; TTYNAME_MAX] = [0; TTYNAME_MAX];
+
+/// `ttyname(3)`: [`ttyname_r`] into static storage; `NULL` with `errno` set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ttyname(fd: c_int) -> *mut c_char {
+    let buf = (&raw mut TTYNAME).cast::<c_char>();
+    match ttyname_r(fd, buf, TTYNAME_MAX) {
+        0 => buf,
+        rc => {
+            errno_set(rc);
+            core::ptr::null_mut()
+        }
+    }
 }

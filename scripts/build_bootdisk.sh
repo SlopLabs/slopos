@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # Build a UEFI boot disk: a GPT image whose only partition is a FAT32 ESP
-# carrying Limine and two kernel slots, `/boot/a` and `/boot/b`, which the
-# guest installs into and switches between by rewriting `/limine.conf`.
+# carrying Limine and two slots, `/boot/a` and `/boot/b`, each a kernel and the
+# base image it boots with, which the guest installs into and switches between
+# by rewriting `/limine.conf`.
 #
-# Usage: build_bootdisk.sh <out.img> <kernel.elf> <initramfs.cpio> <cmdline>
+# Usage: build_bootdisk.sh <out.img> <kernel.elf> <base.cpio> <cmdline>
 #
 # Environment:
 #   LIMINE_DIR - path to Limine directory (default: third_party/limine)
@@ -16,14 +17,14 @@ SELF="build_bootdisk"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-USAGE="Usage: build_bootdisk.sh <out.img> <kernel.elf> <initramfs.cpio> <cmdline>"
+USAGE="Usage: build_bootdisk.sh <out.img> <kernel.elf> <base.cpio> <cmdline>"
 if [ "$#" -ne 4 ]; then
     echo "$USAGE" >&2
     exit 2
 fi
 OUTPUT="$1"
 KERNEL="$2"
-INITRAMFS="$3"
+BASE="$3"
 CMDLINE="$4"
 
 LIMINE_DIR="${LIMINE_DIR:-${REPO_ROOT}/third_party/limine}"
@@ -46,7 +47,7 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
-for input in "$KERNEL" "$INITRAMFS"; do
+for input in "$KERNEL" "$BASE"; do
     if [ ! -f "$input" ]; then
         echo "$SELF: $input not found. Build it first." >&2
         exit 1
@@ -83,7 +84,7 @@ CONF="${STAGING}/limine.conf"
         printf '    protocol: limine\n'
         printf '    path: boot():/boot/%s/kernel.elf\n' "$slot"
         printf '    cmdline: %s\n' "${CMDLINE:+$CMDLINE }slot=$slot"
-        printf '    module_path: boot():/boot/initramfs.cpio\n'
+        printf '    module_path: boot():/boot/%s/base.img\n' "$slot"
         printf '    module_string: initramfs\n'
         printf '    resolution: %sx%s\n' "$fb_w" "$fb_h"
     done
@@ -94,7 +95,7 @@ CONF="${STAGING}/limine.conf"
         printf '    protocol: limine\n'
         printf '    path: boot():/boot/a/kernel.elf\n'
         printf '    cmdline: %s\n' "${CMDLINE:+$CMDLINE }slot=bad panic=reboot panic.boot=on"
-        printf '    module_path: boot():/boot/initramfs.cpio\n'
+        printf '    module_path: boot():/boot/a/base.img\n'
         printf '    module_string: initramfs\n'
         printf '    resolution: %sx%s\n' "$fb_w" "$fb_h"
     fi
@@ -108,9 +109,10 @@ export MTOOLS_SKIP_CHECK=1
 mmd -i "$ESP" ::/EFI ::/EFI/BOOT ::/boot ::/boot/a ::/boot/b
 mcopy -i "$ESP" "$LIMINE_DIR/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$ESP" "$CONF" ::/limine.conf
-mcopy -i "$ESP" "$KERNEL" ::/boot/a/kernel.elf
-mcopy -i "$ESP" "$KERNEL" ::/boot/b/kernel.elf
-mcopy -i "$ESP" "$INITRAMFS" ::/boot/initramfs.cpio
+for slot in a b; do
+    mcopy -i "$ESP" "$KERNEL" "::/boot/$slot/kernel.elf"
+    mcopy -i "$ESP" "$BASE" "::/boot/$slot/base.img"
+done
 # Limine's BSD-2-Clause notice travels with the binary, as on the ISO.
 mcopy -i "$ESP" "$LIMINE_DIR/LICENSE" ::/boot/LICENSE.limine
 mcopy -i "$ESP" "$REPO_ROOT/NOTICE.md" ::/boot/NOTICE.md

@@ -1,0 +1,47 @@
+# GNU Bash: what the tree's bash scripts run under in the guest, the userland
+# build and the C++ runtime's among them.
+#
+# 5.3 as released: the bash53-NNN fixes upstream publishes are patches, and a
+# recipe carries only one that teaches a project the target.
+#
+#   without-bash-malloc   bash's own allocator grows the heap with sbrk.
+#   disable-nls           there are no message catalogues.
+#   disable-readline      line editing needs a termcap; the one bash bundles
+#                         duplicates symbols readline defines, which links
+#                         only where readline defers to ncurses. That waits
+#                         for ncurses and a terminfo entry for TERM=slopos;
+#                         the interactive shell is SlopOS's own.
+#   bash_cv_*             what the configure tests that run a program would
+#                         find, which a cross build cannot: facts about slibc
+#                         and the kernel. WEXITSTATUS is the status's second
+#                         byte, and there is no /dev/fd or /dev/stdin.
+version=5.3
+url=https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz
+sha256=0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba
+license=GPL-3.0-or-later
+license_file=COPYING
+template=autotools
+program=bin/bash
+arg=--without-bash-malloc
+arg=--disable-nls
+arg=--disable-readline
+arg=bash_cv_job_control_missing=present
+arg=bash_cv_sys_named_pipes=present
+arg=bash_cv_func_sigsetjmp=present
+arg=bash_cv_getcwd_malloc=yes
+arg=bash_cv_printf_a_format=yes
+arg=bash_cv_must_reinstall_sighandlers=no
+arg=bash_cv_dup2_broken=no
+arg=bash_cv_opendir_not_robust=no
+arg=bash_cv_pgrp_pipe=no
+arg=bash_cv_ulimit_maxfds=yes
+arg=bash_cv_unusable_rtsigs=no
+arg=bash_cv_func_strcoll_broken=no
+arg=bash_cv_type_rlimit=rlim_t
+arg=bash_cv_func_snprintf=yes
+arg=bash_cv_func_vsnprintf=yes
+arg=bash_cv_wcontinued_broken=no
+arg=bash_cv_wexitstatus_offset=8
+arg=bash_cv_getenv_redef=no
+arg=bash_cv_dev_fd=absent
+arg=bash_cv_dev_stdin=absent

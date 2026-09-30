@@ -196,6 +196,55 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
+    fn ppoll(
+        fds: *mut u8,
+        nfds: u32,
+        timeout: *mut Timespec,
+        sigmask: *const u64,
+    ) -> Result<i32, Errno> {
+        let ret = unsafe {
+            syscall5(
+                SYSCALL_PPOLL,
+                fds as u64,
+                nfds as u64,
+                timeout as u64,
+                sigmask as u64,
+                crate::signal::SIGSET_SIZE as u64,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as i32)
+    }
+
+    fn pselect6(
+        nfds: i32,
+        readfds: *mut u8,
+        writefds: *mut u8,
+        exceptfds: *mut u8,
+        timeout: *mut Timespec,
+        sigmask: *const u64,
+    ) -> Result<i32, Errno> {
+        let pair = [sigmask as u64, crate::signal::SIGSET_SIZE as u64];
+        let sig = if sigmask.is_null() {
+            0
+        } else {
+            pair.as_ptr() as u64
+        };
+        let ret = unsafe {
+            syscall6(
+                SYSCALL_PSELECT6,
+                nfds as u64,
+                readfds as u64,
+                writefds as u64,
+                exceptfds as u64,
+                timeout as u64,
+                sig,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as i32)
+    }
+
     fn ioctl(fd: i32, request: u64, arg: u64) -> Result<i32, Errno> {
         let ret = unsafe { syscall3(SYSCALL_IOCTL, fd as u64, request, arg) };
         let val = to_result(ret)?;
@@ -610,6 +659,10 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
+    fn umask(mask: u32) -> u32 {
+        (unsafe { syscall1(SYSCALL_UMASK, u64::from(mask)) }) as u32
+    }
+
     fn chdir(path: *const u8) -> Result<(), Errno> {
         let ret = unsafe { syscall1(SYSCALL_CHDIR, path as u64) };
         to_result(ret)?;
@@ -787,6 +840,14 @@ impl Pal for Sys {
         };
         to_result(ret)?;
         Ok(())
+    }
+
+    fn rt_sigsuspend(set: *const u64, sigsetsize: usize) -> Errno {
+        let ret = unsafe { syscall2(SYSCALL_RT_SIGSUSPEND, set as u64, sigsetsize as u64) };
+        match to_result(ret) {
+            Ok(_) => crate::errno::EINTR,
+            Err(e) => e,
+        }
     }
 
     fn rt_sigpending(set: *mut u64, sigsetsize: usize) -> Result<(), Errno> {
@@ -1118,6 +1179,31 @@ impl Pal for Sys {
 
     fn uname(out: *mut UserUtsname) -> Result<(), Errno> {
         let ret = unsafe { syscall1(SYSCALL_UNAME, out as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn sysinfo(out: *mut Sysinfo) -> Result<(), Errno> {
+        let ret = unsafe { syscall1(SYSCALL_SYSINFO, out as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn getpriority(which: i32, who: u32) -> Result<i32, Errno> {
+        let ret = unsafe { syscall2(SYSCALL_GETPRIORITY, which as u64, who as u64) };
+        let val = to_result(ret)?;
+        Ok(val as i32)
+    }
+
+    fn setpriority(which: i32, who: u32, nice: i32) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall3(
+                SYSCALL_SETPRIORITY,
+                which as u64,
+                who as u64,
+                nice as i64 as u64,
+            )
+        };
         to_result(ret)?;
         Ok(())
     }

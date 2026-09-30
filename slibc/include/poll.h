@@ -8,6 +8,7 @@
 #define _SLIBC_POLL_H
 
 #include <sys/types.h>
+#include <signal.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,7 @@ struct pollfd {
 #define POLLWRNORM (0x100)
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+int ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout, const sigset_t *sigmask);
 
 #ifdef __cplusplus
 }

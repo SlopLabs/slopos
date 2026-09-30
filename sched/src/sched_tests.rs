@@ -8213,3 +8213,32 @@ slopos_testing::stest!(
     name = test_aging_never_holds_back_kernel_io,
     suite = sched_core
 );
+
+/// A minute of one task brings the one-minute average to `1 - 1/e`; a steady
+/// load is reached on every average and an idle machine decays to 0 on every
+/// one, with no step short of either where the rounding would stall it.
+pub fn test_load_average_damping() -> TestResult {
+    use super::loadavg::{DECAY, FIXED_1, damp};
+    let mut after_a_minute = 0;
+    for _ in 0..12 {
+        after_a_minute = damp(after_a_minute, DECAY[0], FIXED_1);
+    }
+    // 2048 * (1 - 1/e) = 1294.6.
+    let one_minute = (1290..=1300).contains(&after_a_minute);
+    let settles = DECAY.iter().all(|&decay| {
+        let (mut rising, mut falling) = (0, FIXED_1);
+        for _ in 0..10_000 {
+            rising = damp(rising, decay, FIXED_1);
+            falling = damp(falling, decay, 0);
+        }
+        rising == FIXED_1 && falling == 0
+    });
+    if one_minute && settles {
+        TestResult::Pass
+    } else {
+        klog_info!("loadavg: after a minute {after_a_minute}, settles {settles}");
+        TestResult::Fail
+    }
+}
+
+slopos_testing::stest!(name = test_load_average_damping, suite = sched_core);

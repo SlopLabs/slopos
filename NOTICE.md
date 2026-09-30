@@ -308,6 +308,29 @@ C library under its MIT option (above). `scripts/check_recipes.sh` fails the
 gates when an object a `GPL-2.0-only` recipe installs reaches a library under
 a licence that code cannot be combined with.
 
+The programs the guest's own builds run are built the same way, each from
+its pinned release tarball:
+
+- GNU Bash (`toolchain/recipes/bash/`): © the Free Software Foundation,
+  `GPL-3.0-or-later`, with the glob and tilde code its tarball bundles under
+  the same licence; it is built without readline.
+- Ninja (`toolchain/recipes/ninja/`): © Google Inc. and the Ninja
+  contributors, `Apache-2.0`.
+- CMake (`toolchain/recipes/cmake/`): © Kitware, Inc. and the CMake
+  contributors, `BSD-3-Clause`, as is KWSys, which it carries in
+  `Source/kwsys/`. The build also compiles the libraries CMake bundles in
+  `Utilities/`, each under its own licence, which the recipe installs beside
+  CMake's: libuv (`MIT`), libarchive (`BSD-2-Clause`), zstd (`BSD-3-Clause`),
+  liblzma from XZ Utils (`0BSD`), bzip2 (its own BSD-style licence), Expat
+  (`MIT`), JsonCpp (`MIT`, or public domain where that is recognised) and
+  RHash (`0BSD`). It links the curl and zlib recipes rather than its bundled
+  copies of them. `toolchain/recipes/cmake/0001-slopos-platform.patch` adds
+  SlopOS to CMake's bundled libuv and adds `Modules/Platform/SlopOS*.cmake`,
+  the files of `toolchain/cmake/Platform/`, which the cmake recipes also
+  configure with: © 2025–2026 The SlopOS Authors, `BSD-3-Clause`, like the
+  project the patch is written to be contributed to, the platform files
+  following the shape of CMake's own `Modules/Platform/SerenityOS*.cmake`.
+
 `tools/kallsyms`, which builds the kernel's symbol table on the host and in
 the guest, carries a Rust v0 symbol demangler derived from LLVM's
 `llvm/lib/Demangle/RustDemangle.cpp`, and its test data is LLVM's

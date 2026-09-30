@@ -14,7 +14,10 @@ pub use init::{
     vfs_init_builtin_filesystems, vfs_init_builtin_filesystems_with, vfs_is_initialized,
     vfs_register_block_claim,
 };
-pub use mount::{MAX_MOUNTS, MOUNT_RDONLY, Mounted, mount, mount_at, unmount, with_mount_table};
+pub use mount::{
+    MAX_MOUNTS, MOUNT_PINNED, MOUNT_RDONLY, Mounted, mount, mount_at, mount_subtree,
+    under_pinned_mount, unmount, with_mount_table,
+};
 pub use ops::{
     ListCursor, VfsHandle, VfsOpenFlags, vfs_link, vfs_link_at, vfs_list, vfs_list_from,
     vfs_list_from_at, vfs_mkdir, vfs_mkdir_at, vfs_mknod_at, vfs_open, vfs_open_flags,

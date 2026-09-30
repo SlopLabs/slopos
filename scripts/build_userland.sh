@@ -7,15 +7,16 @@ set -euo pipefail
 #
 # With --test:    also builds userland test binaries (requires testbins feature)
 #
+# Runs on the Linux host and in the guest alike. What only the host does,
+# making the toolchain, lives in the justfile.
+#
 # Environment:
-#   CARGO           - cargo binary (default: cargo)
+#   CARGO           - cargo command, split on blanks (default: cargo). The
+#                     justfile passes `cargo +slopos`: `-Zbuild-std` reads std
+#                     from the sysroot it runs under, and the owned one
+#                     carries the pinned std and libc forks
 #   USERLAND_TARGET - target JSON (default: targets/x86_64-unknown-slopos.json)
 #   BUILD_STD       - std crates -Zbuild-std compiles (default: core,alloc,std,panic_abort)
-#
-# The build runs on `+slopos`, not on the rustup channel: std for
-# `x86_64-unknown-slopos` comes from the pinned std + libc forks that
-# scripts/make_slopos_sysroot.sh materialises into an owned sysroot, and
-# `-Zbuild-std` only ever reads std from the sysroot it was invoked under.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -24,21 +25,37 @@ BUILD_DIR="${1:?Usage: build_userland.sh <build_dir> <cargo_target_dir> [--test]
 CARGO_TARGET_DIR="${2:?Usage: build_userland.sh <build_dir> <cargo_target_dir> [--test]}"
 TEST_MODE="${3:-}"
 
-CARGO="${CARGO:-cargo}"
+# `-Zbuild-std` takes its profile from this workspace, not from std's own
+# manifest, which builds compiler_builtins one intrinsic per object: in fewer,
+# linking one drags in the weak hidden libm routines beside it, and their
+# visibility wins over the ones libc.so exports.
+CARGO="${CARGO:-cargo} --config profile.release.package.compiler_builtins.codegen-units=10000"
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-unknown-slopos.json}"
 # Cargo names the output directory after the target JSON's stem.
 USERLAND_TRIPLE="$(basename "$USERLAND_TARGET" .json)"
 
-BINS="init shell coreutils terminal compositor roulette halt bootctl editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping widget_gallery oops_smoke"
+. "$SCRIPT_DIR/lib/base.sh"
+# The base's programs and the one demo no base ships.
+BINS="$BASE_PROGRAMS widget_gallery"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
-# Install the pinned channel and materialise the owned `slopos` sysroot.
-"$SCRIPT_DIR/ensure_toolchain.sh"
-
 # Cargo fingerprints `-Zbuild-std` units by compiler version, not by the
-# sysroot sources, so a fork edit restaged into the owned sysroot would leave
-# the previous std in place.
-SYSROOT_STAMP="$(. "$SCRIPT_DIR/lib/toolchain_pin.sh" && cat "$REPO_ROOT/$TP_SYSROOT_REL/$TP_STAMP_NAME")"
+# sysroot sources, so a fork edit restaged into the sysroot would leave the
+# previous std in place. Both the owned sysroot and an installed SlopOS
+# toolchain stamp the std fork their library carries.
+SYSROOT="$(CARGO_TARGET_DIR="$CARGO_TARGET_DIR" $CARGO rustc --locked -Zunstable-options \
+    -Zjson-target-spec --target "$USERLAND_TARGET" --package slopos-crt0 --release --print sysroot)"
+. "$SCRIPT_DIR/lib/toolchain_pin.sh"
+SYSROOT_STAMP="$(cat "$SYSROOT/$TP_LIBRARY_REL/$TP_STD_STAMP_NAME" 2>/dev/null)" || {
+    echo "build_userland: $SYSROOT carries no SlopOS std (no $TP_LIBRARY_REL/$TP_STD_STAMP_NAME)" >&2
+    exit 1
+}
+WANT_STD="$(tp_std_stamp "$REPO_ROOT")"
+[ "$SYSROOT_STAMP" = "$WANT_STD" ] || {
+    echo "build_userland: $SYSROOT carries the std fork stamped $SYSROOT_STAMP, not the $WANT_STD this tree pins" >&2
+    echo "  On the host, scripts/ensure_toolchain.sh or just toolchain rebuilds it." >&2
+    exit 1
+}
 STD_STAMP="$CARGO_TARGET_DIR/$USERLAND_TRIPLE/.slopos-sysroot-stamp"
 if [ "$(cat "$STD_STAMP" 2>/dev/null)" != "$SYSROOT_STAMP" ]; then
     rm -rf "${CARGO_TARGET_DIR:?}/$USERLAND_TRIPLE"
@@ -93,7 +110,7 @@ rm -f "$CRT0_OBJ"
 # not enough to get it back. Cleaning just this package forces the one
 # compilation that emits it (~1 s; `core` stays cached).
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-$CARGO +slopos clean --quiet \
+$CARGO clean --quiet \
     --package slopos-crt0 \
     --release \
     -Zunstable-options \
@@ -101,7 +118,7 @@ $CARGO +slopos clean --quiet \
     --target "$USERLAND_TARGET"
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$USERLAND_RUSTFLAGS" \
-$CARGO +slopos rustc --locked \
+$CARGO rustc --locked \
     -Zbuild-std=core \
     -Zunstable-options \
     -Zjson-target-spec \
@@ -122,7 +139,7 @@ done
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$USERLAND_RUSTFLAGS" \
-$CARGO +slopos build --locked \
+$CARGO build --locked \
     -Zbuild-std="$BUILD_STD" \
     -Zbuild-std-features=compiler-builtins-mem \
     -Zunstable-options \
@@ -137,7 +154,7 @@ $CARGO +slopos build --locked \
 # disposition and pass it on. `cargo rustc` scopes the flag to this binary.
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$USERLAND_RUSTFLAGS" \
-$CARGO +slopos rustc --locked \
+$CARGO rustc --locked \
     -Zbuild-std="$BUILD_STD" \
     -Zbuild-std-features=compiler-builtins-mem \
     -Zunstable-options \
@@ -163,7 +180,7 @@ echo "Userland binaries built: $(for b in $BINS; do printf '%s/%s.elf ' "$BUILD_
 if [ "$TEST_MODE" = "--test" ]; then
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     RUSTFLAGS="$USERLAND_RUSTFLAGS" \
-    $CARGO +slopos build --locked \
+    $CARGO build --locked \
         -Zbuild-std="$BUILD_STD" \
         -Zbuild-std-features=compiler-builtins-mem \
         -Zunstable-options \
@@ -400,7 +417,7 @@ fi
 # why it lives in a wrapper package) rots unobserved.
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$USERLAND_RUSTFLAGS -C force-unwind-tables" \
-$CARGO +slopos build --locked \
+$CARGO build --locked \
     -Zbuild-std="$BUILD_STD" \
     -Zbuild-std-features=compiler-builtins-mem \
     -Zunstable-options \
@@ -417,8 +434,10 @@ echo "C archive built: $RELEASE_DIR/libc.a"
 
 # libc.so, which is both the shared C library and the program interpreter.
 #
-#   -Bsymbolic  binds its own references at link time, so the only relocation
-#               its pre-relocation bootstrap has to apply is RELATIVE.
+#   --dynamic-list (from slibc/cdylib/build.rs) binds its own references at
+#               link time bar the objects it exports, so the only relocation
+#               its pre-relocation bootstrap has to apply is RELATIVE, and a
+#               program's COPY of `environ` or `optind` is the one it uses.
 #   -z now      eager binding; the loader writes no GOT slot after startup,
 #               which is what makes full RELRO free.
 #   --soname    what a DT_NEEDED on the C library resolves to: the already
@@ -441,7 +460,7 @@ SO_RUSTFLAGS="$SYSTEM_RUSTFLAGS -C relocation-model=pic -Z tls-model=initial-exe
 # images, so its relocations are the ones a `.so` may not carry.
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$SYSTEM_RUSTFLAGS -C relocation-model=pic" \
-$CARGO +slopos build --locked \
+$CARGO build --locked \
     -Zbuild-std=core \
     -Zunstable-options \
     -Zjson-target-spec \
@@ -457,8 +476,8 @@ fi
 cp "$RELEASE_DIR/libbuiltins.a" "$BUILD_DIR/libbuiltins.a"
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-RUSTFLAGS="$SO_RUSTFLAGS -C link-arg=-Bsymbolic -C link-arg=-znow -C link-arg=--soname=libc.so -C link-arg=--entry=_dlstart" \
-$CARGO +slopos build --locked \
+RUSTFLAGS="$SO_RUSTFLAGS -C link-arg=-znow -C link-arg=--soname=libc.so -C link-arg=--entry=_dlstart" \
+$CARGO build --locked \
     -Zbuild-std=core,alloc \
     -Zunstable-options \
     -Zjson-target-spec \
@@ -484,7 +503,7 @@ if [ "$TEST_MODE" = "--test" ]; then
     DL_LINK="-C link-arg=-L$RELEASE_DIR -C link-arg=-lc"
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     RUSTFLAGS="$SO_RUSTFLAGS -Z tls-model=global-dynamic $DL_LINK -C link-arg=-znow -C link-arg=--soname=libdltest.so" \
-    $CARGO +slopos build --locked \
+    $CARGO build --locked \
         -Zbuild-std=core \
         -Zunstable-options \
         -Zjson-target-spec \
@@ -495,7 +514,7 @@ if [ "$TEST_MODE" = "--test" ]; then
 
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     RUSTFLAGS="$SYSTEM_RUSTFLAGS -C relocation-model=static -C link-arg=$CRT0_OBJ $DL_LINK -C link-arg=--image-base=0x400000 -C link-arg=--dynamic-linker=/lib/ld-slopos.so.1 -C link-arg=--export-dynamic -C link-arg=-znow" \
-    $CARGO +slopos build --locked \
+    $CARGO build --locked \
         -Zbuild-std=core \
         -Zunstable-options \
         -Zjson-target-spec \
@@ -555,16 +574,20 @@ if [ "$TEST_MODE" = "--test" ]; then
         -isystem "${REPO_ROOT}/slibc/include" -std=c11 -O2 \
         -Wall -Wextra -Wsystem-headers -Werror \
         -c "${REPO_ROOT}/userland/libctest/probe.c" -o "$BUILD_DIR/libctest-probe.o"
-    "$LD_LLD" -static -o "$BUILD_DIR/libc_probe.elf" \
+    # Linked twice: against libc.so, as `cc` links a C program, so a function
+    # slibc defines but does not export fails the link; and statically against
+    # libc.a.
+    "$LD_LLD" -o "$BUILD_DIR/libc_probe.elf" "$CRT0_OBJ" "$BUILD_DIR/libctest-probe.o" \
+        --eh-frame-hdr -znow --image-base=0x400000 --dynamic-linker=/lib/ld-slopos.so.1 \
+        -L "$RELEASE_DIR" -lc "$RELEASE_DIR/libbuiltins.a"
+    "$LD_LLD" -static -o "$BUILD_DIR/libc_probe_static.elf" \
         "$CRT0_OBJ" "$BUILD_DIR/libctest-probe.o" --eh-frame-hdr \
         --image-base=0x400000 -L "$RELEASE_DIR" -lc
 
-    echo "C probe built: $BUILD_DIR/libc_probe.elf"
+    echo "C probe built: $BUILD_DIR/libc_probe.elf $BUILD_DIR/libc_probe_static.elf"
 
-    # The C++ runtime and the three artifacts that prove it works. Cross-built
-    # from this host and never in the guest, and staged only here, because the
-    # shipped appliance root runs no C++ program.
-    # `CLANG*`/`LD_LLD` are the ones resolved at the top of this script.
+    # The C++ runtime and the three artifacts that prove it works, staged only
+    # here because the shipped base runs no C++ program.
     "$SCRIPT_DIR/make_slopos_cxx.sh" "$RELEASE_DIR"
     CXX_DIR="${REPO_ROOT}/third_party/slopos-cxx"
     cp "$CXX_DIR/lib/libc++.so" "$BUILD_DIR/libc++.so"

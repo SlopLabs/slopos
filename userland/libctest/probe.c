@@ -12,16 +12,21 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fenv.h>
+#include <getopt.h>
 #include <iconv.h>
+#include <ifaddrs.h>
 #include <inttypes.h>
 #include <langinfo.h>
 #include <limits.h>
 #include <locale.h>
 #include <math.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <nl_types.h>
+#include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
+#include <sched.h>
 #include <setjmp.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -35,11 +40,15 @@
 #include <sys/auxv.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/times.h>
 #include <sys/wait.h>
 #include <syslog.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 #include <wchar.h>
@@ -2026,6 +2035,12 @@ static int addresses(void) {
         inet_pton(12345, "1.2.3.4", &v4) != -1 || errno != EAFNOSUPPORT) {
         return fail("inet_ntop/inet_pton did not report ENOSPC/EAFNOSUPPORT");
     }
+    const struct in6_addr any = IN6ADDR_ANY_INIT, loopback = IN6ADDR_LOOPBACK_INIT;
+    if (memcmp(&any, &in6addr_any, sizeof any) != 0 ||
+        memcmp(&loopback, &in6addr_loopback, sizeof loopback) != 0 ||
+        !IN6_IS_ADDR_LOOPBACK(&loopback)) {
+        return fail("IN6ADDR_ANY_INIT or IN6ADDR_LOOPBACK_INIT is not its in6addr_* constant");
+    }
 
     struct sockaddr_in6 sa;
     memset(&sa, 0, sizeof sa);
@@ -2142,6 +2157,412 @@ static int star_widths(void) {
     return 1;
 }
 
+// Called through pointers so clang cannot fold them as builtins: the libc.so
+// probe then fails to link on any that slibc defines but does not export.
+static double (*volatile const lib_floor)(double) = floor;
+static double (*volatile const lib_ceil)(double) = ceil;
+static double (*volatile const lib_trunc)(double) = trunc;
+static double (*volatile const lib_round)(double) = round;
+static double (*volatile const lib_fabs)(double) = fabs;
+static double (*volatile const lib_sqrt)(double) = sqrt;
+static double (*volatile const lib_cbrt)(double) = cbrt;
+static double (*volatile const lib_fmod)(double, double) = fmod;
+static double (*volatile const lib_fmin)(double, double) = fmin;
+static double (*volatile const lib_fmax)(double, double) = fmax;
+static double (*volatile const lib_copysign)(double, double) = copysign;
+static double (*volatile const lib_fma)(double, double, double) = fma;
+static float (*volatile const lib_floorf)(float) = floorf;
+static float (*volatile const lib_sqrtf)(float) = sqrtf;
+
+static int math_exports(void) {
+    if (lib_floor(2.5) != 2.0 || lib_ceil(2.5) != 3.0 || lib_trunc(-2.5) != -2.0 ||
+        lib_round(2.5) != 3.0 || lib_fabs(-2.0) != 2.0) {
+        return fail("the double rounding family disagrees with C");
+    }
+    if (lib_sqrt(16.0) != 4.0 || lib_cbrt(27.0) != 3.0 || lib_fmod(7.0, 3.0) != 1.0 ||
+        lib_fmin(1.0, 2.0) != 1.0 || lib_fmax(1.0, 2.0) != 2.0 ||
+        lib_copysign(1.0, -0.0) != -1.0 || lib_fma(2.0, 3.0, 4.0) != 10.0) {
+        return fail("a double libm routine answered wrongly");
+    }
+    if (lib_floorf(2.5f) != 2.0f || lib_sqrtf(16.0f) != 4.0f) {
+        return fail("a float libm routine answered wrongly");
+    }
+    return 1;
+}
+
+// The probe reads `optind` and `optarg` through its own copies of them, which
+// only an exported, preemptible definition in the library keeps in step.
+static int options(void) {
+    char *argv[] = {"probe", "-v", "-o", "out", "--level=3", "--quiet", "rest", NULL};
+    int argc = 7;
+    static const struct option longs[] = {
+        {"level", required_argument, NULL, 'l'},
+        {"quiet", no_argument, NULL, 'q'},
+        {NULL, 0, NULL, 0},
+    };
+    int verbose = 0, quiet = 0, level = 0;
+    const char *out = NULL;
+    int opt;
+    optind = 1;
+    while ((opt = getopt_long(argc, argv, "vo:", longs, NULL)) != -1) {
+        switch (opt) {
+        case 'v': verbose = 1; break;
+        case 'o': out = optarg; break;
+        case 'l': level = atoi(optarg); break;
+        case 'q': quiet = 1; break;
+        default: return fail("getopt_long returned an option it was not given");
+        }
+    }
+    if (!verbose || !quiet || level != 3 || out == NULL || strcmp(out, "out") != 0) {
+        return fail("getopt_long did not parse short and long options");
+    }
+    if (optind != 6 || strcmp(argv[optind], "rest") != 0) {
+        return fail("optind does not name the first operand");
+    }
+    // A handler that takes the word after its option, as glibc callers do.
+    char *mixed[] = {"probe", "file", "-o", "x", "--", "-d", NULL};
+    const char *taken = NULL;
+    optind = 1;
+    while ((opt = getopt_long(6, mixed, "o", longs, NULL)) != -1) {
+        if (opt != 'o' || optind >= 6) {
+            return fail("getopt_long misread an option among operands");
+        }
+        taken = mixed[optind++];
+    }
+    if (taken == NULL || strcmp(taken, "x") != 0 || optind != 4 ||
+        strcmp(mixed[1], "-o") != 0 || strcmp(mixed[2], "x") != 0 ||
+        strcmp(mixed[3], "--") != 0 || strcmp(mixed[4], "file") != 0 ||
+        strcmp(mixed[5], "-d") != 0) {
+        return fail("getopt_long moved an operand before its handler read the next word");
+    }
+    char *shorts[] = {"probe", "-ab", "x", NULL};
+    optind = 1;
+    int a = getopt(3, shorts, "ab:");
+    int b = getopt(3, shorts, "ab:");
+    if (a != 'a' || b != 'b' || optarg == NULL || strcmp(optarg, "x") != 0 ||
+        getopt(3, shorts, "ab:") != -1 || optind != 3) {
+        return fail("getopt did not take a clustered option's argument");
+    }
+    char *ended[] = {"rm", "--", "-f", NULL};
+    optind = 1;
+    if (getopt(3, ended, "fir") != -1 || optind != 2) {
+        return fail("getopt read an option after --");
+    }
+    char *single[] = {"probe", "-ab", "-level=4", "-v", NULL};
+    static const struct option level_only[] = {{"level", required_argument, NULL, 'l'}, {NULL, 0, NULL, 0}};
+    int seen[4] = {0};
+    optind = 1;
+    while ((opt = getopt_long_only(4, single, "abv", level_only, NULL)) != -1) {
+        seen[opt == 'a' ? 0 : opt == 'b' ? 1 : opt == 'l' ? 2 : 3]++;
+    }
+    if (seen[0] != 1 || seen[1] != 1 || seen[2] != 1 || seen[3] != 1) {
+        return fail("getopt_long_only did not tell a short cluster from a long option");
+    }
+    char *twice[] = {"probe", "-ab", NULL};
+    optind = 1;
+    if (getopt(2, twice, "ab") != 'a') {
+        return fail("getopt did not start a cluster");
+    }
+    optind = 0;
+    if (getopt(2, twice, "ab") != 'a' || getopt(2, twice, "ab") != 'b' ||
+        getopt(2, twice, "ab") != -1) {
+        return fail("getopt did not start over when optind was set to 0");
+    }
+    optind = 1;
+    if (getopt(2, twice, "ab") != 'a') {
+        return fail("getopt did not rescan a finished argv from optind 1");
+    }
+    optind = 1;
+    return 1;
+}
+
+static int terminal_names(void) {
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0 || grantpt(master) != 0 || unlockpt(master) != 0) {
+        return fail("posix_openpt did not open a terminal pair");
+    }
+    char name[64];
+    if (ptsname_r(master, name, sizeof name) != 0 || strcmp(name, ptsname(master)) != 0) {
+        return fail("ptsname and ptsname_r disagree");
+    }
+    int slave = open(name, O_RDWR | O_NOCTTY);
+    const char *tty = slave >= 0 ? ttyname(slave) : NULL;
+    int ok = tty != NULL && strcmp(tty, name) == 0;
+    int flow = slave >= 0 && tcdrain(slave) == 0 && tcflush(slave, TCIOFLUSH) == 0 &&
+               tcflow(slave, TCOON) == 0;
+    errno = 0;
+    // Linux names the node a master was opened through.
+    const char *master_name = ttyname(master);
+    int master_ok = master_name == NULL ? errno != 0 : strcmp(master_name, "/dev/ptmx") == 0;
+    if (slave >= 0) {
+        close(slave);
+    }
+    close(master);
+    if (!ok) {
+        return fail("ttyname does not name the terminal it was opened as");
+    }
+    if (!flow) {
+        return fail("tcdrain, tcflush or tcflow refused a terminal");
+    }
+    return master_ok ? 1 : fail("ttyname named a master side as something but /dev/ptmx");
+}
+
+static int widths_and_bytes(void) {
+    // The C locale prints the basic character set and nothing else.
+    if (wcwidth(L'a') != 1 || wcwidth(L'\0') != 0 || wcwidth(0x07) != -1 ||
+        wcwidth(0x4e00) != -1) {
+        return fail("wcwidth disagrees with the C locale's printable set");
+    }
+    if (wcswidth(L"ab c", 4) != 4 || wcswidth(L"ab\ac", 4) != -1 || wcswidth(L"ab", 9) != 2) {
+        return fail("wcswidth did not sum its characters' columns");
+    }
+    char buf[8] = "abcdefg";
+    bcopy(buf, buf + 1, 3);
+    bzero(buf + 5, 2);
+    if (memcmp(buf, "aabce\0\0", 8) != 0) {
+        return fail("bcopy or bzero moved the wrong bytes");
+    }
+    if (atoll("-9000000000") != -9000000000LL || getpagesize() != sysconf(_SC_PAGESIZE)) {
+        return fail("atoll or getpagesize answered wrongly");
+    }
+    char tmpl[] = "/tmp/libc_probe_mktempXXXXXX";
+    struct stat st;
+    if (mktemp(tmpl)[0] == '\0' || strstr(tmpl, "XXXXXX") != NULL || stat(tmpl, &st) == 0) {
+        return fail("mktemp did not make a fresh name without creating it");
+    }
+    return 1;
+}
+
+static int load_and_priority(void) {
+    double loads[3] = {-1, -1, -1};
+    struct sysinfo si;
+    if (getloadavg(loads, 3) != 3 || loads[0] < 0 || loads[1] < 0 || loads[2] < 0) {
+        return fail("getloadavg did not report three averages");
+    }
+    if (sysinfo(&si) != 0 || si.uptime <= 0 || si.totalram == 0 || si.freeram > si.totalram ||
+        si.mem_unit == 0 || si.procs == 0) {
+        return fail("sysinfo reported an impossible machine");
+    }
+    errno = 0;
+    int nice_now = getpriority(PRIO_PROCESS, 0);
+    if (nice_now == -1 && errno != 0) {
+        return fail("getpriority refused this process");
+    }
+    if (setpriority(PRIO_PROCESS, 0, nice_now + 1) != 0 ||
+        getpriority(PRIO_PROCESS, 0) != nice_now + 1) {
+        return fail("setpriority did not lower this process's priority");
+    }
+    struct sched_param param;
+    int policy = -1;
+    if (sched_get_priority_min(SCHED_OTHER) != 0 || sched_get_priority_max(SCHED_OTHER) != 0 ||
+        pthread_getschedparam(pthread_self(), &policy, &param) != 0 || policy != SCHED_OTHER) {
+        return fail("the scheduling policy is not SCHED_OTHER at priority 0");
+    }
+    param.sched_priority = sched_get_priority_min(SCHED_FIFO);
+    if (param.sched_priority != 1 || sched_get_priority_max(SCHED_RR) != 99 ||
+        pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != ENOTSUP) {
+        return fail("SCHED_FIFO has no range, or was not refused as unsupported");
+    }
+    return 1;
+}
+
+static volatile int forks_prepared, forks_in_parent, forks_in_child;
+static void fork_prepare(void) { forks_prepared++; }
+static void fork_parent(void) { forks_in_parent++; }
+static void fork_child(void) { forks_in_child++; }
+
+static int fork_handlers(void) {
+    if (pthread_atfork(fork_prepare, fork_parent, fork_child) != 0) {
+        return fail("pthread_atfork refused its handlers");
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        _exit(forks_prepared == 1 && forks_in_child == 1 && forks_in_parent == 0 ? 0 : 1);
+    }
+    int status = -1;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid) {
+        return fail("fork or waitpid failed");
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return fail("the child did not run prepare and then the child handler");
+    }
+    return forks_prepared == 1 && forks_in_parent == 1 && forks_in_child == 0
+               ? 1
+               : fail("the parent did not run prepare and then the parent handler");
+}
+
+static volatile int wakes;
+static void on_wake(int sig) {
+    (void)sig;
+    wakes++;
+}
+
+// Each wait takes a mask for its own duration only: the signal it lets in is
+// delivered before the call returns, and the caller's mask is back after.
+static int wait_masks(void) {
+    struct sigaction act, old_act;
+    // Garbage in `sa_restorer`, as a caller that never names it leaves there.
+    memset(&act, 0xa5, sizeof act);
+    act.sa_handler = on_wake;
+    act.sa_flags = 0;
+    sigemptyset(&act.sa_mask);
+    sigset_t blocked, empty, now;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGUSR1);
+    sigemptyset(&empty);
+    sigset_t old_mask;
+    if (sigaction(SIGUSR1, &act, &old_act) != 0 ||
+        sigprocmask(SIG_BLOCK, &blocked, &old_mask) != 0) {
+        return fail("could not catch and block SIGUSR1");
+    }
+    const struct timespec second = {1, 0};
+    static const char *const calls[] = {"sigsuspend", "pselect", "ppoll"};
+    static char why_buf[128];
+    int ok = 1;
+    const char *why = NULL;
+    for (int round = 0; round < 3 && ok; round++) {
+        wakes = 0;
+        raise(SIGUSR1);
+        int rc;
+        errno = 0;
+        if (round == 0) {
+            rc = sigsuspend(&empty);
+        } else if (round == 1) {
+            rc = pselect(0, NULL, NULL, NULL, &second, &empty);
+        } else {
+            rc = ppoll(NULL, 0, &second, &empty);
+        }
+        int err = errno;
+        sigprocmask(SIG_BLOCK, NULL, &now);
+        if (rc != -1 || err != EINTR || wakes != 1) {
+            snprintf(why_buf, sizeof why_buf,
+                     "%s returned %d, errno %d, after %d deliveries; want -1, EINTR, 1",
+                     calls[round], rc, err, wakes);
+            why = why_buf;
+            ok = 0;
+        } else if (!sigismember(&now, SIGUSR1)) {
+            snprintf(why_buf, sizeof why_buf, "%s left its own mask in place of the caller's",
+                     calls[round]);
+            why = why_buf;
+            ok = 0;
+        }
+    }
+    int fds[2];
+    if (ok && pipe(fds) == 0) {
+        write(fds[1], "x", 1);
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(fds[0], &readable);
+        struct pollfd pfd = {fds[0], POLLIN, 0};
+        const struct timespec zero = {0, 0};
+        if (pselect(fds[0] + 1, &readable, NULL, NULL, &zero, NULL) != 1 ||
+            !FD_ISSET(fds[0], &readable) || ppoll(&pfd, 1, &zero, NULL) != 1 ||
+            !(pfd.revents & POLLIN) || poll(NULL, 0, 0) != 0) {
+            why = "pselect or ppoll missed a readable pipe, or poll refused no descriptors";
+            ok = 0;
+        }
+        close(fds[0]);
+        close(fds[1]);
+    }
+    sigprocmask(SIG_SETMASK, &old_mask, NULL);
+    sigaction(SIGUSR1, &old_act, NULL);
+    return ok ? 1 : fail(why);
+}
+
+// A wait cut short by a stop and a continue runs on for the rest of its
+// timeout, and leaves the caller's timeout as written.
+static int restarted_waits(void) {
+    pid_t child = fork();
+    if (child == 0) {
+        const struct timespec wait = {0, 400000000};
+        int rc = ppoll(NULL, 0, &wait, NULL);
+        _exit(rc == 0 && wait.tv_nsec == 400000000 ? 0 : rc == -1 && errno == EINTR ? 2 : 3);
+    }
+    if (child < 0) {
+        return fail("fork failed");
+    }
+    usleep(100000);
+    kill(child, SIGSTOP);
+    usleep(50000);
+    kill(child, SIGCONT);
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) {
+        return fail("the stopped child did not exit");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 1;
+    case 2:
+        return fail("ppoll answered EINTR for a stop no handler saw");
+    default:
+        return fail("ppoll did not time out, or wrote the caller's timeout");
+    }
+}
+
+static int filter_dotless(const struct dirent *entry) { return entry->d_name[0] != '.'; }
+
+static int creation_mask(void) {
+    const char *file = "/tmp/libc_probe_umask";
+    const char *dir = "/tmp/libc_probe_umask_d";
+    mode_t old = umask(077);
+    int fd = open(file, O_CREAT | O_WRONLY | O_TRUNC, 0666);
+    int made = mkdir(dir, 0777);
+    struct stat file_st, dir_st;
+    int ok = fd >= 0 && made == 0 && fstat(fd, &file_st) == 0 && stat(dir, &dir_st) == 0 &&
+             (file_st.st_mode & 0777) == 0600 && (dir_st.st_mode & 0777) == 0700;
+    if (fd >= 0) {
+        close(fd);
+    }
+    unlink(file);
+    rmdir(dir);
+    if (umask(old) != 077) {
+        return fail("umask did not answer the mask it replaced");
+    }
+    return ok ? 1 : fail("a created file or directory kept bits the mask removes");
+}
+
+static int directory_scans(void) {
+    const char *dir = "/tmp/libc_probe_scandir";
+    const char *names[] = {"beta", "alpha", "gamma"};
+    char path[64];
+    mkdir(dir, 0755);
+    for (int i = 0; i < 3; i++) {
+        snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        close(open(path, O_CREAT | O_WRONLY, 0644));
+    }
+    struct dirent **list = NULL;
+    int n = scandir(dir, &list, filter_dotless, alphasort);
+    int ok = n == 3 && strcmp(list[0]->d_name, "alpha") == 0 &&
+             strcmp(list[1]->d_name, "beta") == 0 && strcmp(list[2]->d_name, "gamma") == 0;
+    for (int i = 0; i < n; i++) {
+        free(list[i]);
+    }
+    free(list);
+    for (int i = 0; i < 3; i++) {
+        snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        unlink(path);
+    }
+    rmdir(dir);
+    return ok ? 1 : fail("scandir did not filter and sort the directory");
+}
+
+static int interfaces(void) {
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list) != 0) {
+        return fail("getifaddrs failed");
+    }
+    int loopback = 0;
+    for (struct ifaddrs *ifa = list; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr != NULL && ifa->ifa_addr->sa_family == AF_INET &&
+            (ifa->ifa_flags & IFF_LOOPBACK) != 0) {
+            const struct sockaddr_in *in = (const struct sockaddr_in *)ifa->ifa_addr;
+            loopback |= ntohl(in->sin_addr.s_addr) == INADDR_LOOPBACK;
+        }
+    }
+    freeifaddrs(list);
+    return loopback ? 1 : fail("getifaddrs listed no IPv4 loopback interface");
+}
+
 static int run(void) {
     static int (*const checks[])(void) = {
         jumps,           mask_jumps,          calendar,
@@ -2156,7 +2577,11 @@ static int run(void) {
         semaphores,      case_and_bits,       unbuffered,
         locked_pages,    waited_signal,       child_times,
         logging,         addresses,           conversion,
-        queued_value,    star_widths,
+        queued_value,    star_widths,         math_exports,
+        options,         terminal_names,      widths_and_bytes,
+        load_and_priority, fork_handlers,     wait_masks,
+        directory_scans, interfaces,      creation_mask,
+        restarted_waits,
     };
     for (size_t i = 0; i < sizeof checks / sizeof checks[0]; i++) {
         check = (int)i + 1;

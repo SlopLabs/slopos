@@ -166,3 +166,38 @@ pub unsafe extern "C" fn getrusage(_who: c_int, _usage: *mut rusage) -> c_int {
     errno_set(ENOSYS.raw());
     -1
 }
+
+pub const PRIO_PROCESS: c_int = 0;
+pub const PRIO_PGRP: c_int = 1;
+pub const PRIO_USER: c_int = 2;
+const _: () = assert!(
+    PRIO_PROCESS as u64 == slopos_abi::syscall::PRIO_PROCESS
+        && PRIO_PGRP as u64 == slopos_abi::syscall::PRIO_PGRP
+        && PRIO_USER as u64 == slopos_abi::syscall::PRIO_USER
+);
+
+/// `getpriority(2)`: the nice value, -20 to 19. Since -1 is a valid answer, a
+/// caller tells failure apart by clearing `errno` first.
+#[unsafe(no_mangle)]
+pub extern "C" fn getpriority(which: c_int, who: crate::types::id_t) -> c_int {
+    match Sys::getpriority(which, who) {
+        Ok(encoded) => 20 - encoded,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}
+
+/// `setpriority(2)`: `nice` is clamped to -20..=19, and lowering a task's
+/// below both 0 and its current value takes `TASK_FLAG_SYSTEM`.
+#[unsafe(no_mangle)]
+pub extern "C" fn setpriority(which: c_int, who: crate::types::id_t, nice: c_int) -> c_int {
+    match Sys::setpriority(which, who, nice) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}

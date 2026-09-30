@@ -30,8 +30,8 @@ use slopos_ostd::sync::wait_queue::WaitAbort;
 use slopos_sched::scheduler::schedule;
 use slopos_sched::task::{
     SignalPost, task_find_by_id, task_for_each_active, task_group_fatal_signal,
-    task_group_signal_info, task_group_stop, task_terminate, task_thread_signal_info,
-    task_wait_for_signal,
+    task_group_signal_info, task_group_stop, task_set_signal_blocked, task_terminate,
+    task_thread_signal_info, task_wait_for_signal,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
@@ -295,6 +295,52 @@ define_syscall!(syscall_rt_sigtimedwait
     }
     Ok(taken.signum as u64)
 });
+
+// Subscribed before the pending set is looked at, so a signal the new mask
+// lets in wakes the wait however close to the swap it lands. `ERESTARTNOHAND`:
+// only a handler ends the wait; a signal that ran none restarts it.
+define_syscall!(syscall_rt_sigsuspend
+    (ctx, set_ptr: UserPtr<SigSet>, sigsetsize: u64)
+    cap(NoneSelf)
+    -> Result<(), Errno>
+{
+    if sigsetsize != core::mem::size_of::<SigSet>() as u64 {
+        return Err(Errno::EINVAL);
+    }
+    let mask = copy_from_user(set_ptr.inner()).map_err(|_| Errno::EFAULT)?;
+    let task_ref = ctx.task();
+    swap_sigmask_for_wait(task_ref, mask);
+    let arrival =
+        slopos_ostd::sync::BUS.subscribe(slopos_ostd::task::ops::signal_pending_event(task_ref.task_id));
+    match arrival.wait_event_interruptible_until(|| None::<()>) {
+        // The way out delivers the signal, or finishes the kill.
+        Err(WaitAbort::Interrupted | WaitAbort::Killed) => Err(Errno::ERESTARTNOHAND),
+        // Nothing could park the task, so nothing will end the wait: a restart
+        // would spin, and the swapped mask goes back.
+        Ok(()) | Err(WaitAbort::Timeout | WaitAbort::NoRuntime) => {
+            finish_sigmask_wait(task_ref, Err(Errno::ENOSYS))
+        }
+    }
+});
+
+/// Put `mask` in force for a wait, arming the mask it replaces to come back
+/// when the syscall returns to user space.
+pub(crate) fn swap_sigmask_for_wait(task: &Task, mask: SigSet) {
+    task.set_restore_sigmask(task.signal_blocked());
+    task_set_signal_blocked(task, mask & !SIG_UNCATCHABLE);
+}
+
+/// End a wait [`swap_sigmask_for_wait`] began. One a signal cut short keeps
+/// the swapped mask for delivery to hand the handler's frame; any other gets
+/// the old mask back before a signal it blocks can be delivered.
+pub(crate) fn finish_sigmask_wait<T>(task: &Task, result: Result<T, Errno>) -> Result<T, Errno> {
+    if !matches!(result, Err(Errno::EINTR | Errno::ERESTARTNOHAND))
+        && let Some(mask) = task.take_restore_sigmask()
+    {
+        task_set_signal_blocked(task, mask & !SIG_UNCATCHABLE);
+    }
+    result
+}
 
 define_syscall!(syscall_kill
     (ctx, raw_pid_arg: i64, sig: u64) cap(NoneRelation)
@@ -585,6 +631,9 @@ pub(crate) fn sigframe_fpu_addr(sigframe_addr: u64) -> u64 {
 /// so a handler cannot corrupt it. The kernel is `+soft-float` and has not
 /// touched the vector file since entry, so the live CPU state is still the
 /// user's. Returns false on a user-copy fault.
+///
+/// `#[inline(never)]`: the vector gate sanctions its `xsave` by this symbol.
+#[inline(never)]
 fn save_fpu_to_sigframe(current: &slopos_sched::task_struct::Current, sigframe_addr: u64) -> bool {
     // Not a switch-out: the state stays live in the register file, so the save
     // keeps the owner tag rather than releasing it.
@@ -839,30 +888,37 @@ impl UserRegView for InterruptFrameRegs<'_> {
     }
 }
 
-/// What [`claim_pending_signal`] decided, for a caller holding no borrow.
 /// Whether delivery would act on a pending signal of `task`, claiming it.
 #[cfg(feature = "test-hooks")]
 pub(crate) fn claim_pending_signal_for_test(task: &Task) -> bool {
     !matches!(claim_pending_signal(task), SignalDisposition::Done)
 }
 
+/// What [`claim_pending_signal`] decided, for a caller holding no borrow.
 enum SignalDisposition {
     /// Nothing deliverable, or the disposition needs no further work.
     Done,
     /// Terminate; the exit fields are already stamped.
     Terminate(u32),
     /// Job control: park this task's whole thread group.
-    Stop { signum: u8 },
-    Handle {
+    Stop {
         signum: u8,
-        bit: u64,
-        action: SignalAction,
-        saved_mask: SigSet,
-        /// The instance taken, requeued if the frame cannot be pushed.
-        taken: DequeuedSignal,
-        /// The fault's `(si_code, si_addr)` when this is a fault signal.
-        fault: Option<(i32, u64)>,
     },
+    Handle(Handling),
+}
+
+struct Handling {
+    signum: u8,
+    bit: u64,
+    action: SignalAction,
+    saved_mask: SigSet,
+    /// `saved_mask` is the one a mask-swapping wait armed, put back in force
+    /// directly if the frame cannot be pushed.
+    restores_wait_mask: bool,
+    /// The instance taken, requeued if the frame cannot be pushed.
+    taken: DequeuedSignal,
+    /// The fault's `(si_code, si_addr)` when this is a fault signal.
+    fault: Option<(i32, u64)>,
 }
 
 /// Pick the lowest deliverable signal, consume its pending bit, and decide what
@@ -939,14 +995,16 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
         return SignalDisposition::Done;
     }
 
-    SignalDisposition::Handle {
+    let armed = task_ref.take_restore_sigmask();
+    SignalDisposition::Handle(Handling {
         signum,
         bit,
         action,
-        saved_mask: task_ref.signal_blocked(),
+        saved_mask: armed.unwrap_or_else(|| task_ref.signal_blocked()),
+        restores_wait_mask: armed.is_some(),
         taken,
         fault: task_ref.fault_siginfo_for(signum),
-    }
+    })
 }
 
 /// Write the `siginfo_t` an `SA_SIGINFO` handler receives.
@@ -1110,56 +1168,91 @@ fn populate_sigframe_range(task_ref: &Task, frame_addr: u64) -> bool {
     populated
 }
 
-/// `settle(restart)` runs before any frame is built, decided on the signal
-/// actually taken: one a sibling's `sigwait` took first restarts the syscall.
+/// What the way out did with the signal it took, which decides whether an
+/// interrupted syscall restarts.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Delivered {
+    /// No handler ran: nothing was pending, another thread took it first, or
+    /// it was ignored.
+    Nothing,
+    Handler {
+        restarting: bool,
+    },
+}
+
+/// `settle` runs once, before any frame is built, on what is done with the
+/// signal claimed under the mask in force, a waiting syscall's own included.
+/// A stop settles nothing: after `SIGCONT` whatever is pending then is claimed.
+/// With nothing to handle, a wait's swapped mask is reinstated and a signal it
+/// unblocks is delivered at once, ahead of any restart, as it would have been
+/// had the mask never changed.
 fn deliver_pending_signal_core(
     current: &slopos_sched::task_struct::Current,
     regs: &mut impl UserRegView,
-    settle: impl FnOnce(bool),
+    settle: impl FnOnce(Delivered),
 ) {
     let task_ref = current.task();
-
-    let disposition = claim_pending_signal(task_ref);
-    settle(!matches!(
-        &disposition,
-        SignalDisposition::Handle { action, .. } if (action.flags & SA_RESTART) == 0
-    ));
-    let (signum, bit, action, saved_mask, taken, fault) = match disposition {
-        SignalDisposition::Done => {
-            // A task marked for death leaves here rather than returning to
-            // userland; the mark is deliberately not a signal. This frame
-            // returns to CPL3 off an exception stack and owns no Rust value,
-            // so abandoning it across the switch leaks nothing.
-            if task_ref.is_killed() {
-                let task_id = task_ref.task_id;
+    let mut settle = Some(settle);
+    loop {
+        let disposition = claim_pending_signal(task_ref);
+        if !matches!(disposition, SignalDisposition::Stop { .. })
+            && let Some(settle) = settle.take()
+        {
+            settle(match &disposition {
+                SignalDisposition::Handle(handling) => Delivered::Handler {
+                    restarting: handling.action.flags & SA_RESTART != 0,
+                },
+                _ => Delivered::Nothing,
+            });
+        }
+        match disposition {
+            SignalDisposition::Stop { signum } => {
+                // Parks this task's whole thread group, this task last, and
+                // does not return until a `SIGCONT` resumes it.
+                let _ = task_group_stop(task_ref.task_id, signum);
+                continue;
+            }
+            SignalDisposition::Done => {
+                if let Some(mask) = task_ref.take_restore_sigmask() {
+                    slopos_sched::task::task_set_signal_blocked(task_ref, mask & !SIG_UNCATCHABLE);
+                    continue;
+                }
+                // A task marked for death leaves here rather than returning to
+                // userland; the mark is deliberately not a signal. This frame
+                // returns to CPL3 off an exception stack and owns no Rust
+                // value, so abandoning it across the switch leaks nothing.
+                if task_ref.is_killed() && task_terminate(task_ref.task_id) == 0 {
+                    schedule();
+                }
+            }
+            SignalDisposition::Terminate(task_id) => {
+                let _ = task_group_fatal_signal(task_id, task_ref.exit_signal());
                 if task_terminate(task_id) == 0 {
                     schedule();
                 }
             }
-            return;
+            SignalDisposition::Handle(handling) => push_handler(current, regs, handling),
         }
-        SignalDisposition::Terminate(task_id) => {
-            let _ = task_group_fatal_signal(task_id, task_ref.exit_signal());
-            if task_terminate(task_id) == 0 {
-                schedule();
-            }
-            return;
-        }
-        SignalDisposition::Stop { signum } => {
-            // Parks this task's whole thread group, this task last, and does
-            // not return until a `SIGCONT` resumes it.
-            let _ = task_group_stop(task_ref.task_id, signum);
-            return;
-        }
-        SignalDisposition::Handle {
-            signum,
-            bit,
-            action,
-            saved_mask,
-            taken,
-            fault,
-        } => (signum, bit, action, saved_mask, taken, fault),
-    };
+        return;
+    }
+}
+
+#[inline(never)]
+fn push_handler(
+    current: &slopos_sched::task_struct::Current,
+    regs: &mut impl UserRegView,
+    handling: Handling,
+) {
+    let task_ref = current.task();
+    let Handling {
+        signum,
+        bit,
+        action,
+        saved_mask,
+        restores_wait_mask,
+        taken,
+        fault,
+    } = handling;
 
     let regs_snapshot = regs.snapshot();
     let fault_signal = fault.is_some();
@@ -1175,6 +1268,9 @@ fn deliver_pending_signal_core(
     // `force_sigsegv` does — a signal retried forever is never reported. So
     // does one whose queue has no room left to take it back.
     let refuse = |task_ref: &Task| {
+        if restores_wait_mask {
+            slopos_sched::task::task_set_signal_blocked(task_ref, saved_mask & !SIG_UNCATCHABLE);
+        }
         // Killed while the frame waited for memory, perhaps as the victim:
         // it dies of the kill, not of the push.
         if task_ref.is_killed() {
@@ -1255,7 +1351,7 @@ fn deliver_pending_signal_core(
         let _ = task_ref.set_signal_action((signum - 1) as usize, SignalAction::default());
     }
 
-    let mut blocked = saved_mask | action.mask;
+    let mut blocked = task_ref.signal_blocked() | action.mask;
     if (action.flags & SA_NODEFER) == 0 {
         blocked |= bit;
     }
@@ -1314,12 +1410,12 @@ pub fn deliver_pending_signal(
     deliver_pending_signal_core(current, &mut UserContextRegs { ctx: user_ctx }, |_| {});
 }
 
-/// [`deliver_pending_signal`] on a syscall's way out: `settle(true)` restarts
-/// the syscall, `settle(false)` fails it with `EINTR`.
-pub fn deliver_pending_signal_on_syscall_exit(
+/// [`deliver_pending_signal`] on a syscall's way out, handing `settle` what it
+/// did before any frame is built.
+pub(crate) fn deliver_pending_signal_on_syscall_exit(
     current: &slopos_sched::task_struct::Current,
     user_ctx: &UserContext,
-    settle: impl FnOnce(bool),
+    settle: impl FnOnce(Delivered),
 ) {
     deliver_pending_signal_core(current, &mut UserContextRegs { ctx: user_ctx }, settle);
 }

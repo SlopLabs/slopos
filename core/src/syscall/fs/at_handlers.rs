@@ -34,6 +34,14 @@ fn reject_unknown(flags: u32, allowed: u32) -> Result<(), Errno> {
     }
 }
 
+fn creation_mode(mode: u32) -> u16 {
+    let umask = slopos_sched::task_struct::Current::get()
+        .map_or(slopos_ostd::task::fs_context::DEFAULT_UMASK, |current| {
+            current.task().umask()
+        });
+    (mode & 0o7777 & !umask) as u16
+}
+
 #[inline(never)]
 pub(crate) fn open_at(
     table: FdTable,
@@ -43,14 +51,7 @@ pub(crate) fn open_at(
     mode: u32,
 ) -> Result<u64, Errno> {
     let resolve = open_resolve_flags(flags, path);
-    let fd = file_open_at(
-        table,
-        path,
-        cwd,
-        flags,
-        resolve,
-        Some((mode & 0o7777) as u16),
-    );
+    let fd = file_open_at(table, path, cwd, flags, resolve, Some(creation_mode(mode)));
     if fd < 0 {
         Err(errno_from_neg(fd))
     } else {
@@ -61,7 +62,7 @@ pub(crate) fn open_at(
 /// The mode goes on the inode `create` returned: re-resolving the name to
 /// chmod it can land on a replacement, or on a symlink's target.
 pub(crate) fn mkdir_at(path: &[u8], cwd: &[u8], mode: u32) -> Result<(), Errno> {
-    slopos_fs::vfs::vfs_mkdir_at(path, cwd, Some((mode & 0o7777) as u16)).map_err(|e| e.to_errno())
+    slopos_fs::vfs::vfs_mkdir_at(path, cwd, Some(creation_mode(mode))).map_err(|e| e.to_errno())
 }
 
 /// `mknodat(2)` for regular files and FIFOs, the only nodes stored here. Device
@@ -73,7 +74,7 @@ pub(crate) fn mknod_at(path: &[u8], cwd: &[u8], mode: u32) -> Result<(), Errno> 
         S_IFCHR | S_IFBLK | S_IFSOCK => return Err(Errno::EPERM),
         _ => return Err(Errno::EINVAL),
     };
-    slopos_fs::vfs::vfs_mknod_at(path, cwd, file_type, (mode & 0o7777) as u16)
+    slopos_fs::vfs::vfs_mknod_at(path, cwd, file_type, creation_mode(mode))
         .map_err(|e| e.to_errno())
 }
 

@@ -4,13 +4,14 @@
 //! non-volatile UEFI variable says which stage the last boot reached.
 //!
 //! 0 (booted `slopos-a`): with a workspace at `/src/slopos`, check out the
-//!   host's `HEAD` there, build the tests kernel under a fresh build tag,
-//!   install it into slot b and return the tree to its own checkout; without
-//!   one, clone slot a into b. Boot b once.
-//! 1 (booted `slopos-b`, default still a): the running kernel carries the tag
-//!   stage 0 built it with, if it built one, and then commits a change on the
-//!   host's `HEAD` and pushes it to the host; commit b, boot `slopos-bad` once
-//!   — a kernel whose command line panics it with `panic=reboot` — and reboot.
+//!   host's `HEAD` there, build the tests kernel and base under a fresh build
+//!   tag, install them into slot b and return the tree to its own checkout;
+//!   without one, clone slot a into b. Boot b once.
+//! 1 (booted `slopos-b`, default still a): the running kernel and base carry
+//!   the tag stage 0 built them with, if it built them, and the kernel then
+//!   commits a change on the host's `HEAD` and pushes it to the host; commit
+//!   b, boot `slopos-bad` once — a kernel whose command line panics it with
+//!   `panic=reboot` — and reboot.
 //! 2 (booted `slopos-b` again): the panic reset back to the default.
 //!
 //! Without a boot disk it has nothing to do and passes, as `toolchain_test`
@@ -32,14 +33,16 @@ use slopos_userland::syscall::numbers::{
 use std::process::Command;
 use std::time::Instant;
 
+const BASE_TAG_FILE: &str = "/usr/share/slopos/build-tag";
+
 /// A GUID of SlopOS's own for the stage counter:
 /// 5a1b0b05-5105-4e57-a11e-0000000000a1.
 const SLOPOS_GUID: [u8; 16] = [
     0x05, 0x0b, 0x1b, 0x5a, 0x05, 0x51, 0x57, 0x4e, 0xa1, 0x1e, 0, 0, 0, 0, 0, 0xa1,
 ];
 const STAGE: &str = "SlopOSInstallTestStage";
-/// The build tag stage 0 gave the kernel it built, for stage 1 to find in
-/// `uname -v`.
+/// The build tag stage 0 gave the system it built, for stage 1 to find in
+/// `uname -v` and in the base.
 const TAG: &str = "SlopOSInstallTestTag";
 const ATTRS: u32 =
     EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
@@ -128,7 +131,9 @@ fn install_guest_build() -> Option<bool> {
     };
     println!("INSTALL-COMMIT {}", head.commit);
     let tag = format!("guest-{}", clock_gettime_ns());
-    let _ = std::fs::remove_file(format!("{root}/builddir/kernel-tests.elf"));
+    for built in ["kernel-tests.elf", "initramfs-tests.cpio"] {
+        let _ = std::fs::remove_file(format!("{root}/builddir/{built}"));
+    }
     let started = Instant::now();
     let status = selfhost(root, &["install", "tests"])
         .env("SLOPOS_BUILD_TAG", &tag)
@@ -254,6 +259,13 @@ fn boot_slot_install_commit_rollback() -> bool {
                     return false;
                 }
                 println!("INSTALL-BOOTED {version}");
+                match std::fs::read_to_string(BASE_TAG_FILE) {
+                    Ok(base) if base.trim() == tag => println!("INSTALL-BASE {tag}"),
+                    other => {
+                        note(&format!("slot b's base carries {other:?}, not {tag}"));
+                        return false;
+                    }
+                }
                 match push_guest_commit(&tag) {
                     Ok(commit) => println!("INSTALL-PUSHED {commit} install-test/{tag}"),
                     Err(why) => {

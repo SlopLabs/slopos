@@ -58,6 +58,9 @@ mod probe {
         fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
         fn strcmp(a: *const c_char, b: *const c_char) -> c_int;
         fn getpid() -> c_int;
+        fn fork() -> c_int;
+        fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+        fn _exit(status: c_int) -> !;
     }
 
     const LIB: &[u8] = b"/lib/libdltest.so\0";
@@ -221,6 +224,15 @@ mod probe {
             return 23;
         }
 
+        let register = sym(handle, b"dltest_register_fork_handlers\0");
+        if register.is_null() {
+            return 29;
+        }
+        let register: extern "C" fn() -> c_int = core::mem::transmute(register);
+        if register() != 0 {
+            return 30;
+        }
+
         // A second open is a second reference, so the first close keeps the
         // object mapped and only the second unloads it.
         let again = dlopen(LIB.as_ptr().cast(), RTLD_NOLOAD);
@@ -239,6 +251,15 @@ mod probe {
         // The object is gone, so nothing owns its addresses any more.
         if dladdr(add as *const c_void, &mut info) != 0 {
             return 28;
+        }
+        // A fork must not run its fork handlers, which point into the unmapped object.
+        let child = fork();
+        if child == 0 {
+            _exit(0);
+        }
+        let mut status = -1;
+        if child < 0 || waitpid(child, &mut status, 0) != child || status != 0 {
+            return 31;
         }
         0
     }

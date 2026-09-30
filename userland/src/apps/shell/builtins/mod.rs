@@ -156,6 +156,14 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         func: fs::cmd_cd,
     },
     BuiltinEntry {
+        name: "umask",
+        desc: "File creation mask",
+        usage: "umask [-S] [mask]",
+        detail: "Print the file creation mask in octal, or with -S as\nthe permissions it leaves. Set it from an octal mask\nor a symbolic mode: umask u=rwx,go=rx is umask 022.",
+        category: Filesystem,
+        func: fs::cmd_umask,
+    },
+    BuiltinEntry {
         name: "pwd",
         desc: "Print working directory",
         usage: "pwd",

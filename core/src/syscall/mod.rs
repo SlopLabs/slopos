@@ -14,6 +14,7 @@ pub mod net_config_handlers;
 pub mod net_handlers;
 pub mod net_query_handlers;
 pub mod pidfd_handlers;
+pub mod priority_handlers;
 pub mod process_handlers;
 pub mod result;
 pub mod ring_handlers;

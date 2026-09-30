@@ -88,6 +88,7 @@ pub const ENOPROTOOPT: Errno = Errno(92);
 pub const EPROTONOSUPPORT: Errno = Errno(93);
 pub const ESOCKTNOSUPPORT: Errno = Errno(94);
 pub const EOPNOTSUPP: Errno = Errno(95);
+pub const ENOTSUP: Errno = EOPNOTSUPP;
 pub const EAFNOSUPPORT: Errno = Errno(97);
 pub const EADDRINUSE: Errno = Errno(98);
 pub const EADDRNOTAVAIL: Errno = Errno(99);

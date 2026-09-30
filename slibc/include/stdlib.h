@@ -74,6 +74,7 @@ void __cxa_finalize(void *dso);
 int __cxa_thread_atexit_impl(void (*dtor)(void *), void *arg, void *dso);
 int atoi(const char *s);
 long atol(const char *s);
+long long atoll(const char *s);
 long strtol(const char *s, char **endptr, int base);
 unsigned long strtoul(const char *s, char **endptr, int base);
 int putenv(char *string);
@@ -97,6 +98,13 @@ unsigned long long strtoull_l(const char *s, char **endptr, int base, locale_t l
 int mkstemp(char *tmpl);
 int mkostemp(char *tmpl, int flags);
 char *mkdtemp(char *tmpl);
+char *mktemp(char *tmpl);
+int getloadavg(double *loadavg, int nelem);
+int posix_openpt(int flags);
+int grantpt(int fd);
+int unlockpt(int fd);
+char *ptsname(int fd);
+int ptsname_r(int fd, char *buf, size_t buflen);
 
 #ifdef __cplusplus
 }

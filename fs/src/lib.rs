@@ -14,6 +14,7 @@ pub const MAX_NAME_LEN: usize = slopos_abi::fs::USER_NAME_MAX;
 /// post-4.2 whole-path budget, not a per-component recursion limit.
 pub const MAX_SYMLINK_FOLLOWS: u32 = 40;
 
+pub mod basefs;
 pub mod blockdev;
 pub mod cpio;
 pub mod devfs;

@@ -1,4 +1,5 @@
-//! A process's filesystem context: its working directory.
+//! A process's filesystem context: its working directory and the mask a
+//! file it creates takes its mode through.
 //!
 //! One [`FsContext`] is shared through `CLONE_FS` (every thread of a process),
 //! so a `chdir` from any sharer moves all; `fork` and spawn copy it. The path
@@ -6,7 +7,8 @@
 //! the old path or the new one, never a mix.
 
 #[cfg(any(test, feature = "test-helpers"))]
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::sync::RcuArcSlot;
 use crate::{AllocError, KArc, KVec};
@@ -44,9 +46,13 @@ pub fn fail_next_cwd_alloc_for_test() {
     CWD_ALLOC_FAILS.store(true, Ordering::Release);
 }
 
+/// The mask a process starts with, as on every Unix.
+pub const DEFAULT_UMASK: u32 = 0o022;
+
 /// The filesystem state `CLONE_FS` shares. An empty slot is `/`.
 pub struct FsContext {
     cwd: RcuArcSlot<CwdPath>,
+    umask: AtomicU32,
 }
 
 impl FsContext {
@@ -58,6 +64,7 @@ impl FsContext {
         };
         let mut fresh = Self {
             cwd: RcuArcSlot::empty(),
+            umask: AtomicU32::new(DEFAULT_UMASK),
         };
         let _ = fresh.cwd.replace_exclusive(cwd);
         KArc::try_new(fresh)
@@ -69,9 +76,19 @@ impl FsContext {
     pub fn try_copy(&self) -> Result<KArc<Self>, AllocError> {
         let mut fresh = Self {
             cwd: RcuArcSlot::empty(),
+            umask: AtomicU32::new(self.umask()),
         };
         let _ = fresh.cwd.replace_exclusive(self.cwd.load());
         KArc::try_new(fresh)
+    }
+
+    pub fn umask(&self) -> u32 {
+        self.umask.load(Ordering::Relaxed)
+    }
+
+    /// Set every sharer's mask to `mask`'s permission bits; answers the old.
+    pub fn swap_umask(&self, mask: u32) -> u32 {
+        self.umask.swap(mask & 0o777, Ordering::Relaxed)
     }
 
     /// Move every sharer to `path`. False if `path` does not fit with its

@@ -1051,6 +1051,18 @@ define_syscall!(syscall_fchdir
     store_cwd(&canon)
 });
 
+define_syscall!(syscall_umask
+    (ctx, mask: u64) cap(NoneSelf)
+    -> Result<u64, Errno>
+{
+    let current = Current::get().ok_or(Errno::EINVAL)?;
+    current
+        .task()
+        .swap_umask(&current, mask as u32)
+        .map(u64::from)
+        .ok_or(Errno::ENOMEM)
+});
+
 fn store_cwd(canon: &CanonPath) -> Result<(), Errno> {
     let current = Current::get().ok_or(Errno::EINVAL)?;
     if !current.task().set_cwd(&current, canon.as_bytes()) {

@@ -17,6 +17,10 @@ set -euo pipefail
 #
 # Needs a tests userland build in `BUILD_DIR` (default builddir) and the C++
 # runtime (`scripts/make_slopos_cxx.sh`).
+#
+# The wrappers run each compile through `SLOPOS_CROSS_LAUNCHER` when it is set
+# (`ccache`): a cache answers with what the compiler would, so no stamp
+# records it.
 
 SELF="make_slopos_cross"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -180,7 +184,7 @@ if [ "\$linking" -eq 0 ]; then
                 ;;
         esac
     done
-    exec $compiler \$cflags "\$@"
+    exec \${SLOPOS_CROSS_LAUNCHER:-} $compiler \$cflags "\$@"
 fi
 
 # A link may carry sources (CMake's \`try_compile\`): compile them for SlopOS
@@ -231,15 +235,17 @@ tmp="\$(mktemp -d)"
 trap 'rm -rf "\$tmp"' EXIT INT TERM
 for source in \$sources; do
     obj="\$tmp/\$(printf '%s' "\$source" | tr '/.' '__').o"
-    $compiler \$cflags \$compile_args -c "\$source" -o "\$obj"
+    \${SLOPOS_CROSS_LAUNCHER:-} $compiler \$cflags \$compile_args -c "\$source" -o "\$obj"
     objects="\$objects \$obj"
 done
 [ -n "\$output" ] || output=a.out
 
 # Objects ahead of \`-l\` and \`.a\`: archive resolution is order-sensitive.
+# The sysroot's directory is searched after the caller's, as a driver's
+# library paths are: bash's own \`-lbuiltins\` is not compiler-rt's.
 set -- --target=$HOST_TRIPLE --sysroot="\$sysroot" --gcc-toolchain="\$sysroot" -fuse-ld=lld -nostdlib \\
-    -Wno-unused-command-line-argument -L"\$sysroot/lib" \\
-    \$objects \$link_args -o "\$output" -Wl,--eh-frame-hdr
+    -Wno-unused-command-line-argument \\
+    \$objects \$link_args -L"\$sysroot/lib" -o "\$output" -Wl,--eh-frame-hdr
 if [ "\$shared" -eq 0 ]; then
     set -- -no-pie "\$@" -Wl,--image-base=0x400000 "\$sysroot/lib/crt0.o"
 fi

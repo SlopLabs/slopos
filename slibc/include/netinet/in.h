@@ -9,6 +9,8 @@
 
 #include <sys/socket.h>
 
+#define IN6ADDR_ANY_INIT { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }
+#define IN6ADDR_LOOPBACK_INIT { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } }
 #define __SLIBC_IN6_ZERO8(a) (((a)->s6_addr[0] | (a)->s6_addr[1] | (a)->s6_addr[2] | (a)->s6_addr[3] | (a)->s6_addr[4] | (a)->s6_addr[5] | (a)->s6_addr[6] | (a)->s6_addr[7]) == 0)
 #define IN6_IS_ADDR_UNSPECIFIED(a) (__SLIBC_IN6_ZERO8(a) && (((a)->s6_addr[8] | (a)->s6_addr[9] | (a)->s6_addr[10] | (a)->s6_addr[11] | (a)->s6_addr[12] | (a)->s6_addr[13] | (a)->s6_addr[14] | (a)->s6_addr[15]) == 0))
 #define IN6_IS_ADDR_LOOPBACK(a) \
@@ -27,6 +29,10 @@
 #define IN6_IS_ADDR_MC_SITELOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x5)
 #define IN6_IS_ADDR_MC_ORGLOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x8)
 #define IN6_IS_ADDR_MC_GLOBAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0xe)
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef unsigned int in_addr_t;
 typedef unsigned short in_port_t;
@@ -58,9 +64,39 @@ struct sockaddr_in6 {
     struct in6_addr sin6_addr;
     unsigned int sin6_scope_id;
 };
+struct ipv6_mreq {
+    struct in6_addr ipv6mr_multiaddr;
+    unsigned int ipv6mr_interface;
+};
+struct ip_mreq_source {
+    struct in_addr imr_multiaddr;
+    struct in_addr imr_interface;
+    struct in_addr imr_sourceaddr;
+};
+struct group_req {
+    unsigned int gr_interface;
+    struct sockaddr_storage gr_group;
+};
+struct group_source_req {
+    unsigned int gsr_interface;
+    struct sockaddr_storage gsr_group;
+    struct sockaddr_storage gsr_source;
+};
 
 #define INET_ADDRSTRLEN (16)
 #define INET6_ADDRSTRLEN (46)
+#define IP_UNBLOCK_SOURCE (37)
+#define IP_BLOCK_SOURCE (38)
+#define IP_ADD_SOURCE_MEMBERSHIP (39)
+#define IP_DROP_SOURCE_MEMBERSHIP (40)
+#define MCAST_JOIN_GROUP (42)
+#define MCAST_BLOCK_SOURCE (43)
+#define MCAST_UNBLOCK_SOURCE (44)
+#define MCAST_LEAVE_GROUP (45)
+#define MCAST_JOIN_SOURCE_GROUP (46)
+#define MCAST_LEAVE_SOURCE_GROUP (47)
+#define IPV6_JOIN_GROUP (20)
+#define IPV6_LEAVE_GROUP (21)
 #define INADDR_ANY (0)
 #define INADDR_BROADCAST (0xffffffff)
 #define INADDR_LOOPBACK (0x7f000001)
@@ -85,5 +121,12 @@ struct sockaddr_in6 {
 #define IP_MULTICAST_TTL (33)
 #define IP_TOS (1)
 #define IP_TTL (2)
+
+extern const struct in6_addr in6addr_any;
+extern const struct in6_addr in6addr_loopback;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_NETINET_IN_H */

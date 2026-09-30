@@ -294,6 +294,14 @@ pub const SYSCALL_CHMOD: u64 = 90;
 /// `fchmod(fd, mode)` — permission bits of an open descriptor.
 pub const SYSCALL_FCHMOD: u64 = 91;
 
+/// `umask(mask) -> old` — set the calling process's file creation mask to
+/// `mask & 0o777`, answering the one it replaces.
+pub const SYSCALL_UMASK: u64 = 95;
+
+/// `sysinfo(info: *mut Sysinfo)` — uptime, the load averages, memory totals
+/// and the number of tasks.
+pub const SYSCALL_SYSINFO: u64 = 99;
+
 /// `getuid()` — always 0; SlopOS is single-user.
 pub const SYSCALL_GETUID: u64 = 102;
 
@@ -337,6 +345,11 @@ pub const SYSCALL_RT_SIGTIMEDWAIT: u64 = 128;
 /// aimed at another process; `EAGAIN` past the realtime queue limit.
 pub const SYSCALL_RT_SIGQUEUEINFO: u64 = 129;
 
+/// `rt_sigsuspend(mask: *const SigSet, sigsetsize)` — wait with `mask` blocked
+/// until a signal is caught; always `EINTR`. The previous mask is back once the
+/// handler returns.
+pub const SYSCALL_RT_SIGSUSPEND: u64 = 130;
+
 /// `sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack)` —
 /// nominate a stack for `SA_ONSTACK` handlers.
 pub const SYSCALL_SIGALTSTACK: u64 = 131;
@@ -353,6 +366,15 @@ pub const SYSCALL_STATFS: u64 = 137;
 /// `fstatfs(fd, out: *mut UserStatfs)` — as [`SYSCALL_STATFS`] for the mount an
 /// open descriptor lives on.
 pub const SYSCALL_FSTATFS: u64 = 138;
+
+/// `getpriority(which, who) -> 20 - nice` — the lowest nice value among the
+/// tasks `which` (`PRIO_PROCESS`, `PRIO_PGRP`, `PRIO_USER`) and `who` name, 0
+/// naming the caller's own.
+pub const SYSCALL_GETPRIORITY: u64 = 140;
+
+/// `setpriority(which, who, nice)` — record `nice`, clamped to -20..=19, for
+/// every task named; below both 0 and a task's own it needs `TASK_FLAG_SYSTEM`.
+pub const SYSCALL_SETPRIORITY: u64 = 141;
 
 /// `vhangup()` — revoke the caller's controlling terminal; every other fd
 /// referencing that TTY then fails with `EIO`. `-EPERM` without a ctty.
@@ -462,6 +484,18 @@ pub const SYSCALL_FCHMODAT: u64 = 268;
 /// `faccessat(dirfd, path: *const u8, mode)` —
 /// [`SYSCALL_FACCESSAT2`] with no flags.
 pub const SYSCALL_FACCESSAT: u64 = 269;
+
+/// `pselect6(nfds, readfds, writefds, exceptfds, timeout: *mut Timespec,
+/// sig: *const [u64; 2])` — [`SYSCALL_SELECT`] with a nanosecond timeout, and
+/// `sig`, when not null, a `{ mask: *const SigSet, sigsetsize }` pair: that
+/// mask is blocked for the wait alone, swapped in and out atomically with it.
+pub const SYSCALL_PSELECT6: u64 = 270;
+
+/// `ppoll(fds: *mut UserPollFd, nfds, timeout: *mut Timespec,
+/// mask: *const SigSet, sigsetsize)` — [`SYSCALL_POLL`] with a nanosecond
+/// timeout it hands back what remains of, as [`SYSCALL_PSELECT6`] does, and a
+/// mask for the wait alone.
+pub const SYSCALL_PPOLL: u64 = 271;
 
 /// `utimensat(dirfd, path: *const u8, times: *const [Timespec; 2], flags)`.
 /// `UTIME_NOW`/`UTIME_OMIT` in `tv_nsec` select per-field behaviour; a NULL

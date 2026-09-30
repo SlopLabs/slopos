@@ -444,3 +444,45 @@ pub fn vfs_init_builtin_filesystems() -> VfsResult<()> {
 pub fn vfs_is_initialized() -> bool {
     VFS_INIT.is_set()
 }
+
+/// Mount the base's directory `dir` at the same path of the root, read-only
+/// and pinned, making the mount point if the root lacks it. `NotFound` when
+/// the base holds no such directory.
+pub fn vfs_mount_base_dir(dir: &[u8]) -> VfsResult<()> {
+    let base = &crate::basefs::BASE_FS;
+    let inode = base.resolve(dir)?;
+    if base.stat(inode)?.file_type != crate::vfs::traits::FileType::Directory {
+        return Err(VfsError::NotDirectory);
+    }
+    let mut at = 0;
+    while let Some(next) = dir[at + 1..].iter().position(|&b| b == b'/') {
+        at += next + 1;
+        make_dir(&dir[..at])?;
+        pin_dir(&dir[..at])?;
+    }
+    make_dir(dir)?;
+    crate::vfs::mount::mount_subtree(
+        dir,
+        base,
+        inode,
+        MOUNT_RDONLY | crate::vfs::mount::MOUNT_PINNED,
+    )
+}
+
+/// A symlink on the way would take the walk past the mount point, so the base
+/// refuses a root that has one where it goes.
+fn pin_dir(path: &[u8]) -> VfsResult<()> {
+    let held =
+        crate::vfs::path::resolve_path_at(path, b"/", crate::vfs::path::RESOLVE_NOFOLLOW_FINAL)?;
+    if held.fs.stat(held.inode)?.file_type != crate::vfs::traits::FileType::Directory {
+        return Err(VfsError::NotDirectory);
+    }
+    crate::vfs::mount::pin_dir(held.fs, held.inode)
+}
+
+fn make_dir(path: &[u8]) -> VfsResult<()> {
+    match crate::vfs::ops::vfs_mkdir(path) {
+        Ok(()) | Err(VfsError::AlreadyExists) => Ok(()),
+        Err(e) => Err(e),
+    }
+}

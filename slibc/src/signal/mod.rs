@@ -16,7 +16,7 @@ pub mod wait;
 use core::ffi::{c_char, c_int, c_uint};
 use core::mem;
 
-use crate::errno::{EINTR, EINVAL, errno_set};
+use crate::errno::{EINVAL, errno_set};
 use crate::pal::slopos::signal_restorer_addr;
 use crate::pal::{Pal, Sys};
 use crate::types::{sigaction as SigAction, sigset_t, sigval, stack_t};
@@ -78,8 +78,9 @@ pub const SS_DISABLE: c_int = slopos_abi::signal::SS_DISABLE as c_int;
 
 pub type SigHandler = unsafe extern "C" fn(i32);
 
-/// The kernel's `sigsetsize` argument: it accepts 8 and nothing else.
-const SIGSET_SIZE: usize = mem::size_of::<u64>();
+/// The kernel's `sigsetsize` argument: it accepts its own set's size and
+/// nothing else.
+pub(crate) const SIGSET_SIZE: usize = mem::size_of::<slopos_abi::signal::SigSet>();
 
 const SIGNAL_MAX: c_int = crate::types::NSIG - 1;
 
@@ -121,9 +122,9 @@ pub unsafe extern "C" fn signal(signum: c_int, handler: usize) -> usize {
 /// Examine or change a signal action.
 ///
 /// The libc-declared `sa_mask` is 128 bytes and the kernel's is 8, which hold
-/// every signal that exists. `sa_restorer` is injected when the caller left it
-/// null and the handler is catchable — without one the kernel refuses the
-/// install.
+/// every signal that exists. A catchable handler returns through slibc's own
+/// restorer whatever the caller's `sa_restorer` holds, as glibc and musl have
+/// it: the field is no part of POSIX, so a C caller leaves it uninitialised.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(
     signum: c_int,
@@ -145,11 +146,10 @@ pub unsafe extern "C" fn sigaction(
         // `SA_RESETHAND` has bit 31 set, so the widening must go through u32.
         kernel_act.sa_flags = a.sa_flags as u32 as u64;
         kernel_act.sa_mask = a.sa_mask.kernel_mask();
-        kernel_act.sa_restorer = match a.sa_restorer {
-            Some(f) => f as *const () as u64,
-            None if is_catchable_handler(kernel_act.sa_handler) => signal_restorer_addr(),
-            None => 0,
-        };
+        if is_catchable_handler(kernel_act.sa_handler) {
+            kernel_act.sa_restorer = signal_restorer_addr();
+            kernel_act.sa_flags |= slopos_abi::signal::SA_RESTORER;
+        }
         &raw const kernel_act as *const u8
     };
 
@@ -332,53 +332,18 @@ pub unsafe extern "C" fn sigpending(set: *mut sigset_t) -> c_int {
     0
 }
 
-/// Replace the mask and block until a signal arrives, then restore it.
-///
-/// There is no `pause(2)` here, but `nanosleep(2)` reports `EINTR` the moment
-/// a deliverable signal exists, so a repeated long sleep is the wait: the only
-/// difference from an unbounded one is that it wakes and re-sleeps every
-/// [`SIGSUSPEND_SLICE_SECS`].
+/// `sigsuspend(2)`: swap in `set` atomically and wait until a signal is
+/// caught; the previous mask is back once the handler has returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigsuspend(set: *const sigset_t) -> c_int {
     if set.is_null() {
         errno_set(EINVAL.raw());
         return -1;
     }
-
-    let mut saved = 0u64;
     let wanted = (*set).kernel_mask();
-    if let Err(e) = Sys::rt_sigprocmask(SIG_SETMASK, &raw const wanted, &raw mut saved, SIGSET_SIZE)
-    {
-        errno_set(e.raw());
-        return -1;
-    }
-
-    let slice = crate::time::Timespec {
-        tv_sec: SIGSUSPEND_SLICE_SECS,
-        tv_nsec: 0,
-    };
-    loop {
-        match Sys::nanosleep(&raw const slice, core::ptr::null_mut()) {
-            // A full slice elapsed with nothing pending: keep waiting.
-            Ok(()) => continue,
-            Err(_) => break,
-        }
-    }
-
-    let _ = Sys::rt_sigprocmask(
-        SIG_SETMASK,
-        &raw const saved,
-        core::ptr::null_mut(),
-        SIGSET_SIZE,
-    );
-    // `sigsuspend` has no success return: it always answers -1/EINTR once the
-    // handler has run.
-    errno_set(EINTR.raw());
+    errno_set(Sys::rt_sigsuspend(&raw const wanted, SIGSET_SIZE).raw());
     -1
 }
-
-/// How long one `sigsuspend` sleep lasts before it is re-armed.
-const SIGSUSPEND_SLICE_SECS: i64 = 3600;
 
 /// Send a signal to a process. Returns 0, or -1 with errno set.
 #[unsafe(no_mangle)]

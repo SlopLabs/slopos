@@ -108,7 +108,7 @@ LLVM_INPUTS="$({
     echo "flow $PROFILE_FLOW"
     tp_rustc_stamp "$REPO_ROOT"
     printf '%s\n' "$LLVM_PORT_STAMP"
-    cat "$SRC/library/.slopos-std-stamp"
+    cat "$SRC/library/$TP_STD_STAMP_NAME"
     "$CLANG" --version
     rbs_build_settings
     rbs_llvm_settings "$OUT/find-root"

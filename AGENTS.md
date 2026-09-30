@@ -81,12 +81,14 @@ check-offline-build`, in CI, checks the kernel and the userland from an empty
 for a missing crate. A new dependency is a `Cargo.lock` diff, a `just vendor`
 and a `NOTICE.md` entry.
 
-**The C++ runtime is cross-built and test-only.** `x86_64-unknown-slopos` has
-a C++ standard library: LLVM's `libc++` and `libc++abi`, cross-built from the
+**The C++ runtime is test-only.** `x86_64-unknown-slopos` has
+a C++ standard library: LLVM's `libc++` and `libc++abi`, built from the
 llvm-project release `toolchain/cxx/PIN` names, linked whole-archived into a
 single `third_party/slopos-cxx/lib/libc++.so`. `scripts/make_slopos_cxx.sh`
-builds it (idempotent: a stamp over the pin, the host compiler's version, the
-build script and `slibc/include` makes a warm run milliseconds),
+builds it on the host or in the guest, for the SlopOS platform
+`toolchain/cmake` describes to CMake (idempotent: a stamp over the pin, the
+compiler's version, the build script, the platform module and `slibc/include`
+makes a warm run milliseconds),
 `scripts/check_cxx_pin.sh`
 gates it, and `scripts/build_userland.sh --test` is the only caller — the
 shipped appliance root runs no C++ program, so the runtime is on the tests
@@ -116,8 +118,10 @@ everything but its own exports.
 **The llvm-project sources are patched too.** `toolchain/llvm/` is the SlopOS
 port — the two places LLVM dispatches on the OS with no default a new one can
 take, the `Triple` entry and clang target that make `__slopos__` a macro a
-compiler predefines, and `toolchains::SlopOS`, the clang driver that turns
-`cc a.o -o a` into the link line `build_userland.sh` writes by hand — pinned
+compiler predefines, `toolchains::SlopOS`, the clang driver that turns
+`cc a.o -o a` into the link line `build_userland.sh` writes by hand, and the
+`config.guess` entry that names a SlopOS machine to the runtimes' configure,
+which `make_slopos_cxx.sh` applies to the part of the tree it unpacks — pinned
 by checksum in `toolchain/cxx/PIN` beside the tarball it applies to,
 materialised by `scripts/make_slopos_llvm_src.sh` into the same
 `third_party/llvm-project-<version>.src` the runtime is built from (1.5 GB on
@@ -134,7 +138,7 @@ Fedora is at 20 with an `llvm18` compat tree, Debian 13 at 19, Ubuntu 24.04 at
 and the libc symbols `libc++.so` ends up needing, which is slibc's side of the
 contract, while the host compiler only codegens them. `clang_major_tested`
 records the majors that have built a green `just test` (18 in CI, 22 on a
-rolling host); a major outside it builds with a note on stderr, because
+rolling host, 23 in the guest, whose suite `just test-selfhost` runs); a major outside it builds with a note on stderr, because
 `cxx_test` and `cxx_static_probe` on the tests image are the functional gate,
 not a version string.
 
@@ -212,23 +216,38 @@ Mbed TLS, OpenSSL, curl, libssh2, libgit2 and git. `scripts/build_recipes.sh`
 `builddir/slopos-recipes/prefix`, with the
 target sysroot and `x86_64-unknown-slopos-clang{,++}` wrappers that
 `scripts/make_slopos_cross.sh` assembles for bootstrap too; tarballs are
-cached in `third_party/recipes/`, and the recipes add `meson`, `make`, `perl`
+cached in `third_party/recipes/`, and the recipes add `meson`, `make`, `perl`, `git`
 and `pkg-config` to the C++ runtime's host tools. A library is
-`$ORIGIN`-rpathed; a program
-(`program=`, git's `bin/git`) is built by the `meson` template with
-`--prefix` the guest path of the toolchain, because it finds its exec path,
-templates and system config through that compiled-in prefix, and its run path
-reaches `lib/` from `libexec/<name>/`. Bootstrap copies the libraries into
+`$ORIGIN`-rpathed; a program (`program=`) is built with `--prefix` the guest
+path of the toolchain, because git finds its exec path, templates and system
+config through that compiled-in prefix, and its run path reaches `lib/`. The
+programs are git (`meson`), CMake and Ninja (`cmake`), and bash
+(`autotools`: out of tree, `--host` the target, and the answers configure
+cannot find out without running a SlopOS program given as `*_cv_*` cache
+values). Bootstrap copies the libraries into
 the target sysroot and `build_recipes.sh --install-programs` copies the
 programs into the install, so both reach a root; only the libraries'
-stamps clear cargo. **No patch, ever:** a build that would need an edit to
-upstream is a slibc or kernel finding, fixed there — git's build is what
-brought `<utime.h>`, `<grp.h>`, `mkstemp`, `freopen`, `execl`, `getpass` and
-`pthread_setcancelstate` into slibc. `scripts/check_recipes.sh` holds the
+stamps clear cargo. The `cmake` template builds for `CMAKE_SYSTEM_NAME=SlopOS`,
+the platform `toolchain/cmake/Platform` describes. **A patch only teaches the
+target:** a build that would need any other edit to upstream is a slibc or
+kernel finding, fixed there — git's build is what brought `<utime.h>`,
+`<grp.h>`, `mkstemp`, `freopen`, `execl`, `getpass` and
+`pthread_setcancelstate` into slibc, and bash's, CMake's and Ninja's brought
+`ppoll`, `pselect`, `getloadavg`, `getopt_long` and `ttyname`. A
+recipe's `patch=` (`NNNN-slopos-<what>.patch`, hashed into its stamp) has the
+shape of one that teaches the target, which review holds it to: it only adds —
+a run of removed lines is replaced where it stood, line for line, by added
+lines that start with them — patches each file in one section, names SlopOS in
+a line every hunk adds or the path of a file it creates, and under CMake's
+`Modules/Platform` only creates `toolchain/cmake/Platform`'s files, byte for
+byte, which with the SlopOS backend of its bundled libuv is all CMake's
+carries. A diff carries upstream's own lines as context, so a recipe under a
+licence this tree may not hold the text of (GPL-2.0-only, CDDL) carries none.
+`scripts/check_recipes.sh` holds the
 shape and holds every `arg` and the OpenSSL target definition to a grammar
 that can carry no code (a flag, CMake script, launcher or search root edits
 what is built without touching a file); the driver fails any build that
-changes the unpacked tree. **Git links no OpenSSL:** git is GPL-2.0-only and
+changes the tree the patches leave. **Git links no OpenSSL:** git is GPL-2.0-only and
 OpenSSL 3 is Apache-2.0, so libcurl, git's HTTP transport and cargo's
 registry client, takes its TLS from Mbed TLS (`Apache-2.0 OR
 GPL-2.0-or-later`), and OpenSSL stays for libgit2 and libssh2 alone.
@@ -299,8 +318,8 @@ anything is written: the tree stays as it was, the build warns and goes on,
 and the next build tries again. A seed tree (`FS_SEED_TREES`) is the guest's
 once it is there and is copied only onto a root without its directory. The
 root is grown with `resize2fs` to hold both and keep `FS_FREE_FLOOR` free
-(`ROOT_FREE_FLOOR`, 4G: a clean dev and tests kernel build leaves 2.9G of
-target directory) on every build, not only one that changed something, and
+(`ROOT_FREE_FLOOR`, 6G: a clean dev and tests system build — kernels,
+userlands, bases and the C++ runtime — holds 3.8G of it) on every build, not only one that changed something, and
 carries a 64M log, the size its grown volume would get. `gen_verity.py`
 streams the image and reads only the blocks a seal attests, so a grown root
 costs what the host wrote rather than its size. A seal keeps what it attested,
@@ -324,7 +343,8 @@ developer's root it resolves its crates from crates.io, as the host does;
 `--vendored` adds the vendored crates in its ignored `third_party/vendor` and
 the offline vendor configuration in `/src/.cargo/config.toml`, above the tree,
 where cargo reads it for any directory below while the clone's own
-`.cargo/config.toml` stays as committed. The clone's `origin` is
+`.cargo/config.toml` stays as committed, and the llvm-project tarball the
+C++ runtime is built from, which the developer's clone fetches. The clone's `origin` is
 `git://10.0.2.4/slopos` and its `host` remote, the push default, is
 `git://10.0.2.4:9419/slopos`: with `GIT_PUSH_REPO` set, `qemu_run.sh` adds two
 SLIRP `guestfwd` rules, as for the echo peer, each running one `git daemon
@@ -343,7 +363,7 @@ down.
 
 **The heavy checks boot a root of their own.** `fs/assets/ext2-selfhost.img`
 (`just _fs-image-selfhost`), rebuilt every run as the tests image is, is the
-persistent root's shape with the tests userland on it: the toolchain at
+persistent root's shape, booted with the tests base: the toolchain at
 `/usr/local`, the clone seeded `--vendored`, so no build reads a registry,
 and at `/srv/ladder` the fixtures `scripts/stage_ladder_fixtures.sh` makes, a
 bare repository of one crate and a sparse registry of one crate with a fresh
@@ -360,34 +380,75 @@ served over loopback TLS and verified against its test root (the image's own
 CA bundle must refuse it first), clang compiling C and C++, git reading the
 clone and reaching the host's checkout, git cloning
 `https://github.com/SlopLabs/slopos` at depth 1, trusting the image's CA
-bundle once a root minted in the guest has been refused, and cargo resolving
+bundle once a root minted in the guest has been refused, cargo resolving
 that clone's lockfile and std's from crates.io over HTTPS — the two rungs that
-need the host's internet, as `dns_resolve_test` does. `reboot_clone_test`
+need the host's internet, as `dns_resolve_test` does — and then bash running a
+script with a pipeline, a background job and a here-document, Ninja running a graph and finding nothing left
+to do, and CMake configuring a C project for the SlopOS platform, generating
+for Ninja and building a program against a shared library it reaches by its
+run path. `reboot_clone_test`
 clones the workspace to `/home/clone` and commits there on one boot and, on
 the next boot of the same image, holds the clone to `git fsck --strict` and to a
 clean status over an index without stat data, which rehashes every file.
 
-**The kernel builds in the guest.** `scripts/build_kernel.sh` is POSIX sh
-that runs under `/bin/sh` with the coreutils and nothing else; what only
-the host has — `ensure_toolchain.sh` before, the ELF gates after
+**The whole tree builds in the guest.** `scripts/build_kernel.sh` is POSIX sh
+that runs under `/bin/sh` with the coreutils and nothing else;
+`scripts/build_userland.sh`, `make_slopos_cxx.sh` and `cxx_host_tools.sh`
+are bash, CMake, Ninja and clang, which the toolchain carries; the base image
+is packed by `tools/initramfs`. What only the host has —
+`ensure_toolchain.sh` before, the ELF gates after
 (`scripts/check_kernel_elf_gates.sh`) — lives in the justfile's `_kernel`
-recipe. The embedded symbol table comes from `tools/kallsyms`, an ELF reader
+and `_build-userland` recipes, which pass `cargo +slopos`; in the guest
+`build_userland.sh` finds std's fork by the `library/.slopos-std-stamp` the
+installed toolchain's rust-src carries, as the owned sysroot's does. Both
+build `compiler_builtins` one intrinsic per object, as std's own manifest
+does, because `-Zbuild-std` takes this workspace's profile: in ten objects,
+linking one intrinsic drags in the weak hidden libm routines beside it, and
+their visibility wins over the `floor` `libc.so` exports. Which programs a
+base carries is `scripts/lib/base.sh`, which the justfile and
+`scripts/selfhost.sh` both read. The embedded symbol table comes from
+`tools/kallsyms`, an ELF reader
 built for whichever machine runs the build, byte-identical to what `llvm-nm`
 gave less LLVM's `.llvm.<hash>` promotion suffix, which would keep a release
 table from ever reaching a fixed point; the driver writes the empty safestack runtime archive itself; and
 `trim-paths` keeps every absolute path out of the image. `just test-selfhost`
-is the whole loop: the guest builds the dev and tests kernels
-(`selfhost_test`), the host holds the root to `e2fsck`, exports both kernels,
-grades them with the ELF gates and runs the kernel suite on the tests kernel
-(`just test-elf`). The guest's kernel is not held to a host build's bytes:
+is the whole loop: the guest builds the dev and tests systems — kernel,
+userland and base (`selfhost_test`) — the host holds the root to `e2fsck`,
+exports both kernels and the tests base, grades the kernels with the ELF
+gates and runs the suite on the guest's tests kernel and base (`just test-elf
+ELF=… BASE=…`). The guest's artifacts are not held to a host build's bytes:
 the gates and the suite are the grade.
 
+**The system is the boot slot's.** Each slot of the boot disk's EFI system
+partition holds a kernel, `/boot/<slot>/kernel.elf`, and the base image it
+boots with, `/boot/<slot>/base.img`, which Limine loads as its module.
+`fs/src/basefs.rs` serves that `newc` archive where it lies: an index of its
+paths built at boot, a file's bytes a slice of the module, every inode sealed
+and nothing writable, so the base costs no copy. Each of
+`slopos_abi::fs::BASE_DIRS` — `/bin`, `/sbin`, `/lib`, `/usr/bin`,
+`/usr/share`, `/etc/ssl` — is mounted from it over whatever `/` is, the disk
+once `fs init` has made it the root or the RAM root, which holds only what the
+archive carries outside them: read-only and `MOUNT_PINNED`, so `umount(2)`
+refuses it and `mount(2)` puts nothing at or beneath it (`EPERM`). A directory
+on the way to one, `/usr` or `/etc`, is held by identity rather than by path:
+no mount of its filesystem may rename or remove it (`EBUSY`), and a root that
+has a symlink there gets no base and fails its boot. The
+boot log's `BOOT: base <path> (<n> bytes)` line says which base booted. The disk keeps what the
+machine wrote — `/etc`, `/var`, `/home`, `/src` — and `/usr/local`, where the
+toolchain and whatever the guest installs for itself live, live and without a
+reboot. `just boot`'s and the self-hosting root are built `FS_BASE=boot`,
+carrying the base directories only as sealed mount points; the tests and
+verified images carry a system of their own, which a disk root's base
+covers.
+
 **The guest installs what it builds.** `/bin/bootctl` (granted `Mount` for the
-raw partition and `Power` for the loader's variables) writes a kernel into a
-slot of the boot disk's EFI system partition through `fat-core`, a FAT32
+raw partition and `Power` for the loader's variables) writes a kernel and its
+base into a slot that is not the default, clearing a one-shot boot armed for
+that slot first, through `fat-core`, a FAT32
 implementation whose every file write is copy-on-write — the new contents go
-into free clusters and a single directory-entry store commits them, so neither
-a kernel nor `/limine.conf` is ever half replaced. It then sets
+into free clusters and a single directory-entry store commits them, so no
+kernel, base or `/limine.conf` is ever half replaced; the base goes first and
+each file is read back. It then sets
 `LoaderEntryOneShot`, which Limine consumes on the next boot, and after that
 boot `bootctl commit` makes the entry Limine reports in `LoaderEntrySelected`
 the default. A slot that panics resets under `panic=reboot`, and the reset lands
@@ -397,8 +458,10 @@ answers `EBUSY`. UEFI variables are read and written on a kernel thread — the
 firmware is mapped only into the kernel master address space and may use the
 vector registers — and only under the Boot Loader Interface's and SlopOS's own
 vendor GUIDs. In the guest, `scripts/selfhost.sh install` is the one
-command for the whole of it: it builds with the toolchain on `PATH`, installs
-into the slot that is not the default and arms the one-shot boot.
+command for the whole of it: it builds the kernel, the userland and the base
+with the toolchain on `PATH`, installs both into the slot that is not the
+default and arms the one-shot boot, so a system is tried, committed or rolled
+back whole.
 `selfhost_test` and `install_test` run that script as a person at the shell
 does, so the loop a developer types is the loop the tests grade.
 
@@ -425,7 +488,7 @@ outright.
 
 `just boot-live` and `just boot-log` boot `builddir/slop.iso` with `BOOT_CMDLINE` as its command line, plus `boot.debug=on` under `DEBUG=1` and `roulette=skip` under `ROULETTE=0`; `VIDEO=0` makes `just boot` and `just boot-live` serial-only.
 
-**The disk is the root.** `root=auto` mounts a writable `disk0` at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=` also accepts `initramfs`, `virtio`, and a device name — `/dev/vda`, `/dev/vda1`, `vdb2` — where the partition comes from the GPT or MBR table on that device; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's binaries and toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
+**The disk is the root.** `root=auto` mounts a writable `disk0` at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=` also accepts `initramfs`, `virtio`, and a device name — `/dev/vda`, `/dev/vda1`, `vdb2` — where the partition comes from the GPT or MBR table on that device; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
 **The root is not the only filesystem.** `mount(2)` with `fstype=ext2` takes a
 `source` naming a block device — `mount("/dev/vdb1", "/home", "ext2", …)` —
@@ -683,7 +746,7 @@ The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-re
 - **`scripts/check_offline_build.sh`** — holds the tree to building with no registry. Two silent failures: `Cargo.lock` moves and the vendored copy no longer describes it, which every host build survives because the host has a registry, and the self-hosting root arrives with a tree its own cargo cannot resolve; and `-Zbuild-std` needs std's crates.io dependencies, which cargo resolves from a lockfile the workspace never reads, so a directory holding only the workspace's crates passes every check but a build. The pins half also fails on a vendored package no lockfile names, since that is a pin nobody reviews, and on a vendored `library.lock` that is not std's, since that copy is what the self-hosting root's guest grades its tree against. `--self-test` grades six fixtures, five of them rejections. The build half is 63 s cold on four cores and ~30 s warm; `skipped` without `third_party/vendor`, `--require` in CI.
 - **`scripts/check_codegen_backend.sh`** — holds a rustc codegen backend to seven of the capabilities `targets/x86_64-slos.json` depends on: an ELF object format, soft-float, `.stack_sizes`, safestack instrumentation through `__safestack_pointer_address`, `#[unsafe(link_section)]`, `#[unsafe(naked)]`, and `sym` operands in `asm!`. Two of those are flags a backend can *accept and ignore* — `-Zemit-stack-sizes` and `-Zsanitizer=safestack` — so a backend swap can leave the build green with S-5 and the dual-stack split enforced by nothing. Tracked verdicts live in `scripts/gates/codegen/<backend>.txt` and a mismatch fails **in either direction**: a `lacks` the probe finds present is the signal that the self-hosting question in `plans/self-hosting.md` needs re-deciding. `disable-redzone` and the `unwind` panic strategy are stated as residual rather than probed — the gate's header says why. Cold it costs ~60 s and ~460 MB for `llvm` / ~310 MB for `cranelift` under `builddir/gates/codegen-probe/` (which `just clean` removes); warm it is ~1 s. `llvm` is graded on every `just check-framekernel-gates`; `cranelift` reports `skipped` when the rustup component is absent, and CI installs it after the gates, in the same job, so the answer is re-taken rather than assumed.
 - **`scripts/check_linker_script.sh`** — holds a linker to the eighteen linker-script constructs `link.ld` uses, from `. = KERNEL_VIRT_BASE` through `PHDRS`, `(NOLOAD)`, all three spellings of `ALIGN`, `KEEP` under `--gc-sections` and the four page-table reservations past `_bss_end`. Each probe's script carries the construct under test and nothing else a probe grades — a script that scaffolds itself with an `ALIGN` reports the linker's `ALIGN` support under whatever name that probe carries — with one deliberate exception, `composed-layout`, which links a `link.ld`-shaped script because a linker can take every construct alone and compose them differently. That exception is what the gate is built around: wild 0.10.0 refuses `link.ld` on its location-counter assignment, and given the shape it does accept it keeps the script's section order and still starts the image 0x13e8 past the base it was given. A second, self-maintaining half compares the constructs probed against the keywords `link.ld` actually uses, so a construct added to the script with no probe fails the gate and a probe whose construct left the script fails as a dead entry. `scripts/gates/linker/<linker>.txt`; `lld` is graded on every `just check-framekernel-gates`, `wild` reports `skipped` when it is not installed and is pinned in the CI job that installs it.
-- **`scripts/check_recipes.sh`** — holds every recipe under `toolchain/recipes/` to a pinned upstream tarball built unmodified: one 64-hex `sha256`, an `https` URL naming the recipe's version, a licence, a known template, a `soname` or `program` to install, dependencies that are recipes, no file beside `recipe` but its declared `config` and never a `*.patch`/`*.diff`, `arg`s that pick among upstream's options (a `cmake` or `meson` arg is `-D<name>=<value>` with the built-in names a recipe may set allowlisted and no flag, file, program or search root among the project's), a `NOTICE.md` entry, and — for a recipe that has been built — the stamp `build_recipes.sh --print-stamp` computes now, and, for a built `GPL-2.0-only` recipe, a `DT_NEEDED` closure of libraries a recipe or the sysroot provides under a licence that code may be combined with, each of whose objects carries a symbol table and defines, even locally, no symbol an incompatible recipe's library exports. Nothing built (CI's gates job) skips the stamp and closure halves.
+- **`scripts/check_recipes.sh`** — holds every recipe under `toolchain/recipes/` to a pinned upstream tarball built as shipped bar a patch that teaches the target: one 64-hex `sha256`, an `https` URL naming the recipe's version, a licence, a known template, a `soname` or `program` to install, dependencies that are recipes, no file beside `recipe` but its declared `config` and `patch`es, each named `NNNN-slopos-<what>.patch` and held to the grammar the recipes paragraph above states, `arg`s that pick among upstream's options (a `cmake` or `meson` arg is `-D<name>=<value>` with the built-in names a recipe may set allowlisted and no flag, file, program or search root among the project's; an `autotools` arg a `--enable`/`--disable`/`--with`/`--without` switch or a configure cache answer naming no program, path or system triple), a `NOTICE.md` entry, and — for a recipe that has been built — the stamp `build_recipes.sh --print-stamp` computes now, and, for a built `GPL-2.0-only` recipe, a `DT_NEEDED` closure of libraries a recipe or the sysroot provides under a licence that code may be combined with, each of whose objects carries a symbol table and defines, even locally, no symbol an incompatible recipe's library exports. Nothing built (CI's gates job) skips the stamp and closure halves.
 - **`scripts/check_libc_license.sh`** — holds every crate `cargo metadata` resolves for `libc.so`, `libc.a`, `crt0.o` and `libbuiltins.a` to an SPDX expression MIT alone satisfies: the four packages and everything they depend on under `--all-features`, except through dev-dependencies (build-dependencies count: a build script's output is compiled in). MIT is the licence `slibc/NOTICE` gives such crates, and a third-party one needs an entry there; another licence needs its text there and a change to the gate. A crate of this tree must keep its manifest and every target under `slibc/`, `slibc-core/` or `abi/`, so neither a new crate elsewhere nor a crate root pointed outside passes on its licence field. `core`, `alloc` and `compiler_builtins` come from the standard library's workspace, which `cargo metadata` does not describe, and `slibc/NOTICE` records them by hand. The walk must reach slibc, `slibc-core` and `slopos-abi`, so a graph the gate cannot read fails instead of passing on the roots alone. Under those three directories every `include!`, `include_str!`, `include_bytes!` and attribute `path =`, read past comments and literals, must be a literal naming a file inside them, a `.rs` file where it is code, or a single file in `OUT_DIR`; a symlink there is refused. It reads spellings, not macro expansions. The one outside input is `toolchain/libc/`, which `slibc/build.rs` renders the headers from and which is `MIT OR Apache-2.0` itself. The library's licence is the sum of what it is built from, so one dependency on a GPL-3.0-or-later crate compiles, links and passes every test, and leaves git undistributable. `--self-test` grades twenty-seven fixtures, twenty-one of them rejections. Runs from `just check-framekernel-gates`: ~0.7 s, the self-test ~1.2 s.
 - **`scripts/tcb_ratio.sh`** (via `just tcb-ratio`) — a hard gate at `--max 1.0` from both `just check-framekernel-gates` and `KERNEL_BUILD_GATES=1` builds. Prints lines of `unsafe` in `slopos-ostd/` divided by total kernel Rust LoC. Read it as a trend, not as a TCB fraction comparable to other projects': the denominator is raw LoC including the 41 kLoC vendored DWARF reader, and published comparators measure post-LTO linked code size.
 
@@ -696,7 +759,9 @@ The in-place-init primitive (`slopos_ostd::Init<T, E>`, `Zeroable`, `init_from_c
 
 ### Licensing discipline
 
-SlopOS is `GPL-3.0-or-later`, except its C library.
+SlopOS is `GPL-3.0-or-later`, except its C library and the CMake platform
+modules in `toolchain/cmake/Platform/`, which are `BSD-3-Clause` like the
+project they are written to be contributed to.
 
 **No verbatim code from a GPL-2.0-only source, ever.** GPL-2.0-only (Linux, the
 seL4 kernel, `rust/kernel/**`) and CDDL (illumos) are incompatible with the GPL
@@ -817,9 +882,9 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext2 volume, attach it as `virtio-disk3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
 - `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 4G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
-- `just test-install` — the install check: boot from `builddir/boot-disk.img` (GPT, one FAT32 ESP holding Limine, `/limine.conf` and one kernel per slot under `/boot/<slot>/`), and across the resets of one QEMU let `install_test` clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot`, commit it as `default_entry`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
-- `just test-install-guest` — the two loops in one QEMU: a clean tree, `just toolchain` and the self-hosting root; slot a is the optimized tests kernel, and `install_test`, finding a workspace at `/src/slopos`, fetches the host's `HEAD` into its clone, checks it out and runs `scripts/selfhost.sh install tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is otherwise unset — which builds the tests kernel and installs it into slot b, then checks the tree's own branch out again; the run boots it once, and that boot must report the tag. The kernel the guest built then commits a change on the fetched `HEAD` in a scratch clone and pushes it into a scratch repository, which the host fetches and holds to that commit's parent being `HEAD`. The run then commits and rolls back as `test-install` does, and the host holds slot b's file to the root's `kernel-tests.elf` byte for byte. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
-- `just test-selfhost` — the self-hosting check: needs `just toolchain` and a clean working tree (the host grades the guest's build of `HEAD` with its own gates and tests). The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), fetches the host's `HEAD` into the self-hosting root's clone and checks it out — refusing a tree with uncommitted edits — builds the dev and tests kernels with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the clone's `builddir/target/cargo-timings`, and checks the tree's own branch out again; the host holds the commit the guest names to `HEAD`, the root to `e2fsck -fn` and a clean superblock, exports both kernels, runs the ELF gates on them and runs the kernel suite on the tests kernel. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
+- `just test-install` — the install check: boot from `builddir/boot-disk.img` (GPT, one FAT32 ESP holding Limine, `/limine.conf` and a kernel and base per slot under `/boot/<slot>/`), and across the resets of one QEMU let `install_test` clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot`, commit it as `default_entry`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
+- `just test-install-guest` — the two loops in one QEMU: a clean tree, `just toolchain` and the self-hosting root; slot a is the optimized tests kernel, and `install_test`, finding a workspace at `/src/slopos`, fetches the host's `HEAD` into its clone, checks it out and runs `scripts/selfhost.sh install tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is otherwise unset — which builds the tests kernel, userland and base and installs the kernel and base into slot b, then checks the tree's own branch out again; the run boots them once, and that boot must report the tag in `uname -v` and in the base's `/usr/share/slopos/build-tag`. The kernel the guest built then commits a change on the fetched `HEAD` in a scratch clone and pushes it into a scratch repository, which the host fetches and holds to that commit's parent being `HEAD`. The run then commits and rolls back as `test-install` does, and the host holds slot b's kernel and base to the root's `kernel-tests.elf` and `initramfs-tests.cpio` byte for byte, and the boot log's `BOOT: base` line to the base's size. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
+- `just test-selfhost` — the self-hosting check: needs `just toolchain` and a clean working tree (the host grades the guest's build of `HEAD` with its own gates and tests). The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), fetches the host's `HEAD` into the self-hosting root's clone and checks it out — refusing a tree with uncommitted edits — builds the dev and tests systems — kernel, userland and base — with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the clone's `builddir/target/cargo-timings`, and checks the tree's own branch out again; the host holds the commit the guest names to `HEAD`, the root to `e2fsck -fn` and a clean superblock, exports both kernels and the tests base, runs the ELF gates on the kernels and runs the suite on the guest's tests kernel and base. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
 - `just bench-selfhost` — the self-hosting build as a profile: boots the optimized tests kernel on the self-hosting root with `prof=on` (`BENCH_PROF=` turns it off), runs only `selfhost_test`, so the guest builds the host's `HEAD`, and hands the log to `scripts/prof_report.py`, which prints the guest's build times, per-CPU busy and halted time, the ext2 lock's wait and hold (writeback's share apart) and the same lock and the per-process VM lock by call site, block I/O counts and latency, syscall costs, and kernel and user ticks symbolized — user ticks through the exec-mapping table the kernel prints, `builddir/bench-libc.so` and the installed toolchain's libraries. No grading and no clean-tree requirement; run it with nothing else loading the host, because every number in it is wall time.
 - `just check-fs-throughput` — filesystem cost ratchet over the `FSPERF[…]` / `FSCAP[…]` report lines, with gate data in `scripts/gates/fsperf/<variant>.txt`. Counts per MiB — transactions, journal commits, device write requests, barriers — are deterministic for one ISO and carry caps; a write rate is not, so the only rate graded is the quotient of the filesystem's write rate and the **same run's** raw block-device write rate, which is invariant under a change of accelerator (the gate's `--self-test` asserts exactly that: a uniformly three-times-slower machine must still pass). Floors (`min-bytes`, `min-volume-gib`, `min-dirents`) exist because a measurement that stopped happening looks exactly like one that got free. `--log` / `--emit-allowlist` / `--self-test` as in the other ratchets.
 - `just check-quota-headroom` — resource-quota ratchet; asserts every account's peak stays under its measured cap in `scripts/gates/quota/<variant>.txt`, that nothing was denied, and that the charge path has not got slower. What the `used`/`peak` packing buys is that a *reported* peak is a value that was genuinely held — the caps themselves are measured maxima carrying the observed spread as margin, exact only on the rows the gate file records as deterministic (`process`, and the fd/object rows). The **cost** check is one cap and two floors, never a cycle count: a cycle count on that path measures the accelerator, not the kernel, and the absolute caps this gate used to carry failed on the *unmodified* tree on any machine without `/dev/kvm`. The cap is `max-depth-cost-ratio` — depth 7 against depth 1, the only quantity here invariant under a change of accelerator. The floors are `min-charge-over-reference` (one charge+refund round trip against a same-run bare CAS, a floor and not a ceiling because that ratio *does* move with the accelerator) and `min-reference-cycles` (an absolute physical bound on the reference itself, since the first floor is a ratio over it). Stated plainly: a slowdown that scales the whole charge path uniformly passes every one of them, and catching it would need the absolute ceiling that failed without KVM. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate, with one difference: this gate's `--log` is a single run, so its file records spreads in prose rather than merging several logs mechanically. `--emit-allowlist` emits a depth cap a quarter above the observation, and its own output is round-tripped through the check path by the self-test — the property that makes "re-measure with `--emit-allowlist`" a remedy that actually works.
@@ -975,7 +1040,7 @@ run.
 
 Two checks are *not* in the sequence above because they are slow and run in a CI job of their own, `ostd-verify`: `just check-miri` (KernMiri) and `just verify` (Verus). Run them when touching `slopos-ostd/` or `verification/`; `just check-framekernel` is the recipe that runs the gates plus both.
 
-CI is four parallel jobs, and its wall clock is the longest one: the boot lane (`ci`), which holds only the tests build, the boot and the graders that read its capture. Every job pays its own setup in runner minutes, so a new check joins the job whose inputs it needs — `gates` for the source tree and a kernel, `toolchain` for the staged tests userland and the patched source trees — rather than a job of its own, and goes in the boot lane only if it reads the capture. Compiler output is cached by content: the LLVM and clang builds under ccache through CMake's `CMAKE_C_COMPILER_LAUNCHER`/`CMAKE_CXX_COMPILER_LAUNCHER` environment variables, which a first configure reads, and the Rust builds under the sccache `scripts/ensure_sccache.sh` pins, as `RUSTC_WRAPPER` on build steps only — never on a gate that probes what a compiler does, since a cache hit there would be a cached answer. Locally, export the two CMake variables for the same warm C++ rebuilds, and set `RUSTC_WRAPPER` on a build command rather than in the shell, for the same reason. `plans/ci-latency.md` is the measured model and the work still open.
+CI is four parallel jobs, and its wall clock is the longest one: the boot lane (`ci`), which holds only the tests build, the boot and the graders that read its capture. Every job pays its own setup in runner minutes, so a new check joins the job whose inputs it needs — `gates` for the source tree and a kernel, `toolchain` for the staged tests userland and the patched source trees — rather than a job of its own, and goes in the boot lane only if it reads the capture. Compiler output is cached by content: the LLVM and clang builds under ccache through CMake's `CMAKE_C_COMPILER_LAUNCHER`/`CMAKE_CXX_COMPILER_LAUNCHER` environment variables, which a first configure reads, the recipes' cross compiles under the same ccache through `SLOPOS_CROSS_LAUNCHER`, which the SlopOS compiler wrappers run each compile through, and the Rust builds under the sccache `scripts/ensure_sccache.sh` pins, as `RUSTC_WRAPPER` on build steps only — never on a gate that probes what a compiler does, since a cache hit there would be a cached answer. Locally, export the two CMake variables for the same warm C++ rebuilds, and set `RUSTC_WRAPPER` on a build command rather than in the shell, for the same reason. `plans/ci-latency.md` is the measured model and the work still open.
 
 Commit order: `cargo fmt --all` → the sequence above → stage → `caveman-commit` for the message → `git commit`.
 

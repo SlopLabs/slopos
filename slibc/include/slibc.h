@@ -17,14 +17,17 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fenv.h>
+#include <getopt.h>
 #include <grp.h>
 #include <iconv.h>
+#include <ifaddrs.h>
 #include <inttypes.h>
 #include <langinfo.h>
 #include <limits.h>
 #include <link.h>
 #include <locale.h>
 #include <math.h>
+#include <memory.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -56,6 +59,7 @@
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/times.h>
 #include <sys/types.h>

@@ -3,8 +3,15 @@ use slopos_userland as _;
 use slopos_slibc::test_harness::note;
 use slopos_userland::selfhost::{HostHead, check_out, selfhost, take_host_head, workspace};
 use std::fs;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Instant;
+
+static FREE_WHEN_CLEAN: OnceLock<u64> = OnceLock::new();
+
+fn root_free_bytes() -> u64 {
+    slopos_userland::syscall::fs::statfs_path(c"/".as_ptr())
+        .map_or(0, |stats| stats.f_bavail.saturating_mul(stats.f_bsize))
+}
 
 /// The workspace with the host's `HEAD` checked out, taken once for every
 /// build. A root with no workspace passes.
@@ -27,9 +34,10 @@ fn guest_takes_the_host_head() -> bool {
     }
 }
 
-/// The workspace's kernel build, timed. `clean` drops the target directory and
-/// symbol table so the time is a whole build.
-fn guest_builds(variant: &str, clean: bool) -> bool {
+/// The workspace's build of a kernel, its userland and the base it boots with,
+/// timed. `clean` drops the target directory and symbol tables so the time is
+/// a whole build.
+fn guest_builds(variant: &str, base: &str, clean: bool) -> bool {
     let root = match &*TREE {
         Ok((root, _)) => root,
         Err((verdict, why)) => {
@@ -38,12 +46,15 @@ fn guest_builds(variant: &str, clean: bool) -> bool {
         }
     };
     let elf = format!("{root}/builddir/kernel-{variant}.elf");
+    let base = format!("{root}/builddir/{base}");
     let _ = fs::remove_file(&elf);
+    let _ = fs::remove_file(&base);
     if clean {
         let _ = fs::remove_dir_all(format!("{root}/builddir/target"));
         for v in ["dev", "tests"] {
             let _ = fs::remove_file(format!("{root}/builddir/kallsyms-{v}.rs"));
         }
+        let _ = FREE_WHEN_CLEAN.set(root_free_bytes());
     }
     let started = Instant::now();
     let status = selfhost(root, &["build", variant]).status();
@@ -61,28 +72,37 @@ fn guest_builds(variant: &str, clean: bool) -> bool {
         ));
         return false;
     }
-    match fs::metadata(&elf) {
-        Ok(meta) => {
+    match (fs::metadata(&elf), fs::metadata(&base)) {
+        (Ok(kernel), Ok(image)) => {
+            let used = FREE_WHEN_CLEAN
+                .get()
+                .map_or(0, |clean| clean.saturating_sub(root_free_bytes()));
             note(&format!(
-                "{variant} kernel, {} bytes, in {:.1} s",
-                meta.len(),
-                started.elapsed().as_secs_f64()
+                "kernel {} bytes, base {} bytes, in {:.1} s; the builds hold {} MiB of the root",
+                kernel.len(),
+                image.len(),
+                started.elapsed().as_secs_f64(),
+                used >> 20
             ));
             true
         }
-        Err(e) => {
+        (Err(e), _) => {
             note(&format!("{elf}: {e}"));
+            false
+        }
+        (_, Err(e)) => {
+            note(&format!("{base}: {e}"));
             false
         }
     }
 }
 
-fn guest_builds_the_dev_kernel() -> bool {
-    guest_builds("dev", true)
+fn guest_builds_the_dev_system() -> bool {
+    guest_builds("dev", "initramfs.cpio", true)
 }
 
-fn guest_builds_the_tests_kernel() -> bool {
-    guest_builds("tests", false)
+fn guest_builds_the_tests_system() -> bool {
+    guest_builds("tests", "initramfs-tests.cpio", false)
 }
 
 /// The tree's developer finds it where they left it.
@@ -102,10 +122,10 @@ fn guest_returns_to_its_checkout() -> bool {
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("guest_takes_the_host_head", guest_takes_the_host_head),
-        ("guest_builds_the_dev_kernel", guest_builds_the_dev_kernel),
+        ("guest_builds_the_dev_system", guest_builds_the_dev_system),
         (
-            "guest_builds_the_tests_kernel",
-            guest_builds_the_tests_kernel,
+            "guest_builds_the_tests_system",
+            guest_builds_the_tests_system,
         ),
         (
             "guest_returns_to_its_checkout",

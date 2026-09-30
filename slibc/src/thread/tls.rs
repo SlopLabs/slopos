@@ -188,9 +188,6 @@ pub unsafe extern "C" fn capture_tls_template_from_stack(stack_base: *const usiz
         return;
     }
     let argc = *stack_base;
-    if argc > 4096 {
-        return; // implausible argc → bail rather than walk garbage
-    }
     // envp begins after argc + argv[0..argc] + the argv NULL terminator.
     let mut p = stack_base.add(1 + argc + 1);
     while *p != 0 {

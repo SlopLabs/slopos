@@ -193,6 +193,74 @@ fn mount_over_bin_refused() -> bool {
     }
 }
 
+/// Nothing replaces, covers, renames aside or unmounts the base a disk root's
+/// slot booted, and no base directory is the disk's.
+fn the_base_is_sealed_over_a_disk_root() -> bool {
+    let kind =
+        |path: &[u8]| fs_syscall::statfs_path(path.as_ptr() as *const c_char).map(|s| s.f_type);
+    if kind(b"/\0") != Ok(slopos_abi::fs::EXT2_SUPER_MAGIC) {
+        note("the root is not a disk; the base is the root itself");
+        return true;
+    }
+    let mut failures = Vec::new();
+    for dir in slopos_abi::fs::BASE_DIRS {
+        let path = format!("{dir}\0");
+        if kind(path.as_bytes()) == Ok(slopos_abi::fs::EXT2_SUPER_MAGIC) {
+            failures.push(format!("{dir} is the disk's, not the base's"));
+        }
+        let unmounted = fs_syscall::umount2(path.as_ptr() as *const c_char, 0);
+        if unmounted != Err(SyscallError::EPERM) {
+            failures.push(format!("umount {dir} gave {unmounted:?}, want EPERM"));
+        }
+    }
+    let covered = fs_syscall::mount(b"", b"/usr/share/fonts", b"ramfs", 0);
+    if covered != Err(SyscallError::EPERM) {
+        failures.push(format!(
+            "a mount beneath /usr/share gave {covered:?}, want EPERM"
+        ));
+    }
+    if File::create("/usr/share/mount_test_probe").is_ok() {
+        let _ = fs::remove_file("/usr/share/mount_test_probe");
+        failures.push("created a file in the base".into());
+    }
+    for (dir, aside) in [
+        ("/lib", "/lib.mount_test"),
+        ("/usr", "/usr.mount_test"),
+        ("/etc", "/etc.mount_test"),
+    ] {
+        if fs::rename(dir, aside).is_ok() {
+            let _ = fs::rename(aside, dir);
+            failures.push(format!("renamed {dir}, which leads to the base, aside"));
+        }
+    }
+    let _ = fs::create_dir(MOUNT_POINT);
+    match fs_syscall::mount(b"", MOUNT_POINT.as_bytes(), b"ext2", 0) {
+        Ok(()) => {
+            for dir in ["usr", "etc"] {
+                let from = format!("{MOUNT_POINT}/{dir}");
+                let aside = format!("{from}.mount_test");
+                if fs::rename(&from, &aside).is_ok() {
+                    let _ = fs::rename(&aside, &from);
+                    failures.push(format!("renamed /{dir} aside through a second mount"));
+                }
+            }
+            umount_mount_point();
+        }
+        Err(e) => failures.push(format!("a second mount of the root gave {e}")),
+    }
+    let _ = fs::remove_dir(MOUNT_POINT);
+    let env = std::process::Command::new("/usr/bin/env")
+        .arg("true")
+        .status();
+    if !env.as_ref().is_ok_and(|status| status.success()) {
+        failures.push(format!("/usr/bin/env true: {env:?}"));
+    }
+    for failure in &failures {
+        println!("mount_test: {failure}");
+    }
+    failures.is_empty()
+}
+
 /// `LABEL=` resolves against the volume labels of the attached devices; one
 /// no device carries is `ENOENT`, as an absent device name is, and an empty
 /// label names nothing at all.
@@ -335,6 +403,10 @@ fn main() {
             long_name_refused_on_the_root,
         ),
         ("mount_over_bin_refused", mount_over_bin_refused),
+        (
+            "the_base_is_sealed_over_a_disk_root",
+            the_base_is_sealed_over_a_disk_root,
+        ),
         ("label_source_resolution", label_source_resolution),
         (
             "the_boot_mounts_a_volume_by_label",

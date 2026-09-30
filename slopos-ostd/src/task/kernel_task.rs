@@ -6,7 +6,7 @@ use core::ffi::c_void;
 use core::ptr;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering,
+    AtomicBool, AtomicI8, AtomicI32, AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering,
 };
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
@@ -633,6 +633,15 @@ pub struct TaskInner<K, U> {
     /// Consecutive signal-frame pushes that could not be written. A second
     /// failure for the same task terminates it rather than re-pending forever.
     pub(crate) sigframe_push_failures: AtomicU8,
+    /// The mask a `sigsuspend`, `ppoll` or `pselect6` replaced for its wait,
+    /// reinstated as that call returns to user space: by the frame of the
+    /// handler that cut the wait short, or directly. Only the owning task
+    /// reads or writes it.
+    pub(crate) restore_sigmask: AtomicU64,
+    pub(crate) restore_sigmask_armed: AtomicBool,
+    /// The nice value `setpriority` recorded, -20 to 19. Inherited by a fork
+    /// and a spawn, and kept across exec.
+    pub(crate) nice: AtomicI8,
     /// `siginfo` for the fault that posted [`fault_signo`](Self::fault_signo).
     /// Stale values are ignored: delivery only uses them when the signal being
     /// delivered is the one recorded here.
@@ -1048,6 +1057,31 @@ impl<K, U> TaskInner<K, U> {
         }
     }
 
+    /// The creation mask; a task with no context has the default.
+    #[inline]
+    pub fn umask(&self) -> u32 {
+        self.fs
+            .load()
+            .map_or(crate::task::fs_context::DEFAULT_UMASK, |fs| fs.umask())
+    }
+
+    /// Set the creation mask of every task sharing this one's context, giving
+    /// it a context of its own first if it has none; answers the old mask, or
+    /// `None` when that context could not be allocated.
+    pub fn swap_umask(&self, witness: &impl TaskExclusive<K, U>, mask: u32) -> Option<u32> {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        if let Some(fs) = self.fs.load() {
+            return Some(fs.swap_umask(mask));
+        }
+        let fs = FsContext::try_new(None).ok()?;
+        let old = fs.swap_umask(mask);
+        self.fs.store(Some(fs));
+        Some(old)
+    }
+
     /// Move the working directory of every task sharing this one's context.
     ///
     /// Returns false if `path` does not fit with its NUL terminator or could
@@ -1391,6 +1425,9 @@ impl<K, U> TaskInner<K, U> {
             sigaltstack_sp: AtomicU64::new(0),
             sigaltstack_size: AtomicU64::new(0),
             sigframe_push_failures: AtomicU8::new(0),
+            restore_sigmask: AtomicU64::new(SIG_EMPTY),
+            restore_sigmask_armed: AtomicBool::new(false),
+            nice: AtomicI8::new(0),
             fault_signo: AtomicU8::new(0),
             fault_si_code: AtomicU32::new(0),
             fault_si_addr: AtomicU64::new(0),
@@ -1818,6 +1855,8 @@ impl<K, U> TaskInner<K, U> {
         self.sigaltstack_sp = AtomicU64::new(0);
         self.sigaltstack_size = AtomicU64::new(0);
         self.sigframe_push_failures = AtomicU8::new(0);
+        self.restore_sigmask = AtomicU64::new(SIG_EMPTY);
+        self.restore_sigmask_armed = AtomicBool::new(false);
         self.fault_signo = AtomicU8::new(0);
         self.fault_si_code = AtomicU32::new(0);
         self.fault_si_addr = AtomicU64::new(0);

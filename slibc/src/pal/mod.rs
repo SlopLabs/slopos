@@ -7,7 +7,7 @@ use crate::errno::Errno;
 use slopos_abi::fs::{UserFsStat, UserIovec};
 use slopos_abi::signal::{UserSigAltStack, UserSiginfo};
 use slopos_abi::spawn::SpawnAttrs;
-use slopos_abi::syscall::{Timespec, UserUtsname};
+use slopos_abi::syscall::{Sysinfo, Timespec, UserUtsname};
 
 /// What keys a futex: this address space's word, or, for a
 /// `PTHREAD_PROCESS_SHARED` object, the shared object every mapping meets.
@@ -57,6 +57,24 @@ pub trait Pal {
         writefds: *mut u8,
         exceptfds: *mut u8,
         timeout: *mut u8,
+    ) -> Result<i32, Errno>;
+    /// `timeout` is in/out like `select`'s; `sigmask`, when not null, is
+    /// blocked for the wait alone.
+    fn ppoll(
+        fds: *mut u8,
+        nfds: u32,
+        timeout: *mut Timespec,
+        sigmask: *const u64,
+    ) -> Result<i32, Errno>;
+    /// `timeout` is in/out like `select`'s; `sigmask`, when not null, is
+    /// blocked for the wait alone.
+    fn pselect6(
+        nfds: i32,
+        readfds: *mut u8,
+        writefds: *mut u8,
+        exceptfds: *mut u8,
+        timeout: *mut Timespec,
+        sigmask: *const u64,
     ) -> Result<i32, Errno>;
     fn ioctl(fd: i32, request: u64, arg: u64) -> Result<i32, Errno>;
 
@@ -137,6 +155,7 @@ pub trait Pal {
     fn setsid() -> Result<i32, Errno>;
     fn getsid(pid: i32) -> Result<i32, Errno>;
     fn chdir(path: *const u8) -> Result<(), Errno>;
+    fn umask(mask: u32) -> u32;
     fn fchdir(fd: i32) -> Result<(), Errno>;
     fn getcwd(buf: *mut u8, size: usize) -> Result<usize, Errno>;
 
@@ -177,6 +196,8 @@ pub trait Pal {
         sigsetsize: usize,
     ) -> Result<(), Errno>;
     fn rt_sigpending(set: *mut u64, sigsetsize: usize) -> Result<(), Errno>;
+    /// Only ever fails: `EINTR` once a handler has run.
+    fn rt_sigsuspend(set: *const u64, sigsetsize: usize) -> Errno;
     /// A null `timeout` waits forever.
     fn rt_sigtimedwait(
         set: *const u64,
@@ -250,6 +271,10 @@ pub trait Pal {
     /// Only `CLOCK_REALTIME` is settable.
     fn clock_settime(clk_id: u64, tp: *const Timespec) -> Result<(), Errno>;
     fn uname(out: *mut UserUtsname) -> Result<(), Errno>;
+    fn sysinfo(out: *mut Sysinfo) -> Result<(), Errno>;
+    /// Linux's encoding: `20 - nice`.
+    fn getpriority(which: i32, who: u32) -> Result<i32, Errno>;
+    fn setpriority(which: i32, who: u32, nice: i32) -> Result<(), Errno>;
     /// A short fill is legal.
     fn getrandom(buf: *mut u8, len: usize, flags: u32) -> Result<usize, Errno>;
     fn gettid() -> i32;

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve the host LLVM toolchain that cross-builds the C++ runtime.
+# Resolve the LLVM toolchain that builds the C++ runtime: the host's, or in the
+# guest the one at /usr/local. The guest's bash has no `/dev/fd`, so loops read
+# here-documents rather than process substitutions.
 #
 # Usage: eval "$(cxx_host_tools.sh)"       # CLANG/CLANGXX/LD_LLD/LLVM_AR/CXX_HOST_MAJOR
 #        cxx_host_tools.sh --describe      # one human line, for a build log
@@ -113,8 +115,11 @@ try_major() {
     local m="$1" dir
     try_set "clang-$m" "clang++-$m" "ld.lld-$m" "llvm-ar-$m" && return 0
     while read -r dir; do
+        [ -n "$dir" ] || continue
         try_set "$dir/clang" "$dir/clang++" "$dir/ld.lld" "$dir/llvm-ar" && return 0
-    done < <(major_dirs "$m")
+    done <<EOF
+$(major_dirs "$m")
+EOF
     return 1
 }
 
@@ -127,7 +132,9 @@ installed_majors() {
                 [ -x "$file" ] || continue
                 printf '%s\n' "${file##*/clang-}"
             done
-        done < <(printf '%s\n' "$PATH" | tr ':' '\n')
+        done <<EOF
+$(printf '%s\n' "$PATH" | tr ':' '\n')
+EOF
         for dir in /usr/lib/llvm-[0-9]*/bin /usr/lib64/llvm-[0-9]*/bin \
             /usr/lib/llvm[0-9]*/bin /usr/lib64/llvm[0-9]*/bin /opt/llvm-[0-9]*/bin; do
             [ -x "$dir/clang" ] || continue
@@ -149,14 +156,16 @@ else
         try_major "$SOURCE_MAJOR" && return 0
         try_set clang clang++ ld.lld llvm-ar && return 0
         while read -r candidate; do
-            [ "$candidate" -ge "$MIN_MAJOR" ] || continue
+            [ -n "$candidate" ] && [ "$candidate" -ge "$MIN_MAJOR" ] || continue
             try_major "$candidate" && return 0
-        done < <(installed_majors)
+        done <<EOF
+$(installed_majors)
+EOF
         return 1
     }
     discover || true
     [ -n "$HOST_MAJOR" ] || die "no LLVM >= $MIN_MAJOR toolchain found
-       The C++ runtime is cross-built from clang, clang++, ld.lld and llvm-ar
+       The C++ runtime is built with clang, clang++, ld.lld and llvm-ar
        of one major, plus cmake and ninja. Install them:
          Arch / CachyOS   pacman -S clang lld llvm cmake ninja
          Debian/Ubuntu    apt install clang lld llvm cmake ninja-build

@@ -1,23 +1,35 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Build a newc cpio initramfs from userland binaries (+ fonts/wallpaper).
+#!/bin/sh
+# Build a boot module's base image: a newc cpio of the userland binaries, the
+# C library and the assets they read.
 #
 # Usage: build_initramfs.sh <out.cpio> <build_dir> <bin1> [bin2] ...
 #
-# Thin wrapper over gen_initramfs.py (python-only, no host `cpio` dependency),
-# mirroring build_fs_image.sh's signature so the RAM root and the ext2 disk
-# image are populated from the same binary list.
+# POSIX sh, run on the host and in the guest alike; the packing is
+# tools/initramfs, built for whichever machine runs this. Its argv matches
+# build_fs_image.sh's, so the RAM root and the ext2 disk image are populated
+# from the same binary list.
+#
+# Environment:
+#   CARGO             - cargo command, split on blanks (default: cargo)
+#   CARGO_TARGET_DIR  - where the tool is built (default: <build_dir>/target)
+#   COREUTILS_LINKS, EXTRA_SHARED_OBJECTS, SLOPOS_BUILD_TAG
+#                     - read by tools/initramfs; see its documentation
+set -eu
 
-OUT="${1:?Usage: build_initramfs.sh <out.cpio> <build_dir> <bin1> [bin2] ...}"
-BUILD_DIR="${2:?Usage: build_initramfs.sh <out.cpio> <build_dir> <bin1> [bin2] ...}"
-shift 2
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "python3 is required to build the initramfs ($OUT)" >&2
-    exit 1
+if [ $# -lt 2 ]; then
+    echo "usage: build_initramfs.sh <out.cpio> <build_dir> <bin1> [bin2] ..." >&2
+    exit 2
 fi
+OUT="$1"
+BUILD_DIR="$2"
+shift 2
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CARGO="${CARGO:-cargo}"
+TARGET_DIR="${CARGO_TARGET_DIR:-$BUILD_DIR/target}"
+case "$TARGET_DIR" in
+/*) ;;
+*) TARGET_DIR="$(pwd)/$TARGET_DIR" ;;
+esac
 
-python3 "${SCRIPT_DIR}/gen_initramfs.py" "$OUT" "$BUILD_DIR" "$@"
+(cd "$REPO_ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" $CARGO build --locked --release --quiet -p slopos-initramfs)
+"$TARGET_DIR/release/initramfs" "$REPO_ROOT" "$OUT" "$BUILD_DIR" "$@"

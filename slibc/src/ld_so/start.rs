@@ -2,9 +2,10 @@
 //!
 //! [`__dls_bootstrap`] runs before this object has been relocated, so it must
 //! touch no pointer that lives in memory — every such pointer is exactly what
-//! it is about to fix. Reaching a `static` is fine (a non-preemptible symbol
-//! in a `-Bsymbolic` object is RIP-relative and needs no relocation); reading
-//! a pointer *out of* one is not.
+//! it is about to fix. Reaching a `static` is fine (one the dynamic list
+//! leaves out binds locally and is RIP-relative); reading a pointer *out of*
+//! one is not, and neither is touching an exported object such as `environ`,
+//! which is reached through a GOT slot the startup link fills.
 
 use core::ptr;
 

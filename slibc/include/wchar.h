@@ -100,6 +100,8 @@ int swprintf(wchar_t *s, size_t n, const wchar_t *fmt, ...);
 int vfwprintf(FILE *stream, const wchar_t *fmt, va_list ap);
 int vwprintf(const wchar_t *fmt, va_list ap);
 int vswprintf(wchar_t *s, size_t n, const wchar_t *fmt, va_list ap);
+int wcwidth(wchar_t c);
+int wcswidth(const wchar_t *s, size_t n);
 
 #ifdef __cplusplus
 }

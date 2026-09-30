@@ -12,6 +12,7 @@ pub mod kconsole;
 #[cfg(feature = "test-hooks")]
 pub mod kernel_io_tests;
 pub mod lifecycle;
+pub mod loadavg;
 pub mod per_cpu;
 pub mod profile;
 pub mod quota_console;

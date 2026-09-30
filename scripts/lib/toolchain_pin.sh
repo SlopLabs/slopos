@@ -22,6 +22,9 @@ TP_PIN_REL="toolchain/PIN"
 # therefore the directory the rust patch applies in; the libc patch applies in
 # its `libc` subdirectory.
 TP_LIBRARY_REL="lib/rustlib/src/rust/library"
+# Inside any `library/` the fork is applied to: the stamp of the overlay it
+# carries, which an installed toolchain's rust-src keeps.
+TP_STD_STAMP_NAME=".slopos-std-stamp"
 # The compiler fork is a second materialised tree with a second stamp: the
 # sysroot is a clone of a *built* toolchain, so a patch to rustc's own sources
 # has nowhere to land in it, and re-cloning the sysroot for a compiler patch
@@ -59,9 +62,9 @@ tp_vendor_rel() {
 
 tp_sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{ print $1 }'
+        sha256sum "$1" | cut -d' ' -f1
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{ print $1 }'
+        shasum -a 256 "$1" | cut -d' ' -f1
     else
         echo "toolchain_pin: need sha256sum or shasum" >&2
         exit 2
@@ -70,9 +73,9 @@ tp_sha256_file() {
 
 tp_sha256_stream() {
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum | awk '{ print $1 }'
+        sha256sum | cut -d' ' -f1
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 | awk '{ print $1 }'
+        shasum -a 256 | cut -d' ' -f1
     else
         echo "toolchain_pin: need sha256sum or shasum" >&2
         exit 2
@@ -158,10 +161,12 @@ tp_patch_pin_file() {
 # `toolchain/libc/` the unpacked libc crate, `toolchain/compiler/` rustc's own
 # sources, `toolchain/crates/` the crates.io crates rustc and cargo depend on, `toolchain/llvm/` the pinned
 # llvm-project the C++ runtime is built from, and `toolchain/llvm-rustc/` the
-# one rustc ships.
+# one rustc ships. A recipe's patch is no fork: its recipe's stamp pins it and
+# `check_recipes.sh` grades it.
 tp_patch_files() {
     local root="$1"
-    (cd "$root" && find "$TP_OVERLAY_REL" -type f -name '*.patch' -print | LC_ALL=C sort)
+    (cd "$root" && find "$TP_OVERLAY_REL" -path "$TP_OVERLAY_REL/recipes" -prune -o \
+        -type f -name '*.patch' -print | LC_ALL=C sort)
 }
 
 tp_patch_tree_rel() {
@@ -249,9 +254,20 @@ tp_stamp() {
     {
         tp_materialiser_hash "$1" make_slopos_sysroot.sh
         tp_materialiser_hash "$1" lib/toolchain_pin.sh
-        (cd "$1" && find "$TP_PIN_REL" "$TP_OVERLAY_REL/rust" "$TP_OVERLAY_REL/libc" \
-            -type f -print) | tp_hash_lines "$1"
+        tp_fork_lines "$1"
     } | tp_sha256_stream
+}
+
+# The std fork alone, which a `library/` carries as its std stamp and a
+# userland build holds its sysroot's to: the scripts that materialise a tree
+# change what a tree is stamped with, not which std it holds.
+tp_std_stamp() {
+    tp_fork_lines "$1" | tp_sha256_stream
+}
+
+tp_fork_lines() {
+    (cd "$1" && find "$TP_PIN_REL" "$TP_OVERLAY_REL/rust" "$TP_OVERLAY_REL/libc" -type f -print) |
+        tp_hash_lines "$1"
 }
 
 tp_rustc_stamp() {

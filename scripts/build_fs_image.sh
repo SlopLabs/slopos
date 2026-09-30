@@ -6,8 +6,9 @@ set -euo pipefail
 # Usage: build_fs_image.sh <image_path> <build_dir> [bin1] [bin2] ...
 #
 # Each binary is placed in /bin/<name> except 'init' which goes to /sbin/init.
-# A run with no binaries builds an empty volume, which is what a scratch or
-# capacity image wants.
+# With none, a volume still carries the base's data files (the C library when
+# built, licence texts, fonts, the CA bundle, keymaps), or under `FS_BASE=boot`
+# only the base's sealed mount points.
 #
 # Environment:
 #   FS_IMAGE_SIZE - image size (default: 32M)
@@ -56,6 +57,10 @@ set -euo pipefail
 #                   guest directory.
 #   FS_FREE_FLOOR - free space the image keeps (default 0); an image with less
 #                   is grown to it on every build.
+#   FS_BASE       - `image` (default) installs the binaries and assets; `boot`
+#                   refuses binaries, COREUTILS_LINKS and EXTRA_SHARED_OBJECTS
+#                   and leaves the base directories as sealed mount points,
+#                   for a root the boot slot's base image is mounted over.
 
 IMAGE_PATH="${1:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
 BUILD_DIR="${2:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
@@ -85,15 +90,31 @@ FS_LABEL="${FS_LABEL:-}"
 FS_HOST_TREES="${FS_HOST_TREES:-}"
 FS_SEED_TREES="${FS_SEED_TREES:-}"
 FS_FREE_FLOOR="${FS_FREE_FLOOR:-0}"
+FS_BASE="${FS_BASE:-image}"
+case "$FS_BASE" in
+    image) ;;
+    boot)
+        if [ "${#BINS[@]}" -gt 0 ] || [ -n "${COREUTILS_LINKS:-}${EXTRA_SHARED_OBJECTS:-}" ]; then
+            echo "build_fs_image: FS_BASE=boot installs no binaries; the boot slot's base carries them" >&2
+            exit 2
+        fi
+        ;;
+    *) echo "build_fs_image: FS_BASE must be 'image' or 'boot', got '$FS_BASE'" >&2; exit 2 ;;
+esac
 
-# Created on every root rather than left to the first writer: the ext2 root
-# does not auto-create parents the way ramfs does, and both roots must agree
-# about whether a path is writable. `/media` is where a boot's `mount=` puts a
-# volume. Mirrors gen_initramfs.py's EMPTY_DIRS.
+# These three mirror tools/initramfs's ROOT_DIRS and SLIBC_LICENSES and
+# slopos_abi::fs::BASE_DIRS; a test in tools/initramfs holds them equal.
+#
+# ROOT_DIRS are created on every root rather than left to the first writer: the
+# ext2 root does not auto-create parents the way ramfs does, and both roots
+# must agree about whether a path is writable. `/media` is where a boot's
+# `mount=` puts a volume.
 ROOT_DIRS=(/etc /var /home /media)
 
-# Mirrors gen_initramfs.py's SLIBC_LICENSES.
+# The on-disk carrier of the VFS seal; `lsattr` shows it as `i`.
+EXT2_IMMUTABLE_FL=0x10
 SLIBC_LICENSES=(LICENSE-MIT LICENSE-APACHE NOTICE)
+BASE_DIRS=(/bin /sbin /lib /usr/bin /usr/share /etc/ssl)
 
 # macOS: extend PATH to find e2fsprogs tools installed via Homebrew
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -141,12 +162,14 @@ TAINT_PATH=""
 # image already carries these binaries and assets, so it needs no work.
 build_stamp() {
     echo "size=$FS_IMAGE_SIZE verity=$VERITY journal=$FS_JOURNAL_SIZE links=${COREUTILS_LINKS:-}"
-    echo "label=$FS_LABEL dirs=${ROOT_DIRS[*]} floor=$FS_FREE_FLOOR"
+    echo "label=$FS_LABEL dirs=${ROOT_DIRS[*]} floor=$FS_FREE_FLOOR base=$FS_BASE"
+    echo "base_dirs=${BASE_DIRS[*]}"
     local spec
     for spec in $FS_HOST_TREES; do
         printf 'tree %s ' "${spec#*:}"
         [ -d "${spec%%:*}" ] && "${FS_TREE[@]}" identity "${spec%%:*}" || echo absent
     done
+    [ "$FS_BASE" = image ] || return 0
     for bin in "${BINS[@]}"; do
         printf '%s ' "$bin"
         sha256sum "${BUILD_DIR}/${bin}.elf" 2>/dev/null | cut -d' ' -f1 || echo missing
@@ -309,11 +332,10 @@ install_binary() {
     debugfs -w -R "rm $dst" "$IMAGE_PATH" >/dev/null 2>&1 || true
     debugfs -w -R "write $src $dst" "$IMAGE_PATH" >/dev/null
     debugfs -w -R "set_inode_field $dst mode 0100755" "$IMAGE_PATH" >/dev/null
-    # EXT2_IMMUTABLE_FL: the on-disk carrier of the VFS seal. Program-identity
-    # privilege is keyed on a binary's path, so a shipped binary that is not
-    # sealed is one any task holding a write descriptor can replace and then
-    # spawn into the grant. `lsattr` shows this as `i`.
-    debugfs -w -R "set_inode_field $dst flags 0x10" "$IMAGE_PATH" >/dev/null
+    # Program-identity privilege is keyed on a binary's path, so a shipped
+    # binary that is not sealed is one any task holding a write descriptor can
+    # replace and then spawn into the grant.
+    debugfs -w -R "set_inode_field $dst flags $EXT2_IMMUTABLE_FL" "$IMAGE_PATH" >/dev/null
 }
 
 install_file() {
@@ -461,7 +483,7 @@ install_journal() {
         exit 1
     fi
     debugfs -w -R "set_inode_field /.journal mode 0100600" "$IMAGE_PATH" >/dev/null
-    debugfs -w -R "set_inode_field /.journal flags 0x10" "$IMAGE_PATH" >/dev/null
+    debugfs -w -R "set_inode_field /.journal flags $EXT2_IMMUTABLE_FL" "$IMAGE_PATH" >/dev/null
     have="$(journal_blocks)"
     if [ -z "$have" ] || [ "$have" = "0" ]; then
         echo "journal: /.journal came out sparse — the kernel would refuse it" >&2
@@ -472,172 +494,195 @@ install_journal() {
 ensure_room "$(numfmt --from=iec "$FS_FREE_FLOOR")"
 install_journal
 
-for bin in "${BINS[@]}"; do
-    src="${BUILD_DIR}/${bin}.elf"
-    if [ ! -f "$src" ]; then
-        echo "Missing userland binary: $src" >&2
-        exit 1
-    fi
-
-    dst="/bin/${bin}"
-    if [ "$bin" = "init" ]; then
-        dst="/sbin/init"
-    fi
-
-    install_binary "$src" "$dst"
-done
-
-# A symlink, so the exec grant keyed on `/bin/shell` follows `/bin/sh`.
-for bin in "${BINS[@]}"; do
-    if [ "$bin" = "shell" ]; then
-        debugfs -w -R "rm /bin/sh" "$IMAGE_PATH" >/dev/null 2>&1 || true
-        debugfs -w -R "symlink /bin/sh shell" "$IMAGE_PATH" >/dev/null
-        echo "Installed /bin/sh -> shell"
-    fi
-done
-
-# The multicall binary's names. A symlink, not a copy: fifty-odd copies of std
-# would be ~8 MiB of a 32 MiB root, and `argv[0]` selects the tool anyway.
-# `debugfs symlink` writes a fast symlink, so a name costs an inode and no block.
-if [ -n "${COREUTILS_LINKS:-}" ]; then
-    if [ ! -f "${BUILD_DIR}/coreutils.elf" ]; then
-        echo "COREUTILS_LINKS is set but ${BUILD_DIR}/coreutils.elf is missing" >&2
-        exit 1
-    fi
-    # Word splitting is wanted here; pathname expansion is not, and a name
-    # holding `*` would otherwise glob against the build directory.
-    set -f
-    for tool in $COREUTILS_LINKS; do
-        # This runs after the binaries are installed, so a name in both lists
-        # would replace a program -- and inherit its grant.
-        for bin in "${BINS[@]}"; do
-            if [ "$tool" = "$bin" ]; then
-                echo "COREUTILS_LINKS name '$tool' collides with an installed binary" >&2
-                exit 1
-            fi
-        done
-        debugfs -w -R "rm /bin/${tool}" "$IMAGE_PATH" >/dev/null 2>&1 || true
-        debugfs -w -R "symlink /bin/${tool} coreutils" "$IMAGE_PATH" >/dev/null
-    done
-    set +f
-    echo "Installed $(set -f; set -- $COREUTILS_LINKS; echo $#) utility names in /bin -> coreutils"
-fi
-
-# /lib: the shared C library, which is also the program interpreter every
-# dynamically linked binary names in its PT_INTERP. Sealed and in a sealed
-# directory for the same reason /bin is: the interpreter runs before the
-# program does, so replacing it is replacing every dynamic program at once.
-mkdir_p /lib
-if [ -f "${BUILD_DIR}/libc.so" ]; then
-    install_binary "${BUILD_DIR}/libc.so" /lib/libc.so
-    debugfs -w -R "rm /lib/ld-slopos.so.1" "$IMAGE_PATH" >/dev/null 2>&1 || true
-    debugfs -w -R "symlink /lib/ld-slopos.so.1 libc.so" "$IMAGE_PATH" >/dev/null
-    echo "Installed /lib/libc.so and /lib/ld-slopos.so.1"
-fi
-# Only the -tests recipes set this. Installing by file presence would put a
-# dlopen fixture into the shipped, attested root out of a stale builddir.
-for so in ${EXTRA_SHARED_OBJECTS:-}; do
-    install_binary "${BUILD_DIR}/${so}" "/lib/${so}"
-done
-
-# The directories too, on a root userland can write: a sealed binary cannot be
-# overwritten, but until now its *directory* could be renamed aside and a
-# fresh /bin/halt planted under the path the grant is keyed on. debugfs is not
-# subject to the flag, so a preserved image still refreshes in place.
+# A sealed directory cannot be renamed aside to plant a fresh /bin/halt under
+# the path its grant is keyed on. debugfs is not subject to the flag, so a
+# preserved image still refreshes in place.
 seal_dir() {
-    debugfs -w -R "set_inode_field $1 flags 0x10" "$IMAGE_PATH" >/dev/null
+    debugfs -w -R "set_inode_field $1 flags $EXT2_IMMUTABLE_FL" "$IMAGE_PATH" >/dev/null
 }
-seal_dir /bin
-seal_dir /sbin
-seal_dir /lib
 
-# Install font files into /usr/share/fonts/ if assets/fonts/ exists
-FONTS_DIR="${REPO_ROOT}/assets/fonts"
+install_base() {
+    for bin in "${BINS[@]}"; do
+        src="${BUILD_DIR}/${bin}.elf"
+        if [ ! -f "$src" ]; then
+            echo "Missing userland binary: $src" >&2
+            exit 1
+        fi
 
-mkdir_p /usr
-mkdir_p /usr/share
+        dst="/bin/${bin}"
+        if [ "$bin" = "init" ]; then
+            dst="/sbin/init"
+        fi
 
-if [ -f "${BUILD_DIR}/libc.so" ]; then
-    mkdir_p /usr/share/licenses
-    mkdir_p /usr/share/licenses/slibc
-    for text in "${SLIBC_LICENSES[@]}"; do
-        [ -f "${REPO_ROOT}/slibc/$text" ] || { echo "build_fs_image: slibc/$text is missing" >&2; exit 1; }
-        install_file "${REPO_ROOT}/slibc/$text" "/usr/share/licenses/slibc/$text"
-        echo "Installed license: /usr/share/licenses/slibc/$text"
+        install_binary "$src" "$dst"
     done
-fi
 
-# The C++ runtime's license texts, beside the library they cover, for the same
-# reason the fonts below carry theirs. Only the -tests recipes stage them,
-# because only the tests image carries `libc++.so`.
-CXX_LICENSES="${BUILD_DIR}/libc++-licenses"
-if [ -d "$CXX_LICENSES" ]; then
-    mkdir_p /usr/share/licenses
-    mkdir_p /usr/share/licenses/libc++
-    for text in "$CXX_LICENSES"/*; do
-        [ -f "$text" ] || continue
-        fname="$(basename "$text")"
-        install_file "$text" "/usr/share/licenses/libc++/$fname"
-        echo "Installed license: /usr/share/licenses/libc++/$fname"
+    # A symlink, so the exec grant keyed on `/bin/shell` follows `/bin/sh`.
+    for bin in "${BINS[@]}"; do
+        if [ "$bin" = "shell" ]; then
+            debugfs -w -R "rm /bin/sh" "$IMAGE_PATH" >/dev/null 2>&1 || true
+            debugfs -w -R "symlink /bin/sh shell" "$IMAGE_PATH" >/dev/null
+            echo "Installed /bin/sh -> shell"
+        fi
     done
-fi
 
-if [ -d "$FONTS_DIR" ]; then
-    mkdir_p /usr/share/fonts
+    # A symlink, not a copy: fifty-odd copies of std would be ~8 MiB of a
+    # 32 MiB root, and `argv[0]` selects the tool anyway. `debugfs symlink`
+    # writes a fast symlink, so a name costs an inode and no block.
+    if [ -n "${COREUTILS_LINKS:-}" ]; then
+        if [ ! -f "${BUILD_DIR}/coreutils.elf" ]; then
+            echo "COREUTILS_LINKS is set but ${BUILD_DIR}/coreutils.elf is missing" >&2
+            exit 1
+        fi
+        # Word splitting is wanted here; pathname expansion is not, and a name
+        # holding `*` would otherwise glob against the build directory.
+        set -f
+        for tool in $COREUTILS_LINKS; do
+            # This runs after the binaries are installed, so a name in both
+            # lists would replace a program -- and inherit its grant.
+            for bin in "${BINS[@]}"; do
+                if [ "$tool" = "$bin" ]; then
+                    echo "COREUTILS_LINKS name '$tool' collides with an installed binary" >&2
+                    exit 1
+                fi
+            done
+            debugfs -w -R "rm /bin/${tool}" "$IMAGE_PATH" >/dev/null 2>&1 || true
+            debugfs -w -R "symlink /bin/${tool} coreutils" "$IMAGE_PATH" >/dev/null
+        done
+        set +f
+        echo "Installed $(set -f; set -- $COREUTILS_LINKS; echo $#) utility names in /bin -> coreutils"
+        # Where every `#!/usr/bin/env` script looks for it.
+        case " $COREUTILS_LINKS " in
+            *" env "*)
+                mkdir_p /usr
+                mkdir_p /usr/bin
+                debugfs -w -R "rm /usr/bin/env" "$IMAGE_PATH" >/dev/null 2>&1 || true
+                debugfs -w -R "symlink /usr/bin/env /bin/env" "$IMAGE_PATH" >/dev/null
+                ;;
+        esac
+    fi
 
-    # The OFL license texts ship beside the fonts they cover: the license
-    # requires each copy of the font to carry its notice.
-    for font in "$FONTS_DIR"/*.ttf "$FONTS_DIR"/*-OFL.txt; do
-        [ -f "$font" ] || continue
-        fname="$(basename "$font")"
-        install_file "$font" "/usr/share/fonts/$fname"
-        echo "Installed font asset: /usr/share/fonts/$fname"
+    # /lib: the shared C library, which is also the program interpreter every
+    # dynamically linked binary names in its PT_INTERP. Sealed and in a sealed
+    # directory for the same reason /bin is: the interpreter runs before the
+    # program does, so replacing it is replacing every dynamic program at once.
+    mkdir_p /lib
+    if [ -f "${BUILD_DIR}/libc.so" ]; then
+        install_binary "${BUILD_DIR}/libc.so" /lib/libc.so
+        debugfs -w -R "rm /lib/ld-slopos.so.1" "$IMAGE_PATH" >/dev/null 2>&1 || true
+        debugfs -w -R "symlink /lib/ld-slopos.so.1 libc.so" "$IMAGE_PATH" >/dev/null
+        echo "Installed /lib/libc.so and /lib/ld-slopos.so.1"
+    fi
+    # Only the -tests recipes set this. Installing by file presence would put a
+    # dlopen fixture into the shipped, attested root out of a stale builddir.
+    for so in ${EXTRA_SHARED_OBJECTS:-}; do
+        install_binary "${BUILD_DIR}/${so}" "/lib/${so}"
     done
-fi
 
-mkdir_p /usr/share/slopos
-mkdir_p /usr/share/slopos/doc
-mkdir_p /usr/share/slopos/wallpapers
+    seal_dir /bin
+    seal_dir /sbin
+    seal_dir /lib
 
-# Documentation the shipped programs open from their own Help menus.
-DOCS_DIR="${REPO_ROOT}/assets/docs"
-if [ -d "$DOCS_DIR" ]; then
-    for doc in "$DOCS_DIR"/*.md; do
-        [ -f "$doc" ] || continue
-        install_file "$doc" "/usr/share/slopos/doc/$(basename "$doc")"
-        echo "Installed doc: /usr/share/slopos/doc/$(basename "$doc")"
+    mkdir_p /usr
+    mkdir_p /usr/share
+
+    if [ -f "${BUILD_DIR}/libc.so" ]; then
+        mkdir_p /usr/share/licenses
+        mkdir_p /usr/share/licenses/slibc
+        for text in "${SLIBC_LICENSES[@]}"; do
+            [ -f "${REPO_ROOT}/slibc/$text" ] || { echo "build_fs_image: slibc/$text is missing" >&2; exit 1; }
+            install_file "${REPO_ROOT}/slibc/$text" "/usr/share/licenses/slibc/$text"
+            echo "Installed license: /usr/share/licenses/slibc/$text"
+        done
+    fi
+
+    # The C++ runtime's license texts, beside the library they cover, for the
+    # same reason the fonts below carry theirs, and only where that library
+    # ships.
+    CXX_LICENSES="${BUILD_DIR}/libc++-licenses"
+    if [ -d "$CXX_LICENSES" ] && [[ " ${EXTRA_SHARED_OBJECTS:-} " == *" libc++.so "* ]]; then
+        mkdir_p /usr/share/licenses
+        mkdir_p /usr/share/licenses/libc++
+        for text in "$CXX_LICENSES"/*; do
+            [ -f "$text" ] || continue
+            fname="$(basename "$text")"
+            install_file "$text" "/usr/share/licenses/libc++/$fname"
+            echo "Installed license: /usr/share/licenses/libc++/$fname"
+        done
+    fi
+
+    FONTS_DIR="${REPO_ROOT}/assets/fonts"
+    if [ -d "$FONTS_DIR" ]; then
+        mkdir_p /usr/share/fonts
+
+        # The OFL license texts ship beside the fonts they cover: the license
+        # requires each copy of the font to carry its notice.
+        for font in "$FONTS_DIR"/*.ttf "$FONTS_DIR"/*-OFL.txt; do
+            [ -f "$font" ] || continue
+            fname="$(basename "$font")"
+            install_file "$font" "/usr/share/fonts/$fname"
+            echo "Installed font asset: /usr/share/fonts/$fname"
+        done
+    fi
+
+    mkdir_p /usr/share/slopos
+    mkdir_p /usr/share/slopos/doc
+    mkdir_p /usr/share/slopos/wallpapers
+
+    # Documentation the shipped programs open from their own Help menus.
+    DOCS_DIR="${REPO_ROOT}/assets/docs"
+    if [ -d "$DOCS_DIR" ]; then
+        for doc in "$DOCS_DIR"/*.md; do
+            [ -f "$doc" ] || continue
+            install_file "$doc" "/usr/share/slopos/doc/$(basename "$doc")"
+            echo "Installed doc: /usr/share/slopos/doc/$(basename "$doc")"
+        done
+    fi
+
+    if [ -f "${REPO_ROOT}/assets/logo.png" ]; then
+        install_file "${REPO_ROOT}/assets/logo.png" /usr/share/slopos/wallpapers/default.png
+        echo "Installed wallpaper: /usr/share/slopos/wallpapers/default.png"
+    fi
+
+    CERTS_DIR="${REPO_ROOT}/assets/certs"
+    if [ -f "$CERTS_DIR/ca-certificates.crt" ]; then
+        mkdir_p /etc/ssl
+        mkdir_p /etc/ssl/certs
+        install_file "$CERTS_DIR/ca-certificates.crt" /etc/ssl/certs/ca-certificates.crt
+        # OpenSSL's default CA file.
+        debugfs -w -R "rm /etc/ssl/cert.pem" "$IMAGE_PATH" >/dev/null 2>&1 || true
+        debugfs -w -R "symlink /etc/ssl/cert.pem certs/ca-certificates.crt" "$IMAGE_PATH" >/dev/null
+        mkdir_p /usr/share/licenses
+        mkdir_p /usr/share/licenses/ca-certificates
+        install_file "$CERTS_DIR/MPL-2.0.txt" /usr/share/licenses/ca-certificates/MPL-2.0.txt
+        echo "Installed CA bundle: /etc/ssl/certs/ca-certificates.crt"
+    fi
+
+    KEYMAPS_DIR="${REPO_ROOT}/assets/keymaps"
+    if [ -d "$KEYMAPS_DIR" ]; then
+        mkdir_p /usr/share/keymaps
+        for layout in "$KEYMAPS_DIR"/*.layout; do
+            [ -e "$layout" ] || continue
+            lname=$(basename "$layout")
+            install_file "$layout" "/usr/share/keymaps/$lname"
+            echo "Installed keymap: /usr/share/keymaps/$lname"
+        done
+    fi
+}
+
+install_mount_points() {
+    local dir
+    for dir in "${BASE_DIRS[@]}"; do
+        mkdir_p "$(dirname "$dir")"
+        mkdir_p "$dir"
+        seal_dir "$dir"
     done
-fi
+}
 
-if [ -f "${REPO_ROOT}/assets/logo.png" ]; then
-    install_file "${REPO_ROOT}/assets/logo.png" /usr/share/slopos/wallpapers/default.png
-    echo "Installed wallpaper: /usr/share/slopos/wallpapers/default.png"
-fi
-
-CERTS_DIR="${REPO_ROOT}/assets/certs"
-if [ -f "$CERTS_DIR/ca-certificates.crt" ]; then
-    mkdir_p /etc/ssl
-    mkdir_p /etc/ssl/certs
-    install_file "$CERTS_DIR/ca-certificates.crt" /etc/ssl/certs/ca-certificates.crt
-    # OpenSSL's default CA file.
-    debugfs -w -R "rm /etc/ssl/cert.pem" "$IMAGE_PATH" >/dev/null 2>&1 || true
-    debugfs -w -R "symlink /etc/ssl/cert.pem certs/ca-certificates.crt" "$IMAGE_PATH" >/dev/null
-    mkdir_p /usr/share/licenses
-    mkdir_p /usr/share/licenses/ca-certificates
-    install_file "$CERTS_DIR/MPL-2.0.txt" /usr/share/licenses/ca-certificates/MPL-2.0.txt
-    echo "Installed CA bundle: /etc/ssl/certs/ca-certificates.crt"
-fi
-
-# Install keyboard layout files into /usr/share/keymaps/
-KEYMAPS_DIR="${REPO_ROOT}/assets/keymaps"
-if [ -d "$KEYMAPS_DIR" ]; then
-    mkdir_p /usr/share/keymaps
-    for layout in "$KEYMAPS_DIR"/*.layout; do
-        [ -e "$layout" ] || continue
-        lname=$(basename "$layout")
-        install_file "$layout" "/usr/share/keymaps/$lname"
-        echo "Installed keymap: /usr/share/keymaps/$lname"
-    done
+if [ "$FS_BASE" = boot ]; then
+    install_mount_points
+else
+    install_base
 fi
 
 install_trees() {

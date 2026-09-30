@@ -151,13 +151,18 @@ impl FileOps for TtyFileOps {
         }
     }
 
+    /// The device a terminal's node carries: `/dev/pts/<n>` for a slave, so
+    /// `ttyname` finds it by `st_rdev`, and `/dev/ptmx` for a master.
     fn stat(&self, handle: usize, out: &mut UserFsStat) -> i32 {
-        slopos_fs::fileio::fill_char_device_stat(
-            out,
-            handle,
-            slopos_fs::fileio::TTY_DEVICE_MAJOR,
-            0o620,
-        );
+        use slopos_fs::fileio::{
+            PTMX_MAJOR, PTMX_MINOR, PTY_SLAVE_MAJOR, TTY_DEVICE_MAJOR, fill_char_device_stat,
+        };
+        let (minor, major, mode) = match TtyHandle::from_usize(handle).map(TtyHandle::index) {
+            Some(index) if tty::is_pty_slave(index) => (handle, PTY_SLAVE_MAJOR, 0o620),
+            Some(index) if tty::get_pty_number(index).is_ok() => (PTMX_MINOR, PTMX_MAJOR, 0o666),
+            _ => (handle, TTY_DEVICE_MAJOR, 0o620),
+        };
+        fill_char_device_stat(out, minor, major, mode);
         0
     }
 }

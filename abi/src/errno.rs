@@ -168,6 +168,9 @@ define_errnos! {
     ECANCELED       = 125, "Operation canceled";
     /// Kernel-internal: restartable syscall.  **Must never reach userland.**
     ERESTARTSYS     = 512, "Restartable system call";
+    /// Kernel-internal: restart unless a handler ran, whatever its
+    /// `SA_RESTART`.  **Must never reach userland.**
+    ERESTARTNOHAND  = 514, "Restart if no handler";
 }
 
 impl fmt::Display for Errno {

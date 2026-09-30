@@ -6,11 +6,11 @@
 //! this file adds is the panic runtime an rlib would have taken from the
 //! binary it was linked into.
 //!
-//! The link line lives in `scripts/build_userland.sh`: `-Bsymbolic` and
-//! `-z now` so the object's own references bind at link time and its
-//! self-relocation needs only `R_X86_64_RELATIVE`, `--soname=libc.so` so a
-//! `DT_NEEDED` on the C library resolves to the already-mapped interpreter,
-//! and `--entry=_dlstart`.
+//! The link line lives in `scripts/build_userland.sh` and `build.rs`: a
+//! dynamic list and `-z now` so the object's own references bar its exported
+//! objects bind at link time and its self-relocation needs only
+//! `R_X86_64_RELATIVE`, `--soname=libc.so` so a `DT_NEEDED` on the C library
+//! resolves to the already-mapped interpreter, and `--entry=_dlstart`.
 //!
 //! Off the `slopos` target the crate is a deliberately empty `std` shim so a
 //! host `cargo check --workspace` stays green: a `no_std` cdylib cannot be

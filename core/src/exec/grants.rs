@@ -9,8 +9,9 @@
 //! `SYSTEM` deliberately appears nowhere below; naming `/sbin/init` here would
 //! let any task re-spawn it and inherit console administration.
 //!
-//! This is containment, not a privilege model: it is only as strong as write
-//! protection on `/bin`, which SlopOS does not have.
+//! A grant holds because no process can replace the program it names: the
+//! system's programs are the boot slot's base, read-only and pinned, or files
+//! the image sealed.
 
 use slopos_abi::task::{
     TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_LAUNCH,

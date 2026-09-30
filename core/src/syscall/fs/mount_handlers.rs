@@ -15,7 +15,9 @@ use slopos_fs::vfs::init::{
     vfs_devfs_instance, vfs_ext2_mount_named, vfs_ext2_mounted_instance, vfs_ext2_pool_release,
     vfs_ramfs_pool_claim, vfs_ramfs_pool_release,
 };
-use slopos_fs::vfs::mount::{MOUNT_RDONLY, mount, mount_at, unmount, with_mount_table};
+use slopos_fs::vfs::mount::{
+    MOUNT_RDONLY, mount, mount_at, under_pinned_mount, unmount, with_mount_table,
+};
 use slopos_fs::vfs::orphan::{drain_releasable, forget_filesystem, has_open_refs};
 use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_at};
 use slopos_fs::vfs::traits::{FileSystem, FileType, same_filesystem};
@@ -78,8 +80,9 @@ pub fn mount_apply_at(
         return Err(Errno::EBUSY);
     }
     // `EPERM`, not `EBUSY`: covering a path a grant is keyed on would let the
-    // caller hand itself that privilege, so the refusal is permanent.
-    if crate::exec::grants::covers_grant_path(target) {
+    // caller hand itself that privilege, and covering the base would replace
+    // the system, so the refusal is permanent.
+    if crate::exec::grants::covers_grant_path(target) || under_pinned_mount(target) {
         return Err(Errno::EPERM);
     }
     // Before the directory check: an occupied path is by construction a valid
@@ -157,6 +160,9 @@ pub(crate) fn umount_path_at(path: &[u8], cwd: &[u8], flags: u32) -> Result<(), 
         return Err(Errno::EBUSY);
     }
     let mounted = mount_at(target).ok_or(Errno::EINVAL)?;
+    if mounted.pinned() {
+        return Err(Errno::EPERM);
+    }
 
     // Asked of the *mount*, not of the instance: devfs and the ext2 singleton
     // can sit at several paths, and tearing an instance's records down while

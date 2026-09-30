@@ -9,6 +9,8 @@
 #   CURL_USE_LIBSSH2               SCP and SFTP URLs; cargo's ssh is
 #                                  libgit2's, not curl's.
 #   CURL_CA_BUNDLE                 the SlopOS image's CA bundle.
+#   CURL_LIBCURL_SOVERSION         `libcurl.so.4`, which curl names only for
+#                                  the systems it lists.
 version=8.22.0
 url=https://curl.se/download/curl-8.22.0.tar.xz
 sha256=f7ef3ae8a22e521f289803fe93543eb64c329b58aa73a9e224dfd915a2a5f4f7
@@ -18,6 +20,7 @@ template=cmake
 depends=mbedtls nghttp2 zlib
 soname=libcurl.so.4
 arg=-DBUILD_CURL_EXE=OFF
+arg=-DCURL_LIBCURL_SOVERSION=ON
 arg=-DBUILD_STATIC_LIBS=OFF
 arg=-DBUILD_TESTING=OFF
 arg=-DBUILD_LIBCURL_DOCS=OFF

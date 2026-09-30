@@ -1,19 +1,30 @@
 use crate::vfs::canon::canonicalise;
-use crate::vfs::traits::{FileSystem, VfsError, VfsResult};
+use crate::vfs::traits::{FileSystem, InodeId, VfsError, VfsResult, same_filesystem};
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{IrqRwLock, LOCK_LEVEL_REGISTRY};
 
 use crate::MAX_PATH_LEN;
 
-pub const MAX_MOUNTS: usize = 16;
+pub const MAX_MOUNTS: usize = 32;
+
+/// Directories pinned mount points' paths pass through: `/usr` and `/etc` for
+/// the base.
+const MAX_PINNED_DIRS: usize = 8;
 
 /// Every mutation through this mount fails with `EROFS` at the VFS, before
 /// the filesystem sees it.
 pub const MOUNT_RDONLY: u32 = 1 << 0;
 
+/// The kernel's own: `umount(2)` refuses it and `mount(2)` puts nothing at or
+/// beneath it.
+pub const MOUNT_PINNED: u32 = 1 << 1;
+
 #[derive(Clone, Copy)]
 pub struct Mounted {
     pub fs: &'static dyn FileSystem,
+    /// The directory a walk enters at: the filesystem's root, or the directory
+    /// of it a subtree mount names.
+    pub root: InodeId,
     pub flags: u32,
     /// Identity of the *mount*, not of the filesystem: one filesystem mounted
     /// at two paths carries two ids.
@@ -24,12 +35,17 @@ impl Mounted {
     pub fn read_only(&self) -> bool {
         self.flags & MOUNT_RDONLY != 0
     }
+
+    pub fn pinned(&self) -> bool {
+        self.flags & MOUNT_PINNED != 0
+    }
 }
 
 pub struct MountPoint {
     path: [u8; MAX_PATH_LEN],
     path_len: usize,
     fs: Option<&'static dyn FileSystem>,
+    root: InodeId,
     flags: u32,
     id: u32,
 }
@@ -40,6 +56,7 @@ impl MountPoint {
             path: [0; MAX_PATH_LEN],
             path_len: 0,
             fs: None,
+            root: 0,
             flags: 0,
             id: 0,
         }
@@ -88,10 +105,17 @@ fn child_component<'a>(parent: &[u8], mp_path: &'a [u8]) -> Option<&'a [u8]> {
     Some(child)
 }
 
+#[derive(Clone, Copy)]
+struct PinnedDir {
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+}
+
 pub struct MountTable {
     mounts: [MountPoint; MAX_MOUNTS],
     count: usize,
     next_id: u32,
+    pinned_dirs: [Option<PinnedDir>; MAX_PINNED_DIRS],
 }
 
 impl MountTable {
@@ -100,7 +124,15 @@ impl MountTable {
             mounts: [const { MountPoint::empty() }; MAX_MOUNTS],
             count: 0,
             next_id: 1,
+            pinned_dirs: [None; MAX_PINNED_DIRS],
         }
+    }
+
+    fn pins_dir(&self, fs: &'static dyn FileSystem, inode: InodeId) -> bool {
+        self.pinned_dirs
+            .iter()
+            .flatten()
+            .any(|dir| dir.inode == inode && same_filesystem(dir.fs, fs))
     }
 
     /// Monotonic within a boot and never reused: a *slot index* is reused the
@@ -117,7 +149,13 @@ impl MountTable {
         Ok(id)
     }
 
-    pub fn mount(&mut self, path: &[u8], fs: &'static dyn FileSystem, flags: u32) -> VfsResult<()> {
+    pub fn mount(
+        &mut self,
+        path: &[u8],
+        fs: &'static dyn FileSystem,
+        root: InodeId,
+        flags: u32,
+    ) -> VfsResult<()> {
         // Canonical, so `/tmp/` and `/tmp` cannot both occupy the table while
         // only one of them is matchable by the per-component walk.
         let canon = canonicalise(path)?;
@@ -140,6 +178,7 @@ impl MountTable {
         slot.path[..path.len()].copy_from_slice(path);
         slot.path_len = path.len();
         slot.fs = Some(fs);
+        slot.root = root;
         slot.flags = flags;
         slot.id = id;
         self.count += 1;
@@ -226,7 +265,67 @@ static MOUNT_TABLE: IrqRwLock<MountTable> = IrqRwLock::new(
 );
 
 pub fn mount(path: &[u8], fs: &'static dyn FileSystem, flags: u32) -> VfsResult<()> {
-    MOUNT_TABLE.write().mount(path, fs, flags)
+    let root = fs.root_inode();
+    MOUNT_TABLE.write().mount(path, fs, root, flags)
+}
+
+/// Mount the directory `root` of `fs` at `path`, which then shows that
+/// directory's contents: a view of part of a filesystem another path may
+/// already show whole.
+pub fn mount_subtree(
+    path: &[u8],
+    fs: &'static dyn FileSystem,
+    root: InodeId,
+    flags: u32,
+) -> VfsResult<()> {
+    MOUNT_TABLE.write().mount(path, fs, root, flags)
+}
+
+/// Hold the directory `inode` of `fs`, which a pinned mount point's path
+/// passes through, where it is: [`is_pinned_dir`] answers for it by identity,
+/// so a second mount of `fs` is no way around the pin.
+pub fn pin_dir(fs: &'static dyn FileSystem, inode: InodeId) -> VfsResult<()> {
+    let mut table = MOUNT_TABLE.write();
+    if table.pins_dir(fs, inode) {
+        return Ok(());
+    }
+    let slot = table
+        .pinned_dirs
+        .iter_mut()
+        .find(|dir| dir.is_none())
+        .ok_or(VfsError::NoSpace)?;
+    *slot = Some(PinnedDir { fs, inode });
+    Ok(())
+}
+
+pub fn is_pinned_dir(fs: &'static dyn FileSystem, inode: InodeId) -> bool {
+    MOUNT_TABLE.read().pins_dir(fs, inode)
+}
+
+/// Whether `path` is a pinned mount point or leads to one: renaming or
+/// removing it would let whatever the walk then finds at its name stand in
+/// for the pinned mount.
+pub fn leads_to_pinned_mount(path: &[u8]) -> bool {
+    let guard = MOUNT_TABLE.read();
+    guard.mounts.iter().any(|mp| {
+        let mount = mp.path_bytes();
+        mp.is_active()
+            && mp.flags & MOUNT_PINNED != 0
+            && mount.starts_with(path)
+            && (mount.len() == path.len() || path == b"/" || mount[path.len()] == b'/')
+    })
+}
+
+/// Whether `path` is a pinned mount point or lies beneath one.
+pub fn under_pinned_mount(path: &[u8]) -> bool {
+    let guard = MOUNT_TABLE.read();
+    guard.mounts.iter().any(|mp| {
+        let mount = mp.path_bytes();
+        mp.is_active()
+            && mp.flags & MOUNT_PINNED != 0
+            && path.starts_with(mount)
+            && (path.len() == mount.len() || path[mount.len()] == b'/')
+    })
 }
 
 pub fn unmount(path: &[u8]) -> VfsResult<()> {
@@ -251,6 +350,7 @@ pub fn mount_at(path: &[u8]) -> Option<Mounted> {
         .and_then(|mp| {
             mp.fs.map(|fs| Mounted {
                 fs,
+                root: mp.root,
                 flags: mp.flags,
                 id: mp.id,
             })

@@ -103,16 +103,13 @@ pub unsafe extern "C" fn __libc_start_main(
 /// `[stack_base]`, then `argv`, `envp`, and the auxv).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __slibc_start(stack_base: *const usize) -> ! {
+    // `main(argc, argv, envp)`, the Unix convention: a two-argument `main`
+    // never reads the third register.
     unsafe extern "C" {
-        fn main(argc: isize, argv: *const *const u8) -> isize;
+        fn main(argc: isize, argv: *const *const u8, envp: *const *const u8) -> isize;
     }
 
-    let raw_argc = *stack_base as isize;
-    let argc = if !(0..=1024).contains(&raw_argc) {
-        0
-    } else {
-        raw_argc
-    };
+    let argc = *stack_base as isize;
     let argv = stack_base.add(1) as *const *const c_char;
     let envp = stack_base.add(1 + (argc as usize) + 1) as *const *const c_char;
 
@@ -129,7 +126,7 @@ pub unsafe extern "C" fn __slibc_start(stack_base: *const usize) -> ! {
     crate::unwind::init();
     run_static_init_array();
 
-    let ret = main(argc, argv as *const *const u8);
+    let ret = main(argc, argv as *const *const u8, envp as *const *const u8);
     crate::process::exit(ret as i32)
 }
 

@@ -3790,7 +3790,12 @@ fn return_from_syscall_as_current(
     }
     let returned = match Current::get() {
         Some(current) => with_user_process_context(table, || {
-            crate::syscall::dispatch::return_from_syscall(&current, ctx, sysno, true)
+            crate::syscall::dispatch::return_from_syscall(
+                &current,
+                ctx,
+                sysno,
+                Some(slopos_abi::Errno::ERESTARTSYS),
+            )
         })
         .is_some(),
         None => false,

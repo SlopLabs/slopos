@@ -481,11 +481,11 @@ fn globbing() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The structural caps that used to exist
+// Sizes a real script reaches
 // ---------------------------------------------------------------------------
 
-/// Twelve stages where eight was the ceiling, and a thousand-byte variable
-/// where 256 was — a `CFLAGS` or a long `PATH` would have hit the latter.
+/// Twelve pipeline stages and a thousand-byte variable, which a `CFLAGS` or a
+/// long `PATH` is.
 fn structural_caps() -> bool {
     let mut script =
         b"echo deep | cat | cat | cat | cat | cat | cat | cat | cat | cat | cat | cat\nv=".to_vec();
@@ -494,8 +494,8 @@ fn structural_caps() -> bool {
     expect_output("structural_caps", &script, b"deep\n1000\n")
 }
 
-/// A hundred arguments, where sixty-four was the ceiling. `cargo rustc` lines
-/// routinely pass more.
+/// A hundred arguments: `cargo rustc` lines routinely pass more than
+/// sixty-four.
 fn a_command_takes_past_sixty_four_words() -> bool {
     let mut script = b"echo".to_vec();
     let mut want = Vec::new();
@@ -600,6 +600,16 @@ fn a_syntax_error_does_not_run_anything() -> bool {
         "a_syntax_error_does_not_run_anything",
         b"for; do echo no; done\necho after\n",
         b"after\n",
+    )
+}
+
+/// `umask` prints and sets the mask octally and symbolically, and a
+/// subshell's change stays in the subshell.
+fn umask_builtin() -> bool {
+    expect_output(
+        "umask_builtin",
+        b"umask\n(umask 077; umask)\numask\numask -S\numask u=rwx,g=,o=\numask\numask 0022\n",
+        b"0022\n0077\n0022\nu=rwx,g=rx,o=rx\n0077\n",
     )
 }
 
@@ -910,6 +920,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 const CASES: &[(&str, fn() -> bool)] = &[
     ("script_output_is_exact", script_output_is_exact),
+    ("umask_builtin", umask_builtin),
     (
         "every_line_runs_once_in_order",
         every_line_runs_once_in_order,

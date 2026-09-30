@@ -431,7 +431,7 @@ fn unlink_and_rename_keep_open_pipes() -> bool {
 
 fn existing_fifo_opens_as_a_pipe() -> bool {
     let path = fresh(TMP_DIR, "creat");
-    if make_fifo(&path, 0o620).is_err() {
+    if make_fifo(&path, 0o604).is_err() {
         return fail("mkfifo failed");
     }
     let Ok(mut both) = OpenOptions::new()
@@ -453,7 +453,7 @@ fn existing_fifo_opens_as_a_pipe() -> bool {
     let meta = both.metadata();
     let _ = fs::remove_file(&path);
     match meta {
-        Ok(m) if m.file_type().is_fifo() && m.permissions().mode() & 0o7777 == 0o620 => true,
+        Ok(m) if m.file_type().is_fifo() && m.permissions().mode() & 0o7777 == 0o604 => true,
         Ok(m) => fail(&format!("fstat reports mode {:o}", m.permissions().mode())),
         Err(e) => fail(&format!("fstat failed: {e}")),
     }

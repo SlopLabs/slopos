@@ -117,6 +117,9 @@ int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *detachstate);
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate);
 int pthread_setcancelstate(int state, int *oldstate);
 int pthread_setcanceltype(int kind, int *oldtype);
+int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void));
+int pthread_getschedparam(pthread_t thread, int *policy, struct sched_param *param);
+int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param *param);
 
 #ifdef __cplusplus
 }

@@ -3,8 +3,12 @@ use slopos_ostd::{KArc, KVec, klog_info, lock_class};
 
 use crate::blockdev::BlockDevice;
 use crate::ext2::ondisk::{SUPERBLOCK_LABEL_SPAN, volume_label_of};
+use crate::fileio::PTY_SLAVE_MAJOR;
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
+use slopos_abi::event::MAX_TTYS;
+use slopos_abi::syscall::TtyIndex;
 use slopos_kernel_services::driver_runtime::{current_task_flags, current_task_is_privileged};
+use slopos_kernel_services::syscall_services::tty;
 
 const ROOT_INODE: InodeId = 1;
 const NULL_INODE: InodeId = 2;
@@ -12,6 +16,9 @@ const ZERO_INODE: InodeId = 3;
 const RANDOM_INODE: InodeId = 4;
 const CONSOLE_INODE: InodeId = 5;
 const KMSG_INODE: InodeId = 6;
+const PTS_INODE: InodeId = 7;
+/// `/dev/pts/<n>` is this plus `n`, the slave's terminal index.
+const PTY_SLAVE_INODE_BASE: InodeId = 1024;
 
 /// Runtime-registered block nodes number from a well clear of the const
 /// character-device ids above.
@@ -176,6 +183,62 @@ pub fn devfs_block_name_by_label(label: &[u8], out: &mut [u8; DEV_NAME_MAX]) -> 
     }
 }
 
+/// The slave `/dev/pts/<name>` names, while it is allocated. Only the
+/// canonical spelling: `01` is not `1`.
+fn pty_slave_named(name: &[u8]) -> Option<u8> {
+    let canonical =
+        name.iter().all(u8::is_ascii_digit) && (name.first() != Some(&b'0') || name.len() == 1);
+    let index = core::str::from_utf8(name).ok()?.parse::<u8>().ok();
+    index.filter(|&n| canonical && pty_slave_live(n))
+}
+
+fn pty_slave_live(index: u8) -> bool {
+    usize::from(index) < MAX_TTYS && tty::is_pty_slave(TtyIndex(index))
+}
+
+fn pty_slave_of(inode: InodeId) -> Option<u8> {
+    let index = u8::try_from(inode.checked_sub(PTY_SLAVE_INODE_BASE)?).ok()?;
+    pty_slave_live(index).then_some(index)
+}
+
+fn readdir_pts(
+    offset: usize,
+    callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
+) -> VfsResult<usize> {
+    let mut count = 0;
+    let mut current = 0;
+    let mut emit = |name: &[u8], inode: InodeId, kind: FileType| {
+        let keep_going = current < offset || callback(name, inode, kind);
+        if current >= offset && keep_going {
+            count += 1;
+        }
+        current += 1;
+        keep_going
+    };
+    if !emit(b".", PTS_INODE, FileType::Directory) || !emit(b"..", ROOT_INODE, FileType::Directory)
+    {
+        return Ok(count);
+    }
+    for index in (0..MAX_TTYS as u8).filter(|&n| pty_slave_live(n)) {
+        let mut digits = [0u8; 3];
+        let mut at = digits.len();
+        let mut rest = index;
+        loop {
+            at -= 1;
+            digits[at] = b'0' + rest % 10;
+            rest /= 10;
+            if rest == 0 {
+                break;
+            }
+        }
+        let inode = PTY_SLAVE_INODE_BASE + InodeId::from(index);
+        if !emit(&digits[at..], inode, FileType::CharDevice) {
+            break;
+        }
+    }
+    Ok(count)
+}
+
 fn block_inode_for(name: &[u8]) -> Option<InodeId> {
     let table = BLOCK_NODES.read();
     table.iter().find(|n| n.matches(name)).map(|n| n.inode)
@@ -330,12 +393,24 @@ impl FileSystem for DevFs {
     }
 
     fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
+        if parent == PTS_INODE {
+            return match name {
+                b"." => Ok(PTS_INODE),
+                b".." => Ok(ROOT_INODE),
+                _ => pty_slave_named(name)
+                    .map(|n| PTY_SLAVE_INODE_BASE + InodeId::from(n))
+                    .ok_or(VfsError::NotFound),
+            };
+        }
         if parent != ROOT_INODE {
             return Err(VfsError::NotDirectory);
         }
 
         if name == b"." || name == b".." {
             return Ok(ROOT_INODE);
+        }
+        if name == b"pts" {
+            return Ok(PTS_INODE);
         }
 
         for dev in &DEVICES {
@@ -348,8 +423,15 @@ impl FileSystem for DevFs {
     }
 
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
-        if inode == ROOT_INODE {
-            return Ok(FileStat::new_directory(ROOT_INODE));
+        if inode == ROOT_INODE || inode == PTS_INODE {
+            return Ok(FileStat::new_directory(inode));
+        }
+        if let Some(index) = pty_slave_of(inode) {
+            return Ok(FileStat::new_char_device(
+                inode,
+                PTY_SLAVE_MAJOR,
+                u32::from(index),
+            ));
         }
 
         for dev in &DEVICES {
@@ -435,6 +517,9 @@ impl FileSystem for DevFs {
         offset: usize,
         callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
     ) -> VfsResult<usize> {
+        if inode == PTS_INODE {
+            return readdir_pts(offset, callback);
+        }
         if inode != ROOT_INODE {
             return Err(VfsError::NotDirectory);
         }
@@ -467,6 +552,14 @@ impl FileSystem for DevFs {
             }
             current += 1;
         }
+
+        if current >= offset {
+            if !callback(b"pts", PTS_INODE, FileType::Directory) {
+                return Ok(count);
+            }
+            count += 1;
+        }
+        current += 1;
 
         // One row at a time, so the callback never runs with BLOCK_NODES held.
         let mut index = 0;

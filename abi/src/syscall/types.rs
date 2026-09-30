@@ -51,6 +51,36 @@ const _: () = assert!(
     "UserSysInfo must carry no implicit padding"
 );
 
+/// Linux x86-64 `struct sysinfo`, what [`SYSCALL_SYSINFO`](super::SYSCALL_SYSINFO)
+/// writes. `loads` carry [`SI_LOAD_SHIFT`] fractional bits and every memory
+/// figure counts `mem_unit` bytes.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct Sysinfo {
+    pub uptime: i64,
+    pub loads: [u64; 3],
+    pub totalram: u64,
+    pub freeram: u64,
+    pub sharedram: u64,
+    pub bufferram: u64,
+    pub totalswap: u64,
+    pub freeswap: u64,
+    pub procs: u16,
+    pub pad: u16,
+    pub _pad0: u32,
+    pub totalhigh: u64,
+    pub freehigh: u64,
+    pub mem_unit: u32,
+    pub _pad1: u32,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<Sysinfo>() == 112,
+    "Sysinfo must match the Linux x86-64 struct sysinfo"
+);
+
+pub const SI_LOAD_SHIFT: u32 = 16;
+
 pub const BOOT_FLAG_ROULETTE_SKIP: u32 = 1 << 0;
 pub const BOOT_FLAG_TESTS_ENABLED: u32 = 1 << 1;
 /// `/` is backed by a block device: a write there survives the reboot. Clear

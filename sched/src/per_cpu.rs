@@ -236,6 +236,9 @@ pub struct PriorityRunQueue {
     pub total_preemptions: AtomicU64,
     pub total_ticks: AtomicU64,
     pub idle_time: AtomicU64,
+    /// Tasks this CPU held ready or running at its last tick, for the load
+    /// average.
+    runnable_sample: AtomicU32,
     pub total_yields: AtomicU64,
     pub schedule_calls: AtomicU32,
     initialized: AtomicBool,
@@ -264,6 +267,7 @@ impl PriorityRunQueue {
             total_preemptions: AtomicU64::new(0),
             total_ticks: AtomicU64::new(0),
             idle_time: AtomicU64::new(0),
+            runnable_sample: AtomicU32::new(0),
             total_yields: AtomicU64::new(0),
             schedule_calls: AtomicU32::new(0),
             initialized: AtomicBool::new(false),
@@ -510,10 +514,16 @@ impl PriorityRunQueue {
         }
     }
 
+    /// Tasks queued ready to run, read without the queue lock: approximate,
+    /// which is what a timer tick may take.
+    pub fn queued_count(&self) -> u32 {
+        self.ready_queues.iter().map(|q| q.len()).sum()
+    }
+
     /// Effective load on this CPU: queued tasks plus one if a non-idle task is
     /// currently running. Lock-free and approximate.
     pub fn effective_load(&self) -> u32 {
-        let queued: u32 = self.ready_queues.iter().map(|q| q.len()).sum();
+        let queued = self.queued_count();
         let inbox = self.inbox_count.load(Ordering::Relaxed);
         let inbox = if inbox == 0 && !self.remote_inbox_head.load(Ordering::Acquire).is_null() {
             1
@@ -590,6 +600,14 @@ impl PriorityRunQueue {
 
     pub fn increment_idle_time(&self) {
         self.idle_time.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_runnable_sample(&self, runnable: u32) {
+        self.runnable_sample.store(runnable, Ordering::Relaxed);
+    }
+
+    pub fn runnable_sample(&self) -> u32 {
+        self.runnable_sample.load(Ordering::Relaxed)
     }
 
     pub fn increment_yields(&self) {

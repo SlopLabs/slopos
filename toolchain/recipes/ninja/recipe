@@ -1,0 +1,13 @@
+# Ninja: the build tool CMake generates for, and what the C++ runtime's build
+# runs in the guest. The tarball is GitHub's archive of the release tag, which
+# is the only form Ninja publishes.
+#
+#   BUILD_TESTING   the suite, which fetches googletest.
+version=1.13.2
+url=https://github.com/ninja-build/ninja/archive/refs/tags/v1.13.2.tar.gz
+sha256=974d6b2f4eeefa25625d34da3cb36bdcebe7fbce40f4c16ac0835fd1c0cbae17
+license=Apache-2.0
+license_file=COPYING
+template=cmake
+program=bin/ninja
+arg=-DBUILD_TESTING=OFF

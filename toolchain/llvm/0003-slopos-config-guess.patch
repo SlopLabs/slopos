@@ -1,0 +1,12 @@
+--- a/llvm/cmake/config.guess
++++ b/llvm/cmake/config.guess
+@@ -1256,6 +1256,9 @@ EOF
+     x86_64:Haiku:*:*) # Haiku running on x86_64.
+ 	echo x86_64-unknown-haiku
+ 	exit ;;
++    *:SlopOS:*:*)
++	echo ${UNAME_MACHINE}-unknown-slopos
++	exit ;;
+     SX-4:SUPER-UX:*:*)
+ 	echo sx4-nec-superux${UNAME_RELEASE}
+ 	exit ;;

@@ -34,6 +34,7 @@ pub type dev_t = u64;
 pub type ino_t = u64;
 pub type uid_t = u32;
 pub type gid_t = u32;
+pub type id_t = u32;
 pub type pid_t = i32;
 pub type clockid_t = c_int;
 pub type time_t = i64;
@@ -253,6 +254,9 @@ pub struct group {
     pub gr_gid: gid_t,
     pub gr_mem: *mut *mut c_char,
 }
+
+/// `struct sysinfo`: the kernel writes it whole.
+pub type sysinfo = slopos_abi::syscall::Sysinfo;
 
 /// `struct utimbuf`.
 #[repr(C)]

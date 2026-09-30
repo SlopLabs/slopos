@@ -27,5 +27,7 @@ pub use path_handlers::{
     syscall_mknod, syscall_open, syscall_read, syscall_readlink, syscall_rename, syscall_rmdir,
     syscall_stat, syscall_symlink, syscall_sync, syscall_truncate, syscall_unlink, syscall_write,
 };
-pub use poll_ioctl_handlers::{syscall_ioctl, syscall_poll, syscall_select};
+pub use poll_ioctl_handlers::{
+    syscall_ioctl, syscall_poll, syscall_ppoll, syscall_pselect6, syscall_select,
+};
 pub use statfs_handlers::*;

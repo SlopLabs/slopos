@@ -6,8 +6,8 @@ use slopos_abi::Errno;
 use slopos_abi::syscall::{
     CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_THREAD_CPUTIME_ID,
     LINUX_REBOOT_CMD_CAD_OFF, LINUX_REBOOT_CMD_CAD_ON, LINUX_REBOOT_CMD_HALT,
-    LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_MAGIC1, Timespec,
-    UserSysInfo, UserUtsname, linux_reboot_magic2,
+    LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_MAGIC1, SI_LOAD_SHIFT,
+    Sysinfo, Timespec, UserSysInfo, UserUtsname, linux_reboot_magic2,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
@@ -424,6 +424,24 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(SysIn
 
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
     Ok(())
+});
+
+// Machine-wide totals that name no process, so not `SysInspect`'s to guard:
+// every program may read them, as `getloadavg` and `sysconf` need to.
+define_syscall!(syscall_sysinfo (ctx, info_out: UserPtr<Sysinfo>) cap(NoneSelf)
+    -> Result<(), Errno> {
+    let pages = get_page_allocator_stats();
+    let load_shift = SI_LOAD_SHIFT - slopos_sched::loadavg::FSHIFT;
+    let info = Sysinfo {
+        uptime: (platform::get_time_ms() / 1000) as i64,
+        loads: slopos_sched::loadavg::load_averages().map(|load| load << load_shift),
+        totalram: u64::from(pages.total) * slopos_abi::PAGE_SIZE,
+        freeram: u64::from(pages.free) * slopos_abi::PAGE_SIZE,
+        procs: get_task_stats().total_tasks.min(u32::from(u16::MAX)) as u16,
+        mem_unit: 1,
+        ..Sysinfo::default()
+    };
+    copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)
 });
 
 define_syscall!(syscall_process_list

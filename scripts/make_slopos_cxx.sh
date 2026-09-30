@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Cross-build the C++ runtime for `x86_64-unknown-slopos`.
+# Build the C++ runtime for `x86_64-unknown-slopos`, on the Linux host or in
+# the guest.
 #
 # Usage: make_slopos_cxx.sh <sysroot_lib_dir>
 #        make_slopos_cxx.sh --print-stamp <sysroot_lib_dir>
 #        make_slopos_cxx.sh --print-abi-flags
+#        make_slopos_cxx.sh --fetch-source
+#
+# `--fetch-source` fetches the pinned llvm-project tarball into third_party/
+# unless it is there, verifies it, and prints its path.
 #
 # `<sysroot_lib_dir>` holds `libc.so`, which the runtime links: the C++ library
 # must reach the C library through the shared one, because two copies of a libc
@@ -18,11 +23,12 @@ set -euo pipefail
 #   licenses/         both projects' license texts, to ship beside the object
 #
 # Idempotent: a stamp over toolchain/cxx/PIN, the host compiler's version,
-# this file and slibc/include makes a warm run a few milliseconds. `just
-# clean` does not remove the result; the build is minutes and the inputs are
-# pinned.
+# this file, the CMake modules it configures with (toolchain/cmake and
+# toolchain/cxx/FindPython3.cmake), slibc/include and `libbuiltins.a` makes a
+# warm run a few milliseconds. `just clean` does not remove the result; the
+# build is minutes and the inputs are pinned.
 #
-# Four things about this build are not upstream's defaults and all are load
+# Five things about this build are not upstream's defaults and all are load
 # bearing.
 #
 #   * Localization, wide characters and the random device are ON. Every one of
@@ -42,11 +48,12 @@ set -euo pipefail
 #     objects and the host's libc. The runtimes are therefore built as static
 #     archives with `CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY`, and the one
 #     shared object is linked here, by `ld.lld`, on a line this file states.
-#   * `CMAKE_SYSTEM_NAME` is `Linux` and not `Generic`. It is CMake's `UNIX`
-#     that libc++abi gates `cxa_thread_atexit.cpp` on, so a custom system name
-#     silently drops `__cxa_thread_atexit` — measured: seventeen objects in the
-#     archive instead of eighteen, and every `thread_local` with a destructor
-#     then fails to link with nothing to say why.
+#   * `CMAKE_SYSTEM_NAME` is `SlopOS`, from the platform module in
+#     toolchain/cmake, which the cmake recipe's patch installs into CMake too.
+#     It sets `UNIX`, which libc++abi gates `cxa_thread_atexit.cpp` on: a
+#     system CMake knows nothing about drops `__cxa_thread_atexit`, and every
+#     `thread_local` with a destructor then fails to link with nothing to say
+#     why.
 
 SELF="make_slopos_cxx"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,20 +74,18 @@ die() {
 ABI_FLAGS="-D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE"
 
 PRINT_STAMP=0
-if [ "${1:-}" = "--print-abi-flags" ]; then
-    echo "$ABI_FLAGS"
-    exit 0
-elif [ "${1:-}" = "--print-stamp" ]; then
-    PRINT_STAMP=1
-    shift
-fi
-
-SYSROOT_LIB="${1:?usage: make_slopos_cxx.sh [--print-stamp] <sysroot_lib_dir>}"
-SYSROOT_LIB="$(cd "$SYSROOT_LIB" && pwd)"
-for library in libc.so libbuiltins.a; do
-    [ -f "$SYSROOT_LIB/$library" ] ||
-        die "no $library in $SYSROOT_LIB — build the userland first"
-done
+FETCH_ONLY=0
+case "${1:-}" in
+    --print-abi-flags)
+        echo "$ABI_FLAGS"
+        exit 0
+        ;;
+    --print-stamp)
+        PRINT_STAMP=1
+        shift
+        ;;
+    --fetch-source) FETCH_ONLY=1 ;;
+esac
 
 PIN="$REPO_ROOT/toolchain/cxx/PIN"
 [ -f "$PIN" ] || die "missing toolchain/cxx/PIN"
@@ -102,6 +107,44 @@ TARBALL="$REPO_ROOT/third_party/llvm-project-${LLVM_VERSION}.src.tar.xz"
 SOURCE="$REPO_ROOT/third_party/llvm-project-${LLVM_VERSION}.src"
 BUILD="${BUILD_DIR:-$REPO_ROOT/builddir}/cxx-build"
 
+# Verified before it is cached: a corrupt-but-complete download promoted to
+# the real name is one every later run then dies on.
+fetch_source() {
+    local have
+    if [ ! -f "$TARBALL" ]; then
+        echo "$SELF: fetching llvm-project $LLVM_VERSION sources..." >&2
+        mkdir -p "$(dirname "$TARBALL")"
+        curl -L --fail --show-error "$LLVM_URL" -o "$TARBALL.part" || die "could not fetch $LLVM_URL
+       An offline checkout pre-populates third_party/ with
+       $(basename "$TARBALL"), or points LLVM_URL at a local copy."
+        have="$(sha256sum "$TARBALL.part" | cut -d' ' -f1)"
+        [ "$have" = "$LLVM_SHA256" ] || {
+            rm -f "$TARBALL.part"
+            die "checksum mismatch for the fetched $(basename "$TARBALL")
+       expected: $LLVM_SHA256 (toolchain/cxx/PIN)
+       actual:   $have"
+        }
+        mv "$TARBALL.part" "$TARBALL"
+    fi
+    have="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
+    [ "$have" = "$LLVM_SHA256" ] || die "checksum mismatch for $(basename "$TARBALL")
+       expected: $LLVM_SHA256 (toolchain/cxx/PIN)
+       actual:   $have"
+}
+
+if [ "$FETCH_ONLY" -eq 1 ]; then
+    fetch_source
+    echo "$TARBALL"
+    exit 0
+fi
+
+SYSROOT_LIB="${1:?usage: make_slopos_cxx.sh [--print-stamp] <sysroot_lib_dir>}"
+SYSROOT_LIB="$(cd "$SYSROOT_LIB" && pwd)"
+for library in libc.so libbuiltins.a; do
+    [ -f "$SYSROOT_LIB/$library" ] ||
+        die "no $library in $SYSROOT_LIB — build the userland first"
+done
+
 # ---------------------------------------------------------------------------
 # Host tools. Resolved by `cxx_host_tools.sh` against the pin's floor, and
 # resolved for `--print-stamp` too: the compiler is an input to the artifact,
@@ -117,7 +160,7 @@ eval "$CXX_TOOLS"
 if [ "$PRINT_STAMP" -eq 0 ]; then
     for tool in cmake ninja; do
         command -v "$tool" >/dev/null 2>&1 ||
-            die "$tool is required to cross-build the C++ runtime"
+            die "$tool is required to build the C++ runtime"
     done
 fi
 
@@ -145,6 +188,8 @@ stamp_want() {
         # prints the path it was given, which would make the stamp depend on
         # whether the caller invoked this script relatively or absolutely.
         sha256sum <"${BASH_SOURCE[0]}"
+        (cd "$REPO_ROOT/toolchain/cmake" && find . -type f | sort | xargs sha256sum)
+        sha256sum <"$REPO_ROOT/toolchain/cxx/FindPython3.cmake"
         # Names as well as contents: two headers with swapped bodies, or a
         # header added empty, leave a content-only digest unchanged.
         (cd "$REPO_ROOT/slibc/include" && find . -type f | sort | xargs sha256sum)
@@ -162,43 +207,28 @@ if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ]; then
     exit 0
 fi
 
-# ---------------------------------------------------------------------------
-# Source. Pinned by checksum, unpacked once; offline environments pre-populate
-# third_party/ with the tarball.
-# ---------------------------------------------------------------------------
 if [ ! -d "$SOURCE/runtimes" ]; then
-    if [ ! -f "$TARBALL" ]; then
-        echo "$SELF: fetching llvm-project $LLVM_VERSION sources..." >&2
-        mkdir -p "$(dirname "$TARBALL")"
-        curl -L --fail --show-error "$LLVM_URL" -o "$TARBALL.part" || die "could not fetch $LLVM_URL
-       An offline checkout pre-populates third_party/ with
-       $(basename "$TARBALL"), or points LLVM_URL at a local copy."
-        # Verified before it is cached: a corrupt-but-complete download
-        # promoted to the real name is one every later run then dies on.
-        HAVE="$(sha256sum "$TARBALL.part" | cut -d' ' -f1)"
-        [ "$HAVE" = "$LLVM_SHA256" ] || {
-            rm -f "$TARBALL.part"
-            die "checksum mismatch for the fetched $(basename "$TARBALL")
-       expected: $LLVM_SHA256 (toolchain/cxx/PIN)
-       actual:   $HAVE"
-        }
-        mv "$TARBALL.part" "$TARBALL"
-    fi
-    HAVE="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
-    [ "$HAVE" = "$LLVM_SHA256" ] || die "checksum mismatch for $(basename "$TARBALL")
-       expected: $LLVM_SHA256 (toolchain/cxx/PIN)
-       actual:   $HAVE"
+    fetch_source
     rm -rf "$SOURCE" "$SOURCE.part"
     mkdir -p "$SOURCE.part"
-    tar -xf "$TARBALL" -C "$SOURCE.part" --strip-components=1 \
-        "llvm-project-${LLVM_VERSION}.src/cmake" \
-        "llvm-project-${LLVM_VERSION}.src/libcxx" \
-        "llvm-project-${LLVM_VERSION}.src/libcxxabi" \
-        "llvm-project-${LLVM_VERSION}.src/runtimes" \
-        "llvm-project-${LLVM_VERSION}.src/third-party" \
-        "llvm-project-${LLVM_VERSION}.src/llvm/cmake"
-    mv "$SOURCE.part" "$SOURCE"
+    # CMake's tar, because the guest's reads no xz.
+    top="llvm-project-${LLVM_VERSION}.src"
+    (cd "$SOURCE.part" && cmake -E tar xf "$TARBALL" -- "$top/cmake" "$top/libcxx" \
+        "$top/libcxxabi" "$top/runtimes" "$top/third-party" "$top/llvm/cmake")
+    mv "$SOURCE.part/$top" "$SOURCE"
+    rmdir "$SOURCE.part"
 fi
+
+# The runtimes' configure runs `llvm/cmake/config.guess`, which names a SlopOS
+# machine only with the port's hunk. Idempotent, so it holds for a tree unpacked
+# here and for one `scripts/make_slopos_llvm_src.sh` has already patched.
+for patch in "$REPO_ROOT"/toolchain/llvm/*.patch; do
+    (cd "$SOURCE" && GIT_CEILING_DIRECTORIES="$(dirname "$SOURCE")" \
+        git apply -p1 --include='llvm/cmake/*' --reverse --check "$patch" >/dev/null 2>&1) ||
+        (cd "$SOURCE" && GIT_CEILING_DIRECTORIES="$(dirname "$SOURCE")" \
+            git apply -p1 --include='llvm/cmake/*' --whitespace=nowarn "$patch") ||
+        die "$(basename "$patch") does not apply to $SOURCE/llvm/cmake"
+done
 
 # ---------------------------------------------------------------------------
 # Configure and build the two archives.
@@ -214,13 +244,16 @@ fi
 # never ran. Each one below is a fact about slibc, not a probe result.
 # ---------------------------------------------------------------------------
 FLAGS="--target=$TARGET -nostdlibinc -isystem $REPO_ROOT/slibc/include -fPIC"
+MODULES="$REPO_ROOT/toolchain/cmake"
+command -v python3 >/dev/null 2>&1 || MODULES="$MODULES;$REPO_ROOT/toolchain/cxx"
 FLAGS="$FLAGS $ABI_FLAGS -D_LIBCPP_USING_GETENTROPY"
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 
 cmake -G Ninja -S "$SOURCE/runtimes" -B "$BUILD" -Wno-dev \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_SYSTEM_NAME=Linux \
+    -DCMAKE_SYSTEM_NAME=SlopOS \
+    -DCMAKE_MODULE_PATH="$MODULES" \
     -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
     -DCMAKE_C_COMPILER="$CLANG" \
     -DCMAKE_CXX_COMPILER="$CLANGXX" \
@@ -230,6 +263,7 @@ cmake -G Ninja -S "$SOURCE/runtimes" -B "$BUILD" -Wno-dev \
     -DCMAKE_ASM_FLAGS="$FLAGS" \
     -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
     -DCMAKE_INSTALL_PREFIX="$BUILD/install" \
+    -DLLVM_DEFAULT_TARGET_TRIPLE="$TARGET" \
     -DLLVM_ENABLE_RUNTIMES="libcxxabi;libcxx" \
     -DLLVM_INCLUDE_TESTS=OFF \
     -DLIBCXX_CXX_ABI=libcxxabi \

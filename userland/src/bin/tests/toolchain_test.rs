@@ -215,11 +215,16 @@ impl Ran {
         if self.code == Some(0) {
             return true;
         }
+        let said: Vec<&str> = self
+            .stdout
+            .lines()
+            .chain(self.stderr.lines())
+            .filter(|line| !line.trim().is_empty())
+            .collect();
         note(&format!(
-            "{what} exited {:?}: {}{}",
+            "{what} exited {:?}: {}",
             self.code,
-            self.stdout.trim_end(),
-            self.stderr.trim_end()
+            said[said.len().saturating_sub(12)..].join(" | ")
         ));
         false
     }
@@ -1149,6 +1154,188 @@ fn cargo_resolves_the_lockfiles_from_crates_io() -> bool {
     true
 }
 
+const BASH_SCRIPT: &str = r#"set -euo pipefail
+double() { local n=$1; echo $((n * 2)); }
+words=(one two three)
+answer=$(double 21)
+[[ $answer == 42 && ${#words[@]} -eq 3 ]]
+printf '%s\n' b a c | sort | tail -n 1
+sleep 0.1 &
+wait $!
+while read -r line; do echo "read $line"; done <<EOF
+$answer
+EOF
+digests() {
+    (cd / && seq 1 64 | while IFS= read -r n; do
+        printf '%s  %s\n' "$(printf %s "$n" | sha256sum | cut -d' ' -f1)" "$n"
+    done)
+}
+echo "digests $(digests | sort -u | wc -l)"
+echo "bash ${BASH_VERSINFO[0]}"
+"#;
+
+/// Rung 10: bash runs a script with a command substitution, a pipeline of the
+/// coreutils, a background job it waits for, a here-document, and a subshell
+/// whose pipeline forks a command substitution per line.
+fn bash_runs_a_script() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let Some(dir) = scratch("bash", &[("ladder.sh", BASH_SCRIPT)]) else {
+        return false;
+    };
+    let Some(ran) = run(&dir, &format!("{prefix}/bin/bash"), &["ladder.sh"], &[]) else {
+        return false;
+    };
+    note(&format!("bash ladder.sh in {} ms", ran.took.as_millis()));
+    ran.ok("bash ladder.sh") && ran.stdout == "c\nread 42\ndigests 64\nbash 5\n"
+}
+
+const NINJA_BUILD: &str = "rule join
+  command = cat $in > $out
+rule upper
+  command = tr a-z A-Z < $in > $out
+build joined.txt: join a.txt b.txt
+build out.txt: upper joined.txt
+default out.txt
+";
+
+/// Rung 11: ninja runs a two-step graph, then finds nothing to do.
+fn ninja_runs_a_graph() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let Some(dir) = scratch(
+        "ninja",
+        &[
+            ("build.ninja", NINJA_BUILD),
+            ("a.txt", "hello\n"),
+            ("b.txt", "world\n"),
+        ],
+    ) else {
+        return false;
+    };
+    let ninja = format!("{prefix}/bin/ninja");
+    let Some(built) = run(&dir, &ninja, &[], &[]) else {
+        return false;
+    };
+    if !built.ok("ninja") {
+        return false;
+    }
+    match fs::read_to_string(format!("{dir}/out.txt")) {
+        Ok(out) if out == "HELLO\nWORLD\n" => {}
+        Ok(out) => {
+            note(&format!("out.txt holds {out:?}"));
+            return false;
+        }
+        Err(e) => {
+            note(&format!("out.txt: {e}"));
+            return false;
+        }
+    }
+    run(&dir, &ninja, &[], &[])
+        .is_some_and(|again| again.ok("ninja, again") && again.stdout.contains("no work to do"))
+}
+
+const CMAKE_LISTS: &str = "cmake_minimum_required(VERSION 3.20)
+project(ladder C)
+message(STATUS \"ladder system: ${CMAKE_SYSTEM_NAME}\")
+add_library(twice SHARED twice.c)
+add_executable(ladder main.c)
+target_link_libraries(ladder PRIVATE twice)
+";
+
+/// Rung 12: CMake configures a C project for the machine it runs on, the
+/// SlopOS platform its own modules describe, generates for ninja, and builds
+/// a program against a shared library it reaches by its run path.
+fn cmake_builds_a_project() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let Some(dir) = scratch(
+        "cmake",
+        &[
+            ("CMakeLists.txt", CMAKE_LISTS),
+            ("twice.c", "int twice(int x) { return 2 * x; }\n"),
+            (
+                "main.c",
+                "#include <stdio.h>\nint twice(int);\nint main(void) {\n    printf(\"cmake %d\\n\", twice(21));\n    return 0;\n}\n",
+            ),
+        ],
+    ) else {
+        return false;
+    };
+    let cmake = format!("{prefix}/bin/cmake");
+    let Some(configured) = run(
+        &dir,
+        &cmake,
+        &["-S", ".", "-B", "build", "-G", "Ninja"],
+        &[],
+    ) else {
+        return false;
+    };
+    if !configured.ok("cmake -G Ninja") {
+        return false;
+    }
+    if !configured.stdout.contains("ladder system: SlopOS") {
+        note("cmake did not configure for the SlopOS platform");
+        return false;
+    }
+    let Some(built) = run(&dir, &cmake, &["--build", "build"], &[]) else {
+        return false;
+    };
+    if !built.ok("cmake --build") {
+        return false;
+    }
+    note(&format!(
+        "cmake configured in {} ms and built in {} ms",
+        configured.took.as_millis(),
+        built.took.as_millis()
+    ));
+    run(&dir, &format!("{dir}/build/ladder"), &[], &[])
+        .is_some_and(|ran| ran.ok("ladder") && ran.stdout == "cmake 42\n")
+}
+
+/// Rung 13: the toolchain carries the std fork the clone pins, by the stamp
+/// `build_userland.sh` checks, computed here with the toolchain's own bash.
+fn std_is_the_clones_fork() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    if !Path::new(SOURCE).join(".git").is_dir() {
+        note("the root carries no workspace");
+        return true;
+    }
+    let bash = format!("{prefix}/bin/bash");
+    let script = ". scripts/lib/toolchain_pin.sh && tp_std_stamp .";
+    let Some(ran) = run(SOURCE, &bash, &["-c", script], &[]) else {
+        return false;
+    };
+    if !ran.ok("tp_std_stamp") {
+        return false;
+    }
+    let carried = format!("{prefix}/lib/rustlib/src/rust/library/.slopos-std-stamp");
+    match fs::read_to_string(&carried) {
+        Ok(stamp) if stamp.trim() == ran.stdout.trim() => true,
+        Ok(stamp) => {
+            note(&format!(
+                "{carried} is {}, the clone pins {}",
+                stamp.trim(),
+                ran.stdout.trim()
+            ));
+            false
+        }
+        Err(e) => {
+            note(&format!("{carried}: {e}"));
+            false
+        }
+    }
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         (
@@ -1174,5 +1361,9 @@ fn main() {
             "cargo_resolves_the_lockfiles_from_crates_io",
             cargo_resolves_the_lockfiles_from_crates_io,
         ),
+        ("bash_runs_a_script", bash_runs_a_script),
+        ("ninja_runs_a_graph", ninja_runs_a_graph),
+        ("cmake_builds_a_project", cmake_builds_a_project),
+        ("std_is_the_clones_fork", std_is_the_clones_fork),
     ]);
 }

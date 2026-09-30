@@ -21,6 +21,8 @@
 extern "C" {
 #endif
 
+#define _SC_PHYS_PAGES (85)
+#define _SC_AVPHYS_PAGES (86)
 #define STDIN_FILENO (0)
 #define STDOUT_FILENO (1)
 #define STDERR_FILENO (2)
@@ -47,6 +49,10 @@ extern "C" {
 #define _SC_THREAD_STACK_MIN (75)
 
 extern char **environ;
+extern char *optarg;
+extern int optind;
+extern int opterr;
+extern int optopt;
 
 int close(int fd);
 ssize_t read(int fd, void *buf, size_t count);
@@ -126,6 +132,9 @@ char *getpass(const char *prompt);
 long pathconf(const char *path, int name);
 long fpathconf(int fd, int name);
 int getentropy(void *buf, size_t len);
+char *ttyname(int fd);
+int getpagesize(void);
+int getopt(int argc, char *const *argv, const char *optstring);
 
 #ifdef __cplusplus
 }

@@ -9,6 +9,7 @@
 
 #include <sys/types.h>
 #include <locale.h>
+#include <strings.h>
 
 #ifdef __cplusplus
 extern "C" {

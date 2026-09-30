@@ -108,3 +108,74 @@ pub unsafe extern "C" fn select(
         }
     }
 }
+
+/// The kernel mask a `ppoll`/`pselect` caller's `sigset_t` names, or null.
+fn wait_mask(sigmask: *const crate::types::sigset_t, storage: &mut u64) -> *const u64 {
+    if sigmask.is_null() {
+        return core::ptr::null();
+    }
+    // SAFETY: a non-null `sigmask` addresses a caller's `sigset_t`.
+    *storage = unsafe { (*sigmask).kernel_mask() };
+    storage
+}
+
+/// `ppoll(2)`: [`poll`] with a `timespec` timeout it leaves unchanged and,
+/// when `sigmask` is not null, that mask blocked for the wait alone, swapped
+/// in and out atomically.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ppoll(
+    fds: *mut Pollfd,
+    nfds: crate::types::nfds_t,
+    timeout: *const crate::time::Timespec,
+    sigmask: *const crate::types::sigset_t,
+) -> i32 {
+    let Ok(count) = u32::try_from(nfds) else {
+        errno_set(crate::errno::EINVAL.raw());
+        return -1;
+    };
+    // SAFETY: a non-null `timeout` addresses a caller's `timespec`.
+    let mut left = unsafe { timeout.as_ref() }.copied();
+    let mut mask = 0;
+    match Sys::ppoll(
+        fds as *mut u8,
+        count,
+        left.as_mut().map_or(core::ptr::null_mut(), |t| t as *mut _),
+        wait_mask(sigmask, &mut mask),
+    ) {
+        Ok(n) => n,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}
+
+/// `pselect(2)`: [`select`] with a `timespec` timeout it leaves unchanged and,
+/// as [`ppoll`], a mask for the wait alone.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pselect(
+    nfds: i32,
+    readfds: *mut FdSet,
+    writefds: *mut FdSet,
+    exceptfds: *mut FdSet,
+    timeout: *const crate::time::Timespec,
+    sigmask: *const crate::types::sigset_t,
+) -> i32 {
+    // SAFETY: a non-null `timeout` addresses a caller's `timespec`.
+    let mut left = unsafe { timeout.as_ref() }.copied();
+    let mut mask = 0;
+    match Sys::pselect6(
+        nfds,
+        readfds as *mut u8,
+        writefds as *mut u8,
+        exceptfds as *mut u8,
+        left.as_mut().map_or(core::ptr::null_mut(), |t| t as *mut _),
+        wait_mask(sigmask, &mut mask),
+    ) {
+        Ok(n) => n,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}

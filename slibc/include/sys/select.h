@@ -9,6 +9,7 @@
 
 #include <sys/types.h>
 #include <time.h>
+#include <signal.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,7 @@ typedef struct {
     } while (0)
 
 int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *errorfds, struct timeval *timeout);
+int pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const struct timespec *timeout, const sigset_t *sigmask);
 
 #ifdef __cplusplus
 }

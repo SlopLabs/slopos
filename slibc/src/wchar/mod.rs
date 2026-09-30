@@ -14,8 +14,8 @@ pub mod wctype;
 
 pub use wctype::{
     iswalnum, iswalpha, iswblank, iswcntrl, iswctype, iswdigit, iswgraph, iswlower, iswprint,
-    iswpunct, iswspace, iswupper, iswxdigit, towctrans, towlower, towupper, wctrans, wctrans_t,
-    wctype, wctype_t,
+    iswpunct, iswspace, iswupper, iswxdigit, towctrans, towlower, towupper, wcswidth, wctrans,
+    wctrans_t, wctype, wctype_t, wcwidth,
 };
 
 use core::ffi::{c_char, c_int, c_long, c_longlong, c_uint, c_ulong, c_ulonglong};
