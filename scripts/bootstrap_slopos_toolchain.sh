@@ -43,7 +43,7 @@ set -euo pipefail
 # an input to them changes, which the first time and after a compiler patch
 # costs a Linux LLVM built twice, a stage1 and a stage2 compiler, and two
 # kernel builds on instrumented compilers. It is opt-in until a SlopOS-hosted
-# compiler built that way has been through `just test-devdisk`; without it
+# compiler built that way has been through `just test-toolchain`; without it
 # (`--no-pgo`, the default) the configuration is the plain one.
 #
 # `--sources-only` stages the source subtrees below and exits: what the
@@ -380,7 +380,7 @@ if [ "$(cat "$RUSTC_BUILD/.slopos-recipes" 2>/dev/null)" != "$RECIPES_STAMP" ]; 
 fi
 
 # Completed under another name and renamed last: a build that stops part way
-# must not leave a prefix the dev disk would take for a toolchain.
+# must not leave a prefix a root would take for a toolchain.
 PREFIX="$OUT/install.partial"
 rm -rf "$PREFIX"
 # `DT_RELR` for LLVM's objects too. bootstrap reads `LDFLAGS_<triple>` for
@@ -414,6 +414,16 @@ cp -a "$SYSROOT/lib/." "$PREFIX/lib/"
 cp -a "$SYSROOT/include" "$PREFIX/"
 BUILD_DIR="$BUILD_DIR" SLOPOS_RECIPES_DIR="$RECIPES_DIR" "$SCRIPT_DIR/build_recipes.sh" \
     --install-programs "$PREFIX" || die "could not install the recipes' programs"
+# Each project's licence text beside what it covers; rustc's and cargo's are
+# where `x.py install` puts them, under share/doc.
+LICENSES="$PREFIX/share/licenses"
+mkdir -p "$LICENSES/libc++" "$LICENSES/slibc"
+cp -a "$RECIPES_PREFIX/share/licenses/." "$LICENSES/"
+for project in llvm clang lld; do
+    install -D -m 0644 "$SRC/src/llvm-project/$project/LICENSE.TXT" "$LICENSES/$project/LICENSE.TXT"
+done
+cp -a "$REPO_ROOT/third_party/slopos-cxx/licenses/." "$LICENSES/libc++/"
+cp -a "$REPO_ROOT"/slibc/{LICENSE-MIT,LICENSE-APACHE,NOTICE} "$LICENSES/slibc/"
 ln -sfn "$CLANG_BIN" "$PREFIX/bin/clang"
 ln -sfn clang "$PREFIX/bin/clang++"
 ln -sfn clang "$PREFIX/bin/cc"
@@ -431,7 +441,7 @@ if [ -n "$STAGE" ]; then
     rm -rf "$STAGE"
     mkdir -p "$STAGE"
     cp -a "$PREFIX/." "$STAGE/"
-    echo "$SELF: staged the toolchain at $STAGE — pass it as TOOLCHAIN_STAGE to scripts/build_devdisk.sh"
+    echo "$SELF: staged the toolchain at $STAGE — TOOLCHAIN_STAGE=$STAGE installs it on a root"
 fi
 
 echo "$SELF: built the $TARGET toolchain into $PREFIX"

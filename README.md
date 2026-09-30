@@ -68,7 +68,7 @@ just boot-live      # spins the wheel, from RAM
 
 | Command | What it does |
 |---------|--------------|
-| `just boot` | Boot the development machine, wheel first: a persistent `/` and the dev disk at `/devel`. Also needs clang, lld, cmake, ninja, dosfstools and mtools |
+| `just boot` | Boot the development machine, wheel first: a persistent `/` carrying the toolchain and a clone of this checkout. Also needs clang, lld, cmake, ninja, dosfstools and mtools |
 | `just boot-fast` | `just boot` without the Wheel of Fate (coward) |
 | `just boot-live` | Boot the live ISO from RAM in a window, as bare metal runs it; nothing persists. `ROULETTE=0` skips the wheel |
 | `just test` | Run the 2,500+ test suite under QEMU |
@@ -78,7 +78,7 @@ To build SlopOS inside SlopOS, cross-build the toolchain once (`just toolchain`,
 hours), `just boot`, and in the guest:
 
 ```sh
-cd /devel/src/slopos && scripts/selfhost.sh install
+cd /src/slopos && scripts/selfhost.sh install
 bootctl reboot      # boots the new kernel once; `bootctl commit` keeps it
 ```
 

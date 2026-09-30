@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Copy one file — a kernel the guest built — off the dev disk.
+# Copy one file — a kernel the guest built — off a root image.
 #
-# Usage: export_devdisk.sh <path_on_volume> <image_path> <out>
+# Usage: export_fs_file.sh <path_in_image> <image_path> <out>
 #
 # The guest must have shut down: debugfs knows nothing of SlopOS's
 # `/.journal`, and a mounted volume reads clean while it idles. Source moves
 # between the machines by git, not through here.
 set -euo pipefail
 
-SELF="export_devdisk"
-USAGE="usage: export_devdisk.sh <path_on_volume> <image_path> <out>"
+SELF="export_fs_file"
+USAGE="usage: export_fs_file.sh <path_in_image> <image_path> <out>"
 FILE="${1:?$USAGE}"
 IMAGE="${2:?$USAGE}"
 OUT="${3:?$USAGE}"

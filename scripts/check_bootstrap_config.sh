@@ -16,8 +16,8 @@ set -euo pipefail
 #   * The step graph quietly loses an artifact. `cargo` is an *extended* tool
 #     — `build.extended` and `build.tools` decide whether it is built at all,
 #     and a stage2 rustc does not depend on it — so a config that stops
-#     naming it still builds a compiler, and the dev disk arrives with no
-#     cargo on it hours later.
+#     naming it still builds a compiler, and the root arrives with no cargo
+#     on it hours later.
 #   * `toolchain/compiler/0003-bootstrap-cmake-system-name.patch` goes away.
 #     bootstrap maps a cross target's triple to a `CMAKE_SYSTEM_NAME` by
 #     hand; an unrecognised one prints a note, sets `Generic`, and exits 0 —
@@ -86,6 +86,9 @@ libz.so.1 inflate deflate zlibVersion
 libssl.so.3 SSL_new OPENSSL_init_ssl
 libcrypto.so.3 OPENSSL_init_crypto EVP_DigestInit_ex
 libnghttp2.so.14 nghttp2_session_client_new
+libtfpsacrypto.so.2 psa_crypto_init psa_generate_random
+libmbedx509.so.9 mbedtls_x509_crt_parse mbedtls_x509_crt_verify
+libmbedtls.so.23 mbedtls_ssl_setup mbedtls_ssl_handshake
 libssh2.so.1 libssh2_init libssh2_exit
 libcurl.so.4 curl_easy_init
 libgit2.so.1.9 git_libgit2_init

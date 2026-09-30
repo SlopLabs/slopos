@@ -1,24 +1,29 @@
-# git: the guest's source tree fetches from and pushes to the host over
-# `git://`, which needs no transport beyond a socket.
+# git: `git://` to the host's checkout, and HTTPS through libcurl.
 #
 #   auto_features=disabled   every optional feature, several of which would
 #                            take the host's Perl, Python or Tcl for the
 #                            guest's.
-#   rust, curl, expat        the three features on by default: Rust through
-#                            the host's cargo, and the HTTP transports.
-#   https_backend=none       found OpenSSL would otherwise be linked in for
-#                            the HTTP transports this build leaves out.
+#   curl                     the HTTP transports.
+#   rust, expat              on by default: Rust through the host's cargo,
+#                            and pushing over dumb HTTP.
+#   https_backend=none       imap-send's own OpenSSL, which git may not
+#                            link; it goes through libcurl instead.
 #   tests                    the suite needs Perl.
 version=2.55.0
 url=https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz
 sha256=457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357
 license=GPL-2.0-only
+license_file=COPYING
+license_file=LGPL-2.1
+license_file=reftable/LICENSE
+license_file=sha1dc/LICENSE.txt
 template=meson
-depends=zlib
+depends=curl zlib
 program=bin/git
+program=libexec/git-core/git-remote-http
 arg=-Dauto_features=disabled
 arg=-Drust=disabled
-arg=-Dcurl=disabled
+arg=-Dcurl=enabled
 arg=-Dexpat=disabled
 arg=-Dhttps_backend=none
 arg=-Dtests=false

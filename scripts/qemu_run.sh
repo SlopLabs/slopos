@@ -17,7 +17,7 @@ set -euo pipefail
 #   QEMU_GTK_ZOOM_TO_FIT,
 #   QEMU_ENABLE_ISA_EXIT, QEMU_PCI_DEVICES,
 #   OVMF_DIR,
-#   DEV_DISK_IMG, BOOT_DISK_IMG, QEMU_ALLOW_REBOOT,
+#   BOOT_DISK_IMG, QEMU_ALLOW_REBOOT,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
 #   GIT_PUSH_REPO,
@@ -106,8 +106,8 @@ ECHO_PEER_ADDR="${ECHO_PEER_ADDR:-10.0.2.100}"
 ECHO_PEER_PORT="${ECHO_PEER_PORT:-9999}"
 ECHO_PEER_CMD="${ECHO_PEER_CMD:-/bin/cat}"
 
-# The dev disk's clone names git://10.0.2.4/ and git://10.0.2.4:9419/, so the
-# git peer's address is fixed.
+# A seeded clone names git://10.0.2.4/ and git://10.0.2.4:9419/, so the git
+# peer's address is fixed.
 GIT_PUSH_REPO="${GIT_PUSH_REPO:-}"
 GIT_PEER_ADDR="10.0.2.4"
 
@@ -256,15 +256,10 @@ ADD_CAPACITY_DISK=0
 if [ -n "${CAPACITY_IMG:-}" ] && [ -f "$CAPACITY_IMG" ]; then
     ADD_CAPACITY_DISK=1
 fi
-# The dev disk (virtio-disk4), attached in every mode when DEV_DISK_IMG names
-# an existing file: a cross-built toolchain's workbench volume, which an
-# interactive boot wants as much as a graded run does. The guest finds it by
-# its `slopos-dev` label (`mount=LABEL=slopos-dev:/devel`), since it names a
-# virtio device by position; last, so it moves no other disk's letter.
-ADD_DEV_DISK=0
-if [ -n "${DEV_DISK_IMG:-}" ] && [ -f "$DEV_DISK_IMG" ]; then
-    ADD_DEV_DISK=1
-fi
+# A labelled ext2 volume (virtio-disk4), test mode only, which the test
+# command line mounts by label; the suite grades that mount, its write claim
+# and a remount. Last but the boot disk, which `bootctl` finds by scanning.
+ADD_MEDIA_DISK=0
 # The UEFI boot disk (virtio-disk5) replaces the ISO as the boot medium. It is
 # the last disk so that it renames none of the others in the guest.
 ADD_BOOT_DISK=0
@@ -293,6 +288,15 @@ case "$MODE" in
         rm -f "$SCRATCH_IMG"
         truncate -s 8M "$SCRATCH_IMG"
         ADD_SCRATCH_DISK=1
+        MEDIA_IMG="${REPO_ROOT}/builddir/media-disk.img"
+        media_stage="$(mktemp -d)"
+        echo "slopos-media: the test harness's labelled volume" >"$media_stage/SLOPOS-MEDIA"
+        rm -f "$MEDIA_IMG"
+        truncate -s 16M "$MEDIA_IMG"
+        mkfs.ext2 -F -q -b 4096 -L slopos-media -d "$media_stage" "$MEDIA_IMG" ||
+            { rm -rf "$media_stage"; exit 1; }
+        rm -rf "$media_stage"
+        ADD_MEDIA_DISK=1
         VERIFIED_IMG="${VERIFIED_IMG:-${REPO_ROOT}/fs/assets/ext2.img}"
         if [ -f "$VERIFIED_IMG" ]; then
             ADD_VERIFIED_DISK=1
@@ -574,11 +578,10 @@ if [ "$ADD_CAPACITY_DISK" = "1" ]; then
         -device "virtio-blk-pci,drive=virtio-disk3,disable-legacy=on"
     )
 fi
-if [ "$ADD_DEV_DISK" = "1" ]; then
+if [ "$ADD_MEDIA_DISK" = "1" ]; then
     QEMU_ARGS+=(
-        -drive "file=$DEV_DISK_IMG,if=none,id=virtio-disk4,format=raw,cache=writeback"
-        -object "iothread,id=iot4"
-        -device "virtio-blk-pci,drive=virtio-disk4,disable-legacy=on,iothread=iot4"
+        -drive "file=$MEDIA_IMG,if=none,id=virtio-disk4,format=raw"
+        -device "virtio-blk-pci,drive=virtio-disk4,disable-legacy=on"
     )
 fi
 if [ "$ADD_BOOT_DISK" = "1" ]; then

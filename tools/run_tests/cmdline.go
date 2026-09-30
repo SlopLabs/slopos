@@ -8,9 +8,10 @@ import (
 	"strings"
 )
 
-// DefaultBaseCmdline is the kernel cmdline baked into the test ISO.
+// DefaultBaseCmdline is the kernel cmdline baked into the test ISO. The
+// `mount=` names the labelled volume qemu_run.sh attaches in test mode.
 const DefaultBaseCmdline = "tests=on tests.shutdown=on tests.verbosity=summary " +
-	"boot.debug=on roulette=skip"
+	"boot.debug=on roulette=skip mount=LABEL=slopos-media:/media"
 
 // Args is the parsed CLI flag set after preprocessing + flag.Parse.
 type Args struct {

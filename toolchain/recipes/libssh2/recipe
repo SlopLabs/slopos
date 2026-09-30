@@ -3,6 +3,7 @@ version=1.11.1
 url=https://libssh2.org/download/libssh2-1.11.1.tar.xz
 sha256=9954cb54c4f548198a7cbebad248bdc87dd64bd26185708a294b2b50771e3769
 license=BSD-3-Clause
+license_file=COPYING
 template=cmake
 depends=openssl zlib
 soname=libssh2.so.1

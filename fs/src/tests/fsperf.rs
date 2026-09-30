@@ -31,6 +31,7 @@ use slopos_ostd::{KBox, KVec, klog_info};
 use slopos_testing::{TestResult, fail};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, stats, total_seg_len};
+use crate::devfs::{DEV_NAME_MAX, devfs_block_name_by_label};
 use crate::fileio::{
     FdTable, file_close_fd, file_open_at, file_read_fd, file_sync_fd, file_write_fd,
 };
@@ -73,7 +74,10 @@ const MAX_TXNS_PER_MIB: u64 = 32;
 /// first-fit insert it replaced was quadratic.
 const CAP_DIRENTS: u32 = 4000;
 const CAP_BYTES: usize = 4 * 1024 * 1024;
-const CAP_DEVICE: &[u8] = b"vdd";
+/// Disk letters are probe order, and the test harness attaches volumes of its
+/// own, so the capacity volume is found by the label `_fs-image-capacity`
+/// gives it.
+const CAP_LABEL: &[u8] = b"slopos-capacity";
 const CAP_MOUNT: &[u8] = b"/fsperfcap";
 
 /// The subtrees `_fs-image-capacity` populates the volume with: a checked-out
@@ -454,8 +458,8 @@ fn emit_cap(
 /// and released here so the mount below can take its own, and in its own
 /// frame: `mount_params` stages a whole block.
 #[inline(never)]
-fn cap_geometry() -> Option<(u64, u32, u32, usize)> {
-    let device = match vfs_claim_block_device(CAP_DEVICE) {
+fn cap_geometry(name: &[u8]) -> Option<(u64, u32, u32, usize)> {
+    let device = match vfs_claim_block_device(name) {
         Ok(device) => device,
         Err(e) => {
             klog_info!("FSPERF: the capacity device is not claimable: {:?}", e);
@@ -722,12 +726,16 @@ fn cap_residency(table: FdTable) -> Result<(u64, u64), &'static str> {
 /// The capacity volume, when the harness attached one: `just test-capacity`
 /// builds the 16 GiB image, and an ordinary run has no such device and passes.
 pub fn test_fsperf_capacity_volume() -> TestResult {
-    let Some((blocks, blocksize, groups, entries)) = cap_geometry() else {
+    let mut name = [0u8; DEV_NAME_MAX];
+    let Some(name) = devfs_block_name_by_label(CAP_LABEL, &mut name).map(|len| &name[..len]) else {
         klog_info!(
             "FSPERF: no ext2 capacity volume attached — skipping the capacity report \
              (attach one with `just test-capacity`)"
         );
         return TestResult::Pass;
+    };
+    let Some((blocks, blocksize, groups, entries)) = cap_geometry(name) else {
+        return fail!("the capacity volume on {:?} gave no geometry", name);
     };
     if !ensure_dir(CAP_MOUNT) {
         return fail!("could not create the capacity mount point");
@@ -737,7 +745,7 @@ pub fn test_fsperf_capacity_volume() -> TestResult {
     // volume, and reads are deterministic where wall time is not.
     stats::reset();
     let start = monotonic_ns();
-    let mounted = vfs_ext2_mount_named(CAP_DEVICE, CAP_MOUNT, false);
+    let mounted = vfs_ext2_mount_named(name, CAP_MOUNT, false);
     let mountns = monotonic_ns().saturating_sub(start);
     let mountreads = stats::snapshot().read_requests;
     if let Err(e) = mounted {

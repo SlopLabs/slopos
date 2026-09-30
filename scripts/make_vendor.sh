@@ -77,7 +77,7 @@ for dir in "$LIBRARY/vendor"/*/; do
     library_count=$((library_count + 1))
 done
 
-# A copy of this directory, such as the dev disk's, is graded against std's
+# A copy of this directory, such as a seeded clone's, is graded against std's
 # lockfile, which nothing in a workspace carries.
 cp "$LIBRARY/Cargo.lock" "$OUT.part/library.lock"
 printf '%s\n' "$STAMP_WANT" >"$OUT.part/$TP_STAMP_NAME"

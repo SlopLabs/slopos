@@ -1,16 +1,16 @@
 use slopos_userland as _;
 
 use slopos_slibc::test_harness::note;
-use slopos_userland::devdisk::{HostHead, check_out, selfhost, take_host_head, workspace};
+use slopos_userland::selfhost::{HostHead, check_out, selfhost, take_host_head, workspace};
 use std::fs;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-/// The dev disk's tree with the host's `HEAD` checked out, taken once for
-/// every build. With no dev disk the verdict is a pass.
-static TREE: LazyLock<Result<(String, HostHead), (bool, String)>> = LazyLock::new(|| {
+/// The workspace with the host's `HEAD` checked out, taken once for every
+/// build. A root with no workspace passes.
+static TREE: LazyLock<Result<(&str, HostHead), (bool, String)>> = LazyLock::new(|| {
     let root = workspace().map_err(|why| (true, why.to_owned()))?;
-    let head = take_host_head(&root).map_err(|why| (false, why))?;
+    let head = take_host_head(root).map_err(|why| (false, why))?;
     Ok((root, head))
 });
 
@@ -27,7 +27,7 @@ fn guest_takes_the_host_head() -> bool {
     }
 }
 
-/// The dev disk's kernel build, timed. `clean` drops the target directory and
+/// The workspace's kernel build, timed. `clean` drops the target directory and
 /// symbol table so the time is a whole build.
 fn guest_builds(variant: &str, clean: bool) -> bool {
     let root = match &*TREE {

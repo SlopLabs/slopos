@@ -117,13 +117,6 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_MOUNT,
         priority: None,
     },
-    // This one mounts a *block device* by name, which is the
-    // `vfs_ext2_mount_named` path the mount test above never reaches.
-    ProgramGrant {
-        path: b"/bin/devdisk_test",
-        flags: TASK_FLAG_MOUNT,
-        priority: None,
-    },
     // Keeps its stage across the reboots it drives in a UEFI variable.
     ProgramGrant {
         path: b"/bin/install_test",

@@ -231,9 +231,11 @@ reach all four.
 ## The self-hosted toolchain
 
 `just toolchain` cross-builds rustc, cargo, LLVM, clang and lld from the pinned
-rustc source tarball, and `scripts/build_devdisk.sh` stages the result on the
-dev disk (`fs/assets/ext2-devdisk.img`), a volume built for development and not
-distributed. Each keeps its upstream licence: rustc and cargo `MIT OR
+rustc source tarball, and `just boot` installs the result at `/usr/local` on
+the development machine's root (`fs/assets/ext2-persist.img`), with each
+project's licence text under `share/licenses`, rustc's and cargo's under
+`share/doc`; neither is distributed. Each
+keeps its upstream licence: rustc and cargo `MIT OR
 Apache-2.0`, LLVM, clang and lld `Apache-2.0 WITH LLVM-exception`.
 
 Beyond the forks above, that build applies patches of the same shape, each
@@ -246,18 +248,27 @@ cargo depend on (`toolchain/crates/`): `getrandom`, `errno`, `stacker` and
 © 2025–2026 The SlopOS Authors; the crates themselves remain © their authors,
 and none is vendored into this repository.
 
-The C libraries cargo links for its network features are built from pinned,
-unmodified upstream release tarballs by `scripts/build_recipes.sh`; each
-recipe records the tarball's URL and SHA-256, and none is vendored into this
-repository. They reach the toolchain install and the dev disk only, and each
-remains © its authors under its own licence:
+The C libraries cargo and git link for their network transports are built
+from pinned, unmodified upstream release tarballs by
+`scripts/build_recipes.sh`; each recipe records the tarball's URL and SHA-256,
+and none is vendored into this repository. They reach the toolchain install
+and the roots it is installed on only, and each remains © its authors under its own licence:
 
 - zlib (`toolchain/recipes/zlib/`): © Jean-loup Gailly and Mark Adler, `Zlib`.
 - nghttp2 (`toolchain/recipes/nghttp2/`): © the nghttp2 contributors, `MIT`.
+- Mbed TLS (`toolchain/recipes/mbedtls/`), with the TF-PSA-Crypto its tarball
+  carries: © The Mbed TLS Contributors, `Apache-2.0 OR GPL-2.0-or-later`, the
+  second option being the one under which git links it. Of the code
+  TF-PSA-Crypto bundles, the Project Everest code (`Apache-2.0`) and the
+  p256-m and mldsa-native drivers are compiled out by the default
+  configuration the recipe builds.
 - OpenSSL (`toolchain/recipes/openssl/`): © The OpenSSL Project Authors,
-  `Apache-2.0`. `toolchain/recipes/openssl/slopos.conf`, the target
-  definition passed to its `Configure`, is © 2025–2026 The SlopOS Authors,
-  `Apache-2.0`, like the project it configures.
+  `Apache-2.0`, for libgit2 and libssh2 and so for cargo; GPL-2.0-only code
+  without an exception cannot be combined with it, so nothing git loads links
+  it.
+  `toolchain/recipes/openssl/slopos.conf`, the target definition passed to its
+  `Configure`, is © 2025–2026 The SlopOS Authors, `Apache-2.0`, like the
+  project it configures.
 - curl (`toolchain/recipes/curl/`), libcurl only: © Daniel Stenberg and the
   curl contributors, the `curl` licence (MIT-style).
 - libssh2 (`toolchain/recipes/libssh2/`): © the libssh2 contributors,
@@ -291,8 +302,11 @@ Torvalds and the git contributors, `GPL-2.0-only`. The build also compiles code
 git bundles under other licences: xdiff, `list.h`, `compat/obstack.c` and the
 glibc regex in `compat/regex/` (`LGPL-2.1-or-later`), `ewah/`
 (`GPL-2.0-or-later`), `reftable/` (© Google LLC, `BSD-3-Clause`) and the
-SHA-1 collision detection code (`MIT`). The binary links zlib, and the C
-library under its MIT option (above).
+SHA-1 collision detection code (`MIT`). Its programs link zlib; its HTTP
+transports libcurl, and through it nghttp2 and Mbed TLS; and all of them the
+C library under its MIT option (above). `scripts/check_recipes.sh` fails the
+gates when an object a `GPL-2.0-only` recipe installs reaches a library under
+a licence that code cannot be combined with.
 
 `tools/kallsyms`, which builds the kernel's symbol table on the host and in
 the guest, carries a Rust v0 symbol demangler derived from LLVM's

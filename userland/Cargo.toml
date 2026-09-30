@@ -229,8 +229,8 @@ name = "mount_test"
 path = "src/bin/tests/mount_test.rs"
 
 [[bin]]
-name = "devdisk_test"
-path = "src/bin/tests/devdisk_test.rs"
+name = "toolchain_test"
+path = "src/bin/tests/toolchain_test.rs"
 required-features = ["testbins"]
 
 [[bin]]
@@ -272,6 +272,10 @@ path = "src/bin/tests/fifo_test.rs"
 [[bin]]
 name = "persist_test"
 path = "src/bin/tests/persist_test.rs"
+
+[[bin]]
+name = "reboot_clone_test"
+path = "src/bin/tests/reboot_clone_test.rs"
 
 [[bin]]
 name = "session_smoke_test"

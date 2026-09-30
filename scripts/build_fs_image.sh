@@ -37,11 +37,25 @@ set -euo pipefail
 #                   iterating on the kernel keeps whatever the guest wrote.
 #                   Ignored when no image exists. When an image *does* exist
 #                   and cannot be kept — damaged, left dirty by a killed boot,
-#                   smaller than asked for, or carrying a write-protecting v1
-#                   trailer — this script REFUSES and names the fix rather
-#                   than deleting it. A larger FS_IMAGE_SIZE grows it in
-#                   place. A v2 trailer is recomputed at the end of the run,
-#                   so it does not block a refresh.
+#                   or carrying a write-protecting v1 trailer — this script
+#                   REFUSES and names the fix rather than deleting it.
+#                   FS_IMAGE_SIZE is a minimum: a larger one grows the image
+#                   in place and a smaller one leaves it as it is. A v2
+#                   trailer is recomputed at the end of the run, so it does
+#                   not block a refresh.
+#   FS_HOST_TREES - `<host dir>:<guest dir>` pairs, space-separated: trees the
+#                   host owns, installed whenever the host directory exists
+#                   and replaced when it changes (scripts/fs_tree.py). What
+#                   each installed is recorded beside the image, in
+#                   `<image>.host/trees/`, so a replacement removes exactly
+#                   that.
+#                   One that would overwrite what the guest put there is left
+#                   as it was, with a warning, and retried on the next build.
+#   FS_SEED_TREES - `<host dir>:<guest dir>` pairs: trees the guest owns once
+#                   they are there, copied only onto an image without the
+#                   guest directory.
+#   FS_FREE_FLOOR - free space the image keeps (default 0); an image with less
+#                   is grown to it on every build.
 
 IMAGE_PATH="${1:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
 BUILD_DIR="${2:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
@@ -68,12 +82,15 @@ case "$VERITY" in
     *) echo "build_fs_image: VERITY must be 'on', 'off' or 'rw', got '$VERITY'" >&2; exit 2 ;;
 esac
 FS_LABEL="${FS_LABEL:-}"
+FS_HOST_TREES="${FS_HOST_TREES:-}"
+FS_SEED_TREES="${FS_SEED_TREES:-}"
+FS_FREE_FLOOR="${FS_FREE_FLOOR:-0}"
 
 # Created on every root rather than left to the first writer: the ext2 root
 # does not auto-create parents the way ramfs does, and both roots must agree
-# about whether a path is writable. `/devel` is where the boot mounts the dev
-# disk (`mount=LABEL=slopos-dev:/devel`). Mirrors gen_initramfs.py's EMPTY_DIRS.
-ROOT_DIRS=(/etc /var /home /devel)
+# about whether a path is writable. `/media` is where a boot's `mount=` puts a
+# volume. Mirrors gen_initramfs.py's EMPTY_DIRS.
+ROOT_DIRS=(/etc /var /home /media)
 
 # Mirrors gen_initramfs.py's SLIBC_LICENSES.
 SLIBC_LICENSES=(LICENSE-MIT LICENSE-APACHE NOTICE)
@@ -104,18 +121,32 @@ mkdir -p "$IMAGE_DIR"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FS_TREE=(python3 "$SCRIPT_DIR/fs_tree.py")
+# What the host keeps about an image, where its guest cannot write: the
+# manifests of the trees it installed, and what its last seal attested.
+HOST_STATE="${IMAGE_PATH}.host"
+TREE_MANIFESTS="$HOST_STATE/trees"
+VERITY_RECORD="$HOST_STATE/verity"
 
 PRESERVE_FS_IMAGE="${PRESERVE_FS_IMAGE:-0}"
 # Set when this run rewrote binaries into an image it kept, which obliges it to
 # invalidate a log whose records describe the old ones.
 REFRESHED_BINARIES=0
 STAMP_PATH="${IMAGE_PATH}.stamp"
+# The blocks a preserved v2 image's guest owns, measured before this build
+# writes anything, so its seal attests none of them.
+TAINT_PATH=""
 
 # What the image's content is a function of: an equal stamp means a preserved
 # image already carries these binaries and assets, so it needs no work.
 build_stamp() {
     echo "size=$FS_IMAGE_SIZE verity=$VERITY journal=$FS_JOURNAL_SIZE links=${COREUTILS_LINKS:-}"
-    echo "label=$FS_LABEL dirs=${ROOT_DIRS[*]}"
+    echo "label=$FS_LABEL dirs=${ROOT_DIRS[*]} floor=$FS_FREE_FLOOR"
+    local spec
+    for spec in $FS_HOST_TREES; do
+        printf 'tree %s ' "${spec#*:}"
+        [ -d "${spec%%:*}" ] && "${FS_TREE[@]}" identity "${spec%%:*}" || echo absent
+    done
     for bin in "${BINS[@]}"; do
         printf '%s ' "$bin"
         sha256sum "${BUILD_DIR}/${bin}.elf" 2>/dev/null | cut -d' ' -f1 || echo missing
@@ -139,9 +170,11 @@ build_stamp() {
 
 # Read from the file rather than from $VERITY: the caller's intent for *this*
 # build says nothing about what is already on disk.
+# A trailer lies past the filesystem; the magic inside it is the guest's data.
 image_carries_verity_trailer() {
     [ -s "$1" ] || return 1
     local magic
+    [ "$(stat -c %s "$1")" -ge "$(( $(fs_extent_bytes "$1") + 32 ))" ] || return 1
     magic=$(tail -c 32 "$1" | head -c 4 | od -An -tx1 | tr -d ' \n')
     [ "$magic" = "54525653" ]
 }
@@ -154,11 +187,19 @@ verity_trailer_version() {
 # larger by whatever trailer is appended, and the trailer starts where the
 # filesystem ends.
 fs_extent_bytes() {
-    local hdr bc bs
+    fs_blocks_bytes "$1" "Block count"
+}
+
+fs_free_bytes() {
+    fs_blocks_bytes "$1" "Free blocks"
+}
+
+fs_blocks_bytes() {
+    local hdr count bs
     hdr=$(dumpe2fs -h "$1" 2>/dev/null)
-    bc=$(echo "$hdr" | sed -n 's/^Block count: *\([0-9]*\)/\1/p')
+    count=$(echo "$hdr" | sed -n "s/^$2: *\([0-9]*\)/\1/p")
     bs=$(echo "$hdr" | sed -n 's/^Block size: *\([0-9]*\)/\1/p')
-    echo $(( ${bc:-0} * ${bs:-0} ))
+    echo $(( ${count:-0} * ${bs:-0} ))
 }
 
 # A preserved image is the developer's machine: nothing here deletes one, and
@@ -175,10 +216,10 @@ refuse() {
 # Grow in place rather than refuse: raising FS_IMAGE_SIZE on a machine you are
 # living in must not be a reason to throw it away.
 grow_image() {
-    local have="$1" want="$2" trailer=""
+    local have="$1" want="$2" trailer="" now
     command -v resize2fs >/dev/null 2>&1 ||
         refuse "resize2fs is not installed, so the image cannot be grown to ${want}B" \
-               "install e2fsprogs, or set FS_IMAGE_SIZE back to $have"
+               "install e2fsprogs"
     # `resize2fs` refuses a filesystem whose last check predates its last
     # write, and this kernel never stamps `s_lastcheck` because it runs no
     # fsck. The image was proved sound and clean a moment ago; this pass is the
@@ -200,8 +241,33 @@ grow_image() {
         refuse "resize2fs could not grow the image to ${want}B (it is unchanged)" \
                "e2fsck -fy '$IMAGE_PATH'"
     fi
+    now="$(fs_extent_bytes "$IMAGE_PATH")"
+    if [ "$now" -le "$have" ]; then
+        # resize2fs drops a last group too small to hold its own metadata, and
+        # a grow that adds nothing must not cost the image its trailer.
+        truncate -s "$have" "$IMAGE_PATH"
+        [ -z "$trailer" ] || cat "$trailer" >> "$IMAGE_PATH"
+        rm -f "$trailer"
+        return 1
+    fi
     rm -f "$trailer"
-    echo "preserve: grew $IMAGE_PATH from ${have}B to ${want}B, keeping its contents"
+    echo "grew $IMAGE_PATH from ${have}B to ${now}B, keeping its contents"
+}
+
+# Grown before a log or a tree lands, never discovered full halfway through.
+# Again until it fits: every group a grow adds spends some of itself on inodes.
+ensure_room() {
+    local need="$1" free have step=$((256 * 1024 * 1024))
+    while free="$(fs_free_bytes "$IMAGE_PATH")" && [ "$free" -lt "$need" ]; do
+        have="$(fs_extent_bytes "$IMAGE_PATH")"
+        grow_image "$have" "$(( (have + need - free + step - 1) / step * step ))" ||
+            refuse "resize2fs added nothing to an image ${free}B free, short of ${need}B" \
+                   "e2fsck -fy '$IMAGE_PATH'"
+    done
+}
+
+tree_bytes() {
+    echo $(( $(du -s --block-size=4096 "$1" | cut -f1) * 4096 ))
 }
 
 # Held to the same oracle CI holds a boot's output to: sound *and* clean.
@@ -225,12 +291,14 @@ preserve_or_refuse() {
     "${SCRIPT_DIR}/check_fs_image.sh" "$IMAGE_PATH" ||
         refuse "the image is damaged, or a boot left it dirty (see above)" \
                "e2fsck -fy '$IMAGE_PATH'"
-    if [ "$want" -lt "$have" ]; then
-        refuse "the image is ${have}B and FS_IMAGE_SIZE asks for ${want}B; shrinking would drop blocks in use" \
-               "set FS_IMAGE_SIZE to at least ${have}"
+    if [ "$VERITY" = "rw" ]; then
+        TAINT_PATH="$(mktemp "${IMAGE_DIR}/taint.XXXXXX")"
+        trap 'rm -f "$TAINT_PATH"' EXIT
+        python3 "${SCRIPT_DIR}/gen_verity.py" --taint-out "$TAINT_PATH" --record "$VERITY_RECORD" "$IMAGE_PATH" ||
+            refuse "gen_verity.py could not measure what the guest wrote" "e2fsck -fy '$IMAGE_PATH'"
     fi
     if [ "$want" -gt "$have" ]; then
-        grow_image "$have" "$want"
+        grow_image "$have" "$want" || true
     fi
 }
 
@@ -263,9 +331,38 @@ mkdir_p() {
     debugfs -w -R "mkdir $1" "$IMAGE_PATH" >/dev/null 2>&1 || true
 }
 
+tree_manifest() {
+    printf '%s' "${1#/}" | tr '/' '_'
+}
+
+tree_pending() {
+    local host="$1" guest="$2" want
+    [ -d "$host" ] || return 1
+    want="$("${FS_TREE[@]}" identity "$host")" || exit 1
+    [ "$("${FS_TREE[@]}" installed "$TREE_MANIFESTS" "$(tree_manifest "$guest")")" != "$want" ]
+}
+
+seed_pending() {
+    [ -d "$1" ] && ! "${FS_TREE[@]}" exists "$IMAGE_PATH" "$2"
+}
+
+# What a matching stamp cannot vouch for: a tree an earlier build left
+# uninstalled, a seed the guest removed, and room the guest has used.
+image_owes_work() {
+    local spec
+    for spec in $FS_HOST_TREES; do
+        tree_pending "${spec%%:*}" "${spec#*:}" && return 0
+    done
+    for spec in $FS_SEED_TREES; do
+        seed_pending "${spec%%:*}" "${spec#*:}" && return 0
+    done
+    [ "$(fs_free_bytes "$IMAGE_PATH")" -lt "$(numfmt --from=iec "$FS_FREE_FLOOR")" ]
+}
+
 if [ "$PRESERVE_FS_IMAGE" = "1" ] && [ -f "$IMAGE_PATH" ]; then
     preserve_or_refuse
-    if [ -f "$STAMP_PATH" ] && [ "$(cat "$STAMP_PATH")" = "$(build_stamp)" ]; then
+    if [ -f "$STAMP_PATH" ] && [ "$(cat "$STAMP_PATH")" = "$(build_stamp)" ] && ! image_owes_work; then
+        rm -f "$TAINT_PATH"
         echo "preserve: $IMAGE_PATH is current — leaving it and its contents alone"
         exit 0
     fi
@@ -279,7 +376,7 @@ if [ "$PRESERVE_FS_IMAGE" = "1" ] && [ -f "$IMAGE_PATH" ]; then
     fi
 else
     echo "Rebuilding ext2 image at $IMAGE_PATH ($FS_IMAGE_SIZE)"
-    rm -f "$IMAGE_PATH" "$STAMP_PATH"
+    rm -rf "$IMAGE_PATH" "$STAMP_PATH" "$HOST_STATE"
     truncate -s "$FS_IMAGE_SIZE" "$IMAGE_PATH"
     MKFS_ARGS=(-F -b 4096)
     [ -z "$FS_LABEL" ] || MKFS_ARGS+=(-L "$FS_LABEL")
@@ -313,6 +410,11 @@ journal_blocks() {
         sed -n 's/.*Blockcount: \([0-9]*\).*/\1/p'
 }
 
+journal_bytes() {
+    debugfs -R "stat /.journal" "$IMAGE_PATH" 2>/dev/null |
+        sed -n 's/.* Size: \([0-9]*\)$/\1/p' | head -n1
+}
+
 # Byte offset of the log's own superblock, i.e. of its first block.
 journal_first_byte() {
     local first bs
@@ -323,15 +425,15 @@ journal_first_byte() {
 
 install_journal() {
     [ "$FS_JOURNAL_SIZE" != "0" ] || return 0
-    local have
+    local have bytes
     have="$(journal_blocks)"
-    if [ -n "$have" ] && [ "$have" != "0" ]; then
-        # Kept, not rebuilt: a preserved image's log may hold transactions the
-        # next mount owes a replay. Its superblock is zeroed after a binary
-        # refresh, because debugfs rewrote inodes the log knows nothing about
-        # and replaying stale copies of them would lose the fresh ones. Safe
-        # only because a preserved image is clean, and a clean image's log is
-        # empty.
+    bytes="$(numfmt --from=iec "$FS_JOURNAL_SIZE")"
+    if [ -n "$have" ] && [ "$have" != "0" ] && [ "$(journal_bytes)" = "$bytes" ]; then
+        # Its superblock is zeroed after a binary refresh, because debugfs
+        # rewrote inodes the log knows nothing about and replaying stale
+        # copies of them would lose the fresh ones; and a log of another size
+        # is rebuilt. Both are safe only because a preserved image is clean,
+        # and a clean image's log is empty.
         if [ "$REFRESHED_BINARIES" = "1" ]; then
             dd if=/dev/zero of="$IMAGE_PATH" bs=1 count=4 conv=notrunc status=none \
                 seek="$(journal_first_byte)" 2>/dev/null || true
@@ -346,8 +448,7 @@ install_journal() {
     if [ -n "$have" ]; then
         debugfs -w -R "rm /.journal" "$IMAGE_PATH" >/dev/null 2>&1 || true
     fi
-    local filled bytes
-    bytes="$(numfmt --from=iec "$FS_JOURNAL_SIZE")"
+    local filled
     # Under the build directory, not $TMPDIR: debugfs word-splits the request
     # string, so the path must be one this repo controls.
     filled="$(mktemp "${IMAGE_DIR}/journal.XXXXXX")"
@@ -368,6 +469,7 @@ install_journal() {
     fi
     echo "journal: installed /.journal ($FS_JOURNAL_SIZE, $have sectors)"
 }
+ensure_room "$(numfmt --from=iec "$FS_FREE_FLOOR")"
 install_journal
 
 for bin in "${BINS[@]}"; do
@@ -538,6 +640,45 @@ if [ -d "$KEYMAPS_DIR" ]; then
     done
 fi
 
+install_trees() {
+    local spec host guest pending=0 hosts=() seeds=() rc
+    for spec in $FS_HOST_TREES; do
+        tree_pending "${spec%%:*}" "${spec#*:}" || continue
+        pending=$(( pending + $(tree_bytes "${spec%%:*}") ))
+        hosts+=("$spec")
+    done
+    for spec in $FS_SEED_TREES; do
+        seed_pending "${spec%%:*}" "${spec#*:}" || continue
+        pending=$(( pending + $(tree_bytes "${spec%%:*}") ))
+        seeds+=("$spec")
+    done
+    [ "${#hosts[@]}" -gt 0 ] || [ "${#seeds[@]}" -gt 0 ] || return 0
+    ensure_room $(( pending + $(numfmt --from=iec "$FS_FREE_FLOOR") ))
+    for spec in "${hosts[@]}"; do
+        host="${spec%%:*}"
+        guest="${spec#*:}"
+        rc=0
+        "${FS_TREE[@]}" install "$IMAGE_PATH" "$host" "$guest" \
+            --manifests "$TREE_MANIFESTS" --name "$(tree_manifest "$guest")" || rc=$?
+        case "$rc" in
+            0) echo "Installed $host at $guest" ;;
+            3) echo "build_fs_image: left $guest as it was; the next build tries again" >&2 ;;
+            *) exit 1 ;;
+        esac
+    done
+    for spec in "${seeds[@]}"; do
+        rc=0
+        "${FS_TREE[@]}" install "$IMAGE_PATH" "${spec%%:*}" "${spec#*:}" || rc=$?
+        case "$rc" in
+            0) echo "Seeded ${spec#*:} from ${spec%%:*}" ;;
+            3) echo "build_fs_image: did not seed ${spec#*:}; the next build tries again" >&2 ;;
+            *) exit 1 ;;
+        esac
+    done
+}
+install_trees
+ensure_room "$(numfmt --from=iec "$FS_FREE_FLOOR")"
+
 # Append a block-integrity (verity) trailer so the kernel detects on-disk
 # corruption at read time (fs/src/verity.rs). Must be the LAST step — it
 # hashes the finished image.
@@ -545,7 +686,10 @@ if [ "$VERITY" = "off" ]; then
     echo "verity: VERITY=off — $IMAGE_PATH will mount unverified and writable"
 elif command -v python3 >/dev/null 2>&1; then
     if [ "$VERITY" = "rw" ]; then
-        python3 "${SCRIPT_DIR}/gen_verity.py" --version 2 "$IMAGE_PATH"
+        mkdir -p "$HOST_STATE"
+        python3 "${SCRIPT_DIR}/gen_verity.py" --version 2 ${TAINT_PATH:+--taint "$TAINT_PATH"} \
+            --record "$VERITY_RECORD" "$IMAGE_PATH"
+        rm -f "$TAINT_PATH"
     else
         python3 "${SCRIPT_DIR}/gen_verity.py" --version 1 "$IMAGE_PATH"
     fi

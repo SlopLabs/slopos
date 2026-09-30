@@ -1,193 +1,95 @@
 use slopos_userland as _;
 
-use slopos_abi::fs::MS_RDONLY;
+use slopos_abi::fs::DEFAULT_PATH;
 use slopos_slibc::test_harness::note;
+use slopos_tls_core::pem;
 use slopos_tls_core::server::{Server, ServerConfig};
-use slopos_userland::syscall::error::SyscallError;
-use slopos_userland::syscall::fs as fs_syscall;
+use slopos_tls_core::testpki::{self, Key, Profile};
+use slopos_userland::selfhost::{SCRATCH, SOURCE};
 use slopos_userland::tls::{self, CipherSuite};
-use std::ffi::c_char;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Where the boot's `mount=LABEL=slopos-dev:/devel` puts the volume; every
-/// root image carries the empty directory.
-const MOUNT_POINT: &str = "/devel";
-const MOUNT_POINT_C: &[u8] = b"/devel\0";
+const PREFIX: &str = "/usr/local";
+/// What the host installed there: an `identity` line, then
+/// `<kind> <size or -> <path>`.
+const MANIFEST: &str = "/var/lib/slopos/trees/usr_local";
+/// What the host seeds on the self-hosting root for the ladder: a bare
+/// repository of one crate and a sparse registry of one crate.
+const FIXTURES: &str = "/srv/ladder";
 
-/// The label `scripts/build_devdisk.sh` gives the volume. Disk letters are
-/// probe order, so this is the only stable name the guest has for it.
-const LABEL_SOURCE: &[u8] = b"LABEL=slopos-dev";
-
-/// A second, read-only view of the volume, used only to tell "not attached"
-/// from "attached but not mounted at /devel".
-const PROBE_POINT: &str = "/tmp/devdisk";
-
-/// Written by `scripts/build_devdisk.sh` at the volume root. Line 1 is the
-/// magic and a format version; `file <bytes> <path>` and `dir <path>` lines
-/// are the inventory this test grades the volume against, and a `source
-/// <path>` line names the guest's source tree.
-const MARKER: &str = "SLOPOS-DEVDISK";
-
-fn marker_path() -> String {
-    format!("{MOUNT_POINT}/{MARKER}")
+/// Gates a rung on the root carrying a toolchain; `Err` is the verdict, a pass
+/// with a note on any root but the self-hosting one.
+fn toolchain() -> Result<&'static str, bool> {
+    if Path::new(PREFIX).join("bin/rustc").is_file() {
+        return Ok(PREFIX);
+    }
+    note("the root carries no toolchain at /usr/local");
+    Err(true)
 }
 
-fn mounted_at_devel() -> bool {
-    fs::read_to_string(marker_path())
-        .map(|text| text.starts_with(MARKER))
-        .unwrap_or(false)
-}
-
-/// Whether the boot mounted the dev disk at `/devel`. `Err(false)`, a failure,
-/// when a volume labelled `slopos-dev` is attached but `/devel` does not hold
-/// it; `Err(true)`, a pass with a note, when none is attached, as the
-/// kernel-side capacity report is: `DEV_DISK_IMG` is opt-in and an ordinary
-/// run sets none. A utest's own stdout is init's console, not the serial line
-/// the run is read from, so the note is the only channel that reaches KTAP.
-static DEV_DISK: LazyLock<Result<(), bool>> = LazyLock::new(|| {
-    if mounted_at_devel() {
-        return Ok(());
-    }
-    let _ = fs::create_dir(PROBE_POINT);
-    match fs_syscall::mount(LABEL_SOURCE, PROBE_POINT.as_bytes(), b"ext2", MS_RDONLY) {
-        Ok(()) => {
-            let _ = fs_syscall::umount2(b"/tmp/devdisk\0".as_ptr() as *const c_char, 0);
-            note(
-                "a slopos-dev volume is attached but /devel does not hold it: the boot's mount= is missing or failed",
-            );
-            Err(false)
-        }
-        Err(e) => {
-            note(&format!("no dev disk attached (LABEL=slopos-dev: {e})"));
-            Err(true)
-        }
-    }
-});
-
-/// Every `file` line names a path that is there and stats as the byte count
-/// the host recorded when it staged the volume. A dev disk whose `lib/` never
-/// arrived mounts, reads and passes every structural check; the inventory is
-/// what turns that into a failure here rather than a link error in a guest
-/// build hours later.
-fn devdisk_inventory_reads_back() -> bool {
-    if let Err(verdict) = *DEV_DISK {
+/// Every entry the host installed is there as the kind, and each file at the
+/// size, it installed: a toolchain whose `lib/` never arrived, or arrived
+/// short, says so here rather than as a link error in a guest build hours
+/// later.
+fn toolchain_matches_its_manifest() -> bool {
+    if let Err(verdict) = toolchain() {
         return verdict;
     }
-    match fs::read_to_string(marker_path()) {
-        Ok(text) => grade_inventory(&text),
+    let text = match fs::read_to_string(MANIFEST) {
+        Ok(text) => text,
         Err(e) => {
-            note(&format!("{MOUNT_POINT}: reading {MARKER} back: {e}"));
-            false
+            note(&format!("{MANIFEST}: {e}"));
+            return false;
         }
-    }
-}
-
-fn grade_inventory(text: &str) -> bool {
-    let mut files = 0usize;
-    let mut dirs = 0usize;
-    for line in text.lines() {
-        let mut field = line.split(' ');
-        match field.next() {
-            Some("file") => {
-                let (Some(want), Some(rel)) = (field.next(), field.next()) else {
-                    note(&format!("malformed inventory line {line:?}"));
-                    return false;
-                };
-                let Ok(want) = want.parse::<u64>() else {
-                    note(&format!("unparsable size in {line:?}"));
-                    return false;
-                };
-                let got = match fs::metadata(format!("{MOUNT_POINT}/{rel}")) {
-                    Ok(meta) => meta.len(),
-                    Err(e) => {
-                        note(&format!("{rel} is not on the volume: {e}"));
-                        return false;
-                    }
-                };
-                if got != want {
-                    note(&format!("{rel} is {got} bytes, want {want}"));
-                    return false;
-                }
-                files += 1;
+    };
+    let mut counts = [0usize; 3];
+    for line in text.lines().filter(|l| !l.starts_with("identity ")) {
+        let mut fields = line.splitn(3, ' ');
+        let (Some(kind), Some(size), Some(rel)) = (fields.next(), fields.next(), fields.next())
+        else {
+            note(&format!("malformed manifest line {line:?}"));
+            return false;
+        };
+        let path = format!("{PREFIX}/{rel}");
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                note(&format!("{path}: {e}"));
+                return false;
             }
-            Some("dir") => {
-                let Some(rel) = field.next() else {
-                    note(&format!("malformed inventory line {line:?}"));
-                    return false;
-                };
-                match fs::metadata(format!("{MOUNT_POINT}/{rel}")) {
-                    Ok(meta) if meta.is_dir() => dirs += 1,
-                    Ok(_) => {
-                        note(&format!("{rel} is not a directory"));
-                        return false;
-                    }
-                    Err(e) => {
-                        note(&format!("{rel} is not on the volume: {e}"));
-                        return false;
-                    }
-                }
-            }
-            _ => {}
+        };
+        let (slot, held) = match kind {
+            "f" => (0, meta.is_file() && size.parse() == Ok(meta.len())),
+            "d" => (1, meta.is_dir()),
+            "l" => (2, meta.file_type().is_symlink()),
+            _ => (0, false),
+        };
+        if !held {
+            note(&format!(
+                "{path} is not the {kind} of {size} bytes the host installed"
+            ));
+            return false;
         }
+        counts[slot] += 1;
     }
-    if files == 0 || dirs == 0 {
-        note(&format!(
-            "the marker lists {files} files and {dirs} directories"
-        ));
+    if counts[0] == 0 {
+        note(&format!("{MANIFEST} lists no file"));
         return false;
     }
     note(&format!(
-        "{MOUNT_POINT}: {files} files and {dirs} directories verified"
+        "{PREFIX}: {} files, {} directories and {} links as installed",
+        counts[0], counts[1], counts[2]
     ));
-    true
-}
-
-/// The boot's mount holds the device's exclusive write claim, so a second
-/// writable mount is refused; `umount2` gives the claim back, so the same
-/// volume mounts again by label. A leaked claim answers `EBUSY` forever,
-/// which is a failure no amount of reading detects. Leaves `/devel` mounted.
-fn devdisk_remounts_after_umount() -> bool {
-    if let Err(verdict) = *DEV_DISK {
-        return verdict;
-    }
-    let _ = fs::create_dir(PROBE_POINT);
-    match fs_syscall::mount(LABEL_SOURCE, PROBE_POINT.as_bytes(), b"ext2", 0) {
-        Err(e) if e == SyscallError::EBUSY => {}
-        Err(e) => {
-            note(&format!("a second writable mount gave {e}, want EBUSY"));
-            return false;
-        }
-        Ok(()) => {
-            let _ = fs_syscall::umount2(b"/tmp/devdisk\0".as_ptr() as *const c_char, 0);
-            note("the volume mounted writable twice: the boot's mount holds no claim");
-            return false;
-        }
-    }
-    if let Err(e) = fs_syscall::umount2(MOUNT_POINT_C.as_ptr() as *const c_char, 0) {
-        note(&format!("umount of {MOUNT_POINT} failed: {e}"));
-        return false;
-    }
-    if mounted_at_devel() {
-        note(&format!(
-            "{MOUNT_POINT} still shows the volume after its umount"
-        ));
-        return false;
-    }
-    if let Err(e) = fs_syscall::mount(LABEL_SOURCE, MOUNT_POINT.as_bytes(), b"ext2", 0) {
-        note(&format!("re-mount by LABEL=slopos-dev failed: {e}"));
-        return false;
-    }
-    if !mounted_at_devel() {
-        note(&format!("re-mounted without its {MARKER}"));
-        return false;
-    }
     true
 }
 
@@ -223,36 +125,22 @@ fn registry_packages(lock: &str) -> Vec<(&str, &str, &str)> {
     out
 }
 
-/// The tree that reached the guest needs no registry: the config in the
-/// directory above it reads a vendor directory holding every locked crate by
-/// checksum.
-fn devdisk_source_is_vendored() -> bool {
-    if let Err(verdict) = *DEV_DISK {
-        return verdict;
+/// The workspace needs no registry: the config in the directory above it
+/// reads a vendor directory holding every locked crate by checksum.
+fn source_is_vendored() -> bool {
+    if !Path::new(SOURCE).join(".git").is_dir() {
+        note("the root carries no workspace");
+        return true;
     }
-    match fs::read_to_string(marker_path()) {
-        Ok(text) => match text.lines().find_map(|l| l.strip_prefix("source ")) {
-            Some(source) => grade_source(source),
-            None => {
-                note("the volume carries no source tree; it predates the seeding");
-                true
-            }
-        },
-        Err(e) => {
-            note(&format!("{MOUNT_POINT}: reading {MARKER} back: {e}"));
-            false
-        }
-    }
+    grade_source(SOURCE)
 }
 
-fn grade_source(source: &str) -> bool {
-    let root = format!("{MOUNT_POINT}/{source}");
-    let Some((above, _)) = source.rsplit_once('/') else {
-        note(&format!("{source} has no directory above it to configure"));
+fn grade_source(root: &str) -> bool {
+    let Some((above, _)) = root.rsplit_once('/') else {
+        note(&format!("{root} has no directory above it to configure"));
         return false;
     };
-    let base = format!("{MOUNT_POINT}/{above}");
-    let config = match fs::read_to_string(format!("{base}/.cargo/config.toml")) {
+    let config = match fs::read_to_string(format!("{above}/.cargo/config.toml")) {
         Ok(config) => config,
         Err(e) => {
             note(&format!("{above}/.cargo/config.toml: {e}"));
@@ -270,12 +158,12 @@ fn grade_source(source: &str) -> bool {
     };
     let (lock, std_lock) = match (
         fs::read_to_string(format!("{root}/Cargo.lock")),
-        fs::read_to_string(format!("{base}/{vendor}/library.lock")),
+        fs::read_to_string(format!("{above}/{vendor}/library.lock")),
     ) {
         (Ok(l), Ok(s)) => (l, s),
         (l, s) => {
             note(&format!(
-                "{source} lacks a lockfile: {:?} {:?}",
+                "{root} lacks a lockfile: {:?} {:?}",
                 l.err(),
                 s.err()
             ));
@@ -293,7 +181,7 @@ fn grade_source(source: &str) -> bool {
     }
     let packages: Vec<_> = workspace.into_iter().chain(std).collect();
     for (name, version, checksum) in &packages {
-        let manifest = format!("{base}/{vendor}/{name}-{version}/.cargo-checksum.json");
+        let manifest = format!("{above}/{vendor}/{name}-{version}/.cargo-checksum.json");
         match fs::read_to_string(&manifest) {
             Ok(json) if json.contains(&format!("\"package\":\"{checksum}\"")) => {}
             Ok(_) => {
@@ -313,18 +201,6 @@ fn grade_source(source: &str) -> bool {
         packages.len()
     ));
     true
-}
-
-/// The value of the marker's `<tag> <value>` line.
-fn marker_entry(tag: &str) -> Option<String> {
-    let text = fs::read_to_string(marker_path()).ok()?;
-    text.lines()
-        .find_map(|l| l.strip_prefix(tag)?.strip_prefix(' ').map(str::to_owned))
-}
-
-/// The staged toolchain prefix, absolute, when the marker names one.
-fn toolchain() -> Option<String> {
-    marker_entry("toolchain").map(|rel| format!("{MOUNT_POINT}/{rel}"))
 }
 
 struct Ran {
@@ -349,16 +225,17 @@ impl Ran {
     }
 }
 
-/// Runs `program` in `dir` the way a developer's shell would: the toolchain's
-/// `bin/` first on `PATH`, and `CARGO_HOME` on the volume, since `HOME` is the
-/// root, which is read-only on the shipped image.
-fn run(prefix: &str, dir: &str, program: &str, args: &[&str], env: &[(&str, &str)]) -> Option<Ran> {
+/// Runs `program` in `dir` with the `PATH` a developer's shell exports, the
+/// default one, and a `CARGO_HOME` of the ladder's own. rustc hands its linker
+/// its own tools directories ahead of the `PATH` it inherited, and only them
+/// when it inherited none, so the ladder cannot leave `PATH` unset.
+fn run(dir: &str, program: &str, args: &[&str], env: &[(&str, &str)]) -> Option<Ran> {
     let started = Instant::now();
     let out = Command::new(program)
         .args(args)
         .current_dir(dir)
-        .env("PATH", format!("{prefix}/bin:/bin"))
-        .env("CARGO_HOME", format!("{MOUNT_POINT}/cargo-home"))
+        .env("PATH", OsStr::from_bytes(DEFAULT_PATH.to_bytes()))
+        .env("CARGO_HOME", format!("{SCRATCH}/ladder/cargo-home"))
         .env_remove("LD_LIBRARY_PATH")
         .envs(env.iter().copied())
         .output();
@@ -378,7 +255,7 @@ fn run(prefix: &str, dir: &str, program: &str, args: &[&str], env: &[(&str, &str
 
 /// A fresh directory for one rung, so every run compiles from nothing.
 fn scratch(rung: &str, files: &[(&str, &str)]) -> Option<String> {
-    let dir = format!("{MOUNT_POINT}/ladder/{rung}");
+    let dir = format!("{SCRATCH}/ladder/{rung}");
     let _ = fs::remove_dir_all(&dir);
     for (rel, body) in files {
         let path = format!("{dir}/{rel}");
@@ -391,27 +268,15 @@ fn scratch(rung: &str, files: &[(&str, &str)]) -> Option<String> {
     Some(dir)
 }
 
-/// Gates a rung on the volume carrying a toolchain; `Err` is the verdict.
-fn prefix() -> Result<String, bool> {
-    if let Err(verdict) = *DEV_DISK {
-        return Err(verdict);
-    }
-    toolchain().ok_or_else(|| {
-        note("the volume carries no toolchain");
-        true
-    })
-}
-
 /// Rung 1. Every startup binds every relocation of rustc, `librustc_driver`,
 /// `libLLVM` and `libstd` before `main`, so this is where eager binding's cost
 /// at compiler scale shows.
 fn toolchain_starts() -> bool {
-    let prefix = match prefix() {
+    let prefix = match toolchain() {
         Ok(p) => p,
         Err(verdict) => return verdict,
     };
     let Some(rustc) = run(
-        &prefix,
         "/",
         &format!("{prefix}/bin/rustc"),
         &["--version"],
@@ -440,13 +305,13 @@ fn toolchain_starts() -> bool {
         (rust_lld, &["-flavor", "gnu", "--version"]),
     ];
     tools.iter().all(|(tool, args)| {
-        run(&prefix, "/", tool, args, &[]).is_some_and(|r| r.ok(&format!("{tool} --version")))
+        run("/", tool, args, &[]).is_some_and(|r| r.ok(&format!("{tool} --version")))
     })
 }
 
 /// Rung 2: rustc compiles, links through `cc`, and the program runs.
 fn rustc_links_a_program() -> bool {
-    let prefix = match prefix() {
+    let prefix = match toolchain() {
         Ok(p) => p,
         Err(verdict) => return verdict,
     };
@@ -460,7 +325,6 @@ fn rustc_links_a_program() -> bool {
         return false;
     };
     let Some(built) = run(
-        &prefix,
         &dir,
         &format!("{prefix}/bin/rustc"),
         &["hello.rs", "-o", "hello"],
@@ -471,7 +335,7 @@ fn rustc_links_a_program() -> bool {
     if !built.ok("rustc hello.rs") {
         return false;
     }
-    let Some(ran) = run(&prefix, &dir, &format!("{dir}/hello"), &[], &[]) else {
+    let Some(ran) = run(&dir, &format!("{dir}/hello"), &[], &[]) else {
         return false;
     };
     note(&format!("rustc hello.rs in {} ms", built.took.as_millis()));
@@ -519,7 +383,7 @@ pub fn answer(_: TokenStream) -> TokenStream {
 /// Rung 3: cargo runs a build script, loads a proc macro into rustc with
 /// `dlopen`, and drives both through its spawn and jobserver road.
 fn cargo_builds_a_crate() -> bool {
-    let prefix = match prefix() {
+    let prefix = match toolchain() {
         Ok(p) => p,
         Err(verdict) => return verdict,
     };
@@ -536,7 +400,6 @@ fn cargo_builds_a_crate() -> bool {
         return false;
     };
     let Some(built) = run(
-        &prefix,
         &dir,
         &format!("{prefix}/bin/cargo"),
         &["build", "--offline"],
@@ -547,13 +410,7 @@ fn cargo_builds_a_crate() -> bool {
     if !built.ok("cargo build") {
         return false;
     }
-    let Some(ran) = run(
-        &prefix,
-        &dir,
-        &format!("{dir}/target/debug/ladder"),
-        &[],
-        &[],
-    ) else {
+    let Some(ran) = run(&dir, &format!("{dir}/target/debug/ladder"), &[], &[]) else {
         return false;
     };
     note(&format!("cargo build in {} ms", built.took.as_millis()));
@@ -565,19 +422,20 @@ const FETCH_MAIN: &str = "fn main() {
 }
 ";
 
-/// Rung 4: cargo fetches a `git` dependency from the volume's bare repository
+/// Rung 4: cargo fetches a `git` dependency from the root's bare repository
 /// through libgit2, into a fresh `CARGO_HOME` so it is never a cache hit. Not
 /// `--offline`, which refuses every git fetch.
 fn cargo_fetches_a_git_dependency() -> bool {
-    let prefix = match prefix() {
+    let prefix = match toolchain() {
         Ok(p) => p,
         Err(verdict) => return verdict,
     };
-    let Some(repo) = marker_entry("git") else {
-        note("the volume carries no git fixture");
+    let repo = format!("{FIXTURES}/git/greeting.git");
+    if !Path::new(&repo).is_dir() {
+        note("the root carries no git fixture");
         return true;
-    };
-    let url = format!("file://{MOUNT_POINT}/{repo}");
+    }
+    let url = format!("file://{repo}");
     let manifest = format!(
         "[package]\nname = \"fetch\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ngreeting = {{ git = \"{url}\" }}\n\n[workspace]\n"
     );
@@ -592,7 +450,6 @@ fn cargo_fetches_a_git_dependency() -> bool {
     };
     let cargo_home = format!("{dir}/cargo-home");
     let Some(built) = run(
-        &prefix,
         &dir,
         &format!("{prefix}/bin/cargo"),
         &["build"],
@@ -612,13 +469,7 @@ fn cargo_fetches_a_git_dependency() -> bool {
         note(&format!("Cargo.lock does not pin greeting to {url}"));
         return false;
     }
-    let Some(ran) = run(
-        &prefix,
-        &dir,
-        &format!("{dir}/target/debug/fetch"),
-        &[],
-        &[],
-    ) else {
+    let Some(ran) = run(&dir, &format!("{dir}/target/debug/fetch"), &[], &[]) else {
         return false;
     };
     note(&format!(
@@ -767,20 +618,20 @@ fn alpn_list(offered: &[Vec<u8>]) -> String {
     names.join(", ")
 }
 
-/// Rung 5: cargo fetches a crate from the volume's sparse registry over
-/// loopback TLS, through libcurl and OpenSSL, trusting the volume's test root.
+/// Rung 5: cargo fetches a crate from the root's sparse registry over
+/// loopback TLS, through libcurl and Mbed TLS, trusting the root's test root.
 /// The image's own CA bundle must refuse the same server first, or the
 /// verification proves nothing.
 fn cargo_fetches_over_https() -> bool {
-    let prefix = match prefix() {
+    let prefix = match toolchain() {
         Ok(p) => p,
         Err(verdict) => return verdict,
     };
-    let Some(rel) = marker_entry("registry") else {
-        note("the volume carries no registry");
+    let root = format!("{FIXTURES}/registry");
+    if !Path::new(&root).is_dir() {
+        note("the root carries no registry");
         return true;
-    };
-    let root = format!("{MOUNT_POINT}/{rel}");
+    }
     let www = format!("{root}/www");
     let config = fs::read_to_string(format!("{www}/index/config.json")).unwrap_or_default();
     let Some(authority) = config
@@ -812,7 +663,7 @@ fn cargo_fetches_over_https() -> bool {
         }
     };
     let index = format!("sparse+https://{authority}/index/");
-    let manifest = "[package]\nname = \"fetch\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ngreeting = { version = \"0.1.0\", registry = \"devdisk\" }\n\n[workspace]\n";
+    let manifest = "[package]\nname = \"fetch\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ngreeting = { version = \"0.1.0\", registry = \"ladder\" }\n\n[workspace]\n";
     let Some(dir) = scratch(
         "https",
         &[("Cargo.toml", manifest), ("src/main.rs", FETCH_MAIN)],
@@ -824,7 +675,7 @@ fn cargo_fetches_over_https() -> bool {
     let cargo_home = format!("{dir}/cargo-home");
     let ca = format!("{root}/ca.pem");
     let registry = [
-        ("CARGO_REGISTRIES_DEVDISK_INDEX", index.as_str()),
+        ("CARGO_REGISTRIES_LADDER_INDEX", index.as_str()),
         ("CARGO_NET_OFFLINE", "false"),
         ("CARGO_NET_RETRY", "0"),
     ];
@@ -832,14 +683,12 @@ fn cargo_fetches_over_https() -> bool {
     let (refused, built, served) = thread::scope(|s| {
         let server = s.spawn(|| serve_registry(&listener, &www, &chain, &key, &stop));
         let refused = run(
-            &prefix,
             &dir,
             &cargo,
             &["fetch"],
             &[&registry[..], &[("CARGO_HOME", untrusting_home.as_str())]].concat(),
         );
         let built = run(
-            &prefix,
             &dir,
             &cargo,
             &["build"],
@@ -928,13 +777,7 @@ fn cargo_fetches_over_https() -> bool {
         ));
         return false;
     }
-    let Some(ran) = run(
-        &prefix,
-        &dir,
-        &format!("{dir}/target/debug/fetch"),
-        &[],
-        &[],
-    ) else {
+    let Some(ran) = run(&dir, &format!("{dir}/target/debug/fetch"), &[], &[]) else {
         return false;
     };
     note(&format!(
@@ -951,7 +794,7 @@ fn cargo_fetches_over_https() -> bool {
 /// Rung 6: clang finds its resource directory and its config through its own
 /// path, compiles C and C++, and links both against the prefix's sysroot.
 fn clang_links_c_and_cxx() -> bool {
-    let prefix = match prefix() {
+    let prefix = match toolchain() {
         Ok(p) => p,
         Err(verdict) => return verdict,
     };
@@ -976,7 +819,6 @@ fn clang_links_c_and_cxx() -> bool {
     ];
     cases.iter().all(|&(driver, source, out, want)| {
         let Some(built) = run(
-            &prefix,
             &dir,
             &format!("{prefix}/bin/{driver}"),
             &[source, "-o", out],
@@ -987,26 +829,26 @@ fn clang_links_c_and_cxx() -> bool {
         if !built.ok(&format!("{driver} {source}")) {
             return false;
         }
-        run(&prefix, &dir, &format!("{dir}/{out}"), &[], &[])
+        run(&dir, &format!("{dir}/{out}"), &[], &[])
             .is_some_and(|ran| ran.ok(out) && ran.stdout == want)
     })
 }
 
-/// Rung 7: git reads the clone the volume was seeded with and reaches the
-/// checkout the host serves; the host holds a volume it has just created to a
+/// Rung 7: git reads the workspace the root was seeded with and reaches the
+/// checkout the host serves; the host holds a root it has just seeded to a
 /// clean status.
 fn git_reads_the_clone_and_reaches_the_host() -> bool {
-    let prefix = match prefix() {
+    let prefix = match toolchain() {
         Ok(p) => p,
         Err(verdict) => return verdict,
     };
-    let Some(source) = marker_entry("source") else {
-        note("the volume carries no source tree");
+    if !Path::new(SOURCE).join(".git").is_dir() {
+        note("the root carries no workspace");
         return true;
-    };
-    let root = format!("{MOUNT_POINT}/{source}");
+    }
+    let root = SOURCE;
     let git = format!("{prefix}/bin/git");
-    let Some(status) = run(&prefix, &root, &git, &["status", "--porcelain"], &[]) else {
+    let Some(status) = run(root, &git, &["status", "--porcelain"], &[]) else {
         return false;
     };
     if !status.ok("git status") {
@@ -1020,8 +862,7 @@ fn git_reads_the_clone_and_reaches_the_host() -> bool {
         ),
     };
     let Some(remote) = run(
-        &prefix,
-        &root,
+        root,
         &git,
         &["ls-remote", "origin", "HEAD"],
         &[("GIT_TERMINAL_PROMPT", "0")],
@@ -1038,14 +879,283 @@ fn git_reads_the_clone_and_reaches_the_host() -> bool {
     true
 }
 
+const GITHUB_REMOTE: &str = "https://github.com/SlopLabs/slopos";
+
+/// The `fatal:` line git ended on, if it failed with one.
+fn fatal_line(ran: &Ran) -> &str {
+    ran.stderr
+        .lines()
+        .rfind(|l| l.starts_with("fatal:"))
+        .unwrap_or_default()
+}
+
+/// `git ls-remote <url> HEAD`'s commit, when it printed one.
+fn advertised_head(ran: &Ran) -> Option<String> {
+    ran.stdout
+        .split_whitespace()
+        .next()
+        .filter(|h| h.len() == 40 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_owned)
+}
+
+/// What a rung ran, written beside its work however the rung returns.
+struct Transcript {
+    path: String,
+    text: String,
+}
+
+impl Transcript {
+    fn record(&mut self, args: &[&str], ran: &Ran) {
+        self.text += &format!(
+            "$ git {}\nexit {:?} in {} ms\n{}{}\n",
+            args.join(" "),
+            ran.code,
+            ran.took.as_millis(),
+            ran.stdout,
+            ran.stderr
+        );
+    }
+}
+
+impl Drop for Transcript {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.path, &self.text);
+    }
+}
+
+/// Rung 8: git clones from GitHub over HTTPS — the kernel's resolver, then
+/// git-remote-https, libcurl, nghttp2 and Mbed TLS — trusting the image's CA
+/// bundle. A root minted here must be refused first, or the trust proves
+/// nothing.
+fn git_clones_over_https() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let dir = format!("{SCRATCH}/ladder/https-git");
+    let _ = fs::remove_dir_all(&dir);
+    let foreign = format!("{dir}/foreign-root.pem");
+    let key = Key::from_seed(b"ladder foreign root");
+    let root = testpki::issue(
+        &Profile::ca("Ladder Foreign Root"),
+        &key,
+        "Ladder Foreign Root",
+        &key,
+        1,
+    );
+    if let Err(e) =
+        fs::create_dir_all(&dir).and_then(|()| fs::write(&foreign, pem::encode_certificate(&root)))
+    {
+        note(&format!("writing {foreign}: {e}"));
+        return false;
+    }
+    let mut transcript = Transcript {
+        path: format!("{dir}/https.log"),
+        text: String::new(),
+    };
+    let log = transcript.path.clone();
+    let mut git = |cwd: &str, args: &[&str], env: &[(&str, &str)]| {
+        let traced = [
+            &[
+                ("GIT_TERMINAL_PROMPT", "0"),
+                ("GIT_TRACE_CURL", "1"),
+                ("GIT_TRACE_CURL_NO_DATA", "1"),
+                // A stall fails the rung in a minute, not the boot's silence budget.
+                ("GIT_HTTP_LOW_SPEED_LIMIT", "1000"),
+                ("GIT_HTTP_LOW_SPEED_TIME", "60"),
+            ][..],
+            env,
+        ]
+        .concat();
+        let ran = run(cwd, &format!("{prefix}/bin/git"), args, &traced)?;
+        transcript.record(args, &ran);
+        Some(ran)
+    };
+    let ls_remote = ["ls-remote", GITHUB_REMOTE, "HEAD"];
+
+    let Some(refused) = git(&dir, &ls_remote, &[("GIT_SSL_CAINFO", foreign.as_str())]) else {
+        return false;
+    };
+    const NOT_TRUSTED: &str = "not correctly signed by the trusted CA";
+    if refused.code == Some(0) || !refused.stderr.contains(NOT_TRUSTED) {
+        note(&format!(
+            "under a foreign root, git ls-remote exited {:?} without refusing the certificate: {} (see {log})",
+            refused.code,
+            fatal_line(&refused)
+        ));
+        return false;
+    }
+
+    let Some(before) = git(&dir, &ls_remote, &[]) else {
+        return false;
+    };
+    let Some(advertised) = advertised_head(&before).filter(|_| before.code == Some(0)) else {
+        note(&format!(
+            "git ls-remote exited {:?}: {} (see {log})",
+            before.code,
+            fatal_line(&before)
+        ));
+        return false;
+    };
+    let negotiated: Vec<String> = before
+        .stderr
+        .lines()
+        .filter_map(|l| {
+            let tls = l
+                .split_once("mbedTLS: ")
+                .and_then(|(_, rest)| rest.split_once(" Handshake complete, cipher is "))
+                .map(|(version, cipher)| format!("{version} {cipher}"));
+            tls.or_else(|| {
+                l.split_once("ALPN: server accepted ")
+                    .map(|(_, proto)| proto.to_owned())
+            })
+        })
+        .collect();
+    if !negotiated.iter().any(|p| p == "h2") {
+        note(&format!(
+            "GitHub did not take HTTP/2 through libcurl's nghttp2: [{}] (see {log})",
+            negotiated.join(", ")
+        ));
+        return false;
+    }
+
+    let Some(cloned) = git(
+        &dir,
+        &["clone", "--depth", "1", GITHUB_REMOTE, "slopos"],
+        &[],
+    ) else {
+        return false;
+    };
+    if cloned.code != Some(0) {
+        note(&format!(
+            "git clone exited {:?}: {} (see {log})",
+            cloned.code,
+            fatal_line(&cloned)
+        ));
+        return false;
+    }
+    let checkout = format!("{dir}/slopos");
+    let (Some(rev), Some(status), Some(fsck)) = (
+        git(&checkout, &["rev-parse", "HEAD"], &[]),
+        git(&checkout, &["status", "--porcelain"], &[]),
+        git(&checkout, &["fsck", "--no-progress"], &[]),
+    ) else {
+        return false;
+    };
+    if [&rev, &status, &fsck].iter().any(|r| r.code != Some(0)) || !status.stdout.is_empty() {
+        note(&format!("the clone does not read back clean (see {log})"));
+        return false;
+    }
+    let rev = rev.stdout.trim();
+    // A push landing between the advertisement and the clone moves HEAD once.
+    if rev != advertised
+        && git(&dir, &ls_remote, &[])
+            .as_ref()
+            .and_then(advertised_head)
+            .as_deref()
+            != Some(rev)
+    {
+        note(&format!(
+            "cloned {rev}, but {GITHUB_REMOTE} advertised {advertised}"
+        ));
+        return false;
+    }
+    note(&format!(
+        "{GITHUB_REMOTE} at {} cloned in {} ms ({}); a foreign root refused in {} ms",
+        &rev[..12],
+        cloned.took.as_millis(),
+        negotiated.join(", "),
+        refused.took.as_millis()
+    ));
+    true
+}
+
+/// Rung 9: in the clone rung 8 made, which no vendored configuration reaches,
+/// cargo resolves both lockfiles from crates.io over HTTPS as the host's cargo
+/// does: the workspace's, and the standard library's that `-Zbuild-std`
+/// reads. A fresh `CARGO_HOME`, so every crate is a download; cargo holds each
+/// to the checksum its lockfile records.
+fn cargo_resolves_the_lockfiles_from_crates_io() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let clone = format!("{SCRATCH}/ladder/https-git/slopos");
+    let lock = match fs::read_to_string(format!("{clone}/Cargo.lock")) {
+        Ok(lock) => lock,
+        Err(e) => {
+            note(&format!("no clone from rung 8 at {clone}: {e}"));
+            return false;
+        }
+    };
+    let cargo_home = format!("{SCRATCH}/ladder/crates-io-home");
+    let _ = fs::remove_dir_all(&cargo_home);
+    let Some(fetched) = run(
+        &clone,
+        &format!("{prefix}/bin/cargo"),
+        &[
+            "fetch",
+            "--locked",
+            "-Zbuild-std=core,alloc",
+            "--target",
+            "targets/x86_64-slos.json",
+        ],
+        &[
+            ("CARGO_HOME", cargo_home.as_str()),
+            ("CARGO_NET_OFFLINE", "false"),
+        ],
+    ) else {
+        return false;
+    };
+    if !fetched.ok("cargo fetch -Zbuild-std") {
+        return false;
+    }
+    let Some(cache) = fs::read_dir(format!("{cargo_home}/registry/cache"))
+        .ok()
+        .and_then(|mut dirs| dirs.find_map(|d| d.ok()))
+        .map(|d| d.path())
+    else {
+        note("cargo fetch left no registry cache");
+        return false;
+    };
+    if !cache.to_string_lossy().contains("index.crates.io-") {
+        note(&format!(
+            "the crates came from {}, not crates.io",
+            cache.display()
+        ));
+        return false;
+    }
+    let workspace = registry_packages(&lock);
+    if let Some((name, version, _)) = workspace
+        .iter()
+        .find(|(name, version, _)| !cache.join(format!("{name}-{version}.crate")).is_file())
+    {
+        note(&format!("{name} {version} is not in {}", cache.display()));
+        return false;
+    }
+    let crates = fs::read_dir(&cache).map(|d| d.count()).unwrap_or(0);
+    if crates <= workspace.len() {
+        note(&format!(
+            "{crates} crates for the workspace's {}: -Zbuild-std fetched nothing of its own",
+            workspace.len()
+        ));
+        return false;
+    }
+    note(&format!(
+        "{crates} crates from crates.io, the workspace's {} among them, in {} ms",
+        workspace.len(),
+        fetched.took.as_millis()
+    ));
+    true
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
-        ("devdisk_inventory_reads_back", devdisk_inventory_reads_back),
-        ("devdisk_source_is_vendored", devdisk_source_is_vendored),
         (
-            "devdisk_remounts_after_umount",
-            devdisk_remounts_after_umount,
+            "toolchain_matches_its_manifest",
+            toolchain_matches_its_manifest,
         ),
+        ("source_is_vendored", source_is_vendored),
         ("toolchain_starts", toolchain_starts),
         ("rustc_links_a_program", rustc_links_a_program),
         ("cargo_builds_a_crate", cargo_builds_a_crate),
@@ -1058,6 +1168,11 @@ fn main() {
         (
             "git_reads_the_clone_and_reaches_the_host",
             git_reads_the_clone_and_reaches_the_host,
+        ),
+        ("git_clones_over_https", git_clones_over_https),
+        (
+            "cargo_resolves_the_lockfiles_from_crates_io",
+            cargo_resolves_the_lockfiles_from_crates_io,
         ),
     ]);
 }

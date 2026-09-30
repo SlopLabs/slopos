@@ -27,14 +27,11 @@ tests) release=0 variant=tests features="slopos-testing/qemu-exit kernel/tests" 
 esac
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# build_devdisk.sh stages the toolchain where the host keeps its own sysroot.
-PREFIX="$REPO_ROOT/third_party/rust-slopos"
-if [ ! -x "$PREFIX/bin/cargo" ]; then
-    echo "selfhost: no toolchain at $PREFIX; on the host, just toolchain and then just reset devdisk" >&2
+command -v cargo >/dev/null || {
+    echo "selfhost: no cargo on PATH; on the host, just toolchain and then just boot installs one at /usr/local" >&2
     exit 1
-fi
+}
 
-export PATH="$PREFIX/bin:/bin"
 export CARGO_HOME="${CARGO_HOME:-$REPO_ROOT/builddir/cargo-home}"
 export KERNEL_RELEASE="$release"
 unset LD_LIBRARY_PATH

@@ -1,19 +1,22 @@
-//! The dev disk as a test sees it: the source tree and toolchain
-//! `build_devdisk.sh` seeded, mounted at `/devel` by the boot's `mount=`.
+//! The self-hosting workspace as a test sees it: the clone the host seeds at
+//! `/src/slopos`, built with the toolchain it installs at `/usr/local`.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 
-pub const DEVEL: &str = "/devel";
-const MARKER: &str = "/devel/SLOPOS-DEVDISK";
+pub const SOURCE: &str = "/src/slopos";
+/// Room on the root disk; `/tmp` is memory.
+pub const SCRATCH: &str = "/var/tmp";
 
-/// The dev disk's source tree, or why there is none to build.
-pub fn workspace() -> Result<String, &'static str> {
-    let text = std::fs::read_to_string(MARKER).map_err(|_| "no dev disk at /devel")?;
-    let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key));
-    match (field("source "), field("toolchain ")) {
-        (Some(source), Some(_)) => Ok(format!("{DEVEL}/{source}")),
-        _ => Err("the dev disk carries no source tree and toolchain"),
+/// The workspace, or why there is none to build.
+pub fn workspace() -> Result<&'static str, &'static str> {
+    if !Path::new(SOURCE).join(".git").is_dir() {
+        return Err("no clone at /src/slopos");
     }
+    if !Path::new("/usr/local/bin/cargo").is_file() {
+        return Err("no toolchain at /usr/local");
+    }
+    Ok(SOURCE)
 }
 
 /// `scripts/selfhost.sh <args>` in the tree at `root`, run as the guest's
@@ -27,10 +30,9 @@ pub fn selfhost(root: &str, args: &[&str]) -> Command {
     cmd
 }
 
-/// `git <args>` in `dir`, with the git the tree at `root` carries in its
-/// toolchain, where `selfhost.sh` finds cargo.
-pub fn git(root: &str, dir: &str, args: &[&str]) -> Command {
-    let mut cmd = Command::new(format!("{root}/third_party/rust-slopos/bin/git"));
+/// `git <args>` in `dir`, the git on the default search path.
+pub fn git(dir: &str, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
     cmd.args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -63,38 +65,26 @@ pub struct HostHead {
 /// refused: they would be built with it.
 pub fn take_host_head(root: &str) -> Result<HostHead, String> {
     let edits = stdout_of(
-        git(
-            root,
-            root,
-            &["status", "--porcelain", "--untracked-files=no"],
-        ),
+        git(root, &["status", "--porcelain", "--untracked-files=no"]),
         "git status",
     )?;
     if !edits.is_empty() {
         return Err(format!("the tree carries uncommitted edits:\n{edits}"));
     }
     let before = stdout_of(
-        git(root, root, &["symbolic-ref", "-q", "--short", "HEAD"]),
+        git(root, &["symbolic-ref", "-q", "--short", "HEAD"]),
         "git symbolic-ref HEAD",
     )
-    .or_else(|_| {
-        stdout_of(
-            git(root, root, &["rev-parse", "HEAD"]),
-            "git rev-parse HEAD",
-        )
-    })?;
+    .or_else(|_| stdout_of(git(root, &["rev-parse", "HEAD"]), "git rev-parse HEAD"))?;
     stdout_of(
-        git(root, root, &["fetch", "-q", "origin", "HEAD"]),
+        git(root, &["fetch", "-q", "origin", "HEAD"]),
         "git fetch origin HEAD",
     )?;
     stdout_of(
-        git(root, root, &["checkout", "-q", "--detach", "FETCH_HEAD"]),
+        git(root, &["checkout", "-q", "--detach", "FETCH_HEAD"]),
         "git checkout FETCH_HEAD",
     )?;
-    let commit = stdout_of(
-        git(root, root, &["rev-parse", "HEAD"]),
-        "git rev-parse HEAD",
-    )?;
+    let commit = stdout_of(git(root, &["rev-parse", "HEAD"]), "git rev-parse HEAD")?;
     Ok(HostHead {
         commit: commit.trim().to_owned(),
         before: before.trim().to_owned(),
@@ -103,9 +93,5 @@ pub fn take_host_head(root: &str) -> Result<HostHead, String> {
 
 /// Check `what`, a [`HostHead::before`], out again in the tree at `root`.
 pub fn check_out(root: &str, what: &str) -> Result<(), String> {
-    stdout_of(
-        git(root, root, &["checkout", "-q", what, "--"]),
-        "git checkout",
-    )
-    .map(drop)
+    stdout_of(git(root, &["checkout", "-q", what, "--"]), "git checkout").map(drop)
 }

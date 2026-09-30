@@ -16,8 +16,7 @@ The loop is closed, and source moves through it by git:
 
 ```sh
 just boot                                   # host: the development machine (just boot-fast: no wheel)
-cd /devel/src/slopos                        # guest: a clone of the host's checkout
-export PATH=/devel/src/slopos/third_party/rust-slopos/bin:$PATH
+cd /src/slopos                              # guest: a clone of the host's checkout
 git pull                                    # take the host's commits
 scripts/selfhost.sh install                 # build the kernel, put it in the spare slot
 bootctl reboot                              # try it once
@@ -26,41 +25,65 @@ git commit -am '...' && git push            # hand a change back
 ```
 
 `just boot` boots this build's kernel from an A/B boot disk it rebuilds every
-run, with `/` on a persistent disk and the dev disk at `/devel`: the toolchain,
-and a clone of the host's checkout whose `origin` is that checkout and whose
-push remote is a bare repository beside the dev disk
-(`fs/assets/devdisk.git`; `git fetch fs/assets/devdisk.git <branch>` on the
-host). SLIRP runs one `git daemon --inetd` on the host per connection the
+run, with `/` on a persistent disk (`fs/assets/ext2-persist.img`). The root
+carries the toolchain at `/usr/local` — rustc, cargo, clang, lld and git, with
+each project's licence text under `share/licenses`, rustc's and cargo's under
+`share/doc` — which the one default
+`PATH`, `/bin:/sbin:/usr/local/bin`, reaches after the system's own tools, and
+a clone of the host's checkout at `/src/slopos` whose `origin` is that
+checkout and whose push remote is a bare repository beside the root
+(`fs/assets/guest-push.git`; `git fetch fs/assets/guest-push.git <branch>` on
+the host). SLIRP runs one `git daemon --inetd` on the host per connection the
 guest opens to `git://10.0.2.4/`, so nothing listens on the host and the
 guest reaches exactly two repositories: the checkout read-only, the push
-repository with receive-pack. The host owns the boot disk and the binaries it
-installs on `/`; the guest owns everything else on both disks. `just
-test-selfhost` and `just test-install-guest` run the loop in the guest and
-grade it: the guest fetches the commit under test, its kernels pass the ELF
-gates and the kernel suite, and a kernel the guest built boots, pushes a
-commit the host fetches, commits and rolls back.
+repository with receive-pack. The host owns the boot disk, the binaries it
+installs on `/` and the toolchain, each replaced when it changes; the guest
+owns everything else, the clone included once it is seeded. Before a boot the
+host grows the root with `resize2fs` whenever its free space is under 4G, a
+clean dev and tests kernel build's target directory with room to spare, and
+the root's integrity seal costs the blocks the host wrote rather than the
+image. A clone taken from GitHub resolves its crates as the host's does: its
+cargo fetches what `Cargo.lock` and std's lockfile for `-Zbuild-std` pin from
+crates.io over HTTPS.
+
+`just test-toolchain`, `just test-selfhost`, `just test-install-guest` and
+`just bench-selfhost` boot a root of their own, rebuilt every run as the tests
+image is: the toolchain, a clone seeded with the vendored crates so no build
+reads a registry, and the fixtures the toolchain ladder fetches from, so `just
+test` never depends on `just toolchain`. `test-toolchain` climbs the ladder —
+rustc, cargo with a build script and a proc macro, a git dependency through
+libgit2, a loopback registry over TLS, clang, git against the host, a clone of
+`https://github.com/SlopLabs/slopos` and crates.io over HTTPS — and finds a
+clone made on `/` intact after a power-off. `test-selfhost` and
+`test-install-guest` run the loop in the guest and grade it: the guest fetches
+the commit under test, its kernels pass the ELF gates and the kernel suite,
+and a kernel the guest built boots, pushes a commit the host fetches, commits
+and rolls back.
 
 Every patch under `toolchain/` teaches its project the `slopos` target and
-nothing else. A library or tool joins as a recipe under `toolchain/recipes/`:
-a pinned tarball, its checksum and a build template that
+nothing else. A library or tool joins as a recipe under `toolchain/recipes/`: a
+pinned tarball, its checksum, its licence texts and a build template that
 `scripts/build_recipes.sh` compiles against slibc, and that
 `scripts/check_recipes.sh` holds to leaving the source as shipped. Cargo builds
-with its default features against the zlib, nghttp2, OpenSSL, libcurl, libssh2
-and libgit2 recipes; in the guest it resolves a git dependency through libgit2
-and fetches a crate over HTTPS through libcurl and OpenSSL. Git 2.55 is a meson
-recipe beside them, built for the toolchain's place in the guest. Every one
-of them links the C library, which is `MIT OR Apache-2.0` so that git, being
-GPL-2.0-only, may be passed on with the library it links;
-`scripts/check_libc_license.sh` holds every crate `cargo metadata` resolves for
-the library to MIT.
+with its default features against the zlib, nghttp2, Mbed TLS, OpenSSL,
+libcurl, libssh2 and libgit2 recipes. Git 2.55 is a meson recipe beside them,
+built for `/usr/local`. Git is GPL-2.0-only, so libcurl takes its TLS from
+Mbed TLS and not OpenSSL, and `check_recipes.sh` walks the `DT_NEEDED`
+closure of everything a GPL-2.0-only recipe installs for a library its licence
+does not allow, and its symbols for a static copy of one. For the same reason
+the C library every one of them links is `MIT OR Apache-2.0`, and
+`scripts/check_libc_license.sh` holds every crate `cargo metadata` resolves
+for it to MIT.
 
 A port finds the POSIX it expects: one working directory per process, `#!`
 scripts and `/bin/sh`, process-shared futexes, 64 signals with queued realtime
-ones and `sigqueue`, FIFOs, `trap` in the shell, and the group database,
-`utime`, `mkstemp`, `freopen` and `execl` git reached for. A fork owes its copy
-as the child writes it, and a write that finds no page makes the OOM killer
-take the process holding most of what ran short, among those the writer may
-signal, instead of faulting the writer.
+ones and `sigqueue`, FIFOs, `trap` in the shell, sockets made nonblocking and
+close-on-exec as `socket` and `accept4` create them, which is how libcurl opens
+git's connections, and the group database, `utime`, `mkstemp`, `freopen` and
+`execl` git reached for. A fork owes its copy as the child writes it, and a
+write that finds no page makes the OOM killer take the process holding most of
+what ran short, among those the writer may signal, instead of faulting the
+writer.
 
 The guest builds the dev kernel in about 62 s at four vCPUs and 8G under KVM
 against 49 s for rustup's dist compiler on the same four cores; the gap is the
@@ -69,99 +92,11 @@ compiler's build settings, not the kernel.
 **Open defect: the tests kernel does not link at the default 4G.** Its link
 hits the file map's per-process cap, an eighth of usable memory: `pinnedbytes`
 peaks at exactly the cap, `rust-lld` takes a refused file-page fault and dies,
-and the dev disk remounts read-only. `test-install-guest` and `test-selfhost`
-need `DEV_QEMU_MEM=8G` until the cap is sized for a linker and a refused fault
-in one process stops failing a whole mount.
+and the filesystem it was writing remounts read-only. `test-install-guest`
+and `test-selfhost` need `DEV_QEMU_MEM=8G` until the cap is sized for a linker
+and a refused fault in one process stops failing a whole mount.
 
-**Open: the vendored crates do not travel.** The dev disk is seeded with the
-crates `Cargo.lock` names, and the guest builds with no registry, so a commit
-that moves `Cargo.lock` builds in the guest only on a fresh dev disk.
-
-## Phase 1: SlopOS ships its own tools
-
-The target: in `just boot`, `git clone https://github.com/SlopLabs/slopos`
-anywhere on `/`, find `git`, `cargo` and `rustc` on the default `PATH`, run
-`scripts/selfhost.sh install` from that clone, reboot, and find the clone still
-there.
-
-What is known:
-
-- **Where the tools are.** Only on the dev disk, at
-  `/devel/src/slopos/third_party/rust-slopos` (748M), because
-  `selfhost.sh` looks for the toolchain inside the checkout, where the host
-  keeps its sysroot, and git's meson prefix is compiled in as that path.
-- **`PATH`.** The shell defaults to `/bin:/sbin`
-  (`userland/src/apps/shell/env.rs`), slibc's `execvp` fallback and
-  `_CS_PATH` to `/bin:/usr/bin` (`slibc/src/process/mod.rs`; no `/usr/bin`
-  exists), the coreutils to `/bin:/sbin`. The shell reads no startup file and
-  the root has no `/usr/local`. Every system surveyed puts extra tools where
-  the default `PATH` already looks: Redox and SerenityOS install into the root
-  (`/usr/bin`; `/usr/local`, with `PATH=/bin:/usr/bin:/usr/local/bin`),
-  ChromeOS bind-mounts its dev-tools partition at `/usr/local`, NixOS and so
-  Asterinas NixOS link a profile at `/run/current-system/sw/bin`.
-- **A link is enough.** `exec` resolves symlinks and passes the canonical path
-  as `AT_EXECFN` (`core/src/exec/mod.rs`), and slibc's loader takes `$ORIGIN`
-  from it, so rustc, cargo, clang and git (`RUNPATH $ORIGIN/../lib`) reached
-  through a link load from their real prefix. The initramfs unpacker skips
-  symlinks.
-- **Licence.** rustc, cargo, clang, lld and git are shippable as they are;
-  cargo's libgit2 carries the GCC linking exception. What git links must be
-  GPL-2.0-compatible, and OpenSSL 3 is Apache-2.0, which is not.
-- **HTTPS.** Git's recipe disables curl, so it clones only from the host's
-  `git://` daemon, and GitHub turned `git://` off in March 2022. The curl and
-  OpenSSL recipes exist and cargo already fetches over HTTPS in the guest, from
-  a loopback registry. The guest takes a nameserver from DHCP and trusts
-  `/etc/ssl/certs/ca-certificates.crt`; no test reaches GitHub or crates.io
-  over the real internet, and `dns_resolve_test` is known-failing in a
-  full-suite boot.
-- **Persistence.** Under `just boot`, `/` is `fs/assets/ext2-persist.img`:
-  writable, preserved across builds, grown with `resize2fs`, 512M by default.
-  The host refreshes its binaries on it on every boot, and `gen_verity.py`
-  reads the whole image into memory and hashes every block each time. `just
-  test-persist` already grades a write surviving a power-off.
-- **Crates.** A clone carries no `third_party/vendor`; the guest builds from
-  the crates seeded onto the dev disk. `-Zbuild-std` resolves std's own
-  dependencies from crates.io too.
-- **Build graph.** `just toolchain` is hours cold and needs the host's clang,
-  CMake and Ninja; `just build`, `just test` and CI's boot lane do not depend
-  on it and must not start to.
-- **The live ISO.** 28M, of which the initramfs is 13M, unpacked into RAM and
-  keeping nothing; the toolchain alone is 748M. Neither Arch's installer ISO
-  nor Ubuntu's desktop ISO carries a compiler or git.
-
-The work:
-
-1. **Git over HTTPS:** enable curl in the recipe and move the one libcurl from
-   OpenSSL to an mbedTLS recipe (`Apache-2.0 OR GPL-2.0-or-later`), plus
-   whatever slibc and the network stack the transport reaches for, graded
-   against a real remote. Cargo's registry traffic moves with the libcurl;
-   OpenSSL stays for libgit2 and libssh2.
-2. **One default `PATH`** for the shell, slibc and the coreutils, naming
-   `/usr/local/bin` after `/bin` and `/sbin`, so a writable disk cannot shadow
-   the system's tools.
-3. **The toolchain as its own prefix at `/usr/local`**, installed onto the
-   persistent root in QEMU by the host that built it, with each project's
-   licence text; `selfhost.sh` takes the toolchain on `PATH` instead of
-   `<checkout>/third_party/rust-slopos`. A guest kernel's `core` panic paths
-   then differ from a host build's, which nothing grades.
-4. **A clone on `/` survives a reboot**, graded like `test-persist`. Before a
-   boot the host grows the root with `resize2fs` whenever its free space is
-   under a floor sized for a checkout and its target directory, and
-   `gen_verity.py`'s cost follows the blocks in use rather than the image.
-5. **crates.io in the guest:** a clone's cargo resolves `Cargo.lock` over
-   HTTPS as the host's does, which closes the vendored crates' open item
-   above. The tests keep building from the vendored crates with no registry.
-6. **The dev disk goes** once the root holds the toolchain and a clone.
-   `just boot` seeds that clone on `/` with the `origin` and `host` remotes the
-   dev disk's carries. `test-selfhost`, `test-install-guest` and
-   `bench-selfhost` boot a root of their own, built only by their recipes as
-   `test-capacity` builds its volume, carrying the toolchain and a clone the
-   host seeds with its vendored crates, so `just test` never depends on `just
-   toolchain`; the dev-disk test's git repository and loopback registry move
-   to that root. `/devel` and `just test-devdisk` go. A user who wants a
-   separate volume makes one; `mount(2)` and `mount=` attach any ext2 device.
-
-## Phase 2: the whole tree builds in the guest
+## Phase 1: the whole tree builds in the guest
 
 `build_userland.sh` is bash and the C++ runtime build is CMake and Ninja, so
 the guest can rebuild the kernel but not `init`, the shell, the coreutils or
@@ -171,7 +106,7 @@ forces the decision the loop avoids today: the host refreshes every binary it
 built on each `just boot`, so a guest-installed `/bin` must either win or be
 declared the guest's.
 
-## Phase 3: bare metal (not committed)
+## Phase 2: bare metal (not committed)
 
 `just iso` builds the bare-metal artifact: kernel and initramfs, running from
 RAM, keeping nothing. You can *try* SlopOS on hardware; you can *develop* there
@@ -191,9 +126,9 @@ The verified image (`fs/assets/ext2.img`, `verity=require`) backs no boot; the
 suite mounts it to exercise verity. Decide whether it becomes the bare-metal
 read-only root or goes.
 
-## Phase 4: the toolchain rebuilds itself (not committed)
+## Phase 3: the toolchain rebuilds itself (not committed)
 
-Rebuilding LLVM and rustc in the guest needs Python beside Phase 2's CMake and
+Rebuilding LLVM and rustc in the guest needs Python beside Phase 1's CMake and
 Ninja, tens of gigabytes and hours of CPU, and `-Zbuild-std` until the target is
 tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 
@@ -242,11 +177,14 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
   is what a GPL-2.0-only program takes. relibc and musl are MIT, and Linux's
   UAPI headers carry the syscall note, for the same reason.
 - **Git never links OpenSSL.** OpenSSL 3 is Apache-2.0, which GPL-2.0-only
-  code cannot be combined with, so git's HTTPS goes through libcurl on mbedTLS
-  and nothing else it loads links OpenSSL. Debian and Ubuntu give git a GnuTLS
-  libcurl, but libldap brings OpenSSL back, and they, Fedora and Arch rely on
-  reading OpenSSL as a system library under GPLv2, which a git copyright
-  holder disputes (Debian #1094969).
+  code cannot be combined with, so the one libcurl, git's HTTP transport and
+  cargo's registry client, takes its TLS from Mbed TLS 4.1, the long-term
+  branch, and OpenSSL stays for libgit2 and libssh2, which only cargo loads.
+  `check_recipes.sh` holds that from the built objects. Debian and Ubuntu give
+  git a GnuTLS libcurl, but libldap brings OpenSSL back, and they, Fedora and
+  Arch rely on reading OpenSSL as a system library under GPLv2, which a git
+  copyright holder disputes (Debian #1094969); Asterinas runs NixOS's git on
+  an OpenSSL libcurl.
 - **Distribution.** Local while SlopOS is pre-alpha: no package host. The ISO
   carries what a distribution's installer ISO does — the system, not a
   compiler or git — and the toolchain reaches a disk from the machine that
@@ -254,7 +192,17 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 - **Crates.** crates.io over HTTPS in the guest, as on the host; the tests and
   CI build from the vendored crates with no registry.
 - **Disks.** One persistent root, grown on demand the way SerenityOS grows its
-  image, and no dev disk: a separate volume is the user's to make.
+  image, with the tools on it; a separate volume is the user's to make, and
+  `mount(2)` and `mount=` attach any ext2 device. The heavy checks boot a root
+  of their own, rebuilt every run, so nothing a boot left decides the next
+  verdict.
+- **Where the tools live.** A prefix of their own at `/usr/local`, found
+  through one default `PATH` that names it after `/bin` and `/sbin`, so a
+  writable disk cannot shadow the system's tools. Redox and SerenityOS install
+  ports into the root and search `/usr/local/bin` after the system, and
+  ChromeOS bind-mounts its dev-tools partition there; a link on the default
+  `PATH` would do as well, since `exec` passes the canonical path the loader
+  takes `$ORIGIN` from.
 - **The dev loop.** One development machine (`just boot`, and `just
   boot-fast` to skip the wheel) and one live artifact (`just iso`); knobs
   (`KERNEL_RELEASE`, `VIDEO`, `ports`, `DEBUG`, `ROULETTE`) rather than more
@@ -269,12 +217,12 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
   loop you run is the loop `just test-selfhost` and `just test-install-guest`
   grade.
 - **Source bridge.** Git over the network, not a shared filesystem: no 9p or
-  virtio-fs on the build path, and no copying the tree. For the dev loop and
-  the tests the host is the remote, where Asterinas's self-hosting demo and
-  SerenityOS clone from the internet over HTTPS: `git://` over SLIRP needs
-  neither TLS nor libcurl, and a `guestfwd` per repository runs the daemon
-  only when the guest connects. The guest pushes into a bare repository, never
-  into the checkout.
+  virtio-fs on the build path, and no copying the tree. The tree under test
+  comes from the host, where Asterinas's self-hosting demo and SerenityOS
+  clone from the internet over HTTPS: `git://` over SLIRP needs neither TLS
+  nor libcurl, and a `guestfwd` per repository runs the daemon only when the
+  guest connects. The guest pushes into a bare repository, never into the
+  checkout. GitHub is where HTTPS itself is graded.
 - **Kernel build.** One POSIX sh driver and one Rust symbol-table tool on both
   machines, rebuilt until the embedded table is the kernel's own. The guest's
   kernel is graded by the gates and the suite, not by identity with the

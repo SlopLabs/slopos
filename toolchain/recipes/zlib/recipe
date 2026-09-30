@@ -4,6 +4,7 @@ version=1.3.2
 url=https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.xz
 sha256=d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3
 license=Zlib
+license_file=LICENSE
 template=cmake
 soname=libz.so.1
 arg=-DZLIB_BUILD_TESTING=OFF

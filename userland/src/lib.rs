@@ -1,11 +1,11 @@
 pub mod apps;
-pub mod devdisk;
 pub mod gfx;
 pub mod keymap;
 pub mod net;
 pub mod net_query;
 pub mod program_registry;
 pub mod readiness;
+pub mod selfhost;
 pub use slopos_rt as ring;
 pub mod runtime;
 pub mod syscall;

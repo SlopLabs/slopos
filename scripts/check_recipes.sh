@@ -3,7 +3,8 @@
 # promises: a pinned upstream tarball built by a template, and nothing else.
 #
 #   - one lowercase-hex `sha256` and one `https://` `url` naming `version`;
-#   - a `license`, a known `template`, at least one `soname` or `program`, no
+#   - a `license`, at least one `license_file` naming a file inside the
+#     tarball, a known `template`, at least one `soname` or `program`, no
 #     unread key;
 #   - at most one `depends` line, naming other recipes, acyclic;
 #   - no file but `recipe` and its declared `config`; never a patch: an edit
@@ -12,7 +13,10 @@
 #     flag, CMake script, launcher or search root edits what is built with
 #     every file pristine. A `cmake` arg is `-D<NAME>=<value>`: `CMAKE_*`
 #     names from `CMAKE_ARG_NAMES`, project names outside `PROJECT_ARG_DENY`
-#     (bar `PROJECT_ARG_ALLOW`), values a word or an `/etc` path. A `meson`
+#     (bar `PROJECT_ARG_ALLOW`) and `PROJECT_ARTIFACT_DENY` (bar a
+#     `PROJECT_SWITCH` set `ON` or `OFF`, which builds a program or library
+#     or does not rather than naming one), values a word or an `/etc` path.
+#     A `meson`
 #     arg is the same shape: built-in options from `MESON_ARG_NAMES`, project
 #     options outside `MESON_PROJECT_DENY`. An `openssl` arg is `no-*`,
 #     `enable-*`, `shared`, `threads` or `--openssldir=/etc/..`;
@@ -21,7 +25,13 @@
 #     strings, and only benign flags;
 #   - a NOTICE.md entry naming `toolchain/recipes/<name>/`;
 #   - a built recipe carries the stamp `build_recipes.sh --print-stamp` gives
-#     now (skipped when nothing is built, as in CI).
+#     now (skipped when nothing is built, as in CI);
+#   - every object a built recipe bound to GPL-2.0-only installs (no exception
+#     from `GPL2_LINKING_EXCEPTIONS`) reaches, through `DT_NEEDED`, only
+#     libraries a recipe or the sysroot provides under a licence that code may
+#     be combined with (`GPL2_COMPATIBLE`), and nothing in that closure lacks a
+#     symbol table or defines, even locally, a symbol an incompatible recipe's
+#     library exports: git links no OpenSSL, dynamically or as a static copy.
 #
 # The driver fails any build that changes the unpacked tree.
 #
@@ -35,11 +45,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TEMPLATES="cmake meson openssl"
-RECIPE_KEYS="version url sha256 license template depends soname program arg config target"
+RECIPE_KEYS="version url sha256 license license_file template depends soname program arg config target"
 
 CMAKE_ARG_NAMES='^CMAKE_(BUILD_TYPE|POSITION_INDEPENDENT_CODE|(REQUIRE|DISABLE)_FIND_PACKAGE_[A-Za-z0-9_]+|INSTALL_(BINDIR|SBINDIR|LIBEXECDIR|SYSCONFDIR|DATAROOTDIR|DATADIR|INCLUDEDIR|DOCDIR|MANDIR))$'
-PROJECT_ARG_DENY='(FLAGS|DEFINITIONS|DEFINES|INCLUDE|LAUNCHER|COMPILER|LINKER|TOOLCHAIN|COMMAND|SCRIPT|MODULE|EXECUTABLE|PROGRAM|FETCHCONTENT|_DIR|_ROOT|_PATH$|_LIBRAR(Y|IES)(_RELEASE|_DEBUG)?$|_FILE$|_HINTS?$)'
+PROJECT_ARG_DENY='(FLAGS|DEFINITIONS|DEFINES|INCLUDE|LAUNCHER|COMPILER|LINKER|TOOLCHAIN|COMMAND|SCRIPT|MODULE|EXECUTABLE|FETCHCONTENT|_DIR|_ROOT|_PATH$|_FILE$|_HINTS?$)'
 PROJECT_ARG_ALLOW='^[A-Z0-9]+_CA_PATH$'
+PROJECT_ARTIFACT_DENY='(PROGRAM|_LIBRAR(Y|IES)(_RELEASE|_DEBUG)?$)'
+PROJECT_SWITCH='^(USE|ENABLE|BUILD|WITH)_'
 MESON_BUILTIN='^(prefix|bindir|datadir|includedir|infodir|libdir|licensedir|libexecdir|localedir|localstatedir|mandir|sbindir|sharedstatedir|sysconfdir|auto_features|backend|genvslite|buildtype|debug|default_library|default_both_libraries|errorlogs|install_umask|layout|optimization|prefer_static|stdsplit|strip|unity|unity_size|warning_level|werror|wrap_mode|force_fallback_for|vsenv|pkg_config_path|cmake_prefix_path)$|^(b|c|cpp|objc|objcpp|fortran|d|rust|cuda|cython|java|vala|nasm|masm|swift|python)_'
 MESON_ARG_NAMES='^(auto_features|b_ndebug)$'
 MESON_PROJECT_DENY='(args|flags|define|include|launcher|compiler|linker|toolchain|command|script|path|dir|file|bin|prefix|editor|pager|environment|shell|exe|program|tool)'
@@ -47,9 +59,20 @@ WORD='^[A-Za-z0-9_][A-Za-z0-9_.,+:-]*$'
 ETC_PATH='^/etc(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)+$'
 RELATIVE_DIR='^[a-z0-9_]+(/[a-z0-9_+-][a-z0-9_.+-]*)*$'
 FILE_NAME='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
+TARBALL_FILE='^[A-Za-z0-9_][A-Za-z0-9_.+-]*(/[A-Za-z0-9_][A-Za-z0-9_.+-]*)*$'
 SONAME='^lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*$'
 PROGRAM='^(bin|libexec)(/[A-Za-z0-9_][A-Za-z0-9_.+-]*)+$'
 CONFIG_FIELDS="inherit_from bn_ops asm_arch perlasm_scheme thread_scheme dso_scheme shared_target CFLAGS cflags CXXFLAGS cxxflags cppflags lib_cppflags lflags ex_libs shared_cflag shared_ldflag"
+# SPDX ids. `A OR B` qualifies when either side does; `X WITH E` when X does,
+# since an exception only adds permission, and for the one pairing whose
+# exception grants exactly this.
+GPL2_COMPATIBLE="MIT Zlib ISC BSD-2-Clause BSD-3-Clause curl GPL-2.0-only GPL-2.0-or-later LGPL-2.1-only LGPL-2.1-or-later"
+GPL2_COMPATIBLE_WITH="Apache-2.0 WITH LLVM-exception"
+# Exceptions that let a GPL-2.0-only work be combined with other licences.
+GPL2_LINKING_EXCEPTIONS="GCC-exception-2.0"
+# What the target sysroot links beside the recipes.
+SYSROOT_LIBS="libc.so:MIT OR Apache-2.0
+libc++.so:Apache-2.0 WITH LLVM-exception"
 
 # Parses the config without running it. `$1` the file, `$2` the target it must
 # define, `$3` the fields it may set.
@@ -182,7 +205,8 @@ check_cmake_arg() {
                 fail "$name: arg '$arg' names an install directory that is not relative to the prefix"
             return 0
         fi
-    elif [[ "$var" =~ $PROJECT_ARG_DENY && ! "$var" =~ $PROJECT_ARG_ALLOW ]]; then
+    elif [[ "$var" =~ $PROJECT_ARG_DENY && ! "$var" =~ $PROJECT_ARG_ALLOW ]] ||
+        [[ "$var" =~ $PROJECT_ARTIFACT_DENY && ! ("$var" =~ $PROJECT_SWITCH && "$value" =~ ^(ON|OFF)$) ]]; then
         fail "$name: arg '$arg' names a flag, file, program or search root"
     fi
     [[ "$value" =~ $WORD || "$value" =~ $ETC_PATH ]] ||
@@ -234,6 +258,11 @@ check_recipe() {
     url="$(single "$file" url "$name")" || exit 1
     sha256="$(single "$file" sha256 "$name")" || exit 1
     single "$file" license "$name" >/dev/null
+    [ -n "$(values "$file" license_file)" ] || fail "$name: no license_file"
+    local text
+    while IFS= read -r text; do
+        [[ "$text" =~ $TARBALL_FILE ]] || fail "$name: license_file '$text' is not a path inside the tarball"
+    done < <(values "$file" license_file)
     template="$(single "$file" template "$name")" || exit 1
 
     [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || fail "$name: sha256 is not 64 lowercase hex digits"
@@ -312,6 +341,156 @@ check_stamps() {
     echo "${#built[@]} built, stamps current"
 }
 
+# Whether some `OR` alternative of the SPDX expression `$1` has every `AND`
+# term satisfy the predicate `$2`. A parenthesised expression has none.
+some_alternative_all() {
+    local alt term held
+    case "$1" in *"("*) return 1 ;; esac
+    while IFS= read -r alt; do
+        held=1
+        while IFS= read -r term; do
+            "$2" "$term" || held=0
+        done < <(printf '%s\n' "$alt" | sed 's/ AND /\n/g')
+        [ "$held" -eq 0 ] || return 0
+    done < <(printf '%s\n' "$1" | sed 's/ OR /\n/g')
+    return 1
+}
+
+term_gpl2_compatible() {
+    [ "$1" != "$GPL2_COMPATIBLE_WITH" ] || return 0
+    case " $GPL2_COMPATIBLE " in *" ${1%% WITH *} "*) return 0 ;; esac
+    return 1
+}
+
+term_free_of_gpl2_only() {
+    case "$1" in
+        GPL-2.0-only | GPL-2.0) return 1 ;;
+        "GPL-2.0-only WITH "* | "GPL-2.0 WITH "*)
+            case " $GPL2_LINKING_EXCEPTIONS " in *" ${1##* WITH } "*) return 0 ;; esac
+            return 1
+            ;;
+    esac
+}
+
+gpl2_compatible() {
+    some_alternative_all "$1" term_gpl2_compatible
+}
+
+binds_gpl2_only() {
+    ! some_alternative_all "$1" term_free_of_gpl2_only
+}
+
+sysroot_licence() {
+    printf '%s\n' "$SYSROOT_LIBS" | awk -F: -v lib="$1" '$1 == lib { print $2; exit }'
+}
+
+needed_of() {
+    readelf -d "$1" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'
+}
+
+# Every function and datum `$1` defines, local ones included: a copy linked
+# with hidden visibility or behind a version script defines only those.
+definitions() {
+    readelf -sW "$1" | awk '
+        NF >= 8 && $1 ~ /:$/ && $7 != "UND" && ($4 == "FUNC" || $4 == "OBJECT") {
+            name = $8; sub(/@.*/, "", name); sub(/\..*/, "", name); print name }' |
+        LC_ALL=C sort -u
+}
+
+has_symtab() {
+    readelf -SW "$1" | grep -q ' \.symtab '
+}
+
+check_closures() {
+    local root="$1" out="$2" name soname rel file lib lic from needed copied objects=0 bad=0
+    local -A owner=() licence=() seen=() exports=() defined=()
+    local queue=() closure=()
+    for name in "${@:3}"; do
+        licence[$name]="$(values "$root/toolchain/recipes/$name/recipe" license)"
+        for soname in $(values "$root/toolchain/recipes/$name/recipe" soname); do
+            owner[$soname]="$name"
+        done
+    done
+    local bound=()
+    for name in "${@:3}"; do
+        [ -f "$out/$name/stamp" ] && [ -f "$out/$name/manifest" ] || continue
+        binds_gpl2_only "${licence[$name]}" && bound+=("$name")
+    done
+    [ "${#bound[@]}" -gt 0 ] || { echo "no GPL-2.0-only object built"; return 0; }
+    command -v readelf >/dev/null 2>&1 || fail "readelf is needed to read what ${bound[*]} link"
+    # What a static copy of an incompatible library would define.
+    for soname in "${!owner[@]}"; do
+        name="${owner[$soname]}"
+        gpl2_compatible "${licence[$name]}" || [ ! -e "$out/prefix/lib/$soname" ] ||
+            exports[$soname]="$(readelf --dyn-syms -W "$out/prefix/lib/$soname" | awk '
+                NF >= 8 && $1 ~ /:$/ && $7 != "UND" && ($5 == "GLOBAL" || $5 == "WEAK") {
+                    name = $8; sub(/@.*/, "", name); print name }' | LC_ALL=C sort -u)"
+    done
+    for name in "${bound[@]}"; do
+        while IFS= read -r rel; do
+            file="$out/prefix/$rel"
+            [ -f "$file" ] && [ ! -L "$file" ] && [ "$(od -An -c -N4 "$file" | tr -d ' ')" = '177ELF' ] ||
+                continue
+            objects=$((objects + 1))
+            seen=()
+            closure=("$file")
+            needed="$(needed_of "$file")" || {
+                echo "  $name: $rel cannot be read" >&2
+                bad=1
+                continue
+            }
+            mapfile -t queue < <(printf '%s' "$needed" | sed '/^$/d')
+            while [ "${#queue[@]}" -gt 0 ]; do
+                lib="${queue[0]}"
+                queue=("${queue[@]:1}")
+                [ -z "${seen[$lib]:-}" ] || continue
+                seen[$lib]=1
+                lic="$(sysroot_licence "$lib")"
+                if [ -n "$lic" ]; then
+                    from="the sysroot"
+                elif [ -n "${owner[$lib]:-}" ]; then
+                    from="${owner[$lib]}"
+                    lic="${licence[$from]}"
+                    if needed="$(needed_of "$out/prefix/lib/$lib" 2>/dev/null)"; then
+                        closure+=("$out/prefix/lib/$lib")
+                        mapfile -t -O "${#queue[@]}" queue < <(printf '%s' "$needed" | sed '/^$/d')
+                    else
+                        echo "  $name: $rel reaches $lib, which $from declares but has not installed" >&2
+                        bad=1
+                    fi
+                else
+                    echo "  $name: $rel reaches $lib, which neither a recipe nor the sysroot provides" >&2
+                    bad=1
+                    continue
+                fi
+                gpl2_compatible "$lic" || {
+                    echo "  $name: $rel reaches $lib ($from, $lic), which GPL-2.0-only code cannot be combined with" >&2
+                    bad=1
+                }
+            done
+            for lib in "${closure[@]}"; do
+                has_symtab "$lib" || {
+                    echo "  $name: ${lib#"$out/prefix/"} carries no symbol table, so what it copied cannot be read" >&2
+                    bad=1
+                    continue
+                }
+                [ -n "${defined[$lib]+set}" ] || defined[$lib]="$(definitions "$lib")"
+                for soname in "${!exports[@]}"; do
+                    [ "$(basename "$lib")" != "$soname" ] || continue
+                    copied="$(LC_ALL=C comm -12 <(printf '%s\n' "${defined[$lib]}") \
+                        <(printf '%s\n' "${exports[$soname]}") | sed '/^$/d' | head -n 3 | tr '\n' ' ')"
+                    [ -z "$copied" ] || {
+                        echo "  $name: ${lib#"$out/prefix/"} defines ${copied% }, which ${owner[$soname]}'s $soname exports: a static copy of code GPL-2.0-only code cannot be combined with" >&2
+                        bad=1
+                    }
+                done
+            done
+        done <"$out/$name/manifest"
+    done
+    [ "$bad" -eq 0 ] || fail "a GPL-2.0-only recipe links what its licence does not allow"
+    echo "$objects GPL-2.0-only objects link compatible code only"
+}
+
 check_tree() {
     local root="$1" out="$2"
     local names=() dir
@@ -344,9 +523,10 @@ check_tree() {
     for name in "${names[@]}"; do
         check_cycle "$name"
     done
-    local built
+    local built closures
     built="$(check_stamps "$root" "$out" "$root/scripts/build_recipes.sh" "${names[@]}")" || exit 1
-    echo "$SELF: OK — ${#names[@]} recipes (${names[*]}); $built"
+    closures="$(check_closures "$root" "$out" "${names[@]}")" || exit 1
+    echo "$SELF: OK — ${#names[@]} recipes (${names[*]}); $built; $closures"
 }
 
 self_test() {
@@ -363,6 +543,7 @@ version=1.2.3
 url=https://example.org/alpha-1.2.3.tar.xz
 sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 license=MIT
+license_file=LICENSE
 template=cmake
 soname=libalpha.so.1
 EOF
@@ -371,6 +552,7 @@ version=4.5
 url=https://example.org/beta-4.5.tar.gz
 sha256=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 license=Apache-2.0
+license_file=LICENSE.txt
 template=openssl
 config=target.conf
 depends=alpha
@@ -381,6 +563,8 @@ version=0.9
 url=https://example.org/delta-0.9.tar.xz
 sha256=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 license=GPL-2.0-only
+license_file=COPYING
+license_file=docs/LGPL-2.1
 template=meson
 depends=alpha
 program=bin/delta
@@ -448,6 +632,10 @@ EOF
     reject_edit 's|alpha-1.2.3|alpha-1.2.4|' "a url naming another version"
     reject_edit 's/^template=.*/template=autotools/' "an unknown template"
     reject_edit '/^license=/d' "a recipe with no license"
+    reject_edit '/^license_file=/d' "a recipe with no licence text" "no license_file"
+    reject_edit 's|^license_file=.*|license_file=/etc/LICENSE|' "an absolute licence path" "not a path inside the tarball"
+    reject_edit 's|^license_file=.*|license_file=../LICENSE|' "a licence path climbing out" "not a path inside the tarball"
+    reject_edit 's|^license_file=.*|license_file=a/../../LICENSE|' "a licence path climbing out midway" "not a path inside the tarball"
     reject_edit '$ a depends=gamma' "a dependency on no recipe"
     reject_edit '$ a depends=alpha' "a recipe that depends on itself" "in a cycle"
     reject_edit '$ a depends=beta' "two recipes that depend on each other" "in a cycle"
@@ -480,6 +668,11 @@ EOF
     reject_edit '$ a arg=-DZLIB_LIBRARY_RELEASE=/etc/x' "a release library override" "names a flag, file"
     reject_edit '$ a arg=-DZLIB_LIBRARY_DEBUG=/etc/x' "a debug library override" "names a flag, file"
     reject_edit '$ a arg=-DEXTRA_CFLAGS=O2' "a project's flags variable" "names a flag, file"
+    reject_edit '$ a arg=-DUSE_ZLIB_LIBRARY=/etc/libz.so' "a switch-shaped name given a path" "names a flag, file"
+    reject_edit '$ a arg=-DWITH_PERL_EXECUTABLE=perl' "a switch-shaped name given a program" "names a flag, file"
+    reject_edit '$ a arg=-DFOO_EXECUTABLE=ON' "a program name given a boolean" "names a flag, file"
+    reject_edit '$ a arg=-DUSE_COMPILER_LAUNCHER=ON' "a switch that turns on a launcher" "names a flag, file"
+    reject_edit '$ a arg=-DBUILD_FETCHCONTENT_DEPS=ON' "a switch that fetches sources" "names a flag, file"
     reject_edit '$ a arg=-DFOO=-include/etc/shim.h' "a flag passed as a value" "neither a word nor a path"
     reject_edit '$ a arg=-DFOO=ON;-include;/etc/shim.h' "a CMake list smuggling a flag" "neither a word nor a path"
     reject_edit '$ a arg=-DFOO=/usr/lib/libz.so' "a host path" "neither a word nor a path"
@@ -561,6 +754,101 @@ EOF
     echo good >"$tmp/out/alpha/stamp"
     printf '#!/bin/sh\nexit 1\n' >"$tmp/scripts/build_recipes.sh"
     expect_reject "a built recipe whose driver cannot print a stamp"
+    printf '#!/bin/sh\nshift\nfor n; do echo "$n good"; done\n' >"$tmp/scripts/build_recipes.sh"
+
+    # delta is GPL-2.0-only; alpha is MIT, beta Apache-2.0.
+    local lld llc prefix="$tmp/out/prefix"
+    lld="$("$SCRIPT_DIR/llvm_tool.sh" rust-lld)" || fail "--self-test: no rust-lld to link its objects with"
+    llc="$("$SCRIPT_DIR/llvm_tool.sh" llc)" || fail "--self-test: no llc to make its objects with"
+    : >"$tmp/empty.ll"
+    printf 'define void @beta_api() {\n  ret void\n}\n' >"$tmp/beta.ll"
+    printf 'define hidden void @beta_api() {\n  ret void\n}\n' >"$tmp/hidden.ll"
+    for unit in empty beta hidden; do
+        "$llc" -filetype=obj -mtriple=x86_64-unknown-linux-gnu "$tmp/$unit.ll" -o "$tmp/$unit.o"
+    done
+    # `$1` the object, `$2` its soname or empty for a program, `$3` its code,
+    # then what it needs.
+    make_object() {
+        local path="$1" soname="$2" code="$3"
+        shift 3
+        mkdir -p "$(dirname "$path")"
+        "$lld" -flavor gnu -shared ${soname:+-soname "$soname"} "$tmp/$code.o" "$@" -o "$path"
+    }
+    make_object "$tmp/sysroot/libc.so" libc.so empty
+    make_object "$tmp/sysroot/libc++.so" libc++.so empty
+    make_object "$prefix/lib/libbeta.so.3" libbeta.so.3 beta "$tmp/sysroot/libc.so"
+    make_object "$prefix/lib/libalpha.so.1" libalpha.so.1 empty "$tmp/sysroot/libc.so"
+    make_object "$tmp/mystery/libmystery.so.1" libmystery.so.1 empty
+    mkdir -p "$tmp/out/delta" "$tmp/out/beta" "$prefix/share/delta"
+    echo good >"$tmp/out/delta/stamp"
+    echo good >"$tmp/out/beta/stamp"
+    printf '%s\n' bin/delta share/delta/README >"$tmp/out/delta/manifest"
+    printf '%s\n' lib/libbeta.so.3 >"$tmp/out/beta/manifest"
+    echo "not an object" >"$prefix/share/delta/README"
+    delta_needs() {
+        make_object "$prefix/bin/delta" "" empty "$@"
+    }
+    as_delta() {
+        sed -i "s/^license=.*/license=$1/" "$r/delta/recipe"
+    }
+    as_beta() {
+        sed -i "s/^license=.*/license=$1/" "$r/beta/recipe"
+    }
+
+    delta_needs "$prefix/lib/libalpha.so.1" "$tmp/sysroot/libc.so"
+    expect_ok "a GPL-2.0-only program linking an MIT library and the C library"
+    delta_needs "$tmp/sysroot/libc++.so"
+    expect_ok "a GPL-2.0-only program linking the C++ runtime"
+    delta_needs "$prefix/lib/libbeta.so.3"
+    expect_reject "a GPL-2.0-only program linking an Apache-2.0 library" \
+        "reaches libbeta.so.3 (beta, Apache-2.0)"
+    as_beta "MIT AND Apache-2.0"
+    expect_reject "a library under an AND with an incompatible side" "cannot be combined with"
+    as_beta "Apache-2.0 OR GPL-2.0-or-later"
+    expect_ok "a GPL-2.0-only program linking a library dual-licensed GPL-2.0-or-later"
+    as_beta "MIT AND BSD-3-Clause"
+    expect_ok "a GPL-2.0-only program linking a library under two compatible licences"
+    as_beta "(MIT OR Apache-2.0)"
+    expect_reject "a library under an expression the gate cannot read" "cannot be combined with"
+    as_beta "Apache-2.0"
+    as_delta "GPL-2.0-only WITH GCC-exception-2.0"
+    expect_ok "a program whose exception allows the combination"
+    as_delta "GPL-2.0-only WITH Autoconf-exception-2.0"
+    expect_reject "a program whose exception does not allow the combination" "cannot be combined with"
+    as_delta "GPL-2.0"
+    expect_reject "a program under the deprecated GPL-2.0 id" "cannot be combined with"
+    as_delta "GPL-2.0-only AND BSD-3-Clause"
+    expect_reject "a program partly GPL-2.0-only" "cannot be combined with"
+    as_delta "GPL-2.0-only OR MIT"
+    expect_ok "a program a distributor may take as MIT"
+    as_delta "GPL-2.0-only"
+    make_object "$prefix/lib/libalpha.so.1" libalpha.so.1 empty "$prefix/lib/libbeta.so.3"
+    delta_needs "$prefix/lib/libalpha.so.1"
+    expect_reject "a GPL-2.0-only program reaching an Apache-2.0 library through another" \
+        "bin/delta reaches libbeta.so.3 (beta, Apache-2.0)"
+    make_object "$prefix/bin/delta" "" beta "$tmp/sysroot/libc.so"
+    expect_reject "a GPL-2.0-only program carrying a static copy of an Apache-2.0 library" \
+        "bin/delta defines beta_api, which beta's libbeta.so.3 exports"
+    make_object "$prefix/bin/delta" "" hidden "$tmp/sysroot/libc.so"
+    expect_reject "a static copy linked with hidden visibility" \
+        "bin/delta defines beta_api, which beta's libbeta.so.3 exports"
+    make_object "$prefix/bin/delta" "" beta "$tmp/sysroot/libc.so" --strip-all
+    expect_reject "a GPL-2.0-only program with no symbol table to read" "carries no symbol table"
+    make_object "$prefix/lib/libalpha.so.1" libalpha.so.1 beta "$tmp/sysroot/libc.so"
+    delta_needs "$prefix/lib/libalpha.so.1"
+    expect_reject "a library a GPL-2.0-only program reaches carrying a static copy" \
+        "lib/libalpha.so.1 defines beta_api, which beta's libbeta.so.3 exports"
+    make_object "$prefix/lib/libalpha.so.1" libalpha.so.1 empty "$tmp/sysroot/libc.so"
+    delta_needs "$tmp/mystery/libmystery.so.1"
+    expect_reject "a GPL-2.0-only program linking a library nothing here provides" \
+        "neither a recipe nor the sysroot"
+    printf '\177ELF, and nothing else\n' >"$prefix/bin/delta"
+    expect_reject "a GPL-2.0-only object readelf cannot read" "bin/delta cannot be read"
+    rm "$prefix/lib/libalpha.so.1"
+    make_object "$tmp/alpha.so" libalpha.so.1 empty
+    delta_needs "$tmp/alpha.so"
+    expect_reject "a GPL-2.0-only program linking a library its recipe did not install" \
+        "alpha declares but has not installed"
     echo "$SELF: --self-test OK"
 }
 

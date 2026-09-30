@@ -30,8 +30,8 @@ MODE_LINK = S_IFLNK | 0o777  # utility names -> the multicall binary
 # Directories nothing writes into at build time, so they need their own record.
 # Mirrors build_fs_image.sh's ROOT_DIRS: the ext2 root does not auto-create
 # parents the way ramfs does, and both roots must agree about whether a path is
-# writable. `/devel` is the mount point `mount=LABEL=slopos-dev:/devel` needs.
-EMPTY_DIRS = (b"/etc", b"/var", b"/home", b"/devel")
+# writable. `/media` is where a boot's `mount=` puts a volume.
+EMPTY_DIRS = (b"/etc", b"/var", b"/home", b"/media")
 
 SLIBC_LICENSES = ("LICENSE-MIT", "LICENSE-APACHE", "NOTICE")
 

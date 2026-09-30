@@ -73,7 +73,7 @@ crate::utest!(
 );
 crate::utest!(name = utest_seat, bin = "/bin/seat_test");
 crate::utest!(name = utest_mount, bin = "/bin/mount_test");
-crate::utest!(name = utest_devdisk, bin = "/bin/devdisk_test");
+crate::utest!(name = utest_toolchain, bin = "/bin/toolchain_test");
 crate::utest!(name = utest_install, bin = "/bin/install_test");
 crate::utest!(
     name = utest_selfhost,
@@ -85,6 +85,7 @@ crate::utest!(name = utest_ip_e2e, bin = "/bin/ip_e2e_test");
 crate::utest!(name = utest_rlimit, bin = "/bin/rlimit_test");
 crate::utest!(name = utest_fifo, bin = "/bin/fifo_test");
 crate::utest!(name = utest_persist, bin = "/bin/persist_test");
+crate::utest!(name = utest_reboot_clone, bin = "/bin/reboot_clone_test");
 
 // Nothing below is ordered by its position in this file. The userland phase
 // walks `ktesting::registry::registry_sorted()`, which orders by

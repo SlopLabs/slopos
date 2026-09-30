@@ -231,8 +231,8 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         // RAM at boot; per process, `RLIMIT_AS` already bounds what one can ask.
         ResourceKind::CommitPages => NO_LIMIT_SENTINEL,
         // 256 MiB of blocks at 4 KiB, against a measured worst of 22989: the
-        // linker writing the 94 MB tests kernel on the dev disk. Bounds a
-        // process's *outstanding* allocations, not its footprint: ext2 records
+        // linker writing the 94 MB tests kernel. Bounds a process's
+        // *outstanding* allocations, not its footprint: ext2 records
         // no owner, so the charge is released when the process is retired and
         // a file it leaves behind costs a later one nothing.
         ResourceKind::DiskBlocks => 65536,

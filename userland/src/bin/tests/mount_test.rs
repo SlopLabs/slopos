@@ -1,5 +1,6 @@
 use slopos_userland as _;
 
+use slopos_slibc::test_harness::note;
 use slopos_userland::syscall::error::SyscallError;
 use slopos_userland::syscall::fs as fs_syscall;
 use std::ffi::c_char;
@@ -222,6 +223,74 @@ fn label_source_resolution() -> bool {
     ok
 }
 
+/// The harness's labelled volume, which the test command line's
+/// `mount=LABEL=slopos-media:/media` mounts at boot.
+const MEDIA: &str = "/media";
+const MEDIA_C: &[u8] = b"/media\0";
+const MEDIA_LABEL: &[u8] = b"LABEL=slopos-media";
+const MEDIA_MARKER: &str = "/media/SLOPOS-MEDIA";
+
+fn media_mounted() -> bool {
+    fs::read_to_string(MEDIA_MARKER).is_ok_and(|text| text.starts_with("slopos-media"))
+}
+
+/// The boot found the volume by its label and mounted it writable.
+fn the_boot_mounts_a_volume_by_label() -> bool {
+    if !media_mounted() {
+        note(&format!(
+            "{MEDIA_MARKER} is not there: the boot's mount= did not mount the volume"
+        ));
+        return false;
+    }
+    let probe = format!("{MEDIA}/mount_test_probe");
+    let wrote =
+        fs::write(&probe, b"probe").is_ok() && fs::read(&probe).is_ok_and(|b| b == b"probe");
+    let _ = fs::remove_file(&probe);
+    if !wrote {
+        note(&format!("{MEDIA} took no write"));
+    }
+    wrote
+}
+
+/// The boot's mount holds the device's exclusive write claim, so a second
+/// writable mount is refused, and `umount2` gives it back, so the volume
+/// mounts again by label: a leaked claim answers `EBUSY` forever. Leaves
+/// `/media` mounted.
+fn a_volume_remounts_by_label_after_umount() -> bool {
+    let _ = fs::create_dir(MOUNT_POINT);
+    let second = fs_syscall::mount(MEDIA_LABEL, MOUNT_POINT.as_bytes(), b"ext2", 0);
+    let _ = fs::remove_dir(MOUNT_POINT);
+    match second {
+        Err(e) if e == SyscallError::EBUSY => {}
+        Err(e) => {
+            note(&format!("a second writable mount gave {e}, want EBUSY"));
+            return false;
+        }
+        Ok(()) => {
+            umount_mount_point();
+            note("the volume mounted writable twice: the boot's mount holds no claim");
+            return false;
+        }
+    }
+    if let Err(e) = fs_syscall::umount2(MEDIA_C.as_ptr() as *const c_char, 0) {
+        note(&format!("umount of {MEDIA} failed: {e}"));
+        return false;
+    }
+    if media_mounted() {
+        note(&format!("{MEDIA} still shows the volume after its umount"));
+        return false;
+    }
+    if let Err(e) = fs_syscall::mount(MEDIA_LABEL, MEDIA.as_bytes(), b"ext2", 0) {
+        note(&format!("re-mount by label failed: {e}"));
+        return false;
+    }
+    if !media_mounted() {
+        note(&format!("re-mounted without {MEDIA_MARKER}"));
+        return false;
+    }
+    true
+}
+
 /// `/dev/shm` is the ramfs boot mounts for `shm_open`: a file there can be
 /// created, sized, read back and unlinked.
 fn dev_shm_is_writable() -> bool {
@@ -267,6 +336,14 @@ fn main() {
         ),
         ("mount_over_bin_refused", mount_over_bin_refused),
         ("label_source_resolution", label_source_resolution),
+        (
+            "the_boot_mounts_a_volume_by_label",
+            the_boot_mounts_a_volume_by_label,
+        ),
+        (
+            "a_volume_remounts_by_label_after_umount",
+            a_volume_remounts_by_label_after_umount,
+        ),
         ("dev_shm_is_writable", dev_shm_is_writable),
     ]);
 }

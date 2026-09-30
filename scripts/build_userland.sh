@@ -207,7 +207,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin spawn_privilege_test \
         --bin seat_test \
         --bin mount_test \
-        --bin devdisk_test \
+        --bin toolchain_test \
         --bin install_test \
         --bin selfhost_test \
         --bin shell_script_test \
@@ -221,6 +221,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin dns_concurrent_test \
         --bin transfer_test \
         --bin persist_test \
+        --bin reboot_clone_test \
         --bin libc_abi_test \
         --features testbins \
         --no-default-features \
@@ -337,8 +338,8 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/mount_test" ]; then
         cp "$RELEASE_DIR/mount_test" "$BUILD_DIR/mount_test.elf"
     fi
-    if [ -f "$RELEASE_DIR/devdisk_test" ]; then
-        cp "$RELEASE_DIR/devdisk_test" "$BUILD_DIR/devdisk_test.elf"
+    if [ -f "$RELEASE_DIR/toolchain_test" ]; then
+        cp "$RELEASE_DIR/toolchain_test" "$BUILD_DIR/toolchain_test.elf"
     fi
     if [ -f "$RELEASE_DIR/install_test" ]; then
         cp "$RELEASE_DIR/install_test" "$BUILD_DIR/install_test.elf"
@@ -381,6 +382,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/persist_test" ]; then
         cp "$RELEASE_DIR/persist_test" "$BUILD_DIR/persist_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/reboot_clone_test" ]; then
+        cp "$RELEASE_DIR/reboot_clone_test" "$BUILD_DIR/reboot_clone_test.elf"
     fi
     if [ -f "$RELEASE_DIR/libc_abi_test" ]; then
         cp "$RELEASE_DIR/libc_abi_test" "$BUILD_DIR/libc_abi_test.elf"

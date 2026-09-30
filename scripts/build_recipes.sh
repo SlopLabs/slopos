@@ -16,6 +16,8 @@ set -euo pipefail
 # comments ignored:
 #
 #   version, url, sha256, license   the tarball and what it is
+#   license_file                    each licence text in the tarball, installed
+#                                   as share/licenses/<name>/<its path there>
 #   template                        `cmake`, `meson` or `openssl`
 #   depends                         recipes built first, space-separated
 #   soname                          each shared library it must install
@@ -103,12 +105,15 @@ recipe_values() {
 }
 
 installed() {
-    local name="$1" soname program
+    local name="$1" soname program text
     for soname in $(recipe_values "$name" soname); do
         [ -e "$PREFIX/lib/$soname" ] || return 1
     done
     for program in $(recipe_values "$name" program); do
         [ -e "$PREFIX/$program" ] || return 1
+    done
+    for text in $(recipe_values "$name" license_file); do
+        [ -e "$PREFIX/share/licenses/$name/$text" ] || return 1
     done
 }
 
@@ -158,9 +163,7 @@ fi
 CXX_TOOLS="$("$SCRIPT_DIR/cxx_host_tools.sh")"
 eval "$CXX_TOOLS"
 . "$SCRIPT_DIR/lib/rustc_build_settings.sh"
-. "$SCRIPT_DIR/lib/toolchain_pin.sh"
-# Where build_devdisk.sh stages the toolchain, as the guest mounts it.
-GUEST_PREFIX="/devel/src/slopos/$TP_SYSROOT_REL"
+GUEST_PREFIX=/usr/local
 eval "$(rbs_llvm_archivers "$LLVM_AR")" || die "no llvm-ranlib beside $LLVM_AR"
 LLVM_AR="$RBS_AR"
 LLVM_RANLIB="$RBS_RANLIB"
@@ -381,6 +384,11 @@ build_recipe() {
     }
 
     [ -d "$work/dest$PREFIX" ] || die "$name: the install put nothing under $PREFIX"
+    local text
+    for text in $(recipe_values "$name" license_file); do
+        [ -f "$work/src/$text" ] || die "$name: the tarball carries no licence text $text"
+        install -D -m 0644 "$work/src/$text" "$work/dest$PREFIX/share/licenses/$name/$text"
+    done
     (cd "$work/dest$PREFIX" && find . ! -type d -print | sed 's|^\./||' | LC_ALL=C sort) >"$work/manifest"
     cp -a "$work/dest$PREFIX/." "$PREFIX/"
     installed "$name" ||

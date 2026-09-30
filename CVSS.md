@@ -2,6 +2,29 @@
 
 **No finding is open.**
 
+Swept 2026-09-30: the tools the root now carries and what they reached —
+`socket(2)`'s type flags and argument checks, `accept4(2)`, a new socket
+description's blocking mode, libcurl on Mbed TLS, the recipe licence
+closure, the default search path, and the host's installer of trees onto the
+guest's disk (`scripts/fs_tree.py`, `build_fs_image.sh`'s floor and log,
+`gen_verity.py`'s taint). One **pre-existing** defect, below the bar:
+`socket` truncated its type argument to 16 bits, so `SOCK_CLOEXEC` was
+dropped and a descriptor a C program asked to be close-on-exec reached every
+program it executed. The process that created it chose what to run, and the
+Rust standard library sets the flag with `fcntl`, so no privilege boundary
+was crossed. Fixed with the flags, along with slibc's `accept4`, whose
+`accept`-then-`fcntl` left the same window open under a concurrent `exec`.
+The installer reads a disk a guest can write behind its filesystem's back,
+since the guest builds and boots kernels of its own, so it puts nothing it
+read from the image into a request, binds each directory listing to the
+inode its parent names, and refuses a listing it cannot read; and the seal
+measures what the guest wrote against the host's own record of what it
+attested, never against the trailer on the disk. The holes four reviews found
+in both were closed before they landed. Residual, below the bar:
+whenever the guest leaves the root under its floor, the host runs `e2fsck
+-fy` and `resize2fs` over metadata the guest wrote, as it already did for a
+larger `PERSIST_IMAGE_SIZE`.
+
 Fixed 2026-09-27, both **pre-existing**, reachable by any user and availability
 defects at most, so neither is an entry. A dead task's post-switch teardown
 runs preemptible in its successor, and a switch that landed inside it resumed

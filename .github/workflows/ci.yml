@@ -174,11 +174,11 @@ jobs:
       - name: Two-boot persistence check
         run: just test-persist
 
-      # One boot with the 4 GiB dev disk on virtio-disk4. Cannot ride
-      # the capture above: that run attaches no dev disk, and the utest
-      # passes there by reporting there is none.
-      - name: Dev-disk check
-        run: just test-devdisk
+      # One boot of the self-hosting root, with no toolchain: the seeded
+      # clone, its vendored crates and the floor the root is grown to. Cannot
+      # ride the capture above, whose root carries no clone.
+      - name: Self-hosting root check
+        run: just test-toolchain
 
       - name: Save the Rust compiler cache
         if: always()
