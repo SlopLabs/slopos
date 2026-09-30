@@ -595,10 +595,25 @@ fn test_posix_spawn_from_a_large_process_needs_no_second_commit() -> bool {
     }
 }
 
+/// The committed total once it stops moving: an earlier case's child may still
+/// be tearing its address space down.
+fn settled_commit() -> u32 {
+    let started = Instant::now();
+    let mut last = sys_info().committed_pages;
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let now = sys_info().committed_pages;
+        if now == last || started.elapsed() > Duration::from_secs(5) {
+            return now;
+        }
+        last = now;
+    }
+}
+
 /// A child's promise comes back when its address space is torn down, on the
 /// CPU it left and not necessarily before `wait` returns here.
 fn test_commit_is_returned_when_a_process_exits() -> bool {
-    let before = sys_info().committed_pages;
+    let before = settled_commit();
     let Ok(status) = Command::new(SELF_PATH).arg("hold").status() else {
         return false;
     };
