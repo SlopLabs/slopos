@@ -253,6 +253,13 @@ fn layout(
             read(&path)?,
         );
     }
+    for (name, path) in listing(&assets.join("completions"), |_| true)? {
+        add(
+            format!("/usr/share/shell/completions/{name}"),
+            MODE_DATA,
+            read(&path)?,
+        );
+    }
     if !extras.build_tag.is_empty() {
         add(
             "/usr/share/slopos/build-tag".into(),

@@ -1,0 +1,2 @@
+complete -c rmdir -P '**' -f -A directory
+complete -c rmdir -s p -d 'Remove each parent that is left empty'

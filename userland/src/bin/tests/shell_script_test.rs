@@ -5,9 +5,10 @@
 //! script's output and nothing else — no banner, no prompt, no SGR — and every
 //! line must run exactly once, which a reader that over-reads cannot manage.
 //!
-//! One case instead drives the shell on a PTY, because the continuation prompt
-//! only exists on the interactive path and the shape of that path (raw mode,
-//! echo, a banner) makes exact-output matching impossible there.
+//! Two cases instead drive the shell on a PTY, because the continuation
+//! prompt and Tab completion only exist on the interactive path, and the
+//! shape of that path (raw mode, echo, a banner) makes exact-output matching
+//! impossible there.
 
 // Links the lib crate's `_start` ELF entry point into the binary; without it
 // the linker emits entry 0x0 and `do_exec` rejects the ELF.
@@ -784,28 +785,23 @@ fn trap_interrupts_wait_for_every_child() -> bool {
 /// Bounded so a regressed shell fails rather than wedging the harness.
 const PTY_IDLE_READS: usize = 20_000;
 
-/// Type an unfinished `if` at an interactive shell, finish it on the next
-/// lines, then run an external command.
-///
-/// `spanned` proves the continuation — `if true` alone would have failed and
-/// `then echo spanned` alone is a syntax error — the PS2 prompt is what tells
-/// the user it is waiting, and the absence of a stop report proves the forked
-/// child could claim the terminal.
+/// Type `script` at an interactive shell on a PTY and collect everything the
+/// terminal shows, until the shell has exited having printed `done`.
 ///
 /// The shell is spawned from a child that first becomes the slave's session
-/// and foreground group, as `/bin/terminal` does. That topology *is* the test:
-/// a shell taking the terminal for itself instead of joining the session that
+/// and foreground group, as `/bin/terminal` does. That topology matters: a
+/// shell taking the terminal for itself instead of joining the session that
 /// owns it leaves every command it forks in a background group.
-fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
+fn interactive_session(script: &[u8], done: &[u8]) -> Option<Vec<u8>> {
     let Ok((master, _slave_num)) = process::openpty() else {
         eprintln!("shell_script_test: openpty failed");
-        return false;
+        return None;
     };
     let master = master.into_raw();
     let Ok(slave) = fs::ioctl_tiocgptpeer(master) else {
         eprintln!("shell_script_test: tiocgptpeer failed");
         let _ = fs::close_fd_raw(master);
-        return false;
+        return None;
     };
     let slave = slave.into_raw();
 
@@ -814,7 +810,7 @@ fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
         eprintln!("shell_script_test: fork for the tty owner failed");
         let _ = fs::close_fd_raw(master);
         let _ = fs::close_fd_raw(slave);
-        return false;
+        return None;
     }
     if tid == 0 {
         let _ = fs::close_fd_raw(master);
@@ -849,7 +845,6 @@ fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
     let _ = fs::close_fd_raw(slave);
 
     let _ = fs::set_fd_nonblocking(master);
-    let script: &[u8] = b"if true\nthen echo spanned\nfi\n/bin/echo external\nexit\n";
     let mut fed = 0usize;
     let mut seen = Vec::new();
     let mut idle = 0usize;
@@ -874,7 +869,7 @@ fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
             Err(SyscallError::EAGAIN) | Ok(_) => {}
             Err(_) => break,
         }
-        if contains(&seen, b"external") && process::wait_exit_code_nohang(tid as u32).is_some() {
+        if contains(&seen, done) && process::wait_exit_code_nohang(tid as u32).is_some() {
             break;
         }
         if progress {
@@ -887,16 +882,37 @@ fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
 
     let _ = process::kill(tid as u32, slopos_abi::signal::SIGKILL);
     let _ = fs::close_fd_raw(master);
+    Some(seen)
+}
 
-    for marker in [b"spanned".as_slice(), b"external"] {
-        if !contains(&seen, marker) {
+fn saw_every(name: &str, seen: &[u8], markers: &[&[u8]]) -> bool {
+    for marker in markers {
+        if !contains(seen, marker) {
             eprintln!(
-                "shell_script_test: no {:?} in the interactive output; saw {:?}",
+                "shell_script_test: {name}: no {:?} in the interactive output; saw {:?}",
                 String::from_utf8_lossy(marker),
-                String::from_utf8_lossy(&seen)
+                String::from_utf8_lossy(seen)
             );
             return false;
         }
+    }
+    true
+}
+
+/// Type an unfinished `if` at an interactive shell, finish it on the next
+/// lines, then run an external command.
+///
+/// `spanned` proves the continuation — `if true` alone would have failed and
+/// `then echo spanned` alone is a syntax error — the PS2 prompt is what tells
+/// the user it is waiting, and the absence of a stop report proves the forked
+/// child could claim the terminal.
+fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
+    let script: &[u8] = b"if true\nthen echo spanned\nfi\n/bin/echo external\nexit\n";
+    let Some(seen) = interactive_session(script, b"external") else {
+        return false;
+    };
+    if !saw_every("continuation", &seen, &[b"spanned", b"external"]) {
+        return false;
     }
     // Decisive: the command's echo and the job-table line for a stopped one
     // both contain `external`, so only the missing stop report says it ran.
@@ -912,6 +928,79 @@ fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
         return false;
     }
     true
+}
+
+/// Every marker is printed by the completed command and appears in nothing
+/// typed, so seeing one proves what Tab inserted. `status<1>` proves a rule's
+/// `$(...)` left `$?` alone.
+fn tab_completes_commands_and_arguments() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let stage = |path: &str, body: &str, mode: u32| {
+        std::fs::write(path, body).is_ok()
+            && std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).is_ok()
+    };
+    let tool = "#!/bin/sh\necho \"ran<$*>\"\n";
+    let _ = std::fs::create_dir_all("/tmp/tabcomp/bin");
+    let _ = std::fs::create_dir_all("/tmp/tabcomp/rules");
+    if !stage("/tmp/tabcomp/bin/zzqtool", tool, 0o755)
+        || !stage("/tmp/tabcomp/bin/zzqauto", tool, 0o755)
+        || !stage("/tmp/tabcomp/with space", "", 0o644)
+        || !stage(
+            "/tmp/tabcomp/rules/zzqauto",
+            "complete -c zzqauto -f -a 'delta-four'\n",
+            0o644,
+        )
+    {
+        eprintln!("shell_script_test: could not stage the completion fixtures");
+        return false;
+    }
+    let script: &[u8] = b"PATH=$PATH:/tmp/tabcomp/bin\n\
+        zzq\tt\t\n\
+        echo x | zzqau\thi\n\
+        complete -c zzqtool -a 'alpha-one beta-two'\n\
+        complete -c zzqtool -P deploy -f -a '$(echo gamma-three)'\n\
+        complete -c zzqtool -l verbose-mode -d 'Talk more'\n\
+        zzqtool al\t\n\
+        zzqtool --verb\t\n\
+        zzqtool /tmp/tabcomp/wi\t\n\
+        false\n\
+        zzqtool deploy ga\t\"status<$?>\"\n\
+        SHELL_COMPLETION_PATH=/tmp/tabcomp/rules\n\
+        zzqauto de\t\n\
+        exit\n";
+    let seen = interactive_session(script, b"ran<delta-four>");
+    let _ = std::fs::remove_dir_all("/tmp/tabcomp");
+    let Some(seen) = seen else {
+        return false;
+    };
+    saw_every(
+        "tab completion",
+        &seen,
+        &[
+            b"zzqauto  zzqtool",
+            b"ran<>",
+            b"ran<hi>",
+            b"ran<alpha-one>",
+            b"ran<--verbose-mode>",
+            b"ran</tmp/tabcomp/with space>",
+            b"ran<deploy gamma-three status<1>>",
+            b"ran<delta-four>",
+        ],
+    )
+}
+
+/// `split`: the variable in cargo's file split into its `-P` alternatives.
+fn shipped_completion_rules_load() -> bool {
+    expect_output(
+        "shipped_completion_rules_load",
+        b"for f in /usr/share/shell/completions/*; do\n\
+            err=$(. \"$f\" 2>&1)\n\
+            [ -z \"$err\" ] || echo \"$f: $err\"\n\
+          done\n\
+          . /usr/share/shell/completions/cargo\n\
+          complete -c cargo | grep -q -e '-P build -P b .*-l release' && echo split\n",
+        b"split\n",
+    )
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -1017,6 +1106,14 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_interactive_prompt_continues_an_unfinished_command",
         the_interactive_prompt_continues_an_unfinished_command,
+    ),
+    (
+        "tab_completes_commands_and_arguments",
+        tab_completes_commands_and_arguments,
+    ),
+    (
+        "shipped_completion_rules_load",
+        shipped_completion_rules_load,
     ),
 ];
 

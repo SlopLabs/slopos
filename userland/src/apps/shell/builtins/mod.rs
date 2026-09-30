@@ -427,6 +427,14 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         category: System,
         func: control::cmd_type,
     },
+    BuiltinEntry {
+        name: "complete",
+        desc: "Declare how arguments complete",
+        usage: "complete -c cmd [-P path] [-s c] [-l name] [-r] [-f] [-x] [-a words] [-A action] [-d desc]",
+        detail: "Add a Tab-completion rule for cmd's arguments. -a is\nshell text expanded on Tab, so $(...) lists what is\nthere now; -A is file, directory, command or builtin.\n-P limits the rule to after those positional words\n(* any word, a final ** any number); -s/-l make it an\noption, -r one taking a value; -f offers no files.\nWith only -c, print cmd's rules; -e -c cmd erases\nthem. Rules for cmd are read from a file named cmd\nin $SHELL_COMPLETION_PATH on first use.",
+        category: Utility,
+        func: control::cmd_complete,
+    },
 ];
 
 pub fn find_builtin(name: &[u8]) -> Option<&'static BuiltinEntry> {

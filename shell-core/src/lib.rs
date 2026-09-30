@@ -17,6 +17,7 @@ extern crate alloc;
 
 pub mod arith;
 pub mod ast;
+pub mod complete;
 pub mod fields;
 pub mod lexer;
 pub mod param;

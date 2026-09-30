@@ -1,0 +1,3 @@
+complete -c keymap -f -a '$(keymap list 2>/dev/null | cut -c3-)'
+complete -c keymap -f -a list -d 'List the available layouts'
+complete -c keymap -s l -l list -d 'List the available layouts'

@@ -14,7 +14,7 @@ use slopos_abi::syscall::{LocalFlags, POLLIN};
 
 use super::buffers;
 use super::completion;
-use super::display::shell_write;
+use super::display::{COLOR_COMMENT_GRAY, shell_write, shell_write_idx};
 use super::history;
 
 use std::collections::VecDeque;
@@ -53,8 +53,9 @@ const STDIN_FD: i32 = 0;
 /// or stolen from the program about to run.
 const READ_CHUNK: usize = 1;
 
-/// Default editor width when `tiocgwinsz(0)` fails (no terminal wired).
+/// Default editor size when `tiocgwinsz(0)` fails (no terminal wired).
 const DEFAULT_COLS: usize = 80;
+const DEFAULT_ROWS: usize = 24;
 
 /// Window for telling a bare ESC from the start of a CSI/SS3 sequence: a real
 /// sequence's bytes arrive back-to-back, a lone ESC keypress has no follow-up.
@@ -698,35 +699,30 @@ async fn input_loop(
                 }
 
                 0x09 => {
-                    let cwd = super::cwd_bytes();
-                    let comp = buffers::with_line_buf(|buf| {
-                        completion::try_complete(buf, len, cursor_pos, &cwd)
-                    });
+                    let before = buffers::with_line_buf(|buf| buf[..cursor_pos.min(len)].to_vec());
+                    // Leave the prompt and the line in view below the listing.
+                    let max_lines = query_rows().saturating_sub(2);
+                    let outcome = completion::complete(&before, cols.max(1), max_lines);
 
-                    if comp.show_matches {
+                    if let Some(listing) = &outcome.listing {
                         let end_row = row_of_offset(prompt.len() + cells_upto(len), cols.max(1));
                         emit_cursor_move(end_row.saturating_sub(cur_row), b'B');
                         shell_write(b"\n");
-                        shell_write(&comp.matches_buf[..comp.matches_len]);
-                        shell_write(b"\n");
+                        show_listing(listing);
                         cur_row = 0;
-
-                        if comp.insertion_len > 0 {
-                            insert_text(
-                                &comp.insertion,
-                                comp.insertion_len,
-                                &mut len,
-                                &mut cursor_pos,
-                            );
-                        }
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
-                    } else if comp.insertion_len > 0 {
+                    }
+                    // A completion that does not fit is not inserted in part.
+                    let room = buffers::with_line_buf(|buf| buf.len()).saturating_sub(len + 1);
+                    let inserted = !outcome.insert.is_empty() && outcome.insert.len() <= room;
+                    if inserted {
                         insert_text(
-                            &comp.insertion,
-                            comp.insertion_len,
+                            &outcome.insert,
+                            outcome.insert.len(),
                             &mut len,
                             &mut cursor_pos,
                         );
+                    }
+                    if inserted || outcome.listing.is_some() {
                         redraw(prompt, len, cursor_pos, cols, &mut cur_row);
                     }
                 }
@@ -792,6 +788,27 @@ fn query_cols() -> usize {
     match fs::tiocgwinsz(STDIN_FD) {
         Ok(ws) if ws.ws_col != 0 => ws.ws_col as usize,
         _ => DEFAULT_COLS,
+    }
+}
+
+fn query_rows() -> usize {
+    match fs::tiocgwinsz(STDIN_FD) {
+        Ok(ws) if ws.ws_row != 0 => ws.ws_row as usize,
+        _ => DEFAULT_ROWS,
+    }
+}
+
+fn show_listing(listing: &slopos_shell_core::complete::Listing) {
+    for line in &listing.lines {
+        shell_write(&line.text);
+        if !line.note.is_empty() {
+            shell_write_idx(&line.note, COLOR_COMMENT_GRAY);
+        }
+        shell_write(b"\n");
+    }
+    if listing.hidden > 0 {
+        let more = format!("... and {} more\n", listing.hidden);
+        shell_write_idx(more.as_bytes(), COLOR_COMMENT_GRAY);
     }
 }
 
@@ -1009,7 +1026,6 @@ fn row_of_offset(offset: usize, cols: usize) -> usize {
 /// everything below, reprint prompt + buffer, then reposition the cursor.
 /// `cur_row` is the row within the region the previous redraw left it on.
 fn redraw(prompt: &[u8], len: usize, cursor_pos: usize, cols: usize, cur_row: &mut usize) {
-    use super::display::shell_write_idx;
     let cols = cols.max(1);
 
     // Column 0 of the region's first row, then wipe every rendered row below.

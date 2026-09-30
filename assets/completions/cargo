@@ -1,0 +1,46 @@
+# Subcommands come from `cargo --list`, so aliases and cargo-* commands too.
+
+complete -c cargo -f -a '$(cargo --list 2>/dev/null | cut -d" " -f5)'
+complete -c cargo -P help -f -a '$(cargo --list 2>/dev/null | cut -d" " -f5)'
+
+complete -c cargo -s V -l version -d 'Print version info'
+complete -c cargo -l list -d 'List installed commands'
+complete -c cargo -l explain -x -d 'Explain an error code'
+complete -c cargo -s v -l verbose -d 'Use verbose output'
+complete -c cargo -s q -l quiet -d 'Print no cargo log messages'
+complete -c cargo -l color -x -a 'auto always never' -d 'When to color output'
+complete -c cargo -s C -x -A directory -d 'Change to this directory before doing anything'
+complete -c cargo -l locked -d 'Refuse to change Cargo.lock'
+complete -c cargo -l offline -d 'Run without the network'
+complete -c cargo -l frozen -d 'As --locked --offline'
+complete -c cargo -l config -x -d 'Override a configuration value'
+complete -c cargo -s Z -x -d 'Unstable nightly-only flag'
+complete -c cargo -s h -l help -d 'Print help'
+
+cargo_compiles='-P build -P b -P check -P c -P test -P t -P run -P r -P bench -P doc -P d
+    -P clippy -P fix -P rustc -P rustdoc'
+complete -c cargo $cargo_compiles -s r -l release -d 'Build with the release profile'
+complete -c cargo $cargo_compiles -l profile -x -d 'Build with this profile'
+complete -c cargo $cargo_compiles -s p -l package -x -d 'Build only this package'
+complete -c cargo $cargo_compiles -l workspace -d 'Build every package in the workspace'
+complete -c cargo $cargo_compiles -l exclude -x -d 'Leave this package out'
+complete -c cargo $cargo_compiles -l lib -d 'Build the library'
+complete -c cargo $cargo_compiles -l bin -x -d 'Build only this binary'
+complete -c cargo $cargo_compiles -l bins -d 'Build every binary'
+complete -c cargo $cargo_compiles -l example -x -d 'Build only this example'
+complete -c cargo $cargo_compiles -l examples -d 'Build every example'
+complete -c cargo $cargo_compiles -l tests -d 'Build every test target'
+complete -c cargo $cargo_compiles -l all-targets -d 'Build every target'
+complete -c cargo $cargo_compiles -s F -l features -x -d 'Activate these features'
+complete -c cargo $cargo_compiles -l all-features -d 'Activate every feature'
+complete -c cargo $cargo_compiles -l no-default-features -d 'Leave the default feature off'
+complete -c cargo $cargo_compiles -l target -r -a '$(rustc --print target-list 2>/dev/null)' \
+    -d 'Build for this target triple or target file'
+complete -c cargo $cargo_compiles -l target-dir -x -A directory -d 'Put build artifacts here'
+complete -c cargo $cargo_compiles -l manifest-path -r -d 'Path to Cargo.toml'
+complete -c cargo $cargo_compiles -s j -l jobs -x -d 'Run this many jobs in parallel'
+complete -c cargo $cargo_compiles -l message-format -x \
+    -a 'human short json json-diagnostic-short json-diagnostic-rendered-ansi json-render-diagnostics' \
+    -d 'How to print diagnostics'
+complete -c cargo $cargo_compiles -l timings -d 'Report how long each unit took'
+unset cargo_compiles

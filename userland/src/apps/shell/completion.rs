@@ -1,430 +1,477 @@
-use std::fs;
+//! Tab completion's candidates: the command tables, every directory on
+//! `PATH`, the filesystem, and the rules `complete` declares. A command's
+//! rules are read on the first completion of one of its arguments, from a
+//! file named after it in a `SHELL_COMPLETION_PATH` directory, so a program
+//! installed under `/usr/local` can bring its own.
+
+use std::sync::{Mutex, MutexGuard};
+
+use slopos_abi::fs::UserFsStat;
+use slopos_shell_core::ast::Word;
+use slopos_shell_core::complete::spec::{self, Action, Query, Request, Rule, Specs};
+use slopos_shell_core::complete::{self, Candidate, Listing, Position, Suffix};
+use slopos_shell_core::lexer::{self, Tok};
 
 use crate::program_registry;
-use slopos_abi::fs::USER_NAME_MAX;
+use crate::syscall::fs;
 
 use super::builtins::BUILTINS;
-use super::parser::is_space;
+use super::{env, expand, funcs, script};
 
-pub struct CompletionResult {
-    pub insertion: [u8; USER_NAME_MAX + 1],
-    pub insertion_len: usize,
-    pub show_matches: bool,
-    pub matches_buf: [u8; 512],
-    pub matches_len: usize,
+const DEFAULT_COMPLETION_PATH: &[u8] =
+    b"/usr/local/share/shell/completions:/usr/share/shell/completions";
+
+/// Compiled in: only the shell knows its builtins' arguments.
+const BUILTIN_RULES: &[&[&[u8]]] = &[
+    &[b"-c", b"cd", b"-f", b"-A", b"directory"],
+    &[b"-c", b"help", b"-f", b"-A", b"builtin"],
+    &[
+        b"-c", b"command", b"-c", b"exec", b"-c", b"time", b"-f", b"-A", b"command",
+    ],
+    &[b"-c", b"type", b"-P", b"**", b"-f", b"-A", b"command"],
+    &[
+        b"-c",
+        b"command",
+        b"-s",
+        b"v",
+        b"-d",
+        b"Print what the name resolves to",
+    ],
+    &[
+        b"-c",
+        b"command",
+        b"-s",
+        b"V",
+        b"-d",
+        b"Describe what the name resolves to",
+    ],
+    &[
+        b"-c",
+        b"command",
+        b"-s",
+        b"p",
+        b"-d",
+        b"Search the default PATH",
+    ],
+    &[b"-c", b"complete", b"-f"],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"c",
+        b"-l",
+        b"command",
+        b"-x",
+        b"-A",
+        b"command",
+        b"-d",
+        b"The command the rule is for",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"P",
+        b"-l",
+        b"after",
+        b"-x",
+        b"-d",
+        b"Positional words that must come first",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"s",
+        b"-l",
+        b"short-option",
+        b"-x",
+        b"-d",
+        b"A one-letter option",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"l",
+        b"-l",
+        b"long-option",
+        b"-x",
+        b"-d",
+        b"A long option",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"r",
+        b"-l",
+        b"require-parameter",
+        b"-d",
+        b"The option takes a value",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"f",
+        b"-l",
+        b"no-files",
+        b"-d",
+        b"Offer no file names",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"x",
+        b"-l",
+        b"exclusive",
+        b"-d",
+        b"As -r -f",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"a",
+        b"-l",
+        b"arguments",
+        b"-x",
+        b"-d",
+        b"Candidate words, expanded on Tab",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"A",
+        b"-l",
+        b"action",
+        b"-x",
+        b"-a",
+        b"file directory command builtin",
+        b"-d",
+        b"A kind of word",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"d",
+        b"-l",
+        b"description",
+        b"-x",
+        b"-d",
+        b"Shown beside the candidates",
+    ],
+    &[
+        b"-c",
+        b"complete",
+        b"-s",
+        b"e",
+        b"-l",
+        b"erase",
+        b"-d",
+        b"Forget the command's rules",
+    ],
+];
+
+struct Registry {
+    specs: Specs,
+    /// Read once even when they declared nothing.
+    sourced: Vec<Vec<u8>>,
+    seeded: bool,
 }
 
-impl CompletionResult {
-    fn empty() -> Self {
-        Self {
-            insertion: [0; USER_NAME_MAX + 1],
-            insertion_len: 0,
-            show_matches: false,
-            matches_buf: [0; 512],
-            matches_len: 0,
-        }
-    }
-}
+static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
+    specs: Specs::new(),
+    sourced: Vec::new(),
+    seeded: false,
+});
 
-pub fn try_complete(input: &[u8], len: usize, cursor_pos: usize, cwd: &[u8]) -> CompletionResult {
-    let mut result = CompletionResult::empty();
-    let effective_pos = cursor_pos.min(len);
-
-    let mut word_start = effective_pos;
-    while word_start > 0 && !is_space(input[word_start - 1]) {
-        word_start -= 1;
-    }
-
-    let prefix = &input[word_start..effective_pos];
-    let prefix_len = effective_pos - word_start;
-
-    if prefix_len == 0 {
-        return result;
-    }
-
-    let is_first_token = {
-        let mut all_space = true;
-        for i in 0..word_start {
-            if !is_space(input[i]) {
-                all_space = false;
-                break;
+fn registry() -> MutexGuard<'static, Registry> {
+    let mut registry = REGISTRY.lock().unwrap();
+    if !registry.seeded {
+        registry.seeded = true;
+        for args in BUILTIN_RULES {
+            match spec::parse(args) {
+                Ok(Request::Add(rules)) => registry.specs.add(rules),
+                _ => unreachable!("a builtin completion rule that does not parse"),
             }
         }
-        all_space
+    }
+    registry
+}
+
+pub fn add_rules(rules: Vec<Rule>) {
+    registry().specs.add(rules);
+}
+
+pub fn erase_rules(commands: &[Vec<u8>]) {
+    let mut registry = registry();
+    for command in commands {
+        registry.specs.erase(command);
+    }
+}
+
+/// Empty `commands`: every rule.
+pub fn render_rules(commands: &[Vec<u8>]) -> Vec<u8> {
+    let registry = registry();
+    let mut out = Vec::new();
+    let wanted = |rule: &&Rule| commands.is_empty() || commands.contains(&rule.command);
+    for rule in registry.specs.rules().iter().filter(wanted) {
+        out.extend_from_slice(&spec::render(rule));
+        out.push(b'\n');
+    }
+    out
+}
+
+pub struct Outcome {
+    pub insert: Vec<u8>,
+    /// Set when more than one candidate is left.
+    pub listing: Option<Listing>,
+}
+
+/// `line` is the text before the cursor.
+pub fn complete(line: &[u8], width: usize, max_lines: usize) -> Outcome {
+    let ctx = complete::analyze(line);
+    // A rule's `$(...)` runs commands; completing is not running one.
+    let status = super::last_exit_code();
+    let mut found = Vec::new();
+    match ctx.position {
+        Position::Nothing => {}
+        Position::Command if ctx.prefix.contains(&b'/') => {
+            files(&ctx.prefix, b"", Kind::Runnable, &mut found);
+        }
+        Position::Command => commands(&ctx.prefix, b"", &mut found),
+        Position::Path => files(&ctx.prefix, b"", Kind::Any, &mut found),
+        Position::Argument => arguments(&ctx.words, &ctx.prefix, &mut found),
+    }
+    super::set_last_exit_code(status);
+    expand::take_substituted();
+
+    let done = complete::resolve(&ctx.prefix, ctx.quote, found);
+    let listing =
+        (done.candidates.len() > 1).then(|| complete::listing(&done.candidates, width, max_lines));
+    Outcome {
+        insert: done.insert,
+        listing,
+    }
+}
+
+fn arguments(words: &[Vec<u8>], prefix: &[u8], out: &mut Vec<Candidate>) {
+    let command = words[0].rsplit(|&b| b == b'/').next().unwrap_or_default();
+    let query = query(command, &words[1..], prefix);
+    let lead = query.lead.as_slice();
+    let value = &prefix[lead.len()..];
+
+    out.extend(query.options);
+    for words in &query.words {
+        for field in expand_words(&words.text) {
+            if field.starts_with(value) {
+                let mut word = lead.to_vec();
+                word.extend_from_slice(&field);
+                out.push(Candidate::new(word).described(&words.description));
+            }
+        }
+    }
+    for action in &query.actions {
+        match action {
+            Action::File => files(value, lead, Kind::Any, out),
+            Action::Directory => files(value, lead, Kind::Directories, out),
+            Action::Command => commands(value, lead, out),
+            Action::Builtin => builtins(value, lead, out),
+        }
+    }
+    if query.files {
+        files(value, lead, Kind::Any, out);
+    }
+}
+
+fn query(command: &[u8], args: &[Vec<u8>], current: &[u8]) -> Query {
+    let loaded = {
+        let registry = registry();
+        registry.specs.covers(command) || registry.sourced.iter().any(|c| c == command)
     };
-
-    if is_first_token {
-        complete_command(prefix, prefix_len, &mut result);
-    } else if command_word(input, word_start) == b"keymap" {
-        complete_keymap(prefix, prefix_len, &mut result);
-    } else {
-        let dirs_only = command_wants_dirs_only(input, word_start);
-        complete_path(prefix, prefix_len, cwd, dirs_only, &mut result);
+    // Sourced unlocked: the file's own `complete` lines take the lock.
+    if !loaded && let Some(path) = rules_file(command) {
+        registry().sourced.push(command.to_vec());
+        script::source_file(&path);
     }
-
-    result
+    registry().specs.query(command, args, current)
 }
 
-/// Completes against the installed layouts, not against the cwd.
-fn complete_keymap(prefix: &[u8], prefix_len: usize, result: &mut CompletionResult) {
-    let prefix_str = match core::str::from_utf8(prefix) {
-        Ok(s) => s,
-        Err(_) => return,
+/// A miss is not remembered, so a file installed later is found.
+fn rules_file(command: &[u8]) -> Option<Vec<u8>> {
+    if command.is_empty() || command == b"." || command == b".." {
+        return None;
+    }
+    let search =
+        env::get(b"SHELL_COMPLETION_PATH").unwrap_or_else(|| DEFAULT_COMPLETION_PATH.to_vec());
+    search
+        .split(|&b| b == b':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| join(dir, command))
+        .find(|path| stat(path).is_some_and(|s| s.is_file()))
+}
+
+fn expand_words(text: &[u8]) -> Vec<Vec<u8>> {
+    let Ok(tokens) = lexer::lex(text) else {
+        return Vec::new();
     };
-    let mut names: Vec<String> = Vec::new();
-    if let Ok(rd) = fs::read_dir("/usr/share/keymaps") {
-        for entry in rd.flatten() {
-            if let Some(stem) = entry.file_name().to_string_lossy().strip_suffix(".layout") {
-                if stem.starts_with(prefix_str) {
-                    names.push(String::from(stem));
-                }
-            }
+    let mut words = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        match token {
+            Tok::Word(raw) => words.push(Word::raw(raw)),
+            Tok::Newline => {}
+            _ => return Vec::new(),
         }
     }
-    names.sort();
-    if names.is_empty() {
-        return;
-    }
-
-    if names.len() == 1 {
-        let name = names[0].as_bytes();
-        let remaining = name.len() - prefix_len;
-        let insert_len = remaining + 1;
-        if insert_len <= result.insertion.len() {
-            result.insertion[..remaining].copy_from_slice(&name[prefix_len..]);
-            result.insertion[remaining] = b' ';
-            result.insertion_len = insert_len;
-        }
-        return;
-    }
-
-    let first = names[0].as_bytes();
-    let mut common_len = first.len();
-    for name in &names[1..] {
-        let nb = name.as_bytes();
-        let mut j = prefix_len;
-        while j < common_len && j < nb.len() && first[j] == nb[j] {
-            j += 1;
-        }
-        common_len = j;
-    }
-    if common_len > prefix_len {
-        let remaining = common_len - prefix_len;
-        if remaining <= result.insertion.len() {
-            result.insertion[..remaining].copy_from_slice(&first[prefix_len..common_len]);
-            result.insertion_len = remaining;
-        }
-    }
-
-    result.show_matches = true;
-    let mut pos = 0;
-    for name in &names {
-        let nb = name.as_bytes();
-        if pos + nb.len() + 2 < result.matches_buf.len() {
-            result.matches_buf[pos..pos + nb.len()].copy_from_slice(nb);
-            pos += nb.len();
-            result.matches_buf[pos] = b' ';
-            pos += 1;
-            result.matches_buf[pos] = b' ';
-            pos += 1;
-        }
-    }
-    if pos > 0 {
-        pos -= 2;
-    }
-    result.matches_len = pos;
+    expand::word_list(&words).unwrap_or_default()
 }
 
-fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionResult) {
-    let mut matches: [&[u8]; 64] = [&[]; 64];
-    let mut match_count = 0;
-
-    for entry in BUILTINS {
-        let name = entry.name.as_bytes();
-        if name.len() >= prefix_len && &name[..prefix_len] == prefix {
-            push_command_match(name, &mut matches, &mut match_count);
-        }
-    }
-
-    for spec in program_registry::user_programs() {
-        let name = spec.name.as_bytes();
-        if name.len() >= prefix_len && &name[..prefix_len] == prefix {
-            push_command_match(name, &mut matches, &mut match_count);
-        }
-    }
-
-    for tool in crate::apps::coreutils::tools() {
-        let name = tool.name.as_bytes();
-        if name.len() >= prefix_len && &name[..prefix_len] == prefix {
-            push_command_match(name, &mut matches, &mut match_count);
-        }
-    }
-
-    if match_count == 0 {
-        return;
-    }
-
-    if match_count == 1 {
-        let name = matches[0];
-        let remaining = name.len() - prefix_len;
-        let insert_len = remaining + 1;
-        if insert_len <= result.insertion.len() {
-            result.insertion[..remaining].copy_from_slice(&name[prefix_len..]);
-            result.insertion[remaining] = b' ';
-            result.insertion_len = insert_len;
-        }
-    } else {
-        let first_name = matches[0];
-        let mut common_len = first_name.len();
-        for i in 1..match_count {
-            let name = matches[i];
-            let mut j = prefix_len;
-            while j < common_len && j < name.len() && first_name[j] == name[j] {
-                j += 1;
-            }
-            common_len = j;
-        }
-
-        if common_len > prefix_len {
-            let remaining = (common_len - prefix_len).min(result.insertion.len());
-            let end = prefix_len + remaining;
-            result.insertion[..remaining].copy_from_slice(&first_name[prefix_len..end]);
-            result.insertion_len = remaining;
-        }
-
-        result.show_matches = true;
-        let mut pos = 0;
-        for i in 0..match_count {
-            let name = matches[i];
-            if pos + name.len() + 2 < result.matches_buf.len() {
-                result.matches_buf[pos..pos + name.len()].copy_from_slice(name);
-                pos += name.len();
-                result.matches_buf[pos] = b' ';
-                pos += 1;
-                result.matches_buf[pos] = b' ';
-                pos += 1;
-            }
-        }
-        if pos > 0 {
-            pos -= 2;
-        }
-        result.matches_len = pos;
-    }
-}
-
-fn push_command_match(name: &'static [u8], matches: &mut [&'static [u8]; 64], count: &mut usize) {
-    if *count >= matches.len() {
-        return;
-    }
-
-    let mut i = 0usize;
-    while i < *count {
-        if matches[i] == name {
-            return;
-        }
-        i += 1;
-    }
-
-    matches[*count] = name;
-    *count += 1;
-}
-
-fn command_word(input: &[u8], word_start: usize) -> &[u8] {
-    let mut cmd_start = 0;
-    while cmd_start < word_start && is_space(input[cmd_start]) {
-        cmd_start += 1;
-    }
-    let mut cmd_end = cmd_start;
-    while cmd_end < word_start && !is_space(input[cmd_end]) {
-        cmd_end += 1;
-    }
-    &input[cmd_start..cmd_end]
-}
-
-fn command_wants_dirs_only(input: &[u8], word_start: usize) -> bool {
-    let cmd = command_word(input, word_start);
-    cmd == b"cd" || cmd == b"mkdir"
-}
-
-fn complete_path(
+fn push_named(
+    name: &[u8],
+    description: &[u8],
     prefix: &[u8],
-    prefix_len: usize,
-    cwd: &[u8],
-    dirs_only: bool,
-    result: &mut CompletionResult,
+    lead: &[u8],
+    out: &mut Vec<Candidate>,
 ) {
-    let mut last_slash = None;
-    for i in 0..prefix_len {
-        if prefix[i] == b'/' {
-            last_slash = Some(i);
+    if name.starts_with(prefix) {
+        let mut word = lead.to_vec();
+        word.extend_from_slice(name);
+        out.push(Candidate::new(word).described(description));
+    }
+}
+
+fn builtins(prefix: &[u8], lead: &[u8], out: &mut Vec<Candidate>) {
+    for entry in BUILTINS {
+        push_named(
+            entry.name.as_bytes(),
+            entry.desc.as_bytes(),
+            prefix,
+            lead,
+            out,
+        );
+    }
+}
+
+fn commands(prefix: &[u8], lead: &[u8], out: &mut Vec<Candidate>) {
+    builtins(prefix, lead, out);
+    for name in funcs::names() {
+        push_named(&name, b"", prefix, lead, out);
+    }
+    for spec in program_registry::user_programs() {
+        push_named(
+            spec.name.as_bytes(),
+            spec.desc.as_bytes(),
+            prefix,
+            lead,
+            out,
+        );
+    }
+    let path = env::get(b"PATH").unwrap_or_default();
+    for dir in path.split(|&b| b == b':') {
+        let dir = absolute(if dir.is_empty() { b"." } else { dir });
+        for name in names_in(&dir, prefix) {
+            let Some(stat) = stat(&join(&dir, &name)) else {
+                continue;
+            };
+            if stat.is_file() && stat.st_mode & 0o111 != 0 {
+                push_named(&name, tool_description(&name), prefix, lead, out);
+            }
         }
     }
+}
 
-    let (file_prefix, file_prefix_len) = if let Some(slash_pos) = last_slash {
-        (&prefix[slash_pos + 1..], prefix_len - slash_pos - 1)
+fn tool_description(name: &[u8]) -> &'static [u8] {
+    crate::apps::coreutils::tools()
+        .find(|tool| tool.name.as_bytes() == name)
+        .map_or(b"", |tool| tool.desc.as_bytes())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Any,
+    Directories,
+    /// Executables, and the directories on the way to one.
+    Runnable,
+}
+
+fn files(prefix: &[u8], lead: &[u8], kind: Kind, out: &mut Vec<Candidate>) {
+    let split = prefix.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1);
+    let (typed_dir, base) = prefix.split_at(split);
+    let dir = absolute(if typed_dir.is_empty() {
+        b"."
     } else {
-        (prefix, prefix_len)
-    };
-
-    let mut dir_buf = super::buffers::path_scratch();
-    let dir_len = build_dir_path(prefix, prefix_len, last_slash, cwd, &mut dir_buf);
-    if dir_len == 0 {
-        return;
-    }
-
-    let dir_str = match core::str::from_utf8(&dir_buf[..dir_len]) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let read_dir = match fs::read_dir(dir_str) {
-        Ok(read_dir) => read_dir,
-        Err(_) => return,
-    };
-
-    let mut matches: std::vec::Vec<PathMatch> = std::vec::Vec::new();
-
-    for dir_entry in read_dir {
-        let dir_entry = match dir_entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
+        typed_dir
+    });
+    for name in names_in(&dir, base) {
+        let Some(stat) = stat(&join(&dir, &name)) else {
+            continue;
         };
-
-        let name = match dir_entry.file_name().into_string() {
-            Ok(name) => name,
-            Err(_) => continue,
+        let is_dir = stat.is_directory();
+        let wanted = match kind {
+            Kind::Any => true,
+            Kind::Directories => is_dir,
+            Kind::Runnable => is_dir || stat.st_mode & 0o111 != 0,
         };
-        let name_bytes = name.as_bytes();
-        if name_bytes == b"." || name_bytes == b".." {
+        if !wanted {
             continue;
         }
-
-        let file_type = match dir_entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-
-        if dirs_only && !file_type.is_dir() {
-            continue;
-        }
-
-        if name_bytes.len() >= file_prefix_len && &name_bytes[..file_prefix_len] == file_prefix {
-            matches.push(PathMatch {
-                name: name.into_bytes(),
-                is_directory: file_type.is_dir(),
-            });
-        }
-    }
-
-    if matches.is_empty() {
-        return;
-    }
-
-    let match_count = matches.len();
-
-    if match_count == 1 {
-        let entry = &matches[0];
-        let name_len = entry.name.len();
-        let remaining = name_len - file_prefix_len;
-        let suffix = if entry.is_directory { b'/' } else { b' ' };
-        let insert_len = remaining + 1;
-        if insert_len <= result.insertion.len() {
-            result.insertion[..remaining].copy_from_slice(&entry.name[file_prefix_len..name_len]);
-            result.insertion[remaining] = suffix;
-            result.insertion_len = insert_len;
-        }
-    } else {
-        let first = &matches[0];
-        let first_len = first.name.len();
-        let mut common_len = first_len;
-
-        for i in 1..match_count {
-            let entry = &matches[i];
-            let name_len = entry.name.len();
-            let mut j = file_prefix_len;
-            while j < common_len && j < name_len && first.name[j] == entry.name[j] {
-                j += 1;
-            }
-            common_len = j;
-        }
-
-        if common_len > file_prefix_len {
-            // Filenames can run past this buffer; unbounded, Tab panics the shell.
-            let remaining = (common_len - file_prefix_len).min(result.insertion.len());
-            let end = file_prefix_len + remaining;
-            result.insertion[..remaining].copy_from_slice(&first.name[file_prefix_len..end]);
-            result.insertion_len = remaining;
-        }
-
-        result.show_matches = true;
-        let mut pos = 0;
-        for i in 0..match_count {
-            let entry = &matches[i];
-            let name_len = entry.name.len();
-            if pos + name_len + 3 < result.matches_buf.len() {
-                result.matches_buf[pos..pos + name_len].copy_from_slice(&entry.name[..name_len]);
-                pos += name_len;
-                if entry.is_directory {
-                    result.matches_buf[pos] = b'/';
-                    pos += 1;
-                }
-                result.matches_buf[pos] = b' ';
-                pos += 1;
-                result.matches_buf[pos] = b' ';
-                pos += 1;
-            }
-        }
-        if pos > 0 {
-            pos -= 2;
-        }
-        result.matches_len = pos;
+        let mut word = lead.to_vec();
+        word.extend_from_slice(typed_dir);
+        word.extend_from_slice(&name);
+        out.push(Candidate {
+            word,
+            shown_from: lead.len() + typed_dir.len(),
+            description: Vec::new(),
+            suffix: if is_dir { Suffix::Slash } else { Suffix::Space },
+        });
     }
 }
 
-fn build_dir_path(
-    prefix: &[u8],
-    _prefix_len: usize,
-    last_slash: Option<usize>,
-    cwd: &[u8],
-    dir_buf: &mut [u8],
-) -> usize {
-    let cwd_len = cwd_strlen(cwd);
-
-    if let Some(slash_pos) = last_slash {
-        if prefix[0] == b'/' {
-            let len = slash_pos + 1;
-            if len >= dir_buf.len() {
-                return 0;
-            }
-            dir_buf[..len].copy_from_slice(&prefix[..len]);
-            return len;
-        }
-        if cwd_len + slash_pos + 2 >= dir_buf.len() {
-            return 0;
-        }
-        dir_buf[..cwd_len].copy_from_slice(&cwd[..cwd_len]);
-        let mut pos = cwd_len;
-        if pos > 0 && dir_buf[pos - 1] != b'/' {
-            dir_buf[pos] = b'/';
-            pos += 1;
-        }
-        let path_part = slash_pos + 1;
-        dir_buf[pos..pos + path_part].copy_from_slice(&prefix[..path_part]);
-        return pos + path_part;
-    }
-
-    if cwd_len >= dir_buf.len() {
-        return 0;
-    }
-    dir_buf[..cwd_len].copy_from_slice(&cwd[..cwd_len]);
-    cwd_len
+fn names_in(dir: &[u8], start: &[u8]) -> Vec<Vec<u8>> {
+    let Ok(dir) = core::str::from_utf8(dir) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .map(String::into_bytes)
+        .filter(|name| name.starts_with(start) && name != b"." && name != b"..")
+        .collect()
 }
 
-struct PathMatch {
-    name: std::vec::Vec<u8>,
-    is_directory: bool,
+/// Against the shell's working directory, as every relative path it resolves.
+fn absolute(path: &[u8]) -> Vec<u8> {
+    if path.starts_with(b"/") {
+        return path.to_vec();
+    }
+    let mut cwd = super::cwd_bytes();
+    cwd.pop();
+    join(&cwd, path)
 }
 
-fn cwd_strlen(cwd: &[u8]) -> usize {
-    cwd.iter().position(|&b| b == 0).unwrap_or(cwd.len())
+fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut path = Vec::with_capacity(dir.len() + name.len() + 1);
+    path.extend_from_slice(dir);
+    if path.last() != Some(&b'/') {
+        path.push(b'/');
+    }
+    path.extend_from_slice(name);
+    path
+}
+
+fn stat(path: &[u8]) -> Option<UserFsStat> {
+    let mut path_z = Vec::with_capacity(path.len() + 1);
+    path_z.extend_from_slice(path);
+    path_z.push(0);
+    let mut stat = UserFsStat::default();
+    fs::stat_path(path_z.as_ptr() as *const core::ffi::c_char, &mut stat).ok()?;
+    Some(stat)
 }

@@ -7,8 +7,8 @@ set -euo pipefail
 #
 # Each binary is placed in /bin/<name> except 'init' which goes to /sbin/init.
 # With none, a volume still carries the base's data files (the C library when
-# built, licence texts, fonts, the CA bundle, keymaps), or under `FS_BASE=boot`
-# only the base's sealed mount points.
+# built, licence texts, fonts, the CA bundle, keymaps, the shell's completion
+# rules), or under `FS_BASE=boot` only the base's sealed mount points.
 #
 # Environment:
 #   FS_IMAGE_SIZE - image size (default: 32M)
@@ -182,6 +182,7 @@ build_stamp() {
         sha256sum "${BUILD_DIR}/${so}" 2>/dev/null | cut -d' ' -f1 || echo missing
     done
     for asset in "${REPO_ROOT}/assets/fonts"/* "${REPO_ROOT}/assets/keymaps"/* \
+                 "${REPO_ROOT}/assets/completions"/* \
                  "${REPO_ROOT}/assets/certs"/* "${REPO_ROOT}/assets/logo.png"; do
         [ -f "$asset" ] || continue
         sha256sum "$asset" | cut -d' ' -f1
@@ -666,6 +667,18 @@ install_base() {
             lname=$(basename "$layout")
             install_file "$layout" "/usr/share/keymaps/$lname"
             echo "Installed keymap: /usr/share/keymaps/$lname"
+        done
+    fi
+
+    COMPLETIONS_DIR="${REPO_ROOT}/assets/completions"
+    if [ -d "$COMPLETIONS_DIR" ]; then
+        mkdir_p /usr/share/shell
+        mkdir_p /usr/share/shell/completions
+        for rules in "$COMPLETIONS_DIR"/*; do
+            [ -f "$rules" ] || continue
+            cname=$(basename "$rules")
+            install_file "$rules" "/usr/share/shell/completions/$cname"
+            echo "Installed completion rules: /usr/share/shell/completions/$cname"
         done
     fi
 }

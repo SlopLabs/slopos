@@ -1,0 +1,17 @@
+# Targets come from the build file in the working directory, not `-C`'s.
+
+complete -c ninja -P '**' -f -a '$(ninja -t targets 2>/dev/null | cut -d: -f1)'
+complete -c ninja -s C -x -A directory -d 'Change to this directory before doing anything'
+complete -c ninja -s f -r -d 'Read this build file'
+complete -c ninja -s j -x -d 'Run this many jobs in parallel'
+complete -c ninja -s k -x -d 'Keep going until this many jobs fail'
+complete -c ninja -s l -x -d 'Start no job while the load average is above this'
+complete -c ninja -s n -d 'Dry run'
+complete -c ninja -s v -l verbose -d 'Show every command line'
+complete -c ninja -l quiet -d 'Show no progress'
+complete -c ninja -s d -x -a 'list stats explain keepdepfile keeprsp' -d 'Enable a debugging mode'
+complete -c ninja -s t -x -d 'Run a subtool' -a 'list browse clean cleandead commands compdb
+    compdb-targets deps graph inputs missingdeps multi-inputs query recompact restat rules targets'
+complete -c ninja -s w -x -a 'list phonycycle=err phonycycle=warn' -d 'Adjust a warning'
+complete -c ninja -l version -d 'Print the ninja version'
+complete -c ninja -s h -l help -d 'Show help'

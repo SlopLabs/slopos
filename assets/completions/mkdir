@@ -1,0 +1,3 @@
+complete -c mkdir -P '**' -f -A directory
+complete -c mkdir -s p -d 'Make parent directories as needed'
+complete -c mkdir -s m -x -d 'Give the new directories this mode'

@@ -1,5 +1,5 @@
-//! The builtins a script leans on: control flow, `read`, `eval`, `.`, and the
-//! command-lookup pair `command`/`type`.
+//! The builtins a script leans on: control flow, `read`, `eval`, `.`, the
+//! command-lookup pair `command`/`type`, and `complete`.
 //!
 //! `break`, `continue` and `return` change what the *executor* does next, but
 //! a builtin's signature is a status, so they request a
@@ -8,8 +8,9 @@
 
 use super::super::display::{COLOR_ERROR_RED, shell_error_named, shell_write, shell_write_idx};
 use super::super::exec::{self, Flow};
-use super::super::{env, funcs, script, traps};
+use super::super::{completion, env, funcs, script, traps};
 use crate::syscall::fs;
+use slopos_shell_core::complete::spec::{self, Request};
 use slopos_shell_core::trap::{self, Action};
 
 fn parse_count(arg: Option<&&[u8]>, default: u32) -> Option<u32> {
@@ -376,4 +377,23 @@ fn describe(name: &[u8], search: exec::Search) -> i32 {
             1
         }
     }
+}
+
+/// `complete` — declare, print or erase argument-completion rules.
+pub fn cmd_complete(argc: i32, argv: &[&[u8]]) -> i32 {
+    let args = argv.get(1..argc as usize).unwrap_or_default();
+    match spec::parse(args) {
+        Ok(Request::Add(rules)) => completion::add_rules(rules),
+        Ok(Request::Erase(commands)) => completion::erase_rules(&commands),
+        Ok(Request::Print(commands)) => {
+            if !shell_write(&completion::render_rules(&commands)) {
+                return 1;
+            }
+        }
+        Err(msg) => {
+            shell_error_named(b"complete", msg.as_bytes());
+            return 2;
+        }
+    }
+    0
 }

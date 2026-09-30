@@ -1,0 +1,46 @@
+# Lists come from git itself, so aliases, git-* commands, refs and remotes
+# are always current.
+
+complete -c git -f -a '$(git --list-cmds=main,others,alias,nohelpers 2>/dev/null)'
+complete -c git -s C -x -A directory -d 'Run as if git was started in this directory'
+complete -c git -s c -x -d 'Set a configuration variable for this command'
+complete -c git -l git-dir -x -A directory -d 'The repository to use'
+complete -c git -l work-tree -x -A directory -d 'The working tree to use'
+complete -c git -l no-pager -d 'Do not pipe output into a pager'
+complete -c git -l version -d 'Print the git version'
+complete -c git -l help -d 'Show help'
+
+complete -c git -P help -f -a '$(git --list-cmds=main,nohelpers 2>/dev/null)'
+
+complete -c git -P branch -P switch -P merge -P rebase -P cherry-pick -f \
+    -a '$(git for-each-ref --format="%(refname:short)" refs/heads refs/remotes 2>/dev/null)'
+complete -c git -P checkout -P log -P diff -P show -P reset -P restore \
+    -a '$(git for-each-ref --format="%(refname:short)" refs/heads refs/remotes refs/tags 2>/dev/null)'
+
+complete -c git -P push -P pull -P fetch -f -a '$(git remote 2>/dev/null)'
+complete -c git -P 'push *' -P 'pull *' -f \
+    -a '$(git for-each-ref --format="%(refname:short)" refs/heads 2>/dev/null)'
+complete -c git -P push -s f -l force -d 'Overwrite the remote branch'
+complete -c git -P push -s u -l set-upstream -d 'Track the pushed branch'
+complete -c git -P push -l tags -d 'Push every tag'
+
+complete -c git -P remote -f -a 'add remove rename show prune set-url get-url'
+complete -c git -P 'remote remove' -P 'remote rename' -P 'remote show' -P 'remote prune' \
+    -P 'remote set-url' -P 'remote get-url' -f -a '$(git remote 2>/dev/null)'
+
+complete -c git -P stash -f -a 'list show push pop apply drop branch clear'
+
+complete -c git -P commit -s m -l message -x -d 'Use this commit message'
+complete -c git -P commit -s F -l file -r -d 'Read the commit message from this file'
+complete -c git -P commit -s a -l all -d 'Stage every modified and deleted file'
+complete -c git -P commit -l amend -d 'Replace the tip of the current branch'
+
+complete -c git -P add -s p -l patch -d 'Choose hunks interactively'
+complete -c git -P add -s A -l all -d 'Stage every change in the tree'
+complete -c git -P add -s u -l update -d 'Stage changes to tracked files only'
+
+complete -c git -P switch -s c -l create -x -d 'Create this branch and switch to it'
+complete -c git -P checkout -s b -x -d 'Create this branch and check it out'
+
+complete -c git -P clone -l depth -x -d 'Clone only this many commits'
+complete -c git -P clone -s b -l branch -x -d 'Check out this branch'
