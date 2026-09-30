@@ -82,7 +82,7 @@ fn which(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
         return ctx.usage("which [-a] name...");
     }
 
-    let path_var = std::env::var("PATH").unwrap_or_else(|_| "/bin:/sbin".to_string());
+    let path_var = fsutil::search_path();
     let mut status = 0;
     for operand in operands {
         let Some(name) = as_str(ctx, operand) else {
@@ -91,7 +91,7 @@ fn which(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
         };
         // A name with a slash is not looked up, as `exec` does not look it up.
         if name.contains('/') {
-            if is_executable(name) {
+            if fsutil::is_executable_file(name) {
                 ctx.out.s(name);
                 ctx.out.nl();
             } else {
@@ -105,7 +105,7 @@ fn which(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
                 continue;
             }
             let candidate = fsutil::join(dir, name);
-            if is_executable(&candidate) {
+            if fsutil::is_executable_file(&candidate) {
                 ctx.out.s(&candidate);
                 ctx.out.nl();
                 found = true;
@@ -119,13 +119,4 @@ fn which(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
         }
     }
     status
-}
-
-/// A regular file is executable here: SlopOS is single-user at uid 0 and the
-/// exec permission bit is not consulted by the loader, so claiming otherwise
-/// would answer a question the kernel does not ask.
-fn is_executable(path: &str) -> bool {
-    std::fs::metadata(path)
-        .map(|m| m.is_file())
-        .unwrap_or(false)
 }

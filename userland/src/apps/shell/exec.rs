@@ -1037,11 +1037,23 @@ fn install_redirects_in_child(redirects: &[Redirect]) {
 // Program resolution
 // ---------------------------------------------------------------------------
 
+/// Which `PATH` a command search walks: the environment's, or for
+/// `command -p` the system's default, which finds every standard utility.
+#[derive(Clone, Copy)]
+pub enum Search {
+    Environment,
+    Default,
+}
+
 /// XBD 8.3: the first executable candidate wins. A non-executable regular file
 /// is named only when nothing better exists, so it fails 126 rather than 127.
-fn resolve_via_path(name: &[u8], tmp: &mut [u8]) -> bool {
-    let Some(path_value) = env::get(b"PATH") else {
-        return false;
+fn resolve_via_path(name: &[u8], search: Search, tmp: &mut [u8]) -> bool {
+    let path_value = match search {
+        Search::Environment => match env::get(b"PATH") {
+            Some(value) => value,
+            None => return false,
+        },
+        Search::Default => slopos_abi::fs::DEFAULT_PATH.to_bytes().to_vec(),
     };
     if path_value.is_empty() {
         return false;
@@ -1082,7 +1094,7 @@ fn resolve_via_path(name: &[u8], tmp: &mut [u8]) -> bool {
 
 /// Resolve a command name to a path the loader will accept. A name holding a
 /// `/` is a path; anything else is a registry program or a `PATH` lookup.
-fn resolve_exec_path(name: &[u8], tmp: &mut [u8]) -> bool {
+fn resolve_exec_path(name: &[u8], search: Search, tmp: &mut [u8]) -> bool {
     if name.is_empty() {
         return false;
     }
@@ -1108,22 +1120,22 @@ fn resolve_exec_path(name: &[u8], tmp: &mut [u8]) -> bool {
         return true;
     }
 
-    resolve_via_path(name, tmp)
+    resolve_via_path(name, search, tmp)
 }
 
 /// Whether `name` names something this shell can run, which is what
 /// `command -v` and `type` answer.
-pub fn resolve_command(name: &[u8]) -> Option<Vec<u8>> {
+pub fn resolve_command(name: &[u8], search: Search) -> Option<Vec<u8>> {
     if funcs::lookup(name).is_some() {
         return Some(name.to_vec());
     }
-    resolve_command_ignoring_functions(name)
+    resolve_command_ignoring_functions(name, search)
 }
 
 /// As [`resolve_command`], but blind to the function table — what
 /// `command NAME` needs, or `ls() { command ls -F "$@"; }` resolves to itself
 /// and recurses until the stack runs out.
-pub fn resolve_command_ignoring_functions(name: &[u8]) -> Option<Vec<u8>> {
+pub fn resolve_command_ignoring_functions(name: &[u8], search: Search) -> Option<Vec<u8>> {
     if name.is_empty() {
         return None;
     }
@@ -1134,7 +1146,7 @@ pub fn resolve_command_ignoring_functions(name: &[u8]) -> Option<Vec<u8>> {
         return Some(spec.path.as_bytes().to_vec());
     }
     let mut tmp = buffers::path_scratch();
-    if !resolve_exec_path(name, &mut tmp) {
+    if !resolve_exec_path(name, search, &mut tmp) {
         return None;
     }
     let len = tmp.iter().position(|&b| b == 0).unwrap_or(tmp.len());
@@ -1362,7 +1374,7 @@ fn become_command(cmd: &Command) -> ! {
 /// refuses as `ENOEXEC` runs as a script of this shell (XCU 2.9.1.1).
 fn exec_external(argv: &[Vec<u8>]) -> ! {
     let mut path_buf = buffers::path_scratch();
-    if !resolve_exec_path(&argv[0], &mut path_buf) {
+    if !resolve_exec_path(&argv[0], Search::Environment, &mut path_buf) {
         shell_error_named(&argv[0], b"not found");
         sys_core::exit_with_code(STATUS_NOT_FOUND);
     }

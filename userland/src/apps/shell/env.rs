@@ -10,6 +10,8 @@
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Mutex;
 
+use slopos_abi::fs::DEFAULT_PATH;
+
 struct Var {
     name: Vec<u8>,
     value: Vec<u8>,
@@ -123,7 +125,7 @@ pub fn initialize() {
         }
     }
     for (name, value) in [
-        (b"PATH".as_slice(), b"/bin:/sbin".as_slice()),
+        (b"PATH".as_slice(), DEFAULT_PATH.to_bytes()),
         (b"SHELL", b"/bin/shell"),
         (b"HOME", b"/"),
         (b"USER", b"root"),

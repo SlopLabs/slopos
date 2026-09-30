@@ -1,5 +1,12 @@
 //! Filesystem ABI types shared between kernel and userland.
 
+use core::ffi::CStr;
+
+/// The command search path of a program whose environment names none: the
+/// system's directories first, so nothing installed under `/usr/local`
+/// shadows them.
+pub const DEFAULT_PATH: &CStr = c"/bin:/sbin:/usr/local/bin";
+
 /// Longest path a syscall accepts, NUL included. Linux's `PATH_MAX`. Too
 /// large for a kernel frame, so the syscall layer stages paths on the heap.
 pub const USER_PATH_MAX: usize = 4096;

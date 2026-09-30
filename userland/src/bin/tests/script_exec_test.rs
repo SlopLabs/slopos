@@ -135,15 +135,40 @@ fn execvp_runs_a_plain_file_under_sh() -> bool {
     true
 }
 
-/// With `PATH` unset, the search takes `confstr(_CS_PATH)`'s `/bin:/usr/bin`.
-fn execvp_searches_the_default_path_without_path() -> bool {
+const LOCAL_BIN: &str = "/usr/local/bin";
+const PROBE: &str = "slopos-path-probe";
+
+/// Every command search with no `PATH` — slibc's `execvp`, the shell, `which`,
+/// `env`, `xargs` and `find -exec` — walks the one default: it reaches
+/// `/usr/local/bin`, where nothing may shadow `/bin`. The shell's
+/// `command -p` walks it past any `PATH`.
+fn every_search_takes_the_default_path_without_path() -> bool {
+    let probe = format!("{LOCAL_BIN}/{PROBE}");
+    let shadow = format!("{LOCAL_BIN}/cat");
+    let installed = fs::create_dir_all(LOCAL_BIN)
+        .and_then(|()| fs::write(&probe, "#!/bin/sh\necho probed \"$@\"\n"))
+        .and_then(|()| fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)))
+        .and_then(|()| fs::write(&shadow, "#!/bin/sh\necho decoy\n"))
+        .and_then(|()| fs::set_permissions(&shadow, fs::Permissions::from_mode(0o755)));
+    if let Err(e) = installed {
+        eprintln!("script_exec_test: installing the probes in {LOCAL_BIN}: {e}");
+        return false;
+    }
+    let held = default_path_searches(&probe);
+    let _ = fs::remove_file(&probe);
+    let _ = fs::remove_file(&shadow);
+    held
+}
+
+fn default_path_searches(probe: &str) -> bool {
     let pid = process::fork();
     if pid == 0 {
         // SAFETY: the forked child is single-threaded.
         unsafe { std::env::remove_var("PATH") };
-        let argv: [*const u8; 2] = [b"true\0".as_ptr(), core::ptr::null()];
+        let file = format!("{PROBE}\0");
+        let argv: [*const u8; 2] = [file.as_ptr(), core::ptr::null()];
         // SAFETY: NUL-terminated file, NULL-ended argv.
-        unsafe { slopos_slibc::process::execvp(b"true\0".as_ptr(), argv.as_ptr()) };
+        unsafe { slopos_slibc::process::execvp(file.as_ptr(), argv.as_ptr()) };
         slopos_userland::syscall::core::exit_with_code(127);
     }
     let status = if pid < 0 {
@@ -152,10 +177,89 @@ fn execvp_searches_the_default_path_without_path() -> bool {
         process::wait_exit_code(pid as u32)
     };
     if status != 0 {
-        eprintln!("script_exec_test: execvp without PATH exited {status}");
+        eprintln!("script_exec_test: execvp of {PROBE} without PATH exited {status}");
         return false;
     }
+    let default = slopos_abi::fs::DEFAULT_PATH.to_str().unwrap_or_default();
+    let probed = "probed\n";
+    let cases: [(&str, &[&str], Option<&str>, String); 9] = [
+        (
+            "/bin/shell",
+            &["-c", "echo $PATH"],
+            None,
+            format!("{default}\n"),
+        ),
+        ("/bin/shell", &["-c", PROBE], None, probed.into()),
+        ("/bin/which", &[PROBE], None, format!("{probe}\n")),
+        ("/bin/which", &["cat"], None, "/bin/cat\n".into()),
+        ("/bin/env", &[PROBE], None, probed.into()),
+        ("/bin/xargs", &[PROBE], Some("x\n"), "probed x\n".into()),
+        (
+            "/bin/find",
+            &[probe, "-exec", PROBE, "{}", ";"],
+            None,
+            format!("probed {probe}\n"),
+        ),
+        (
+            "/bin/shell",
+            &["-c", "cat"],
+            Some("kept\n"),
+            "kept\n".into(),
+        ),
+        ("/bin/env", &["cat"], Some("kept\n"), "kept\n".into()),
+    ];
+    for (program, args, stdin, want) in cases {
+        let mut cmd = Command::new(program);
+        cmd.args(args).env_clear();
+        let got = match stdin {
+            None => stdout_of(&mut cmd),
+            Some(input) => stdout_with_stdin(&mut cmd, input),
+        };
+        if got.as_deref() != Some(want.as_str()) {
+            eprintln!(
+                "script_exec_test: {program} {args:?} with no PATH gave {got:?}, want {want:?}"
+            );
+            return false;
+        }
+    }
+    for (script, want) in [
+        (format!("command -p {PROBE}"), probed.to_owned()),
+        (format!("command -p -v {PROBE}"), format!("{probe}\n")),
+    ] {
+        let got = stdout_of(
+            Command::new("/bin/shell")
+                .args(["-c", &script])
+                .env_clear()
+                .env("PATH", "/nowhere"),
+        );
+        if got.as_deref() != Some(want.as_str()) {
+            eprintln!(
+                "script_exec_test: {script:?} under PATH=/nowhere gave {got:?}, want {want:?}"
+            );
+            return false;
+        }
+    }
     true
+}
+
+fn stdout_with_stdin(cmd: &mut Command, input: &str) -> Option<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("script_exec_test: spawn failed: {e}");
+            return None;
+        }
+    };
+    let fed = child
+        .stdin
+        .take()
+        .is_some_and(|mut pipe| pipe.write_all(input.as_bytes()).is_ok());
+    let out = child.wait_with_output().ok()?;
+    (fed && out.status.success())
+        .then(|| String::from_utf8(out.stdout).ok())
+        .flatten()
 }
 
 fn execvp_keeps_eacces_over_a_later_miss() -> bool {
@@ -347,8 +451,8 @@ fn main() {
             execvp_runs_a_plain_file_under_sh,
         ),
         (
-            "execvp_searches_the_default_path_without_path",
-            execvp_searches_the_default_path_without_path,
+            "every_search_takes_the_default_path_without_path",
+            every_search_takes_the_default_path_without_path,
         ),
         (
             "execvp_keeps_eacces_over_a_later_miss",

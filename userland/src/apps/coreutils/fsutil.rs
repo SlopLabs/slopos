@@ -58,6 +58,38 @@ pub fn read_link(path: &str) -> Result<Vec<u8>, std::io::Error> {
     Ok(buf)
 }
 
+/// `PATH`, or the system's default search path when the environment names none.
+pub fn search_path() -> String {
+    std::env::var("PATH").unwrap_or_else(|_| default_search_path().to_owned())
+}
+
+pub fn default_search_path() -> &'static str {
+    slopos_abi::fs::DEFAULT_PATH
+        .to_str()
+        .expect("the default search path is ASCII")
+}
+
+/// The first executable regular file `name` names on `path`; a name holding a
+/// `/` is taken as it stands, if it is one.
+pub fn resolve_command(name: &str, path: &str) -> Option<String> {
+    if name.contains('/') {
+        return is_executable_file(name).then(|| name.to_string());
+    }
+    path.split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| join(dir, name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// A regular file is executable here: SlopOS is single-user at uid 0 and the
+/// exec permission bit is not consulted by the loader, so claiming otherwise
+/// would answer a question the kernel does not ask.
+pub fn is_executable_file(path: &str) -> bool {
+    fs::metadata(path)
+        .map(|meta| meta.is_file())
+        .unwrap_or(false)
+}
+
 /// Join a directory and a name, collapsing the separator so `/` + `bin` is
 /// `/bin` rather than `//bin`.
 pub fn join(dir: &str, name: &str) -> String {

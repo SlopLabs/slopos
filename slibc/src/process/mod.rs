@@ -87,8 +87,9 @@ pub unsafe extern "C" fn execvpe(
 }
 
 /// POSIX command search: `file` under each `PATH` element (an empty one is
-/// the cwd; an unset `PATH` is [`DEFAULT_PATH`]) until `attempt` succeeds or
-/// fails with anything but a miss; `EACCES` if a miss was not permitted.
+/// the cwd; an unset `PATH` is [`slopos_abi::fs::DEFAULT_PATH`]) until
+/// `attempt` succeeds or fails with anything but a miss; `EACCES` if a miss
+/// was not permitted.
 pub(crate) unsafe fn search_path<T>(
     file: *const u8,
     file_len: usize,
@@ -96,7 +97,7 @@ pub(crate) unsafe fn search_path<T>(
 ) -> Result<T, errno::Errno> {
     let mut path_val = crate::env::getenv(b"PATH\0".as_ptr()).cast_const();
     if path_val.is_null() {
-        path_val = DEFAULT_PATH.as_ptr();
+        path_val = slopos_abi::fs::DEFAULT_PATH.as_ptr().cast();
     }
     let path_len = u_strlen(path_val);
     let mut buf = [0u8; 4096];
@@ -228,8 +229,6 @@ pub(crate) unsafe fn script_argv(
 }
 
 pub(crate) const SH_PATH: &[u8] = b"/bin/sh\0";
-
-pub(crate) const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin\0";
 
 /// Returns the child PID on success, -1 on error.
 #[unsafe(no_mangle)]

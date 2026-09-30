@@ -321,7 +321,7 @@ fn exec_flush(index: usize, state: &mut State, ctx: &mut Ctx) {
 fn run_and_record(argv: &[String], state: &mut State, ctx: &mut Ctx) -> bool {
     // The child inherits fd 1; buffered output has to land before it writes.
     ctx.out.flush();
-    let Some(program) = resolve(&argv[0]) else {
+    let Some(program) = fsutil::resolve_command(&argv[0], &fsutil::search_path()) else {
         ctx.warn_at(argv[0].as_bytes(), b"not found");
         state.status = 1;
         return false;
@@ -342,23 +342,6 @@ fn run_and_record(argv: &[String], state: &mut State, ctx: &mut Ctx) -> bool {
             false
         }
     }
-}
-
-fn resolve(name: &str) -> Option<String> {
-    if name.contains('/') {
-        return is_executable(name).then(|| name.to_string());
-    }
-    let path = std::env::var("PATH").unwrap_or_else(|_| "/bin:/sbin".to_string());
-    path.split(':')
-        .filter(|dir| !dir.is_empty())
-        .map(|dir| fsutil::join(dir, name))
-        .find(|candidate| is_executable(candidate))
-}
-
-fn is_executable(path: &str) -> bool {
-    fs::metadata(path)
-        .map(|meta| meta.is_file())
-        .unwrap_or(false)
 }
 
 struct Parser<'t> {

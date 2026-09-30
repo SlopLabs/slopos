@@ -201,7 +201,7 @@ fn run(ctx: &mut Ctx, argv: &[String], trace: bool, builtin: bool) -> Flow {
 
     // The child inherits fd 1; buffered output has to land before it writes.
     ctx.out.flush();
-    let Some(program) = resolve(&argv[0]) else {
+    let Some(program) = fsutil::resolve_command(&argv[0], &fsutil::search_path()) else {
         ctx.warn_at(argv[0].as_bytes(), b"not found");
         return Flow::Stop(127);
     };
@@ -229,23 +229,6 @@ fn classify(code: i32) -> Flow {
         255 => Flow::Stop(124),
         _ => Flow::Failed,
     }
-}
-
-fn resolve(name: &str) -> Option<String> {
-    if name.contains('/') {
-        return is_executable(name).then(|| name.to_string());
-    }
-    let path = std::env::var("PATH").unwrap_or_else(|_| "/bin:/sbin".to_string());
-    path.split(':')
-        .filter(|dir| !dir.is_empty())
-        .map(|dir| fsutil::join(dir, name))
-        .find(|candidate| is_executable(candidate))
-}
-
-fn is_executable(path: &str) -> bool {
-    std::fs::metadata(path)
-        .map(|meta| meta.is_file())
-        .unwrap_or(false)
 }
 
 fn split_on(data: &[u8], sep: u8) -> Vec<Vec<u8>> {

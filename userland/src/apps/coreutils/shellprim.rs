@@ -970,21 +970,6 @@ fn env_set(vars: &mut Vec<(String, String)>, name: &str, value: &str) {
     }
 }
 
-fn locate(program: &str, path_var: &str) -> Option<String> {
-    if program.contains('/') {
-        return Some(program.to_string());
-    }
-    path_var
-        .split(':')
-        .filter(|dir| !dir.is_empty())
-        .map(|dir| fsutil::join(dir, program))
-        .find(|candidate| {
-            std::fs::metadata(candidate)
-                .map(|meta| meta.is_file())
-                .unwrap_or(false)
-        })
-}
-
 fn env(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
     let mut ignore = false;
     let mut unset: Vec<&[u8]> = Vec::new();
@@ -1048,8 +1033,13 @@ fn env(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
         .iter()
         .find(|(key, _)| key == "PATH")
         .map(|(_, value)| value.as_str())
-        .unwrap_or("/bin:/sbin");
-    let Some(resolved) = locate(program, path_var) else {
+        .unwrap_or(fsutil::default_search_path());
+    // A path is run as it stands, so exec reports why it cannot be.
+    let resolved = if program.contains('/') {
+        program.to_string()
+    } else if let Some(found) = fsutil::resolve_command(program, path_var) {
+        found
+    } else {
         ctx.warn_at(command[0], b"No such file or directory");
         return super::STATUS_NOT_FOUND;
     };

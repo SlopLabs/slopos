@@ -262,9 +262,10 @@ fn trim_ifs<'a>(mut bytes: &'a [u8], ifs: &[u8]) -> &'a [u8] {
     bytes
 }
 
-/// `command [-v|-V] name [arg...]` — run `name` ignoring any function of that
-/// name, or report what it resolves to. A configure-style script probes with
-/// `command -v` before anything else.
+/// `command [-p] [-v|-V] name [arg...]` — run `name` ignoring any function of
+/// that name, or report what it resolves to; `-p` searches the system's
+/// default `PATH`. A configure-style script probes with `command -v` before
+/// anything else.
 pub fn cmd_command(argc: i32, argv: &[&[u8]]) -> i32 {
     let argc = argc as usize;
     let mut index = 1usize;
@@ -272,11 +273,12 @@ pub fn cmd_command(argc: i32, argv: &[&[u8]]) -> i32 {
     // sentence for a human.
     let mut terse = false;
     let mut verbose = false;
+    let mut search = exec::Search::Environment;
     while index < argc {
         match argv[index] {
             b"-v" => terse = true,
             b"-V" => verbose = true,
-            b"-p" => {}
+            b"-p" => search = exec::Search::Default,
             b"--" => {
                 index += 1;
                 break;
@@ -294,14 +296,14 @@ pub fn cmd_command(argc: i32, argv: &[&[u8]]) -> i32 {
     }
 
     if verbose {
-        return describe(argv[index]);
+        return describe(argv[index], search);
     }
     if terse {
-        return name_of(argv[index]);
+        return name_of(argv[index], search);
     }
 
     // The point of `command` is the *non-function* meaning of a name.
-    let Some(path) = exec::resolve_command_ignoring_functions(argv[index]) else {
+    let Some(path) = exec::resolve_command_ignoring_functions(argv[index], search) else {
         shell_error_named(argv[index], b"not found");
         return exec::STATUS_NOT_FOUND;
     };
@@ -319,13 +321,13 @@ pub fn cmd_command(argc: i32, argv: &[&[u8]]) -> i32 {
 
 /// What `command -v` writes: a name for a function or builtin, a path for
 /// anything a command search finds.
-fn name_of(name: &[u8]) -> i32 {
+fn name_of(name: &[u8], search: exec::Search) -> i32 {
     if funcs::lookup(name).is_some() || super::find_builtin(name).is_some() {
         shell_write(name);
         shell_write(b"\n");
         return 0;
     }
-    match exec::resolve_command(name) {
+    match exec::resolve_command(name, search) {
         Some(path) => {
             shell_write(&path);
             shell_write(b"\n");
@@ -342,14 +344,14 @@ pub fn cmd_type(argc: i32, argv: &[&[u8]]) -> i32 {
     }
     let mut status = 0;
     for name in argv.iter().take(argc as usize).skip(1) {
-        if describe(name) != 0 {
+        if describe(name, exec::Search::Environment) != 0 {
             status = 1;
         }
     }
     status
 }
 
-fn describe(name: &[u8]) -> i32 {
+fn describe(name: &[u8], search: exec::Search) -> i32 {
     if funcs::lookup(name).is_some() {
         shell_write(name);
         shell_write(b" is a function\n");
@@ -360,7 +362,7 @@ fn describe(name: &[u8]) -> i32 {
         shell_write(b" is a shell builtin\n");
         return 0;
     }
-    match exec::resolve_command(name) {
+    match exec::resolve_command(name, search) {
         Some(path) => {
             shell_write(name);
             shell_write(b" is ");
