@@ -126,26 +126,11 @@ and the filesystem it was writing remounts read-only. `test-install-guest`
 and `test-selfhost` need `DEV_QEMU_MEM=8G` until the cap is sized for a linker
 and a refused fault in one process stops failing a whole mount.
 
-## Phase 1: bare metal (not committed)
+## Phase 1: bare metal
 
-`just iso` builds the bare-metal artifact: kernel and base, running from
-RAM, keeping nothing. You can *try* SlopOS on hardware; you can *develop* there
-once it keeps what you write:
-
-1. **Storage.** NVMe first, then AHCI. QEMU emulates both, so write and test
-   the driver in QEMU and let `just boot` attach its disks through it.
-2. **An installer.** From the live ISO: partition a disk GPT (ESP, `/`),
-   write the running kernel and base into a slot with `fat-core` as `bootctl`
-   does, and make an empty root for the base to mount over. That is Linux
-   0.12's route and Redox's installer's. Once item 3's NIC works, the
-   toolchain comes over the local network from the machine that built it.
-3. **The rest of a real machine.** PCI without MCFG, x2APIC, a real NIC,
-   USB HID input (`plans/usb-xhci.md`), ACPI SCI/GPE, and a log sink other than
-   COM1.
-
-The verified image (`fs/assets/ext2.img`, `verity=require`) backs no boot; the
-suite mounts it to exercise verity. Decide whether it becomes the bare-metal
-read-only root or goes.
+`plans/bare-metal.md`: storage, the filesystem, a boot chain that shares a
+disk, the installer, a crash record and the network on the first real
+machine.
 
 ## Phase 2: the toolchain rebuilds itself (not committed)
 
@@ -222,7 +207,7 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 - **Distribution.** Local while SlopOS is pre-alpha: no package host. The ISO
   carries what a distribution's installer ISO does — the system, not a
   compiler or git — and the toolchain reaches a disk from the machine that
-  built it.
+  built it, as the install payload of `plans/bare-metal.md`.
 - **Crates.** crates.io over HTTPS in the guest, as on the host; the tests and
   CI build from the vendored crates with no registry.
 - **Disks.** One persistent root, grown on demand the way SerenityOS grows its
