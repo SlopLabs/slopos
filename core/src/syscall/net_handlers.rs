@@ -1,8 +1,11 @@
 use slopos_abi::Errno;
 use slopos_abi::file_ops::FileKind;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
-use slopos_abi::net::{AF_INET, AF_UNIX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
-use slopos_abi::syscall::{MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS};
+use slopos_abi::net::{
+    AF_INET, AF_UNIX, IPPROTO_ICMP, IPPROTO_UDP, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_MAX, SOCK_NONBLOCK,
+    SOCK_STREAM, SOCK_TYPE_MASK, SockAddrIn,
+};
+use slopos_abi::syscall::{IPPROTO_TCP, MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS};
 use slopos_abi::unix::SockAddrUn;
 use slopos_fs::fileio::FdTable;
 use slopos_mm::user_copy::{
@@ -79,45 +82,103 @@ fn check_send_flags(flags: u32) -> Result<(), Errno> {
     check_msg_flags(flags & !MSG_NOSIGNAL)
 }
 
+/// What `socket(2)` and `accept4(2)` apply to the descriptor they make.
+#[derive(Clone, Copy)]
+struct NewSocketFlags {
+    fd: slopos_fs::FdFlags,
+    nonblock: bool,
+}
+
+impl NewSocketFlags {
+    const NONE: Self = Self {
+        fd: slopos_fs::FdFlags::NONE,
+        nonblock: false,
+    };
+
+    fn parse(flags: u32) -> Result<Self, Errno> {
+        if flags & !(SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+            return Err(Errno::EINVAL);
+        }
+        Ok(Self {
+            fd: slopos_fs::FdFlags {
+                cloexec: flags & SOCK_CLOEXEC != 0,
+                close_on_fork: false,
+            },
+            nonblock: flags & SOCK_NONBLOCK != 0,
+        })
+    }
+}
+
+/// The backing owns the endpoint from its creation: a failed install closes it.
+fn install_unix_socket(
+    table: FdTable,
+    handle: SocketHandle,
+    flags: NewSocketFlags,
+) -> Result<i32, Errno> {
+    let backing =
+        unix_socket_file_ops::unix_socket_backing(handle, table.account()).ok_or(Errno::ENFILE)?;
+    let fd = slopos_fs::fileio_open_fd_with_ops_nonblock(
+        table,
+        &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
+        handle.as_usize(),
+        Some(backing),
+        flags.fd,
+        flags.nonblock,
+    );
+    if fd < 0 {
+        Err(errno_from_neg(fd))
+    } else {
+        Ok(fd)
+    }
+}
+
+fn install_inet_socket(table: FdTable, sock_idx: u32, flags: NewSocketFlags) -> Result<i32, Errno> {
+    let backing = slopos_net::socket_file_ops::socket_backing(sock_idx, table.account())
+        .ok_or(Errno::ENFILE)?;
+    let fd =
+        slopos_fs::fileio_open_socket_fd(table, sock_idx, Some(backing), flags.fd, flags.nonblock);
+    if fd < 0 {
+        Err(errno_from_neg(fd))
+    } else {
+        Ok(fd)
+    }
+}
+
 define_syscall!(syscall_socket
     (ctx, domain: u32, sock_type: u32, protocol: u32)
     cap(NoneSelf)
     requires(let process_id: process_id, let task_id: task_id)
     -> Result<u64, Errno>
 {
-    let domain = domain as u16;
+    let flags = NewSocketFlags::parse(sock_type & !SOCK_TYPE_MASK)?;
+    let sock_type = sock_type & SOCK_TYPE_MASK;
+    if sock_type >= SOCK_MAX {
+        return Err(Errno::EINVAL);
+    }
     let sock_type = sock_type as u16;
-    let protocol = protocol as u16;
 
-    if domain == AF_UNIX {
-        if sock_type != SOCK_STREAM {
+    if domain == AF_UNIX as u32 {
+        if protocol != 0 && protocol != AF_UNIX as u32 {
             return Err(Errno::EPROTONOSUPPORT);
         }
-        let handle = unix_socket::unix_create().ok_or(Errno::ENOMEM)?;
-        // The backing owns the endpoint from here: a failed install (or a
-        // failed backing allocation) closes it.
-        let backing = unix_socket_file_ops::unix_socket_backing(handle, process_id.account())
-            .ok_or(Errno::ENFILE)?;
-        let fd = slopos_fs::fileio_open_fd_with_ops(
-            process_id,
-            &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
-            handle.as_usize(),
-            Some(backing),
-            slopos_fs::FdFlags::NONE,
-        );
-        if fd < 0 {
-            return Err(Errno::ENOMEM);
+        if sock_type != SOCK_STREAM {
+            return Err(Errno::ESOCKTNOSUPPORT);
         }
-        return Ok(fd as u64);
+        let handle = unix_socket::unix_create().ok_or(Errno::ENOMEM)?;
+        return install_unix_socket(process_id, handle, flags).map(|fd| fd as u64);
     }
 
-    if domain != AF_INET {
+    if domain != AF_INET as u32 {
         return Err(Errno::EAFNOSUPPORT);
     }
-    if sock_type != SOCK_STREAM && sock_type != SOCK_DGRAM {
+    let protocols: &[u32] = match sock_type {
+        SOCK_STREAM => &[0, IPPROTO_TCP as u32],
+        SOCK_DGRAM => &[0, IPPROTO_UDP as u32, IPPROTO_ICMP as u32],
+        _ => return Err(Errno::ESOCKTNOSUPPORT),
+    };
+    if !protocols.contains(&protocol) {
         return Err(Errno::EPROTONOSUPPORT);
     }
-    let _icmp_datagram = sock_type == SOCK_DGRAM && protocol == IPPROTO_ICMP;
 
     // Both halves of the owner come from the syscall context, never from
     // userland: `net_query` gates owner disclosure by comparing against it.
@@ -125,20 +186,11 @@ define_syscall!(syscall_socket
         process: Some(process_id),
         task_id,
     };
-    let sock_idx = socket::socket_create(domain, sock_type, protocol, owner);
+    let sock_idx = socket::socket_create(AF_INET, sock_type, protocol as u16, owner);
     if sock_idx < 0 {
         return Err(errno_from_neg(sock_idx));
     }
-
-    let backing =
-        slopos_net::socket_file_ops::socket_backing(sock_idx as u32, process_id.account())
-            .ok_or(Errno::ENFILE)?;
-    let fd = slopos_fs::fileio_open_socket_fd(process_id, sock_idx as u32, Some(backing));
-    if fd < 0 {
-        return Err(Errno::ENOMEM);
-    }
-
-    Ok(fd as u64)
+    install_inet_socket(process_id, sock_idx as u32, flags).map(|fd| fd as u64)
 });
 
 define_syscall!(syscall_bind
@@ -202,7 +254,27 @@ define_syscall!(syscall_accept
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    let sock_fd = socket_fd_for(process_id, fd.raw())?;
+    accept_connection(process_id, fd.raw(), peer_ptr, addrlen_ptr, NewSocketFlags::NONE)
+});
+
+define_syscall!(syscall_accept4
+    (ctx, fd: Fd, peer_ptr: u64, addrlen_ptr: u64, flags: u32)
+    cap(NoneFd)
+    requires(let process_id: process_id)
+    -> Result<u64, Errno>
+{
+    let flags = NewSocketFlags::parse(flags)?;
+    accept_connection(process_id, fd.raw(), peer_ptr, addrlen_ptr, flags)
+});
+
+fn accept_connection(
+    process_id: FdTable,
+    fd: i32,
+    peer_ptr: u64,
+    addrlen_ptr: u64,
+    flags: NewSocketFlags,
+) -> Result<u64, Errno> {
+    let sock_fd = socket_fd_for(process_id, fd)?;
     // `addrlen` is in/out: the caller's buffer size in, the peer address's real
     // length out. A null address pointer declines the peer; a non-null one with
     // no length to read is the malformed pair Linux faults on.
@@ -210,33 +282,23 @@ define_syscall!(syscall_accept
         return Err(Errno::EFAULT);
     }
     let want_peer = peer_ptr != 0;
-    let caller_len = if want_peer { read_socklen(addrlen_ptr)? } else { 0 };
+    let caller_len = if want_peer {
+        read_socklen(addrlen_ptr)?
+    } else {
+        0
+    };
 
     match sock_fd {
         SocketFd::Unix(sh) => {
-            let accepted_handle =
-                unix_socket::unix_accept(sh).map_err(errno_from_neg)?;
+            let accepted_handle = unix_socket::unix_accept(sh).map_err(errno_from_neg)?;
             // The accepting process pays: a connection is remote-triggered, so
             // charging the listener would let a peer exhaust its whole budget.
-            let backing =
-                unix_socket_file_ops::unix_socket_backing(accepted_handle, process_id.account())
-                    .ok_or(Errno::ENFILE)?;
-            let new_fd = slopos_fs::fileio_open_fd_with_ops(
-                process_id,
-                &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
-                accepted_handle.as_usize(),
-                Some(backing),
-                slopos_fs::FdFlags::NONE,
-            );
-            if new_fd < 0 {
-                return Err(Errno::ENOMEM);
-            }
+            let new_fd = install_unix_socket(process_id, accepted_handle, flags)?;
             // The descriptor is already installed, so a faulting copy-out must
             // not leave the caller holding a connection it was never told the
             // number of.
             if want_peer
-                && let Err(e) =
-                    accept_peer_unix(accepted_handle, caller_len, peer_ptr, addrlen_ptr)
+                && let Err(e) = accept_peer_unix(accepted_handle, caller_len, peer_ptr, addrlen_ptr)
             {
                 let _ = slopos_fs::file_close_fd(process_id, new_fd);
                 return Err(e);
@@ -249,23 +311,21 @@ define_syscall!(syscall_accept
 
             let accepted_idx = socket::socket_accept(
                 sock_idx,
-                if want_peer { &mut peer_ip as *mut [u8; 4] } else { core::ptr::null_mut() },
-                if want_peer { &mut peer_port as *mut u16 } else { core::ptr::null_mut() },
+                if want_peer {
+                    &mut peer_ip as *mut [u8; 4]
+                } else {
+                    core::ptr::null_mut()
+                },
+                if want_peer {
+                    &mut peer_port as *mut u16
+                } else {
+                    core::ptr::null_mut()
+                },
             );
             if accepted_idx < 0 {
                 return Err(errno_from_neg(accepted_idx));
             }
-
-            let backing = slopos_net::socket_file_ops::socket_backing(
-                accepted_idx as u32,
-                process_id.account(),
-            )
-            .ok_or(Errno::ENFILE)?;
-            let new_fd =
-                slopos_fs::fileio_open_socket_fd(process_id, accepted_idx as u32, Some(backing));
-            if new_fd < 0 {
-                return Err(Errno::ENOMEM);
-            }
+            let new_fd = install_inet_socket(process_id, accepted_idx as u32, flags)?;
 
             if want_peer {
                 let peer = SockAddrIn {
@@ -288,7 +348,7 @@ define_syscall!(syscall_accept
             Ok(new_fd as u64)
         }
     }
-});
+}
 
 define_syscall!(syscall_connect
     (ctx, fd: Fd, addr_ptr: u64, addr_len: u64)

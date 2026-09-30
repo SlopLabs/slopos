@@ -895,6 +895,11 @@ pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
         socket_get_state(new_sock as u32),
         Some(SocketState::Connected)
     );
+    assert_eq_test!(
+        socket_is_nonblocking(new_sock as u32),
+        Some(false),
+        "the accepted socket took the listener's O_NONBLOCK"
+    );
     pass!()
 }
 

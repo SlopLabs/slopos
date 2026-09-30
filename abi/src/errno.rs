@@ -148,6 +148,7 @@ define_errnos! {
     EDESTADDRREQ    =  89, "Destination address required";
     EMSGSIZE        =  90, "Message too long";
     EPROTONOSUPPORT =  93, "Protocol not supported";
+    ESOCKTNOSUPPORT =  94, "Socket type not supported";
     EOPNOTSUPP      =  95, "Operation not supported";
     EAFNOSUPPORT    =  97, "Address family not supported";
     EADDRINUSE      =  98, "Address already in use";

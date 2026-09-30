@@ -203,13 +203,6 @@ pub unsafe extern "C" fn socketpair(_domain: i32, _ty: i32, _protocol: i32, _sv:
     -1
 }
 
-/// `accept4(2)`.
-///
-/// Linux sets the new descriptor's flags atomically with the accept; without
-/// an `accept4` syscall this is `accept` followed by `fcntl`, so a concurrent
-/// `fork` in the window between them inherits a descriptor whose `O_CLOEXEC`
-/// is not yet set. Stated rather than hidden: the ordering is the best a
-/// userland implementation can do.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn accept4(
     sockfd: i32,
@@ -217,42 +210,13 @@ pub unsafe extern "C" fn accept4(
     addrlen: *mut u32,
     flags: i32,
 ) -> i32 {
-    let fd = accept(sockfd, addr, addrlen);
-    if fd < 0 {
-        return -1;
-    }
-    if flags & addr::SOCK_CLOEXEC != 0
-        && Sys::fcntl(
-            fd,
-            slopos_abi::syscall::F_SETFD as i32,
-            slopos_abi::syscall::FD_CLOEXEC,
-        )
-        .is_err()
-    {
-        let _ = Sys::close(fd);
-        errno_set(crate::errno::EINVAL.raw());
-        return -1;
-    }
-    if flags & addr::SOCK_NONBLOCK != 0 {
-        let current = match Sys::fcntl(fd, slopos_abi::syscall::F_GETFL as i32, 0) {
-            Ok(v) => v as u64,
-            Err(e) => {
-                let _ = Sys::close(fd);
-                errno_set(e.raw());
-                return -1;
-            }
-        };
-        if let Err(e) = Sys::fcntl(
-            fd,
-            slopos_abi::syscall::F_SETFL as i32,
-            current | slopos_abi::syscall::O_NONBLOCK,
-        ) {
-            let _ = Sys::close(fd);
+    match Sys::accept4(sockfd, addr as *mut u8, addrlen, flags) {
+        Ok(new_fd) => new_fd,
+        Err(e) => {
             errno_set(e.raw());
-            return -1;
+            -1
         }
     }
-    fd
 }
 
 /// `sendmsg(2)`. The kernel's `MsgHdr` *is* the Linux-shaped `struct msghdr`

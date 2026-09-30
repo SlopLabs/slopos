@@ -32,20 +32,24 @@ use slopos_abi::signal::{
     MINSIGSTKSZ, SA_ONSTACK, SA_RESTART, SA_SIGINFO, SEGV_ACCERR, UserSiginfo,
 };
 use slopos_abi::syscall::{
-    CMSG_DATA_OFFSET, CmsgHdr, MAP_ANONYMOUS, MAP_PRIVATE, MsgHdr, PROT_READ, PROT_WRITE,
-    SCM_RIGHTS, SOL_SOCKET, cmsg_len, cmsg_space,
+    CMSG_DATA_OFFSET, CmsgHdr, F_GETFD, F_GETFL, FD_CLOEXEC, MAP_ANONYMOUS, MAP_PRIVATE, MsgHdr,
+    O_NONBLOCK, PROT_READ, PROT_WRITE, SCM_RIGHTS, SOL_SOCKET, cmsg_len, cmsg_space,
 };
 use slopos_abi::unix::SockAddrUn;
 use slopos_slibc::conf::{
     _SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN, _SC_PAGESIZE, getgrgid, getgrgid_r, getgrnam,
     sysconf,
 };
-use slopos_slibc::errno::{EBUSY, EINVAL, ERANGE, ETIMEDOUT};
+use slopos_slibc::errno::{
+    EAGAIN, EBUSY, EINVAL, EPROTONOSUPPORT, ERANGE, ESOCKTNOSUPPORT, ETIMEDOUT,
+};
 use slopos_slibc::ffi::syscalls::{mmap, mprotect, munmap, realpath, slopos_getdents64, utime};
-use slopos_slibc::ffi::{O_DIRECTORY, O_RDONLY, close, open, write};
+use slopos_slibc::ffi::{O_DIRECTORY, O_RDONLY, close, open, read, write};
 use slopos_slibc::io::dirent::DirentIter;
 use slopos_slibc::net::{
-    AF_UNIX, SOCK_STREAM, accept, bind, connect, listen, recvmsg, sendmsg, socket,
+    AF_INET, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_NONBLOCK,
+    SOCK_SEQPACKET, SOCK_STREAM, SockAddrIn, accept, accept4, bind, connect, getsockname, listen,
+    recvmsg, sendmsg, socket,
 };
 use slopos_slibc::process::{_exit, WEXITSTATUS, WIFEXITED, execl, execle, fork, waitpid};
 use slopos_slibc::signal::{self, SIG_DFL, SIGSEGV, SIGUSR1, SIGUSR2};
@@ -895,6 +899,221 @@ fn connected_unix_pair(path: &str) -> Option<(i32, i32, i32)> {
     Some((listener, client, server))
 }
 
+unsafe extern "C" {
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+}
+
+/// `(FD_CLOEXEC, O_NONBLOCK)` as `fd` carries them; `None` for no descriptor.
+fn descriptor_flags(fd: i32) -> Option<(bool, bool)> {
+    let fd_flags = unsafe { fcntl(fd, F_GETFD as i32) };
+    let status = unsafe { fcntl(fd, F_GETFL as i32) };
+    (fd_flags >= 0 && status >= 0).then_some((
+        fd_flags & FD_CLOEXEC as i32 != 0,
+        status & O_NONBLOCK as i32 != 0,
+    ))
+}
+
+/// What `call` returned and its errno, or `None` if it was still blocked after a
+/// second, so a lost `O_NONBLOCK` fails the case rather than hanging the suite.
+fn unblocked(call: impl FnOnce() -> isize + Send + 'static) -> Option<(isize, i32)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let ret = call();
+        let _ = tx.send((ret, errno_get()));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(1)).ok()
+}
+
+/// Closes what it holds when the case returns, however it returns.
+struct Descriptors(Vec<i32>);
+
+impl Descriptors {
+    fn keep(&mut self, fd: i32) -> i32 {
+        if fd >= 0 {
+            self.0.push(fd);
+        }
+        fd
+    }
+}
+
+impl Drop for Descriptors {
+    fn drop(&mut self) {
+        for &fd in &self.0 {
+            close(fd);
+        }
+    }
+}
+
+/// An `accept4` on a nonblocking listener, retried while the handshake that
+/// `connect` finished has not yet reached the listener's queue.
+fn accept4_pending(listener: i32, flags: i32) -> i32 {
+    for _ in 0..100 {
+        let fd = unsafe { accept4(listener, ptr::null_mut(), ptr::null_mut(), flags) };
+        if fd >= 0 || errno_get() != EAGAIN.raw() {
+            return fd;
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    -1
+}
+
+/// `socket(2)` takes `SOCK_CLOEXEC` and `SOCK_NONBLOCK` in its type argument
+/// and `accept4(2)` in its fourth; both apply them to the descriptor they make
+/// and refuse any other bit, and an accepted connection takes neither from
+/// its listener.
+fn socket_and_accept4_apply_their_flags() -> bool {
+    if !work_dir() {
+        return false;
+    }
+    let fail = |why: &str| {
+        note(why);
+        false
+    };
+    let path = format!("{WORK}/flags.sock");
+    let _ = fs::remove_file(&path);
+    let mut un = SockAddrUn::default();
+    un.family = AF_UNIX as u16;
+    un.path[..path.len()].copy_from_slice(path.as_bytes());
+    let un_len = (2 + path.len()) as u32;
+    let un_addr = &un as *const SockAddrUn as *const slopos_slibc::net::SockAddr;
+    const UNKNOWN: i32 = 0x4000_0000;
+    let mut fds = Descriptors(Vec::new());
+
+    let listener =
+        fds.keep(unsafe { socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0) });
+    if descriptor_flags(listener) != Some((true, true)) {
+        return fail("socket(AF_UNIX) left SOCK_CLOEXEC or SOCK_NONBLOCK off the descriptor");
+    }
+    if unsafe { bind(listener, un_addr, un_len) } != 0 || unsafe { listen(listener, 2) } != 0 {
+        return fail("the flagged AF_UNIX listener did not bind and listen");
+    }
+    // A probe left blocked still holds the listener, so nothing may connect to
+    // it after a failure here.
+    match unblocked(move || unsafe { accept(listener, ptr::null_mut(), ptr::null_mut()) } as isize)
+    {
+        Some((-1, errno)) if errno == EAGAIN.raw() => {}
+        Some((fd, _)) => {
+            fds.keep(fd as i32);
+            return fail("accept() on the SOCK_NONBLOCK listener did not answer EAGAIN");
+        }
+        None => return fail("accept() blocked on the SOCK_NONBLOCK listener"),
+    }
+    let plain = fds.keep(unsafe { socket(AF_UNIX, SOCK_STREAM, 0) });
+    if descriptor_flags(plain) != Some((false, false))
+        || unsafe { connect(plain, un_addr, un_len) } != 0
+    {
+        return fail("a plain socket(AF_UNIX) came out flagged or did not connect");
+    }
+    let conn =
+        fds.keep(unsafe { accept4(listener, ptr::null_mut(), ptr::null_mut(), SOCK_CLOEXEC) });
+    if descriptor_flags(conn) != Some((true, false)) {
+        return fail("accept4(SOCK_CLOEXEC) did not make a close-on-exec, blocking descriptor");
+    }
+    let second = fds.keep(unsafe { socket(AF_UNIX, SOCK_STREAM, 0) });
+    if unsafe { connect(second, un_addr, un_len) } != 0 {
+        return fail("a second AF_UNIX connect failed");
+    }
+    let conn =
+        fds.keep(unsafe { accept4(listener, ptr::null_mut(), ptr::null_mut(), SOCK_NONBLOCK) });
+    if descriptor_flags(conn) != Some((false, true)) {
+        return fail("accept4(SOCK_NONBLOCK) did not make a nonblocking descriptor");
+    }
+    match unblocked(move || {
+        let mut byte = 0u8;
+        unsafe { read(conn, (&raw mut byte).cast(), 1) }
+    }) {
+        Some((-1, errno)) if errno == EAGAIN.raw() => {}
+        _ => return fail("a read on the accept4(SOCK_NONBLOCK) connection did not answer EAGAIN"),
+    }
+    if fds.keep(unsafe { socket(AF_UNIX, SOCK_STREAM | UNKNOWN, 0) }) != -1
+        || errno_get() != EINVAL.raw()
+    {
+        return fail("socket() took an unknown type flag");
+    }
+    if fds.keep(unsafe { accept4(listener, ptr::null_mut(), ptr::null_mut(), UNKNOWN) }) != -1
+        || errno_get() != EINVAL.raw()
+    {
+        return fail("accept4() took an unknown flag");
+    }
+
+    for (domain, kind, protocol, want, what) in [
+        (
+            AF_INET,
+            SOCK_STREAM,
+            IPPROTO_UDP,
+            EPROTONOSUPPORT,
+            "a protocol the type lacks",
+        ),
+        (
+            AF_INET,
+            SOCK_SEQPACKET,
+            0,
+            ESOCKTNOSUPPORT,
+            "a type the family lacks",
+        ),
+        (AF_INET, 11, 0, EINVAL, "a type past the last one"),
+        (
+            AF_UNIX,
+            SOCK_DGRAM,
+            6,
+            EPROTONOSUPPORT,
+            "a foreign protocol, ahead of the type",
+        ),
+    ] {
+        if fds.keep(unsafe { socket(domain, kind, protocol) }) != -1 || errno_get() != want.raw() {
+            return fail(&format!(
+                "socket() given {what} did not answer errno {}",
+                want.raw()
+            ));
+        }
+    }
+    let inet_listener = fds.keep(unsafe {
+        socket(
+            AF_INET,
+            SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+            IPPROTO_TCP,
+        )
+    });
+    if descriptor_flags(inet_listener) != Some((true, true)) {
+        return fail(
+            "socket(AF_INET, SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP) was refused or unflagged",
+        );
+    }
+    let mut inet = SockAddrIn {
+        sin_family: AF_INET as u16,
+        sin_port: 0,
+        sin_addr: u32::from_ne_bytes([127, 0, 0, 1]),
+        sin_zero: [0; 8],
+    };
+    let inet_addr = &raw mut inet as *mut slopos_slibc::net::SockAddr;
+    let mut inet_len = mem::size_of::<SockAddrIn>() as u32;
+    if unsafe { bind(inet_listener, inet_addr, inet_len) } != 0
+        || unsafe { listen(inet_listener, 1) } != 0
+        || unsafe { getsockname(inet_listener, inet_addr, &mut inet_len) } != 0
+    {
+        return fail("the flagged AF_INET listener did not bind to loopback and listen");
+    }
+    let client = fds.keep(unsafe { socket(AF_INET, SOCK_STREAM, 0) });
+    if unsafe { connect(client, inet_addr, inet_len) } != 0 {
+        return fail("a loopback connect to the flagged AF_INET listener failed");
+    }
+    let conn = fds.keep(accept4_pending(inet_listener, SOCK_NONBLOCK | SOCK_CLOEXEC));
+    if descriptor_flags(conn) != Some((true, true)) {
+        return fail(
+            "accept4(AF_INET, SOCK_NONBLOCK | SOCK_CLOEXEC) did not make a flagged descriptor",
+        );
+    }
+    match unblocked(move || {
+        let mut byte = 0u8;
+        unsafe { read(conn, (&raw mut byte).cast(), 1) }
+    }) {
+        Some((-1, errno)) if errno == EAGAIN.raw() => {}
+        _ => return fail("a read on the nonblocking AF_INET connection did not answer EAGAIN"),
+    }
+    let _ = fs::remove_file(&path);
+    true
+}
+
 /// `msghdr` is Linux's 56-byte form with a real `*mut iovec` the kernel walks,
 /// and `cmsghdr` is 16 bytes with the payload at +16. Two *non-adjacent*
 /// iovec segments prove the array is walked rather than the first descriptor
@@ -1694,6 +1913,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "sigsegv_handler_reads_the_faulting_address",
         sigsegv_handler_reads_the_faulting_address,
+    ),
+    (
+        "socket_and_accept4_apply_their_flags",
+        socket_and_accept4_apply_their_flags,
     ),
     (
         "sendmsg_passes_a_descriptor_and_scattered_data",

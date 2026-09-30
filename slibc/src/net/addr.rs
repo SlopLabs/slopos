@@ -6,6 +6,7 @@ pub const AF_INET6: i32 = 10;
 
 pub const SOCK_STREAM: i32 = 1;
 pub const SOCK_DGRAM: i32 = 2;
+pub const SOCK_SEQPACKET: i32 = 5;
 pub const SOCK_NONBLOCK: i32 = 2048;
 pub const SOCK_CLOEXEC: i32 = 524288;
 

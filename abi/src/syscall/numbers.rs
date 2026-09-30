@@ -143,7 +143,8 @@ pub const SYSCALL_NANOSLEEP: u64 = 35;
 /// `getpid()` — the caller's thread-group id.
 pub const SYSCALL_GETPID: u64 = 39;
 
-/// `socket(domain, type, protocol) -> fd`. `protocol` 0 auto-selects.
+/// `socket(domain, type, protocol) -> fd`. `type` may carry `SOCK_NONBLOCK`
+/// and `SOCK_CLOEXEC`; `protocol` 0 auto-selects.
 pub const SYSCALL_SOCKET: u64 = 41;
 
 /// `connect(fd, addr: *const SockAddrIn, addrlen)`.
@@ -466,6 +467,11 @@ pub const SYSCALL_FACCESSAT: u64 = 269;
 /// `UTIME_NOW`/`UTIME_OMIT` in `tv_nsec` select per-field behaviour; a NULL
 /// `times` means both now.
 pub const SYSCALL_UTIMENSAT: u64 = 280;
+
+/// `accept4(fd, peer: *mut SockAddrIn, addrlen: *mut u32, flags) -> fd` —
+/// [`SYSCALL_ACCEPT`] with `SOCK_NONBLOCK` and `SOCK_CLOEXEC` applied to the
+/// new descriptor as it is made; it takes neither from the listener.
+pub const SYSCALL_ACCEPT4: u64 = 288;
 
 /// `signalfd4(fd, mask: *const SigSet, sizemask, flags) -> fd`, `POLLIN`-ready
 /// while a signal in `mask` is pending for the poller or its process; `read`

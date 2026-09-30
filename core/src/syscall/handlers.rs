@@ -35,9 +35,10 @@ use crate::syscall::net_config_handlers::{
     syscall_net_route_ctl,
 };
 use crate::syscall::net_handlers::{
-    syscall_accept, syscall_bind, syscall_connect, syscall_getpeername, syscall_getsockname,
-    syscall_getsockopt, syscall_listen, syscall_recvfrom, syscall_recvmsg, syscall_resolve,
-    syscall_sendmsg, syscall_sendto, syscall_setsockopt, syscall_shutdown, syscall_socket,
+    syscall_accept, syscall_accept4, syscall_bind, syscall_connect, syscall_getpeername,
+    syscall_getsockname, syscall_getsockopt, syscall_listen, syscall_recvfrom, syscall_recvmsg,
+    syscall_resolve, syscall_sendmsg, syscall_sendto, syscall_setsockopt, syscall_shutdown,
+    syscall_socket,
 };
 use crate::syscall::net_query_handlers::syscall_net_query;
 pub use crate::syscall::pidfd_handlers::syscall_pidfd_open;
@@ -213,6 +214,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_FCHMODAT]          => syscall_fchmodat,          "fchmodat";
     [SYSCALL_FACCESSAT]         => syscall_faccessat,         "faccessat";
     [SYSCALL_UTIMENSAT]         => syscall_utimensat,         "utimensat";
+    [SYSCALL_ACCEPT4]           => syscall_accept4,           "accept4";
     [SYSCALL_SIGNALFD4]         => syscall_signalfd4,         "signalfd4";
     [SYSCALL_DUP3]              => syscall_dup3,              "dup3";
     [SYSCALL_PIPE2]             => syscall_pipe2,             "pipe2";
@@ -323,7 +325,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 162;
+pub const SYSCALL_ENTRY_COUNT: usize = 163;
 
 /// The recorded shape of the classification.
 ///
@@ -334,7 +336,7 @@ pub const SYSCALL_ENTRY_COUNT: usize = 162;
 const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::Unimplemented, 0),
     (Capability::NoneSelf, 48),
-    (Capability::NoneFd, 74),
+    (Capability::NoneFd, 75),
     (Capability::NoneRelation, 17),
     (Capability::Power, 3),
     (Capability::Launch, 0),

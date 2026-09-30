@@ -195,6 +195,7 @@ pub trait Pal {
     fn bind(fd: i32, addr: *const u8, addrlen: u32) -> Result<(), Errno>;
     fn listen(fd: i32, backlog: i32) -> Result<(), Errno>;
     fn accept(fd: i32, addr: *mut u8, addrlen: *mut u32) -> Result<i32, Errno>;
+    fn accept4(fd: i32, addr: *mut u8, addrlen: *mut u32, flags: i32) -> Result<i32, Errno>;
     fn connect(fd: i32, addr: *const u8, addrlen: u32) -> Result<(), Errno>;
     fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> Result<usize, Errno>;
     fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> Result<usize, Errno>;

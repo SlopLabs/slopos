@@ -94,7 +94,7 @@ pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Er
                     slopos_fs::FdFlags::NONE,
                 );
                 if new_fd < 0 {
-                    return Err(Errno::ENOMEM);
+                    return Err(Errno::from_raw(new_fd).unwrap_or(Errno::ENOMEM));
                 }
                 Ok(Some(new_fd))
             }
@@ -117,9 +117,15 @@ pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Er
         else {
             return Err(Errno::ENFILE);
         };
-        let new_fd = slopos_fs::fileio_open_socket_fd(table, accepted as u32, Some(backing));
+        let new_fd = slopos_fs::fileio_open_socket_fd(
+            table,
+            accepted as u32,
+            Some(backing),
+            slopos_fs::FdFlags::NONE,
+            false,
+        );
         if new_fd < 0 {
-            return Err(Errno::ENOMEM);
+            return Err(Errno::from_raw(new_fd).unwrap_or(Errno::ENOMEM));
         }
         Ok(Some(new_fd))
     }

@@ -6,6 +6,23 @@ pub const SOCK_DGRAM: u16 = 2;
 pub const SOCK_RAW: u16 = 3;
 
 pub const IPPROTO_ICMP: u16 = 1;
+pub const IPPROTO_UDP: u16 = 17;
+
+/// `socket(2)`'s type argument is a type in these bits and flags above them.
+pub const SOCK_TYPE_MASK: u32 = 0xf;
+/// One past the last socket type Linux numbers: a type from here up is a bad
+/// argument, one below it that a family lacks is `ESOCKTNOSUPPORT`.
+pub const SOCK_MAX: u32 = 11;
+/// `socket(2)` and `accept4(2)` flags, applied to the descriptor as it is made:
+/// the open file's `O_NONBLOCK`, and the descriptor's `FD_CLOEXEC`.
+pub const SOCK_NONBLOCK: u32 = 0x800;
+pub const SOCK_CLOEXEC: u32 = 0x80_000;
+
+const _: () = assert!(
+    SOCK_NONBLOCK as u64 == crate::syscall::O_NONBLOCK
+        && SOCK_CLOEXEC as u64 == crate::syscall::O_CLOEXEC,
+    "the socket flags share the O_ flags' values"
+);
 
 /// IPv4 socket address — mirrors POSIX `sockaddr_in` layout.
 #[repr(C)]

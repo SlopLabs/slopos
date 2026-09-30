@@ -877,6 +877,20 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
+    fn accept4(fd: i32, addr: *mut u8, addrlen: *mut u32, flags: i32) -> Result<i32, Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_ACCEPT4,
+                fd as u64,
+                addr as u64,
+                addrlen as u64,
+                flags as u32 as u64,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as i32)
+    }
+
     fn connect(fd: i32, addr: *const u8, addrlen: u32) -> Result<(), Errno> {
         let ret = unsafe { syscall3(SYSCALL_CONNECT, fd as u64, addr as u64, addrlen as u64) };
         to_result(ret)?;

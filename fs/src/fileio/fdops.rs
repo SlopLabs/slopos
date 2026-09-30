@@ -52,10 +52,12 @@ fn install_fd_entry(
         }
     }
 
+    // A socket keeps its blocking mode in its own state too, which a new
+    // description sets from its `O_NONBLOCK`.
     if ops.kind() == FileKind::Socket {
-        let mode_bits = flags & (OpenMode::READ | OpenMode::WRITE);
-        flags = mode_bits;
-        let _ = ops.set_status_flags(handle, flags.bits());
+        flags =
+            (flags & (OpenMode::READ | OpenMode::WRITE)).with_raw(flags.bits() & O_NONBLOCK as u32);
+        let _ = ops.set_status_flags(handle, openmode_to_posix_bits(flags));
     }
 
     let cloexec = fd_flags.cloexec || (flags.bits() & O_CLOEXEC as u32) != 0;
@@ -1480,19 +1482,19 @@ pub fn fileio_open_socket_fd(
     table: FdTable,
     socket_idx: u32,
     backing: Option<KArc<dyn FileBacking>>,
+    fd_flags: FdFlags,
+    nonblock: bool,
 ) -> i32 {
     let Some(socket_ops) = current_socket_ops() else {
         return Errno::ENOTSOCK.raw() as _;
     };
-    install_fd_entry(
+    fileio_open_fd_with_ops_nonblock(
         table,
         socket_ops,
         socket_idx as usize,
-        OpenMode::READ | OpenMode::WRITE,
-        FdFlags::NONE,
-        None,
         backing,
-        None,
+        fd_flags,
+        nonblock,
     )
 }
 

@@ -1582,7 +1582,6 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 keepalive: listen_sock.options.keepalive,
                 tcp_nodelay: listen_sock.options.tcp_nodelay,
             };
-            let is_nonblocking = listen_sock.is_nonblocking();
 
             let accepted = if let SocketInner::Tcp(ref mut tcp_inner) = listen_sock.inner {
                 tcp_inner.listen.as_mut().and_then(|ls| ls.accept())
@@ -1635,7 +1634,6 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                     Port(accepted_conn.tuple.remote_port),
                 ));
                 sock.options = listen_opts;
-                sock.set_nonblocking(is_nonblocking);
 
                 slopos_ostd::util::ptr_buf::write_if_non_null(
                     peer_addr,
