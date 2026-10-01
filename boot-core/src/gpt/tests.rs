@@ -1,8 +1,8 @@
 use super::*;
 use crate::layout::{BOOT_TYPE, ESP_TYPE};
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::string::String;
 use std::vec;
 use std::vec::Vec;
@@ -328,13 +328,32 @@ fn scratch(name: &str) -> PathBuf {
     scratch_dir().join(name)
 }
 
-/// A table `sfdisk` wrote — on a 512-byte disk, and a short one on a
-/// 4K-native disk — reads back with the partitions, GUIDs and names it was
-/// given.
+/// Partitions `img` as a disk of `block`-byte sectors from the sfdisk
+/// `script`, through fdisk's `I` command: sfdisk takes a sector size only
+/// from util-linux 2.40.
+fn partition(img: &Path, block: u64, script: &str) {
+    let script_path = img.with_extension("sfdisk");
+    fs::write(&script_path, script).unwrap();
+    let mut child = Command::new("fdisk")
+        .arg("--sector-size")
+        .arg(format!("{block}"))
+        .arg(img)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let commands = format!("I\n{}\nw\n", script_path.display());
+    std::io::Write::write_all(child.stdin.as_mut().unwrap(), commands.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+    let _ = fs::remove_file(&script_path);
+}
+
+/// A table fdisk wrote — on a 512-byte disk, and a short one on a 4K-native
+/// disk — reads back with the partitions, GUIDs and names it was given.
 #[test]
-fn reads_what_sfdisk_writes() {
-    if !host_tool("sfdisk") {
-        eprintln!("skipped: needs sfdisk");
+fn reads_what_fdisk_writes() {
+    if !host_tool("fdisk") {
+        eprintln!("skipped: needs fdisk");
         return;
     }
     for (block, table_length) in [(512u64, 128), (4096, 4)] {
@@ -352,20 +371,7 @@ fn reads_what_sfdisk_writes() {
             9 * mib,
             16 * mib
         );
-        let mut child = Command::new("sfdisk")
-            .args([
-                "--quiet",
-                "--no-reread",
-                "--no-tell-kernel",
-                "--sector-size",
-            ])
-            .arg(format!("{block}"))
-            .arg(&img)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        std::io::Write::write_all(child.stdin.as_mut().unwrap(), script.as_bytes()).unwrap();
-        assert!(child.wait().unwrap().success());
+        partition(&img, block, &script);
         let image = fs::read(&img).unwrap();
         let blocks = image.len() as u64 / block;
         for lba in [PRIMARY_LBA, blocks - 1] {

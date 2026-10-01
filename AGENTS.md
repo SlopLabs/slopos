@@ -432,7 +432,7 @@ partition probe and `bootctl` both read through it, load options and device
 paths, the boot manager variables and what a write to them must look like, the
 Boot Loader Interface's strings, the layout and the Limine configuration. It
 is `no_std`, free of I/O and host-tested under `just test-host`, against
-tables `sfdisk` wrote among them, and `tools/bootdisk` is how the host's disk
+tables `fdisk` wrote among them, and `tools/bootdisk` is how the host's disk
 builder asks it for the layout and the configuration. The configuration names
 each slot's files by the boot partition's GUID and names no `default_entry`,
 because Limine 12.9 consults `LoaderEntryDefault` only while that is unset; it
