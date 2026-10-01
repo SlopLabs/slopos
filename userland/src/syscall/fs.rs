@@ -391,6 +391,36 @@ pub fn tcgetsid(fd: RawFd) -> SyscallResult<u32> {
     demux(result).map(|_| sid)
 }
 
+/// The inode flags of the file on `fd` (`FS_IOC_GETFLAGS`).
+#[inline(always)]
+pub fn inode_flags(fd: RawFd) -> SyscallResult<u32> {
+    let mut flags = 0u32;
+    let result = unsafe {
+        syscall3(
+            SYSCALL_IOCTL,
+            fd as u64,
+            u64::from(slopos_abi::fs::inode_flags_ioctl::FS_IOC_GETFLAGS),
+            (&mut flags as *mut u32) as u64,
+        )
+    };
+    demux(result).map(|_| flags)
+}
+
+/// Make the file's inode flags `flags` (`FS_IOC_SETFLAGS`).
+#[inline(always)]
+pub fn set_inode_flags(fd: RawFd, flags: u32) -> SyscallResult<()> {
+    let value = flags;
+    let result = unsafe {
+        syscall3(
+            SYSCALL_IOCTL,
+            fd as u64,
+            u64::from(slopos_abi::fs::inode_flags_ioctl::FS_IOC_SETFLAGS),
+            (&value as *const u32) as u64,
+        )
+    };
+    demux(result).map(|_| ())
+}
+
 /// The logical block size of the block device on `fd` (BLKSSZGET ioctl).
 #[inline(always)]
 pub fn block_size(fd: RawFd) -> SyscallResult<u32> {

@@ -7,8 +7,10 @@
 //! the crate can construct.
 
 use super::Ext2Error;
-use super::ondisk::{GroupDesc, Superblock};
+use super::ondisk::{GroupDesc, InodeFormat, Superblock};
 use super::types::{BlockNum, GroupIdx, InodeNum};
+use slopos_ext4_core::group::DescCsum;
+use slopos_ext4_core::superblock::{incompat, ro_compat};
 use slopos_ostd::process::AccountId;
 
 /// A group-descriptor location proven to lie inside the descriptor table.
@@ -30,13 +32,18 @@ impl GroupDescLoc {
     }
 }
 
-/// On-disk size of one block group descriptor in ext2 rev 0/1.
-pub const GROUP_DESC_SIZE: u32 = 32;
-
 #[derive(Debug, Copy, Clone)]
 pub struct Ext2Geometry {
     block_size: u32,
     inode_size: u16,
+    desc_size: u32,
+    desc_csum: DescCsum,
+    csum_seed: Option<u32>,
+    feature_incompat: u32,
+    feature_ro_compat: u32,
+    reserved_gdt_blocks: u32,
+    log_groups_per_flex: u8,
+    want_extra_isize: u16,
     blocks_count: u32,
     inodes_count: u32,
     first_data_block: BlockNum,
@@ -104,7 +111,8 @@ impl Ext2Geometry {
             return Err(Ext2Error::InvalidSuperblock);
         }
 
-        let desc_per_block = block_size / GROUP_DESC_SIZE;
+        let desc_size = u32::from(sb.desc_size);
+        let desc_per_block = block_size / desc_size;
         let gdt_first_block = first_data_block
             .checked_add(1)
             .ok_or(Ext2Error::InvalidSuperblock)?;
@@ -119,6 +127,14 @@ impl Ext2Geometry {
         Ok(Self {
             block_size,
             inode_size,
+            desc_size,
+            desc_csum: sb.desc_csum(),
+            csum_seed: sb.metadata_csum().then_some(sb.csum_seed),
+            feature_incompat: sb.feature_incompat,
+            feature_ro_compat: sb.feature_ro_compat,
+            reserved_gdt_blocks: u32::from(sb.reserved_gdt_blocks),
+            log_groups_per_flex: sb.log_groups_per_flex,
+            want_extra_isize: sb.want_extra_isize,
             blocks_count: sb.blocks_count,
             inodes_count: sb.inodes_count,
             first_data_block: BlockNum(first_data_block),
@@ -199,6 +215,72 @@ impl Ext2Geometry {
     }
 
     #[inline]
+    pub fn desc_size(self) -> usize {
+        self.desc_size as usize
+    }
+
+    #[inline]
+    pub fn desc_csum(self) -> DescCsum {
+        self.desc_csum
+    }
+
+    /// The `metadata_csum` seed, or `None` on a volume without checksums.
+    #[inline]
+    pub fn csum_seed(self) -> Option<u32> {
+        self.csum_seed
+    }
+
+    /// Whether the uninitialised-group flags mean anything: only a volume
+    /// that checksums its descriptors may leave a group unwritten.
+    #[inline]
+    pub fn uninit_groups(self) -> bool {
+        self.desc_csum.enabled()
+    }
+
+    #[inline]
+    pub fn inode_format(self) -> InodeFormat {
+        InodeFormat {
+            huge_file: self.feature_ro_compat & ro_compat::HUGE_FILE != 0,
+            block_size: self.block_size,
+        }
+    }
+
+    /// Whether new inodes map their blocks with an extent tree.
+    #[inline]
+    pub fn extents(self) -> bool {
+        self.feature_incompat & incompat::EXTENTS != 0
+    }
+
+    /// `i_extra_isize` a new inode gets: the volume's wish, held to what the
+    /// record has room for.
+    #[inline]
+    pub fn new_extra_isize(self) -> u16 {
+        let room = self.inode_size.saturating_sub(128);
+        self.want_extra_isize.max(32).min(room)
+    }
+
+    #[inline]
+    pub fn reserved_gdt_blocks(self) -> u32 {
+        self.reserved_gdt_blocks
+    }
+
+    /// Groups whose bitmaps and inode tables `flex_bg` packs together.
+    #[inline]
+    pub fn groups_per_flex(self) -> u32 {
+        if self.feature_incompat & incompat::FLEX_BG == 0 {
+            return 1;
+        }
+        1u32.checked_shl(u32::from(self.log_groups_per_flex))
+            .unwrap_or(1)
+    }
+
+    /// Whether `group` carries a superblock copy and descriptor table.
+    pub fn group_has_super(self, group: GroupIdx) -> bool {
+        let sparse = self.feature_ro_compat & ro_compat::SPARSE_SUPER != 0;
+        slopos_ext4_core::superblock::has_backup(group.raw(), sparse)
+    }
+
+    #[inline]
     pub fn groups_count(self) -> u32 {
         self.groups_count
     }
@@ -276,7 +358,7 @@ impl Ext2Geometry {
         let raw = group.raw();
         GroupDescLoc {
             block: BlockNum(self.gdt_first_block.raw() + raw / self.desc_per_block),
-            within: (raw % self.desc_per_block) * GROUP_DESC_SIZE,
+            within: (raw % self.desc_per_block) * self.desc_size,
         }
     }
 
@@ -289,16 +371,24 @@ impl Ext2Geometry {
         }
     }
 
+    /// [`Self::checked_block`], refusing the primary superblock and descriptor
+    /// table, which a file, tree, bitmap or inode table pointing there overwrites.
+    #[inline]
+    pub fn checked_owned_block(self, raw: u32) -> Option<BlockNum> {
+        let fixed_end = self.gdt_first_block.raw() + self.gdt_blocks + self.reserved_gdt_blocks;
+        self.checked_block(raw).filter(|_| raw >= fixed_end)
+    }
+
     /// A descriptor's three block pointers name blocks inside the volume, and
     /// the inode table it points at fits within it. Without this the pointers
     /// are attacker-chosen block numbers that `write_inode_num` writes through.
     pub fn validate_desc(&self, _group: GroupIdx, d: &GroupDesc) -> Result<(), Ext2Error> {
-        self.checked_block(d.block_bitmap.raw())
+        self.checked_owned_block(d.block_bitmap.raw())
             .ok_or(Ext2Error::InvalidBlock)?;
-        self.checked_block(d.inode_bitmap.raw())
+        self.checked_owned_block(d.inode_bitmap.raw())
             .ok_or(Ext2Error::InvalidBlock)?;
         let itable = self
-            .checked_block(d.inode_table.raw())
+            .checked_owned_block(d.inode_table.raw())
             .ok_or(Ext2Error::InvalidBlock)?;
         let itable_end = itable
             .raw()

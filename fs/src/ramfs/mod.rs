@@ -5,7 +5,9 @@ use slopos_mm::slab::MAX_ALLOC_SIZE;
 use slopos_ostd::{KBox, KVec};
 
 use crate::MAX_NAME_LEN;
-use crate::vfs::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult};
+use crate::vfs::{
+    FileStat, FileSystem, FileType, FsStats, InodeId, Timestamp, VfsError, VfsResult,
+};
 use slopos_ostd::sync::SpinLock;
 use slopos_ostd::sync::lock_tracking::LockClassKey;
 
@@ -401,9 +403,9 @@ struct RamInode {
     parent: InodeId,
     mode: u16,
     nlink: u32,
-    atime: u64,
-    mtime: u64,
-    ctime: u64,
+    atime: Timestamp,
+    mtime: Timestamp,
+    ctime: Timestamp,
     /// Refuses every mutation once set; never cleared while the inode lives.
     sealed: bool,
     /// Bumped on every reset, so a stale id fails to resolve.
@@ -420,9 +422,9 @@ impl RamInode {
             parent: 0,
             mode: 0o644,
             nlink: 1,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
+            atime: Timestamp::UNSET,
+            mtime: Timestamp::UNSET,
+            ctime: Timestamp::UNSET,
             sealed: false,
             generation: 1,
         }
@@ -440,9 +442,9 @@ impl RamInode {
         self.parent = 0;
         self.mode = 0o644;
         self.nlink = 1;
-        self.atime = 0;
-        self.mtime = 0;
-        self.ctime = 0;
+        self.atime = Timestamp::UNSET;
+        self.mtime = Timestamp::UNSET;
+        self.ctime = Timestamp::UNSET;
         self.sealed = false;
         self.generation = self.generation.wrapping_add(1);
         body
@@ -507,9 +509,9 @@ impl RamInode {
 
 /// Stamp a timestamp only when the wall clock can answer, so a boot without
 /// one leaves the field unset rather than claiming 1970, as ext2 does.
-fn stamp(field: &mut u64) {
-    if let Some(now) = slopos_kernel_services::clock::realtime_unix_secs() {
-        *field = u64::from(now);
+fn stamp(field: &mut Timestamp) {
+    if let Some(now) = Timestamp::now() {
+        *field = now;
     }
 }
 
@@ -1271,7 +1273,12 @@ impl FileSystem for RamFs {
         })
     }
 
-    fn set_times(&self, inode: InodeId, atime: Option<u64>, mtime: Option<u64>) -> VfsResult<()> {
+    fn set_times(
+        &self,
+        inode: InodeId,
+        atime: Option<Timestamp>,
+        mtime: Option<Timestamp>,
+    ) -> VfsResult<()> {
         self.with_inner_mut(|inner| {
             let ram_inode = inner.get_inode_mut(inode)?;
             if ram_inode.sealed {

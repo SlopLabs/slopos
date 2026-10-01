@@ -208,9 +208,13 @@ fn attr_body(fs: &'static Ext2Mount) -> Check {
         return Err("stat missed an unlink of one of two names");
     }
 
-    fs.set_times(f, Some(1_000), Some(2_000))
+    let (a, m) = (
+        crate::vfs::Timestamp::from_secs(1_000),
+        crate::vfs::Timestamp::from_secs(2_000),
+    );
+    fs.set_times(f, Some(a), Some(m))
         .map_err(|_| "utimes failed")?;
-    if stat2(fs, f).map(|s| (s.atime, s.mtime)) != Ok((1_000, 2_000)) {
+    if stat2(fs, f).map(|s| (s.atime, s.mtime)) != Ok((a, m)) {
         return Err("stat missed a utimes");
     }
     fs.set_sealed(f).map_err(|_| "the seal failed")?;

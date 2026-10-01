@@ -217,8 +217,13 @@ pub fn write_file(
     let mut written = 0usize;
     let mut file_offset = offset;
     let mut failure = None;
+    let limit = blockmap::max_file_size(inode, geom);
 
     while written < buffer.len() {
+        if file_offset >= limit {
+            failure = Some(Ext2Error::InvalidRange);
+            break;
+        }
         let fb = match file_block_index(file_offset, block_size) {
             Ok(fb) => FileBlock(fb),
             Err(e) => {
@@ -229,7 +234,7 @@ pub fn write_file(
         let block_off = (file_offset % block_size as u64) as usize;
         let to_copy = cmp::min(buffer.len() - written, block_size as usize - block_off);
 
-        let (phys, allocated) =
+        let phys =
             match blockmap::ensure_data_block(inode, fb, cache, device, geom, superblock, owner) {
                 Ok(v) => v,
                 Err(e) => {
@@ -237,10 +242,6 @@ pub fn write_file(
                     break;
                 }
             };
-        // Counted before the copy: the blocks are the inode's the moment
-        // `ensure_data_block` linked them in, whether or not this iteration
-        // goes on to fill them.
-        inode.blocks += allocated * (block_size / 512);
 
         match cache.get_data(phys, device, owner) {
             Ok(mut blk) => {
@@ -348,24 +349,37 @@ pub fn truncate(
         subtree_start += span;
     }
 
-    // Bytes between the new end and the end of its block are still on disk;
-    // extending the file again would surface them.
-    let tail = (new_size % bs) as usize;
-    if tail != 0 {
-        let fb = FileBlock(file_block_index(new_size, block_size)?);
-        let phys = blockmap::map_block(inode, fb, geom, cache, device, owner)?;
-        if phys.is_valid() {
-            let mut blk = cache.get_data(phys, device, owner)?;
-            blk.data_mut()[tail..].fill(0);
-        }
-    }
-
+    zero_tail(inode, new_size, cache, device, geom, block_size, owner)?;
     inode.size = new_size;
     let sectors_per_block = (block_size / 512) as u64;
     inode.blocks = inode
         .blocks
-        .saturating_sub((freed.saturating_mul(sectors_per_block)).min(u32::MAX as u64) as u32);
+        .saturating_sub(freed.saturating_mul(sectors_per_block));
 
+    Ok(())
+}
+
+/// Zero the bytes between a new end of file and the end of its block: they
+/// are still on disk, and extending the file again would surface them.
+pub fn zero_tail(
+    inode: &Inode,
+    new_size: u64,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext2Geometry,
+    block_size: u32,
+    owner: BlockOwner,
+) -> Result<(), Ext2Error> {
+    let tail = (new_size % u64::from(block_size)) as usize;
+    if tail == 0 {
+        return Ok(());
+    }
+    let fb = FileBlock(file_block_index(new_size, block_size)?);
+    let phys = blockmap::map_block(inode, fb, geom, cache, device, owner)?;
+    if phys.is_valid() {
+        let mut blk = cache.get_data(phys, device, owner)?;
+        blk.data_mut()[tail..].fill(0);
+    }
     Ok(())
 }
 

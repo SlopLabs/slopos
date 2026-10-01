@@ -93,6 +93,12 @@ pub enum Capability {
     /// Deletion condition: dies when the clock is an ioctl on a `/dev/rtc`
     /// descriptor delegated to init.
     Clock,
+
+    /// Setting or clearing a file's immutable flag. The descriptor naming the
+    /// file is not enough: the flag is what holds a program-identity grant,
+    /// keyed on a path, to the bytes it was granted for. Deletion condition:
+    /// dies when grants are keyed on content rather than path.
+    Seal,
 }
 
 impl Capability {
@@ -118,6 +124,7 @@ impl Capability {
             Self::TestHarness => 1 << 10,
             Self::Mount => 1 << 11,
             Self::Clock => 1 << 12,
+            Self::Seal => 1 << 13,
         }
     }
 
@@ -149,6 +156,7 @@ impl Capability {
             Self::TestHarness => "TestHarness",
             Self::Mount => "Mount",
             Self::Clock => "Clock",
+            Self::Seal => "Seal",
         }
     }
 
@@ -172,6 +180,7 @@ impl Capability {
         Self::TestHarness,
         Self::Mount,
         Self::Clock,
+        Self::Seal,
     ];
 }
 
@@ -235,6 +244,7 @@ cap_kinds!(
     Fate,
     TestHarness,
     Mount,
+    Seal,
 );
 
 /// Proof that a capability check ran, for the request it was minted in.
@@ -480,11 +490,12 @@ pub const fn caps_from_task_flags(flags: u16) -> u64 {
         mask |= Capability::Mount.bit();
     }
     if flags & TASK_FLAG_SYSTEM != 0 {
-        // No `TASK_FLAG_CLOCK` exists to grant on a program identity: the wall
-        // clock is one global anchor, so init is the only principal that sets
-        // it.
-        mask |=
-            Capability::ProcSignal.bit() | Capability::TestHarness.bit() | Capability::Clock.bit();
+        // No flag grants the clock or the seal on a program identity, so init
+        // is the only principal that moves either.
+        mask |= Capability::ProcSignal.bit()
+            | Capability::TestHarness.bit()
+            | Capability::Clock.bit()
+            | Capability::Seal.bit();
     }
     mask
 }

@@ -1,6 +1,7 @@
 pub mod dcache;
 pub mod dirchurn;
 pub mod dquota;
+pub mod ext4;
 pub mod filemap;
 pub mod fsperf;
 pub mod journal;
@@ -8,11 +9,13 @@ pub mod mount;
 pub mod partition;
 pub mod ramfs_devfs;
 pub mod resolve;
+pub mod rude_exit;
 pub mod statfs;
 pub mod verity_rw;
 pub mod volume_id;
 
 use slopos_abi::fs::UserFsEntry;
+use slopos_ext4_core::superblock::{incompat, ro_compat};
 use slopos_ostd::KVec;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
@@ -30,20 +33,33 @@ use crate::vfs::{
 /// outlive `$fs`; returns `TestResult::Fail` early on an invalid superblock.
 macro_rules! mount_ext2 {
     ($device:expr, $cache:ident, $fs:ident) => {
-        let (sb, bs, is) = match Ext2Fs::mount_params(&$device) {
-            Ok(v) => v,
-            Err(_) => return TestResult::Fail,
-        };
-        let mut $cache = match BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) {
-            Ok(c) => c,
-            Err(_) => return TestResult::Fail,
+        let Some(mut $cache) = fixture_cache(&$device) else {
+            return TestResult::Fail;
         };
         #[allow(unused_mut)]
-        let mut $fs = match Ext2Fs::new(&$device, &mut $cache, sb, bs, is) {
-            Ok(v) => v,
-            Err(_) => return TestResult::Fail,
+        let Some(mut $fs) = fixture_fs(&$device, &mut $cache) else {
+            return TestResult::Fail;
         };
     };
+}
+
+/// [`mount_ext2!`]'s halves, each in its own frame so the superblock and
+/// geometry they stage never sit on a test's.
+#[inline(never)]
+fn fixture_cache(
+    device: &dyn crate::blockdev::BlockDevice,
+) -> Option<slopos_ostd::KBox<BlockCache>> {
+    let (_, geom) = Ext2Fs::mount_params(device).ok()?;
+    BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).ok()
+}
+
+#[inline(never)]
+fn fixture_fs<'a>(
+    device: &'a dyn crate::blockdev::BlockDevice,
+    cache: &'a mut BlockCache,
+) -> Option<Ext2Fs<'a>> {
+    let (sb, geom) = Ext2Fs::mount_params(device).ok()?;
+    Some(Ext2Fs::new(device, cache, sb, geom))
 }
 
 // Idempotent, so no test has to depend on the lex order that put it first.
@@ -616,11 +632,13 @@ pub(crate) const FIX_FILE_BLOCK: u32 = FIX_ROOT_DIR_BLOCK + 1;
 const FIX_LAST_USED_BLOCK: u32 = FIX_FILE_BLOCK;
 /// `s_first_ino`: inodes below it are reserved and marked used.
 const FIX_FIRST_INO: u32 = 11;
+/// The fixture's one file, the first inode no feature reserves.
+const FIX_FILE_INO: u32 = FIX_FIRST_INO;
 
 #[inline(never)]
-fn write_superblock(sb: &mut [u8], inodes: u32, blocks: u32, inode_size: u16) {
+fn write_superblock(sb: &mut [u8], inodes: u32, used_inodes: u32, blocks: u32, inode_size: u16) {
     let free_blocks = blocks.saturating_sub(FIX_LAST_USED_BLOCK + 1);
-    let free_inodes = inodes.saturating_sub(FIX_FIRST_INO - 1);
+    let free_inodes = inodes.saturating_sub(used_inodes);
     sb[0..4].copy_from_slice(&inodes.to_le_bytes());
     sb[4..8].copy_from_slice(&blocks.to_le_bytes());
     sb[12..16].copy_from_slice(&free_blocks.to_le_bytes());
@@ -641,9 +659,9 @@ fn write_superblock(sb: &mut [u8], inodes: u32, blocks: u32, inode_size: u16) {
 }
 
 #[inline(never)]
-fn write_group_descriptor(desc: &mut [u8], inodes: u32, blocks: u32) {
+fn write_group_descriptor(desc: &mut [u8], inodes: u32, used_inodes: u32, blocks: u32) {
     let free_blocks = blocks.saturating_sub(FIX_LAST_USED_BLOCK + 1);
-    let free_inodes = inodes.saturating_sub(FIX_FIRST_INO - 1);
+    let free_inodes = inodes.saturating_sub(used_inodes);
     desc[0..4].copy_from_slice(&FIX_BLOCK_BITMAP.to_le_bytes());
     desc[4..8].copy_from_slice(&FIX_INODE_BITMAP.to_le_bytes());
     desc[8..12].copy_from_slice(&FIX_INODE_TABLE.to_le_bytes());
@@ -658,7 +676,7 @@ fn write_group_descriptor(desc: &mut [u8], inodes: u32, blocks: u32) {
 /// free and hands out block 1, the superblock. Every write through such a
 /// fixture lands on top of the filesystem describing it.
 #[inline(never)]
-fn write_fixture_bitmaps(buf: &mut [u8], inodes: u32, blocks: u32) {
+fn write_fixture_bitmaps(buf: &mut [u8], inodes: u32, used_inodes: u32, blocks: u32) {
     let bs = FIX_BLOCK_SIZE as usize;
     let bmap = FIX_BLOCK_BITMAP as usize * bs;
     // `locate_block` maps block N to bit N - first_data_block, and
@@ -674,7 +692,7 @@ fn write_fixture_bitmaps(buf: &mut [u8], inodes: u32, blocks: u32) {
     }
 
     let imap = FIX_INODE_BITMAP as usize * bs;
-    for ino in 1..FIX_FIRST_INO.min(inodes + 1) {
+    for ino in 1..=used_inodes.min(inodes) {
         let bit = (ino - 1) as usize;
         buf[imap + bit / 8] |= 1 << (bit % 8);
     }
@@ -754,11 +772,18 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
     let size_bytes = (spec.blocks as usize).saturating_mul(bs);
     let device = MemoryBlockDevice::allocate(size_bytes)?;
 
+    let has_file = spec.file_name.is_some() && spec.file_data.is_some();
+    let used_inodes = if has_file {
+        FIX_FILE_INO
+    } else {
+        FIX_FIRST_INO - 1
+    };
     device.with_buffer_mut(|buf| {
         let sb_offset = 1024usize;
         write_superblock(
             &mut buf[sb_offset..sb_offset + 1024],
             spec.inodes,
+            used_inodes,
             spec.blocks,
             inode_size,
         );
@@ -767,9 +792,10 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
         write_group_descriptor(
             &mut buf[desc_offset..desc_offset + 32],
             spec.inodes,
+            used_inodes,
             spec.blocks,
         );
-        write_fixture_bitmaps(buf, spec.inodes, spec.blocks);
+        write_fixture_bitmaps(buf, spec.inodes, used_inodes, spec.blocks);
 
         let inode_table_offset = FIX_INODE_TABLE as usize * bs;
         let root_inode_offset = inode_size as usize;
@@ -779,12 +805,11 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
             block_size,
         );
 
-        let file_inode_number = 3u32;
         let dir_offset = FIX_ROOT_DIR_BLOCK as usize * bs;
         if let (Some(name), Some(data)) = (spec.file_name, spec.file_data) {
-            let file_inode_offset = root_inode_offset + inode_size as usize;
+            let file_inode_offset = (FIX_FILE_INO - 1) as usize * inode_size as usize;
             write_file_inode(
-                &mut buf[inode_table_offset..inode_table_offset + bs],
+                &mut buf[inode_table_offset..inode_table_offset + FIX_ITABLE_BLOCKS as usize * bs],
                 file_inode_offset,
                 data.len() as u32,
                 spec.file_block,
@@ -799,7 +824,7 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
             write_dir_with_file(
                 &mut buf[dir_offset..dir_offset + bs],
                 bs,
-                file_inode_number,
+                FIX_FILE_INO,
                 name,
             );
         } else {
@@ -808,6 +833,33 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
     });
 
     Some(device)
+}
+
+/// An in-memory ext4 volume shaped as the image builder makes one, over 1 KiB
+/// blocks; `journal_blocks` of zero builds no journal.
+pub(crate) fn ext4_image(blocks: u32, journal_blocks: u32) -> Option<MemoryBlockDevice> {
+    ext4_image_laid_out(blocks, journal_blocks).map(|(device, _)| device)
+}
+
+/// [`ext4_image`] and where the builder put its metadata.
+pub(crate) fn ext4_image_laid_out(
+    blocks: u32,
+    journal_blocks: u32,
+) -> Option<(MemoryBlockDevice, slopos_ext4_core::fixture::Layout)> {
+    let spec = slopos_ext4_core::fixture::Spec {
+        block_size: 1024,
+        blocks,
+        inodes: 64,
+        inode_size: 256,
+        extents: true,
+        bit64: true,
+        metadata_csum: true,
+        journal_blocks,
+        uuid: *b"slopos-ext4-test",
+    };
+    let device = MemoryBlockDevice::allocate(blocks as usize * 1024)?;
+    let formatted = device.with_buffer_mut(|buf| slopos_ext4_core::fixture::format(buf, &spec));
+    formatted.ok().map(|layout| (device, layout))
 }
 
 fn build_minimal_ext2_image(blocks: u32, inodes: u32) -> Option<MemoryBlockDevice> {
@@ -820,9 +872,8 @@ fn build_minimal_ext2_image(blocks: u32, inodes: u32) -> Option<MemoryBlockDevic
     })
 }
 
-/// An image declaring an incompat feature we cannot represent (extents,
-/// 64-bit block numbers, metadata checksums) must be refused, not mounted
-/// read-write and written into corruption.
+/// An image declaring an incompat feature outside the profile must be
+/// refused, not mounted read-write and written into corruption.
 pub fn test_ext2_unsupported_incompat_feature_refused() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
@@ -830,8 +881,7 @@ pub fn test_ext2_unsupported_incompat_feature_refused() -> TestResult {
     let sb_offset = 1024usize;
     device.with_buffer_mut(|buf| {
         let sb = &mut buf[sb_offset..sb_offset + 1024];
-        // EXT4_FEATURE_INCOMPAT_EXTENTS.
-        sb[96..100].copy_from_slice(&0x0040u32.to_le_bytes());
+        sb[96..100].copy_from_slice(&incompat::INLINE_DATA.to_le_bytes());
     });
 
     match Ext2Fs::mount_params(&device) {
@@ -849,8 +899,7 @@ pub fn test_ext2_unsupported_ro_compat_forces_readonly() -> TestResult {
     let sb_offset = 1024usize;
     device.with_buffer_mut(|buf| {
         let sb = &mut buf[sb_offset..sb_offset + 1024];
-        // EXT4_FEATURE_RO_COMPAT_METADATA_CSUM.
-        sb[100..104].copy_from_slice(&0x0400u32.to_le_bytes());
+        sb[100..104].copy_from_slice(&ro_compat::QUOTA.to_le_bytes());
     });
 
     mount_ext2!(device, cache, fs);
@@ -1078,8 +1127,7 @@ pub fn test_ext2_deleted_dir_entry_with_stale_name_len_accepted() -> TestResult 
 fn mount_geometry(
     device: &dyn crate::blockdev::BlockDevice,
 ) -> Result<crate::ext2::geometry::Ext2Geometry, Ext2Error> {
-    let (sb, _bs, _is) = Ext2Fs::mount_params(device)?;
-    crate::ext2::geometry::Ext2Geometry::derive(&sb)
+    Ext2Fs::mount_params(device).map(|(_, geom)| geom)
 }
 
 pub fn test_ext2_invalid_superblock_magic() -> TestResult {
@@ -1201,18 +1249,15 @@ pub fn test_ext2_device_write_error_on_metadata() -> TestResult {
     // stamp; without it this fixture measures that stamp's write failing.
     device.with_buffer_mut(|buf| buf[1024 + 58..1024 + 60].copy_from_slice(&2u16.to_le_bytes()));
     let failing = WriteFailingDevice::new(device);
-    let (sb, bs, is) = match Ext2Fs::mount_params(&failing) {
+    let (sb, geom) = match Ext2Fs::mount_params(&failing) {
         Ok(v) => v,
         Err(_) => return TestResult::Pass,
     };
-    let mut cache = match BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) {
+    let mut cache = match BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN) {
         Ok(c) => c,
         Err(_) => return TestResult::Fail,
     };
-    let mut fs = match Ext2Fs::new(&failing, &mut cache, sb, bs, is) {
-        Ok(v) => v,
-        Err(_) => return TestResult::Fail,
-    };
+    let mut fs = Ext2Fs::new(&failing, &mut cache, sb, geom);
 
     // Write-back caching: the mutations land in the cache and the create
     // succeeds; the device error surfaces only at `sync`.
@@ -1284,8 +1329,8 @@ fn wild_pointer_image() -> Option<MemoryBlockDevice> {
     }
     drop(volume);
     device.with_buffer_mut(|buf| {
-        // Inode 3, the fixture's file: one inode size past the root's record.
-        let file_inode = FIX_INODE_TABLE as usize * bs + 2 * FIX_INODE_SIZE as usize;
+        let file_inode =
+            FIX_INODE_TABLE as usize * bs + (FIX_FILE_INO - 1) as usize * FIX_INODE_SIZE as usize;
         // Twelve direct blocks plus the first indirect one, so a read can
         // reach either kind of pointer.
         let size = 13 * FIX_BLOCK_SIZE;
@@ -1711,9 +1756,9 @@ fn narrow_image() -> Option<MemoryBlockDevice> {
 
 #[inline(never)]
 fn count_sync_inode(device: &CountingBlockDevice, bystanders: u32) -> Option<usize> {
-    let (sb, bs, is) = Ext2Fs::mount_params(device).ok()?;
-    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN).ok()?;
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).ok()?;
+    let (sb, geom) = Ext2Fs::mount_params(device).ok()?;
+    let mut cache = BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).ok()?;
+    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
     count_sync_inode_inner(&mut fs, device, bystanders)
 }
 
@@ -3550,7 +3595,6 @@ slopos_testing::stest!(
 pub fn test_ext2_allocation_hint_skips_the_scanned_prefix() -> TestResult {
     use crate::ext2::cache::BlockOwner;
     use crate::ext2::ext2_alloc::{allocate_block, free_block};
-    use crate::ext2::geometry::Ext2Geometry;
 
     let Some(device) = build_ext2_image(Ext2ImageSpec {
         blocks: 64,
@@ -3561,13 +3605,10 @@ pub fn test_ext2_allocation_hint_skips_the_scanned_prefix() -> TestResult {
     }) else {
         return TestResult::Skipped;
     };
-    let Ok((mut sb, bs, _is)) = Ext2Fs::mount_params(&device) else {
+    let Ok((mut sb, geom)) = Ext2Fs::mount_params(&device) else {
         return TestResult::Fail;
     };
-    let Ok(geom) = Ext2Geometry::derive(&sb) else {
-        return TestResult::Fail;
-    };
-    let Ok(mut cache) = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) else {
+    let Ok(mut cache) = BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN) else {
         return TestResult::Fail;
     };
     let owner = BlockOwner::File(11);
@@ -3622,9 +3663,10 @@ fn with_mounted(
     device: &MemoryBlockDevice,
     body: fn(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
-    let (sb, bs, is) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
-    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).map_err(|_| "mount")?;
+    let (sb, geom) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
+    let mut cache =
+        BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
+    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
     body(&mut fs)
 }
 
@@ -4624,9 +4666,9 @@ fn crash_workload_write_count() -> Option<usize> {
 /// group descriptor, an inode-table block, a directory block and a data block.
 #[inline(never)]
 fn crash_workload(device: &FaultyBlockDevice) -> Result<(), Ext2Error> {
-    let (sb, bs, is) = Ext2Fs::mount_params(device)?;
-    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN)?;
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is)?;
+    let (sb, geom) = Ext2Fs::mount_params(device)?;
+    let mut cache = BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN)?;
+    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
     fs.mark_dirty_on_disk()?;
     let ino = fs.create_file(2, b"crash.txt")?;
     fs.write_file(ino, 0, b"payload-that-spans-a-block")?;
@@ -4689,7 +4731,7 @@ fn crash_assert_legal(device: &MemoryBlockDevice, was_cut: bool) -> Result<(), &
 fn crash_mount_reason(
     device: &MemoryBlockDevice,
 ) -> Result<Option<crate::ext2::ReadOnlyReason>, &'static str> {
-    let (sb, _, _) = Ext2Fs::mount_params(device).map_err(|_| "the image no longer mounts")?;
+    let (sb, _) = Ext2Fs::mount_params(device).map_err(|_| "the image no longer mounts")?;
     Ok(Ext2Fs::mount_read_only_reason(&sb, device))
 }
 
@@ -4715,39 +4757,40 @@ pub fn test_ext2_dirty_image_mounts_read_only() -> TestResult {
         buf[1024 + 58..1024 + 60].copy_from_slice(&2u16.to_le_bytes());
     });
 
-    let Ok((sb, _, _)) = Ext2Fs::mount_params(&device) else {
-        return slopos_testing::fail!("a dirty image must still mount");
-    };
-    match Ext2Fs::mount_read_only_reason(&sb, &device) {
-        Some(crate::ext2::ReadOnlyReason::NotCleanlyUnmounted) => {}
+    match crash_mount_reason(&device) {
+        Ok(Some(crate::ext2::ReadOnlyReason::NotCleanlyUnmounted)) => {}
+        Err(msg) => return slopos_testing::fail!("a dirty image must still mount: {}", msg),
         other => return slopos_testing::fail!("want NotCleanlyUnmounted, got {:?}", other),
     }
 
     // The reason is the mount's to apply; a handle told to hold it must then
     // refuse every mutation, and must still read.
-    mount_ext2!(device, _cache, fs);
-    fs.force_read_only();
-    if !matches!(fs.create_file(2, b"nope"), Err(Ext2Error::ReadOnly)) {
-        return slopos_testing::fail!("a dirty-mounted image accepted a create");
-    }
-    if !matches!(fs.unlink_entry(2, b"d.txt"), Err(Ext2Error::ReadOnly)) {
-        return slopos_testing::fail!("a dirty-mounted image accepted an unlink");
-    }
-    if fs.resolve_path(b"/d.txt").is_err() {
-        return slopos_testing::fail!("a dirty-mounted image is unreadable");
+    if let Err(msg) = with_mounted(&device, dirty_refuses_writes) {
+        return slopos_testing::fail!("{}", msg);
     }
     // A clean image is the control: without it this test passes on a rule that
     // refuses everything.
     let Some(clean) = phase3_image(b"d.txt", b"seed") else {
         return TestResult::Skipped;
     };
-    let Ok((clean_sb, _, _)) = Ext2Fs::mount_params(&clean) else {
-        return TestResult::Fail;
-    };
-    match Ext2Fs::mount_read_only_reason(&clean_sb, &clean) {
-        None => TestResult::Pass,
+    match crash_mount_reason(&clean) {
+        Ok(None) => TestResult::Pass,
         other => slopos_testing::fail!("a clean image must mount read-write, got {:?}", other),
     }
+}
+
+#[inline(never)]
+fn dirty_refuses_writes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    fs.force_read_only();
+    if !matches!(fs.create_file(2, b"nope"), Err(Ext2Error::ReadOnly)) {
+        return Err("a dirty-mounted image accepted a create");
+    }
+    if !matches!(fs.unlink_entry(2, b"d.txt"), Err(Ext2Error::ReadOnly)) {
+        return Err("a dirty-mounted image accepted an unlink");
+    }
+    fs.resolve_path(b"/d.txt")
+        .map(|_| ())
+        .map_err(|_| "a dirty-mounted image is unreadable")
 }
 
 /// A mount records itself in the fields `e2fsck` reads, and `s_state` tracks
@@ -5080,7 +5123,7 @@ fn corruption_caller_errors_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static st
     // latch the whole mount read-only for every process on it.
     let ino = fs.create_file(2, b"deep.txt").map_err(|_| "create")?;
     let past_reach =
-        crate::ext2::blockmap::max_file_size(256, FIX_BLOCK_SIZE) + FIX_BLOCK_SIZE as u64;
+        crate::ext2::blockmap::block_map_reach(256, FIX_BLOCK_SIZE) + FIX_BLOCK_SIZE as u64;
     let _ = fs.write_file(ino, past_reach, b"x");
     let _ = fs.read_file(ino, past_reach, &mut scratch);
     // And the size that would let a later read reach it: refused where the
@@ -5200,17 +5243,14 @@ fn with_counted(
     device: &CountingBlockDevice,
     body: &mut dyn FnMut(&mut Ext2Fs<'_>) -> TestResult,
 ) -> TestResult {
-    let (sb, bs, is) = match Ext2Fs::mount_params(device) {
+    let (sb, geom) = match Ext2Fs::mount_params(device) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
     };
-    let Ok(mut cache) = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) else {
+    let Ok(mut cache) = BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN) else {
         return TestResult::Skipped;
     };
-    match Ext2Fs::new(device, &mut cache, sb, bs, is) {
-        Ok(mut fs) => body(&mut fs),
-        Err(_) => TestResult::Fail,
-    }
+    body(&mut Ext2Fs::new(device, &mut cache, sb, geom))
 }
 
 /// One frame for the failure message, so the assertion sites cost no stack.
@@ -5717,6 +5757,10 @@ slopos_testing::stest!(
     name = test_ext2_dotdot_record_past_block_end_refused,
     suite = fs
 );
+slopos_testing::stest!(
+    name = test_ext2_renamed_indexed_directory_is_deindexed,
+    suite = fs
+);
 
 /// An htree directory hides its index inside records the linear format reads
 /// as free space, which is exactly where an insert places an entry. The first
@@ -5738,6 +5782,50 @@ pub fn test_ext2_indexed_directory_is_deindexed_on_first_insert() -> TestResult 
         return setup;
     }
     with_counted(&device, &mut |fs| htree_check(fs, dir))
+}
+
+/// A directory moved to a new parent loses its index first: its `..` sits in
+/// the htree root, whose checksum would no longer match it.
+pub fn test_ext2_renamed_indexed_directory_is_deindexed() -> TestResult {
+    let Some(image) = build_ext2_image(Ext2ImageSpec {
+        blocks: 128,
+        inodes: 32,
+        file_name: Some(b"seed.txt"),
+        file_data: Some(b"x"),
+        file_block: FIX_FILE_BLOCK,
+    }) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    let mut dir = 0u32;
+    let setup = with_counted(&device, &mut |fs| htree_fixture(fs, &device, &mut dir));
+    if setup != TestResult::Pass {
+        return setup;
+    }
+    with_counted(&device, &mut |fs| renamed_htree_check(fs, dir))
+}
+
+#[inline(never)]
+fn renamed_htree_check(fs: &mut Ext2Fs<'_>, dir: u32) -> TestResult {
+    let Ok(other) = fs.create_directory(2, b"other") else {
+        return dir_index_fail("mkdir other");
+    };
+    if fs.rename_entry(2, b"idx", other, b"idx").is_err() {
+        return dir_index_fail("the indexed directory would not move");
+    }
+    match fs.read_inode(dir) {
+        Ok(inode) if !inode.is_indexed() => {}
+        Ok(_) => return dir_index_fail("the moved directory kept its index"),
+        Err(_) => return dir_index_fail("read idx"),
+    }
+    match fs.lookup_child(dir, b"..") {
+        Ok(parent) if parent.raw() == other => {}
+        _ => return dir_index_fail("`..` does not name the new parent"),
+    }
+    if fs.lookup_child(dir, &capped_name(HTREE_NAMES - 1)).is_err() {
+        return dir_index_fail("a leaf-block name was lost in the move");
+    }
+    TestResult::Pass
 }
 
 /// Enough sixteen-byte records to spill into block 1, so the survivor this

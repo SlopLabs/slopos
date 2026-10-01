@@ -184,6 +184,13 @@ name = "slopos-editor-core"
 version = "0.1.0"
 
 [[package]]
+name = "slopos-ext4-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-ext4-core",
+]
+
+[[package]]
 name = "slopos-fat-core"
 version = "0.1.0"
 
@@ -203,6 +210,7 @@ version = "0.1.0"
 dependencies = [
  "slopos-abi",
  "slopos-arch",
+ "slopos-ext4-core",
  "slopos-kernel-services",
  "slopos-mm",
  "slopos-ostd",

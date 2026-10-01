@@ -115,7 +115,7 @@ pub fn mount_apply_at(
             }
         }
         b"devfs" => mount(target, vfs_devfs_instance(), mount_flags).map_err(vfs_errno),
-        b"ext2" => {
+        b"ext2" | b"ext3" | b"ext4" => {
             let read_only = mount_flags & MOUNT_RDONLY != 0;
             // Empty `source` means the instance this boot already attached,
             // placed at a second path. A named one gets an instance of its

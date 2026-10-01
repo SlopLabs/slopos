@@ -1,14 +1,16 @@
 use super::Ext2Error;
 use super::blockmap;
-use super::cache::{BlockCache, BlockOwner};
+use super::cache::{BlockCache, BlockOwner, CachedBlock};
 use super::dirindex::{DirProbe, hash_name};
 use super::geometry::Ext2Geometry;
 use super::ondisk::{
     DIR_ENTRY_HEADER_SIZE, DirEntry, Inode, Superblock, dir_entry_size, write_dir_entry,
 };
-use super::types::{FileBlock, InodeNum};
+use super::types::{BlockNum, FileBlock, InodeNum};
 use crate::blockdev::BlockDevice;
 use core::cmp;
+use slopos_ext4_core::dir as ext4_dir;
+use slopos_ext4_core::inode as ext4_inode;
 
 /// One record's header fields, accepted only if every consumer of the record
 /// can act on it.
@@ -79,6 +81,68 @@ fn dir_ino(owner: BlockOwner) -> u32 {
     owner.charged_inode().unwrap_or(0)
 }
 
+/// The checksum seed of a directory's blocks, or `None` without checksums.
+pub fn dir_seed(geom: &Ext2Geometry, owner: BlockOwner, dir: &Inode) -> Option<u32> {
+    geom.csum_seed()
+        .map(|fs_seed| ext4_inode::seed(fs_seed, dir_ino(owner), dir.generation))
+}
+
+/// Bytes of a block that hold records: all of it, less the checksum tail.
+pub fn usable(block_size: u32, seed: Option<u32>) -> usize {
+    ext4_dir::usable(block_size as usize, seed.is_some())
+}
+
+/// Restamp a directory block's tail after a change.
+pub fn seal_block(seed: Option<u32>, data: &mut [u8]) {
+    if let Some(seed) = seed {
+        ext4_dir::seal(seed, data);
+    }
+}
+
+/// A directory block, its tail checksum verified on first read. An indexed
+/// directory's htree interior blocks carry no dirent tail and pass unchecked:
+/// a linear reader sees their records as free space.
+fn dir_block<'c>(
+    dir: &Inode,
+    phys: BlockNum,
+    cache: &'c mut BlockCache,
+    device: &dyn BlockDevice,
+    seed: Option<u32>,
+    owner: BlockOwner,
+) -> Result<CachedBlock<'c>, Ext2Error> {
+    let mut block = cache.get_owned(phys, device, owner)?;
+    if let Some(seed) = seed
+        && !block.checked()
+    {
+        let data = block.data();
+        if ext4_dir::has_tail(data) {
+            if !ext4_dir::verify(seed, data) {
+                return Err(Ext2Error::BadChecksum);
+            }
+            let tail_start = data.len() - ext4_dir::TAIL_SIZE;
+            if !records_end_at(data, tail_start) {
+                return Err(Ext2Error::DirectoryFormat);
+            }
+        } else if !dir.is_indexed() {
+            return Err(Ext2Error::BadChecksum);
+        }
+        block.set_checked();
+    }
+    Ok(block)
+}
+
+/// Whether the records from the block's start chain to exactly `end`.
+fn records_end_at(data: &[u8], end: usize) -> bool {
+    let mut cursor = 0;
+    while cursor < end {
+        match parse_record(data, cursor, end) {
+            Ok(record) => cursor += record.rec_len,
+            Err(_) => return false,
+        }
+    }
+    cursor == end
+}
+
 /// Iterate directory entries, calling `f` for each valid entry.
 /// Returns early if `f` returns `false`.
 pub fn for_each_entry(
@@ -132,6 +196,7 @@ pub fn for_each_entry_from(
         return Err(Ext2Error::InvalidRange);
     }
     let bs = block_size as u64;
+    let seed = dir_seed(geom, owner, inode);
     // Resume at the *block* holding the cookie and re-walk it from its start,
     // skipping the records that end at or before it. ext2 chains records by
     // `rec_len`, so a boundary is only reachable by walking from the block's
@@ -144,7 +209,7 @@ pub fn for_each_entry_from(
         if !phys.is_valid() {
             return Err(Ext2Error::DirectoryFormat);
         }
-        let block = cache.get_owned(phys, device, owner)?;
+        let block = dir_block(inode, phys, cache, device, seed, owner)?;
         let data = block.data();
         let mut cursor = 0usize;
         while cursor + DIR_ENTRY_HEADER_SIZE <= block_size as usize {
@@ -237,7 +302,14 @@ fn entry_at(
         return Ok(None);
     }
     let cursor = (offset % bs) as usize;
-    let block = cache.get_owned(phys, device, owner)?;
+    let block = dir_block(
+        parent,
+        phys,
+        cache,
+        device,
+        dir_seed(geom, owner, parent),
+        owner,
+    )?;
     let data = block.data();
     let Ok(record) = parse_record(data, cursor, block_size as usize) else {
         return Ok(None);
@@ -329,6 +401,7 @@ pub fn remove_dir_entry(
         return Err(Ext2Error::NotDirectory);
     }
     let bs = block_size as usize;
+    let seed = dir_seed(geom, owner, parent);
     let mut offset = 0u64;
     let mut removed: Option<u64> = None;
     while offset < parent.size && removed.is_none() {
@@ -339,7 +412,7 @@ pub fn remove_dir_entry(
         if !phys.is_valid() {
             return Err(Ext2Error::DirectoryFormat);
         }
-        let mut block = cache.get_owned(phys, device, owner)?;
+        let mut block = dir_block(parent, phys, cache, device, seed, owner)?;
         if let Some((cursor, prev, rec_len)) = find_record(block.data(), name, bs)? {
             let data = block.data_mut();
             match prev {
@@ -354,6 +427,7 @@ pub fn remove_dir_entry(
                     data[cursor..cursor + 4].copy_from_slice(&0u32.to_le_bytes());
                 }
             }
+            seal_block(seed, data);
             removed = Some(offset + cursor as u64);
         }
         offset += block_size as u64;
@@ -546,6 +620,7 @@ fn place_in_range(
     owner: BlockOwner,
 ) -> Result<Option<u64>, Ext2Error> {
     let bs = block_size as usize;
+    let seed = dir_seed(geom, owner, parent_inode);
     for index in first..end {
         let offset = index * block_size as u64;
         if offset >= parent_inode.size {
@@ -556,13 +631,13 @@ fn place_in_range(
         if !phys.is_valid() {
             return Err(Ext2Error::DirectoryFormat);
         }
-        let mut block = cache.get_owned(phys, device, owner)?;
+        let mut block = dir_block(parent_inode, phys, cache, device, seed, owner)?;
         let Some((cursor, record)) = find_slack(block.data(), req.needed, bs)? else {
             continue;
         };
         let data = block.data_mut();
         let rec_len = record.rec_len;
-        if record.inode != 0 {
+        let at = if record.inode != 0 {
             let actual_size = record.actual_size;
             data[cursor + 4..cursor + 6].copy_from_slice(&(actual_size as u16).to_le_bytes());
             let new_cursor = cursor + actual_size;
@@ -574,16 +649,19 @@ fn place_in_range(
                 req.file_type,
                 new_rec_len,
             );
-            return Ok(Some(offset + new_cursor as u64));
-        }
-        write_dir_entry(
-            &mut data[cursor..cursor + rec_len],
-            req.child,
-            req.name,
-            req.file_type,
-            rec_len,
-        );
-        return Ok(Some(offset + cursor as u64));
+            new_cursor
+        } else {
+            write_dir_entry(
+                &mut data[cursor..cursor + rec_len],
+                req.child,
+                req.name,
+                req.file_type,
+                rec_len,
+            );
+            cursor
+        };
+        seal_block(seed, data);
+        return Ok(Some(offset + at as u64));
     }
     Ok(None)
 }
@@ -620,12 +698,18 @@ fn grow_and_place(
     superblock: &mut Superblock,
     owner: BlockOwner,
 ) -> Result<u64, Ext2Error> {
-    let bs = block_size as usize;
     let file_block = FileBlock(
         u32::try_from(parent_inode.size / block_size as u64)
             .map_err(|_| Ext2Error::InvalidBlock)?,
     );
-    let (new_block, allocated) = blockmap::ensure_data_block(
+    // Growing zeroes the new block, so one already mapped past the end, which
+    // no sound directory has, is refused rather than wiped.
+    if parent_inode.size % u64::from(block_size) != 0
+        || blockmap::map_block(parent_inode, file_block, geom, cache, device, owner)?.is_valid()
+    {
+        return Err(Ext2Error::DirectoryFormat);
+    }
+    let new_block = blockmap::ensure_data_block(
         parent_inode,
         file_block,
         cache,
@@ -635,14 +719,19 @@ fn grow_and_place(
         owner,
     )?;
 
+    let seed = dir_seed(geom, owner, parent_inode);
+    let end = usable(block_size, seed);
     let mut block = cache.get_zero_owned(new_block, device, owner)?;
     let data = block.data_mut();
-    write_dir_entry(&mut data[..bs], req.child, req.name, req.file_type, bs);
+    write_dir_entry(&mut data[..end], req.child, req.name, req.file_type, end);
+    if seed.is_some() {
+        ext4_dir::write_tail(data);
+    }
+    seal_block(seed, data);
     drop(block);
 
     let pos = parent_inode.size;
     parent_inode.size += block_size as u64;
-    parent_inode.blocks += allocated * (block_size / 512);
     Ok(pos)
 }
 
@@ -662,7 +751,8 @@ pub fn update_dotdot(
     if !phys.is_valid() {
         return Err(Ext2Error::DirectoryFormat);
     }
-    let mut block = cache.get_owned(phys, device, owner)?;
+    let seed = dir_seed(geom, owner, dir_inode);
+    let mut block = dir_block(dir_inode, phys, cache, device, seed, owner)?;
     let data = block.data_mut();
     let bs = block_size as usize;
 
@@ -673,6 +763,7 @@ pub fn update_dotdot(
             let name_start = cursor + DIR_ENTRY_HEADER_SIZE;
             if &data[name_start..name_start + 2] == b".." {
                 data[cursor..cursor + 4].copy_from_slice(&new_parent.raw().to_le_bytes());
+                seal_block(seed, data);
                 return Ok(());
             }
         }

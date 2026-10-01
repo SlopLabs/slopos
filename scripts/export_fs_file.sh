@@ -3,10 +3,13 @@
 #
 # Usage: export_fs_file.sh <path_in_image> <image_path> <out>
 #
-# The guest must have shut down: debugfs knows nothing of SlopOS's
-# `/.journal`, and a mounted volume reads clean while it idles. Source moves
-# between the machines by git, not through here.
+# The guest must have shut down: debugfs reads the home locations and not a
+# journal's newer copies, and a mounted volume is at rest while it idles.
+# Source moves between the machines by git, not through here.
 set -euo pipefail
+
+# shellcheck source=lib/ext4.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/ext4.sh"
 
 SELF="export_fs_file"
 USAGE="usage: export_fs_file.sh <path_in_image> <image_path> <out>"
@@ -22,9 +25,9 @@ die() {
 [ -f "$IMAGE" ] || die "$IMAGE does not exist"
 command -v debugfs >/dev/null && command -v dumpe2fs >/dev/null && command -v e2fsck >/dev/null ||
     die "debugfs, dumpe2fs and e2fsck (e2fsprogs) are not installed"
-state="$({ dumpe2fs -h "$IMAGE" 2>/dev/null || true; } | sed -n 's/^Filesystem state:[[:space:]]*//p')"
-[ "$state" = "clean" ] ||
-    die "$IMAGE is not clean (state: ${state:-unreadable}); boot it once so its log replays, shut the guest down, then export"
+unrest="$(ext4_unrest "$IMAGE")"
+[ -z "$unrest" ] ||
+    die "$IMAGE is not at rest ($unrest); boot it once so its journal replays, shut the guest down, then export"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

@@ -196,6 +196,7 @@ fn the_universal_capabilities_are_the_recorded_set() -> TestResult {
         Capability::InputSeat,
         Capability::ConsoleConfig,
         Capability::TestHarness,
+        Capability::Seal,
     ] {
         if mask_permits(ordinary, cap) {
             return fail!("{} leaked into the universal set", cap.name());

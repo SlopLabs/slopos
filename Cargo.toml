@@ -34,6 +34,7 @@ members = [
   "chrome-core",
   "net-core",
   "nvme-core",
+  "ext4-core",
   "tls-core",
   "http-core",
   "fat-core",
@@ -114,6 +115,7 @@ slopos-keymap-core = { path = "keymap-core" }
 slopos-chrome-core = { path = "chrome-core" }
 slopos-net-core = { path = "net-core" }
 slopos-nvme-core = { path = "nvme-core" }
+slopos-ext4-core = { path = "ext4-core" }
 slopos-tls-core = { path = "tls-core" }
 slopos-http-core = { path = "http-core" }
 slopos-fat-core = { path = "fat-core" }

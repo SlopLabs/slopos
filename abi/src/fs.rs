@@ -170,6 +170,23 @@ pub mod block_ioctl {
     pub const BLKGETSIZE64: u32 = 0x8008_1272;
 }
 
+/// The inode-flag ioctls `lsattr` and `chattr` use, with Linux's numbers. The
+/// argument is an `int *` holding the flags.
+pub mod inode_flags_ioctl {
+    pub const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
+    pub const FS_IOC_SETFLAGS: u32 = 0x4008_6602;
+}
+
+/// The inode flags those ioctls carry: ext4's on-disk encoding, which Linux
+/// reports for every filesystem.
+pub mod inode_flags {
+    pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
+    pub const FS_APPEND_FL: u32 = 0x0000_0020;
+    pub const FS_NODUMP_FL: u32 = 0x0000_0040;
+    pub const FS_NOATIME_FL: u32 = 0x0000_0080;
+    pub const FS_EXTENT_FL: u32 = 0x0008_0000;
+}
+
 /// `st_mode` type field and the values it takes. Linux/POSIX numbering.
 pub const S_IFMT: u32 = 0o170_000;
 pub const S_IFSOCK: u32 = 0o140_000;

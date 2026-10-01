@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
-# Hold an image SlopOS wrote to what e2fsprogs says a well-formed ext2
+# Hold an image SlopOS wrote to what e2fsprogs says a well-formed ext4
 # filesystem is.
 #
 # This is the one oracle for on-disk correctness that SlopOS does not have to
-# write itself. e2fsprogs is already a hard build dependency (`mkfs.ext2` and
+# write itself. e2fsprogs is already a hard build dependency (`mke2fs` and
 # `debugfs` build every image), so the check costs nothing new, and an image
 # SlopOS wrote that `e2fsck` rejects is a bug in SlopOS.
 #
-# Two assertions, because the exit code alone is not enough. `e2fsck -fn` exits
-# 0 on a structurally sound filesystem whose superblock says `s_state ==
-# EXT2_ERROR_FS`: the dirty bit is state, not damage, so it is reported and not
-# counted. But that bit is exactly what says whether the last boot shut the
-# filesystem down in an orderly way, so an image left dirty by every run would
-# pass a check that only read the exit code:
+# Two assertions, because `e2fsck -fn` exits 0 on a sound filesystem whose
+# superblock says it is in use or whose journal still holds transactions: that
+# is state, not damage, yet it is what says whether the last boot shut down in
+# order:
 #
 #   1. `e2fsck -fn` exits 0 — no structural inconsistency.
-#   2. The superblock reports `Filesystem state: clean` — a boot that mounted
-#      this image also unmounted it, running the final sync and `mark_clean`.
+#   2. The volume is at rest: `Filesystem state: clean`, no `needs_recovery`,
+#      an empty journal — a boot that mounted this image also ran the final
+#      sync and `mark_clean`.
 #
 # A run that panicked deliberately leaves the image dirty, so a failure here
 # after a panicking boot is the gate reporting the truth rather than a false
@@ -24,7 +23,7 @@
 #
 # The verity trailer needs no special handling: `e2fsck` objects when the
 # superblock claims *more* blocks than the device holds, never fewer, and an
-# ext2 image with 16 KiB of trailer appended checks clean.
+# image with 16 KiB of trailer appended checks clean.
 #
 #     scripts/check_fs_image.sh [image]
 #     scripts/check_fs_image.sh --self-test
@@ -33,6 +32,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/ext4.sh
+. "$SCRIPT_DIR/lib/ext4.sh"
 
 DEFAULT_IMAGE="${REPO_ROOT}/fs/assets/ext2-tests.img"
 
@@ -87,25 +88,22 @@ check_image() {
         return 1
     fi
 
-    local state
-    state="$(dumpe2fs -h "$image" 2>/dev/null \
-        | sed -n 's/^Filesystem state:[[:space:]]*//p' \
-        | head -n 1)"
-    if [ -z "$state" ]; then
+    local unrest
+    unrest="$(ext4_unrest "$image")"
+    if [ "$unrest" = "unreadable" ]; then
         [ "$quiet" = 1 ] || echo "check_fs_image: dumpe2fs reported no filesystem state for $image" >&2
         return 2
     fi
-    if [ "$state" != "clean" ]; then
+    if [ -n "$unrest" ]; then
         if [ "$quiet" != 1 ]; then
-            echo "check_fs_image: $image is structurally sound but its superblock says" >&2
-            echo "  'Filesystem state: $state'. The last boot to mount it never reached" >&2
-            echo "  the final sync, so mark_clean never ran — a write it reported as" >&2
-            echo "  durable may not be on the disk." >&2
+            echo "check_fs_image: $image is structurally sound but not at rest ($unrest)." >&2
+            echo "  The last boot to mount it never reached the final sync, so mark_clean" >&2
+            echo "  never ran — a write it reported as durable may only be in its journal." >&2
         fi
         return 1
     fi
 
-    [ "$quiet" = 1 ] || echo "check_fs_image: OK — $image passes e2fsck -fn and its superblock is clean"
+    [ "$quiet" = 1 ] || echo "check_fs_image: OK — $image passes e2fsck -fn and is at rest"
     return 0
 }
 
@@ -115,8 +113,8 @@ check_image() {
 # observed to work.
 # ---------------------------------------------------------------------------
 if [ "$SELF_TEST" = 1 ]; then
-    if ! command -v mkfs.ext2 >/dev/null 2>&1 || ! command -v debugfs >/dev/null 2>&1; then
-        echo "check_fs_image --self-test: mkfs.ext2 and debugfs are required" >&2
+    if ! command -v mke2fs >/dev/null 2>&1 || ! command -v debugfs >/dev/null 2>&1; then
+        echo "check_fs_image --self-test: mke2fs and debugfs are required" >&2
         exit 2
     fi
 
@@ -135,17 +133,32 @@ if [ "$SELF_TEST" = 1 ]; then
         fi
     }
 
-    mkfs.ext2 -F -b 1024 "$tmp/clean.img" 4096 >/dev/null 2>&1
+    ext4_mkfs_args
+    truncate -s 32M "$tmp/clean.img"
+    mke2fs -F -q "${EXT4_MKFS_ARGS[@]}" "$tmp/clean.img" >/dev/null 2>&1
     expect 0 "a freshly built image passes" "$tmp/clean.img"
 
-    # Structurally sound, superblock dirty: the arm the exit code alone misses.
+    # Sound but not at rest: the states e2fsck's exit code alone passes.
     cp "$tmp/clean.img" "$tmp/dirty.img"
     debugfs -w -R "ssv state 0" "$tmp/dirty.img" >/dev/null 2>&1
-    expect 1 "s_state == EXT2_ERROR_FS is rejected" "$tmp/dirty.img"
+    expect 1 "an s_state other than clean is rejected" "$tmp/dirty.img"
+
+    cp "$tmp/clean.img" "$tmp/live.img"
+    printf 'jo -c\njw -b 7000 /dev/zero\njc\n' | debugfs -w -f - "$tmp/live.img" >/dev/null 2>&1
+    expect 1 "a journal still needing recovery is rejected" "$tmp/live.img"
+
+    cp "$tmp/clean.img" "$tmp/flagged.img"
+    debugfs -w -R "feature needs_recovery" "$tmp/flagged.img" >/dev/null 2>&1
+    expect 1 "needs_recovery over an empty journal is rejected" "$tmp/flagged.img"
+
+    cp "$tmp/live.img" "$tmp/unflagged.img"
+    debugfs -w -R "feature -needs_recovery" "$tmp/unflagged.img" >/dev/null 2>&1
+    expect 1 "a live journal under a clear flag is rejected" "$tmp/unflagged.img"
 
     # Damaged metadata: the e2fsck arm.
     cp "$tmp/clean.img" "$tmp/corrupt.img"
-    dd if=/dev/urandom of="$tmp/corrupt.img" bs=1024 seek=5 count=40 \
+    itable="$(dumpe2fs "$tmp/clean.img" 2>/dev/null | sed -n 's/^ *Inode table at \([0-9]*\)-.*/\1/p' | head -n 1)"
+    dd if=/dev/urandom of="$tmp/corrupt.img" bs=4096 seek="$itable" count=4 \
         conv=notrunc status=none
     expect 1 "a corrupted inode table is rejected" "$tmp/corrupt.img"
 
@@ -158,7 +171,7 @@ if [ "$SELF_TEST" = 1 ]; then
         echo "check_fs_image --self-test: $failures check(s) failed" >&2
         exit 1
     fi
-    echo "check_fs_image: self-test OK — 5 checks, both directions"
+    echo "check_fs_image: self-test OK — 8 checks, both directions"
     exit 0
 fi
 

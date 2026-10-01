@@ -204,7 +204,7 @@ fn run_phase(
             continue;
         }
         let fqn = full_name_into(desc, &mut name_buf);
-        if cfg.passes_filter(fqn) {
+        if cfg.passes_filter(fqn, desc.flags) {
             planned += 1;
         }
     }
@@ -226,7 +226,7 @@ fn run_phase(
             continue;
         }
         let fqn = full_name_into(desc, &mut name_buf);
-        if !cfg.passes_filter(fqn) {
+        if !cfg.passes_filter(fqn, desc.flags) {
             continue;
         }
         idx += 1;

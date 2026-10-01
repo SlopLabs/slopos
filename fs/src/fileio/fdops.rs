@@ -4,6 +4,7 @@ use core::sync::atomic::Ordering;
 use super::*;
 
 use slopos_abi::Errno;
+use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{UserDirent64, UserFlock, UserFsStat};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::MsgHdr;
@@ -27,6 +28,7 @@ use crate::vfs_file_ops::{
     vfs_open_dir_handle_at, vfs_open_handle_flags_at, vnode_backing,
 };
 use slopos_abi::tty_error::TtyError;
+use slopos_ostd::authority::{Cap, Seal};
 use slopos_ostd::process::quota::FileBacking;
 
 #[allow(non_camel_case_types)]
@@ -694,8 +696,8 @@ pub fn file_link_at(
 pub fn file_utimens_at(
     path: &[u8],
     cwd: &[u8],
-    atime: Option<u64>,
-    mtime: Option<u64>,
+    atime: Option<crate::vfs::Timestamp>,
+    mtime: Option<crate::vfs::Timestamp>,
     resolve_flags: u32,
 ) -> c_int {
     errno_of(crate::vfs::vfs_utimens(
@@ -1332,6 +1334,40 @@ pub fn file_fchmod_fd(table: FdTable, fd: c_int, mode: u16) -> c_int {
     errno_of(fs.set_mode(inode, mode))
 }
 
+/// `FS_IOC_GETFLAGS`. `ENOTTY` for a descriptor that names no file.
+pub fn file_inode_flags_fd(table: FdTable, fd: c_int) -> Result<u32, Errno> {
+    let (fs, inode) = flags_vnode(table, fd)?;
+    fs.inode_flags(inode).map_err(VfsError::to_errno)
+}
+
+/// `FS_IOC_SETFLAGS`. A change to the seal without `seal` is `EPERM`, a flag
+/// the filesystem does not keep `EOPNOTSUPP`.
+pub fn file_set_inode_flags_fd(
+    table: FdTable,
+    fd: c_int,
+    flags: u32,
+    seal: Option<&Cap<'_, Seal>>,
+) -> Result<(), Errno> {
+    let (fs, inode) = flags_vnode(table, fd)?;
+    fd_writable_fs(fs)?;
+    let current = fs.inode_flags(inode).map_err(VfsError::to_errno)?;
+    if (current ^ flags) & FS_IMMUTABLE_FL != 0 && seal.is_none() {
+        return Err(Errno::EPERM);
+    }
+    fs.set_inode_flags(inode, flags, seal).map_err(|e| match e {
+        VfsError::PermissionDenied => Errno::EPERM,
+        e => e.to_errno(),
+    })
+}
+
+fn flags_vnode(
+    table: FdTable,
+    fd: c_int,
+) -> Result<(&'static dyn crate::vfs::FileSystem, InodeId), Errno> {
+    let snap = snapshot(table, fd)?;
+    fd_vnode(&snap).map_err(|e| if e == Errno::EINVAL { Errno::ENOTTY } else { e })
+}
+
 /// The read-only check the fd-shaped mutators owe.
 ///
 /// A read-only *mount* is not reachable from a descriptor — it records
@@ -1366,8 +1402,8 @@ pub fn file_ftruncate_fd(table: FdTable, fd: c_int, length: u64) -> c_int {
 pub fn file_set_times_fd(
     table: FdTable,
     fd: c_int,
-    atime: Option<u64>,
-    mtime: Option<u64>,
+    atime: Option<crate::vfs::Timestamp>,
+    mtime: Option<crate::vfs::Timestamp>,
 ) -> c_int {
     let snap = match snapshot(table, fd) {
         Ok(s) => s,

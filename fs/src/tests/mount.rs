@@ -1081,19 +1081,17 @@ fn untouched_body(
     fs: &'static Ext2Mount,
     device: KBox<dyn BlockDevice + Send + Sync>,
 ) -> Result<(), &'static str> {
-    use crate::ext2::ondisk::{EXT2_ERROR_FS, EXT2_VALID_FS};
-
     fs.attach(device, false)
         .map_err(|_| "the log-carrying fixture would not attach")?;
     if fs.is_read_only() {
         return Err("the fixture mounted read-only, so the mount stamped nothing");
     }
-    if fs.superblock_state_for_test() != Some(EXT2_ERROR_FS) {
-        return Err("attaching did not stamp the image dirty");
+    if fs.superblock_clean_for_test() != Some(false) {
+        return Err("attaching did not stamp the image in use");
     }
     fs.flusher_visit_for_test()
         .map_err(|_| "the flusher's visit failed")?;
-    if fs.superblock_state_for_test() != Some(EXT2_VALID_FS) {
+    if fs.superblock_clean_for_test() != Some(true) {
         return Err("an idle mount nothing wrote to was never stamped clean");
     }
     Ok(())

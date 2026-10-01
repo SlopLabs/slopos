@@ -41,6 +41,10 @@ pub const FLAG_EXPECTED_PANIC: u32 = 0x1;
 /// hours is none of what explains its failure.
 pub const FLAG_UNCAPTURED: u32 = 0x2;
 
+/// `flags` bit: the test ends the machine, so it runs only when a
+/// `tests.run` pattern is its full name, never under a wildcard.
+pub const FLAG_EXPLICIT: u32 = 0x4;
+
 impl slopos_ostd::ffi::registry::RegistryEntry for TestDesc {
     const REGISTRIES: &'static [slopos_ostd::ffi::registry::RegistryId] =
         &[slopos_ostd::ffi::registry::RegistryId::Tests];

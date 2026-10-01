@@ -1,0 +1,5 @@
+# The volume SlopOS formats; every feature is one the kernel writes.
+# scripts/lib/ext4.sh and ext4_profile.py read it; ext4-core compiles it in.
+features=has_journal,extent,64bit,flex_bg,sparse_super,large_file,filetype,huge_file,dir_nlink,extra_isize,metadata_csum
+inode_size=256
+block_size=4096

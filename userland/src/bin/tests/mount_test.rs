@@ -348,7 +348,7 @@ fn a_volume_remounts_by_label_after_umount() -> bool {
         note(&format!("{MEDIA} still shows the volume after its umount"));
         return false;
     }
-    if let Err(e) = fs_syscall::mount(MEDIA_LABEL, MEDIA.as_bytes(), b"ext2", 0) {
+    if let Err(e) = fs_syscall::mount(MEDIA_LABEL, MEDIA.as_bytes(), b"ext4", 0) {
         note(&format!("re-mount by label failed: {e}"));
         return false;
     }

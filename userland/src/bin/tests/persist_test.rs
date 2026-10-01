@@ -323,6 +323,118 @@ fn the_disk_reserve_refuses_an_unprivileged_filler() -> bool {
     ok
 }
 
+/// `lsattr`'s and `chattr`'s ioctls on the disk root: a new file is extent-mapped,
+/// `nodump` sticks, append-only is refused, and only a `Seal` holder moves the seal.
+fn inode_flags_follow_chattr() -> bool {
+    use slopos_abi::fs::inode_flags::{FS_APPEND_FL, FS_EXTENT_FL, FS_IMMUTABLE_FL, FS_NODUMP_FL};
+    use slopos_userland::syscall::SyscallError;
+    use std::os::fd::AsRawFd;
+
+    if !root_persists() {
+        return true;
+    }
+    let path = unique_probe_path("chattr");
+    let file = match File::create(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("CHATTR: create failed: {e}");
+            return false;
+        }
+    };
+    let fd = file.as_raw_fd();
+    let mut failures = Vec::new();
+    let flags = fs_syscall::inode_flags(fd).unwrap_or_else(|e| {
+        failures.push(format!("FS_IOC_GETFLAGS: {e}"));
+        0
+    });
+    if flags & FS_EXTENT_FL == 0 || flags & FS_IMMUTABLE_FL != 0 {
+        failures.push(format!(
+            "a new file reads {flags:#x}, want extents and no seal"
+        ));
+    }
+    if let Err(e) = fs_syscall::set_inode_flags(fd, flags | FS_NODUMP_FL) {
+        failures.push(format!("setting nodump: {e}"));
+    }
+    if fs_syscall::inode_flags(fd).map(|f| f & FS_NODUMP_FL) != Ok(FS_NODUMP_FL) {
+        failures.push("nodump did not stick".to_string());
+    }
+    let unhonoured = fs_syscall::set_inode_flags(fd, flags | FS_APPEND_FL);
+    if unhonoured != Err(SyscallError::EOPNOTSUPP) {
+        failures.push(format!("append-only gave {unhonoured:?}, want EOPNOTSUPP"));
+    }
+    match unprivileged_seal(&path) {
+        0 => {}
+        rc => failures.push(format!("the unprivileged seal attempt exited {rc}")),
+    }
+    let sealed = flags | FS_NODUMP_FL | FS_IMMUTABLE_FL;
+    if let Err(e) = fs_syscall::set_inode_flags(fd, sealed) {
+        failures.push(format!("sealing as init's peer: {e}"));
+    }
+    if fs::OpenOptions::new().write(true).open(&path).is_ok() {
+        failures.push("a sealed file opened for writing".to_string());
+    }
+    if let Err(e) = fs_syscall::set_inode_flags(fd, flags) {
+        failures.push(format!("unsealing: {e}"));
+    }
+    drop(file);
+    if fs::remove_file(&path).is_err() {
+        failures.push("the unsealed file could not be removed".to_string());
+    }
+    for failure in &failures {
+        println!("CHATTR: {failure}");
+    }
+    failures.is_empty()
+}
+
+/// Spawn this binary without `TASK_FLAG_SYSTEM` to try sealing `path`.
+fn unprivileged_seal(path: &str) -> i32 {
+    use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
+    use slopos_userland::syscall::process;
+
+    let stdio = [
+        process::clone_fd(0, 0),
+        process::clone_fd(1, 1),
+        process::clone_fd(2, 2),
+    ];
+    let target = format!("{path}\0");
+    let argv = [
+        b"persist_test\0".as_ptr(),
+        SEAL_ARG.as_ptr(),
+        target.as_ptr(),
+    ];
+    let tid = process::spawn_path_with_actions(
+        b"/bin/persist_test",
+        &argv,
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &stdio,
+        0,
+    );
+    if tid <= 0 {
+        return -1;
+    }
+    process::wait_exit_code(tid as u32)
+}
+
+/// The unprivileged half: exit 0 when sealing `path` is refused with `EPERM`.
+fn seal_refused(path: &str) -> i32 {
+    use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
+    use slopos_userland::syscall::SyscallError;
+    use std::os::fd::AsRawFd;
+
+    let Ok(file) = File::open(path) else {
+        return 2;
+    };
+    let Ok(flags) = fs_syscall::inode_flags(file.as_raw_fd()) else {
+        return 3;
+    };
+    match fs_syscall::set_inode_flags(file.as_raw_fd(), flags | FS_IMMUTABLE_FL) {
+        Err(SyscallError::EPERM) => 0,
+        Ok(()) => 4,
+        Err(_) => 5,
+    }
+}
+
 /// A `MAP_SHARED` mapping and `read(2)` agree in both directions: the mapping
 /// shows the file's bytes, and a store through it is what a later `read(2)`
 /// returns.
@@ -635,6 +747,7 @@ fn store_through(base: u64, data: &[u8]) {
 }
 
 const FILL_ARG: &[u8] = b"--fill-until-refused\0";
+const SEAL_ARG: &[u8] = b"--seal\0";
 const FILLER_PATH: &str = "/var/reserve-filler";
 
 /// The unprivileged half: fill the volume until `ENOSPC` and exit 0 with the
@@ -672,8 +785,11 @@ fn fill_until_refused() -> i32 {
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("--fill-until-refused") {
-        std::process::exit(fill_until_refused());
+    let mut args = std::env::args().skip(1);
+    match (args.next().as_deref(), args.next()) {
+        (Some("--fill-until-refused"), _) => std::process::exit(fill_until_refused()),
+        (Some("--seal"), Some(path)) => std::process::exit(seal_refused(&path)),
+        _ => {}
     }
     slopos_slibc::test_harness::run(&[
         ("the_root_is_the_disk", the_root_is_the_disk),
@@ -686,6 +802,7 @@ fn main() {
         ("o_sync_write_needs_no_fsync", o_sync_write_needs_no_fsync),
         ("etc_is_writable", etc_is_writable),
         ("statfs_agrees_with_fstatfs", statfs_agrees_with_fstatfs),
+        ("inode_flags_follow_chattr", inode_flags_follow_chattr),
         (
             "the_disk_reserve_refuses_an_unprivileged_filler",
             the_disk_reserve_refuses_an_unprivileged_filler,

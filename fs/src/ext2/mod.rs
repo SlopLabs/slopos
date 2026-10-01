@@ -5,6 +5,7 @@ pub mod dir;
 pub mod dirindex;
 #[path = "alloc.rs"]
 pub mod ext2_alloc;
+pub mod extents;
 pub mod file;
 pub mod geometry;
 pub mod inode;
@@ -18,19 +19,19 @@ use cache::{BlockCache, BlockOwner};
 use geometry::Ext2Geometry;
 use ondisk::{
     DIR_FT_DIR, DIR_FT_REG_FILE, DIR_FT_SYMLINK, DirEntry, EXT2_ERROR_FS, EXT2_IMMUTABLE_FL,
-    EXT2_INDEX_FL, EXT2_VALID_FS, GroupDesc, Inode, MODE_DIRECTORY, MODE_FILE, MODE_PERM_MASK,
-    RO_COMPAT_LARGE_FILE, S_LAST_ORPHAN_OFF, Superblock,
+    EXT2_INDEX_FL, EXT2_VALID_FS, EXT4_EXTENTS_FL, EXT4_LINK_MAX, GroupDesc, Inode, InodeTime,
+    MODE_DIRECTORY, MODE_FILE, MODE_PERM_MASK, S_LAST_ORPHAN_OFF, Superblock,
 };
+use slopos_ext4_core::inode as ext4_inode;
+use slopos_ext4_core::superblock::incompat;
+use slopos_ext4_core::superblock::ro_compat::LARGE_FILE as RO_COMPAT_LARGE_FILE;
+use slopos_ext4_core::xattr;
 use types::{BlockNum, FileBlock, GroupIdx, InodeNum};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError};
-use slopos_ostd::{KVec, klog_info};
+use slopos_ostd::klog_info;
 
 pub use ondisk::EXT2_MAX_BLOCK_SIZE;
-
-/// Where the metadata log lives. A plain preallocated file, so an image that
-/// has none simply has none and `e2fsck` needs to know nothing about it.
-pub const JOURNAL_PATH: &[u8] = b"/.journal";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Ext2Error {
@@ -65,7 +66,7 @@ pub enum Ext2Error {
     IsDirectory,
     TooManyLinks,
     OutOfMemory,
-    /// The inode carries `EXT2_IMMUTABLE_FL` and refuses every mutation.
+    /// The inode is sealed and refuses every mutation.
     Immutable,
     /// A rename would splice a directory into its own subtree, detaching it
     /// and everything under it from the root.
@@ -73,6 +74,8 @@ pub enum Ext2Error {
     /// The requester was killed, leaving nothing with the device that can
     /// change the image.
     Interrupted,
+    /// A structure's `metadata_csum` checksum does not match its contents.
+    BadChecksum,
 }
 
 impl From<BlockDeviceError> for Ext2Error {
@@ -104,6 +107,7 @@ impl Ext2Error {
                 | Self::InvalidBlock
                 | Self::DirectoryFormat
                 | Self::InvalidSuperblock
+                | Self::BadChecksum
         )
     }
 }
@@ -122,9 +126,17 @@ pub enum ReadOnlyReason {
     /// The image declares a read-only-compatible feature this implementation
     /// does not write.
     UnsupportedFeature,
-    /// `s_state` is not `EXT2_VALID_FS`: the last mount never marked it
-    /// clean. Repair with `e2fsck` on the host.
+    /// `s_state` is not `EXT2_VALID_FS` on a volume without a journal: the
+    /// last mount never marked it clean. Repair with `e2fsck` on the host.
     NotCleanlyUnmounted,
+    /// The volume went down in use and its journal must be replayed first.
+    /// Lifted by a replay; held when the journal cannot be read.
+    NeedsRecovery,
+    /// The volume has a journal this kernel cannot use: on another device,
+    /// or with a feature it neither replays nor writes.
+    JournalUnusable,
+    /// An implementation recorded errors in `s_state`; `e2fsck` clears them.
+    ErrorsRecorded,
     /// An operation found the image or the device damaged after mount
     /// (`errors=remount-ro`).
     ErrorsRemountRo,
@@ -317,20 +329,12 @@ impl Drop for Ext2Txn<'_, '_> {
         }
         self.fs.cache.rollback_op();
         if self.outermost {
-            // The orphan-list head is the one field an operation publishes
-            // straight to the device, so the cache rollback cannot retract it.
-            // Restore it before the in-memory superblock, or a crash leaves a
-            // head naming an inode whose zeroing was rolled back — which the
-            // next mount's drain refuses, discarding the chain behind it.
-            // Best-effort: a destructor has nowhere to put a device error.
-            // Under a log the head write was deferred past a commit that never
-            // happened, so there is nothing on the device to retract.
-            let deferred = self.fs.take_pending_orphan_head().is_some();
-            if !deferred && self.fs.superblock.last_orphan != self.superblock.last_orphan {
-                let published = self.fs.superblock.last_orphan;
+            // The orphan head may be on the device already, out of the cache rollback's reach,
+            // naming an inode whose zeroing rolled back. Best-effort: a destructor cannot fail.
+            self.fs.take_pending_orphan_head();
+            if self.fs.superblock.last_orphan != self.superblock.last_orphan {
                 self.fs.superblock.last_orphan = self.superblock.last_orphan;
-                let _ = self.fs.write_orphan_head();
-                self.fs.superblock.last_orphan = published;
+                let _ = self.fs.write_orphan_head_now();
             }
             self.fs.superblock = self.superblock;
             self.fs.superblock_dirty = self.superblock_dirty;
@@ -367,28 +371,17 @@ pub struct Ext2Fs<'a> {
     /// commits. Only set under a log, which is what makes deferring it safe:
     /// the member's record reaches the log before the head names it.
     pending_orphan_head: Option<u32>,
-    /// The log's own file, kept even when no log was attached: the reason to
-    /// refuse a reader is the file's contents, not whether this boot logs.
-    journal_inode: Option<u32>,
     /// The mount's cache generations, bumped by every change a cached lookup
     /// or `stat` could see. `None` on a handle no cache sits in front of.
     gens: Option<&'a crate::ext2_dcache::Ext2Gens>,
 }
 
 impl<'a> Ext2Fs<'a> {
-    /// Reads the superblock *without* a cache: mount needs `block_size` to size
-    /// the [`BlockCache`] before it exists. Returns
-    /// `(superblock, block_size, inode_size)`.
-    ///
-    /// `#[inline(never)]`, like the other superblock-I/O helpers: each stages
-    /// the full 1024-byte block on its own frame.
-    #[inline(never)]
-    pub fn mount_params(device: &dyn BlockDevice) -> Result<(Superblock, u32, u16), Ext2Error> {
-        let mut sb_buf = [0u8; 1024];
-        device.read_at(1024, &mut sb_buf).map_err(Ext2Error::from)?;
-        let superblock = Superblock::parse(&sb_buf)?;
-        let block_size = superblock.block_size()?;
-        let inode_size = superblock.effective_inode_size();
+    /// Reads the superblock *without* a cache, and the geometry a mount sizes
+    /// its [`BlockCache`] by before one exists.
+    pub fn mount_params(device: &dyn BlockDevice) -> Result<(Superblock, Ext2Geometry), Ext2Error> {
+        let superblock = Self::read_superblock(device)?;
+        let geom = Ext2Geometry::derive(&superblock)?;
         // Ignoring a COMPAT bit is correct — that is what makes it compatible
         // — but this is the one place that can still say which.
         let ignored = superblock.unsupported_compat();
@@ -398,12 +391,20 @@ impl<'a> Ext2Fs<'a> {
                 ignored
             );
         }
-        Ok((superblock, block_size, inode_size))
+        Ok((superblock, geom))
+    }
+
+    /// Out of line, so the 1024-byte record it stages has a frame of its own.
+    #[inline(never)]
+    fn read_superblock(device: &dyn BlockDevice) -> Result<Superblock, Ext2Error> {
+        let mut sb_buf = [0u8; 1024];
+        device.read_at(1024, &mut sb_buf).map_err(Ext2Error::from)?;
+        Superblock::parse(&sb_buf)
     }
 
     /// `s_r_blocks_count`, read straight off the device.
     ///
-    /// Its own read rather than a fourth element on [`Self::mount_params`]'s
+    /// Its own read rather than a third element on [`Self::mount_params`]'s
     /// tuple, which every other caller would have to name and discard.
     #[inline(never)]
     pub fn read_block_reserve(device: &dyn BlockDevice) -> Result<u32, Ext2Error> {
@@ -418,26 +419,22 @@ impl<'a> Ext2Fs<'a> {
         device: &'a dyn BlockDevice,
         cache: &'a mut BlockCache,
         superblock: Superblock,
-        block_size: u32,
-        inode_size: u16,
-    ) -> Result<Self, Ext2Error> {
-        let read_only = Self::read_only_for(&superblock, device);
-        let geom = Ext2Geometry::derive(&superblock)?;
-        Ok(Self {
+        geom: Ext2Geometry,
+    ) -> Self {
+        Self {
             device,
+            read_only: Self::read_only_for(&superblock, device),
             superblock,
+            block_size: geom.block_size(),
+            inode_size: geom.inode_size(),
             geom,
             cache,
-            block_size,
-            inode_size,
             superblock_dirty: false,
-            read_only,
             corruption_seen: false,
             in_transaction: false,
             pending_orphan_head: None,
-            journal_inode: None,
             gens: None,
-        })
+        }
     }
 
     pub fn geometry(&self) -> &Ext2Geometry {
@@ -482,25 +479,15 @@ impl<'a> Ext2Fs<'a> {
         self.geom = self.geom.with_account(account);
     }
 
-    /// The log's file, for the mount to carry across handles.
-    pub fn journal_inode(&self) -> Option<u32> {
-        self.journal_inode
-    }
-
-    /// Refuse readers of the log's file on this handle.
-    pub fn set_journal_inode(&mut self, ino: Option<u32>) {
-        self.journal_inode = ino;
-    }
-
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
 
     /// The one rule for whether a handle over `device` may mutate.
     ///
-    /// Deliberately does **not** consult `s_state`: a mounted image carries
-    /// `EXT2_ERROR_FS` by design, so a per-call handle would read its own
-    /// mount stamp as damage. That question is asked once, at mount — see
+    /// Deliberately does **not** consult the in-use stamp: a mounted image
+    /// carries one by design, so a per-call handle would read its own mount
+    /// as damage. That question is asked once, at mount — see
     /// [`Self::mount_read_only_reason`].
     pub fn read_only_for(superblock: &Superblock, device: &dyn BlockDevice) -> bool {
         superblock.requires_readonly() || device.write_protected()
@@ -518,6 +505,12 @@ impl<'a> Ext2Fs<'a> {
         }
         if superblock.requires_readonly() {
             return Some(ReadOnlyReason::UnsupportedFeature);
+        }
+        if superblock.state & EXT2_ERROR_FS != 0 && superblock.has_journal() {
+            return Some(ReadOnlyReason::ErrorsRecorded);
+        }
+        if superblock.has_journal() && superblock.needs_recovery() {
+            return Some(ReadOnlyReason::NeedsRecovery);
         }
         // Never marked clean: a previous mount is either still running or died
         // mid-write, so the free counts, the bitmaps and the inode table may
@@ -607,33 +600,11 @@ impl<'a> Ext2Fs<'a> {
         result
     }
 
-    /// Mark the image as not cleanly unmounted, so a later fsck knows it must
-    /// run, and record the mount in the fields `e2fsck` reports.
+    /// Stamp the volume in use, so a crash before the clean stamp reads as
+    /// one to every reader, and record the mount in the fields `e2fsck`
+    /// reports.
     pub fn mark_dirty_on_disk(&mut self) -> Result<(), Ext2Error> {
-        self.stamp_dirty(true)?;
-        self.claim_log()
-    }
-
-    /// Stamp the attached log with this mount, which says every metadata
-    /// write from here on goes through it. Only a mount that will write may
-    /// claim it: a later unclean mount trusts an empty log carrying the
-    /// volume's current stamp.
-    pub fn claim_log(&mut self) -> Result<(), Ext2Error> {
-        if self.read_only || self.cache.journal().is_none() {
-            return Ok(());
-        }
-        let stamp = self.mount_stamp()?;
-        match self.cache.journal_mut() {
-            Some(journal) => journal.restamp(stamp, self.device),
-            None => Ok(()),
-        }
-    }
-
-    /// `[s_mnt_count, s_mtime]` on the medium: what tells one mount of the
-    /// volume from the next, whoever made it.
-    fn mount_stamp(&self) -> Result<[u32; 2], Ext2Error> {
-        let bookkeeping = self.read_bookkeeping()?;
-        Ok([u32::from(bookkeeping.mnt_count), bookkeeping.mtime])
+        self.stamp_dirty(true)
     }
 
     /// [`Self::mark_dirty_on_disk`] for a mount that already counted itself.
@@ -641,21 +612,56 @@ impl<'a> Ext2Fs<'a> {
         self.stamp_dirty(false)
     }
 
+    /// Whether the in-use stamp is on the medium: `needs_recovery` and a live
+    /// log on a journaled volume, `s_state` not valid on one without.
+    pub fn stamped_dirty(&self) -> bool {
+        match self.cache.journal() {
+            Some(journal) => self.superblock.needs_recovery() && journal.is_live(),
+            None => self.superblock.state == EXT2_ERROR_FS,
+        }
+    }
+
+    /// Stamp the volume in use. `needs_recovery` reaches the medium before the
+    /// log goes live: the reverse order can leave a live log under a clear
+    /// flag, which `e2fsck -p` will not decide alone.
     fn stamp_dirty(&mut self, mounting: bool) -> Result<(), Ext2Error> {
-        if self.read_only || self.superblock.state == EXT2_ERROR_FS {
+        if self.read_only || self.stamped_dirty() {
             return Ok(());
         }
-        self.superblock.state = EXT2_ERROR_FS;
-        self.write_superblock_state(mounting)
+        // An `s_state` stamp on a journaled volume leaves a crash that every
+        // implementation that replays reads as clean.
+        if self.superblock.has_journal() && self.cache.journal().is_none() {
+            return Err(Ext2Error::ReadOnly);
+        }
+        if self.cache.journal().is_some() {
+            self.superblock.feature_incompat |= incompat::RECOVER;
+        } else {
+            self.superblock.state = EXT2_ERROR_FS;
+        }
+        self.write_superblock_state(mounting)?;
+        let device = self.device;
+        match self.cache.journal_mut() {
+            Some(journal) => journal.set_live(true, device),
+            None => Ok(()),
+        }
     }
 
     /// Declare the image consistent on the medium. The caller owes the
-    /// predicate: nothing dirty, nothing unbarriered, an empty log.
+    /// predicate: nothing dirty, nothing unbarriered, an empty log. The log
+    /// is emptied on the medium before `needs_recovery` is cleared, the
+    /// reverse of [`Self::stamp_dirty`].
     pub fn mark_clean(&mut self) -> Result<(), Ext2Error> {
         if self.read_only {
             return Ok(());
         }
-        self.superblock.state = EXT2_VALID_FS;
+        let device = self.device;
+        if let Some(journal) = self.cache.journal_mut() {
+            journal.set_live(false, device)?;
+            self.device_barrier()?;
+            self.superblock.feature_incompat &= !incompat::RECOVER;
+        } else {
+            self.superblock.state = EXT2_VALID_FS;
+        }
         self.write_superblock_state(false)
     }
 
@@ -684,12 +690,14 @@ impl<'a> Ext2Fs<'a> {
             .map_err(Ext2Error::from)?;
         self.superblock.encode_mutable_fields(&mut sb_buf);
         sb_buf[58..60].copy_from_slice(&self.superblock.state.to_le_bytes());
+        sb_buf[96..100].copy_from_slice(&self.superblock.feature_incompat.to_le_bytes());
         let now = time::now_unix_opt();
         if mounting {
             ondisk::SuperblockBookkeeping::stamp_mount(&mut sb_buf, now);
         } else {
             ondisk::SuperblockBookkeeping::stamp_write(&mut sb_buf, now);
         }
+        ondisk::seal_superblock(&mut sb_buf);
         self.device
             .write_at(1024, &sb_buf)
             .map_err(Ext2Error::from)?;
@@ -773,9 +781,9 @@ impl<'a> Ext2Fs<'a> {
         let (table_block, _) = self.inode_disk_offset(ino_num)?;
 
         // Under a log the inode's record is in a transaction, so what makes it
-        // durable is making the log durable: its data home, a barrier, the
-        // ring, a barrier — jbd2's commit on `fsync`. The inode's own data
-        // goes first so a log with nothing pending still barriers behind it.
+        // durable is making the log durable: its data home, then the ring with
+        // its commit behind a flush. The inode's own data goes first so a log
+        // with nothing pending still barriers behind it.
         if self.cache.journal().is_some() {
             self.cache.flush_where(self.device, |kind, owner| {
                 kind == cache::BlockKind::Data && owner == BlockOwner::File(ino)
@@ -892,11 +900,12 @@ impl<'a> Ext2Fs<'a> {
     /// Advance `pass` by at most `budget` device writes.
     ///
     /// Ordered durability, following ext2's `data=ordered` discipline: data
-    /// blocks, barrier, the log's in-memory records, barrier, metadata
-    /// blocks, the log's own leftovers, barrier, superblock free counts,
-    /// barrier. A crash between phases can leave recoverable free-count drift
-    /// but never a directory entry or inode pointing at uninitialised on-disk
-    /// data.
+    /// blocks, the log's in-memory records with a flush ahead of each commit
+    /// block, a flush, metadata blocks, the log's own leftovers, a flush,
+    /// superblock free counts, a flush. Without a log the data phase ends in
+    /// a flush of its own. A crash between phases can leave recoverable
+    /// free-count drift but never a directory entry or inode pointing at
+    /// uninitialised on-disk data.
     pub fn sync_step(&mut self, pass: &mut SyncPass, budget: usize) -> Result<(), Ext2Error> {
         match pass.phase {
             SyncPhase::Data => {
@@ -908,7 +917,9 @@ impl<'a> Ext2Fs<'a> {
                 )?;
                 pass.scan = progress.next;
                 if !progress.more {
-                    self.device_barrier()?;
+                    if self.cache.journal().is_none() {
+                        self.device_barrier()?;
+                    }
                     pass.phase = SyncPhase::Commit;
                     pass.scan = 0;
                 }
@@ -997,112 +1008,154 @@ impl<'a> Ext2Fs<'a> {
         Ok(())
     }
 
-    /// Attach the image's metadata log, replaying whatever a previous boot
-    /// committed and never check pointed.
-    ///
-    /// `Ok(None)` for an image with no usable log; operations then fall back
-    /// to undo-scoped. A read-only mount attaches none — replay is a write.
+    /// Attach the volume's journal, replaying whatever a previous mount —
+    /// this kernel's or another implementation's — committed and never wrote
+    /// home. `Ok(None)` for a volume without one; a read-only handle attaches
+    /// none, since replay is a write.
     #[inline(never)]
-    pub fn attach_journal(&mut self) -> Result<Option<journal::JournalRecovery>, Ext2Error> {
-        let ino = match self.resolve_path(JOURNAL_PATH) {
-            Ok(ino) => ino,
-            Err(Ext2Error::PathNotFound | Ext2Error::NotDirectory | Ext2Error::NotFile) => {
-                return Ok(None);
-            }
-            Err(e) => return Err(e),
-        };
+    pub fn attach_journal(
+        &mut self,
+    ) -> Result<Option<journal::JournalRecovery>, journal::AttachError> {
+        if !self.superblock.has_journal() || self.read_only {
+            return Ok(None);
+        }
+        let ino = self.superblock.journal_inum;
+        let internal_journal = ino != 0 && ino < self.superblock.first_ino;
+        if !internal_journal {
+            return Err(journal::AttachError::Unsupported);
+        }
         let inode = self.read_inode_num(InodeNum(ino))?;
-        // The seal is what refuses every write, rename and unlink of the file,
-        // so a log file without one is not a log this kernel will use.
-        if !inode.is_regular_file() || !inode.is_immutable() {
-            return Ok(None);
+        if !inode.is_regular_file() {
+            return Err(journal::AttachError::BadSuperblock);
         }
-        let blocks = u32::try_from(inode.size / self.block_size as u64).unwrap_or(0);
-        if blocks < journal::MIN_LOG_SLOTS + 1 {
-            return Ok(None);
-        }
-        // Clamped rather than refused, and clamped here so the mapped list is
-        // the one the log keeps — `log_blocks_unchanged` compares against it.
-        let blocks = if blocks > journal::MAX_LOG_SLOTS {
-            slopos_ostd::klog_info!(
-                "ext2: /.journal has {} slots; using the first {}",
-                blocks,
-                journal::MAX_LOG_SLOTS
-            );
-            journal::MAX_LOG_SLOTS
-        } else {
-            blocks
+        let runs = self.journal_runs(ino, &inode)?;
+        let volume = journal::LogVolume {
+            block_size: self.block_size,
+            extent: journal::LogExtent {
+                first_data_block: self.geom.first_data_block().raw(),
+                blocks_count: self.geom.blocks_count(),
+            },
+            csum: self.superblock.metadata_csum(),
+            bit64: self.superblock.feature_incompat & slopos_ext4_core::superblock::incompat::BIT64
+                != 0,
+            inode: ino,
+            needs_recovery: self.superblock.needs_recovery(),
         };
-        // Recorded once the shape says it really is a log, and before the
-        // read-only bail: a mount that cannot replay still owes readers the
-        // refusal. Earlier would reserve the number against a deletable file,
-        // and the refusal would follow it to whatever reused the number.
-        self.journal_inode = Some(ino);
-        if self.read_only {
-            return Ok(None);
-        }
-        let Some(slots) = self.map_log_blocks(ino, blocks)? else {
-            return Ok(None);
-        };
-        let extent = journal::LogExtent {
-            first_data_block: self.geom.first_data_block().raw(),
-            blocks_count: self.geom.blocks_count(),
-        };
-        let stamp = self.mount_stamp()?;
-        let (log, recovery) =
-            journal::Journal::attach(slots, self.block_size, ino, extent, stamp, self.device)?;
+        let (log, recovery) = journal::Journal::attach(&runs, volume, self.device)?;
         if recovery.replayed() {
             // The replay wrote home locations under the reads this function
-            // just did, so anything cached before it is stale.
+            // just did, the superblock's own block among them.
             self.cache.invalidate_all_clean();
-            // Including the blocks that named the log's own extent: if the
-            // replay moved them, this list is no longer `/.journal`'s.
-            if !self.log_blocks_unchanged(ino, blocks, log.slots())? {
-                return Ok(None);
-            }
+            self.reread_superblock()?;
         }
         self.cache.install_journal(log)?;
         Ok(Some(recovery))
     }
 
-    /// Whether the log file still maps to exactly `slots`.
+    /// Take the superblock a replay left, refusing one that describes another
+    /// shape of volume than the cache was sized for, or one this
+    /// implementation may not write.
     #[inline(never)]
-    fn log_blocks_unchanged(
-        &mut self,
-        ino: u32,
-        blocks: u32,
-        slots: &[u32],
-    ) -> Result<bool, Ext2Error> {
-        let again = self.map_log_blocks(ino, blocks)?;
-        Ok(again.as_ref().map(|s| s.as_slice()) == Some(slots))
+    fn reread_superblock(&mut self) -> Result<(), journal::AttachError> {
+        let fresh = Self::read_superblock(self.device)?;
+        let geom = Ext2Geometry::derive(&fresh)?;
+        if geom.block_size() != self.block_size || geom.inode_size() != self.inode_size {
+            return Err(journal::AttachError::Corrupt);
+        }
+        if fresh.requires_readonly() {
+            return Err(journal::AttachError::Unsupported);
+        }
+        self.geom = geom
+            .with_reserve(self.geom.reserved_blocks())
+            .with_account(self.geom.account());
+        self.superblock = fresh;
+        Ok(())
     }
 
-    /// The log file's blocks, or `None` for a file this kernel will not log
-    /// into. Each is checked against the volume, because the log writes to
-    /// them without consulting the filesystem again.
-    fn map_log_blocks(&mut self, ino: u32, blocks: u32) -> Result<Option<KVec<u32>>, Ext2Error> {
-        let inode = self.read_inode_num(InodeNum(ino))?;
-        let mut slots = KVec::with_capacity(blocks as usize).map_err(|_| Ext2Error::OutOfMemory)?;
-        for index in 0..blocks {
-            let block = blockmap::map_block(
-                &inode,
-                FileBlock(index),
-                &self.geom,
+    /// The journal inode's blocks as runs of consecutive ones from journal
+    /// block 0, every one inside the volume: the log writes to them without
+    /// consulting the filesystem again. A hole or an unwritten extent is not
+    /// a journal.
+    #[inline(never)]
+    fn journal_runs(
+        &mut self,
+        ino: u32,
+        inode: &Inode,
+    ) -> Result<journal::JournalRuns, journal::AttachError> {
+        let blocks = u32::try_from(inode.size / u64::from(self.block_size))
+            .map_err(|_| journal::AttachError::BadSuperblock)?;
+        let mut runs = journal::JournalRuns::new();
+        let extend = |runs: &mut journal::JournalRuns, lblk: u32, pblk: u32, len: u32| {
+            if let Some(last) = runs.as_mut_slice().last_mut()
+                && last.0.checked_add(last.2) == Some(lblk)
+                && last.1.checked_add(last.2) == Some(pblk)
+                && let Some(grown) = last.2.checked_add(len)
+            {
+                last.2 = grown;
+                return Ok(());
+            }
+            runs.push((lblk, pblk, len))
+        };
+        let owner = BlockOwner::File(ino);
+        let mut broken = false;
+        if inode.uses_extents() {
+            let mut failed = false;
+            extents::for_each_run(
+                inode,
                 &mut *self.cache,
                 self.device,
-                BlockOwner::File(ino),
+                &self.geom,
+                owner,
+                &mut |e| {
+                    let next = runs
+                        .as_slice()
+                        .last()
+                        .map_or(Some(0), |r| r.0.checked_add(r.2));
+                    let pblk = u32::try_from(e.pblk).ok();
+                    match pblk {
+                        Some(pblk) if Some(e.lblk) == next && e.len > 0 && !e.unwritten => {
+                            failed |= extend(&mut runs, e.lblk, pblk, e.len).is_err();
+                        }
+                        _ => broken = true,
+                    }
+                    !broken && !failed
+                },
             )?;
-            // A hole means the file was never preallocated; a block outside
-            // the volume means the mapping is not this file's. Writing into
-            // either would land on something else.
-            if !block.is_valid() || self.geom.checked_block(block.raw()).is_none() {
-                return Ok(None);
+            if failed {
+                return Err(Ext2Error::OutOfMemory.into());
             }
-            slots
-                .push(block.raw())
-                .map_err(|_| Ext2Error::OutOfMemory)?;
+        } else {
+            for index in 0..blocks {
+                let block = blockmap::map_block(
+                    inode,
+                    FileBlock(index),
+                    &self.geom,
+                    &mut *self.cache,
+                    self.device,
+                    owner,
+                )?;
+                if !block.is_valid() {
+                    broken = true;
+                    break;
+                }
+                extend(&mut runs, index, block.raw(), 1).map_err(|_| Ext2Error::OutOfMemory)?;
+            }
         }
-        Ok(Some(slots))
+        let mapped = runs
+            .as_slice()
+            .last()
+            .map_or(0, |r| r.0.saturating_add(r.2));
+        let in_volume = runs.as_slice().iter().all(|&(_, pblk, len)| {
+            self.geom.checked_owned_block(pblk).is_some()
+                && len
+                    .checked_sub(1)
+                    .and_then(|tail| pblk.checked_add(tail))
+                    .is_some_and(|last| self.geom.checked_block(last).is_some())
+        });
+        if broken || mapped < blocks || !in_volume {
+            return Err(journal::AttachError::BadSuperblock);
+        }
+        Ok(runs)
     }
 
     /// Whether the log has filled far enough that the flusher should drain it
@@ -1203,16 +1256,23 @@ impl<'a> Ext2Fs<'a> {
         Ok((blk_num, within))
     }
 
+    /// An inode's record, its checksum held to its contents. A record of no
+    /// type is never checked: a table a volume left uninitialised holds
+    /// zeros there, which no checksum describes.
     fn read_inode_num(&mut self, ino: InodeNum) -> Result<Inode, Ext2Error> {
         let (blk_num, within) = self.inode_disk_offset(ino)?;
         let size = self.inode_size as usize;
         let owner = self.inode_block_owner(ino, blk_num)?;
         let block = self.cache.get_owned(blk_num, self.device, owner)?;
-        let data = block.data();
-        if within + size > data.len() {
-            return Err(Ext2Error::InvalidInode);
+        let record = block.slice(within, size).ok_or(Ext2Error::InvalidInode)?;
+        let inode = Inode::parse(record, self.geom.inode_format());
+        if let Some(seed) = self.geom.csum_seed()
+            && inode.mode != 0
+            && !ext4_inode::verify(seed, ino.raw(), record)
+        {
+            return Err(Ext2Error::BadChecksum);
         }
-        Ok(Inode::parse(&data[within..within + size]))
+        Ok(inode)
     }
 
     /// Classify an inode-table block by the records it carries, so a per-inode
@@ -1226,24 +1286,46 @@ impl<'a> Ext2Fs<'a> {
         Ok(BlockOwner::Inodes { first, last })
     }
 
+    /// Write `inode` over its record, keeping the bytes it does not carry,
+    /// and restamp the record's checksum.
     fn write_inode_num(&mut self, ino: InodeNum, inode: &Inode) -> Result<(), Ext2Error> {
         self.note_record(ino);
         let (blk_num, within) = self.inode_disk_offset(ino)?;
         let size = self.inode_size as usize;
+        let fmt = self.geom.inode_format();
+        let seed = self.geom.csum_seed();
         let owner = self.inode_block_owner(ino, blk_num)?;
         let mut block = self.cache.get_owned(blk_num, self.device, owner)?;
-        let data = block.data_mut();
-        if within + size > data.len() {
-            return Err(Ext2Error::InvalidInode);
+        let record = block
+            .slice_mut(within, size)
+            .ok_or(Ext2Error::InvalidInode)?;
+        inode.encode_into(record, fmt)?;
+        if let Some(seed) = seed {
+            ext4_inode::seal(seed, ino.raw(), record);
         }
-        inode.encode(&mut data[within..within + size]);
         Ok(())
     }
 
-    /// The log's own file is refused rather than read: its blocks hold copies
-    /// of bitmaps, inode tables and directory blocks, so a reader of it sees
-    /// the metadata of files whose permissions it does not hold.
-    /// `EXT2_IMMUTABLE_FL` refuses the write half; this is the read half.
+    /// Clear a newly allocated inode's record: an uninitialised table, or a
+    /// record a previous owner left, holds bytes a field-wise write would keep.
+    /// The extension a larger record carries is sized here, once.
+    fn init_inode_record(&mut self, ino: InodeNum) -> Result<(), Ext2Error> {
+        let (blk_num, within) = self.inode_disk_offset(ino)?;
+        let size = self.inode_size as usize;
+        let extra = self.geom.new_extra_isize();
+        let owner = self.inode_block_owner(ino, blk_num)?;
+        let mut block = self.cache.get_owned(blk_num, self.device, owner)?;
+        let record = block
+            .slice_mut(within, size)
+            .ok_or(Ext2Error::InvalidInode)?;
+        record.fill(0);
+        if size > ext4_inode::GOOD_OLD_SIZE {
+            record[ext4_inode::off::EXTRA_ISIZE..ext4_inode::off::EXTRA_ISIZE + 2]
+                .copy_from_slice(&extra.to_le_bytes());
+        }
+        Ok(())
+    }
+
     pub fn read_file(
         &mut self,
         ino: u32,
@@ -1261,9 +1343,6 @@ impl<'a> Ext2Fs<'a> {
         offset: u64,
         pages: &mut [&mut [u8]],
     ) -> Result<usize, Ext2Error> {
-        if self.journal_inode == Some(ino) {
-            return Err(Ext2Error::Immutable);
-        }
         let inode = self.read_inode_num(InodeNum(ino))?;
         file::read_file(
             &inode,
@@ -1283,7 +1362,7 @@ impl<'a> Ext2Fs<'a> {
         self.transaction(|fs| {
             let ino_num = InodeNum(ino);
             let mut inode = fs.read_inode_num(ino_num)?;
-            if inode.is_immutable() {
+            if inode.is_sealed() {
                 return Err(Ext2Error::Immutable);
             }
             let free_before = fs.superblock.free_blocks_count;
@@ -1321,7 +1400,7 @@ impl<'a> Ext2Fs<'a> {
         self.transaction(|fs| {
             let ino_num = InodeNum(ino);
             let mut inode = fs.read_inode_num(ino_num)?;
-            if inode.is_immutable() {
+            if inode.is_sealed() {
                 return Err(Ext2Error::Immutable);
             }
             if inode.is_directory() {
@@ -1333,18 +1412,14 @@ impl<'a> Ext2Fs<'a> {
             // A size past what the block map can address would leave `i_size`
             // naming a block no read could reach. Refused here rather than at
             // that read: this is the only place the size is set.
-            if new_size > blockmap::max_file_size(fs.geom.ptrs_per_block(), fs.block_size) {
+            if new_size > blockmap::max_file_size(&inode, &fs.geom) {
                 return Err(Ext2Error::InvalidRange);
             }
-            let free_before = fs.superblock.free_blocks_count;
             fs.release_blocks_past(&mut inode, new_size, BlockOwner::File(ino))?;
             time::stamp(&mut inode.mtime);
             time::stamp(&mut inode.ctime);
             fs.note_large_file(&inode);
             fs.write_inode_num(ino_num, &inode)?;
-            if fs.superblock.free_blocks_count != free_before {
-                fs.superblock_dirty = true;
-            }
             fs.superblock_dirty = true;
             Ok(())
         })
@@ -1373,6 +1448,25 @@ impl<'a> Ext2Fs<'a> {
         let superblock = &mut self.superblock;
         let cache = &mut *self.cache;
         let device = self.device;
+        if inode.uses_extents() {
+            if new_size < inode.size {
+                let first_free = new_size.div_ceil(u64::from(self.block_size));
+                let first_free =
+                    FileBlock(u32::try_from(first_free).map_err(|_| Ext2Error::InvalidRange)?);
+                extents::truncate(inode, first_free, cache, device, &geom, superblock, owner)?;
+                file::zero_tail(
+                    inode,
+                    new_size,
+                    cache,
+                    device,
+                    &geom,
+                    self.block_size,
+                    owner,
+                )?;
+            }
+            inode.size = new_size;
+            return Ok(());
+        }
         // `free_block` needs the same cache and superblock the walk borrows,
         // so the frees are collected and applied after it.
         let mut freed: slopos_ostd::KVec<BlockNum> = slopos_ostd::KVec::new();
@@ -1414,7 +1508,7 @@ impl<'a> Ext2Fs<'a> {
         self.transaction(|fs| {
             let ino_num = InodeNum(ino);
             let mut inode = fs.read_inode_num(ino_num)?;
-            if inode.is_immutable() {
+            if inode.is_sealed() {
                 return Err(Ext2Error::Immutable);
             }
             inode.mode = (inode.mode & !MODE_PERM_MASK) | (mode & MODE_PERM_MASK);
@@ -1423,27 +1517,27 @@ impl<'a> Ext2Fs<'a> {
         })
     }
 
-    /// Write access and modification times through, in whole seconds. `None`
-    /// leaves a field alone, which is `UTIME_OMIT`.
+    /// Write access and modification times through. `None` leaves a field
+    /// alone, which is `UTIME_OMIT`. A 128-byte record keeps whole seconds.
     #[inline(never)]
     pub fn set_times(
         &mut self,
         ino: u32,
-        atime: Option<u64>,
-        mtime: Option<u64>,
+        atime: Option<InodeTime>,
+        mtime: Option<InodeTime>,
     ) -> Result<(), Ext2Error> {
         self.check_writable()?;
         self.transaction(|fs| {
             let ino_num = InodeNum(ino);
             let mut inode = fs.read_inode_num(ino_num)?;
-            if inode.is_immutable() {
+            if inode.is_sealed() {
                 return Err(Ext2Error::Immutable);
             }
             if let Some(atime) = atime {
-                inode.atime = u32::try_from(atime).map_err(|_| Ext2Error::InvalidRange)?;
+                inode.atime = atime;
             }
             if let Some(mtime) = mtime {
-                inode.mtime = u32::try_from(mtime).map_err(|_| Ext2Error::InvalidRange)?;
+                inode.mtime = mtime;
             }
             time::stamp(&mut inode.ctime);
             fs.write_inode_num(ino_num, &inode)
@@ -1464,15 +1558,18 @@ impl<'a> Ext2Fs<'a> {
             }
             let parent_num = InodeNum(parent);
             let target_num = InodeNum(target);
+            if fs.is_volume_inode(target_num) {
+                return Err(Ext2Error::InvalidPath);
+            }
 
             let mut target_inode = fs.read_inode_num(target_num)?;
             if target_inode.is_directory() {
                 return Err(Ext2Error::IsDirectory);
             }
-            if target_inode.is_immutable() {
+            if target_inode.is_sealed() {
                 return Err(Ext2Error::Immutable);
             }
-            if target_inode.links_count == u16::MAX {
+            if target_inode.links_count >= EXT4_LINK_MAX {
                 return Err(Ext2Error::TooManyLinks);
             }
 
@@ -1480,7 +1577,7 @@ impl<'a> Ext2Fs<'a> {
             if !parent_inode.is_directory() {
                 return Err(Ext2Error::NotDirectory);
             }
-            if parent_inode.is_immutable() {
+            if parent_inode.is_sealed() {
                 return Err(Ext2Error::Immutable);
             }
             if fs.find_child(parent_num, &parent_inode, name)?.is_some() {
@@ -1515,8 +1612,7 @@ impl<'a> Ext2Fs<'a> {
         })
     }
 
-    /// Seal an inode with `EXT2_IMMUTABLE_FL`. One-way, as the VFS trait
-    /// requires: nothing in this implementation clears the bit.
+    /// Seal an inode with `EXT2_IMMUTABLE_FL`.
     #[inline(never)]
     pub fn set_sealed(&mut self, ino: u32) -> Result<(), Ext2Error> {
         self.check_writable()?;
@@ -1532,8 +1628,42 @@ impl<'a> Ext2Fs<'a> {
         })
     }
 
+    pub fn inode_flags(&mut self, ino: u32) -> Result<u32, Ext2Error> {
+        Ok(self.read_inode_num(InodeNum(ino))?.flags & ondisk::USER_VISIBLE_FL)
+    }
+
+    /// Make the inode's visible flags `flags`. `may_seal` is the caller's
+    /// authority over the seal; a sealed inode changes nothing else.
+    #[inline(never)]
+    pub fn set_inode_flags(
+        &mut self,
+        ino: u32,
+        flags: u32,
+        may_seal: bool,
+    ) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            let ino_num = InodeNum(ino);
+            let mut inode = fs.read_inode_num(ino_num)?;
+            let changed = (inode.flags & ondisk::USER_VISIBLE_FL) ^ flags;
+            if changed == 0 {
+                return Ok(());
+            }
+            if changed & !ondisk::USER_SETTABLE_FL != 0 {
+                return Err(Ext2Error::UnsupportedFeature);
+            }
+            let reseals = changed & EXT2_IMMUTABLE_FL != 0;
+            if (reseals && !may_seal) || (!reseals && inode.is_sealed()) {
+                return Err(Ext2Error::Immutable);
+            }
+            inode.flags ^= changed;
+            time::stamp(&mut inode.ctime);
+            fs.write_inode_num(ino_num, &inode)
+        })
+    }
+
     pub fn is_sealed(&mut self, ino: u32) -> Result<bool, Ext2Error> {
-        Ok(self.read_inode_num(InodeNum(ino))?.is_immutable())
+        Ok(self.read_inode_num(InodeNum(ino))?.is_sealed())
     }
 
     pub fn for_each_dir_entry<F>(&mut self, ino: u32, mut f: F) -> Result<(), Ext2Error>
@@ -1586,7 +1716,7 @@ impl<'a> Ext2Fs<'a> {
         if !parent_inode.is_directory() {
             return Err(Ext2Error::NotDirectory);
         }
-        dir::lookup_child(
+        let found = dir::lookup_child(
             &parent_inode,
             name,
             &mut *self.cache,
@@ -1594,7 +1724,17 @@ impl<'a> Ext2Fs<'a> {
             &self.geom,
             self.block_size,
             BlockOwner::File(parent),
-        )
+        )?;
+        if self.is_volume_inode(found) {
+            return Err(Ext2Error::DirectoryFormat);
+        }
+        Ok(found)
+    }
+
+    /// A reserved inode the volume keeps for itself — the journal, the resize
+    /// inode — which no name may reach.
+    fn is_volume_inode(&self, ino: InodeNum) -> bool {
+        ino != InodeNum::ROOT && ino.raw() < self.superblock.first_ino
     }
 
     /// Whether the name index can answer a miss in `ino` without scanning it.
@@ -1605,24 +1745,83 @@ impl<'a> Ext2Fs<'a> {
     }
 
     /// Clear `EXT2_INDEX_FL` before the first mutation of a directory that
-    /// carries it, and publish the inode before any block is touched.
+    /// carries it.
     ///
     /// Nothing here builds an htree, and the linear inserter places entries in
     /// exactly the slack an index node hides (see [`ondisk::EXT2_INDEX_FL`]) —
     /// leaving an image Linux still reads as indexed over a tree this kernel
     /// destroyed. De-indexing is the honest resolution: the linear view of an
     /// indexed directory is already correct, which is what the compatibility
-    /// htree was designed around.
+    /// htree was designed around. Under checksums the index blocks carry no
+    /// leaf tail, so they are rewritten as the empty leaves they read as.
     ///
     /// The superblock's `dir_index` COMPAT bit is left alone: it says indexes
-    /// may exist on the volume, not that this directory has one.
+    /// may exist on the volume, not that this directory has one. An
+    /// uncounted directory is refused with `TooManyLinks`: its link count
+    /// means something only while it is indexed.
     fn deindex_directory(&mut self, ino: InodeNum, inode: &mut Inode) -> Result<(), Ext2Error> {
         if !inode.is_indexed() {
             return Ok(());
         }
+        if inode.is_uncounted_directory() {
+            return Err(Ext2Error::TooManyLinks);
+        }
+        let owner = BlockOwner::File(ino.raw());
+        if let Some(seed) = dir::dir_seed(&self.geom, owner, inode) {
+            self.linearize_index_blocks(inode, seed, owner)?;
+        }
         inode.flags &= !EXT2_INDEX_FL;
         time::stamp(&mut inode.ctime);
         self.write_inode_num(ino, inode)
+    }
+
+    /// Give every block of an indexed directory that carries no leaf tail —
+    /// the root and the interior nodes — the linear form its records already
+    /// read as, and a tail.
+    #[inline(never)]
+    fn linearize_index_blocks(
+        &mut self,
+        inode: &Inode,
+        seed: u32,
+        owner: BlockOwner,
+    ) -> Result<(), Ext2Error> {
+        use slopos_ext4_core::dir as ext4_dir;
+        let bs = u64::from(self.block_size);
+        for index in 0..inode.size.div_ceil(bs) {
+            let file_block = FileBlock(u32::try_from(index).map_err(|_| Ext2Error::InvalidBlock)?);
+            let phys = blockmap::map_block(
+                inode,
+                file_block,
+                &self.geom,
+                &mut *self.cache,
+                self.device,
+                owner,
+            )?;
+            if !phys.is_valid() {
+                return Err(Ext2Error::DirectoryFormat);
+            }
+            let mut block = self.cache.get_owned(phys, self.device, owner)?;
+            if ext4_dir::has_tail(block.data()) {
+                continue;
+            }
+            let root = index == 0;
+            let expected = if root {
+                ext4_dir::is_htree_root(block.data())
+            } else {
+                ext4_dir::is_htree_node(block.data())
+            };
+            if !expected {
+                return Err(Ext2Error::DirectoryFormat);
+            }
+            let data = block.data_mut();
+            if root {
+                ext4_dir::linearize_root(data, true);
+            } else {
+                ext4_dir::linearize_node(data, true);
+            }
+            ext4_dir::seal(seed, data);
+        }
+        Ok(())
     }
 
     pub fn resolve_path(&mut self, path: &[u8]) -> Result<u32, Ext2Error> {
@@ -1718,12 +1917,11 @@ impl<'a> Ext2Fs<'a> {
         if !parent.is_directory() {
             return Err(Ext2Error::NotDirectory);
         }
-        if parent.is_immutable() {
+        if parent.is_sealed() {
             return Err(Ext2Error::Immutable);
         }
         let is_dir = matches!(kind, NewInode::Directory);
-        // A directory's parent gains a `..` link, and `links_count` is a u16.
-        if is_dir && parent.links_count == u16::MAX {
+        if is_dir && parent.subdir_links_full() {
             return Err(Ext2Error::TooManyLinks);
         }
 
@@ -1735,26 +1933,7 @@ impl<'a> Ext2Fs<'a> {
         }
         self.deindex_directory(parent_num, &mut parent)?;
 
-        let parent_group = self
-            .geom
-            .locate_inode(parent_num)
-            .map(|(g, _)| g)
-            .ok_or(Ext2Error::InvalidInode)?;
-        let new_ino = ext2_alloc::allocate_inode(
-            parent_group,
-            &self.geom,
-            &mut self.superblock,
-            &mut *self.cache,
-            self.device,
-        )?;
-        self.note_life(new_ino);
-
-        let mut new_inode = self.build_new_inode(new_ino, parent_num, kind)?;
-        let now = time::now_unix();
-        new_inode.atime = now;
-        new_inode.ctime = now;
-        new_inode.mtime = now;
-        self.write_inode_num(new_ino, &new_inode)?;
+        let new_ino = self.allocate_new_inode(parent_num, kind)?;
 
         let ft = match kind {
             NewInode::Directory => DIR_FT_DIR,
@@ -1777,7 +1956,7 @@ impl<'a> Ext2Fs<'a> {
         )?;
 
         if is_dir {
-            parent.links_count += 1;
+            parent.link_subdir();
             self.adjust_used_dirs(new_ino, 1)?;
         }
         time::stamp(&mut parent.mtime);
@@ -1785,6 +1964,38 @@ impl<'a> Ext2Fs<'a> {
         self.write_inode_num(parent_num, &parent)?;
         self.superblock_dirty = true;
 
+        Ok(new_ino)
+    }
+
+    /// An inode beside `parent_num`'s, its record written, still nameless.
+    #[inline(never)]
+    fn allocate_new_inode(
+        &mut self,
+        parent_num: InodeNum,
+        kind: NewInode<'_>,
+    ) -> Result<InodeNum, Ext2Error> {
+        let parent_group = self
+            .geom
+            .locate_inode(parent_num)
+            .map(|(g, _)| g)
+            .ok_or(Ext2Error::InvalidInode)?;
+        let new_ino = ext2_alloc::allocate_inode(
+            parent_group,
+            &self.geom,
+            &mut self.superblock,
+            &mut *self.cache,
+            self.device,
+        )?;
+        self.note_life(new_ino);
+        self.init_inode_record(new_ino)?;
+
+        let mut new_inode = self.build_new_inode(new_ino, parent_num, kind)?;
+        let now = time::now_or_unset();
+        new_inode.atime = now;
+        new_inode.ctime = now;
+        new_inode.mtime = now;
+        new_inode.crtime = now;
+        self.write_inode_num(new_ino, &new_inode)?;
         Ok(new_ino)
     }
 
@@ -1797,81 +2008,110 @@ impl<'a> Ext2Fs<'a> {
         parent_num: InodeNum,
         kind: NewInode<'_>,
     ) -> Result<Inode, Ext2Error> {
+        let generation = self.cache.next_generation();
         if let NewInode::Symlink(target) = kind {
-            let data_block = if symlink::symlink_needs_block(target) {
-                Some(ext2_alloc::allocate_block(
-                    &self.geom,
-                    &mut self.superblock,
-                    &mut *self.cache,
-                    self.device,
-                    BlockOwner::File(new_ino.raw()),
-                )?)
-            } else {
-                None
-            };
-            return symlink::create_symlink_inode(
-                target,
-                self.block_size,
-                data_block,
+            return self.build_symlink_inode(new_ino, target, generation);
+        }
+        let mut inode = Inode::EMPTY;
+        inode.mode = match kind {
+            NewInode::Directory => MODE_DIRECTORY | 0o755,
+            NewInode::Fifo => ondisk::MODE_FIFO | 0o644,
+            _ => MODE_FILE | 0o644,
+        };
+        inode.links_count = 1;
+        inode.generation = generation;
+        // Readers hold a FIFO's `i_block` to zero, so it takes no extent tree.
+        if self.geom.extents() && !matches!(kind, NewInode::Fifo) {
+            inode.flags |= EXT4_EXTENTS_FL;
+            extents::init_root(&mut inode);
+        }
+        if matches!(kind, NewInode::Directory) {
+            inode.links_count = 2;
+            self.init_dir_block(&mut inode, new_ino, parent_num)?;
+        }
+        Ok(inode)
+    }
+
+    #[inline(never)]
+    fn build_symlink_inode(
+        &mut self,
+        new_ino: InodeNum,
+        target: &[u8],
+        generation: u32,
+    ) -> Result<Inode, Ext2Error> {
+        let owner = BlockOwner::File(new_ino.raw());
+        let data_block = if symlink::symlink_needs_block(target) {
+            Some(ext2_alloc::allocate_block_near(
+                self.inode_goal(new_ino),
+                &self.geom,
+                &mut self.superblock,
                 &mut *self.cache,
                 self.device,
-                BlockOwner::File(new_ino.raw()),
-            );
-        }
-
-        let is_dir = matches!(kind, NewInode::Directory);
-        let mut inode = Inode {
-            mode: match kind {
-                NewInode::Directory => MODE_DIRECTORY | 0o755,
-                NewInode::Fifo => ondisk::MODE_FIFO | 0o644,
-                _ => MODE_FILE | 0o644,
-            },
-            uid: 0,
-            size: 0,
-            atime: 0,
-            ctime: 0,
-            mtime: 0,
-            dtime: 0,
-            gid: 0,
-            links_count: if is_dir { 2 } else { 1 },
-            blocks: 0,
-            flags: 0,
-            block: [BlockNum::ZERO; 15],
+                owner,
+            )?)
+        } else {
+            None
         };
-        if !is_dir {
-            return Ok(inode);
-        }
-
-        let first_block = ext2_alloc::allocate_block(
-            &self.geom,
-            &mut self.superblock,
+        let mut inode = symlink::create_symlink_inode(
+            target,
+            self.block_size,
+            data_block,
+            self.geom.extents(),
             &mut *self.cache,
             self.device,
-            BlockOwner::File(new_ino.raw()),
+            owner,
         )?;
-        {
-            let mut blk = self.cache.get_zero_owned(
-                first_block,
-                self.device,
-                BlockOwner::File(new_ino.raw()),
-            )?;
-            let data = blk.data_mut();
-            let bs = self.block_size as usize;
-            let dot_rec = 12;
-            ondisk::write_dir_entry(&mut data[..dot_rec], new_ino, b".", DIR_FT_DIR, dot_rec);
-            let dotdot_rec = bs - dot_rec;
-            ondisk::write_dir_entry(
-                &mut data[dot_rec..dot_rec + dotdot_rec],
-                parent_num,
-                b"..",
-                DIR_FT_DIR,
-                dotdot_rec,
-            );
-        }
-        inode.block[0] = first_block;
-        inode.size = self.block_size as u64;
-        inode.blocks = self.block_size / 512;
+        inode.generation = generation;
         Ok(inode)
+    }
+
+    /// A new directory's first block: `.` and `..`, and the checksum tail.
+    #[inline(never)]
+    fn init_dir_block(
+        &mut self,
+        inode: &mut Inode,
+        new_ino: InodeNum,
+        parent_num: InodeNum,
+    ) -> Result<(), Ext2Error> {
+        let owner = BlockOwner::File(new_ino.raw());
+        let first_block = blockmap::ensure_data_block(
+            inode,
+            FileBlock(0),
+            &mut *self.cache,
+            self.device,
+            &self.geom,
+            &mut self.superblock,
+            owner,
+        )?;
+        let seed = dir::dir_seed(&self.geom, owner, inode);
+        let mut blk = self.cache.get_zero_owned(first_block, self.device, owner)?;
+        let data = blk.data_mut();
+        let end = dir::usable(self.block_size, seed);
+        let dot_rec = 12;
+        ondisk::write_dir_entry(&mut data[..dot_rec], new_ino, b".", DIR_FT_DIR, dot_rec);
+        let dotdot_rec = end - dot_rec;
+        ondisk::write_dir_entry(
+            &mut data[dot_rec..dot_rec + dotdot_rec],
+            parent_num,
+            b"..",
+            DIR_FT_DIR,
+            dotdot_rec,
+        );
+        if seed.is_some() {
+            slopos_ext4_core::dir::write_tail(data);
+        }
+        dir::seal_block(seed, data);
+        inode.size = u64::from(self.block_size);
+        Ok(())
+    }
+
+    /// Where a new inode's first block should go: the first block of its own
+    /// group, which keeps a directory's files beside it.
+    fn inode_goal(&self, ino: InodeNum) -> BlockNum {
+        self.geom
+            .locate_inode(ino)
+            .and_then(|(group, _)| self.geom.block_of(group, 0))
+            .unwrap_or(BlockNum::ZERO)
     }
 
     /// Move the `used_dirs_count` of the group holding `ino` by `delta`.
@@ -1880,11 +2120,7 @@ impl<'a> Ext2Fs<'a> {
     fn adjust_used_dirs(&mut self, ino: InodeNum, delta: i32) -> Result<(), Ext2Error> {
         let (group, _) = self.geom.locate_inode(ino).ok_or(Ext2Error::InvalidInode)?;
         let mut desc = self.read_group_desc(group)?;
-        desc.used_dirs_count = if delta >= 0 {
-            desc.used_dirs_count.saturating_add(delta as u16)
-        } else {
-            desc.used_dirs_count.saturating_sub((-delta) as u16)
-        };
+        desc.used_dirs_count = desc.used_dirs_count.saturating_add_signed(delta);
         ext2_alloc::write_group_desc(group, &desc, &self.geom, &mut *self.cache, self.device)
     }
 
@@ -1955,7 +2191,7 @@ impl<'a> Ext2Fs<'a> {
         if !parent_inode.is_directory() {
             return Err(Ext2Error::NotDirectory);
         }
-        if parent_inode.is_immutable() {
+        if parent_inode.is_sealed() {
             return Err(Ext2Error::Immutable);
         }
 
@@ -1969,7 +2205,7 @@ impl<'a> Ext2Fs<'a> {
             BlockOwner::File(parent_num.raw()),
         )?;
         let mut target = self.read_inode_num(target_num)?;
-        if target.is_immutable() {
+        if target.is_sealed() {
             return Err(Ext2Error::Immutable);
         }
 
@@ -2033,18 +2269,23 @@ impl<'a> Ext2Fs<'a> {
             self.free_detached_inode(target_num, &mut target, is_dir)?;
         }
 
-        // Re-read the parent: `remove_dir_entry` mutated its cached data
-        // block, and `append_dir_entry` in an earlier op may have grown it.
-        parent_inode = self.read_inode_num(parent_num)?;
-        if is_dir {
-            parent_inode.links_count = parent_inode.links_count.saturating_sub(1);
-        }
-        time::stamp(&mut parent_inode.mtime);
-        time::stamp(&mut parent_inode.ctime);
-        self.write_inode_num(parent_num, &parent_inode)?;
+        self.lost_entry(parent_num, is_dir)?;
         self.superblock_dirty = true;
-
         Ok(orphaned)
+    }
+
+    /// Restamp a directory that lost an entry, and the link a subdirectory's
+    /// `..` held. Re-read rather than taken from the caller: removing the
+    /// entry may have rewritten the record.
+    #[inline(never)]
+    fn lost_entry(&mut self, dir_num: InodeNum, subdir: bool) -> Result<(), Ext2Error> {
+        let mut dir = self.read_inode_num(dir_num)?;
+        if subdir {
+            dir.unlink_subdir();
+        }
+        time::stamp(&mut dir.mtime);
+        time::stamp(&mut dir.ctime);
+        self.write_inode_num(dir_num, &dir)
     }
 
     /// Free the blocks and the inode of a record that no name reaches.
@@ -2057,9 +2298,10 @@ impl<'a> Ext2Fs<'a> {
     ) -> Result<(), Ext2Error> {
         // A fast symlink's target lives in `i_block`, which the block walk
         // would otherwise read as fifteen block numbers and free.
-        if !target.is_fast_symlink() {
+        if target.uses_extents() || !target.is_fast_symlink() {
             self.release_file_blocks(target, BlockOwner::File(target_num.raw()))?;
         }
+        self.release_xattr_block(target)?;
         self.note_life(target_num);
         ext2_alloc::free_inode(
             target_num,
@@ -2080,8 +2322,57 @@ impl<'a> Ext2Fs<'a> {
         target.size = 0;
         target.flags = 0;
         target.block = [BlockNum::ZERO; 15];
+        target.file_acl = 0;
         target.dtime = time::now_unix();
         self.write_inode_num(target_num, target)
+    }
+
+    /// Give up the inode's reference to its extended-attribute block, freeing
+    /// the block when it was the last. Several inodes may share one.
+    fn release_xattr_block(&mut self, inode: &Inode) -> Result<(), Ext2Error> {
+        if inode.file_acl == 0 {
+            return Ok(());
+        }
+        let block = u32::try_from(inode.file_acl)
+            .ok()
+            .and_then(|raw| self.geom.checked_block(raw))
+            .ok_or(Ext2Error::InvalidBlock)?;
+        let seed = self.geom.csum_seed();
+        let remaining = {
+            let mut cached = self
+                .cache
+                .get_owned(block, self.device, BlockOwner::Other)?;
+            let data = cached.data();
+            if !xattr::is_xattr_block(data) || xattr::refcount(data) == 0 {
+                return Err(Ext2Error::InvalidBlock);
+            }
+            if let Some(seed) = seed
+                && !xattr::verify(seed, u64::from(block.raw()), data)
+            {
+                return Err(Ext2Error::BadChecksum);
+            }
+            let remaining = xattr::refcount(data) - 1;
+            if remaining > 0 {
+                let data = cached.data_mut();
+                xattr::set_refcount(data, remaining);
+                if let Some(seed) = seed {
+                    xattr::seal(seed, u64::from(block.raw()), data);
+                }
+            }
+            remaining
+        };
+        if remaining == 0 {
+            ext2_alloc::free_block(
+                block,
+                &self.geom,
+                &mut self.superblock,
+                &mut *self.cache,
+                self.device,
+                BlockOwner::Other,
+            )?;
+            self.cache.invalidate(block);
+        }
+        Ok(())
     }
 
     /// Complete the deferred free of an orphaned inode: unthread it from the
@@ -2219,6 +2510,7 @@ impl<'a> Ext2Fs<'a> {
             .map_err(Ext2Error::from)?;
         sb_buf[S_LAST_ORPHAN_OFF..S_LAST_ORPHAN_OFF + 4]
             .copy_from_slice(&self.superblock.last_orphan.to_le_bytes());
+        ondisk::seal_superblock(&mut sb_buf);
         self.device
             .write_at(1024, &sb_buf)
             .map_err(Ext2Error::from)?;
@@ -2240,7 +2532,7 @@ impl<'a> Ext2Fs<'a> {
         }
         let mut freed = 0u32;
         let limit = self.geom.inodes_count();
-        while self.superblock.last_orphan != 0 && freed <= limit {
+        while self.superblock.last_orphan >= self.superblock.first_ino && freed <= limit {
             let ino = InodeNum(self.superblock.last_orphan);
             let inode = match self.read_inode_num(ino) {
                 Ok(inode) => inode,
@@ -2380,7 +2672,7 @@ impl<'a> Ext2Fs<'a> {
 
         let (source_is_dir, file_type) = {
             let source_inode = self.read_inode_num(source)?;
-            if source_inode.is_immutable() {
+            if source_inode.is_sealed() {
                 return Err(Ext2Error::Immutable);
             }
             (source_inode.is_directory(), dir_file_type(&source_inode))
@@ -2435,7 +2727,7 @@ impl<'a> Ext2Fs<'a> {
         if !parent_inode.is_directory() {
             return Err(Ext2Error::NotDirectory);
         }
-        if parent_inode.is_immutable() {
+        if parent_inode.is_sealed() {
             return Err(Ext2Error::Immutable);
         }
         self.find_child(parent, &parent_inode, name)
@@ -2475,7 +2767,7 @@ impl<'a> Ext2Fs<'a> {
         plan: &RenamePlan,
     ) -> Result<(), Ext2Error> {
         let mut target_parent = self.read_inode_num(new_parent)?;
-        if plan.source_is_dir && plan.reparenting && target_parent.links_count == u16::MAX {
+        if plan.source_is_dir && plan.reparenting && target_parent.subdir_links_full() {
             return Err(Ext2Error::TooManyLinks);
         }
         self.deindex_directory(new_parent, &mut target_parent)?;
@@ -2493,7 +2785,7 @@ impl<'a> Ext2Fs<'a> {
             BlockOwner::File(new_parent.raw()),
         )?;
         if plan.source_is_dir && plan.reparenting {
-            target_parent.links_count += 1;
+            target_parent.link_subdir();
         }
         time::stamp(&mut target_parent.mtime);
         time::stamp(&mut target_parent.ctime);
@@ -2523,7 +2815,7 @@ impl<'a> Ext2Fs<'a> {
         )?;
         let mut source_parent = self.read_inode_num(old_parent)?;
         if plan.source_is_dir && plan.reparenting {
-            source_parent.links_count = source_parent.links_count.saturating_sub(1);
+            source_parent.unlink_subdir();
         }
         time::stamp(&mut source_parent.mtime);
         time::stamp(&mut source_parent.ctime);
@@ -2536,7 +2828,10 @@ impl<'a> Ext2Fs<'a> {
         moved: InodeNum,
         new_parent: InodeNum,
     ) -> Result<(), Ext2Error> {
-        let inode = self.read_inode_num(moved)?;
+        let mut inode = self.read_inode_num(moved)?;
+        // `..` sits in the htree root, whose own checksum tail a leaf's would
+        // overwrite.
+        self.deindex_directory(moved, &mut inode)?;
         dir::update_dotdot(
             &inode,
             new_parent,
@@ -2598,16 +2893,42 @@ impl<'a> Ext2Fs<'a> {
         self.write_inode_num(InodeNum(ino), inode)
     }
 
+    /// The block holding `index` of `ino`'s data, whichever mapping it uses.
+    #[cfg(feature = "tests")]
+    pub fn block_of_for_test(&mut self, ino: u32, index: u32) -> Result<u32, Ext2Error> {
+        let inode = self.read_inode_num(InodeNum(ino))?;
+        blockmap::map_block(
+            &inode,
+            FileBlock(index),
+            &self.geom,
+            &mut *self.cache,
+            self.device,
+            BlockOwner::File(ino),
+        )
+        .map(|b| b.raw())
+    }
+
     /// A group's directory count, which `e2fsck` cross-checks against the
     /// inodes it finds.
-    pub fn group_used_dirs(&mut self, group: u32) -> Result<u16, Ext2Error> {
+    pub fn group_used_dirs(&mut self, group: u32) -> Result<u32, Ext2Error> {
         let group = self.geom.group(group).ok_or(Ext2Error::InvalidBlock)?;
         Ok(self.read_group_desc(group)?.used_dirs_count)
     }
 
-    /// Free every block an inode owns: the twelve direct ones and all three
-    /// indirect trees.
+    /// Free every block an inode owns, whichever mapping it uses.
     fn release_file_blocks(&mut self, inode: &Inode, owner: BlockOwner) -> Result<(), Ext2Error> {
+        if inode.uses_extents() {
+            let mut tree = *inode;
+            return extents::truncate(
+                &mut tree,
+                FileBlock(0),
+                &mut *self.cache,
+                self.device,
+                &self.geom,
+                &mut self.superblock,
+                owner,
+            );
+        }
         for blk in inode.block.iter().take(12) {
             if blk.is_valid() {
                 ext2_alloc::free_block(
@@ -2667,6 +2988,7 @@ impl<'a> Ext2Fs<'a> {
             .map_err(Ext2Error::from)?;
         self.superblock.encode_mutable_fields(&mut sb_buf);
         ondisk::SuperblockBookkeeping::stamp_write(&mut sb_buf, time::now_unix_opt());
+        ondisk::seal_superblock(&mut sb_buf);
         self.device
             .write_at(1024, &sb_buf)
             .map_err(Ext2Error::from)?;

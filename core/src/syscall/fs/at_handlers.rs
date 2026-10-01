@@ -7,6 +7,7 @@ use slopos_abi::fs::{
     S_IFCHR, S_IFIFO, S_IFMT, S_IFREG, S_IFSOCK, UTIME_NOW, UTIME_OMIT, UserFsStat,
 };
 use slopos_abi::syscall::types::Timespec;
+use slopos_fs::vfs::Timestamp;
 
 use slopos_fs::fileio::{
     FdTable, file_access_at, file_chmod_at, file_fstat_fd, file_link_at, file_open_at,
@@ -326,11 +327,11 @@ define_syscall!(syscall_link
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
-/// One `utimensat` timestamp in whole seconds; `None` is `UTIME_OMIT`.
+/// One `utimensat` timestamp; `None` is `UTIME_OMIT`.
 ///
 /// `UTIME_NOW` without a set wall clock is `EINVAL`: reporting success for a
 /// stamp that never landed breaks every mtime-based build system.
-fn timestamp_of(ts: &Timespec, now: Option<u64>) -> Result<Option<u64>, Errno> {
+fn timestamp_of(ts: &Timespec, now: Option<Timestamp>) -> Result<Option<Timestamp>, Errno> {
     match ts.tv_nsec {
         UTIME_OMIT => Ok(None),
         UTIME_NOW => now.map(Some).ok_or(Errno::EINVAL),
@@ -338,7 +339,10 @@ fn timestamp_of(ts: &Timespec, now: Option<u64>) -> Result<Option<u64>, Errno> {
             if ts.tv_sec < 0 {
                 return Err(Errno::EINVAL);
             }
-            Ok(Some(ts.tv_sec as u64))
+            Ok(Some(Timestamp {
+                secs: ts.tv_sec,
+                nanos: nsec as u32,
+            }))
         }
         _ => Err(Errno::EINVAL),
     }
@@ -368,7 +372,7 @@ define_syscall!(syscall_utimensat
     -> Result<(), Errno>
 {
     reject_unknown(flags, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)?;
-    let now = slopos_kernel_services::clock::realtime_unix_secs().map(u64::from);
+    let now = Timestamp::now();
     let (atime, mtime) = match times {
         None => {
             let now = now.ok_or(Errno::EINVAL)?;

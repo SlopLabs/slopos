@@ -354,17 +354,18 @@ _qemu-boot mode video iso fs_image *extra_env:
 
 # Optimized by default: a dev-profile kernel spends ten times as long in every
 # syscall and page fault a compiler makes. A disk closed mid-write boots
-# unrefreshed, because the host cannot write into an image whose log the kernel
-# has yet to replay.
+# unrefreshed, because the host cannot write into an image whose journal the
+# kernel has yet to replay.
 [doc("Boot the development machine and spin the Wheel of Fate: a persistent / carrying the toolchain and a clone of HEAD, and an A/B boot disk the guest installs into. KERNEL_RELEASE=0 for a dev kernel, VIDEO=0 for serial only, ports=7777,8080 to forward")]
 boot:
     #!/usr/bin/env bash
     set -euo pipefail
     export KERNEL_RELEASE="${KERNEL_RELEASE:-1}"
     refresh=_fs-image-persist
-    state="$(dumpe2fs -h "{{fs_image_persist}}" 2>/dev/null | sed -n 's/^Filesystem state:[[:space:]]*//p' || true)"
-    if [ -f "{{fs_image_persist}}" ] && [ "$state" != clean ]; then
-        echo "boot: {{fs_image_persist}} was closed mid-write; booting it unrefreshed so its log replays" >&2
+    . scripts/lib/ext4.sh
+    if [ -f "{{fs_image_persist}}" ] && ext4_has_feature "{{fs_image_persist}}" has_journal &&
+       [ -n "$(ext4_unrest "{{fs_image_persist}}")" ]; then
+        echo "boot: {{fs_image_persist}} was closed mid-write; booting it unrefreshed so its journal replays" >&2
         refresh=""
     fi
     just _boot-disk-dev $refresh
@@ -609,6 +610,24 @@ test-persist: _build-run-tests
         exit 1
     fi
 
+# The ISO is built in the body, not as a dependency, so it carries this
+# cmdline: the test runs only when named exactly, since it ends the machine.
+[doc("Rude-exit check: a boot fsyncs a file into the root's journal and dies holding it; the host's e2fsck must replay it")]
+test-rude-exit: _build-run-tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TEST_CMDLINE="{{test_cmdline}} tests.run=slopos_fs::tests::rude_exit::test_ext4_rude_exit" just _iso-tests
+    # `set -e` must not abort: the boot ends mid-run on purpose.
+    {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
+        --raw --no-color > {{build_dir}}/rude-exit.log 2>&1 || true
+    if ! grep -q "RUDE_EXIT: committed" {{build_dir}}/rude-exit.log; then
+        tail -n 40 {{build_dir}}/rude-exit.log
+        echo "FAIL: the boot never committed its file — full log in {{build_dir}}/rude-exit.log" >&2
+        exit 1
+    fi
+    printf 'slopos-rude-exit-v1\n' > {{build_dir}}/rude-exit.payload
+    scripts/check_fs_replay.sh "{{fs_image_tests}}" /rude-exit {{build_dir}}/rude-exit.payload
+
 # The capacity check: one boot with a 16 GiB volume attached as nvme0n3,
 # which the suite mounts, measures and grades. Separate from `just test`
 # because the image takes minutes to build once and is then preserved; the
@@ -721,9 +740,9 @@ bench-selfhost: _build-run-tests
     [ "$rc" -eq 0 ] || { tail -n 30 {{build_dir}}/bench-selfhost.log; echo "FAIL: the benchmark boot exited $rc — full log in {{build_dir}}/bench-selfhost.log" >&2; exit 1; }
     python3 scripts/prof_report.py {{build_dir}}/bench-selfhost.log --libc {{build_dir}}/bench-libc.so --lib-dir {{toolchain_install}}/lib
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, ext4-core, http-core, fat-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-http-core -p slopos-fat-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-ext4-core -p slopos-http-core -p slopos-fat-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:
@@ -733,7 +752,7 @@ check-tests-host:
 check-test-count: _build-run-tests
     scripts/check_test_count.sh
 
-[doc("Hold an image a boot wrote to e2fsck -fn plus a clean superblock state")]
+[doc("Hold an image a boot wrote to e2fsck -fn and to being at rest: clean, no journal to replay")]
 check-fs-image *ARGS:
     scripts/check_fs_image.sh {{ARGS}}
 
@@ -895,6 +914,7 @@ check-framekernel-gates:
     scripts/check_quota_headroom.sh --self-test
     scripts/check_sched_spread.sh --self-test
     scripts/check_fs_image.sh --self-test
+    scripts/check_fs_replay.sh --self-test
     python3 scripts/fs_tree.py --self-test
     python3 scripts/gen_verity.py --self-test
     scripts/check_fs_throughput.sh --self-test

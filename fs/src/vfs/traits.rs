@@ -1,6 +1,9 @@
 //! VFS trait definitions — the abstractions every filesystem implementation
 //! must adhere to.
 
+use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
+use slopos_ostd::authority::{Cap, Seal};
+
 /// Each filesystem maintains its own inode number space.
 pub type InodeId = u64;
 
@@ -74,6 +77,27 @@ impl FileType {
     }
 }
 
+/// A file time as `stat(2)` reports it: seconds from the Unix epoch and the
+/// nanoseconds past them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Timestamp {
+    pub secs: i64,
+    pub nanos: u32,
+}
+
+impl Timestamp {
+    pub const UNSET: Self = Self { secs: 0, nanos: 0 };
+
+    pub const fn from_secs(secs: i64) -> Self {
+        Self { secs, nanos: 0 }
+    }
+
+    /// The wall clock, or `None` when the boot established none.
+    pub fn now() -> Option<Self> {
+        slopos_kernel_services::clock::realtime_timespec().map(|(secs, nanos)| Self { secs, nanos })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileStat {
     pub inode: InodeId,
@@ -83,16 +107,17 @@ pub struct FileStat {
     pub nlink: u32,
     pub uid: u32,
     pub gid: u32,
-    pub atime: u64,
-    pub mtime: u64,
-    pub ctime: u64,
+    pub atime: Timestamp,
+    pub mtime: Timestamp,
+    pub ctime: Timestamp,
     pub dev_major: u32,
     pub dev_minor: u32,
     /// The inode refuses every mutation: write, truncate, unlink, rename,
-    /// being renamed over, and any change to its mode. Set once when the
-    /// initramfs is unpacked and never cleared — program-identity privilege is
-    /// keyed on a binary's path, so without this any task could overwrite
-    /// `/bin/compositor` and spawn the replacement into the grant.
+    /// being renamed over, and any change to its mode. Set when the initramfs
+    /// is unpacked and cleared only under the `Seal` capability —
+    /// program-identity privilege is keyed on a binary's path, so without this
+    /// any task could overwrite `/bin/compositor` and spawn the replacement
+    /// into the grant.
     pub sealed: bool,
 }
 
@@ -104,9 +129,9 @@ impl FileStat {
     pub fn fill_user_stat(&self, out: &mut slopos_abi::fs::UserFsStat) {
         use slopos_abi::syscall::types::Timespec;
 
-        let secs = |s: u64| Timespec {
-            tv_sec: i64::try_from(s).unwrap_or(i64::MAX),
-            tv_nsec: 0,
+        let secs = |t: Timestamp| Timespec {
+            tv_sec: t.secs,
+            tv_nsec: i64::from(t.nanos),
         };
 
         out.st_dev = 0;
@@ -135,9 +160,9 @@ impl FileStat {
             nlink: 1,
             uid: 0,
             gid: 0,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
+            atime: Timestamp::UNSET,
+            mtime: Timestamp::UNSET,
+            ctime: Timestamp::UNSET,
             dev_major: 0,
             dev_minor: 0,
             sealed: false,
@@ -153,9 +178,9 @@ impl FileStat {
             nlink: 2,
             uid: 0,
             gid: 0,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
+            atime: Timestamp::UNSET,
+            mtime: Timestamp::UNSET,
+            ctime: Timestamp::UNSET,
             dev_major: 0,
             dev_minor: 0,
             sealed: false,
@@ -171,9 +196,9 @@ impl FileStat {
             nlink: 1,
             uid: 0,
             gid: 0,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
+            atime: Timestamp::UNSET,
+            mtime: Timestamp::UNSET,
+            ctime: Timestamp::UNSET,
             dev_major: major,
             dev_minor: minor,
             sealed: false,
@@ -193,9 +218,9 @@ impl FileStat {
             nlink: 1,
             uid: 0,
             gid: 0,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
+            atime: Timestamp::UNSET,
+            mtime: Timestamp::UNSET,
+            ctime: Timestamp::UNSET,
             dev_major: major,
             dev_minor: minor,
             sealed: false,
@@ -500,18 +525,24 @@ pub trait FileSystem: Send + Sync {
         Err(VfsError::NotSupported)
     }
 
-    /// Set an inode's times in whole seconds since the epoch; `None` leaves a
-    /// field alone, which is `UTIME_OMIT`.
+    /// Set an inode's times; `None` leaves a field alone, which is
+    /// `UTIME_OMIT`. A filesystem keeps what precision its format has.
     ///
     /// Refuses rather than no-opping: a build system that cannot set an mtime
     /// must find out.
-    fn set_times(&self, inode: InodeId, atime: Option<u64>, mtime: Option<u64>) -> VfsResult<()> {
+    fn set_times(
+        &self,
+        inode: InodeId,
+        atime: Option<Timestamp>,
+        mtime: Option<Timestamp>,
+    ) -> VfsResult<()> {
         let _ = (inode, atime, mtime);
         Err(VfsError::NotSupported)
     }
 
-    /// Seal an inode against every future mutation. One-way: a binary's
-    /// contents must not change under a privilege grant keyed on its path.
+    /// Seal an inode against every future mutation: a binary's contents must
+    /// not change under a privilege grant keyed on its path. Only
+    /// [`Self::set_inode_flags`], with the `Seal` capability, unseals.
     /// Defaults to a refusal rather than a no-op, so a filesystem that cannot
     /// store the bit says so instead of leaving the caller falsely reassured.
     fn set_sealed(&self, inode: InodeId) -> VfsResult<()> {
@@ -529,6 +560,33 @@ pub trait FileSystem: Send + Sync {
     fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
         let _ = (inode, mode);
         Err(VfsError::NotSupported)
+    }
+
+    /// The inode flags `FS_IOC_GETFLAGS` reports, in ext4's encoding. By
+    /// default the seal alone, which every filesystem's `stat` answers.
+    fn inode_flags(&self, inode: InodeId) -> VfsResult<u32> {
+        let sealed = self.stat(inode)?.sealed;
+        Ok(if sealed { FS_IMMUTABLE_FL } else { 0 })
+    }
+
+    /// Make the inode's flags `flags`, for `FS_IOC_SETFLAGS`. A change to a
+    /// flag the filesystem does not keep is refused rather than dropped, and
+    /// a change to the seal needs `seal`. By default only sealing is a change
+    /// the filesystem can make.
+    fn set_inode_flags(
+        &self,
+        inode: InodeId,
+        flags: u32,
+        seal: Option<&Cap<'_, Seal>>,
+    ) -> VfsResult<()> {
+        match self.inode_flags(inode)? ^ flags {
+            0 => Ok(()),
+            FS_IMMUTABLE_FL if flags & FS_IMMUTABLE_FL != 0 && seal.is_some() => {
+                self.set_sealed(inode)
+            }
+            FS_IMMUTABLE_FL if seal.is_none() => Err(VfsError::PermissionDenied),
+            _ => Err(VfsError::NotSupported),
+        }
     }
 
     /// This filesystem's own capacity, for `statfs(2)`.

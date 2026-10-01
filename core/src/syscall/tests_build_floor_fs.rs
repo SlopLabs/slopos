@@ -1277,8 +1277,8 @@ pub fn test_utimensat_validates_before_it_no_ops() -> TestResult {
     if slopos_fs::vfs::vfs_utimens(
         &file,
         b"/",
-        Some(1_000_000),
-        Some(2_000_000),
+        Some(slopos_fs::vfs::Timestamp::from_secs(1_000_000)),
+        Some(slopos_fs::vfs::Timestamp::from_secs(2_000_000)),
         RESOLVE_FOLLOW,
     )
     .is_err()

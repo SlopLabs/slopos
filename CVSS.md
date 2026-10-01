@@ -2,6 +2,24 @@
 
 **No finding is open.**
 
+Swept 2026-10-01: ext4 — `ext4-core`'s codecs, extent trees and jbd2
+replay over crafted images, the kernel's journal, extents and checksums,
+`FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` and the `Seal` capability, the mount
+aliases, and the host's in-place conversion of a preserved root. Four
+reviews found defects in the change before it landed, none in code that had
+shipped: a `pwrite` at the last file block any process could make latched
+the root read-only; an extent tree whose index entries share one node made
+the mount's walk exponential; a commit block the medium damaged ended replay
+silently, dropping the transactions committed after it; a checkpointed
+journal could be reused before its emptied superblock was durable, which a
+crash then replayed over newer homes; and the conversion removed a
+`/.journal` the guest wrote on an ext4 root. One **pre-existing** defect,
+below the bar: an operation that failed after unlinking the orphan list's
+head left the head unrestored on the medium until the next commit, leaking
+the inode until `e2fsck` if none came. Below the bar: the host's e2fsprogs
+read and repair metadata the guest wrote, as they do any image they are
+given, and a crafted root can at most fail its own build.
+
 Swept 2026-10-01: the block layer and NVMe — raw reads, writes and flushes of
 `/dev` block nodes, `BLKRRPART` and the size ioctls, the claims a mount and a
 raw write take, `/dev/disk/by-*` and the `PARTUUID=`/`UUID=`/`LABEL=`

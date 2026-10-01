@@ -212,9 +212,9 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
   CI build from the vendored crates with no registry.
 - **Disks.** One persistent root, grown on demand the way SerenityOS grows its
   image, with the tools on it; a separate volume is the user's to make, and
-  `mount(2)` and `mount=` attach any ext2 device. The heavy checks boot a root
-  of their own, rebuilt every run, so nothing a boot left decides the next
-  verdict.
+  `mount(2)` and `mount=` attach any ext2, ext3 or ext4 device. The heavy
+  checks boot a root of their own, rebuilt every run, so nothing a boot left
+  decides the next verdict.
 - **Where the tools live.** A prefix of their own at `/usr/local`, found
   through one default `PATH` that names it after `/bin` and `/sbin`, so a
   writable disk cannot shadow the system's tools. Redox and SerenityOS install

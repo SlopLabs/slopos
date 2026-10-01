@@ -87,9 +87,10 @@ fn mounted(
     device: &MemoryBlockDevice,
     body: &mut dyn FnMut(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
-    let (sb, bs, is) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
-    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).map_err(|_| "mount")?;
+    let (sb, geom) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
+    let mut cache =
+        BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
+    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
     body(&mut fs)
 }
 

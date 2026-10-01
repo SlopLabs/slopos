@@ -23,8 +23,8 @@ const VERIFIED: &[u8] = b"vda";
 
 fn extent_of(device: &dyn BlockDevice) -> Result<FsExtent, TestResult> {
     match Ext2Fs::mount_params(device) {
-        Ok((sb, bs, _)) => Ok(FsExtent {
-            block_size: bs,
+        Ok((sb, geom)) => Ok(FsExtent {
+            block_size: geom.block_size(),
             blocks: sb.blocks_count as u64,
         }),
         Err(e) => Err(fail!("verified image superblock unreadable: {:?}", e)),
@@ -85,18 +85,15 @@ pub fn test_verity_artifact_trailer_reachable() -> TestResult {
 
 #[inline(never)]
 fn mount_and_probe(device: &(dyn BlockDevice + Send + Sync)) -> TestResult {
-    let (sb, bs, is) = match Ext2Fs::mount_params(device) {
+    let (sb, geom) = match Ext2Fs::mount_params(device) {
         Ok(v) => v,
         Err(e) => return fail!("mount_params: {:?}", e),
     };
-    let mut cache = match BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) {
+    let mut cache = match BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN) {
         Ok(c) => c,
         Err(e) => return fail!("BlockCache::new: {:?}", e),
     };
-    let mut fs = match Ext2Fs::new(device, &mut cache, sb, bs, is) {
-        Ok(f) => f,
-        Err(e) => return fail!("Ext2Fs::new: {:?}", e),
-    };
+    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
     if !fs.is_read_only() {
         return fail!("ext2 over a verified device must come up read-only");
     }

@@ -1,0 +1,21 @@
+[package]
+name = "slopos-ext4-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ext4 and jbd2 on-disk formats, checksums, the extent tree and journal recovery as data, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+doctest = false
+
+[features]
+# The in-memory volume builder the kernel's own tests format with.
+fixture = []
+
+[dev-dependencies]
+slopos-ext4-core = { path = ".", features = ["fixture"] }

@@ -30,4 +30,6 @@ pub use path::{
     resolve_parent_at, resolve_path, resolve_path_at, resolve_path_canon_at,
 };
 pub use statfs::{vfs_statfs, vfs_statfs_at};
-pub use traits::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult};
+pub use traits::{
+    FileStat, FileSystem, FileType, FsStats, InodeId, Timestamp, VfsError, VfsResult,
+};

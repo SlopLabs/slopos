@@ -9,7 +9,7 @@ use slopos_ostd::{KBTreeMap, KBox, KVec, write_field};
 use super::Ext2Error;
 use super::blockcharge::BlockCharges;
 use super::dirindex::{DirIndexSet, DirProbe};
-use super::journal::Journal;
+use super::journal::{Journal, SPILL_SLOTS};
 use super::ondisk::EXT2_MAX_BLOCK_SIZE;
 use super::types::BlockNum;
 use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket, stats};
@@ -314,6 +314,9 @@ struct CacheEntry {
     /// lock: marked clean already, so it must stay cached until the batch
     /// finishes and puts it back dirty if the write failed.
     inflight: bool,
+    /// The block's checksum was verified when it was read; every writer
+    /// since has restamped it.
+    checked: bool,
 }
 
 impl CacheEntry {
@@ -337,6 +340,7 @@ impl CacheEntry {
             dirty_epoch: 0,
             dirtied_epoch: 0,
             inflight: false,
+            checked: false,
         })
     }
 }
@@ -480,10 +484,6 @@ pub struct BlockCache {
     /// Which principal each charged block belongs to, so a free credits the
     /// account that paid.
     charges: BlockCharges,
-    /// An eviction wrote one of the open operation's *data* blocks home, so
-    /// the commit owes a barrier whichever path it takes: `data=ordered`
-    /// forbids publishing metadata that names a home write still in a cache.
-    op_data_evicted: bool,
     /// Every slot carrying per-operation state — touched, invalidated, or
     /// discardable. Preallocated to [`Self::capacity`] and appended to at
     /// most once per slot per operation, so a commit walks what the operation
@@ -519,11 +519,14 @@ pub struct BlockCache {
     /// data goes home ahead of the log, and a crash that lost the free would
     /// leave another file's bytes in its old owner's block — jbd2's rule for
     /// blocks freed in an uncommitted transaction.
-    freed: KBTreeMap<u32, ()>,
+    freed: BlockRuns,
     /// The open operation's frees, kept apart from `freed` because a log sync
     /// inside the operation does not make them durable.
-    op_freed: KBTreeMap<u32, ()>,
+    op_freed: BlockRuns,
     inflight: Inflight,
+    /// The `i_generation` last handed out. It need only differ between two
+    /// lives of one inode number, so a counter seeded from the clock suffices.
+    next_generation: u32,
 }
 
 impl BlockCache {
@@ -561,7 +564,6 @@ impl BlockCache {
                 write_field!(slot, op_charged, 0);
                 write_field!(slot, op_cancelled, 0);
                 write_field!(slot, charges, BlockCharges::new().map_err(|_| AllocError)?);
-                write_field!(slot, op_data_evicted, false);
                 write_field!(slot, op_touched_slots, KVec::with_capacity(capacity)?);
                 write_field!(slot, op_dirs, [0u32; OP_DIRS_MAX]);
                 write_field!(slot, op_dirs_len, 0);
@@ -570,9 +572,14 @@ impl BlockCache {
                 write_field!(slot, last_group, 0);
                 write_field!(slot, dir_index, DirIndexSet::new());
                 write_field!(slot, dirty, 0);
-                write_field!(slot, freed, KBTreeMap::new());
-                write_field!(slot, op_freed, KBTreeMap::new());
+                write_field!(slot, freed, BlockRuns::new());
+                write_field!(slot, op_freed, BlockRuns::new());
                 write_field!(slot, inflight, Inflight::new()?);
+                write_field!(
+                    slot,
+                    next_generation,
+                    slopos_kernel_services::clock::monotonic_ns() as u32
+                );
                 Ok(slot.finish())
             },
         )
@@ -669,7 +676,6 @@ impl BlockCache {
     }
 
     fn settle_charges(&mut self, committed: bool) {
-        self.op_data_evicted = false;
         let (account, charged, cancelled) = (self.op_account, self.op_charged, self.op_cancelled);
         self.op_account = AccountId::NONE;
         self.op_charged = 0;
@@ -696,13 +702,13 @@ impl BlockCache {
         block: BlockNum,
         device: &dyn BlockDevice,
     ) -> Result<(), Ext2Error> {
-        // A full revoke list is written as a record of its own.
+        // One more revoke may cost the seal another revoke block.
         self.ensure_log_room(device, 1)?;
         let Some(mut journal) = self.journal.take() else {
             return Ok(());
         };
-        let result = journal.note_revoke(block.raw(), device);
-        self.unbarriered += journal.take_writes();
+        let result = journal.note_revoke(block.raw());
+        self.absorb(&mut journal);
         self.journal = Some(journal);
         result
     }
@@ -717,8 +723,8 @@ impl BlockCache {
         let Some(mut journal) = self.journal.take() else {
             return Ok(());
         };
-        let result = journal.supersede(block.raw(), device);
-        self.unbarriered += journal.take_writes();
+        let result = journal.supersede(block.raw());
+        self.absorb(&mut journal);
         self.journal = Some(journal);
         result
     }
@@ -1025,11 +1031,10 @@ impl BlockCache {
 
     /// Publish the open operation's metadata through the log.
     ///
-    /// Data is never logged: it stays dirty here, and [`Self::sync_log`] writes
-    /// it home and barriers before any record that names it reaches the
-    /// medium — `data=ordered` — so a commit issues no I/O at all unless the
-    /// ring is full or the operation outgrew it. Logging it as well would
-    /// write every block twice for a barrier the group commit pays anyway.
+    /// Data is never logged: it stays dirty, and [`Self::sync_log`] writes it
+    /// home ahead of the flush its commit block waits behind (`data=ordered`),
+    /// so a commit issues no I/O unless the ring is full or the operation
+    /// outgrew it.
     fn log_transaction(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
         let Some(per_record) = self.journal.as_ref().map(|j| j.max_entries().max(1)) else {
             return Ok(());
@@ -1039,19 +1044,20 @@ impl BlockCache {
         // data already on the medium.
         let op_data = self.count_op_data();
         if op_data > 0 {
-            // A full revoke list takes a slot of its own.
+            // Superseding its logged copies costs the seal revoke blocks.
             self.ensure_log_room(device, (op_data / per_record + 1) as u32)?;
             self.supersede_op_data(device)?;
         }
         self.stage_metadata()?;
         let needed = self.log_slots_needed();
-        // Making room seals the open compound, whose commit record the log
-        // must also hold. The ring needs no such slot: `pending_room` holds
-        // it back already, so charging it there too would write a compound
-        // out one operation early.
-        if self.journal.as_ref().is_some_and(|journal| {
-            journal.free_slots() < needed + u32::from(journal.has_unsealed())
-        }) {
+        // The log must also hold what sealing writes; the ring's `pending_room`
+        // holds that back already, and charging it twice would write a
+        // compound out one operation early.
+        if self
+            .journal
+            .as_ref()
+            .is_some_and(|journal| journal.free_slots() < needed + journal.seal_room())
+        {
             return Err(Ext2Error::NoSpace);
         }
         self.ensure_log_room(device, needed)?;
@@ -1063,20 +1069,16 @@ impl BlockCache {
             return Ok(());
         };
         let result = self.log_records(&mut journal, device);
-        self.unbarriered += journal.take_writes();
+        self.absorb(&mut journal);
         self.journal = Some(journal);
         result
     }
 
     /// Records about to go straight to the medium: every dirty data block
-    /// home and a barrier behind them first, `data=ordered`. The barrier is
-    /// owed even with nothing written here when an eviction already put one
-    /// of this operation's data blocks home.
+    /// home first, `data=ordered`. The flush the log puts in front of the
+    /// commit block makes them durable before the commit is.
     fn home_data_for_records(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
-        let wrote = self.flush_where(device, |kind, _| kind == BlockKind::Data)?;
-        if wrote > 0 || self.op_data_evicted {
-            self.barrier(device)?;
-        }
+        self.flush_where(device, |kind, _| kind == BlockKind::Data)?;
         Ok(())
     }
 
@@ -1084,6 +1086,19 @@ impl BlockCache {
         device.flush().map_err(Ext2Error::from)?;
         self.note_barrier();
         Ok(())
+    }
+
+    /// Take the log's writes and flushes into the barrier bookkeeping. A
+    /// flush the log issued made every write before it durable, the cache's
+    /// own included.
+    fn absorb(&mut self, journal: &mut Journal) {
+        if journal.take_flushes() > 0 {
+            self.unbarriered = 0;
+            if journal.is_durable() {
+                self.prune_freed();
+            }
+        }
+        self.unbarriered += journal.take_writes();
     }
 
     /// Room in the ring for `want` more slots. A full ring is written out
@@ -1106,9 +1121,9 @@ impl BlockCache {
         Ok(())
     }
 
-    /// Make every appended record durable: dirty data home, a barrier, the
-    /// log's ring, a barrier. What a home write of logged metadata, an
-    /// `fsync`, a check point and a full ring all wait for.
+    /// Make every appended record durable: dirty data home, the ring with each
+    /// commit block behind a flush, then a final flush. What a home write of
+    /// logged metadata, an `fsync`, a check point and a full ring all wait for.
     ///
     /// Legal inside an operation: the data it writes home may include the
     /// open operation's, which a rollback then leaves as a failed write
@@ -1122,14 +1137,11 @@ impl BlockCache {
         }
         if journal.owes_write() {
             self.flush_where(device, |kind, _| kind == BlockKind::Data)?;
-            if self.unbarriered > 0 {
-                self.barrier(device)?;
-            }
             let Some(mut journal) = self.journal.take() else {
                 return Ok(());
             };
             let result = journal.write_pending(device);
-            self.unbarriered += journal.take_writes();
+            self.absorb(&mut journal);
             self.journal = Some(journal);
             result?;
         }
@@ -1159,7 +1171,7 @@ impl BlockCache {
             return Ok(false);
         };
         let result = journal.write_pending_until(limit, budget, device);
-        self.unbarriered += journal.take_writes();
+        self.absorb(&mut journal);
         self.journal = Some(journal);
         result
     }
@@ -1203,12 +1215,12 @@ impl BlockCache {
         } else {
             &mut self.freed
         };
-        set.insert(block.raw(), ());
+        set.insert(block.raw());
     }
 
     /// Whether an allocation must pass `block` over: see [`Self::freed`].
     pub fn reuse_blocked(&self, block: BlockNum) -> bool {
-        self.freed.contains_key(&block.raw()) || self.op_freed.contains_key(&block.raw())
+        self.freed.contains(block.raw()) || self.op_freed.contains(block.raw())
     }
 
     /// Whether any free still waits on a log sync, so a search that found
@@ -1227,9 +1239,7 @@ impl BlockCache {
     /// whichever way it ends: committed, they are in a record the medium may
     /// lack; rolled back, the bitmap owns them again anyway.
     fn forget_op_frees(&mut self) {
-        for &block in self.op_freed.keys() {
-            self.freed.insert(block, ());
-        }
+        self.freed.absorb(&self.op_freed);
         self.op_freed.clear();
     }
 
@@ -1383,8 +1393,7 @@ impl BlockCache {
         Ok(())
     }
 
-    /// Slots the staged metadata plus its headers, the queued revokes and the
-    /// commit record will take.
+    /// Slots the staged metadata and its descriptors take, before sealing.
     fn log_slots_needed(&self) -> u32 {
         let Some(journal) = self.journal.as_ref() else {
             return 0;
@@ -1392,9 +1401,7 @@ impl BlockCache {
         let per_record = journal.max_entries().max(1);
         let payloads = self.scratch.len();
         let records = payloads.div_ceil(per_record);
-        // One revoke record per full entry list, plus the commit record.
-        let revokes = journal.queued_revokes().div_ceil(per_record);
-        (payloads + records + revokes + 1) as u32
+        (payloads + records) as u32
     }
 
     fn log_records(
@@ -1402,7 +1409,6 @@ impl BlockCache {
         journal: &mut Journal,
         device: &dyn BlockDevice,
     ) -> Result<(), Ext2Error> {
-        journal.flush_revokes(device)?;
         let bs = self.block_size as usize;
         let appended = self.partition_rewrites(journal)?;
         let per_record = journal.max_entries();
@@ -1411,9 +1417,8 @@ impl BlockCache {
             let take = (appended - done).min(per_record);
             let targets = &self.scratch.as_slice()[done..done + take];
             let (index, entries) = (&self.index, &self.entries);
-            // The log gathers these; the commit record is still a separate
-            // write after every one of them, which is the only ordering the
-            // log itself needs.
+            // The records need no order among themselves: the commit block
+            // follows them behind a flush.
             journal.write_record(targets, device, &mut |k| {
                 let slot = *index.get(&BlockNum(targets[k]))?;
                 Some(&entries[slot].frame.as_bytes()[..bs])
@@ -1582,6 +1587,11 @@ impl BlockCache {
         self.block_size
     }
 
+    pub fn next_generation(&mut self) -> u32 {
+        self.next_generation = self.next_generation.wrapping_add(1);
+        self.next_generation
+    }
+
     /// Size the per-group allocation hints from the volume's group count, once
     /// per mount. A group count whose table would outgrow [`GROUP_HINTS_MAX`]
     /// gets none: a missing hint costs a bitmap scan, not correctness.
@@ -1710,6 +1720,7 @@ impl BlockCache {
         // the only copy.
         self.set_dirty(slot, logged.is_some());
         let entry = &mut self.entries[slot];
+        entry.checked = false;
         entry.pinned = 1;
         entry.valid = true;
         entry.op_touched = false;
@@ -1789,6 +1800,7 @@ impl BlockCache {
         entry.dirty_epoch = epoch;
         self.set_dirty(slot, true);
         let entry = &mut self.entries[slot];
+        entry.checked = true;
         entry.pinned = 1;
         entry.valid = true;
         entry.op_touched = false;
@@ -2199,7 +2211,7 @@ impl BlockCache {
             written += len as usize;
             slot += len;
         }
-        self.unbarriered += journal.take_writes();
+        self.absorb(&mut journal);
         self.journal = Some(journal);
         result?;
         Ok(CheckpointProgress {
@@ -2266,18 +2278,19 @@ impl BlockCache {
 
     /// Declare the log check pointed. The caller must have barriered the home
     /// writes first.
-    ///
-    /// Its own write deliberately does not count as owing a barrier: losing it
-    /// costs a redundant replay of transactions already applied, and counting
-    /// it would leave a sync with nothing else to do reporting itself
-    /// perpetually unfinished.
     pub fn journal_reset(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
         let Some(mut journal) = self.journal.take() else {
             return Ok(());
         };
         let result = journal.reset(device);
-        let _ = journal.take_writes();
+        let writes = journal.take_writes();
+        let flushed = journal.take_flushes() > 0;
         self.journal = Some(journal);
+        if flushed {
+            self.note_barrier();
+        } else {
+            self.unbarriered += writes;
+        }
         result
     }
 
@@ -2556,9 +2569,7 @@ impl BlockCache {
             let metadata = self.entries[slot].kind == BlockKind::Metadata;
             let spill = self.journal.is_some() && self.entries[slot].op_touched && metadata;
             if spill {
-                // A header and a payload, and a revoke record the spill may
-                // flush ahead of them.
-                self.ensure_log_room(device, 3)?;
+                self.ensure_log_room(device, SPILL_SLOTS)?;
                 let staged = self.journal.take();
                 let block = self.entries[slot].block.raw();
                 let outcome = match staged {
@@ -2568,7 +2579,7 @@ impl BlockCache {
                             &self.entries[slot].frame.as_bytes()[..bs],
                             device,
                         );
-                        self.unbarriered += journal.take_writes();
+                        self.absorb(&mut journal);
                         self.journal = Some(journal);
                         r
                     }
@@ -2590,9 +2601,6 @@ impl BlockCache {
                     .write_at(offset.raw(), &self.entries[slot].frame.as_bytes()[..bs])
                     .map_err(Ext2Error::from)?;
                 self.unbarriered += 1;
-                if op_data {
-                    self.op_data_evicted = true;
-                }
             }
         }
 
@@ -2669,6 +2677,7 @@ impl BlockCache {
             entry.dirty_epoch = epoch;
             entry.pinned = 0;
             entry.valid = true;
+            entry.checked = false;
             entry.op_touched = false;
             entry.op_invalidated = false;
             entry.op_discard = false;
@@ -2744,8 +2753,31 @@ impl<'a> CachedBlock<'a> {
         (&mut data[at..end]).try_into().ok()
     }
 
+    /// `len` bytes from `at`, or `None` if they do not fit the block.
+    pub fn slice(&self, at: usize, len: usize) -> Option<&[u8]> {
+        self.data().get(at..at.checked_add(len)?)
+    }
+
+    pub fn slice_mut(&mut self, at: usize, len: usize) -> Option<&mut [u8]> {
+        let end = at.checked_add(len)?;
+        if end > self.cache.block_size as usize {
+            return None;
+        }
+        Some(&mut self.data_mut()[at..end])
+    }
+
     pub fn block_num(&self) -> BlockNum {
         self.cache.entries[self.slot].block
+    }
+
+    /// Whether the block's checksum was verified since it was read, so a
+    /// reader need not verify it again.
+    pub fn checked(&self) -> bool {
+        self.cache.entries[self.slot].checked
+    }
+
+    pub fn set_checked(&mut self) {
+        self.cache.entries[self.slot].checked = true;
     }
 }
 
@@ -2753,5 +2785,71 @@ impl Drop for CachedBlock<'_> {
     fn drop(&mut self) {
         self.cache.entries[self.slot].pinned =
             self.cache.entries[self.slot].pinned.saturating_sub(1);
+    }
+}
+
+/// Blocks as runs of consecutive ones, so what freeing a file costs is its
+/// fragments rather than its length.
+pub(crate) struct BlockRuns {
+    /// Each run's first block to the block past its last.
+    runs: KBTreeMap<u32, u32>,
+}
+
+impl BlockRuns {
+    pub(crate) const fn new() -> Self {
+        Self {
+            runs: KBTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn contains(&self, block: u32) -> bool {
+        self.runs
+            .range(..=block)
+            .next_back()
+            .is_some_and(|(_, &end)| block < end)
+    }
+
+    pub(crate) fn insert(&mut self, block: u32) {
+        self.insert_run(block, block.saturating_add(1));
+    }
+
+    fn insert_run(&mut self, start: u32, end: u32) {
+        let (mut lo, mut hi) = (start, end);
+        if let Some((&s, &e)) = self.runs.range(..=start).next_back()
+            && e >= start
+        {
+            lo = s;
+            hi = hi.max(e);
+        }
+        while let Some((s, e)) = self
+            .runs
+            .range(lo.saturating_add(1)..)
+            .next()
+            .map(|(&s, &e)| (s, e))
+            .filter(|&(s, _)| s <= hi)
+        {
+            self.runs.remove(&s);
+            hi = hi.max(e);
+        }
+        self.runs.insert(lo, hi);
+    }
+
+    pub(crate) fn absorb(&mut self, other: &BlockRuns) {
+        for (&start, &end) in other.runs.iter() {
+            self.insert_run(start, end);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.runs.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+
+    #[cfg(feature = "tests")]
+    pub(crate) fn runs(&self) -> usize {
+        self.runs.len()
     }
 }

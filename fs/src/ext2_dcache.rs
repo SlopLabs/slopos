@@ -36,7 +36,8 @@ use core::sync::atomic::{AtomicU64, Ordering, fence};
 use slopos_ostd::KVec;
 
 use crate::ext2::Ext2Inode;
-use crate::vfs::{FileStat, FileType, InodeId};
+use crate::ext2::ondisk::InodeTime;
+use crate::vfs::{FileStat, FileType, InodeId, Timestamp};
 
 /// Buckets per generation table. A collision only costs a spurious miss.
 const GEN_BUCKETS: usize = 4096;
@@ -69,12 +70,10 @@ const D_WORDS: usize = D_LIFE_GEN + 1;
 
 // Attribute words. `KEY` is the inode number, zero for an empty slot.
 const A_KEY: usize = 1;
-const A_SIZE: usize = 2;
-const A_IDS: usize = 3;
-const A_TIMES: usize = 4;
-const A_CTIME: usize = 5;
-const A_GEN: usize = 6;
+const A_DATA: usize = 2;
+const A_GEN: usize = A_DATA + ATTR_DATA_WORDS;
 const A_WORDS: usize = A_GEN + 1;
+const ATTR_DATA_WORDS: usize = 6;
 
 #[inline]
 fn mix(mut x: u64) -> u64 {
@@ -221,14 +220,32 @@ impl Ext2Gens {
 #[derive(Clone, Copy)]
 pub(crate) struct InodeAttr {
     mode: u16,
-    uid: u16,
-    gid: u16,
+    uid: u32,
+    gid: u32,
     links: u16,
     size: u64,
-    atime: u32,
-    mtime: u32,
-    ctime: u32,
+    atime: InodeTime,
+    mtime: InodeTime,
+    ctime: InodeTime,
     sealed: bool,
+}
+
+fn timestamp(t: InodeTime) -> Timestamp {
+    Timestamp {
+        secs: t.secs(),
+        nanos: t.nanos(),
+    }
+}
+
+fn time_word(t: InodeTime) -> u64 {
+    u64::from(t.lo) | u64::from(t.extra) << 32
+}
+
+fn word_time(w: u64) -> InodeTime {
+    InodeTime {
+        lo: w as u32,
+        extra: (w >> 32) as u32,
+    }
 }
 
 impl InodeAttr {
@@ -244,7 +261,7 @@ impl InodeAttr {
             ctime: inode.ctime,
             // `EXT2_IMMUTABLE_FL` is the carrier, so the seal survives a
             // reboot and reads as one to `lsattr` and `e2fsck`.
-            sealed: inode.is_immutable(),
+            sealed: inode.is_sealed(),
         }
     }
 
@@ -255,40 +272,39 @@ impl InodeAttr {
             size: self.size,
             mode: self.mode,
             nlink: u32::from(self.links),
-            uid: u32::from(self.uid),
-            gid: u32::from(self.gid),
-            atime: u64::from(self.atime),
-            mtime: u64::from(self.mtime),
-            ctime: u64::from(self.ctime),
+            uid: self.uid,
+            gid: self.gid,
+            atime: timestamp(self.atime),
+            mtime: timestamp(self.mtime),
+            ctime: timestamp(self.ctime),
             dev_major: 0,
             dev_minor: 0,
             sealed: self.sealed,
         }
     }
 
-    fn encode(self) -> [u64; 4] {
+    fn encode(self) -> [u64; ATTR_DATA_WORDS] {
         [
             self.size,
-            u64::from(self.mode)
-                | u64::from(self.uid) << 16
-                | u64::from(self.gid) << 32
-                | u64::from(self.links) << 48,
-            u64::from(self.atime) | u64::from(self.mtime) << 32,
-            u64::from(self.ctime) | u64::from(self.sealed) << 32,
+            u64::from(self.mode) | u64::from(self.links) << 16 | u64::from(self.sealed) << 32,
+            u64::from(self.uid) | u64::from(self.gid) << 32,
+            time_word(self.atime),
+            time_word(self.mtime),
+            time_word(self.ctime),
         ]
     }
 
-    fn decode(w: [u64; 4]) -> Self {
+    fn decode(w: [u64; ATTR_DATA_WORDS]) -> Self {
         Self {
             size: w[0],
             mode: w[1] as u16,
-            uid: (w[1] >> 16) as u16,
-            gid: (w[1] >> 32) as u16,
-            links: (w[1] >> 48) as u16,
-            atime: w[2] as u32,
-            mtime: (w[2] >> 32) as u32,
-            ctime: w[3] as u32,
-            sealed: (w[3] >> 32) & 1 != 0,
+            links: (w[1] >> 16) as u16,
+            sealed: (w[1] >> 32) & 1 != 0,
+            uid: w[2] as u32,
+            gid: (w[2] >> 32) as u32,
+            atime: word_time(w[3]),
+            mtime: word_time(w[4]),
+            ctime: word_time(w[5]),
         }
     }
 }
@@ -500,9 +516,9 @@ impl Ext2Dcache {
             if w[A_GEN] != self.gens.read(RECORD_TABLE, hash) {
                 return None;
             }
-            return Some(InodeAttr::decode([
-                w[A_SIZE], w[A_IDS], w[A_TIMES], w[A_CTIME],
-            ]));
+            let mut data = [0u64; ATTR_DATA_WORDS];
+            data.copy_from_slice(&w[A_DATA..A_GEN]);
+            return Some(InodeAttr::decode(data));
         }
         None
     }
@@ -515,13 +531,9 @@ impl Ext2Dcache {
             return;
         };
         let way = victim_way(set, A_WORDS, A_KEY, u64::from(ino));
-        let [size, ids, times, ctime] = attr.encode();
         let mut w = [0u64; A_WORDS];
         w[A_KEY] = u64::from(ino);
-        w[A_SIZE] = size;
-        w[A_IDS] = ids;
-        w[A_TIMES] = times;
-        w[A_CTIME] = ctime;
+        w[A_DATA..A_GEN].copy_from_slice(&attr.encode());
         w[A_GEN] = stamp;
         write_slot(&set[way * A_WORDS..(way + 1) * A_WORDS], &w);
     }

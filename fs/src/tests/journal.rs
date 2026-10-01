@@ -1,24 +1,27 @@
-//! The metadata redo log, and the bounded writeback pass it makes safe.
+//! The jbd2 journal, and the bounded writeback pass it makes safe.
 //!
-//! The fixtures build the log the way the image builder does — a preallocated
-//! sealed file at `/.journal` — so these tests exercise the same attach path a
-//! boot takes rather than a synthetic one.
+//! Most fixtures are ext4 volumes whose journal is inode 8, as the image
+//! builder makes them, so they take the attach path a boot takes;
+//! [`synthetic_log`] serves tests that need more slots than that journal has.
 //!
 //! Every mount goes through [`with_log`] and the probe device reports through
 //! statics rather than a handle the bodies would carry: one `Ext2Fs` plus one
 //! `BlockCache` already fills a 2 KiB frame.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use slopos_ext4_core::superblock::{self as sbk, incompat::RECOVER, off};
 use slopos_ostd::{KBox, KVec};
 use slopos_testing::{TestResult, fail};
 
-use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image};
+use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image, ext4_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::ext2::cache::{BlockCache, BlockKind, CACHE_ENTRIES_MIN};
-use crate::ext2::journal::{Journal, JournalRecovery, LogExtent, MAX_LOG_SLOTS};
+use crate::ext2::journal::{
+    AttachError, Journal, JournalRecovery, JournalRuns, LogExtent, LogVolume, MAX_LOG_SLOTS,
+};
 use crate::ext2::types::BlockNum;
-use crate::ext2::{Ext2Error, Ext2Fs, JOURNAL_PATH, ReadOnlyReason};
+use crate::ext2::{Ext2Error, Ext2Fs, ReadOnlyReason};
 
 /// Comfortably above `journal::MIN_LOG_SLOTS`, and small enough to leave the
 /// fixture room to allocate.
@@ -30,9 +33,7 @@ const SPARE_BASE: u32 = FIX_FILE_BLOCK + 1;
 /// location no log slot writes to.
 const HOME_BLOCKS: u32 = 4;
 const HOME_FIRST: u32 = IMAGE_BLOCKS - HOME_BLOCKS;
-/// Inode a synthetic log claims; only the log superblock's identity field
-/// reads it, to recognise its own log on a later attach.
-const SYNTH_INO: u32 = 12;
+const JOURNAL_INO: u32 = 8;
 const PAYLOAD: &[u8] = b"a transaction the home locations never saw";
 
 static PROBE_WRITES: AtomicUsize = AtomicUsize::new(0);
@@ -134,42 +135,27 @@ fn with_log(
     device: &dyn BlockDevice,
     body: fn(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
-    let (sb, bs, is) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
-    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).map_err(|_| "mount")?;
+    let (sb, geom) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
+    let mut cache =
+        BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
+    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
     body(&mut fs)
 }
 
-/// A fixture carrying a log, built through the ordinary write path.
+/// A clean ext4 volume with a jbd2 journal, as an idle boot leaves one.
 pub(super) fn journal_image() -> Option<MemoryBlockDevice> {
-    let device = plain_image()?;
-    match with_log(&device, install_log) {
-        Ok(()) => Some(device),
-        Err(_) => None,
-    }
+    ext4_image(IMAGE_BLOCKS, LOG_BLOCKS)
 }
 
-fn install_log(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    let bs = fs.block_size();
-    let ino = fs
-        .create_file(2, &JOURNAL_PATH[1..])
-        .map_err(|_| "create")?;
-    let zeros = KVec::<u8>::zeroed(bs as usize).map_err(|_| "zeros")?;
-    for index in 0..LOG_BLOCKS {
-        fs.write_file(ino, u64::from(index) * u64::from(bs), zeros.as_slice())
-            .map_err(|_| "preallocate")?;
-    }
-    fs.set_sealed(ino).map_err(|_| "seal")?;
-    fs.sync().map_err(|_| "sync")?;
-    fs.mark_clean().map_err(|_| "clean")
-}
-
+/// Attach the journal and stamp the volume in use: what a writable mount
+/// does, in that order.
 fn attach(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     match fs.attach_journal() {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err("the fixture's log was not attached"),
-        Err(_) => Err("attach failed"),
+        Ok(Some(_)) => {}
+        Ok(None) => return Err("the fixture's journal was not attached"),
+        Err(_) => return Err("attach failed"),
     }
+    fs.mark_dirty_on_disk().map_err(|_| "the in-use stamp")
 }
 
 /// An operation the log committed and nothing else wrote home survives a mount
@@ -184,8 +170,8 @@ pub fn test_ext2_journal_replays_an_unsynced_operation() -> TestResult {
     let Ok((sb, ..)) = Ext2Fs::mount_params(&device) else {
         return fail!("the staged image no longer parses");
     };
-    if Ext2Fs::mount_read_only_reason(&sb, &device) != Some(ReadOnlyReason::NotCleanlyUnmounted) {
-        return fail!("the image should read as never cleanly unmounted");
+    if Ext2Fs::mount_read_only_reason(&sb, &device) != Some(ReadOnlyReason::NeedsRecovery) {
+        return fail!("the image should read as needing recovery");
     }
     match with_log(&device, replay_and_check) {
         Ok(()) => TestResult::Pass,
@@ -194,8 +180,6 @@ pub fn test_ext2_journal_replays_an_unsynced_operation() -> TestResult {
 }
 
 fn log_one_operation(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    // What a boot does: stamp the image not-clean, then attach.
-    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
     attach(fs)?;
     let ino = fs.create_file(2, b"logged.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -203,6 +187,95 @@ fn log_one_operation(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     // the home locations are not, which is exactly what a power cut here
     // leaves.
     fs.commit_log().map_err(|_| "commit")
+}
+
+/// A read-only mount of a volume whose journal needs recovery is refused:
+/// it may not replay, and the homes are older than the journal.
+pub fn test_ext2_read_only_mount_needing_recovery_is_refused() -> TestResult {
+    use crate::vfs::VfsError;
+    use crate::vfs::init::{vfs_ext2_pool_claim, vfs_ext2_pool_release};
+
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&device, log_one_operation) {
+        return fail!("staging the transaction: {}", msg);
+    }
+    let Ok(device) = KBox::try_new(device) else {
+        return fail!("out of memory");
+    };
+    let Some(fs) = vfs_ext2_pool_claim() else {
+        return fail!("the ext2 pool handed out no instance");
+    };
+    let attached = fs.attach(device, true).map(|_| ());
+    vfs_ext2_pool_release(fs, false);
+    match attached {
+        Err(VfsError::ReadOnly) => TestResult::Pass,
+        Ok(()) => fail!("a read-only mount came up over a journal it could not replay"),
+        Err(_) => fail!("the refusal was not EROFS"),
+    }
+}
+
+/// Freed blocks are kept as runs: a file freed end to end costs one entry,
+/// and a block between two runs joins them.
+pub fn test_ext2_freed_blocks_are_kept_as_runs() -> TestResult {
+    use crate::ext2::cache::BlockRuns;
+
+    let mut runs = BlockRuns::new();
+    for block in (1000..5000).chain([20, 22, 10]) {
+        runs.insert(block);
+    }
+    if runs.runs() != 4 {
+        return fail!("{} runs where four were freed", runs.runs());
+    }
+    runs.insert(21);
+    if runs.runs() != 3 || !runs.contains(20) || !runs.contains(22) {
+        return fail!("the block between two runs did not join them");
+    }
+    if runs.contains(999) || runs.contains(5000) || !runs.contains(4999) || runs.contains(11) {
+        return fail!("a run's bounds are off");
+    }
+    let mut more = BlockRuns::new();
+    more.insert(5000);
+    more.insert(9);
+    runs.absorb(&more);
+    if runs.runs() != 3 || !runs.contains(5000) || !runs.contains(9) {
+        return fail!("absorbing runs did not merge them");
+    }
+    TestResult::Pass
+}
+
+/// A journal holding a transaction under a clear `needs_recovery` is not
+/// replayed: its copies may be older than the homes, and `e2fsck` decides.
+pub fn test_ext2_journal_under_a_clear_flag_is_not_replayed() -> TestResult {
+    use slopos_ext4_core::bytes::{le32, put_le32};
+
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&device, log_one_operation) {
+        return fail!("staging the transaction: {}", msg);
+    }
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[1024..2048];
+        put_le32(
+            sb,
+            off::FEATURE_INCOMPAT,
+            le32(sb, off::FEATURE_INCOMPAT) & !RECOVER,
+        );
+        sbk::seal(sb);
+    });
+    let refused = with_log(&device, |fs| match fs.attach_journal() {
+        Err(AttachError::Unflagged) => match fs.resolve_path(b"/logged.txt") {
+            Err(_) => Ok(()),
+            Ok(_) => Err("the transaction reached its homes"),
+        },
+        _ => Err("a live journal under a clear flag was attached"),
+    });
+    match refused {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
 }
 
 /// An operation whose records never left the in-memory ring is not
@@ -222,7 +295,6 @@ pub fn test_ext2_journal_drops_an_uncommitted_ring_whole() -> TestResult {
 }
 
 fn commit_one_then_stage_one(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
     attach(fs)?;
     let ino = fs.create_file(2, b"logged.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -273,7 +345,6 @@ pub fn test_ext2_journal_orders_data_a_later_truncate_frees() -> TestResult {
 }
 
 fn write_then_truncate_then_crash(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
     attach(fs)?;
     let bs = fs.block_size() as usize;
     let mut payload = KVec::<u8>::zeroed(UNLOGGED_BLOCKS * bs).map_err(|_| "payload")?;
@@ -422,6 +493,7 @@ pub fn test_ext2_killed_read_is_not_damage() -> TestResult {
 }
 
 fn killed_read_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    attach(fs)?;
     let ino = fs.create_file(2, b"killed.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
     fs.sync().map_err(|_| "sync")?;
@@ -463,11 +535,11 @@ fn unreadable_target_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let target = fs.create_file(dir, b"b").map_err(|_| "create target")?;
     let source = fs.create_file(2, b"a").map_err(|_| "create source")?;
     fs.sync().map_err(|_| "sync")?;
-    let block = fs.read_inode(dir).map_err(|_| "read dir")?.block[0];
+    let block = fs.block_of_for_test(dir, 0).map_err(|_| "map dir")?;
     fs.cache_drop_clean_for_test();
 
     PROBE_REFUSE_READ_AT.store(
-        u64::from(block.raw()) * u64::from(fs.block_size()),
+        u64::from(block) * u64::from(fs.block_size()),
         Ordering::Relaxed,
     );
     let renamed = fs.rename_entry(2, b"a", dir, b"b");
@@ -518,8 +590,8 @@ fn unreadable_name_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let taken = fs.create_file(dir, b"b").map_err(|_| "create")?;
     let other = fs.create_file(2, b"o").map_err(|_| "create other")?;
     fs.sync().map_err(|_| "sync")?;
-    let block = fs.read_inode(dir).map_err(|_| "read dir")?.block[0];
-    let home = u64::from(block.raw()) * u64::from(fs.block_size());
+    let block = fs.block_of_for_test(dir, 0).map_err(|_| "map dir")?;
+    let home = u64::from(block) * u64::from(fs.block_size());
 
     fs.cache_drop_clean_for_test();
     PROBE_REFUSE_READ_AT.store(home, Ordering::Relaxed);
@@ -556,20 +628,21 @@ pub fn test_ext2_new_directory_block_is_metadata() -> TestResult {
 fn new_directory_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let dir = fs.create_directory(2, b"fresh").map_err(|_| "mkdir")?;
-    let block = fs.read_inode(dir).map_err(|_| "read dir")?.block[0];
-    if fs.cached_kind_for_test(block.raw()) != Some(BlockKind::Metadata) {
+    let block = fs.block_of_for_test(dir, 0).map_err(|_| "map dir")?;
+    if fs.cached_kind_for_test(block) != Some(BlockKind::Metadata) {
         return Err("a new directory's first block is cached as file data");
     }
     fs.create_file(dir, b"inside")
         .map_err(|_| "create inside")?;
-    if fs.cached_kind_for_test(block.raw()) != Some(BlockKind::Metadata) {
+    if fs.cached_kind_for_test(block) != Some(BlockKind::Metadata) {
         return Err("an insert left the directory block cached as file data");
     }
     Ok(())
 }
 
-/// The log's own file is kernel state: not readable, not removable.
-pub fn test_ext2_journal_file_is_not_userland_data() -> TestResult {
+/// The journal is the volume's own: no name reaches it, so nothing in
+/// userland can read the metadata copies it holds or write into it.
+pub fn test_ext2_journal_inode_takes_no_name() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -581,16 +654,11 @@ pub fn test_ext2_journal_file_is_not_userland_data() -> TestResult {
 
 fn guard_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
-    let ino = fs.resolve_path(JOURNAL_PATH).map_err(|_| "resolve")?;
-    let mut buf = [0u8; 32];
-    if fs.read_file(ino, 0, &mut buf).is_ok() {
-        return Err("the log's blocks are readable through the VFS");
+    if fs.link_entry(2, b"journal", JOURNAL_INO).is_ok() {
+        return Err("a name was given to the journal inode");
     }
-    if fs.unlink_entry(2, &JOURNAL_PATH[1..]).is_ok() {
-        return Err("the log's file can be unlinked from under the mount");
-    }
-    if fs.truncate_file(ino, 0).is_ok() {
-        return Err("the log's file can be truncated from under the mount");
+    if fs.resolve_path(b"/journal").is_ok() {
+        return Err("the refused link left a name behind");
     }
     Ok(())
 }
@@ -757,12 +825,9 @@ fn expect_survivor(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A boot that dies with its log empty — everything checkpointed, nothing
-/// half done — leaves an image the next mount may write, because the log's
-/// stamp says it saw every write of that mount. A mount of the volume that
-/// did not stamp the log (a count that moved) takes that back, and a mount
-/// that refused to write does not give it back.
-pub fn test_ext2_journal_empty_log_of_the_last_mount_recovers() -> TestResult {
+/// A boot that dies with an empty journal leaves its volume stamped in use; the
+/// next mount replays nothing and writes again, as Linux and `e2fsck` would.
+pub fn test_ext2_journal_volume_down_in_use_with_an_empty_log_recovers() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -772,71 +837,38 @@ pub fn test_ext2_journal_empty_log_of_the_last_mount_recovers() -> TestResult {
     let Ok((sb, ..)) = Ext2Fs::mount_params(&device) else {
         return fail!("the staged image no longer parses");
     };
-    if Ext2Fs::mount_read_only_reason(&sb, &device) != Some(ReadOnlyReason::NotCleanlyUnmounted) {
-        return fail!("the image should read as never cleanly unmounted");
+    if Ext2Fs::mount_read_only_reason(&sb, &device) != Some(ReadOnlyReason::NeedsRecovery) {
+        return fail!("the image should read as needing recovery");
     }
-    match with_log(&device, expect_continuous) {
-        Ok(()) => {}
-        Err(msg) => return fail!("{}", msg),
+    match with_log(&device, expect_writable_after_nothing_to_replay) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
     }
-
-    // A foreign mount since: the medium's count moves and the log's does not.
-    let Some(device) = journal_image() else {
-        return TestResult::Skipped;
-    };
-    if let Err(msg) = with_log(&device, crash_with_an_empty_log) {
-        return fail!("staging the second crash: {}", msg);
-    }
-    device.with_buffer_mut(|buf| {
-        let count = u16::from_le_bytes([buf[1024 + 52], buf[1024 + 53]]).wrapping_add(1);
-        buf[1024 + 52..1024 + 54].copy_from_slice(&count.to_le_bytes());
-    });
-    // Twice: a mount that refused must not leave the log claimed for the next.
-    for _ in 0..2 {
-        if let Err(msg) = with_log(&device, expect_discontinuous) {
-            return fail!("{}", msg);
-        }
-    }
-    TestResult::Pass
 }
 
 fn crash_with_an_empty_log(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
     attach(fs)?;
-    fs.claim_log().map_err(|_| "claim")?;
     let ino = fs.create_file(2, b"synced.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
     fs.sync().map_err(|_| "sync")?;
-    // No mark_clean: the boot dies here, with s_state still not clean.
     Ok(())
 }
 
-fn recovery_of(fs: &mut Ext2Fs<'_>) -> Result<JournalRecovery, &'static str> {
-    match fs.attach_journal() {
-        Ok(Some(recovery)) => Ok(recovery),
-        Ok(None) => Err("no log on the remount"),
-        Err(_) => Err("attach failed on the remount"),
-    }
-}
-
-fn expect_continuous(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    let recovery = recovery_of(fs)?;
+fn expect_writable_after_nothing_to_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let recovery = match fs.attach_journal() {
+        Ok(Some(recovery)) => recovery,
+        Ok(None) => return Err("no journal on the remount"),
+        Err(_) => return Err("attach failed on the remount"),
+    };
     if recovery.replayed() {
-        return Err("a synced log replayed a transaction");
+        return Err("an emptied journal replayed a transaction");
     }
-    if !recovery.recovered() {
-        return Err("the last mount's own empty log did not count as recovery");
-    }
+    fs.mark_dirty_on_disk().map_err(|_| "the in-use stamp")?;
     fs.resolve_path(b"/synced.txt")
+        .map_err(|_| "the synced file is gone")?;
+    fs.create_file(2, b"after.txt")
         .map(|_| ())
-        .map_err(|_| "the synced file is gone")
-}
-
-fn expect_discontinuous(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    if recovery_of(fs)?.recovered() {
-        return Err("a log another mount never stamped was trusted");
-    }
-    Ok(())
+        .map_err(|_| "the recovered mount refused a write")
 }
 
 slopos_testing::stest!(
@@ -844,7 +876,16 @@ slopos_testing::stest!(
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_journal_empty_log_of_the_last_mount_recovers,
+    name = test_ext2_journal_under_a_clear_flag_is_not_replayed,
+    suite = fs
+);
+slopos_testing::stest!(name = test_ext2_freed_blocks_are_kept_as_runs, suite = fs);
+slopos_testing::stest!(
+    name = test_ext2_read_only_mount_needing_recovery_is_refused,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_journal_volume_down_in_use_with_an_empty_log_recovers,
     suite = fs
 );
 slopos_testing::stest!(
@@ -865,10 +906,7 @@ slopos_testing::stest!(
     name = test_ext2_journal_checkpoints_a_block_read_back_from_the_log,
     suite = fs
 );
-slopos_testing::stest!(
-    name = test_ext2_journal_file_is_not_userland_data,
-    suite = fs
-);
+slopos_testing::stest!(name = test_ext2_journal_inode_takes_no_name, suite = fs);
 slopos_testing::stest!(
     name = test_ext2_writeback_step_respects_its_budget,
     suite = fs
@@ -913,12 +951,11 @@ fn orphan_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     if detached != ino {
         return Err("a different inode was orphaned");
     }
-    // One barrier for the log commit that makes the member's record durable,
-    // one behind the head that names it; a home write mid-operation would
-    // add a third.
+    // Two barriers bracket the commit block and one follows the head naming the
+    // member; a home write mid-operation would add a fourth.
     let barriers = PROBE_FLUSHES.load(Ordering::Relaxed);
-    if barriers != 2 {
-        return Err("the orphan path barriered other than twice, so it published home early");
+    if barriers != 3 {
+        return Err("the orphan path barriered other than three times, so it published home early");
     }
     // And the list is still usable: the deferred head write landed.
     fs.release_orphan(detached).map_err(|_| "release")?;
@@ -987,33 +1024,28 @@ fn on_disk_u16(device: &dyn BlockDevice, field_offset: u64) -> u16 {
     u16::from_le_bytes(buf)
 }
 
-/// An image marked clean while still mounted must be re-stamped dirty before
-/// the next mutation reaches the medium, or a crash leaves a superblock
-/// claiming a consistency its blocks do not have and nothing tells `e2fsck` to
-/// look. Observed as the offset of the first device write — 1024 is the
-/// superblock, and without the thaw it is this operation's log block. An idle
-/// window is not a mount, so the re-stamp must not bill one.
+/// A volume stamped clean while mounted is stamped in use again before its next
+/// mutation reaches the medium, and the re-stamp bills no mount.
 pub fn test_ext2_clean_stamp_thaws_before_the_next_write() -> TestResult {
-    use crate::ext2::ondisk::{EXT2_ERROR_FS, EXT2_VALID_FS};
-
-    // `journal_image` ends in `mark_clean`: a clean image carrying a log, which
-    // is what an idle boot leaves behind.
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
     let device = ProbeDevice::new(image);
-    if on_disk_u16(&device, 58) != EXT2_VALID_FS {
-        return fail!("the fixture is not clean, so there is nothing to thaw");
+    if let Err(msg) = with_log(&device, attach_then_clean) {
+        return fail!("{}", msg);
+    }
+    if on_disk_u32(&device, off::FEATURE_INCOMPAT) & RECOVER != 0 {
+        return fail!("the clean stamp left needs_recovery set");
     }
     let mounts = on_disk_u16(&device, 52);
 
     if let Err(msg) = with_log(&device, thaw_body) {
         return fail!("{}", msg);
     }
-    if PROBE_FIRST.load(Ordering::Relaxed) != 1024 {
-        return fail!("the mutation wrote before it stamped the image dirty");
+    if PROBE_FIRST.load(Ordering::Relaxed) != sbk::OFFSET {
+        return fail!("the mutation wrote before it stamped the image in use");
     }
-    if on_disk_u16(&device, 58) != EXT2_ERROR_FS {
+    if on_disk_u32(&device, off::FEATURE_INCOMPAT) & RECOVER == 0 {
         return fail!("a mutated image is still marked clean on the medium");
     }
     if on_disk_u16(&device, 52) != mounts {
@@ -1022,9 +1054,29 @@ pub fn test_ext2_clean_stamp_thaws_before_the_next_write() -> TestResult {
     TestResult::Pass
 }
 
-fn thaw_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    // The attach writes the log's own superblock, so measure after it.
+/// A superblock word as the medium holds it.
+fn on_disk_u32(device: &dyn BlockDevice, field: usize) -> u32 {
+    let mut buf = [0u8; 4];
+    if device
+        .read_at(sbk::OFFSET + field as u64, &mut buf)
+        .is_err()
+    {
+        return u32::MAX;
+    }
+    u32::from_le_bytes(buf)
+}
+
+fn attach_then_clean(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
+    fs.mark_clean().map_err(|_| "clean")
+}
+
+fn thaw_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    // Measure from after the attach, which writes the journal superblock but
+    // leaves the in-use stamp to the thaw.
+    if !matches!(fs.attach_journal(), Ok(Some(_))) {
+        return Err("attach");
+    }
     PROBE_FIRST.store(u64::MAX, Ordering::Relaxed);
     fs.create_file(2, b"thaw.txt")
         .map(|_| ())
@@ -1047,31 +1099,84 @@ fn synth_slot_block(i: u32) -> u32 {
     }
 }
 
-/// A log built directly rather than through `/.journal`: the tests that use it
-/// want more slots than a fixture image has blocks, and measure the slot count
-/// rather than any payload.
+/// A journal over spare blocks of an ext2 fixture, for tests that need more
+/// slots than a fixture's journal has. Its superblock is written once, so a
+/// later attach finds what an earlier one logged.
 #[inline(never)]
 fn synthetic_log(
     device: &dyn BlockDevice,
     count: u32,
 ) -> Result<(KBox<Journal>, JournalRecovery), &'static str> {
-    let bs = image_block_size(device)?;
-    let mut slots = KVec::with_capacity(count as usize).map_err(|_| "slots")?;
+    synthetic_attach(device, count).map_err(|_| "attach")
+}
+
+/// [`synthetic_log`], answering why an attach refused. The log comes back
+/// live, as a mount that stamped its volume in use leaves it.
+#[inline(never)]
+fn synthetic_attach(
+    device: &dyn BlockDevice,
+    count: u32,
+) -> Result<(KBox<Journal>, JournalRecovery), AttachError> {
+    let bs = image_block_size(device).map_err(|_| AttachError::BadSuperblock)?;
+    let mut runs = JournalRuns::new();
     for i in 0..count {
-        slots.push(synth_slot_block(i)).map_err(|_| "slots")?;
+        let block = synth_slot_block(i);
+        match runs.as_mut_slice().last_mut() {
+            Some(last) if last.1 + last.2 == block => last.2 += 1,
+            _ => runs
+                .push((i, block, 1))
+                .map_err(|_| AttachError::Fs(Ext2Error::OutOfMemory))?,
+        }
     }
-    let extent = LogExtent {
-        first_data_block: 1,
-        blocks_count: IMAGE_BLOCKS,
+    write_synthetic_superblock(device, bs, count).map_err(|_| AttachError::BadSuperblock)?;
+    let volume = LogVolume {
+        block_size: bs,
+        extent: LogExtent {
+            first_data_block: 1,
+            blocks_count: IMAGE_BLOCKS,
+        },
+        csum: true,
+        bit64: true,
+        inode: JOURNAL_INO,
+        needs_recovery: true,
     };
-    Journal::attach(slots, bs, SYNTH_INO, extent, [0, 0], device).map_err(|_| "attach")
+    let (mut log, recovery) = Journal::attach(&runs, volume, device)?;
+    log.set_live(true, device)?;
+    Ok((log, recovery))
+}
+
+/// An empty version-2 journal superblock in slot 0, unless one is there.
+#[inline(never)]
+fn write_synthetic_superblock(
+    device: &dyn BlockDevice,
+    bs: u32,
+    count: u32,
+) -> Result<(), &'static str> {
+    use slopos_ext4_core::jbd2;
+    let at = u64::from(synth_slot_block(0)) * u64::from(bs);
+    let mut jsb = KVec::<u8>::zeroed(bs as usize).map_err(|_| "jsb")?;
+    device
+        .read_at(at, jsb.as_mut_slice())
+        .map_err(|_| "read jsb")?;
+    if jbd2::Superblock::parse(jsb.as_slice()).is_ok_and(|sb| sb.maxlen == count) {
+        return Ok(());
+    }
+    jsb.as_mut_slice().fill(0);
+    let raw = jsb.as_mut_slice();
+    raw[0..4].copy_from_slice(&jbd2::MAGIC.to_be_bytes());
+    raw[4..8].copy_from_slice(&jbd2::blocktype::SUPERBLOCK_V2.to_be_bytes());
+    raw[jbd2::sb_off::BLOCK_SIZE..jbd2::sb_off::BLOCK_SIZE + 4].copy_from_slice(&bs.to_be_bytes());
+    raw[jbd2::sb_off::MAXLEN..jbd2::sb_off::MAXLEN + 4].copy_from_slice(&count.to_be_bytes());
+    raw[jbd2::sb_off::FIRST..jbd2::sb_off::FIRST + 4].copy_from_slice(&1u32.to_be_bytes());
+    raw[jbd2::sb_off::SEQUENCE..jbd2::sb_off::SEQUENCE + 4].copy_from_slice(&1u32.to_be_bytes());
+    device.write_at(at, jsb.as_slice()).map_err(|_| "write jsb")
 }
 
 /// Its own frame: `mount_params` hands back a whole superblock.
 #[inline(never)]
 fn image_block_size(device: &dyn BlockDevice) -> Result<u32, &'static str> {
     Ext2Fs::mount_params(device)
-        .map(|(_, bs, _)| bs)
+        .map(|(_, geom)| geom.block_size())
         .map_err(|_| "mount_params")
 }
 
@@ -1107,8 +1212,7 @@ fn newest_record_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
     if log.resident_slot(target) != Some(newest) {
         return Err("the index did not answer the newest of a block's records");
     }
-    log.note_revoke(target, device).map_err(|_| "note_revoke")?;
-    log.flush_revokes(device).map_err(|_| "flush_revokes")?;
+    log.note_revoke(target).map_err(|_| "note_revoke")?;
     if log.resident_slot(target).is_some() {
         return Err("a revoked block still resolves to a log record");
     }
@@ -1148,8 +1252,7 @@ fn index_rewind_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
     log.begin_op();
     // Revoked from inside the operation that aborts, so the rewind has to put
     // a committed mapping back as well as drop its own.
-    log.note_revoke(kept, device).map_err(|_| "note_revoke")?;
-    log.flush_revokes(device).map_err(|_| "flush_revokes")?;
+    log.note_revoke(kept).map_err(|_| "note_revoke")?;
     log.write_record(&aborted, device, &mut |_| Some(PAYLOAD))
         .map_err(|_| "write_record")?;
     log.abort_op();
@@ -1168,7 +1271,7 @@ fn index_rewind_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A `/.journal` with more slots than the kernel can index is used up to the
+/// A journal with more blocks than the kernel can index is used up to the
 /// cap, not refused, and the front of it still replays.
 pub fn test_ext2_journal_uses_the_front_of_an_oversized_log() -> TestResult {
     let Some(device) = plain_image() else {
@@ -1297,6 +1400,10 @@ slopos_testing::stest!(
 /// bound, so a coalesced phase is still several requests.
 const EXTENT_BLOCKS: u32 = 64;
 
+/// Journal blocks an extent write's commit may carry ahead of its barrier: a
+/// descriptor and the metadata blocks the write dirties, with room to spare.
+const RECORD_ALLOWANCE: usize = 16;
+
 /// Byte *i* of the extent, so a misplaced segment mismatches rather than
 /// reading as the zeros a sparse read would also give.
 fn extent_byte(i: usize) -> u8 {
@@ -1307,7 +1414,7 @@ static EXT_WRITES: AtomicUsize = AtomicUsize::new(0);
 static EXT_BYTES: AtomicUsize = AtomicUsize::new(0);
 static EXT_BARRIERS: AtomicUsize = AtomicUsize::new(0);
 /// Requests and bytes taken *before* the first barrier: the ordered-writeback
-/// data phase and nothing else.
+/// data and the journal blocks the commit block waits behind.
 static EXT_PRE_WRITES: AtomicUsize = AtomicUsize::new(0);
 static EXT_PRE_BYTES: AtomicUsize = AtomicUsize::new(0);
 /// The measurement, lifted out of a body whose only error channel is a
@@ -1401,14 +1508,14 @@ pub fn test_ext2_journal_write_extent_coalesces_its_requests() -> TestResult {
     let extent = bs * EXTENT_BLOCKS as usize;
 
     if EXT_SEEN_BARRIERS.load(Ordering::Relaxed) == 0 {
-        return fail!("the data phase of an ordered write issued no barrier");
+        return fail!("an ordered write's commit waited behind no barrier");
     }
-    // The pre-barrier phase carried the extent and nothing else: extra bytes
-    // are a metadata block merged into a data run, missing ones a data block
-    // deferred past the barrier.
-    if bytes != extent {
+    // `data=ordered`: the extent precedes the commit's barrier, beside at most
+    // the journal blocks that describe the file.
+    let records = RECORD_ALLOWANCE * bs;
+    if bytes < extent || bytes > extent + records {
         return fail!(
-            "the data phase wrote {} bytes before the barrier, not the extent's {}",
+            "{} bytes went out before the barrier, not the extent's {} and its records",
             bytes,
             extent
         );
@@ -1431,9 +1538,8 @@ fn extent_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     for (i, byte) in buffer.as_mut_slice().iter_mut().enumerate() {
         *byte = extent_byte(i);
     }
-    // The create is what stamps the image dirty and spends the log's first
-    // slots. The write itself defers its data to the next log sync, so the
-    // sync is where the ordered phases are counted.
+    // The write defers its data to the next sync, so the sync is where the
+    // ordered phases are counted.
     let ino = fs.create_file(2, b"extent.bin").map_err(|_| "create")?;
     let written = fs
         .write_file(ino, 0, buffer.as_slice())
@@ -1565,7 +1671,6 @@ fn relog_verify(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 fn relog_unsynced(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
     attach(fs)?;
     relog_writes(fs)?;
     // Committed to the medium, never check pointed.
@@ -1589,21 +1694,17 @@ slopos_testing::stest!(
     suite = fs
 );
 
-/// Where a record header carries its entry count, and one past its end.
-const REC_COUNT_OFF: usize = 12;
-const REC_COUNT_END: usize = REC_COUNT_OFF + 4;
-
-/// Answers one record header differently on its second read — the precondition
-/// `build_disposition`'s clamp names: the scan and the disposition each read
-/// the header off the medium, and nothing makes a device answer alike twice.
+/// Answers one block differently on every read after the first: replay's scan
+/// and its later passes each read the block, and must not trust them to agree.
 struct TamperDevice {
     inner: MemoryBlockDevice,
-    /// Offset whose header is rewritten, or `u64::MAX` for none.
+    /// Offset whose block is altered, or `u64::MAX` for none.
     target: AtomicU64,
     reads: AtomicUsize,
-    /// Entries the rewritten header claims.
-    claim: AtomicU32,
 }
+
+/// The byte a tampered read flips: inside the first tag of a descriptor.
+const TAMPER_BYTE: usize = 13;
 
 impl TamperDevice {
     fn new(inner: MemoryBlockDevice) -> Self {
@@ -1611,15 +1712,11 @@ impl TamperDevice {
             inner,
             target: AtomicU64::new(u64::MAX),
             reads: AtomicUsize::new(0),
-            claim: AtomicU32::new(0),
         }
     }
 
-    /// Rewrite the entry count of every read of `offset` after the first, so
-    /// the scan sees the honest record and the disposition sees `claim`.
-    fn arm(&self, offset: u64, claim: u32) {
+    fn arm(&self, offset: u64) {
         self.reads.store(0, Ordering::Relaxed);
-        self.claim.store(claim, Ordering::Relaxed);
         self.target.store(offset, Ordering::Relaxed);
     }
 
@@ -1632,11 +1729,10 @@ impl BlockDevice for TamperDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
         self.inner.read_at(offset, buffer)?;
         if offset == self.target.load(Ordering::Relaxed)
-            && buffer.len() >= REC_COUNT_END
+            && buffer.len() > TAMPER_BYTE
             && self.reads.fetch_add(1, Ordering::Relaxed) > 0
         {
-            let claim = self.claim.load(Ordering::Relaxed);
-            buffer[REC_COUNT_OFF..REC_COUNT_END].copy_from_slice(&claim.to_le_bytes());
+            buffer[TAMPER_BYTE] ^= 0x40;
         }
         Ok(())
     }
@@ -1658,123 +1754,106 @@ impl BlockDevice for TamperDevice {
     }
 }
 
-/// Home blocks the clamp fixture's two transactions target: past every slot
-/// the synthetic log takes, so a replay's own writes never land on the log.
-const CLAMP_WIDE_HOME: u32 = HOME_FIRST;
-const CLAMP_TAIL_HOME: u32 = HOME_FIRST + 1;
-/// Slots the fixture needs: a full-width `DATA` record and its commit, then a
-/// one-block transaction and its — past `2 + max_entries`, which is the only
-/// region in which the clamped and unclamped cursors differ.
-const CLAMP_SLOTS: u32 = 300;
-/// What the tampered header claims on top of the maximum.
-const CLAMP_OVERCLAIM: u32 = 7;
+/// Home blocks the fixture's two transactions target: past every slot the
+/// synthetic log takes, so a replay's own writes never land on the log.
+const TAMPER_WIDE_HOME: u32 = HOME_FIRST;
+const TAMPER_TAIL_HOME: u32 = HOME_FIRST + 1;
+const TAMPER_SLOTS: u32 = 300;
+const FIRST_DESCRIPTOR_SLOT: u32 = 1;
 
-/// A record header claiming more entries than a block holds must read as
-/// claiming exactly the maximum, for the slot cursor as much as for the
-/// indexing: `build_disposition` clamped the index but advanced its cursor by
-/// the unclamped value, stepping the second pass past the tail transaction.
-pub fn test_ext2_journal_record_count_is_clamped_for_the_cursor_too() -> TestResult {
+/// A descriptor that reads differently after the scan checked it is refused
+/// before anything is written home.
+pub fn test_ext2_journal_block_that_reads_differently_is_refused() -> TestResult {
     let Some(image) = plain_image() else {
         return TestResult::Skipped;
     };
     let device = TamperDevice::new(image);
-    match clamped_cursor_body(&device) {
+    match tamper_body(&device) {
         Ok(()) => TestResult::Pass,
         Err(msg) => fail!("{}", msg),
     }
 }
 
 #[inline(never)]
-fn clamped_cursor_body(device: &TamperDevice) -> Result<(), &'static str> {
+fn tamper_body(device: &TamperDevice) -> Result<(), &'static str> {
     let bs = image_block_size(device)?;
-    let honest = clamp_replay(device, bs, None)?;
-    let tampered = clamp_replay(device, bs, Some(CLAMP_OVERCLAIM))?;
-    if honest != tampered {
-        return Err("an overclaimed entry count replayed to a different state");
+    let honest = tamper_replay(device, bs, false)?;
+    if honest != Some(2) {
+        return Err("the fixture's two committed transactions did not both replay");
+    }
+    if tamper_replay(device, bs, true)? != None {
+        return Err("a descriptor that changed between reads was replayed");
     }
     Ok(())
 }
 
-/// Lay the two-transaction log down, replay it from a fresh attach, and answer
-/// what the replay did. `overclaim` inflates the header's count on the
-/// disposition's read of it, which is the second.
+/// Lay the two-transaction log down and replay it from a fresh attach,
+/// answering how many transactions it applied, or `None` if it refused.
 #[inline(never)]
-fn clamp_replay(
+fn tamper_replay(
     device: &TamperDevice,
     bs: u32,
-    overclaim: Option<u32>,
-) -> Result<(u32, u32), &'static str> {
+    tamper: bool,
+) -> Result<Option<u32>, &'static str> {
     let mut payload = KVec::<u8>::zeroed(bs as usize).map_err(|_| "payload")?;
     payload.as_mut_slice()[..PAYLOAD.len()].copy_from_slice(PAYLOAD);
-    // Both home locations start empty, so a transaction that never reached
-    // one shows up as zeros rather than as the previous round's payload.
-    for home in [CLAMP_WIDE_HOME, CLAMP_TAIL_HOME] {
-        let mut zeros = KVec::<u8>::zeroed(bs as usize).map_err(|_| "zeros")?;
-        zeros.as_mut_slice().fill(0);
+    for home in [TAMPER_WIDE_HOME, TAMPER_TAIL_HOME] {
+        let zeros = KVec::<u8>::zeroed(bs as usize).map_err(|_| "zeros")?;
         device
             .write_at(u64::from(home) * u64::from(bs), zeros.as_slice())
             .map_err(|_| "clear home")?;
     }
-
     device.disarm();
-    let wide = clamp_fill(device, payload.as_slice())?;
-    if let Some(extra) = overclaim {
-        // Slot 1 is the wide record's header.
-        device.arm(u64::from(synth_slot_block(1)) * u64::from(bs), wide + extra);
+    tamper_fill(device, payload.as_slice())?;
+    if tamper {
+        device.arm(u64::from(synth_slot_block(FIRST_DESCRIPTOR_SLOT)) * u64::from(bs));
     }
-
-    let (log, recovery) = synthetic_log(device, CLAMP_SLOTS)?;
-    drop(log);
+    let attached = synthetic_attach(device, TAMPER_SLOTS);
     device.disarm();
-
-    if recovery.transactions != 2 {
-        return Err("the fixture's two committed transactions did not both replay");
+    let applied = match attached {
+        Ok((log, recovery)) => {
+            drop(log);
+            Some(recovery.transactions)
+        }
+        Err(AttachError::Corrupt) => None,
+        Err(_) => return Err("the attach failed for a reason other than the tamper"),
+    };
+    let tail = home_byte(device, TAMPER_TAIL_HOME, bs)?;
+    match applied {
+        Some(_) if tail != PAYLOAD[0] => Err("the tail transaction never reached its home"),
+        None if tail != 0 || home_byte(device, TAMPER_WIDE_HOME, bs)? != 0 => {
+            Err("a refused replay wrote home first")
+        }
+        _ => Ok(applied),
     }
-    // One write per payload slot of the wide record, plus the tail
-    // transaction's one. A cursor that overshot leaves the tail out.
-    if recovery.blocks != wide + 1 {
-        return Err("the replay wrote a different number of blocks home");
-    }
-    payload.as_mut_slice().fill(0);
-    device
-        .read_at(
-            u64::from(CLAMP_TAIL_HOME) * u64::from(bs),
-            payload.as_mut_slice(),
-        )
-        .map_err(|_| "read")?;
-    if &payload.as_slice()[..PAYLOAD.len()] != PAYLOAD {
-        return Err("the transaction past the overclaimed record never reached its home");
-    }
-    Ok((recovery.transactions, recovery.blocks))
 }
 
-/// Write a full-width `DATA` record and a one-block one, each committed, and
-/// answer the entries the wide one lists. Its own frame: the target array is
-/// one entry per header slot.
+/// Write a full-width descriptor's transaction and a one-block one, each
+/// committed, and drop the log without writing anything home.
 #[inline(never)]
-fn clamp_fill(device: &TamperDevice, payload: &[u8]) -> Result<u32, &'static str> {
-    let (mut log, _) = synthetic_log(device, CLAMP_SLOTS)?;
+fn tamper_fill(device: &TamperDevice, payload: &[u8]) -> Result<(), &'static str> {
+    let (mut log, _) = synthetic_log(device, TAMPER_SLOTS)?;
     let wide = log.max_entries();
     let mut targets = KVec::<u32>::zeroed(wide).map_err(|_| "targets")?;
-    targets.as_mut_slice().fill(CLAMP_WIDE_HOME);
+    targets.as_mut_slice().fill(TAMPER_WIDE_HOME);
+    log.begin_op();
     log.write_record(targets.as_slice(), device, &mut |_| Some(payload))
         .map_err(|_| "write_record")?;
     log.commit_op(device).map_err(|_| "commit_op")?;
     log.seal(device).map_err(|_| "seal")?;
-    log.write_record(&[CLAMP_TAIL_HOME], device, &mut |_| Some(payload))
+    log.begin_op();
+    log.write_record(&[TAMPER_TAIL_HOME], device, &mut |_| Some(payload))
         .map_err(|_| "write_record")?;
     log.commit_op(device).map_err(|_| "commit_op")?;
     log.seal(device).map_err(|_| "seal")?;
     log.write_pending(device)
         .map_err(|_| "write the ring out")?;
-    // Dropped without a check point: the next attach is what has to find both
-    // transactions and apply them.
     drop(log);
-    u32::try_from(wide).map_err(|_| "max_entries")
+    Ok(())
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_record_count_is_clamped_for_the_cursor_too,
+    name = test_ext2_journal_block_that_reads_differently_is_refused,
     suite = fs
 );
 
@@ -1845,7 +1924,7 @@ fn interleave_two_passes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let dir = fs.create_directory(2, b"d").map_err(|_| "mkdir")?;
     fs.sync().map_err(|_| "sync")?;
     fs.create_file(dir, RESURRECTED).map_err(|_| "create")?;
-    let block = fs.read_inode(dir).map_err(|_| "read dir")?.block[0].raw();
+    let block = fs.block_of_for_test(dir, 0).map_err(|_| "map dir")?;
 
     let mut early = fs.begin_sync();
     while !early.checkpointing_for_test() {
@@ -1939,7 +2018,6 @@ pub fn test_ext2_journal_compound_logs_each_block_once() -> TestResult {
 }
 
 fn compound_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
     attach(fs)?;
     let ino = fs.create_file(2, b"modes.txt").map_err(|_| "create")?;
     // Out to the medium, so the compound below starts in an empty ring.
@@ -2050,11 +2128,51 @@ fn replay_synthetic(device: &dyn BlockDevice) -> Result<u32, &'static str> {
     Ok(recovery.transactions)
 }
 
-/// A torn write of the ring loses the whole compound and keeps the commit
-/// before it. Two tears: the write stops part-way, so the compound's commit
-/// record never lands; and a block ahead of it is acknowledged but never
-/// lands, so the commit does and the CRC over the compound's final images
-/// has to refuse it.
+/// A copy whose first word is the journal magic, which the log must escape.
+const MAGIC_PAYLOAD: &[u8] = &[0xC0, 0x3B, 0x39, 0x98, b'e', b's', b'c'];
+
+/// A record spilled before its operation commits goes out escaped, checksummed
+/// and under a sealed descriptor, so the transaction that commits it replays.
+pub fn test_ext2_journal_spilled_record_is_settled_on_its_way_out() -> TestResult {
+    let Some(image) = plain_image() else {
+        return TestResult::Skipped;
+    };
+    match spilled_body(&image) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+#[inline(never)]
+fn spilled_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
+    let bs = image_block_size(device)?;
+    let (mut log, _) = synthetic_log(device, COMPOUND_LOG_SLOTS)?;
+    log.begin_op();
+    log.spill(HOME_FIRST, MAGIC_PAYLOAD, device)
+        .map_err(|_| "spill")?;
+    log.write_pending(device)
+        .map_err(|_| "the write-out inside the operation")?;
+    log.commit_op(device).map_err(|_| "commit")?;
+    log.write_pending(device)
+        .map_err(|_| "the write-out of the commit")?;
+    device.flush().map_err(|_| "flush")?;
+    drop(log);
+    if replay_synthetic(device)? != 1 {
+        return Err("the transaction holding the spilled record did not replay");
+    }
+    if home_byte(device, HOME_FIRST, bs)? != MAGIC_PAYLOAD[0] {
+        return Err("the escaped copy came home without its magic");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_journal_spilled_record_is_settled_on_its_way_out,
+    suite = fs
+);
+
+/// A torn ring write applies none of the compound: cut short, the replay keeps
+/// the commit before it; missing a block, it is refused before anything lands.
 pub fn test_ext2_journal_torn_compound_replays_none_of_it() -> TestResult {
     for lost_block in [false, true] {
         let Some(image) = plain_image() else {
@@ -2105,8 +2223,18 @@ fn torn_compound(device: &ProbeDevice, lost_block: bool) -> Result<(), &'static 
     // The crash: nothing else of this mount reaches the medium.
     drop(cache);
 
-    if replay_synthetic(device)? != 1 {
-        return Err("the replay kept other than the one durable commit");
+    let a_now = home_byte(device, COMPOUND_A, bs)?;
+    match synthetic_attach(device, COMPOUND_LOG_SLOTS) {
+        Ok((_, recovery)) if !lost_block && recovery.transactions == 1 => {}
+        Ok(_) if lost_block => return Err("a commit over a lost block was replayed"),
+        Ok(_) => return Err("the replay kept other than the one durable commit"),
+        Err(AttachError::Corrupt) if lost_block => {
+            if home_byte(device, COMPOUND_A, bs)? != a_now {
+                return Err("a refused replay wrote home first");
+            }
+            return Ok(());
+        }
+        Err(_) => return Err("the attach failed"),
     }
     if home_byte(device, COMPOUND_A, bs)? != 1 || home_byte(device, COMPOUND_B, bs)? != b_before {
         return Err("the replay applied part of a torn compound");

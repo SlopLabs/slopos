@@ -24,6 +24,8 @@ set -euo pipefail
 #   BOOT_LOG_TIMEOUT, LOG_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/ext4.sh
+. "$SCRIPT_DIR/lib/ext4.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 MODE="${1:?Usage: qemu_run.sh <interactive|logged|test> <iso> <fs_image>}"
@@ -249,7 +251,7 @@ ADD_NO_REBOOT=0
 #            tests target it, never the live root.
 #   nvme0n3  CAPACITY_IMG, when it names an existing file: the large volume
 #            the capacity check measures, opt-in and preserved.
-#   nvme1n1  test mode: a labelled ext2 volume on 4096-byte logical blocks,
+#   nvme1n1  test mode: a labelled ext4 volume on 4096-byte logical blocks,
 #            which the test command line mounts by label.
 #   nvme1n2  test mode: a blank 4096-byte-block scratch.
 #   nvme2n1  test mode: a controller of its own that a test shuts down.
@@ -299,7 +301,8 @@ case "$MODE" in
         echo "slopos-media: the test harness's labelled volume" >"$media_stage/SLOPOS-MEDIA"
         rm -f "$MEDIA_IMG"
         truncate -s 16M "$MEDIA_IMG"
-        mkfs.ext2 -F -q -b 4096 -L slopos-media -d "$media_stage" "$MEDIA_IMG" ||
+        ext4_mkfs_args
+        mke2fs -F -q "${EXT4_MKFS_ARGS[@]}" -L slopos-media -d "$media_stage" "$MEDIA_IMG" ||
             { rm -rf "$media_stage"; exit 1; }
         rm -rf "$media_stage"
         ADD_MEDIA_DISK=1

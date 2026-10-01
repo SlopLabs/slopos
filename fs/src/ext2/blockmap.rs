@@ -1,6 +1,7 @@
 use super::Ext2Error;
 use super::cache::{BlockCache, BlockOwner};
 use super::ext2_alloc;
+use super::extents;
 use super::geometry::Ext2Geometry;
 use super::ondisk::{Inode, Superblock};
 use super::types::{BlockNum, FileBlock};
@@ -18,11 +19,19 @@ pub struct BlockPath {
     pub offsets: [u32; 4],
 }
 
-/// Bytes addressable by twelve direct blocks plus three levels of indirection.
-///
+/// The largest size `inode`'s mapping, extent tree or block map, can address.
+pub fn max_file_size(inode: &Inode, geom: &Ext2Geometry) -> u64 {
+    let block_size = u64::from(geom.block_size());
+    if inode.uses_extents() {
+        return slopos_ext4_core::extent::MAX_BLOCKS * block_size;
+    }
+    block_map_reach(geom.ptrs_per_block(), geom.block_size())
+}
+
+/// Bytes twelve direct blocks and three levels of indirection address.
 /// Saturating rather than checked: `ptrs_per_block` is `block_size / 4`, so
 /// the product cannot overflow `u64` for any block size accepted here.
-pub fn max_file_size(ptrs_per_block: u32, block_size: u32) -> u64 {
+pub fn block_map_reach(ptrs_per_block: u32, block_size: u32) -> u64 {
     let n = ptrs_per_block as u64;
     let blocks = (DIRECT_BLOCKS as u64)
         .saturating_add(n)
@@ -102,7 +111,7 @@ pub(super) fn checked_ptr(geom: &Ext2Geometry, block: BlockNum) -> Result<BlockN
     if !block.is_valid() {
         return Ok(BlockNum::ZERO);
     }
-    geom.checked_block(block.raw())
+    geom.checked_owned_block(block.raw())
         .ok_or(Ext2Error::InvalidBlock)
 }
 
@@ -115,6 +124,9 @@ pub fn map_block(
     device: &dyn BlockDevice,
     owner: BlockOwner,
 ) -> Result<BlockNum, Ext2Error> {
+    if inode.uses_extents() {
+        return extents::map_block(inode, file_block, geom, cache, device, owner);
+    }
     let path = block_to_path(file_block, geom.ptrs_per_block())?;
 
     let mut current = checked_ptr(geom, inode.block[path.offsets[0] as usize])?;
@@ -133,11 +145,9 @@ pub fn map_block(
     Ok(current)
 }
 
-/// Answers the block plus how many blocks the call allocated, **including the
-/// indirect blocks it had to create**.
-///
-/// `i_blocks` counts every 512-byte sector the inode owns, indirect blocks
-/// among them; `e2fsck` recomputes the field from the whole tree.
+/// The block holding `file_block`, allocated and zeroed if the file has none
+/// there. Every block linked into the map is counted into `i_blocks`, even
+/// when the call then fails, since a linked block is the inode's either way.
 pub fn ensure_data_block(
     inode: &mut Inode,
     file_block: FileBlock,
@@ -146,30 +156,57 @@ pub fn ensure_data_block(
     geom: &Ext2Geometry,
     superblock: &mut Superblock,
     owner: BlockOwner,
-) -> Result<(BlockNum, u32), Ext2Error> {
-    let path = block_to_path(file_block, geom.ptrs_per_block())?;
+) -> Result<BlockNum, Ext2Error> {
+    if inode.uses_extents() {
+        return extents::ensure_block(inode, file_block, cache, device, geom, superblock, owner);
+    }
     let mut allocated = 0u32;
+    let mapped = ensure_mapped(
+        inode,
+        file_block,
+        cache,
+        device,
+        geom,
+        superblock,
+        owner,
+        &mut allocated,
+    );
+    inode.blocks += u64::from(allocated) * u64::from(geom.block_size() / 512);
+    mapped
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensure_mapped(
+    inode: &mut Inode,
+    file_block: FileBlock,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext2Geometry,
+    superblock: &mut Superblock,
+    owner: BlockOwner,
+    allocated: &mut u32,
+) -> Result<BlockNum, Ext2Error> {
+    let path = block_to_path(file_block, geom.ptrs_per_block())?;
 
     if path.depth == 1 {
         let idx = path.offsets[0] as usize;
         let existing = checked_ptr(geom, inode.block[idx])?;
         if existing.is_valid() {
-            return Ok((existing, 0));
+            return Ok(existing);
         }
-        let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
-        drop(cache.get_zero_data(new_block, device, owner)?);
+        let new_block = allocate_zeroed(BlockKind::Data, geom, superblock, cache, device, owner)?;
         inode.block[idx] = new_block;
-        return Ok((new_block, 1));
+        *allocated += 1;
+        return Ok(new_block);
     }
 
     let top_idx = path.offsets[0] as usize;
     let mut current_indirect = checked_ptr(geom, inode.block[top_idx])?;
     if !current_indirect.is_valid() {
-        let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
-        drop(cache.get_zero_owned(new_block, device, owner)?);
+        let new_block = allocate_zeroed(BlockKind::Map, geom, superblock, cache, device, owner)?;
         inode.block[top_idx] = new_block;
         current_indirect = new_block;
-        allocated += 1;
+        *allocated += 1;
     }
 
     for level in 1..path.depth as usize - 1 {
@@ -177,16 +214,14 @@ pub fn ensure_data_block(
             let block = cache.get_owned(current_indirect, device, owner)?;
             checked_ptr(geom, read_ptr(block.data(), path.offsets[level]))?
         };
-        if child.is_valid() {
-            current_indirect = child;
+        current_indirect = if child.is_valid() {
+            child
         } else {
-            let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
-            drop(cache.get_zero_owned(new_block, device, owner)?);
-            let mut parent = cache.get_owned(current_indirect, device, owner)?;
-            write_ptr(parent.data_mut(), path.offsets[level], new_block);
-            current_indirect = new_block;
-            allocated += 1;
-        }
+            let at = (current_indirect, path.offsets[level]);
+            let new_block = link_new(BlockKind::Map, at, geom, superblock, cache, device, owner)?;
+            *allocated += 1;
+            new_block
+        };
     }
 
     let data_idx = path.offsets[path.depth as usize - 1];
@@ -196,13 +231,60 @@ pub fn ensure_data_block(
     };
 
     if existing.is_valid() {
-        return Ok((existing, allocated));
+        return Ok(existing);
     }
 
-    let new_data = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
-    drop(cache.get_zero_data(new_data, device, owner)?);
-    let mut parent = cache.get_owned(current_indirect, device, owner)?;
-    write_ptr(parent.data_mut(), data_idx, new_data);
+    let at = (current_indirect, data_idx);
+    let new_data = link_new(BlockKind::Data, at, geom, superblock, cache, device, owner)?;
+    *allocated += 1;
+    Ok(new_data)
+}
 
-    Ok((new_data, allocated + 1))
+/// A fresh block linked at entry `at.1` of map block `at.0`, or given back.
+fn link_new(
+    kind: BlockKind,
+    at: (BlockNum, u32),
+    geom: &Ext2Geometry,
+    superblock: &mut Superblock,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    owner: BlockOwner,
+) -> Result<BlockNum, Ext2Error> {
+    let block = allocate_zeroed(kind, geom, superblock, cache, device, owner)?;
+    let linked = cache
+        .get_owned(at.0, device, owner)
+        .map(|mut parent| write_ptr(parent.data_mut(), at.1, block));
+    if let Err(e) = linked {
+        ext2_alloc::free_block(block, geom, superblock, cache, device, owner)?;
+        return Err(e);
+    }
+    Ok(block)
+}
+
+#[derive(Clone, Copy)]
+enum BlockKind {
+    Data,
+    Map,
+}
+
+/// A fresh block, zeroed in the cache before anything maps it so no file sees
+/// its previous owner's bytes; given back if it cannot be zeroed.
+fn allocate_zeroed(
+    kind: BlockKind,
+    geom: &Ext2Geometry,
+    superblock: &mut Superblock,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    owner: BlockOwner,
+) -> Result<BlockNum, Ext2Error> {
+    let block = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
+    let zeroed = match kind {
+        BlockKind::Data => cache.get_zero_data(block, device, owner).map(drop),
+        BlockKind::Map => cache.get_zero_owned(block, device, owner).map(drop),
+    };
+    if let Err(e) = zeroed {
+        ext2_alloc::free_block(block, geom, superblock, cache, device, owner)?;
+        return Err(e);
+    }
+    Ok(block)
 }

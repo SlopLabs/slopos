@@ -15,8 +15,8 @@ use slopos_abi::syscall::{
 };
 
 use slopos_fs::fileio::{
-    file_fcntl_fd, file_get_tty_index, file_open_tty_fd, file_poll_fused,
-    file_poll_unfused_by_token, fileio_get_open_file_handle,
+    file_fcntl_fd, file_get_tty_index, file_inode_flags_fd, file_open_tty_fd, file_poll_fused,
+    file_poll_unfused_by_token, file_set_inode_flags_fd, fileio_get_open_file_handle,
 };
 
 use slopos_kernel_services::driver_runtime::{
@@ -29,7 +29,9 @@ use slopos_mm::user_copy::{
 use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 
 use crate::syscall::args::{Fd, UserPtr};
+use crate::syscall::context::SyscallContext;
 use crate::syscall::signal::{finish_sigmask_wait, swap_sigmask_for_wait};
+use slopos_ostd::authority::Seal;
 
 const SELECT_MAX_FDS: usize = 256;
 
@@ -857,6 +859,34 @@ fn block_ioctl(table: FdTable, fd: c_int, cmd: u64, arg: u64) -> Option<Result<u
     })
 }
 
+/// The inode flags `lsattr` and `chattr` read and write. `None` for any other
+/// command.
+#[inline(never)]
+fn inode_flags_ioctl(
+    ctx: &SyscallContext<'_>,
+    table: FdTable,
+    fd: c_int,
+    cmd: u64,
+    arg: u64,
+) -> Option<Result<u64, Errno>> {
+    use slopos_abi::fs::inode_flags_ioctl::{FS_IOC_GETFLAGS, FS_IOC_SETFLAGS};
+
+    let flags = || MmUserPtr::<u32>::try_new(arg).map_err(|_| Errno::EFAULT);
+    Some(match cmd as u32 {
+        FS_IOC_GETFLAGS => file_inode_flags_fd(table, fd).and_then(|value| {
+            copy_to_user(flags()?, &value).map_err(|_| Errno::EFAULT)?;
+            Ok(0)
+        }),
+        FS_IOC_SETFLAGS => flags()
+            .and_then(|ptr| copy_from_user(ptr).map_err(|_| Errno::EFAULT))
+            .and_then(|value| {
+                let seal = ctx.require_cap::<Seal>().ok();
+                file_set_inode_flags_fd(table, fd, value, seal.as_ref()).map(|()| 0)
+            }),
+        _ => return None,
+    })
+}
+
 define_syscall!(syscall_ioctl
     (ctx, fd: Fd, cmd: u64, arg: u64)
     cap(NoneFd)
@@ -872,6 +902,9 @@ define_syscall!(syscall_ioctl
         return result;
     }
     if let Some(result) = block_ioctl(pid, fd.raw(), cmd, arg) {
+        return result;
+    }
+    if let Some(result) = inode_flags_ioctl(ctx, pid, fd.raw(), cmd, arg) {
         return result;
     }
 

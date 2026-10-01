@@ -7,7 +7,6 @@ use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
 
 use crate::ext2::Ext2Fs;
-use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
 use crate::ext2_vfs::ext2_stats_of;
 use crate::ramfs::RamFs;
 use crate::vfs::traits::same_filesystem;
@@ -29,10 +28,11 @@ pub fn test_statfs_ext2_matches_the_image_superblock() -> TestResult {
     let Some(device) = build_minimal_ext2_image(IMAGE_BLOCKS, IMAGE_INODES) else {
         return TestResult::Skipped;
     };
-    let (superblock, block_size, _inode_size) = match Ext2Fs::mount_params(&device) {
+    let (superblock, geom) = match Ext2Fs::mount_params(&device) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("the fixture did not mount: {:?}", e),
     };
+    let block_size = geom.block_size();
 
     let stats = ext2_stats_of(&superblock, block_size, PROBE_RESERVE, false);
     if stats.magic != EXT2_SUPER_MAGIC {
@@ -100,16 +100,13 @@ pub fn test_statfs_ext2_free_counts_follow_a_write() -> TestResult {
     let Some(device) = build_minimal_ext2_image(IMAGE_BLOCKS, IMAGE_INODES) else {
         return TestResult::Skipped;
     };
-    let (superblock, block_size, inode_size) = match Ext2Fs::mount_params(&device) {
-        Ok(v) => v,
-        Err(e) => return slopos_testing::fail!("the fixture did not mount: {:?}", e),
-    };
-    let Ok(mut cache) = BlockCache::new_boxed(block_size, CACHE_ENTRIES_MIN) else {
+    let Some(mut cache) = super::fixture_cache(&device) else {
         return TestResult::Skipped;
     };
-    let Ok(mut fs) = Ext2Fs::new(&device, &mut cache, superblock, block_size, inode_size) else {
+    let Some(mut fs) = super::fixture_fs(&device, &mut cache) else {
         return slopos_testing::fail!("the fixture did not mount");
     };
+    let block_size = fs.geometry().block_size();
     let Some(payload) = block_payload(block_size as usize) else {
         return TestResult::Skipped;
     };

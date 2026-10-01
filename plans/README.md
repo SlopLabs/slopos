@@ -34,12 +34,12 @@ are the seams they would build on.
 
 Persistent storage has **landed and its plan is retired**. A file written on one
 boot is readable on the next on the root filesystem and under failure: a
-writable disk is `/` by default, a metadata redo log in `/.journal` makes an
+writable disk is `/` by default, a jbd2 journal makes an
 operation retractable and a crash recoverable, a writeback pass is bounded so
 `sync(2)` no longer stalls every path walk on the mount for its duration, and a
 per-process `ResourceKind::DiskBlocks` bounds what one principal can hold.
-Read the code rather than a document: `fs/src/ext2/journal.rs` for the log's
-format and its replay, `fs/src/ext2/cache.rs` for how a commit, a rollback and
+Read the code rather than a document: `fs/src/ext2/journal.rs` and
+`ext4-core/src/{jbd2,recovery}.rs` for the journal's format and its replay, `fs/src/ext2/cache.rs` for how a commit, a rollback and
 an eviction interact with it, `Ext2Fs::sync_step` for the bounded pass, and
 `slopos-ostd/src/process/quota/disk.rs` for the block ledger. `AGENTS.md`
 states the invariants a change there must keep.

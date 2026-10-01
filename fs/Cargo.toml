@@ -20,10 +20,11 @@ default = []
 # etc.) behind an opt-in feature so they compile out of production
 # builds — they carry per-function stack frames well above the
 # production gate and have no runtime callers outside regression tests.
-tests = ["slopos-mm/test-hooks"]
+tests = ["slopos-mm/test-hooks", "slopos-ext4-core/fixture"]
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-ext4-core = { workspace = true }
 slopos-arch = { workspace = true }
 slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }

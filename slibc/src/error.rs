@@ -34,6 +34,7 @@ impl SyscallError {
     pub const EROFS: Self = Self(30);
     pub const EPIPE: Self = Self(32);
     pub const ENOSYS: Self = Self(38);
+    pub const EOPNOTSUPP: Self = Self(95);
     pub const ENETUNREACH: Self = Self(101);
     pub const ETIMEDOUT: Self = Self(110);
     pub const ECONNREFUSED: Self = Self(111);

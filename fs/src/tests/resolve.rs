@@ -6,6 +6,8 @@ use slopos_ostd::KVec;
 use slopos_testing::TestResult;
 
 use crate::ext2::Ext2Fs;
+use crate::ext2::ondisk::InodeTime;
+use crate::vfs::Timestamp;
 use crate::vfs::{
     FileType, RESOLVE_FOLLOW, RESOLVE_NOFOLLOW_FINAL, VfsError, VfsResult, resolve_parent_at,
     resolve_path, resolve_path_at, vfs_link, vfs_list, vfs_mkdir, vfs_open, vfs_open_flags_at,
@@ -576,11 +578,19 @@ pub fn test_set_times_is_observable_through_stat() -> TestResult {
         return slopos_testing::fail!("could not seed the fixture file");
     }
 
+    let atime = Timestamp {
+        secs: 1_000_000,
+        nanos: 123_456_789,
+    };
+    let mtime = Timestamp {
+        secs: 2_000_000,
+        nanos: 5,
+    };
     if let Err(e) = vfs_utimens(
         file.as_slice(),
         b"/",
-        Some(1_000_000),
-        Some(2_000_000),
+        Some(atime),
+        Some(mtime),
         RESOLVE_FOLLOW,
     ) {
         return slopos_testing::fail!("utimens on a RAM file: {:?}", e);
@@ -589,23 +599,24 @@ pub fn test_set_times_is_observable_through_stat() -> TestResult {
         Ok(s) => s,
         Err(e) => return slopos_testing::fail!("stat after utimens: {:?}", e),
     };
-    if stat.atime != 1_000_000 || stat.mtime != 2_000_000 {
+    if stat.atime != atime || stat.mtime != mtime {
         return slopos_testing::fail!(
-            "times did not round-trip: atime {}, mtime {}",
+            "times did not round-trip: atime {:?}, mtime {:?}",
             stat.atime,
             stat.mtime
         );
     }
 
     // `None` is `UTIME_OMIT`: the other field must not move.
-    if vfs_utimens(file.as_slice(), b"/", None, Some(3_000_000), RESOLVE_FOLLOW).is_err() {
+    let later = Timestamp::from_secs(3_000_000);
+    if vfs_utimens(file.as_slice(), b"/", None, Some(later), RESOLVE_FOLLOW).is_err() {
         return slopos_testing::fail!("a partial utimens was refused");
     }
     let stat = match vfs_stat(file.as_slice()) {
         Ok(s) => s,
         Err(e) => return slopos_testing::fail!("stat after a partial utimens: {:?}", e),
     };
-    if stat.atime != 1_000_000 || stat.mtime != 3_000_000 {
+    if stat.atime != atime || stat.mtime != later {
         return slopos_testing::fail!("an omitted field was overwritten");
     }
 
@@ -630,27 +641,35 @@ fn set_times_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let ino = fs
         .resolve_path(b"/stamped.txt")
         .map_err(|_| "resolve the fixture")?;
-    fs.set_times(ino, Some(1_700_000_000), Some(1_700_000_001))
-        .map_err(|_| "set_times refused")?;
-    let inode = fs.read_inode(ino).map_err(|_| "read inode")?;
-    if inode.atime != 1_700_000_000 || inode.mtime != 1_700_000_001 {
+    fs.set_times(
+        ino,
+        Some(InodeTime::new(1_700_000_000, 0)),
+        Some(InodeTime::new(1_700_000_001, 0)),
+    )
+    .map_err(|_| "set_times refused")?;
+    if times_of(fs, ino)? != (1_700_000_000, 1_700_000_001) {
         return Err("the times did not reach the inode");
     }
 
-    fs.set_times(ino, None, Some(1_700_000_002))
+    fs.set_times(ino, None, Some(InodeTime::new(1_700_000_002, 0)))
         .map_err(|_| "a partial set_times refused")?;
-    let inode = fs.read_inode(ino).map_err(|_| "read inode")?;
-    if inode.atime != 1_700_000_000 || inode.mtime != 1_700_000_002 {
+    if times_of(fs, ino)? != (1_700_000_000, 1_700_000_002) {
         return Err("an omitted field was overwritten");
     }
-    // Past what a 32-bit ext2 timestamp holds: refused, not truncated.
-    if fs
-        .set_times(ino, Some(u64::from(u32::MAX) + 1), None)
-        .is_ok()
-    {
-        return Err("an out-of-range time was accepted");
+    let past_2038 = InodeTime::new(i64::from(u32::MAX) + 1, 0);
+    fs.set_times(ino, Some(past_2038), None)
+        .map_err(|_| "a late time was refused")?;
+    if times_of(fs, ino)?.0 != i64::from(i32::MAX) {
+        return Err("a time past 2038 did not clamp in a 128-byte record");
     }
     Ok(())
+}
+
+/// `(atime, mtime)` in seconds, as the record holds them.
+#[inline(never)]
+fn times_of(fs: &mut Ext2Fs<'_>, ino: u32) -> Result<(i64, i64), &'static str> {
+    let inode = fs.read_inode(ino).map_err(|_| "read inode")?;
+    Ok((inode.atime.secs(), inode.mtime.secs()))
 }
 
 /// `..` names the parent of the directory the walk actually reached, so a

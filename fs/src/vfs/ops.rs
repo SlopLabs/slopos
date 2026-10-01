@@ -215,7 +215,7 @@ pub fn vfs_set_mode_at(path: &[u8], cwd: &[u8], mode: u16, flags: u32) -> VfsRes
     resolved.fs.set_mode(resolved.inode, mode)
 }
 
-/// Seal `path` against every future mutation. One-way and un-clearable.
+/// Seal `path` against every future mutation; only a `Seal` holder clears it.
 pub fn vfs_set_sealed(path: &[u8]) -> VfsResult<()> {
     let resolved = resolve_path(path)?;
     resolved.check_writable()?;
@@ -226,8 +226,8 @@ pub fn vfs_set_sealed(path: &[u8]) -> VfsResult<()> {
 pub fn vfs_utimens(
     path: &[u8],
     cwd: &[u8],
-    atime: Option<u64>,
-    mtime: Option<u64>,
+    atime: Option<crate::vfs::Timestamp>,
+    mtime: Option<crate::vfs::Timestamp>,
     flags: u32,
 ) -> VfsResult<()> {
     if path_is_sealed_at(path, cwd, flags) {
@@ -244,8 +244,8 @@ pub fn vfs_utimens(
 pub fn vfs_set_times(
     fs: &'static dyn crate::vfs::FileSystem,
     inode: InodeId,
-    atime: Option<u64>,
-    mtime: Option<u64>,
+    atime: Option<crate::vfs::Timestamp>,
+    mtime: Option<crate::vfs::Timestamp>,
 ) -> VfsResult<()> {
     fs.set_times(inode, atime, mtime)
 }

@@ -56,7 +56,7 @@ static RAMFS_POOL_STATE: [AtomicU8; RAMFS_POOL_LEN] =
 /// ceiling: a slot with no device to put in it buys nothing.
 pub const EXT2_POOL_LEN: usize = 4;
 
-/// The ext2 instances `mount(2)` hands out for `fstype="ext2"`. One
+/// The instances `mount(2)` hands out for `fstype` `ext2`, `ext3` or `ext4`. One
 /// `lock_class!` site each, for the reason [`RAMFS_POOL`] gives; slot 0 keeps
 /// the historical `CACHED_EXT2` name so the class the boot phase registers
 /// survives.

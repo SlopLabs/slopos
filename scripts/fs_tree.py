@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Copy a host directory tree into an ext2 image through one debugfs session.
+"""Copy a host directory tree into an ext4 image through one debugfs session.
 
-`mkfs.ext2 -d` populates only a new filesystem; a preserved image holds what
+`mke2fs -d` populates only a new filesystem; a preserved image holds what
 its guest wrote, so a tree reaches one through debugfs, which writes
 everything as uid 0.
 
@@ -37,6 +37,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+from ext4_profile import mkfs_args  # noqa: E402
 
 IMAGE_MANIFESTS = "/var/lib/slopos/trees"
 ROOT_INODE = 2
@@ -371,7 +374,7 @@ def install(image, host, guest, name=None):
 
 
 def self_test():
-    for tool in ("mkfs.ext2", "debugfs", "e2fsck"):
+    for tool in ("mke2fs", "debugfs", "e2fsck"):
         if not shutil.which(tool):
             raise SystemExit(f"fs_tree: --self-test needs {tool}")
     work = tempfile.mkdtemp(prefix="fs_tree-self-test.")
@@ -389,7 +392,7 @@ def _self_test(work):
     name = (manifests, "usr_local")
     with open(image, "wb") as f:
         f.truncate(16 << 20)
-    subprocess.run(["mkfs.ext2", "-q", "-F", "-b", "4096", image], check=True)
+    subprocess.run(["mke2fs", "-q", "-F", *mkfs_args(), image], check=True)
 
     def put(rel, text="x\n", mode=0o644):
         path = os.path.join(tree, rel)
@@ -502,7 +505,7 @@ def _self_test(work):
     other = os.path.join(work, "crafted.img")
     with open(other, "wb") as f:
         f.truncate(8 << 20)
-    subprocess.run(["mkfs.ext2", "-q", "-F", "-b", "4096", "-d", stage, other], check=True)
+    subprocess.run(["mke2fs", "-q", "-F", *mkfs_args(), "-d", stage, other], check=True)
     assert exists(other, "/src") and not exists(other, "/nowhere")
     install(other, tree, "/usr/local", None)
     assert kind_in(other, "/usr/local/bin/tool") == "f"

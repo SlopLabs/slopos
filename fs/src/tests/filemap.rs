@@ -17,6 +17,7 @@ use slopos_testing::TestResult;
 use super::ScratchProcess;
 use crate::blockdev::MemoryBlockDevice;
 use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
+use crate::ext2::geometry::Ext2Geometry;
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Superblock};
 use crate::filemap::{self, FileMapError, MAX_INODES_PER_ACCOUNT, MAX_MAPPED_INODES};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
@@ -42,8 +43,7 @@ struct TestMount {
     /// Boxed so a per-call copy is the only 1 KiB superblock on any frame.
     superblock: KBox<Ext2Superblock>,
     superblock_dirty: bool,
-    block_size: u32,
-    inode_size: u16,
+    geom: Ext2Geometry,
 }
 
 static TEST_MOUNT: Mutex<Option<TestMount>> =
@@ -63,16 +63,13 @@ fn test_fs() -> &'static dyn FileSystem {
 fn with_ext2<R>(f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
     let mut guard = TEST_MOUNT.lock().map_err(|_| VfsError::Interrupted)?;
     let mount = guard.as_mut().ok_or(VfsError::IoError)?;
-    let (block_size, inode_size, dirty) =
-        (mount.block_size, mount.inode_size, mount.superblock_dirty);
+    let dirty = mount.superblock_dirty;
     let mut fs = Ext2Fs::new(
         &mount.device,
         &mut mount.cache,
         *mount.superblock,
-        block_size,
-        inode_size,
-    )
-    .map_err(|_| VfsError::IoError)?;
+        mount.geom,
+    );
     fs.set_superblock_dirty(dirty);
     let result = f(&mut fs).map_err(report_ext2_error);
     *mount.superblock = fs.superblock();
@@ -122,7 +119,7 @@ impl FileSystem for TestFs {
             let mut stat = FileStat::new_file(inode, ext2_inode.size as u64);
             // The seal has to reach the page set: it is what refuses a
             // writable set.
-            stat.sealed = ext2_inode.is_immutable();
+            stat.sealed = ext2_inode.is_sealed();
             Ok(stat)
         })
     }
@@ -193,13 +190,13 @@ fn ensure_mount() -> bool {
 
 #[inline(never)]
 fn install_mount(device: MemoryBlockDevice) -> bool {
-    let Ok((superblock, block_size, inode_size)) = Ext2Fs::mount_params(&device) else {
+    let Ok((superblock, geom)) = Ext2Fs::mount_params(&device) else {
         return false;
     };
     let Ok(boxed) = KBox::try_new(superblock) else {
         return false;
     };
-    let Ok(cache) = BlockCache::new_boxed(block_size, CACHE_ENTRIES_MIN) else {
+    let Ok(cache) = BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN) else {
         return false;
     };
     let Ok(mut guard) = TEST_MOUNT.lock() else {
@@ -210,8 +207,7 @@ fn install_mount(device: MemoryBlockDevice) -> bool {
         cache,
         superblock: boxed,
         superblock_dirty: false,
-        block_size,
-        inode_size,
+        geom,
     });
     true
 }
@@ -318,8 +314,7 @@ fn device_read(inode: InodeId, offset: u64, len: usize) -> Option<KVec<u8>> {
     read_fresh(
         &mount.device,
         &mount.superblock,
-        mount.block_size,
-        mount.inode_size,
+        mount.geom,
         inode,
         offset,
         buf.as_mut_slice(),
@@ -333,18 +328,15 @@ fn device_read(inode: InodeId, offset: u64, len: usize) -> Option<KVec<u8>> {
 fn read_fresh(
     device: &MemoryBlockDevice,
     superblock: &Ext2Superblock,
-    block_size: u32,
-    inode_size: u16,
+    geom: Ext2Geometry,
     inode: InodeId,
     offset: u64,
     buf: &mut [u8],
 ) -> bool {
-    let Ok(mut cache) = BlockCache::new_boxed(block_size, CACHE_ENTRIES_MIN) else {
+    let Ok(mut cache) = BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN) else {
         return false;
     };
-    let Ok(mut fs) = Ext2Fs::new(device, &mut cache, *superblock, block_size, inode_size) else {
-        return false;
-    };
+    let mut fs = Ext2Fs::new(device, &mut cache, *superblock, geom);
     let mut done = 0usize;
     while done < buf.len() {
         match fs.read_file(inode as u32, offset + done as u64, &mut buf[done..]) {

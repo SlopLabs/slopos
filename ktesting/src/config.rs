@@ -59,7 +59,10 @@ impl Default for Verbosity {
 }
 
 impl TestConfig {
-    pub fn passes_filter(&self, name: &[u8]) -> bool {
+    pub fn passes_filter(&self, name: &[u8], flags: u32) -> bool {
+        if flags & crate::FLAG_EXPLICIT != 0 {
+            return self.run_globs.iter().any(|p| p.as_slice() == name);
+        }
         let run_match = self.run_globs.is_empty()
             || self
                 .run_globs

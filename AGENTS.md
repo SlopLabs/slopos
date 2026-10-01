@@ -536,8 +536,40 @@ controller's.
 
 **The disk is the root.** `root=auto` mounts a writable `disk0` — the first disk probed, `nvme0n1` under QEMU — at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=disk` insists on the disk, and `root=initramfs` mounts no disk it was not asked to by a `mount=`, which is what the live ISO boots with. `root=` also takes a device in any spelling a mount source does — `/dev/nvme0n1p2`, `vda1`, `PARTUUID=…`, `UUID=…`, `LABEL=…` — where a partition comes from the GPT or MBR table on its disk; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
-**The root is not the only filesystem.** `mount(2)` with `fstype=ext2` takes a
-`source` naming a block device — `mount("/dev/nvme0n1p3", "/home", "ext2", …)`
+**Every volume the tree builds is ext4, in one profile.** `ext4-core/profile`
+names it — `extent`, `64bit`, `flex_bg`, 256-byte inodes with nanosecond
+timestamps, `metadata_csum`, `has_journal` — and is the one statement of it:
+`scripts/lib/ext4.sh` and `scripts/lib/ext4_profile.py` hand it to `mke2fs`,
+and `ext4-core` compiles it in and holds it to the features the kernel
+writes. `ext4-core` is the format as data, `no_std` and free of I/O:
+checksums, the superblock, descriptor and inode codecs, the extent tree over
+a caller's block store, directory tails, and jbd2's blocks and recovery,
+host-tested under `just test-host` against images `mke2fs`, `debugfs` and
+`e2fsck` made and judged; its layouts are kernel.org's ext4 documentation
+taken as interface facts. The kernel reads ext2 and ext3 volumes too: a file
+mapped by blocks keeps its map, a new file gets an extent tree wherever the
+volume has `extent`, directories stay linear (an htree is linearised by the
+first change to it) and so hold at most 64998 subdirectories, a group left
+`BLOCK_UNINIT` or `INODE_UNINIT` is initialised on first use, and block
+numbers are 32-bit inside the kernel, so a volume past 16 TiB at 4 KiB blocks
+is refused. `build_fs_image.sh` converts a preserved image short of the
+profile in place — an ext2-era root's sealed `/.journal` file dropped, the
+features added in the order `tune2fs`, `resize2fs -b` and `e2fsck -fD` need,
+on a copy that replaces the image only once it meets the profile, and the
+journal added after — and otherwise refuses, showing the step that failed,
+and names `just reset root`. `ext_attr`, which `tune2fs` cannot clear,
+survives a conversion, and the kernel reads such a volume like any other.
+`FS_IOC_GETFLAGS` and `FS_IOC_SETFLAGS` are `lsattr`'s and `chattr`'s: the
+immutable flag is the VFS seal, an append-only file another system marked is
+sealed too, ext4 also stores `nodump` and `noatime`, any other change is
+`EOPNOTSUPP` (a RAM filesystem keeps only the seal, and only sets it), and
+moving the seal takes the `Seal` capability, which only
+`TASK_FLAG_SYSTEM` confers, because a path-keyed program-identity grant is
+only as good as the seal on the file it names.
+
+**The root is not the only filesystem.** `mount(2)` with `fstype` `ext2`,
+`ext3` or `ext4` (one driver) takes a
+`source` naming a block device — `mount("/dev/nvme0n1p3", "/home", "ext4", …)`
 or `mount("LABEL=home", …)` — claims that device's exclusive writer (or, with
 `MS_RDONLY`, a read claim shared with other readers), and binds it to one of
 four pooled `Ext2Mount` instances, each with **its own lock**. A path walk
@@ -562,62 +594,66 @@ another image cannot answer from the last one. A new path that changes a
 record or a directory without `Ext2Fs::write_inode_num` or the `dir` entry
 helpers must bump the counters itself, or the walk serves what it replaced.
 
-**A rude exit is survivable.** The flusher marks the image clean *on the
+**A rude exit is survivable.** The flusher marks the image at rest *on the
 medium* once a pass leaves nothing dirty, nothing unbarriered, no
-superblock drift and an empty log, and the mount has had nothing to write
+superblock drift and an empty journal, and the mount has had nothing to write
 for a second — the state ext4 reaches for `fsfreeze`, here reached
 automatically at idle; a busy mount would pay a superblock read, write and
 barrier each way on every pass — and `Ext2Fs::transaction` re-stamps it
-dirty before the next mutation reaches the device. A mount owes the stamp
-from the moment it attaches, since attaching stamped it dirty and a mount
-nothing writes to runs no pass. Closing the QEMU window
+in use before the next mutation reaches the device. At rest is the
+journal's superblock emptied before `needs_recovery` is cleared; in use is
+the reverse, the flag set before the journal says it is live, so no crash
+leaves a live journal under a clear flag, which `e2fsck -p` will not decide
+alone. A volume without a journal is stamped through `s_state` instead. A
+mount owes the stamp from the moment it attaches, since attaching stamped it
+in use and a mount nothing writes to runs no pass. Closing the QEMU window
 therefore costs at most the last idle window's writes, instead of leaving an
 image that mounts read-only forever after and that `root=auto` then demotes to
 `/mnt` while booting the initramfs. The host half is the same promise:
 `build_fs_image.sh` never deletes a `PRESERVE_FS_IMAGE=1` image. One that is
-damaged, left dirty, or built under a different `VERITY` stops the build
+damaged, not at rest, or built under a different `VERITY` stops the build
 naming the command that repairs it, except that `just boot` boots a disk
-closed mid-write without refreshing it, so the kernel replays its log;
+closed mid-write without refreshing it, so the kernel replays its journal;
 `just reset root` is the only
 thing that discards one; a larger `PERSIST_IMAGE_SIZE`, or free space under
 the floor, grows the image with `resize2fs` rather than rebuilding it; and a
 block the guest wrote stays un-attested across rebuilds, because the seal
-leaves out every block that was allocated and unattested before the build
-wrote anything. `PERSIST_IMAGE_SIZE` is a minimum, 512M by default; the
+leaves out every block that was allocated and unattested once the build has
+converted and grown the image, before it installs anything, and every block a
+later resize allocates, which is where a resize moves what it must. `PERSIST_IMAGE_SIZE` is a minimum, 512M by default; the
 ceiling is what the machine's RAM allows rather than what one allocation
 allows, because
 the verity hash array is chunked (4 bytes per 4 KiB block, in 256 KiB pieces,
 refused past a stated share of usable memory) instead of one contiguous `KVec`.
 
-**A write is logged before it lands.** A writable ext2 image carries a metadata
-redo log in a preallocated sealed file at `/.journal` (`FS_JOURNAL_SIZE`,
-default 1/64 of the image floored at 4M and capped at 64M; `0` builds none),
-located at mount by path lookup and used as a
-physical redo log: an operation's metadata goes into the log with a
-CRC-covered commit record before any of it reaches a home location; file data
-never does, and instead reaches its home ahead of the commit that names it
-(`data=ordered`). That is
-what makes an operation retractable (a rollback rewinds the log; nothing was
-published) and a crash recoverable: a mount that finds `s_state` unclean and
-replays a committed transaction comes up **read-write**, which is the one case
-in which this kernel repairs an image instead of deferring to `e2fsck`. So does
-one whose log is empty *and* carries the volume's current `[s_mnt_count,
-s_mtime]`: every mount writes that stamp into the log superblock, so a match
-says the last mount logged every metadata write it made and nothing mounted
-the volume since — a boot that panicked with the log checkpointed left nothing
-half done, and a Linux mount in between moves the count and keeps the refusal. The log
-is an *image* property, not a kernel one — an image without one gets the
-previous undo-scoped behaviour and still refuses an unclean mount — and the
-boot log says which of the two a mount got. `/.journal` is refused to readers
-and protected from write, rename, unlink and truncate by `EXT2_IMMUTABLE_FL`:
-its blocks hold copies of bitmaps, inode tables and directory blocks, so a
-reader of it would see the metadata of every recently changed file. The default
-image is 32M rather than 16M because the log takes 4M of it.
+**A write is logged before it lands.** A writable image carries a jbd2
+journal in its journal inode (`FS_JOURNAL_SIZE`, default 1/64 of the image
+floored at 4M and capped at 64M; `0` builds none), in the format jbd2
+documents and e2fsprogs replays: descriptor blocks of `CSUM_V3` tags, revoke blocks, and a
+commit block written only behind a flush that covers its transaction's
+records and the data they name. An operation's metadata goes into the journal
+before any of it reaches a home location; file data never does, and instead
+reaches its home ahead of the commit that names it (`data=ordered`). That is
+what makes an operation retractable (a rollback rewinds the journal; nothing
+was published) and a crash recoverable: a mount that finds `needs_recovery`
+replays every committed transaction and comes up **read-write**, which is the
+one case in which this kernel repairs an image instead of deferring to
+`e2fsck`. Nothing is written home until every committed copy has checked out,
+so a journal with one bad copy is replayed by nobody here and the volume
+mounts read-only for `e2fsck` to decide, as does one holding transactions
+under a clear `needs_recovery`, whose copies may be older than their homes. `just test-rude-exit` is the other
+half: a boot fsyncs a file and ends the machine holding it, and the host's
+`e2fsck` must replay what the kernel committed (`scripts/check_fs_replay.sh`).
+The journal is an *image* property, not a kernel one — an image without one
+gets undo-scoped operations and still refuses an unclean mount — and the boot
+log says which of the two a mount got. The journal inode has no name, and a
+name that reaches any reserved inode is refused as damage. The default image
+is 32M rather than 16M because the journal takes 4M of it.
 
 **A commit is grouped, not synchronous.** An operation's records are staged
 into an in-memory ring (`Journal::pending`, up to `PENDING_SLOTS_MAX` slots)
-and reach the medium together, jbd2-style: `sync_log` writes dirty data home,
-barriers, writes the ring, barriers. The flusher does that every
+and reach the medium together: `sync_log` writes dirty data home, writes the
+ring with each commit block behind a flush, and flushes. The flusher does that every
 `COMMIT_INTERVAL_MS` (1 s rather than jbd2's 5, because the build machine is
 the one most often closed rudely), a full ring does it inline, and `fsync` is
 the file's data plus `sync_log`. The operations whose records are still in the
@@ -759,7 +795,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `core`, `drivers`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 
@@ -925,13 +961,14 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-userland-only` — skip the kernel phase; run only the userland (`utest!`) phase.
 - `just check-tests-host` — run the Go wrapper's own unit tests via `go test ./tools/run_tests/...` (host-side, no QEMU).
 - `just check-test-count` — count-regression CI guard; fails if total planned tests across phases drops below `TEST_COUNT_BASELINE`. The default lives in `scripts/check_test_count.sh` and is written down only there — read it from the script rather than restating it here, and bump it there when the suite grows. Measure the new value with `TEST_COUNT_BASELINE=0 scripts/check_test_count.sh`; never guess it.
-- `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn` and a clean superblock. Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
+- `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn` and to being at rest: `Filesystem state: clean`, no `needs_recovery`, an empty journal. Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
-- `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext2 volume, attach it as `nvme0n3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
+- `just test-rude-exit` — one boot that fsyncs a file into the root's journal and ends the machine holding it, then `scripts/check_fs_replay.sh`: the image must need recovery, the file must be reachable only through the journal, and after `e2fsck -E journal_only` the image must pass `e2fsck -fn`, be at rest and hold the file. In CI after `test-persist`. The kernel test runs only when `tests.run` names it exactly (`FLAG_EXPLICIT`), since it ends the machine.
+- `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext4 volume, attach it as `nvme0n3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
 - `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 4G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
 - `just test-install` — the install check: boot from `builddir/boot-disk.img` (GPT, one FAT32 ESP holding Limine, `/limine.conf` and a kernel and base per slot under `/boot/<slot>/`), and across the resets of one QEMU let `install_test` clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot`, commit it as `default_entry`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
 - `just test-install-guest` — the two loops in one QEMU: a clean tree, `just toolchain` and the self-hosting root; slot a is the optimized tests kernel, and `install_test`, finding a workspace at `/src/slopos`, fetches the host's `HEAD` into its clone, checks it out and runs `scripts/selfhost.sh install tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is otherwise unset — which builds the tests kernel, userland and base and installs the kernel and base into slot b, then checks the tree's own branch out again; the run boots them once, and that boot must report the tag in `uname -v` and in the base's `/usr/share/slopos/build-tag`. The kernel the guest built then commits a change on the fetched `HEAD` in a scratch clone and pushes it into a scratch repository, which the host fetches and holds to that commit's parent being `HEAD`. The run then commits and rolls back as `test-install` does, and the host holds slot b's kernel and base to the root's `kernel-tests.elf` and `initramfs-tests.cpio` byte for byte, and the boot log's `BOOT: base` line to the base's size. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
-- `just test-selfhost` — the self-hosting check: needs `just toolchain` and a clean working tree (the host grades the guest's build of `HEAD` with its own gates and tests). The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), fetches the host's `HEAD` into the self-hosting root's clone and checks it out — refusing a tree with uncommitted edits — builds the dev and tests systems — kernel, userland and base — with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the clone's `builddir/target/cargo-timings`, and checks the tree's own branch out again; the host holds the commit the guest names to `HEAD`, the root to `e2fsck -fn` and a clean superblock, exports both kernels and the tests base, runs the ELF gates on the kernels and runs the suite on the guest's tests kernel and base. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
+- `just test-selfhost` — the self-hosting check: needs `just toolchain` and a clean working tree (the host grades the guest's build of `HEAD` with its own gates and tests). The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), fetches the host's `HEAD` into the self-hosting root's clone and checks it out — refusing a tree with uncommitted edits — builds the dev and tests systems — kernel, userland and base — with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the clone's `builddir/target/cargo-timings`, and checks the tree's own branch out again; the host holds the commit the guest names to `HEAD`, the root to `e2fsck -fn` and to being at rest, exports both kernels and the tests base, runs the ELF gates on the kernels and runs the suite on the guest's tests kernel and base. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
 - `just bench-selfhost` — the self-hosting build as a profile: boots the optimized tests kernel on the self-hosting root with `prof=on` (`BENCH_PROF=` turns it off), runs only `selfhost_test`, so the guest builds the host's `HEAD`, and hands the log to `scripts/prof_report.py`, which prints the guest's build times, per-CPU busy and halted time, the ext2 lock's wait and hold (writeback's share apart) and the same lock and the per-process VM lock by call site, block I/O counts and latency, syscall costs, and kernel and user ticks symbolized — user ticks through the exec-mapping table the kernel prints, `builddir/bench-libc.so` and the installed toolchain's libraries. No grading and no clean-tree requirement; run it with nothing else loading the host, because every number in it is wall time.
 - `just check-fs-throughput` — filesystem cost ratchet over the `FSPERF[…]` / `FSCAP[…]` report lines, with gate data in `scripts/gates/fsperf/<variant>.txt`. Counts per MiB — transactions, journal commits, device write requests, barriers — are deterministic for one ISO and carry caps; a write rate is not, so the only rate graded is the quotient of the filesystem's write rate and the **same run's** raw block-device write rate, which is invariant under a change of accelerator (the gate's `--self-test` asserts exactly that: a uniformly three-times-slower machine must still pass). Floors (`min-bytes`, `min-volume-gib`, `min-dirents`) exist because a measurement that stopped happening looks exactly like one that got free. `--log` / `--emit-allowlist` / `--self-test` as in the other ratchets.
 - `just check-quota-headroom` — resource-quota ratchet; asserts every account's peak stays under its measured cap in `scripts/gates/quota/<variant>.txt`, that nothing was denied, and that the charge path has not got slower. What the `used`/`peak` packing buys is that a *reported* peak is a value that was genuinely held — the caps themselves are measured maxima carrying the observed spread as margin, exact only on the rows the gate file records as deterministic (`process`, and the fd/object rows). The **cost** check is one cap and two floors, never a cycle count: a cycle count on that path measures the accelerator, not the kernel, and the absolute caps this gate used to carry failed on the *unmodified* tree on any machine without `/dev/kvm`. The cap is `max-depth-cost-ratio` — depth 7 against depth 1, the only quantity here invariant under a change of accelerator. The floors are `min-charge-over-reference` (one charge+refund round trip against a same-run bare CAS, a floor and not a ceiling because that ratio *does* move with the accelerator) and `min-reference-cycles` (an absolute physical bound on the reference itself, since the first floor is a ratio over it). Stated plainly: a slowdown that scales the whole charge path uniformly passes every one of them, and catching it would need the absolute ceiling that failed without KVM. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate, with one difference: this gate's `--log` is a single run, so its file records spreads in prose rather than merging several logs mechanically. `--emit-allowlist` emits a depth cap a quarter above the observation, and its own output is round-tripped through the check path by the self-test — the property that makes "re-measure with `--emit-allowlist`" a remedy that actually works.
@@ -957,7 +994,7 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `tests.run` | comma-separated globs | only run matching tests |
 | `tests.skip` | comma-separated globs | skip matching tests |
 | `root` | `auto` / `initramfs` / `disk` / a device | which filesystem `/` is. `auto` prefers a writable `disk0` and falls back to the initramfs; `initramfs` mounts no disk a `mount=` does not name; a device is any mount-source spelling — `nvme0n1p2`, `/dev/vda`, `PARTUUID=`, `UUID=`, `LABEL=`; an absent device or partition degrades to the initramfs with a klog line |
-| `mount` | `<device>:/<path>` / `LABEL=<label>:/<path>`, repeatable | mount an ext2 volume read-write after the root is up, in cmdline order; the source takes every spelling `mount(2)` accepts. A failure is one klog line and the boot goes on |
+| `mount` | `<device>:/<path>` / `LABEL=<label>:/<path>`, repeatable | mount an ext2/3/4 volume read-write after the root is up, in cmdline order; the source takes every spelling `mount(2)` accepts. A failure is one klog line and the boot goes on |
 | `lockdep` | `off` / `warn` / `panic` | lock-order validator policy; default `panic` |
 | `verity` | `require` | the root disk must mount with a verity trailer or the `fs init` boot step fails; no disk at all still passes |
 | `sched.ap_pause_ms` | integer | wall-clock budget for the AP pause; `0` disables the deadline and falls back to the iteration bound. Default measured — see `AP_PAUSE_BUDGET_NS_DEFAULT` |

@@ -784,8 +784,8 @@ impl FileSystem for StubFs {
     fn set_times(
         &self,
         _inode: InodeId,
-        _atime: Option<u64>,
-        _mtime: Option<u64>,
+        _atime: Option<crate::vfs::Timestamp>,
+        _mtime: Option<crate::vfs::Timestamp>,
     ) -> VfsResult<()> {
         Ok(())
     }
@@ -840,9 +840,10 @@ pub fn test_read_only_filesystem_refuses_fd_shaped_mutators() -> TestResult {
     };
 
     let chmod_ro = file_fchmod_fd(table, 3, 0o600);
-    let times_ro = file_set_times_fd(table, 3, Some(1), Some(1));
+    let one = Some(crate::vfs::Timestamp::from_secs(1));
+    let times_ro = file_set_times_fd(table, 3, one, one);
     let chmod_rw = file_fchmod_fd(table, 4, 0o600);
-    let times_rw = file_set_times_fd(table, 4, Some(1), Some(1));
+    let times_rw = file_set_times_fd(table, 4, one, one);
 
     let _ = file_close_fd(table, 3);
     let _ = file_close_fd(table, 4);

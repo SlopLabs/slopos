@@ -34,16 +34,17 @@ its firmware entry, `cachyos`, is the only one.
 - The kernel carries an NVMe driver, graded on QEMU's model, which lists a
   disk's partitions under `/dev/disk/by-partuuid`. The live system boots
   `root=initramfs` and mounts no disk.
+- Every volume is ext4 in one profile, with a jbd2 journal that e2fsck
+  replays.
 
 Nothing persists yet, and nothing reaches the network:
 
 - **Network.** The only NIC driver is virtio-net, and it starts the DHCP
   client itself. `net/src/ipv4.rs` sends a resolved neighbour's queued packets
   through a hard-coded `DevIndex(1)`.
-- **Making a root.** The host makes every root: `mkfs.ext2`, then `debugfs`
-  writes the log file and the seals (`scripts/build_fs_image.sh`). The guest
-  has no mkfs, fsck or resize tool, no call that sets `EXT2_IMMUTABLE_FL`, and
-  nothing that writes a partition table.
+- **Making a root.** The host makes every root: `mke2fs` in the profile, then
+  `debugfs` writes the seals (`scripts/build_fs_image.sh`). The guest has no
+  mkfs, fsck or resize tool, and nothing that writes a partition table.
 - **Boot disk.** The boot disk is a host-built GPT with one ESP. Limine sits
   at the removable-media path, and both slots are on the ESP
   (`scripts/build_bootdisk.sh`). `bootctl` finds the ESP by scanning every
@@ -53,19 +54,6 @@ Nothing persists yet, and nothing reaches the network:
   committed one, resets at once. On a machine with no COM1 the screen is the
   only record of the panic, and the reset erases it.
 
-The filesystem is ext2 plus a log of SlopOS's own. What it writes passes
-`e2fsck -fn` in CI, so the problem is the format, not conformance:
-
-- Timestamps are 32-bit seconds. Cargo and Ninja get no sub-second mtimes, and
-  the format runs out in 2038.
-- Files use block maps rather than extents.
-- Directories are kept linear; an existing htree is dropped on the first
-  write.
-- There are no metadata checksums.
-- The redo log lives in a sealed file, `/.journal`, and no other
-  implementation replays it. If another OS on the same disk mounts or checks
-  a SlopOS root after a crash, whatever was still in the log is lost.
-
 ## Phases
 
 There are seven phases. Each ends in something that runs, and each lands as
@@ -74,7 +62,7 @@ commits of its own.
 | Phase | Needs | Ends with |
 |---|---|---|
 | 1. NVMe disks — **done** | — | the dev loop on NVMe; the live ISO sees the laptop's disk |
-| 2. ext4 | — | every image the tree builds is ext4 |
+| 2. ext4 — **done** | — | every image the tree builds is ext4 |
 | 3. A boot chain that shares a disk | 1 | the A/B loop on the new partition layout |
 | 4. A crash record | 1, 3 | a slot that panics leaves the panic behind |
 | 5. Installer and install medium | 1, 2, 3 | **milestone 1:** SlopOS installed beside CachyOS, self-hosting offline |
@@ -95,48 +83,21 @@ Left for the laptop, which only the user's run grades: the NV3's partitions
 listed under `/dev/disk/by-partuuid` from the live ISO, and the host memory
 buffer it asks for granted.
 
-### Phase 2: ext4
+### Phase 2: ext4 — done
 
-The kernel's ext2 driver grows into an ext4 driver, and SlopOS formats ext4.
+Built: `ext4-core`, the format as host-tested data — checksums, codecs, the
+extent tree, directory tails, jbd2 and its recovery — graded against images
+e2fsprogs made; the kernel's driver on it, writing the profile in
+`ext4-core/profile` and reading ext2 and ext3; the journal as jbd2 in the
+journal inode, keeping the ring, grouped commits, ordered data and bounded
+writeback; `FS_IOC_GETFLAGS` and `FS_IOC_SETFLAGS` with the `Seal`
+capability; every host image formatted in the profile, the persistent root
+converted in place; and `just test-rude-exit`, in which the host's e2fsck
+replays what a dying boot committed. `AGENTS.md` describes all of it; the
+decisions later phases build on are under Decided.
 
-- **One feature profile.** The profile is written down once. The host's image
-  builder reads it, and the installer is compiled with it. It is `mke2fs -t
-  ext4` with exactly the features the kernel writes:
-  - extents;
-  - 64-bit block numbers;
-  - flex_bg;
-  - 256-byte inodes, with nanosecond timestamps;
-  - metadata checksums;
-  - `has_journal`.
-
-  It carries nothing the kernel does not write: no `orphan_file`,
-  `inline_data`, encryption, casefold or quota. A volume with any other
-  feature mounts read-only, as unsupported features do today.
-- **The log becomes jbd2**, in the journal inode. What stays: the ring,
-  grouped commits, ordered data and bounded writeback. What changes: the
-  record format becomes jbd2's (descriptor, commit and revoke blocks, v3
-  checksums). e2fsck and Linux can then replay what SlopOS logged, and SlopOS
-  can replay what they logged. `/.journal` and its seal go.
-- **Old files keep working.** Block-mapped files stay readable and writable,
-  whether on an ext2 image or a converted one; new files get extents.
-  Directories may stay linear at first. htree writes, with the hash Linux
-  uses, come once a large directory's cold lookup is measured as the cost.
-- **Seals through the kernel.** `FS_IOC_GETFLAGS` and `FS_IOC_SETFLAGS` let a
-  program set a seal through the kernel rather than behind it. Changing the
-  immutable bit needs a capability, as Linux requires `CAP_LINUX_IMMUTABLE`.
-- **Existing images.** The test images and the verified image are rebuilt
-  every run anyway. The host converts the persistent `ext2-persist.img` in
-  place with `tune2fs`, `resize2fs -b` and `e2fsck`; when it cannot, it
-  refuses and names `just reset root`.
-- **Grading.** `e2fsck -fn` stays the oracle. A rude-exit test hands its image
-  to the host's e2fsck to replay, which proves the log is really jbd2 and not
-  a lookalike.
-- **Sources.** The on-disk format comes from kernel.org's ext4 layout
-  documentation, taken as interface facts. No Linux code or prose.
-
-**Done when** every image the tree builds is ext4 with the profile,
-`just check-fs-image` passes, the rude-exit image replays under the host's
-e2fsck, and `ext2-persist.img` converts in place.
+Left for the developer's machine: its own `ext2-persist.img`, which converts
+on the next `just boot`.
 
 ### Phase 3: A boot chain that shares a disk
 
@@ -322,8 +283,7 @@ Each run then boots from the disk with the ISO detached, and goes around
 **Crash record.** A slot booted with `panic.boot=on` falls back to the
 committed slot. The fallback boot finds the panic in `/var/log/crash/`.
 
-**Filesystem.** The rude-exit test of phase 2 runs in CI beside
-`just check-fs-image`.
+**Filesystem.** `just check-fs-image` and `just test-rude-exit` run in CI.
 
 ## Out of scope
 
@@ -361,9 +321,9 @@ committed slot. The fallback boot finds the panic in `/var/log/crash/`.
   through a whole-disk claim, drops it, and re-reads.
 - **A filesystem block is at least a logical block.** A partial block is a
   read-modify-write inside one request slot, which a torn write turns into
-  damage outside the transaction, so ext2 — and ext4 after it — refuses a
-  volume whose blocks are smaller than the device's. The feature profile of
-  phase 2 and the installer's `mke2fs` follow the device's block size.
+  damage outside the transaction, so the driver refuses a volume whose blocks
+  are smaller than the device's. The profile's 4 KiB blocks cover the
+  512-byte and 4 KiB logical blocks drives report.
 - **The panic path owns a queue pair.** It is created at probe, polled, holds
   64 KiB, and is taken with a `try_lock` that never waits; phase 4 builds on
   `PanicQueue` and nothing else.
@@ -380,16 +340,44 @@ committed slot. The fallback boot finds the panic in `/var/log/crash/`.
   notification among them. Recovery waits for a drive seen to need it.
 
 - **ext4 first.** It is the filesystem SlopOS formats its root with, and the
-  first one it supports beyond ext2. It is the smallest step from the code
-  there is: the ext2 driver, cache and log carry over. Its on-disk format is
+  first one it supports beyond ext2, sharing ext2's on-disk core: one driver,
+  cache and journal serve both. Its on-disk format is
   documented, e2fsprogs is its reference toolset, and a Linux on the same disk
   can check and replay a SlopOS root. btrfs's snapshots, data checksums and
   compression are reasons to support it later, not reasons to start with it:
   its write path is by far the largest to build.
 - **Upstream tools, not our own.** e2fsprogs formats, checks and grows the
-  volume; SlopOS writes none of those tools. Once the log is jbd2 and seals
-  go through the kernel, SlopOS's format has no extension that e2fsprogs does
+  volume; SlopOS writes none of those tools. The journal is jbd2 and seals go
+  through the kernel, so SlopOS's format has no extension that e2fsprogs does
   not know.
+- **One profile, in one file.** `ext4-core/profile` is what `mke2fs` is asked
+  for and what the kernel writes; the installer formats from it too. A
+  feature joins it only once the kernel writes it. `ext_attr`, which
+  `tune2fs` cannot clear from a converted volume, is read and released but
+  never written.
+- **Block numbers are 32 bits inside the kernel.** That is 16 TiB at 4 KiB
+  blocks; a larger volume is refused at mount. Widening them is a kernel
+  change, not a format one: the profile is already `64bit`.
+- **At rest is three facts:** `s_state` clean, no `needs_recovery`, and an
+  empty journal. The flag reaches the medium before the journal goes live and
+  leaves it after the journal empties, so no crash shows a live journal under
+  a clear flag. The host's checks ask all three (`scripts/lib/ext4.sh`).
+- **A replay is all or nothing.** Every committed copy is checked before any
+  is written home; one that fails leaves the whole journal to e2fsck and the
+  volume read-only. A mount that may not write, and a journal the volume does
+  not flag, replay nothing either: the volume is refused or read-only.
+- **A delete is one transaction.** Freeing a file dirties a block bitmap per
+  128 MiB group it spans, so the journal bounds the largest file one delete
+  can free: about 2 TiB at the 64 MiB a root carries, past the laptop's
+  disk. A delete split across transactions through the orphan list lifts
+  it.
+- **The seal is the immutable flag, and moving it is a capability.** `Seal`
+  covers setting and clearing it, because a path-keyed program-identity
+  grant is only as good as the seal on the file it names. An append-only
+  file another system marked is sealed too: refusing its appends is stricter
+  than Linux and never weaker. `TASK_FLAG_SYSTEM`
+  confers it today; the installer, which seals the base mount points, gets
+  it by program identity in phase 5.
 - **Coexistence.** The loader lives in the vendor directory
   `\EFI\SlopOS\` and is reached through a firmware entry; slots live on a
   partition of their own; slot selection is a Boot Loader Interface variable.
