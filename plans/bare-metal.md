@@ -31,33 +31,24 @@ its firmware entry, `cachyos`, is the only one.
   namespace.
 - The kernel log and a panic render on screen.
 - UEFI resets and powers the machine off.
+- The kernel carries an NVMe driver, graded on QEMU's model, which lists a
+  disk's partitions under `/dev/disk/by-partuuid`. The live system boots
+  `root=initramfs` and mounts no disk.
 
-Nothing persists, because nothing on the machine is reachable once the kernel
-runs:
+Nothing persists yet, and nothing reaches the network:
 
-- **Block devices.** The only block driver is virtio-blk, and the block layer
-  lives inside it. `drivers/src/virtio_blk.rs` holds the registry, the
-  exclusive-writer claims and the `/dev/vd*` name parsing, and the root attach
-  calls `virtio_blk::claim_writer_at` (`boot/src/boot_services.rs`). `root=`
-  takes only `vd` names. `fs/src/partition.rs` counts every table in 512-byte
-  units. Nothing writes a partition table, and nothing re-reads one after
-  boot.
 - **Network.** The only NIC driver is virtio-net, and it starts the DHCP
   client itself. `net/src/ipv4.rs` sends a resolved neighbour's queued packets
   through a hard-coded `DevIndex(1)`.
 - **Making a root.** The host makes every root: `mkfs.ext2`, then `debugfs`
   writes the log file and the seals (`scripts/build_fs_image.sh`). The guest
-  has no mkfs, fsck or resize tool, and no call that sets
-  `EXT2_IMMUTABLE_FL`.
+  has no mkfs, fsck or resize tool, no call that sets `EXT2_IMMUTABLE_FL`, and
+  nothing that writes a partition table.
 - **Boot disk.** The boot disk is a host-built GPT with one ESP. Limine sits
   at the removable-media path, and both slots are on the ESP
-  (`scripts/build_bootdisk.sh`). `bootctl` finds the ESP by scanning
-  `/dev/vd*` and commits by rewriting `/limine.conf`. Limine is pinned at
+  (`scripts/build_bootdisk.sh`). `bootctl` finds the ESP by scanning every
+  block node and commits by rewriting `/limine.conf`. Limine is pinned at
   12.3.1.
-- **Live ISO.** The live ISO boots with `verity=require` and `root=auto`
-  (`justfile`). `fs init` fails whenever a disk is present but did not mount
-  verified. Once any real disk driver lands, that is every disk on every
-  machine.
 - **Panics.** `panic=reboot`, which is how a broken slot falls back to the
   committed one, resets at once. On a machine with no COM1 the screen is the
   only record of the panic, and the reset erases it.
@@ -82,7 +73,7 @@ commits of its own.
 
 | Phase | Needs | Ends with |
 |---|---|---|
-| 1. NVMe disks | — | the dev loop on NVMe; the live ISO sees the laptop's disk |
+| 1. NVMe disks — **done** | — | the dev loop on NVMe; the live ISO sees the laptop's disk |
 | 2. ext4 | — | every image the tree builds is ext4 |
 | 3. A boot chain that shares a disk | 1 | the A/B loop on the new partition layout |
 | 4. A crash record | 1, 3 | a slot that panics leaves the panic behind |
@@ -90,52 +81,19 @@ commits of its own.
 | 6. Wired network | — | **milestone 2:** git and crates.io over the RJ45 port |
 | 7. Full speed | 5 | a native build measured, and made faster if the CPU clock is the cause |
 
-Phases 1, 2 and 6 can run side by side. Phase 4 comes before phase 5 because
-the first installed boots on the laptop are where a crash record pays off.
+Phases 2 and 6 can run side by side. Phase 4 comes before phase 5 because the
+first installed boots on the laptop are where a crash record pays off.
 
-### Phase 1: NVMe disks
+### Phase 1: NVMe disks — done
 
-#### Block layer and names
+Built: the block layer (`drivers/src/block`) every block driver registers
+with, the NVMe driver (`drivers/src/nvme`, its layouts in `nvme-core`), and
+the QEMU disks moved onto `-device nvme`. `AGENTS.md` describes both; the
+decisions later phases build on are under Decided.
 
-- **Generic layer.** Move the registry, the claims, the reader and writer
-  handles and the partition nodes out of `virtio_blk.rs`, into a layer every
-  block driver registers with.
-- **Logical block size.** A device reports its logical block size, and
-  partition parsing and `fat-core` use it. The UEFI specification counts GPT
-  LBAs in logical blocks, so today a namespace formatted with 4 KiB blocks is
-  misread.
-- **Names.** Kernel names follow Linux: `vdX`, `nvmeXnYpZ`, and `sdX` once a
-  SCSI-class driver exists. Stable links live under `/dev/disk/by-partuuid`,
-  `by-uuid` and `by-label`. `root=` and `mount=` accept `PARTUUID=`, `UUID=`
-  and `LABEL=`. `root=auto` stays disk0, for QEMU.
-- **Re-read.** A disk's partition table can be re-read after boot (Linux's
-  `BLKRRPART`). The re-read is refused while any partition of that disk is
-  claimed.
-
-#### The NVMe driver
-
-- **Driver.** An admin queue pair and I/O queue pairs on MSI-X, with PRP
-  lists and namespace LBA formats.
-- **Host memory buffer.** The laptop's NV3 has no DRAM of its own, and it asks
-  the host for a buffer to cache its mapping tables. The driver grants the
-  size it prefers, in DMA-coherent chunks. The spec lets a host decline;
-  declining costs the drive its cache. QEMU's NVMe model has no host memory
-  buffer, so this path is graded on the laptop.
-- **Flush.** Flush is sent whenever the controller reports a volatile write
-  cache. The journal's barriers depend on it.
-- **Shutdown.** The controller gets a shutdown notification on poweroff and
-  on reboot.
-- **Panic queue.** A polled queue pair is reserved at probe for the panic
-  path (phase 4).
-- **Graded in QEMU.** QEMU's `-device nvme` stands in for the laptop's drive.
-  `just boot` and the heavy checks attach their disks through it, so the dev
-  loop exercises the driver on every boot.
-- **Live ISO, same change.** The live ISO boots `root=initramfs` and leaves
-  internal disks unmounted, and `verity=require` leaves its command line.
-
-**Done when** `just boot` and the suite run their disks on QEMU's NVMe, and
-the live ISO on the laptop lists the NV3's partitions under
-`/dev/disk/by-partuuid` without mounting any of them.
+Left for the laptop, which only the user's run grades: the NV3's partitions
+listed under `/dev/disk/by-partuuid` from the live ISO, and the host memory
+buffer it asks for granted.
 
 ### Phase 2: ext4
 
@@ -229,7 +187,7 @@ later, and `just test-install` commits and rolls back through
 
 - **Write.** The panic path writes the panic report and the tail of the
   kernel log to the crash partition, through NVMe's reserved polled queue: no
-  lock, no allocation, no interrupt. Then it flushes, then it resets.
+  wait, no allocation, no interrupt. Then it flushes, then it resets.
 - **Read back.** On the next boot, a service moves the record to
   `/var/log/crash/` and clears the partition. `bootctl status` reports that
   the slot's last boot crashed.
@@ -387,6 +345,39 @@ committed slot. The fallback boot finds the panic in `/var/log/crash/`.
 - **A package repository.**
 
 ## Decided
+
+- **One block layer, one request engine.** Every block driver registers its
+  disks with `drivers/src/block` and supplies only a `QueueOps` transport; the
+  request slots, their bounce pages, the timeout quarantine and the
+  abandoned-write fence are shared, and so are their tests. A USB
+  mass-storage or AHCI driver is a transport.
+- **Names:** `nvme<C>n<N>` numbers controllers in probe order and namespaces
+  by NSID, not Linux's per-subsystem head instance: stable, and the same as
+  Linux's on every drive with dense NSIDs.
+- **Claims cover what they name.** A partition's claim excludes the whole disk
+  and itself, so a disk's partitions mount side by side; a write claim is
+  exclusive and read claims, which read-only mounts take, share; a table
+  re-read needs nothing on the disk claimed. The installer writes a table
+  through a whole-disk claim, drops it, and re-reads.
+- **A filesystem block is at least a logical block.** A partial block is a
+  read-modify-write inside one request slot, which a torn write turns into
+  damage outside the transaction, so ext2 — and ext4 after it — refuses a
+  volume whose blocks are smaller than the device's. The feature profile of
+  phase 2 and the installer's `mke2fs` follow the device's block size.
+- **The panic path owns a queue pair.** It is created at probe, polled, holds
+  64 KiB, and is taken with a `try_lock` that never waits; phase 4 builds on
+  `PanicQueue` and nothing else.
+- **Devices are told the power is going** through `driver_core::shutdown`,
+  after the filesystems write back, on poweroff and reboot. A panic reset does
+  not run it.
+- **The host memory buffer** is granted up to 128 MiB in chunks of at most
+  4 MiB, after the namespaces register, and taken back before the shutdown
+  notification.
+- **A request the device never answers stays quarantined.** There is no
+  Abort and no controller reset: a controller that drops ten I/O commands
+  serves nothing more until a reboot, and one admin command it never answers
+  holds back every later one, the host memory reclaim and the shutdown
+  notification among them. Recovery waits for a drive seen to need it.
 
 - **ext4 first.** It is the filesystem SlopOS formats its root with, and the
   first one it supports beyond ext2. It is the smallest step from the code

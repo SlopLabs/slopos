@@ -6,7 +6,10 @@ use slopos_ostd::{KArc, KVec, klog_info, lock_class};
 use slopos_testing::{TestResult, fail};
 
 use crate::blockdev::{BlockDevice, MemoryBlockDevice};
-use crate::devfs::{devfs_block_device_by_name, devfs_register_block_device};
+use crate::devfs::{
+    DEV_NAME_MAX, DevFs, devfs_register_block_device, devfs_resolve_block_source,
+    devfs_standalone_block_device, devfs_unregister_block_node,
+};
 use crate::ramfs::{
     RAMFS_BYTES_PER_INODE, RAMFS_CHUNK_BATCH, RAMFS_FILE_CHUNK, RAMFS_MAX_INODES_CEILING,
     RAMFS_MEM_SHARE, RAMFS_MIN_FILE_SIZE, RAMFS_MIN_INODES, RamFs, derive_max_file_size,
@@ -512,8 +515,8 @@ fn chunk_work_off_lock() -> TestResult {
 
 const LOOKUP_DEVICE_BYTES: usize = 4096;
 
-/// `mount(2)` names a disk with whatever the source argument carried, and gets
-/// back a handle it can reach the driver through.
+/// `mount(2)` names a disk with whatever the source argument carried, and a
+/// standalone node hands back a handle that reaches its device.
 pub fn test_devfs_block_device_lookup_by_name() -> TestResult {
     let Some(memory) = MemoryBlockDevice::allocate(LOOKUP_DEVICE_BYTES) else {
         return TestResult::Skipped;
@@ -531,28 +534,84 @@ pub fn test_devfs_block_device_lookup_by_name() -> TestResult {
         Err(e) => return fail!("registration failed: {:?}", e),
     }
 
-    let Some(bare) = devfs_block_device_by_name("lookuptest0") else {
-        return fail!("the bare name resolved to nothing");
-    };
-    let Some(path) = devfs_block_device_by_name("/dev/lookuptest0") else {
-        return fail!("the /dev/ spelling resolved to nothing");
-    };
-    if devfs_block_device_by_name("lookuptest_absent").is_some() {
-        return fail!("an unregistered name resolved");
+    let mut name = [0u8; DEV_NAME_MAX];
+    match devfs_resolve_block_source(b"/dev/lookuptest0", &mut name) {
+        Ok(len) if name[..len] == *b"lookuptest0" => {}
+        other => return fail!("the /dev/ spelling resolved to {:?}", other),
     }
-    if devfs_block_device_by_name("/dev/").is_some() || devfs_block_device_by_name("").is_some() {
-        return fail!("an empty name resolved");
+    for absent in [&b"lookuptestabsent"[..], b"/dev/", b""] {
+        if devfs_resolve_block_source(absent, &mut name).is_ok() {
+            return fail!("{:?} resolved", absent);
+        }
     }
-
+    let Some(device) = devfs_standalone_block_device(b"lookuptest0") else {
+        return fail!("the standalone node's device is not found");
+    };
     // Reaching the device takes its own lock: an answer here is proof the
     // registry lock was released and the handle is the caller's own.
-    if bare.capacity() != LOOKUP_DEVICE_BYTES as u64 {
-        return fail!("capacity {} through the bare name", bare.capacity());
-    }
-    if path.capacity() != bare.capacity() {
-        return fail!("the two spellings named different devices");
+    if device.capacity() != LOOKUP_DEVICE_BYTES as u64 {
+        return fail!("capacity {} through the node", device.capacity());
     }
     TestResult::Pass
+}
+
+/// A `/dev` listing paged across the removal of a node it already passed
+/// neither repeats nor skips what follows.
+pub fn test_devfs_listing_resumes_across_removal() -> TestResult {
+    let names: [&[u8]; 3] = [b"cookietest0", b"cookietest1", b"cookietest2"];
+    let mut registered = 0;
+    for name in names {
+        let Some(memory) = MemoryBlockDevice::allocate(LOOKUP_DEVICE_BYTES) else {
+            break;
+        };
+        let Ok(memory) = KArc::try_new(memory) else {
+            break;
+        };
+        if devfs_register_block_device(name, memory).is_err() {
+            break;
+        }
+        registered += 1;
+    }
+    let verdict = if registered == names.len() {
+        resume_across_removal(names)
+    } else {
+        fail!("only {} of the fixture nodes registered", registered)
+    };
+    for name in &names[..registered] {
+        let _ = devfs_unregister_block_node(name);
+    }
+    verdict
+}
+
+#[inline(never)]
+fn resume_across_removal(names: [&[u8]; 3]) -> TestResult {
+    let fs = DevFs::new();
+    let mut cookie = None;
+    let walk = fs.readdir_cookie(fs.root_inode(), 0, &mut |next, name, _, _| {
+        if name == names[1] {
+            cookie = Some(next);
+        }
+        cookie.is_none()
+    });
+    let Some(cookie) = cookie else {
+        return fail!("the listing never reached the second node: {:?}", walk);
+    };
+    if devfs_unregister_block_node(names[0]).is_err() {
+        return fail!("the first node could not be removed");
+    }
+    let mut next = [0u8; DEV_NAME_MAX];
+    let mut next_len = None;
+    let walk = fs.readdir_cookie(fs.root_inode(), cookie, &mut |_, name, _, _| {
+        let len = name.len().min(DEV_NAME_MAX);
+        next[..len].copy_from_slice(&name[..len]);
+        next_len = Some(len);
+        false
+    });
+    match next_len {
+        Some(len) if next[..len] == *names[2] => TestResult::Pass,
+        Some(len) => fail!("the listing resumed at {:?}", &next[..len]),
+        None => fail!("the listing resumed at nothing: {:?}", walk),
+    }
 }
 
 slopos_testing::stest!(name = test_ramfs_limits_track_usable_memory, suite = fs);
@@ -562,3 +621,4 @@ slopos_testing::stest!(name = test_ramfs_shrink_releases_chunks, suite = fs);
 slopos_testing::stest!(name = test_ramfs_write_past_cap_refused, suite = fs);
 slopos_testing::stest!(name = test_ramfs_chunk_work_stays_off_the_lock, suite = fs);
 slopos_testing::stest!(name = test_devfs_block_device_lookup_by_name, suite = fs);
+slopos_testing::stest!(name = test_devfs_listing_resumes_across_removal, suite = fs);

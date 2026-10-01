@@ -120,6 +120,10 @@ impl BlockDevice for SharedMem {
     fn capacity(&self) -> u64 {
         self.0.capacity()
     }
+
+    fn logical_block_size(&self) -> u32 {
+        self.0.logical_block_size()
+    }
 }
 
 #[inline(never)]
@@ -544,6 +548,10 @@ impl BlockDevice for BigImage {
     fn capacity(&self) -> u64 {
         self.bm_off() + (bitmap_len(BIG_N) + 32) as u64
     }
+
+    fn logical_block_size(&self) -> u32 {
+        crate::blockdev::DEFAULT_LOGICAL_BLOCK
+    }
 }
 
 struct SharedBig(KArc<BigImage>);
@@ -559,6 +567,10 @@ impl BlockDevice for SharedBig {
 
     fn capacity(&self) -> u64 {
         self.0.capacity()
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        self.0.logical_block_size()
     }
 }
 
@@ -787,6 +799,10 @@ impl BlockDevice for HugeTrailer {
 
     fn capacity(&self) -> u64 {
         HUGE_BLOCKS * BS as u64 + HUGE_BLOCKS * 4 + HUGE_BLOCKS / 8 + 32
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        crate::blockdev::DEFAULT_LOGICAL_BLOCK
     }
 }
 

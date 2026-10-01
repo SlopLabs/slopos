@@ -831,6 +831,32 @@ fn fd_layer_ioctl(table: FdTable, fd: c_int, cmd: u64, arg: u64) -> Option<Resul
     }
 }
 
+/// A block device's size, block size and partition table. `None` when the
+/// descriptor is no block device node.
+#[inline(never)]
+fn block_ioctl(table: FdTable, fd: c_int, cmd: u64, arg: u64) -> Option<Result<u64, Errno>> {
+    use slopos_fs::devfs::BlockIoctlReply;
+
+    // The request is 32 bits wide; Linux drops whatever lies above.
+    let request = cmd as u32;
+    let reply = match slopos_fs::fileio::file_block_ioctl(table, fd, request)? {
+        Ok(reply) => reply,
+        Err(Errno::EOPNOTSUPP) => return Some(Err(Errno::ENOTTY)),
+        Err(e) => return Some(Err(e)),
+    };
+    fn store<T: Copy>(arg: u64, value: T) -> Result<u64, Errno> {
+        let ptr = MmUserPtr::<T>::try_new(arg).map_err(|_| Errno::EFAULT)?;
+        copy_to_user(ptr, &value).map_err(|_| Errno::EFAULT)?;
+        Ok(0)
+    }
+    Some(match reply {
+        BlockIoctlReply::Nothing => Ok(0),
+        BlockIoctlReply::Int(v) => store(arg, v),
+        BlockIoctlReply::UInt(v) => store(arg, v),
+        BlockIoctlReply::U64(v) => store(arg, v),
+    })
+}
+
 define_syscall!(syscall_ioctl
     (ctx, fd: Fd, cmd: u64, arg: u64)
     cap(NoneFd)
@@ -843,6 +869,9 @@ define_syscall!(syscall_ioctl
     // `FileDesc::set_cloexec`/`set_nonblocking` use them on every descriptor it
     // owns, so answering `ENOTTY` here fails every pipe and socket it opens.
     if let Some(result) = fd_layer_ioctl(pid, fd.raw(), cmd, arg) {
+        return result;
+    }
+    if let Some(result) = block_ioctl(pid, fd.raw(), cmd, arg) {
         return result;
     }
 

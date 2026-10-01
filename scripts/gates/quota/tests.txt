@@ -42,7 +42,11 @@
 # residentpages row after the kernel tests rose from 772 to 2049 once a memfd
 # charged its sizer's resident pages at ftruncate rather than when mapped: the
 # OOM tests size 64-page memfds per process, and one row holds a 2048-page
-# memfd. The kernelmeta row after the kernel tests measured 6230 and 6192 in
+# memfd. The boot kernelmeta row measured 1708, and 1713 once every disk went
+# through the block layer and NVMe: the controllers' queues and engines, the
+# disk registry and the devfs node table. A boot on which an AP is slow to
+# answer its startup peaks 48 pages higher, 1761, which is the cap.
+# The kernelmeta row after the kernel tests measured 6230 and 6192 in
 # two captures once the OOM and signal tests spawned more processes, then
 # 6290, 6229 and 6283 in three once slibc gained the functions git needs, then
 # 6292, 6294, 6196, 6298, 6197, 6213, 6240 and 6199 in eight once every test
@@ -73,7 +77,7 @@ require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
-boot	kernelmeta	1756
+boot	kernelmeta	1761
 post-kernel-tests	commitpages	2560
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6

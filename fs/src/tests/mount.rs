@@ -11,7 +11,7 @@ use slopos_testing::TestResult;
 
 use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
-use crate::devfs::{devfs_block_device_by_name, devfs_register_block_device};
+use crate::devfs::{devfs_register_block_device, devfs_standalone_block_device};
 use crate::ext2::ReadOnlyReason;
 use crate::ext2_vfs::{Ext2Mount, WRITEBACK_CHUNK};
 use crate::ramfs::RamFs;
@@ -769,7 +769,7 @@ const REMOUNT_MP: &[u8] = b"/tmp/ext2_remount";
 const REMOUNT_FILE: &[u8] = b"/tmp/ext2_remount/persisted";
 
 /// The re-mount is what proves the first mount gave the device's exclusive
-/// write claim back: a leaked token makes `open_writer` answer `AlreadyClaimed`
+/// write claim back: a leaked claim makes every later one answer `Busy`
 /// forever. The file surviving the round trip shows the unmount reached the
 /// medium rather than merely dropping the instance.
 pub fn test_ext2_remount_of_the_same_device_succeeds() -> TestResult {
@@ -816,6 +816,29 @@ fn remount_body() -> Result<(), &'static str> {
     vfs_ext2_unmount_named(REMOUNT_MP).map_err(|_| "the second unmount failed")
 }
 
+/// ext2 on 1 KiB blocks over a disk of 4 KiB logical blocks: each metadata
+/// write would be a read-modify-write of three neighbours, and a torn one
+/// damages blocks outside the transaction, so the mount is refused.
+pub fn test_ext2_refuses_blocks_smaller_than_the_device() -> TestResult {
+    const SCRATCH_4K: &[u8] = b"nvme1n2";
+    const MP: &[u8] = b"/tmp/ext2_4kn";
+    if !ready() || !ensure_dir(MP) {
+        return slopos_testing::fail!("the /tmp fixture directory is unavailable");
+    }
+    if !write_scratch_ext2(SCRATCH_4K) {
+        return slopos_testing::fail!("could not write the ext2 fixture to nvme1n2");
+    }
+    let mounted = vfs_ext2_mount_named(SCRATCH_4K, MP, false);
+    if mounted.is_ok() {
+        let _ = vfs_ext2_unmount_named(MP);
+    }
+    let _ = vfs_rmdir(MP);
+    match mounted {
+        Err(VfsError::InvalidArgument) => TestResult::Pass,
+        other => slopos_testing::fail!("1 KiB blocks on a 4K disk gave {:?}", other.map(|_| ())),
+    }
+}
+
 /// Device writes since [`CountingDevice::new`]; a static, so no test frame has
 /// to carry the handle.
 static COUNTED_WRITES: AtomicUsize = AtomicUsize::new(0);
@@ -843,6 +866,10 @@ impl BlockDevice for CountingDevice {
 
     fn capacity(&self) -> u64 {
         self.inner.capacity()
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
     }
 }
 
@@ -1119,7 +1146,7 @@ pub fn test_ext2_readonly_mount_refuses_a_writable_device() -> TestResult {
 
 #[inline(never)]
 fn rdonly_mount_body() -> Result<(), &'static str> {
-    let Some(node) = devfs_block_device_by_name("romountprobe0") else {
+    let Some(node) = devfs_standalone_block_device(RDONLY_PROBE) else {
         return Err("the probe device is not in devfs");
     };
     if node.write_protected() {
@@ -1229,5 +1256,9 @@ slopos_testing::stest!(name = test_rename_fails_when_a_lookup_does, suite = fs);
 slopos_testing::stest!(name = test_removal_fails_when_a_lookup_does, suite = fs);
 slopos_testing::stest!(
     name = test_create_open_keeps_the_mode_of_a_file_it_found,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_refuses_blocks_smaller_than_the_device,
     suite = fs
 );

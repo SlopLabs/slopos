@@ -1132,6 +1132,24 @@ pub fn file_statfs_fd(table: FdTable, fd: c_int) -> Result<FsStats, Errno> {
     }
 }
 
+/// A block device ioctl on the descriptor's file. `None` when the file is no
+/// block device node, so the caller falls through to its other handlers.
+pub fn file_block_ioctl(
+    table: FdTable,
+    fd: c_int,
+    request: u32,
+) -> Option<Result<crate::devfs::BlockIoctlReply, Errno>> {
+    let snap = snapshot(table, fd).ok()?;
+    if snap.ops().kind() != FileKind::Regular {
+        return None;
+    }
+    let (fs, inode) = crate::vfs_file_ops::vfs_file_inode(snap.handle())?;
+    if !crate::vfs::traits::same_filesystem(fs, crate::vfs::init::vfs_devfs_instance()) {
+        return None;
+    }
+    crate::devfs::devfs_block_ioctl(inode, request).map(|r| r.map_err(|e| e.to_errno()))
+}
+
 fn snapshot(table: FdTable, fd: c_int) -> Result<FdSnapshot, Errno> {
     let inner = lock_table_slot(table).ok_or(Errno::ESRCH)?;
     snapshot_fd(&inner, fd).ok_or(Errno::EBADF)

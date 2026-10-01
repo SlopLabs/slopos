@@ -108,7 +108,7 @@ qemu_gtk_zoom       := env("QEMU_GTK_ZOOM_TO_FIT", "off")
 gpu                 := env("GPU", "virtio-vga")
 
 boot_log_timeout := env("BOOT_LOG_TIMEOUT", "15")
-boot_cmdline     := env("BOOT_CMDLINE", "tests=off verity=require")
+boot_cmdline     := env("BOOT_CMDLINE", "tests=off root=initramfs")
 test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip root=auto mount=LABEL=slopos-media:/media"
 # `TEST_CMDLINE=…` is how `builddir/run_tests` threads filter / verbosity flags
 # into the ISO at build time.
@@ -392,8 +392,9 @@ test-install:
     TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*install*" BOOTDISK_PANIC_ENTRY=1 just _boot-disk
     log="{{build_dir}}/install.log"
     rc=0
+    # `bootctl clone` holds a slot's tests kernel and base in memory at once.
     timeout "${INSTALL_TIMEOUT_SECS:-900}" \
-        just _qemu-boot "test" "0" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} \
+        just _qemu-boot "test" "0" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} QEMU_MEM=1G \
         >"$log" 2>&1 || rc=$?
     missing=0
     for marker in "INSTALL-STAGE 1: rebooting into slopos-b" "INSTALL-STAGE 2: rebooting into slopos-bad" \
@@ -608,7 +609,7 @@ test-persist: _build-run-tests
         exit 1
     fi
 
-# The capacity check: one boot with a 16 GiB volume attached as virtio-disk3,
+# The capacity check: one boot with a 16 GiB volume attached as nvme0n3,
 # which the suite mounts, measures and grades. Separate from `just test`
 # because the image takes minutes to build once and is then preserved; the
 # per-run ratchet that CI does grade lives in `check_fs_throughput.sh`.
@@ -722,7 +723,7 @@ bench-selfhost: _build-run-tests
 
 [doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-http-core -p slopos-fat-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-http-core -p slopos-fat-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

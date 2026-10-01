@@ -240,28 +240,32 @@ DISPLAY_ARGS=(-display none)
 SERIAL_ARGS=(-serial stdio)
 ADD_ISA_EXIT=0
 ADD_NO_REBOOT=0
-# Disposable scratch block device (virtio-disk1) attached only for the test
-# harness. Destructive block-device tests target THIS device, never the live
-# root-fs image (virtio-disk0) — so a buggy test cannot corrupt an on-disk
-# binary (the nightly-2026-05-25 io_capture incident). Recreated blank each run.
+# Disks, as the guest names them. Every NVMe controller is probed ahead of
+# every virtio one, in command-line order, so the root is disk0 (`root=auto`),
+# and a namespace is named by its NSID, so an absent optional one renames
+# nothing:
+#   nvme0n1  the root filesystem image
+#   nvme0n2  test mode: a blank scratch, recreated each run. Destructive block
+#            tests target it, never the live root.
+#   nvme0n3  CAPACITY_IMG, when it names an existing file: the large volume
+#            the capacity check measures, opt-in and preserved.
+#   nvme1n1  test mode: a labelled ext2 volume on 4096-byte logical blocks,
+#            which the test command line mounts by label.
+#   nvme1n2  test mode: a blank 4096-byte-block scratch.
+#   nvme2n1  test mode: a controller of its own that a test shuts down.
+#   nvme3n1  BOOT_DISK_IMG: the UEFI boot disk, in place of the ISO, on the
+#            last controller: nvme1n1 outside test mode.
+#   vda      test mode: the shipped verified image. The root is built
+#            VERITY=off so the suite can write; without this no run would
+#            exercise fs/src/verity.rs against a trailer a real device reports.
+#   vdb      test mode: a blank virtio scratch, so virtio-blk stays graded.
 ADD_SCRATCH_DISK=0
-# The shipped verified image (virtio-disk2), test harness only. disk0 is built
-# VERITY=off so the suite can write; without this no `just test` run would
-# exercise fs/src/verity.rs against a trailer a real device reports.
 ADD_VERIFIED_DISK=0
-# A large writable volume (virtio-disk3), attached only when CAPACITY_IMG names
-# an existing file. This is the medium the capacity ratchet measures: a 16 GiB
-# image is far too slow to build on every run, so it is opt-in and preserved.
 ADD_CAPACITY_DISK=0
 if [ -n "${CAPACITY_IMG:-}" ] && [ -f "$CAPACITY_IMG" ]; then
     ADD_CAPACITY_DISK=1
 fi
-# A labelled ext2 volume (virtio-disk4), test mode only, which the test
-# command line mounts by label; the suite grades that mount, its write claim
-# and a remount. Last but the boot disk, which `bootctl` finds by scanning.
 ADD_MEDIA_DISK=0
-# The UEFI boot disk (virtio-disk5) replaces the ISO as the boot medium. It is
-# the last disk so that it renames none of the others in the guest.
 ADD_BOOT_DISK=0
 BOOT_ORDER=d
 if [ -n "${BOOT_DISK_IMG:-}" ]; then
@@ -282,11 +286,13 @@ case "$MODE" in
         DISPLAY_ARGS=(-display none)
         ADD_ISA_EXIT=1
         ADD_NO_REBOOT=1
-        SCRATCH_IMG="${SCRATCH_IMG:-${REPO_ROOT}/builddir/scratch-disk.img}"
-        mkdir -p "$(dirname "$SCRATCH_IMG")"
-        # Fresh, blank 8 MiB raw scratch each run (no filesystem; raw-sector tests only).
-        rm -f "$SCRATCH_IMG"
-        truncate -s 8M "$SCRATCH_IMG"
+        SCRATCH_DIR="${SCRATCH_DIR:-${REPO_ROOT}/builddir}"
+        mkdir -p "$SCRATCH_DIR"
+        # Fresh, blank 8 MiB raw scratches each run (no filesystem; raw-block tests only).
+        for scratch in scratch-nvme scratch-4kn scratch-virtio scratch-spare; do
+            rm -f "$SCRATCH_DIR/$scratch.img"
+            truncate -s 8M "$SCRATCH_DIR/$scratch.img"
+        done
         ADD_SCRATCH_DISK=1
         MEDIA_IMG="${REPO_ROOT}/builddir/media-disk.img"
         media_stage="$(mktemp -d)"
@@ -519,14 +525,13 @@ else
     DEBUG_ARGS=(-monitor none)
 fi
 
-# Root-fs disk (virtio-disk0). Omitted when QEMU_NO_ROOT_DISK=1 to prove the
+# The root disk (nvme0n1). Omitted when QEMU_NO_ROOT_DISK=1 to prove the
 # kernel boots purely from the Limine initramfs with no storage device
-# attached — the real-hardware scenario. Otherwise it is the ext2 image the
-# kernel mounts at /mnt (secondary) once the RAM root is up.
+# attached.
 if [[ ! "${QEMU_NO_ROOT_DISK:-0}" =~ ^(1|true|on|yes)$ ]]; then
     ADD_ROOT_DISK=1
 else
-    echo "QEMU_NO_ROOT_DISK=1 → booting RAM-only (no virtio-disk0 attached)"
+    echo "QEMU_NO_ROOT_DISK=1 → booting RAM-only (no root disk attached)"
     ADD_ROOT_DISK=0
 fi
 
@@ -551,43 +556,62 @@ if [ "$ADD_BOOT_DISK" = "0" ]; then
         -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
     )
 fi
+if [ "$ADD_ROOT_DISK" = "1" ] || [ "$ADD_SCRATCH_DISK" = "1" ] || [ "$ADD_CAPACITY_DISK" = "1" ]; then
+    QEMU_ARGS+=(-device "nvme,id=nvme0,serial=slopos-root")
+fi
 if [ "$ADD_ROOT_DISK" = "1" ]; then
     QEMU_ARGS+=(
-        -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
-        -object "iothread,id=iot0"
-        -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on,iothread=iot0"
+        -drive "file=$FS_IMAGE,if=none,id=root-disk,format=raw"
+        -device "nvme-ns,bus=nvme0,drive=root-disk,nsid=1"
     )
 fi
 if [ "$ADD_SCRATCH_DISK" = "1" ]; then
     QEMU_ARGS+=(
-        -drive "file=$SCRATCH_IMG,if=none,id=virtio-disk1,format=raw"
-        -device "virtio-blk-pci,drive=virtio-disk1,disable-legacy=on"
+        -drive "file=$SCRATCH_DIR/scratch-nvme.img,if=none,id=scratch-disk,format=raw"
+        -device "nvme-ns,bus=nvme0,drive=scratch-disk,nsid=2"
+    )
+fi
+if [ "$ADD_CAPACITY_DISK" = "1" ]; then
+    QEMU_ARGS+=(
+        -drive "file=$CAPACITY_IMG,if=none,id=capacity-disk,format=raw,cache=writeback"
+        -device "nvme-ns,bus=nvme0,drive=capacity-disk,nsid=3"
+    )
+fi
+if [ "$ADD_MEDIA_DISK" = "1" ]; then
+    QEMU_ARGS+=(
+        -device "nvme,id=nvme1,serial=slopos-4kn"
+        -drive "file=$MEDIA_IMG,if=none,id=media-disk,format=raw"
+        -device "nvme-ns,bus=nvme1,drive=media-disk,nsid=1,logical_block_size=4096,physical_block_size=4096"
+        -drive "file=$SCRATCH_DIR/scratch-4kn.img,if=none,id=scratch-4kn,format=raw"
+        -device "nvme-ns,bus=nvme1,drive=scratch-4kn,nsid=2,logical_block_size=4096,physical_block_size=4096"
+    )
+fi
+if [ "$ADD_SCRATCH_DISK" = "1" ]; then
+    QEMU_ARGS+=(
+        -device "nvme,id=nvme-spare,serial=slopos-spare"
+        -drive "file=$SCRATCH_DIR/scratch-spare.img,if=none,id=spare-disk,format=raw"
+        -device "nvme-ns,bus=nvme-spare,drive=spare-disk,nsid=1"
+    )
+fi
+if [ "$ADD_BOOT_DISK" = "1" ]; then
+    QEMU_ARGS+=(
+        -device "nvme,id=nvme-boot,serial=slopos-boot"
+        -drive "file=$BOOT_DISK_IMG,if=none,id=boot-disk,format=raw"
+        -device "nvme-ns,bus=nvme-boot,drive=boot-disk,nsid=1,bootindex=0"
     )
 fi
 if [ "$ADD_VERIFIED_DISK" = "1" ]; then
     # snapshot=on: a bug is exactly when "the guest never writes it" is not to
     # be trusted.
     QEMU_ARGS+=(
-        -drive "file=$VERIFIED_IMG,if=none,id=virtio-disk2,format=raw,snapshot=on"
-        -device "virtio-blk-pci,drive=virtio-disk2,disable-legacy=on"
+        -drive "file=$VERIFIED_IMG,if=none,id=verified-disk,format=raw,snapshot=on"
+        -device "virtio-blk-pci,drive=verified-disk,disable-legacy=on"
     )
 fi
-if [ "$ADD_CAPACITY_DISK" = "1" ]; then
+if [ "$ADD_SCRATCH_DISK" = "1" ]; then
     QEMU_ARGS+=(
-        -drive "file=$CAPACITY_IMG,if=none,id=virtio-disk3,format=raw,cache=writeback"
-        -device "virtio-blk-pci,drive=virtio-disk3,disable-legacy=on"
-    )
-fi
-if [ "$ADD_MEDIA_DISK" = "1" ]; then
-    QEMU_ARGS+=(
-        -drive "file=$MEDIA_IMG,if=none,id=virtio-disk4,format=raw"
-        -device "virtio-blk-pci,drive=virtio-disk4,disable-legacy=on"
-    )
-fi
-if [ "$ADD_BOOT_DISK" = "1" ]; then
-    QEMU_ARGS+=(
-        -drive "file=$BOOT_DISK_IMG,if=none,id=virtio-disk5,format=raw"
-        -device "virtio-blk-pci,drive=virtio-disk5,disable-legacy=on,bootindex=0"
+        -drive "file=$SCRATCH_DIR/scratch-virtio.img,if=none,id=scratch-virtio,format=raw"
+        -device "virtio-blk-pci,drive=scratch-virtio,disable-legacy=on"
     )
 fi
 QEMU_ARGS+=(

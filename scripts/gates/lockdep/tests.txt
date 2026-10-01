@@ -288,8 +288,27 @@ require-phase post-userland-tests
 #               the flaky-lookup filesystem. 212/220 on both full runs of the
 #               change; every banded pool stayed inside its band (kernel edges
 #               182, chains 410; userland edges 225, chains 463).
-boot	classes	72
-post-kernel-tests	classes	212
+#   2026-10-01  boot 72 -> 75, kernel 212 -> 214: the block layer and NVMe
+#               (`plans/bare-metal.md` phase 1). A disk's partition table is now
+#               read, and its `/dev` nodes published, when its driver probes,
+#               so `BlockEngine.state`, `BlockEngine.slot_waiters`,
+#               `BlockEngine.free_waiters` (drivers/src/block/engine.rs, the
+#               request engine every transport shares, replacing
+#               `VirtioBlk.state` and its wait queues) and `DEVFS_BLOCK_NODES`
+#               register during boot instead of during the tests. New at boot:
+#               `NvmeAdmin.ring` and `NvmeAdmin.waiters` (drivers/src/nvme/
+#               admin.rs). Gone: `BLK_REGISTRY`, whose replacement
+#               `BLOCK_DISKS` is a sleeping `Mutex` an uncontended acquire
+#               registers no class for. The kernel phase adds `NvmePanic.ring`
+#               (the polled queue's test) beside the two admin classes and loses
+#               `BLK_REGISTRY`; `BlockEngine.abandon_waiters` replaces
+#               `VirtioBlk.abandon_waiters`. The userland phase holds at 220.
+#               Measured from a class-name dump on two full runs; boot edges 39
+#               and chains 110 sit inside their caps and every banded pool
+#               inside its band (kernel edges 174-183, chains 401-410;
+#               userland edges 223-226, chains 459-462).
+boot	classes	75
+post-kernel-tests	classes	214
 post-userland-tests	classes	220
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.

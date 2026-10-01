@@ -10,6 +10,7 @@ static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
 static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();
 static SERIAL_DRAINED: StateFlag = StateFlag::new();
 static FS_SYNCED: StateFlag = StateFlag::new();
+static DEVICES_SHUT_DOWN: StateFlag = StateFlag::new();
 
 use slopos_acpi::fadt::PowerConfig;
 use slopos_acpi::tables::AcpiTables;
@@ -28,6 +29,17 @@ use slopos_sched::task::{stop_kernel_io_tasks, task_shutdown_all};
 fn serial_flush() {
     ostd_power::drain_serial_tx(|| cpu::pause(), 1024);
 }
+/// Tell every device the power is going: an NVMe controller that is not
+/// notified counts an unsafe shutdown and may lose what its cache held. Only
+/// once the I/O threads have stopped, so nothing writes behind the notice.
+fn shutdown_devices() {
+    if !DEVICES_SHUT_DOWN.enter() {
+        return;
+    }
+    klog_info!("Kernel shutdown: notifying devices");
+    slopos_drivers::driver_core::shutdown::shutdown_devices();
+}
+
 fn flush_filesystems_for_shutdown() {
     if !FS_SYNCED.enter() {
         return;
@@ -133,8 +145,8 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     // Must precede anything below that perturbs the machine: the summary
     // characterises steady-state kernel behaviour.
     slopos_ostd::watchdog::snapshot_max_stalls();
-    // Must precede `disable_interrupts`: the virtio-blk completion path needs
-    // IRQs and the scheduler to post the used-buffer event.
+    // Must precede `disable_interrupts`: a block completion needs IRQs and
+    // the scheduler to reach the task waiting on it.
     flush_filesystems_for_shutdown();
 
     if !SHUTDOWN_IN_PROGRESS.enter() {
@@ -153,6 +165,7 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     // cross-CPU TLB drains. I/O threads stop first — one parked on a paused CPU
     // never reaches its own exit point.
     stop_kernel_io_tasks();
+    shutdown_devices();
 
     if task_shutdown_all() != 0 {
         klog_info!("Warning: Failed to terminate one or more tasks");
@@ -217,10 +230,10 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
     ensure_shutdown_mmio_mapped();
     slopos_ostd::watchdog::snapshot_max_stalls();
     // Must precede `disable_interrupts`, for the reason `kernel_shutdown`
-    // gives: the virtio-blk completion path needs IRQs and the scheduler to
-    // post the used-buffer event. Without this a reboot discards write-back
-    // data that a halt would have persisted.
+    // gives; without it a reboot discards write-back a halt would persist.
     flush_filesystems_for_shutdown();
+    stop_kernel_io_tasks();
+    shutdown_devices();
     slopos_ostd::watchdog::leave_watched_set();
     cpu::disable_interrupts();
 

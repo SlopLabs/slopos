@@ -452,8 +452,8 @@ each file is read back. It then sets
 `LoaderEntryOneShot`, which Limine consumes on the next boot, and after that
 boot `bootctl commit` makes the entry Limine reports in `LoaderEntrySelected`
 the default. A slot that panics resets under `panic=reboot`, and the reset lands
-on the old default. `/dev/vd*` nodes accept writes from a `Mount` or `SYSTEM`
-holder, each one through the device's exclusive claim, so a mounted device
+on the old default. Block device nodes accept writes from a `Mount` or `SYSTEM`
+holder, each one through the claim on that disk or partition, so a mounted one
 answers `EBUSY`. UEFI variables are read and written on a kernel thread — the
 firmware is mapped only into the kernel master address space and may use the
 vector registers — and only under the Boot Loader Interface's and SlopOS's own
@@ -486,22 +486,69 @@ unconditionally. The 60 static Rust binaries are unaffected: they take slibc as
 an rlib with the feature off, and `userland/userland.ld` discards `.eh_frame`
 outright.
 
-`just boot-live` and `just boot-log` boot `builddir/slop.iso` with `BOOT_CMDLINE` as its command line, plus `boot.debug=on` under `DEBUG=1` and `roulette=skip` under `ROULETTE=0`; `VIDEO=0` makes `just boot` and `just boot-live` serial-only.
+`just boot-live` and `just boot-log` boot `builddir/slop.iso` with `BOOT_CMDLINE` as its command line — `root=initramfs` unless it says otherwise — plus `boot.debug=on` under `DEBUG=1` and `roulette=skip` under `ROULETTE=0`; `VIDEO=0` makes `just boot` and `just boot-live` serial-only.
 
-**The disk is the root.** `root=auto` mounts a writable `disk0` at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=` also accepts `initramfs`, `virtio`, and a device name — `/dev/vda`, `/dev/vda1`, `vdb2` — where the partition comes from the GPT or MBR table on that device; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
+**Every disk goes through the block layer.** `drivers/src/block` is what a
+block driver registers its disks with: their Linux names (`vda` in virtio
+probe order, `nvme<C>n<N>` for namespace `N` of the `C`-th NVMe controller,
+`nvme0n1p2` and `vda2` for partitions), their partition tables, their `/dev`
+nodes and the claims a mount or a raw write takes. A claim covers what it
+names — a partition's excludes the whole disk and itself, so two partitions of
+one disk mount side by side; a write claim is exclusive, and the read claims
+read-only mounts take share with each other and keep a writer off — and
+`BLKRRPART` re-reads a table only while nothing on the disk is claimed,
+replacing its partition nodes; a node's inode is never reused, so a descriptor
+on a replaced one fails rather than reaching another window. Every disk is an `EngineDisk` over the request engine
+(`block/engine.rs`): request slots whose preallocated pages every payload is
+staged through, a timeout that quarantines a request with its pages until the
+device hands it back, and a fence that holds every write behind one a timeout
+abandoned. A transport supplies only `QueueOps` — virtio-blk's descriptor
+chains, NVMe's submission entries — so the engine's tests run on both. Spans
+are cut into the device's logical blocks: partition tables count in them, a
+partial block is read, patched and written back inside one slot's pages, and
+ext2 refuses a block smaller than one, whose write would tear its neighbours.
+devfs publishes `/dev/disk/by-partuuid`, `by-uuid` and `by-label` (ext2/3/4,
+FAT and btrfs identities, udev's escaping), and `root=`, `mount=` and
+`mount(2)` take `PARTUUID=`, `UUID=`, `LABEL=` and those paths as well as a
+name; block nodes answer `BLKGETSIZE64`, `BLKGETSIZE`, `BLKSSZGET`,
+`BLKPBSZGET`, `BLKROGET` and `BLKRRPART`. A volume's identity is read when
+something first names the node by one — a listing, a lookup, a `LABEL=` or
+`UUID=` — and again only once a write claim that wrote is released, which no
+unprivileged task can cause; a probe the disk did not answer is retried after
+five seconds.
+
+**NVMe is the disk QEMU attaches.** `drivers/src/nvme` runs an admin queue,
+one interrupt-driven I/O queue pair every namespace shares, and a polled pair
+created with interrupts off and its pages allocated at probe, which a panic
+takes whole with a `try_lock` that never waits (`PanicQueue`). It grants a DRAM-less
+drive the host memory buffer it asks for, in `DmaCoherent` chunks, flushes
+only a controller with a volatile write cache, and on poweroff and reboot
+(`driver_core::shutdown`) takes the buffer back, deletes its queues and waits
+for the shutdown notification to complete. Register, command and identify
+layouts, and the host memory sizing, are `nvme-core`, host-tested under `just
+test-host`, since QEMU's model asks for no host memory. `qemu_run.sh` attaches
+the root as `nvme0n1`; test mode adds a scratch `nvme0n2`, a 4096-byte-block
+controller carrying the labelled media volume (`nvme1n1`) and a scratch
+(`nvme1n2`), a controller of its own a test shuts down (`nvme2n1`), and on
+virtio-blk the verified image (`vda`) and a scratch (`vdb`), so both drivers
+stay graded; the capacity volume is `nvme0n3`, and the boot disk is the last
+controller's.
+
+**The disk is the root.** `root=auto` mounts a writable `disk0` — the first disk probed, `nvme0n1` under QEMU — at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=disk` insists on the disk, and `root=initramfs` mounts no disk it was not asked to by a `mount=`, which is what the live ISO boots with. `root=` also takes a device in any spelling a mount source does — `/dev/nvme0n1p2`, `vda1`, `PARTUUID=…`, `UUID=…`, `LABEL=…` — where a partition comes from the GPT or MBR table on its disk; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
 **The root is not the only filesystem.** `mount(2)` with `fstype=ext2` takes a
-`source` naming a block device — `mount("/dev/vdb1", "/home", "ext2", …)` —
-claims that device's exclusive writer (or mounts read-only with `MS_RDONLY`,
-which needs no claim), and binds it to one of four pooled `Ext2Mount`
-instances, each with **its own lock**. A path walk crossing a mount therefore
-holds one mount's lock while taking the next one's, which is why the four
-instances carry four separate `lock_class!` sites rather than one shared class;
+`source` naming a block device — `mount("/dev/nvme0n1p3", "/home", "ext2", …)`
+or `mount("LABEL=home", …)` — claims that device's exclusive writer (or, with
+`MS_RDONLY`, a read claim shared with other readers), and binds it to one of
+four pooled `Ext2Mount` instances, each with **its own lock**. A path walk
+crossing a mount therefore holds one mount's lock while taking the next one's,
+which is why the four instances carry four separate `lock_class!` sites rather
+than one shared class;
 slot 0's is still named `CACHED_EXT2`, so the class boot registers is the class
 it always was. `umount` of the last mount of an instance flushes it, marks the
 image clean, drops the device and returns the slot, so the write claim is
 released and the same disk can be mounted again — a leaked claim answers
-`AlreadyClaimed` forever, and that is the failure the remount test exists to
+`Busy` forever, and that is the failure the remount test exists to
 catch.
 
 **A warm path walk does not take the mount lock.** Each component is a
@@ -712,7 +759,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `core`, `drivers`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `pidfd`, `ring`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `core`, `drivers`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 
@@ -880,7 +927,7 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just check-test-count` — count-regression CI guard; fails if total planned tests across phases drops below `TEST_COUNT_BASELINE`. The default lives in `scripts/check_test_count.sh` and is written down only there — read it from the script rather than restating it here, and bump it there when the suite grows. Measure the new value with `TEST_COUNT_BASELINE=0 scripts/check_test_count.sh`; never guess it.
 - `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn` and a clean superblock. Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
-- `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext2 volume, attach it as `virtio-disk3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
+- `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext2 volume, attach it as `nvme0n3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
 - `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 4G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
 - `just test-install` — the install check: boot from `builddir/boot-disk.img` (GPT, one FAT32 ESP holding Limine, `/limine.conf` and a kernel and base per slot under `/boot/<slot>/`), and across the resets of one QEMU let `install_test` clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot`, commit it as `default_entry`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
 - `just test-install-guest` — the two loops in one QEMU: a clean tree, `just toolchain` and the self-hosting root; slot a is the optimized tests kernel, and `install_test`, finding a workspace at `/src/slopos`, fetches the host's `HEAD` into its clone, checks it out and runs `scripts/selfhost.sh install tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is otherwise unset — which builds the tests kernel, userland and base and installs the kernel and base into slot b, then checks the tree's own branch out again; the run boots them once, and that boot must report the tag in `uname -v` and in the base's `/usr/share/slopos/build-tag`. The kernel the guest built then commits a change on the fetched `HEAD` in a scratch clone and pushes it into a scratch repository, which the host fetches and holds to that commit's parent being `HEAD`. The run then commits and rolls back as `test-install` does, and the host holds slot b's kernel and base to the root's `kernel-tests.elf` and `initramfs-tests.cpio` byte for byte, and the boot log's `BOOT: base` line to the base's size. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
@@ -909,10 +956,10 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `tests.warn_ms` | integer | mark slower tests as `OVER_TIME` |
 | `tests.run` | comma-separated globs | only run matching tests |
 | `tests.skip` | comma-separated globs | skip matching tests |
-| `root` | `auto` / `initramfs` / `virtio` / `/dev/vdX[N]` / `vdX[N]` | which filesystem `/` is. `auto` prefers a writable `disk0` and falls back to the initramfs; a device name selects a probe-order device and, with a number, a GPT/MBR partition of it; an absent device or partition degrades to the initramfs with a klog line |
+| `root` | `auto` / `initramfs` / `disk` / a device | which filesystem `/` is. `auto` prefers a writable `disk0` and falls back to the initramfs; `initramfs` mounts no disk a `mount=` does not name; a device is any mount-source spelling — `nvme0n1p2`, `/dev/vda`, `PARTUUID=`, `UUID=`, `LABEL=`; an absent device or partition degrades to the initramfs with a klog line |
 | `mount` | `<device>:/<path>` / `LABEL=<label>:/<path>`, repeatable | mount an ext2 volume read-write after the root is up, in cmdline order; the source takes every spelling `mount(2)` accepts. A failure is one klog line and the boot goes on |
 | `lockdep` | `off` / `warn` / `panic` | lock-order validator policy; default `panic` |
-| `verity` | `require` | an attached disk must mount with a verity trailer or the `fs init` boot step fails; no disk at all still passes. `just iso` sets it: the live ISO trusts no disk it finds without a trailer |
+| `verity` | `require` | the root disk must mount with a verity trailer or the `fs init` boot step fails; no disk at all still passes |
 | `sched.ap_pause_ms` | integer | wall-clock budget for the AP pause; `0` disables the deadline and falls back to the iteration bound. Default measured — see `AP_PAUSE_BUDGET_NS_DEFAULT` |
 | `kconsole` | `off` / `on` / `<hex mask>` | diagnostic-console permission mask; default `on` (informational only) |
 | `kconsole.serial` | `on` / `off` | serial BREAK trigger; default `on` |

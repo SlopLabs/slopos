@@ -116,7 +116,7 @@ impl FileStat {
         out.st_uid = 0;
         out.st_gid = 0;
         out._pad0 = 0;
-        out.st_rdev = (u64::from(self.dev_major) << 8) | u64::from(self.dev_minor);
+        out.st_rdev = slopos_abi::fs::makedev(self.dev_major, self.dev_minor);
         out.st_size = i64::try_from(self.size).unwrap_or(i64::MAX);
         out.st_blksize = 4096;
         out.st_blocks = i64::try_from(self.size.div_ceil(512)).unwrap_or(i64::MAX);

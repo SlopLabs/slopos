@@ -123,7 +123,7 @@ const RECORD_RUN: usize = 32;
 
 /// Slots one check-point step may carry home in one request. Bounds the
 /// staging buffer, which is preallocated at `RECORD_RUN`-independent size:
-/// eight 4 KiB blocks is the 32 KiB a virtio-blk chain takes whole.
+/// eight 4 KiB blocks, well inside one block request.
 const CHECKPOINT_RUN: usize = 8;
 
 /// Slots whose images the log may hold in memory: 8 MiB at 4 KiB blocks.

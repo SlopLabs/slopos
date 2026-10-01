@@ -12,7 +12,7 @@ use super::dirindex::{DirIndexSet, DirProbe};
 use super::journal::Journal;
 use super::ondisk::EXT2_MAX_BLOCK_SIZE;
 use super::types::BlockNum;
-use crate::blockdev::{BlockDevice, WriteTicket, stats};
+use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket, stats};
 
 /// Frames the cache never drops below. Small enough for the appliance image,
 /// large enough that a 16 GiB volume's whole allocation working set stays
@@ -137,11 +137,16 @@ impl DataBatch {
                     Ok(ticket) => {
                         pending[(head + count) % WRITE_DEPTH_MAX] = Some((next, ticket));
                         count += 1;
+                        next += 1;
+                        continue;
                     }
-                    Err(_) => self.retry(device, next, bs),
+                    Err(BlockDeviceError::Busy) if count > 0 => {}
+                    Err(_) => {
+                        self.retry(device, next, bs);
+                        next += 1;
+                        continue;
+                    }
                 }
-                next += 1;
-                continue;
             }
             if let Some((k, ticket)) = pending[head].take() {
                 if device.complete_write(ticket).is_ok() {
@@ -1283,7 +1288,9 @@ impl BlockCache {
     /// Hand `run` to the device as one gathered request, and mark it clean:
     /// the bytes are the device's once this returns, and a scan that reaches
     /// another block of the run before it completes must not send it twice.
-    /// [`Self::finish_run`] puts back what a failure owes.
+    /// [`Self::finish_run`] puts back what a failure owes. With no slot free
+    /// and no other run in flight it writes synchronously, since waiting then
+    /// holds nothing up.
     ///
     /// `#[inline(never)]`: the segment array is 512 bytes of frame no caller
     /// can afford on top of its own.
@@ -1292,7 +1299,7 @@ impl BlockCache {
         &mut self,
         device: &dyn BlockDevice,
         inflight: usize,
-    ) -> Result<WriteTicket, Ext2Error> {
+    ) -> Result<WriteTicket, BlockDeviceError> {
         let bs = self.block_size as usize;
         let len = usize::from(self.inflight.lens[inflight]);
         let run = self.inflight.runs[inflight];
@@ -1305,9 +1312,13 @@ impl BlockCache {
             for k in 0..len {
                 segs[k] = &self.entries[run[k] as usize].frame.as_bytes()[..bs];
             }
-            device
-                .submit_write(offset, &segs[..len])
-                .map_err(Ext2Error::from)?
+            match device.submit_write(offset, &segs[..len]) {
+                Err(BlockDeviceError::Busy) if self.inflight.count == 1 => {
+                    device.write_vectored(offset, &segs[..len])?;
+                    WriteTicket::new(WriteTicket::DONE, 0)
+                }
+                submitted => submitted?,
+            }
         };
         for k in 0..len {
             self.set_dirty(run[k] as usize, false);
@@ -2043,11 +2054,20 @@ impl BlockCache {
                 );
                 self.inflight.runs[at] = run;
                 self.inflight.lens[at] = len as u8;
-                match self.submit_run(device, at) {
+                let ticket = loop {
+                    match self.submit_run(device, at) {
+                        Err(BlockDeviceError::Busy) if self.inflight.count > 1 => {
+                            let keep = self.inflight.count - 1;
+                            written += self.complete_inflight(device, keep, &mut first_err);
+                        }
+                        ticket => break ticket,
+                    }
+                };
+                match ticket {
                     Ok(ticket) => self.inflight.tickets[at] = Some(ticket),
                     Err(e) => {
                         self.inflight.pop_newest();
-                        first_err.get_or_insert(e);
+                        first_err.get_or_insert(e.into());
                     }
                 }
                 submitted += len;

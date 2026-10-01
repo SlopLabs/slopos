@@ -3,10 +3,12 @@
 //!
 //! GPT layout and validation follow the UEFI Specification (2.10) §5.3: the
 //! header at LBA 1, the backup at the last logical block, a CRC32 over each of
-//! the header and the entry array. MBR is the conventional 512-byte boot
-//! sector, `0xAA55` at offset 510 and four 16-byte entries from 446. Only an
-//! MBR entry's LBA fields are read: its CHS fields cannot address a modern
-//! disk and disagree with the LBA fields often enough to be a trap.
+//! the header and the entry array. MBR is the conventional boot sector,
+//! `0xAA55` at offset 510, the disk signature at 440 and four 16-byte entries
+//! from 446. Only an MBR entry's LBA fields are read: its CHS fields cannot
+//! address a modern disk and disagree with the LBA fields often enough to be a
+//! trap. Both count in the device's logical blocks, so a 4K-native disk's
+//! header is at byte 4096.
 
 use slopos_ostd::klog_info;
 use slopos_ostd::{KArc, KVec};
@@ -14,13 +16,11 @@ use slopos_ostd::{KArc, KVec};
 use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket, total_seg_len};
 use crate::verity::crc32;
 
-/// Table offsets are in units of this whatever the device's physical sector
-/// size is: a 4K-native disk still describes its table in 512-byte blocks.
-pub const LOGICAL_SECTOR: u64 = 512;
+/// The boot sector's size, which is also the smallest logical block.
+const MBR_BYTES: usize = 512;
 
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 const GPT_HEADER_MIN: u32 = 92;
-const GPT_HEADER_MAX: u32 = 512;
 const GPT_MAX_ENTRIES: u32 = 128;
 const GPT_MIN_ENTRY_SIZE: u32 = 128;
 /// The array is staged whole to CRC it, so the allocation is bounded here
@@ -28,6 +28,7 @@ const GPT_MIN_ENTRY_SIZE: u32 = 128;
 const GPT_MAX_ARRAY_BYTES: u64 = 32 * 1024;
 const GPT_PRIMARY_LBA: u64 = 1;
 
+const MBR_DISK_SIGNATURE_AT: usize = 440;
 const MBR_SIGNATURE_AT: usize = 510;
 const MBR_SIGNATURE: u16 = 0xAA55;
 const MBR_ENTRY_AT: usize = 446;
@@ -53,8 +54,9 @@ pub enum PartitionError {
     ProtectiveMbrWithoutGpt,
     /// Both GPT copies failed validation and there is no MBR to fall back to.
     CorruptGpt,
-    /// A [`PartitionDevice`] window that does not start on a logical-sector
-    /// boundary.
+    /// A [`PartitionDevice`] window that does not start on a logical-block
+    /// boundary, or a device whose logical block size is not a power of two
+    /// of at least 512.
     Misaligned,
     /// A [`PartitionDevice`] window that is empty or leaves the parent.
     OutOfRange,
@@ -74,6 +76,74 @@ pub struct PartitionEntry {
     pub start: u64,
     pub len: u64,
     pub kind: PartitionKind,
+    pub uuid: PartUuid,
+}
+
+/// What `PARTUUID=` names a partition by: a GPT entry's unique partition
+/// GUID, or an MBR disk's signature with the entry's number.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PartUuid {
+    Gpt([u8; 16]),
+    Mbr { signature: u32, number: u8 },
+}
+
+/// Room for the longest [`PartUuid`] spelling, a GUID's 36 characters.
+pub const PARTUUID_TEXT_MAX: usize = 36;
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+fn put_hex(out: &mut [u8], bytes: impl Iterator<Item = u8>) -> usize {
+    let mut at = 0;
+    for byte in bytes {
+        out[at] = HEX[usize::from(byte >> 4)];
+        out[at + 1] = HEX[usize::from(byte & 0xF)];
+        at += 2;
+    }
+    at
+}
+
+/// A GUID in its registry spelling, lowercase: the first three fields are
+/// stored little-endian and the last two as bytes.
+pub fn format_guid(guid: &[u8; 16], out: &mut [u8; PARTUUID_TEXT_MAX]) {
+    let groups: [&[usize]; 5] = [
+        &[3, 2, 1, 0],
+        &[5, 4],
+        &[7, 6],
+        &[8, 9],
+        &[10, 11, 12, 13, 14, 15],
+    ];
+    let mut at = 0;
+    for (i, group) in groups.iter().enumerate() {
+        if i > 0 {
+            out[at] = b'-';
+            at += 1;
+        }
+        at += put_hex(&mut out[at..], group.iter().map(|&b| guid[b]));
+    }
+}
+
+impl PartUuid {
+    /// The lowercase spelling Linux gives it: a GUID, or `ssssssss-nn` in
+    /// hex for MBR.
+    pub fn format(&self, out: &mut [u8; PARTUUID_TEXT_MAX]) -> usize {
+        match self {
+            PartUuid::Gpt(guid) => {
+                format_guid(guid, out);
+                PARTUUID_TEXT_MAX
+            }
+            PartUuid::Mbr { signature, number } => {
+                let at = put_hex(out, signature.to_be_bytes().into_iter());
+                out[at] = b'-';
+                at + 1 + put_hex(&mut out[at + 1..], core::iter::once(*number))
+            }
+        }
+    }
+
+    pub fn matches(&self, text: &[u8]) -> bool {
+        let mut buf = [0u8; PARTUUID_TEXT_MAX];
+        let len = self.format(&mut buf);
+        buf[..len].eq_ignore_ascii_case(text)
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -86,6 +156,15 @@ pub enum PartitionScheme {
 pub struct PartitionTable {
     pub scheme: PartitionScheme,
     pub entries: KVec<PartitionEntry>,
+}
+
+/// The device's logical block size, if it is one a table can be counted in.
+fn block_size_of(device: &dyn BlockDevice) -> Result<u64, PartitionError> {
+    let size = device.logical_block_size();
+    if size < MBR_BYTES as u32 || !size.is_power_of_two() {
+        return Err(PartitionError::Misaligned);
+    }
+    Ok(u64::from(size))
 }
 
 impl PartitionTable {
@@ -153,23 +232,43 @@ enum GptReject {
 /// GPT is tried before MBR because a GPT disk carries a protective MBR that
 /// would otherwise parse as one partition spanning the disk.
 pub fn probe(device: &dyn BlockDevice) -> Result<PartitionTable, PartitionError> {
-    let capacity = device.capacity();
-    if capacity < 2 * LOGICAL_SECTOR {
+    let geometry = Geometry {
+        capacity: device.capacity(),
+        block: block_size_of(device)?,
+    };
+    if geometry.capacity < 2 * geometry.block {
         return Ok(PartitionTable::unpartitioned());
     }
 
-    let gpt_claimed = match probe_gpt(device, capacity) {
+    let gpt_claimed = match probe_gpt(device, geometry) {
         Ok(Some(table)) => return Ok(table),
         Ok(None) => false,
         Err(PartitionError::CorruptGpt) => true,
         Err(e) => return Err(e),
     };
 
-    match probe_mbr(device, capacity) {
+    match probe_mbr(device, geometry) {
         Ok(table) if gpt_claimed && table.scheme == PartitionScheme::None => {
             Err(PartitionError::CorruptGpt)
         }
         other => other,
+    }
+}
+
+/// A device's size and the logical block its table counts in, both in bytes.
+#[derive(Clone, Copy)]
+struct Geometry {
+    capacity: u64,
+    block: u64,
+}
+
+impl Geometry {
+    fn blocks(&self) -> u64 {
+        self.capacity / self.block
+    }
+
+    fn byte_of(&self, lba: u64) -> Option<u64> {
+        lba.checked_mul(self.block)
     }
 }
 
@@ -179,18 +278,18 @@ pub fn probe(device: &dyn BlockDevice) -> Result<PartitionTable, PartitionError>
 #[inline(never)]
 fn probe_gpt(
     device: &dyn BlockDevice,
-    capacity: u64,
+    geometry: Geometry,
 ) -> Result<Option<PartitionTable>, PartitionError> {
-    let primary = match read_gpt_copy(device, capacity, GPT_PRIMARY_LBA) {
+    let primary = match read_gpt_copy(device, geometry, GPT_PRIMARY_LBA) {
         Ok(table) => return Ok(Some(table)),
         Err(e) => e,
     };
 
-    let backup_lba = capacity / LOGICAL_SECTOR - 1;
+    let backup_lba = geometry.blocks() - 1;
     let backup = if backup_lba == GPT_PRIMARY_LBA {
         GptReject::Absent
     } else {
-        match read_gpt_copy(device, capacity, backup_lba) {
+        match read_gpt_copy(device, geometry, backup_lba) {
             Ok(table) => {
                 klog_info!(
                     "PART: primary GPT header unusable, parsed the backup at LBA {backup_lba}"
@@ -226,17 +325,16 @@ struct GptHeader {
 #[inline(never)]
 fn read_gpt_copy(
     device: &dyn BlockDevice,
-    capacity: u64,
+    geometry: Geometry,
     lba: u64,
 ) -> Result<PartitionTable, GptReject> {
-    let header = parse_gpt_header(device, capacity, lba)?;
+    let header = parse_gpt_header(device, geometry, lba)?;
     let array_bytes = header.num_entries as u64 * header.entry_size as u64;
 
     let mut array = staged(array_bytes as usize)
         .map_err(|_| GptReject::Indeterminate(PartitionError::NoMemory))?;
-    let at = header
-        .entry_lba
-        .checked_mul(LOGICAL_SECTOR)
+    let at = geometry
+        .byte_of(header.entry_lba)
         .ok_or(GptReject::Corrupt)?;
     device
         .read_at(at, array.as_mut_slice())
@@ -256,6 +354,8 @@ fn read_gpt_copy(
         if type_guid.iter().all(|&b| b == 0) {
             continue;
         }
+        let mut unique = [0u8; 16];
+        unique.copy_from_slice(&raw[16..32]);
         let first = le_u64(raw, 32);
         let last = le_u64(raw, 40);
         let number = (index + 1) as u8;
@@ -263,16 +363,21 @@ fn read_gpt_copy(
             klog_info!("PART: GPT entry {number} lies outside the usable range — skipped");
             continue;
         }
-        let Some((start, len)) = window_bytes(first, last, capacity) else {
+        let Some((start, len)) = window_bytes(first, last, geometry) else {
             klog_info!("PART: GPT entry {number} leaves the device — skipped");
             continue;
         };
+        if overlaps_any(&entries, start, len) {
+            klog_info!("PART: GPT entry {number} overlaps an earlier one — skipped");
+            continue;
+        }
         entries
             .push(PartitionEntry {
                 number,
                 start,
                 len,
                 kind: PartitionKind::Gpt { type_guid },
+                uuid: PartUuid::Gpt(unique),
             })
             .map_err(|_| GptReject::Indeterminate(PartitionError::NoMemory))?;
     }
@@ -285,13 +390,13 @@ fn read_gpt_copy(
 
 fn parse_gpt_header(
     device: &dyn BlockDevice,
-    capacity: u64,
+    geometry: Geometry,
     lba: u64,
 ) -> Result<GptHeader, GptReject> {
     // Nothing has claimed a GPT here yet, so a failure to stage or read the
-    // sector leaves the disk a candidate for MBR.
-    let mut header = staged(LOGICAL_SECTOR as usize).map_err(|_| GptReject::Absent)?;
-    let at = lba.checked_mul(LOGICAL_SECTOR).ok_or(GptReject::Absent)?;
+    // block leaves the disk a candidate for MBR.
+    let mut header = staged(geometry.block as usize).map_err(|_| GptReject::Absent)?;
+    let at = geometry.byte_of(lba).ok_or(GptReject::Absent)?;
     device
         .read_at(at, header.as_mut_slice())
         .map_err(|_| GptReject::Absent)?;
@@ -302,7 +407,7 @@ fn parse_gpt_header(
         return Err(GptReject::Unsupported);
     }
     let header_size = le_u32(&header, 12);
-    if !(GPT_HEADER_MIN..=GPT_HEADER_MAX).contains(&header_size) {
+    if !(u64::from(GPT_HEADER_MIN)..=geometry.block).contains(&u64::from(header_size)) {
         return Err(GptReject::Corrupt);
     }
     let stored_crc = le_u32(&header, 16);
@@ -336,24 +441,27 @@ fn parse_gpt_header(
         return Err(GptReject::Unsupported);
     }
 
-    let total_sectors = capacity / LOGICAL_SECTOR;
-    if first_usable > last_usable || last_usable >= total_sectors {
+    if first_usable > last_usable || last_usable >= geometry.blocks() {
         return Err(GptReject::Corrupt);
     }
-    let array_end = entry_lba
-        .checked_mul(LOGICAL_SECTOR)
+    let array_end = geometry
+        .byte_of(entry_lba)
         .and_then(|b| b.checked_add(array_bytes))
         .ok_or(GptReject::Corrupt)?;
-    if array_end > capacity {
+    if array_end > geometry.capacity {
         return Err(GptReject::Corrupt);
     }
-    // UEFI §5.3.2: the entry array must not intersect
-    // `[FirstUsableLBA, LastUsableLBA]`, or a partition window could contain
-    // the GPT itself and a read-write mount inside it would destroy the table.
+    // UEFI §5.3.2: `[FirstUsableLBA, LastUsableLBA]` holds neither header nor
+    // this copy's entry array, or a partition window could contain the GPT
+    // itself and a read-write mount inside it would destroy the table.
     // Intersection, not "below first_usable": a *backup* array legitimately
     // sits above `LastUsableLBA`.
-    let array_last_lba = entry_lba + (array_bytes - 1) / LOGICAL_SECTOR;
-    if entry_lba <= last_usable && array_last_lba >= first_usable {
+    let usable = first_usable..=last_usable;
+    let array_last_lba = entry_lba + (array_bytes - 1) / geometry.block;
+    if usable.contains(&GPT_PRIMARY_LBA)
+        || usable.contains(&(geometry.blocks() - 1))
+        || (entry_lba <= last_usable && array_last_lba >= first_usable)
+    {
         return Err(GptReject::Corrupt);
     }
 
@@ -367,26 +475,38 @@ fn parse_gpt_header(
     })
 }
 
+/// Whether `[start, start + len)` shares a byte with a window in `entries`: two
+/// claims on one disk exclude each other only when they name the same window.
+fn overlaps_any(entries: &[PartitionEntry], start: u64, len: u64) -> bool {
+    entries
+        .iter()
+        .any(|e| start < e.start + e.len && e.start < start + len)
+}
+
 /// Inclusive LBA range to a byte window, `None` if it leaves the device.
-fn window_bytes(first_lba: u64, last_lba: u64, capacity: u64) -> Option<(u64, u64)> {
-    let start = first_lba.checked_mul(LOGICAL_SECTOR)?;
-    let sectors = last_lba.checked_sub(first_lba)?.checked_add(1)?;
-    let len = sectors.checked_mul(LOGICAL_SECTOR)?;
-    if start.checked_add(len)? > capacity {
+fn window_bytes(first_lba: u64, last_lba: u64, geometry: Geometry) -> Option<(u64, u64)> {
+    let start = geometry.byte_of(first_lba)?;
+    let blocks = last_lba.checked_sub(first_lba)?.checked_add(1)?;
+    let len = geometry.byte_of(blocks)?;
+    if start.checked_add(len)? > geometry.capacity {
         return None;
     }
     Some((start, len))
 }
 
 #[inline(never)]
-fn probe_mbr(device: &dyn BlockDevice, capacity: u64) -> Result<PartitionTable, PartitionError> {
-    let mut sector = staged(LOGICAL_SECTOR as usize)?;
+fn probe_mbr(
+    device: &dyn BlockDevice,
+    geometry: Geometry,
+) -> Result<PartitionTable, PartitionError> {
+    let mut sector = staged(MBR_BYTES)?;
     device
         .read_at(0, sector.as_mut_slice())
         .map_err(|_| PartitionError::Io)?;
     if le_u16(&sector, MBR_SIGNATURE_AT) != MBR_SIGNATURE {
         return Ok(PartitionTable::unpartitioned());
     }
+    let signature = le_u32(&sector, MBR_DISK_SIGNATURE_AT);
 
     let mut entries = KVec::new();
     let mut protective = false;
@@ -417,16 +537,25 @@ fn probe_mbr(device: &dyn BlockDevice, capacity: u64) -> Result<PartitionTable, 
         if sectors == 0 {
             continue;
         }
-        let Some((start, len)) = window_bytes(first, first + sectors - 1, capacity) else {
+        if first == 0 {
+            klog_info!("PART: MBR entry {number} covers the table itself — skipped");
+            continue;
+        }
+        let Some((start, len)) = window_bytes(first, first + sectors - 1, geometry) else {
             klog_info!("PART: MBR entry {number} leaves the device — skipped");
             continue;
         };
+        if overlaps_any(&entries, start, len) {
+            klog_info!("PART: MBR entry {number} overlaps an earlier one — skipped");
+            continue;
+        }
         entries
             .push(PartitionEntry {
                 number,
                 start,
                 len,
                 kind: PartitionKind::Mbr { type_byte },
+                uuid: PartUuid::Mbr { signature, number },
             })
             .map_err(|_| PartitionError::NoMemory)?;
     }
@@ -476,6 +605,10 @@ impl BlockDevice for SharedBlockDevice {
         self.0.capacity()
     }
 
+    fn logical_block_size(&self) -> u32 {
+        self.0.logical_block_size()
+    }
+
     fn write_protected(&self) -> bool {
         self.0.write_protected()
     }
@@ -498,8 +631,8 @@ pub struct PartitionDevice {
 }
 
 impl PartitionDevice {
-    /// `start` must be logical-sector aligned: virtio-blk turns a
-    /// partial-sector write into a read-modify-write, so a misaligned window
+    /// `start` must be logical-block aligned: the block layer turns a
+    /// partial-block write into a read-modify-write, so a misaligned window
     /// would put every filesystem metadata write over bytes outside the
     /// partition.
     pub fn try_new(
@@ -507,7 +640,7 @@ impl PartitionDevice {
         start: u64,
         len: u64,
     ) -> Result<Self, PartitionError> {
-        if start % LOGICAL_SECTOR != 0 {
+        if start % block_size_of(parent.as_ref())? != 0 {
             return Err(PartitionError::Misaligned);
         }
         let end = start.checked_add(len).ok_or(PartitionError::OutOfRange)?;
@@ -563,6 +696,10 @@ impl BlockDevice for PartitionDevice {
     /// lock and this is on every bounds check.
     fn capacity(&self) -> u64 {
         self.len
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        self.parent.logical_block_size()
     }
 
     fn write_protected(&self) -> bool {

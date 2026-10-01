@@ -16,21 +16,22 @@ pub enum BlockDeviceError {
     /// The device did not answer in time. What it had already been handed
     /// may still land; a request that waited on an earlier one was never sent.
     Timeout,
-    /// The requesting task was killed before the device was handed the
-    /// request, so none of it will land; an earlier part of a request split
-    /// across several may have.
+    /// The requesting task was killed, and nothing it left with the device
+    /// can change the medium: the request never reached it, or was a read or
+    /// a flush. An earlier part of a request split across several may have
+    /// landed.
     Interrupted,
+    /// The requesting task was killed while the device held the request. It
+    /// may still land, ahead of every later write to the same medium.
+    Abandoned,
     /// The device completed the request but reported a failure.
     DeviceFault,
     Unsupported,
     OutOfMemory,
 }
 
-/// Stable, enumeration-order identity for a block device, assigned at probe
-/// time: `disk0` is the first device claimed (by convention the root filesystem
-/// image), `disk1` the second (a scratch device for destructive tests).
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlockDeviceIndex(pub u16);
+/// The logical block size of a device that is no disk, such as a memory image.
+pub const DEFAULT_LOGICAL_BLOCK: u32 = 512;
 
 pub(crate) fn total_seg_len(segs: &[&[u8]]) -> Result<usize, BlockDeviceError> {
     let mut total = 0usize;
@@ -74,6 +75,12 @@ pub trait BlockDevice {
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError>;
     fn capacity(&self) -> u64;
 
+    /// The unit the medium is addressed in: what a partition table counts in,
+    /// and the span below which a write is a read-modify-write. A power of two
+    /// of at least 512. No default: a wrapper that forgot to forward it would
+    /// answer 512 over a 4096-byte disk and silence every check keyed on it.
+    fn logical_block_size(&self) -> u32;
+
     /// Write `segs` back to back starting at `offset`.
     fn write_vectored(&self, offset: u64, segs: &[&[u8]]) -> Result<(), BlockDeviceError> {
         let mut at = offset;
@@ -90,6 +97,10 @@ pub trait BlockDevice {
     /// finished, so a caller can keep [`Self::write_depth`] writes in flight.
     /// The bytes are copied before this returns. The default writes
     /// synchronously.
+    ///
+    /// Never waits for a request slot: `Busy` when none is free. Only the
+    /// caller can complete the writes it holds, so it completes one before
+    /// trying again, or writes synchronously when it holds none.
     fn submit_write(&self, offset: u64, segs: &[&[u8]]) -> Result<WriteTicket, BlockDeviceError> {
         self.write_vectored(offset, segs)?;
         Ok(WriteTicket::new(WriteTicket::DONE, 0))
@@ -119,8 +130,8 @@ pub trait BlockDevice {
     /// returning `Ok` only means the bytes reached that cache.
     ///
     /// The default is a no-op for devices that are inherently durable on write
-    /// (e.g. [`MemoryBlockDevice`], or a virtio-blk backend that did not
-    /// negotiate `VIRTIO_BLK_F_FLUSH`).
+    /// (e.g. [`MemoryBlockDevice`], or a disk without a volatile write
+    /// cache).
     fn flush(&self) -> Result<(), BlockDeviceError> {
         Ok(())
     }
@@ -140,15 +151,24 @@ pub trait BlockDevice {
 
 pub struct MemoryBlockDevice {
     buffer: slopos_ostd::sync::SpinLock<KVec<u8>>,
+    block_size: u32,
 }
 
 impl MemoryBlockDevice {
     pub fn allocate(len: usize) -> Option<Self> {
+        Self::allocate_with_block_size(len, DEFAULT_LOGICAL_BLOCK)
+    }
+
+    /// A device that reports `block_size` as its logical block size, as a
+    /// 4K-native disk does. Byte access stays exact: nothing here
+    /// read-modify-writes.
+    pub fn allocate_with_block_size(len: usize, block_size: u32) -> Option<Self> {
         let mut buffer = KVec::with_capacity(len).ok()?;
         for _ in 0..len {
             buffer.push(0).ok()?;
         }
         Some(Self {
+            block_size,
             buffer: slopos_ostd::sync::SpinLock::new(
                 buffer,
                 slopos_ostd::lock_class!(
@@ -233,6 +253,10 @@ impl BlockDevice for MemoryBlockDevice {
     fn capacity(&self) -> u64 {
         self.buffer.lock().len() as u64
     }
+
+    fn logical_block_size(&self) -> u32 {
+        self.block_size
+    }
 }
 
 /// Storage cost, counted at the device.
@@ -243,8 +267,8 @@ impl BlockDevice for MemoryBlockDevice {
 pub mod stats {
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    /// Unit the block counts are in: the logical sector every block device
-    /// addresses in, so one number covers any filesystem block size.
+    /// Unit the block counts are in, whatever a device's logical block size,
+    /// so one number covers every device and filesystem block size.
     pub const SECTOR_BYTES: usize = 512;
 
     static READ_REQUESTS: AtomicU64 = AtomicU64::new(0);

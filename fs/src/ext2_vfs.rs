@@ -197,6 +197,10 @@ impl BlockDevice for GatedDevice {
         self.inner.capacity()
     }
 
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
+    }
+
     fn write_protected(&self) -> bool {
         self.inner.write_protected()
     }
@@ -1000,6 +1004,17 @@ impl Ext2Mount {
         // sub-block read is one verity would not check anyway.
         let (superblock, block_size, inode_size) =
             Ext2Fs::mount_params(&*device).map_err(ext2_error_to_vfs)?;
+        // A filesystem block the medium cannot write on its own would be a
+        // read-modify-write of its neighbours, and a torn one takes blocks
+        // outside the transaction with it.
+        if (block_size as u64) < u64::from(device.logical_block_size()) {
+            klog_info!(
+                "ext2: refusing {}-byte blocks on a device of {}-byte logical blocks",
+                block_size,
+                device.logical_block_size()
+            );
+            return Err(VfsError::InvalidArgument);
+        }
         let extent = FsExtent {
             block_size,
             blocks: superblock.blocks_count as u64,
@@ -1673,8 +1688,8 @@ impl Ext2Mount {
     }
 }
 
-/// Must be called with interrupts still enabled — the virtio-blk completion
-/// path needs them. Best-effort, and over every bound instance: a second
+/// Must be called with interrupts still enabled — a block completion needs
+/// them. Best-effort, and over every bound instance: a second
 /// filesystem's dirty blocks are as lost as the root's if nobody writes them.
 pub fn ext2_vfs_shutdown_sync() {
     FLUSH_STOP.request();

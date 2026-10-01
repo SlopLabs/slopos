@@ -2,6 +2,21 @@
 
 **No finding is open.**
 
+Swept 2026-10-01: the block layer and NVMe — raw reads, writes and flushes of
+`/dev` block nodes, `BLKRRPART` and the size ioctls, the claims a mount and a
+raw write take, `/dev/disk/by-*` and the `PARTUUID=`/`UUID=`/`LABEL=`
+resolver, partition tables and filesystem superblocks read off removable
+media, and an NVMe controller left running by firmware. A raw read, a raw
+write and a re-read need the task to be privileged or hold `Mount`, a write
+or a re-read is refused while anything holds the disk, and a claim is held to
+the node its source resolved to. Four reviews found defects in the change
+before it landed, none in code that had shipped: two partition entries could
+share a window and each be mounted writable; a kill after the device held a
+write left ext2 writable over a journal write of unknown fate; and the probe
+let a controller master the bus before resetting it. Below the bar: any task
+can read a disk's size, block size and volume labels and UUIDs, as Linux
+exposes `/dev/disk/by-*` to every user.
+
 Swept 2026-09-30: the tools the root now carries and what they reached —
 `socket(2)`'s type flags and argument checks, `accept4(2)`, a new socket
 description's blocking mode, libcurl on Mbed TLS, the recipe licence

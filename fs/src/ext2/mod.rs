@@ -70,7 +70,8 @@ pub enum Ext2Error {
     /// A rename would splice a directory into its own subtree, detaching it
     /// and everything under it from the root.
     InvalidPath,
-    /// The requester was killed before the device was handed its request.
+    /// The requester was killed, leaving nothing with the device that can
+    /// change the image.
     Interrupted,
 }
 

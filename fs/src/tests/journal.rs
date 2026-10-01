@@ -107,6 +107,10 @@ impl BlockDevice for ProbeDevice {
         self.inner.capacity()
     }
 
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
+    }
+
     fn flush(&self) -> Result<(), BlockDeviceError> {
         PROBE_FLUSHES.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -1362,6 +1366,10 @@ impl BlockDevice for ExtentDevice {
         self.inner.capacity()
     }
 
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
+    }
+
     fn flush(&self) -> Result<(), BlockDeviceError> {
         EXT_BARRIERS.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -1643,6 +1651,10 @@ impl BlockDevice for TamperDevice {
 
     fn capacity(&self) -> u64 {
         self.inner.capacity()
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
     }
 }
 

@@ -219,3 +219,70 @@ fn init_inner() -> i32 {
     HPET_INIT_IN_PROGRESS.leave();
     0
 }
+
+/// HPET-based polling loop. On the BSP `sti; hlt` sleeps until the next
+/// interrupt; APs spin. Returns `false` on timeout.
+pub(crate) fn poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
+    if condition() {
+        return true;
+    }
+
+    let Some(ticks_needed) = ms_to_ticks(timeout_ms) else {
+        for _ in 0..100_000u32 {
+            if condition() {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        return condition();
+    };
+
+    let start = read_counter();
+    let allow_hlt = slopos_arch::pcr::get_current_cpu() == 0;
+
+    loop {
+        slopos_ostd::cpu::x86_64::interrupts::disable_interrupts();
+
+        if condition() {
+            slopos_ostd::cpu::x86_64::interrupts::enable_interrupts();
+            return true;
+        }
+
+        if read_counter().wrapping_sub(start) >= ticks_needed {
+            slopos_ostd::cpu::x86_64::interrupts::enable_interrupts();
+            return false;
+        }
+
+        if allow_hlt {
+            slopos_ostd::cpu::x86_64::core::sti_hlt_atomic();
+        } else {
+            slopos_ostd::cpu::x86_64::interrupts::enable_interrupts();
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Busy-poll `condition` for up to `timeout_ms` without touching the
+/// interrupt flag, for paths that run with interrupts off or must not take
+/// one. Returns `false` on timeout.
+pub(crate) fn spin_until(condition: &mut dyn FnMut() -> bool, timeout_ms: u32) -> bool {
+    let Some(ticks) = ms_to_ticks(timeout_ms) else {
+        for _ in 0..u64::from(timeout_ms) * 100_000 {
+            if condition() {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        return condition();
+    };
+    let start = read_counter();
+    loop {
+        if condition() {
+            return true;
+        }
+        if read_counter().wrapping_sub(start) >= ticks {
+            return condition();
+        }
+        core::hint::spin_loop();
+    }
+}

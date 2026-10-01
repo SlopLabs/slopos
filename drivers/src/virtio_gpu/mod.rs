@@ -520,7 +520,7 @@ impl VirtioGpuInner {
         match waiters.wait_event_timeout_until(collect, CMD_TIMEOUT_MS as u64) {
             Ok(page) => Some(page),
             Err(WaitAbort::NoRuntime) => {
-                virtio::hpet_poll_wait(
+                crate::hpet::poll_wait(
                     &|| {
                         let mut st = self.state.lock();
                         let q = match which {

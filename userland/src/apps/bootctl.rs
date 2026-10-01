@@ -16,7 +16,8 @@
 //! loader variables and the reboot.
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{FileExt, FileTypeExt};
 
 use slopos_fat_core::{Device, Error as FatError, Volume};
 
@@ -30,6 +31,8 @@ use crate::syscall::numbers::{
 use crate::syscall::process;
 
 const CONFIG: &str = "/limine.conf";
+/// The block size a regular file standing in for a disk is addressed in.
+const IMAGE_FILE_BLOCK: u32 = 512;
 const ENTRY_PREFIX: &str = "slopos-";
 const KERNEL: &str = "kernel.elf";
 const BASE: &str = "base.img";
@@ -42,6 +45,7 @@ const ONE_SHOT_ATTRIBUTES: u32 =
 struct BlockFile {
     file: File,
     size: u64,
+    block: u32,
 }
 
 impl Device for BlockFile {
@@ -64,6 +68,10 @@ impl Device for BlockFile {
     fn size(&self) -> u64 {
         self.size
     }
+
+    fn block_size(&self) -> u32 {
+        self.block
+    }
 }
 
 fn open_volume(path: &str) -> Result<Volume<BlockFile>, String> {
@@ -73,28 +81,31 @@ fn open_volume(path: &str) -> Result<Volume<BlockFile>, String> {
         .open(path)
         .map_err(|e| format!("{path}: {e}"))?;
     let size = file.metadata().map_err(|e| format!("{path}: {e}"))?.len();
-    Volume::open(BlockFile { file, size })
+    let block = crate::syscall::fs::block_size(file.as_raw_fd()).unwrap_or(IMAGE_FILE_BLOCK);
+    Volume::open(BlockFile { file, size, block })
         .map_err(|e| format!("{path}: not a FAT32 volume ({e:?})"))
 }
 
-/// The first block node holding a FAT32 volume with a Limine configuration.
+/// The first block node holding a FAT32 volume whose Limine configuration
+/// boots a SlopOS slot: a disk shared with another system may carry its ESP
+/// too.
 fn find_esp() -> Result<String, String> {
     let mut names: Vec<String> = std::fs::read_dir("/dev")
         .map_err(|e| format!("/dev: {e}"))?
         .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_block_device()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with("vd"))
         .collect();
     names.sort();
     for name in names {
         let path = format!("/dev/{name}");
         if let Ok(mut volume) = open_volume(&path)
-            && volume.stat(CONFIG).is_ok()
+            && read_config(&mut volume).is_ok_and(|config| boots_a_slot(&config))
         {
             return Ok(path);
         }
     }
-    Err("no EFI system partition with /limine.conf found; pass --esp /dev/<node>".into())
+    Err("no EFI system partition with a SlopOS /limine.conf found; pass --esp /dev/<node>".into())
 }
 
 fn loader_var(name: &str) -> Result<Option<String>, String> {
@@ -133,10 +144,21 @@ fn with_default_entry(config: &str, entry: &str) -> String {
     out
 }
 
+/// The top-level entry a `/name` line opens; Limine shows a `/+name` one
+/// expanded.
+fn entry_name(line: &str) -> Option<&str> {
+    let name = line.trim_start().strip_prefix('/')?;
+    Some(name.strip_prefix('+').unwrap_or(name).trim())
+}
+
 fn has_entry(config: &str, entry: &str) -> bool {
+    config.lines().any(|l| entry_name(l) == Some(entry))
+}
+
+fn boots_a_slot(config: &str) -> bool {
     config
         .lines()
-        .any(|l| l.trim_start().strip_prefix('/').map(str::trim) == Some(entry))
+        .any(|l| entry_name(l).is_some_and(|entry| entry.starts_with(ENTRY_PREFIX)))
 }
 
 fn valid_slot(slot: &str) -> bool {

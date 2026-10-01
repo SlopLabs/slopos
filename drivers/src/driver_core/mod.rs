@@ -6,6 +6,7 @@ pub mod bound;
 pub mod bus;
 pub mod msi;
 pub mod platform_bound;
+pub mod shutdown;
 
 pub use bound::BoundError;
 pub use bus::{

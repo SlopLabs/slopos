@@ -522,6 +522,10 @@ impl BlockDevice for VerifiedBlockDevice {
         self.inner.capacity()
     }
 
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
+    }
+
     fn flush(&self) -> Result<(), BlockDeviceError> {
         self.inner.flush()
     }

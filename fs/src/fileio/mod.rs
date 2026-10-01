@@ -989,7 +989,7 @@ pub fn fill_char_device_stat(out: &mut UserFsStat, minor: usize, major: u32, mod
     out.st_nlink = 1;
     out.st_mode = S_IFCHR | (mode & 0o7777);
     out.st_blksize = 1024;
-    out.st_rdev = ((major as u64) << 8) | (minor as u64 & 0xFF);
+    out.st_rdev = slopos_abi::fs::makedev(major, minor as u32);
 }
 
 pub(super) fn external_tty_ops(external_ops: &ExternalOpsState) -> Option<&'static dyn FileOps> {

@@ -31,7 +31,7 @@ use slopos_ostd::{KBox, KVec, klog_info};
 use slopos_testing::{TestResult, fail};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, stats, total_seg_len};
-use crate::devfs::{DEV_NAME_MAX, devfs_block_name_by_label};
+use crate::devfs::{DEV_NAME_MAX, devfs_resolve_block_source};
 use crate::fileio::{
     FdTable, file_close_fd, file_open_at, file_read_fd, file_sync_fd, file_write_fd,
 };
@@ -43,9 +43,7 @@ use crate::vfs::{
 };
 
 /// Bytes each half of the report moves — the same count in both, or their
-/// quotient means nothing. The reference write has to land on a real device,
-/// and 2 MiB at [`RAW_OFFSET`] is the largest window of the scratch disk that
-/// disturbs no other user of it.
+/// quotient means nothing.
 const PERF_BYTES: usize = 2 * 1024 * 1024;
 
 /// One filesystem call per chunk, which is what one transaction is: a larger
@@ -53,17 +51,17 @@ const PERF_BYTES: usize = 2 * 1024 * 1024;
 /// the staging rather than the filesystem.
 const PERF_CHUNK: usize = IO_FILE_BATCH_SIZE;
 
-/// Byte 5 MiB of `disk1`: clear of the raw-sector tests (sectors 0..2,
-/// 64..255, 2048, 3072, 4000, 4608, 5120, 5632 and 8192) and of the GPT
-/// backup header in the last sector.
+/// Clear of the partition tables a block-layer test writes at the scratch
+/// namespace's two ends; nothing else there outlives the test that wrote it.
 const RAW_OFFSET: u64 = 5 * 1024 * 1024;
 
-/// `disk0`, the ext2 image this boot came from: a real filesystem on a real
-/// device, which is what the report is about.
-const PERF_DEVICE: &[u8] = b"vda";
+/// The ext2 image this boot came from: a real filesystem on a real device,
+/// which is what the report is about. The raw rate beside it is taken on the
+/// same controller.
+const PERF_DEVICE: &[u8] = b"nvme0n1";
 const PERF_MOUNT: &[u8] = b"/fsperfroot";
 const PERF_PATH: &[u8] = b"/fsperfroot/fsperf.dat";
-const RAW_DEVICE: &[u8] = b"vdb";
+const RAW_DEVICE: &[u8] = b"nvme0n2";
 
 /// Transactions per MiB this write is allowed. Staging 4 KiB per filesystem
 /// call — the shape this replaced — is 256 of them; one 256 KiB batch per
@@ -74,10 +72,9 @@ const MAX_TXNS_PER_MIB: u64 = 32;
 /// first-fit insert it replaced was quadratic.
 const CAP_DIRENTS: u32 = 4000;
 const CAP_BYTES: usize = 4 * 1024 * 1024;
-/// Disk letters are probe order, and the test harness attaches volumes of its
-/// own, so the capacity volume is found by the label `_fs-image-capacity`
-/// gives it.
-const CAP_LABEL: &[u8] = b"slopos-capacity";
+/// Found by the label `_fs-image-capacity` gives it, the spelling no
+/// attachment order changes.
+const CAP_LABEL: &[u8] = b"LABEL=slopos-capacity";
 const CAP_MOUNT: &[u8] = b"/fsperfcap";
 
 /// The subtrees `_fs-image-capacity` populates the volume with: a checked-out
@@ -273,6 +270,10 @@ impl BlockDevice for CountedDevice {
 
     fn capacity(&self) -> u64 {
         self.inner.capacity()
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
     }
 
     fn write_protected(&self) -> bool {
@@ -727,7 +728,10 @@ fn cap_residency(table: FdTable) -> Result<(u64, u64), &'static str> {
 /// builds the 16 GiB image, and an ordinary run has no such device and passes.
 pub fn test_fsperf_capacity_volume() -> TestResult {
     let mut name = [0u8; DEV_NAME_MAX];
-    let Some(name) = devfs_block_name_by_label(CAP_LABEL, &mut name).map(|len| &name[..len]) else {
+    let Some(name) = devfs_resolve_block_source(CAP_LABEL, &mut name)
+        .ok()
+        .map(|len| &name[..len])
+    else {
         klog_info!(
             "FSPERF: no ext2 capacity volume attached — skipping the capacity report \
              (attach one with `just test-capacity`)"

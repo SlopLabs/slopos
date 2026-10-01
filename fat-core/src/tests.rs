@@ -12,6 +12,7 @@ use super::*;
 struct MemDevice {
     bytes: Vec<u8>,
     log: Vec<Op>,
+    block: u32,
 }
 
 #[derive(Clone)]
@@ -25,6 +26,7 @@ impl MemDevice {
         Self {
             bytes: vec![0; size],
             log: Vec::new(),
+            block: 512,
         }
     }
 }
@@ -55,6 +57,10 @@ impl Device for MemDevice {
     fn size(&self) -> u64 {
         self.bytes.len() as u64
     }
+
+    fn block_size(&self) -> u32 {
+        self.block
+    }
 }
 
 const MIB: usize = 1024 * 1024;
@@ -71,6 +77,26 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
     (0..len)
         .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
         .collect()
+}
+
+/// A 4K-native disk formats with 4096-byte sectors, and a volume laid out
+/// in 512-byte sectors is refused there: none of its sectors is a whole block.
+#[test]
+fn sectors_follow_the_device_block_size() {
+    let size = 272 * MIB;
+    let mut dev = MemDevice::new(size);
+    dev.block = 4096;
+    format(&mut dev, size as u64, LABEL).expect("format on 4K blocks");
+    assert_eq!(u16::from_le_bytes([dev.bytes[11], dev.bytes[12]]), 4096);
+    let mut volume = Volume::open(dev).expect("open on 4K blocks");
+    let data = pattern(10_000, 3);
+    volume.write_file("/K.BIN", &data).unwrap();
+    assert_eq!(volume.read_file("/K.BIN").unwrap(), data);
+
+    let mut small = MemDevice::new(64 * MIB);
+    format(&mut small, 64 * MIB as u64, LABEL).unwrap();
+    small.block = 4096;
+    assert_eq!(Volume::open(small).err(), Some(Error::SectorTooSmall));
 }
 
 #[test]

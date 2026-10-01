@@ -173,6 +173,7 @@ dependencies = [
  "slopos-keymap-core",
  "slopos-mm",
  "slopos-net",
+ "slopos-nvme-core",
  "slopos-ostd",
  "slopos-testing",
  "slopos-vt",
@@ -294,6 +295,10 @@ version = "0.1.0"
 dependencies = [
  "slopos-abi",
 ]
+
+[[package]]
+name = "slopos-nvme-core"
+version = "0.1.0"
 
 [[package]]
 name = "slopos-ostd"

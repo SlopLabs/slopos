@@ -5,13 +5,16 @@ use slopos_ostd::sync::{InitFlag, OnceLock};
 use slopos_ostd::{KArc, KBox, lock_class};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError};
-use crate::devfs::{DEV_NAME_MAX, DevFs, devfs_block_device_by_name, devfs_block_name_by_label};
+use crate::devfs::{
+    DEV_NAME_MAX, DevFs, devfs_block_node_is, devfs_resolve_block_node,
+    devfs_standalone_block_device,
+};
 use crate::ext2_vfs::{Ext2Mount, Ext2MountInfo};
 use crate::ramfs::RamFs;
 use crate::vfs::mount::{MOUNT_RDONLY, mount, mount_at, unmount, with_mount_table};
 use crate::vfs::orphan::{drain_releasable, forget_filesystem, has_open_refs};
 use crate::vfs::traits::{FileSystem, same_filesystem};
-use crate::vfs::{VfsError, VfsResult};
+use crate::vfs::{InodeId, VfsError, VfsResult};
 
 static VFS_INIT: InitFlag = InitFlag::new();
 
@@ -251,35 +254,78 @@ pub fn vfs_ext2_mounted_instance() -> Option<&'static Ext2Mount> {
     found.map(|idx| &EXT2_POOL[idx])
 }
 
-/// Resolve a block-device name to an *exclusive writable* handle.
-///
-/// `slopos-fs` cannot name a driver — the crate graph runs fs -> core ->
-/// drivers -> boot — so boot installs the virtio-blk claim behind this.
-pub type BlockClaimFn = fn(&[u8]) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>>;
-
-static BLOCK_CLAIM: OnceLock<BlockClaimFn> = OnceLock::new();
-
-pub fn vfs_register_block_claim(claim: BlockClaimFn) {
-    BLOCK_CLAIM.call_once(|| claim);
+/// What the block layer does for devfs and `mount(2)`. `slopos-fs` cannot
+/// name a driver — the crate graph runs fs -> core -> drivers -> boot — so
+/// boot installs the block layer's entry points behind this.
+pub struct BlockLayerOps {
+    /// An exclusive writable handle on the named device or partition.
+    pub claim: fn(&[u8]) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>>,
+    /// A read-only handle, shared with other readers and held against a
+    /// writer.
+    pub claim_read: fn(&[u8]) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>>,
+    /// Re-read the named disk's partition table.
+    pub reread: fn(&[u8]) -> VfsResult<()>,
 }
 
-/// An exclusive writable handle on the named block device — `vdb`,
-/// `/dev/vdb`, `vdb2`, `/dev/vdb2`. Dropping it releases the claim.
-///
-/// `NotSupported` when no driver registered one, which is what a kernel built
-/// without the block layer looks like.
-pub fn vfs_claim_block_device(name: &[u8]) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>> {
-    let claim = BLOCK_CLAIM.get().ok_or(VfsError::NotSupported)?;
-    (*claim)(name)
+static BLOCK_LAYER: OnceLock<&'static BlockLayerOps> = OnceLock::new();
+
+pub fn vfs_register_block_layer(ops: &'static BlockLayerOps) {
+    BLOCK_LAYER.call_once(|| ops);
 }
 
-/// A device view that refuses every write, over whatever devfs publishes for
-/// the named device.
+/// An exclusive writable handle on the block device `source` names — `vdb`,
+/// `/dev/nvme0n1p2`, `PARTUUID=…`, `LABEL=…`. Dropping it releases the
+/// claim.
 ///
-/// The wrapper is what makes the view read-only, not devfs: a `/dev` node is
-/// a handle on the same device the kernel already holds, so the root disk's
-/// node *is* the root mount's exclusive write claim. Refusing here keeps a
-/// bug past the mount's own read-only gate off the medium.
+/// `NotSupported` when no block layer registered, which is what a kernel
+/// built without one looks like.
+pub fn vfs_claim_block_device(source: &[u8]) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>> {
+    let mut name = [0u8; DEV_NAME_MAX];
+    vfs_claim_block_source(source, &mut name).map(|(device, _)| device)
+}
+
+/// [`vfs_claim_block_device`], with the name of the node it claimed copied
+/// into `name`; the answer carries the name's length.
+pub fn vfs_claim_block_source(
+    source: &[u8],
+    name: &mut [u8; DEV_NAME_MAX],
+) -> VfsResult<(KBox<dyn BlockDevice + Send + Sync>, usize)> {
+    let (len, inode) = devfs_resolve_block_node(source, name)?;
+    vfs_claim_block_node(&name[..len], inode).map(|device| (device, len))
+}
+
+/// The write claim on the block node `inode`, published as `name`.
+pub(crate) fn vfs_claim_block_node(
+    name: &[u8],
+    inode: InodeId,
+) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>> {
+    let ops = BLOCK_LAYER.get().ok_or(VfsError::NotSupported)?;
+    held_to_node(name, inode, ops.claim)
+}
+
+/// A claim is taken by name, and a table re-read may have given the name to
+/// another window since the node was found; nothing re-reads a disk while a
+/// claim is held, so once taken it is checked.
+fn held_to_node(
+    name: &[u8],
+    inode: InodeId,
+    claim: fn(&[u8]) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>>,
+) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>> {
+    let device = claim(name)?;
+    if !devfs_block_node_is(name, inode) {
+        return Err(VfsError::NotFound);
+    }
+    Ok(device)
+}
+
+/// Re-read the partition table of the disk `/dev/<name>` is.
+pub fn vfs_reread_partitions(name: &[u8]) -> VfsResult<()> {
+    let ops = BLOCK_LAYER.get().ok_or(VfsError::NotSupported)?;
+    (ops.reread)(name)
+}
+
+/// A standalone node's device with every write refused, which is all that
+/// keeps a bug past a read-only mount's own gate off it: nothing claims it.
 struct ReadOnlyBlockDevice(KArc<dyn BlockDevice + Send + Sync>);
 
 impl BlockDevice for ReadOnlyBlockDevice {
@@ -299,26 +345,33 @@ impl BlockDevice for ReadOnlyBlockDevice {
         self.0.capacity()
     }
 
+    fn logical_block_size(&self) -> u32 {
+        self.0.logical_block_size()
+    }
+
     fn write_protected(&self) -> bool {
         true
     }
 }
 
-/// The read-only view of the named device, for an `MS_RDONLY` mount.
-fn read_only_block_device(name: &[u8]) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>> {
-    let name = core::str::from_utf8(name).map_err(|_| VfsError::NotFound)?;
-    let shared = devfs_block_device_by_name(name).ok_or(VfsError::NotFound)?;
-    let boxed = KBox::try_new(ReadOnlyBlockDevice(shared)).map_err(|_| VfsError::IoError)?;
-    Ok(boxed)
+/// The read-only view of the device `source` names, for an `MS_RDONLY` mount.
+fn read_only_block_device(source: &[u8]) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>> {
+    let mut resolved = [0u8; DEV_NAME_MAX];
+    let (len, inode) = devfs_resolve_block_node(source, &mut resolved)?;
+    let name = &resolved[..len];
+    if let Some(device) = devfs_standalone_block_device(name) {
+        let view: KBox<dyn BlockDevice + Send + Sync> =
+            KBox::try_new(ReadOnlyBlockDevice(device)).map_err(|_| VfsError::NoSpace)?;
+        return Ok(view);
+    }
+    let ops = BLOCK_LAYER.get().ok_or(VfsError::NotSupported)?;
+    held_to_node(name, inode, ops.claim_read)
 }
 
-/// What a `mount` source spells an ext2 volume by its label with.
-const LABEL_PREFIX: &[u8] = b"LABEL=";
-
 /// Attach the block device `source` names to a pooled ext2 instance and mount
-/// it at `target`. `source` is a device name, or `LABEL=<volume label>` for
-/// the first registered device whose superblock carries that label — disk
-/// letters are probe order, so the label is the stable spelling.
+/// it at `target`. `source` takes every spelling
+/// [`devfs_resolve_block_source`] reads; probe order renames devices, so a
+/// `UUID=`, `PARTUUID=` or `LABEL=` is the stable one.
 ///
 /// `read_only` is the caller's *intent*, and an `MS_RDONLY` mount needs both
 /// halves of it: the write-refusing device view, and the instance's own
@@ -328,19 +381,10 @@ pub fn vfs_ext2_mount_named(
     target: &[u8],
     read_only: bool,
 ) -> VfsResult<Ext2MountInfo> {
-    let mut by_label = [0u8; DEV_NAME_MAX];
-    let source = match source.strip_prefix(LABEL_PREFIX) {
-        Some(b"") => return Err(VfsError::InvalidArgument),
-        Some(label) => {
-            let len = devfs_block_name_by_label(label, &mut by_label).ok_or(VfsError::NotFound)?;
-            &by_label[..len]
-        }
-        None => source,
-    };
     // The slot first, the device only once one is held: a slot retired by a
     // lazy unmount still owns its device claim and *claiming* a slot is what
     // sweeps it, so resolving the device first meets that stale claim and
-    // answers `AlreadyClaimed`.
+    // answers `Busy`.
     let fs = vfs_ext2_pool_claim().ok_or(VfsError::NoSpace)?;
     let device = match if read_only {
         read_only_block_device(source)
@@ -375,7 +419,7 @@ pub fn vfs_ext2_mount_named(
 /// Unmount the ext2 filesystem at `target` and detach its instance.
 ///
 /// The detach is what gives the write claim back, so a re-mount of the same
-/// disk succeeds; without it `open_writer` answers `AlreadyClaimed` forever.
+/// disk succeeds; without it every later claim answers `Busy`.
 pub fn vfs_ext2_unmount_named(target: &[u8]) -> VfsResult<()> {
     let mounted = mount_at(target).ok_or(VfsError::InvalidArgument)?;
     if ext2_pool_slot_of(mounted.fs).is_none() {

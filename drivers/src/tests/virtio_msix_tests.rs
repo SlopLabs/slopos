@@ -5,18 +5,20 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
-use slopos_fs::blockdev::BlockDeviceIndex;
-
 use crate::pci::{pci_config_read16, pci_get_device, pci_get_device_count};
-use crate::virtio_blk;
+use crate::virtio::VirtioMsixState;
 use crate::virtio_net;
+use crate::{block, virtio_blk};
 
 /// Mirrors the vector range `msi_alloc_vector` allocates from.
 const MSI_VECTOR_BASE: u8 = 48;
 const MSI_VECTOR_MAX: u8 = 223;
 
-fn disk0() -> Option<virtio_blk::DevHandle> {
-    virtio_blk::blk_device_by_index(BlockDeviceIndex(0))
+/// The first virtio disk the test harness attaches.
+const VIRTIO_DISK: &[u8] = b"vda";
+
+fn disk_msix() -> Option<VirtioMsixState> {
+    virtio_blk::test_hooks::msix_state(VIRTIO_DISK)
 }
 
 fn find_device(vendor: u16, device: u16) -> Option<crate::pci::PciDeviceInfo> {
@@ -40,14 +42,14 @@ fn msix_control_bits(dev: &crate::pci::PciDeviceInfo, cap_offset: u16) -> (bool,
 
 pub fn test_virtio_blk_ready() -> TestResult {
     assert_test!(
-        disk0().is_some_and(virtio_blk::blk_is_ready),
+        block::disk(VIRTIO_DISK).is_some_and(|d| d.engine().is_ready()),
         "virtio-blk should be ready after probe"
     );
     pass!()
 }
 
 pub fn test_virtio_blk_has_msix_state() -> TestResult {
-    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
+    let state = match disk_msix() {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None — unexpected on q35"),
     };
@@ -59,7 +61,7 @@ pub fn test_virtio_blk_has_msix_state() -> TestResult {
 }
 
 pub fn test_virtio_blk_vector_in_range() -> TestResult {
-    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
+    let state = match disk_msix() {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -77,7 +79,7 @@ pub fn test_virtio_blk_vector_in_range() -> TestResult {
 
 /// The vector sits in bits 7:0 of the entry's Message Data field.
 pub fn test_virtio_blk_table_entry_matches_vector() -> TestResult {
-    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
+    let state = match disk_msix() {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -96,7 +98,7 @@ pub fn test_virtio_blk_table_entry_matches_vector() -> TestResult {
 }
 
 pub fn test_virtio_blk_table_entry_targets_bsp() -> TestResult {
-    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
+    let state = match disk_msix() {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -116,7 +118,7 @@ pub fn test_virtio_blk_table_entry_targets_bsp() -> TestResult {
 
 /// The per-entry mask is bit 0 of the vector control word.
 pub fn test_virtio_blk_entry_unmasked() -> TestResult {
-    let state = match disk0().and_then(virtio_blk::blk_msix_state) {
+    let state = match disk_msix() {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -283,7 +285,7 @@ pub fn test_virtio_net_msix_enabled_in_config() -> TestResult {
 }
 
 pub fn test_blk_and_net_vectors_disjoint() -> TestResult {
-    let blk = match disk0().and_then(virtio_blk::blk_msix_state) {
+    let blk = match disk_msix() {
         Some(s) => s,
         None => return fail!("virtio-blk MSI-X state is None"),
     };
@@ -332,7 +334,7 @@ pub fn test_msix_preferred_over_msi_on_q35() -> TestResult {
     );
 
     assert_test!(
-        disk0().and_then(virtio_blk::blk_msix_state).is_some(),
+        disk_msix().is_some(),
         "virtio-blk should use MSI-X, not MSI fallback"
     );
     assert_test!(

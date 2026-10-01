@@ -3,14 +3,11 @@
 use crate::driver_core::msi::{self as core_msi, IrqMechanism};
 use crate::msix;
 use crate::pci::BoundDevice;
-use crate::pci_defs::{PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_ostd::klog_info;
 
-use crate::pci::{
-    PciDeviceInfo, pci_config_read8, pci_config_read16, pci_config_read32, pci_config_write16,
-};
+use crate::pci::{PciDeviceInfo, pci_config_read8, pci_config_read16, pci_config_read32};
 
 use super::{
     COMMON_CFG_DEVICE_FEATURE, COMMON_CFG_DEVICE_FEATURE_SELECT, COMMON_CFG_DRIVER_FEATURE,
@@ -24,19 +21,7 @@ use super::{
 
 pub use crate::pci_defs::PCI_VENDOR_ID_VIRTIO;
 
-pub fn enable_bus_master(info: &PciDeviceInfo) {
-    let cmd = pci_config_read16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET);
-    let new_cmd = cmd | PCI_COMMAND_BUS_MASTER | PCI_COMMAND_MEMORY_SPACE;
-    if cmd != new_cmd {
-        pci_config_write16(
-            info.bus,
-            info.device,
-            info.function,
-            PCI_COMMAND_OFFSET,
-            new_cmd,
-        );
-    }
-}
+pub use crate::pci::enable_bus_master;
 
 fn map_cap_region(info: &PciDeviceInfo, bar: u8, offset: u32, length: u32) -> MmioRegion {
     if bar as usize >= info.bars.len() {

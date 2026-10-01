@@ -110,6 +110,13 @@ impl Default for UserFsEntry {
     }
 }
 
+/// A device number in the `dev_t` layout `major` and `minor` decode on the
+/// Linux ABI: twelve bits of major and eight of minor low, the rest above.
+pub const fn makedev(major: u32, minor: u32) -> u64 {
+    let (major, minor) = (major as u64, minor as u64);
+    ((major & 0xFFF) << 8) | ((major & !0xFFF) << 32) | (minor & 0xFF) | ((minor & !0xFF) << 12)
+}
+
 /// `stat(2)` output. Field order, widths and padding are the Linux x86-64
 /// `struct stat` ones, so a libc port needs no translation table.
 /// `st_uid`/`st_gid` exist for layout and always read 0: single-user uid 0.
@@ -145,6 +152,23 @@ const _: () = assert!(
 const _: () = assert!(core::mem::offset_of!(UserFsStat, st_atim) == 72);
 const _: () = assert!(core::mem::offset_of!(UserFsStat, st_mtim) == 88);
 const _: () = assert!(core::mem::offset_of!(UserFsStat, st_ctim) == 104);
+
+/// Block device ioctls, with Linux's numbers and argument types.
+pub mod block_ioctl {
+    /// `int *`: 1 when the device refuses writes.
+    pub const BLKROGET: u32 = 0x125E;
+    /// No argument: re-read the disk's partition table.
+    pub const BLKRRPART: u32 = 0x125F;
+    /// `unsigned long *`: the size in 512-byte sectors.
+    pub const BLKGETSIZE: u32 = 0x1260;
+    /// `int *`: the logical block size.
+    pub const BLKSSZGET: u32 = 0x1268;
+    /// `unsigned int *`: the physical block size, which no driver here learns
+    /// apart from the logical one, so the logical block size.
+    pub const BLKPBSZGET: u32 = 0x127B;
+    /// `u64 *`: the size in bytes.
+    pub const BLKGETSIZE64: u32 = 0x8008_1272;
+}
 
 /// `st_mode` type field and the values it takes. Linux/POSIX numbering.
 pub const S_IFMT: u32 = 0o170_000;

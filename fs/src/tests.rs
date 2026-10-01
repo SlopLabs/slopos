@@ -10,6 +10,7 @@ pub mod ramfs_devfs;
 pub mod resolve;
 pub mod statfs;
 pub mod verity_rw;
+pub mod volume_id;
 
 use slopos_abi::fs::UserFsEntry;
 use slopos_ostd::KVec;
@@ -459,6 +460,10 @@ impl BlockDevice for FailingBlockDevice {
     fn capacity(&self) -> u64 {
         self.capacity
     }
+
+    fn logical_block_size(&self) -> u32 {
+        crate::blockdev::DEFAULT_LOGICAL_BLOCK
+    }
 }
 
 struct WriteFailingDevice {
@@ -482,6 +487,10 @@ impl BlockDevice for WriteFailingDevice {
 
     fn capacity(&self) -> u64 {
         self.inner.capacity()
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
     }
 }
 
@@ -544,6 +553,10 @@ impl BlockDevice for CountingBlockDevice {
 
     fn capacity(&self) -> u64 {
         self.inner.capacity()
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
     }
 
     fn flush(&self) -> Result<(), BlockDeviceError> {
@@ -863,6 +876,10 @@ pub fn test_ext2_write_protected_device_forces_readonly() -> TestResult {
         }
         fn capacity(&self) -> u64 {
             self.0.capacity()
+        }
+
+        fn logical_block_size(&self) -> u32 {
+            self.0.logical_block_size()
         }
         fn write_protected(&self) -> bool {
             true
@@ -4559,6 +4576,10 @@ impl BlockDevice for FaultyBlockDevice {
 
     fn capacity(&self) -> u64 {
         self.inner.capacity()
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
     }
 }
 

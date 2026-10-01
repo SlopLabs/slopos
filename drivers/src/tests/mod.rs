@@ -1,4 +1,6 @@
 pub mod apic_timer_tests;
+pub mod block_engine_tests;
+pub mod block_layer_tests;
 pub mod bus_generic;
 pub mod devres_tests;
 pub mod ecam_tests;
@@ -9,7 +11,7 @@ pub mod kconsole_serial_tests;
 pub mod keyboard_tests;
 pub mod madt_tests;
 pub mod msix_tests;
-pub mod partition_device_tests;
+pub mod nvme_tests;
 pub mod pci_binding;
 pub mod pci_cap_tests;
 pub mod platform_acpi_tests;

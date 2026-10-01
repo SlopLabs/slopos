@@ -9468,8 +9468,8 @@ fn ext2_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     }
 
     // Mounting the same disk again is what proves the retired instance gave
-    // the exclusive claim back: a leaked one answers `AlreadyClaimed` for the
-    // rest of the boot.
+    // the exclusive claim back: a leaked one answers `Busy` for the rest of
+    // the boot.
     mount_apply_at(b"vdb", mp, b"/", b"ext2", 0)
         .map_err(|_| "the scratch device would not mount again after a lazy unmount")?;
     umount_path_at(mp, b"/", 0).map_err(|_| "the re-mounted ext2 would not unmount")
@@ -9551,6 +9551,10 @@ impl slopos_fs::blockdev::BlockDevice for MountsOnWrite {
 
     fn capacity(&self) -> u64 {
         self.inner.capacity()
+    }
+
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
     }
 
     fn flush(&self) -> Result<(), slopos_fs::blockdev::BlockDeviceError> {
@@ -9723,6 +9727,10 @@ impl slopos_fs::blockdev::BlockDevice for ReleasesWhileDying {
         self.inner.capacity()
     }
 
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
+    }
+
     fn flush(&self) -> Result<(), slopos_fs::blockdev::BlockDeviceError> {
         self.fire();
         self.inner.flush()
@@ -9836,5 +9844,109 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_user_copy_retries_a_copy_that_faulted_midway,
+    suite = syscall_core
+);
+
+const BLOCK_IOCTL_GUARD: u8 = 0xA5;
+
+/// Block ioctls through the syscall: each answer is exactly as wide as Linux
+/// writes it, with the bytes around it untouched; an unknown request is
+/// `ENOTTY`; and a re-read is refused to a task that may not touch a disk
+/// beneath its filesystems.
+pub fn test_block_ioctls_through_the_syscall() -> TestResult {
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return fail!("no /dev to open the node through");
+    }
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
+    let verdict = block_ioctls_body(task_id);
+    task_terminate(task_id);
+    verdict
+}
+
+#[inline(never)]
+fn block_ioctls_body(task_id: u32) -> TestResult {
+    use slopos_abi::fs::block_ioctl;
+    use slopos_fs::vfs::FileSystem;
+
+    const DISK: &[u8] = b"nvme1n2";
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return fail!("the task has no descriptor table");
+    };
+    let devfs = slopos_fs::vfs::init::vfs_devfs_instance();
+    let capacity = devfs
+        .lookup(devfs.root_inode(), DISK)
+        .and_then(|inode| devfs.stat(inode))
+        .map(|stat| stat.size);
+    let Ok(capacity) = capacity else {
+        return fail!("/dev/nvme1n2 is not attached");
+    };
+    let page = assert_some!(map_user_rw_page(pid), "no user page");
+    make_task_current(task_id);
+    let fd = file_open_for_process(pid, b"/dev/nvme1n2", O_RDONLY);
+    park_bootstrap_on_current_cpu();
+    if fd < 0 {
+        return fail!("opening the block node failed: {}", fd);
+    }
+
+    // Current for the call: the entitlement a re-read needs is the running
+    // task's, and the harness itself runs privileged.
+    let ioctl = |request: u32, arg: u64| {
+        let mut frame = zero_frame();
+        frame.regs_mut().rdi = fd as u64;
+        frame.regs_mut().rsi = u64::from(request);
+        frame.regs_mut().rdx = arg;
+        make_task_current(task_id);
+        let _ = with_user_process_context(pid, || {
+            crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &task_guard, &mut frame)
+        });
+        park_bootstrap_on_current_cpu();
+        frame.rax()
+    };
+    let answers: [(u32, &[u8]); 3] = [
+        (block_ioctl::BLKGETSIZE64, &capacity.to_le_bytes()),
+        (block_ioctl::BLKGETSIZE, &(capacity / 512).to_le_bytes()),
+        (block_ioctl::BLKSSZGET, &4096i32.to_le_bytes()),
+    ];
+    for (request, want) in answers {
+        let guarded = [BLOCK_IOCTL_GUARD; 24];
+        assert_test!(write_user_bytes(pid, page, &guarded), "staging the guard");
+        assert_eq_test!(ioctl(request, page + 8), 0, "a block ioctl failed");
+        let mut got = [0u8; 24];
+        assert_test!(read_user_bytes(pid, page, &mut got), "reading the answer");
+        assert_test!(
+            got[8..8 + want.len()] == *want,
+            "a block ioctl answered the wrong value"
+        );
+        assert_test!(
+            got[..8]
+                .iter()
+                .chain(&got[8 + want.len()..])
+                .all(|&b| b == BLOCK_IOCTL_GUARD),
+            "a block ioctl wrote past its answer"
+        );
+    }
+    assert_eq_test!(
+        ioctl(0x1234, page),
+        slopos_abi::Errno::ENOTTY.as_u64(),
+        "an unknown request on a block node"
+    );
+    assert_eq_test!(
+        ioctl(block_ioctl::BLKRRPART, 0),
+        slopos_abi::Errno::EACCES.as_u64(),
+        "a re-read by an unentitled task"
+    );
+    let _ = file_close_fd(pid, fd);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_block_ioctls_through_the_syscall,
     suite = syscall_core
 );

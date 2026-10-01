@@ -2,12 +2,12 @@
 //! attaches it on.
 //!
 //! `fs/assets/ext2.img` is the only image that carries a write-protecting
-//! verity trailer: the tests image on disk0 is built `VERITY=off` so the suite
-//! can write to it. Without this test no `just test` run would exercise
+//! verity trailer: the tests image on the root disk is built `VERITY=off` so
+//! the suite can write to it. Without this test no `just test` run would exercise
 //! `fs/src/verity.rs` against a trailer a real block device reports — which is
 //! exactly how SLOPOS-2026-0053 stayed invisible.
 
-use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
+use slopos_fs::blockdev::BlockDevice;
 use slopos_fs::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
 use slopos_fs::ext2::{Ext2Error, Ext2Fs};
 use slopos_fs::verity::{FsExtent, VerityStatus, build_verified};
@@ -15,11 +15,11 @@ use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{fail, pass};
 
-use crate::virtio_blk;
+use crate::block;
 
-/// virtio-disk2 in `scripts/qemu_run.sh`'s test mode: the shipped verified
-/// image, attached `snapshot=on`.
-const VERIFIED: BlockDeviceIndex = BlockDeviceIndex(2);
+/// `scripts/qemu_run.sh`'s test mode attaches the shipped verified image as
+/// the first virtio disk, `snapshot=on`.
+const VERIFIED: &[u8] = b"vda";
 
 fn extent_of(device: &dyn BlockDevice) -> Result<FsExtent, TestResult> {
     match Ext2Fs::mount_params(device) {
@@ -27,26 +27,17 @@ fn extent_of(device: &dyn BlockDevice) -> Result<FsExtent, TestResult> {
             block_size: bs,
             blocks: sb.blocks_count as u64,
         }),
-        Err(e) => Err(fail!("disk2 superblock unreadable: {:?}", e)),
+        Err(e) => Err(fail!("verified image superblock unreadable: {:?}", e)),
     }
 }
 
 fn claim_verified() -> Result<KBox<dyn BlockDevice + Send + Sync>, TestResult> {
-    let Some(handle) = virtio_blk::blk_device_by_index(VERIFIED) else {
-        return Err(fail!(
-            "verified image (disk2) not attached — is fs/assets/ext2.img built?"
-        ));
-    };
-    if !virtio_blk::blk_is_ready(handle) {
-        return Err(fail!("disk2 present but not ready"));
-    }
-    let token = match virtio_blk::open_writer(handle) {
-        Ok(t) => t,
-        Err(e) => return Err(fail!("could not claim disk2: {:?}", e)),
-    };
-    match KBox::try_new(token) {
-        Ok(boxed) => Ok(boxed),
-        Err(_) => Err(fail!("out of memory boxing the disk2 handle")),
+    match block::claim(VERIFIED) {
+        Ok(device) => Ok(device),
+        Err(block::ClaimError::NoDevice) => Err(fail!(
+            "verified image not attached — is fs/assets/ext2.img built?"
+        )),
+        Err(e) => Err(fail!("could not claim the verified image: {:?}", e)),
     }
 }
 

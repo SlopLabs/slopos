@@ -14,7 +14,7 @@ editing.
 
 | Document | Scope |
 |----------|-------|
-| `bare-metal.md` | The self-hosting loop on a real machine: a block layer and NVMe, ext4 in place of ext2, a boot chain that shares a disk with another OS, an installer and install medium, a crash record, and a wired NIC |
+| `bare-metal.md` | The self-hosting loop on a real machine: ext4 in place of ext2, a boot chain that shares a disk with another OS, an installer and install medium, a crash record, and a wired NIC |
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
 | `self-hosting.md` | SlopOS as a development machine: the closed loop over git on a root that carries its own tools, where the guest builds and installs the whole system; bare metal and a toolchain that rebuilds itself ahead |

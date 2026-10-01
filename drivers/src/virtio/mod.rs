@@ -104,50 +104,6 @@ impl VirtioMmioCaps {
     }
 }
 
-/// HPET-based polling loop. On the BSP `sti; hlt` sleeps until the next
-/// interrupt; APs spin. Returns `false` on timeout.
-pub(crate) fn hpet_poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
-    use crate::hpet;
-
-    if condition() {
-        return true;
-    }
-
-    let Some(ticks_needed) = hpet::ms_to_ticks(timeout_ms) else {
-        for _ in 0..100_000u32 {
-            if condition() {
-                return true;
-            }
-            core::hint::spin_loop();
-        }
-        return condition();
-    };
-
-    let start = hpet::read_counter();
-    let allow_hlt = slopos_arch::pcr::get_current_cpu() == 0;
-
-    loop {
-        slopos_ostd::cpu::x86_64::interrupts::disable_interrupts();
-
-        if condition() {
-            slopos_ostd::cpu::x86_64::interrupts::enable_interrupts();
-            return true;
-        }
-
-        if hpet::read_counter().wrapping_sub(start) >= ticks_needed {
-            slopos_ostd::cpu::x86_64::interrupts::enable_interrupts();
-            return false;
-        }
-
-        if allow_hlt {
-            slopos_ostd::cpu::x86_64::core::sti_hlt_atomic();
-        } else {
-            slopos_ostd::cpu::x86_64::interrupts::enable_interrupts();
-            core::hint::spin_loop();
-        }
-    }
-}
-
 /// Edge-triggered event signalled from IRQ context, waited on by tasks.
 ///
 /// The edge is latched in `signaled`, so a signal that fires while no waiter
@@ -211,7 +167,7 @@ impl IrqEdgeEvent {
             Err(WaitAbort::Timeout) => EdgeWait::TimedOut,
             // Pre-scheduler context (probe paths): fall back to polling.
             Err(WaitAbort::NoRuntime) => {
-                if hpet_poll_wait(&|| self.try_consume(), timeout_ms) {
+                if crate::hpet::poll_wait(&|| self.try_consume(), timeout_ms) {
                     EdgeWait::Woken
                 } else {
                     EdgeWait::TimedOut

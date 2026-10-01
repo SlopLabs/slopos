@@ -1,13 +1,18 @@
-use slopos_ostd::sync::{IrqRwLock, LOCK_LEVEL_REGISTRY};
-use slopos_ostd::{KArc, KVec, klog_info, lock_class};
+mod block;
 
-use crate::blockdev::BlockDevice;
-use crate::ext2::ondisk::{SUPERBLOCK_LABEL_SPAN, volume_label_of};
+pub use block::{
+    BlockIoctlReply, BlockNodeKind, devfs_block_contents_changed, devfs_block_ioctl,
+    devfs_register_block_device, devfs_register_block_node, devfs_resolve_block_source,
+    devfs_set_block_partitioned, devfs_standalone_block_device, devfs_unregister_block_node,
+};
+#[cfg(feature = "tests")]
+pub(crate) use block::{block_read_entitled, block_write_entitled};
+pub(crate) use block::{devfs_block_node_is, devfs_resolve_block_node};
+
 use crate::fileio::PTY_SLAVE_MAJOR;
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_abi::event::MAX_TTYS;
 use slopos_abi::syscall::TtyIndex;
-use slopos_kernel_services::driver_runtime::{current_task_flags, current_task_is_privileged};
 use slopos_kernel_services::syscall_services::tty;
 
 const ROOT_INODE: InodeId = 1;
@@ -20,20 +25,9 @@ const PTS_INODE: InodeId = 7;
 /// `/dev/pts/<n>` is this plus `n`, the slave's terminal index.
 const PTY_SLAVE_INODE_BASE: InodeId = 1024;
 
-/// Runtime-registered block nodes number from a well clear of the const
-/// character-device ids above.
-const BLOCK_INODE_BASE: InodeId = 64;
-const MAX_BLOCK_NODES: usize = 16;
-
-/// devfs's own name ceiling, independent of the VFS's 255: every name here is
-/// kernel-registered and short, and `block_node_at` answers one by value.
+/// devfs's own name ceiling, independent of the VFS's 255: every node name is
+/// kernel-registered and short.
 pub const DEV_NAME_MAX: usize = 32;
-
-/// What a `mount` source argument spells a device with.
-const DEV_PATH_PREFIX: &[u8] = b"/dev/";
-
-/// Linux's `virtblk` major; the minor is the registration ordinal.
-const BLOCK_MAJOR: u32 = 254;
 
 struct DeviceEntry {
     name: [u8; DEV_NAME_MAX],
@@ -75,114 +69,6 @@ static DEVICES: [DeviceEntry; 5] = [
     DeviceEntry::new(b"kmsg", KMSG_INODE, 1, 11),
 ];
 
-/// `capacity` is cached: `BlockDevice::capacity` takes the device's own lock
-/// and `stat` answers it on every call.
-struct BlockNode {
-    name: [u8; DEV_NAME_MAX],
-    name_len: usize,
-    inode: InodeId,
-    device: KArc<dyn BlockDevice + Send + Sync>,
-    capacity: u64,
-}
-
-impl BlockNode {
-    fn matches(&self, name: &[u8]) -> bool {
-        self.name_len == name.len() && self.name[..self.name_len] == *name
-    }
-}
-
-/// Append-only for the lifetime of the kernel, which is what lets `readdir`
-/// walk these after [`DEVICES`] under the trait-default `readdir_cookie`.
-static BLOCK_NODES: IrqRwLock<KVec<BlockNode>> = IrqRwLock::new(
-    KVec::new(),
-    lock_class!("DEVFS_BLOCK_NODES", LOCK_LEVEL_REGISTRY),
-);
-
-/// Publish `device` as `/dev/<name>`; `name` must be unique. The caller keeps
-/// its own `KArc` clone, so one claim can back both a mount and this node.
-pub fn devfs_register_block_device(
-    name: &[u8],
-    device: KArc<dyn BlockDevice + Send + Sync>,
-) -> VfsResult<InodeId> {
-    if name.is_empty() || name.len() > DEV_NAME_MAX {
-        return Err(VfsError::InvalidArgument);
-    }
-    // Outside the registry lock: BLOCK_NODES must never nest over the device
-    // state lock `capacity()` takes.
-    let capacity = device.capacity();
-
-    let mut table = BLOCK_NODES.write();
-    if table.len() >= MAX_BLOCK_NODES {
-        return Err(VfsError::NoSpace);
-    }
-    if table.iter().any(|n| n.matches(name)) {
-        return Err(VfsError::AlreadyExists);
-    }
-    let inode = BLOCK_INODE_BASE + table.len() as InodeId;
-    let mut stored = [0u8; DEV_NAME_MAX];
-    stored[..name.len()].copy_from_slice(name);
-    table
-        .push(BlockNode {
-            name: stored,
-            name_len: name.len(),
-            inode,
-            device,
-            capacity,
-        })
-        .map_err(|_| VfsError::NoSpace)?;
-    drop(table);
-
-    klog_info!(
-        "DEVFS: registered block node inode {} ({} bytes)",
-        inode,
-        capacity
-    );
-    Ok(inode)
-}
-
-/// The device published as `name`, either bare (`vdb`) or the path spelling
-/// (`/dev/vdb1`) a `mount` source argument carries.
-///
-/// The handle is cloned out and the registry lock released before returning:
-/// [`BLOCK_NODES`] must never be held across device I/O.
-pub fn devfs_block_device_by_name(name: &str) -> Option<KArc<dyn BlockDevice + Send + Sync>> {
-    let bytes = name.as_bytes();
-    let bare = bytes.strip_prefix(DEV_PATH_PREFIX).unwrap_or(bytes);
-    let table = BLOCK_NODES.read();
-    let device = table
-        .iter()
-        .find(|n| n.matches(bare))
-        .map(|n| KArc::clone(&n.device));
-    drop(table);
-    device
-}
-
-/// The first registered block node — whole device or partition, in
-/// registration order — whose ext2 volume label is `label`. Its name is copied
-/// into `out`; the answer is the name's length.
-pub fn devfs_block_name_by_label(label: &[u8], out: &mut [u8; DEV_NAME_MAX]) -> Option<usize> {
-    if label.is_empty() {
-        return None;
-    }
-    let mut index = 0;
-    loop {
-        let table = BLOCK_NODES.read();
-        let node = table.get(index)?;
-        let (name, name_len, device) = (node.name, node.name_len, KArc::clone(&node.device));
-        drop(table);
-        index += 1;
-
-        let mut head = [0u8; SUPERBLOCK_LABEL_SPAN];
-        if device.read_at(1024, &mut head).is_err() {
-            continue;
-        }
-        if volume_label_of(&head) == Some(label) {
-            *out = name;
-            return Some(name_len);
-        }
-    }
-}
-
 /// The slave `/dev/pts/<name>` names, while it is allocated. Only the
 /// canonical spelling: `01` is not `1`.
 fn pty_slave_named(name: &[u8]) -> Option<u8> {
@@ -201,25 +87,41 @@ fn pty_slave_of(inode: InodeId) -> Option<u8> {
     pty_slave_live(index).then_some(index)
 }
 
-fn readdir_pts(
-    offset: usize,
-    callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
-) -> VfsResult<usize> {
-    let mut count = 0;
-    let mut current = 0;
-    let mut emit = |name: &[u8], inode: InodeId, kind: FileType| {
-        let keep_going = current < offset || callback(name, inode, kind);
-        if current >= offset && keep_going {
-            count += 1;
+/// What a directory walk hands each entry: the cookie that resumes after it,
+/// its name, inode and type. `false` stops the walk.
+type Emit<'a> = &'a mut dyn FnMut(u64, &[u8], InodeId, FileType) -> bool;
+
+/// Walk `entries` from `cookie`, the one at ordinal `i` resuming at `i + 1`.
+/// Answers the cookie reached and whether the callback wants more.
+fn walk_fixed<'a>(
+    entries: impl IntoIterator<Item = (&'a [u8], InodeId, FileType)>,
+    cookie: u64,
+    callback: Emit<'_>,
+) -> (u64, bool) {
+    let mut next = cookie;
+    let start = usize::try_from(cookie).unwrap_or(usize::MAX);
+    for (ordinal, (name, inode, file_type)) in entries.into_iter().enumerate().skip(start) {
+        next = ordinal as u64 + 1;
+        if !callback(next, name, inode, file_type) {
+            return (next, false);
         }
-        current += 1;
-        keep_going
-    };
-    if !emit(b".", PTS_INODE, FileType::Directory) || !emit(b"..", ROOT_INODE, FileType::Directory)
-    {
-        return Ok(count);
     }
-    for index in (0..MAX_TTYS as u8).filter(|&n| pty_slave_live(n)) {
+    (next, true)
+}
+
+/// `.` and `..`, then each live slave, which resumes after itself at its
+/// index plus three: slaves come and go, and an ordinal would shift.
+fn walk_pts(cookie: u64, callback: Emit<'_>) -> u64 {
+    let dots = [
+        (&b"."[..], PTS_INODE, FileType::Directory),
+        (&b".."[..], ROOT_INODE, FileType::Directory),
+    ];
+    let (mut next, more) = walk_fixed(dots, cookie, callback);
+    if !more {
+        return next;
+    }
+    let first = u8::try_from(next.saturating_sub(2)).unwrap_or(u8::MAX);
+    for index in (first..MAX_TTYS as u8).filter(|&n| pty_slave_live(n)) {
         let mut digits = [0u8; 3];
         let mut at = digits.len();
         let mut rest = index;
@@ -231,139 +133,35 @@ fn readdir_pts(
                 break;
             }
         }
+        next = u64::from(index) + 3;
         let inode = PTY_SLAVE_INODE_BASE + InodeId::from(index);
-        if !emit(&digits[at..], inode, FileType::CharDevice) {
+        if !callback(next, &digits[at..], inode, FileType::CharDevice) {
             break;
         }
     }
-    Ok(count)
+    next
 }
 
-fn block_inode_for(name: &[u8]) -> Option<InodeId> {
-    let table = BLOCK_NODES.read();
-    table.iter().find(|n| n.matches(name)).map(|n| n.inode)
-}
-
-/// Copied out so the caller can run the `readdir` callback with the registry
-/// lock released.
-fn block_node_at(index: usize) -> Option<([u8; DEV_NAME_MAX], usize, InodeId)> {
-    let table = BLOCK_NODES.read();
-    let node = table.get(index)?;
-    Some((node.name, node.name_len, node.inode))
-}
-
-fn block_capacity_of(inode: InodeId) -> Option<u64> {
-    let table = BLOCK_NODES.read();
-    table.iter().find(|n| n.inode == inode).map(|n| n.capacity)
-}
-
-/// Clones the device out from under the registry lock: the read that follows
-/// goes to the driver and must not hold an IRQ-off spinlock.
-fn block_device_of(inode: InodeId) -> Option<(KArc<dyn BlockDevice + Send + Sync>, u64)> {
-    let table = BLOCK_NODES.read();
-    table
-        .iter()
-        .find(|n| n.inode == inode)
-        .map(|n| (KArc::clone(&n.device), n.capacity))
-}
-
-/// Whether the running task may touch a device beneath every filesystem: a
-/// kernel thread, `TASK_FLAG_SYSTEM`, or the holder of `TASK_FLAG_MOUNT`, who
-/// may already graft any device onto the namespace.
-fn raw_block_entitled() -> bool {
-    current_task_is_privileged() || current_task_flags() & slopos_abi::task::TASK_FLAG_MOUNT != 0
-}
-
-/// Serve bytes from a registered block device. A short read is EOF to the
-/// VFS, so this shortens only at the end of the device.
-///
-/// Requires [`raw_block_entitled`]: a raw read bypasses every filesystem
-/// permission check above it, and ext2 does not zero a block it frees, so an
-/// unprivileged reader could recover any unlinked file's contents.
-fn block_read(inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
-    block_read_entitled(inode, offset, buf, raw_block_entitled())
-}
-
-/// The registered name of the block node at `inode`.
-fn block_name_of(inode: InodeId) -> Option<([u8; DEV_NAME_MAX], usize, u64)> {
-    let table = BLOCK_NODES.read();
-    table
-        .iter()
-        .find(|n| n.inode == inode)
-        .map(|n| (n.name, n.name_len, n.capacity))
-}
-
-/// Write bytes to a registered block device through its exclusive write
-/// claim, taken for this one call. A device something holds — a mount above
-/// all — refuses with `Busy`: a write behind a filesystem's cache would race
-/// its writeback. A write reaching past the end is shortened there, and one
-/// starting at the end has no room.
-fn block_write(inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
-    block_write_entitled(inode, offset, buf, raw_block_entitled())
-}
-
-/// [`block_write`] with the entitlement a parameter, as for reads.
-pub(crate) fn block_write_entitled(
-    inode: InodeId,
-    offset: u64,
-    buf: &[u8],
-    entitled: bool,
-) -> VfsResult<usize> {
-    let Some((name, name_len, capacity)) = block_name_of(inode) else {
-        return Err(VfsError::NotFound);
-    };
-    if !entitled {
-        return Err(VfsError::PermissionDenied);
+/// The fixed entries at cookies 1 to 9, then the block nodes by inode.
+fn walk_root(cookie: u64, callback: Emit<'_>) -> u64 {
+    let fixed = [
+        (&b"."[..], ROOT_INODE, FileType::Directory),
+        (&b".."[..], ROOT_INODE, FileType::Directory),
+    ]
+    .into_iter()
+    .chain(
+        DEVICES
+            .iter()
+            .map(|dev| (&dev.name[..dev.name_len], dev.inode, FileType::CharDevice)),
+    )
+    .chain([
+        (&b"pts"[..], PTS_INODE, FileType::Directory),
+        (&b"disk"[..], block::DISK_DIR, FileType::Directory),
+    ]);
+    match walk_fixed(fixed, cookie, callback) {
+        (next, true) => block::walk_nodes(next, callback),
+        (next, false) => next,
     }
-    if buf.is_empty() {
-        return Ok(0);
-    }
-    if offset >= capacity {
-        return Err(VfsError::NoSpace);
-    }
-    let want = (capacity - offset).min(buf.len() as u64) as usize;
-    let device = crate::vfs::init::vfs_claim_block_device(&name[..name_len])?;
-    device
-        .write_at(offset, &buf[..want])
-        .map_err(|_| VfsError::IoError)?;
-    Ok(want)
-}
-
-/// Push a block node's writes to the medium.
-fn block_flush(inode: InodeId) -> VfsResult<()> {
-    let Some((name, name_len, _)) = block_name_of(inode) else {
-        return Err(VfsError::NotFound);
-    };
-    if !raw_block_entitled() {
-        return Err(VfsError::PermissionDenied);
-    }
-    let device = crate::vfs::init::vfs_claim_block_device(&name[..name_len])?;
-    device.flush().map_err(|_| VfsError::IoError)
-}
-
-/// `entitled` is [`current_task_is_privileged`] on every production path; it
-/// is a parameter only so a test can reach the refusal, which a kernel thread
-/// cannot otherwise do.
-pub(crate) fn block_read_entitled(
-    inode: InodeId,
-    offset: u64,
-    buf: &mut [u8],
-    entitled: bool,
-) -> VfsResult<usize> {
-    let Some((device, capacity)) = block_device_of(inode) else {
-        return Err(VfsError::NotFound);
-    };
-    if !entitled {
-        return Err(VfsError::PermissionDenied);
-    }
-    if offset >= capacity || buf.is_empty() {
-        return Ok(0);
-    }
-    let want = (capacity - offset).min(buf.len() as u64) as usize;
-    device
-        .read_at(offset, &mut buf[..want])
-        .map_err(|_| VfsError::IoError)?;
-    Ok(want)
 }
 
 /// Not a ZST deliberately: filesystem identity is the address of the `static`
@@ -402,6 +200,16 @@ impl FileSystem for DevFs {
                     .ok_or(VfsError::NotFound),
             };
         }
+        if parent == block::DISK_DIR {
+            return block::lookup_disk_dir(name);
+        }
+        if block::is_dir(parent) {
+            return match name {
+                b"." => Ok(parent),
+                b".." => Ok(block::DISK_DIR),
+                _ => block::lookup_link(parent, name),
+            };
+        }
         if parent != ROOT_INODE {
             return Err(VfsError::NotDirectory);
         }
@@ -412,6 +220,9 @@ impl FileSystem for DevFs {
         if name == b"pts" {
             return Ok(PTS_INODE);
         }
+        if name == b"disk" {
+            return Ok(block::DISK_DIR);
+        }
 
         for dev in &DEVICES {
             if dev.name_len == name.len() && &dev.name[..dev.name_len] == name {
@@ -419,11 +230,11 @@ impl FileSystem for DevFs {
             }
         }
 
-        block_inode_for(name).ok_or(VfsError::NotFound)
+        block::node_inode_for(name).ok_or(VfsError::NotFound)
     }
 
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
-        if inode == ROOT_INODE || inode == PTS_INODE {
+        if inode == ROOT_INODE || inode == PTS_INODE || block::is_dir(inode) {
             return Ok(FileStat::new_directory(inode));
         }
         if let Some(index) = pty_slave_of(inode) {
@@ -440,16 +251,9 @@ impl FileSystem for DevFs {
             }
         }
 
-        if let Some(capacity) = block_capacity_of(inode) {
-            return Ok(FileStat::new_block_device(
-                inode,
-                capacity,
-                BLOCK_MAJOR,
-                (inode - BLOCK_INODE_BASE) as u32,
-            ));
-        }
-
-        Err(VfsError::NotFound)
+        block::node_stat(inode)
+            .or_else(|| block::link_stat(inode))
+            .ok_or(VfsError::NotFound)
     }
 
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
@@ -478,9 +282,10 @@ impl FileSystem for DevFs {
 
             CONSOLE_INODE => Ok(0),
 
-            ROOT_INODE => Err(VfsError::IsDirectory),
+            ROOT_INODE | PTS_INODE => Err(VfsError::IsDirectory),
+            _ if block::is_dir(inode) => Err(VfsError::IsDirectory),
 
-            _ => block_read(inode, offset, buf),
+            _ => block::block_read(inode, offset, buf),
         }
     }
 
@@ -495,9 +300,10 @@ impl FileSystem for DevFs {
 
             CONSOLE_INODE => Ok(buf.len()),
 
-            ROOT_INODE => Err(VfsError::IsDirectory),
+            ROOT_INODE | PTS_INODE => Err(VfsError::IsDirectory),
+            _ if block::is_dir(inode) => Err(VfsError::IsDirectory),
 
-            _ if block_capacity_of(inode).is_some() => block_write(inode, offset, buf),
+            _ if block::is_node(inode) => block::block_write(inode, offset, buf),
 
             _ => Err(VfsError::NotFound),
         }
@@ -517,64 +323,35 @@ impl FileSystem for DevFs {
         offset: usize,
         callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
     ) -> VfsResult<usize> {
-        if inode == PTS_INODE {
-            return readdir_pts(offset, callback);
-        }
-        if inode != ROOT_INODE {
-            return Err(VfsError::NotDirectory);
-        }
-
+        let mut seen = 0;
         let mut count = 0;
-        let mut current = 0;
-
-        if current >= offset {
-            if !callback(b".", ROOT_INODE, FileType::Directory) {
-                return Ok(count);
+        self.readdir_cookie(inode, 0, &mut |_, name, ino, file_type| {
+            seen += 1;
+            if seen <= offset {
+                return true;
             }
-            count += 1;
-        }
-        current += 1;
-
-        if current >= offset {
-            if !callback(b"..", ROOT_INODE, FileType::Directory) {
-                return Ok(count);
-            }
-            count += 1;
-        }
-        current += 1;
-
-        for dev in &DEVICES {
-            if current >= offset {
-                if !callback(&dev.name[..dev.name_len], dev.inode, FileType::CharDevice) {
-                    return Ok(count);
-                }
-                count += 1;
-            }
-            current += 1;
-        }
-
-        if current >= offset {
-            if !callback(b"pts", PTS_INODE, FileType::Directory) {
-                return Ok(count);
-            }
-            count += 1;
-        }
-        current += 1;
-
-        // One row at a time, so the callback never runs with BLOCK_NODES held.
-        let mut index = 0;
-        while let Some((name, name_len, node_inode)) = block_node_at(index) {
-            if current >= offset {
-                if !callback(&name[..name_len], node_inode, FileType::BlockDevice) {
-                    return Ok(count);
-                }
-                count += 1;
-            }
-            current += 1;
-            index += 1;
-        }
-
+            let more = callback(name, ino, file_type);
+            count += usize::from(more);
+            more
+        })?;
         Ok(count)
+    }
+
+    /// Cookies name positions that survive nodes and slaves coming and going,
+    /// so a listing paged across a table re-read neither skips nor repeats.
+    fn readdir_cookie(
+        &self,
+        inode: InodeId,
+        cookie: u64,
+        callback: &mut dyn FnMut(u64, &[u8], InodeId, FileType) -> bool,
+    ) -> VfsResult<u64> {
+        match inode {
+            ROOT_INODE => Ok(walk_root(cookie, callback)),
+            PTS_INODE => Ok(walk_pts(cookie, callback)),
+            block::DISK_DIR => Ok(block::walk_disk_dir(cookie, callback)),
+            _ if block::is_dir(inode) => block::walk_links(inode, cookie, callback),
+            _ => Err(VfsError::NotDirectory),
+        }
     }
 
     fn truncate(&self, _inode: InodeId, _size: u64) -> VfsResult<()> {
@@ -586,9 +363,16 @@ impl FileSystem for DevFs {
     }
 
     fn sync_inode(&self, inode: InodeId, _data_only: bool) -> VfsResult<()> {
-        if block_capacity_of(inode).is_some() {
-            return block_flush(inode);
+        if block::is_node(inode) {
+            return block::block_flush(inode);
         }
         Ok(())
+    }
+
+    fn readlink(&self, inode: InodeId, buf: &mut [u8]) -> VfsResult<usize> {
+        if !block::is_link(inode) {
+            return Err(VfsError::InvalidArgument);
+        }
+        block::readlink(inode, buf)
     }
 }

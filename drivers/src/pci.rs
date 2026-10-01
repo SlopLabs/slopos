@@ -373,6 +373,49 @@ pub fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u16) -> u16 
     pci_ecam_read16(bus, device, function, offset).expect("pci_config_read16: ECAM read failed")
 }
 
+/// Let the function answer memory accesses and master the bus: what every
+/// driver that maps a BAR and does DMA needs before it touches either.
+pub fn enable_bus_master(info: &PciDeviceInfo) {
+    let cmd = pci_config_read16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET);
+    let new_cmd = cmd | PCI_COMMAND_BUS_MASTER | PCI_COMMAND_MEMORY_SPACE;
+    if cmd != new_cmd {
+        pci_config_write16(
+            info.bus,
+            info.device,
+            info.function,
+            PCI_COMMAND_OFFSET,
+            new_cmd,
+        );
+    }
+}
+
+/// Let the function decode its memory BARs without letting it master the bus.
+pub fn enable_memory_space(info: &PciDeviceInfo) {
+    let cmd = pci_config_read16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET);
+    if cmd & PCI_COMMAND_MEMORY_SPACE == 0 {
+        pci_config_write16(
+            info.bus,
+            info.device,
+            info.function,
+            PCI_COMMAND_OFFSET,
+            cmd | PCI_COMMAND_MEMORY_SPACE,
+        );
+    }
+}
+
+/// Stop the function mastering the bus, so nothing it was handed can be
+/// written after the memory is freed.
+pub fn disable_bus_master(info: &PciDeviceInfo) {
+    let cmd = pci_config_read16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET);
+    pci_config_write16(
+        info.bus,
+        info.device,
+        info.function,
+        PCI_COMMAND_OFFSET,
+        cmd & !PCI_COMMAND_BUS_MASTER,
+    );
+}
+
 #[inline]
 pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u16) -> u8 {
     pci_ecam_read8(bus, device, function, offset).expect("pci_config_read8: ECAM read failed")

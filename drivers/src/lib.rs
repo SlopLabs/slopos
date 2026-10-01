@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod apic;
+pub mod block;
 pub mod driver_core;
 pub mod hpet;
 pub mod i2c;
@@ -12,6 +13,7 @@ pub mod irq;
 pub mod msi;
 pub mod msi_common;
 pub mod msix;
+pub mod nvme;
 pub mod pci;
 pub mod pci_defs;
 pub mod pinctrl;

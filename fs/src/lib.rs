@@ -31,6 +31,7 @@ pub mod ramfs;
 pub mod verity;
 pub mod vfs;
 pub mod vfs_file_ops;
+pub mod volume_id;
 
 #[cfg(feature = "tests")]
 pub mod tests;
@@ -49,5 +50,5 @@ pub use vfs::{
     FileStat, FileSystem, FileType, InodeId, RootBacking, VfsError, VfsResult, mount,
     vfs_claim_block_device, vfs_ext2_mount_named, vfs_ext2_unmount_named,
     vfs_init_builtin_filesystems, vfs_init_builtin_filesystems_with, vfs_is_initialized,
-    vfs_register_block_claim,
+    vfs_register_block_layer,
 };

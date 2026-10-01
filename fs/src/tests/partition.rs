@@ -8,13 +8,16 @@ use super::{Ext2ImageSpec, build_ext2_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::devfs::{DevFs, block_read_entitled, block_write_entitled, devfs_register_block_device};
 use crate::partition::{
-    LOGICAL_SECTOR, PartitionDevice, PartitionError, PartitionKind, PartitionScheme, probe,
+    PARTUUID_TEXT_MAX, PartUuid, PartitionDevice, PartitionError, PartitionKind, PartitionScheme,
+    probe,
 };
 use crate::verity::crc32;
 use crate::vfs::{FileSystem, FileType, VfsError};
 
+/// The fixtures' logical block, unless a test says otherwise.
+const SECTOR: u64 = 512;
 const TOTAL_SECTORS: u64 = 128;
-const IMAGE_BYTES: usize = (TOTAL_SECTORS * LOGICAL_SECTOR) as usize;
+const IMAGE_BYTES: usize = (TOTAL_SECTORS * SECTOR) as usize;
 const PRIMARY_HEADER_LBA: u64 = 1;
 const PRIMARY_ARRAY_LBA: u64 = 2;
 const BACKUP_ARRAY_LBA: u64 = TOTAL_SECTORS - 2;
@@ -22,7 +25,7 @@ const BACKUP_HEADER_LBA: u64 = TOTAL_SECTORS - 1;
 const FIRST_USABLE: u64 = 3;
 const LAST_USABLE: u64 = TOTAL_SECTORS - 3;
 /// Room the fixture leaves for one entry-array copy.
-const ARRAY_FIT_BYTES: usize = 32 * LOGICAL_SECTOR as usize;
+const ARRAY_FIT_BYTES: usize = 32 * SECTOR as usize;
 
 fn put_u16(buf: &mut [u8], at: usize, value: u16) {
     buf[at..at + 2].copy_from_slice(&value.to_le_bytes());
@@ -50,6 +53,8 @@ fn write_mbr_entry(buf: &mut [u8], slot: usize, type_byte: u8, first_lba: u32, s
 /// Each test starts from [`GptSpec::valid`] and breaks exactly one thing.
 #[derive(Clone, Copy)]
 struct GptSpec {
+    /// The logical block every LBA below counts in.
+    block: u64,
     num_entries: u32,
     entry_size: u32,
     first_usable: u64,
@@ -70,6 +75,7 @@ struct GptSpec {
 impl GptSpec {
     fn valid() -> Self {
         Self {
+            block: SECTOR,
             num_entries: 4,
             entry_size: 128,
             first_usable: FIRST_USABLE,
@@ -86,9 +92,14 @@ impl GptSpec {
     }
 }
 
+/// Slot `n`'s unique partition GUID: `n` repeated, then a counting run.
+fn unique_guid(slot: usize) -> [u8; 16] {
+    core::array::from_fn(|i| if i < 4 { slot as u8 + 1 } else { i as u8 })
+}
+
 #[inline(never)]
 fn install_array(buf: &mut [u8], lba: u64, spec: &GptSpec) -> u32 {
-    let at = (lba * LOGICAL_SECTOR) as usize;
+    let at = (lba * spec.block) as usize;
     let len = spec.num_entries as usize * spec.entry_size as usize;
     let array = &mut buf[at..at + len];
     array.fill(0);
@@ -97,6 +108,7 @@ fn install_array(buf: &mut [u8], lba: u64, spec: &GptSpec) -> u32 {
         // A non-zero type GUID is what marks the slot used; the byte value
         // doubles as the fixture's identity check.
         array[base..base + 16].fill(0x11 * (slot as u8 + 1));
+        array[base + 16..base + 32].copy_from_slice(&unique_guid(slot));
         put_u64(array, base + 32, first);
         put_u64(array, base + 40, last);
     }
@@ -112,8 +124,8 @@ fn install_header(
     crc: u32,
     spec: &GptSpec,
 ) {
-    let at = (lba * LOGICAL_SECTOR) as usize;
-    let header = &mut buf[at..at + LOGICAL_SECTOR as usize];
+    let at = (lba * spec.block) as usize;
+    let header = &mut buf[at..at + spec.block as usize];
     header.fill(0);
     header[..8].copy_from_slice(b"EFI PART");
     put_u32(header, 8, 0x0001_0000);
@@ -148,10 +160,10 @@ fn install_gpt(buf: &mut [u8], spec: &GptSpec) {
         primary_crc = install_array(buf, primary_array_lba, spec);
         backup_crc = install_array(buf, backup_array_lba, spec);
         if spec.break_primary_array {
-            buf[(primary_array_lba * LOGICAL_SECTOR) as usize + 32] ^= 0xFF;
+            buf[(primary_array_lba * spec.block) as usize + 32] ^= 0xFF;
         }
         if spec.break_backup_array {
-            buf[(backup_array_lba * LOGICAL_SECTOR) as usize + 32] ^= 0xFF;
+            buf[(backup_array_lba * spec.block) as usize + 32] ^= 0xFF;
         }
     }
 
@@ -166,7 +178,7 @@ fn install_gpt(buf: &mut [u8], spec: &GptSpec) {
     if spec.break_primary_header {
         // The reserved field is inside the CRC's coverage, so touching it
         // invalidates the header without changing what it claims.
-        buf[(PRIMARY_HEADER_LBA * LOGICAL_SECTOR) as usize + 20] ^= 0xFF;
+        buf[(PRIMARY_HEADER_LBA * spec.block) as usize + 20] ^= 0xFF;
     }
     if spec.write_backup {
         install_header(
@@ -181,7 +193,8 @@ fn install_gpt(buf: &mut [u8], spec: &GptSpec) {
 }
 
 fn gpt_device(spec: &GptSpec) -> Option<MemoryBlockDevice> {
-    let device = MemoryBlockDevice::allocate(IMAGE_BYTES)?;
+    let bytes = (TOTAL_SECTORS * spec.block) as usize;
+    let device = MemoryBlockDevice::allocate_with_block_size(bytes, spec.block as u32)?;
     device.with_buffer_mut(|buf| install_gpt(buf, spec));
     Some(device)
 }
@@ -213,13 +226,10 @@ pub fn test_partition_gpt_happy_path() -> TestResult {
     }
     let first = table.entries[0];
     let second = table.entries[1];
-    if first.number != 1 || first.start != 8 * LOGICAL_SECTOR || first.len != 8 * LOGICAL_SECTOR {
+    if first.number != 1 || first.start != 8 * SECTOR || first.len != 8 * SECTOR {
         return fail!("entry 1 window wrong: {:?}", first);
     }
-    if second.number != 2
-        || second.start != 16 * LOGICAL_SECTOR
-        || second.len != 48 * LOGICAL_SECTOR
-    {
+    if second.number != 2 || second.start != 16 * SECTOR || second.len != 48 * SECTOR {
         return fail!("entry 2 window wrong: {:?}", second);
     }
     match (first.kind, second.kind) {
@@ -248,7 +258,7 @@ pub fn test_partition_gpt_backup_header_fallback() -> TestResult {
             table.entries.len()
         );
     }
-    if table.entries[0].start != 8 * LOGICAL_SECTOR {
+    if table.entries[0].start != 8 * SECTOR {
         return fail!("backup entry array not read: {:?}", table.entries[0]);
     }
 
@@ -290,7 +300,7 @@ pub fn test_partition_gpt_array_crc_falls_back_to_mbr() -> TestResult {
         );
     }
     let entry = table.entries[0];
-    if entry.number != 2 || entry.start != 8 * LOGICAL_SECTOR || entry.len != 8 * LOGICAL_SECTOR {
+    if entry.number != 2 || entry.start != 8 * SECTOR || entry.len != 8 * SECTOR {
         return fail!("MBR fallback entry wrong: {:?}", entry);
     }
 
@@ -378,8 +388,8 @@ pub fn test_partition_mbr_rules() -> TestResult {
             table.entries.len()
         );
     }
-    if table.entries[1].start != 16 * LOGICAL_SECTOR
-        || table.entries[1].len != 32 * LOGICAL_SECTOR
+    if table.entries[1].start != 16 * SECTOR
+        || table.entries[1].len != 32 * SECTOR
         || table.entries[1].kind != (PartitionKind::Mbr { type_byte: 0x83 })
     {
         return fail!("second MBR entry wrong: {:?}", table.entries[1]);
@@ -421,6 +431,57 @@ pub fn test_partition_mbr_rules() -> TestResult {
         return fail!("oversized MBR entry accepted: {:?}", table.scheme);
     }
     TestResult::Pass
+}
+
+/// No window the parser hands out contains the table or shares a byte with
+/// another: a claim on one partition excludes only that window.
+pub fn test_partition_windows_miss_the_table_and_each_other() -> TestResult {
+    let overlapping = GptSpec {
+        entries: [(8, 15), (12, 63)],
+        ..GptSpec::valid()
+    };
+    let Some(device) = gpt_device(&overlapping) else {
+        return fail!("no memory for the fixture");
+    };
+    match probe(&device) {
+        Ok(t) if t.entries.len() == 1 && t.entries[0].number == 1 => {}
+        other => {
+            return fail!(
+                "overlapping GPT entries: {:?}",
+                other.map(|t| t.entries.len())
+            );
+        }
+    }
+
+    let header_usable = GptSpec {
+        first_usable: 1,
+        entries: [(1, 15), (16, 63)],
+        protective_mbr: false,
+        ..GptSpec::valid()
+    };
+    let Some(device) = gpt_device(&header_usable) else {
+        return fail!("no memory for the fixture");
+    };
+    match probe(&device) {
+        Err(PartitionError::CorruptGpt) => {}
+        other => {
+            return fail!(
+                "a usable range holding the header: {:?}",
+                other.map(|t| t.scheme)
+            );
+        }
+    }
+
+    let Some(device) = mbr_device(&[(0x83, 0, 8), (0x83, 8, 16), (0x83, 16, 32)]) else {
+        return fail!("no memory for the fixture");
+    };
+    match probe(&device) {
+        Ok(t) if t.entries.len() == 1 && t.entries[0].number == 2 => TestResult::Pass,
+        other => fail!(
+            "MBR entries over the table or each other: {:?}",
+            other.map(|t| t.entries.len())
+        ),
+    }
 }
 
 pub fn test_partition_device_windows_the_parent() -> TestResult {
@@ -655,6 +716,10 @@ impl BlockDevice for ShortMediaDevice {
     fn capacity(&self) -> u64 {
         self.claimed
     }
+
+    fn logical_block_size(&self) -> u32 {
+        self.inner.logical_block_size()
+    }
 }
 
 /// An unreadable backup LBA must not suppress the MBR fallback: the primary
@@ -668,7 +733,7 @@ pub fn test_partition_unreadable_backup_lba_still_parses_mbr() -> TestResult {
     inner.with_buffer_mut(|buf| write_mbr_entry(buf, 0, 0x83, 8, 8));
     let device = ShortMediaDevice {
         inner,
-        claimed: IMAGE_BYTES as u64 + LOGICAL_SECTOR,
+        claimed: IMAGE_BYTES as u64 + SECTOR,
     };
     let table = match probe(&device) {
         Ok(t) => t,
@@ -681,7 +746,7 @@ pub fn test_partition_unreadable_backup_lba_still_parses_mbr() -> TestResult {
             table.entries.len()
         );
     }
-    if table.entries[0].start != 8 * LOGICAL_SECTOR {
+    if table.entries[0].start != 8 * SECTOR {
         return fail!("MBR entry window wrong: {:?}", table.entries[0]);
     }
     TestResult::Pass
@@ -736,11 +801,10 @@ pub fn test_devfs_block_node_read_requires_entitlement() -> TestResult {
 /// time: refused without the entitlement, refused while anything else holds
 /// the claim, shortened at the end of the device, and read back as written.
 pub fn test_devfs_block_node_writes_through_the_claim() -> TestResult {
-    const SCRATCH: &[u8] = b"vdb";
+    const SCRATCH: &[u8] = b"nvme0n2";
     let fs = DevFs::new();
     let Ok(inode) = fs.lookup(fs.root_inode(), SCRATCH) else {
-        klog_info!("PART_TEST: no scratch disk attached; nothing to write");
-        return TestResult::Pass;
+        return fail!("the scratch disk nvme0n2 is not in /dev");
     };
     let capacity = match fs.stat(inode) {
         Ok(stat) => stat.size,
@@ -748,7 +812,7 @@ pub fn test_devfs_block_node_writes_through_the_claim() -> TestResult {
     };
     let at = capacity - 4096;
     let Ok(mut saved) = slopos_ostd::KVec::<u8>::zeroed(4096) else {
-        return TestResult::Pass;
+        return fail!("no memory for the saved window");
     };
     if fs.read(inode, at, &mut saved) != Ok(4096) {
         return fail!("could not read the window back");
@@ -777,7 +841,7 @@ fn block_write_body(fs: &DevFs, inode: u64, at: u64, capacity: u64) -> TestResul
         return fail!("the write did not read back");
     }
 
-    match crate::vfs::vfs_claim_block_device(b"vdb") {
+    match crate::vfs::vfs_claim_block_device(b"nvme0n2") {
         Ok(held) => {
             let busy = fs.write(inode, at, &pattern);
             drop(held);
@@ -798,7 +862,118 @@ fn block_write_body(fs: &DevFs, inode: u64, at: u64, capacity: u64) -> TestResul
     }
 }
 
+/// A 4K-native disk counts its table in 4096-byte blocks: the header at byte
+/// 4096, every window a multiple of 4096. A table laid out for 512-byte blocks
+/// is not one on such a disk.
+pub fn test_partition_gpt_counts_in_logical_blocks() -> TestResult {
+    klog_info!("PART_TEST: GPT on 4096-byte logical blocks");
+    let spec = GptSpec {
+        block: 4096,
+        ..GptSpec::valid()
+    };
+    let Some(device) = gpt_device(&spec) else {
+        return TestResult::Pass;
+    };
+    let table = match probe(&device) {
+        Ok(t) => t,
+        Err(e) => return fail!("a 4K-native GPT was rejected: {:?}", e),
+    };
+    if table.scheme != PartitionScheme::Gpt || table.entries.len() != 2 {
+        return fail!(
+            "4K GPT gave {:?} with {} entries",
+            table.scheme,
+            table.entries.len()
+        );
+    }
+    let second = table.entries[1];
+    if second.start != 16 * 4096 || second.len != 48 * 4096 {
+        return fail!("4K entry window counted in the wrong unit: {:?}", second);
+    }
+
+    let Some(misread) = MemoryBlockDevice::allocate_with_block_size(IMAGE_BYTES, 4096) else {
+        return TestResult::Pass;
+    };
+    misread.with_buffer_mut(|buf| install_gpt(buf, &GptSpec::valid()));
+    match probe(&misread).map(|t| t.scheme) {
+        Err(PartitionError::ProtectiveMbrWithoutGpt) => {}
+        other => return fail!("a 512-byte GPT on a 4K disk parsed as {:?}", other),
+    }
+
+    let Ok(parent) = KArc::try_new(device) else {
+        return TestResult::Pass;
+    };
+    let parent: KArc<dyn BlockDevice + Send + Sync> = parent;
+    if PartitionDevice::try_new(parent.clone(), 512, 4096).is_ok() {
+        return fail!("a window off the 4096-byte grid was accepted");
+    }
+    match PartitionDevice::try_new(parent, 4096, 4096) {
+        Ok(window) if window.logical_block_size() == 4096 => TestResult::Pass,
+        Ok(window) => fail!(
+            "a window reported {}-byte blocks",
+            window.logical_block_size()
+        ),
+        Err(e) => fail!("an aligned 4K window was refused: {:?}", e),
+    }
+}
+
+/// PARTUUID is the GPT unique partition GUID in its registry spelling — the
+/// first three fields little-endian — or an MBR disk's signature and the
+/// entry number, and a match ignores case.
+pub fn test_partition_partuuid_spelling() -> TestResult {
+    klog_info!("PART_TEST: PARTUUID spelling");
+    let Some(device) = gpt_device(&GptSpec::valid()) else {
+        return TestResult::Pass;
+    };
+    let table = match probe(&device) {
+        Ok(t) => t,
+        Err(e) => return fail!("valid GPT rejected: {:?}", e),
+    };
+    let mut text = [0u8; PARTUUID_TEXT_MAX];
+    let len = table.entries[1].uuid.format(&mut text);
+    let want = b"02020202-0504-0706-0809-0a0b0c0d0e0f";
+    if &text[..len] != want {
+        return fail!(
+            "GPT PARTUUID spelled {:?}",
+            core::str::from_utf8(&text[..len])
+        );
+    }
+    if !table.entries[1]
+        .uuid
+        .matches(b"02020202-0504-0706-0809-0A0B0C0D0E0F")
+    {
+        return fail!("an uppercase spelling did not match");
+    }
+    if table.entries[0].uuid.matches(want) {
+        return fail!("another partition's PARTUUID matched");
+    }
+
+    let mbr = PartUuid::Mbr {
+        signature: 0x1234_ABCD,
+        number: 5,
+    };
+    let len = mbr.format(&mut text);
+    if &text[..len] != b"1234abcd-05" {
+        return fail!(
+            "MBR PARTUUID spelled {:?}",
+            core::str::from_utf8(&text[..len])
+        );
+    }
+    let Some(device) = mbr_device(&[(0x83, 8, 8)]) else {
+        return TestResult::Pass;
+    };
+    device.with_buffer_mut(|buf| put_u32(buf, 440, 0xDEAD_BEEF));
+    match probe(&device).map(|t| t.entries.first().map(|e| e.uuid)) {
+        Ok(Some(uuid)) if uuid.matches(b"deadbeef-01") => TestResult::Pass,
+        other => fail!("the MBR disk signature was not read: {:?}", other),
+    }
+}
+
 slopos_testing::stest!(name = test_partition_gpt_happy_path, suite = fs);
+slopos_testing::stest!(
+    name = test_partition_gpt_counts_in_logical_blocks,
+    suite = fs
+);
+slopos_testing::stest!(name = test_partition_partuuid_spelling, suite = fs);
 slopos_testing::stest!(name = test_partition_gpt_backup_header_fallback, suite = fs);
 slopos_testing::stest!(
     name = test_partition_gpt_array_crc_falls_back_to_mbr,
@@ -806,6 +981,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_partition_gpt_geometry_limits, suite = fs);
 slopos_testing::stest!(name = test_partition_mbr_rules, suite = fs);
+slopos_testing::stest!(
+    name = test_partition_windows_miss_the_table_and_each_other,
+    suite = fs
+);
 slopos_testing::stest!(name = test_partition_device_windows_the_parent, suite = fs);
 slopos_testing::stest!(
     name = test_partition_whole_device_image_is_unpartitioned,

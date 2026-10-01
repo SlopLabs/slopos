@@ -37,6 +37,10 @@ pub trait Device {
     /// Order every write before this call ahead of every write after it.
     fn flush(&mut self) -> Result<(), Error>;
     fn size(&self) -> u64;
+    /// The medium's logical block size, the smallest unit it writes whole.
+    fn block_size(&self) -> u32 {
+        512
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +61,9 @@ pub enum Error {
     /// Larger than a FAT file can be (4 GiB - 1), or a device too small to
     /// format.
     TooLarge,
+    /// The volume's sectors are smaller than the device's logical blocks, so
+    /// no sector could be written on its own.
+    SectorTooSmall,
 }
 
 const SECTOR: usize = 512;
@@ -196,6 +203,9 @@ impl<D: Device> Volume<D> {
             || fat_sectors == 0
         {
             return Err(Error::NotFat32);
+        }
+        if bytes_per_sector < dev.block_size() {
+            return Err(Error::SectorTooSmall);
         }
         let total_sectors = if total16 != 0 { total16 } else { total32 };
         let meta = reserved_sectors
@@ -887,15 +897,23 @@ impl LongName {
     }
 }
 
-/// Lay a fresh FAT32 volume over the first `bytes` of `dev`: 512-byte
-/// sectors, two FATs, the largest cluster up to 4 KiB that still leaves
-/// FAT32's minimum cluster count, and an empty root directory.
+/// Lay a fresh FAT32 volume over the first `bytes` of `dev`: sectors of the
+/// device's logical block size, two FATs, the largest cluster up to 4 KiB
+/// that still leaves FAT32's minimum cluster count, and an empty root
+/// directory.
 pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<(), Error> {
-    let total = u32::try_from(bytes / SECTOR as u64).map_err(|_| Error::TooLarge)?;
+    let sector = dev.block_size() as usize;
+    if !matches!(sector, 512 | 1024 | 2048 | 4096) {
+        return Err(Error::SectorTooSmall);
+    }
+    let total = u32::try_from(bytes / sector as u64).map_err(|_| Error::TooLarge)?;
     let reserved = 32u32;
     let fats = 2u32;
     let mut chosen = None;
-    for spc in [8u32, 4, 2, 1] {
+    for spc in [8u32, 4, 2, 1]
+        .into_iter()
+        .filter(|&spc| spc as usize * sector <= 4096)
+    {
         // Fixpoint: the FAT's own size eats the space it describes.
         let mut fat_sectors = 1u32;
         loop {
@@ -903,7 +921,7 @@ pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<()
             let clusters = data / spc;
             let need = u32::try_from((u64::from(clusters) + 2) * 4)
                 .map_err(|_| Error::TooLarge)?
-                .div_ceil(SECTOR as u32);
+                .div_ceil(sector as u32);
             if need <= fat_sectors {
                 if clusters >= FAT32_MIN_CLUSTERS {
                     chosen = Some((spc, fat_sectors));
@@ -918,10 +936,10 @@ pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<()
     }
     let (spc, fat_sectors) = chosen.ok_or(Error::TooLarge)?;
 
-    let mut boot = [0u8; SECTOR];
+    let mut boot = vec![0u8; sector];
     boot[..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
     boot[3..11].copy_from_slice(b"SLOPOS  ");
-    put16(&mut boot, 11, SECTOR as u32);
+    put16(&mut boot, 11, sector as u32);
     boot[13] = spc as u8;
     put16(&mut boot, 14, reserved);
     boot[16] = fats as u8;
@@ -941,7 +959,7 @@ pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<()
     boot[510] = 0x55;
     boot[511] = 0xAA;
 
-    let mut info = [0u8; SECTOR];
+    let mut info = vec![0u8; sector];
     put32(&mut info, 0, FSINFO_LEAD);
     put32(&mut info, 484, FSINFO_STRUCT);
     let clusters = (total - reserved - fats * fat_sectors) / spc;
@@ -949,27 +967,27 @@ pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<()
     put32(&mut info, 492, 3);
     put32(&mut info, 508, FSINFO_TRAIL);
 
-    let zero = vec![0u8; SECTOR];
+    let zero = vec![0u8; sector];
     for s in 0..reserved {
-        dev.write_at(u64::from(s) * SECTOR as u64, &zero)?;
+        dev.write_at(u64::from(s) * sector as u64, &zero)?;
     }
     for copy in [0u64, 6] {
-        dev.write_at(copy * SECTOR as u64, &boot)?;
-        dev.write_at((copy + 1) * SECTOR as u64, &info)?;
+        dev.write_at(copy * sector as u64, &boot)?;
+        dev.write_at((copy + 1) * sector as u64, &info)?;
     }
-    let mut first_fat = vec![0u8; SECTOR];
+    let mut first_fat = vec![0u8; sector];
     put32(&mut first_fat, 0, 0x0FFF_FFF8);
     put32(&mut first_fat, 4, END_OF_CHAIN);
     put32(&mut first_fat, 8, END_OF_CHAIN);
     for copy in 0..fats {
-        let base = u64::from(reserved + copy * fat_sectors) * SECTOR as u64;
+        let base = u64::from(reserved + copy * fat_sectors) * sector as u64;
         dev.write_at(base, &first_fat)?;
         for s in 1..fat_sectors {
-            dev.write_at(base + u64::from(s) * SECTOR as u64, &zero)?;
+            dev.write_at(base + u64::from(s) * sector as u64, &zero)?;
         }
     }
-    let root = u64::from(reserved + fats * fat_sectors) * SECTOR as u64;
-    let mut cluster = vec![0u8; spc as usize * SECTOR];
+    let root = u64::from(reserved + fats * fat_sectors) * sector as u64;
+    let mut cluster = vec![0u8; spc as usize * sector];
     // The boot sector's label is only believed alongside this entry.
     write_short(&mut cluster[..ENTRY], label, 0, ATTR_VOLUME_ID, 0, 0);
     dev.write_at(root, &cluster)?;
