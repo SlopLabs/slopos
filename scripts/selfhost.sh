@@ -64,10 +64,7 @@ COREUTILS_LINKS="$COREUTILS_TOOLS" EXTRA_SHARED_OBJECTS="$shared" \
 [ "$1" = install ] || exit 0
 
 elf="$REPO_ROOT/builddir/kernel-$variant.elf"
-case "$(bootctl status)" in
-*"default: slopos-b"*) slot=a ;;
-*) slot=b ;;
-esac
+slot="$(bootctl spare)"
 bootctl install "$slot" "$elf" "$REPO_ROOT/$base"
 bootctl oneshot "slopos-$slot"
 echo "selfhost: bootctl reboot tries slopos-$slot once; bootctl commit there keeps it"

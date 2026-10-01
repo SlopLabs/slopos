@@ -1,0 +1,17 @@
+[package]
+name = "slopos-bootdisk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The boot disk's layout and Limine configuration, asked of boot-core by the host's disk builder"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "bootdisk"
+path = "src/main.rs"
+
+[dependencies]
+slopos-boot-core = { workspace = true }

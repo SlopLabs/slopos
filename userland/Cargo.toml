@@ -321,6 +321,7 @@ slopos-editor-core = { workspace = true }
 slopos-chrome-core = { workspace = true }
 slopos-font = { workspace = true }
 slopos-http-core = { workspace = true }
+slopos-boot-core = { workspace = true }
 slopos-fat-core = { workspace = true }
 slopos-keymap-core = { workspace = true }
 slopos-gfx = { workspace = true }

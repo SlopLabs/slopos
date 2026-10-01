@@ -1,25 +1,33 @@
 //! A kernel installed into a boot slot, tried once, committed, and a broken
 //! one rolled back — across the reboots that takes, on a boot disk
-//! `just test-install` attaches. Each boot runs this test again; a
+//! `just test-install` attaches, and through the firmware entry an installer
+//! registers for SlopOS's loader. Each boot runs this test again; a
 //! non-volatile UEFI variable says which stage the last boot reached.
 //!
-//! 0 (booted `slopos-a`): with a workspace at `/src/slopos`, check out the
-//!   host's `HEAD` there, build the tests kernel and base under a fresh build
-//!   tag, install them into slot b and return the tree to its own checkout;
+//! 0 (booted `slopos-a` by the removable-media path, as a disk the firmware
+//!   has no entry for is): register SlopOS's firmware entry first in
+//!   `BootOrder`. With a workspace at `/src/slopos`, check out the host's
+//!   `HEAD` there, build the tests kernel and base under a fresh build tag,
+//!   install them into slot b and return the tree to its own checkout;
 //!   without one, clone slot a into b. Boot b once.
-//! 1 (booted `slopos-b`, default still a): the running kernel and base carry
-//!   the tag stage 0 built them with, if it built them, and the kernel then
-//!   commits a change on the host's `HEAD` and pushes it to the host; commit
-//!   b, boot `slopos-bad` once — a kernel whose command line panics it with
-//!   `panic=reboot` — and reboot.
-//! 2 (booted `slopos-b` again): the panic reset back to the default.
+//! 1 (booted `slopos-b` through the firmware entry, default still a): the
+//!   running kernel and base carry the tag stage 0 built them with, if it
+//!   built them, and the kernel then commits a change on the host's `HEAD`
+//!   and pushes it to the host; commit b, boot `slopos-bad` once — a kernel
+//!   whose command line panics it with `panic=reboot` — and reboot.
+//! 2 (booted `slopos-b` again, through the firmware entry): the panic reset
+//!   back to the default.
 //!
 //! Without a boot disk it has nothing to do and passes, as `toolchain_test`
 //! does without a toolchain.
 
 use slopos_userland as _;
 
+use slopos_boot_core::variables;
 use slopos_slibc::test_harness::note;
+use slopos_userland::boot_disk::{
+    BootDisk, FindError, boot_current, boot_order, firmware_entry, register_firmware_entry,
+};
 use slopos_userland::selfhost::{
     SCRATCH, check_out, git, selfhost, stdout_of, take_host_head, workspace,
 };
@@ -27,25 +35,15 @@ use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
 use slopos_userland::syscall::efi::{efivar_get, efivar_set};
 use slopos_userland::syscall::error::SyscallError;
-use slopos_userland::syscall::numbers::{
-    EFI_VARIABLE_BOOTSERVICE_ACCESS, EFI_VARIABLE_NON_VOLATILE, EFI_VARIABLE_RUNTIME_ACCESS,
-};
 use std::process::Command;
 use std::time::Instant;
 
 const BASE_TAG_FILE: &str = "/usr/share/slopos/build-tag";
 
-/// A GUID of SlopOS's own for the stage counter:
-/// 5a1b0b05-5105-4e57-a11e-0000000000a1.
-const SLOPOS_GUID: [u8; 16] = [
-    0x05, 0x0b, 0x1b, 0x5a, 0x05, 0x51, 0x57, 0x4e, 0xa1, 0x1e, 0, 0, 0, 0, 0, 0xa1,
-];
 const STAGE: &str = "SlopOSInstallTestStage";
 /// The build tag stage 0 gave the system it built, for stage 1 to find in
 /// `uname -v` and in the base.
 const TAG: &str = "SlopOSInstallTestTag";
-const ATTRS: u32 =
-    EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
 
 fn bootctl(args: &[&str]) -> Option<String> {
     let out = Command::new("/bin/bootctl").args(args).output().ok()?;
@@ -70,7 +68,7 @@ fn field<'a>(status: &'a str, key: &str) -> Option<&'a str> {
 
 fn stage() -> Option<u8> {
     let mut buf = [0u8; 4];
-    match efivar_get(STAGE, &SLOPOS_GUID, &mut buf) {
+    match efivar_get(STAGE, &variables::SLOPOS.0, &mut buf) {
         Ok(1) => Some(buf[0]),
         _ => None,
     }
@@ -78,7 +76,7 @@ fn stage() -> Option<u8> {
 
 /// Write a variable, or delete it with an empty `data`.
 fn set_var(name: &str, data: &[u8]) -> bool {
-    match efivar_set(name, &SLOPOS_GUID, ATTRS, data) {
+    match efivar_set(name, &variables::SLOPOS.0, variables::PERSISTENT, data) {
         Ok(()) => true,
         Err(e) if data.is_empty() && e == SyscallError::ENOENT => true,
         Err(e) => {
@@ -94,7 +92,7 @@ fn set_stage(value: Option<u8>) -> bool {
 
 fn built_tag() -> Option<String> {
     let mut buf = [0u8; 64];
-    let len = efivar_get(TAG, &SLOPOS_GUID, &mut buf).ok()?;
+    let len = efivar_get(TAG, &variables::SLOPOS.0, &mut buf).ok()?;
     String::from_utf8(buf[..len].to_vec()).ok()
 }
 
@@ -204,6 +202,57 @@ fn push_guest_commit(tag: &str) -> Result<String, String> {
     Ok(commit.trim().to_owned())
 }
 
+/// Register SlopOS's loader first in `BootOrder`, twice: the second time
+/// must find the first's entry and change nothing.
+fn register_loader(disk: &BootDisk) -> bool {
+    if let Ok(Some(current)) = boot_current()
+        && firmware_entry(disk).ok().flatten() == Some(current)
+    {
+        note(&format!(
+            "Boot{current:04X}, SlopOS's entry, booted a disk nothing registered"
+        ));
+        return false;
+    }
+    let number = match register_firmware_entry(disk, true) {
+        Ok(number) => number,
+        Err(why) => {
+            note(&why);
+            return false;
+        }
+    };
+    let order = boot_order().unwrap_or_default();
+    match register_firmware_entry(disk, true) {
+        Ok(again) if again == number && boot_order().unwrap_or_default() == order => {}
+        other => {
+            note(&format!(
+                "registering again answered {other:?}, BootOrder {:04X?} became {:04X?}",
+                order,
+                boot_order()
+            ));
+            return false;
+        }
+    }
+    println!("INSTALL-FIRMWARE-ENTRY Boot{number:04X} first in BootOrder {order:04X?}");
+    true
+}
+
+/// The firmware started this boot from SlopOS's own entry, so Limine ran from
+/// its vendor directory and read the configuration there.
+fn booted_through_entry(disk: &BootDisk, stage: u8) -> bool {
+    match (firmware_entry(disk), boot_current()) {
+        (Ok(Some(entry)), Ok(Some(current))) if entry == current => {
+            println!("INSTALL-THROUGH Boot{entry:04X} at stage {stage}");
+            true
+        }
+        other => {
+            note(&format!(
+                "stage {stage} did not boot through SlopOS's firmware entry: {other:?}"
+            ));
+            false
+        }
+    }
+}
+
 fn reboot_into(entry: &str, next: u8) -> bool {
     if bootctl(&["oneshot", entry]).is_none() || !set_stage(Some(next)) {
         return false;
@@ -215,26 +264,54 @@ fn reboot_into(entry: &str, next: u8) -> bool {
 }
 
 fn boot_slot_install_commit_rollback() -> bool {
-    let Some(status) = bootctl(&["status"]) else {
+    // Probed first: an image without UEFI runtime services answers ENODEV.
+    let mut probe = [0u8; 1];
+    if matches!(efivar_get(STAGE, &variables::SLOPOS.0, &mut probe), Err(e) if e == SyscallError::ENODEV)
+    {
+        note("no UEFI runtime services; nothing to test");
         return true;
+    }
+    let mut order = [0u8; slopos_abi::syscall::EFIVAR_DATA_MAX];
+    if matches!(
+        efivar_get("BootOrder", &variables::GLOBAL.0, &mut order),
+        Err(SyscallError::EPERM)
+    ) {
+        note("the installer's role does not reach BootOrder");
+        return false;
+    }
+    let disk = match BootDisk::find() {
+        Ok(disk) => disk,
+        Err(
+            why @ (FindError::NoLoaderPartition
+            | FindError::UnlistedEsp(_)
+            | FindError::NoBootPartition(_)),
+        ) => {
+            note(&format!("{why}; nothing to test"));
+            return true;
+        }
+        Err(why) => {
+            note(&why.to_string());
+            return false;
+        }
+    };
+    let Some(status) = bootctl(&["status"]) else {
+        return false;
     };
     let booted = field(&status, "booted").unwrap_or("-");
     let default = field(&status, "default").unwrap_or("-");
     let oneshot = field(&status, "oneshot").unwrap_or("-");
     println!(
-        "INSTALL-STATUS stage={:?} booted={booted} default={default}",
-        stage()
+        "INSTALL-STATUS stage={:?} booted={booted} default={default} boot={}",
+        stage(),
+        disk.boot_node
     );
-    // Probed first: an image without UEFI runtime services answers ENODEV.
-    let mut probe = [0u8; 1];
-    if matches!(efivar_get(STAGE, &SLOPOS_GUID, &mut probe), Err(e) if e == SyscallError::ENODEV) {
-        note("no UEFI runtime services; nothing to test");
-        return true;
-    }
     match stage() {
         None => {
             if booted != "slopos-a" || default != "slopos-a" {
                 note(&format!("first boot is {booted} with default {default}"));
+                return false;
+            }
+            if !register_loader(&disk) {
                 return false;
             }
             let installed = match install_guest_build() {
@@ -248,6 +325,9 @@ fn boot_slot_install_commit_rollback() -> bool {
                 note(&format!(
                     "the tried boot is {booted}, default {default}, oneshot {oneshot}"
                 ));
+                return false;
+            }
+            if !booted_through_entry(&disk, 1) {
                 return false;
             }
             if let Some(tag) = built_tag() {
@@ -290,6 +370,9 @@ fn boot_slot_install_commit_rollback() -> bool {
                 note(&format!(
                     "after the broken slot: booted {booted}, default {default}, oneshot {oneshot}"
                 ));
+                return false;
+            }
+            if !booted_through_entry(&disk, 2) {
                 return false;
             }
             note("slot b installed, tried, committed; a panicking slot rolled back");

@@ -341,7 +341,7 @@ pub const SYSCALL_ENTRY_COUNT: usize = 170;
 /// point to a capability that had none still moves a number here.
 /// `Unimplemented` is the absence of a handler, so its count is 0 by
 /// construction and the assert below holds it there.
-const CAP_COUNTS: [(Capability, usize); 18] = [
+const CAP_COUNTS: [(Capability, usize); 19] = [
     (Capability::Unimplemented, 0),
     (Capability::NoneSelf, 51),
     (Capability::NoneFd, 77),
@@ -360,6 +360,7 @@ const CAP_COUNTS: [(Capability, usize); 18] = [
     (Capability::Mount, 2),
     (Capability::Clock, 1),
     (Capability::Seal, 0),
+    (Capability::BootEntry, 0),
 ];
 
 const _: () = {
@@ -424,6 +425,6 @@ const _: () = {
 };
 
 /// Per-capability entry-point counts, for the boot-time dump and the tests.
-pub fn cap_counts() -> &'static [(Capability, usize); 18] {
+pub fn cap_counts() -> &'static [(Capability, usize); 19] {
     &CAP_COUNTS
 }

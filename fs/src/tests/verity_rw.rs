@@ -13,9 +13,9 @@ use slopos_testing::{TestResult, fail};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::verity::{
-    AttestTrust, CHUNK_BLOCKS, CRC32_INIT, FsExtent, VerityError, VerityStatus,
-    build_verified_trusting, crc32, crc32_feed, crc32_finish,
+    AttestTrust, CHUNK_BLOCKS, FsExtent, VerityError, VerityStatus, build_verified_trusting,
 };
+use slopos_boot_core::crc32::{self, crc32};
 
 const BS: usize = 512;
 const N: usize = 8;
@@ -589,14 +589,14 @@ fn big_root(word: [u8; 4]) -> u32 {
         staging[k * 4..k * 4 + 4].copy_from_slice(&word);
     }
     let total = BIG_N * 4;
-    let mut state = CRC32_INIT;
+    let mut state = crc32::INIT;
     let mut done = 0usize;
     while done < total {
         let n = core::cmp::min(staging.len(), total - done);
-        state = crc32_feed(state, &staging[..n]);
+        state = crc32::feed(state, &staging[..n]);
         done += n;
     }
-    crc32_finish(state)
+    crc32::finish(state)
 }
 
 #[inline(never)]

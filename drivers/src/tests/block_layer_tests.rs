@@ -7,12 +7,13 @@
 //! the windows sit below the regions the engine tests write.
 
 use slopos_abi::fs::block_ioctl;
+use slopos_boot_core::Guid;
+use slopos_boot_core::crc32::crc32;
 use slopos_fs::blockdev::BlockDevice;
 use slopos_fs::devfs::{
     BlockIoctlReply, DEV_NAME_MAX, devfs_block_ioctl, devfs_resolve_block_source,
 };
-use slopos_fs::partition::{PARTUUID_TEXT_MAX, format_guid};
-use slopos_fs::verity::crc32;
+use slopos_fs::partition::PARTUUID_TEXT_MAX;
 use slopos_fs::vfs::{FileSystem, FileType, VfsError};
 use slopos_ostd::KVec;
 use slopos_testing::TestResult;
@@ -222,8 +223,7 @@ fn partitioned_disk(disk: &[u8], disk_tag: u8) -> TestResult {
 /// Partition 2 resolves by `PARTUUID=` and through its by-partuuid link.
 #[inline(never)]
 fn check_links(p2: &DiskName, disk_tag: u8) -> TestResult {
-    let mut text = [0u8; PARTUUID_TEXT_MAX];
-    format_guid(&unique_guid(disk_tag, 2), &mut text);
+    let text: [u8; PARTUUID_TEXT_MAX] = Guid(unique_guid(disk_tag, 2)).spelling();
     let mut spec = [0u8; 9 + PARTUUID_TEXT_MAX];
     spec[..9].copy_from_slice(b"PARTUUID=");
     spec[9..].copy_from_slice(&text);

@@ -1,46 +1,36 @@
 //! `/bin/bootctl` — install a system into a boot slot and choose what boots.
 //!
-//! The boot disk's EFI system partition holds Limine, `/limine.conf` and, per
-//! slot, a kernel at `/boot/<slot>/kernel.elf` and the base image it boots
-//! with at `/boot/<slot>/base.img`; each slot is a Limine entry named
-//! `slopos-<slot>`. A new system is tried once, not adopted: `oneshot` sets the
-//! Boot Loader Interface's `LoaderEntryOneShot`, which Limine consumes on the
-//! next boot, so a reset after a panic boots the `default_entry` again.
-//! `commit`, run once the tried system is up, makes the entry Limine reports
-//! as booted (`LoaderEntrySelected`) the default.
+//! The boot partition, on the disk the loader was started from, holds per slot
+//! a kernel at `/boot/<slot>/kernel.elf` and the base image it boots with at
+//! `/boot/<slot>/base.img`; each slot is a Limine entry named `slopos-<slot>`.
+//! What boots is chosen through the Boot Loader Interface alone, and nothing
+//! on the ESP is written. A new system is tried once, not adopted: `oneshot`
+//! sets `LoaderEntryOneShot`, which Limine consumes on the next boot, so a
+//! reset after a panic boots the default again. `commit`, run once the tried
+//! system is up, makes the entry Limine reports as booted
+//! (`LoaderEntrySelected`) the default, `LoaderEntryDefault`.
 //!
-//! Every file write is copy-on-write (`slopos_fat_core`), so no kernel, base
-//! or configuration is ever half replaced on the medium.
+//! Every file write is copy-on-write (`slopos_fat_core`), so no kernel or base
+//! is ever half replaced on the medium.
 //!
 //! Holds `TASK_FLAG_MOUNT` for the raw partition and `TASK_FLAG_POWER` for the
 //! loader variables and the reboot.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileExt, FileTypeExt};
+use std::os::unix::fs::FileExt;
 
+use slopos_boot_core::{bli, layout};
 use slopos_fat_core::{Device, Error as FatError, Volume};
 
+use crate::boot_disk::{BootDisk, loader_entries, loader_var, set_loader_var};
 use crate::syscall::core as sys_core;
-use crate::syscall::efi::{
-    LOADER_GUID, efivar_get, efivar_set, loader_string, loader_string_value,
-};
-use crate::syscall::numbers::{
-    EFI_VARIABLE_BOOTSERVICE_ACCESS, EFI_VARIABLE_NON_VOLATILE, EFI_VARIABLE_RUNTIME_ACCESS,
-};
 use crate::syscall::process;
 
-const CONFIG: &str = "/limine.conf";
-/// The block size a regular file standing in for a disk is addressed in.
+/// The block size a regular file standing in for a partition is addressed in.
 const IMAGE_FILE_BLOCK: u32 = 512;
-const ENTRY_PREFIX: &str = "slopos-";
-const KERNEL: &str = "kernel.elf";
-const BASE: &str = "base.img";
 const CPIO_NEWC_MAGIC: &[u8] = b"070701";
 const CPIO_TRAILER: &[u8] = b"TRAILER!!!\0";
-/// Non-volatile, because the reset between arming and the loader clears a volatile variable.
-const ONE_SHOT_ATTRIBUTES: u32 =
-    EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
 
 struct BlockFile {
     file: File,
@@ -86,129 +76,78 @@ fn open_volume(path: &str) -> Result<Volume<BlockFile>, String> {
         .map_err(|e| format!("{path}: not a FAT32 volume ({e:?})"))
 }
 
-/// The first block node holding a FAT32 volume whose Limine configuration
-/// boots a SlopOS slot: a disk shared with another system may carry its ESP
-/// too.
-fn find_esp() -> Result<String, String> {
-    let mut names: Vec<String> = std::fs::read_dir("/dev")
-        .map_err(|e| format!("/dev: {e}"))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_block_device()))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    for name in names {
-        let path = format!("/dev/{name}");
-        if let Ok(mut volume) = open_volume(&path)
-            && read_config(&mut volume).is_ok_and(|config| boots_a_slot(&config))
-        {
-            return Ok(path);
-        }
-    }
-    Err("no EFI system partition with a SlopOS /limine.conf found; pass --esp /dev/<node>".into())
-}
-
-fn loader_var(name: &str) -> Result<Option<String>, String> {
-    let mut buf = [0u8; 512];
-    match efivar_get(name, &LOADER_GUID, &mut buf) {
-        Ok(n) => Ok(loader_string_value(&buf[..n])),
-        Err(e) if e == crate::syscall::error::SyscallError::ENOENT => Ok(None),
-        Err(e) => Err(format!("reading {name}: {e:?}")),
+fn boot_partition(named: Option<&str>) -> Result<String, String> {
+    match named {
+        Some(node) => Ok(node.to_owned()),
+        None => BootDisk::find()
+            .map(|disk| disk.boot_node)
+            .map_err(|e| format!("{e}; pass --boot /dev/<node>")),
     }
 }
 
-/// `default_entry` as the configuration names it.
-fn default_entry(config: &str) -> Option<&str> {
-    config
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("default_entry:"))
-        .map(str::trim)
+/// What the loader reported on this boot, and what the system asked of it.
+struct Loader {
+    entries: Vec<String>,
+    selected: Option<String>,
+    default: Option<String>,
+    one_shot: Option<String>,
 }
 
-/// `config` with `default_entry` set to `entry`, every other line kept.
-fn with_default_entry(config: &str, entry: &str) -> String {
-    let mut out = String::new();
-    let mut replaced = false;
-    for line in config.lines() {
-        if !replaced && line.trim().starts_with("default_entry:") {
-            out.push_str(&format!("default_entry: {entry}\n"));
-            replaced = true;
+impl Loader {
+    fn read() -> Result<Loader, String> {
+        Ok(Loader {
+            entries: loader_entries()?,
+            selected: loader_var(bli::ENTRY_SELECTED)?,
+            default: loader_var(bli::ENTRY_DEFAULT)?,
+            one_shot: loader_var(bli::ENTRY_ONE_SHOT)?,
+        })
+    }
+
+    /// The entry a boot with nothing armed takes, or why it is not known.
+    fn default_entry(&self) -> Result<Option<&str>, String> {
+        let entries: Vec<&str> = self.entries.iter().map(String::as_str).collect();
+        bli::default_entry(&entries, self.default.as_deref()).map_err(|_| {
+            format!(
+                "{} is {:?}, which names no entry the boot loader offers; \
+                 bootctl set-default names one",
+                bli::ENTRY_DEFAULT,
+                self.default.as_deref().unwrap_or_default()
+            )
+        })
+    }
+
+    fn offered(&self, entry: &str) -> Result<(), String> {
+        if self.entries.iter().any(|e| e == entry) {
+            Ok(())
         } else {
-            out.push_str(line);
-            out.push('\n');
+            Err(format!(
+                "the boot loader offers no entry {entry} (it offers: {})",
+                self.entries.join(" ")
+            ))
         }
     }
-    if !replaced {
-        out = format!("default_entry: {entry}\n{out}");
+}
+
+fn status(boot: &str) -> Result<(), String> {
+    let loader = Loader::read()?;
+    let show = |value: Option<&str>| value.unwrap_or("-").to_owned();
+    println!("boot: {boot}");
+    println!("booted: {}", show(loader.selected.as_deref()));
+    match loader.default_entry() {
+        Ok(entry) => println!("default: {}", show(entry)),
+        Err(why) => println!("default: ? ({why})"),
     }
-    out
-}
-
-/// The top-level entry a `/name` line opens; Limine shows a `/+name` one
-/// expanded.
-fn entry_name(line: &str) -> Option<&str> {
-    let name = line.trim_start().strip_prefix('/')?;
-    Some(name.strip_prefix('+').unwrap_or(name).trim())
-}
-
-fn has_entry(config: &str, entry: &str) -> bool {
-    config.lines().any(|l| entry_name(l) == Some(entry))
-}
-
-fn boots_a_slot(config: &str) -> bool {
-    config
-        .lines()
-        .any(|l| entry_name(l).is_some_and(|entry| entry.starts_with(ENTRY_PREFIX)))
-}
-
-fn valid_slot(slot: &str) -> bool {
-    (1..=8).contains(&slot.len())
-        && slot
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-}
-
-fn read_config(volume: &mut Volume<BlockFile>) -> Result<String, String> {
-    let raw = volume
-        .read_file(CONFIG)
-        .map_err(|e| format!("{CONFIG}: {e:?}"))?;
-    String::from_utf8(raw).map_err(|_| format!("{CONFIG} is not UTF-8"))
-}
-
-fn set_default(volume: &mut Volume<BlockFile>, entry: &str) -> Result<(), String> {
-    let config = read_config(volume)?;
-    if !has_entry(&config, entry) {
-        return Err(format!("{CONFIG} has no entry /{entry}"));
-    }
-    if default_entry(&config) == Some(entry) {
-        return Ok(());
-    }
-    volume
-        .write_file(CONFIG, with_default_entry(&config, entry).as_bytes())
-        .map_err(|e| format!("{CONFIG}: {e:?}"))
-}
-
-fn status(esp: &str) -> Result<(), String> {
-    let mut volume = open_volume(esp)?;
-    let config = read_config(&mut volume)?;
-    println!("esp: {esp}");
-    println!(
-        "booted: {}",
-        loader_var("LoaderEntrySelected")?.unwrap_or_else(|| "-".into())
-    );
-    println!("default: {}", default_entry(&config).unwrap_or("-"));
-    println!(
-        "oneshot: {}",
-        loader_var("LoaderEntryOneShot")?.unwrap_or_else(|| "-".into())
-    );
-    if let Ok(slots) = volume.list("/boot") {
+    println!("oneshot: {}", show(loader.one_shot.as_deref()));
+    println!("entries: {}", loader.entries.join(" "));
+    let mut volume = open_volume(boot)?;
+    if let Ok(slots) = volume.list(layout::SLOTS_DIR) {
         for slot in slots.iter().filter(|e| e.is_dir) {
             let mut size = |file: &str| {
                 volume
-                    .stat(&format!("/boot/{}/{file}", slot.name))
+                    .stat(&format!("{}/{}/{file}", layout::SLOTS_DIR, slot.name))
                     .map_or_else(|_| "-".to_owned(), |entry| entry.size.to_string())
             };
-            let (kernel, base) = (size(KERNEL), size(BASE));
+            let (kernel, base) = (size(layout::KERNEL_FILE), size(layout::BASE_FILE));
             if kernel != "-" {
                 println!(
                     "slot {}: kernel {kernel} bytes, base {base} bytes",
@@ -226,25 +165,22 @@ fn is_base_image(image: &[u8]) -> bool {
         && tail.windows(CPIO_TRAILER.len()).any(|w| w == CPIO_TRAILER)
 }
 
-/// The slot's directory, created if need be, once `/limine.conf` is known to
-/// boot it and not by default.
-fn slot_dir(volume: &mut Volume<BlockFile>, slot: &str) -> Result<String, String> {
-    if !valid_slot(slot) {
+/// The slot's directory, created if need be, once the loader is known to
+/// offer it and not to boot it by default.
+fn slot_dir(volume: &mut Volume<BlockFile>, loader: &Loader, slot: &str) -> Result<String, String> {
+    if !layout::valid_slot(slot) {
         return Err(format!("slot '{slot}': 1-8 lowercase letters or digits"));
     }
-    let entry = format!("{ENTRY_PREFIX}{slot}");
-    let config = read_config(volume)?;
-    if !has_entry(&config, &entry) {
-        return Err(format!("{CONFIG} has no entry /{entry}"));
-    }
+    let entry = format!("{}{slot}", layout::ENTRY_PREFIX);
+    loader.offered(&entry)?;
     // A slot is written as two files, so the one that boots by default is
     // never the one being written.
-    if default_entry(&config) == Some(entry.as_str()) {
+    if loader.default_entry()? == Some(entry.as_str()) {
         return Err(format!(
             "{entry} is the default; install into another slot and try it"
         ));
     }
-    let dir = format!("/boot/{slot}");
+    let dir = format!("{}/{slot}", layout::SLOTS_DIR);
     match volume.create_dir(&dir) {
         Ok(()) | Err(FatError::Exists) => Ok(dir),
         Err(e) => Err(format!("{dir}: {e:?}")),
@@ -275,23 +211,18 @@ fn install_slot(
     kernel: &[u8],
     base: &[u8],
 ) -> Result<(), String> {
-    let dir = slot_dir(volume, slot)?;
-    disarm_one_shot(&format!("{ENTRY_PREFIX}{slot}"))?;
-    write_verified(volume, &format!("{dir}/{BASE}"), base)?;
-    write_verified(volume, &format!("{dir}/{KERNEL}"), kernel)
-}
-
-fn disarm_one_shot(entry: &str) -> Result<(), String> {
-    if loader_var("LoaderEntryOneShot")?.as_deref() != Some(entry) {
-        return Ok(());
+    let loader = Loader::read()?;
+    let dir = slot_dir(volume, &loader, slot)?;
+    let entry = format!("{}{slot}", layout::ENTRY_PREFIX);
+    if loader.one_shot.as_deref() == Some(entry.as_str()) {
+        set_loader_var(bli::ENTRY_ONE_SHOT, None)?;
+        println!("{entry} is no longer armed to boot once");
     }
-    efivar_set("LoaderEntryOneShot", &LOADER_GUID, ONE_SHOT_ATTRIBUTES, &[])
-        .map_err(|e| format!("clearing LoaderEntryOneShot: {e:?}"))?;
-    println!("{entry} is no longer armed to boot once");
-    Ok(())
+    write_verified(volume, &format!("{dir}/{}", layout::BASE_FILE), base)?;
+    write_verified(volume, &format!("{dir}/{}", layout::KERNEL_FILE), kernel)
 }
 
-fn install(esp: &str, slot: &str, kernel_path: &str, base_path: &str) -> Result<(), String> {
+fn install(boot: &str, slot: &str, kernel_path: &str, base_path: &str) -> Result<(), String> {
     let kernel = std::fs::read(kernel_path).map_err(|e| format!("{kernel_path}: {e}"))?;
     if !kernel.starts_with(b"\x7fELF") {
         return Err(format!("{kernel_path}: not an ELF file"));
@@ -300,78 +231,95 @@ fn install(esp: &str, slot: &str, kernel_path: &str, base_path: &str) -> Result<
     if !is_base_image(&base) {
         return Err(format!("{base_path}: not a newc cpio archive"));
     }
-    let mut volume = open_volume(esp)?;
+    let mut volume = open_volume(boot)?;
     install_slot(&mut volume, slot, &kernel, &base)?;
-    println!("installed slot {slot} (entry {ENTRY_PREFIX}{slot})");
+    println!(
+        "installed slot {slot} (entry {}{slot})",
+        layout::ENTRY_PREFIX
+    );
     Ok(())
 }
 
-fn clone_slot(esp: &str, from: &str, to: &str) -> Result<(), String> {
-    if !valid_slot(from) {
+fn clone_slot(boot: &str, from: &str, to: &str) -> Result<(), String> {
+    if !layout::valid_slot(from) {
         return Err(format!("slot '{from}': 1-8 lowercase letters or digits"));
     }
-    let mut volume = open_volume(esp)?;
+    let mut volume = open_volume(boot)?;
     let mut read = |file: &str| {
-        let path = format!("/boot/{from}/{file}");
+        let path = format!("{}/{from}/{file}", layout::SLOTS_DIR);
         volume
             .read_file(&path)
             .map_err(|e| format!("{path}: {e:?}"))
     };
-    let (kernel, base) = (read(KERNEL)?, read(BASE)?);
+    let (kernel, base) = (read(layout::KERNEL_FILE)?, read(layout::BASE_FILE)?);
     install_slot(&mut volume, to, &kernel, &base)?;
     println!("copied slot {from} to slot {to}");
     Ok(())
 }
 
 fn oneshot(entry: &str) -> Result<(), String> {
-    efivar_set(
-        "LoaderEntryOneShot",
-        &LOADER_GUID,
-        ONE_SHOT_ATTRIBUTES,
-        &loader_string(entry),
-    )
-    .map_err(|e| format!("setting LoaderEntryOneShot: {e:?}"))?;
+    Loader::read()?.offered(entry)?;
+    set_loader_var(bli::ENTRY_ONE_SHOT, Some(entry))?;
     println!("next boot: {entry}, once");
     Ok(())
 }
 
-fn commit(esp: &str) -> Result<(), String> {
-    let booted = loader_var("LoaderEntrySelected")?
-        .ok_or("the boot loader did not report the booted entry")?;
-    let mut volume = open_volume(esp)?;
-    set_default(&mut volume, &booted)?;
-    println!("default: {booted}");
+fn set_default(entry: &str) -> Result<(), String> {
+    let loader = Loader::read()?;
+    loader.offered(entry)?;
+    if loader.default.as_deref() != Some(entry) {
+        set_loader_var(bli::ENTRY_DEFAULT, Some(entry))?;
+    }
+    println!("default: {entry}");
     Ok(())
 }
 
-const USAGE: &str = "usage: bootctl [--esp /dev/<node>] <command>
+/// The first of the layout's slots that does not boot by default: where a
+/// new system goes to be tried.
+fn spare() -> Result<(), String> {
+    let loader = Loader::read()?;
+    let default = loader.default_entry()?;
+    let slot = layout::SLOTS
+        .iter()
+        .find(|slot| default.and_then(|d| d.strip_prefix(layout::ENTRY_PREFIX)) != Some(**slot))
+        .ok_or("every slot boots by default")?;
+    println!("{slot}");
+    Ok(())
+}
+
+fn commit() -> Result<(), String> {
+    let booted = loader_var(bli::ENTRY_SELECTED)?
+        .ok_or("the boot loader did not report the booted entry")?;
+    set_default(&booted)
+}
+
+const USAGE: &str = "usage: bootctl [--boot /dev/<node>] <command>
   status                      what booted, what is default, the slots
   install <slot> <kernel.elf> <base.img>
                               copy a kernel and its base into /boot/<slot>/
   clone <from> <to>           copy one slot's kernel and base into another
   oneshot <entry>             boot <entry> once, on the next boot only
   set-default <entry>         make <entry> the default
+  spare                       the slot a new system goes into: not the default
   commit                      make the entry that booted the default
   reboot                      restart now";
 
 fn run(args: &[String]) -> Result<(), String> {
     let mut rest = args;
-    let mut esp = None;
-    if rest.first().map(String::as_str) == Some("--esp") {
-        esp = Some(rest.get(1).ok_or(USAGE)?.clone());
+    let mut named = None;
+    if rest.first().map(String::as_str) == Some("--boot") {
+        named = Some(rest.get(1).ok_or(USAGE)?.as_str());
         rest = &rest[2..];
     }
-    let esp = || esp.clone().map_or_else(find_esp, Ok);
+    let boot = || boot_partition(named);
     match rest {
-        [cmd] if cmd == "status" => status(&esp()?),
-        [cmd, slot, kernel, base] if cmd == "install" => install(&esp()?, slot, kernel, base),
-        [cmd, from, to] if cmd == "clone" => clone_slot(&esp()?, from, to),
+        [cmd] if cmd == "status" => status(&boot()?),
+        [cmd, slot, kernel, base] if cmd == "install" => install(&boot()?, slot, kernel, base),
+        [cmd, from, to] if cmd == "clone" => clone_slot(&boot()?, from, to),
         [cmd, entry] if cmd == "oneshot" => oneshot(entry),
-        [cmd, entry] if cmd == "set-default" => {
-            let mut volume = open_volume(&esp()?)?;
-            set_default(&mut volume, entry)
-        }
-        [cmd] if cmd == "commit" => commit(&esp()?),
+        [cmd, entry] if cmd == "set-default" => set_default(entry),
+        [cmd] if cmd == "spare" => spare(),
+        [cmd] if cmd == "commit" => commit(),
         [cmd] if cmd == "reboot" => process::reboot(),
         _ => Err(USAGE.into()),
     }

@@ -85,7 +85,8 @@ iso_tests    := build_dir / "slop-tests.iso"
 iso_elf_tests := build_dir / "slop-elf-tests.iso"
 log_file     := env("LOG_FILE", "test_output.log")
 
-# The UEFI boot disk: GPT, one FAT32 ESP, Limine with A/B kernel slots.
+# The UEFI boot disk, in the layout every SlopOS disk has: an ESP with Limine,
+# a boot partition with A/B kernel slots, and a crash partition.
 boot_disk    := build_dir / "boot-disk.img"
 
 ports        := ""
@@ -386,25 +387,39 @@ boot-debug:
 boot-live: iso
     just _qemu-boot "interactive" "${VIDEO:-1}" {{iso}} {{fs_image}} QEMU_NO_ROOT_DISK=1 {{net_env}}
 
-[doc("Install check: install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics, across the reboots of one QEMU")]
+[doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics, across the reboots of one QEMU, with the ESP untouched")]
 test-install:
     #!/usr/bin/env bash
     set -euo pipefail
-    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*install*" BOOTDISK_PANIC_ENTRY=1 just _boot-disk
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*install*" BOOTDISK_PANIC_ENTRY=1 \
+        BOOTDISK_ROOT_IMAGE={{fs_image_tests}} just _boot-disk
+    . scripts/lib/bootdisk.sh
+    bootdisk_layout
+    esp="$(bootdisk_partition_sha256 {{boot_disk}} "$ESP_TYPE")"
     log="{{build_dir}}/install.log"
     rc=0
     # `bootctl clone` holds a slot's tests kernel and base in memory at once.
+    # The root is the boot disk's own partition, as on bare metal.
     timeout "${INSTALL_TIMEOUT_SECS:-900}" \
-        just _qemu-boot "test" "0" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} QEMU_MEM=1G \
-        >"$log" 2>&1 || rc=$?
+        just _qemu-boot "test" "0" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} \
+        QEMU_NO_ROOT_DISK=1 QEMU_MEM=1G >"$log" 2>&1 || rc=$?
     missing=0
-    for marker in "INSTALL-STAGE 1: rebooting into slopos-b" "INSTALL-STAGE 2: rebooting into slopos-bad" \
-        "panic=reboot: resetting" "ok 1 - boot_slot_install_commit_rollback"; do
+    entry="$(grep -aoE 'INSTALL-FIRMWARE-ENTRY Boot[0-9A-F]{4}' "$log" | head -n1 | cut -d' ' -f2 || true)"
+    for marker in "INSTALL-FIRMWARE-ENTRY ${entry:-Boot????} first" "INSTALL-STAGE 1: rebooting into slopos-b" \
+        "INSTALL-THROUGH $entry at stage 1" "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" \
+        "INSTALL-THROUGH $entry at stage 2" "ok 1 - boot_slot_install_commit_rollback"; do
         grep -aqF "$marker" "$log" || { echo "FAIL: '$marker' not in $log" >&2; missing=1; }
     done
     grep -aq "not ok" "$log" && { echo "FAIL: a test failed; see $log" >&2; missing=1; }
+    [ "$(bootdisk_partition_sha256 {{boot_disk}} "$ESP_TYPE")" = "$esp" ] ||
+        { echo "FAIL: the ESP changed; a commit must touch no limine.conf" >&2; missing=1; }
+    window="$(bootdisk_partition {{boot_disk}} "$ROOT_TYPE")"
+    read -r start size <<<"$window"
+    root="{{build_dir}}/install-root.img"
+    dd if={{boot_disk}} of="$root" bs=1M iflag=skip_bytes,count_bytes skip="$start" count="$size" conv=sparse status=none
+    scripts/check_fs_image.sh "$root" || missing=1
     [ "$missing" = 0 ] || exit 1
-    echo "test-install: installed, tried, committed and rolled back (qemu rc=$rc); log in $log"
+    echo "test-install: registered, installed, tried, committed and rolled back with the ESP untouched (qemu rc=$rc); log in $log"
 
 [doc("Guest install check: the guest takes HEAD over git, builds its kernel and base on the self-hosting root, installs them into slot b and boots them; that system pushes a commit the host fetches; then it commits the slot and rolls back a slot that panics")]
 test-install-guest:
@@ -449,8 +464,12 @@ test-install-guest:
     mkdir -p "$guest"
     scripts/export_fs_file.sh src/slopos/builddir/kernel-tests.elf "{{fs_image_selfhost}}" "$guest/installed.elf"
     scripts/export_fs_file.sh src/slopos/builddir/initramfs-tests.cpio "{{fs_image_selfhost}}" "$guest/installed.cpio"
-    mcopy -o -i "{{boot_disk}}@@1M" ::/boot/b/kernel.elf "$guest/slot-b.elf"
-    mcopy -o -i "{{boot_disk}}@@1M" ::/boot/b/base.img "$guest/slot-b.cpio"
+    . scripts/lib/bootdisk.sh
+    bootdisk_layout
+    window="$(bootdisk_partition {{boot_disk}} "$BOOT_TYPE")"
+    read -r boot_at _ <<<"$window"
+    mcopy -o -i "{{boot_disk}}@@$boot_at" "::$SLOTS_DIR/b/$KERNEL_FILE" "$guest/slot-b.elf"
+    mcopy -o -i "{{boot_disk}}@@$boot_at" "::$SLOTS_DIR/b/$BASE_FILE" "$guest/slot-b.cpio"
     cmp "$guest/installed.elf" "$guest/slot-b.elf" ||
         { echo "FAIL: slot b does not hold the kernel the guest built" >&2; exit 1; }
     cmp "$guest/installed.cpio" "$guest/slot-b.cpio" ||
@@ -740,9 +759,9 @@ bench-selfhost: _build-run-tests
     [ "$rc" -eq 0 ] || { tail -n 30 {{build_dir}}/bench-selfhost.log; echo "FAIL: the benchmark boot exited $rc — full log in {{build_dir}}/bench-selfhost.log" >&2; exit 1; }
     python3 scripts/prof_report.py {{build_dir}}/bench-selfhost.log --libc {{build_dir}}/bench-libc.so --lib-dir {{toolchain_install}}/lib
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, ext4-core, http-core, fat-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, ext4-core, http-core, fat-core, boot-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-ext4-core -p slopos-http-core -p slopos-fat-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-ext4-core -p slopos-http-core -p slopos-fat-core -p slopos-boot-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

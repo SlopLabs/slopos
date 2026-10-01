@@ -1840,7 +1840,7 @@ fn test_ext2_aaa_init() -> TestResult {
 /// is recorded, so the stored hash no longer matches the bytes on disk.
 #[inline(never)]
 fn fill_verity_image(img: &mut [u8], bs: usize, n: usize, corrupt_block: Option<usize>) {
-    use crate::verity::crc32;
+    use slopos_boot_core::crc32::crc32;
     for i in 0..n {
         for j in 0..bs {
             img[i * bs + j] = ((i.wrapping_mul(31).wrapping_add(j)) & 0xFF) as u8;
@@ -1897,27 +1897,6 @@ fn build_verity_device(
     match crate::verity::build_verified(boxed, verity_extent(bs, n)) {
         Ok((dev, crate::verity::VerityStatus::Verified { .. })) => Some(dev),
         _ => None,
-    }
-}
-
-/// CRC-32 must match the standard (zlib) algorithm `gen_verity.py` uses,
-/// otherwise every verified read would fail.
-fn test_verity_crc32_known_vectors() -> TestResult {
-    use crate::verity::{CRC32_INIT, crc32, crc32_feed, crc32_finish};
-    let mut long = [0u8; 1027];
-    for (i, b) in long.iter_mut().enumerate() {
-        *b = (i * 7 + 3) as u8;
-    }
-    let (head, tail) = long.split_at(13);
-    let split = crc32_finish(crc32_feed(crc32_feed(CRC32_INIT, head), tail));
-    if crc32(&[]) == 0
-        && crc32(b"123456789") == 0xCBF4_3926
-        && crc32(&long) == 0x02AD_D968
-        && split == crc32(&long)
-    {
-        TestResult::Pass
-    } else {
-        TestResult::Fail
     }
 }
 
@@ -2291,7 +2270,6 @@ pub fn test_fileio_file_ref_move() -> TestResult {
 
 slopos_testing::stest!(name = test_fileio_open_at_fd);
 slopos_testing::stest!(name = test_fileio_file_ref_move);
-slopos_testing::stest!(name = test_verity_crc32_known_vectors);
 slopos_testing::stest!(name = test_verity_clean_read_passes);
 slopos_testing::stest!(name = test_verity_corruption_detected);
 slopos_testing::stest!(name = test_verity_device_is_write_protected);

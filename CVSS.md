@@ -2,6 +2,31 @@
 
 **No finding is open.**
 
+Swept 2026-10-01: the boot chain — UEFI variables from user space and the
+`BootEntry` capability, the boot manager variables' write checks, `bootctl`
+and `install_test` reading every block node's GPT and writing the boot
+partition, the kernel's GPT probe moved onto `boot-core`, load options and
+device paths read off the firmware, and the host's disk builder. `Power`
+reaches nothing it did not; `BootEntry`, which only `TASK_FLAG_INSTALL`
+confers and only `install_test` holds, reaches `Boot####`, `BootOrder` and
+`BootNext` and reads `BootCurrent`, and every write there is held to its
+format on the kernel's own copy before the firmware sees it. Four reviews and
+fuzzing of every `boot-core` parser found defects in the change before it
+landed, none in code that had shipped: a new firmware entry could take a
+number `BootOrder` still listed and boot first unasked; `bootctl`'s refusal to
+overwrite the default slot failed open when `LoaderEntryDefault` named a menu
+path rather than an entry; an entry stored with the disk's full device path
+went unrecognised, so each install would add another; one unreadable firmware
+entry aborted registration; and userland accepted a GPT entry overlapping an
+earlier partition that the kernel skips. One **pre-existing** defect, fixed
+here and below the bar, since only whoever writes a disk can craft it: the
+kernel's probe accepted a header whose usable range reached LBA 0 or the other
+copy's array, so a partition there could cover the table and a mount of it
+overwrite it. Below the bar: `LoaderEntryDefault` is
+machine-wide, so another loader that writes it moves SlopOS to slot a, or to
+no install until `bootctl set-default`; a firmware entry outside `BootOrder`
+past the first free number is not found.
+
 Swept 2026-10-01: ext4 — `ext4-core`'s codecs, extent trees and jbd2
 replay over crafted images, the kernel's journal, extents and checksums,
 `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` and the `Seal` capability, the mount

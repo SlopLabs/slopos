@@ -13,12 +13,15 @@ use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction};
 use slopos_abi::syscall::SYSCALL_SPAWN_PATH;
 use slopos_abi::task::{
     SPAWN_RESERVED, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-    TASK_FLAG_KERNEL_MODE, TASK_FLAG_NET_ADMIN, TASK_FLAG_NEW_PGRP, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
+    TASK_FLAG_INSTALL, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NET_ADMIN, TASK_FLAG_NEW_PGRP,
+    TASK_FLAG_NO_PREEMPT, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
 };
+use slopos_boot_core::variables;
+use slopos_userland::syscall::efi::efivar_get;
+use slopos_userland::syscall::error::SyscallError;
 
-/// The lowest bit the ABI has never defined, derived rather than written down
-/// so the next ABI addition moves the probe instead of invalidating it.
+/// The lowest reserved bit, derived rather than written down so a widened
+/// flag word moves the probe instead of invalidating it.
 const UNDEFINED_FLAG: u16 = 1 << SPAWN_RESERVED.trailing_zeros();
 use slopos_userland::syscall::process;
 use slopos_userland::syscall::raw::syscall5;
@@ -109,11 +112,29 @@ fn privileged_flags_are_eperm() -> bool {
         "PROC_ADMIN",
         spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_PROC_ADMIN, &[]),
         EPERM,
+    ) && expect(
+        "INSTALL",
+        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_INSTALL, &[]),
+        EPERM,
     )
 }
 
-/// Undefined bits fail closed so the ABI can grow one without a deployed caller
-/// having already assigned it a different meaning. `0x0040` is the retired
+/// This caller holds `SYSTEM`, and so `Power`, which the UEFI variable calls
+/// are gated on, but not the installer's role: the firmware's boot manager
+/// variables stay out of reach, whatever the machine's firmware.
+fn power_alone_reaches_no_boot_entry() -> bool {
+    let mut buf = [0u8; 64];
+    match efivar_get("BootOrder", &variables::GLOBAL.0, &mut buf) {
+        Err(SyscallError::EPERM) => true,
+        other => {
+            eprintln!("spawn_privilege_test: BootOrder without the installer's role: {other:?}");
+            false
+        }
+    }
+}
+
+/// Reserved bits fail closed, so a widened flag word can give one a meaning no
+/// deployed caller already assumed. `0x0040` is the retired
 /// `TASK_FLAG_FPU_INITIALIZED`: retired, not freed.
 ///
 /// A request carrying both a reserved and a privileged bit is answered as
@@ -121,7 +142,7 @@ fn privileged_flags_are_eperm() -> bool {
 /// means something.
 fn malformed_flags_are_einval() -> bool {
     expect(
-        "lowest undefined bit",
+        "lowest reserved bit",
         spawn_raw(MISSING, PRIORITY_NORMAL, UNDEFINED_FLAG, &[]),
         EINVAL,
     ) && expect(
@@ -309,6 +330,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("granted_binaries_are_sealed", granted_binaries_are_sealed),
     ("grant_directories_are_sealed", grant_directories_are_sealed),
     ("launch_bounds_the_raise_site", launch_bounds_the_raise_site),
+    (
+        "power_alone_reaches_no_boot_entry",
+        power_alone_reaches_no_boot_entry,
+    ),
 ];
 
 /// A sealed binary is only as safe as the directory that names it: rename

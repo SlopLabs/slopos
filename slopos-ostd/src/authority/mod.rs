@@ -99,6 +99,14 @@ pub enum Capability {
     /// keyed on a path, to the bytes it was granted for. Deletion condition:
     /// dies when grants are keyed on content rather than path.
     Seal,
+    /// Reaching the firmware's boot manager: reading and writing `Boot####`,
+    /// `BootOrder` and `BootNext`, and reading `BootCurrent`. `Power` reaches
+    /// only the Boot Loader Interface's variables and SlopOS's own; this is
+    /// what lets an installer register its loader, and nothing in the global
+    /// namespace beyond those four, so no holder enrols a Secure Boot key.
+    /// Deletion condition: dies when firmware variables are objects named by
+    /// descriptor and the installer is handed the boot manager's.
+    BootEntry,
 }
 
 impl Capability {
@@ -125,6 +133,7 @@ impl Capability {
             Self::Mount => 1 << 11,
             Self::Clock => 1 << 12,
             Self::Seal => 1 << 13,
+            Self::BootEntry => 1 << 14,
         }
     }
 
@@ -157,6 +166,7 @@ impl Capability {
             Self::Mount => "Mount",
             Self::Clock => "Clock",
             Self::Seal => "Seal",
+            Self::BootEntry => "BootEntry",
         }
     }
 
@@ -181,6 +191,7 @@ impl Capability {
         Self::Mount,
         Self::Clock,
         Self::Seal,
+        Self::BootEntry,
     ];
 }
 
@@ -245,6 +256,7 @@ cap_kinds!(
     TestHarness,
     Mount,
     Seal,
+    BootEntry,
 );
 
 /// Proof that a capability check ran, for the request it was minted in.
@@ -385,8 +397,8 @@ pub fn warn_once(cap: Capability) -> bool {
     if bit == 0 {
         return false;
     }
-    // The mask is 11 bits, so a `u16` holds every gated capability. Truncating
-    // to 16 is checked below rather than assumed.
+    // A `u16` holds every gated capability; the truncation is checked below
+    // rather than assumed.
     let bit16 = bit as u16;
     let previous = WARNED.fetch_or(bit16, Ordering::Relaxed);
     previous & bit16 == 0
@@ -457,7 +469,8 @@ pub(crate) fn mint_kernel_power() -> Cap<'static, Power> {
 pub const fn caps_from_task_flags(flags: u16) -> u64 {
     use slopos_abi::task::{
         TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-        TASK_FLAG_LAUNCH, TASK_FLAG_MOUNT, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
+        TASK_FLAG_INSTALL, TASK_FLAG_LAUNCH, TASK_FLAG_MOUNT, TASK_FLAG_POWER,
+        TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
     };
 
     // Universal: each names a global with no object form yet, so a grant would
@@ -488,6 +501,9 @@ pub const fn caps_from_task_flags(flags: u16) -> u64 {
     }
     if flags & (TASK_FLAG_MOUNT | TASK_FLAG_SYSTEM) != 0 {
         mask |= Capability::Mount.bit();
+    }
+    if flags & TASK_FLAG_INSTALL != 0 {
+        mask |= Capability::BootEntry.bit();
     }
     if flags & TASK_FLAG_SYSTEM != 0 {
         // No flag grants the clock or the seal on a program identity, so init

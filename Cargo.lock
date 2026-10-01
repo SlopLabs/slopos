@@ -122,6 +122,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-boot-core"
+version = "0.1.0"
+
+[[package]]
+name = "slopos-bootdisk"
+version = "0.1.0"
+dependencies = [
+ "slopos-boot-core",
+]
+
+[[package]]
 name = "slopos-chrome-core"
 version = "0.1.0"
 dependencies = [
@@ -136,6 +147,7 @@ dependencies = [
  "paste",
  "slopos-abi",
  "slopos-arch",
+ "slopos-boot-core",
  "slopos-font",
  "slopos-fs",
  "slopos-hermetic",
@@ -166,6 +178,7 @@ dependencies = [
  "slopos-abi",
  "slopos-acpi",
  "slopos-arch",
+ "slopos-boot-core",
  "slopos-core",
  "slopos-font",
  "slopos-fs",
@@ -210,6 +223,7 @@ version = "0.1.0"
 dependencies = [
  "slopos-abi",
  "slopos-arch",
+ "slopos-boot-core",
  "slopos-ext4-core",
  "slopos-kernel-services",
  "slopos-mm",
@@ -468,6 +482,7 @@ version = "0.1.0"
 dependencies = [
  "slopos-abi",
  "slopos-appkit",
+ "slopos-boot-core",
  "slopos-chrome-core",
  "slopos-editor-core",
  "slopos-fat-core",

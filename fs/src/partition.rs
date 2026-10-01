@@ -1,32 +1,28 @@
 //! Partition-table parsing and the [`BlockDevice`] adaptors that turn a table
 //! entry into a device.
 //!
-//! GPT layout and validation follow the UEFI Specification (2.10) §5.3: the
-//! header at LBA 1, the backup at the last logical block, a CRC32 over each of
-//! the header and the entry array. MBR is the conventional boot sector,
-//! `0xAA55` at offset 510, the disk signature at 440 and four 16-byte entries
-//! from 446. Only an MBR entry's LBA fields are read: its CHS fields cannot
-//! address a modern disk and disagree with the LBA fields often enough to be a
-//! trap. Both count in the device's logical blocks, so a 4K-native disk's
-//! header is at byte 4096.
+//! GPT is read through `slopos_boot_core::gpt`, which `bootctl` reads the
+//! same tables with, so both name the same partitions. MBR is the
+//! conventional boot sector, `0xAA55` at offset 510, the disk signature at 440
+//! and four 16-byte entries from 446. Only an MBR entry's LBA fields are read:
+//! its CHS fields cannot address a modern disk and disagree with the LBA
+//! fields often enough to be a trap. They count in the device's logical
+//! blocks.
 
+use slopos_boot_core::Guid;
+use slopos_boot_core::gpt::{self, Geometry, Header, Reject, Skip, Skipped};
 use slopos_ostd::klog_info;
 use slopos_ostd::{KArc, KVec};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket, total_seg_len};
-use crate::verity::crc32;
 
 /// The boot sector's size, which is also the smallest logical block.
 const MBR_BYTES: usize = 512;
 
-const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
-const GPT_HEADER_MIN: u32 = 92;
-const GPT_MAX_ENTRIES: u32 = 128;
-const GPT_MIN_ENTRY_SIZE: u32 = 128;
-/// The array is staged whole to CRC it, so the allocation is bounded here
-/// rather than by a header field.
-const GPT_MAX_ARRAY_BYTES: u64 = 32 * 1024;
-const GPT_PRIMARY_LBA: u64 = 1;
+const _: () = assert!(
+    gpt::MAX_ENTRIES <= u8::MAX as u32,
+    "a GPT entry's number is a u8 here"
+);
 
 const MBR_DISK_SIGNATURE_AT: usize = 440;
 const MBR_SIGNATURE_AT: usize = 510;
@@ -44,9 +40,8 @@ const MBR_TYPE_EXTENDED_LINUX: u8 = 0x85;
 pub enum PartitionError {
     Io,
     NoMemory,
-    /// Well-formed but beyond what this parser reads: an array over
-    /// [`GPT_MAX_ARRAY_BYTES`], more than 128 entries, an entry stride under
-    /// 128 bytes or not a multiple of 8, or a GPT major revision other than 1.
+    /// Well-formed but beyond what the GPT reader stages: see
+    /// [`Reject::Unsupported`].
     Unsupported,
     /// A protective MBR (type `0xEE`) with no usable GPT behind it: the real
     /// table is unreadable, so reporting the disk partitionless would hand the
@@ -64,7 +59,7 @@ pub enum PartitionError {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PartitionKind {
-    Gpt { type_guid: [u8; 16] },
+    Gpt { type_guid: Guid },
     Mbr { type_byte: u8 },
 }
 
@@ -83,7 +78,7 @@ pub struct PartitionEntry {
 /// GUID, or an MBR disk's signature with the entry's number.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PartUuid {
-    Gpt([u8; 16]),
+    Gpt(Guid),
     Mbr { signature: u32, number: u8 },
 }
 
@@ -102,33 +97,13 @@ fn put_hex(out: &mut [u8], bytes: impl Iterator<Item = u8>) -> usize {
     at
 }
 
-/// A GUID in its registry spelling, lowercase: the first three fields are
-/// stored little-endian and the last two as bytes.
-pub fn format_guid(guid: &[u8; 16], out: &mut [u8; PARTUUID_TEXT_MAX]) {
-    let groups: [&[usize]; 5] = [
-        &[3, 2, 1, 0],
-        &[5, 4],
-        &[7, 6],
-        &[8, 9],
-        &[10, 11, 12, 13, 14, 15],
-    ];
-    let mut at = 0;
-    for (i, group) in groups.iter().enumerate() {
-        if i > 0 {
-            out[at] = b'-';
-            at += 1;
-        }
-        at += put_hex(&mut out[at..], group.iter().map(|&b| guid[b]));
-    }
-}
-
 impl PartUuid {
     /// The lowercase spelling Linux gives it: a GUID, or `ssssssss-nn` in
     /// hex for MBR.
     pub fn format(&self, out: &mut [u8; PARTUUID_TEXT_MAX]) -> usize {
         match self {
             PartUuid::Gpt(guid) => {
-                format_guid(guid, out);
+                *out = guid.spelling();
                 PARTUUID_TEXT_MAX
             }
             PartUuid::Mbr { signature, number } => {
@@ -158,13 +133,11 @@ pub struct PartitionTable {
     pub entries: KVec<PartitionEntry>,
 }
 
-/// The device's logical block size, if it is one a table can be counted in.
-fn block_size_of(device: &dyn BlockDevice) -> Result<u64, PartitionError> {
-    let size = device.logical_block_size();
-    if size < MBR_BYTES as u32 || !size.is_power_of_two() {
-        return Err(PartitionError::Misaligned);
-    }
-    Ok(u64::from(size))
+/// The device's size and logical block, if it is one a table can be counted
+/// in.
+fn geometry_of(device: &dyn BlockDevice) -> Result<Geometry, PartitionError> {
+    Geometry::new(device.capacity(), u64::from(device.logical_block_size()))
+        .ok_or(PartitionError::Misaligned)
 }
 
 impl PartitionTable {
@@ -196,11 +169,6 @@ fn le_u32(bytes: &[u8], at: usize) -> u32 {
     (s[0] as u32) | ((s[1] as u32) << 8) | ((s[2] as u32) << 16) | ((s[3] as u32) << 24)
 }
 
-#[inline]
-fn le_u64(bytes: &[u8], at: usize) -> u64 {
-    (le_u32(bytes, at) as u64) | ((le_u32(bytes, at + 4) as u64) << 32)
-}
-
 /// Zeroed heap buffer: a sector or an entry array must not sit on the kernel
 /// stack.
 fn staged(len: usize) -> Result<KVec<u8>, PartitionError> {
@@ -215,15 +183,21 @@ fn staged(len: usize) -> Result<KVec<u8>, PartitionError> {
 ///
 /// Only a copy that *claimed* a GPT — one whose signature matched — may
 /// suppress the MBR fallback, so a sector that could not be read or staged
-/// before any signature matched is [`GptReject::Absent`]: a plain MBR disk
-/// whose last logical block is unreadable must still parse its MBR.
+/// before any signature matched is [`Reject::Absent`]: a plain MBR disk whose
+/// last logical block is unreadable must still parse its MBR.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum GptReject {
-    Absent,
-    Corrupt,
-    Unsupported,
+    Rejected(Reject),
     /// A GPT was claimed, but its entry array could not be read or staged.
     Indeterminate(PartitionError),
+}
+
+const ABSENT: GptReject = GptReject::Rejected(Reject::Absent);
+
+impl From<Reject> for GptReject {
+    fn from(reject: Reject) -> Self {
+        GptReject::Rejected(reject)
+    }
 }
 
 /// Parse the partition table of `device`. Neither signature present is
@@ -232,11 +206,8 @@ enum GptReject {
 /// GPT is tried before MBR because a GPT disk carries a protective MBR that
 /// would otherwise parse as one partition spanning the disk.
 pub fn probe(device: &dyn BlockDevice) -> Result<PartitionTable, PartitionError> {
-    let geometry = Geometry {
-        capacity: device.capacity(),
-        block: block_size_of(device)?,
-    };
-    if geometry.capacity < 2 * geometry.block {
+    let geometry = geometry_of(device)?;
+    if geometry.blocks() < 2 {
         return Ok(PartitionTable::unpartitioned());
     }
 
@@ -255,23 +226,6 @@ pub fn probe(device: &dyn BlockDevice) -> Result<PartitionTable, PartitionError>
     }
 }
 
-/// A device's size and the logical block its table counts in, both in bytes.
-#[derive(Clone, Copy)]
-struct Geometry {
-    capacity: u64,
-    block: u64,
-}
-
-impl Geometry {
-    fn blocks(&self) -> u64 {
-        self.capacity / self.block
-    }
-
-    fn byte_of(&self, lba: u64) -> Option<u64> {
-        lba.checked_mul(self.block)
-    }
-}
-
 /// `Ok(None)`: no GPT here, try MBR. `Err(CorruptGpt)`: a GPT was claimed by
 /// at least one copy and neither validated, so an MBR fallback must not report
 /// the disk as partitionless.
@@ -280,14 +234,14 @@ fn probe_gpt(
     device: &dyn BlockDevice,
     geometry: Geometry,
 ) -> Result<Option<PartitionTable>, PartitionError> {
-    let primary = match read_gpt_copy(device, geometry, GPT_PRIMARY_LBA) {
+    let primary = match read_gpt_copy(device, geometry, gpt::PRIMARY_LBA) {
         Ok(table) => return Ok(Some(table)),
         Err(e) => e,
     };
 
-    let backup_lba = geometry.blocks() - 1;
-    let backup = if backup_lba == GPT_PRIMARY_LBA {
-        GptReject::Absent
+    let backup_lba = geometry.backup_lba();
+    let backup = if backup_lba == gpt::PRIMARY_LBA {
+        ABSENT
     } else {
         match read_gpt_copy(device, geometry, backup_lba) {
             Ok(table) => {
@@ -300,26 +254,13 @@ fn probe_gpt(
         }
     };
 
-    let verdict = if primary == GptReject::Absent {
-        backup
-    } else {
-        primary
-    };
+    let verdict = if primary == ABSENT { backup } else { primary };
     match verdict {
-        GptReject::Absent => Ok(None),
-        GptReject::Corrupt => Err(PartitionError::CorruptGpt),
-        GptReject::Unsupported => Err(PartitionError::Unsupported),
+        GptReject::Rejected(Reject::Absent) => Ok(None),
+        GptReject::Rejected(Reject::Corrupt) => Err(PartitionError::CorruptGpt),
+        GptReject::Rejected(Reject::Unsupported) => Err(PartitionError::Unsupported),
         GptReject::Indeterminate(e) => Err(e),
     }
-}
-
-struct GptHeader {
-    entry_lba: u64,
-    num_entries: u32,
-    entry_size: u32,
-    array_crc: u32,
-    first_usable: u64,
-    last_usable: u64,
 }
 
 #[inline(never)]
@@ -328,56 +269,42 @@ fn read_gpt_copy(
     geometry: Geometry,
     lba: u64,
 ) -> Result<PartitionTable, GptReject> {
-    let header = parse_gpt_header(device, geometry, lba)?;
-    let array_bytes = header.num_entries as u64 * header.entry_size as u64;
+    let header = read_gpt_header(device, geometry, lba)?;
 
-    let mut array = staged(array_bytes as usize)
+    let mut array = staged(header.array_bytes())
         .map_err(|_| GptReject::Indeterminate(PartitionError::NoMemory))?;
     let at = geometry
-        .byte_of(header.entry_lba)
-        .ok_or(GptReject::Corrupt)?;
+        .byte_of(header.entry_lba())
+        .ok_or(GptReject::Rejected(Reject::Corrupt))?;
     device
         .read_at(at, array.as_mut_slice())
         .map_err(|_| GptReject::Indeterminate(PartitionError::Io))?;
-    if crc32(&array) != header.array_crc {
-        return Err(GptReject::Corrupt);
+    if !header.array_matches(&array) {
+        return Err(Reject::Corrupt.into());
     }
 
     let mut entries = KVec::new();
-    for index in 0..header.num_entries as usize {
-        let base = index * header.entry_size as usize;
-        let Some(raw) = array.get(base..base + GPT_MIN_ENTRY_SIZE as usize) else {
-            break;
+    for partition in header.partitions(&array) {
+        let partition = match partition {
+            Ok(partition) => partition,
+            Err(Skipped { number, why }) => {
+                let why = match why {
+                    Skip::OutsideUsable => "lies outside the usable range",
+                    Skip::Overlaps => "overlaps an earlier one",
+                };
+                klog_info!("PART: GPT entry {number} {why} — skipped");
+                continue;
+            }
         };
-        let mut type_guid = [0u8; 16];
-        type_guid.copy_from_slice(&raw[..16]);
-        if type_guid.iter().all(|&b| b == 0) {
-            continue;
-        }
-        let mut unique = [0u8; 16];
-        unique.copy_from_slice(&raw[16..32]);
-        let first = le_u64(raw, 32);
-        let last = le_u64(raw, 40);
-        let number = (index + 1) as u8;
-        if first > last || first < header.first_usable || last > header.last_usable {
-            klog_info!("PART: GPT entry {number} lies outside the usable range — skipped");
-            continue;
-        }
-        let Some((start, len)) = window_bytes(first, last, geometry) else {
-            klog_info!("PART: GPT entry {number} leaves the device — skipped");
-            continue;
-        };
-        if overlaps_any(&entries, start, len) {
-            klog_info!("PART: GPT entry {number} overlaps an earlier one — skipped");
-            continue;
-        }
         entries
             .push(PartitionEntry {
-                number,
-                start,
-                len,
-                kind: PartitionKind::Gpt { type_guid },
-                uuid: PartUuid::Gpt(unique),
+                number: partition.entry.number as u8,
+                start: partition.start,
+                len: partition.len,
+                kind: PartitionKind::Gpt {
+                    type_guid: partition.entry.type_guid,
+                },
+                uuid: PartUuid::Gpt(partition.entry.unique),
             })
             .map_err(|_| GptReject::Indeterminate(PartitionError::NoMemory))?;
     }
@@ -388,91 +315,19 @@ fn read_gpt_copy(
     })
 }
 
-fn parse_gpt_header(
+fn read_gpt_header(
     device: &dyn BlockDevice,
     geometry: Geometry,
     lba: u64,
-) -> Result<GptHeader, GptReject> {
+) -> Result<Header, GptReject> {
     // Nothing has claimed a GPT here yet, so a failure to stage or read the
     // block leaves the disk a candidate for MBR.
-    let mut header = staged(geometry.block as usize).map_err(|_| GptReject::Absent)?;
-    let at = geometry.byte_of(lba).ok_or(GptReject::Absent)?;
+    let mut block = staged(geometry.block() as usize).map_err(|_| ABSENT)?;
+    let at = geometry.byte_of(lba).ok_or(ABSENT)?;
     device
-        .read_at(at, header.as_mut_slice())
-        .map_err(|_| GptReject::Absent)?;
-    if &header[..8] != GPT_SIGNATURE {
-        return Err(GptReject::Absent);
-    }
-    if le_u32(&header, 8) >> 16 != 1 {
-        return Err(GptReject::Unsupported);
-    }
-    let header_size = le_u32(&header, 12);
-    if !(u64::from(GPT_HEADER_MIN)..=geometry.block).contains(&u64::from(header_size)) {
-        return Err(GptReject::Corrupt);
-    }
-    let stored_crc = le_u32(&header, 16);
-    // UEFI §5.3.2: the header CRC covers `header_size` bytes with its own
-    // field taken as zero.
-    header.as_mut_slice()[16..20].fill(0);
-    if crc32(&header[..header_size as usize]) != stored_crc {
-        return Err(GptReject::Corrupt);
-    }
-    // A header that disagrees about where it lives is a copy of the other one,
-    // so its entry-array pointer cannot be trusted either.
-    if le_u64(&header, 24) != lba {
-        return Err(GptReject::Corrupt);
-    }
-
-    let first_usable = le_u64(&header, 40);
-    let last_usable = le_u64(&header, 48);
-    let entry_lba = le_u64(&header, 72);
-    let num_entries = le_u32(&header, 80);
-    let entry_size = le_u32(&header, 84);
-    let array_crc = le_u32(&header, 88);
-
-    if num_entries == 0 || num_entries > GPT_MAX_ENTRIES {
-        return Err(GptReject::Unsupported);
-    }
-    if entry_size < GPT_MIN_ENTRY_SIZE || entry_size % 8 != 0 {
-        return Err(GptReject::Unsupported);
-    }
-    let array_bytes = num_entries as u64 * entry_size as u64;
-    if array_bytes > GPT_MAX_ARRAY_BYTES {
-        return Err(GptReject::Unsupported);
-    }
-
-    if first_usable > last_usable || last_usable >= geometry.blocks() {
-        return Err(GptReject::Corrupt);
-    }
-    let array_end = geometry
-        .byte_of(entry_lba)
-        .and_then(|b| b.checked_add(array_bytes))
-        .ok_or(GptReject::Corrupt)?;
-    if array_end > geometry.capacity {
-        return Err(GptReject::Corrupt);
-    }
-    // UEFI §5.3.2: `[FirstUsableLBA, LastUsableLBA]` holds neither header nor
-    // this copy's entry array, or a partition window could contain the GPT
-    // itself and a read-write mount inside it would destroy the table.
-    // Intersection, not "below first_usable": a *backup* array legitimately
-    // sits above `LastUsableLBA`.
-    let usable = first_usable..=last_usable;
-    let array_last_lba = entry_lba + (array_bytes - 1) / geometry.block;
-    if usable.contains(&GPT_PRIMARY_LBA)
-        || usable.contains(&(geometry.blocks() - 1))
-        || (entry_lba <= last_usable && array_last_lba >= first_usable)
-    {
-        return Err(GptReject::Corrupt);
-    }
-
-    Ok(GptHeader {
-        entry_lba,
-        num_entries,
-        entry_size,
-        array_crc,
-        first_usable,
-        last_usable,
-    })
+        .read_at(at, block.as_mut_slice())
+        .map_err(|_| ABSENT)?;
+    Ok(Header::parse(&block, lba, geometry)?)
 }
 
 /// Whether `[start, start + len)` shares a byte with a window in `entries`: two
@@ -481,17 +336,6 @@ fn overlaps_any(entries: &[PartitionEntry], start: u64, len: u64) -> bool {
     entries
         .iter()
         .any(|e| start < e.start + e.len && e.start < start + len)
-}
-
-/// Inclusive LBA range to a byte window, `None` if it leaves the device.
-fn window_bytes(first_lba: u64, last_lba: u64, geometry: Geometry) -> Option<(u64, u64)> {
-    let start = geometry.byte_of(first_lba)?;
-    let blocks = last_lba.checked_sub(first_lba)?.checked_add(1)?;
-    let len = geometry.byte_of(blocks)?;
-    if start.checked_add(len)? > geometry.capacity {
-        return None;
-    }
-    Some((start, len))
 }
 
 #[inline(never)]
@@ -541,7 +385,7 @@ fn probe_mbr(
             klog_info!("PART: MBR entry {number} covers the table itself — skipped");
             continue;
         }
-        let Some((start, len)) = window_bytes(first, first + sectors - 1, geometry) else {
+        let Some((start, len)) = geometry.window(first, first + sectors - 1) else {
             klog_info!("PART: MBR entry {number} leaves the device — skipped");
             continue;
         };
@@ -640,7 +484,7 @@ impl PartitionDevice {
         start: u64,
         len: u64,
     ) -> Result<Self, PartitionError> {
-        if start % block_size_of(parent.as_ref())? != 0 {
+        if start % geometry_of(parent.as_ref())?.block() != 0 {
             return Err(PartitionError::Misaligned);
         }
         let end = start.checked_add(len).ok_or(PartitionError::OutOfRange)?;

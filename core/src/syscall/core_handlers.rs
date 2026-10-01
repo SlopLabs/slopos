@@ -11,6 +11,7 @@ use slopos_abi::syscall::{
 };
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
+use slopos_ostd::authority::BootEntry;
 use slopos_ostd::klog_debug;
 
 use crate::syscall::args::{UserBytes, UserPtr};
@@ -164,10 +165,10 @@ fn efivar_name(name: &UserBytes) -> Result<slopos_ostd::KVec<u8>, Errno> {
 define_syscall!(syscall_efivar_get
     (ctx, name: UserBytes, guid: UserPtr<[u8; 16]>, buf: UserBytes) cap(Power)
     -> Result<u64, Errno> {
-    let _ = ctx;
     let name = efivar_name(&name)?;
     let guid = copy_from_user(guid.inner()).map_err(|_| Errno::EFAULT)?;
-    let value = crate::efivar::efivar_get(&name, guid, buf.len())?;
+    let boot_entry = ctx.require_cap::<BootEntry>().ok();
+    let value = crate::efivar::efivar_get(&name, guid, buf.len(), boot_entry.as_ref())?;
     slopos_mm::user_copy::copy_bytes_to_user(*buf.inner(), &value).map_err(|_| Errno::EFAULT)?;
     Ok(value.len() as u64)
 });
@@ -175,7 +176,6 @@ define_syscall!(syscall_efivar_get
 define_syscall!(syscall_efivar_set
     (ctx, name: UserBytes, guid: UserPtr<[u8; 16]>, attributes: u32, data: UserBytes) cap(Power)
     -> Result<u64, Errno> {
-    let _ = ctx;
     let name = efivar_name(&name)?;
     let guid = copy_from_user(guid.inner()).map_err(|_| Errno::EFAULT)?;
     if data.len() > crate::efivar::EFIVAR_DATA_MAX {
@@ -184,7 +184,8 @@ define_syscall!(syscall_efivar_set
     let mut value = slopos_ostd::KVec::zeroed(data.len()).map_err(|_| Errno::ENOMEM)?;
     slopos_mm::user_copy::copy_bytes_from_user(*data.inner(), &mut value)
         .map_err(|_| Errno::EFAULT)?;
-    crate::efivar::efivar_set(&name, guid, attributes, &value)?;
+    let boot_entry = ctx.require_cap::<BootEntry>().ok();
+    crate::efivar::efivar_set(&name, guid, attributes, &value, boot_entry.as_ref())?;
     Ok(0)
 });
 

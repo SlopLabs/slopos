@@ -1471,6 +1471,18 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
         grant_for(b"/bin/dns_concurrent_test") == (slopos_abi::task::TASK_FLAG_NET_ADMIN, None),
         "the resolver test must be granted NET_ADMIN and nothing more"
     );
+    {
+        use slopos_abi::task::{TASK_FLAG_INSTALL, TASK_FLAG_MOUNT, TASK_FLAG_POWER};
+        assert_test!(
+            grant_for(b"/bin/bootctl") == (TASK_FLAG_MOUNT | TASK_FLAG_POWER, None),
+            "bootctl must be granted MOUNT and POWER, and not the installer's role"
+        );
+        assert_test!(
+            grant_for(b"/bin/install_test")
+                == (TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL, None),
+            "the install test must hold the installer's role beside what bootctl holds"
+        );
+    }
 
     assert_test!(
         grant_for(INIT_PATH) == (0, None),

@@ -55,11 +55,6 @@ impl EfiGuid {
     }
 }
 
-/// `EFI_VARIABLE_*` attribute bits (UEFI 2.x §8.2).
-pub const EFI_VARIABLE_NON_VOLATILE: u32 = 0x1;
-pub const EFI_VARIABLE_BOOTSERVICE_ACCESS: u32 = 0x2;
-pub const EFI_VARIABLE_RUNTIME_ACCESS: u32 = 0x4;
-
 /// An `EFI_STATUS` error: the low bits of a status with the high bit set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EfiError {

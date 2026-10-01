@@ -14,8 +14,9 @@
 //! the image sealed.
 
 use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_LAUNCH,
-    TASK_FLAG_MOUNT, TASK_FLAG_NET_ADMIN, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TaskPriority,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_INSTALL,
+    TASK_FLAG_LAUNCH, TASK_FLAG_MOUNT, TASK_FLAG_NET_ADMIN, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN,
+    TaskPriority,
 };
 
 struct ProgramGrant {
@@ -95,9 +96,8 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_POWER,
         priority: None,
     },
-    // Writes the boot disk's EFI system partition beneath every filesystem
-    // (`Mount`, the raw-device right) and sets the loader's next-boot
-    // variable and reboots (`Power`).
+    // Writes the boot partition's slots beneath every filesystem (`Mount`, the
+    // raw-device right) and sets the loader's variables and reboots (`Power`).
     ProgramGrant {
         path: b"/bin/bootctl",
         flags: TASK_FLAG_MOUNT | TASK_FLAG_POWER,
@@ -118,10 +118,12 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_MOUNT,
         priority: None,
     },
-    // Keeps its stage across the reboots it drives in a UEFI variable.
+    // Keeps its stage in a UEFI variable across the reboots it drives, reads
+    // the boot disk's table, and registers SlopOS's firmware entry as the
+    // installer will.
     ProgramGrant {
         path: b"/bin/install_test",
-        flags: TASK_FLAG_POWER,
+        flags: TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL,
         priority: None,
     },
     // Points the resolver at a nameserver it runs on loopback.

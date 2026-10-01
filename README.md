@@ -68,7 +68,7 @@ just boot-live      # spins the wheel, from RAM
 
 | Command | What it does |
 |---------|--------------|
-| `just boot` | Boot the development machine, wheel first: a persistent `/` carrying the toolchain and a clone of this checkout. Also needs clang, lld, cmake, ninja, dosfstools and mtools |
+| `just boot` | Boot the development machine, wheel first: a persistent `/` carrying the toolchain and a clone of this checkout. Also needs clang, lld, cmake, ninja, util-linux (sfdisk), dosfstools and mtools |
 | `just boot-fast` | `just boot` without the Wheel of Fate (coward) |
 | `just boot-live` | Boot the live ISO from RAM in a window, as bare metal runs it; nothing persists. `ROULETTE=0` skips the wheel |
 | `just test` | Run the 2,500+ test suite under QEMU |

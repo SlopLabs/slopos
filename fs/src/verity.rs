@@ -33,6 +33,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use slopos_boot_core::crc32;
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
@@ -75,77 +76,6 @@ const RESIDENT_SHARE: u64 = 8;
 /// image of 4 KiB blocks costs, which is the largest that mounted at all
 /// before the hash array was chunked.
 const RESIDENT_FLOOR_BYTES: u64 = 256 * 1024 * 4 + 256 * 1024 / 8;
-
-// CRC-32 (IEEE 802.3 / zlib, reflected, poly 0xEDB88320) — matches Python's
-// `zlib.crc32`, which `scripts/gen_verity.py` uses to build the trailer.
-const fn build_crc32_tables() -> [[u32; 256]; 8] {
-    let mut tables = [[0u32; 256]; 8];
-    let mut i = 0usize;
-    while i < 256 {
-        let mut c = i as u32;
-        let mut k = 0;
-        while k < 8 {
-            c = if c & 1 != 0 {
-                0xEDB8_8320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
-            k += 1;
-        }
-        tables[0][i] = c;
-        i += 1;
-    }
-    let mut t = 1usize;
-    while t < 8 {
-        let mut i = 0usize;
-        while i < 256 {
-            let prev = tables[t - 1][i];
-            tables[t][i] = (prev >> 8) ^ tables[0][(prev & 0xFF) as usize];
-            i += 1;
-        }
-        t += 1;
-    }
-    tables
-}
-
-/// Slicing-by-8: `CRC32_TABLES[k][b]` is byte `b`'s contribution followed by
-/// `k` zero bytes, so eight bytes fold in with eight independent lookups.
-static CRC32_TABLES: [[u32; 256]; 8] = build_crc32_tables();
-
-/// Starting state of a running CRC-32, before any byte is fed.
-pub(crate) const CRC32_INIT: u32 = 0xFFFF_FFFF;
-
-/// Feed `data` into a running (pre-final-inversion) CRC-32 state.
-pub(crate) fn crc32_feed(mut state: u32, data: &[u8]) -> u32 {
-    let t = &CRC32_TABLES;
-    let mut words = data.chunks_exact(8);
-    for w in &mut words {
-        let lo = u32::from_le_bytes([w[0], w[1], w[2], w[3]]) ^ state;
-        let hi = u32::from_le_bytes([w[4], w[5], w[6], w[7]]);
-        state = t[7][(lo & 0xFF) as usize]
-            ^ t[6][((lo >> 8) & 0xFF) as usize]
-            ^ t[5][((lo >> 16) & 0xFF) as usize]
-            ^ t[4][(lo >> 24) as usize]
-            ^ t[3][(hi & 0xFF) as usize]
-            ^ t[2][((hi >> 8) & 0xFF) as usize]
-            ^ t[1][((hi >> 16) & 0xFF) as usize]
-            ^ t[0][(hi >> 24) as usize];
-    }
-    for &b in words.remainder() {
-        state = (state >> 8) ^ t[0][((state ^ b as u32) & 0xFF) as usize];
-    }
-    state
-}
-
-/// Close a running state into the value [`crc32`] would have returned.
-pub(crate) fn crc32_finish(state: u32) -> u32 {
-    state ^ 0xFFFF_FFFF
-}
-
-/// CRC-32 (IEEE, reflected) of `data`. `crc32(&[]) == 0`, matching `zlib.crc32`.
-pub fn crc32(data: &[u8]) -> u32 {
-    crc32_finish(crc32_feed(CRC32_INIT, data))
-}
 
 /// The byte range the filesystem claims, from its own superblock. A trailer
 /// lives beyond it or does not exist.
@@ -353,7 +283,7 @@ impl AttestBitmap {
                 let guard = self.bits.lock();
                 guard.copy_out(done, &mut chunk[..n]);
             }
-            state = crc32_feed(state, &chunk[..n]);
+            state = crc32::feed(state, &chunk[..n]);
             inner.write_at(self.offset + done as u64, &chunk[..n])?;
             done += n;
         }
@@ -434,7 +364,7 @@ impl VerifiedBlockDevice {
             let idx = b as usize;
             let buf_off = (b * bs - offset) as usize;
             let block = &buffer[buf_off..buf_off + self.block_size as usize];
-            let got = crc32(block);
+            let got = crc32::crc32(block);
             let want = hashes[(b - hash_base) as usize];
             if got != want {
                 klog_info!(
@@ -741,7 +671,7 @@ fn load_hashes(device: &dyn BlockDevice, header: &TrailerHeader) -> Result<HashA
         KVec::with_capacity(n.div_ceil(CHUNK_BLOCKS)).map_err(|_| VerityError::OutOfMemory)?;
     let mut staging = KVec::<u8>::zeroed(core::cmp::min(arr_bytes, CHUNK_BLOCKS * 4))
         .map_err(|_| VerityError::OutOfMemory)?;
-    let mut state = CRC32_INIT;
+    let mut state = crc32::INIT;
     let mut done = 0usize;
     while done < n {
         let count = core::cmp::min(CHUNK_BLOCKS, n - done);
@@ -749,7 +679,7 @@ fn load_hashes(device: &dyn BlockDevice, header: &TrailerHeader) -> Result<HashA
         device
             .read_at(arr_off + (done * 4) as u64, bytes)
             .map_err(|_| VerityError::Device)?;
-        state = crc32_feed(state, bytes);
+        state = crc32::feed(state, bytes);
         let mut chunk = KVec::<u32>::with_capacity(count).map_err(|_| VerityError::OutOfMemory)?;
         for word in bytes.chunks_exact(4) {
             let h = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
@@ -758,7 +688,7 @@ fn load_hashes(device: &dyn BlockDevice, header: &TrailerHeader) -> Result<HashA
         chunks.push(chunk).map_err(|_| VerityError::OutOfMemory)?;
         done += count;
     }
-    if crc32_finish(state) != header.root {
+    if crc32::finish(state) != header.root {
         klog_info!("verity: hash-array root mismatch (corrupt trailer)");
         return Err(VerityError::CorruptTrailer);
     }
@@ -777,16 +707,16 @@ fn load_bitmap(
     if trust == AttestTrust::NoneThisBoot {
         klog_info!("verity: image not marked clean — no block is attested this boot");
     } else {
-        let mut state = CRC32_INIT;
+        let mut state = crc32::INIT;
         let mut base = 0u64;
         for chunk in bits.chunks.iter_mut() {
             device
                 .read_at(offset + base, chunk.as_mut_slice())
                 .map_err(|_| VerityError::Device)?;
-            state = crc32_feed(state, chunk.as_slice());
+            state = crc32::feed(state, chunk.as_slice());
             base += chunk.len() as u64;
         }
-        if crc32_finish(state) != header.bitmap_crc {
+        if crc32::finish(state) != header.bitmap_crc {
             // A torn bitmap is a crash, not an attack: attest nothing, but do
             // not refuse the mount.
             klog_info!("verity: attested bitmap CRC mismatch — no block is attested this boot");

@@ -240,14 +240,15 @@ pub const TASK_FLAG_CONSOLE_ADMIN: u16 = 0x400;
 /// Conferred on `/bin/sysmon`; `TASK_FLAG_SYSTEM` implies it.
 pub const TASK_FLAG_PROC_ADMIN: u16 = 0x800;
 
-/// May halt or reboot the machine.
+/// May halt or reboot the machine, and set the Boot Loader Interface's
+/// variables that choose what boots next.
 ///
-/// Conferred on exactly one program, `/bin/halt`. Power is deliberately not a
-/// shell builtin: Linux gates `reboot(2)` on `CAP_SYS_BOOT` and ships
-/// `/sbin/halt` as a separate privileged binary, `systemctl poweroff` asks
-/// logind rather than acting, and Redox puts every such resource behind a
-/// daemon that holds the authority. All three keep the shell as the thing that
-/// *asks*, never the thing that holds.
+/// Conferred by program identity, through `slopos_core::exec::grants`. Power
+/// is deliberately not a shell builtin: Linux gates `reboot(2)` on
+/// `CAP_SYS_BOOT` and ships `/sbin/halt` as a separate privileged binary,
+/// `systemctl poweroff` asks logind rather than acting, and Redox puts every
+/// such resource behind a daemon that holds the authority. All three keep the
+/// shell as the thing that *asks*, never the thing that holds.
 ///
 /// `TASK_FLAG_SYSTEM` implies it, so init can still bring the machine down.
 pub const TASK_FLAG_POWER: u16 = 0x1000;
@@ -274,9 +275,21 @@ pub const TASK_FLAG_LAUNCH: u16 = 0x2000;
 ///
 /// The mount table is one global namespace, so a mount is authority over every
 /// other process's view of the filesystem — a mount over `/bin` replaces the
-/// binaries the program-identity grant table is keyed on. Conferred on no
-/// shipped program; `TASK_FLAG_SYSTEM` implies it.
+/// binaries the program-identity grant table is keyed on. It is also the
+/// raw-device right: `/bin/bootctl` holds it to write the boot partition
+/// beneath every filesystem. `TASK_FLAG_SYSTEM` implies it.
 pub const TASK_FLAG_MOUNT: u16 = 0x4000;
+
+/// The installer's role: register a loader with the firmware, as a `Boot####`
+/// entry ordered in `BootOrder`. It adds those variables to what `Power`, which
+/// the UEFI variable calls are gated on, already reaches, so a holder holds
+/// both.
+///
+/// The last bit of the flag word. Conferred by program identity on
+/// `/bin/install_test`, which registers an entry as the installer will;
+/// `TASK_FLAG_SYSTEM` does not imply it, since nothing init does writes a
+/// firmware entry.
+pub const TASK_FLAG_INSTALL: u16 = 0x8000;
 
 // `task.flags` is the entirety of SlopOS's privilege model; the four masks
 // below partition it, so "may a caller set this bit?" is answered once, here.
@@ -303,7 +316,8 @@ pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT
     | TASK_FLAG_PROC_ADMIN
     | TASK_FLAG_POWER
     | TASK_FLAG_LAUNCH
-    | TASK_FLAG_MOUNT;
+    | TASK_FLAG_MOUNT
+    | TASK_FLAG_INSTALL;
 
 /// The two ring bits. They describe where the task executes, not what it may do,
 /// hence classified apart from the privileges. `USER_MODE` is forced on
@@ -317,10 +331,10 @@ pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 /// partition assert below unfailable, which is the only reason that assert
 /// exists.
 ///
-/// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused.
-/// Adding a `TASK_FLAG_*` means clearing its bit here *and* adding it to exactly
-/// one of the three masks above; the asserts fail until both are done.
-pub const SPAWN_RESERVED: u16 = 0x8040;
+/// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused,
+/// so every bit of the word is spoken for: a new `TASK_FLAG_*` means widening
+/// it, and adding the flag to exactly one of the three masks above.
+pub const SPAWN_RESERVED: u16 = 0x0040;
 
 const _: () = assert!(
     (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS | SPAWN_RESERVED) == u16::MAX,

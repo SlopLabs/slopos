@@ -1,5 +1,13 @@
 //! UEFI variables for user space: how a booted system asks its boot loader
-//! for the next boot, through the Boot Loader Interface's EFI variables.
+//! for the next boot, through the Boot Loader Interface's EFI variables, and
+//! how an installer registers that loader with the firmware's boot manager.
+//!
+//! `Power`, which both syscalls are gated on, reaches the Boot Loader
+//! Interface's namespace and SlopOS's own. The global namespace holds Secure
+//! Boot's keys and every firmware setting besides the boot entries, so only
+//! `Boot####`, `BootOrder`, `BootNext` and `BootCurrent` are reachable there,
+//! with `BootEntry`, and a write is held to the format the firmware will parse
+//! on every boot after it.
 //!
 //! The firmware is mapped only into the kernel master address space and may
 //! use the vector registers, so a call runs on a kernel thread: there no user
@@ -11,30 +19,17 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::Errno;
+use slopos_boot_core::Guid;
+use slopos_boot_core::variables::{self, BootVariable, Refusal, check_boot_write};
+use slopos_ostd::authority::{BootEntry, Cap};
 use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
 use slopos_ostd::uefi::{EfiError, EfiGuid};
 use slopos_ostd::{KBox, KVec, lock_class};
 
-/// The vendor GUIDs user space may touch: the Boot Loader Interface's
-/// (4a67b082-0a4c-41cf-b6c7-440b29bb8c4f) and SlopOS's own
-/// (5a1b0b05-5105-4e57-a11e-0000000000a1). Anything wider would let a holder
-/// of `Power`, which exists to reboot, rewrite `BootOrder` or enrol Secure
-/// Boot keys.
-const ALLOWED_GUIDS: [[u8; 16]; 2] = [
-    [
-        0x82, 0xb0, 0x67, 0x4a, 0x4c, 0x0a, 0xcf, 0x41, 0xb6, 0xc7, 0x44, 0x0b, 0x29, 0xbb, 0x8c,
-        0x4f,
-    ],
-    [
-        0x05, 0x0b, 0x1b, 0x5a, 0x05, 0x51, 0x57, 0x4e, 0xa1, 0x1e, 0, 0, 0, 0, 0, 0xa1,
-    ],
-];
-
 /// Longest variable name accepted, in UTF-16 units before the terminator.
 pub const EFIVAR_NAME_MAX: usize = 128;
-/// Largest variable value moved in one call.
-pub const EFIVAR_DATA_MAX: usize = 4096;
+pub use slopos_abi::syscall::EFIVAR_DATA_MAX;
 
 static SYSTEM_TABLE: AtomicU64 = AtomicU64::new(0);
 
@@ -161,11 +156,35 @@ fn utf16_name(name: &[u8]) -> Result<KVec<u16>, Errno> {
     Ok(out)
 }
 
-/// Run one request on the thread and answer it with the buffer it carried.
-fn call(op: Op, name: &[u8], guid: [u8; 16], data: KVec<u8>) -> Result<(usize, KVec<u8>), Errno> {
-    if !ALLOWED_GUIDS.contains(&guid) {
+/// Whether a caller may read `name` under `guid`, or write it with `write`'s
+/// attributes and value.
+pub(crate) fn admit(
+    name: &[u8],
+    guid: Guid,
+    write: Option<(u32, &[u8])>,
+    boot_entry: Option<&Cap<'_, BootEntry>>,
+) -> Result<(), Errno> {
+    if guid == variables::LOADER || guid == variables::SLOPOS {
+        return Ok(());
+    }
+    if guid != variables::GLOBAL || boot_entry.is_none() {
         return Err(Errno::EPERM);
     }
+    let variable = core::str::from_utf8(name)
+        .ok()
+        .and_then(BootVariable::from_name)
+        .ok_or(Errno::EPERM)?;
+    let Some((attributes, value)) = write else {
+        return Ok(());
+    };
+    check_boot_write(variable, attributes, value).map_err(|refusal| match refusal {
+        Refusal::ReadOnly => Errno::EPERM,
+        Refusal::Attributes | Refusal::Malformed => Errno::EINVAL,
+    })
+}
+
+/// Run one request on the thread and answer it with the buffer it carried.
+fn call(op: Op, name: &[u8], guid: [u8; 16], data: KVec<u8>) -> Result<(usize, KVec<u8>), Errno> {
     if SYSTEM_TABLE.load(Ordering::Acquire) == 0 {
         return Err(Errno::ENODEV);
     }
@@ -204,7 +223,13 @@ fn call(op: Op, name: &[u8], guid: [u8; 16], data: KVec<u8>) -> Result<(usize, K
 
 /// Read variable `name` under `guid` into a buffer of `capacity` bytes,
 /// answering the value.
-pub fn efivar_get(name: &[u8], guid: [u8; 16], capacity: usize) -> Result<KVec<u8>, Errno> {
+pub fn efivar_get(
+    name: &[u8],
+    guid: [u8; 16],
+    capacity: usize,
+    boot_entry: Option<&Cap<'_, BootEntry>>,
+) -> Result<KVec<u8>, Errno> {
+    admit(name, Guid(guid), None, boot_entry)?;
     let data = KVec::zeroed(capacity.min(EFIVAR_DATA_MAX)).map_err(|_| Errno::ENOMEM)?;
     let (len, mut data) = call(Op::Get, name, guid, data)?;
     data.truncate(len);
@@ -212,10 +237,17 @@ pub fn efivar_get(name: &[u8], guid: [u8; 16], capacity: usize) -> Result<KVec<u
 }
 
 /// Write variable `name` under `guid`; an empty `value` deletes it.
-pub fn efivar_set(name: &[u8], guid: [u8; 16], attributes: u32, value: &[u8]) -> Result<(), Errno> {
+pub fn efivar_set(
+    name: &[u8],
+    guid: [u8; 16],
+    attributes: u32,
+    value: &[u8],
+    boot_entry: Option<&Cap<'_, BootEntry>>,
+) -> Result<(), Errno> {
     if value.len() > EFIVAR_DATA_MAX {
         return Err(Errno::E2BIG);
     }
+    admit(name, Guid(guid), Some((attributes, value)), boot_entry)?;
     let mut data = KVec::new();
     data.extend_from_slice(value).map_err(|_| Errno::ENOMEM)?;
     call(Op::Set { attributes }, name, guid, data).map(|_| ())

@@ -11,8 +11,8 @@ use crate::partition::{
     PARTUUID_TEXT_MAX, PartUuid, PartitionDevice, PartitionError, PartitionKind, PartitionScheme,
     probe,
 };
-use crate::verity::crc32;
 use crate::vfs::{FileSystem, FileType, VfsError};
+use slopos_boot_core::crc32::crc32;
 
 /// The fixtures' logical block, unless a test says otherwise.
 const SECTOR: u64 = 512;
@@ -234,7 +234,7 @@ pub fn test_partition_gpt_happy_path() -> TestResult {
     }
     match (first.kind, second.kind) {
         (PartitionKind::Gpt { type_guid: a }, PartitionKind::Gpt { type_guid: b })
-            if a == [0x11; 16] && b == [0x22; 16] => {}
+            if a.0 == [0x11; 16] && b.0 == [0x22; 16] => {}
         other => return fail!("type GUIDs not carried through: {:?}", other),
     }
     TestResult::Pass

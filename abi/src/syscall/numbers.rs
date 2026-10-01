@@ -750,20 +750,25 @@ pub const SYSCALL_TEST_PANIC: u64 = SYSCALL_PRIVATE_BASE + 36;
 /// `efivar_get(name: *const u8, name_len, guid: *const [u8; 16], buf: *mut u8,
 /// buf_len) -> len` — read a UEFI variable; `name` is UTF-8. `ENOENT` when it
 /// is not set, `ENOBUFS` when `buf` is too small for it, `ENODEV` without UEFI
-/// runtime services, `EPERM` for a vendor GUID outside the Boot Loader
-/// Interface's and SlopOS's own. Gated on `Capability::Power`: the variables
-/// that matter choose what the machine boots next.
+/// runtime services. Gated on `Capability::Power`: the variables that matter
+/// choose what the machine boots next. That reaches the Boot Loader
+/// Interface's vendor GUID and SlopOS's own; `Capability::BootEntry` adds
+/// `Boot####`, `BootOrder`, `BootNext` and `BootCurrent` under the EFI global
+/// GUID. Anything else is `EPERM`.
 pub const SYSCALL_EFIVAR_GET: u64 = SYSCALL_PRIVATE_BASE + 37;
 
 /// `efivar_set(name: *const u8, name_len, guid: *const [u8; 16], attributes:
 /// u32, data: *const u8, data_len)` — write a UEFI variable; an empty `data`
-/// deletes it. Errors and gate as [`SYSCALL_EFIVAR_GET`].
+/// deletes it. Errors and gate as [`SYSCALL_EFIVAR_GET`], and in the global
+/// namespace `EINVAL` for attributes other than non-volatile with boot and
+/// runtime access, or a value the firmware could not parse: a load option
+/// with a malformed device path list, a `BootOrder` of odd length or none, a
+/// `BootNext` that is not one option number. `BootCurrent` is `EPERM`.
 pub const SYSCALL_EFIVAR_SET: u64 = SYSCALL_PRIVATE_BASE + 38;
 
-/// `EFI_VARIABLE_*` attributes, as `efivar_set` passes them through.
-pub const EFI_VARIABLE_NON_VOLATILE: u32 = 0x1;
-pub const EFI_VARIABLE_BOOTSERVICE_ACCESS: u32 = 0x2;
-pub const EFI_VARIABLE_RUNTIME_ACCESS: u32 = 0x4;
+/// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
+/// call.
+pub const EFIVAR_DATA_MAX: usize = 4096;
 
 /// `getrandom` flags. Both are accepted and change nothing: the pool is
 /// seeded before userland runs.

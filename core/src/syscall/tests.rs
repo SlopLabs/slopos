@@ -3574,9 +3574,14 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         eperm,
         "spawning with PROC_ADMIN must be EPERM — it is conferred by program identity"
     );
+    assert_eq_test!(
+        spawn(NORMAL, slopos_abi::task::TASK_FLAG_INSTALL),
+        eperm,
+        "spawning with INSTALL must be EPERM — it is conferred by program identity"
+    );
 
-    // Undefined bits fail closed so the ABI can grow one. Derived from
-    // SPAWN_RESERVED rather than a literal, which would age into a defined bit.
+    // Reserved bits fail closed. Derived from SPAWN_RESERVED rather than a
+    // literal, so a widened flag word moves the probe with it.
     assert_eq_test!(
         spawn(
             NORMAL,

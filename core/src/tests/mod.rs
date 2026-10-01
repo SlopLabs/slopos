@@ -1,5 +1,6 @@
 pub mod authority_tests;
 pub mod bh_tests;
+pub mod efivar_tests;
 pub mod event_bus_tests;
 pub mod helpers;
 pub mod irq_tests;

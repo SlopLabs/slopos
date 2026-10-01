@@ -13,11 +13,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 LIMINE_DIR="${LIMINE_DIR:-${REPO_ROOT}/third_party/limine}"
-LIMINE_VERSION="${LIMINE_VERSION:-12.3.1}"
+case "$LIMINE_DIR" in /*) ;; *) LIMINE_DIR="$PWD/$LIMINE_DIR" ;; esac
+LIMINE_VERSION="${LIMINE_VERSION:-12.9.1}"
 LIMINE_URL="${LIMINE_URL:-https://github.com/limine-bootloader/limine/releases/download/v${LIMINE_VERSION}/limine-binary.tar.xz}"
 # SHA-256 of limine-binary.tar.xz for the pinned version (GitHub release assets
 # are immutable). Set to empty to skip integrity verification.
-LIMINE_TARBALL_SHA256="${LIMINE_TARBALL_SHA256:-52e84e1d371cdbbeb7bdf01139f33a4bae30a8a6f3d67fccb2ee07d21f8b886b}"
+LIMINE_TARBALL_SHA256="${LIMINE_TARBALL_SHA256:-ce972a05e9d1973dc9b725f9130bd15af01add0eb3a7f90c118ac5cfe21c17b8}"
 
 # Already populated with the pinned release (downloaded earlier or pre-staged
 # for offline builds). The version is read out of the EFI binary itself: a

@@ -36,20 +36,22 @@ its firmware entry, `cachyos`, is the only one.
   `root=initramfs` and mounts no disk.
 - Every volume is ext4 in one profile, with a jbd2 journal that e2fsck
   replays.
+- The boot chain shares a disk: Limine under `\EFI\SlopOS\`, the slots on a
+  boot partition of their own, slot selection through `LoaderEntryDefault`,
+  and a firmware entry only the installer's role may register. The QEMU A/B
+  loop runs on that layout.
 
 Nothing persists yet, and nothing reaches the network:
 
 - **Network.** The only NIC driver is virtio-net, and it starts the DHCP
   client itself. `net/src/ipv4.rs` sends a resolved neighbour's queued packets
   through a hard-coded `DevIndex(1)`.
-- **Making a root.** The host makes every root: `mke2fs` in the profile, then
-  `debugfs` writes the seals (`scripts/build_fs_image.sh`). The guest has no
-  mkfs, fsck or resize tool, and nothing that writes a partition table.
-- **Boot disk.** The boot disk is a host-built GPT with one ESP. Limine sits
-  at the removable-media path, and both slots are on the ESP
-  (`scripts/build_bootdisk.sh`). `bootctl` finds the ESP by scanning every
-  block node and commits by rewriting `/limine.conf`. Limine is pinned at
-  12.3.1.
+- **Making a disk.** The host makes every root and every boot disk: `mke2fs`
+  in the profile, then `debugfs` writes the seals
+  (`scripts/build_fs_image.sh`); `sfdisk`, `mkfs.fat` and mtools lay out the
+  boot disk (`scripts/build_bootdisk.sh`). The guest has no mkfs, fsck or
+  resize tool, nothing that writes a partition table, and `fat-core` creates
+  8.3 names only, so it cannot write `\EFI\SlopOS\limine.conf`.
 - **Panics.** `panic=reboot`, which is how a broken slot falls back to the
   committed one, resets at once. On a machine with no COM1 the screen is the
   only record of the panic, and the reset erases it.
@@ -63,7 +65,7 @@ commits of its own.
 |---|---|---|
 | 1. NVMe disks — **done** | — | the dev loop on NVMe; the live ISO sees the laptop's disk |
 | 2. ext4 — **done** | — | every image the tree builds is ext4 |
-| 3. A boot chain that shares a disk | 1 | the A/B loop on the new partition layout |
+| 3. A boot chain that shares a disk — **done** | 1 | the A/B loop on the new partition layout |
 | 4. A crash record | 1, 3 | a slot that panics leaves the panic behind |
 | 5. Installer and install medium | 1, 2, 3 | **milestone 1:** SlopOS installed beside CachyOS, self-hosting offline |
 | 6. Wired network | — | **milestone 2:** git and crates.io over the RJ45 port |
@@ -99,56 +101,40 @@ decisions later phases build on are under Decided.
 Left for the developer's machine: its own `ext2-persist.img`, which converts
 on the next `just boot`.
 
-### Phase 3: A boot chain that shares a disk
+### Phase 3: A boot chain that shares a disk — done
 
-Every SlopOS disk has this layout, the QEMU boot disk included
-(`scripts/build_bootdisk.sh` builds it):
+Built: the layout every SlopOS disk has, stated once in `boot-core` and laid
+out by `scripts/build_bootdisk.sh` through `tools/bootdisk`:
 
 | Partition | Filesystem and type | Contents | Written by |
 |---|---|---|---|
-| ESP | the disk's existing ESP, or a new one if there is none | `\EFI\SlopOS\BOOTX64.EFI` (Limine) and `\EFI\SlopOS\limine.conf` | installer |
+| ESP | the disk's existing ESP, or a new 260 MiB one | `\EFI\SlopOS\BOOTX64.EFI` (Limine 12.9.1) and `\EFI\SlopOS\limine.conf` | installer |
 | SlopOS boot | FAT32, SlopOS type GUID, 1 GiB | `/boot/{a,b}/kernel.elf` and `base.img` | `bootctl` |
 | SlopOS root | ext4, SlopOS type GUID | `/` | the system |
 | SlopOS crash | raw, SlopOS type GUID, 4 MiB | the last panic | the panic path |
 
-The boot partition is 1 GiB because the largest slot, the tests kernel (97 MB)
-with the tests base (64 MB), is 161 MB, and there are two slots.
-
-- **Limine 12.9 or later.** Limine reads `<EFI app path>/limine.conf` first,
-  so it coexists with another Limine or with GRUB on the same ESP. It
-  publishes `LoaderDevicePartUUID`. Since 12.7 it publishes `LoaderEntries`
-  and resolves `LoaderEntryDefault`, and since 12.9 it consults
-  `LoaderEntryDefault` only while `default_entry` is unset. Kernel and base
-  paths are `guid(<partuuid>):/boot/<slot>/…`.
-- **bootctl.** `bootctl` looks for the boot partition, by its type GUID, on
-  the disk named by `LoaderDevicePartUUID`. It commits by writing
-  `LoaderEntryDefault`, a Boot Loader Interface variable that is already
-  allowed, instead of rewriting `limine.conf`. `limine.conf` then changes only
-  at install. Secure Boot needs that later: Limine's enrolled config hash has
-  to survive every commit.
-- **Firmware entry.** The firmware learns about the loader through a
-  `Boot####` entry for `\EFI\SlopOS\BOOTX64.EFI`, placed first in `BootOrder`
-  only if the user asks. Those variables live under the EFI global GUID,
-  which `core/src/efivar.rs` refuses today, rightly. A new `BootEntry`
-  capability grants `Boot####`, `BootOrder` and `BootNext` and nothing else,
-  and only the installer gets it.
-- **Fallback path.** `\EFI\BOOT\BOOTX64.EFI` is written only on an ESP the
-  installer created. On a shared ESP, the removable-media path belongs to
-  whoever put a loader there.
-- **Other OSes.** The Limine menu carries an `efi_boot_entry` entry for each
-  other OS's firmware entry, so SlopOS's menu can boot CachyOS. The other
-  direction goes through the firmware's boot menu: GRUB's os-prober finds no
-  Linux kernel on SlopOS's partitions.
-
-**Done when** the QEMU boot disk carries the new layout under Limine 12.9 or
-later, and `just test-install` commits and rolls back through
-`LoaderEntryDefault` with `limine.conf` untouched.
+`boot-core` also carries the GPT reader the kernel's partition probe uses,
+load options and device paths, the boot manager variables' formats, the Boot
+Loader Interface's strings and the Limine configuration renderer, with an
+`efi_boot_entry` per other system. `bootctl` finds the boot partition through
+`LoaderDevicePartUUID` and commits through `LoaderEntryDefault`; it never writes
+the ESP. The `BootEntry` capability, conferred by the installer's role
+`TASK_FLAG_INSTALL`, reaches the boot manager's variables, and the kernel holds
+every write there to its format. `userland::boot_disk` registers the firmware
+entry. `just test-install` runs on one disk in the bare-metal shape: it boots
+through the registered entry and holds the ESP to the bytes it was built with.
+`AGENTS.md` describes all of it; the decisions later phases build on are under
+Decided.
 
 ### Phase 4: A crash record
 
 - **Write.** The panic path writes the panic report and the tail of the
   kernel log to the crash partition, through NVMe's reserved polled queue: no
   wait, no allocation, no interrupt. Then it flushes, then it resets.
+- **Finding it.** The crash partition is the one of `layout::CRASH_TYPE` on
+  the disk the kernel was loaded from, which Limine's executable-file response
+  names by its GPT disk GUID. It is found at boot, so the panic path only
+  writes.
 - **Read back.** On the next boot, a service moves the record to
   `/var/log/crash/` and clears the partition. `bootctl status` reports that
   the slot's last boot crashed.
@@ -205,16 +191,27 @@ person runs. It works in this order:
    primary and backup tables written together.
 3. Re-read the partition table.
 4. Format the new partitions: `fat-core` for FAT32, `mke2fs` with the feature
-   profile for the root.
+   profile for the root. `fat-core` learns to create long names first:
+   `\EFI\SlopOS` is mixed case and `limine.conf` is no 8.3 name.
 5. Seal the base mount points.
 6. Copy the payload, and record a manifest under `/var/lib/slopos/trees`. The
    rule is the one host trees follow, so a newer stick updates `/usr/local`
    without touching what the user added.
-7. Write both slots, and `limine.conf` with `cmdline: root=PARTUUID=…` and no
-   QEMU `resolution:` line.
+7. Write both slots, and `limine.conf` from `boot_core::limine`: `cmdline:
+   root=PARTUUID=…`, no QEMU `resolution:` line, a timeout that shows the
+   menu, and an `efi_boot_entry` for each option `BootOrder` lists that
+   `limine::offered_title` accepts given all of them, leaving out one that
+   `limine::collide`s with an entry already in the menu. It
+   goes to `\EFI\SlopOS\`, and on an ESP the installer created to the
+   removable-media path as well.
 8. Set `LoaderEntryDefault`.
 9. Run `e2fsck -fn` on the new root.
-10. Register the firmware entry, last.
+10. Register the firmware entry, last (`boot_disk::register_firmware_entry`),
+    first in `BootOrder` only if the user asks.
+
+The installer holds `Mount`, `Power` and the installer's role,
+`TASK_FLAG_INSTALL`, by program identity; the role confers `BootEntry`, and
+`Seal` joins it here.
 
 The clone's remotes are set to whatever the user names: GitHub over HTTPS, or
 the development machine. None point at SLIRP.
@@ -274,7 +271,9 @@ the kernel does not, just as with a stick. Three disks are graded:
 - **A disk holding a foreign OS,** installed into free space. The disk has an
   ESP with `\EFI\other\`, one foreign data partition and a foreign `Boot####`
   entry. Afterwards the foreign partition and the foreign ESP files are
-  byte-identical, and the foreign firmware entry is still in `BootOrder`.
+  byte-identical, and the foreign firmware entry is still in `BootOrder`. The
+  foreign entry names a partition on the disk QEMU boots by `bootindex`: OVMF
+  deletes an `HD()` entry it cannot match to such a device.
 - **An existing partition,** reused as the root.
 
 Each run then boots from the disk with the ISO detached, and goes around
@@ -294,8 +293,10 @@ committed slot. The fallback boot finds the panic in `/var/log/crash/`.
   disk), VMD, more than 17 CPUs, timers without HPET, x2APIC mode, INTx, PCI
   without MCFG, other PCH GPIO blocks.
 - **ACPI events and suspend.**
-- **Secure Boot signing.** The design allows it (commits do not touch
-  `limine.conf`); the signing itself is not planned.
+- **Secure Boot signing.** The design allows it: commits do not touch
+  `limine.conf`. With a config hash enrolled, Limine wants a BLAKE2B hash on
+  every path, so installing into a slot would rewrite the configuration and
+  re-enrol it. The signing itself is not planned.
 - **Resizing another OS's filesystem.**
 - **Other filesystems.** Mounting, or installing onto, btrfs (CachyOS's
   default), XFS or any other filesystem is future work, not excluded. This
@@ -383,6 +384,59 @@ committed slot. The fallback boot finds the panic in `/var/log/crash/`.
   partition of their own; slot selection is a Boot Loader Interface variable.
   This is how Linux distributions share an ESP, and it keeps a Secure Boot
   chain possible.
+- **One statement of the boot disk.** `boot-core` holds the layout, the type
+  GUIDs, the GPT reader, the load option and device path codecs, the boot
+  manager variables' formats and the Limine configuration renderer. The
+  kernel, `bootctl`, the host's disk builder and the installer all read the
+  disk through it.
+- **SlopOS's partitions carry type GUIDs of its own:** boot
+  `0a5d2380-494f-4bb7-9fa1-76e03c03d1ec`, root
+  `dc5e4e29-da9a-4e3e-ac44-38b4ea426284`, crash
+  `2f690270-a513-45e2-8e3b-75aa8e44177c`. A Linux on the same disk mounts a
+  Discoverable Partitions root or XBOOTLDR as its own, and writes its kernels
+  into the latter.
+- **Limine reads its configuration beside itself and names no default.** It
+  tries `<EFI app path>/limine.conf` before any other name, so it finds its own
+  ahead of another loader's on a shared ESP. With `default_entry` unset,
+  `LoaderEntryDefault` decides, and Limine falls back to its first entry, slot
+  a. Slot files are named by the boot partition's GUID. The configuration is
+  written at install alone.
+- **The loader variables are machine-wide.** `LoaderEntryDefault` and
+  `LoaderEntryOneShot` live under the Boot Loader Interface's GUID, which
+  systemd-boot and any other Limine on the machine read and write too. A value
+  another loader wrote names no SlopOS entry, so SlopOS boots slot a. The
+  laptop's CachyOS boots through GRUB, which reads none of them.
+- **The removable-media path belongs to an ESP SlopOS created.** Only there
+  does SlopOS write `\EFI\BOOT\BOOTX64.EFI`, with a copy of the configuration
+  beside it, which is how a firmware that has lost its entries, or never had
+  one, still boots the disk.
+- **A firmware entry is found by what it starts.** Registering looks for an
+  entry naming the same partition GUID and file path, as systemd's `bootctl`
+  does, wherever the device path puts them. It rewrites that entry if it
+  differs, and otherwise takes the lowest number that is neither a variable
+  nor listed in `BootOrder`. The entry goes first in `BootOrder` only when
+  asked; otherwise it keeps its place, or joins the end. With no variable
+  enumeration, an entry outside `BootOrder` past that number is not seen.
+- **A default bootctl cannot resolve stops installs.** Limine also resolves
+  `LoaderEntryDefault` by menu path, so a value naming no offered entry
+  leaves which slot boots unknown, and `bootctl install` refuses until
+  `bootctl set-default` names one. Every slot has an entry of its own name,
+  so the slot an entry boots is never in doubt.
+- **The kernel holds the boot manager's variables to their formats.**
+  `BootEntry` reaches `Boot####`, `BootOrder` and `BootNext`, and reads
+  `BootCurrent`. Every write must be non-volatile with boot and runtime
+  access, and must be one of: a load option with a well-formed device path
+  list, a `BootOrder` that is not empty, a two-byte `BootNext`. Linux's
+  efivarfs validates these formats too, for the same reason: firmware parses
+  these variables on every boot, often before anything can recover.
+- **The installer is a role, and it took the flag word's last bit.**
+  `TASK_FLAG_INSTALL` confers `BootEntry`, not init, which writes no firmware
+  entry. `0x0040` is retired, so the next flag means widening the word.
+- **QEMU roots the host keeps stay disks of their own.** The persistent and
+  self-hosting roots are grown, refreshed and read back as image files, so
+  they stay `nvme0n1` beside a boot disk with no root partition. `just
+  test-install` builds its disk around the tests root, so the A/B loop also
+  runs on the one-disk shape.
 - **Linux device names,** plus stable `by-partuuid`, `by-uuid` and `by-label`
   links. Probe order is not stable across machines or boots.
 - **The install payload is a Limine module** until a USB mass-storage driver

@@ -528,13 +528,13 @@ else
     DEBUG_ARGS=(-monitor none)
 fi
 
-# The root disk (nvme0n1). Omitted when QEMU_NO_ROOT_DISK=1 to prove the
-# kernel boots purely from the Limine initramfs with no storage device
-# attached.
+# The root disk (nvme0n1). Omitted when QEMU_NO_ROOT_DISK=1: the live ISO
+# boots purely from the Limine initramfs, and a boot disk carrying its own root
+# partition needs no other.
 if [[ ! "${QEMU_NO_ROOT_DISK:-0}" =~ ^(1|true|on|yes)$ ]]; then
     ADD_ROOT_DISK=1
 else
-    echo "QEMU_NO_ROOT_DISK=1 → booting RAM-only (no root disk attached)"
+    echo "QEMU_NO_ROOT_DISK=1 → no root disk at nvme0n1"
     ADD_ROOT_DISK=0
 fi
 

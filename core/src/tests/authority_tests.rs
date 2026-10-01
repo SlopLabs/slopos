@@ -43,8 +43,8 @@ fn power_is_denied_to_an_ordinary_task() -> TestResult {
     pass!()
 }
 
-/// `/bin/halt` is the one program conferred `Power`, and init keeps it so the
-/// machine can still be brought down by the system itself.
+/// `/bin/halt`'s grant confers `Power` and nothing else, and init keeps it so
+/// the machine can still be brought down by the system itself.
 fn power_is_granted_by_program_identity() -> TestResult {
     let halt_binary = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_POWER);
     if !mask_permits(halt_binary, Capability::Power) {
@@ -60,6 +60,7 @@ fn power_is_granted_by_program_identity() -> TestResult {
         Capability::DisplaySeat,
         Capability::InputSeat,
         Capability::TestHarness,
+        Capability::BootEntry,
     ] {
         if mask_permits(halt_binary, other) {
             return fail!("/bin/halt's grant leaked {}", other.name());
@@ -196,7 +197,10 @@ fn the_universal_capabilities_are_the_recorded_set() -> TestResult {
         Capability::InputSeat,
         Capability::ConsoleConfig,
         Capability::TestHarness,
+        Capability::Mount,
+        Capability::Clock,
         Capability::Seal,
+        Capability::BootEntry,
     ] {
         if mask_permits(ordinary, cap) {
             return fail!("{} leaked into the universal set", cap.name());
@@ -340,5 +344,52 @@ fn launch_is_held_by_the_launchers_only() -> TestResult {
 slopos_testing::stest!(name = exec_intersection_never_widens, suite = authority);
 slopos_testing::stest!(
     name = launch_is_held_by_the_launchers_only,
+    suite = authority
+);
+
+/// `BootEntry` is the installer's role and nobody else's: not `bootctl`, which
+/// writes slots and the loader's variables, and not init, which never touches
+/// the firmware's boot manager. It adds to `Power`, under which the UEFI
+/// variable calls are classified, so the role alone reaches no variable.
+fn boot_entry_is_the_installer_s_alone() -> TestResult {
+    use slopos_abi::task::{TASK_FLAG_INSTALL, TASK_FLAG_MOUNT};
+
+    let installer = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_INSTALL);
+    if !mask_permits(installer, Capability::BootEntry) {
+        return fail!("the installer's role must confer BootEntry");
+    }
+    for other in [Capability::Power, Capability::Mount, Capability::Seal] {
+        if mask_permits(installer, other) {
+            return fail!("the installer's role leaked {}", other.name());
+        }
+    }
+    for sysno in [
+        slopos_abi::syscall::SYSCALL_EFIVAR_GET,
+        slopos_abi::syscall::SYSCALL_EFIVAR_SET,
+    ] {
+        let Some(entry) = syscall_lookup(sysno) else {
+            return fail!("efivar syscall {} is not registered", sysno);
+        };
+        if entry.cap != Capability::Power || decide(installer, entry.cap) != AuthorityDecision::Deny
+        {
+            return fail!("the installer's role alone must not pass efivar's Power gate");
+        }
+    }
+    for (flags, who) in [
+        (TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM, "init"),
+        (
+            TASK_FLAG_USER_MODE | TASK_FLAG_MOUNT | TASK_FLAG_POWER,
+            "bootctl",
+        ),
+    ] {
+        if mask_permits(caps_from_task_flags(flags), Capability::BootEntry) {
+            return fail!("{} must not hold BootEntry", who);
+        }
+    }
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = boot_entry_is_the_installer_s_alone,
     suite = authority
 );

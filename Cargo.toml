@@ -38,6 +38,7 @@ members = [
   "tls-core",
   "http-core",
   "fat-core",
+  "boot-core",
   "shell-core",
   "editor-core",
   "video",
@@ -49,6 +50,7 @@ members = [
   "slopos-rt",
   "hermetic",
   "verification",
+  "tools/bootdisk",
   "tools/initramfs",
   "tools/kallsyms"
 ]
@@ -119,6 +121,7 @@ slopos-ext4-core = { path = "ext4-core" }
 slopos-tls-core = { path = "tls-core" }
 slopos-http-core = { path = "http-core" }
 slopos-fat-core = { path = "fat-core" }
+slopos-boot-core = { path = "boot-core" }
 slopos-shell-core = { path = "shell-core" }
 slopos-editor-core = { path = "editor-core" }
 slopos-protocol = { path = "slop-protocol" }

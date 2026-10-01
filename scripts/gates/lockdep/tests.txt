@@ -307,9 +307,24 @@ require-phase post-userland-tests
 #               and chains 110 sit inside their caps and every banded pool
 #               inside its band (kernel edges 174-183, chains 401-410;
 #               userland edges 223-226, chains 459-462).
+#   2026-10-01  userland 220 -> 223, and its chain band 359-467 -> 359-479:
+#               the boot chain (`plans/bare-metal.md` phase 3). The suite now
+#               reaches the UEFI-variable thread (core/src/efivar.rs), because
+#               `install_test` looks for its boot disk through
+#               `LoaderDevicePartUUID`, and checks that the installer's role
+#               reaches `BootOrder`, before deciding there is nothing to test.
+#               Its classes are `EFIVAR_SLOT`, `EFIVAR_STOP.waiters` and
+#               `EFIVAR_DONE`; `EFIVAR_CALLER` is a sleeping `Mutex` an
+#               uncontended acquire registers no class for. Measured from a
+#               class-name dump; boot and the kernel phase hold at 75 and 214.
+#               The thread's orderings put userland chains at 469-474 over
+#               seven full runs of the change, so that band's top takes the
+#               measured range widened by its own width. Every other banded
+#               pool stayed inside its band (kernel edges 181-186, chains
+#               411-414; userland edges 227-233).
 boot	classes	75
 post-kernel-tests	classes	214
-post-userland-tests	classes	220
+post-userland-tests	classes	223
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
@@ -346,4 +361,4 @@ boot	chains	111
 band post-kernel-tests edges 128 188
 band post-userland-tests edges 185 235
 band post-kernel-tests chains 309 417
-band post-userland-tests chains 359 467
+band post-userland-tests chains 359 479

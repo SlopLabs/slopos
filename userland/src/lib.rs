@@ -1,4 +1,5 @@
 pub mod apps;
+pub mod boot_disk;
 pub mod gfx;
 pub mod keymap;
 pub mod net;
