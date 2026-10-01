@@ -4,12 +4,13 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use slopos_arch::cpu;
+use slopos_drivers::crash::PanicRecord;
 use slopos_drivers::keyboard::poll_wait_enter;
 use slopos_mm::memory_init::is_memory_system_initialized;
 use slopos_ostd::panic_recovery;
 use slopos_ostd::stacktrace::{self, StacktraceEntry};
 use slopos_ostd::sync::StateFlag;
-use slopos_video::panic_screen;
+use slopos_video::panic_screen::{self, PanicView};
 
 use crate::shutdown::execute_kernel;
 
@@ -65,6 +66,12 @@ fn panic_serial_write(s: &str) {
     slopos_ostd::watchdog::touch();
 }
 
+/// Into the kernel log too, so a later fatal panic's record carries the oops.
+fn oops_line(s: &str) {
+    panic_serial_write(s);
+    slopos_ostd::klog::klog_ring_line(s);
+}
+
 /// Last-resort abort: prints only pre-existing `&'static str`s, never a
 /// `format_args!` value.
 ///
@@ -73,6 +80,16 @@ fn panic_serial_write(s: &str) {
 /// overflowed in the one case this exists for, where the normal reporter would
 /// re-fault on it. Interrupts are masked first so no IRQ perturbs the halt.
 pub fn panic_abort_raw(msg: &'static str) -> ! {
+    abort(msg, false)
+}
+
+/// [`panic_abort_raw`] on a CPU whose data stack is whole, as a lockup's is,
+/// which also leaves a crash record.
+pub fn panic_abort_recorded(msg: &'static str) -> ! {
+    abort(msg, true)
+}
+
+fn abort(msg: &'static str, record: bool) -> ! {
     slopos_ostd::fblog::snapshot_tail_for_panic();
     cpu::disable_interrupts();
     // Published before the bypass below, which force-releases locks a peer
@@ -87,12 +104,43 @@ pub fn panic_abort_raw(msg: &'static str) -> ! {
     slopos_ostd::panic::mark_fatal_abort();
     // Ordering validation off before anything below acquires a lock.
     slopos_ostd::sync::enter_fatal_bypass();
+    // A fault in writing the record below must come back here, not be
+    // recovered or lose the owner election to this CPU's own claim.
+    slopos_ostd::panic::panic_in_flight_enter();
+    slopos_ostd::panic::panic_depth_enter();
     // Best-effort ownership so a concurrent panic on a peer cannot interleave.
-    let _ = slopos_ostd::panic::claim_panic_owner(slopos_arch::get_current_cpu() as u32);
+    let _ = slopos_ostd::panic::claim_panic_owner(dying_cpu as u32);
     panic_serial_write("\n\n=== KERNEL ABORT ===");
     panic_serial_write(msg);
+    if slopos_ostd::panic::panic_owner_is(dying_cpu as u32) {
+        if record {
+            record_abort(msg);
+        }
+        if REBOOT_ON_PANIC.load(Ordering::Relaxed) {
+            panic_serial_write("panic=reboot: resetting");
+            // A triple fault takes no lock and reserves no port, either of
+            // which the fault that brought this CPU here may have left held.
+            slopos_ostd::cpu::x86_64::core::trigger_triple_fault();
+        }
+    }
     panic_serial_write("System halted.");
     cpu::halt_loop()
+}
+
+fn record_abort(msg: &'static str) {
+    let Some(mut record) = slopos_drivers::crash::begin_panic_record(msg) else {
+        panic_serial_write(if slopos_drivers::crash::armed().is_some() {
+            "crash record: not begun, its buffer was held"
+        } else {
+            "crash record: none, the boot disk keeps no crash store"
+        });
+        return;
+    };
+    let _ = writeln!(record, "=== KERNEL ABORT ===\n{msg}");
+    panic_serial_write(match record.commit() {
+        Ok(_) => "crash record: written",
+        Err(_) => "crash record: not written",
+    });
 }
 
 /// Fills `out` with return addresses walked from the stashed rbp; returns the
@@ -126,7 +174,8 @@ fn panic_capture_backtrace(out: &mut [u64]) -> usize {
     n
 }
 
-fn panic_dump_backtrace() {
+#[inline(never)]
+fn panic_dump_backtrace(report: &mut Report) {
     let frame_rbp = PANIC_FRAME_RBP.load(Ordering::SeqCst);
     let stashed = PANIC_ORIG_RBP.load(Ordering::SeqCst);
     let rbp = if frame_rbp != 0 {
@@ -136,12 +185,12 @@ fn panic_dump_backtrace() {
     } else {
         cpu::read_rbp()
     };
-    panic_dump_backtrace_from(rbp)
+    panic_dump_backtrace_from(rbp, &mut |line| report.line(line))
 }
 
 /// Every frame is printed, the panic machinery's own included: a fixed skip
 /// count would rot as the call shape changes.
-fn panic_dump_backtrace_from(rbp: u64) {
+fn panic_dump_backtrace_from(rbp: u64, emit: &mut dyn FnMut(&str)) {
     let mut entries: [StacktraceEntry; PANIC_BACKTRACE_MAX] = [StacktraceEntry {
         frame_pointer: 0,
         return_address: 0,
@@ -153,11 +202,11 @@ fn panic_dump_backtrace_from(rbp: u64) {
         PANIC_BACKTRACE_MAX as c_int,
     );
     if captured <= 0 {
-        panic_serial_write("Backtrace: <empty>");
+        emit("Backtrace: <empty>");
         return;
     }
 
-    panic_serial_write("Backtrace (most recent call first):");
+    emit("Backtrace (most recent call first):");
     for i in 0..captured as usize {
         let entry = &entries[i];
         let mut line = MessageBuffer::new();
@@ -174,7 +223,7 @@ fn panic_dump_backtrace_from(rbp: u64) {
                 i, entry.frame_pointer, entry.return_address
             );
         }
-        panic_serial_write(line.as_str());
+        emit(line.as_str());
     }
 }
 
@@ -214,9 +263,9 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
                 oops_count,
                 panic_recovery::oops_limit()
             );
-            panic_serial_write(buf.as_str());
+            oops_line(buf.as_str());
         } else {
-            panic_serial_write("\n[PANIC — task-scoped recovery]");
+            oops_line("\n[PANIC — task-scoped recovery]");
 
             if let Some(location) = info.location() {
                 let mut buf = MessageBuffer::new();
@@ -227,7 +276,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
                     location.line(),
                     location.column()
                 );
-                panic_serial_write(buf.as_str());
+                oops_line(buf.as_str());
             }
 
             {
@@ -237,18 +286,18 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
                 } else {
                     let _ = write!(msg_buf, "  message: {}", info.message());
                 }
-                panic_serial_write(msg_buf.as_str());
+                oops_line(msg_buf.as_str());
             }
 
             if production {
                 let mut buf = MessageBuffer::new();
                 let _ = write!(buf, "  oops count: {}", oops_count);
-                panic_serial_write(buf.as_str());
+                oops_line(buf.as_str());
             }
 
             // The live rbp, because the stashed statics belong to the
             // fatal/exception path and may be stale here.
-            panic_dump_backtrace_from(cpu::read_rbp());
+            panic_dump_backtrace_from(cpu::read_rbp(), &mut oops_line);
 
             // Unwinding restores Rust frames, not the interrupt flag.
             if interrupts_were_enabled {
@@ -260,7 +309,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
                 Err(code) => {
                     let mut buf = MessageBuffer::new();
                     let _ = write!(buf, "  unwind initiation failed: {}", code.0);
-                    panic_serial_write(buf.as_str());
+                    oops_line(buf.as_str());
                 }
             }
         }
@@ -317,6 +366,98 @@ fn wait_for_peer_stop() {
     }
 }
 
+struct Report {
+    record: Option<PanicRecord<'static>>,
+}
+
+const BANNER: &str = "=== KERNEL PANIC ===";
+
+impl Report {
+    /// The banner and the panic's message reach serial before a record is
+    /// begun, so a fault in beginning it still leaves them there.
+    fn begin(message: &str) -> Report {
+        panic_serial_write("\n");
+        panic_serial_write(BANNER);
+        panic_serial_write(message);
+        let mut record = slopos_drivers::crash::begin_panic_record(message);
+        if let Some(record) = &mut record {
+            let _ = writeln!(record, "{BANNER}\n{message}");
+        }
+        Report { record }
+    }
+
+    fn line(&mut self, text: &str) {
+        panic_serial_write(text);
+        if let Some(record) = &mut self.record {
+            let _ = writeln!(record, "{text}");
+        }
+    }
+
+    /// Before anything resets or waits, so the record outlives both.
+    #[inline(never)]
+    fn commit(&mut self) -> MessageBuffer {
+        let mut outcome = MessageBuffer::new();
+        let _ = match self.record.take() {
+            Some(record) => {
+                let partition = record.partition();
+                match record.commit() {
+                    Ok(written) => write!(
+                        outcome,
+                        "crash record: {} written to {} slot {}",
+                        written.sequence, partition, written.slot
+                    ),
+                    Err(e) => write!(
+                        outcome,
+                        "crash record: not written to {}: {:?}",
+                        partition, e
+                    ),
+                }
+            }
+            None if slopos_drivers::crash::armed().is_some() => {
+                outcome.write_str("crash record: not begun, its buffer was held")
+            }
+            None => outcome.write_str("crash record: none, the boot disk keeps no crash store"),
+        };
+        panic_serial_write(outcome.as_str());
+        outcome
+    }
+}
+
+/// How long `panic=reboot` leaves the panic on screen before it resets. Bare
+/// metal may have no other record of it; a hypervisor's console is on the
+/// host, as `watchdog.panic`'s default also assumes.
+pub(crate) const fn reset_hold_ms(hypervisor_present: bool) -> u32 {
+    if hypervisor_present { 0 } else { 10_000 }
+}
+
+/// A ten-second spin would otherwise read to the watchdog as a lockup.
+fn hold_before_reset(ms: u32) {
+    slopos_drivers::hpet::spin_for(ms, &mut slopos_ostd::watchdog::touch);
+}
+
+/// Recovered panics may have left non-RAII kernel state skewed, so a non-zero
+/// count marks this report as post-degradation.
+#[inline(never)]
+fn report_taint(report: &mut Report) {
+    let oopses = panic_recovery::oops_count();
+    if oopses > 0 {
+        let mut taint_buf = MessageBuffer::new();
+        let _ = write!(taint_buf, "tainted: oops={}", oopses);
+        report.line(taint_buf.as_str());
+    }
+}
+
+#[inline(never)]
+fn report_registers(report: &mut Report, registers: &[(&str, Option<u64>)]) {
+    report.line("Register snapshot:");
+    for &(label, value) in registers {
+        if let Some(value) = value {
+            let mut hex_buf = HexBuffer::new();
+            report.line(hex_buf.format_labeled(label, value));
+        }
+    }
+}
+
 /// The fatal-fault report: sole console writer, peers already stopped.
 /// `extern "sysv64"` + `-> !` matches the trampoline's bare-fn entry, so all
 /// state arrives through statics.
@@ -328,55 +469,53 @@ extern "sysv64" fn emergency_report() -> ! {
     let cr3 = cpu::read_cr3();
     let cr4 = cpu::read_cr4();
 
-    panic_serial_write("\n\n=== KERNEL PANIC ===");
-
     let mut message_buf = MessageBuffer::new();
     let info_ptr = PANIC_INFO_PTR.load(Ordering::SeqCst) as *const PanicInfo;
     slopos_ostd::panic::format_panic_location_message(info_ptr, &mut message_buf);
     let message_str = message_buf.as_str();
-    panic_serial_write(message_str);
 
-    // Recovered panics may have left non-RAII kernel state skewed, so a non-zero
-    // count marks this report as post-degradation.
-    let oopses = panic_recovery::oops_count();
-    if oopses > 0 {
-        let mut taint_buf = MessageBuffer::new();
-        let _ = write!(taint_buf, "tainted: oops={}", oopses);
-        panic_serial_write(taint_buf.as_str());
-    }
+    let mut report = Report::begin(message_str);
 
-    panic_serial_write("Register snapshot:");
-    if let Some(rip) = extra_rip {
-        let mut hex_buf = HexBuffer::new();
-        panic_serial_write(hex_buf.format_labeled("RIP", rip));
-    }
-    {
-        let mut hex_buf = HexBuffer::new();
-        panic_serial_write(hex_buf.format_labeled("RSP", display_rsp));
-    }
-    {
-        let mut hex_buf = HexBuffer::new();
-        panic_serial_write(hex_buf.format_labeled("CR0", cr0));
-    }
-    {
-        let mut hex_buf = HexBuffer::new();
-        panic_serial_write(hex_buf.format_labeled("CR2", cr2));
-    }
-    {
-        let mut hex_buf = HexBuffer::new();
-        panic_serial_write(hex_buf.format_labeled("CR3", cr3));
-    }
-    {
-        let mut hex_buf = HexBuffer::new();
-        panic_serial_write(hex_buf.format_labeled("CR4", cr4));
-    }
+    report_taint(&mut report);
+    report_registers(
+        &mut report,
+        &[
+            ("RIP", extra_rip),
+            ("RSP", Some(display_rsp)),
+            ("CR0", Some(cr0)),
+            ("CR2", Some(cr2)),
+            ("CR3", Some(cr3)),
+            ("CR4", Some(cr4)),
+        ],
+    );
+    panic_dump_backtrace(&mut report);
 
-    panic_dump_backtrace();
+    report.line("===================");
+    report.line("Kernel panic: unrecoverable error");
+    let outcome = report.commit();
 
-    panic_serial_write("===================");
-    panic_serial_write("Kernel panic: unrecoverable error");
+    let mut bt = [0u64; 8];
+    let bt_n = panic_capture_backtrace(&mut bt);
+    let show_screen = |prompt| {
+        panic_screen::display_panic_screen(&PanicView {
+            message: message_str,
+            rip: extra_rip,
+            rsp: display_rsp,
+            cr0,
+            cr2,
+            cr3,
+            cr4,
+            backtrace: &bt[..bt_n],
+            status: outcome.as_str(),
+            prompt,
+        })
+    };
 
-    if REBOOT_ON_PANIC.load(core::sync::atomic::Ordering::Relaxed) {
+    if REBOOT_ON_PANIC.load(Ordering::Relaxed) {
+        let hold = reset_hold_ms(slopos_ostd::arch::x86_64::cpuid::hypervisor_present());
+        if hold > 0 && show_screen("Resetting to the default boot entry") {
+            hold_before_reset(hold);
+        }
         panic_serial_write("panic=reboot: resetting");
         crate::shutdown::reset_after_panic();
     }
@@ -387,20 +526,7 @@ extern "sysv64" fn emergency_report() -> ! {
         slopos_testing::tests_request_shutdown(1);
     }
 
-    let mut bt = [0u64; 8];
-    let bt_n = panic_capture_backtrace(&mut bt);
-
-    if panic_screen::display_panic_screen(
-        Some(message_str),
-        extra_rip,
-        Some(display_rsp),
-        cr0,
-        cr2,
-        cr3,
-        cr4,
-        &bt[..bt_n],
-        false,
-    ) {
+    if show_screen("Press ENTER to shutdown") {
         panic_serial_write("Press ENTER to shutdown...");
         poll_wait_enter();
     } else {

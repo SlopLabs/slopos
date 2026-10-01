@@ -177,6 +177,12 @@ pub(crate) fn snapshot() -> Option<FbState> {
     FRAMEBUFFER.lock().fb
 }
 
+/// [`snapshot`] for a panic, which must not wait on a lock a stopped CPU
+/// holds.
+pub(crate) fn try_snapshot() -> Option<FbState> {
+    FRAMEBUFFER.try_lock()?.fb
+}
+
 pub fn register_flush_callback(callback: FlushCallback) {
     let mut guard = FRAMEBUFFER_FLUSH.lock();
     *guard = Some(callback);
@@ -193,6 +199,14 @@ pub fn framebuffer_flush(damage: *const DamageRect, damage_count: u32) -> c_int 
     match cb {
         Some(cb) => cb(damage, damage_count),
         None => 0,
+    }
+}
+
+/// [`framebuffer_flush`] of the whole frame for a panic, skipped while the
+/// backend's hook is held.
+pub(crate) fn try_flush() {
+    if let Some(Some(cb)) = FRAMEBUFFER_FLUSH.try_lock().map(|hook| *hook) {
+        cb(core::ptr::null(), 0);
     }
 }
 

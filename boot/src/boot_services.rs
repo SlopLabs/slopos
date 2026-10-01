@@ -9,9 +9,9 @@ use slopos_sched::scheduler::{
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use slopos_drivers::block;
+use slopos_drivers::{block, crash};
 use slopos_fs::blockdev::BlockDevice;
-use slopos_fs::devfs::DEV_NAME_MAX;
+use slopos_fs::devfs::{DEV_NAME_MAX, devfs_register_crash_store};
 use slopos_fs::ext2_vfs::Ext2Mount;
 use slopos_fs::verity::VerityStatus;
 use slopos_fs::vfs::{
@@ -87,6 +87,49 @@ crate::boot_init!(
     drivers,
     b"block device claim\0",
     boot_step_block_claim_fn,
+    flags = boot_init_priority(88)
+);
+
+/// Armed once the disks are probed, so a panic in anything after has
+/// somewhere to go.
+fn boot_step_crash_store_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    let limine = (
+        crate::limine_protocol::kernel_disk_guid(),
+        crate::limine_protocol::kernel_path(),
+    );
+    let (Some(disk), Some(kernel)) = limine else {
+        klog_info!("CRASH: the kernel came from no GPT disk; a panic leaves no record");
+        return;
+    };
+    let booted = crash::Booted {
+        kernel,
+        cmdline: crate::limine_protocol::kernel_cmdline_str().unwrap_or(""),
+        build: slopos_core::syscall::core_handlers::BUILD_TAG.unwrap_or("-"),
+    };
+    let store = match crash::arm(disk, &booted) {
+        Ok(store) => store,
+        Err(e) => {
+            klog_info!("CRASH: no crash store on the boot disk: {:?}", e);
+            return;
+        }
+    };
+    devfs_register_crash_store(&crash::DEVFS_OPS);
+    let held = (0..store.slots())
+        .filter(|&slot| store.record(slot).is_some())
+        .count();
+    klog_info!(
+        "CRASH: records go to {} ({} slots, {} held)",
+        store.partition(),
+        store.slots(),
+        held
+    );
+}
+
+crate::boot_init!(
+    BOOT_STEP_CRASH_STORE,
+    drivers,
+    b"crash store\0",
+    boot_step_crash_store_fn,
     flags = boot_init_priority(88)
 );
 

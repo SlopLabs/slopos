@@ -262,6 +262,22 @@ pub(crate) fn poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
     }
 }
 
+/// Spin for `ms`, calling `poll` throughout, without touching the interrupt
+/// flag. Before the HPET is found there is no clock to spin by, and it returns
+/// at once.
+pub fn spin_for(ms: u32, poll: &mut dyn FnMut()) {
+    if ms_to_ticks(ms).is_none() {
+        return;
+    }
+    spin_until(
+        &mut || {
+            poll();
+            false
+        },
+        ms,
+    );
+}
+
 /// Busy-poll `condition` for up to `timeout_ms` without touching the
 /// interrupt flag, for paths that run with interrupts off or must not take
 /// one. Returns `false` on timeout.

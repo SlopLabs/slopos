@@ -380,7 +380,7 @@ fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
 
     // Not `panic!`: the panic strategy is `unwind`, and the interrupt-entry
     // asm frame below carries no unwind information.
-    crate::panic::panic_abort_raw("NMI watchdog: CPU made no progress, sustained")
+    crate::panic::panic_abort_recorded("NMI watchdog: CPU made no progress, sustained")
 }
 
 /// `int 0x80` is not a SlopOS syscall ABI — userland enters through `SYSCALL` /

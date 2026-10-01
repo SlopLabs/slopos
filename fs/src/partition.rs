@@ -124,7 +124,7 @@ impl PartUuid {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PartitionScheme {
     None,
-    Gpt,
+    Gpt { disk: Guid },
     Mbr,
 }
 
@@ -310,7 +310,9 @@ fn read_gpt_copy(
     }
 
     Ok(PartitionTable {
-        scheme: PartitionScheme::Gpt,
+        scheme: PartitionScheme::Gpt {
+            disk: header.disk_guid(),
+        },
         entries,
     })
 }

@@ -22,13 +22,14 @@ pub use disk::EngineDisk;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use slopos_boot_core::Guid;
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
 use slopos_fs::devfs::{
     BlockNodeKind, DEV_NAME_MAX, devfs_block_contents_changed, devfs_register_block_node,
     devfs_set_block_partitioned, devfs_unregister_block_node,
 };
 use slopos_fs::partition::{
-    PartitionDevice, PartitionEntry, PartitionError, PartitionScheme, probe,
+    PartitionDevice, PartitionEntry, PartitionError, PartitionKind, PartitionScheme, probe,
 };
 use slopos_fs::vfs::{BlockLayerOps, VfsError, VfsResult};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, Mutex, MutexGuard};
@@ -176,6 +177,7 @@ struct Partition {
 struct Disk {
     name: DiskName,
     device: KArc<EngineDisk>,
+    scheme: PartitionScheme,
     whole: Holders,
     /// Set while a table is read with the registry unlocked: nothing on the
     /// disk may be claimed until the table it names is the one in place.
@@ -279,6 +281,7 @@ pub fn register_disk(name: DiskName, device: KArc<EngineDisk>) -> bool {
         let entry = Disk {
             name,
             device: KArc::clone(&device),
+            scheme: PartitionScheme::None,
             whole: Holders::default(),
             scanning: true,
             partitions: KVec::new(),
@@ -308,24 +311,25 @@ pub fn register_disk(name: DiskName, device: KArc<EngineDisk>) -> bool {
     ) {
         klog_info!("BLOCK: /dev/{} not published: {:?}", name, e);
     }
-    let partitions = scan(&name, reader.as_ref()).unwrap_or_else(|e| {
+    let (scheme, partitions) = scan(&name, reader.as_ref()).unwrap_or_else(|e| {
         klog_info!("BLOCK: {} partition table unusable: {:?}", name, e);
-        KVec::new()
+        (PartitionScheme::None, KVec::new())
     });
     publish_partitions(&name, &reader, &partitions);
-    finish_scan(&name, partitions);
+    finish_scan(&name, scheme, partitions);
     true
 }
 
-/// The partitions the table on `device` holds; none when it has no table.
+/// The table on `device` and the partitions it holds; none when it has no
+/// table.
 fn scan(
     name: &DiskName,
     device: &(dyn BlockDevice + Send + Sync),
-) -> Result<KVec<Partition>, PartitionError> {
+) -> Result<(PartitionScheme, KVec<Partition>), PartitionError> {
     let mut partitions = KVec::new();
     let table = probe(device)?;
     if table.scheme == PartitionScheme::None {
-        return Ok(partitions);
+        return Ok((table.scheme, partitions));
     }
     for entry in table.entries.iter() {
         if partitions
@@ -345,7 +349,7 @@ fn scan(
         table.scheme,
         partitions.len()
     );
-    Ok(partitions)
+    Ok((table.scheme, partitions))
 }
 
 fn publish_partitions(
@@ -379,7 +383,7 @@ fn publish_partitions(
 
 /// Install a scanned table and let claims in again. The table it replaces
 /// drops here, with the registry unlocked.
-fn finish_scan(name: &DiskName, partitions: KVec<Partition>) {
+fn finish_scan(name: &DiskName, scheme: PartitionScheme, partitions: KVec<Partition>) {
     let _ = devfs_set_block_partitioned(name.as_bytes(), !partitions.is_empty());
     let replaced = {
         let mut disks = disks();
@@ -387,6 +391,7 @@ fn finish_scan(name: &DiskName, partitions: KVec<Partition>) {
             return;
         };
         disk.scanning = false;
+        disk.scheme = scheme;
         core::mem::replace(&mut disk.partitions, partitions)
     };
     drop(replaced);
@@ -399,6 +404,52 @@ pub fn disk_count() -> usize {
 /// The `index`-th disk registered, in probe order.
 pub fn disk_name(index: usize) -> Option<DiskName> {
     disks().get(index).map(|d| d.name)
+}
+
+/// A partition of a registered disk and its window on that disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Located {
+    pub disk: DiskName,
+    pub partition: DiskName,
+    pub start: u64,
+    pub len: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocateError {
+    /// No registered disk's GPT names that disk GUID.
+    NoDisk,
+    /// The disk holds no partition of that type.
+    NoPartition,
+    /// Two disks carry the GUID, or the disk two partitions of the type.
+    Ambiguous,
+}
+
+/// The one partition of type `type_guid` on the one disk whose GPT names it
+/// `disk`.
+pub fn locate_partition(disk: Guid, type_guid: Guid) -> Result<Located, LocateError> {
+    let disks = disks();
+    let mut holders = disks
+        .iter()
+        .filter(|d| d.scheme == PartitionScheme::Gpt { disk });
+    let holder = holders.next().ok_or(LocateError::NoDisk)?;
+    if holders.next().is_some() {
+        return Err(LocateError::Ambiguous);
+    }
+    let mut typed = holder
+        .partitions
+        .iter()
+        .filter(|p| p.entry.kind == PartitionKind::Gpt { type_guid });
+    let part = typed.next().ok_or(LocateError::NoPartition)?;
+    if typed.next().is_some() {
+        return Err(LocateError::Ambiguous);
+    }
+    Ok(Located {
+        disk: holder.name,
+        partition: holder.name.partition(part.entry.number),
+        start: part.entry.start,
+        len: part.entry.len,
+    })
 }
 
 /// Where `name` points: the disk's index and what on it.
@@ -623,20 +674,20 @@ pub fn reread(name: &[u8]) -> Result<(), RereadError> {
     let reader: KArc<dyn BlockDevice + Send + Sync> = match KArc::try_new(DiskReader(device)) {
         Ok(reader) => reader,
         Err(_) => {
-            finish_scan(&whole, KVec::new());
+            finish_scan(&whole, PartitionScheme::None, KVec::new());
             return Err(RereadError::NoMemory);
         }
     };
-    let partitions = match scan(&whole, reader.as_ref()) {
-        Ok(partitions) => partitions,
+    let (scheme, partitions) = match scan(&whole, reader.as_ref()) {
+        Ok(table) => table,
         Err(e) => {
             klog_info!("BLOCK: {} re-read: table unusable: {:?}", whole, e);
-            finish_scan(&whole, KVec::new());
+            finish_scan(&whole, PartitionScheme::None, KVec::new());
             return Err(RereadError::Table);
         }
     };
     publish_partitions(&whole, &reader, &partitions);
-    finish_scan(&whole, partitions);
+    finish_scan(&whole, scheme, partitions);
     Ok(())
 }
 

@@ -40,8 +40,12 @@ its firmware entry, `cachyos`, is the only one.
   boot partition of their own, slot selection through `LoaderEntryDefault`,
   and a firmware entry only the installer's role may register. The QEMU A/B
   loop runs on that layout.
+- A fatal panic leaves its report and the kernel log's tail in the boot
+  disk's crash partition, and the next boot moves it to `/var/log/crash/`.
+  Under `panic=reboot` on bare metal the panic stays on screen for ten seconds
+  before the reset.
 
-Nothing persists yet, and nothing reaches the network:
+Nothing reaches the network, and the guest cannot make a disk:
 
 - **Network.** The only NIC driver is virtio-net, and it starts the DHCP
   client itself. `net/src/ipv4.rs` sends a resolved neighbour's queued packets
@@ -52,9 +56,6 @@ Nothing persists yet, and nothing reaches the network:
   boot disk (`scripts/build_bootdisk.sh`). The guest has no mkfs, fsck or
   resize tool, nothing that writes a partition table, and `fat-core` creates
   8.3 names only, so it cannot write `\EFI\SlopOS\limine.conf`.
-- **Panics.** `panic=reboot`, which is how a broken slot falls back to the
-  committed one, resets at once. On a machine with no COM1 the screen is the
-  only record of the panic, and the reset erases it.
 
 ## Phases
 
@@ -66,7 +67,7 @@ commits of its own.
 | 1. NVMe disks — **done** | — | the dev loop on NVMe; the live ISO sees the laptop's disk |
 | 2. ext4 — **done** | — | every image the tree builds is ext4 |
 | 3. A boot chain that shares a disk — **done** | 1 | the A/B loop on the new partition layout |
-| 4. A crash record | 1, 3 | a slot that panics leaves the panic behind |
+| 4. A crash record — **done** | 1, 3 | a slot that panics leaves the panic behind |
 | 5. Installer and install medium | 1, 2, 3 | **milestone 1:** SlopOS installed beside CachyOS, self-hosting offline |
 | 6. Wired network | — | **milestone 2:** git and crates.io over the RJ45 port |
 | 7. Full speed | 5 | a native build measured, and made faster if the CPU clock is the cause |
@@ -126,30 +127,24 @@ through the registered entry and holds the ESP to the bytes it was built with.
 `AGENTS.md` describes all of it; the decisions later phases build on are under
 Decided.
 
-### Phase 4: A crash record
+### Phase 4: A crash record — done
 
-- **Write.** The panic path writes the panic report and the tail of the
-  kernel log to the crash partition, through NVMe's reserved polled queue: no
-  wait, no allocation, no interrupt. Then it flushes, then it resets.
-- **Finding it.** The crash partition is the one of `layout::CRASH_TYPE` on
-  the disk the kernel was loaded from, which Limine's executable-file response
-  names by its GPT disk GUID. It is found at boot, so the panic path only
-  writes.
-- **Read back.** On the next boot, a service moves the record to
-  `/var/log/crash/` and clears the partition. `bootctl status` reports that
-  the slot's last boot crashed.
-- **Why not RAM:** whether memory survives a reset is up to the firmware
-  (memory training, and TME re-keying).
-- **Why not a UEFI variable:** the panic path cannot reach runtime services
-  from a user task's address space (`boot/src/shutdown.rs`), and NVRAM is
-  small and wears out.
-- **Screen hold.** On bare metal, `panic=reboot` holds the screen for a few
-  seconds before resetting; under a hypervisor it does not wait. This is the
-  same split `watchdog.panic`'s default already makes. A panic before the
-  root disk is probed leaves only the screen.
+Built: `boot-core::crash`, the crash partition's format as host-tested data —
+64 KiB slots, a header sealing each record's text with a CRC-32, a summary of
+`key: value` lines, and which slot the next record takes; the kernel's crash
+store (`drivers/src/crash.rs`), which finds the partition at boot on the disk
+whose GPT disk GUID Limine reports for the kernel, holds it under a write
+claim, and on a fatal panic writes the report and the kernel log's tail
+through the NVMe panic queue before any reset; `/dev/crash`, a file per record
+that reads its text and erases it on unlink; `bootctl collect`, which init runs
+first on every boot, and `bootctl status`, which reports each slot's last boot;
+and `panic=reboot`'s ten-second hold on bare metal. `just test-install` grades
+it: the slot that panics leaves a record the fallback boot moves to
+`/var/log/crash/`. `AGENTS.md` describes all of it; the decisions later phases
+build on are under Decided.
 
-**Done when** a slot booted with `panic.boot=on` in QEMU falls back to the
-committed slot, and the fallback boot finds the panic in `/var/log/crash/`.
+Left for the laptop, which only the user's run grades: a panic written through
+the NV3's panic queue, and the hold on its screen.
 
 ### Phase 5: Installer and install medium (milestone 1)
 
@@ -279,8 +274,9 @@ the kernel does not, just as with a stick. Three disks are graded:
 Each run then boots from the disk with the ISO detached, and goes around
 `selfhost.sh install` once. The host holds the root to `e2fsck -fn`.
 
-**Crash record.** A slot booted with `panic.boot=on` falls back to the
-committed slot. The fallback boot finds the panic in `/var/log/crash/`.
+**Crash record.** In `just test-install`, a slot booted with `panic.boot=on`
+falls back to the committed slot, and the fallback boot finds the panic in
+`/var/log/crash/`.
 
 **Filesystem.** `just check-fs-image` and `just test-rude-exit` run in CI.
 
@@ -446,6 +442,47 @@ committed slot. The fallback boot finds the panic in `/var/log/crash/`.
   integrity comes from Limine's BLAKE2B hash on each loaded file under Secure
   Boot, not from a verified root. `fs/assets/ext2.img` remains the suite's
   verity fixture.
+- **The crash partition is the kernel's for the boot.** The store holds it
+  under a write claim from the drivers phase on, so no table re-read or
+  whole-disk write moves the window the panic path writes, and userland
+  reaches the records only through `/dev/crash`. An installer cannot
+  repartition the disk it booted from, which a mounted root on it already
+  forbids.
+- **The panic path reads nothing.** What each slot holds is read at boot and
+  kept in memory; a record goes to the first empty slot after the newest, else
+  over the oldest. A slot being written or erased is busy, so an erase on the
+  I/O queue and a panic's write on the panic queue never meet in one slot.
+- **A crash store needs a polled queue.** The panic write goes through
+  `PanicQueue` with interrupts off and nothing allocated. A disk on any other
+  transport keeps no crash record until that transport has a polled panic
+  path of its own.
+- **A record names its slot by the kernel's own path.** Limine reports the
+  path it loaded the kernel from, `/boot/<slot>/kernel.elf`, so a record is
+  attributed without the panic or the next boot asking a UEFI variable.
+- **A record is erased only once its copy is durable on a disk.** `bootctl
+  collect` takes the copy's index from `/var/log/crash/bounds` before writing
+  it, writes it beside its final name, flushes it, renames it, flushes the
+  directory, and only then unlinks the record; on a RAM root it erases
+  nothing. An erase names the record's sequence number as well as its slot,
+  so it never removes a newer record that took the slot.
+- **A slot keeps two facts: how its last boot ended and its last crash.**
+  Under `/var/lib/slopos/slots/<slot>`, `collect` notes `crashed` and the
+  copy for each record, then `up` for the slot this boot came from, keeping
+  the crash; `bootctl install` clears both, since a new system has not
+  booted.
+- **Every fatal path that can leave a record does.** The format-free abort a
+  lockup takes writes one from its message and resets under `panic=reboot`
+  only after it; one a stack overflow takes does not, since writing needs the
+  data stack that overflowed. A recovered panic's report goes into the kernel
+  log so a later record carries it.
+- **`panic=reboot` holds the screen only on bare metal,** for ten seconds,
+  the split `watchdog.panic`'s default makes: a hypervisor's log is on the
+  host.
+- **The `limine` crate misreads `struct limine_file` past `media_type`.**
+  Its `File` leaves out the protocol's `unused` word, and its `Uuid` is not
+  `repr(C)`, so the GPT disk GUID is rebuilt from where those fields were
+  read (`boot/src/limine_protocol.rs`). Any other field after `media_type`
+  needs the same treatment until the crate is fixed.
 - **Wired NIC first; Wi-Fi is out.** Wi-Fi means a driver per chip, firmware
   blobs, an 802.11 stack and WPA.
 

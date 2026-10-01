@@ -387,7 +387,7 @@ boot-debug:
 boot-live: iso
     just _qemu-boot "interactive" "${VIDEO:-1}" {{iso}} {{fs_image}} QEMU_NO_ROOT_DISK=1 {{net_env}}
 
-[doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics, across the reboots of one QEMU, with the ESP untouched")]
+[doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics and one that aborts, each leaving its crash record, across the reboots of one QEMU, with the ESP untouched")]
 test-install:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -407,9 +407,12 @@ test-install:
     entry="$(grep -aoE 'INSTALL-FIRMWARE-ENTRY Boot[0-9A-F]{4}' "$log" | head -n1 | cut -d' ' -f2 || true)"
     for marker in "INSTALL-FIRMWARE-ENTRY ${entry:-Boot????} first" "INSTALL-STAGE 1: rebooting into slopos-b" \
         "INSTALL-THROUGH $entry at stage 1" "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" \
-        "INSTALL-THROUGH $entry at stage 2" "ok 1 - boot_slot_install_commit_rollback"; do
+        "INSTALL-THROUGH $entry at stage 2" "INSTALL-CRASH-RECORD /var/log/crash/" "INSTALL-STAGE 3: rebooting into slopos-abort" \
+        "crash record: written" "INSTALL-THROUGH $entry at stage 3" "ok 1 - boot_slot_install_commit_rollback"; do
         grep -aqF "$marker" "$log" || { echo "FAIL: '$marker' not in $log" >&2; missing=1; }
     done
+    grep -aqE "crash record: [0-9]+ written to nvme[0-9]+n[0-9]+p[0-9]+ slot [0-9]+" "$log" ||
+        { echo "FAIL: the panic wrote no crash record; see $log" >&2; missing=1; }
     grep -aq "not ok" "$log" && { echo "FAIL: a test failed; see $log" >&2; missing=1; }
     [ "$(bootdisk_partition_sha256 {{boot_disk}} "$ESP_TYPE")" = "$esp" ] ||
         { echo "FAIL: the ESP changed; a commit must touch no limine.conf" >&2; missing=1; }
@@ -444,9 +447,13 @@ test-install-guest:
         >"$log" 2>&1 || rc=$?
     missing=0
     for marker in "INSTALL-COMMIT $head" "INSTALL-BUILT guest-" "INSTALL-STAGE 1: rebooting into slopos-b" "INSTALL-BOOTED " \
-        "INSTALL-BASE guest-" "INSTALL-PUSHED " "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" "ok 1 - boot_slot_install_commit_rollback"; do
+        "INSTALL-BASE guest-" "INSTALL-PUSHED " "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" \
+        "INSTALL-CRASH-RECORD /var/log/crash/" "INSTALL-STAGE 3: rebooting into slopos-abort" "crash record: written" \
+        "ok 1 - boot_slot_install_commit_rollback"; do
         grep -aqF "$marker" "$log" || { echo "FAIL: '$marker' not in $log" >&2; missing=1; }
     done
+    grep -aqE "crash record: [0-9]+ written to nvme[0-9]+n[0-9]+p[0-9]+ slot [0-9]+" "$log" ||
+        { echo "FAIL: the panic wrote no crash record; see $log" >&2; missing=1; }
     grep -aq "not ok" "$log" && { echo "FAIL: a test failed; see $log" >&2; missing=1; }
     [ "$rc" != 124 ] || { echo "FAIL: timed out after ${INSTALL_TIMEOUT_SECS:-28800} s (INSTALL_TIMEOUT_SECS)" >&2; exit 1; }
     [ "$missing" = 0 ] || exit 1

@@ -19,6 +19,10 @@ impl GraphicsContext {
         snapshot().map(|fb| Self { fb })
     }
 
+    pub(crate) fn from_state(fb: FbState) -> Self {
+        Self { fb }
+    }
+
     pub fn width(&self) -> u32 {
         self.fb.width()
     }

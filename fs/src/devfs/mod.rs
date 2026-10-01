@@ -1,4 +1,5 @@
 mod block;
+pub(crate) mod crash;
 
 pub use block::{
     BlockIoctlReply, BlockNodeKind, devfs_block_contents_changed, devfs_block_ioctl,
@@ -8,6 +9,7 @@ pub use block::{
 #[cfg(feature = "tests")]
 pub(crate) use block::{block_read_entitled, block_write_entitled};
 pub(crate) use block::{devfs_block_node_is, devfs_resolve_block_node};
+pub use crash::{CrashRecord, CrashStoreOps, devfs_register_crash_store};
 
 use crate::fileio::PTY_SLAVE_MAJOR;
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
@@ -142,7 +144,8 @@ fn walk_pts(cookie: u64, callback: Emit<'_>) -> u64 {
     next
 }
 
-/// The fixed entries at cookies 1 to 9, then the block nodes by inode.
+/// The fixed entries at cookies 1 to 9, `crash` at 10 while a crash store is
+/// registered, then the block nodes by inode.
 fn walk_root(cookie: u64, callback: Emit<'_>) -> u64 {
     let fixed = [
         (&b"."[..], ROOT_INODE, FileType::Directory),
@@ -157,7 +160,8 @@ fn walk_root(cookie: u64, callback: Emit<'_>) -> u64 {
     .chain([
         (&b"pts"[..], PTS_INODE, FileType::Directory),
         (&b"disk"[..], block::DISK_DIR, FileType::Directory),
-    ]);
+    ])
+    .chain(crash::registered().map(|_| (&b"crash"[..], crash::CRASH_DIR, FileType::Directory)));
     match walk_fixed(fixed, cookie, callback) {
         (next, true) => block::walk_nodes(next, callback),
         (next, false) => next,
@@ -203,6 +207,11 @@ impl FileSystem for DevFs {
         if parent == block::DISK_DIR {
             return block::lookup_disk_dir(name);
         }
+        if parent == crash::CRASH_DIR
+            && let Some(store) = crash::registered()
+        {
+            return crash::lookup(store, name);
+        }
         if block::is_dir(parent) {
             return match name {
                 b"." => Ok(parent),
@@ -223,6 +232,9 @@ impl FileSystem for DevFs {
         if name == b"disk" {
             return Ok(block::DISK_DIR);
         }
+        if name == b"crash" && crash::registered().is_some() {
+            return Ok(crash::CRASH_DIR);
+        }
 
         for dev in &DEVICES {
             if dev.name_len == name.len() && &dev.name[..dev.name_len] == name {
@@ -234,6 +246,9 @@ impl FileSystem for DevFs {
     }
 
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
+        if let Some(stat) = crash::registered().and_then(|store| crash::stat(store, inode)) {
+            return Ok(stat);
+        }
         if inode == ROOT_INODE || inode == PTS_INODE || block::is_dir(inode) {
             return Ok(FileStat::new_directory(inode));
         }
@@ -257,6 +272,11 @@ impl FileSystem for DevFs {
     }
 
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
+        if let Some(store) = crash::registered()
+            && crash::is_record(store, inode)
+        {
+            return crash::read(store, inode, offset, buf, block::raw_block_entitled());
+        }
         match inode {
             NULL_INODE => Ok(0),
 
@@ -282,7 +302,7 @@ impl FileSystem for DevFs {
 
             CONSOLE_INODE => Ok(0),
 
-            ROOT_INODE | PTS_INODE => Err(VfsError::IsDirectory),
+            ROOT_INODE | PTS_INODE | crash::CRASH_DIR => Err(VfsError::IsDirectory),
             _ if block::is_dir(inode) => Err(VfsError::IsDirectory),
 
             _ => block::block_read(inode, offset, buf),
@@ -290,6 +310,9 @@ impl FileSystem for DevFs {
     }
 
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
+        if crash::registered().is_some_and(|store| crash::is_record(store, inode)) {
+            return Err(VfsError::ReadOnly);
+        }
         match inode {
             // kmsg is read-only; writes are discarded so a stray redirect does
             // not error.
@@ -300,7 +323,7 @@ impl FileSystem for DevFs {
 
             CONSOLE_INODE => Ok(buf.len()),
 
-            ROOT_INODE | PTS_INODE => Err(VfsError::IsDirectory),
+            ROOT_INODE | PTS_INODE | crash::CRASH_DIR => Err(VfsError::IsDirectory),
             _ if block::is_dir(inode) => Err(VfsError::IsDirectory),
 
             _ if block::is_node(inode) => block::block_write(inode, offset, buf),
@@ -313,7 +336,12 @@ impl FileSystem for DevFs {
         Err(VfsError::ReadOnly)
     }
 
-    fn unlink(&self, _parent: InodeId, _name: &[u8]) -> VfsResult<()> {
+    fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
+        if parent == crash::CRASH_DIR
+            && let Some(store) = crash::registered()
+        {
+            return crash::unlink(store, name, block::raw_block_entitled());
+        }
         Err(VfsError::ReadOnly)
     }
 
@@ -349,6 +377,9 @@ impl FileSystem for DevFs {
             ROOT_INODE => Ok(walk_root(cookie, callback)),
             PTS_INODE => Ok(walk_pts(cookie, callback)),
             block::DISK_DIR => Ok(block::walk_disk_dir(cookie, callback)),
+            crash::CRASH_DIR => crash::registered()
+                .map(|store| crash::walk(store, cookie, callback))
+                .ok_or(VfsError::NotDirectory),
             _ if block::is_dir(inode) => block::walk_links(inode, cookie, callback),
             _ => Err(VfsError::NotDirectory),
         }

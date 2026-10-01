@@ -1,3 +1,4 @@
+pub mod crash_devfs;
 pub mod dcache;
 pub mod dirchurn;
 pub mod dquota;

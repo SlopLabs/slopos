@@ -13,22 +13,41 @@
 //! Every file write is copy-on-write (`slopos_fat_core`), so no kernel or base
 //! is ever half replaced on the medium.
 //!
-//! Holds `TASK_FLAG_MOUNT` for the raw partition and `TASK_FLAG_POWER` for the
-//! loader variables and the reboot.
+//! `collect`, which init runs on every boot, moves the records the kernel's
+//! crash store kept to `/var/log/crash` and notes what each slot's last boot
+//! came to under `/var/lib/slopos/slots`, which `status` reports.
+//!
+//! Holds `TASK_FLAG_MOUNT` for the raw partition and the crash records, and
+//! `TASK_FLAG_POWER` for the loader variables and the reboot.
 
-use std::fs::{File, OpenOptions};
+use std::ffi::CString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 
+use slopos_boot_core::crash::Summary;
 use slopos_boot_core::{bli, layout};
 use slopos_fat_core::{Device, Error as FatError, Volume};
 
+use crate::apps::coreutils::time::utc_from_epoch;
 use crate::boot_disk::{BootDisk, loader_entries, loader_var, set_loader_var};
 use crate::syscall::core as sys_core;
 use crate::syscall::process;
 
 /// The block size a regular file standing in for a partition is addressed in.
 const IMAGE_FILE_BLOCK: u32 = 512;
+const CRASH_STORE: &str = "/dev/crash";
+const CRASH_LOG: &str = "/var/log/crash";
+const CRASH_LOG_KEPT: usize = 64;
+/// The index the next record saved under `CRASH_LOG` takes. Each name starts
+/// with its index, so names sort by when they were saved, whatever the clock
+/// said.
+const CRASH_LOG_BOUNDS: &str = "bounds";
+/// A file per slot: how its last recorded boot ended, `up` or `crashed`,
+/// then the record its last crash left. A boot that died with no record
+/// leaves the one before it as the last recorded.
+const SLOT_STATE: &str = "/var/lib/slopos/slots";
 const CPIO_NEWC_MAGIC: &[u8] = b"070701";
 const CPIO_TRAILER: &[u8] = b"TRAILER!!!\0";
 
@@ -150,8 +169,9 @@ fn status(boot: &str) -> Result<(), String> {
             let (kernel, base) = (size(layout::KERNEL_FILE), size(layout::BASE_FILE));
             if kernel != "-" {
                 println!(
-                    "slot {}: kernel {kernel} bytes, base {base} bytes",
-                    slot.name
+                    "slot {}: kernel {kernel} bytes, base {base} bytes{}",
+                    slot.name,
+                    last_boot(&slot.name)
                 );
             }
         }
@@ -219,7 +239,17 @@ fn install_slot(
         println!("{entry} is no longer armed to boot once");
     }
     write_verified(volume, &format!("{dir}/{}", layout::BASE_FILE), base)?;
-    write_verified(volume, &format!("{dir}/{}", layout::KERNEL_FILE), kernel)
+    write_verified(volume, &format!("{dir}/{}", layout::KERNEL_FILE), kernel)?;
+    forget_last_boot(slot);
+    Ok(())
+}
+
+fn forget_last_boot(slot: &str) {
+    match fs::remove_file(format!("{SLOT_STATE}/{slot}")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => eprintln!("bootctl: {SLOT_STATE}/{slot}: {e}; its last boot stays noted"),
+    }
 }
 
 fn install(boot: &str, slot: &str, kernel_path: &str, base_path: &str) -> Result<(), String> {
@@ -287,6 +317,252 @@ fn spare() -> Result<(), String> {
     Ok(())
 }
 
+#[derive(PartialEq)]
+struct LastBoot {
+    crashed: bool,
+    last_crash: Option<String>,
+}
+
+impl LastBoot {
+    fn read(slot: &str) -> Option<LastBoot> {
+        let state = fs::read_to_string(format!("{SLOT_STATE}/{slot}")).ok()?;
+        let mut lines = state.lines();
+        let crashed = match lines.next()? {
+            "up" => false,
+            "crashed" => true,
+            _ => return None,
+        };
+        Some(LastBoot {
+            crashed,
+            last_crash: lines.next().map(str::to_owned),
+        })
+    }
+
+    fn write(&self, slot: &str) -> Result<(), String> {
+        if LastBoot::read(slot).as_ref() == Some(self) {
+            return Ok(());
+        }
+        let mut state = String::from(if self.crashed { "crashed\n" } else { "up\n" });
+        if let Some(record) = &self.last_crash {
+            state.push_str(record);
+            state.push('\n');
+        }
+        write_durably(SLOT_STATE, slot, state.as_bytes(), 0o644).map(|_| ())
+    }
+
+    fn status_tail(&self) -> String {
+        match (self.crashed, &self.last_crash) {
+            (true, Some(record)) => format!(", last boot crashed: {record}"),
+            (true, None) => ", last boot crashed".to_owned(),
+            (false, Some(record)) => format!(", last boot came up, last crash: {record}"),
+            (false, None) => ", last boot came up".to_owned(),
+        }
+    }
+}
+
+fn last_boot(slot: &str) -> String {
+    LastBoot::read(slot).map_or_else(String::new, |last| last.status_tail())
+}
+
+/// `bytes` at `dir/name` through a sibling written and flushed first, so the
+/// name holds all of it or nothing; the rename is made durable too.
+fn write_durably(dir: &str, name: &str, bytes: &[u8], mode: u32) -> Result<String, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+    let temp = format!("{dir}/.{name}.{}", std::process::id());
+    let path = format!("{dir}/{name}");
+    let written = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(&temp)
+        .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
+        .and_then(|()| fs::rename(&temp, &path))
+        .and_then(|()| File::open(dir)?.sync_all());
+    if let Err(e) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("{path}: {e}"));
+    }
+    Ok(path)
+}
+
+/// `<UTC time>-<slot>`, or what of it the record says.
+fn record_stem(summary: Option<&Summary<'_>>, name: &str) -> String {
+    let when = summary.and_then(|s| s.time).map_or_else(
+        || "unknown-time".to_owned(),
+        |secs| {
+            let t = utc_from_epoch(secs as i64);
+            format!(
+                "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+                t.year, t.month, t.day, t.hour, t.minute, t.second
+            )
+        },
+    );
+    let slot = summary.and_then(|s| s.slot()).unwrap_or("kernel");
+    let torn = if name.ends_with("-torn") { "-torn" } else { "" };
+    format!("{when}-{slot}{torn}")
+}
+
+fn index_of(name: &str) -> Option<u64> {
+    let (index, rest) = name.split_once('-')?;
+    if !rest.ends_with(".txt") {
+        return None;
+    }
+    index.parse().ok()
+}
+
+/// The records saved under `CRASH_LOG`, oldest first.
+fn saved_records() -> Vec<(u64, String)> {
+    let mut saved: Vec<(u64, String)> = fs::read_dir(CRASH_LOG)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter_map(|name| Some((index_of(&name)?, name)))
+        .collect();
+    saved.sort();
+    saved
+}
+
+/// Taken durably before the record is written, as `savecore` takes its
+/// bounds, so a copy that failed never hands its index to another.
+fn take_index() -> Result<u64, String> {
+    let recorded = fs::read_to_string(format!("{CRASH_LOG}/{CRASH_LOG_BOUNDS}"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    let past_saved = saved_records().last().map_or(0, |(index, _)| index + 1);
+    let index = recorded.unwrap_or(0).max(past_saved);
+    let next = format!("{}\n", index + 1);
+    write_durably(CRASH_LOG, CRASH_LOG_BOUNDS, next.as_bytes(), 0o644)?;
+    Ok(index)
+}
+
+/// Save one record, note its slot crashed, and only then erase it: a note
+/// that failed does not keep a saved record in the partition.
+fn save_record(name: &str) -> Result<(), String> {
+    let source = format!("{CRASH_STORE}/{name}");
+    let text = fs::read(&source).map_err(|e| format!("{source}: {e}"))?;
+    let lossy = String::from_utf8_lossy(&text);
+    let summary = Summary::parse(&lossy);
+    let file = format!(
+        "{:06}-{}.txt",
+        take_index()?,
+        record_stem(summary.as_ref(), name)
+    );
+    let saved = write_durably(CRASH_LOG, &file, &text, 0o600)?;
+    if let Some(slot) = summary.as_ref().and_then(Summary::slot) {
+        let crashed = LastBoot {
+            crashed: true,
+            last_crash: Some(saved.clone()),
+        };
+        if let Err(why) = crashed.write(slot) {
+            eprintln!("bootctl: {why}");
+        }
+    }
+    fs::remove_file(&source).map_err(|e| format!("{source}: {e}"))?;
+    println!(
+        "bootctl: crash record {name} saved to {saved}: {}",
+        summary.map_or("no summary", |s| s.panic)
+    );
+    Ok(())
+}
+
+/// Whether what is written under `dir` outlives the boot: a RAM root, which
+/// a disk that mounted read-only leaves, does not.
+fn on_disk(dir: &str) -> bool {
+    let Ok(path) = CString::new(dir) else {
+        return false;
+    };
+    crate::syscall::fs::statfs_path(path.as_ptr()).is_ok_and(|stats| {
+        stats.f_type == slopos_abi::fs::EXT2_SUPER_MAGIC
+            && stats.f_flags & slopos_abi::fs::ST_RDONLY == 0
+    })
+}
+
+/// Drop the oldest records past [`CRASH_LOG_KEPT`], since a slot that
+/// crashes on every boot would fill the root, and what a copy cut short left.
+/// A record a slot names as its last crash stays.
+fn prune_crash_log() {
+    let named: Vec<String> = fs::read_dir(SLOT_STATE)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter_map(|slot| LastBoot::read(&slot)?.last_crash)
+        .collect();
+    let saved: Vec<(u64, String)> = saved_records()
+        .into_iter()
+        .filter(|(_, name)| !named.iter().any(|path| path.ends_with(name.as_str())))
+        .collect();
+    let surplus = saved.len().saturating_sub(CRASH_LOG_KEPT);
+    let partial = fs::read_dir(CRASH_LOG)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with('.'));
+    for name in saved[..surplus]
+        .iter()
+        .map(|(_, name)| name.clone())
+        .chain(partial)
+    {
+        let _ = fs::remove_file(format!("{CRASH_LOG}/{name}"));
+    }
+}
+
+/// Move every record the kernel's crash store holds to `CRASH_LOG`, oldest
+/// first, then note the slot this boot came from as up. A boot with neither a
+/// store nor a slot's state has nothing a note would change, and asks the
+/// firmware nothing.
+fn collect() -> Result<(), String> {
+    let saved = save_records();
+    if fs::metadata(CRASH_STORE).is_err() && fs::metadata(SLOT_STATE).is_err() {
+        return saved;
+    }
+    let booted = loader_var(bli::ENTRY_SELECTED).ok().flatten();
+    if let Some(slot) = booted
+        .as_deref()
+        .and_then(|entry| entry.strip_prefix(layout::ENTRY_PREFIX))
+        .filter(|slot| layout::valid_slot(slot))
+    {
+        let last_crash = LastBoot::read(slot).and_then(|last| last.last_crash);
+        LastBoot {
+            crashed: false,
+            last_crash,
+        }
+        .write(slot)?;
+    }
+    saved
+}
+
+/// Without a store, which a disk with no crash partition or none on an NVMe
+/// drive leaves, there is nothing to save; without a disk under `CRASH_LOG`
+/// the records stay where they are.
+fn save_records() -> Result<(), String> {
+    let entries = match fs::read_dir(CRASH_STORE) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{CRASH_STORE}: {e}")),
+    };
+    fs::create_dir_all(CRASH_LOG).map_err(|e| format!("{CRASH_LOG}: {e}"))?;
+    if !on_disk(CRASH_LOG) {
+        return Err(format!(
+            "{CRASH_LOG} is on no writable disk; the crash records stay in {CRASH_STORE}"
+        ));
+    }
+    let mut records: Vec<(u64, String)> = entries
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter_map(|name| Some((name.split('-').next()?.parse().ok()?, name)))
+        .collect();
+    records.sort();
+    let mut failed = Ok(());
+    for (_, name) in &records {
+        if let Err(why) = save_record(name) {
+            eprintln!("bootctl: {why}");
+            failed = Err(format!("crash record {name} not collected"));
+        }
+    }
+    prune_crash_log();
+    failed
+}
+
 fn commit() -> Result<(), String> {
     let booted = loader_var(bli::ENTRY_SELECTED)?
         .ok_or("the boot loader did not report the booted entry")?;
@@ -302,6 +578,7 @@ const USAGE: &str = "usage: bootctl [--boot /dev/<node>] <command>
   set-default <entry>         make <entry> the default
   spare                       the slot a new system goes into: not the default
   commit                      make the entry that booted the default
+  collect                     save the kernel's crash records under /var/log/crash
   reboot                      restart now";
 
 fn run(args: &[String]) -> Result<(), String> {
@@ -320,6 +597,7 @@ fn run(args: &[String]) -> Result<(), String> {
         [cmd, entry] if cmd == "set-default" => set_default(entry),
         [cmd] if cmd == "spare" => spare(),
         [cmd] if cmd == "commit" => commit(),
+        [cmd] if cmd == "collect" => collect(),
         [cmd] if cmd == "reboot" => process::reboot(),
         _ => Err(USAGE.into()),
     }

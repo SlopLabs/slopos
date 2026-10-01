@@ -144,6 +144,20 @@ impl KlogRing {
         }
         n
     }
+
+    fn tail(&self, out: &mut [u8]) -> usize {
+        let start = self.len - self.len.min(out.len());
+        let copied = self.read_at(start, out);
+        let mut before = [0u8; 1];
+        if start == 0 || (self.read_at(start - 1, &mut before) == 1 && before[0] == b'\n') {
+            return copied;
+        }
+        let Some(cut) = out[..copied].iter().position(|&b| b == b'\n') else {
+            return 0;
+        };
+        out.copy_within(cut + 1..copied, 0);
+        copied - cut - 1
+    }
 }
 
 static KLOG_RING: SpinLock<KlogRing> = SpinLock::new(
@@ -180,6 +194,18 @@ fn ring_capture(args: fmt::Arguments<'_>) {
 /// returning the number copied (`0` = end-of-log). Backs `/dev/kmsg`.
 pub fn klog_read(offset: usize, out: &mut [u8]) -> usize {
     KLOG_RING.lock().read_at(offset, out)
+}
+
+/// Put `line` in the ring without sending it to the backend, for a panic
+/// whose CPU may hold the backend's lock and writes its console itself.
+pub fn klog_ring_line(line: &str) {
+    ring_capture(format_args!("{line}"));
+}
+
+/// The newest whole lines of the log that fit in `out`. `None` while the
+/// ring's lock is held, which a panic inside a log call leaves it.
+pub fn klog_tail(out: &mut [u8]) -> Option<usize> {
+    KLOG_RING.try_lock().map(|ring| ring.tail(out))
 }
 
 /// Logical bytes the ring currently holds — the offset to pass [`klog_read`]
@@ -383,4 +409,59 @@ macro_rules! klog_warn_ratelimited {
     ($($arg:tt)*) => {
         $crate::klog_ratelimited!($crate::klog::KlogLevel::Warn, 1000, 10, $($arg)*)
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KlogRing;
+
+    fn ring_of(text: &[u8]) -> alloc::boxed::Box<KlogRing> {
+        let mut ring = alloc::boxed::Box::new(KlogRing::new());
+        for &b in text {
+            ring.push(b);
+        }
+        ring
+    }
+
+    fn tail_of(ring: &KlogRing, room: usize) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec![0u8; room];
+        let n = ring.tail(&mut out);
+        out.truncate(n);
+        out
+    }
+
+    #[test]
+    fn a_log_that_fits_is_taken_whole() {
+        let ring = ring_of(b"one\ntwo\n");
+        assert_eq!(tail_of(&ring, 64), b"one\ntwo\n");
+    }
+
+    #[test]
+    fn a_tail_starts_at_a_line() {
+        let ring = ring_of(b"first line\nsecond\nthird\n");
+        assert_eq!(tail_of(&ring, 10), b"third\n");
+        assert_eq!(tail_of(&ring, 12), b"third\n");
+        assert_eq!(tail_of(&ring, 13), b"second\nthird\n");
+    }
+
+    #[test]
+    fn a_tail_inside_one_long_line_is_empty() {
+        let ring = ring_of(b"a line longer than the room\n");
+        assert_eq!(tail_of(&ring, 8), b"");
+    }
+
+    #[test]
+    fn a_wrapped_ring_gives_its_newest_lines() {
+        let mut ring = alloc::boxed::Box::new(KlogRing::new());
+        let line = b"0123456789abcde\n";
+        for _ in 0..(super::KLOG_RING_SIZE / line.len() + 3) {
+            for &b in line {
+                ring.push(b);
+            }
+        }
+        ring.push(b'x');
+        ring.push(b'\n');
+        let tail = tail_of(&ring, 2 * line.len() + 1);
+        assert_eq!(tail, b"0123456789abcde\nx\n");
+    }
 }

@@ -322,9 +322,19 @@ require-phase post-userland-tests
 #               measured range widened by its own width. Every other banded
 #               pool stayed inside its band (kernel edges 181-186, chains
 #               411-414; userland edges 227-233).
+#   2026-10-01  kernel 214 -> 215, userland 223 -> 224: the crash record
+#               (`plans/bare-metal.md` phase 4). The crash store's tests take
+#               `crash.BUFFER`, the static buffer a panic's record is staged
+#               in, which nothing else takes before a panic. Measured from a
+#               class-name dump; six full runs agree but one, which counted
+#               216 and 225 because a test's mount landed in pool slot 1 and
+#               registered `EXT2_POOL_1` early, as it does on unchanged trees.
+#               Boot held at 75 and every banded pool inside its band (kernel
+#               edges 183-185, chains 412-414; userland edges 225-234, chains
+#               465-475).
 boot	classes	75
-post-kernel-tests	classes	214
-post-userland-tests	classes	223
+post-kernel-tests	classes	215
+post-userland-tests	classes	224
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the

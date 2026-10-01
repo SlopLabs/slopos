@@ -108,6 +108,7 @@ dependencies = [
  "slopos-abi",
  "slopos-acpi",
  "slopos-arch",
+ "slopos-boot-core",
  "slopos-core",
  "slopos-drivers",
  "slopos-fs",

@@ -72,6 +72,15 @@ pub fn valid_slot(slot: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
+pub fn slot_of_kernel(path: &str) -> Option<&str> {
+    let slot = path
+        .strip_prefix(SLOTS_DIR)?
+        .strip_prefix('/')?
+        .strip_suffix(KERNEL_FILE)?
+        .strip_suffix('/')?;
+    valid_slot(slot).then_some(slot)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +114,21 @@ mod tests {
             !valid_slot("") && !valid_slot("A") && !valid_slot("abcdefghi") && !valid_slot("a-b")
         );
         assert!(SLOTS.iter().all(|slot| valid_slot(slot)));
+    }
+
+    #[test]
+    fn a_slot_kernel_names_its_slot() {
+        assert_eq!(slot_of_kernel("/boot/b/kernel.elf"), Some("b"));
+        assert_eq!(slot_of_kernel("/boot/bad/kernel.elf"), Some("bad"));
+        for other in [
+            "/boot/kernel.elf",
+            "/boot/B/kernel.elf",
+            "/boot/a/b/kernel.elf",
+            "/boot/a/base.img",
+            "boot/a/kernel.elf",
+        ] {
+            assert_eq!(slot_of_kernel(other), None, "{other}");
+        }
     }
 
     #[test]

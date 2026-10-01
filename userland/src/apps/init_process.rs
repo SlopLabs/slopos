@@ -1,4 +1,5 @@
 use slopos_abi::syscall::{BOOT_FLAG_ROULETTE_SKIP, BOOT_FLAG_TESTS_ENABLED};
+use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_font::atlas::GlyphAtlas;
 
 use crate::program_registry;
@@ -64,8 +65,27 @@ fn spawn_service_inheriting(name: &str, extra_fds: &[i32]) -> i32 {
     tid
 }
 
+/// What a crashed boot left goes to `/var/log/crash` before the tests and the
+/// services run.
+fn collect_crash_records() {
+    let argv = [b"bootctl\0".as_ptr(), b"collect\0".as_ptr()];
+    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
+    let tid = process::spawn_path_with_actions(
+        b"/bin/bootctl",
+        &argv,
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &actions,
+        0,
+    );
+    if tid > 0 {
+        let _ = process::waitpid(tid as u32);
+    }
+}
+
 pub fn init_user_main() {
     upgrade_console_font();
+    collect_crash_records();
 
     // Must precede anything interactive; a missing or invalid /etc/keymap
     // leaves the built-in US default active.

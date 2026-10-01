@@ -21,9 +21,9 @@ set -euo pipefail
 #   LIMINE_DIR - path to Limine directory (default: third_party/limine)
 #   BOOTDISK_ROOT_IMAGE - an ext4 image the disk carries as its root
 #     partition; every slot boots with it as root=PARTUUID=
-#   BOOTDISK_PANIC_ENTRY=1 - add slot bad, holding the same system with a
-#     command line that panics and resets it: what `just test-install` rolls
-#     back from
+#   BOOTDISK_PANIC_ENTRY=1 - add slots bad and abort, holding the same system
+#     with command lines that panic and reset it, through the report and
+#     through the format-free abort: what `just test-install` rolls back from
 #   QEMU_FB_WIDTH, QEMU_FB_HEIGHT, QEMU_FB_AUTO, QEMU_FB_AUTO_POLICY,
 #   QEMU_FB_AUTO_OUTPUT - framebuffer resolution, as build_iso.sh takes them
 
@@ -140,8 +140,9 @@ for slot in "${slots[@]}"; do
     slot_args+=(--slot "$slot:slot=$slot")
 done
 if [ "${BOOTDISK_PANIC_ENTRY:-0}" = 1 ]; then
-    slots+=(bad)
+    slots+=(bad abort)
     slot_args+=(--slot "bad:slot=bad panic=reboot panic.boot=on")
+    slot_args+=(--slot "abort:slot=abort panic=reboot panic.boot=abort")
 fi
 CONF="${STAGING}/limine.conf"
 "$BOOTDISK" limine-conf --boot "$BOOT_UUID" ${ROOT_UUID:+--root "$ROOT_UUID"} \

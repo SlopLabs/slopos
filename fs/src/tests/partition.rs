@@ -12,6 +12,7 @@ use crate::partition::{
     probe,
 };
 use crate::vfs::{FileSystem, FileType, VfsError};
+use slopos_boot_core::Guid;
 use slopos_boot_core::crc32::crc32;
 
 /// The fixtures' logical block, unless a test says otherwise.
@@ -26,6 +27,7 @@ const FIRST_USABLE: u64 = 3;
 const LAST_USABLE: u64 = TOTAL_SECTORS - 3;
 /// Room the fixture leaves for one entry-array copy.
 const ARRAY_FIT_BYTES: usize = 32 * SECTOR as usize;
+const DISK_GUID: [u8; 16] = [0xD1; 16];
 
 fn put_u16(buf: &mut [u8], at: usize, value: u16) {
     buf[at..at + 2].copy_from_slice(&value.to_le_bytes());
@@ -134,6 +136,7 @@ fn install_header(
     put_u64(header, 32, alt_lba);
     put_u64(header, 40, spec.first_usable);
     put_u64(header, 48, spec.last_usable);
+    header[56..72].copy_from_slice(&DISK_GUID);
     put_u64(header, 72, array_lba);
     put_u32(header, 80, spec.num_entries);
     put_u32(header, 84, spec.entry_size);
@@ -218,8 +221,12 @@ pub fn test_partition_gpt_happy_path() -> TestResult {
         Ok(t) => t,
         Err(e) => return fail!("valid GPT rejected: {:?}", e),
     };
-    if table.scheme != PartitionScheme::Gpt {
-        return fail!("scheme was {:?}, want Gpt", table.scheme);
+    if table.scheme
+        != (PartitionScheme::Gpt {
+            disk: Guid(DISK_GUID),
+        })
+    {
+        return fail!("scheme was {:?}, want Gpt naming its disk", table.scheme);
     }
     if table.entries.len() != 2 {
         return fail!("parsed {} entries, want 2", table.entries.len());
@@ -251,7 +258,7 @@ pub fn test_partition_gpt_backup_header_fallback() -> TestResult {
         Ok(t) => t,
         Err(e) => return fail!("a broken primary header must fall back, got {:?}", e),
     };
-    if table.scheme != PartitionScheme::Gpt || table.entries.len() != 2 {
+    if !matches!(table.scheme, PartitionScheme::Gpt { .. }) || table.entries.len() != 2 {
         return fail!(
             "backup parse gave {:?} with {} entries",
             table.scheme,
@@ -687,7 +694,7 @@ pub fn test_partition_gpt_entry_array_must_miss_the_usable_range() -> TestResult
         Ok(t) => t,
         Err(e) => return fail!("a backup array above last_usable was rejected: {:?}", e),
     };
-    if table.scheme != PartitionScheme::Gpt || table.entries.len() != 2 {
+    if !matches!(table.scheme, PartitionScheme::Gpt { .. }) || table.entries.len() != 2 {
         return fail!(
             "backup-array parse gave {:?} with {} entries",
             table.scheme,
@@ -878,7 +885,7 @@ pub fn test_partition_gpt_counts_in_logical_blocks() -> TestResult {
         Ok(t) => t,
         Err(e) => return fail!("a 4K-native GPT was rejected: {:?}", e),
     };
-    if table.scheme != PartitionScheme::Gpt || table.entries.len() != 2 {
+    if !matches!(table.scheme, PartitionScheme::Gpt { .. }) || table.entries.len() != 2 {
         return fail!(
             "4K GPT gave {:?} with {} entries",
             table.scheme,

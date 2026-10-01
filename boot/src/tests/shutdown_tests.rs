@@ -639,6 +639,19 @@ pub fn test_find_s5_absent() -> TestResult {
     TestResult::Pass
 }
 
+/// `panic=reboot` resets at once under a hypervisor, which the install loop's
+/// rollback relies on, and holds the panic on screen on bare metal.
+pub fn test_panic_reset_holds_only_on_bare_metal() -> TestResult {
+    use crate::panic::reset_hold_ms;
+
+    assert_eq_test!(reset_hold_ms(true), 0, "a hypervisor's reset must not wait");
+    assert_test!(
+        reset_hold_ms(false) >= 1000,
+        "bare metal must keep the panic on screen for a while"
+    );
+    TestResult::Pass
+}
+
 slopos_testing::stest!(name = test_fadt_parse_legacy_io_ports, suite = shutdown);
 slopos_testing::stest!(name = test_fadt_prefers_extended_io_port, suite = shutdown);
 slopos_testing::stest!(name = test_fadt_no_reset_when_flag_clear, suite = shutdown);
@@ -667,6 +680,10 @@ slopos_testing::stest!(name = test_shutdown_partial_init, suite = shutdown);
 slopos_testing::stest!(name = test_rapid_shutdown_cycles, suite = shutdown);
 slopos_testing::stest!(name = test_shutdown_many_tasks, suite = shutdown);
 slopos_testing::stest!(name = test_shutdown_mixed_priorities, suite = shutdown);
+slopos_testing::stest!(
+    name = test_panic_reset_holds_only_on_bare_metal,
+    suite = shutdown
+);
 slopos_testing::stest!(name = test_task_shutdown_skips_current, suite = shutdown);
 slopos_testing::stest!(
     name = test_scheduler_reinit_after_shutdown,

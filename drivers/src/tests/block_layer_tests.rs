@@ -8,7 +8,6 @@
 
 use slopos_abi::fs::block_ioctl;
 use slopos_boot_core::Guid;
-use slopos_boot_core::crc32::crc32;
 use slopos_fs::blockdev::BlockDevice;
 use slopos_fs::devfs::{
     BlockIoctlReply, DEV_NAME_MAX, devfs_block_ioctl, devfs_resolve_block_source,
@@ -19,10 +18,9 @@ use slopos_ostd::KVec;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
+use super::gpt_fixture;
 use crate::block::{self, ClaimError, DiskName, RereadError};
 
-const ENTRY_SIZE: usize = 128;
-const ENTRY_COUNT: usize = 4;
 /// The windows, in bytes of the disk: 64 KiB..128 KiB and 128 KiB..256 KiB,
 /// so both are whole logical blocks on either block size.
 const P1: (u64, u64) = (64 << 10, 64 << 10);
@@ -30,14 +28,6 @@ const P2: (u64, u64) = (128 << 10, 128 << 10);
 
 fn show(name: &[u8]) -> &str {
     core::str::from_utf8(name).unwrap_or("?")
-}
-
-fn put_u32(buf: &mut [u8], at: usize, value: u32) {
-    buf[at..at + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-fn put_u64(buf: &mut [u8], at: usize, value: u64) {
-    buf[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 /// Partition `slot`'s unique GUID: distinct per disk and slot, so one disk's
@@ -50,97 +40,14 @@ fn unique_guid(disk_tag: u8, slot: u8) -> [u8; 16] {
     })
 }
 
-/// The entry array's first block: the two windows, and the CRC over the
-/// array the header names.
-#[inline(never)]
-fn gpt_array(block: u64, disk_tag: u8) -> Result<(KVec<u8>, u32), &'static str> {
-    let mut array = KVec::<u8>::zeroed(block as usize).map_err(|_| "array alloc")?;
-    for (slot, &(start, len)) in [P1, P2].iter().enumerate() {
-        let row = &mut array[slot * ENTRY_SIZE..(slot + 1) * ENTRY_SIZE];
-        row[..16].copy_from_slice(&[0x11 * (slot as u8 + 1); 16]);
-        row[16..32].copy_from_slice(&unique_guid(disk_tag, slot as u8 + 1));
-        put_u64(row, 32, start / block);
-        put_u64(row, 40, (start + len) / block - 1);
-    }
-    let crc = crc32(&array[..ENTRY_COUNT * ENTRY_SIZE]);
-    Ok((array, crc))
-}
-
-#[inline(never)]
-fn protective_mbr(blocks: u64) -> Result<KVec<u8>, &'static str> {
-    let mut mbr = KVec::<u8>::zeroed(512).map_err(|_| "mbr alloc")?;
-    mbr[446 + 4] = 0xEE;
-    put_u32(&mut mbr, 446 + 8, 1);
-    let span = u32::try_from(blocks - 1).unwrap_or(u32::MAX);
-    put_u32(&mut mbr, 446 + 12, span);
-    mbr[510] = 0x55;
-    mbr[511] = 0xAA;
-    Ok(mbr)
-}
-
-/// The table for a disk of `blocks` logical blocks of `block` bytes: a
-/// protective MBR, the primary header and array, and the backup pair.
-#[inline(never)]
-fn install_gpt(
-    device: &dyn BlockDevice,
-    block: u64,
-    blocks: u64,
-    disk_tag: u8,
-) -> Result<(), &'static str> {
-    let (array, crc) = gpt_array(block, disk_tag)?;
-    let backup_array = blocks - 2;
-    let primary = gpt_header(block, 1, blocks - 1, 2, backup_array - 1, crc)?;
-    let backup = gpt_header(block, blocks - 1, 1, backup_array, backup_array - 1, crc)?;
-    let writes: [(u64, &[u8]); 5] = [
-        (0, &protective_mbr(blocks)?),
-        (block, &primary),
-        (2 * block, &array),
-        (backup_array * block, &array),
-        ((blocks - 1) * block, &backup),
-    ];
-    for (at, bytes) in writes {
-        device.write_at(at, bytes).map_err(|_| "table write")?;
-    }
-    device.flush().map_err(|_| "flush")
-}
-
-/// One GPT header block: `lba` its own, `alt` the other copy's.
-#[inline(never)]
-fn gpt_header(
-    block: u64,
-    lba: u64,
-    alt: u64,
-    array_lba: u64,
-    last_usable: u64,
-    array_crc: u32,
-) -> Result<KVec<u8>, &'static str> {
-    let mut h = KVec::<u8>::zeroed(block as usize).map_err(|_| "header alloc")?;
-    h[..8].copy_from_slice(b"EFI PART");
-    put_u32(&mut h, 8, 0x0001_0000);
-    put_u32(&mut h, 12, 92);
-    put_u64(&mut h, 24, lba);
-    put_u64(&mut h, 32, alt);
-    put_u64(&mut h, 40, 3);
-    put_u64(&mut h, 48, last_usable);
-    h[56..72].copy_from_slice(&[0x5A; 16]);
-    put_u64(&mut h, 72, array_lba);
-    put_u32(&mut h, 80, ENTRY_COUNT as u32);
-    put_u32(&mut h, 84, ENTRY_SIZE as u32);
-    put_u32(&mut h, 88, array_crc);
-    let crc = crc32(&h[..92]);
-    put_u32(&mut h, 16, crc);
-    Ok(h)
-}
-
-/// Zero the table's first and last blocks: no signature is left to find.
-#[inline(never)]
-fn wipe_gpt(device: &dyn BlockDevice, block: u64, blocks: u64) -> Result<(), &'static str> {
-    let zeros = KVec::<u8>::zeroed(3 * block as usize).map_err(|_| "zeros alloc")?;
-    device.write_at(0, &zeros).map_err(|_| "wipe head")?;
-    device
-        .write_at((blocks - 2) * block, &zeros[..2 * block as usize])
-        .map_err(|_| "wipe tail")?;
-    device.flush().map_err(|_| "flush")
+fn install_gpt(device: &dyn BlockDevice, disk_tag: u8) -> Result<(), &'static str> {
+    let entry = |slot: u8, (start, len): (u64, u64)| gpt_fixture::Entry {
+        type_guid: Guid([0x11 * slot; 16]),
+        unique: Guid(unique_guid(disk_tag, slot)),
+        start,
+        len,
+    };
+    gpt_fixture::install(device, Guid([0x5A; 16]), &[entry(1, P1), entry(2, P2)])
 }
 
 fn node_capacity(name: &[u8]) -> Option<u64> {
@@ -154,14 +61,12 @@ fn partitioned_disk(disk: &[u8], disk_tag: u8) -> TestResult {
     let Some(device) = block::disk(disk) else {
         return fail!("scratch disk {} not attached", show(disk));
     };
-    let block = u64::from(device.logical_block_size());
-    let blocks = device.capacity() / block;
     {
         let whole = match block::claim(disk) {
             Ok(c) => c,
             Err(e) => return fail!("claiming {} failed: {:?}", show(disk), e),
         };
-        if let Err(why) = install_gpt(whole.as_ref(), block, blocks, disk_tag) {
+        if let Err(why) = install_gpt(whole.as_ref(), disk_tag) {
             return fail!("could not install the GPT: {}", why);
         }
         assert_test!(
@@ -206,7 +111,7 @@ fn partitioned_disk(disk: &[u8], disk_tag: u8) -> TestResult {
         Ok(c) => c,
         Err(e) => return fail!("the whole disk was not released: {:?}", e),
     };
-    if let Err(why) = wipe_gpt(whole.as_ref(), block, blocks) {
+    if let Err(why) = gpt_fixture::wipe(whole.as_ref()) {
         return fail!("{}", why);
     }
     drop(whole);

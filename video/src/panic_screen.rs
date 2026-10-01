@@ -1,7 +1,8 @@
 //! Kernel panic screen display.
 //!
 //! Renders a full-screen panic message through the pre-rasterized glyph atlas,
-//! so nothing allocates at render time.
+//! so nothing allocates at render time, and only tries the framebuffer's
+//! locks, which a CPU the panic stopped may hold.
 
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_font::atlas::GlyphAtlas;
@@ -156,25 +157,40 @@ fn draw_log_tail(
     y + line_pitch
 }
 
-pub fn display_panic_screen(
-    message: Option<&str>,
-    rip: Option<u64>,
-    rsp: Option<u64>,
-    cr0: u64,
-    cr2: u64,
-    cr3: u64,
-    cr4: u64,
-    backtrace: &[u64],
-    backtrace_is_unwind: bool,
-) -> bool {
-    if framebuffer::snapshot().is_none() {
-        return false;
-    }
+pub struct PanicView<'a> {
+    pub message: &'a str,
+    pub rip: Option<u64>,
+    pub rsp: u64,
+    pub cr0: u64,
+    pub cr2: u64,
+    pub cr3: u64,
+    pub cr4: u64,
+    /// Return addresses, most recent call first.
+    pub backtrace: &'a [u64],
+    /// What became of the crash record, above the prompt.
+    pub status: &'a str,
+    pub prompt: &'a str,
+}
 
-    let mut ctx = match GraphicsContext::new() {
-        Ok(ctx) => ctx,
-        Err(_) => return false,
+/// Whether the screen was drawn; its flush is tried, and skipped while the
+/// display backend's hook is held.
+pub fn display_panic_screen(view: &PanicView<'_>) -> bool {
+    let &PanicView {
+        message,
+        rip,
+        rsp,
+        cr0,
+        cr2,
+        cr3,
+        cr4,
+        backtrace,
+        status,
+        prompt,
+    } = view;
+    let Some(fb) = framebuffer::try_snapshot() else {
+        return false;
     };
+    let mut ctx = GraphicsContext::from_state(fb);
 
     let atlas = match kernel_font::atlas() {
         Some(a) => a,
@@ -220,28 +236,25 @@ pub fn display_panic_screen(
 
     y += char_height;
 
-    if let Some(msg) = message {
-        let msg_label = b"Reason: \0";
-        atlas.draw_bytes(&mut ctx, 40, y, msg_label, PANIC_FG_COLOR, PANIC_BG_COLOR);
-
-        let mut x = 40 + 8 * char_width;
-        let max_x = width - 40;
-        for &byte in msg.as_bytes() {
-            if byte == 0 {
+    let msg_label = b"Reason: \0";
+    atlas.draw_bytes(&mut ctx, 40, y, msg_label, PANIC_FG_COLOR, PANIC_BG_COLOR);
+    let mut x = 40 + 8 * char_width;
+    let max_x = width - 40;
+    for &byte in message.as_bytes() {
+        if byte == 0 {
+            break;
+        }
+        if x + char_width > max_x {
+            y += char_height;
+            x = 40 + 8 * char_width;
+            if y > height - 120 {
                 break;
             }
-            if x + char_width > max_x {
-                y += char_height;
-                x = 40 + 8 * char_width;
-                if y > height - 120 {
-                    break;
-                }
-            }
-            atlas.draw_char(&mut ctx, x, y, byte as u32, PANIC_FG_COLOR, PANIC_BG_COLOR);
-            x += char_width;
         }
-        y += char_height * 2;
+        atlas.draw_char(&mut ctx, x, y, byte as u32, PANIC_FG_COLOR, PANIC_BG_COLOR);
+        x += char_width;
     }
+    y += char_height * 2;
 
     y += char_height;
     let reg_header = b"CPU State:\0";
@@ -260,10 +273,8 @@ pub fn display_panic_screen(
         y += char_height + 4;
     }
 
-    if let Some(rsp_val) = rsp {
-        draw_register_line(&mut ctx, &atlas, 60, y, b"RSP: \0", rsp_val);
-        y += char_height + 4;
-    }
+    draw_register_line(&mut ctx, &atlas, 60, y, b"RSP: \0", rsp);
+    y += char_height + 4;
 
     draw_register_line(&mut ctx, &atlas, 60, y, b"CR0: \0", cr0);
     y += char_height + 4;
@@ -277,14 +288,9 @@ pub fn display_panic_screen(
     draw_register_line(&mut ctx, &atlas, 60, y, b"CR4: \0", cr4);
     y += char_height + 4;
 
-    // Most recent call first.
     if !backtrace.is_empty() {
         y += char_height;
-        let label = if backtrace_is_unwind {
-            b"DWARF unwind backtrace:\0" as &[u8]
-        } else {
-            b"Frame-pointer backtrace:\0" as &[u8]
-        };
+        let label = b"Frame-pointer backtrace:\0";
         atlas.draw_bytes(&mut ctx, 40, y, label, PANIC_HEADER_COLOR, PANIC_BG_COLOR);
         y += char_height + 8;
         for (i, &ra) in backtrace.iter().enumerate() {
@@ -317,21 +323,21 @@ pub fn display_panic_screen(
             &atlas,
             tail,
             y + char_height,
-            prompt_y - char_height * 2,
+            prompt_y - char_height * 3,
         );
     });
 
-    let prompt = b"Press ENTER to shutdown\0";
-    let prompt_width = atlas.bytes_width(prompt);
-    let prompt_x = (width - prompt_width) / 2;
-    atlas.draw_bytes(
-        &mut ctx,
-        prompt_x,
-        prompt_y,
-        prompt,
-        PANIC_FG_COLOR,
-        PANIC_BG_COLOR,
-    );
+    for (line, y) in [(status, prompt_y - char_height - 4), (prompt, prompt_y)] {
+        let x = (width - atlas.bytes_width(line.as_bytes())) / 2;
+        atlas.draw_bytes(
+            &mut ctx,
+            x,
+            y,
+            line.as_bytes(),
+            PANIC_FG_COLOR,
+            PANIC_BG_COLOR,
+        );
+    }
 
     let serial_note = b"(Debug output also available on serial console)\0";
     let note_width = atlas.bytes_width(serial_note);
@@ -346,7 +352,6 @@ pub fn display_panic_screen(
         PANIC_BG_COLOR,
     );
 
-    ctx.flush();
-
+    framebuffer::try_flush();
     true
 }

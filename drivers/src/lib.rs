@@ -4,6 +4,7 @@
 
 pub mod apic;
 pub mod block;
+pub mod crash;
 pub mod driver_core;
 pub mod hpet;
 pub mod i2c;

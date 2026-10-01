@@ -16,13 +16,18 @@
 //!   and pushes it to the host; commit b, boot `slopos-bad` once — a kernel
 //!   whose command line panics it with `panic=reboot` — and reboot.
 //! 2 (booted `slopos-b` again, through the firmware entry): the panic reset
-//!   back to the default.
+//!   back to the default, and init's `bootctl collect` moved the record the
+//!   panic left in the crash partition to `/var/log/crash`, which `bootctl
+//!   status` reports as slot bad's last boot. Boot `slopos-abort` once — its
+//!   kernel takes the format-free abort a lockup takes — and reboot.
+//! 3 (booted `slopos-b` again): that abort left a record too.
 //!
 //! Without a boot disk it has nothing to do and passes, as `toolchain_test`
 //! does without a toolchain.
 
 use slopos_userland as _;
 
+use slopos_boot_core::crash::Summary;
 use slopos_boot_core::variables;
 use slopos_slibc::test_harness::note;
 use slopos_userland::boot_disk::{
@@ -253,6 +258,50 @@ fn booted_through_entry(disk: &BootDisk, stage: u8) -> bool {
     }
 }
 
+/// The record the panic of slot `slot` left, collected: saved under
+/// `/var/log/crash`, naming `panic` and holding `heading`'s report, named as
+/// the slot's last boot by `status`, and gone from the crash store.
+fn panic_collected(status: &str, slot: &str, panic: &str, heading: &str) -> bool {
+    let saved = std::fs::read_dir("/var/log/crash")
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .find(|path| {
+            let text = std::fs::read(path).unwrap_or_default();
+            let text = String::from_utf8_lossy(&text);
+            Summary::parse(&text)
+                .is_some_and(|s| s.slot() == Some(slot) && s.panic.ends_with(panic))
+                && text.contains(heading)
+        });
+    let Some(saved) = saved else {
+        note(&format!(
+            "/var/log/crash holds no record of slot {slot}'s panic"
+        ));
+        return false;
+    };
+    let saved = saved.display().to_string();
+    let reported = format!(", last boot crashed: {saved}");
+    let line = format!("slot {slot}:");
+    if !status
+        .lines()
+        .any(|l| l.starts_with(&line) && l.ends_with(&reported))
+    {
+        note(&format!(
+            "bootctl status does not report {saved}:\n{status}"
+        ));
+        return false;
+    }
+    match std::fs::read_dir("/dev/crash").map(Iterator::count) {
+        Ok(0) => {}
+        other => {
+            note(&format!("the crash store still holds records: {other:?}"));
+            return false;
+        }
+    }
+    println!("INSTALL-CRASH-RECORD {saved}");
+    true
+}
+
 fn reboot_into(entry: &str, next: u8) -> bool {
     if bootctl(&["oneshot", entry]).is_none() || !set_stage(Some(next)) {
         return false;
@@ -364,18 +413,38 @@ fn boot_slot_install_commit_rollback() -> bool {
             reboot_into("slopos-bad", 2)
         }
         Some(2) => {
-            let _ = set_stage(None);
             let _ = set_var(TAG, &[]);
             if booted != "slopos-b" || default != "slopos-b" || oneshot != "-" {
                 note(&format!(
                     "after the broken slot: booted {booted}, default {default}, oneshot {oneshot}"
                 ));
+                let _ = set_stage(None);
                 return false;
             }
-            if !booted_through_entry(&disk, 2) {
+            if !booted_through_entry(&disk, 2)
+                || !panic_collected(&status, "bad", "panic.boot=on", "=== KERNEL PANIC ===")
+            {
+                let _ = set_stage(None);
                 return false;
             }
-            note("slot b installed, tried, committed; a panicking slot rolled back");
+            reboot_into("slopos-abort", 3)
+        }
+        Some(3) => {
+            let _ = set_stage(None);
+            if booted != "slopos-b" || default != "slopos-b" || oneshot != "-" {
+                note(&format!(
+                    "after the aborting slot: booted {booted}, default {default}, oneshot {oneshot}"
+                ));
+                return false;
+            }
+            if !booted_through_entry(&disk, 3)
+                || !panic_collected(&status, "abort", "panic.boot=abort", "=== KERNEL ABORT ===")
+            {
+                return false;
+            }
+            note(
+                "slot b installed, tried and committed; a panicking and an aborting slot rolled back, each leaving its record",
+            );
             true
         }
         Some(other) => {

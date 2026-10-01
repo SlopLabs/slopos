@@ -2,6 +2,26 @@
 
 **No finding is open.**
 
+Swept 2026-10-01: the crash record — the panic path's polled writes to the
+crash partition and the store's claim on it, `/dev/crash`'s listing, reads and
+unlinks, `bootctl collect` writing what a record says into `/var/log/crash`
+and `/var/lib/slopos/slots`, init running it with `Mount` and `Power` on every
+boot, and the boot step that finds the partition by the GUID the loader
+reports. A record is read or erased only with the raw-device right; the store
+holds the partition's write claim, so no other writer reaches it and no table
+re-read or whole-disk write moves the window the panic path writes, and every
+write lands inside that window. Nothing a record holds names a file: the
+collector takes the slot through `valid_slot` and the time as a number. Five
+reviews found defects in the change before it landed, none in code that had
+shipped: the collector could erase a record it had only copied to a RAM root;
+a sequence number could repeat while the newest record was being erased,
+leaving two records one name; one unreadable slot disabled the whole store;
+the bare-metal hold could wait forever on a framebuffer lock a stopped CPU
+held, so `panic=reboot` never reset; and an abort on an exhausted data stack
+would have faulted again writing its record. Below the bar: any task can list
+`/dev/crash` and so learn how many records it holds; a record carries kernel
+addresses and the kernel log, which `/dev/kmsg` already gives every task.
+
 Swept 2026-10-01: the boot chain — UEFI variables from user space and the
 `BootEntry` capability, the boot manager variables' write checks, `bootctl`
 and `install_test` reading every block node's GPT and writing the boot

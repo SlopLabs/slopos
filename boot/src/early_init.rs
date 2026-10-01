@@ -531,7 +531,8 @@ fn apply_root_option(cmdline: &'static str) {
 /// `panic=reboot`: a panic resets the machine instead of halting it, which is
 /// what hands a boot slot that panics back to the loader's default.
 /// `panic.boot=on` panics once boot initialisation is done: the broken kernel
-/// a slot rollback is tested with.
+/// a slot rollback is tested with. `panic.boot=abort` takes the format-free
+/// abort a lockup takes instead.
 #[inline(never)]
 fn apply_panic_options(cmdline: &str) {
     for token in cmdline.split_whitespace() {
@@ -541,16 +542,21 @@ fn apply_panic_options(cmdline: &str) {
                 boot_info(b"Boot option: panic=reboot\0");
             }
             "panic.boot=on" => {
-                PANIC_AFTER_BOOT.store(true, core::sync::atomic::Ordering::Relaxed);
+                PANIC_AFTER_BOOT.store(PANIC_BOOT_PANIC, core::sync::atomic::Ordering::Relaxed);
                 boot_info(b"Boot option: panic.boot=on\0");
+            }
+            "panic.boot=abort" => {
+                PANIC_AFTER_BOOT.store(PANIC_BOOT_ABORT, core::sync::atomic::Ordering::Relaxed);
+                boot_info(b"Boot option: panic.boot=abort\0");
             }
             _ => {}
         }
     }
 }
 
-static PANIC_AFTER_BOOT: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+const PANIC_BOOT_PANIC: u8 = 1;
+const PANIC_BOOT_ABORT: u8 = 2;
+static PANIC_AFTER_BOOT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 /// `prof=on`: sample where the machine's time goes, reported at the end of
 /// a test run.
@@ -922,8 +928,10 @@ pub fn kernel_main_impl() {
         }
         slopos_hermetic::return_after_boot(boot_ctx);
         serial::write_line("BOOT: boot init complete");
-        if PANIC_AFTER_BOOT.load(core::sync::atomic::Ordering::Relaxed) {
-            panic!("panic.boot=on");
+        match PANIC_AFTER_BOOT.load(core::sync::atomic::Ordering::Relaxed) {
+            PANIC_BOOT_PANIC => panic!("panic.boot=on"),
+            PANIC_BOOT_ABORT => crate::panic::panic_abort_recorded("panic.boot=abort"),
+            _ => {}
         }
 
         // Must happen while the EFI memory map is still live, so firmware

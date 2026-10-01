@@ -14,9 +14,11 @@ use limine::{
         ExecutableAddressRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest,
         MemmapRequest, ModulesRequest, MpRequest, MpResponse, RsdpRequest,
     },
+    uuid::Uuid,
 };
 
 use slopos_abi::DisplayInfo;
+use slopos_boot_core::Guid;
 use slopos_ostd::sync::{InitInPlace, KernelSync, OnceLock};
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -345,6 +347,47 @@ pub fn boot_info() -> slopos_ostd::boot_info::BootInfo {
         kernel_virt_base: info.kernel_virt_base,
         rsdp_address: info.rsdp_phys_addr,
     }
+}
+
+/// The path the loader read the kernel from, on its volume.
+pub fn kernel_path() -> Option<&'static str> {
+    Some(KERNEL_FILE_REQUEST.response()?.executable_file().path())
+}
+
+/// Where the protocol's `struct limine_file` keeps `gpt_disk_uuid`. The
+/// `limine` crate's `File` leaves out the protocol's `unused` word after
+/// `media_type`, so its UUID fields were read from four bytes earlier.
+const GPT_DISK_UUID_AT: usize = 64;
+const CRATE_DISK_UUID_AT: usize = core::mem::offset_of!(LimineFile, gpt_disk_uuid);
+const _: () = assert!(
+    core::mem::size_of::<Uuid>() == 16
+        && core::mem::offset_of!(LimineFile, gpt_part_uuid) == CRATE_DISK_UUID_AT + 16
+        && CRATE_DISK_UUID_AT <= GPT_DISK_UUID_AT
+        && GPT_DISK_UUID_AT <= CRATE_DISK_UUID_AT + 16
+);
+
+/// The bytes `uuid` was read from. The crate's `Uuid` is not `repr(C)`, so
+/// each field goes back where rustc put it.
+fn raw_uuid(uuid: &Uuid) -> [u8; 16] {
+    let mut raw = [0u8; 16];
+    let mut put = |at: usize, bytes: &[u8]| raw[at..at + bytes.len()].copy_from_slice(bytes);
+    put(core::mem::offset_of!(Uuid, a), &uuid.a.to_ne_bytes());
+    put(core::mem::offset_of!(Uuid, b), &uuid.b.to_ne_bytes());
+    put(core::mem::offset_of!(Uuid, c), &uuid.c.to_ne_bytes());
+    put(core::mem::offset_of!(Uuid, d), &uuid.d);
+    raw
+}
+
+/// The GPT disk GUID of the disk the loader read the kernel from; `None` off a
+/// GPT disk.
+pub fn kernel_disk_guid() -> Option<Guid> {
+    let file = KERNEL_FILE_REQUEST.response()?.executable_file();
+    let mut read = [0u8; 32];
+    read[..16].copy_from_slice(&raw_uuid(&file.gpt_disk_uuid));
+    read[16..].copy_from_slice(&raw_uuid(&file.gpt_part_uuid));
+    let at = GPT_DISK_UUID_AT - CRATE_DISK_UUID_AT;
+    let guid = Guid(read[at..at + 16].try_into().ok()?);
+    (!guid.is_zero()).then_some(guid)
 }
 
 /// Bytes of the initramfs module loaded by Limine, if present.

@@ -32,7 +32,7 @@ const LINK_DIRS: [(&[u8], InodeId); 3] = [
 ];
 
 /// Node inodes count up from here, clear of every fixed devfs inode.
-const NODE_INODE_BASE: InodeId = 1 << 16;
+pub(super) const NODE_INODE_BASE: InodeId = 1 << 16;
 /// A link's inode is its node's with the link kind above this bit.
 const LINK_KIND_SHIFT: u32 = 48;
 const MAX_BLOCK_NODES: usize = 128;
@@ -653,7 +653,7 @@ pub(crate) fn devfs_block_node_is(name: &[u8], inode: InodeId) -> bool {
 /// Whether the running task may touch a device beneath every filesystem: a
 /// kernel thread, `TASK_FLAG_SYSTEM`, or the holder of `TASK_FLAG_MOUNT`, who
 /// may already graft any device onto the namespace.
-fn raw_block_entitled() -> bool {
+pub(super) fn raw_block_entitled() -> bool {
     current_task_is_privileged() || current_task_flags() & slopos_abi::task::TASK_FLAG_MOUNT != 0
 }
 
