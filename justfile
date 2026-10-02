@@ -312,6 +312,7 @@ _initramfs-tests: _build-userland-tests _base-recipes
 _kernel variant features='':
     scripts/ensure_toolchain.sh
     CARGO="{{cargo}} +slopos" RUST_TARGET={{rust_target}} KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
+    KERNEL_RELEASE={{ if variant =~ '^release' { "1" } else { "0" } }} \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" "{{features}}"
     scripts/check_kernel_elf_gates.sh "{{build_dir}}" "{{variant}}"
 
