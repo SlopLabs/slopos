@@ -182,50 +182,111 @@ pub(crate) fn flush_echo(slot: usize, nesting: WriteNesting) {
     let Some(mut claim) = EchoDrain::acquire(slot) else {
         return;
     };
+    drain_echo(slot, nesting, Some(&mut claim));
+}
 
-    let mut chunk = [0u8; ECHO_CHUNK];
+/// Emit the echo `slot` has staged ahead of a write about to follow, as
+/// `n_tty_write` does: the newline that ended a line must reach the terminal
+/// before the program's answer to that line.
+pub(crate) fn flush_echo_before_write(slot: usize) {
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let staged = TTY_SLOTS[slot]
+        .lock()
+        .as_ref()
+        .is_some_and(|tty| !tty.ldisc.echo_is_empty());
+    if staged {
+        drain_echo(slot, WriteNesting::Toplevel, None);
+    }
+}
+
+fn drain_echo(slot: usize, nesting: WriteNesting, mut claim: Option<&mut EchoDrain>) {
     let mut settle = false;
     let mut wrote_any = false;
-
     for _ in 0..MAX_FLUSH_ROUNDS {
-        // The in-flight count is taken in the same critical section as the
-        // take, so no window exists in which a byte is neither staged nor in
-        // flight.
-        let (n, driver, inflight) = {
-            let mut guard = TTY_SLOTS[slot].lock();
-            let Some(tty) = guard.as_mut() else { break };
-            let n = tty.ldisc.echo_take(&mut chunk);
-            if n == 0 {
-                claim.release_under(&mut tty.ldisc);
+        debug_check_emit_contract(slot, nesting);
+        let step = {
+            let _write = write_guard(slot, nesting);
+            emit_echo_chunk(slot, claim.as_deref_mut())
+        };
+        match step {
+            EchoStep::Idle => break,
+            EchoStep::Emitted { console } => {
+                settle |= console;
+                wrote_any = true;
+            }
+            EchoStep::Stalled { console, wrote } => {
+                settle |= console;
+                wrote_any |= wrote;
                 break;
             }
-            (n, tty.driver.id(), InflightGuard::new(slot, n))
-        };
-        settle |= defers_console_work(&driver);
-        let written = emit_under_write_lock(slot, driver, &chunk[..n], nesting);
-        // A flush that moved no bytes must not publish: it would wake every
-        // drain waiter to re-observe the state that parked it.
-        wrote_any |= written > 0;
-        if written < n {
-            // Peer input queue full: put the tail back and hand the claim
-            // over, so a later producer or the peer's reader drains it.
-            let mut guard = TTY_SLOTS[slot].lock();
-            if let Some(tty) = guard.as_mut() {
-                tty.ldisc.echo_unread(&chunk[written..n]);
-                claim.release_under(&mut tty.ldisc);
-            }
-            drop(inflight);
-            break;
         }
-        drop(inflight);
     }
 
     if settle {
         settle_console_output();
     }
+    // A flush that moved no bytes must not publish: it would wake every drain
+    // waiter to re-observe the state that parked it.
     if wrote_any {
         BUS.publish(tty_output_event(slot));
     }
+}
+
+enum EchoStep {
+    Idle,
+    Emitted {
+        console: bool,
+    },
+    /// The peer's input queue took part of the chunk; the rest is staged again.
+    Stalled {
+        console: bool,
+        wrote: bool,
+    },
+}
+
+/// Move the oldest staged chunk to the driver. The caller holds
+/// `TTY_WRITE_LOCKS[slot]` from before the take, so no output that lock orders
+/// later can reach the driver between this take and its emission.
+fn emit_echo_chunk(slot: usize, claim: Option<&mut EchoDrain>) -> EchoStep {
+    let mut chunk = [0u8; ECHO_CHUNK];
+    // The in-flight count is taken in the same critical section as the take,
+    // so no window exists in which a byte is neither staged nor in flight.
+    let (n, driver, inflight) = {
+        let mut guard = TTY_SLOTS[slot].lock();
+        let Some(tty) = guard.as_mut() else {
+            return EchoStep::Idle;
+        };
+        let n = tty.ldisc.echo_take(&mut chunk);
+        if n == 0 {
+            if let Some(claim) = claim {
+                claim.release_under(&mut tty.ldisc);
+            }
+            return EchoStep::Idle;
+        }
+        (n, tty.driver.id(), InflightGuard::new(slot, n))
+    };
+    let console = defers_console_work(&driver);
+    let written = write_to_driver(driver, &chunk[..n]);
+    if written < n {
+        // Hand the claim over, so a later producer or the peer's reader
+        // drains the tail.
+        let mut guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_mut() {
+            tty.ldisc.echo_unread(&chunk[written..n]);
+            if let Some(claim) = claim {
+                claim.release_under(&mut tty.ldisc);
+            }
+        }
+        drop(inflight);
+        return EchoStep::Stalled {
+            console,
+            wrote: written > 0,
+        };
+    }
+    drop(inflight);
+    EchoStep::Emitted { console }
 }
 
 /// One drainer per slot: two CPUs would take alternate chunks and race for the

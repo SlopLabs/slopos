@@ -810,6 +810,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         } else {
             data.len()
         };
+        output::flush_echo_before_write(slot);
 
         let mut out_buf = [0u8; OUT_BUF_CAP];
         let mut out_len = 0;

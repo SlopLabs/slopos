@@ -347,6 +347,41 @@ pub fn test_pty_master_empty_read_would_block_not_eof() -> TestResult {
     TestResult::Pass
 }
 
+/// Echo the slave has staged goes to the terminal ahead of what the slave's
+/// program writes next: the newline that ended a typed line comes before the
+/// next prompt, however late its own flush would have run.
+pub fn test_pty_staged_echo_precedes_slave_write() -> TestResult {
+    let pair = open_pty_pair();
+    {
+        let mut guard = TTY_SLOTS[pair.slave.0 as usize].lock();
+        let Some(tty) = guard.as_mut() else {
+            klog_info!("TTY_TEST: BUG - the slave has no slot");
+            return TestResult::Fail;
+        };
+        tty.ldisc.echo_stage(b"\r\n");
+    }
+    if tty::write(pair.slave, b"next", false) != Ok(4) {
+        klog_info!("TTY_TEST: BUG - the slave write did not complete");
+        return TestResult::Fail;
+    }
+    let mut seen = [0u8; 16];
+    let mut len = 0;
+    while len < seen.len() {
+        match tty::read(pair.master, &mut seen[len..], true) {
+            Ok(n) if n > 0 => len += n,
+            _ => break,
+        }
+    }
+    if &seen[..len] != b"\r\nnext" {
+        klog_info!(
+            "TTY_TEST: BUG - the terminal saw {:?}, want the echo before the write",
+            &seen[..len]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 /// TIOCSWINSZ on either PTY end updates both views: window size is a property
 /// of the pair, so the shell's columns match the geometry the emulator set.
 pub fn test_pty_winsize_shared_across_pair() -> TestResult {
@@ -1341,6 +1376,10 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_non_pty_not_locked, suite = tty_test_pty_core);
 slopos_testing::stest!(
     name = test_pty_master_empty_read_would_block_not_eof,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_pty_staged_echo_precedes_slave_write,
     suite = tty_test_pty_core
 );
 slopos_testing::stest!(

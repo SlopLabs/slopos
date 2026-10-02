@@ -57,8 +57,10 @@
 # crash store's tests opened stores over scratch disks, all but 6271 on boots
 # whose AP answered late, then 6526, 6514 and 6528 in three once a basefs test
 # indexed a 5000-entry medium, the index's vectors briefly doubled as they
-# grow, and the block-ceiling test made a user task, and the cap is the
-# largest. The pages row
+# grow, and the block-ceiling test made a user task, then 6552 in one whose
+# new tests hold nothing past their end (the PTY echo test leaves the root's
+# kernelmeta where it found it), the spread, and the cap is the largest.
+# The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
 # the row counts twice: captures measured 538 714, 535 332, 538 832, 539 004
@@ -89,7 +91,7 @@ post-kernel-tests	commitpages	2560
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	6528
+post-kernel-tests	kernelmeta	6552
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	539050
 post-kernel-tests	pinnedbytes	4
