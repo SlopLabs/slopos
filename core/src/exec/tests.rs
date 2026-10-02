@@ -1482,12 +1482,23 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
                 == (TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL, None),
             "the installer must hold the installer's role beside what bootctl holds"
         );
-        for test in [&b"/bin/install_test"[..], b"/bin/installer_test"] {
-            assert_test!(
-                grant_for(test) == (TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL, None),
-                "the install tests must hold the installer's role beside what bootctl holds"
-            );
-        }
+        assert_test!(
+            grant_for(b"/bin/install_test")
+                == (TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL, None),
+            "the install test must hold the installer's role beside what bootctl holds"
+        );
+        assert_test!(
+            grant_for(b"/bin/installer_test")
+                == (
+                    TASK_FLAG_POWER
+                        | TASK_FLAG_MOUNT
+                        | TASK_FLAG_INSTALL
+                        | slopos_abi::task::TASK_FLAG_LAUNCH,
+                    None
+                ),
+            "the installer test must hold the installer's role and Launch, so the shell it \
+             types the installer at keeps its own"
+        );
         for tool in [
             "mke2fs",
             "e2fsck",
