@@ -2407,6 +2407,39 @@ pub fn test_receive_buf_accumulates_echo() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_echoed_newline_takes_onlcr() -> TestResult {
+    let line = [
+        InputEvent::normal(b'a'),
+        InputEvent::normal(b'b'),
+        InputEvent::normal(b'\n'),
+    ];
+    let mut ld = LineDisc::new();
+    let _ = ld.receive_buf(&line);
+    let echo = EchoScratch::drain(&mut ld);
+    if echo.as_slice() != b"ab\r\n" {
+        klog_info!(
+            "TTY_TEST: BUG - an echoed newline should return the carriage, got {:?}",
+            echo.as_slice()
+        );
+        return TestResult::Fail;
+    }
+
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_oflag &= !OutputFlags::ONLCR;
+    ld.set_termios(&t);
+    let _ = ld.receive_buf(&line);
+    let echo = EchoScratch::drain(&mut ld);
+    if echo.as_slice() != b"ab\n" {
+        klog_info!(
+            "TTY_TEST: BUG - echo without ONLCR should keep a bare newline, got {:?}",
+            echo.as_slice()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 pub fn test_mod_reexports_io_functions() -> TestResult {
     let _: fn(TtyIndex, &mut [u8], bool) -> Result<usize, TtyError> = tty::read;
     let _: fn(TtyIndex, &[u8], bool) -> Result<usize, TtyError> = tty::write;
@@ -3058,6 +3091,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_receive_buf_accumulates_echo,
+    suite = tty_test_ldisc_regression
+);
+slopos_testing::stest!(
+    name = test_echoed_newline_takes_onlcr,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(

@@ -1587,10 +1587,10 @@ impl LineDisc {
         for &event in events {
             match self.input_char(event) {
                 InputAction::Echo { buf, len } => {
-                    self.echo.extend(&buf[..len as usize]);
+                    self.echo_out(&buf[..len as usize]);
                 }
                 InputAction::Bell => {
-                    self.echo.push(0x07);
+                    self.echo_out(&[0x07]);
                 }
                 InputAction::Signal(sig) => {
                     let lflag = self.termios.local_flags();
@@ -1601,27 +1601,22 @@ impl LineDisc {
                     {
                         let c = event.byte;
                         if c < 0x20 && c != b'\t' && c != b'\n' {
-                            self.echo.extend(&[b'^', c | 0x40]);
+                            self.echo_out(&[b'^', c | 0x40]);
                         }
                     }
                     result.signal = Some((sig, !lflag.contains(LocalFlags::NOFLSH)));
                     break;
                 }
                 InputAction::ReprintLine => {
-                    self.echo.push(b'\n');
-                    // Split borrow: the redisplay source and the queue it feeds
-                    // share a struct.
-                    let Self {
-                        edit_buf,
-                        edit_len,
-                        echo,
-                        ..
-                    } = self;
-                    echo.extend(&edit_buf[..*edit_len]);
+                    self.echo_out(b"\n");
+                    for i in 0..self.edit_len {
+                        let c = self.edit_buf[i];
+                        self.echo_out(&[c]);
+                    }
                 }
                 InputAction::KillLineEcho { columns } => {
                     for _ in 0..columns {
-                        self.echo.extend(&[0x08, 0x20, 0x08]);
+                        self.echo_out(&[0x08, 0x20, 0x08]);
                     }
                 }
                 InputAction::None => {}
@@ -1630,6 +1625,24 @@ impl LineDisc {
         result.should_wake = self.should_wake_reader();
         result.throttle_check = true;
         result
+    }
+
+    /// Echo is output: `c_oflag` shapes it as it does a write, so an echoed
+    /// newline is the `\r\n` that `ONLCR` makes of one.
+    fn echo_out(&mut self, bytes: &[u8]) {
+        for &c in bytes {
+            match self.process_output_byte(c) {
+                OutputAction::Emit { buf, len } => {
+                    self.echo.extend(&buf[..len as usize]);
+                }
+                OutputAction::Tab(n) => {
+                    for _ in 0..n {
+                        self.echo.push(b' ');
+                    }
+                }
+                OutputAction::Suppress => {}
+            }
+        }
     }
 }
 
