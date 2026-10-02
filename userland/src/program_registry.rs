@@ -75,6 +75,14 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Install a kernel into a boot slot and choose what boots",
     },
+    // Granted `Mount`, `Power` and `Install` by path.
+    ProgramSpec {
+        name: "installer",
+        path: "/bin/installer",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Install SlopOS onto a disk from the live medium",
+    },
     ProgramSpec {
         name: "editor",
         path: "/bin/editor",

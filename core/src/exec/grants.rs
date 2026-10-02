@@ -189,10 +189,11 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         priority: None,
     },
     // Keeps its stage in a UEFI variable across the boots an install takes,
-    // and gives a foreign disk the firmware entry another system would have.
+    // gives a foreign disk the firmware entry another system would have, and
+    // starts the installer from a shell, which raises it only under `Launch`.
     ProgramGrant {
         path: b"/bin/installer_test",
-        flags: TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL,
+        flags: TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL | TASK_FLAG_LAUNCH,
         delegated: 0,
         priority: None,
     },

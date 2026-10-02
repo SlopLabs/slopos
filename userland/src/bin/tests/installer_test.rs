@@ -8,7 +8,8 @@
 //!
 //! 0 (the live system, the medium at `/media/install`): on a disk another
 //!   system is on, give it the firmware entry that system would have; run
-//!   `/bin/installer` with every answer a flag.
+//!   the installer, on a blank disk from the shell answering its questions,
+//!   on the others with every answer a flag.
 //! 1 (`slopos-a` of the installed disk): the root is the disk's, the other
 //!   system's entry is still in `BootOrder` and in Limine's menu, and the
 //!   clone fetches from the remote it was given. With a toolchain at
@@ -209,11 +210,16 @@ fn leave_kept_file(node: &str) -> Result<(), String> {
     written.map_err(|e| format!("{KEPT}: {e}"))
 }
 
-/// The installer asking its questions, and a person typing `typed`.
+/// A person typing `installer` at the shell, then `typed` to its questions:
+/// the shell is what must hand the installer its grant.
 fn answer_on_stdin(args: &[String], typed: &str) -> std::io::Result<std::process::ExitStatus> {
     use std::io::Write;
-    let mut child = Command::new("/bin/installer")
-        .args(args)
+    let line = std::iter::once("installer".to_owned())
+        .chain(args.iter().map(|arg| format!("'{arg}'")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut child = Command::new("/bin/shell")
+        .args(["-c", &line])
         .stdin(std::process::Stdio::piped())
         .spawn()?;
     child
