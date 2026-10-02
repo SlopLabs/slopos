@@ -103,6 +103,77 @@ pub extern "C" fn rand() -> c_int {
     }
 }
 
+/// POSIX's `random`: an additive feedback generator over 31 words, each new
+/// word the sum of the words 31 and 3 back, its high 31 bits the result. The
+/// words start as the multiplicative congruential sequence of the seed, and
+/// the first 310 results are discarded so they no longer show it.
+struct Additive {
+    ring: [u32; ADDITIVE_RING],
+    /// Where the next word goes.
+    at: usize,
+}
+
+const ADDITIVE_DEGREE: usize = 31;
+const ADDITIVE_SEPARATION: usize = 3;
+const ADDITIVE_RING: usize = ADDITIVE_DEGREE + ADDITIVE_SEPARATION;
+const ADDITIVE_DISCARD: usize = 10 * ADDITIVE_DEGREE;
+const PARK_MILLER_MULTIPLIER: i64 = 16_807;
+const PARK_MILLER_MODULUS: i64 = 2_147_483_647;
+
+impl Additive {
+    const fn seeded(seed: u32) -> Additive {
+        let mut ring = [0u32; ADDITIVE_RING];
+        ring[0] = if seed == 0 { 1 } else { seed };
+        let mut i = 1;
+        while i < ADDITIVE_DEGREE {
+            let word = PARK_MILLER_MULTIPLIER * (ring[i - 1] as i32 as i64) % PARK_MILLER_MODULUS;
+            ring[i] = if word < 0 {
+                word + PARK_MILLER_MODULUS
+            } else {
+                word
+            } as u32;
+            i += 1;
+        }
+        while i < ADDITIVE_RING {
+            ring[i] = ring[i - ADDITIVE_DEGREE];
+            i += 1;
+        }
+        let mut state = Additive { ring, at: 0 };
+        let mut discarded = 0;
+        while discarded < ADDITIVE_DISCARD {
+            state.step();
+            discarded += 1;
+        }
+        state
+    }
+
+    const fn back(&self, n: usize) -> u32 {
+        self.ring[(self.at + ADDITIVE_RING - n) % ADDITIVE_RING]
+    }
+
+    const fn step(&mut self) -> u32 {
+        let word = self
+            .back(ADDITIVE_DEGREE)
+            .wrapping_add(self.back(ADDITIVE_SEPARATION));
+        self.ring[self.at] = word;
+        self.at = (self.at + 1) % ADDITIVE_RING;
+        word >> 1
+    }
+}
+
+/// Unsynchronised, as `rand`'s state is.
+static mut RANDOM_STATE: Additive = Additive::seeded(1);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn srandom(seed: core::ffi::c_uint) {
+    unsafe { RANDOM_STATE = Additive::seeded(seed) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn random() -> core::ffi::c_long {
+    unsafe { core::ffi::c_long::from((*(&raw mut RANDOM_STATE)).step()) }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn imaxabs(n: intmax_t) -> intmax_t {
     n.wrapping_abs()

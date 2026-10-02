@@ -18,6 +18,17 @@ struct winsize {
     unsigned short ws_ypixel;
 };
 
+#define SIOCGIFCONF (0x8912)
+#define SIOCGIFFLAGS (0x8913)
+#define SIOCGIFMTU (0x8921)
+#define SIOCGIFHWADDR (0x8927)
+#define SIOCGIFINDEX (0x8933)
+#define BLKROGET (0x125E)
+#define BLKRRPART (0x125F)
+#define BLKGETSIZE (0x1260)
+#define BLKSSZGET (0x1268)
+#define BLKPBSZGET (0x127B)
+#define BLKGETSIZE64 (0x80081272)
 #define FIOCLEX (0x5451)
 #define FIONBIO (0x5421)
 #define FIONCLEX (0x5450)

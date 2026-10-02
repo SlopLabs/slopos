@@ -35,7 +35,7 @@ mod token;
 pub use arena::{
     AccountCreateError, KindStats, LedgerFault, MAX_ACCOUNT_DEPTH, NO_LIMIT, PagesReconciler,
     TryChargeError, account_count, account_create, account_depth, account_release,
-    account_release_by_slot, for_each_account, held_by, ledger_audit, quota_mode,
+    account_release_by_slot, fit_disk_blocks, for_each_account, held_by, ledger_audit, quota_mode,
     register_pages_reconciler, reset_for_test, root, set_derived_process_limit, set_limit,
     set_quota_mode, stats, try_charge,
 };
@@ -106,6 +106,26 @@ mod tests {
         assert_eq!(used(child, ResourceKind::FdSlot), 0);
         assert_eq!(used(parent, ResourceKind::FdSlot), 0);
         assert_eq!(used(root(), ResourceKind::FdSlot), 0);
+    }
+
+    /// The raw-device right frees a principal of the block ceiling, and losing
+    /// it restores the default.
+    #[test]
+    fn the_block_ceiling_follows_the_raw_device_right() {
+        use crate::authority::caps_from_task_flags;
+        use slopos_abi::task::{TASK_FLAG_MOUNT, TASK_FLAG_USER_MODE};
+        let _f = fixture();
+        let installer = account(1, root());
+        let limit = |id| stats(id, ResourceKind::DiskBlocks).map(|s| s.limit);
+        let default = slopos_abi::quota::default_process_limit(ResourceKind::DiskBlocks);
+        assert_eq!(limit(installer), Some(default));
+        fit_disk_blocks(
+            installer,
+            caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_MOUNT),
+        );
+        assert_eq!(limit(installer), Some(NO_LIMIT));
+        fit_disk_blocks(installer, caps_from_task_flags(TASK_FLAG_USER_MODE));
+        assert_eq!(limit(installer), Some(default));
     }
 
     /// L4: a batch that succeeds at level *k* and fails at *k+1* leaves every

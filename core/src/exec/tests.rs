@@ -1427,7 +1427,7 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
     use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TaskPriority};
     use slopos_testing::assert_test;
 
-    use super::grants::grant_for;
+    use super::grants::{delegated_for, grant_for};
 
     let (flags, priority) = grant_for(b"/bin/compositor");
     assert_test!(
@@ -1478,9 +1478,42 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
             "bootctl must be granted MOUNT and POWER, and not the installer's role"
         );
         assert_test!(
-            grant_for(b"/bin/install_test")
+            grant_for(b"/bin/installer")
                 == (TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL, None),
-            "the install test must hold the installer's role beside what bootctl holds"
+            "the installer must hold the installer's role beside what bootctl holds"
+        );
+        for test in [&b"/bin/install_test"[..], b"/bin/installer_test"] {
+            assert_test!(
+                grant_for(test) == (TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL, None),
+                "the install tests must hold the installer's role beside what bootctl holds"
+            );
+        }
+        for tool in [
+            "mke2fs",
+            "e2fsck",
+            "resize2fs",
+            "tune2fs",
+            "debugfs",
+            "dumpe2fs",
+        ] {
+            let mut path = [0u8; 32];
+            let base = b"/sbin/";
+            path[..base.len()].copy_from_slice(base);
+            path[base.len()..base.len() + tool.len()].copy_from_slice(tool.as_bytes());
+            let tool = &path[..base.len() + tool.len()];
+            assert_test!(
+                grant_for(tool) == (0, None) && delegated_for(tool) == TASK_FLAG_MOUNT,
+                "e2fsprogs must take the raw-device right from its spawner, and nothing more"
+            );
+        }
+        assert_test!(
+            grant_for(b"/usr/local/sbin/mke2fs") == (0, None)
+                && delegated_for(b"/usr/local/sbin/mke2fs") == 0,
+            "a copy a root holds, which the guest can replace, must get nothing"
+        );
+        assert_test!(
+            delegated_for(b"/bin/bootctl") == 0 && delegated_for(b"/bin/shell") == 0,
+            "only e2fsprogs takes its authority from its spawner"
         );
     }
 
@@ -1543,5 +1576,63 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
 
 slopos_testing::stest!(
     name = test_program_grants_are_keyed_on_exact_path,
+    suite = exec
+);
+
+/// The raw-device right frees a process of the per-process block ceiling
+/// where a spawn confers it, and an `execve` that gives the right up holds
+/// the process to the ceiling again.
+pub fn test_the_block_ceiling_follows_the_raw_device_right() -> TestResult {
+    use core::ffi::c_char;
+    use slopos_abi::quota::{ResourceKind, default_process_limit};
+    use slopos_abi::task::{TASK_FLAG_MOUNT, TASK_FLAG_USER_MODE};
+    use slopos_ostd::authority::{Capability, caps_from_task_flags, mask_permits};
+    use slopos_ostd::process::quota::{NO_LIMIT, stats};
+    use slopos_ostd::task::ops::{task_caps, task_set_caps};
+    use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
+
+    let id = task_create(
+        b"CeilingTest\0".as_ptr() as *const c_char,
+        slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+        core::ptr::null_mut(),
+        1,
+        TASK_FLAG_USER_MODE,
+    );
+    let Some(task) = task_find_by_id(id) else {
+        return slopos_testing::fail!("no test task");
+    };
+    let Some(account) = task.process().map(|process| process.account()) else {
+        task_terminate(id);
+        return slopos_testing::fail!("the test task has no process");
+    };
+    let limit = || stats(account, ResourceKind::DiskBlocks).map(|row| row.limit);
+
+    task_set_caps(
+        &task,
+        caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_MOUNT),
+    );
+    slopos_ostd::process::quota::fit_disk_blocks(account, task_caps(&task));
+    let holding = limit();
+    let Ok(sleep) = slopos_fs::vfs::canon::canonicalise_at(b"/bin/sleep", b"/") else {
+        task_terminate(id);
+        return slopos_testing::fail!("no path for /bin/sleep");
+    };
+    super::narrow_authority_for_exec(&task, id, &sleep, true);
+    let gave_up = (limit(), mask_permits(task_caps(&task), Capability::Mount));
+    task_terminate(id);
+
+    let bounded = default_process_limit(ResourceKind::DiskBlocks);
+    if holding != Some(NO_LIMIT) || gave_up != (Some(bounded), false) {
+        return slopos_testing::fail!(
+            "block ceiling holding Mount {:?}, after an exec gave it up {:?}",
+            holding,
+            gave_up
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_the_block_ceiling_follows_the_raw_device_right,
     suite = exec
 );

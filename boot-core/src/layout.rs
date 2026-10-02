@@ -37,6 +37,9 @@ pub const NEW_ESP_BYTES: u64 = 260 * MIB;
 /// Two slots of the largest system, the tests kernel and base, with room.
 pub const BOOT_BYTES: u64 = 1024 * MIB;
 pub const CRASH_BYTES: u64 = 4 * MIB;
+/// The largest root the kernel mounts: its block numbers are 32 bits wide,
+/// and the profile's blocks are 4 KiB.
+pub const ROOT_MAX_BYTES: u64 = (1 << 44) - ALIGN_BYTES;
 
 /// UEFI paths on the ESP. Everything SlopOS writes to a shared ESP is under
 /// [`LOADER_DIR`].
@@ -49,6 +52,19 @@ pub const LOADER_CONFIG: &str = r"\EFI\SlopOS\limine.conf";
 /// shared one it belongs to whoever put a loader there.
 pub const FALLBACK_LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
 pub const FALLBACK_CONFIG: &str = r"\EFI\BOOT\limine.conf";
+
+/// Where the live system serves its install medium: the archive the loader
+/// carries as the module [`MEDIUM_MODULE`], beside the kernel and base it
+/// booted, which an install copies into every slot.
+pub const MEDIUM_DIR: &str = "/media/install";
+pub const MEDIUM_MODULE: &str = "install";
+pub const MEDIUM_KERNEL: &str = "boot/kernel.elf";
+pub const MEDIUM_BASE: &str = "boot/base.img";
+/// Limine, as the archive carries it for an ESP, with its licence.
+pub const MEDIUM_LOADER: &str = "boot/BOOTX64.EFI";
+pub const MEDIUM_LOADER_LICENSE: &str = "boot/LICENSE.limine";
+/// The third-party notices, which go beside the slots.
+pub const MEDIUM_NOTICE: &str = "boot/NOTICE.md";
 
 /// The description of SlopOS's firmware boot entry.
 pub const FIRMWARE_ENTRY: &str = "SlopOS";

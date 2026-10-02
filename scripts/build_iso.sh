@@ -6,8 +6,11 @@ set -euo pipefail
 # Usage: build_iso.sh <output> <build_dir> [cmdline]
 #
 # Environment:
-#   KERNEL_ELF - path to the kernel ELF to stage (required)
-#   LIMINE_DIR - path to Limine directory (default: third_party/limine)
+#   KERNEL_ELF      - path to the kernel ELF to stage (required)
+#   LIMINE_DIR      - path to Limine directory (default: third_party/limine)
+#   INITRAMFS_FILE  - the base, loaded as the module `initramfs`
+#   INSTALL_ARCHIVE - the install medium's archive (scripts/build_install_medium.sh),
+#                     loaded as the module `install` the installer reads
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -30,7 +33,10 @@ fi
 # Ensure Limine is available
 "$SCRIPT_DIR/ensure_limine.sh"
 
-STAGING="$(mktemp -d)"
+# Beside the output rather than in /tmp, which is often memory: an install
+# medium's payload is a toolchain.
+mkdir -p "$(dirname "$OUTPUT")"
+STAGING="$(mktemp -d "$(dirname "$OUTPUT")/.iso.XXXXXX")"
 TMP_OUTPUT="${OUTPUT}.tmp"
 trap 'rm -rf "$STAGING"; rm -f "$TMP_OUTPUT"' EXIT INT TERM
 
@@ -66,6 +72,15 @@ if [ -n "${INITRAMFS_FILE:-}" ] && [ -f "${INITRAMFS_FILE}" ]; then
     cp "${INITRAMFS_FILE}" "$ISO_ROOT/boot/initramfs.cpio"
     printf '    module_path: boot():/boot/initramfs.cpio\n' >> "$ISO_ROOT/boot/limine.conf"
     printf '    module_string: initramfs\n' >> "$ISO_ROOT/boot/limine.conf"
+fi
+if [ -n "${INSTALL_ARCHIVE:-}" ]; then
+    [ -f "$INSTALL_ARCHIVE" ] || { echo "No install archive at $INSTALL_ARCHIVE" >&2; exit 1; }
+    . "$SCRIPT_DIR/lib/bootdisk.sh"
+    bootdisk_layout
+    ln "$INSTALL_ARCHIVE" "$ISO_ROOT/boot/install.cpio" 2>/dev/null ||
+        cp "$INSTALL_ARCHIVE" "$ISO_ROOT/boot/install.cpio"
+    printf '    module_path: boot():/boot/install.cpio\n' >> "$ISO_ROOT/boot/limine.conf"
+    printf '    module_string: %s\n' "$MEDIUM_MODULE" >> "$ISO_ROOT/boot/limine.conf"
 fi
 
 cp "$LIMINE_DIR/limine-bios.sys" "$ISO_ROOT/boot/"

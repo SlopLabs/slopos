@@ -18,6 +18,17 @@ pub static mut environ: *mut *mut u8 = ptr::null_mut();
 static mut ENVIRON_ALLOC: *mut *mut u8 = ptr::null_mut();
 static mut ENVIRON_CAP: usize = 0;
 
+/// `getenv`, unless the process runs with `AT_SECURE`: a program started
+/// with authority its caller lacks takes nothing from the environment that
+/// caller wrote.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn secure_getenv(name: *const u8) -> *mut u8 {
+    if crate::auxv::tag(slopos_abi::auxv::AT_SECURE).is_some_and(|v| v != 0) {
+        return ptr::null_mut();
+    }
+    getenv(name)
+}
+
 /// Pointer to `name`'s value (the part after `=`), or null if not set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getenv(name: *const u8) -> *mut u8 {

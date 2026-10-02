@@ -56,9 +56,16 @@ pub fn resolve_flags_from(at_flags: u32, path: &[u8]) -> u32 {
     }
 }
 
+/// `O_DIRECTORY` with `O_NOFOLLOW` refuses a final link rather than opening
+/// what it names, which is what keeps a directory walk from being steered off
+/// its tree by a link swapped in underneath it.
 pub fn open_resolve_flags(open_flags: u32, path: &[u8]) -> u32 {
     if open_flags & O_DIRECTORY != 0 {
-        RESOLVE_MUST_BE_DIR
+        if open_flags & O_NOFOLLOW != 0 && !names_directory(path) {
+            RESOLVE_MUST_BE_DIR | RESOLVE_NOFOLLOW_FINAL
+        } else {
+            RESOLVE_MUST_BE_DIR
+        }
     } else if open_flags & O_NOFOLLOW != 0 {
         resolve_flags_from(AT_SYMLINK_NOFOLLOW, path)
     } else {

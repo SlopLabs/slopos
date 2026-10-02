@@ -19,6 +19,7 @@ where the tree goes that the manifest does not name, or that is not the kind
 the manifest names, refuses the install before anything is written.
 
     identity HOST
+    manifest HOST
     installed MANIFESTS NAME
     exists IMAGE PATH
     install IMAGE HOST GUEST [--manifests DIR --name NAME]
@@ -323,8 +324,8 @@ def plan(image, host, guest, name):
         else:
             creates.append(f'symlink "{path}" "{target}"')
 
-    entries = [f"{k} {st.st_size if k == 'f' else '-'} {rel}" for k, _, rel, _, st in tree]
-    lines = [f"identity {identity(host)}"] + entries
+    lines = manifest(host, tree)
+    entries = lines[1:]
     during = [f"identity {UNFINISHED}"] + sorted(set(entries) | {f"{k} - {r}" for k, r in old})
     if copy:
         for a in ancestors(copy):
@@ -346,6 +347,14 @@ def plan(image, host, guest, name):
             + f"\n{unrecorded}Move it aside in the guest, or discard the root with `just reset root`."
         )
     return removes + creates, (during, lines), copy, manifest_path
+
+
+def manifest(host, tree=None):
+    """The manifest an install of `host` records, as lines; what the
+    installer finds in the install medium beside the tree it copies."""
+    tree = walk(host) if tree is None else tree
+    entries = [f"{k} {st.st_size if k == 'f' else '-'} {rel}" for k, _, rel, _, st in tree]
+    return [f"identity {identity(host)}"] + entries
 
 
 def write_manifest(path, lines):
@@ -431,7 +440,7 @@ def _self_test(work):
     os.symlink("tool", os.path.join(tree, "bin/alias"))
     install(image, tree, "/usr/local", name)
     assert kind("/usr/local/bin/tool") == "f" and kind("/usr/local/bin/alias") == "l"
-    assert read(f"{IMAGE_MANIFESTS}/usr_local").startswith(b"identity ")
+    assert read(f"{IMAGE_MANIFESTS}/usr_local") == "".join(f"{x}\n" for x in manifest(tree)).encode()
     assert installed(manifests, "usr_local") == identity(tree)
     sound()
 
@@ -535,6 +544,8 @@ def main(argv):
             self_test()
         elif len(argv) == 2 and argv[0] == "identity":
             print(identity(argv[1]))
+        elif len(argv) == 2 and argv[0] == "manifest":
+            print("\n".join(manifest(argv[1])))
         elif len(argv) == 3 and argv[0] == "installed":
             print(installed(argv[1], argv[2]))
         elif len(argv) == 3 and argv[0] == "exists":

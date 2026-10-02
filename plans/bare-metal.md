@@ -44,18 +44,15 @@ its firmware entry, `cachyos`, is the only one.
   disk's crash partition, and the next boot moves it to `/var/log/crash/`.
   Under `panic=reboot` on bare metal the panic stays on screen for ten seconds
   before the reset.
+- The ISO is an install medium: `/bin/installer` lays SlopOS out on a disk,
+  beside another system or over it, from what the loader brought, and every
+  base carries e2fsprogs.
 
-Nothing reaches the network, and the guest cannot make a disk:
+Nothing reaches the network:
 
 - **Network.** The only NIC driver is virtio-net, and it starts the DHCP
   client itself. `net/src/ipv4.rs` sends a resolved neighbour's queued packets
   through a hard-coded `DevIndex(1)`.
-- **Making a disk.** The host makes every root and every boot disk: `mke2fs`
-  in the profile, then `debugfs` writes the seals
-  (`scripts/build_fs_image.sh`); `sfdisk`, `mkfs.fat` and mtools lay out the
-  boot disk (`scripts/build_bootdisk.sh`). The guest has no mkfs, fsck or
-  resize tool, nothing that writes a partition table, and `fat-core` creates
-  8.3 names only, so it cannot write `\EFI\SlopOS\limine.conf`.
 
 ## Phases
 
@@ -68,7 +65,7 @@ commits of its own.
 | 2. ext4 — **done** | — | every image the tree builds is ext4 |
 | 3. A boot chain that shares a disk — **done** | 1 | the A/B loop on the new partition layout |
 | 4. A crash record — **done** | 1, 3 | a slot that panics leaves the panic behind |
-| 5. Installer and install medium | 1, 2, 3 | **milestone 1:** SlopOS installed beside CachyOS, self-hosting offline |
+| 5. Installer and install medium — **done** | 1, 2, 3 | **milestone 1:** SlopOS installed beside CachyOS, self-hosting offline |
 | 6. Wired network | — | **milestone 2:** git and crates.io over the RJ45 port |
 | 7. Full speed | 5 | a native build measured, and made faster if the CPU clock is the cause |
 
@@ -146,74 +143,32 @@ build on are under Decided.
 Left for the laptop, which only the user's run grades: a panic written through
 the NV3's panic queue, and the hold on its screen.
 
-### Phase 5: Installer and install medium (milestone 1)
+### Phase 5: Installer and install medium (milestone 1) — done
 
-**The medium** is the ISO, flashed to a USB stick.
+Built: the install medium, an `install` module the live ISO carries
+(`scripts/build_install_medium.sh`) — Limine for the ESP, the source of the
+base's recipe programs, and with `PAYLOAD=1` the toolchain and a `--vendored`
+clone of `HEAD` — which the kernel serves at `/media/install` beside the
+kernel and base Limine booted, a second `basefs` instance; e2fsprogs as an
+unpatched recipe, its six programs in every base at `/sbin`, and the slibc it
+needed; `/bin/installer`, every answer also a flag, with the GPT writer and
+the placement plan in `boot-core`, long names in `fat-core` and the host-tree
+rule in `tree-core`; and `just test-installer`, which installs from a USB
+stick onto a blank disk, beside another system and over an existing
+partition, takes each disk once around `selfhost.sh install` with the stick
+gone, and reinstalls over the blank one keeping its root. `AGENTS.md`
+describes all of it; the decisions later phases build on are under Decided.
 
-- Limine loads the kernel and the live base into RAM.
-- When the ISO is built with the payload knob on `just iso`, Limine also loads
-  a second module, `install`. It is a newc archive of:
-  - `/usr/local`: the toolchain, 835 MB here;
-  - `/src/slopos`: a `--vendored` clone, with the llvm-project tarball.
-- The kernel serves the payload read-only at `/media/install`, in place where
-  Limine put it, as a second instance of `fs/src/basefs.rs`.
-- A Limine module is the only way in. The kernel has no USB driver, so once it
-  runs it cannot read the stick. This is the `copytoram` route of Linux live
-  ISOs.
-- An ISO built without the payload installs the system alone.
+Left for the laptop, which only the user's run grades: SlopOS installed beside
+CachyOS from the stick (`PAYLOAD=1 just iso`), booted from the NV3, and
+`selfhost.sh install`, `bootctl reboot` and `bootctl commit` run there with
+no network.
 
-**e2fsprogs** becomes a recipe and ships in the base: `mke2fs`, `e2fsck`,
-`resize2fs`, `tune2fs`, `debugfs` and `dumpe2fs`.
-
-- The installer formats with it.
-- A damaged root is repaired from the stick.
-- The guest's base build takes e2fsprogs from `/usr/local`, as it takes clang
-  from there. Rebuilding recipes in the guest is Phase 2 of
-  `plans/self-hosting.md`.
-
-**The installer** is a text program run from the live system's terminal.
-Every answer is also a flag, so the QEMU check drives the same program a
-person runs. It works in this order:
-
-1. The user picks a disk and a mode:
-   - erase the whole disk;
-   - install into a free region;
-   - reuse an existing partition the user names.
-
-   Nothing else on the disk is written. Shrinking another OS's filesystem is
-   done from that OS.
-2. Write the GPT: partitions aligned to 1 MiB, fresh GUIDs from `getrandom`,
-   primary and backup tables written together.
-3. Re-read the partition table.
-4. Format the new partitions: `fat-core` for FAT32, `mke2fs` with the feature
-   profile for the root. `fat-core` learns to create long names first:
-   `\EFI\SlopOS` is mixed case and `limine.conf` is no 8.3 name.
-5. Seal the base mount points.
-6. Copy the payload, and record a manifest under `/var/lib/slopos/trees`. The
-   rule is the one host trees follow, so a newer stick updates `/usr/local`
-   without touching what the user added.
-7. Write both slots, and `limine.conf` from `boot_core::limine`: `cmdline:
-   root=PARTUUID=…`, no QEMU `resolution:` line, a timeout that shows the
-   menu, and an `efi_boot_entry` for each option `BootOrder` lists that
-   `limine::offered_title` accepts given all of them, leaving out one that
-   `limine::collide`s with an entry already in the menu. It
-   goes to `\EFI\SlopOS\`, and on an ESP the installer created to the
-   removable-media path as well.
-8. Set `LoaderEntryDefault`.
-9. Run `e2fsck -fn` on the new root.
-10. Register the firmware entry, last (`boot_disk::register_firmware_entry`),
-    first in `BootOrder` only if the user asks.
-
-The installer holds `Mount`, `Power` and the installer's role,
-`TASK_FLAG_INSTALL`, by program identity; the role confers `BootEntry`, and
-`Seal` joins it here.
-
-The clone's remotes are set to whatever the user names: GitHub over HTTPS, or
-the development machine. None point at SLIRP.
-
-**Done when** `just test-installer` passes its three disks, and on the laptop
-SlopOS installs beside CachyOS from the stick, boots from the NV3, and runs
-`selfhost.sh install`, `bootctl reboot` and `bootctl commit` with no network.
+Left open: a clean file page a process has mapped is pinned until unmapped,
+so the file map's per-process share, an eighth of memory, bounds what one
+link may map; the debug tests kernel's link outgrew 4 GiB's, and the
+self-hosting checks boot at 6 GiB. Reclaiming such pages under pressure is
+what lets that bound go.
 
 ### Phase 6: Wired network (milestone 2)
 
@@ -265,14 +220,17 @@ the kernel does not, just as with a stick. Three disks are graded:
 - **A blank disk,** installed with erase-disk.
 - **A disk holding a foreign OS,** installed into free space. The disk has an
   ESP with `\EFI\other\`, one foreign data partition and a foreign `Boot####`
-  entry. Afterwards the foreign partition and the foreign ESP files are
-  byte-identical, and the foreign firmware entry is still in `BootOrder`. The
+  entry, which the live system registers before it installs. Afterwards the
+  foreign partition and the foreign ESP files are byte-identical, the foreign
+  firmware entry is still in `BootOrder` and Limine's menu offers it. The
   foreign entry names a partition on the disk QEMU boots by `bootindex`: OVMF
   deletes an `HD()` entry it cannot match to such a device.
 - **An existing partition,** reused as the root.
 
-Each run then boots from the disk with the ISO detached, and goes around
-`selfhost.sh install` once. The host holds the root to `e2fsck -fn`.
+Each run then boots from the disk with the ISO detached, a second QEMU on the
+varstore the first left, and goes around `selfhost.sh install` once. The host
+holds the root to `e2fsck -fn`. `INSTALLER_PAYLOAD=0` installs without the
+toolchain and clones a slot where it would build one.
 
 **Crash record.** In `just test-install`, a slot booted with `panic.boot=on`
 falls back to the committed slot, and the fallback boot finds the panic in
@@ -437,6 +395,60 @@ falls back to the committed slot, and the fallback boot finds the panic in
   links. Probe order is not stable across machines or boots.
 - **The install payload is a Limine module** until a USB mass-storage driver
   exists, and the install is offline: no package host.
+- **The live ISO is always an install medium.** `just iso` puts the
+  `install` module on it whether or not the payload comes, since the
+  installer needs Limine for the ESP; the payload alone is the knob, and
+  `PAYLOAD=1` builds the release kernel the installed system builds itself
+  with. The suite's ISOs carry none but `test-installer`'s. The kernel serves
+  beside the medium the kernel and base Limine booted, so an install puts on
+  the disk exactly the system it runs. A medium carries the tarball of every
+  recipe the base takes programs from and the scripts that build them, and a
+  payload's clone every recipe's, so the source of the GPL programs it
+  distributes travels with them.
+- **e2fsprogs is handed `Mount`, never raised to it, and only in the base.**
+  `/sbin`'s six programs keep the raw-device right as far as their spawner
+  holds it (a grant's `delegated` flags), so the installer runs them with it
+  and the shell, or a script it starts, cannot format a disk through them; no
+  copy a root holds gets anything. `AT_SECURE`, which that brings, makes them
+  not dumpable, as a setuid program on Linux is; they read their configuration
+  and undo directory with a plain `getenv`, so the installer runs them with an
+  emptied environment, the configuration named at a path in the sealed base
+  that holds none, and no undo file.
+- **The raw-device right lifts the block ceiling.** A process holding
+  `Mount` may write any disk beneath every filesystem, so the per-process
+  `DiskBlocks` ceiling bounds nothing of it, as `CAP_SYS_RESOURCE` overrides a
+  Linux quota; the ceiling follows the right at spawn, fork and `execve`. The
+  installer copies a gigabyte and more into the root in one process.
+- **A base's recipe programs come from a prefix:** the recipes' on the host,
+  `/usr/local` in the guest, so a guest builds the base with the e2fsprogs its
+  toolchain carries. A recipe of programs alone installs no library, so its
+  static archives and headers reach neither another recipe nor the target
+  sysroot.
+- **An installed table is written the other copy first:** the backup, or
+  the primary when the table was read from the backup, each piece behind a
+  flush, so a reader finds the old table or the new one whole at every step.
+  An erase writes its protective MBR before either copy, and a GPT behind an
+  MBR that does not protect it counts as MBR, so an erase cut short leaves a
+  disk only erase takes rather than one other systems read as MBR. The first
+  MiB of every new partition is zeroed before the table names it, so one an
+  install cut short holds no stale volume. A reuse refuses a disk that holds a
+  SlopOS root elsewhere. New partitions go into one free region,
+  ESP, boot, root and crash in that order on 1 MiB boundaries, the largest
+  region unless one is named; a root stops at 16 TiB. A disk SlopOS is already
+  on takes a reinstall over its own partitions (reuse), not a second set.
+- **The installed root is the host's root, made by the guest.** The same
+  directories, the base mount points sealed (the installer's role carries
+  `Seal`), `mke2fs` in the profile with the inode tables left for the kernel to
+  initialise as each group is first used, as e2fsprogs does off Linux, and a
+  64 MiB journal. `/usr/local` follows the host-tree rule (`tree-core`), from
+  the manifest `fs_tree.py` makes for the payload, so a newer stick replaces
+  exactly what an older one installed; `/src` is seeded once. An installed
+  system boots `panic=reboot`, so a tried slot that panics falls back.
+- **FAT names as the specification has Windows make them.** An 8.3 name whose
+  base and extension are each one case is a short entry alone; any other gets
+  long-name entries before an alias, which takes a numeric tail only when the
+  name does not fit 8.3 or lost a character, and the short entry is written
+  last, behind a flush.
 - **The verified image is not a bare-metal root.** The system already belongs
   to the boot slot: kernel and base, read-only. On bare metal the system's
   integrity comes from Limine's BLAKE2B hash on each loaded file under Secure
@@ -490,8 +502,9 @@ falls back to the committed slot, and the fallback boot finds the panic in
 
 - Everything in `plans/self-hosting.md`'s Constraints applies.
 - The installer writes nothing outside the partitions it created or was given,
-  and nothing on a shared ESP outside `\EFI\SlopOS\`. The one exception is the
-  firmware entry, written last.
+  and nothing on a shared ESP outside `\EFI\SlopOS\`. The exceptions are UEFI
+  variables: the Boot Loader Interface's `LoaderEntryDefault` (and clearing a
+  SlopOS `LoaderEntryOneShot`), and the firmware entry, written last.
 - No ext4, jbd2, NVMe or NIC driver code or prose from Linux. Format and
   register facts come from the specifications and from kernel.org's layout
   documentation.

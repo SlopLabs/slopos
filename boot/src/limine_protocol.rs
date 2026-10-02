@@ -398,6 +398,22 @@ pub fn initramfs() -> Option<&'static [u8]> {
     initramfs_module().map(|module| module.data())
 }
 
+/// Bytes of the module `limine.conf` names with `module_string: <string>`.
+pub fn module(string: &str) -> Option<&'static [u8]> {
+    MODULES_REQUEST
+        .response()?
+        .modules()
+        .iter()
+        .find(|module| module.cmdline() == string)
+        .map(|module| module.data())
+}
+
+/// The kernel's own ELF file as the loader read it, kept for the kernel's
+/// lifetime as its modules are.
+pub fn kernel_file() -> Option<&'static [u8]> {
+    Some(KERNEL_FILE_REQUEST.response()?.executable_file().data())
+}
+
 fn initramfs_module() -> Option<&'static LimineFile> {
     let modules = MODULES_REQUEST.response()?.modules();
     modules

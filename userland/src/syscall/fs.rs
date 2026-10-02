@@ -9,7 +9,7 @@ use super::raw::{syscall2, syscall3};
 use slopos_abi::fs::{
     AT_FDCWD, DT_BLK, DT_CHR, DT_DIR, DT_LNK, DT_REG, FS_LIST_CURSOR_END, FS_TYPE_BLOCKDEV,
     FS_TYPE_CHARDEV, FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_SYMLINK, FS_TYPE_UNKNOWN,
-    O_DIRECTORY, O_RDONLY, USER_NAME_MAX, UserFsEntry,
+    O_DIRECTORY, O_NOFOLLOW, O_RDONLY, USER_NAME_MAX, UserFsEntry,
 };
 use slopos_abi::syscall::{
     SEEK_SET, TIOCGPTPEER, TIOCGSID, TIOCGWINSZ, TIOCSCTTY, TIOCSWINSZ, UserPollFd, UserTermios,
@@ -36,6 +36,19 @@ pub fn open_path(path: *const c_char, flags: u32) -> SyscallResult<super::OwnedF
 #[inline(always)]
 pub fn open_cstr(path: &CStr, flags: u32) -> SyscallResult<super::OwnedFd> {
     open_path(path.as_ptr(), flags)
+}
+
+/// Open `name` in the directory `dir` as a directory, refusing a link there.
+pub fn open_dir_nofollow(dir: RawFd, name: &CStr) -> SyscallResult<super::OwnedFd> {
+    Sys::openat(
+        dir,
+        name.as_ptr().cast(),
+        (O_RDONLY | O_DIRECTORY | O_NOFOLLOW) as i32,
+        0,
+    )
+    // SAFETY: fd is a valid descriptor just returned by the kernel.
+    .map(|fd| unsafe { super::OwnedFd::from_raw(fd as RawFd) })
+    .map_err(Into::into)
 }
 
 /// Escape hatch for well-known fds (0/1/2) and fds taken out of an `OwnedFd`;
@@ -416,6 +429,20 @@ pub fn set_inode_flags(fd: RawFd, flags: u32) -> SyscallResult<()> {
             fd as u64,
             u64::from(slopos_abi::fs::inode_flags_ioctl::FS_IOC_SETFLAGS),
             (&value as *const u32) as u64,
+        )
+    };
+    demux(result).map(|_| ())
+}
+
+/// Re-read the partition table of the whole disk on `fd` (BLKRRPART ioctl).
+#[inline(always)]
+pub fn reread_partitions(fd: RawFd) -> SyscallResult<()> {
+    let result = unsafe {
+        syscall3(
+            SYSCALL_IOCTL,
+            fd as u64,
+            u64::from(slopos_abi::fs::block_ioctl::BLKRRPART),
+            0,
         )
     };
     demux(result).map(|_| ())

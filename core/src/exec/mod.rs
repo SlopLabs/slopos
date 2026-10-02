@@ -323,26 +323,37 @@ pub fn spawn_program_with_cwd(
         // refused every privileged bit the caller asked for, so flags follow
         // the program, not the requester.
         let (mut granted_flags, mut granted_priority) = grants::grant_for(normalized_path);
+        let delegated = if program.named_directly(path, cwd) {
+            grants::delegated_for(normalized_path)
+        } else {
+            0
+        };
 
         // A raise needs `Launch`; an ordinary spawn raises nothing and needs
         // no right. Not an intersection with the spawner's own authority: the
         // shell holds no display authority, so `/bin/roulette` could not draw.
         // A spawner that may not raise gets the image ungranted, not a refusal:
         // `/bin/sh` and every `#!/bin/sh` script load the granted shell.
-        if granted_flags != 0 {
-            let spawner_may_launch = match task_find_by_id(parent_task_id) {
-                Some(parent) => slopos_ostd::authority::mask_permits(
-                    slopos_ostd::task::ops::task_caps(&parent),
+        if granted_flags != 0 || delegated != 0 {
+            // No parent task: `launch_init`, the kernel-only root. That is
+            // exactly the raise `Launch` exists to bound, performed by the one
+            // caller that cannot be userland.
+            let spawner_caps = task_find_by_id(parent_task_id)
+                .map(|parent| slopos_ostd::task::ops::task_caps(&parent));
+            let spawner_may_launch = spawner_caps.is_none_or(|caps| {
+                slopos_ostd::authority::mask_permits(
+                    caps,
                     slopos_ostd::authority::Capability::Launch,
-                ),
-                // No parent task: `launch_init`, the kernel-only root. That is
-                // exactly the raise `Launch` exists to bound, performed by the
-                // one caller that cannot be userland.
-                None => true,
-            };
+                )
+            });
             if !spawner_may_launch {
                 granted_flags = 0;
                 granted_priority = None;
+            }
+            let handed = slopos_ostd::authority::caps_from_task_flags(delegated)
+                & !slopos_ostd::authority::caps_from_task_flags(0);
+            if spawner_caps.is_none_or(|caps| handed & !caps == 0) {
+                granted_flags |= delegated;
             }
         }
 
@@ -433,6 +444,11 @@ pub fn spawn_program_with_cwd(
         // above -- the single raise site. Stamped on the child before it is
         // findable, so no other CPU can observe it with an unset mask.
         let child_caps = slopos_ostd::authority::caps_from_task_flags(flags);
+        if let Some(Some(account)) =
+            spawn.with_child(|child| child.process().map(|process| process.account()))
+        {
+            slopos_ostd::process::quota::fit_disk_blocks(account, child_caps);
+        }
 
         let Some((fg_handoff, displaced_group)) = spawn.with_child(|child| {
             slopos_ostd::task::ops::task_set_caps(child, child_caps);
@@ -563,6 +579,41 @@ pub fn do_exec(
         stack_ptr_out,
         tls_tp_out,
     )
+}
+
+/// `execve`'s half of the grant table: the caller keeps only what `image` is
+/// granted, and what it delegates when the caller `named_directly` it, and
+/// the block ceiling follows what it keeps.
+#[inline(never)]
+pub fn narrow_authority_for_exec(
+    task: &slopos_sched::task_struct::Task,
+    task_id: u32,
+    image: &CanonPath,
+    named_directly: bool,
+) {
+    let image = image.as_bytes();
+    let (granted_flags, _) = grants::grant_for(image);
+    let delegated = if named_directly {
+        grants::delegated_for(image)
+    } else {
+        0
+    };
+    let granted = slopos_ostd::authority::caps_from_task_flags(
+        granted_flags | delegated | TASK_FLAG_USER_MODE,
+    );
+    let before = slopos_ostd::task::ops::task_caps(task);
+    let after = slopos_ostd::task::ops::task_restrict_caps(task, granted);
+    if let Some(process) = task.process() {
+        slopos_ostd::process::quota::fit_disk_blocks(process.account(), after);
+    }
+    if after != before {
+        slopos_ostd::klog_debug!(
+            "exec: task {} authority {:#x} -> {:#x}",
+            task_id,
+            before,
+            after,
+        );
+    }
 }
 
 /// `secure` is whether this exec conferred a grant, which is what the image

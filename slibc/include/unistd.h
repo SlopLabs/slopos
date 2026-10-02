@@ -123,6 +123,7 @@ long syscall(long num, ...);
 unsigned int sleep(unsigned int seconds);
 int usleep(useconds_t usec);
 pid_t getsid(pid_t pid);
+int daemon(int nochdir, int noclose);
 int execlp(const char *file, const char *arg0, ...);
 int execl(const char *path, const char *arg0, ...);
 int execle(const char *path, const char *arg0, ...);

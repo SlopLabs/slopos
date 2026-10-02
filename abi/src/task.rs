@@ -281,12 +281,12 @@ pub const TASK_FLAG_LAUNCH: u16 = 0x2000;
 pub const TASK_FLAG_MOUNT: u16 = 0x4000;
 
 /// The installer's role: register a loader with the firmware, as a `Boot####`
-/// entry ordered in `BootOrder`. It adds those variables to what `Power`, which
-/// the UEFI variable calls are gated on, already reaches, so a holder holds
-/// both.
+/// entry ordered in `BootOrder`, and seal the mount points a new root carries
+/// the base over. It adds those variables to what `Power`, which the UEFI
+/// variable calls are gated on, already reaches, so a holder holds both.
 ///
 /// The last bit of the flag word. Conferred by program identity on
-/// `/bin/install_test`, which registers an entry as the installer will;
+/// `/bin/installer` and the two tests that drive what it does;
 /// `TASK_FLAG_SYSTEM` does not imply it, since nothing init does writes a
 /// firmware entry.
 pub const TASK_FLAG_INSTALL: u16 = 0x8000;

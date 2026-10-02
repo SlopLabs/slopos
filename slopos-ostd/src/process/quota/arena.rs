@@ -537,11 +537,25 @@ pub fn account_release_by_slot(slot: u32) {
     ));
 }
 
-/// Set the ceiling for one kind. Boot and test-fixture use only.
+/// Set the ceiling for one kind: the limits boot derives, `setrlimit`'s
+/// lowering, the block ceiling the raw-device right lifts, and test fixtures.
 pub fn set_limit(id: AccountId, kind: ResourceKind, limit: u32) {
     if let Some(row) = row_for(id) {
         row.limit[kind.index()].store(limit, Ordering::Release);
     }
+}
+
+/// Hold `id` to the per-process block ceiling unless `caps` carry the
+/// raw-device right, whose holder may write any disk beneath every
+/// filesystem anyway; the installer fills a whole root in one process.
+pub fn fit_disk_blocks(id: AccountId, caps: u64) {
+    let raw_device = crate::authority::mask_permits(caps, crate::authority::Capability::Mount);
+    let limit = if raw_device {
+        NO_LIMIT
+    } else {
+        process_default_limit(ResourceKind::DiskBlocks)
+    };
+    set_limit(id, ResourceKind::DiskBlocks, limit);
 }
 
 /// Debit `n` units of `A` from `account` and every ancestor.

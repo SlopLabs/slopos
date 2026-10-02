@@ -503,11 +503,13 @@ pub const fn caps_from_task_flags(flags: u16) -> u64 {
         mask |= Capability::Mount.bit();
     }
     if flags & TASK_FLAG_INSTALL != 0 {
-        mask |= Capability::BootEntry.bit();
+        // The installer seals the mount points a new root carries the base
+        // over.
+        mask |= Capability::BootEntry.bit() | Capability::Seal.bit();
     }
     if flags & TASK_FLAG_SYSTEM != 0 {
-        // No flag grants the clock or the seal on a program identity, so init
-        // is the only principal that moves either.
+        // No flag grants the clock on a program identity, so init is the only
+        // principal that moves it.
         mask |= Capability::ProcSignal.bit()
             | Capability::TestHarness.bit()
             | Capability::Clock.bit()

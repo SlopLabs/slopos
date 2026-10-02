@@ -11,6 +11,9 @@
 extern "C" {
 #endif
 
+#define PR_GET_DUMPABLE (3)
+#define PR_SET_DUMPABLE (4)
+
 int prctl(int option, ...);
 
 #ifdef __cplusplus

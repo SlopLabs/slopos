@@ -2,6 +2,7 @@ use core::ffi::c_void;
 
 pub mod case;
 pub mod convert;
+pub mod libgen;
 pub(crate) mod vector;
 
 pub fn u_memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {

@@ -23,20 +23,17 @@
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 
 use slopos_boot_core::crash::Summary;
 use slopos_boot_core::{bli, layout};
-use slopos_fat_core::{Device, Error as FatError, Volume};
+use slopos_fat_core::{Error as FatError, Volume};
 
 use crate::apps::coreutils::time::utc_from_epoch;
-use crate::boot_disk::{BootDisk, loader_entries, loader_var, set_loader_var};
+use crate::boot_disk::{BlockFile, BootDisk, loader_entries, loader_var, open_fat, set_loader_var};
 use crate::syscall::core as sys_core;
 use crate::syscall::process;
 
-/// The block size a regular file standing in for a partition is addressed in.
-const IMAGE_FILE_BLOCK: u32 = 512;
 const CRASH_STORE: &str = "/dev/crash";
 const CRASH_LOG: &str = "/var/log/crash";
 const CRASH_LOG_KEPT: usize = 64;
@@ -50,50 +47,6 @@ const CRASH_LOG_BOUNDS: &str = "bounds";
 const SLOT_STATE: &str = "/var/lib/slopos/slots";
 const CPIO_NEWC_MAGIC: &[u8] = b"070701";
 const CPIO_TRAILER: &[u8] = b"TRAILER!!!\0";
-
-struct BlockFile {
-    file: File,
-    size: u64,
-    block: u32,
-}
-
-impl Device for BlockFile {
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), FatError> {
-        self.file
-            .read_exact_at(buf, offset)
-            .map_err(|_| FatError::Io)
-    }
-
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), FatError> {
-        self.file
-            .write_all_at(buf, offset)
-            .map_err(|_| FatError::Io)
-    }
-
-    fn flush(&mut self) -> Result<(), FatError> {
-        self.file.sync_data().map_err(|_| FatError::Io)
-    }
-
-    fn size(&self) -> u64 {
-        self.size
-    }
-
-    fn block_size(&self) -> u32 {
-        self.block
-    }
-}
-
-fn open_volume(path: &str) -> Result<Volume<BlockFile>, String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("{path}: {e}"))?;
-    let size = file.metadata().map_err(|e| format!("{path}: {e}"))?.len();
-    let block = crate::syscall::fs::block_size(file.as_raw_fd()).unwrap_or(IMAGE_FILE_BLOCK);
-    Volume::open(BlockFile { file, size, block })
-        .map_err(|e| format!("{path}: not a FAT32 volume ({e:?})"))
-}
 
 fn boot_partition(named: Option<&str>) -> Result<String, String> {
     match named {
@@ -158,7 +111,7 @@ fn status(boot: &str) -> Result<(), String> {
     }
     println!("oneshot: {}", show(loader.one_shot.as_deref()));
     println!("entries: {}", loader.entries.join(" "));
-    let mut volume = open_volume(boot)?;
+    let mut volume = open_fat(boot)?;
     if let Ok(slots) = volume.list(layout::SLOTS_DIR) {
         for slot in slots.iter().filter(|e| e.is_dir) {
             let mut size = |file: &str| {
@@ -261,7 +214,7 @@ fn install(boot: &str, slot: &str, kernel_path: &str, base_path: &str) -> Result
     if !is_base_image(&base) {
         return Err(format!("{base_path}: not a newc cpio archive"));
     }
-    let mut volume = open_volume(boot)?;
+    let mut volume = open_fat(boot)?;
     install_slot(&mut volume, slot, &kernel, &base)?;
     println!(
         "installed slot {slot} (entry {}{slot})",
@@ -274,7 +227,7 @@ fn clone_slot(boot: &str, from: &str, to: &str) -> Result<(), String> {
     if !layout::valid_slot(from) {
         return Err(format!("slot '{from}': 1-8 lowercase letters or digits"));
     }
-    let mut volume = open_volume(boot)?;
+    let mut volume = open_fat(boot)?;
     let mut read = |file: &str| {
         let path = format!("{}/{from}/{file}", layout::SLOTS_DIR);
         volume

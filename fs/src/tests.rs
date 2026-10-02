@@ -2559,7 +2559,7 @@ pub fn test_basefs_serves_an_archive_in_place() -> TestResult {
     use crate::vfs::{FileSystem, VfsError};
     let base = BaseFs::new();
 
-    if base.install(&BASE_SAMPLE) != Ok(8) {
+    if base.install(&BASE_SAMPLE, &[]) != Ok(8) {
         return slopos_testing::fail!("the sample did not index as eight entries");
     }
     let (Ok(bin), Ok(tool), Ok(doc)) = (
@@ -2611,14 +2611,130 @@ pub fn test_basefs_serves_an_archive_in_place() -> TestResult {
 
 /// An archive whose path climbs out with `..` is no base.
 pub fn test_basefs_refuses_a_climbing_path() -> TestResult {
-    match crate::basefs::BaseFs::new().install(&CLIMBING) {
+    match crate::basefs::BaseFs::new().install(&CLIMBING, &[]) {
         Err(CpioError::BadPath) => TestResult::Pass,
         other => slopos_testing::fail!("installed a climbing path: {:?}", other),
     }
 }
 
+/// The install medium: files the loader loaded on their own, served beside
+/// the archive's and under directories it does not hold, and never over a
+/// file it does.
+pub fn test_basefs_serves_files_beside_the_archive() -> TestResult {
+    use crate::basefs::BaseFs;
+    use crate::vfs::FileSystem;
+    static KERNEL: [u8; 4] = *b"\x7fELF";
+    let medium = BaseFs::new();
+    if medium.install(&BASE_SAMPLE, &[(b"boot/kernel.elf", &KERNEL)]) != Ok(10) {
+        return slopos_testing::fail!("the sample and one file did not index as ten entries");
+    }
+    let mut buf = [0u8; 8];
+    let read = medium
+        .resolve(b"/boot/kernel.elf")
+        .and_then(|inode| medium.read(inode, 0, &mut buf));
+    if read != Ok(4) || buf[..4] != KERNEL || medium.resolve(b"/bin/tool").is_err() {
+        return slopos_testing::fail!("the medium does not serve both the file and the archive");
+    }
+    match BaseFs::new().install(&BASE_SAMPLE, &[(b"bin/tool", &KERNEL)]) {
+        Err(CpioError::BadPath) => TestResult::Pass,
+        other => slopos_testing::fail!("a file replaced the archive's: {:?}", other),
+    }
+}
+
+/// More entries than one chunk of the index holds, alternating between two
+/// directories so their by-parent runs fill and split in the middle.
+const MANY: usize = 5000;
+static MANY_PATHS: [[u8; 6]; MANY] = many_paths();
+static MANY_FILES: [(&[u8], &[u8]); MANY] = many_files(&MANY_PATHS);
+
+const fn many_paths() -> [[u8; 6]; MANY] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [[0u8; 6]; MANY];
+    let mut i = 0;
+    while i < MANY {
+        out[i] = [
+            if i % 2 == 0 { b'a' } else { b'b' },
+            b'/',
+            HEX[(i >> 12) & 15],
+            HEX[(i >> 8) & 15],
+            HEX[(i >> 4) & 15],
+            HEX[i & 15],
+        ];
+        i += 1;
+    }
+    out
+}
+
+const fn many_files(paths: &'static [[u8; 6]; MANY]) -> [(&'static [u8], &'static [u8]); MANY] {
+    let mut out: [(&'static [u8], &'static [u8]); MANY] = [(b"", b""); MANY];
+    let mut i = 0;
+    while i < MANY {
+        out[i] = (&paths[i], b"x");
+        i += 1;
+    }
+    out
+}
+
+/// A medium of thousands of entries indexes without one allocation
+/// growing with it, and still resolves every path and lists each directory in
+/// order across the pages `getdents` reads it in.
+pub fn test_basefs_indexes_more_than_one_chunk() -> TestResult {
+    use crate::basefs::BaseFs;
+    use crate::vfs::FileSystem;
+    /// Entries one `getdents` buffer takes.
+    const PAGE: usize = 100;
+    let medium = BaseFs::new();
+    if medium.install(&BASE_SAMPLE, &MANY_FILES) != Ok(8 + 2 + MANY) {
+        return slopos_testing::fail!("the sample and {} files did not index", MANY);
+    }
+    for (path, _) in MANY_FILES.iter() {
+        let mut absolute = [b'/'; 7];
+        absolute[1..].copy_from_slice(path);
+        if !matches!(medium.resolve(&absolute).and_then(|i| medium.stat(i)), Ok(s) if s.size == 1) {
+            return slopos_testing::fail!("a path the medium holds did not resolve");
+        }
+    }
+    for dir in [&b"/a"[..], b"/b"] {
+        let Ok(inode) = medium.resolve(dir) else {
+            return slopos_testing::fail!("a directory the files imply did not resolve");
+        };
+        let mut seen = 0;
+        let mut previous = [0u8; 4];
+        let mut ordered = true;
+        loop {
+            let mut room = PAGE;
+            let page = medium.readdir(inode, seen, &mut |name, _, _| {
+                if room == 0 {
+                    return false;
+                }
+                room -= 1;
+                if name.len() == 4 {
+                    ordered &= name > &previous[..];
+                    previous.copy_from_slice(name);
+                }
+                true
+            });
+            match page {
+                Ok(0) => break,
+                Ok(n) => seen += n,
+                Err(_) => return slopos_testing::fail!("listing a directory failed"),
+            }
+        }
+        if seen != 2 + MANY / 2 || !ordered {
+            return slopos_testing::fail!(
+                "a directory listed {} entries, in order: {}",
+                seen,
+                ordered
+            );
+        }
+    }
+    TestResult::Pass
+}
+
 slopos_testing::stest!(name = test_basefs_serves_an_archive_in_place);
 slopos_testing::stest!(name = test_basefs_refuses_a_climbing_path);
+slopos_testing::stest!(name = test_basefs_serves_files_beside_the_archive);
+slopos_testing::stest!(name = test_basefs_indexes_more_than_one_chunk);
 
 /// A process may hold `FILEIO_MAX_OPEN_FILES` descriptors and no more, which
 /// also pins that the heap-backed table is built at its full size rather than

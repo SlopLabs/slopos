@@ -155,8 +155,14 @@ pub unsafe extern "C" fn isatty(fd: i32) -> i32 {
 /// harmless unused register slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ioctl(fd: c_int, request: c_ulong, mut args: ...) -> c_int {
-    let arg = args.next_arg::<*mut c_void>() as u64;
-    match Sys::ioctl(fd, request, arg) {
+    let arg = args.next_arg::<*mut c_void>();
+    if let Some(answer) = crate::net::ifreq::answer(fd, request, arg.cast()) {
+        return answer.unwrap_or_else(|e| {
+            errno_set(e);
+            -1
+        });
+    }
+    match Sys::ioctl(fd, request, arg as u64) {
         Ok(ret) => ret,
         Err(e) => {
             errno_set(e.raw());
@@ -164,6 +170,26 @@ pub unsafe extern "C" fn ioctl(fd: c_int, request: c_ulong, mut args: ...) -> c_
         }
     }
 }
+
+/// The block-device requests, as `<sys/ioctl.h>` names them for a program
+/// that sizes a disk or re-reads its table: Linux's numbers, which the kernel
+/// answers.
+pub const BLKROGET: c_ulong = 0x125E;
+pub const BLKRRPART: c_ulong = 0x125F;
+pub const BLKGETSIZE: c_ulong = 0x1260;
+pub const BLKSSZGET: c_ulong = 0x1268;
+pub const BLKPBSZGET: c_ulong = 0x127B;
+pub const BLKGETSIZE64: c_ulong = 0x80081272;
+
+const _: () = {
+    use slopos_abi::fs::block_ioctl as kernel;
+    assert!(BLKROGET == kernel::BLKROGET as c_ulong);
+    assert!(BLKRRPART == kernel::BLKRRPART as c_ulong);
+    assert!(BLKGETSIZE == kernel::BLKGETSIZE as c_ulong);
+    assert!(BLKSSZGET == kernel::BLKSSZGET as c_ulong);
+    assert!(BLKPBSZGET == kernel::BLKPBSZGET as c_ulong);
+    assert!(BLKGETSIZE64 == kernel::BLKGETSIZE64 as c_ulong);
+};
 
 /// Directories scanned for the device node matching a terminal descriptor.
 /// There is no `/proc`, so the name has to be found the way BSD finds it: by

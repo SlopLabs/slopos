@@ -403,6 +403,56 @@ slopos_testing::stest!(
     suite = syscall_fs_build_floor
 );
 
+/// `O_DIRECTORY|O_NOFOLLOW` opens a directory and refuses a link to one with
+/// `ENOTDIR`, as Linux does: the guard a directory walk such as Rust's
+/// `remove_dir_all` takes against a link swapped in underneath it.
+pub fn test_open_directory_nofollow_refuses_a_link_to_a_directory() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let Some(scratch) = Scratch::new() else {
+        return fail!("could not build the fixture");
+    };
+    let table = scratch.table;
+    let dir = join(b"nofollow_dir");
+    let link = join(b"nofollow_dir_link");
+    let _ = file_unlink_at(&link, b"/");
+    let _ = file_rmdir_at(&dir, b"/");
+    if file_mkdir_at(&dir, b"/") != 0 || file_symlink_at(&dir, &link, b"/") != 0 {
+        return fail!("could not build the directory and its link");
+    }
+    let open = |path: &[u8]| {
+        crate::syscall::fs::at_handlers::open_at(
+            table,
+            path,
+            b"/",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW,
+            0,
+        )
+    };
+    let through_link = open(&link);
+    let direct = open(&dir);
+    if let Ok(fd) = direct {
+        let _ = file_close_fd(table, fd as i32);
+    }
+    if let Ok(fd) = through_link {
+        let _ = file_close_fd(table, fd as i32);
+    }
+    let _ = file_unlink_at(&link, b"/");
+    let _ = file_rmdir_at(&dir, b"/");
+
+    assert_eq_test!(
+        through_link.err(),
+        Some(Errno::ENOTDIR),
+        "O_DIRECTORY|O_NOFOLLOW followed a link to a directory"
+    );
+    assert_test!(direct.is_ok(), "O_DIRECTORY|O_NOFOLLOW refused a directory");
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_open_directory_nofollow_refuses_a_link_to_a_directory,
+    suite = syscall_fs_build_floor
+);
+
 /// The bug the widened `struct stat` fixes: `FileType as u8` landed in the
 /// `FS_TYPE_*` space, so a regular file reported as a directory.
 pub fn test_stat_reports_a_regular_file_as_s_ifreg() -> TestResult {

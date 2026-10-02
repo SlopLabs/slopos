@@ -9,6 +9,7 @@ use slopos_sched::scheduler::{
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use slopos_boot_core::layout;
 use slopos_drivers::{block, crash};
 use slopos_fs::blockdev::BlockDevice;
 use slopos_fs::devfs::{DEV_NAME_MAX, devfs_register_crash_store};
@@ -216,7 +217,7 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 }
 
 fn install_base(archive: &'static [u8]) -> bool {
-    match slopos_fs::basefs::BASE_FS.install(archive) {
+    match slopos_fs::basefs::BASE_FS.install(archive, &[]) {
         Ok(entries) => {
             klog_info!(
                 "ROOTFS: the boot module's base holds {} entries ({} bytes)",
@@ -513,6 +514,48 @@ fn apply_cmdline_mount(spec: &str) {
     }
 }
 
+/// Serve the install medium when the loader carried one: the `install`
+/// module's archive, with the kernel and base it booted at the paths a slot
+/// holds them under, read-only at [`layout::MEDIUM_DIR`]. The loader keeps
+/// all three mapped, so nothing is copied.
+fn boot_step_install_medium_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    let Some(archive) = crate::limine_protocol::module(layout::MEDIUM_MODULE) else {
+        return;
+    };
+    let (Some(kernel), Some(base)) = (
+        crate::limine_protocol::kernel_file(),
+        crate::limine_protocol::initramfs(),
+    ) else {
+        klog_info!("INSTALL: the medium came without a kernel file or a base; not served");
+        return;
+    };
+    let medium = &slopos_fs::basefs::MEDIUM_FS;
+    let files = [
+        (layout::MEDIUM_KERNEL.as_bytes(), kernel),
+        (layout::MEDIUM_BASE.as_bytes(), base),
+    ];
+    let entries = match medium.install(archive, &files) {
+        Ok(entries) => entries,
+        Err(e) => {
+            klog_info!("INSTALL: the install module is no medium: {:?}", e);
+            return;
+        }
+    };
+    match slopos_fs::vfs::init::vfs_mount_readonly(layout::MEDIUM_DIR.as_bytes(), medium) {
+        Ok(()) => klog_info!(
+            "INSTALL: the medium is at {} ({} entries, {} bytes)",
+            layout::MEDIUM_DIR,
+            entries,
+            archive.len()
+        ),
+        Err(e) => klog_info!(
+            "INSTALL: the medium could not be mounted at {}: {:?}",
+            layout::MEDIUM_DIR,
+            e
+        ),
+    }
+}
+
 fn boot_step_init_launch(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     match exec::launch_init() {
         Ok(task_id) => {
@@ -572,6 +615,13 @@ crate::boot_init!(
     b"cmdline mounts\0",
     boot_step_cmdline_mounts_fn,
     flags = boot_init_priority(56)
+);
+crate::boot_init!(
+    BOOT_STEP_INSTALL_MEDIUM,
+    services,
+    b"install medium\0",
+    boot_step_install_medium_fn,
+    flags = boot_init_priority(57)
 );
 crate::boot_init!(
     BOOT_STEP_INIT_LAUNCH,

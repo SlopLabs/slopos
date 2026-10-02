@@ -1569,6 +1569,10 @@ pub fn task_fork(
         .process
         .as_deref()
         .map_or(AccountId::NONE, |p| p.account());
+    slopos_ostd::process::quota::fit_disk_blocks(
+        stack_account,
+        slopos_ostd::task::ops::task_caps(parent),
+    );
 
     let child_kernel_stack =
         match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize, stack_account) {

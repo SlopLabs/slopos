@@ -39,6 +39,7 @@ members = [
   "http-core",
   "fat-core",
   "boot-core",
+  "tree-core",
   "shell-core",
   "editor-core",
   "video",
@@ -122,6 +123,7 @@ slopos-tls-core = { path = "tls-core" }
 slopos-http-core = { path = "http-core" }
 slopos-fat-core = { path = "fat-core" }
 slopos-boot-core = { path = "boot-core" }
+slopos-tree-core = { path = "tree-core" }
 slopos-shell-core = { path = "shell-core" }
 slopos-editor-core = { path = "editor-core" }
 slopos-protocol = { path = "slop-protocol" }

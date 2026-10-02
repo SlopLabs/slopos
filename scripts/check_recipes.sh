@@ -85,7 +85,7 @@ RELATIVE_DIR='^[a-z0-9_]+(/[a-z0-9_+-][a-z0-9_.+-]*)*$'
 FILE_NAME='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
 TARBALL_FILE='^[A-Za-z0-9_][A-Za-z0-9_.+-]*(/[A-Za-z0-9_][A-Za-z0-9_.+-]*)*$'
 SONAME='^lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*$'
-PROGRAM='^(bin|libexec)(/[A-Za-z0-9_][A-Za-z0-9_.+-]*)+$'
+PROGRAM='^(bin|sbin|libexec)(/[A-Za-z0-9_][A-Za-z0-9_.+-]*)+$'
 CONFIG_FIELDS="inherit_from bn_ops asm_arch perlasm_scheme thread_scheme dso_scheme shared_target CFLAGS cflags CXXFLAGS cxxflags cppflags lib_cppflags lflags ex_libs shared_cflag shared_ldflag"
 # SPDX ids. `A OR B` qualifies when either side does; `X WITH E` when X does,
 # since an exception only adds permission, and for the one pairing whose
@@ -431,7 +431,7 @@ check_recipe() {
         [[ "$soname" =~ $SONAME ]] || fail "$name: soname '$soname' is not lib<name>.so[.<n>...]"
     done < <(values "$file" soname)
     while IFS= read -r program; do
-        [[ "$program" =~ $PROGRAM ]] || fail "$name: program '$program' is not a path under bin/ or libexec/"
+        [[ "$program" =~ $PROGRAM ]] || fail "$name: program '$program' is not a path under bin/, sbin/ or libexec/"
     done < <(values "$file" program)
 
     local patch

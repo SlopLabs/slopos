@@ -16,8 +16,8 @@ set -euo pipefail
 #   QEMU_FB_AUTO_POLICY, QEMU_FB_AUTO_OUTPUT,
 #   QEMU_GTK_ZOOM_TO_FIT,
 #   QEMU_ENABLE_ISA_EXIT, QEMU_PCI_DEVICES,
-#   OVMF_DIR,
-#   BOOT_DISK_IMG, QEMU_ALLOW_REBOOT,
+#   OVMF_DIR, OVMF_VARS_FILE,
+#   BOOT_DISK_IMG, INSTALL_STICK, QEMU_ALLOW_REBOOT, QEMU_TEST_DISKS,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
 #   GIT_PUSH_REPO,
@@ -176,14 +176,27 @@ if [ $(( QEMU_SMP & (QEMU_SMP - 1) )) -ne 0 ]; then
     exit 1
 fi
 
+# INSTALL_STICK: the ISO on a USB stick, as the installer's medium is flashed,
+# which the firmware reads and the kernel, without a USB driver, does not. The
+# boot disk is then the disk it installs onto, booted after it.
+INSTALL_STICK="${INSTALL_STICK:-}"
+NV_FIRMWARE=0
+if [ -n "${BOOT_DISK_IMG:-}" ] || [ -n "$INSTALL_STICK" ]; then
+    NV_FIRMWARE=1
+fi
+
 # ── Ensure OVMF firmware ─────────────────────────────────────────────────────
-if [ -n "${BOOT_DISK_IMG:-}" ]; then
+if [ "$NV_FIRMWARE" = 1 ]; then
     "$SCRIPT_DIR/setup_ovmf.sh" nv
 else
     "$SCRIPT_DIR/setup_ovmf.sh"
 fi
 
 # ── Check boot medium exists ─────────────────────────────────────────────────
+if [ -n "$INSTALL_STICK" ] && [ ! -f "$INSTALL_STICK" ]; then
+    echo "Install stick not found at $INSTALL_STICK" >&2
+    exit 1
+fi
 if [ -n "${BOOT_DISK_IMG:-}" ]; then
     if [ ! -f "$BOOT_DISK_IMG" ]; then
         echo "Boot disk not found at $BOOT_DISK_IMG" >&2
@@ -197,7 +210,7 @@ fi
 # A boot disk selects its next boot through UEFI variables, which only the
 # varstore-writing firmware keeps across a reset (see setup_ovmf.sh).
 SECURE_PFLASH=1
-if [ -n "${BOOT_DISK_IMG:-}" ]; then
+if [ "$NV_FIRMWARE" = 1 ]; then
     OVMF_DIR="${OVMF_NV_DIR:-${REPO_ROOT}/third_party/ovmf-nv}"
     OVMF_CODE="${OVMF_DIR}/OVMF_CODE.fd"
     OVMF_VARS="${OVMF_DIR}/OVMF_VARS.fd"
@@ -205,10 +218,19 @@ if [ -n "${BOOT_DISK_IMG:-}" ]; then
 fi
 
 # ── Create runtime OVMF_VARS copy ────────────────────────────────────────────
-OVMF_VARS_RUNTIME="$(mktemp "${OVMF_DIR}/OVMF_VARS.runtime.XXXXXX")"
-cleanup() { rm -f "$OVMF_VARS_RUNTIME"; }
+# OVMF_VARS_FILE keeps the variables from one QEMU run to the next, as a
+# machine's flash does across power cycles: made from the template when it is
+# absent, and never removed here.
+if [ -n "${OVMF_VARS_FILE:-}" ]; then
+    [ -f "$OVMF_VARS_FILE" ] || cp "$OVMF_VARS" "$OVMF_VARS_FILE"
+    OVMF_VARS_RUNTIME="$OVMF_VARS_FILE"
+    cleanup() { :; }
+else
+    OVMF_VARS_RUNTIME="$(mktemp "${OVMF_DIR}/OVMF_VARS.runtime.XXXXXX")"
+    cleanup() { rm -f "$OVMF_VARS_RUNTIME"; }
+    cp "$OVMF_VARS" "$OVMF_VARS_RUNTIME"
+fi
 trap cleanup EXIT INT TERM
-cp "$OVMF_VARS" "$OVMF_VARS_RUNTIME"
 
 # ── Resolve framebuffer dimensions ───────────────────────────────────────────
 fb_width="$QEMU_FB_WIDTH"
@@ -256,7 +278,8 @@ ADD_NO_REBOOT=0
 #   nvme1n2  test mode: a blank 4096-byte-block scratch.
 #   nvme2n1  test mode: a controller of its own that a test shuts down.
 #   nvme3n1  BOOT_DISK_IMG: the UEFI boot disk, in place of the ISO, on the
-#            last controller: nvme1n1 outside test mode.
+#            last controller: nvme1n1 outside test mode, and nvme0n1 with
+#            neither a root disk nor QEMU_TEST_DISKS.
 #   vda      test mode: the shipped verified image. The root is built
 #            VERITY=off so the suite can write; without this no run would
 #            exercise fs/src/verity.rs against a trailer a real device reports.
@@ -288,29 +311,33 @@ case "$MODE" in
         DISPLAY_ARGS=(-display none)
         ADD_ISA_EXIT=1
         ADD_NO_REBOOT=1
-        SCRATCH_DIR="${SCRATCH_DIR:-${REPO_ROOT}/builddir}"
-        mkdir -p "$SCRATCH_DIR"
-        # Fresh, blank 8 MiB raw scratches each run (no filesystem; raw-block tests only).
-        for scratch in scratch-nvme scratch-4kn scratch-virtio scratch-spare; do
-            rm -f "$SCRATCH_DIR/$scratch.img"
-            truncate -s 8M "$SCRATCH_DIR/$scratch.img"
-        done
-        ADD_SCRATCH_DISK=1
-        MEDIA_IMG="${REPO_ROOT}/builddir/media-disk.img"
-        media_stage="$(mktemp -d)"
-        echo "slopos-media: the test harness's labelled volume" >"$media_stage/SLOPOS-MEDIA"
-        rm -f "$MEDIA_IMG"
-        truncate -s 16M "$MEDIA_IMG"
-        ext4_mkfs_args
-        mke2fs -F -q "${EXT4_MKFS_ARGS[@]}" -L slopos-media -d "$media_stage" "$MEDIA_IMG" ||
-            { rm -rf "$media_stage"; exit 1; }
-        rm -rf "$media_stage"
-        ADD_MEDIA_DISK=1
-        VERIFIED_IMG="${VERIFIED_IMG:-${REPO_ROOT}/fs/assets/ext2.img}"
-        if [ -f "$VERIFIED_IMG" ]; then
-            ADD_VERIFIED_DISK=1
-        else
-            echo "qemu_run: no verified image at $VERIFIED_IMG — the verity artifact test will report it absent" >&2
+        # QEMU_TEST_DISKS=0: the suite's own disks stay off a machine whose
+        # disks a test lays out itself.
+        if [[ ! "${QEMU_TEST_DISKS:-1}" =~ ^(0|false|off|no)$ ]]; then
+            SCRATCH_DIR="${SCRATCH_DIR:-${REPO_ROOT}/builddir}"
+            mkdir -p "$SCRATCH_DIR"
+            # Fresh, blank 8 MiB raw scratches each run (no filesystem; raw-block tests only).
+            for scratch in scratch-nvme scratch-4kn scratch-virtio scratch-spare; do
+                rm -f "$SCRATCH_DIR/$scratch.img"
+                truncate -s 8M "$SCRATCH_DIR/$scratch.img"
+            done
+            ADD_SCRATCH_DISK=1
+            MEDIA_IMG="${REPO_ROOT}/builddir/media-disk.img"
+            media_stage="$(mktemp -d)"
+            echo "slopos-media: the test harness's labelled volume" >"$media_stage/SLOPOS-MEDIA"
+            rm -f "$MEDIA_IMG"
+            truncate -s 16M "$MEDIA_IMG"
+            ext4_mkfs_args
+            mke2fs -F -q "${EXT4_MKFS_ARGS[@]}" -L slopos-media -d "$media_stage" "$MEDIA_IMG" ||
+                { rm -rf "$media_stage"; exit 1; }
+            rm -rf "$media_stage"
+            ADD_MEDIA_DISK=1
+            VERIFIED_IMG="${VERIFIED_IMG:-${REPO_ROOT}/fs/assets/ext2.img}"
+            if [ -f "$VERIFIED_IMG" ]; then
+                ADD_VERIFIED_DISK=1
+            else
+                echo "qemu_run: no verified image at $VERIFIED_IMG — the verity artifact test will report it absent" >&2
+            fi
         fi
         ;;
     interactive|logged)
@@ -553,7 +580,15 @@ QEMU_ARGS=(
 if [ "$SECURE_PFLASH" = "1" ]; then
     QEMU_ARGS+=(-global "driver=cfi.pflash01,property=secure,value=on")
 fi
-if [ "$ADD_BOOT_DISK" = "0" ]; then
+BOOT_DISK_INDEX=0
+if [ -n "$INSTALL_STICK" ]; then
+    QEMU_ARGS+=(
+        -device "qemu-xhci,id=xhci"
+        -drive "if=none,id=stick,format=raw,readonly=on,file=$INSTALL_STICK"
+        -device "usb-storage,bus=xhci.0,drive=stick,removable=on,bootindex=0"
+    )
+    BOOT_DISK_INDEX=1
+elif [ "$ADD_BOOT_DISK" = "0" ]; then
     QEMU_ARGS+=(
         -drive "if=none,id=cdrom,media=cdrom,readonly=on,file=$ISO"
         -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
@@ -600,7 +635,7 @@ if [ "$ADD_BOOT_DISK" = "1" ]; then
     QEMU_ARGS+=(
         -device "nvme,id=nvme-boot,serial=slopos-boot"
         -drive "file=$BOOT_DISK_IMG,if=none,id=boot-disk,format=raw"
-        -device "nvme-ns,bus=nvme-boot,drive=boot-disk,nsid=1,bootindex=0"
+        -device "nvme-ns,bus=nvme-boot,drive=boot-disk,nsid=1,bootindex=$BOOT_DISK_INDEX"
     )
 fi
 if [ "$ADD_VERIFIED_DISK" = "1" ]; then
@@ -651,7 +686,7 @@ case "$MODE" in
         : > "$LOG_FILE_RAW"
         tail -n +1 -F "$LOG_FILE_RAW" 2>/dev/null &
         tail_pid=$!
-        trap 'kill "$tail_pid" 2>/dev/null; wait "$tail_pid" 2>/dev/null || true; rm -f "$OVMF_VARS_RUNTIME" "$LOG_FILE_RAW"' EXIT INT TERM
+        trap 'kill "$tail_pid" 2>/dev/null; wait "$tail_pid" 2>/dev/null || true; cleanup; rm -f "$LOG_FILE_RAW"' EXIT INT TERM
 
         set +e
         run_with_timeout "$BOOT_LOG_TIMEOUT" "$QEMU_BIN" "${QEMU_ARGS[@]}"
@@ -662,7 +697,7 @@ case "$MODE" in
         kill "$tail_pid" 2>/dev/null
         wait "$tail_pid" 2>/dev/null || true
         trap - EXIT INT TERM
-        rm -f "$OVMF_VARS_RUNTIME"
+        cleanup
 
         sed 's/\x1b\[[^a-zA-Z]*[a-zA-Z]//g' "$LOG_FILE_RAW" > "$LOG_FILE"
         rm -f "$LOG_FILE_RAW"
@@ -680,7 +715,7 @@ case "$MODE" in
         status=$?
         set -e
         trap - EXIT INT TERM
-        rm -f "$OVMF_VARS_RUNTIME"
+        cleanup
         if [ $status -eq 1 ]; then
             echo "Tests passed."
         elif [ $status -eq 3 ]; then

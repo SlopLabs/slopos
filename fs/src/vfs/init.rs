@@ -513,15 +513,35 @@ pub fn vfs_mount_base_dir(dir: &[u8]) -> VfsResult<()> {
     )
 }
 
+/// Mount `fs` read-only and pinned at `path`, making the directories on the
+/// way and holding them as the base's are.
+pub fn vfs_mount_readonly(path: &[u8], fs: &'static dyn FileSystem) -> VfsResult<()> {
+    let mut at = 0;
+    while let Some(next) = path[at + 1..].iter().position(|&b| b == b'/') {
+        at += next + 1;
+        make_dir(&path[..at])?;
+        pin_dir(&path[..at])?;
+    }
+    make_dir(path)?;
+    directory_itself(path)?;
+    crate::vfs::mount::mount(path, fs, MOUNT_RDONLY | crate::vfs::mount::MOUNT_PINNED)
+}
+
 /// A symlink on the way would take the walk past the mount point, so the base
 /// refuses a root that has one where it goes.
 fn pin_dir(path: &[u8]) -> VfsResult<()> {
+    let held = directory_itself(path)?;
+    crate::vfs::mount::pin_dir(held.fs, held.inode)
+}
+
+/// `path` when it is a directory, not a symlink to one.
+fn directory_itself(path: &[u8]) -> VfsResult<crate::vfs::path::ResolvedPath> {
     let held =
         crate::vfs::path::resolve_path_at(path, b"/", crate::vfs::path::RESOLVE_NOFOLLOW_FINAL)?;
     if held.fs.stat(held.inode)?.file_type != crate::vfs::traits::FileType::Directory {
         return Err(VfsError::NotDirectory);
     }
-    crate::vfs::mount::pin_dir(held.fs, held.inode)
+    Ok(held)
 }
 
 fn make_dir(path: &[u8]) -> VfsResult<()> {

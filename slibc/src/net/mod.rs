@@ -3,6 +3,7 @@
 pub mod addr;
 pub mod dns;
 pub mod ifaddrs;
+pub mod ifreq;
 pub mod netdb;
 #[allow(dead_code)]
 pub(crate) mod shim;

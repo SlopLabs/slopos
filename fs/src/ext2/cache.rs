@@ -2555,7 +2555,9 @@ impl BlockCache {
             return Ok(slot);
         }
 
-        let slot = self.pick_victim().ok_or(Ext2Error::DeviceError)?;
+        // Every entry pinned or in flight and no frame to grow by is a
+        // shortage, not damage: it must not take the mount read-only.
+        let slot = self.pick_victim().ok_or(Ext2Error::OutOfMemory)?;
         if !self.entries[slot].valid {
             return Ok(slot);
         }

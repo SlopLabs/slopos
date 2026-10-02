@@ -1,0 +1,14 @@
+[package]
+name = "slopos-tree-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The manifest a tree installed onto a root records, and the rule that replaces it keeping what the root's user added, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+doctest = false

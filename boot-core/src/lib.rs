@@ -21,6 +21,7 @@ pub mod crc32;
 pub mod device_path;
 pub mod gpt;
 pub mod guid;
+pub mod install;
 pub mod layout;
 pub mod limine;
 pub mod load_option;

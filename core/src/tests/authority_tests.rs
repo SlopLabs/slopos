@@ -350,15 +350,18 @@ slopos_testing::stest!(
 /// `BootEntry` is the installer's role and nobody else's: not `bootctl`, which
 /// writes slots and the loader's variables, and not init, which never touches
 /// the firmware's boot manager. It adds to `Power`, under which the UEFI
-/// variable calls are classified, so the role alone reaches no variable.
+/// variable calls are classified, so the role alone reaches no variable. The
+/// role also carries `Seal`, for the mount points a new root holds the base
+/// over.
 fn boot_entry_is_the_installer_s_alone() -> TestResult {
     use slopos_abi::task::{TASK_FLAG_INSTALL, TASK_FLAG_MOUNT};
 
     let installer = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_INSTALL);
-    if !mask_permits(installer, Capability::BootEntry) {
-        return fail!("the installer's role must confer BootEntry");
+    if !mask_permits(installer, Capability::BootEntry) || !mask_permits(installer, Capability::Seal)
+    {
+        return fail!("the installer's role must confer BootEntry and Seal");
     }
-    for other in [Capability::Power, Capability::Mount, Capability::Seal] {
+    for other in [Capability::Power, Capability::Mount] {
         if mask_permits(installer, other) {
             return fail!("the installer's role leaked {}", other.name());
         }

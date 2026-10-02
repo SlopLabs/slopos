@@ -3,13 +3,15 @@ set -euo pipefail
 
 # Stage the guest's workspace: a clone of this checkout for a root to seed.
 #
-# Usage: stage_workspace.sh <dir> [--vendored]
+# Usage: stage_workspace.sh <dir> [--vendored] [--remote <url>]
 #
 # `<dir>/slopos` is `git clone --no-local` of HEAD's branch, so its history is
 # what the branches and tags reach and nothing else. Its `origin` is the
 # checkout `qemu_run.sh` serves the guest and its `host` remote, the push
-# default, the repository it pushes into; it takes this checkout's user.name
-# and user.email.
+# default, the repository it pushes into, and it takes this checkout's
+# user.name and user.email. `--remote` is for a clone that leaves this
+# machine: `origin` is that URL, with no `host`, the history is HEAD's
+# branch's alone, and it carries no identity of the developer's.
 #
 # `--vendored` adds the vendored crates, in the clone's ignored
 # `third_party/vendor`; `<dir>/.cargo/config.toml`, which points cargo
@@ -22,15 +24,23 @@ set -euo pipefail
 SELF="stage_workspace"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-USAGE="usage: stage_workspace.sh <dir> [--vendored]"
+USAGE="usage: stage_workspace.sh <dir> [--vendored] [--remote <url>]"
 
 DIR="${1:?$USAGE}"
+shift
 VENDORED=0
-case "${2:-}" in
-    "") ;;
-    --vendored) VENDORED=1 ;;
-    *) echo "$USAGE" >&2; exit 2 ;;
-esac
+REMOTE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --vendored) VENDORED=1 ;;
+        --remote)
+            REMOTE="${2:?$USAGE}"
+            shift
+            ;;
+        *) echo "$USAGE" >&2; exit 2 ;;
+    esac
+    shift
+done
 
 die() {
     echo "$SELF: $*" >&2
@@ -50,15 +60,21 @@ git -C "$REPO_ROOT" rev-parse --verify -q HEAD >/dev/null ||
 rm -rf "$DIR"
 mkdir -p "$DIR"
 src="$DIR/slopos"
-git clone -q --no-local "$REPO_ROOT" "$src" || die "could not clone $REPO_ROOT into $src"
-git -C "$src" remote set-url origin "$GIT_PEER/slopos"
-git -C "$src" remote add host "$GIT_PEER:9419/slopos"
-git -C "$src" config remote.pushDefault host
+if [ -n "$REMOTE" ]; then
+    git clone -q --no-local --single-branch "$REPO_ROOT" "$src" ||
+        die "could not clone $REPO_ROOT into $src"
+    git -C "$src" remote set-url origin "$REMOTE"
+else
+    git clone -q --no-local "$REPO_ROOT" "$src" || die "could not clone $REPO_ROOT into $src"
+    git -C "$src" remote set-url origin "$GIT_PEER/slopos"
+    git -C "$src" remote add host "$GIT_PEER:9419/slopos"
+    git -C "$src" config remote.pushDefault host
+    for key in user.name user.email; do
+        value="$(git -C "$REPO_ROOT" config "$key" || true)"
+        [ -z "$value" ] || git -C "$src" config "$key" "$value"
+    done
+fi
 git -C "$src" config push.default current
-for key in user.name user.email; do
-    value="$(git -C "$REPO_ROOT" config "$key" || true)"
-    [ -z "$value" ] || git -C "$src" config "$key" "$value"
-done
 
 [ "$VENDORED" -eq 1 ] || exit 0
 . "$SCRIPT_DIR/lib/toolchain_pin.sh"

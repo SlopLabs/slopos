@@ -6,6 +6,13 @@
 //! `COREUTILS_LINKS` names the multicall binary's installed names,
 //! `EXTRA_SHARED_OBJECTS` the shared objects a tests image adds to `/lib`, and
 //! `SLOPOS_BUILD_TAG`, when set, is written to `/usr/share/slopos/build-tag`.
+//! `RECIPE_PROGRAMS` names programs a recipe built, by their path below
+//! `RECIPE_PREFIX`, which they keep below `/`, and `RECIPE_LICENSES` the
+//! recipes whose licence texts go with them.
+//!
+//! `initramfs tree <out.cpio> <dir>=<path>...` packs whole directory trees
+//! instead, each below its path in the archive, streamed rather than held:
+//! the install medium, whose payload is a toolchain and a source tree.
 //!
 //! The output is a function of the inputs alone: entries in a fixed order,
 //! every timestamp, owner and inode number 0. Dependency-free, so it builds
@@ -42,6 +49,9 @@ struct Extras {
     coreutils_links: String,
     shared_objects: String,
     build_tag: String,
+    recipe_prefix: String,
+    recipe_programs: String,
+    recipe_licenses: String,
 }
 
 impl Extras {
@@ -51,12 +61,28 @@ impl Extras {
             coreutils_links: var("COREUTILS_LINKS"),
             shared_objects: var("EXTRA_SHARED_OBJECTS"),
             build_tag: var("SLOPOS_BUILD_TAG"),
+            recipe_prefix: var("RECIPE_PREFIX"),
+            recipe_programs: var("RECIPE_PROGRAMS"),
+            recipe_licenses: var("RECIPE_LICENSES"),
         }
     }
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("tree") {
+        let packed = match args.get(2) {
+            Some(out) => pack_trees(Path::new(out), &args[3..]),
+            None => Err("usage: initramfs tree <out.cpio> <dir>=<path>...".into()),
+        };
+        return match packed {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("initramfs: {msg}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if args.len() < 4 {
         eprintln!("usage: initramfs <repo root> <out.cpio> <build dir> <program>...");
         return ExitCode::from(2);
@@ -206,6 +232,28 @@ fn layout(
         );
     }
 
+    let recipes = Path::new(&extras.recipe_prefix);
+    for program in extras.recipe_programs.split_whitespace() {
+        if !program.starts_with("sbin/") && !program.starts_with("bin/") {
+            return Err(format!("{program}: a recipe program goes in bin/ or sbin/"));
+        }
+        add(
+            format!("/{program}"),
+            MODE_EXEC,
+            read(&recipes.join(program))?,
+        );
+    }
+    for recipe in extras.recipe_licenses.split_whitespace() {
+        let texts = recipes.join("share/licenses").join(recipe);
+        for (rel, path) in files_below(&texts)? {
+            add(
+                format!("/usr/share/licenses/{recipe}/{rel}"),
+                MODE_DATA,
+                read(&path)?,
+            );
+        }
+    }
+
     let assets = root.join("assets");
     for (name, path) in listing(&assets.join("fonts"), |n| {
         n.ends_with(".ttf") || n.ends_with("-OFL.txt")
@@ -293,9 +341,153 @@ fn listing(dir: &Path, keep: impl Fn(&str) -> bool) -> Result<Vec<(String, PathB
     Ok(files)
 }
 
+/// Every regular file below `dir`, by its path there, in name order; an
+/// absent `dir` is an error, since a recipe's licences must ship.
+fn files_below(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut out = Vec::new();
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if path.is_dir() {
+            for (rel, inner) in files_below(&path)? {
+                out.push((format!("{name}/{rel}"), inner));
+            }
+        } else if path.is_file() {
+            out.push((name, path));
+        }
+    }
+    Ok(out)
+}
+
+/// Pack each `<dir>=<path>` tree below `path`, the directories on the way to
+/// it included, every name sorted.
+fn pack_trees(out: &Path, specs: &[String]) -> Result<(), String> {
+    use std::io::{BufWriter, Write};
+    let file = fs::File::create(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut writer = Sink {
+        out: BufWriter::with_capacity(1 << 20, file),
+        written: 0,
+    };
+    let mut seen = BTreeMap::new();
+    for spec in specs {
+        let (dir, at) = spec
+            .split_once('=')
+            .ok_or_else(|| format!("{spec}: not <dir>=<path>"))?;
+        let at = format!("/{}", at.trim_matches('/'));
+        let mut parent = String::new();
+        for part in at.split('/').filter(|p| !p.is_empty()) {
+            parent = format!("{parent}/{part}");
+            if seen.insert(parent.clone(), MODE_DIR).is_none() {
+                writer.record(&parent, MODE_DIR, &[])?;
+            }
+        }
+        pack_dir(Path::new(dir), &at, &mut writer, &mut seen)?;
+    }
+    writer.record("TRAILER!!!", 0, &[])?;
+    writer
+        .out
+        .flush()
+        .map_err(|e| format!("{}: {e}", out.display()))?;
+    println!(
+        "initramfs: wrote {} ({} bytes, {} entries)",
+        out.display(),
+        writer.written,
+        seen.len()
+    );
+    Ok(())
+}
+
+struct Sink<W> {
+    out: W,
+    written: u64,
+}
+
+impl<W: std::io::Write> Sink<W> {
+    fn record(&mut self, name: &str, mode: u32, data: &[u8]) -> Result<(), String> {
+        let name = name.trim_start_matches('/');
+        if name.split('/').any(|part| part.len() > MAX_NAME_LEN) {
+            return Err(format!("{name}: a component exceeds {MAX_NAME_LEN} bytes"));
+        }
+        let size = u32::try_from(data.len()).map_err(|_| format!("{name}: too large for newc"))?;
+        let mut head = Vec::with_capacity(128 + name.len());
+        emit_header(&mut head, name, mode, size);
+        self.write(&head)?;
+        self.write(data)?;
+        self.write(&[0; 3][..(4 - data.len() % 4) % 4])
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.out.write_all(bytes).map_err(|e| e.to_string())?;
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+}
+
+fn pack_dir<W: std::io::Write>(
+    dir: &Path,
+    at: &str,
+    writer: &mut Sink<W>,
+    seen: &mut BTreeMap<String, u32>,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| format!("{}: a name that is not UTF-8", path.display()))?;
+        let inside = format!("{at}/{name}");
+        let meta = fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let perms = meta.permissions().mode() & 0o7777;
+        let (mode, data) = if meta.file_type().is_symlink() {
+            let target = fs::read_link(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let target = target
+                .into_os_string()
+                .into_string()
+                .map_err(|_| format!("{}: a link target that is not UTF-8", path.display()))?;
+            (MODE_LINK, target.into_bytes())
+        } else if meta.is_dir() {
+            (MODE_DIR & !0o7777 | perms, Vec::new())
+        } else if meta.is_file() {
+            (MODE_DATA & !0o7777 | perms, read(&path)?)
+        } else {
+            return Err(format!(
+                "{}: neither a file, a directory nor a symlink",
+                path.display()
+            ));
+        };
+        if seen.insert(inside.clone(), mode).is_some() {
+            return Err(format!("{inside} is packed twice"));
+        }
+        writer.record(&inside, mode, &data)?;
+        if meta.is_dir() {
+            pack_dir(&path, &inside, writer, seen)?;
+        }
+    }
+    Ok(())
+}
+
 /// One `newc` record: the ASCII header, the NUL-terminated name and the body,
 /// each padded to four bytes.
 fn emit(archive: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
+    emit_header(archive, name, mode, data.len() as u32);
+    archive.extend_from_slice(data);
+    pad(archive);
+}
+
+/// The record's header and name, padded to four bytes.
+fn emit_header(archive: &mut Vec<u8>, name: &str, mode: u32, size: u32) {
+    let start = archive.len();
     let fields = [
         0,
         mode,
@@ -303,7 +495,7 @@ fn emit(archive: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
         0,
         1,
         0,
-        data.len() as u32,
+        size,
         0,
         0,
         0,
@@ -317,9 +509,9 @@ fn emit(archive: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
     }
     archive.extend_from_slice(name.as_bytes());
     archive.push(0);
-    pad(archive);
-    archive.extend_from_slice(data);
-    pad(archive);
+    while (archive.len() - start) % 4 != 0 {
+        archive.push(0);
+    }
 }
 
 fn pad(archive: &mut Vec<u8>) {
@@ -474,6 +666,71 @@ mod tests {
             &extras,
         );
         assert_eq!(packed, Err("/bin/shell is packed twice".into()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recipe_programs_keep_their_path_and_bring_their_licences() {
+        let dir = scratch("recipes");
+        let prefix = dir.join("prefix");
+        fs::create_dir_all(prefix.join("sbin")).unwrap();
+        fs::create_dir_all(prefix.join("share/licenses/tools/lib")).unwrap();
+        fs::write(prefix.join("sbin/mkfs"), b"\x7fELF mkfs").unwrap();
+        fs::write(prefix.join("share/licenses/tools/NOTICE"), b"notice").unwrap();
+        fs::write(prefix.join("share/licenses/tools/lib/COPYING"), b"copying").unwrap();
+        let extras = Extras {
+            recipe_prefix: prefix.to_string_lossy().into_owned(),
+            recipe_programs: "sbin/mkfs".into(),
+            recipe_licenses: "tools".into(),
+            ..Extras::default()
+        };
+        let out = dir.join("out.cpio");
+        run(&dir.join("root"), &out, &dir.join("build"), &[], &extras).unwrap();
+        let got = records(&fs::read(&out).unwrap());
+        let find = |name: &str| got.iter().find(|(n, _, _)| n == name).map(|r| r.2.clone());
+        assert_eq!(find("/sbin/mkfs").as_deref(), Some(&b"\x7fELF mkfs"[..]));
+        assert_eq!(
+            find("/usr/share/licenses/tools/lib/COPYING").as_deref(),
+            Some(&b"copying"[..])
+        );
+        assert!(find("/usr/share/licenses/tools/NOTICE").is_some());
+        let missing = Extras {
+            recipe_programs: "sbin/gone".into(),
+            ..extras
+        };
+        assert!(run(&dir.join("root"), &out, &dir.join("build"), &[], &missing).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_tree_packs_below_its_path_with_its_modes_and_links() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = scratch("tree");
+        let tree = dir.join("root/local");
+        fs::create_dir_all(tree.join("bin")).unwrap();
+        fs::write(tree.join("bin/tool"), b"tool").unwrap();
+        fs::set_permissions(tree.join("bin/tool"), fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("tool", tree.join("bin/alias")).unwrap();
+        let out = dir.join("medium.cpio");
+        pack_trees(&out, &[format!("{}=usr/local", tree.display())]).unwrap();
+        let got = records(&fs::read(&out).unwrap());
+        let names: Vec<&str> = got.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "usr",
+                "usr/local",
+                "usr/local/bin",
+                "usr/local/bin/alias",
+                "usr/local/bin/tool"
+            ]
+        );
+        assert_eq!(
+            got[3],
+            ("usr/local/bin/alias".into(), MODE_LINK, b"tool".to_vec())
+        );
+        assert_eq!(got[4].1, 0o100_755);
+        assert_eq!(got[4].2, b"tool");
         fs::remove_dir_all(&dir).unwrap();
     }
 

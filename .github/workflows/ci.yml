@@ -50,7 +50,8 @@ jobs:
 
       # clang/cmake/ninja/lld are the C++ runtime's cross-build, which the
       # tests image needs: `libc++.so` and the two fixtures that prove a C++
-      # exception crosses a `dlopen` boundary. `toolchain/cxx/PIN` states a
+      # exception crosses a `dlopen` boundary. make and pkg-config build the
+      # e2fsprogs recipe every base carries. `toolchain/cxx/PIN` states a
       # *floor* (`clang_major_min`) so a rolling host can build it at all, and
       # the env vars below pin CI to the sources' own major regardless of what
       # the runner image happens to default to — `scripts/cxx_host_tools.sh`
@@ -66,7 +67,9 @@ jobs:
             lld-18 \
             llvm-18 \
             cmake \
-            ninja-build
+            ninja-build \
+            make \
+            pkg-config
           # Named, not aliased: `update-alternatives --install` with a missing
           # target warns and exits 0, so a wrong package name would surface
           # much later as a cross-build failure with nothing pointing here.
@@ -124,6 +127,14 @@ jobs:
         with:
           path: third_party/llvm-project-*.src.tar.xz
           key: llvm-project-src-${{ hashFiles('toolchain/cxx/PIN') }}
+
+      # e2fsprogs's, which every base's programs are built from.
+      - name: Cache the pinned recipe tarballs
+        uses: actions/cache@v6
+        with:
+          path: third_party/recipes
+          key: recipes-src-${{ hashFiles('toolchain/recipes/**') }}
+          restore-keys: recipes-src-
 
       - name: Restore the Rust compiler cache
         uses: ./.github/actions/sccache-restore

@@ -31,14 +31,14 @@ const HDR: usize = size_of::<UserNetQueryHdr>();
 /// One query's records, in a buffer `malloc` owns. The kernel's stride is
 /// honoured and each record copied out, since neither side promised the
 /// other an alignment.
-struct Records {
+pub(crate) struct Records {
     buf: *mut u8,
     stride: usize,
-    count: usize,
+    pub(crate) count: usize,
 }
 
 impl Records {
-    fn fetch(what: u32) -> Result<Self, c_int> {
+    pub(crate) fn fetch(what: u32) -> Result<Self, c_int> {
         let mut sizing = [0u8; HDR];
         Sys::net_query(what, 0, sizing.as_mut_ptr(), HDR).map_err(|e| e.raw())?;
         let want = header(sizing.as_ptr()).total_count as usize;
@@ -58,7 +58,7 @@ impl Records {
         Ok(Self { buf, stride, count })
     }
 
-    fn get<T: Copy + Default>(&self, i: usize) -> T {
+    pub(crate) fn get<T: Copy + Default>(&self, i: usize) -> T {
         let mut out = T::default();
         let n = self.stride.min(size_of::<T>());
         // SAFETY: record `i` lies inside the buffer the kernel filled, and

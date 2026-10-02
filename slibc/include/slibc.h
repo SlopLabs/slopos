@@ -23,6 +23,7 @@
 #include <ifaddrs.h>
 #include <inttypes.h>
 #include <langinfo.h>
+#include <libgen.h>
 #include <limits.h>
 #include <link.h>
 #include <locale.h>

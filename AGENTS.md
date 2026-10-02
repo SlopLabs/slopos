@@ -209,22 +209,27 @@ loader applies).
 
 **The C libraries cargo's and git's network transports link are recipes, and
 so is git.** `toolchain/recipes/<name>/recipe` pins an upstream release
-tarball (URL, SHA-256, licence), a build template (`cmake`, `meson` or
-`openssl`), its configure arguments and its dependencies: zlib, nghttp2,
-Mbed TLS, OpenSSL, curl, libssh2, libgit2 and git. `scripts/build_recipes.sh`
-(`just recipes`) builds them shared and `-z defs` into
-`builddir/slopos-recipes/prefix`, with the
+tarball (URL, SHA-256, licence), a build template (`cmake`, `meson`,
+`openssl` or `autotools`), its configure arguments and its dependencies: zlib,
+nghttp2, Mbed TLS, OpenSSL, curl, libssh2, libgit2 and git.
+`scripts/build_recipes.sh` (`just recipes`) builds them shared and `-z defs`
+into `builddir/slopos-recipes/prefix`, with the
 target sysroot and `x86_64-unknown-slopos-clang{,++}` wrappers that
 `scripts/make_slopos_cross.sh` assembles for bootstrap too; tarballs are
-cached in `third_party/recipes/`, and the recipes add `meson`, `make`, `perl`, `git`
-and `pkg-config` to the C++ runtime's host tools. A library is
+cached in `third_party/recipes/` (`--fetch-source` prints them), and each
+template adds what it runs to the C++ runtime's host tools — `make` and
+`pkg-config` for autotools, `meson`, `cmake`, `ninja` and `perl` — whose
+versions join that template's stamps, and a recipe with a patch needs `git`,
+which only applies it. A library is
 `$ORIGIN`-rpathed; a program (`program=`) is built with `--prefix` the guest
 path of the toolchain, because git finds its exec path, templates and system
 config through that compiled-in prefix, and its run path reaches `lib/`. The
-programs are git (`meson`), CMake and Ninja (`cmake`), and bash
+programs are git (`meson`), CMake and Ninja (`cmake`), and bash and e2fsprogs
 (`autotools`: out of tree, `--host` the target, and the answers configure
 cannot find out without running a SlopOS program given as `*_cv_*` cache
-values). Bootstrap copies the libraries into
+values); a recipe that declares no library installs nothing under `include/`
+or `lib/`, so e2fsprogs's static libraries reach neither another recipe nor
+the target sysroot. Bootstrap copies the libraries into
 the target sysroot and `build_recipes.sh --install-programs` copies the
 programs into the install, so both reach a root; only the libraries'
 stamps clear cargo. The `cmake` template builds for `CMAKE_SYSTEM_NAME=SlopOS`,
@@ -232,8 +237,13 @@ the platform `toolchain/cmake/Platform` describes. **A patch only teaches the
 target:** a build that would need any other edit to upstream is a slibc or
 kernel finding, fixed there — git's build is what brought `<utime.h>`,
 `<grp.h>`, `mkstemp`, `freopen`, `execl`, `getpass` and
-`pthread_setcancelstate` into slibc, and bash's, CMake's and Ninja's brought
-`ppoll`, `pselect`, `getloadavg`, `getopt_long` and `ttyname`. A
+`pthread_setcancelstate` into slibc, bash's, CMake's and Ninja's brought
+`ppoll`, `pselect`, `getloadavg`, `getopt_long` and `ttyname`, and
+e2fsprogs's brought `system`, `popen`, `daemon`, `random`, `<libgen.h>`,
+`secure_getenv`, `PR_GET_DUMPABLE` (not dumpable under `AT_SECURE`, as a
+setuid program is not), `si_addr`, the block requests in `<sys/ioctl.h>` and
+`<net/if.h>`'s interface requests, which slibc answers from the kernel's net
+query. A
 recipe's `patch=` (`NNNN-slopos-<what>.patch`, hashed into its stamp) has the
 shape of one that teaches the target, which review holds it to: it only adds —
 a run of removed lines is replaced where it stood, line for line, by added
@@ -332,7 +342,9 @@ extent and describing exactly it, so bytes the guest writes that look like one
 are only its data. The guest's cargo reads std's sources from
 `/usr/local/lib/rustlib/src`, so a guest kernel's `core` panic locations
 differ from a host build's; nothing grades them. `just boot` gives the guest
-4G of RAM and the optimized kernel, because a dev-profile kernel spends ten
+6G of RAM (`DEV_QEMU_MEM`), because the file map pins at most an eighth of
+memory per process and the debug tests kernel's link maps more than 4G's
+eighth, and the optimized kernel, because a dev-profile kernel spends ten
 times as long in every syscall and page fault a compiler makes.
 
 **The source moves by git.** A root without `/src` is seeded with
@@ -406,7 +418,9 @@ does, because `-Zbuild-std` takes this workspace's profile: in ten objects,
 linking one intrinsic drags in the weak hidden libm routines beside it, and
 their visibility wins over the `floor` `libc.so` exports. Which programs a
 base carries is `scripts/lib/base.sh`, which the justfile and
-`scripts/selfhost.sh` both read. The embedded symbol table comes from
+`scripts/selfhost.sh` both read; the recipe programs among them come from the
+recipes' prefix on the host and from `/usr/local` in the guest, where the
+toolchain installs them. The embedded symbol table comes from
 `tools/kallsyms`, an ELF reader
 built for whichever machine runs the build, byte-identical to what `llvm-nm`
 gave less LLVM's `.llvm.<hash>` promotion suffix, which would keep a release
@@ -430,10 +444,15 @@ or XBOOTLDR types, which a Linux on the same disk would mount as its own.
 `boot-core` is that disk as data: GUIDs and the GPT, which the kernel's
 partition probe and `bootctl` both read through it, load options and device
 paths, the boot manager variables and what a write to them must look like, the
-Boot Loader Interface's strings, the layout and the Limine configuration. It
+Boot Loader Interface's strings, the layout and the Limine configuration, and
+an install's half: the table a disk is given, written with each piece behind
+a flush and the copy it was not read from first, and where a plan puts
+SlopOS's partitions
+(`boot-core::install`). It
 is `no_std`, free of I/O and host-tested under `just test-host`, against
-tables `fdisk` wrote among them, and `tools/bootdisk` is how the host's disk
-builder asks it for the layout and the configuration. The configuration names
+tables `fdisk` wrote and `sfdisk --verify` reads among them, and
+`tools/bootdisk` is how the host's disk builder asks it for the layout and the
+configuration. The configuration names
 each slot's files by the boot partition's GUID and names no `default_entry`,
 because Limine 12.9 consults `LoaderEntryDefault` only while that is unset; it
 is written at install and never by a commit. The removable-media path
@@ -503,6 +522,40 @@ arms the one-shot boot, so a system is tried, committed or rolled
 back whole.
 `selfhost_test` and `install_test` run that script as a person at the shell
 does, so the loop a developer types is the loop the tests grade.
+
+**An install medium installs SlopOS.** The live ISO is the medium: `just iso`
+builds `builddir/install.cpio` (`scripts/build_install_medium.sh`), which
+Limine loads as the module `install` beside the base, holding Limine for the
+ESP and the source tarball of every recipe the base takes programs from;
+`PAYLOAD=1` adds the toolchain at `usr/local` with the manifest an install
+records for it, and at `src/` a `--vendored` clone of `HEAD` whose origin is
+GitHub. The kernel serves it read-only and pinned at `/media/install`
+(`layout::MEDIUM_DIR`), a second `basefs` instance where Limine put it, with
+the kernel and base it booted beside it at `boot/kernel.elf` and
+`boot/base.img`: without a USB driver the module is the only way in, as
+`copytoram` is a Linux live system's. `/bin/installer` (granted `Mount`,
+`Power`, and `Install`, which confers `Seal` beside `BootEntry`; a `Mount`
+holder may write any disk raw, so no per-process `DiskBlocks` ceiling binds
+it, and it fills a whole root in one process) asks for a whole disk and a
+mode — erase it, install
+into free space beside what it holds, or reuse a partition as the root — or
+takes every answer as a flag. `boot-core::install` plans where the partitions
+go, on 1 MiB boundaries, sharing the disk's ESP and keeping SlopOS's own on a
+reinstall; `BLKRRPART` re-reads the table it writes. It formats new FAT32
+volumes with `fat-core`, which creates long names, the root with
+`/sbin/mke2fs` in the profile, and zeroes a new crash partition; seals the
+root's base mount points; installs the medium's `/usr/local` by the rule host
+trees follow (`tree-core`: what the manifest under `/var/lib/slopos/trees`
+names is replaced, what the user added kept) and seeds `/src` once, its origin
+where the user says; writes both slots and `limine.conf` — `root=PARTUUID=`, a
+five-second menu, an `efi_boot_entry` for each other system `BootOrder` lists
+that Limine can boot — makes `slopos-a` the default, holds the root to
+`e2fsck -fn` and last registers the firmware entry, first in `BootOrder` only
+when asked. It writes nothing outside the partitions it made or was given, nor
+anything on a shared ESP outside `\EFI\SlopOS\`. e2fsprogs is the recipe
+`toolchain/recipes/e2fsprogs`, built unpatched; its six programs are in every
+base at `/sbin`, each keeping `Mount` there, and nowhere else, as far as
+its spawner holds it: the installer hands it on, the shell has none to give.
 
 **A panic leaves a record.** The boot disk's crash partition is a ring of
 64 KiB slots in the format `boot-core::crash` states: a header sealing each
@@ -635,9 +688,9 @@ survives a conversion, and the kernel reads such a volume like any other.
 immutable flag is the VFS seal, an append-only file another system marked is
 sealed too, ext4 also stores `nodump` and `noatime`, any other change is
 `EOPNOTSUPP` (a RAM filesystem keeps only the seal, and only sets it), and
-moving the seal takes the `Seal` capability, which only
-`TASK_FLAG_SYSTEM` confers, because a path-keyed program-identity grant is
-only as good as the seal on the file it names.
+moving the seal takes the `Seal` capability, which only `TASK_FLAG_SYSTEM`
+and the installer's role confer, because a path-keyed program-identity grant
+is only as good as the seal on the file it names.
 
 **The root is not the only filesystem.** `mount(2)` with `fstype` `ext2`,
 `ext3` or `ext4` (one driver) takes a
@@ -867,7 +920,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 
@@ -1037,8 +1090,9 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
 - `just test-rude-exit` — one boot that fsyncs a file into the root's journal and ends the machine holding it, then `scripts/check_fs_replay.sh`: the image must need recovery, the file must be reachable only through the journal, and after `e2fsck -E journal_only` the image must pass `e2fsck -fn`, be at rest and hold the file. In CI after `test-persist`. The kernel test runs only when `tests.run` names it exactly (`FLAG_EXPLICIT`), since it ends the machine.
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext4 volume, attach it as `nvme0n3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
-- `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 4G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
+- `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 6G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
 - `just test-install` — the install check: boot from `builddir/boot-disk.img`, one disk in the bare-metal layout (an ESP holding Limine and `limine.conf` under `\EFI\SlopOS\` and at the removable-media path, the boot partition with a kernel and base per slot under `/boot/<slot>/`, the tests image as the root partition every slot boots with as `root=PARTUUID=`, and the crash partition), and across the resets of one QEMU let `install_test` register SlopOS's firmware entry first in `BootOrder`, clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot` and through that entry, commit it as `LoaderEntryDefault`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default, through the entry again, and find the panic's record moved from the crash partition to `/var/log/crash/` and reported by `bootctl status` as that slot's last boot; then the same for a slot that takes the format-free abort. The host then holds the ESP to the bytes it built, so no commit touched `limine.conf`, and the root partition to `e2fsck -fn` and to being at rest. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
+- `just test-installer` — the installer check: the tests system on a USB stick (`INSTALL_STICK`, `qemu-xhci`), its install medium carrying the payload, on the pinned NV-varstore OVMF with the varstore kept from one QEMU run to the next (`OVMF_VARS_FILE`) but for the reinstall's, which starts afresh as a person picking the stick from the firmware's menu does, and one NVMe disk without the suite's own (`QEMU_TEST_DISKS=0`), one of three `scripts/make_installer_disk.sh` makes: a blank one, erased; another system's, holding an ESP with `\EFI\other\`, a data partition and the firmware entry `installer_test` gives it, which SlopOS goes beside in free space; and one whose partition is reused as the root. `installer_test` runs `/bin/installer`, answering the blank disk's questions on standard input as a person does and the others' with flags; booted from the disk with the stick gone, through SlopOS's own firmware entry (`BootCurrent`), it takes the loop once — `scripts/selfhost.sh install tests`, a boot of slot b and `bootctl commit` — after holding the other system's entry to `BootOrder` and Limine's menu. The blank disk then takes a reinstall from the stick that keeps its root, with a file left in it, and a boot that finds the file and the old slots' state gone. The host holds each table to `sfdisk --verify`, each FAT volume to `fsck.fat -n`, each root to `e2fsck -fn`, to being at rest and to sealed base mount points, the other system's entries, partition and files to their bytes, and a reused root to a new PARTUUID. `INSTALLER_PAYLOAD=0` installs without the toolchain, cloning a slot where it would build one, and needs no `just toolchain`; `just test-installer foreign` runs one disk.
 - `just test-install-guest` — the two loops in one QEMU: a clean tree, `just toolchain` and the self-hosting root; slot a is the optimized tests kernel, and `install_test`, finding a workspace at `/src/slopos`, fetches the host's `HEAD` into its clone, checks it out and runs `scripts/selfhost.sh install tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is otherwise unset — which builds the tests kernel, userland and base and installs the kernel and base into slot b, then checks the tree's own branch out again; the run boots them once, and that boot must report the tag in `uname -v` and in the base's `/usr/share/slopos/build-tag`. The kernel the guest built then commits a change on the fetched `HEAD` in a scratch clone and pushes it into a scratch repository, which the host fetches and holds to that commit's parent being `HEAD`. The run then commits and rolls back as `test-install` does, and the host holds slot b's kernel and base to the root's `kernel-tests.elf` and `initramfs-tests.cpio` byte for byte, and the boot log's `BOOT: base` line to the base's size. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
 - `just test-selfhost` — the self-hosting check: needs `just toolchain` and a clean working tree (the host grades the guest's build of `HEAD` with its own gates and tests). The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), fetches the host's `HEAD` into the self-hosting root's clone and checks it out — refusing a tree with uncommitted edits — builds the dev and tests systems — kernel, userland and base — with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the clone's `builddir/target/cargo-timings`, and checks the tree's own branch out again; the host holds the commit the guest names to `HEAD`, the root to `e2fsck -fn` and to being at rest, exports both kernels and the tests base, runs the ELF gates on the kernels and runs the suite on the guest's tests kernel and base. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
 - `just bench-selfhost` — the self-hosting build as a profile: boots the optimized tests kernel on the self-hosting root with `prof=on` (`BENCH_PROF=` turns it off), runs only `selfhost_test`, so the guest builds the host's `HEAD`, and hands the log to `scripts/prof_report.py`, which prints the guest's build times, per-CPU busy and halted time, the ext2 lock's wait and hold (writeback's share apart) and the same lock and the per-process VM lock by call site, block I/O counts and latency, syscall costs, and kernel and user ticks symbolized — user ticks through the exec-mapping table the kernel prints, `builddir/bench-libc.so` and the installed toolchain's libraries. No grading and no clean-tree requirement; run it with nothing else loading the host, because every number in it is wall time.

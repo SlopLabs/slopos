@@ -2,6 +2,29 @@
 
 **No finding is open.**
 
+Swept 2026-10-02: the installer and its medium — `/bin/installer` writing a
+table, formats and a root onto a disk another system shares, the `install`
+module served at `/media/install`, e2fsprogs run from the base with `Mount`,
+the block ceiling the raw-device right lifts, slibc's additions for
+e2fsprogs, `tree-core` installing over a root a guest wrote, and the GPT
+writer and `fat-core`'s long names and format. Four reviews found defects in
+the change before it landed, none in code that had shipped: a partition named
+as the disk got a table written inside it; a disk with an MBR or an
+unreadable GPT was erased without `--mode erase`; e2fsprogs held `Mount` by
+identity, so any script the shell ran could format a disk (it now keeps
+`Mount` only as far as a spawner that names it directly holds it); a link a
+kept root held redirected the installer's manifest and seal writes off the
+root, and a planted `e2fsck.conf` its log; and a reinstall would overwrite
+another system's loader at `\EFI\BOOT\` on an ESP SlopOS had once made. Two
+**pre-existing** defects, fixed here: `open(2)` dropped `O_NOFOLLOW` beside
+`O_DIRECTORY`, so a directory walk that relies on the pair, Rust's
+`remove_dir_all` among them, followed a link swapped in under it
+(`test_open_directory_nofollow_refuses_a_link_to_a_directory`); and an ext4
+block cache full of pinned entries answered as device damage and remounted
+the volume read-only, which memory pressure alone could cause. Below the bar:
+any process can see the new root's mount point while an install runs, and
+the installer walks it without following links.
+
 Swept 2026-10-01: the crash record — the panic path's polled writes to the
 crash partition and the store's claim on it, `/dev/crash`'s listing, reads and
 unlinks, `bootctl collect` writing what a record says into `/var/log/crash`

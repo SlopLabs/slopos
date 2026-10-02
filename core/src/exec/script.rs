@@ -4,6 +4,7 @@
 
 use slopos_abi::Errno;
 use slopos_fs::vfs::CanonPath;
+use slopos_fs::vfs::canon::canonicalise_at;
 use slopos_ostd::KVec;
 
 use super::{open_executable, read_exact_at, resolve_program, trim_nul_bytes};
@@ -24,6 +25,15 @@ pub struct ExecProgram {
 }
 
 impl ExecProgram {
+    /// Whether `path`, the caller's spelling against `cwd`, names the image
+    /// itself, with no `#!` line or link between: only then are the
+    /// arguments the image runs with the caller's own.
+    pub fn named_directly(&self, path: &[u8], cwd: &[u8]) -> bool {
+        self.prefix.is_empty()
+            && canonicalise_at(trim_nul_bytes(path), cwd)
+                .is_ok_and(|named| named.as_bytes() == self.image.as_bytes())
+    }
+
     /// The argument vector the loaded image receives: the caller's, or for a
     /// script `[interpreter, optional argument, script path, argv[1..]]`.
     pub fn argv<'a>(&'a self, argv: Option<&[&'a [u8]]>) -> Result<Option<KVec<&'a [u8]>>, Errno> {

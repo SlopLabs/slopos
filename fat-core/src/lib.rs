@@ -1,6 +1,6 @@
 //! FAT32 over a byte-addressed device, as an EFI system partition needs it:
-//! read any file, create 8.3-named files and directories, and replace a file
-//! without a window in which it is half written.
+//! format a volume, read any file, create files and directories under any
+//! name, and replace a file without a window in which it is half written.
 //!
 //! A replacement is copy-on-write. The new contents go into clusters nothing
 //! references, the FAT that chains them is written, and only then is the
@@ -12,9 +12,11 @@
 //! configuration that fits one sector is therefore replaced atomically, and so
 //! is a kernel image.
 //!
-//! Long names are read, so a volume a host formatted with `mkfs.fat` and
-//! populated with `mcopy` is fully visible; names this crate *creates* must fit
-//! 8.3. Replacing a file keeps whatever names it already had.
+//! A name that fits 8.3, its case kept by the `DIR_NTRes` bits, is stored as a
+//! short entry alone; any other gets long-name entries and a generated 8.3
+//! alias, as the FAT specification has Windows make them, so `\EFI\SlopOS`
+//! and `limine.conf` read back as given. Replacing a file keeps whatever names
+//! it already had.
 //!
 //! The whole FAT is held in memory: an ESP of a few hundred megabytes has a
 //! FAT of a few hundred kilobytes, and every allocation then costs no read.
@@ -55,7 +57,8 @@ pub enum Error {
     IsADirectory,
     Exists,
     NoSpace,
-    /// Empty, not 8.3, or carrying a character FAT forbids.
+    /// Empty, longer than 255 UTF-16 units, ending in a space or a period, or
+    /// carrying a character a long name may not hold.
     InvalidName,
     DirectoryNotEmpty,
     /// Larger than a FAT file can be (4 GiB - 1), or a device too small to
@@ -87,6 +90,13 @@ const NTRES_LOWER_BASE: u8 = 0x08;
 const NTRES_LOWER_EXT: u8 = 0x10;
 
 const FREE_ENTRY: u8 = 0xE5;
+/// A long name's UTF-16 units, at most.
+const LONG_NAME_MAX: usize = 255;
+/// UTF-16 units one long-name entry holds, and where in it each lies.
+const LONG_UNITS: usize = 13;
+const LONG_OFFSETS: [usize; LONG_UNITS] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+/// Ordinal bit of the long-name entry holding a name's last part.
+const LAST_LONG_ENTRY: u8 = 0x40;
 const END_OF_DIRECTORY: u8 = 0x00;
 
 const FSINFO_LEAD: u32 = 0x4161_5252;
@@ -139,6 +149,7 @@ pub struct Entry {
     /// The long name where there is one, else the short name as `NAME.EXT`.
     pub name: String,
     pub short_name: String,
+    short: [u8; 11],
     pub is_dir: bool,
     pub size: u32,
     first_cluster: u32,
@@ -463,6 +474,7 @@ impl<D: Device> Volume<D> {
                 out.push(Entry {
                     name,
                     short_name,
+                    short,
                     is_dir: attr & ATTR_DIRECTORY != 0,
                     size: le32(raw, 28),
                     first_cluster: (le16(raw, 20) << 16) | le16(raw, 26),
@@ -575,10 +587,10 @@ impl<D: Device> Volume<D> {
         let (parent, name) = Self::split(path)?;
         let dir = self.dir_cluster(parent)?;
         let existing = self.find(dir, name)?;
-        let short = match &existing {
+        let fresh = match &existing {
             Some(e) if e.is_dir => return Err(Error::IsADirectory),
             Some(_) => None,
-            None => Some(short_name(name)?),
+            None => Some(self.new_name(dir, name)?),
         };
 
         let chain = self.store(data)?;
@@ -600,8 +612,8 @@ impl<D: Device> Volume<D> {
                 self.release(&old_chain);
             }
             None => {
-                let (short, ntres) = short.ok_or(Error::InvalidName)?;
-                self.insert(dir, &short, ntres, ATTR_ARCHIVE, first, size)?;
+                let fresh = fresh.ok_or(Error::InvalidName)?;
+                self.insert(dir, &fresh, ATTR_ARCHIVE, first, size)?;
             }
         }
         self.write_fat()?;
@@ -616,7 +628,7 @@ impl<D: Device> Volume<D> {
         if self.find(parent, name)?.is_some() {
             return Err(Error::Exists);
         }
-        let (short, ntres) = short_name(name)?;
+        let fresh = self.new_name(parent, name)?;
         let chain = self.allocate(1)?;
         let cluster = chain[0];
         let mut buf = vec![0u8; self.g.cluster_bytes()];
@@ -648,7 +660,7 @@ impl<D: Device> Volume<D> {
         }
         self.write_fat()?;
         self.dev.flush()?;
-        self.insert(parent, &short, ntres, ATTR_DIRECTORY, cluster, 0)?;
+        self.insert(parent, &fresh, ATTR_DIRECTORY, cluster, 0)?;
         self.write_fsinfo()?;
         self.dev.flush()
     }
@@ -680,48 +692,207 @@ impl<D: Device> Volume<D> {
         self.dev.flush()
     }
 
-    /// Put a short entry into the directory at `dir`, growing it by a cluster
-    /// when it has no free slot.
+    /// The entries `name` takes in the directory at `dir`: a short entry
+    /// alone when it fits 8.3, else long-name entries and an alias no entry
+    /// there already has.
+    fn new_name(&mut self, dir: u32, name: &str) -> Result<NewName, Error> {
+        if let Ok((short, ntres)) = short_name(name) {
+            return Ok(NewName {
+                short,
+                ntres,
+                long: Vec::new(),
+            });
+        }
+        let units = long_units(name)?;
+        let taken: Vec<[u8; 11]> = self.entries(dir)?.into_iter().map(|e| e.short).collect();
+        let short = alias(name, &taken)?;
+        Ok(NewName {
+            short,
+            ntres: 0,
+            long: long_entries(&units, short_checksum(&short)),
+        })
+    }
+
+    /// Put `name`'s entries into the directory at `dir`, in a run of free
+    /// slots, growing the directory when it has none long enough. The short
+    /// entry is written last, behind a flush: a crash before it leaves only
+    /// long-name entries no short entry claims, which every reader skips.
     fn insert(
         &mut self,
         dir: u32,
-        short: &[u8; 11],
-        ntres: u8,
+        name: &NewName,
         attr: u8,
         first: u32,
         size: u32,
     ) -> Result<(), Error> {
-        let chain = self.chain(dir)?;
+        let needed = name.long.len() + 1;
+        let mut chain = self.chain(dir)?;
         let cb = self.g.cluster_bytes();
         let mut buf = vec![0u8; cb];
-        let mut slot = None;
+        let mut run: Vec<u64> = Vec::new();
         'search: for &cluster in &chain {
             self.read_cluster(cluster, &mut buf)?;
             for (i, raw) in buf.chunks_exact(ENTRY).enumerate() {
                 if raw[0] == END_OF_DIRECTORY || raw[0] == FREE_ENTRY {
-                    slot = Some(self.g.cluster_offset(cluster) + (i * ENTRY) as u64);
-                    break 'search;
+                    run.push(self.g.cluster_offset(cluster) + (i * ENTRY) as u64);
+                    if run.len() == needed {
+                        break 'search;
+                    }
+                } else {
+                    run.clear();
                 }
             }
         }
-        let at = match slot {
-            Some(at) => at,
-            None => {
-                let grown = self.allocate(1)?;
-                let last = *chain.last().ok_or(Error::Corrupt)?;
-                let zero = vec![0u8; cb];
-                let at = self.g.cluster_offset(grown[0]);
-                self.dev.write_at(at, &zero)?;
-                self.set_fat(last, grown[0]);
-                self.write_fat()?;
-                self.dev.flush()?;
-                at
+        if run.len() < needed {
+            let more = ((needed - run.len()) * ENTRY).div_ceil(cb);
+            let grown = self.allocate(more)?;
+            let zero = vec![0u8; cb];
+            for &cluster in &grown {
+                self.dev.write_at(self.g.cluster_offset(cluster), &zero)?;
             }
-        };
+            let last = *chain.last().ok_or(Error::Corrupt)?;
+            self.set_fat(last, grown[0]);
+            self.write_fat()?;
+            self.dev.flush()?;
+            chain.extend_from_slice(&grown);
+            for cluster in grown {
+                let base = self.g.cluster_offset(cluster);
+                run.extend((0..cb / ENTRY).map(|i| base + (i * ENTRY) as u64));
+            }
+            run.truncate(needed);
+        }
+        for (&at, raw) in run.iter().zip(&name.long) {
+            self.dev.write_at(at, raw)?;
+        }
+        if !name.long.is_empty() {
+            self.dev.flush()?;
+        }
         let mut raw = [0u8; ENTRY];
-        write_short(&mut raw, short, ntres, attr, first, size);
-        self.dev.write_at(at, &raw)
+        write_short(&mut raw, &name.short, name.ntres, attr, first, size);
+        self.dev.write_at(run[needed - 1], &raw)
     }
+}
+
+/// The directory entries a new name is stored as.
+struct NewName {
+    short: [u8; 11],
+    ntres: u8,
+    /// In the order they are stored: the last part of the name first.
+    long: Vec<[u8; ENTRY]>,
+}
+
+/// Characters a long name may hold beyond those of an 8.3 one.
+fn is_long_char(c: char) -> bool {
+    !c.is_control() && !"\"*/:<>?\\|".contains(c)
+}
+
+fn long_units(name: &str) -> Result<Vec<u16>, Error> {
+    let units: Vec<u16> = name.encode_utf16().collect();
+    if units.is_empty()
+        || units.len() > LONG_NAME_MAX
+        || name.ends_with(['.', ' '])
+        || !name.chars().all(is_long_char)
+    {
+        return Err(Error::InvalidName);
+    }
+    Ok(units)
+}
+
+/// The 8.3 alias of a long name, as the specification's basis-name
+/// algorithm makes it: uppercased, spaces and leading periods dropped, what an
+/// 8.3 name cannot hold as `_`, the base up to the first period and the
+/// extension after the last. That basis stands alone when it spells the whole
+/// name and no entry in `taken` has it; otherwise it takes the lowest `~n` tail
+/// none has.
+fn alias(name: &str, taken: &[[u8; 11]]) -> Result<[u8; 11], Error> {
+    let oem = |c: char| match u8::try_from(c.to_ascii_uppercase()) {
+        Ok(b) if is_short_char(b) => b,
+        _ => b'_',
+    };
+    let trimmed = name.trim_start_matches(['.', ' ']);
+    let lossy = trimmed.len() != name.len()
+        || trimmed
+            .chars()
+            .any(|c| c != '.' && oem(c) == b'_' && c != '_');
+    let base: Vec<u8> = trimmed
+        .chars()
+        .take_while(|&c| c != '.')
+        .filter(|&c| c != ' ')
+        .map(oem)
+        .collect();
+    let ext: Vec<u8> = match trimmed.rfind('.') {
+        Some(dot) => trimmed[dot + 1..]
+            .chars()
+            .filter(|&c| c != ' ')
+            .map(oem)
+            .collect(),
+        None => Vec::new(),
+    };
+    let dots = trimmed.matches('.').count();
+    let fits = !lossy && base.len() <= 8 && ext.len() <= 3 && dots <= 1;
+    let (base, ext) = (&base[..base.len().min(8)], &ext[..ext.len().min(3)]);
+    let compose = |tail: &[u8]| {
+        let keep = base.len().min(8 - tail.len());
+        let mut short = [b' '; 11];
+        short[..keep].copy_from_slice(&base[..keep]);
+        short[keep..keep + tail.len()].copy_from_slice(tail);
+        short[8..8 + ext.len()].copy_from_slice(ext);
+        if short[0] == FREE_ENTRY {
+            short[0] = 0x05;
+        }
+        short
+    };
+    if fits && !taken.contains(&compose(&[])) {
+        return Ok(compose(&[]));
+    }
+    for n in 1..=999_999u32 {
+        let mut digits = [0u8; 7];
+        let short = compose(format_tail(n, &mut digits));
+        if !taken.contains(&short) {
+            return Ok(short);
+        }
+    }
+    Err(Error::Exists)
+}
+
+fn format_tail(mut n: u32, out: &mut [u8; 7]) -> &[u8] {
+    let mut at = out.len();
+    while n > 0 {
+        at -= 1;
+        out[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    at -= 1;
+    out[at] = b'~';
+    &out[at..]
+}
+
+/// The long-name entries holding `units`, 13 to an entry, the last part
+/// first, each tagged with its ordinal and `checksum`, the alias's.
+fn long_entries(units: &[u16], checksum: u8) -> Vec<[u8; ENTRY]> {
+    let parts = units.len().div_ceil(LONG_UNITS);
+    let mut out = Vec::with_capacity(parts);
+    for part in (0..parts).rev() {
+        let mut raw = [0u8; ENTRY];
+        let ordinal = part as u8 + 1;
+        raw[0] = if part + 1 == parts {
+            ordinal | LAST_LONG_ENTRY
+        } else {
+            ordinal
+        };
+        raw[11] = ATTR_LONG_NAME;
+        raw[13] = checksum;
+        for (i, at) in LONG_OFFSETS.into_iter().enumerate() {
+            let unit = match (part * LONG_UNITS + i).cmp(&units.len()) {
+                core::cmp::Ordering::Less => units[part * LONG_UNITS + i],
+                core::cmp::Ordering::Equal => 0x0000,
+                core::cmp::Ordering::Greater => 0xFFFF,
+            };
+            raw[at..at + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+        out.push(raw);
+    }
+    out
 }
 
 /// Split a path into its components, dropping empty ones and `.`.
@@ -834,7 +1005,7 @@ fn short_checksum(short: &[u8; 11]) -> u8 {
 /// match is an orphan, and the short name stands alone.
 #[derive(Default)]
 struct LongName {
-    parts: Vec<(u8, [u16; 13])>,
+    parts: Vec<(u8, [u16; LONG_UNITS])>,
     at: Vec<u64>,
     checksum: u8,
     expected: u8,
@@ -849,7 +1020,7 @@ impl LongName {
 
     fn push(&mut self, raw: &[u8], at: u64) {
         let ord = raw[0] & 0x3F;
-        if raw[0] & 0x40 != 0 {
+        if raw[0] & LAST_LONG_ENTRY != 0 {
             self.clear();
             self.checksum = raw[13];
             self.expected = ord;
@@ -858,15 +1029,7 @@ impl LongName {
             self.clear();
             return;
         }
-        let mut units = [0u16; 13];
-        let spans = [(1usize, 5usize), (14, 6), (28, 2)];
-        let mut n = 0;
-        for (start, count) in spans {
-            for k in 0..count {
-                units[n] = u16::from_le_bytes([raw[start + 2 * k], raw[start + 2 * k + 1]]);
-                n += 1;
-            }
-        }
+        let units = LONG_OFFSETS.map(|at| u16::from_le_bytes([raw[at], raw[at + 1]]));
         self.parts.push((ord, units));
         self.at.push(at);
         self.expected = ord - 1;
@@ -897,19 +1060,20 @@ impl LongName {
     }
 }
 
-/// Lay a fresh FAT32 volume over the first `bytes` of `dev`: sectors of the
-/// device's logical block size, two FATs, the largest cluster up to 4 KiB
-/// that still leaves FAT32's minimum cluster count, and an empty root
-/// directory.
-pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<(), Error> {
-    let sector = dev.block_size() as usize;
-    if !matches!(sector, 512 | 1024 | 2048 | 4096) {
-        return Err(Error::SectorTooSmall);
-    }
-    let total = u32::try_from(bytes / sector as u64).map_err(|_| Error::TooLarge)?;
-    let reserved = 32u32;
-    let fats = 2u32;
-    let mut chosen = None;
+/// Reserved sectors a volume starts with at least: the boot sector, FSInfo and
+/// their backups at 6 and 7, as the specification lays them out.
+const MIN_RESERVED: u32 = 32;
+const FATS: u32 = 2;
+/// Where a volume's data region starts, from the volume's own start: the
+/// boundary partitions are placed on, so each cluster lies inside one
+/// physical block and one transfer unit, as UEFI asks of an ESP (§13.3.1.1).
+const DATA_ALIGN_BYTES: u64 = 1 << 20;
+/// The most `BPB_RsvdSecCnt` holds.
+const MAX_RESERVED: u32 = u16::MAX as u32;
+
+/// The largest cluster up to 4 KiB that leaves FAT32's minimum cluster count
+/// over `total` sectors after `reserved`, and the FAT that describes them.
+fn fat_layout(total: u32, reserved: u32, sector: usize) -> Result<Option<(u32, u32)>, Error> {
     for spc in [8u32, 4, 2, 1]
         .into_iter()
         .filter(|&spc| spc as usize * sector <= 4096)
@@ -917,24 +1081,70 @@ pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<()
         // Fixpoint: the FAT's own size eats the space it describes.
         let mut fat_sectors = 1u32;
         loop {
-            let data = total.saturating_sub(reserved + fats * fat_sectors);
+            let data = total.saturating_sub(reserved + FATS * fat_sectors);
             let clusters = data / spc;
             let need = u32::try_from((u64::from(clusters) + 2) * 4)
                 .map_err(|_| Error::TooLarge)?
                 .div_ceil(sector as u32);
             if need <= fat_sectors {
                 if clusters >= FAT32_MIN_CLUSTERS {
-                    chosen = Some((spc, fat_sectors));
+                    return Ok(Some((spc, fat_sectors)));
                 }
                 break;
             }
             fat_sectors = need;
         }
-        if chosen.is_some() {
+    }
+    Ok(None)
+}
+
+fn zero_fill<D: Device>(dev: &mut D, offset: u64, len: u64) -> Result<(), Error> {
+    let zero = vec![0u8; MAX_EXTENT];
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(MAX_EXTENT as u64) as usize;
+        dev.write_at(offset + done, &zero[..n])?;
+        done += n as u64;
+    }
+    Ok(())
+}
+
+/// Lay a fresh FAT32 volume over the first `bytes` of `dev`: sectors of the
+/// device's logical block size, two FATs, the largest cluster up to 4 KiB
+/// that still leaves FAT32's minimum cluster count, the reserved region grown
+/// until the data region starts on [`DATA_ALIGN_BYTES`], and an empty root
+/// directory. `serial` is the volume ID, which Linux reads as the
+/// filesystem's UUID.
+pub fn format<D: Device>(
+    dev: &mut D,
+    bytes: u64,
+    label: &[u8; 11],
+    serial: u32,
+) -> Result<(), Error> {
+    let sector = dev.block_size() as usize;
+    if !matches!(sector, 512 | 1024 | 2048 | 4096) {
+        return Err(Error::SectorTooSmall);
+    }
+    let total = u32::try_from(bytes / sector as u64).map_err(|_| Error::TooLarge)?;
+    let fats = FATS;
+    let align = (DATA_ALIGN_BYTES / sector as u64) as u32;
+    let mut reserved = MIN_RESERVED;
+    let (mut spc, mut fat_sectors) = fat_layout(total, reserved, sector)?.ok_or(Error::TooLarge)?;
+    // A longer reserved region shrinks the FAT, never grows it, so this only
+    // climbs, to where the data region's start stops moving.
+    loop {
+        let aligned = (reserved + fats * fat_sectors).next_multiple_of(align) - fats * fat_sectors;
+        if aligned == reserved || aligned > MAX_RESERVED {
             break;
         }
+        match fat_layout(total, aligned, sector)? {
+            Some(layout) => {
+                reserved = aligned;
+                (spc, fat_sectors) = layout;
+            }
+            None => break,
+        }
     }
-    let (spc, fat_sectors) = chosen.ok_or(Error::TooLarge)?;
 
     let mut boot = vec![0u8; sector];
     boot[..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
@@ -953,7 +1163,7 @@ pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<()
     put16(&mut boot, 50, 6);
     boot[64] = 0x80;
     boot[66] = 0x29;
-    put32(&mut boot, 67, 0x5105_0505);
+    put32(&mut boot, 67, serial);
     boot[71..82].copy_from_slice(label);
     boot[82..90].copy_from_slice(b"FAT32   ");
     boot[510] = 0x55;
@@ -967,30 +1177,28 @@ pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<()
     put32(&mut info, 492, 3);
     put32(&mut info, 508, FSINFO_TRAIL);
 
-    let zero = vec![0u8; sector];
-    for s in 0..reserved {
-        dev.write_at(u64::from(s) * sector as u64, &zero)?;
-    }
-    for copy in [0u64, 6] {
-        dev.write_at(copy * sector as u64, &boot)?;
-        dev.write_at((copy + 1) * sector as u64, &info)?;
+    let at = |sectors: u32| u64::from(sectors) * sector as u64;
+    zero_fill(dev, 0, at(reserved + fats * fat_sectors))?;
+    dev.write_at(at(6), &boot)?;
+    for copy in [0u32, 6] {
+        dev.write_at(at(copy + 1), &info)?;
     }
     let mut first_fat = vec![0u8; sector];
     put32(&mut first_fat, 0, 0x0FFF_FFF8);
     put32(&mut first_fat, 4, END_OF_CHAIN);
     put32(&mut first_fat, 8, END_OF_CHAIN);
     for copy in 0..fats {
-        let base = u64::from(reserved + copy * fat_sectors) * sector as u64;
-        dev.write_at(base, &first_fat)?;
-        for s in 1..fat_sectors {
-            dev.write_at(base + u64::from(s) * sector as u64, &zero)?;
-        }
+        dev.write_at(at(reserved + copy * fat_sectors), &first_fat)?;
     }
     let root = u64::from(reserved + fats * fat_sectors) * sector as u64;
     let mut cluster = vec![0u8; spc as usize * sector];
     // The boot sector's label is only believed alongside this entry.
     write_short(&mut cluster[..ENTRY], label, 0, ATTR_VOLUME_ID, 0, 0);
     dev.write_at(root, &cluster)?;
+    // The boot sector last, behind the rest: until it lands the partition
+    // starts with no volume, which an install cut short reformats.
+    dev.flush()?;
+    dev.write_at(0, &boot)?;
     dev.flush()
 }
 

@@ -68,6 +68,16 @@ impl Guid {
         }
     }
 
+    /// A random GUID, RFC 9562's version 4, from sixteen random bytes: the
+    /// version in the high nibble of the stored byte 7, which the
+    /// little-endian third field puts there, and the variant in the high
+    /// bits of byte 8.
+    pub const fn random(mut bytes: [u8; 16]) -> Guid {
+        bytes[7] = (bytes[7] & 0x0F) | 0x40;
+        bytes[8] = (bytes[8] & 0x3F) | 0x80;
+        Guid(bytes)
+    }
+
     pub const fn is_zero(&self) -> bool {
         let mut i = 0;
         while i < 16 {
@@ -134,6 +144,15 @@ mod tests {
         assert!(Guid::parse("c12a7328-f81f-11d2-ba4b-00a0c93ec93").is_none());
         assert!(Guid::parse("g12a7328-f81f-11d2-ba4b-00a0c93ec93b").is_none());
         assert!(Guid::parse("").is_none());
+    }
+
+    #[test]
+    fn a_random_guid_spells_version_4_and_the_rfc_variant() {
+        for fill in [0x00, 0xFF, 0x5A] {
+            let text = Guid::random([fill; 16]).to_string();
+            assert_eq!(&text[14..15], "4", "{text}");
+            assert!("89ab".contains(&text[19..20]), "{text}");
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ set -euo pipefail
 # Usage: build_recipes.sh [<name>...]
 #        build_recipes.sh --print-stamp [<name>...]
 #        build_recipes.sh --install-programs <prefix>
+#        build_recipes.sh --fetch-source [<name>...]
 #
 # A recipe is a pinned upstream tarball, its checksum, its dependencies, a
 # build template and at most the patches that teach the project the target: a
@@ -51,13 +52,17 @@ set -euo pipefail
 # Everything builds shared into `<recipes dir>/prefix` with `-z defs`, so a
 # libc function slibc lacks fails here rather than at `dlopen` on SlopOS. A
 # library's run path is `$ORIGIN`; a program's reaches `lib/` from `bin/` or
-# `libexec/<name>/`. Each recipe's stamp covers its directory, this file,
-# `make_slopos_cross.sh --print-stamp`, the host tools, the prefixes and its
-# dependencies' stamps; `--print-stamp` prints `<name> <stamp>` per recipe.
+# `libexec/<name>/`. A recipe that declares no library installs nothing under
+# `include/` or `lib/`. Each recipe's stamp covers its directory, this file,
+# `make_slopos_cross.sh --print-stamp`, the host tools its template runs, the
+# prefixes and its dependencies' stamps; `--print-stamp` prints `<name>
+# <stamp>` per recipe.
 #
 # `--install-programs` copies what each built recipe that declares a program
 # installed outside `include/` and `lib/` into another prefix; its libraries
-# travel with the target sysroot.
+# travel with the target sysroot. `--fetch-source` prints the path of each
+# recipe's tarball, fetching and checking it, which is the source that travels
+# with what a medium distributes of it.
 #
 # Tarballs are cached in third_party/recipes/; offline, pre-populate it or set
 # `<NAME>_URL` (`ZLIB_URL`, ...) to a local copy.
@@ -77,10 +82,15 @@ die() {
 }
 
 PRINT_STAMP=0
+FETCH_SOURCE=0
 INSTALL_PROGRAMS=""
 case "${1:-}" in
     --print-stamp)
         PRINT_STAMP=1
+        shift
+        ;;
+    --fetch-source)
+        FETCH_SOURCE=1
         shift
         ;;
     --install-programs)
@@ -129,6 +139,37 @@ all_recipes() {
     (cd "$RECIPES" && for dir in */; do printf '%s\n' "${dir%/}"; done) | LC_ALL=C sort
 }
 
+fetch() {
+    local name="$1" version url sha ext file var got
+    version="$(recipe_value "$name" version)"
+    url="$(recipe_value "$name" url)"
+    sha="$(recipe_value "$name" sha256)"
+    case "$url" in
+        *.tar.gz) ext=tar.gz ;;
+        *.tar.xz) ext=tar.xz ;;
+        *.tar.bz2) ext=tar.bz2 ;;
+        *) die "$name: $url is not a .tar.gz, .tar.xz or .tar.bz2" ;;
+    esac
+    file="$CACHE/$name-$version.$ext"
+    var="$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')_URL"
+    protocols=(--proto =https --proto-redir =https)
+    if [ -n "${!var:-}" ]; then
+        url="${!var}"
+        protocols=()
+    fi
+    if [ ! -f "$file" ]; then
+        mkdir -p "$CACHE"
+        echo "$SELF: fetching $url" >&2
+        curl -L "${protocols[@]}" --fail --show-error "$url" -o "$file.part" || die "could not fetch $url
+       An offline checkout pre-populates third_party/recipes/$(basename "$file"),
+       or points $var at a local copy."
+        mv "$file.part" "$file"
+    fi
+    got="$(sha256sum "$file" | cut -d' ' -f1)"
+    [ "$got" = "$sha" ] || die "$(basename "$file") is $got, not the pinned $sha — delete it to refetch"
+    printf '%s\n' "$file"
+}
+
 ORDER=()
 declare -A VISIT=()
 visit() {
@@ -153,6 +194,13 @@ for name in "$@"; do
     visit "$name"
 done
 
+if [ "$FETCH_SOURCE" -eq 1 ]; then
+    for name in "${ORDER[@]}"; do
+        fetch "$name"
+    done
+    exit 0
+fi
+
 if [ -n "$INSTALL_PROGRAMS" ]; then
     for name in "${ORDER[@]}"; do
         [ -n "$(recipe_values "$name" program)" ] || continue
@@ -167,7 +215,6 @@ if [ -n "$INSTALL_PROGRAMS" ]; then
     exit 0
 fi
 
-# The build systems join the stamp with their versions.
 CXX_TOOLS="$("$SCRIPT_DIR/cxx_host_tools.sh")"
 eval "$CXX_TOOLS"
 . "$SCRIPT_DIR/lib/rustc_build_settings.sh"
@@ -176,10 +223,39 @@ BUILD_TRIPLE=x86_64-pc-linux-gnu
 eval "$(rbs_llvm_archivers "$LLVM_AR")" || die "no llvm-ranlib beside $LLVM_AR"
 LLVM_AR="$RBS_AR"
 LLVM_RANLIB="$RBS_RANLIB"
-for tool in cmake meson ninja make perl pkg-config git; do
-    command -v "$tool" >/dev/null 2>&1 || die "$tool is required to build the recipes"
+# The host tools each template runs, which join its recipes' stamps.
+template_tools() {
+    case "$1" in
+        cmake) echo cmake ninja pkg-config ;;
+        meson) echo meson ninja pkg-config ;;
+        openssl) echo perl make ;;
+        autotools) echo make pkg-config ;;
+    esac
+}
+tool_version() {
+    case "$1" in
+        cmake | make) "$1" --version | head -n 1 ;;
+        perl) perl -e 'print "perl $]\n"' ;;
+        git) git --version ;;
+        *) printf '%s %s\n' "$1" "$("$1" --version)" ;;
+    esac
+}
+declare -A TOOL_VERSION=()
+for name in "${ORDER[@]}"; do
+    tools="$(template_tools "$(recipe_value "$name" template)")"
+    [ -z "$(recipe_values "$name" patch)" ] || tools="$tools git"
+    for tool in $tools; do
+        [ -z "${TOOL_VERSION[$tool]:-}" ] || continue
+        command -v "$tool" >/dev/null 2>&1 || die "$tool is required to build $name"
+        TOOL_VERSION[$tool]="$(tool_version "$tool")"
+    done
 done
-HOST_TOOLS="$(cmake --version | head -n 1; meson --version; ninja --version; make --version | head -n 1; perl -e 'print "perl $]\n"'; pkg-config --version)"
+recipe_tools() {
+    local tool
+    for tool in $(template_tools "$(recipe_value "$1" template)"); do
+        printf '%s\n' "${TOOL_VERSION[$tool]}"
+    done
+}
 
 CROSS_STAMP="$(BUILD_DIR="$BUILD_DIR" "$SCRIPT_DIR/make_slopos_cross.sh" --print-stamp)" ||
     die "the cross compiler's inputs are not there — see above"
@@ -192,7 +268,8 @@ stamp_want() {
     local name="$1" dep
     if [ -z "${WANT[$name]:-}" ]; then
         WANT[$name]="$(
-            printf '%s\n' "$DRIVER_STAMP" "$CROSS_STAMP" "$HOST_TOOLS" "$PREFIX" "$GUEST_PREFIX"
+            printf '%s\n' "$DRIVER_STAMP" "$CROSS_STAMP" "$PREFIX" "$GUEST_PREFIX"
+            recipe_tools "$name"
             (cd "$RECIPES/$name" && find . -type f -print | LC_ALL=C sort | xargs sha256sum)
             [ "$(recipe_value "$name" template)" != cmake ] || printf '%s\n' "$CMAKE_PLATFORM_STAMP"
             for dep in $(recipe_value "$name" depends); do
@@ -284,36 +361,6 @@ for var in $(compgen -e); do
     esac
 done
 
-fetch() {
-    local name="$1" version url sha ext file var got
-    version="$(recipe_value "$name" version)"
-    url="$(recipe_value "$name" url)"
-    sha="$(recipe_value "$name" sha256)"
-    case "$url" in
-        *.tar.gz) ext=tar.gz ;;
-        *.tar.xz) ext=tar.xz ;;
-        *.tar.bz2) ext=tar.bz2 ;;
-        *) die "$name: $url is not a .tar.gz, .tar.xz or .tar.bz2" ;;
-    esac
-    file="$CACHE/$name-$version.$ext"
-    var="$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')_URL"
-    protocols=(--proto =https --proto-redir =https)
-    if [ -n "${!var:-}" ]; then
-        url="${!var}"
-        protocols=()
-    fi
-    if [ ! -f "$file" ]; then
-        mkdir -p "$CACHE"
-        echo "$SELF: fetching $url" >&2
-        curl -L "${protocols[@]}" --fail --show-error "$url" -o "$file.part" || die "could not fetch $url
-       An offline checkout pre-populates third_party/recipes/$(basename "$file"),
-       or points $var at a local copy."
-        mv "$file.part" "$file"
-    fi
-    got="$(sha256sum "$file" | cut -d' ' -f1)"
-    [ "$got" = "$sha" ] || die "$(basename "$file") is $got, not the pinned $sha — delete it to refetch"
-    printf '%s\n' "$file"
-}
 
 template_cmake() {
     local name="$1" work="$2" args=()
@@ -440,6 +487,9 @@ build_recipe() {
     }
 
     [ -d "$work/dest$PREFIX" ] || die "$name: the install put nothing under $PREFIX"
+    # A recipe of programs alone links its libraries into them, and the target
+    # sysroot takes the prefix's headers whole.
+    [ -n "$(recipe_values "$name" soname)" ] || rm -rf "$work/dest$PREFIX/include" "$work/dest$PREFIX/lib"
     local text
     for text in $(recipe_values "$name" license_file); do
         [ -f "$work/src/$text" ] || die "$name: the tarball carries no licence text $text"

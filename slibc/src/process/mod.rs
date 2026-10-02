@@ -368,6 +368,44 @@ pub unsafe extern "C" fn getsid(pid: i32) -> i32 {
     }
 }
 
+/// `daemon(3)`: carry on in a child, which the caller's parent no longer
+/// waits on, as the leader of a session of its own; in `/` unless `nochdir`,
+/// and with `/dev/null` as standard input, output and error unless
+/// `noclose`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
+    match fork() {
+        -1 => return -1,
+        0 => {}
+        _ => _exit(0),
+    }
+    if setsid() < 0 {
+        return -1;
+    }
+    if nochdir == 0 && crate::env::chdir(b"/\0".as_ptr()) < 0 {
+        return -1;
+    }
+    if noclose == 0 {
+        let null = match Sys::open(b"/dev/null\0".as_ptr(), slopos_abi::fs::O_RDWR as i32, 0) {
+            Ok(fd) => fd,
+            Err(e) => {
+                errno::errno_set(e.raw());
+                return -1;
+            }
+        };
+        for std in 0..3 {
+            if let Err(e) = Sys::dup2(null, std) {
+                errno::errno_set(e.raw());
+                return -1;
+            }
+        }
+        if null > 2 {
+            let _ = Sys::close(null);
+        }
+    }
+    0
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setsid() -> i32 {
     match Sys::setsid() {

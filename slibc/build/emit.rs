@@ -652,8 +652,8 @@ const HANDLER_SLOT: &str = "    union {
 /// `siginfo_t`'s payload is 29 opaque ints in the contract, the `libc` crate's
 /// shape. The header overlays C's field names at Linux's offsets: one int of
 /// padding at 12, the union at 16, eight-aligned for the `union sigval`
-/// `si_value` at 24. Tagged structs outside the union and glibc's member-name
-/// macros keep this valid C++ as well as C.
+/// `si_value` at 24 and a fault's `si_addr` at 16. Tagged structs outside the
+/// union and glibc's member-name macros keep this valid C++ as well as C.
 const SIGINFO_KILL: &str = "struct __slibc_siginfo_kill {
     pid_t __si_pid;
     uid_t __si_uid;
@@ -664,18 +664,23 @@ struct __slibc_siginfo_rt {
     uid_t __si_uid;
     union sigval __si_value;
 };
+struct __slibc_siginfo_fault {
+    void *__si_addr;
+};
 ";
 const SIGINFO_PAYLOAD: &str = "    int __si_fill;
     union {
         int _pad[28];
         struct __slibc_siginfo_kill __si_fields;
         struct __slibc_siginfo_rt __si_rt;
+        struct __slibc_siginfo_fault __si_fault;
     };
 ";
 const SIGINFO_MEMBERS: &str = "#define si_pid __si_fields.__si_pid
 #define si_uid __si_fields.__si_uid
 #define si_status __si_fields.__si_status
 #define si_value __si_rt.__si_value
+#define si_addr __si_fault.__si_addr
 ";
 
 /// POSIX's `union sigval`. The contract has the pointer arm only, as the

@@ -695,23 +695,9 @@ define_syscall!(syscall_execve
 
             // Here rather than in `do_exec`: past every fallible step, before
             // the new image's first instruction.
-            {
-                let (granted_flags, _) = exec::grants::grant_for(program.image.as_bytes());
-                let granted = slopos_ostd::authority::caps_from_task_flags(
-                    granted_flags | slopos_abi::task::TASK_FLAG_USER_MODE,
-                );
-                let before = slopos_ostd::task::ops::task_caps(ctx.task());
-                let after =
-                    slopos_ostd::task::ops::task_restrict_caps(ctx.task(), granted);
-                if after != before {
-                    slopos_ostd::klog_debug!(
-                        "exec: task {} authority {:#x} -> {:#x}",
-                        task_id,
-                        before,
-                        after,
-                    );
-                }
-            }
+            let named_directly =
+                ctx.with_cwd(|cwd| program.named_directly(path.as_bytes(), cwd));
+            exec::narrow_authority_for_exec(ctx.task(), task_id, &program.image, named_directly);
 
             exec::name_task_after(ctx.task(), path.as_bytes());
             slopos_sched::task::task_cleanup_for_exec(task_id);

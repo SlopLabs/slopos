@@ -11,11 +11,16 @@ use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFd
 use slopos_abi::task::{TASK_FLAG_NEW_PGRP, TaskPriority};
 
 use crate::env::environ;
-use crate::errno::{EBADF, EINVAL, ENOEXEC, ENOMEM, Errno};
+use crate::errno::{EAGAIN, EBADF, EINTR, EINVAL, ENOEXEC, ENOMEM, Errno};
 use crate::pal::{Pal, Sys};
-use crate::signal::{SIG_DFL, SIG_SETMASK, signal, sigprocmask};
+use crate::signal::{
+    SIG_BLOCK, SIG_DFL, SIG_IGN, SIG_SETMASK, SIGCHLD, SIGINT, SIGQUIT, sigaction, sigaddset,
+    signal, sigprocmask,
+};
 use crate::string::{strdup, u_strlen};
-use crate::types::{mode_t, pid_t, posix_spawn_file_actions_t, posix_spawnattr_t, sigset_t};
+use crate::types::{
+    mode_t, pid_t, posix_spawn_file_actions_t, posix_spawnattr_t, sigaction as SigAction, sigset_t,
+};
 
 pub const POSIX_SPAWN_RESETIDS: c_int = 0x01;
 pub const POSIX_SPAWN_SETPGROUP: c_int = 0x02;
@@ -388,6 +393,81 @@ pub unsafe extern "C" fn posix_spawnp(
     envp: *const *const u8,
 ) -> c_int {
     spawn(pid, file, true, file_actions, attrp, argv, envp)
+}
+
+const SHELL: &[u8] = b"/bin/sh\0";
+/// The wait status of a shell that could not be started, as if it exited 127.
+const SHELL_NOT_STARTED: c_int = 127 << 8;
+
+/// `system(3)`: `command` run by `/bin/sh -c` and waited for, answering its
+/// wait status, that of a shell exiting 127 when none could be run, or -1
+/// when no process could be made or its status had. SIGINT and SIGQUIT are
+/// ignored and SIGCHLD held while it runs, so an interrupt reaches the
+/// command and no handler reaps it first; the shell starts with the caller's
+/// mask and those two as the caller had them, a handler reset to the default.
+/// A null `command` asks whether there is a shell.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn system(command: *const u8) -> c_int {
+    if command.is_null() {
+        return c_int::from(Sys::access(SHELL.as_ptr(), slopos_abi::fs::X_OK).is_ok());
+    }
+    let mut ignore = SigAction::zeroed();
+    ignore.sa_sigaction = SIG_IGN;
+    let (mut old_int, mut old_quit) = (SigAction::zeroed(), SigAction::zeroed());
+    sigaction(SIGINT, &ignore, &mut old_int);
+    sigaction(SIGQUIT, &ignore, &mut old_quit);
+    let mut held = sigset_t::empty();
+    sigaddset(&mut held, SIGCHLD);
+    let mut mask = sigset_t::empty();
+    sigprocmask(SIG_BLOCK, &held, &mut mask);
+
+    let mut defaults = sigset_t::empty();
+    for (signal, old) in [(SIGINT, &old_int), (SIGQUIT, &old_quit)] {
+        if old.sa_sigaction != SIG_IGN {
+            sigaddset(&mut defaults, signal);
+        }
+    }
+    let mut attr: posix_spawnattr_t = core::mem::zeroed();
+    posix_spawnattr_init(&mut attr);
+    posix_spawnattr_setsigdefault(&mut attr, &defaults);
+    posix_spawnattr_setsigmask(&mut attr, &mask);
+    posix_spawnattr_setflags(
+        &mut attr,
+        (POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK) as c_short,
+    );
+    let argv = [b"sh\0".as_ptr(), b"-c\0".as_ptr(), command, ptr::null()];
+    let mut child: pid_t = 0;
+    let started = posix_spawn(
+        &mut child,
+        SHELL.as_ptr(),
+        ptr::null(),
+        &attr,
+        argv.as_ptr(),
+        ptr::null(),
+    );
+    posix_spawnattr_destroy(&mut attr);
+    let status = if started == 0 {
+        let mut status = 0;
+        loop {
+            match Sys::waitpid(child, &mut status, 0) {
+                Ok(_) => break status,
+                Err(e) if e == EINTR => {}
+                Err(e) => {
+                    crate::errno::errno_set(e.raw());
+                    break -1;
+                }
+            }
+        }
+    } else if started == ENOMEM.raw() || started == EAGAIN.raw() {
+        crate::errno::errno_set(started);
+        -1
+    } else {
+        SHELL_NOT_STARTED
+    };
+    sigaction(SIGINT, &old_int, ptr::null_mut());
+    sigaction(SIGQUIT, &old_quit, ptr::null_mut());
+    sigprocmask(SIG_SETMASK, &mask, ptr::null_mut());
+    status
 }
 
 #[derive(Clone, Copy)]

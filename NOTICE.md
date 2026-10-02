@@ -234,7 +234,8 @@ reach all four.
 rustc source tarball, and `just boot` installs the result at `/usr/local` on
 the development machine's root (`fs/assets/ext2-persist.img`), with each
 project's licence text under `share/licenses`, rustc's and cargo's under
-`share/doc`; neither is distributed. Each
+`share/doc`. An ISO built with `PAYLOAD=1` carries it, and the installer puts
+it at `/usr/local` on the disk it installs onto. Each
 keeps its upstream licence: rustc and cargo `MIT OR
 Apache-2.0`, LLVM, clang and lld `Apache-2.0 WITH LLVM-exception`.
 
@@ -251,8 +252,10 @@ and none is vendored into this repository.
 The C libraries cargo and git link for their network transports are built
 from pinned, unmodified upstream release tarballs by
 `scripts/build_recipes.sh`; each recipe records the tarball's URL and SHA-256,
-and none is vendored into this repository. They reach the toolchain install
-and the roots it is installed on only, and each remains © its authors under its own licence:
+and none is vendored into this repository. They reach the toolchain install,
+the roots it is installed on and an ISO's payload only, whose clone of the
+source carries every recipe's tarball in `third_party/recipes/`, and each
+remains © its authors under its own licence:
 
 - zlib (`toolchain/recipes/zlib/`): © Jean-loup Gailly and Mark Adler, `Zlib`.
 - nghttp2 (`toolchain/recipes/nghttp2/`): © the nghttp2 contributors, `MIT`.
@@ -373,6 +376,23 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+### e2fsprogs
+
+`mke2fs`, `e2fsck`, `resize2fs`, `tune2fs`, `debugfs` and `dumpe2fs`, built by
+the recipe `toolchain/recipes/e2fsprogs/` from the pinned, unmodified release
+tarball of e2fsprogs 1.47.4, ship in every base at `/sbin`, and with the
+toolchain's other programs at `/usr/local/sbin`: © Theodore Ts'o and the
+e2fsprogs contributors. They are separate programs aggregated onto the medium,
+under the licences e2fsprogs states in its `NOTICE`: `GPL-2.0-only`, with the
+`lib/ext2fs` and `lib/e2p` code they link `LGPL-2.0-only` (bar the CRC and
+red-black tree files there, which are `GPL-2.0-only` and `GPL-2.0-or-later`),
+the bundled `lib/uuid` `BSD-3-Clause` and `lib/et` and `lib/ss` under MIT-style
+permissions. They link the C library under its MIT option (above), statically
+link the libraries above, and link nothing else. Its `NOTICE` and
+`lib/uuid/COPYING` travel with them at `/usr/share/licenses/e2fsprogs/`, and
+every install medium carries the tarball they were built from, with the recipe
+that builds it, under `sources/`.
 
 ### Mozilla CA certificate bundle
 

@@ -60,9 +60,9 @@ selfhost_stage        := build_dir / "selfhost-stage"
 # Outside the root, so `just reset root` keeps what the guest pushed.
 guest_push_repo       := fs_image_dir / "guest-push.git"
 # A compiler session: the `core` compile peaks at 1.15 GiB anonymous, and the
-# file map's per-process cap is usable memory / 8 — 512 MiB at 4G, which the
-# kernel's link needs and 2G does not give.
-dev_qemu_mem          := env("DEV_QEMU_MEM", "4G")
+# file map's per-process cap is usable memory / 8, which the debug tests
+# kernel's link outgrew at 4G (refused at 126394 of its 124720 pages).
+dev_qemu_mem          := env("DEV_QEMU_MEM", "6G")
 # The toolchain's execs and forks hold interrupts masked for seconds under TCG,
 # which runs that work far slower than the timer; at the default threshold each
 # is an NMI report on the serial console of an hours-long build.
@@ -70,9 +70,15 @@ dev_watchdog          := "watchdog.miss_threshold=300"
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
 
+# The installer's medium beside the kernel and base: Limine for the ESP, and
+# with PAYLOAD=1 the toolchain at /usr/local and a clone of HEAD for /src.
+payload      := env("PAYLOAD", "0")
+payload_on   := if payload =~ '^(1|true|on|yes)$' { "1" } else { "0" }
+
 # One artifact per variant: a shared path lets whichever build ran last answer
-# for all three — to the gates, to gdb, to the ISO.
-kernel_release   := env("KERNEL_RELEASE", "0")
+# for all three — to the gates, to gdb, to the ISO. An ISO with the payload
+# installs a system that builds itself, ten times slower on a dev kernel.
+kernel_release   := env("KERNEL_RELEASE", payload_on)
 kernel_variant   := if kernel_release == "1" { "release" } else { "dev" }
 kernel_variant_tests := if kernel_release == "1" { "release-tests" } else { "tests" }
 kernel_elf       := build_dir / ("kernel-" + kernel_variant + ".elf")
@@ -80,6 +86,13 @@ kernel_elf_tests := build_dir / ("kernel-" + kernel_variant_tests + ".elf")
 kernel_features_tests := "slopos-testing/qemu-exit kernel/tests"
 
 iso          := build_dir / "slop.iso"
+install_medium := build_dir / "install.cpio"
+# `test-installer`'s medium: the optimized tests system, always with the payload
+# unless INSTALLER_PAYLOAD=0, whose install then clones a slot rather than
+# building one.
+iso_installer   := build_dir / "slop-installer.iso"
+installer_medium := build_dir / "install-tests.cpio"
+installer_live_cmdline := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip root=initramfs " + dev_watchdog + " tests.run=*ext2_aaa*,*installer*"
 iso_tests    := build_dir / "slop-tests.iso"
 # `test-elf`: a kernel built elsewhere, never the build's own ISO.
 iso_elf_tests := build_dir / "slop-elf-tests.iso"
@@ -131,6 +144,10 @@ userland_bins       := `. scripts/lib/base.sh && printf %s "$BASE_PROGRAMS"`
 coreutils_tools     := `. scripts/lib/base.sh && printf %s "$COREUTILS_TOOLS"`
 test_userland_bins  := `. scripts/lib/base.sh && printf %s "$BASE_TEST_PROGRAMS"`
 test_shared_objects := `. scripts/lib/base.sh && printf %s "$BASE_TEST_SHARED_OBJECTS"`
+base_recipe_programs := `. scripts/lib/base.sh && printf %s "$BASE_RECIPE_PROGRAMS"`
+base_recipes        := `. scripts/lib/base.sh && printf %s "$BASE_RECIPES"`
+recipes_prefix      := build_dir / "slopos-recipes/prefix"
+base_recipe_env     := "RECIPE_PREFIX=" + recipes_prefix + " RECIPE_PROGRAMS=\"" + base_recipe_programs + "\" RECIPE_LICENSES=\"" + base_recipes + "\""
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
@@ -275,11 +292,18 @@ export-file +ARGS:
     fi
     scripts/export_fs_file.sh "$file" "$image" "$out"
 
-_initramfs: _build-userland
-    COREUTILS_LINKS="{{coreutils_tools}}" scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
+# The recipes whose programs every base carries. Their cross build needs the
+# tests userland's libraries.
+_base-recipes: _build-userland-tests
+    BUILD_DIR={{build_dir}} scripts/build_recipes.sh {{base_recipes}}
 
-_initramfs-tests: _build-userland-tests
-    COREUTILS_LINKS="{{coreutils_tools}}" EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
+_initramfs: _build-userland _base-recipes
+    COREUTILS_LINKS="{{coreutils_tools}}" {{base_recipe_env}} \
+        scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
+
+_initramfs-tests: _build-userland-tests _base-recipes
+    COREUTILS_LINKS="{{coreutils_tools}}" EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" {{base_recipe_env}} \
+        scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
 # The host's half of a kernel build around scripts/build_kernel.sh, which the
 # guest runs alone: the toolchain before, the ELF gates after. `+slopos`, the
@@ -299,13 +323,36 @@ build: _fs-image (_kernel kernel_variant)
 [doc("Build the kernel ELF alone, skipping the fs image — for gate-only jobs")]
 build-kernel-only: (_kernel kernel_variant)
 
-[doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk. Honors BOOT_CMDLINE")]
-iso: _initramfs (_kernel kernel_variant)
-    KERNEL_ELF={{kernel_elf}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
+_install-medium:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    toolchain=""
+    if [ "{{payload_on}}" = 1 ]; then
+        toolchain="{{toolchain_install}}"
+    fi
+    LIMINE_DIR={{limine_dir}} scripts/build_install_medium.sh "{{install_medium}}" ${toolchain:+"$toolchain"}
+
+[doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk, and installs from it with /bin/installer. PAYLOAD=1 adds the toolchain and a clone of HEAD, which the installer copies to /usr/local and /src, and the release kernel. Honors BOOT_CMDLINE")]
+iso: _initramfs _install-medium (_kernel kernel_variant)
+    KERNEL_ELF={{kernel_elf}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} INSTALL_ARCHIVE={{install_medium}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
+
+# The live system `test-installer` boots: the tests system, so installer_test
+# runs, and the medium with the payload unless INSTALLER_PAYLOAD=0.
+_iso-installer: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    toolchain=""
+    if [[ ! "${INSTALLER_PAYLOAD:-1}" =~ ^(0|false|off|no)$ ]]; then
+        toolchain="{{toolchain_install}}"
+    fi
+    LIMINE_DIR={{limine_dir}} scripts/build_install_medium.sh "{{installer_medium}}" ${toolchain:+"$toolchain"}
+    KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
+    INSTALL_ARCHIVE={{installer_medium}} QEMU_FB_AUTO=0 \
+        scripts/build_iso.sh "{{iso_installer}}" "{{build_dir}}" "{{installer_live_cmdline}}"
 
 # `_fs-image`: the harness attaches the shipped image as a snapshot disk.
 _iso-tests: _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
@@ -488,6 +535,181 @@ test-install-guest:
     grep -aqE "BOOT: base .*/boot/b/base.img \($base_size bytes\)" "$log" ||
         { echo "FAIL: no boot of /boot/b/base.img reports the guest build's $base_size bytes" >&2; exit 1; }
     echo "test-install-guest: the guest built $head as $tag (kernel $size bytes, base $base_size bytes), booted it from slot b, pushed $pushed, committed the slot and rolled back a panicking slot (qemu rc=$rc); log in $log"
+
+# Each disk: a QEMU on the NV-varstore OVMF with the medium on a USB stick
+# installs, then one with the stick gone boots the disk, builds and installs
+# the system and commits it; the varstore is kept between them, as a
+# machine's flash is. The blank disk then takes a reinstall that keeps its
+# root, and a boot after it.
+[doc("Installer check: from the ISO on a USB stick, install SlopOS onto a blank disk (erase), beside another system (free space) and over an existing partition (reuse), then boot each disk with the stick gone, build and install the system there and commit it, and reinstall over the blank disk keeping its root; the host holds every table to sfdisk, every root to e2fsck, every FAT volume to fsck.fat and the other system's partitions, entries and files to their bytes. INSTALLER_PAYLOAD=0 installs without the toolchain and clones a slot instead of building one; names a subset: just test-installer foreign")]
+test-installer *DISKS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    payload=1
+    [[ ! "${INSTALLER_PAYLOAD:-1}" =~ ^(0|false|off|no)$ ]] || payload=0
+    if [ "$payload" = 1 ] && [ ! -d "{{toolchain_install}}" ]; then
+        echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain, or INSTALLER_PAYLOAD=0" >&2
+        exit 1
+    fi
+    # The optimized tests kernel: the installed system is the machine that
+    # runs the build.
+    KERNEL_RELEASE=1 just _iso-installer
+    . scripts/lib/bootdisk.sh
+    bootdisk_layout
+    # Each check says what failed and answers non-zero, so one disk's failure
+    # leaves the others to run.
+    # One QEMU on the disk, from the stick when `$3` names one, which must
+    # print each of the markers after it and fail no test. A guest whose
+    # serial log stops growing is ended rather than waited on for its whole
+    # budget: a build prints every few seconds, and a blocked one never again.
+    boot_once() {
+        local log="$1" budget="$2" stick="$3" ok=0 marker runner size=-1 still=0
+        local stall="${INSTALLER_STALL_SECS:-1800}"
+        shift 3
+        local how=(QEMU_ALLOW_REBOOT=1)
+        [ -z "$stick" ] || how=(INSTALL_STICK="$stick")
+        setsid timeout "$budget" \
+            just _qemu-boot "test" "0" {{iso_installer}} "$disk" "${how[@]}" BOOT_DISK_IMG="$disk" \
+            OVMF_VARS_FILE="$PWD/$vars" QEMU_NO_ROOT_DISK=1 QEMU_TEST_DISKS=0 \
+            QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" >"$log" 2>&1 &
+        runner=$!
+        while kill -0 "$runner" 2>/dev/null; do
+            sleep 30
+            if [ "$(stat -c %s "$log")" = "$size" ]; then
+                still=$((still + 30))
+            else
+                still=0
+                size="$(stat -c %s "$log")"
+            fi
+            if [ "$still" -ge "$stall" ]; then
+                echo "FAIL: $log has not grown in ${still}s; the guest is ended" >&2
+                kill -TERM -- "-$runner" 2>/dev/null || true
+                ok=1
+                break
+            fi
+        done
+        wait "$runner" || true
+        for marker in "$@"; do
+            grep -aqF "$marker" "$log" || { echo "FAIL: '$marker' not in $log" >&2; ok=1; }
+        done
+        ! grep -aq "not ok" "$log" || { echo "FAIL: a test failed; see $log" >&2; ok=1; }
+        return "$ok"
+    }
+    # The table whole, every FAT volume SlopOS wrote clean, and the root
+    # clean, at rest and with the base's mount points sealed.
+    check_disk() {
+        local disk="$1" kind="$2" window start size image type dir flags said ok=0
+        said="$(sfdisk --verify "$disk" 2>&1)" && grep -qF "No errors detected" <<<"$said" ||
+            { echo "FAIL: sfdisk finds $disk's table wrong: $said" >&2; ok=1; }
+        image="{{build_dir}}/installer-$kind-part.img"
+        for type in "$ESP_TYPE" "$BOOT_TYPE" "$ROOT_TYPE"; do
+            window="$(bootdisk_partition "$disk" "$type")" ||
+                { echo "FAIL: $disk holds no partition of type $type" >&2; ok=1; continue; }
+            read -r start size <<<"$window"
+            dd if="$disk" of="$image" bs=1M iflag=skip_bytes,count_bytes skip="$start" count="$size" \
+                conv=sparse status=none || { echo "FAIL: reading $type of $disk" >&2; ok=1; continue; }
+            if [ "$type" != "$ROOT_TYPE" ]; then
+                fsck.fat -n "$image" >/dev/null 2>&1 ||
+                    { echo "FAIL: fsck.fat finds the $type volume on $disk wrong" >&2; ok=1; }
+                continue
+            fi
+            scripts/check_fs_image.sh "$image" || ok=1
+            for dir in /bin /sbin /lib /usr/bin /usr/share /etc/ssl; do
+                flags="$(debugfs -R "stat $dir" "$image" 2>/dev/null |
+                    sed -n 's/.*Flags: \(0x[0-9a-f]*\).*/\1/p' | head -n 1)"
+                (( ${flags:-0} & 0x10 )) || { echo "FAIL: $dir on the root is not sealed" >&2; ok=1; }
+            done
+        done
+        rm -f "$image"
+        return "$ok"
+    }
+    # What the disk held before the install, against what it holds after.
+    check_kept() {
+        local disk="$1" kind="$2" keep="$1.foreign" window start size file old new ok=0
+        new="$(sfdisk --dump "$disk")"
+        case "$kind" in
+            foreign)
+                for name in "EFI system partition" "foreign data"; do
+                    old="$(grep -F "name=\"$name\"" "$disk.before" || true)"
+                    [ -n "$old" ] && [ "$old" = "$(grep -F "name=\"$name\"" <<<"$new")" ] ||
+                        { echo "FAIL: the table's entry for \"$name\" changed or is gone" >&2; ok=1; }
+                done
+                window="$(sed -n 's/.*start= *\([0-9]*\), size= *\([0-9]*\),.*name="foreign data".*/\1 \2/p' <<<"$new")"
+                read -r start size <<<"$window"
+                [ "$(dd if="$disk" bs=512 skip="$start" count="$size" status=none | sha256sum | cut -d' ' -f1)" = \
+                    "$(cat "$keep/data.sha256")" ] ||
+                    { echo "FAIL: the installer changed the other system's partition" >&2; ok=1; }
+                window="$(bootdisk_partition "$disk" "$ESP_TYPE")" ||
+                    { echo "FAIL: $disk holds no ESP" >&2; return 1; }
+                read -r start _ <<<"$window"
+                for file in BOOTX64.EFI grub.cfg; do
+                    MTOOLS_SKIP_CHECK=1 mcopy -n -i "$disk@@$start" "::/EFI/other/$file" "$keep/$file.after" &&
+                        cmp -s "$keep/$file" "$keep/$file.after" ||
+                        { echo "FAIL: the installer changed /EFI/other/$file" >&2; ok=1; }
+                done
+                ! MTOOLS_SKIP_CHECK=1 mdir -i "$disk@@$start" ::/EFI/BOOT >/dev/null 2>&1 ||
+                    { echo "FAIL: the installer wrote the removable-media path on a shared ESP" >&2; ok=1; }
+                ;;
+            reuse)
+                read -r start old <<<"$(sed -n 's/.*start= *\([0-9]*\),.*uuid=\([0-9A-F-]*\),.*name="installer-test-root".*/\1 \2/p' "$disk.before")"
+                new="$(grep -E "start= *$start," <<<"$new" | sed -n 's/.*uuid=\([0-9A-F-]*\),.*/\1/p')"
+                [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ] ||
+                    { echo "FAIL: the reused root kept the PARTUUID $old the other system knew it by" >&2; ok=1; }
+                ;;
+        esac
+        return "$ok"
+    }
+    failed=0
+    for kind in {{ if DISKS == "" { "blank foreign reuse" } else { DISKS } }}; do
+        echo "── $kind ──"
+        disk="{{build_dir}}/installer-$kind.img"
+        vars="{{build_dir}}/installer-$kind.vars"
+        logs="{{build_dir}}/installer-$kind"
+        scripts/make_installer_disk.sh "$kind" "$disk" ||
+            { echo "FAIL: $kind: no disk to install onto" >&2; failed=1; continue; }
+        sfdisk --dump "$disk" >"$disk.before" 2>/dev/null || : >"$disk.before"
+        rm -f "$vars"
+        missing=0
+        boot_once "$logs-install.log" "${INSTALLER_TIMEOUT_SECS:-1800}" {{iso_installer}} \
+            "INSTALLER-INSTALLED" "ok 1 - installed_built_and_committed" || missing=1
+        if [ "$missing" = 0 ]; then
+            # The build's budget: under TCG the guest's build alone takes hours.
+            budget=1800
+            [ "$payload" = 0 ] || budget=28800
+            markers=("INSTALLER-BOOTED slopos-a" "INSTALLER-STAGE 2: rebooting into slopos-b"
+                "INSTALLER-COMMITTED slopos-b" "ok 1 - installed_built_and_committed")
+            [ "$payload" = 0 ] || markers+=("INSTALLER-BUILT guest-" "INSTALLER-RUNS ")
+            [ "$kind" != foreign ] || markers+=("INSTALLER-FOREIGN-KEPT")
+            boot_once "$logs-boot.log" "${INSTALLER_BOOT_TIMEOUT_SECS:-$budget}" "" "${markers[@]}" || missing=1
+            check_disk "$disk" "$kind" || missing=1
+        fi
+        check_kept "$disk" "$kind" || missing=1
+        if [ "$missing" = 0 ] && [ "$kind" = blank ]; then
+            # The firmware boots SlopOS first now; a person picks the stick
+            # from its boot menu, which a fresh varstore stands in for.
+            rm -f "$vars"
+            markers=("INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed")
+            [ "$payload" = 0 ] ||
+                markers+=("/usr/local already holds this medium's toolchain" "the root has a /src already")
+            boot_once "$logs-reinstall.log" "${INSTALLER_TIMEOUT_SECS:-1800}" {{iso_installer}} \
+                "${markers[@]}" || missing=1
+            [ "$missing" = 1 ] ||
+                boot_once "$logs-reinstalled.log" "${INSTALLER_TIMEOUT_SECS:-1800}" "" \
+                    "INSTALLER-KEPT" "ok 1 - installed_built_and_committed" || missing=1
+            check_disk "$disk" "$kind" || missing=1
+        fi
+        if [ "$missing" = 0 ]; then
+            loop="built and installed the system"
+            [ "$payload" = 1 ] || loop="cloned slot a"
+            [ "$kind" != blank ] || loop="$loop, then reinstalled keeping the root"
+            echo "test-installer: $kind: installed from the stick, booted from the disk, $loop"
+            rm -rf "$disk" "$disk.foreign" "$disk.before" "$vars"
+        else
+            echo "FAIL: $kind; logs in $logs-*.log, the disk at $disk" >&2
+            failed=1
+        fi
+    done
+    exit "$failed"
 
 [doc("Boot the live ISO headless for BOOT_LOG_TIMEOUT seconds, serial log in test_output.log; fails unless /sbin/init launched")]
 boot-log: iso
@@ -681,7 +903,7 @@ test-capacity: _build-run-tests _fs-image-capacity
 # leaves a clone on /, the second reads it back and climbs the ladder again.
 # Separate from `just test`, which runs the same utests on a root with no
 # toolchain and no clone, and they pass by saying so.
-[doc("Toolchain check at 4G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph and a CMake project), and find a clone made on / intact after a power-off")]
+[doc("Toolchain check at 6G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph and a CMake project), and find a clone made on / intact after a power-off")]
 test-toolchain: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
@@ -766,9 +988,9 @@ bench-selfhost: _build-run-tests
     [ "$rc" -eq 0 ] || { tail -n 30 {{build_dir}}/bench-selfhost.log; echo "FAIL: the benchmark boot exited $rc — full log in {{build_dir}}/bench-selfhost.log" >&2; exit 1; }
     python3 scripts/prof_report.py {{build_dir}}/bench-selfhost.log --libc {{build_dir}}/bench-libc.so --lib-dir {{toolchain_install}}/lib
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, ext4-core, http-core, fat-core, boot-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, ext4-core, http-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-ext4-core -p slopos-http-core -p slopos-fat-core -p slopos-boot-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-ext4-core -p slopos-http-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

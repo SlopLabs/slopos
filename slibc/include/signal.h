@@ -33,6 +33,9 @@ struct __slibc_siginfo_rt {
     uid_t __si_uid;
     union sigval __si_value;
 };
+struct __slibc_siginfo_fault {
+    void *__si_addr;
+};
 typedef struct {
     int si_signo;
     int si_errno;
@@ -42,12 +45,14 @@ typedef struct {
         int _pad[28];
         struct __slibc_siginfo_kill __si_fields;
         struct __slibc_siginfo_rt __si_rt;
+        struct __slibc_siginfo_fault __si_fault;
     };
 } __slibc_aligned(8) siginfo_t;
 #define si_pid __si_fields.__si_pid
 #define si_uid __si_fields.__si_uid
 #define si_status __si_fields.__si_status
 #define si_value __si_rt.__si_value
+#define si_addr __si_fault.__si_addr
 struct sigaction {
     union {
         sighandler_t sa_handler;

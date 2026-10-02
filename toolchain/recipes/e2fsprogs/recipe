@@ -1,0 +1,46 @@
+# e2fsprogs: what formats, checks, grows and inspects the ext4 volumes SlopOS
+# mounts. The base carries the six programs below at /sbin, so the live system
+# formats a root and repairs one; a guest's base build takes them from here.
+#
+# As released: a GPL-2.0-only recipe carries no patch.
+#
+#   enable-libuuid, enable-libblkid  the private copies, linked into each
+#                                    program, rather than a probe that could
+#                                    find the host's util-linux.
+#   disable-fsck                     the `fsck` front end runs a per-type
+#                                    checker by name; e2fsck is run directly.
+#   disable-e2initrd-helper, disable-uuidd, disable-imager, disable-defrag,
+#   disable-fuse2fs, disable-tdb     what nothing here runs: an initrd's
+#                                    helper, the uuid daemon, e2image,
+#                                    e4defrag, FUSE and the undo files.
+#   disable-nls                      there are no message catalogues.
+#   disable-tls, disable-backtrace   no thread-local error buffers and no
+#                                    glibc backtrace.
+#   without-libarchive               `mke2fs -d` takes a directory, not a
+#                                    tarball through a dlopen'd libarchive.
+version=1.47.4
+url=https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4/e2fsprogs-1.47.4.tar.xz
+sha256=fd5bf388cbdbe006a3d3b318d983b2948382440acc85a87f1e7d108653e8db0b
+license=GPL-2.0-only AND LGPL-2.0-only AND BSD-3-Clause AND MIT
+license_file=NOTICE
+license_file=lib/uuid/COPYING
+template=autotools
+program=sbin/mke2fs
+program=sbin/e2fsck
+program=sbin/resize2fs
+program=sbin/tune2fs
+program=sbin/debugfs
+program=sbin/dumpe2fs
+arg=--enable-libuuid
+arg=--enable-libblkid
+arg=--disable-fsck
+arg=--disable-e2initrd-helper
+arg=--disable-uuidd
+arg=--disable-imager
+arg=--disable-defrag
+arg=--disable-fuse2fs
+arg=--disable-tdb
+arg=--disable-nls
+arg=--disable-tls
+arg=--disable-backtrace
+arg=--without-libarchive

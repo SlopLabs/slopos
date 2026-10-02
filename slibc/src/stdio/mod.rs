@@ -7,6 +7,7 @@ use crate::pal::Pal;
 pub mod chars;
 pub mod file;
 pub mod lock;
+pub mod popen;
 pub mod printf;
 pub mod registry;
 pub mod scanf;
@@ -98,6 +99,9 @@ pub struct FILE {
     pub next: *mut FILE,
     /// Recursive per-stream lock (POSIX §2.5.1).
     pub lock: StreamLock,
+    /// The shell `popen` started on the other end, which `pclose` waits on;
+    /// 0 for any other stream.
+    pub child: i32,
     /// Internal I/O buffer. Last, so the scalars share cache lines.
     pub buf: [u8; BUFSIZ],
 }
@@ -118,6 +122,7 @@ impl FILE {
             ungot_len: 0,
             next: ptr::null_mut(),
             lock: StreamLock::new(),
+            child: 0,
             buf: [0u8; BUFSIZ],
         }
     }
@@ -138,6 +143,7 @@ impl FILE {
         ptr::write(&raw mut (*dst).ungot_len, 0);
         ptr::write(&raw mut (*dst).next, ptr::null_mut());
         ptr::write(&raw mut (*dst).lock, StreamLock::new());
+        ptr::write(&raw mut (*dst).child, 0);
         ptr::write_bytes(&raw mut (*dst).buf as *mut u8, 0, BUFSIZ);
     }
 

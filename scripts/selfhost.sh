@@ -51,6 +51,12 @@ for tool in $tools; do
         exit 1
     }
 done
+for program in $BASE_RECIPE_PROGRAMS; do
+    [ -x "/usr/local/$program" ] || {
+        echo "selfhost: no /usr/local/$program for the base; on the host, just toolchain and then just boot installs one" >&2
+        exit 1
+    }
+done
 
 export CARGO_HOME="${CARGO_HOME:-$REPO_ROOT/builddir/cargo-home}"
 export KERNEL_RELEASE="$release"
@@ -60,6 +66,7 @@ cd "$REPO_ROOT"
 scripts/build_kernel.sh builddir builddir/target "$features"
 bash scripts/build_userland.sh builddir builddir/target $userland
 COREUTILS_LINKS="$COREUTILS_TOOLS" EXTRA_SHARED_OBJECTS="$shared" \
+    RECIPE_PREFIX=/usr/local RECIPE_PROGRAMS="$BASE_RECIPE_PROGRAMS" RECIPE_LICENSES="$BASE_RECIPES" \
     scripts/build_initramfs.sh "$base" builddir $programs
 [ "$1" = install ] || exit 0
 

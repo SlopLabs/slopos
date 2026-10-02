@@ -65,10 +65,11 @@ impl Device for MemDevice {
 
 const MIB: usize = 1024 * 1024;
 const LABEL: &[u8; 11] = b"SLOPOS ESP ";
+const SERIAL: u32 = 0x5105_0505;
 
 fn fresh(size: usize) -> Volume<MemDevice> {
     let mut dev = MemDevice::new(size);
-    format(&mut dev, size as u64, LABEL).expect("format");
+    format(&mut dev, size as u64, LABEL, SERIAL).expect("format");
     dev.log.clear();
     Volume::open(dev).expect("open")
 }
@@ -86,7 +87,7 @@ fn sectors_follow_the_device_block_size() {
     let size = 272 * MIB;
     let mut dev = MemDevice::new(size);
     dev.block = 4096;
-    format(&mut dev, size as u64, LABEL).expect("format on 4K blocks");
+    format(&mut dev, size as u64, LABEL, SERIAL).expect("format on 4K blocks");
     assert_eq!(u16::from_le_bytes([dev.bytes[11], dev.bytes[12]]), 4096);
     let mut volume = Volume::open(dev).expect("open on 4K blocks");
     let data = pattern(10_000, 3);
@@ -94,7 +95,7 @@ fn sectors_follow_the_device_block_size() {
     assert_eq!(volume.read_file("/K.BIN").unwrap(), data);
 
     let mut small = MemDevice::new(64 * MIB);
-    format(&mut small, 64 * MIB as u64, LABEL).unwrap();
+    format(&mut small, 64 * MIB as u64, LABEL, SERIAL).unwrap();
     small.block = 4096;
     assert_eq!(Volume::open(small).err(), Some(Error::SectorTooSmall));
 }
@@ -196,15 +197,36 @@ fn a_directory_grows_past_one_cluster() {
     }
 }
 
+/// The data region starts on a MiB of the volume, whatever the sector size,
+/// and the volume still reads back.
 #[test]
-fn created_names_must_fit_eight_dot_three() {
+fn the_data_region_starts_on_a_mebibyte() {
+    for (block, size) in [(512u32, 272 * MIB), (4096, 272 * MIB), (512, 1024 * MIB)] {
+        let mut dev = MemDevice::new(size);
+        dev.block = block;
+        format(&mut dev, size as u64, LABEL, SERIAL).unwrap();
+        let reserved = u64::from(le16(&dev.bytes, 14));
+        let fat = u64::from(le32(&dev.bytes, 36));
+        assert_eq!(
+            (reserved + 2 * fat) * u64::from(block) % (1 << 20),
+            0,
+            "{block} {size}"
+        );
+        let mut v = Volume::open(dev).unwrap();
+        v.write_file("/K.BIN", b"kernel").unwrap();
+        assert_eq!(v.read_file("/K.BIN").unwrap(), b"kernel");
+    }
+}
+
+#[test]
+fn eight_dot_three_names_keep_their_case_in_ntres() {
     assert!(short_name("KERNEL.ELF").is_ok());
     assert_eq!(
         short_name("kernel.elf").unwrap().1,
         NTRES_LOWER_BASE | NTRES_LOWER_EXT
     );
     assert_eq!(&short_name("a").unwrap().0, b"A          ");
-    for bad in [
+    for long in [
         "",
         "limine.conf",
         "ninechars",
@@ -215,13 +237,194 @@ fn created_names_must_fit_eight_dot_three() {
         "a.b.c",
     ] {
         assert_eq!(
-            short_name(bad).map(|_| ()),
+            short_name(long).map(|_| ()),
             Err(Error::InvalidName),
-            "{bad}"
+            "{long}"
         );
     }
+}
+
+fn shorts(v: &mut Volume<MemDevice>, dir: &str) -> Vec<(String, String)> {
+    v.list(dir)
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.short_name))
+        .collect()
+}
+
+#[test]
+fn long_names_round_trip_with_generated_aliases() {
     let mut v = fresh(64 * MIB);
-    assert_eq!(v.write_file("/limine.conf", b"x"), Err(Error::InvalidName));
+    v.create_dir("/EFI").unwrap();
+    v.create_dir("/EFI/SlopOS").unwrap();
+    v.write_file("/EFI/SlopOS/limine.conf", b"timeout: 5\n")
+        .unwrap();
+    v.write_file("/EFI/SlopOS/LICENSE.limine", b"BSD").unwrap();
+    let long = "a name long enough to take three long entries.txt";
+    v.write_file(&format!("/EFI/{long}"), b"x").unwrap();
+    v.write_file("/EFI/Ünïcødé.bin", b"u").unwrap();
+    let mut again = Volume::open(v.into_device()).unwrap();
+    assert_eq!(
+        shorts(&mut again, "/EFI/SlopOS"),
+        [
+            ("limine.conf".to_string(), "LIMINE~1.CON".to_string()),
+            ("LICENSE.limine".to_string(), "LICENS~1.LIM".to_string()),
+        ]
+    );
+    assert_eq!(
+        shorts(&mut again, "/EFI"),
+        [
+            ("SlopOS".to_string(), "SLOPOS".to_string()),
+            (long.to_string(), "ANAMEL~1.TXT".to_string()),
+            ("Ünïcødé.bin".to_string(), "_N_C_D~1.BIN".to_string()),
+        ]
+    );
+    assert_eq!(
+        again.read_file("/efi/slopos/LIMINE.CONF").unwrap(),
+        b"timeout: 5\n"
+    );
+    assert_eq!(
+        again.read_file("/EFI/SLOPOS/LIMINE~1.CON").unwrap(),
+        b"timeout: 5\n"
+    );
+    assert_eq!(
+        again.write_file("/EFI/slopos", b"x"),
+        Err(Error::IsADirectory),
+        "a long name matches without case"
+    );
+}
+
+#[test]
+fn an_alias_takes_the_lowest_tail_no_entry_has() {
+    let mut v = fresh(64 * MIB);
+    for name in ["limine.conf", "limine.config", "Limine.Cfg"] {
+        v.write_file(&format!("/{name}"), name.as_bytes()).unwrap();
+    }
+    let got: Vec<String> = shorts(&mut v, "/").into_iter().map(|(_, s)| s).collect();
+    assert_eq!(got, ["LIMINE~1.CON", "LIMINE~2.CON", "LIMINE.CFG"]);
+    v.write_file("/Mixed.Elf", b"x").unwrap();
+    v.write_file("/MIXED.elf", b"y").unwrap();
+    assert_eq!(
+        v.read_file("/mixed.ELF").unwrap(),
+        b"y",
+        "one file, any case"
+    );
+    let taken: Vec<[u8; 11]> = (1..=9)
+        .map(|n| {
+            let mut short = *b"LONGNA~0TXT";
+            short[7] = b'0' + n;
+            short
+        })
+        .collect();
+    assert_eq!(&alias("longname file.txt", &taken).unwrap(), b"LONGN~10TXT");
+}
+
+#[test]
+fn a_name_a_long_entry_cannot_hold_is_refused() {
+    let mut v = fresh(64 * MIB);
+    let too_long = "x".repeat(256);
+    for bad in ["", "a:b", "a*b", "x.", "trailing ", "tab\there", &too_long] {
+        assert_eq!(
+            v.write_file(&format!("/{bad}"), b"x"),
+            Err(Error::InvalidName),
+            "{bad:?}"
+        );
+    }
+    v.write_file(&format!("/{}", "y".repeat(255)), b"y")
+        .unwrap();
+}
+
+#[test]
+fn removing_a_long_named_file_frees_every_entry_it_took() {
+    let mut v = fresh(64 * MIB);
+    let name = "/a name that takes two long entries";
+    v.write_file(name, b"1").unwrap();
+    v.write_file("/after", b"2").unwrap();
+    v.remove(name).unwrap();
+    assert!(v.stat(name).is_err());
+    v.write_file(name, b"3").unwrap();
+    let mut again = Volume::open(v.into_device()).unwrap();
+    assert_eq!(again.read_file(name).unwrap(), b"3");
+    assert_eq!(again.read_file("/after").unwrap(), b"2");
+    assert_eq!(again.list("/").unwrap().len(), 2);
+}
+
+/// A run of entries reaches into a cluster the directory gains for it.
+#[test]
+fn long_entries_span_a_directory_cluster_boundary() {
+    let mut v = fresh(64 * MIB);
+    v.create_dir("/d").unwrap();
+    let per_cluster = v.cluster_bytes() / ENTRY;
+    for i in 0..per_cluster - 3 {
+        v.write_file(&format!("/d/f{i}"), &[i as u8]).unwrap();
+    }
+    let long = "a name long enough to take three long entries.txt";
+    v.write_file(&format!("/d/{long}"), b"spans").unwrap();
+    let mut again = Volume::open(v.into_device()).unwrap();
+    assert_eq!(again.read_file(&format!("/d/{long}")).unwrap(), b"spans");
+    assert_eq!(again.list("/d").unwrap().len(), per_cluster - 3 + 1);
+}
+
+/// A crash at any point of creating a long-named file shows it under its
+/// long name or not at all, never as its alias alone.
+#[test]
+fn a_long_named_file_appears_whole_or_not_at_all() {
+    let v = fresh(64 * MIB);
+    let base = v.into_device();
+    let mut v = Volume::open(base.clone()).unwrap();
+    v.write_file("/limine.conf", b"timeout: 5\n").unwrap();
+    let log = v.into_device().log;
+    for cut in 0..=log.len() {
+        let mut image = base.clone();
+        for op in &log[..cut] {
+            if let Op::Write(at, data) = op {
+                image.bytes[*at as usize..*at as usize + data.len()].copy_from_slice(data);
+            }
+        }
+        let names: Vec<String> = Volume::open(image)
+            .unwrap()
+            .list("/")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            names.is_empty() || names == ["limine.conf"],
+            "cut {cut}: {names:?}"
+        );
+    }
+}
+
+/// A format cut short leaves no boot sector, so the partition reads as
+/// holding no volume rather than a damaged one: the boot sector is written
+/// last, behind everything it describes.
+#[test]
+fn a_volume_starts_only_when_its_format_is_whole() {
+    let mut dev = MemDevice::new(64 * MIB);
+    dev.bytes.fill(0xA5);
+    dev.bytes[..512].fill(0);
+    let stale = dev.clone();
+    format(&mut dev, 64 * MIB as u64, LABEL, SERIAL).unwrap();
+    let log = dev.log;
+    let boot_at = log
+        .iter()
+        .rposition(|op| matches!(op, Op::Write(0, data) if data[510..512] == [0x55, 0xAA]))
+        .expect("the boot sector is written");
+    assert!(matches!(log[boot_at - 1], Op::Flush));
+    assert_eq!(boot_at, log.len() - 2);
+    for cut in 0..=log.len() {
+        let mut image = stale.clone();
+        for op in &log[..cut] {
+            if let Op::Write(at, data) = op {
+                image.bytes[*at as usize..*at as usize + data.len()].copy_from_slice(data);
+            }
+        }
+        let signed = image.bytes[510..512] == [0x55, 0xAA];
+        assert_eq!(signed, cut > boot_at, "cut {cut}");
+        if signed {
+            assert!(Volume::open(image).unwrap().list("/").unwrap().is_empty());
+        }
+    }
 }
 
 /// Replay every prefix of the writes a replacement issued: the file must read
@@ -399,11 +602,32 @@ fn interoperates_with_dosfstools_and_mtools() {
         .unwrap();
     file.set_len(64 * MIB as u64).unwrap();
     let mut dev = FileDevice(file, 64 * MIB as u64);
-    format(&mut dev, 64 * MIB as u64, LABEL).unwrap();
+    format(&mut dev, 64 * MIB as u64, LABEL, SERIAL).unwrap();
     let mut v = Volume::open(dev).unwrap();
     v.create_dir("/efi").unwrap();
     v.write_file("/efi/x.bin", &pattern(5000, 1)).unwrap();
+    v.create_dir("/EFI/SlopOS").unwrap();
+    v.write_file("/EFI/SlopOS/limine.conf", b"timeout: 5\n")
+        .unwrap();
     drop(v);
     fsck_clean(&ours);
+    let out = Command::new("mtype")
+        .arg("-i")
+        .arg(&ours)
+        .arg("::/EFI/SlopOS/limine.conf")
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout, b"timeout: 5\n");
+    let out = Command::new("mdir")
+        .args(["-b", "-i"])
+        .arg(&ours)
+        .arg("::/EFI")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("::/EFI/SlopOS/"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let _ = fs::remove_dir_all(img.parent().unwrap());
 }

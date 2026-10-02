@@ -285,6 +285,13 @@ fn launch_bounds_the_raise_site() -> bool {
 
 const SELF: &str = "/bin/spawn_privilege_test";
 const WITHOUT_LAUNCH: &str = "--without-launch";
+/// Holds `Mount` only as far as its spawner does.
+const DUMPE2FS: &str = "/sbin/dumpe2fs";
+const ROOT_DISK: &str = "/dev/nvme0n1";
+
+fn dumps_root_superblock() -> std::io::Result<std::process::Output> {
+    Command::new(DUMPE2FS).args(["-h", ROOT_DISK]).output()
+}
 
 /// Runs in a child without Launch. A granted path it spawns runs ungranted, as
 /// its own `execve` would, rather than being refused; `#!/bin/sh` scripts too.
@@ -315,7 +322,27 @@ fn spawns_without_launch() -> i32 {
         eprintln!("spawn_privilege_test: a #!/bin/sh script without Launch ran as {run:?}");
         return 3;
     }
+
+    let dump = dumps_root_superblock();
+    if !matches!(&dump, Ok(out) if !out.status.success()) {
+        eprintln!(
+            "spawn_privilege_test: e2fsprogs read a disk for a spawner without Mount: {dump:?}"
+        );
+        return 4;
+    }
     0
+}
+
+/// A spawner holding `Mount` hands it to e2fsprogs, which reads the disk; the
+/// half without it is [`spawns_without_launch`].
+fn e2fsprogs_takes_mount_from_its_spawner() -> bool {
+    match dumps_root_superblock() {
+        Ok(out) if out.status.success() => true,
+        other => {
+            eprintln!("spawn_privilege_test: {DUMPE2FS} -h {ROOT_DISK} ran as {other:?}");
+            false
+        }
+    }
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[
@@ -330,6 +357,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("granted_binaries_are_sealed", granted_binaries_are_sealed),
     ("grant_directories_are_sealed", grant_directories_are_sealed),
     ("launch_bounds_the_raise_site", launch_bounds_the_raise_site),
+    (
+        "e2fsprogs_takes_mount_from_its_spawner",
+        e2fsprogs_takes_mount_from_its_spawner,
+    ),
     (
         "power_alone_reaches_no_boot_entry",
         power_alone_reaches_no_boot_entry,

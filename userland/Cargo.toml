@@ -26,6 +26,10 @@ name = "bootctl"
 path = "src/bin/bootctl.rs"
 
 [[bin]]
+name = "installer"
+path = "src/bin/installer.rs"
+
+[[bin]]
 name = "compositor"
 path = "src/bin/compositor.rs"
 
@@ -238,6 +242,10 @@ name = "install_test"
 path = "src/bin/tests/install_test.rs"
 
 [[bin]]
+name = "installer_test"
+path = "src/bin/tests/installer_test.rs"
+
+[[bin]]
 name = "selfhost_test"
 path = "src/bin/tests/selfhost_test.rs"
 
@@ -322,7 +330,9 @@ slopos-chrome-core = { workspace = true }
 slopos-font = { workspace = true }
 slopos-http-core = { workspace = true }
 slopos-boot-core = { workspace = true }
+slopos-ext4-core = { workspace = true }
 slopos-fat-core = { workspace = true }
+slopos-tree-core = { workspace = true }
 slopos-keymap-core = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-net-core = { workspace = true }

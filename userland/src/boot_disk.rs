@@ -7,14 +7,16 @@
 //! same table by the same rule. Reading a whole disk beneath its filesystems
 //! takes `TASK_FLAG_MOUNT`.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, FileTypeExt};
 
 use slopos_boot_core::gpt::{self, Geometry, Header, Partition};
+use slopos_boot_core::limine::Listed;
 use slopos_boot_core::load_option::LoadOption;
 use slopos_boot_core::variables::{self, BootVariable, Held, PERSISTENT, Placement};
 use slopos_boot_core::{Guid, bli, device_path, layout, load_option};
+use slopos_fat_core::{Device, Error as FatError, Volume};
 
 use crate::syscall::efi::{efivar_get, efivar_set};
 use crate::syscall::error::SyscallError;
@@ -72,13 +74,85 @@ pub fn loader_entries() -> Result<Vec<String>, String> {
     Ok(bli::strings(&raw).map(text_of).collect())
 }
 
-/// A node's partitions, if it holds a GPT.
-fn partitions_of(node: &str) -> Option<Vec<Partition>> {
-    let file = File::open(node).ok()?;
+/// The block size a regular file standing in for a partition is addressed in.
+const IMAGE_FILE_BLOCK: u32 = 512;
+
+/// A block node, or an image file standing in for one, as `fat-core` reads it.
+pub struct BlockFile {
+    file: File,
+    size: u64,
+    block: u32,
+}
+
+impl Device for BlockFile {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), FatError> {
+        self.file
+            .read_exact_at(buf, offset)
+            .map_err(|_| FatError::Io)
+    }
+
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), FatError> {
+        self.file
+            .write_all_at(buf, offset)
+            .map_err(|_| FatError::Io)
+    }
+
+    fn flush(&mut self) -> Result<(), FatError> {
+        self.file.sync_data().map_err(|_| FatError::Io)
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn block_size(&self) -> u32 {
+        self.block
+    }
+}
+
+impl BlockFile {
+    pub fn open(path: &str) -> Result<BlockFile, String> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| format!("{path}: {e}"))?;
+        let size = file.metadata().map_err(|e| format!("{path}: {e}"))?.len();
+        let block = crate::syscall::fs::block_size(file.as_raw_fd()).unwrap_or(IMAGE_FILE_BLOCK);
+        Ok(BlockFile { file, size, block })
+    }
+}
+
+/// The FAT32 volume on the block node `path`.
+pub fn open_fat(path: &str) -> Result<Volume<BlockFile>, String> {
+    Volume::open(BlockFile::open(path)?).map_err(|e| format!("{path}: not a FAT32 volume ({e:?})"))
+}
+
+/// A disk's GUID Partition Table, as one of its copies holds it.
+pub struct Table {
+    pub header: Header,
+    pub array: Vec<u8>,
+}
+
+impl Table {
+    pub fn partitions(&self) -> impl Iterator<Item = Partition> + '_ {
+        self.header.partitions(&self.array).filter_map(Result::ok)
+    }
+}
+
+/// The geometry of the block node `file`.
+pub fn geometry_of(file: &File) -> Option<Geometry> {
     let capacity = file.metadata().ok()?.len();
     let block = crate::syscall::fs::block_size(file.as_raw_fd()).ok()?;
-    let geometry = Geometry::new(capacity, u64::from(block))?;
-    let mut sector = vec![0u8; block as usize];
+    Geometry::new(capacity, u64::from(block))
+}
+
+/// The table `node` holds: the primary copy, or the backup where the primary
+/// does not read whole; `None` for a disk without one.
+pub fn table_of(node: &str) -> Option<Table> {
+    let file = File::open(node).ok()?;
+    let geometry = geometry_of(&file)?;
+    let mut sector = vec![0u8; geometry.block() as usize];
     [gpt::PRIMARY_LBA, geometry.backup_lba()]
         .into_iter()
         .find_map(|lba| {
@@ -90,8 +164,32 @@ fn partitions_of(node: &str) -> Option<Vec<Partition>> {
                 .ok()?;
             header
                 .array_matches(&array)
-                .then(|| header.partitions(&array).filter_map(Result::ok).collect())
+                .then_some(Table { header, array })
         })
+}
+
+/// A node's partitions, if it holds a GPT.
+fn partitions_of(node: &str) -> Option<Vec<Partition>> {
+    table_of(node).map(|table| table.partitions().collect())
+}
+
+/// The whole disks among the block nodes: those no other node names as its
+/// disk by the rule [`partition_node`] names partitions with.
+pub fn whole_disks() -> Result<Vec<String>, String> {
+    let nodes = block_nodes()?;
+    let is_partition = |node: &String| {
+        nodes.iter().any(|disk| {
+            let separator = if disk.ends_with(|c: char| c.is_ascii_digit()) {
+                "p"
+            } else {
+                ""
+            };
+            node.strip_prefix(disk.as_str())
+                .and_then(|rest| rest.strip_prefix(separator))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+    };
+    Ok(nodes.iter().filter(|n| !is_partition(n)).cloned().collect())
 }
 
 fn block_nodes() -> Result<Vec<String>, String> {
@@ -108,7 +206,7 @@ fn block_nodes() -> Result<Vec<String>, String> {
 /// The node the kernel names `partition` of `disk` with, as Linux does: a `p`
 /// between them when the disk's name ends in a digit. Held to the partition's
 /// size, so a name that is some other window is refused.
-fn partition_node(disk: &str, partition: &Partition) -> Result<String, String> {
+pub fn partition_node(disk: &str, partition: &Partition) -> Result<String, String> {
     let separator = if disk.ends_with(|c: char| c.is_ascii_digit()) {
         "p"
     } else {
@@ -224,6 +322,38 @@ pub fn boot_order() -> Result<Vec<u16>, String> {
 fn write_boot_order(order: impl Iterator<Item = u16>) -> Result<(), String> {
     let raw: Vec<u8> = order.flat_map(u16::to_le_bytes).collect();
     write_var("BootOrder", &variables::GLOBAL, PERSISTENT, &raw)
+}
+
+/// Each option `order` lists, as Limine's `efi_boot_entry` would find it.
+pub fn listed_options(order: &[u16]) -> Result<Vec<ListedOption>, String> {
+    order
+        .iter()
+        .map(
+            |&number| match read_var(&option_name(number), &variables::GLOBAL) {
+                Ok(None) => Ok(ListedOption::Absent),
+                Ok(Some(raw)) => Ok(ListedOption::Value(raw)),
+                Err(SyscallError::ENOBUFS | SyscallError::EIO) => Ok(ListedOption::Unreadable),
+                Err(e) => Err(format!("reading {}: {e:?}", option_name(number))),
+            },
+        )
+        .collect()
+}
+
+/// [`Listed`], owning its value.
+pub enum ListedOption {
+    Absent,
+    Unreadable,
+    Value(Vec<u8>),
+}
+
+impl ListedOption {
+    pub fn as_listed(&self) -> Listed<'_> {
+        match self {
+            ListedOption::Absent => Listed::Absent,
+            ListedOption::Unreadable => Listed::Unreadable,
+            ListedOption::Value(raw) => Listed::Value(raw),
+        }
+    }
 }
 
 /// The option the firmware booted this time.

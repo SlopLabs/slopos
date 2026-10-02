@@ -5,7 +5,8 @@
 //! below succeeds for 0 and answers `EPERM` for anything else: there is
 //! nothing to become. That is the whole of the reasoning, stated once.
 
-use core::ffi::{c_int, c_uint};
+use core::ffi::{c_int, c_uint, c_ulong};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::errno::{EINVAL, ENOSYS, EPERM, errno_set};
 use crate::pal::{Pal, Sys};
@@ -126,13 +127,46 @@ pub unsafe extern "C" fn alarm(_seconds: c_uint) -> c_uint {
     0
 }
 
-/// `prctl(2)` has no kernel counterpart here: not one of its options —
-/// `PR_SET_NAME`, `PR_SET_PDEATHSIG`, `PR_SET_DUMPABLE` — has state to set. A
-/// thread name is kept by libc instead, through `pthread_setname_np`.
+pub const PR_GET_DUMPABLE: c_int = 3;
+pub const PR_SET_DUMPABLE: c_int = 4;
+
+const DUMPABLE_UNSET: u8 = 2;
+static DUMPABLE: AtomicU8 = AtomicU8::new(DUMPABLE_UNSET);
+
+/// Whether the process may be dumped. Nothing here dumps or traces a
+/// process, so the flag is only reported; a program started with authority
+/// its caller lacks (`AT_SECURE`) starts not dumpable, as a setuid one does
+/// on Linux, which is what a caller asking means to learn.
+fn dumpable() -> bool {
+    match DUMPABLE.load(Ordering::Relaxed) {
+        DUMPABLE_UNSET => !crate::auxv::tag(slopos_abi::auxv::AT_SECURE).is_some_and(|v| v != 0),
+        flag => flag != 0,
+    }
+}
+
+/// `prctl(2)`, kept by libc: the kernel has no counterpart, and only the
+/// dumpable flag has state to keep. Any other option — `PR_SET_NAME`,
+/// `PR_SET_PDEATHSIG` — is `ENOSYS`; a thread name is kept through
+/// `pthread_setname_np`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn prctl(_option: c_int, _args: ...) -> c_int {
-    errno_set(ENOSYS.raw());
-    -1
+pub unsafe extern "C" fn prctl(option: c_int, mut args: ...) -> c_int {
+    match option {
+        PR_GET_DUMPABLE => c_int::from(dumpable()),
+        PR_SET_DUMPABLE => match args.next_arg::<c_ulong>() {
+            value @ (0 | 1) => {
+                DUMPABLE.store(value as u8, Ordering::Relaxed);
+                0
+            }
+            _ => {
+                errno_set(EINVAL.raw());
+                -1
+            }
+        },
+        _ => {
+            errno_set(ENOSYS.raw());
+            -1
+        }
+    }
 }
 
 /// `getrlimit(2)`, the C form. The Rust-typed helpers next door in
