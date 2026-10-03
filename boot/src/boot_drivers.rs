@@ -296,12 +296,14 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         .unwrap_or(false);
     slopos_drivers::i2c::set_lpss_disabled(tp_off);
 
-    // Before `pci_init()` triggers the VirtIO-net probe, so loopback takes
-    // DevIndex(0) by convention.
+    // Before `pci_init()` probes any NIC, so loopback takes DevIndex(0) by
+    // convention.
     slopos_net::loopback::init_loopback();
 
     // The filter chain must be published before any NIC delivers a packet.
     slopos_net::xdp::init();
+
+    slopos_net::nic::init();
 
     klog_debug!("Enumerating PCI devices...");
     pci_init();

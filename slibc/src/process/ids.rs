@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::errno::{EINVAL, ENOSYS, EPERM, errno_set};
 use crate::pal::{Pal, Sys};
-use crate::types::{gid_t, pid_t, rlimit, rusage, uid_t};
+use crate::types::{gid_t, itimerval, pid_t, rlimit, rusage, uid_t};
 
 /// The only principal that exists.
 const ROOT: u32 = 0;
@@ -113,17 +113,51 @@ pub unsafe extern "C" fn wait4(
     }
 }
 
-/// Linux's values; there is no `setitimer` to take them.
+/// Linux's values, for `getitimer` and `setitimer`.
 pub const ITIMER_REAL: c_int = 0;
 pub const ITIMER_VIRTUAL: c_int = 1;
 pub const ITIMER_PROF: c_int = 2;
 
-/// There is no per-process interval timer and no `setitimer`, so an alarm
-/// cannot be armed. `alarm` has no failure return of its own — 0 means "none
-/// was pending" — so the refusal is reported through `errno` alone.
+/// There is no per-process interval timer, so an alarm cannot be armed.
+/// `alarm` has no failure return of its own — 0 means "none was pending" —
+/// so the refusal is reported through `errno` alone.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn alarm(_seconds: c_uint) -> c_uint {
     errno_set(ENOSYS.raw());
+    0
+}
+
+/// `getitimer(2)`: no timer is ever armed, so every one reads zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getitimer(which: c_int, value: *mut itimerval) -> c_int {
+    if !matches!(which, ITIMER_REAL | ITIMER_VIRTUAL | ITIMER_PROF) || value.is_null() {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    *value = itimerval::default();
+    0
+}
+
+/// `setitimer(2)`. Disarming — a zero `it_value` — succeeds, there being
+/// nothing armed; arming is `ENOSYS`, as for `alarm`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setitimer(
+    which: c_int,
+    value: *const itimerval,
+    ovalue: *mut itimerval,
+) -> c_int {
+    if !matches!(which, ITIMER_REAL | ITIMER_VIRTUAL | ITIMER_PROF) || value.is_null() {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    let it = (*value).it_value;
+    if it.tv_sec != 0 || it.tv_usec != 0 {
+        errno_set(ENOSYS.raw());
+        return -1;
+    }
+    if !ovalue.is_null() {
+        *ovalue = itimerval::default();
+    }
     0
 }
 

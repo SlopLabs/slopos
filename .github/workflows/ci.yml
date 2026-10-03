@@ -55,7 +55,8 @@ jobs:
       # *floor* (`clang_major_min`) so a rolling host can build it at all, and
       # the env vars below pin CI to the sources' own major regardless of what
       # the runner image happens to default to — `scripts/cxx_host_tools.sh`
-      # treats them as an override that never falls back.
+      # treats them as an override that never falls back. openssh-client is
+      # for `ssh-keygen`, which stages the ladder's ssh fixture keys.
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -69,7 +70,8 @@ jobs:
             cmake \
             ninja-build \
             make \
-            pkg-config
+            pkg-config \
+            openssh-client
           # Named, not aliased: `update-alternatives --install` with a missing
           # target warns and exits 0, so a wrong package name would surface
           # much later as a cross-build failure with nothing pointing here.

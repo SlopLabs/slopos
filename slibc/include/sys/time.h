@@ -11,6 +11,22 @@
 #include <time.h>
 #include <sys/select.h>
 
+#define timerisset(tvp) ((tvp)->tv_sec || (tvp)->tv_usec)
+#define timerclear(tvp) ((tvp)->tv_sec = (tvp)->tv_usec = 0)
+#define timercmp(a, b, cmp) \
+    (((a)->tv_sec == (b)->tv_sec) ? ((a)->tv_usec cmp (b)->tv_usec) \
+                                  : ((a)->tv_sec cmp (b)->tv_sec))
+#define timeradd(a, b, res) do { \
+    (res)->tv_sec = (a)->tv_sec + (b)->tv_sec; \
+    (res)->tv_usec = (a)->tv_usec + (b)->tv_usec; \
+    if ((res)->tv_usec >= 1000000) { (res)->tv_sec++; (res)->tv_usec -= 1000000; } \
+} while (0)
+#define timersub(a, b, res) do { \
+    (res)->tv_sec = (a)->tv_sec - (b)->tv_sec; \
+    (res)->tv_usec = (a)->tv_usec - (b)->tv_usec; \
+    if ((res)->tv_usec < 0) { (res)->tv_sec--; (res)->tv_usec += 1000000; } \
+} while (0)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,6 +42,8 @@ struct itimerval {
 
 int gettimeofday(struct timeval *tp, void *tz);
 int lutimes(const char *path, const struct timeval *times);
+int getitimer(int which, struct itimerval *value);
+int setitimer(int which, const struct itimerval *value, struct itimerval *ovalue);
 
 #ifdef __cplusplus
 }

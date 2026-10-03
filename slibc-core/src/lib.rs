@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod calendar;
+pub mod dns;
 pub mod dtoa;
 pub mod hexfloat;
 pub mod iconv;

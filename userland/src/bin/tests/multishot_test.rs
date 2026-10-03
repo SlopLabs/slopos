@@ -8,6 +8,7 @@
 
 use slopos_abi::net::{AF_INET, SOCK_STREAM, SockAddrIn};
 use slopos_abi::syscall::POLLIN;
+use slopos_slibc::test_harness::note;
 use slopos_userland as _;
 use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{fs, net};
@@ -143,18 +144,25 @@ fn test_accept_multishot_yields_connections() -> bool {
     slopfut::block_on(ring, async move {
         let mut stream = slopfut::accept_multishot(listen_fd);
 
-        for _ in 0..2 {
+        for round in 0..2 {
             let Ok(client) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+                note(&format!("round {round}: socket failed"));
                 return false;
             };
-            if net::connect(client.raw(), &addr).is_err() {
+            if let Err(e) = net::connect(client.raw(), &addr) {
+                note(&format!("round {round}: connect failed: {e:?}"));
                 return false;
             }
             match stream.next().await {
                 Some(fd) if fd >= 0 => {
                     let _ = fs::close_fd_raw(fd);
                 }
-                _ => return false,
+                other => {
+                    note(&format!(
+                        "round {round}: the armed accept yielded {other:?}"
+                    ));
+                    return false;
+                }
             }
             drop(client);
         }

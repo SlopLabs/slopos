@@ -54,11 +54,12 @@ pub struct HeaderSpec {
 /// own entry points use: `name: <rust type>` for a typedef,
 /// `struct name { field: ty, ... }` for a struct.
 ///
-/// All are upstream `libc`'s shared `src/unix/mod.rs` definitions for x86-64,
-/// unmodified: the SlopOS patch adds a per-OS module arm and a
-/// `#[link]` arm and touches no type or struct definition, so there is no
-/// creation hunk to read them out of. `size_t`/`ssize_t` are the crate
-/// prelude's. `build.rs` pins the three that `slopos-abi` also defines with a
+/// All but `struct __res_state` are upstream `libc`'s shared `src/unix/mod.rs`
+/// definitions for x86-64, unmodified: the SlopOS patch adds a per-OS module
+/// arm and a `#[link]` arm and touches no type or struct definition, so there
+/// is no creation hunk to read them out of. `__res_state` is slibc's own
+/// (`src/net/resolv.rs`). `size_t`/`ssize_t` are the crate prelude's.
+/// `build.rs` pins the three that `slopos-abi` also defines with a
 /// `const _: () = assert!`, so a divergence is a compile error rather than a
 /// wrong header.
 pub const SHARED_TYPES: &[&str] = &[
@@ -110,6 +111,8 @@ pub const SHARED_TYPES: &[&str] = &[
      gr_mem: *mut *mut c_char }",
     "struct utimbuf { actime: time_t, modtime: time_t }",
     "struct itimerval { it_interval: timeval, it_value: timeval }",
+    "struct __res_state { retrans: c_int, retry: c_int, options: c_ulong, nscount: c_int, \
+     nsaddr_list: [sockaddr_in; 3] }",
 ];
 
 /// `va_list` is not a contract type and cannot be: the `libc` crate has no
@@ -312,6 +315,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "typedef unsigned short u_short;",
             "typedef unsigned int u_int;",
             "typedef unsigned long u_long;",
+            "typedef char *caddr_t;",
         ],
         raw_unguarded: &[],
     },
@@ -1508,9 +1512,30 @@ pub const HEADERS: &[HeaderSpec] = &[
         slibc_consts: &["ITIMER_REAL", "ITIMER_VIRTUAL", "ITIMER_PROF"],
         macros: &[],
         functions: &["gettimeofday", "lutimes"],
-        extra: &[],
+        extra: &[
+            "getitimer(which: c_int, value: *mut itimerval) -> c_int",
+            "setitimer(which: c_int, value: *const itimerval, ovalue: *mut itimerval) -> c_int",
+        ],
         variables: &[],
-        raw: &[],
+        // The BSD `timeval` arithmetic of timeradd(3), as C macros: no
+        // contract item stands behind them. `cmp` is a relational operator.
+        raw: &[
+            "#define timerisset(tvp) ((tvp)->tv_sec || (tvp)->tv_usec)",
+            "#define timerclear(tvp) ((tvp)->tv_sec = (tvp)->tv_usec = 0)",
+            "#define timercmp(a, b, cmp) \\",
+            "    (((a)->tv_sec == (b)->tv_sec) ? ((a)->tv_usec cmp (b)->tv_usec) \\",
+            "                                  : ((a)->tv_sec cmp (b)->tv_sec))",
+            "#define timeradd(a, b, res) do { \\",
+            "    (res)->tv_sec = (a)->tv_sec + (b)->tv_sec; \\",
+            "    (res)->tv_usec = (a)->tv_usec + (b)->tv_usec; \\",
+            "    if ((res)->tv_usec >= 1000000) { (res)->tv_sec++; (res)->tv_usec -= 1000000; } \\",
+            "} while (0)",
+            "#define timersub(a, b, res) do { \\",
+            "    (res)->tv_sec = (a)->tv_sec - (b)->tv_sec; \\",
+            "    (res)->tv_usec = (a)->tv_usec - (b)->tv_usec; \\",
+            "    if ((res)->tv_usec < 0) { (res)->tv_sec--; (res)->tv_usec += 1000000; } \\",
+            "} while (0)",
+        ],
         raw_unguarded: &[],
     },
     HeaderSpec {
@@ -1663,6 +1688,8 @@ pub const HEADERS: &[HeaderSpec] = &[
         ],
         consts: &["IPPROTO_*", "IP_*", "IPV6_*", "INADDR_*"],
         slibc_consts: &[
+            "IN_LOOPBACKNET",
+            "IPPORT_RESERVED",
             "INET_ADDRSTRLEN",
             "INET6_ADDRSTRLEN",
             "IP_UNBLOCK_SOURCE",
@@ -1836,6 +1863,71 @@ pub const HEADERS: &[HeaderSpec] = &[
         raw_unguarded: &[],
     },
     HeaderSpec {
+        path: "netinet/in_systm.h",
+        summary: "network-order integer types",
+        includes: &["sys/types.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[],
+        variables: &[],
+        // The BSD names for fields held in network byte order, which C
+        // programs reach through this header alone.
+        raw: &[
+            "typedef unsigned short n_short;",
+            "typedef unsigned int n_long;",
+            "typedef unsigned int n_time;",
+        ],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "netinet/ip.h",
+        summary: "IPv4 type of service",
+        includes: &["netinet/in.h", "netinet/in_systm.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[],
+        variables: &[],
+        // What a socket's `IP_TOS` takes: RFC 1349's type-of-service bits and
+        // the DSCP code points of RFCs 2474, 2597, 3246, 5865 and 8622, each
+        // shifted into the byte's upper six bits.
+        raw: &[
+            "#define IPTOS_LOWDELAY 0x10",
+            "#define IPTOS_THROUGHPUT 0x08",
+            "#define IPTOS_RELIABILITY 0x04",
+            "#define IPTOS_MINCOST 0x02",
+            "#define IPTOS_DSCP_CS0 0x00",
+            "#define IPTOS_DSCP_CS1 0x20",
+            "#define IPTOS_DSCP_CS2 0x40",
+            "#define IPTOS_DSCP_CS3 0x60",
+            "#define IPTOS_DSCP_CS4 0x80",
+            "#define IPTOS_DSCP_CS5 0xa0",
+            "#define IPTOS_DSCP_CS6 0xc0",
+            "#define IPTOS_DSCP_CS7 0xe0",
+            "#define IPTOS_DSCP_AF11 0x28",
+            "#define IPTOS_DSCP_AF12 0x30",
+            "#define IPTOS_DSCP_AF13 0x38",
+            "#define IPTOS_DSCP_AF21 0x48",
+            "#define IPTOS_DSCP_AF22 0x50",
+            "#define IPTOS_DSCP_AF23 0x58",
+            "#define IPTOS_DSCP_AF31 0x68",
+            "#define IPTOS_DSCP_AF32 0x70",
+            "#define IPTOS_DSCP_AF33 0x78",
+            "#define IPTOS_DSCP_AF41 0x88",
+            "#define IPTOS_DSCP_AF42 0x90",
+            "#define IPTOS_DSCP_AF43 0x98",
+            "#define IPTOS_DSCP_EF 0xb8",
+            "#define IPTOS_DSCP_VA 0xb0",
+            "#define IPTOS_DSCP_LE 0x04",
+        ],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
         path: "arpa/inet.h",
         summary: "internet address manipulation",
         includes: &["netinet/in.h"],
@@ -1854,6 +1946,91 @@ pub const HEADERS: &[HeaderSpec] = &[
         ],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "arpa/nameser.h",
+        summary: "DNS message format",
+        includes: &["sys/types.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[],
+        variables: &[],
+        // RFC 1035 section 4.1: the sizes, codes and header a caller of
+        // `res_query` parses a reply with. `HEADER` lays its flag bits out
+        // as a little-endian compiler allocates bit-fields, low bit first, so
+        // each lands on its wire bit (AD and CD as RFC 4035 places them); its
+        // 16-bit fields hold network byte order.
+        raw: &[
+            "#define NS_PACKETSZ 512",
+            "#define NS_MAXDNAME 1025",
+            "#define NS_MAXCDNAME 255",
+            "#define NS_MAXLABEL 63",
+            "#define NS_HFIXEDSZ 12",
+            "#define NS_QFIXEDSZ 4",
+            "#define NS_RRFIXEDSZ 10",
+            "#define NS_INT32SZ 4",
+            "#define NS_INT16SZ 2",
+            "#define NS_INADDRSZ 4",
+            "#define NS_IN6ADDRSZ 16",
+            "#define NS_DEFAULTPORT 53",
+            "#define PACKETSZ NS_PACKETSZ",
+            "#define MAXDNAME NS_MAXDNAME",
+            "#define MAXCDNAME NS_MAXCDNAME",
+            "#define MAXLABEL NS_MAXLABEL",
+            "#define HFIXEDSZ NS_HFIXEDSZ",
+            "#define QFIXEDSZ NS_QFIXEDSZ",
+            "#define RRFIXEDSZ NS_RRFIXEDSZ",
+            "#define INT32SZ NS_INT32SZ",
+            "#define INT16SZ NS_INT16SZ",
+            "#define INADDRSZ NS_INADDRSZ",
+            "#define IN6ADDRSZ NS_IN6ADDRSZ",
+            "#define NAMESERVER_PORT NS_DEFAULTPORT",
+            "",
+            "#define QUERY 0",
+            "#define NOERROR 0",
+            "#define FORMERR 1",
+            "#define SERVFAIL 2",
+            "#define NXDOMAIN 3",
+            "#define NOTIMP 4",
+            "#define REFUSED 5",
+            "",
+            "#define C_IN 1",
+            "#define C_ANY 255",
+            "#define T_A 1",
+            "#define T_NS 2",
+            "#define T_CNAME 5",
+            "#define T_SOA 6",
+            "#define T_PTR 12",
+            "#define T_MX 15",
+            "#define T_TXT 16",
+            "#define T_AAAA 28",
+            "#define T_SRV 33",
+            "#define T_SSHFP 44",
+            "#define T_RRSIG 46",
+            "#define T_ANY 255",
+            "",
+            "typedef struct {",
+            "    unsigned id : 16;",
+            "    unsigned rd : 1;",
+            "    unsigned tc : 1;",
+            "    unsigned aa : 1;",
+            "    unsigned opcode : 4;",
+            "    unsigned qr : 1;",
+            "    unsigned rcode : 4;",
+            "    unsigned cd : 1;",
+            "    unsigned ad : 1;",
+            "    unsigned unused : 1;",
+            "    unsigned ra : 1;",
+            "    unsigned qdcount : 16;",
+            "    unsigned ancount : 16;",
+            "    unsigned nscount : 16;",
+            "    unsigned arcount : 16;",
+            "} HEADER;",
+        ],
         raw_unguarded: &[],
     },
     HeaderSpec {
@@ -1886,6 +2063,26 @@ pub const HEADERS: &[HeaderSpec] = &[
         variables: &[],
         // `h_errno` is per thread, a macro over its accessor as `errno` is.
         raw: &["#define h_errno (*__h_errno_location())"],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "resolv.h",
+        summary: "DNS resolver",
+        includes: &["sys/types.h", "netinet/in.h", "arpa/nameser.h"],
+        types: &["__res_state"],
+        consts: &[],
+        slibc_consts: &["MAXNS", "RES_INIT", "RES_RECURSE", "RES_DEFAULT"],
+        macros: &[],
+        functions: &[],
+        extra: &[
+            "res_init() -> c_int",
+            "res_query(dname: *const c_char, rclass: c_int, rtype: c_int, answer: *mut c_uchar, \
+             anslen: c_int) -> c_int",
+            "dn_expand(msg: *const c_uchar, eom: *const c_uchar, src: *const c_uchar, \
+             dst: *mut c_char, dstsiz: c_int) -> c_int",
+        ],
+        variables: &["_res: __res_state"],
+        raw: &[],
         raw_unguarded: &[],
     },
     HeaderSpec {
@@ -2306,6 +2503,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "setgrent()",
             "getgrent() -> *mut group",
             "endgrent()",
+            "initgroups(user: *const c_char, group: gid_t) -> c_int",
         ],
         variables: &[],
         raw: &[],
@@ -2849,6 +3047,26 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "paths.h",
+        summary: "system file paths",
+        includes: &[],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[],
+        variables: &[],
+        // OpenSSH's configure asks for `_PATH_MAILDIR`; nothing delivers mail.
+        raw: &[
+            "#define _PATH_BSHELL \"/bin/sh\"",
+            "#define _PATH_DEVNULL \"/dev/null\"",
+            "#define _PATH_TTY \"/dev/tty\"",
+            "#define _PATH_MAILDIR \"/var/mail\"",
+        ],
         raw_unguarded: &[],
     },
     HeaderSpec {

@@ -29,10 +29,11 @@ const METRIC_DEFAULT: u32 = 100;
 /// Assign an IPv4 configuration to an interface: address, connected route, and
 /// optionally a default route through `gateway`.
 ///
-/// Replaces any previous routes this device owned, so a reconfiguration does
-/// not leave the old subnet behind. Three separate critical sections, never
-/// nested: the interface table, then the route table for the withdrawal, then
-/// for the additions.
+/// Replaces the address `origin` held there before and any previous routes this
+/// device owned, so a reconfiguration leaves neither the old address first nor
+/// the old subnet behind. Three separate critical sections, never nested: the
+/// interface table, then the route table for the withdrawal, then for the
+/// additions.
 pub fn configure_ipv4(
     dev: DevIndex,
     addr: Ipv4Addr,
@@ -48,6 +49,9 @@ pub fn configure_ipv4(
         ifindex,
         IfaceAddr::permanent(addr, prefix_len, AddrScope::Global, origin),
     )?;
+    let _ = iface::retain_addrs(ifindex, |a| {
+        a.origin != origin || (a.addr == addr && a.prefix_len == prefix_len)
+    });
 
     route::remove_device_routes(dev);
 

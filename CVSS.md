@@ -355,6 +355,27 @@ SlopOS's own. Also closed in the change: an answer a killed caller left on
 the firmware thread could be handed to the next caller. `fat-core` bounds
 every chain walk, so a hostile ESP yields an error rather than a hang.
 
+Swept 2026-10-03: wired networking — the RTL8168 receive ring, which reads
+lengths and status a device writes; `nic::publish`, ARP and IPv4 ingress, now
+facing a physical LAN; slibc's `res_query` and `dn_expand`, which parse replies
+from the network; and the host's `sshd -i` fixture the guest reaches at
+10.0.2.4:22. Three review passes. Nothing reached the bar, and what came
+closest was fixed in the change rather than entered. The driver had opened the
+chip's receive filter to 16 KiB over 2 KiB buffers, the precondition of
+CVE-2009-1389 (confidence 55); RxMaxSize is now the length a descriptor
+names. IPv4 ingress delivered 127/8 and foreign destinations arriving on a
+physical NIC, so a LAN host reached a socket bound to 127.0.0.1 (confidence
+75); `ipv4::admits` now drops them, admitting only DHCP's unfragmented
+datagrams to port 68 on a device that holds no address yet. A connected UDP
+socket's `poll` counted datagrams its `recv` discarded, which could hang
+`res_query` (confidence 45), and `res_query` kept an id a failed `getrandom`
+left zero and asked from the allocator's next port (confidence 30); both are
+fixed. The fixture's sshd takes one client key, forces a command that serves
+the checkout read-only and the run's scratch repository, and forwards
+nothing. Pre-existing and left as designed: a UDP bind with `SO_REUSEADDR`
+takes over an identical binding whatever its holder set
+(`test_so_reuseaddr`).
+
 The highest ID issued so far is **SLOPOS-2026-0057**. The next finding is
 `SLOPOS-2026-0058`.
 

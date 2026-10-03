@@ -232,10 +232,6 @@ fn test_icmp_napi_scheduling_e2e() -> TestResult {
         );
     };
 
-    let Some(driver) = crate::net_driver_service::net_driver() else {
-        return fail!("no NIC driver is registered");
-    };
-
     let fd = socket::socket_create(
         AF_INET,
         SOCK_DGRAM,
@@ -273,7 +269,7 @@ fn test_icmp_napi_scheduling_e2e() -> TestResult {
     let mut recv_buf = [0u8; 256];
     let mut peer = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
     let received = await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
-        (driver.virtnet_force_napi_poll)();
+        crate::nic::force_napi_poll();
         if socket::socket_poll_readable(sock) == 0 {
             return None;
         }

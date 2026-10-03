@@ -1,11 +1,11 @@
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
-use slopos_ostd::dev::FromRawPtr;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use slopos_ostd::lock_class;
 use slopos_ostd::mm::uframe::KeepaliveFrames;
-use slopos_ostd::{KArc, KBox, KVec};
+use slopos_ostd::{KArc, KVec};
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
+#[cfg(feature = "test-hooks")]
 use slopos_net as net;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_info};
@@ -22,10 +22,8 @@ use crate::virtio::{
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
 use slopos_net::{
-    self, PACKET_POOL, ingress,
-    napi::NapiContext,
-    net_driver_service::{NetDriverServices, register_net_driver_services},
-    netdev::{CsumOffload, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats},
+    self,
+    netdev::{CsumOffload, NetDevice, NetDeviceFeatures, NetDeviceStats},
     packetbuf::PacketBuf,
     pool::PacketPool,
     types::{MacAddr, NetError},
@@ -54,13 +52,11 @@ const DEV_CFG_MTU_OFFSET: usize = 0x0A;
 const DEFAULT_MTU: u16 = 1500;
 const PACKET_BUFFER_SIZE: usize = 2048;
 
+#[cfg(feature = "test-hooks")]
 const UDP_HEADER_LEN: usize = 8;
 
 const RX_RING_SIZE: usize = 64;
 const TX_RING_SIZE: usize = 64;
-const NAPI_BUDGET: u32 = 64;
-
-const LOOPBACK_POLL_BUDGET: usize = 32;
 
 /// Max descriptors in one zero-copy SG TX chain (header + payload runs): a
 /// `<= 1472`-byte datagram spans at most 2 pages, so 4 leaves headroom.
@@ -156,22 +152,8 @@ static VIRTIO_NET_STATE: SpinLock<VirtioNetState> = SpinLock::new(
     VirtioNetState::new(),
     lock_class!("VIRTIO_NET_STATE", LOCK_LEVEL_RESOURCE),
 );
-/// Wake the NAPI kthread when the NIC IRQ fires.
-static NAPI_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new(
-    "netpoll",
-    lock_class!("NETPOLL_WAKER.waiters", LOCK_LEVEL_RESOURCE),
-);
-/// Wake the net-timer kthread when a deadline sooner than the 50 ms periodic
-/// slice is armed. No production caller arms it today.
-static TIMER_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new(
-    "net-timer",
-    lock_class!("NET_TIMER_WAKER.waiters", LOCK_LEVEL_RESOURCE),
-);
-static NAPI_CONTEXT: NapiContext = NapiContext::new(NAPI_BUDGET);
 
-static DEVICE_HANDLE_PTR: AtomicPtr<DeviceHandle> = AtomicPtr::new(core::ptr::null_mut());
-
-/// Link state as of the last carrier poll.
+/// Link state as of the last carrier sample.
 ///
 /// An atomic, not a [`VIRTIO_NET_STATE`] field: [`NetDevice::carrier`] must not
 /// take a lock — callers hold their own, and a driver lock here would add the
@@ -181,16 +163,6 @@ static LINK_UP: AtomicBool = AtomicBool::new(true);
 /// Whether the device negotiated `VIRTIO_NET_F_STATUS`, i.e. whether
 /// [`LINK_UP`] is an observation or an assumption.
 static LINK_OBSERVABLE: AtomicBool = AtomicBool::new(false);
-
-pub fn get_device_handle() -> Option<&'static DeviceHandle> {
-    DeviceHandle::from_ptr(DEVICE_HANDLE_PTR.load(Ordering::Acquire))
-}
-
-fn set_device_handle(handle: DeviceHandle) {
-    let boxed = KBox::try_new(handle).expect("virtio_net: device handle alloc");
-    let ptr = KBox::into_raw(boxed);
-    DEVICE_HANDLE_PTR.store(ptr, Ordering::Release);
-}
 
 /// Relaxed atomics rather than fields on `VirtioNetState`: `stats()` answers a
 /// query syscall that must not take the driver lock. Byte counts are payload
@@ -419,24 +391,15 @@ impl NetDevice for VirtioNetDev {
     fn carrier_detect(&self) -> bool {
         LINK_OBSERVABLE.load(Ordering::Acquire)
     }
-}
 
-/// The driver lock is released before `iface::set_carrier`: the driver lock
-/// holds no out-edges into the network tables. No edge state is kept here —
-/// `set_carrier` reports only real transitions.
-fn poll_carrier() {
-    let up = {
-        let state = VIRTIO_NET_STATE.lock();
-        link_status_up(&state)
-    };
-    LINK_UP.store(up, Ordering::Release);
+    fn rx_pending(&self) -> bool {
+        VIRTIO_NET_STATE.lock().device.rx_queue.has_pending()
+    }
 
-    // Before registration there is no interface to carry the transition; the
-    // state attach reads is this atomic, so nothing is lost.
-    let Some(handle) = get_device_handle() else {
-        return;
-    };
-    let _ = slopos_net::iface::set_carrier(handle.index(), up);
+    fn sample_carrier(&self) {
+        let up = link_status_up(&VIRTIO_NET_STATE.lock());
+        LINK_UP.store(up, Ordering::Release);
+    }
 }
 
 fn read_mac(caps: &VirtioMmioCaps, negotiated_features: u64) -> [u8; 6] {
@@ -462,15 +425,6 @@ fn read_mtu(caps: &VirtioMmioCaps, negotiated_features: u64) -> u16 {
         return DEFAULT_MTU;
     }
     caps.device_cfg.read::<u16>(DEV_CFG_MTU_OFFSET)
-}
-
-/// This device's IPv4 address, read from the interface table: a driver-side
-/// copy cannot learn about a renewal, a reconfiguration or a second address.
-fn our_ipv4(_state: &VirtioNetState) -> [u8; 4] {
-    get_device_handle()
-        .and_then(|h| slopos_net::iface::our_ip(h.index()))
-        .map(|ip| ip.0)
-        .unwrap_or([0; 4])
 }
 
 /// The link state the device reports, independent of whether the driver is in
@@ -772,6 +726,7 @@ fn virtnet_refill_rx_and_notify(state: &mut VirtioNetState) {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 fn transmit_udp_packet_locked(
     state: &mut VirtioNetState,
     src_ip: [u8; 4],
@@ -842,6 +797,7 @@ fn transmit_udp_packet_locked(
     }
 }
 
+#[cfg(feature = "test-hooks")]
 pub fn transmit_udp_packet(
     src_ip: [u8; 4],
     dst_ip: [u8; 4],
@@ -853,121 +809,10 @@ pub fn transmit_udp_packet(
     transmit_udp_packet_locked(&mut state, src_ip, dst_ip, src_port, dst_port, payload)
 }
 
-/// Drain one NAPI burst. Returns the NIC packet count so the caller can re-arm
-/// the waker when budget was exhausted.
-fn run_napi_burst() -> u32 {
-    // Before the NIC-readiness gate below: loopback delivery must not depend on
-    // a physical NIC being present and up.
-    let software = slopos_net::napi::poll_software_devices(LOOPBACK_POLL_BUDGET);
-
-    let Some(handle) = get_device_handle() else {
-        return software;
-    };
-
-    {
-        let state = VIRTIO_NET_STATE.lock();
-        if !state.device.ready || !link_is_up(&state) {
-            return software;
-        }
-    }
-
-    let packets = handle.poll_rx(NAPI_CONTEXT.budget() as usize, &PACKET_POOL);
-    let processed = packets.len() as u32;
-    for pkt in packets {
-        ingress::net_rx(handle, pkt);
-    }
-    NAPI_CONTEXT.add_processed(processed);
-
-    processed + software
-}
-
-/// Force a synchronous NAPI poll cycle from a non-IRQ context, for test
-/// fixtures and the host wrapper; production RX runs on the netpoll kthread.
-pub fn virtnet_force_napi_poll() {
-    NAPI_WAKER.arm_and_wake();
-    let _ = run_napi_burst();
-    slopos_net::socket::socket_process_timers();
-}
-
-/// Wake-only counterpart to [`virtnet_force_napi_poll`]: loopback tx calls it
-/// under the `LoopbackDev::inner` lock, where a synchronous poll would re-enter
-/// `VIRTIO_NET_STATE`.
-pub fn virtnet_wake_napi() {
-    NAPI_WAKER.arm_and_wake();
-}
-
-/// Long-lived netpoll worker (threaded NAPI), parked on [`NAPI_WAKER`] which the
-/// per-queue IRQ handler arms. After each burst it peeks the used ring and
-/// re-arms if the IRQ landed inside the drain-to-park window (lost wakeup).
-fn napi_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
-    use slopos_ostd::sync::kernel_io_task::{KthreadWait, yield_now};
-    loop {
-        let waited = NAPI_WAKER.wait(&token);
-        if waited == KthreadWait::Stop {
-            // Packets the IRQ already committed are in the used ring and
-            // nothing else will collect them.
-            let _ = run_napi_burst();
-            break;
-        }
-        let processed = run_napi_burst();
-        slopos_net::socket::socket_process_timers();
-
-        if has_pending_rx() {
-            NAPI_WAKER.rearm();
-        }
-
-        if processed >= NAPI_CONTEXT.budget() {
-            NAPI_WAKER.rearm();
-            yield_now(&token);
-        }
-    }
-    NAPI_WAKER.stop().note_exited();
-}
-
-/// Does the used ring hold an entry the kthread has not popped? Compares used
-/// `idx` against the driver-cached `last_used_idx`, which only the kthread
-/// advances.
-fn has_pending_rx() -> bool {
-    // TODO(tech-debt): takes `VIRTIO_NET_STATE` for a single volatile read
-    // because `has_pending` needs `&Virtqueue` — expose the used-ring base so
-    // this becomes a pure atomic load.
-    let state = VIRTIO_NET_STATE.lock();
-    state.device.rx_queue.has_pending()
-}
-
-/// Net-timer kthread, separated from `napi_thread_entry` so the RX hot path is
-/// not charged for `net_timer_process`. Runs at [`TaskPriority::KernelIo`] so
-/// ARP aging, TCP retransmit and delayed-ACK fire on time under user load.
-fn net_timer_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
-    use slopos_ostd::sync::kernel_io_task::{KthreadWait, yield_now};
-    const NET_TIMER_PERIOD_MS: u32 = 50;
-    loop {
-        if TIMER_WAKER.wait_timeout_ms(&token, NET_TIMER_PERIOD_MS) == KthreadWait::Stop {
-            break;
-        }
-        slopos_net::timer::net_timer_process();
-        slopos_net::socket::socket_process_timers();
-        // Polled here rather than from the config-change interrupt: reading the
-        // status register needs the driver lock and acting on a transition
-        // needs four more plus an allocation, none of which a hard IRQ may do.
-        poll_carrier();
-        yield_now(&token);
-    }
-    TIMER_WAKER.stop().note_exited();
-}
-
-/// Per-queue interrupt handler: `queue_idx` 0 is RX, 1 is TX. Deliberately tiny
-/// — wake the netpoll kthread and do no protocol or scheduler work in hard IRQ.
-fn virtio_net_irq_handler(queue_idx: u8) {
-    match queue_idx {
-        0 => {
-            NAPI_WAKER.arm_and_wake();
-        }
-        1 => {
-            NAPI_WAKER.arm_and_wake();
-        }
-        _ => {}
-    }
+/// Deliberately tiny: wake the netpoll kthread and do no protocol or scheduler
+/// work in hard IRQ.
+fn virtio_net_irq_handler(_queue_idx: u8) {
+    slopos_net::napi::wake_napi();
 }
 
 /// Runs with `VIRTIO_NET_STATE` held: nothing here may block, allocate, take
@@ -987,53 +832,22 @@ fn virtio_net_register_device(state: &mut VirtioNetState) -> bool {
     true
 }
 
-/// **Runs with `VIRTIO_NET_STATE` released.** Every step either allocates,
-/// takes another subsystem's lock, or re-enters this driver's own `tx()` —
-/// none permissible under a lock that disables interrupts and preemption.
+/// **Runs with `VIRTIO_NET_STATE` released**: publishing allocates, takes the
+/// network tables' locks and sends a DHCP DISCOVER through this driver's own
+/// `tx()` — none permissible under a lock that disables interrupts and
+/// preemption.
 ///
 /// Returns `false` only on allocation failure.
-fn virtio_net_publish_device(mac: [u8; 6], mtu: u16) -> bool {
-    use slopos_net::netdev::DEVICE_REGISTRY;
-
-    PACKET_POOL.init();
-
-    let dev: KArc<dyn slopos_net::netdev::NetDevice + Send + Sync> =
-        match KArc::try_new(VirtioNetDev) {
-            Ok(d) => d,
-            Err(_) => {
-                klog_info!("virtio-net: alloc failed");
-                return false;
-            }
-        };
-    let Some(handle) = DEVICE_REGISTRY.register(dev) else {
-        klog_info!("virtio-net: failed to register in device registry");
-        return true;
+fn virtio_net_publish_device() -> bool {
+    let dev: KArc<dyn NetDevice + Send + Sync> = match KArc::try_new(VirtioNetDev) {
+        Ok(d) => d,
+        Err(_) => {
+            klog_info!("virtio-net: alloc failed");
+            return false;
+        }
     };
-
-    let actual_idx = handle.index();
-    klog_info!(
-        "virtio-net: registered as dev {} in device registry",
-        actual_idx
-    );
-
-    match slopos_net::iface::attach(
-        actual_idx,
-        slopos_net::iface::IfaceKind::Ethernet,
-        slopos_net::types::MacAddr(mac),
-        mtu,
-        LINK_UP.load(Ordering::Acquire),
-        LINK_OBSERVABLE.load(Ordering::Acquire),
-    ) {
-        Ok(ifindex) => klog_info!("virtio-net: attached interface {}", ifindex),
-        Err(err) => klog_info!("virtio-net: failed to attach interface: {:?}", err),
-    }
-
-    set_device_handle(handle);
-
-    // Only queues a DISCOVER and arms a timer, so probe returns whether or not
-    // a server answers, and a late one is retried.
-    if !slopos_net::dhcp::start(actual_idx) {
-        klog_info!("virtio-net: could not start the DHCP client");
+    if slopos_net::nic::publish(dev).is_none() {
+        klog_info!("virtio-net: not published to the network stack");
     }
     true
 }
@@ -1151,36 +965,7 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         }
     }
 
-    if !virtio_net_publish_device(mac, mtu) {
-        return Err(PciProbeError::OutOfMemory);
-    }
-
-    slopos_net::napi::register_wake_napi(virtnet_wake_napi);
-    static NET_DRIVER_SVC: NetDriverServices = NetDriverServices {
-        virtio_net_ipv4_addr,
-        transmit_udp_packet,
-        virtio_net_mac,
-        get_device_handle,
-        virtio_net_is_ready,
-        virtio_net_transmit,
-        virtnet_force_napi_poll,
-    };
-    register_net_driver_services(&NET_DRIVER_SVC);
-
-    if let Err(err) = slopos_ostd::spawn_kernel_io!(NAPI_WAKER.stop(), napi_thread_entry) {
-        klog_info!(
-            "virtio-net: failed to spawn netpoll kernel thread ({:?})",
-            err
-        );
-        DEVICE_CLAIMED.reset();
-        return Err(PciProbeError::OutOfMemory);
-    }
-    if let Err(err) = slopos_ostd::spawn_kernel_io!(TIMER_WAKER.stop(), net_timer_thread_entry) {
-        klog_info!(
-            "virtio-net: failed to spawn net-timer kernel thread ({:?})",
-            err
-        );
-        DEVICE_CLAIMED.reset();
+    if !virtio_net_publish_device() {
         return Err(PciProbeError::OutOfMemory);
     }
 
@@ -1216,15 +1001,18 @@ crate::pci_driver! {
     };
 }
 
+#[cfg(feature = "test-hooks")]
 pub fn virtio_net_is_ready() -> bool {
     VIRTIO_NET_STATE.lock().device.ready
 }
 
+#[cfg(feature = "test-hooks")]
 pub fn virtio_net_link_up() -> bool {
     let state = VIRTIO_NET_STATE.lock();
     link_is_up(&state)
 }
 
+#[cfg(feature = "test-hooks")]
 pub fn virtio_net_mac() -> Option<[u8; 6]> {
     let state = VIRTIO_NET_STATE.lock();
     if !state.device.ready {
@@ -1233,23 +1021,7 @@ pub fn virtio_net_mac() -> Option<[u8; 6]> {
     Some(state.device.mac)
 }
 
-pub fn virtio_net_mtu() -> Option<u16> {
-    let state = VIRTIO_NET_STATE.lock();
-    if !state.device.ready {
-        return None;
-    }
-    Some(state.device.mtu)
-}
-
-pub fn virtio_net_ipv4_addr() -> Option<[u8; 4]> {
-    let state = VIRTIO_NET_STATE.lock();
-    if !state.device.ready {
-        return None;
-    }
-    let addr = our_ipv4(&state);
-    if addr == [0; 4] { None } else { Some(addr) }
-}
-
+#[cfg(feature = "test-hooks")]
 pub fn virtio_net_transmit(packet: &[u8]) -> bool {
     if packet.is_empty() {
         return true;

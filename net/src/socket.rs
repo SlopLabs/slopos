@@ -769,12 +769,7 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
         return map_net_err(err);
     }
 
-    let dst = Ipv4Addr(seg.tuple.remote_ip);
-    let src_mac = net::route::ROUTE_TABLE
-        .lookup(dst)
-        .and_then(|(dev, _)| net::DEVICE_REGISTRY.mac_by_index(dev))
-        .unwrap_or(net::types::MacAddr::ZERO);
-    if let Err(err) = pkt.prepend_eth(src_mac.0, [0; 6]) {
+    if let Err(err) = pkt.prepend_eth(net::types::MacAddr::ZERO.0, [0; 6]) {
         return map_net_err(err);
     }
     pkt.set_ipv4_offsets();
@@ -1114,30 +1109,34 @@ fn sync_socket_state(sock: &mut Socket) {
     }
 }
 
-pub fn socket_deliver_udp(sock_idx: u32, src_ip: [u8; 4], src_port: u16, payload: &[u8]) {
-    let packet = match PacketBuf::from_raw_copy(payload) {
-        Some(pkt) => pkt,
-        None => return,
+/// Queue a datagram on `sock_idx`. `false` when it is not that socket's to
+/// take — the socket is gone, not UDP, or connected to a peer other than the
+/// source — so the caller can offer it to a wildcard socket on the same port.
+pub fn socket_deliver_udp(sock_idx: u32, src_ip: [u8; 4], src_port: u16, payload: &[u8]) -> bool {
+    let Some(packet) = PacketBuf::from_raw_copy(payload) else {
+        return true;
     };
+    let src = SockAddr::new(Ipv4Addr(src_ip), Port(src_port));
 
-    let mut should_wake = false;
-    {
+    let queued = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
-            return;
+            return false;
         };
         if !socket_is_udp(sock) {
-            return;
+            return false;
         }
-        let src = SockAddr::new(Ipv4Addr(src_ip), Port(src_port));
-        if sock.recv_queue.push((packet, src)) {
-            should_wake = true;
+        if sock.state == SocketState::Connected && sock.remote_addr.is_some_and(|peer| peer != src)
+        {
+            return false;
         }
-    }
+        sock.recv_queue.push((packet, src))
+    };
 
-    if should_wake {
+    if queued {
         BUS.publish(sock_recv_ev(sock_idx));
     }
+    true
 }
 
 pub fn socket_deliver_icmp(sock_idx: u32, src_ip: [u8; 4], icmp_message: &[u8]) {
@@ -1195,17 +1194,17 @@ pub fn socket_deliver_udp_from_dispatch(
             }
 
             if local.ip.0 == dst_ip {
-                exact = Some(idx as u32);
-                break;
-            }
-            if local.ip == Ipv4Addr::UNSPECIFIED {
+                exact.get_or_insert(idx as u32);
+            } else if local.ip == Ipv4Addr::UNSPECIFIED {
                 wildcard = Some(idx as u32);
             }
         }
     }
 
-    if let Some(sock_idx) = exact.or(wildcard) {
-        socket_deliver_udp(sock_idx, src_ip, src_port, payload);
+    for sock_idx in [exact, wildcard].into_iter().flatten() {
+        if socket_deliver_udp(sock_idx, src_ip, src_port, payload) {
+            return;
+        }
     }
 }
 
@@ -1246,6 +1245,15 @@ pub fn socket_create(domain: u16, sock_type: u16, protocol: u16, owner: SocketOw
         }
     }
     idx as i32
+}
+
+/// The address a datagram from `local` to `dst` carries as its source:
+/// `local`, or for a wildcard bind the address routing to `dst` picks.
+fn udp_source(local: SockAddr, dst: Ipv4Addr) -> SockAddr {
+    if !local.ip.is_unspecified() {
+        return local;
+    }
+    crate::iface::source_ip_for(dst).map_or(local, |ip| SockAddr::new(ip, local.port))
 }
 
 /// Send `payload` to `dst_ip:dst_port`.
@@ -1356,6 +1364,7 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
     }
 
     if is_udp {
+        let local = udp_source(local, Ipv4Addr(dst_ip));
         match crate::udp::udp_sendto(local.ip.0, dst_ip, local.port.0, dst_port, payload) {
             Ok(n) => n as i64,
             Err(err) => map_net_err(err) as i64,
@@ -1463,19 +1472,31 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         }
     }
 
-    if let Some((local, reuse_addr)) = udp_bind_args
-        && let Err(err) = crate::udp::udp_bind(sock_idx, local.ip, local.port, reuse_addr)
-    {
-        let mut table = NEW_SOCKET_TABLE.lock();
-        if let Some(sock) = table.get_mut(sock_idx as usize)
-            && socket_is_udp(sock)
-            && sock.local_addr == Some(local)
-            && sock.state == SocketState::Bound
-        {
-            sock.local_addr = None;
-            sock.state = SocketState::Unbound;
+    if let Some((local, reuse_addr)) = udp_bind_args {
+        let claimed = EPHEMERAL_PORTS.lock().claim(local.port);
+        let ephemeral = (EphemeralPortAllocator::EPHEMERAL_PORT_START
+            ..=EphemeralPortAllocator::EPHEMERAL_PORT_END)
+            .contains(&local.port.0);
+        let bound = if ephemeral && !claimed && !reuse_addr {
+            Err(NetError::AddressInUse)
+        } else {
+            crate::udp::udp_bind(sock_idx, local.ip, local.port, reuse_addr)
+        };
+        if let Err(err) = bound {
+            if claimed {
+                EPHEMERAL_PORTS.lock().release(local.port);
+            }
+            let mut table = NEW_SOCKET_TABLE.lock();
+            if let Some(sock) = table.get_mut(sock_idx as usize)
+                && socket_is_udp(sock)
+                && sock.local_addr == Some(local)
+                && sock.state == SocketState::Bound
+            {
+                sock.local_addr = None;
+                sock.state = SocketState::Unbound;
+            }
+            return map_net_err(err);
         }
-        return map_net_err(err);
     }
 
     if let Some((identifier, reuse_addr)) = icmp_bind_args
@@ -2011,6 +2032,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
         }
 
         if is_udp {
+            let local = udp_source(local, remote.ip);
             return Ok(SendTarget::Udp { local, remote });
         }
         return Ok(SendTarget::Icmp {

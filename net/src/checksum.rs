@@ -103,8 +103,8 @@ pub fn internet_checksum(data: &[u8]) -> u16 {
 }
 
 /// Compute the UDP checksum from discrete fields, for callers that build
-/// frames outside the `PacketBuf` pipeline (the VirtIO-net early-boot DHCP
-/// path).  Per RFC 768, a computed checksum of zero is transmitted as `0xFFFF`.
+/// frames outside the `PacketBuf` pipeline. Per RFC 768, a computed checksum of
+/// zero is transmitted as `0xFFFF`.
 pub fn udp_checksum(
     src_ip: [u8; 4],
     dst_ip: [u8; 4],

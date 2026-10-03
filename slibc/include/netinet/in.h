@@ -83,6 +83,8 @@ struct group_source_req {
     struct sockaddr_storage gsr_source;
 };
 
+#define IN_LOOPBACKNET (127)
+#define IPPORT_RESERVED (1024)
 #define INET_ADDRSTRLEN (16)
 #define INET6_ADDRSTRLEN (46)
 #define IP_UNBLOCK_SOURCE (37)

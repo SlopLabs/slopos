@@ -141,12 +141,19 @@ impl UdpDemuxTable {
     }
 
     pub fn lookup(&self, dst_ip: Ipv4Addr, dst_port: Port) -> Option<u32> {
+        let [exact, wildcard] = self.candidates(dst_ip, dst_port);
+        exact.or(wildcard)
+    }
+
+    /// The socket bound to exactly `dst_ip`, then the wildcard one, in the
+    /// order a datagram is offered to them.
+    pub fn candidates(&self, dst_ip: Ipv4Addr, dst_port: Port) -> [Option<u32>; 2] {
         let idx = udp_demux_hash(dst_port);
         let bucket = UDP_DEMUX_BUCKETS_TABLE[idx].lock();
-        if let Some(sock) = bucket.lookup_exact(dst_ip, dst_port) {
-            return Some(sock);
-        }
-        bucket.lookup_wildcard(dst_port)
+        [
+            bucket.lookup_exact(dst_ip, dst_port),
+            bucket.lookup_wildcard(dst_port),
+        ]
     }
 
     pub fn clear(&mut self) {
@@ -256,10 +263,13 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
         return;
     }
 
-    let sock_idx = UDP_DEMUX.lock().lookup(Ipv4Addr(dst_ip), Port(dst_port));
-    if let Some(sock_idx) = sock_idx {
-        super::socket::socket_deliver_udp(sock_idx, src_ip, src_port, udp_payload);
-        return;
+    let candidates = UDP_DEMUX
+        .lock()
+        .candidates(Ipv4Addr(dst_ip), Port(dst_port));
+    for sock_idx in candidates.into_iter().flatten() {
+        if super::socket::socket_deliver_udp(sock_idx, src_ip, src_port, udp_payload) {
+            return;
+        }
     }
 
     klog_debug!(
@@ -389,10 +399,7 @@ pub fn udp_sendto(
 
     pkt.prepend_ipv4(local_ip, dst_ip, super::IpProtocol::Udp.as_u8(), udp_len)?;
 
-    let src_mac = crate::net_driver_service::net_driver()
-        .and_then(|d| (d.virtio_net_mac)())
-        .unwrap_or([0; 6]);
-    pkt.prepend_eth(src_mac, super::MacAddr::BROADCAST.0)?;
+    pkt.prepend_eth(MacAddr::ZERO.0, MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();
 
     let udp_checksum = pkt.compute_udp_checksum(Ipv4Addr(local_ip), Ipv4Addr(dst_ip));
@@ -434,10 +441,7 @@ pub fn udp_sendto_from(
 
     pkt.prepend_ipv4(local_ip, dst_ip, super::IpProtocol::Udp.as_u8(), udp_len)?;
 
-    let src_mac = crate::net_driver_service::net_driver()
-        .and_then(|d| (d.virtio_net_mac)())
-        .unwrap_or([0; 6]);
-    pkt.prepend_eth(src_mac, super::MacAddr::BROADCAST.0)?;
+    pkt.prepend_eth(MacAddr::ZERO.0, MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();
 
     let udp_checksum = pkt.compute_udp_checksum(Ipv4Addr(local_ip), Ipv4Addr(dst_ip));
@@ -479,6 +483,9 @@ pub fn udp_sendto_zerocopy(
     }
     let dst = Ipv4Addr(dst_ip);
     if dst.is_loopback() || dst.is_broadcast() || dst.is_multicast() {
+        return ZcSendOutcome::NotEligible;
+    }
+    if Ipv4Addr(local_ip).is_loopback() {
         return ZcSendOutcome::NotEligible;
     }
     let Some((dev, next_hop)) = super::route::ROUTE_TABLE.lookup(dst) else {

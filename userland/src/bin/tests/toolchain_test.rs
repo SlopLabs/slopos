@@ -24,7 +24,8 @@ const PREFIX: &str = "/usr/local";
 /// `<kind> <size or -> <path>`.
 const MANIFEST: &str = "/var/lib/slopos/trees/usr_local";
 /// What the host seeds on the self-hosting root for the ladder: a bare
-/// repository of one crate and a sparse registry of one crate.
+/// repository of one crate, a sparse registry of one crate, and the guest's
+/// half of the ssh fixture.
 const FIXTURES: &str = "/srv/ladder";
 
 /// Gates a rung on the root carrying a toolchain; `Err` is the verdict, a pass
@@ -884,6 +885,211 @@ fn git_reads_the_clone_and_reaches_the_host() -> bool {
     true
 }
 
+/// The host as the guest's network sees it, where `scripts/qemu_run.sh` runs
+/// one `sshd -i` per connection to port 22.
+const SSH_PEER: &str = "10.0.2.4";
+
+/// Rung 8: ssh runs, ssh-keygen reads the root's client key, and git rides
+/// ssh to the host's sshd: `ls-remote` and a fetch of the checkout, a commit
+/// on the fetched HEAD pushed into the run's scratch push repository, and a
+/// command the host's forced command refuses. ssh holds the host to the
+/// root's `known_hosts`; the host holds the push to the commit noted here
+/// (`SSH-PUSHED`) and its parent to the host's HEAD.
+fn ssh_carries_git_to_the_host() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let ssh = format!("{prefix}/bin/ssh");
+    let fixture = format!("{FIXTURES}/ssh");
+    let key = format!("{fixture}/id_ed25519");
+
+    let Some(version) = run("/", &ssh, &["-V"], &[]) else {
+        return false;
+    };
+    if !version.ok("step 1, ssh -V") {
+        return false;
+    }
+    let version = version.stderr.trim().to_owned();
+    if !version.starts_with("OpenSSH_") {
+        note(&format!(
+            "step 1, ssh -V printed {version:?}, not an OpenSSH version"
+        ));
+        return false;
+    }
+
+    let (public, user) = match (
+        fs::read_to_string(format!("{key}.pub")),
+        fs::read_to_string(format!("{fixture}/user")),
+    ) {
+        (Ok(public), Ok(user)) => (public, user.trim().to_owned()),
+        (Err(e), _) | (_, Err(e)) => {
+            note(&format!(
+                "step 2, reading the root's ssh fixture in {fixture}: {e}"
+            ));
+            return false;
+        }
+    };
+    let Some(derived) = run(
+        "/",
+        &format!("{prefix}/bin/ssh-keygen"),
+        &["-y", "-f", &key],
+        &[],
+    ) else {
+        return false;
+    };
+    if !derived.ok(&format!("step 2, ssh-keygen -y -f {key}")) {
+        return false;
+    }
+    let fields = |text: &str| {
+        text.split_whitespace()
+            .take(2)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    if fields(&derived.stdout) != fields(&public) {
+        note(&format!(
+            "step 2, ssh-keygen -y -f {key} derived {:?}, not the {key}.pub beside it",
+            derived.stdout.trim()
+        ));
+        return false;
+    }
+
+    let ssh_command = format!(
+        "{ssh} -F none -i {key} -l {user} -o IdentitiesOnly=yes -o IdentityAgent=none \
+         -o UserKnownHostsFile={fixture}/known_hosts -o GlobalKnownHostsFile=none \
+         -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o CheckHostIP=no \
+         -o BatchMode=yes -o ConnectTimeout=60"
+    );
+    let env = [
+        ("GIT_SSH_COMMAND", ssh_command.as_str()),
+        ("GIT_TERMINAL_PROMPT", "0"),
+    ];
+    let git = format!("{prefix}/bin/git");
+    let checkout = format!("ssh://{SSH_PEER}/checkout");
+    let push = format!("ssh://{SSH_PEER}/push");
+
+    let Some(listed) = run("/", &git, &["ls-remote", &checkout, "HEAD"], &env) else {
+        return false;
+    };
+    if !listed.ok(&format!("step 3, git ls-remote {checkout} HEAD")) {
+        return false;
+    }
+    let Some(head) = advertised_head(&listed) else {
+        note(&format!(
+            "step 3, git ls-remote {checkout} HEAD printed no commit: {:?}",
+            listed.stdout.trim()
+        ));
+        return false;
+    };
+
+    let Some(dir) = scratch("ssh", &[]) else {
+        return false;
+    };
+    let repo = format!("{dir}/fetched");
+    if let Err(e) = fs::create_dir_all(&repo) {
+        note(&format!("step 4, creating {repo}: {e}"));
+        return false;
+    }
+    let Some(init) = run(&repo, &git, &["init", "-q"], &[]) else {
+        return false;
+    };
+    if !init.ok(&format!("step 4, git init in {repo}")) {
+        return false;
+    }
+    // The seeded clone's objects as an alternate: its refs are the haves, so
+    // the fetch moves what the host has beyond it rather than the history.
+    let mut fetch = vec!["fetch", "-q", checkout.as_str(), "HEAD"];
+    let clone_objects = format!("{SOURCE}/.git/objects");
+    if Path::new(&clone_objects).is_dir() {
+        let alternates = format!("{repo}/.git/objects/info/alternates");
+        if let Err(e) = fs::write(&alternates, format!("{clone_objects}\n")) {
+            note(&format!("step 4, writing {alternates}: {e}"));
+            return false;
+        }
+    } else {
+        fetch.insert(2, "--depth=1");
+    }
+    let Some(fetched) = run(&repo, &git, &fetch, &env) else {
+        return false;
+    };
+    if !fetched.ok(&format!("step 4, git fetch {checkout} HEAD")) {
+        return false;
+    }
+    let Some(got) = run(&repo, &git, &["rev-parse", "FETCH_HEAD"], &[]) else {
+        return false;
+    };
+    if got.stdout.trim() != head {
+        note(&format!(
+            "step 4, git fetch {checkout} HEAD left FETCH_HEAD at {:?}, not the advertised {head}",
+            got.stdout.trim()
+        ));
+        return false;
+    }
+    let Some(reset) = run(&repo, &git, &["reset", "-q", "FETCH_HEAD"], &[]) else {
+        return false;
+    };
+    if !reset.ok("step 5, git reset FETCH_HEAD") {
+        return false;
+    }
+
+    let author = [
+        ("GIT_AUTHOR_NAME", "The SlopOS Authors"),
+        ("GIT_AUTHOR_EMAIL", "ladder@slopos.invalid"),
+        ("GIT_COMMITTER_NAME", "The SlopOS Authors"),
+        ("GIT_COMMITTER_EMAIL", "ladder@slopos.invalid"),
+    ];
+    let message = format!("ladder: pushed over ssh on top of {head}");
+    let Some(committed) = run(
+        &repo,
+        &git,
+        &["commit", "-q", "--allow-empty", "-m", &message],
+        &author,
+    ) else {
+        return false;
+    };
+    if !committed.ok("step 5, git commit --allow-empty") {
+        return false;
+    }
+    let Some(commit) = run(&repo, &git, &["rev-parse", "HEAD"], &[]) else {
+        return false;
+    };
+    let commit = commit.stdout.trim().to_owned();
+    let Some(pushed) = run(
+        &repo,
+        &git,
+        &["push", "-q", &push, "HEAD:refs/heads/ladder-ssh"],
+        &env,
+    ) else {
+        return false;
+    };
+    if !pushed.ok(&format!(
+        "step 5, git push {push} HEAD:refs/heads/ladder-ssh"
+    )) {
+        return false;
+    }
+
+    let mut refused_command = ssh_command.split_whitespace().skip(1).collect::<Vec<_>>();
+    refused_command.extend([SSH_PEER, "id"]);
+    let Some(refused) = run("/", &ssh, &refused_command, &[]) else {
+        return false;
+    };
+    const REFUSED: &str = "ladder sshd: refused id";
+    if refused.code == Some(0) || !refused.stderr.contains(REFUSED) {
+        note(&format!(
+            "step 6, ssh {SSH_PEER} id exited {:?} without the forced command's refusal: {}",
+            refused.code,
+            refused.stderr.trim()
+        ));
+        return false;
+    }
+
+    note(&format!(
+        "SSH-PUSHED {commit}; {version}; origin HEAD over ssh is {head}"
+    ));
+    true
+}
+
 const GITHUB_REMOTE: &str = "https://github.com/SlopLabs/slopos";
 
 /// The `fatal:` line git ended on, if it failed with one.
@@ -928,7 +1134,7 @@ impl Drop for Transcript {
     }
 }
 
-/// Rung 8: git clones from GitHub over HTTPS — the kernel's resolver, then
+/// Rung 9: git clones from GitHub over HTTPS — the kernel's resolver, then
 /// git-remote-https, libcurl, nghttp2 and Mbed TLS — trusting the image's CA
 /// bundle. A root minted here must be refused first, or the trust proves
 /// nothing.
@@ -1075,7 +1281,7 @@ fn git_clones_over_https() -> bool {
     true
 }
 
-/// Rung 9: in the clone rung 8 made, which no vendored configuration reaches,
+/// Rung 10: in the clone rung 9 made, which no vendored configuration reaches,
 /// cargo resolves both lockfiles from crates.io over HTTPS as the host's cargo
 /// does: the workspace's, and the standard library's that `-Zbuild-std`
 /// reads. A fresh `CARGO_HOME`, so every crate is a download; cargo holds each
@@ -1089,7 +1295,7 @@ fn cargo_resolves_the_lockfiles_from_crates_io() -> bool {
     let lock = match fs::read_to_string(format!("{clone}/Cargo.lock")) {
         Ok(lock) => lock,
         Err(e) => {
-            note(&format!("no clone from rung 8 at {clone}: {e}"));
+            note(&format!("no clone from rung 9 at {clone}: {e}"));
             return false;
         }
     };
@@ -1174,7 +1380,7 @@ echo "digests $(digests | sort -u | wc -l)"
 echo "bash ${BASH_VERSINFO[0]}"
 "#;
 
-/// Rung 10: bash runs a script with a command substitution, a pipeline of the
+/// Rung 11: bash runs a script with a command substitution, a pipeline of the
 /// coreutils, a background job it waits for, a here-document, and a subshell
 /// whose pipeline forks a command substitution per line.
 fn bash_runs_a_script() -> bool {
@@ -1201,7 +1407,7 @@ build out.txt: upper joined.txt
 default out.txt
 ";
 
-/// Rung 11: ninja runs a two-step graph, then finds nothing to do.
+/// Rung 12: ninja runs a two-step graph, then finds nothing to do.
 fn ninja_runs_a_graph() -> bool {
     let prefix = match toolchain() {
         Ok(p) => p,
@@ -1247,7 +1453,7 @@ add_executable(ladder main.c)
 target_link_libraries(ladder PRIVATE twice)
 ";
 
-/// Rung 12: CMake configures a C project for the machine it runs on, the
+/// Rung 13: CMake configures a C project for the machine it runs on, the
 /// SlopOS platform its own modules describe, generates for ninja, and builds
 /// a program against a shared library it reaches by its run path.
 fn cmake_builds_a_project() -> bool {
@@ -1299,7 +1505,7 @@ fn cmake_builds_a_project() -> bool {
         .is_some_and(|ran| ran.ok("ladder") && ran.stdout == "cmake 42\n")
 }
 
-/// Rung 13: the toolchain carries the std fork the clone pins, by the stamp
+/// Rung 14: the toolchain carries the std fork the clone pins, by the stamp
 /// `build_userland.sh` checks, computed here with the toolchain's own bash.
 fn std_is_the_clones_fork() -> bool {
     let prefix = match toolchain() {
@@ -1356,6 +1562,7 @@ fn main() {
             "git_reads_the_clone_and_reaches_the_host",
             git_reads_the_clone_and_reaches_the_host,
         ),
+        ("ssh_carries_git_to_the_host", ssh_carries_git_to_the_host),
         ("git_clones_over_https", git_clones_over_https),
         (
             "cargo_resolves_the_lockfiles_from_crates_io",

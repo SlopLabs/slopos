@@ -29,6 +29,10 @@ pub const TCP_NODELAY: i32 = 1;
 
 pub const INADDR_ANY: u32 = 0;
 pub const INADDR_NONE: u32 = u32::MAX;
+/// The class A network loopback addresses are in, 127/8.
+pub const IN_LOOPBACKNET: i32 = 127;
+/// The ports below this one are those `rresvport` and `bindresvport` take.
+pub const IPPORT_RESERVED: i32 = 1024;
 
 /// Generic socket address — compatible with POSIX `struct sockaddr`.
 #[repr(C)]

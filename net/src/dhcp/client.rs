@@ -285,6 +285,23 @@ impl DhcpClient {
         self.send(DhcpDest::Broadcast)
     }
 
+    /// Abandon the transaction and discover again, withdrawing the address
+    /// first if one is held: in `Requesting` that is the INIT-REBOOT lease,
+    /// configured since before the replug. Keeping a refused or expired
+    /// address risks a second host on it.
+    fn rediscover(&mut self, reason: UnbindReason) -> DhcpAction {
+        let held = self.addr != [0; 4];
+        self.clear_lease();
+        match self.discover() {
+            DhcpAction::Send { dest, retry_ms } if held => DhcpAction::UnbindThenSend {
+                reason,
+                dest,
+                retry_ms,
+            },
+            action => action,
+        }
+    }
+
     /// Apply a reply's lease times, filling in the RFC 2131 §4.4.5 defaults for
     /// whichever of T1 and T2 the server left out; treating the absent values
     /// as zero would renew continuously.
@@ -352,13 +369,20 @@ impl DhcpClient {
 
     fn on_stop(&mut self) -> DhcpAction {
         match self.state {
-            // Nothing is configured yet, so there is nothing to give back.
-            DhcpState::Init | DhcpState::Selecting | DhcpState::Requesting => {
+            DhcpState::Init | DhcpState::Selecting => {
                 self.state = DhcpState::Init;
                 self.clear_lease();
                 DhcpAction::Idle
             }
-            DhcpState::Bound | DhcpState::Renewing | DhcpState::Rebinding => {
+            DhcpState::Requesting if self.addr == [0; 4] => {
+                self.state = DhcpState::Init;
+                self.clear_lease();
+                DhcpAction::Idle
+            }
+            DhcpState::Requesting
+            | DhcpState::Bound
+            | DhcpState::Renewing
+            | DhcpState::Rebinding => {
                 self.new_transaction();
                 self.tx_len = codec::build_release(
                     self.mac,
@@ -427,30 +451,17 @@ impl DhcpClient {
             (DhcpState::Requesting, MSG_ACK)
             | (DhcpState::Renewing, MSG_ACK)
             | (DhcpState::Rebinding, MSG_ACK) => {
+                if reply.yiaddr == [0; 4] {
+                    return DhcpAction::Idle;
+                }
                 let binding = self.adopt(&reply);
                 self.state = DhcpState::Bound;
                 self.retry_base_ms = RETRY_BASE_MS;
                 DhcpAction::Bind(binding)
             }
-            (DhcpState::Requesting, MSG_NAK) => {
-                // Nothing was ever installed, so there is nothing to unbind.
-                self.clear_lease();
-                self.discover()
-            }
-            (DhcpState::Renewing, MSG_NAK) | (DhcpState::Rebinding, MSG_NAK) => {
-                // Give the address up immediately: keeping a NAKed address
-                // risks a second host on it.
-                self.clear_lease();
-                let action = self.discover();
-                let DhcpAction::Send { dest, retry_ms } = action else {
-                    return action;
-                };
-                DhcpAction::UnbindThenSend {
-                    reason: UnbindReason::Nak,
-                    dest,
-                    retry_ms,
-                }
-            }
+            (DhcpState::Requesting, MSG_NAK)
+            | (DhcpState::Renewing, MSG_NAK)
+            | (DhcpState::Rebinding, MSG_NAK) => self.rediscover(UnbindReason::Nak),
             _ => DhcpAction::Idle,
         }
     }
@@ -480,13 +491,19 @@ impl DhcpClient {
 
     fn on_expire(&mut self) -> DhcpAction {
         match self.state {
-            DhcpState::Bound | DhcpState::Renewing | DhcpState::Rebinding => {
-                self.clear_lease();
-                self.state = DhcpState::Init;
-                DhcpAction::Unbind(UnbindReason::Expired)
-            }
-            _ => DhcpAction::Idle,
+            DhcpState::Init | DhcpState::Selecting => return DhcpAction::Idle,
+            DhcpState::Requesting if self.addr == [0; 4] => return DhcpAction::Idle,
+            DhcpState::Requesting
+            | DhcpState::Bound
+            | DhcpState::Renewing
+            | DhcpState::Rebinding => {}
         }
+        if !self.link_down {
+            return self.rediscover(UnbindReason::Expired);
+        }
+        self.clear_lease();
+        self.state = DhcpState::Init;
+        DhcpAction::Unbind(UnbindReason::Expired)
     }
 
     fn on_carrier_down(&mut self) -> DhcpAction {

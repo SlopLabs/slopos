@@ -4,18 +4,21 @@
 
 use slopos_ostd::klog_debug;
 
+use super::iface;
+use super::netdev::{DeviceHandle, NetDevice};
 use super::socket;
 use super::tcp;
 use super::types::{DevIndex, IpProtocol, Ipv4Addr};
 use crate::{self as net, NetError, packetbuf::PacketBuf};
 
 /// Handle an incoming IPv4 packet; `head` points at the first byte of the IP
-/// header, the Ethernet header having been consumed already.
+/// header, the Ethernet header having been consumed already. Ingress has
+/// already asked [`admits`].
 ///
 /// Packets failing validation are silently dropped with a debug log. The header
 /// checksum is skipped when the device set `CHECKSUM_RX`. TTL=0 is dropped
 /// rather than forwarded: this stack does not forward.
-pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
+pub fn handle_rx(mut pkt: PacketBuf, checksum_rx: bool) {
     let mut reassembled: Option<super::reassembly::ReassembledPacket> = None;
     let mut is_fragmented = false;
 
@@ -37,7 +40,6 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
             return;
         }
 
-        // IHL is a count of 32-bit words.
         let ihl = ((ip_data[0] & 0x0F) as usize) * 4;
         if ihl < net::IPV4_HEADER_LEN || ip_data.len() < ihl {
             klog_debug!("ipv4: bad IHL {} (packet len {})", ihl, ip_data.len());
@@ -116,7 +118,6 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
             &assembled_pkt,
             checksum_rx,
         );
-        let _ = dev;
         return;
     }
 
@@ -130,8 +131,59 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
     }
 
     dispatch_l4(proto, src_ip, dst_ip, &pkt, checksum_rx);
+}
 
-    let _ = dev;
+/// Whether an IPv4 packet `handle` received — head at the IP header — is the
+/// host's to receive. Loopback takes everything. Elsewhere RFC 1122 §3.2.1.3
+/// keeps loopback, broadcast and multicast sources off the wire, and any
+/// interface's address will do as the destination (the weak host model of
+/// RFC 1122 §3.3.4.2). A header too short to name both addresses is left for
+/// [`handle_rx`] to reject.
+pub fn admits(handle: &DeviceHandle, pkt: &PacketBuf) -> bool {
+    if handle.kind().is_loopback() {
+        return true;
+    }
+    let ip = pkt.payload();
+    let Some(addrs) = ip.get(12..20) else {
+        return true;
+    };
+    let src = Ipv4Addr([addrs[0], addrs[1], addrs[2], addrs[3]]);
+    let dst = Ipv4Addr([addrs[4], addrs[5], addrs[6], addrs[7]]);
+    let martian = src.is_loopback()
+        || src.is_broadcast()
+        || src.is_multicast()
+        || src.is_unspecified()
+        || dst.is_loopback();
+    let admitted = !martian
+        && (dst.is_broadcast()
+            || dst.is_multicast()
+            || iface::is_our_addr(dst)
+            || iface::is_directed_broadcast(handle.index(), dst)
+            || dhcp_before_lease(handle, ip));
+    if !admitted {
+        klog_debug!(
+            "ipv4: dropping {} -> {} on dev {}",
+            src,
+            dst,
+            handle.index()
+        );
+    }
+    admitted
+}
+
+/// A datagram to the DHCP client port on a device that holds no address yet:
+/// RFC 2131 §4.1 lets a server that ignores the broadcast flag unicast its
+/// OFFER and ACK to the address it offers. Unfragmented only: a later fragment
+/// carries payload where the port is read, so a first fragment admitted alone
+/// could never complete. `ip` holds at least 20 bytes.
+fn dhcp_before_lease(handle: &DeviceHandle, ip: &[u8]) -> bool {
+    let ihl = usize::from(ip[0] & 0x0f) * 4;
+    let fragment = u16::from_be_bytes([ip[6], ip[7]]) & 0x3fff;
+    ihl >= net::IPV4_HEADER_LEN
+        && fragment == 0
+        && ip[9] == IpProtocol::Udp as u8
+        && ip.get(ihl + 2..ihl + 4) == Some(&super::dhcp::UDP_PORT_CLIENT.to_be_bytes()[..])
+        && iface::our_ip(handle.index()).is_none()
 }
 
 fn dispatch_l4(proto: u8, src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf, checksum_rx: bool) {
@@ -184,7 +236,11 @@ fn dispatch_udp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
     super::udp::handle_rx(src_ip, dst_ip, pkt);
 }
 
-pub fn send(dst_ip: super::types::Ipv4Addr, pkt: PacketBuf) -> Result<(), NetError> {
+/// Route `pkt` — an Ethernet frame whose head is the Ethernet header — and send
+/// it out the route's device, which also supplies the source MAC. A 127/8
+/// source never leaves through a device other than loopback (RFC 1122
+/// §3.2.1.3): that is `InvalidArgument`.
+pub fn send(dst_ip: super::types::Ipv4Addr, mut pkt: PacketBuf) -> Result<(), NetError> {
     use super::netdev::DEVICE_REGISTRY;
     use super::route::ROUTE_TABLE;
 
@@ -193,25 +249,40 @@ pub fn send(dst_ip: super::types::Ipv4Addr, pkt: PacketBuf) -> Result<(), NetErr
         NetError::NetworkUnreachable
     })?;
 
-    if next_hop.is_loopback() || dst_ip.is_loopback() {
-        return DEVICE_REGISTRY.tx_by_index(dev, pkt);
+    let device = DEVICE_REGISTRY
+        .device_at(dev)
+        .ok_or(NetError::NetworkUnreachable)?;
+    if !device.kind().is_loopback() && source_of(&pkt).is_some_and(|src| src.is_loopback()) {
+        klog_debug!("ipv4::send: loopback source to {} out dev {}", dst_ip, dev);
+        return Err(NetError::InvalidArgument);
+    }
+    super::arp::set_src_mac_in_eth_header(&mut pkt, device.mac());
+
+    if next_hop.is_loopback()
+        || dst_ip.is_loopback()
+        || dst_ip.is_broadcast()
+        || dst_ip.is_multicast()
+    {
+        return device.tx(pkt);
     }
 
-    if dst_ip.is_broadcast() || dst_ip.is_multicast() {
-        return DEVICE_REGISTRY.tx_by_index(dev, pkt);
-    }
+    resolve_neighbor_and_send(&*device, dev, next_hop, pkt)
+}
 
-    resolve_neighbor_and_send(dev, next_hop, pkt)
+fn source_of(frame: &PacketBuf) -> Option<Ipv4Addr> {
+    let at = net::ETH_HEADER_LEN + 12;
+    let src = frame.payload().get(at..at + 4)?;
+    Some(Ipv4Addr([src[0], src[1], src[2], src[3]]))
 }
 
 fn resolve_neighbor_and_send(
+    device: &(dyn NetDevice + Send + Sync),
     dev: DevIndex,
     next_hop: super::types::Ipv4Addr,
     pkt: PacketBuf,
 ) -> Result<(), NetError> {
     use super::arp;
     use super::neighbor::{NEIGHBOR_CACHE, ResolveOutcome};
-    use super::netdev::DEVICE_REGISTRY;
 
     match NEIGHBOR_CACHE.resolve(dev, next_hop, pkt) {
         ResolveOutcome::Resolved {
@@ -221,13 +292,13 @@ fn resolve_neighbor_and_send(
         } => {
             arp::set_dst_mac_in_eth_header(&mut pkt, mac);
             if let Some(act) = action {
-                execute_neighbor_action_via_registry(dev, act);
+                arp::execute_neighbor_action(act);
             }
-            DEVICE_REGISTRY.tx_by_index(dev, pkt)
+            device.tx(pkt)
         }
         ResolveOutcome::Queued => Ok(()),
         ResolveOutcome::ArpNeeded(action) => {
-            execute_neighbor_action_via_registry(dev, action);
+            arp::execute_neighbor_action(action);
             Ok(())
         }
         ResolveOutcome::Failed(e) => {
@@ -238,32 +309,5 @@ fn resolve_neighbor_and_send(
             );
             Err(e)
         }
-    }
-}
-
-fn execute_neighbor_action_via_registry(_dev: DevIndex, action: super::neighbor::NeighborAction) {
-    use super::arp;
-    use super::netdev::DEVICE_REGISTRY;
-
-    match action {
-        super::neighbor::NeighborAction::SendArpRequest { dev, target_ip } => {
-            arp::send_request_via_registry(dev, target_ip);
-        }
-        super::neighbor::NeighborAction::FlushPending {
-            packets,
-            dst_mac,
-            dev,
-        } => {
-            for mut pkt in packets {
-                arp::set_dst_mac_in_eth_header(&mut pkt, dst_mac);
-                let _ = DEVICE_REGISTRY.tx_by_index(dev, pkt);
-            }
-        }
-        super::neighbor::NeighborAction::TransmitPacket { pkt } => {
-            // TODO(tech-debt): dev 1 (VirtIO) is hardcoded here while `_dev` is
-            // ignored — route the caller's device through instead.
-            let _ = DEVICE_REGISTRY.tx_by_index(DevIndex(1), pkt);
-        }
-        super::neighbor::NeighborAction::None => {}
     }
 }

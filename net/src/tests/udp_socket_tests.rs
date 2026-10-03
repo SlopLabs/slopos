@@ -1,6 +1,5 @@
 use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 use slopos_abi::syscall::{ERRNO_EAGAIN, POLLIN, POLLOUT};
-use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -50,39 +49,6 @@ pub fn test_udp_t2_dispatch_delivery_and_unbound_drop() -> TestResult {
         "unbound destination is dropped"
     );
 
-    pass!()
-}
-
-/// `transmit_udp_packet` submits straight to the ring, so no scope can
-/// blackhole it — hence a TEST-NET-1 destination no host network routes.
-pub fn test_udp_t3_generic_udp_tx_no_crash() -> TestResult {
-    use crate::tests::net_scope::{TEST_LOCAL_IP, TEST_PEER_IP};
-
-    reset();
-
-    let Some(driver) = crate::net_driver_service::net_driver() else {
-        klog_info!("UDP_TEST: SKIP - no net driver registered");
-        return TestResult::Skipped;
-    };
-    let Some(handle) = (driver.get_device_handle)() else {
-        klog_info!("UDP_TEST: SKIP - no device handle");
-        return TestResult::Skipped;
-    };
-
-    let payload = [1u8, 2, 3, 4];
-    let before = handle.stats().tx_packets;
-    let ok = (driver.transmit_udp_packet)(TEST_LOCAL_IP, TEST_PEER_IP, 50000, 53, &payload);
-    let advanced = handle.stats().tx_packets.wrapping_sub(before);
-
-    if !ok {
-        klog_info!("UDP_TEST: SKIP - the device refused the submit");
-        return TestResult::Skipped;
-    }
-    assert_eq_test!(
-        advanced,
-        1,
-        "a successful UDP submit did not advance the device's tx_packets"
-    );
     pass!()
 }
 
@@ -292,10 +258,6 @@ pub fn test_udp_t10_reset_clears_udp_queues() -> TestResult {
 
 slopos_testing::stest!(
     name = test_udp_t2_dispatch_delivery_and_unbound_drop,
-    suite = udp_socket
-);
-slopos_testing::stest!(
-    name = test_udp_t3_generic_udp_tx_no_crash,
     suite = udp_socket
 );
 slopos_testing::stest!(

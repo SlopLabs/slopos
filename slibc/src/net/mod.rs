@@ -5,6 +5,7 @@ pub mod dns;
 pub mod ifaddrs;
 pub mod ifreq;
 pub mod netdb;
+pub mod resolv;
 #[allow(dead_code)]
 pub(crate) mod shim;
 pub mod tests;

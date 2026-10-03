@@ -31,7 +31,7 @@ library and what they read, under `/bin`, `/sbin`, `/lib`, `/usr/bin`,
 `/usr/share` and `/etc/ssl` — is served read-only from the boot module and
 mounted over the root, pinned, so the system is the slot's and the disk holds
 what the machine wrote. The root carries the toolchain at `/usr/local` —
-rustc, cargo, clang, lld, git, bash, CMake and Ninja, with
+rustc, cargo, clang, lld, git, bash, CMake, Ninja and OpenSSH's client, with
 each project's licence text under `share/licenses`, rustc's and cargo's under
 `share/doc` — which the one default
 `PATH`, `/bin:/sbin:/usr/local/bin`, reaches after the system's own tools, and
@@ -67,7 +67,7 @@ llvm-project sources so no build reads the network, and the fixtures the
 toolchain ladder fetches from, so `just test` never depends on `just
 toolchain`. `test-toolchain` climbs the ladder — rustc, cargo with a build
 script and a proc macro, a git dependency through libgit2, a loopback registry
-over TLS, clang, git against the host, a clone of
+over TLS, clang, git against the host over `git://` and over SSH, a clone of
 `https://github.com/SlopLabs/slopos`, crates.io over HTTPS, a bash script,
 a Ninja graph and a CMake project — and finds a clone made on `/` intact after
 a power-off. `test-selfhost` and `test-install-guest` run the loop in the
@@ -83,11 +83,11 @@ pinned tarball, its checksum, its licence texts and a build template that
 `scripts/check_recipes.sh` holds to leaving the source as shipped, bar a
 patch of that one kind. Cargo builds
 with its default features against the zlib, nghttp2, Mbed TLS, OpenSSL,
-libcurl, libssh2 and libgit2 recipes. Git 2.55, bash 5.3, CMake 4.4 and Ninja
-1.13 are programs beside them, built for `/usr/local`; CMake's recipe carries
-its SlopOS platform modules, which the other recipes' builds and the C++
-runtime's name too. Git is GPL-2.0-only, so libcurl takes its TLS from
-Mbed TLS and not OpenSSL, and `check_recipes.sh` walks the `DT_NEEDED`
+libcurl, libssh2 and libgit2 recipes. Git 2.55, bash 5.3, CMake 4.4, Ninja
+1.13 and OpenSSH 10.5 are programs beside them, built for `/usr/local`;
+CMake's recipe carries its SlopOS platform modules, which the other recipes'
+builds and the C++ runtime's name too. Git is GPL-2.0-only, so libcurl takes
+its TLS from Mbed TLS and not OpenSSL, and `check_recipes.sh` walks the `DT_NEEDED`
 closure of everything a GPL-2.0-only recipe installs for a library its licence
 does not allow, and its symbols for a static copy of one. For the same reason
 the C library every one of them links is `MIT OR Apache-2.0`, and

@@ -9,6 +9,7 @@
 #define _SLIBC_H
 
 #include <arpa/inet.h>
+#include <arpa/nameser.h>
 #include <assert.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -32,11 +33,15 @@
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/in_systm.h>
+#include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <nl_types.h>
+#include <paths.h>
 #include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
+#include <resolv.h>
 #include <sched.h>
 #include <semaphore.h>
 #include <setjmp.h>

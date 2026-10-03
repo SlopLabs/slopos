@@ -705,8 +705,16 @@ fn test_first_ipv4_skips_loopback() -> TestResult {
         "our own address must be recognised"
     );
     assert_test!(
-        t.is_our_addr(Ipv4Addr::LOCALHOST),
-        "loopback's address must be recognised"
+        !t.is_our_addr(Ipv4Addr::LOCALHOST),
+        "a host-scope address is not ours to accept off the wire"
+    );
+    assert_test!(
+        t.is_directed_broadcast(DevIndex(1), Ipv4Addr([10, 0, 0, 255])),
+        "the subnet broadcast of the device's address is accepted"
+    );
+    assert_test!(
+        !t.is_directed_broadcast(DevIndex(0), Ipv4Addr([10, 0, 0, 255])),
+        "another device's subnet broadcast is not"
     );
     assert_test!(
         !t.is_our_addr(Ipv4Addr([10, 0, 0, 1])),

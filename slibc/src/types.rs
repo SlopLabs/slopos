@@ -210,6 +210,14 @@ pub struct timeval {
     pub tv_usec: i64,
 }
 
+/// `struct itimerval`.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct itimerval {
+    pub it_interval: timeval,
+    pub it_value: timeval,
+}
+
 /// `struct rusage`. Linux x86-64's 144-byte shape, which `wait4` fills as
 /// `slopos_abi::syscall::Rusage` describes.
 #[repr(C)]

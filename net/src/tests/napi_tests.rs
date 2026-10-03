@@ -1,12 +1,11 @@
 use slopos_abi::net::{AF_INET, SOCK_STREAM};
 use slopos_abi::syscall::{ERRNO_EAGAIN, ERRNO_EINPROGRESS, POLLOUT};
 use slopos_ostd::KBox;
-use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::WaitQueue;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_test, fail, pass};
+use slopos_testing::{assert_test, fail, pass};
 
 use crate::napi::NapiContext;
 use crate::socket;
@@ -75,52 +74,6 @@ pub fn test_napi_waker_rearm_short_circuits() -> TestResult {
         WAKER.consume_edge_for_test(),
         "arm_and_wake must leave an edge to consume"
     );
-    pass!()
-}
-
-/// Asserted by outstanding depth, not a wall clock, which would measure the host.
-pub fn test_tx_fire_and_forget() -> TestResult {
-    const BURST: u64 = 8;
-
-    let Some(driver) = crate::net_driver_service::net_driver() else {
-        klog_info!("NAPI_TEST: SKIP - no net driver registered");
-        return TestResult::Skipped;
-    };
-    if !(driver.virtio_net_is_ready)() {
-        klog_info!("NAPI_TEST: SKIP - the net device is not ready");
-        return TestResult::Skipped;
-    }
-    let Some(handle) = (driver.get_device_handle)() else {
-        return fail!("a ready driver with no device handle");
-    };
-
-    // An empty frame is answered before the ring is touched: the control.
-    let before_empty = handle.stats().tx_packets;
-    assert_test!(
-        (driver.virtio_net_transmit)(&[]),
-        "an empty submit was refused"
-    );
-    assert_eq_test!(
-        handle.stats().tx_packets,
-        before_empty,
-        "an empty submit reached the ring"
-    );
-
-    let before = handle.stats().tx_packets;
-    for _ in 0..BURST {
-        if !(driver.virtio_net_transmit)(&[0u8; 64]) {
-            return fail!("the device refused a frame while ready");
-        }
-    }
-    let advanced = handle.stats().tx_packets.wrapping_sub(before);
-    assert_test!(
-        advanced >= BURST,
-        "{} submits advanced tx_packets by {} — the submit path is waiting on \
-         its own completion",
-        BURST,
-        advanced
-    );
-
     pass!()
 }
 
@@ -260,7 +213,6 @@ pub fn test_regression_existing() -> TestResult {
 
 slopos_testing::stest!(name = test_napi_budget_limiting, suite = napi);
 slopos_testing::stest!(name = test_napi_waker_rearm_short_circuits, suite = napi);
-slopos_testing::stest!(name = test_tx_fire_and_forget, suite = napi);
 slopos_testing::stest!(name = test_waitqueue_basic, suite = napi);
 slopos_testing::stest!(name = test_blocking_recv, suite = napi);
 slopos_testing::stest!(name = test_blocking_accept, suite = napi);

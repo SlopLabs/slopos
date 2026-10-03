@@ -65,6 +65,12 @@ pub const PCI_CAP_ID_VNDR: u8 = 0x09;
 /// PCI Express.
 pub const PCI_CAP_ID_PCIE: u8 = 0x10;
 
+/// Link Control register's offset within the PCI Express capability (16-bit).
+pub const PCIE_LINK_CONTROL_OFFSET: u16 = 0x10;
+
+/// Link Control: ASPM Control, L0s (bit 0) and L1 (bit 1).
+pub const PCIE_LINK_CONTROL_ASPM: u16 = 0x0003;
+
 /// Extended Message Signaled Interrupts.
 pub const PCI_CAP_ID_MSIX: u8 = 0x11;
 

@@ -45,7 +45,10 @@
 # memfd. The boot kernelmeta row measured 1708, and 1713 once every disk went
 # through the block layer and NVMe: the controllers' queues and engines, the
 # disk registry and the devfs node table. A boot on which an AP is slow to
-# answer its startup peaks 48 pages higher, 1761, which is the cap.
+# answer its startup peaks 48 pages higher, 1761, and the wired network's
+# table of published NICs and their handles adds 4 at every AP timing (1666,
+# 1713 and 1761 on the tree before it, 1670, 1717 and 1765 on it), so 1765 is
+# the cap.
 # The kernelmeta row after the kernel tests measured 6230 and 6192 in
 # two captures once the OOM and signal tests spawned more processes, then
 # 6290, 6229 and 6283 in three once slibc gained the functions git needs, then
@@ -59,7 +62,14 @@
 # indexed a 5000-entry medium, the index's vectors briefly doubled as they
 # grow, and the block-ceiling test made a user task, then 6552 in one whose
 # new tests hold nothing past their end (the PTY echo test leaves the root's
-# kernelmeta where it found it), the spread, and the cap is the largest.
+# kernelmeta where it found it), then 6578, 6615, 6663, 6670, 6672, 6672 and
+# 6681 in seven once the wired network landed. The previous tree's kernel
+# measured 6472 on this host against the same images, and the peak sat 384
+# pages above what the phase ends holding in every run of both: the growth is
+# in what the drivers and net suites leave allocated (each suite alone: 188 to
+# 234 and 242 to 262 pages, the two virtio-net tests that moved into the
+# drivers suite and the NIC tests), while core, fs, mm and sched end where
+# they did. The spread, and the cap is the largest.
 # The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
@@ -86,12 +96,12 @@ require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
-boot	kernelmeta	1761
+boot	kernelmeta	1765
 post-kernel-tests	commitpages	2560
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	6552
+post-kernel-tests	kernelmeta	6681
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	539050
 post-kernel-tests	pinnedbytes	4

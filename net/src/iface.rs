@@ -108,7 +108,7 @@ impl IfaceKind {
     }
 
     #[inline]
-    const fn is_loopback(self) -> bool {
+    pub const fn is_loopback(self) -> bool {
         matches!(self, IfaceKind::Loopback)
     }
 }
@@ -726,7 +726,8 @@ impl IfaceTable {
     }
 
     /// Whether `ip` is an address of a realised interface — the RX path's "is
-    /// this packet for us" test.
+    /// this packet for us" test. Host-scope addresses are reachable only
+    /// through loopback, so they are not.
     pub fn is_our_addr(&self, ip: Ipv4Addr) -> bool {
         let enabled = self.is_enabled();
         let table = self.inner.lock();
@@ -735,7 +736,23 @@ impl IfaceTable {
             .iter()
             .flatten()
             .filter(|i| i.is_realised(enabled))
-            .any(|i| i.addrs().iter().any(|a| a.addr == ip))
+            .any(|i| {
+                i.addrs()
+                    .iter()
+                    .any(|a| a.addr == ip && a.scope != AddrScope::Host)
+            })
+    }
+
+    /// Whether `ip` is the subnet broadcast of one of `dev`'s addresses.
+    pub fn is_directed_broadcast(&self, dev: DevIndex, ip: Ipv4Addr) -> bool {
+        let enabled = self.is_enabled();
+        let table = self.inner.lock();
+        table
+            .slots
+            .iter()
+            .flatten()
+            .filter(|i| i.dev == dev && i.is_realised(enabled))
+            .any(|i| i.addrs().iter().any(|a| a.broadcast() == ip))
     }
 
     /// The first address of any realised non-loopback interface.
@@ -1058,10 +1075,17 @@ pub fn our_ip(dev: DevIndex) -> Option<Ipv4Addr> {
     IFACE_TABLE.our_ip(dev)
 }
 
-/// Whether `ip` belongs to a realised kernel interface.
+/// Whether `ip` is a non-host-scope address of a realised kernel interface.
 #[inline]
 pub fn is_our_addr(ip: Ipv4Addr) -> bool {
     IFACE_TABLE.is_our_addr(ip)
+}
+
+/// Whether `ip` is the subnet broadcast of one of kernel device `dev`'s
+/// addresses.
+#[inline]
+pub fn is_directed_broadcast(dev: DevIndex, ip: Ipv4Addr) -> bool {
+    IFACE_TABLE.is_directed_broadcast(dev, ip)
 }
 
 /// The first address of a realised, non-loopback kernel interface.

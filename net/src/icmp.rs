@@ -125,6 +125,13 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
                 klog_debug!("icmp: drop echo request with code {}", code);
                 return;
             }
+            if !holds(crate::types::Ipv4Addr(dst_ip)) {
+                klog_debug!(
+                    "icmp: ignore echo request to {}",
+                    crate::types::Ipv4Addr(dst_ip)
+                );
+                return;
+            }
             klog_debug!(
                 "icmp: echo request from {}.{}.{}.{} id={} seq={}",
                 src_ip[0],
@@ -173,6 +180,14 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
             klog_debug!("icmp: unhandled type {} code {}", icmp_type, code);
         }
     }
+}
+
+/// Whether `dst` is an address the host holds, and so may source an echo
+/// reply. RFC 1122 §3.2.2.6 lets a host ignore an echo request sent to a
+/// broadcast or multicast address; answering one would put that address on
+/// the wire as a source.
+fn holds(dst: crate::types::Ipv4Addr) -> bool {
+    dst.is_loopback() || crate::iface::is_our_addr(dst)
 }
 
 fn send_echo_reply(
@@ -238,10 +253,7 @@ fn send_echo(
 
     pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Icmp.as_u8(), icmp_len)?;
 
-    let src_mac = crate::net_driver_service::net_driver()
-        .and_then(|d| (d.virtio_net_mac)())
-        .unwrap_or([0; 6]);
-    pkt.prepend_eth(src_mac, super::MacAddr::BROADCAST.0)?;
+    pkt.prepend_eth(super::MacAddr::ZERO.0, super::MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();
 
     let icmp_start = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;
@@ -298,10 +310,7 @@ pub fn send_echo_request_from(
 
     pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Icmp.as_u8(), icmp_len)?;
 
-    let src_mac = crate::net_driver_service::net_driver()
-        .and_then(|d| (d.virtio_net_mac)())
-        .unwrap_or([0; 6]);
-    pkt.prepend_eth(src_mac, super::MacAddr::BROADCAST.0)?;
+    pkt.prepend_eth(super::MacAddr::ZERO.0, super::MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();
 
     let icmp_start = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;

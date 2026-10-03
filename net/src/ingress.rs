@@ -111,12 +111,15 @@ fn net_rx_inner(handle: &DeviceHandle, mut pkt: PacketBuf) {
         return;
     }
 
-    let dev = handle.index();
     let checksum_rx = handle.features().contains(NetDeviceFeatures::CHECKSUM_RX);
 
     match EtherType::from_u16(ethertype_raw) {
         Some(EtherType::Arp) => arp::handle_rx(handle, pkt),
-        Some(EtherType::Ipv4) => ipv4::handle_rx(dev, pkt, checksum_rx),
+        Some(EtherType::Ipv4) => {
+            if ipv4::admits(handle, &pkt) {
+                ipv4::handle_rx(pkt, checksum_rx);
+            }
+        }
         None => {
             klog_debug!(
                 "ingress: unknown EtherType 0x{:04x}, dropping",

@@ -276,6 +276,9 @@ impl Drop for ScopedNeighbor {
 const DEV_MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 const SENDER_MAC: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 const BROADCAST: [u8; 6] = [0xff; 6];
+/// What the sender's entry holds before the frame: an ARP from a sender the
+/// cache already knows refreshes the entry, whoever it is for.
+const STALE_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x5e, 0x01];
 
 pub fn test_xdp_empty_chain_passes() -> TestResult {
     ensure_pool_init();
@@ -298,6 +301,7 @@ pub fn test_xdp_filter_drop_drops_packet() -> TestResult {
     let handle = make_test_handle(MacAddr(DEV_MAC));
     let sender_ip = Ipv4Addr([192, 168, 1, 42]);
     let _neighbor = ScopedNeighbor::cleared(handle.index(), sender_ip);
+    let _ = NEIGHBOR_CACHE.insert_or_update(handle.index(), sender_ip, MacAddr(STALE_MAC), 0);
 
     let Some(_chain) = GlobalChain::install(&[&XDP_TEST_DROP_ALL]) else {
         return slopos_testing::fail!("xdp install");
@@ -310,8 +314,9 @@ pub fn test_xdp_filter_drop_drops_packet() -> TestResult {
     };
     net_rx_injected(&handle, pkt);
 
-    assert_test!(
-        NEIGHBOR_CACHE.lookup(handle.index(), sender_ip).is_none(),
+    assert_eq_test!(
+        NEIGHBOR_CACHE.lookup(handle.index(), sender_ip),
+        Some(MacAddr(STALE_MAC)),
         "drop filter suppresses stack dispatch"
     );
     pass!()
@@ -323,6 +328,7 @@ pub fn test_xdp_filter_pass_falls_through() -> TestResult {
     let handle = make_test_handle(MacAddr(DEV_MAC));
     let sender_ip = Ipv4Addr([192, 168, 1, 43]);
     let _neighbor = ScopedNeighbor::cleared(handle.index(), sender_ip);
+    let _ = NEIGHBOR_CACHE.insert_or_update(handle.index(), sender_ip, MacAddr(STALE_MAC), 0);
 
     let Some(_chain) = GlobalChain::install(&[&XDP_TEST_PASS_ALL]) else {
         return slopos_testing::fail!("xdp install");

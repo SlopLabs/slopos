@@ -1,13 +1,15 @@
 //! Binding the DHCP state machine to a real interface: transmit, arm timers,
 //! install or withdraw a lease, announce the transition to the monitors.
 //!
-//! Runs on the network timer thread, never inline in PCI probe: probe holds
-//! `VIRTIO_NET_STATE` cli- and preempt-disabled, and taking a lease there would
-//! span a heap allocation and multi-second descheduling waits.
+//! Runs on the network timer thread. [`start`] sends at most the first DISCOVER
+//! and arms its timer, and nothing while the link is down, so `nic::publish`
+//! calls it from a driver's probe with no driver lock held.
 //!
 //! The client lives under a leaf `SpinLock` and *no action is performed while it
 //! is held*: `step` runs under the lock, the action is carried out after it
 //! drops.
+
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
@@ -33,12 +35,15 @@ struct Slot {
     /// `None` means the slot is free.
     dev: Option<DevIndex>,
     ifindex: u32,
-    /// Bumped whenever the timers this client armed stop being meaningful; every
-    /// armed timer carries its epoch and a handler drops one that mismatches.
-    ///
-    /// The wheel has no cancel-by-key, and checking the client's state is not
-    /// enough: after a refused lease the state is legitimately `Bound` again.
+    /// Redrawn whenever the lease timers this client armed stop being
+    /// meaningful; T1, T2 and expiry carry it and a handler drops one that
+    /// mismatches. The wheel has no cancel-by-key, and the client's state is
+    /// not enough: after a refused lease it is legitimately `Bound` again.
     epoch: u16,
+    /// Redrawn by every action that arms a retransmission, so arming one
+    /// supersedes the last; kept apart from `epoch`, so a renewal's
+    /// retransmissions leave T2 and expiry standing.
+    retransmit: u16,
     client: DhcpClient,
 }
 
@@ -50,21 +55,32 @@ const FREE_SLOT: Slot = Slot {
     dev: None,
     ifindex: 0,
     epoch: 0,
+    retransmit: 0,
     client: DhcpClient::new([0; 6], 0),
 };
 
-/// Packs the interface and the epoch into the wheel's single `u32` key, so a
-/// stale timer is identifiable as stale. The epoch wraps; it only has to differ
-/// from the epoch in flight.
-const fn timer_key(ifindex: u32, epoch: u16) -> u32 {
-    ((epoch as u32) << 16) | (ifindex & 0xFFFF)
+/// Source of every slot's `epoch` and `retransmit` tags. Global because timer
+/// keys name the interface, not the slot: a device re-started into another
+/// slot must not find its old timers matching that slot's tags.
+static NEXT_TAG: AtomicU16 = AtomicU16::new(1);
+
+fn next_tag() -> u16 {
+    NEXT_TAG.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Packs the interface and a 16-bit tag (the epoch for lease timers, the
+/// retransmission sequence for retransmits) into the wheel's single `u32` key,
+/// so a stale timer is identifiable as stale. The tag wraps; it only has to
+/// differ from the one in flight.
+const fn timer_key(ifindex: u32, tag: u16) -> u32 {
+    ((tag as u32) << 16) | (ifindex & 0xFFFF)
 }
 
 const fn key_ifindex(key: u32) -> u32 {
     key & 0xFFFF
 }
 
-const fn key_epoch(key: u32) -> u16 {
+const fn key_tag(key: u32) -> u16 {
     (key >> 16) as u16
 }
 
@@ -97,6 +113,7 @@ struct SlotContext {
     dev: DevIndex,
     ifindex: u32,
     epoch: u16,
+    retransmit: u16,
     addr: [u8; 4],
     state: DhcpState,
 }
@@ -130,7 +147,9 @@ pub fn lease_of(dev: DevIndex) -> Option<(u32, u32, u32, [u8; 4])> {
     })
 }
 
-/// Start a client on `dev`, replacing any client already running there.
+/// Start a client on `dev`, replacing any client already running there. With
+/// the link down it sends nothing and waits in `Init` for the carrier-up edge,
+/// which discovers.
 ///
 /// Returns `false` if the table is full or the device has no interface.
 pub fn start(dev: DevIndex) -> bool {
@@ -155,10 +174,16 @@ pub fn start(dev: DevIndex) -> bool {
         slot.dev = Some(dev);
         slot.ifindex = row.ifindex;
         slot.client.reset(row.mac.0, seed);
+        slot.epoch = next_tag();
+        slot.retransmit = next_tag();
     }
 
     let _ = iface::set_dhcp_managed(row.ifindex, true);
-    drive(dev, DhcpEvent::Start);
+    // Read after the slot exists, so a carrier-up racing this call finds the
+    // client and discovers itself.
+    if iface::get_by_dev(dev).is_some_and(|r| r.carrier) {
+        drive(dev, DhcpEvent::Start);
+    }
     true
 }
 
@@ -212,41 +237,62 @@ fn with_client(
 ) -> Option<(DhcpAction, usize, SlotContext)> {
     let mut table = CLIENTS.lock();
     let slot = table.slots.iter_mut().find(|s| s.dev == Some(dev))?;
-    let action = slot.client.step(event, crate::clock::now_ms());
-    let frame_len = slot.client.frame().len();
-    frame[..frame_len].copy_from_slice(slot.client.frame());
-    if !matches!(action, DhcpAction::Idle | DhcpAction::Send { .. }) {
-        slot.epoch = slot.epoch.wrapping_add(1);
-    }
-    let ctx = SlotContext {
-        dev,
-        ifindex: slot.ifindex,
-        epoch: slot.epoch,
-        addr: slot.client.address(),
-        state: slot.client.state(),
-    };
-    Some((action, frame_len, ctx))
+    Some(step_slot(slot, dev, event, frame))
 }
 
-/// Same, resolved by interface index — what a timer key carries.
+/// Same, resolved by interface index — what a timer key carries — and only if
+/// the key's tag is the one in force for that kind of timer.
 fn with_client_for_key(
     key: u32,
     event: DhcpEvent<'_>,
     frame: &mut [u8; super::codec::DHCP_FRAME_LEN],
 ) -> Option<(DhcpAction, usize, SlotContext)> {
     let ifindex = key_ifindex(key);
-    let dev = {
-        let table = CLIENTS.lock();
-        let slot = table
-            .slots
-            .iter()
-            .find(|s| s.dev.is_some() && (s.ifindex & 0xFFFF) == ifindex)?;
-        if slot.epoch != key_epoch(key) {
-            return None;
-        }
-        slot.dev?
+    let mut table = CLIENTS.lock();
+    let slot = table
+        .slots
+        .iter_mut()
+        .find(|s| s.dev.is_some() && (s.ifindex & 0xFFFF) == ifindex)?;
+    let in_force = match event {
+        DhcpEvent::Retransmit => slot.retransmit,
+        _ => slot.epoch,
     };
-    with_client(dev, event, frame)
+    if in_force != key_tag(key) {
+        return None;
+    }
+    let dev = slot.dev?;
+    Some(step_slot(slot, dev, event, frame))
+}
+
+fn step_slot(
+    slot: &mut Slot,
+    dev: DevIndex,
+    event: DhcpEvent<'_>,
+    frame: &mut [u8; super::codec::DHCP_FRAME_LEN],
+) -> (DhcpAction, usize, SlotContext) {
+    let action = slot.client.step(event, crate::clock::now_ms());
+    let frame_len = slot.client.frame().len();
+    frame[..frame_len].copy_from_slice(slot.client.frame());
+    match action {
+        DhcpAction::Idle => {}
+        DhcpAction::Send { .. } => slot.retransmit = next_tag(),
+        DhcpAction::UnbindThenSend { .. } => {
+            slot.epoch = next_tag();
+            slot.retransmit = next_tag();
+        }
+        DhcpAction::Bind(_) | DhcpAction::Unbind(_) | DhcpAction::SendThenUnbind { .. } => {
+            slot.epoch = next_tag()
+        }
+    }
+    let ctx = SlotContext {
+        dev,
+        ifindex: slot.ifindex,
+        epoch: slot.epoch,
+        retransmit: slot.retransmit,
+        addr: slot.client.address(),
+        state: slot.client.state(),
+    };
+    (action, frame_len, ctx)
 }
 
 /// Carry out one action. **Nothing here runs under the client lock.**
@@ -387,7 +433,7 @@ fn arm_retransmit(ctx: SlotContext, retry_ms: u32) {
     NET_TIMER_WHEEL.schedule(
         u64::from(retry_ms),
         TimerKind::DhcpRetransmit,
-        timer_key(ctx.ifindex, ctx.epoch),
+        timer_key(ctx.ifindex, ctx.retransmit),
     );
 }
 

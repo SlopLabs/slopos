@@ -47,12 +47,9 @@ its firmware entry, `cachyos`, is the only one.
 - The ISO is an install medium: `/bin/installer` lays SlopOS out on a disk,
   beside another system or over it, from what the loader brought, and every
   base carries e2fsprogs.
-
-Nothing reaches the network:
-
-- **Network.** The only NIC driver is virtio-net, and it starts the DHCP
-  client itself. `net/src/ipv4.rs` sends a resolved neighbour's queued packets
-  through a hard-coded `DevIndex(1)`.
+- The kernel carries a driver for the laptop's RTL8168h, graded by host tests
+  over a simulated chip. Every NIC takes a DHCP lease, and git reaches another
+  machine over SSH.
 
 ## Phases
 
@@ -66,7 +63,7 @@ commits of its own.
 | 3. A boot chain that shares a disk — **done** | 1 | the A/B loop on the new partition layout |
 | 4. A crash record — **done** | 1, 3 | a slot that panics leaves the panic behind |
 | 5. Installer and install medium — **done** | 1, 2, 3 | **milestone 1:** SlopOS installed beside CachyOS, self-hosting offline |
-| 6. Wired network | — | **milestone 2:** git and crates.io over the RJ45 port |
+| 6. Wired network — **done** | — | **milestone 2:** git and crates.io over the RJ45 port |
 | 7. Full speed | 5 | a native build measured, and made faster if the CPU clock is the cause |
 
 Phases 2 and 6 can run side by side. Phase 4 comes before phase 5 because the
@@ -170,31 +167,24 @@ link may map; the debug tests kernel's link outgrew 4 GiB's, and the
 self-hosting checks boot at 6 GiB. Reclaiming such pages under pressure is
 what lets that bound go.
 
-### Phase 6: Wired network (milestone 2)
+### Phase 6: Wired network (milestone 2) — done
 
-- **Driver.** A driver for the laptop's Realtek RTL8111/8168 (`10ec:8168`).
-  The chip reports its exact MAC version in its TxConfig register at probe.
-  The driver carries a table of the versions it knows, and declines any
-  other.
-- **Sources.** Register and descriptor facts come from Realtek's published
-  RTL8169/8111-family datasheets and from Redox's `rtl8168d`, which is MIT.
-  Linux's `r8169` and Realtek's `r8168` are GPL-2.0-only, and FreeBSD's
-  `re(4)` is BSD-4-Clause; from those, facts only, never code. The PHY patch
-  file Linux loads for some chip versions is not carried.
-- **Grading.** QEMU has no model of this chip, so the driver is the one piece
-  of this plan the suite cannot boot. Its descriptor rings and version table
-  live in a host-tested core crate, as `tls-core` does, so `just test-host`
-  grades everything but the hardware. The laptop grades the rest.
-- **DHCP.** DHCP starts for every NIC that registers, not just virtio-net.
-  `ipv4.rs` sends on the device the neighbour belongs to.
-- **Remotes.** HTTPS to GitHub already works; `just test-toolchain` grades it.
-  To reach the development machine over the LAN, git needs an `ssh` program
-  (git runs one; nothing in the tree provides it), so an OpenSSH client
-  becomes a recipe. An unauthenticated `git daemon` on a LAN is not the route.
+Built: the network stack's own netpoll and net-timer threads and
+`nic::publish`, which brings any NIC into service with a DHCP client; egress
+frames, ARP and neighbour traffic that carry the identity of the device they
+leave on, the hard-coded `DevIndex(1)` gone; ingress on a physical NIC held to
+what is addressed to the host; `rtl8168-core`, the RTL8168h as host-tested data
+and register sequence over a simulated chip, and its kernel driver
+(`drivers/src/rtl8168.rs`); OpenSSH 10.5p1 as a recipe, whose `ssh` and
+`ssh-keygen` git and the ladder run, and the slibc it needed; and a ladder
+rung in which the guest's git fetches and pushes over SSH through the host's
+own `sshd`. `AGENTS.md` describes all of it; the decisions later phases build on
+are under Decided.
 
-**Done when** `just test-host` grades the driver's core crate, and on the
-laptop the RJ45 port takes a DHCP lease, `git pull` and `git push` reach the
-development machine over SSH, and cargo fetches from crates.io.
+Left for the laptop, which only the user's run grades: the RTL8168h brought up
+without the PHY patch firmware, a DHCP lease on the RJ45 port, `git pull` and
+`git push` reaching the development machine over SSH, and cargo fetching from
+crates.io.
 
 ### Phase 7: Full speed
 
@@ -497,6 +487,42 @@ falls back to the committed slot, and the fallback boot finds the panic in
   needs the same treatment until the crate is fixed.
 - **Wired NIC first; Wi-Fi is out.** Wi-Fi means a driver per chip, firmware
   blobs, an 802.11 stack and WPA.
+- **The stack owns the poll threads; a NIC driver is a `NetDevice`.**
+  netpoll and net-timer start at boot whatever NICs there are. A driver
+  supplies the device, an interrupt handler that only wakes netpoll,
+  `rx_pending` and `sample_carrier`, and calls `nic::publish`, which starts
+  DHCP. A USB NIC is the same and nothing more.
+- **A frame carries the identity of the device it leaves on.** The source
+  MAC is stamped once the route has picked the device, an ARP names that
+  device's address, and a neighbour's packets leave on the neighbour's device.
+- **A physical NIC delivers only what is addressed to the host.** The weak
+  host model, as Linux's default: a datagram for any of the host's addresses
+  but a host-scoped one, broadcast and multicast; never 127/8, and no echo
+  reply to a broadcast. The one exception is DHCP's: until a device holds an
+  address, an unfragmented datagram to the DHCP client port reaches it,
+  because a server that ignores the client's broadcast flag unicasts to the
+  address it offers.
+- **A NIC driver names the versions it brings up.** Each Realtek MAC version
+  has a bring-up sequence of its own, so the table holds the RTL8168h and the
+  RTL8168M, which is the same MAC, and a new version joins it with its
+  sequence when a machine that has one is seen. The PHY patch firmware Linux
+  loads for this version is not carried: it is a binary blob, and Linux's
+  driver brings the chip up without it when the file is missing.
+- **NIC register facts come from drivers, taken as facts.** No public
+  Realtek document describes the RTL8168h's bring-up, so its offsets, bit
+  values and order come from Linux's `r8169` (GPL-2.0-only) and Redox's
+  `rtl8168d` (MIT); code and prose come from neither.
+- **A device never writes past the buffer it was given.** The RTL8168's
+  receive filter is the length its descriptors name. A larger filter over
+  smaller buffers was the precondition of CVE-2009-1389.
+- **No device bring-up under a spinlock.** A chip's bring-up busy-waits for
+  tens to hundreds of milliseconds, so a driver runs it with its spinlock
+  released and the device out of reach, serialised by a sleeping mutex.
+- **git reaches another machine over SSH, with OpenSSH's own client.** git
+  runs an `ssh` program for an `ssh://` remote, and an unauthenticated `git
+  daemon` on a LAN is not the route; OpenSSH's client is the one git is tested
+  against. Its whole install lands in the toolchain, as e2fsprogs's does, and
+  nothing runs the server or the helpers.
 
 ## Constraints
 
@@ -506,5 +532,5 @@ falls back to the committed slot, and the fallback boot finds the panic in
   variables: the Boot Loader Interface's `LoaderEntryDefault` (and clearing a
   SlopOS `LoaderEntryOneShot`), and the firmware entry, written last.
 - No ext4, jbd2, NVMe or NIC driver code or prose from Linux. Format and
-  register facts come from the specifications and from kernel.org's layout
-  documentation.
+  register facts come from the specifications, from kernel.org's layout
+  documentation and, for the NIC, from the drivers Decided names.

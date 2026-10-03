@@ -343,6 +343,21 @@ pub unsafe extern "C" fn getgrnam_r(
     getgrgid_r(0, grp, buf, buflen, result)
 }
 
+/// `initgroups(3)`: the supplementary groups become `group` and every group
+/// that lists `user` as a member. The one group row lists none, so the set is
+/// `{group}`, which `setgroups` grants for gid 0 alone.
+///
+/// # Safety
+/// `user` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn initgroups(user: *const c_char, group: gid_t) -> c_int {
+    if user.is_null() {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    crate::process::ids::setgroups(1, &group)
+}
+
 static mut GR_ROW: group = group {
     gr_name: core::ptr::null_mut(),
     gr_passwd: core::ptr::null_mut(),

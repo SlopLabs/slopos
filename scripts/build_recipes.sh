@@ -345,6 +345,10 @@ cpu = 'x86_64'
 endian = 'little'
 MESON
 
+cat >"$CROSS/autotools-link.rsp" <<'RSP'
+-Wl,-z,defs -Wl,-rpath,$ORIGIN/../lib:$ORIGIN/../../lib
+RSP
+
 # pkg-config sees the prefix and nothing else.
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
@@ -394,7 +398,8 @@ template_meson() {
     unstage "$name" "$work"
 }
 
-# Staged under the guest prefix, like meson's.
+# Staged under the guest prefix, like meson's. The link flags travel in a
+# response file, so neither make nor the shell expands `$ORIGIN`.
 template_autotools() {
     local name="$1" work="$2" args=()
     mapfile -t args < <(recipe_values "$name" arg)
@@ -404,6 +409,7 @@ template_autotools() {
             --prefix="$GUEST_PREFIX" --libdir="$GUEST_PREFIX/lib" \
             CC="$CC_WRAPPER" CXX="$CXX_WRAPPER" AR="$LLVM_AR" RANLIB="$LLVM_RANLIB" \
             CFLAGS=-O2 CXXFLAGS=-O2 CC_FOR_BUILD="$CLANG" \
+            CPPFLAGS="-I$PREFIX/include" LDFLAGS="-L$PREFIX/lib @$CROSS/autotools-link.rsp" \
             "${args[@]}") >"$work/configure.log" 2>&1 ||
         { tail -n 40 "$work/configure.log" >&2; die "$name: configure failed; see $work/configure.log"; }
     make -C "$work/build" -j "$JOBS" >"$work/build.log" 2>&1 ||

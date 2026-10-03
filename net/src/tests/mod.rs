@@ -19,6 +19,7 @@ pub mod net_types_tests;
 pub mod netdev_tests;
 pub mod netmon_producer_tests;
 pub mod netmon_tests;
+pub mod nic_tests;
 pub mod packetbuf_tests;
 pub mod reassembly_tests;
 pub mod route_tests;

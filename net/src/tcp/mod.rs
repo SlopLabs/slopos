@@ -129,6 +129,7 @@ pub fn input(
         if actions.accepted.is_some() {
             // The table had no room, but the peer believes the handshake
             // completed.
+            note_no_room_for_child(&incoming_tuple);
             actions.accepted = None;
             actions.notify = SocketNotify::empty();
             actions.push_segment(SegmentBuilder::rst_for(hdr, dst_ip, src_ip));
@@ -172,6 +173,18 @@ fn input_process_listener(
         (actions, parent)
     })
     .unwrap_or((Actions::new(), orphan))
+}
+
+#[cold]
+#[inline(never)]
+fn note_no_room_for_child(tuple: &TcpTuple) {
+    klog_debug!(
+        "tcp_listen: no shard slot for {}:{} -> {}:{}, RST",
+        Ipv4Addr(tuple.remote_ip),
+        tuple.remote_port,
+        Ipv4Addr(tuple.local_ip),
+        tuple.local_port
+    );
 }
 
 /// Build a single-RST `Actions` for the no-matching-connection path. Separate

@@ -38,19 +38,22 @@ use slopos_abi::syscall::{
 use slopos_abi::unix::SockAddrUn;
 use slopos_slibc::conf::{
     _SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN, _SC_PAGESIZE, getgrgid, getgrgid_r, getgrnam,
-    sysconf,
+    initgroups, sysconf,
 };
 use slopos_slibc::errno::{
-    EAGAIN, EBUSY, EINVAL, EPROTONOSUPPORT, ERANGE, ESOCKTNOSUPPORT, ETIMEDOUT,
+    EAGAIN, EBUSY, EINVAL, ENOSYS, EPERM, EPROTONOSUPPORT, ERANGE, ESOCKTNOSUPPORT, ETIMEDOUT,
 };
 use slopos_slibc::ffi::syscalls::{mmap, mprotect, munmap, realpath, slopos_getdents64, utime};
 use slopos_slibc::ffi::{O_DIRECTORY, O_RDONLY, close, open, read, write};
 use slopos_slibc::io::dirent::DirentIter;
+use slopos_slibc::net::netdb::__h_errno_location;
+use slopos_slibc::net::resolv::{_res, RES_INIT, RES_RECURSE, dn_expand, res_query};
 use slopos_slibc::net::{
     AF_INET, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_NONBLOCK,
     SOCK_SEQPACKET, SOCK_STREAM, SockAddrIn, accept, accept4, bind, connect, getsockname, listen,
     recvmsg, sendmsg, socket,
 };
+use slopos_slibc::process::ids::{ITIMER_REAL, getitimer, setitimer};
 use slopos_slibc::process::{_exit, WEXITSTATUS, WIFEXITED, execl, execle, fork, waitpid};
 use slopos_slibc::signal::{self, SIG_DFL, SIGSEGV, SIGUSR1, SIGUSR2};
 use slopos_slibc::stdio::{self, chars::fputs, file::fflush, file::fileno, file::freopen};
@@ -62,7 +65,7 @@ use slopos_slibc::thread::{
 };
 use slopos_slibc::time::{CLOCK_REALTIME, Timespec, clock_gettime};
 use slopos_slibc::types::{
-    dirent, group, sigaction as SigAction, sigset_t as SigSet, stack_t, utimbuf,
+    dirent, group, itimerval, sigaction as SigAction, sigset_t as SigSet, stack_t, timeval, utimbuf,
 };
 use slopos_slibc::{errno_get, errno_set};
 
@@ -1808,6 +1811,191 @@ fn group_database_has_the_one_root_row() -> bool {
     true
 }
 
+/// The group set `initgroups` makes is `{group}`, which only gid 0 may be;
+/// no interval timer is ever armed, so one reads zero, disarming succeeds and
+/// arming is `ENOSYS`.
+fn initgroups_and_the_interval_timer_hold_to_one_principal() -> bool {
+    let root = unsafe { initgroups(c"root".as_ptr(), 0) };
+    errno_set(0);
+    let other = unsafe { initgroups(c"root".as_ptr(), 5) };
+    if root != 0 || other != -1 || errno_get() != EPERM.raw() {
+        note(&format!(
+            "initgroups gave {root} for gid 0 and {other} (errno {}) for gid 5",
+            errno_get()
+        ));
+        return false;
+    }
+    let mut now = itimerval {
+        it_interval: timeval {
+            tv_sec: 1,
+            tv_usec: 1,
+        },
+        it_value: timeval {
+            tv_sec: 1,
+            tv_usec: 1,
+        },
+    };
+    let read = unsafe { getitimer(ITIMER_REAL, &mut now) };
+    let disarm = itimerval::default();
+    let disarmed = unsafe { setitimer(ITIMER_REAL, &disarm, &mut now) };
+    let arm = itimerval {
+        it_interval: timeval::default(),
+        it_value: timeval {
+            tv_sec: 5,
+            tv_usec: 0,
+        },
+    };
+    errno_set(0);
+    let armed = unsafe { setitimer(ITIMER_REAL, &arm, ptr::null_mut()) };
+    let refused = errno_get();
+    let bad = unsafe { setitimer(99, &disarm, ptr::null_mut()) };
+    if read != 0
+        || now.it_value.tv_sec != 0
+        || now.it_interval.tv_usec != 0
+        || disarmed != 0
+        || armed != -1
+        || refused != ENOSYS.raw()
+        || bad != -1
+        || errno_get() != EINVAL.raw()
+    {
+        note(&format!(
+            "getitimer {read}, disarming {disarmed}, arming {armed} (errno {refused}), timer 99 {bad}"
+        ));
+        return false;
+    }
+    true
+}
+
+/// `dn_expand` follows a compression pointer, reports the two octets the
+/// pointer occupies, and refuses a pointer to itself.
+fn dn_expand_follows_a_compression_pointer() -> bool {
+    let mut msg = [0u8; 40];
+    msg[12..25].copy_from_slice(b"\x07example\x03com\x00");
+    msg[30..36].copy_from_slice(b"\x03www\xc0\x0c");
+    msg[36..38].copy_from_slice(b"\xc0\x24");
+    let mut name = [0u8; 64];
+    let range = msg.as_ptr_range();
+    let used = unsafe {
+        dn_expand(
+            range.start,
+            range.end,
+            msg[30..].as_ptr(),
+            name.as_mut_ptr().cast(),
+            64,
+        )
+    };
+    let text = c_str_of(name.as_ptr());
+    let looped = unsafe {
+        dn_expand(
+            range.start,
+            range.end,
+            msg[36..].as_ptr(),
+            name.as_mut_ptr().cast(),
+            64,
+        )
+    };
+    let short = unsafe {
+        dn_expand(
+            range.start,
+            range.end,
+            msg[30..].as_ptr(),
+            name.as_mut_ptr().cast(),
+            8,
+        )
+    };
+    if used != 6 || text != "www.example.com" || looped != -1 || short != -1 {
+        note(&format!(
+            "dn_expand gave {used} {text:?}, {looped} for a loop, {short} into 8 bytes"
+        ));
+        return false;
+    }
+    true
+}
+
+/// A nameserver on loopback answers truncated over UDP, then over TCP with
+/// another query's ID: `res_query` keeps the truncated reply, which answers,
+/// rather than failing the server. The query leaves a wildcard-bound socket,
+/// so the reply reaching it also holds the kernel to a routed source address.
+fn res_query_keeps_a_truncated_reply_the_tcp_retry_does_not_better() -> bool {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, UdpSocket};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const ANSWER: [u8; 16] = [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1];
+    let Some((udp, tcp, port)) = (5300..5400).find_map(|port| {
+        let udp = UdpSocket::bind(("127.0.0.1", port)).ok()?;
+        let tcp = TcpListener::bind(("127.0.0.1", port)).ok()?;
+        Some((udp, tcp, port))
+    }) else {
+        note("a loopback UDP socket and a TCP listener on its port did not bind");
+        return false;
+    };
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let served = (|| -> std::io::Result<Vec<u8>> {
+            let mut query = [0u8; 512];
+            let (n, from) = udp.recv_from(&mut query)?;
+            let mut reply = query[..n].to_vec();
+            reply[2] |= 0x82;
+            reply[7] = 1;
+            reply.extend_from_slice(&ANSWER);
+            udp.send_to(&reply, from)?;
+            let (mut stream, _) = tcp.accept()?;
+            let mut len = [0u8; 2];
+            stream.read_exact(&mut len)?;
+            let mut other = vec![0u8; usize::from(u16::from_be_bytes(len))];
+            stream.read_exact(&mut other)?;
+            other[0] ^= 0xff;
+            other[2] |= 0x80;
+            other[7] = 1;
+            other.extend_from_slice(&ANSWER);
+            stream.write_all(&(other.len() as u16).to_be_bytes())?;
+            stream.write_all(&other)?;
+            Ok(reply)
+        })();
+        let _ = tx.send(served.map_err(|e| e.to_string()));
+    });
+
+    let state = &raw mut _res;
+    let mut answer = [0u8; 512];
+    let got = unsafe {
+        (*state).nsaddr_list[0] = SockAddrIn {
+            sin_family: AF_INET as u16,
+            sin_port: port.to_be(),
+            sin_addr: u32::from_ne_bytes([127, 0, 0, 1]),
+            sin_zero: [0; 8],
+        };
+        (*state).nscount = 1;
+        (*state).retrans = 5;
+        (*state).retry = 1;
+        (*state).options = RES_INIT | RES_RECURSE;
+        let got = res_query(
+            c"example.com".as_ptr(),
+            1,
+            1,
+            answer.as_mut_ptr(),
+            answer.len() as i32,
+        );
+        (*state).options = 0;
+        got
+    };
+    let h_errno = unsafe { *__h_errno_location() };
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(reply))
+            if usize::try_from(got) == Ok(reply.len()) && answer[..reply.len()] == reply[..] =>
+        {
+            true
+        }
+        served => {
+            note(&format!(
+                "res_query gave {got} (h_errno {h_errno}); the server: {served:?}"
+            ));
+            false
+        }
+    }
+}
+
 /// The state is per thread, the previous value comes back, and a value that
 /// is neither of the two is `EINVAL`.
 fn pthread_setcancelstate_round_trips_per_thread() -> bool {
@@ -1972,6 +2160,18 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "execl_and_execle_pass_the_list_as_argv",
         execl_and_execle_pass_the_list_as_argv,
+    ),
+    (
+        "initgroups_and_the_interval_timer_hold_to_one_principal",
+        initgroups_and_the_interval_timer_hold_to_one_principal,
+    ),
+    (
+        "dn_expand_follows_a_compression_pointer",
+        dn_expand_follows_a_compression_pointer,
+    ),
+    (
+        "res_query_keeps_a_truncated_reply_the_tcp_retry_does_not_better",
+        res_query_keeps_a_truncated_reply_the_tcp_retry_does_not_better,
     ),
 ];
 

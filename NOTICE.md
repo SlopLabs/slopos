@@ -311,6 +311,20 @@ C library under its MIT option (above). `scripts/check_recipes.sh` fails the
 gates when an object a `GPL-2.0-only` recipe installs reaches a library under
 a licence that code cannot be combined with.
 
+OpenSSH (`toolchain/recipes/openssh/`), whose `ssh` git runs as a separate
+program to reach a machine over ssh and whose `ssh-keygen` makes the key it
+logs in with, is built the same way from its pinned release tarball of
+OpenSSH 10.5p1: © Tatu Ylonen, the OpenBSD project and the OpenSSH
+contributors, under the licences its `LICENCE` lists, all of them BSD-style or
+freer — Tatu Ylonen's terms (`SSH-OpenSSH`), ssh-keyscan's (`ssh-keyscan`),
+`BSD-2-Clause` and `BSD-3-Clause`, `ISC`, Patrick Powell's notice
+(`snprintf`), an MIT-style licence (`X11-distribute-modifications-variant`),
+IBM's notice on the replacement base64 code the programs carry, which keeps
+IBM's name out of their promotion (`LicenseRef-OpenSSH-IBM-base64`), and the
+public-domain Rijndael code. Its programs link OpenSSL and zlib and the C
+library under its MIT option (above). Its `LICENCE` travels with them at
+`share/licenses/openssh/LICENCE`.
+
 The programs the guest's own builds run are built the same way, each from
 its pinned release tarball:
 

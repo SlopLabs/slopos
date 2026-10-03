@@ -416,6 +416,26 @@ pub fn disable_bus_master(info: &PciDeviceInfo) {
     );
 }
 
+/// Turn ASPM L0s and L1 off in the function's PCI Express Link Control
+/// register. `false` when the function has no PCI Express capability.
+pub fn disable_aspm(info: &PciDeviceInfo) -> bool {
+    let Some(cap) = info.find_capability(PCI_CAP_ID_PCIE) else {
+        return false;
+    };
+    let at = cap + PCIE_LINK_CONTROL_OFFSET;
+    let control = pci_config_read16(info.bus, info.device, info.function, at);
+    if control & PCIE_LINK_CONTROL_ASPM != 0 {
+        pci_config_write16(
+            info.bus,
+            info.device,
+            info.function,
+            at,
+            control & !PCIE_LINK_CONTROL_ASPM,
+        );
+    }
+    true
+}
+
 #[inline]
 pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u16) -> u8 {
     pci_ecam_read8(bus, device, function, offset).expect("pci_config_read8: ECAM read failed")

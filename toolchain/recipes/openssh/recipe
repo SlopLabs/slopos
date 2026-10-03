@@ -1,0 +1,25 @@
+# OpenSSH: the `ssh` git runs to reach a machine over the network, and the
+# `ssh-keygen` that makes the key it authenticates with.
+#
+# As released. `make install` installs the server and the other tools too;
+# nothing runs them.
+#
+#   disable-strip           `install -s` would run the host's strip, which
+#                           no stamp records.
+#   disable-security-key    no FIDO authenticator reaches a SlopOS machine.
+#   disable-pkcs11          no smartcard either, and no PKCS#11 module to
+#                           load.
+#   disable-utmpx           SlopOS keeps no login records.
+version=10.5p1
+url=https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.5p1.tar.gz
+sha256=d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11
+license=SSH-OpenSSH AND ssh-keyscan AND BSD-2-Clause AND BSD-3-Clause AND ISC AND snprintf AND X11-distribute-modifications-variant AND LicenseRef-OpenSSH-IBM-base64 AND LicenseRef-OpenSSH-public-domain
+license_file=LICENCE
+template=autotools
+depends=openssl zlib
+program=bin/ssh
+program=bin/ssh-keygen
+arg=--disable-strip
+arg=--disable-security-key
+arg=--disable-pkcs11
+arg=--disable-utmpx

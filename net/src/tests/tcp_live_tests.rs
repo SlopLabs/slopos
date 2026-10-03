@@ -133,7 +133,7 @@ fn test_arp_resolve_gateway() -> TestResult {
             dev
         );
     };
-    crate::arp::send_request_via_registry(dev, next_hop);
+    crate::arp::send_request(dev, next_hop);
     let after = DEVICE_REGISTRY.stats_by_index(dev).unwrap_or(before);
 
     // Other CPUs transmit on this device too, so the counter is a floor.

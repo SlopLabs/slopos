@@ -1,5 +1,7 @@
 use slopos_abi::net::{AF_INET, SOCK_DGRAM};
-use slopos_abi::syscall::{ERRNO_EAGAIN, SHUT_RD, SO_RCVBUF, SO_REUSEADDR, SOL_SOCKET};
+use slopos_abi::syscall::{
+    ERRNO_EADDRINUSE, ERRNO_EAGAIN, SHUT_RD, SO_RCVBUF, SO_REUSEADDR, SOL_SOCKET,
+};
 use slopos_ostd::KVec;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -208,6 +210,47 @@ pub fn test_so_reuseaddr() -> TestResult {
     pass!()
 }
 
+pub fn test_explicit_ephemeral_bind_is_never_drawn() -> TestResult {
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+
+    let next = {
+        let mut alloc = EPHEMERAL_PORTS.lock();
+        let Some(drawn) = alloc.alloc() else {
+            return fail!("allocator empty");
+        };
+        alloc.release(drawn);
+        drawn.0 + 1
+    };
+
+    let bound = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    let other = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    let auto = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    if bound < 0 || other < 0 || auto < 0 {
+        return fail!("socket_create failed");
+    }
+
+    assert_eq_test!(socket_bind(bound as u32, [0, 0, 0, 0], next), 0);
+    assert_eq_test!(
+        i64::from(socket_bind(other as u32, [127, 0, 0, 1], next)),
+        errno_i64(ERRNO_EADDRINUSE),
+        "a second bind of a claimed ephemeral port"
+    );
+    let _ = socket_sendto(auto as u32, b"x", [127, 0, 0, 1], 9);
+    let Some(local) = socket_get_local_addr(auto as u32) else {
+        return fail!("sendto did not bind");
+    };
+    assert_test!(local.port.0 != 0, "sendto bound a port");
+    assert_test!(
+        local.port.0 != next,
+        "the automatic bind drew the explicitly bound port {}",
+        next
+    );
+    pass!()
+}
+
 pub fn test_so_rcvbuf_resize() -> TestResult {
     reset();
 
@@ -301,5 +344,9 @@ slopos_testing::stest!(name = test_udp_demux_dispatch, suite = socket_framework)
 slopos_testing::stest!(name = test_inaddr_any_wildcard, suite = socket_framework);
 slopos_testing::stest!(name = test_recv_queue_overflow, suite = socket_framework);
 slopos_testing::stest!(name = test_so_reuseaddr, suite = socket_framework);
+slopos_testing::stest!(
+    name = test_explicit_ephemeral_bind_is_never_drawn,
+    suite = socket_framework
+);
 slopos_testing::stest!(name = test_so_rcvbuf_resize, suite = socket_framework);
 slopos_testing::stest!(name = test_shutdown_read_behavior, suite = socket_framework);

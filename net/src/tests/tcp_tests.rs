@@ -7,11 +7,16 @@ use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
-use crate::tcp::table::SLOTS_PER_SHARD;
+use crate::tcp::Spares;
+use crate::tcp::buffer::TcpBufferPair;
+use crate::tcp::pcb::time_wait::TimeWaitState;
+use crate::tcp::pcb::{SocketId, SynSentState};
+use crate::tcp::seq::SeqNum;
+use crate::tcp::table::{self, SLOTS_PER_SHARD};
 use crate::tcp::{
-    self, ConnId, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, SocketNotify, TCP_FLAG_ACK, TCP_FLAG_FIN,
-    TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TCP_FLAG_URG, TcpError, TcpHeader, TcpState,
-    TcpTuple,
+    self, ConnId, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, PcbState, SocketNotify, TCP_FLAG_ACK,
+    TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TCP_FLAG_URG, TcpError, TcpHeader,
+    TcpState, TcpTuple,
 };
 use crate::with_data_state;
 
@@ -453,6 +458,128 @@ pub fn test_tcp_table_full_returns_error() -> TestResult {
     assert_test!(
         established >= SLOTS_PER_SHARD,
         "should fill at least one shard"
+    );
+    pass!()
+}
+
+fn tuple_for_port(local_port: u16) -> TcpTuple {
+    TcpTuple {
+        local_ip: LOCAL_IP,
+        local_port,
+        remote_ip: REMOTE_IP,
+        remote_port: 80,
+    }
+}
+
+fn time_wait_state(entry_ms: u64) -> PcbState {
+    PcbState::TimeWait(TimeWaitState::new(
+        SeqNum::new(1),
+        SeqNum::new(1),
+        32_768,
+        32_768,
+        entry_ms,
+    ))
+}
+
+/// Install a TIME_WAIT for `tuple`; when `owed`, with an attached socket and
+/// six unread bytes. Out of line: the buffer pair's construction would push
+/// the caller's frame past the gate.
+#[inline(never)]
+fn install_time_wait(tuple: TcpTuple, entry_ms: u64, owed: bool) -> Option<ConnId> {
+    let socket_id = owed.then_some(SocketId(1));
+    let id = table::install_established(tuple, time_wait_state(entry_ms), |pcb| {
+        pcb.socket_id = socket_id
+    })
+    .ok()?;
+    if owed {
+        let pair = TcpBufferPair::boxed(4096, 4096).ok()?;
+        let wrote = table::with_pcb_and_bufs(id, |_, slot| {
+            slot.insert(pair)
+                .recv
+                .enqueue(b"unread", &mut Spares::for_bytes(6, 0), 0)
+        })?;
+        if wrote != 6 {
+            return None;
+        }
+    }
+    Some(id)
+}
+
+/// The oldest TIME_WAIT goes first, except one whose socket still has unread
+/// bytes: that one keeps its slot even when it is the only TIME_WAIT left.
+pub fn test_tcp_full_shard_evicts_oldest_time_wait() -> TestResult {
+    let _scope = enter_scope!();
+    const NEEDED: usize = 2 * SLOTS_PER_SHARD;
+    let shard = table::tcp_hash(&tuple_for_port(20_000));
+    let mut tuples = [tuple_for_port(0); NEEDED];
+    let mut found = 0;
+    let mut port = 20_000u16;
+    while found < NEEDED {
+        let t = tuple_for_port(port);
+        if table::tcp_hash(&t) == shard {
+            tuples[found] = t;
+            found += 1;
+        }
+        port += 1;
+    }
+    let (waiting, fresh) = tuples.split_at(SLOTS_PER_SHARD);
+
+    let entry_ms: [u64; SLOTS_PER_SHARD] = [400, 100, 300, 200];
+    let owed = 1usize;
+    let mut waiting_ids = [ConnId::SENTINEL; SLOTS_PER_SHARD];
+    for (i, t) in waiting.iter().enumerate() {
+        match install_time_wait(*t, entry_ms[i], i == owed) {
+            Some(id) => waiting_ids[i] = id,
+            None => return fail!("TIME_WAIT install {} failed", i),
+        }
+    }
+
+    let eviction_order = [3usize, 2, 0];
+    for (n, (&victim, t)) in eviction_order.iter().zip(fresh.iter()).enumerate() {
+        let id = match table::install_established(
+            *t,
+            PcbState::SynSent(SynSentState::new(SeqNum::new(0x1000))),
+            |_| {},
+        ) {
+            Ok(id) => id,
+            Err(e) => return fail!("install {} into a full shard failed: {:?}", n, e),
+        };
+        assert_eq_test!(
+            id.shard(),
+            shard,
+            "the new connection lands in the full shard"
+        );
+        assert_eq_test!(table::find(t), Some(id), "the new connection resolves");
+        assert_eq_test!(
+            table::find(&waiting[victim]),
+            None,
+            "the oldest unowed TIME_WAIT tuple is gone"
+        );
+        assert_test!(
+            table::with_pcb(waiting_ids[victim], |_| ()).is_none(),
+            "the evicted connection's id no longer resolves"
+        );
+        for &kept in &eviction_order[n + 1..] {
+            assert_eq_test!(
+                table::find(&waiting[kept]),
+                Some(waiting_ids[kept]),
+                "younger TIME_WAIT connections stay"
+            );
+        }
+    }
+
+    match table::install_established(
+        fresh[SLOTS_PER_SHARD - 1],
+        PcbState::SynSent(SynSentState::new(SeqNum::new(0x1000))),
+        |_| {},
+    ) {
+        Err(TcpError::TableFull) => {}
+        other => return fail!("an owed TIME_WAIT must not be evicted, got {:?}", other),
+    }
+    assert_eq_test!(
+        table::find(&waiting[owed]),
+        Some(waiting_ids[owed]),
+        "the oldest TIME_WAIT outlived every eviction: its socket is owed bytes"
     );
     pass!()
 }
@@ -1598,6 +1725,10 @@ slopos_testing::stest!(name = test_tcp_seq_ge, suite = tcp);
 slopos_testing::stest!(name = test_tcp_table_initially_empty, suite = tcp);
 slopos_testing::stest!(name = test_tcp_connect_creates_syn_sent, suite = tcp);
 slopos_testing::stest!(name = test_tcp_table_full_returns_error, suite = tcp);
+slopos_testing::stest!(
+    name = test_tcp_full_shard_evicts_oldest_time_wait,
+    suite = tcp
+);
 slopos_testing::stest!(name = test_tcp_listen_creates_listen_state, suite = tcp);
 slopos_testing::stest!(name = test_tcp_listen_duplicate_port_fails, suite = tcp);
 slopos_testing::stest!(name = test_tcp_close_listen_releases_slot, suite = tcp);

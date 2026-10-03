@@ -12,16 +12,22 @@ use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KVec};
 
+use slopos_abi::net::{NET_DHCP_INIT, NET_DHCP_REBINDING, NET_DHCP_REQUESTING, NET_DHCP_SELECTING};
+
+use crate::clock::MockClock;
+use crate::dhcp::client::{RETRY_JITTER_MS, RETRY_MAX_MS};
 use crate::dhcp::codec::{self, BOOTP_HEADER_LEN, DHCP_FRAME_LEN, MSG_ACK, MSG_NAK, MSG_OFFER};
 use crate::iface::{self, AddrOrigin, IfaceKind};
 use crate::netdev::{DEVICE_REGISTRY, NetDevice, NetDeviceFeatures, NetDeviceStats};
 use crate::packetbuf::PacketBuf;
 use crate::pool::PacketPool;
 use crate::route::ROUTE_TABLE;
-use crate::types::{DevIndex, MacAddr, NetError};
+use crate::tests::net_scope::NetTestScope;
+use crate::timer::TimerKind;
+use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
-const SERVER: [u8; 4] = [10, 77, 0, 1];
-const CLIENT_IP: [u8; 4] = [10, 77, 0, 55];
+pub(crate) const SERVER: [u8; 4] = [10, 77, 0, 1];
+pub(crate) const CLIENT_IP: [u8; 4] = [10, 77, 0, 55];
 const MASK: [u8; 4] = [255, 255, 255, 0];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -174,12 +180,40 @@ struct Fixture {
 
 impl Fixture {
     fn new(mac: MacAddr) -> Option<Self> {
+        Self::with_carrier(mac, true)
+    }
+
+    fn with_carrier(mac: MacAddr, carrier: bool) -> Option<Self> {
         let mock = KArc::try_new(RecordingMock::new(mac)).ok()?;
+        mock.carrier.store(carrier, Ordering::Release);
         let dyn_dev: KArc<dyn NetDevice + Send + Sync> = mock.clone();
         let handle = DEVICE_REGISTRY.register(dyn_dev)?;
         let dev = handle.index();
-        let ifindex = iface::attach(dev, IfaceKind::Ethernet, mac, 1500, true, true).ok()?;
+        let ifindex = iface::attach(dev, IfaceKind::Ethernet, mac, 1500, carrier, true).ok()?;
         Some(Self { dev, ifindex, mock })
+    }
+
+    /// The cable out and back in, as the net-timer's carrier sampling reports it.
+    fn replug(&self) {
+        let _ = iface::set_carrier(self.dev, false);
+        let _ = iface::set_carrier(self.dev, true);
+    }
+
+    fn sent(&self, msg_type: u8) -> usize {
+        let mut events = [MockEvent::SetUp; MAX_EVENTS];
+        let n = self.mock.snapshot(&mut events);
+        events[..n]
+            .iter()
+            .filter(|e| **e == MockEvent::Tx(msg_type))
+            .count()
+    }
+
+    fn addresses(&self) -> usize {
+        iface::get(self.ifindex).map_or(0, |i| i.addrs().len())
+    }
+
+    fn holds(&self, addr: [u8; 4]) -> bool {
+        iface::get(self.ifindex).is_some_and(|i| i.addrs().iter().any(|a| a.addr == Ipv4Addr(addr)))
     }
 
     fn bind(&self, lease_secs: u32) -> bool {
@@ -216,7 +250,7 @@ fn current_xid(dev: DevIndex) -> Option<u32> {
 
 /// Build a server reply. **No DNS option is ever written**, so `bind()` leaves
 /// the system resolver the DNS tests depend on untouched.
-fn reply(
+pub(crate) fn reply(
     buf: &mut [u8; DHCP_FRAME_LEN],
     xid: u32,
     msg_type: u8,
@@ -504,8 +538,265 @@ fn test_dhcp_admin_down_releases_before_set_down() -> TestResult {
     pass!()
 }
 
+/// Carrier returning mid-DISCOVER restarts the transaction; the retransmission
+/// it arms must replace the one in flight, not run beside it at twice the rate.
+fn test_dhcp_carrier_up_while_selecting_keeps_one_retransmit_chain() -> TestResult {
+    const ROUNDS: usize = 3;
+    let scope = match NetTestScope::enter_at_mock_ms(1_000_000) {
+        Ok(scope) => scope,
+        Err(e) => return fail!("could not enter the net test scope: {:?}", e),
+    };
+    let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 6])) else {
+        return fail!("could not register a mock device");
+    };
+    if !crate::dhcp::start(f.dev) {
+        f.teardown();
+        return fail!("start failed");
+    }
+    f.replug();
+    f.mock.clear();
+
+    // Every armed delay is below the backoff ceiling plus jitter, so each
+    // advance fires each live chain exactly once.
+    for _ in 0..ROUNDS {
+        MockClock::advance(u64::from(RETRY_MAX_MS + RETRY_JITTER_MS) + 1);
+        for timer in scope.dispatch_due(TimerKind::DhcpRetransmit).iter() {
+            crate::dhcp::on_retransmit_timer(timer.key);
+        }
+    }
+    let discovers = f.sent(codec::MSG_DISCOVER);
+    f.teardown();
+
+    assert_eq_test!(
+        discovers,
+        ROUNDS,
+        "one DISCOVER per backoff interval: the carrier's chain replaced the start's"
+    );
+    pass!()
+}
+
+/// A NIC that publishes while its link is still negotiating would otherwise
+/// spend the first DISCOVER on a transmit the driver refuses.
+fn test_dhcp_start_without_carrier_waits_for_it() -> TestResult {
+    let Some(f) = Fixture::with_carrier(MacAddr([2, 0, 0, 0, 77, 7]), false) else {
+        return fail!("could not register a mock device");
+    };
+    if !crate::dhcp::start(f.dev) {
+        f.teardown();
+        return fail!("start failed");
+    }
+    let sent_while_down = f.mock.tx_calls.load(Ordering::Relaxed);
+
+    f.mock.carrier.store(true, Ordering::Release);
+    let _ = iface::set_carrier(f.dev, true);
+    let discovers = f.sent(codec::MSG_DISCOVER);
+    let state = crate::dhcp::state_of(f.dev);
+    f.teardown();
+
+    assert_eq_test!(
+        sent_while_down,
+        0,
+        "nothing is sent into a link that is down"
+    );
+    assert_eq_test!(discovers, 1, "carrier-up sends the first DISCOVER");
+    assert_eq_test!(
+        state,
+        Some(NET_DHCP_SELECTING),
+        "and the client is selecting"
+    );
+    pass!()
+}
+
+/// RFC 2131 §3.2: a NAK to INIT-REBOOT means the address is not ours on this
+/// segment, and it was installed before the replug.
+fn test_dhcp_nak_to_init_reboot_withdraws_the_old_address() -> TestResult {
+    let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 8])) else {
+        return fail!("could not register a mock device");
+    };
+    if !f.bind(3600) {
+        f.teardown();
+        return fail!("could not reach Bound");
+    }
+    f.mock.clear();
+    f.replug();
+    let requested = f.sent(codec::MSG_REQUEST);
+
+    let Some(xid) = current_xid(f.dev) else {
+        f.teardown();
+        return fail!("no INIT-REBOOT request in flight");
+    };
+    let mut buf = [0u8; DHCP_FRAME_LEN];
+    let len = reply(&mut buf, xid, MSG_NAK, [0; 4], None);
+    crate::dhcp::transport::on_udp_receive(SERVER, codec::UDP_PORT_SERVER, &buf[..len]);
+
+    let addresses = f.addresses();
+    let routes = routes_for(f.dev);
+    let discovers = f.sent(codec::MSG_DISCOVER);
+    f.teardown();
+
+    assert_eq_test!(requested, 1, "the replug confirms the held address");
+    assert_eq_test!(addresses, 0, "the NAK withdraws the address it refused");
+    assert_eq_test!(routes, 0, "and the routes derived from it");
+    assert_eq_test!(discovers, 1, "then the client discovers afresh");
+    pass!()
+}
+
+/// RFC 2131 §4.4.2: an INIT-REBOOT nobody answers must not keep the address
+/// past the lease it came from.
+fn test_dhcp_expiry_while_requesting_withdraws_and_rediscovers() -> TestResult {
+    let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 9])) else {
+        return fail!("could not register a mock device");
+    };
+    if !f.bind(3600) {
+        f.teardown();
+        return fail!("could not reach Bound");
+    }
+    let Some(expire) = crate::dhcp::transport::expire_key(f.dev) else {
+        f.teardown();
+        return fail!("no expiry timer armed");
+    };
+    f.mock.clear();
+    f.replug();
+    let requesting = crate::dhcp::state_of(f.dev);
+
+    crate::dhcp::on_expire_timer(expire);
+    let addresses = f.addresses();
+    let discovers = f.sent(codec::MSG_DISCOVER);
+    let state = crate::dhcp::state_of(f.dev);
+    f.teardown();
+
+    assert_eq_test!(
+        requesting,
+        Some(NET_DHCP_REQUESTING),
+        "the replug left an INIT-REBOOT in flight"
+    );
+    assert_eq_test!(addresses, 0, "the lease's expiry withdraws the address");
+    assert_eq_test!(discovers, 1, "and falls back to DISCOVER");
+    assert_eq_test!(state, Some(NET_DHCP_SELECTING), "selecting again");
+    pass!()
+}
+
+/// The held address must not stay first on the interface, where source
+/// selection and ARP would keep answering with it.
+fn test_dhcp_ack_for_another_address_replaces_the_held_one() -> TestResult {
+    const MOVED: [u8; 4] = [10, 77, 0, 66];
+    let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 10])) else {
+        return fail!("could not register a mock device");
+    };
+    if !f.bind(3600) {
+        f.teardown();
+        return fail!("could not reach Bound");
+    }
+    f.replug();
+    let Some(xid) = current_xid(f.dev) else {
+        f.teardown();
+        return fail!("no INIT-REBOOT request in flight");
+    };
+    let mut buf = [0u8; DHCP_FRAME_LEN];
+    let len = reply(&mut buf, xid, MSG_ACK, MOVED, Some(3600));
+    crate::dhcp::transport::on_udp_receive(SERVER, codec::UDP_PORT_SERVER, &buf[..len]);
+
+    let addresses = f.addresses();
+    let moved = f.holds(MOVED);
+    f.teardown();
+
+    assert_test!(moved, "the ACK installs the address it grants");
+    assert_eq_test!(addresses, 1, "in place of the one held before");
+    pass!()
+}
+
+/// RFC 2131 §4.4.5: a lease that runs out while rebinding sends the client
+/// back to DISCOVER, so a server outage longer than the lease is survivable.
+fn test_dhcp_expiry_while_rebinding_rediscovers() -> TestResult {
+    let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 11])) else {
+        return fail!("could not register a mock device");
+    };
+    if !f.bind(3600) {
+        f.teardown();
+        return fail!("could not reach Bound");
+    }
+    let Some(key) = crate::dhcp::transport::expire_key(f.dev) else {
+        f.teardown();
+        return fail!("no lease timers armed");
+    };
+    crate::dhcp::on_t1_timer(key);
+    crate::dhcp::on_t2_timer(key);
+    let rebinding = crate::dhcp::state_of(f.dev);
+    f.mock.clear();
+
+    crate::dhcp::on_expire_timer(key);
+    let addresses = f.addresses();
+    let discovers = f.sent(codec::MSG_DISCOVER);
+    let state = crate::dhcp::state_of(f.dev);
+    f.teardown();
+
+    assert_eq_test!(rebinding, Some(NET_DHCP_REBINDING), "T2 left it rebinding");
+    assert_eq_test!(addresses, 0, "expiry withdraws the address");
+    assert_eq_test!(discovers, 1, "and sends a DISCOVER");
+    assert_eq_test!(state, Some(NET_DHCP_SELECTING), "selecting again");
+    pass!()
+}
+
+/// Stopping during INIT-REBOOT still holds the old lease, so it is released
+/// and withdrawn like a bound one.
+fn test_dhcp_stop_during_init_reboot_releases() -> TestResult {
+    let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 12])) else {
+        return fail!("could not register a mock device");
+    };
+    if !f.bind(3600) {
+        f.teardown();
+        return fail!("could not reach Bound");
+    }
+    f.replug();
+    let requesting = crate::dhcp::state_of(f.dev);
+    f.mock.clear();
+
+    crate::dhcp::stop(f.dev);
+    let releases = f.sent(codec::MSG_RELEASE);
+    let addresses = f.addresses();
+    let state = crate::dhcp::state_of(f.dev);
+    f.teardown();
+
+    assert_eq_test!(
+        requesting,
+        Some(NET_DHCP_REQUESTING),
+        "the replug left an INIT-REBOOT in flight"
+    );
+    assert_eq_test!(releases, 1, "stop gives the held lease back");
+    assert_eq_test!(addresses, 0, "and withdraws the address");
+    assert_test!(
+        state.is_none() || state == Some(NET_DHCP_INIT),
+        "and the client is no longer running"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_dhcp_admin_down_releases_before_set_down,
+    suite = dhcp_transport
+);
+slopos_testing::stest!(
+    name = test_dhcp_ack_for_another_address_replaces_the_held_one,
+    suite = dhcp_transport
+);
+slopos_testing::stest!(
+    name = test_dhcp_carrier_up_while_selecting_keeps_one_retransmit_chain,
+    suite = dhcp_transport
+);
+slopos_testing::stest!(
+    name = test_dhcp_expiry_while_requesting_withdraws_and_rediscovers,
+    suite = dhcp_transport
+);
+slopos_testing::stest!(
+    name = test_dhcp_expiry_while_rebinding_rediscovers,
+    suite = dhcp_transport
+);
+slopos_testing::stest!(
+    name = test_dhcp_stop_during_init_reboot_releases,
+    suite = dhcp_transport
+);
+slopos_testing::stest!(
+    name = test_dhcp_nak_to_init_reboot_withdraws_the_old_address,
     suite = dhcp_transport
 );
 slopos_testing::stest!(
@@ -514,6 +805,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_dhcp_release_precedes_unbind,
+    suite = dhcp_transport
+);
+slopos_testing::stest!(
+    name = test_dhcp_start_without_carrier_waits_for_it,
     suite = dhcp_transport
 );
 slopos_testing::stest!(

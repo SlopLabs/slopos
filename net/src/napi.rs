@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Per-NIC NAPI instrumentation: budget cap + processed counter.
 ///
@@ -42,29 +42,15 @@ impl NapiContext {
 // caller that drains on its own behalf is compensating for the netpoll kthread
 // not running.
 
-static NAPI_WAKE_FN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-
-/// The registered function must call
-/// [`NapiWaker::arm_and_wake`](crate::napi_waker::NapiWaker::arm_and_wake).
-pub fn register_wake_napi(f: fn()) {
-    NAPI_WAKE_FN.store(slopos_ostd::util::fn_ptr::encode(f), Ordering::Release);
-}
-
-/// Wake the netpoll kthread; a no-op until a driver registers. Does not poll
-/// synchronously — the kthread drains when scheduled.
+/// IRQ-safe: wake the netpoll kthread. Does not poll synchronously — the
+/// kthread drains when scheduled.
 #[inline]
 pub fn wake_napi() {
-    let ptr = NAPI_WAKE_FN.load(Ordering::Acquire);
-    if let Some(f) = slopos_ostd::util::fn_ptr::decode(ptr) {
-        f();
-    }
+    crate::nic::NAPI_WAKER.arm_and_wake();
 }
 
 /// Drain the software devices — today just `lo` — through the ordinary ingress
 /// pipeline, returning the packet count.
-///
-/// Lives here rather than in a NIC driver so loopback delivery is not
-/// conditional on unrelated hardware being present and up.
 pub fn poll_software_devices(budget: usize) -> u32 {
     let Some(handle) = crate::loopback::handle() else {
         return 0;

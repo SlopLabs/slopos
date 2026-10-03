@@ -8,7 +8,7 @@ use crate::packetbuf::PacketBuf;
 use crate::pool::PACKET_POOL;
 use crate::reassembly::REASSEMBLY_TABLE;
 use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
-use crate::types::{DevIndex, Ipv4Addr};
+use crate::types::Ipv4Addr;
 
 const MAX_GROUPS_UNDER_TEST: usize = 32;
 static NEXT_TEST_IDENTIFICATION: AtomicU16 = AtomicU16::new(1);
@@ -335,10 +335,10 @@ fn ipv4_packet(key: GroupKey, more_fragments: bool) -> Option<PacketBuf> {
     PacketBuf::from_raw_copy(&frame)
 }
 
-fn drive_ingress(dev: DevIndex, key: GroupKey, more_fragments: bool) -> bool {
+fn drive_ingress(key: GroupKey, more_fragments: bool) -> bool {
     match ipv4_packet(key, more_fragments) {
         Some(pkt) => {
-            crate::ipv4::handle_rx(dev, pkt, false);
+            crate::ipv4::handle_rx(pkt, false);
             true
         }
         None => false,
@@ -406,7 +406,7 @@ pub fn test_non_fragmented_bypasses_reassembly() -> TestResult {
         src: BYPASS_PROBE_SRC,
         identification: next_identification(),
     };
-    if !drive_ingress(scope.dev(), probe, false) {
+    if !drive_ingress(probe, false) {
         return fail!("could not build the probe packet");
     }
     let bypassed = complete_group(oldest);
@@ -419,7 +419,7 @@ pub fn test_non_fragmented_bypasses_reassembly() -> TestResult {
         src: BYPASS_PROBE_SRC,
         identification: next_identification(),
     };
-    if !drive_ingress(scope.dev(), probe, true) {
+    if !drive_ingress(probe, true) {
         return fail!("could not build the fragment packet");
     }
     let fragment_took_a_group = !complete_group(oldest);

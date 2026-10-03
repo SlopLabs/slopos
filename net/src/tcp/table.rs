@@ -147,7 +147,7 @@ const fn next_generation(current: u16) -> u16 {
     }
 }
 
-pub(super) fn tcp_hash(tuple: &TcpTuple) -> usize {
+pub(crate) fn tcp_hash(tuple: &TcpTuple) -> usize {
     let mut h: u64 = 0xcbf29ce484222325;
     let fnv_prime: u64 = 0x100000001b3;
     for &b in tuple
@@ -464,9 +464,12 @@ pub fn install_established(
     let _w = TCP_SHARDS_WRITE[shard_idx].lock();
 
     let mut idx = load_shard_index(shard_idx);
-    let free_slot = idx.first_free().ok_or(TcpError::TableFull)?;
-    // The generation was advanced by whichever `release` vacated this slot,
-    // so the installing side only copies it.
+    let free_slot = match idx.first_free() {
+        Some(slot) => slot,
+        None => evict_oldest_time_wait(shard_idx, &mut idx).ok_or(TcpError::TableFull)?,
+    };
+    // The generation was advanced by whichever `release` or eviction vacated
+    // this slot, so the installing side only copies it.
     let generation = idx.generations[free_slot];
 
     // The outer write lock is the only other lock held while this one is live.
@@ -490,6 +493,50 @@ pub fn install_established(
     TCP_SHARDS_INDEX[shard_idx].replace(new_box);
 
     Ok(ConnId::new_shard(shard_idx, free_slot, generation))
+}
+
+/// Free the slot of the shard's oldest TIME_WAIT connection for a new one.
+/// A connection whose socket is still owed bytes keeps its slot, as it does
+/// past its own expiry. The caller holds the shard's write lock and
+/// publishes `idx`.
+#[cold]
+#[inline(never)]
+fn evict_oldest_time_wait(shard_idx: usize, idx: &mut TcpShardIndex) -> Option<usize> {
+    let base = shard_idx * SLOTS_PER_SHARD;
+    let mut oldest: Option<(usize, u64)> = None;
+    for s in 0..SLOTS_PER_SHARD {
+        let guard = TCP_PCB_SLOTS[base + s].lock();
+        let Some(entry) = guard.as_ref() else {
+            continue;
+        };
+        let PcbState::TimeWait(tw) = &entry.pcb.state else {
+            continue;
+        };
+        let owed = entry.pcb.socket_id.is_some()
+            && entry
+                .buffer
+                .as_ref()
+                .is_some_and(|b| b.recv.available() > 0);
+        if owed {
+            continue;
+        }
+        match oldest {
+            Some((_, entry_ms)) if entry_ms <= tw.entry_ms => {}
+            _ => oldest = Some((s, tw.entry_ms)),
+        }
+    }
+    let (victim, _) = oldest?;
+
+    idx.tuples[victim] = None;
+    idx.generations[victim] = next_generation(idx.generations[victim]);
+    {
+        let mut guard = TCP_PCB_SLOTS[base + victim].lock();
+        if let Some(entry) = guard.as_ref() {
+            cancel_pcb_timers(&entry.pcb);
+        }
+        *guard = None;
+    }
+    Some(victim)
 }
 
 /// Install a LISTEN socket.

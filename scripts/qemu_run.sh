@@ -20,7 +20,7 @@ set -euo pipefail
 #   BOOT_DISK_IMG, INSTALL_STICK, QEMU_ALLOW_REBOOT, QEMU_TEST_DISKS,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
-#   GIT_PUSH_REPO,
+#   GIT_PUSH_REPO, GIT_SSH_PEER,
 #   BOOT_LOG_TIMEOUT, LOG_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,8 +109,10 @@ ECHO_PEER_PORT="${ECHO_PEER_PORT:-9999}"
 ECHO_PEER_CMD="${ECHO_PEER_CMD:-/bin/cat}"
 
 # A seeded clone names git://10.0.2.4/ and git://10.0.2.4:9419/, so the git
-# peer's address is fixed.
+# peer's address is fixed. GIT_SSH_PEER is the host's half of the ladder's ssh
+# fixture (scripts/stage_ladder_fixtures.sh), served on the same address.
 GIT_PUSH_REPO="${GIT_PUSH_REPO:-}"
+GIT_SSH_PEER="${GIT_SSH_PEER:-}"
 GIT_PEER_ADDR="10.0.2.4"
 
 OVMF_DIR="${OVMF_DIR:-${REPO_ROOT}/third_party/ovmf}"
@@ -536,6 +538,19 @@ if [ -n "$GIT_PUSH_REPO" ]; then
     git_daemon="git daemon --inetd --strict-paths --export-all --log-destination=none --init-timeout=30 --timeout=600"
     NET_GITFWD=",guestfwd=tcp:${GIT_PEER_ADDR}:9418-cmd:${git_daemon} --forbid-override=receive-pack --interpolated-path=${checkout_dir} ${checkout_dir}"
     NET_GITFWD+=",guestfwd=tcp:${GIT_PEER_ADDR}:9419-cmd:${git_daemon} --enable=receive-pack --interpolated-path=${push_dir} ${push_dir}"
+    # libslirp hands the command the connection as stdin, stdout and stderr,
+    # so `-E` keeps sshd's log out of the stream.
+    if [ -n "$GIT_SSH_PEER" ]; then
+        [ -f "$GIT_SSH_PEER/sshd_config" ] ||
+            { echo "qemu_run.sh: GIT_SSH_PEER=$GIT_SSH_PEER holds no sshd_config" >&2; exit 1; }
+        sshd_bin="$(command -v sshd || echo /usr/sbin/sshd)"
+        [ -x "$sshd_bin" ] || { echo "qemu_run.sh: GIT_SSH_PEER needs sshd on PATH or at /usr/sbin/sshd" >&2; exit 1; }
+        case "$GIT_SSH_PEER" in
+            *[,%\'\"\\[:space:]]*) echo "qemu_run.sh: the ssh peer cannot run from $GIT_SSH_PEER" >&2; exit 1 ;;
+        esac
+        NET_GITFWD+=",guestfwd=tcp:${GIT_PEER_ADDR}:22-cmd:${sshd_bin} -i -E ${GIT_SSH_PEER}/sshd.log -f ${GIT_SSH_PEER}/sshd_config"
+        NET_GITFWD+=" -o 'SetEnv=LADDER_CHECKOUT=${checkout_dir} LADDER_PUSH=${push_dir}'"
+    fi
 fi
 
 # ── Debug-mode plumbing ─────────────────────────────────────────────────────

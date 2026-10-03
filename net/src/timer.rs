@@ -358,13 +358,7 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
             klog_debug!("net_timer: ARP retransmit fired, key={}", timer.key);
             let (action, _dropped) = super::neighbor::NEIGHBOR_CACHE.on_retransmit(timer.key);
             if let Some(act) = action {
-                // TODO(tech-debt): one global device handle — multi-NIC needs a
-                // per-device lookup.
-                if let Some(handle) =
-                    crate::net_driver_service::net_driver().and_then(|d| (d.get_device_handle)())
-                {
-                    super::arp::execute_neighbor_action(handle, act);
-                }
+                super::arp::execute_neighbor_action(act);
             }
         }
         TimerKind::TcpRetransmit => {

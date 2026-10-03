@@ -1,10 +1,8 @@
 //! Waiting on the live network environment from a boot step.
 
-/// Nudge the NIC's receive path, since nothing else will while a boot step runs.
+/// Nudge the receive path, since nothing else will while a boot step runs.
 pub fn pump_rx() {
-    if let Some(driver) = crate::net_driver_service::net_driver() {
-        (driver.virtnet_force_napi_poll)();
-    }
+    crate::nic::force_napi_poll();
 }
 
 /// Polls rather than parks: the caller is a BSP boot step, and a blocking wait

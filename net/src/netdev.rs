@@ -145,6 +145,17 @@ pub trait NetDevice: Send + Sync {
     fn carrier_detect(&self) -> bool {
         false
     }
+
+    /// RX work the last poll left behind — the netpoll loop's recheck for an
+    /// interrupt that raced its burst. Default `false`.
+    fn rx_pending(&self) -> bool {
+        false
+    }
+
+    /// Sample the link and refresh what [`carrier`](Self::carrier) returns.
+    /// The net-timer kthread calls it every period with no lock held, then
+    /// reports `carrier()` to the interface table. Default no-op.
+    fn sample_carrier(&self) {}
 }
 
 /// Read-only snapshot of network device statistics.
@@ -318,6 +329,18 @@ impl DeviceHandle {
     pub fn kind(&self) -> IfaceKind {
         self.dev.kind()
     }
+
+    pub fn rx_pending(&self) -> bool {
+        self.dev.rx_pending()
+    }
+
+    pub fn sample_carrier(&self) {
+        self.dev.sample_carrier()
+    }
+
+    pub fn carrier(&self) -> bool {
+        self.dev.carrier()
+    }
 }
 
 impl fmt::Debug for DeviceHandle {
@@ -326,7 +349,7 @@ impl fmt::Debug for DeviceHandle {
     }
 }
 
-const MAX_DEVICES: usize = 8;
+pub(crate) const MAX_DEVICES: usize = 8;
 
 /// Control-plane storage for registered network devices.
 ///

@@ -211,7 +211,7 @@ loader applies).
 so is git.** `toolchain/recipes/<name>/recipe` pins an upstream release
 tarball (URL, SHA-256, licence), a build template (`cmake`, `meson`,
 `openssl` or `autotools`), its configure arguments and its dependencies: zlib,
-nghttp2, Mbed TLS, OpenSSL, curl, libssh2, libgit2 and git.
+nghttp2, Mbed TLS, OpenSSL, curl, libssh2, libgit2, git and OpenSSH.
 `scripts/build_recipes.sh` (`just recipes`) builds them shared and `-z defs`
 into `builddir/slopos-recipes/prefix`, with the
 target sysroot and `x86_64-unknown-slopos-clang{,++}` wrappers that
@@ -224,14 +224,19 @@ which only applies it. A library is
 `$ORIGIN`-rpathed; a program (`program=`) is built with `--prefix` the guest
 path of the toolchain, because git finds its exec path, templates and system
 config through that compiled-in prefix, and its run path reaches `lib/`. The
-programs are git (`meson`), CMake and Ninja (`cmake`), and bash and e2fsprogs
-(`autotools`: out of tree, `--host` the target, and the answers configure
-cannot find out without running a SlopOS program given as `*_cv_*` cache
-values); a recipe that declares no library installs nothing under `include/`
-or `lib/`, so e2fsprogs's static libraries reach neither another recipe nor
-the target sysroot. Bootstrap copies the libraries into
-the target sysroot and `build_recipes.sh --install-programs` copies the
-programs into the install, so both reach a root; only the libraries'
+programs are git (`meson`), CMake and Ninja (`cmake`), and bash, e2fsprogs
+and OpenSSH (`autotools`: out of tree, `--host` the target, the prefix's
+headers and libraries on the search paths, and the link flags — `-z defs`
+and the run path — in a response file beside the wrappers so neither make nor
+a shell expands `$ORIGIN`, and the answers configure cannot find out without
+running a SlopOS program given as `*_cv_*` cache values); a recipe that
+declares no library installs nothing under `include/` or `lib/`, so
+e2fsprogs's static libraries reach neither another recipe nor the target
+sysroot. Bootstrap copies the libraries into the target sysroot and
+`build_recipes.sh --install-programs` copies everything else a recipe
+installed into the install, so all of it reaches a root: OpenSSH's `ssh` and
+`ssh-keygen`, which git and the ladder run, arrive with its server, `scp`,
+`sftp`, the agent and the helpers, which nothing runs. Only the libraries'
 stamps clear cargo. The `cmake` template builds for `CMAKE_SYSTEM_NAME=SlopOS`,
 the platform `toolchain/cmake/Platform` describes. **A patch only teaches the
 target:** a build that would need any other edit to upstream is a slibc or
@@ -243,7 +248,14 @@ e2fsprogs's brought `system`, `popen`, `daemon`, `random`, `<libgen.h>`,
 `secure_getenv`, `PR_GET_DUMPABLE` (not dumpable under `AT_SECURE`, as a
 setuid program is not), `si_addr`, the block requests in `<sys/ioctl.h>` and
 `<net/if.h>`'s interface requests, which slibc answers from the kernel's net
-query. A
+query, and OpenSSH's brought `<resolv.h>`'s `res_init`, `res_query` (any
+record type, asked of the kernel resolver's nameservers over UDP from a
+random source port and over TCP when truncated, each step bounded by the
+resolver's timeout) and `dn_expand` with `<arpa/nameser.h>`, `initgroups`,
+`getitimer` and `setitimer` (which disarm and refuse to arm, as `alarm`
+does), `<paths.h>`, `<netinet/in_systm.h>`, `<netinet/ip.h>`'s
+type-of-service values, the BSD `timeval` macros, `caddr_t`,
+`IPPORT_RESERVED` and `IN_LOOPBACKNET`. A
 recipe's `patch=` (`NNNN-slopos-<what>.patch`, hashed into its stamp) has the
 shape of one that teaches the target, which review holds it to: it only adds —
 a run of removed lines is replaced where it stood, line for line, by added
@@ -366,8 +378,19 @@ listens on the host. Each daemon is pinned to its git directory twice: its
 `--interpolated-path` answers a request that names a host, which every git
 client sends, and `--strict-paths` with that directory as the whole allowlist
 refuses a hand-made request that names none and so bypasses the template.
+With `GIT_SSH_PEER` naming the host's half of the ladder's ssh fixture too,
+a third rule runs `sshd -i -E <it>/sshd.log -f <it>/sshd_config` per
+connection to `10.0.2.4:22`, as the host's own user: publickey only, for the
+one guest key in its `authorized_keys`, with a host key the guest's
+`known_hosts` names, no forwarding, no pty and no PAM, and a `ForceCommand`
+that runs `git-upload-pack` on this checkout for `ssh://10.0.2.4/checkout`
+and `git-receive-pack` on `GIT_PUSH_REPO` for `ssh://10.0.2.4/push` and
+refuses anything else. libslirp gives the command the connection as stdin,
+stdout and stderr, so sshd logs to that file and never to stderr.
 `just boot` names `fs/assets/guest-push.git`, which `just reset root` keeps;
-the tests name a scratch repository under `builddir/`. In the guest, `git
+the tests name a scratch repository under `builddir/`, `test-toolchain`'s
+with this checkout's objects as an alternate, so receive-pack offers its refs
+as haves and a push sends only what is new. In the guest, `git
 pull` takes the host's commits and `git push` hands the guest's back (`git
 fetch fs/assets/guest-push.git <branch>` on the host); `just export-file`
 copies one file, a kernel the guest built, off a root whose guest has shut
@@ -379,7 +402,11 @@ persistent root's shape, booted with the tests base: the toolchain at
 `/usr/local`, the clone seeded `--vendored`, so no build reads a registry,
 and at `/srv/ladder` the fixtures `scripts/stage_ladder_fixtures.sh` makes, a
 bare repository of one crate and a sparse registry of one crate with a fresh
-test root and server identity. `just test-toolchain`, `test-selfhost`,
+test root and server identity, and the guest's half of a fresh ssh key pair
+and host key, whose host half stays in `builddir/ladder-sshd` for both boots
+of `test-toolchain`. Staging them needs `git`, `openssl` and `ssh-keygen` on
+the host, and `test-toolchain` with a toolchain installed needs `sshd` (on
+PATH or at `/usr/sbin/sshd`) as well. `just test-toolchain`, `test-selfhost`,
 `test-install-guest` and `bench-selfhost` boot it as `/`, so `just test`
 never depends on `just toolchain`. `toolchain_test` holds the toolchain to
 the manifest the host installed it with and the clone to its vendored crates,
@@ -390,7 +417,12 @@ crate with a build script and a proc macro, cargo fetching a `git =
 fetching a crate through libcurl and Mbed TLS from the fixture registry,
 served over loopback TLS and verified against its test root (the image's own
 CA bundle must refuse it first), clang compiling C and C++, git reading the
-clone and reaching the host's checkout, git cloning
+clone and reaching the host's checkout, `ssh -V`, `ssh-keygen` deriving the
+fixture key's public half, and git over ssh to the host's sshd — `ls-remote`
+and a fetch of the checkout, a commit on the fetched `HEAD` pushed into the
+run's scratch repository, which the host holds to the commit the guest notes
+and to its own `HEAD` as that commit's parent, and a command the forced
+command refuses — git cloning
 `https://github.com/SlopLabs/slopos` at depth 1, trusting the image's CA
 bundle once a root minted in the guest has been refused, cargo resolving
 that clone's lockfile and std's from crates.io over HTTPS — the two rungs that
@@ -661,6 +693,53 @@ virtio-blk the verified image (`vda`) and a scratch (`vdb`), so both drivers
 stay graded; the capacity volume is `nvme0n3`, and the boot disk is the last
 controller's.
 
+**Every NIC goes through `nic::publish`.** The stack owns the netpoll and
+net-timer kernel threads, which `nic::init` starts at boot before PCI probe. A
+NIC driver supplies a `NetDevice`, an interrupt handler that only calls
+`napi::wake_napi`, `rx_pending` (receive work an interrupt raced in after a
+poll) and `sample_carrier`, and calls `nic::publish`, which gives the device a
+registry slot, an interface, a place in netpoll and in the net-timer's carrier
+sampling, and a DHCP client, whose first DISCOVER waits for carrier; no driver
+keeps a thread of its own. A frame takes
+its Ethernet source from the device its route leaves on (`ipv4::send` stamps
+it), an ARP its sender address from that device's address, and a neighbour's
+queued packets leave on the neighbour's device. On any device but loopback,
+`ipv4::admits` drops a 127/8 source or destination, a broadcast, multicast or
+unspecified source, and a unicast destination that is no address of the host
+(any interface's address but a host-scoped one counts: the weak host model),
+except an unfragmented UDP datagram to port 68 on a device that holds no
+address yet, which is how a DHCP server that ignores the broadcast flag
+delivers its offer; an echo request to a broadcast or multicast address
+goes unanswered, and `ipv4::send` refuses a 127/8 source on such a device.
+ARP refreshes the entry of any sender it already knows and creates one only
+for an ARP aimed at the receiving device's address (RFC 826), and a connected
+UDP socket queues only its peer's datagrams, so `poll` and `recv` agree.
+
+**The laptop's NIC is a Realtek RTL8168h.** `drivers/src/rtl8168.rs` binds
+`10ec:8168` and brings up the versions `rtl8168-core`'s table names —
+RTL8168h/8111h and the RTL8168M, one MAC version told apart by TxConfig's
+hardware id — and declines any other, naming its id in the log, because each
+version needs a sequence of its own. `rtl8168-core` is the chip as data and as
+a register sequence: the register map, the version table, the descriptor codec
+and ring bookkeeping, the take-over from the management firmware, reset, the
+station address (ERI, else MAC0), the PHY's settings through GPHY OCP (the PHY
+patch firmware is not loaded) and start, written once over a `RegisterBus` and
+host-tested under `just test-host` against a simulated chip, since QEMU has no
+model of it. Its register offsets, bit values and the order of the bring-up
+are facts taken from Linux's `r8169` and Redox's `rtl8168d`; no code or prose
+of the GPL-2.0-only driver is. The FIFO-drain and link-list waits are
+advisory, as they are there: one that times out is logged and the bring-up
+goes on, while a reset that never completes leaves the chip unused. RxMaxSize
+is the RX buffer length a descriptor names, so the chip never writes past a
+buffer; interrupt status is cleared whole before the rings are harvested, so
+any later event is a fresh interrupt; TxPoll is rung again after a reclaim
+that leaves frames in flight;
+bring-up and stop run with the driver's spinlock released, serialised by a
+mutex; ASPM L0s and L1 are turned off in the endpoint's Link Control unless
+the chip says the machine's vendor validated them (MAC OCP `0xc0b2`); and
+`driver_core::shutdown` stops its DMA on poweroff and reboot. Only the laptop
+grades the hardware half.
+
 **The disk is the root.** `root=auto` mounts a writable `disk0` — the first disk probed, `nvme0n1` under QEMU — at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=disk` insists on the disk, and `root=initramfs` mounts no disk it was not asked to by a `mount=`, which is what the live ISO boots with. `root=` also takes a device in any spelling a mount source does — `/dev/nvme0n1p2`, `vda1`, `PARTUUID=…`, `UUID=…`, `LABEL=…` — where a partition comes from the GPT or MBR table on its disk; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
 **Every volume the tree builds is ext4, in one profile.** `ext4-core/profile`
@@ -922,7 +1001,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 

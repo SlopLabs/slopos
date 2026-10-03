@@ -113,10 +113,6 @@ pub enum NeighborAction {
         dev: DevIndex,
         target_ip: Ipv4Addr,
     },
-    /// MAC already set in the Ethernet header.
-    TransmitPacket {
-        pkt: PacketBuf,
-    },
     FlushPending {
         packets: KVec<PacketBuf>,
         dst_mac: MacAddr,
@@ -326,8 +322,7 @@ impl NeighborCache {
 
     /// Insert or update a neighbor entry with a confirmed MAC address.
     ///
-    /// Called when an ARP reply (or gratuitous ARP) is received. Returns any
-    /// packets queued while the entry was `Incomplete`.
+    /// Returns any packets queued while the entry was `Incomplete`.
     pub fn insert_or_update(
         &self,
         dev: DevIndex,
@@ -337,79 +332,101 @@ impl NeighborCache {
     ) -> NeighborAction {
         let mut inner = self.inner.lock();
 
-        if let Some(entry) = inner
-            .entries
-            .iter_mut()
-            .find(|e| e.dev == dev && e.ip == ip)
-        {
-            if let Some(token) = entry.timer_token.take() {
-                NET_TIMER_WHEEL.cancel(token);
-            }
+        if let Some(action) = Self::confirm(&mut inner, dev, ip, mac, current_ms) {
+            return action;
+        }
 
-            let pending = if let NeighborState::Incomplete { pending, .. } = &mut entry.state {
-                let packets: KVec<PacketBuf> = pending.drain(..).collect();
-                if !packets.is_empty() {
-                    klog_debug!(
-                        "neighbor: flushing {} pending packets for {} on dev {}",
-                        packets.len(),
-                        ip,
-                        dev
-                    );
-                }
-                packets
-            } else {
-                KVec::new()
-            };
+        let entry_id = inner.next_entry_id;
+        inner.next_entry_id = inner.next_entry_id.wrapping_add(1);
 
-            entry.state = NeighborState::Reachable {
+        if inner.entries.len() >= MAX_ENTRIES {
+            Self::evict_one(&mut inner);
+        }
+
+        let token = NET_TIMER_WHEEL.schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry_id);
+
+        let _ = inner.entries.push(NeighborEntry {
+            dev,
+            ip,
+            state: NeighborState::Reachable {
                 mac,
                 confirmed_ms: current_ms,
-            };
+            },
+            timer_token: Some(token),
+            entry_id,
+        });
 
-            let token =
-                NET_TIMER_WHEEL.schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry.entry_id);
-            entry.timer_token = Some(token);
+        klog_debug!(
+            "neighbor: new entry {} -> {} on dev {} (id={})",
+            ip,
+            mac,
+            dev,
+            entry_id
+        );
 
-            if pending.is_empty() {
-                NeighborAction::None
-            } else {
-                NeighborAction::FlushPending {
-                    packets: pending,
-                    dst_mac: mac,
-                    dev,
-                }
-            }
-        } else {
-            let entry_id = inner.next_entry_id;
-            inner.next_entry_id = inner.next_entry_id.wrapping_add(1);
+        NeighborAction::None
+    }
 
-            if inner.entries.len() >= MAX_ENTRIES {
-                Self::evict_one(&mut inner);
-            }
+    /// [`insert_or_update`](Self::insert_or_update) for an entry that already
+    /// exists; `None` when there is none.
+    pub fn update(
+        &self,
+        dev: DevIndex,
+        ip: Ipv4Addr,
+        mac: MacAddr,
+        current_ms: u64,
+    ) -> Option<NeighborAction> {
+        Self::confirm(&mut self.inner.lock(), dev, ip, mac, current_ms)
+    }
 
-            let token = NET_TIMER_WHEEL.schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry_id);
-
-            let _ = inner.entries.push(NeighborEntry {
-                dev,
-                ip,
-                state: NeighborState::Reachable {
-                    mac,
-                    confirmed_ms: current_ms,
-                },
-                timer_token: Some(token),
-                entry_id,
-            });
-
-            klog_debug!(
-                "neighbor: new entry {} -> {} on dev {} (id={})",
-                ip,
-                mac,
-                dev,
-                entry_id
-            );
-
-            NeighborAction::None
+    fn confirm(
+        inner: &mut NeighborCacheInner,
+        dev: DevIndex,
+        ip: Ipv4Addr,
+        mac: MacAddr,
+        current_ms: u64,
+    ) -> Option<NeighborAction> {
+        let entry = inner
+            .entries
+            .iter_mut()
+            .find(|e| e.dev == dev && e.ip == ip)?;
+        if let Some(token) = entry.timer_token.take() {
+            NET_TIMER_WHEEL.cancel(token);
         }
+
+        let pending = if let NeighborState::Incomplete { pending, .. } = &mut entry.state {
+            let packets: KVec<PacketBuf> = pending.drain(..).collect();
+            if !packets.is_empty() {
+                klog_debug!(
+                    "neighbor: flushing {} pending packets for {} on dev {}",
+                    packets.len(),
+                    ip,
+                    dev
+                );
+            }
+            packets
+        } else {
+            KVec::new()
+        };
+
+        entry.state = NeighborState::Reachable {
+            mac,
+            confirmed_ms: current_ms,
+        };
+
+        let token =
+            NET_TIMER_WHEEL.schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry.entry_id);
+        entry.timer_token = Some(token);
+
+        Some(if pending.is_empty() {
+            NeighborAction::None
+        } else {
+            NeighborAction::FlushPending {
+                packets: pending,
+                dst_mac: mac,
+                dev,
+            }
+        })
     }
 
     /// Resolve a neighbor's MAC address for packet transmission.

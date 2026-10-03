@@ -466,7 +466,8 @@ fn test_dhcp_nak_in_renewing_unbinds_immediately() -> TestResult {
     pass!()
 }
 
-/// Expiry unbinds. Nothing is sent — there is nobody left to tell.
+/// RFC 2131 §4.4.5: expiry withdraws the address and starts over with a
+/// DISCOVER.
 fn test_dhcp_expiry_unbinds() -> TestResult {
     let mut buf = [0u8; DHCP_FRAME_LEN];
     let Some(mut c) = bound_client(&mut buf, 3600, 1800, 3150) else {
@@ -474,13 +475,31 @@ fn test_dhcp_expiry_unbinds() -> TestResult {
     };
 
     let action = c.step(DhcpEvent::Expire, 3_600_000);
-    assert_eq_test!(
-        action,
-        DhcpAction::Unbind(UnbindReason::Expired),
-        "an expired lease is torn down"
-    );
+    let DhcpAction::UnbindThenSend { reason, dest, .. } = action else {
+        return fail!("expiry must unbind and rediscover, got {:?}", action);
+    };
+    assert_eq_test!(reason, UnbindReason::Expired, "for the lease running out");
+    assert_eq_test!(dest, DhcpDest::Broadcast, "with a broadcast DISCOVER");
     assert_eq_test!(c.address(), [0; 4], "and the address released");
-    assert_eq_test!(c.state(), DhcpState::Init, "back to the start");
+    assert_eq_test!(c.state(), DhcpState::Selecting, "selecting again");
+    pass!()
+}
+
+/// Expiry with the link down withdraws the address and waits in `Init` for
+/// carrier-up instead of sending into the dead link.
+fn test_dhcp_expiry_without_carrier_waits_in_init() -> TestResult {
+    let mut buf = [0u8; DHCP_FRAME_LEN];
+    let Some(mut c) = bound_client(&mut buf, 3600, 1800, 3150) else {
+        return fail!("could not reach Bound");
+    };
+    c.step(DhcpEvent::CarrierDown, 100_000);
+    assert_eq_test!(
+        c.step(DhcpEvent::Expire, 3_600_000),
+        DhcpAction::Unbind(UnbindReason::Expired),
+        "with the link down nothing is sent"
+    );
+    assert_eq_test!(c.address(), [0; 4], "the address is still released");
+    assert_eq_test!(c.state(), DhcpState::Init, "and carrier-up will discover");
     pass!()
 }
 
@@ -656,6 +675,79 @@ fn test_dhcp_xid_depends_on_the_seed() -> TestResult {
     pass!()
 }
 
+/// A NAK to the REQUEST that follows an OFFER has nothing to withdraw; a NAK to
+/// INIT-REBOOT refuses an address installed before the replug.
+fn test_dhcp_nak_unbinds_only_an_init_reboot_request() -> TestResult {
+    let mut buf = [0u8; DHCP_FRAME_LEN];
+    let mut fresh = DhcpClient::new(MAC, SEED);
+    fresh.step(DhcpEvent::Start, 0);
+    let len = offer(&mut buf, fresh.xid());
+    fresh.step(DhcpEvent::Reply(&buf[..len]), 10);
+    let len = nak(&mut buf, fresh.xid());
+    let action = fresh.step(DhcpEvent::Reply(&buf[..len]), 20);
+    assert_test!(
+        matches!(action, DhcpAction::Send { .. }),
+        "a NAK after an OFFER only discovers again, got {:?}",
+        action
+    );
+
+    let Some(mut c) = bound_client(&mut buf, 3600, 1800, 3150) else {
+        return fail!("could not reach Bound");
+    };
+    c.step(DhcpEvent::CarrierDown, 100_000);
+    c.step(DhcpEvent::CarrierUp, 200_000);
+    let len = nak(&mut buf, c.xid());
+    let action = c.step(DhcpEvent::Reply(&buf[..len]), 200_010);
+    let DhcpAction::UnbindThenSend { reason, .. } = action else {
+        return fail!("a NAK to INIT-REBOOT must unbind, got {:?}", action);
+    };
+    assert_eq_test!(reason, UnbindReason::Nak, "and says why");
+    assert_eq_test!(c.address(), [0; 4], "the address is gone");
+    assert_eq_test!(
+        frame_msg_type(c.frame()),
+        Some(codec::MSG_DISCOVER),
+        "and a DISCOVER follows"
+    );
+    pass!()
+}
+
+/// RFC 2131 §4.4.2: an INIT-REBOOT left unanswered until the lease runs out
+/// falls back to DISCOVER.
+fn test_dhcp_expiry_ends_an_init_reboot() -> TestResult {
+    let mut buf = [0u8; DHCP_FRAME_LEN];
+    let Some(mut c) = bound_client(&mut buf, 3600, 1800, 3150) else {
+        return fail!("could not reach Bound");
+    };
+    c.step(DhcpEvent::CarrierDown, 100_000);
+    c.step(DhcpEvent::CarrierUp, 200_000);
+    let action = c.step(DhcpEvent::Expire, 3_600_000);
+    let DhcpAction::UnbindThenSend { reason, dest, .. } = action else {
+        return fail!("expiry must unbind and rediscover, got {:?}", action);
+    };
+    assert_eq_test!(reason, UnbindReason::Expired, "for the lease running out");
+    assert_eq_test!(dest, DhcpDest::Broadcast, "with a broadcast DISCOVER");
+    assert_eq_test!(c.state(), DhcpState::Selecting, "selecting again");
+    pass!()
+}
+
+/// The same expiry with the link gone again sends nothing into it.
+fn test_dhcp_expiry_ends_an_init_reboot_without_carrier() -> TestResult {
+    let mut buf = [0u8; DHCP_FRAME_LEN];
+    let Some(mut c) = bound_client(&mut buf, 3600, 1800, 3150) else {
+        return fail!("could not reach Bound");
+    };
+    c.step(DhcpEvent::CarrierDown, 100_000);
+    c.step(DhcpEvent::CarrierUp, 200_000);
+    c.step(DhcpEvent::CarrierDown, 300_000);
+    assert_eq_test!(
+        c.step(DhcpEvent::Expire, 3_600_000),
+        DhcpAction::Unbind(UnbindReason::Expired),
+        "the address is withdrawn and nothing is sent"
+    );
+    assert_eq_test!(c.state(), DhcpState::Init, "and carrier-up will discover");
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_dhcp_ack_binds_with_full_configuration,
     suite = dhcp_client
@@ -668,13 +760,29 @@ slopos_testing::stest!(
     name = test_dhcp_carrier_loss_keeps_the_lease,
     suite = dhcp_client
 );
+slopos_testing::stest!(
+    name = test_dhcp_expiry_ends_an_init_reboot,
+    suite = dhcp_client
+);
+slopos_testing::stest!(
+    name = test_dhcp_expiry_ends_an_init_reboot_without_carrier,
+    suite = dhcp_client
+);
 slopos_testing::stest!(name = test_dhcp_expiry_unbinds, suite = dhcp_client);
+slopos_testing::stest!(
+    name = test_dhcp_expiry_without_carrier_waits_in_init,
+    suite = dhcp_client
+);
 slopos_testing::stest!(
     name = test_dhcp_ignores_foreign_and_untimely_replies,
     suite = dhcp_client
 );
 slopos_testing::stest!(
     name = test_dhcp_lease_times_default_to_half_and_seven_eighths,
+    suite = dhcp_client
+);
+slopos_testing::stest!(
+    name = test_dhcp_nak_unbinds_only_an_init_reboot_request,
     suite = dhcp_client
 );
 slopos_testing::stest!(

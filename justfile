@@ -57,6 +57,9 @@ root_journal_size     := "64M"
 # under the tests base. Rebuilt every run, as the tests image is.
 fs_image_selfhost     := fs_image_dir / "ext2-selfhost.img"
 selfhost_stage        := build_dir / "selfhost-stage"
+# The host's half of the ladder's ssh fixture, which `sshd -i` serves the
+# guest from; staged with the root, so both boots of `test-toolchain` use it.
+ladder_sshd           := build_dir / "ladder-sshd"
 # Outside the root, so `just reset root` keeps what the guest pushed.
 guest_push_repo       := fs_image_dir / "guest-push.git"
 # A compiler session: the `core` compile peaks at 1.15 GiB anonymous, and the
@@ -208,7 +211,7 @@ _fs-image-selfhost:
     set -euo pipefail
     rm -rf "{{selfhost_stage}}"
     scripts/stage_workspace.sh "{{selfhost_stage}}/src" --vendored
-    scripts/stage_ladder_fixtures.sh "{{selfhost_stage}}/ladder"
+    scripts/stage_ladder_fixtures.sh "{{selfhost_stage}}/ladder" "{{ladder_sshd}}"
     FS_IMAGE_SIZE=1G FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=0 FS_BASE=boot \
         FS_HOST_TREES="{{toolchain_install}}:/usr/local {{selfhost_stage}}/ladder:/srv/ladder" \
         FS_SEED_TREES="{{selfhost_stage}}/src:/src" FS_FREE_FLOOR={{root_free_floor}} \
@@ -904,7 +907,7 @@ test-capacity: _build-run-tests _fs-image-capacity
 # leaves a clone on /, the second reads it back and climbs the ladder again.
 # Separate from `just test`, which runs the same utests on a root with no
 # toolchain and no clone, and they pass by saying so.
-[doc("Toolchain check at 6G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph and a CMake project), and find a clone made on / intact after a power-off")]
+[doc("Toolchain check at 6G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, ssh and git over ssh to the host's sshd, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph and a CMake project), and find a clone made on / intact after a power-off")]
 test-toolchain: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
@@ -914,12 +917,19 @@ test-toolchain: _build-run-tests
         { echo "FAIL: the self-hosting root has ${free}B free, under the {{root_free_floor}} floor" >&2; exit 1; }
     TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*toolchain*,*reboot_clone*" just _iso-tests
     push="$PWD/{{build_dir}}/toolchain-push.git"
+    # Only the toolchain's ssh dials the peer, so only then is sshd needed.
+    ssh_peer=""
+    [ -d "{{toolchain_install}}" ] && ssh_peer="$PWD/{{ladder_sshd}}"
     for boot in 1 2; do
         echo "── boot $boot ──"
         log="{{build_dir}}/toolchain-boot$boot.log"
         rm -rf "$push"
+        # The checkout's objects as an alternate: receive-pack offers its refs
+        # as haves, so the guest pushes one commit rather than the history.
+        git init -q --bare "$push"
+        git rev-parse --path-format=absolute --git-path objects >"$push/objects/info/alternates"
         rc=0
-        GIT_PUSH_REPO="$push" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
+        GIT_PUSH_REPO="$push" GIT_SSH_PEER="$ssh_peer" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
             {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_selfhost}}" \
             --timeout-secs 3600 --silence-secs 1800 --raw --no-color >"$log" 2>&1 || rc=$?
         tail -n 30 "$log"
@@ -929,9 +939,16 @@ test-toolchain: _build-run-tests
         [ -d "{{toolchain_install}}" ] || exit 0
         grep -aq 'git_reads_the_clone_and_reaches_the_host # git status: clean' "$log" ||
             { echo "FAIL: the seeded clone is not clean in the guest — see $log" >&2; exit 1; }
+        pushed="$(grep -aoE 'ssh_carries_git_to_the_host # SSH-PUSHED [0-9a-f]{40}' "$log" | awk '{print $NF}' || true)"
+        landed="$(git -C "$push" rev-parse -q --verify refs/heads/ladder-ssh || true)"
+        [ -n "$pushed" ] && [ "$pushed" = "$landed" ] ||
+            { echo "FAIL: boot $boot pushed '${pushed:-nothing}' over ssh and $push holds '${landed:-nothing}' at refs/heads/ladder-ssh — see $log and {{ladder_sshd}}/sshd.log" >&2; exit 1; }
+        parent="$(git -C "$push" rev-parse -q --verify 'refs/heads/ladder-ssh^' || true)"
+        [ "$parent" = "$(git rev-parse HEAD)" ] ||
+            { echo "FAIL: boot $boot pushed $pushed on '${parent:-no parent}', not on HEAD $(git rev-parse HEAD)" >&2; exit 1; }
     done
-    written="$(grep -aoE 'a_clone_survives_a_reboot # CLONE-WRITTEN [0-9a-f]{40}' "{{build_dir}}/toolchain-boot1.log" | awk '{print $NF}')"
-    survived="$(grep -aoE 'a_clone_survives_a_reboot # CLONE-SURVIVED [0-9a-f]{40}' "{{build_dir}}/toolchain-boot2.log" | awk '{print $NF}')"
+    written="$(grep -aoE 'a_clone_survives_a_reboot # CLONE-WRITTEN [0-9a-f]{40}' "{{build_dir}}/toolchain-boot1.log" | awk '{print $NF}' || true)"
+    survived="$(grep -aoE 'a_clone_survives_a_reboot # CLONE-SURVIVED [0-9a-f]{40}' "{{build_dir}}/toolchain-boot2.log" | awk '{print $NF}' || true)"
     [ -n "$written" ] && [ "$written" = "$survived" ] ||
         { echo "FAIL: boot 1 committed '${written:-nothing}' in /home/clone and boot 2 found '${survived:-nothing}'" >&2; exit 1; }
     echo "test-toolchain: the ladder held on both boots, and the clone's commit $written survived the power-off"
@@ -989,9 +1006,9 @@ bench-selfhost: _build-run-tests
     [ "$rc" -eq 0 ] || { tail -n 30 {{build_dir}}/bench-selfhost.log; echo "FAIL: the benchmark boot exited $rc — full log in {{build_dir}}/bench-selfhost.log" >&2; exit 1; }
     python3 scripts/prof_report.py {{build_dir}}/bench-selfhost.log --libc {{build_dir}}/bench-libc.so --lib-dir {{toolchain_install}}/lib
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, ext4-core, http-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, ext4-core, http-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-ext4-core -p slopos-http-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-ext4-core -p slopos-http-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:
@@ -1103,7 +1120,7 @@ toolchain *ARGS:
 toolchain-profile *ARGS:
     scripts/make_toolchain_profile.sh {{ARGS}}
 
-[doc("Build the recipes under toolchain/recipes/ (zlib, nghttp2, Mbed TLS, OpenSSL, curl, libssh2, libgit2, git) for SlopOS from their pinned tarballs into builddir/slopos-recipes/prefix; names build only those and what they depend on")]
+[doc("Build the recipes under toolchain/recipes/ (zlib, nghttp2, Mbed TLS, OpenSSL, curl, libssh2, libgit2, git, OpenSSH, and the programs the guest's builds run) for SlopOS from their pinned tarballs into builddir/slopos-recipes/prefix; names build only those and what they depend on")]
 recipes *NAMES: _build-userland-tests
     BUILD_DIR={{build_dir}} scripts/build_recipes.sh {{NAMES}}
 

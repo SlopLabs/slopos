@@ -332,9 +332,24 @@ require-phase post-userland-tests
 #               Boot held at 75 and every banded pool inside its band (kernel
 #               edges 183-185, chains 412-414; userland edges 225-234, chains
 #               465-475).
-boot	classes	75
-post-kernel-tests	classes	215
-post-userland-tests	classes	224
+#   2026-10-03  boot 75 -> 76, kernel 215 -> 216, userland 224 -> 225, and
+#               the userland edge band 185-235 -> 185-248: the wired network
+#               (`plans/bare-metal.md` phase 6). The new class is `NIC_TABLE`,
+#               the table of published NICs `nic::publish` takes when the
+#               virtio NIC probes at boot; the stack's netpoll and net-timer
+#               threads kept their wakers' classes when they moved out of
+#               virtio-net, and the RTL8168 driver's locks are never taken
+#               under QEMU. Three full runs of the final tree agree but one,
+#               which counted 226 at the userland phase, the pool-slot
+#               variance recorded above. The netpoll thread now serves every
+#               NIC, and the userland phase observes orderings it did not:
+#               edges 226-237 over the change's runs (each the cycle detector
+#               passed), so the band takes that spread widened by its width
+#               above. Boot edges 39 and chains 111 sit inside their caps, and
+#               every other band held.
+boot	classes	76
+post-kernel-tests	classes	216
+post-userland-tests	classes	225
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
@@ -369,6 +384,6 @@ boot	chains	111
 # not a failure, so a band set slightly tight costs a DRIFT line to read,
 # never a red run.
 band post-kernel-tests edges 128 188
-band post-userland-tests edges 185 235
+band post-userland-tests edges 185 248
 band post-kernel-tests chains 309 417
 band post-userland-tests chains 359 479
