@@ -31,11 +31,11 @@
 ## This Is Not QEMU
 
 <p align="center">
-  <img src="assets/hardware.jpg" alt="SlopOS desktop running on a real Lenovo laptop: terminal, file manager, system monitor, and image viewer" width="640" />
+  <img src="assets/hardware.webp" alt="SlopOS desktop running on a real Lenovo laptop: terminal, text editor, file manager, system monitor, and image viewer" width="640" />
 </p>
 
-That is a real laptop. The desktop — compositor, terminal, file manager,
-system monitor, image viewer — is drawn by our own Intel Xe display driver.
+That is a real laptop. The desktop — compositor, terminal, text editor, file
+manager, system monitor, image viewer — is drawn by our own Intel Xe display driver.
 The keyboard and I²C-HID touchpad were discovered by walking the firmware's
 actual AML tables with our own ACPI interpreter, then driven over our own
 I²C and GPIO drivers. The slop has escaped the sandbox.
