@@ -140,6 +140,16 @@ impl Actions {
             .filter_map(|s| s.as_ref())
     }
 
+    /// Give every queued segment the owning socket's TOS byte.
+    pub fn set_tos(&mut self, tos: u8) {
+        for seg in self.segments[..self.segments_len as usize]
+            .iter_mut()
+            .flatten()
+        {
+            seg.tos = tos;
+        }
+    }
+
     pub fn timer_ops(&self) -> impl Iterator<Item = &TimerOp> {
         self.timer_ops[..self.timer_ops_len as usize]
             .iter()

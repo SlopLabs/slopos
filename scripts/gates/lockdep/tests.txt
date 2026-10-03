@@ -333,20 +333,21 @@ require-phase post-userland-tests
 #               edges 183-185, chains 412-414; userland edges 225-234, chains
 #               465-475).
 #   2026-10-03  boot 75 -> 76, kernel 215 -> 216, userland 224 -> 225, and
-#               the userland edge band 185-235 -> 185-248: the wired network
-#               (`plans/bare-metal.md` phase 6). The new class is `NIC_TABLE`,
-#               the table of published NICs `nic::publish` takes when the
-#               virtio NIC probes at boot; the stack's netpoll and net-timer
-#               threads kept their wakers' classes when they moved out of
-#               virtio-net, and the RTL8168 driver's locks are never taken
-#               under QEMU. Three full runs of the final tree agree but one,
-#               which counted 226 at the userland phase, the pool-slot
-#               variance recorded above. The netpoll thread now serves every
-#               NIC, and the userland phase observes orderings it did not:
-#               edges 226-237 over the change's runs (each the cycle detector
-#               passed), so the band takes that spread widened by its width
-#               above. Boot edges 39 and chains 111 sit inside their caps, and
-#               every other band held.
+#               the userland bands, edges 185-235 -> 185-248 and chains
+#               359-479 -> 359-495: the wired network (`plans/bare-metal.md`
+#               phase 6). The new class is `NIC_TABLE`, the table of
+#               published NICs `nic::publish` takes when the virtio NIC probes
+#               at boot; the stack's netpoll and net-timer threads kept their
+#               wakers' classes when they moved out of virtio-net, and the
+#               RTL8168 driver's locks are never taken under QEMU. Six full
+#               runs of the final trees agree but one, which counted 226 at
+#               the userland phase, the pool-slot variance recorded above. The
+#               netpoll thread now serves every NIC and sockets carry IP_TOS
+#               through TCP, so the userland phase observes orderings it did
+#               not: edges 226-238 and chains 465-480 over the change's runs
+#               (each the cycle detector passed), and each band takes its
+#               spread widened by its width above. Boot edges 39 and chains
+#               111 sit inside their caps, and the kernel bands held.
 boot	classes	76
 post-kernel-tests	classes	216
 post-userland-tests	classes	225
@@ -386,4 +387,4 @@ boot	chains	111
 band post-kernel-tests edges 128 188
 band post-userland-tests edges 185 248
 band post-kernel-tests chains 309 417
-band post-userland-tests chains 359 479
+band post-userland-tests chains 359 495

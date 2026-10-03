@@ -366,20 +366,21 @@ impl PacketBuf {
 use super::checksum;
 
 impl PacketBuf {
-    /// Prepend a standard IPv4 header (IHL=5, TTL=64, no options) and compute
-    /// the header checksum.  `l4_len` is the total size of everything already
-    /// pushed after this point (L4 header + L4 payload).
+    /// Prepend a standard IPv4 header (IHL=5, TTL=64, no options) carrying
+    /// `tos` and compute the header checksum.  `l4_len` is the total size of
+    /// everything already pushed after this point (L4 header + L4 payload).
     pub fn prepend_ipv4(
         &mut self,
         src_ip: [u8; 4],
         dst_ip: [u8; 4],
         protocol: u8,
+        tos: u8,
         l4_len: usize,
     ) -> Result<(), NetError> {
         let total_len = (super::IPV4_HEADER_LEN + l4_len) as u16;
         let ip_hdr = self.push_header(super::IPV4_HEADER_LEN)?;
         ip_hdr[0] = 0x45;
-        ip_hdr[1] = 0;
+        ip_hdr[1] = tos;
         ip_hdr[2..4].copy_from_slice(&total_len.to_be_bytes());
         ip_hdr[4..8].copy_from_slice(&[0; 4]);
         ip_hdr[8] = 64;

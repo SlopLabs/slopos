@@ -281,6 +281,88 @@ pub fn test_so_oobinline_is_always_on() -> TestResult {
     pass!()
 }
 
+pub fn test_ip_tos_roundtrip() -> TestResult {
+    reset();
+    let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    if idx < 0 {
+        return fail!("socket_create failed");
+    }
+    let sock_idx = idx as u32;
+
+    let mut buf = [0u8; 4];
+    assert_eq_test!(socket_getsockopt(sock_idx, IPPROTO_IP, IP_TOS, &mut buf), 4);
+    assert_eq_test!(i32::from_ne_bytes(buf), 0, "default IP_TOS");
+
+    assert_eq_test!(
+        socket_setsockopt(sock_idx, IPPROTO_IP, IP_TOS, &0xb9i32.to_ne_bytes()),
+        0
+    );
+    assert_eq_test!(socket_getsockopt(sock_idx, IPPROTO_IP, IP_TOS, &mut buf), 4);
+    assert_eq_test!(
+        i32::from_ne_bytes(buf),
+        0xb9,
+        "a datagram socket keeps every TOS bit"
+    );
+
+    assert_eq_test!(socket_setsockopt(sock_idx, IPPROTO_IP, IP_TOS, &[0x28]), 0);
+    let mut byte = [0u8; 1];
+    assert_eq_test!(
+        socket_getsockopt(sock_idx, IPPROTO_IP, IP_TOS, &mut byte),
+        1
+    );
+    assert_eq_test!(byte[0], 0x28, "a one-byte IP_TOS is set and read back");
+
+    let _ = socket_close(sock_idx);
+    pass!()
+}
+
+pub fn test_ip_tos_stream_clears_ecn() -> TestResult {
+    reset();
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
+    if idx < 0 {
+        return fail!("socket_create failed");
+    }
+    let sock_idx = idx as u32;
+
+    assert_eq_test!(
+        socket_setsockopt(sock_idx, IPPROTO_IP, IP_TOS, &0xbbi32.to_ne_bytes()),
+        0
+    );
+    let mut buf = [0u8; 4];
+    assert_eq_test!(socket_getsockopt(sock_idx, IPPROTO_IP, IP_TOS, &mut buf), 4);
+    assert_eq_test!(
+        i32::from_ne_bytes(buf),
+        0xb8,
+        "TCP owns the ECN bits of a stream socket's TOS"
+    );
+
+    let _ = socket_close(sock_idx);
+    pass!()
+}
+
+pub fn test_unknown_ip_option_is_enoprotoopt() -> TestResult {
+    reset();
+    let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    if idx < 0 {
+        return fail!("socket_create failed");
+    }
+    let sock_idx = idx as u32;
+
+    let enoprotoopt = ERRNO_ENOPROTOOPT as i64 as i32;
+    assert_eq_test!(
+        socket_setsockopt(sock_idx, IPPROTO_IP, 999, &1i32.to_ne_bytes()),
+        enoprotoopt
+    );
+    let mut buf = [0u8; 4];
+    assert_eq_test!(
+        socket_getsockopt(sock_idx, IPPROTO_IP, 999, &mut buf),
+        enoprotoopt
+    );
+
+    let _ = socket_close(sock_idx);
+    pass!()
+}
+
 slopos_testing::stest!(name = test_so_reuseaddr_roundtrip, suite = socket_option);
 slopos_testing::stest!(name = test_socket_option_roundtrips, suite = socket_option);
 slopos_testing::stest!(name = test_so_rcvbuf_validation, suite = socket_option);
@@ -296,3 +378,9 @@ slopos_testing::stest!(
     suite = socket_option
 );
 slopos_testing::stest!(name = test_so_oobinline_is_always_on, suite = socket_option);
+slopos_testing::stest!(name = test_ip_tos_roundtrip, suite = socket_option);
+slopos_testing::stest!(name = test_ip_tos_stream_clears_ecn, suite = socket_option);
+slopos_testing::stest!(
+    name = test_unknown_ip_option_is_enoprotoopt,
+    suite = socket_option
+);

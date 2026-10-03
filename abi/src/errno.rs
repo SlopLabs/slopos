@@ -147,6 +147,7 @@ define_errnos! {
     ENOTSOCK        =  88, "Not a socket";
     EDESTADDRREQ    =  89, "Destination address required";
     EMSGSIZE        =  90, "Message too long";
+    ENOPROTOOPT     =  92, "Protocol not available";
     EPROTONOSUPPORT =  93, "Protocol not supported";
     ESOCKTNOSUPPORT =  94, "Socket type not supported";
     EOPNOTSUPP      =  95, "Operation not supported";

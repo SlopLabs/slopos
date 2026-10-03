@@ -3,10 +3,10 @@
 //!
 //! Each test publishes its own mock device and retires it before returning.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use slopos_abi::net::{AF_INET, NET_DHCP_SELECTING, SOCK_DGRAM};
-use slopos_abi::syscall::POLLIN;
+use slopos_abi::net::{AF_INET, NET_DHCP_SELECTING, SOCK_DGRAM, SOCK_STREAM};
+use slopos_abi::syscall::{ERRNO_EINPROGRESS, IP_TOS, IPPROTO_IP, POLLIN};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -22,12 +22,15 @@ use crate::packetbuf::PacketBuf;
 use crate::pool::PacketPool;
 use crate::route::{self, RouteEntry};
 use crate::socket::{
-    SocketOwner, socket_bind, socket_close, socket_connect, socket_create, socket_poll_readable,
+    SocketOwner, socket_bind, socket_close, socket_connect, socket_create, socket_getsockopt,
+    socket_poll_readable, socket_send, socket_set_nonblocking, socket_setsockopt,
 };
 use crate::tests::dhcp_transport_tests::{self, CLIENT_IP, SERVER};
+use crate::tests::env_wait::errno_i32;
 use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
 const PROBE_PORT: u16 = 40_999;
+const TCP_PROBE_PORT: u16 = 40_998;
 const ETH_LEN: usize = 14;
 const IP_LEN: usize = 20;
 
@@ -42,6 +45,10 @@ struct MockNic {
     arp_sender_ip: AtomicU32,
     arp_replies: AtomicUsize,
     echo_replies: AtomicUsize,
+    probe_tos: AtomicU8,
+    tcp_seen: AtomicBool,
+    tcp_tos: AtomicU8,
+    ip_csum_bad: AtomicBool,
 }
 
 impl MockNic {
@@ -57,6 +64,10 @@ impl MockNic {
             arp_sender_ip: AtomicU32::new(0),
             arp_replies: AtomicUsize::new(0),
             echo_replies: AtomicUsize::new(0),
+            probe_tos: AtomicU8::new(0),
+            tcp_seen: AtomicBool::new(false),
+            tcp_tos: AtomicU8::new(0),
+            ip_csum_bad: AtomicBool::new(false),
         }
     }
 
@@ -73,6 +84,13 @@ impl MockNic {
         self.arp_request_seen
             .load(Ordering::Acquire)
             .then(|| Ipv4Addr(self.arp_sender_ip.load(Ordering::Relaxed).to_be_bytes()))
+    }
+
+    /// The TOS byte of the latest segment sent to `TCP_PROBE_PORT`.
+    fn tcp_probe_tos(&self) -> Option<u8> {
+        self.tcp_seen
+            .load(Ordering::Acquire)
+            .then(|| self.tcp_tos.load(Ordering::Relaxed))
     }
 }
 
@@ -93,6 +111,26 @@ fn udp_dst_port(frame: &[u8]) -> Option<u16> {
         return None;
     }
     Some(u16::from_be_bytes([frame[L2 + L3 + 2], frame[L2 + L3 + 3]]))
+}
+
+/// The TCP destination port of an Ethernet + IPv4 (no options) + TCP frame.
+fn tcp_dst_port(frame: &[u8]) -> Option<u16> {
+    if frame.len() < ETH_LEN + IP_LEN + 20
+        || frame[12..14] != [0x08, 0x00]
+        || frame[ETH_LEN + 9] != 6
+    {
+        return None;
+    }
+    Some(u16::from_be_bytes([
+        frame[ETH_LEN + IP_LEN + 2],
+        frame[ETH_LEN + IP_LEN + 3],
+    ]))
+}
+
+/// The TOS byte of an IPv4 frame and whether its header checksum holds.
+fn ipv4_tos(frame: &[u8]) -> (u8, bool) {
+    let header = &frame[ETH_LEN..ETH_LEN + IP_LEN];
+    (header[1], crate::checksum::internet_checksum(header) == 0)
 }
 
 /// The sender protocol address of an Ethernet ARP request.
@@ -130,11 +168,20 @@ impl NetDevice for MockNic {
                 self.dhcp_frames.fetch_add(1, Ordering::Relaxed);
             }
             Some(PROBE_PORT) => {
+                let (tos, csum_ok) = ipv4_tos(frame);
+                self.probe_tos.store(tos, Ordering::Relaxed);
+                self.ip_csum_bad.fetch_or(!csum_ok, Ordering::Relaxed);
                 self.probe_dst.store(pack(&frame[0..6]), Ordering::Relaxed);
                 self.probe_src.store(pack(&frame[6..12]), Ordering::Relaxed);
                 self.probe_seen.store(true, Ordering::Release);
             }
             _ => {}
+        }
+        if tcp_dst_port(frame) == Some(TCP_PROBE_PORT) {
+            let (tos, csum_ok) = ipv4_tos(frame);
+            self.tcp_tos.store(tos, Ordering::Relaxed);
+            self.ip_csum_bad.fetch_or(!csum_ok, Ordering::Relaxed);
+            self.tcp_seen.store(true, Ordering::Release);
         }
         if let Some(ip) = arp_request_sender_ip(frame) {
             self.arp_sender_ip
@@ -429,7 +476,7 @@ fn test_nic_udp_egress_carries_the_nic_mac() -> TestResult {
     });
     let _ = NEIGHBOR_CACHE.insert_or_update(dev, Ipv4Addr(PEER), PEER_MAC, crate::clock::now_ms());
 
-    let sent = crate::udp::udp_sendto(LOCAL, PEER, 40_000, PROBE_PORT, &[0x5a; 16]);
+    let sent = crate::udp::udp_sendto(LOCAL, PEER, 40_000, PROBE_PORT, 0, &[0x5a; 16]);
     let probe = mock.probe();
     nic::retire(dev);
 
@@ -439,6 +486,93 @@ fn test_nic_udp_egress_carries_the_nic_mac() -> TestResult {
     };
     assert_eq_test!(src, MAC, "the Ethernet source is the egress NIC's MAC");
     assert_eq_test!(dst, PEER_MAC, "the Ethernet destination is the neighbour's");
+    pass!()
+}
+
+fn ip_tos_of(sock: u32) -> Option<i32> {
+    let mut out = [0u8; 4];
+    (socket_getsockopt(sock, IPPROTO_IP, IP_TOS, &mut out) == 4).then(|| i32::from_ne_bytes(out))
+}
+
+fn set_ip_tos(sock: u32, tos: i32) -> i32 {
+    socket_setsockopt(sock, IPPROTO_IP, IP_TOS, &tos.to_ne_bytes())
+}
+
+fn test_nic_udp_ip_tos_marks_the_datagram() -> TestResult {
+    const PORT: u16 = 40_963;
+
+    let Some(lan) = Lan::up(MacAddr([2, 0, 0, 0, 0x61, 10])) else {
+        return fail!("could not bring up the mock NIC");
+    };
+    let Some(sock) = udp_socket(LAN_LOCAL, PORT) else {
+        return fail!("could not bind a UDP socket");
+    };
+    let set_rc = set_ip_tos(sock, 0xb8);
+    let stored = ip_tos_of(sock);
+    let connect_rc = socket_connect(sock, LAN_PEER, PROBE_PORT);
+    let sent = socket_send(sock, &[0x5a; 16]);
+    let seen = lan.mock.probe().is_some();
+    let tos = lan.mock.probe_tos.load(Ordering::Relaxed);
+    let csum_bad = lan.mock.ip_csum_bad.load(Ordering::Relaxed);
+    let _ = socket_close(sock);
+    drop(lan);
+
+    assert_eq_test!(set_rc, 0, "IP_TOS is accepted on a datagram socket");
+    assert_eq_test!(stored, Some(0xb8), "getsockopt reports the stored TOS");
+    assert_eq_test!(connect_rc, 0, "the socket connects to its peer");
+    assert_eq_test!(sent, 16, "the datagram is sent");
+    assert_test!(seen, "the datagram leaves through the NIC");
+    assert_eq_test!(tos, 0xb8, "the datagram's IPv4 header carries the TOS");
+    assert_test!(!csum_bad, "the IPv4 header checksum covers the TOS");
+    pass!()
+}
+
+fn test_nic_tcp_ip_tos_marks_segments_without_ecn() -> TestResult {
+    let Some(lan) = Lan::up(MacAddr([2, 0, 0, 0, 0x61, 11])) else {
+        return fail!("could not bring up the mock NIC");
+    };
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
+    if sock < 0 {
+        return fail!("socket_create failed");
+    }
+    let sock = sock as u32;
+    let nb_rc = socket_set_nonblocking(sock, true);
+    let set_rc = set_ip_tos(sock, 0xbb);
+    let stored = ip_tos_of(sock);
+    let connect_rc = socket_connect(sock, LAN_PEER, TCP_PROBE_PORT);
+    let syn_tos = lan.mock.tcp_probe_tos();
+
+    let reset_rc = set_ip_tos(sock, 0x29);
+    let conn = crate::socket::socket_lookup_tcp_idx(sock);
+    if let Some(id) = conn {
+        crate::timer::dispatch_retransmit_action(id.raw(), crate::tcp::on_retransmit(id.raw()));
+    }
+    let resent_tos = lan.mock.tcp_probe_tos();
+    let csum_bad = lan.mock.ip_csum_bad.load(Ordering::Relaxed);
+    let _ = socket_close(sock);
+    drop(lan);
+
+    assert_eq_test!(nb_rc, 0, "the socket goes non-blocking");
+    assert_eq_test!(set_rc, 0, "IP_TOS is accepted on a stream socket");
+    assert_eq_test!(
+        stored,
+        Some(0xb8),
+        "a stream socket's TOS leaves the ECN bits to TCP"
+    );
+    assert_eq_test!(
+        connect_rc,
+        errno_i32(ERRNO_EINPROGRESS),
+        "the SYN is on the wire"
+    );
+    assert_eq_test!(syn_tos, Some(0xb8), "the SYN carries the TOS");
+    assert_eq_test!(reset_rc, 0, "IP_TOS changes on a connecting socket");
+    assert_test!(conn.is_some(), "the socket has a connection");
+    assert_eq_test!(
+        resent_tos,
+        Some(0x28),
+        "the retransmitted SYN carries the new TOS"
+    );
+    assert_test!(!csum_bad, "the IPv4 header checksum covers the TOS");
     pass!()
 }
 
@@ -715,6 +849,11 @@ slopos_testing::stest!(
     suite = nic
 );
 slopos_testing::stest!(name = test_nic_udp_egress_carries_the_nic_mac, suite = nic);
+slopos_testing::stest!(name = test_nic_udp_ip_tos_marks_the_datagram, suite = nic);
+slopos_testing::stest!(
+    name = test_nic_tcp_ip_tos_marks_segments_without_ecn,
+    suite = nic
+);
 slopos_testing::stest!(
     name = test_nic_arp_request_carries_the_egress_nic_address,
     suite = nic

@@ -11,6 +11,8 @@ pub const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
 /// CPU time consumed by the calling task alone.
 pub const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
 
+/// Socket option level: IPv4 options.
+pub const IPPROTO_IP: i32 = 0;
 /// Socket option level: generic socket options.
 pub const SOL_SOCKET: i32 = 1;
 /// Socket option level: TCP protocol options.
@@ -114,6 +116,8 @@ const _: () = assert!(core::mem::size_of::<Rusage>() == 144);
 
 /// Disable Nagle's algorithm (TCP only).
 pub const TCP_NODELAY: i32 = 1;
+/// IPv4 type-of-service byte carried by the socket's packets (`IPPROTO_IP`).
+pub const IP_TOS: i32 = 1;
 
 /// Disallow further receives.
 pub const SHUT_RD: i32 = 0;

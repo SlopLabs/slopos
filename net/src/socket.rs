@@ -84,6 +84,8 @@ pub struct SocketOptions {
     /// TCP only.
     pub keepalive: bool,
     pub tcp_nodelay: bool,
+    /// `IP_TOS`: the TOS byte of the socket's IPv4 headers.
+    pub tos: u8,
 }
 
 impl SocketOptions {
@@ -103,6 +105,7 @@ impl SocketOptions {
             send_timeout: None,
             keepalive: false,
             tcp_nodelay: false,
+            tos: 0,
         }
     }
 
@@ -764,6 +767,7 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
         seg.tuple.local_ip,
         seg.tuple.remote_ip,
         net::IpProtocol::Tcp.as_u8(),
+        seg.tos,
         tcp_len,
     ) {
         return map_net_err(err);
@@ -845,7 +849,7 @@ fn socket_send_tcp_segment_zerocopy(
             {
                 let ip = &mut hdr[net::ETH_HEADER_LEN..net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN];
                 ip[0] = 0x45;
-                ip[1] = 0;
+                ip[1] = seg.tos;
                 ip[2..4].copy_from_slice(&(ip_total as u16).to_be_bytes());
                 ip[4..8].copy_from_slice(&[0; 4]);
                 ip[8] = 64;
@@ -1080,10 +1084,12 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
                         // A handshake nothing will ever accept still holds a
                         // shard slot, so reset the peer rather than leak it.
                         if queued == Some(false) {
+                            let tos = tcp::with_pcb(conn_id, |pcb| pcb.tos).unwrap_or(0);
                             let rst = tcp::SegmentBuilder::bare_rst(
                                 accepted.tuple,
                                 accepted.iss.wrapping_add(1),
-                            );
+                            )
+                            .with_tos(tos);
                             tcp::table::release(conn_id);
                             let _ = socket_send_tcp_segment(&rst, &[]);
                         }
@@ -1269,7 +1275,7 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
 
     let mut auto_bind_udp: Option<(SockAddr, bool)> = None;
     let mut auto_bind_icmp: Option<(u16, bool)> = None;
-    let (local, is_udp, identifier) = {
+    let (local, is_udp, identifier, tos) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
@@ -1322,7 +1328,7 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
             0
         };
 
-        (local, is_udp, identifier)
+        (local, is_udp, identifier, sock.options.tos)
     };
 
     if let Some((bind_addr, reuse_addr)) = auto_bind_udp
@@ -1365,7 +1371,7 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
 
     if is_udp {
         let local = udp_source(local, Ipv4Addr(dst_ip));
-        match crate::udp::udp_sendto(local.ip.0, dst_ip, local.port.0, dst_port, payload) {
+        match crate::udp::udp_sendto(local.ip.0, dst_ip, local.port.0, dst_port, tos, payload) {
             Ok(n) => n as i64,
             Err(err) => map_net_err(err) as i64,
         }
@@ -1562,6 +1568,7 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
             tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
             tcp::set_rcvbuf(tcp_idx, sock.options.recv_buf_size);
             tcp::set_sndbuf(tcp_idx, sock.options.send_buf_size);
+            tcp::set_tos(tcp_idx, sock.options.tos);
 
             0
         }
@@ -1602,6 +1609,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 send_timeout: listen_sock.options.send_timeout,
                 keepalive: listen_sock.options.keepalive,
                 tcp_nodelay: listen_sock.options.tcp_nodelay,
+                tos: listen_sock.options.tos,
             };
 
             let accepted = if let SocketInner::Tcp(ref mut tcp_inner) = listen_sock.inner {
@@ -1733,6 +1741,7 @@ fn connect_initiate_tcp_locked(
 
     match tcp::connect(local_ip, addr, port) {
         Ok((tcp_idx, syn)) => {
+            let syn = syn.with_tos(sock.options.tos);
             sock.local_addr = Some(SockAddr::new(
                 Ipv4Addr(syn.tuple.local_ip),
                 Port(syn.tuple.local_port),
@@ -1746,6 +1755,7 @@ fn connect_initiate_tcp_locked(
             tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
             tcp::set_rcvbuf(tcp_idx, sock.options.recv_buf_size);
             tcp::set_sndbuf(tcp_idx, sock.options.send_buf_size);
+            tcp::set_tos(tcp_idx, sock.options.tos);
             let nb = sock.is_nonblocking();
             Ok((tcp_idx, nb, syn))
         }
@@ -1902,6 +1912,7 @@ enum SendTarget {
     Udp {
         local: SockAddr,
         remote: SockAddr,
+        tos: u8,
     },
     Icmp {
         remote_ip: [u8; 4],
@@ -1937,7 +1948,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
 
         let mut auto_bind_udp: Option<(SockAddr, bool)> = None;
         let mut auto_bind_icmp: Option<(u16, bool)> = None;
-        let (local, remote, state, identifier) = {
+        let (local, remote, state, identifier, tos) = {
             let mut table = NEW_SOCKET_TABLE.lock();
             let Some(sock) = table.get_mut(sock_idx as usize) else {
                 return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
@@ -1985,7 +1996,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
             } else {
                 0
             };
-            (local, remote, sock.state, identifier)
+            (local, remote, sock.state, identifier, sock.options.tos)
         };
 
         if let Some((bind_addr, reuse_addr)) = auto_bind_udp
@@ -2033,7 +2044,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
 
         if is_udp {
             let local = udp_source(local, remote.ip);
-            return Ok(SendTarget::Udp { local, remote });
+            return Ok(SendTarget::Udp { local, remote, tos });
         }
         return Ok(SendTarget::Icmp {
             remote_ip: remote.ip.0,
@@ -2195,12 +2206,13 @@ pub fn socket_send(sock_idx: u32, payload: &[u8]) -> i64 {
     };
 
     match target {
-        SendTarget::Udp { local, remote } => {
+        SendTarget::Udp { local, remote, tos } => {
             match crate::udp::udp_sendto(
                 local.ip.0,
                 remote.ip.0,
                 local.port.0,
                 remote.port.0,
+                tos,
                 payload,
             ) {
                 Ok(n) => n as i64,
@@ -2233,12 +2245,13 @@ pub fn socket_send_pinned(sock_idx: u32, reader: &mut VmReader<'_>) -> i64 {
     };
 
     match target {
-        SendTarget::Udp { local, remote } => {
+        SendTarget::Udp { local, remote, tos } => {
             match crate::udp::udp_sendto_from(
                 local.ip.0,
                 remote.ip.0,
                 local.port.0,
                 remote.port.0,
+                tos,
                 reader,
             ) {
                 Ok(n) => n as i64,
@@ -2296,11 +2309,12 @@ pub fn socket_send_zerocopy(
         Err(_) => return ZcSendOutcome::NotEligible,
     };
     match target {
-        SendTarget::Udp { local, remote } => crate::udp::udp_sendto_zerocopy(
+        SendTarget::Udp { local, remote, tos } => crate::udp::udp_sendto_zerocopy(
             local.ip.0,
             remote.ip.0,
             local.port.0,
             remote.port.0,
+            tos,
             runs,
             total_len,
             keepalive,
@@ -2669,8 +2683,7 @@ pub fn socket_close(sock_idx: u32) -> i32 {
     // socket; nothing else reclaims them once it is gone, so release them here
     // and reset the peers that were still talking to them.
     if was_listener {
-        for (tuple, seq) in tcp::release_children_of(tcp::SocketId(sock_idx)) {
-            let rst = tcp::SegmentBuilder::bare_rst(tuple, seq);
+        for rst in tcp::release_children_of(tcp::SocketId(sock_idx)) {
             let _ = socket_send_tcp_segment(&rst, &[]);
         }
     }
@@ -3105,6 +3118,9 @@ pub fn socket_count_active() -> usize {
     SOCKET_ALLOC.lock().count_active()
 }
 
+/// The TOS byte's ECN field (RFC 3168 §5), which a stream socket leaves to TCP.
+const IP_TOS_ECN_MASK: u8 = 0x03;
+
 pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) -> i32 {
     use slopos_abi::syscall::*;
 
@@ -3218,6 +3234,26 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
             }
             _ => errno_i32(ERRNO_EINVAL),
         },
+        IPPROTO_IP => match optname {
+            IP_TOS => {
+                let tos = match val.len() {
+                    0 => return errno_i32(ERRNO_EINVAL),
+                    1..4 => val[0],
+                    _ => i32::from_ne_bytes([val[0], val[1], val[2], val[3]]) as u8,
+                };
+                if let SocketInner::Tcp(tcp_inner) = &sock.inner {
+                    let tos = tos & !IP_TOS_ECN_MASK;
+                    sock.options.tos = tos;
+                    if let Some(conn_id) = tcp_inner.conn_id {
+                        tcp::set_tos(conn_id, tos);
+                    }
+                } else {
+                    sock.options.tos = tos;
+                }
+                0
+            }
+            _ => errno_i32(ERRNO_ENOPROTOOPT),
+        },
         _ => errno_i32(ERRNO_EINVAL),
     }
 }
@@ -3309,6 +3345,23 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 4
             }
             _ => errno_i32(ERRNO_EINVAL),
+        },
+        IPPROTO_IP => match optname {
+            IP_TOS => {
+                let tos = sock.options.tos;
+                match out.len() {
+                    0 => errno_i32(ERRNO_EINVAL),
+                    1..4 => {
+                        out[0] = tos;
+                        1
+                    }
+                    _ => {
+                        out[..4].copy_from_slice(&i32::from(tos).to_ne_bytes());
+                        4
+                    }
+                }
+            }
+            _ => errno_i32(ERRNO_ENOPROTOOPT),
         },
         _ => errno_i32(ERRNO_EINVAL),
     }

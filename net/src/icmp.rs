@@ -251,7 +251,7 @@ fn send_echo(
         icmp_hdr[6..8].copy_from_slice(&sequence.to_be_bytes());
     }
 
-    pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Icmp.as_u8(), icmp_len)?;
+    pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Icmp.as_u8(), 0, icmp_len)?;
 
     pkt.prepend_eth(super::MacAddr::ZERO.0, super::MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();
@@ -308,7 +308,7 @@ pub fn send_echo_request_from(
         icmp_hdr[6..8].copy_from_slice(&sequence.to_be_bytes());
     }
 
-    pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Icmp.as_u8(), icmp_len)?;
+    pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Icmp.as_u8(), 0, icmp_len)?;
 
     pkt.prepend_eth(super::MacAddr::ZERO.0, super::MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();

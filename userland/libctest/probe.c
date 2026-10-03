@@ -1195,25 +1195,53 @@ static int scan_conversions(void) {
         return fail("a suppressed %c did not consume one character");
     }
 
+    int major = 0, minor = 0;
+    char version[32];
+    if (sscanf("SSH-2.0-OpenSSH_10.5", "SSH-%d.%d-%[^\n]\n", &major, &minor, version) != 3 ||
+        major != 2 || minor != 0 || strcmp(version, "OpenSSH_10.5") != 0) {
+        return fail("%[^\\n] did not read the rest of an ssh banner");
+    }
+    char set[8];
+    if (sscanf("]a-b]c", "%[]a-]", set) != 1 || strcmp(set, "]a-") != 0) {
+        return fail("a leading ] or a trailing - was not a member of the scanset");
+    }
+    if (sscanf("hello42", "%[a-z]%d", set, &d) != 2 || strcmp(set, "hello") != 0 || d != 42) {
+        return fail("a range in the scanset did not stop at the first non-member");
+    }
+    memset(set, '#', sizeof set);
+    if (sscanf("abcdef", "%3[a-z]", set) != 1 || strcmp(set, "abc") != 0 || set[4] != '#') {
+        return fail("%[ wrote past its field width");
+    }
+    if (sscanf("42", "%[a-z]", set) != 0) {
+        return fail("a scanset that matched nothing counted as a conversion");
+    }
+    d = 0;
+    if (sscanf("key=7", "%*[^=]=%d", &d) != 1 || d != 7) {
+        return fail("a suppressed %[ was stored or counted");
+    }
+
     // The stream engine is a second implementation of all of the above.
     FILE *s = fopen("/tmp/libc_probe_scan", "w+");
     if (s == NULL) {
         return fail("could not open a scratch stream");
     }
-    if (fputs("ff 17 0x1f abc 12 34", s) < 0 || fseek(s, 0, SEEK_SET) != 0) {
+    if (fputs("ff 17 0x1f abc 12 34 name:rest", s) < 0 || fseek(s, 0, SEEK_SET) != 0) {
         fclose(s);
         return fail("could not write the scratch stream");
     }
     unsigned hex = 0, oct = 0;
     int mixed = 0;
+    char name[8];
+    char past = 0;
     memset(text, '#', sizeof text);
-    if (fscanf(s, "%x %o %i %3s %*d %d", &hex, &oct, &d, text, &mixed) != 5) {
+    if (fscanf(s, "%x %o %i %3s %*d %d %[^:]%c", &hex, &oct, &d, text, &mixed, name, &past) !=
+        7) {
         fclose(s);
-        return fail("the stream engine did not convert all five");
+        return fail("the stream engine did not convert all seven");
     }
     fclose(s);
     if (hex != 255 || oct != 15 || d != 31 || strcmp(text, "abc") != 0 ||
-        mixed != 34) {
+        mixed != 34 || strcmp(name, "name") != 0 || past != ':') {
         return fail("the stream engine disagreed with the string engine");
     }
     return 1;

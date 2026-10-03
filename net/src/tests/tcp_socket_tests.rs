@@ -879,3 +879,85 @@ slopos_testing::stest!(
     name = test_listener_release_reclaims_its_children,
     suite = tcp_socket
 );
+
+/// A listener's TOS marks its SYN-ACKs and passes to the children it accepts.
+pub fn test_listener_tos_passes_to_its_children() -> TestResult {
+    use crate::tcp::{SocketId, TcpTuple};
+
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    tcp_common::reset_all();
+
+    const PORT: u16 = 8081;
+    const CLIENT_PORT: u16 = 52000;
+    let server_ip = tcp_common::LOCAL_IP;
+    let client_ip = tcp_common::REMOTE_IP;
+    let owner = SocketId(9);
+
+    let listen_id = match tcp::listen(server_ip, PORT) {
+        Ok(id) => id,
+        Err(e) => return fail!("listen failed: {:?}", e),
+    };
+    tcp::set_socket_idx(listen_id, Some(owner));
+    tcp::set_tos(listen_id, 0xb8);
+
+    let syn = TcpHeader {
+        src_port: CLIENT_PORT,
+        dst_port: PORT,
+        seq_num: 3000,
+        ack_num: 0,
+        data_offset: 5,
+        flags: crate::tcp::TCP_FLAG_SYN,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let r = tcp::input(client_ip, server_ip, &syn, &[], &[], 0);
+    let Some(syn_ack) = r.segments().next().cloned() else {
+        return fail!("no SYN+ACK");
+    };
+    assert_eq_test!(syn_ack.tos, 0xb8, "the SYN-ACK carries the listener's TOS");
+
+    let ack = TcpHeader {
+        src_port: CLIENT_PORT,
+        dst_port: PORT,
+        seq_num: 3001,
+        ack_num: syn_ack.seq_num.wrapping_add(1),
+        data_offset: 5,
+        flags: TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let _ = tcp::input(client_ip, server_ip, &ack, &[], &[], 0);
+
+    let child = tcp::find(&TcpTuple {
+        local_ip: server_ip,
+        local_port: PORT,
+        remote_ip: client_ip,
+        remote_port: CLIENT_PORT,
+    });
+    let Some(child) = child.filter(|id| !id.is_listener()) else {
+        return fail!("the handshake installed no child");
+    };
+    assert_eq_test!(
+        tcp::with_pcb(child, |pcb| pcb.tos),
+        Some(0xb8),
+        "the accepted child inherits the listener's TOS"
+    );
+
+    let resets = tcp::release_children_of(owner);
+    assert_eq_test!(resets.len(), 1, "the child is reset with its listener");
+    assert_test!(
+        resets.iter().all(|rst| rst.tos == 0xb8),
+        "the child's RST carries its TOS"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_listener_tos_passes_to_its_children,
+    suite = tcp_socket
+);

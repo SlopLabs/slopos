@@ -146,6 +146,7 @@ struct Parent {
     socket: Option<pcb::SocketId>,
     rcvbuf: u32,
     sndbuf: u32,
+    tos: u8,
 }
 
 /// Run the listener state machine on `id` under its per-slot lock.
@@ -161,14 +162,17 @@ fn input_process_listener(
         socket: None,
         rcvbuf: 0,
         sndbuf: 0,
+        tos: 0,
     };
     table::with_pcb_mut(id, |pcb| {
         let mut actions = pcb.on_segment(None, incoming, hdr, options, &[], now_ms);
         actions.conn_id = Some(id);
+        actions.set_tos(pcb.tos);
         let parent = Parent {
             socket: pcb.socket_id,
             rcvbuf: pcb.rcvbuf,
             sndbuf: pcb.sndbuf,
+            tos: pcb.tos,
         };
         (actions, parent)
     })
@@ -229,6 +233,7 @@ fn install_accepted_child(
         child.socket_id = parent.socket;
         child.rcvbuf = parent.rcvbuf;
         child.sndbuf = parent.sndbuf;
+        child.tos = parent.tos;
     })
     .ok()
 }
@@ -246,7 +251,10 @@ pub fn on_syn_ack_retransmit(key: u32) -> Option<TcpOutSegment> {
             if !listen.syn_queue().has_key(key) {
                 return None;
             }
-            listen.syn_queue_mut().on_retransmit(key)
+            listen
+                .syn_queue_mut()
+                .on_retransmit(key)
+                .map(|seg| seg.with_tos(pcb.tos))
         });
         if let Some(Some(seg)) = found {
             return Some(seg);
@@ -258,14 +266,16 @@ pub fn on_syn_ack_retransmit(key: u32) -> Option<TcpOutSegment> {
 /// Release every established child a closing listener still owns.
 ///
 /// A child holds a shard slot nothing else reclaims once the listener is gone;
-/// the returned tuples let the caller reset the peers it was still speaking to.
-pub fn release_children_of(socket_id: pcb::SocketId) -> KVec<(TcpTuple, u32)> {
+/// the returned RSTs reset the peers it was still speaking to.
+pub fn release_children_of(socket_id: pcb::SocketId) -> KVec<TcpOutSegment> {
     let mut ids = [None; table::TOTAL_PCB_SLOTS];
     let count = table::snapshot_shard_conn_ids(&mut ids);
     let mut orphans = KVec::new();
     for id in ids.iter().take(count).flatten() {
         let owned = table::with_pcb(*id, |pcb| {
-            (pcb.socket_id == Some(socket_id)).then(|| (pcb.tuple, pcb.state.snd_nxt_raw()))
+            (pcb.socket_id == Some(socket_id)).then(|| {
+                SegmentBuilder::bare_rst(pcb.tuple, pcb.state.snd_nxt_raw()).with_tos(pcb.tos)
+            })
         })
         .flatten();
         if let Some(entry) = owned {
@@ -431,6 +441,7 @@ fn input_process_established(
         if actions.notify.contains(SocketNotify::NEW_ESTABLISHED) && buffer_slot.is_none() {
             reset_for_no_buffer(&mut actions, &pcb.tuple, hdr);
         }
+        actions.set_tos(pcb.tos);
 
         release_time_wait_bufs(pcb, buffer_slot);
 
@@ -611,7 +622,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                 let tuple = pcb.tuple;
                 let fin = fin_or_queue(d, buffer_slot.as_deref(), tuple, id);
                 pcb.assert_invariants();
-                Ok(fin.map_or(Outcome::NoOp, Outcome::Segment))
+                Ok(fin.map_or(Outcome::NoOp, |s| Outcome::Segment(s.with_tos(pcb.tos))))
             }
             _ => Err(TcpError::InvalidState),
         }
@@ -668,7 +679,7 @@ fn fin_from_syn_recv(
         NET_TIMER_WHEEL.cancel(token);
     }
     pcb.assert_invariants();
-    let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
+    let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window).with_tos(pcb.tos);
     seg.timestamp = ts;
     klog_debug!("tcp: {} id={} SYN_RECV -> FIN_WAIT_1", what, id);
     Ok(Some(seg))
@@ -685,7 +696,7 @@ pub fn abort(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
 
     let seg = table::with_pcb(id, |pcb| {
         klog_debug!("tcp: ABORT id={} from {}", id, pcb.state.name());
-        match &pcb.state {
+        let seg = match &pcb.state {
             PcbState::Listen(_) => None,
             PcbState::SynSent(s) => Some(SegmentBuilder::bare_rst(pcb.tuple, s.snd_nxt.raw())),
             PcbState::SynRecv(s) => Some(SegmentBuilder::bare_rst(pcb.tuple, s.snd_nxt.raw())),
@@ -693,7 +704,8 @@ pub fn abort(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             PcbState::TimeWait(tw) => {
                 Some(SegmentBuilder::bare_rst(pcb.tuple, tw.last_snd_nxt.raw()))
             }
-        }
+        };
+        seg.map(|s| s.with_tos(pcb.tos))
     })
     .ok_or(TcpError::NotFound)?;
 
@@ -720,7 +732,7 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                     let tuple = pcb.tuple;
                     let fin = fin_or_queue(d, buffer_slot.as_deref(), tuple, id);
                     pcb.assert_invariants();
-                    Ok(fin)
+                    Ok(fin.map(|s| s.with_tos(pcb.tos)))
                 }
                 PcbState::SynRecv(_) => fin_from_syn_recv(pcb, id, "SHUTDOWN_WR"),
                 _ => Err(TcpError::InvalidState),
@@ -899,6 +911,11 @@ pub fn set_nodelay(id: ConnId, nodelay: bool) {
     });
 }
 
+/// Set the TOS byte (`IP_TOS`) the connection's segments carry.
+pub fn set_tos(id: ConnId, tos: u8) {
+    table::with_pcb_mut(id, |pcb| pcb.tos = tos);
+}
+
 fn send_spares(id: ConnId, len: usize) -> Spares {
     let (held, writable) =
         table::with_bufs(id, |b| (b.send.chunks_held(), b.send.writable())).unwrap_or((0, 0));
@@ -1038,7 +1055,8 @@ pub fn window_update(id: ConnId) -> Option<TcpOutSegment> {
             return None;
         }
         let window = d.advertise(new);
-        let mut seg = SegmentBuilder::ack(tuple, d.snd_nxt.raw(), d.rcv_nxt.raw(), window);
+        let mut seg =
+            SegmentBuilder::ack(tuple, d.snd_nxt.raw(), d.rcv_nxt.raw(), window).with_tos(pcb.tos);
         d.stamp(&mut seg, clock::now_ms());
         bufs.recv.ack_sent();
         Some(seg)
@@ -1165,6 +1183,7 @@ pub fn poll_transmit(
             }
 
             let tuple = pcb.tuple;
+            let tos = pcb.tos;
             let peer_mss = d.peer_mss as usize;
             let snd_wnd = d.snd_wnd as usize;
 
@@ -1191,7 +1210,8 @@ pub fn poll_transmit(
                         bufs.send.sendmap.mark_retransmitted(lost.seq);
                         let window = d.advertise(bufs.recv.window());
                         let mut seg =
-                            SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
+                            SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window)
+                                .with_tos(tos);
                         d.stamp(&mut seg, now_ms);
                         arm_retransmit(d, &mut bufs.send.rto_deadline_ms, id, now_ms);
                         pcb.assert_invariants();
@@ -1206,7 +1226,7 @@ pub fn poll_transmit(
 
             let unsent = bufs.send.unsent_len();
             if unsent == 0 && d.fin_queued {
-                return send_fin(d, tuple, id).map(|seg| (seg, 0, None));
+                return send_fin(d, tuple, id).map(|seg| (seg.with_tos(tos), 0, None));
             }
             if unsent > 0 && must_probe {
                 arm_retransmit(d, &mut bufs.send.rto_deadline_ms, id, now_ms);
@@ -1243,7 +1263,8 @@ pub fn poll_transmit(
             arm_retransmit(d, &mut bufs.send.rto_deadline_ms, id, now_ms);
 
             let window = d.advertise(bufs.recv.window());
-            let mut seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
+            let mut seg =
+                SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window).with_tos(tos);
             d.stamp(&mut seg, now_ms);
             #[cfg(debug_assertions)]
             d.debug_assert_sendmap(&bufs.send.sendmap);
@@ -1274,6 +1295,7 @@ fn on_handshake_retransmit(id: ConnId, fired: Option<TimerToken>) -> Option<Retr
 
     let outcome = table::with_pcb_mut(id, |pcb| {
         let tuple = pcb.tuple;
+        let tos = pcb.tos;
         let now_ms = clock::now_ms();
         match &mut pcb.state {
             PcbState::SynSent(s) if stale(s.retransmit_token) => SynOutcome::Stale,
@@ -1287,7 +1309,8 @@ fn on_handshake_retransmit(id: ConnId, fired: Option<TimerToken>) -> Option<Retr
                 s.rto_ms = s.rto_ms.saturating_mul(2);
 
                 let seg = SegmentBuilder::active_syn(tuple, s.iss.raw(), s.our_wscale)
-                    .with_timestamp(now_ms as u32, 0);
+                    .with_timestamp(now_ms as u32, 0)
+                    .with_tos(tos);
                 let token =
                     NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
                 s.retransmit_token = Some(token);
@@ -1301,7 +1324,7 @@ fn on_handshake_retransmit(id: ConnId, fired: Option<TimerToken>) -> Option<Retr
                 s.retransmits = s.retransmits.saturating_add(1);
                 s.rto_ms = s.rto_ms.saturating_mul(2);
 
-                let seg = s.syn_ack(tuple, now_ms);
+                let seg = s.syn_ack(tuple, now_ms).with_tos(tos);
                 let token =
                     NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
                 s.retransmit_token = Some(token);
@@ -1371,6 +1394,7 @@ fn retransmit_fired(conn_id: u32, fired: Option<TimerToken>) -> RetransmitAction
         };
         let orphan = pcb.socket_id.is_none();
         let tuple = pcb.tuple;
+        let tos = pcb.tos;
         let PcbState::Data(d) = &mut pcb.state else {
             return Outcome::Skip;
         };
@@ -1394,7 +1418,8 @@ fn retransmit_fired(conn_id: u32, fired: Option<TimerToken>) -> RetransmitAction
                 return Outcome::Released;
             }
             let fin_seq = d.snd_nxt.raw().wrapping_sub(1);
-            let mut fin = SegmentBuilder::fin_ack(tuple, fin_seq, d.rcv_nxt.raw(), d.advertised());
+            let mut fin = SegmentBuilder::fin_ack(tuple, fin_seq, d.rcv_nxt.raw(), d.advertised())
+                .with_tos(tos);
             d.stamp(&mut fin, now_ms);
             d.rtt.back_off();
             (Some(fin), d.rtt.rto_ms() as u64)
@@ -1403,7 +1428,9 @@ fn retransmit_fired(conn_id: u32, fired: Option<TimerToken>) -> RetransmitAction
                 d.orphan_probes = d.orphan_probes.saturating_add(1);
             }
             if d.persist_probes >= MAX_RETRANSMITS || d.orphan_probes > MAX_ORPHAN_PROBES {
-                return Outcome::Reset(SegmentBuilder::bare_rst(tuple, d.snd_nxt.raw()));
+                return Outcome::Reset(
+                    SegmentBuilder::bare_rst(tuple, d.snd_nxt.raw()).with_tos(tos),
+                );
             }
             d.persist_probes = d.persist_probes.saturating_add(1);
             d.persist_backoff = d.persist_backoff.saturating_add(1);
@@ -1412,7 +1439,8 @@ fn retransmit_fired(conn_id: u32, fired: Option<TimerToken>) -> RetransmitAction
                 d.snd_una.raw(),
                 d.rcv_nxt.raw(),
                 d.advertised(),
-            );
+            )
+            .with_tos(tos);
             d.stamp(&mut probe, now_ms);
             let interval = (d.rtt.rto_ms() as u64) << d.persist_backoff.min(16);
             (Some(probe), interval.min(u64::from(MAX_RTO_MS)))
@@ -1489,7 +1517,8 @@ fn keepalive_fired(conn_id: u32, fired: Option<TimerToken>) -> RetransmitAction 
             d.snd_una.raw(),
             d.rcv_nxt.raw(),
             d.advertised(),
-        );
+        )
+        .with_tos(pcb.tos);
         d.stamp(&mut probe_seg, clock::now_ms());
 
         d.keepalive_probes_sent = d.keepalive_probes_sent.saturating_add(1);
@@ -1637,6 +1666,7 @@ pub fn delayed_ack_check(now_ms: u64) -> Option<(ConnId, TcpOutSegment)> {
                 return None;
             };
             d.check_delayed_ack(tuple, bufs, now_ms)
+                .map(|seg| seg.with_tos(pcb.tos))
         })
         .flatten()
         {

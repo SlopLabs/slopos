@@ -255,7 +255,8 @@ resolver's timeout) and `dn_expand` with `<arpa/nameser.h>`, `initgroups`,
 `getitimer` and `setitimer` (which disarm and refuse to arm, as `alarm`
 does), `<paths.h>`, `<netinet/in_systm.h>`, `<netinet/ip.h>`'s
 type-of-service values, the BSD `timeval` macros, `caddr_t`,
-`IPPORT_RESERVED` and `IN_LOOPBACKNET`. A
+`IPPORT_RESERVED`, `IN_LOOPBACKNET` and `scanf`'s `%[` scansets, without
+which ssh refuses every server's banner. A
 recipe's `patch=` (`NNNN-slopos-<what>.patch`, hashed into its stamp) has the
 shape of one that teaches the target, which review holds it to: it only adds —
 a run of removed lines is replaced where it stood, line for line, by added
@@ -713,7 +714,10 @@ delivers its offer; an echo request to a broadcast or multicast address
 goes unanswered, and `ipv4::send` refuses a 127/8 source on such a device.
 ARP refreshes the entry of any sender it already knows and creates one only
 for an ARP aimed at the receiving device's address (RFC 826), and a connected
-UDP socket queues only its peer's datagrams, so `poll` and `recv` agree.
+UDP socket queues only its peer's datagrams, so `poll` and `recv` agree. A
+socket's `IP_TOS` marks the IPv4 header of every TCP segment and UDP datagram
+it sends, ECN bits left to TCP, and an accepted connection inherits its
+listener's.
 
 **The laptop's NIC is a Realtek RTL8168h.** `drivers/src/rtl8168.rs` binds
 `10ec:8168` and brings up the versions `rtl8168-core`'s table names —

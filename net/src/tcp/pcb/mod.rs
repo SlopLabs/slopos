@@ -50,6 +50,9 @@ pub struct Pcb {
     /// machine's default.
     pub rcvbuf: u32,
     pub sndbuf: u32,
+
+    /// The owning socket's `IP_TOS`, stamped on every segment this PCB emits.
+    pub tos: u8,
 }
 
 impl Pcb {
@@ -60,6 +63,7 @@ impl Pcb {
             state,
             rcvbuf: 0,
             sndbuf: 0,
+            tos: 0,
         }
     }
 

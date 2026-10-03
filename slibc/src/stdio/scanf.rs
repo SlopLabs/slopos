@@ -450,6 +450,66 @@ unsafe fn read_subject(stream: *mut FILE, text: &mut [u8; SUBJECT_MAX]) -> Subje
     subject
 }
 
+/// The characters a `%[` conversion matches (C11 7.21.6.2p12): a `]` first in
+/// the list is a member, a leading `^` complements the set, and `a-z` between
+/// two members is a range.
+struct Scanset([u32; 8]);
+
+impl Scanset {
+    /// Read the list after `%[` up to its closing `]`, leaving `fp` past it;
+    /// `None` when the list never closes.
+    ///
+    /// # Safety
+    /// `*fp` points into a NUL-terminated format string.
+    unsafe fn parse(fp: &mut *const u8) -> Option<Self> {
+        let mut p = *fp;
+        let complement = *p == b'^';
+        if complement {
+            p = p.add(1);
+        }
+        let mut set = Scanset([0; 8]);
+        let mut previous: Option<u8> = None;
+        let mut first = true;
+        loop {
+            let c = *p;
+            if c == 0 {
+                return None;
+            }
+            if c == b']' && !first {
+                break;
+            }
+            let high = *p.add(1);
+            if let (b'-', Some(low)) = (c, previous)
+                && high != b']'
+                && high != 0
+                && low <= high
+            {
+                (low..=high).for_each(|m| set.insert(m));
+                previous = None;
+                p = p.add(2);
+            } else {
+                set.insert(c);
+                previous = Some(c);
+                p = p.add(1);
+            }
+            first = false;
+        }
+        if complement {
+            set.0.iter_mut().for_each(|w| *w = !*w);
+        }
+        *fp = p.add(1);
+        Some(set)
+    }
+
+    fn insert(&mut self, c: u8) {
+        self.0[usize::from(c >> 5)] |= 1 << (c & 31);
+    }
+
+    fn contains(&self, c: u8) -> bool {
+        self.0[usize::from(c >> 5)] & (1 << (c & 31)) != 0
+    }
+}
+
 unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
     let mut matched: i32 = 0;
     let mut ip = input;
@@ -610,6 +670,38 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                     return matched;
                 }
                 if !suppress {
+                    matched += 1;
+                }
+            }
+
+            b'[' => {
+                let Some(set) = Scanset::parse(&mut fp) else {
+                    break;
+                };
+                if *ip == 0 {
+                    if matched == 0 {
+                        return EOF;
+                    }
+                    return matched;
+                }
+                let dst = if suppress {
+                    core::ptr::null_mut()
+                } else {
+                    ap.next_arg::<*mut u8>()
+                };
+                let mut i = 0usize;
+                while *ip != 0 && set.contains(*ip) && i < width {
+                    if !dst.is_null() {
+                        *dst.add(i) = *ip;
+                    }
+                    ip = ip.add(1);
+                    i += 1;
+                }
+                if i == 0 {
+                    return matched;
+                }
+                if !dst.is_null() {
+                    *dst.add(i) = 0;
                     matched += 1;
                 }
             }
@@ -849,6 +941,44 @@ unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                     return matched;
                 }
                 if !suppress {
+                    matched += 1;
+                }
+            }
+
+            b'[' => {
+                let Some(set) = Scanset::parse(&mut fp) else {
+                    break;
+                };
+                let dst = if suppress {
+                    core::ptr::null_mut()
+                } else {
+                    ap.next_arg::<*mut u8>()
+                };
+                let mut i = 0usize;
+                let mut at_end = false;
+                while i < width {
+                    let c = fgetc_unlocked(stream);
+                    if c == EOF {
+                        at_end = true;
+                        break;
+                    }
+                    if !set.contains(c as u8) {
+                        ungetc_unlocked(c, stream);
+                        break;
+                    }
+                    if !dst.is_null() {
+                        *dst.add(i) = c as u8;
+                    }
+                    i += 1;
+                }
+                if i == 0 {
+                    if matched == 0 && at_end {
+                        return EOF;
+                    }
+                    return matched;
+                }
+                if !dst.is_null() {
+                    *dst.add(i) = 0;
                     matched += 1;
                 }
             }

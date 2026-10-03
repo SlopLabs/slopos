@@ -27,12 +27,21 @@ pub struct TcpOutSegment {
     pub sack_block_count: u8,
     /// TCP Timestamp option (TSval, TSecr).  RFC 7323 §3.
     pub timestamp: Option<(u32, u32)>,
+    /// IPv4 TOS byte: the owning socket's `IP_TOS`, zero for a segment no
+    /// socket owns.
+    pub tos: u8,
 }
 
 impl TcpOutSegment {
     #[inline]
     pub fn with_timestamp(mut self, tsval: u32, tsecr: u32) -> Self {
         self.timestamp = Some((tsval, tsecr));
+        self
+    }
+
+    #[inline]
+    pub fn with_tos(mut self, tos: u8) -> Self {
+        self.tos = tos;
         self
     }
 }
@@ -155,6 +164,7 @@ impl SegmentBuilder {
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
             timestamp: None,
+            tos: 0,
         }
     }
 
@@ -188,6 +198,7 @@ impl SegmentBuilder {
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
             timestamp: None,
+            tos: 0,
         }
     }
 
@@ -205,6 +216,7 @@ impl SegmentBuilder {
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
             timestamp: None,
+            tos: 0,
         }
     }
 
@@ -222,6 +234,7 @@ impl SegmentBuilder {
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
             timestamp: None,
+            tos: 0,
         }
     }
 
@@ -239,6 +252,7 @@ impl SegmentBuilder {
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
             timestamp: None,
+            tos: 0,
         }
     }
 
@@ -267,6 +281,7 @@ impl SegmentBuilder {
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
             timestamp: None,
+            tos: 0,
         }
     }
 
@@ -285,6 +300,7 @@ impl SegmentBuilder {
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
             timestamp: None,
+            tos: 0,
         }
     }
 
@@ -309,6 +325,7 @@ impl SegmentBuilder {
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
             timestamp: None,
+            tos: 0,
         }
     }
 }

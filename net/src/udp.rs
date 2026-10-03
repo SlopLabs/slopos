@@ -352,7 +352,7 @@ fn send_on_dev(
         hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
     }
 
-    pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Udp.as_u8(), udp_len)?;
+    pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Udp.as_u8(), 0, udp_len)?;
     pkt.prepend_eth(src_mac.0, dst_mac.0)?;
     pkt.set_ipv4_offsets();
 
@@ -374,11 +374,14 @@ pub fn udp_unbind(sock_idx: u32, local_ip: Ipv4Addr, local_port: Port) {
     UDP_DEMUX.lock().unregister(local_ip, local_port, sock_idx);
 }
 
+/// `tos` is the IPv4 TOS byte: the sending socket's `IP_TOS`, zero for the
+/// kernel's own datagrams.
 pub fn udp_sendto(
     local_ip: [u8; 4],
     dst_ip: [u8; 4],
     local_port: u16,
     dst_port: u16,
+    tos: u8,
     payload: &[u8],
 ) -> Result<usize, NetError> {
     if payload.len() > 1472 {
@@ -397,7 +400,13 @@ pub fn udp_sendto(
         udp_hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
     }
 
-    pkt.prepend_ipv4(local_ip, dst_ip, super::IpProtocol::Udp.as_u8(), udp_len)?;
+    pkt.prepend_ipv4(
+        local_ip,
+        dst_ip,
+        super::IpProtocol::Udp.as_u8(),
+        tos,
+        udp_len,
+    )?;
 
     pkt.prepend_eth(MacAddr::ZERO.0, MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();
@@ -420,6 +429,7 @@ pub fn udp_sendto_from(
     dst_ip: [u8; 4],
     local_port: u16,
     dst_port: u16,
+    tos: u8,
     reader: &mut slopos_ostd::mm::VmReader<'_>,
 ) -> Result<usize, NetError> {
     let payload_len = reader.remain();
@@ -439,7 +449,13 @@ pub fn udp_sendto_from(
         udp_hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
     }
 
-    pkt.prepend_ipv4(local_ip, dst_ip, super::IpProtocol::Udp.as_u8(), udp_len)?;
+    pkt.prepend_ipv4(
+        local_ip,
+        dst_ip,
+        super::IpProtocol::Udp.as_u8(),
+        tos,
+        udp_len,
+    )?;
 
     pkt.prepend_eth(MacAddr::ZERO.0, MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();
@@ -470,6 +486,7 @@ pub fn udp_sendto_zerocopy(
     dst_ip: [u8; 4],
     local_port: u16,
     dst_port: u16,
+    tos: u8,
     runs: &[(u64, u32)],
     total_len: usize,
     keepalive: slopos_ostd::mm::uframe::KeepaliveFrames,
@@ -514,7 +531,7 @@ pub fn udp_sendto_zerocopy(
     {
         let ip = &mut hdr[super::ETH_HEADER_LEN..super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN];
         ip[0] = 0x45;
-        ip[1] = 0;
+        ip[1] = tos;
         ip[2..4].copy_from_slice(&(ip_total as u16).to_be_bytes());
         ip[4..8].copy_from_slice(&[0; 4]);
         ip[8] = 64;

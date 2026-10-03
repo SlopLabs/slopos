@@ -442,6 +442,7 @@ fn build_syn_ack_from(entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment 
         sack_blocks: [(0, 0); 4],
         sack_block_count: 0,
         timestamp: None,
+        tos: 0,
     };
     if let Some(tsval) = entry.peer_tsval {
         seg.timestamp = Some((super::clock::now_ms() as u32, tsval));

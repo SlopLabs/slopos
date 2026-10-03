@@ -20,6 +20,7 @@ pub const ERRNO_EINVAL: u64 = Errno::EINVAL.as_u64();
 pub const ERRNO_ERANGE: u64 = Errno::ERANGE.as_u64();
 pub const ERRNO_ENOTSOCK: u64 = Errno::ENOTSOCK.as_u64();
 pub const ERRNO_EDESTADDRREQ: u64 = Errno::EDESTADDRREQ.as_u64();
+pub const ERRNO_ENOPROTOOPT: u64 = Errno::ENOPROTOOPT.as_u64();
 pub const ERRNO_EPROTONOSUPPORT: u64 = Errno::EPROTONOSUPPORT.as_u64();
 pub const ERRNO_EOPNOTSUPP: u64 = Errno::EOPNOTSUPP.as_u64();
 pub const ERRNO_EAFNOSUPPORT: u64 = Errno::EAFNOSUPPORT.as_u64();

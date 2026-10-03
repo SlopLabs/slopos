@@ -937,6 +937,7 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
                     server.0,
                     inflight.port(),
                     DNS_PORT,
+                    0,
                     resolver.query_bytes(),
                 )
                 .is_err()
