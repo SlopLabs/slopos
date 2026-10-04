@@ -265,6 +265,52 @@ threads and four E-cores):
   informational commands for the remote control (`just remote run -- kconsole
   tp`), and the probe now logs each CPU's RIP, task and idle slot, which went
   only to the UART the laptop has not got.
+- **Open: the installed system boots to a black screen.** From the laptop's
+  disk, `slopos-a` and `slopos-b` alike, every boot ends on a black screen
+  with the backlight on, unless the Limine entry went through the editor:
+  `e` and then `F10` with nothing changed brings it up every time, and so does
+  any edit. Enter, the timeout and the one-shot `remote-install` arms all go
+  black; one one-shot boot of a `xe.modeset=off` kernel came up anyway, the
+  only unedited boot that ever has. Limine's `limine: Loading executable…` text
+  flashes in both cases, and the black is its own framebuffer clear. Measured:
+  - **The kernel never runs.** A breadcrumb painted into the loader's
+    framebuffer as the first statement of `kernel_main_impl` (white square,
+    top left, then one per boot step) shows on an edited boot that hangs on
+    purpose (`boot.hang=entry` on the loader's command line) and never on an
+    unedited one. The machine answers no ARP or ping and writes no crash
+    record; keys do nothing.
+  - **So it is not the Xe takeover**, which is where it was first looked
+    for: the display registers dumped before any write (`xe.diag=on`: planes,
+    pipes, power wells, DC states, PSR, FBC, scalers, DBUF, watermarks, cursor,
+    timings, GGTT) are identical between an edited and an unedited boot, and
+    deferring the takeover 60 s (`xe.defer=60`) leaves the boot black. Nor is
+    it the resolution, the Wheel of Fate or the command line's content: the
+    command line `… panic=reboot roulette=skip` boots when typed in the editor
+    and goes black when the kernel appends the same words itself.
+  - **What the editor changes inside Limine 12.9.1** (`common/menu.c`): it
+    keeps a 4 KiB buffer and frees a ~128 KiB cell map, both allocated top-down
+    below 4 GiB before the kernel is (`ext_mem_alloc_type_aligned_mode`), so
+    everything loaded after it lands lower; it boots the copy in that buffer;
+    and it calls `mouse_flush()` before `boot()`'s `mouse_deinit()`. An edited
+    boot loaded the kernel at physical `0x3429d000`, the base just below it,
+    the kernel file's buffer above it (the `MEMMAP:` lines in the boot log).
+  - **Where the hang is:** after Limine's module messages and its framebuffer
+    clear, before `kernel_main_impl`: `fb_init`, the responses,
+    `efi_exit_boot_services`, `build_pagemap`, `init_smp` (APs started through
+    a trampoline at `0x1000`) and the jump, or `_start` in
+    `boot/limine_entry.s`, which touches only the kernel image and COM1.
+
+  Next: instrument Limine itself (built from the pinned tag with breadcrumbs
+  of its own after the clear) to find the step, and from that whether it is a
+  Limine bug to work around or report, or a layout this firmware's memory map
+  makes fatal. Laptop state: `slopos-b` is the default, a kernel built with
+  `xe.modeset=off xe.diag=on`; `slopos-a` holds the breadcrumb kernel; both
+  boot only through `e` and `F10`. The diagnostics are uncommitted in the
+  working tree: the breadcrumbs, `boot.hang=entry` and the `MEMMAP:` dump
+  (`boot/src/early_init.rs`, `boot/src/limine_protocol.rs`), and
+  `xe.stop=<stage>`, `xe.defer=<s>` and the wider `XE-DIAG` dump
+  (`drivers/src/xe/`, `drivers/src/xe_logic/cmdline.rs`). The `XE-DIAG`
+  registers are worth keeping; the rest goes once the cause is found.
 
 **Done when** a guest build's effective frequency on the laptop is measured,
 and the same build is timed with the firmware's settings and with HWP.
