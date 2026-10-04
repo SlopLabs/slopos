@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::platform;
 
 static CACHED_TSC_HZ: AtomicU64 = AtomicU64::new(0);
+static MEASURED_TSC_KHZ: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 fn tsc_frequency_hz() -> u64 {
@@ -27,6 +28,19 @@ fn tsc_frequency_hz() -> u64 {
 
     CACHED_TSC_HZ.store(freq_hz, Ordering::Relaxed);
     freq_hz
+}
+
+/// The TSC's rate as measured against the HPET, which then answers for every
+/// cycle conversion in place of the CPUID estimate.
+pub fn record_measured_tsc_khz(khz: u64) {
+    MEASURED_TSC_KHZ.store(khz, Ordering::Relaxed);
+    CACHED_TSC_HZ.store(khz.saturating_mul(1000), Ordering::Relaxed);
+}
+
+/// The measured TSC rate, `0` until it has been measured.
+#[inline]
+pub fn measured_tsc_khz() -> u64 {
+    MEASURED_TSC_KHZ.load(Ordering::Relaxed)
 }
 
 #[inline]

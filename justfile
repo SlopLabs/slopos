@@ -22,8 +22,8 @@ fs_image_size    := env("FS_IMAGE_SIZE", "32M")
 # `persist_test`'s space filler must still meet the volume's reserve before it
 # meets the 8192-block `DiskBlocks` quota. 64M left 809 free blocks against a
 # 819-block reserve once `libc++.so` was on it, which refuses the filler before
-# it has written anything.
-fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "80M")
+# it has written anything; 80M left 732 once `remoted` and `cpufreq` joined.
+fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "96M")
 # Sized on its own: this disk holds work, not the shipped appliance root. No
 # longer capped at 1 GiB — the verity hash array is chunked, so what bounds it
 # is the 4 bytes of resident hash per 4 KiB block the machine's RAM can hold,
@@ -1006,9 +1006,224 @@ bench-selfhost: _build-run-tests
     [ "$rc" -eq 0 ] || { tail -n 30 {{build_dir}}/bench-selfhost.log; echo "FAIL: the benchmark boot exited $rc — full log in {{build_dir}}/bench-selfhost.log" >&2; exit 1; }
     python3 scripts/prof_report.py {{build_dir}}/bench-selfhost.log --libc {{build_dir}}/bench-libc.so --lib-dir {{toolchain_install}}/lib
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, ext4-core, http-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+# `remoted` on a SlopOS machine dials scripts/remote.py's broker on this host;
+# the CLI reaches the broker over a unix socket. A machine is paired by the
+# base it boots, which carries the broker's CA, token and address where no
+# program can rewrite them.
+remote_pairing   := build_dir / "remote-pairing"
+initramfs_remote := build_dir / "initramfs-remote.cpio"
+
+[positional-arguments]
+[doc("Drive the paired SlopOS machine through the broker: just remote status | wait [--tag T] | run -- ARGV | sh CMDLINE | push LOCAL REMOTE | pull REMOTE LOCAL | klog [--follow] | install (scripts/remote.py --help)")]
+remote *ARGS:
+    scripts/remote.py "$@"
+
+# The shipped base paired with this host's broker, apart from
+# builddir/initramfs.cpio, which every other image packs and which so never
+# carries a token. ARGS go to `remote.py provision`; none pairs with the
+# broker the last pairing named.
+[positional-arguments]
+_initramfs-remote *ARGS: _build-userland _base-recipes
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/remote.py provision {{remote_pairing}} "$@"
+    COREUTILS_LINKS="{{coreutils_tools}}" {{base_recipe_env}} REMOTE_PAIRING_DIR={{remote_pairing}} \
+        scripts/build_initramfs.sh "{{initramfs_remote}}" "{{build_dir}}" {{userland_bins}}
+    chmod 600 "{{initramfs_remote}}"
+
+[positional-arguments]
+[doc("Run the broker remoted dials, on this host's LAN address (REMOTE_HOST) and port 7330 (REMOTE_PORT), offering the release kernel and a base paired with it (builddir/initramfs-remote.cpio) as bootstrap downloads; prints how to boot them on the machine and, with ufw active, the rule to add")]
+remote-serve *ARGS: (_kernel "release")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    port="${REMOTE_PORT:-7330}"
+    if [ -n "${REMOTE_HOST:-}" ]; then pair=(--broker "$REMOTE_HOST:$port"); else pair=(--port "$port"); fi
+    just _initramfs-remote "${pair[@]}"
+    scripts/remote.py serve --port "$port" --offer kernel={{build_dir}}/kernel-release.elf \
+        --offer base={{initramfs_remote}} "$@"
+
+[positional-arguments]
+[doc("Build the release kernel and a base paired with the broker under a fresh SLOPOS_BUILD_TAG, install them into the paired machine's spare slot, boot it once and wait for it to come back with that tag; --commit then makes it the default")]
+remote-install *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="remote-$(date -u +%Y%m%dT%H%M%SZ)"
+    export SLOPOS_BUILD_TAG="$tag"
+    just _initramfs-remote
+    just _kernel release
+    scripts/remote.py install --kernel {{build_dir}}/kernel-release.elf --base {{initramfs_remote}} --tag "$tag" "$@"
+
+# An installed machine as the bare-metal layout has it — a boot disk whose
+# slots hold a base paired with a broker on this host's loopback, which SLIRP
+# shows the guest as 10.0.2.2, and a root partition where a pairing with
+# another broker is planted under /etc/remote, which remoted must ignore. The
+# kernel carries a build tag and is built in a target directory of its own, so
+# the tag never rebuilds the shared one.
+[doc("Remote-control check: boot an installed machine whose base is paired with a broker on this host and drive it through scripts/remote.py — wait for its build tag; run commands and check stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; push a random 8 MiB file, pull it back byte-identical; read /dev/kmsg; find the base's pairing unwritable and a pairing planted on the root ignored; serve from two daemons; install into the spare slot, reboot into it and commit it; power off with /bin/halt and require QEMU to exit")]
+test-remote: _build-userland _base-recipes
+    #!/usr/bin/env bash
+    set -euo pipefail
+    work="$PWD/{{build_dir}}/remote-e2e"
+    tag=remote-e2e
+    BUILD_DIR="{{build_dir}}/remote-e2e" SLOPOS_BUILD_TAG="$tag" just _kernel dev
+    free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
+    port="${REMOTE_TEST_PORT:-$(free_port)}"
+    decoy_port="$(free_port)"
+    state="$work/state"
+    # Per run: a broker left over from an aborted one keeps its own socket.
+    sock="$work/broker.$$.sock"
+    rm -rf "$state" "$work/decoy-state" "$work/pairing" "$work/planted" "$work/base.cpio" "$work/root.img" \
+        "$work/root.img.host" "$work/boot-disk.img" "$work"/*.log "$work"/broker.*.sock
+    remote() { timeout "${REMOTE_STEP_TIMEOUT:-180}" scripts/remote.py --state "$state" --socket "$sock" "$@"; }
+    broker="" decoy="" qemu=""
+    cleanup() {
+        if [ -n "$qemu" ]; then
+            kill -TERM -- "-$qemu" 2>/dev/null || true
+            for _ in $(seq 20); do kill -0 "$qemu" 2>/dev/null || break; sleep 0.5; done
+            kill -KILL -- "-$qemu" 2>/dev/null || true
+        fi
+        [ -z "$broker" ] || kill "$broker" 2>/dev/null || true
+        [ -z "$decoy" ] || kill "$decoy" 2>/dev/null || true
+        wait 2>/dev/null || true
+    }
+    trap cleanup EXIT
+    fail() {
+        echo "FAIL: $*" >&2
+        echo "  broker log: $work/broker.log; serial log: $work/qemu.log" >&2
+        exit 1
+    }
+
+    remote provision "$work/pairing" --broker "10.0.2.2:$port"
+    COREUTILS_LINKS="{{coreutils_tools}}" {{base_recipe_env}} SLOPOS_BUILD_TAG="$tag" REMOTE_PAIRING_DIR="$work/pairing" \
+        scripts/build_initramfs.sh "$work/base.cpio" "{{build_dir}}" {{userland_bins}}
+    # Where remoted once read a pairing, and any program can write: one with
+    # a broker of its own, which must never hear from the machine.
+    scripts/remote.py --state "$work/decoy-state" provision "$work/planted" --broker "10.0.2.2:$decoy_port"
+    # Room for the kernel and base `install` pushes.
+    FS_IMAGE_SIZE=256M VERITY=off PRESERVE_FS_IMAGE=0 FS_BASE=boot FS_HOST_TREES="$work/planted:/etc/remote" \
+        scripts/build_fs_image.sh "$work/root.img" "{{build_dir}}"
+    BOOTDISK_ROOT_IMAGE="$work/root.img" LIMINE_DIR={{limine_dir}} QEMU_FB_AUTO=0 \
+        scripts/build_bootdisk.sh "$work/boot-disk.img" "$work/kernel-dev.elf" "$work/base.cpio" "tests=off roulette=skip"
+
+    scripts/remote.py --state "$state" --socket "$sock" serve --bind 127.0.0.1 --port "$port" --advertise 10.0.2.2 \
+        --offer base="$work/base.cpio" >"$work/broker.log" 2>&1 &
+    broker=$!
+    scripts/remote.py --state "$work/decoy-state" --socket "$work/decoy.$$.sock" serve --bind 127.0.0.1 \
+        --port "$decoy_port" --advertise 10.0.2.2 >"$work/decoy.log" 2>&1 &
+    decoy=$!
+    for _ in $(seq 100); do [ -S "$sock" ] && [ -S "$work/decoy.$$.sock" ] && break; sleep 0.1; done
+    [ -S "$sock" ] && kill -0 "$broker" 2>/dev/null || fail "the broker did not come up: $(cat "$work/broker.log")"
+    [ -S "$work/decoy.$$.sock" ] || fail "the decoy broker did not come up: $(cat "$work/decoy.log")"
+    # setsid and timeout: the launcher and QEMU under it, in the foreground
+    # of `interactive` mode, are one group to end. `bootctl install` holds a
+    # kernel and its base in memory at once.
+    setsid timeout "${REMOTE_TEST_TIMEOUT_SECS:-900}" \
+        just _qemu-boot interactive 0 "$work/boot-disk.img" "$work/root.img" BOOT_DISK_IMG="$work/boot-disk.img" \
+        QEMU_NO_ROOT_DISK=1 QEMU_ALLOW_REBOOT=1 QEMU_MEM=1G >"$work/qemu.log" 2>&1 &
+    qemu=$!
+
+    echo "── wait for the agent and its build tag ──"
+    remote wait --tag "$tag" --timeout 300 --json >"$work/agent.json" || fail "no agent reported build tag $tag"
+    python3 - "$work/agent.json" "$tag" <<'EOF'
+    import json, sys
+    agent = json.load(open(sys.argv[1]))
+    assert agent["tag"] == sys.argv[2] and sys.argv[2] in agent["version"], agent
+    assert agent["base_tag"] == sys.argv[2], agent
+    assert len(agent["boot"]) == 32 and agent["host"] and agent["uptime_s"] >= 0, agent
+    print(f"agent: boot {agent['boot']} {agent['version']}, up {agent['uptime_s']} s")
+    EOF
+
+    echo "── run: stdout, stderr, exit codes ──"
+    rc=0; remote sh 'echo out; echo err >&2; exit 3' >"$work/out" 2>"$work/err" || rc=$?
+    [ "$rc" = 3 ] && [ "$(cat "$work/out")" = out ] && [ "$(cat "$work/err")" = err ] ||
+        fail "sh: exit $rc, stdout '$(cat "$work/out")', stderr '$(cat "$work/err")'; want 3, 'out', 'err'"
+    rc=0; remote run -- /bin/shell -c 'echo out; echo err >&2; exit 3' >"$work/out" 2>"$work/err" || rc=$?
+    [ "$rc" = 3 ] && [ "$(cat "$work/out")" = out ] && [ "$(cat "$work/err")" = err ] ||
+        fail "run: exit $rc, stdout '$(cat "$work/out")', stderr '$(cat "$work/err")'; want 3, 'out', 'err'"
+    [ "$(remote run --cwd /etc -- pwd)" = /etc ] || fail "run --cwd /etc did not run in /etc"
+    remote run --env SLOPOS_E2E=yes -- env >"$work/env"
+    grep -qx 'SLOPOS_E2E=yes' "$work/env" && grep -qx 'PATH=/bin:/sbin:/usr/local/bin' "$work/env" ||
+        fail "the child's environment: $(tr '\n' ' ' <"$work/env")"
+    [ "$(printf 'piped stdin' | remote run --stdin -- cat)" = 'piped stdin' ] || fail "stdin did not reach the child"
+    rc=0; remote run -- /bin/no-such-program 2>"$work/err" || rc=$?
+    [ "$rc" != 0 ] && grep -q no-such-program "$work/err" || fail "a missing program: exit $rc, $(cat "$work/err")"
+    start=$SECONDS; rc=0; remote run --timeout 2 -- sleep 60 2>/dev/null || rc=$?
+    [ "$rc" = 124 ] && [ $((SECONDS - start)) -lt 30 ] || fail "run --timeout 2 -- sleep 60: exit $rc after $((SECONDS - start)) s"
+    remote run -- sleep 6 & slow=$!
+    sleep 1
+    start=$SECONDS
+    [ "$(remote run -- echo concurrent)" = concurrent ] || fail "a second command beside a running one"
+    [ $((SECONDS - start)) -lt 5 ] || fail "a second command waited for the first ($((SECONDS - start)) s)"
+    wait "$slow" || fail "the first of two concurrent commands failed"
+
+    echo "── push and pull 8 MiB ──"
+    head -c 8388608 /dev/urandom >"$work/payload.bin"
+    remote push "$work/payload.bin" /home/payload.bin
+    remote pull /home/payload.bin "$work/payload.back"
+    cmp "$work/payload.bin" "$work/payload.back" || fail "the pulled file differs from the pushed one"
+    want="$(sha256sum "$work/payload.bin" | cut -d' ' -f1)"
+    remote run -- sha256sum /home/payload.bin | grep -q "^$want" || fail "the guest's sha256sum disagrees"
+
+    echo "── kernel log ──"
+    remote klog >"$work/klog.txt"
+    [ "$(wc -c <"$work/klog.txt")" -gt 1000 ] || fail "/dev/kmsg read $(wc -c <"$work/klog.txt") bytes"
+
+    echo "── the pairing is the base's ──"
+    remote run -- cat /usr/share/slopos/remote/remote.conf | grep -qx "broker = 10.0.2.2:$port" ||
+        fail "the base does not carry the pairing"
+    rc=0; remote sh 'echo "broker = 10.0.2.2:1" > /usr/share/slopos/remote/remote.conf' 2>/dev/null || rc=$?
+    [ "$rc" != 0 ] || fail "a program rewrote the base's remote.conf"
+    remote run -- cat /usr/share/slopos/remote/remote.conf | grep -qx "broker = 10.0.2.2:$port" ||
+        fail "the base's remote.conf changed"
+    remote run -- cat /etc/remote/remote.conf | grep -qx "broker = 10.0.2.2:$decoy_port" ||
+        fail "the decoy pairing was not planted on the root"
+    rc=0; remote run -- remoted pair "10.0.2.2:$port" 00 >/dev/null 2>&1 || rc=$?
+    [ "$rc" != 0 ] || fail "remoted still takes arguments"
+    # A second daemon, from the same base pairing: the broker prefers the
+    # newer boot id.
+    first="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["boot"])' "$work/agent.json")"
+    remote sh 'remoted >/dev/null 2>&1 &'
+    for _ in $(seq 30); do
+        [ "$(remote status --json | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))')" = 2 ] && break
+        sleep 1
+    done
+    remote status --json >"$work/agents.json"
+    python3 - "$work/agents.json" "$first" <<'EOF'
+    import json, sys
+    agents = json.load(open(sys.argv[1]))
+    assert len(agents) == 2 and agents[1]["boot"] == sys.argv[2], agents
+    print(f"agents: {agents[0]['boot']} (started just now), {agents[1]['boot']}")
+    EOF
+    [ "$(remote run -- echo via-second)" = via-second ] || fail "a command through the second daemon"
+
+    echo "── install into the spare slot, reboot into it, commit it ──"
+    # A fresh boot disk names no default; an installed machine's does.
+    remote run -- bootctl set-default slopos-a
+    REMOTE_STEP_TIMEOUT=600 remote install --kernel "$work/kernel-dev.elf" --base "$work/base.cpio" --tag "$tag" --commit \
+        >"$work/install.log" 2>&1 || fail "install: $(tail -n 5 "$work/install.log")"
+    grep -qx 'installed slot b (entry slopos-b)' "$work/install.log" && grep -qx 'booted: slopos-b' "$work/install.log" &&
+        grep -qx 'default: slopos-b' "$work/install.log" || fail "install did not boot and commit slopos-b; see $work/install.log"
+    sed 's/^/  /' "$work/install.log"
+
+    echo "── power off ──"
+    remote run -- /bin/halt >/dev/null 2>&1 || true
+    for _ in $(seq 120); do
+        kill -0 "$qemu" 2>/dev/null || break
+        sleep 1
+    done
+    kill -0 "$qemu" 2>/dev/null && fail "QEMU still running 120 s after /bin/halt"
+    rc=0; wait "$qemu" || rc=$?
+    qemu=""
+    [ "$rc" != 124 ] || fail "QEMU hit its ${REMOTE_TEST_TIMEOUT_SECS:-900} s budget instead of powering off"
+    [ "$rc" = 0 ] || fail "QEMU exited $rc"
+    if grep -q "agent .* up\|refused the agent\|TLS handshake" "$work/decoy.log"; then
+        fail "the machine dialled the broker planted under /etc/remote: $(cat "$work/decoy.log")"
+    fi
+    echo "test-remote: identity, commands, files, kernel log, the sealed pairing, install and power-off all held"
+
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, cpufreq-core, ext4-core, http-core, remote-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-ext4-core -p slopos-http-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-http-core -p slopos-remote-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

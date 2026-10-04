@@ -82,6 +82,7 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
         idt_load(ap_token);
         syscall_msr_init(ap_token);
         slopos_hermetic::return_after_ap(cpu_idx, ap_boot_ctx);
+        slopos_sched::cpufreq::init_this_cpu(cpu_idx, apic_id);
 
         // Must precede `enable_interrupts`: a timer, shootdown or reschedule
         // IPI arriving first would touch uninitialised per-CPU scheduler state.

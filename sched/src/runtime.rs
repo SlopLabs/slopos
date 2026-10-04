@@ -504,6 +504,7 @@ fn scheduler_loop(cpu_id: usize) -> ! {
 
         crate::scheduler::arm_tickless_idle_if_due();
 
+        crate::cpufreq::on_idle(cpu_id);
         slopos_ostd::sync::rcu_note_cpu_idle_enter();
         crate::profile::halt_begin(cpu_id);
         slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();

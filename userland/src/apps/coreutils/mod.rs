@@ -26,6 +26,7 @@ mod hash;
 mod listing;
 mod pager;
 mod pathname;
+mod prof;
 mod sed;
 mod shellprim;
 mod sortuniq;
@@ -55,6 +56,7 @@ static TOOL_SETS: &[&[Tool]] = &[
     listing::TOOLS,
     pager::TOOLS,
     pathname::TOOLS,
+    prof::TOOLS,
     sed::TOOLS,
     shellprim::TOOLS,
     sortuniq::TOOLS,

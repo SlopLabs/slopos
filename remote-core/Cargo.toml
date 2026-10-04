@@ -1,0 +1,17 @@
+[package]
+name = "slopos-remote-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Remote-control wire protocol: frames, fields, pairing and configuration, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+slopos-tls-core = { workspace = true }

@@ -28,7 +28,7 @@ pub(crate) const COLOR_STATE_RUN: Color32 = Color32::rgb(0x44, 0xCC, 0x44);
 pub(crate) const COLOR_STATE_BLOCK: Color32 = Color32::rgb(0xCC, 0xAA, 0x44);
 pub(crate) const COLOR_STATE_READY: Color32 = Color32::rgb(0xCC, 0xCC, 0xCC);
 
-pub(crate) const MAX_CPUS: usize = 16;
+pub(crate) const MAX_CPUS: usize = 64;
 pub(crate) const REFRESH_INTERVAL_MS: u64 = 1000;
 
 #[derive(Clone, Debug)]
@@ -216,9 +216,13 @@ impl SysmonApp {
         children.push(label("CPU"));
         for i in 0..self.cpu_count {
             let pct = self.cpu_usage_pct[i];
+            let mhz = self.cpu_eff_mhz[i].map_or_else(|| "-".to_owned(), |mhz| mhz.to_string());
             children.push(Node::ProgressBar {
                 value: pct,
-                label: format!("CPU{} {:>3}%", self.percpu[i].cpu_id, pct),
+                label: format!(
+                    "CPU{} {} {:>3}%  {} MHz",
+                    self.percpu[i].cpu_id, self.cpu_type[i], pct, mhz
+                ),
                 color: None,
             });
         }

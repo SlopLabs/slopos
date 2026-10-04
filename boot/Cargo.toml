@@ -26,6 +26,7 @@ slopos-acpi = { workspace = true }
 slopos-arch = { workspace = true }
 slopos-boot-core = { workspace = true }
 slopos-core = { workspace = true }
+slopos-cpufreq-core = { workspace = true }
 slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }
 slopos-drivers = { workspace = true }

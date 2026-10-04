@@ -83,9 +83,19 @@ fn collect_crash_records() {
     }
 }
 
+/// In the sealed base of a machine the host built paired; the daemon runs
+/// only there.
+const REMOTE_CONF: &str = "/usr/share/slopos/remote/remote.conf";
+
 pub fn init_user_main() {
     upgrade_console_font();
     collect_crash_records();
+
+    // Early, so a machine whose desktop never comes up can still be reached;
+    // never waited for. The final loop reaps it if it exits.
+    if std::fs::metadata(REMOTE_CONF).is_ok() {
+        spawn_service("remoted");
+    }
 
     // Must precede anything interactive; a missing or invalid /etc/keymap
     // leaves the built-in US default active.

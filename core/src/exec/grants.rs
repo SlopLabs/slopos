@@ -64,6 +64,17 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         delegated: 0,
         priority: None,
     },
+    // Runs what the paired host asks for, as a shell runs what the user types:
+    // `Launch` alone, so `bootctl` and `halt` get their own grants from it and
+    // the daemon holding the network connection holds nothing more. Which
+    // host that is comes from the sealed base alone, or any program could
+    // name one and borrow this grant.
+    ProgramGrant {
+        path: b"/bin/remoted",
+        flags: TASK_FLAG_LAUNCH,
+        delegated: 0,
+        priority: None,
+    },
     // Draws straight to the framebuffer before a compositor exists — what
     // `roulette_draw`'s `requires(display_exclusive)` gates.
     ProgramGrant {
@@ -112,6 +123,14 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     ProgramGrant {
         path: b"/bin/bootctl",
         flags: TASK_FLAG_MOUNT | TASK_FLAG_POWER,
+        delegated: 0,
+        priority: None,
+    },
+    // Sets the HWP preference and limits and the placement policy every CPU
+    // runs under (`cpu_perf_ctl`, classified `Power`).
+    ProgramGrant {
+        path: b"/bin/cpufreq",
+        flags: TASK_FLAG_POWER,
         delegated: 0,
         priority: None,
     },

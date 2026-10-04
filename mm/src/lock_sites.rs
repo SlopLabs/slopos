@@ -87,4 +87,13 @@ impl SiteTable {
             );
         }
     }
+
+    /// Zero every site's counts, keeping the sites claimed.
+    pub fn reset_counts(&self) {
+        for site in &self.sites {
+            site.acquires.store(0, Ordering::Relaxed);
+            site.wait.store(0, Ordering::Relaxed);
+            site.hold.store(0, Ordering::Relaxed);
+        }
+    }
 }

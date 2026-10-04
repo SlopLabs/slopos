@@ -35,9 +35,11 @@ members = [
   "net-core",
   "nvme-core",
   "rtl8168-core",
+  "cpufreq-core",
   "ext4-core",
   "tls-core",
   "http-core",
+  "remote-core",
   "fat-core",
   "boot-core",
   "tree-core",
@@ -120,9 +122,11 @@ slopos-chrome-core = { path = "chrome-core" }
 slopos-net-core = { path = "net-core" }
 slopos-nvme-core = { path = "nvme-core" }
 slopos-rtl8168-core = { path = "rtl8168-core" }
+slopos-cpufreq-core = { path = "cpufreq-core" }
 slopos-ext4-core = { path = "ext4-core" }
 slopos-tls-core = { path = "tls-core" }
 slopos-http-core = { path = "http-core" }
+slopos-remote-core = { path = "remote-core" }
 slopos-fat-core = { path = "fat-core" }
 slopos-boot-core = { path = "boot-core" }
 slopos-tree-core = { path = "tree-core" }

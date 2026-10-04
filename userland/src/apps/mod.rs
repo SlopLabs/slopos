@@ -1,6 +1,7 @@
 pub mod bootctl;
 pub mod compositor;
 pub mod coreutils;
+pub mod cpufreq;
 pub mod curl;
 pub mod editor;
 pub mod file_manager;
@@ -13,6 +14,7 @@ pub mod keymap;
 pub mod nc;
 pub mod nmap;
 pub mod ping;
+pub mod remoted;
 pub mod roulette;
 pub mod shell;
 pub mod ss;

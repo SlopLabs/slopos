@@ -766,6 +766,26 @@ pub const SYSCALL_EFIVAR_GET: u64 = SYSCALL_PRIVATE_BASE + 37;
 /// `BootNext` that is not one option number. `BootCurrent` is `EPERM`.
 pub const SYSCALL_EFIVAR_SET: u64 = SYSCALL_PRIVATE_BASE + 38;
 
+/// `cpu_perf(info: *mut UserCpuPerfInfo, cpus: *mut UserCpuPerf, max) ->
+/// entries written`: frequency control state and, per CPU, the APERF/MPERF
+/// and TSC sample its last tick or idle entry took, its HWP registers and its
+/// core type. Unprivileged. `info` may be null.
+pub const SYSCALL_CPU_PERF: u64 = SYSCALL_PRIVATE_BASE + 39;
+
+/// `cpu_perf_ctl(op, value) -> settings generation`: one of the
+/// `CPU_PERF_OP_*` changes, applied by every CPU at its next tick or idle
+/// entry, each of which it is woken for. `EOPNOTSUPP` for an HWP operation on
+/// a CPU without HWP (or without its preference field), `EINVAL` for a value
+/// out of range. Gated on `Capability::Power`: the setting trades the whole
+/// machine's speed against its power.
+pub const SYSCALL_CPU_PERF_CTL: u64 = SYSCALL_PRIVATE_BASE + 40;
+
+/// `prof_ctl(op, label: *const u8, label_len) -> 0` (or the state for
+/// `PROF_OP_STATUS`): start, stop or report the sampling profiler `prof=on`
+/// starts at boot. A report label is 1 to `PROF_LABEL_MAX` bytes of
+/// `[A-Za-z0-9_.-]`, `EINVAL` otherwise.
+pub const SYSCALL_PROF_CTL: u64 = SYSCALL_PRIVATE_BASE + 41;
+
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
 /// call.
 pub const EFIVAR_DATA_MAX: usize = 4096;
@@ -814,6 +834,6 @@ const _: () = assert!(SYSCALL_PRIVATE_BASE > SYSCALL_LINUX_MAX);
 const _: () = assert!(SYSCALL_PRIVATE_BASE & 0x4000_0000 == 0);
 
 const _: () = assert!(
-    SYSCALL_TEST_PANIC < SYSCALL_PRIVATE_END,
+    SYSCALL_PROF_CTL < SYSCALL_PRIVATE_END,
     "private syscall range is full; raise SYSCALL_PRIVATE_TABLE_SIZE",
 );

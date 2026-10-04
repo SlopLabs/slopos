@@ -6,6 +6,9 @@
 //! `COREUTILS_LINKS` names the multicall binary's installed names,
 //! `EXTRA_SHARED_OBJECTS` the shared objects a tests image adds to `/lib`, and
 //! `SLOPOS_BUILD_TAG`, when set, is written to `/usr/share/slopos/build-tag`.
+//! `REMOTE_PAIRING_DIR`, when set, names a directory holding the broker
+//! `remoted` dials ([`REMOTE_PAIRING`]), packed at `/usr/share/slopos/remote`,
+//! where no process can rewrite it.
 //! `RECIPE_PROGRAMS` names programs a recipe built, by their path below
 //! `RECIPE_PREFIX`, which they keep below `/`, and `RECIPE_LICENSES` the
 //! recipes whose licence texts go with them.
@@ -38,6 +41,10 @@ const ROOT_DIRS: [&str; 4] = ["/etc", "/var", "/home", "/media"];
 
 const SLIBC_LICENSES: [&str; 3] = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"];
 
+/// What a remote pairing directory holds; `remoted` reads these, and nothing
+/// else, from `/usr/share/slopos/remote`.
+const REMOTE_PAIRING: [&str; 3] = ["remote.conf", "ca.pem", "token"];
+
 struct Entry {
     path: String,
     mode: u32,
@@ -52,6 +59,7 @@ struct Extras {
     recipe_prefix: String,
     recipe_programs: String,
     recipe_licenses: String,
+    remote_pairing: String,
 }
 
 impl Extras {
@@ -64,6 +72,7 @@ impl Extras {
             recipe_prefix: var("RECIPE_PREFIX"),
             recipe_programs: var("RECIPE_PROGRAMS"),
             recipe_licenses: var("RECIPE_LICENSES"),
+            remote_pairing: var("REMOTE_PAIRING_DIR"),
         }
     }
 }
@@ -315,6 +324,16 @@ fn layout(
             format!("{}\n", extras.build_tag).into_bytes(),
         );
     }
+    if !extras.remote_pairing.is_empty() {
+        let dir = Path::new(&extras.remote_pairing);
+        for name in REMOTE_PAIRING {
+            add(
+                format!("/usr/share/slopos/remote/{name}"),
+                MODE_DATA,
+                read(&dir.join(name))?,
+            );
+        }
+    }
     Ok(entries)
 }
 
@@ -557,6 +576,38 @@ mod tests {
             ));
             at = align(body + size);
         }
+    }
+
+    #[test]
+    fn packs_a_remote_pairing_whole_or_not_at_all() {
+        let dir = scratch("pairing");
+        let pairing = dir.join("pairing");
+        fs::create_dir_all(&pairing).unwrap();
+        fs::write(pairing.join("remote.conf"), b"broker = h:1\n").unwrap();
+        fs::write(pairing.join("ca.pem"), b"PEM").unwrap();
+        let extras = Extras {
+            remote_pairing: pairing.to_string_lossy().into_owned(),
+            ..Extras::default()
+        };
+        let out = dir.join("out.cpio");
+        let missing = run(&dir.join("root"), &out, &dir.join("build"), &[], &extras);
+        assert!(missing.unwrap_err().contains("token"));
+        fs::write(pairing.join("token"), b"secret\n").unwrap();
+        fs::write(pairing.join("stray"), b"not packed").unwrap();
+        run(&dir.join("root"), &out, &dir.join("build"), &[], &extras).unwrap();
+        let got = records(&fs::read(&out).unwrap());
+        let remote: Vec<_> = got
+            .iter()
+            .filter(|(name, _, _)| name.starts_with("/usr/share/slopos/remote/"))
+            .collect();
+        assert_eq!(remote.len(), 3);
+        assert!(remote.iter().all(|(_, mode, _)| *mode == MODE_DATA));
+        assert!(remote.contains(&&(
+            "/usr/share/slopos/remote/token".to_owned(),
+            MODE_DATA,
+            b"secret\n".to_vec()
+        )));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

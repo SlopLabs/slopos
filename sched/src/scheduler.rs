@@ -2146,6 +2146,7 @@ pub fn scheduler_timer_tick() {
     // The tick is the only context that reaches every CPU; a peer's PAT/MTRR
     // MSRs are readable only by that peer.
     slopos_mm::cache_census::record_current_cpu();
+    crate::cpufreq::on_tick(cpu_id);
 
     // Tick-driven so the on-screen log renders even when dispatch is wedged,
     // which is exactly when it is needed.

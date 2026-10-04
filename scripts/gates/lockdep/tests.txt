@@ -348,9 +348,21 @@ require-phase post-userland-tests
 #               (each the cycle detector passed), and each band takes its
 #               spread widened by its width above. Boot edges 39 and chains
 #               111 sit inside their caps, and the kernel bands held.
+#   2026-10-04  userland 225 -> 227: full speed (`plans/bare-metal.md` phase
+#               7). No new lock: `cpufreq_test` starts the sampling profiler
+#               at runtime (`prof start`), the first test to, and the
+#               lock-site tables' `EXT2_LOCK_SITES` and
+#               `PROCESS_VM_LOCK_SITES` register on the first acquire a
+#               profiled lock makes. Boot and the kernel phase hold at 76 and
+#               216, which is that signature. Three full runs counted 227,
+#               228, 227, the extra one the pool-slot variance recorded above;
+#               every banded pool stayed inside its band (kernel edges
+#               182-184, chains 409-413; userland edges 231-237, chains
+#               473-481), and boot's 39 edges and 111 chains sit inside their
+#               caps.
 boot	classes	76
 post-kernel-tests	classes	216
-post-userland-tests	classes	225
+post-userland-tests	classes	227
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the

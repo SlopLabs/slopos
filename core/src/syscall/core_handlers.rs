@@ -14,7 +14,7 @@ use slopos_abi::tty_error::TtyError;
 use slopos_ostd::authority::BootEntry;
 use slopos_ostd::klog_debug;
 
-use crate::syscall::args::{UserBytes, UserPtr};
+use crate::syscall::args::{UserBytes, UserPtr, UserSlice};
 use crate::syscall::common::{
     USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
 };
@@ -576,4 +576,72 @@ define_syscall!(syscall_percpu_stats
     }
 
     Ok(max_entries as u64)
+});
+
+define_syscall!(syscall_cpu_perf
+    (ctx, info_out: Option<UserPtr<slopos_abi::syscall::UserCpuPerfInfo>>,
+     cpus: UserSlice<slopos_abi::syscall::UserCpuPerf>) cap(SysInspect)
+    -> Result<u64, Errno>
+{
+    use slopos_abi::syscall::UserCpuPerf;
+
+    if let Some(info_out) = info_out {
+        let info = slopos_sched::cpufreq::info();
+        copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
+    }
+    let entries = cpus.len().min(slopos_arch::pcr::get_cpu_count());
+    for cpu in 0..entries {
+        let record = slopos_sched::cpufreq::cpu_record(cpu);
+        let dst_addr = cpus
+            .base_u64()
+            .wrapping_add((cpu * core::mem::size_of::<UserCpuPerf>()) as u64);
+        let user_ptr = slopos_mm::user_ptr::UserPtr::<UserCpuPerf>::try_new(dst_addr)
+            .map_err(|_| Errno::EFAULT)?;
+        copy_to_user(user_ptr, &record).map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(entries as u64)
+});
+
+// `Power`: the preference and limits trade every CPU's speed against the
+// machine's power draw, and the placement policy moves every task.
+define_syscall!(syscall_cpu_perf_ctl (ctx, op: u64, value: u64) cap(Power)
+    -> Result<u64, Errno> {
+    slopos_sched::cpufreq::control(op, value).map(u64::from)
+});
+
+define_syscall!(syscall_prof_ctl (ctx, op: u64, label: UserBytes) cap(SysInspect)
+    -> Result<u64, Errno> {
+    use slopos_abi::syscall::{
+        PROF_LABEL_MAX, PROF_OP_REPORT, PROF_OP_START, PROF_OP_STATUS, PROF_OP_STOP,
+    };
+
+    match op {
+        PROF_OP_START => slopos_sched::profile::start(),
+        PROF_OP_STOP => slopos_sched::profile::stop(),
+        PROF_OP_STATUS => return Ok(u64::from(slopos_sched::profile::enabled())),
+        PROF_OP_REPORT => {
+            if label.is_empty() || label.len() > PROF_LABEL_MAX {
+                return Err(Errno::EINVAL);
+            }
+            let mut text = [0u8; PROF_LABEL_MAX];
+            let len = syscall_bounded_from_user(
+                &mut text,
+                label.base_u64(),
+                label.len() as u64,
+                PROF_LABEL_MAX,
+            )
+            .map_err(|_| Errno::EFAULT)?;
+            let text = &text[..len];
+            if !text
+                .iter()
+                .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+            {
+                return Err(Errno::EINVAL);
+            }
+            let label = core::str::from_utf8(text).map_err(|_| Errno::EINVAL)?;
+            slopos_sched::profile::report(label);
+        }
+        _ => return Err(Errno::EINVAL),
+    }
+    Ok(0)
 });

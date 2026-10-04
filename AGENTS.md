@@ -744,6 +744,80 @@ the chip says the machine's vendor validated them (MAC OCP `0xc0b2`); and
 `driver_core::shutdown` stops its DMA on poweroff and reboot. Only the laptop
 grades the hardware half.
 
+**The CPUs run at the speed asked of them.** `sched/src/cpufreq.rs` is
+frequency control and core-type topology; the register layouts, the command
+line and the placement score are `cpufreq-core`, host-tested under `just
+test-host`. Every register involved is per logical CPU and reachable only from
+that CPU, so each CPU records and programs its own: the boot CPU in the
+`cpufreq` boot step ahead of `smp`, each AP during its bring-up, after its IDT
+is loaded. Under `cpufreq=hwp`, the default, a CPU with HWP enables it
+(`IA32_PM_ENABLE`, write-once until reset, notifications off) and asks for
+autonomous selection between its lowest and highest level — guaranteed when the
+firmware disabled turbo — at the configured energy-performance preference;
+`cpufreq=firmware` writes nothing, and a CPU without HWP keeps the firmware's
+legacy settings either way. The boot CPU records what the firmware left first
+(`IA32_PM_ENABLE`, `IA32_MISC_ENABLE`, `MSR_PLATFORM_INFO`, each CPU's
+`IA32_PERF_CTL` and a firmware-enabled HWP request), and the boot log's
+`CPUFREQ:` line says it. Each CPU samples `IA32_APERF`, `IA32_MPERF` and the
+TSC together at every timer tick and idle entry — the pair stops while a CPU is
+halted, so the idle sample stays current — and `IA32_THERM_STATUS`, CPU 0 also
+the package's; `cpu_perf` (unprivileged) hands userland those samples, the HWP
+registers, the core type and SMT position (`CPUID` 0x1A and 0xB) and the
+measured TSC rate MPERF counts at. `cpu_perf_ctl` (`Power`) changes the
+preference, the limits, the placement policy or enables HWP on a boot that
+left it to the firmware: a settings generation every CPU applies at its next
+tick or idle entry, and is woken for. MSRs are touched only where CPUID
+enumerates them, the Intel-only ones only on Intel, and the thermal and
+platform ones only on bare metal. On a part whose CPUs differ — hybrid core
+types, or SMT siblings — `sched.hybrid=on` places a waking or new task on the
+best idle CPU: a P-core whose core is idle, then an E-core, then a thread
+beside a busy sibling, the HWP highest level breaking ties and a warm
+`last_cpu` kept when it is as good; the kick that sends an idle CPU to steal
+prefers the same. A running task is not migrated toward a better CPU; it moves
+when it next wakes. Identical CPUs without siblings, as QEMU's are, place as
+before. `/bin/cpufreq` (granted `Power` by path) is the tool: `status`, `watch`,
+`run -- CMD` (busy time, effective MHz per class, package temperature and
+throttle causes, and one `CPUFREQ[run]:` line on stderr), `set
+hwp|epp|limits|placement`, and `bench`, which times one workload pinned to each
+CPU, on an SMT pair and wherever the scheduler puts it (`CPUFREQ[bench]:`).
+`sysmon` shows each CPU's type and clock. `prof` (`prof_ctl`) starts, stops and
+reports the sampling profiler on a running system; its report carries each
+CPU's busy share and effective clock over the span.
+
+**A machine on the LAN is driven from this host.** `/bin/remoted`, which init
+starts when the base carries `/usr/share/slopos/remote/remote.conf`, dials out
+— nothing on SlopOS listens — to `scripts/remote.py serve`, the broker, on one
+TCP port (7330), over TLS 1.3 with `tls-core`, pinning the broker's own CA and
+the name `slopos-remote`, and proves itself with the broker's token. It keeps
+an idle connection open and opens another whenever one takes a request, so
+requests run side by side; it redials with backoff and pings both ways.
+Requests are `remote-core`'s frames: run a program (argv, cwd, env, stdin,
+timeout; stdout, stderr and the exit status streamed back), and write or read
+a file, atomically and checked by SHA-256 end to end. remoted holds `Launch` by
+path, so a program it starts gets its grant — `bootctl` its `Mount` and
+`Power`, `cpufreq` its `Power` — and whoever holds the broker's key holds the
+machine. **The pairing lives only in the base,** which no process can write:
+every program can write `/etc`, so a pairing read from there would let any
+program point a `Launch` holder at a broker of its own. The host bakes it in
+(`REMOTE_PAIRING_DIR`, which `tools/initramfs` packs whole or not at all) into
+a separate base, `builddir/initramfs-remote.cpio`, so the shipped
+`initramfs.cpio` never carries a token; `scripts/selfhost.sh` carries a
+running machine's pairing into every base it builds there; and `remote.py`
+refuses to serve or install a base paired with another broker, or with none.
+The token is readable inside the base, which lets a local program pose as the
+agent to the broker and no more. The broker's plain-HTTP side serves only `GET
+/files/<name>`, the files it was told to offer. The CLI reaches the broker over
+a unix socket: `just remote status|wait|run|sh|push|pull|klog`, and `just
+remote-install`, which builds the release kernel and the paired base under a
+fresh `SLOPOS_BUILD_TAG`, installs them into `bootctl spare`'s slot, boots it
+once and waits for the machine to come back with that tag (`--commit` makes it
+the default). `just remote-serve` (`REMOTE_HOST`, `REMOTE_PORT`) prints the
+bootstrap for a machine that does not yet run remoted — `curl` the offered
+kernel and paired base, check their SHA-256, `bootctl install`, `oneshot`,
+`reboot` — and the `ufw` rule a firewalled host needs. State lives in
+`~/.config/slopos-remote`, outside the tree. `just test-remote` grades all of
+it under QEMU, a pairing planted under `/etc/remote` included.
+
 **The disk is the root.** `root=auto` mounts a writable `disk0` — the first disk probed, `nvme0n1` under QEMU — at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=disk` insists on the disk, and `root=initramfs` mounts no disk it was not asked to by a `mount=`, which is what the live ISO boots with. `root=` also takes a device in any spelling a mount source does — `/dev/nvme0n1p2`, `vda1`, `PARTUUID=…`, `UUID=…`, `LABEL=…` — where a partition comes from the GPT or MBR table on its disk; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
 **Every volume the tree builds is ext4, in one profile.** `ext4-core/profile`
@@ -1005,7 +1079,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 
@@ -1178,6 +1252,7 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 6G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
 - `just test-install` — the install check: boot from `builddir/boot-disk.img`, one disk in the bare-metal layout (an ESP holding Limine and `limine.conf` under `\EFI\SlopOS\` and at the removable-media path, the boot partition with a kernel and base per slot under `/boot/<slot>/`, the tests image as the root partition every slot boots with as `root=PARTUUID=`, and the crash partition), and across the resets of one QEMU let `install_test` register SlopOS's firmware entry first in `BootOrder`, clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot` and through that entry, commit it as `LoaderEntryDefault`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default, through the entry again, and find the panic's record moved from the crash partition to `/var/log/crash/` and reported by `bootctl status` as that slot's last boot; then the same for a slot that takes the format-free abort. The host then holds the ESP to the bytes it built, so no commit touched `limine.conf`, and the root partition to `e2fsck -fn` and to being at rest. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
 - `just test-installer` — the installer check: the tests system on a USB stick (`INSTALL_STICK`, `qemu-xhci`), its install medium carrying the payload, on the pinned NV-varstore OVMF with the varstore kept from one QEMU run to the next (`OVMF_VARS_FILE`) but for the reinstall's, which starts afresh as a person picking the stick from the firmware's menu does, and one NVMe disk without the suite's own (`QEMU_TEST_DISKS=0`), one of three `scripts/make_installer_disk.sh` makes: a blank one, erased; another system's, holding an ESP with `\EFI\other\`, a data partition and the firmware entry `installer_test` gives it, which SlopOS goes beside in free space; and one whose partition is reused as the root. `installer_test` runs `/bin/installer`, for the blank disk as a person does — typed at `/bin/shell`, which must hand it its grant, its questions answered on standard input — and for the others with flags; booted from the disk with the stick gone, through SlopOS's own firmware entry (`BootCurrent`), it takes the loop once — `scripts/selfhost.sh install tests`, a boot of slot b and `bootctl commit` — after holding the other system's entry to `BootOrder` and Limine's menu. The blank disk then takes a reinstall from the stick that keeps its root, with a file left in it, and a boot that finds the file and the old slots' state gone. The host holds each table to `sfdisk --verify`, each FAT volume to `fsck.fat -n`, each root to `e2fsck -fn`, to being at rest and to sealed base mount points, the other system's entries, partition and files to their bytes, and a reused root to a new PARTUUID. `INSTALLER_PAYLOAD=0` installs without the toolchain, cloning a slot where it would build one, and needs no `just toolchain`; `just test-installer foreign` runs one disk.
+- `just test-remote` — the remote-control check: an installed machine under QEMU, a boot disk whose slots hold a base paired with a broker on this host's loopback (SLIRP's 10.0.2.2), and a root carrying a decoy pairing under `/etc/remote` for a second, live broker; driven through `scripts/remote.py`: the agent's identity and build tags; commands' stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; an 8 MiB file pushed and pulled back byte-identical; `/dev/kmsg`; the base's pairing unwritable and the decoy never dialled; a second daemon, preferred as the newest; an install into the spare slot, the boot into it and its commit; and `/bin/halt`, which must end QEMU.
 - `just test-install-guest` — the two loops in one QEMU: a clean tree, `just toolchain` and the self-hosting root; slot a is the optimized tests kernel, and `install_test`, finding a workspace at `/src/slopos`, fetches the host's `HEAD` into its clone, checks it out and runs `scripts/selfhost.sh install tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is otherwise unset — which builds the tests kernel, userland and base and installs the kernel and base into slot b, then checks the tree's own branch out again; the run boots them once, and that boot must report the tag in `uname -v` and in the base's `/usr/share/slopos/build-tag`. The kernel the guest built then commits a change on the fetched `HEAD` in a scratch clone and pushes it into a scratch repository, which the host fetches and holds to that commit's parent being `HEAD`. The run then commits and rolls back as `test-install` does, and the host holds slot b's kernel and base to the root's `kernel-tests.elf` and `initramfs-tests.cpio` byte for byte, and the boot log's `BOOT: base` line to the base's size. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
 - `just test-selfhost` — the self-hosting check: needs `just toolchain` and a clean working tree (the host grades the guest's build of `HEAD` with its own gates and tests). The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), fetches the host's `HEAD` into the self-hosting root's clone and checks it out — refusing a tree with uncommitted edits — builds the dev and tests systems — kernel, userland and base — with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the clone's `builddir/target/cargo-timings`, and checks the tree's own branch out again; the host holds the commit the guest names to `HEAD`, the root to `e2fsck -fn` and to being at rest, exports both kernels and the tests base, runs the ELF gates on the kernels and runs the suite on the guest's tests kernel and base. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
 - `just bench-selfhost` — the self-hosting build as a profile: boots the optimized tests kernel on the self-hosting root with `prof=on` (`BENCH_PROF=` turns it off), runs only `selfhost_test`, so the guest builds the host's `HEAD`, and hands the log to `scripts/prof_report.py`, which prints the guest's build times, per-CPU busy and halted time, the ext2 lock's wait and hold (writeback's share apart) and the same lock and the per-process VM lock by call site, block I/O counts and latency, syscall costs, and kernel and user ticks symbolized — user ticks through the exec-mapping table the kernel prints, `builddir/bench-libc.so` and the installed toolchain's libraries. No grading and no clean-tree requirement; run it with nothing else loading the host, because every number in it is wall time.
@@ -1194,7 +1269,7 @@ All four boot-based ratchets (`check_test_count.sh`, `check_lockdep_headroom.sh`
 A ratchet failure is a **measurement to re-take, not a number to raise**. Bump a cap only with a fresh `--emit-allowlist` in the same commit, and say in the commit message which lock, test or account added the delta. Never edit a gate file by hand to make a run pass.
 
 ### Cmdline knobs
-The kernel parses these from the Limine cmdline (threaded through `scripts/build_iso.sh`'s third positional arg, controlled by the `test_cmdline` justfile constant or the `TEST_CMDLINE=…` env override). For manual `just boot-log` invocations, set `BOOT_CMDLINE='tests=on tests.run=mm::*'` to run a subset.
+The kernel parses these from the Limine cmdline (threaded through `scripts/build_iso.sh`'s third positional arg, controlled by the `test_cmdline` justfile constant or the `TEST_CMDLINE=…` env override), followed by whatever the kernel was built with in `SLOPOS_BUILTIN_CMDLINE` — appended, so a knob read by its last occurrence takes the built-in value, and a slot whose `limine.conf` entry is fixed still boots with an experiment's knobs (`SLOPOS_BUILTIN_CMDLINE='cpufreq=firmware prof=on' just remote-install`). The boot log says `BOOT: built-in command line appended: …`. For manual `just boot-log` invocations, set `BOOT_CMDLINE='tests=on tests.run=mm::*'` to run a subset.
 
 | Key | Values | Effect |
 |---|---|---|
@@ -1217,7 +1292,10 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `watchdog.miss_threshold` | integer | consecutive heartbeat samples a CPU may miss before the watchdog reports it; default 100, `0` refused |
 | `watchdog.panic` | `on` / `off` | whether a stall five thresholds long is fatal; default on bare metal only, since under a hypervisor a descheduled vCPU looks the same |
 | `mem.commit` | integer | percent of usable frames the commit ledger may promise to private mappings; default 100, capped at 400, `0` measures without a ceiling |
-| `prof` | `on` | sample where the time goes — per-CPU user/kernel/idle ticks and halted time, the hottest kernel RIPs, user ticks by task name, and the kernel stacks blocked user tasks are parked on whenever a CPU idles — printed as `PROF[post-userland-tests]:` lines; off by default. `TEST_CMDLINE_EXTRA=prof=on just test-selfhost` profiles the guest's build |
+| `prof` | `on` | sample where the time goes — per-CPU user/kernel/idle ticks and halted time and each CPU's busy share and effective clock, the hottest kernel RIPs, user ticks by task name, and the kernel stacks blocked user tasks are parked on whenever a CPU idles — printed as `PROF[post-userland-tests]:` lines; off by default. `TEST_CMDLINE_EXTRA=prof=on just test-selfhost` profiles the guest's build. `prof start`, `prof report <label>` and `prof stop` (`prof_ctl`) do the same on a running system, printing `PROF[<label>]:` lines that `scripts/prof_report.py --label` reads |
+| `cpufreq` | `hwp` / `firmware` | `hwp` (default) enables HWP where the CPU has it and asks every CPU for autonomous selection between its lowest and highest level; `firmware` leaves every frequency register as the firmware left it |
+| `cpufreq.epp` | `performance` / `balance_performance` / `balance_power` / `power` / 0-255 | the energy-performance preference HWP is given; default `balance_performance` (128) |
+| `sched.hybrid` | `on` / `off` | `on` (default) places a task on the best idle CPU by class — a P-core with nothing on it, then an E-core, then a busy core's sibling thread — on a part whose CPUs differ; `off` treats every idle CPU alike |
 | `panic` | `reboot` | a kernel panic resets the machine (ACPI, then `0xCF9`, then the keyboard controller; the format-free abort triple-faults) instead of halting it: how a boot slot that panics falls back to the loader's default. The crash record is written first; on bare metal a panic's screen stays up for ten seconds before the reset, under a hypervisor not at all |
 | `panic.boot` | `on` / `abort` | panic as soon as boot initialisation completes, or take the format-free abort a lockup takes — the broken slots `just test-install` rolls back from |
 
@@ -1345,7 +1423,7 @@ First-time developers should run `scripts/setup_ovmf.sh` to download firmware bl
 `scripts/make_slopos_sysroot.sh` needs the pinned `libc` crate; it takes it from `$CARGO_HOME/registry/cache` when it is already there and only falls back to `static.crates.io`, so an offline environment should pre-populate that cache (or point `LIBC_URL` at a local copy). It also needs the `rust-src` component, which `scripts/ensure_toolchain.sh` installs.
 
 ## Safety & Execution Boundaries
-Keep all work inside this repository. Do not copy kernel binaries to system paths, do not install or chainload on real hardware, and never run outside QEMU/OVMF. The scripts already sandbox execution; if you need fresh firmware or boot assets, use the provided automation instead of manual installs. Treat Limine, OVMF, and the kernel as development artifacts only and avoid touching `/boot`, `/efi`, or other host-level locations.
+Keep all work inside this repository. Do not copy kernel binaries to system paths, do not install or chainload on real hardware, and never run outside QEMU/OVMF — with one exception: a SlopOS machine the user has booted a base paired with this host on (`just remote-serve` and the bootstrap it prints) may be driven through `scripts/remote.py` alone, which runs programs there, moves files and installs a kernel and base into its spare boot slot. Never write its ESP, its firmware variables beyond what `bootctl` does, or another system's partitions, and commit a slot (`--commit`, `bootctl commit`) only once the boot it came from answered with the expected tag. The scripts already sandbox execution; if you need fresh firmware or boot assets, use the provided automation instead of manual installs. Treat Limine, OVMF, and the kernel as development artifacts only and avoid touching `/boot`, `/efi`, or other host-level locations.
 
 
 ## Security Triage & CVSS Ledger (MANDATORY)

@@ -22,6 +22,15 @@ pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
 }
 
+pub fn disable() {
+    ENABLED.store(false, Ordering::Relaxed);
+}
+
+/// Zero every site's counts.
+pub fn reset() {
+    SITES.reset_counts();
+}
+
 /// One slot of the address-space table: the lock and its profile hook.
 pub(super) struct VmLock(SpinLock<ProcessVm>);
 

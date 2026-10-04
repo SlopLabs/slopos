@@ -80,10 +80,9 @@ pub fn calibrate() {
     BASE_TSC.store(tsc1, Ordering::Relaxed);
     BASE_NS.store(ns1, Ordering::Relaxed);
     READY.mark_set();
-    klog_info!(
-        "CLOCK: monotonic clock on the TSC at {} kHz",
-        cycles.saturating_mul(1_000_000) / nanos
-    );
+    let khz = cycles.saturating_mul(1_000_000) / nanos;
+    slopos_kernel_services::clock::record_measured_tsc_khz(khz);
+    klog_info!("CLOCK: monotonic clock on the TSC at {} kHz", khz);
 }
 
 /// Nanoseconds on the monotonic clock: the TSC once calibrated, the HPET

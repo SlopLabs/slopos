@@ -98,6 +98,14 @@ name = "ping"
 path = "src/bin/ping.rs"
 
 [[bin]]
+name = "cpufreq"
+path = "src/bin/cpufreq.rs"
+
+[[bin]]
+name = "remoted"
+path = "src/bin/remoted.rs"
+
+[[bin]]
 name = "widget_gallery"
 path = "src/bin/widget_gallery.rs"
 
@@ -298,6 +306,10 @@ name = "dns_resolve_test"
 path = "src/bin/tests/dns_resolve_test.rs"
 
 [[bin]]
+name = "cpufreq_test"
+path = "src/bin/tests/cpufreq_test.rs"
+
+[[bin]]
 name = "dns_concurrent_test"
 path = "src/bin/tests/dns_concurrent_test.rs"
 
@@ -331,6 +343,7 @@ slopos-font = { workspace = true }
 slopos-http-core = { workspace = true }
 slopos-boot-core = { workspace = true }
 slopos-ext4-core = { workspace = true }
+slopos-cpufreq-core = { workspace = true }
 slopos-fat-core = { workspace = true }
 slopos-tree-core = { workspace = true }
 slopos-keymap-core = { workspace = true }
@@ -338,6 +351,7 @@ slopos-gfx = { workspace = true }
 slopos-net-core = { workspace = true }
 slopos-image = { workspace = true }
 slopos-protocol = { workspace = true }
+slopos-remote-core = { workspace = true }
 slopos-rt = { workspace = true }
 slopos-shell-core = { workspace = true }
 slopos-slibc = { workspace = true }

@@ -568,6 +568,25 @@ fn apply_prof_option(cmdline: &str) {
     }
 }
 
+/// `cpufreq=`, `cpufreq.epp=` and `sched.hybrid=`, read before any CPU is
+/// programmed.
+#[inline(never)]
+fn apply_cpufreq_option(cmdline: &str) {
+    use slopos_cpufreq_core::Config;
+
+    let config = Config::parse(cmdline);
+    slopos_sched::cpufreq::configure(config);
+    if config.rejected & Config::BAD_POLICY != 0 {
+        boot_info(b"Boot option: cpufreq= ignored (want hwp|firmware)\0");
+    }
+    if config.rejected & Config::BAD_EPP != 0 {
+        boot_info(b"Boot option: cpufreq.epp= ignored (want a name or 0-255)\0");
+    }
+    if config.rejected & Config::BAD_PLACEMENT != 0 {
+        boot_info(b"Boot option: sched.hybrid= ignored (want on|off)\0");
+    }
+}
+
 /// Out of line so the boot-config step's frame stays under the 2 KiB gate.
 #[inline(never)]
 fn apply_mem_commit_option(cmdline: &str) {
@@ -792,6 +811,7 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     }
 
     apply_mem_commit_option(cmdline);
+    apply_cpufreq_option(cmdline);
 
     // A typed parser rather than more `contains` arms, so a malformed value
     // degrades to the shipped policy instead of to a disabled console.

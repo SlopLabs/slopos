@@ -31,6 +31,43 @@ impl Msr {
     /// Page Attribute Table.
     pub const PAT: Self = Self(0x277);
 
+    /// Fixed-rate cycle counter, counting at the TSC's rate while in C0.
+    pub const MPERF: Self = Self(0xE7);
+
+    /// Actual-clock cycle counter, counting while in C0.
+    pub const APERF: Self = Self(0xE8);
+
+    /// Ratio limits and the TDP-level frequency (bits 15:8 max non-turbo).
+    pub const PLATFORM_INFO: Self = Self(0xCE);
+
+    /// Legacy (Enhanced SpeedStep) performance request (bits 15:8 ratio).
+    pub const PERF_CTL: Self = Self(0x199);
+
+    /// Per-core thermal status: throttling causes and the temperature below
+    /// the throttling point.
+    pub const THERM_STATUS: Self = Self(0x19C);
+
+    /// Miscellaneous enables: bit 16 EIST, bit 38 turbo disable.
+    pub const MISC_ENABLE: Self = Self(0x1A0);
+
+    /// Package thermal status, laid out as `THERM_STATUS`.
+    pub const PACKAGE_THERM_STATUS: Self = Self(0x1B1);
+
+    /// The throttling temperature (bits 23:16).
+    pub const TEMPERATURE_TARGET: Self = Self(0x1A2);
+
+    /// Bit 0 enables HWP; write-once, cleared only by reset.
+    pub const PM_ENABLE: Self = Self(0x770);
+
+    /// Per-CPU HWP highest/guaranteed/efficient/lowest levels.
+    pub const HWP_CAPABILITIES: Self = Self(0x771);
+
+    /// HWP notification interrupt enables.
+    pub const HWP_INTERRUPT: Self = Self(0x773);
+
+    /// Per-CPU HWP min/max/desired/EPP request.
+    pub const HWP_REQUEST: Self = Self(0x774);
+
     /// Extended Feature Enable Register.
     pub const EFER: Self = Self(0xC000_0080);
 

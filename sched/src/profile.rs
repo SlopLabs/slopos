@@ -2,9 +2,10 @@
 //! timer tick, how long each spent halted, and — whenever a CPU goes idle —
 //! where every blocked user task is parked.
 //!
-//! Off unless the command line says `prof=on`; `report` prints `PROF[...]`
-//! lines. Every table is fixed-size and lock-free, because the tick half runs
-//! in the timer ISR and the park-site half from the idle loop.
+//! Off unless the command line says `prof=on` or `prof_ctl` starts it; `report`
+//! prints `PROF[...]` lines. Every table is fixed-size and lock-free, because
+//! the tick half runs in the timer ISR and the park-site half from the idle
+//! loop.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -20,17 +21,98 @@ use crate::task_struct::{Current, Idle};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static STARTED_TSC: AtomicU64 = AtomicU64::new(0);
+/// When sampling stopped, zero while it runs: where a report's span ends.
+static STOPPED_TSC: AtomicU64 = AtomicU64::new(0);
 /// The first TSC and millisecond clock readings taken once the clock runs,
 /// which is after the command line enables profiling: what converts cycles
 /// to time.
 static CLOCK_TSC: AtomicU64 = AtomicU64::new(0);
 static CLOCK_MS: AtomicU64 = AtomicU64::new(0);
+/// Each CPU's APERF/MPERF/TSC sample when sampling started, and when it
+/// stopped.
+static FREQ_BASE: [[AtomicU64; 3]; MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; 3] }; MAX_CPUS];
+static FREQ_END: [[AtomicU64; 3]; MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; 3] }; MAX_CPUS];
 
 pub fn enable() {
     STARTED_TSC.store(rdtsc(), Ordering::Relaxed);
+    STOPPED_TSC.store(0, Ordering::Relaxed);
+    note_freq(&FREQ_BASE);
     ENABLED.store(true, Ordering::Release);
     slopos_fs::ext2_vfs::lock_profile::enable();
     slopos_mm::process_vm::lock_profile::enable();
+}
+
+/// Zero every table and sample from now on.
+pub fn start() {
+    ENABLED.store(false, Ordering::Release);
+    reset_tables();
+    slopos_fs::ext2_vfs::lock_profile::reset();
+    slopos_mm::process_vm::lock_profile::reset();
+    CLOCK_MS.store(0, Ordering::Relaxed);
+    anchor_clock(crate::sleep::sleep_queue_now_ms());
+    enable();
+}
+
+/// Stop sampling; what was sampled stays for a report.
+pub fn stop() {
+    if ENABLED.swap(false, Ordering::AcqRel) {
+        STOPPED_TSC.store(rdtsc(), Ordering::Relaxed);
+        note_freq(&FREQ_END);
+    }
+    slopos_fs::ext2_vfs::lock_profile::disable();
+    slopos_mm::process_vm::lock_profile::disable();
+}
+
+fn note_freq(into: &[[AtomicU64; 3]; MAX_CPUS]) {
+    for (cpu, slots) in into.iter().enumerate() {
+        let (aperf, mperf, tsc) = crate::cpufreq::sample(cpu).unwrap_or((0, 0, 0));
+        for (slot, value) in slots.iter().zip([aperf, mperf, tsc]) {
+            slot.store(value, Ordering::Relaxed);
+        }
+    }
+}
+
+fn reset_tables() {
+    for time in &CPUS {
+        for counter in [
+            &time.user,
+            &time.kernel,
+            &time.idle,
+            &time.halted_cycles,
+            &time.halt_began,
+            &time.switch_began,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+    KERNEL_RIPS.clear();
+    USER_TASKS.clear();
+    USER_RIPS.clear();
+    EXEC_MAP_KEYS.clear();
+    CHAIN_HITS.clear();
+    FUTEX_ADDRS.clear();
+    for counter in [
+        &SAMPLES,
+        &READY_WAITING,
+        &LAST_SAMPLE_TSC,
+        &SWITCH_CALLS,
+        &SWITCH_CYCLES,
+        &SWITCH_MAX,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+    for counter in BLOCKED_BY_REASON
+        .iter()
+        .chain(&SYSCALL_CALLS)
+        .chain(&SYSCALL_CYCLES)
+        .chain(&FAULT_CALLS)
+        .chain(&FAULT_CYCLES)
+        .chain(&SWITCH_BUCKETS)
+    {
+        counter.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Take the clock anchor on the first reading past zero.
@@ -86,6 +168,14 @@ impl<const N: usize> Histogram<N> {
             counts: [const { AtomicU32::new(0) }; N],
             dropped: AtomicU64::new(0),
         }
+    }
+
+    fn clear(&self) {
+        for (key, count) in self.keys.iter().zip(&self.counts) {
+            key.store(0, Ordering::Relaxed);
+            count.store(0, Ordering::Relaxed);
+        }
+        self.dropped.store(0, Ordering::Relaxed);
     }
 
     /// The slot holding `key`, claiming a free one if it has none.
@@ -477,9 +567,9 @@ fn symbolized(phase: &str, lead: core::fmt::Arguments<'_>, addr: u64) {
     }
 }
 
-/// Print everything sampled so far.
+/// Print everything sampled since sampling last started, running or stopped.
 pub fn report(phase: &str) {
-    if !enabled() {
+    if STARTED_TSC.load(Ordering::Relaxed) == 0 {
         return;
     }
     report_cpus(phase);
@@ -497,14 +587,15 @@ pub fn report(phase: &str) {
 
 #[inline(never)]
 fn report_cpus(phase: &str) {
-    let elapsed = rdtsc()
+    let end = match STOPPED_TSC.load(Ordering::Relaxed) {
+        0 => rdtsc(),
+        stopped => stopped,
+    };
+    let elapsed = end
         .saturating_sub(STARTED_TSC.load(Ordering::Relaxed))
         .max(1);
-    klog_info!(
-        "PROF[{}]: span_ms={}",
-        phase,
-        elapsed / cycles_per_ms().max(1)
-    );
+    let per_ms = cycles_per_ms();
+    klog_info!("PROF[{}]: span_ms={}", phase, elapsed / per_ms.max(1));
     let cpus = slopos_arch::pcr::get_cpu_count().min(MAX_CPUS);
     for (cpu, time) in CPUS.iter().enumerate().take(cpus) {
         let halted = time.halted_cycles.load(Ordering::Relaxed);
@@ -517,6 +608,38 @@ fn report_cpus(phase: &str) {
             time.idle.load(Ordering::Relaxed),
             halted * 100 / elapsed,
             halted * 1000 / elapsed % 10,
+        );
+    }
+    let tsc_khz = match slopos_kernel_services::clock::measured_tsc_khz() {
+        0 => per_ms,
+        khz => khz,
+    };
+    let stopped = STOPPED_TSC.load(Ordering::Relaxed) != 0;
+    for cpu in 0..cpus {
+        let [aperf0, mperf0, tsc0] = FREQ_BASE[cpu].each_ref().map(|v| v.load(Ordering::Relaxed));
+        let (aperf, mperf, tsc) = if stopped {
+            let [aperf, mperf, tsc] = FREQ_END[cpu].each_ref().map(|v| v.load(Ordering::Relaxed));
+            (aperf, mperf, tsc)
+        } else {
+            match crate::cpufreq::sample(cpu) {
+                Some(sample) => sample,
+                None => continue,
+            }
+        };
+        if tsc == 0 {
+            continue;
+        }
+        let d_mperf = mperf.wrapping_sub(mperf0);
+        let busy = slopos_cpufreq_core::freq::busy_permille(d_mperf, tsc.wrapping_sub(tsc0));
+        klog_info!(
+            "PROF[{}]: freq cpu={} type={} busy={}.{}% eff_mhz={}",
+            phase,
+            cpu,
+            crate::cpufreq::core_type(cpu).name(),
+            busy / 10,
+            busy % 10,
+            slopos_cpufreq_core::freq::effective_khz(tsc_khz, aperf.wrapping_sub(aperf0), d_mperf)
+                / 1000,
         );
     }
 }

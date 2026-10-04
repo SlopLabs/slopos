@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Summarize a prof=on boot log: where a self-hosting build's time went.
+"""Summarize a profiler report: where a self-hosting build's time went.
 
-Usage: prof_report.py LOG [--libc LIBC_SO] [--lib-dir DIR ...] [--top N]
+Usage: prof_report.py LOG [--label LABEL] [--libc LIBC_SO] [--lib-dir DIR ...] [--top N]
+
+LOG is a boot log with `prof=on` (the `PROF[post-userland-tests]:` lines) or a
+capture of `prof report LABEL`. Only the lines of one report are read: LABEL's,
+by default the label of the last report in the log.
 
 Kernel ticks arrive symbolized by the kernel and are folded by function. User
 ticks arrive as raw 64-byte lines; the `PROF[..]: map` lines name every
@@ -108,10 +112,19 @@ def main():
     ap.add_argument("--libc")
     ap.add_argument("--lib-dir", action="append", default=[])
     ap.add_argument("--top", type=int, default=40)
+    ap.add_argument("--label", help="the report to read (default: the log's last)")
     args = ap.parse_args()
 
     lines = open(args.log, errors="replace").read().splitlines()
-    prof = [l.split("]: ", 1)[1] for l in lines if l.startswith("PROF[post-userland-tests]: ")]
+    labels = [m.group(1) for l in lines if (m := re.match(r"PROF\[([^\]]+)\]: ", l))]
+    if not labels:
+        sys.exit(f"{args.log}: no PROF[...] lines")
+    label = args.label or labels[-1]
+    if label not in labels:
+        sys.exit(f"{args.log}: no PROF[{label}] lines; the log has {', '.join(dict.fromkeys(labels))}")
+    prefix = f"PROF[{label}]: "
+    prof = [l[len(prefix):] for l in lines if l.startswith(prefix)]
+    print(f"== report {label}")
 
     print("== build times")
     for l in lines:

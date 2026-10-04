@@ -110,6 +110,7 @@ dependencies = [
  "slopos-arch",
  "slopos-boot-core",
  "slopos-core",
+ "slopos-cpufreq-core",
  "slopos-drivers",
  "slopos-fs",
  "slopos-hermetic",
@@ -162,6 +163,10 @@ dependencies = [
  "slopos-signalfd",
  "slopos-testing",
 ]
+
+[[package]]
+name = "slopos-cpufreq-core"
+version = "0.1.0"
 
 [[package]]
 name = "slopos-crt0"
@@ -364,6 +369,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-remote-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-tls-core",
+]
+
+[[package]]
 name = "slopos-ring"
 version = "0.1.0"
 dependencies = [
@@ -395,6 +407,7 @@ dependencies = [
  "paste",
  "slopos-abi",
  "slopos-arch",
+ "slopos-cpufreq-core",
  "slopos-fs",
  "slopos-hermetic",
  "slopos-kernel-services",
@@ -494,6 +507,7 @@ dependencies = [
  "slopos-appkit",
  "slopos-boot-core",
  "slopos-chrome-core",
+ "slopos-cpufreq-core",
  "slopos-editor-core",
  "slopos-ext4-core",
  "slopos-fat-core",
@@ -504,6 +518,7 @@ dependencies = [
  "slopos-keymap-core",
  "slopos-net-core",
  "slopos-protocol",
+ "slopos-remote-core",
  "slopos-rt",
  "slopos-shell-core",
  "slopos-slibc",

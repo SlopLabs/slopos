@@ -265,10 +265,11 @@ pub const TASK_FLAG_POWER: u16 = 0x1000;
 /// The bound has to be a separate right to *launch*, not a floor on what is
 /// launched.
 ///
-/// Conferred on the four programs that actually launch: `/sbin/init`,
-/// `/bin/shell`, `/bin/terminal` (which spawns the shell) and
+/// Conferred on the programs that actually launch: `/sbin/init`,
+/// `/bin/shell`, `/bin/terminal` (which spawns the shell),
 /// `/bin/compositor` (which spawns `/bin/ip` for the network toggle and the
-/// dock's programs). `TASK_FLAG_SYSTEM` implies it.
+/// dock's programs) and `/bin/remoted` (which runs what the paired host
+/// asks for). `TASK_FLAG_SYSTEM` implies it.
 pub const TASK_FLAG_LAUNCH: u16 = 0x2000;
 
 /// May attach and detach filesystems: `mount(2)` and `umount2(2)`.

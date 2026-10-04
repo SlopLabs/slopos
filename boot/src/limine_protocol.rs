@@ -210,6 +210,51 @@ pub fn date_at_boot_unix() -> Option<u64> {
     u64::try_from(stamp).ok().filter(|&s| s != 0)
 }
 
+/// Appended to the loader's command line, so a kernel built for one
+/// experiment carries its own options into a slot whose loader entry is fixed:
+/// an option read by its last occurrence takes this value.
+const BUILTIN_CMDLINE: Option<&str> = option_env!("SLOPOS_BUILTIN_CMDLINE");
+
+const CMDLINE_MAX: usize = 1024;
+
+/// The merged line, NUL-terminated for `boot_get_cmdline`'s C-string readers;
+/// assembled where it lies, since a buffer this size would not fit a frame.
+static MERGED_CMDLINE: InitInPlace<[u8; CMDLINE_MAX]> = InitInPlace::new([0; CMDLINE_MAX]);
+
+/// The loader's command line with [`BUILTIN_CMDLINE`] after it, as a string
+/// and its NUL-terminated pointer; the loader's alone when there is no
+/// built-in one or the two do not fit together.
+fn merged_cmdline(loader: &'static str) -> (&'static str, *const c_char) {
+    let builtin = BUILTIN_CMDLINE.map_or("", str::trim);
+    let fits = loader.len() + 1 + builtin.len() < CMDLINE_MAX;
+    if builtin.is_empty() || !fits {
+        if !builtin.is_empty() {
+            klog_info!("BOOT: built-in command line dropped: it does not fit beside the loader's");
+        }
+        return (loader, loader.as_ptr() as *const c_char);
+    }
+    MERGED_CMDLINE.init_once(|bytes| {
+        let mut len = 0;
+        for part in [loader, builtin] {
+            if part.is_empty() {
+                continue;
+            }
+            if len != 0 {
+                bytes[len] = b' ';
+                len += 1;
+            }
+            bytes[len..len + part.len()].copy_from_slice(part.as_bytes());
+            len += part.len();
+        }
+    });
+    let ptr = MERGED_CMDLINE.as_ptr() as *const c_char;
+    let Some(text) = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(ptr) else {
+        return (loader, loader.as_ptr() as *const c_char);
+    };
+    klog_info!("BOOT: built-in command line appended: {}", builtin);
+    (text, ptr)
+}
+
 fn build_system_info() -> SystemInfo {
     let mut info = SystemInfo::new();
 
@@ -263,9 +308,9 @@ fn build_system_info() -> SystemInfo {
                 module.data().len()
             );
         }
-        let cmdline_str = kernel_file.cmdline();
+        let (cmdline_str, cmdline_ptr) = merged_cmdline(kernel_file.cmdline());
         if !cmdline_str.is_empty() {
-            info.cmdline_ptr = KernelSync::new(cmdline_str.as_ptr() as *const c_char);
+            info.cmdline_ptr = KernelSync::new(cmdline_ptr);
             info.cmdline = Some(cmdline_str);
             info.flags.kernel_cmdline_available = true;
 

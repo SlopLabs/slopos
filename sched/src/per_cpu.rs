@@ -1045,15 +1045,14 @@ static KICK_PENDING: [AtomicBool; slopos_arch::MAX_CPUS] =
 /// peer sleeps. Linux kicks an idle CPU into balancing the same way.
 fn kick_idle_peer(busy: usize) {
     let cpu_count = slopos_arch::pcr::get_cpu_count();
-    for i in 1..cpu_count {
-        let cpu = (busy + i) % cpu_count;
-        if !is_schedulable_cpu(cpu, 0) || !cpu_is_idle(cpu) {
-            continue;
-        }
+    let ranked = ranked_idle_cpu(0, None).filter(|&cpu| cpu != busy);
+    let mut order = ranked
+        .into_iter()
+        .chain((1..cpu_count).map(|i| (busy + i) % cpu_count));
+    if let Some(cpu) = order.find(|&cpu| is_schedulable_cpu(cpu, 0) && cpu_is_idle(cpu)) {
         if !KICK_PENDING[cpu].swap(true, Ordering::AcqRel) {
             crate::lifecycle::send_reschedule_ipi(cpu);
         }
-        return;
     }
 }
 
@@ -1077,11 +1076,46 @@ fn cpu_is_idle(cpu_id: usize) -> bool {
     with_cpu_scheduler(cpu_id, |sched| sched.effective_load() == 0).unwrap_or(false)
 }
 
+/// The best idle CPU by placement score on a part whose CPUs differ, `prefer`
+/// among equals; `None` when ranking is off or no permitted CPU is idle.
+fn ranked_idle_cpu(affinity: u32, prefer: Option<usize>) -> Option<usize> {
+    if !crate::cpufreq::ranking_active() {
+        return None;
+    }
+    let cpu_count = slopos_arch::pcr::get_cpu_count().min(MAX_CPUS);
+    if cpu_count == 0 {
+        return None;
+    }
+    let mut idle = [0u64; MAX_CPUS / 64];
+    for cpu in 0..cpu_count {
+        if cpu_is_idle(cpu) {
+            idle[cpu / 64] |= 1 << (cpu % 64);
+        }
+    }
+    let is_idle = |cpu: usize| idle[cpu / 64] & (1 << (cpu % 64)) != 0;
+    let start = FORK_RR_COUNTER.fetch_add(1, Ordering::Relaxed) % cpu_count;
+    let candidates = (0..cpu_count)
+        .map(|i| (start + i) % cpu_count)
+        .filter(|&cpu| is_schedulable_cpu(cpu, affinity))
+        .map(|cpu| slopos_cpufreq_core::Candidate {
+            cpu,
+            idle: is_idle(cpu),
+            score: crate::cpufreq::placement_score(cpu, |other| !is_idle(other)),
+        });
+    slopos_cpufreq_core::place::pick_idle(candidates, prefer)
+}
+
 /// Select the best CPU for a waking task.
 pub fn select_target_cpu(task: &Task) -> Option<usize> {
     let current_cpu = slopos_arch::pcr::get_current_cpu();
     let affinity = task.cpu_affinity();
     let last_cpu = task.last_cpu() as usize;
+
+    // On a part whose CPUs differ, the best idle CPU; `last_cpu` keeps the
+    // task when it is as good, its caches being warm.
+    if let Some(cpu) = ranked_idle_cpu(affinity, Some(last_cpu)) {
+        return Some(cpu);
+    }
 
     // Prefer `last_cpu` when idle: its cache-warm data is still there.
     if is_schedulable_cpu(last_cpu, affinity) && cpu_is_idle(last_cpu) {
@@ -1135,7 +1169,7 @@ pub fn select_target_cpu_for_new(task: &Task) -> Option<usize> {
     let current_cpu = slopos_arch::pcr::get_current_cpu();
     let affinity = task.cpu_affinity();
 
-    if let Some(best_cpu) = find_idlest_cpu(affinity) {
+    if let Some(best_cpu) = ranked_idle_cpu(affinity, None).or_else(|| find_idlest_cpu(affinity)) {
         return Some(best_cpu);
     }
 

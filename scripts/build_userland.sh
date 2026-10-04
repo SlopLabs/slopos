@@ -217,6 +217,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin spin_signal_test \
         --bin terminal_grid_test \
         --bin sysmon_selection_test \
+        --bin cpufreq_test \
         --bin clipboard_test \
         --bin keymap_test \
         --bin appkit_test \
@@ -334,6 +335,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/sysmon_selection_test" ]; then
         cp "$RELEASE_DIR/sysmon_selection_test" "$BUILD_DIR/sysmon_selection_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/cpufreq_test" ]; then
+        cp "$RELEASE_DIR/cpufreq_test" "$BUILD_DIR/cpufreq_test.elf"
     fi
     if [ -f "$RELEASE_DIR/clipboard_test" ]; then
         cp "$RELEASE_DIR/clipboard_test" "$BUILD_DIR/clipboard_test.elf"

@@ -42,6 +42,25 @@ pub mod lock_profile {
         ENABLED.store(true, Ordering::Relaxed);
     }
 
+    pub fn disable() {
+        ENABLED.store(false, Ordering::Relaxed);
+    }
+
+    /// Zero the totals and every site's counts.
+    pub fn reset() {
+        for total in [
+            &ACQUIRES,
+            &WAIT_CYCLES,
+            &HOLD_CYCLES,
+            &MAX_WAIT,
+            &MAX_HOLD,
+            &WRITEBACK_HOLD_CYCLES,
+        ] {
+            total.store(0, Ordering::Relaxed);
+        }
+        SITES.reset_counts();
+    }
+
     #[inline]
     pub(super) fn stamp() -> u64 {
         if ENABLED.load(Ordering::Relaxed) {

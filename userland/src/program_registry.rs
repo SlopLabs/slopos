@@ -132,6 +132,23 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Show socket statistics",
     },
+    // Granted `Power` by path, for `cpufreq set`.
+    ProgramSpec {
+        name: "cpufreq",
+        path: "/bin/cpufreq",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Show CPU frequency and core types; set the HWP policy",
+    },
+    // A service init starts when the base carries a remote pairing, not a
+    // launcher entry. Granted `Launch` by path, like the shell.
+    ProgramSpec {
+        name: "remoted",
+        path: "/bin/remoted",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "",
+    },
     // Aliases below: the shell passes the typed name through as `argv[0]`, so
     // one binary renders whichever name was asked for. A canonical entry must
     // precede its aliases — `resolve_program_path` returns the first match, so

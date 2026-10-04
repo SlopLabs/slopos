@@ -144,3 +144,38 @@ pub fn percpu_stats(buf: &mut [UserPerCpuStats]) -> i64 {
         ) as i64
     }
 }
+
+/// Fills `cpus` (and `info`, when given); answers the entries written or a
+/// negated errno.
+#[inline(always)]
+pub fn cpu_perf(info: Option<&mut UserCpuPerfInfo>, cpus: &mut [UserCpuPerf]) -> i64 {
+    let info = info.map_or(0, |info| info as *mut _ as u64);
+    unsafe {
+        syscall3(
+            SYSCALL_CPU_PERF,
+            info,
+            cpus.as_mut_ptr() as u64,
+            cpus.len() as u64,
+        ) as i64
+    }
+}
+
+/// One `CPU_PERF_OP_*` change; answers the new settings generation or a
+/// negated errno.
+#[inline(always)]
+pub fn cpu_perf_ctl(op: u64, value: u64) -> i64 {
+    unsafe { syscall2(SYSCALL_CPU_PERF_CTL, op, value) as i64 }
+}
+
+/// One `PROF_OP_*`; `label` names a report and is ignored otherwise.
+#[inline(always)]
+pub fn prof_ctl(op: u64, label: &[u8]) -> i64 {
+    unsafe {
+        syscall3(
+            SYSCALL_PROF_CTL,
+            op,
+            label.as_ptr() as u64,
+            label.len() as u64,
+        ) as i64
+    }
+}

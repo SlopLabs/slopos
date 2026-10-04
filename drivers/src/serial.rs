@@ -80,7 +80,8 @@ pub fn init() {
 
     SERIAL_PRESENT.store(present, Ordering::Relaxed);
     if !present {
-        klog_info!("SERIAL: no UART at COM1; console input disabled");
+        slopos_ostd::early_console::mark_uart_absent();
+        klog_info!("SERIAL: no UART at COM1; console input disabled, output on screen only");
     }
 
     slopos_ostd::klog::klog_register_backend(serial_klog_backend);

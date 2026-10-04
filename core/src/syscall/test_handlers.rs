@@ -108,7 +108,11 @@ define_syscall!(syscall_run_userland_tests (ctx) cap(TestHarness)
     slopos_sched::quota_console::quota_report("post-userland-tests");
     slopos_sched::per_cpu::ap_pause_report("post-userland-tests");
     slopos_sched::lifecycle::sched_cpu_report("post-userland-tests");
-    slopos_sched::profile::report("post-userland-tests");
+    // A boot's `prof=on`; a test that started and stopped the profiler leaves
+    // nothing for this run to report.
+    if slopos_sched::profile::enabled() {
+        slopos_sched::profile::report("post-userland-tests");
+    }
     report_reclaim();
 
     let _ = utest_rc;

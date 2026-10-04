@@ -6,7 +6,11 @@ use std::string::String;
 /// `process_list` truncates to this many entries.
 pub(crate) const MAX_TASKS: usize = 256;
 
-use crate::syscall::{UserCpuInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry, core as sys_core};
+use crate::apps::cpufreq::sample::{Usage, type_name};
+use crate::syscall::{
+    UserCpuInfo, UserCpuPerf, UserCpuPerfInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry,
+    core as sys_core,
+};
 
 use super::selection::{self, TaskKey};
 use super::{MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes, task_name_string};
@@ -118,6 +122,15 @@ pub(crate) struct SysmonApp {
     pub(crate) prev_percpu: [UserPerCpuStats; MAX_CPUS],
     pub(crate) task_cpu_pct: [u32; MAX_TASKS],
     pub(crate) cpu_usage_pct: [u32; MAX_CPUS],
+    pub(crate) perf_info: UserCpuPerfInfo,
+    pub(crate) perf: [UserCpuPerf; MAX_CPUS],
+    pub(crate) perf_count: usize,
+    pub(crate) prev_perf: [UserCpuPerf; MAX_CPUS],
+    pub(crate) prev_perf_count: usize,
+    /// By `percpu` index: `P`, `E` or `-`, and the busy-weighted clock since
+    /// the last refresh, `None` where the CPU does not report it.
+    pub(crate) cpu_type: [&'static str; MAX_CPUS],
+    pub(crate) cpu_eff_mhz: [Option<u64>; MAX_CPUS],
     /// The selected task, not the row it occupies: the table re-sorts on every
     /// refresh, so a row index would slide the highlight onto another task.
     pub(crate) selected: Option<TaskKey>,
@@ -149,6 +162,13 @@ impl SysmonApp {
             prev_percpu: [UserPerCpuStats::default(); MAX_CPUS],
             task_cpu_pct: [0; MAX_TASKS],
             cpu_usage_pct: [0; MAX_CPUS],
+            perf_info: UserCpuPerfInfo::default(),
+            perf: [UserCpuPerf::default(); MAX_CPUS],
+            perf_count: 0,
+            prev_perf: [UserCpuPerf::default(); MAX_CPUS],
+            prev_perf_count: 0,
+            cpu_type: ["-"; MAX_CPUS],
+            cpu_eff_mhz: [None; MAX_CPUS],
             selected: None,
             sort_column: SortColumn::CpuPct,
             sort_ascending: false,
@@ -202,6 +222,13 @@ impl SysmonApp {
             (cpu_count as usize).min(MAX_CPUS)
         };
 
+        let perf_count = sys_core::cpu_perf(Some(&mut self.perf_info), &mut self.perf);
+        self.perf_count = if perf_count <= 0 {
+            0
+        } else {
+            (perf_count as usize).min(MAX_CPUS)
+        };
+
         if self.cpu_info.cpu_count == 0 {
             let _ = sys_core::cpu_info(&mut self.cpu_info);
         }
@@ -209,11 +236,14 @@ impl SysmonApp {
         self.net = NetSummary::fetch();
 
         self.compute_cpu_usage();
+        self.compute_cpu_freq();
         self.compute_task_cpu(elapsed_ms);
 
         self.prev_task_count = self.task_count;
         self.prev_tasks[..self.task_count].copy_from_slice(&self.tasks[..self.task_count]);
         self.prev_percpu[..self.cpu_count].copy_from_slice(&self.percpu[..self.cpu_count]);
+        self.prev_perf_count = self.perf_count;
+        self.prev_perf[..self.perf_count].copy_from_slice(&self.perf[..self.perf_count]);
 
         self.sort_tasks();
 
@@ -324,6 +354,20 @@ impl SysmonApp {
             };
 
             self.cpu_usage_pct[i] = usage;
+        }
+    }
+
+    fn compute_cpu_freq(&mut self) {
+        let current = &self.perf[..self.perf_count];
+        let previous = &self.prev_perf[..self.prev_perf_count];
+        for i in 0..self.cpu_count {
+            let id = self.percpu[i].cpu_id;
+            let now = current.iter().find(|c| c.cpu == id && c.online != 0);
+            let before = previous.iter().find(|c| c.cpu == id && c.online != 0);
+            self.cpu_type[i] = now.map_or("-", type_name);
+            self.cpu_eff_mhz[i] = now
+                .zip(before)
+                .and_then(|(now, before)| Usage::of_samples(before, now).eff_mhz(&self.perf_info));
         }
     }
 

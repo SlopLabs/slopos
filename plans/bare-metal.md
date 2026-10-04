@@ -50,6 +50,13 @@ its firmware entry, `cachyos`, is the only one.
 - The kernel carries a driver for the laptop's RTL8168h, graded by host tests
   over a simulated chip. Every NIC takes a DHCP lease, and git reaches another
   machine over SSH.
+- The kernel enables HWP, samples every CPU's APERF/MPERF and thermal status,
+  knows P-cores from E-cores and SMT siblings, and places tasks by them;
+  `/bin/cpufreq` measures and changes all of it, and `prof` profiles a running
+  system.
+- A paired SlopOS machine is driven from the development host:
+  `/bin/remoted` dials out to `scripts/remote.py`'s broker, which runs
+  commands, moves files and installs a kernel and base into the spare slot.
 
 ## Phases
 
@@ -64,7 +71,7 @@ commits of its own.
 | 4. A crash record — **done** | 1, 3 | a slot that panics leaves the panic behind |
 | 5. Installer and install medium — **done** | 1, 2, 3 | **milestone 1:** SlopOS installed beside CachyOS, self-hosting offline |
 | 6. Wired network — **done** | — | **milestone 2:** git and crates.io over the RJ45 port |
-| 7. Full speed | 5 | a native build measured, and made faster if the CPU clock is the cause |
+| 7. Full speed — **built** | 5 | a native build measured, and made faster if the CPU clock is the cause |
 
 Phases 2 and 6 can run side by side. Phase 4 comes before phase 5 because the
 first installed boots on the laptop are where a crash record pays off.
@@ -186,22 +193,49 @@ without the PHY patch firmware, a DHCP lease on the RJ45 port, `git pull` and
 `git push` reaching the development machine over SSH, and cargo fetching from
 crates.io.
 
-### Phase 7: Full speed
+### Phase 7: Full speed — built, measurement left
 
-- **Frequency.** The tree has no HWP or P-state code. Measure the effective
-  frequency (APERF/MPERF) during a guest build, and enable HWP if it runs
-  below turbo.
-- **Hybrid cores.** The scheduler does not tell P-cores from E-cores. Measure
-  the cost before changing that.
+Built: `sched/src/cpufreq.rs` with its layouts in `cpufreq-core` — HWP
+enabled at boot on every CPU and asked for autonomous selection at
+`balance_performance` (`cpufreq=`, `cpufreq.epp=`), the firmware's own
+settings recorded before any write, APERF/MPERF, the TSC and the thermal
+status sampled per CPU at every tick and idle entry, core type and SMT
+position per CPU, and placement of a waking or new task on the best idle CPU
+on a part whose CPUs differ (`sched.hybrid=`); `cpu_perf`, `cpu_perf_ctl` and
+`prof_ctl`, so all of it is read and changed at runtime; `/bin/cpufreq`
+(`status`, `watch`, `run`, `set`, `bench`), `prof`, and `sysmon`'s per-CPU
+clock; `SLOPOS_BUILTIN_CMDLINE`, so an experiment's knobs ride in a kernel
+installed into a slot whose loader entry is fixed; and the remote control
+that lets an agent take the measurements on the laptop itself (`remoted`,
+`scripts/remote.py`, `just test-remote`). The console stops writing to COM1
+once the probe finds no UART there, as on the laptop. `AGENTS.md` describes
+all of it; the decisions are under Decided.
+
+Left for the laptop, which the remote control now reaches once the user has
+booted a paired base on it (`just remote-serve`, then the bootstrap it
+prints):
+
+- **Frequency.** With a kernel built `SLOPOS_BUILTIN_CMDLINE=cpufreq=firmware`
+  installed and booted (`just remote-install`): `cpufreq status` for what the
+  firmware left; `cpufreq run -- scripts/selfhost.sh build` for the effective
+  frequency and wall time before; `cpufreq set hwp` and the same build after.
+  Then the default kernel, `cpufreq set epp performance`, and the build again.
+- **Hybrid cores.** `cpufreq bench` under `cpufreq set placement flat` and
+  `ranked`, and the build under each: the cost the placement saves.
+- **Where the rest of the time goes.** `prof start`, the desktop in use or the
+  build, `prof report laptop`, through `scripts/prof_report.py --label laptop`.
 
 **Done when** a guest build's effective frequency on the laptop is measured,
-and, if HWP is enabled, the same build is timed before and after.
+and the same build is timed with the firmware's settings and with HWP.
 
 ## Grading
 
-Everything but the Realtek driver's hardware half and the NVMe host memory
-buffer is graded in QEMU. Agents never run on hardware (`AGENTS.md`); the
-laptop run is the user's acceptance, and the only grade those two get.
+Everything but the Realtek driver's hardware half, the NVMe host memory
+buffer and Phase 7's measurements is graded in QEMU, where HWP, APERF/MPERF,
+thermal sensors and hybrid cores are absent and the code takes its
+no-such-hardware paths. The laptop grades the rest: by the user's run, or by an
+agent through the remote control once the user has paired the laptop, within
+the bounds `AGENTS.md` sets for it.
 
 **`just test-installer`** uses the pinned NV-varstore OVMF, one NVMe disk, and
 the ISO attached as USB storage on `qemu-xhci`. The firmware reads the ISO and
@@ -523,6 +557,37 @@ falls back to the committed slot, and the fallback boot finds the panic in
   daemon` on a LAN is not the route; OpenSSH's client is the one git is tested
   against. Its whole install lands in the toolchain, as e2fsprogs's does, and
   nothing runs the server or the helpers.
+- **HWP by default, as Linux does, with the firmware's state kept on record.**
+  `IA32_PM_ENABLE` cannot be cleared until reset, so the comparison the plan
+  asks for takes a boot under `cpufreq=firmware` — a built-in command line, the
+  loader's entries being fixed — and `cpufreq set hwp` within it. The
+  preference is `balance_performance` (128), the request spans the CPU's
+  lowest to highest level, guaranteed with turbo disabled. Without HWP the
+  firmware's legacy settings stand: no `IA32_PERF_CTL` governor, which this
+  machine does not need.
+- **Each CPU programs and samples its own registers,** at bring-up, tick and
+  idle entry. A change is a generation the CPUs converge on, woken by IPI,
+  rather than a cross-call: nothing waits on another CPU with interrupts off.
+- **Placement ranks idle CPUs only:** a P-core whose core is idle, an E-core, a
+  busy core's sibling — Linux's order for Alder Lake — on wake and fork, and
+  for the CPU sent to steal. A running task is not migrated to a better CPU;
+  it moves when it next blocks and wakes. Identical CPUs without siblings rank
+  nothing, so QEMU places exactly as before.
+- **The agent dials out, over TLS, to a broker the host runs.** SlopOS runs no
+  server: OpenSSH's needs credentials and a privilege separation SlopOS lacks,
+  and a listener on the LAN would be the machine's whole attack surface. The
+  host needs one firewall rule and no sshd. Whoever holds the broker's key
+  holds the machine.
+- **The pairing is part of the base.** Every program can write `/etc`, so a
+  pairing read from there lets any of them point the `Launch`-holding agent
+  at a broker of its own. The broker's CA, address and token are packed into a
+  base the host builds for the machine, carried into every base the machine
+  builds for itself, and never into the shipped one. The token is readable
+  there, which lets a local program pose as the agent and gains it nothing on
+  SlopOS.
+- **A console without a UART is the screen alone.** Every byte to a COM1
+  nothing decodes is still a bus cycle, taken with interrupts masked under the
+  console lock.
 
 ## Constraints
 

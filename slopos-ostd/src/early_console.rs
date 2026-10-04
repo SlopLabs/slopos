@@ -68,10 +68,28 @@ mod imp {
     }
 }
 
+/// Set once the serial driver's probe found no UART at COM1. Every byte to a
+/// port nothing decodes is still a bus cycle of a microsecond or more, taken
+/// with interrupts masked under the console lock, so a machine without one
+/// skips the wire and keeps only the framebuffer log.
+static UART_ABSENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The serial driver's probe found no UART at COM1.
+pub fn mark_uart_absent() {
+    UART_ABSENT.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+fn uart_absent() -> bool {
+    UART_ABSENT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Write one byte to COM1, blocking until the transmitter is free.
 #[inline]
 pub fn write_byte(b: u8) {
-    imp::write_byte(b);
+    if !uart_absent() {
+        imp::write_byte(b);
+    }
 }
 
 /// Write a byte slice to COM1, converting a lone `\n` into `\r\n`; an existing
@@ -81,6 +99,9 @@ pub fn write_bytes(slice: &[u8]) {
     // Every serial writer — kernel klog and userland TTY alike — funnels
     // through here, so the framebuffer log mirrors the wire.
     crate::fblog::capture(slice);
+    if uart_absent() {
+        return;
+    }
 
     let mut last_was_cr = false;
     for &b in slice {
@@ -95,7 +116,9 @@ pub fn write_bytes(slice: &[u8]) {
 /// Block until the UART transmit holding register is empty.
 #[inline]
 pub fn flush() {
-    imp::flush();
+    if !uart_absent() {
+        imp::flush();
+    }
 }
 
 /// Drain the recorded mock buffer, so host-side tests can observe the bytes

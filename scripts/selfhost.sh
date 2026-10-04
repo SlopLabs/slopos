@@ -62,12 +62,17 @@ export CARGO_HOME="${CARGO_HOME:-$REPO_ROOT/builddir/cargo-home}"
 export KERNEL_RELEASE="$release"
 unset LD_LIBRARY_PATH
 
+# A machine the host drives through remoted stays paired: the base it builds
+# carries the pairing the running base does.
+pairing=
+[ -f /usr/share/slopos/remote/remote.conf ] && pairing=/usr/share/slopos/remote
+
 cd "$REPO_ROOT"
 scripts/build_kernel.sh builddir builddir/target "$features"
 bash scripts/build_userland.sh builddir builddir/target $userland
 COREUTILS_LINKS="$COREUTILS_TOOLS" EXTRA_SHARED_OBJECTS="$shared" \
     RECIPE_PREFIX=/usr/local RECIPE_PROGRAMS="$BASE_RECIPE_PROGRAMS" RECIPE_LICENSES="$BASE_RECIPES" \
-    scripts/build_initramfs.sh "$base" builddir $programs
+    REMOTE_PAIRING_DIR="$pairing" scripts/build_initramfs.sh "$base" builddir $programs
 [ "$1" = install ] || exit 0
 
 elf="$REPO_ROOT/builddir/kernel-$variant.elf"

@@ -69,7 +69,10 @@
 # in what the drivers and net suites leave allocated (each suite alone: 188 to
 # 234 and 242 to 262 pages, the two virtio-net tests that moved into the
 # drivers suite and the NIC tests), while core, fs, mm and sched end where
-# they did. The spread, and the cap is the largest.
+# they did. Then 6628, 6689, 6628, 6586 and 6695 in five once full speed
+# landed, whose kernel tests allocate nothing: the two highest ended 61 and 67
+# pages above the others too, the late-AP spread the boot row records, and the
+# tree before it reached 6681. The spread, and the cap is the largest.
 # The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
@@ -101,7 +104,7 @@ post-kernel-tests	commitpages	2560
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	6681
+post-kernel-tests	kernelmeta	6695
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	539050
 post-kernel-tests	pinnedbytes	4

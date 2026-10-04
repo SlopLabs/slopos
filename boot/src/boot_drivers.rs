@@ -164,6 +164,12 @@ fn boot_step_xsave_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     slopos_sched::task_struct::validate_fpu_state_size();
 }
 
+/// The boot CPU's frequency control and topology, ahead of the APs, which each
+/// program their own during bring-up.
+fn boot_step_cpufreq_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    slopos_sched::cpufreq::init_this_cpu(0, apic::get_id());
+}
+
 fn boot_step_smp_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Discovering CPUs and starting APs...");
     smp_init(ctx);
@@ -441,6 +447,13 @@ crate::boot_init!(
     b"xsave\0",
     boot_step_xsave_setup_fn,
     flags = boot_init_priority(42)
+);
+crate::boot_init!(
+    BOOT_STEP_CPUFREQ,
+    drivers,
+    b"cpufreq\0",
+    boot_step_cpufreq_fn,
+    flags = boot_init_priority(44)
 );
 crate::boot_init!(
     BOOT_STEP_SMP_SETUP,
