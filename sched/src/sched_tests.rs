@@ -7078,6 +7078,64 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A task that commits `Blocked` and yields while its CPU cannot switch — the
+/// scheduler off, as during the BSP's boot after APs already run tasks — comes
+/// back `Running`. Left `Blocked` it is a task on a CPU that no wait loop can
+/// block again: the futex loop's `Running → Blocked` CAS fails forever.
+pub fn test_unswitched_yield_resumes_running() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"Unswitched\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    if !scheduler::clear_nascent_for_test(task_id) || !dispatch_as_current(task_id) {
+        park_bootstrap_on_current_cpu();
+        let _ = task_terminate(task_id);
+        klog_info!("SCHED_TEST: could not dispatch the fixture task");
+        return TestResult::Fail;
+    }
+
+    let mut outcome = TestResult::Pass;
+    // IRQs off: the fixture task is this CPU's current while the test's own
+    // stack keeps running, so nothing may reschedule off it.
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        if scheduler::scheduler_is_enabled() != 0 {
+            klog_info!("SCHED_TEST: the fixture left the scheduler on");
+            outcome = TestResult::Fail;
+            return;
+        }
+        if !scheduler::mark_current_blocked() {
+            klog_info!("SCHED_TEST: could not commit Running -> Blocked");
+            outcome = TestResult::Fail;
+            return;
+        }
+        scheduler::yield_blocked_task();
+        let status = task_find_by_id(task_id).map(|t| t.status());
+        if status != Some(TaskStatus::Running) {
+            klog_info!(
+                "SCHED_TEST: a yield that could not switch left the task {:?}",
+                status
+            );
+            outcome = TestResult::Fail;
+        }
+    });
+    park_bootstrap_on_current_cpu();
+    let _ = task_terminate(task_id);
+    outcome
+}
+
+slopos_testing::stest!(
+    name = test_unswitched_yield_resumes_running,
+    suite = sched_core
+);
+
 /// A current task that a wake found mid-protocol — committed `Running →
 /// Blocked`, then CASed back to `Ready` and enqueued by a peer before it
 /// descheduled — must not be rescheduled from the trap exit: `schedule()`

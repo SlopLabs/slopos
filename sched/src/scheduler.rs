@@ -1512,6 +1512,7 @@ fn schedule_internal() {
     crate::profile::switch_begin(cpu_id);
 
     if SCHEDULER_ENABLED.load(Ordering::Acquire) == 0 {
+        resume_unswitched();
         cpu::restore_flags(irq_flags);
         return;
     }
@@ -1528,6 +1529,7 @@ fn schedule_internal() {
     });
 
     let Some(idle) = idle else {
+        resume_unswitched();
         cpu::restore_flags(irq_flags);
         return;
     };
@@ -1581,6 +1583,22 @@ fn schedule_internal() {
     let _ = drain_previous_task();
     crate::profile::switch_end(resumed_on);
     cpu::restore_flags(irq_flags);
+}
+
+/// The caller of a `schedule` that could not switch keeps running, so a
+/// `Blocked` it committed is undone: no dispatch will flip a task that never
+/// left the CPU back to `Running`, and every wait loop's `Running → Blocked`
+/// CAS fails against it forever. `boot_step_scheduler_init` turns the
+/// scheduler off while the APs already run user tasks, until the BSP enters
+/// its own loop; on the laptop a remoted thread was found `Blocked` in the
+/// futex loop, still on the CPU it first ran on. The loop sees a spurious wake
+/// and waits again.
+fn resume_unswitched() {
+    if let Some(current) = Current::get()
+        && current.task().status() == TaskStatus::Blocked
+    {
+        let _ = consume_ready_wake_for_current(&current);
+    }
 }
 
 pub(crate) fn schedule_from_trap_exit() {
