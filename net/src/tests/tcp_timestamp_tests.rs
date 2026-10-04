@@ -244,6 +244,39 @@ pub fn test_non_ts_fallback_karn_sampling() -> TestResult {
     pass!()
 }
 
+/// RFC 6691 §2: the MSS counts no TCP options, so a data segment carrying the
+/// timestamp option holds that much less payload. Sized to the bare MSS it is
+/// a 1512-byte packet on a 1500-byte path, which an Ethernet bridge drops.
+pub fn test_ts_data_segment_fits_mss() -> TestResult {
+    let _scope = pinned_scope!(100);
+    let conn = establish_connection_with_ts();
+    let Ok(data) = slopos_ostd::KVec::<u8>::zeroed(2 * tcp::DEFAULT_MSS as usize) else {
+        return fail!("test alloc");
+    };
+    assert_test!(tcp::send(conn.id, &data).is_ok(), "queue two MSS of data");
+    let Some((seg, payload)) = poll_once(conn.id) else {
+        return fail!("no segment to send");
+    };
+    assert_test!(seg.timestamp.is_some(), "data segment carries TSopt");
+    let Ok(mut wire) = slopos_ostd::KVec::<u8>::zeroed(1600) else {
+        return fail!("test alloc");
+    };
+    let Some(tcp_len) = tcp::write_tcp_segment(&seg, &payload, &mut wire) else {
+        return fail!("segment does not serialise");
+    };
+    assert_eq_test!(
+        tcp_len,
+        tcp::DEFAULT_MSS as usize + 20,
+        "a full segment is the MSS plus a bare header, options inside the MSS"
+    );
+    assert_eq_test!(
+        payload.len(),
+        tcp::DEFAULT_MSS as usize - 12,
+        "payload is the MSS less the 12-byte timestamp option"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_active_open_ts_negotiation,
     suite = tcp_timestamp
@@ -260,3 +293,4 @@ slopos_testing::stest!(
     name = test_non_ts_fallback_karn_sampling,
     suite = tcp_timestamp
 );
+slopos_testing::stest!(name = test_ts_data_segment_fits_mss, suite = tcp_timestamp);

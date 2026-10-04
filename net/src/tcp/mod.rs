@@ -1184,7 +1184,7 @@ pub fn poll_transmit(
 
             let tuple = pcb.tuple;
             let tos = pcb.tos;
-            let peer_mss = d.peer_mss as usize;
+            let peer_mss = d.send_mss();
             let snd_wnd = d.snd_wnd as usize;
 
             // The congestion window is against pipe (RFC 6675); the peer's

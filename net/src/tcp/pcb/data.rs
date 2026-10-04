@@ -333,6 +333,20 @@ impl DataState {
         }
     }
 
+    /// Payload a data segment may carry: the peer's MSS less the options every
+    /// data segment carries, which the MSS does not count (RFC 6691 §2). One
+    /// sized to the bare MSS is a 1512-byte packet on a 1500-byte path.
+    #[inline]
+    pub fn send_mss(&self) -> usize {
+        const TIMESTAMP_OPTION_BYTES: usize = 12;
+        let options = if self.ts_enabled {
+            TIMESTAMP_OPTION_BYTES
+        } else {
+            0
+        };
+        usize::from(self.peer_mss).saturating_sub(options).max(1)
+    }
+
     /// Our timestamp on `seg`, whose ACK becomes the last one sent (RFC 7323
     /// §4.3).
     pub fn stamp(&mut self, seg: &mut TcpOutSegment, now_ms: u64) {

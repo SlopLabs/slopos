@@ -238,10 +238,16 @@ threads and four E-cores):
   zeroes `IA32_TSC_ADJUST` before it reads the clock, each AP is held to the
   BSP's TSC at bring-up, and one still out of step hands the clock to the HPET
   (`drivers/src/tsc_clock.rs`); the boot log says which.
-- **Idle is not idle.** `cpufreq status` at the desktop read every CPU 99.3%
-  busy by MPERF, at 1,692 MHz average under a power-limit throttle, with the
-  package at 50 °C. The firmware left HWP off. Whether the skew is the cause is
-  for the next boot to say.
+- **Idle is not idle by MPERF.** `cpufreq status` at the desktop read every
+  CPU 99.3% busy, at 1,692 MHz average under a power-limit throttle, with the
+  package at 50 °C, and read the same with the clocks in step (1,756 MHz, 51
+  °C), while `sysmon`'s tick accounting shows one CPU busy and the rest near
+  idle. The firmware left HWP off. Open: whether the CPUs halt at all.
+- **Full segments never arrived.** Every 1460-byte TCP payload from the laptop
+  was lost on the way to the host, where Linux on the same port sends 1448:
+  the data segment carried the 12-byte timestamp option on top of a full MSS, a
+  1512-byte packet a bridge on the path drops (QEMU's SLIRP takes it). Data
+  segments now hold the MSS less their options (`DataState::send_mss`).
 
 **Done when** a guest build's effective frequency on the laptop is measured,
 and the same build is timed with the firmware's settings and with HWP.
