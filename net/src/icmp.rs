@@ -379,7 +379,9 @@ pub fn send_echo_request_zerocopy(
         ip[0] = 0x45;
         ip[1] = 0;
         ip[2..4].copy_from_slice(&(ip_total as u16).to_be_bytes());
-        ip[4..8].copy_from_slice(&[0; 4]);
+        ip[4..8].copy_from_slice(&super::ipv4::ident_and_flags(
+            super::IpProtocol::Icmp.as_u8(),
+        ));
         ip[8] = 64;
         ip[9] = super::IpProtocol::Icmp.as_u8();
         ip[10..12].copy_from_slice(&[0; 2]);

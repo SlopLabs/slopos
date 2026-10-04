@@ -382,7 +382,7 @@ impl PacketBuf {
         ip_hdr[0] = 0x45;
         ip_hdr[1] = tos;
         ip_hdr[2..4].copy_from_slice(&total_len.to_be_bytes());
-        ip_hdr[4..8].copy_from_slice(&[0; 4]);
+        ip_hdr[4..8].copy_from_slice(&super::ipv4::ident_and_flags(protocol));
         ip_hdr[8] = 64;
         ip_hdr[9] = protocol;
         ip_hdr[10..12].copy_from_slice(&[0; 2]);

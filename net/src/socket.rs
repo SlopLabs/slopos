@@ -851,7 +851,7 @@ fn socket_send_tcp_segment_zerocopy(
                 ip[0] = 0x45;
                 ip[1] = seg.tos;
                 ip[2..4].copy_from_slice(&(ip_total as u16).to_be_bytes());
-                ip[4..8].copy_from_slice(&[0; 4]);
+                ip[4..8].copy_from_slice(&net::ipv4::ident_and_flags(net::IpProtocol::Tcp.as_u8()));
                 ip[8] = 64;
                 ip[9] = net::IpProtocol::Tcp.as_u8();
                 ip[10..12].copy_from_slice(&[0; 2]);

@@ -11,6 +11,30 @@ use super::tcp;
 use super::types::{DevIndex, IpProtocol, Ipv4Addr};
 use crate::{self as net, NetError, packetbuf::PacketBuf};
 
+use core::sync::atomic::{AtomicU16, Ordering};
+
+static NEXT_IDENTIFICATION: AtomicU16 = AtomicU16::new(1);
+
+/// Bytes 4..8 of an outgoing IPv4 header: a fresh identification and, for TCP,
+/// Don't Fragment. RFC 6864 requires a datagram that may be fragmented to carry
+/// an identification unique among its source, destination and protocol, which
+/// a constant zero is not; TCP sizes its segments to the path's MSS and goes
+/// out atomic, as Linux and the BSDs send it. A NETGEAR extender in the field
+/// wrote a partial checksum into every TCP data segment that left it with
+/// neither, and passed Linux's untouched.
+pub(crate) fn ident_and_flags(protocol: u8) -> [u8; 4] {
+    const DONT_FRAGMENT: u16 = 0x4000;
+    let id = NEXT_IDENTIFICATION.fetch_add(1, Ordering::Relaxed);
+    let flags = if protocol == IpProtocol::Tcp.as_u8() {
+        DONT_FRAGMENT
+    } else {
+        0
+    };
+    let [a, b] = id.to_be_bytes();
+    let [c, d] = flags.to_be_bytes();
+    [a, b, c, d]
+}
+
 /// Handle an incoming IPv4 packet; `head` points at the first byte of the IP
 /// header, the Ethernet header having been consumed already. Ingress has
 /// already asked [`admits`].

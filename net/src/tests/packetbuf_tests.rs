@@ -501,6 +501,47 @@ pub fn test_tcp_checksum() -> TestResult {
     pass!()
 }
 
+/// The identification and fragment word an outgoing header carries:
+/// `(id, flags_and_offset)`.
+fn egress_ident(protocol: u8) -> Option<(u16, u16)> {
+    let mut pkt = PacketBuf::alloc()?;
+    pkt.append(&[0u8; 20]).ok()?;
+    pkt.prepend_ipv4([10, 0, 2, 15], [10, 0, 2, 2], protocol, 0, 20)
+        .ok()?;
+    let ip = pkt.payload();
+    Some((
+        u16::from_be_bytes([ip[4], ip[5]]),
+        u16::from_be_bytes([ip[6], ip[7]]),
+    ))
+}
+
+/// RFC 6864: a datagram that may be fragmented carries an identification no
+/// other recent one between the same hosts shares; TCP goes out atomic (DF).
+pub fn test_egress_identification_and_dont_fragment() -> TestResult {
+    ensure_pool_init();
+    let tcp = crate::IpProtocol::Tcp.as_u8();
+    let udp = crate::IpProtocol::Udp.as_u8();
+    let (Some((tcp_a, tcp_flags)), Some((tcp_b, _)), Some((udp_a, udp_flags)), Some((udp_b, _))) = (
+        egress_ident(tcp),
+        egress_ident(tcp),
+        egress_ident(udp),
+        egress_ident(udp),
+    ) else {
+        return slopos_testing::fail!("could not build the headers");
+    };
+    assert_eq_test!(tcp_flags, 0x4000, "TCP is sent Don't Fragment, offset zero");
+    assert_eq_test!(udp_flags, 0, "UDP may be fragmented, offset zero");
+    assert_test!(
+        tcp_a != tcp_b,
+        "consecutive TCP datagrams share an identification"
+    );
+    assert_test!(
+        udp_a != udp_b,
+        "consecutive UDP datagrams share an identification"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(name = test_pool_alloc_and_release, suite = packetbuf);
 slopos_testing::stest!(name = test_pool_exhaust_and_recover, suite = packetbuf);
 slopos_testing::stest!(name = test_packetbuf_alloc_empty, suite = packetbuf);
@@ -517,3 +558,7 @@ slopos_testing::stest!(name = test_append, suite = packetbuf);
 slopos_testing::stest!(name = test_ipv4_checksum, suite = packetbuf);
 slopos_testing::stest!(name = test_udp_checksum, suite = packetbuf);
 slopos_testing::stest!(name = test_tcp_checksum, suite = packetbuf);
+slopos_testing::stest!(
+    name = test_egress_identification_and_dont_fragment,
+    suite = packetbuf
+);
