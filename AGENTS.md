@@ -814,7 +814,10 @@ once and waits for the machine to come back with that tag (`--commit` makes it
 the default). `just remote-serve` (`REMOTE_HOST`, `REMOTE_PORT`) prints the
 bootstrap for a machine that does not yet run remoted — `curl` the offered
 kernel and paired base, check their SHA-256, `bootctl install`, `oneshot`,
-`reboot` — and the `ufw` rule a firewalled host needs. State lives in
+`reboot` — and the `ufw` rule a firewalled host needs. `REMOTE=1 just iso`
+packs the paired base into the live ISO instead, so the medium and every
+system installed from it dial the broker from their first boot; that ISO
+carries the token and is for your own machines. State lives in
 `~/.config/slopos-remote`, outside the tree. `just test-remote` grades all of
 it under QEMU, a pairing planted under `/etc/remote` included.
 

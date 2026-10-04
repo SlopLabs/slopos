@@ -336,9 +336,16 @@ _install-medium:
     fi
     LIMINE_DIR={{limine_dir}} scripts/build_install_medium.sh "{{install_medium}}" ${toolchain:+"$toolchain"}
 
-[doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk, and installs from it with /bin/installer. PAYLOAD=1 adds the toolchain and a clone of HEAD, which the installer copies to /usr/local and /src, and the release kernel. Honors BOOT_CMDLINE")]
+[doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk, and installs from it with /bin/installer. PAYLOAD=1 adds the toolchain and a clone of HEAD, which the installer copies to /usr/local and /src, and the release kernel. REMOTE=1 packs the base paired with this host's broker (builddir/initramfs-remote.cpio), so the live system and every system installed from it dial `just remote-serve`; that ISO carries the broker's token and is for your own machines. Honors BOOT_CMDLINE")]
 iso: _initramfs _install-medium (_kernel kernel_variant)
-    KERNEL_ELF={{kernel_elf}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} INSTALL_ARCHIVE={{install_medium}} \
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base="{{initramfs}}"
+    if [[ "${REMOTE:-0}" =~ ^(1|true|on|yes)$ ]]; then
+        just _initramfs-remote
+        base="{{initramfs_remote}}"
+    fi
+    KERNEL_ELF={{kernel_elf}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE="$base" INSTALL_ARCHIVE={{install_medium}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
