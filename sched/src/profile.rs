@@ -88,6 +88,7 @@ fn reset_tables() {
         }
     }
     KERNEL_RIPS.clear();
+    IDLE_RIPS.clear();
     USER_TASKS.clear();
     USER_RIPS.clear();
     EXEC_MAP_KEYS.clear();
@@ -232,6 +233,9 @@ impl<const N: usize> Histogram<N> {
 
 /// Kernel RIPs of non-idle kernel ticks.
 static KERNEL_RIPS: Histogram<4096> = Histogram::new();
+/// Kernel RIPs of ticks that found a CPU's idle task running: where an idle
+/// loop spends a CPU that never halts.
+static IDLE_RIPS: Histogram<1024> = Histogram::new();
 /// User ticks by the first eight bytes of the running task's name.
 static USER_TASKS: Histogram<256> = Histogram::new();
 /// User RIPs by 64-byte line: a hot loop in a shared library shows up as the
@@ -381,6 +385,7 @@ pub fn note_tick(rip: u64, cs: u64) {
     };
     if idle {
         time.idle.fetch_add(1, Ordering::Relaxed);
+        IDLE_RIPS.bump(rip);
         return;
     }
     time.kernel.fetch_add(1, Ordering::Relaxed);
@@ -797,6 +802,9 @@ fn report_ticks(phase: &str) {
     });
     KERNEL_RIPS.for_each_top(120, |rip, count| {
         symbolized(phase, format_args!("kernel tick {:>7}", count), rip);
+    });
+    IDLE_RIPS.for_each_top(40, |rip, count| {
+        symbolized(phase, format_args!("idle tick {:>7}", count), rip);
     });
     USER_RIPS.for_each_top(600, |key, count| {
         klog_info!(

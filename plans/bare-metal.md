@@ -238,16 +238,33 @@ threads and four E-cores):
   zeroes `IA32_TSC_ADJUST` before it reads the clock, each AP is held to the
   BSP's TSC at bring-up, and one still out of step hands the clock to the HPET
   (`drivers/src/tsc_clock.rs`); the boot log says which.
-- **Idle is not idle by MPERF.** `cpufreq status` at the desktop read every
-  CPU 99.3% busy, at 1,692 MHz average under a power-limit throttle, with the
-  package at 50 °C, and read the same with the clocks in step (1,756 MHz, 51
-  °C), while `sysmon`'s tick accounting shows one CPU busy and the rest near
-  idle. The firmware left HWP off. Open: whether the CPUs halt at all.
+- **No CPU halted, because one never switched.** `cpufreq status` at the
+  desktop read every CPU 99.3% busy, at 1,692 MHz average under a power-limit
+  throttle, with the package at 50 °C, while `sysmon` showed one CPU at 100%
+  and the rest near idle; a ten-second profile gave every CPU 0.0% halted and
+  4.8 million dispatch passes (QEMU, sixteen CPUs: 98–99% halted, 31,000). The
+  task table (SysRq `t`) showed remoted's main thread `Blocked` in the futex
+  loop yet `on_cpu`, its saved context still the one it was created with: it
+  had never left its CPU, and a task pinned there never ran.
+  `boot_step_scheduler_init` turns the scheduler off while the APs already run
+  user tasks, until the BSP enters its own loop, and a `schedule()` that could
+  not switch returned leaving its caller `Blocked`, where the futex loop's
+  `Running → Blocked` CAS fails forever. It now undoes that `Blocked`
+  (`resume_unswitched`). The next boot, at the desktop: every CPU 0.8–6.3%
+  busy, 991 MHz average, 93.9–99.4% halted, 27,700 dispatch passes in ten
+  seconds, the package at 43 °C, the power-limit throttle no longer active.
+  The firmware left HWP off. Open: the window itself, in which a waiting task
+  now spins until the BSP's loop starts instead of forever; turning the
+  scheduler off per CPU rather than globally would close it.
 - **Full segments never arrived.** Every 1460-byte TCP payload from the laptop
   was lost on the way to the host, where Linux on the same port sends 1448:
   the data segment carried the 12-byte timestamp option on top of a full MSS, a
   1512-byte packet a bridge on the path drops (QEMU's SLIRP takes it). Data
   segments now hold the MSS less their options (`DataState::send_mss`).
+- **Diagnostics without a keyboard.** `/bin/kconsole` runs the console's
+  informational commands for the remote control (`just remote run -- kconsole
+  tp`), and the probe now logs each CPU's RIP, task and idle slot, which went
+  only to the UART the laptop has not got.
 
 **Done when** a guest build's effective frequency on the laptop is measured,
 and the same build is timed with the firmware's settings and with HWP.

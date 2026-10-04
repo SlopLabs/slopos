@@ -3,7 +3,7 @@
 # sh.
 
 # The shipped programs: `/bin/<name>`, and `init` at `/sbin/init`.
-BASE_PROGRAMS="init shell coreutils terminal compositor roulette halt bootctl installer editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted"
+BASE_PROGRAMS="init shell coreutils terminal compositor roulette halt bootctl installer editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted kconsole"
 
 # The multicall utility binary's installed names. `/bin/<name>` is a symlink to
 # `/bin/coreutils`, which dispatches on `argv[0]` — one binary rather than

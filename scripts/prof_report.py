@@ -133,6 +133,7 @@ def main():
             print(f"  {m.group(1):6s} {m.group(2)}")
 
     kernel = collections.Counter()
+    idle = collections.Counter()
     user_lines = []
     maps = []
     cpu = []
@@ -140,6 +141,8 @@ def main():
     for p in prof:
         if m := re.match(r"kernel tick\s+(\d+) 0x([0-9a-f]+)(?: <(.*)\+0x[0-9a-f]+>)?", p):
             kernel[m.group(3) or "0x" + m.group(2)] += int(m.group(1))
+        elif m := re.match(r"idle tick\s+(\d+) 0x([0-9a-f]+)(?: <(.*)\+0x[0-9a-f]+>)?", p):
+            idle[m.group(3) or "0x" + m.group(2)] += int(m.group(1))
         elif m := re.match(r"user tick\s+(\d+) 0x([0-9a-f]+)", p):
             user_lines.append((int(m.group(2), 16), int(m.group(1))))
         elif m := re.match(r"map base=0x(\w+) len=0x(\w+) off=0x(\w+) ino=(\d+) size=(\d+)", p):
@@ -168,6 +171,11 @@ def main():
     print(f"== kernel ticks by function (top {args.top} of {sum(kernel.values())})")
     for name, n in kernel.most_common(args.top):
         print(f"  {n:7d} {short(name)}")
+
+    if idle:
+        print(f"== idle-loop ticks by function (top {args.top} of {sum(idle.values())})")
+        for name, n in idle.most_common(args.top):
+            print(f"  {n:7d} {short(name)}")
 
     by_size = index_by_size(args.lib_dir)
     objects = []

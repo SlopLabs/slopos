@@ -231,13 +231,15 @@ pub const TASK_FLAG_NET_ADMIN: u16 = 0x200;
 pub const TASK_FLAG_CONSOLE_ADMIN: u16 = 0x400;
 
 /// May enumerate every task, including kernel threads and more privileged
-/// tasks.
+/// tasks, and run the diagnostic console's informational commands, which
+/// print them (`kconsole(2)`).
 ///
 /// Without it, `process_list` reports only the tasks the caller could already
 /// signal (`slopos_core::syscall::signal::signal_dominates`), so an id the
 /// kernel refuses to act on is one it never handed out.
 ///
-/// Conferred on `/bin/sysmon`; `TASK_FLAG_SYSTEM` implies it.
+/// Conferred on `/bin/sysmon` and `/bin/kconsole`; `TASK_FLAG_SYSTEM`
+/// implies it.
 pub const TASK_FLAG_PROC_ADMIN: u16 = 0x800;
 
 /// May halt or reboot the machine, and set the Boot Loader Interface's

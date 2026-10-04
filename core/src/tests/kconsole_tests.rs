@@ -340,6 +340,60 @@ pub fn test_kcon_unknown_key_is_consumed() -> TestResult {
     })
 }
 
+/// The task-context trigger reaches informational commands only, whatever the
+/// keyboard's policy permits, and its requester can see the command run.
+pub fn test_kcon_task_trigger_is_informational_only() -> TestResult {
+    use kconsole::RequestRefused;
+    let permitted = KConfig {
+        mask: KCMD_INFORMATIONAL | KCMD_DESTRUCTIVE,
+        ..KConfig::defaults()
+    };
+    let outcome = with_policy(permitted, || {
+        with_sole_drain(|| {
+            let destructive_before = DESTRUCTIVE_RUNS.load(Ordering::Relaxed);
+            let destructive = kconsole::request_informational(b'y');
+            let destructive_queued = kconsole::drain();
+            let destructive_ran = DESTRUCTIVE_RUNS.load(Ordering::Relaxed) != destructive_before;
+            let unknown = kconsole::request_informational(b'0');
+            let runs_before = kconsole::runs(b'z');
+            let probe = kconsole::request_informational(b'z');
+            kconsole::drain();
+            let counted = kconsole::runs(b'z') == runs_before.wrapping_add(1);
+            (
+                destructive,
+                destructive_queued,
+                destructive_ran,
+                unknown,
+                probe,
+                counted,
+            )
+        })
+    });
+    let (destructive, queued, ran, unknown, probe, counted) = match outcome {
+        Ok(observed) => observed,
+        Err(err) => return fail!("the APs would not park: {:?}", err),
+    };
+    if destructive != Err(RequestRefused::NotInformational) || queued || ran {
+        return fail!(
+            "a destructive key from task context: {:?}, queued {}, ran {}",
+            destructive,
+            queued,
+            ran
+        );
+    }
+    if unknown != Err(RequestRefused::NoCommand) {
+        return fail!("a key no command takes answered {:?}", unknown);
+    }
+    if probe != Ok(()) || !counted {
+        return fail!(
+            "an informational key answered {:?}, its run counted {}",
+            probe,
+            counted
+        );
+    }
+    TestResult::Pass
+}
+
 /// The build-time symbol table can fail open into an empty one.
 pub fn test_kcon_kernel_text_symbolizes() -> TestResult {
     let probe: fn() -> TestResult = test_kcon_kernel_text_symbolizes;
@@ -446,4 +500,8 @@ slopos_testing::stest!(
     suite = kconsole
 );
 slopos_testing::stest!(name = test_kcon_unknown_key_is_consumed, suite = kconsole);
+slopos_testing::stest!(
+    name = test_kcon_task_trigger_is_informational_only,
+    suite = kconsole
+);
 slopos_testing::stest!(name = test_kcon_kernel_text_symbolizes, suite = kconsole);

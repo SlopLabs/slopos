@@ -140,6 +140,14 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Show CPU frequency and core types; set the HWP policy",
     },
+    // Granted `PROC_ADMIN` by path, for `kconsole(2)`.
+    ProgramSpec {
+        name: "kconsole",
+        path: "/bin/kconsole",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Run the diagnostic console's informational commands",
+    },
     // A service init starts when the base carries a remote pairing, not a
     // launcher entry. Granted `Launch` by path, like the shell.
     ProgramSpec {

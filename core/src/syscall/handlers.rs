@@ -8,9 +8,9 @@ use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
     syscall_clock_gettime, syscall_clock_settime, syscall_cpu_info, syscall_cpu_perf,
     syscall_cpu_perf_ctl, syscall_ctty_read, syscall_efivar_get, syscall_efivar_set, syscall_exit,
-    syscall_exit_group, syscall_klog_write, syscall_nanosleep, syscall_percpu_stats,
-    syscall_process_list, syscall_prof_ctl, syscall_reboot, syscall_sched_yield, syscall_sys_info,
-    syscall_sysinfo, syscall_uname,
+    syscall_exit_group, syscall_kconsole, syscall_klog_write, syscall_nanosleep,
+    syscall_percpu_stats, syscall_process_list, syscall_prof_ctl, syscall_reboot,
+    syscall_sched_yield, syscall_sys_info, syscall_sysinfo, syscall_uname,
 };
 use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
@@ -284,6 +284,7 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     [SYSCALL_CPU_PERF]           => syscall_cpu_perf,           "cpu_perf";
     [SYSCALL_CPU_PERF_CTL]       => syscall_cpu_perf_ctl,       "cpu_perf_ctl";
     [SYSCALL_PROF_CTL]           => syscall_prof_ctl,           "prof_ctl";
+    [SYSCALL_KCONSOLE]           => syscall_kconsole,           "kconsole";
 };
 
 /// The entry for `sysno`, or `None` when nothing is registered there.
@@ -337,7 +338,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 173;
+pub const SYSCALL_ENTRY_COUNT: usize = 174;
 
 /// The recorded shape of the classification.
 ///
@@ -353,7 +354,7 @@ const CAP_COUNTS: [(Capability, usize); 19] = [
     (Capability::Power, 4),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),
-    (Capability::SysInspect, 8),
+    (Capability::SysInspect, 9),
     (Capability::DisplaySeat, 1),
     (Capability::InputSeat, 1),
     (Capability::ConsoleConfig, 2),

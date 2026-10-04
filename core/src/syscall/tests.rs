@@ -8080,6 +8080,46 @@ pub fn test_process_list_hides_undominated_tasks() -> TestResult {
     pass!()
 }
 
+/// `kconsole` prints every task and CPU, so a task outside `PROC_ADMIN` is
+/// refused before anything is queued, informational key or not.
+pub fn test_kconsole_needs_proc_admin() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let plain_id = create_test_user_task();
+    assert_test!(plain_id != INVALID_TASK_ID, "failed to create plain task");
+    let plain_guard = assert_some!(task_find_by_id(plain_id), "plain lookup failed");
+    let Some(plain_pid) = plain_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return fail!("plain caller has no fd table");
+    };
+
+    let help_runs = slopos_ostd::kconsole::runs(b'h');
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rdi = u64::from(b'h');
+    let _ = with_user_process_context(plain_pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            crate::syscall::core_handlers::syscall_kconsole,
+            &plain_guard,
+            &mut *frame,
+        )
+    });
+    let eperm = slopos_abi::Errno::EPERM.as_u64();
+    let answered = frame.rax();
+
+    drop(plain_guard);
+    task_terminate(plain_id);
+    assert_eq_test!(answered, eperm, "a task without PROC_ADMIN ran kconsole");
+    assert_eq_test!(
+        slopos_ostd::kconsole::runs(b'h'),
+        help_runs,
+        "a refused kconsole call still queued its command"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_process_list_excludes_exited_tasks,
     suite = syscall_core
@@ -8088,6 +8128,7 @@ slopos_testing::stest!(
     name = test_process_list_hides_undominated_tasks,
     suite = syscall_core
 );
+slopos_testing::stest!(name = test_kconsole_needs_proc_admin, suite = syscall_core);
 
 /// `waitpid(-1)` reaps whichever child exited, without being told which.
 pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {

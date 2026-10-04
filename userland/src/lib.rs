@@ -2,6 +2,7 @@ pub mod apps;
 pub mod boot_disk;
 pub mod gfx;
 pub mod keymap;
+pub mod kmsg;
 pub mod net;
 pub mod net_query;
 pub mod program_registry;

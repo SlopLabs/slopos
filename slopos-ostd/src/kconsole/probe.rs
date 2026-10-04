@@ -61,11 +61,12 @@ fn probe_one(kc: &mut KConsole<'_>, cpu: usize, probe_ms: u16) {
     pcr::send_nmi_to_cpu(apic_id);
 
     // The handler releases the slot as its last act, so the slot leaving Probe
-    // is the answer arriving; its output reaches the console through the
-    // NMI-safe emitters, not this handle.
+    // is the answer arriving. The handler's own lines go to the UART, which a
+    // machine may lack; what it noted is repeated here, into the kernel log.
     let budget = u32::from(probe_ms).saturating_mul(ROUNDS_PER_MS);
     for _ in 0..budget {
         if watchdog::probe_disposition(cpu) != NmiDisposition::Probe {
+            describe_peer(kc, cpu);
             return;
         }
         core::hint::spin_loop();
@@ -80,6 +81,28 @@ fn probe_one(kc: &mut KConsole<'_>, cpu: usize, probe_ms: u16) {
         cpu,
         probe_ms
     );
+}
+
+/// What a probed CPU's NMI noted, and the PCR slots the scheduler reads there:
+/// a CPU whose idle slot is empty can deschedule nothing.
+fn describe_peer(kc: &mut KConsole<'_>, cpu: usize) {
+    let task = pcr::current_task_id_for(cpu);
+    let idle = if pcr::get_idle_task(cpu).is_null() {
+        "empty"
+    } else {
+        "set"
+    };
+    match watchdog::probe_rip(cpu) {
+        Some(rip) => crate::ksymline!(
+            kc,
+            rip,
+            "  cpu {}: task {} idle slot {} rip ",
+            cpu,
+            task,
+            idle
+        ),
+        None => kline!(kc, "  cpu {}: task {} idle slot {}", cpu, task, idle),
+    }
 }
 
 /// Deliberately no backtrace: this CPU's stack is the console's own plumbing

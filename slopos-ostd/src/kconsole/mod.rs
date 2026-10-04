@@ -5,7 +5,8 @@
 //! and raises the bottom half. A *drain* at the bottom-half point runs every
 //! queued command. Commands live in a linker registry, so the crate that owns
 //! a subsystem's data also owns the command that prints it, and OSTD never
-//! names one.
+//! names one. A program holding the whole-machine inspection right may queue
+//! the informational ones too, through [`request_informational`].
 //!
 //! Trigger and drain are separate because triggers run where nothing may
 //! allocate, log, or take a lock — the keyboard IRQ handler, the serial drain
@@ -223,6 +224,47 @@ pub fn request(key: u8) {
     crate::sync::bh::raise();
 }
 
+/// Why [`request_informational`] queued nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestRefused {
+    /// The console is off (`kconsole=off`).
+    Disabled,
+    /// No command has this key.
+    NoCommand,
+    /// A command with this key may change the machine; only the physical
+    /// console may ask for one.
+    NotInformational,
+}
+
+/// Queue `key` for a caller in task context that holds no keyboard: only if
+/// every command it names is [`KCMD_INFORMATIONAL`]. The physical console's
+/// triggers go through [`request`] and stay the only way to a destructive
+/// command, as `/proc/sysrq-trigger` is Linux's way past the keyboard mask.
+pub fn request_informational(key: u8) -> Result<(), RequestRefused> {
+    if !enabled() {
+        return Err(RequestRefused::Disabled);
+    }
+    let mut named = commands().iter().filter(|cmd| cmd.key == key).peekable();
+    if key >= 128 || named.peek().is_none() {
+        return Err(RequestRefused::NoCommand);
+    }
+    if named.any(|cmd| cmd.flags != KCMD_INFORMATIONAL) {
+        return Err(RequestRefused::NotInformational);
+    }
+    request(key);
+    Ok(())
+}
+
+/// How many times `key` has been dispatched since boot, so a requester can
+/// tell when the command it queued has printed.
+pub fn runs(key: u8) -> u32 {
+    RUNS.get(key as usize)
+        .map_or(0, |n| n.load(core::sync::atomic::Ordering::Acquire))
+}
+
+static RUNS: [core::sync::atomic::AtomicU32; 128] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 128];
+
 /// Raise this CPU's bottom half if anything is queued. Called from every CPU's
 /// timer tick, so a request raised on one CPU can be answered by another.
 #[inline]
@@ -284,6 +326,9 @@ fn run_key(key: u8, cfg: &KConfig) {
             "kconsole: no command for '{}' — press the trigger then 'h' for the list",
             key as char
         ));
+    }
+    if let Some(n) = RUNS.get(key as usize) {
+        n.fetch_add(1, core::sync::atomic::Ordering::Release);
     }
 }
 

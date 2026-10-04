@@ -108,6 +108,15 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         delegated: 0,
         priority: None,
     },
+    // The diagnostic console's informational commands print every task and
+    // every CPU: the same whole-machine view, through `kconsole(2)`. Commands
+    // that change the machine stay the physical console's.
+    ProgramGrant {
+        path: b"/bin/kconsole",
+        flags: TASK_FLAG_PROC_ADMIN,
+        delegated: 0,
+        priority: None,
+    },
     // The only program that may halt or reboot. Power is deliberately not a
     // shell builtin — Linux gates `reboot(2)` on `CAP_SYS_BOOT` and ships
     // `/sbin/halt` separately, `systemctl poweroff` asks logind, and Redox puts

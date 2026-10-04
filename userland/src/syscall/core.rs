@@ -179,3 +179,10 @@ pub fn prof_ctl(op: u64, label: &[u8]) -> i64 {
         ) as i64
     }
 }
+
+/// Run the diagnostic console's informational command `key`; 0 once it has
+/// printed into the kernel log, or a negated errno.
+#[inline(always)]
+pub fn kconsole(key: u8) -> i64 {
+    unsafe { syscall1(SYSCALL_KCONSOLE, u64::from(key)) as i64 }
+}

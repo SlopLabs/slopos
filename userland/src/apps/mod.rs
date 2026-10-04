@@ -10,6 +10,7 @@ pub mod image_viewer;
 pub mod init_process;
 pub mod installer;
 pub mod ip;
+pub mod kconsole;
 pub mod keymap;
 pub mod nc;
 pub mod nmap;

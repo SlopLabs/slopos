@@ -645,3 +645,35 @@ define_syscall!(syscall_prof_ctl (ctx, op: u64, label: UserBytes) cap(SysInspect
     }
     Ok(0)
 });
+
+// `SysInspect`, as `process_list`, and held to the same `PROC_ADMIN` bound
+// before it sees everything: the commands print every task and every CPU.
+define_syscall!(syscall_kconsole (ctx, key: u64) cap(SysInspect)
+    -> Result<u64, Errno> {
+    use slopos_ostd::kconsole::{RequestRefused, request_informational, runs};
+    const WAIT_MS: u64 = 5_000;
+    const POLL_MS: u32 = 10;
+
+    if !ctx.is_proc_admin() {
+        return Err(Errno::EPERM);
+    }
+    let key = u8::try_from(key).map_err(|_| Errno::ENOENT)?;
+    let before = runs(key);
+    request_informational(key).map_err(|refused| match refused {
+        RequestRefused::Disabled => Errno::EOPNOTSUPP,
+        RequestRefused::NoCommand => Errno::ENOENT,
+        RequestRefused::NotInformational => Errno::EPERM,
+    })?;
+    let deadline_ms = platform::get_time_ms().saturating_add(WAIT_MS);
+    while runs(key) == before {
+        let task = ctx.task();
+        if task.is_killed() || slopos_sched::task::task_has_deliverable_signal(task) {
+            return Err(Errno::EINTR);
+        }
+        if platform::get_time_ms() >= deadline_ms {
+            return Err(Errno::ETIMEDOUT);
+        }
+        sleep_current_task_ms(POLL_MS);
+    }
+    Ok(0)
+});

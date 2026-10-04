@@ -786,6 +786,14 @@ pub const SYSCALL_CPU_PERF_CTL: u64 = SYSCALL_PRIVATE_BASE + 40;
 /// `[A-Za-z0-9_.-]`, `EINVAL` otherwise.
 pub const SYSCALL_PROF_CTL: u64 = SYSCALL_PRIVATE_BASE + 41;
 
+/// `kconsole(key) -> 0`: run the diagnostic console's command `key` as the
+/// physical console's trigger would, and return once it has printed into the
+/// kernel log. Only a command that is informational in every registration:
+/// `EPERM` for one that may change the machine and for a caller without
+/// `TASK_FLAG_PROC_ADMIN`, `ENOENT` for a key no command takes, `EOPNOTSUPP`
+/// under `kconsole=off`, `ETIMEDOUT` if nothing ran it within five seconds.
+pub const SYSCALL_KCONSOLE: u64 = SYSCALL_PRIVATE_BASE + 42;
+
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
 /// call.
 pub const EFIVAR_DATA_MAX: usize = 4096;
@@ -834,6 +842,6 @@ const _: () = assert!(SYSCALL_PRIVATE_BASE > SYSCALL_LINUX_MAX);
 const _: () = assert!(SYSCALL_PRIVATE_BASE & 0x4000_0000 == 0);
 
 const _: () = assert!(
-    SYSCALL_PROF_CTL < SYSCALL_PRIVATE_END,
+    SYSCALL_KCONSOLE < SYSCALL_PRIVATE_END,
     "private syscall range is full; raise SYSCALL_PRIVATE_TABLE_SIZE",
 );

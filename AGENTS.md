@@ -1295,7 +1295,7 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `watchdog.miss_threshold` | integer | consecutive heartbeat samples a CPU may miss before the watchdog reports it; default 100, `0` refused |
 | `watchdog.panic` | `on` / `off` | whether a stall five thresholds long is fatal; default on bare metal only, since under a hypervisor a descheduled vCPU looks the same |
 | `mem.commit` | integer | percent of usable frames the commit ledger may promise to private mappings; default 100, capped at 400, `0` measures without a ceiling |
-| `prof` | `on` | sample where the time goes — per-CPU user/kernel/idle ticks and halted time and each CPU's busy share and effective clock, the hottest kernel RIPs, user ticks by task name, and the kernel stacks blocked user tasks are parked on whenever a CPU idles — printed as `PROF[post-userland-tests]:` lines; off by default. `TEST_CMDLINE_EXTRA=prof=on just test-selfhost` profiles the guest's build. `prof start`, `prof report <label>` and `prof stop` (`prof_ctl`) do the same on a running system, printing `PROF[<label>]:` lines that `scripts/prof_report.py --label` reads |
+| `prof` | `on` | sample where the time goes — per-CPU user/kernel/idle ticks and halted time and each CPU's busy share and effective clock, the hottest kernel RIPs and where idle loops spend ticks that never halt, user ticks by task name, and the kernel stacks blocked user tasks are parked on whenever a CPU idles — printed as `PROF[post-userland-tests]:` lines; off by default. `TEST_CMDLINE_EXTRA=prof=on just test-selfhost` profiles the guest's build. `prof start`, `prof report <label>` and `prof stop` (`prof_ctl`) do the same on a running system, printing `PROF[<label>]:` lines that `scripts/prof_report.py --label` reads |
 | `cpufreq` | `hwp` / `firmware` | `hwp` (default) enables HWP where the CPU has it and asks every CPU for autonomous selection between its lowest and highest level; `firmware` leaves every frequency register as the firmware left it |
 | `cpufreq.epp` | `performance` / `balance_performance` / `balance_power` / `power` / 0-255 | the energy-performance preference HWP is given; default `balance_performance` (128) |
 | `sched.hybrid` | `on` / `off` | `on` (default) places a task on the best idle CPU by class — a P-core with nothing on it, then an E-core, then a busy core's sibling thread — on a part whose CPUs differ; `off` treats every idle CPU alike |
@@ -1314,7 +1314,12 @@ without a separate build.
 `slopos_ostd::kconsole` is the kernel's magic-key facility: a key pressed on the
 **physical console** makes the kernel describe itself. Press SysRq
 (Alt+PrintScreen) to arm and one command key to run, or send a serial BREAK and
-then the command key. Press the trigger then `h` for the list.
+then the command key. Press the trigger then `h` for the list. A program may
+run the informational ones too: `/bin/kconsole t` (granted `PROC_ADMIN` by
+path) queues `t` through `kconsole(2)`, waits for it to run and prints what it
+added to the kernel log, so `just remote run -- kconsole tp` reads a machine
+nobody is sitting at. The probe (`p`) writes each CPU's RIP, current task and
+idle slot there too, beside the NMI handler's own lines on the UART.
 
 Commands live in the `.kconsole_registry` linker registry, so the crate that
 owns a subsystem's data owns the command that prints it — `kcommand!` in `mm/`,
@@ -1325,12 +1330,15 @@ section.
 
 Three properties are load-bearing:
 
-- **Only the physical console triggers it.** The keyboard hook sits in the IRQ
-  handler ahead of layout resolution and consumes its keys, so they reach
-  neither the TTY nor the focused GUI application; the serial trigger is a BREAK
-  condition, which no byte pattern can forge. There is no call edge from any
-  userland write path to `kconsole::request`, and that is the point — the
-  facility this replaced was reachable by any process holding a PTY master.
+- **Only the physical console reaches a destructive command.** The keyboard
+  hook sits in the IRQ handler ahead of layout resolution and consumes its
+  keys, so they reach neither the TTY nor the focused GUI application; the
+  serial trigger is a BREAK condition, which no byte pattern can forge. The one
+  other caller of `kconsole::request` is `request_informational`, which refuses
+  any key a `KCMD_DESTRUCTIVE` command takes and is reached only by
+  `kconsole(2)` for a `PROC_ADMIN` holder — the shape of Linux's root-only
+  `/proc/sysrq-trigger`, narrowed to the commands that only print. The facility
+  this replaced was reachable by any process holding a PTY master.
 - **One execution tier.** Every command runs at the bottom-half point with
   interrupts and preemption enabled. No command runs in NMI context and none may
   assume it can: a *returning* NMI handler must be fault-free, and the
