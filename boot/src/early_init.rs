@@ -885,6 +885,10 @@ pub fn kernel_main_impl() {
         // only becomes callable once the PCR is live.
         slopos_ostd::sync::enable_lock_tracking();
 
+        // Before anything reads the TSC: firmware may have left the BSP's
+        // counter offset from the APs'.
+        slopos_drivers::tsc_clock::sanitize_this_cpu(0);
+
         // Mask the low CR3 bits before handing the value over as a table base:
         // they carry PCID with CR4.PCIDE, PWT/PCD without it.
         let cr3 = slopos_arch::cpu::control_regs::read_cr3();

@@ -16,6 +16,10 @@ impl Msr {
     /// APIC Base MSR - contains physical base address and enable flags.
     pub const APIC_BASE: Self = Self(0x1B);
 
+    /// Per-CPU offset added to the shared counter `RDTSC` reads; every write
+    /// of `IA32_TIME_STAMP_COUNTER` moves it by the same amount.
+    pub const TSC_ADJUST: Self = Self(0x3B);
+
     /// Memory Type Range Register capabilities.
     pub const MTRR_CAP: Self = Self(0xFE);
 

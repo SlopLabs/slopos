@@ -225,6 +225,24 @@ prints):
 - **Where the rest of the time goes.** `prof start`, the desktop in use or the
   build, `prof report laptop`, through `scripts/prof_report.py --label laptop`.
 
+Measured so far, on the live ISO over the remote control (i5-13420H, eight P
+threads and four E-cores):
+
+- **The TSCs disagree.** CPUs 1–3 read 2,309,921,770 cycles — 884.5 ms on
+  `CLOCK_MONOTONIC` — ahead of CPU 0 (a userland probe pinned to each CPU in
+  turn; pinning to CPU 4 never returned). The monotonic clock is each CPU's own
+  TSC scaled, so time stepped by 884 ms whenever a task changed CPU. Seen on the
+  wire: the TCP timestamps of one connection ran 883 ms backwards between a
+  segment sent from one CPU and the next from another, the peer's PAWS check
+  dropped the data, and the retransmission came ~59 s later. Every CPU now
+  zeroes `IA32_TSC_ADJUST` before it reads the clock, each AP is held to the
+  BSP's TSC at bring-up, and one still out of step hands the clock to the HPET
+  (`drivers/src/tsc_clock.rs`); the boot log says which.
+- **Idle is not idle.** `cpufreq status` at the desktop read every CPU 99.3%
+  busy by MPERF, at 1,692 MHz average under a power-limit throttle, with the
+  package at 50 °C. The firmware left HWP off. Whether the skew is the cause is
+  for the next boot to say.
+
 **Done when** a guest build's effective frequency on the laptop is measured,
 and the same build is timed with the firmware's settings and with HWP.
 

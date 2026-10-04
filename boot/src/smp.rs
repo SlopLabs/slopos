@@ -36,6 +36,8 @@ static AP_SIGNALS: [AtomicU64; MAX_CPUS] = {
 fn ap_late_entry(cpu_idx: usize) -> ! {
     cpu::disable_interrupts();
     cpu::enable_sse();
+    slopos_drivers::tsc_clock::sanitize_this_cpu(cpu_idx);
+    slopos_drivers::tsc_clock::ap_check_behind(cpu_idx);
 
     slopos_ostd::sync::run_ap_init(cpu_idx, |ap_token| {
         slopos_arch::cpu::xsave::enable_on_current_cpu();
@@ -100,6 +102,7 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
 
         // The BSP's bounded wait must not release until this point, so it never
         // proceeds with a half-joined AP in the shootdown set.
+        slopos_drivers::tsc_clock::ap_publish_tsc(cpu_idx);
         AP_SIGNALS[cpu_idx].store(AP_STARTED_MAGIC, Ordering::Release);
 
         klog_info!("MP: CPU online (idx {}, apic 0x{:x})", cpu_idx, apic_id);
@@ -183,6 +186,8 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
     // Must run on the BSP while it is still the only CPU running.
     ist_stacks::premap_cpus(1 + ap_count);
 
+    slopos_drivers::tsc_clock::publish_bsp_tsc();
+
     // `ap_slot` is the 1-based non-BSP counter, matching the index the AP
     // writes to `AP_SIGNALS`. The limine `enumerate` index would mis-align
     // whenever the BSP is not `cpus[0]`.
@@ -207,6 +212,7 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
     }
 
     let mut started_count = 0usize;
+    let mut tsc_in_step = 0usize;
 
     let mut ap_slot = 0u64;
     for cpu in cpus.iter() {
@@ -221,17 +227,26 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
         let mut spins = 2_000_000u32;
         while AP_SIGNALS[ap_slot as usize].load(Ordering::Acquire) != AP_STARTED_MAGIC && spins > 0
         {
+            slopos_drivers::tsc_clock::publish_bsp_tsc();
             cpu::pause();
             spins -= 1;
         }
 
         if AP_SIGNALS[ap_slot as usize].load(Ordering::Acquire) == AP_STARTED_MAGIC {
+            if slopos_drivers::tsc_clock::bsp_check_ap(ap_slot as usize) {
+                tsc_in_step += 1;
+            }
             klog_info!("MP: CPU 0x{:x} reported online", cpu.lapic_id);
             started_count += 1;
         } else {
             klog_info!("MP: CPU 0x{:x} did not respond", cpu.lapic_id);
         }
     }
+    klog_info!(
+        "CLOCK: {} of {} APs' TSCs in step with the BSP's",
+        tsc_in_step,
+        started_count
+    );
 
     for cpu_idx in 1..=started_count {
         let mut spins = 5_000_000u32;
