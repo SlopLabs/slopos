@@ -2,17 +2,6 @@
 
 use crate::paging_defs::PAGE_SIZE_4KB;
 
-/// Boot stack size (16 KB).
-pub const BOOT_STACK_SIZE: u64 = 0x4000;
-
-pub const BOOT_STACK_PHYS_ADDR: u64 = 0x20000;
-
-pub const EARLY_PML4_PHYS_ADDR: u64 = 0x30000;
-
-pub const EARLY_PDPT_PHYS_ADDR: u64 = 0x31000;
-
-pub const EARLY_PD_PHYS_ADDR: u64 = 0x32000;
-
 /// The kernel is mapped in the highest 2GB of 64-bit address space.
 pub const KERNEL_VIRTUAL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
