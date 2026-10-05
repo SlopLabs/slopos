@@ -32,6 +32,7 @@ const LIMINE_MEMMAP_ACPI_NVS: u64 = 3;
 const LIMINE_MEMMAP_FRAMEBUFFER: u64 = 7;
 
 const BOOT_REGION_STATIC_CAP: usize = 4096;
+const LOW_MEMORY_END: u64 = 0x10_0000;
 const DESC_ALIGN_BYTES: u64 = 64;
 
 #[repr(C)]
@@ -200,6 +201,16 @@ fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
 /// The image lands wherever Limine's allocator found room: `phys_base` is the
 /// physical address of its lowest virtual address, `virt_base`.
 fn record_kernel_core_reservations(phys_base: u64, virt_base: u64) {
+    // Firmware is known to scribble on the first MiB after handing over, so
+    // Linux keeps it all on x86; nothing here needs it.
+    add_reservation_or_panic(
+        0,
+        LOW_MEMORY_END,
+        MmReservationType::FirmwareOther,
+        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+        b"Low memory\0".as_ptr() as *const c_char,
+    );
+
     let (_, kend) = kernel_image_bounds();
     if phys_base == 0 || kend <= virt_base {
         klog_info!("MM: kernel placement unavailable; cannot reserve kernel image");
