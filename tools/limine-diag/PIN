@@ -1,0 +1,19 @@
+# The Limine source release the handoff diagnostics are built from.
+#
+# `scripts/build_limine_diag.sh` fetches it, checks it, applies the patches in
+# this directory and builds one diagnostic BOOTX64.EFI. The version is the one
+# `scripts/ensure_limine.sh` installs as the loader, and the build refuses to
+# run while the two differ: the point is to watch that loader fail.
+limine_version=12.9.1
+limine_url=https://github.com/limine-bootloader/limine/releases/download/v12.9.1/limine-12.9.1.tar.xz
+limine_sha256=c1096fdd506487fbd92c113baa9e153a9973cf766483cc3928e13fd29b976b32
+
+# The PE sizes of the release's own BOOTX64.EFI (limine-binary.tar.xz), the
+# file an installed SlopOS boots. Firmware places a loader by its file and
+# image size, and every allocation Limine makes moves with where it lands
+# (under OVMF one page of image is one page of every allocation, the same
+# shift the menu editor's buffer causes), so the build pads the diagnostic
+# binary to exactly these. The build checks them against
+# third_party/limine/BOOTX64.EFI when that is present.
+stock_file_size=376832
+stock_image_size=0x63000
