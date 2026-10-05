@@ -56,8 +56,8 @@ pub use lock_tracking::{
     fatal_bypassed, for_each_held_lock_name, for_each_held_lock_name_for_cpu, graph_overflowed,
     held_depth_max, held_depth_overflows, held_lock_addrs, held_lock_addrs_for_cpu,
     held_lock_count, lockdep_mode, overflow_reported, poison_unlock_all_held,
-    registered_class_count, report_only_violations, set_lockdep_mode, tracking_enabled,
-    validator_alive, violation_reports, violations_reported,
+    register_class_eagerly, registered_class_count, report_only_violations, set_lockdep_mode,
+    tracking_enabled, validator_alive, violation_reports, violations_reported,
 };
 pub use mutex::{Mutex, MutexGuard};
 pub use once_lock::OnceLock;

@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
-use slopos_ostd::sync::{InitFlag, OnceLock};
+use slopos_ostd::sync::{InitFlag, LockClassKey, OnceLock, register_class_eagerly};
 use slopos_ostd::{KArc, KBox, lock_class};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError};
@@ -56,16 +56,28 @@ static RAMFS_POOL_STATE: [AtomicU8; RAMFS_POOL_LEN] =
 /// ceiling: a slot with no device to put in it buys nothing.
 pub const EXT2_POOL_LEN: usize = 4;
 
-/// The instances `mount(2)` hands out for `fstype` `ext2`, `ext3` or `ext4`. One
-/// `lock_class!` site each, for the reason [`RAMFS_POOL`] gives; slot 0 keeps
+/// One `lock_class!` site per instance `mount(2)` hands out for `fstype`
+/// `ext2`, `ext3` or `ext4`, for the reason [`RAMFS_POOL`] gives; slot 0 keeps
 /// the historical `CACHED_EXT2` name so the class the boot phase registers
 /// survives.
-static EXT2_POOL: [Ext2Mount; EXT2_POOL_LEN] = [
-    Ext2Mount::new_const(lock_class!("CACHED_EXT2", LOCK_LEVEL_RESOURCE)),
-    Ext2Mount::new_const(lock_class!("EXT2_POOL_1", LOCK_LEVEL_RESOURCE)),
-    Ext2Mount::new_const(lock_class!("EXT2_POOL_2", LOCK_LEVEL_RESOURCE)),
-    Ext2Mount::new_const(lock_class!("EXT2_POOL_3", LOCK_LEVEL_RESOURCE)),
+const EXT2_POOL_CLASSES: [&LockClassKey; EXT2_POOL_LEN] = [
+    lock_class!("CACHED_EXT2", LOCK_LEVEL_RESOURCE),
+    lock_class!("EXT2_POOL_1", LOCK_LEVEL_RESOURCE),
+    lock_class!("EXT2_POOL_2", LOCK_LEVEL_RESOURCE),
+    lock_class!("EXT2_POOL_3", LOCK_LEVEL_RESOURCE),
 ];
+
+static EXT2_POOL: [Ext2Mount; EXT2_POOL_LEN] = [
+    Ext2Mount::new_const(EXT2_POOL_CLASSES[0]),
+    Ext2Mount::new_const(EXT2_POOL_CLASSES[1]),
+    Ext2Mount::new_const(EXT2_POOL_CLASSES[2]),
+    Ext2Mount::new_const(EXT2_POOL_CLASSES[3]),
+];
+
+/// A mount's sleeping lock registers its class only when it contends, and
+/// which slot a mount lands in is timing too, so the whole pool registers on
+/// the first claim: the class count is then the same on every run.
+static EXT2_POOL_CLASSES_REGISTERED: InitFlag = InitFlag::new();
 
 static EXT2_POOL_STATE: [AtomicU8; EXT2_POOL_LEN] =
     [const { AtomicU8::new(POOL_FREE) }; EXT2_POOL_LEN];
@@ -204,6 +216,11 @@ fn reclaim_retired_ext2_slots() {
 /// Claim an ext2 instance for a mount, or `None` when all of them are in use.
 /// It comes back with no device attached; the caller owes it one.
 pub fn vfs_ext2_pool_claim() -> Option<&'static Ext2Mount> {
+    if EXT2_POOL_CLASSES_REGISTERED.init_once() {
+        EXT2_POOL_CLASSES
+            .iter()
+            .for_each(|class| register_class_eagerly(class));
+    }
     reclaim_retired_ext2_slots();
 
     for (idx, state) in EXT2_POOL_STATE.iter().enumerate() {

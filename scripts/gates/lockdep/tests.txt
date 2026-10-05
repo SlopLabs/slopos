@@ -360,9 +360,22 @@ require-phase post-userland-tests
 #               182-184, chains 409-413; userland edges 231-237, chains
 #               473-481), and boot's 39 edges and 111 chains sit inside their
 #               caps.
+#   2026-10-05  kernel 216 -> 219, userland 227 -> 230: the pool-slot
+#               variance above, removed. `EXT2_POOL_1..3` registered only when
+#               a mount landed in that slot and its sleeping lock contended,
+#               which CI hit on two of three runs of unchanged kernels
+#               (217/228). The first `vfs_ext2_pool_claim` now registers all
+#               four pool classes (`register_class_eagerly`), so both test
+#               phases carry the three every run. Boot holds at 76: nothing
+#               claims an ext2 slot before its report. Measured with
+#               `--emit-allowlist` over three full runs, 219/230 on each, no
+#               collision; every banded pool stayed inside its band (kernel
+#               edges 180-182, chains 407-412; userland edges 228-231, chains
+#               472-474), and boot's 39 edges and 111 chains sit inside their
+#               caps.
 boot	classes	76
-post-kernel-tests	classes	216
-post-userland-tests	classes	227
+post-kernel-tests	classes	219
+post-userland-tests	classes	230
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the

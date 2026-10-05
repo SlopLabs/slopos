@@ -1315,6 +1315,21 @@ pub enum DeclareOrderError {
     Full,
 }
 
+/// Register `key`'s class now rather than at the lock's first tracked acquire.
+///
+/// For a pool whose instances carry a class each: which instance a caller
+/// gets, and whether its sleeping lock ever contends, is timing, so without
+/// this the pool's class count differs from run to run of the same kernel.
+pub fn register_class_eagerly(key: &'static LockClassKey) {
+    if !TRACKING_ENABLED.load(Ordering::Relaxed)
+        || GRAPH_OVERFLOW.load(Ordering::Relaxed)
+        || matches!(lockdep_mode(), LockdepMode::Off)
+    {
+        return;
+    }
+    let _ = register_class(key, 0);
+}
+
 /// Assert that `outer` is always acquired before `inner`.
 ///
 /// Without a declaration, the polarity of a class pair is whatever ran first
