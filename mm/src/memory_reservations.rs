@@ -127,7 +127,7 @@ fn regions_equivalent(a: &MmRegion, b: &MmRegion) -> bool {
     }
 }
 
-fn try_merge_with_neighbors(store: &mut RegionStoreInner, index: u32) {
+fn try_merge_with_neighbors(store: &mut RegionStoreInner, mut index: u32) {
     let count = store.count;
     if count == 0 || index >= count {
         return;
@@ -150,6 +150,7 @@ fn try_merge_with_neighbors(store: &mut RegionStoreInner, index: u32) {
                 store.regions.copy_within(i + 1..cap, i);
             }
             store.count -= 1;
+            index -= 1;
         }
     }
 
