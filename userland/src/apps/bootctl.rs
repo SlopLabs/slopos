@@ -242,9 +242,8 @@ fn clone_slot(boot: &str, from: &str, to: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A boot armed here runs unattended, so it skips Limine's menu: the laptop's
-/// installed boots that went through the menu unedited hung black, while the
-/// live ISO, which has none, always came up (plans/bare-metal.md).
+/// A boot armed here runs unattended, so it skips Limine's menu and its
+/// timeout.
 fn oneshot(entry: &str) -> Result<(), String> {
     Loader::read()?.offered(entry)?;
     let armed = loader_var(bli::TIMEOUT_ONE_SHOT)?;
