@@ -9,6 +9,12 @@ use core::char::DecodeUtf16Error;
 pub const ENTRY_DEFAULT: &str = "LoaderEntryDefault";
 /// Set by the system, consumed by the loader on the next boot.
 pub const ENTRY_ONE_SHOT: &str = "LoaderEntryOneShot";
+/// Set by the system, consumed by the loader on the next boot: how long that
+/// boot's menu waits, or [`MENU_DISABLED`].
+pub const TIMEOUT_ONE_SHOT: &str = "LoaderConfigTimeoutOneShot";
+/// The [`TIMEOUT_ONE_SHOT`] that boots the chosen entry with no menu at all.
+/// `0` would mean the opposite: a menu that never times out.
+pub const MENU_DISABLED: &str = "menu-disabled";
 /// Set by the loader: the entry it booted.
 pub const ENTRY_SELECTED: &str = "LoaderEntrySelected";
 /// Set by the loader: every entry it offers, in menu order.

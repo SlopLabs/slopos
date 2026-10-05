@@ -214,6 +214,7 @@ pub fn set_default() -> Result<String, String> {
     if loader_var(bli::ENTRY_ONE_SHOT)?.is_some_and(|armed| armed.starts_with(layout::ENTRY_PREFIX))
     {
         set_loader_var(bli::ENTRY_ONE_SHOT, None)?;
+        set_loader_var(bli::TIMEOUT_ONE_SHOT, None)?;
     }
     set_loader_var(bli::ENTRY_DEFAULT, Some(&entry))?;
     Ok(entry)
