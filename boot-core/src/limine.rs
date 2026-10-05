@@ -134,8 +134,8 @@ impl Config<'_> {
         writeln!(out, "timeout: {}", self.timeout)?;
         writeln!(out, "serial: {}", if self.serial { "yes" } else { "no" })?;
         writeln!(out, "verbose: yes")?;
-        // Pointer support Resets the firmware's pointers and reads them again
-        // only on input or after the editor; the laptop booted after the editor.
+        // The menu resets the firmware's pointers and reads them again only on
+        // pointer input or after the editor, which every edited laptop boot took.
         writeln!(out, "mouse: no")?;
         for entry in self.entries {
             match *entry {
