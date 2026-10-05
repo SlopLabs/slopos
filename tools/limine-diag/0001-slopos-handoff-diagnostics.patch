@@ -199,10 +199,10 @@ index ef03917..6bfce3c 100644
  
 diff --git a/common/lib/slopos_diag.c b/common/lib/slopos_diag.c
 new file mode 100644
-index 0000000..c4356b4
+index 0000000..486c291
 --- /dev/null
 +++ b/common/lib/slopos_diag.c
-@@ -0,0 +1,1566 @@
+@@ -0,0 +1,1572 @@
 +// SPDX-License-Identifier: BSD-2-Clause
 +// SlopOS handoff diagnostics for Limine. Not part of upstream Limine; a
 +// derivative of it under the same licence (see COPYING).
@@ -1296,9 +1296,15 @@ index 0000000..c4356b4
 +static void sd_report_box(uint32_t bg, const char lines[][SD_LINE_MAX], unsigned n) {
 +    unsigned used1 = sd_nlines > sd_rows ? sd_nlines - sd_rows : 0;
 +    uint64_t y = sd_trail_y + (uint64_t)(used1 == 0 ? 0 : used1 + 1) * sd_lh;
++    uint64_t box_h = (uint64_t)(n + 1) * sd_lh;
++    // The report outranks the trail lines it covers, whole lines at a time.
++    if (y + box_h > sd_h) {
++        uint64_t room = sd_h > box_h ? sd_h - box_h : 0;
++        y = room > sd_trail_y ? sd_trail_y + (room - sd_trail_y) / sd_lh * sd_lh : room;
++    }
 +    uint64_t x = sd_half;
 +    unsigned width = (unsigned)((sd_w - sd_half) / sd_cw) - 1;
-+    sd_fill(x, y, (uint64_t)(width + 1) * sd_cw, (uint64_t)(n + 1) * sd_lh, bg);
++    sd_fill(x, y, (uint64_t)(width + 1) * sd_cw, box_h, bg);
 +    for (unsigned i = 0; i < n; i++) {
 +        sd_text(x + sd_cw / 2, y + sd_lh / 2 + (uint64_t)i * sd_lh, lines[i], width,
 +                i == 0 ? SD_YELLOW : SD_WHITE, bg);

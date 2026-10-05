@@ -17,7 +17,7 @@ MIMIC=1 when it ran. -DSLOPOS_DIAG_MIMIC_NO_ALLOC (mouse_flush only) or
 which of the two an edited boot needs.
 
 diff --git a/common/lib/slopos_diag.c b/common/lib/slopos_diag.c
-index c4356b4..058b678 100644
+index 486c291..781fe48 100644
 --- a/common/lib/slopos_diag.c
 +++ b/common/lib/slopos_diag.c
 @@ -30,7 +30,13 @@
