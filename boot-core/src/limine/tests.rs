@@ -47,7 +47,7 @@ fn slots_boot_from_the_boot_partition_and_nothing_names_a_default() {
     });
     let boot = "guid(11111111-2222-4333-8444-555555555555)";
     let expected = format!(
-        "timeout: 0\nserial: yes\nverbose: yes\n\
+        "timeout: 0\nserial: yes\nverbose: yes\nmouse: no\n\
          /slopos-a\n    protocol: limine\n    path: {boot}:/boot/a/kernel.elf\n    \
          cmdline: tests=on root=auto slot=a\n    module_path: {boot}:/boot/a/base.img\n    \
          module_string: initramfs\n    resolution: 1920x1080\n\
