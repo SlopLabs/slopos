@@ -1,87 +1,77 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ensure the Limine bootloader binaries are present.
+# Ensure the Limine bootloader SlopOS ships is built.
 #
-# As of Limine v12.0.0 the project no longer publishes a `vX.x-binary` git
-# branch; prebuilt binaries ship as a `limine-binary.tar.xz` asset attached to
-# each GitHub release. We download and unpack a pinned release into
-# third_party/limine. Offline environments may pre-populate that directory
-# (it just needs limine-bios.sys + BOOTX64.EFI) to skip the download.
+# Limine is built from the pinned release tarball with toolchain/limine's
+# patches (toolchain/limine/PIN says why) into third_party/limine, holding the
+# files the ISO, the boot disks and the install medium take: BOOTX64.EFI,
+# BOOTIA32.EFI, limine-bios.sys, limine-bios-cd.bin, limine-uefi-cd.bin and
+# LICENSE. A stamp over the pin, the patches, the build scripts and the tools
+# that built it decides whether it is rebuilt; a warm run is a hash.
+#
+# Needs make, nasm (the x86 ports), mtools (limine-uefi-cd.bin) and an LLVM
+# toolchain: clang, ld.lld, llvm-objcopy, llvm-objdump and llvm-readelf, picked
+# as scripts/lib/limine.sh says. The tarball is fetched into third_party/ once;
+# offline, put it there or point LIMINE_SRC_URL at a copy.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-LIMINE_DIR="${LIMINE_DIR:-${REPO_ROOT}/third_party/limine}"
+die() {
+    echo "ensure_limine: $*" >&2
+    exit 1
+}
+
+# shellcheck source=lib/limine.sh
+. "$SCRIPT_DIR/lib/limine.sh"
+
+DEFAULT_DIR="${REPO_ROOT}/third_party/limine"
+LIMINE_DIR="${LIMINE_DIR:-$DEFAULT_DIR}"
 case "$LIMINE_DIR" in /*) ;; *) LIMINE_DIR="$PWD/$LIMINE_DIR" ;; esac
-LIMINE_VERSION="${LIMINE_VERSION:-12.9.1}"
-LIMINE_URL="${LIMINE_URL:-https://github.com/limine-bootloader/limine/releases/download/v${LIMINE_VERSION}/limine-binary.tar.xz}"
-# SHA-256 of limine-binary.tar.xz for the pinned version (GitHub release assets
-# are immutable). Set to empty to skip integrity verification.
-LIMINE_TARBALL_SHA256="${LIMINE_TARBALL_SHA256:-ce972a05e9d1973dc9b725f9130bd15af01add0eb3a7f90c118ac5cfe21c17b8}"
+STAMP="$LIMINE_DIR/.slopos-limine-stamp"
 
-# Already populated with the pinned release (downloaded earlier or pre-staged
-# for offline builds). The version is read out of the EFI binary itself: a
-# directory left by an earlier pin passes a presence check and boots the old
-# loader, which is how a v11 Limine survived the move to v12.
-# Only the default location is replaced; a directory the caller named is
-# theirs, so a wrong version there is an error rather than a deletion.
-STALE=0
-if [ -f "$LIMINE_DIR/limine-bios.sys" ] && [ -f "$LIMINE_DIR/BOOTX64.EFI" ]; then
-    if grep -aq "Limine ${LIMINE_VERSION} " "$LIMINE_DIR/BOOTX64.EFI"; then
-        exit 0
-    fi
-    if [ "$LIMINE_DIR" != "${REPO_ROOT}/third_party/limine" ]; then
-        echo "Limine in $LIMINE_DIR is not v${LIMINE_VERSION}" >&2
-        exit 1
-    fi
-    echo "Limine in $LIMINE_DIR is not v${LIMINE_VERSION}; replacing it" >&2
-    STALE=1
+limine_load_pin
+limine_tools mtools
+
+WANT="$({
+    cat "$LIMINE_PIN" "${LIMINE_PATCHES[@]}" "$SCRIPT_DIR/ensure_limine.sh" "$SCRIPT_DIR/lib/limine.sh"
+    "$LIMINE_CC" --version | head -n 1
+    "$LIMINE_LD" --version | head -n 1
+    nasm -v
+} | limine_sha256_of)"
+if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ]; then
+    exit 0
 fi
 
-if [ "$STALE" = 0 ] && [ -d "$LIMINE_DIR" ] && [ -n "$(ls -A "$LIMINE_DIR" 2>/dev/null)" ]; then
-    echo "Limine directory exists but lacks Limine binaries: $LIMINE_DIR" >&2
-    echo "Remove it or point LIMINE_DIR to a valid Limine binary release." >&2
-    exit 1
+# Only the default location is replaced; a directory the caller named holds
+# someone else's files unless this script built them.
+if [ -d "$LIMINE_DIR" ] && [ -n "$(ls -A "$LIMINE_DIR" 2>/dev/null)" ] \
+    && [ "$LIMINE_DIR" != "$DEFAULT_DIR" ] && [ ! -f "$STAMP" ]; then
+    die "$LIMINE_DIR holds files this script did not build; remove it or name another LIMINE_DIR"
 fi
 
-echo "Fetching Limine v${LIMINE_VERSION} binaries..." >&2
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/limine-build.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+SRC="$WORK/src"
+limine_patched_tree "$SRC"
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+echo "Building Limine v${LIMINE_VERSION} with ${#LIMINE_PATCHES[@]} patch(es) ($("$LIMINE_CC" --version | head -n 1))..." >&2
+limine_configure "$SRC" "$WORK/configure.log" \
+    --enable-bios --enable-bios-cd --enable-uefi-ia32 --enable-uefi-x86-64 --enable-uefi-cd
+make -C "$SRC" -j"$(nproc 2>/dev/null || echo 4)" > "$WORK/make.log" 2>&1 \
+    || { tail -n 30 "$WORK/make.log" >&2; die "build failed"; }
 
-curl -L --fail --progress-bar "$LIMINE_URL" -o "$TMP/limine-binary.tar.xz"
+OUT="$WORK/out"
+mkdir -p "$OUT"
+for f in BOOTX64.EFI BOOTIA32.EFI limine-bios.sys limine-bios-cd.bin limine-uefi-cd.bin; do
+    [ -f "$SRC/bin/$f" ] || die "the build made no $f"
+    cp "$SRC/bin/$f" "$OUT/$f"
+done
+cp "$SRC/COPYING" "$OUT/LICENSE"
+printf '%s\n' "$WANT" > "$OUT/.slopos-limine-stamp"
 
-if [ -n "$LIMINE_TARBALL_SHA256" ]; then
-    if command -v sha256sum >/dev/null 2>&1; then
-        echo "${LIMINE_TARBALL_SHA256}  ${TMP}/limine-binary.tar.xz" | sha256sum -c - >&2
-    elif command -v shasum >/dev/null 2>&1; then
-        actual="$(shasum -a 256 "$TMP/limine-binary.tar.xz" | cut -d' ' -f1)"
-        if [ "$actual" != "$LIMINE_TARBALL_SHA256" ]; then
-            echo "Limine checksum mismatch: expected $LIMINE_TARBALL_SHA256, got $actual" >&2
-            exit 1
-        fi
-    else
-        echo "No SHA-256 tool found (need sha256sum or shasum)" >&2
-        exit 1
-    fi
-fi
-
-# The tarball unpacks into a single top-level `limine-binary/` directory; flatten
-# its contents into LIMINE_DIR.
-tar -xf "$TMP/limine-binary.tar.xz" -C "$TMP"
-SRC="$TMP/limine-binary"
-if [ ! -d "$SRC" ]; then
-    SRC="$(find "$TMP" -maxdepth 1 -type d -name 'limine*' | head -n1)"
-fi
-if [ -z "$SRC" ] || [ ! -f "$SRC/limine-bios.sys" ]; then
-    echo "Unexpected Limine binary tarball layout under $TMP" >&2
-    exit 1
-fi
-
-# Swapped in only once the replacement is downloaded and verified.
 rm -rf "$LIMINE_DIR"
-mkdir -p "$LIMINE_DIR"
-cp -a "$SRC"/. "$LIMINE_DIR"/
-
+mkdir -p "$(dirname "$LIMINE_DIR")"
+cp -a "$OUT" "$LIMINE_DIR"
 echo "Limine v${LIMINE_VERSION} ready in $LIMINE_DIR" >&2

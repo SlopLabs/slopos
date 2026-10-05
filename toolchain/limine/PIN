@@ -1,0 +1,11 @@
+# Limine, built from source rather than taken as the release's binaries, so the
+# patches beside this file reach the loader SlopOS ships: the ISO, every boot
+# disk's ESP and the install medium. scripts/ensure_limine.sh fetches the
+# release tarball into third_party/, checks it against limine_sha256, applies
+# toolchain/limine/*.patch in order and builds third_party/limine.
+#
+# Re-pinning: change all three values together, then re-cut the patches here
+# and under tools/limine-diag/ against the new tree.
+limine_version=12.9.1
+limine_url=https://github.com/limine-bootloader/limine/releases/download/v12.9.1/limine-12.9.1.tar.xz
+limine_sha256=c1096fdd506487fbd92c113baa9e153a9973cf766483cc3928e13fd29b976b32

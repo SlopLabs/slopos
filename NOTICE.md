@@ -362,9 +362,11 @@ section above. The tool runs at build time and is linked into no SlopOS image.
 `limine-bios.sys`, `limine-bios-cd.bin`, `limine-uefi-cd.bin`, `BOOTX64.EFI` and
 `BOOTIA32.EFI` are distributed on the SlopOS ISO, and `BOOTX64.EFI` on the ESP
 of a SlopOS boot disk, with this notice on the same ESP as
-`\EFI\SlopOS\LICENSE.limine`. Limine is a separate and independent work
-aggregated onto the same medium; its inclusion does not place it under the GNU
-GPL, and the GPL does not apply to it.
+`\EFI\SlopOS\LICENSE.limine`. They are built from the Limine 12.9.1 release
+sources with the modifications under `toolchain/limine/`, which are under the
+same licence. Limine is a separate and independent work aggregated onto the
+same medium; its inclusion does not place it under the GNU GPL, and the GPL
+does not apply to it.
 
 ```
 Copyright (C) 2019-2026 Mintsuki and contributors.

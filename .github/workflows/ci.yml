@@ -56,7 +56,9 @@ jobs:
       # the env vars below pin CI to the sources' own major regardless of what
       # the runner image happens to default to — `scripts/cxx_host_tools.sh`
       # treats them as an override that never falls back. openssh-client is
-      # for `ssh-keygen`, which stages the ladder's ssh fixture keys.
+      # for `ssh-keygen`, which stages the ladder's ssh fixture keys. nasm and
+      # mtools build Limine from source (`scripts/ensure_limine.sh`), with the
+      # same clang-18 and lld-18.
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -71,7 +73,9 @@ jobs:
             ninja-build \
             make \
             pkg-config \
-            openssh-client
+            openssh-client \
+            nasm \
+            mtools
           # Named, not aliased: `update-alternatives --install` with a missing
           # target warns and exits 0, so a wrong package name would surface
           # much later as a cross-build failure with nothing pointing here.

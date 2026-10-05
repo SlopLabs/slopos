@@ -1,21 +1,29 @@
 # Limine handoff diagnostics
 
-A Limine 12.9.1 `BOOTX64.EFI` that shows on screen where it stops. Between its
-framebuffer clear and the jump to the kernel, stock Limine draws nothing. A
-fault there goes to an IDT nobody services and the loop never ends, or, once
-the handoff GDT is loaded, the CPU triple-faults. On a machine with no serial
-port you get a black screen. This build draws into framebuffer 0 instead:
+A `BOOTX64.EFI` of the Limine SlopOS ships (12.9.1 with `toolchain/limine`'s
+patches) that shows on screen where it stops. Between its framebuffer clear
+and the jump to the kernel, stock Limine draws nothing. A fault there goes to an
+IDT nobody services and the loop never ends, or, once the handoff GDT is
+loaded, the CPU triple-faults. On a machine with no serial port you get a
+black screen. This build draws into framebuffer 0 instead:
 
 - a trail with one line per step, the newest marked `>`;
 - a red **EXCEPTION** box for any CPU exception (vectors 0-31);
 - a purple **CORRUPT** box when a page that Limine handed out changed behind
   its back;
-- a green box in the top-right corner when Limine executes `iretq` into the
-  kernel.
+- green boxes along the top right, drawn by the 32-bit trampoline once paging
+  is back on: from the left, on entering 64-bit mode, after its `lgdt`, after
+  the jump to the higher half, and the last, in the corner, when Limine
+  executes `iretq` into the kernel.
 
 The patches are `0001-slopos-handoff-diagnostics.patch` and the optional
-`0002-slopos-autoboot-as-editor.patch`. Both are BSD-2-Clause, as Limine is.
-The source release is pinned in `PIN`.
+`0002-slopos-autoboot-as-editor.patch`. Both are BSD-2-Clause, as Limine is,
+and apply on top of the shipped loader's patches; the source release is the
+one `toolchain/limine/PIN` pins.
+
+It found the bug `toolchain/limine/0001` fixes: on a laptop whose framebuffer
+is the highest memory-map entry, step 10 showed the framebuffer in Limine's
+map and absent from its page tables, and the first write through it faulted.
 
 ## Build
 
@@ -24,11 +32,11 @@ just limine-diag                        # builddir/limine-diag/BOOTX64.EFI + lim
 just limine-diag --autoboot-as-editor   # adds 0002, see below
 ```
 
-You need `clang`, `ld.lld`, `llvm-objcopy`, `llvm-objdump`, `llvm-readelf`,
-`nasm`, `make` and `patch`. The first build fetches the source tarball into
+You need what the shipped loader needs (`scripts/ensure_limine.sh`, which this
+runs first) and `patch`. The first build fetches the source tarball into
 `third_party/`. To build offline, put the tarball there yourself or set
-`LIMINE_SRC_URL`. The build pads the binary to the stock release's file and
-image size, because firmware places a loader by those sizes and every
+`LIMINE_SRC_URL`. The build pads the binary to the shipped `BOOTX64.EFI`'s file
+and image size, because firmware places a loader by those sizes and every
 allocation Limine makes moves with it (under OVMF, one page of image moves
 every allocation by one page). The header's last line confirms the match.
 
@@ -46,7 +54,7 @@ The ESP is shared with CachyOS, so replace only SlopOS's own loader.
 ```sh
 ESP=$(findmnt -no TARGET -t vfat | head -n1)      # usually /boot/efi or /boot
 ls "$ESP/EFI/SlopOS/"                             # BOOTX64.EFI  limine.conf
-sudo cp "$ESP/EFI/SlopOS/BOOTX64.EFI" "$ESP/EFI/SlopOS/BOOTX64.EFI.stock"
+sudo cp "$ESP/EFI/SlopOS/BOOTX64.EFI" "$ESP/EFI/SlopOS/BOOTX64.EFI.shipped"
 sudo cp BOOTX64.EFI "$ESP/EFI/SlopOS/BOOTX64.EFI" # the file from builddir/limine-diag/
 sync
 ```
@@ -57,10 +65,10 @@ whole screen. Then hold the power button. For comparison, boot once more and
 press `e` and then `F10`. The diagnostic binary still shows Limine's menu and
 its CachyOS entry.
 
-To restore the stock loader:
+To restore the shipped loader:
 
 ```sh
-sudo cp "$ESP/EFI/SlopOS/BOOTX64.EFI.stock" "$ESP/EFI/SlopOS/BOOTX64.EFI" && sync
+sudo cp "$ESP/EFI/SlopOS/BOOTX64.EFI.shipped" "$ESP/EFI/SlopOS/BOOTX64.EFI" && sync
 ```
 
 ## Reading the photo
@@ -76,7 +84,7 @@ else is hex.
 | `SLIDE`, `ABOVE4G` | Limine's load address, and whether it is above 4 GiB. |
 | `KBASE`, `STACK` | The kernel's physical base and the top of the handoff stack. |
 | `FW-CR3` | The firmware's page tables, which stay live until paging is turned off. |
-| `IMAGE … STOCK` | `SAME SIZE` means Limine's memory layout is stock's. |
+| `IMAGE … STOCK` | `SAME SIZE` means Limine's memory layout is the shipped loader's. |
 
 Trail lines, in order:
 
@@ -89,7 +97,12 @@ Trail lines, in order:
 4. `CHECK EBS`
 5. `EFI MEMMAP REBUILT`
 6. `MAP … TABLES`
-7. `BUILD PAGEMAP TOP= PT=`
+7. `BUILD PAGEMAP SNAP= NOW= TOP= PT=`: the memory map's entry count before and
+   after `build_pagemap` allocates its copy, each entry past `SNAP` as
+   `TAIL <base>+<length> T<type>` (unpatched 12.9.1 left these out of the page
+   tables), then `MAP-FB` for each framebuffer entry and `WALK FB:` /
+   `WALK FB END:`, the page-table entries the framebuffer's first and last
+   page resolve through, level by level.
 8. `CHECK PAGEMAP`
 9. `INIT SMP`, then one `START AP LAPIC ID n:` line per AP, ending `BOOTED`
    or `TIMED OUT`
@@ -137,10 +150,11 @@ are listed.
 | `VT-D … TE:` (or `IR:`, `QI:`) with no `OFF` | `iommu_disable_all` polls that unit's GSTS bit forever. | `STS=` on that line is the GSTS before the write. |
 | `START AP LAPIC ID n:` with no result | Hang while starting that AP. | |
 | Red EXCEPTION box | Fault at the decoded RIP. | `addr2line` on `limine.elf`. |
-| `TO 32-BIT, PAGING OFF` is the last line and there is no green box | Stopped in `limine_spinup_32`. It runs with a limit-0 IDT and paging off, so a fault there triple-faults. | |
-| Green box present, but the kernel never draws or answers | Limine handed off. The hang is in the kernel's `_start` or before `kernel_main_impl`. | |
+| `TO 32-BIT, PAGING OFF` is the last line and there is no box top right | Stopped in `spinup_go32` or `limine_spinup_32` before 64-bit mode: paging off, EFER, CR4 and CR3, the TSS, then the PAT, CR3, PAE, EFER, paging on and the far return. A limit-0 IDT is loaded, so a fault there triple-faults, and the framebuffer above 4 GiB cannot be drawn into. | Bisect with the reset probes (below). |
+| One to three boxes, none in the corner | Stopped after the box furthest right: one box, in or after the `lgdt`; two, in the jump to the higher half (the HHDM alias of the trampoline's code or stack); three, unmapping the lower half. | |
+| All four boxes, but the kernel never draws or answers | Limine handed off. The hang is in the kernel's `_start` or before `kernel_main_impl`. | |
 | No diagnostic text at all | Stopped in or before `fb_init`, or framebuffer 0 is not 32 bpp. | |
-| It boots fine | The diagnostics changed what fails: timing (drawing and checksums add up to about a second), or firmware-pool placement (the tables take 22 pages from the firmware at `boot()`). With `SAME SIZE`, Limine's own allocations are where stock puts them, so they are not what changed. | |
+| It boots fine | The diagnostics changed what fails: timing (drawing and checksums add up to about a second), or firmware-pool placement (the tables take 22 pages from the firmware at `boot()`). With `SAME SIZE`, Limine's own allocations are where the shipped loader puts them, so they are not what changed. | |
 
 If the `--autoboot-as-editor` build boots where the plain one hangs, add
 one of these to find which half of the editor path it needs:
@@ -168,3 +182,27 @@ These use `--define` (repeatable) with `just limine-diag`:
   which only the comparison against the ELF file catches.
 - `SLOPOS_DIAG_E9_TRACE` prints every allocation to QEMU's debugcon (port
   0xe9). That is how 0002 was compared with `e` + `F10`.
+- `SLOPOS_DIAG_RESET_AT=<n>` resets the machine at probe n of the spinup:
+  the reset control register's hard reset (0xcf9 ← 2, then 6), its full reset
+  (14), the keyboard controller's reset line (0x64 ← 0xfe), then a triple
+  fault, each after a pause. 1 is after the IRQ flush, which every boot that
+  draws `TO 32-BIT` reaches, so it shows the reset works on that machine. In
+  `spinup_go32`: 2 on entry, 3 after paging is off, 4 after EFER, 5 after CR4
+  and CR3, 6 after `ltr`. In `limine_spinup_32`: 7 on entry, 8 after the PAT,
+  9 after CR3 and PAE, 10 after EFER, 11 after paging is on; then, in 64-bit
+  mode, 12 before the first box, 13 after it (the first write through the new
+  HHDM), 14 after the `lgdt`, 15 after the jump to the higher half, 16 after
+  unmapping the lower half. A machine that reboots on its own reached that
+  probe; one that stops black did not. Under QEMU, every probe sends OVMF
+  round its boot loop without ever reaching the kernel.
+- `SLOPOS_DIAG_PROBE_STEP` does that bisection in one sitting: each boot takes
+  the probe after the last one's, from `SLOPOS_DIAG_PROBE_FIRST` (default 1)
+  to 16, counted in the NV UEFI variable `SlopDiagProbe` (vendor GUID
+  `5c1f2a8e-3b7d-4e61-9a0c-510b05d1a607`), and the header shows it as
+  `PROBE=n`. Left to boot the default entry by itself, the machine resets
+  through probe after probe until it hangs at one it never reaches: it
+  stopped between probe n-1 and n. Hanging at the first probe means the reset
+  does not work there, and says nothing. One that keeps cycling stops after
+  the last probe. Delete the variable from Linux afterwards: `sudo chattr -i`
+  and then `sudo rm` on
+  `/sys/firmware/efi/efivars/SlopDiagProbe-5c1f2a8e-3b7d-4e61-9a0c-510b05d1a607`.

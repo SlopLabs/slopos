@@ -2,9 +2,10 @@ SlopOS handoff diagnostics for Limine 12.9.1
 
 SPDX-License-Identifier: BSD-2-Clause
 A derivative of Limine (BSD-2-Clause, see COPYING in its tree), not part of
-upstream Limine. Applies to the tree of the limine-12.9.1 release tarball with
-`patch -p1` or `git apply`; scripts/build_limine_diag.sh applies it and builds.
-README.md beside this file says how to read what it draws.
+upstream Limine. Applies with `patch -p1` or `git apply` to the tree of the
+limine-12.9.1 release tarball once toolchain/limine's patches are on it;
+scripts/build_limine_diag.sh applies them all and builds. README.md beside
+this file says how to read what it draws.
 
 From fb_init to common_spinup it draws into framebuffer 0: a trail of the
 steps reached, a report of any CPU exception (vectors 0-31, through an IDT it
@@ -14,9 +15,10 @@ changed behind its back (per-page checksums verified after ExitBootServices,
 after build_pagemap, after init_smp and before common_spinup, plus the kernel
 image against its ELF file). It never calls Limine's allocator: its tables live
 in pages the firmware hands out at boot(), and the build pads the image to the
-stock binary's size, because firmware places a loader by its size and every
+shipped loader's size, because firmware places a loader by its size and every
 Limine allocation moves with it. The PNG/JPEG/BMP wallpaper decoder is dropped
-to make the room.
+to make the room. Step 10 also reports the memory map's count around
+build_pagemap's copy and walks the new page tables for the framebuffer.
 
 Compile-time options, through CPPFLAGS_FOR_TARGET:
   -DSLOPOS_DIAG_TEST_FAULT=<n>    take a #GP when step kind n starts
@@ -26,6 +28,15 @@ Compile-time options, through CPPFLAGS_FOR_TARGET:
                                   page-table page at the SMP check, 4 the
                                   kernel image before anything is sealed
   -DSLOPOS_DIAG_E9_TRACE          every allocation on port 0xe9 (QEMU debugcon)
+  -DSLOPOS_DIAG_RESET_AT=<n>      reset the machine at probe n of the spinup:
+                                  1 after the IRQ flush, spinup_go32 2-6,
+                                  limine_spinup_32 7-11 before 64-bit mode and
+                                  12-16 around its boxes
+  -DSLOPOS_DIAG_PROBE_STEP        take the next probe on each boot, counted
+                                  in the UEFI variable SlopDiagProbe
+  -DSLOPOS_DIAG_PROBE_FIRST=<n>   the probe stepping starts from (default 1)
+  -DSLOPOS_DIAG_HOLD_S=<n>        hold n seconds before the spinup, so a boot
+                                  that reaches the kernel can be photographed
   -DSLOPOS_DIAG_STOCK_IMAGE_SIZE, -DSLOPOS_DIAG_PAD_RODATA,
   -DSLOPOS_DIAG_PAD_BSS           set by the build script
 
@@ -199,10 +210,10 @@ index ef03917..6bfce3c 100644
  
 diff --git a/common/lib/slopos_diag.c b/common/lib/slopos_diag.c
 new file mode 100644
-index 0000000..486c291
+index 0000000..297a72d
 --- /dev/null
 +++ b/common/lib/slopos_diag.c
-@@ -0,0 +1,1572 @@
+@@ -0,0 +1,1688 @@
 +// SPDX-License-Identifier: BSD-2-Clause
 +// SlopOS handoff diagnostics for Limine. Not part of upstream Limine; a
 +// derivative of it under the same licence (see COPYING).
@@ -239,6 +250,23 @@ index 0000000..486c291
 +
 +#define SD_MAX_LINES 80
 +#define SD_LINE_MAX 112
++
++// The reset probe the spinup takes: 1 after the IRQ flush, which every boot
++// that draws step `TO 32-BIT` reaches, so it shows the reset works; 2-6 in
++// spinup_go32; 7-11 in limine_spinup_32 before 64-bit mode, 12-16 after it,
++// each around one of the boxes; 0 none. SLOPOS_DIAG_PROBE_STEP takes the next
++// one on each boot from SLOPOS_DIAG_PROBE_FIRST on, kept in the UEFI variable
++// SlopDiagProbe, so a machine resets through each probe in turn until it
++// reaches one it never gets to, and hangs showing it; after the last it
++// starts over.
++#ifndef SLOPOS_DIAG_RESET_AT
++#define SLOPOS_DIAG_RESET_AT 0
++#endif
++#ifndef SLOPOS_DIAG_PROBE_FIRST
++#define SLOPOS_DIAG_PROBE_FIRST 1
++#endif
++#define SDIAG_PROBES 16
++
 +#define SD_MAX_RECS 320
 +#define SD_MAX_FINE 128
 +#define SD_FINE_PAGES 8
@@ -284,9 +312,33 @@ index 0000000..486c291
 +
 +extern symbol __slide, __image_base, __image_end, __text_end;
 +extern symbol limine_spinup_32, sdiag_jump_mark;
++extern symbol spinup_go32, sdiag_go32_probe;
 +extern uint64_t sdiag_stubs[32];
 +extern uintptr_t spinup_low_go32, spinup_low_stack_top;
 +struct idt_entry *sdiag_flush_idt(void);
++
++static uint32_t sd_probe;
++
++static uint32_t sd_pick_probe(void) {
++#ifdef SLOPOS_DIAG_PROBE_STEP
++    static EFI_GUID guid =
++        { 0x5c1f2a8e, 0x3b7d, 0x4e61, { 0x9a, 0x0c, 0x51, 0x0b, 0x05, 0xd1, 0xa6, 0x07 } };
++    uint32_t last = 0;
++    UINTN size = sizeof(last);
++    if (gRT->GetVariable(L"SlopDiagProbe", &guid, NULL, &size, &last) != EFI_SUCCESS
++     || size != sizeof(last)) {
++        last = SDIAG_PROBES;
++    }
++    uint32_t next = last >= SDIAG_PROBES || last < SLOPOS_DIAG_PROBE_FIRST
++        ? SLOPOS_DIAG_PROBE_FIRST : last + 1;
++    gRT->SetVariable(L"SlopDiagProbe", &guid,
++        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
++        sizeof(next), &next);
++    return next;
++#else
++    return SLOPOS_DIAG_RESET_AT;
++#endif
++}
 +
 +static const uint8_t sd_font[96][7] = {
 +    [' ' - ' '] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
@@ -765,8 +817,12 @@ index 0000000..486c291
 +    char l[4][SD_LINE_MAX];
 +    uint64_t slide = (uint64_t)(uintptr_t)__slide;
 +    uint64_t img = ((uintptr_t)__image_end - (uintptr_t)__image_base + 4095) / 4096;
-+    sd_fmt(l[0], SD_LINE_MAX, "SLOPOS LIMINE-DIAG %s %s   GREEN BOX TOP RIGHT = LIMINE JUMPED TO THE KERNEL",
-+           LIMINE_VERSION, SDIAG_VARIANT);
++    char probe[16] = "";
++    if (sd_probe != 0) {
++        sd_fmt(probe, sizeof(probe), " PROBE=%u", (uint64_t)sd_probe);
++    }
++    sd_fmt(l[0], SD_LINE_MAX, "SLOPOS LIMINE-DIAG %s %s%s   GREEN BOX TOP RIGHT = LIMINE JUMPED TO THE KERNEL",
++           LIMINE_VERSION, SDIAG_VARIANT, probe);
 +    sd_fmt(l[1], SD_LINE_MAX, "ENTRY EDITOR=%u MIMIC=%u  POINTER INITS=%u REL=%u ABS=%u GETSTATE=%u FLUSH=%u  FB %ux%u",
 +           (uint64_t)booting_from_editor, (uint64_t)sdiag_mimic_ran, (uint64_t)sd_ptr_inits,
 +           (uint64_t)sd_ptr_rel, (uint64_t)sd_ptr_abs, (uint64_t)sd_getstates, (uint64_t)sd_flushes,
@@ -1513,6 +1569,19 @@ index 0000000..486c291
 +    }
 +}
 +
++// The count before and after build_pagemap()'s copy is allocated. Unpatched
++// 12.9.1 copied only the entries below snap; the TAIL entries past it are the
++// ones toolchain/limine/0001 keeps in the page tables.
++void sdiag_memmap_copy(size_t snap) {
++    sdiag_note(" SNAP=%u NOW=%u", (uint64_t)snap, (uint64_t)memmap_entries);
++    sd_e9("limine-diag: memmap copy snap=%u now=%u\n", (uint64_t)snap, (uint64_t)memmap_entries);
++    for (size_t i = snap; i < memmap_entries; i++) {
++        sdiag_note(" TAIL %x+%x T%u", memmap[i].base, memmap[i].length, (uint64_t)memmap[i].type);
++        sd_e9("limine-diag: tail %x+%x type %u\n", memmap[i].base, memmap[i].length,
++              (uint64_t)memmap[i].type);
++    }
++}
++
 +void sdiag_pagemap(void *top_level, int levels) {
 +    static const char *const names[] = { "", "PT-L1", "PT-L2", "PT-L3", "PT-L4", "PT-L5" };
 +    if (!sd_on || top_level == NULL || levels < 4 || levels > 5) {
@@ -1546,6 +1615,29 @@ index 0000000..486c291
 +        stack[depth][1] = 0;
 +    }
 +    sdiag_note(" TOP=%x PT=%u", (uint64_t)(uintptr_t)top_level, (uint64_t)count);
++
++    // Where the framebuffer's HHDM alias leads: the first write the 64-bit
++    // trampoline makes through these tables, and the kernel's first too.
++    for (size_t i = 0; i < memmap_entries; i++) {
++        if (memmap[i].type == MEMMAP_FRAMEBUFFER) {
++            sdiag_note(" MAP-FB %x+%x", memmap[i].base, memmap[i].length);
++        }
++    }
++    uint64_t fb_len = (uint64_t)sd_pitch * 4 * sd_h;
++    uint64_t fb_va[2] = { sd_hhdm + sd_fb_phys, sd_hhdm + sd_fb_phys + ((fb_len - 1) & ~0xfffULL) };
++    for (unsigned v = 0; v < 2; v++) {
++        sdiag_note(v == 0 ? " WALK FB:" : " WALK FB END:");
++        uint64_t *t = top_level;
++        for (int level = levels; level >= 1; level--) {
++            unsigned idx = (unsigned)((fb_va[v] >> (12 + 9 * (level - 1))) & 0x1ff);
++            uint64_t e = t[idx];
++            sdiag_note(" L%u[%u]=%x", (uint64_t)level, (uint64_t)idx, e);
++            if (!(e & 1) || (level <= 3 && (e & 0x80))) {
++                break;
++            }
++            t = (uint64_t *)(uintptr_t)(e & 0x000ffffffffff000ULL);
++        }
++    }
 +    sdiag_seal();
 +}
 +
@@ -1623,22 +1715,31 @@ index 0000000..486c291
 +    asm volatile ("mov %%cr3, %0" : "=r"(sd_fw_cr3));
 +
 +    sd_install_idt();
++    sd_probe = sd_pick_probe();
 +    sd_header();
 +
-+    // A box limine_spinup_32 paints through the new HHDM, just before iretq.
++    // Boxes limine_spinup_32 paints through the new HHDM: one on entering
++    // 64-bit mode, one after its lgdt, one after the jump to the higher half
++    // and the last, top right, just before iretq. Each lies left of the next.
 +    struct {
 +        uint64_t addr;
 +        uint32_t pitch;
 +        uint32_t size;
 +        uint32_t colour;
-+        uint32_t pad;
++        uint32_t reset_at;
 +    } *mark = (void *)((uint8_t *)spinup_copy + ((uintptr_t)sdiag_jump_mark - (uintptr_t)limine_spinup_32));
 +    uint32_t box = 12 * sd_s;
-+    if (spinup_copy != NULL && sd_w > box + 8) {
++    if (spinup_copy != NULL && sd_w > 6 * box + 8) {
 +        mark->addr = hhdm + sd_fb_phys + 8 * fbi->framebuffer_pitch + (sd_w - box - 8) * 4;
 +        mark->pitch = (uint32_t)fbi->framebuffer_pitch;
 +        mark->size = box;
 +        mark->colour = sd_px(SD_MARK);
++    }
++    if (spinup_copy != NULL) {
++        mark->reset_at = sd_probe;
++    }
++    if (spinup_low_go32 != 0) {
++        *(volatile uint32_t *)(spinup_low_go32 + ((uintptr_t)sdiag_go32_probe - (uintptr_t)spinup_go32)) = sd_probe;
 +    }
 +
 +    sdiag_track((void *)(uintptr_t)kernel_phys, sd_ksize, "KERNEL");
@@ -1723,9 +1824,35 @@ index 0000000..486c291
 +#endif
 +}
 +
++// The reset the 32-bit probes make: the reset control register's hard reset,
++// its full reset, the keyboard controller's reset line, then a triple fault.
++static noreturn void sd_reset(void) {
++    static const uint8_t cf9[] = { 0x02, 0x06, 0x0e };
++    for (size_t i = 0; i < sizeof(cf9); i++) {
++        outb(0xcf9, cf9[i]);
++        for (volatile uint32_t n = 0; n < 0x10000000; n++) {
++        }
++    }
++    outb(0x64, 0xfe);
++    for (volatile uint32_t n = 0; n < 0x10000000; n++) {
++    }
++    struct idtr none = { 0 };
++    asm volatile ("lidt %0; int3" :: "m"(none));
++    for (;;) {
++    }
++}
++
 +void sdiag_spinup_post_flush(void) {
 +    sdiag_note("OK");
++#ifdef SLOPOS_DIAG_HOLD_S
++    // Time to photograph a boot the kernel's first frame would overwrite.
++    sdiag_step(SDIAG_GO32, "HOLDING %u S", (uint64_t)SLOPOS_DIAG_HOLD_S);
++    stall((uint64_t)SLOPOS_DIAG_HOLD_S * 1000000);
++#endif
 +    sdiag_step(SDIAG_GO32, "TO 32-BIT, PAGING OFF, LIMINE_SPINUP_32");
++    if (sd_probe == 1) {
++        sd_reset();
++    }
 +}
 +
 +static const char *const sd_vec_names[32] = {
@@ -1777,10 +1904,10 @@ index 0000000..486c291
 +#endif
 diff --git a/common/lib/slopos_diag.h b/common/lib/slopos_diag.h
 new file mode 100644
-index 0000000..0f6ae3b
+index 0000000..2d4bbce
 --- /dev/null
 +++ b/common/lib/slopos_diag.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,92 @@
 +// SPDX-License-Identifier: BSD-2-Clause
 +// SlopOS handoff diagnostics for Limine. Not part of upstream Limine; a
 +// derivative of it under the same licence (see COPYING).
@@ -1840,6 +1967,7 @@ index 0000000..0f6ae3b
 +void sdiag_reseal(const void *p, uint64_t len);
 +void sdiag_check(const char *where);
 +void sdiag_pagemap(void *top_level, int levels);
++void sdiag_memmap_copy(size_t snap);
 +
 +void sdiag_after_ebs(void);
 +void sdiag_mouse_init(size_t rel, size_t abs);
@@ -1953,10 +2081,10 @@ index 0000000..37a3a1b
 +%assign i i+1
 +%endrep
 diff --git a/common/lib/spinup.asm_uefi_x86_64 b/common/lib/spinup.asm_uefi_x86_64
-index 48ad868..0369c95 100644
+index 48ad868..f14828a 100644
 --- a/common/lib/spinup.asm_uefi_x86_64
 +++ b/common/lib/spinup.asm_uefi_x86_64
-@@ -6,6 +6,9 @@ invalid_idt:
+@@ -6,12 +6,63 @@ invalid_idt:
  section .text
  
  extern flush_irqs
@@ -1966,7 +2094,61 @@ index 48ad868..0369c95 100644
  
  %macro push32 1
      sub rsp, 4
-@@ -25,7 +28,8 @@ common_spinup:
+     mov dword [rsp], %1
+ %endmacro
+ 
++; SlopOS diagnostics: SDIAG_RESET32 n resets the machine when sdiag_go32_probe
++; asks for probe n, so a machine that reboots reached it. spinup_go32 runs
++; from a copy, so the probe is found relative to EIP. Clobbers ebx.
++%macro SDIAG_RESET32 1
++    call %%ip
++  %%ip:
++    pop ebx
++    cmp dword [ebx + (sdiag_go32_probe - %%ip)], %1
++    je sdiag_go32_reset
++%endmacro
++
++; The reset sdiag_reset() in slopos_diag.c also makes, for 32-bit code in any
++; mode: the reset control register's hard reset, its full reset, the keyboard
++; controller's reset line, then a triple fault.
++%macro SDIAG_RESET_SEQ 0
++    mov dx, 0xcf9
++    mov al, 0x02
++    out dx, al
++    mov ecx, 0x100000
++  %%d1:
++    dec ecx
++    jnz %%d1
++    mov al, 0x06
++    out dx, al
++    mov ecx, 0x10000000
++  %%d2:
++    dec ecx
++    jnz %%d2
++    mov al, 0x0e
++    out dx, al
++    mov ecx, 0x10000000
++  %%d3:
++    dec ecx
++    jnz %%d3
++    mov al, 0xfe
++    out 0x64, al
++    mov ecx, 0x10000000
++  %%d4:
++    dec ecx
++    jnz %%d4
++    push 0
++    push 0
++    lidt [esp]
++    int3
++  %%hang:
++    jmp %%hang
++%endmacro
++
+ extern gdt
+ 
+ ; Below-4GiB copy of spinup_go32 and its scratch stack top; set by
+@@ -25,7 +76,8 @@ common_spinup:
      cli
  
      lgdt [rel gdt]
@@ -1976,7 +2158,7 @@ index 48ad868..0369c95 100644
  
      lea rbx, [rel .reload_cs]
  
-@@ -46,7 +50,9 @@ common_spinup:
+@@ -46,7 +98,9 @@ common_spinup:
      push rdx
      push rsi
      push rdi
@@ -1986,10 +2168,12 @@ index 48ad868..0369c95 100644
      pop rdi
      pop rsi
      pop rdx
-@@ -97,6 +103,13 @@ spinup_go32:
+@@ -97,18 +151,33 @@ spinup_go32:
      xor eax, eax
      lldt ax
  
++    SDIAG_RESET32 2
++
 +    ; Back to stock's limit-0 IDT: past this point gates are read in the
 +    ; legacy format, which the diagnostic IDT is not.
 +    push 0
@@ -2000,6 +2184,44 @@ index 48ad868..0369c95 100644
      mov eax, 0x00000011
      mov cr0, eax
  
++    SDIAG_RESET32 3
++
+     mov ecx, 0xc0000080
+     xor eax, eax
+     xor edx, edx
+     wrmsr
+ 
++    SDIAG_RESET32 4
++
+     xor eax, eax
+     mov cr4, eax
+     mov cr3, eax
+ 
++    SDIAG_RESET32 5
++
+     ; Clear TSS busy bit and load TR with base 0, limit 0
+     sub esp, 8
+     sgdt [esp]
+@@ -118,7 +187,19 @@ spinup_go32:
+     mov ax, 0x38
+     ltr ax
+ 
++    SDIAG_RESET32 6
++
+     call edi
+ 
++sdiag_go32_reset:
++    SDIAG_RESET_SEQ
++
++; The probe to take, 0 for none: written into the below-4GiB copy by
++; sdiag_init().
++align 4
++global sdiag_go32_probe
++sdiag_go32_probe:
++    dd 0
++
+ global spinup_go32_end
+ spinup_go32_end:
 diff --git a/common/menu.c b/common/menu.c
 index fc8571a..b06ab3d 100644
 --- a/common/menu.c
@@ -2059,7 +2281,7 @@ index 524771a..b902137 100644
      }
  
 diff --git a/common/protos/limine.c b/common/protos/limine.c
-index 34e1c16..951d701 100644
+index 6db73fd..4235847 100644
 --- a/common/protos/limine.c
 +++ b/common/protos/limine.c
 @@ -27,6 +27,7 @@
@@ -2070,7 +2292,25 @@ index 34e1c16..951d701 100644
  #include <fs/file.h>
  #include <mm/pmm.h>
  #include <pxe/tftp.h>
-@@ -1578,6 +1579,10 @@ FEAT_END
+@@ -211,10 +212,17 @@ static pagemap_t build_pagemap(int base_revision,
+         map_pages(pagemap, direct_map_offset, 0, VMM_FLAG_WRITE, 0x100000000);
+     }
+ 
++#if defined (UEFI) && defined (__x86_64__)
++    // SlopOS diagnostics: what the copy's allocation did to the count.
++    size_t sd_snap = memmap_entries;
++#endif
+     // The allocation can split a memmap entry and so add one: count after it.
+     struct memmap_entry *_memmap =
+         ext_mem_alloc_counted(memmap_entries + 1, sizeof(struct memmap_entry));
+     size_t _memmap_entries = memmap_entries;
++#if defined (UEFI) && defined (__x86_64__)
++    sdiag_memmap_copy(sd_snap);
++#endif
+     for (size_t i = 0; i < _memmap_entries; i++)
+         _memmap[i] = memmap[i];
+ 
+@@ -1580,6 +1588,10 @@ FEAT_END
      term_notready();
  
      fb_init(&fbs, &fbs_count, req_width, req_height, req_bpp, preserve_screen, false);
@@ -2081,7 +2321,7 @@ index 34e1c16..951d701 100644
      if (fbs_count == 0) {
          goto no_fb;
      }
-@@ -1780,6 +1785,9 @@ FEAT_END
+@@ -1782,6 +1794,9 @@ FEAT_END
      // Wrap-up stuff before memmap close
  #if defined (__x86_64__) || defined (__i386__)
      struct gdtr *local_gdt = ext_mem_alloc(sizeof(struct gdtr));
@@ -2091,7 +2331,7 @@ index 34e1c16..951d701 100644
      local_gdt->limit = gdt.limit;
      uint64_t local_gdt_base = (uint64_t)gdt.ptr;
      local_gdt_base += direct_map_offset;
-@@ -1844,6 +1852,9 @@ FEAT_END
+@@ -1846,6 +1861,9 @@ FEAT_END
  #endif
  
      void *stack = ext_mem_alloc(stack_size) + stack_size;
@@ -2101,7 +2341,7 @@ index 34e1c16..951d701 100644
  
      bool nx_available = true;
  #if defined (__x86_64__) || defined (__i386__)
-@@ -1969,6 +1980,10 @@ FEAT_END
+@@ -1971,6 +1989,10 @@ FEAT_END
      }
  #endif
  
@@ -2112,7 +2352,7 @@ index 34e1c16..951d701 100644
      efi_exit_boot_services();
  #endif
  
-@@ -1989,6 +2004,9 @@ FEAT_START
+@@ -1991,6 +2013,9 @@ FEAT_START
      efi_memmap_response->desc_version = efi_desc_ver;
  
      efi_memmap_request->response = reported_addr(efi_memmap_response);
@@ -2122,7 +2362,7 @@ index 34e1c16..951d701 100644
  FEAT_END
  #endif
  
-@@ -1998,6 +2016,9 @@ FEAT_END
+@@ -2000,6 +2025,9 @@ FEAT_END
      }
  
      if (base_revision >= 4) {
@@ -2132,7 +2372,7 @@ index 34e1c16..951d701 100644
          acpi_map_tables();
          if (base_revision >= 5) {
              smbios_map_tables();
-@@ -2006,11 +2027,23 @@ FEAT_END
+@@ -2008,11 +2036,23 @@ FEAT_END
  #endif
          }
          pmm_sanitise_entries(memmap, &memmap_entries, true);
@@ -2156,7 +2396,7 @@ index 34e1c16..951d701 100644
  
      // MP
  FEAT_START
-@@ -2024,10 +2057,17 @@ FEAT_START
+@@ -2026,10 +2066,17 @@ FEAT_START
  #if defined (__x86_64__) || defined (__i386__)
      smp_configure_apic = base_revision >= 5;
      uint32_t bsp_lapic_id;
@@ -2174,7 +2414,7 @@ index 34e1c16..951d701 100644
  #elif defined (__aarch64__)
      uint64_t bsp_mpidr;
  
-@@ -2099,7 +2139,14 @@ FEAT_START
+@@ -2101,7 +2148,14 @@ FEAT_START
      mp_response->cpus = reported_addr(mp_list);
  
      mp_request->response = reported_addr(mp_response);
@@ -2189,7 +2429,7 @@ index 34e1c16..951d701 100644
  
  #if defined (__aarch64__) || defined (__loongarch64)
      if (smp_dtb != NULL) {
-@@ -2202,7 +2249,15 @@ FEAT_START
+@@ -2204,7 +2258,15 @@ FEAT_START
      memmap_response->entries = reported_addr(memmap_list);
  
      memmap_request->response = reported_addr(memmap_response);
@@ -2205,7 +2445,7 @@ index 34e1c16..951d701 100644
  
  #if defined (__x86_64__) || defined (__i386__)
  #if defined (BIOS)
-@@ -2215,15 +2270,33 @@ FEAT_END
+@@ -2217,15 +2279,33 @@ FEAT_END
      rm_int(0x15, &r, &r);
  #endif
  
@@ -2239,7 +2479,7 @@ index 34e1c16..951d701 100644
      }
  
      irq_flush_type = IRQ_PIC_APIC_FLUSH;
-@@ -2232,6 +2305,8 @@ FEAT_END
+@@ -2234,6 +2314,8 @@ FEAT_END
  
  #if defined (UEFI) && defined (__x86_64__)
      void *spinup_fn = spinup_tramp_low(limine_spinup_32);
@@ -2249,51 +2489,219 @@ index 34e1c16..951d701 100644
      void *spinup_fn = limine_spinup_32;
  #endif
 diff --git a/common/protos/limine_32.asm_x86 b/common/protos/limine_32.asm_x86
-index ff6ee16..7860ce2 100644
+index ff6ee16..bd9c812 100644
 --- a/common/protos/limine_32.asm_x86
 +++ b/common/protos/limine_32.asm_x86
-@@ -110,6 +110,33 @@ bits 64
+@@ -2,8 +2,114 @@ bits 32
  
-   .no_unmap_lower_half:
+ section .text
  
 +%ifdef UEFI
 +%ifdef X86_64_TARGET
-+    ; SlopOS diagnostics: paint the jump marker through the new HHDM. Nothing
-+    ; here is live yet: the stack arguments are read again below.
++; SlopOS diagnostics. SDIAG_RESET32 n resets the machine when sdiag_init()
++; asked for probe n (sdiag_jump_mark + 20): a machine that reboots reached
++; that point. Probe 1 is sdiag_spinup_post_flush()'s, 2-6 spinup_go32's,
++; 7-11 these. It runs with paging off, where the framebuffer above 4 GiB
++; cannot be drawn into; it finds its data relative to EIP because this code
++; runs from a copy. Clobbers ebx.
++%macro SDIAG_RESET32 1
++    call %%ip
++  %%ip:
++    pop ebx
++    cmp dword [ebx + (sdiag_jump_mark + 20 - %%ip)], %1
++    je sdiag_spinup_32_reset
++%endmacro
++
++; Probes 12-16, in 64-bit mode: the same, RIP-relative. Clobbers only flags.
++%macro SDIAG_RESET64 1
++    cmp dword [rel sdiag_jump_mark + 20], %1
++    je sdiag_spinup_64_reset
++%endmacro
++
++; As spinup_go32's: the reset control register's hard and full resets, the
++; keyboard controller's reset line, then a triple fault. %1 is the stack
++; pointer the empty IDT descriptor is read through.
++%macro SDIAG_RESET_SEQ 1
++    mov dx, 0xcf9
++    mov al, 0x02
++    out dx, al
++    mov ecx, 0x100000
++  %%d1:
++    dec ecx
++    jnz %%d1
++    mov al, 0x06
++    out dx, al
++    mov ecx, 0x10000000
++  %%d2:
++    dec ecx
++    jnz %%d2
++    mov al, 0x0e
++    out dx, al
++    mov ecx, 0x10000000
++  %%d3:
++    dec ecx
++    jnz %%d3
++    mov al, 0xfe
++    out 0x64, al
++    mov ecx, 0x10000000
++  %%d4:
++    dec ecx
++    jnz %%d4
++    push 0
++    push 0
++    lidt [%1]
++    int3
++  %%hang:
++    jmp %%hang
++%endmacro
++
++; SDIAG_MARK slot paints a box through the new HHDM, `slot` boxes left of the
++; final one; a boot that got further shows more boxes from the left. Clobbers
++; rax, rcx, rdx, rdi, r8, r9, r10.
++%macro SDIAG_MARK 1
 +    mov rdi, [rel sdiag_jump_mark]
 +    test rdi, rdi
-+    jz .no_jump_mark
++    jz %%skip
 +    mov edx, [rel sdiag_jump_mark + 8]
 +    mov r8d, [rel sdiag_jump_mark + 12]
 +    mov eax, [rel sdiag_jump_mark + 16]
++    mov ecx, r8d
++    imul ecx, ecx, 6 * %1
++    sub rdi, rcx
 +    mov r9d, r8d
-+  .jump_mark_row:
++  %%row:
 +    mov ecx, r8d
 +    mov r10, rdi
-+  .jump_mark_px:
++  %%px:
 +    mov [r10], eax
 +    add r10, 4
 +    dec ecx
-+    jnz .jump_mark_px
++    jnz %%px
 +    add rdi, rdx
 +    dec r9d
-+    jnz .jump_mark_row
++    jnz %%row
 +    sfence
-+  .no_jump_mark:
++  %%skip:
++%endmacro
++%else
++%macro SDIAG_RESET32 1
++%endmacro
++%macro SDIAG_RESET64 1
++%endmacro
++%macro SDIAG_MARK 1
++%endmacro
 +%endif
++%else
++%macro SDIAG_RESET32 1
++%endmacro
++%macro SDIAG_RESET64 1
++%endmacro
++%macro SDIAG_MARK 1
++%endmacro
 +%endif
++
+ global limine_spinup_32
+ limine_spinup_32:
++    SDIAG_RESET32 7
++
+     ; If available, set PAT as:
+     ; PAT0 -> WB  (06)
+     ; PAT1 -> WT  (04)
+@@ -22,6 +128,8 @@ limine_spinup_32:
+     wrmsr
+   .no_pat:
+ 
++    SDIAG_RESET32 8
++
+     ; Enable CR4.LA57
+     cmp dword [esp+4], 0 ; level5pg
+     je .no_la57
+@@ -45,6 +153,8 @@ limine_spinup_32:
+     bts eax, 5
+     mov cr4, eax
+ 
++    SDIAG_RESET32 9
++
+     ; Set EFER (LME + NX if available), all other bits cleared
+     mov ecx, 0xc0000080
+     xor edx, edx
+@@ -55,6 +165,8 @@ limine_spinup_32:
+   .no_nx:
+     wrmsr
+ 
++    SDIAG_RESET32 10
++
+     ; Enable CR0.PG. AMD requires the next instruction to be a branch and
+     ; Intel recommends one. AMD64 APM 24593 Rev. 3.45, 14.6.1; Intel SDM
+     ; 325462-092, 25.30.3.
+@@ -64,6 +176,8 @@ limine_spinup_32:
+     jmp .paging_on
+   .paging_on:
+ 
++    SDIAG_RESET32 11
++
+     ; Go 64
+     push 0x28
+     call .p1
+@@ -83,10 +197,17 @@ bits 64
+     ; Legacy mode leaves the GPR high halves undefined; define them
+     mov esp, esp
+ 
++    SDIAG_RESET64 12
++    SDIAG_MARK 3
++    SDIAG_RESET64 13
++
+     ; Load 64-bit GDT
+     mov eax, [rsp+28] ; local_gdt
+     lgdt [rax]
+ 
++    SDIAG_RESET64 14
++    SDIAG_MARK 2
++
+     ; Jump to higher half
+     mov rax, qword [rsp+36]
+     add rsp, rax
+@@ -97,6 +218,11 @@ bits 64
+     retq
+   .hh:
+ 
++    SDIAG_RESET64 15
++    push rax
++    SDIAG_MARK 1
++    pop rax
++
+     cmp dword [rsp+44], 1
+     jb .no_unmap_lower_half
+ 
+@@ -110,6 +236,11 @@ bits 64
+ 
+   .no_unmap_lower_half:
+ 
++    ; SlopOS diagnostics: the final box, in the top right corner. Nothing
++    ; here is live yet: the stack arguments are read again below.
++    SDIAG_RESET64 16
++    SDIAG_MARK 0
 +
      ; Push fake return address
      mov rsi, [rsp+20] ; stack
      sub rsi, 8
-@@ -142,5 +169,20 @@ bits 64
+@@ -142,5 +273,29 @@ bits 64
  
      iretq
  
 +%ifdef UEFI
 +%ifdef X86_64_TARGET
-+; Filled in the below-4GiB copy by sdiag_init(): HHDM address of the marker's
-+; first pixel, pitch in bytes, side in pixels, pixel value.
++bits 64
++sdiag_spinup_64_reset:
++    SDIAG_RESET_SEQ rsp
++
++bits 32
++sdiag_spinup_32_reset:
++    SDIAG_RESET_SEQ esp
++
++; Filled in the below-4GiB copy by sdiag_init(): HHDM address of the final
++; box's first pixel, pitch in bytes, side in pixels, pixel value, and the
++; SDIAG_RESET32 probe to take (0 for none).
 +align 8
 +global sdiag_jump_mark
 +sdiag_jump_mark:
