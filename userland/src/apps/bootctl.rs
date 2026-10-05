@@ -5,8 +5,9 @@
 //! `/boot/<slot>/base.img`; each slot is a Limine entry named `slopos-<slot>`.
 //! What boots is chosen through the Boot Loader Interface alone, and nothing
 //! on the ESP is written. A new system is tried once, not adopted: `oneshot`
-//! sets `LoaderEntryOneShot`, which Limine consumes on the next boot, so a
-//! reset after a panic boots the default again. `commit`, run once the tried
+//! sets `LoaderEntryOneShot`, and `LoaderConfigTimeoutOneShot` to skip the
+//! menu, which Limine consumes on the next boot, so a reset after a panic
+//! boots the default again. `commit`, run once the tried
 //! system is up, makes the entry Limine reports as booted
 //! (`LoaderEntrySelected`) the default, `LoaderEntryDefault`.
 //!
@@ -189,6 +190,7 @@ fn install_slot(
     let entry = format!("{}{slot}", layout::ENTRY_PREFIX);
     if loader.one_shot.as_deref() == Some(entry.as_str()) {
         set_loader_var(bli::ENTRY_ONE_SHOT, None)?;
+        set_loader_var(bli::TIMEOUT_ONE_SHOT, None)?;
         println!("{entry} is no longer armed to boot once");
     }
     write_verified(volume, &format!("{dir}/{}", layout::BASE_FILE), base)?;
@@ -240,10 +242,14 @@ fn clone_slot(boot: &str, from: &str, to: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A boot armed here runs unattended, so it skips Limine's menu: the laptop's
+/// installed boots that went through the menu unedited hung black, while the
+/// live ISO, which has none, always came up (plans/bare-metal.md).
 fn oneshot(entry: &str) -> Result<(), String> {
     Loader::read()?.offered(entry)?;
     set_loader_var(bli::ENTRY_ONE_SHOT, Some(entry))?;
-    println!("next boot: {entry}, once");
+    set_loader_var(bli::TIMEOUT_ONE_SHOT, Some(bli::MENU_DISABLED))?;
+    println!("next boot: {entry}, once, without the menu");
     Ok(())
 }
 
