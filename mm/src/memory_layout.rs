@@ -12,8 +12,8 @@ static BOUNDS_INIT: InitFlag = InitFlag::new();
 /// Resolve linker-provided `_kernel_start` / `_kernel_end` and cache their
 /// addresses. Idempotent — only the first call has an effect.
 ///
-/// The cached values are linker symbol addresses and may be virtual; callers
-/// needing physical addresses must translate via `virt_to_phys_kernel()`.
+/// The cached values are the linker symbols' virtual addresses; the image's
+/// physical placement is Limine's, reported in its executable address response.
 pub fn init_kernel_bounds() {
     if !BOUNDS_INIT.init_once() {
         return;

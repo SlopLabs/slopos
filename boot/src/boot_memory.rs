@@ -172,11 +172,21 @@ fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 
     let hhdm = boot_get_hhdm_offset();
     let hhdm_available = crate::limine_protocol::is_hhdm_available() != 0;
-    let boot_fb = crate::limine_protocol::boot_info().framebuffer;
-    let framebuffer = boot_fb.as_ref().map(|bf| (*bf.address as u64, &bf.info));
+    let boot_info = crate::limine_protocol::boot_info();
+    let framebuffer = boot_info
+        .framebuffer
+        .as_ref()
+        .map(|bf| (*bf.address as u64, &bf.info));
 
     klog_debug!("Initializing memory management from Limine data...");
-    let rc = init_memory_system_pre_typestate(memmap, hhdm, hhdm_available, framebuffer);
+    let rc = init_memory_system_pre_typestate(
+        memmap,
+        hhdm,
+        hhdm_available,
+        framebuffer,
+        boot_info.kernel_phys_base,
+        boot_info.kernel_virt_base,
+    );
     if rc != 0 {
         klog_info!("ERROR: Memory system pre-typestate init failed");
         return -1;

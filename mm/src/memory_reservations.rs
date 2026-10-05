@@ -249,19 +249,25 @@ fn overlay_region(
             let region_exists = idx < store.count;
             let needs_insert = !region_exists || store.regions[idx as usize].phys_base > cursor;
             if needs_insert {
+                let gap_end = if region_exists {
+                    store.regions[idx as usize].phys_base.min(aligned_end)
+                } else {
+                    aligned_end
+                };
                 if insert_slot(store, idx).is_err() {
                     return -1;
                 }
                 let i = idx as usize;
                 let region = &mut store.regions[i];
                 region.phys_base = cursor;
-                region.length = aligned_end - cursor;
+                region.length = gap_end - cursor;
                 region.kind = kind;
                 region.type_ = type_;
                 region.flags = flags;
                 copy_label(&mut region.label, label);
                 try_merge_with_neighbors(store, idx);
-                break;
+                cursor = gap_end;
+                continue;
             }
 
             if split_region(store, idx, cursor).is_err() {

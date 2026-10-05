@@ -1,9 +1,6 @@
 use crate::kernel_mappings::{kernel_is_mapped, kernel_map_io_4kb};
 use crate::memory_layout::{init_kernel_bounds, kernel_image_bounds};
-use crate::memory_layout_defs::{
-    BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
-    EARLY_PML4_PHYS_ADDR, HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE,
-};
+use crate::memory_layout_defs::HHDM_VIRT_BASE;
 use crate::memory_reservations::{
     MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT, MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
     MM_RESERVATION_FLAG_MMIO, MmRegionKind, MmReservationType, mm_region_add_usable,
@@ -137,19 +134,6 @@ fn add_usable_or_panic(base: u64, length: u64, label: *const c_char) {
     }
 }
 
-fn virt_to_phys_kernel(virt: u64) -> u64 {
-    if virt >= KERNEL_VIRTUAL_BASE {
-        return virt - KERNEL_VIRTUAL_BASE;
-    }
-    if crate::hhdm::is_available() {
-        let hhdm_base = crate::hhdm::offset();
-        if virt >= hhdm_base {
-            return virt - hhdm_base;
-        }
-    }
-    virt
-}
-
 fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
     if memmap.is_null() {
         panic!("MM: Missing Limine memmap for usable regions");
@@ -213,57 +197,20 @@ fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
     stats.reserved_device_bytes = reserved_device_bytes;
 }
 
-fn record_kernel_core_reservations() {
-    let (kstart, kend) = kernel_image_bounds();
-    if kstart == 0 && kend == 0 {
-        klog_info!("MM: kernel bounds unavailable; cannot reserve kernel image");
+/// The image lands wherever Limine's allocator found room: `phys_base` is the
+/// physical address of its lowest virtual address, `virt_base`.
+fn record_kernel_core_reservations(phys_base: u64, virt_base: u64) {
+    let (_, kend) = kernel_image_bounds();
+    if phys_base == 0 || kend <= virt_base {
+        klog_info!("MM: kernel placement unavailable; cannot reserve kernel image");
         return;
     }
-
-    let kstart_phys = virt_to_phys_kernel(kstart);
-    let kend_phys = virt_to_phys_kernel(kend);
-    let kernel_size = kend_phys.saturating_sub(kstart_phys);
-
-    if kernel_size > 0 {
-        add_reservation_or_panic(
-            kstart_phys,
-            kernel_size,
-            MmReservationType::FirmwareOther,
-            MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS | MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
-            b"Kernel image\0".as_ptr() as *const c_char,
-        );
-    }
-
     add_reservation_or_panic(
-        BOOT_STACK_PHYS_ADDR,
-        BOOT_STACK_SIZE,
+        phys_base,
+        kend - virt_base,
         MmReservationType::FirmwareOther,
-        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-        b"Boot stack\0".as_ptr() as *const c_char,
-    );
-
-    add_reservation_or_panic(
-        EARLY_PML4_PHYS_ADDR,
-        PAGE_SIZE_4KB,
-        MmReservationType::FirmwareOther,
-        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-        b"Early PML4\0".as_ptr() as *const c_char,
-    );
-
-    add_reservation_or_panic(
-        EARLY_PDPT_PHYS_ADDR,
-        PAGE_SIZE_4KB,
-        MmReservationType::FirmwareOther,
-        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-        b"Early PDPT\0".as_ptr() as *const c_char,
-    );
-
-    add_reservation_or_panic(
-        EARLY_PD_PHYS_ADDR,
-        PAGE_SIZE_4KB,
-        MmReservationType::FirmwareOther,
-        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-        b"Early PD\0".as_ptr() as *const c_char,
+        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS | MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
+        b"Kernel image\0".as_ptr() as *const c_char,
     );
 }
 
@@ -536,6 +483,8 @@ pub fn init_memory_system_pre_typestate(
     hhdm_offset: u64,
     hhdm_available: bool,
     framebuffer: Option<(u64, &DisplayInfo)>,
+    kernel_phys_base: u64,
+    kernel_virt_base: u64,
 ) -> c_int {
     klog_debug!("========== SlopOS Memory System Initialization ==========");
     klog_debug!("Initializing complete memory management system...");
@@ -568,7 +517,7 @@ pub fn init_memory_system_pre_typestate(
 
     configure_region_store(memmap);
     record_memmap_usable(memmap);
-    record_kernel_core_reservations();
+    record_kernel_core_reservations(kernel_phys_base, kernel_virt_base);
     record_memmap_reservations(memmap);
     record_framebuffer_reservation();
     record_apic_reservation();
