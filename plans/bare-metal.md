@@ -265,142 +265,45 @@ threads and four E-cores):
   informational commands for the remote control (`just remote run -- kconsole
   tp`), and the probe now logs each CPU's RIP, task and idle slot, which went
   only to the UART the laptop has not got.
-- **Open: the installed system boots to a black screen.** From the laptop's
-  disk, `slopos-a` and `slopos-b` alike, every boot ends on a black screen
-  with the backlight on, unless the Limine entry went through the editor:
-  `e` and then `F10` with nothing changed brings it up every time, and so does
-  any edit. Enter, the timeout and the one-shot `remote-install` arms all go
-  black; one one-shot boot of a `xe.modeset=off` kernel came up anyway, the
-  only unedited boot that ever has. Limine's `limine: Loading executable…` text
-  flashes in both cases, and the black is its own framebuffer clear. Measured:
-  - **The kernel never runs.** A breadcrumb painted into the loader's
-    framebuffer as the first statement of `kernel_main_impl` (white square,
-    top left, then one per boot step) shows on an edited boot that hangs on
-    purpose (`boot.hang=entry` on the loader's command line) and never on an
-    unedited one. The machine answers no ARP or ping and writes no crash
-    record; keys do nothing.
-  - **So it is not the Xe takeover**, which is where it was first looked
-    for: the display registers dumped before any write (`xe.diag=on`: planes,
-    pipes, power wells, DC states, PSR, FBC, scalers, DBUF, watermarks, cursor,
-    timings, GGTT) are identical between an edited and an unedited boot, and
-    deferring the takeover 60 s (`xe.defer=60`) leaves the boot black. Nor is
-    it the resolution, the Wheel of Fate or the command line's content: the
-    command line `… panic=reboot roulette=skip` boots when typed in the editor
-    and goes black when the kernel appends the same words itself.
-  - **What the editor changes inside Limine 12.9.1** (`common/menu.c`): it
-    keeps a 4 KiB buffer and frees a ~128 KiB cell map, both allocated top-down
-    below 4 GiB before the kernel is (`ext_mem_alloc_type_aligned_mode`); it
-    boots the copy in that buffer; and it calls `mouse_flush()` before
-    `boot()`'s `mouse_deinit()`. An edited boot loaded the kernel at physical
-    `0x3429d000`, the base just below it, the kernel file's buffer above it
-    (the `MEMMAP:` lines in the boot log).
-  - **Where the hang is:** after Limine's module messages and its framebuffer
-    clear, before `kernel_main_impl`: `fb_init`, the responses,
-    `efi_exit_boot_services`, `build_pagemap`, `init_smp` (APs started through
-    a trampoline at `0x1000`) and the jump, or `_start` in
-    `boot/limine_entry.s`, which touches only the kernel image and COM1.
-
-  **Suspected: the menu's pointer support; `mouse: no` written, not yet tried
-  on the laptop.** Read from Limine 12.9.1's source and measured under
-  QEMU/OVMF with an instrumented build tracing every allocation, EFI event and
-  pointer call:
-  - **The editor leaves two things behind.** Every arm reaches `autoboot:`
-    alike but for them, and nothing after `boot()` reads menu or editor
-    state: no EFI timer is left armed, the terminal is torn down, the BLI
-    writes are the same. (a) `mouse_flush()` calls `GetState()` on the
-    console's aggregate pointers, which every menu boot `Reset()` in
-    `mouse_init()`; an unedited boot reads them again only if one signals
-    input while the menu is up (`common/lib/getchar.c:455`). (b) The one
-    retained page moves 49 of the 119 small allocations live at the jump
-    (the requests array, ELF ranges, most responses and page-table pages,
-    `mp_info`, one AP stack), most by one page. Under QEMU the kernel file,
-    image, base, entry stack, GDT and framebuffer responses do not move;
-    whether the laptop's unedited boots also put the kernel at `0x3429d000`
-    is unmeasured. The live ISO never calls `mouse_init()`: `timeout: 0`
-    jumps to `autoboot:` first.
-  - **Where it can hang.** Until `common_spinup` loads its limit-0 IDT, even
-    after ExitBootServices, a fault lands in the firmware's IDT, whose handler
-    dead-loops without a word (measured under OVMF); after it, a fault in
-    Limine's stub or the kernel's `_start` triple-faults, bar `flush_irqs`'
-    10 ms on its dummy IDT. A screen that stays black is a hang inside a
-    firmware call, an unbounded poll in Limine (the VT-d disable below), or a
-    fault before `common_spinup`. The kernel's entry path depends on nothing
-    about where it was loaded.
-  - **A firmware pointer driver that hangs ExitBootServices until its state is
-    read reproduces every arm but the one unedited boot that came up.** A
-    small UEFI driver that installs a pointer under ConIn and spins in its
-    ExitBootServices callback while a `Reset()` is unanswered by a
-    `GetState()`, chainloading 12.9.1 on the installed layout (the official
-    binary for Enter, `e`/F10 and `e`/Esc/Enter; a build of the tag for the
-    rest): timeout, Enter and one-shot hang black after the clear; `e` then
-    F10, `e`, Esc, Enter, `mouse: no` and `timeout: 0` boot. The editor's
-    allocations without the editor still hang; a `GetState()` in `boot()`
-    alone boots. The one unedited boot that came up fits only if the
-    touchpad saw input during that menu.
-  - **History.** UEFI pointer support first shipped in Limine 12.5.0
-    (`f1713d96`), the release's only UEFI change. The resets reported against
-    it upstream (#610, #613) were Limine's below-4 GiB relocation, fixed in
-    12.5.2, where `mouse: no` did not help, so the release also set off a
-    layout-sensitive bug. One CachyOS user in that wave booted through the
-    firmware's boot override and then `e` and F10 (forum t/33195), which does
-    not tell the two apart. Under it a Snapdragon ThinkPad's keyboard goes
-    dead (#618). The installed menu path has never run on the laptop without
-    it: the pin went from 12.3.1 to 12.9.1 the day before the installer
-    landed.
-  - **Not the cause:** Limine 12.9.2 and upstream's trunk change nothing on
-    this path; the #610 image-above-4 GiB failure is fixed and the AP
-    callbacks are reached through the HHDM; the framebuffer write-combining
-    edits to the firmware's page tables and PAT (`common/mm/efi_pt.c`) are the
-    same on every path; nothing in the config's content; QEMU's 56 runs over
-    every path, 2–16 GiB, 12 CPUs, an IOMMU and USB pointers all boot.
-  - **The fix, two halves.** Every rendered `limine.conf` says `mouse: no`
-    (`boot-core/src/limine.rs`), so Limine never `Reset()`s a pointer; the
-    laptop keeps its old `\EFI\SlopOS\limine.conf` until the line is added
-    by hand under `verbose: yes` (from CachyOS; only that copy exists on a
-    shared ESP) or SlopOS is reinstalled from an ISO carrying it
-    (`installer --mode reuse --root <part> --keep-root`, which rewrites both
-    slots). And `bootctl oneshot` also arms `LoaderConfigTimeoutOneShot` =
-    `menu-disabled`, so a one-shot boot — `selfhost.sh install`,
-    `remote-install` — skips the menu as the live ISO does, needing no ESP
-    write: one `e`/F10 boot into a base carrying the new bootctl puts it in
-    reach. Neither half moves the layout.
-  - **The laptop tests, cheapest first, on the old config:** (1) `e`, Esc,
-    Enter: Esc frees both editor allocations and still drains the pointer
-    (`common/menu.c:830-831,2356`), so it boots if the pointer is the cause
-    and stays black if the layout is; (2) move the touchpad in the menu: a
-    pointer Limine draws is the first sign a firmware pointer exists at all,
-    and Enter after it should boot; (3) `mouse: no` in the ESP's config, then
-    Enter and the timeout.
-  - **If it stays black,** the residual is the layout: something outside
-    Limine (a firmware callback writing a buffer it freed, a device left doing
-    DMA — the RTL8168's PXE stack with the cable in, xHCI, Thunderbolt — or
-    SMM) overwriting a fixed page Limine owns, the editor's shift moving a
-    critical object off it. `just limine-diag` builds a 12.9.1 that paints
-    each handoff step, any exception (vector, RIP, CR2) and any handoff object
-    whose checksum changed (`CORRUPT`, with the page) over the black screen,
-    and how many pointers `mouse_init()` found: one photo of one unedited boot
-    names the step (`tools/limine-diag/README.md`). Its
-    `--autoboot-as-editor` variant boots every entry as an edited one would
-    be.
-  - **Limine bugs found on the way, worth reporting:** the VT-d disable polls
-    `GSTS` with no bound (`common/sys/iommu.c:38,48,58`, timeout removed in
-    `57188a10`) and clears queued invalidation without draining it, after
-    ExitBootServices with nothing on screen; `flush_irqs` enables interrupts
-    for 10 ms on a dummy IDT that mishandles error-code exceptions; an AP that
-    misses its 1 s deadline shares the trampoline and temporary stack with the
-    next; the UEFI `mouse_deinit()` leaves pointers as `Reset()` left them,
-    where the BIOS one disables and drains the device.
-
-  Laptop state: `slopos-b` is the default, a kernel built with
-  `xe.modeset=off xe.diag=on`; `slopos-a` holds the breadcrumb kernel; both
-  boot only through `e` and `F10`; `mouse: no` in the ESP's config is the
-  test.
-  The diagnostics are uncommitted in the working tree: the breadcrumbs,
-  `boot.hang=entry` and the `MEMMAP:` dump (`boot/src/early_init.rs`,
-  `boot/src/limine_protocol.rs`), and `xe.stop=<stage>`, `xe.defer=<s>` and
-  the wider `XE-DIAG` dump (`drivers/src/xe/`,
-  `drivers/src/xe_logic/cmdline.rs`). The `XE-DIAG` registers are worth
-  keeping; the rest goes once an unedited boot comes up.
+- **The installed system booted to a black screen: a Limine bug.** From the
+  laptop's disk every boot ended on a black screen with the backlight on,
+  unless the Limine entry went through the editor (`e`, then `F10`, nothing
+  changed). The kernel never ran: a breadcrumb painted as the first statement
+  of `kernel_main_impl` showed on an edited boot and never on an unedited one.
+  Not the Xe takeover (its registers were identical and deferring it changed
+  nothing), the resolution, the Wheel of Fate, the command line or the menu's
+  pointer support: `e`, Esc, Enter reads the touchpad and still went black,
+  and the diagnostic loader saw ExitBootServices return with the touchpad
+  reset and never read.
+  `just limine-diag` (`tools/limine-diag/`) found it: a build of the shipped
+  loader that draws its handoff steps, sized as the shipped loader so its
+  layout is the same. The boot stopped on the trampoline's first write through
+  the new page tables (reset probes before and after it), and walking those
+  tables showed the framebuffer, `0x4000000000+0x7E9000` and the highest
+  memory-map entry, present in Limine's map and absent from the HHDM
+  (`PDPT[256] = 0`). `build_pagemap` counts the map, allocates its copy and
+  copies that many entries; the allocation can split an entry, and on the
+  laptop it did (145 entries before, 146 after), so the copy lost the
+  framebuffer. The editor's buffer moves that allocation by a page, where it
+  merges instead. The same code is in every 12.x and on upstream's trunk, and
+  no report of it exists upstream; under QEMU (1–8 GiB) the allocation always
+  merges. `toolchain/limine/0001-slopos-memmap-copy-count.patch` counts after
+  the allocation, and `scripts/ensure_limine.sh` now builds Limine from the
+  pinned source with it for the ISO, the boot disks and the install medium;
+  unedited boots on the laptop come up. Left: report it upstream (the draft
+  holds the cause, the evidence and the patch) and drop the patch with the
+  release that fixes it. The `mouse: no` line and the one-shot menu skip that
+  went in while the pointer was the suspect: the first is gone again, since the
+  touchpad was not the cause; the second stays, as unattended boots have no use
+  for the menu.
+- **Limine bugs found on the way, worth reporting:** the VT-d disable polls
+  `GSTS` with no bound (`common/sys/iommu.c:38,48,58`, timeout removed in
+  `57188a10`) and clears queued invalidation without draining it, after
+  ExitBootServices with nothing on screen; `flush_irqs` enables interrupts for
+  10 ms on a dummy IDT that mishandles error-code exceptions; an AP that misses
+  its 1 s deadline shares the trampoline and temporary stack with the next; the
+  UEFI `mouse_deinit()` leaves pointers as `Reset()` left them, where the BIOS
+  one disables and drains the device.
 
 **Done when** a guest build's effective frequency on the laptop is measured,
 and the same build is timed with the firmware's settings and with HWP.
