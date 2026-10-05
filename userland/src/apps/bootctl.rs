@@ -247,8 +247,14 @@ fn clone_slot(boot: &str, from: &str, to: &str) -> Result<(), String> {
 /// live ISO, which has none, always came up (plans/bare-metal.md).
 fn oneshot(entry: &str) -> Result<(), String> {
     Loader::read()?.offered(entry)?;
-    set_loader_var(bli::ENTRY_ONE_SHOT, Some(entry))?;
+    let armed = loader_var(bli::TIMEOUT_ONE_SHOT)?;
+    // The timeout first: left armed alone it skips one menu, where the entry
+    // left alone would go through it.
     set_loader_var(bli::TIMEOUT_ONE_SHOT, Some(bli::MENU_DISABLED))?;
+    if let Err(e) = set_loader_var(bli::ENTRY_ONE_SHOT, Some(entry)) {
+        let _ = set_loader_var(bli::TIMEOUT_ONE_SHOT, armed.as_deref());
+        return Err(e);
+    }
     println!("next boot: {entry}, once, without the menu");
     Ok(())
 }
