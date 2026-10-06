@@ -15,9 +15,12 @@ left out of the HHDM, and the kernel's first write to the screen faults before
 it has an IDT. A carve adds at most one entry, so the copy is sized one larger
 and the count is taken after the allocation.
 
-Upstream status: not reported when this was written; the code is the same on
-trunk at bc8b95362de5 (2026-10-04). Drop this patch with the first release
-that fixes it.
+Upstream status: reported as limine-bootloader/limine#687. The fix under
+review, #688, is this change asking for memmap_entries + 2, which also covers
+an entry running across 4 GiB, where one allocation adds two entries
+(plans/bare-metal.md, Phase 7). The code is unchanged in 12.9.2 and on trunk
+at bc8b95362de5 (2026-10-04). Drop this patch with the first release that
+fixes it.
 
 diff --git a/common/protos/limine.c b/common/protos/limine.c
 index 34e1c16..6db73fd 100644

@@ -290,12 +290,61 @@ threads and four E-cores):
   merges. `toolchain/limine/0001-slopos-memmap-copy-count.patch` counts after
   the allocation, and `scripts/ensure_limine.sh` now builds Limine from the
   pinned source with it for the ISO, the boot disks and the install medium;
-  unedited boots on the laptop come up. Left: report it upstream (the draft
-  holds the cause, the evidence and the patch) and drop the patch with the
-  release that fixes it. The `mouse: no` line and the one-shot menu skip that
+  unedited boots on the laptop come up. Reported upstream; see the next item.
+  The `mouse: no` line and the one-shot menu skip that
   went in while the pointer was the suspect: the first is gone again, since the
   touchpad was not the cause; the second stays, as unattended boots have no use
   for the menu.
+- **Upstream: issue #687, and PR #688 sizes the copy one entry larger.** The
+  bug is limine-bootloader/limine#687 (2026-10-05), which carries this patch.
+  hotline1337's #688 (open, unreviewed) reads the count after the allocation
+  too, but asks for `memmap_entries + 2`; that and the comment's wording are
+  the whole difference. 12.9.2 (2026-10-04) still has the bug, and its
+  `limine.c` is 12.9.1's byte for byte, so both diffs apply to either.
+  Researched without the laptop:
+  - `+2` is the bound, and `+1` holds only short of it. One `ext_mem_alloc`
+    changes the count by −2 to +2: the carved piece is appended, and on x86
+    the allocator clips a usable entry at 4 GiB, so for an entry that runs
+    across 4 GiB the piece lands in its middle, leaving usable memory on both
+    sides (+2). A merge with a reclaimable neighbour takes one back, two for
+    an exact fit. A host harness over 12.9.1's own `pmm.s2.c` gives +1 for the
+    laptop's shape (145 → 146; 12.9.1 drops the framebuffer, both diffs keep
+    it) and +2 for an entry across 4 GiB. There `+1` copies one entry more
+    than it asked for, and at 169 entries that write leaves the page for the
+    memory above 4 GiB, which the allocator keeps out of on purpose. On −2,
+    12.9.1 copies two stale duplicates. No PC has RAM running across 4 GiB,
+    because the chipset's MMIO hole sits below it, so `+2` is a correctness
+    margin and nothing this laptop needs.
+  - On the laptop the two diffs boot the same. At 145 entries both ask for one
+    page (146 × 24 and 147 × 24 bytes), so the copy lands at the same address.
+    The two requests take different page counts only at 169 and at 340
+    entries. Built from the pinned tarball with clang 18, the two
+    `BOOTX64.EFI`s have the same size and `SizeOfImage` and every symbol at the
+    same address. The one instruction that differs is `incq %rdi` against
+    `addq $2, %rdi` inside `limine_load`. `BOOTIA32.EFI` keeps its
+    `SizeOfImage`, with the functions after `limine_load` 16 bytes later, and
+    `limine-bios.sys` keeps its layout.
+  - QEMU reproduces the bug only when forced. Under OVMF the copy merged in
+    each of 192 configurations (RAM, vCPUs, modules, module sizes), because
+    the hole it lands in was entered from the top by an earlier allocation.
+    A test-only patch marks the top page of that hole ACPI NVS just before the
+    snapshot, identical in all three builds, and the copy then splits it
+    (201 → 202 entries). A kernel that walks CR3 for every map entry finds the
+    highest one, RAM above 4 GiB with an Intel vCPU, missing from 12.9.1's
+    HHDM and present with either diff. Unforced, both diffs boot that kernel
+    under UEFI (1, 4 and 8 GiB, 4 vCPUs, a module) and BIOS.
+  - Nothing else copies the map across an allocation. The menu's own
+    snapshot, the editor's rewind in `menu.c`, already allocates
+    `memmap_entries + 16` and reads the count afterwards.
+
+  Left: if #688 wants a laptop test, build with its diff (`curl -L
+  https://github.com/limine-bootloader/limine/pull/688.diff -o
+  toolchain/limine/0001-slopos-memmap-copy-count.patch`, then
+  `scripts/ensure_limine.sh`) and put `third_party/limine/BOOTX64.EFI` in
+  `\EFI\SlopOS\` from CachyOS, as `tools/limine-diag/README.md` describes.
+  Expect the boot this patch gives. While the swap is in, `just limine-diag`
+  does not build, because one of its hunks is cut against this patch's lines.
+  Then drop the patch with the release that carries the fix.
 - **Limine bugs found on the way, worth reporting:** the VT-d disable polls
   `GSTS` with no bound (`common/sys/iommu.c:38,48,58`, timeout removed in
   `57188a10`) and clears queued invalidation without draining it, after
