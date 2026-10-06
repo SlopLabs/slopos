@@ -469,9 +469,11 @@ the gates and the suite are the grade.
 **A SlopOS disk shares its ESP.** Every disk SlopOS is installed on, the QEMU
 boot disk `scripts/build_bootdisk.sh` makes included, carries Limine at
 `\EFI\SlopOS\BOOTX64.EFI` with its configuration beside it, which Limine reads
-ahead of any other loader's on the same ESP; a FAT32 boot partition holding
-the slots; the ext4 root, unless the root is a disk of its own; and a 4 MiB
-crash partition. SlopOS's partitions carry
+ahead of any other loader's on the same ESP, and its `LICENSE` and
+`3RDPARTY.md`, the notices its binaries must carry, as `LICENSE.limine` and
+`3RDPARTY.limine.md`, as on the ISO and the install medium; a FAT32 boot
+partition holding the slots; the ext4 root, unless the root is a disk of its
+own; and a 4 MiB crash partition. SlopOS's partitions carry
 type GUIDs of its own, never the Discoverable Partitions Specification's root
 or XBOOTLDR types, which a Linux on the same disk would mount as its own.
 `boot-core` is that disk as data: GUIDs and the GPT, which the kernel's
@@ -1429,7 +1431,7 @@ CI is four parallel jobs, and its wall clock is the longest one: the boot lane (
 Commit order: `cargo fmt --all` → the sequence above → stage → `caveman-commit` for the message → `git commit`.
 
 ## Environment & Tooling Tips
-First-time developers should run `scripts/setup_ovmf.sh` to download firmware blobs; keep them under `third_party/ovmf/`. The ISO builder auto-downloads the pinned Limine binary release into `third_party/limine`; offline environments should pre-populate that directory (it only needs `limine-bios.sys` + `BOOTX64.EFI`) or set `LIMINE_URL`/`LIMINE_VERSION` to avoid network stalls. Rust crates are auto-discovered via the workspace, so most build changes belong in `justfile`, `scripts/`, `Cargo.toml`, and `targets/*.json`; ensure `link.ld` maps any new sections intentionally. The entry point is the assembly `_start` trampoline, which jumps into `kernel_main`; keep `no_std`, rely on `rust-lld`, and avoid host installs. **SlopOS requires LAPIC + IOAPIC hardware (or QEMU `q35`/`-machine q35,accel=kvm:tcg` with IOAPIC enabled); the legacy 8259 PIC path has been sacrificed to the Wheel of Fate, so the kernel panics immediately if an IOAPIC cannot be discovered. VirtIO devices require MSI-X (preferred) or MSI as a minimum — legacy polling has been removed; probe panics if neither interrupt mechanism is available.**
+First-time developers should run `scripts/setup_ovmf.sh` to download firmware blobs; keep them under `third_party/ovmf/`. The ISO builder auto-downloads the pinned Limine binary release into `third_party/limine`; offline environments should pre-populate that directory with the pinned release's `limine-binary.tar.xz`, unpacked, or set `LIMINE_URL`/`LIMINE_VERSION` to avoid network stalls. Rust crates are auto-discovered via the workspace, so most build changes belong in `justfile`, `scripts/`, `Cargo.toml`, and `targets/*.json`; ensure `link.ld` maps any new sections intentionally. The entry point is the assembly `_start` trampoline, which jumps into `kernel_main`; keep `no_std`, rely on `rust-lld`, and avoid host installs. **SlopOS requires LAPIC + IOAPIC hardware (or QEMU `q35`/`-machine q35,accel=kvm:tcg` with IOAPIC enabled); the legacy 8259 PIC path has been sacrificed to the Wheel of Fate, so the kernel panics immediately if an IOAPIC cannot be discovered. VirtIO devices require MSI-X (preferred) or MSI as a minimum — legacy polling has been removed; probe panics if neither interrupt mechanism is available.**
 
 `scripts/make_slopos_sysroot.sh` needs the pinned `libc` crate; it takes it from `$CARGO_HOME/registry/cache` when it is already there and only falls back to `static.crates.io`, so an offline environment should pre-populate that cache (or point `LIBC_URL` at a local copy). It also needs the `rust-src` component, which `scripts/ensure_toolchain.sh` installs.
 

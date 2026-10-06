@@ -66,6 +66,7 @@ impl Medium {
             layout::MEDIUM_BASE,
             layout::MEDIUM_LOADER,
             layout::MEDIUM_LOADER_LICENSE,
+            layout::MEDIUM_LOADER_NOTICES,
         ] {
             if !medium.has(file) {
                 return Err(format!(

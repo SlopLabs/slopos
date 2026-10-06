@@ -181,6 +181,7 @@ pub fn write_loader(
 ) -> Result<(), String> {
     let loader = medium.read(layout::MEDIUM_LOADER)?;
     let license = medium.read(layout::MEDIUM_LOADER_LICENSE)?;
+    let notices = medium.read(layout::MEDIUM_LOADER_NOTICES)?;
     let mut volume = open_fat(esp_node)?;
     make_dirs(&mut volume, &fat_path(layout::LOADER_DIR))?;
     write_verified(&mut volume, &fat_path(layout::LOADER), &loader)?;
@@ -189,11 +190,8 @@ pub fn write_loader(
         &fat_path(layout::LOADER_CONFIG),
         conf.as_bytes(),
     )?;
-    write_verified(
-        &mut volume,
-        &format!("{}/LICENSE.limine", fat_path(layout::LOADER_DIR)),
-        &license,
-    )?;
+    write_verified(&mut volume, &fat_path(layout::LOADER_LICENSE), &license)?;
+    write_verified(&mut volume, &fat_path(layout::LOADER_NOTICES), &notices)?;
     if own_esp {
         let fallback = fat_path(layout::FALLBACK_LOADER);
         make_dirs(&mut volume, &fallback[..fallback.rfind('/').unwrap_or(0)])?;

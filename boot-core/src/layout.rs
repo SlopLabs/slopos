@@ -48,6 +48,10 @@ pub const LOADER: &str = r"\EFI\SlopOS\BOOTX64.EFI";
 /// Limine reads the configuration beside its own image first, so this one
 /// is found ahead of any other loader's on the same ESP.
 pub const LOADER_CONFIG: &str = r"\EFI\SlopOS\limine.conf";
+/// Limine's licence, and the notices of the third-party code built into its
+/// binaries, which upstream requires to accompany them.
+pub const LOADER_LICENSE: &str = r"\EFI\SlopOS\LICENSE.limine";
+pub const LOADER_NOTICES: &str = r"\EFI\SlopOS\3RDPARTY.limine.md";
 /// The removable-media path, written only on an ESP SlopOS created: on a
 /// shared one it belongs to whoever put a loader there.
 pub const FALLBACK_LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
@@ -60,9 +64,11 @@ pub const MEDIUM_DIR: &str = "/media/install";
 pub const MEDIUM_MODULE: &str = "install";
 pub const MEDIUM_KERNEL: &str = "boot/kernel.elf";
 pub const MEDIUM_BASE: &str = "boot/base.img";
-/// Limine, as the archive carries it for an ESP, with its licence.
+/// Limine, as the archive carries it for an ESP, with its licence and
+/// notices.
 pub const MEDIUM_LOADER: &str = "boot/BOOTX64.EFI";
 pub const MEDIUM_LOADER_LICENSE: &str = "boot/LICENSE.limine";
+pub const MEDIUM_LOADER_NOTICES: &str = "boot/3RDPARTY.limine.md";
 /// The third-party notices, which go beside the slots.
 pub const MEDIUM_NOTICE: &str = "boot/NOTICE.md";
 
@@ -149,7 +155,7 @@ mod tests {
 
     #[test]
     fn everything_on_the_esp_is_under_the_vendor_directory_but_the_fallback() {
-        for path in [LOADER, LOADER_CONFIG] {
+        for path in [LOADER, LOADER_CONFIG, LOADER_LICENSE, LOADER_NOTICES] {
             assert!(path.starts_with(LOADER_DIR) && path.as_bytes()[LOADER_DIR.len()] == b'\\');
         }
     }

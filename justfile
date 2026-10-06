@@ -606,8 +606,22 @@ test-installer *DISKS:
         ! grep -aq "not ok" "$log" || { echo "FAIL: a test failed; see $log" >&2; ok=1; }
         return "$ok"
     }
-    # The table whole, every FAT volume SlopOS wrote clean, and the root
-    # clean, at rest and with the base's mount points sealed.
+    # Limine's licence and notices beside the loader, byte for byte as the
+    # release ships them.
+    check_limine_notices() {
+        local image="$1" disk="$2" path file ok=0
+        for path in "$LOADER_LICENSE=LICENSE" "$LOADER_NOTICES=3RDPARTY.md"; do
+            file="${path#*=}"
+            path="${path%%=*}"
+            MTOOLS_SKIP_CHECK=1 mtype -i "$image" "::${path//\\//}" 2>/dev/null |
+                cmp -s - "{{limine_dir}}/$file" ||
+                { echo "FAIL: $path on $disk is not Limine's $file" >&2; ok=1; }
+        done
+        return "$ok"
+    }
+    # The table whole, every FAT volume SlopOS wrote clean, the ESP carrying
+    # Limine's notices, and the root clean, at rest and with the base's mount
+    # points sealed.
     check_disk() {
         local disk="$1" kind="$2" window start size image type dir flags said ok=0
         said="$(sfdisk --verify "$disk" 2>&1)" && grep -qF "No errors detected" <<<"$said" ||
@@ -622,6 +636,7 @@ test-installer *DISKS:
             if [ "$type" != "$ROOT_TYPE" ]; then
                 fsck.fat -n "$image" >/dev/null 2>&1 ||
                     { echo "FAIL: fsck.fat finds the $type volume on $disk wrong" >&2; ok=1; }
+                [ "$type" != "$ESP_TYPE" ] || check_limine_notices "$image" "$disk" || ok=1
                 continue
             fi
             scripts/check_fs_image.sh "$image" || ok=1

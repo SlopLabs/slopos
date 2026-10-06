@@ -260,6 +260,8 @@ fn long_names_round_trip_with_generated_aliases() {
     v.write_file("/EFI/SlopOS/limine.conf", b"timeout: 5\n")
         .unwrap();
     v.write_file("/EFI/SlopOS/LICENSE.limine", b"BSD").unwrap();
+    v.write_file("/EFI/SlopOS/3RDPARTY.limine.md", b"notices")
+        .unwrap();
     let long = "a name long enough to take three long entries.txt";
     v.write_file(&format!("/EFI/{long}"), b"x").unwrap();
     v.write_file("/EFI/Ünïcødé.bin", b"u").unwrap();
@@ -269,6 +271,7 @@ fn long_names_round_trip_with_generated_aliases() {
         [
             ("limine.conf".to_string(), "LIMINE~1.CON".to_string()),
             ("LICENSE.limine".to_string(), "LICENS~1.LIM".to_string()),
+            ("3RDPARTY.limine.md".to_string(), "3RDPAR~1.MD".to_string()),
         ]
     );
     assert_eq!(

@@ -7,10 +7,11 @@ set -euo pipefail
 #
 # Usage: build_install_medium.sh <out.cpio> [<toolchain>]
 #
-# Always Limine's loader, its licence and NOTICE.md, under boot/, which the
-# installer puts on the ESP and beside the slots; and under sources/ the pinned
-# tarball and recipe of each recipe the base takes programs from, with the
-# scripts that build them, the source of what the medium distributes of them.
+# Always Limine's loader, its licence and notices, and NOTICE.md, under boot/,
+# which the installer puts on the ESP and beside the slots; and under sources/
+# the pinned tarball and recipe of each recipe the base takes programs from,
+# with the scripts that build them, the source of what the medium distributes
+# of them.
 # Given a toolchain, the payload as well: the toolchain at usr/local, the
 # manifest an install records for it at var/lib/slopos/trees/usr_local, and at
 # src/ a `--vendored` clone of HEAD whose origin is GitHub, which the installer
@@ -53,6 +54,7 @@ boot="$STAGE/$(dirname "$MEDIUM_LOADER")"
 mkdir -p "$boot"
 cp "$LIMINE_DIR/BOOTX64.EFI" "$STAGE/$MEDIUM_LOADER"
 cp "$LIMINE_DIR/LICENSE" "$STAGE/$MEDIUM_LOADER_LICENSE"
+cp "$LIMINE_DIR/3RDPARTY.md" "$STAGE/$MEDIUM_LOADER_NOTICES"
 cp "$REPO_ROOT/NOTICE.md" "$STAGE/$MEDIUM_NOTICE"
 trees=("$boot=$(dirname "$MEDIUM_LOADER")")
 

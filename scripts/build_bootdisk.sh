@@ -162,8 +162,10 @@ done
 for config in "$LOADER_CONFIG" "$FALLBACK_CONFIG"; do
     mcopy -i "$ESP" "$CONF" "$(mtools_path "$config")"
 done
-# Limine's BSD-2-Clause notice travels with the binary, as on the ISO.
-mcopy -i "$ESP" "$LIMINE_DIR/LICENSE" "$(mtools_path "$LOADER_DIR")/LICENSE.limine"
+# Limine's licence and the notices of the code built into it travel with the
+# binary, as on the ISO.
+mcopy -i "$ESP" "$LIMINE_DIR/LICENSE" "$(mtools_path "$LOADER_LICENSE")"
+mcopy -i "$ESP" "$LIMINE_DIR/3RDPARTY.md" "$(mtools_path "$LOADER_NOTICES")"
 
 BOOT="${STAGING}/boot.img"
 truncate -s "${BOOT_MIB}M" "$BOOT"

@@ -303,11 +303,11 @@ threads and four E-cores):
   single page. A host harness over 12.9.1's allocator and a QEMU boot with
   the split forced (12.9.1 left RAM above 4 GiB out of the HHDM, both diffs
   kept it) said the same. SlopOS pins 12.9.3's release binaries again, with
-  no patch and no diagnostic loader. Left: one boot of 12.9.3 on the laptop,
-  since it brings 12.9.2's other changes and upstream's own build; and
-  12.9.2's binary release ships `3RDPARTY.md`, the notices it says must
-  accompany Limine's binaries, which SlopOS's ISO, ESP and install medium do
-  not carry yet beside `LICENSE.limine`.
+  no patch and no diagnostic loader. Its `3RDPARTY.md`, the notices it says
+  must accompany Limine's binaries, travels beside `LICENSE.limine` on the
+  ISO, the ESP and the install medium, and `just test-installer` holds every
+  installed ESP to both. Left: one boot of 12.9.3 on the laptop, since it
+  brings 12.9.2's other changes and upstream's own build.
 - **Limine bugs found on the way, worth reporting** (as of 12.9.1): the VT-d
   disable polls `GSTS` with no bound (`common/sys/iommu.c:38,48,58`, timeout
   removed in `57188a10`) and clears queued invalidation without draining it,
