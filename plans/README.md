@@ -18,7 +18,7 @@ editing.
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
 | `self-hosting.md` | SlopOS as a development machine: the closed loop over git on a root that carries its own tools, where the guest builds and installs the whole system; bare metal and a toolchain that rebuilds itself ahead |
-| `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
+| `usb-xhci.md` | USB on QEMU and the laptop: the xHCI driver, enumeration through hubs and removal, keyboards and pointers, mass storage, the install payload read from the stick, and USB Ethernet |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive both the
@@ -28,9 +28,11 @@ the devres claim table and `BoundDevice<B>`. Every device driver binds declarati
 `boot_init!` carries no device drivers. Read the code rather than a document:
 `driver_core::bus` for the model, `drivers/src/pci.rs` and `drivers/src/platform_bus/` for
 the two instances, and `drivers/src/tests/bus_generic.rs` for what the protocol guarantees.
-Deferred-probe-to-fixpoint, unbind and hotplug were the plan's Phase 2 and are deliberately
-not planned in the mid term; the `Deferred` outcome and the Binding-above-Devres slot order
-are the seams they would build on.
+Deferred-probe-to-fixpoint, and unbind and hotplug of PCI and platform devices, were the
+plan's Phase 2 and are deliberately not planned in the mid term. `usb-xhci.md` builds unbind
+for USB devices alone, on the Binding-above-Devres slot order and a `ClaimTable` release;
+unbind of PCI and platform devices would build on the same two, and deferred probe on the
+`Deferred` outcome.
 
 Persistent storage has **landed and its plan is retired**. A file written on one
 boot is readable on the next on the root filesystem and under failure: a
