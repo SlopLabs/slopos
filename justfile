@@ -1358,10 +1358,6 @@ check-rustc-target:
 llvm-src:
     scripts/make_slopos_llvm_src.sh
 
-[doc("Build a diagnostic Limine BOOTX64.EFI (builddir/limine-diag/) that draws its handoff steps, any CPU exception and any page changed behind its back on screen, for a machine without a serial port. --autoboot-as-editor also boots every entry as an unchanged e + F10 would; tools/limine-diag/README.md says how to install and read it")]
-limine-diag *ARGS:
-    scripts/build_limine_diag.sh {{ARGS}}
-
 [doc("Compile LLVM's Support library for x86_64-unknown-slopos. Needs `just llvm-src` and a tests userland build first.")]
 check-llvm-port:
     scripts/check_llvm_port.sh --require

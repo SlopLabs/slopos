@@ -162,12 +162,10 @@ tp_patch_pin_file() {
 # sources, `toolchain/crates/` the crates.io crates rustc and cargo depend on, `toolchain/llvm/` the pinned
 # llvm-project the C++ runtime is built from, and `toolchain/llvm-rustc/` the
 # one rustc ships. A recipe's patch is no fork: its recipe's stamp pins it and
-# `check_recipes.sh` grades it. Nor is Limine's: `scripts/ensure_limine.sh`'s
-# stamp hashes `toolchain/limine/`'s patches and rebuilds the loader when one
-# changes.
+# `check_recipes.sh` grades it.
 tp_patch_files() {
     local root="$1"
-    (cd "$root" && find "$TP_OVERLAY_REL" \( -path "$TP_OVERLAY_REL/recipes" -o -path "$TP_OVERLAY_REL/limine" \) -prune -o \
+    (cd "$root" && find "$TP_OVERLAY_REL" -path "$TP_OVERLAY_REL/recipes" -prune -o \
         -type f -name '*.patch' -print | LC_ALL=C sort)
 }
 

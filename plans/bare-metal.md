@@ -110,7 +110,7 @@ out by `scripts/build_bootdisk.sh` through `tools/bootdisk`:
 
 | Partition | Filesystem and type | Contents | Written by |
 |---|---|---|---|
-| ESP | the disk's existing ESP, or a new 260 MiB one | `\EFI\SlopOS\BOOTX64.EFI` (Limine 12.9.1) and `\EFI\SlopOS\limine.conf` | installer |
+| ESP | the disk's existing ESP, or a new 260 MiB one | `\EFI\SlopOS\BOOTX64.EFI` (Limine 12.9.3) and `\EFI\SlopOS\limine.conf` | installer |
 | SlopOS boot | FAT32, SlopOS type GUID, 1 GiB | `/boot/{a,b}/kernel.elf` and `base.img` | `bootctl` |
 | SlopOS root | ext4, SlopOS type GUID | `/` | the system |
 | SlopOS crash | raw, SlopOS type GUID, 4 MiB | the last panic | the panic path |
@@ -269,90 +269,53 @@ threads and four E-cores):
   laptop's disk every boot ended on a black screen with the backlight on,
   unless the Limine entry went through the editor (`e`, then `F10`, nothing
   changed). The kernel never ran: a breadcrumb painted as the first statement
-  of `kernel_main_impl` showed on an edited boot and never on an unedited one.
-  Not the Xe takeover (its registers were identical and deferring it changed
-  nothing), the resolution, the Wheel of Fate, the command line or the menu's
-  pointer support: `e`, Esc, Enter reads the touchpad and still went black,
-  and the diagnostic loader saw ExitBootServices return with the touchpad
-  reset and never read.
-  `just limine-diag` (`tools/limine-diag/`) found it: a build of the shipped
-  loader that draws its handoff steps, sized as the shipped loader so its
-  layout is the same. The boot stopped on the trampoline's first write through
-  the new page tables (reset probes before and after it), and walking those
-  tables showed the framebuffer, `0x4000000000+0x7E9000` and the highest
-  memory-map entry, present in Limine's map and absent from the HHDM
-  (`PDPT[256] = 0`). `build_pagemap` counts the map, allocates its copy and
-  copies that many entries; the allocation can split an entry, and on the
-  laptop it did (145 entries before, 146 after), so the copy lost the
+  of `kernel_main_impl` showed on an edited boot and never on an unedited
+  one. Not the Xe takeover (its registers were identical and deferring it
+  changed nothing), the resolution, the Wheel of Fate, the command line or
+  the menu's pointer support: `e`, Esc, Enter reads the touchpad and still
+  went black, and the diagnostic loader saw ExitBootServices return with the
+  touchpad reset and never read. A diagnostic build of the shipped loader
+  found it: it drew its handoff steps and was sized as the shipped loader so
+  its layout was the same (`tools/limine-diag/`, removed once the fix
+  shipped; in the history at `e7a5db4`). The boot stopped on the trampoline's
+  first write through the new page tables (reset probes before and after it),
+  and walking those tables showed the framebuffer, `0x4000000000+0x7E9000`
+  and the highest memory-map entry, present in Limine's map and absent from
+  the HHDM (`PDPT[256] = 0`). `build_pagemap` counts the map, allocates its
+  copy and copies that many entries; the allocation can split an entry, and
+  on the laptop it did (145 entries before, 146 after), so the copy lost the
   framebuffer. The editor's buffer moves that allocation by a page, where it
-  merges instead. The same code is in every 12.x and on upstream's trunk, and
-  no report of it exists upstream; under QEMU (1–8 GiB) the allocation always
-  merges. `toolchain/limine/0001-slopos-memmap-copy-count.patch` counts after
-  the allocation, and `scripts/ensure_limine.sh` now builds Limine from the
-  pinned source with it for the ISO, the boot disks and the install medium;
-  unedited boots on the laptop come up. Reported upstream; see the next item.
-  The `mouse: no` line and the one-shot menu skip that
-  went in while the pointer was the suspect: the first is gone again, since the
-  touchpad was not the cause; the second stays, as unattended boots have no use
-  for the menu.
-- **Upstream: issue #687, and PR #688 sizes the copy one entry larger.** The
-  bug is limine-bootloader/limine#687 (2026-10-05), which carries this patch.
-  hotline1337's #688 (open, unreviewed) reads the count after the allocation
-  too, but asks for `memmap_entries + 2`; that and the comment's wording are
-  the whole difference. 12.9.2 (2026-10-04) still has the bug, and its
-  `limine.c` is 12.9.1's byte for byte, so both diffs apply to either.
-  Researched without the laptop:
-  - `+2` is the bound, and `+1` holds only short of it. One `ext_mem_alloc`
-    changes the count by −2 to +2: the carved piece is appended, and on x86
-    the allocator clips a usable entry at 4 GiB, so for an entry that runs
-    across 4 GiB the piece lands in its middle, leaving usable memory on both
-    sides (+2). A merge with a reclaimable neighbour takes one back, two for
-    an exact fit. A host harness over 12.9.1's own `pmm.s2.c` gives +1 for the
-    laptop's shape (145 → 146; 12.9.1 drops the framebuffer, both diffs keep
-    it) and +2 for an entry across 4 GiB. There `+1` copies one entry more
-    than it asked for, and at 169 entries that write leaves the page for the
-    memory above 4 GiB, which the allocator keeps out of on purpose. On −2,
-    12.9.1 copies two stale duplicates. No PC has RAM running across 4 GiB,
-    because the chipset's MMIO hole sits below it, so `+2` is a correctness
-    margin and nothing this laptop needs.
-  - On the laptop the two diffs boot the same. At 145 entries both ask for one
-    page (146 × 24 and 147 × 24 bytes), so the copy lands at the same address.
-    The two requests take different page counts only at 169 and at 340
-    entries. Built from the pinned tarball with clang 18, the two
-    `BOOTX64.EFI`s have the same size and `SizeOfImage` and every symbol at the
-    same address. The one instruction that differs is `incq %rdi` against
-    `addq $2, %rdi` inside `limine_load`. `BOOTIA32.EFI` keeps its
-    `SizeOfImage`, with the functions after `limine_load` 16 bytes later, and
-    `limine-bios.sys` keeps its layout.
-  - QEMU reproduces the bug only when forced. Under OVMF the copy merged in
-    each of 192 configurations (RAM, vCPUs, modules, module sizes), because
-    the hole it lands in was entered from the top by an earlier allocation.
-    A test-only patch marks the top page of that hole ACPI NVS just before the
-    snapshot, identical in all three builds, and the copy then splits it
-    (201 → 202 entries). A kernel that walks CR3 for every map entry finds the
-    highest one, RAM above 4 GiB with an Intel vCPU, missing from 12.9.1's
-    HHDM and present with either diff. Unforced, both diffs boot that kernel
-    under UEFI (1, 4 and 8 GiB, 4 vCPUs, a module) and BIOS.
-  - Nothing else copies the map across an allocation. The menu's own
-    snapshot, the editor's rewind in `menu.c`, already allocates
-    `memmap_entries + 16` and reads the count afterwards.
-
-  Left: if #688 wants a laptop test, build with its diff (`curl -L
-  https://github.com/limine-bootloader/limine/pull/688.diff -o
-  toolchain/limine/0001-slopos-memmap-copy-count.patch`, then
-  `scripts/ensure_limine.sh`) and put `third_party/limine/BOOTX64.EFI` in
-  `\EFI\SlopOS\` from CachyOS, as `tools/limine-diag/README.md` describes.
-  Expect the boot this patch gives. While the swap is in, `just limine-diag`
-  does not build, because one of its hunks is cut against this patch's lines.
-  Then drop the patch with the release that carries the fix.
-- **Limine bugs found on the way, worth reporting:** the VT-d disable polls
-  `GSTS` with no bound (`common/sys/iommu.c:38,48,58`, timeout removed in
-  `57188a10`) and clears queued invalidation without draining it, after
-  ExitBootServices with nothing on screen; `flush_irqs` enables interrupts for
-  10 ms on a dummy IDT that mishandles error-code exceptions; an AP that misses
-  its 1 s deadline shares the trampoline and temporary stack with the next; the
-  UEFI `mouse_deinit()` leaves pointers as `Reset()` left them, where the BIOS
-  one disables and drains the device.
+  merges instead. The same code was in every 12.x up to 12.9.2; under QEMU
+  (1–8 GiB) the allocation always merges. Until upstream shipped the fix,
+  SlopOS built Limine from source with a patch that counts after the
+  allocation, and unedited boots on the laptop came up. The `mouse: no` line
+  and the one-shot menu skip that went in while the pointer was the suspect:
+  the first is gone again, since the touchpad was not the cause; the second
+  stays, as unattended boots have no use for the menu.
+- **Fixed upstream in Limine 12.9.3.** Reported as
+  limine-bootloader/limine#687 (2026-10-05). hotline1337's #688, merged on
+  2026-10-06 and released as 12.9.3 the same day, reads the count after the
+  allocation and asks for `memmap_entries + 2` where SlopOS's patch asked for
+  `+ 1`. `+2` is the bound: on x86 the allocator clips a usable entry at
+  4 GiB, so one allocation from an entry running across 4 GiB leaves usable
+  memory on both sides of it (+2), where `+1` would write one entry past its
+  copy. No PC has RAM across 4 GiB, and on the laptop both ask for the same
+  single page. A host harness over 12.9.1's allocator and a QEMU boot with
+  the split forced (12.9.1 left RAM above 4 GiB out of the HHDM, both diffs
+  kept it) said the same. SlopOS pins 12.9.3's release binaries again, with
+  no patch and no diagnostic loader. Left: one boot of 12.9.3 on the laptop,
+  since it brings 12.9.2's other changes and upstream's own build; and
+  12.9.2's binary release ships `3RDPARTY.md`, the notices it says must
+  accompany Limine's binaries, which SlopOS's ISO, ESP and install medium do
+  not carry yet beside `LICENSE.limine`.
+- **Limine bugs found on the way, worth reporting** (as of 12.9.1): the VT-d
+  disable polls `GSTS` with no bound (`common/sys/iommu.c:38,48,58`, timeout
+  removed in `57188a10`) and clears queued invalidation without draining it,
+  after ExitBootServices with nothing on screen; `flush_irqs` enables
+  interrupts for 10 ms on a dummy IDT that mishandles error-code exceptions;
+  an AP that misses its 1 s deadline shares the trampoline and temporary
+  stack with the next; the UEFI `mouse_deinit()` leaves pointers as `Reset()`
+  left them, where the BIOS one disables and drains the device.
 
 **Done when** a guest build's effective frequency on the laptop is measured,
 and the same build is timed with the firmware's settings and with HWP.
