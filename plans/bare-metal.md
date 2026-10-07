@@ -34,9 +34,10 @@ its firmware entry, `cachyos`, is the only one.
 - The kernel carries an NVMe driver, graded on QEMU's model, which lists a
   disk's partitions under `/dev/disk/by-partuuid`. The live system boots
   `root=initramfs` and mounts no disk.
-- The kernel carries an xHCI driver, graded on QEMU's two models, which
-  takes each controller from the firmware, logs its root ports' attach and
-  detach and resets it at poweroff; it enumerates no device yet.
+- The kernel carries an xHCI driver, graded on QEMU's two models and the
+  laptop's two controllers, which takes each controller from the firmware,
+  logs its root ports' attach and detach and resets it at poweroff; it
+  enumerates no device yet.
 - Every volume is ext4 in one profile, with a jbd2 journal that e2fsck
   replays.
 - The boot chain shares a disk: Limine under `\EFI\SlopOS\`, the slots on a

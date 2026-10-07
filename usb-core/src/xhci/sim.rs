@@ -184,8 +184,8 @@ impl Config {
         }
     }
 
-    /// A laptop-shaped controller: 64-byte contexts, scratchpads, USB
-    /// Legacy Support, switched port power and the specification's events.
+    /// What QEMU's lacks: 64-byte contexts, scratchpads, USB Legacy
+    /// Support, switched port power and the specification's events.
     pub fn intel() -> Self {
         Self {
             ac64: true,

@@ -111,11 +111,11 @@ Built:
   context codecs (both context sizes), ring bookkeeping with a table of
   outstanding commands, and the handoff, halt, reset, configure and run
   sequences over a `RegisterBus` with named waits. Host tests run them
-  against a simulated controller in QEMU's shape and in the laptop's (64-byte
-  contexts, 300 scratchpads, USB Legacy Support, switched port power,
-  §4.19.2's port events), a BIOS that never lets go, a controller without
-  64-bit addressing, a Host System Error with a command outstanding, and
-  mutated registers.
+  against a simulated controller in QEMU's shape and in one with what
+  QEMU's lacks (64-byte contexts, 300 scratchpads, USB Legacy Support,
+  switched port power, §4.19.2's port events), a BIOS that never lets go, a
+  controller without 64-bit addressing, a Host System Error with a command
+  outstanding, and mutated registers.
 - **The `xhci` PCI driver in `drivers/src/usb`**: a probe that takes each
   controller from the firmware, resets and runs it as **Decided** below
   states, a No Op command as proof of the rings, the `usb` thread, a
@@ -127,11 +127,14 @@ Built:
 - **`just test-usb`**, in CI after `test-rude-exit`. It measured 44 of the 64
   dynamic MMIO ranges free, and 23 with the suite's disks attached too.
 
-Still to run, on the laptop: a `usb=report` boot through `just remote klog`
-recording both controllers' version, context size, 64-bit addressing,
-scratchpads, port ranges and USB Legacy Support, and whether the TCSS
-controller appears on PCI at all; then a `usb=on` boot that brings both up,
-and a reboot from it that reaches the firmware with no delay.
+**On the laptop (done).** A `usb=report` boot found both controllers on PCI,
+each xHCI 1.20 with 64 slots, 32-byte contexts, 64-bit addressing, 34
+scratchpads and USB Legacy Support: the TCSS `00:0d.0` with USB 2.0 port 1
+and USB 3.2 port 2, the PCH `00:14.0` with USB 2.0 ports 1-12 and USB 3.1
+ports 13-16. A `usb=on` boot took both from the firmware and ran them on
+MSI, logging the PCH's internal devices on ports 2-8, 2-9 and 2-10. A reboot
+from it reached the next kernel in 14.9 s, as reboots from `usb=report`
+boots did (14.7-15.6 s).
 
 ### Phase 2: Enumeration and the device model
 
@@ -564,7 +567,7 @@ takes a lease, and git fetches over it.
 - **`just test-installer`:** phases 4 and 5.
 - **The laptop** grades what QEMU cannot:
   - Intel's controllers and the firmware handoff;
-  - 64-byte contexts and scratchpad buffers;
+  - scratchpad buffers;
   - a high-speed hub with its transaction translators, and USB 3 hubs;
   - low-speed devices;
   - the Type-C split.
@@ -573,7 +576,8 @@ takes a lease, and git fetches over it.
   Legacy Support capability. It accepts any EP0 packet size, its only hub
   is full-speed, and its `usb-storage` keeps no data toggles. A mistake in
   any of these passes CI, so the simulated controller and the laptop are
-  the grade for each.
+  the grade for each; the laptop's controllers use 32-byte contexts too, so
+  64-byte contexts are the simulated controller's alone.
 - **Ratchets:** any lock class, test or account the driver adds is
   re-measured in the commit that adds it, as `AGENTS.md` requires.
 
@@ -650,8 +654,8 @@ takes a lease, and git fetches over it.
   Transfer data uses the block engine's 4 KiB pages, one TRB each. A
   controller without 64-bit addressing is declined until the frame
   allocator has a below-4 GiB constraint that page allocation can ask for.
-  QEMU's controllers have 64-bit addressing; the laptop's are measured by a
-  `usb=report` boot. 64-bit registers are written as one qword, as the specification
+  QEMU's and the laptop's controllers have 64-bit addressing. 64-bit
+  registers are written as one qword, as the specification
   asks of a 64-bit controller.
 - **The drain owns the event ring, and nothing drains it under an engine
   lock.**
