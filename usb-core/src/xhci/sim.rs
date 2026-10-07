@@ -266,6 +266,8 @@ pub struct SimController {
 }
 
 const LEGACY_CONTROL_RESET: u32 = 0xe000_e011;
+/// The status bits a write of one clears (§5.4.2).
+const STS_RW1C: u32 = STS_HOST_SYSTEM_ERROR | STS_EVENT_INTERRUPT | STS_PORT_CHANGE | 1 << 10;
 /// PORTSC's link state while a port waits for a device (§5.4.8).
 const RX_DETECT: u32 = 5 << 5;
 

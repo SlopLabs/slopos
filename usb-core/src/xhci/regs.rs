@@ -39,8 +39,6 @@ pub const STS_EVENT_INTERRUPT: u32 = 1 << 3;
 pub const STS_PORT_CHANGE: u32 = 1 << 4;
 pub const STS_NOT_READY: u32 = 1 << 11;
 pub const STS_CONTROLLER_ERROR: u32 = 1 << 12;
-/// The status bits a write of one clears (§5.4.2).
-pub const STS_RW1C: u32 = STS_HOST_SYSTEM_ERROR | STS_EVENT_INTERRUPT | STS_PORT_CHANGE | 1 << 10;
 
 pub const IMAN_PENDING: u32 = 1 << 0;
 pub const IMAN_ENABLE: u32 = 1 << 1;
@@ -263,6 +261,7 @@ impl PortSc {
         self.0 & PORT_CONNECTED != 0
     }
 
+    #[cfg(test)]
     pub fn enabled(self) -> bool {
         self.0 & PORT_ENABLED != 0
     }

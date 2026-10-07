@@ -60,6 +60,7 @@ pub mod legacy {
     pub const CONTROL: usize = 4;
     /// USB SMI, SMI on Host System Error, on OS Ownership, on PCI Command
     /// and on BAR.
+    #[cfg(test)]
     pub const SMI_ENABLES: u32 = 1 | 1 << 4 | 1 << 13 | 1 << 14 | 1 << 15;
     /// SMI on OS Ownership Change, on PCI Command and on BAR: written as one
     /// to clear.

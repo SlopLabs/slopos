@@ -40,6 +40,7 @@ static CONTROLLERS: [OnceLock<KArc<Controller>>; MAX_CONTROLLERS] =
 
 /// Controller `number`, counted from 1 in probe order, as `1-3` names root
 /// port 3 of the first.
+#[cfg(feature = "test-hooks")]
 pub fn controller(number: u8) -> Option<KArc<Controller>> {
     let slot = CONTROLLERS.get(usize::from(number).checked_sub(1)?)?;
     slot.get().map(KArc::clone)

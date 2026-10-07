@@ -209,6 +209,7 @@ impl Controller {
         self.number
     }
 
+    #[cfg(feature = "test-hooks")]
     pub fn ids(&self) -> (u16, u16) {
         (self.info.vendor_id, self.info.device_id)
     }
@@ -217,6 +218,7 @@ impl Controller {
         self.irq.get().copied().unwrap_or("no interrupt")
     }
 
+    #[cfg(feature = "test-hooks")]
     pub fn max_ports(&self) -> u8 {
         self.caps.max_ports
     }
@@ -229,16 +231,19 @@ impl Controller {
         self.ports.get(usize::from(port).checked_sub(1)?)
     }
 
+    #[cfg(feature = "test-hooks")]
     pub fn port_connected(&self, port: u8) -> bool {
         self.port(port)
             .is_some_and(|p| p.connected.load(Ordering::Acquire))
     }
 
+    #[cfg(feature = "test-hooks")]
     pub fn port_attaches(&self, port: u8) -> u32 {
         self.port(port)
             .map_or(0, |p| p.attaches.load(Ordering::Acquire))
     }
 
+    #[cfg(feature = "test-hooks")]
     pub fn port_detaches(&self, port: u8) -> u32 {
         self.port(port)
             .map_or(0, |p| p.detaches.load(Ordering::Acquire))
@@ -252,6 +257,7 @@ impl Controller {
     }
 
     /// Interrupts taken since probe.
+    #[cfg(feature = "test-hooks")]
     pub fn interrupts_taken(&self) -> u32 {
         self.interrupts.load(Ordering::Relaxed)
     }
@@ -358,11 +364,7 @@ impl Controller {
             return;
         }
         self.drain();
-        let found = self.failure.swap(Health::Running as u8, Ordering::AcqRel);
-        let health = match Health::from_u8(found) {
-            Health::Running => seq::health(&mut self.bus(), &self.layout),
-            failed => failed,
-        };
+        let health = Health::from_u8(self.failure.swap(Health::Running as u8, Ordering::AcqRel));
         if health != Health::Running {
             self.die(health);
             return;

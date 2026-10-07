@@ -356,6 +356,7 @@ impl<P: DmaPage> CommandRing<P> {
     }
 
     /// Commands the controller has yet to complete.
+    #[cfg(test)]
     pub fn outstanding(&self) -> usize {
         self.entries
             .iter()

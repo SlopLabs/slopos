@@ -399,7 +399,7 @@ disk's included, needed (confidence 45); it now declines without touching
 the function unless a range for BAR0, and two for an MSI-X table when it has
 no MSI, are free, though one declined on its capabilities keeps its BAR0
 range. Below the bar and left: an unresponsive controller holds boot for up
-to about thirty seconds (35); a device that toggles its connection floods
+to about a minute (35); a device that toggles its connection floods
 the kernel log (30); and the test's QMP socket gives the user's QEMU to
 whoever can connect to it, which the umask limits to the user (30). By
 design, and recorded in `plans/usb-xhci.md`: taking a controller ends the

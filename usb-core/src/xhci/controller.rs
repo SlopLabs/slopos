@@ -198,14 +198,14 @@ pub fn power_port<B: RegisterBus>(bus: &mut B, layout: &Layout, port: u8) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Health {
-    Running,
+    Running = 0,
     /// Host System Error: the controller stopped on a PCI error.
-    HostSystemError,
+    HostSystemError = 1,
     /// Host Controller Error: an internal error the controller cannot
     /// recover from without a reset.
-    ControllerError,
+    ControllerError = 2,
     /// The registers read all ones.
-    Absent,
+    Absent = 3,
 }
 
 impl Health {
@@ -270,4 +270,22 @@ pub fn drain<B: RegisterBus, P: DmaPage>(
 /// Doorbell 0's offset, through which the command ring is rung.
 pub fn command_doorbell(layout: &Layout) -> usize {
     layout.doorbell(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Health;
+
+    #[test]
+    fn health_round_trips_through_its_byte() {
+        for health in [
+            Health::Running,
+            Health::HostSystemError,
+            Health::ControllerError,
+            Health::Absent,
+        ] {
+            assert_eq!(Health::from_u8(health as u8), health);
+        }
+        assert_eq!(Health::from_u8(0xff), Health::Absent);
+    }
 }
