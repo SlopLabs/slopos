@@ -196,6 +196,7 @@ dependencies = [
  "slopos-ostd",
  "slopos-rtl8168-core",
  "slopos-testing",
+ "slopos-usb-core",
  "slopos-vt",
 ]
 
@@ -497,6 +498,10 @@ version = "0.1.0"
 
 [[package]]
 name = "slopos-tree-core"
+version = "0.1.0"
+
+[[package]]
+name = "slopos-usb-core"
 version = "0.1.0"
 
 [[package]]

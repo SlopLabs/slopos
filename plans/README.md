@@ -18,7 +18,7 @@ editing.
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
 | `self-hosting.md` | SlopOS as a development machine: the closed loop over git on a root that carries its own tools, where the guest builds and installs the whole system; bare metal and a toolchain that rebuilds itself ahead |
-| `usb-xhci.md` | USB on QEMU and the laptop: the xHCI driver, enumeration through hubs and removal, keyboards and pointers, mass storage, the install payload read from the stick, and USB Ethernet |
+| `usb-xhci.md` | USB on QEMU and the laptop: the xHCI driver runs the controllers and watches their root ports; ahead are enumeration through hubs and removal, keyboards and pointers, mass storage, the install payload read from the stick, and USB Ethernet |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive both the

@@ -44,6 +44,8 @@ pub const PCI_INTERRUPT_PIN_OFFSET: u16 = 0x3D;
 /// Status: Capabilities list present (bit 4).
 pub const PCI_STATUS_CAP_LIST: u16 = 0x10;
 
+pub const PCI_COMMAND_IO_SPACE: u16 = 0x0001;
+
 /// Enable memory space access (bit 1).
 pub const PCI_COMMAND_MEMORY_SPACE: u16 = 0x0002;
 
@@ -55,6 +57,18 @@ pub const PCI_COMMAND_BUS_MASTER: u16 = 0x0004;
 pub const PCI_COMMAND_INTX_DISABLE: u16 = 0x0400;
 
 pub const PCI_CLASS_DISPLAY: u8 = 0x03;
+pub const PCI_CLASS_BRIDGE: u8 = 0x06;
+pub const PCI_SUBCLASS_HOST_BRIDGE: u8 = 0x00;
+
+/// Power Management (PCI Bus Power Management Interface 1.2).
+pub const PCI_CAP_ID_PM: u8 = 0x01;
+/// PMCSR within the PM capability.
+pub const PCI_PM_CTRL: u16 = 0x04;
+/// PMCSR's power state: 0 is D0, 3 is D3hot.
+pub const PCI_PM_STATE_MASK: u16 = 0x0003;
+pub const PCI_PM_STATE_D3HOT: u16 = 0x0003;
+/// Set when leaving D3hot keeps the function's configuration.
+pub const PCI_PM_NO_SOFT_RESET: u16 = 0x0008;
 
 /// Message Signaled Interrupts.
 pub const PCI_CAP_ID_MSI: u8 = 0x05;

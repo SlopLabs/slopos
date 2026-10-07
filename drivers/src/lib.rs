@@ -34,6 +34,7 @@ pub mod tty;
 pub mod tty_file_ops;
 #[cfg(feature = "test-hooks")]
 pub mod tty_tests;
+pub mod usb;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_gpu;

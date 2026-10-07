@@ -20,7 +20,7 @@ set -euo pipefail
 #   BOOT_DISK_IMG, INSTALL_STICK, QEMU_ALLOW_REBOOT, QEMU_TEST_DISKS,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
-#   GIT_PUSH_REPO, GIT_SSH_PEER,
+#   GIT_PUSH_REPO, GIT_SSH_PEER, QEMU_QMP,
 #   BOOT_LOG_TIMEOUT, LOG_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -179,8 +179,8 @@ if [ $(( QEMU_SMP & (QEMU_SMP - 1) )) -ne 0 ]; then
 fi
 
 # INSTALL_STICK: the ISO on a USB stick, as the installer's medium is flashed,
-# which the firmware reads and the kernel, without a USB driver, does not. The
-# boot disk is then the disk it installs onto, booted after it.
+# which the firmware reads and the kernel, without a USB storage driver, does
+# not. The boot disk is then the disk it installs onto, booted after it.
 INSTALL_STICK="${INSTALL_STICK:-}"
 NV_FIRMWARE=0
 if [ -n "${BOOT_DISK_IMG:-}" ] || [ -n "$INSTALL_STICK" ]; then
@@ -687,6 +687,11 @@ if [ "$ADD_NO_REBOOT" = "1" ]; then
 fi
 if [ "$HAVE_PCI_ARGS" = "1" ]; then
     QEMU_ARGS+=("${PCI_ARGS[@]}")
+fi
+# QEMU_QMP: a QMP socket through which the host plugs and pulls devices.
+if [ -n "${QEMU_QMP:-}" ]; then
+    rm -f "$QEMU_QMP"
+    QEMU_ARGS+=(-qmp "unix:${QEMU_QMP},server=on,wait=off")
 fi
 
 # ── Launch QEMU ──────────────────────────────────────────────────────────────

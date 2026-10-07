@@ -11,41 +11,13 @@ use slopos_ostd::{klog_info, klog_warn};
 
 use super::designware::{DesignWareI2c, I2cError};
 use super::{I2cBus, register_bus};
-use crate::hpet;
 use crate::pci::BoundDevice;
 use crate::pci::{
     PciProbeError, ProbeOutcome, pci_alloc_mmio, pci_config_read16, pci_config_read32,
-    pci_config_write16, pci_config_write32, pci_find_capability,
+    pci_config_write16, pci_config_write32, set_power_d0,
 };
 use crate::pci_defs::PciDeviceInfo;
 use crate::pci_defs::{PCI_BAR0_OFFSET, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
-
-const PCI_CAP_ID_PM: u8 = 0x01;
-/// PMCSR (power management control/status) offset within the PM capability.
-const PCI_PM_CTRL: u16 = 0x04;
-/// Power-state field within PMCSR (`0` = D0, `3` = D3hot).
-const PCI_PM_STATE_MASK: u16 = 0x03;
-
-/// LPSS controllers can come up in D3hot, where their MMIO BARs do not decode,
-/// so this must run before any MMIO access. The 10 ms D3hot→D0 settle is
-/// mandatory.
-fn set_power_d0(info: &PciDeviceInfo) {
-    let Some(pm_cap) = pci_find_capability(info.bus, info.device, info.function, PCI_CAP_ID_PM)
-    else {
-        return; // no PM capability → the function is always in D0
-    };
-    let pmcsr = pci_config_read16(info.bus, info.device, info.function, pm_cap + PCI_PM_CTRL);
-    if pmcsr & PCI_PM_STATE_MASK != 0 {
-        pci_config_write16(
-            info.bus,
-            info.device,
-            info.function,
-            pm_cap + PCI_PM_CTRL,
-            pmcsr & !PCI_PM_STATE_MASK,
-        );
-        hpet::delay_ms(10);
-    }
-}
 
 /// Preserves the BAR's read-only low type bits.
 fn program_bar0(info: &PciDeviceInfo, base: u64, is_64bit: bool) {

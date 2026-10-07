@@ -314,11 +314,10 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Enumerating PCI devices...");
     pci_init();
 
-    // The xe driver must see its configuration before its probe runs; with no
-    // `xe.*` knobs it stays passive on the firmware framebuffer.
-    let xe_cmdline =
+    let cmdline =
         slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline()).unwrap_or("");
-    slopos_drivers::xe::set_config(slopos_drivers::xe_logic::cmdline::parse(xe_cmdline));
+    slopos_drivers::xe::set_config(slopos_drivers::xe_logic::cmdline::parse(cmdline));
+    slopos_drivers::usb::configure(cmdline);
 
     pci_probe_drivers();
     klog_debug!("PCI subsystem initialized.");

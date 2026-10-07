@@ -99,6 +99,7 @@ installer_live_cmdline := "tests=on tests.shutdown=on tests.verbosity=summary bo
 iso_tests    := build_dir / "slop-tests.iso"
 # `test-elf`: a kernel built elsewhere, never the build's own ISO.
 iso_elf_tests := build_dir / "slop-elf-tests.iso"
+iso_usb := build_dir / "slop-usb.iso"
 log_file     := env("LOG_FILE", "test_output.log")
 
 # The UEFI boot disk, in the layout every SlopOS disk has: an ESP with Limine,
@@ -902,6 +903,25 @@ test-rude-exit: _build-run-tests
     printf 'slopos-rude-exit-v1\n' > {{build_dir}}/rude-exit.payload
     scripts/check_fs_replay.sh "{{fs_image_tests}}" /rude-exit {{build_dir}}/rude-exit.payload
 
+# The ISO names the explicit tests, which run only when named since the host
+# must pull and plug sticks for them.
+[doc("USB check: both QEMU xHCI models, qemu-xhci on MSI-X and nec-usb-xhci on MSI, with a stick on each connector; the host pulls and plugs every stick through QMP, and the guest must see each root port detach and attach again and reset each controller")]
+test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tests=slopos_drivers::tests::usb_tests::test_usb_1_controllers_run
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_2_pulled_ports_detach
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_3_plugged_ports_attach
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_4_shutdown_resets
+    KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
+    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
+        scripts/build_iso.sh "{{iso_usb}}" "{{build_dir}}" \
+            "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip root=initramfs tests.run=$tests"
+    QEMU_NO_ROOT_DISK=1 QEMU_TEST_DISKS=0 python3 scripts/test_usb.py --iso "{{iso_usb}}" \
+        --build-dir "{{build_dir}}" --log "{{build_dir}}/usb.log" --tests "$tests"
+
 # The capacity check: one boot with a 16 GiB volume attached as nvme0n3,
 # which the suite mounts, measures and grades. Separate from `just test`
 # because the image takes minutes to build once and is then preserved; the
@@ -1243,9 +1263,9 @@ test-remote: _build-userland _base-recipes
     fi
     echo "test-remote: identity, commands, files, kernel log, the sealed pairing, install and power-off all held"
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, cpufreq-core, ext4-core, http-core, remote-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, cpufreq-core, ext4-core, http-core, remote-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-http-core -p slopos-remote-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-http-core -p slopos-remote-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

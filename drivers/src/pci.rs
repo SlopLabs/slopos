@@ -416,6 +416,51 @@ pub fn disable_bus_master(info: &PciDeviceInfo) {
     );
 }
 
+/// The longest power-state transition, D3hot to D0 (PCI PM 1.2 §5.6.1).
+const D3HOT_RECOVERY_MS: u32 = 10;
+
+/// Bring the function to D0, where its BARs decode, from wherever the
+/// firmware left it. A function that leaves D3hot with No_Soft_Reset clear
+/// resets, losing the BARs enumeration recorded, so they are written back.
+pub fn set_power_d0(info: &PciDeviceInfo) {
+    let Some(pm) = info.find_capability(PCI_CAP_ID_PM) else {
+        return;
+    };
+    let at = pm + PCI_PM_CTRL;
+    let pmcsr = pci_config_read16(info.bus, info.device, info.function, at);
+    let state = pmcsr & PCI_PM_STATE_MASK;
+    if state == 0 {
+        return;
+    }
+    pci_config_write16(
+        info.bus,
+        info.device,
+        info.function,
+        at,
+        pmcsr & !PCI_PM_STATE_MASK,
+    );
+    crate::hpet::delay_ms(D3HOT_RECOVERY_MS);
+    if state == PCI_PM_STATE_D3HOT && pmcsr & PCI_PM_NO_SOFT_RESET == 0 {
+        restore_bars(info);
+    }
+}
+
+fn restore_bars(info: &PciDeviceInfo) {
+    let mut index = 0;
+    while index < usize::from(info.bar_count).min(PCI_MAX_BARS) {
+        let bar = info.bars[index];
+        let at = PCI_BAR0_OFFSET + 4 * index as u16;
+        if bar.base != 0 {
+            pci_config_write32(info.bus, info.device, info.function, at, bar.base as u32);
+            if bar.is_64bit != 0 && index + 1 < PCI_MAX_BARS {
+                let high = (bar.base >> 32) as u32;
+                pci_config_write32(info.bus, info.device, info.function, at + 4, high);
+            }
+        }
+        index += if bar.is_64bit != 0 { 2 } else { 1 };
+    }
+}
+
 /// Turn ASPM L0s and L1 off in the function's PCI Express Link Control
 /// register. `false` when the function has no PCI Express capability.
 pub fn disable_aspm(info: &PciDeviceInfo) -> bool {
@@ -761,16 +806,27 @@ fn pci_probe_bar(bus: u8, device: u8, function: u8, bar_idx: u8) -> PciBarInfo {
 
 /// `#[inline(never)]` so the 144 B BAR array lives in this helper's frame, not
 /// the caller's.
+///
+/// Sizing writes all ones to each BAR, so decoding is off meanwhile: firmware
+/// SMM may be driving a USB controller through it. A host bridge keeps
+/// decoding, as the memory path may run through it.
 #[inline(never)]
 fn pci_enumerate_bars(
     bus: u8,
     device: u8,
     function: u8,
     header_type: u8,
+    host_bridge: bool,
 ) -> ([PciBarInfo; PCI_MAX_BARS], u8) {
     let mut bars = [PciBarInfo::zeroed(); PCI_MAX_BARS];
     let mut bar_count = 0u8;
     if header_type == 0 {
+        let command = pci_config_read16(bus, device, function, PCI_COMMAND_OFFSET);
+        let decode = PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_IO_SPACE;
+        let pause = !host_bridge && command & decode != 0;
+        if pause {
+            pci_config_write16(bus, device, function, PCI_COMMAND_OFFSET, command & !decode);
+        }
         let mut bar_idx = 0u8;
         while bar_idx < 6 {
             let bar = pci_probe_bar(bus, device, function, bar_idx);
@@ -782,6 +838,9 @@ fn pci_enumerate_bars(
                 bar_idx += 1;
             }
             bar_idx += 1;
+        }
+        if pause {
+            pci_config_write16(bus, device, function, PCI_COMMAND_OFFSET, command);
         }
     }
     (bars, bar_count)
@@ -876,7 +935,8 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
     let interrupt_line = pci_config_read8(bus, device, function, PCI_INTERRUPT_LINE_OFFSET);
     let interrupt_pin = pci_config_read8(bus, device, function, PCI_INTERRUPT_PIN_OFFSET);
 
-    let (bars, bar_count) = pci_enumerate_bars(bus, device, function, header_type);
+    let host_bridge = class == PCI_CLASS_BRIDGE && subclass == PCI_SUBCLASS_HOST_BRIDGE;
+    let (bars, bar_count) = pci_enumerate_bars(bus, device, function, header_type, host_bridge);
     let (msi_cap_offset, msix_cap_offset) = pci_find_msi_caps(bus, device, function);
 
     let info = PciDeviceInfo {

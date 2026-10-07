@@ -200,6 +200,11 @@ jobs:
       - name: Rude-exit journal replay check
         run: just test-rude-exit
 
+      # Sticks pulled and plugged through QMP on both QEMU xHCI models: a boot
+      # of its own, since the suite's capture carries no USB controller.
+      - name: USB check
+        run: just test-usb
+
       # One boot of the self-hosting root, with no toolchain: the seeded
       # clone, its vendored crates and the floor the root is grown to. Cannot
       # ride the capture above, whose root carries no clone.

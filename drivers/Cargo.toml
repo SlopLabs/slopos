@@ -32,6 +32,7 @@ slopos-mm = { workspace = true }
 slopos-net = { workspace = true }
 slopos-nvme-core = { workspace = true }
 slopos-rtl8168-core = { workspace = true }
+slopos-usb-core = { workspace = true }
 slopos-ostd = { workspace = true }
 slopos-vt = { workspace = true }
 bitflags = { workspace = true }

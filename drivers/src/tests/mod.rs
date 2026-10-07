@@ -21,6 +21,7 @@ pub mod platform_binding;
 pub mod rtc_tests;
 pub mod scanout_arbiter;
 pub mod touchpad_platform_tests;
+pub mod usb_tests;
 pub mod verity_artifact_tests;
 pub mod virtio_completion_tests;
 pub mod virtio_gpu_tests;

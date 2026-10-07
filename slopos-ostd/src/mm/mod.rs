@@ -31,7 +31,7 @@ pub use init::{
     init_from_owned, init_struct_with, init_zeroed,
 };
 pub use io_mem::{
-    IoMem, IoMemCachePolicy, IoMemError, IoMemMapper, IoMemRegistry, PhysRange,
+    IoMem, IoMemCachePolicy, IoMemError, IoMemMapper, IoMemRegistry, PhysRange, io_mem_ranges_free,
     register_io_mem_mapper, register_io_mem_range, register_io_mem_registry,
 };
 pub use pod::Pod;

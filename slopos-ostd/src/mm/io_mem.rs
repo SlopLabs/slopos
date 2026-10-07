@@ -210,6 +210,11 @@ pub fn register_io_mem_range(range: PhysRange) -> Result<(), IoMemError> {
     Ok(())
 }
 
+/// Slots the dynamic registry has left, out of `MAX_DYNAMIC_RANGES`.
+pub fn io_mem_ranges_free() -> usize {
+    MAX_DYNAMIC_RANGES.saturating_sub(DYNAMIC_COUNT.load(Ordering::Acquire))
+}
+
 fn dynamic_ranges_view() -> &'static [PhysRange] {
     let count = DYNAMIC_COUNT.load(Ordering::Acquire);
     if count == 0 {

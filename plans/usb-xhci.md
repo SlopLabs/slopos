@@ -16,13 +16,15 @@ system runs. QEMU's controllers come first, then the laptop's two
 
 ## Where it stands
 
-The kernel has no USB driver: no PCI driver matches class `0x0C`, subclass
-`0x03`. The firmware reads a stick; the kernel does not. `just
-test-installer` attaches the ISO as QEMU's `usb-storage` device on
-`qemu-xhci` (`INSTALL_STICK` in `scripts/qemu_run.sh`), for the firmware
-alone. The install medium reaches the kernel only as the Limine module
-`install`, payload included. Limine loads it into RAM, and
-`fs/src/basefs.rs` serves it at `/media/install` for the whole boot.
+Phase 1 has landed: the kernel takes every xHCI controller it can drive from
+the firmware, runs it, logs each root port's attach and detach, and resets it
+at poweroff, but it enumerates nothing. A stick in a port is a connect status;
+the firmware reads a stick and the kernel does not. `just test-installer`
+attaches the ISO as QEMU's `usb-storage` device on `qemu-xhci`
+(`INSTALL_STICK` in `scripts/qemu_run.sh`) for the firmware alone. The install
+medium reaches the kernel only as the Limine module `install`, payload
+included. Limine loads it into RAM, and `fs/src/basefs.rs` serves it at
+`/media/install` for the whole boot.
 
 The pieces USB plugs into exist. These are their gaps:
 
@@ -35,8 +37,8 @@ The pieces USB plugs into exist. These are their gaps:
   INTx. The i8042 and the touchpad's GPIO cascade are IOAPIC lines. All of
   them target the BSP. Deferred work runs on a `spawn_kernel_io!` thread,
   and each such thread takes a slot in a fixed registry of
-  `MAX_KERNEL_IO_STOPS` that netpoll, net-timer, the ext2 flusher, the
-  efivar thread and the touchpad already draw on.
+  `MAX_KERNEL_IO_STOPS` (eight) that netpoll, net-timer, the ext2 flusher,
+  the efivar thread, the touchpad and the USB thread already draw on.
 - **Device memory.** Every DMA ring in the tree is a single zeroed 4 KiB
   `OwnedPageFrame` with volatile accessors. A multi-page `DmaCoherent` run
   has no volatile accessors. The frame allocator's one placement
@@ -66,11 +68,12 @@ The pieces USB plugs into exist. These are their gaps:
 - **Network.** A NIC is a `NetDevice` handed to `nic::publish`.
   `nic::retire` tears one down, and a test grades it, but it exists only
   under `test-hooks`. Both NIC drivers are singletons.
-- **Tests.** No graded QEMU boot attaches a USB device the kernel drives.
-  Test runs pass `-monitor none` and nothing opens QMP, so no test can
-  hot-plug a device or inject input into one. `utest!` has no form that
-  only a named run executes. CI's QEMU is the runner distribution's, so a
-  USB test uses only devices and QMP commands that version carries.
+- **Tests.** `just test` attaches no USB controller. `just test-usb` plugs
+  and pulls sticks through QMP, but no graded boot drives a USB device past
+  its connect status, and nothing injects input into one. `utest!` has no
+  form that only a named run executes. CI's QEMU is the runner
+  distribution's, so a USB test uses only devices and QMP commands that
+  version carries.
 
 The laptop has two controllers. The PCH xHCI `8086:51ed` sits at `00:14.0`
 and the Thunderbolt 4 (TCSS) xHCI `8086:a71e` at `00:0d.0`. On Intel's
@@ -89,7 +92,7 @@ untrusted input, and each rewrites the `AGENTS.md` and
 
 | Phase | Needs | Ends with |
 |---|---|---|
-| 1. The host controller | — | both QEMU xHCI models running, every root port's attach and detach logged, the controller reset at poweroff |
+| 1. The host controller (done) | — | both QEMU xHCI models running, every root port's attach and detach logged, the controller reset at poweroff |
 | 2. Enumeration and the device model | 1 | every device QEMU attaches, a hub's included, enumerated, bound or listed, and removed cleanly |
 | 3. Keyboards and pointers | 2 | a USB keyboard and tablet drive the shell and the desktop beside PS/2 |
 | 4. Mass storage | 2 | an ext4 stick mounted, written, pulled and plugged back; the installer still installs with its stick visible |
@@ -100,113 +103,35 @@ Phases 3, 4 and 6 can run side by side. A phase's laptop half is graded by
 the user's run, or by an agent through the remote control
 (`scripts/remote.py`) within the bounds `AGENTS.md` sets for it.
 
-### Phase 1: The host controller
+### Phase 1: The host controller (done)
 
-Build the xHCI part of `usb-core` and the USB core that runs it. The USB
-core is `drivers/src/usb`, the kernel side; `usb-core` is the host-tested
-crate.
+Built:
 
-- **`usb-core`.** A `no_std`, `forbid(unsafe_code)`, alloc-free crate,
-  host-tested under `just test-host` as `nvme-core` and `rtl8168-core` are.
-  It joins the workspace members, `[workspace.dependencies]` and `just
-  test-host`'s package list. It holds:
-  - the capability, operational, runtime and doorbell layouts;
-  - the extended-capability walk (USB Legacy Support, Supported Protocol);
-  - TRB and context codecs for both context sizes;
-  - ring bookkeeping: cycle bits, Link TRBs, the full and empty tests;
-  - the handoff, halt, reset and start sequences, written once over a
-    register-bus trait shaped like `rtl8168_core::RegisterBus`, with named
-    waits;
-  - a simulated controller (`#[cfg(test)] mod sim`) that runs those
-    sequences, posts events and can be told to leave a wait unanswered, as
-    `rtl8168-core`'s simulated chip does.
-- **`drivers/src/usb/xhci`.** It is bound by `pci_driver!` on
-  `PciMatch::ClassSubclass { class: 0x0C, subclass: 0x03 }`, and declines
-  unless `prog_if` is `0x30`, as NVMe declines a foreign prog-if. Probe
-  does this, in order:
-  1. declines, touching nothing, under `usb=off`, and for a function whose
-     config space offers neither MSI-X nor MSI;
-  2. brings the function to D0 and turns memory decode on;
-  3. reads the capability registers and declines, restoring the command
-     register it found, a controller that lacks 64-bit addressing, asks for
-     more scratchpad buffers than one page lists (512), or has no 4 KiB
-     page size. Under `usb=report` it logs the controller and declines here;
-  4. takes the controller from the firmware, with bus mastering as the
-     firmware left it (Decided);
-  5. halts it, disables bus mastering and resets it;
-  6. sets up the Device Context Base Address Array (DCBAA), the scratchpad
-     buffers, the command ring, and interrupter 0 with one event-ring
-     segment;
-  7. sets up MSI-X or MSI through `driver_core::msi::setup_interrupts`, and
-     enables MSI-X with `msix::msix_enable`, as NVMe does;
-  8. enables bus mastering, runs the controller, then reads every `PORTSC`
-     once and clears its change bits. QEMU raises no event for a device
-     present before the run, nor for a later change while a change bit
-     stays set. A controller that follows xHCI 1.2 §4.19.2 raises one when
-     the run ungates the bits. Either way the event only means "look at
-     this port again", so no port is enumerated twice.
+- **`usb-core`'s xHCI half**: the register, extended-capability, TRB and
+  context codecs (both context sizes), ring bookkeeping with a table of
+  outstanding commands, and the handoff, halt, reset, configure and run
+  sequences over a `RegisterBus` with named waits. Host tests run them
+  against a simulated controller in QEMU's shape and in the laptop's (64-byte
+  contexts, 300 scratchpads, USB Legacy Support, switched port power,
+  §4.19.2's port events), a BIOS that never lets go, a controller without
+  64-bit addressing, a Host System Error with a command outstanding, and
+  mutated registers.
+- **The `xhci` PCI driver in `drivers/src/usb`**: a probe that takes each
+  controller from the firmware, resets and runs it as **Decided** below
+  states, a No Op command as proof of the rings, the `usb` thread, a
+  shutdown hook per controller, the dead-controller path, the `usb` knob,
+  and kernel-log lines per controller and per root port change.
+- **PCI**: `set_power_d0` lives in `drivers/src/pci.rs` and writes back the
+  BARs a reset out of D3hot lost, and BAR sizing runs with decode off on
+  every function but a host bridge.
+- **`just test-usb`**, in CI after `test-rude-exit`. It measured 44 of the 64
+  dynamic MMIO ranges free, and 23 with the suite's disks attached too.
 
-  A controller that fails any step after the handoff is halted, with bus
-  mastering off, before its resources drop.
-- **A controller that dies.** At run time, a controller that reports Host
-  System Error or Host Controller Error, or whose registers read back all
-  ones, is dead. The USB thread halts it, or finds it halted, turns bus
-  mastering off and logs one line. From phase 2 it then removes every
-  device on it, issuing no command. The controller is not probed again
-  that boot.
-- **The USB thread**, one `spawn_kernel_io!` thread serving every
-  controller, and the event-ring drain shared by the interrupt handler and
-  that thread (Decided).
-- **A shutdown hook per controller**, registered through
-  `driver_core::shutdown::register` and polled. It halts and resets the
-  controller and turns bus mastering off; phase 4 puts the storage drain in
-  front (Decided).
-- **PCI fixes.** `set_power_d0` moves from `drivers/src/i2c/pci.rs` into
-  `drivers/src/pci.rs`, for a controller the firmware left in D3hot. When
-  the function's No_Soft_Reset bit is clear, the move to D0 resets it, so
-  the helper writes back the BARs enumeration recorded. `pci_probe_bar`
-  turns memory decode off while it sizes a BAR, because firmware SMM may be
-  driving a USB controller through that BAR.
-- **The MMIO budget.** Each controller takes up to three of the
-  append-only dynamic MMIO ranges: BAR0, the MSI-X table and the PBA. The
-  phase measures how many `just test-usb` reaches, and phase 4 measures
-  `just test` once `qemu-xhci` joins it. If fewer than eight are left,
-  `register_io_mem_range` stops appending a range an existing entry
-  already contains.
-- **The `usb` knob.** `on` is the default. `off` binds no controller.
-  `report` logs each controller's capabilities, protocols and ports and
-  takes nothing over. A typed parser in `usb-core` reads it from whole
-  tokens, and `boot_step_pci_init_fn` hands the result to the driver, as it
-  does `xe.*`.
-- **One kernel-log line per controller**, with its version, slots,
-  interrupters, context size, 64-bit addressing, scratchpad count, whether
-  it has USB Legacy Support, and each protocol's port range.
-- **`just test-usb`** starts here: its own QEMU boot carrying `qemu-xhci`
-  and `nec-usb-xhci`, the NEC model with `msix=off` so that the MSI path
-  runs, and a device on each root port.
-  - `qemu_run.sh` opens a QMP socket for the run when `QEMU_QMP` names one,
-    and the host drives `device_del` and `device_add` through it.
-  - Each stick is a `-blockdev` node, because QEMU deletes a `-drive`
-    backend together with the device that used it, and a re-plugged stick
-    would then find no drive.
-  - Its guest half is kernel tests registered `FLAG_EXPLICIT`, which `just
-    test-usb` names in `tests.run`, so `just test` neither runs nor counts
-    them.
-
-**Done when** both models come up under `just test-usb`, log attach and
-detach on each root port as the host plugs and pulls, and are reset at
-poweroff. The host tests must also run the bring-up against simulated
-controllers that have 64-byte contexts and scratchpad buffers. They must
-decline one without 64-bit addressing, survive a USB Legacy Support
-capability whose BIOS never lets go, and drive one into Host System Error
-with a command outstanding.
-
-**On the laptop,** a `usb=report` boot measures both controllers through
-`just remote klog`: version, context size, 64-bit addressing, scratchpads,
-port ranges, and whether each has USB Legacy Support. The same boot shows
-whether the TCSS controller appears on PCI at all. Then a `usb=on` boot
-must bring both controllers up, and a reboot from it must reach the
-firmware with no delay.
+Still to run, on the laptop: a `usb=report` boot through `just remote klog`
+recording both controllers' version, context size, 64-bit addressing,
+scratchpads, port ranges and USB Legacy Support, and whether the TCSS
+controller appears on PCI at all; then a `usb=on` boot that brings both up,
+and a reboot from it that reaches the firmware with no delay.
 
 ### Phase 2: Enumeration and the device model
 
@@ -265,6 +190,9 @@ firmware with no delay.
   6. clears the slot's DCBAA entry and drops the `ClaimSlot`, the
      `Binding` first and the `Devres` last, which frees the rings and
      contexts.
+
+  A controller that dies removes every device on it the same way, issuing
+  no command.
 
   A driver whose objects outlive its binding keeps what they touch outside
   the `Devres`. A stick's engine lives until the disk's last mount and node
@@ -480,6 +408,10 @@ keyboard and touchpad.
   is the one that excludes it.
 - **The default test lane.** `qemu-xhci` joins `just test` at a fixed PCI
   address after the suite's NVMe and virtio devices, with a scratch stick.
+  The phase measures how many of the dynamic MMIO ranges `just test` leaves
+  free: each controller takes up to three, BAR0, the MSI-X table and the
+  PBA. If fewer than eight are left, `register_io_mem_range` stops appending
+  a range an existing entry already contains.
   The stick is a fourth arm of `on_scratch!`. `msix_tests` picks its device
   by identity rather than by enumeration order.
 
@@ -605,10 +537,15 @@ takes a lease, and git fetches over it.
   Every parser of device input also runs deterministic mutation loops over
   its inputs, and must neither panic nor read past them.
 - **`just test`:** one `qemu-xhci` with a scratch stick, from phase 4.
-- **`just test-usb`:** a boot of its own with a QMP socket. Its guest half
-  is `FLAG_EXPLICIT` kernel tests and, from phase 3, explicit userland
-  tests. It carries:
-  - both QEMU models, the NEC one on MSI;
+- **`just test-usb`:** a boot of its own with a QMP socket, which
+  `qemu_run.sh` opens when `QEMU_QMP` names one and `scripts/test_usb.py`
+  drives. Its guest half is kernel tests registered `FLAG_EXPLICIT |
+  FLAG_UNCAPTURED`, which the recipe names in `tests.run`, and, from phase
+  3, explicit userland tests. It carries:
+  - both QEMU models, the NEC one on MSI, each with two USB 3 and four USB 2
+    root ports;
+  - a stick on each connector, each a `-blockdev` node, since QEMU deletes a
+    `-drive` backend together with the device that used it;
   - a hub;
   - `usb-kbd`, `usb-mouse` and `usb-tablet`, with keys and motion injected
     through QMP;
@@ -623,8 +560,7 @@ takes a lease, and git fetches over it.
   host drives the test at markers the guest prints, as `just test-remote`
   does, and holds each stick image to `e2fsck -fn` afterwards. The test
   runs in CI's `ci` job after `test-rude-exit`, because only that job has
-  the tests build. Its warm cost is held under a minute, and the `ci` row
-  of `plans/ci-latency.md` gains it when it lands.
+  the tests build, and its warm cost is held under a minute.
 - **`just test-installer`:** phases 4 and 5.
 - **The laptop** grades what QEMU cannot:
   - Intel's controllers and the firmware handoff;
@@ -686,7 +622,9 @@ takes a lease, and git fetches over it.
 - **A declined controller stays the firmware's.** Probe declines before the
   handoff, so a controller it cannot drive keeps its owner, its bus
   mastering and any keyboard emulation the firmware gives it; at most its
-  power state has moved to D0.
+  power state has moved to D0. One that would find no dynamic MMIO range
+  left for BAR0, or for an MSI-X table when it has no MSI to fall back to,
+  is declined before probe touches it at all.
 - **The firmware hands the controller over.** The driver sets OS Owned and
   waits for BIOS Owned to clear, for at most a second, which is the
   specification's bound. Past that it clears BIOS Owned itself. Either
@@ -697,9 +635,12 @@ takes a lease, and git fetches over it.
   its own schedules. Then the driver halts the controller, waits for it to
   stop, turns bus mastering off, sets HCRST, waits 1 ms before touching
   any register (some Intel controllers hang the machine otherwise), and
-  waits for HCRST and Controller Not Ready (CNR) to clear. The handoff ends
-  any PS/2 emulation the firmware's SMM gave a USB keyboard. The laptop's
-  built-in keyboard is a real i8042 and is unaffected.
+  waits for HCRST and Controller Not Ready (CNR) to clear. Bus mastering
+  comes back on just before the controller is given its memory, since
+  writing ERSTBA makes it read the segment table by DMA, which QEMU's model
+  does at once and fails as a Host Controller Error with mastering off. The
+  handoff ends any PS/2 emulation the firmware's SMM gave a USB keyboard.
+  The laptop's built-in keyboard is a real i8042 and is unaffected.
 - **Rings and contexts are single pages.** Each is a zeroed
   `OwnedPageFrame`, so no ring or buffer can cross a 64 KiB or page
   boundary, and the CPU reads device-written TRBs through volatile
@@ -709,8 +650,8 @@ takes a lease, and git fetches over it.
   Transfer data uses the block engine's 4 KiB pages, one TRB each. A
   controller without 64-bit addressing is declined until the frame
   allocator has a below-4 GiB constraint that page allocation can ask for.
-  QEMU's controllers have 64-bit addressing; the laptop's are measured in
-  phase 1. 64-bit registers are written as one qword, as the specification
+  QEMU's controllers have 64-bit addressing; the laptop's are measured by a
+  `usb=report` boot. 64-bit registers are written as one qword, as the specification
   asks of a 64-bit controller.
 - **The drain owns the event ring, and nothing drains it under an engine
   lock.**
@@ -723,8 +664,8 @@ takes a lease, and git fetches over it.
     `Engine::handle_irq` as NVMe's and virtio-blk's handlers wake them;
     netpoll; or the USB threads.
   - A transport's `pop` reads only its own completion queue. A lost
-    interrupt is recovered by the USB thread, which, while any transfer is
-    outstanding on a controller, runs the same drain at every park timeout.
+    interrupt is recovered by the USB thread, which runs the same drain on
+    every pass, at least once a second.
   - The lock order is: `BlockEngine.state` or the event lock, never both;
     then a transport's queue lock; then an endpoint's ring. No engine lock
     is held while the event lock is taken, and HID decoding and every wake
@@ -740,10 +681,26 @@ takes a lease, and git fetches over it.
     enumeration and key repeat go on while a probe or a table read waits.
   - USB takes two slots of the fixed stop registry, however many
     controllers a machine has.
-  - Probe and the shutdown hooks drain the ring by polling. Probe runs on
+  - Probe and the shutdown hooks wait for the controller by spinning, and
+    drain the ring themselves when the interrupt does not. Probe runs on
     the BSP's boot context, which has no current task, so a wait there
     answers `WaitAbort::NoRuntime`. The shutdown hooks run after the kernel
     I/O threads have stopped.
+- **A controller proves its rings before it is used.** Once it runs, probe
+  sends a No Op command and gives its interrupt 200 ms to deliver the
+  completion, then polls for 500 ms more. One that answers only when polled
+  is kept, logged and served by the thread's drain; one that does not
+  answer is reset, taken off the bus and left unused, so a broken command
+  ring, event ring or doorbell surfaces at probe rather than as a stalled
+  enumeration.
+- **The `usb` knob.** `on` is the default. `off` binds no controller and
+  touches none. `report` logs each controller's capabilities, protocols
+  and ports and leaves it to the firmware. The last `usb=` token naming a
+  mode decides, as for every knob the built-in command line can override;
+  one naming none is logged and ignored.
+- **Names.** Controllers are numbered from 1 in probe order and a root
+  port is `<controller>-<port>`, a hub port appending `.<port>`, as the
+  kernel log and the kconsole listing name them.
 - **Hubs belong to the USB core.** A hub's slot must be marked as a hub
   before any child of it is addressed, and its children are the USB core's
   enumeration work. A hub is therefore never offered to `UsbBus`.
