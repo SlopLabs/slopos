@@ -69,6 +69,19 @@ impl Trb {
         }
     }
 
+    pub fn chains(&self) -> bool {
+        self.control & CHAIN != 0
+    }
+
+    /// A Link TRB inside a TD carries the chain on (§4.11.5.1).
+    pub fn with_chain(self, chain: bool) -> Self {
+        Self {
+            control: self.control & !CHAIN,
+            ..self
+        }
+        .flag(CHAIN, chain)
+    }
+
     fn slot(self, slot: u8) -> Self {
         Self {
             control: self.control | u32::from(slot) << 24,
@@ -207,9 +220,14 @@ impl Trb {
     }
 
     pub fn normal(buffer: u64, len: u32, chain: bool) -> Self {
+        Self::normal_sized(buffer, len, 0, chain)
+    }
+
+    /// `td_size` is how many packets of the TD follow this TRB's (§4.11.2.4).
+    pub fn normal_sized(buffer: u64, len: u32, td_size: u32, chain: bool) -> Self {
         Self {
             parameter: buffer,
-            status: len & 0x1_ffff,
+            status: len & 0x1_ffff | td_size.min(31) << 17,
             ..Self::new(kind::NORMAL)
         }
         .flag(CHAIN, chain)

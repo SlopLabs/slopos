@@ -5,8 +5,10 @@
 
 mod devices;
 mod slots;
+mod storage;
 
 pub use devices::{Faults, Reply, SimDevice};
+pub use storage::SimStorage;
 
 use super::bus::RegisterBus;
 use super::context::{
@@ -208,6 +210,9 @@ pub struct Config {
     /// a run raises none.
     pub specification_port_events: bool,
     pub max_slots: u8,
+    /// A TD a short packet ended early also reports its last TRB, as the
+    /// specification asks when only ISP was set on the short one.
+    pub second_short_event: bool,
 }
 
 impl Config {
@@ -223,6 +228,7 @@ impl Config {
             protocols: vec![(0x03, 0x00, 1, 2), (0x02, 0x00, 3, 4)],
             specification_port_events: false,
             max_slots: 64,
+            second_short_event: false,
         }
     }
 
@@ -239,6 +245,7 @@ impl Config {
             protocols: vec![(0x02, 0x00, 1, 4), (0x03, 0x10, 5, 2)],
             specification_port_events: true,
             max_slots: 32,
+            second_short_event: true,
         }
     }
 
@@ -319,6 +326,8 @@ pub struct SimEndpoint {
     pub max_packet: u16,
     /// A NAKed transfer waits at the dequeue pointer.
     pub pending: bool,
+    /// The host's data toggle: the next packet's DATA1.
+    pub toggle: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -866,6 +875,12 @@ impl SimController {
                 control: 39 << 10,
             });
         }
+    }
+
+    /// Let `us` pass, and run whatever waited for it.
+    pub fn advance_us(&mut self, us: u64) {
+        self.now_us += us;
+        self.kick();
     }
 
     /// A PCI error the controller stops on.

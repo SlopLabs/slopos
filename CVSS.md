@@ -2,6 +2,38 @@
 
 **No finding is open.**
 
+Swept 2026-10-08: USB mass storage — what a stick sends (Bulk-Only
+wrappers, sense, INQUIRY, capacity and mode data) through `usb-core`'s
+storage parsers, the transport's recovery driving Reset, Stop and Configure
+Endpoint and EP0 requests (`CLEAR_TT_BUFFER` to the hub above a full-speed
+stick), `usb-storage` registering a stick's LUNs as `sd` disks and taking them
+out when it leaves, block claims keyed by a disk's generation, write
+protection reaching `BLKROGET` and ext4, `root=auto` passing over USB disks,
+boot waiting for a named device, the shutdown flush, and the installer
+passing over its own medium by its GPT disk GUID. Every parser of device
+input is host-tested with mutation loops and bounded by the buffer posted; a
+descriptor on a departed `sda` fails rather than reaching the next disk of
+that name, since node inodes are never reused and a claim releases only its
+own generation; mounting a stick takes `Mount`, and the kernel mounts only
+what `root=` or a `mount=` names. Four reviews found defects in the change
+before it landed, none in code that had shipped: a stick's transport was not
+served while its LUNs were probed, so one that stalled held the shared
+`usb-bind` thread, and with it every USB bind and removal, for minutes; a
+READ a device failed with RECOVERED ERROR having moved nothing completed as
+success, handing back the previous request's bytes from the slot's staging
+page; REQUEST SENSE data overwrote a probe command's own data; a recovery
+step refused for want of room escalated to a port reset; a probe command no
+waiter held a completion slot from then on; and every escalation spent one
+of the port's three tries for good. Two **pre-existing** defects, fixed here:
+every MMIO mapping took one of the 64 dynamic MMIO registry's slots even when
+an entry already covered it, so re-probes and tests exhausted it and a later
+device's probe failed (`dynamic_range_inside_an_entry_takes_no_slot`); and
+the release-tests kernel failed its stack gate on a 2280-byte net test frame,
+which kept `just test-installer` and every other release-tests lane from
+building. Below the bar: a disk carrying the medium's GPT disk GUID is never
+offered, so whoever can write a disk's table can hide it from an install,
+which already takes the raw-device right or the disk in hand.
+
 Swept 2026-10-02: the installer and its medium — `/bin/installer` writing a
 table, formats and a root onto a disk another system shares, the `install`
 module served at `/media/install`, e2fsprogs run from the base with `Mount`,

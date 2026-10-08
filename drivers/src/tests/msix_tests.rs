@@ -55,15 +55,11 @@ fn restore_msix_control(dev: &PciDeviceInfo, cap: &MsixCapability, saved_ctrl: u
     );
 }
 
+/// QEMU's NVMe controller, the first of them: picked by identity, so a device
+/// another lane adds ahead of it on the bus changes nothing here.
 fn find_msix_device() -> Option<(PciDeviceInfo, u16)> {
-    for i in 0..pci_get_device_count() {
-        if let Some(dev) = pci_get_device(i) {
-            if let Some(off) = dev.msix_cap_offset {
-                return Some((dev, off));
-            }
-        }
-    }
-    None
+    let dev = find_device_by_vendor_device(0x1b36, 0x0010)?;
+    Some((dev, dev.msix_cap_offset?))
 }
 
 fn read_msix_control(dev: &PciDeviceInfo, cap: &MsixCapability) -> u16 {

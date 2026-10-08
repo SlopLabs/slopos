@@ -58,6 +58,7 @@ impl fmt::Display for Why {
             Failure::NoMemory => f.write_str("out of memory"),
             Failure::Hub => f.write_str("too many of its hub requests failed"),
             Failure::Halted => f.write_str("an endpoint it needs stayed halted"),
+            Failure::Recovery => f.write_str("its driver could not recover it"),
             Failure::BadSlot(slot) => write!(f, "the controller gave out slot {}", slot),
         }
     }
@@ -211,6 +212,12 @@ impl Host for ControllerHost<'_> {
             device.recovered(dci);
         }
         crate::usb::TRANSFERS.wake_all();
+    }
+
+    fn escalated(&mut self, slot: u8) -> bool {
+        self.controller
+            .device(slot)
+            .is_some_and(|d| d.take_escalation())
     }
 
     fn running_endpoints(&mut self, slot: u8) -> u32 {

@@ -5,9 +5,10 @@
 pub mod bus;
 pub mod hid;
 mod kconsole;
+pub mod storage;
 pub mod xhci;
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use slopos_net::napi_waker::NapiWaker;
 use slopos_ostd::sync::kernel_io_task::{KernelIoToken, KthreadWait};
@@ -16,14 +17,22 @@ use slopos_ostd::{klog_info, lock_class};
 use slopos_usb_core::knob::{Knob, Mode};
 
 static MODE: AtomicU8 = AtomicU8::new(Mode::On as u8);
+static SETTLE_MS: AtomicU32 = AtomicU32::new(slopos_usb_core::knob::SETTLE_MS);
 
-/// Read the `usb=` knob; the PCI boot step calls this before any probe.
+/// Read the `usb=` and `usb.settle_ms=` knobs; the PCI boot step calls this
+/// before any probe.
 pub fn configure(cmdline: &str) {
     let knob = Knob::parse(cmdline);
     if let Some(value) = knob.ignored {
         klog_info!("USB: usb={} names no mode; ignored", value);
     }
     MODE.store(knob.mode as u8, Ordering::Release);
+    SETTLE_MS.store(knob.settle_ms, Ordering::Release);
+}
+
+/// How long a boot step that names an absent device waits for the bus.
+pub fn settle_ms() -> u32 {
+    SETTLE_MS.load(Ordering::Acquire)
 }
 
 pub(crate) fn mode() -> Mode {
@@ -92,8 +101,9 @@ fn usb_thread(token: KernelIoToken<'static>) {
             break;
         }
         let tree = xhci::serve_all();
+        let sticks = storage::serve();
         let now = slopos_kernel_services::clock::uptime_ms();
-        let next = [tree, hid::serve(now)].into_iter().flatten().min();
+        let next = [tree, sticks, hid::serve(now)].into_iter().flatten().min();
         timeout = next.map_or(IDLE_MS, |at| at.saturating_sub(now).clamp(1, IDLE_MS));
     }
     WAKER.stop().note_exited();

@@ -567,14 +567,22 @@ records for it, and at `src/` a `--vendored` clone of `HEAD` whose origin is
 GitHub. The kernel serves it read-only and pinned at `/media/install`
 (`layout::MEDIUM_DIR`), a second `basefs` instance where Limine put it, with
 the kernel and base it booted beside it at `boot/kernel.elf` and
-`boot/base.img`: without a USB mass-storage driver the module is the only way in, as
-`copytoram` is a Linux live system's. `/bin/installer` (granted `Mount`,
+`boot/base.img`: the module is how the payload arrives until it moves to a
+partition of its own (`plans/usb-xhci.md` phase 5), as `copytoram` is a Linux
+live system's. The medium records the GPT disk GUID its image was built with
+(`boot/disk-guid`, `layout::MEDIUM_DISK_GUID`), which `build_install_medium.sh`
+chooses per build and `build_iso.sh` hands xorriso as `--gpt_disk_guid`; read
+from the header alone (`gpt::disk_guid`), since xorriso's array of 176 entries
+is past what `boot-core` stages, it names the stick the system booted from on
+every boot path. `/bin/installer` (granted `Mount`,
 `Power`, and `Install`, which confers `Seal` beside `BootEntry`; a `Mount`
 holder may write any disk raw, so no per-process `DiskBlocks` ceiling binds
 it, and it fills a whole root in one process; in the shell's program
 registry, because a grant is raised only by a spawn and the shell `exec`s
-anything else in a fork that keeps nothing of it) asks for a whole disk and a
-mode — erase it, install
+anything else in a fork that keeps nothing of it) asks for a whole disk —
+never one that answers `BLKROGET` with 1, nor the one carrying the medium's
+GPT disk GUID, which `installer_test` excludes by the same rule
+(`boot_disk::not_installable`) — and a mode — erase it, install
 into free space beside what it holds, or reuse a partition as the root — or
 takes every answer as a flag. `boot-core::install` plans where the partitions
 go, on 1 MiB boundaries, sharing the disk's ESP and keeping SlopOS's own on a
@@ -653,8 +661,13 @@ outright.
 **Every disk goes through the block layer.** `drivers/src/block` is what a
 block driver registers its disks with: their Linux names (`vda` in virtio
 probe order, `nvme<C>n<N>` for namespace `N` of the `C`-th NVMe controller,
-`nvme0n1p2` and `vda2` for partitions), their partition tables, their `/dev`
-nodes and the claims a mount or a raw write takes. A claim covers what it
+`sda` for a USB disk, the lowest letter free, `nvme0n1p2`, `vda2` and `sda1`
+for partitions), their partition tables, their `/dev` nodes and the claims a
+mount or a raw write takes. A disk can leave: `unregister_disk` takes it and
+its nodes out, and a claim carries its disk's generation, so one a departed
+disk's mount still holds releases nothing of the disk given its name next.
+A disk reports write protection (`EngineDisk::protected`), which its
+partition nodes forward: `BLKROGET` answers 1 and ext4 mounts it read-only. A claim covers what it
 names — a partition's excludes the whole disk and itself, so two partitions of
 one disk mount side by side; a write claim is exclusive, and the read claims
 read-only mounts take share with each other and keep a writer off — and
@@ -665,7 +678,10 @@ on a replaced one fails rather than reaching another window. Every disk is an `E
 staged through, a timeout that quarantines a request with its pages until the
 device hands it back, and a fence that holds every write behind one a timeout
 abandoned. A transport supplies only `QueueOps` — virtio-blk's descriptor
-chains, NVMe's submission entries — so the engine's tests run on both. Spans
+chains, NVMe's submission entries, Bulk-Only's commands — so the engine's
+tests run on all three, and names how long a request waits for a free slot:
+250 ms for NVMe and virtio-blk, a Bulk-Only command and its recoveries for a
+stick. Spans
 are cut into the device's logical blocks: partition tables count in them, a
 partial block is read, patched and written back inside one slot's pages, and
 ext2 refuses a block smaller than one, whose write would tear its neighbours.
@@ -692,11 +708,12 @@ test-host`, since QEMU's model asks for no host memory. `qemu_run.sh` attaches
 the root as `nvme0n1`; test mode adds a scratch `nvme0n2`, a 4096-byte-block
 controller carrying the labelled media volume (`nvme1n1`) and a scratch
 (`nvme1n2`), a controller of its own a test shuts down (`nvme2n1`), and on
-virtio-blk the verified image (`vda`) and a scratch (`vdb`), so both drivers
-stay graded; the capacity volume is `nvme0n3`, and the boot disk is the last
-controller's.
+virtio-blk the verified image (`vda`) and a scratch (`vdb`), and on a
+`qemu-xhci` at a fixed PCI address (`00:10.0`) a scratch stick (`sda`), so
+every transport stays graded; the capacity volume is `nvme0n3`, and the boot
+disk is the last controller's.
 
-**USB is xHCI, and `plans/usb-xhci.md` has reached keyboards and pointers.**
+**USB is xHCI, and `plans/usb-xhci.md` has reached mass storage.**
 `drivers/src/usb` binds every PCI xHCI controller (class `0x0C`,
 subclass `0x03`, prog-if `0x30`) that offers MSI-X or MSI and has 64-bit
 addressing, 4 KiB pages and at most 512 scratchpad buffers, up to eight; any
@@ -744,15 +761,51 @@ seconds, does the same without commands. Under `tests=on`
 the `usb settle` boot step waits up to a minute for every port to be quiet and
 every device to reach an end, and fails the run with `USB: unsettled`. The
 kconsole command `u` lists controllers, ports, devices, drivers and endpoint
-queues. A shutdown hook resets each controller at poweroff and reboot.
-`usb-hid` is the one class driver: a boot keyboard is told to use the boot
+queues. A shutdown hook resets each controller at poweroff and reboot, once
+its sticks are drained and flushed. `usb-hid` reads keyboards and pointers: a
+boot keyboard is told to use the boot
 protocol, anything else is read in the report protocol through `hid-core`,
 and each interface claims a keyboard slot, a pointer slot or both; the `usb`
 thread keeps each keyboard's repeat and LEDs. `hid-core` is HID independent
 of transport, host-tested under `just test-host` with mutation loops: report
 descriptors parsed into storage the caller passes, the boot reports, what a
 keyboard or pointer report says and the LED output report; the I²C-HID
-touchpad parses through it too. A stick is listed, not read.
+touchpad parses through it too.
+
+**A USB stick is a disk.** `usb-storage` binds Bulk-Only SCSI functions (class
+`08/06/50`, which is a UAS device's alternate setting 0 too) and registers
+as a disk, `sda` onwards, each LUN INQUIRY calls direct-access that is ready
+within `usb.settle_ms` and counts 512-, 1024-, 2048- or 4096-byte blocks;
+MODE SENSE's WP bit makes it write-protected. `usb-core::storage` is the transport as data:
+the wrappers, the SCSI commands, sense and capacity, and `Transport`, a state
+machine over the device's pipes and EP0 behind a `Wire`, host-tested against
+the simulated controller with simulated sticks — stalls, Phase Errors, CSWs
+that are not valid, a device that never answers, a slow command with another
+behind it — whose bulk endpoints keep data toggles and fail a transfer whose
+toggle does not match, since QEMU's `usb-storage` keeps none. Each stick is
+a request engine of two slots whose `QueueOps` is that transport: one command
+on the wire, one queued, cut at 120 KiB into READ/WRITE (10), or (16) past 2³²
+blocks, with SYNCHRONIZE CACHE the flush until a LUN answers it ILLEGAL
+REQUEST. The drain moves a command along where the event ring is drained;
+`BoundDevice::stream` gives the driver its two bulk pipes, whose halts the
+tree leaves to it, and the `usb` thread runs its recovery: a stalled data
+stage or CSW cleared and the CSW read, a failed command's REQUEST SENSE
+deciding retry or failure, and for a CSW that is not valid, a Phase Error, a
+stalled CBW or a command past its 20 s deadline, Reset Recovery — Reset
+Endpoint (Stop Endpoint on a pipe not halted), the Bulk-Only reset,
+`CLEAR_TT_BUFFER` through a full-speed stick's transaction translator, the
+halts cleared, and a Configure Endpoint dropping and adding both pipes, which
+resets the controller's toggles and moves each ring past what failed — then
+a block request again, once; a probe's own command that hung is not sent
+again, and a LUN whose INQUIRY goes unanswered ends the scan, since probes
+share the `usb-bind` thread. A recovery that fails fails every command and has
+the tree reset the port and enumerate the stick again, which spends one of
+the port's three tries unless the stick had run for a minute. A stick that leaves
+unregisters its disks and fails what it held at once, so a mount on it turns
+read-only through `errors=remount-ro`, answers `EROFS` and stays until
+unmounted. At poweroff and reboot each controller's hook stops its sticks'
+engines, drains them and sends each LUN with a cache a polled SYNCHRONIZE
+CACHE before the reset.
 
 **Every keyboard feeds one keyboard state, and every pointer moves one
 cursor.** `drivers/src/keyboard.rs` takes `(source, usage, pressed)` steps
@@ -905,7 +958,7 @@ carries the token and is for your own machines. State lives in
 `~/.config/slopos-remote`, outside the tree. `just test-remote` grades all of
 it under QEMU, a pairing planted under `/etc/remote` included.
 
-**The disk is the root.** `root=auto` mounts a writable `disk0` — the first disk probed, `nvme0n1` under QEMU — at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=disk` insists on the disk, and `root=initramfs` mounts no disk it was not asked to by a `mount=`, which is what the live ISO boots with. `root=` also takes a device in any spelling a mount source does — `/dev/nvme0n1p2`, `vda1`, `PARTUUID=…`, `UUID=…`, `LABEL=…` — where a partition comes from the GPT or MBR table on its disk; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
+**The disk is the root.** `root=auto` mounts a writable `disk0` — the first disk probed that is not a USB disk, `nvme0n1` under QEMU, so a stick left in a port never changes what boots — at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=disk` insists on the disk, and `root=initramfs` mounts no disk it was not asked to by a `mount=`, which is what the live ISO boots with. A device `root=` or a `mount=` names that is absent is waited for until USB settles, up to `usb.settle_ms`; beyond `tests=on`'s `usb settle` step nothing else in boot waits for USB, the crash store included. `root=` also takes a device in any spelling a mount source does — `/dev/nvme0n1p2`, `vda1`, `PARTUUID=…`, `UUID=…`, `LABEL=…` — where a partition comes from the GPT or MBR table on its disk; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
 **Every volume the tree builds is ext4, in one profile.** `ext4-core/profile`
 names it — `extent`, `64bit`, `flex_bg`, 256-byte inodes with nanosecond
@@ -1335,11 +1388,11 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn` and to being at rest: `Filesystem state: clean`, no `needs_recovery`, an empty journal. Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
 - `just test-rude-exit` — one boot that fsyncs a file into the root's journal and ends the machine holding it, then `scripts/check_fs_replay.sh`: the image must need recovery, the file must be reachable only through the journal, and after `e2fsck -E journal_only` the image must pass `e2fsck -fn`, be at rest and hold the file. In CI after `test-persist`. The kernel test runs only when `tests.run` names it exactly (`FLAG_EXPLICIT`), since it ends the machine.
-- `just test-usb` — the USB check: a boot from the tests base, with no root disk and none of the suite's (`root=initramfs`, `QEMU_NO_ROOT_DISK=1`, `QEMU_TEST_DISKS=0`, so no image is built for it), carrying both of QEMU's xHCI models, `qemu-xhci` on MSI-X and `nec-usb-xhci` with `msix=off` on MSI, each with two USB 3 and four USB 2 root ports: a SuperSpeed stick, QEMU's full-speed hub with a stick, a tablet and a mouse behind it, a high-speed stick and a full-speed keyboard, the keyboard and the tablet bound to the stdvga `video0`. `qemu_run.sh` opens a QMP socket when `QEMU_QMP` names one, and `scripts/test_usb.py` drives the boot at the guest's `USB-TEST:` lines: it deletes and re-adds devices through `device_del` and `device_add`, each stick a `-blockdev` node so it survives its device, and injects keys, buttons and motion through `input-send-event`, naming `video0` for a USB keyboard or the tablet and nothing for the i8042 or the newest usb-mouse. The guest half is kernel tests registered `FLAG_EXPLICIT | FLAG_UNCAPTURED`, which the recipe names in `tests.run`, and the explicit userland test `usb_shell_test`; they hold both controllers running, every device enumerated, each stick bound by the `test-hooks` driver `usb-test`, which sends TEST UNIT READY over its bulk pipes, stalls its bulk-in with a stray read and sends TEST UNIT READY again once the endpoint has recovered and the stick's halt is cleared, every keyboard, tablet and mouse tried first by `usb-test-hid`, which abandons a read of its idle interrupt endpoint, waits for the endpoint to come back idle and declines, and bound by `usb-hid`; every posted report, abandoned as a halt leaves it, to being posted again by recovery; a held USB key to repeating and the i8042's second press of a held key to being a repeat; Caps Lock on a USB keyboard to lighting both USB keyboards and the i8042; Alt+PrintScreen and a command key to running the command; the tablet, a USB mouse and the PS/2 mouse to moving one cursor, and a button to staying down while either the tablet or a mouse holds it; a keyboard pulled with Shift held to leaving nothing shifted unless the i8042 still holds it; every device to leaving and returning twice with no slot, claim or page left behind; each controller to interrupting for its pulls and its plugs; the dynamic MMIO registry to eight free ranges; the kconsole listing to running; a shell on the console to running what the host types on a USB keyboard; and last, as a kernel test that runs in the userland phase, each shutdown hook to leaving its controller halted, reset (DCBAAP cleared) and off the bus. The host holds the log to the same, to every device enumerated and removed as often as it was plugged and pulled, to the listing's lines, to QEMU's `ps2_set_ledstate` trace showing Caps Lock, to no enumeration failing, to neither controller answering its first command only when polled, and the suite to green. In CI after `test-rude-exit`.
+- `just test-usb` — the USB check: a boot from the tests base, with no root disk and none of the suite's (`root=initramfs`, `QEMU_NO_ROOT_DISK=1`, `QEMU_TEST_DISKS=0`, so no image is built for it), carrying both of QEMU's xHCI models, `qemu-xhci` on MSI-X and `nec-usb-xhci` with `msix=off` on MSI, each with two USB 3 and five USB 2 root ports: a SuperSpeed stick, QEMU's full-speed hub with a stick, a tablet and a mouse behind it, a high-speed stick and a full-speed keyboard, the keyboard and the tablet bound to the stdvga `video0`; on `qemu-xhci` a high-speed ext4 stick as well, and for `nec-usb-xhci` a read-only ext4 drive the guest asks for. `qemu_run.sh` opens a QMP socket when `QEMU_QMP` names one, and `scripts/test_usb.py` drives the boot at the guest's `USB-TEST:` lines: it deletes and re-adds devices through `device_del` and `device_add`, each stick a `-blockdev` node so it survives its device, and injects keys, buttons and motion through `input-send-event`, naming `video0` for a USB keyboard or the tablet and nothing for the i8042 or the newest usb-mouse. The guest half is kernel tests registered `FLAG_EXPLICIT | FLAG_UNCAPTURED`, which the recipe names in `tests.run`, and the explicit userland tests `usb_disk_test` and `usb_shell_test`; they hold both controllers running, every device enumerated, each 1 MiB stick bound by the `test-hooks` driver `usb-test`, which sends TEST UNIT READY over its bulk pipes, stalls its bulk-in with a stray read and sends TEST UNIT READY again once the endpoint has recovered and the stick's halt is cleared, every keyboard, tablet and mouse tried first by `usb-test-hid`, which abandons a read of its idle interrupt endpoint, waits for the endpoint to come back idle and declines, and bound by `usb-hid`; every posted report, abandoned as a halt leaves it, to being posted again by recovery; a held USB key to repeating and the i8042's second press of a held key to being a repeat; Caps Lock on a USB keyboard to lighting both USB keyboards and the i8042; Alt+PrintScreen and a command key to running the command; the tablet, a USB mouse and the PS/2 mouse to moving one cursor, and a button to staying down while either the tablet or a mouse holds it; a keyboard pulled with Shift held to leaving nothing shifted unless the i8042 still holds it; every device to leaving and returning twice with no slot, claim or page left behind, the ext4 stick `sda` each time; the ext4 stick mounted, written and fsynced, then pulled under a writer that fsyncs in a loop and is refused within a minute, the mount answering `EROFS` to a create, a mkdir and a write, a read of a block never cached failing within ten seconds, `umount` releasing it, and plugged back as `sda` holding what was fsynced; the read-only drive answering `BLKROGET` with 1 and mounting read-only; each controller to interrupting for its pulls and its plugs; the dynamic MMIO registry to eight free ranges; the kconsole listing to running; a shell on the console to running what the host types on a USB keyboard; and last, as a kernel test that runs in the userland phase, each shutdown hook to leaving its controller halted, reset (DCBAAP cleared) and off the bus. The host holds the log to the same, to every device enumerated and removed as often as it was plugged and pulled, to the listing's lines, to QEMU's `ps2_set_ledstate` trace showing Caps Lock, to no enumeration failing, to neither controller answering its first command only when polled, to the ext4 stick named `sda` and the drive `sdb` each time they were plugged, the stick's image to `check_fs_image.sh` and to holding the guest's fsynced file, and the suite to green. In CI after `test-rude-exit`.
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext4 volume, attach it as `nvme0n3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
 - `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 6G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
 - `just test-install` — the install check: boot from `builddir/boot-disk.img`, one disk in the bare-metal layout (an ESP holding Limine and `limine.conf` under `\EFI\SlopOS\` and at the removable-media path, the boot partition with a kernel and base per slot under `/boot/<slot>/`, the tests image as the root partition every slot boots with as `root=PARTUUID=`, and the crash partition), and across the resets of one QEMU let `install_test` register SlopOS's firmware entry first in `BootOrder`, clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot` and through that entry, commit it as `LoaderEntryDefault`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default, through the entry again, and find the panic's record moved from the crash partition to `/var/log/crash/` and reported by `bootctl status` as that slot's last boot; then the same for a slot that takes the format-free abort. The host then holds the ESP to the bytes it built, so no commit touched `limine.conf`, and the root partition to `e2fsck -fn` and to being at rest. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
-- `just test-installer` — the installer check: the tests system on a USB stick (`INSTALL_STICK`, `qemu-xhci`), its install medium carrying the payload, on the pinned NV-varstore OVMF with the varstore kept from one QEMU run to the next (`OVMF_VARS_FILE`) but for the reinstall's, which starts afresh as a person picking the stick from the firmware's menu does, and one NVMe disk without the suite's own (`QEMU_TEST_DISKS=0`), one of three `scripts/make_installer_disk.sh` makes: a blank one, erased; another system's, holding an ESP with `\EFI\other\`, a data partition and the firmware entry `installer_test` gives it, which SlopOS goes beside in free space; and one whose partition is reused as the root. `installer_test` runs `/bin/installer`, for the blank disk as a person does — typed at `/bin/shell`, which must hand it its grant, its questions answered on standard input — and for the others with flags; booted from the disk with the stick gone, through SlopOS's own firmware entry (`BootCurrent`), it takes the loop once — `scripts/selfhost.sh install tests`, a boot of slot b and `bootctl commit` — after holding the other system's entry to `BootOrder` and Limine's menu. The blank disk then takes a reinstall from the stick that keeps its root, with a file left in it, and a boot that finds the file and the old slots' state gone. The host holds each table to `sfdisk --verify`, each FAT volume to `fsck.fat -n`, each root to `e2fsck -fn`, to being at rest and to sealed base mount points, the other system's entries, partition and files to their bytes, and a reused root to a new PARTUUID. `INSTALLER_PAYLOAD=0` installs without the toolchain, cloning a slot where it would build one, and needs no `just toolchain`; `just test-installer foreign` runs one disk.
+- `just test-installer` — the installer check: the tests system on a USB stick (`INSTALL_STICK`, `qemu-xhci`), which the kernel reads as `sda` and the installer never offers — write-protected but for the blank disk's install, which takes a writable copy that only its GPT disk GUID excludes and that the host holds to the ISO's bytes afterwards — its install medium carrying the payload, on the pinned NV-varstore OVMF with the varstore kept from one QEMU run to the next (`OVMF_VARS_FILE`) but for the reinstall's, which starts afresh as a person picking the stick from the firmware's menu does, and one NVMe disk without the suite's own (`QEMU_TEST_DISKS=0`), one of three `scripts/make_installer_disk.sh` makes: a blank one, erased; another system's, holding an ESP with `\EFI\other\`, a data partition and the firmware entry `installer_test` gives it, which SlopOS goes beside in free space; and one whose partition is reused as the root. `installer_test` runs `/bin/installer`, for the blank disk as a person does — typed at `/bin/shell`, which must hand it its grant, its questions answered on standard input — and for the others with flags; booted from the disk with the stick gone, through SlopOS's own firmware entry (`BootCurrent`), it takes the loop once — `scripts/selfhost.sh install tests`, a boot of slot b and `bootctl commit` — after holding the other system's entry to `BootOrder` and Limine's menu. The blank disk then takes a reinstall from the stick that keeps its root, with a file left in it, and a boot that finds the file and the old slots' state gone. The host holds each table to `sfdisk --verify`, each FAT volume to `fsck.fat -n`, each root to `e2fsck -fn`, to being at rest and to sealed base mount points, the other system's entries, partition and files to their bytes, and a reused root to a new PARTUUID. `INSTALLER_PAYLOAD=0` installs without the toolchain, cloning a slot where it would build one, and needs no `just toolchain`; `just test-installer foreign` runs one disk.
 - `just test-remote` — the remote-control check: an installed machine under QEMU, a boot disk whose slots hold a base paired with a broker on this host's loopback (SLIRP's 10.0.2.2), and a root carrying a decoy pairing under `/etc/remote` for a second, live broker; driven through `scripts/remote.py`: the agent's identity and build tags; commands' stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; an 8 MiB file pushed and pulled back byte-identical; `/dev/kmsg`; the base's pairing unwritable and the decoy never dialled; a second daemon, preferred as the newest; an install into the spare slot, the boot into it and its commit; and `/bin/halt`, which must end QEMU.
 - `just test-install-guest` — the two loops in one QEMU: a clean tree, `just toolchain` and the self-hosting root; slot a is the optimized tests kernel, and `install_test`, finding a workspace at `/src/slopos`, fetches the host's `HEAD` into its clone, checks it out and runs `scripts/selfhost.sh install tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is otherwise unset — which builds the tests kernel, userland and base and installs the kernel and base into slot b, then checks the tree's own branch out again; the run boots them once, and that boot must report the tag in `uname -v` and in the base's `/usr/share/slopos/build-tag`. The kernel the guest built then commits a change on the fetched `HEAD` in a scratch clone and pushes it into a scratch repository, which the host fetches and holds to that commit's parent being `HEAD`. The run then commits and rolls back as `test-install` does, and the host holds slot b's kernel and base to the root's `kernel-tests.elf` and `initramfs-tests.cpio` byte for byte, and the boot log's `BOOT: base` line to the base's size. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
 - `just test-selfhost` — the self-hosting check: needs `just toolchain` and a clean working tree (the host grades the guest's build of `HEAD` with its own gates and tests). The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), fetches the host's `HEAD` into the self-hosting root's clone and checks it out — refusing a tree with uncommitted edits — builds the dev and tests systems — kernel, userland and base — with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the clone's `builddir/target/cargo-timings`, and checks the tree's own branch out again; the host holds the commit the guest names to `HEAD`, the root to `e2fsck -fn` and to being at rest, exports both kernels and the tests base, runs the ELF gates on the kernels and runs the suite on the guest's tests kernel and base. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
@@ -1367,7 +1420,7 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `tests.warn_ms` | integer | mark slower tests as `OVER_TIME` |
 | `tests.run` | comma-separated globs | only run matching tests |
 | `tests.skip` | comma-separated globs | skip matching tests |
-| `root` | `auto` / `initramfs` / `disk` / a device | which filesystem `/` is. `auto` prefers a writable `disk0` and falls back to the initramfs; `initramfs` mounts no disk a `mount=` does not name; a device is any mount-source spelling — `nvme0n1p2`, `/dev/vda`, `PARTUUID=`, `UUID=`, `LABEL=`; an absent device or partition degrades to the initramfs with a klog line |
+| `root` | `auto` / `initramfs` / `disk` / a device | which filesystem `/` is. `auto` prefers a writable `disk0`, the first disk that is not a USB disk, and falls back to the initramfs; `initramfs` mounts no disk a `mount=` does not name; a device is any mount-source spelling — `nvme0n1p2`, `/dev/vda`, `PARTUUID=`, `UUID=`, `LABEL=`; an absent device or partition degrades to the initramfs with a klog line |
 | `mount` | `<device>:/<path>` / `LABEL=<label>:/<path>`, repeatable | mount an ext2/3/4 volume read-write after the root is up, in cmdline order; the source takes every spelling `mount(2)` accepts. A failure is one klog line and the boot goes on |
 | `lockdep` | `off` / `warn` / `panic` | lock-order validator policy; default `panic` |
 | `verity` | `require` | the root disk must mount with a verity trailer or the `fs init` boot step fails; no disk at all still passes |
@@ -1387,6 +1440,7 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `panic` | `reboot` | a kernel panic resets the machine (ACPI, then `0xCF9`, then the keyboard controller; the format-free abort triple-faults) instead of halting it: how a boot slot that panics falls back to the loader's default. The crash record is written first; on bare metal a panic's screen stays up for ten seconds before the reset, under a hypervisor not at all |
 | `panic.boot` | `on` / `abort` | panic as soon as boot initialisation completes, or take the format-free abort a lockup takes — the broken slots `just test-install` rolls back from |
 | `usb` | `on` / `off` / `report` | `on` (default) takes every xHCI controller it can drive from the firmware and runs it; `off` binds none, touching nothing; `report` logs each controller's capabilities, protocols and ports and leaves it to the firmware |
+| `usb.settle_ms` | integer | how long a USB disk's LUN may stay not ready at probe, and how long boot waits for USB to settle when the device `root=` or a `mount=` names is absent; default 5000 |
 
 `lockdep=warn` reports each distinct finding once (deduped per class pair) and
 keeps booting, so one boot enumerates every ordering finding in the tree instead

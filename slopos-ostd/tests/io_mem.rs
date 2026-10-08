@@ -243,6 +243,23 @@ fn dynamic_range_register_then_reserve() {
 }
 
 #[test]
+fn dynamic_range_inside_an_entry_takes_no_slot() {
+    let _g = setup();
+    let base = PhysAddr::new(REGION_BASE + (REGION_SIZE as u64) * 4);
+    let range = |offset: u64, len: usize| PhysRange {
+        base: PhysAddr::new(base.as_u64() + offset),
+        len,
+    };
+    register_io_mem_range(range(0, 4 * PAGE_SIZE)).expect("register");
+    let free = io_mem::io_mem_ranges_free();
+    register_io_mem_range(range(0, 4 * PAGE_SIZE)).expect("the same range");
+    register_io_mem_range(range(PAGE_SIZE as u64, PAGE_SIZE)).expect("a range inside it");
+    assert_eq!(io_mem::io_mem_ranges_free(), free);
+    register_io_mem_range(range(3 * PAGE_SIZE as u64, 2 * PAGE_SIZE)).expect("one past its end");
+    assert_eq!(io_mem::io_mem_ranges_free(), free - 1);
+}
+
+#[test]
 fn dynamic_range_outside_static_and_dynamic_rejected() {
     let _g = setup();
     // Outside both the static slice and the range the companion

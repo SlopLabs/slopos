@@ -131,33 +131,48 @@ pub struct Header {
     array_crc: u32,
 }
 
+/// The disk GUID of the header copy `block` holds, read from `lba`, whatever
+/// array it names: a table [`Header::parse`] will not stage, as xorriso lays
+/// one out for an ISO, still identifies its disk.
+pub fn disk_guid(block: &[u8], lba: u64, geometry: Geometry) -> Result<Guid, Reject> {
+    sealed(block, lba, geometry)?;
+    Ok(guid_at(block, 56))
+}
+
+/// The checks a header copy answers for itself: its signature, revision,
+/// size, CRC and location.
+fn sealed(block: &[u8], lba: u64, geometry: Geometry) -> Result<(), Reject> {
+    if block.len() < HEADER_MIN as usize || &block[..8] != SIGNATURE {
+        return Err(Reject::Absent);
+    }
+    if le_u32(block, 8) >> 16 != 1 {
+        return Err(Reject::Unsupported);
+    }
+    let header_size = le_u32(block, 12) as usize;
+    if !(HEADER_MIN as usize..=block.len()).contains(&header_size)
+        || header_size as u64 > geometry.block
+    {
+        return Err(Reject::Corrupt);
+    }
+    // §5.3.2: the CRC covers `HeaderSize` bytes with its own field zero.
+    let mut state = crc32::feed(crc32::INIT, &block[..16]);
+    state = crc32::feed(state, &[0; 4]);
+    state = crc32::feed(state, &block[20..header_size]);
+    if crc32::finish(state) != le_u32(block, 16) {
+        return Err(Reject::Corrupt);
+    }
+    // A copy that disagrees about where it lives is the other copy, and its
+    // array pointer cannot be trusted either.
+    if le_u64(block, 24) != lba {
+        return Err(Reject::Corrupt);
+    }
+    Ok(())
+}
+
 impl Header {
     /// Validate the copy `block` holds, read from `lba`.
     pub fn parse(block: &[u8], lba: u64, geometry: Geometry) -> Result<Header, Reject> {
-        if block.len() < HEADER_MIN as usize || &block[..8] != SIGNATURE {
-            return Err(Reject::Absent);
-        }
-        if le_u32(block, 8) >> 16 != 1 {
-            return Err(Reject::Unsupported);
-        }
-        let header_size = le_u32(block, 12) as usize;
-        if !(HEADER_MIN as usize..=block.len()).contains(&header_size)
-            || header_size as u64 > geometry.block
-        {
-            return Err(Reject::Corrupt);
-        }
-        // §5.3.2: the CRC covers `HeaderSize` bytes with its own field zero.
-        let mut state = crc32::feed(crc32::INIT, &block[..16]);
-        state = crc32::feed(state, &[0; 4]);
-        state = crc32::feed(state, &block[20..header_size]);
-        if crc32::finish(state) != le_u32(block, 16) {
-            return Err(Reject::Corrupt);
-        }
-        // A copy that disagrees about where it lives is the other copy, and
-        // its array pointer cannot be trusted either.
-        if le_u64(block, 24) != lba {
-            return Err(Reject::Corrupt);
-        }
+        sealed(block, lba, geometry)?;
         let header = Header {
             geometry,
             my_lba: lba,

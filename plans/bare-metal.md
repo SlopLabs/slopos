@@ -38,7 +38,8 @@ its firmware entry, `cachyos`, is the only one.
   laptop's two controllers, which takes each controller from the firmware,
   enumerates the devices on its ports and behind its hubs, binds USB
   keyboards and pointers beside the i8042 keyboard and the touchpad, and
-  resets it at poweroff.
+  resets it at poweroff. It serves sticks as `sd` disks, flushed before that
+  reset, which only QEMU has graded so far.
 - Every volume is ext4 in one profile, with a jbd2 journal that e2fsck
   replays.
 - The boot chain shares a disk: Limine under `\EFI\SlopOS\`, the slots on a
@@ -335,8 +336,9 @@ agent through the remote control once the user has paired the laptop, within
 the bounds `AGENTS.md` sets for it.
 
 **`just test-installer`** uses the pinned NV-varstore OVMF, one NVMe disk, and
-the ISO attached as USB storage on `qemu-xhci`. The firmware reads the ISO and
-the kernel does not, just as with a stick. Three disks are graded:
+the ISO attached as USB storage on `qemu-xhci`. The firmware boots the ISO and
+the kernel sees it as `sda`, which the installer never offers, just as with a
+stick. Three disks are graded:
 
 - **A blank disk,** installed with erase-disk.
 - **A disk holding a foreign OS,** installed into free space. The disk has an
@@ -362,9 +364,9 @@ falls back to the committed slot, and the fallback boot finds the panic in
 ## Out of scope
 
 - **Wi-Fi.**
-- **USB beyond keyboards and pointers.** See `plans/usb-xhci.md`. It is what
-  later lets the live system read the medium from the stick instead of from
-  RAM, and what brings USB NICs.
+- **USB beyond keyboards, pointers and sticks.** See `plans/usb-xhci.md`. It
+  is what later lets the live system read the medium from the stick instead
+  of from RAM, and what brings USB NICs.
 - **Other machines' platforms:** AHCI (the laptop's SATA controller has no
   disk), VMD, more than 17 CPUs, timers without HPET, x2APIC mode, INTx, PCI
   without MCFG, other PCH GPIO blocks.
@@ -386,8 +388,8 @@ falls back to the committed slot, and the fallback boot finds the panic in
 - **One block layer, one request engine.** Every block driver registers its
   disks with `drivers/src/block` and supplies only a `QueueOps` transport; the
   request slots, their bounce pages, the timeout quarantine and the
-  abandoned-write fence are shared, and so are their tests. A USB
-  mass-storage or AHCI driver is a transport.
+  abandoned-write fence are shared, and so are their tests. USB mass storage
+  is a transport, and an AHCI driver would be one.
 - **Names:** `nvme<C>n<N>` numbers controllers in probe order and namespaces
   by NSID, not Linux's per-subsystem head instance: stable, and the same as
   Linux's on every drive with dense NSIDs.
@@ -515,8 +517,9 @@ falls back to the committed slot, and the fallback boot finds the panic in
   runs on the one-disk shape.
 - **Linux device names,** plus stable `by-partuuid`, `by-uuid` and `by-label`
   links. Probe order is not stable across machines or boots.
-- **The install payload is a Limine module** until a USB mass-storage driver
-  exists, and the install is offline: no package host.
+- **The install payload is a Limine module** until it moves to a partition of
+  the stick the kernel reads (`plans/usb-xhci.md` phase 5), and the install is
+  offline: no package host.
 - **The live ISO is always an install medium.** `just iso` puts the
   `install` module on it whether or not the payload comes, since the
   installer needs Limine for the ESP; the payload alone is the knob, and

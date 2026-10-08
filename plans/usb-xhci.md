@@ -16,19 +16,19 @@ system runs. QEMU's controllers come first, then the laptop's two
 
 ## Where it stands
 
-Phases 1, 2 and 3 have landed. The kernel takes every xHCI controller it can
+Phases 1 to 4 have landed. The kernel takes every xHCI controller it can
 drive from the firmware and runs it. It enumerates every device on its root
 ports and behind its hubs, offers each function to the drivers `usb_driver!`
-registers, and removes a device cleanly when it leaves. It resets each
-controller at poweroff. `usb-hid` binds keyboards, mice and tablets, which
-type into the TTY and the desktop and move the one cursor beside the i8042's
-and the touchpad's. No other class driver exists yet, so a stick or an
-adapter is listed and left unbound; the firmware reads a stick and the
-kernel does not. `just test-installer`
-attaches the ISO as QEMU's `usb-storage` device on `qemu-xhci`
-(`INSTALL_STICK` in `scripts/qemu_run.sh`) for the firmware alone. The install
-medium reaches the kernel only as the Limine module `install`, payload
-included. Limine loads it into RAM, and `fs/src/basefs.rs` serves it at
+registers, and removes a device cleanly when it leaves. At poweroff it
+flushes each stick and resets each controller. `usb-hid` binds keyboards,
+mice and tablets, which type into the TTY and the desktop and move the one
+cursor beside the i8042's and the touchpad's. `usb-storage` serves Bulk-Only
+sticks as `sd` disks; an adapter is listed and left unbound. `just
+test-installer` attaches the ISO as QEMU's `usb-storage` device on
+`qemu-xhci` (`INSTALL_STICK` in `scripts/qemu_run.sh`), which the kernel
+sees as `sda` and the installer never offers. The install medium still
+reaches the kernel only as the Limine module `install`, payload included.
+Limine loads it into RAM, and `fs/src/basefs.rs` serves it at
 `/media/install` for the whole boot.
 
 The pieces USB plugs into exist. These are their gaps:
@@ -50,19 +50,20 @@ The pieces USB plugs into exist. These are their gaps:
   test as a user, and nothing asks for pages below 4 GiB. No IOMMU
   translates: boot registers the identity mapper.
 - **Disks.** Every disk is an `EngineDisk` over the request engine's
-  `QueueOps`. It is registered with `block::register_disk` and named by
-  `DiskName::virtio` or `DiskName::nvme`. `disk0`, the disk `root=auto`
-  mounts, is the first disk registered, and NVMe and virtio register theirs
-  inside probe. No disk is ever unregistered, and a block claim is released
-  by the disk's name. No disk reports write protection, so `BLKROGET`
-  answers 0 everywhere. A request waits a fixed 250 ms for a free slot,
-  three times, before it fails as `Busy`.
+  `QueueOps`, a stick's being the Bulk-Only transport. `disk0`, the disk
+  `root=auto` mounts, is the first disk registered that is not a USB disk. A
+  USB disk is unregistered when it leaves, a block claim names its disk's
+  generation, and a disk reports write protection. xorriso gives the ISO's
+  GPT 176 entries, past `gpt::MAX_ENTRIES` (128), so neither the kernel's
+  partition probe nor `boot-core`'s reader stages that table: a stick
+  flashed with the ISO shows no partitions, and only its disk GUID is read.
 - **Network.** A NIC is a `NetDevice` handed to `nic::publish`.
   `nic::retire` tears one down, and a test grades it, but it exists only
   under `test-hooks`. Both NIC drivers are singletons.
-- **Tests.** `just test` attaches no USB controller. `just test-usb`
-  enumerates sticks, a hub and HID devices, plugs and pulls them through
-  QMP and injects keys and motion. CI's QEMU is the runner distribution's,
+- **Tests.** `just test` attaches a `qemu-xhci` with a scratch stick, `sda`.
+  `just test-usb` enumerates sticks, a hub and HID devices, plugs and pulls
+  them through QMP, injects keys and motion, and mounts and pulls an ext4
+  stick. CI's QEMU is the runner distribution's,
   so a USB test uses only devices and QMP commands that version carries.
 
 The laptop has two controllers. The PCH xHCI `8086:51ed` sits at `00:14.0`
@@ -85,7 +86,7 @@ untrusted input, and each rewrites the `AGENTS.md` and
 | 1. The host controller (done) | — | both QEMU xHCI models running, every root port's attach and detach logged, the controller reset at poweroff |
 | 2. Enumeration and the device model (done) | 1 | every device QEMU attaches, a hub's included, enumerated, bound or listed, and removed cleanly |
 | 3. Keyboards and pointers (done) | 2 | a USB keyboard and tablet drive the shell and the desktop beside PS/2 |
-| 4. Mass storage | 2 | an ext4 stick mounted, written, pulled and plugged back; the installer still installs with its stick visible |
+| 4. Mass storage (done) | 2 | an ext4 stick mounted, written, pulled and plugged back; the installer still installs with its stick visible |
 | 5. The install medium on a stick | 4 | **milestone:** the installer takes the toolchain from the stick, not from RAM |
 | 6. USB networking | 2 | a CDC Ethernet adapter takes a DHCP lease and leaves cleanly |
 
@@ -206,116 +207,68 @@ Built:
 **On the laptop (not yet run),** an external keyboard and mouse work beside
 the internal keyboard and touchpad.
 
-### Phase 4: Mass storage
+### Phase 4: Mass storage (done)
 
-- **The storage part of `usb-core`:** Bulk-Only Transport's Command Block
-  Wrapper (CBW) and Command Status Wrapper (CSW) with their validity and
-  meaning rules, SCSI command builders, fixed-format sense data, READ
-  CAPACITY (10) and (16), and the WP bit of the mode parameter header.
-- **`usb-storage`, a `UsbBus` driver.** It binds class `0x08`, subclass
-  `0x06`, protocol `0x50`, and a USB Attached SCSI (UAS) device's Bulk-Only
-  alternate setting.
-  - It sends `GET MAX LUN`, and takes a STALL as a single LUN.
-  - For each LUN it sends INQUIRY, then TEST UNIT READY until the LUN is
-    ready or `usb.settle_ms` has passed since the LUN was probed, then READ
-    CAPACITY, and MODE SENSE for write protection. A LUN that is still not
-    ready is declined with a log line.
-  - It is a `QueueOps` transport, with one engine per device; `nsid` is the
-    LUN. The engine has two slots: one command on the wire and one queued
-    behind it, so the engine suite's concurrent submissions hold. The queue
-    is the transport's own, behind its own lock. `submit` appends to it and
-    returns the tag. The bulk pipes carry one CBW, data stage and CSW at a
-    time, and the drain starts the queued command when a CSW completes.
-  - `pop` never touches the event ring. It returns only what the drain has
-    already put in the transport's completion queue.
-  - `Engine::init` takes the slot wait, which is a fixed 250 ms today.
-    `usb-storage` sets it to cover the command ahead plus its recovery, so
-    a request queued behind a slow, healthy command is not answered `Busy`,
-    which ext4 would count as a device error.
-  - Reads and writes use READ/WRITE (10), and (16) past 2³² blocks.
-    SYNCHRONIZE CACHE is the flush.
-  - A CSW that is not valid, a Phase Error, or a stall of bulk-OUT during
-    the CBW hands the device to the USB thread for Reset Recovery: a
-    Bulk-Only Mass Storage Reset, then `CLEAR_FEATURE(ENDPOINT_HALT)` on
-    bulk-IN and on bulk-OUT, and `CLEAR_TT_BUFFER` to the transaction
-    translator a full-speed stick behind a high-speed hub is reached through
-    (USB 2.0 §11.24.2.3). If that fails, recovery escalates to a port
-    reset and re-enumeration. During recovery the transport keeps the tag,
-    queues new commands rather than answering `Busy`, and re-issues the
-    CBW once. A recovery that fails completes the tag with a non-retryable
-    error.
-  - A stalled data stage is cleared and the CSW is then read. A CSW that
-    reports Command Failed is followed by REQUEST SENSE, and the sense key
-    decides: UNIT ATTENTION and NOT READY are retried, while MEDIUM ERROR,
-    DATA PROTECT and ILLEGAL REQUEST fail the request.
-  - The host side of a halt is cleared too. A pipe the controller reports
-    Halted takes Reset Endpoint first. After each
-    `CLEAR_FEATURE(ENDPOINT_HALT)`, which resets the device's data toggle
-    or sequence number, a Configure Endpoint that drops and adds the pipe
-    resets the controller's. Set TR Dequeue Pointer then skips the failed
-    command. Without that reset, the first packet after recovery carries a
-    stale toggle and the device discards it.
-  - Every command has a USB-side deadline, counted from its CBW. The USB
-    thread ends a command past it: Stop Endpoint on both bulk pipes, the
-    recovery above, and Set TR Dequeue Pointer past the command. The
-    engine's timeout covers both slots' commands, each with one recovery
-    and one re-issue, so the engine quarantines a Bulk-Only request only
-    when a kill outlasts `UNINTERRUPTIBLE_MAX_MS`. The transport then
-    completes the quarantined tag when its CSW or recovery ends, which
-    returns its pages and lifts the abandoned-write fence.
-- **Block layer changes.**
-  - `DiskName::scsi` names USB disks `sda`, `sdb` and so on, reusing the
-    lowest free letter. Partitions are `sda1`.
-  - `block::unregister_disk` removes a disk.
-  - Block claims carry the disk's generation.
-  - `EngineDisk` reports write protection, and the node view that partition
-    nodes wrap, `DiskReader`, forwards it. `BLKROGET`, the installer and
-    ext4's read-only verdict all see it.
-  - `root=auto` and `root=disk` resolve to the first disk that is not a USB
-    disk.
-  - `fs init` and `cmdline mounts` wait for USB to settle when the device
-    `root=` or a `mount=` names is absent. The crash store never waits.
-- **The shutdown hook** gains the storage drain in front of the halt
-  (Decided).
-- **The installer never offers its own medium.** The ISO is built with a
-  GPT disk GUID chosen for that build, through xorriso's `--gpt_disk_guid`
-  (checked with `--protective-msdos-label`, which `scripts/build_iso.sh`
-  passes), and the `install` module records it. `/bin/installer` never
-  offers a disk whose GPT disk GUID is the medium's, nor a write-protected
-  disk, and `installer_test` picks its target with the same filter. One
-  `test-installer` run attaches the stick writable, so that the GUID rule
-  is the one that excludes it.
-- **The default test lane.** `qemu-xhci` joins `just test` at a fixed PCI
-  address after the suite's NVMe and virtio devices, with a scratch stick.
-  The phase measures how many of the dynamic MMIO ranges `just test` leaves
-  free: each controller takes up to three, BAR0, the MSI-X table and the
-  PBA. If fewer than eight are left, `register_io_mem_range` stops appending
-  a range an existing entry already contains.
-  The stick is a fourth arm of `on_scratch!`. `msix_tests` picks its device
-  by identity rather than by enumeration order.
+Built:
 
-**Done when** all of these hold:
+- **`usb-core::storage`**: the Bulk-Only wrappers with their validity and
+  meaning rules, `GET MAX LUN` and the Bulk-Only reset; TEST UNIT READY,
+  REQUEST SENSE, INQUIRY, READ CAPACITY (10) and (16), MODE SENSE (6),
+  READ/WRITE (10) and (16) and SYNCHRONIZE CACHE (10); fixed- and
+  descriptor-format sense and its verdicts; and `Transport`, the state
+  machine over a `Wire` that **Decided** below describes. Host tests drive it
+  through simulated sticks on the simulated controller, whose bulk endpoints
+  keep data toggles: a stall in every stage, Phase Errors, CSWs that are not
+  valid or not meaningful, a stalled CBW, a device that never answers, a slow
+  command with another queued behind it, a full-speed stick behind a
+  high-speed hub, a refused reset, a stick pulled mid-command, and QEMU's and
+  the specification's events for a short packet inside a chained TD; every
+  parser also runs mutation loops. `usb-core` gained chained bulk TDs,
+  `CLEAR_TT_BUFFER`, Configure Endpoint's drop-and-add input context and
+  `usb.settle_ms`.
+- **`usb-storage`**, a `UsbBus` driver for class `08/06/50`, which is also a
+  UAS device's alternate setting 0. Per LUN it sends INQUIRY, TEST UNIT
+  READY for up to `usb.settle_ms` (an empty card-reader slot is declined at
+  once), READ CAPACITY and MODE SENSE, and registers a direct-access LUN of
+  512-, 1024-, 2048- or 4096-byte blocks as a disk. Each stick is an engine
+  of two slots whose `QueueOps` is the transport. Probe's own commands go
+  through the same transport and are waited for on the bind thread.
+- **`xhci::device::Stream`**, through `BoundDevice::stream`: a driver's two
+  bulk pipes, their completion sink called where the event ring is drained,
+  Reset and Stop Endpoint, the drop-and-add reconfigure, control requests on
+  EP0 and to the transaction translator's hub, and an escalation the tree
+  takes as `Failure::Recovery`, resetting the port.
+- **The block layer**: `DiskName::scsi`, `register_usb_disk` and
+  `unregister_disk`; claims and table scans keyed by the disk's generation;
+  `EngineDisk::protected`, which `DiskReader` forwards to `BLKROGET` and
+  ext4; `first_fixed_disk` for `root=auto` and `root=disk`; `fs init` and
+  `cmdline mounts` waiting for USB to settle when their device is absent; and
+  the slot wait as an `Engine::init` argument.
+- **Shutdown**: the storage drain and a polled SYNCHRONIZE CACHE ahead of
+  each controller's reset, as **Decided** states.
+- **The installer**: `build_install_medium.sh` chooses a GPT disk GUID per
+  medium and records it at `boot/disk-guid`, which `build_iso.sh` builds the
+  image with. `/bin/installer` and `installer_test` share
+  `boot_disk::not_installable`.
+- **Tests**: `just test` carries a `qemu-xhci` at `00:10.0` with an 8 MiB
+  scratch stick, `sda`, the fourth arm of `on_scratch!`, and `msix_tests`
+  picks the first QEMU NVMe by identity. Where the stick's test runs, `just
+  test` had left four of the 64 dynamic MMIO ranges free, so
+  `register_io_mem_range` takes no slot for a range an entry already
+  contains, and the test's headroom of eight holds. `just test-usb` gained a
+  high-speed ext4 stick on `qemu-xhci`'s fifth connector, pulled and plugged
+  with the rest, and `usb_disk_test`: the stick mounted, written and
+  fsynced, pulled under a writer that fsyncs in a loop and is refused within
+  a minute, `EROFS` to every
+  mutation, a read of a block never cached failing within ten seconds,
+  `umount`, and back as `sda` holding what was fsynced; and a read-only
+  drive on `nec-usb-xhci` answering `BLKROGET` with 1 and mounting
+  read-only. The host holds the stick's image to `check_fs_image.sh` and to the
+  fsynced file. `just test-installer` sees its stick as `sda`; the blank disk's
+  install takes a writable copy, which the host holds to the ISO's bytes.
 
-- the engine suite, `concurrent_requests` included, passes on `sda` beside
-  `vdb` and the NVMe scratch disks;
-- in `just test-usb`, an ext4 stick is mounted, written and fsynced, then
-  pulled while writes are in flight. The mount turns read-only: every
-  mutation answers `EROFS`, every call that reaches the device fails at
-  once rather than waiting out the engine's timeout, and `umount` releases
-  the mount. Plugged back, the stick is `sda` again and still holds what
-  was fsynced;
-- a read-only drive reports write protection and mounts read-only;
-- `nvme0n1` stays `disk0` with a stick attached;
-- `just test-installer` installs with its stick visible as `sda`.
-
-The host tests must also drive the transport through stalls, Phase Errors,
-CSWs that are not valid, a device that never answers, and a slow command
-with another queued behind it. The simulated controller tracks data
-toggles and fails a transfer whose toggle does not match, because QEMU's
-`usb-storage` does not model them.
-
-**On the laptop,** a stick is read and written on a Type-A port and on a
-Type-C port.
+**On the laptop (not yet run),** a stick is read and written on a Type-A
+port and on a Type-C port.
 
 ### Phase 5: The install medium on a stick (milestone)
 
@@ -352,7 +305,9 @@ Type-C port.
   probe reads `/media/payload/src`.
 - **The ISO's table.** A host test holds the built ISO's GPT to the kernel's
   and `boot-core`'s parsers, both of which keep the ESP and the payload
-  entries.
+  entries. Today neither stages it: xorriso writes 176 entries, past
+  `gpt::MAX_ENTRIES`, so either the bound rises (the kernel's partition
+  numbers are a `u8`) or the image is built with 128.
 - **A medium the kernel cannot read.** `qemu_run.sh` gains `INSTALL_CDROM`,
   which attaches the ISO as an `ide-cd` with `bootindex=0` beside
   `BOOT_DISK_IMG`. Today the CD drive is attached only when neither
@@ -609,6 +564,30 @@ takes a lease, and git fetches over it.
   endpoint counts its own failed steps since it last ran. Three leave it
   halted without holding up EP0 or any other endpoint. Three on EP0 remove
   the device, and its port tries it again.
+- **A driver may own its pipes.** `BoundDevice::stream` hands a driver its
+  device's two bulk pipes as a `Stream`, whose halts the tree leaves to it:
+  the tree recovers neither pipe, their completions reach the driver's
+  `StreamSink` where the event ring is drained, and the driver issues Reset
+  and Stop Endpoint, control requests on EP0 and to the hub whose transaction
+  translator reaches it, and a Configure Endpoint that drops and adds its
+  pipes. That one command resets the controller's data toggle and points
+  each pipe's dequeue at where its ring is written next, which is Set TR
+  Dequeue Pointer's work past whatever failed. A Reset Endpoint answered
+  Context State found its pipe running, which is stopped instead. A driver
+  that cannot recover its device escalates: the tree fails the device
+  (`Failure::Recovery`) and its port enumerates it again. The escalation
+  spends one of the port's three tries unless the device had been running
+  for `SERVED_MS` (a minute), so a stick that needs a reset now and then over
+  a long session keeps its port, and one that fails again at once does not.
+  A command a driver
+  issues is held to the controller's rule: one that never completes kills
+  the controller.
+- **A bulk TD spans pages.** A transfer of more than a page is one TD of
+  chained Normal TRBs, one per page and at most 32, each with
+  Interrupt-on-Short-Packet and its TD Size, and IOC on the last; a Link TRB
+  inside a TD carries the chain bit. A short packet ends the TD early: QEMU
+  posts one event for it, the specification a second at the IOC TRB, which
+  the ring takes as a stray.
 - **An abandoned transfer stops its endpoint.** A transfer whose waiter
   gave up may still be on the controller's ring, so its endpoint takes no
   transfer until the USB thread has stopped it and moved its dequeue pointer
@@ -735,10 +714,28 @@ takes a lease, and git fetches over it.
   - Recovery runs on the USB thread, because `QueueOps` runs with
     interrupts off and may not block. It escalates to a port reset, which
     QEMU's `usb-storage` needs after a direction mismatch.
-  - The quirk table starts empty. A device that fails even 120 KiB, or
-    needs any other exception, joins it once one is seen, as Linux's
-    32 KiB entries do and as a Realtek version joins `rtl8168-core`'s
-    table.
+  - There is no quirk table. The first device that fails even 120 KiB, or
+    needs any other exception, brings one, as Linux's 32 KiB entries do and
+    as a Realtek version joins `rtl8168-core`'s table.
+  - A command has 20 s from its CBW and each recovery step 5 s; a step
+    the controller has no room for yet waits for room within those 5 s. A
+    command, its recovery, its re-issue and that one's recovery are
+    `TAG_MS`. The engine's slot wait is one `TAG_MS`, so a request queued
+    behind a slow, healthy command is not answered `Busy`, which ext4 would
+    count as a device error, and its timeout two, both slots' commands.
+    NVMe and virtio-blk keep their 250 ms.
+  - Probe runs on the bind thread, which every USB driver shares. A probe
+    command that hung past its deadline fails once recovered and is not
+    sent again; one the device answered, or that a quick recovery ended, is
+    sent up to three times. A LUN whose INQUIRY goes unanswered ends the
+    scan, so a stick that hangs holds the bind thread for about one command
+    and its recovery rather than minutes per LUN.
+  - A residue on a read or write retries it rather than complete it short,
+    and so does a RECOVERED ERROR that moved less than asked. Deferred sense
+    reports an earlier command's error, so the command it answers is
+    retried.
+  - Probe gives a LUN `usb.settle_ms` to become ready, and declines at once
+    one that reports no medium.
 - **One keyboard state for the machine.** Every keyboard feeds
   `drivers/src/keyboard.rs` `(source, usage, pressed)` steps: the i8042 is
   a fixed source, a USB keyboard claims one of `MAX_KEYBOARDS`. Locks and
@@ -815,7 +812,11 @@ takes a lease, and git fetches over it.
     `mount=` did not name, and `AGENTS.md` says so when phase 5 lands.
 - **The installer never offers its own medium.** The medium's GPT disk GUID
   identifies the stick on every boot path, UEFI, BIOS or optical, with no
-  help from the loader. A write-protected disk is excluded as unwritable.
+  help from the loader. It is read from the header alone
+  (`gpt::disk_guid`), whatever array the header names. A write-protected disk
+  is excluded as unwritable, and is checked first, so `test-installer`'s
+  write-protected stick is passed over by that rule and its writable one by
+  the GUID.
   On a medium that carries a payload, the payload's block read claim makes
   the installer's table re-read on that disk fail with `EBUSY` before
   anything is written, which backstops both.

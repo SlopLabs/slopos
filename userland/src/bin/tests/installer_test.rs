@@ -37,8 +37,8 @@ use slopos_boot_core::layout::{self, ESP_TYPE, ROOT_TYPE};
 use slopos_boot_core::{device_path, load_option, variables};
 use slopos_slibc::test_harness::note;
 use slopos_userland::boot_disk::{
-    BootDisk, boot_current, boot_order, firmware_entry, open_fat, partition_node, table_of,
-    whole_disks,
+    BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, not_installable,
+    open_fat, partition_node, table_of, whole_disks,
 };
 use slopos_userland::selfhost::{selfhost, workspace};
 use slopos_userland::syscall::UserUtsname;
@@ -132,9 +132,17 @@ fn name_of(p: &Partition) -> String {
         .to_owned()
 }
 
-/// The one disk, and what kind of install it asks for.
+/// The one disk the installer would offer, and what kind of install it asks
+/// for.
 fn target() -> Result<(String, Kind, Vec<Partition>), String> {
-    let disks = whole_disks()?;
+    let medium = medium_disk_guid()?;
+    let mut disks = Vec::new();
+    for node in whole_disks()? {
+        match not_installable(&node, medium) {
+            Some(why) => println!("INSTALLER-NOT-OFFERED {node}: {why}"),
+            None => disks.push(node),
+        }
+    }
     let [disk] = disks.as_slice() else {
         return Err(format!(
             "the installer check attaches one disk, not {disks:?}"

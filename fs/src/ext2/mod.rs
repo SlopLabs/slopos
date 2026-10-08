@@ -121,7 +121,8 @@ pub enum ReadOnlyReason {
     /// caller's intent rather than a property of the image, and it outranks
     /// every reason derived from the medium.
     Requested,
-    /// A verity trailer makes the device refuse writes.
+    /// The device refuses writes: a verity trailer, or a medium that
+    /// reports write protection.
     DeviceWriteProtected,
     /// The image declares a read-only-compatible feature this implementation
     /// does not write.

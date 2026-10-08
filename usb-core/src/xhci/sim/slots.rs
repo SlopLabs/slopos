@@ -1,6 +1,7 @@
 //! The simulated controller's slot commands and doorbells, recording a
 //! driver's breaches of the context rules as violations.
 
+use super::storage::Bulk;
 use super::*;
 
 const SLOT_ADDRESSED: u8 = 2;
@@ -82,9 +83,15 @@ impl SimController {
             kind::CONFIGURE_ENDPOINT => {
                 self.configure(slot, trb.parameter & !0xf, trb.control & 1 << 9 != 0)
             }
-            kind::RESET_ENDPOINT => self.endpoint_command(slot, dci, |state| {
-                (state == endpoint_state::HALTED).then_some(endpoint_state::STOPPED)
-            }),
+            kind::RESET_ENDPOINT => {
+                let code = self.endpoint_command(slot, dci, |state| {
+                    (state == endpoint_state::HALTED).then_some(endpoint_state::STOPPED)
+                });
+                if code == CompletionCode::SUCCESS && trb.control & 1 << 9 == 0 {
+                    self.slots[usize::from(slot)].endpoints[usize::from(dci)].toggle = false;
+                }
+                code
+            }
             kind::STOP_ENDPOINT => {
                 let pending = self.slots[usize::from(slot)].endpoints[usize::from(dci)];
                 let code = self.endpoint_command(slot, dci, |state| {
@@ -290,6 +297,7 @@ impl SimController {
             kind: endpoint_type::CONTROL,
             max_packet: ep0.max_packet_size,
             pending: false,
+            toggle: false,
         };
         let mut out = context;
         out.state = SLOT_ADDRESSED;
@@ -333,6 +341,12 @@ impl SimController {
             self.violations
                 .push("Context Entries short of the last endpoint added");
         }
+        let dropped = control.drop & !0b11;
+        for dci in 2..32usize {
+            if dropped & 1 << dci != 0 {
+                self.slots[usize::from(slot)].endpoints[dci] = SimEndpoint::default();
+            }
+        }
         let in_use = self.slots[usize::from(slot)].endpoints[2..]
             .iter()
             .rposition(|e| e.state != endpoint_state::DISABLED)
@@ -356,6 +370,7 @@ impl SimController {
                 kind: ep.kind,
                 max_packet: ep.max_packet_size,
                 pending: false,
+                toggle: false,
             };
             let mut out = ep;
             out.state = endpoint_state::RUNNING;
@@ -433,11 +448,12 @@ impl SimController {
         }
     }
 
-    /// A control transfer up to its Status TRB, or one Normal TRB.
+    /// A control transfer up to its Status TRB, or Normal TRBs up to one
+    /// that does not chain.
     fn fetch(&mut self, ep: SimEndpoint, control: bool) -> Option<Fetched> {
         let (mut at, mut cycle) = (ep.dequeue, ep.cycle);
         let mut trbs = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..64 {
             let trb = self.read_trb(at);
             if trb.cycle() != cycle {
                 return None;
@@ -451,7 +467,11 @@ impl SimController {
             }
             trbs.push((at, trb));
             at += 16;
-            let done = !control || trb.kind() == kind::STATUS;
+            let done = if control {
+                trb.kind() == kind::STATUS
+            } else {
+                !trb.chains()
+            };
             if done {
                 return Some(Fetched {
                     trbs,
@@ -483,6 +503,8 @@ impl SimController {
             };
             let advance = if control {
                 self.run_control(slot, &td.trbs)
+            } else if self.is_disk(slot) {
+                self.run_bulk(slot, dci, &td.trbs)
             } else {
                 self.run_normal(slot, dci, &td.trbs)
             };
@@ -633,6 +655,95 @@ impl SimController {
             CompletionCode::SUCCESS
         };
         self.transfer_event(at, code, length - sent, slot, dci);
+        Some(true)
+    }
+
+    fn is_disk(&self, slot: u8) -> bool {
+        self.located(slot)
+            .and_then(|(root, route)| self.device_ref(root, route))
+            .is_some_and(|d| d.storage.is_some())
+    }
+
+    /// One TD on a disk's bulk pipe, its toggles held to the device's; `None`
+    /// if it halted the endpoint.
+    fn run_bulk(&mut self, slot: u8, dci: u8, trbs: &[(u64, Trb)]) -> Option<bool> {
+        let (first, _) = trbs[0];
+        let lengths: Vec<u32> = trbs.iter().map(|(_, t)| t.status & 0x1_ffff).collect();
+        let total: u32 = lengths.iter().sum();
+        let direction_in = dci % 2 == 1;
+        let mut out = Vec::new();
+        if !direction_in {
+            for ((_, trb), &length) in trbs.iter().zip(&lengths) {
+                let mut bytes = vec![0u8; length as usize];
+                self.mem.read_bytes(trb.parameter, &mut bytes);
+                out.extend_from_slice(&bytes);
+            }
+        }
+        let endpoint = self.slots[usize::from(slot)].endpoints[usize::from(dci)];
+        let now = self.now_us;
+        let located = self.located(slot);
+        let Some(device) = located.and_then(|(root, route)| self.device_mut(root, route)) else {
+            self.transfer_event(first, CompletionCode::TRANSACTION, 0, slot, dci);
+            return None;
+        };
+        if device.halted_endpoints & 1 << dci != 0 {
+            self.transfer_event(first, CompletionCode::STALL, 0, slot, dci);
+            return None;
+        }
+        if (device.toggles & 1 << dci != 0) != endpoint.toggle {
+            self.violations.push("a data toggle out of step");
+            self.transfer_event(first, CompletionCode::TRANSACTION, 0, slot, dci);
+            return None;
+        }
+        let mut halted = device.halted_endpoints;
+        let storage = device.storage.as_mut().expect("a disk");
+        let reply = if direction_in {
+            storage.bulk_in(total, now, &mut halted)
+        } else {
+            storage.bulk_out(&out, &mut halted)
+        };
+        device.halted_endpoints = halted;
+        let moved = match reply {
+            Bulk::Nak => return Some(false),
+            Bulk::Stall => {
+                self.transfer_event(first, CompletionCode::STALL, 0, slot, dci);
+                return None;
+            }
+            Bulk::Moved(bytes) if direction_in => bytes,
+            Bulk::Moved(_) => out,
+        };
+        let packet = usize::from(endpoint.max_packet.max(1));
+        let short = direction_in && moved.len() < total as usize;
+        let mut packets = moved.len().div_ceil(packet).max(1);
+        if short && !moved.is_empty() && moved.len().is_multiple_of(packet) {
+            packets += 1;
+        }
+        if packets % 2 == 1 {
+            device.toggles ^= 1 << dci;
+            self.slots[usize::from(slot)].endpoints[usize::from(dci)].toggle ^= true;
+        }
+        let mut at = 0usize;
+        for (i, ((address, trb), &length)) in trbs.iter().zip(&lengths).enumerate() {
+            let take = (moved.len() - at.min(moved.len())).min(length as usize);
+            if direction_in {
+                self.mem.write_bytes(trb.parameter, &moved[at..at + take]);
+            }
+            at += take;
+            let last = i + 1 == trbs.len();
+            if short && take < length as usize {
+                let residual = length - take as u32;
+                self.transfer_event(*address, CompletionCode::SHORT_PACKET, residual, slot, dci);
+                if self.config.second_short_event && !last {
+                    let (end, _) = trbs[trbs.len() - 1];
+                    self.transfer_event(end, CompletionCode::SHORT_PACKET, residual, slot, dci);
+                }
+                break;
+            }
+            if last {
+                self.transfer_event(*address, CompletionCode::SUCCESS, 0, slot, dci);
+            }
+        }
+        self.kick();
         Some(true)
     }
 

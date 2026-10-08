@@ -47,8 +47,12 @@
 # disk registry and the devfs node table. A boot on which an AP is slow to
 # answer its startup peaks 48 pages higher, 1761, and the wired network's
 # table of published NICs and their handles adds 4 at every AP timing (1666,
-# 1713 and 1761 on the tree before it, 1670, 1717 and 1765 on it), so 1765 is
-# the cap.
+# 1713 and 1761 on the tree before it, 1670, 1717 and 1765 on it), so 1765 was
+# the cap. The `qemu-xhci` and scratch stick `just test` attaches from USB mass
+# storage on are bound at boot: the controller's device table and rings, the
+# stick's device, transport and engine. On a host without KVM the tree before
+# it peaked at 1766 and this one at 1800, 1801, 1802 and 1802 over four boots,
+# so 1802 is the cap.
 # The kernelmeta row after the kernel tests measured 6230 and 6192 in
 # two captures once the OOM and signal tests spawned more processes, then
 # 6290, 6229 and 6283 in three once slibc gained the functions git needs, then
@@ -99,7 +103,7 @@ require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
-boot	kernelmeta	1765
+boot	kernelmeta	1802
 post-kernel-tests	commitpages	2560
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6

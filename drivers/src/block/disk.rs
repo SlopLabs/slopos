@@ -12,6 +12,7 @@ pub struct EngineDisk {
     ns: Namespace,
     capacity: u64,
     flushes: bool,
+    write_protected: bool,
 }
 
 fn total_seg_len(segs: &[&[u8]]) -> Result<usize, BlkError> {
@@ -39,7 +40,14 @@ impl EngineDisk {
             },
             capacity,
             flushes,
+            write_protected: false,
         }
+    }
+
+    /// A medium the device refuses to write.
+    pub fn protected(mut self) -> Self {
+        self.write_protected = true;
+        self
     }
 
     pub fn engine(&self) -> &KArc<Engine> {
@@ -260,6 +268,10 @@ impl BlockDevice for EngineDisk {
 
     fn logical_block_size(&self) -> u32 {
         1 << self.ns.block_shift
+    }
+
+    fn write_protected(&self) -> bool {
+        self.write_protected
     }
 
     /// Without a volatile write cache every acknowledged write is already

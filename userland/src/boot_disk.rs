@@ -168,6 +168,47 @@ pub fn table_of(node: &str) -> Option<Table> {
         })
 }
 
+/// The GPT disk GUID `node` carries, from either header copy, whether or not
+/// its table is one [`table_of`] reads.
+pub fn disk_guid_of(node: &str) -> Option<Guid> {
+    let file = File::open(node).ok()?;
+    let geometry = geometry_of(&file)?;
+    let mut sector = vec![0u8; geometry.block() as usize];
+    [gpt::PRIMARY_LBA, geometry.backup_lba()]
+        .into_iter()
+        .find_map(|lba| {
+            file.read_exact_at(&mut sector, geometry.byte_of(lba)?)
+                .ok()?;
+            gpt::disk_guid(&sector, lba, geometry).ok()
+        })
+}
+
+/// The GPT disk GUID of the medium SlopOS booted from, which the medium
+/// records; `None` when no medium is served.
+pub fn medium_disk_guid() -> Result<Option<Guid>, String> {
+    let path = format!("{}/{}", layout::MEDIUM_DIR, layout::MEDIUM_DISK_GUID);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Guid::parse(text.trim())
+            .map(Some)
+            .ok_or_else(|| format!("{path} holds no GUID")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{path}: {e}")),
+    }
+}
+
+/// Why nothing may be installed onto the whole disk `node`: it refuses
+/// writes, or it is the medium whose GPT disk GUID is `medium`.
+pub fn not_installable(node: &str, medium: Option<Guid>) -> Option<&'static str> {
+    let protected = File::open(node)
+        .ok()
+        .and_then(|file| crate::syscall::fs::read_only(file.as_raw_fd()).ok())
+        .unwrap_or(false);
+    if protected {
+        return Some("write-protected");
+    }
+    (medium.is_some() && disk_guid_of(node) == medium).then_some("the install medium")
+}
+
 /// A node's partitions, if it holds a GPT.
 fn partitions_of(node: &str) -> Option<Vec<Partition>> {
     table_of(node).map(|table| table.partitions().collect())

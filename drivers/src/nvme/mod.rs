@@ -554,8 +554,14 @@ fn start_engine(io_ring: Ring, max_transfer: usize) -> Result<KArc<Engine>, Init
     if slots == 0 {
         return Err(InitError::Unsupported("I/O queue too shallow"));
     }
-    let engine = KArc::try_init(Engine::init("nvme", slots, max_transfer, IO_TIMEOUT_MS))
-        .map_err(|_| InitError::NoMemory)?;
+    let engine = KArc::try_init(Engine::init(
+        "nvme",
+        slots,
+        max_transfer,
+        IO_TIMEOUT_MS,
+        engine::SLOT_WAIT_MS,
+    ))
+    .map_err(|_| InitError::NoMemory)?;
     if !engine.prime() {
         return Err(InitError::NoMemory);
     }

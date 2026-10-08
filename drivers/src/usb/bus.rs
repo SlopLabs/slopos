@@ -11,7 +11,10 @@ use slopos_usb_core::bus::{Candidate, Node, Path, STORE_CONFIGURATION};
 use slopos_usb_core::device::Speed;
 use slopos_usb_core::device::descriptor::{Configuration, Function, MAX_FUNCTIONS};
 
-use super::xhci::device::{Bind, BindState, Control, Device, Pipe, Posted, ReportSink, Reports};
+use super::xhci::device::{
+    Bind, BindState, Control, Device, Pipe, Posted, ReportSink, Reports, STREAM_IN, STREAM_OUT,
+    Stream,
+};
 use crate::driver_core::bound::BoundError;
 use crate::driver_core::bus::{
     BoundDevice, Bus, ClaimTable, LinearIndex, ProbeError, ProbeOutcome, Probed, Removal, probe_one,
@@ -502,6 +505,18 @@ impl<'d> BoundDevice<'d, UsbBus> {
         self.owned_endpoint(address)?;
         let reports = Reports::open(self.device()?, address, length, sink)?;
         self.keep(reports)
+    }
+
+    /// The bulk IN and OUT endpoints at `bulk_in` and `bulk_out`, driven
+    /// and recovered by the driver itself.
+    pub fn stream(&mut self, bulk_in: u8, bulk_out: u8) -> Result<KArc<Stream>, BoundError> {
+        self.owned_endpoint(bulk_in)?;
+        self.owned_endpoint(bulk_out)?;
+        let mut addresses = [0; 2];
+        addresses[STREAM_IN] = bulk_in;
+        addresses[STREAM_OUT] = bulk_out;
+        let stream = Stream::open(self.device()?, addresses)?;
+        self.keep(stream)
     }
 
     /// Control requests for a thread that may not wait on one.

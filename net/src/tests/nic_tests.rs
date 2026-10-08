@@ -760,6 +760,20 @@ fn test_nic_rx_arp_learns_only_when_targeted() -> TestResult {
     pass!()
 }
 
+/// A stack frame per reply: the test's two would not fit in one.
+#[inline(never)]
+fn inject_dhcp_reply(
+    inject: &dyn Fn(&[u8]),
+    dst_mac: MacAddr,
+    dev: DevIndex,
+    msg_type: u8,
+    lease: Option<u32>,
+) -> bool {
+    unicast_dhcp_reply(dst_mac, dev, msg_type, lease)
+        .map(|(frame, len)| inject(&frame[..len]))
+        .is_some()
+}
+
 /// RFC 2131 §4.1: a server that ignores the broadcast flag unicasts its OFFER
 /// and ACK to the address it offers, which the NIC does not hold yet. Nothing
 /// else addressed elsewhere gets in meanwhile.
@@ -785,12 +799,8 @@ fn test_nic_rx_unicast_dhcp_reply_binds_an_unaddressed_nic() -> TestResult {
     inject(&frame[..len]);
     let stray = sock.map(readable);
 
-    let offered = unicast_dhcp_reply(mock.mac, dev, MSG_OFFER, None)
-        .map(|(frame, len)| inject(&frame[..len]))
-        .is_some();
-    let acked = unicast_dhcp_reply(mock.mac, dev, MSG_ACK, Some(3600))
-        .map(|(frame, len)| inject(&frame[..len]))
-        .is_some();
+    let offered = inject_dhcp_reply(&inject, mock.mac, dev, MSG_OFFER, None);
+    let acked = inject_dhcp_reply(&inject, mock.mac, dev, MSG_ACK, Some(3600));
     let bound = iface::get_by_dev(dev)
         .is_some_and(|row| row.addrs().iter().any(|a| a.addr == Ipv4Addr(CLIENT_IP)));
 

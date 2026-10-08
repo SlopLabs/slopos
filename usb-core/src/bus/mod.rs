@@ -130,6 +130,8 @@ pub enum Failure {
     Hub,
     /// An endpoint a hub or EP0 needs stayed halted through its recoveries.
     Halted,
+    /// Its driver could not recover it.
+    Recovery,
     /// The controller handed out a slot the tree does not have.
     BadSlot(u8),
 }
@@ -230,6 +232,8 @@ pub trait Host {
     fn halted(&mut self, slot: u8) -> u32;
     /// Set TR Dequeue Pointer moved `dci`'s ring past what it held.
     fn recovered(&mut self, slot: u8, dci: u8);
+    /// A driver's recovery failed since the last asking: reset the port.
+    fn escalated(&mut self, slot: u8) -> bool;
     /// DCI bits of the endpoints whose contexts say running.
     fn running_endpoints(&mut self, slot: u8) -> u32;
     /// Refuse every submission to the slot and ring none of its doorbells.
@@ -672,4 +676,4 @@ pub fn for_each_configured_endpoint(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use slopos_boot_core::layout;
 use slopos_drivers::{block, crash};
 use slopos_fs::blockdev::BlockDevice;
-use slopos_fs::devfs::{DEV_NAME_MAX, devfs_register_crash_store};
+use slopos_fs::devfs::{DEV_NAME_MAX, devfs_register_crash_store, devfs_resolve_block_source};
 use slopos_fs::ext2_vfs::Ext2Mount;
 use slopos_fs::verity::VerityStatus;
 use slopos_fs::vfs::{
@@ -32,8 +32,8 @@ pub const ROOT_DISK: u8 = 2;
 static ROOT_MODE: AtomicU8 = AtomicU8::new(ROOT_AUTO);
 
 /// `root=<device>`: kept as spelled, since the disks it may name are probed
-/// only after the command line is read. Unset is disk0, the first disk
-/// probed.
+/// only after the command line is read. Unset is the first disk probed that
+/// is not removable.
 static ROOT_DEVICE: OnceLock<&'static str> = OnceLock::new();
 
 /// Naming a device does not force the disk root the way `root=disk` does —
@@ -295,15 +295,45 @@ fn root_ext2() -> Option<&'static Ext2Mount> {
     ROOT_EXT2.get().copied()
 }
 
-/// The device `root=` names, disk0 when it names none, claimed for writing:
-/// the window and the name of the node it claimed.
+/// A device a boot step names that is not there yet may be a USB disk the
+/// bus has still to enumerate: wait for it to settle, at most
+/// `usb.settle_ms`.
+fn await_usb(spec: &str) {
+    let mut name = [0u8; DEV_NAME_MAX];
+    if devfs_resolve_block_source(spec.as_bytes(), &mut name) != Err(VfsError::NotFound) {
+        return;
+    }
+    let bound = slopos_drivers::usb::settle_ms();
+    match slopos_drivers::usb::wait_settled(bound) {
+        slopos_drivers::usb::Settle::Settled => {}
+        slopos_drivers::usb::Settle::Unsettled => {
+            klog_info!(
+                "USB: {} absent and the bus still settling after {} ms",
+                spec,
+                bound
+            )
+        }
+        slopos_drivers::usb::Settle::OneCpu => {
+            klog_info!(
+                "USB: {} absent; with one CPU the bus is not waited for",
+                spec
+            )
+        }
+    }
+}
+
+/// The device `root=` names, else the machine's first fixed disk, claimed
+/// for writing: the window and the name of the node it claimed.
 fn claim_root(
     name: &mut [u8; DEV_NAME_MAX],
 ) -> Result<(KBox<dyn BlockDevice + Send + Sync>, usize), DiskAttachOutcome> {
-    let disk0 = block::disk_name(0);
-    let (source, named) = match (ROOT_DEVICE.get(), &disk0) {
-        (Some(spec), _) => (spec.as_bytes(), true),
-        (None, Some(disk0)) => (disk0.as_bytes(), false),
+    let fixed = block::first_fixed_disk();
+    let (source, named) = match (ROOT_DEVICE.get(), &fixed) {
+        (Some(spec), _) => {
+            await_usb(spec);
+            (spec.as_bytes(), true)
+        }
+        (None, Some(fixed)) => (fixed.as_bytes(), false),
         (None, None) => return Err(DiskAttachOutcome::NoDisk),
     };
     let shown = core::str::from_utf8(source).unwrap_or("?");
@@ -491,6 +521,7 @@ fn apply_cmdline_mount(spec: &str) {
         );
         return;
     };
+    await_usb(source);
     match slopos_core::syscall::fs::mount_handlers::mount_apply_at(
         source.as_bytes(),
         path.as_bytes(),

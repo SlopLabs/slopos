@@ -392,9 +392,28 @@ require-phase post-userland-tests
 #               maximum. Every banded pool stayed inside its band (kernel
 #               edges 175, chains 410; userland edges 225, chains 474), and
 #               boot's 43 edges sit at their cap.
-boot	classes	79
-post-kernel-tests	classes	222
-post-userland-tests	classes	233
+#   2026-10-08  boot 79 -> 95, kernel 222 -> 238, userland 233 -> 249; boot
+#               edges 43 -> 59 and chains 120 -> 156; the test phases' bands
+#               moved: USB mass storage (`plans/usb-xhci.md` phase 4). `just
+#               test` now attaches a `qemu-xhci` with a scratch stick that
+#               `usb-storage` binds at boot, so the controller's and its
+#               devices' classes (`Xhci.*`, `UsbDevice.*`, `USB.transfers`,
+#               the USB threads' stop waiters, `usb.JOBS`, `usb.CLAIMS`),
+#               which only `just test-usb` reached before, register at boot,
+#               beside the five the phase adds: `UsbDevice.sinks` and
+#               `usb-storage.transport`, `.STICKS`, `.disks` and `.pause`.
+#               Two full captures count 238 and 249 on each; three boots
+#               count 95, 95 and 94 classes, 58, 59 and 54 edges and 155, 156
+#               and 149 chains, so each boot cap takes the maximum. The
+#               engine suite's fourth arm runs on the stick, so the test
+#               phases observe orderings they did not: kernel edges 193 and
+#               198, chains 444 and 452; userland edges 245 and 243, chains
+#               511 and 512. Two runs measure no spread, so each band takes
+#               those values widened by the spread the table below recorded
+#               for that pool, on each side.
+boot	classes	95
+post-kernel-tests	classes	238
+post-userland-tests	classes	249
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
@@ -402,18 +421,21 @@ post-userland-tests	classes	233
 # measurement. The one extra chain over the 110 recorded in prose is a new
 # ordering among locks that already existed, not a new lock: boot's class
 # count did not move.
-boot	edges	43
-boot	chains	120
+boot	edges	59
+boot	chains	156
 
 # Bands, for the two phases whose edge and chain counts move with scheduling.
 # Each band is the recorded range widened by that range's own width on each
 # side, so a band is three times as wide as the spread it was measured over and
 # a re-measurement that finds a wider spread widens the band with it.
 #
-#   post-kernel-tests    edges   148-168  (spread 20)  ->  128-188
-#   post-userland-tests  edges   196-207  (spread 11)  ->  185-218
-#   post-kernel-tests    chains  345-381  (spread 36)  ->  309-417
-#   post-userland-tests  chains  395-431  (spread 36)  ->  359-467
+#   post-kernel-tests    edges   193-198  (spread 20)  ->  173-218
+#   post-userland-tests  edges   243-245  (spread 11)  ->  232-256
+#   post-kernel-tests    chains  444-452  (spread 36)  ->  408-488
+#   post-userland-tests  chains  511-512  (spread 36)  ->  475-548
+#
+# The spreads are those measured before phase 4 of `plans/usb-xhci.md`; the
+# ranges are its two captures, as the 2026-10-08 entry above records.
 #
 # Each recorded range is the union of the measurements this file already
 # carried, not one sitting: the 24-run set taken when the sleep queue moved
@@ -428,7 +450,7 @@ boot	chains	120
 # have moved had any of them been a real ordering change. Leaving a band is
 # not a failure, so a band set slightly tight costs a DRIFT line to read,
 # never a red run.
-band post-kernel-tests edges 128 188
-band post-userland-tests edges 185 248
-band post-kernel-tests chains 309 417
-band post-userland-tests chains 359 495
+band post-kernel-tests edges 173 218
+band post-userland-tests edges 232 256
+band post-kernel-tests chains 408 488
+band post-userland-tests chains 475 548

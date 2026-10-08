@@ -96,7 +96,7 @@ impl<P: DmaPage> ProducerRing<P> {
         }
         let index = self.enqueue;
         publish(&mut self.page, index, trb.with_cycle(self.cycle));
-        self.advance();
+        self.advance(trb.chains());
         Some(self.address(index))
     }
 
@@ -114,21 +114,24 @@ impl<P: DmaPage> ProducerRing<P> {
         }
         let first = self.enqueue;
         let cycle = self.cycle;
-        self.advance();
+        self.advance(head.chains());
         let mut last = first;
         for &trb in rest {
             last = self.enqueue;
             publish(&mut self.page, last, trb.with_cycle(self.cycle));
-            self.advance();
+            self.advance(trb.chains());
         }
         publish(&mut self.page, first, head.with_cycle(cycle));
         Some((first, last))
     }
 
-    fn advance(&mut self) {
+    /// `chain` when the TRB just written continues its TD past the link.
+    fn advance(&mut self, chain: bool) {
         self.enqueue += 1;
         if self.enqueue == LINK {
-            let link = Trb::link(self.page.phys()).with_cycle(self.cycle);
+            let link = Trb::link(self.page.phys())
+                .with_chain(chain)
+                .with_cycle(self.cycle);
             publish(&mut self.page, LINK, link);
             self.cycle = !self.cycle;
             self.enqueue = 0;

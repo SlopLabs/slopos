@@ -180,8 +180,8 @@ static DYNAMIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Append a runtime-discovered insensitive range to the dynamic secondary
 /// registry, for MMIO whose physical address firmware only reveals during boot
 /// (HPET, IOAPIC, PCI ECAM, device BARs, framebuffer). Append-only, with no
-/// deregistration path; re-registering the same range is harmless because
-/// `reserve` only checks containment, not exact match.
+/// deregistration path; a range an entry already contains takes no slot, so a
+/// device mapped again, by a re-probe or a test, costs nothing.
 ///
 /// Returns:
 /// - `Err(OutOfBounds)` for a zero-length range.
@@ -195,6 +195,12 @@ static DYNAMIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub fn register_io_mem_range(range: PhysRange) -> Result<(), IoMemError> {
     if range.len == 0 {
         return Err(IoMemError::OutOfBounds);
+    }
+    if dynamic_ranges_view()
+        .iter()
+        .any(|entry| entry.contains_range(range.base, range.len))
+    {
+        return Ok(());
     }
     let slot = DYNAMIC_COUNT.load(Ordering::Relaxed);
     if slot >= MAX_DYNAMIC_RANGES {

@@ -10,7 +10,8 @@ set -euo pipefail
 #   LIMINE_DIR      - path to Limine directory (default: third_party/limine)
 #   INITRAMFS_FILE  - the base, loaded as the module `initramfs`
 #   INSTALL_ARCHIVE - the install medium's archive (scripts/build_install_medium.sh),
-#                     loaded as the module `install` the installer reads
+#                     loaded as the module `install` the installer reads; the
+#                     image takes the GPT disk GUID it records
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -73,6 +74,7 @@ if [ -n "${INITRAMFS_FILE:-}" ] && [ -f "${INITRAMFS_FILE}" ]; then
     printf '    module_path: boot():/boot/initramfs.cpio\n' >> "$ISO_ROOT/boot/limine.conf"
     printf '    module_string: initramfs\n' >> "$ISO_ROOT/boot/limine.conf"
 fi
+GPT_ARGS=()
 if [ -n "${INSTALL_ARCHIVE:-}" ]; then
     [ -f "$INSTALL_ARCHIVE" ] || { echo "No install archive at $INSTALL_ARCHIVE" >&2; exit 1; }
     . "$SCRIPT_DIR/lib/bootdisk.sh"
@@ -81,6 +83,9 @@ if [ -n "${INSTALL_ARCHIVE:-}" ]; then
         cp "$INSTALL_ARCHIVE" "$ISO_ROOT/boot/install.cpio"
     printf '    module_path: boot():/boot/install.cpio\n' >> "$ISO_ROOT/boot/limine.conf"
     printf '    module_string: %s\n' "$MEDIUM_MODULE" >> "$ISO_ROOT/boot/limine.conf"
+    disk_guid="$(cat "$INSTALL_ARCHIVE.disk-guid")" ||
+        { echo "No disk GUID beside $INSTALL_ARCHIVE" >&2; exit 1; }
+    GPT_ARGS=(--gpt_disk_guid "$disk_guid")
 fi
 
 cp "$LIMINE_DIR/limine-bios.sys" "$ISO_ROOT/boot/"
@@ -113,6 +118,7 @@ xorriso -as mkisofs -quiet \
     -efi-boot-part \
     --efi-boot-image \
     --protective-msdos-label \
+    ${GPT_ARGS[@]+"${GPT_ARGS[@]}"} \
     "$ISO_ROOT" \
     -o "$TMP_OUTPUT"
 

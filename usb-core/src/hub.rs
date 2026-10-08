@@ -10,6 +10,7 @@ use crate::device::request::{
 
 pub const HUB_DESCRIPTOR: u8 = 0x29;
 pub const SUPERSPEED_HUB_DESCRIPTOR: u8 = 0x2a;
+const CLEAR_TT_BUFFER: u8 = 8;
 const SET_HUB_DEPTH: u8 = 12;
 
 /// A route string holds port numbers up to 15.
@@ -138,6 +139,25 @@ pub fn clear_port_feature(port: u8, feature: u16) -> Setup {
         request: CLEAR_FEATURE,
         value: feature,
         index: port.into(),
+        length: 0,
+    }
+}
+
+pub const TT_BULK: u8 = 2;
+
+/// Drop what a transaction translator holds for the endpoint at `endpoint`
+/// of the device at `address` (USB 2.0 §11.24.2.3); `tt_port` is 1 for a hub
+/// run with one translator.
+pub fn clear_tt_buffer(address: u8, endpoint: u8, endpoint_type: u8, tt_port: u16) -> Setup {
+    let direction_in = u16::from(endpoint & 0x80 != 0);
+    Setup {
+        request_type: TYPE_CLASS | RECIPIENT_OTHER,
+        request: CLEAR_TT_BUFFER,
+        value: u16::from(endpoint & 0x0f)
+            | u16::from(address & 0x7f) << 4
+            | u16::from(endpoint_type & 3) << 11
+            | direction_in << 15,
+        index: tt_port,
         length: 0,
     }
 }

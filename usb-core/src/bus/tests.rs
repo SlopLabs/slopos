@@ -24,14 +24,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::vec;
 use std::vec::Vec;
 
-struct Slot {
-    output: SimPage,
-    input: SimPage,
-    ep0: TransferRing<SimPage>,
-    control: SimPage,
-    store: Vec<u8>,
-    rings: BTreeMap<u8, (TransferRing<SimPage>, SimPage)>,
-    gone: bool,
+pub(crate) struct Slot {
+    pub(crate) output: SimPage,
+    pub(crate) input: SimPage,
+    pub(crate) ep0: TransferRing<SimPage>,
+    pub(crate) control: SimPage,
+    pub(crate) store: Vec<u8>,
+    pub(crate) rings: BTreeMap<u8, (TransferRing<SimPage>, SimPage)>,
+    pub(crate) gone: bool,
 }
 
 impl Slot {
@@ -44,44 +44,48 @@ impl Slot {
     }
 }
 
-struct SimHost {
-    sim: SimController,
-    mem: Memory,
-    layout: Layout,
-    protocols: Protocols,
-    contexts: ContextLayout,
-    commands: CommandRing<SimPage>,
-    events: EventRing<SimPage>,
-    dcbaa: SimPage,
+pub(crate) struct SimHost {
+    pub(crate) sim: SimController,
+    pub(crate) mem: Memory,
+    pub(crate) layout: Layout,
+    pub(crate) protocols: Protocols,
+    pub(crate) contexts: ContextLayout,
+    pub(crate) commands: CommandRing<SimPage>,
+    pub(crate) events: EventRing<SimPage>,
+    pub(crate) dcbaa: SimPage,
     _table: SimPage,
-    slots: BTreeMap<u8, Slot>,
-    changes: BTreeSet<u8>,
-    reports: Vec<Report>,
-    wants: fn(&Candidate) -> bool,
-    offered: BTreeSet<u8>,
-    ever_offered: Vec<u8>,
-    unbound: Vec<u8>,
-    destroyed: Vec<u8>,
+    pub(crate) slots: BTreeMap<u8, Slot>,
+    pub(crate) changes: BTreeSet<u8>,
+    pub(crate) reports: Vec<Report>,
+    pub(crate) wants: fn(&Candidate) -> bool,
+    pub(crate) offered: BTreeSet<u8>,
+    pub(crate) ever_offered: Vec<u8>,
+    pub(crate) unbound: Vec<u8>,
+    pub(crate) destroyed: Vec<u8>,
     /// Passes the drivers take to bind or unbind a device.
-    bind_passes: u32,
+    pub(crate) bind_passes: u32,
     /// How often each slot had been disabled when its memory was made.
-    disables_at_create: BTreeMap<u8, usize>,
-    binding: BTreeMap<u8, u32>,
-    unbinding: BTreeMap<u8, u32>,
+    pub(crate) disables_at_create: BTreeMap<u8, usize>,
+    pub(crate) binding: BTreeMap<u8, u32>,
+    pub(crate) unbinding: BTreeMap<u8, u32>,
     /// A command after this many would be issued to a dead controller.
-    commands_when_dead: Option<usize>,
-    stuck: usize,
+    pub(crate) commands_when_dead: Option<usize>,
+    pub(crate) stuck: usize,
     /// Set TR Dequeue commands refused as if the ring were full.
-    busy_dequeues: u32,
+    pub(crate) busy_dequeues: u32,
     /// Events drained since the tree's last step, which the kernel's work
     /// stamp counts against a settled reading.
-    fresh_events: bool,
+    pub(crate) fresh_events: bool,
     /// What the host gets wrong, to show the simulator catches it.
-    sabotage: Sabotage,
+    pub(crate) sabotage: Sabotage,
+    /// DCI bits of endpoints a driver recovers itself.
+    pub(crate) owned: u32,
+    /// Slots whose driver's recovery failed.
+    pub(crate) escalations: BTreeSet<u8>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Sabotage {
+pub(crate) enum Sabotage {
     #[default]
     None,
     /// Address Device names no transaction translator.
@@ -105,7 +109,7 @@ fn count_down(pending: &mut BTreeMap<u8, u32>, slot: u8) -> bool {
 }
 
 impl SimHost {
-    fn new(config: Config) -> Self {
+    pub(crate) fn new(config: Config) -> Self {
         let mut sim = SimController::new(config);
         let caps = Capabilities::read(&mut sim, BAR_LEN).unwrap();
         let layout = caps.layout();
@@ -157,13 +161,15 @@ impl SimHost {
             busy_dequeues: 0,
             fresh_events: false,
             sabotage: Sabotage::None,
+            owned: 0,
+            escalations: BTreeSet::new(),
         };
         host.drain();
         host.changes.clear();
         host
     }
 
-    fn drain(&mut self) {
+    pub(crate) fn drain(&mut self) {
         let mut events = Vec::new();
         controller::drain(
             &mut self.sim,
@@ -208,7 +214,7 @@ impl SimHost {
         }
     }
 
-    fn doorbell(&mut self, slot: u8, dci: u8) {
+    pub(crate) fn doorbell(&mut self, slot: u8, dci: u8) {
         let at = self.layout.doorbell(slot);
         self.sim.write32(at, u32::from(dci));
     }
@@ -528,12 +534,17 @@ impl Host for SimHost {
             .fold(u32::from(s.ep0.is_halted()) << 1, |bits, (&dci, _)| {
                 bits | 1 << dci
             })
+            & !self.owned
     }
 
     fn recovered(&mut self, slot: u8, dci: u8) {
         if let Some(ring) = self.slots.get_mut(&slot).and_then(|s| s.ring(dci)) {
             ring.recovered();
         }
+    }
+
+    fn escalated(&mut self, slot: u8) -> bool {
+        self.escalations.remove(&slot)
     }
 
     fn running_endpoints(&mut self, slot: u8) -> u32 {
@@ -595,15 +606,15 @@ impl Host for SimHost {
     }
 }
 
-struct Tables {
-    roots: Vec<Port>,
-    nodes: Vec<Node>,
-    hubs: Vec<Hub>,
-    state: State,
+pub(crate) struct Tables {
+    pub(crate) roots: Vec<Port>,
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) hubs: Vec<Hub>,
+    pub(crate) state: State,
 }
 
 impl Tables {
-    fn new(host: &SimHost) -> Self {
+    pub(crate) fn new(host: &SimHost) -> Self {
         Self {
             roots: vec![Port::default(); usize::from(host.layout.max_ports())],
             nodes: vec![Node::default(); host.sim.slots.len()],
@@ -612,7 +623,7 @@ impl Tables {
         }
     }
 
-    fn tree(&mut self) -> Tree<'_> {
+    pub(crate) fn tree(&mut self) -> Tree<'_> {
         Tree {
             roots: &mut self.roots,
             nodes: &mut self.nodes,
@@ -626,7 +637,7 @@ impl Tables {
     }
 }
 
-fn run_until(
+pub(crate) fn run_until(
     host: &mut SimHost,
     tables: &mut Tables,
     limit_ms: u64,
@@ -645,14 +656,14 @@ fn run_until(
     false
 }
 
-fn settle(host: &mut SimHost, tables: &mut Tables) {
+pub(crate) fn settle(host: &mut SimHost, tables: &mut Tables) {
     let settled = run_until(host, tables, 20_000, |host, tables| {
         !host.fresh_events && tables.tree().settled(host)
     });
     assert!(settled, "never settled: {:?}", host.reports);
 }
 
-fn no_violations(host: &SimHost) {
+pub(crate) fn no_violations(host: &SimHost) {
     assert!(host.sim.violations.is_empty(), "{:?}", host.sim.violations);
 }
 
@@ -1512,6 +1523,51 @@ fn an_endpoint_whose_clear_stalls_is_left_halted_alone() {
     let status = host.control(slot, Setup::get_status()).unwrap();
     host.drain();
     assert_eq!(host.transfer_result(slot, 1, status), Some(Ok(2)));
+    no_violations(&host);
+}
+
+#[test]
+fn a_device_whose_driver_could_not_recover_it_is_enumerated_again() {
+    let mut host = SimHost::new(Config::qemu());
+    host.sim.plug(3, SimDevice::storage(Speed::High));
+    let mut tables = Tables::new(&host);
+    settle(&mut host, &mut tables);
+    let slot = host.sim.device_at(3, &[]).unwrap().slot;
+    let resets = host.sim.port_resets;
+    host.escalations.insert(slot);
+    settle(&mut host, &mut tables);
+    assert_eq!(host.removed(), [slot]);
+    assert!(host.failures().contains(&Failure::Recovery));
+    assert!(host.sim.port_resets > resets, "its port is reset");
+    assert_eq!(host.enumerated().len(), 1);
+    assert_eq!(tables.live(), 1, "and it is back");
+    no_violations(&host);
+}
+
+#[test]
+fn escalations_spend_the_ports_tries_only_soon_after_enumeration() {
+    let mut host = SimHost::new(Config::qemu());
+    host.sim.plug(3, SimDevice::storage(Speed::High));
+    let mut tables = Tables::new(&host);
+    settle(&mut host, &mut tables);
+    let escalate = |host: &mut SimHost, tables: &mut Tables| {
+        let slot = host.sim.device_at(3, &[]).unwrap().slot;
+        host.escalations.insert(slot);
+        settle(host, tables);
+    };
+    for _ in 0..2 * port::MAX_FAILURES {
+        host.sim.advance_us(node::SERVED_MS * 1000);
+        escalate(&mut host, &mut tables);
+        assert_eq!(tables.live(), 1, "a device that served keeps its port");
+    }
+    for left in (0..port::MAX_FAILURES - 1).rev() {
+        escalate(&mut host, &mut tables);
+        assert_eq!(
+            tables.live(),
+            usize::from(left > 0),
+            "one that fails again at once spends a try"
+        );
+    }
     no_violations(&host);
 }
 

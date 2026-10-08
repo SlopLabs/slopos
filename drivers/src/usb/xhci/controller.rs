@@ -90,6 +90,7 @@ struct Took {
     /// A driver may be waiting on it.
     transfer: bool,
     report: bool,
+    stream: bool,
 }
 
 #[derive(slopos_ostd::SlotFields)]
@@ -114,9 +115,13 @@ pub struct Controller {
     port_changes: [AtomicU64; PORT_WORDS],
     /// Slots with a report completed, by number.
     reports_done: [AtomicU64; PORT_WORDS],
+    /// Slots with a stream's transfer completed, by number.
+    streams_done: [AtomicU64; PORT_WORDS],
     state: AtomicU8,
     /// What a drain found wrong, for the thread to act on.
     failure: AtomicU8,
+    /// A driver's command never completed.
+    stuck: AtomicBool,
     ring_full: AtomicBool,
     interrupts: AtomicU32,
     /// Bumped whenever the thread is left something to do.
@@ -172,21 +177,7 @@ impl Controller {
                     SpinLock::new(devices, lock_class!("Xhci.devices", LOCK_LEVEL_RESOURCE))
                 );
                 write_field!(slot, ports, ports);
-                write_field!(
-                    slot,
-                    port_changes,
-                    [const { AtomicU64::new(0) }; PORT_WORDS]
-                );
-                write_field!(
-                    slot,
-                    reports_done,
-                    [const { AtomicU64::new(0) }; PORT_WORDS]
-                );
-                write_field!(slot, state, AtomicU8::new(STARTING));
-                write_field!(slot, failure, AtomicU8::new(Health::Running as u8));
-                write_field!(slot, ring_full, AtomicBool::new(false));
-                write_field!(slot, interrupts, AtomicU32::new(0));
-                write_field!(slot, work, AtomicU64::new(0));
+                Self::install_flags(&slot);
                 write_field!(
                     slot,
                     service,
@@ -197,6 +188,31 @@ impl Controller {
                 Ok(slot.finish())
             },
         ))
+    }
+
+    #[inline(never)]
+    fn install_flags(slot: &SlotPtr<Self>) {
+        write_field!(
+            slot,
+            port_changes,
+            [const { AtomicU64::new(0) }; PORT_WORDS]
+        );
+        write_field!(
+            slot,
+            reports_done,
+            [const { AtomicU64::new(0) }; PORT_WORDS]
+        );
+        write_field!(
+            slot,
+            streams_done,
+            [const { AtomicU64::new(0) }; PORT_WORDS]
+        );
+        write_field!(slot, stuck, AtomicBool::new(false));
+        write_field!(slot, state, AtomicU8::new(STARTING));
+        write_field!(slot, failure, AtomicU8::new(Health::Running as u8));
+        write_field!(slot, ring_full, AtomicBool::new(false));
+        write_field!(slot, interrupts, AtomicU32::new(0));
+        write_field!(slot, work, AtomicU64::new(0));
     }
 
     /// The pages the controller is given, and the rings over them.
@@ -390,6 +406,7 @@ impl Controller {
                     took.work |= one.work;
                     took.transfer |= one.transfer;
                     took.report |= one.report;
+                    took.stream |= one.stream;
                 },
             )
         };
@@ -399,6 +416,9 @@ impl Controller {
         }
         if took.work {
             self.note_work();
+        }
+        if took.stream {
+            self.dispatch_streams();
         }
         if took.transfer {
             crate::usb::TRANSFERS.wake_all();
@@ -445,10 +465,14 @@ impl Controller {
                 if finished.report {
                     Self::flag(&self.reports_done, slot);
                 }
+                if finished.stream {
+                    Self::flag(&self.streams_done, slot);
+                }
                 Took {
                     work: finished.transfer && finished.tree,
-                    transfer: finished.transfer && !finished.report,
+                    transfer: finished.transfer && !finished.report && !finished.stream,
                     report: finished.report,
+                    stream: finished.stream,
                 }
             }
             Event::PortStatusChange { port } if (1..=self.caps.max_ports).contains(&port) => {
@@ -482,6 +506,25 @@ impl Controller {
     /// The lowest root port an event named, then forgotten.
     pub(super) fn take_port_change(&self) -> Option<u8> {
         Self::take_lowest(&self.port_changes)
+    }
+
+    /// Each device's streams hear of their completions under the device
+    /// table's lock, which keeps the device from being freed under them.
+    fn dispatch_streams(&self) {
+        while let Some(slot) = Self::take_lowest(&self.streams_done) {
+            let devices = self.devices.lock();
+            if let Some(device) = devices.get(usize::from(slot)).and_then(Option::as_ref) {
+                device.dispatch_streams();
+            }
+        }
+    }
+
+    /// A driver's command never completed: the thread takes the controller
+    /// for dead, as it does when one of the tree's does not.
+    pub(super) fn note_stuck(&self) {
+        self.stuck.store(true, Ordering::Release);
+        self.note_work();
+        crate::usb::wake();
     }
 
     /// Each device's reports go to its sinks under the device table's lock,
@@ -611,7 +654,9 @@ impl Controller {
                 let health =
                     Health::from_u8(self.failure.swap(Health::Running as u8, Ordering::AcqRel));
                 if health != Health::Running {
-                    self.die(health, &mut service);
+                    self.die(cause(health), &mut service);
+                } else if self.stuck.swap(false, Ordering::AcqRel) {
+                    self.die("a command never completed", &mut service);
                 }
             }
             DEAD => {}
@@ -768,8 +813,8 @@ impl Controller {
     }
 
     /// Every device goes, with no command issued.
-    fn die(&self, health: Health, service: &mut Service) {
-        if self.kill(cause(health)) {
+    fn die(&self, cause: &str, service: &mut Service) {
+        if self.kill(cause) {
             service.tree().die(&mut ControllerHost::new(self));
             crate::usb::TRANSFERS.wake_all();
         }
@@ -843,10 +888,16 @@ impl Controller {
 }
 
 impl DeviceShutdown for Controller {
-    /// Halt and reset the controller, dead or alive, and take it off the
-    /// bus, so the next firmware finds it as a reset leaves it.
+    /// Drain and flush its sticks, then halt and reset the controller, dead or
+    /// alive, and take it off the bus, so the next firmware finds it as a
+    /// reset leaves it.
     fn shutdown(&self) {
         let _service = self.service_lock();
+        if self.is_running() {
+            crate::usb::storage::shutdown(self.number, &|| {
+                self.drain();
+            });
+        }
         if self.leave(Some(RUNNING), STOPPED) || self.leave(Some(DEAD), STOPPED) {
             self.reset_off_the_bus(seq::SHUTDOWN_RESET_MS);
         }

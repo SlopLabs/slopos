@@ -8,7 +8,9 @@ set -euo pipefail
 # Usage: build_install_medium.sh <out.cpio> [<toolchain>]
 #
 # Always Limine's loader, its licence and notices, and NOTICE.md, under boot/,
-# which the installer puts on the ESP and beside the slots; and under sources/
+# which the installer puts on the ESP and beside the slots, with the GPT disk
+# GUID chosen for this medium, also left beside the archive as
+# <out.cpio>.disk-guid for scripts/build_iso.sh to build the image with; under sources/
 # the pinned tarball and recipe of each recipe the base takes programs from,
 # with the scripts that build them, the source of what the medium distributes
 # of them.
@@ -48,7 +50,7 @@ OUT_DIR="$(dirname "$OUT")"
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 STAGE="$(mktemp -d "$OUT_DIR/.medium.XXXXXX")"
-trap 'rm -rf "$STAGE"; rm -f "$OUT.tmp"' EXIT INT TERM
+trap 'rm -rf "$STAGE"; rm -f "$OUT.tmp" "$OUT.disk-guid.tmp"' EXIT INT TERM
 
 boot="$STAGE/$(dirname "$MEDIUM_LOADER")"
 mkdir -p "$boot"
@@ -56,6 +58,8 @@ cp "$LIMINE_DIR/BOOTX64.EFI" "$STAGE/$MEDIUM_LOADER"
 cp "$LIMINE_DIR/LICENSE" "$STAGE/$MEDIUM_LOADER_LICENSE"
 cp "$LIMINE_DIR/3RDPARTY.md" "$STAGE/$MEDIUM_LOADER_NOTICES"
 cp "$REPO_ROOT/NOTICE.md" "$STAGE/$MEDIUM_NOTICE"
+disk_guid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+printf '%s\n' "$disk_guid" >"$STAGE/$MEDIUM_DISK_GUID"
 trees=("$boot=$(dirname "$MEDIUM_LOADER")")
 
 . "$SCRIPT_DIR/lib/base.sh"
@@ -88,4 +92,9 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$OUT_DIR/target}"
 case "$TARGET_DIR" in /*) ;; *) TARGET_DIR="$PWD/$TARGET_DIR" ;; esac
 (cd "$REPO_ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" ${CARGO:-cargo} build --locked --release --quiet -p slopos-initramfs)
 "$TARGET_DIR/release/initramfs" tree "$OUT.tmp" "${trees[@]}"
+printf '%s\n' "$disk_guid" >"$OUT.disk-guid.tmp"
+# An archive is never left beside another build's GUID: until both are in
+# place there is none, which build_iso.sh refuses.
+rm -f "$OUT.disk-guid"
 mv "$OUT.tmp" "$OUT"
+mv "$OUT.disk-guid.tmp" "$OUT.disk-guid"

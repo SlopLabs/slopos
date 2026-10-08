@@ -17,7 +17,7 @@ set -euo pipefail
 #   QEMU_GTK_ZOOM_TO_FIT,
 #   QEMU_ENABLE_ISA_EXIT, QEMU_PCI_DEVICES,
 #   OVMF_DIR, OVMF_VARS_FILE,
-#   BOOT_DISK_IMG, INSTALL_STICK, QEMU_ALLOW_REBOOT, QEMU_TEST_DISKS,
+#   BOOT_DISK_IMG, INSTALL_STICK, INSTALL_STICK_WRITABLE, QEMU_ALLOW_REBOOT, QEMU_TEST_DISKS,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
 #   GIT_PUSH_REPO, GIT_SSH_PEER, QEMU_QMP,
@@ -179,9 +179,11 @@ if [ $(( QEMU_SMP & (QEMU_SMP - 1) )) -ne 0 ]; then
 fi
 
 # INSTALL_STICK: the ISO on a USB stick, as the installer's medium is flashed,
-# which the firmware reads and the kernel, without a USB storage driver, does
-# not. The boot disk is then the disk it installs onto, booted after it.
+# write-protected unless INSTALL_STICK_WRITABLE=1. The boot disk is then the
+# disk it installs onto, booted after it.
 INSTALL_STICK="${INSTALL_STICK:-}"
+STICK_READONLY=on
+[ "${INSTALL_STICK_WRITABLE:-0}" != 1 ] || STICK_READONLY=off
 NV_FIRMWARE=0
 if [ -n "${BOOT_DISK_IMG:-}" ] || [ -n "$INSTALL_STICK" ]; then
     NV_FIRMWARE=1
@@ -286,6 +288,9 @@ ADD_NO_REBOOT=0
 #            VERITY=off so the suite can write; without this no run would
 #            exercise fs/src/verity.rs against a trailer a real device reports.
 #   vdb      test mode: a blank virtio scratch, so virtio-blk stays graded.
+#   sda      test mode: a blank scratch on a USB stick behind a qemu-xhci at
+#            a fixed address past every other device, so usb-storage stays
+#            graded and adding it moves nothing else on the bus.
 ADD_SCRATCH_DISK=0
 ADD_VERIFIED_DISK=0
 ADD_CAPACITY_DISK=0
@@ -319,7 +324,7 @@ case "$MODE" in
             SCRATCH_DIR="${SCRATCH_DIR:-${REPO_ROOT}/builddir}"
             mkdir -p "$SCRATCH_DIR"
             # Fresh, blank 8 MiB raw scratches each run (no filesystem; raw-block tests only).
-            for scratch in scratch-nvme scratch-4kn scratch-virtio scratch-spare; do
+            for scratch in scratch-nvme scratch-4kn scratch-virtio scratch-spare scratch-usb; do
                 rm -f "$SCRATCH_DIR/$scratch.img"
                 truncate -s 8M "$SCRATCH_DIR/$scratch.img"
             done
@@ -599,7 +604,7 @@ BOOT_DISK_INDEX=0
 if [ -n "$INSTALL_STICK" ]; then
     QEMU_ARGS+=(
         -device "qemu-xhci,id=xhci"
-        -drive "if=none,id=stick,format=raw,readonly=on,file=$INSTALL_STICK"
+        -drive "if=none,id=stick,format=raw,readonly=$STICK_READONLY,file=$INSTALL_STICK"
         -device "usb-storage,bus=xhci.0,drive=stick,removable=on,bootindex=0"
     )
     BOOT_DISK_INDEX=1
@@ -665,6 +670,9 @@ if [ "$ADD_SCRATCH_DISK" = "1" ]; then
     QEMU_ARGS+=(
         -drive "file=$SCRATCH_DIR/scratch-virtio.img,if=none,id=scratch-virtio,format=raw"
         -device "virtio-blk-pci,drive=scratch-virtio,disable-legacy=on"
+        -device "qemu-xhci,id=xhci-test,bus=pcie.0,addr=0x10"
+        -blockdev "driver=raw,node-name=scratch-usb,file.driver=file,file.filename=$SCRATCH_DIR/scratch-usb.img"
+        -device "usb-storage,bus=xhci-test.0,drive=scratch-usb"
     )
 fi
 QEMU_ARGS+=(

@@ -16,12 +16,13 @@ use slopos_usb_core::device::Speed;
 use slopos_usb_core::device::descriptor::{self, Configuration, Function};
 use slopos_usb_core::device::request::Setup;
 use slopos_usb_core::xhci::context::{
-    ContextLayout, EndpointContext, InputControlContext, SlotContext, endpoint_state, read_context,
-    write_input,
+    ContextLayout, EndpointContext, InputControlContext, MAX_READDED, SlotContext, endpoint_state,
+    read_context, write_input, write_readded,
 };
 use slopos_usb_core::xhci::memory::PAGE_SIZE;
+use slopos_usb_core::xhci::ring::{CommandResult, SubmitError, Ticket};
 use slopos_usb_core::xhci::transfer::{PushError, Transfer, TransferError, TransferResult};
-use slopos_usb_core::xhci::{CompletionCode, DmaPage, TransferRing};
+use slopos_usb_core::xhci::{CompletionCode, DmaPage, TransferRing, Trb};
 
 use super::page::{Page, Store};
 use crate::driver_core::bound::BoundError;
@@ -113,7 +114,15 @@ struct Memory {
     /// Each [`Posted`]'s data stage, kept as long as the device so an
     /// abandoned request never reads a freed page.
     posted: KVec<Page>,
+    /// Each [`Stream`]'s wrapper page and input context, kept as long as the
+    /// device for the same reason.
+    streams: KVec<StreamPages>,
     gone: bool,
+}
+
+struct StreamPages {
+    wire: Page,
+    input: Page,
 }
 
 impl Memory {
@@ -127,6 +136,7 @@ impl Memory {
                 write_field!(init, ep0, TransferRing::new(page()?));
                 write_field!(init, endpoints, KVec::new());
                 write_field!(init, posted, KVec::new());
+                write_field!(init, streams, KVec::new());
                 write_field!(init, gone, false);
                 Ok(init.finish())
             },
@@ -188,6 +198,7 @@ pub(super) struct Finished {
     pub transfer: bool,
     pub tree: bool,
     pub report: bool,
+    pub stream: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +239,27 @@ pub struct Device {
     reporters: SpinLock<KVec<Reporter>>,
     /// Endpoints, by DCI, whose posted report has completed.
     reports_done: AtomicU32,
+    /// Endpoints, by DCI, a [`Stream`] drives and recovers: the tree leaves
+    /// their halts alone.
+    owned: AtomicU32,
+    sinks: SpinLock<KVec<Sink>>,
+    /// Endpoints, by DCI, of a stream with a transfer completed.
+    streams_done: AtomicU32,
+    /// A driver's recovery failed: the tree removes the device and its port
+    /// tries it again.
+    escalated: AtomicBool,
+}
+
+/// Called with the device table held, so the device cannot be freed under it,
+/// each time a transfer on one of a [`Stream`]'s endpoints completes, from
+/// wherever the event ring is drained: it may not block, allocate or log.
+pub trait StreamSink: Send + Sync {
+    fn completed(&self);
+}
+
+struct Sink {
+    pipes: u32,
+    sink: KArc<dyn StreamSink>,
 }
 
 /// Called with each report an endpoint returns, from wherever the event ring
@@ -309,6 +341,17 @@ impl Device {
                     )
                 );
                 write_field!(init, reports_done, AtomicU32::new(0));
+                write_field!(init, owned, AtomicU32::new(0));
+                write_field!(
+                    init,
+                    sinks,
+                    SpinLock::new(
+                        KVec::new(),
+                        lock_class!("UsbDevice.sinks", LOCK_LEVEL_RESOURCE)
+                    )
+                );
+                write_field!(init, streams_done, AtomicU32::new(0));
+                write_field!(init, escalated, AtomicBool::new(false));
                 Ok(init.finish())
             },
         ))
@@ -542,13 +585,18 @@ impl Device {
         if memory.gone {
             return 0;
         }
-        memory
+        let halted = memory
             .endpoints
             .iter()
             .filter(|e| e.ring.is_halted())
             .fold(u32::from(memory.ep0.is_halted()) << 1, |bits, e| {
                 bits | 1 << e.dci
-            })
+            });
+        halted & !self.owned.load(Ordering::Acquire)
+    }
+
+    pub(super) fn take_escalation(&self) -> bool {
+        self.escalated.swap(false, Ordering::AcqRel)
     }
 
     /// A reporting endpoint's ring runs again with a report posted, unless
@@ -639,15 +687,32 @@ impl Device {
         if ring.complete(trb, code, residual) != Completed::Transfer {
             return Finished::default();
         }
-        let tree = dci == 1 || ring.is_halted() || self.hub.load(Ordering::Acquire);
+        let stream = self.owned.load(Ordering::Acquire) & 1 << dci != 0;
+        let tree = dci == 1 || (ring.is_halted() && !stream) || self.hub.load(Ordering::Acquire);
         let report = memory.endpoint(dci).is_some_and(|e| e.report_length != 0);
         if report {
             self.reports_done.fetch_or(1 << dci, Ordering::AcqRel);
+        }
+        if stream {
+            self.streams_done.fetch_or(1 << dci, Ordering::AcqRel);
         }
         Finished {
             transfer: true,
             tree,
             report,
+            stream,
+        }
+    }
+
+    /// Tells each stream a transfer of its completed. Runs with no event lock
+    /// held.
+    pub(super) fn dispatch_streams(&self) {
+        let done = self.streams_done.swap(0, Ordering::AcqRel);
+        if done == 0 {
+            return;
+        }
+        for sink in self.sinks.lock().iter().filter(|s| s.pipes & done != 0) {
+            sink.sink.completed();
         }
     }
 
@@ -1237,5 +1302,268 @@ impl Drop for Posted {
         if let Some((transfer, _)) = self.out.lock().take() {
             self.device.abandon(1, transfer);
         }
+    }
+}
+
+/// A bulk IN and a bulk OUT endpoint a driver drives itself, never waiting:
+/// TDs pushed from any context, each completion handed to its sink where the
+/// event ring is drained, and their halts left to the driver to recover.
+pub struct Stream {
+    device: KArc<Device>,
+    pipes: [(u8, u16); 2],
+    index: usize,
+}
+
+pub const STREAM_IN: usize = 0;
+pub const STREAM_OUT: usize = 1;
+
+impl Stream {
+    /// The hub to clear when the device is reached through a translator.
+    pub fn translator(&self) -> Option<Translator> {
+        let (hub, _) = self.device.node()?.tt?;
+        let hub = super::controller(self.device.controller)?.device(hub)?;
+        Some(Translator { hub })
+    }
+
+    /// Unless either endpoint is not a bulk endpoint of the configuration in
+    /// that direction, or another handle holds it.
+    #[inline(never)]
+    pub(crate) fn open(device: KArc<Device>, addresses: [u8; 2]) -> Result<Self, BoundError> {
+        let wire = Page::alloc().ok_or(BoundError::OutOfMemory)?;
+        let input = Page::alloc().ok_or(BoundError::OutOfMemory)?;
+        let mut memory = device.memory.lock();
+        if memory.gone {
+            return Err(BoundError::Gone);
+        }
+        memory
+            .streams
+            .try_reserve(1)
+            .map_err(|_| BoundError::OutOfMemory)?;
+        let mut pipes = [(0u8, 0u16); 2];
+        for (pipe, address) in pipes.iter_mut().zip(addresses) {
+            let dci = slopos_usb_core::xhci::context::dci(address & 0x0f, address & 0x80 != 0);
+            let endpoint = memory.endpoint(dci).ok_or(BoundError::NoSuchEndpoint)?;
+            let bulk = endpoint.descriptor.transfer_type() == descriptor::TransferType::Bulk;
+            if !bulk || endpoint.open {
+                return Err(BoundError::Busy);
+            }
+            *pipe = (dci, endpoint.descriptor.max_packet_size());
+        }
+        if pipes[0].0 == pipes[1].0 || pipes[STREAM_IN].0 % 2 == 0 || pipes[STREAM_OUT].0 % 2 == 1 {
+            return Err(BoundError::NoSuchEndpoint);
+        }
+        for (dci, _) in pipes {
+            if let Some(endpoint) = memory.endpoint(dci) {
+                endpoint.open = true;
+            }
+        }
+        let _ = memory.streams.push(StreamPages { wire, input });
+        let index = memory.streams.len() - 1;
+        drop(memory);
+        device
+            .owned
+            .fetch_or(Self::mask_of(&pipes), Ordering::AcqRel);
+        Ok(Self {
+            device,
+            pipes,
+            index,
+        })
+    }
+
+    fn mask_of(pipes: &[(u8, u16); 2]) -> u32 {
+        pipes.iter().fold(0, |mask, &(dci, _)| mask | 1 << dci)
+    }
+
+    /// `sink` hears of every completion on the stream's endpoints from here
+    /// until the stream is dropped.
+    pub fn attach(&self, sink: KArc<dyn StreamSink>) -> Result<(), BoundError> {
+        let mut sinks = self.device.sinks.lock();
+        sinks.try_reserve(1).map_err(|_| BoundError::OutOfMemory)?;
+        sinks
+            .push(Sink {
+                pipes: Self::mask_of(&self.pipes),
+                sink,
+            })
+            .map_err(|_| BoundError::OutOfMemory)
+    }
+
+    /// The address the controller gave the device.
+    pub fn address(&self) -> u8 {
+        let memory = self.device.memory.lock();
+        SlotContext::decode(&read_context(&memory.output, 0)).address
+    }
+
+    pub fn is_gone(&self) -> bool {
+        self.device.is_gone()
+    }
+
+    fn dci(&self, pipe: usize) -> u8 {
+        self.pipes[pipe & 1].0
+    }
+
+    pub fn wire_phys(&self) -> u64 {
+        self.device.memory.lock().streams[self.index].wire.phys()
+    }
+
+    pub fn write_wire(&self, offset: usize, bytes: &[u8]) {
+        self.device.memory.lock().streams[self.index]
+            .wire
+            .write_bytes(offset, bytes);
+    }
+
+    pub fn read_wire(&self, offset: usize, out: &mut [u8]) {
+        self.device.memory.lock().streams[self.index]
+            .wire
+            .read_bytes(offset, out);
+    }
+
+    /// One TD of `length` bytes over `pages` on pipe [`STREAM_IN`] or
+    /// [`STREAM_OUT`], its doorbell rung.
+    pub fn push(&self, pipe: usize, pages: &[u64], length: u32) -> Result<Transfer, PushError> {
+        let (dci, max_packet) = self.pipes[pipe & 1];
+        let mut memory = self.device.memory.lock();
+        if memory.gone {
+            return Err(PushError::Halted);
+        }
+        let ring = memory.ring(dci).ok_or(PushError::Halted)?;
+        let transfer = ring.bulk(pages, length, max_packet)?;
+        self.device.ring_doorbell(&memory, dci);
+        Ok(transfer)
+    }
+
+    pub fn result(&self, pipe: usize, transfer: Transfer) -> Option<TransferResult> {
+        self.device.take(self.dci(pipe), transfer)
+    }
+
+    pub fn abandon(&self, pipe: usize, transfer: Transfer) {
+        self.device.abandon(self.dci(pipe), transfer);
+    }
+
+    /// The ring of the pipe runs again, empty.
+    pub fn recovered(&self, pipe: usize) {
+        self.device.recovered(self.dci(pipe));
+    }
+
+    /// A request with no data stage on the device's EP0.
+    pub fn control(&self, setup: Setup) -> Result<Transfer, PushError> {
+        self.device.control(setup)
+    }
+
+    pub fn control_result(&self, transfer: Transfer) -> Option<TransferResult> {
+        self.device.take(1, transfer)
+    }
+
+    pub fn abandon_control(&self, transfer: Transfer) {
+        self.device.abandon(1, transfer);
+    }
+
+    pub fn reset_endpoint(&self, pipe: usize) -> Result<Ticket, SubmitError> {
+        let trb = Trb::reset_endpoint(self.device.slot, self.dci(pipe), false);
+        self.submit(trb)
+    }
+
+    pub fn stop_endpoint(&self, pipe: usize) -> Result<Ticket, SubmitError> {
+        let trb = Trb::stop_endpoint(self.device.slot, self.dci(pipe), false);
+        self.submit(trb)
+    }
+
+    /// Configure Endpoint dropping and adding the pipes `mask` names, by
+    /// `1 << pipe`, each at its ring's enqueue pointer.
+    pub fn readd(&self, mask: u8) -> Result<Ticket, SubmitError> {
+        let mut endpoints = [(0u8, 0u64, false); MAX_READDED];
+        let mut count = 0;
+        let input = {
+            let mut memory = self.device.memory.lock();
+            if memory.gone {
+                return Err(SubmitError::Dead);
+            }
+            for pipe in [STREAM_IN, STREAM_OUT] {
+                let dci = self.dci(pipe);
+                if mask & 1 << pipe == 0 {
+                    continue;
+                }
+                let Some(ring) = memory.ring(dci) else {
+                    continue;
+                };
+                let (dequeue, cycle) = ring.recovery_dequeue();
+                endpoints[count] = (dci, dequeue, cycle);
+                count += 1;
+            }
+            let Memory {
+                output, streams, ..
+            } = &mut **memory;
+            let input = &mut streams[self.index].input;
+            write_readded(output, input, self.device.contexts, &endpoints[..count]);
+            input.phys()
+        };
+        self.submit(Trb::configure_endpoint(input, self.device.slot, false))
+    }
+
+    fn submit(&self, trb: Trb) -> Result<Ticket, SubmitError> {
+        super::controller(self.device.controller)
+            .ok_or(SubmitError::Dead)?
+            .submit(trb)
+    }
+
+    pub fn command_result(&self, ticket: Ticket) -> Option<CommandResult> {
+        super::controller(self.device.controller)?.take(ticket)
+    }
+
+    pub fn abandon_command(&self, ticket: Ticket) {
+        if let Some(controller) = super::controller(self.device.controller) {
+            controller.abandon(ticket);
+        }
+    }
+
+    /// A command never completed: the controller is taken for dead.
+    pub fn stuck(&self) {
+        if let Some(controller) = super::controller(self.device.controller) {
+            controller.note_stuck();
+        }
+    }
+
+    /// Recovery failed: the device is removed and its port tries it again.
+    pub fn escalate(&self) {
+        self.device.escalated.store(true, Ordering::Release);
+        self.device.note_abandoned();
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        let mask = Self::mask_of(&self.pipes);
+        let detached = {
+            let mut sinks = self.device.sinks.lock();
+            let at = sinks.iter().position(|s| s.pipes == mask);
+            at.map(|at| sinks.swap_remove(at))
+        };
+        drop(detached);
+        self.device.owned.fetch_and(!mask, Ordering::AcqRel);
+        let mut memory = self.device.memory.lock();
+        for (dci, _) in self.pipes {
+            if let Some(endpoint) = memory.endpoint(dci) {
+                endpoint.open = false;
+            }
+        }
+    }
+}
+
+/// The high-speed hub whose transaction translator a full- or low-speed
+/// device is reached through: requests with no data stage on its EP0.
+pub struct Translator {
+    hub: KArc<Device>,
+}
+
+impl Translator {
+    pub fn control(&self, setup: Setup) -> Result<Transfer, PushError> {
+        self.hub.control(setup)
+    }
+
+    pub fn control_result(&self, transfer: Transfer) -> Option<TransferResult> {
+        self.hub.take(1, transfer)
+    }
+
+    pub fn abandon_control(&self, transfer: Transfer) {
+        self.hub.abandon(1, transfer);
     }
 }

@@ -1203,7 +1203,7 @@ fn log_read_only_reason(reason: Option<ReadOnlyReason>) {
             klog_info!("ext2: mounting read-only — the mount asked for it")
         }
         ReadOnlyReason::DeviceWriteProtected => {
-            klog_info!("ext2: mounting read-only — the device is verity-attested")
+            klog_info!("ext2: mounting read-only — the device refuses writes")
         }
         ReadOnlyReason::UnsupportedFeature => klog_info!(
             "ext2: mounting read-only — the image declares a feature this kernel does not write"

@@ -35,7 +35,9 @@ pub const QUARANTINE_SLOTS: usize = 2;
 const UNINTERRUPTIBLE_MS: u64 = slopos_ostd::sync::wait_queue::UNINTERRUPTIBLE_MAX_MS;
 /// How long a requester watches for its completion before it sleeps.
 const COMPLETION_POLL_NS: u64 = 50_000;
-const SLOT_WAIT_MS: u64 = 250;
+/// How long a request waits for a free slot before it is answered `Busy`,
+/// for a transport whose requests complete in milliseconds.
+pub const SLOT_WAIT_MS: u64 = 250;
 /// Attempts per logical request, including the first.
 const REQUEST_ATTEMPTS: u32 = 3;
 
@@ -513,13 +515,15 @@ pub struct Engine {
     slot_count: usize,
     max_transfer: usize,
     timeout_ms: u64,
+    slot_wait_ms: u64,
     name: &'static str,
 }
 
 impl Engine {
     /// `slot_count` request slots of `max_transfer` bytes each, a request
     /// given up on after `timeout_ms` or [`UNINTERRUPTIBLE_MS`], whichever is
-    /// longer. Built in place through `KArc::try_init`, so nothing
+    /// longer, and a free slot waited for `slot_wait_ms` before the request
+    /// is `Busy`. Built in place through `KArc::try_init`, so nothing
     /// materialises on the caller's stack; serves nothing until
     /// [`Self::start`].
     pub fn init(
@@ -527,6 +531,7 @@ impl Engine {
         slot_count: usize,
         max_transfer: usize,
         timeout_ms: u64,
+        slot_wait_ms: u64,
     ) -> impl Init<Self, AllocError> {
         init_struct_with(
             move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
@@ -564,6 +569,7 @@ impl Engine {
                     max_transfer.clamp(PAGE_SIZE, MAX_XFER) / PAGE_SIZE * PAGE_SIZE
                 );
                 write_field!(slot, timeout_ms, timeout_ms.max(UNINTERRUPTIBLE_MS));
+                write_field!(slot, slot_wait_ms, slot_wait_ms);
                 write_field!(slot, name, name);
                 Ok(slot.finish())
             },
@@ -681,11 +687,11 @@ impl Engine {
         let available = || self.state.lock().has_available_slot(self.slot_count);
         match self
             .free_waiters
-            .wait_event_timeout(available, SLOT_WAIT_MS)
+            .wait_event_timeout(available, self.slot_wait_ms)
         {
             Ok(()) => {}
             Err(WaitAbort::NoRuntime) => {
-                poll_wait(&available, SLOT_WAIT_MS as u32);
+                poll_wait(&available, self.slot_wait_ms as u32);
             }
             Err(WaitAbort::Killed) => return Err(BlkError::Interrupted),
             Err(_) => return Err(BlkError::Busy),

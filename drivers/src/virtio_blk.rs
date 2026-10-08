@@ -329,6 +329,7 @@ fn virtio_blk_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         REQUEST_SLOTS,
         engine::MAX_XFER,
         REQUEST_TIMEOUT_MS,
+        engine::SLOT_WAIT_MS,
     ))
     .map_err(|_| PciProbeError::OutOfMemory)?;
 

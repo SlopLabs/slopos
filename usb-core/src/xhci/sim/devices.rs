@@ -58,6 +58,8 @@ pub struct SimHub {
     pub depth: Option<u8>,
     /// Ports that power on only when told to.
     pub power_switching: bool,
+    /// `CLEAR_TT_BUFFER`'s `wValue` and `wIndex`, as each arrived.
+    pub tt_clears: Vec<(u16, u16)>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +80,9 @@ pub struct SimDevice {
     pub default_state: bool,
     /// DCI bits of endpoints that STALL until `CLEAR_FEATURE(ENDPOINT_HALT)`.
     pub halted_endpoints: u32,
+    /// DCI bits of the device's data toggles: the next packet's DATA1.
+    pub toggles: u32,
+    pub storage: Option<Box<super::storage::SimStorage>>,
 }
 
 fn max_packet0(speed: Speed) -> u8 {
@@ -115,6 +120,8 @@ impl SimDevice {
             pull_me: false,
             default_state: false,
             halted_endpoints: 0,
+            toggles: 0,
+            storage: None,
         }
     }
 
@@ -198,6 +205,7 @@ impl SimDevice {
             power_good: 10,
             depth: None,
             power_switching: true,
+            tt_clears: Vec::new(),
         });
         hub
     }
@@ -379,6 +387,7 @@ impl SimDevice {
                 let known = value == 0 || self.configurations.iter().any(|c| c[5] == value);
                 if known {
                     self.configuration = value;
+                    self.toggles = 0;
                     Reply::Data(Vec::new())
                 } else {
                     Reply::Stall
@@ -394,11 +403,25 @@ impl SimDevice {
                 } else {
                     if setup.value == 0 {
                         self.halted_endpoints &= !(1 << dci);
+                        self.toggles &= !(1 << dci);
                     }
                     Reply::Data(Vec::new())
                 }
             }
             (0x23, 1) if self.faults.stall_port_clear => Reply::Stall,
+            (0xa1, 0xfe) if self.storage.is_some() => {
+                match self.storage.as_ref().and_then(|s| s.max_lun()) {
+                    Some(lun) => Reply::Data(vec![lun]),
+                    None => Reply::Stall,
+                }
+            }
+            (0x21, 0xff) if self.storage.is_some() => {
+                if self.storage.as_mut().is_some_and(|s| s.reset()) {
+                    Reply::Data(Vec::new())
+                } else {
+                    Reply::Stall
+                }
+            }
             _ => match self.hub.as_mut() {
                 Some(hub) if self.configuration != 0 => Self::hub_request(hub, setup),
                 _ => Reply::Stall,
@@ -423,6 +446,10 @@ impl SimDevice {
             }
             (0xa0, 0) => Reply::Data(vec![0; 4]),
             (0x20, 1) => Reply::Data(Vec::new()),
+            (0x23, 8) if !hub.super_speed => {
+                hub.tt_clears.push((setup.value, setup.index));
+                Reply::Data(Vec::new())
+            }
             (0x20, 12) if hub.super_speed => {
                 hub.depth = Some(setup.value as u8);
                 Reply::Data(Vec::new())

@@ -31,10 +31,11 @@ const QEMU_XHCI: (u16, u16) = (0x1b36, 0x000d);
 const NEC_XHCI: (u16, u16) = (0x1033, 0x0194);
 const STICK: (u16, u16) = (0x46f4, 0x0001);
 const HUB: (u16, u16) = (0x0409, 0x55aa);
-/// Of two USB 3 and four USB 2 ports: a SuperSpeed stick, the hub, a
+/// Of two USB 3 and five USB 2 ports: a SuperSpeed stick, the hub, a
 /// high-speed stick and a full-speed keyboard.
 const ROOT_PORTS: [u8; 4] = [1, 4, 5, 6];
-/// By root port and hub port, 0 for the root port's own device.
+/// By root port and hub port, 0 for the root port's own device, on both
+/// controllers.
 const DEVICES: [(u8, u8, Speed); 7] = [
     (1, 0, Speed::Super),
     (4, 0, Speed::Full),
@@ -46,6 +47,10 @@ const DEVICES: [(u8, u8, Speed); 7] = [
 ];
 /// The sticks among them, which `usb-test` binds.
 const STICKS: u32 = 3;
+/// qemu-xhci's alone: an ext4 stick `usb-storage` binds as `sda`, the one
+/// USB disk until `usb_disk_test` plugs a read-only drive on nec-usb-xhci's
+/// port 7.
+const DISK: (u8, u8, Speed) = (7, 0, Speed::High);
 /// The keyboard, the tablet and the mouse, which `usb-test-hid` tries and
 /// `usb-hid` binds.
 const HIDS: u32 = 3;
@@ -73,6 +78,10 @@ impl Removal for Unbind {
 const CBW_SIGNATURE: u32 = 0x4342_5355;
 const CSW_SIGNATURE: u32 = 0x5342_5355;
 const CBW_TAG: u32 = 0x5553_4231;
+
+/// The 1 MiB sticks `just test-usb` plugs for this driver; it declines any
+/// other for `usb-storage`.
+const TEST_STICK_BLOCKS: u32 = 2048;
 
 /// A control request, then a Bulk-Only TEST UNIT READY through both bulk
 /// pipes. A stray read of bulk-in stalls, as a stick waiting for a command
@@ -105,7 +114,11 @@ fn probe_stick(bound: &mut BoundUsbDevice<'_>) -> Result<ProbeOutcome, ProbeErro
     };
     let pipe_out = bound.pipe(bulk_out).map_err(|_| ProbeError::DeviceFault)?;
     let pipe_in = bound.pipe(bulk_in).map_err(|_| ProbeError::DeviceFault)?;
-    if test_unit_ready(&pipe_out, &pipe_in) {
+    let ready = test_unit_ready(&pipe_out, &pipe_in);
+    if blocks(&pipe_out, &pipe_in) != Some(TEST_STICK_BLOCKS) {
+        return Ok(ProbeOutcome::Declined);
+    }
+    if ready {
         TEST_UNIT_READY.fetch_add(1, Ordering::AcqRel);
     }
     let mut stray = [0u8; 13];
@@ -128,6 +141,28 @@ fn test_unit_ready(pipe_out: &Pipe, pipe_in: &Pipe) -> bool {
     if pipe_out.write(&cbw, 5000).is_err() {
         return false;
     }
+    status(pipe_in)
+}
+
+/// READ CAPACITY (10): the stick's blocks.
+fn blocks(pipe_out: &Pipe, pipe_in: &Pipe) -> Option<u32> {
+    let mut cbw = [0u8; 31];
+    cbw[0..4].copy_from_slice(&CBW_SIGNATURE.to_le_bytes());
+    cbw[4..8].copy_from_slice(&CBW_TAG.to_le_bytes());
+    cbw[8] = 8;
+    cbw[12] = 0x80;
+    cbw[14] = 10;
+    cbw[15] = 0x25;
+    pipe_out.write(&cbw, 5000).ok()?;
+    let mut answer = [0u8; 8];
+    let read = pipe_in.read(&mut answer, 5000).ok()?;
+    if !status(pipe_in) || read != 8 {
+        return None;
+    }
+    u32::from_be_bytes([answer[0], answer[1], answer[2], answer[3]]).checked_add(1)
+}
+
+fn status(pipe_in: &Pipe) -> bool {
     let mut csw = [0u8; 13];
     let Ok(read) = pipe_in.read(&mut csw, 5000) else {
         return false;
@@ -181,6 +216,7 @@ crate::usb_driver! {
             subclass: Some(6),
             protocol: Some(0x50),
         }],
+        priority: 64,
         probe: probe_stick,
     };
 }
@@ -222,9 +258,10 @@ fn path(root: u8, hub_port: u8) -> Path {
 
 /// Every device, configured at its speed, and nothing else.
 fn complete(c: &Controller) -> bool {
+    let disk = (c.ids() == QEMU_XHCI).then_some(DISK);
     let devices = c.devices();
-    devices.len() == DEVICES.len()
-        && DEVICES.iter().all(|&(root, hub_port, speed)| {
+    devices.len() == DEVICES.len() + usize::from(disk.is_some())
+        && DEVICES.iter().chain(&disk).all(|&(root, hub_port, speed)| {
             let want = path(root, hub_port);
             devices.iter().any(|d| {
                 d.node().is_some_and(|n| {
@@ -262,11 +299,16 @@ pub fn test_usb_01_controllers_run() -> TestResult {
         "nec-usb-xhci with msix=off takes MSI"
     );
     for c in [&qemu, &nec] {
-        assert_eq_test!(c.max_ports(), 6, "two USB 3 ports and four USB 2");
+        assert_eq_test!(c.max_ports(), 7, "two USB 3 ports and five USB 2");
         for port in [2, 3] {
             assert_test!(!c.port_connected(port), "no device on ports 2 and 3");
         }
     }
+    assert_test!(qemu.port_connected(DISK.0), "qemu-xhci's disk is on port 7");
+    assert_test!(
+        !nec.port_connected(DISK.0),
+        "nec-usb-xhci's port 7 is empty"
+    );
     let free = slopos_ostd::mm::io_mem_ranges_free();
     klog_info!("USB-TEST: io-mem ranges free {}", free);
     assert_test!(
@@ -333,8 +375,12 @@ pub fn test_usb_02_every_device_enumerates() -> TestResult {
     );
     assert_eq_test!(
         crate::usb::bus::claims_held(),
-        2 * (STICKS + HIDS),
+        2 * (STICKS + HIDS) + 1,
         "one claim per bound function"
+    );
+    assert_test!(
+        crate::usb::storage::has_disk(b"sda"),
+        "usb-storage registered the ext4 stick as sda"
     );
     let listed = slopos_ostd::kconsole::runs(b'u');
     assert_test!(
@@ -620,6 +666,7 @@ fn pulled(round: u32) -> TestResult {
         every_controller(empty)
             && crate::usb::settled()
             && UNBINDS.load(Ordering::Acquire) == unbinds + 2 * STICKS
+            && !crate::usb::storage::has_disk(b"sda")
     });
     assert_test!(
         gone,
@@ -631,7 +678,10 @@ fn pulled(round: u32) -> TestResult {
         "no HID interface left bound"
     );
     assert_test!(
-        every_controller(|c| ROOT_PORTS.iter().all(|&p| !c.port_connected(p))),
+        every_controller(|c| ROOT_PORTS
+            .iter()
+            .chain(&[DISK.0])
+            .all(|&p| !c.port_connected(p))),
         "every root port empty"
     );
     assert_test!(
@@ -670,11 +720,12 @@ fn plugged() -> TestResult {
             && BINDS.load(Ordering::Acquire) == binds + 2 * STICKS
             && HID_PROBES.load(Ordering::Acquire) == hid_probes + 2 * HIDS
             && every_hid_bound()
+            && crate::usb::storage::has_disk(b"sda")
     });
     assert_test!(back, "every device must enumerate again and bind");
     assert_eq_test!(
         crate::usb::bus::claims_held(),
-        2 * (STICKS + HIDS),
+        2 * (STICKS + HIDS) + 1,
         "one claim per bound function"
     );
     assert_test!(
@@ -715,6 +766,25 @@ pub fn test_usb_12_shutdown_resets() -> TestResult {
     }
     pass!()
 }
+
+/// `just test`'s scratch stick: bound by `usb-storage` as `sda`, with the
+/// dynamic MMIO ranges a controller takes still leaving headroom.
+pub fn test_usb_scratch_stick_is_sda() -> TestResult {
+    assert_test!(
+        crate::usb::storage::has_disk(b"sda"),
+        "usb-storage registered the stick as sda"
+    );
+    let free = slopos_ostd::mm::io_mem_ranges_free();
+    assert_test!(
+        free >= IO_MEM_HEADROOM,
+        "{} dynamic MMIO ranges free, fewer than {}",
+        free,
+        IO_MEM_HEADROOM
+    );
+    pass!()
+}
+
+slopos_testing::stest!(name = test_usb_scratch_stick_is_sda);
 
 const HOSTED: u32 = slopos_testing::FLAG_EXPLICIT | slopos_testing::FLAG_UNCAPTURED;
 

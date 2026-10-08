@@ -22,11 +22,12 @@ use std::fs;
 use std::io::{Write, stdin, stdout};
 use std::path::PathBuf;
 
+use slopos_boot_core::Guid;
 use slopos_boot_core::gpt::{Header, Partition};
 use slopos_boot_core::install::{self, Mode as PlanMode, Place, PlanError, ROLES, Role};
 use slopos_boot_core::layout::{self, BOOT_LABEL, ESP_LABEL, ROOT_TYPE};
 
-use crate::boot_disk::{open_fat, partition_node, whole_disks};
+use crate::boot_disk::{medium_disk_guid, not_installable, open_fat, partition_node, whole_disks};
 use crate::syscall::core as sys_core;
 use disk::{Disk, human};
 
@@ -43,13 +44,15 @@ const DEFAULT_REMOTE: &str = "https://github.com/SlopLabs/slopos";
 const DEFAULT_CMDLINE: &str = "panic=reboot";
 
 /// The install medium the live system serves.
-pub struct Medium;
+pub struct Medium {
+    /// The GPT disk GUID its image was built with: the disk never offered.
+    disk_guid: Guid,
+}
 
 impl Medium {
     /// The medium, whole: what every install takes, and what a payload's
     /// trees take with them, checked before anything is written.
     fn find() -> Result<Medium, String> {
-        let medium = Medium;
         let dir = layout::MEDIUM_DIR;
         let served = fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
             && std::ffi::CString::new(dir)
@@ -61,6 +64,14 @@ impl Medium {
                 "no install medium at {dir}; boot the SlopOS ISO to install"
             ));
         }
+        let medium = Medium {
+            disk_guid: medium_disk_guid()?.ok_or_else(|| {
+                format!(
+                    "no install medium: {dir}/{} is missing; boot the SlopOS ISO to install",
+                    layout::MEDIUM_DISK_GUID
+                )
+            })?,
+        };
         for file in [
             layout::MEDIUM_KERNEL,
             layout::MEDIUM_BASE,
@@ -230,19 +241,25 @@ fn ask_yes(question: &str, default: bool, flag: &str) -> Result<bool, String> {
     }
 }
 
-fn choose_disk() -> Result<String, String> {
-    let disks = whole_disks()?;
-    if disks.is_empty() {
-        return Err("no disk to install onto".to_owned());
-    }
+fn choose_disk(medium: &Medium) -> Result<String, String> {
+    let mut offered = Vec::new();
     println!("Disks:");
-    for node in &disks {
-        match Disk::open(node) {
+    for node in whole_disks()? {
+        if let Some(why) = not_installable(&node, Some(medium.disk_guid)) {
+            println!("{node}: {why}, not offered");
+            continue;
+        }
+        match Disk::open(&node) {
             Ok(disk) => print!("{}", disk.describe()),
             Err(why) => println!("{node}: {why}"),
         }
+        offered.push(node);
     }
-    let default = (disks.len() == 1).then(|| disks[0].as_str());
+    let default = match offered.as_slice() {
+        [] => return Err("no disk to install onto".to_owned()),
+        [only] => Some(only.as_str()),
+        _ => None,
+    };
     ask("Disk to install onto", default, "--disk")
 }
 
@@ -403,8 +420,11 @@ fn settle(opts: Options, medium: &Medium) -> Result<Settled, String> {
     let interactive = opts.disk.is_none();
     let node = disk_node(match opts.disk {
         Some(node) => node,
-        None => choose_disk()?,
+        None => choose_disk(medium)?,
     });
+    if let Some(why) = not_installable(&node, Some(medium.disk_guid)) {
+        return Err(format!("{node} is {why}; nothing is installed onto it"));
+    }
     let disk = Disk::open(&node)?;
     disk::reread(&disk)?;
     if !interactive {

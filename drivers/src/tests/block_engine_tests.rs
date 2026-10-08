@@ -28,7 +28,7 @@ use slopos_testing::{assert_eq_test, assert_ok, assert_test, fail, pass};
 use crate::block::engine::hooks;
 use crate::block::{self, EngineDisk};
 
-const SCRATCH_DISKS: [&[u8]; 3] = [b"vdb", b"nvme0n2", b"nvme1n2"];
+const SCRATCH_DISKS: [&[u8]; 4] = [b"vdb", b"nvme0n2", b"nvme1n2", b"sda"];
 
 fn show(name: &[u8]) -> &str {
     core::str::from_utf8(name).unwrap_or("?")
@@ -43,7 +43,7 @@ fn claim(name: &[u8]) -> Result<KBox<dyn BlockDevice + Send + Sync>, TestResult>
 }
 
 macro_rules! on_scratch {
-    ($body:ident => $virtio:ident, $nvme:ident, $nvme_4k:ident) => {
+    ($body:ident => $virtio:ident, $nvme:ident, $nvme_4k:ident, $usb:ident) => {
         pub fn $virtio() -> TestResult {
             $body(SCRATCH_DISKS[0])
         }
@@ -53,9 +53,13 @@ macro_rules! on_scratch {
         pub fn $nvme_4k() -> TestResult {
             $body(SCRATCH_DISKS[2])
         }
+        pub fn $usb() -> TestResult {
+            $body(SCRATCH_DISKS[3])
+        }
         slopos_testing::stest!(name = $virtio, suite = block_engine);
         slopos_testing::stest!(name = $nvme, suite = block_engine);
         slopos_testing::stest!(name = $nvme_4k, suite = block_engine);
+        slopos_testing::stest!(name = $usb, suite = block_engine);
     };
 }
 
@@ -92,6 +96,10 @@ pub fn test_block_registry_names() -> TestResult {
         block::disk_name(0).is_some_and(|n| n.as_bytes() == b"nvme0n1"),
         "disk0 must be the root image on the first NVMe namespace"
     );
+    assert_test!(
+        block::first_fixed_disk().is_some_and(|n| n.as_bytes() == b"nvme0n1"),
+        "a stick never becomes the disk root=auto takes"
+    );
     for name in SCRATCH_DISKS {
         assert_test!(
             block::disk(name).is_some(),
@@ -105,8 +113,8 @@ pub fn test_block_registry_names() -> TestResult {
         "an NSID the controller lacks must not exist"
     );
     assert_test!(
-        block::disk_count() >= 5,
-        "at least the root, three scratches and the media disk"
+        block::disk_count() >= 6,
+        "at least the root, four scratches and the media disk"
     );
     assert_eq_test!(
         block::disk(b"nvme1n2").map(|d| d.logical_block_size()),
@@ -151,7 +159,7 @@ fn write_readback(name: &[u8]) -> TestResult {
     assert_test!(back[..] == data[..], "readback must match what was written");
     pass!()
 }
-on_scratch!(write_readback => test_block_write_readback_virtio, test_block_write_readback_nvme, test_block_write_readback_nvme_4k);
+on_scratch!(write_readback => test_block_write_readback_virtio, test_block_write_readback_nvme, test_block_write_readback_nvme_4k, test_block_write_readback_usb);
 
 /// A span of whole blocks is one request; a sub-span with partial blocks at
 /// both ends reads through the same device.
@@ -182,7 +190,7 @@ fn multiblock(name: &[u8]) -> TestResult {
     );
     pass!()
 }
-on_scratch!(multiblock => test_block_multiblock_virtio, test_block_multiblock_nvme, test_block_multiblock_nvme_4k);
+on_scratch!(multiblock => test_block_multiblock_virtio, test_block_multiblock_nvme, test_block_multiblock_nvme_4k, test_block_multiblock_usb);
 
 /// A span straddling a 4 KiB boundary covers no logical block whole on any
 /// disk: the bytes around it survive the read-modify-write of both ends.
@@ -212,7 +220,7 @@ fn partial_block_write(name: &[u8]) -> TestResult {
     );
     pass!()
 }
-on_scratch!(partial_block_write => test_block_partial_write_virtio, test_block_partial_write_nvme, test_block_partial_write_nvme_4k);
+on_scratch!(partial_block_write => test_block_partial_write_virtio, test_block_partial_write_nvme, test_block_partial_write_nvme_4k, test_block_partial_write_usb);
 
 fn flush(name: &[u8]) -> TestResult {
     let device = match claim(name) {
@@ -227,7 +235,7 @@ fn flush(name: &[u8]) -> TestResult {
     assert_test!(device.flush().is_ok(), "flush must complete");
     pass!()
 }
-on_scratch!(flush => test_block_flush_virtio, test_block_flush_nvme, test_block_flush_nvme_4k);
+on_scratch!(flush => test_block_flush_virtio, test_block_flush_nvme, test_block_flush_nvme_4k, test_block_flush_usb);
 
 /// 8 KiB is two data pages in one request.
 fn single_request_over_one_page(name: &[u8]) -> TestResult {
@@ -253,7 +261,7 @@ fn single_request_over_one_page(name: &[u8]) -> TestResult {
     );
     pass!()
 }
-on_scratch!(single_request_over_one_page => test_block_two_page_request_virtio, test_block_two_page_request_nvme, test_block_two_page_request_nvme_4k);
+on_scratch!(single_request_over_one_page => test_block_two_page_request_virtio, test_block_two_page_request_nvme, test_block_two_page_request_nvme_4k, test_block_two_page_request_usb);
 
 /// Non-adjacent buffers land back to back in one device extent.
 fn write_vectored(name: &[u8]) -> TestResult {
@@ -278,7 +286,7 @@ fn write_vectored(name: &[u8]) -> TestResult {
     );
     pass!()
 }
-on_scratch!(write_vectored => test_block_write_vectored_virtio, test_block_write_vectored_nvme, test_block_write_vectored_nvme_4k);
+on_scratch!(write_vectored => test_block_write_vectored_virtio, test_block_write_vectored_nvme, test_block_write_vectored_nvme_4k, test_block_write_vectored_usb);
 
 /// Two requests in flight at once, each completing with its own data.
 fn concurrent_requests(name: &[u8]) -> TestResult {
@@ -320,7 +328,7 @@ fn concurrent_requests(name: &[u8]) -> TestResult {
     assert_test!(got_two[..] == second[..], "the second request's own extent");
     pass!()
 }
-on_scratch!(concurrent_requests => test_block_concurrent_requests_virtio, test_block_concurrent_requests_nvme, test_block_concurrent_requests_nvme_4k);
+on_scratch!(concurrent_requests => test_block_concurrent_requests_virtio, test_block_concurrent_requests_nvme, test_block_concurrent_requests_nvme_4k, test_block_concurrent_requests_usb);
 
 /// A span past the end of the medium is a bounds error.
 fn read_past_capacity(name: &[u8]) -> TestResult {
@@ -339,7 +347,7 @@ fn read_past_capacity(name: &[u8]) -> TestResult {
         other => fail!("want OutOfBounds for an overflowing span, got {:?}", other),
     }
 }
-on_scratch!(read_past_capacity => test_block_past_capacity_virtio, test_block_past_capacity_nvme, test_block_past_capacity_nvme_4k);
+on_scratch!(read_past_capacity => test_block_past_capacity_virtio, test_block_past_capacity_nvme, test_block_past_capacity_nvme_4k, test_block_past_capacity_usb);
 
 /// A completion landing while the timeout epilogue allocates the slot's
 /// replacement pages must be handed to the caller and the slot kept in
@@ -377,7 +385,7 @@ fn late_completion_keeps_slot(name: &[u8]) -> TestResult {
     }
     pass!()
 }
-on_scratch!(late_completion_keeps_slot => test_block_late_completion_virtio, test_block_late_completion_nvme, test_block_late_completion_nvme_4k);
+on_scratch!(late_completion_keeps_slot => test_block_late_completion_virtio, test_block_late_completion_nvme, test_block_late_completion_nvme_4k, test_block_late_completion_usb);
 
 /// One count is one device request: a span wider than the largest transfer
 /// costs more than one write, and a sub-block write pays for its
@@ -421,7 +429,7 @@ fn counters_per_request(name: &[u8]) -> TestResult {
     );
     pass!()
 }
-on_scratch!(counters_per_request => test_block_counters_virtio, test_block_counters_nvme, test_block_counters_nvme_4k);
+on_scratch!(counters_per_request => test_block_counters_virtio, test_block_counters_nvme, test_block_counters_nvme_4k, test_block_counters_usb);
 
 /// Which scratch disk a spawned writer thread targets.
 static THREAD_DISK: AtomicUsize = AtomicUsize::new(0);
@@ -526,7 +534,7 @@ fn killed_write(name: &[u8]) -> TestResult {
     let index = SCRATCH_DISKS.iter().position(|d| *d == name).unwrap_or(0);
     killed_write_is_waited_out(index)
 }
-on_scratch!(killed_write => test_block_killed_write_virtio, test_block_killed_write_nvme, test_block_killed_write_nvme_4k);
+on_scratch!(killed_write => test_block_killed_write_virtio, test_block_killed_write_nvme, test_block_killed_write_nvme_4k, test_block_killed_write_usb);
 
 const FENCED_OFFSET: u64 = 7 << 19;
 const FENCED_OLDER: [u8; 512] = [0x3C; 512];
@@ -658,7 +666,7 @@ fn waits_out_an_abandoned_write(name: &[u8]) -> TestResult {
     );
     pass!()
 }
-on_scratch!(waits_out_an_abandoned_write => test_block_abandoned_write_fence_virtio, test_block_abandoned_write_fence_nvme, test_block_abandoned_write_fence_nvme_4k);
+on_scratch!(waits_out_an_abandoned_write => test_block_abandoned_write_fence_virtio, test_block_abandoned_write_fence_nvme, test_block_abandoned_write_fence_nvme_4k, test_block_abandoned_write_fence_usb);
 
 slopos_testing::stest!(
     name = test_block_root_superblock_reads,

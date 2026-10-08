@@ -1,12 +1,14 @@
 //! Transfer rings (§4.9.2, §4.11): one endpoint's ring and its outstanding
 //! transfers, each completed by one event, or two when a data stage is short.
 
-use super::memory::DmaPage;
+use super::memory::{DmaPage, PAGE_SIZE};
 use super::ring::ProducerRing;
 use super::trb::{CompletionCode, Trb};
 use crate::device::request::Setup;
 
 pub const MAX_TRANSFERS: usize = 8;
+/// Pages one bulk TD may span: 128 KiB.
+pub const MAX_TD_PAGES: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Transfer {
@@ -68,6 +70,8 @@ struct Entry {
     data: Option<u16>,
     length: u32,
     short: Option<u32>,
+    /// A TD of page-sized Normal TRBs, any of which may end it short.
+    chained: bool,
 }
 
 const FREE: Entry = Entry {
@@ -77,6 +81,7 @@ const FREE: Entry = Entry {
     data: None,
     length: 0,
     short: None,
+    chained: false,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +180,7 @@ impl<P: DmaPage> TransferRing<P> {
             data: data.map(|offset| (first + offset) % (super::ring::RING_TRBS - 1)),
             length,
             short: None,
+            chained: trbs.len() > 1 && data.is_none(),
         };
         Ok(ticket)
     }
@@ -197,6 +203,37 @@ impl<P: DmaPage> TransferRing<P> {
 
     pub fn normal(&mut self, buffer: u64, length: u32) -> Result<Transfer, PushError> {
         self.submit(&[Trb::normal(buffer, length, false)], None, length)
+    }
+
+    /// One TD of `length` bytes over `pages`, a TRB per page, every page but
+    /// the last filled; `length` past what the pages hold is cut to fit.
+    /// `max_packet` counts each TRB's TD Size.
+    pub fn bulk(
+        &mut self,
+        pages: &[u64],
+        length: u32,
+        max_packet: u16,
+    ) -> Result<Transfer, PushError> {
+        let pages = &pages[..pages.len().min(MAX_TD_PAGES)];
+        let length = length.min((pages.len() * PAGE_SIZE) as u32);
+        let count = (length as usize)
+            .div_ceil(PAGE_SIZE)
+            .clamp(1, pages.len().max(1));
+        let packet = u32::from(max_packet.max(1));
+        let mut trbs = [Trb::default(); MAX_TD_PAGES];
+        for (i, trb) in trbs[..count].iter_mut().enumerate() {
+            let start = (i * PAGE_SIZE) as u32;
+            let end = (start + PAGE_SIZE as u32).min(length);
+            let buffer = pages.get(i).copied().unwrap_or(0);
+            let last = i + 1 == count;
+            let td_size = if last {
+                0
+            } else {
+                (length - end).div_ceil(packet)
+            };
+            *trb = Trb::normal_sized(buffer, end.saturating_sub(start), td_size, !last);
+        }
+        self.submit(&trbs[..count], None, length)
     }
 
     pub fn complete(&mut self, trb: u64, code: CompletionCode, residual: u32) -> Completed {
@@ -226,9 +263,14 @@ impl<P: DmaPage> TransferRing<P> {
         let Some(i) = found else {
             return Completed::Stray;
         };
+        let first = self.ring.distance(self.entries[i].first);
         let entry = &mut self.entries[i];
         let delivered = entry.length - residual.min(entry.length);
-        let result = if code == CompletionCode::SHORT_PACKET && Some(index) == entry.data {
+        let result = if code == CompletionCode::SHORT_PACKET && entry.chained {
+            let before = u32::from(at - first) * PAGE_SIZE as u32;
+            let trb = entry.length.saturating_sub(before).min(PAGE_SIZE as u32);
+            Ok(before.min(entry.length) + trb - residual.min(trb))
+        } else if code == CompletionCode::SHORT_PACKET && Some(index) == entry.data {
             entry.short = Some(delivered);
             if index != entry.ticket.last {
                 return Completed::Partial;
@@ -467,6 +509,104 @@ mod tests {
         }
         assert_eq!(r.normal(0x9000, 1), Err(PushError::Halted));
         assert!(TransferError::Gone.is_final() && !TransferError::Stall.is_final());
+    }
+
+    #[test]
+    fn a_bulk_td_chains_a_trb_per_page_and_counts_what_follows() {
+        let (mem, mut r) = ring();
+        let (base, _) = r.dequeue();
+        let pages: std::vec::Vec<u64> = (0..30).map(|i| 0x10_0000 + i * 0x1000).collect();
+        let ticket = r.bulk(&pages, 30 * 4096 - 512, 512).unwrap();
+        let trbs: std::vec::Vec<Trb> = (0..30).map(|i| trb_at(&mem, base + i * 16)).collect();
+        assert!(
+            trbs.iter()
+                .all(|t| t.kind() == trb_kind::NORMAL && t.cycle())
+        );
+        assert!(trbs[..29].iter().all(Trb::chains) && !trbs[29].chains());
+        assert_eq!(trbs[0].status & 0x1_ffff, 4096);
+        assert_eq!(trbs[29].status & 0x1_ffff, 4096 - 512);
+        assert_eq!(trbs[0].status >> 17, 31, "TD Size saturates");
+        assert_eq!(trbs[27].status >> 17, 15);
+        assert_eq!(trbs[29].status >> 17, 0);
+        assert_eq!(trbs[3].parameter, 0x10_3000);
+        assert_eq!(
+            r.complete(base + 29 * 16, CompletionCode::SUCCESS, 0),
+            Completed::Transfer
+        );
+        assert_eq!(r.take(ticket), Some(Ok(30 * 4096 - 512)));
+    }
+
+    #[test]
+    fn a_short_packet_anywhere_in_a_bulk_td_ends_it() {
+        let (_mem, mut r) = ring();
+        let (base, _) = r.dequeue();
+        let pages = [0x10_0000, 0x10_1000, 0x10_2000, 0x10_3000];
+        let ticket = r.bulk(&pages, 4 * 4096, 512).unwrap();
+        let next = r.bulk(&pages[..1], 13, 512).unwrap();
+        assert_eq!(
+            r.complete(base + 16, CompletionCode::SHORT_PACKET, 1000),
+            Completed::Transfer
+        );
+        assert_eq!(r.take(ticket), Some(Ok(4096 + 3096)));
+        assert_eq!(
+            r.complete(base + 3 * 16, CompletionCode::SUCCESS, 0),
+            Completed::Stray,
+            "a controller that also reports the TD's last TRB"
+        );
+        assert_eq!(
+            r.complete(base + 4 * 16, CompletionCode::SHORT_PACKET, 0xff_ffff),
+            Completed::Transfer
+        );
+        assert_eq!(r.take(next), Some(Ok(0)));
+        let stalled = r.bulk(&pages, 3 * 4096, 512).unwrap();
+        assert_eq!(
+            r.complete(base + 6 * 16, CompletionCode::STALL, 0),
+            Completed::Transfer
+        );
+        assert_eq!(r.take(stalled), Some(Err(TransferError::Stall)));
+        assert!(r.is_halted());
+    }
+
+    #[test]
+    fn a_bulk_td_across_the_link_chains_the_link() {
+        let (mem, mut r) = ring();
+        let (base, _) = r.dequeue();
+        let link = u64::from(crate::xhci::ring::RING_TRBS - 1);
+        for i in 0..link - 2 {
+            let ticket = r.normal(0x9000, 1).unwrap();
+            assert_eq!(
+                r.complete(base + i * 16, CompletionCode::SUCCESS, 0),
+                Completed::Transfer
+            );
+            assert_eq!(r.take(ticket), Some(Ok(1)));
+        }
+        assert!(!trb_at(&mem, base + link * 16).chains());
+        let pages = [0x10_0000, 0x10_1000, 0x10_2000, 0x10_3000];
+        let ticket = r.bulk(&pages, 4 * 4096, 64).unwrap();
+        assert!(trb_at(&mem, base + link * 16).chains());
+        assert_eq!(trb_at(&mem, base + link * 16).kind(), trb_kind::LINK);
+        assert_eq!(
+            r.complete(base + 16, CompletionCode::SUCCESS, 0),
+            Completed::Transfer
+        );
+        assert_eq!(r.take(ticket), Some(Ok(4 * 4096)));
+        let single = r.normal(0x9000, 1).unwrap();
+        r.complete(base + 2 * 16, CompletionCode::SUCCESS, 0);
+        assert_eq!(r.take(single), Some(Ok(1)));
+    }
+
+    #[test]
+    fn a_bulk_td_is_cut_to_its_pages() {
+        let (mem, mut r) = ring();
+        let (base, _) = r.dequeue();
+        let ticket = r.bulk(&[0x10_0000], 3 * 4096, 512).unwrap();
+        assert!(!trb_at(&mem, base).chains());
+        r.complete(base, CompletionCode::SUCCESS, 0);
+        assert_eq!(r.take(ticket), Some(Ok(4096)));
+        let empty = r.bulk(&[], 0, 512).unwrap();
+        assert_eq!(trb_at(&mem, base + 16).status & 0x1_ffff, 0);
+        r.complete(base + 16, CompletionCode::SUCCESS, 0);
+        assert_eq!(r.take(empty), Some(Ok(0)));
     }
 
     #[test]

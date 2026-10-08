@@ -463,6 +463,21 @@ pub fn block_size(fd: RawFd) -> SyscallResult<u32> {
     demux(result).map(|_| size as u32)
 }
 
+/// Whether the block device on `fd` refuses writes (BLKROGET ioctl).
+#[inline(always)]
+pub fn read_only(fd: RawFd) -> SyscallResult<bool> {
+    let mut flag = 0i32;
+    let result = unsafe {
+        syscall3(
+            SYSCALL_IOCTL,
+            fd as u64,
+            u64::from(slopos_abi::fs::block_ioctl::BLKROGET),
+            (&mut flag as *mut i32) as u64,
+        )
+    };
+    demux(result).map(|_| flag != 0)
+}
+
 /// Open the PTY slave peer of a master FD (TIOCGPTPEER ioctl). The new fd
 /// shares the slave's open state with every other slave fd.
 #[inline(always)]

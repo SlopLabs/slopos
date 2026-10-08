@@ -24,6 +24,10 @@ use crate::xhci::trb::CompletionCode;
 pub const ADDRESS_MS: u64 = 10;
 /// Failed recovery steps before an endpoint is left halted.
 pub const MAX_RECOVERIES: u8 = 3;
+/// A device that ran this long before its driver gave it up starts its
+/// port's failure count afresh: only a device that fails again soon after
+/// enumerating spends the port's tries.
+pub const SERVED_MS: u64 = 60_000;
 
 const EP0: u32 = 1 << 1;
 
@@ -119,6 +123,7 @@ pub struct Node {
     /// DCI bits of endpoints whose ring stays halted until EP0 has carried
     /// their `CLEAR_FEATURE(ENDPOINT_HALT)`.
     owed_clears: u32,
+    running_since: u64,
 }
 
 impl Node {
@@ -328,6 +333,9 @@ impl Tree<'_> {
         if let Some(port) = self.port_mut(node.port)
             && port.state == (port::State::Attached { slot })
         {
+            if failure == Failure::Recovery && now.saturating_sub(node.running_since) >= SERVED_MS {
+                port.failures = 0;
+            }
             action = port.fail();
             tries = port.failures;
         }
@@ -424,7 +432,7 @@ impl Tree<'_> {
                         let setup = hub_class::get_descriptor(node.speed.is_super());
                         self.request(host, now, slot, setup, Stage::HubDescriptor);
                     } else {
-                        self.running(host, slot);
+                        self.running(host, now, slot);
                     }
                 }
             }
@@ -458,7 +466,7 @@ impl Tree<'_> {
                 Poll::Pending => {}
                 Poll::TimedOut => self.stuck(host),
                 Poll::Done(result) => match command_code(result) {
-                    Ok(()) => self.running(host, slot),
+                    Ok(()) => self.running(host, now, slot),
                     Err(failure) => self.failed(host, now, slot, failure),
                 },
             },
@@ -738,9 +746,10 @@ impl Tree<'_> {
         self.await_command(host, now, slot, submitted, Stage::ConfiguringHub);
     }
 
-    fn running<H: Host>(&mut self, host: &mut H, slot: u8) {
+    fn running<H: Host>(&mut self, host: &mut H, now: u64, slot: u8) {
         let node = self.node(slot);
         node.stage = Stage::Running;
+        node.running_since = now;
         let (hub, functions) = (node.hub, node.functions);
         let hub_ports = self
             .hubs
@@ -764,6 +773,9 @@ impl Tree<'_> {
     /// EP0 is recovered first, then owed clears are sent, then any other
     /// endpoint a transfer halted is recovered.
     fn watch<H: Host>(&mut self, host: &mut H, now: u64, slot: u8) {
+        if host.escalated(slot) {
+            return self.failed(host, now, slot, Failure::Recovery);
+        }
         let node = *self.node(slot);
         let halted = host.halted(slot) & !node.given_up;
         if halted & EP0 != 0 {

@@ -553,7 +553,7 @@ test-install-guest:
 # the system and commits it; the varstore is kept between them, as a
 # machine's flash is. The blank disk then takes a reinstall that keeps its
 # root, and a boot after it.
-[doc("Installer check: from the ISO on a USB stick, install SlopOS onto a blank disk (erase), beside another system (free space) and over an existing partition (reuse), then boot each disk with the stick gone, build and install the system there and commit it, and reinstall over the blank disk keeping its root; the host holds every table to sfdisk, every root to e2fsck, every FAT volume to fsck.fat and the other system's partitions, entries and files to their bytes. INSTALLER_PAYLOAD=0 installs without the toolchain and clones a slot instead of building one; names a subset: just test-installer foreign")]
+[doc("Installer check: from the ISO on a USB stick, visible as sda and never offered, install SlopOS onto a blank disk (erase), beside another system (free space) and over an existing partition (reuse), then boot each disk with the stick gone, build and install the system there and commit it, and reinstall over the blank disk keeping its root; the host holds every table to sfdisk, every root to e2fsck, every FAT volume to fsck.fat and the other system's partitions, entries and files to their bytes. INSTALLER_PAYLOAD=0 installs without the toolchain and clones a slot instead of building one; names a subset: just test-installer foreign")]
 test-installer *DISKS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -579,7 +579,7 @@ test-installer *DISKS:
         local stall="${INSTALLER_STALL_SECS:-1800}"
         shift 3
         local how=(QEMU_ALLOW_REBOOT=1)
-        [ -z "$stick" ] || how=(INSTALL_STICK="$stick")
+        [ -z "$stick" ] || how=(INSTALL_STICK="$stick" INSTALL_STICK_WRITABLE="$writable")
         setsid timeout "$budget" \
             just _qemu-boot "test" "0" {{iso_installer}} "$disk" "${how[@]}" BOOT_DISK_IMG="$disk" \
             OVMF_VARS_FILE="$PWD/$vars" QEMU_NO_ROOT_DISK=1 QEMU_TEST_DISKS=0 \
@@ -697,8 +697,23 @@ test-installer *DISKS:
         sfdisk --dump "$disk" >"$disk.before" 2>/dev/null || : >"$disk.before"
         rm -f "$vars"
         missing=0
-        boot_once "$logs-install.log" "${INSTALLER_TIMEOUT_SECS:-1800}" {{iso_installer}} \
+        # The stick is sda beside the disk and never offered: write-protected,
+        # but on the blank disk's install a writable copy, which only its GPT
+        # disk GUID excludes and which must come back as it was built.
+        stick={{iso_installer}} writable=0 passed_over="write-protected"
+        if [ "$kind" = blank ]; then
+            stick="{{build_dir}}/installer-stick.img" writable=1 passed_over="the install medium"
+            cp {{iso_installer}} "$stick"
+        fi
+        boot_once "$logs-install.log" "${INSTALLER_TIMEOUT_SECS:-1800}" "$stick" \
+            "INSTALLER-NOT-OFFERED /dev/sda: $passed_over" \
             "INSTALLER-INSTALLED" "ok 1 - installed_built_and_committed" || missing=1
+        if [ "$writable" = 1 ]; then
+            cmp -s "$stick" {{iso_installer}} ||
+                { echo "FAIL: the install wrote to the writable stick it booted from" >&2; missing=1; }
+            rm -f "$stick"
+            writable=0
+        fi
         if [ "$missing" = 0 ]; then
             # The build's budget: under TCG the guest's build alone takes hours.
             budget=1800
@@ -715,7 +730,8 @@ test-installer *DISKS:
             # The firmware boots SlopOS first now; a person picks the stick
             # from its boot menu, which a fresh varstore stands in for.
             rm -f "$vars"
-            markers=("INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed")
+            markers=("INSTALLER-NOT-OFFERED /dev/sda: write-protected"
+                "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed")
             [ "$payload" = 0 ] ||
                 markers+=("/usr/local already holds this medium's toolchain" "the root has a /src already")
             boot_once "$logs-reinstall.log" "${INSTALLER_TIMEOUT_SECS:-1800}" {{iso_installer}} \
@@ -905,7 +921,7 @@ test-rude-exit: _build-run-tests
 
 # The ISO names the explicit tests, which run only when named since the host
 # must pull and plug devices for them.
-[doc("USB check: both QEMU xHCI models, qemu-xhci on MSI-X and nec-usb-xhci on MSI, each with a stick at every speed, QEMU's hub with two devices behind it and a full-speed keyboard; the guest must enumerate every device and bind every stick, and through two rounds of QMP pulls and plugs give back every slot, page and claim, then reset each controller")]
+[doc("USB check: both QEMU xHCI models, qemu-xhci on MSI-X and nec-usb-xhci on MSI, each with a stick at every speed, QEMU's hub with two devices behind it and a full-speed keyboard, and an ext4 stick and a read-only drive; the guest must enumerate every device and bind every stick, through two rounds of QMP pulls and plugs give back every slot, page and claim, keep what it fsynced on the ext4 stick across a pull mid-write, mount the read-only drive read-only, then reset each controller")]
 test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     #!/usr/bin/env bash
     set -euo pipefail
@@ -920,6 +936,7 @@ test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     tests+=,slopos_drivers::tests::usb_tests::test_usb_09_plugged_devices_return
     tests+=,slopos_drivers::tests::usb_tests::test_usb_10_pulled_again
     tests+=,slopos_drivers::tests::usb_tests::test_usb_11_plugged_again
+    tests+=,slopos_core::utests::utest_usb_disk
     tests+=,slopos_core::utests::utest_usb_shell
     tests+=,slopos_drivers::tests::usb_tests::test_usb_12_shutdown_resets
     KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \

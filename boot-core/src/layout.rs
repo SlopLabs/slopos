@@ -71,6 +71,9 @@ pub const MEDIUM_LOADER_LICENSE: &str = "boot/LICENSE.limine";
 pub const MEDIUM_LOADER_NOTICES: &str = "boot/3RDPARTY.limine.md";
 /// The third-party notices, which go beside the slots.
 pub const MEDIUM_NOTICE: &str = "boot/NOTICE.md";
+/// The GPT disk GUID the medium's image was built with, spelled out: the
+/// disk the installer never offers, however the loader was started.
+pub const MEDIUM_DISK_GUID: &str = "boot/disk-guid";
 
 /// The description of SlopOS's firmware boot entry.
 pub const FIRMWARE_ENTRY: &str = "SlopOS";

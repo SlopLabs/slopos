@@ -388,6 +388,80 @@ pub fn test_block_disk_names() -> TestResult {
         virtio(1).partition(128).as_bytes() == b"vdb128",
         "a name ending in a letter does not"
     );
+    assert_test!(DiskName::scsi(0).as_bytes() == b"sda", "sda");
+    assert_test!(DiskName::scsi(27).as_bytes() == b"sdab", "sdab");
+    assert_test!(DiskName::scsi(0).partition(1).as_bytes() == b"sda1", "sda1");
+    pass!()
+}
+
+/// A USB disk takes the lowest free `sd` letter, gives it back when its
+/// device leaves, and a claim on the disk that left never releases its
+/// successor's; it reports the write protection its device does, and is
+/// never the disk `root=auto` takes.
+pub fn test_block_usb_disks_come_and_go() -> TestResult {
+    let Some(scratch) = block::disk(b"nvme1n2") else {
+        return fail!("nvme1n2 is not registered");
+    };
+    let view = || {
+        let ns = scratch.namespace();
+        slopos_ostd::KArc::try_new(
+            block::EngineDisk::new(
+                slopos_ostd::KArc::clone(scratch.engine()),
+                ns.nsid,
+                1 << ns.block_shift,
+                scratch.capacity(),
+                false,
+            )
+            .protected(),
+        )
+    };
+    let Ok(first) = view() else {
+        return fail!("no memory for a disk");
+    };
+    let Some(name) = block::register_usb_disk(first) else {
+        return fail!("the USB disk was not registered");
+    };
+    assert_test!(name.as_bytes().starts_with(b"sd"), "a USB disk is sd");
+    assert_test!(
+        block::first_fixed_disk().is_some_and(|d| d.as_bytes() == b"nvme0n1"),
+        "root=auto's disk stays nvme0n1"
+    );
+    let fs = slopos_fs::vfs::init::vfs_devfs_instance();
+    let Ok(inode) = fs.lookup(fs.root_inode(), name.as_bytes()) else {
+        return fail!("/dev/{} is missing", name);
+    };
+    assert_eq_test!(
+        devfs_block_ioctl(inode, block_ioctl::BLKROGET),
+        Some(Ok(BlockIoctlReply::Int(1))),
+        "BLKROGET reports the device's protection"
+    );
+    let held = match block::claim(name.as_bytes()) {
+        Ok(held) => held,
+        Err(e) => return fail!("claiming {} failed: {:?}", name, e),
+    };
+    assert_test!(held.write_protected(), "a write claim reports it too");
+    assert_test!(block::unregister_disk(name), "unregister");
+    assert_test!(
+        fs.lookup(fs.root_inode(), name.as_bytes()).is_err(),
+        "its node is gone"
+    );
+    let Ok(second) = view() else {
+        return fail!("no memory for a disk");
+    };
+    let again = block::register_usb_disk(second);
+    assert_test!(again == Some(name), "the letter is reused");
+    let successor = match block::claim(name.as_bytes()) {
+        Ok(c) => c,
+        Err(e) => return fail!("claiming the successor failed: {:?}", e),
+    };
+    drop(held);
+    assert_test!(
+        matches!(block::claim_read(name.as_bytes()), Err(ClaimError::Busy)),
+        "the departed disk's claim released its successor's"
+    );
+    drop(successor);
+    assert_test!(block::unregister_disk(name), "unregister the successor");
+    assert_test!(!block::unregister_disk(name), "a disk leaves once");
     pass!()
 }
 
@@ -402,3 +476,4 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_block_volume_links, suite = block_layer);
 slopos_testing::stest!(name = test_block_ioctls, suite = block_layer);
+slopos_testing::stest!(name = test_block_usb_disks_come_and_go, suite = block_layer);

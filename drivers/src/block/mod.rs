@@ -3,10 +3,11 @@
 //! takes.
 //!
 //! Names follow Linux: `vda` in virtio probe order, `nvme<C>n<N>` for
-//! namespace `N` of the `C`-th NVMe controller, and a partition appended as
-//! `vda1` or, after a name ending in a digit, `nvme0n1p1`. Probe order is not
-//! stable across machines, so `/dev/disk/by-*` and `PARTUUID=`, `UUID=` and
-//! `LABEL=` are the spellings that are.
+//! namespace `N` of the `C`-th NVMe controller, `sda` for the USB disk that
+//! took the lowest free letter, and a partition appended as `vda1` or, after a
+//! name ending in a digit, `nvme0n1p1`. Probe order is not stable across
+//! machines, so `/dev/disk/by-*` and `PARTUUID=`, `UUID=` and `LABEL=` are the
+//! spellings that are.
 //!
 //! A claim covers what it names: a partition's excludes the whole disk and
 //! itself, the whole disk's excludes every partition. A write claim is
@@ -20,7 +21,7 @@ mod disk;
 
 pub use disk::EngineDisk;
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_boot_core::Guid;
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
@@ -84,6 +85,15 @@ impl DiskName {
 
     /// `vd` and the `index`-th letter name: `a`..`z`, then `aa`, `ab`, …
     pub fn virtio(index: usize) -> Self {
+        Self::lettered(b"vd", index)
+    }
+
+    /// A USB disk's: `sd` and the `index`-th letter name.
+    pub fn scsi(index: usize) -> Self {
+        Self::lettered(b"sd", index)
+    }
+
+    fn lettered(prefix: &[u8], index: usize) -> Self {
         let mut letters = [0u8; 8];
         let mut at = letters.len();
         let mut n = index + 1;
@@ -94,7 +104,7 @@ impl DiskName {
             n /= 26;
         }
         let mut name = Self::empty();
-        name.push(b"vd");
+        name.push(prefix);
         name.push(&letters[at..]);
         name
     }
@@ -176,6 +186,10 @@ struct Partition {
 
 struct Disk {
     name: DiskName,
+    /// Which disk of that name: a claim on one never releases its successor.
+    generation: u64,
+    /// On a bus whose disks come and go, which `root=auto` never takes.
+    removable: bool,
     device: KArc<EngineDisk>,
     scheme: PartitionScheme,
     whole: Holders,
@@ -195,11 +209,12 @@ impl Disk {
     }
 }
 
-/// Registration order is probe order: `root=auto`'s disk0 is the first.
-/// A sleeping lock, since registering and re-reading allocate under it; no
-/// I/O ever runs under it.
+/// Registration order is probe order: `root=auto`'s disk is the first one
+/// not removable. A sleeping lock, since registering and re-reading allocate
+/// under it; no I/O ever runs under it.
 static DISKS: Mutex<KVec<Disk>> =
     Mutex::new(KVec::new(), lock_class!("BLOCK_DISKS", LOCK_LEVEL_REGISTRY));
+static GENERATIONS: AtomicU64 = AtomicU64::new(1);
 
 /// A killed task still releases what it claimed, and nothing under the lock
 /// blocks, so its acquire spins where a live task's sleeps.
@@ -267,29 +282,56 @@ impl BlockDevice for DiskReader {
     fn flush(&self) -> Result<(), BlockDeviceError> {
         self.0.flush()
     }
+
+    fn write_protected(&self) -> bool {
+        self.0.write_protected()
+    }
 }
 
 /// Register a disk a driver probed, read its partition table and publish its
 /// `/dev` nodes.
 pub fn register_disk(name: DiskName, device: KArc<EngineDisk>) -> bool {
-    {
+    let registered = register(device, false, |disks| {
+        (!disks.iter().any(|d| d.name == name)).then_some(name)
+    });
+    if registered.is_none() {
+        klog_info!("BLOCK: cannot register {}", name);
+    }
+    registered.is_some()
+}
+
+/// Register a USB disk as `sd` and the lowest letter no disk holds; its
+/// name, unless the registry is full.
+pub fn register_usb_disk(device: KArc<EngineDisk>) -> Option<DiskName> {
+    register(device, true, |disks| {
+        (0..MAX_DISKS)
+            .map(DiskName::scsi)
+            .find(|name| !disks.iter().any(|d| d.name == *name))
+    })
+}
+
+fn register(
+    device: KArc<EngineDisk>,
+    removable: bool,
+    name: impl FnOnce(&KVec<Disk>) -> Option<DiskName>,
+) -> Option<DiskName> {
+    let generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
+    let name = {
         let mut disks = disks();
-        if disks.len() >= MAX_DISKS || disks.iter().any(|d| d.name == name) {
-            klog_info!("BLOCK: cannot register {}", name);
-            return false;
-        }
+        let name = name(&disks).filter(|_| disks.len() < MAX_DISKS)?;
         let entry = Disk {
             name,
+            generation,
+            removable,
             device: KArc::clone(&device),
             scheme: PartitionScheme::None,
             whole: Holders::default(),
             scanning: true,
             partitions: KVec::new(),
         };
-        if disks.push(entry).is_err() {
-            return false;
-        }
-    }
+        disks.push(entry).ok()?;
+        name
+    };
     let reader: KArc<dyn BlockDevice + Send + Sync> = match KArc::try_new(DiskReader(device)) {
         Ok(reader) => reader,
         Err(_) => {
@@ -297,11 +339,11 @@ pub fn register_disk(name: DiskName, device: KArc<EngineDisk>) -> bool {
                 let mut disks = disks();
                 disks
                     .iter()
-                    .position(|d| d.name == name)
+                    .position(|d| d.name == name && d.generation == generation)
                     .map(|at| disks.remove(at))
             };
             drop(removed);
-            return false;
+            return None;
         }
     };
     if let Err(e) = devfs_register_block_node(
@@ -316,7 +358,26 @@ pub fn register_disk(name: DiskName, device: KArc<EngineDisk>) -> bool {
         (PartitionScheme::None, KVec::new())
     });
     publish_partitions(&name, &reader, &partitions);
-    finish_scan(&name, scheme, partitions);
+    finish_scan(&name, generation, scheme, partitions);
+    Some(name)
+}
+
+/// Take a disk whose device left out of the registry and `/dev`. Whatever
+/// still holds it, a mount or an open node, keeps it until it lets go, and
+/// fails from here on.
+pub fn unregister_disk(name: DiskName) -> bool {
+    let removed = {
+        let mut disks = disks();
+        let Some(at) = disks.iter().position(|d| d.name == name) else {
+            return false;
+        };
+        disks.remove(at)
+    };
+    for part in removed.partitions.iter() {
+        let _ = devfs_unregister_block_node(name.partition(part.entry.number).as_bytes());
+    }
+    let _ = devfs_unregister_block_node(name.as_bytes());
+    drop(removed);
     true
 }
 
@@ -382,19 +443,43 @@ fn publish_partitions(
 }
 
 /// Install a scanned table and let claims in again. The table it replaces
-/// drops here, with the registry unlocked.
-fn finish_scan(name: &DiskName, scheme: PartitionScheme, partitions: KVec<Partition>) {
-    let _ = devfs_set_block_partitioned(name.as_bytes(), !partitions.is_empty());
-    let replaced = {
+/// drops here, with the registry unlocked; a disk taken out of the registry
+/// while its table was read keeps none of the nodes the read published.
+fn finish_scan(
+    name: &DiskName,
+    generation: u64,
+    scheme: PartitionScheme,
+    partitions: KVec<Partition>,
+) {
+    let installed = {
         let mut disks = disks();
-        let Some(disk) = disks.iter_mut().find(|d| d.name == *name) else {
-            return;
-        };
-        disk.scanning = false;
-        disk.scheme = scheme;
-        core::mem::replace(&mut disk.partitions, partitions)
+        match disks
+            .iter_mut()
+            .find(|d| d.name == *name && d.generation == generation)
+        {
+            Some(disk) => {
+                disk.scanning = false;
+                disk.scheme = scheme;
+                let partitioned = !partitions.is_empty();
+                Ok((
+                    partitioned,
+                    core::mem::replace(&mut disk.partitions, partitions),
+                ))
+            }
+            None => Err(partitions),
+        }
     };
-    drop(replaced);
+    match installed {
+        Ok((partitioned, replaced)) => {
+            let _ = devfs_set_block_partitioned(name.as_bytes(), partitioned);
+            drop(replaced);
+        }
+        Err(published) => {
+            for part in published.iter() {
+                let _ = devfs_unregister_block_node(name.partition(part.entry.number).as_bytes());
+            }
+        }
+    }
 }
 
 pub fn disk_count() -> usize {
@@ -404,6 +489,13 @@ pub fn disk_count() -> usize {
 /// The `index`-th disk registered, in probe order.
 pub fn disk_name(index: usize) -> Option<DiskName> {
     disks().get(index).map(|d| d.name)
+}
+
+/// The machine's own disk that `root=auto` and `root=disk` mean: the first
+/// registered that is not removable, so a stick left in a port changes
+/// nothing that boots.
+pub fn first_fixed_disk() -> Option<DiskName> {
+    disks().iter().find(|d| !d.removable).map(|d| d.name)
 }
 
 /// A partition of a registered disk and its window on that disk.
@@ -481,7 +573,7 @@ fn claim_as(
     name: &[u8],
     access: Access,
 ) -> Result<KBox<dyn BlockDevice + Send + Sync>, ClaimError> {
-    let (owner, device, target, window) = {
+    let (owner, generation, device, target, window) = {
         let mut disks = disks();
         let (index, target) = locate(&disks, name).ok_or(ClaimError::NoDevice)?;
         let disk = &mut disks[index];
@@ -518,10 +610,17 @@ fn claim_as(
                 Some((part.entry.start, part.entry.len))
             }
         };
-        (disk.name, KArc::clone(&disk.device), target, window)
+        (
+            disk.name,
+            disk.generation,
+            KArc::clone(&disk.device),
+            target,
+            window,
+        )
     };
     let guard = ClaimGuard {
         disk: owner,
+        generation,
         target,
         access,
         wrote: AtomicBool::new(false),
@@ -545,6 +644,7 @@ fn claim_as(
 /// ever built.
 struct ClaimGuard {
     disk: DiskName,
+    generation: u64,
     target: Target,
     access: Access,
     wrote: AtomicBool,
@@ -559,7 +659,10 @@ impl Drop for ClaimGuard {
         }
         {
             let mut disks = disks();
-            let Some(disk) = disks.iter_mut().find(|d| d.name == self.disk) else {
+            let Some(disk) = disks
+                .iter_mut()
+                .find(|d| d.name == self.disk && d.generation == self.generation)
+            else {
                 return;
             };
             match self.target {
@@ -648,7 +751,7 @@ impl BlockDevice for Claimed {
 /// partition nodes. Refused while anything on the disk is claimed: a mounted
 /// partition's window must not move under it.
 pub fn reread(name: &[u8]) -> Result<(), RereadError> {
-    let (whole, device, old) = {
+    let (whole, generation, device, old) = {
         let mut disks = disks();
         let (index, target) = locate(&disks, name).ok_or(RereadError::NoDevice)?;
         if let Target::Partition(_) = target {
@@ -666,7 +769,7 @@ pub fn reread(name: &[u8]) -> Result<(), RereadError> {
                 return Err(RereadError::NoMemory);
             }
         }
-        (disk.name, KArc::clone(&disk.device), old)
+        (disk.name, disk.generation, KArc::clone(&disk.device), old)
     };
     for part in old.iter() {
         let _ = devfs_unregister_block_node(part.as_bytes());
@@ -674,7 +777,7 @@ pub fn reread(name: &[u8]) -> Result<(), RereadError> {
     let reader: KArc<dyn BlockDevice + Send + Sync> = match KArc::try_new(DiskReader(device)) {
         Ok(reader) => reader,
         Err(_) => {
-            finish_scan(&whole, PartitionScheme::None, KVec::new());
+            finish_scan(&whole, generation, PartitionScheme::None, KVec::new());
             return Err(RereadError::NoMemory);
         }
     };
@@ -682,12 +785,12 @@ pub fn reread(name: &[u8]) -> Result<(), RereadError> {
         Ok(table) => table,
         Err(e) => {
             klog_info!("BLOCK: {} re-read: table unusable: {:?}", whole, e);
-            finish_scan(&whole, PartitionScheme::None, KVec::new());
+            finish_scan(&whole, generation, PartitionScheme::None, KVec::new());
             return Err(RereadError::Table);
         }
     };
     publish_partitions(&whole, &reader, &partitions);
-    finish_scan(&whole, scheme, partitions);
+    finish_scan(&whole, generation, scheme, partitions);
     Ok(())
 }
 

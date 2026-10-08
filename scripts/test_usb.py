@@ -2,10 +2,13 @@
 """The host half of `just test-usb`: boots the tests ISO with both of QEMU's
 xHCI models, each carrying a SuperSpeed stick, QEMU's full-speed hub with a
 stick, a tablet and a mouse behind it, a high-speed stick and a full-speed
-keyboard, and acts on the guest's `USB-TEST:` lines: it plugs and pulls
-devices through QMP and injects keys and motion with `input-send-event`. The
-run passes when the suite is green and the log shows every device
-enumerated, bound where a driver matches it, and removed, each time.
+keyboard, with a high-speed ext4 stick on qemu-xhci's fifth USB 2 connector
+and a read-only ext4 drive for nec-usb-xhci's, and acts on the guest's `USB-TEST:`
+lines: it plugs and pulls devices through QMP and injects keys and motion
+with `input-send-event`. The run passes when the suite is green, the log
+shows every device enumerated, bound where a driver matches it, and removed,
+each time, and both ext4 volumes pass `e2fsck` at rest, the stick holding
+what the guest fsynced before its pull.
 
 QEMU sends an event that names no display to the unbound device activated
 most recently, and one that names `video0` to a device bound to it. The
@@ -17,6 +20,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -25,13 +29,22 @@ import threading
 import time
 from typing import NamedTuple
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import ext4_profile  # noqa: E402
+
 CONTROLLERS = {
     "xhci1": ("qemu-xhci", "1b36:000d", ""),
     "xhci2": ("nec-usb-xhci", "1033:0194", ",msix=off"),
 }
 USB3_PORTS = 2
-USB2_PORTS = 4
+USB2_PORTS = 5
 STICK_BYTES = 1 << 20
+DISK_BYTES = 16 << 20
+# What the guest writes and fsyncs on the ext4 stick before its pull, and
+# what the read-only drive is seeded with (userland/src/bin/tests/usb_disk_test.rs).
+KEPT = ("kept", b"fsynced before the pull\n")
+SEEDED = ("seeded", b"written by the host\n")
+COLD_BYTES = 1 << 20
 DISPLAY = "video0"
 # An event a guest poll has not taken yet merges with the next.
 PACE = 0.15
@@ -58,7 +71,14 @@ DEVICES = (
     Device("hs", "usb-storage", "3", {}, "5", "usb-test"),
     Device("fs", "usb-kbd", "4", {"usb_version": 1, "display": DISPLAY}, "6", "usb-hid"),
 )
-ROOT_PORTS = ("1", "4", "5", "6")
+# Each controller's own on its fifth connector: qemu-xhci's ext4 stick,
+# `sda`, and nec-usb-xhci's read-only drive, which only the guest's `plug ro`
+# attaches.
+EXTRA = {
+    "xhci1": Device("disk", "usb-storage", "5", {}, "7", "usb-storage"),
+    "xhci2": Device("ro", "usb-storage", "5", {}, "7", "usb-storage"),
+}
+LATE = {"xhci2-ro"}
 ROUNDS = 2
 TYPED = "exit 7\n"
 QCODES = {" ": "spc", "\n": "ret"}
@@ -66,8 +86,29 @@ QCODES = {" ": "spc", "\n": "ret"}
 
 def devices():
     for bus in CONTROLLERS:
-        for suffix, driver, port, props, path, bound in DEVICES:
+        for suffix, driver, port, props, path, bound in DEVICES + (EXTRA[bus],):
             yield f"{bus}-{suffix}", bus, driver, port, props, path, bound
+
+
+def image_of(build_dir, name):
+    return os.path.join(build_dir, f"usb-{name}.img")
+
+
+def ext4_image(image, label, files):
+    """A volume in the profile SlopOS formats, holding `files`."""
+    stage = image + ".d"
+    shutil.rmtree(stage, ignore_errors=True)
+    os.makedirs(stage)
+    for name, data in files:
+        with open(os.path.join(stage, name), "wb") as f:
+            f.write(data)
+    with open(image, "wb") as f:
+        f.truncate(DISK_BYTES)
+    subprocess.run(
+        ["mke2fs", "-q", "-F", *ext4_profile.mkfs_args(), "-L", label, "-d", stage, image],
+        check=True,
+    )
+    shutil.rmtree(stage)
 
 
 def device_args(build_dir):
@@ -80,15 +121,20 @@ def device_args(build_dir):
         device = f"{driver},id={name},bus={bus}.0,port={port}"
         device += "".join(f",{key}={value}" for key, value in props.items())
         if driver == "usb-storage":
-            image = os.path.join(build_dir, f"usb-{name}.img")
-            with open(image, "wb") as f:
-                f.truncate(STICK_BYTES)
-            args += [
-                "-blockdev",
-                f"driver=raw,node-name={name},file.driver=file,file.filename={image}",
-            ]
+            image = image_of(build_dir, name)
+            node = f"driver=raw,node-name={name},file.driver=file,file.filename={image}"
+            if name.endswith("-disk"):
+                ext4_image(image, "usb-stick", [("cold", os.urandom(COLD_BYTES))])
+            elif name.endswith("-ro"):
+                ext4_image(image, "usb-ro", [SEEDED])
+                node += ",read-only=on"
+            else:
+                with open(image, "wb") as f:
+                    f.truncate(STICK_BYTES)
+            args += ["-blockdev", node]
             device += f",drive={name},removable=on"
-        args += ["-device", device]
+        if name not in LATE:
+            args += ["-device", device]
     return args
 
 
@@ -178,9 +224,9 @@ class Bench:
 
     def __init__(self, qmp):
         self.qmp = qmp
-        self.present = {name for name, *_ in devices()}
-        self.adds = {name: 1 for name in self.present}
-        self.deletes = {name: 0 for name in self.present}
+        self.present = {name for name, *_ in devices() if name not in LATE}
+        self.adds = {name: int(name in self.present) for name, *_ in devices()}
+        self.deletes = {name: 0 for name, *_ in devices()}
         self.numbers = {}
 
     def pull(self, names, timeout):
@@ -197,9 +243,10 @@ class Bench:
                 self.deletes[name] += 1
         self.qmp.events.clear()
 
-    def plug(self):
+    def plug(self, only=None):
+        """Every device but the late ones, or the one `only` names."""
         for name, bus, driver, port, props, _, _ in sorted(devices(), key=lambda d: "." in d[3]):
-            if name in self.present:
+            if name in self.present or (name in LATE if only is None else name != only):
                 continue
             arguments = {"driver": driver, "id": name, "bus": f"{bus}.0", "port": port}
             if driver == "usb-storage":
@@ -225,6 +272,10 @@ class Bench:
                 self.pull(sorted(self.present), timeout)
             case ["plug"]:
                 self.plug()
+            case ["pull", "disk" | "ro" as which]:
+                self.pull([n for n, *_ in devices() if n.endswith(f"-{which}")], timeout)
+            case ["plug", "disk" | "ro" as which]:
+                self.plug(next(n for n, *_ in devices() if n.endswith(f"-{which}")))
             case ["pull", "mice"]:
                 self.pull([n for n, *_ in devices() if n.endswith("-mouse")], timeout)
             case ["pull", "keyboard", where]:
@@ -274,7 +325,8 @@ def grade_listing(log, model, number, ids):
     """The kconsole listing names the controller, its hub, and the stick
     behind the hub with its function bound and its bulk-in pipe idle."""
     failures = []
-    header = rf"^usb: xhci {number} at [0-9a-f:.]+ \({ids}\) running on MSI(-X)?, 6 ports, settled\r?$"
+    ports = USB2_PORTS + USB3_PORTS
+    header = rf"^usb: xhci {number} at [0-9a-f:.]+ \({ids}\) running on MSI(-X)?, {ports} ports, settled\r?$"
     if not re.search(header, log, re.M):
         failures.append(f"{model}: the kconsole listing names no running, settled controller")
     if not re.search(rf"^usb:   {number}-4 slot \d+ 0409:55aa full speed, hub\r?$", log, re.M):
@@ -292,6 +344,43 @@ def grade_listing(log, model, number, ids):
     ):
         if line not in stick.group(1):
             failures.append(f"{model}: the listing of {number}-4.1 has no line {line!r}")
+    return failures
+
+
+def grade_disks(log, bench, numbers):
+    """The ext4 stick is `sda` each time it is plugged and the read-only
+    drive `sdb`, write-protected; each disk leaves with its device."""
+    failures = []
+    for bus, name, disk, protected in (("xhci1", "xhci1-disk", "sda", ""), ("xhci2", "xhci2-ro", "sdb", ", write-protected")):
+        number = numbers.get(CONTROLLERS[bus][1])
+        if number is None:
+            continue
+        where = f"{number}-{EXTRA[bus].path}"
+        named = len(re.findall(rf"^USB: {where} LUN 0 is {disk}, \d+ MB in 512-byte blocks{protected}\r?$", log, re.M))
+        if named != bench.adds[name]:
+            failures.append(f"{name}: named {disk} {named} times, not {bench.adds[name]}")
+        removed = len(re.findall(rf"^USB: {where} {disk} removed\r?$", log, re.M))
+        if removed != bench.deletes[name]:
+            failures.append(f"{name}: {disk} removed {removed} times, not {bench.deletes[name]}")
+    return failures
+
+
+def check_images(root, build_dir):
+    """The ext4 stick whole, at rest and holding what the guest fsynced. The
+    read-only drive is QEMU's to keep as built."""
+    image = image_of(build_dir, "xhci1-disk")
+    failures = []
+    checked = subprocess.run(
+        [os.path.join(root, "scripts/check_fs_image.sh"), image],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if checked.returncode != 0:
+        failures.append(f"{image}: {checked.stdout.decode(errors='replace').strip()}")
+    path, text = KEPT
+    held = subprocess.run(["debugfs", "-R", f"cat /{path}", image], capture_output=True).stdout
+    if held != text:
+        failures.append(f"{image}: /{path} holds {held!r}, not {text!r}")
     return failures
 
 
@@ -313,7 +402,7 @@ def grade(log, tests, bench):
             if device_bus != bus:
                 continue
             adds, deletes = bench.adds[name], bench.deletes[name]
-            if path in ROOT_PORTS:
+            if "." not in path:
                 where = f"{number}-{path}"
                 attaches = len(re.findall(rf"USB: {where} attached", log))
                 detaches = len(re.findall(rf"USB: {where} detached", log))
@@ -341,6 +430,7 @@ def grade(log, tests, bench):
             failures.append(f"{model} answered its first command only when polled")
         for line in re.findall(rf"USB: {number}-\S+ enumeration failed.*", log):
             failures.append(f"{model}: {line}")
+    failures += grade_disks(log, bench, numbers)
     caps = log.find("USB-TEST: caps")
     if caps < 0 or not re.search(r"ps2_set_ledstate \S+ ledstate 6\b", log[caps:]):
         failures.append("Caps Lock on a USB keyboard never lit the i8042's LED")
@@ -418,6 +508,7 @@ def main():
 
     log = "".join(lines)
     failures = errors + (grade(log, args.tests.split(","), bench) if bench else [])
+    failures += check_images(root, args.build_dir)
     if status != 0:
         failures.append(f"qemu_run.sh exited {status}")
     if failures:
@@ -427,7 +518,10 @@ def main():
             sys.stderr.write(f"FAIL: {failure}\n")
         sys.stderr.write(f"full log in {args.log}\n")
         return 1
-    print(f"test-usb: both controllers ran, every device enumerated, bound and removed, keys and motion reached the guest, both reset — {args.log}")
+    print(
+        "test-usb: both controllers ran, every device enumerated, bound and removed, keys and motion "
+        f"reached the guest, the ext4 stick survived its pull, the read-only drive mounted read-only, both reset — {args.log}"
+    )
     return 0
 
 

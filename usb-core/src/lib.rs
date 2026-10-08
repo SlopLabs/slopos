@@ -14,4 +14,5 @@ pub mod device;
 pub mod hid;
 pub mod hub;
 pub mod knob;
+pub mod storage;
 pub mod xhci;

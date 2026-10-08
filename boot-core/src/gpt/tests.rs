@@ -216,6 +216,21 @@ fn what_this_reader_does_not_stage_is_unsupported_not_corrupt() {
     };
     assert_eq!(parse(&set_u32(8, 0x0002_0000)), Err(Reject::Unsupported));
     assert_eq!(parse(&set_u32(80, 129)), Err(Reject::Unsupported));
+    assert_eq!(
+        disk_guid(&set_u32(80, 176), PRIMARY_LBA, geometry),
+        Ok(DISK),
+        "an array this reader does not stage still names its disk"
+    );
+    assert_eq!(
+        disk_guid(&set_u32(8, 0x0002_0000), PRIMARY_LBA, geometry),
+        Err(Reject::Unsupported)
+    );
+    let mut flipped = set_u32(80, 176);
+    flipped[60] ^= 1;
+    assert_eq!(
+        disk_guid(&flipped, PRIMARY_LBA, geometry),
+        Err(Reject::Corrupt)
+    );
     assert_eq!(parse(&set_u32(80, 0)), Err(Reject::Unsupported));
     for stride in [0, 64, 132, 136, 192] {
         assert_eq!(

@@ -326,6 +326,40 @@ pub fn write_input<P: DmaPage>(
     }
 }
 
+/// Endpoints one Configure Endpoint drops and adds again.
+pub const MAX_READDED: usize = 4;
+
+/// An input context for a Configure Endpoint that drops and adds each
+/// `(dci, dequeue, cycle)` as the output context has it, at the new dequeue:
+/// the controller's toggle back at zero and its ring moved (§4.6.6). The slot
+/// context goes along unchanged, as the command requires it.
+pub fn write_readded<P: DmaPage>(
+    output: &P,
+    input: &mut P,
+    layout: ContextLayout,
+    endpoints: &[(u8, u64, bool)],
+) {
+    let slot = SlotContext::decode(&read_context(output, 0));
+    let mut contexts = [(0u8, EndpointContext::default()); MAX_READDED];
+    let mut mask = 0u32;
+    let count = endpoints.len().min(MAX_READDED);
+    for (entry, &(dci, dequeue, cycle)) in contexts.iter_mut().zip(&endpoints[..count]) {
+        let mut endpoint =
+            EndpointContext::decode(&read_context(output, layout.device_endpoint(dci)));
+        endpoint.state = 0;
+        endpoint.dequeue = dequeue;
+        endpoint.dequeue_cycle = cycle;
+        *entry = (dci, endpoint);
+        mask |= 1 << dci;
+    }
+    let control = InputControlContext {
+        drop: mask,
+        add: mask | 1,
+        ..InputControlContext::default()
+    };
+    write_input(input, layout, &control, Some(&slot), &contexts[..count]);
+}
+
 /// The input control context (§6.2.5.1): which contexts a command drops and
 /// adds, and the configuration it concerns.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
