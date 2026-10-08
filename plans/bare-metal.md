@@ -36,8 +36,9 @@ its firmware entry, `cachyos`, is the only one.
   `root=initramfs` and mounts no disk.
 - The kernel carries an xHCI driver, graded on QEMU's two models and the
   laptop's two controllers, which takes each controller from the firmware,
-  logs its root ports' attach and detach and resets it at poweroff; it
-  enumerates no device yet.
+  enumerates the devices on its ports and behind its hubs, binds USB
+  keyboards and pointers beside the i8042 keyboard and the touchpad, and
+  resets it at poweroff.
 - Every volume is ext4 in one profile, with a jbd2 journal that e2fsck
   replays.
 - The boot chain shares a disk: Limine under `\EFI\SlopOS\`, the slots on a
@@ -361,8 +362,9 @@ falls back to the committed slot, and the fallback boot finds the panic in
 ## Out of scope
 
 - **Wi-Fi.**
-- **USB.** See `plans/usb-xhci.md`. It is what later lets the live system read
-  the medium from the stick instead of from RAM, and what brings USB NICs.
+- **USB beyond keyboards and pointers.** See `plans/usb-xhci.md`. It is what
+  later lets the live system read the medium from the stick instead of from
+  RAM, and what brings USB NICs.
 - **Other machines' platforms:** AHCI (the laptop's SATA controller has no
   disk), VMD, more than 17 CPUs, timers without HPET, x2APIC mode, INTx, PCI
   without MCFG, other PCH GPIO blocks.

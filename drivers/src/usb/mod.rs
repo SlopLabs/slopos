@@ -3,6 +3,7 @@
 //! and removals, which may block.
 
 pub mod bus;
+pub mod hid;
 mod kconsole;
 pub mod xhci;
 
@@ -90,8 +91,9 @@ fn usb_thread(token: KernelIoToken<'static>) {
         if WAKER.wait_timeout_ms(&token, timeout as u32) == KthreadWait::Stop {
             break;
         }
-        let next = xhci::serve_all();
+        let tree = xhci::serve_all();
         let now = slopos_kernel_services::clock::uptime_ms();
+        let next = [tree, hid::serve(now)].into_iter().flatten().min();
         timeout = next.map_or(IDLE_MS, |at| at.saturating_sub(now).clamp(1, IDLE_MS));
     }
     WAKER.stop().note_exited();

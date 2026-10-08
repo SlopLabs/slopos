@@ -238,7 +238,7 @@ fn install_scanout_provider(ctx: &InstallCtx) -> bool {
     let width = ctx.fb.info.width as i32;
     let height = ctx.fb.info.height as i32;
     if width > 0 && height > 0 {
-        slopos_drivers::mouse::set_bounds(width, height);
+        slopos_drivers::input_event::set_pointer_bounds(width, height);
     }
 
     scanout::set_current_framebuffer(ctx.fb);

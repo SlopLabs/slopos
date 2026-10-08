@@ -11,7 +11,7 @@ use slopos_usb_core::bus::{Candidate, Node, Path, STORE_CONFIGURATION};
 use slopos_usb_core::device::Speed;
 use slopos_usb_core::device::descriptor::{Configuration, Function, MAX_FUNCTIONS};
 
-use super::xhci::device::{Bind, BindState, Control, Device, Pipe};
+use super::xhci::device::{Bind, BindState, Control, Device, Pipe, Posted, ReportSink, Reports};
 use crate::driver_core::bound::BoundError;
 use crate::driver_core::bus::{
     BoundDevice, Bus, ClaimTable, LinearIndex, ProbeError, ProbeOutcome, Probed, Removal, probe_one,
@@ -486,6 +486,31 @@ impl<'d> BoundDevice<'d, UsbBus> {
 
     /// Opened once per binding.
     pub fn pipe(&mut self, address: u8) -> Result<KArc<Pipe>, BoundError> {
+        self.owned_endpoint(address)?;
+        let pipe = Pipe::open(self.device()?, address)?;
+        self.keep(pipe)
+    }
+
+    /// Keeps a report of `length` bytes posted on the interrupt endpoint at
+    /// `address`, handing each to `sink` from wherever the drain runs.
+    pub fn reports(
+        &mut self,
+        address: u8,
+        length: u32,
+        sink: KArc<dyn ReportSink>,
+    ) -> Result<KArc<Reports>, BoundError> {
+        self.owned_endpoint(address)?;
+        let reports = Reports::open(self.device()?, address, length, sink)?;
+        self.keep(reports)
+    }
+
+    /// Control requests for a thread that may not wait on one.
+    pub fn posted(&mut self) -> Result<KArc<Posted>, BoundError> {
+        let posted = Posted::new(self.device()?)?;
+        self.keep(posted)
+    }
+
+    fn owned_endpoint(&self, address: u8) -> Result<(), BoundError> {
         let info = *self.info;
         let device = self.device()?;
         let owned = device.stored(|b| {
@@ -496,11 +521,7 @@ impl<'d> BoundDevice<'d, UsbBus> {
                 .flat_map(|i| config.endpoints(i.number, 0))
                 .find(|e| e.address == address)
         });
-        if owned.is_none() {
-            return Err(BoundError::NoSuchEndpoint);
-        }
-        let pipe = Pipe::open(device, address)?;
-        self.keep(pipe)
+        owned.map(|_| ()).ok_or(BoundError::NoSuchEndpoint)
     }
 
     /// The binding's resources keep a handle too.

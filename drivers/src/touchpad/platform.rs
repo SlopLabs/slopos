@@ -6,7 +6,7 @@
 //! and IOAPIC line the small-descriptor walker reads.
 //!
 //! Configuration comes from a boot step rather than the probe, because a probe
-//! cannot reach the framebuffer geometry or the kernel cmdline.
+//! cannot reach the kernel cmdline.
 
 use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
@@ -22,8 +22,6 @@ const HID_I2C_ID: &[u8] = b"PNP0C50";
 /// Boot-parsed configuration, installed before the platform bus probes.
 #[derive(Clone, Copy)]
 pub struct TouchpadConfig {
-    pub width: u32,
-    pub height: u32,
     pub debug: bool,
     pub force_poll: bool,
 }
@@ -31,8 +29,6 @@ pub struct TouchpadConfig {
 impl TouchpadConfig {
     const fn empty() -> Self {
         Self {
-            width: 0,
-            height: 0,
             debug: false,
             force_poll: false,
         }
@@ -67,7 +63,7 @@ fn probe(bound: &mut BoundPlatformDevice<'_>) -> Result<ProbeOutcome, PlatformPr
     };
     let cfg = *CONFIG.lock();
 
-    match bring_up(&found, cfg.width, cfg.height, cfg.debug, cfg.force_poll) {
+    match bring_up(&found, cfg.debug, cfg.force_poll) {
         Ok(()) => Ok(ProbeOutcome::Bound),
         // The parent I²C controller is bound by a PCI driver, and PCI probe has
         // already run to completion by the time any platform device is offered.

@@ -1,76 +1,83 @@
-//! PS/2 keyboard driver — a thin stateful adapter over `keymap-core`.
-//!
-//! The IRQ handler ([`handle_scancode`]) feeds raw set-1 scancode bytes into a
-//! [`Set1Decoder`], folds modifier/lock state with a [`ModTracker`], and asks
-//! the **active layout** (a runtime-swappable [`LayoutTable`], defaulting to the
-//! built-in US-QWERTY) for the produced text / named key. Each event is
-//! published carrying **both** the legacy `(scancode, ascii)` bytes and the
-//! canonical `(keycode, codepoint, modifiers, flags)` payload.
-//!
-//! All keyboard *logic* — scancode tables, layout resolution, AltGr levels, the
-//! numeric-keypad + Num Lock behavior, dead-key composition — lives in the
-//! host-tested `keymap-core` crate; this module is just the kernel glue.
+//! The i8042 keyboard: its set-1 scancodes decoded into usages for the
+//! machine's keyboard state, and its lock LEDs.
+
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_arch::cpu;
-use slopos_ostd::lock_class;
+use slopos_keymap_core::{LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, Set1Decoder};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{KBox, klog_info, klog_warn};
+use slopos_ostd::{klog_info, klog_warn, lock_class};
 
-use slopos_abi::Errno;
-use slopos_abi::input::{KEY_FLAG_FROM_KEYPAD, KEY_FLAG_HAS_CANONICAL};
-use slopos_keymap_core::keycode::{self, NamedKey};
-use slopos_keymap_core::keymap::KeyOutcome;
-use slopos_keymap_core::sysrq::{SysrqFsm, Verdict};
-use slopos_keymap_core::{
-    DeadKeyState, LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, LayoutTable, ModSnapshot, ModTracker, Resolved,
-    SERIALIZED_LEN, Set1Decoder, US_QWERTY, deserialize, resolve,
-};
-use slopos_mm::user_io_buf::memdup_user;
-
-use crate::input_event::{has_keyboard_focus, input_route_key_full};
+use crate::keyboard::{self, KeyboardSource};
 use crate::ps2;
-use crate::tty::vconsole;
-use crate::tty::{active_tty, push_input};
-use slopos_kernel_services::driver_runtime::request_reschedule_from_interrupt;
 
 /// Keyboard device command: set the lock LEDs (followed by a 1-byte LED mask).
 const DEV_CMD_SET_LEDS: u8 = 0xED;
 const ACK_WAIT_ITERS: u32 = 50_000;
+/// An LED exchange byte the keyboard has not answered by then is sent again.
+const ANSWER_MS: u64 = 250;
+/// Times a byte is sent again, on RESEND or unanswered, before the exchange
+/// is given up.
+const RETRIES: u8 = 2;
 
-/// All keyboard state behind one lock; `layout: None` ⇒ the built-in
-/// [`US_QWERTY`].
-struct KeyboardState {
-    decoder: Set1Decoder,
-    mods: ModTracker,
-    dead: DeadKeyState,
-    sysrq: SysrqFsm,
-    layout: Option<KBox<LayoutTable>>,
+static DECODER: SpinLock<Set1Decoder> = SpinLock::new(
+    Set1Decoder::new(),
+    lock_class!("ps2kbd.DECODER", LOCK_LEVEL_RESOURCE),
+);
+
+#[derive(Clone, Copy)]
+enum Stage {
+    /// `0xED`; the LED byte follows its ACK.
+    Command,
+    Byte,
 }
 
-impl KeyboardState {
-    const fn new() -> Self {
-        Self {
-            decoder: Set1Decoder::new(),
-            mods: ModTracker::new(),
-            dead: DeadKeyState::new(),
-            sysrq: SysrqFsm::new(),
-            layout: None,
-        }
+#[derive(Clone, Copy)]
+struct Exchange {
+    stage: Stage,
+    locks: u8,
+    since: u64,
+    retries: u8,
+}
+
+impl Exchange {
+    fn send(&self) {
+        ps2::write_data(match self.stage {
+            Stage::Command => DEV_CMD_SET_LEDS,
+            Stage::Byte => led_byte(self.locks),
+        });
     }
 }
 
-static STATE: SpinLock<KeyboardState> = SpinLock::new(
-    KeyboardState::new(),
-    lock_class!("ps2kbd.STATE", LOCK_LEVEL_RESOURCE),
+/// The LED exchange, which the keyboard's interrupt advances on each ACK, and
+/// the locks it last tried and had acknowledged.
+struct Leds {
+    exchange: Option<Exchange>,
+    tried: Option<u8>,
+    acknowledged: Option<u8>,
+}
+
+static LEDS: SpinLock<Leds> = SpinLock::new(
+    Leds {
+        exchange: None,
+        tried: None,
+        acknowledged: None,
+    },
+    lock_class!("ps2kbd.LEDS", LOCK_LEVEL_RESOURCE),
 );
+
+/// Set once the keyboard acknowledged its reset; nothing is sent before.
+static PRESENT: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
     klog_info!("PS/2 keyboard: initialising device");
 
     ps2::write_data(ps2::DEV_CMD_RESET);
+    let mut acknowledged = false;
     if ps2::wait_data() {
         let response = ps2::read_data_nowait();
         if response == ps2::DEV_ACK {
+            acknowledged = true;
             if ps2::wait_data() {
                 let test_result = ps2::read_data_nowait();
                 if test_result != ps2::DEV_SELF_TEST_PASS {
@@ -86,257 +93,150 @@ pub fn init() {
 
     ps2::flush();
 
-    let snap = {
-        let mut state = STATE.lock();
-        state.decoder = Set1Decoder::new();
-        state.mods = ModTracker::new();
-        state.dead = DeadKeyState::new();
-        state.mods.snapshot()
-    };
-    // Num Lock starts on; IRQs are still masked here, so the ACK exchange is
-    // race-free.
-    set_leds(snap);
+    *DECODER.lock() = Set1Decoder::new();
+    if acknowledged {
+        set_leds_polled(keyboard::locks());
+    }
+    PRESENT.store(acknowledged, Ordering::Release);
 
     klog_info!("PS/2 keyboard: initialised");
 }
 
 /// IRQ entry point: process one raw scancode byte from the controller.
 pub fn handle_scancode(byte: u8) {
-    // Sampled before the lock: the diagnostic console's arm window and every
-    // event routed below both need it, so one off-lock read serves all.
     let ts = slopos_kernel_services::clock::uptime_ms();
-    let mut state = STATE.lock();
-
-    let step = match state.decoder.feed(byte) {
-        Some(step) => step,
-        None => return, // prefix byte, fake-shift, swallowed Pause, or unknown
-    };
-    let usage = step.usage;
-    let pressed = step.pressed;
-    // Legacy scancode = the set-1 make code (low 7 bits). For E0-prefixed keys
-    // this is the bare code (e.g. 0x48 for Up).
-    let legacy_scancode = byte & 0x7F;
-
-    if usage == keycode::KEY_ESC && pressed && slopos_ostd::fblog::handle_esc_press() {
+    if answered(byte, ts) {
         return;
     }
-
-    let is_mod_or_lock = state.mods.update(usage, pressed);
-    let mods = state.mods.mods();
-    let locks = state.mods.locks();
-    let snap = state.mods.snapshot();
-    let lock_toggled = pressed
-        && matches!(
-            usage,
-            keycode::KEY_CAPSLOCK | keycode::KEY_NUMLOCK | keycode::KEY_SCROLLLOCK
-        );
-
-    // The diagnostic console's chord cannot move below `resolve`: its command
-    // key is a physical position rather than a glyph, so consulting a layout
-    // would make the bindings depend on which one is loaded, and running it
-    // through `resolve` would compose it with any pending dead key and swallow
-    // the accent. Consumed keys reach neither the TTY nor the focused GUI
-    // application, which keeps the console reachable only from the console.
-    if slopos_ostd::kconsole::enabled() {
-        let arm_ms = slopos_ostd::kconsole::policy().arm_ms;
-        match state.sysrq.feed(usage, pressed, mods, ts, arm_ms) {
-            Verdict::Pass => {}
-            Verdict::Eat => return,
-            Verdict::Run(key) => {
-                drop(state);
-                slopos_ostd::kconsole::request(key);
-                return;
-            }
-        }
-    }
-
-    // Resolving under the lock is safe: it allocates nothing and never blocks.
-    let resolved = if pressed && !is_mod_or_lock {
-        let st = &mut *state;
-        let table = st.layout.as_deref().unwrap_or(&US_QWERTY);
-        resolve(table, usage, mods, locks, &mut st.dead)
-    } else {
-        Resolved::none()
-    };
-    drop(state);
-
-    // Consumed here, so paging never reaches an application. The Ctrl variant
-    // is deliberately not: that is the GUI terminal's own scrollback chord.
-    if pressed
-        && mods.shift
-        && !mods.ctrl
-        && matches!(usage, keycode::KEY_PAGEUP | keycode::KEY_PAGEDOWN)
-    {
-        if usage == keycode::KEY_PAGEUP {
-            vconsole::scroll_view_up(12);
-        } else {
-            vconsole::scroll_view_down(12);
-        }
+    let Some(step) = DECODER.lock().feed(byte) else {
         return;
-    }
-
-    if lock_toggled {
-        set_leds(snap);
-    }
-
-    // A pending accent that did not compose is emitted ahead of the key's own
-    // event.
-    if resolved.flush != 0 {
-        route_text(resolved.flush, snap.mods, ts);
-    }
-
-    let (ascii, codepoint) = legacy_and_canonical(resolved.outcome, pressed);
-
-    let mut flags = KEY_FLAG_HAS_CANONICAL;
-    if keycode::is_keypad(usage) {
-        flags |= KEY_FLAG_FROM_KEYPAD;
-    }
-
-    input_route_key_full(
-        legacy_scancode,
-        ascii,
-        usage,
-        codepoint,
-        snap.mods,
-        flags,
-        pressed,
-        ts,
-    );
-
-    if pressed && !has_keyboard_focus() {
-        let flush_byte = if resolved.flush != 0 && resolved.flush <= 0x7F {
-            resolved.flush as u8
-        } else {
-            0
-        };
-        if flush_byte != 0 {
-            push_input(active_tty(), flush_byte);
-        }
-        if ascii != 0 {
-            push_input(active_tty(), ascii);
-        }
-        if flush_byte != 0 || ascii != 0 {
-            request_reschedule_from_interrupt();
-        }
-    }
-}
-
-/// Route a bare text codepoint as a synthetic key-press event (used for the
-/// dead-key accent flush; carries no canonical keycode).
-fn route_text(codepoint: u32, modifiers: u8, ts: u64) {
-    let ascii = if codepoint <= 0x7F {
-        codepoint as u8
-    } else {
-        0
     };
-    input_route_key_full(
-        0,
-        ascii,
-        0,
-        codepoint,
-        modifiers,
-        KEY_FLAG_HAS_CANONICAL,
-        true,
-        ts,
-    );
+    keyboard::key(KeyboardSource::I8042, step.usage, step.pressed, ts);
 }
 
-/// Derive the legacy `ascii` byte and the canonical `codepoint` from a keymap
-/// outcome. The legacy byte is ASCII-only: a raw Latin-1 byte on the TTY/PTY
-/// byte stream would be mojibake to UTF-8 consumers, and 0x80..=0x88 are
-/// reserved as nav pseudo-codes.
-fn legacy_and_canonical(outcome: KeyOutcome, pressed: bool) -> (u8, u32) {
-    if !pressed {
-        return (0, 0);
-    }
-    match outcome {
-        KeyOutcome::Text(cp) => {
-            let ascii = if cp <= 0x7F { cp as u8 } else { 0 };
-            (ascii, cp)
-        }
-        KeyOutcome::Named(nk) => (named_to_legacy_ascii(nk), 0),
-        KeyOutcome::None => (0, 0),
-    }
-}
-
-/// Map a navigation named key to the SlopOS legacy `ascii` pseudo-code that the
-/// terminal/shell decode into ANSI escape sequences. Non-navigation named keys
-/// have no legacy byte and yield 0.
-fn named_to_legacy_ascii(nk: NamedKey) -> u8 {
-    match nk {
-        NamedKey::PageUp => 0x80,
-        NamedKey::PageDown => 0x81,
-        NamedKey::Up => 0x82,
-        NamedKey::Down => 0x83,
-        NamedKey::Left => 0x84,
-        NamedKey::Right => 0x85,
-        NamedKey::Home => 0x86,
-        NamedKey::End => 0x87,
-        NamedKey::Delete => 0x88,
-        _ => 0,
-    }
-}
-
-/// The old layout is freed **outside** the lock: a heap free can trigger a
-/// cross-CPU TLB/LUF drain that must not run while the keyboard `SpinLock` is
-/// held.
-pub fn set_layout(layout: KBox<LayoutTable>) {
-    let old = {
-        let mut state = STATE.lock();
-        state.dead.reset(); // a layout swap invalidates any pending dead key
-        state.layout.replace(layout)
-    };
-    drop(old);
-}
-
-/// The kernel only ever ingests the **binary** form here (no text parsing): the
-/// blob is bounded, copied via `memdup_user`, then `deserialize` runs
-/// `keymap-core`'s validator before the table is installed.
-pub fn load_layout_from_user(data_ptr: u64, len: usize) -> Result<(), Errno> {
-    if data_ptr == 0 || len != SERIALIZED_LEN {
-        return Err(Errno::EINVAL);
-    }
-    let bytes = memdup_user(data_ptr, len, SERIALIZED_LEN)?;
-    let mut layout = KBox::<LayoutTable>::zeroed().map_err(|_| Errno::ENOMEM)?;
-    deserialize(bytes.as_slice(), &mut layout).map_err(|_| Errno::EINVAL)?;
-    set_layout(layout);
-    Ok(())
-}
-
-/// Writes into a kernel buffer and never touches user pages; the syscall handler
-/// copies `out` to user memory through the SMAP-safe path.
-pub fn layout_name(out: &mut [u8]) -> usize {
-    let state = STATE.lock();
-    let table = state.layout.as_deref().unwrap_or(&US_QWERTY);
-    let bytes = table.name_str().as_bytes();
-    let n = bytes.len().min(out.len());
-    out[..n].copy_from_slice(&bytes[..n]);
-    n
-}
-
-/// Program the keyboard's lock LEDs to match `snap`. Takes no locks, so it is
-/// callable with the state lock released and from the IRQ handler with IRQs off.
-///
-/// A concurrent scancode could be mistaken for the ACK; the window is accepted
-/// because lock keys are pressed in isolation.
-fn set_leds(snap: ModSnapshot) {
+fn led_byte(locks: u8) -> u8 {
     let mut led = 0u8;
-    if snap.locks & LOCK_SCROLL != 0 {
+    if locks & LOCK_SCROLL != 0 {
         led |= 0b001;
     }
-    if snap.locks & LOCK_NUM != 0 {
+    if locks & LOCK_NUM != 0 {
         led |= 0b010;
     }
-    if snap.locks & LOCK_CAPS != 0 {
+    if locks & LOCK_CAPS != 0 {
         led |= 0b100;
     }
+    led
+}
 
-    ps2::write_data(DEV_CMD_SET_LEDS);
-    if !wait_ack() {
+/// Whether `byte` was the keyboard's answer to an LED exchange, which it
+/// advances; the locks that changed meanwhile go out next. Any other byte
+/// shows the keyboard scanning, so an exchange it left unanswered is retried.
+fn answered(byte: u8, now: u64) -> bool {
+    let mut leds = LEDS.lock();
+    let Some(exchange) = leds.exchange else {
+        return false;
+    };
+    let answer = match (exchange.stage, byte) {
+        (Stage::Command, ps2::DEV_ACK) => {
+            let next = Exchange {
+                stage: Stage::Byte,
+                since: now,
+                retries: 0,
+                ..exchange
+            };
+            next.send();
+            leds.exchange = Some(next);
+            true
+        }
+        (Stage::Byte, ps2::DEV_ACK) => {
+            leds.acknowledged = Some(exchange.locks);
+            leds.exchange = None;
+            true
+        }
+        (_, ps2::DEV_RESEND) => {
+            retry(&mut leds, now);
+            true
+        }
+        _ => {
+            expire(&mut leds, now);
+            false
+        }
+    };
+    if leds.exchange.is_none() {
+        start(&mut leds, keyboard::locks(), now);
+    }
+    answer
+}
+
+/// Sends the exchange's byte again, or gives the exchange up.
+fn retry(leds: &mut Leds, now: u64) {
+    leds.exchange = leds
+        .exchange
+        .filter(|e| e.retries < RETRIES)
+        .map(|e| Exchange {
+            since: now,
+            retries: e.retries + 1,
+            ..e
+        });
+    if let Some(exchange) = &leds.exchange {
+        exchange.send();
+    }
+}
+
+fn expire(leds: &mut Leds, now: u64) {
+    if leds
+        .exchange
+        .is_some_and(|e| now.saturating_sub(e.since) >= ANSWER_MS)
+    {
+        retry(leds, now);
+    }
+}
+
+/// Sends `0xED` unless an exchange is under way or `locks` was already
+/// tried.
+fn start(leds: &mut Leds, locks: u8, now: u64) {
+    expire(leds, now);
+    if leds.exchange.is_some() || leds.tried == Some(locks) {
         return;
     }
+    leds.tried = Some(locks);
+    let exchange = Exchange {
+        stage: Stage::Command,
+        locks,
+        since: now,
+        retries: 0,
+    };
+    exchange.send();
+    leds.exchange = Some(exchange);
+}
+
+/// Brings the LEDs towards the locks without waiting: the keyboard's
+/// interrupt carries the exchange on from each ACK. From any context.
+pub(crate) fn sync_leds() {
+    if !PRESENT.load(Ordering::Acquire) {
+        return;
+    }
+    let now = slopos_kernel_services::clock::uptime_ms();
+    start(&mut LEDS.lock(), keyboard::locks(), now);
+}
+
+/// With the keyboard's interrupt still masked, so the ACKs are polled.
+fn set_leds_polled(locks: u8) {
+    let mut leds = LEDS.lock();
+    leds.exchange = None;
+    leds.tried = Some(locks);
+    if exchange(led_byte(locks)) {
+        leds.acknowledged = Some(locks);
+    }
+}
+
+fn exchange(led: u8) -> bool {
+    ps2::write_data(DEV_CMD_SET_LEDS);
+    if !wait_ack() {
+        return false;
+    }
     ps2::write_data(led);
-    let _ = wait_ack();
+    wait_ack()
 }
 
 /// Bounded poll for a device ACK (0xFA). Stray bytes are discarded.
@@ -353,25 +253,19 @@ fn wait_ack() -> bool {
     false
 }
 
-/// Return the current keyboard modifier state as a `MODIFIER_*` bitfield.
-pub fn get_modifier_state() -> u8 {
-    STATE.lock().mods.snapshot().mods
+/// The locks the keyboard last acknowledged in its LEDs.
+#[cfg(feature = "test-hooks")]
+pub fn leds_acknowledged() -> Option<u8> {
+    LEDS.lock().acknowledged
 }
 
-/// Resets to defaults without device I/O. Keyboard state is a global shared with
-/// the live IRQ handler, so tests reset it before and after to keep a stuck `E0`
-/// latch, a held modifier, a pending dead key or a loaded layout from leaking
-/// into other tests or the live desktop.
+/// Resets the decoder and the keyboard state without device I/O, so a stuck
+/// `E0` latch, a held modifier, a pending dead key or a loaded layout cannot
+/// leak from one test into the next or into the live desktop.
 #[cfg(feature = "test-hooks")]
 pub fn reset_state_for_test() {
-    let old = {
-        let mut state = STATE.lock();
-        state.decoder = Set1Decoder::new();
-        state.mods = ModTracker::new();
-        state.dead = DeadKeyState::new();
-        state.layout.take()
-    };
-    drop(old);
+    *DECODER.lock() = Set1Decoder::new();
+    keyboard::reset_for_test();
 }
 
 pub fn poll_wait_enter() {

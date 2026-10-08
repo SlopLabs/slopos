@@ -446,6 +446,45 @@ the kernel log (30), as Phase 1 recorded, and the laptop half — a low-speed
 device, a high-speed hub's transaction translator, a USB 3 hub — is graded
 only by the simulated controller until the laptop run.
 
+Swept 2026-10-08: USB keyboards and pointers — `hid-core`'s report
+descriptor parser and its keyboard, pointer, boot and LED decoders over every
+byte a device sends; `usb-hid`'s binding, the report endpoints the xHCI drain
+serves and the EP0 requests the `usb` thread posts; the keyboard state the
+i8042 and every USB keyboard share, with its locks, layout and SysRq trigger;
+the i8042's LED exchange; the one cursor and its sources; and the host's
+QMP-driven test. Four review passes, one of which drove random structured
+descriptors and reports through the parser and decoders with overflow checks
+on, and `hid-core`'s own mutation loops over every one of them, which
+panicked nowhere and read nothing past their input. Nothing reached the
+bar. Everything a device controls needs a port, and nothing in the
+change is reachable from user space: the layout syscalls only moved. A USB
+keyboard reaching the SysRq trigger is the physical console by design, as on
+Linux, and destructive commands still need the `kconsole=` mask. What came
+closest was fixed in the change. A report endpoint that halted once was
+recovered with no report posted, leaving its keyboard dead until it was
+pulled (35); one that halted on every report would have been recovered
+forever, and now stops after four halts in a row, each within a second of
+the last. An empty report released every key a
+keyboard held (30). An abandoned posted request's data page could be freed
+while the controller might still read it, up to 64 bytes of reused memory
+going to the device (25); the page now lives as long as the device. The
+first LED design masked the i8042's IOAPIC lines and polled port 0x60, where
+a byte arriving during the mask lost its edge and could wedge the keyboard
+(30), and an LED byte the keyboard asked for again was never resent, leaving
+it waiting for its option byte with scanning stopped (30); the exchange is now
+carried by the i8042's own interrupt with a bounded retransmit. A descriptor
+could make decoding one report walk any number of elements where the ring is
+drained (30); input and output elements are now capped. A held SysRq command
+key's repeats reached the focused application (15), and the boot log's Esc
+toggled on every repeat (10).
+
+Below the bar and left: any USB device can type and point, as on every
+system that accepts HID; key events are not merged across keyboards, so a
+pulled keyboard's Shift release is delivered while another keyboard still
+holds Shift, which consumers that read the modifier state ignore (15); and on
+a machine with no xHCI controller an LED byte the i8042 leaves unanswered is
+resent only at its next byte or lock change (15).
+
 The highest ID issued so far is **SLOPOS-2026-0057**. The next finding is
 `SLOPOS-2026-0058`.
 

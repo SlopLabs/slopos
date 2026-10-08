@@ -36,6 +36,7 @@ members = [
   "nvme-core",
   "rtl8168-core",
   "usb-core",
+  "hid-core",
   "cpufreq-core",
   "ext4-core",
   "tls-core",
@@ -124,6 +125,7 @@ slopos-net-core = { path = "net-core" }
 slopos-nvme-core = { path = "nvme-core" }
 slopos-rtl8168-core = { path = "rtl8168-core" }
 slopos-usb-core = { path = "usb-core" }
+slopos-hid-core = { path = "hid-core" }
 slopos-cpufreq-core = { path = "cpufreq-core" }
 slopos-ext4-core = { path = "ext4-core" }
 slopos-tls-core = { path = "tls-core" }

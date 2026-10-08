@@ -149,7 +149,7 @@ pub fn test_press_then_release_events() -> TestResult {
 /// `handle_scancode` resolves against the layout loaded at runtime, not the
 /// hardcoded default.
 pub fn test_runtime_layout_swap() -> TestResult {
-    use crate::ps2::keyboard::set_layout;
+    use crate::keyboard::set_layout;
     use slopos_keymap_core::{LayoutTable, parse};
     use slopos_ostd::KBox;
 

@@ -218,6 +218,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin terminal_grid_test \
         --bin sysmon_selection_test \
         --bin cpufreq_test \
+        --bin usb_shell_test \
         --bin clipboard_test \
         --bin keymap_test \
         --bin appkit_test \
@@ -338,6 +339,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/cpufreq_test" ]; then
         cp "$RELEASE_DIR/cpufreq_test" "$BUILD_DIR/cpufreq_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/usb_shell_test" ]; then
+        cp "$RELEASE_DIR/usb_shell_test" "$BUILD_DIR/usb_shell_test.elf"
     fi
     if [ -f "$RELEASE_DIR/clipboard_test" ]; then
         cp "$RELEASE_DIR/clipboard_test" "$BUILD_DIR/clipboard_test.elf"

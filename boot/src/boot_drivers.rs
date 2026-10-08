@@ -336,13 +336,9 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     slopos_drivers::usb::start();
 }
 
-/// The touchpad probe cannot reach the framebuffer geometry or the cmdline, so
-/// the boot step hands them over before the platform bus binds it.
+/// The touchpad probe cannot reach the cmdline, so the boot step hands it
+/// over before the platform bus binds it.
 fn install_touchpad_config() {
-    let (width, height) = limine_protocol::boot_info()
-        .framebuffer
-        .map(|fb| (fb.info.width, fb.info.height))
-        .unwrap_or((0, 0));
     let cmdline = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline());
     let debug = cmdline.map(|s| s.contains("tp.debug")).unwrap_or(false);
     let force_poll = cmdline.map(|s| s.contains("tp.poll")).unwrap_or(false);
@@ -353,12 +349,7 @@ fn install_touchpad_config() {
         slopos_sched::sleep::arm_strand_sweep();
     }
     slopos_drivers::touchpad::platform::set_config(
-        slopos_drivers::touchpad::platform::TouchpadConfig {
-            width,
-            height,
-            debug,
-            force_poll,
-        },
+        slopos_drivers::touchpad::platform::TouchpadConfig { debug, force_poll },
     );
 }
 

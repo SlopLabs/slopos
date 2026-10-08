@@ -2,11 +2,17 @@
 //! events out — motion, buttons, scroll axis, tap-to-click. Apps never see the
 //! raw absolute/multitouch coordinates.
 
-use crate::input_event;
+use slopos_hid_core::pointer::{Axis, Motion};
+
+use crate::input_event::{self, PointerSource};
 
 pub const MAX_CONTACTS: usize = 5;
 
 const BUTTON_LEFT: u8 = 0x01;
+
+fn buttons(left: bool, ts: u64) {
+    input_event::pointer_buttons(PointerSource::TOUCHPAD, u8::from(left) * BUTTON_LEFT, ts);
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct Contact {
@@ -39,10 +45,6 @@ const SCROLL_STEP: i32 = 80; // pad units per notch
 const SCROLL_NOTCH_V120: i32 = 120;
 
 pub struct GestureEngine {
-    w: i32,
-    h: i32,
-    cx: i32,
-    cy: i32,
     pad_max_x: i32,
     pad_max_y: i32,
 
@@ -67,14 +69,8 @@ pub struct GestureEngine {
 }
 
 impl GestureEngine {
-    pub fn new(width: i32, height: i32, pad_max_x: i32, pad_max_y: i32) -> Self {
-        let w = width.max(1);
-        let h = height.max(1);
+    pub fn new(pad_max_x: i32, pad_max_y: i32) -> Self {
         Self {
-            w,
-            h,
-            cx: w / 2,
-            cy: h / 2,
             pad_max_x: pad_max_x.max(1),
             pad_max_y: pad_max_y.max(1),
             active_id: None,
@@ -95,17 +91,10 @@ impl GestureEngine {
         }
     }
 
-    pub fn set_bounds(&mut self, width: i32, height: i32) {
-        self.w = width.max(1);
-        self.h = height.max(1);
-        self.cx = self.cx.clamp(0, self.w - 1);
-        self.cy = self.cy.clamp(0, self.h - 1);
-    }
-
     pub fn process(&mut self, frame: &Frame, ts: u64) {
         if frame.button != self.btn_down {
             self.btn_down = frame.button;
-            input_event::input_route_pointer_button(BUTTON_LEFT, frame.button, ts);
+            buttons(frame.button, ts);
         }
 
         let down = frame.count;
@@ -154,12 +143,18 @@ impl GestureEngine {
             self.gesture_moved = true;
         }
 
-        let sx = self.scale_x(dx);
-        let sy = self.scale_y(dy);
+        let (w, h) = input_event::pointer_bounds();
+        let sx = accelerate(dx, w, self.pad_max_x);
+        let sy = accelerate(dy, h, self.pad_max_y);
         if sx != 0 || sy != 0 {
-            self.cx = (self.cx + sx).clamp(0, self.w - 1);
-            self.cy = (self.cy + sy).clamp(0, self.h - 1);
-            input_event::input_route_pointer_motion(self.cx, self.cy, ts);
+            let motion = Motion {
+                buttons: u32::from(self.btn_down),
+                reported: BUTTON_LEFT.into(),
+                x: Some(Axis::Relative(sx)),
+                y: Some(Axis::Relative(sy)),
+                ..Motion::default()
+            };
+            input_event::pointer_report(PointerSource::TOUCHPAD, &motion, ts);
         }
     }
 
@@ -202,8 +197,8 @@ impl GestureEngine {
             && !self.gesture_moved
             && !self.btn_down;
         if tapped {
-            input_event::input_route_pointer_button(BUTTON_LEFT, true, ts);
-            input_event::input_route_pointer_button(BUTTON_LEFT, false, ts);
+            buttons(true, ts);
+            buttons(false, ts);
         }
         self.active_id = None;
         self.reset_scroll();
@@ -216,13 +211,6 @@ impl GestureEngine {
         self.scroll_id_a = None;
         self.scroll_accum_x = 0;
         self.scroll_accum_y = 0;
-    }
-
-    fn scale_x(&self, dpad: i32) -> i32 {
-        accelerate(dpad, self.w, self.pad_max_x)
-    }
-    fn scale_y(&self, dpad: i32) -> i32 {
-        accelerate(dpad, self.h, self.pad_max_y)
     }
 }
 

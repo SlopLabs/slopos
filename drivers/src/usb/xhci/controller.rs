@@ -89,6 +89,7 @@ struct Took {
     work: bool,
     /// A driver may be waiting on it.
     transfer: bool,
+    report: bool,
 }
 
 #[derive(slopos_ostd::SlotFields)]
@@ -111,6 +112,8 @@ pub struct Controller {
     /// Root ports a Port Status Change Event named, by number, for the
     /// thread to look at again.
     port_changes: [AtomicU64; PORT_WORDS],
+    /// Slots with a report completed, by number.
+    reports_done: [AtomicU64; PORT_WORDS],
     state: AtomicU8,
     /// What a drain found wrong, for the thread to act on.
     failure: AtomicU8,
@@ -172,6 +175,11 @@ impl Controller {
                 write_field!(
                     slot,
                     port_changes,
+                    [const { AtomicU64::new(0) }; PORT_WORDS]
+                );
+                write_field!(
+                    slot,
+                    reports_done,
                     [const { AtomicU64::new(0) }; PORT_WORDS]
                 );
                 write_field!(slot, state, AtomicU8::new(STARTING));
@@ -381,6 +389,7 @@ impl Controller {
                     let one = self.take_event(event);
                     took.work |= one.work;
                     took.transfer |= one.transfer;
+                    took.report |= one.report;
                 },
             )
         };
@@ -393,6 +402,9 @@ impl Controller {
         }
         if took.transfer {
             crate::usb::TRANSFERS.wake_all();
+        }
+        if took.report {
+            self.dispatch_reports();
         }
         took.work
     }
@@ -413,7 +425,7 @@ impl Controller {
                 self.commands.lock().complete(trb, completion);
                 Took {
                     work: true,
-                    transfer: false,
+                    ..Took::default()
                 }
             }
             Event::Transfer {
@@ -425,20 +437,25 @@ impl Controller {
                 ..
             } => {
                 let devices = self.devices.lock();
-                let (finished, work) = devices
+                let finished = devices
                     .get(usize::from(slot))
                     .and_then(Option::as_ref)
-                    .map_or((false, false), |d| d.complete(dci, trb, code, residual));
+                    .map(|d| d.complete(dci, trb, code, residual))
+                    .unwrap_or_default();
+                if finished.report {
+                    Self::flag(&self.reports_done, slot);
+                }
                 Took {
-                    work,
-                    transfer: finished,
+                    work: finished.transfer && finished.tree,
+                    transfer: finished.transfer && !finished.report,
+                    report: finished.report,
                 }
             }
             Event::PortStatusChange { port } if (1..=self.caps.max_ports).contains(&port) => {
                 self.flag_port(port);
                 Took {
                     work: true,
-                    transfer: false,
+                    ..Took::default()
                 }
             }
             Event::HostController {
@@ -447,20 +464,39 @@ impl Controller {
                 self.ring_full.store(true, Ordering::Release);
                 Took {
                     work: true,
-                    transfer: false,
+                    ..Took::default()
                 }
             }
             _ => Took::default(),
         }
     }
 
+    fn flag(bits: &[AtomicU64; PORT_WORDS], n: u8) {
+        bits[usize::from(n / 64)].fetch_or(1 << (n % 64), Ordering::AcqRel);
+    }
+
     fn flag_port(&self, port: u8) {
-        self.port_changes[usize::from(port / 64)].fetch_or(1 << (port % 64), Ordering::AcqRel);
+        Self::flag(&self.port_changes, port);
     }
 
     /// The lowest root port an event named, then forgotten.
     pub(super) fn take_port_change(&self) -> Option<u8> {
-        for (word, changes) in self.port_changes.iter().enumerate() {
+        Self::take_lowest(&self.port_changes)
+    }
+
+    /// Each device's reports go to its sinks under the device table's lock,
+    /// which keeps the device from being freed under them.
+    fn dispatch_reports(&self) {
+        while let Some(slot) = Self::take_lowest(&self.reports_done) {
+            let devices = self.devices.lock();
+            if let Some(device) = devices.get(usize::from(slot)).and_then(Option::as_ref) {
+                device.dispatch_reports();
+            }
+        }
+    }
+
+    fn take_lowest(bits: &[AtomicU64; PORT_WORDS]) -> Option<u8> {
+        for (word, changes) in bits.iter().enumerate() {
             let mut pending = changes.load(Ordering::Acquire);
             while pending != 0 {
                 let bit = pending.trailing_zeros();

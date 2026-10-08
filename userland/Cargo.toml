@@ -314,6 +314,10 @@ name = "cpufreq_test"
 path = "src/bin/tests/cpufreq_test.rs"
 
 [[bin]]
+name = "usb_shell_test"
+path = "src/bin/tests/usb_shell_test.rs"
+
+[[bin]]
 name = "dns_concurrent_test"
 path = "src/bin/tests/dns_concurrent_test.rs"
 

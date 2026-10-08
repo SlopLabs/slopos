@@ -88,6 +88,11 @@ crate::utest!(name = utest_fifo, bin = "/bin/fifo_test");
 crate::utest!(name = utest_persist, bin = "/bin/persist_test");
 crate::utest!(name = utest_reboot_clone, bin = "/bin/reboot_clone_test");
 crate::utest!(name = utest_cpufreq, bin = "/bin/cpufreq_test");
+crate::utest!(
+    name = utest_usb_shell,
+    bin = "/bin/usb_shell_test",
+    explicit
+);
 
 // Nothing below is ordered by its position in this file. The userland phase
 // walks `ktesting::registry::registry_sorted()`, which orders by

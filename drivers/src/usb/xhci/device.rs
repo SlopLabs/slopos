@@ -2,13 +2,13 @@
 //! drain and the threads share, its descriptors, its bindings, and the
 //! blocking transfers a bound driver makes.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, MutexGuard, SpinLock, WaitAbort};
-use slopos_ostd::{KArc, KBox, KVec, lock_class, write_field};
+use slopos_ostd::{KArc, KBox, KVec, klog_info, lock_class, write_field};
 use slopos_usb_core::bus::{
     MAX_ENDPOINTS, Node, STORE_CONFIGURATION, for_each_configured_endpoint,
 };
@@ -29,6 +29,11 @@ use crate::driver_core::bus::ClaimSlot;
 
 /// USB 2.0 §9.2.6.4.
 pub const CONTROL_MS: u64 = 5000;
+/// Halts a reporting endpoint is recovered from, each within
+/// [`HALT_WINDOW_MS`] of the last and with no report between, before it is
+/// left quiet.
+const REPORT_RECOVERIES: u8 = 3;
+const HALT_WINDOW_MS: u64 = 1000;
 
 struct Endpoint {
     dci: u8,
@@ -37,6 +42,12 @@ struct Endpoint {
     /// Given out with the pipe, or the tree's first transfer.
     buffer: Option<Page>,
     open: bool,
+    /// Bytes of each report a [`Reports`] keeps posted, 0 for none.
+    report_length: u32,
+    posted: Option<Transfer>,
+    /// Recoveries since a report last arrived, and when it last halted.
+    recoveries: u8,
+    halted_at: u64,
 }
 
 impl Endpoint {
@@ -48,7 +59,23 @@ impl Endpoint {
             ring: TransferRing::new(Page::alloc().ok_or(AllocError)?),
             buffer: None,
             open: false,
+            report_length: 0,
+            posted: None,
+            recoveries: 0,
+            halted_at: 0,
         })
+    }
+
+    /// Posts the next report unless one is posted or the ring is halted.
+    fn post_report(&mut self) -> bool {
+        if self.report_length == 0 || self.posted.is_some() {
+            return false;
+        }
+        let Some(buffer) = self.buffer.as_ref() else {
+            return false;
+        };
+        self.posted = self.ring.normal(buffer.phys(), self.report_length).ok();
+        self.posted.is_some()
     }
 
     fn context(&self, speed: Speed) -> EndpointContext {
@@ -83,6 +110,9 @@ struct Memory {
     control: Page,
     ep0: TransferRing<Page>,
     endpoints: KVec<Endpoint>,
+    /// Each [`Posted`]'s data stage, kept as long as the device so an
+    /// abandoned request never reads a freed page.
+    posted: KVec<Page>,
     gone: bool,
 }
 
@@ -96,6 +126,7 @@ impl Memory {
                 write_field!(init, control, page()?);
                 write_field!(init, ep0, TransferRing::new(page()?));
                 write_field!(init, endpoints, KVec::new());
+                write_field!(init, posted, KVec::new());
                 write_field!(init, gone, false);
                 Ok(init.finish())
             },
@@ -110,6 +141,10 @@ impl Memory {
             .iter_mut()
             .find(|e| e.dci == dci)
             .map(|e| &mut e.ring)
+    }
+
+    fn endpoint(&mut self, dci: u8) -> Option<&mut Endpoint> {
+        self.endpoints.iter_mut().find(|e| e.dci == dci)
     }
 
     fn buffer(&self, dci: u8) -> Option<&Page> {
@@ -148,6 +183,13 @@ pub struct Bind {
     pub state: BindState,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Finished {
+    pub transfer: bool,
+    pub tree: bool,
+    pub report: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UsbError {
     Transfer(TransferError),
@@ -156,6 +198,8 @@ pub enum UsbError {
     /// More than one page.
     TooLong,
     Killed,
+    /// The endpoint takes nothing now; try again.
+    Busy,
 }
 
 #[derive(slopos_ostd::SlotFields)]
@@ -180,6 +224,23 @@ pub struct Device {
     unbound: AtomicBool,
     /// Dropped once Disable Slot has completed.
     retired: SpinLock<KVec<ClaimSlot>>,
+    /// Taken by the drain once it has released the event lock.
+    reporters: SpinLock<KVec<Reporter>>,
+    /// Endpoints, by DCI, whose posted report has completed.
+    reports_done: AtomicU32,
+}
+
+/// Called with each report an endpoint returns, from wherever the event ring
+/// is drained: it may not block, allocate or log.
+pub trait ReportSink: Send + Sync {
+    fn report(&self, report: &[u8]);
+}
+
+struct Reporter {
+    dci: u8,
+    sink: KArc<dyn ReportSink>,
+    /// The report, copied out of the page the controller writes.
+    copy: Store,
 }
 
 impl Device {
@@ -239,6 +300,15 @@ impl Device {
                         lock_class!("UsbDevice.retired", LOCK_LEVEL_RESOURCE)
                     )
                 );
+                write_field!(
+                    init,
+                    reporters,
+                    SpinLock::new(
+                        KVec::new(),
+                        lock_class!("UsbDevice.reporters", LOCK_LEVEL_RESOURCE)
+                    )
+                );
+                write_field!(init, reports_done, AtomicU32::new(0));
                 Ok(init.finish())
             },
         ))
@@ -425,6 +495,13 @@ impl Device {
         if let Some(ring) = self.memory.lock().ring(dci) {
             ring.abandon(transfer);
         }
+        self.note_abandoned();
+    }
+
+    fn note_abandoned(&self) {
+        if let Some(controller) = super::controller(self.controller) {
+            controller.note_work();
+        }
         crate::usb::wake();
     }
 
@@ -474,9 +551,46 @@ impl Device {
             })
     }
 
+    /// A reporting endpoint's ring runs again with a report posted, unless
+    /// it has used up [`REPORT_RECOVERIES`].
     pub(super) fn recovered(&self, dci: u8) {
-        if let Some(ring) = self.memory.lock().ring(dci) {
-            ring.recovered();
+        let mut memory = self.memory.lock();
+        let Some(ring) = memory.ring(dci) else {
+            return;
+        };
+        ring.recovered();
+        let gone = memory.gone;
+        let Some(endpoint) = memory.endpoint(dci) else {
+            return;
+        };
+        if let Some(posted) = endpoint.posted.take() {
+            let _ = endpoint.ring.take(posted);
+        }
+        if endpoint.report_length == 0 {
+            return;
+        }
+        let now = slopos_kernel_services::clock::uptime_ms();
+        if now.saturating_sub(endpoint.halted_at) > HALT_WINDOW_MS {
+            endpoint.recoveries = 0;
+        }
+        endpoint.halted_at = now;
+        endpoint.recoveries = endpoint.recoveries.saturating_add(1);
+        if endpoint.recoveries > REPORT_RECOVERIES {
+            let address = endpoint.descriptor.address;
+            let first = endpoint.recoveries == REPORT_RECOVERIES + 1;
+            drop(memory);
+            if first && let Some(node) = self.node() {
+                klog_info!(
+                    "USB: {}-{} endpoint {:#04x} keeps halting; its reports stop",
+                    self.controller,
+                    node.path,
+                    address
+                );
+            }
+            return;
+        }
+        if !gone && endpoint.post_report() {
+            self.ring_doorbell(&memory, dci);
         }
     }
 
@@ -507,23 +621,224 @@ impl Device {
         }
     }
 
-    /// Whether it finished a transfer, and whether that is the USB thread's:
-    /// EP0's, a hub's, or a halt. Other transfers wake only their waiters.
+    /// What finishing a transfer leaves to do: the USB thread's work is EP0's,
+    /// a hub's or a halt, a report is the drain's, and any other transfer
+    /// wakes only its waiter.
     pub(super) fn complete(
         &self,
         dci: u8,
         trb: u64,
         code: CompletionCode,
         residual: u32,
-    ) -> (bool, bool) {
+    ) -> Finished {
         use slopos_usb_core::xhci::transfer::Completed;
         let mut memory = self.memory.lock();
         let Some(ring) = memory.ring(dci) else {
-            return (false, false);
+            return Finished::default();
         };
-        let finished = ring.complete(trb, code, residual) == Completed::Transfer;
+        if ring.complete(trb, code, residual) != Completed::Transfer {
+            return Finished::default();
+        }
         let tree = dci == 1 || ring.is_halted() || self.hub.load(Ordering::Acquire);
-        (finished, finished && tree)
+        let report = memory.endpoint(dci).is_some_and(|e| e.report_length != 0);
+        if report {
+            self.reports_done.fetch_or(1 << dci, Ordering::AcqRel);
+        }
+        Finished {
+            transfer: true,
+            tree,
+            report,
+        }
+    }
+
+    /// Hands each completed report to its sink and posts the next. Runs with
+    /// no event lock held.
+    pub(super) fn dispatch_reports(&self) {
+        let done = self.reports_done.swap(0, Ordering::AcqRel);
+        if done == 0 {
+            return;
+        }
+        let mut reporters = self.reporters.lock();
+        for reporter in reporters.iter_mut().filter(|r| done >> r.dci & 1 != 0) {
+            if let Some(length) = self.take_report(reporter.dci, reporter.copy.bytes_mut()) {
+                reporter.sink.report(&reporter.copy.bytes()[..length]);
+            }
+        }
+    }
+
+    /// Copies a completed report into `into`, zero-padded to the length
+    /// posted, and posts the next. An empty one is dropped.
+    fn take_report(&self, dci: u8, into: &mut [u8]) -> Option<usize> {
+        let mut memory = self.memory.lock();
+        let gone = memory.gone;
+        let endpoint = memory.endpoint(dci)?;
+        let posted = endpoint.posted?;
+        let result = endpoint.ring.take(posted)?;
+        endpoint.posted = None;
+        let padded = (endpoint.report_length as usize).min(into.len());
+        let length = match (result, endpoint.buffer.as_ref()) {
+            (Ok(moved @ 1..), Some(buffer)) => {
+                endpoint.recoveries = 0;
+                let moved = (moved as usize).min(padded);
+                buffer.read_bytes(0, &mut into[..moved]);
+                into[moved..padded].fill(0);
+                Some(padded)
+            }
+            _ => None,
+        };
+        if !gone && endpoint.post_report() {
+            self.ring_doorbell(&memory, dci);
+        }
+        length
+    }
+
+    /// Keeps a report of `length` bytes posted on the endpoint at `address`,
+    /// handing each to `sink`.
+    #[inline(never)]
+    pub(crate) fn open_reports(
+        &self,
+        address: u8,
+        length: u32,
+        sink: KArc<dyn ReportSink>,
+    ) -> Result<u8, BoundError> {
+        let dci = slopos_usb_core::xhci::context::dci(address & 0x0f, address & 0x80 != 0);
+        let copy = Store::alloc().ok_or(BoundError::OutOfMemory)?;
+        let buffer = Page::alloc().ok_or(BoundError::OutOfMemory)?;
+        let mut reporters = self.reporters.lock();
+        reporters
+            .try_reserve(1)
+            .map_err(|_| BoundError::OutOfMemory)?;
+        let mut memory = self.memory.lock();
+        if memory.gone {
+            return Err(BoundError::Gone);
+        }
+        let endpoint = memory.endpoint(dci).ok_or(BoundError::NoSuchEndpoint)?;
+        if endpoint.open {
+            return Err(BoundError::Busy);
+        }
+        endpoint.open = true;
+        endpoint.report_length = length.min(PAGE_SIZE as u32);
+        endpoint.recoveries = 0;
+        let spare = match endpoint.buffer {
+            Some(_) => Some(buffer),
+            None => endpoint.buffer.replace(buffer),
+        };
+        let posted = endpoint.post_report();
+        if posted {
+            self.ring_doorbell(&memory, dci);
+        }
+        drop(memory);
+        let _ = reporters.push(Reporter { dci, sink, copy });
+        drop(reporters);
+        drop(spare);
+        Ok(dci)
+    }
+
+    fn close_reports(&self, dci: u8) {
+        let reporter = {
+            let mut reporters = self.reporters.lock();
+            let at = reporters.iter().position(|r| r.dci == dci);
+            at.map(|at| reporters.swap_remove(at))
+        };
+        drop(reporter);
+        let abandoned = {
+            let mut memory = self.memory.lock();
+            let Some(endpoint) = memory.endpoint(dci) else {
+                return;
+            };
+            endpoint.open = false;
+            endpoint.report_length = 0;
+            endpoint
+                .posted
+                .take()
+                .inspect(|&posted| endpoint.ring.abandon(posted))
+        };
+        if abandoned.is_some() {
+            self.note_abandoned();
+        }
+    }
+
+    /// A data page for [`post_control`](Self::post_control), by index.
+    fn add_posted_page(&self) -> Result<usize, BoundError> {
+        let page = Page::alloc().ok_or(BoundError::OutOfMemory)?;
+        let mut memory = self.memory.lock();
+        memory
+            .posted
+            .try_reserve(1)
+            .map_err(|_| BoundError::OutOfMemory)?;
+        memory
+            .posted
+            .push(page)
+            .map_err(|_| BoundError::OutOfMemory)?;
+        Ok(memory.posted.len() - 1)
+    }
+
+    /// Abandons every posted report as a halt would leave it, for the USB
+    /// thread to move each ring past and post again: how many.
+    #[cfg(feature = "test-hooks")]
+    pub fn abandon_reports(&self) -> usize {
+        let mut memory = self.memory.lock();
+        let mut abandoned = 0;
+        let mut reposted = 0u32;
+        for endpoint in memory.endpoints.iter_mut() {
+            if let Some(posted) = endpoint.posted.take() {
+                endpoint.ring.abandon(posted);
+                if endpoint.post_report() {
+                    reposted |= 1 << endpoint.dci;
+                }
+                abandoned += 1;
+            }
+        }
+        for dci in (1..32u8).filter(|dci| reposted >> dci & 1 != 0) {
+            self.ring_doorbell(&memory, dci);
+        }
+        drop(memory);
+        if abandoned != 0 {
+            self.note_abandoned();
+        }
+        abandoned
+    }
+
+    /// Every reporting endpoint runs with a report posted.
+    #[cfg(feature = "test-hooks")]
+    pub fn reports_posted(&self) -> bool {
+        let memory = self.memory.lock();
+        memory
+            .endpoints
+            .iter()
+            .filter(|e| e.report_length != 0)
+            .all(|e| e.posted.is_some() && !e.ring.is_halted())
+    }
+
+    /// A control request whose data stage is `data`, written to posted page
+    /// `page` and left for [`posted`](Self::posted) to collect: for a thread
+    /// that may not wait.
+    pub(crate) fn post_control(
+        &self,
+        setup: Setup,
+        page: usize,
+        data: &[u8],
+    ) -> Result<Transfer, UsbError> {
+        let mut memory = self.memory.lock();
+        if memory.gone {
+            return Err(UsbError::Gone);
+        }
+        if !memory.ep0.accepts() {
+            return Err(UsbError::Busy);
+        }
+        let buffer = memory.posted.get_mut(page).ok_or(UsbError::Gone)?;
+        buffer.write_bytes(0, data);
+        let phys = buffer.phys();
+        let transfer = memory
+            .ep0
+            .control(setup, phys)
+            .map_err(|_| UsbError::Busy)?;
+        self.ring_doorbell(&memory, 1);
+        Ok(transfer)
+    }
+
+    pub(crate) fn posted(&self, transfer: Transfer) -> Option<TransferResult> {
+        self.memory.lock().ep0.take(transfer)
     }
 
     /// The `n`th endpoint, EP0 first: DCI, address and transfers outstanding.
@@ -677,9 +992,6 @@ impl Device {
             Ok(Err(error)) => Err(UsbError::Transfer(error)),
             Err(abort) => {
                 self.abandon(dci, ticket);
-                if let Some(controller) = super::controller(self.controller) {
-                    controller.note_work();
-                }
                 Err(if abort == WaitAbort::Timeout {
                     UsbError::Timeout
                 } else {
@@ -823,6 +1135,107 @@ impl Drop for Pipe {
         let mut memory = self.device.memory.lock();
         if let Some(endpoint) = memory.endpoints.iter_mut().find(|e| e.dci == self.dci) {
             endpoint.open = false;
+        }
+    }
+}
+
+/// An endpoint that keeps a report posted, until this is dropped.
+pub struct Reports {
+    device: KArc<Device>,
+    dci: u8,
+}
+
+impl Reports {
+    pub(crate) fn open(
+        device: KArc<Device>,
+        address: u8,
+        length: u32,
+        sink: KArc<dyn ReportSink>,
+    ) -> Result<Self, BoundError> {
+        let dci = device.open_reports(address, length, sink)?;
+        Ok(Self { device, dci })
+    }
+}
+
+impl Drop for Reports {
+    fn drop(&mut self) {
+        self.device.close_reports(self.dci);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Poll {
+    Idle,
+    Out,
+    Done(TransferResult),
+}
+
+/// Control requests sent one at a time and collected later, for the USB
+/// thread, which never waits on a completion.
+pub struct Posted {
+    device: KArc<Device>,
+    page: usize,
+    /// The request out, and when it was sent.
+    out: SpinLock<Option<(Transfer, u64)>>,
+}
+
+impl Posted {
+    pub(crate) fn new(device: KArc<Device>) -> Result<Self, BoundError> {
+        let page = device.add_posted_page()?;
+        Ok(Self {
+            device,
+            page,
+            out: SpinLock::new(None, lock_class!("UsbPosted.out", LOCK_LEVEL_RESOURCE)),
+        })
+    }
+
+    /// `data` is the request's data stage, which `setup` must size.
+    pub fn send(&self, setup: Setup, data: &[u8]) -> Result<(), UsbError> {
+        if usize::from(setup.length) != data.len() || data.len() > PAGE_SIZE {
+            return Err(UsbError::TooLong);
+        }
+        let mut out = self.out.lock();
+        if out.is_some() {
+            return Err(UsbError::Busy);
+        }
+        let transfer = self.device.post_control(setup, self.page, data)?;
+        *out = Some((transfer, slopos_kernel_services::clock::uptime_ms()));
+        Ok(())
+    }
+
+    /// A request still out after [`CONTROL_MS`] is abandoned, as a waited one
+    /// is, and fails as a transaction error.
+    pub fn poll(&self) -> Poll {
+        let mut out = self.out.lock();
+        let Some((transfer, sent)) = *out else {
+            return Poll::Idle;
+        };
+        match self.device.posted(transfer) {
+            Some(result) => {
+                *out = None;
+                Poll::Done(result)
+            }
+            None if self.device.is_gone() => {
+                *out = None;
+                Poll::Done(Err(TransferError::Gone))
+            }
+            None if slopos_kernel_services::clock::uptime_ms().saturating_sub(sent)
+                >= CONTROL_MS =>
+            {
+                *out = None;
+                drop(out);
+                self.device.abandon(1, transfer);
+                Poll::Done(Err(TransferError::Transaction))
+            }
+            None => Poll::Out,
+        }
+    }
+}
+
+impl Drop for Posted {
+    fn drop(&mut self) {
+        if let Some((transfer, _)) = self.out.lock().take() {
+            self.device.abandon(1, transfer);
         }
     }
 }

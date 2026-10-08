@@ -46,6 +46,19 @@ impl KeyRepeat {
         }
     }
 
+    /// When [`tick`](Self::tick) next fires, if a repeating key is held.
+    pub fn next_ms(&self) -> Option<u64> {
+        let key = self.key?;
+        if !key_repeats(key) {
+            return None;
+        }
+        Some(if self.repeating {
+            self.last_repeat_ms + REPEAT_INTERVAL_MS
+        } else {
+            self.press_time_ms + REPEAT_DELAY_MS
+        })
+    }
+
     /// Drive from a periodic tick. Returns `Some(key)` when a repeat should fire.
     pub fn tick(&mut self, now_ms: u64) -> Option<u16> {
         let key = self.key?;
@@ -120,6 +133,20 @@ mod tests {
         assert_eq!(r.tick(REPEAT_DELAY_MS), Some(KEY_A));
         assert_eq!(r.tick(REPEAT_DELAY_MS + 1), None);
         assert_eq!(r.tick(REPEAT_DELAY_MS + REPEAT_INTERVAL_MS), Some(KEY_A));
+    }
+
+    #[test]
+    fn next_ms_names_the_tick_that_fires() {
+        let mut r = KeyRepeat::new();
+        assert_eq!(r.next_ms(), None);
+        r.on_key_down(KEY_A, 7);
+        assert_eq!(r.next_ms(), Some(7 + REPEAT_DELAY_MS));
+        assert_eq!(r.tick(r.next_ms().unwrap() - 1), None);
+        let first = r.next_ms().unwrap();
+        assert_eq!(r.tick(first), Some(KEY_A));
+        assert_eq!(r.next_ms(), Some(first + REPEAT_INTERVAL_MS));
+        r.on_key_down(KEY_LEFTSHIFT, 9);
+        assert_eq!(r.next_ms(), None);
     }
 
     #[test]

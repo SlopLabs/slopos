@@ -1,38 +1,25 @@
+use slopos_hid_core::pointer::{Axis, Motion};
 use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-use crate::input_event::{self, get_timestamp_ms};
+use crate::input_event::{self, PointerSource, get_timestamp_ms};
 use crate::ps2;
 
-pub const BUTTON_LEFT: u8 = 0x01;
-pub const BUTTON_RIGHT: u8 = 0x02;
-pub const BUTTON_MIDDLE: u8 = 0x04;
-
 struct MouseState {
-    x: i32,
-    y: i32,
-    buttons: u8,
     packet_byte: u8,
     packet: [u8; 4],
     packet_size: u8,
     mouse_type: u8,
-    max_x: i32,
-    max_y: i32,
 }
 
 impl MouseState {
     const fn new() -> Self {
         Self {
-            x: 0,
-            y: 0,
-            buttons: 0,
             packet_byte: 0,
             packet: [0; 4],
             packet_size: 3,
             mouse_type: 0,
-            max_x: 1,
-            max_y: 1,
         }
     }
 }
@@ -104,31 +91,14 @@ pub fn init() {
     // The mouse may have sent trailing bytes during init.
     ps2::flush();
 
-    let (x, y) = {
+    {
         let mut state = STATE.lock();
         state.mouse_type = mouse_type;
         state.packet_size = packet_size;
-        state.x = state.max_x / 2;
-        state.y = state.max_y / 2;
         state.packet_byte = 0;
-        (state.x, state.y)
-    };
-
-    input_event::input_route_pointer_motion(x, y, 0);
-
-    klog_info!("PS/2 mouse: initialised at ({}, {})", x, y);
-}
-
-pub fn set_bounds(width: i32, height: i32) {
-    if width <= 0 || height <= 0 {
-        return;
     }
 
-    let mut state = STATE.lock();
-    state.max_x = width;
-    state.max_y = height;
-    state.x = state.x.clamp(0, width - 1);
-    state.y = state.y.clamp(0, height - 1);
+    klog_info!("PS/2 mouse: initialised");
 }
 
 pub fn handle_irq(data: u8) {
@@ -157,8 +127,7 @@ pub fn handle_irq(data: u8) {
         return;
     }
 
-    let old_buttons = state.buttons;
-    state.buttons = packet_flags & 0x07;
+    let buttons = packet_flags & 0x07;
 
     let mut dx = dx_raw as i16;
     if packet_flags & 0x10 != 0 {
@@ -170,15 +139,7 @@ pub fn handle_irq(data: u8) {
         dy -= 256;
     }
 
-    dy = -dy;
-
-    state.x += dx as i32;
-    state.y += dy as i32;
-
-    state.x = state.x.clamp(0, state.max_x - 1);
-    state.y = state.y.clamp(0, state.max_y - 1);
-
-    let mut dz: i32 = 0;
+    let mut z_toward_user: i32 = 0;
     let mut dw: i32 = 0;
 
     if state.mouse_type >= 3 && state.packet_size == 4 {
@@ -190,7 +151,7 @@ pub fn handle_irq(data: u8) {
                 if b3 & 0x08 != 0 {
                     z |= -16_i8;
                 }
-                dz = z as i32;
+                z_toward_user = z as i32;
             }
             4 => {
                 // ImExPS/2: upper 2 bits select encoding
@@ -201,7 +162,7 @@ pub fn handle_irq(data: u8) {
                         if b3 & 0x08 != 0 {
                             z |= -16_i8;
                         }
-                        dz = z as i32;
+                        z_toward_user = z as i32;
                     }
                     0x80 => {
                         // Vertical scroll (IM 4.0): bits 5:0 = 6-bit signed
@@ -209,7 +170,7 @@ pub fn handle_irq(data: u8) {
                         if b3 & 0x20 != 0 {
                             z |= -64_i8;
                         }
-                        dz = z as i32;
+                        z_toward_user = z as i32;
                     }
                     0x40 => {
                         // Horizontal scroll (IM 4.0): bits 5:0 = 6-bit signed
@@ -226,40 +187,15 @@ pub fn handle_irq(data: u8) {
         }
     }
 
-    let final_x = state.x;
-    let final_y = state.y;
-    let final_buttons = state.buttons;
-
     drop(state);
 
-    let timestamp_ms = get_timestamp_ms();
-
-    if dx != 0 || dy != 0 {
-        input_event::input_route_pointer_motion(final_x, final_y, timestamp_ms);
-    }
-
-    let button_changes = old_buttons ^ final_buttons;
-    for button_bit in [BUTTON_LEFT, BUTTON_RIGHT, BUTTON_MIDDLE] {
-        if button_changes & button_bit != 0 {
-            let pressed = final_buttons & button_bit != 0;
-            input_event::input_route_pointer_button(button_bit, pressed, timestamp_ms);
-        }
-    }
-
-    // value120 axis units: one detent click is ±120.
-    if dz != 0 {
-        input_event::input_route_pointer_axis(0, dz * 120, timestamp_ms);
-    }
-    if dw != 0 {
-        input_event::input_route_pointer_axis(1, dw * 120, timestamp_ms);
-    }
-}
-
-pub fn get_position() -> (i32, i32) {
-    let state = STATE.lock();
-    (state.x, state.y)
-}
-
-pub fn get_buttons() -> u8 {
-    STATE.lock().buttons
+    let motion = Motion {
+        buttons: buttons.into(),
+        reported: u32::MAX,
+        x: Some(Axis::Relative(dx.into())),
+        y: Some(Axis::Relative((-dy).into())),
+        wheel: -z_toward_user,
+        pan: dw,
+    };
+    input_event::pointer_report(PointerSource::PS2, &motion, get_timestamp_ms());
 }

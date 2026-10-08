@@ -58,6 +58,12 @@ impl SysrqFsm {
         }
     }
 
+    fn is_eaten(&self, usage: u16) -> bool {
+        self.eaten
+            .get((usage >> 6) as usize)
+            .is_some_and(|word| word >> (usage & 63) & 1 != 0)
+    }
+
     fn take_eaten(&mut self, usage: u16) -> bool {
         let Some(word) = self.eaten.get_mut((usage >> 6) as usize) else {
             return false;
@@ -85,10 +91,12 @@ impl SysrqFsm {
                 Verdict::Pass
             };
         }
-
         if is_arm_key(usage, mods) {
             self.armed_at_ms = Some(now_ms);
             self.mark_eaten(usage);
+            return Verdict::Eat;
+        }
+        if self.is_eaten(usage) {
             return Verdict::Eat;
         }
 
@@ -170,6 +178,34 @@ mod tests {
             Verdict::Run(b't')
         );
         assert!(!fsm.is_armed());
+    }
+
+    #[test]
+    fn a_held_trigger_stays_armed() {
+        let mut fsm = SysrqFsm::new();
+        fsm.feed(KEY_SYSRQ, true, mods(), 0, ARM_MS);
+        let held = u64::from(ARM_MS) + 500;
+        assert_eq!(
+            fsm.feed(KEY_SYSRQ, true, mods(), held, ARM_MS),
+            Verdict::Eat
+        );
+        assert_eq!(
+            fsm.feed(KEY_T, true, mods(), held + 10, ARM_MS),
+            Verdict::Run(b't')
+        );
+    }
+
+    #[test]
+    fn a_held_command_key_repeats_into_nothing() {
+        let mut fsm = SysrqFsm::new();
+        fsm.feed(KEY_SYSRQ, true, mods(), 0, ARM_MS);
+        assert_eq!(
+            fsm.feed(KEY_T, true, mods(), 10, ARM_MS),
+            Verdict::Run(b't')
+        );
+        assert_eq!(fsm.feed(KEY_T, true, mods(), 600, ARM_MS), Verdict::Eat);
+        assert_eq!(fsm.feed(KEY_T, false, mods(), 700, ARM_MS), Verdict::Eat);
+        assert_eq!(fsm.feed(KEY_T, true, mods(), 800, ARM_MS), Verdict::Pass);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use slopos_kernel_services::syscall_services::tty::{TtyServices, register_tty_se
 use slopos_ostd::KArc;
 use slopos_ostd::process::quota::FileBacking;
 
-use crate::{input_event, ps2, tty};
+use crate::{input_event, keyboard, tty};
 
 static INPUT_SERVICES: InputServices = InputServices {
     poll: input_event::input_poll,
@@ -176,8 +176,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
 };
 
 static KEYMAP_SERVICES: KeymapServices = KeymapServices {
-    load: ps2::keyboard::load_layout_from_user,
-    current_name: ps2::keyboard::layout_name,
+    load: keyboard::load_layout_from_user,
+    current_name: keyboard::layout_name,
 };
 
 pub fn init_syscall_services() {

@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use slopos_arch::cpu;
 use slopos_drivers::crash::PanicRecord;
-use slopos_drivers::keyboard::poll_wait_enter;
+use slopos_drivers::ps2::keyboard::poll_wait_enter;
 use slopos_mm::memory_init::is_memory_system_initialized;
 use slopos_ostd::panic_recovery;
 use slopos_ostd::stacktrace::{self, StacktraceEntry};

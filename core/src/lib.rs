@@ -31,7 +31,11 @@ pub mod utests;
 ///     argv = &["foo", "--flag"],
 /// );
 /// slopos_core::utest!(name = utest_hours_long, bin = "/bin/bar", uncaptured);
+/// slopos_core::utest!(name = utest_host_driven, bin = "/bin/baz", explicit);
 /// ```
+///
+/// `explicit` runs only when `tests.run` names the test in full, its log
+/// reaching the console as it is written: a host drives it.
 #[macro_export]
 macro_rules! utest {
     (name = $ident:ident, bin = $bin:literal) => {
@@ -40,6 +44,15 @@ macro_rules! utest {
 
     (name = $ident:ident, bin = $bin:literal, uncaptured) => {
         $crate::utest!(@desc $ident, $bin, &[$bin], $crate::__testing::FLAG_UNCAPTURED);
+    };
+
+    (name = $ident:ident, bin = $bin:literal, explicit) => {
+        $crate::utest!(
+            @desc $ident,
+            $bin,
+            &[$bin],
+            $crate::__testing::FLAG_EXPLICIT | $crate::__testing::FLAG_UNCAPTURED
+        );
     };
 
     (name = $ident:ident, bin = $bin:literal, argv = &[$($arg:literal),* $(,)?]) => {

@@ -11,6 +11,7 @@ extern crate std;
 
 pub mod bus;
 pub mod device;
+pub mod hid;
 pub mod hub;
 pub mod knob;
 pub mod xhci;

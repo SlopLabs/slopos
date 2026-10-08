@@ -188,6 +188,7 @@ dependencies = [
  "slopos-core",
  "slopos-font",
  "slopos-fs",
+ "slopos-hid-core",
  "slopos-kernel-services",
  "slopos-keymap-core",
  "slopos-mm",
@@ -255,6 +256,10 @@ dependencies = [
  "slopos-ostd",
  "slopos-service-core",
 ]
+
+[[package]]
+name = "slopos-hid-core"
+version = "0.1.0"
 
 [[package]]
 name = "slopos-http-core"

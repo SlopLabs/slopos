@@ -82,6 +82,14 @@ impl Default for Set1Decoder {
     }
 }
 
+/// The set-1 make code a usage arrives as, less any `0xE0` prefix: what the
+/// legacy byte of a key event carries whichever keyboard pressed it.
+pub fn make_code(usage: u16) -> Option<u8> {
+    (0..0x80)
+        .find(|&make| base_usage(make) == Some(usage))
+        .or_else(|| (0..0x80).find(|&make| ext_usage(make) == Some(usage)))
+}
+
 /// Non-extended set-1 make code → canonical usage.
 fn base_usage(make: u8) -> Option<u16> {
     Some(match make {
@@ -211,6 +219,23 @@ mod tests {
 
     fn one(byte: u8) -> Option<DecodeStep> {
         Set1Decoder::new().feed(byte)
+    }
+
+    #[test]
+    fn make_codes_round_trip_through_the_decoder() {
+        for make in 0..0x80u8 {
+            if let Some(usage) = base_usage(make) {
+                assert_eq!(make_code(usage), Some(make));
+            }
+            if let Some(usage) = ext_usage(make)
+                && base_usage(make) != Some(usage)
+            {
+                assert_eq!(make_code(usage), Some(make));
+            }
+        }
+        assert_eq!(make_code(KEY_A), Some(0x1E));
+        assert_eq!(make_code(KEY_UP), Some(0x48));
+        assert_eq!(make_code(0xff), None);
     }
 
     #[test]

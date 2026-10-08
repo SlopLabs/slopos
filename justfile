@@ -909,13 +909,19 @@ test-rude-exit: _build-run-tests
 test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     #!/usr/bin/env bash
     set -euo pipefail
-    tests=slopos_drivers::tests::usb_tests::test_usb_1_controllers_run
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_2_every_device_enumerates
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_3_pulled_devices_leave
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_4_plugged_devices_return
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_5_pulled_again
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_6_plugged_again
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_7_shutdown_resets
+    tests=slopos_drivers::tests::usb_tests::test_usb_01_controllers_run
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_02_every_device_enumerates
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_03_held_keys_repeat
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_04_caps_lock_lights_every_keyboard
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_05_sysrq_runs_a_command
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_06_pointers_share_the_cursor
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_07_pulled_keyboard_releases_shift
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_08_pulled_devices_leave
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_09_plugged_devices_return
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_10_pulled_again
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_11_plugged_again
+    tests+=,slopos_core::utests::utest_usb_shell
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_12_shutdown_resets
     KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
@@ -1266,9 +1272,9 @@ test-remote: _build-userland _base-recipes
     fi
     echo "test-remote: identity, commands, files, kernel log, the sealed pairing, install and power-off all held"
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, cpufreq-core, ext4-core, http-core, remote-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, http-core, remote-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-http-core -p slopos-remote-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-http-core -p slopos-remote-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

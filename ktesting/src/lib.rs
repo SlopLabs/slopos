@@ -61,6 +61,8 @@ macro_rules! fail {
 }
 
 /// Register a `fn() -> TestResult` as a `TestDesc` in `.test_registry`.
+/// `kind = Userland` runs a kernel test in the userland phase, sorted among
+/// the userland tests.
 ///
 /// ```ignore
 /// fn my_test() -> TestResult { TestResult::Pass }
@@ -73,6 +75,10 @@ macro_rules! stest {
     };
 
     (name = $ident:ident, flags = $flags:expr) => {
+        $crate::stest!(name = $ident, flags = $flags, kind = Kernel);
+    };
+
+    (name = $ident:ident, flags = $flags:expr, kind = $kind:ident) => {
         $crate::paste::paste! {
             fn [<__stest_thunk_ $ident>]() -> $crate::TestResult {
                 $crate::execute_test($ident as fn() -> $crate::TestResult)
@@ -87,7 +93,7 @@ macro_rules! stest {
                 file: file!(),
                 line: line!(),
                 run: [<__stest_thunk_ $ident>],
-                kind: $crate::TestKind::Kernel,
+                kind: $crate::TestKind::$kind,
                 flags: $flags,
                 bin: None,
                 argv: &[],

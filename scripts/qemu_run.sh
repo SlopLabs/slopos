@@ -402,7 +402,7 @@ stdvga_args() {
     if [ "$vgamem_mb" -lt 16 ]; then vgamem_mb=16; fi
     p=1; while [ "$p" -lt "$vgamem_mb" ]; do p=$((p * 2)); done
     vgamem_mb=$p
-    VIDEO_ARGS=(-vga none -device "VGA,edid=on,xres=${fb_width},yres=${fb_height},vgamem_mb=${vgamem_mb}")
+    VIDEO_ARGS=(-vga none -device "VGA,id=video0,edid=on,xres=${fb_width},yres=${fb_height},vgamem_mb=${vgamem_mb}")
 }
 
 # True only if the named display device both EXISTS and INITIALIZES without

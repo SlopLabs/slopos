@@ -16,12 +16,14 @@ system runs. QEMU's controllers come first, then the laptop's two
 
 ## Where it stands
 
-Phases 1 and 2 have landed. The kernel takes every xHCI controller it can
+Phases 1, 2 and 3 have landed. The kernel takes every xHCI controller it can
 drive from the firmware and runs it. It enumerates every device on its root
 ports and behind its hubs, offers each function to the drivers `usb_driver!`
 registers, and removes a device cleanly when it leaves. It resets each
-controller at poweroff. No class driver exists yet, so a stick, a keyboard or
-an adapter is listed and left unbound; the firmware reads a stick and the
+controller at poweroff. `usb-hid` binds keyboards, mice and tablets, which
+type into the TTY and the desktop and move the one cursor beside the i8042's
+and the touchpad's. No other class driver exists yet, so a stick or an
+adapter is listed and left unbound; the firmware reads a stick and the
 kernel does not. `just test-installer`
 attaches the ISO as QEMU's `usb-storage` device on `qemu-xhci`
 (`INSTALL_STICK` in `scripts/qemu_run.sh`) for the firmware alone. The install
@@ -55,27 +57,13 @@ The pieces USB plugs into exist. These are their gaps:
   by the disk's name. No disk reports write protection, so `BLKROGET`
   answers 0 everywhere. A request waits a fixed 250 ms for a free slot,
   three times, before it fails as `Busy`.
-- **Input.** The i8042 keyboard and mouse and the I²C-HID touchpad call
-  `input_route_*` in `drivers/src/input_event.rs`. Keycodes are HID usages,
-  so `keymap-core`'s `ModTracker`, `resolve` and `SysrqFsm` already take
-  USB usages. The keyboard state, though, lives in `ps2::keyboard`: the
-  layout and its dead-key state, the modifiers and locks, the SysRq hook,
-  the TTY fallback and the scroll keys. Keys repeat by the keyboard's own
-  typematic, and `keymap_core::KeyRepeat` has no user. Each pointing device
-  keeps its own cursor. Only the PS/2 mouse hears of a mode change from the
-  video layer; the touchpad takes the boot framebuffer's size once.
-  `drivers/src/touchpad/report.rs` parses HID report descriptors but reads
-  neither array nor relative fields, records no output items and has no
-  tests.
 - **Network.** A NIC is a `NetDevice` handed to `nic::publish`.
   `nic::retire` tears one down, and a test grades it, but it exists only
   under `test-hooks`. Both NIC drivers are singletons.
 - **Tests.** `just test` attaches no USB controller. `just test-usb`
-  enumerates sticks, a hub and HID devices and plugs and pulls them through
-  QMP, but nothing injects input into a device. `utest!` has no form that
-  only a named run executes. CI's QEMU is the runner
-  distribution's, so a USB test uses only devices and QMP commands that
-  version carries.
+  enumerates sticks, a hub and HID devices, plugs and pulls them through
+  QMP and injects keys and motion. CI's QEMU is the runner distribution's,
+  so a USB test uses only devices and QMP commands that version carries.
 
 The laptop has two controllers. The PCH xHCI `8086:51ed` sits at `00:14.0`
 and the Thunderbolt 4 (TCSS) xHCI `8086:a71e` at `00:0d.0`. On Intel's
@@ -96,7 +84,7 @@ untrusted input, and each rewrites the `AGENTS.md` and
 |---|---|---|
 | 1. The host controller (done) | — | both QEMU xHCI models running, every root port's attach and detach logged, the controller reset at poweroff |
 | 2. Enumeration and the device model (done) | 1 | every device QEMU attaches, a hub's included, enumerated, bound or listed, and removed cleanly |
-| 3. Keyboards and pointers | 2 | a USB keyboard and tablet drive the shell and the desktop beside PS/2 |
+| 3. Keyboards and pointers (done) | 2 | a USB keyboard and tablet drive the shell and the desktop beside PS/2 |
 | 4. Mass storage | 2 | an ext4 stick mounted, written, pulled and plugged back; the installer still installs with its stick visible |
 | 5. The install medium on a stick | 4 | **milestone:** the installer takes the toolchain from the stick, not from RAM |
 | 6. USB networking | 2 | a CDC Ethernet adapter takes a DHCP lease and leaves cleanly |
@@ -189,85 +177,34 @@ devices such as Bluetooth are listed unbound. A SuperSpeed stick in a
 Type-C port is measured: it may reach the TCSS controller, reach the PCH
 controller at USB 2 speed, or reach neither.
 
-### Phase 3: Keyboards and pointers
+### Phase 3: Keyboards and pointers (done)
 
-- **`hid-core`.** A host-tested, `no_std`, alloc-free crate for HID,
-  independent of transport, added to the workspace and to `just test-host`
-  as `usb-core` is. It holds:
-  - the boot keyboard and mouse reports;
-  - the keyboard report's diff into `(usage, pressed)` steps, with
-    rollover reports ignored;
-  - the report-descriptor parser that `drivers/src/touchpad/report.rs`
-    becomes: main, global and local items with push and pop, report IDs,
-    array and variable fields, relative and absolute fields, signed fields
-    and output items, written over storage the caller passes.
+Built:
 
-  The touchpad becomes its first user.
-- **A keyboard layer in `drivers`.** It takes the machine's keyboard state
-  out of `ps2::keyboard`:
-  - one `ModTracker`, fed through per-source press counts, so a modifier is
-    held while any keyboard holds it;
-  - one layout and its dead-key state;
-  - the SysRq hook, the boot-log Esc, the scroll keys and the legacy ASCII
-    codes;
-  - the TTY fallback;
-  - the `get_modifier_state` that `input_event::input_get_modifier_state`
-    reads.
+- **`hid-core`**, HID independent of transport and host-tested with mutation
+  loops: report descriptors parsed into storage the caller passes (push and
+  pop, report IDs, delimiters, extended usages, variable and array fields,
+  signed and relative fields, outputs and features), the boot keyboard and
+  mouse reports, what a keyboard report holds and the steps between two,
+  what a pointer report says, and the LED output report. The touchpad parses
+  through it, and `usb-core` gained the HID class descriptor and requests.
+- **The keyboard layer**, `drivers/src/keyboard.rs`, holding the machine's
+  keyboard state as **Decided** below states. `ps2::keyboard` decodes set 1
+  into it and keeps the i8042's LED exchange; the layout syscalls read it.
+- **One cursor** in `input_event`, as **Decided** below states. The PS/2
+  mouse and the touchpad move it; the touchpad scales by the bounds the
+  video layer publishes rather than the boot framebuffer's.
+- **`usb-hid`**: boot keyboards, report-protocol keyboards, mice and
+  tablets, each interface holding a keyboard slot, a pointer slot or both.
+  Report endpoints and posted control requests in `drivers/src/usb/xhci`
+  carry its reports, repeats and LEDs as **Decided** states.
+- **Tests**: `utest!(…, explicit)` and `stest!(…, kind = Userland)`; and in
+  `just test-usb` a usb-mouse behind the hub, every posted report
+  abandoned and recovered, keys and motion injected through
+  `input-send-event`, and `usb_shell_test`, a shell typed at.
 
-  The i8042 driver and every USB keyboard feed it `(source, usage,
-  pressed)` steps, and the layout syscalls move to it. The layer marks
-  `KEY_FLAG_IS_REPEAT` on every press of a usage the same source already
-  holds, so the i8042's typematic repeats carry it as USB repeats do.
-  `ps2::keyboard` keeps `handle_scancode` as the i8042's way into the
-  layer, re-exports the layer's `set_layout`, and keeps a
-  `reset_state_for_test` that resets both its decoder and the layer, so the
-  existing tests' imports stand.
-- **Lock LEDs.** Every keyboard is told when the lock state changes. The
-  i8042's own lock keys set its LEDs from its interrupt handler, as today.
-  A lock change from a USB keyboard reaches the i8042 through `set_leds` on
-  the USB thread, with both i8042 lines (IRQ 1 and IRQ 12) masked for the
-  exchange: `set_leds` polls port 0x60, which the keyboard's and the aux
-  port's handlers both read, and it busy-waits, which no interrupt handler
-  or drain may. USB keyboards get an output report from the USB thread.
-- **One cursor.** `input_event` owns the pointer position, and the video
-  layer publishes the screen bounds to it. A relative device adds deltas.
-  An absolute device maps its logical range onto the bounds. Each source's
-  buttons are kept apart and merged, so a release on one device does not
-  lift a button held on another. The PS/2 mouse and the touchpad move onto
-  it.
-- **`usb-hid`, a `UsbBus` driver.**
-  - Boot keyboards (interface subclass 1, protocol 1) use boot protocol:
-    `SET_PROTOCOL` is always sent, never assumed, then `SET_IDLE`. A
-    keyboard interface outside the boot subclass is read by report protocol
-    through `hid-core`, its array field being the key list.
-  - Pointers and tablets use report protocol through `hid-core`.
-  - Reports are decoded wherever the event-ring drain runs, once it has
-    released the event lock, and fed to the keyboard layer and the cursor
-    there, as the i8042 feeds them from its interrupt handler. Each
-    transfer is re-posted from the same path, so no enumeration, storage
-    probe or recovery delays input.
-  - The USB thread keeps the repeat ticks, through `keymap_core::KeyRepeat`
-    with its `park_timeout` deadline at the next repeat.
-  - On removal, the driver sends a release for every key and button the
-    device held.
-- **An explicit userland test.** `utest!` gains the explicit flag, so a
-  userland test runs only when `just test-usb` names it.
-
-**Done when** `just test-usb` passes all of these:
-
-- it types into the shell on `usb-kbd` through QMP `input-send-event`;
-- held keys repeat;
-- Caps Lock on `usb-kbd` sets the LED in its output report and the i8042's
-  LEDs;
-- Alt+PrintScreen and a command key run a kconsole command;
-- `usb-tablet` and `usb-mouse` move the same cursor the PS/2 mouse moves;
-- pulling a keyboard while Shift is held leaves nothing shifted, except
-  where another keyboard still holds Shift.
-
-The existing keyboard tests must also pass through the new layer.
-
-**On the laptop,** an external keyboard and mouse work beside the internal
-keyboard and touchpad.
+**On the laptop (not yet run),** an external keyboard and mouse work beside
+the internal keyboard and touchpad.
 
 ### Phase 4: Mass storage
 
@@ -494,15 +431,25 @@ takes a lease, and git fetches over it.
   - ext4 sticks that are plugged and pulled;
   - QEMU's `usb-net` device.
 
-  QEMU sends an injected event to the input device activated most
-  recently, unless the device and the event both name a display. The test
-  therefore binds `usb-kbd` and `usb-tablet` to the display with their
-  `display` property and names it in `input-send-event`. It moves the PS/2
-  mouse only while `usb-mouse`, which cannot be bound, is unplugged. The
-  host drives the test at markers the guest prints, as `just test-remote`
-  does, and holds each stick image to `e2fsck -fn` afterwards. The test
-  runs in CI's `ci` job after `test-rude-exit`, because only that job has
-  the tests build, and its warm cost is held under a minute.
+  QEMU sends an event that names no display to the unbound input device
+  activated most recently, and one that names a display to a device bound
+  to it. The test binds `usb-kbd` and `usb-tablet` to a stdvga given the id
+  `video0`, which must come before them on the command line, so a key or a
+  button that names no display reaches the i8042; `-parallel none` keeps a
+  text console from aborting QEMU's lookup. Motion that names none reaches
+  the usb-mouse our probe's `SET_IDLE` activated, which cannot be bound,
+  and the PS/2 mouse once it is unplugged. QEMU's HID devices never repeat
+  a key and its PS/2 keyboard has no typematic, so the host presses a key
+  twice to stand in for one; it merges a button's press and release sent
+  in one command, so each goes alone. The i8042's LEDs are graded from
+  QEMU's `ps2_set_ledstate` trace, a USB keyboard's from the output report
+  it acknowledged. The host drives the test at markers the guest prints, as
+  `just test-remote` does, and holds each stick image to `e2fsck -fn`
+  afterwards. A kernel test registered with `kind = Userland` runs after
+  the userland ones, which is how the controllers are reset only after the
+  shell has been typed at. The test runs in CI's `ci` job after
+  `test-rude-exit`, because only that job has the tests build, and its warm
+  cost is held under a minute.
 - **`just test-installer`:** phases 4 and 5.
 - **The laptop** grades what QEMU cannot:
   - Intel's controllers and the firmware handoff;
@@ -602,10 +549,23 @@ takes a lease, and git fetches over it.
     controller. The interrupt handler drains it under the controller's
     event lock, boundedly and allocating nothing, into per-endpoint
     completion queues.
-  - Once it has released the event lock, it decodes HID reports and wakes
-    whatever consumes each queue: the block engine's waiters, through
-    `Engine::handle_irq` as NVMe's and virtio-blk's handlers wake them;
-    netpoll; or the USB threads.
+  - Once it has released the event lock, it wakes whatever consumes each
+    queue: the block engine's waiters, through `Engine::handle_irq` as
+    NVMe's and virtio-blk's handlers wake them; netpoll; or the USB threads.
+    HID reports are decoded after the wakes.
+  - A driver that reads reports keeps one transfer posted on its interrupt
+    endpoint (`Reports`). The drain marks the endpoint done and, with the
+    event lock released and the device table's held so the device cannot
+    be freed under it, copies the report out, posts the next transfer and
+    hands the report to the driver's `ReportSink`, which may not block,
+    allocate or log. An endpoint the tree recovers is posted again from its
+    recovery, whatever the halt left posted, until it has halted four times,
+    each within a second of the last, with no report between; then it stays
+    quiet, and the log says so. A posted request still out after five
+    seconds is abandoned, as a waited one is. A reopened endpoint keeps the
+    buffer it had, and a `Posted` request's data stage lives as long as the
+    device, so a transfer abandoned under either never reaches a freed
+    page.
   - A transport's `pop` reads only its own completion queue. A lost
     interrupt is recovered by the USB thread, which runs the same drain on
     every pass, at least once a second.
@@ -622,6 +582,10 @@ takes a lease, and git fetches over it.
     the table read inside `block::register_disk`. A transfer a probe issues
     completes from the drain and wakes it, so recovery, deadlines,
     enumeration and key repeat go on while a probe or a table read waits.
+  - The USB thread also keeps each USB keyboard's repeat, at a deadline it
+    parks to, and the LEDs (**Lock LEDs** below). A control request it may
+    not wait for goes out as a `Posted` request, one at a time, collected on
+    a later pass.
   - USB takes two slots of the fixed stop registry, however many
     controllers a machine has.
   - Probe and the shutdown hooks wait for the controller by spinning, and
@@ -775,23 +739,69 @@ takes a lease, and git fetches over it.
     needs any other exception, joins it once one is seen, as Linux's
     32 KiB entries do and as a Realtek version joins `rtl8168-core`'s
     table.
-- **One keyboard state for the machine.** Locks and the layout are shared
-  by every keyboard, as on Linux's console. Modifiers are merged by
-  counting, as Linux's are: a modifier is held while any keyboard holds
-  it, so a release on one keyboard, or the releases sent when one is
-  removed, never lift a modifier another keyboard holds. Each source keeps
-  its own repeat: the i8042 keeps its typematic, and a USB keyboard gets
-  `KeyRepeat`'s `REPEAT_DELAY_MS` and `REPEAT_INTERVAL_MS`. Input events
-  stay anonymous on the ABI. The kernel keeps per-source state only where
-  sources must merge: held modifiers, held buttons, and held keys to
-  release on removal.
+- **One keyboard state for the machine.** Every keyboard feeds
+  `drivers/src/keyboard.rs` `(source, usage, pressed)` steps: the i8042 is
+  a fixed source, a USB keyboard claims one of `MAX_KEYBOARDS`. Locks and
+  the layout are shared by every keyboard, as on Linux's console.
+  Modifiers are merged by counting, as Linux's are: a modifier is held
+  while any keyboard holds it, so a release on one keyboard, or the
+  releases sent when one is removed, never lift a modifier another keyboard
+  holds. A press of a key its source already holds is a repeat: delivered
+  with `KEY_FLAG_IS_REPEAT`, and toggling no lock. Each source keeps its
+  own repeat: the i8042 keeps its typematic, and a USB keyboard gets
+  `KeyRepeat`'s `REPEAT_DELAY_MS` and `REPEAT_INTERVAL_MS` for the key it
+  pressed last. Input events stay anonymous on the ABI; the legacy byte of
+  a key event is its set-1 make code whichever keyboard pressed it. The
+  kernel keeps per-source state only where sources must merge: held
+  modifiers, held buttons, and held keys to release on removal.
+- **Lock LEDs.** Every keyboard is told when the locks change. The i8042's
+  exchange is started from wherever the locks changed and carried on by its
+  own interrupt, each ACK sending the next byte, as Linux's libps2 does, so
+  nothing masks its lines or polls port 0x60 once it is running. A byte the
+  keyboard answers with RESEND, or leaves unanswered for 250 ms, is sent
+  again, twice at most; an unanswered one is noticed at the keyboard's next
+  byte, the next lock change or the USB thread's next pass, so a machine
+  without xHCI has no clock behind it. A USB keyboard is sent the locks when
+  it binds and at every change, one output report at a time, through
+  `SET_REPORT` on EP0, from a table of the eight lock states built at bind.
+  A lock state a keyboard did not take, the i8042's included, is not sent
+  to it again until the locks change; a USB request cancelled by another
+  request's halt was not refused, and goes again.
+- **One cursor.** `input_event` owns the pointer's position and the screen
+  bounds the video layer publishes; the first bounds centre it. A pointing
+  device claims a `PointerSource`, the PS/2 mouse and the touchpad fixed
+  ones, and reports `hid-core`'s `Motion`: a relative axis moves the
+  cursor, an absolute one maps its logical range onto the bounds. Each
+  source's buttons are its own, and a button goes down when the first
+  source presses it and up when the last releases it. A report changes only
+  the buttons it carries, so a device whose buttons and wheel come in
+  different reports keeps its buttons held across the wheel's. An absolute
+  axis places the cursor only when its value changed, as an input core drops
+  a repeated absolute value: a tablet repeats its position in every report,
+  and would otherwise snap the cursor back from a mouse on each click.
+- **HID protocols.** A boot keyboard is told to use the boot protocol, as
+  HID 1.11 asks a host to tell rather than assume; one that refuses is read
+  through its report descriptor if that names keys. Anything else is read in
+  the report protocol through `hid-core`, a boot-subclass device told so,
+  and a boot mouse whose descriptor cannot be read, or names no pointer,
+  falls back to the boot protocol. Every interface whose protocol is chosen
+  is sent `SET_IDLE(0)`, whose refusal is ignored. A report that rolls over changes nothing held, and a keyboard's
+  report replaces only the keys of its own report ID. Keys are read only
+  from Keyboard and Keypad application collections and motion only from
+  Mouse and Pointer ones, so a game pad moves no cursor; an interface with
+  neither, such as a media-key or vendor collection, is declined. A short
+  report is zero-padded to the length posted and an empty one dropped, as
+  Linux's HID core does.
+  Input and output elements past `MAX_ELEMENTS`, which bounds what decoding
+  costs where the ring is drained, are left out rather than refusing the
+  descriptor; feature fields, decoded only at probe, count toward nothing,
+  and a feature report past `MAX_REPORT_BITS` leaves its later fields out.
 - **A USB keyboard is the physical console.** Someone typing on it is at
   the machine, as on Linux. Its reports feed the layer's one `SysrqFsm`
-  from the xHCI interrupt, and a command key reaches the same
-  `kconsole::request` the i8042 hook calls. Destructive commands still need
-  the `kconsole=` mask. Phase 3 rewrites `AGENTS.md`'s first diagnostic
-  console property, "Only the physical console reaches a destructive
-  command", to name the USB keyboard's hook beside the i8042's.
+  wherever the event ring is drained, and a command key reaches the same
+  `kconsole::request` the i8042 hook calls, and the repeats of a command key
+  still held are eaten with it. Destructive commands still need the
+  `kconsole=` mask.
 - **The payload moves to a partition the kernel mounts.**
   - The module stays small, so Limine no longer loads gigabytes into RAM.
   - A single file in the ISO no longer carries the toolchain, so the ISO

@@ -9,7 +9,6 @@
 pub mod gesture;
 pub mod i2c_hid;
 pub mod platform;
-pub mod report;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use slopos_ostd::lock_class;
@@ -19,22 +18,31 @@ use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_ostd::{KArc, klog_info, klog_warn};
 
+use slopos_hid_core::usage::{self, page};
+use slopos_hid_core::{Descriptor, Kind};
+
+use crate::hid::ReportMap;
 use crate::hpet;
 use crate::i2c::{self, I2cBus};
 use crate::pinctrl;
 use gesture::{Contact, Frame, GestureEngine, MAX_CONTACTS};
 use i2c_hid::I2cHid;
-use report::{
-    PAGE_BUTTON, PAGE_DIGITIZER, PAGE_GENERIC_DESKTOP, ReportFormat, USAGE_BUTTON_1,
-    USAGE_CONTACT_ID, USAGE_TIP_SWITCH, USAGE_X, USAGE_Y,
-};
+
+/// A Precision Touchpad's five fingers, its buttons and the mouse collection
+/// beside them fit with room to spare.
+const MAX_FIELDS: usize = 128;
+const MAX_USAGES: usize = 128;
+const BUTTON_1: u32 = usage::usage(page::BUTTON, 1);
 
 /// Poll interval for the fallback (interrupt-less) input read loop.
 const POLL_MS: u32 = 8;
+/// The Input Mode a precision touchpad leaves the mouse mode it boots in for:
+/// absolute multitouch reports.
+const INPUT_MODE_TOUCHPAD: u8 = 0x03;
 
 struct TouchpadRuntime {
     hid: I2cHid,
-    format: ReportFormat,
+    format: ReportMap,
     gesture: SpinLock<GestureEngine>,
     debug: bool,
 }
@@ -52,12 +60,10 @@ pub enum TouchpadError {
     NoDigitizer,
 }
 
-/// Bring up the discovered I²C-HID touchpad and start delivering input.
-/// `width`/`height` bound the cursor; `debug` (`tp.debug=on`) traces bring-up.
+/// Bring up the discovered I²C-HID touchpad and start delivering input;
+/// `debug` (`tp.debug=on`) traces bring-up.
 pub(crate) fn bring_up(
     found: &AcpiI2cHid,
-    width: u32,
-    height: u32,
     debug: bool,
     force_poll: bool,
 ) -> Result<(), TouchpadError> {
@@ -85,37 +91,17 @@ pub(crate) fn bring_up(
         }
     };
 
-    let rdesc = match hid.fetch_report_descriptor() {
-        Ok(d) => d,
-        Err(e) => {
-            klog_warn!("touchpad: report descriptor fetch failed: {:?}", e);
-            return Err(TouchpadError::BringUp);
-        }
-    };
-    let format = report::parse_report_descriptor(rdesc.as_slice());
+    let format = read_format(&hid, debug)?;
 
-    // The device boots in mouse-compatibility mode (relative reports); `0x03`
-    // selects multitouch so the absolute digitizer reports start flowing.
-    if let Some(rid) = format.input_mode_report_id {
-        match hid.set_feature_report(rid, &[0x03]) {
-            Ok(()) => {
-                klog_info!("touchpad: requested multitouch mode (report {})", rid);
-                hpet::delay_ms(50);
-            }
-            Err(e) => klog_warn!("touchpad: multitouch-mode request failed: {:?}", e),
-        }
-    } else if debug {
-        klog_info!("touchpad: no input-mode selector; device stays in mouse mode");
-    }
-
-    let (pad_x, pad_y) = pad_logical_max(&format);
+    let (pad_x, pad_y) = pad_logical_max(&format.descriptor());
     if debug {
+        let desc = format.descriptor();
         klog_info!(
-            "touchpad: parsed {} input fields, pad_max=({},{}), report_ids={}",
-            format.fields.len(),
+            "touchpad: parsed {} fields, pad_max=({},{}), report_ids={}",
+            desc.fields().len(),
             pad_x,
             pad_y,
-            format.uses_report_ids
+            desc.report_ids()
         );
     }
     if pad_x <= 1 || pad_y <= 1 {
@@ -123,7 +109,7 @@ pub(crate) fn bring_up(
         return Err(TouchpadError::NoDigitizer);
     }
 
-    let engine = GestureEngine::new(width as i32, height as i32, pad_x, pad_y);
+    let engine = GestureEngine::new(pad_x, pad_y);
     let rt = TouchpadRuntime {
         hid,
         format,
@@ -140,6 +126,39 @@ pub(crate) fn bring_up(
         Err(e) => klog_warn!("touchpad: failed to spawn poll thread: {:?}", e),
     }
     Ok(())
+}
+
+/// The report descriptor, with the device switched to multitouch where it
+/// has the selector.
+#[inline(never)]
+fn read_format(hid: &I2cHid, debug: bool) -> Result<ReportMap, TouchpadError> {
+    let rdesc = match hid.fetch_report_descriptor() {
+        Ok(d) => d,
+        Err(e) => {
+            klog_warn!("touchpad: report descriptor fetch failed: {:?}", e);
+            return Err(TouchpadError::BringUp);
+        }
+    };
+    let format = match ReportMap::parse(rdesc.as_slice(), MAX_FIELDS, MAX_USAGES) {
+        Ok(format) => format,
+        Err(e) => {
+            klog_warn!("touchpad: report descriptor refused: {:?}", e);
+            return Err(TouchpadError::NoDigitizer);
+        }
+    };
+
+    if let Some(rid) = input_mode_report(&format.descriptor()) {
+        match hid.set_feature_report(rid, &[INPUT_MODE_TOUCHPAD]) {
+            Ok(()) => {
+                klog_info!("touchpad: requested multitouch mode (report {})", rid);
+                hpet::delay_ms(50);
+            }
+            Err(e) => klog_warn!("touchpad: multitouch-mode request failed: {:?}", e),
+        }
+    } else if debug {
+        klog_info!("touchpad: no input-mode selector; device stays in mouse mode");
+    }
+    Ok(format)
 }
 
 /// IO-APIC line the Intel PCH GPIO controller (`INTC1055`) funnels pad interrupts
@@ -296,7 +315,7 @@ fn irq_thread(token: KernelIoToken<'static>) {
                                 &buf[..n.min(24)]
                             );
                         }
-                        if let Some(frame) = extract_frame(&rt.format, &buf[..n]) {
+                        if let Some(frame) = extract_frame(&rt.format.descriptor(), &buf[..n]) {
                             let ts = timestamp_ms();
                             rt.gesture.lock().process(&frame, ts);
                         }
@@ -317,13 +336,6 @@ fn irq_thread(token: KernelIoToken<'static>) {
     // a late edge would assert an interrupt with nobody left to drain it.
     pinctrl::pad_irq_mask();
     TOUCHPAD_WAKER.stop().note_exited();
-}
-
-/// Update cursor bounds after a resolution change.
-pub fn set_bounds(width: i32, height: i32) {
-    if let Some(rt) = TOUCHPAD.get() {
-        rt.gesture.lock().set_bounds(width, height);
-    }
 }
 
 /// Budget for per-poll diagnostic lines so a persistent read error can't flood
@@ -359,7 +371,7 @@ fn poll_thread(token: KernelIoToken<'static>) {
                             &buf[..n.min(24)]
                         );
                     }
-                    if let Some(frame) = extract_frame(&rt.format, &buf[..n]) {
+                    if let Some(frame) = extract_frame(&rt.format.descriptor(), &buf[..n]) {
                         if frame.count > 0 {
                             n_tipped += 1;
                             if rt.debug && first_tip {
@@ -418,34 +430,31 @@ fn controller_bus(index: u8) -> Option<KArc<I2cBus>> {
     i2c::bus_by_bdf(0, device, function)
 }
 
-/// Logical extent of the touch surface. The descriptor also carries the relative
-/// mouse collection, so the largest X/Y maximum is the absolute digitizer's.
-fn pad_logical_max(format: &ReportFormat) -> (i32, i32) {
-    let x = format
-        .matches(PAGE_GENERIC_DESKTOP, USAGE_X)
-        .map(|f| f.logical_max)
-        .max()
-        .unwrap_or(1);
-    let y = format
-        .matches(PAGE_GENERIC_DESKTOP, USAGE_Y)
-        .map(|f| f.logical_max)
-        .max()
-        .unwrap_or(1);
-    (x.max(1), y.max(1))
+/// The Digitizer feature report that selects multitouch.
+fn input_mode_report(desc: &Descriptor<'_>) -> Option<u8> {
+    desc.every_element(Kind::Feature)
+        .find(|e| e.usage == usage::INPUT_MODE)
+        .map(|e| e.field.report_id)
 }
 
-/// Decode an input report into a [`Frame`] of tipped contacts.
-fn extract_frame(format: &ReportFormat, report: &[u8]) -> Option<Frame> {
-    let rid = if format.uses_report_ids {
-        *report.first()?
-    } else {
-        0
+/// Logical extent of the touch surface. The descriptor also carries the relative
+/// mouse collection, so the largest X/Y maximum is the absolute digitizer's.
+fn pad_logical_max(desc: &Descriptor<'_>) -> (i32, i32) {
+    let max_of = |wanted| {
+        desc.every_element(Kind::Input)
+            .filter(|e| e.usage == wanted)
+            .map(|e| e.field.logical_max)
+            .max()
+            .unwrap_or(1)
     };
-    let data = if format.uses_report_ids {
-        report.get(1..)?
-    } else {
-        report
-    };
+    (max_of(usage::X).max(1), max_of(usage::Y).max(1))
+}
+
+/// Decode an input report into a [`Frame`] of tipped contacts. Fingers are
+/// repeated X/Y/Tip elements in descriptor order, so the Nth of each is finger
+/// N's.
+fn extract_frame(desc: &Descriptor<'_>, report: &[u8]) -> Option<Frame> {
+    let (rid, data) = desc.split(report)?;
 
     let mut xs = [0i32; MAX_CONTACTS];
     let mut ys = [0i32; MAX_CONTACTS];
@@ -454,26 +463,26 @@ fn extract_frame(format: &ReportFormat, report: &[u8]) -> Option<Frame> {
     let (mut nx, mut ny, mut nt, mut nid) = (0usize, 0usize, 0usize, 0usize);
     let mut button = false;
 
-    for f in format.fields.iter().filter(|f| f.report_id == rid) {
-        let raw = read_bits(data, f.bit_offset, f.bit_size);
-        match (f.usage_page, f.usage) {
-            (PAGE_GENERIC_DESKTOP, USAGE_X) if nx < MAX_CONTACTS => {
-                xs[nx] = raw as i32;
+    for e in desc.elements(Kind::Input, rid) {
+        let raw = e.value(data).unwrap_or(0);
+        match e.usage {
+            usage::X if nx < MAX_CONTACTS => {
+                xs[nx] = raw;
                 nx += 1;
             }
-            (PAGE_GENERIC_DESKTOP, USAGE_Y) if ny < MAX_CONTACTS => {
-                ys[ny] = raw as i32;
+            usage::Y if ny < MAX_CONTACTS => {
+                ys[ny] = raw;
                 ny += 1;
             }
-            (PAGE_DIGITIZER, USAGE_TIP_SWITCH) if nt < MAX_CONTACTS => {
+            usage::TIP_SWITCH if nt < MAX_CONTACTS => {
                 tips[nt] = raw != 0;
                 nt += 1;
             }
-            (PAGE_DIGITIZER, USAGE_CONTACT_ID) if nid < MAX_CONTACTS => {
+            usage::CONTACT_ID if nid < MAX_CONTACTS => {
                 ids[nid] = raw as u8;
                 nid += 1;
             }
-            (PAGE_BUTTON, USAGE_BUTTON_1) => button |= raw != 0,
+            BUTTON_1 => button |= raw != 0,
             _ => {}
         }
     }
@@ -495,23 +504,6 @@ fn extract_frame(format: &ReportFormat, report: &[u8]) -> Option<Frame> {
     frame.count = count;
     frame.button = button;
     Some(frame)
-}
-
-/// Read `bit_size` (≤32) bits at `bit_offset` from `data`, little-endian.
-fn read_bits(data: &[u8], bit_offset: u32, bit_size: u32) -> u32 {
-    let mut v = 0u32;
-    let n = bit_size.min(32);
-    for i in 0..n {
-        let bit = bit_offset + i;
-        let byte = (bit / 8) as usize;
-        let shift = (bit % 8) as u32;
-        if let Some(&b) = data.get(byte) {
-            if b & (1 << shift) != 0 {
-                v |= 1 << i;
-            }
-        }
-    }
-    v
 }
 
 fn timestamp_ms() -> u64 {

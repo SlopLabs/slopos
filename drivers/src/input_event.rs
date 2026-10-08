@@ -6,6 +6,7 @@
 //! to one task never blocks delivery to another.
 
 use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
+use slopos_hid_core::pointer::{Axis, Motion};
 use slopos_ostd::RingBuffer;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SeqLock, SpinLock};
@@ -70,11 +71,204 @@ impl InputFocusState {
 
 static FOCUS: SeqLock<InputFocusState> = SeqLock::new(InputFocusState::new());
 
-/// Updated on every mouse event (ISR, up to 1000Hz): atomics rather than a
-/// SeqLock write per event, which would contend in the ISR path.
+/// Mirrors of [`POINTER`]'s position and merged buttons, read without its
+/// lock.
 static POINTER_X: AtomicI32 = AtomicI32::new(0);
 static POINTER_Y: AtomicI32 = AtomicI32::new(0);
 static POINTER_BUTTONS: AtomicU8 = AtomicU8::new(0);
+
+/// Pointing devices that move the cursor at once.
+pub const MAX_POINTERS: usize = 8;
+
+/// A pointing device's hold on the one cursor: its buttons are its own, the
+/// position everyone's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PointerSource(u8);
+
+impl PointerSource {
+    pub const PS2: Self = Self(0);
+    pub const TOUCHPAD: Self = Self(1);
+    const FIXED: u8 = 2;
+}
+
+struct PointerState {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    buttons: [u8; MAX_POINTERS],
+    /// Each source's last absolute X and Y, as it reported them.
+    placed: [[Option<i32>; 2]; MAX_POINTERS],
+    claimed: u8,
+}
+
+impl PointerState {
+    fn merged(&self) -> u8 {
+        self.buttons.iter().fold(0, |all, b| all | b)
+    }
+
+    /// Whether `axis` moves the cursor: an absolute one only when it changed,
+    /// since a tablet repeats its position in every report.
+    fn moves(&mut self, source: PointerSource, index: usize, axis: Axis) -> bool {
+        let Axis::Absolute { value, .. } = axis else {
+            return true;
+        };
+        let Some(placed) = self
+            .placed
+            .get_mut(usize::from(source.0))
+            .map(|axes| &mut axes[index])
+        else {
+            return false;
+        };
+        placed.replace(value) != Some(value)
+    }
+}
+
+static POINTER: SpinLock<PointerState> = SpinLock::new(
+    PointerState {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        buttons: [0; MAX_POINTERS],
+        placed: [[None; 2]; MAX_POINTERS],
+        claimed: (1 << PointerSource::FIXED) - 1,
+    },
+    lock_class!("POINTER", LOCK_LEVEL_RESOURCE),
+);
+
+/// A slot for a device that comes and goes; `None` when every one is taken.
+pub fn claim_pointer() -> Option<PointerSource> {
+    let mut p = POINTER.lock();
+    let free = (!p.claimed).trailing_zeros();
+    if free as usize >= MAX_POINTERS {
+        return None;
+    }
+    p.claimed |= 1 << free;
+    p.buttons[free as usize] = 0;
+    p.placed[free as usize] = [None; 2];
+    Some(PointerSource(free as u8))
+}
+
+/// Lifts every button only `source` held, then frees its slot.
+pub fn release_pointer(source: PointerSource, timestamp_ms: u64) {
+    pointer_buttons(source, 0, timestamp_ms);
+    if source.0 >= PointerSource::FIXED {
+        POINTER.lock().claimed &= !(1 << source.0);
+    }
+}
+
+/// The screen the cursor moves on, from the video layer; the first one
+/// centres it.
+pub fn set_pointer_bounds(width: i32, height: i32) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let mut p = POINTER.lock();
+    if p.width == 0 {
+        p.x = width / 2;
+        p.y = height / 2;
+    }
+    p.width = width;
+    p.height = height;
+    p.x = p.x.clamp(0, width - 1);
+    p.y = p.y.clamp(0, height - 1);
+    POINTER_X.store(p.x, Ordering::Relaxed);
+    POINTER_Y.store(p.y, Ordering::Relaxed);
+}
+
+/// `(0, 0)` until the video layer has published a screen.
+pub fn pointer_bounds() -> (i32, i32) {
+    let p = POINTER.lock();
+    (p.width, p.height)
+}
+
+fn moved(axis: Axis, at: i32, extent: i32) -> i32 {
+    let next = match axis {
+        Axis::Relative(delta) => at.saturating_add(delta),
+        absolute => absolute.onto(extent).unwrap_or(at),
+    };
+    next.clamp(0, (extent - 1).max(0))
+}
+
+/// One report from `source`: relative axes move the cursor, absolute ones
+/// place it on the screen when they change, and a button it reports goes
+/// down when the first device presses it and up when the last releases it.
+pub fn pointer_report(source: PointerSource, motion: &Motion, timestamp_ms: u64) {
+    {
+        let mut p = POINTER.lock();
+        let x = motion
+            .x
+            .filter(|&axis| p.width > 0 && p.moves(source, 0, axis));
+        let y = motion
+            .y
+            .filter(|&axis| p.height > 0 && p.moves(source, 1, axis));
+        let (x, y) = (
+            x.map_or(p.x, |axis| moved(axis, p.x, p.width)),
+            y.map_or(p.y, |axis| moved(axis, p.y, p.height)),
+        );
+        if (x, y) != (p.x, p.y) {
+            p.x = x;
+            p.y = y;
+            POINTER_X.store(x, Ordering::Relaxed);
+            POINTER_Y.store(y, Ordering::Relaxed);
+            input_route_pointer_motion(x, y, timestamp_ms);
+        }
+        let reported = motion.reported as u8;
+        let held = p.buttons.get(usize::from(source.0)).copied().unwrap_or(0);
+        let buttons = held & !reported | motion.buttons as u8 & reported;
+        set_buttons(&mut p, source, buttons, timestamp_ms);
+    }
+    if motion.wheel != 0 {
+        input_route_pointer_axis(
+            slopos_abi::POINTER_AXIS_VERTICAL,
+            motion.wheel.saturating_mul(-120),
+            timestamp_ms,
+        );
+    }
+    if motion.pan != 0 {
+        input_route_pointer_axis(
+            slopos_abi::POINTER_AXIS_HORIZONTAL,
+            motion.pan.saturating_mul(120),
+            timestamp_ms,
+        );
+    }
+}
+
+/// How many pointing devices hold `button` down.
+#[cfg(feature = "test-hooks")]
+pub fn button_holders(button: u8) -> usize {
+    POINTER
+        .lock()
+        .buttons
+        .iter()
+        .filter(|held| *held & button != 0)
+        .count()
+}
+
+/// `source`'s whole button state, bit `n - 1` for button `n`.
+pub fn pointer_buttons(source: PointerSource, buttons: u8, timestamp_ms: u64) {
+    set_buttons(&mut POINTER.lock(), source, buttons, timestamp_ms);
+}
+
+fn set_buttons(p: &mut PointerState, source: PointerSource, buttons: u8, timestamp_ms: u64) {
+    let Some(held) = p.buttons.get(usize::from(source.0)).copied() else {
+        return;
+    };
+    if held == buttons {
+        return;
+    }
+    let before = p.merged();
+    p.buttons[usize::from(source.0)] = buttons;
+    let after = p.merged();
+    POINTER_BUTTONS.store(after, Ordering::Relaxed);
+    for bit in 0..8 {
+        let button = 1u8 << bit;
+        if (before ^ after) & button != 0 {
+            input_route_pointer_button(button, after & button != 0, timestamp_ms);
+        }
+    }
+}
 
 /// Avoids a SeqLock read in `has_keyboard_focus`.
 static KEYBOARD_FOCUS_FAST: AtomicU32 = AtomicU32::new(0);
@@ -127,8 +321,9 @@ fn find_queue(task_id: u32) -> Option<usize> {
 /// # Never from the routing path
 ///
 /// Every caller must be a syscall, a focus change or a registration — a point
-/// where a task is *asking* for a queue. `input_route_*` runs in the PS/2 IRQ
-/// handler, where there is no principal to charge and no errno to return, so
+/// where a task is *asking* for a queue. `input_route_*` runs in interrupt
+/// handlers and the xHCI drain, where there is no principal to charge and no
+/// errno to return, so
 /// those paths call [`find_queue`] and drop the event when a task has no
 /// queue: a claim there would acquire a slot on behalf of a task that never
 /// asked, at a point that cannot refuse.
@@ -306,7 +501,7 @@ pub fn input_get_button_state() -> u8 {
 }
 
 pub fn input_get_modifier_state() -> u8 {
-    crate::ps2::keyboard::get_modifier_state()
+    crate::keyboard::get_modifier_state()
 }
 
 /// Route a fully-populated key event to the focused task / compositor.
@@ -358,10 +553,7 @@ pub fn input_route_key_full(
     }
 }
 
-pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
-    POINTER_X.store(x, Ordering::Relaxed);
-    POINTER_Y.store(y, Ordering::Relaxed);
-
+fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
     let state = FOCUS.read();
     let comp_id = state.compositor_task_id;
     if comp_id != 0 {
@@ -391,13 +583,7 @@ pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
     }
 }
 
-pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) {
-    if pressed {
-        POINTER_BUTTONS.fetch_or(button, Ordering::Relaxed);
-    } else {
-        POINTER_BUTTONS.fetch_and(!button, Ordering::Relaxed);
-    }
-
+fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) {
     let state = FOCUS.read();
     let comp_id = state.compositor_task_id;
     if comp_id != 0 {

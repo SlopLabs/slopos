@@ -373,9 +373,28 @@ require-phase post-userland-tests
 #               edges 180-182, chains 407-412; userland edges 228-231, chains
 #               472-474), and boot's 39 edges and 111 chains sit inside their
 #               caps.
-boot	classes	76
-post-kernel-tests	classes	219
-post-userland-tests	classes	230
+#   2026-10-08  boot 76 -> 79, kernel 219 -> 222, userland 230 -> 233, and
+#               boot chains 111 -> 120: USB keyboards and pointers
+#               (`plans/usb-xhci.md` phase 3). Boot gains `POINTER`, the one
+#               cursor `input_event` keeps and the video layer bounds, and
+#               `ps2kbd.DECODER` and `ps2kbd.LEDS`, the i8042's set-1 decoder
+#               and its LED exchange, which its init takes; a class-name dump
+#               of the boot report names exactly those three. The test phases
+#               add `keyboard.STATE`, the keyboard state every keyboard feeds,
+#               and lose `ps2kbd.STATE`, which it replaces. The USB HID
+#               classes are never taken: `just test` attaches no xHCI.
+#               Measured with `--emit-allowlist`; classes 79/222/233 on every
+#               full run and boot sample of the final tree. That host has no
+#               KVM, and there two boots of the unchanged tree count 77
+#               classes and 117 chains against the 76 and 111 recorded here:
+#               boot's chains move with timing under TCG. The change's tree
+#               took 118-120 chains over four runs, so the cap takes that
+#               maximum. Every banded pool stayed inside its band (kernel
+#               edges 175, chains 410; userland edges 225, chains 474), and
+#               boot's 43 edges sit at their cap.
+boot	classes	79
+post-kernel-tests	classes	222
+post-userland-tests	classes	233
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
@@ -384,7 +403,7 @@ post-userland-tests	classes	230
 # ordering among locks that already existed, not a new lock: boot's class
 # count did not move.
 boot	edges	43
-boot	chains	111
+boot	chains	120
 
 # Bands, for the two phases whose edge and chain counts move with scheduling.
 # Each band is the recorded range widened by that range's own width on each

@@ -1,0 +1,14 @@
+[package]
+name = "slopos-hid-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HID report descriptors, boot reports, keyboard and pointer decoding, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+doctest = false

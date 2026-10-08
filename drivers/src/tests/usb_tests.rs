@@ -1,10 +1,14 @@
 //! The guest half of `just test-usb`: every device `scripts/test_usb.py`
 //! attaches enumerated and bound, a stalled and an abandoned transfer
-//! recovered, and every device pulled and plugged twice with no slot, page or
+//! recovered, keys and motion the host injects reaching the keyboard state and
+//! the cursor, and every device pulled and plugged twice with no slot, page or
 //! claim left behind. The host acts on the `USB-TEST:` lines.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_abi::input::{MODIFIER_CAPS_LOCK, MODIFIER_SHIFT};
+use slopos_keymap_core::keycode::{KEY_LEFTSHIFT, KEY_X};
+use slopos_keymap_core::{LOCK_CAPS, LOCK_NUM};
 use slopos_ostd::{KArc, klog_info};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -16,8 +20,11 @@ use slopos_usb_core::xhci::transfer::TransferError;
 
 use crate::driver_core::bus::{ProbeError, ProbeOutcome, Removal};
 use crate::driver_core::shutdown::DeviceShutdown;
+use crate::input_event;
+use crate::keyboard::{self, KeyboardSource};
 use crate::usb::bus::{BoundUsbDevice, UsbMatch};
-use crate::usb::xhci::device::{Pipe, UsbError};
+use crate::usb::hid::{self, BoundKeyboard};
+use crate::usb::xhci::device::{Device, Pipe, UsbError};
 use crate::usb::xhci::{self, Controller};
 
 const QEMU_XHCI: (u16, u16) = (0x1b36, 0x000d);
@@ -28,18 +35,20 @@ const HUB: (u16, u16) = (0x0409, 0x55aa);
 /// high-speed stick and a full-speed keyboard.
 const ROOT_PORTS: [u8; 4] = [1, 4, 5, 6];
 /// By root port and hub port, 0 for the root port's own device.
-const DEVICES: [(u8, u8, Speed); 6] = [
+const DEVICES: [(u8, u8, Speed); 7] = [
     (1, 0, Speed::Super),
     (4, 0, Speed::Full),
     (4, 1, Speed::Full),
     (4, 2, Speed::Full),
+    (4, 3, Speed::Full),
     (5, 0, Speed::High),
     (6, 0, Speed::Full),
 ];
 /// The sticks among them, which `usb-test` binds.
 const STICKS: u32 = 3;
-/// The keyboard and the tablet, which `usb-test-hid` binds.
-const HIDS: u32 = 2;
+/// The keyboard, the tablet and the mouse, which `usb-test-hid` tries and
+/// `usb-hid` binds.
+const HIDS: u32 = 3;
 const SETTLE_MS: u32 = 30_000;
 /// The host acts on a marker within this long, however slow the emulator.
 const HOST_MS: u32 = 120_000;
@@ -50,7 +59,7 @@ static BINDS: AtomicU32 = AtomicU32::new(0);
 static UNBINDS: AtomicU32 = AtomicU32::new(0);
 static TEST_UNIT_READY: AtomicU32 = AtomicU32::new(0);
 static STALLS_RECOVERED: AtomicU32 = AtomicU32::new(0);
-static HID_BINDS: AtomicU32 = AtomicU32::new(0);
+static HID_PROBES: AtomicU32 = AtomicU32::new(0);
 static ABANDONED_RECOVERED: AtomicU32 = AtomicU32::new(0);
 
 struct Unbind;
@@ -128,9 +137,9 @@ fn test_unit_ready(pipe_out: &Pipe, pipe_in: &Pipe) -> bool {
     read == 13 && signature == CSW_SIGNATURE && tag == CBW_TAG
 }
 
-/// An idle HID device NAKs its interrupt endpoint, so a read times out and
-/// is abandoned, and the endpoint must come back idle once the USB thread
-/// has moved its ring past it.
+/// An idle HID device NAKs its interrupt endpoint, so a read times out and is
+/// abandoned, and the endpoint must come back idle once the USB thread has
+/// moved its ring past it. Then it declines, for `usb-hid` to bind.
 fn probe_hid(bound: &mut BoundUsbDevice<'_>) -> Result<ProbeOutcome, ProbeError> {
     let info = *bound.info();
     let reports = bound
@@ -156,8 +165,8 @@ fn probe_hid(bound: &mut BoundUsbDevice<'_>) -> Result<ProbeOutcome, ProbeError>
             Err(_) => return Err(ProbeError::DeviceFault),
         }
     }
-    HID_BINDS.fetch_add(1, Ordering::AcqRel);
-    Ok(ProbeOutcome::Bound)
+    HID_PROBES.fetch_add(1, Ordering::AcqRel);
+    Ok(ProbeOutcome::Declined)
 }
 
 /// An idle device NAKs at the latest once its first reports are read.
@@ -184,6 +193,7 @@ crate::usb_driver! {
             subclass: None,
             protocol: None,
         }],
+        priority: 64,
         probe: probe_hid,
     };
 }
@@ -232,7 +242,12 @@ fn empty(c: &Controller) -> bool {
     c.slots_in_use() == 0 && c.devices().is_empty()
 }
 
-pub fn test_usb_1_controllers_run() -> TestResult {
+/// Both controllers' keyboards, tablets and mice bound.
+fn every_hid_bound() -> bool {
+    hid::keyboards().len() == 2 && hid::pointers() == 4
+}
+
+pub fn test_usb_01_controllers_run() -> TestResult {
     let connected = wait(SETTLE_MS, || {
         every_controller(|c| c.is_running() && ROOT_PORTS.iter().all(|&p| c.port_connected(p)))
     });
@@ -261,13 +276,13 @@ pub fn test_usb_1_controllers_run() -> TestResult {
     pass!()
 }
 
-pub fn test_usb_2_every_device_enumerates() -> TestResult {
+pub fn test_usb_02_every_device_enumerates() -> TestResult {
     let enumerated = wait(SETTLE_MS, || {
-        crate::usb::settled() && every_controller(complete)
+        crate::usb::settled() && every_controller(complete) && every_hid_bound()
     });
     assert_test!(
         enumerated,
-        "every device, the hub's two included, must enumerate"
+        "every device, the hub's three included, must enumerate"
     );
     let Some(all) = controllers() else {
         return fail!("both controllers must be running");
@@ -302,9 +317,9 @@ pub fn test_usb_2_every_device_enumerates() -> TestResult {
         "a stalled bulk-in recovers, the stick's halt cleared"
     );
     assert_eq_test!(
-        HID_BINDS.load(Ordering::Acquire),
+        HID_PROBES.load(Ordering::Acquire),
         2 * HIDS,
-        "every keyboard and tablet bound"
+        "usb-test-hid tried every keyboard, tablet and mouse"
     );
     assert_eq_test!(
         ABANDONED_RECOVERED.load(Ordering::Acquire),
@@ -329,6 +344,251 @@ pub fn test_usb_2_every_device_enumerates() -> TestResult {
     assert_test!(
         wait(SETTLE_MS, || slopos_ostd::kconsole::runs(b'u') > listed),
         "the USB listing runs"
+    );
+    pass!()
+}
+
+fn holding(usage: u16) -> Option<BoundKeyboard> {
+    hid::keyboards()
+        .iter()
+        .copied()
+        .find(|k| keyboard::holds(k.source, usage))
+}
+
+fn usb_repeats() -> u32 {
+    hid::keyboards()
+        .iter()
+        .map(|k| keyboard::repeats(k.source))
+        .sum()
+}
+
+fn i8042_repeats() -> u32 {
+    keyboard::repeats(KeyboardSource::I8042)
+}
+
+fn each_device(mut visit: impl FnMut(&Device)) {
+    for c in controllers().iter().flatten() {
+        for device in c.devices().iter() {
+            visit(device);
+        }
+    }
+}
+
+/// A held USB key repeats from the USB thread; the i8042's own repeated
+/// press is marked a repeat as well. Every report is first abandoned as a
+/// halt leaves it, so the keys arrive only if recovery posts them again.
+pub fn test_usb_03_held_keys_repeat() -> TestResult {
+    let mut abandoned = 0;
+    each_device(|d| abandoned += d.abandon_reports());
+    assert_eq_test!(abandoned, 6, "both keyboards', tablets' and mice's reports");
+    assert_test!(
+        wait(HOST_MS, || {
+            let mut posted = true;
+            each_device(|d| posted &= d.reports_posted());
+            posted
+        }),
+        "every reporting endpoint recovers with a report posted"
+    );
+    let before = usb_repeats();
+    klog_info!("USB-TEST: hold x");
+    assert_test!(
+        wait(HOST_MS, || holding(KEY_X).is_some()),
+        "a USB keyboard holds the key the host pressed"
+    );
+    assert_test!(
+        wait(SETTLE_MS, || usb_repeats() >= before + 3),
+        "a held key repeats"
+    );
+    klog_info!("USB-TEST: release x");
+    assert_test!(
+        wait(HOST_MS, || holding(KEY_X).is_none()),
+        "the release reaches the keyboard state"
+    );
+    let stopped = usb_repeats();
+    crate::hpet::delay_ms(300);
+    assert_eq_test!(usb_repeats(), stopped, "a released key stops repeating");
+
+    let i8042 = i8042_repeats();
+    klog_info!("USB-TEST: ps2 repeat x");
+    assert_test!(
+        wait(HOST_MS, || i8042_repeats() == i8042 + 1
+            && !keyboard::holds(KeyboardSource::I8042, KEY_X)),
+        "the i8042's second press of a held key is a repeat"
+    );
+    pass!()
+}
+
+fn locks_everywhere(locks: u8) -> bool {
+    let keyboards = hid::keyboards();
+    keyboard::locks() == locks
+        && keyboards.len() == 2
+        && keyboards.iter().all(|k| k.leds == Some(locks))
+        && crate::ps2::keyboard::leds_acknowledged() == Some(locks)
+}
+
+/// Caps Lock on a USB keyboard lights every keyboard's LED, the i8042's
+/// among them, and a second press puts them all out.
+pub fn test_usb_04_caps_lock_lights_every_keyboard() -> TestResult {
+    assert_test!(
+        wait(SETTLE_MS, || locks_everywhere(LOCK_NUM)),
+        "every keyboard starts with Num Lock alone lit"
+    );
+    klog_info!("USB-TEST: caps");
+    assert_test!(
+        wait(HOST_MS, || locks_everywhere(LOCK_NUM | LOCK_CAPS)),
+        "Caps Lock lit on both USB keyboards and the i8042"
+    );
+    assert_test!(
+        input_event::input_get_modifier_state() & MODIFIER_CAPS_LOCK != 0,
+        "the modifier state carries Caps Lock"
+    );
+    klog_info!("USB-TEST: caps");
+    assert_test!(
+        wait(HOST_MS, || locks_everywhere(LOCK_NUM)),
+        "a second press puts Caps Lock out everywhere"
+    );
+    pass!()
+}
+
+/// Alt+PrintScreen and a command key on a USB keyboard run the command.
+pub fn test_usb_05_sysrq_runs_a_command() -> TestResult {
+    let runs = slopos_ostd::kconsole::runs(b'u');
+    klog_info!("USB-TEST: sysrq u");
+    assert_test!(
+        wait(HOST_MS, || slopos_ostd::kconsole::runs(b'u') > runs),
+        "the command key ran its command"
+    );
+    pass!()
+}
+
+fn cursor() -> (i32, i32) {
+    input_event::input_get_pointer_position()
+}
+
+/// The tablet places the cursor, the mice move it, and a button stays down
+/// while any device holds it.
+pub fn test_usb_06_pointers_share_the_cursor() -> TestResult {
+    let (width, height) = input_event::pointer_bounds();
+    assert_test!(
+        width > 1 && height > 1,
+        "the video layer published a screen"
+    );
+    klog_info!("USB-TEST: tablet 16384 8192");
+    let placed = (
+        (16384i64 * i64::from(width - 1) / 0x7fff) as i32,
+        (8192i64 * i64::from(height - 1) / 0x7fff) as i32,
+    );
+    assert_test!(
+        wait(HOST_MS, || cursor() == placed),
+        "the tablet places the cursor on the screen"
+    );
+    klog_info!("USB-TEST: mouse 12 -7");
+    let moved = (placed.0 + 12, placed.1 - 7);
+    assert_test!(
+        wait(HOST_MS, || cursor() == moved),
+        "a USB mouse moves the same cursor"
+    );
+
+    klog_info!("USB-TEST: tablet press");
+    assert_test!(
+        wait(HOST_MS, || input_event::button_holders(1) == 1),
+        "the tablet holds the left button"
+    );
+    klog_info!("USB-TEST: mouse press");
+    assert_test!(
+        wait(HOST_MS, || input_event::button_holders(1) == 2),
+        "the mouse holds it too"
+    );
+    klog_info!("USB-TEST: tablet release");
+    assert_test!(
+        wait(HOST_MS, || input_event::button_holders(1) == 1),
+        "the tablet let go"
+    );
+    assert_test!(
+        input_event::input_get_button_state() & 1 != 0,
+        "the button stays down while the mouse holds it"
+    );
+    klog_info!("USB-TEST: mouse release");
+    assert_test!(
+        wait(HOST_MS, || input_event::input_get_button_state() & 1 == 0),
+        "the last release lifts it"
+    );
+
+    klog_info!("USB-TEST: pull mice");
+    assert_test!(wait(HOST_MS, || hid::pointers() == 2), "both mice leave");
+    let before = cursor();
+    klog_info!("USB-TEST: ps2 mouse 5 5");
+    assert_test!(
+        wait(HOST_MS, || cursor() == (before.0 + 5, before.1 + 5)),
+        "the PS/2 mouse moves the same cursor"
+    );
+    klog_info!("USB-TEST: plug");
+    assert_test!(
+        wait(HOST_MS, || every_hid_bound() && crate::usb::settled()),
+        "both mice return"
+    );
+    pass!()
+}
+
+fn shifted() -> bool {
+    input_event::input_get_modifier_state() & MODIFIER_SHIFT != 0
+}
+
+fn pull(pulled: BoundKeyboard) -> bool {
+    klog_info!(
+        "USB-TEST: pull keyboard {}-{}",
+        pulled.controller,
+        pulled.path
+    );
+    wait(HOST_MS, || {
+        hid::keyboards()
+            .iter()
+            .all(|k| (k.controller, k.path) != (pulled.controller, pulled.path))
+            && !keyboard::holds(pulled.source, KEY_LEFTSHIFT)
+    })
+}
+
+/// A keyboard pulled with Shift held releases it, unless another keyboard
+/// still holds it.
+pub fn test_usb_07_pulled_keyboard_releases_shift() -> TestResult {
+    klog_info!("USB-TEST: hold shift");
+    assert_test!(
+        wait(HOST_MS, || holding(KEY_LEFTSHIFT).is_some()
+            && keyboard::holds(KeyboardSource::I8042, KEY_LEFTSHIFT)),
+        "a USB keyboard and the i8042 hold Shift"
+    );
+    let Some(first) = holding(KEY_LEFTSHIFT) else {
+        return fail!("no USB keyboard holds Shift");
+    };
+    assert_test!(pull(first), "the keyboard holding Shift leaves");
+    assert_test!(shifted(), "the i8042 still holds Shift");
+    klog_info!("USB-TEST: ps2 release shift");
+    assert_test!(
+        wait(HOST_MS, || !shifted()),
+        "nothing is shifted once the i8042 lets go"
+    );
+
+    klog_info!("USB-TEST: hold usb shift");
+    assert_test!(
+        wait(HOST_MS, || holding(KEY_LEFTSHIFT).is_some() && shifted()),
+        "the other USB keyboard holds Shift"
+    );
+    let Some(second) = holding(KEY_LEFTSHIFT) else {
+        return fail!("no USB keyboard holds Shift");
+    };
+    assert_test!(pull(second), "the second keyboard leaves");
+    assert_test!(!shifted(), "pulling it left nothing shifted");
+
+    klog_info!("USB-TEST: plug");
+    assert_test!(
+        wait(HOST_MS, || every_hid_bound()
+            && every_controller(complete)
+            && crate::usb::settled()),
+        "both keyboards return"
+    );
+    assert_test!(
+        wait(SETTLE_MS, || locks_everywhere(LOCK_NUM)),
+        "a returning keyboard is told the locks"
     );
     pass!()
 }
@@ -367,6 +627,10 @@ fn pulled(round: u32) -> TestResult {
     );
     assert_eq_test!(crate::usb::bus::claims_held(), 0, "no claim left");
     assert_test!(
+        hid::keyboards().is_empty() && hid::pointers() == 0,
+        "no HID interface left bound"
+    );
+    assert_test!(
         every_controller(|c| ROOT_PORTS.iter().all(|&p| !c.port_connected(p))),
         "every root port empty"
     );
@@ -395,7 +659,7 @@ fn pulled(round: u32) -> TestResult {
 
 fn plugged() -> TestResult {
     let binds = BINDS.load(Ordering::Acquire);
-    let hid_binds = HID_BINDS.load(Ordering::Acquire);
+    let hid_probes = HID_PROBES.load(Ordering::Acquire);
     let Some(irqs) = interrupts() else {
         return fail!("both controllers must be running");
     };
@@ -404,7 +668,8 @@ fn plugged() -> TestResult {
         every_controller(complete)
             && crate::usb::settled()
             && BINDS.load(Ordering::Acquire) == binds + 2 * STICKS
-            && HID_BINDS.load(Ordering::Acquire) == hid_binds + 2 * HIDS
+            && HID_PROBES.load(Ordering::Acquire) == hid_probes + 2 * HIDS
+            && every_hid_bound()
     });
     assert_test!(back, "every device must enumerate again and bind");
     assert_eq_test!(
@@ -419,23 +684,25 @@ fn plugged() -> TestResult {
     pass!()
 }
 
-pub fn test_usb_3_pulled_devices_leave() -> TestResult {
+pub fn test_usb_08_pulled_devices_leave() -> TestResult {
     pulled(1)
 }
 
-pub fn test_usb_4_plugged_devices_return() -> TestResult {
+pub fn test_usb_09_plugged_devices_return() -> TestResult {
     plugged()
 }
 
-pub fn test_usb_5_pulled_again() -> TestResult {
+pub fn test_usb_10_pulled_again() -> TestResult {
     pulled(2)
 }
 
-pub fn test_usb_6_plugged_again() -> TestResult {
+pub fn test_usb_11_plugged_again() -> TestResult {
     plugged()
 }
 
-pub fn test_usb_7_shutdown_resets() -> TestResult {
+/// After the userland test has typed at the shell: each controller's
+/// shutdown hook leaves it halted, reset and off the bus.
+pub fn test_usb_12_shutdown_resets() -> TestResult {
     let Some(all) = controllers() else {
         return fail!("both controllers must be running");
     };
@@ -449,31 +716,27 @@ pub fn test_usb_7_shutdown_resets() -> TestResult {
     pass!()
 }
 
+const HOSTED: u32 = slopos_testing::FLAG_EXPLICIT | slopos_testing::FLAG_UNCAPTURED;
+
+slopos_testing::stest!(name = test_usb_01_controllers_run, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_02_every_device_enumerates, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_03_held_keys_repeat, flags = HOSTED);
 slopos_testing::stest!(
-    name = test_usb_1_controllers_run,
-    flags = slopos_testing::FLAG_EXPLICIT | slopos_testing::FLAG_UNCAPTURED
+    name = test_usb_04_caps_lock_lights_every_keyboard,
+    flags = HOSTED
 );
+slopos_testing::stest!(name = test_usb_05_sysrq_runs_a_command, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_06_pointers_share_the_cursor, flags = HOSTED);
 slopos_testing::stest!(
-    name = test_usb_2_every_device_enumerates,
-    flags = slopos_testing::FLAG_EXPLICIT | slopos_testing::FLAG_UNCAPTURED
+    name = test_usb_07_pulled_keyboard_releases_shift,
+    flags = HOSTED
 );
+slopos_testing::stest!(name = test_usb_08_pulled_devices_leave, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_09_plugged_devices_return, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_10_pulled_again, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_11_plugged_again, flags = HOSTED);
 slopos_testing::stest!(
-    name = test_usb_3_pulled_devices_leave,
-    flags = slopos_testing::FLAG_EXPLICIT | slopos_testing::FLAG_UNCAPTURED
-);
-slopos_testing::stest!(
-    name = test_usb_4_plugged_devices_return,
-    flags = slopos_testing::FLAG_EXPLICIT | slopos_testing::FLAG_UNCAPTURED
-);
-slopos_testing::stest!(
-    name = test_usb_5_pulled_again,
-    flags = slopos_testing::FLAG_EXPLICIT | slopos_testing::FLAG_UNCAPTURED
-);
-slopos_testing::stest!(
-    name = test_usb_6_plugged_again,
-    flags = slopos_testing::FLAG_EXPLICIT | slopos_testing::FLAG_UNCAPTURED
-);
-slopos_testing::stest!(
-    name = test_usb_7_shutdown_resets,
-    flags = slopos_testing::FLAG_EXPLICIT | slopos_testing::FLAG_UNCAPTURED
+    name = test_usb_12_shutdown_resets,
+    flags = HOSTED,
+    kind = Userland
 );
