@@ -173,6 +173,51 @@ fn a_short_or_moved_array_reads_as_any_other() {
     }
 }
 
+/// A partition in the last slot keeps its number, and one overlapping a
+/// partition past slot 128 is skipped.
+#[test]
+fn xorriso_s_tables_read_whole() {
+    for entries in [176, MAX_ENTRIES as usize] {
+        let part = |slot, first, last| Part {
+            slot,
+            type_guid: BOOT_TYPE,
+            unique: BOOT_UUID,
+            first,
+            last,
+            name: "Appended2",
+        };
+        let parts = [
+            part(130, 9000, 9999),
+            part(150, 9500, 10_499),
+            part(entries - 1, 12_000, 12_999),
+        ];
+        let image = disk_with(512, 16_384, &parts, entries, 2);
+        for lba in [PRIMARY_LBA, 16_383] {
+            let geometry = Geometry::new(image.len() as u64, 512).unwrap();
+            let at = (lba * 512) as usize;
+            let header = Header::parse(&image[at..at + 512], lba, geometry).unwrap();
+            let at = (header.entry_lba() * 512) as usize;
+            let array = &image[at..at + header.array_bytes()];
+            assert!(header.array_matches(array));
+            let read: Vec<_> = header
+                .partitions(array)
+                .map(|p| p.map(|p| p.entry.number))
+                .collect();
+            assert_eq!(
+                read,
+                [
+                    Ok(131),
+                    Err(Skipped {
+                        number: 151,
+                        why: Skip::Overlaps
+                    }),
+                    Ok(entries as u32),
+                ]
+            );
+        }
+    }
+}
+
 #[test]
 fn a_damaged_header_is_corrupt_and_a_missing_one_absent() {
     let image = disk(512, 16_384, &two_parts());
@@ -215,9 +260,12 @@ fn what_this_reader_does_not_stage_is_unsupported_not_corrupt() {
         })
     };
     assert_eq!(parse(&set_u32(8, 0x0002_0000)), Err(Reject::Unsupported));
-    assert_eq!(parse(&set_u32(80, 129)), Err(Reject::Unsupported));
     assert_eq!(
-        disk_guid(&set_u32(80, 176), PRIMARY_LBA, geometry),
+        parse(&set_u32(80, MAX_ENTRIES + 1)),
+        Err(Reject::Unsupported)
+    );
+    assert_eq!(
+        disk_guid(&set_u32(80, MAX_ENTRIES + 1), PRIMARY_LBA, geometry),
         Ok(DISK),
         "an array this reader does not stage still names its disk"
     );
@@ -225,7 +273,7 @@ fn what_this_reader_does_not_stage_is_unsupported_not_corrupt() {
         disk_guid(&set_u32(8, 0x0002_0000), PRIMARY_LBA, geometry),
         Err(Reject::Unsupported)
     );
-    let mut flipped = set_u32(80, 176);
+    let mut flipped = set_u32(80, MAX_ENTRIES + 1);
     flipped[60] ^= 1;
     assert_eq!(
         disk_guid(&flipped, PRIMARY_LBA, geometry),

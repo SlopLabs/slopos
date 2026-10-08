@@ -238,9 +238,40 @@ fn answer_on_stdin(args: &[String], typed: &str) -> std::io::Result<std::process
     child.wait()
 }
 
+/// The payload the kernel mounted stays as it mounted it: nothing unmounts
+/// it, covers it or writes it.
+fn payload_held() -> Result<(), String> {
+    let dir = layout::PAYLOAD_DIR;
+    let path = std::ffi::CString::new(dir).map_err(|_| "a NUL in a path")?;
+    match umount2(path.as_ptr(), 0) {
+        Err(SyscallError::EPERM) => {}
+        other => return Err(format!("umount {dir}: {other:?}, not EPERM")),
+    }
+    let under = format!("{dir}/usr");
+    match mount(b"", under.as_bytes(), b"ramfs", 0) {
+        Err(SyscallError::EPERM) => {}
+        other => return Err(format!("mounting over {under}: {other:?}, not EPERM")),
+    }
+    match std::fs::File::create(format!("{dir}/written")) {
+        Err(e) if e.raw_os_error() == Some(SyscallError::EROFS.errno()) => Ok(()),
+        other => Err(format!("creating a file in {dir}: {other:?}, not EROFS")),
+    }
+}
+
 /// The blank disk is installed as a person answers the questions; the others
 /// with every answer a flag.
 fn install() -> bool {
+    let module = std::path::Path::new(layout::MEDIUM_DIR);
+    if ["usr", "src"].iter().any(|tree| module.join(tree).exists()) {
+        note("the module the loader carried holds the payload's trees");
+        return false;
+    }
+    if std::path::Path::new(layout::PAYLOAD_DIR).exists()
+        && let Err(why) = payload_held()
+    {
+        note(&why);
+        return false;
+    }
     let (disk, kind, partitions) = match target() {
         Ok(found) => found,
         Err(why) => {
@@ -260,7 +291,7 @@ fn install() -> bool {
     match kind {
         Kind::Erase => {
             let mut answers = String::from("\n");
-            if std::path::Path::new(layout::MEDIUM_DIR)
+            if std::path::Path::new(layout::PAYLOAD_DIR)
                 .join("src")
                 .exists()
             {

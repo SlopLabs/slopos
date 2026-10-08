@@ -9,7 +9,8 @@ use slopos_sched::scheduler::{
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use slopos_boot_core::layout;
+use slopos_boot_core::{Guid, layout};
+use slopos_drivers::block::LocateError;
 use slopos_drivers::{block, crash};
 use slopos_fs::blockdev::BlockDevice;
 use slopos_fs::devfs::{DEV_NAME_MAX, devfs_register_crash_store, devfs_resolve_block_source};
@@ -300,24 +301,25 @@ fn root_ext2() -> Option<&'static Ext2Mount> {
 /// `usb.settle_ms`.
 fn await_usb(spec: &str) {
     let mut name = [0u8; DEV_NAME_MAX];
-    if devfs_resolve_block_source(spec.as_bytes(), &mut name) != Err(VfsError::NotFound) {
-        return;
+    if devfs_resolve_block_source(spec.as_bytes(), &mut name) == Err(VfsError::NotFound) {
+        settle_usb(&format_args!("{} absent", spec));
     }
+}
+
+/// Wait for USB to settle, at most `usb.settle_ms`, for what `waiting` says.
+fn settle_usb(waiting: &dyn core::fmt::Display) {
     let bound = slopos_drivers::usb::settle_ms();
     match slopos_drivers::usb::wait_settled(bound) {
         slopos_drivers::usb::Settle::Settled => {}
         slopos_drivers::usb::Settle::Unsettled => {
             klog_info!(
-                "USB: {} absent and the bus still settling after {} ms",
-                spec,
+                "USB: {}; the bus still settling after {} ms",
+                waiting,
                 bound
             )
         }
         slopos_drivers::usb::Settle::OneCpu => {
-            klog_info!(
-                "USB: {} absent; with one CPU the bus is not waited for",
-                spec
-            )
+            klog_info!("USB: {}; with one CPU the bus is not waited for", waiting)
         }
     }
 }
@@ -547,8 +549,8 @@ fn apply_cmdline_mount(spec: &str) {
 
 /// Serve the install medium when the loader carried one: the `install`
 /// module's archive, with the kernel and base it booted at the paths a slot
-/// holds them under, read-only at [`layout::MEDIUM_DIR`]. The loader keeps
-/// all three mapped, so nothing is copied.
+/// holds them under, read-only at [`layout::MEDIUM_DIR`], then its payload.
+/// The loader keeps the archive, kernel and base mapped, so nothing is copied.
 fn boot_step_install_medium_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let Some(archive) = crate::limine_protocol::module(layout::MEDIUM_MODULE) else {
         return;
@@ -579,9 +581,86 @@ fn boot_step_install_medium_fn(_ctx: &mut BootCtx<'_, BspInit>) {
             entries,
             archive.len()
         ),
+        Err(e) => {
+            klog_info!(
+                "INSTALL: the medium could not be mounted at {}: {:?}",
+                layout::MEDIUM_DIR,
+                e
+            );
+            return;
+        }
+    }
+    mount_payload();
+}
+
+/// The medium's payload, read-only and pinned at [`layout::PAYLOAD_DIR`]: the
+/// one partition of the payload type on the one disk whose GPT carries the
+/// disk GUID the medium records. Its read claim, held for the boot, keeps any
+/// table re-read off that disk.
+#[inline(never)]
+fn mount_payload() {
+    let Some(disk) = slopos_fs::basefs::MEDIUM_FS
+        .file(layout::MEDIUM_DISK_GUID.as_bytes())
+        .ok()
+        .and_then(|text| core::str::from_utf8(text).ok())
+        .and_then(|text| Guid::parse(text.trim_ascii()))
+    else {
+        klog_info!("INSTALL: the medium records no GPT disk GUID; no payload");
+        return;
+    };
+    // Settled even when a disk carries the GUID already, so a second one makes
+    // the choice ambiguous rather than first come.
+    settle_usb(&"looking for the install medium's payload");
+    let located = match block::locate_partition(disk, layout::PAYLOAD_TYPE) {
+        Ok(located) => located,
+        Err(LocateError::NoDisk) => {
+            klog_info!(
+                "INSTALL: no disk carries the medium's GPT disk GUID {}; no payload",
+                disk
+            );
+            return;
+        }
+        Err(LocateError::NoPartition) => {
+            klog_info!("INSTALL: the medium's disk carries no payload");
+            return;
+        }
+        Err(LocateError::Ambiguous) => {
+            klog_info!(
+                "INSTALL: the medium's GPT disk GUID {} names two disks, or its disk two payloads; none is mounted",
+                disk
+            );
+            return;
+        }
+    };
+    let device = match block::claim_read(located.partition.as_bytes()) {
+        Ok(device) => device,
+        Err(e) => {
+            klog_info!(
+                "INSTALL: the payload {} could not be claimed: {:?}",
+                located.partition,
+                e
+            );
+            return;
+        }
+    };
+    if block::locate_partition(disk, layout::PAYLOAD_TYPE) != Ok(located) {
+        klog_info!(
+            "INSTALL: the payload {} moved while it was claimed",
+            located.partition
+        );
+        return;
+    }
+    match slopos_fs::vfs::init::vfs_ext2_mount_readonly(layout::PAYLOAD_DIR.as_bytes(), device) {
+        Ok(_) => klog_info!(
+            "INSTALL: the payload {} is at {} ({} bytes)",
+            located.partition,
+            layout::PAYLOAD_DIR,
+            located.len
+        ),
         Err(e) => klog_info!(
-            "INSTALL: the medium could not be mounted at {}: {:?}",
-            layout::MEDIUM_DIR,
+            "INSTALL: the payload {} could not be mounted at {}: {:?}",
+            located.partition,
+            layout::PAYLOAD_DIR,
             e
         ),
     }

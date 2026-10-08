@@ -11,7 +11,8 @@ set -euo pipefail
 #   INITRAMFS_FILE  - the base, loaded as the module `initramfs`
 #   INSTALL_ARCHIVE - the install medium's archive (scripts/build_install_medium.sh),
 #                     loaded as the module `install` the installer reads; the
-#                     image takes the GPT disk GUID it records
+#                     image takes the GPT disk GUID it records, and the payload
+#                     volume beside it as a partition of the payload type
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -86,6 +87,11 @@ if [ -n "${INSTALL_ARCHIVE:-}" ]; then
     disk_guid="$(cat "$INSTALL_ARCHIVE.disk-guid")" ||
         { echo "No disk GUID beside $INSTALL_ARCHIVE" >&2; exit 1; }
     GPT_ARGS=(--gpt_disk_guid "$disk_guid")
+    payload=()
+    if [ -f "$INSTALL_ARCHIVE.payload" ]; then
+        payload=("$INSTALL_ARCHIVE.payload")
+        GPT_ARGS+=(-append_partition 2 "$PAYLOAD_TYPE" "$INSTALL_ARCHIVE.payload" -appended_part_as_gpt)
+    fi
 fi
 
 cp "$LIMINE_DIR/limine-bios.sys" "$ISO_ROOT/boot/"
@@ -122,7 +128,11 @@ xorriso -as mkisofs -quiet \
     "$ISO_ROOT" \
     -o "$TMP_OUTPUT"
 
-"$LIMINE_DIR/limine" bios-install "$TMP_OUTPUT" 2>/dev/null || true
+# The kernel finds the payload through the same reader, so a table it would
+# not stage, or a payload it would not find, fails the build.
+if [ -n "${INSTALL_ARCHIVE:-}" ]; then
+    "$(bootdisk_tool)" medium "$TMP_OUTPUT" "$disk_guid" ${payload[@]+"${payload[@]}"}
+fi
 
 mv "$TMP_OUTPUT" "$OUTPUT"
 trap - EXIT INT TERM

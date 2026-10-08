@@ -2,8 +2,9 @@
 //! system booted, beside whatever else the disk holds.
 //!
 //! The medium is what the loader brought, served at [`layout::MEDIUM_DIR`]:
-//! the kernel and base every slot gets and Limine for the ESP, and on a stick
-//! built with the payload the toolchain for `/usr/local` and a clone of the
+//! the kernel and base every slot gets and Limine for the ESP; and on a stick
+//! built with the payload, the partition the kernel mounts at
+//! [`layout::PAYLOAD_DIR`], the toolchain for `/usr/local` and a clone of the
 //! source for `/src`. An install writes the partition table — a fresh one, or
 //! new entries beside the disk's own — and has the kernel re-read it, formats
 //! the new partitions, fills the root, writes both slots and the loader with
@@ -27,7 +28,10 @@ use slopos_boot_core::gpt::{Header, Partition};
 use slopos_boot_core::install::{self, Mode as PlanMode, Place, PlanError, ROLES, Role};
 use slopos_boot_core::layout::{self, BOOT_LABEL, ESP_LABEL, ROOT_TYPE};
 
-use crate::boot_disk::{medium_disk_guid, not_installable, open_fat, partition_node, whole_disks};
+use crate::boot_disk::{
+    disk_guid_of, medium_disk_guid, not_installable, open_fat, partition_node, table_of,
+    whole_disks,
+};
 use crate::syscall::core as sys_core;
 use disk::{Disk, human};
 
@@ -47,6 +51,41 @@ const DEFAULT_CMDLINE: &str = "panic=reboot";
 pub struct Medium {
     /// The GPT disk GUID its image was built with: the disk never offered.
     disk_guid: Guid,
+    payload: bool,
+}
+
+/// The directory `dir`, not a link to one, and the filesystem it is on.
+fn dir_and_fs(dir: &str) -> Option<(fs::Metadata, slopos_abi::fs::UserStatfs)> {
+    let meta = fs::symlink_metadata(dir)
+        .ok()
+        .filter(|meta| meta.is_dir())?;
+    let path = std::ffi::CString::new(dir).ok()?;
+    let stats = crate::syscall::fs::statfs_path(path.as_ptr()).ok()?;
+    Some((meta, stats))
+}
+
+/// Whether the kernel mounted the medium's payload: the root of a read-only
+/// ext4 volume at [`layout::PAYLOAD_DIR`], which no program fakes with a
+/// directory.
+fn payload_mounted() -> bool {
+    dir_and_fs(layout::PAYLOAD_DIR).is_some_and(|(meta, stats)| {
+        std::os::unix::fs::MetadataExt::ino(&meta) == root::EXT4_ROOT_INODE
+            && stats.f_type == slopos_abi::fs::EXT2_SUPER_MAGIC
+            && stats.f_flags & slopos_abi::fs::ST_RDONLY != 0
+    })
+}
+
+/// The disk carrying the medium's GPT disk GUID, when its table names a
+/// payload partition.
+fn unmounted_payload(disk_guid: Guid) -> Option<String> {
+    whole_disks().ok()?.into_iter().find(|node| {
+        disk_guid_of(node) == Some(disk_guid)
+            && table_of(node).is_some_and(|table| {
+                table
+                    .partitions()
+                    .any(|p| p.entry.type_guid == layout::PAYLOAD_TYPE)
+            })
+    })
 }
 
 impl Medium {
@@ -54,11 +93,8 @@ impl Medium {
     /// trees take with them, checked before anything is written.
     fn find() -> Result<Medium, String> {
         let dir = layout::MEDIUM_DIR;
-        let served = fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
-            && std::ffi::CString::new(dir)
-                .ok()
-                .and_then(|path| crate::syscall::fs::statfs_path(path.as_ptr()).ok())
-                .is_some_and(|stats| stats.f_type == slopos_abi::fs::BASEFS_MAGIC);
+        let served =
+            dir_and_fs(dir).is_some_and(|(_, stats)| stats.f_type == slopos_abi::fs::BASEFS_MAGIC);
         if !served {
             return Err(format!(
                 "no install medium at {dir}; boot the SlopOS ISO to install"
@@ -71,6 +107,7 @@ impl Medium {
                     layout::MEDIUM_DISK_GUID
                 )
             })?,
+            payload: payload_mounted(),
         };
         for file in [
             layout::MEDIUM_KERNEL,
@@ -95,11 +132,18 @@ impl Medium {
             (root::TOOLCHAIN, toolchain_manifest.as_str()),
             (root::SOURCE, "/src/slopos/.git/config"),
         ] {
-            if medium.has(tree) && !medium.has(needs) {
+            if medium.payload_has(tree) && !medium.payload_has(needs) {
                 return Err(format!(
-                    "the medium carries {tree} without {needs}; it was not built whole"
+                    "the payload carries {tree} without {needs}; it was not built whole"
                 ));
             }
+        }
+        if !medium.payload
+            && let Some(node) = unmounted_payload(medium.disk_guid)
+        {
+            println!(
+                "installer: {node} carries the medium's payload, which the kernel did not mount; its log says why"
+            );
         }
         Ok(medium)
     }
@@ -116,15 +160,23 @@ impl Medium {
         fs::read(self.path(rel)).map_err(|e| format!("{}: {e}", self.path(rel).display()))
     }
 
+    pub fn payload_path(&self, rel: &str) -> PathBuf {
+        PathBuf::from(layout::PAYLOAD_DIR).join(rel.trim_start_matches('/'))
+    }
+
+    pub fn payload_has(&self, rel: &str) -> bool {
+        self.payload && self.payload_path(rel).exists()
+    }
+
     /// The root's least size: the payload and room to build beside it, or the
     /// system's own needs without one.
     fn root_min(&self) -> Result<u64, String> {
-        if !self.has(root::TOOLCHAIN) && !self.has(root::SOURCE) {
+        if !self.payload_has(root::TOOLCHAIN) && !self.payload_has(root::SOURCE) {
             return Ok(ROOT_MIN_BYTES);
         }
-        let path = std::ffi::CString::new(layout::MEDIUM_DIR).map_err(|_| "a NUL in a path")?;
+        let path = std::ffi::CString::new(layout::PAYLOAD_DIR).map_err(|_| "a NUL in a path")?;
         let stats = crate::syscall::fs::statfs_path(path.as_ptr())
-            .map_err(|e| format!("{}: {e:?}", layout::MEDIUM_DIR))?;
+            .map_err(|e| format!("{}: {e:?}", layout::PAYLOAD_DIR))?;
         Ok(stats.f_blocks * stats.f_bsize + ROOT_WORK_BYTES)
     }
 }
@@ -498,7 +550,7 @@ fn settle(opts: Options, medium: &Medium) -> Result<Settled, String> {
         None => false,
     };
     let format = check_kept(&disk, &plan, medium)?;
-    let remote = if medium.has(root::SOURCE) {
+    let remote = if medium.payload_has(root::SOURCE) {
         Some(match opts.remote {
             Some(url) => url,
             None => ask(
@@ -659,7 +711,7 @@ fn summarise(s: &Settled, medium: &Medium) {
             )
         );
     }
-    if medium.has(root::TOOLCHAIN) {
+    if medium.payload_has(root::TOOLCHAIN) {
         println!("  /usr/local: the toolchain the medium carries");
     }
     match &s.remote {

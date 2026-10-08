@@ -337,7 +337,7 @@ _install-medium:
     fi
     LIMINE_DIR={{limine_dir}} scripts/build_install_medium.sh "{{install_medium}}" ${toolchain:+"$toolchain"}
 
-[doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk, and installs from it with /bin/installer. PAYLOAD=1 adds the toolchain and a clone of HEAD, which the installer copies to /usr/local and /src, and the release kernel. REMOTE=1 packs the base paired with this host's broker (builddir/initramfs-remote.cpio), so the live system and every system installed from it dial `just remote-serve`; that ISO carries the broker's token and is for your own machines. Honors BOOT_CMDLINE")]
+[doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk, and installs from it with /bin/installer. PAYLOAD=1 builds the release kernel and adds the toolchain and a clone of HEAD in a partition the kernel mounts from the stick, which the installer copies to /usr/local and /src; booted as a CD, as boot-live attaches it, the kernel reads no payload. REMOTE=1 packs the base paired with this host's broker (builddir/initramfs-remote.cpio), so the live system and every system installed from it dial `just remote-serve`; that ISO carries the broker's token and is for your own machines. Honors BOOT_CMDLINE")]
 iso: _initramfs _install-medium (_kernel kernel_variant)
     #!/usr/bin/env bash
     set -euo pipefail
@@ -552,13 +552,17 @@ test-install-guest:
 # installs, then one with the stick gone boots the disk, builds and installs
 # the system and commits it; the varstore is kept between them, as a
 # machine's flash is. The blank disk then takes a reinstall that keeps its
-# root, and a boot after it.
-[doc("Installer check: from the ISO on a USB stick, visible as sda and never offered, install SlopOS onto a blank disk (erase), beside another system (free space) and over an existing partition (reuse), then boot each disk with the stick gone, build and install the system there and commit it, and reinstall over the blank disk keeping its root; the host holds every table to sfdisk, every root to e2fsck, every FAT volume to fsck.fat and the other system's partitions, entries and files to their bytes. INSTALLER_PAYLOAD=0 installs without the toolchain and clones a slot instead of building one; names a subset: just test-installer foreign")]
+# root, and a boot after it. The optical disk is blank too, installed from
+# the medium in a CD drive the kernel has no driver for, so without its
+# payload.
+[doc("Installer check: from the ISO on a USB stick, visible as sda and never offered, its payload partition read over USB, install SlopOS onto a blank disk (erase), beside another system (free space) and over an existing partition (reuse), then boot each disk with the stick gone, build and install the system there and commit it, and reinstall over the blank disk keeping its root; from the ISO in a CD drive the kernel cannot read, install onto a blank disk without the toolchain (optical); the host holds every table to sfdisk, every root to e2fsck, every FAT volume to fsck.fat and the other system's partitions, entries and files to their bytes. INSTALLER_PAYLOAD=0 installs without the toolchain and clones a slot instead of building one; names a subset: just test-installer foreign")]
 test-installer *DISKS:
     #!/usr/bin/env bash
     set -euo pipefail
     payload=1
     [[ ! "${INSTALLER_PAYLOAD:-1}" =~ ^(0|false|off|no)$ ]] || payload=0
+    # Copying the payload over emulated USB doubles the install's budget.
+    install_budget="${INSTALLER_TIMEOUT_SECS:-$((1800 + 1800 * payload))}"
     if [ "$payload" = 1 ] && [ ! -d "{{toolchain_install}}" ]; then
         echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain, or INSTALLER_PAYLOAD=0" >&2
         exit 1
@@ -570,16 +574,20 @@ test-installer *DISKS:
     bootdisk_layout
     # Each check says what failed and answers non-zero, so one disk's failure
     # leaves the others to run.
-    # One QEMU on the disk, from the stick when `$3` names one, which must
-    # print each of the markers after it and fail no test. A guest whose
-    # serial log stops growing is ended rather than waited on for its whole
-    # budget: a build prints every few seconds, and a blocked one never again.
+    # One QEMU on the disk, from the medium when `$3` names one as
+    # `stick:<image>` or `cdrom:<image>`, which must print each of the markers
+    # after it and fail no test. A guest whose serial log stops growing is
+    # ended rather than waited on for its whole budget: a build prints every
+    # few seconds, and a blocked one never again.
     boot_once() {
-        local log="$1" budget="$2" stick="$3" ok=0 marker runner size=-1 still=0
+        local log="$1" budget="$2" medium="$3" ok=0 marker runner size=-1 still=0
         local stall="${INSTALLER_STALL_SECS:-1800}"
         shift 3
         local how=(QEMU_ALLOW_REBOOT=1)
-        [ -z "$stick" ] || how=(INSTALL_STICK="$stick" INSTALL_STICK_WRITABLE="$writable")
+        case "$medium" in
+            stick:*) how=(INSTALL_STICK="${medium#stick:}" INSTALL_STICK_WRITABLE="$writable") ;;
+            cdrom:*) how=(INSTALL_CDROM="${medium#cdrom:}") ;;
+        esac
         setsid timeout "$budget" \
             just _qemu-boot "test" "0" {{iso_installer}} "$disk" "${how[@]}" BOOT_DISK_IMG="$disk" \
             OVMF_VARS_FILE="$PWD/$vars" QEMU_NO_ROOT_DISK=1 QEMU_TEST_DISKS=0 \
@@ -687,12 +695,12 @@ test-installer *DISKS:
         return "$ok"
     }
     failed=0
-    for kind in {{ if DISKS == "" { "blank foreign reuse" } else { DISKS } }}; do
+    for kind in {{ if DISKS == "" { "blank foreign reuse optical" } else { DISKS } }}; do
         echo "── $kind ──"
         disk="{{build_dir}}/installer-$kind.img"
         vars="{{build_dir}}/installer-$kind.vars"
         logs="{{build_dir}}/installer-$kind"
-        scripts/make_installer_disk.sh "$kind" "$disk" ||
+        scripts/make_installer_disk.sh "${kind/optical/blank}" "$disk" ||
             { echo "FAIL: $kind: no disk to install onto" >&2; failed=1; continue; }
         sfdisk --dump "$disk" >"$disk.before" 2>/dev/null || : >"$disk.before"
         rm -f "$vars"
@@ -700,14 +708,26 @@ test-installer *DISKS:
         # The stick is sda beside the disk and never offered: write-protected,
         # but on the blank disk's install a writable copy, which only its GPT
         # disk GUID excludes and which must come back as it was built.
-        stick={{iso_installer}} writable=0 passed_over="write-protected"
+        medium="stick:{{iso_installer}}" writable=0 passed_over="write-protected"
         if [ "$kind" = blank ]; then
             stick="{{build_dir}}/installer-stick.img" writable=1 passed_over="the install medium"
+            medium="stick:$stick"
             cp {{iso_installer}} "$stick"
         fi
-        boot_once "$logs-install.log" "${INSTALLER_TIMEOUT_SECS:-1800}" "$stick" \
-            "INSTALLER-NOT-OFFERED /dev/sda: $passed_over" \
-            "INSTALLER-INSTALLED" "ok 1 - installed_built_and_committed" || missing=1
+        built="$payload"
+        markers=("INSTALLER-INSTALLED" "ok 1 - installed_built_and_committed")
+        if [ "$kind" = optical ]; then
+            medium="cdrom:{{iso_installer}}" built=0
+            markers+=("INSTALL: no disk carries the medium's GPT disk GUID"
+                "the medium carries no toolchain")
+        elif [ "$payload" = 1 ]; then
+            markers+=("INSTALLER-NOT-OFFERED /dev/sda: $passed_over" "INSTALL: the payload sda"
+                " is at /media/payload (" "installed the toolchain at /usr/local")
+        else
+            markers+=("INSTALLER-NOT-OFFERED /dev/sda: $passed_over"
+                "INSTALL: the medium's disk carries no payload" "the medium carries no toolchain")
+        fi
+        boot_once "$logs-install.log" "$install_budget" "$medium" "${markers[@]}" || missing=1
         if [ "$writable" = 1 ]; then
             cmp -s "$stick" {{iso_installer}} ||
                 { echo "FAIL: the install wrote to the writable stick it booted from" >&2; missing=1; }
@@ -717,12 +737,14 @@ test-installer *DISKS:
         if [ "$missing" = 0 ]; then
             # The build's budget: under TCG the guest's build alone takes hours.
             budget=1800
-            [ "$payload" = 0 ] || budget=28800
+            [ "$built" = 0 ] || budget=28800
             markers=("INSTALLER-BOOTED slopos-a" "INSTALLER-STAGE 2: rebooting into slopos-b"
                 "INSTALLER-COMMITTED slopos-b" "ok 1 - installed_built_and_committed")
-            [ "$payload" = 0 ] || markers+=("INSTALLER-BUILT guest-" "INSTALLER-RUNS ")
+            [ "$built" = 0 ] || markers+=("INSTALLER-BUILT guest-" "INSTALLER-RUNS ")
             [ "$kind" != foreign ] || markers+=("INSTALLER-FOREIGN-KEPT")
             boot_once "$logs-boot.log" "${INSTALLER_BOOT_TIMEOUT_SECS:-$budget}" "" "${markers[@]}" || missing=1
+            [ "$built" = 1 ] || ! grep -aqF "INSTALLER-BUILT" "$logs-boot.log" ||
+                { echo "FAIL: $kind: the disk built a system with no toolchain installed" >&2; missing=1; }
             check_disk "$disk" "$kind" || missing=1
         fi
         check_kept "$disk" "$kind" || missing=1
@@ -734,18 +756,20 @@ test-installer *DISKS:
                 "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed")
             [ "$payload" = 0 ] ||
                 markers+=("/usr/local already holds this medium's toolchain" "the root has a /src already")
-            boot_once "$logs-reinstall.log" "${INSTALLER_TIMEOUT_SECS:-1800}" {{iso_installer}} \
+            boot_once "$logs-reinstall.log" "$install_budget" "stick:{{iso_installer}}" \
                 "${markers[@]}" || missing=1
             [ "$missing" = 1 ] ||
-                boot_once "$logs-reinstalled.log" "${INSTALLER_TIMEOUT_SECS:-1800}" "" \
+                boot_once "$logs-reinstalled.log" "$install_budget" "" \
                     "INSTALLER-KEPT" "ok 1 - installed_built_and_committed" || missing=1
             check_disk "$disk" "$kind" || missing=1
         fi
         if [ "$missing" = 0 ]; then
             loop="built and installed the system"
-            [ "$payload" = 1 ] || loop="cloned slot a"
+            [ "$built" = 1 ] || loop="cloned slot a"
             [ "$kind" != blank ] || loop="$loop, then reinstalled keeping the root"
-            echo "test-installer: $kind: installed from the stick, booted from the disk, $loop"
+            from="the stick"
+            [ "$kind" != optical ] || from="the CD without its payload"
+            echo "test-installer: $kind: installed from $from, booted from the disk, $loop"
             rm -rf "$disk" "$disk.foreign" "$disk.before" "$vars"
         else
             echo "FAIL: $kind; logs in $logs-*.log, the disk at $disk" >&2

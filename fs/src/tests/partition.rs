@@ -329,13 +329,18 @@ pub fn test_partition_gpt_array_crc_falls_back_to_mbr() -> TestResult {
 pub fn test_partition_gpt_geometry_limits() -> TestResult {
     klog_info!("PART_TEST: GPT geometry limits");
     let mut many = GptSpec::valid();
-    many.num_entries = 200;
+    many.num_entries = slopos_boot_core::gpt::MAX_ENTRIES + 1;
     let Some(device) = gpt_device(&many) else {
         return TestResult::Pass;
     };
     match probe(&device).map(|t| t.scheme) {
         Err(PartitionError::Unsupported) => {}
-        other => return fail!("200 entries should be Unsupported, got {:?}", other),
+        other => {
+            return fail!(
+                "entries past MAX_ENTRIES should be Unsupported, got {:?}",
+                other
+            );
+        }
     }
 
     let mut narrow = GptSpec::valid();

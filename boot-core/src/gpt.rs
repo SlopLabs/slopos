@@ -14,8 +14,10 @@ pub const PRIMARY_LBA: u64 = 1;
 /// The header's defined fields; a larger `HeaderSize` is reserved bytes.
 pub const HEADER_MIN: u32 = 92;
 pub const MIN_ENTRY_SIZE: u32 = 128;
-/// The most entries this reader stages, so the most partitions a disk has.
-pub const MAX_ENTRIES: u32 = 128;
+/// The most entries this reader stages, so the most partitions a disk has:
+/// xorriso's most, which it gives an ISO's table (176 beside an Apple
+/// Partition Map), where partitioning tools write 128.
+pub const MAX_ENTRIES: u32 = 248;
 /// The largest entry array this reader stages: it CRCs the array whole.
 pub const MAX_ARRAY_BYTES: u64 = 32 * 1024;
 /// UTF-16 code units in an entry's name.
@@ -28,10 +30,7 @@ const HEADER_REVISION: u32 = 0x0001_0000;
 /// The protective MBR's one partition type, §5.2.3.
 const PROTECTIVE_TYPE: u8 = 0xEE;
 
-const _: () = assert!(
-    MAX_ENTRIES <= u128::BITS,
-    "partitions() marks accepted slots in a u128"
-);
+const ACCEPTED_WORDS: usize = (MAX_ENTRIES as usize).div_ceil(64);
 
 fn le_u32(bytes: &[u8], at: usize) -> u32 {
     let mut word = [0u8; 4];
@@ -132,8 +131,9 @@ pub struct Header {
 }
 
 /// The disk GUID of the header copy `block` holds, read from `lba`, whatever
-/// array it names: a table [`Header::parse`] will not stage, as xorriso lays
-/// one out for an ISO, still identifies its disk.
+/// array it names: a header [`Header::parse`] refuses for naming over
+/// [`MAX_ENTRIES`] entries, or one whose array is damaged, still identifies
+/// its disk.
 pub fn disk_guid(block: &[u8], lba: u64, geometry: Geometry) -> Result<Guid, Reject> {
     sealed(block, lba, geometry)?;
     Ok(guid_at(block, 56))
@@ -419,7 +419,7 @@ impl Header {
         array: &'a [u8],
     ) -> impl Iterator<Item = Result<Partition, Skipped>> + 'a {
         let count = (self.num_entries as usize).min(array.len() / self.entry_size as usize);
-        let mut accepted: u128 = 0;
+        let mut accepted = [0u64; ACCEPTED_WORDS];
         (0..count).filter_map(move |index| {
             let entry = self.entry(array, index)?;
             let skip = |why| {
@@ -435,13 +435,13 @@ impl Header {
                 return skip(Skip::OutsideUsable);
             }
             let overlaps = (0..index)
-                .filter(|&earlier| accepted & (1 << earlier) != 0)
+                .filter(|&earlier| accepted[earlier / 64] & (1 << (earlier % 64)) != 0)
                 .filter_map(|earlier| self.entry(array, earlier))
                 .any(|e| entry.first_lba <= e.last_lba && e.first_lba <= entry.last_lba);
             if overlaps {
                 return skip(Skip::Overlaps);
             }
-            accepted |= 1 << index;
+            accepted[index / 64] |= 1 << (index % 64);
             let block = self.geometry.block;
             Some(Ok(Partition {
                 entry,

@@ -324,6 +324,17 @@ impl BaseFs {
             .filter(|name| !name.is_empty())
             .try_fold(self.root_inode(), |dir, name| self.lookup(dir, name))
     }
+
+    /// The bytes of the regular file at `path`, from the root, where they
+    /// lie.
+    pub fn file(&self, path: &[u8]) -> VfsResult<&'static [u8]> {
+        let node = self.index()?.node(self.resolve(path)?)?;
+        match node.kind {
+            FileType::Regular => Ok(node.data),
+            FileType::Directory => Err(VfsError::IsDirectory),
+            _ => Err(VfsError::InvalidArgument),
+        }
+    }
 }
 
 impl Default for BaseFs {

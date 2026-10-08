@@ -2,6 +2,31 @@
 
 **No finding is open.**
 
+Swept 2026-10-08: the install medium on a stick — the payload volume
+`build_install_medium.sh` builds and `build_iso.sh` appends as a GPT partition,
+`boot-core`'s GPT reader staging xorriso's 176-entry table (`MAX_ENTRIES`
+248, the accepted-slot mask a bitset), `bootdisk medium` holding every built
+medium to it, the install-medium boot step finding the payload by the
+module's disk GUID and mounting it read-only and pinned under a read claim,
+and the installer copying the toolchain and clone from it. New input reaches
+the kernel: on a live boot, the ext4 metadata of a payload partition on the
+disk carrying the medium's GUID goes to the kernel's ext4 driver, with no
+`Mount` holder asking, as a `root=` or `mount=` volume's does; the volume is
+mounted read-only, every write refused by the claim and the `read-only`
+feature, and nothing unmounts, covers or writes it (`installer_test`). Three
+reviews found defects before it landed: the kernel took the first disk
+carrying the GUID before USB had settled, so an internal disk carrying it hid
+the stick instead of making the choice ambiguous; and the installer trusted
+any read-only ext4 at `/media/payload`, a directory of a read-only root
+included, where it now takes only a volume's root. One **pre-existing**
+latent defect, removed: `build_iso.sh` ran `limine bios-install`, which
+replaces an ISO's GPT, and with it the disk GUID that names the medium, by an
+MBR; it never ran, since nothing built the tool. Below the bar: the disk GUID
+is no secret, so whoever can write a disk in the machine can give it the
+medium's GUID and a payload partition, which a live system booted from a CD
+would mount and install from; that takes the raw-device right or the disk in
+hand, which already reaches the installed system.
+
 Swept 2026-10-08: USB mass storage — what a stick sends (Bulk-Only
 wrappers, sense, INQUIRY, capacity and mode data) through `usb-core`'s
 storage parsers, the transport's recovery driving Reset, Stop and Configure

@@ -7,6 +7,9 @@
 //! | SlopOS root  | ext4: `/`                                               |
 //! | SlopOS crash | raw: the last panic                                     |
 //!
+//! An install medium carries one more, the payload: an ext4 volume holding
+//! the toolchain and a clone of the source, read-only to every system.
+//!
 //! SlopOS's partitions carry type GUIDs of its own. The Discoverable
 //! Partitions Specification's root and XBOOTLDR types would have a Linux on
 //! the same disk mount them as its own, and write its kernels into the boot
@@ -20,6 +23,7 @@ pub const ESP_TYPE: Guid = Guid::from_spelling("c12a7328-f81f-11d2-ba4b-00a0c93e
 pub const BOOT_TYPE: Guid = Guid::from_spelling("0a5d2380-494f-4bb7-9fa1-76e03c03d1ec");
 pub const ROOT_TYPE: Guid = Guid::from_spelling("dc5e4e29-da9a-4e3e-ac44-38b4ea426284");
 pub const CRASH_TYPE: Guid = Guid::from_spelling("2f690270-a513-45e2-8e3b-75aa8e44177c");
+pub const PAYLOAD_TYPE: Guid = Guid::from_spelling("2af194ea-b926-4003-88fe-08d832269dd9");
 
 pub const ESP_NAME: &str = "EFI system partition";
 pub const BOOT_NAME: &str = "SlopOS boot";
@@ -75,6 +79,10 @@ pub const MEDIUM_NOTICE: &str = "boot/NOTICE.md";
 /// disk the installer never offers, however the loader was started.
 pub const MEDIUM_DISK_GUID: &str = "boot/disk-guid";
 
+/// Where the live system mounts the medium's payload partition, which holds
+/// the toolchain and the clone where an installed root has them.
+pub const PAYLOAD_DIR: &str = "/media/payload";
+
 /// The description of SlopOS's firmware boot entry.
 pub const FIRMWARE_ENTRY: &str = "SlopOS";
 
@@ -114,7 +122,7 @@ mod tests {
     fn the_types_are_distinct_and_none_is_linux_s() {
         let xbootldr = Guid::from_spelling("bc13c2ff-59e6-4262-a352-b275fd6f7172");
         let linux_root = Guid::from_spelling("4f68bce3-e8cd-4db1-96e7-fbcaf984b709");
-        let ours = [BOOT_TYPE, ROOT_TYPE, CRASH_TYPE];
+        let ours = [BOOT_TYPE, ROOT_TYPE, CRASH_TYPE, PAYLOAD_TYPE];
         for (i, a) in ours.iter().enumerate() {
             assert!(*a != xbootldr && *a != linux_root && *a != ESP_TYPE);
             assert!(ours[i + 1..].iter().all(|b| a != b));

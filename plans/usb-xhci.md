@@ -16,20 +16,19 @@ system runs. QEMU's controllers come first, then the laptop's two
 
 ## Where it stands
 
-Phases 1 to 4 have landed. The kernel takes every xHCI controller it can
+Phases 1 to 5 have landed. The kernel takes every xHCI controller it can
 drive from the firmware and runs it. It enumerates every device on its root
 ports and behind its hubs, offers each function to the drivers `usb_driver!`
 registers, and removes a device cleanly when it leaves. At poweroff it
 flushes each stick and resets each controller. `usb-hid` binds keyboards,
 mice and tablets, which type into the TTY and the desktop and move the one
 cursor beside the i8042's and the touchpad's. `usb-storage` serves Bulk-Only
-sticks as `sd` disks; an adapter is listed and left unbound. `just
-test-installer` attaches the ISO as QEMU's `usb-storage` device on
-`qemu-xhci` (`INSTALL_STICK` in `scripts/qemu_run.sh`), which the kernel
-sees as `sda` and the installer never offers. The install medium still
-reaches the kernel only as the Limine module `install`, payload included.
-Limine loads it into RAM, and `fs/src/basefs.rs` serves it at
-`/media/install` for the whole boot.
+sticks as `sd` disks; an adapter is listed and left unbound. The live
+system mounts the install payload, the toolchain and a clone of the source,
+from a partition of the stick it booted from, read-only at
+`/media/payload`, and the installer copies it from there. Limine still
+loads the small `install` module, which `fs/src/basefs.rs` serves at
+`/media/install`.
 
 The pieces USB plugs into exist. These are their gaps:
 
@@ -53,10 +52,8 @@ The pieces USB plugs into exist. These are their gaps:
   `QueueOps`, a stick's being the Bulk-Only transport. `disk0`, the disk
   `root=auto` mounts, is the first disk registered that is not a USB disk. A
   USB disk is unregistered when it leaves, a block claim names its disk's
-  generation, and a disk reports write protection. xorriso gives the ISO's
-  GPT 176 entries, past `gpt::MAX_ENTRIES` (128), so neither the kernel's
-  partition probe nor `boot-core`'s reader stages that table: a stick
-  flashed with the ISO shows no partitions, and only its disk GUID is read.
+  generation, and a disk reports write protection. A stick flashed with the
+  ISO shows its partitions, the payload's among them.
 - **Network.** A NIC is a `NetDevice` handed to `nic::publish`.
   `nic::retire` tears one down, and a test grades it, but it exists only
   under `test-hooks`. Both NIC drivers are singletons.
@@ -87,7 +84,7 @@ untrusted input, and each rewrites the `AGENTS.md` and
 | 2. Enumeration and the device model (done) | 1 | every device QEMU attaches, a hub's included, enumerated, bound or listed, and removed cleanly |
 | 3. Keyboards and pointers (done) | 2 | a USB keyboard and tablet drive the shell and the desktop beside PS/2 |
 | 4. Mass storage (done) | 2 | an ext4 stick mounted, written, pulled and plugged back; the installer still installs with its stick visible |
-| 5. The install medium on a stick | 4 | **milestone:** the installer takes the toolchain from the stick, not from RAM |
+| 5. The install medium on a stick (done) | 4 | **milestone:** the installer takes the toolchain from the stick, not from RAM |
 | 6. USB networking | 2 | a CDC Ethernet adapter takes a DHCP lease and leaves cleanly |
 
 Phases 3, 4 and 6 can run side by side. A phase's laptop half is graded by
@@ -270,60 +267,35 @@ Built:
 **On the laptop (not yet run),** a stick is read and written on a Type-A
 port and on a Type-C port.
 
-### Phase 5: The install medium on a stick (milestone)
+### Phase 5: The install medium on a stick (done)
 
-- **The payload partition.** `PAYLOAD=1` puts the toolchain, its manifest
-  under `var/lib/slopos/trees` and the clone in an ext4 volume.
-  - The volume is built in the profile, populated, then given ext4's
-    `read-only` feature with `tune2fs -O read-only`, since `mke2fs` refuses
-    the feature at creation. Linux mounts such a volume read-only and
-    refuses to remount it read-write, and the kernel takes it as a
-    read-only verdict (`requires_readonly`), so no other system leaves its
-    journal needing recovery.
-  - It is appended to the ISO as a GPT partition of a new SlopOS payload
-    type, which `boot-core::layout` defines beside `CRASH_TYPE`. xorriso's
-    `-append_partition` takes the type GUID, and `-appended_part_as_gpt`
-    puts the partition in the GPT, where `block::locate_partition` looks.
-  - The `install` module, still the one Limine loads, keeps the rest:
-    Limine, the licences, the notices, the recipe sources and the medium's
-    GPT disk GUID.
-- **Mounting it.** The install-medium boot step finds the payload as the one
-  partition of the payload type on the disk whose GPT disk GUID the module
-  records, through `block::locate_partition`, as the crash store finds its
-  partition. It waits for USB to settle if the disk is absent, then mounts
-  the partition read-only and pinned at `/media/payload`. If the payload is
-  still absent, or two disks carry the medium's GUID, the live system logs
-  it and installs without the toolchain, as `INSTALLER_PAYLOAD=0` does.
-  The mount holds one of the four ext4 mount slots for the boot. A stick
-  pulled during the session leaves the pinned mount failing every read that
-  reaches the device until reboot, and an install in progress fails,
-  naming the payload.
-- **The installer.** `Medium::find` keeps its basefs check and the kernel,
-  base and loader files at `/media/install`. It checks the toolchain with
-  its manifest, and the clone, at `/media/payload`. `root_min` sizes the
-  root from `/media/payload`'s `statfs`, and `installer_test`'s clone
-  probe reads `/media/payload/src`.
-- **The ISO's table.** A host test holds the built ISO's GPT to the kernel's
-  and `boot-core`'s parsers, both of which keep the ESP and the payload
-  entries. Today neither stages it: xorriso writes 176 entries, past
-  `gpt::MAX_ENTRIES`, so either the bound rises (the kernel's partition
-  numbers are a `u8`) or the image is built with 128.
-- **A medium the kernel cannot read.** `qemu_run.sh` gains `INSTALL_CDROM`,
-  which attaches the ISO as an `ide-cd` with `bootindex=0` beside
-  `BOOT_DISK_IMG`. Today the CD drive is attached only when neither
-  `INSTALL_STICK` nor `BOOT_DISK_IMG` is set.
+Built:
 
-**Done when** `just test-installer` installs from a stick whose payload the
-kernel reads over USB, while the module Limine loads carries no toolchain.
-A reinstall must keep the root. The same medium booted through
-`INSTALL_CDROM`, which the kernel cannot read, must install without the
-toolchain: the host requires the installer's `the medium carries no
-toolchain` line in that run's log, and no `INSTALLER-BUILT` in the disk
-boot that follows.
+- **The payload partition.** With `PAYLOAD=1`, `build_install_medium.sh`
+  builds the toolchain, its manifest and the clone into an ext4 volume beside
+  the module, `<archive>.payload`, and `build_iso.sh` appends it to the image
+  as a GPT partition of `layout::PAYLOAD_TYPE`. The module keeps Limine, the
+  notices, the recipe sources and the disk GUID.
+- **The ISO's table.** `gpt::MAX_ENTRIES` rose to 248, so the kernel and
+  `boot-core` stage xorriso's 176 entries, and `bootdisk medium` holds every
+  built medium to that reader.
+- **Mounting it.** The install-medium step reads the module's disk GUID,
+  waits for USB to settle, locates the payload, claims it for reading and
+  mounts it read-only and pinned at `/media/payload`
+  (`vfs_ext2_mount_readonly`), logging every outcome.
+- **The installer** takes `/usr/local`, its manifest and `/src` from
+  `/media/payload` and sizes the root from it; without a payload it installs
+  no toolchain, and says so when the medium's disk names one.
+- **Tests.** `boot-core` reads 176- and 248-entry tables. In `just
+  test-installer` every stick install must log the kernel mounting `sda`'s
+  payload and the toolchain installed from it, the guest checks that the
+  module holds no payload and that the mount cannot be unmounted, covered or
+  written, and a fourth disk, `optical`, installs from the ISO on an
+  `ide-cd` (`INSTALL_CDROM`) without the toolchain and clones a slot.
 
-**On the laptop,** a stick made with `PAYLOAD=1 just iso` installs SlopOS
-beside CachyOS, toolchain included, from a live system that never holds
-the toolchain in RAM.
+**On the laptop (not yet run),** a stick made with `PAYLOAD=1 just iso`
+installs SlopOS beside CachyOS, toolchain included, from a live system that
+never holds the toolchain in RAM.
 
 ### Phase 6: USB networking
 
@@ -675,9 +647,10 @@ takes a lease, and git fetches over it.
   re-read renews, so after the installer re-reads the internal disk a
   stick's duplicate would precede it. Nothing the boot resolves depends on
   that order once the internal disk has been re-read. `fs init` for
-  `root=`, `cmdline mounts` and the install-medium step wait for USB to
-  settle only when the device they name is absent; under `tests=on` the
-  kernel tests wait too. No other boot step waits for USB.
+  `root=` and `cmdline mounts` wait for USB to settle only when the device
+  they name is absent, and the install-medium step before it looks for its
+  payload; under `tests=on` the kernel tests wait too. No other boot step
+  waits for USB.
   - The bus is *settled* once every root and hub port has been powered for
     its power-good time plus the 100 ms a device may take to signal attach
     and has since been quiet for a debounce interval, and every device that
@@ -799,24 +772,64 @@ takes a lease, and git fetches over it.
   `kconsole::request` the i8042 hook calls, and the repeats of a command key
   still held are eaten with it. Destructive commands still need the
   `kconsole=` mask.
-- **The payload moves to a partition the kernel mounts.**
-  - The module stays small, so Limine no longer loads gigabytes into RAM.
-  - A single file in the ISO no longer carries the toolchain, so the ISO
-    9660 limit of 4 GiB per file stops mattering.
-  - The payload is found by the medium's GPT disk GUID, which the build
-    fixes and the module records, not by a filesystem identity that a
-    volume on an internal disk could also carry.
-  - It is pinned, as `/media/install` is, so no process can substitute
-    one.
+- **The payload is a partition the kernel mounts.**
+  - The module stays small, so Limine never loads gigabytes into RAM.
+  - No single file in the ISO carries the toolchain, so the ISO 9660 limit
+    of 4 GiB per file does not matter.
+  - It is the profile's ext4, populated through `fs_tree.py`, shrunk with
+    `resize2fs -M` and only then given ext4's `read-only` feature, which
+    `mke2fs` refuses at creation. Linux mounts such a volume read-only and
+    will not remount it read-write, and the kernel takes it as a read-only
+    verdict (`requires_readonly`), so no system leaves its journal needing
+    recovery. Its journal is the floor the tree uses, 4 MiB.
+  - It is found by the medium's GPT disk GUID, which the build fixes and
+    the module records, not by a filesystem identity that a volume on an
+    internal disk could also carry, and by its type, never its number:
+    xorriso numbers partitions by start, with gap partitions between.
+  - The step waits for USB to settle even when a disk carries the GUID, so
+    a second one, the stick perhaps, makes the choice ambiguous rather than
+    first come. Absent or ambiguous, the live system logs it and installs
+    without the toolchain, as `INSTALLER_PAYLOAD=0` does. It looks once: a
+    stick still settling after `usb.settle_ms`, or one a one-CPU machine
+    does not wait for, leaves the session without its payload.
+  - A medium the kernel cannot read has no payload: a CD, which it has no
+    driver for and Linux does not partition either, or an ISO copied as a
+    file onto another volume. Such a live system installs without the
+    toolchain, and the installer says so when the medium's disk does name a
+    payload.
+  - It is pinned, as `/media/install` is, so no process can substitute one,
+    and held under a read claim for the boot. The installer takes a payload
+    only from the root of a read-only ext4 volume at `/media/payload`: any
+    program can make a directory there, and only a `Mount` holder, which may
+    write any disk raw already, can put a volume there.
+  - It holds one of the four ext4 mount slots for the boot. A stick pulled
+    during the session leaves the pinned mount failing every read that
+    reaches the device until reboot, and an install in progress fails,
+    naming the payload's path.
   - It is the one exception to `root=initramfs` mounting no disk that a
-    `mount=` did not name, and `AGENTS.md` says so when phase 5 lands.
+    `mount=` did not name.
+- **The GPT reader stages xorriso's tables.** `gpt::MAX_ENTRIES` is 248, the
+  most libisofs writes: 248 entries, or 176 beside an Apple Partition Map,
+  which Limine's recipe adds. Partitioning tools write 128, and the kernel
+  numbers partitions in a `u8`. An ISO's table counts in 512-byte sectors, so
+  behind a 4Kn bridge a stick shows neither its disk GUID nor its payload.
+  `bootdisk medium` reads both copies of every built medium's table through
+  `boot-core`, the kernel's reader, and fails the build unless each is whole
+  and names the disk GUID, one ESP and the same payload partition, which holds
+  the volume byte for byte. It is stricter than the kernel, which skips a bad
+  entry and reads the backup only when the primary fails: what the build ships
+  is the whole table.
+- **Limine's BIOS installer is not run on the image.** `limine bios-install`
+  replaces an ISO's GPT with an MBR when its partitions are all ESP, basic
+  data or HFS+, which loses the disk GUID, and with a payload it finds no
+  BIOS boot partition. A stick written with the image boots under UEFI; a
+  BIOS boots it from optical media only, through El Torito.
 - **The installer never offers its own medium.** The medium's GPT disk GUID
-  identifies the stick on every boot path, UEFI, BIOS or optical, with no
-  help from the loader. It is read from the header alone
-  (`gpt::disk_guid`), whatever array the header names. A write-protected disk
-  is excluded as unwritable, and is checked first, so `test-installer`'s
-  write-protected stick is passed over by that rule and its writable one by
-  the GUID.
+  identifies the medium however the firmware started it, with no help from the
+  loader. It is read from the header alone (`gpt::disk_guid`), whatever array
+  the header names. A write-protected disk is excluded as unwritable, and is
+  checked first, so `test-installer`'s write-protected stick is passed over by
+  that rule and its writable one by the GUID.
   On a medium that carries a payload, the payload's block read claim makes
   the installer's table re-read on that disk fail with `EBUSY` before
   anything is written, which backstops both.

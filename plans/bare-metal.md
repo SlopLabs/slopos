@@ -33,13 +33,14 @@ its firmware entry, `cachyos`, is the only one.
 - UEFI resets and powers the machine off.
 - The kernel carries an NVMe driver, graded on QEMU's model, which lists a
   disk's partitions under `/dev/disk/by-partuuid`. The live system boots
-  `root=initramfs` and mounts no disk.
+  `root=initramfs` and mounts no disk but its medium's payload.
 - The kernel carries an xHCI driver, graded on QEMU's two models and the
   laptop's two controllers, which takes each controller from the firmware,
   enumerates the devices on its ports and behind its hubs, binds USB
   keyboards and pointers beside the i8042 keyboard and the touchpad, and
   resets it at poweroff. It serves sticks as `sd` disks, flushed before that
-  reset, which only QEMU has graded so far.
+  reset, and reads the install payload from the stick it booted from, which
+  only QEMU has graded so far.
 - Every volume is ext4 in one profile, with a jbd2 journal that e2fsck
   replays.
 - The boot chain shares a disk: Limine under `\EFI\SlopOS\`, the slots on a
@@ -51,8 +52,9 @@ its firmware entry, `cachyos`, is the only one.
   Under `panic=reboot` on bare metal the panic stays on screen for ten seconds
   before the reset.
 - The ISO is an install medium: `/bin/installer` lays SlopOS out on a disk,
-  beside another system or over it, from what the loader brought, and every
-  base carries e2fsprogs.
+  beside another system or over it, from what the loader brought and the
+  payload partition the kernel mounts from the stick, and every base carries
+  e2fsprogs.
 - The kernel carries a driver for the laptop's RTL8168h, graded by host tests
   over a simulated chip. Every NIC takes a DHCP lease, and git reaches another
   machine over SSH.
@@ -157,9 +159,10 @@ the NV3's panic queue, and the hold on its screen.
 
 Built: the install medium, an `install` module the live ISO carries
 (`scripts/build_install_medium.sh`) — Limine for the ESP, the source of the
-base's recipe programs, and with `PAYLOAD=1` the toolchain and a `--vendored`
-clone of `HEAD` — which the kernel serves at `/media/install` beside the
-kernel and base Limine booted, a second `basefs` instance; e2fsprogs as an
+base's recipe programs — which the kernel serves at `/media/install` beside
+the kernel and base Limine booted, a second `basefs` instance, and with
+`PAYLOAD=1` the toolchain and a `--vendored` clone of `HEAD` in a partition
+of the stick the kernel mounts at `/media/payload`; e2fsprogs as an
 unpatched recipe, its six programs in every base at `/sbin`, and the slibc it
 needed; `/bin/installer`, every answer also a flag, with the GPT writer and
 the placement plan in `boot-core`, long names in `fat-core` and the host-tree
@@ -338,7 +341,7 @@ the bounds `AGENTS.md` sets for it.
 **`just test-installer`** uses the pinned NV-varstore OVMF, one NVMe disk, and
 the ISO attached as USB storage on `qemu-xhci`. The firmware boots the ISO and
 the kernel sees it as `sda`, which the installer never offers, just as with a
-stick. Three disks are graded:
+stick, and mounts its payload partition. Four disks are graded:
 
 - **A blank disk,** installed with erase-disk.
 - **A disk holding a foreign OS,** installed into free space. The disk has an
@@ -349,6 +352,9 @@ stick. Three disks are graded:
   foreign entry names a partition on the disk QEMU boots by `bootindex`: OVMF
   deletes an `HD()` entry it cannot match to such a device.
 - **An existing partition,** reused as the root.
+- **A blank disk installed from a CD,** the ISO in a drive the kernel has no
+  driver for (`INSTALL_CDROM`), so without the payload: the install says the
+  medium carries no toolchain and the disk clones a slot.
 
 Each run then boots from the disk with the ISO detached, a second QEMU on the
 varstore the first left, and goes around `selfhost.sh install` once. The host
@@ -364,9 +370,8 @@ falls back to the committed slot, and the fallback boot finds the panic in
 ## Out of scope
 
 - **Wi-Fi.**
-- **USB beyond keyboards, pointers and sticks.** See `plans/usb-xhci.md`. It
-  is what later lets the live system read the medium from the stick instead
-  of from RAM, and what brings USB NICs.
+- **USB beyond keyboards, pointers and sticks.** See `plans/usb-xhci.md`,
+  which brings USB NICs.
 - **Other machines' platforms:** AHCI (the laptop's SATA controller has no
   disk), VMD, more than 17 CPUs, timers without HPET, x2APIC mode, INTx, PCI
   without MCFG, other PCH GPIO blocks.
@@ -517,9 +522,10 @@ falls back to the committed slot, and the fallback boot finds the panic in
   runs on the one-disk shape.
 - **Linux device names,** plus stable `by-partuuid`, `by-uuid` and `by-label`
   links. Probe order is not stable across machines or boots.
-- **The install payload is a Limine module** until it moves to a partition of
-  the stick the kernel reads (`plans/usb-xhci.md` phase 5), and the install is
-  offline: no package host.
+- **The install payload is a partition of the stick,** which the kernel
+  mounts read-only, never a Limine module, so the live system holds no
+  toolchain in RAM; booted from a medium the kernel cannot read, it installs
+  without one. The install is offline: no package host.
 - **The live ISO is always an install medium.** `just iso` puts the
   `install` module on it whether or not the payload comes, since the
   installer needs Limine for the ESP; the payload alone is the knob, and

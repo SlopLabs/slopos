@@ -17,7 +17,8 @@ set -euo pipefail
 #   QEMU_GTK_ZOOM_TO_FIT,
 #   QEMU_ENABLE_ISA_EXIT, QEMU_PCI_DEVICES,
 #   OVMF_DIR, OVMF_VARS_FILE,
-#   BOOT_DISK_IMG, INSTALL_STICK, INSTALL_STICK_WRITABLE, QEMU_ALLOW_REBOOT, QEMU_TEST_DISKS,
+#   BOOT_DISK_IMG, INSTALL_STICK, INSTALL_STICK_WRITABLE, INSTALL_CDROM, QEMU_ALLOW_REBOOT,
+#   QEMU_TEST_DISKS,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
 #   GIT_PUSH_REPO, GIT_SSH_PEER, QEMU_QMP,
@@ -179,13 +180,19 @@ if [ $(( QEMU_SMP & (QEMU_SMP - 1) )) -ne 0 ]; then
 fi
 
 # INSTALL_STICK: the ISO on a USB stick, as the installer's medium is flashed,
-# write-protected unless INSTALL_STICK_WRITABLE=1. The boot disk is then the
-# disk it installs onto, booted after it.
+# write-protected unless INSTALL_STICK_WRITABLE=1. INSTALL_CDROM: the ISO in a
+# CD drive, which the kernel has no driver for. Either way the boot disk is
+# then the disk it installs onto, booted after it.
 INSTALL_STICK="${INSTALL_STICK:-}"
+INSTALL_CDROM="${INSTALL_CDROM:-}"
 STICK_READONLY=on
 [ "${INSTALL_STICK_WRITABLE:-0}" != 1 ] || STICK_READONLY=off
+if [ -n "$INSTALL_STICK" ] && [ -n "$INSTALL_CDROM" ]; then
+    echo "INSTALL_STICK and INSTALL_CDROM both name a medium; boot one" >&2
+    exit 1
+fi
 NV_FIRMWARE=0
-if [ -n "${BOOT_DISK_IMG:-}" ] || [ -n "$INSTALL_STICK" ]; then
+if [ -n "${BOOT_DISK_IMG:-}" ] || [ -n "$INSTALL_STICK$INSTALL_CDROM" ]; then
     NV_FIRMWARE=1
 fi
 
@@ -199,6 +206,10 @@ fi
 # ── Check boot medium exists ─────────────────────────────────────────────────
 if [ -n "$INSTALL_STICK" ] && [ ! -f "$INSTALL_STICK" ]; then
     echo "Install stick not found at $INSTALL_STICK" >&2
+    exit 1
+fi
+if [ -n "$INSTALL_CDROM" ] && [ ! -f "$INSTALL_CDROM" ]; then
+    echo "Install CD not found at $INSTALL_CDROM" >&2
     exit 1
 fi
 if [ -n "${BOOT_DISK_IMG:-}" ]; then
@@ -608,11 +619,12 @@ if [ -n "$INSTALL_STICK" ]; then
         -device "usb-storage,bus=xhci.0,drive=stick,removable=on,bootindex=0"
     )
     BOOT_DISK_INDEX=1
-elif [ "$ADD_BOOT_DISK" = "0" ]; then
+elif [ -n "$INSTALL_CDROM" ] || [ "$ADD_BOOT_DISK" = "0" ]; then
     QEMU_ARGS+=(
-        -drive "if=none,id=cdrom,media=cdrom,readonly=on,file=$ISO"
+        -drive "if=none,id=cdrom,media=cdrom,readonly=on,file=${INSTALL_CDROM:-$ISO}"
         -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
     )
+    [ -z "$INSTALL_CDROM" ] || BOOT_DISK_INDEX=1
 fi
 if [ "$ADD_ROOT_DISK" = "1" ] || [ "$ADD_SCRATCH_DISK" = "1" ] || [ "$ADD_CAPACITY_DISK" = "1" ]; then
     QEMU_ARGS+=(-device "nvme,id=nvme0,serial=slopos-root")

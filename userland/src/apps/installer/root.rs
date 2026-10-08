@@ -17,7 +17,7 @@ use crate::syscall::fs::{inode_flags, mount, set_inode_flags, sync, umount2};
 /// Where the new root's mount point is made: memory, which the next boot does
 /// not see.
 const MOUNT_PARENT: &str = "/tmp";
-const EXT4_ROOT_INODE: u64 = 2;
+pub(super) const EXT4_ROOT_INODE: u64 = 2;
 /// The directories every root carries, as `scripts/build_fs_image.sh` lays
 /// them out.
 const ROOT_DIRS: [&str; 6] = ["/bin", "/sbin", "/etc", "/var", "/home", "/media"];
@@ -292,7 +292,7 @@ fn put(
 fn install_tree(root: &Mounted, medium: &Medium, guest: &str) -> Result<Option<u64>, String> {
     let name = manifest_name(guest);
     let recorded = format!("{MANIFEST_DIR}/{name}");
-    let new_text = fs::read_to_string(medium.path(&recorded))
+    let new_text = fs::read_to_string(medium.payload_path(&recorded))
         .map_err(|e| format!("the medium's manifest of {guest}: {e}"))?;
     let new = Manifest::parse(&new_text)
         .map_err(|e| format!("the medium's manifest of {guest}, line {}", e.line))?;
@@ -332,7 +332,7 @@ fn install_tree(root: &Mounted, medium: &Medium, guest: &str) -> Result<Option<u
             Step::MakeDir(path) => make_dir(&root.path(path))?,
             Step::Install { item, path } => put(
                 root,
-                &medium.path(&format!("{guest}/{}", item.rel)),
+                &medium.payload_path(&format!("{guest}/{}", item.rel)),
                 item.kind,
                 path,
                 &mut progress,
@@ -374,7 +374,7 @@ fn copy_tree(root: &Mounted, medium: &Medium, dir: &str, to: &str) -> Result<u64
         copied: 0,
         reported: 0,
     };
-    let from = medium.path(dir);
+    let from = medium.payload_path(dir);
     put(root, &from, Kind::Dir, to, &mut progress)?;
     walk(root, &from, to, &mut progress)?;
     Ok(progress.copied)
@@ -431,7 +431,7 @@ fn with_origin(config: &str, url: &str) -> String {
 
 /// Fill the root from the medium: `/usr/local` by its manifest, `/src` once.
 pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(), String> {
-    if !medium.has(TOOLCHAIN) {
+    if !medium.payload_has(TOOLCHAIN) {
         println!("installer: the medium carries no toolchain; /usr/local stays as it is");
     } else {
         match install_tree(root, medium, TOOLCHAIN)? {
@@ -442,7 +442,7 @@ pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(),
             None => println!("installer: /usr/local already holds this medium's toolchain"),
         }
     }
-    if !medium.has(SOURCE) {
+    if !medium.payload_has(SOURCE) {
         return Ok(());
     }
     if fs::symlink_metadata(root.path(SOURCE)).is_ok() {

@@ -433,6 +433,22 @@ pub fn vfs_ext2_mount_named(
     Ok(info)
 }
 
+/// [`vfs_mount_readonly`] for `device` on a pooled ext2 instance, which with
+/// the device is held for the rest of the boot.
+pub fn vfs_ext2_mount_readonly(
+    path: &[u8],
+    device: KBox<dyn BlockDevice + Send + Sync>,
+) -> VfsResult<Ext2MountInfo> {
+    let fs = vfs_ext2_pool_claim().ok_or(VfsError::NoSpace)?;
+    let mounted = fs
+        .attach(device, true)
+        .and_then(|info| vfs_mount_readonly(path, fs).map(|()| info));
+    if mounted.is_err() {
+        vfs_ext2_pool_release(fs, false);
+    }
+    mounted
+}
+
 /// Unmount the ext2 filesystem at `target` and detach its instance.
 ///
 /// The detach is what gives the write claim back, so a re-mount of the same

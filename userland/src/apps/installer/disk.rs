@@ -91,10 +91,10 @@ impl Disk {
                 "an MBR partition table with {} partition(s)",
                 parts.len()
             )),
-            Contents::UnreadableGpt => Some(
-                "a GUID partition table this installer cannot read: over 128 entries, or damaged in both copies"
-                    .to_owned(),
-            ),
+            Contents::UnreadableGpt => Some(format!(
+                "a GUID partition table this installer cannot read: over {} entries, or damaged in both copies",
+                gpt::MAX_ENTRIES
+            )),
             Contents::Ext4 => Some("an ext4 volume across the whole disk".to_owned()),
             Contents::Data => Some("data that starts no partition table".to_owned()),
         }
