@@ -3,10 +3,20 @@
 //! event ring it produces into, in memory shared with the pages the driver
 //! side owns, and root ports a test plugs and pulls.
 
+mod devices;
+mod slots;
+
+pub use devices::{Faults, Reply, SimDevice};
+
 use super::bus::RegisterBus;
+use super::context::{
+    ContextLayout, EndpointContext, InputControlContext, SlotContext, endpoint_state, endpoint_type,
+};
 use super::memory::{DmaPage, PAGE_SIZE};
 use super::regs::*;
-use super::trb::{Trb, kind};
+use super::trb::{CompletionCode, Trb, kind};
+use crate::device::Speed;
+use crate::device::request::Setup;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -77,6 +87,23 @@ impl Memory {
         self.write32(phys + 4, (value >> 32) as u32);
     }
 
+    pub fn read_bytes(&self, phys: u64, dst: &mut [u8]) {
+        let (page, offset) = self
+            .locate(phys, dst.len())
+            .expect("DMA read outside memory");
+        let inner = self.0.borrow();
+        dst.copy_from_slice(&inner.pages[&page][offset..offset + dst.len()]);
+    }
+
+    pub fn write_bytes(&self, phys: u64, src: &[u8]) {
+        let (page, offset) = self
+            .locate(phys, src.len())
+            .expect("DMA write outside memory");
+        let mut inner = self.0.borrow_mut();
+        let bytes = inner.pages.get_mut(&page).unwrap();
+        bytes[offset..offset + src.len()].copy_from_slice(src);
+    }
+
     pub fn is_page(&self, phys: u64) -> bool {
         self.0.borrow().pages.contains_key(&phys)
     }
@@ -97,6 +124,13 @@ pub struct SimPage {
     pub fences: Rc<RefCell<Vec<PageOp>>>,
 }
 
+/// Dropping a page frees it, so DMA into it afterwards panics.
+impl Drop for SimPage {
+    fn drop(&mut self) {
+        self.mem.0.borrow_mut().pages.remove(&self.phys);
+    }
+}
+
 impl DmaPage for SimPage {
     fn phys(&self) -> u64 {
         self.phys
@@ -112,6 +146,14 @@ impl DmaPage for SimPage {
     fn write64(&mut self, offset: usize, value: u64) {
         self.fences.borrow_mut().push(PageOp::Write(offset));
         self.mem.write64(self.phys + offset as u64, value);
+    }
+    fn read_bytes(&self, offset: usize, dst: &mut [u8]) {
+        self.fences.borrow_mut().push(PageOp::Read(offset));
+        self.mem.read_bytes(self.phys + offset as u64, dst);
+    }
+    fn write_bytes(&mut self, offset: usize, src: &[u8]) {
+        self.fences.borrow_mut().push(PageOp::Write(offset));
+        self.mem.write_bytes(self.phys + offset as u64, src);
     }
     fn acquire(&self) {
         self.fences.borrow_mut().push(PageOp::Acquire);
@@ -244,9 +286,9 @@ pub struct SimController {
     enqueue: u16,
     event_cycle: bool,
     ports: Vec<u32>,
-    /// The Protocol Speed ID of the device plugged into each port, which
-    /// connects once the port has power.
-    devices: Vec<Option<u8>>,
+    /// Each connects once its port has power.
+    pub roots: Vec<Option<SimDevice>>,
+    pub slots: Vec<SimSlot>,
     /// A port whose device is pulled, or plugged at `Some` speed, just after
     /// the next read of its PORTSC.
     pub race: Option<(u8, Option<u8>)>,
@@ -263,6 +305,40 @@ pub struct SimController {
     /// MSI messages the controller would have sent.
     pub interrupts: u32,
     pub dropped_events: u32,
+    pub port_resets: u32,
+    pub commands_seen: Vec<u8>,
+    pub disabled: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimEndpoint {
+    pub state: u8,
+    pub dequeue: u64,
+    pub cycle: bool,
+    pub kind: u8,
+    pub max_packet: u16,
+    /// A NAKed transfer waits at the dequeue pointer.
+    pub pending: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SimSlot {
+    pub enabled: bool,
+    pub device: Option<(u8, u32)>,
+    pub endpoints: [SimEndpoint; 32],
+    /// Ports, once Configure Endpoint marked the slot a hub.
+    pub hub_ports: Option<u8>,
+    pub context: SlotContext,
+}
+
+pub fn speed_of(psiv: u8) -> Speed {
+    match psiv {
+        2 => Speed::Low,
+        3 => Speed::High,
+        4 => Speed::Super,
+        5.. => Speed::SuperPlus,
+        _ => Speed::Full,
+    }
 }
 
 const LEGACY_CONTROL_RESET: u32 = 0xe000_e011;
@@ -275,7 +351,8 @@ impl SimController {
     /// A controller as the firmware leaves it: running, its ports powered.
     pub fn new(config: Config) -> Self {
         let ports = vec![PORT_POWER | RX_DETECT; usize::from(config.ports())];
-        let devices = vec![None; usize::from(config.ports())];
+        let roots = vec![None; usize::from(config.ports())];
+        let slots = vec![SimSlot::default(); usize::from(config.max_slots) + 1];
         let bios_owned = config.legacy.is_some();
         Self {
             config,
@@ -306,7 +383,8 @@ impl SimController {
             enqueue: 0,
             event_cycle: true,
             ports,
-            devices,
+            roots,
+            slots,
             race: None,
             flapping: None,
             bios_owned,
@@ -317,11 +395,18 @@ impl SimController {
             violations: Vec::new(),
             interrupts: 0,
             dropped_events: 0,
+            port_resets: 0,
+            commands_seen: Vec::new(),
+            disabled: Vec::new(),
         }
     }
 
     pub fn running(&self) -> bool {
         !self.halted && self.usbcmd & CMD_RUN != 0
+    }
+
+    pub fn now_us(&self) -> u64 {
+        self.now_us
     }
 
     pub fn halted(&self) -> bool {
@@ -495,7 +580,7 @@ impl SimController {
                 self.ports[usize::from(port) - 1] |= PORT_CONNECT_CHANGE;
             }
             if power != 0
-                && let Some(speed) = self.devices[usize::from(port) - 1]
+                && let Some(speed) = self.root_speed(port)
             {
                 self.ports[usize::from(port) - 1] |= self.connection(port, speed);
             }
@@ -539,11 +624,22 @@ impl SimController {
         let old = self.portsc(port);
         let mut new = old & !(value & PORT_CHANGES);
         if value & PORT_ENABLED != 0 {
-            self.violations.push("PED written as one");
             new &= !PORT_ENABLED;
+            if let Some(device) = self.roots[usize::from(port) - 1].as_mut() {
+                device.default_state = false;
+            }
         }
         if value & PORT_RESET != 0 {
-            self.violations.push("port reset started");
+            self.port_resets += 1;
+            if let Some(speed) = self.root_speed(port).filter(|_| old & PORT_POWER != 0) {
+                self.enter_default_state(port, 0);
+                let index = usize::from(port) - 1;
+                self.ports[index] = new;
+                self.change_port(port, |portsc| {
+                    (portsc & !(0xf << 10)) | PORT_ENABLED | u32::from(speed) << 10 | 1 << 21
+                });
+                return;
+            }
         }
         if !self.config.port_power_control && value & PORT_POWER == 0 {
             self.violations.push("PP written as zero");
@@ -555,7 +651,7 @@ impl SimController {
                 self.ports[index] = new & !(PORT_POWER | PORT_CONNECTED | PORT_ENABLED | 0xf << 10);
             } else {
                 self.ports[index] = new | PORT_POWER;
-                if let Some(speed) = self.devices[index] {
+                if let Some(speed) = self.root_speed(port) {
                     let connection = self.connection(port, speed);
                     self.change_port(port, |portsc| (portsc & !(0xf << 10)) | connection);
                 }
@@ -606,6 +702,9 @@ impl SimController {
                 }
             }
             o if o == DB => self.ring_command_doorbell(),
+            o if o > DB && o < DB + 4 * 256 && (o - DB).is_multiple_of(4) => {
+                self.ring_slot(((o - DB) / 4) as u8, value as u8)
+            }
             _ => {}
         }
     }
@@ -697,15 +796,12 @@ impl SimController {
                 }
                 continue;
             }
-            let code = if trb.kind() == kind::NO_OP_COMMAND {
-                1
-            } else {
-                5
-            };
+            self.commands_seen.push(trb.kind());
+            let (code, slot) = self.execute(trb);
             let completion = Trb {
                 parameter: self.command,
-                status: code << 24,
-                control: u32::from(kind::COMMAND_COMPLETION_EVENT) << 10,
+                status: u32::from(code.0) << 24,
+                control: u32::from(kind::COMMAND_COMPLETION_EVENT) << 10 | u32::from(slot) << 24,
             };
             self.command += 16;
             self.post_event(completion);
@@ -731,9 +827,13 @@ impl SimController {
         }
     }
 
-    /// Plug a device into `port` at Protocol Speed ID `speed`.
     pub fn attach(&mut self, port: u8, speed: u8) {
-        self.devices[usize::from(port) - 1] = Some(speed);
+        self.plug(port, SimDevice::storage(speed_of(speed)));
+    }
+
+    pub fn plug(&mut self, port: u8, device: SimDevice) {
+        let speed = device.speed.default_psiv();
+        self.roots[usize::from(port) - 1] = Some(device);
         if self.portsc(port) & PORT_POWER == 0 {
             return;
         }
@@ -741,11 +841,20 @@ impl SimController {
         self.change_port(port, |old| (old & !(0xf << 10)) | connection);
     }
 
-    pub fn detach(&mut self, port: u8) {
-        self.devices[usize::from(port) - 1] = None;
+    pub fn detach(&mut self, port: u8) -> Option<SimDevice> {
+        let device = self.roots[usize::from(port) - 1].take();
         self.change_port(port, |old| {
             (old & !(PORT_CONNECTED | PORT_ENABLED | 0xf << 10)) | PORT_CONNECT_CHANGE
         });
+        device
+    }
+
+    fn root_speed(&self, port: u8) -> Option<u8> {
+        let device = self
+            .roots
+            .get(usize::from(port).checked_sub(1)?)?
+            .as_ref()?;
+        Some(device.speed.default_psiv())
     }
 
     /// Post `count` events no driver acts on: MFINDEX Wrap events.
@@ -781,7 +890,9 @@ impl RegisterBus for SimController {
             self.race = None;
             match device {
                 Some(speed) => self.attach(port, speed),
-                None => self.detach(port),
+                None => {
+                    self.detach(port);
+                }
             }
         }
         value
@@ -832,7 +943,7 @@ impl RegisterBus for SimController {
         if let Some(port) = self.flapping
             && offset == OP + 0x400 + 0x10 * usize::from(port - 1)
         {
-            if self.devices[usize::from(port - 1)].is_some() {
+            if self.roots[usize::from(port - 1)].is_some() {
                 self.detach(port);
             } else {
                 self.attach(port, 3);

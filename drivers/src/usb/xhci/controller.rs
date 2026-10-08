@@ -1,6 +1,5 @@
-//! One running controller: its rings behind their locks, the drain the
-//! interrupt handler and the USB thread share, its root ports, and what
-//! happens when it dies or the machine goes down.
+//! One running controller: its rings, the drain the interrupt handler and
+//! the USB thread share, its root ports and tree, its death and shutdown.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -9,16 +8,22 @@ use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, MutexGuard, OnceLock, SpinLock};
 use slopos_ostd::{KArc, KVec, klog_info, lock_class, write_field};
+use slopos_usb_core::bus::{Hub, Node, Port as TreePort, State as TreeState, Tree};
+use slopos_usb_core::device::Speed;
+use slopos_usb_core::hub::PortStatus;
+use slopos_usb_core::xhci::context::ContextLayout;
 use slopos_usb_core::xhci::controller::{self as seq, Handoff, Health};
-use slopos_usb_core::xhci::memory::{list_scratchpads, write_segment_table};
+use slopos_usb_core::xhci::memory::{list_scratchpads, set_device_context, write_segment_table};
+use slopos_usb_core::xhci::regs::PortSc;
 use slopos_usb_core::xhci::ring::{
     CommandCompletion, CommandResult, RING_TRBS, SubmitError, Ticket,
 };
 use slopos_usb_core::xhci::{
-    Capabilities, CommandRing, CompletionCode, DmaPage, Event, EventRing, Layout, Protocols, Setup,
-    Trb,
+    Capabilities, CommandRing, CompletionCode, DmaPage, Event, EventRing, Layout, Protocols, Trb,
 };
 
+use super::device::Device;
+use super::host::ControllerHost;
 use super::page::{Bus, Page};
 use crate::driver_core::shutdown::DeviceShutdown;
 use crate::pci_defs::PciDeviceInfo;
@@ -31,13 +36,59 @@ const STOPPED: u8 = 3;
 /// A bit for every port number a `u8` holds.
 const PORT_WORDS: usize = 256 / 64;
 
+const MAX_HUBS: usize = 8;
+
 /// What a root port last showed, and how often it changed: the USB thread
 /// writes it, tests read it.
 #[derive(Default)]
-pub struct Port {
+pub struct RootPort {
     connected: AtomicBool,
     attaches: AtomicU32,
     detaches: AtomicU32,
+}
+
+pub(super) struct Service {
+    roots: KVec<TreePort>,
+    nodes: KVec<Node>,
+    hubs: KVec<Hub>,
+    state: TreeState,
+}
+
+impl Service {
+    fn new(ports: u8, slots: u8) -> Result<Self, AllocError> {
+        let mut service = Self {
+            roots: KVec::new(),
+            nodes: KVec::new(),
+            hubs: KVec::new(),
+            state: TreeState::default(),
+        };
+        for _ in 0..ports {
+            service.roots.push(TreePort::default())?;
+        }
+        for _ in 0..=slots {
+            service.nodes.push(Node::default())?;
+        }
+        for _ in 0..MAX_HUBS {
+            service.hubs.push(Hub::default())?;
+        }
+        Ok(service)
+    }
+
+    pub(super) fn tree(&mut self) -> Tree<'_> {
+        Tree {
+            roots: &mut self.roots,
+            nodes: &mut self.nodes,
+            hubs: &mut self.hubs,
+            state: &mut self.state,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Took {
+    work: bool,
+    /// A driver may be waiting on it.
+    transfer: bool,
 }
 
 #[derive(slopos_ostd::SlotFields)]
@@ -49,11 +100,14 @@ pub struct Controller {
     layout: Layout,
     protocols: Protocols,
     /// Held by the drain, and by a state change so that none is mid-drain;
-    /// the command lock nests inside it.
+    /// the command lock and the device table nest inside it.
     events: SpinLock<EventRing<Page>>,
     commands: SpinLock<CommandRing<Page>>,
+    dcbaa: SpinLock<Page>,
     _tables: KVec<Page>,
-    ports: KVec<Port>,
+    /// The drain finds a transfer's ring here.
+    devices: SpinLock<KVec<Option<KArc<Device>>>>,
+    ports: KVec<RootPort>,
     /// Root ports a Port Status Change Event named, by number, for the
     /// thread to look at again.
     port_changes: [AtomicU64; PORT_WORDS],
@@ -62,9 +116,13 @@ pub struct Controller {
     failure: AtomicU8,
     ring_full: AtomicBool,
     interrupts: AtomicU32,
-    /// Serialises the thread's work on the controller with its shutdown.
-    service: Mutex<()>,
-    setup: Setup,
+    /// Bumped whenever the thread is left something to do.
+    work: AtomicU64,
+    /// The thread's work on the controller, serialised with its shutdown.
+    service: Mutex<Service>,
+    /// `work` when a pass that began there found the tree settled.
+    settled_at: AtomicU64,
+    setup: seq::Setup,
     irq: OnceLock<&'static str>,
 }
 
@@ -91,8 +149,13 @@ impl Controller {
             move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
                 let mut ports = KVec::new();
                 for _ in 0..caps.max_ports {
-                    ports.push(Port::default())?;
+                    ports.push(RootPort::default())?;
                 }
+                let mut devices = KVec::new();
+                for _ in 0..=caps.max_slots {
+                    devices.push(None)?;
+                }
+                let service = Service::new(caps.max_ports, caps.max_slots)?;
                 Self::install_memory(&slot, &caps)?;
                 write_field!(slot, number, number);
                 write_field!(slot, info, *info);
@@ -100,6 +163,11 @@ impl Controller {
                 write_field!(slot, caps, caps);
                 write_field!(slot, layout, caps.layout());
                 write_field!(slot, protocols, *protocols);
+                write_field!(
+                    slot,
+                    devices,
+                    SpinLock::new(devices, lock_class!("Xhci.devices", LOCK_LEVEL_RESOURCE))
+                );
                 write_field!(slot, ports, ports);
                 write_field!(
                     slot,
@@ -110,11 +178,13 @@ impl Controller {
                 write_field!(slot, failure, AtomicU8::new(Health::Running as u8));
                 write_field!(slot, ring_full, AtomicBool::new(false));
                 write_field!(slot, interrupts, AtomicU32::new(0));
+                write_field!(slot, work, AtomicU64::new(0));
                 write_field!(
                     slot,
                     service,
-                    Mutex::new((), lock_class!("Xhci.service", LOCK_LEVEL_RESOURCE))
+                    Mutex::new(service, lock_class!("Xhci.service", LOCK_LEVEL_RESOURCE))
                 );
+                write_field!(slot, settled_at, AtomicU64::new(u64::MAX));
                 write_field!(slot, irq, OnceLock::new());
                 Ok(slot.finish())
             },
@@ -142,7 +212,7 @@ impl Controller {
         write_field!(
             slot,
             setup,
-            Setup {
+            seq::Setup {
                 slots: caps.max_slots,
                 dcbaa: dcbaa.phys(),
                 crcr: commands.crcr(),
@@ -150,9 +220,13 @@ impl Controller {
                 event_ring: events.dequeue_pointer(),
             }
         );
-        tables.push(dcbaa)?;
         tables.push(segment_table)?;
         write_field!(slot, _tables, tables);
+        write_field!(
+            slot,
+            dcbaa,
+            SpinLock::new(dcbaa, lock_class!("Xhci.dcbaa", LOCK_LEVEL_RESOURCE))
+        );
         write_field!(
             slot,
             events,
@@ -198,7 +272,7 @@ impl Controller {
         self.irq.call_once(|| kind);
     }
 
-    fn bus(&self) -> Bus<'_> {
+    pub(super) fn bus(&self) -> Bus<'_> {
         Bus {
             regs: &self.regs,
             info: &self.info,
@@ -209,16 +283,18 @@ impl Controller {
         self.number
     }
 
-    #[cfg(feature = "test-hooks")]
     pub fn ids(&self) -> (u16, u16) {
         (self.info.vendor_id, self.info.device_id)
+    }
+
+    pub fn bdf(&self) -> (u8, u8, u8) {
+        (self.info.bus, self.info.device, self.info.function)
     }
 
     pub fn interrupt(&self) -> &'static str {
         self.irq.get().copied().unwrap_or("no interrupt")
     }
 
-    #[cfg(feature = "test-hooks")]
     pub fn max_ports(&self) -> u8 {
         self.caps.max_ports
     }
@@ -227,11 +303,27 @@ impl Controller {
         self.state.load(Ordering::Acquire) == RUNNING
     }
 
-    fn port(&self, port: u8) -> Option<&Port> {
+    pub fn state_name(&self) -> &'static str {
+        match self.state.load(Ordering::Acquire) {
+            STARTING => "starting",
+            RUNNING => "running",
+            DEAD => "dead",
+            _ => "stopped",
+        }
+    }
+
+    pub(super) fn protocols(&self) -> &Protocols {
+        &self.protocols
+    }
+
+    pub(super) fn contexts(&self) -> ContextLayout {
+        ContextLayout::new(self.caps.context_64)
+    }
+
+    fn port(&self, port: u8) -> Option<&RootPort> {
         self.ports.get(usize::from(port).checked_sub(1)?)
     }
 
-    #[cfg(feature = "test-hooks")]
     pub fn port_connected(&self, port: u8) -> bool {
         self.port(port)
             .is_some_and(|p| p.connected.load(Ordering::Acquire))
@@ -262,15 +354,19 @@ impl Controller {
         self.interrupts.load(Ordering::Relaxed)
     }
 
-    /// Hand every event the ring holds to whoever waits on it; whether any
-    /// work is left for the thread. Bounded and allocation-free, as it runs
-    /// in the interrupt handler.
+    /// Whether work is left for the thread. Bounded and allocation-free, as
+    /// the interrupt handler runs it; waiting drivers are woken once the event
+    /// lock is released.
+    pub(super) fn note_work(&self) {
+        self.work.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub(super) fn drain(&self) -> bool {
         if !self.is_running() {
             return false;
         }
         let mut bus = self.bus();
-        let mut work = false;
+        let mut took = Took::default();
         let drained = {
             let mut events = self.events.lock();
             if !self.is_running() {
@@ -282,19 +378,26 @@ impl Controller {
                 &mut events,
                 seq::DRAIN_BUDGET,
                 |event| {
-                    work |= self.take_event(event);
+                    let one = self.take_event(event);
+                    took.work |= one.work;
+                    took.transfer |= one.transfer;
                 },
             )
         };
         if drained.health != Health::Running {
             self.failure.store(drained.health as u8, Ordering::Release);
-            work = true;
+            took.work = true;
         }
-        work
+        if took.work {
+            self.note_work();
+        }
+        if took.transfer {
+            crate::usb::TRANSFERS.wake_all();
+        }
+        took.work
     }
 
-    /// Record one event; whether it left the thread something to do.
-    fn take_event(&self, event: Event) -> bool {
+    fn take_event(&self, event: Event) -> Took {
         match event {
             Event::CommandCompletion {
                 trb,
@@ -308,24 +411,71 @@ impl Controller {
                     slot,
                 };
                 self.commands.lock().complete(trb, completion);
-                false
+                Took {
+                    work: true,
+                    transfer: false,
+                }
+            }
+            Event::Transfer {
+                trb,
+                residual,
+                code,
+                dci,
+                slot,
+                ..
+            } => {
+                let devices = self.devices.lock();
+                let (finished, work) = devices
+                    .get(usize::from(slot))
+                    .and_then(Option::as_ref)
+                    .map_or((false, false), |d| d.complete(dci, trb, code, residual));
+                Took {
+                    work,
+                    transfer: finished,
+                }
             }
             Event::PortStatusChange { port } if (1..=self.caps.max_ports).contains(&port) => {
                 self.flag_port(port);
-                true
+                Took {
+                    work: true,
+                    transfer: false,
+                }
             }
             Event::HostController {
                 code: CompletionCode::EVENT_RING_FULL,
             } => {
                 self.ring_full.store(true, Ordering::Release);
-                true
+                Took {
+                    work: true,
+                    transfer: false,
+                }
             }
-            _ => false,
+            _ => Took::default(),
         }
     }
 
     fn flag_port(&self, port: u8) {
         self.port_changes[usize::from(port / 64)].fetch_or(1 << (port % 64), Ordering::AcqRel);
+    }
+
+    /// The lowest root port an event named, then forgotten.
+    pub(super) fn take_port_change(&self) -> Option<u8> {
+        for (word, changes) in self.port_changes.iter().enumerate() {
+            let mut pending = changes.load(Ordering::Acquire);
+            while pending != 0 {
+                let bit = pending.trailing_zeros();
+                match changes.compare_exchange(
+                    pending,
+                    pending & !(1 << bit),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Some((word as u32 * 64 + bit) as u8),
+                    Err(seen) => pending = seen,
+                }
+            }
+        }
+        None
     }
 
     pub(super) fn submit(&self, trb: Trb) -> Result<Ticket, SubmitError> {
@@ -342,9 +492,68 @@ impl Controller {
         self.commands.lock().abandon(ticket);
     }
 
-    /// A killed task still gets the lock: nothing under it sleeps, so its
-    /// acquire spins.
-    fn service_lock(&self) -> MutexGuard<'_, ()> {
+    pub(super) fn device(&self, slot: u8) -> Option<KArc<Device>> {
+        self.devices
+            .lock()
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .map(KArc::clone)
+    }
+
+    /// None if the list cannot be allocated.
+    pub fn devices(&self) -> KVec<KArc<Device>> {
+        let Ok(mut out) = KVec::with_capacity(usize::from(self.caps.max_slots) + 1) else {
+            return KVec::new();
+        };
+        for device in self.devices.lock().iter().flatten() {
+            if out.push(KArc::clone(device)).is_err() {
+                break;
+            }
+        }
+        out
+    }
+
+    pub(super) fn create_device(&self, slot: u8, serial: u64) -> bool {
+        let Ok(device) = Device::new(
+            self.number,
+            slot,
+            serial,
+            self.regs.clone(),
+            self.layout.doorbell(slot),
+            self.contexts(),
+        ) else {
+            return false;
+        };
+        let output = device.output_phys();
+        match self.devices.lock().get_mut(usize::from(slot)) {
+            Some(entry) => *entry = Some(device),
+            None => return false,
+        }
+        set_device_context(&mut *self.dcbaa.lock(), slot, output);
+        true
+    }
+
+    /// The DCBAA entry is cleared first, then the drivers' claims go.
+    pub(super) fn destroy_device(&self, slot: u8) {
+        set_device_context(&mut *self.dcbaa.lock(), slot, 0);
+        let device = self
+            .devices
+            .lock()
+            .get_mut(usize::from(slot))
+            .and_then(Option::take);
+        if let Some(device) = device {
+            crate::usb::bus::release_claims(&device);
+        }
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn slots_in_use(&self) -> usize {
+        self.devices.lock().iter().flatten().count()
+    }
+
+    /// A killed task spins for it: the shutdown hook must have it, and the USB
+    /// thread holds it only for a pass.
+    pub(super) fn service_lock(&self) -> MutexGuard<'_, Service> {
         match self.service.lock() {
             Ok(guard) => guard,
             Err(_) => loop {
@@ -356,26 +565,21 @@ impl Controller {
         }
     }
 
-    /// The USB thread's turn: notice a death, drain what a lost interrupt
-    /// left in the ring, and look again at every root port an event named.
-    pub(super) fn serve(&self) {
-        let _service = self.service_lock();
-        if !self.is_running() {
-            return;
-        }
-        self.drain();
-        let health = Health::from_u8(self.failure.swap(Health::Running as u8, Ordering::AcqRel));
-        if health != Health::Running {
-            self.die(health);
-            return;
-        }
-        for (word, changes) in self.port_changes.iter().enumerate() {
-            let mut pending = changes.swap(0, Ordering::AcqRel);
-            while pending != 0 {
-                let bit = pending.trailing_zeros();
-                pending &= pending - 1;
-                self.check_port((word as u32 * 64 + bit) as u8);
+    /// Notices a death, drains what a lost interrupt left and steps the tree;
+    /// returns when it next needs a pass.
+    pub(super) fn serve(&self) -> Option<u64> {
+        let mut service = self.service_lock();
+        match self.state.load(Ordering::Acquire) {
+            RUNNING => {
+                self.drain();
+                let health =
+                    Health::from_u8(self.failure.swap(Health::Running as u8, Ordering::AcqRel));
+                if health != Health::Running {
+                    self.die(health, &mut service);
+                }
             }
+            DEAD => {}
+            _ => return None,
         }
         if self.ring_full.swap(false, Ordering::AcqRel) {
             klog_info!(
@@ -383,6 +587,37 @@ impl Controller {
                 self.number
             );
         }
+        if !crate::usb::enumerating() {
+            for _ in 0..self.caps.max_ports {
+                let Some(port) = self.take_port_change() else {
+                    break;
+                };
+                self.read_port(port);
+            }
+            return None;
+        }
+        let seen = self.work.load(Ordering::Acquire);
+        let mut host = ControllerHost::new(self);
+        let mut tree = service.tree();
+        let next = tree.step(&mut host);
+        let settled = tree.settled(&mut host) || (self.state() == DEAD && tree.is_empty());
+        self.settled_at
+            .store(if settled { seen } else { u64::MAX }, Ordering::Release);
+        next
+    }
+
+    fn state(&self) -> u8 {
+        self.state.load(Ordering::Acquire)
+    }
+
+    /// And no port change waits for the thread; a stopped controller has.
+    pub fn is_settled(&self) -> bool {
+        let quiet = self
+            .port_changes
+            .iter()
+            .all(|changes| changes.load(Ordering::Acquire) == 0);
+        let settled = self.settled_at.load(Ordering::Acquire) == self.work.load(Ordering::Acquire);
+        self.state() == STOPPED || (quiet && settled)
     }
 
     /// Power every root port the controller switches and look at each once,
@@ -394,17 +629,14 @@ impl Controller {
             seq::power_port(&mut bus, &self.layout, port);
         }
         for port in 1..=self.caps.max_ports {
-            self.check_port(port);
+            self.read_port(port);
         }
     }
 
-    fn check_port(&self, port: u8) {
-        let Some(state) = self.port(port) else {
-            return;
-        };
-        let Some(read) = seq::acknowledge_port(&mut self.bus(), &self.layout, port) else {
-            return;
-        };
+    /// Logs what arrived and left.
+    pub(super) fn read_port(&self, port: u8) -> Option<PortStatus> {
+        let state = self.port(port)?;
+        let read = seq::acknowledge_port(&mut self.bus(), &self.layout, port)?;
         if read.unsettled {
             self.flag_port(port);
         }
@@ -427,6 +659,19 @@ impl Controller {
                 "back under"
             };
             klog_info!("USB: {}-{} {} current", self.number, port, over);
+        }
+        let speed = self
+            .protocols
+            .speed(port, status.speed())
+            .map(|s| Speed::from_bits_per_second(s.bits_per_second));
+        Some(status.status(speed))
+    }
+
+    pub(super) fn write_port(&self, port: u8, write: impl FnOnce(PortSc) -> u32) {
+        let at = self.layout.port(port);
+        let portsc = PortSc(self.regs.read::<u32>(at));
+        if portsc.0 != u32::MAX {
+            self.regs.write::<u32>(at, write(portsc));
         }
     }
 
@@ -486,11 +731,19 @@ impl Controller {
         true
     }
 
-    /// Halt a dead controller, or find it halted, and take it off the bus.
-    /// It is not reset, and not probed again this boot.
-    fn die(&self, health: Health) {
+    /// Every device goes, with no command issued.
+    fn die(&self, health: Health, service: &mut Service) {
+        if self.kill(cause(health)) {
+            service.tree().die(&mut ControllerHost::new(self));
+            crate::usb::TRANSFERS.wake_all();
+        }
+    }
+
+    /// Halts the controller, takes it off the bus and fails its commands;
+    /// whether it was running. It is not reset or probed again.
+    pub(super) fn kill(&self, cause: &str) -> bool {
         if !self.leave(Some(RUNNING), DEAD) {
-            return;
+            return false;
         }
         let halted = seq::quiesce(&mut self.bus(), &self.layout);
         self.commands.lock().fail_all();
@@ -502,9 +755,10 @@ impl Controller {
         klog_info!(
             "USB: xhci {} died: {}; {}, bus mastering off",
             self.number,
-            cause(health),
+            cause,
             halted
         );
+        true
     }
 
     /// Whether the controller is halted, reset and off the bus, as a

@@ -1284,8 +1284,8 @@ impl ClaimSink for GlobalClaims {
         CLAIMED_BY.lock().is_claimed(dev_idx)
     }
 
-    fn record(&self, dev_idx: usize, name: &'static str, devres: Devres) {
-        CLAIMED_BY.lock().claim(dev_idx, Binding::new(name), devres);
+    fn record(&self, dev_idx: usize, binding: Binding, devres: Devres) {
+        CLAIMED_BY.lock().claim(dev_idx, binding, devres);
     }
 }
 
@@ -1329,7 +1329,7 @@ fn pci_probe_drivers_fallback() {
             match (e.probe)(&mut bound) {
                 Ok(ProbeOutcome::Bound) => {
                     drop(bound);
-                    GlobalClaims.record(dev_idx, e.name, devres);
+                    GlobalClaims.record(dev_idx, Binding::new(e.name), devres);
                     break;
                 }
                 Ok(ProbeOutcome::Declined) => continue,

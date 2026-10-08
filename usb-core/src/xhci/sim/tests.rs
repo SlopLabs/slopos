@@ -934,3 +934,18 @@ fn events_of_noise_decode_without_panicking() {
         let _ = Event::decode(trb);
     }
 }
+
+#[test]
+fn two_resets_with_no_address_between_put_two_devices_in_the_default_state() {
+    let mut sim = SimController::new(Config::qemu());
+    let b = bring_up(&mut sim).expect("bring-up");
+    sim.attach(3, 3);
+    sim.attach(4, 3);
+    for port in [3, 4] {
+        let portsc = PortSc(sim.read32(b.layout.port(port)));
+        sim.write32(b.layout.port(port), portsc.reset());
+    }
+    assert_eq!(sim.violations, ["two devices in the default state at once"]);
+    assert_eq!(sim.port_resets, 2);
+    assert!(PortSc(sim.portsc(3)).enabled() && PortSc(sim.portsc(4)).enabled());
+}

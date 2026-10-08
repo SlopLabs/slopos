@@ -7,10 +7,11 @@ pub mod ext_cap;
 pub mod memory;
 pub mod regs;
 pub mod ring;
+pub mod transfer;
 pub mod trb;
 
 #[cfg(test)]
-mod sim;
+pub(crate) mod sim;
 
 pub use bus::{Error, RegisterBus, Wait};
 pub use controller::{Drained, Handoff, Health, Setup};
@@ -18,4 +19,5 @@ pub use ext_cap::{Found, Protocol, Protocols, Speed};
 pub use memory::DmaPage;
 pub use regs::{Capabilities, Decline, Layout, Malformed, PortSc};
 pub use ring::{CommandRing, EventRing, ProducerRing};
+pub use transfer::{TransferError, TransferResult, TransferRing};
 pub use trb::{CompletionCode, Event, Trb};

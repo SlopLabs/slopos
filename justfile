@@ -904,15 +904,18 @@ test-rude-exit: _build-run-tests
     scripts/check_fs_replay.sh "{{fs_image_tests}}" /rude-exit {{build_dir}}/rude-exit.payload
 
 # The ISO names the explicit tests, which run only when named since the host
-# must pull and plug sticks for them.
-[doc("USB check: both QEMU xHCI models, qemu-xhci on MSI-X and nec-usb-xhci on MSI, with a stick on each connector; the host pulls and plugs every stick through QMP, and the guest must see each root port detach and attach again and reset each controller")]
+# must pull and plug devices for them.
+[doc("USB check: both QEMU xHCI models, qemu-xhci on MSI-X and nec-usb-xhci on MSI, each with a stick at every speed, QEMU's hub with two devices behind it and a full-speed keyboard; the guest must enumerate every device and bind every stick, and through two rounds of QMP pulls and plugs give back every slot, page and claim, then reset each controller")]
 test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     #!/usr/bin/env bash
     set -euo pipefail
     tests=slopos_drivers::tests::usb_tests::test_usb_1_controllers_run
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_2_pulled_ports_detach
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_3_plugged_ports_attach
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_4_shutdown_resets
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_2_every_device_enumerates
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_3_pulled_devices_leave
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_4_plugged_devices_return
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_5_pulled_again
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_6_plugged_again
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_7_shutdown_resets
     KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \

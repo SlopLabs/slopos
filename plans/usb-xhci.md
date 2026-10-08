@@ -16,10 +16,13 @@ system runs. QEMU's controllers come first, then the laptop's two
 
 ## Where it stands
 
-Phase 1 has landed: the kernel takes every xHCI controller it can drive from
-the firmware, runs it, logs each root port's attach and detach, and resets it
-at poweroff, but it enumerates nothing. A stick in a port is a connect status;
-the firmware reads a stick and the kernel does not. `just test-installer`
+Phases 1 and 2 have landed. The kernel takes every xHCI controller it can
+drive from the firmware and runs it. It enumerates every device on its root
+ports and behind its hubs, offers each function to the drivers `usb_driver!`
+registers, and removes a device cleanly when it leaves. It resets each
+controller at poweroff. No class driver exists yet, so a stick, a keyboard or
+an adapter is listed and left unbound; the firmware reads a stick and the
+kernel does not. `just test-installer`
 attaches the ISO as QEMU's `usb-storage` device on `qemu-xhci`
 (`INSTALL_STICK` in `scripts/qemu_run.sh`) for the firmware alone. The install
 medium reaches the kernel only as the Limine module `install`, payload
@@ -28,17 +31,16 @@ included. Limine loads it into RAM, and `fs/src/basefs.rs` serves it at
 
 The pieces USB plugs into exist. These are their gaps:
 
-- **Binding.** `driver_core::bus` drives two buses, PCI and platform,
-  through one `Bus` trait and `probe_bus`. Nothing is ever unbound: a
-  device claim (a `ClaimTable` slot) is never released, and a `Binding` is
-  only a name. `ClaimSlot` already drops the binding before the resource
-  bag, so a future unbind can quiesce the driver before its resources go.
+- **Binding.** `driver_core::bus` drives three buses, PCI, platform and
+  USB, through one `Bus` trait. A USB function is unbound when its device
+  leaves, through `ClaimTable::release`; PCI and platform devices never
+  are.
 - **Interrupts and threads.** PCI device interrupts are MSI-X or MSI, never
   INTx. The i8042 and the touchpad's GPIO cascade are IOAPIC lines. All of
   them target the BSP. Deferred work runs on a `spawn_kernel_io!` thread,
   and each such thread takes a slot in a fixed registry of
   `MAX_KERNEL_IO_STOPS` (eight) that netpoll, net-timer, the ext2 flusher,
-  the efivar thread, the touchpad and the USB thread already draw on.
+  the efivar thread, the touchpad and the two USB threads already draw on.
 - **Device memory.** Every DMA ring in the tree is a single zeroed 4 KiB
   `OwnedPageFrame` with volatile accessors. A multi-page `DmaCoherent` run
   has no volatile accessors. The frame allocator's one placement
@@ -68,10 +70,10 @@ The pieces USB plugs into exist. These are their gaps:
 - **Network.** A NIC is a `NetDevice` handed to `nic::publish`.
   `nic::retire` tears one down, and a test grades it, but it exists only
   under `test-hooks`. Both NIC drivers are singletons.
-- **Tests.** `just test` attaches no USB controller. `just test-usb` plugs
-  and pulls sticks through QMP, but no graded boot drives a USB device past
-  its connect status, and nothing injects input into one. `utest!` has no
-  form that only a named run executes. CI's QEMU is the runner
+- **Tests.** `just test` attaches no USB controller. `just test-usb`
+  enumerates sticks, a hub and HID devices and plugs and pulls them through
+  QMP, but nothing injects input into a device. `utest!` has no form that
+  only a named run executes. CI's QEMU is the runner
   distribution's, so a USB test uses only devices and QMP commands that
   version carries.
 
@@ -93,7 +95,7 @@ untrusted input, and each rewrites the `AGENTS.md` and
 | Phase | Needs | Ends with |
 |---|---|---|
 | 1. The host controller (done) | — | both QEMU xHCI models running, every root port's attach and detach logged, the controller reset at poweroff |
-| 2. Enumeration and the device model | 1 | every device QEMU attaches, a hub's included, enumerated, bound or listed, and removed cleanly |
+| 2. Enumeration and the device model (done) | 1 | every device QEMU attaches, a hub's included, enumerated, bound or listed, and removed cleanly |
 | 3. Keyboards and pointers | 2 | a USB keyboard and tablet drive the shell and the desktop beside PS/2 |
 | 4. Mass storage | 2 | an ext4 stick mounted, written, pulled and plugged back; the installer still installs with its stick visible |
 | 5. The install medium on a stick | 4 | **milestone:** the installer takes the toolchain from the stick, not from RAM |
@@ -136,121 +138,56 @@ MSI, logging the PCH's internal devices on ports 2-8, 2-9 and 2-10. A reboot
 from it reached the next kernel in 14.9 s, as reboots from `usb=report`
 boots did (14.7-15.6 s).
 
-### Phase 2: Enumeration and the device model
+### Phase 2: Enumeration and the device model (done)
 
-- **The device part of `usb-core`:**
-  - the standard requests;
-  - the descriptor walker over device, configuration and string
-    descriptors: interfaces, alternate settings, interface associations,
-    endpoints, SuperSpeed companions, and class descriptors handed to their
-    drivers;
-  - the hub descriptor and the hub class requests;
-  - the enumeration and hub-port sequences, written over a controller trait
-    so that the simulated controller and simulated devices drive them under
-    `just test-host`.
-- **Enumeration** is the USB core's work, stepped by the USB thread, with
-  one device in the default state per controller at a time:
-  1. connect debounce, then a port reset on ports whose protocol needs one;
-  2. Enable Slot, then Address Device;
-  3. EP0's packet size, from the port's speed or, at full speed, from the
-     first eight bytes of the device descriptor and an Evaluate Context;
-  4. the device and configuration descriptors;
-  5. the configuration choice (Decided), then Configure Endpoint and
-     `SET_CONFIGURATION`.
+Built:
 
-  Every wait is bounded by the timing the USB 2.0 specification sets
-  (chapters 7 and 9). A port whose device fails enumeration three times is
-  disabled until it is unplugged.
-- **The bind thread**, a second `spawn_kernel_io!` thread, runs what may
-  block: driver probes, driver removals and the table read inside
-  `block::register_disk` (Decided).
-- **Hubs** belong to the USB core:
-  - USB 2 hubs, with their transaction translators named in each child's
-    slot context;
-  - USB 3 hubs, with route strings and `SET_HUB_DEPTH`;
-  - port power, debounce and reset through hub requests, and the hub's
-    status-change endpoint;
-  - the power rule: a bus-powered hub's port offers one unit load, and a
-    configuration that asks for more is not set.
-- **`UsbBus`, the third `Bus`.**
-  - Its device is a `Copy` snapshot of one function: an interface, or the
-    interfaces an association groups. The snapshot carries the controller,
-    port path, VID:PID and class triple.
-  - Its drivers register through `usb_driver!` in a
-    `.usb_driver_registry` linker section.
-  - `BoundDevice<UsbBus>` vends pipes (endpoints with their rings) and
-    control transfers into the device's `Devres`.
-- **Removal.** A disconnect does six things, in order:
-  1. marks the device gone, so every submission answers `NotReady` and no
-     doorbell of its slot rings again;
-  2. stops its endpoints;
-  3. completes every outstanding transfer with a disconnect status that
-     maps to a non-retryable error;
-  4. takes the device's `ClaimSlot` out of the claim table (`ClaimTable`
-     gains a release, which only the USB bus calls) and runs the
-     `Binding`'s removal on the bind thread, with no lock held;
-  5. runs Disable Slot and waits for it to complete;
-  6. clears the slot's DCBAA entry and drops the `ClaimSlot`, the
-     `Binding` first and the `Devres` last, which frees the rings and
-     contexts.
+- **`usb-core`'s device half**: the standard requests, the descriptor
+  walker (functions from interfaces and their associations, alternate
+  settings, endpoints, SuperSpeed companions, class descriptors, strings),
+  the hub descriptors, port status and class requests of both generations,
+  and `usb_core::bus`, the tree: a state machine over a `Host` trait that
+  steps root and hub ports, enumeration, configuration, endpoint recovery
+  and removal on completions and deadlines. Host tests drive it through the
+  simulated controller and simulated devices: high-speed hubs with
+  transaction translators and full-speed hubs behind them, USB 3 hubs,
+  stalls, babble, misstated lengths, ports that flap, disconnects
+  mid-enumeration, the power rule, a controller that dies mid-transfer, and
+  mutation loops over every parser.
+- **Enumeration in `drivers/src/usb`**, stepped by the `usb` thread as
+  **Decided** below states. A device's slot, contexts and rings are pages of
+  its own, and hubs name their transaction translator, route string and
+  depth in their children's contexts. A multi-TT hub is run with one
+  transaction translator.
+- **`UsbBus`**, the third bus: a `UsbFunction` snapshot per function, drivers
+  in `.usb_driver_registry` through `usb_driver!`, and a
+  `BoundDevice<UsbBus>` that vends control requests, page-sized pipes, the
+  configuration's descriptors and a removal. Probes and removals run on the
+  `usb-bind` thread, and removal runs the six steps **Decided** states.
+- **Settle and diagnostics**: `usb::wait_settled`; the `usb settle` boot
+  step, which under `tests=on` waits a minute and fails the run with `USB:
+  unsettled`; a kernel-log line per device and per failure; and the
+  informational kconsole command `u`.
+- **`just test-usb`**: on both models a SuperSpeed and a high-speed stick, a
+  full-speed keyboard, and QEMU's hub with a stick and a tablet behind it.
+  `test-hooks` drivers bind every stick, send TEST UNIT READY over its bulk
+  pipes and recover a stalled bulk-in, and bind the keyboard and tablet to
+  abandon a read of the idle interrupt endpoint and see the endpoint come
+  back. Two rounds of `device_del` and `device_add` leave no slot, page or
+  claim behind, and the host grades the `u` listing. The run left 44 of the
+  64 dynamic MMIO ranges free.
 
-  A controller that dies removes every device on it the same way, issuing
-  no command.
+Left for later phases: `usb.settle_ms` arrives with its first waiter in
+phase 4, enumeration reads no string descriptors, and a halted full- or
+low-speed endpoint behind a high-speed hub sends its transaction translator
+no `CLEAR_TT_BUFFER`, which phase 4's Bulk-Only recovery adds.
 
-  A driver whose objects outlive its binding keeps what they touch outside
-  the `Devres`. A stick's engine lives until the disk's last mount and node
-  are gone, so the transport's completion queue and gone flag are its own,
-  and once the device is gone it touches no ring or context page.
-- **Order and settle.** Enumeration starts only after the `pci` boot step
-  has probed every PCI device.
-  - The bus is *settled* once two things hold. First, every root and hub
-    port of every running controller has been powered for its power-good
-    time plus the 100 ms a device may take to signal attach, and has since
-    shown no connect or link change for one debounce interval. Root ports
-    are powered first where the controller has port power control, and a
-    hub's ports as soon as the hub is configured. Second, every device that
-    connected in that time has reached an end: a hub is configured and its
-    own ports have settled; each function is bound, declined, or matched by
-    no driver; a failing port has been given up; and, from phase 4, every
-    disk a bound driver registers has had its table read.
-  - A boot step waits for settle up to `usb.settle_ms` (default 5000),
-    counted from the start of its own wait. Boot steps run on the BSP with
-    no current task, so the wait polls while the USB threads run on the
-    APs. On a machine with one CPU those threads cannot run before the BSP
-    enters the scheduler, so the wait is skipped and the kernel log says
-    so.
-  - Under `tests=on`, a `drivers` step ahead of the boot lockdep report
-    waits for settle for up to a minute, so that the report, whose class
-    counts are exact caps, and the kernel tests see the same bus on every
-    run. A bus still unsettled then, or a one-CPU run with a controller,
-    prints `USB: unsettled` and fails the run, so a run never grades a
-    different bus silently.
-- **Diagnostics.** Each device gets one kernel-log line when it is
-  enumerated, such as `USB: 1-3.2 046d:c52b 3 functions, bound usb-hid`
-  (controller 1, root port 3, hub port 2; `usb-hid` is phase 3's driver).
-  An informational kconsole command lists controllers, ports, devices,
-  bound drivers and each endpoint's queue, so `just remote run -- kconsole
-  <key>` reads a machine nobody is sitting at.
-
-**Done when** `just test-usb` passes all of these:
-
-- it enumerates a full-speed, a high-speed and a SuperSpeed device on root
-  ports, and two devices behind QEMU's hub;
-- a driver registered under `test-hooks` binds and unbinds;
-- every device survives repeated `device_del` and `device_add` with no
-  leaked slot, ring or device claim.
-
-The host tests must also enumerate through simulated high-speed hubs with
-transaction translators, through USB 3 hubs, against devices that stall,
-babble, misstate lengths or disconnect mid-enumeration, and through a
-controller that dies mid-transfer.
-
-**On the laptop,** every device on both controllers is listed, including a
-low-speed device, devices behind a high-speed hub reached through its
-transaction translator, and devices behind a USB 3 hub. Internal devices
-such as Bluetooth are listed unbound. A SuperSpeed stick in a Type-C port
-is measured: it may reach the TCSS controller, reach the PCH controller at
-USB 2 speed, or reach neither.
+**On the laptop (not yet run),** every device on both controllers is listed,
+including a low-speed device, devices behind a high-speed hub reached
+through its transaction translator, and devices behind a USB 3 hub. Internal
+devices such as Bluetooth are listed unbound. A SuperSpeed stick in a
+Type-C port is measured: it may reach the TCSS controller, reach the PCH
+controller at USB 2 speed, or reach neither.
 
 ### Phase 3: Keyboards and pointers
 
@@ -363,7 +300,9 @@ keyboard and touchpad.
   - A CSW that is not valid, a Phase Error, or a stall of bulk-OUT during
     the CBW hands the device to the USB thread for Reset Recovery: a
     Bulk-Only Mass Storage Reset, then `CLEAR_FEATURE(ENDPOINT_HALT)` on
-    bulk-IN and on bulk-OUT. If that fails, recovery escalates to a port
+    bulk-IN and on bulk-OUT, and `CLEAR_TT_BUFFER` to the transaction
+    translator a full-speed stick behind a high-speed hub is reached through
+    (USB 2.0 §11.24.2.3). If that fails, recovery escalates to a port
     reset and re-enumeration. During recovery the transport keeps the tag,
     queues new commands rather than answering `Busy`, and re-issues the
     CBW once. A recovery that fails completes the tag with a non-retryable
@@ -690,6 +629,26 @@ takes a lease, and git fetches over it.
     the BSP's boot context, which has no current task, so a wait there
     answers `WaitAbort::NoRuntime`. The shutdown hooks run after the kernel
     I/O threads have stopped.
+- **A command that never completes kills the controller.** Commands run in
+  ring order, so one that never completes holds up every command behind
+  it. A working controller completes each in milliseconds, so after five
+  seconds the controller is taken for dead rather than sent a Command Abort:
+  halted, taken off the bus, and every device on it removed without a
+  command.
+- **A halt is cleared on both sides.** An endpoint a transfer halted takes
+  Reset Endpoint, which resets the controller's data toggle. A bulk or
+  interrupt endpoint is halted on the device too, and takes
+  `CLEAR_FEATURE(ENDPOINT_HALT)`, which resets the device's toggle, once EP0
+  can carry it. Only then does Set TR Dequeue Pointer move its ring past
+  what the halt left, and the ring run again. An endpoint that was only
+  stopped keeps both toggles. EP0 is recovered before anything else. Each
+  endpoint counts its own failed steps since it last ran. Three leave it
+  halted without holding up EP0 or any other endpoint. Three on EP0 remove
+  the device, and its port tries it again.
+- **An abandoned transfer stops its endpoint.** A transfer whose waiter
+  gave up may still be on the controller's ring, so its endpoint takes no
+  transfer until the USB thread has stopped it and moved its dequeue pointer
+  past what was abandoned, and nothing reuses a buffer under the controller.
 - **A controller proves its rings before it is used.** Once it runs, probe
   sends a No Op command and gives its interrupt 200 ms to deliver the
   completion, then polls for 500 ms more. One that answers only when polled
@@ -704,10 +663,29 @@ takes a lease, and git fetches over it.
   one naming none is logged and ignored.
 - **Names.** Controllers are numbered from 1 in probe order and a root
   port is `<controller>-<port>`, a hub port appending `.<port>`, as the
-  kernel log and the kconsole listing name them.
+  kernel log and the kconsole listing name them. Each device gets one
+  kernel-log line once enumerated, such as `USB: 1-3.2 046d:c52b 3
+  functions, bound usb-hid`. The kconsole command `u` lists controllers,
+  ports, devices, bound drivers and each endpoint's queue, so `just remote
+  run -- kconsole u` reads a machine nobody is sitting at.
+- **Enumeration is the USB core's, one device at a time.** Each controller
+  has at most one device in the default state. A port is debounced, reset
+  where its protocol needs it, given a slot and an address, and EP0 is
+  sized from the port's speed or, at full speed, from the device
+  descriptor's first eight bytes and an Evaluate Context. The device's
+  descriptors are then read and a configuration set. Every wait is bounded
+  by USB 2.0's chapter 7 and 9 timings. A port whose device fails three
+  times is disabled until it is unplugged.
 - **Hubs belong to the USB core.** A hub's slot must be marked as a hub
   before any child of it is addressed, and its children are the USB core's
-  enumeration work. A hub is therefore never offered to `UsbBus`.
+  enumeration work. A hub is therefore never offered to `UsbBus`. It is
+  configured before it is asked anything as a hub, since a hub's answer to
+  a class request is undefined until then, and a second Configure Endpoint
+  then marks its slot a hub. A bus-powered hub's port offers one unit load,
+  and a configuration that asks for more is not set. A hub that fails eight
+  requests between two port statuses, or any of whose endpoints stays
+  halted, is removed, and its port tries it again as it would any device
+  that failed.
 - **`UsbBus` is a third linker-registered bus.** It shares the binding
   protocol, the claim table and the `Devres` bag with PCI and platform, so
   a class driver added later touches no central list. The cost is a
@@ -727,6 +705,25 @@ takes a lease, and git fetches over it.
   devices are still never unbound. A removed device's transfers complete at
   once with a non-retryable status, so an engine never waits out a timeout
   on a device that is gone.
+- **Removal is six steps, in order.**
+  1. The device is marked gone, so every submission answers at once and no
+     doorbell of its slot rings again.
+  2. Its endpoints are stopped.
+  3. Every outstanding transfer completes with a disconnect status that
+     maps to a non-retryable error.
+  4. Its claims leave the claim table and each `Binding`'s removal runs on
+     the bind thread, with no lock held.
+  5. Disable Slot runs and is waited for; one that never completes kills
+     the controller.
+  6. The slot's DCBAA entry is cleared and the claim dropped, the `Binding`
+     first and the `Devres` last, which frees the rings and contexts.
+
+  A controller that dies removes every device on it the same way, issuing
+  no command. A driver whose objects outlive its binding keeps what they
+  touch outside the `Devres`: a stick's engine lives until the disk's last
+  mount and node are gone, so the transport's completion queue and gone
+  flag are its own, and once the device is gone it touches no ring or
+  context page.
 - **USB enumerates after PCI, and it settles.** `disk0`, `eth0` and which
   disk a PARTUUID or UUID two disks share resolves to are all decided by
   registration order, and a stick written from a SlopOS disk image carries
@@ -738,6 +735,23 @@ takes a lease, and git fetches over it.
   `root=`, `cmdline mounts` and the install-medium step wait for USB to
   settle only when the device they name is absent; under `tests=on` the
   kernel tests wait too. No other boot step waits for USB.
+  - The bus is *settled* once every root and hub port has been powered for
+    its power-good time plus the 100 ms a device may take to signal attach
+    and has since been quiet for a debounce interval, and every device that
+    connected has reached an end: a hub configured with its own ports
+    settled, each function bound, declined or matched by no driver, a
+    failing port given up and, from phase 4, every disk a bound driver
+    registers with its table read.
+  - A boot step waits up to `usb.settle_ms` (default 5000), counted from
+    the start of its own wait. Boot steps run on the BSP with no current
+    task, so the wait polls while the USB threads run on the APs. With one
+    CPU those threads cannot run before the BSP enters the scheduler, so
+    the wait is skipped and the kernel log says so.
+  - Under `tests=on`, the `usb settle` step ahead of the boot lockdep
+    report waits up to a minute, so the report's exact class caps and the
+    kernel tests see the same bus on every run. A bus still unsettled then,
+    or a one-CPU run with a controller, prints `USB: unsettled` and fails
+    the run.
 - **`root=auto` and `root=disk` never take a USB disk.** Each means the
   machine's own disk, and a stick left in a port must not change what
   boots. A root on USB is named with `root=PARTUUID=` and waited for.

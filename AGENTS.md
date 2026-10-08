@@ -696,8 +696,8 @@ virtio-blk the verified image (`vda`) and a scratch (`vdb`), so both drivers
 stay graded; the capacity volume is `nvme0n3`, and the boot disk is the last
 controller's.
 
-**USB is xHCI, and Phase 1 of `plans/usb-xhci.md` stops at the root
-ports.** `drivers/src/usb` binds every PCI xHCI controller (class `0x0C`,
+**USB is xHCI, and `plans/usb-xhci.md` has reached the device model.**
+`drivers/src/usb` binds every PCI xHCI controller (class `0x0C`,
 subclass `0x03`, prog-if `0x30`) that offers MSI-X or MSI and has 64-bit
 addressing, 4 KiB pages and at most 512 scratchpad buffers, up to eight; any
 other is declined with its command register as found and stays the
@@ -712,16 +712,38 @@ rings with a No Op command, served by polling, and said so, if it never
 interrupts; a failure past the handoff takes it off the bus and resets it, or
 logs that it would not reset. `usb-core` is xHCI as data and as a register sequence — registers,
 extended capabilities, TRBs, contexts in both sizes, ring bookkeeping and the
-sequences over a `RegisterBus` — host-tested under `just test-host` against a
-simulated controller, since QEMU's reports 32-byte contexts, no scratchpads and
-no legacy support. The interrupt handler drains the event ring; one kernel
-thread, `usb`, serves every controller when woken and once a second: it
+sequences over a `RegisterBus` — and the device half: the standard requests,
+descriptors, hub descriptors and class requests, and `usb_core::bus`, the tree
+of ports, hubs and devices as a state machine over a `Host` trait, all
+host-tested under `just test-host` against a simulated controller with
+simulated devices and hubs, since QEMU's reports 32-byte contexts, no
+scratchpads and no legacy support, and its only hub is full-speed. The
+interrupt handler drains the event ring; the `usb` thread serves every
+controller when woken, at its tree's next deadline and once a second: it
 drains the ring itself, halts and takes off the bus one that died (Host System
-Error, Host Controller Error, registers all ones), and looks again at each root
-port an event named, logging `USB: <controller>-<port> attached` or
-`detached`, controllers numbered from 1 in probe order. A shutdown hook resets
-each controller at poweroff and reboot. Nothing is enumerated yet: a stick in a
-port is a connect status and no more.
+Error, Host Controller Error, registers all ones), and steps the tree — once
+the `pci` step has probed every PCI device (`usb::start`) — one device in the
+default state per controller: debounce, reset, Address Device, EP0's packet
+size, the descriptors and a configuration, a hub's ports through hub requests
+with its transaction translator, route string and depth named in its
+children's contexts, and a port disabled until unplugged after three
+failures. It logs each attach, detach, enumerated device (`USB: 1-4.1
+46f4:0001 1 function, bound usb-test`), failure and removal, controllers
+numbered from 1 in probe order and a hub port appended with a dot. Every
+function of a configured device that is not a hub is offered to `UsbBus`, the
+third bus, whose drivers register with `usb_driver!` in
+`.usb_driver_registry`; probes and removals run on a second thread,
+`usb-bind`, and a `BoundDevice<UsbBus>` vends control requests and page-sized
+pipes. A device that leaves is marked gone, its endpoints stopped, its
+transfers failed, its claims taken out of the `ClaimTable` (`release`, which
+only USB calls) and their removals run, then its slot disabled and its pages
+freed; a controller that dies, or leaves a command uncompleted for five
+seconds, does the same without commands. Under `tests=on`
+the `usb settle` boot step waits up to a minute for every port to be quiet and
+every device to reach an end, and fails the run with `USB: unsettled`. The
+kconsole command `u` lists controllers, ports, devices, drivers and endpoint
+queues. A shutdown hook resets each controller at poweroff and reboot. No class
+driver exists yet: a stick is listed, not read.
 
 **Every NIC goes through `nic::publish`.** The stack owns the netpoll and
 net-timer kernel threads, which `nic::init` starts at boot before PCI probe. A
@@ -1280,7 +1302,7 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn` and to being at rest: `Filesystem state: clean`, no `needs_recovery`, an empty journal. Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
 - `just test-rude-exit` — one boot that fsyncs a file into the root's journal and ends the machine holding it, then `scripts/check_fs_replay.sh`: the image must need recovery, the file must be reachable only through the journal, and after `e2fsck -E journal_only` the image must pass `e2fsck -fn`, be at rest and hold the file. In CI after `test-persist`. The kernel test runs only when `tests.run` names it exactly (`FLAG_EXPLICIT`), since it ends the machine.
-- `just test-usb` — the USB check: a boot from the tests base, with no root disk and none of the suite's (`root=initramfs`, `QEMU_NO_ROOT_DISK=1`, `QEMU_TEST_DISKS=0`, so no image is built for it), carrying both of QEMU's xHCI models, `qemu-xhci` on MSI-X and `nec-usb-xhci` with `msix=off` on MSI, each with two USB 3 and four USB 2 root ports and a stick on each of its four connectors, two at SuperSpeed and two at high speed. `qemu_run.sh` opens a QMP socket when `QEMU_QMP` names one, and `scripts/test_usb.py` drives the boot: at the guest's `USB-TEST: pull` and `USB-TEST: plug` it deletes and re-adds every stick through `device_del` and `device_add`, each stick a `-blockdev` node so it survives its device. The guest half is kernel tests registered `FLAG_EXPLICIT | FLAG_UNCAPTURED`, which the recipe names in `tests.run`; they hold both controllers running, every stick's port to a detach and a second attach, each controller to interrupting for its pulls and its plugs, the dynamic MMIO registry to eight free ranges, and each shutdown hook to leaving its controller halted, reset (DCBAAP cleared) and off the bus. The host holds the log to the same, to neither controller answering its first command only when polled, and the suite to green. In CI after `test-rude-exit`.
+- `just test-usb` — the USB check: a boot from the tests base, with no root disk and none of the suite's (`root=initramfs`, `QEMU_NO_ROOT_DISK=1`, `QEMU_TEST_DISKS=0`, so no image is built for it), carrying both of QEMU's xHCI models, `qemu-xhci` on MSI-X and `nec-usb-xhci` with `msix=off` on MSI, each with two USB 3 and four USB 2 root ports: a SuperSpeed stick, QEMU's full-speed hub with a stick and a tablet behind it, a high-speed stick and a full-speed keyboard. `qemu_run.sh` opens a QMP socket when `QEMU_QMP` names one, and `scripts/test_usb.py` drives the boot: at the guest's `USB-TEST: pull` and `USB-TEST: plug`, twice each, it deletes and re-adds every device through `device_del` and `device_add`, each stick a `-blockdev` node so it survives its device. The guest half is kernel tests registered `FLAG_EXPLICIT | FLAG_UNCAPTURED`, which the recipe names in `tests.run`; they hold both controllers running, every device enumerated, each stick bound by the `test-hooks` driver `usb-test`, which sends TEST UNIT READY over its bulk pipes, stalls its bulk-in with a stray read and sends TEST UNIT READY again once the endpoint has recovered and the stick's halt is cleared, the keyboard and tablet bound by `usb-test-hid`, which abandons a read of its idle interrupt endpoint and waits for the endpoint to come back idle, every device to leaving and returning with no slot, claim or page left behind, each controller to interrupting for its pulls and its plugs, the dynamic MMIO registry to eight free ranges, the kconsole listing to running, and each shutdown hook to leaving its controller halted, reset (DCBAAP cleared) and off the bus. The host holds the log to the same, to every device enumerated and removed each round, to the listing's lines, to no enumeration failing, to neither controller answering its first command only when polled, and the suite to green. In CI after `test-rude-exit`.
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext4 volume, attach it as `nvme0n3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
 - `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 6G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
 - `just test-install` — the install check: boot from `builddir/boot-disk.img`, one disk in the bare-metal layout (an ESP holding Limine and `limine.conf` under `\EFI\SlopOS\` and at the removable-media path, the boot partition with a kernel and base per slot under `/boot/<slot>/`, the tests image as the root partition every slot boots with as `root=PARTUUID=`, and the crash partition), and across the resets of one QEMU let `install_test` register SlopOS's firmware entry first in `BootOrder`, clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot` and through that entry, commit it as `LoaderEntryDefault`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default, through the entry again, and find the panic's record moved from the crash partition to `/var/log/crash/` and reported by `bootctl status` as that slot's last boot; then the same for a slot that takes the format-free abort. The host then holds the ESP to the bytes it built, so no commit touched `limine.conf`, and the root partition to `e2fsck -fn` and to being at rest. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.

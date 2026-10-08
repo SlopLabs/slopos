@@ -12,7 +12,7 @@
 //! [`DriverIndex`] only *narrows* the candidate set.
 
 use slopos_ostd::dev::Devres;
-use slopos_ostd::{AllocError, KVec, klog_info};
+use slopos_ostd::{AllocError, KBox, KVec, klog_info};
 
 /// What a driver's probe decided about a device it was offered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,19 +41,34 @@ pub enum ProbeError {
     Deferred,
 }
 
+/// Runs when the device leaves, before the driver's resources are released.
+pub trait Removal: Send + Sync {
+    fn remove(&self);
+}
+
 /// A driver's claim on a device, stored in the per-device claim slot once its
 /// probe returns [`ProbeOutcome::Bound`].
 pub struct Binding {
     name: &'static str,
+    removal: Option<KBox<dyn Removal>>,
 }
 
 impl Binding {
     pub const fn new(name: &'static str) -> Self {
-        Self { name }
+        Self {
+            name,
+            removal: None,
+        }
     }
 
     pub fn name(&self) -> &'static str {
         self.name
+    }
+
+    pub fn remove(&mut self) {
+        if let Some(removal) = self.removal.take() {
+            removal.remove();
+        }
     }
 }
 
@@ -99,11 +114,23 @@ pub trait Bus: Sized + 'static {
 pub struct BoundDevice<'d, B: Bus + 'static> {
     pub(crate) info: &'d B::Device,
     pub(crate) res: &'d mut Devres,
+    pub(crate) removal: Option<KBox<dyn Removal>>,
 }
 
 impl<'d, B: Bus + 'static> BoundDevice<'d, B> {
     pub fn new(info: &'d B::Device, res: &'d mut Devres) -> Self {
-        Self { info, res }
+        Self {
+            info,
+            res,
+            removal: None,
+        }
+    }
+
+    fn into_binding(self, name: &'static str) -> Binding {
+        Binding {
+            name,
+            removal: self.removal,
+        }
     }
 
     /// `B::Device` is `Copy`: snapshot it (`let info = *bound.info();`) to free
@@ -127,6 +154,15 @@ pub enum ClaimSlot {
     },
 }
 
+impl ClaimSlot {
+    /// The resources stay until the slot drops.
+    pub fn remove(&mut self) {
+        if let ClaimSlot::Claimed { binding, .. } = self {
+            binding.remove();
+        }
+    }
+}
+
 /// Records which driver owns each enumerated device, indexed by device index.
 pub struct ClaimTable<const N: usize> {
     slots: [ClaimSlot; N],
@@ -141,6 +177,14 @@ impl<const N: usize> ClaimTable<N> {
 
     pub fn is_claimed(&self, dev_idx: usize) -> bool {
         matches!(self.slots.get(dev_idx), Some(ClaimSlot::Claimed { .. }))
+    }
+
+    /// Only the USB bus unbinds.
+    pub fn release(&mut self, dev_idx: usize) -> ClaimSlot {
+        match self.slots.get_mut(dev_idx) {
+            Some(slot) => core::mem::replace(slot, ClaimSlot::Unclaimed),
+            None => ClaimSlot::Unclaimed,
+        }
     }
 
     pub fn owner(&self, dev_idx: usize) -> Option<&'static str> {
@@ -172,7 +216,7 @@ impl<const N: usize> Default for ClaimTable<N> {
 /// probe itself lock-free.
 pub trait ClaimSink {
     fn is_claimed(&self, dev_idx: usize) -> bool;
-    fn record(&self, dev_idx: usize, name: &'static str, devres: Devres);
+    fn record(&self, dev_idx: usize, binding: Binding, devres: Devres);
 }
 
 /// Narrows the driver registry to the candidates worth offering a device.
@@ -313,37 +357,80 @@ enum Offer {
     Deferred,
 }
 
+pub enum Probed {
+    /// With the resources the probe acquired.
+    Bound(Binding, Devres),
+    Unbound,
+}
+
+/// The first binding, for a bus that records claims itself: a deferral is a
+/// decline, as such a bus has no later pass.
+pub fn probe_one<B: Bus>(
+    idx: &dyn DriverIndex<B>,
+    dev: &B::Device,
+    dev_idx: usize,
+) -> Result<Probed, AllocError> {
+    let mut cands: KVec<u16> = KVec::new();
+    idx.candidates_for(dev, &mut cands)?;
+    for &li in cands.iter() {
+        let entry = idx.entry(li);
+        if !B::matches(entry, dev) {
+            continue;
+        }
+        if let Ok(probed @ Probed::Bound(..)) = attempt::<B>(entry, dev, dev_idx) {
+            return Ok(probed);
+        }
+    }
+    Ok(Probed::Unbound)
+}
+
 /// `#[inline(never)]` so the `Devres` bag, the `BoundDevice` and the log
-/// scratch stay in this frame rather than accumulating in `probe_bus`'s.
+/// scratch stay in this frame rather than accumulating in the caller's.
 #[inline(never)]
+fn attempt<B: Bus>(
+    entry: &'static B::DriverEntry,
+    dev: &B::Device,
+    dev_idx: usize,
+) -> Result<Probed, ProbeError> {
+    // On `Bound` the bag moves out with the binding; otherwise it drops here,
+    // releasing every acquired resource in reverse order.
+    let mut devres = Devres::new();
+    let mut bound = BoundDevice::<B>::new(dev, &mut devres);
+    let outcome = B::probe(entry, &mut bound);
+    match outcome {
+        Ok(ProbeOutcome::Bound) => {
+            let binding = bound.into_binding(B::entry_name(entry));
+            Ok(Probed::Bound(binding, devres))
+        }
+        Ok(ProbeOutcome::Declined) => Ok(Probed::Unbound),
+        Err(err) => {
+            if err != ProbeError::Deferred {
+                klog_info!(
+                    "{}: {} declined device {}: {:?}",
+                    B::NAME,
+                    B::entry_name(entry),
+                    dev_idx,
+                    err
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
 fn offer<B: Bus>(
     entry: &'static B::DriverEntry,
     dev: &B::Device,
     dev_idx: usize,
     claims: &dyn ClaimSink,
 ) -> Offer {
-    // On `Bound` the bag moves into the claim slot; otherwise it drops here,
-    // releasing every acquired resource in reverse order.
-    let mut devres = Devres::new();
-    let mut bound = BoundDevice::<B>::new(dev, &mut devres);
-    let outcome = B::probe(entry, &mut bound);
-    drop(bound);
-    match outcome {
-        Ok(ProbeOutcome::Bound) => {
-            claims.record(dev_idx, B::entry_name(entry), devres);
+    match attempt::<B>(entry, dev, dev_idx) {
+        Ok(Probed::Bound(binding, devres)) => {
+            claims.record(dev_idx, binding, devres);
             Offer::Bound
         }
-        Ok(ProbeOutcome::Declined) => Offer::Passed,
+        Ok(Probed::Unbound) => Offer::Passed,
         Err(ProbeError::Deferred) => Offer::Deferred,
-        Err(other) => {
-            klog_info!(
-                "{}: {} declined device {}: {:?}",
-                B::NAME,
-                B::entry_name(entry),
-                dev_idx,
-                other
-            );
-            Offer::Passed
-        }
+        Err(_) => Offer::Passed,
     }
 }

@@ -4,7 +4,7 @@
 # direction.
 #
 # The kernel's image is not a default layout with a base address applied: it
-# is eleven linker registries whose spans check_registry_sections.sh holds to
+# is twelve linker registries whose spans check_registry_sections.sh holds to
 # whole entries, a .limine_requests section the bootloader only finds in the
 # first LOAD segment, three PHDRS with declared flags, and four early page
 # tables carved out of the location counter past _bss_end. A linker that

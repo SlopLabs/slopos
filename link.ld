@@ -107,6 +107,12 @@ SECTIONS
     __stop_platform_driver_registry = .;
   } :rodata
 
+  .usb_driver_registry ALIGN(8) : {
+    __start_usb_driver_registry = .;
+    KEEP(*(.usb_driver_registry))
+    __stop_usb_driver_registry = .;
+  } :rodata
+
   .test_registry ALIGN(8) : {
     __start_test_registry = .;
     KEEP(*(.test_registry))

@@ -2,9 +2,15 @@
 //! resets it and runs it, and the registry the USB thread serves.
 
 mod controller;
+pub mod device;
+mod host;
 mod page;
 
 pub use controller::Controller;
+#[cfg(feature = "test-hooks")]
+pub use host::clears_sent;
+#[cfg(feature = "test-hooks")]
+pub use page::pages_held;
 
 use core::fmt;
 
@@ -40,20 +46,25 @@ static CONTROLLERS: [OnceLock<KArc<Controller>>; MAX_CONTROLLERS] =
 
 /// Controller `number`, counted from 1 in probe order, as `1-3` names root
 /// port 3 of the first.
-#[cfg(feature = "test-hooks")]
 pub fn controller(number: u8) -> Option<KArc<Controller>> {
     let slot = CONTROLLERS.get(usize::from(number).checked_sub(1)?)?;
     slot.get().map(KArc::clone)
 }
 
-fn published() -> impl Iterator<Item = &'static KArc<Controller>> {
+pub fn published() -> impl Iterator<Item = &'static KArc<Controller>> {
     CONTROLLERS.iter().filter_map(OnceLock::get)
 }
 
-pub(super) fn serve_all() {
-    for controller in published() {
-        controller.serve();
-    }
+/// When a controller next needs a pass.
+pub(super) fn serve_all() -> Option<u64> {
+    published().filter_map(|c| c.serve()).min()
+}
+
+/// `None` once the device left its slot.
+pub(crate) fn device_of(function: &crate::usb::bus::UsbFunction) -> Option<KArc<device::Device>> {
+    controller(function.controller)?
+        .device(function.slot)
+        .filter(|d| d.serial == function.serial)
 }
 
 /// Why a controller taken from the firmware was not brought into service.
@@ -391,8 +402,7 @@ fn publish(controller: KArc<Controller>) {
     if let Some(slot) = CONTROLLERS.get(usize::from(controller.number()) - 1) {
         slot.call_once(|| controller);
     }
-    super::start_thread();
-    super::wake();
+    super::start_serving();
 }
 
 crate::pci_driver! {

@@ -3,6 +3,8 @@
 //! name (xHCI 1.2 §5).
 
 use super::bus::RegisterBus;
+use crate::device::Speed;
+use crate::hub::{PortStatus, change};
 
 pub const CAPLENGTH: usize = 0x00;
 pub const HCSPARAMS1: usize = 0x04;
@@ -261,7 +263,6 @@ impl PortSc {
         self.0 & PORT_CONNECTED != 0
     }
 
-    #[cfg(test)]
     pub fn enabled(self) -> bool {
         self.0 & PORT_ENABLED != 0
     }
@@ -289,6 +290,42 @@ impl PortSc {
     /// The Protocol Speed ID of what is attached.
     pub fn speed(self) -> u8 {
         bits(self.0, 10, 4) as u8
+    }
+
+    /// In the form a hub port reports too.
+    pub fn status(self, speed: Option<Speed>) -> PortStatus {
+        let map = [
+            (PORT_CONNECT_CHANGE, change::CONNECT),
+            (1 << 18, change::ENABLE),
+            (1 << 19, change::WARM_RESET),
+            (PORT_OVER_CURRENT_CHANGE, change::OVER_CURRENT),
+            (1 << 21, change::RESET),
+            (1 << 22, change::LINK),
+            (1 << 23, change::CONFIG_ERROR),
+        ];
+        let changes = map
+            .iter()
+            .filter(|(bit, _)| self.0 & bit != 0)
+            .fold(0, |changes, (_, flag)| changes | flag);
+        PortStatus {
+            connected: self.connected(),
+            enabled: self.0 & PORT_ENABLED != 0,
+            resetting: self.0 & PORT_RESET != 0,
+            over_current: self.over_current(),
+            powered: self.powered(),
+            speed: speed.filter(|_| self.connected()),
+            changes,
+        }
+    }
+
+    /// The write that starts a reset and touches nothing else.
+    pub fn reset(self) -> u32 {
+        (self.0 & PORT_PRESERVE) | PORT_RESET
+    }
+
+    /// The write that disables the port: PED is write-1-to-clear.
+    pub fn disable(self) -> u32 {
+        (self.0 & PORT_PRESERVE) | PORT_ENABLED
     }
 
     /// The write that clears `changes` and touches nothing else.

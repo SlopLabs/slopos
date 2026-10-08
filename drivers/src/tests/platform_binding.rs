@@ -11,7 +11,7 @@ use slopos_ostd::dev::Devres;
 use slopos_ostd::{AllocError, KVec};
 use slopos_testing::{TestResult, fail, pass};
 
-use crate::driver_core::bus::{ClaimSink, LinearIndex, probe_bus};
+use crate::driver_core::bus::{Binding, ClaimSink, LinearIndex, probe_bus};
 use crate::platform_bus::{
     BoundPlatformDevice, MAX_PLATFORM_IO, PlatformBus, PlatformDeviceInfo, PlatformDriverEntry,
     PlatformIoWindow, PlatformMatch, PlatformProbeError, ProbeOutcome,
@@ -80,9 +80,9 @@ impl ClaimSink for TestClaims {
             .flatten()
             .is_some()
     }
-    fn record(&self, dev_idx: usize, name: &'static str, _devres: Devres) {
+    fn record(&self, dev_idx: usize, binding: Binding, _devres: Devres) {
         if let Some(slot) = self.bound.borrow_mut().get_mut(dev_idx) {
-            *slot = Some(name);
+            *slot = Some(binding.name());
         }
     }
 }

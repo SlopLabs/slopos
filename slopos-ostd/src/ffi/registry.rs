@@ -40,6 +40,8 @@ pub enum RegistryId {
     PciDrivers,
     /// `.platform_driver_registry`
     PlatformDrivers,
+    /// `.usb_driver_registry`
+    UsbDrivers,
     /// `.test_registry`
     Tests,
     /// `.hermetic_state_registry`
@@ -63,6 +65,7 @@ impl RegistryId {
             RegistryId::BootInitOptional => ".boot_init_optional",
             RegistryId::PciDrivers => ".driver_registry",
             RegistryId::PlatformDrivers => ".platform_driver_registry",
+            RegistryId::UsbDrivers => ".usb_driver_registry",
             RegistryId::Tests => ".test_registry",
             RegistryId::HermeticStates => ".hermetic_state_registry",
             RegistryId::KConsole => ".kconsole_registry",
@@ -115,6 +118,8 @@ unsafe extern "C" {
     static __stop_driver_registry: u8;
     static __start_platform_driver_registry: u8;
     static __stop_platform_driver_registry: u8;
+    static __start_usb_driver_registry: u8;
+    static __stop_usb_driver_registry: u8;
     static __start_test_registry: u8;
     static __stop_test_registry: u8;
     static __start_hermetic_state_registry: u8;
@@ -154,6 +159,10 @@ fn bounds(id: RegistryId) -> (*const u8, *const u8) {
         RegistryId::PlatformDrivers => (
             &raw const __start_platform_driver_registry,
             &raw const __stop_platform_driver_registry,
+        ),
+        RegistryId::UsbDrivers => (
+            &raw const __start_usb_driver_registry,
+            &raw const __stop_usb_driver_registry,
         ),
         RegistryId::Tests => (
             &raw const __start_test_registry,
@@ -237,6 +246,9 @@ macro_rules! registry_entry {
     };
     (platform_drivers, $($item:tt)*) => {
         $crate::__registry_entry!(".platform_driver_registry", PlatformDrivers, $($item)*);
+    };
+    (usb_drivers, $($item:tt)*) => {
+        $crate::__registry_entry!(".usb_driver_registry", UsbDrivers, $($item)*);
     };
     (tests, $($item:tt)*) => {
         $crate::__registry_entry!(".test_registry", Tests, $($item)*);

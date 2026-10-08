@@ -11,5 +11,5 @@ pub mod shutdown;
 pub use bound::BoundError;
 pub use bus::{
     Binding, BoundDevice, Bus, ClaimSink, ClaimSlot, ClaimTable, DriverIndex, LinearIndex,
-    ProbeError, ProbeOutcome, probe_bus,
+    ProbeError, ProbeOutcome, Probed, Removal, probe_bus, probe_one,
 };

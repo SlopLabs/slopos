@@ -407,6 +407,45 @@ firmware's emulation of a USB keyboard. Pre-existing and left: `QEMU_DEBUG=1`
 puts its monitor socket in `/tmp`, where another user can create the path
 first and keep QEMU from starting.
 
+Swept 2026-10-07: USB enumeration and the device model — `usb-core`'s
+standard requests, descriptor walker, hub descriptors and status, transfer
+rings and the enumeration tree, over every byte a device, a hub or the
+controller sends; the kernel's per-device slot memory, rings, store and
+pipes; `UsbBus`, its claim release and the bind thread; removal across a
+controller that dies; the `usb settle` boot step; the kconsole listing; and
+the host's QMP-driven test. Six review passes and a fuzz run of 30 000
+enumerations of mutated devices behind mutated hubs, each pulled after a
+random time, which panicked nowhere and left no slot. Nothing reached the
+bar, and nothing in the change is reachable from user space: no device node,
+ioctl or syscall, and the listing is informational. Everything a device
+controls needs physical access to a port. What came closest was fixed in the
+change. A hub could keep its ports, and with them the controller's one
+default-state turn, frozen by failing requests in the right order, or loop
+forever on a change bit it stalled every clear of, and in a dev or tests
+kernel overflow its error counter into a panic after about an hour of
+failures (confidence 70); a hub that fails eight requests between two port
+statuses is now removed and its port given its three tries. A driver's
+abandoned transfer stayed on the ring, so the next write could send its
+bytes twice or a read take another's (55); the ring now stops until the
+USB thread moves it past. A command that never completed held every later
+one and left removal waiting forever (50); it now kills the controller. A
+4 KiB configuration was walked quadratically with interrupts masked (40), a
+port whose change bits never cleared could hold the USB thread in one pass
+(40), and a configuration value of 0 unconfigured the device it was set on
+(30); each is fixed.
+
+Three more were found in endpoint-halt recovery, and are fixed. A device
+that stalled every `CLEAR_FEATURE(ENDPOINT_HALT)` kept its endpoint in a
+clear-and-recover loop forever (45). A Set TR Dequeue Pointer refused after
+Reset Endpoint reopened the ring while the device's endpoint was still
+halted and the two data toggles disagreed (40). An endpoint left halted
+kept EP0 from ever being recovered again (40).
+
+Below the bar and left: a device that toggles its connection still floods
+the kernel log (30), as Phase 1 recorded, and the laptop half — a low-speed
+device, a high-speed hub's transaction translator, a USB 3 hub — is graded
+only by the simulated controller until the laptop run.
+
 The highest ID issued so far is **SLOPOS-2026-0057**. The next finding is
 `SLOPOS-2026-0058`.
 

@@ -55,3 +55,4 @@ expect-test-registry few
 # `sort_candidates` monomorphizes over the `Bus` impl.
 2248	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*3pci6PciBus*
 2248	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*12platform_bus11PlatformBus*
+2056	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*3usb3bus6UsbBus*

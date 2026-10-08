@@ -332,6 +332,8 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         install_touchpad_config();
         slopos_drivers::platform_bus::probe_drivers(rsdp_phys, pdbg);
     }
+
+    slopos_drivers::usb::start();
 }
 
 /// The touchpad probe cannot reach the framebuffer geometry or the cmdline, so
@@ -580,6 +582,37 @@ crate::boot_init!(
     boot_step_pci_init_fn,
     flags = boot_init_priority(80)
 );
+/// Under `tests=on` the report below and the kernel tests must see the same
+/// bus on every run, so the step fails the run when USB has not settled.
+fn boot_step_usb_settle_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
+    let cmdline = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline());
+    if !config_from_cmdline(cmdline).enabled {
+        return 0;
+    }
+    match slopos_drivers::usb::wait_settled(USB_SETTLE_TESTS_MS) {
+        slopos_drivers::usb::Settle::Settled => 0,
+        slopos_drivers::usb::Settle::Unsettled => {
+            klog_info!("USB: unsettled after {} ms", USB_SETTLE_TESTS_MS);
+            1
+        }
+        slopos_drivers::usb::Settle::OneCpu => {
+            klog_info!("USB: unsettled: one CPU, so the USB threads cannot run during boot");
+            1
+        }
+    }
+}
+
+const USB_SETTLE_TESTS_MS: u32 = 60_000;
+
+crate::boot_init!(
+    BOOT_STEP_USB_SETTLE,
+    drivers,
+    b"usb settle\0",
+    boot_step_usb_settle_fn,
+    fallible,
+    flags = boot_init_priority(85)
+);
+
 /// Runs immediately before the test step, by which point every driver has taken
 /// its locks once, so the counters read as boot steady state.
 fn boot_step_lockdep_report_fn(_ctx: &mut BootCtx<'_, BspInit>) {

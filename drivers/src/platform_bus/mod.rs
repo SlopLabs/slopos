@@ -340,8 +340,8 @@ impl ClaimSink for GlobalClaims {
     fn is_claimed(&self, dev_idx: usize) -> bool {
         CLAIMED_BY.lock().is_claimed(dev_idx)
     }
-    fn record(&self, dev_idx: usize, name: &'static str, devres: Devres) {
-        CLAIMED_BY.lock().claim(dev_idx, Binding::new(name), devres);
+    fn record(&self, dev_idx: usize, binding: Binding, devres: Devres) {
+        CLAIMED_BY.lock().claim(dev_idx, binding, devres);
     }
 }
 

@@ -27,6 +27,12 @@ pub enum BoundError {
     /// The BAR index does not exist, is an I/O BAR, or firmware left it unassigned.
     NoSuchBar,
     MapFailed,
+    /// The device has no such endpoint in the configuration in use.
+    NoSuchEndpoint,
+    /// Another handle already holds it.
+    Busy,
+    /// The device left during the probe.
+    Gone,
 }
 
 impl<'d, B: Bus + 'static> BoundDevice<'d, B> {

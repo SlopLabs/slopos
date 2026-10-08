@@ -78,6 +78,8 @@ pub struct Protocol {
     /// The first root port, numbered from 1.
     pub first_port: u8,
     pub ports: u8,
+    /// What Enable Slot names for a device on these ports.
+    pub slot_type: u8,
     /// Its Protocol Speed IDs, in [`Protocols`]' shared table.
     psi_start: u8,
     psi_count: u8,
@@ -200,6 +202,7 @@ impl Protocols {
             minor: (cap.header >> 16) as u8,
             first_port,
             ports: count,
+            slot_type: (bus.read32(cap.offset + 12) & 0x1f) as u8,
             psi_start: self.psi_len as u8,
             psi_count: 0,
         };

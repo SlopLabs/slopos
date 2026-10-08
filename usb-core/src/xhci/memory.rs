@@ -10,6 +10,9 @@ pub trait DmaPage {
     fn read32(&self, offset: usize) -> u32;
     fn write32(&mut self, offset: usize, value: u32);
     fn write64(&mut self, offset: usize, value: u64);
+    /// Of bytes the controller has finished writing.
+    fn read_bytes(&self, offset: usize, dst: &mut [u8]);
+    fn write_bytes(&mut self, offset: usize, src: &[u8]);
     /// A load-acquire fence.
     fn acquire(&self);
     /// A store-release fence.

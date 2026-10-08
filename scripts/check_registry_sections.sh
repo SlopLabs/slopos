@@ -71,6 +71,7 @@ declare -A ENTRY_SIZE=(
     ['.boot_init_optional']=32
     ['.driver_registry']=56
     ['.platform_driver_registry']=56
+    ['.usb_driver_registry']=48
     ['.test_registry']=104
     ['.hermetic_state_registry']=48
     ['.kconsole_registry']=48

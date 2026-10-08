@@ -1,6 +1,10 @@
 //! Device and input contexts (§6.2) in either size HCCPARAMS1.CSZ selects: a
 //! context is 32 bytes, or 64 of which the first 32 carry fields.
 
+use super::memory::DmaPage;
+use crate::device::Speed;
+use crate::device::descriptor::{Endpoint, TransferType};
+
 /// Every context carries eight dwords of fields.
 pub type Dwords = [u32; 8];
 
@@ -193,6 +197,135 @@ impl EndpointContext {
     }
 }
 
+/// Endpoint context states (Table 6-8).
+pub mod endpoint_state {
+    pub const DISABLED: u8 = 0;
+    pub const RUNNING: u8 = 1;
+    pub const HALTED: u8 = 2;
+    pub const STOPPED: u8 = 3;
+    pub const ERROR: u8 = 4;
+}
+
+/// Transaction errors retried before a non-isochronous endpoint halts.
+const ERROR_COUNT: u8 = 3;
+
+impl EndpointContext {
+    pub fn control(max_packet: u16, dequeue: u64, cycle: bool) -> Self {
+        Self {
+            kind: endpoint_type::CONTROL,
+            error_count: ERROR_COUNT,
+            max_packet_size: max_packet,
+            dequeue,
+            dequeue_cycle: cycle,
+            average_trb_length: 8,
+            ..Self::default()
+        }
+    }
+
+    /// §4.14, §6.2.3.6.
+    pub fn for_endpoint(endpoint: &Endpoint, speed: Speed, dequeue: u64, cycle: bool) -> Self {
+        let kind = match (endpoint.transfer_type(), endpoint.is_in()) {
+            (TransferType::Isochronous, false) => endpoint_type::ISOCH_OUT,
+            (TransferType::Isochronous, true) => endpoint_type::ISOCH_IN,
+            (TransferType::Bulk, false) => endpoint_type::BULK_OUT,
+            (TransferType::Bulk, true) => endpoint_type::BULK_IN,
+            (TransferType::Interrupt, false) => endpoint_type::INTERRUPT_OUT,
+            (TransferType::Interrupt, true) => endpoint_type::INTERRUPT_IN,
+            (TransferType::Control, _) => endpoint_type::CONTROL,
+        };
+        let periodic = matches!(
+            endpoint.transfer_type(),
+            TransferType::Isochronous | TransferType::Interrupt
+        );
+        let isochronous = endpoint.transfer_type() == TransferType::Isochronous;
+        let max_packet = endpoint.max_packet_size();
+        let (max_burst, mult) = match endpoint.companion {
+            Some(c) if speed.is_super() => (
+                c.max_burst.min(15),
+                if isochronous { c.attributes & 0b11 } else { 0 },
+            ),
+            _ if speed == Speed::High && periodic => (endpoint.extra_transactions(), 0),
+            _ => (0, 0),
+        };
+        let max_esit_payload = match (periodic, endpoint.companion) {
+            (false, _) => 0,
+            (true, Some(c)) if speed.is_super() => u32::from(c.bytes_per_interval),
+            (true, _) => u32::from(max_packet) * (u32::from(max_burst) + 1),
+        };
+        Self {
+            interval: if periodic {
+                interval(endpoint, speed)
+            } else {
+                0
+            },
+            mult,
+            max_esit_payload,
+            error_count: if isochronous { 0 } else { ERROR_COUNT },
+            kind,
+            max_burst,
+            max_packet_size: max_packet,
+            dequeue,
+            dequeue_cycle: cycle,
+            average_trb_length: match endpoint.transfer_type() {
+                TransferType::Interrupt => 1024,
+                _ => 3072,
+            },
+            ..Self::default()
+        }
+    }
+}
+
+/// 2^Interval microframes. `bInterval` is the exponent plus one, in frames
+/// for full-speed isochronous, except for low- and full-speed interrupt
+/// endpoints, where it counts frames and rounds down to a power of two.
+fn interval(endpoint: &Endpoint, speed: Speed) -> u8 {
+    let b = endpoint.interval;
+    let exponent = match (speed, endpoint.transfer_type()) {
+        (Speed::Low | Speed::Full, TransferType::Interrupt) => {
+            let frames = u32::from(b.max(1));
+            (31 - frames.leading_zeros()) + 3
+        }
+        (Speed::Low | Speed::Full, _) => u32::from(b.clamp(1, 16)) - 1 + 3,
+        _ => u32::from(b.clamp(1, 16)) - 1,
+    };
+    exponent.min(15) as u8
+}
+
+pub fn write_context<P: DmaPage>(page: &mut P, offset: usize, dwords: &Dwords) {
+    for (i, &dword) in dwords.iter().enumerate() {
+        page.write32(offset + 4 * i, dword);
+    }
+}
+
+pub fn read_context<P: DmaPage>(page: &P, offset: usize) -> Dwords {
+    let mut dwords = [0; 8];
+    for (i, dword) in dwords.iter_mut().enumerate() {
+        *dword = page.read32(offset + 4 * i);
+    }
+    dwords
+}
+
+/// Every context not written is zeroed, so nothing a previous command left
+/// is read.
+pub fn write_input<P: DmaPage>(
+    page: &mut P,
+    layout: ContextLayout,
+    control: &InputControlContext,
+    slot: Option<&SlotContext>,
+    endpoints: &[(u8, EndpointContext)],
+) {
+    for offset in (0..layout.input_bytes()).step_by(4) {
+        page.write32(offset, 0);
+    }
+    write_context(page, 0, &control.encode());
+    if let Some(slot) = slot {
+        write_context(page, layout.input_slot(), &slot.encode());
+    }
+    for (dci, endpoint) in endpoints {
+        write_context(page, layout.input_endpoint(*dci), &endpoint.encode());
+    }
+}
+
 /// The input control context (§6.2.5.1): which contexts a command drops and
 /// adds, and the configuration it concerns.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -305,6 +438,108 @@ mod tests {
         assert_eq!((dw[2], dw[3]), (0x2345_6781, 1));
         assert_eq!(dw[4], 3072 | 0x3456 << 16);
         assert_eq!(EndpointContext::decode(&dw), ep);
+    }
+
+    fn endpoint(address: u8, attributes: u8, max_packet: u16, interval: u8) -> Endpoint {
+        Endpoint {
+            address,
+            attributes,
+            max_packet,
+            interval,
+            companion: None,
+        }
+    }
+
+    #[test]
+    fn endpoint_contexts_follow_each_speeds_rules() {
+        let mut bulk = endpoint(0x81, 2, 1024, 0);
+        bulk.companion = Some(crate::device::descriptor::Companion {
+            max_burst: 15,
+            attributes: 0,
+            bytes_per_interval: 0,
+        });
+        let ss = EndpointContext::for_endpoint(&bulk, Speed::Super, 0x5000, true);
+        assert_eq!(ss.kind, endpoint_type::BULK_IN);
+        assert_eq!(
+            (ss.max_burst, ss.max_packet_size, ss.error_count),
+            (15, 1024, 3)
+        );
+        assert_eq!((ss.interval, ss.max_esit_payload), (0, 0));
+        assert!(ss.dequeue_cycle && ss.dequeue == 0x5000);
+
+        let keyboard = endpoint(0x81, 3, 8, 10);
+        let fs = EndpointContext::for_endpoint(&keyboard, Speed::Full, 0, true);
+        assert_eq!(fs.kind, endpoint_type::INTERRUPT_IN);
+        assert_eq!(fs.interval, 6, "10 frames round down to 8, 2^6 microframes");
+        assert_eq!(fs.max_esit_payload, 8);
+        let slowest =
+            EndpointContext::for_endpoint(&endpoint(0x81, 3, 8, 255), Speed::Low, 0, true);
+        assert_eq!(slowest.interval, 10);
+        let zero = EndpointContext::for_endpoint(&endpoint(0x81, 3, 8, 0), Speed::Full, 0, true);
+        assert_eq!(zero.interval, 3);
+
+        let hs = endpoint(0x82, 3, 0x1000 | 64, 4);
+        let hs = EndpointContext::for_endpoint(&hs, Speed::High, 0, true);
+        assert_eq!(
+            (hs.interval, hs.max_burst, hs.max_esit_payload),
+            (3, 2, 192)
+        );
+        let iso = EndpointContext::for_endpoint(&endpoint(0x03, 1, 192, 1), Speed::Full, 0, true);
+        assert_eq!(
+            (iso.kind, iso.interval, iso.error_count),
+            (endpoint_type::ISOCH_OUT, 3, 0)
+        );
+        let wild = EndpointContext::for_endpoint(&endpoint(0x83, 3, 64, 200), Speed::High, 0, true);
+        assert_eq!(wild.interval, 15);
+
+        let ep0 = EndpointContext::control(64, 0x6000, true);
+        assert_eq!(
+            (ep0.kind, ep0.max_packet_size, ep0.average_trb_length),
+            (4, 64, 8)
+        );
+    }
+
+    #[test]
+    fn an_input_context_is_written_whole() {
+        let mem = crate::xhci::sim::Memory::default();
+        let mut page = mem.page();
+        for offset in (0..4096).step_by(4) {
+            page.write32(offset, 0xdead_beef);
+        }
+        let layout = ContextLayout::new(true);
+        let control = InputControlContext {
+            add: 0b1011,
+            ..InputControlContext::default()
+        };
+        let slot = SlotContext {
+            speed: 3,
+            context_entries: 3,
+            root_hub_port: 2,
+            ..SlotContext::default()
+        };
+        let ep = EndpointContext::control(64, 0x7000, true);
+        write_input(
+            &mut page,
+            layout,
+            &control,
+            Some(&slot),
+            &[(1, ep), (3, ep)],
+        );
+        assert_eq!(
+            InputControlContext::decode(&read_context(&page, 0)),
+            control
+        );
+        assert_eq!(
+            SlotContext::decode(&read_context(&page, layout.input_slot())),
+            slot
+        );
+        assert_eq!(
+            EndpointContext::decode(&read_context(&page, layout.input_endpoint(3))),
+            ep
+        );
+        assert_eq!(read_context(&page, layout.input_endpoint(2)), [0; 8]);
+        assert_eq!(page.read32(layout.input_bytes() - 4), 0);
+        assert_eq!(page.read32(layout.input_bytes()), 0xdead_beef);
     }
 
     #[test]

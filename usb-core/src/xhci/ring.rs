@@ -96,6 +96,36 @@ impl<P: DmaPage> ProducerRing<P> {
         }
         let index = self.enqueue;
         publish(&mut self.page, index, trb.with_cycle(self.cycle));
+        self.advance();
+        Some(self.address(index))
+    }
+
+    /// TRBs a push can still take.
+    pub fn free(&self) -> u16 {
+        LINK - 1 - self.in_flight()
+    }
+
+    /// The first TRB is published last, so the consumer never starts what it
+    /// cannot finish. Returns the indices of the first and last.
+    pub fn push_all(&mut self, trbs: &[Trb]) -> Option<(u16, u16)> {
+        let (head, rest) = trbs.split_first()?;
+        if usize::from(self.free()) < trbs.len() {
+            return None;
+        }
+        let first = self.enqueue;
+        let cycle = self.cycle;
+        self.advance();
+        let mut last = first;
+        for &trb in rest {
+            last = self.enqueue;
+            publish(&mut self.page, last, trb.with_cycle(self.cycle));
+            self.advance();
+        }
+        publish(&mut self.page, first, head.with_cycle(cycle));
+        Some((first, last))
+    }
+
+    fn advance(&mut self) {
         self.enqueue += 1;
         if self.enqueue == LINK {
             let link = Trb::link(self.page.phys()).with_cycle(self.cycle);
@@ -103,7 +133,16 @@ impl<P: DmaPage> ProducerRing<P> {
             self.cycle = !self.cycle;
             self.enqueue = 0;
         }
-        Some(self.address(index))
+    }
+
+    /// What Set TR Dequeue Pointer gives a consumer to skip every TRB written.
+    pub fn enqueue_pointer(&self) -> (u64, bool) {
+        (self.address(self.enqueue), self.cycle)
+    }
+
+    /// The consumer was moved to the enqueue pointer: nothing is in flight.
+    pub fn skip_to_enqueue(&mut self) {
+        self.dequeue = self.enqueue;
     }
 
     pub fn address(&self, index: u16) -> u64 {
@@ -120,10 +159,11 @@ impl<P: DmaPage> ProducerRing<P> {
 
     /// Whether the TRB at `index` is one the consumer has yet to finish.
     pub fn in_flight_at(&self, index: u16) -> bool {
-        index < LINK && (index + LINK - self.dequeue) % LINK < self.in_flight()
+        index < LINK && self.distance(index) < self.in_flight()
     }
 
-    fn distance(&self, index: u16) -> u16 {
+    /// From the consumer.
+    pub fn distance(&self, index: u16) -> u16 {
         (index + LINK - self.dequeue) % LINK
     }
 
@@ -362,5 +402,14 @@ impl<P: DmaPage> CommandRing<P> {
             .iter()
             .filter(|e| matches!(e, Entry::Waiting(_) | Entry::Abandoned(_)))
             .count()
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::Ticket;
+
+    pub fn ticket(index: u16, serial: u32) -> Ticket {
+        Ticket { index, serial }
     }
 }
