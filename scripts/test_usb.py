@@ -312,10 +312,11 @@ class Bench:
             case ["hold", "usb", "shift"]:
                 qmp.send(key("shift", True), display=True)
             case ["type", *_]:
+                # One command per keystroke: the guest may power off on Enter's
+                # press, so nothing may follow it on QMP.
                 for ch in TYPED:
                     qcode = QCODES.get(ch, ch)
-                    qmp.send(key(qcode, True), display=True)
-                    qmp.send(key(qcode, False), display=True)
+                    qmp.send(key(qcode, True), key(qcode, False), display=True)
             case _:
                 return False
         return True
@@ -496,8 +497,8 @@ def main():
                     words = marker.group(1).split()
                     if words[0] not in ("io-mem", "pages") and not bench.act(words, max(1, deadline - time.monotonic())):
                         errors.append(f"no action for {marker.group(0)!r}")
-                except RuntimeError as err:
-                    errors.append(str(err))
+                except (RuntimeError, OSError) as err:
+                    errors.append(f"{marker.group(0)!r}: {err}")
     except RuntimeError as err:
         errors.append(str(err))
     finally:
