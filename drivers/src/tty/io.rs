@@ -24,10 +24,11 @@ use slopos_kernel_services::driver_runtime::{
 use slopos_ostd::sync::{BUS, WaitAbort};
 
 impl Tty {
-    /// Caller holds the per-TTY lock.  Echo, any IXOFF byte and any generated
-    /// signal are registered with `deferred` for emission once the caller drops
-    /// the slot guard.
-    pub(crate) fn drain_hw_input_locked(&mut self, deferred: &mut PostLockWork) {
+    /// Caller holds the per-TTY lock.  Echo, any IXOFF byte, any generated
+    /// signal and the wake of this TTY's readers are registered with `deferred`
+    /// for emission once the caller drops the slot guard. `true` when input
+    /// arrived that a reader can take.
+    pub(crate) fn drain_hw_input_locked(&mut self, deferred: &mut PostLockWork) -> bool {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
         let mut events = [InputEvent::normal(0); 64];
@@ -48,6 +49,14 @@ impl Tty {
                 deferred.add_signal(pg, sig);
             }
         }
+
+        // `should_wake` is a level: data already waiting was announced when it
+        // arrived.
+        let arrived = count > 0 && batch.should_wake;
+        if arrived {
+            deferred.wake_input_slot(self.index.0 as usize);
+        }
+        arrived
     }
 
     /// Register any staged echo for emission after the slot guard drops.
@@ -930,31 +939,26 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
     Ok(staged + inflight + driver_pending)
 }
 
-/// Idle-loop callback: drain hardware input and wake blocked readers.
-fn input_available_cb() -> c_int {
-    let mut any_data = false;
+/// Idle-loop callback: drain hardware input and wake its readers. Only input
+/// that arrived here is work: a line nobody reads, such as an Enter typed while
+/// nothing has keyboard focus, would otherwise keep every idle CPU out of `hlt`.
+pub(crate) fn input_available_cb() -> c_int {
+    let mut arrived = false;
     let mut bits = super::table::active_slots_bitmap();
     while bits != 0 {
         let i = bits.trailing_zeros() as usize;
         bits &= bits - 1;
 
         let mut deferred = PostLockWork::new();
-        let has_data = {
+        {
             let mut guard = TTY_SLOTS[i].lock();
             if let Some(tty) = guard.as_mut() {
-                tty.drain_hw_input_locked(&mut deferred);
-                tty.ldisc.has_data()
-            } else {
-                false
+                arrived |= tty.drain_hw_input_locked(&mut deferred);
             }
-        };
-        deferred.execute();
-        if has_data {
-            notify_input_ready(TtyIndex(i as u8));
-            any_data = true;
         }
+        deferred.execute();
     }
-    any_data as c_int
+    arrived as c_int
 }
 
 pub(super) fn register_idle_callback() {

@@ -1,12 +1,19 @@
-//! PTY output-flow regression test.
+//! PTY flow regression tests: every edge that makes a blocked end able to
+//! proceed wakes it.
 //!
 //! A writer that fills the master's 4 KiB read buffer blocks inside `write()`;
 //! draining the master must wake it, or a large stream advances one bufferful
 //! per keystroke. Forks a flooding child onto a slave and drains the master.
+//! A reader parked on a partial canonical line must wake when `ICANON` clears.
 
 use slopos_userland as _;
 
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
 use slopos_abi::signal::{SIGKILL, SIGTSTP, SIGTTIN, SIGTTOU};
+use slopos_abi::syscall::{LocalFlags, VMIN, VTIME};
 use slopos_userland::syscall::{SyscallError, core as sys_core, fs, process};
 
 /// Far larger than the kernel's 4 KiB master `RawDisc` buffer, so the child
@@ -151,10 +158,87 @@ fn test_master_drain_wakes_blocked_slave_writer() -> bool {
     true
 }
 
-const CASES: &[(&str, fn() -> bool)] = &[(
-    "master_drain_wakes_blocked_slave_writer",
-    test_master_drain_wakes_blocked_slave_writer,
-)];
+/// How long a parked reader gets to come back once its input is readable.
+const WAKE_DEADLINE: Duration = Duration::from_secs(2);
+
+/// A canonical reader parks on a partial line. Clearing `ICANON` makes that
+/// line input, and no byte follows to announce it: the change must wake the
+/// reader itself.
+fn test_clearing_icanon_wakes_parked_reader() -> bool {
+    let Some((master_fd, slave_fd)) = open_pair() else {
+        eprintln!("pty_flow_test: openpty/fd setup failed");
+        return false;
+    };
+    let ok = clearing_icanon_wakes(master_fd, slave_fd);
+    let _ = fs::close_fd_raw(master_fd);
+    let _ = fs::close_fd_raw(slave_fd);
+    ok
+}
+
+fn clearing_icanon_wakes(master_fd: i32, slave_fd: i32) -> bool {
+    let Ok(canonical) = fs::tcgetattr(slave_fd) else {
+        eprintln!("pty_flow_test: tcgetattr failed");
+        return false;
+    };
+    if fs::write_slice(master_fd, b"abc") != Ok(3) {
+        eprintln!("pty_flow_test: writing the partial line failed");
+        return false;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut buf = [0u8; 16];
+        let _ = tx.send(fs::read_slice(slave_fd, &mut buf));
+    });
+
+    let woke = match rx.recv_timeout(Duration::from_millis(200)) {
+        Ok(early) => {
+            eprintln!("pty_flow_test: a canonical read returned {early:?} on a partial line");
+            false
+        }
+        Err(_) => {
+            let mut raw = canonical;
+            raw.c_lflag &= !LocalFlags::ICANON;
+            raw.c_cc[VMIN] = 1;
+            raw.c_cc[VTIME] = 0;
+            if fs::tcsetattr(slave_fd, &raw).is_err() {
+                eprintln!("pty_flow_test: tcsetattr failed");
+                false
+            } else {
+                match rx.recv_timeout(WAKE_DEADLINE) {
+                    Ok(Ok(3)) => true,
+                    Ok(other) => {
+                        eprintln!("pty_flow_test: the woken read returned {other:?}, expected 3");
+                        false
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "pty_flow_test: clearing ICANON left the reader parked on readable input"
+                        );
+                        false
+                    }
+                }
+            }
+        }
+    };
+
+    // A reader still parked takes this byte and returns, so the join cannot hang.
+    let _ = fs::write_slice(master_fd, b"\n");
+    let _ = reader.join();
+    let _ = fs::tcsetattr(slave_fd, &canonical);
+    woke
+}
+
+const CASES: &[(&str, fn() -> bool)] = &[
+    (
+        "master_drain_wakes_blocked_slave_writer",
+        test_master_drain_wakes_blocked_slave_writer,
+    ),
+    (
+        "clearing_icanon_wakes_parked_reader",
+        test_clearing_icanon_wakes_parked_reader,
+    ),
+];
 
 fn main() {
     slopos_slibc::test_harness::run(CASES);

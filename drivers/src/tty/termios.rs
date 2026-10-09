@@ -239,8 +239,14 @@ pub(super) fn set_termios_mode(
                     tty.ldisc.flush_input();
                     deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_FLUSHREAD);
                 }
+                let had_data = tty.ldisc.has_data();
                 tty.ldisc.set_termios(&merged);
                 tty.driver.set_termios(&merged);
+                // Clearing `ICANON` turns a partial line into input: nothing
+                // else announces it to a reader already parked.
+                if !had_data && tty.ldisc.has_data() {
+                    deferred.wake_input_and_poll(slot);
+                }
                 defer_hangup = (merged.c_cflag.bits() & CBAUD) == B0;
 
                 if !old_ixon && new_ixon {

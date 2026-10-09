@@ -192,6 +192,7 @@ slopos_testing::stest!(
     name = test_keyboard_scancode_routes_to_active_tty_index,
     suite = tty
 );
+slopos_testing::stest!(name = test_unread_line_is_not_idle_work, suite = tty);
 slopos_testing::stest!(
     name = test_keyboard_extended_up_arrow_reaches_tty,
     suite = tty

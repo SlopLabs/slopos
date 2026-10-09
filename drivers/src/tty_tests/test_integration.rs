@@ -257,6 +257,32 @@ pub fn test_keyboard_scancode_routes_to_active_tty_index() -> TestResult {
     TestResult::Pass
 }
 
+/// An Enter typed while nothing has keyboard focus lands in the active TTY,
+/// which nothing may ever read. Counting that line as idle work kept every idle
+/// CPU out of `hlt` for as long as it stayed there.
+pub fn test_unread_line_is_not_idle_work() -> TestResult {
+    tty::table::tty_table_init();
+    tty::set_active_tty(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(0));
+
+    crate::ps2::keyboard::handle_scancode(0x1C);
+    crate::ps2::keyboard::handle_scancode(0x9C);
+
+    let pending = tty::has_data(TtyIndex(0));
+    let work = tty::io::input_available_cb();
+    drain_tty_nonblock(TtyIndex(0));
+
+    if !pending || work != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - an unread line counted as idle work (pending={}, work={})",
+            pending,
+            work
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 pub fn test_keyboard_extended_up_arrow_reaches_tty() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
