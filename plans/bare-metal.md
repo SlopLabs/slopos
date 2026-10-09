@@ -39,8 +39,9 @@ its firmware entry, `cachyos`, is the only one.
   enumerates the devices on its ports and behind its hubs, binds USB
   keyboards and pointers beside the i8042 keyboard and the touchpad, and
   resets it at poweroff. It serves sticks as `sd` disks, flushed before that
-  reset, and reads the install payload from the stick it booted from, which
-  only QEMU has graded so far.
+  reset, reads the install payload from the stick it booted from, and serves
+  CDC-ECM and CDC-NCM adapters as NICs; only QEMU has graded those three so
+  far, and NCM only the host tests.
 - Every volume is ext4 in one profile, with a jbd2 journal that e2fsck
   replays.
 - The boot chain shares a disk: Limine under `\EFI\SlopOS\`, the slots on a
@@ -370,8 +371,8 @@ falls back to the committed slot, and the fallback boot finds the panic in
 ## Out of scope
 
 - **Wi-Fi.**
-- **USB beyond keyboards, pointers and sticks.** See `plans/usb-xhci.md`,
-  which brings USB NICs.
+- **USB beyond keyboards, pointers, sticks and class-mode Ethernet
+  adapters.** See `plans/usb-xhci.md`'s Out of scope.
 - **Other machines' platforms:** AHCI (the laptop's SATA controller has no
   disk), VMD, more than 17 CPUs, timers without HPET, x2APIC mode, INTx, PCI
   without MCFG, other PCH GPIO blocks.
@@ -632,7 +633,8 @@ falls back to the committed slot, and the fallback boot finds the panic in
   netpoll and net-timer start at boot whatever NICs there are. A driver
   supplies the device, an interrupt handler that only wakes netpoll,
   `rx_pending` and `sample_carrier`, and calls `nic::publish`, which starts
-  DHCP. A USB NIC is the same and nothing more.
+  DHCP. A USB NIC is the same and nothing more, and `nic::retire` takes it
+  out of service when it leaves.
 - **A frame carries the identity of the device it leaves on.** The source
   MAC is stamped once the route has picked the device, an ARP names that
   device's address, and a neighbour's packets leave on the neighbour's device.

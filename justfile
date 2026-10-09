@@ -956,13 +956,15 @@ test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     tests+=,slopos_drivers::tests::usb_tests::test_usb_05_sysrq_runs_a_command
     tests+=,slopos_drivers::tests::usb_tests::test_usb_06_pointers_share_the_cursor
     tests+=,slopos_drivers::tests::usb_tests::test_usb_07_pulled_keyboard_releases_shift
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_08_pulled_devices_leave
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_09_plugged_devices_return
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_10_pulled_again
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_11_plugged_again
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_08_nic_takes_a_lease
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_09_pulled_devices_leave
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_10_plugged_devices_return
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_11_pulled_again
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_12_plugged_again
     tests+=,slopos_core::utests::utest_usb_disk
+    tests+=,slopos_core::utests::utest_usb_net
     tests+=,slopos_core::utests::utest_usb_shell
-    tests+=,slopos_drivers::tests::usb_tests::test_usb_12_shutdown_resets
+    tests+=,slopos_drivers::tests::usb_tests::test_usb_13_shutdown_resets
     KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \

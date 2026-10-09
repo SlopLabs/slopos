@@ -1,14 +1,19 @@
 //! The guest half of `just test-usb`: every device `scripts/test_usb.py`
 //! attaches enumerated and bound, a stalled and an abandoned transfer
 //! recovered, keys and motion the host injects reaching the keyboard state and
-//! the cursor, and every device pulled and plugged twice with no slot, page or
-//! claim left behind. The host acts on the `USB-TEST:` lines.
+//! the cursor, a USB NIC leased and retired, and every device pulled and
+//! plugged twice with no slot, page or claim left behind. The host acts on
+//! the `USB-TEST:` lines.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::input::{MODIFIER_CAPS_LOCK, MODIFIER_SHIFT};
 use slopos_keymap_core::keycode::{KEY_LEFTSHIFT, KEY_X};
 use slopos_keymap_core::{LOCK_CAPS, LOCK_NUM};
+use slopos_net::iface::{self, Iface};
+use slopos_net::neighbor::NEIGHBOR_CACHE;
+use slopos_net::types::{DevIndex, Ipv4Addr, MacAddr};
+use slopos_net::{DEVICE_REGISTRY, ROUTE_TABLE};
 use slopos_ostd::{KArc, klog_info};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -49,8 +54,15 @@ const DEVICES: [(u8, u8, Speed); 7] = [
 const STICKS: u32 = 3;
 /// qemu-xhci's alone: an ext4 stick `usb-storage` binds as `sda`, the one
 /// USB disk until `usb_disk_test` plugs a read-only drive on nec-usb-xhci's
-/// port 7.
+/// port 7, and a usb-net behind the hub, its network 10.0.3.0/24.
 const DISK: (u8, u8, Speed) = (7, 0, Speed::High);
+const NET: (u8, u8, Speed) = (4, 4, Speed::Full);
+const QEMU_ONLY: [(u8, u8, Speed); 2] = [DISK, NET];
+const NET_MAC: MacAddr = MacAddr([0x52, 0x54, 0x00, 0x12, 0x34, 0x99]);
+const NET_LEASE: Ipv4Addr = Ipv4Addr([10, 0, 3, 15]);
+const NET_GATEWAY: Ipv4Addr = Ipv4Addr([10, 0, 3, 2]);
+/// The echo peer on the NIC's network, which no other route reaches.
+const NET_PEER: Ipv4Addr = Ipv4Addr([10, 0, 3, 100]);
 /// The keyboard, the tablet and the mouse, which `usb-test-hid` tries and
 /// `usb-hid` binds.
 const HIDS: u32 = 3;
@@ -258,17 +270,24 @@ fn path(root: u8, hub_port: u8) -> Path {
 
 /// Every device, configured at its speed, and nothing else.
 fn complete(c: &Controller) -> bool {
-    let disk = (c.ids() == QEMU_XHCI).then_some(DISK);
+    let extras: &[(u8, u8, Speed)] = if c.ids() == QEMU_XHCI {
+        &QEMU_ONLY
+    } else {
+        &[]
+    };
     let devices = c.devices();
-    devices.len() == DEVICES.len() + usize::from(disk.is_some())
-        && DEVICES.iter().chain(&disk).all(|&(root, hub_port, speed)| {
-            let want = path(root, hub_port);
-            devices.iter().any(|d| {
-                d.node().is_some_and(|n| {
-                    n.path == want && n.speed == speed && (n.configuration != 0 || n.hub)
+    devices.len() == DEVICES.len() + extras.len()
+        && DEVICES
+            .iter()
+            .chain(extras)
+            .all(|&(root, hub_port, speed)| {
+                let want = path(root, hub_port);
+                devices.iter().any(|d| {
+                    d.node().is_some_and(|n| {
+                        n.path == want && n.speed == speed && (n.configuration != 0 || n.hub)
+                    })
                 })
             })
-        })
 }
 
 fn every_controller(test: impl Fn(&Controller) -> bool) -> bool {
@@ -277,6 +296,33 @@ fn every_controller(test: impl Fn(&Controller) -> bool) -> bool {
 
 fn empty(c: &Controller) -> bool {
     c.slots_in_use() == 0 && c.devices().is_empty()
+}
+
+fn usb_nic() -> Option<Iface> {
+    let mut found = None;
+    iface::for_each(|i| {
+        if i.mac == NET_MAC {
+            found = Some(*i);
+        }
+    });
+    found
+}
+
+/// The USB NIC, `eth1` beside virtio-net's `eth0`.
+fn nic_published() -> Option<Iface> {
+    let eth0 = iface::get_by_name(b"eth0")?;
+    usb_nic().filter(|nic| nic.name.as_bytes() == b"eth1" && eth0.dev != nic.dev)
+}
+
+/// Nothing of a retired NIC is left: its interface, routes, neighbours,
+/// DHCP client and device slot, while `eth0` keeps its name.
+fn nic_retired(dev: DevIndex) -> bool {
+    usb_nic().is_none()
+        && ROUTE_TABLE.all_routes().iter().all(|r| r.dev != dev)
+        && NEIGHBOR_CACHE.snapshot_owned(Some(dev)).1 == 0
+        && !slopos_net::dhcp::is_running(dev)
+        && DEVICE_REGISTRY.device_at(dev).is_none()
+        && iface::get_by_name(b"eth0").is_some_and(|i| i.mac != NET_MAC)
 }
 
 /// Both controllers' keyboards, tablets and mice bound.
@@ -375,8 +421,12 @@ pub fn test_usb_02_every_device_enumerates() -> TestResult {
     );
     assert_eq_test!(
         crate::usb::bus::claims_held(),
-        2 * (STICKS + HIDS) + 1,
+        2 * (STICKS + HIDS) + 2,
         "one claim per bound function"
+    );
+    assert_test!(
+        nic_published().is_some(),
+        "usb-net published the adapter as eth1"
     );
     assert_test!(
         crate::usb::storage::has_disk(b"sda"),
@@ -426,7 +476,11 @@ fn each_device(mut visit: impl FnMut(&Device)) {
 pub fn test_usb_03_held_keys_repeat() -> TestResult {
     let mut abandoned = 0;
     each_device(|d| abandoned += d.abandon_reports());
-    assert_eq_test!(abandoned, 6, "both keyboards', tablets' and mice's reports");
+    assert_eq_test!(
+        abandoned,
+        7,
+        "both keyboards', tablets' and mice's reports, and the NIC's notifications"
+    );
     assert_test!(
         wait(HOST_MS, || {
             let mut posted = true;
@@ -657,6 +711,9 @@ fn pulled(round: u32) -> TestResult {
     let (Some(irqs), unbinds) = (interrupts(), UNBINDS.load(Ordering::Acquire)) else {
         return fail!("both controllers must be running");
     };
+    let Some(nic) = usb_nic() else {
+        return fail!("the USB NIC must be published before the pull");
+    };
     let full = xhci::pages_held() as u32;
     if round == 1 {
         PAGES_FULL.store(full, Ordering::Release);
@@ -671,6 +728,10 @@ fn pulled(round: u32) -> TestResult {
     assert_test!(
         gone,
         "every device must leave its slot, its drivers unbound"
+    );
+    assert_test!(
+        nic_retired(nic.dev),
+        "the USB NIC's interface, routes, neighbours and DHCP client leave with it"
     );
     assert_eq_test!(crate::usb::bus::claims_held(), 0, "no claim left");
     assert_test!(
@@ -721,11 +782,12 @@ fn plugged() -> TestResult {
             && HID_PROBES.load(Ordering::Acquire) == hid_probes + 2 * HIDS
             && every_hid_bound()
             && crate::usb::storage::has_disk(b"sda")
+            && nic_published().is_some()
     });
     assert_test!(back, "every device must enumerate again and bind");
     assert_eq_test!(
         crate::usb::bus::claims_held(),
-        2 * (STICKS + HIDS) + 1,
+        2 * (STICKS + HIDS) + 2,
         "one claim per bound function"
     );
     assert_test!(
@@ -735,25 +797,50 @@ fn plugged() -> TestResult {
     pass!()
 }
 
-pub fn test_usb_08_pulled_devices_leave() -> TestResult {
+/// The USB NIC leases an address on its own network, routes the network
+/// through itself, and resolves the gateway over it.
+pub fn test_usb_08_nic_takes_a_lease() -> TestResult {
+    let leased = wait(HOST_MS, || {
+        nic_published().is_some_and(|nic| iface::our_ip(nic.dev) == Some(NET_LEASE))
+    });
+    assert_test!(leased, "eth1 leases 10.0.3.15 from its own network");
+    let Some(nic) = usb_nic() else {
+        return fail!("the USB NIC left");
+    };
+    assert_eq_test!(
+        ROUTE_TABLE.lookup(NET_PEER).map(|(dev, _)| dev),
+        Some(nic.dev),
+        "10.0.3.0/24 is reached through eth1"
+    );
+    let sent = slopos_net::udp::udp_sendto(NET_LEASE.0, NET_GATEWAY.0, 40_000, 9, 0, b"usb-net");
+    assert_eq_test!(sent, Ok(7), "a datagram leaves through eth1");
+    assert_test!(
+        wait(HOST_MS, || NEIGHBOR_CACHE
+            .is_reachable(nic.dev, NET_GATEWAY)),
+        "the gateway answers ARP over eth1"
+    );
+    pass!()
+}
+
+pub fn test_usb_09_pulled_devices_leave() -> TestResult {
     pulled(1)
 }
 
-pub fn test_usb_09_plugged_devices_return() -> TestResult {
+pub fn test_usb_10_plugged_devices_return() -> TestResult {
     plugged()
 }
 
-pub fn test_usb_10_pulled_again() -> TestResult {
+pub fn test_usb_11_pulled_again() -> TestResult {
     pulled(2)
 }
 
-pub fn test_usb_11_plugged_again() -> TestResult {
+pub fn test_usb_12_plugged_again() -> TestResult {
     plugged()
 }
 
-/// After the userland test has typed at the shell: each controller's
-/// shutdown hook leaves it halted, reset and off the bus.
-pub fn test_usb_12_shutdown_resets() -> TestResult {
+/// After the userland tests have used the NIC and typed at the shell: each
+/// controller's shutdown hook leaves it halted, reset and off the bus.
+pub fn test_usb_13_shutdown_resets() -> TestResult {
     let Some(all) = controllers() else {
         return fail!("both controllers must be running");
     };
@@ -801,12 +888,13 @@ slopos_testing::stest!(
     name = test_usb_07_pulled_keyboard_releases_shift,
     flags = HOSTED
 );
-slopos_testing::stest!(name = test_usb_08_pulled_devices_leave, flags = HOSTED);
-slopos_testing::stest!(name = test_usb_09_plugged_devices_return, flags = HOSTED);
-slopos_testing::stest!(name = test_usb_10_pulled_again, flags = HOSTED);
-slopos_testing::stest!(name = test_usb_11_plugged_again, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_08_nic_takes_a_lease, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_09_pulled_devices_leave, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_10_plugged_devices_return, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_11_pulled_again, flags = HOSTED);
+slopos_testing::stest!(name = test_usb_12_plugged_again, flags = HOSTED);
 slopos_testing::stest!(
-    name = test_usb_12_shutdown_resets,
+    name = test_usb_13_shutdown_resets,
     flags = HOSTED,
     kind = Userland
 );

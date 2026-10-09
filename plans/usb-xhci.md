@@ -16,14 +16,15 @@ system runs. QEMU's controllers come first, then the laptop's two
 
 ## Where it stands
 
-Phases 1 to 5 have landed. The kernel takes every xHCI controller it can
+All six phases have landed. The kernel takes every xHCI controller it can
 drive from the firmware and runs it. It enumerates every device on its root
 ports and behind its hubs, offers each function to the drivers `usb_driver!`
 registers, and removes a device cleanly when it leaves. At poweroff it
 flushes each stick and resets each controller. `usb-hid` binds keyboards,
 mice and tablets, which type into the TTY and the desktop and move the one
 cursor beside the i8042's and the touchpad's. `usb-storage` serves Bulk-Only
-sticks as `sd` disks; an adapter is listed and left unbound. The live
+sticks as `sd` disks. `usb-net` serves CDC-ECM and CDC-NCM adapters as NICs,
+published after the machine's own and retired when they leave. The live
 system mounts the install payload, the toolchain and a clone of the source,
 from a partition of the stick it booted from, read-only at
 `/media/payload`, and the installer copies it from there. Limine still
@@ -54,13 +55,14 @@ The pieces USB plugs into exist. These are their gaps:
   USB disk is unregistered when it leaves, a block claim names its disk's
   generation, and a disk reports write protection. A stick flashed with the
   ISO shows its partitions, the payload's among them.
-- **Network.** A NIC is a `NetDevice` handed to `nic::publish`.
-  `nic::retire` tears one down, and a test grades it, but it exists only
-  under `test-hooks`. Both NIC drivers are singletons.
+- **Network.** A NIC is a `NetDevice` handed to `nic::publish`, and
+  `nic::retire` takes one out of service, which a USB NIC's removal does.
+  The PCI NIC drivers are singletons.
 - **Tests.** `just test` attaches a `qemu-xhci` with a scratch stick, `sda`.
-  `just test-usb` enumerates sticks, a hub and HID devices, plugs and pulls
-  them through QMP, injects keys and motion, and mounts and pulls an ext4
-  stick. CI's QEMU is the runner distribution's,
+  `just test-usb` enumerates sticks, a hub, HID devices and a `usb-net`,
+  plugs and pulls them through QMP, injects keys and motion, mounts and
+  pulls an ext4 stick, and leases and retires the NIC and carries TCP over
+  it. CI's QEMU is the runner distribution's,
   so a USB test uses only devices and QMP commands that version carries.
 
 The laptop has two controllers. The PCH xHCI `8086:51ed` sits at `00:14.0`
@@ -85,7 +87,7 @@ untrusted input, and each rewrites the `AGENTS.md` and
 | 3. Keyboards and pointers (done) | 2 | a USB keyboard and tablet drive the shell and the desktop beside PS/2 |
 | 4. Mass storage (done) | 2 | an ext4 stick mounted, written, pulled and plugged back; the installer still installs with its stick visible |
 | 5. The install medium on a stick (done) | 4 | **milestone:** the installer takes the toolchain from the stick, not from RAM |
-| 6. USB networking | 2 | a CDC Ethernet adapter takes a DHCP lease and leaves cleanly |
+| 6. USB networking (done) | 2 | a CDC Ethernet adapter takes a DHCP lease and leaves cleanly |
 
 Phases 3, 4 and 6 can run side by side. A phase's laptop half is graded by
 the user's run, or by an agent through the remote control
@@ -301,38 +303,48 @@ Built:
 installs SlopOS beside CachyOS, toolchain included, from a live system that
 never holds the toolchain in RAM.
 
-### Phase 6: USB networking
+### Phase 6: USB networking (done)
 
-- **The CDC part of `usb-core`:** the header, union and Ethernet functional
-  descriptors, the MAC address string, NCM's NCM Transfer Block (NTB16)
-  header and datagram pointer tables, and `GET_NTB_PARAMETERS`.
-- **`usb-net`, a `UsbBus` driver** for CDC-ECM and CDC-NCM functions, one
-  instance per device.
-  - It selects the data alternate setting and posts bulk-IN transfers
-    before it calls `nic::publish`, with no lock held.
-  - `tx` copies the frame into a bulk-OUT buffer, framed as an ECM frame
-    (ended by a zero-length packet when needed) or as an NTB, and returns
-    without waiting.
-  - Completions wake netpoll.
-  - Carrier comes from `NETWORK_CONNECTION` notifications and is kept in an
-    atomic. The parser checks the request type, the notification code and
-    `wValue`, but not that `wIndex` names the control interface, because
-    QEMU's `usb-net` sends its data interface's number. A notification that
-    repeats the current state wakes nothing, since QEMU answers every poll
-    with one.
-  - A function whose `wMaxSegmentSize` is under 1514 is declined, because
-    the stack assumes a 1500-byte MTU.
-- **`nic::retire` in production.** Removal runs it.
+Built:
 
-**Done when** QEMU's `usb-net` device in `just test-usb`, in its ECM
-configuration (it lists RNDIS first), takes a DHCP lease from a SLIRP
-network of its own (`net=10.0.3.0/24`) and fetches over TCP through
-10.0.3.2, which only the USB interface's route reaches, beside virtio-net.
-`device_del` must retire its interface, along with its routes, neighbours
-and DHCP client, while the other NIC keeps its name.
+- **`usb-core::cdc`**: the ECM and NCM function found from its control
+  interface (union, Ethernet and NCM functional descriptors, the data
+  setting with a bulk pair, the notification endpoint), the MAC string, the
+  notifications, the ECM and NCM class requests, the NTB parameters, NTB-16
+  written and read, and the zero-length packet rule; host tests on QEMU's
+  descriptors and an NCM function, with mutation loops over every parser.
+  `functions()` groups a CDC union's interfaces into one function, and
+  `bus::alternate_change` says what moving an interface to another setting
+  drops and adds.
+- **`drivers/src/usb/xhci`**: `BoundDevice::select`, an alternate setting as
+  **Decided** below states; `BoundDevice::queue`, a bulk endpoint with
+  buffers of the device's own pages that a driver keeps transfers on without
+  waiting, whose halts the tree recovers; one `TransferSink` for streams
+  and queues, told of a queue's ring running again too; command completions
+  waking the threads that wait for transfers.
+- **`usb-net`**, as **Decided** below states, and `nic::retire` outside
+  `test-hooks`.
+- **The review's and the security sweep's findings, fixed**: DHCP refuses a
+  lease whose mask would make the Internet on-link, default routes and the
+  resolver rank interfaces by publication, and a queue that keeps halting
+  resets its device, each as **Decided** below states, with DHCP client,
+  resolver and route tests.
+- **Tests**: in `just test-usb` a `usb-net` behind qemu-xhci's hub, its
+  netdev `10.0.3.0/24` with the echo peer at `10.0.3.100`, and in the guest:
+  `eth1` beside virtio-net's `eth0`, a lease of `10.0.3.15`, the network
+  routed through it and the gateway resolved over it; two pulls that each
+  leave no interface, route, neighbour, DHCP client or device slot behind,
+  `eth0` unrenamed; two plugs back to `eth1`; its notification endpoint
+  abandoned and recovered with the HID reports; and `usb_net_test`, TCP to
+  the echo peer in segments of every length from 1 to 128 bytes, which puts
+  some frames on whole packets and so behind a zero-length packet. The host
+  holds the log to `eth1` named and removed as often as the device was
+  plugged and pulled. The peer is a SLIRP `guestfwd` rather than the host's
+  10.0.3.2, which would need a port on the host the guest is told of.
 
-**On the laptop,** a USB-C Ethernet adapter in its class configuration
-takes a lease, and git fetches over it.
+**On the laptop (not yet run),** a USB-C Ethernet adapter in its class
+configuration takes a lease, and git fetches over it. NCM is graded by the
+host tests alone until then: QEMU has no NCM device.
 
 ## Grading
 
@@ -543,7 +555,7 @@ takes a lease, and git fetches over it.
 - **A driver may own its pipes.** `BoundDevice::stream` hands a driver its
   device's two bulk pipes as a `Stream`, whose halts the tree leaves to it:
   the tree recovers neither pipe, their completions reach the driver's
-  `StreamSink` where the event ring is drained, and the driver issues Reset
+  `TransferSink` where the event ring is drained, and the driver issues Reset
   and Stop Endpoint, control requests on EP0 and to the hub whose transaction
   translator reaches it, and a Configure Endpoint that drops and adds its
   pipes. That one command resets the controller's data toggle and points
@@ -558,6 +570,48 @@ takes a lease, and git fetches over it.
   A command a driver
   issues is held to the controller's rule: one that never completes kills
   the controller.
+- **Or leave them to the tree.** `BoundDevice::queue` hands a driver one
+  bulk endpoint as a `Queue`: buffers of pages the device owns, kept as long
+  as the device so a transfer the controller still holds never reaches a
+  freed page, and transfers the driver pushes over them from any context
+  without waiting. Each completion reaches the queue's `TransferSink` where
+  the event ring is drained. A halt is recovered by the tree as any
+  endpoint's is; what was posted behind it completes as cancelled, and the
+  sink hears from the USB thread once the ring runs again, so the driver
+  posts again. A queue that halts four times, each within a second of the
+  last and with nothing received between, has its device reset and
+  enumerated again, as a driver's escalation does, so a device that stalls
+  every transfer spends its port's tries rather than the USB thread. A
+  protocol whose recovery is a cleared halt takes a queue; one that must
+  read a status after a halt, as Bulk-Only does, owns its pipes.
+- **An interface may move to another alternate setting.**
+  `BoundDevice::select` runs on the bind thread, for an interface of the
+  function: one Configure Endpoint drops the rings of the setting the
+  interface was in and adds rings for the new one's endpoints, refused when
+  one would take a DCI another interface holds or an old one is open or has
+  a transfer out, and then `SET_INTERFACE` tells the device, the order xHCI
+  §4.6.6.1 gives. A device that refuses `SET_INTERFACE` leaves the
+  interface unusable until it is enumerated again. The input context is the
+  slot's own, which the tree is done with once the device is offered. A
+  Configure Endpoint whose wait is cut short may still run, so its rings
+  become the device's whatever the answer; one that never completes kills
+  the controller. Handles open endpoints of each interface's current setting
+  only. Interfaces numbered past 31 stay in setting 0.
+- **A USB NIC's DHCP server is untrusted input.** Plugging a device starts
+  DHCP on it with nobody asking, so a lease may not take what the machine's
+  own NIC set up. An offer or ACK whose mask is missing, has holes or is
+  shorter than /8 is not taken, since its connected route would outrank
+  every default route. A default route's metric adds its interface's index,
+  so the interface published first keeps the default whatever order leases
+  land or renew in. The resolver goes to the lease of the lowest-indexed
+  interface that names one: a later interface's lease neither takes it nor
+  empties it by leaving, and when the holder's lease goes, the other leases
+  still held offer theirs again.
+- **A CDC union is one function.** A communications interface whose union
+  functional descriptor names it the control interface and the interfaces
+  right after it as subordinates is offered with them as one function, as
+  an association's are, so the data interface's endpoints are the driver's.
+  A union naming anything else groups nothing.
 - **A bulk TD spans pages.** A transfer of more than a page is one TD of
   chained Normal TRBs, one per page and at most 32, each with
   Interrupt-on-Short-Packet and its TD Size, and IOC on the last; a Link TRB
@@ -845,6 +899,34 @@ takes a lease, and git fetches over it.
   `ethN` when it is published. USB publishes after PCI, so the built-in NIC
   keeps `eth0`, and a USB NIC that leaves gives its name back. Vendor modes
   are not planned; a class configuration reaches most adapters.
+- **`usb-net` keeps the data path off the USB thread.**
+  - Probe declines a function whose `wMaxSegmentSize` is under 1514, since
+    the stack assumes a 1500-byte MTU, or whose MAC string is not twelve hex
+    digits of a unicast address; it then selects the data setting with the
+    bulk pair, asks for directed and broadcast frames, posts the bulk-IN
+    transfers and publishes, with no lock held.
+  - Four bulk-IN transfers stay posted. Netpoll takes them in the order they
+    complete, copies each frame or NTB out of its buffer and posts it again;
+    a zero-length one, which QEMU sends after a frame of whole packets, is
+    dropped.
+  - `tx` copies the frame into one of four bulk-OUT buffers, or the NTB
+    holding it, pushes it, follows a transfer of whole packets with a
+    zero-length packet, and returns; a frame's TD and its zero-length packet
+    take two of a ring's eight transfer slots. Buffers are reclaimed as
+    transfers complete, at the next send or poll.
+  - The drain only marks work pending and wakes netpoll; the tree recovers
+    a halted pipe.
+  - Carrier is what the last `NETWORK_CONNECTION` said, held in an atomic
+    the net-timer samples, so a notification that repeats the state, as
+    QEMU sends on every poll, changes nothing. It starts down, and a
+    function with no notification endpoint is taken as always up. `wIndex`
+    is not checked, because QEMU's names the data interface.
+  - NCM is NTB-16 only, the device's IN blocks held to 16 KiB or its own
+    maximum when smaller (`SET_NTB_INPUT_SIZE`, in the long form when its
+    capabilities ask), and one datagram per OUT block laid out by the
+    device's divisor, remainder and alignment. A received block yields
+    every well-formed datagram within it, through at most eight NDPs and 64
+    datagrams; the rest are skipped.
 - **No USB API in userland.** A device shows up only as the disk, the
   interface or the input its class gives it. The kernel log and a kconsole
   command list the bus.

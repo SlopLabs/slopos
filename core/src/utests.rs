@@ -89,6 +89,7 @@ crate::utest!(name = utest_persist, bin = "/bin/persist_test");
 crate::utest!(name = utest_reboot_clone, bin = "/bin/reboot_clone_test");
 crate::utest!(name = utest_cpufreq, bin = "/bin/cpufreq_test");
 crate::utest!(name = utest_usb_disk, bin = "/bin/usb_disk_test", explicit);
+crate::utest!(name = utest_usb_net, bin = "/bin/usb_net_test", explicit);
 crate::utest!(
     name = utest_usb_shell,
     bin = "/bin/usb_shell_test",

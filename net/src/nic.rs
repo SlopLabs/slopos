@@ -109,9 +109,9 @@ fn snapshot(out: &mut NicTable) {
     }
 }
 
-/// Take `dev` out of service: the inverse of [`publish`]. Production never
-/// retires a NIC; tests do, to leave the stack as they found it.
-#[cfg(feature = "test-hooks")]
+/// Take `dev` out of service: the inverse of [`publish`]. Call with no driver
+/// lock held; the device's `set_down` runs before this returns. `false` when
+/// `dev` is not published.
 pub fn retire(dev: DevIndex) -> bool {
     let removed = {
         let mut nics = NICS.lock();

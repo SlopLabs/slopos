@@ -26,7 +26,7 @@ use slopos_usb_core::xhci::ring::{CommandResult, SubmitError, Ticket};
 use slopos_usb_core::xhci::transfer::{MAX_TD_PAGES, PushError, Transfer, TransferResult};
 
 use super::bus::{BoundUsbDevice, UsbFunction, UsbMatch};
-use super::xhci::device::{STREAM_IN, STREAM_OUT, Stream, StreamSink, Translator};
+use super::xhci::device::{STREAM_IN, STREAM_OUT, Stream, TransferSink, Translator};
 use crate::block::engine::{BlkError, Engine, Op, QueueOps, Request, RequestPages};
 use crate::block::{self, DiskName, EngineDisk};
 use crate::driver_core::bus::{ProbeError, ProbeOutcome, Removal};
@@ -394,7 +394,7 @@ struct Waker {
     engine: KArc<Engine>,
 }
 
-impl StreamSink for Waker {
+impl TransferSink for Waker {
     fn completed(&self) {
         let stepped = self.shared.completed();
         finished(&stepped, &self.engine);

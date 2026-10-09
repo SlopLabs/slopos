@@ -15,10 +15,14 @@ pub mod kind {
 
 pub mod class {
     pub const PER_INTERFACE: u8 = 0x00;
+    pub const COMMUNICATIONS: u8 = 0x02;
     pub const HUB: u8 = 0x09;
     pub const MISCELLANEOUS: u8 = 0xef;
     pub const VENDOR: u8 = 0xff;
 }
+
+const CS_INTERFACE: u8 = 0x24;
+const UNION: u8 = 0x06;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Malformed {
@@ -345,7 +349,8 @@ impl<'a> Iterator for Items<'a> {
 /// Functions past this are left unbound.
 pub const MAX_FUNCTIONS: usize = 16;
 
-/// What a driver binds: one interface, or the interfaces an association groups.
+/// What a driver binds: one interface, or the interfaces an association or a
+/// communications class union groups.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Function {
     pub first_interface: u8,
@@ -449,8 +454,11 @@ impl<'a> Configuration<'a> {
             })
     }
 
-    /// Alternate setting 0 of every interface, an association's interfaces as
-    /// one function named by its class triple.
+    /// Alternate setting 0 of every interface. An association's interfaces
+    /// are one function named by its class triple, and so is a communications
+    /// interface with the interfaces its Union functional descriptor (CDC 1.2
+    /// §5.2.3.2) names when they are the next numbers and in no other
+    /// function, named by the communications interface's triple.
     pub fn functions(&self) -> Functions {
         let mut associations = [Association::default(); MAX_FUNCTIONS];
         let mut count = 0;
@@ -479,7 +487,7 @@ impl<'a> Configuration<'a> {
                 },
                 None => Function {
                     first_interface: interface.number,
-                    interfaces: 1,
+                    interfaces: 1 + self.union(&interface, associations, &functions),
                     class: interface.class,
                     subclass: interface.subclass,
                     protocol: interface.protocol,
@@ -488,6 +496,40 @@ impl<'a> Configuration<'a> {
             functions.push(function);
         }
         functions
+    }
+
+    /// How many interfaces a communications interface's union adds to its
+    /// function: 0 unless they follow it and belong to nothing else.
+    fn union(&self, control: &Interface, associations: &[Association], taken: &Functions) -> u8 {
+        if control.class != class::COMMUNICATIONS {
+            return 0;
+        }
+        let Some(subordinates) = self.setting(control.number, 0).find_map(|item| match item {
+            Item::Other {
+                kind: CS_INTERFACE,
+                bytes,
+            } if bytes.len() >= 4 && bytes[2] == UNION => Some(bytes),
+            _ => None,
+        }) else {
+            return 0;
+        };
+        if subordinates[3] != control.number || subordinates.len() < 5 {
+            return 0;
+        }
+        let subordinates = &subordinates[4..];
+        let consecutive = subordinates.iter().enumerate().all(|(k, &number)| {
+            usize::from(number) == usize::from(control.number) + 1 + k
+                && !taken.holds(number)
+                && !associations.iter().any(|a| a.covers(number))
+                && self
+                    .interfaces()
+                    .any(|i| i.number == number && i.alternate == 0)
+        });
+        if consecutive {
+            subordinates.len() as u8
+        } else {
+            0
+        }
     }
 
     pub fn has_interface_class(&self, class: u8) -> bool {
@@ -554,6 +596,46 @@ pub(crate) mod tests {
 
     pub fn association(first: u8, count: u8, class: [u8; 3]) -> [u8; 8] {
         [8, 11, first, count, class[0], class[1], class[2], 0]
+    }
+
+    pub const ECM_ETHERNET: [u8; 13] = [13, 0x24, 0x0f, 3, 0, 0, 0, 0, 0xea, 0x05, 0, 0, 0];
+
+    /// QEMU usb-net's ECM configuration.
+    pub fn qemu_ecm() -> Vec<u8> {
+        configuration(
+            1,
+            50,
+            &[
+                &interface(0, 0, 1, [2, 6, 0]),
+                &[5, 0x24, 0x00, 0x10, 0x01],
+                &[5, 0x24, 0x06, 0, 1],
+                &ECM_ETHERNET,
+                &endpoint(0x81, 3, 16, 32),
+                &interface(1, 0, 0, [10, 0, 0]),
+                &interface(1, 1, 2, [10, 0, 0]),
+                &endpoint(0x82, 2, 64, 0),
+                &endpoint(0x02, 2, 64, 0),
+            ],
+        )
+    }
+
+    /// QEMU usb-net's RNDIS configuration.
+    pub fn qemu_rndis() -> Vec<u8> {
+        configuration(
+            2,
+            50,
+            &[
+                &interface(0, 0, 1, [2, 2, 0xff]),
+                &[5, 0x24, 0x00, 0x10, 0x01],
+                &[5, 0x24, 0x01, 0x00, 0x01],
+                &[4, 0x24, 0x02, 0x00],
+                &[5, 0x24, 0x06, 0, 1],
+                &endpoint(0x81, 3, 8, 32),
+                &interface(1, 0, 2, [10, 0, 0]),
+                &endpoint(0x82, 2, 64, 0),
+                &endpoint(0x02, 2, 64, 0),
+            ],
+        )
     }
 
     #[test]
@@ -721,8 +803,88 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_communications_union_groups_the_interfaces_after_it() {
+        let one = |bytes: &[u8]| {
+            let functions = Configuration::parse(bytes).unwrap().functions();
+            assert_eq!(functions.as_slice().len(), 1);
+            functions.as_slice()[0]
+        };
+        assert_eq!(
+            one(&qemu_ecm()),
+            Function {
+                first_interface: 0,
+                interfaces: 2,
+                class: 2,
+                subclass: 6,
+                protocol: 0,
+            }
+        );
+        assert_eq!(
+            one(&qemu_rndis()),
+            Function {
+                first_interface: 0,
+                interfaces: 2,
+                class: 2,
+                subclass: 2,
+                protocol: 0xff,
+            }
+        );
+        let three = configuration(
+            1,
+            0,
+            &[
+                &interface(4, 0, 0, [2, 0x0d, 0]),
+                &[6, 0x24, 0x06, 4, 5, 6],
+                &interface(5, 0, 0, [10, 0, 1]),
+                &interface(6, 0, 0, [10, 0, 1]),
+            ],
+        );
+        assert_eq!(one(&three).interfaces, 3);
+    }
+
+    #[test]
+    fn a_union_naming_anything_else_groups_nothing() {
+        let functions = |union: &[u8], data: u8| -> Vec<(u8, u8)> {
+            let bytes = configuration(
+                1,
+                0,
+                &[
+                    &interface(0, 0, 0, [2, 6, 0]),
+                    union,
+                    &interface(data, 0, 0, [10, 0, 0]),
+                ],
+            );
+            Configuration::parse(&bytes)
+                .unwrap()
+                .functions()
+                .as_slice()
+                .iter()
+                .map(|f| (f.first_interface, f.interfaces))
+                .collect()
+        };
+        assert_eq!(functions(&[5, 0x24, 6, 0, 1], 1), [(0, 2)]);
+        assert_eq!(functions(&[5, 0x24, 6, 0, 2], 2), [(0, 1), (2, 1)]);
+        assert_eq!(functions(&[5, 0x24, 6, 0, 1], 2), [(0, 1), (2, 1)]);
+        assert_eq!(functions(&[5, 0x24, 6, 1, 1], 1), [(0, 1), (1, 1)]);
+        assert_eq!(functions(&[4, 0x24, 6, 0], 1), [(0, 1), (1, 1)]);
+        assert_eq!(functions(&[6, 0x24, 6, 0, 1, 2], 1), [(0, 1), (1, 1)]);
+        let associated = configuration(
+            1,
+            0,
+            &[
+                &interface(0, 0, 0, [2, 6, 0]),
+                &[5, 0x24, 6, 0, 1],
+                &association(1, 1, [10, 0, 0]),
+                &interface(1, 0, 0, [10, 0, 0]),
+            ],
+        );
+        let functions = Configuration::parse(&associated).unwrap().functions();
+        assert_eq!(functions.as_slice().len(), 2);
+    }
+
+    #[test]
     fn mutated_descriptors_never_panic_or_read_past_their_bytes() {
-        let bytes = configuration(
+        let associated = configuration(
             2,
             250,
             &[
@@ -753,20 +915,22 @@ pub(crate) mod tests {
                 let _ = config.raw().count();
             }
         };
-        for len in 0..=bytes.len() {
-            exercise(&bytes[..len]);
-        }
         let mut state = 0x2545_f491_4f6c_dd1du64;
-        for at in 0..bytes.len() {
-            for _ in 0..16 {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                let mut mutated = bytes.clone();
-                mutated[at] = state as u8;
-                exercise(&mutated);
-                let cut = (state >> 8) as usize % (bytes.len() + 1);
-                exercise(&mutated[..cut]);
+        for bytes in [associated, qemu_ecm(), qemu_rndis()] {
+            for len in 0..=bytes.len() {
+                exercise(&bytes[..len]);
+            }
+            for at in 0..bytes.len() {
+                for _ in 0..16 {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let mut mutated = bytes.clone();
+                    mutated[at] = state as u8;
+                    exercise(&mutated);
+                    let cut = (state >> 8) as usize % (bytes.len() + 1);
+                    exercise(&mutated[..cut]);
+                }
             }
         }
     }

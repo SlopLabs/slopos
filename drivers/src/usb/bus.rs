@@ -12,8 +12,8 @@ use slopos_usb_core::device::Speed;
 use slopos_usb_core::device::descriptor::{Configuration, Function, MAX_FUNCTIONS};
 
 use super::xhci::device::{
-    Bind, BindState, Control, Device, Pipe, Posted, ReportSink, Reports, STREAM_IN, STREAM_OUT,
-    Stream,
+    Bind, BindState, Control, Device, Pipe, Posted, Queue, ReportSink, Reports, STREAM_IN,
+    STREAM_OUT, Stream,
 };
 use crate::driver_core::bound::BoundError;
 use crate::driver_core::bus::{
@@ -525,15 +525,39 @@ impl<'d> BoundDevice<'d, UsbBus> {
         self.keep(posted)
     }
 
+    /// Moves `interface`, one of the function's, to alternate setting
+    /// `alternate`, whose endpoints are the ones handles open from then on.
+    pub fn select(&mut self, interface: u8, alternate: u8) -> Result<(), BoundError> {
+        if !self.info.covers(interface) {
+            return Err(BoundError::NoSuchEndpoint);
+        }
+        self.device()?.select(interface, alternate)
+    }
+
+    /// The bulk endpoint at `address`, with `buffers` buffers of `pages`
+    /// pages each to keep transfers on.
+    pub fn queue(
+        &mut self,
+        address: u8,
+        buffers: usize,
+        pages: usize,
+    ) -> Result<KArc<Queue>, BoundError> {
+        self.owned_endpoint(address)?;
+        let queue = Queue::open(self.device()?, address, buffers, pages)?;
+        self.keep(queue)
+    }
+
     fn owned_endpoint(&self, address: u8) -> Result<(), BoundError> {
         let info = *self.info;
         let device = self.device()?;
+        let alternates = device.alternates();
+        let current = |number: u8| alternates.get(usize::from(number)).copied().unwrap_or(0);
         let owned = device.stored(|b| {
             let config = Configuration::parse(&b[STORE_CONFIGURATION..]).ok()?;
             config
                 .interfaces()
-                .filter(|i| i.alternate == 0 && info.covers(i.number))
-                .flat_map(|i| config.endpoints(i.number, 0))
+                .filter(|i| info.covers(i.number) && i.alternate == current(i.number))
+                .flat_map(|i| config.endpoints(i.number, i.alternate))
                 .find(|e| e.address == address)
         });
         owned.map(|_| ()).ok_or(BoundError::NoSuchEndpoint)

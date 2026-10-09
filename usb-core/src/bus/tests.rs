@@ -1738,6 +1738,61 @@ fn every_function_of_a_configuration_is_offered_by_its_class() {
 }
 
 #[test]
+fn an_alternate_change_drops_its_old_setting_and_adds_the_new() {
+    let config = configuration(
+        1,
+        0,
+        &[
+            &interface(0, 0, 1, [2, 6, 0]),
+            &endpoint(0x81, 3, 16, 32),
+            &interface(1, 0, 0, [0x0a, 0, 0]),
+            &interface(1, 1, 2, [0x0a, 0, 0]),
+            &endpoint(0x82, 2, 64, 0),
+            &endpoint(0x02, 2, 64, 0),
+            &interface(1, 2, 1, [0x0a, 0, 0]),
+            &endpoint(0x83, 2, 64, 0),
+            &interface(1, 3, 1, [0x0a, 0, 0]),
+            &endpoint(0x81, 2, 64, 0),
+            &interface(1, 4, 2, [0x0a, 0, 0]),
+            &endpoint(0x84, 2, 64, 0),
+            &endpoint(0x84, 2, 64, 0),
+        ],
+    );
+    let parsed = Configuration::parse(&config).unwrap();
+    let held = 1 << 3;
+
+    let up = alternate_change(&parsed, 1, 0, 1, held).unwrap();
+    assert_eq!(
+        up,
+        AlternateChange {
+            drop: 0,
+            add: 1 << 5 | 1 << 4
+        },
+        "alternate 0 has no endpoints; 0x82 and 0x02 are DCIs 5 and 4"
+    );
+
+    let across = alternate_change(&parsed, 1, 1, 2, held | up.add).unwrap();
+    assert_eq!(across.drop, 1 << 5 | 1 << 4, "the old setting's rings go");
+    assert_eq!(across.add, 1 << 7);
+
+    let back = alternate_change(&parsed, 1, 1, 0, held | up.add).unwrap();
+    assert_eq!((back.drop, back.add), (1 << 5 | 1 << 4, 0));
+
+    assert_eq!(
+        alternate_change(&parsed, 1, 0, 3, held),
+        None,
+        "0x81 is the control interface's"
+    );
+    assert_eq!(
+        alternate_change(&parsed, 1, 0, 4, held),
+        None,
+        "one setting naming a DCI twice"
+    );
+    assert_eq!(alternate_change(&parsed, 1, 0, 5, held), None);
+    assert_eq!(alternate_change(&parsed, 2, 0, 0, held), None);
+}
+
+#[test]
 fn the_simulated_controller_catches_what_it_checks() {
     let mut host = high_speed_tree();
     host.sabotage = Sabotage::NoTt;

@@ -10,6 +10,7 @@
 extern crate std;
 
 pub mod bus;
+pub mod cdc;
 pub mod device;
 pub mod hid;
 pub mod hub;

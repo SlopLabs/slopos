@@ -854,6 +854,51 @@ fn test_nic_rx_drops_dhcp_port_fragments_before_a_lease() -> TestResult {
     pass!()
 }
 
+fn default_metric(dev: DevIndex) -> Option<u32> {
+    route::ROUTE_TABLE
+        .all_routes()
+        .iter()
+        .find(|r| r.dev == dev && r.prefix_len == 0)
+        .map(|r| r.metric)
+}
+
+/// The interface published first keeps the default route whatever order the
+/// leases land or renew in: an adapter plugged in later cannot take it.
+fn test_nic_default_route_stays_with_the_first_interface() -> TestResult {
+    let Some((first, _a)) = publish(MacAddr([2, 0, 0, 0, 0x61, 0x31])) else {
+        return fail!("could not publish a mock NIC");
+    };
+    let Some((later, _b)) = publish(MacAddr([2, 0, 0, 0, 0x61, 0x32])) else {
+        nic::retire(first);
+        return fail!("could not publish a second mock NIC");
+    };
+    let configure = |dev, addr: [u8; 4], gateway: [u8; 4]| {
+        crate::iface_ctl::configure_ipv4(
+            dev,
+            Ipv4Addr(addr),
+            24,
+            Ipv4Addr(gateway),
+            AddrOrigin::Dhcp,
+        )
+        .is_ok()
+    };
+    let configured = configure(later, [10, 98, 0, 15], [10, 98, 0, 2])
+        && configure(first, [10, 99, 0, 15], [10, 99, 0, 2])
+        && configure(later, [10, 98, 0, 15], [10, 98, 0, 2]);
+    let (first_metric, later_metric) = (default_metric(first), default_metric(later));
+    nic::retire(later);
+    nic::retire(first);
+    assert_test!(configured, "both interfaces take an address and a gateway");
+    match (first_metric, later_metric) {
+        (Some(first), Some(later)) => assert_test!(
+            first < later,
+            "the first interface's default route outranks the later one's, renewed last"
+        ),
+        _ => return fail!("each interface has a default route"),
+    }
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_nic_publish_runs_dhcp_and_retire_clears_it,
     suite = nic
@@ -887,5 +932,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_nic_rx_drops_dhcp_port_fragments_before_a_lease,
+    suite = nic
+);
+slopos_testing::stest!(
+    name = test_nic_default_route_stays_with_the_first_interface,
     suite = nic
 );

@@ -411,6 +411,7 @@ fn unbind(ctx: SlotContext, reason: UnbindReason) {
     let _ = iface::retain_addrs(ctx.ifindex, |a| a.origin != AddrOrigin::Dhcp);
     crate::route::remove_device_routes(ctx.dev);
     crate::resolver::RESOLVER.clear_from_lease(ctx.ifindex);
+    reoffer_resolver(ctx.ifindex);
 
     let abi_reason = match reason {
         UnbindReason::Nak => NET_DHCP_REASON_NAK,
@@ -419,6 +420,28 @@ fn unbind(ctx: SlotContext, reason: UnbindReason) {
     };
     post_dhcp_event(ctx.ifindex, ctx.state, abi_reason, 0);
     klog_info!("dhcp: unbound iface {} ({:?})", ctx.ifindex, reason);
+}
+
+/// Every other interface still holding a lease that names a resolver offers
+/// it again, so the one published first takes the resolver its departing
+/// holder emptied.
+fn reoffer_resolver(departing: u32) {
+    let mut leases = [(0u32, [0u8; 4]); MAX_CLIENTS];
+    {
+        let table = CLIENTS.lock();
+        for (lease, slot) in leases.iter_mut().zip(table.slots.iter()) {
+            let held = matches!(
+                slot.client.state(),
+                DhcpState::Bound | DhcpState::Renewing | DhcpState::Rebinding
+            );
+            if slot.dev.is_some() && held && slot.ifindex != departing {
+                *lease = (slot.ifindex, slot.client.dns());
+            }
+        }
+    }
+    for &(ifindex, dns) in leases.iter().filter(|(_, dns)| *dns != [0; 4]) {
+        crate::resolver::RESOLVER.set_from_lease(ifindex, &[Ipv4Addr(dns)]);
+    }
 }
 
 fn post_dhcp_event(ifindex: u32, state: DhcpState, reason: u8, lease_secs: u32) {

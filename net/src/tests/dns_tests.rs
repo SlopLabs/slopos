@@ -669,6 +669,44 @@ fn udp_port_bindable(port: u16, addr: [u8; 4], reuse: bool) -> bool {
     bound
 }
 
+/// The resolver goes to the lease of the interface published first: one
+/// plugged in later, a USB adapter's say, neither takes it nor empties it by
+/// leaving, and one published earlier takes it whenever its lease lands.
+pub fn test_dns_resolver_keeps_the_first_interface_lease() -> TestResult {
+    let r = crate::resolver::ResolverConfig::new();
+    let built_in = [Ipv4Addr([10, 0, 2, 3])];
+    let adapter = [Ipv4Addr([10, 0, 3, 3])];
+    assert_test!(
+        r.set_from_lease(3, &adapter),
+        "a lone lease sets the resolver"
+    );
+    assert_test!(
+        r.set_from_lease(2, &built_in),
+        "an earlier interface's lease takes it"
+    );
+    assert_test!(
+        !r.set_from_lease(3, &adapter),
+        "and a later one's renewal does not take it back"
+    );
+    r.clear_from_lease(3);
+    assert_eq_test!(
+        r.primary(),
+        Some(built_in[0]),
+        "the later interface leaving changes nothing"
+    );
+    assert_test!(
+        r.set_from_lease(2, &adapter),
+        "the holder's renewal updates it"
+    );
+    r.clear_from_lease(2);
+    assert_eq_test!(r.primary(), None, "the holder leaving empties it");
+    assert_test!(
+        r.set_from_lease(3, &built_in),
+        "and then another interface's lease applies"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(name = test_dns_t1_name_encoding, suite = dns);
 slopos_testing::stest!(name = test_dns_t2_query_construction, suite = dns);
 slopos_testing::stest!(name = test_dns_t3_name_decoding, suite = dns);
@@ -679,6 +717,10 @@ slopos_testing::stest!(
     suite = dns
 );
 slopos_testing::stest!(name = test_dns_t7_resolver_exhaustion, suite = dns);
+slopos_testing::stest!(
+    name = test_dns_resolver_keeps_the_first_interface_lease,
+    suite = dns
+);
 slopos_testing::stest!(name = test_dns_t8_regression_network_stack, suite = dns);
 slopos_testing::stest!(name = test_dns_t9_query_entropy, suite = dns);
 slopos_testing::stest!(name = test_dns_t10_response_provenance, suite = dns);

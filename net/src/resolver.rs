@@ -132,9 +132,16 @@ impl ResolverConfig {
     }
 
     /// Offer a configuration learned from a lease. Refused, and reported as
-    /// refused, while an operator's configuration is pinned.
+    /// refused, while an operator's configuration is pinned, or while the lease
+    /// of an interface published earlier (a lower index) holds it: an adapter
+    /// plugged in later, a USB one say, neither takes the machine's resolver
+    /// nor empties it by leaving.
     pub fn set_from_lease(&self, ifindex: u32, servers: &[Ipv4Addr]) -> bool {
-        if self.is_pinned() {
+        let holder = self.source_ifindex();
+        let outranked = self.source() == NET_RESOLVER_SRC_DHCP
+            && holder != slopos_abi::net::NET_IFINDEX_NONE
+            && holder < ifindex;
+        if self.is_pinned() || outranked {
             return false;
         }
         self.write_servers(servers);

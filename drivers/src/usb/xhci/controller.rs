@@ -90,7 +90,7 @@ struct Took {
     /// A driver may be waiting on it.
     transfer: bool,
     report: bool,
-    stream: bool,
+    sink: bool,
 }
 
 #[derive(slopos_ostd::SlotFields)]
@@ -115,8 +115,8 @@ pub struct Controller {
     port_changes: [AtomicU64; PORT_WORDS],
     /// Slots with a report completed, by number.
     reports_done: [AtomicU64; PORT_WORDS],
-    /// Slots with a stream's transfer completed, by number.
-    streams_done: [AtomicU64; PORT_WORDS],
+    /// Slots with a transfer for a sink completed, by number.
+    sinks_done: [AtomicU64; PORT_WORDS],
     state: AtomicU8,
     /// What a drain found wrong, for the thread to act on.
     failure: AtomicU8,
@@ -202,11 +202,7 @@ impl Controller {
             reports_done,
             [const { AtomicU64::new(0) }; PORT_WORDS]
         );
-        write_field!(
-            slot,
-            streams_done,
-            [const { AtomicU64::new(0) }; PORT_WORDS]
-        );
+        write_field!(slot, sinks_done, [const { AtomicU64::new(0) }; PORT_WORDS]);
         write_field!(slot, stuck, AtomicBool::new(false));
         write_field!(slot, state, AtomicU8::new(STARTING));
         write_field!(slot, failure, AtomicU8::new(Health::Running as u8));
@@ -406,7 +402,7 @@ impl Controller {
                     took.work |= one.work;
                     took.transfer |= one.transfer;
                     took.report |= one.report;
-                    took.stream |= one.stream;
+                    took.sink |= one.sink;
                 },
             )
         };
@@ -417,8 +413,8 @@ impl Controller {
         if took.work {
             self.note_work();
         }
-        if took.stream {
-            self.dispatch_streams();
+        if took.sink {
+            self.dispatch_sinks();
         }
         if took.transfer {
             crate::usb::TRANSFERS.wake_all();
@@ -445,6 +441,7 @@ impl Controller {
                 self.commands.lock().complete(trb, completion);
                 Took {
                     work: true,
+                    transfer: true,
                     ..Took::default()
                 }
             }
@@ -465,14 +462,14 @@ impl Controller {
                 if finished.report {
                     Self::flag(&self.reports_done, slot);
                 }
-                if finished.stream {
-                    Self::flag(&self.streams_done, slot);
+                if finished.sink {
+                    Self::flag(&self.sinks_done, slot);
                 }
                 Took {
                     work: finished.transfer && finished.tree,
-                    transfer: finished.transfer && !finished.report && !finished.stream,
+                    transfer: finished.transfer && !finished.report && !finished.sink,
                     report: finished.report,
-                    stream: finished.stream,
+                    sink: finished.sink,
                 }
             }
             Event::PortStatusChange { port } if (1..=self.caps.max_ports).contains(&port) => {
@@ -508,13 +505,13 @@ impl Controller {
         Self::take_lowest(&self.port_changes)
     }
 
-    /// Each device's streams hear of their completions under the device
+    /// Each device's sinks hear of their completions under the device
     /// table's lock, which keeps the device from being freed under them.
-    fn dispatch_streams(&self) {
-        while let Some(slot) = Self::take_lowest(&self.streams_done) {
+    fn dispatch_sinks(&self) {
+        while let Some(slot) = Self::take_lowest(&self.sinks_done) {
             let devices = self.devices.lock();
             if let Some(device) = devices.get(usize::from(slot)).and_then(Option::as_ref) {
-                device.dispatch_streams();
+                device.dispatch_sinks();
             }
         }
     }

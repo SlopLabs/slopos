@@ -322,6 +322,10 @@ name = "usb_disk_test"
 path = "src/bin/tests/usb_disk_test.rs"
 
 [[bin]]
+name = "usb_net_test"
+path = "src/bin/tests/usb_net_test.rs"
+
+[[bin]]
 name = "dns_concurrent_test"
 path = "src/bin/tests/dns_concurrent_test.rs"
 

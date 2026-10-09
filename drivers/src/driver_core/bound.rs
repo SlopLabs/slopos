@@ -31,6 +31,8 @@ pub enum BoundError {
     NoSuchEndpoint,
     /// Another handle already holds it.
     Busy,
+    /// The device or its controller refused a request.
+    Refused,
     /// The device left during the probe.
     Gone,
 }

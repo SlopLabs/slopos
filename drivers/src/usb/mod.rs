@@ -5,6 +5,7 @@
 pub mod bus;
 pub mod hid;
 mod kconsole;
+pub mod net;
 pub mod storage;
 pub mod xhci;
 

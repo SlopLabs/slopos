@@ -56,7 +56,7 @@ pub fn change(dest: RouteDest, via: Option<Ipv4>, dev: Option<&[u8]>, adding: bo
     net_route_ctl(&req, adding).map_err(|err| Failure::from_errno("route", err))
 }
 
-/// `default via 10.0.2.2 dev eth0 proto dhcp metric 100`
+/// `default via 10.0.2.2 dev eth0 proto dhcp metric 102`
 /// `10.0.2.0/24 dev eth0 proto kernel`
 fn print_route(route: &UserRoute, ifaces: &query::Ifaces) {
     let mut line = std::string::String::new();

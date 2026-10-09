@@ -619,6 +619,51 @@ fn test_dhcp_ignores_foreign_and_untimely_replies() -> TestResult {
     pass!()
 }
 
+/// A lease whose mask is missing, holed or shorter than /8 would install a
+/// connected route that takes traffic meant for the default route: a USB
+/// gadget's DHCP server is no more trusted than its descriptors.
+fn test_dhcp_refuses_a_lease_that_claims_the_internet_on_link() -> TestResult {
+    let mut buf = [0u8; DHCP_FRAME_LEN];
+    for mask in [[0, 0, 0, 0], [254, 0, 0, 0], [255, 0, 255, 0]] {
+        let mut c = DhcpClient::new(MAC, SEED);
+        c.step(DhcpEvent::Start, 0);
+        let mut b = ReplyBuilder::new(&mut buf, c.xid(), MSG_OFFER, CLIENT_IP);
+        b.opt(54, &SERVER).opt(1, &mask);
+        let len = b.finish();
+        assert_eq_test!(
+            c.step(DhcpEvent::Reply(&buf[..len]), 10),
+            DhcpAction::Idle,
+            "an offer with a mask under /8 or with holes is not taken"
+        );
+
+        let len = offer(&mut buf, c.xid());
+        c.step(DhcpEvent::Reply(&buf[..len]), 20);
+        let mut b = ReplyBuilder::new(&mut buf, c.xid(), MSG_ACK, CLIENT_IP);
+        b.opt(54, &SERVER)
+            .opt(1, &mask)
+            .opt(51, &3600u32.to_be_bytes());
+        let len = b.finish();
+        assert_eq_test!(
+            c.step(DhcpEvent::Reply(&buf[..len]), 30),
+            DhcpAction::Idle,
+            "an ACK with a mask under /8 or with holes binds nothing"
+        );
+        assert_eq_test!(c.state(), DhcpState::Requesting, "the client still asks");
+    }
+
+    let mut c = DhcpClient::new(MAC, SEED);
+    c.step(DhcpEvent::Start, 0);
+    let mut b = ReplyBuilder::new(&mut buf, c.xid(), MSG_OFFER, CLIENT_IP);
+    b.opt(54, &SERVER);
+    let len = b.finish();
+    assert_eq_test!(
+        c.step(DhcpEvent::Reply(&buf[..len]), 10),
+        DhcpAction::Idle,
+        "an offer naming no mask is not taken"
+    );
+    pass!()
+}
+
 /// Every truncation of a valid ACK decodes or refuses, and none panics: this
 /// parses an unauthenticated broadcast from a machine nobody has proved
 /// anything about.
@@ -779,6 +824,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_dhcp_lease_times_default_to_half_and_seven_eighths,
+    suite = dhcp_client
+);
+slopos_testing::stest!(
+    name = test_dhcp_refuses_a_lease_that_claims_the_internet_on_link,
     suite = dhcp_client
 );
 slopos_testing::stest!(

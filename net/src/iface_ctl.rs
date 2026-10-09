@@ -23,7 +23,9 @@ use crate::types::{DevIndex, Ipv4Addr};
 
 const METRIC_CONNECTED: u32 = 0;
 /// Higher than any connected route, so a directly reachable destination never
-/// goes via the gateway.
+/// goes via the gateway; a default route adds its interface's index, so the
+/// interface published first keeps the default whatever order leases land or
+/// renew in, and an adapter plugged in later cannot take it.
 const METRIC_DEFAULT: u32 = 100;
 
 /// Assign an IPv4 configuration to an interface: address, connected route, and
@@ -72,7 +74,7 @@ pub fn configure_ipv4(
                 prefix_len: 0,
                 gateway,
                 dev,
-                metric: METRIC_DEFAULT,
+                metric: METRIC_DEFAULT.saturating_add(ifindex),
             },
             route_origin_of(origin),
         );

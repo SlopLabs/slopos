@@ -153,6 +153,13 @@ pub struct DhcpClient {
     tx_len: usize,
 }
 
+/// A contiguous mask of at least /8: a lease must not make every destination,
+/// or a sizeable part of the Internet, on-link through its interface.
+fn usable_mask(mask: [u8; 4]) -> bool {
+    let bits = u32::from_be_bytes(mask);
+    bits.leading_ones() >= 8 && bits.leading_ones() + bits.trailing_zeros() == 32
+}
+
 impl DhcpClient {
     /// A client that has not started. `seed` must come from the kernel RNG in
     /// production.
@@ -207,6 +214,12 @@ impl DhcpClient {
     #[inline]
     pub const fn server_id(&self) -> [u8; 4] {
         self.server_id
+    }
+
+    /// The resolver the lease named, or all-zero.
+    #[inline]
+    pub const fn dns(&self) -> [u8; 4] {
+        self.dns
     }
 
     #[inline]
@@ -432,8 +445,10 @@ impl DhcpClient {
 
         match (self.state, reply.msg_type) {
             (DhcpState::Selecting, MSG_OFFER) => {
-                if reply.server_id == [0; 4] || reply.yiaddr == [0; 4] {
-                    // An offer that names no server cannot be requested from.
+                if reply.server_id == [0; 4]
+                    || reply.yiaddr == [0; 4]
+                    || !usable_mask(reply.subnet_mask)
+                {
                     return DhcpAction::Idle;
                 }
                 self.server_id = reply.server_id;
@@ -451,7 +466,7 @@ impl DhcpClient {
             (DhcpState::Requesting, MSG_ACK)
             | (DhcpState::Renewing, MSG_ACK)
             | (DhcpState::Rebinding, MSG_ACK) => {
-                if reply.yiaddr == [0; 4] {
+                if reply.yiaddr == [0; 4] || !usable_mask(reply.subnet_mask) {
                     return DhcpAction::Idle;
                 }
                 let binding = self.adopt(&reply);

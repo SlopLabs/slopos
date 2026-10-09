@@ -220,6 +220,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin cpufreq_test \
         --bin usb_shell_test \
         --bin usb_disk_test \
+        --bin usb_net_test \
         --bin clipboard_test \
         --bin keymap_test \
         --bin appkit_test \
@@ -346,6 +347,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/usb_disk_test" ]; then
         cp "$RELEASE_DIR/usb_disk_test" "$BUILD_DIR/usb_disk_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/usb_net_test" ]; then
+        cp "$RELEASE_DIR/usb_net_test" "$BUILD_DIR/usb_net_test.elf"
     fi
     if [ -f "$RELEASE_DIR/clipboard_test" ]; then
         cp "$RELEASE_DIR/clipboard_test" "$BUILD_DIR/clipboard_test.elf"

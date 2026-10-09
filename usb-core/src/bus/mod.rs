@@ -675,5 +675,46 @@ pub fn for_each_configured_endpoint(
     }
 }
 
+/// What a Configure Endpoint moving one interface to another alternate
+/// setting drops and adds (§4.6.6.1), by DCI bit; the added endpoints are
+/// the new setting's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AlternateChange {
+    pub drop: u32,
+    pub add: u32,
+}
+
+/// Moving `interface` from alternate `from` to `to`, while the DCIs in
+/// `held` have rings. `None` when `to` is no setting of `interface`, or one
+/// of its endpoints would take a DCI another interface holds or one its own
+/// setting names twice.
+pub fn alternate_change(
+    config: &Configuration<'_>,
+    interface: u8,
+    from: u8,
+    to: u8,
+    held: u32,
+) -> Option<AlternateChange> {
+    if !config
+        .interfaces()
+        .any(|i| i.number == interface && i.alternate == to)
+    {
+        return None;
+    }
+    let drop = config
+        .endpoints(interface, from)
+        .fold(0, |bits, e| bits | 1 << dci(e.number(), e.is_in()))
+        & held;
+    let mut add = 0u32;
+    for endpoint in config.endpoints(interface, to) {
+        let index = dci(endpoint.number(), endpoint.is_in());
+        if (held & !drop | add) & 1 << index != 0 {
+            return None;
+        }
+        add |= 1 << index;
+    }
+    Some(AlternateChange { drop, add })
+}
+
 #[cfg(test)]
 pub(crate) mod tests;

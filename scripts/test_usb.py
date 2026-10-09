@@ -3,12 +3,14 @@
 xHCI models, each carrying a SuperSpeed stick, QEMU's full-speed hub with a
 stick, a tablet and a mouse behind it, a high-speed stick and a full-speed
 keyboard, with a high-speed ext4 stick on qemu-xhci's fifth USB 2 connector
-and a read-only ext4 drive for nec-usb-xhci's, and acts on the guest's `USB-TEST:`
-lines: it plugs and pulls devices through QMP and injects keys and motion
-with `input-send-event`. The run passes when the suite is green, the log
-shows every device enumerated, bound where a driver matches it, and removed,
-each time, and both ext4 volumes pass `e2fsck` at rest, the stick holding
-what the guest fsynced before its pull.
+and a read-only ext4 drive for nec-usb-xhci's, and a usb-net behind
+qemu-xhci's hub on a SLIRP network of its own, and acts on the guest's
+`USB-TEST:` lines: it plugs and pulls devices through QMP and injects keys
+and motion with `input-send-event`. The run passes when the suite is green,
+the log shows every device enumerated, bound where a driver matches it, and
+removed, each time, the NIC published as eth1 and retired with it, and both
+ext4 volumes pass `e2fsck` at rest, the stick holding what the guest fsynced
+before its pull.
 
 QEMU sends an event that names no display to the unbound device activated
 most recently, and one that names `video0` to a device bound to it. The
@@ -71,13 +73,20 @@ DEVICES = (
     Device("hs", "usb-storage", "3", {}, "5", "usb-test"),
     Device("fs", "usb-kbd", "4", {"usb_version": 1, "display": DISPLAY}, "6", "usb-hid"),
 )
-# Each controller's own on its fifth connector: qemu-xhci's ext4 stick,
+# Each controller's own: on the fifth connector qemu-xhci's ext4 stick,
 # `sda`, and nec-usb-xhci's read-only drive, which only the guest's `plug ro`
-# attaches.
+# attaches; and behind qemu-xhci's hub a usb-net, which QEMU offers in an
+# RNDIS and an ECM configuration, on 10.0.3.0/24 with the echo peer at
+# 10.0.3.100 (drivers/src/tests/usb_tests.rs, userland/src/bin/tests/usb_net_test.rs).
+NET_MAC = "52:54:00:12:34:99"
 EXTRA = {
-    "xhci1": Device("disk", "usb-storage", "5", {}, "7", "usb-storage"),
-    "xhci2": Device("ro", "usb-storage", "5", {}, "7", "usb-storage"),
+    "xhci1": (
+        Device("disk", "usb-storage", "5", {}, "7", "usb-storage"),
+        Device("net", "usb-net", "2.4", {"netdev": "usbnet0", "mac": NET_MAC}, "4.4", "usb-net"),
+    ),
+    "xhci2": (Device("ro", "usb-storage", "5", {}, "7", "usb-storage"),),
 }
+NET_PEER = "10.0.3.100:9999"
 LATE = {"xhci2-ro"}
 ROUNDS = 2
 TYPED = "exit 7\n"
@@ -86,7 +95,7 @@ QCODES = {" ": "spc", "\n": "ret"}
 
 def devices():
     for bus in CONTROLLERS:
-        for suffix, driver, port, props, path, bound in DEVICES + (EXTRA[bus],):
+        for suffix, driver, port, props, path, bound in DEVICES + EXTRA[bus]:
             yield f"{bus}-{suffix}", bus, driver, port, props, path, bound
 
 
@@ -114,7 +123,9 @@ def ext4_image(image, label, files):
 def device_args(build_dir):
     """Each stick is a `-blockdev` node: QEMU deletes a `-drive` backend with
     the device that used it."""
+    echo = os.environ.get("ECHO_PEER_CMD", "/bin/cat")
     args = ["-parallel", "none", "-trace", "ps2_set_ledstate"]
+    args += ["-netdev", f"user,id=usbnet0,net=10.0.3.0/24,guestfwd=tcp:{NET_PEER}-cmd:{echo}"]
     for bus, (model, _, extra) in CONTROLLERS.items():
         args += ["-device", f"{model},id={bus},p2={USB2_PORTS},p3={USB3_PORTS}{extra}"]
     for name, bus, driver, port, props, _, _ in devices():
@@ -356,13 +367,32 @@ def grade_disks(log, bench, numbers):
         number = numbers.get(CONTROLLERS[bus][1])
         if number is None:
             continue
-        where = f"{number}-{EXTRA[bus].path}"
+        where = f"{number}-{next(d.path for d in EXTRA[bus] if d.driver == 'usb-storage')}"
         named = len(re.findall(rf"^USB: {where} LUN 0 is {disk}, \d+ MB in 512-byte blocks{protected}\r?$", log, re.M))
         if named != bench.adds[name]:
             failures.append(f"{name}: named {disk} {named} times, not {bench.adds[name]}")
         removed = len(re.findall(rf"^USB: {where} {disk} removed\r?$", log, re.M))
         if removed != bench.deletes[name]:
             failures.append(f"{name}: {disk} removed {removed} times, not {bench.deletes[name]}")
+    return failures
+
+
+def grade_nic(log, bench, numbers):
+    """The usb-net is eth1 each time it is plugged, eth0 being virtio-net's,
+    and its interface leaves with it."""
+    number = numbers.get(CONTROLLERS["xhci1"][1])
+    if number is None:
+        return []
+    failures = []
+    where = f"{number}-4.4"
+    named = len(re.findall(rf"^USB: {where} is eth1, {NET_MAC}, ECM\r?$", log, re.M))
+    if named != bench.adds["xhci1-net"]:
+        failures.append(f"xhci1-net: published as eth1 {named} times, not {bench.adds['xhci1-net']}")
+    removed = len(re.findall(rf"^USB: {where} eth1 removed\r?$", log, re.M))
+    if removed != bench.deletes["xhci1-net"]:
+        failures.append(f"xhci1-net: eth1 removed {removed} times, not {bench.deletes['xhci1-net']}")
+    if re.search(r"network function declined", log):
+        failures.append("a network function was declined")
     return failures
 
 
@@ -432,6 +462,7 @@ def grade(log, tests, bench):
         for line in re.findall(rf"USB: {number}-\S+ enumeration failed.*", log):
             failures.append(f"{model}: {line}")
     failures += grade_disks(log, bench, numbers)
+    failures += grade_nic(log, bench, numbers)
     caps = log.find("USB-TEST: caps")
     if caps < 0 or not re.search(r"ps2_set_ledstate \S+ ledstate 6\b", log[caps:]):
         failures.append("Caps Lock on a USB keyboard never lit the i8042's LED")
@@ -521,7 +552,8 @@ def main():
         return 1
     print(
         "test-usb: both controllers ran, every device enumerated, bound and removed, keys and motion "
-        f"reached the guest, the ext4 stick survived its pull, the read-only drive mounted read-only, both reset — {args.log}"
+        "reached the guest, the ext4 stick survived its pull, the read-only drive mounted read-only, "
+        f"the USB NIC leased, carried TCP and left, both reset — {args.log}"
     )
     return 0
 
