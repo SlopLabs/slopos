@@ -1,8 +1,8 @@
-//! `usb-hid`: keyboards and pointers. A boot keyboard is read in the boot
-//! protocol, anything else in the report protocol through `hid-core`. Reports
-//! are decoded wherever the drain runs and fed to the machine's keyboard state
-//! and cursor, as the i8042's are from its interrupt; the USB thread keeps each
-//! keyboard's repeat and LEDs.
+//! `usb-hid`: keyboards and pointers. Every interface is read in the report
+//! protocol through `hid-core`, a boot device in the boot protocol only when
+//! its report descriptor is unusable. Reports are decoded wherever the drain
+//! runs and fed to the machine's keyboard state and cursor, as the i8042's are
+//! from its interrupt; the USB thread keeps each keyboard's repeat and LEDs.
 
 use slopos_hid_core::keyboard::{self as keys, HeldByReport, Keys, Leds};
 use slopos_hid_core::{Kind, boot, pointer};
@@ -316,8 +316,10 @@ fn read_map(control: &Control, info: &UsbFunction, length: u16) -> Option<Report
     }
 }
 
-/// A boot keyboard is always told to use the boot protocol, and a boot device
-/// read through its descriptor the report protocol: neither is assumed.
+/// A device starts in the report protocol (HID 1.11 §7.2.6), so reading its
+/// descriptor is right whether or not it honours `SET_PROTOCOL`; the boot
+/// protocol is only right if it does, and NuPhy's 2.4 GHz receiver (19f5:2620)
+/// acknowledges it and keeps sending its key bitmap.
 fn choose(
     control: &Control,
     info: &UsbFunction,
@@ -326,22 +328,6 @@ fn choose(
 ) -> Option<Protocol> {
     let boot = found.subclass == class::SUBCLASS_BOOT;
     let interface = info.first_interface;
-    if boot && found.protocol == class::PROTOCOL_KEYBOARD {
-        if control
-            .write(Setup::set_protocol(interface, true), &[])
-            .is_ok()
-        {
-            return Some(Protocol::BootKeyboard);
-        }
-        klog_info!(
-            "USB: {}-{} refused the boot protocol",
-            info.controller,
-            info.path
-        );
-        return map
-            .filter(|m| keys::carries_keys(&m.descriptor()))
-            .map(Protocol::Report);
-    }
     if let Some(map) = map.filter(|m| {
         let desc = m.descriptor();
         keys::carries_keys(&desc) || pointer::carries_pointer(&desc)
@@ -351,15 +337,23 @@ fn choose(
         }
         return Some(Protocol::Report(map));
     }
-    if boot
-        && found.protocol == class::PROTOCOL_MOUSE
-        && control
-            .write(Setup::set_protocol(interface, true), &[])
-            .is_ok()
+    let fallback = match found.protocol {
+        class::PROTOCOL_KEYBOARD if boot => Protocol::BootKeyboard,
+        class::PROTOCOL_MOUSE if boot => Protocol::BootMouse,
+        _ => return None,
+    };
+    if control
+        .write(Setup::set_protocol(interface, true), &[])
+        .is_err()
     {
-        return Some(Protocol::BootMouse);
+        klog_info!(
+            "USB: {}-{} refused the boot protocol",
+            info.controller,
+            info.path
+        );
+        return None;
     }
-    None
+    Some(fallback)
 }
 
 fn probe(bound: &mut BoundUsbDevice<'_>) -> Result<ProbeOutcome, ProbeError> {

@@ -779,15 +779,15 @@ the `usb settle` boot step waits up to a minute for every port to be quiet and
 every device to reach an end, and fails the run with `USB: unsettled`. The
 kconsole command `u` lists controllers, ports, devices, drivers and endpoint
 queues. A shutdown hook resets each controller at poweroff and reboot, once
-its sticks are drained and flushed. `usb-hid` reads keyboards and pointers: a
-boot keyboard is told to use the boot
-protocol, anything else is read in the report protocol through `hid-core`,
-and each interface claims a keyboard slot, a pointer slot or both; the `usb`
-thread keeps each keyboard's repeat and LEDs. `hid-core` is HID independent
-of transport, host-tested under `just test-host` with mutation loops: report
-descriptors parsed into storage the caller passes, the boot reports, what a
-keyboard or pointer report says and the LED output report; the I²C-HID
-touchpad parses through it too.
+its sticks are drained and flushed. `usb-hid` reads keyboards and pointers in
+the report protocol through `hid-core`, a boot device in the boot protocol
+only when its report descriptor cannot be read or names neither keys nor a
+pointer, and each interface claims a keyboard slot, a pointer slot or both;
+the `usb` thread keeps each keyboard's repeat and LEDs. `hid-core` is HID
+independent of transport, host-tested under `just test-host` with mutation
+loops: report descriptors parsed into storage the caller passes, the boot
+reports, what a keyboard or pointer report says and the LED output report;
+the I²C-HID touchpad parses through it too.
 
 **A USB stick is a disk.** `usb-storage` binds Bulk-Only SCSI functions (class
 `08/06/50`, which is a UAS device's alternate setting 0 too) and registers

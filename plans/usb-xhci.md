@@ -201,8 +201,12 @@ Built:
   abandoned and recovered, keys and motion injected through
   `input-send-event`, and `usb_shell_test`, a shell typed at.
 
-**On the laptop (not yet run),** an external keyboard and mouse work beside
-the internal keyboard and touchpad.
+**On the laptop,** a Logitech receiver's mouse (046d:c548) worked. A NuPhy
+Air75 V3's 2.4 GHz receiver (19f5:2620), two boot-keyboard interfaces,
+acknowledged `SET_PROTOCOL(boot)` and kept sending its report-protocol key
+bitmap, which read as boot key codes typed usage `u` as `1 << (u % 8)`:
+Backspace and 5 as `a`, 6 as `e`. Read through its report descriptor, as
+every interface now is, it types correctly.
 
 ### Phase 4: Mass storage (done)
 
@@ -749,13 +753,16 @@ takes a lease, and git fetches over it.
   axis places the cursor only when its value changed, as an input core drops
   a repeated absolute value: a tablet repeats its position in every report,
   and would otherwise snap the cursor back from a mouse on each click.
-- **HID protocols.** A boot keyboard is told to use the boot protocol, as
-  HID 1.11 asks a host to tell rather than assume; one that refuses is read
-  through its report descriptor if that names keys. Anything else is read in
-  the report protocol through `hid-core`, a boot-subclass device told so,
-  and a boot mouse whose descriptor cannot be read, or names no pointer,
-  falls back to the boot protocol. Every interface whose protocol is chosen
-  is sent `SET_IDLE(0)`, whose refusal is ignored. A report that rolls over changes nothing held, and a keyboard's
+- **HID protocols.** Every interface whose report descriptor names keys or a
+  pointer is read in the report protocol through `hid-core`, a boot-subclass
+  device told so, whose refusal is ignored: a device starts in the report
+  protocol, so the descriptor is right whether or not the device honours
+  `SET_PROTOCOL`, and a receiver that acknowledges the boot protocol and
+  ignores it does exist. A boot keyboard or mouse whose descriptor cannot be
+  read, or names neither, is told to use the boot protocol, as HID 1.11 asks
+  a host to tell rather than assume, and declined if it refuses. Every
+  interface whose protocol is chosen is sent `SET_IDLE(0)`, whose refusal is
+  ignored. A report that rolls over changes nothing held, and a keyboard's
   report replaces only the keys of its own report ID. Keys are read only
   from Keyboard and Keypad application collections and motion only from
   Mouse and Pointer ones, so a game pad moves no cursor; an interface with
