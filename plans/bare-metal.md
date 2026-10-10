@@ -62,7 +62,8 @@ its firmware entry, `cachyos`, is the only one.
 - The kernel enables HWP, samples every CPU's APERF/MPERF and thermal status,
   knows P-cores from E-cores and SMT siblings, and places tasks by them;
   `/bin/cpufreq` measures and changes all of it, and `prof` profiles a running
-  system.
+  system. On the laptop the system builds itself in about six minutes, 12%
+  less than under the firmware's own settings.
 - A paired SlopOS machine is driven from the development host:
   `/bin/remoted` dials out to `scripts/remote.py`'s broker, which runs
   commands, moves files and installs a kernel and base into the spare slot.
@@ -80,7 +81,7 @@ commits of its own.
 | 4. A crash record — **done** | 1, 3 | a slot that panics leaves the panic behind |
 | 5. Installer and install medium — **done** | 1, 2, 3 | **milestone 1:** SlopOS installed beside CachyOS, self-hosting offline |
 | 6. Wired network — **done** | — | **milestone 2:** git and crates.io over the RJ45 port |
-| 7. Full speed — **built** | 5 | a native build measured, and made faster if the CPU clock is the cause |
+| 7. Full speed — **done** | 5 | a native build measured, and made faster if the CPU clock is the cause |
 
 Phases 2 and 6 can run side by side. Phase 4 comes before phase 5 because the
 first installed boots on the laptop are where a crash record pays off.
@@ -198,12 +199,12 @@ rung in which the guest's git fetches and pushes over SSH through the host's
 own `sshd`. `AGENTS.md` describes all of it; the decisions later phases build on
 are under Decided.
 
-Left for the laptop, which only the user's run grades: the RTL8168h brought up
-without the PHY patch firmware, a DHCP lease on the RJ45 port, `git pull` and
-`git push` reaching the development machine over SSH, and cargo fetching from
-crates.io.
+Seen on the laptop: the RTL8168h brought up without the PHY patch firmware and
+a DHCP lease on the RJ45 port, which every Phase 7 measurement ran over. Left
+for the user's run: `git pull` and `git push` reaching the development machine
+over SSH, and cargo fetching from crates.io.
 
-### Phase 7: Full speed — built, measurement left
+### Phase 7: Full speed — done
 
 Built: `sched/src/cpufreq.rs` with its layouts in `cpufreq-core` — HWP
 enabled at boot on every CPU and asked for autonomous selection at
@@ -221,22 +222,45 @@ that lets an agent take the measurements on the laptop itself (`remoted`,
 once the probe finds no UART there, as on the laptop. `AGENTS.md` describes
 all of it; the decisions are under Decided.
 
-Left for the laptop, which the remote control now reaches once the user has
-booted a paired base on it (`just remote-serve`, then the bootstrap it
-prints):
+Measured on the laptop over the remote control (i5-13420H, eight P threads
+and four E-cores), each run a `scripts/selfhost.sh build release` — kernel,
+userland and base — of the installed clone (`ff6b10ba`) from an empty
+`builddir`, offline from the vendored crates, under `cpufreq run`:
 
-- **Frequency.** With a kernel built `SLOPOS_BUILTIN_CMDLINE=cpufreq=firmware`
-  installed and booted (`just remote-install`): `cpufreq status` for what the
-  firmware left; `cpufreq run -- scripts/selfhost.sh build` for the effective
-  frequency and wall time before; `cpufreq set hwp` and the same build after.
-  Then the default kernel, `cpufreq set epp performance`, and the build again.
-- **Hybrid cores.** `cpufreq bench` under `cpufreq set placement flat` and
-  `ranked`, and the build under each: the cost the placement saves.
-- **Where the rest of the time goes.** `prof start`, the desktop in use or the
-  build, `prof report laptop`, through `scripts/prof_report.py --label laptop`.
+| Kernel and settings | Wall (s) | Busy CPU-s | Busy clock, P / E (MHz) |
+|---|---|---|---|
+| idle CPUs spinning (before `21966fdf`), HWP at 128 | 539.7 | 6433 | 1495 / 1058 |
+| `cpufreq=firmware`, three runs | 397.1, 382.1, 384.2 | 1968–2042 | 1460–1495 / 1384–1399 |
+| that boot after `cpufreq set hwp`, EPP 128, two runs | 344.8, 335.1 | 1870–1948 | 1494–1569 / 1020–1101 |
+| that boot, EPP 0 (`performance`) | 348.8 | 1908 | 1518 / 1066 |
+| HWP from boot, the default, two runs | 355.8, 364.1 | 1873–1971 | 1476–1507 / 1057–1106 |
+| HWP from boot, `placement flat` | 376.8 | 1956 | 1458 / 1181 |
 
-Measured so far, on the live ISO over the remote control (i5-13420H, eight P
-threads and four E-cores):
+- **HWP is the faster policy.** On one kernel the build took 340 s on
+  average under HWP and 388 s under the firmware's settings, 12% less; the
+  default kernel, with HWP from boot, 360 s. It stays the default.
+- **The package power limit holds the clock, whatever the policy.** Every
+  run reported the power-limit throttle while it ran, the busy clock averaged
+  1.3–1.5 GHz under every setting, and asking HWP for `performance` bought
+  nothing (348.8 s). A lone thread on a cool package reaches 4.6 GHz on a
+  P-core and 3.4 GHz on an E-core under the firmware's settings, 3.8 and
+  2.7 GHz under HWP at 128 (`cpufreq bench`).
+- **Ranked placement pays.** `cpufreq bench` put all twenty unpinned runs on
+  P-cores at the best pinned CPU's speed under `ranked`, and seven of twenty
+  on E-cores under `flat`, 18.4% slower on average; a P-core thread does 1.75
+  times an E-core's work, and two threads on one core each run 48% slower
+  than on two. The build under `flat` took 376.8 s against 355.8 and 364.1 s.
+- **Where the rest goes.** A profile of the 364.1 s build (`prof report
+  laptop`, `scripts/prof_report.py --label laptop`) gave user code 29% of the
+  CPUs' ticks, the kernel 3% and the idle loop 68%: the build keeps 3.4 of
+  twelve CPUs in user code on average. rustc is 99% of the user ticks — LLVM
+  63%, slibc 27%, `librustc_driver` 10% — and slibc's allocator, `malloc`,
+  `free` and their slow paths, is 20% of all user time, the hottest code in
+  the build. The kernel took 746,000 page faults (26 s), wrote 5.0 GiB in
+  400,000 requests and waited 2.6 s for the ext2 lock in all.
+
+Found on the way, over the remote control, from the live ISO and then the
+installed system:
 
 - **The TSCs disagree.** CPUs 1–3 read 2,309,921,770 cycles — 884.5 ms on
   `CLOCK_MONOTONIC` — ahead of CPU 0 (a userland probe pinned to each CPU in
@@ -326,6 +350,31 @@ threads and four E-cores):
   an AP that misses its 1 s deadline shares the trampoline and temporary
   stack with the next; the UEFI `mouse_deinit()` leaves pointers as `Reset()`
   left them, where the BIOS one disables and drains the device.
+- **Idle CPUs that never halted, again.** The installed system read every CPU
+  99.3% busy at the desktop with nothing running, the package power-limited,
+  and `cpufreq bench` put a P-core at 1.9 GHz. A ten-second profile found
+  every idle CPU in the TTY's idle callback, which counted any TTY holding a
+  readable line as work: an Enter typed with nothing focused leaves one in the
+  console TTY, which nothing reads, and every idle CPU looped from then on.
+  The callback counts only input that arrives during the call now
+  (`21966fdf`); one serial newline took a four-CPU QEMU from 0.25 host CPUs
+  to 3.99 before and to 0.27 after.
+- **Open: about half the laptop's builds fail.** Of seventeen builds on the
+  fixed kernels, eight failed, in four ways: cargo's spawn of a rustc or a
+  build script answered `Bad address` (EFAULT) five times; cargo died once
+  writing through a null pointer in `BTreeMap<OsString, OsString>::insert`
+  (std, `rip 0x1ca7ebd` in the installed cargo); once cargo could not parse a
+  rustc's JSON output, rustc having exited 0; and twice the build hung — once
+  after an EFAULT, waiting for its other jobs, and once with a `cc` exited 0
+  and unreaped by the rustc thread polling its pipes, which an `ld.lld` still
+  held: that process had one task left, its main thread, `Blocked` in
+  `futex_wait`. Only the segfault left a kernel log line. QEMU's self-hosting
+  checks show none of it. These are the laptop's first long boots with idle
+  CPUs halting; the one build with them spinning finished, too few to say
+  whether halting exposes it. The table holds only builds that finished.
+- **Open: the power limit is unread.** SlopOS reads no RAPL register, so the
+  limit that holds every build's clock, and the package's power under it, are
+  inferred from the throttle bit alone.
 
 **Done when** a guest build's effective frequency on the laptop is measured,
 and the same build is timed with the firmware's settings and with HWP.
