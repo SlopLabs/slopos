@@ -372,7 +372,12 @@ falls back to the committed slot, and the fallback boot finds the panic in
 
 - **Wi-Fi.**
 - **USB beyond keyboards, pointers, sticks and class-mode Ethernet
-  adapters.** See `plans/usb-xhci.md`'s Out of scope.
+  adapters:** EHCI, OHCI and UHCI; controllers that come and go (PCI hotplug,
+  docks, USB4, Thunderbolt, Type-C power delivery and alternate modes);
+  isochronous transfers; Bluetooth, serial, printers, smart cards, MTP, vendor
+  NIC modes and RNDIS; UAS; USB power management; userland USB access; media
+  change in card readers; kernel-mounted FAT and exFAT; USB on the panic path;
+  a graded boot from a USB root; consumer-page keys.
 - **Other machines' platforms:** AHCI (the laptop's SATA controller has no
   disk), VMD, more than 17 CPUs, timers without HPET, x2APIC mode, INTx, PCI
   without MCFG, other PCH GPIO blocks.

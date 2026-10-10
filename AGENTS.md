@@ -730,7 +730,7 @@ virtio-blk the verified image (`vda`) and a scratch (`vdb`), and on a
 every transport stays graded; the capacity volume is `nvme0n3`, and the boot
 disk is the last controller's.
 
-**USB is xHCI, and `plans/usb-xhci.md` is done.**
+**USB is xHCI.**
 `drivers/src/usb` binds every PCI xHCI controller (class `0x0C`,
 subclass `0x03`, prog-if `0x30`) that offers MSI-X or MSI and has 64-bit
 addressing, 4 KiB pages and at most 512 scratchpad buffers, up to eight; any

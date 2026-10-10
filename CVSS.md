@@ -459,8 +459,8 @@ range. Below the bar and left: an unresponsive controller holds boot for up
 to about a minute (35); a device that toggles its connection floods
 the kernel log (30); and the test's QMP socket gives the user's QEMU to
 whoever can connect to it, which the umask limits to the user (30). By
-design, and recorded in `plans/usb-xhci.md`: taking a controller ends the
-firmware's emulation of a USB keyboard. Pre-existing and left: `QEMU_DEBUG=1`
+design: taking a controller ends the firmware's emulation of a USB keyboard,
+which `usb=report` and `usb=off` leave in place. Pre-existing and left: `QEMU_DEBUG=1`
 puts its monitor socket in `/tmp`, where another user can create the path
 first and keep QEMU from starting.
 

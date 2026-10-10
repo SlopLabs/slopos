@@ -20,7 +20,6 @@ editing.
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
 | `installer-gui.md` | A graphical installer on the live medium: an engine that emits events, a typed protocol between an unprivileged window and the engine privd runs, a linear wizard with before/after partition bars and a guarded review, and a root size choice; starts after `access-model.md` |
 | `self-hosting.md` | SlopOS as a development machine: the closed loop over git on a root that carries its own tools, where the guest builds and installs the whole system; bare metal and a toolchain that rebuilds itself ahead |
-| `usb-xhci.md` | USB on QEMU and the laptop: the xHCI driver runs the controllers, enumerates devices through hubs, binds `UsbBus` drivers, drives keyboards and pointers, serves sticks as `sd` disks, reads the install payload from the stick, serves CDC Ethernet adapters as NICs, and removes devices cleanly; done but for its laptop runs |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive the
@@ -32,10 +31,17 @@ the devres claim table and `BoundDevice<B>`. Every device driver binds declarati
 `driver_core::bus` for the model, `drivers/src/pci.rs`, `drivers/src/platform_bus/` and
 `drivers/src/usb/bus.rs` for the three instances, and `drivers/src/tests/bus_generic.rs` for what the protocol guarantees.
 Deferred-probe-to-fixpoint, and unbind and hotplug of PCI and platform devices, were the
-plan's Phase 2 and are deliberately not planned in the mid term. `usb-xhci.md` built unbind
-for USB devices alone, on the Binding-above-Devres slot order and a `ClaimTable` release;
-unbind of PCI and platform devices would build on the same two, and deferred probe on the
+plan's Phase 2 and are deliberately not planned in the mid term. USB built unbind for its
+devices alone, on the Binding-above-Devres slot order and a `ClaimTable` release; unbind of
+PCI and platform devices would build on the same two, and deferred probe on the
 `Deferred` outcome.
+
+USB has **landed and its plan is retired**. The xHCI driver runs every controller it can
+take from the firmware, enumerates devices through hubs, binds `UsbBus` drivers for
+keyboards and pointers, sticks and CDC Ethernet adapters, and removes devices cleanly.
+Read the code rather than a document: `drivers/src/usb` for the driver and the tree,
+`usb-core` and `hid-core` for the host-tested data and state machines, and `just test-usb`
+for what QEMU grades. `AGENTS.md` states what it guarantees.
 
 Persistent storage has **landed and its plan is retired**. A file written on one
 boot is readable on the next on the root filesystem and under failure: a
