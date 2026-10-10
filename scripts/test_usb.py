@@ -78,7 +78,9 @@ DEVICES = (
 # attaches; and behind qemu-xhci's hub a usb-net, which QEMU offers in an
 # RNDIS and an ECM configuration, on 10.0.3.0/24 with the echo peer at
 # 10.0.3.100 (drivers/src/tests/usb_tests.rs, userland/src/bin/tests/usb_net_test.rs).
-NET_MAC = "52:54:00:12:34:99"
+# QEMU 8.2 (CI's) reports the MAC with its first byte replaced by 0x40,
+# QEMU 11 as given, so one that starts with 0x40 reads the same on both.
+NET_MAC = "40:54:00:12:34:99"
 EXTRA = {
     "xhci1": (
         Device("disk", "usb-storage", "5", {}, "7", "usb-storage"),

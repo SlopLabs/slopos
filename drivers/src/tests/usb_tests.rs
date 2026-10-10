@@ -58,7 +58,8 @@ const STICKS: u32 = 3;
 const DISK: (u8, u8, Speed) = (7, 0, Speed::High);
 const NET: (u8, u8, Speed) = (4, 4, Speed::Full);
 const QEMU_ONLY: [(u8, u8, Speed); 2] = [DISK, NET];
-const NET_MAC: MacAddr = MacAddr([0x52, 0x54, 0x00, 0x12, 0x34, 0x99]);
+/// `scripts/test_usb.py`'s, whose first byte older QEMU reports as 0x40 anyway.
+const NET_MAC: MacAddr = MacAddr([0x40, 0x54, 0x00, 0x12, 0x34, 0x99]);
 const NET_LEASE: Ipv4Addr = Ipv4Addr([10, 0, 3, 15]);
 const NET_GATEWAY: Ipv4Addr = Ipv4Addr([10, 0, 3, 2]);
 /// The echo peer on the NIC's network, which no other route reaches.
