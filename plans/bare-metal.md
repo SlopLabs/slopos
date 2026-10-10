@@ -64,6 +64,10 @@ its firmware entry, `cachyos`, is the only one.
   `/bin/cpufreq` measures and changes all of it, and `prof` profiles a running
   system. On the laptop the system builds itself in about six minutes, 12%
   less than under the firmware's own settings.
+- **Open: about half the builds on the laptop fail**, by EFAULT, a null
+  write, garbled output or a hang, and the cause is unknown; QEMU shows none
+  of it. Until it is found the self-hosting loop on bare metal is not
+  reliable. Phase 7 has the evidence.
 - A paired SlopOS machine is driven from the development host:
   `/bin/remoted` dials out to `scripts/remote.py`'s broker, which runs
   commands, moves files and installs a kernel and base into the spare slot.
@@ -259,6 +263,25 @@ userland and base — of the installed clone (`ff6b10ba`) from an empty
   the build. The kernel took 746,000 page faults (26 s), wrote 5.0 GiB in
   400,000 requests and waited 2.6 s for the ext2 lock in all.
 
+**Open: about half the laptop's builds fail.** Of seventeen builds on the
+fixed kernels, eight failed, in four ways: cargo's spawn of a rustc or a build
+script answered `Bad address` (EFAULT) five times; cargo died once writing
+through a null pointer in `BTreeMap<OsString, OsString>::insert` (std, `rip
+0x1ca7ebd` in the installed cargo); once cargo could not parse a rustc's JSON
+output, rustc having exited 0; and twice the build hung — once after an
+EFAULT, waiting for its other jobs, and once with a `cc` exited 0 and unreaped
+by the rustc thread polling its pipes, which an `ld.lld` still held: that
+process had one task left, its main thread, `Blocked` in `futex_wait`. Only the
+segfault left a kernel log line. QEMU's self-hosting checks show none of it.
+These are the laptop's first long boots with idle CPUs halting; the one build
+with them spinning finished, too few to say whether halting exposes it. The
+table above holds only builds that finished. An unverified lead: a pointer
+read back as zero explains the first three, and only an idle CPU that reaches
+the end of its loop scrubs free pages ahead of use. The TLB path is no
+difference: QEMU's `-cpu host` on the development machine disables PCID by
+the same erratum. A kernel without the scrubbing, tried once in the spare
+slot, would tell.
+
 Found on the way, over the remote control, from the live ISO and then the
 installed system:
 
@@ -359,19 +382,6 @@ installed system:
   The callback counts only input that arrives during the call now
   (`21966fdf`); one serial newline took a four-CPU QEMU from 0.25 host CPUs
   to 3.99 before and to 0.27 after.
-- **Open: about half the laptop's builds fail.** Of seventeen builds on the
-  fixed kernels, eight failed, in four ways: cargo's spawn of a rustc or a
-  build script answered `Bad address` (EFAULT) five times; cargo died once
-  writing through a null pointer in `BTreeMap<OsString, OsString>::insert`
-  (std, `rip 0x1ca7ebd` in the installed cargo); once cargo could not parse a
-  rustc's JSON output, rustc having exited 0; and twice the build hung — once
-  after an EFAULT, waiting for its other jobs, and once with a `cc` exited 0
-  and unreaped by the rustc thread polling its pipes, which an `ld.lld` still
-  held: that process had one task left, its main thread, `Blocked` in
-  `futex_wait`. Only the segfault left a kernel log line. QEMU's self-hosting
-  checks show none of it. These are the laptop's first long boots with idle
-  CPUs halting; the one build with them spinning finished, too few to say
-  whether halting exposes it. The table holds only builds that finished.
 - **Open: the power limit is unread.** SlopOS reads no RAPL register, so the
   limit that holds every build's clock, and the package's power under it, are
   inferred from the throttle bit alone.
