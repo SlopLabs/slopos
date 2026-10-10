@@ -14,9 +14,11 @@ editing.
 
 | Document | Scope |
 |----------|-------|
+| `access-model.md` | Principals and brokered authority: Unix uid/gid and kernel DAC for compatibility, the capability mask as the only authority carrier, delegation at spawn in place of the path-keyed grant table, kernel-attested peer identity, `privd` running named actions, and consent drawn by the compositor; comes before `installer-gui.md` |
 | `bare-metal.md` | The self-hosting loop on a real machine: ext4 in place of ext2, a boot chain that shares a disk with another OS, an installer and install medium, a crash record, a wired NIC, and full speed — what is left is measuring the laptop's frequency and placement through the remote control |
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
+| `installer-gui.md` | A graphical installer on the live medium: an engine that emits events, a typed protocol between an unprivileged window and the engine privd runs, a linear wizard with before/after partition bars and a guarded review, and a root size choice; starts after `access-model.md` |
 | `self-hosting.md` | SlopOS as a development machine: the closed loop over git on a root that carries its own tools, where the guest builds and installs the whole system; bare metal and a toolchain that rebuilds itself ahead |
 | `usb-xhci.md` | USB on QEMU and the laptop: the xHCI driver runs the controllers, enumerates devices through hubs, binds `UsbBus` drivers, drives keyboards and pointers, serves sticks as `sd` disks, reads the install payload from the stick, serves CDC Ethernet adapters as NICs, and removes devices cleanly; done but for its laptop runs |
 
@@ -57,6 +59,8 @@ rather than a document: `slopos_ostd::authority` for the vocabulary and the witn
 and input seats, and `verification/proofs/authority.rs` for the four machine-checked
 obligations. `scripts/check_authority_reachability.sh` is what catches an unprivileged
 syscall reaching a power primitive two calls away, which a slot-level gate cannot see.
+`access-model.md` replaces where authority enters: the grant table and `Launch` give way
+to delegation from holders and to `privd`.
 
 ## When To Promote A Plan
 
