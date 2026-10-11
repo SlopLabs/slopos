@@ -352,6 +352,99 @@ fn test_fork_keeps_sibling_writes() -> bool {
     true
 }
 
+const COPY_FORKERS: usize = 2;
+const COPY_FORKS_EACH: u32 = 150;
+
+/// A `read` into a page user code never touched must land while siblings
+/// fork: the kernel's first copy finds the page absent and maps it, and a
+/// sibling's fork can make the fresh page copy-on-write before the copy runs
+/// again.
+fn test_reads_into_fresh_pages_across_sibling_forks() -> bool {
+    let ballast = memory::mmap(
+        0,
+        BALLAST_BYTES,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if ballast == 0 || (ballast as i64) < 0 {
+        eprintln!("fork_test: copy ballast mapping failed");
+        return false;
+    }
+    for offset in (0..BALLAST_BYTES).step_by(4096) {
+        // SAFETY: inside the fresh writable mapping of `BALLAST_BYTES`.
+        unsafe { ((ballast + offset) as *mut u8).write_volatile(1) };
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let stop = stop.clone();
+        std::thread::spawn(move || -> Result<u64, String> {
+            use std::io::{Read, Write};
+            let (mut rx, mut tx) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
+            let mut reads = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                let page = memory::mmap(
+                    0,
+                    4096,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    -1,
+                    0,
+                );
+                if page == 0 || (page as i64) < 0 {
+                    return Err("page mapping failed".into());
+                }
+                tx.write_all(&[7]).map_err(|e| format!("write: {e}"))?;
+                // SAFETY: a fresh writable page of which nothing else holds a
+                // reference, unmapped only after the slice's last use.
+                let fresh = unsafe { core::slice::from_raw_parts_mut(page as *mut u8, 1) };
+                let read = rx.read_exact(fresh);
+                let _ = memory::munmap(page, 4096);
+                read.map_err(|e| format!("read {reads}: {e}"))?;
+                reads += 1;
+            }
+            Ok(reads)
+        })
+    };
+    let forkers: Vec<_> = (0..COPY_FORKERS)
+        .map(|_| {
+            std::thread::spawn(|| {
+                for _ in 0..COPY_FORKS_EACH {
+                    // SAFETY: the child calls nothing but `_exit`.
+                    let pid = unsafe { slopos_slibc::process::fork() };
+                    if pid == 0 {
+                        // SAFETY: ends the child at once.
+                        unsafe { slopos_slibc::process::_exit(0) };
+                    }
+                    if pid < 0 || reap_within(pid, 5).is_none() {
+                        return false;
+                    }
+                }
+                true
+            })
+        })
+        .collect();
+    let forked = forkers.into_iter().all(|f| f.join().unwrap_or(false));
+    stop.store(true, Ordering::SeqCst);
+    let read = reader
+        .join()
+        .unwrap_or_else(|_| Err("reader panicked".into()));
+    let _ = memory::munmap(ballast, BALLAST_BYTES);
+    if !forked {
+        eprintln!("fork_test: a sibling fork failed or never exited");
+        return false;
+    }
+    match read {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("fork_test: a read beside sibling forks failed: {e}");
+            false
+        }
+    }
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("fork_pipe_echo_tee", test_fork_pipe_echo_tee),
@@ -364,5 +457,9 @@ fn main() {
             test_pshared_mutex_and_semaphore_over_shm_file,
         ),
         ("fork_keeps_sibling_writes", test_fork_keeps_sibling_writes),
+        (
+            "reads_into_fresh_pages_across_sibling_forks",
+            test_reads_into_fresh_pages_across_sibling_forks,
+        ),
     ]);
 }

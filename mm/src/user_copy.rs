@@ -63,13 +63,11 @@ fn current_vm_space() -> Result<slopos_ostd::KArc<slopos_ostd::mm::vm_space::VmS
 /// write and answered `EFAULT`. Linux services a kernel fault on a user
 /// address through the ordinary fault path; this is that, run from
 /// [`copy_then_populate`] on the failure that path would have fixed. A range
-/// that cannot be resolved is left alone: the copy then fails exactly as it
-/// did before, so this only ever turns an `EFAULT` into a transfer.
-fn populate(access: Access, addr: u64, len: usize) {
-    if len == 0 {
-        return;
-    }
-    let _ = populate_inner(access, addr, len);
+/// that cannot be resolved is left alone, and answers `false`: the copy then
+/// fails exactly as it did before, so this only ever turns an `EFAULT` into a
+/// transfer.
+fn populate(access: Access, addr: u64, len: usize) -> bool {
+    len == 0 || populate_inner(access, addr, len).is_some()
 }
 
 fn populate_inner(access: Access, addr: u64, len: usize) -> Option<()> {
@@ -129,9 +127,15 @@ enum Access {
     Write,
 }
 
-/// Run `copy` against the current address space; only if it fails the way a
-/// page fault would have fixed, populate `[addr, addr + len)` and run it once
-/// more.
+/// Copies a range [`populate`] just made copyable may still refuse — a
+/// sibling's fork can mark a page it mapped copy-on-write before the copy runs
+/// — so each refusal after a populate that succeeded goes round again, this
+/// many times at most.
+const POPULATE_ROUNDS: u32 = 64;
+
+/// Run `copy` against the current address space; while it fails the way a
+/// page fault would have fixed, populate `[addr, addr + len)` and run it again.
+/// A populate that fails leaves one more copy, which fails as it did before.
 ///
 /// Copy first, not populate first: the pages are already present on all but
 /// the first touch, and populating unconditionally charged that majority a
@@ -160,29 +164,37 @@ fn copy_then_populate<T>(
     len: usize,
     mut copy: impl FnMut(&slopos_ostd::mm::vm_space::VmSpace) -> Result<T, UserPtrError>,
 ) -> Result<T, UserPtrError> {
-    {
-        let _pinned = PreemptGuard::new();
-        let space = current_vm_space()?;
-        let first = copy(&space);
+    let mut rounds = 0;
+    loop {
+        let result = {
+            let _pinned = PreemptGuard::new();
+            let space = current_vm_space()?;
+            copy(&space)
+        };
         #[cfg(feature = "test-hooks")]
-        let first = match FAULT_NEXT_COPY.compare_exchange(
+        let result = match FAULT_NEXT_COPY.compare_exchange(
             current_process_id(),
             slopos_abi::task::INVALID_PROCESS_ID,
             core::sync::atomic::Ordering::AcqRel,
             core::sync::atomic::Ordering::Acquire,
         ) {
             Ok(_) => Err(UserPtrError::CopyFailed),
-            Err(_) => first,
+            Err(_) => result,
         };
-        match first {
-            Err(UserPtrError::NotMapped | UserPtrError::CopyFailed) => {}
-            result => return result,
+        if rounds == POPULATE_ROUNDS
+            || !matches!(
+                result,
+                Err(UserPtrError::NotMapped | UserPtrError::CopyFailed)
+            )
+        {
+            return result;
         }
+        rounds = if populate(access, addr, len) {
+            rounds + 1
+        } else {
+            POPULATE_ROUNDS
+        };
     }
-    populate(access, addr, len);
-    let _pinned = PreemptGuard::new();
-    let space = current_vm_space()?;
-    copy(&space)
 }
 
 /// Copy a `T: Copy` from user space into kernel space.
