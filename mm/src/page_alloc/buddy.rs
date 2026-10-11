@@ -5,13 +5,14 @@
 //!
 //! Access to the [`RawTable<PageFrame>`] descriptor table is gated either by
 //! the [`SpinLock`] over [`BuddyInner`] (when mutating free-list links) or by
-//! exclusive PCP ownership under a [`PreemptGuard`].
+//! exclusive PCP ownership with interrupts off.
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use slopos_ostd::lock_class;
 
 use slopos_abi::addr::PhysAddr;
+use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
 use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions, Paddr};
 use slopos_ostd::panic::AbortOnUnwind;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_ALLOCATOR, PreemptGuard, RawTable, SpinLock};
@@ -666,36 +667,43 @@ impl BuddyInner {
         let is_pcp_candidate = order == 0 && frame.state == PAGE_FRAME_ALLOCATED && pcp::is_live();
 
         if is_pcp_candidate {
-            if let Some(cache) = pcp::cache_mut(cpu) {
-                if cache.count < pcp::PCP_HIGH_WATERMARK {
-                    if let Some(desc) = self.frame_desc_mut(table, frame_num) {
-                        desc.state = PAGE_FRAME_PCP;
-                        desc.next_free = INVALID_PAGE_FRAME;
-                    }
-                    cache.stack[cache.count as usize] = frame_num;
-                    cache.count += 1;
-                    cache
-                        .free_count
-                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
-                    if cache.count > pcp::PCP_HIGH_WATERMARK {
-                        let to_drain = (cache.count - pcp::PCP_HIGH_WATERMARK / 2)
-                            .min(pcp::PCP_BATCH_SIZE)
-                            as usize;
-                        let mut batch = [INVALID_PAGE_FRAME; pcp::PCP_BATCH_SIZE as usize];
-                        let mut drained = 0usize;
-                        while drained < to_drain && cache.count > 0 {
-                            cache.count -= 1;
-                            batch[drained] = cache.stack[cache.count as usize];
-                            cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
-                            drained += 1;
-                        }
-                        if drained > 0 {
-                            self.free_batch_from_pcp(table, &batch[..drained]);
-                        }
-                    }
-                    return 0;
+            // Already under the cli-lock; the token is what `cache_mut` asks for.
+            let pushed = IrqDisabled::with(|irq| {
+                let Some(cache) = pcp::cache_mut(cpu, irq) else {
+                    return false;
+                };
+                if cache.count >= pcp::PCP_HIGH_WATERMARK {
+                    return false;
                 }
+                if let Some(desc) = self.frame_desc_mut(table, frame_num) {
+                    desc.state = PAGE_FRAME_PCP;
+                    desc.next_free = INVALID_PAGE_FRAME;
+                }
+                cache.stack[cache.count as usize] = frame_num;
+                cache.count += 1;
+                cache
+                    .free_count
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+                if cache.count > pcp::PCP_HIGH_WATERMARK {
+                    let to_drain = (cache.count - pcp::PCP_HIGH_WATERMARK / 2)
+                        .min(pcp::PCP_BATCH_SIZE) as usize;
+                    let mut batch = [INVALID_PAGE_FRAME; pcp::PCP_BATCH_SIZE as usize];
+                    let mut drained = 0usize;
+                    while drained < to_drain && cache.count > 0 {
+                        cache.count -= 1;
+                        batch[drained] = cache.stack[cache.count as usize];
+                        cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
+                        drained += 1;
+                    }
+                    if drained > 0 {
+                        self.free_batch_from_pcp(table, &batch[..drained]);
+                    }
+                }
+                true
+            });
+            if pushed {
+                return 0;
             }
         }
 
@@ -985,7 +993,9 @@ impl BuddyAllocator {
 
         if use_pcp && scrub {
             let _no_migrate = PreemptGuard::new();
-            let frame = self.pcp_try_alloc_zeroed(slopos_arch::pcr::get_current_cpu());
+            let frame = IrqDisabled::with(|irq| {
+                self.pcp_try_alloc_zeroed(slopos_arch::pcr::get_current_cpu(), irq)
+            });
             if frame != INVALID_PAGE_FRAME {
                 return PhysAddr::new((frame as u64) << 12);
             }
@@ -996,20 +1006,22 @@ impl BuddyAllocator {
         loop {
             let frame_num = if use_pcp {
                 let _no_migrate = PreemptGuard::new();
-                let cpu = slopos_arch::pcr::get_current_cpu();
-                let mut frame = self.pcp_try_alloc(cpu);
-                if frame == INVALID_PAGE_FRAME {
-                    self.pcp_refill(cpu, flags);
-                    frame = self.pcp_try_alloc(cpu);
-                }
-                if frame == INVALID_PAGE_FRAME {
-                    frame = self.with_locked(|inner, table| {
-                        let flag_order = inner.flags_to_order(flags);
-                        let actual_order = flag_order.max(order);
-                        inner.allocate_block(table, actual_order, flags)
-                    });
-                }
-                frame
+                IrqDisabled::with(|irq| {
+                    let cpu = slopos_arch::pcr::get_current_cpu();
+                    let mut frame = self.pcp_try_alloc(cpu, irq);
+                    if frame == INVALID_PAGE_FRAME {
+                        self.pcp_refill(cpu, flags, irq);
+                        frame = self.pcp_try_alloc(cpu, irq);
+                    }
+                    if frame == INVALID_PAGE_FRAME {
+                        frame = self.with_locked(|inner, table| {
+                            let flag_order = inner.flags_to_order(flags);
+                            let actual_order = flag_order.max(order);
+                            inner.allocate_block(table, actual_order, flags)
+                        });
+                    }
+                    frame
+                })
             } else {
                 self.with_locked(|inner, table| {
                     let flag_order = inner.flags_to_order(flags);
@@ -1175,28 +1187,30 @@ impl BuddyAllocator {
 
         if pcp::is_live() {
             let _no_migrate = PreemptGuard::new();
-            let cpu = slopos_arch::pcr::get_current_cpu();
-            while filled < out.len() {
-                let frame = self.pcp_try_alloc_zeroed(cpu);
-                if frame == INVALID_PAGE_FRAME {
-                    break;
-                }
-                frames[filled] = frame;
-                filled += 1;
-            }
-            zeroed = filled;
-            while filled < out.len() {
-                let mut frame = self.pcp_try_alloc(cpu);
-                if frame == INVALID_PAGE_FRAME {
-                    self.pcp_refill(cpu, 0);
-                    frame = self.pcp_try_alloc(cpu);
+            IrqDisabled::with(|irq| {
+                let cpu = slopos_arch::pcr::get_current_cpu();
+                while filled < out.len() {
+                    let frame = self.pcp_try_alloc_zeroed(cpu, irq);
                     if frame == INVALID_PAGE_FRAME {
                         break;
                     }
+                    frames[filled] = frame;
+                    filled += 1;
                 }
-                frames[filled] = frame;
-                filled += 1;
-            }
+                zeroed = filled;
+                while filled < out.len() {
+                    let mut frame = self.pcp_try_alloc(cpu, irq);
+                    if frame == INVALID_PAGE_FRAME {
+                        self.pcp_refill(cpu, 0, irq);
+                        frame = self.pcp_try_alloc(cpu, irq);
+                        if frame == INVALID_PAGE_FRAME {
+                            break;
+                        }
+                    }
+                    frames[filled] = frame;
+                    filled += 1;
+                }
+            });
         }
 
         while filled < out.len() {
@@ -1229,9 +1243,8 @@ impl BuddyAllocator {
     // No unwind-abort guard on the PCP spans below: they are straight-line
     // field writes with no fallible calls, and the worst torn outcome is a
     // leaked frame, never a torn list.
-    fn pcp_try_alloc(&self, cpu: usize) -> u32 {
-        debug_assert!(PreemptGuard::is_active());
-        let Some(cache) = pcp::cache_mut(cpu) else {
+    fn pcp_try_alloc(&self, cpu: usize, irq: &IrqDisabled<'_>) -> u32 {
+        let Some(cache) = pcp::cache_mut(cpu, irq) else {
             return INVALID_PAGE_FRAME;
         };
         if !pcp::is_live() || cache.count == 0 {
@@ -1250,9 +1263,8 @@ impl BuddyAllocator {
         frame_num
     }
 
-    fn pcp_try_alloc_zeroed(&self, cpu: usize) -> u32 {
-        debug_assert!(PreemptGuard::is_active());
-        let Some(cache) = pcp::cache_mut(cpu) else {
+    fn pcp_try_alloc_zeroed(&self, cpu: usize, irq: &IrqDisabled<'_>) -> u32 {
+        let Some(cache) = pcp::cache_mut(cpu, irq) else {
             return INVALID_PAGE_FRAME;
         };
         if !pcp::is_live() || cache.zeroed_count == 0 {
@@ -1283,41 +1295,58 @@ impl BuddyAllocator {
         let cpu = slopos_arch::pcr::get_current_cpu();
         let mut done = 0usize;
         while done < budget {
-            let Some(cache) = pcp::cache_mut(cpu) else {
+            let taken = IrqDisabled::with(|irq| {
+                let cache = pcp::cache_mut(cpu, irq)?;
+                if cache.zeroed_count as usize >= pcp::ZEROED_CAPACITY {
+                    return None;
+                }
+                if cache.count == 0 {
+                    self.pcp_refill(cpu, 0, irq);
+                }
+                let cache = pcp::cache_mut(cpu, irq)?;
+                if cache.count == 0 {
+                    return None;
+                }
+                cache.count -= 1;
+                let frame_num = cache.stack[cache.count as usize];
+                cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
+                Some(frame_num)
+            });
+            let Some(frame_num) = taken else {
                 break;
             };
-            if cache.zeroed_count as usize >= pcp::ZEROED_CAPACITY {
+            // Scrubbed with interrupts on, off both stacks: its descriptor stays
+            // `PAGE_FRAME_PCP`, and nothing else can reach it meanwhile.
+            let scrubbed = zero_physical_page(PhysAddr::new((frame_num as u64) << 12)) == 0;
+            let kept = IrqDisabled::with(|irq| {
+                let Some(cache) = pcp::cache_mut(cpu, irq) else {
+                    return false;
+                };
+                if scrubbed && (cache.zeroed_count as usize) < pcp::ZEROED_CAPACITY {
+                    cache.zeroed[cache.zeroed_count as usize] = frame_num;
+                    cache.zeroed_count += 1;
+                    true
+                } else if (cache.count as usize) < pcp::PCP_CAPACITY {
+                    cache.stack[cache.count as usize] = frame_num;
+                    cache.count += 1;
+                    true
+                } else {
+                    false
+                }
+            });
+            if !kept {
+                self.with_locked(|inner, table| inner.free_batch_from_pcp(table, &[frame_num]));
+            }
+            if !scrubbed {
                 break;
             }
-            if cache.count == 0 {
-                self.pcp_refill(cpu, 0);
-            }
-            let Some(cache) = pcp::cache_mut(cpu) else {
-                break;
-            };
-            if cache.count == 0 {
-                break;
-            }
-            // Still a cached free frame while it is scrubbed: its descriptor
-            // stays `PAGE_FRAME_PCP`, and nothing else can reach it.
-            cache.count -= 1;
-            let frame_num = cache.stack[cache.count as usize];
-            cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
-            if zero_physical_page(PhysAddr::new((frame_num as u64) << 12)) != 0 {
-                cache.stack[cache.count as usize] = frame_num;
-                cache.count += 1;
-                break;
-            }
-            cache.zeroed[cache.zeroed_count as usize] = frame_num;
-            cache.zeroed_count += 1;
             done += 1;
         }
         done
     }
 
-    fn pcp_refill(&self, cpu: usize, flags: u32) {
-        debug_assert!(PreemptGuard::is_active());
-        let Some(cache) = pcp::cache_mut(cpu) else {
+    fn pcp_refill(&self, cpu: usize, flags: u32, irq: &IrqDisabled<'_>) {
+        let Some(cache) = pcp::cache_mut(cpu, irq) else {
             return;
         };
         if cache.count >= pcp::PCP_LOW_WATERMARK {

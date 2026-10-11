@@ -1,15 +1,16 @@
 //! Per-CPU page caches for order-0 allocations.
 //!
-//! Each CPU owns a stack of cached frame numbers, popped and pushed under a
-//! [`PreemptGuard`] to avoid the global buddy lock. All policy (watermarks,
+//! Each CPU owns a stack of cached frame numbers, popped and pushed with
+//! interrupts off to avoid the global buddy lock. All policy (watermarks,
 //! refill batching, descriptor state) lives in
 //! [`super::buddy::BuddyAllocator`].
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_arch::pcr::{MAX_CPUS, get_cpu_count};
+use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
+use slopos_ostd::sync::InitFlag;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
-use slopos_ostd::sync::{InitFlag, PreemptGuard};
 
 use super::buddy::INVALID_PAGE_FRAME;
 
@@ -21,8 +22,8 @@ pub(super) const PCP_BATCH_SIZE: u32 = 16;
 /// would scrub them on a fault path: 1 MiB per CPU.
 pub(super) const ZEROED_CAPACITY: usize = 256;
 
-/// `count`/`stack` are non-atomic: only the owning CPU touches them, under a
-/// [`PreemptGuard`]. The counters are atomic for cross-CPU stat reads.
+/// `count`/`stack` are non-atomic: only the owning CPU touches them, with
+/// interrupts off. The counters are atomic for cross-CPU stat reads.
 #[repr(C, align(64))]
 pub(super) struct PerCpuPageCache {
     pub(super) stack: [u32; PCP_CAPACITY],
@@ -56,7 +57,7 @@ pub(super) static PER_CPU_CACHES: CpuLocal<PerCpuPageCache> = {
 static PCP_INIT: InitFlag = InitFlag::new();
 
 /// Whether the order-0 fast path may consult the per-CPU cache; touching a
-/// slot still needs a [`PreemptGuard`].
+/// slot still needs interrupts off.
 #[inline]
 pub(super) fn is_live() -> bool {
     PCP_INIT.is_set()
@@ -67,14 +68,14 @@ pub(super) fn mark_live() {
     PCP_INIT.mark_set();
 }
 
-/// Mutable view of `cpu`'s cache. Caller holds a [`PreemptGuard`] so `cpu`
-/// stays stable for the borrow's lifetime.
+/// Mutable view of `cpu`'s cache for as long as interrupts stay off: that
+/// keeps the task on `cpu`, and keeps out an interrupt handler whose free
+/// pushes onto the same stack between a read of `count` and its write-back.
 #[inline]
-pub(super) fn cache_mut(cpu: usize) -> Option<&'static mut PerCpuPageCache> {
-    debug_assert!(
-        PreemptGuard::is_active(),
-        "pcp::cache_mut requires PreemptGuard"
-    );
+pub(super) fn cache_mut<'a>(
+    cpu: usize,
+    _irq: &'a IrqDisabled<'a>,
+) -> Option<&'a mut PerCpuPageCache> {
     if cpu >= MAX_CPUS {
         return None;
     }
