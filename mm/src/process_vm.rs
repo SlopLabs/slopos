@@ -3042,8 +3042,9 @@ fn push_clone_snapshot(chunks: &mut ClonePageChunks, entry: ClonePageSnapshot) -
 /// COW-mark every user page of its private VMAs. `None` if the
 /// parent slot has no address space, or if the snapshot cannot be held.
 ///
-/// One hold for the whole walk: a parent whose other threads could write
-/// between the COW mark and the child's mapping is not handing over a snapshot.
+/// One hold for the whole walk and its shootdown: a parent whose other threads
+/// could write between the COW mark and the child's mapping is not handing
+/// over a snapshot.
 #[inline(never)]
 fn clone_cow_snapshot_parent(
     parent_slot: usize,
@@ -3056,7 +3057,15 @@ fn clone_cow_snapshot_parent(
     }
 
     let mut cow_backed = 0u32;
-    let vmas = snapshot_parent_vmas(&mut guard, &mut cow_backed);
+    let mut marked = 0u32;
+    let vmas = snapshot_parent_vmas(&mut guard, &mut cow_backed, &mut marked);
+    // Before the lock goes: a CPU running a sibling thread still caches the
+    // writable translations the walk narrowed, and once a fault elsewhere
+    // copies a page, that sibling's writes land only in the frame the child
+    // keeps.
+    if marked > 0 {
+        tlb::flush_all_for_process(slot_tlb_key(parent_slot));
+    }
     // Given back however the fork ends: the marks stay, and a page of a
     // forked copy that is copy-on-write again is owed only by the write that
     // breaks it.
@@ -3077,10 +3086,12 @@ fn clone_cow_snapshot_parent(
 }
 
 /// The walk [`clone_cow_snapshot_parent`] makes, counting into `cow_backed`
-/// the paid pages of the parent's own [`Commit::Forked`] regions it marks.
+/// the paid pages of the parent's own [`Commit::Forked`] regions it marks and
+/// into `marked` every page it marks.
 fn snapshot_parent_vmas(
     inner: &mut ProcessVm,
     cow_backed: &mut u32,
+    marked: &mut u32,
 ) -> Option<KVec<CloneVmaEntry>> {
     let vmas_iter: KVec<(u64, u64, VmaRegion)> =
         KVec::from_iter_fallible(inner.vma_map.iter().map(|(s, e, r)| (s, e, r.clone()))).ok()?;
@@ -3122,8 +3133,11 @@ fn snapshot_parent_vmas(
                 // range must not make a frame the child also maps writable
                 // here.
                 let mark = !is_shared && !flags.contains(PageFlags::COW);
-                if mark && forked {
-                    *cow_backed += 1;
+                if mark {
+                    *marked += 1;
+                    if forked {
+                        *cow_backed += 1;
+                    }
                 }
                 ControlFlow::Continue(mark)
             },
@@ -3426,11 +3440,6 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
                 clone_failed = true;
             }
         }
-    }
-
-    // paging_mark_cow defers TLB invalidation -- flush once for all COW pages.
-    if cow_pages > 0 {
-        tlb::flush_all();
     }
 
     if clone_failed {

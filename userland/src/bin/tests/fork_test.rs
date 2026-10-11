@@ -1,9 +1,11 @@
 use std::fs;
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use slopos_abi::syscall::posix::{MAP_SHARED, PROT_READ, PROT_WRITE};
+use slopos_abi::syscall::posix::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE};
 use slopos_slibc::thread::PTHREAD_PROCESS_SHARED;
 use slopos_slibc::thread::mutex::{
     pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t, pthread_mutex_unlock,
@@ -242,6 +244,114 @@ fn test_pshared_mutex_and_semaphore_over_shm_file() -> bool {
     ok
 }
 
+/// Resident pages the parent touches before forking, so each fork's window
+/// between marking the parent copy-on-write and returning is long.
+const BALLAST_BYTES: u64 = 16 << 20;
+const FORK_ROUNDS: u32 = 100;
+
+/// A sibling spinning on a page while another thread forks must never lose a
+/// write: its CPU caches the page writable from before the fork, and if a third
+/// thread's fault copies the page before that translation is shot down, every
+/// write the sibling makes in between lands in the frame the child keeps.
+fn test_fork_keeps_sibling_writes() -> bool {
+    let ballast = memory::mmap(
+        0,
+        BALLAST_BYTES,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    let page = memory::mmap(
+        0,
+        4096,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if ballast == 0 || (ballast as i64) < 0 || page == 0 || (page as i64) < 0 {
+        eprintln!("fork_test: sibling-write mappings failed");
+        return false;
+    }
+    for offset in (0..BALLAST_BYTES).step_by(4096) {
+        // SAFETY: inside the fresh writable mapping of `BALLAST_BYTES`.
+        unsafe { ((ballast + offset) as *mut u8).write_volatile(1) };
+    }
+    // SAFETY: a fresh, zero-filled, writable, page-aligned page holds two
+    // `AtomicU64`s, which every thread below only touches atomically.
+    let (spun, poked) = unsafe {
+        (
+            &*(page as *const AtomicU64),
+            &*((page + 64) as *const AtomicU64),
+        )
+    };
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let lost = Arc::new(AtomicU64::new(0));
+    let spinner = {
+        let (stop, lost) = (stop.clone(), lost.clone());
+        std::thread::spawn(move || {
+            let mut expected = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                let seen = spun.load(Ordering::Relaxed);
+                if seen != expected {
+                    lost.store(expected.wrapping_sub(seen), Ordering::SeqCst);
+                    return;
+                }
+                expected += 1;
+                spun.store(expected, Ordering::Relaxed);
+            }
+        })
+    };
+    // Wakes from a sleep, so its CPU holds no translation of the page and its
+    // write faults: the copy that strands the spinner's writes.
+    let poker = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                // SAFETY: `usleep` touches no caller memory.
+                unsafe { slopos_slibc::time::usleep(200) };
+                poked.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut rounds = 0;
+    let mut forked = true;
+    while rounds < FORK_ROUNDS && lost.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        // SAFETY: the child calls nothing but `_exit`, which a forked copy of
+        // a threaded process may.
+        let pid = unsafe { slopos_slibc::process::fork() };
+        if pid == 0 {
+            // SAFETY: ends the child at once, as the comment above relies on.
+            unsafe { slopos_slibc::process::_exit(0) };
+        }
+        if pid < 0 || reap_within(pid, 5).is_none() {
+            forked = false;
+            break;
+        }
+        rounds += 1;
+    }
+    stop.store(true, Ordering::SeqCst);
+    let _ = spinner.join();
+    let _ = poker.join();
+    let _ = memory::munmap(page, 4096);
+    let _ = memory::munmap(ballast, BALLAST_BYTES);
+
+    let lost = lost.load(Ordering::SeqCst);
+    if !forked {
+        eprintln!("fork_test: fork {rounds} failed or never exited");
+        return false;
+    }
+    if lost != 0 {
+        eprintln!("fork_test: a sibling lost {lost} writes to its page across fork {rounds}");
+        return false;
+    }
+    true
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("fork_pipe_echo_tee", test_fork_pipe_echo_tee),
@@ -253,5 +363,6 @@ fn main() {
             "pshared_mutex_and_semaphore_over_shm_file",
             test_pshared_mutex_and_semaphore_over_shm_file,
         ),
+        ("fork_keeps_sibling_writes", test_fork_keeps_sibling_writes),
     ]);
 }
