@@ -8,8 +8,8 @@ use slopos_ostd::sync::kernel_io_task::KernelIoTaskIds;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::scheduler::{
-    commit_blocked_deschedule, consume_ready_wake_for_current, is_scheduling_active, schedule,
-    wake_blocked_task,
+    abort_raced_block, commit_blocked_deschedule, consume_ready_wake_for_current,
+    is_scheduling_active, schedule, wake_blocked_task,
 };
 use super::task::{
     INVALID_TASK_ID, MAX_TASKS, TaskStatus, task_find_by_id, task_set_state_from_with_reason,
@@ -642,6 +642,10 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
                 TaskStatus::Running,
             );
             return -1;
+        }
+        if abort_raced_block(&current) {
+            consume_ready_wake_for_current(&current);
+            return 1; // a kill or signal raced the CAS; scrub the sleep entry below
         }
         if !commit_blocked_deschedule(&current) {
             return 1; // raced: a wake was consumed; scrub the sleep entry below

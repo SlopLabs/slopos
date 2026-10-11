@@ -1645,6 +1645,16 @@ pub fn mark_current_blocked() -> bool {
     ) == 0
 }
 
+/// Whether a kill or a signal reached the current task before its
+/// `Running → Blocked` CAS. Its wake moved nothing — a wake only moves a
+/// `Blocked` task — so it is looked for after the CAS: either its poster read
+/// `Blocked` and wakes the task, or this reads the poster's flag.
+pub(crate) fn abort_raced_block(current: &Current) -> bool {
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let task = current.task();
+    task.is_killed() || super::task::task_has_deliverable_signal(task)
+}
+
 /// A task must never deschedule with preemption disabled: the held
 /// `SpinLock`/`PreemptMutex` would travel with the blocked task and every
 /// contender would spin unpreemptibly until a wake that may itself need the lock.

@@ -2,9 +2,15 @@
 //! a spawned child ending, a forked child ending, a child that forks and
 //! ends — hundreds of times over, on every CPU at once.
 
-use std::process::Command;
+use std::io::Read;
+use std::os::fd::AsRawFd;
+use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicU32;
 
-use slopos_abi::syscall::posix::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+use slopos_abi::syscall::SYSCALL_FUTEX;
+use slopos_abi::syscall::posix::{
+    FUTEX_PRIVATE_FLAG, FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE,
+};
 use slopos_userland as _;
 use slopos_userland::syscall::{core as sys_core, memory, process};
 
@@ -139,6 +145,90 @@ fn test_spawned_children_that_fork_end_under_load() -> bool {
     ok
 }
 
+/// Children whose threads keep entering `futex_wait` while the main thread
+/// ends the process, each holding the pipe the parent reads to its end.
+const FUTEX_EXITS: usize = 60;
+
+fn futex(word: &AtomicU32, op: u64, val: u64) {
+    // SAFETY: `word` is a live, aligned `u32`; no timeout pointer is passed.
+    unsafe {
+        slopos_slibc::pal::raw::syscall4(
+            SYSCALL_FUTEX,
+            word.as_ptr() as u64,
+            op | FUTEX_PRIVATE_FLAG,
+            val,
+            0,
+        )
+    };
+}
+
+/// Two threads wait on a word a third wakes without pause, so one of them is
+/// usually between entering `futex_wait` and parking when `exit` kills it.
+fn futex_mode(delay_us: u32) -> i32 {
+    static WORD: AtomicU32 = AtomicU32::new(0);
+    for _ in 0..2 {
+        std::thread::spawn(|| {
+            loop {
+                futex(&WORD, FUTEX_WAIT, 0);
+            }
+        });
+    }
+    std::thread::spawn(|| {
+        loop {
+            futex(&WORD, FUTEX_WAKE, u64::from(u32::MAX));
+        }
+    });
+    // SAFETY: `usleep` touches no caller memory.
+    unsafe { slopos_slibc::time::usleep(delay_us) };
+    0
+}
+
+/// A kill that lands while a thread is on its way into `futex_wait` must still
+/// end it: a straggler keeps the process's descriptors open after the parent
+/// has reaped it, and whoever reads its pipe waits for an end that never comes.
+fn test_exit_ends_threads_entering_futex_wait() -> bool {
+    for round in 0..FUTEX_EXITS {
+        let mut child = match Command::new(SELF_PATH)
+            .arg("futex")
+            .arg(format!("{}", 200 + (round * 137) % 1800))
+            .stdout(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                note(format!("spawn {round} failed: {e}"));
+                return false;
+            }
+        };
+        let Some(mut stdout) = child.stdout.take() else {
+            note(format!("spawn {round} gave no pipe"));
+            return false;
+        };
+        if child.wait().is_err() {
+            note(format!("wait {round} failed"));
+            return false;
+        }
+        let mut pfd = slopos_slibc::io::poll::Pollfd {
+            fd: stdout.as_raw_fd(),
+            events: slopos_slibc::io::poll::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one live `Pollfd`.
+        let ready = unsafe { slopos_slibc::io::poll::poll(&mut pfd, 1, 5000) };
+        let mut rest = [0u8; 16];
+        if ready != 1 || !matches!(stdout.read(&mut rest), Ok(0)) {
+            note(format!(
+                "round {round}: a thread outlived its reaped process and holds its pipe"
+            ));
+            return false;
+        }
+    }
+    note(format!(
+        "{FUTEX_EXITS} exits with threads entering futex_wait"
+    ));
+    true
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     (
         "spawned_children_end_under_load",
@@ -152,6 +242,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "spawned_children_that_fork_end_under_load",
         test_spawned_children_that_fork_end_under_load,
     ),
+    (
+        "exit_ends_threads_entering_futex_wait",
+        test_exit_ends_threads_entering_futex_wait,
+    ),
 ];
 
 fn main() {
@@ -159,6 +253,7 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("noop") => 0,
         Some("child") => child_mode(),
+        Some("futex") => futex_mode(args.get(1).and_then(|s| s.parse().ok()).unwrap_or(500)),
         _ => slopos_slibc::test_harness::run_with_progress("exit_stress", CASES),
     };
     std::process::exit(code);

@@ -24,8 +24,8 @@ use slopos_ostd::sync::{IntrusiveDList, KernelSync, LOCK_LEVEL_RESOURCE, SpinLoc
 use slopos_ostd::task::{FutexRole, placement};
 
 use super::scheduler::{
-    mark_current_blocked, set_current_runnable, unblock_task, yield_blocked_task,
-    yield_blocked_task_with_timeout,
+    abort_raced_block, mark_current_blocked, set_current_runnable, unblock_task,
+    yield_blocked_task, yield_blocked_task_with_timeout,
 };
 use super::task::{TaskRef, task_put};
 
@@ -230,15 +230,20 @@ pub fn futex_wait(
         // A failed Running→Blocked CAS means a wake got there first, and that
         // wakeup is already preserved in the current Running/Ready status.
         if blocked {
-            match deadline_ms {
-                None => yield_blocked_task(),
-                Some(deadline) => {
-                    let now = slopos_kernel_services::platform::get_time_ms();
-                    if now >= deadline {
-                        set_current_runnable();
-                    } else {
-                        let remaining = deadline.saturating_sub(now).min(u32::MAX as u64) as u32;
-                        yield_blocked_task_with_timeout(remaining);
+            if abort_raced_block(&current_guard) {
+                set_current_runnable();
+            } else {
+                match deadline_ms {
+                    None => yield_blocked_task(),
+                    Some(deadline) => {
+                        let now = slopos_kernel_services::platform::get_time_ms();
+                        if now >= deadline {
+                            set_current_runnable();
+                        } else {
+                            let remaining =
+                                deadline.saturating_sub(now).min(u32::MAX as u64) as u32;
+                            yield_blocked_task_with_timeout(remaining);
+                        }
                     }
                 }
             }
