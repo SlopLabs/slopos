@@ -64,10 +64,10 @@ its firmware entry, `cachyos`, is the only one.
   `/bin/cpufreq` measures and changes all of it, and `prof` profiles a running
   system. On the laptop the system builds itself in about six minutes, 12%
   less than under the firmware's own settings.
-- **Open: about half the builds on the laptop fail**, by EFAULT, a null
-  write, garbled output or a hang, and the cause is unknown; QEMU shows none
-  of it. Until it is found the self-hosting loop on bare metal is not
-  reliable. Phase 7 has the evidence.
+- About half the laptop's builds once failed, by EFAULT, a null write,
+  garbled output or a hang. Three kernel bugs caused it, each fixed with a
+  test that reproduces it under QEMU; ten builds in a row then finished.
+  Phase 7 has the account.
 - A paired SlopOS machine is driven from the development host:
   `/bin/remoted` dials out to `scripts/remote.py`'s broker, which runs
   commands, moves files and installs a kernel and base into the spare slot.
@@ -263,24 +263,46 @@ userland and base — of the installed clone (`ff6b10ba`) from an empty
   the build. The kernel took 746,000 page faults (26 s), wrote 5.0 GiB in
   400,000 requests and waited 2.6 s for the ext2 lock in all.
 
-**Open: about half the laptop's builds fail.** Of seventeen builds on the
-fixed kernels, eight failed, in four ways: cargo's spawn of a rustc or a build
-script answered `Bad address` (EFAULT) five times; cargo died once writing
-through a null pointer in `BTreeMap<OsString, OsString>::insert` (std, `rip
-0x1ca7ebd` in the installed cargo); once cargo could not parse a rustc's JSON
-output, rustc having exited 0; and twice the build hung — once after an
-EFAULT, waiting for its other jobs, and once with a `cc` exited 0 and unreaped
-by the rustc thread polling its pipes, which an `ld.lld` still held: that
-process had one task left, its main thread, `Blocked` in `futex_wait`. Only the
-segfault left a kernel log line. QEMU's self-hosting checks show none of it.
-These are the laptop's first long boots with idle CPUs halting; the one build
-with them spinning finished, too few to say whether halting exposes it. The
-table above holds only builds that finished. An unverified lead: a pointer
-read back as zero explains the first three, and only an idle CPU that reaches
-the end of its loop scrubs free pages ahead of use. The TLB path is no
-difference: QEMU's `-cpu host` on the development machine disables PCID by
-the same erratum. A kernel without the scrubbing, tried once in the spare
-slot, would tell.
+**About half the laptop's builds failed, and three kernel bugs were why.** Of
+seventeen builds on the fixed kernels, eight failed, in four ways: cargo's
+spawn of a rustc or a build script answered `Bad address` (EFAULT) five
+times; cargo died once writing through a null pointer in
+`BTreeMap<OsString, OsString>::insert`; once cargo could not parse a rustc's
+JSON output, rustc having exited 0; and twice the build hung, once with a
+`cc` exited 0 and unreaped by the rustc thread polling its pipes, which an
+`ld.lld` still held from its one task left, `Blocked` in `futex_wait`. Cargo
+forks for every rustc it starts — its jobserver needs a `pre_exec` — from up
+to twelve threads at once, which QEMU's four CPUs rarely race:
+
+- **A fork's shootdown came after its lock.** The parent's pages were marked
+  copy-on-write under its lock, but the CPUs running its other threads were
+  flushed only once the lock was gone and the child built. A sibling kept
+  writing through its stale writable translation into the frame the child
+  now shared, and once another thread's fault copied the page those writes
+  were lost to the parent: the null pointer, the garbled output, and children
+  that died in `exec` on memory written after the fork. The flush now runs
+  under the lock (`fork_keeps_sibling_writes`).
+- **A kernel copy into user memory retried once.** A copy that finds a page
+  absent or copy-on-write populates it and copies again; a sibling's fork in
+  between marks the fresh page copy-on-write again and the second copy
+  answered EFAULT to a valid buffer. A diagnostic kernel caught two on the
+  laptop: a 144-byte `stat` result and a spawn's 1080-byte write. The copy now
+  retries while populate succeeds, at most 64 times
+  (`reads_into_fresh_pages_across_sibling_forks`).
+- **A kill landing before `futex_wait` parked was lost.** A wake moves only a
+  `Blocked` task, and `futex_wait` never looked for a kill or signal after its
+  `Running → Blocked` CAS, so a thread killed by `exit_group` on its way in
+  slept forever holding the process's descriptors after the parent had reaped
+  it — the `ld.lld` hang. `futex_wait` and `sleep_current_task_ms` recheck now
+  (`exit_ends_threads_entering_futex_wait`).
+
+On the way, the per-CPU page caches turned out to be changed with interrupts
+on, so an interrupt's free could lose a frame between a pop's read and its
+write; they are touched with interrupts off now. The idle CPUs' scrubbing,
+the earlier lead, was not involved. Before the fixes four builds gave one
+EFAULT; with all but the copy retry, eight gave two, both the copy race; with
+all of them ten in a row finished, 362–364 s each. Slot b, the laptop's
+default now, holds those fixes less the diagnostic.
 
 Found on the way, over the remote control, from the live ISO and then the
 installed system:
