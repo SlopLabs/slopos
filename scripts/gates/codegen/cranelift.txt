@@ -6,10 +6,10 @@
 #
 # <capability> <TAB> has|lacks
 #
-# Why this file exists: plans/self-hosting.md decided against a Rust-hosted
-# toolchain on this measurement, which makes "can cg_clif build
-# targets/x86_64-slos.json yet?" a standing question rather than a settled
-# one. Recording the answer here is what re-asks it on every toolchain bump.
+# Why this file exists: the toolchain is LLVM's rather than Rust-hosted on
+# this measurement, which makes "can cg_clif build targets/x86_64-slos.json
+# yet?" a standing question rather than a settled one. Recording the answer
+# here is what re-asks it on every toolchain bump.
 # A `lacks` the probe finds present fails the run — that is the signal to go
 # and re-decide, not a nuisance.
 #

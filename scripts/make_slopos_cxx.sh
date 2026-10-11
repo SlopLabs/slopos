@@ -34,8 +34,7 @@ set -euo pipefail
 #   * Localization, wide characters and the random device are ON. Every one of
 #     them was off, and `llvm/lib/Support/raw_os_ostream.cpp` reaches `<ios>`,
 #     `ConvertUTF.cpp` reaches `std::wstring` and `LockFileManager.cpp` reaches
-#     `std::random_device`, so LLVM did not compile at all. What they cost the
-#     C library is measured in `plans/self-hosting.md`.
+#     `std::random_device`, so LLVM did not compile at all.
 #   * `_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE` takes libc++'s own classification
 #     table and its own `ctype_base::mask` bits. The alternative is the glibc
 #     road, where the table is `__ctype_b_loc()`'s and the bits are `_ISspace`

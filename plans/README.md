@@ -15,11 +15,9 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `access-model.md` | Principals and brokered authority: Unix uid/gid and kernel DAC for compatibility, the capability mask as the only authority carrier, delegation at spawn in place of the path-keyed grant table, kernel-attested peer identity, `privd` running named actions, and consent drawn by the compositor; comes before `installer-gui.md` |
-| `bare-metal.md` | The self-hosting loop on a real machine: ext4 in place of ext2, a boot chain that shares a disk with another OS, an installer and install medium, a crash record, a wired NIC, and full speed — what is left is measuring the laptop's frequency and placement through the remote control |
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
 | `installer-gui.md` | A graphical installer on the live medium: an engine that emits events, a typed protocol between an unprivileged window and the engine privd runs, a linear wizard with before/after partition bars and a guarded review, and a root size choice; starts after `access-model.md` |
-| `self-hosting.md` | SlopOS as a development machine: the closed loop over git on a root that carries its own tools, where the guest builds and installs the whole system; bare metal and a toolchain that rebuilds itself ahead |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive the
@@ -42,6 +40,18 @@ keyboards and pointers, sticks and CDC Ethernet adapters, and removes devices cl
 Read the code rather than a document: `drivers/src/usb` for the driver and the tree,
 `usb-core` and `hid-core` for the host-tested data and state machines, and `just test-usb`
 for what QEMU grades. `AGENTS.md` states what it guarantees.
+
+Self-hosting and bare metal have **landed and their plans are retired**. The
+guest builds, installs and boots the whole system from a root that carries its
+own toolchain, under QEMU and on the laptop, which SlopOS shares with another OS
+through the installer, a crash partition and A/B slots, over NVMe, ext4 and the
+RTL8168h. Read `AGENTS.md` rather than a document: it states the toolchain, the
+recipes, the boot chain, the installer and the remote control, and `just
+test-selfhost`, `just test-install`, `just test-installer` and `just
+test-remote` grade them. The toolchain stays LLVM's: Cranelift and wild were
+measured against this kernel and do not reach it, and
+`scripts/gates/{codegen,linker}/` re-ask on every install. What remains open is
+in `KNOWN_ISSUES.md`.
 
 Persistent storage has **landed and its plan is retired**. A file written on one
 boot is readable on the next on the root filesystem and under failure: a

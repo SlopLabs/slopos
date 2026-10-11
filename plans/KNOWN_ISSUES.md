@@ -1,6 +1,6 @@
 # SlopOS Known Issues
 
-Last updated: 2026-08-27
+Last updated: 2026-10-11
 
 
 ---
@@ -58,6 +58,40 @@ shape.
 Fixes for the first two: bound the `on_cpu` spin, re-enqueueing rather than
 spinning past a threshold; and record the owning CPU on the task so
 `unschedule_task` takes one lock instead of `n`. Neither is scheduled work.
+
+---
+
+## A link larger than an eighth of memory dies on a refused file-page fault
+
+**Status**: Open
+**Severity**: Medium (the debug tests kernel does not link in a 4G guest)
+**Component**: the file map's per-process pin share (`commit ledger` boot step,
+`PinnedBytes`), `mm/src/page_fault.rs`
+
+A clean file page a process has mapped stays pinned until it is unmapped, so
+the file map's per-process share — an eighth of usable memory — bounds what one
+process may map. The debug tests kernel's link outgrew 4 GiB's share:
+`pinnedbytes` peaks at exactly the cap, `rust-lld` takes a refused file-page
+fault and dies, and the filesystem it was writing remounts read-only. The
+self-hosting checks and `just boot` run at 6G for that reason. Reclaiming clean
+mapped pages under pressure lifts the bound; a refused fault in one process
+should also stop failing a whole mount.
+
+---
+
+## Boot turns the scheduler off globally while APs already run user tasks
+
+**Status**: Open
+**Severity**: Low (a boot-time window; latency only)
+**Component**: `sched/src/lifecycle.rs` (`boot_step_scheduler_init`),
+`sched/src/scheduler.rs` (`resume_unswitched`)
+
+`boot_step_scheduler_init` disables scheduling for every CPU until the BSP
+enters its own loop, though the APs are already running user tasks.
+`resume_unswitched` undoes the `Blocked` a `schedule()` that could not switch
+leaves behind, so a waiting task now spins through the window instead of
+hanging, but it still spins. Turning the scheduler off per CPU rather than
+globally closes the window.
 
 ---
 

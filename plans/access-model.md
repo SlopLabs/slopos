@@ -47,7 +47,7 @@ directories are sealed and pinned, mount refuses grant paths and `/lib`
 (`authority/mod.rs:97-101`). That makes every grant row a setuid program by
 another name. It runs `AT_SECURE`, and it inherits argv, environment, cwd and
 descriptors from whoever spawned it. That is why the installer starts
-e2fsprogs with an emptied environment (`plans/bare-metal.md:544-548`).
+e2fsprogs with an emptied environment (`userland/src/apps/installer/disk.rs:473`).
 
 **exec narrows the mask and leaves the flag word.**
 `narrow_authority_for_exec` intersects `caps` with the image's grant
@@ -97,8 +97,8 @@ has 174.
   fork+exec runs ungranted.
 - utest binaries run with SYSTEM (`core/src/exec/utest.rs:107`), so they cannot
   test an unprivileged gate.
-- No sshd runs, because "OpenSSH's needs credentials and a privilege separation
-  SlopOS lacks" (`plans/bare-metal.md:686-689`).
+- No sshd runs: OpenSSH's needs credentials and a privilege separation SlopOS
+  lacks, so the remote control dials out to a broker instead.
 - A GUI cannot hand install authority to a helper: an app the dock launches
   holds nothing, and a helper it spawns is ungranted unless the app becomes a
   sixth `Launch` holder.

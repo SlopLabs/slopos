@@ -10,8 +10,7 @@
 #
 # The runtime is LLVM's rather than GCC's because only LLVM's needs no second
 # compiler: the host clang that builds it is already here, where libstdc++
-# would cost a GCC cross-build first. `plans/self-hosting.md` carries the
-# measurement that settled it.
+# would cost a GCC cross-build first.
 llvm_version=18.1.8
 llvm_url=https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-project-18.1.8.src.tar.xz
 llvm_sha256=0b58557a6d32ceee97c8d533a59b9212d87e0fc4d2833924eb6c611247db2f2a
