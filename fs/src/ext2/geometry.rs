@@ -188,8 +188,9 @@ impl Ext2Geometry {
     /// ext2 carries no `s_r_inodes_count`, so this is the block reserve's ratio
     /// applied to the inode table: an image reserving 5% of its blocks reserves
     /// 5% of its inodes. Without it a process that creates empty files denies
-    /// `/sbin/init` a new inode with every block still free — the same
-    /// exhaustion the block reserve exists to stop, through the other table.
+    /// the reserve's holders a new inode with every block still free — the
+    /// same exhaustion the block reserve exists to stop, through the other
+    /// table.
     #[inline]
     pub fn reserved_inodes(self) -> u32 {
         if self.reserved_blocks == 0 || self.blocks_count == 0 {

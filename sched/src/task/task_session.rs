@@ -109,5 +109,6 @@ fn child_exit_info(task: &Task) -> SigInfo {
     } else {
         (CLD_EXITED, task.exit_code.load(Ordering::Acquire) & 0xff)
     };
-    SigInfo::sent(code, task.task_id, 0, status as u64)
+    let uid = task.process().map_or(0, |process| process.cred().ruid);
+    SigInfo::sent(code, task.task_id, uid, status as u64)
 }

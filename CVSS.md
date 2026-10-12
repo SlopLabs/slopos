@@ -2,6 +2,30 @@
 
 **No finding is open.**
 
+Swept 2026-10-12: credentials and DAC — the `Cred` on every process and the
+id calls' rules, `SetId` and `DacOverride`, the `Subject` every VFS entry now
+takes and each check it runs (search on the walk, open, create, link,
+symlink, unlink, rename and the sticky bit, a directory moved between
+parents, truncate, chdir, chmod, chown and the set-ID bits, times, inode
+flags, `faccessat2`), owners on ext4, ramfs and basefs, ring opcodes checking
+as their submitter, the ext4 reserve moving from init's task id to the
+superblock's uid and group, the signal rule's uid half and same-session
+`SIGCONT`, a universal `process_list`, and `AT_SECURE` for mixed ids. Reviews
+found defects before it landed: a new file was created at the filesystem's
+default mode and narrowed by a second call, so an `O_CREAT|O_EXCL` 0600 file
+was readable by any uid in between and stayed 0644 if the second call failed
+(now one step); `FS_IOC_SETFLAGS` took no owner check; and a spawn whose
+parent had vanished would have resolved as the kernel. One **pre-existing**
+defect DAC exposed: userland's `open_path` created files 0000, which nothing
+noticed while mode bits were unenforced. Below the bar: a permission check
+and the operation it guards look the name up separately with no directory
+lock across both, so a racing rename can swap what a check saw — the one
+check it can evade is write on a directory moved between parents, which only
+guards that directory's `..`, and every sticky-bit check survives it, since
+only a name the attacker could already remove can be swapped in; and pty
+slaves are 0666 to every uid, which phase 4 must close before the session
+leaves uid 0.
+
 Swept 2026-10-12: the authority model's move off `task.flags` — the spawn
 boundary and its retired flag bits, the grant table now naming capabilities,
 exec's narrowing, `caps_drop` and the process record a racing clone is

@@ -31,6 +31,14 @@ pub enum FileType {
 }
 
 impl FileType {
+    /// The permission bits a node created without asking for any gets.
+    pub const fn default_mode(self) -> u16 {
+        match self {
+            Self::Directory => 0o755,
+            _ => 0o644,
+        }
+    }
+
     /// The `S_IFMT` field of a POSIX `st_mode`.
     pub const fn to_s_ifmt(self) -> u32 {
         use slopos_abi::fs::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK};
@@ -370,19 +378,26 @@ pub trait FileSystem: Send + Sync {
     /// user-space I/O, so filesystem code never touches a user address.
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize>;
 
-    /// Create an entry under `parent`, owned by `owner`. `file_type` is
-    /// `Regular`, `Directory` or `Pipe`.
+    /// Create an entry under `parent`, owned by `owner`, with the permission
+    /// bits `mode`. `file_type` is `Regular`, `Directory` or `Pipe`.
     fn create_owned(
         &self,
         parent: InodeId,
         name: &[u8],
         file_type: FileType,
         owner: Owner,
+        mode: u16,
     ) -> VfsResult<InodeId>;
 
-    /// [`Self::create_owned`] for uid 0.
+    /// [`Self::create_owned`] for uid 0, with the default mode.
     fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
-        self.create_owned(parent, name, file_type, Owner::ROOT)
+        self.create_owned(
+            parent,
+            name,
+            file_type,
+            Owner::ROOT,
+            file_type.default_mode(),
+        )
     }
 
     /// Remove a non-directory entry. A directory is `EISDIR`; use

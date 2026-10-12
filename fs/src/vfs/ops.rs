@@ -161,16 +161,14 @@ pub fn vfs_open_flags_at(
             check_name_len(name.as_bytes())?;
             parent.check_writable()?;
             parent.perm.check_entries(who)?;
+            let mode = create_mode.unwrap_or(FileType::Regular.default_mode());
             let new_inode = parent.fs.create_owned(
                 parent.inode,
                 name.as_bytes(),
                 FileType::Regular,
                 parent.perm.owner_for_child(who),
+                parent.perm.mode_for_child(who, mode, false),
             )?;
-            if let Some(mode) = create_mode {
-                let mode = who.child_mode(parent.perm.mode, parent.perm.gid, mode, false);
-                let _ = parent.fs.set_mode(new_inode, mode);
-            }
             Ok(VfsHandle {
                 inode: new_inode,
                 fs: parent.fs,
@@ -195,9 +193,7 @@ pub fn vfs_mkdir(path: &[u8]) -> VfsResult<()> {
     vfs_mkdir_at(path, b"/", None, &Subject::KERNEL)
 }
 
-/// `mkdirat(2)`. `mode` lands on the inode `create` returned: re-resolving the
-/// path to chmod it could hand the mode to a replacement, or to a symlink's
-/// target.
+/// `mkdirat(2)`.
 pub fn vfs_mkdir_at(path: &[u8], cwd: &[u8], mode: Option<u16>, who: &Subject) -> VfsResult<()> {
     create_node_at(path, cwd, FileType::Directory, mode, who)
 }
@@ -227,23 +223,16 @@ fn create_node_at(
     check_name_len(name.as_bytes())?;
     parent.check_writable()?;
     parent.perm.check_entries(who)?;
-    let inode = parent.fs.create_owned(
+    let mode = mode.unwrap_or(file_type.default_mode());
+    parent.fs.create_owned(
         parent.inode,
         name.as_bytes(),
         file_type,
         parent.perm.owner_for_child(who),
+        parent
+            .perm
+            .mode_for_child(who, mode, file_type == FileType::Directory),
     )?;
-    let is_dir = file_type == FileType::Directory;
-    let mode = match mode {
-        Some(mode) => Some(who.child_mode(parent.perm.mode, parent.perm.gid, mode, is_dir)),
-        None if is_dir && parent.perm.mode & slopos_abi::fs::S_ISGID as u16 != 0 => {
-            Some(0o755 | slopos_abi::fs::S_ISGID as u16)
-        }
-        None => None,
-    };
-    if let Some(mode) = mode {
-        parent.fs.set_mode(inode, mode)?;
-    }
     Ok(())
 }
 
@@ -469,15 +458,19 @@ pub fn vfs_unlink_at(path: &[u8], cwd: &[u8], who: &Subject) -> VfsResult<()> {
     let (parent, name) = resolve_parent_at(path, cwd, who)?;
     let name = name.as_bytes();
     parent.check_writable()?;
-    parent.perm.check_entries(who)?;
+    parent.perm.check(who, Perm::Exec)?;
 
     // A filesystem that reports its own `ENOENT` gives a better error than a
     // lookup here would.
     let inode = match parent.fs.lookup(parent.inode, name) {
         Ok(inode) => inode,
-        Err(VfsError::NotFound) => return parent.fs.unlink(parent.inode, name),
+        Err(VfsError::NotFound) => {
+            check_missing_removable(&parent, who)?;
+            return parent.fs.unlink(parent.inode, name);
+        }
         Err(e) => return Err(e),
     };
+    parent.perm.check(who, Perm::Write)?;
 
     let victim = parent.fs.stat(inode)?;
     parent.perm.check_sticky(who, victim.uid)?;
@@ -562,11 +555,12 @@ pub fn vfs_rmdir_at(path: &[u8], cwd: &[u8], who: &Subject) -> VfsResult<()> {
     }
     let (parent, name) = resolve_parent_at(path, cwd, who)?;
     parent.check_writable()?;
-    parent.perm.check_entries(who)?;
+    parent.perm.check(who, Perm::Exec)?;
     // Only a regular file can carry a page set while `mmap` refuses every
     // other type, and that is not a rule to leave load-bearing.
     match parent.fs.lookup(parent.inode, name.as_bytes()) {
         Ok(inode) => {
+            parent.perm.check(who, Perm::Write)?;
             let victim = parent.fs.stat(inode)?;
             parent.perm.check_sticky(who, victim.uid)?;
             if victim.file_type != FileType::Directory {
@@ -574,10 +568,19 @@ pub fn vfs_rmdir_at(path: &[u8], cwd: &[u8], who: &Subject) -> VfsResult<()> {
             }
             crate::filemap::detach_inode(parent.fs, inode);
         }
-        Err(VfsError::NotFound) => {}
+        Err(VfsError::NotFound) => check_missing_removable(&parent, who)?,
         Err(e) => return Err(e),
     }
     parent.fs.rmdir(parent.inode, name.as_bytes())
+}
+
+/// A name that is not there is `ENOENT` to a caller who could not have
+/// removed it either, as Linux looks a name up before it checks for write.
+fn check_missing_removable(parent: &ResolvedPath, who: &Subject) -> VfsResult<()> {
+    parent
+        .perm
+        .check(who, Perm::Write)
+        .map_err(|_| VfsError::NotFound)
 }
 
 /// Create a symlink at `link_path` pointing at `target`.

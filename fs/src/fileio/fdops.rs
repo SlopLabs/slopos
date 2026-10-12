@@ -1414,16 +1414,21 @@ pub fn file_inode_flags_fd(table: FdTable, fd: c_int) -> Result<u32, Errno> {
     fs.inode_flags(inode).map_err(VfsError::to_errno)
 }
 
-/// `FS_IOC_SETFLAGS`. A change to the seal without `seal` is `EPERM`, a flag
-/// the filesystem does not keep `EOPNOTSUPP`.
+/// `FS_IOC_SETFLAGS`, the owner's. A change to the seal without `seal` is
+/// `EPERM`, a flag the filesystem does not keep `EOPNOTSUPP`.
 pub fn file_set_inode_flags_fd(
     table: FdTable,
     fd: c_int,
     flags: u32,
+    who: &Subject,
     seal: Option<&Cap<'_, Seal>>,
 ) -> Result<(), Errno> {
     let (fs, inode) = flags_vnode(table, fd)?;
     fd_writable_fs(fs)?;
+    let stat = fs.stat(inode).map_err(VfsError::to_errno)?;
+    InodePerm::of(&stat)
+        .check_owner(who)
+        .map_err(VfsError::to_errno)?;
     let current = fs.inode_flags(inode).map_err(VfsError::to_errno)?;
     if (current ^ flags) & FS_IMMUTABLE_FL != 0 && seal.is_none() {
         return Err(Errno::EPERM);

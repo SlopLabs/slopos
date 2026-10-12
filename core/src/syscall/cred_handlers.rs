@@ -94,6 +94,9 @@ define_syscall!(syscall_getgroups (ctx, size: i32, list: u64) cap(NoneSelf)
 
 define_syscall!(syscall_setgroups (ctx, size: u64, list: u64) cap(NoneSelf)
     -> Result<(), Errno> {
+    if !ctx.holds(Capability::SetId) {
+        return Err(Errno::EPERM);
+    }
     let len = usize::try_from(size).map_err(|_| Errno::EINVAL)?;
     if len > NGROUPS_MAX {
         return Err(Errno::EINVAL);

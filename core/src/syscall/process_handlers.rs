@@ -1002,9 +1002,8 @@ define_syscall!(syscall_setsid (ctx)
 /// Not `canonicalise_at`: that normaliser is lexical, folding `..` against
 /// the spelling and erasing a symlink the `..` crossed. The stored cwd is
 /// prefixed onto every later relative lookup, so a lexical answer would leave
-/// the task resolving against a directory this call never checked.
-/// The directory must be searchable too, since every later relative walk
-/// starts in it.
+/// the task resolving against a directory this call never checked. As
+/// `chdir(2)` requires, the directory must also be searchable.
 #[inline(never)]
 fn resolve_new_cwd(
     path: &[u8],

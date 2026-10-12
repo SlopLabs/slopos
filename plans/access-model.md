@@ -454,27 +454,36 @@ raw block and signal gates), `test_caps_drop_is_total_and_process_wide`,
 
 Each process carries a `Cred`, process-wide, that fork and spawn copy and exec
 keeps. The ten id syscalls and the four chown calls sit at the Linux numbers;
-an id the process does not hold, and `setgroups`, take `SetId`. Every VFS
-entry takes the `Subject` it acts for: a walk needs search on each directory
-it crosses, open needs read or write, a name made or removed needs write and
+an id the process does not hold, and `setgroups`, take `SetId`. Every VFS entry
+takes the `Subject` it acts for: a walk needs search on each directory it
+crosses, open needs read or write, a name made or removed needs write and
 search on its parent and passes the sticky bit, `chmod`, `utimensat` and
 `chown` follow ownership and strip set-ID bits as Linux does, a setgid
-directory hands down its group, and `faccessat2` checks the real ids unless
-`AT_EACCESS`; ring opcodes check as their submitter. `DacOverride` passes every
-mode check. `stat` reports ext4's `i_uid`/`i_gid`, ramfs's creator and
-basefs's 0:0, and the ext4 reserve is the superblock's `s_def_resuid` and
-`s_def_resgid` rather than init's. A signal also needs POSIX's uid rule, which
-`ProcSignal` and a same-session `SIGCONT` waive, and `si_uid` is the sender's
-real uid. `process_list` lists every task with its uid, so `/bin/sysmon` lost
-its `SysInspect` row. `AT_SECURE` also marks a program whose effective ids
-differ from its real ones. slibc's root-only emulation became the syscalls,
-its passwd and group rows gained `user`, and `prctl` reports
-`PR_GET_NO_NEW_PRIVS` set. Graded by `dac_test` (as uid 1000: no create or
-write in `/etc`, no read, chmod or chown of a 0600 root file, no unlink of or
-rename over another owner's name in sticky `/tmp`, each beside what it may
-do), the `cred` kernel tests (the id rules, DAC on open, create, unlink,
-rename, chmod, chown and `faccessat2`, the signal rule), `cred.rs`'s host
-tests and `libc_abi_test`'s group calls.
+directory hands down its group, a new inode is born with its final mode, and
+`faccessat2` checks the real ids unless `AT_EACCESS`; ring opcodes check as
+their submitter. `DacOverride` passes every mode check. `stat` reports ext4's
+`i_uid`/`i_gid`, ramfs's creator and basefs's 0:0, and the ext4 reserve is the
+superblock's `s_def_resuid` and `s_def_resgid` rather than init's. A signal
+also needs POSIX's uid rule, which `ProcSignal` and a same-session `SIGCONT`
+waive, and `si_uid` is the sender's real uid. `process_list` lists every task
+with its uid, so `/bin/sysmon` lost its `SysInspect` row. `AT_SECURE` also
+marks a program whose effective ids differ from its real ones. slibc's
+root-only emulation became the syscalls, its passwd and group rows gained
+`user`, and `prctl` reports `PR_GET_NO_NEW_PRIVS` set. The owner bits admit the
+uid-0 session wherever they admitted it before, except that uid 0 without
+`DacOverride` is held to a mode that denies the owner: a 0444 file is read-only
+even to it. That exposed userland's `open_path`, behind the shell's
+redirections and `write_durable`, creating files 0000; it creates 0666 less the
+umask now, and a file a preserved root kept from before is its owner's to
+`chmod`. Until phase 4 the whole session is the reserve's uid. Graded by
+`dac_test` (as uid 1000: no create or write in `/etc`, no read, chmod or chown
+of a 0600 root file, no unlink of or rename over another owner's name in sticky
+`/tmp`, each beside what it may do; and uid 0 held to its own 0444 file), the
+`cred` kernel tests (the id rules, DAC on open, create, mkdir, link, symlink,
+unlink, rename, a directory moved between parents, truncate, chdir, chmod,
+chown, times, inode flags and `faccessat2`, setgid directories, the signal
+rule), `cred.rs`'s host tests, `persist_test`'s reserve against a uid-1000
+filler and `libc_abi_test`'s group calls.
 
 ### Phase 3: Peer identity
 
@@ -498,7 +507,10 @@ session. A row whose program writes root-owned state (`keymap`'s `/etc/keymap`,
 the installer's new root) also names `DacOverride` until privd runs it as
 uid 0. The ownership map lands with the uid change: the image builders,
 `fs_tree.py`, the installer, and init's one-time migration on a preserved
-root. `utest!` declarations replace the test rows.
+root. `utest!` declarations replace the test rows. A pty's slave takes the
+opener's uid, mode 0620, as Linux's devpts gives it, since devfs reports every
+character device 0:0 0666 and the session's terminals would otherwise be open
+to every uid.
 
 Ends with:
 - a test that a spawn asking beyond its spawner's mask is `EPERM`, and one that

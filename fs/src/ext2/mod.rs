@@ -1887,16 +1887,16 @@ impl<'a> Ext2Fs<'a> {
     }
 
     pub fn create_file(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        self.create_owned(parent, name, NewInode::File, Owner::ROOT)
+        self.create_owned(parent, name, NewInode::File, Owner::ROOT, 0o644)
     }
 
     pub fn create_directory(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        self.create_owned(parent, name, NewInode::Directory, Owner::ROOT)
+        self.create_owned(parent, name, NewInode::Directory, Owner::ROOT, 0o755)
     }
 
     /// A named pipe: a blockless inode whose data lives in the kernel's pipe.
     pub fn create_fifo(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        self.create_owned(parent, name, NewInode::Fifo, Owner::ROOT)
+        self.create_owned(parent, name, NewInode::Fifo, Owner::ROOT, 0o644)
     }
 
     /// Create a symlink under `parent` pointing at `target`. Targets of 60
@@ -1907,9 +1907,21 @@ impl<'a> Ext2Fs<'a> {
         name: &[u8],
         target: &[u8],
     ) -> Result<u32, Ext2Error> {
-        self.create_owned(parent, name, NewInode::Symlink(target), Owner::ROOT)
+        self.create_symlink_owned(parent, name, target, Owner::ROOT)
     }
 
+    pub fn create_symlink_owned(
+        &mut self,
+        parent: u32,
+        name: &[u8],
+        target: &[u8],
+        owner: Owner,
+    ) -> Result<u32, Ext2Error> {
+        self.create_owned(parent, name, NewInode::Symlink(target), owner, 0o777)
+    }
+
+    /// A new inode under `parent`; `mode` is its permission bits, which a
+    /// symlink ignores.
     #[inline(never)]
     pub fn create_owned(
         &mut self,
@@ -1917,9 +1929,10 @@ impl<'a> Ext2Fs<'a> {
         name: &[u8],
         kind: NewInode<'_>,
         owner: Owner,
+        mode: u16,
     ) -> Result<u32, Ext2Error> {
         self.check_writable()?;
-        self.transaction(|fs| fs.create_inode_entry(InodeNum(parent), name, kind, owner))
+        self.transaction(|fs| fs.create_inode_entry(InodeNum(parent), name, kind, owner, mode))
             .map(|n| n.raw())
     }
 
@@ -1930,6 +1943,7 @@ impl<'a> Ext2Fs<'a> {
         name: &[u8],
         kind: NewInode<'_>,
         owner: Owner,
+        mode: u16,
     ) -> Result<InodeNum, Ext2Error> {
         if name.is_empty() || name.len() > 255 {
             return Err(Ext2Error::NameTooLong);
@@ -1957,7 +1971,7 @@ impl<'a> Ext2Fs<'a> {
         }
         self.deindex_directory(parent_num, &mut parent)?;
 
-        let new_ino = self.allocate_new_inode(parent_num, kind, owner)?;
+        let new_ino = self.allocate_new_inode(parent_num, kind, owner, mode)?;
 
         let ft = match kind {
             NewInode::Directory => DIR_FT_DIR,
@@ -1998,6 +2012,7 @@ impl<'a> Ext2Fs<'a> {
         parent_num: InodeNum,
         kind: NewInode<'_>,
         owner: Owner,
+        mode: u16,
     ) -> Result<InodeNum, Ext2Error> {
         let parent_group = self
             .geom
@@ -2014,7 +2029,7 @@ impl<'a> Ext2Fs<'a> {
         self.note_life(new_ino);
         self.init_inode_record(new_ino)?;
 
-        let mut new_inode = self.build_new_inode(new_ino, parent_num, kind)?;
+        let mut new_inode = self.build_new_inode(new_ino, parent_num, kind, mode)?;
         new_inode.uid = owner.uid;
         new_inode.gid = owner.gid;
         let now = time::now_or_unset();
@@ -2034,17 +2049,19 @@ impl<'a> Ext2Fs<'a> {
         new_ino: InodeNum,
         parent_num: InodeNum,
         kind: NewInode<'_>,
+        mode: u16,
     ) -> Result<Inode, Ext2Error> {
         let generation = self.cache.next_generation();
         if let NewInode::Symlink(target) = kind {
             return self.build_symlink_inode(new_ino, target, generation);
         }
         let mut inode = Inode::EMPTY;
-        inode.mode = match kind {
-            NewInode::Directory => MODE_DIRECTORY | 0o755,
-            NewInode::Fifo => ondisk::MODE_FIFO | 0o644,
-            _ => MODE_FILE | 0o644,
-        };
+        inode.mode = mode & 0o7777
+            | match kind {
+                NewInode::Directory => MODE_DIRECTORY,
+                NewInode::Fifo => ondisk::MODE_FIFO,
+                _ => MODE_FILE,
+            };
         inode.links_count = 1;
         inode.generation = generation;
         // Readers hold a FIFO's `i_block` to zero, so it takes no extent tree.

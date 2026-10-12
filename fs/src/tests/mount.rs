@@ -399,8 +399,10 @@ impl FileSystem for FlakyLookup {
         name: &[u8],
         file_type: FileType,
         owner: crate::vfs::Owner,
+        mode: u16,
     ) -> VfsResult<InodeId> {
-        self.inner.create_owned(parent, name, file_type, owner)
+        self.inner
+            .create_owned(parent, name, file_type, owner, mode)
     }
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
         self.inner.unlink(parent, name)

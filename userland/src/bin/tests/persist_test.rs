@@ -267,20 +267,24 @@ fn statfs_agrees_with_fstatfs() -> bool {
 }
 
 /// The block reserve (`s_r_blocks_count`) is what stops an unprivileged writer
-/// denying the disk to `/sbin/init`.
+/// denying the disk to the system.
 ///
-/// Only init and kernel threads spend the reserve, so this process and the
-/// [`FILL_ARG`] children it spawns are all held to it. Each child writes until
-/// refused and exits **leaving its filler in place**; one child's `DiskBlocks`
-/// ceiling can refuse it first, so fillers are spawned until `f_bavail` reads
-/// zero. The discriminating observation is then `f_bfree`: with a reserve the
-/// refused blocks are still free; on a disk that simply filled, nothing is.
-/// Only after that are the fillers removed. An entitled writer spending the
-/// reserve is `slopos_fs`'s `test_ext2_reserve_refuses_unprivileged_allocation`,
-/// and who is entitled `slopos_core`'s `init_is_told_apart_by_its_task_id`.
+/// The reserve is uid 0's, so the [`FILL_ARG`] children run as uid 1000. Each
+/// writes until refused and exits **leaving its filler in place**; one child's
+/// `DiskBlocks` ceiling can refuse it first, so fillers are spawned until
+/// `f_bavail` reads zero. The discriminating observation is then `f_bfree`:
+/// with a reserve the refused blocks are still free; on a disk that simply
+/// filled, nothing is. Only after that are the fillers removed. An entitled
+/// writer spending the reserve is `slopos_fs`'s
+/// `test_ext2_reserve_refuses_unprivileged_allocation`.
 fn the_disk_reserve_refuses_an_unprivileged_filler() -> bool {
     if !root_persists() {
         return true;
+    }
+    let _ = fs::create_dir(FILLER_DIR);
+    if let Err(e) = std::os::unix::fs::chown(FILLER_DIR, Some(FILLER_UID), Some(FILLER_UID)) {
+        println!("RESERVE: could not hand {FILLER_DIR} to uid {FILLER_UID}: {e}");
+        return false;
     }
     let mut spawned = 0;
     let verdict = loop {
@@ -309,6 +313,7 @@ fn the_disk_reserve_refuses_an_unprivileged_filler() -> bool {
     for i in 0..spawned {
         let _ = fs::remove_file(filler_path(i));
     }
+    let _ = fs::remove_dir(FILLER_DIR);
     match verdict {
         Ok(()) => true,
         Err(why) => {
@@ -322,38 +327,32 @@ fn the_disk_reserve_refuses_an_unprivileged_filler() -> bool {
 /// than one ceiling takes several.
 const MAX_FILLERS: usize = 16;
 
+const FILLER_DIR: &str = "/var/reserve-fillers";
+const FILLER_UID: u32 = 1000;
+
 fn filler_path(index: usize) -> String {
-    format!("/var/reserve-filler.{index}")
+    format!("{FILLER_DIR}/{index}")
 }
 
-/// Spawn this binary, which no grant row names, as a [`FILL_ARG`] child.
+/// Run this binary, which no grant row names, as a [`FILL_ARG`] child of uid
+/// [`FILLER_UID`].
 fn spawn_filler(path: &str) -> i32 {
-    use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
-    use slopos_userland::syscall::process;
+    use std::os::unix::process::CommandExt;
 
-    let stdio = [
-        process::clone_fd(0, 0),
-        process::clone_fd(1, 1),
-        process::clone_fd(2, 2),
-    ];
-    let target = format!("{path}\0");
-    let argv = [
-        b"persist_test\0".as_ptr(),
-        FILL_ARG.as_ptr(),
-        target.as_ptr(),
-    ];
-    let tid = process::spawn_path_with_actions(
-        b"/bin/persist_test",
-        &argv,
-        TaskPriority::Normal,
-        TASK_FLAG_USER_MODE,
-        &stdio,
-        0,
-    );
-    if tid <= 0 {
-        return tid;
+    match std::process::Command::new("/bin/persist_test")
+        .arg0("persist_test")
+        .arg(FILL_ARG)
+        .arg(path)
+        .uid(FILLER_UID)
+        .gid(FILLER_UID)
+        .status()
+    {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            println!("RESERVE: could not run a filler: {e}");
+            -1
+        }
     }
-    process::wait_exit_code(tid as u32)
 }
 
 /// `lsattr`'s and `chattr`'s ioctls on the disk root: a new file is extent-mapped,
@@ -780,7 +779,7 @@ fn store_through(base: u64, data: &[u8]) {
     }
 }
 
-const FILL_ARG: &[u8] = b"--fill-until-refused\0";
+const FILL_ARG: &str = "--fill-until-refused";
 const SEAL_ARG: &[u8] = b"--seal\0";
 
 /// The unprivileged half: fill the volume at `path` until `ENOSPC` and exit 0
@@ -827,7 +826,7 @@ fn fill_until_refused(path: &str) -> i32 {
 fn main() {
     let mut args = std::env::args().skip(1);
     match (args.next().as_deref(), args.next()) {
-        (Some("--fill-until-refused"), Some(path)) => std::process::exit(fill_until_refused(&path)),
+        (Some(FILL_ARG), Some(path)) => std::process::exit(fill_until_refused(&path)),
         (Some("--seal"), Some(path)) => std::process::exit(seal_refused(&path)),
         _ => {}
     }

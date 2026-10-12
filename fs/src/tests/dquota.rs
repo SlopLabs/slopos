@@ -1,10 +1,10 @@
 //! The per-principal disk-block ceiling.
 //!
 //! ext2's own `s_r_blocks_count` is a system floor: it keeps a reserve for
-//! `/sbin/init` and the kernel's writes, and says nothing about how the space
-//! *above* it is shared. These tests cover the other half — one process cannot
-//! take all of it, what it took comes back when it frees, and what it still
-//! holds at exit is released rather than inherited.
+//! its reserved uid and group and the kernel's writes, and says nothing about
+//! how the space *above* it is shared. These tests cover the other half — one
+//! process cannot take all of it, what it took comes back when it frees, and
+//! what it still holds at exit is released rather than inherited.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

@@ -63,6 +63,12 @@ impl InodePerm {
         }
     }
 
+    /// The mode an inode `who` creates in this directory, asking for `mode`,
+    /// is born with.
+    pub fn mode_for_child(&self, who: &Subject, mode: u16, is_dir: bool) -> u16 {
+        who.child_mode(self.mode, self.gid, mode & 0o7777, is_dir)
+    }
+
     /// Who an inode `who` creates in this directory belongs to.
     pub fn owner_for_child(&self, who: &Subject) -> Owner {
         let (uid, gid) = who.child_owner(self.mode, self.gid);

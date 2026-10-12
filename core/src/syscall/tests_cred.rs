@@ -1,7 +1,8 @@
-//! Credentials and permission bits through the real syscall entry: the id
-//! calls' rules, the mode bits on every path operation, ownership for
-//! `chmod`/`chown`, and the signal rule's uid half. Each refusal sits beside
-//! the positive control that shows the same caller one bit away succeeding.
+//! Credentials and permission bits: the id calls' rules, the mode bits on
+//! every path operation and ownership for `chmod`, `chown`, times and flags,
+//! all through the real syscall entry, and the signal rule's uid half. Each
+//! refusal sits beside the positive control that shows the same caller one bit
+//! away succeeding.
 
 use core::ffi::c_char;
 use core::ptr;
@@ -12,7 +13,9 @@ use slopos_abi::signal::{SIGCONT, SIGTERM};
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
 use slopos_fs::fileio::{FdTable, file_stat_at};
 use slopos_fs::vfs::path::RESOLVE_FOLLOW;
-use slopos_fs::vfs::{Subject, vfs_mkdir, vfs_open, vfs_rmdir, vfs_set_mode, vfs_unlink};
+use slopos_fs::vfs::{
+    Subject, vfs_mkdir, vfs_open, vfs_rmdir, vfs_set_mode, vfs_set_owner_at, vfs_unlink,
+};
 use slopos_ostd::authority::{CAP_UNIVERSAL, Capability};
 use slopos_ostd::process::Cred;
 use slopos_sched::task::{TaskRef, task_create, task_find_by_id, task_terminate};
@@ -90,16 +93,31 @@ impl Principal {
     }
 
     fn openat(&self, path: &[u8], flags: u32) -> Option<i64> {
-        let (at, _) = self.paths(path, b"")?;
-        let rc = self.call(
-            crate::syscall::fs::at_handlers::syscall_openat,
-            [AT_FDCWD as i64 as u64, at, u64::from(flags), 0o644, 0, 0],
-        )?;
-        if rc >= 0 {
-            let _ = slopos_fs::fileio::file_close_fd(self.table, rc as i32);
+        self.openat_mode(path, flags, 0o644)
+    }
+
+    fn openat_mode(&self, path: &[u8], flags: u32, mode: u64) -> Option<i64> {
+        let fd = self.open_fd(path, flags, mode)?;
+        if fd >= 0 {
+            let _ = slopos_fs::fileio::file_close_fd(self.table, fd as i32);
             return Some(0);
         }
-        Some(rc)
+        Some(fd)
+    }
+
+    fn open_fd(&self, path: &[u8], flags: u32, mode: u64) -> Option<i64> {
+        let (at, _) = self.paths(path, b"")?;
+        self.call(
+            crate::syscall::fs::at_handlers::syscall_openat,
+            [AT_FDCWD as i64 as u64, at, u64::from(flags), mode, 0, 0],
+        )
+    }
+
+    /// `bytes` staged in the second half of the page, for an argument that is
+    /// not a path.
+    fn stage(&self, bytes: &[u8]) -> Option<u64> {
+        let half = self.page + 2048;
+        stage_cstr(self.table, half, bytes).then_some(half)
     }
 
     fn path_call(&self, handler: SyscallHandler, path: &[u8], rest: [u64; 3]) -> Option<i64> {
@@ -108,11 +126,12 @@ impl Principal {
     }
 
     fn rename(&self, from: &[u8], to: &[u8]) -> Option<i64> {
-        let (old, new) = self.paths(from, to)?;
-        self.call(
-            crate::syscall::fs::path_handlers::syscall_rename,
-            [old, new, 0, 0, 0, 0],
-        )
+        self.two_paths(crate::syscall::fs::path_handlers::syscall_rename, from, to)
+    }
+
+    fn two_paths(&self, handler: SyscallHandler, first: &[u8], second: &[u8]) -> Option<i64> {
+        let (first, second) = self.paths(first, second)?;
+        self.call(handler, [first, second, 0, 0, 0, 0])
     }
 
     #[inline(never)]
@@ -245,23 +264,31 @@ pub fn test_id_calls_follow_posix_without_set_id() -> TestResult {
         "SetId must take any uid"
     );
     assert_eq_test!(admin.uids(), [0; 3], "setuid with SetId sets all three");
+    let mut list = [0u8; 8];
+    list[..4].copy_from_slice(&7u32.to_le_bytes());
+    list[4..].copy_from_slice(&8u32.to_le_bytes());
     let group_list = admin.page;
     assert_test!(
-        stage_cstr(admin.table, group_list, &7u32.to_le_bytes()),
+        stage_cstr(admin.table, group_list, &list),
         "could not stage the group list"
     );
     assert_eq_test!(
-        admin.call(syscall_setgroups, [1, group_list, 0, 0, 0, 0]),
+        admin.call(syscall_setgroups, [2, group_list, 0, 0, 0, 0]),
         Some(0),
         "setgroups with SetId"
     );
     assert_eq_test!(
         admin.call(syscall_getgroups, [0, 0, 0, 0, 0, 0]),
-        Some(1),
+        Some(2),
         "getgroups(0) counts the groups set"
     );
+    assert_eq_test!(
+        admin.call(syscall_getgroups, [1, group_list, 0, 0, 0, 0]),
+        errno(Errno::EINVAL),
+        "getgroups into a list too short for the set"
+    );
     assert_test!(
-        admin.groups_are(&[7]),
+        admin.groups_are(&[7, 8]),
         "the group set is not the one asked for"
     );
     pass!()
@@ -322,6 +349,18 @@ pub fn test_mode_bits_refuse_open_and_create() -> TestResult {
         Some((USER, USER)),
         "a new file belongs to its creator"
     );
+    let private = join(b"closed/private");
+    assert_eq_test!(
+        user.openat_mode(&private, O_WRONLY | O_CREAT, 0o600),
+        Some(0),
+        "create a private file"
+    );
+    assert_eq_test!(
+        owner_of(&private).map(|(_, _, mode)| mode),
+        Some(0o600),
+        "a new file is born with the mode it asked for"
+    );
+    let _ = vfs_unlink(&private);
 
     assert_test!(
         vfs_set_mode(&closed, 0o700).is_ok(),
@@ -586,3 +625,285 @@ pub fn test_signals_need_the_uid_rule() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_signals_need_the_uid_rule, suite = cred);
+
+pub fn test_a_new_name_needs_write_and_search() -> TestResult {
+    use crate::syscall::fs::at_handlers::syscall_link;
+    use crate::syscall::fs::path_handlers::{syscall_mkdir, syscall_symlink};
+    let _fixture = SyscallFixture::new();
+    assert_test!(fixtures_root(), "could not lay out the fixture root");
+    let (Some(names), Some(target)) =
+        (root_dir(b"names", 0o755), root_file(b"names_target", 0o644))
+    else {
+        return fail!("could not lay out the fixtures");
+    };
+    let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
+        return fail!("could not build the principal");
+    };
+    let (sub, soft, hard) = (join(b"names/sub"), join(b"names/soft"), join(b"names/hard"));
+
+    assert_eq_test!(
+        user.path_call(syscall_mkdir, &sub, [0o755, 0, 0]),
+        errno(Errno::EACCES),
+        "mkdir in a 0755 root directory"
+    );
+    assert_eq_test!(
+        user.two_paths(syscall_symlink, &target, &soft),
+        errno(Errno::EACCES),
+        "symlink in a 0755 root directory"
+    );
+    assert_eq_test!(
+        user.two_paths(syscall_link, &target, &hard),
+        errno(Errno::EACCES),
+        "link in a 0755 root directory"
+    );
+    assert_test!(
+        vfs_set_mode(&names, 0o777).is_ok(),
+        "could not open the directory"
+    );
+    assert_eq_test!(
+        user.path_call(syscall_mkdir, &sub, [0o755, 0, 0]),
+        Some(0),
+        "mkdir in a 0777 directory"
+    );
+    assert_eq_test!(
+        user.two_paths(syscall_symlink, &target, &soft),
+        Some(0),
+        "symlink in a 0777 directory"
+    );
+    assert_eq_test!(
+        user.two_paths(syscall_link, &target, &hard),
+        Some(0),
+        "link in a 0777 directory"
+    );
+    let _ = vfs_unlink(&hard);
+    let _ = vfs_unlink(&soft);
+    let _ = vfs_rmdir(&sub);
+    let _ = vfs_rmdir(&names);
+    let _ = vfs_unlink(&target);
+    pass!()
+}
+
+slopos_testing::stest!(name = test_a_new_name_needs_write_and_search, suite = cred);
+
+pub fn test_a_setgid_directory_hands_down_its_group() -> TestResult {
+    use crate::syscall::fs::path_handlers::syscall_mkdir;
+    let _fixture = SyscallFixture::new();
+    assert_test!(fixtures_root(), "could not lay out the fixture root");
+    let Some(team) = root_dir(b"team", 0o777) else {
+        return fail!("could not lay out the fixture");
+    };
+    let regrouped = vfs_set_owner_at(
+        &team,
+        b"/",
+        None,
+        Some(OTHER),
+        RESOLVE_FOLLOW,
+        &Subject::KERNEL,
+    );
+    assert_test!(
+        regrouped.is_ok() && vfs_set_mode(&team, 0o2777).is_ok(),
+        "could not make the directory set-group-ID"
+    );
+    let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
+        return fail!("could not build the principal");
+    };
+    let (file, sub) = (join(b"team/file"), join(b"team/sub"));
+
+    assert_eq_test!(
+        user.openat_mode(&file, O_WRONLY | O_CREAT, 0o2644),
+        Some(0),
+        "create in a set-group-ID directory"
+    );
+    assert_eq_test!(
+        owner_of(&file),
+        Some((USER, OTHER, 0o644)),
+        "a file takes the directory's group, and no set-group-ID outside the creator's"
+    );
+    assert_eq_test!(
+        user.path_call(syscall_mkdir, &sub, [0o755, 0, 0]),
+        Some(0),
+        "mkdir in a set-group-ID directory"
+    );
+    assert_eq_test!(
+        owner_of(&sub),
+        Some((USER, OTHER, 0o2755)),
+        "a directory takes the group and the set-group-ID bit"
+    );
+    let _ = vfs_unlink(&file);
+    let _ = vfs_rmdir(&sub);
+    let _ = vfs_rmdir(&team);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_a_setgid_directory_hands_down_its_group,
+    suite = cred
+);
+
+pub fn test_moving_a_directory_needs_write_on_it() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    assert_test!(fixtures_root(), "could not lay out the fixture root");
+    let (Some(from), Some(to), Some(theirs)) = (
+        root_dir(b"from", 0o777),
+        root_dir(b"to", 0o777),
+        root_dir(b"from/theirs", 0o755),
+    ) else {
+        return fail!("could not lay out the fixtures");
+    };
+    let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
+        return fail!("could not build the principal");
+    };
+    let (away, renamed) = (join(b"to/theirs"), join(b"from/renamed"));
+
+    assert_eq_test!(
+        user.rename(&theirs, &away),
+        errno(Errno::EACCES),
+        "move another's directory to a new parent"
+    );
+    assert_eq_test!(
+        user.rename(&theirs, &renamed),
+        Some(0),
+        "rename another's directory within its parent"
+    );
+    let _ = vfs_rmdir(&renamed);
+    let _ = vfs_rmdir(&from);
+    let _ = vfs_rmdir(&to);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_moving_a_directory_needs_write_on_it,
+    suite = cred
+);
+
+pub fn test_times_size_and_flags_follow_the_bits() -> TestResult {
+    use crate::syscall::fs::at_handlers::syscall_utimensat;
+    use crate::syscall::fs::path_handlers::syscall_truncate;
+    use crate::syscall::fs::poll_ioctl_handlers::syscall_ioctl;
+    use slopos_abi::fs::inode_flags::FS_NODUMP_FL;
+    use slopos_abi::fs::inode_flags_ioctl::FS_IOC_SETFLAGS;
+    let _fixture = SyscallFixture::new();
+    assert_test!(fixtures_root(), "could not lay out the fixture root");
+    let (Some(shared), Some(read_only)) = (
+        root_file(b"times_shared", 0o666),
+        root_file(b"times_read_only", 0o644),
+    ) else {
+        return fail!("could not lay out the fixtures");
+    };
+    let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
+        return fail!("could not build the principal");
+    };
+    let fdcwd = AT_FDCWD as i64 as u64;
+    let Some((at, _)) = user.paths(&shared, b"") else {
+        return fail!("could not stage the path");
+    };
+    assert_eq_test!(
+        user.call(syscall_utimensat, [fdcwd, at, 0, 0, 0, 0]),
+        Some(0),
+        "a writer sets another's times to now"
+    );
+    let mut explicit = [0u8; 32];
+    explicit[..8].copy_from_slice(&1i64.to_le_bytes());
+    explicit[16..24].copy_from_slice(&1i64.to_le_bytes());
+    let Some(times) = user.stage(&explicit) else {
+        return fail!("could not stage the times");
+    };
+    assert_eq_test!(
+        user.call(syscall_utimensat, [fdcwd, at, times, 0, 0, 0]),
+        errno(Errno::EPERM),
+        "a writer sets another's times to a chosen moment"
+    );
+
+    assert_eq_test!(
+        user.path_call(syscall_truncate, &read_only, [0, 0, 0]),
+        errno(Errno::EACCES),
+        "truncate a 0644 root file"
+    );
+    assert_eq_test!(
+        user.path_call(syscall_truncate, &shared, [0, 0, 0]),
+        Some(0),
+        "truncate a 0666 root file"
+    );
+
+    let fd = user.open_fd(&shared, O_RDONLY, 0).unwrap_or(-1);
+    let Some(flags) = user.stage(&FS_NODUMP_FL.to_le_bytes()) else {
+        return fail!("could not stage the flags");
+    };
+    let set_flags = user.call(
+        syscall_ioctl,
+        [fd as u64, u64::from(FS_IOC_SETFLAGS), flags, 0, 0, 0],
+    );
+    let _ = slopos_fs::fileio::file_close_fd(user.table, fd as i32);
+    assert_eq_test!(
+        set_flags,
+        errno(Errno::EPERM),
+        "set the flags of another's file"
+    );
+    let _ = vfs_unlink(&shared);
+    let _ = vfs_unlink(&read_only);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_times_size_and_flags_follow_the_bits,
+    suite = cred
+);
+
+pub fn test_chdir_needs_search() -> TestResult {
+    use crate::syscall::process_handlers::syscall_chdir;
+    let _fixture = SyscallFixture::new();
+    assert_test!(fixtures_root(), "could not lay out the fixture root");
+    let Some(locked) = root_dir(b"locked", 0o700) else {
+        return fail!("could not lay out the fixture");
+    };
+    let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
+        return fail!("could not build the principal");
+    };
+    assert_eq_test!(
+        user.path_call(syscall_chdir, &locked, [0; 3]),
+        errno(Errno::EACCES),
+        "chdir into a 0700 root directory"
+    );
+    assert_test!(
+        vfs_set_mode(&locked, 0o711).is_ok(),
+        "could not open the directory to search"
+    );
+    assert_eq_test!(
+        user.path_call(syscall_chdir, &locked, [0; 3]),
+        Some(0),
+        "chdir into a 0711 directory"
+    );
+    let _ = vfs_rmdir(&locked);
+    pass!()
+}
+
+slopos_testing::stest!(name = test_chdir_needs_search, suite = cred);
+
+/// uid 0 owns the system's files and passes no mode bit on its own.
+pub fn test_uid_zero_meets_the_mode_bits() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    assert_test!(fixtures_root(), "could not lay out the fixture root");
+    let Some(sealed_off) = root_file(b"read_only_to_root", 0o444) else {
+        return fail!("could not lay out the fixture");
+    };
+    let (Some(root), Some(overrider)) = (
+        Principal::user(0, CAP_UNIVERSAL),
+        Principal::user(0, CAP_UNIVERSAL | Capability::DacOverride.bit()),
+    ) else {
+        return fail!("could not build the principals");
+    };
+    assert_eq_test!(
+        root.openat(&sealed_off, O_WRONLY),
+        errno(Errno::EACCES),
+        "uid 0 writes its own 0444 file"
+    );
+    assert_eq_test!(
+        overrider.openat(&sealed_off, O_WRONLY),
+        Some(0),
+        "DacOverride writes a 0444 file"
+    );
+    let _ = vfs_unlink(&sealed_off);
+    pass!()
+}
+
+slopos_testing::stest!(name = test_uid_zero_meets_the_mode_bits, suite = cred);

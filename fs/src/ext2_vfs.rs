@@ -771,6 +771,7 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         name: &[u8],
         file_type: FileType,
         owner: Owner,
+        mode: u16,
     ) -> VfsResult<InodeId> {
         let kind = match file_type {
             FileType::Directory => NewInode::Directory,
@@ -778,7 +779,7 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
             FileType::Pipe => NewInode::Fifo,
             _ => return Err(ext2_error_to_vfs(Ext2Error::InvalidInode)),
         };
-        self.with_ext2(|fs| fs.create_owned(parent as u32, name, kind, owner))
+        self.with_ext2(|fs| fs.create_owned(parent as u32, name, kind, owner, mode))
             .map(InodeId::from)
     }
 
@@ -883,7 +884,7 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         target: &[u8],
         owner: Owner,
     ) -> VfsResult<InodeId> {
-        self.with_ext2(|fs| fs.create_owned(parent as u32, name, NewInode::Symlink(target), owner))
+        self.with_ext2(|fs| fs.create_symlink_owned(parent as u32, name, target, owner))
             .map(InodeId::from)
     }
 

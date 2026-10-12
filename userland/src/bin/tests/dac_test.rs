@@ -28,6 +28,7 @@ const SECRET: &str = "/var/dac_test/secret";
 const PUBLIC: &str = "/var/dac_test/public";
 const THEIRS: &str = "/tmp/dac_test.theirs";
 const MINE: &str = "/tmp/dac_test.mine";
+const ROOTS_OWN: &str = "/tmp/dac_test.roots";
 
 /// The errno an operation failed with, or 0 for success.
 fn errno_of<T>(result: std::io::Result<T>) -> i32 {
@@ -65,6 +66,10 @@ fn as_user(label: &str, body: fn() -> bool) -> bool {
         let ok = become_user() && body();
         unsafe { _exit(if ok { 0 } else { 1 }) };
     }
+    reaped_cleanly(label, pid)
+}
+
+fn reaped_cleanly(label: &str, pid: i32) -> bool {
     if pid < 0 {
         note(&format!("{label}: fork failed"));
         return false;
@@ -96,7 +101,7 @@ fn lay_out_fixtures() -> bool {
 }
 
 fn clean_up() -> bool {
-    for path in [ETC_FILE, ETC_NEW, SECRET, PUBLIC, THEIRS, MINE] {
+    for path in [ETC_FILE, ETC_NEW, SECRET, PUBLIC, THEIRS, MINE, ROOTS_OWN] {
         let _ = fs::remove_file(path);
     }
     fs::remove_dir(PRIVATE_DIR).is_ok()
@@ -185,13 +190,46 @@ fn a_root_file_stays_root_owned() -> bool {
     as_user("chown", || {
         let taken = std::os::unix::fs::chown(PUBLIC, Some(USER), None);
         let regrouped = std::os::unix::fs::chown(PUBLIC, None, Some(USER));
+        let own = File::create(MINE).and_then(|_| std::os::unix::fs::chown(MINE, None, Some(USER)));
+        let _ = fs::remove_file(MINE);
         expect("take a root file", errno_of(taken), EPERM)
             && expect(
                 "move a root file to the user's group",
                 errno_of(regrouped),
                 EPERM,
             )
+            && expect("move its own file to its own group", errno_of(own), 0)
     })
+}
+
+/// uid 0 without `DacOverride` is held to the owner's bits like anyone.
+fn uid_zero_holds_no_override() -> bool {
+    let pid = unsafe { fork() };
+    if pid == 0 {
+        caps_drop(DAC_OVERRIDE);
+        let ok = write_mode(ROOTS_OWN, 0o444).is_ok()
+            && expect(
+                "write its own 0444 file",
+                errno_of(OpenOptions::new().write(true).open(ROOTS_OWN)),
+                EACCES,
+            )
+            && expect(
+                "chmod its own file",
+                errno_of(fs::set_permissions(
+                    ROOTS_OWN,
+                    fs::Permissions::from_mode(0o644),
+                )),
+                0,
+            )
+            && expect(
+                "write its own 0644 file",
+                errno_of(OpenOptions::new().write(true).open(ROOTS_OWN)),
+                0,
+            );
+        let _ = fs::remove_file(ROOTS_OWN);
+        unsafe { _exit(if ok { 0 } else { 1 }) };
+    }
+    reaped_cleanly("uid 0", pid)
 }
 
 fn main() {
@@ -212,6 +250,7 @@ fn main() {
             sticky_tmp_keeps_a_name_to_its_owner,
         ),
         ("a_root_file_stays_root_owned", a_root_file_stays_root_owned),
+        ("uid_zero_holds_no_override", uid_zero_holds_no_override),
         ("clean_up", clean_up),
     ]);
 }

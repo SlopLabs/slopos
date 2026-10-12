@@ -224,9 +224,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = signalable_refuses_invalid_targets, suite = authority);
 
-/// Init is told apart by its task id, which is what spends the ext2 reserve,
-/// sets a nice value below zero and is never a signal target. Runs in the
-/// userland phase, the first in which init exists.
+/// Init is told apart by its task id, which is what sets a nice value below
+/// zero and is never a signal target. Runs in the userland phase, the first in
+/// which init exists.
 fn init_is_told_apart_by_its_task_id() -> TestResult {
     use crate::syscall::signalable::resolve_signal_target;
     use core::ffi::c_char;

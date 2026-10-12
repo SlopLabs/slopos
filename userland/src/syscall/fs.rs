@@ -19,7 +19,8 @@ use slopos_abi::{UserFsList, UserFsStat, UserStatfs};
 use slopos_slibc::io::dirent::DirentIter;
 use slopos_slibc::pal::{Pal, Sys};
 
-/// Open a file by path.
+/// Open a file by path; one `O_CREAT` makes is `0666` less the umask, as
+/// `fopen` and `std` create.
 ///
 /// # Errors
 /// * `ENOENT` - File not found
@@ -27,7 +28,7 @@ use slopos_slibc::pal::{Pal, Sys};
 /// * `EINVAL` - Invalid flags
 #[inline(always)]
 pub fn open_path(path: *const c_char, flags: u32) -> SyscallResult<super::OwnedFd> {
-    Sys::open(path as *const u8, flags as i32, 0)
+    Sys::open(path as *const u8, flags as i32, 0o666)
         // SAFETY: fd is a valid descriptor just returned by the kernel.
         .map(|fd| unsafe { super::OwnedFd::from_raw(fd as RawFd) })
         .map_err(Into::into)

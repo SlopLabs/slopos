@@ -881,7 +881,7 @@ fn inode_flags_ioctl(
             .and_then(|ptr| copy_from_user(ptr).map_err(|_| Errno::EFAULT))
             .and_then(|value| {
                 let seal = ctx.require_cap::<Seal>().ok();
-                file_set_inode_flags_fd(table, fd, value, seal.as_ref()).map(|()| 0)
+                file_set_inode_flags_fd(table, fd, value, &ctx.subject(), seal.as_ref()).map(|()| 0)
             }),
         _ => return None,
     })

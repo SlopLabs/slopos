@@ -142,10 +142,17 @@ impl FileSystem for TestFs {
         name: &[u8],
         file_type: FileType,
         owner: crate::vfs::Owner,
+        mode: u16,
     ) -> VfsResult<InodeId> {
         with_ext2(|fs| match file_type {
             FileType::Regular => fs
-                .create_owned(parent as u32, name, crate::ext2::NewInode::File, owner)
+                .create_owned(
+                    parent as u32,
+                    name,
+                    crate::ext2::NewInode::File,
+                    owner,
+                    mode,
+                )
                 .map(|i| i as InodeId),
             _ => Err(Ext2Error::InvalidInode),
         })
@@ -1652,8 +1659,9 @@ impl FileSystem for ShortFs {
         name: &[u8],
         file_type: FileType,
         owner: crate::vfs::Owner,
+        mode: u16,
     ) -> VfsResult<InodeId> {
-        TEST_FS.create_owned(parent, name, file_type, owner)
+        TEST_FS.create_owned(parent, name, file_type, owner, mode)
     }
 
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {

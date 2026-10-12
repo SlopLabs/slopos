@@ -103,11 +103,11 @@ impl Cred {
 
     /// `setgroups(2)`, which only a holder of `SetId` may call.
     pub fn set_groups(&self, groups: &[u32], set_id: bool) -> Result<Self, Errno> {
-        if groups.len() > NGROUPS_MAX || groups.contains(&ID_UNCHANGED) {
-            return Err(Errno::EINVAL);
-        }
         if !set_id {
             return Err(Errno::EPERM);
+        }
+        if groups.len() > NGROUPS_MAX || groups.contains(&ID_UNCHANGED) {
+            return Err(Errno::EINVAL);
         }
         let mut next = *self;
         next.groups = [0; NGROUPS_MAX];

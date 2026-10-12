@@ -338,10 +338,11 @@ pub fn spawn_program_with_cwd(
     parent_task_id: u32,
     cwd: &[u8],
 ) -> Result<u32, Errno> {
-    // No parent task: a spawn the kernel makes itself.
-    let spawner = &task_find_by_id(parent_task_id).map_or(Subject::KERNEL, |parent| {
-        crate::syscall::context::subject_of(&parent)
-    });
+    let spawner = &match task_find_by_id(parent_task_id) {
+        Some(parent) => crate::syscall::context::subject_of(&parent),
+        None if parent_task_id == INVALID_TASK_ID => Subject::KERNEL,
+        None => return Err(Errno::ESRCH),
+    };
     let result = (|| {
         // Resolved once so the grant table and the loader agree on the file:
         // for a script, its interpreter. `comm` takes the path as passed.

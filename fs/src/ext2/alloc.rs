@@ -8,8 +8,9 @@ use slopos_ext4_core::group::{self as ext4_group, BLOCK_UNINIT, INODE_UNINIT};
 use slopos_ostd::bitmap_slice;
 
 /// ext2's denial-of-service answer: `s_r_blocks_count` blocks are spendable
-/// only by an entitled writer, so a process that fills the disk still leaves
-/// the reserve for `/sbin/init`. An entitled handle carries a reserve of zero.
+/// only by the superblock's reserved uid or group and the kernel, so a process
+/// that fills the disk still leaves them room. An entitled handle carries a
+/// reserve of zero.
 fn reserve_permits_allocation(geom: &Ext2Geometry, superblock: &Superblock) -> bool {
     superblock.free_blocks_count > geom.reserved_blocks()
 }

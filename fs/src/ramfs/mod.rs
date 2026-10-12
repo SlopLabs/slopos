@@ -929,6 +929,7 @@ impl FileSystem for RamFs {
         name: &[u8],
         file_type: FileType,
         owner: Owner,
+        mode: u16,
     ) -> VfsResult<InodeId> {
         let max_inodes = ramfs_max_inodes();
         self.with_inner_mut(|inner| {
@@ -954,18 +955,15 @@ impl FileSystem for RamFs {
                 new_inode.dir_entries.clear();
                 new_inode.parent = parent;
                 new_inode.owner = owner;
+                new_inode.mode = mode;
 
                 match file_type {
                     FileType::Directory => {
-                        new_inode.mode = 0o755;
                         new_inode.nlink = 2;
                         new_inode.add_dir_entry(b".", new_id)?;
                         new_inode.add_dir_entry(b"..", parent)?;
                     }
-                    _ => {
-                        new_inode.mode = 0o644;
-                        new_inode.nlink = 1;
-                    }
+                    _ => new_inode.nlink = 1,
                 }
                 stamp(&mut new_inode.atime);
                 stamp(&mut new_inode.mtime);

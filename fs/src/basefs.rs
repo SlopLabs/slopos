@@ -408,6 +408,7 @@ impl FileSystem for BaseFs {
         _name: &[u8],
         _file_type: FileType,
         _owner: crate::vfs::Owner,
+        _mode: u16,
     ) -> VfsResult<InodeId> {
         Err(VfsError::ReadOnly)
     }

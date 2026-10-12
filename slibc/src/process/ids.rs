@@ -39,14 +39,24 @@ pub unsafe extern "C" fn setgid(gid: gid_t) -> c_int {
     answer(syscall1(SYSCALL_SETGID, u64::from(gid)))
 }
 
+/// `seteuid(-1)` is `EINVAL`, as POSIX lets it be: `setresuid` would read
+/// the same id as "leave it".
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn seteuid(uid: uid_t) -> c_int {
-    answer(syscall3(SYSCALL_SETRESUID, KEEP, u64::from(uid), KEEP))
+    set_effective(SYSCALL_SETRESUID, uid)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setegid(gid: gid_t) -> c_int {
-    answer(syscall3(SYSCALL_SETRESGID, KEEP, u64::from(gid), KEEP))
+    set_effective(SYSCALL_SETRESGID, gid)
+}
+
+fn set_effective(call: u64, id: u32) -> c_int {
+    if u64::from(id) == KEEP {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    answer(unsafe { syscall3(call, KEEP, u64::from(id), KEEP) })
 }
 
 #[unsafe(no_mangle)]
