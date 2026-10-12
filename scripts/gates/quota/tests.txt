@@ -42,7 +42,12 @@
 # residentpages row after the kernel tests rose from 772 to 2049 once a memfd
 # charged its sizer's resident pages at ftruncate rather than when mapped: the
 # OOM tests size 64-page memfds per process, and one row holds a 2048-page
-# memfd. The boot kernelmeta row measured 1708, and 1713 once every disk went
+# memfd. With the credential tests the kernel-phase task row rose from 8 to 9
+# and its residentpages row to 2308: `test_signals_need_the_uid_rule` holds
+# four principals at once, each a process of 257 resident pages, beside the
+# five tasks and 1280 pages earlier syscall tests leave for their scope's
+# teardown. Two captures measured 9 and 2308 each; skipping the `cred` suite
+# measured 7 and 2049. The boot kernelmeta row measured 1708, and 1713 once every disk went
 # through the block layer and NVMe: the controllers' queues and engines, the
 # disk registry and the devfs node table. A boot on which an AP is slow to
 # answer its startup peaks 48 pages higher, 1761, and the wired network's
@@ -113,8 +118,8 @@ post-kernel-tests	objectrow	257
 post-kernel-tests	pages	539050
 post-kernel-tests	pinnedbytes	4
 post-kernel-tests	process	14
-post-kernel-tests	residentpages	2049
-post-kernel-tests	task	8
+post-kernel-tests	residentpages	2308
+post-kernel-tests	task	9
 post-userland-tests	commitpages	193853
 post-userland-tests	custody	8
 post-userland-tests	diskblocks	3658
