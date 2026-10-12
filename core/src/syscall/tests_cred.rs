@@ -134,11 +134,13 @@ impl Principal {
         self.call(handler, [first, second, 0, 0, 0, 0])
     }
 
-    /// `FS_IOC_SETFLAGS` on `path` opened read-only.
+    /// `FS_IOC_SETFLAGS` on `path` opened read-only, asking for the flags it
+    /// already has.
     #[inline(never)]
-    fn set_flags(&self, path: &[u8], flags: u32) -> Option<i64> {
+    fn keep_flags(&self, path: &[u8]) -> Option<i64> {
         use slopos_abi::fs::inode_flags_ioctl::FS_IOC_SETFLAGS;
         let fd = self.open_fd(path, O_RDONLY, 0)?;
+        let flags = slopos_fs::fileio::file_inode_flags_fd(self.table, fd as i32).ok()?;
         let staged = self.stage(&flags.to_le_bytes())?;
         let rc = self.call(
             crate::syscall::fs::poll_ioctl_handlers::syscall_ioctl,
@@ -552,6 +554,7 @@ pub fn test_chmod_and_chown_are_the_owners() -> TestResult {
     );
     let _ = vfs_unlink(&mine);
     let _ = vfs_unlink(&theirs);
+    let _ = vfs_rmdir(&join(b"owned"));
     pass!()
 }
 
@@ -701,8 +704,8 @@ pub fn test_a_new_name_needs_write_and_search() -> TestResult {
         "symlink in a 0777 directory"
     );
     assert_test!(
-        user.two_paths(syscall_link, &target, &hard) != errno(Errno::EACCES),
-        "link in a 0777 directory was refused for permission"
+        matches!(user.two_paths(syscall_link, &target, &hard), Some(0 | -95)),
+        "link in a 0777 directory, which ramfs answers EOPNOTSUPP"
     );
     let _ = vfs_unlink(&hard);
     let _ = vfs_unlink(&soft);
@@ -809,7 +812,6 @@ slopos_testing::stest!(
 pub fn test_times_size_and_flags_follow_the_bits() -> TestResult {
     use crate::syscall::fs::at_handlers::syscall_utimensat;
     use crate::syscall::fs::path_handlers::syscall_truncate;
-    use slopos_abi::fs::inode_flags::FS_NODUMP_FL;
     let _fixture = SyscallFixture::new();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let (Some(shared), Some(read_only)) = (
@@ -854,8 +856,8 @@ pub fn test_times_size_and_flags_follow_the_bits() -> TestResult {
     );
 
     let (Some(theirs), Some(owner)) = (
-        user.set_flags(&shared, FS_NODUMP_FL),
-        Principal::user(0, CAP_UNIVERSAL).and_then(|root| root.set_flags(&shared, FS_NODUMP_FL)),
+        user.keep_flags(&shared),
+        Principal::user(0, CAP_UNIVERSAL).and_then(|root| root.keep_flags(&shared)),
     ) else {
         return fail!("could not reach the flags");
     };
@@ -864,10 +866,7 @@ pub fn test_times_size_and_flags_follow_the_bits() -> TestResult {
         i64::from(Errno::EPERM.raw()),
         "set the flags of another's file"
     );
-    assert_test!(
-        owner != i64::from(Errno::EPERM.raw()),
-        "the owner was refused its own file's flags"
-    );
+    assert_eq_test!(owner, 0, "set the flags of its own file");
     let _ = vfs_unlink(&shared);
     let _ = vfs_unlink(&read_only);
     pass!()
@@ -939,7 +938,7 @@ pub fn test_uid_zero_meets_the_mode_bits() -> TestResult {
 
 slopos_testing::stest!(name = test_uid_zero_meets_the_mode_bits, suite = cred);
 
-pub fn test_exec_needs_its_classs_execute_bit() -> TestResult {
+pub fn test_exec_needs_the_execute_bit_of_its_class() -> TestResult {
     use crate::exec::resolve_exec;
     let _fixture = SyscallFixture::new();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
@@ -967,4 +966,55 @@ pub fn test_exec_needs_its_classs_execute_bit() -> TestResult {
     pass!()
 }
 
-slopos_testing::stest!(name = test_exec_needs_its_classs_execute_bit, suite = cred);
+slopos_testing::stest!(
+    name = test_exec_needs_the_execute_bit_of_its_class,
+    suite = cred
+);
+
+/// A spawned child saves its effective ids, as an exec does.
+pub fn test_spawn_saves_the_effective_ids() -> TestResult {
+    use crate::tests::helpers::install_static_program;
+    let _fixture = SyscallFixture::new();
+    let spin = join(b"spin");
+    assert_test!(
+        fixtures_root() && install_static_program(&spin, &[0xeb, 0xfe]),
+        "could not write the program"
+    );
+    let Some(parent) = Principal::with_uids([USER, USER, 0], CAP_UNIVERSAL) else {
+        return fail!("could not build the spawner");
+    };
+    let Ok(child_id) = crate::exec::spawn_program_with_attrs(
+        &spin,
+        None,
+        None,
+        slopos_abi::task::TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        CAP_UNIVERSAL,
+        &[],
+        0,
+        None,
+        parent.task.task_id,
+    ) else {
+        return fail!("could not spawn the program");
+    };
+    let child_uids = task_find_by_id(child_id)
+        .and_then(|child| child.process())
+        .map(|process| process.cred())
+        .map(|cred| [cred.ruid, cred.euid, cred.suid]);
+    task_terminate(child_id);
+    let _ = slopos_sched::task::task_consume_zombie(child_id);
+    let _ = vfs_unlink(&spin);
+    assert_eq_test!(
+        child_uids,
+        Some([USER; 3]),
+        "the child kept a saved uid its spawner had set aside"
+    );
+    assert_eq_test!(
+        parent.uids(),
+        [USER, USER, 0],
+        "spawning moved the spawner's own ids"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(name = test_spawn_saves_the_effective_ids, suite = cred);

@@ -329,12 +329,14 @@ pub fn spawn_program_with_cwd(
     cwd: &[u8],
 ) -> Result<u32, Errno> {
     let parent_ref = task_find_by_id(parent_task_id);
-    if parent_ref.is_none() && parent_task_id != INVALID_TASK_ID {
-        return Err(Errno::ESRCH);
-    }
-    let spawner = &parent_ref.as_ref().map_or(Subject::KERNEL, |parent| {
-        crate::syscall::context::subject_of(parent)
-    });
+    let spawner = &match parent_ref.as_ref() {
+        None if parent_task_id == INVALID_TASK_ID => Subject::KERNEL,
+        None => return Err(Errno::ESRCH),
+        Some(parent) => match crate::syscall::context::subject_of(parent) {
+            who if who.cred == slopos_ostd::process::Cred::NOBODY => return Err(Errno::ESRCH),
+            who => who,
+        },
+    };
     let result = (|| {
         // Resolved once so the grant table and the loader agree on the file:
         // for a script, its interpreter. `comm` takes the path as passed.
@@ -449,11 +451,10 @@ pub fn spawn_program_with_cwd(
             apply_fd_actions(parent_table, FdTable::Process(child_process), actions)?;
         }
 
-        // Inherited so the child joins the parent's session; without it the
-        // shell cannot make the child its foreground group.
-        // Resolved — and for NEW_PGRP allocated — before the child borrow
-        // opens: that borrow runs preempt-disabled, where a fallible allocation
-        // has no business.
+        // Inherited so the child joins the parent's session, which the shell
+        // needs to make it its foreground group; resolved — and for NEW_PGRP
+        // allocated — before the child borrow opens, since that borrow runs
+        // preempt-disabled, where a fallible allocation has no business.
         let inherited = parent_ref
             .as_ref()
             .map(|parent| resolve_inherited_job_control(parent, task_id, flags));

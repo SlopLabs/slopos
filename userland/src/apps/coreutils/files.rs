@@ -2,8 +2,9 @@
 //! runs between compiling and installing, which is why they recurse and
 //! create parents rather than handling one flat name at a time.
 
-use std::fs::{self, File, FileTimes, OpenOptions};
+use std::fs::{self, File, FileTimes, OpenOptions, Permissions};
 use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::time::SystemTime;
 
 use crate::syscall::core;
@@ -721,6 +722,22 @@ fn copy_node(ctx: &mut Ctx, source: &str, kind: Kind, dest: &str, flags: &CopyFl
     }
 }
 
+/// `cp -p`'s owner and mode: an id the copier may not give stays its own, as
+/// POSIX has it, and the set-ID bit that names that id goes with it.
+fn preserved_mode(writer: &File, meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::{MetadataExt, fchown};
+    let uid_kept = fchown(writer, Some(meta.uid()), Some(meta.gid())).is_ok();
+    let gid_kept = uid_kept || fchown(writer, None, Some(meta.gid())).is_ok();
+    let mut mode = meta.mode() & 0o7777;
+    if !uid_kept {
+        mode &= !0o4000;
+    }
+    if !gid_kept {
+        mode &= !0o2000;
+    }
+    mode
+}
+
 fn copy_regular(source: &str, dest: &str, flags: &CopyFlags) -> Result<(), std::io::Error> {
     let mut reader = File::open(source)?;
     let mut writer = match File::create(dest) {
@@ -733,17 +750,13 @@ fn copy_regular(source: &str, dest: &str, flags: &CopyFlags) -> Result<(), std::
     };
     copy_through(&mut reader, &mut writer)?;
     if flags.preserve {
-        use std::os::unix::fs::MetadataExt;
         let meta = reader.metadata()?;
         writer.set_times(
             FileTimes::new()
                 .set_accessed(meta.accessed()?)
                 .set_modified(meta.modified()?),
         )?;
-        // As POSIX's `cp -p` does, an owner the caller may not give stays the
-        // caller's rather than failing the copy.
-        let _ = std::os::unix::fs::fchown(&writer, Some(meta.uid()), Some(meta.gid()));
-        writer.set_permissions(meta.permissions())?;
+        writer.set_permissions(Permissions::from_mode(preserved_mode(&writer, &meta)))?;
     }
     Ok(())
 }

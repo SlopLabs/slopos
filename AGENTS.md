@@ -1337,21 +1337,22 @@ included. A nice value below zero is init's by task id. A new check that reads
 authority carrier.
 
 **A uid is an identity, never a power.** Each process carries a `Cred`
-(`slopos_ostd::process::cred`): real, effective and saved uid and gid and up
-to 32 supplementary groups, process-wide, copied by fork and spawn and kept by
-exec, which honours no set-ID bit. The id syscalls follow POSIX's unprivileged
-rules, and any other id, or `setgroups`, takes `SetId`. Every VFS entry takes
-the `Subject` it acts for (the caller's effective ids and whether it holds
-`DacOverride`; the kernel's own callers pass `Subject::KERNEL`) and checks
-owner, group and mode: search on each directory a walk crosses, read and write
-on open, write and search on a parent for a name made or removed, the sticky
-bit, and ownership for `chmod`, `utimensat` and the set-ID bits. `DacOverride`
-passes every mode check and lets `chown` name any owner; uid 0 passes nothing
-on its own. A signal also needs the sender's real or effective uid to be the
-target's real or saved uid; `ProcSignal` waives both halves, and `SIGCONT` to
-a task of the sender's session needs neither. `process_list` reports every
-task to everyone. The ext4 reserve is the superblock's `s_def_resuid` and
-`s_def_resgid`, which admit every process until the session leaves uid 0.
+(`slopos_ostd::process::cred`): real, effective and saved uid and gid and up to
+32 supplementary groups, process-wide, copied by fork and spawn and kept by
+exec, which saves the effective ids and honours no set-ID bit. The id syscalls
+follow POSIX's unprivileged rules, and any other id, or `setgroups`, takes
+`SetId`. Every VFS entry takes the `Subject` it acts for (the caller's
+effective ids and whether it holds `DacOverride`; the kernel's own callers pass
+`Subject::KERNEL`) and checks owner, group and mode: search on each directory a
+walk crosses, read and write on open, write and search on a parent for a name
+made or removed, the sticky bit, and ownership for `chmod`, `utimensat` and the
+set-ID bits. `DacOverride` passes every mode check and lets `chown` name any
+owner; uid 0 passes nothing on its own. A signal also needs the sender's real
+or effective uid to be the target's real or saved uid; `ProcSignal` waives both
+halves, and `SIGCONT` to a task of the sender's session needs neither.
+`process_list` reports every task to everyone. The ext4 reserve is the
+superblock's `s_def_resuid` and `s_def_resgid`, which admit every process until
+the session leaves uid 0.
 
 ### Licensing discipline
 

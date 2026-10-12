@@ -20,7 +20,7 @@ use slopos_fs::fileio::{
     FileRef, file_close_fd, file_open_at, file_poll_ref, file_read_ref_nonblock,
     file_write_ref_nonblock,
 };
-use slopos_fs::vfs::path::RESOLVE_FOLLOW;
+use slopos_fs::vfs::path::open_resolve_flags;
 use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
 use slopos_mm::user_ptr::UserBytes;
 
@@ -97,10 +97,10 @@ pub fn inflight_from(sqe: &Sqe, deadline_ms: u64, file: Option<FileRef>) -> InFl
 
 /// Run the non-blocking probe for one SQE in process `table`. Pure dispatch —
 /// never blocks. `file` is the reference resolved at submit for fd-driven
-/// opcodes (`None` for the path/fd-number/no-fd opcodes, or a closed fd, which
+/// opcodes (`None` for the fd-number and no-fd opcodes, or a closed fd, which
 /// the fd-driven arms report as `-EBADF` *after* the static buffer-selection
-/// check). `OP_CANCEL` / `OP_TIMEOUT` are handled by the caller (they touch
-/// ring state), so reaching here with one yields `Inline(EINVAL)`.
+/// check). `OP_CANCEL`, `OP_TIMEOUT` and `OP_OPENAT` are handled by the
+/// caller, so reaching here with one yields `Inline(EINVAL)`.
 pub fn probe(
     table: FdTable,
     sqe: &Sqe,
@@ -148,7 +148,7 @@ pub fn probe(
                 crate::net_glue::recvfrom_nonblock(f, sqe.addr, sqe.len, sqe.addr2)
             })
         }),
-        // Path-addressed and fd-number-addressed: no target reference held.
+        // Fd-number-addressed: no target reference held.
         OP_CLOSE => reject_buf(sel).unwrap_or_else(|| probe_close(table, sqe)),
         OP_ACCEPT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_accept(table, f))),
         OP_CONNECT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_connect(f, sqe))),
@@ -263,7 +263,7 @@ pub fn open(table: FdTable, sqe: &Sqe, who: &Subject, create_mode: u16) -> Outco
         path,
         b"/",
         sqe.op_flags,
-        RESOLVE_FOLLOW,
+        open_resolve_flags(sqe.op_flags, path),
         Some(create_mode),
         who,
     ))
@@ -406,7 +406,7 @@ pub const ALL_OPCODES: [u8; 14] = [
 ];
 
 const _: () = {
-    // The opcode set is exactly the range `probe` accepts, so a new opcode
+    // The opcode set is exactly the range the ring accepts, so a new opcode
     // added without a classification fails here rather than defaulting.
     assert!(
         ALL_OPCODES.len() == (slopos_abi::ring::OP_MAX as usize) + 1,

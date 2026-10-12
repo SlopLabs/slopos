@@ -166,7 +166,7 @@ The failures on record each set a rule here:
     `/etc/passwd` waits for multi-user.
 - **Credentials.** Each process carries real, effective and saved uid and gid,
   and up to 32 supplementary groups, in a `Cred` the process owns. fork copies
-  it, and exec keeps it.
+  it, and exec keeps it with the effective ids saved, as POSIX has it.
 - **Id syscalls** are added at the Linux numbers: `setuid`, `setgid`, `setreuid`,
   `setregid`, `setresuid`, `setresgid`, `getresuid`, `getresgid`, `setgroups`
   and `getgroups`.
@@ -664,10 +664,10 @@ Ends with:
   in one bit.** It passes read and write, execute where some class may execute
   or on a directory, every ownership test, and any `chown`. One broker grants
   it, so three bits would only be three ways to name the same holder.
-- **Set-ID bits are stored and never honoured.** `chown` strips them and a
-  `chmod` or create outside the file's group drops set-group-ID, as Linux
-  does, so a file copied to a system that honours them carries none it should
-  not.
+- **Set-ID bits are stored and never honoured.** They are stripped as Linux
+  strips them — by `chown`, by a `chmod` outside the file's group, and from a
+  group-executable file created outside it — so a file copied to a system that
+  honours them carries none it should not.
 - **One broker.** privd, with an action policy in the sealed base, runs
   unchanged mechanism programs. Per-domain daemons would multiply processes and
   protocols for no gain in a single-seat system.

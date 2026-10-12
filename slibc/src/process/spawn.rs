@@ -499,7 +499,8 @@ impl Attrs {
 
     /// Whether the kernel primitive can express every attribute asked for.
     fn direct(&self) -> bool {
-        let unexpressible = POSIX_SPAWN_SETSIGMASK
+        let unexpressible = POSIX_SPAWN_RESETIDS
+            | POSIX_SPAWN_SETSIGMASK
             | POSIX_SPAWN_SETSCHEDPARAM
             | POSIX_SPAWN_SETSCHEDULER
             | POSIX_SPAWN_SETSID;
@@ -775,6 +776,12 @@ unsafe fn spawn_via_fork(
             *pid = child;
         }
         return 0;
+    }
+    if attrs.flags & POSIX_SPAWN_RESETIDS != 0
+        && (crate::process::ids::setegid(Sys::getgid()) != 0
+            || crate::process::ids::seteuid(Sys::getuid()) != 0)
+    {
+        crate::process::_exit(127);
     }
     if attrs.flags & POSIX_SPAWN_SETSIGMASK != 0 {
         sigprocmask(SIG_SETMASK, &attrs.sigmask, ptr::null_mut());

@@ -49,7 +49,8 @@ define_syscall!(syscall_umount2
     cap(Mount)
     -> Result<(), Errno>
 {
-    with_cwd_base(ctx, |cwd| umount_path_at(path.as_bytes(), cwd, flags))
+    let who = ctx.subject();
+    with_cwd_base(ctx, |cwd| umount_path_at(path.as_bytes(), cwd, flags, &who))
 });
 
 fn target_is_directory(path: &[u8], who: &Subject) -> Result<bool, Errno> {
@@ -154,9 +155,17 @@ fn mounts_of(fs: &'static dyn FileSystem) -> usize {
 }
 
 #[inline(never)]
-pub(crate) fn umount_path_at(path: &[u8], cwd: &[u8], flags: u32) -> Result<(), Errno> {
+pub(crate) fn umount_path_at(
+    path: &[u8],
+    cwd: &[u8],
+    flags: u32,
+    who: &Subject,
+) -> Result<(), Errno> {
     let canon = canonicalise_at(path, cwd).map_err(vfs_errno)?;
     let target = canon.as_bytes();
+    if let Err(VfsError::PermissionDenied) = resolve_path_at(target, b"/", RESOLVE_FOLLOW, who) {
+        return Err(Errno::EACCES);
+    }
 
     if target == b"/" {
         return Err(Errno::EBUSY);

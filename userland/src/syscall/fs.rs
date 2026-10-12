@@ -3,7 +3,7 @@
 use core::ffi::{CStr, c_char};
 
 use super::RawFd;
-use super::error::{SyscallResult, demux};
+use super::error::{SyscallError, SyscallResult, demux};
 use super::numbers::*;
 use super::raw::{syscall2, syscall3};
 use slopos_abi::fs::{
@@ -76,25 +76,46 @@ pub fn sync() -> SyscallResult<()> {
 }
 
 /// Replace `path`'s contents, committing before returning — for the settings
-/// a reboot must not lose. Written whole to a sibling and renamed over `path`,
-/// so no reader sees it half replaced and an old copy this process may not
-/// write is replaced all the same; the `fsync` after the rename commits it.
+/// a reboot must not lose. Written whole to a sibling of its own and renamed
+/// over `path`, so no reader sees it half replaced and an old copy this
+/// process may not write is replaced all the same; the replacement keeps the
+/// old file's owner where this process may give it, and the `fsync` after the
+/// rename commits it.
 pub fn write_durable(path: &CStr, data: &[u8]) -> SyscallResult<()> {
-    use slopos_abi::fs::{O_CREAT, O_TRUNC, O_WRONLY};
+    use slopos_abi::fs::{O_CREAT, O_EXCL, O_NOFOLLOW, O_WRONLY};
+    use slopos_slibc::errno::EINVAL;
     let mut staged = path.to_bytes().to_vec();
-    staged.extend_from_slice(b".new");
-    let staged = std::ffi::CString::new(staged)
-        .map_err(|_| super::error::SyscallError::from(slopos_slibc::errno::EINVAL))?;
-    let fd = open_cstr(&staged, O_WRONLY | O_CREAT | O_TRUNC)?;
+    staged.extend_from_slice(format!(".new.{}", Sys::getpid()).as_bytes());
+    let staged = std::ffi::CString::new(staged).map_err(|_| SyscallError::from(EINVAL))?;
+    let flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+    let fd = match open_cstr(&staged, flags) {
+        Err(SyscallError::EEXIST) => {
+            unlink_path(staged.as_ptr())?;
+            open_cstr(&staged, flags)?
+        }
+        opened => opened?,
+    };
+    let replaced = fill_and_replace(fd.raw(), &staged, path, data);
+    if replaced.is_err() {
+        let _ = unlink_path(staged.as_ptr());
+    }
+    replaced
+}
+
+fn fill_and_replace(fd: RawFd, staged: &CStr, path: &CStr, data: &[u8]) -> SyscallResult<()> {
+    let mut old = UserFsStat::default();
+    if stat_path(path.as_ptr(), &mut old).is_ok() {
+        let _ = Sys::fchown(fd, old.st_uid, old.st_gid);
+    }
     let mut written = 0usize;
     while written < data.len() {
-        match write_slice(fd.raw(), &data[written..])? {
-            0 => return Err(super::error::SyscallError::from(slopos_slibc::errno::EIO)),
+        match write_slice(fd, &data[written..])? {
+            0 => return Err(SyscallError::from(slopos_slibc::errno::EIO)),
             n => written += n,
         }
     }
     rename(staged.as_ptr(), path.as_ptr())?;
-    fsync(fd.raw())
+    fsync(fd)
 }
 
 /// Consumes the handle so `Drop` cannot double-close. On failure the fd is

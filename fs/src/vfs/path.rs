@@ -3,6 +3,7 @@ use crate::vfs::mount::mount_at;
 use crate::vfs::perm::{InodePerm, Perm, Subject};
 use crate::vfs::traits::{FileSystem, FileType, InodeId, VfsError, VfsResult};
 use crate::{MAX_PATH_LEN, MAX_SYMLINK_FOLLOWS};
+use slopos_abi::fs::{AT_SYMLINK_NOFOLLOW, O_DIRECTORY, O_NOFOLLOW};
 use slopos_ostd::KVec;
 
 /// Follow symlinks, the final component included.
@@ -416,4 +417,42 @@ fn split_path(path: &[u8]) -> Option<(&[u8], &[u8])> {
     }
 
     Some((parent, name))
+}
+
+/// The resolve flags an `*at` call's own flag word and path spelling imply.
+///
+/// A trailing slash has to be read here — canonicalisation drops it as an
+/// empty component — and POSIX makes it assert a directory, so a final
+/// symlink is followed whatever `AT_SYMLINK_NOFOLLOW` asked for.
+pub fn resolve_flags_from(at_flags: u32, path: &[u8]) -> u32 {
+    if names_directory(path) {
+        return RESOLVE_MUST_BE_DIR;
+    }
+    if at_flags & AT_SYMLINK_NOFOLLOW != 0 {
+        RESOLVE_NOFOLLOW_FINAL
+    } else {
+        RESOLVE_FOLLOW
+    }
+}
+
+/// `O_DIRECTORY` with `O_NOFOLLOW` refuses a final link rather than opening
+/// what it names, which is what keeps a directory walk from being steered off
+/// its tree by a link swapped in underneath it.
+pub fn open_resolve_flags(open_flags: u32, path: &[u8]) -> u32 {
+    if open_flags & O_DIRECTORY != 0 {
+        if open_flags & O_NOFOLLOW != 0 && !names_directory(path) {
+            RESOLVE_MUST_BE_DIR | RESOLVE_NOFOLLOW_FINAL
+        } else {
+            RESOLVE_MUST_BE_DIR
+        }
+    } else if open_flags & O_NOFOLLOW != 0 {
+        resolve_flags_from(AT_SYMLINK_NOFOLLOW, path)
+    } else {
+        resolve_flags_from(0, path)
+    }
+}
+
+#[inline]
+pub fn names_directory(path: &[u8]) -> bool {
+    path.last() == Some(&b'/')
 }

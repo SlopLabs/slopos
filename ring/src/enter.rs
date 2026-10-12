@@ -275,8 +275,9 @@ fn submit(table: FdTable, ring: &mut Ring, to_submit: u32, who: &Subject, create
     consumed
 }
 
-/// Process one submitted SQE: the special opcodes inline, the rest through the
-/// probe, posting a CQE or recording an in-flight row.
+/// Process one submitted SQE: the special opcodes inline, `OP_OPENAT` through
+/// [`opcode::open`] and the rest through the probe, posting a CQE or recording
+/// an in-flight row.
 fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe, who: &Subject, create_mode: u16) {
     // Checked before any dispatch, so an opcode outside the ring's set never
     // reaches a probe. `EPERM` rather than `EINVAL`: the opcode is valid, this

@@ -9569,8 +9569,8 @@ pub fn test_umount2_busy_unless_detached() -> TestResult {
 
     // A mount left behind is a mount every later test sees. Plain first, so
     // the common path gives the pool slot back rather than retiring it.
-    if umount_path_at(MP, b"/", 0).is_err() {
-        let _ = umount_path_at(MP, b"/", MNT_DETACH);
+    if umount_path_at(MP, b"/", 0, &slopos_fs::vfs::Subject::KERNEL).is_err() {
+        let _ = umount_path_at(MP, b"/", MNT_DETACH, &slopos_fs::vfs::Subject::KERNEL);
     }
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
 
@@ -9593,12 +9593,12 @@ fn umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
         .map_err(|_| "could not create a file through the mount")?;
     open_ref(handle.fs, handle.inode).map_err(|_| "could not take an open reference")?;
 
-    let busy = umount_path_at(mp, b"/", 0);
+    let busy = umount_path_at(mp, b"/", 0, &slopos_fs::vfs::Subject::KERNEL);
     if busy != Err(slopos_abi::Errno::EBUSY) {
         let _ = close_ref(handle.fs, handle.inode);
         return Err("umount2 of a held filesystem was not EBUSY");
     }
-    if umount_path_at(mp, b"/", MNT_DETACH).is_err() {
+    if umount_path_at(mp, b"/", MNT_DETACH, &slopos_fs::vfs::Subject::KERNEL).is_err() {
         let _ = close_ref(handle.fs, handle.inode);
         return Err("MNT_DETACH did not detach a held filesystem");
     }
@@ -9620,7 +9620,8 @@ fn umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     mount_apply_at(b"", mp, b"/", b"ramfs", 0, &slopos_fs::vfs::Subject::KERNEL)
         .map_err(|_| "the pool refused a second mount")?;
     let fresh = slopos_fs::vfs::vfs_open(b"/tmp/umount_busy_mp/held", false);
-    umount_path_at(mp, b"/", 0).map_err(|_| "the re-mounted filesystem would not unmount")?;
+    umount_path_at(mp, b"/", 0, &slopos_fs::vfs::Subject::KERNEL)
+        .map_err(|_| "the re-mounted filesystem would not unmount")?;
     if fresh.is_ok() {
         return Err("a pooled instance served the previous mount's file");
     }
@@ -9740,7 +9741,7 @@ pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
     let outcome = (|| -> Result<(), &'static str> {
         mount_apply_at(b"", MP, b"/", b"devfs", 0, &slopos_fs::vfs::Subject::KERNEL)
             .map_err(|_| "the second devfs mount failed")?;
-        if umount_path_at(MP, b"/", 0).is_err() {
+        if umount_path_at(MP, b"/", 0, &slopos_fs::vfs::Subject::KERNEL).is_err() {
             return Err("a descriptor on /dev made a second devfs mount busy");
         }
         if !has_open_refs(devfs) {
@@ -9749,7 +9750,7 @@ pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
         Ok(())
     })();
 
-    let _ = umount_path_at(MP, b"/", 0);
+    let _ = umount_path_at(MP, b"/", 0, &slopos_fs::vfs::Subject::KERNEL);
     let _ = close_ref(devfs, inode);
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
 
@@ -9793,7 +9794,7 @@ pub fn test_mount_ext2_unknown_source_is_not_busy() -> TestResult {
         &slopos_fs::vfs::Subject::KERNEL,
     );
 
-    let _ = umount_path_at(MP, b"/", 0);
+    let _ = umount_path_at(MP, b"/", 0, &slopos_fs::vfs::Subject::KERNEL);
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
 
     if absent != Err(slopos_abi::Errno::ENOENT) {
@@ -9827,8 +9828,8 @@ pub fn test_umount2_of_ext2_is_busy_unless_detached() -> TestResult {
 
     let outcome = ext2_umount_busy_body(MP);
 
-    if umount_path_at(MP, b"/", 0).is_err() {
-        let _ = umount_path_at(MP, b"/", MNT_DETACH);
+    if umount_path_at(MP, b"/", 0, &slopos_fs::vfs::Subject::KERNEL).is_err() {
+        let _ = umount_path_at(MP, b"/", MNT_DETACH, &slopos_fs::vfs::Subject::KERNEL);
     }
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
 
@@ -9858,12 +9859,12 @@ fn ext2_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
         .map_err(|_| "could not create a file through the mount")?;
     open_ref(handle.fs, handle.inode).map_err(|_| "could not take an open reference")?;
 
-    let busy = umount_path_at(mp, b"/", 0);
+    let busy = umount_path_at(mp, b"/", 0, &slopos_fs::vfs::Subject::KERNEL);
     if busy != Err(slopos_abi::Errno::EBUSY) {
         let _ = close_ref(handle.fs, handle.inode);
         return Err("umount2 of a held ext2 mount was not EBUSY");
     }
-    if umount_path_at(mp, b"/", MNT_DETACH).is_err() {
+    if umount_path_at(mp, b"/", MNT_DETACH, &slopos_fs::vfs::Subject::KERNEL).is_err() {
         let _ = close_ref(handle.fs, handle.inode);
         return Err("MNT_DETACH did not detach a held ext2 mount");
     }
@@ -9894,7 +9895,8 @@ fn ext2_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
         &slopos_fs::vfs::Subject::KERNEL,
     )
     .map_err(|_| "the scratch device would not mount again after a lazy unmount")?;
-    umount_path_at(mp, b"/", 0).map_err(|_| "the re-mounted ext2 would not unmount")
+    umount_path_at(mp, b"/", 0, &slopos_fs::vfs::Subject::KERNEL)
+        .map_err(|_| "the re-mounted ext2 would not unmount")
 }
 
 slopos_testing::stest!(
@@ -10046,7 +10048,7 @@ fn umount_release_body(
     if slopos_fs::vfs::mount::mount_at(RACE_MP_B).is_some() {
         return Err("the fixture mounted before the window it exists for");
     }
-    let removed = umount_path_at(RACE_MP_A, b"/", 0);
+    let removed = umount_path_at(RACE_MP_A, b"/", 0, &slopos_fs::vfs::Subject::KERNEL);
     RACE_ARMED.store(false, Ordering::Release);
     removed.map_err(|_| "umount2 of the fixture failed")?;
 
