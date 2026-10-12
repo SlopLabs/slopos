@@ -701,6 +701,7 @@ define_syscall!(syscall_execve
             let named_directly =
                 ctx.with_cwd(|cwd| program.named_directly(path.as_bytes(), cwd));
             exec::narrow_authority_for_exec(ctx.task(), task_id, &program.image, named_directly);
+            exec::save_ids_for_exec(ctx.task());
 
             exec::name_task_after(ctx.task(), path.as_bytes());
             slopos_sched::task::task_cleanup_for_exec(task_id);

@@ -732,10 +732,18 @@ fn copy_regular(source: &str, dest: &str, flags: &CopyFlags) -> Result<(), std::
         Err(error) => return Err(error),
     };
     copy_through(&mut reader, &mut writer)?;
-    // Only the mtime: there is no path-based `utimensat` in std here.
     if flags.preserve {
-        let modified = reader.metadata()?.modified()?;
-        writer.set_times(FileTimes::new().set_modified(modified))?;
+        use std::os::unix::fs::MetadataExt;
+        let meta = reader.metadata()?;
+        writer.set_times(
+            FileTimes::new()
+                .set_accessed(meta.accessed()?)
+                .set_modified(meta.modified()?),
+        )?;
+        // As POSIX's `cp -p` does, an owner the caller may not give stays the
+        // caller's rather than failing the copy.
+        let _ = std::os::unix::fs::fchown(&writer, Some(meta.uid()), Some(meta.gid()));
+        writer.set_permissions(meta.permissions())?;
     }
     Ok(())
 }

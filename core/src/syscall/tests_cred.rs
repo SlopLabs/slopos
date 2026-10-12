@@ -134,6 +134,30 @@ impl Principal {
         self.call(handler, [first, second, 0, 0, 0, 0])
     }
 
+    /// `FS_IOC_SETFLAGS` on `path` opened read-only.
+    #[inline(never)]
+    fn set_flags(&self, path: &[u8], flags: u32) -> Option<i64> {
+        use slopos_abi::fs::inode_flags_ioctl::FS_IOC_SETFLAGS;
+        let fd = self.open_fd(path, O_RDONLY, 0)?;
+        let staged = self.stage(&flags.to_le_bytes())?;
+        let rc = self.call(
+            crate::syscall::fs::poll_ioctl_handlers::syscall_ioctl,
+            [fd as u64, u64::from(FS_IOC_SETFLAGS), staged, 0, 0, 0],
+        );
+        let _ = slopos_fs::fileio::file_close_fd(self.table, fd as i32);
+        rc
+    }
+
+    /// `kill(target, 0)` through the syscall.
+    #[inline(never)]
+    fn probe_kill(&self, target: &Principal) -> Option<i64> {
+        let pid = crate::syscall::signal::sender_pid(&target.task);
+        self.call(
+            crate::syscall::signal::syscall_kill,
+            [u64::from(pid), 0, 0, 0, 0, 0],
+        )
+    }
+
     #[inline(never)]
     fn uids(&self) -> [u32; 3] {
         let cred = self
@@ -584,6 +608,12 @@ pub fn test_signals_need_the_uid_rule() -> TestResult {
         sender.may_signal(&same, SIGTERM),
         "signal its own uid's task"
     );
+    assert_eq_test!(
+        sender.probe_kill(&stranger),
+        errno(Errno::EPERM),
+        "kill another uid's task"
+    );
+    assert_eq_test!(sender.probe_kill(&same), Some(0), "kill its own uid's task");
     assert_test!(
         !sender.may_signal(&stranger, SIGTERM),
         "signal another uid's task"
@@ -709,14 +739,15 @@ pub fn test_a_setgid_directory_hands_down_its_group() -> TestResult {
     let (file, sub) = (join(b"team/file"), join(b"team/sub"));
 
     assert_eq_test!(
-        user.openat_mode(&file, O_WRONLY | O_CREAT, 0o2644),
+        user.openat_mode(&file, O_WRONLY | O_CREAT, 0o2654),
         Some(0),
         "create in a set-group-ID directory"
     );
     assert_eq_test!(
         owner_of(&file),
-        Some((USER, OTHER, 0o644)),
-        "a file takes the directory's group, and no set-group-ID outside the creator's"
+        Some((USER, OTHER, 0o654)),
+        "a file takes the directory's group, and no group-executable set-group-ID outside \
+         the creator's"
     );
     assert_eq_test!(
         user.path_call(syscall_mkdir, &sub, [0o755, 0, 0]),
@@ -778,9 +809,7 @@ slopos_testing::stest!(
 pub fn test_times_size_and_flags_follow_the_bits() -> TestResult {
     use crate::syscall::fs::at_handlers::syscall_utimensat;
     use crate::syscall::fs::path_handlers::syscall_truncate;
-    use crate::syscall::fs::poll_ioctl_handlers::syscall_ioctl;
     use slopos_abi::fs::inode_flags::FS_NODUMP_FL;
-    use slopos_abi::fs::inode_flags_ioctl::FS_IOC_SETFLAGS;
     let _fixture = SyscallFixture::new();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let (Some(shared), Some(read_only)) = (
@@ -824,19 +853,20 @@ pub fn test_times_size_and_flags_follow_the_bits() -> TestResult {
         "truncate a 0666 root file"
     );
 
-    let fd = user.open_fd(&shared, O_RDONLY, 0).unwrap_or(-1);
-    let Some(flags) = user.stage(&FS_NODUMP_FL.to_le_bytes()) else {
-        return fail!("could not stage the flags");
+    let (Some(theirs), Some(owner)) = (
+        user.set_flags(&shared, FS_NODUMP_FL),
+        Principal::user(0, CAP_UNIVERSAL).and_then(|root| root.set_flags(&shared, FS_NODUMP_FL)),
+    ) else {
+        return fail!("could not reach the flags");
     };
-    let set_flags = user.call(
-        syscall_ioctl,
-        [fd as u64, u64::from(FS_IOC_SETFLAGS), flags, 0, 0, 0],
-    );
-    let _ = slopos_fs::fileio::file_close_fd(user.table, fd as i32);
     assert_eq_test!(
-        set_flags,
-        errno(Errno::EPERM),
+        theirs,
+        i64::from(Errno::EPERM.raw()),
         "set the flags of another's file"
+    );
+    assert_test!(
+        owner != i64::from(Errno::EPERM.raw()),
+        "the owner was refused its own file's flags"
     );
     let _ = vfs_unlink(&shared);
     let _ = vfs_unlink(&read_only);
@@ -908,3 +938,33 @@ pub fn test_uid_zero_meets_the_mode_bits() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_uid_zero_meets_the_mode_bits, suite = cred);
+
+pub fn test_exec_needs_its_classs_execute_bit() -> TestResult {
+    use crate::exec::resolve_exec;
+    let _fixture = SyscallFixture::new();
+    assert_test!(fixtures_root(), "could not lay out the fixture root");
+    let Some(tool) = root_file(b"tool", 0o700) else {
+        return fail!("could not lay out the fixture");
+    };
+    let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
+        return fail!("could not build the principal");
+    };
+    let who = user_subject(&user);
+    assert_eq_test!(
+        resolve_exec(&tool, b"/", &who).err(),
+        Some(Errno::EACCES),
+        "exec a 0700 root program"
+    );
+    assert_test!(
+        vfs_set_mode(&tool, 0o755).is_ok(),
+        "could not open the program to others"
+    );
+    assert_test!(
+        resolve_exec(&tool, b"/", &who).is_ok(),
+        "exec a 0755 root program"
+    );
+    let _ = vfs_unlink(&tool);
+    pass!()
+}
+
+slopos_testing::stest!(name = test_exec_needs_its_classs_execute_bit, suite = cred);

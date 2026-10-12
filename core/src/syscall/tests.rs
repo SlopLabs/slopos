@@ -8055,7 +8055,7 @@ pub fn test_process_list_excludes_exited_tasks() -> TestResult {
 }
 
 /// Enumeration is universal, as Linux's `/proc` is: an unprivileged caller is
-/// shown a task it may not signal and a kernel task, each with its real uid.
+/// shown a task it may not signal and a kernel task, each with its uid.
 pub fn test_process_list_reports_every_task() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -8100,8 +8100,7 @@ pub fn test_process_list_reports_every_task() -> TestResult {
             &mut *frame,
         )
     });
-    // (itself, the privileged task as uid 4242, a kernel task) as listed.
-    let mut seen = (false, false, false);
+    let (mut itself, mut other_uid, mut kernel_task) = (false, false, false);
     for i in 0..frame.rax().min(capacity) {
         let addr = buf + i * core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>() as u64;
         let Ok(ptr) = UserPtr::<slopos_abi::syscall::UserTaskEntry>::try_new(addr) else {
@@ -8110,21 +8109,21 @@ pub fn test_process_list_reports_every_task() -> TestResult {
         let Some(Ok(entry)) = with_user_process_context(plain_pid, || copy_from_user(ptr)) else {
             continue;
         };
-        seen.0 |= entry.task_id == plain_id;
-        seen.1 |= entry.task_id == privileged_id && entry.uid == 4242;
-        seen.2 |=
+        itself |= entry.task_id == plain_id;
+        other_uid |= entry.task_id == privileged_id && entry.uid == 4242;
+        kernel_task |=
             task_find_by_id(entry.task_id).is_some_and(|t| t.flags & TASK_FLAG_USER_MODE == 0);
     }
 
     drop(plain_guard);
     task_terminate(plain_id);
     task_terminate(privileged_id);
-    assert_test!(seen.0, "a task could not see itself");
+    assert_test!(itself, "a task could not see itself");
     assert_test!(
-        seen.1,
+        other_uid,
         "a task it may not signal was hidden, or reported without its uid"
     );
-    assert_test!(seen.2, "a kernel task was hidden");
+    assert_test!(kernel_task, "a kernel task was hidden");
     pass!()
 }
 
@@ -9587,7 +9586,8 @@ fn umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     use slopos_fs::vfs::mount::mount_at;
     use slopos_fs::vfs::orphan::{close_ref, open_ref};
 
-    mount_apply_at(b"", mp, b"/", b"ramfs", 0).map_err(|_| "mount of a pooled ramfs failed")?;
+    mount_apply_at(b"", mp, b"/", b"ramfs", 0, &slopos_fs::vfs::Subject::KERNEL)
+        .map_err(|_| "mount of a pooled ramfs failed")?;
 
     let handle = slopos_fs::vfs::vfs_open(b"/tmp/umount_busy_mp/held", true)
         .map_err(|_| "could not create a file through the mount")?;
@@ -9617,7 +9617,8 @@ fn umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     }
 
     // The instance a later mount gets is reset, whichever slot it comes from.
-    mount_apply_at(b"", mp, b"/", b"ramfs", 0).map_err(|_| "the pool refused a second mount")?;
+    mount_apply_at(b"", mp, b"/", b"ramfs", 0, &slopos_fs::vfs::Subject::KERNEL)
+        .map_err(|_| "the pool refused a second mount")?;
     let fresh = slopos_fs::vfs::vfs_open(b"/tmp/umount_busy_mp/held", false);
     umount_path_at(mp, b"/", 0).map_err(|_| "the re-mounted filesystem would not unmount")?;
     if fresh.is_ok() {
@@ -9665,19 +9666,40 @@ pub fn test_mount_over_a_grant_path_is_refused() -> TestResult {
     }
 
     assert_eq_test!(
-        mount_apply_at(b"", b"/bin", b"/", b"ramfs", 0),
+        mount_apply_at(
+            b"",
+            b"/bin",
+            b"/",
+            b"ramfs",
+            0,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
         Err(slopos_abi::Errno::EPERM),
         "a mount over /bin was allowed"
     );
     // Non-canonical too: the target is canonicalised before the table is
     // consulted.
     assert_eq_test!(
-        mount_apply_at(b"", b"/bin/halt", b"/", b"ramfs", 0),
+        mount_apply_at(
+            b"",
+            b"/bin/halt",
+            b"/",
+            b"ramfs",
+            0,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
         Err(slopos_abi::Errno::EPERM),
         "a mount over a granted program was allowed"
     );
     assert_eq_test!(
-        mount_apply_at(b"", b"/tmp/../bin", b"/", b"ramfs", 0),
+        mount_apply_at(
+            b"",
+            b"/tmp/../bin",
+            b"/",
+            b"ramfs",
+            0,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
         Err(slopos_abi::Errno::EPERM),
         "a non-canonical spelling of /bin got past the grant check"
     );
@@ -9716,7 +9738,8 @@ pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
     }
 
     let outcome = (|| -> Result<(), &'static str> {
-        mount_apply_at(b"", MP, b"/", b"devfs", 0).map_err(|_| "the second devfs mount failed")?;
+        mount_apply_at(b"", MP, b"/", b"devfs", 0, &slopos_fs::vfs::Subject::KERNEL)
+            .map_err(|_| "the second devfs mount failed")?;
         if umount_path_at(MP, b"/", 0).is_err() {
             return Err("a descriptor on /dev made a second devfs mount busy");
         }
@@ -9753,8 +9776,22 @@ pub fn test_mount_ext2_unknown_source_is_not_busy() -> TestResult {
     }
 
     // `vdz` is past every letter the harness attaches.
-    let absent = mount_apply_at(b"vdz", MP, b"/", b"ext2", 0);
-    let garbage = mount_apply_at(b"not-a-device", MP, b"/", b"ext2", 0);
+    let absent = mount_apply_at(
+        b"vdz",
+        MP,
+        b"/",
+        b"ext2",
+        0,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
+    let garbage = mount_apply_at(
+        b"not-a-device",
+        MP,
+        b"/",
+        b"ext2",
+        0,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
 
     let _ = umount_path_at(MP, b"/", 0);
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
@@ -9807,8 +9844,15 @@ fn ext2_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     use slopos_fs::vfs::mount::mount_at;
     use slopos_fs::vfs::orphan::{close_ref, open_ref};
 
-    mount_apply_at(b"vdb", mp, b"/", b"ext2", 0)
-        .map_err(|_| "mount of the scratch device failed")?;
+    mount_apply_at(
+        b"vdb",
+        mp,
+        b"/",
+        b"ext2",
+        0,
+        &slopos_fs::vfs::Subject::KERNEL,
+    )
+    .map_err(|_| "mount of the scratch device failed")?;
 
     let handle = slopos_fs::vfs::vfs_open(b"/tmp/ext2_busy_mp/held", true)
         .map_err(|_| "could not create a file through the mount")?;
@@ -9841,8 +9885,15 @@ fn ext2_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     // Mounting the same disk again is what proves the retired instance gave
     // the exclusive claim back: a leaked one answers `Busy` for the rest of
     // the boot.
-    mount_apply_at(b"vdb", mp, b"/", b"ext2", 0)
-        .map_err(|_| "the scratch device would not mount again after a lazy unmount")?;
+    mount_apply_at(
+        b"vdb",
+        mp,
+        b"/",
+        b"ext2",
+        0,
+        &slopos_fs::vfs::Subject::KERNEL,
+    )
+    .map_err(|_| "the scratch device would not mount again after a lazy unmount")?;
     umount_path_at(mp, b"/", 0).map_err(|_| "the re-mounted ext2 would not unmount")
 }
 

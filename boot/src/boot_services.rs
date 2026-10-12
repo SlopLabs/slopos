@@ -530,6 +530,7 @@ fn apply_cmdline_mount(spec: &str) {
         b"/",
         b"ext2",
         0,
+        &slopos_fs::vfs::Subject::KERNEL,
     ) {
         Ok(()) => {
             let read_only = slopos_fs::vfs::canon::canonicalise(path.as_bytes())

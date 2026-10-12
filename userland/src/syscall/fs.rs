@@ -76,12 +76,16 @@ pub fn sync() -> SyscallResult<()> {
 }
 
 /// Replace `path`'s contents, committing before returning — for the settings
-/// a reboot must not lose. `O_SYNC` rather than a trailing `fsync` so a short
-/// write is still durable up to where it got, and so the durability cannot be
-/// skipped by an early return between the two calls.
+/// a reboot must not lose. Written whole to a sibling and renamed over `path`,
+/// so no reader sees it half replaced and an old copy this process may not
+/// write is replaced all the same; the `fsync` after the rename commits it.
 pub fn write_durable(path: &CStr, data: &[u8]) -> SyscallResult<()> {
-    use slopos_abi::fs::{O_CREAT, O_SYNC, O_TRUNC, O_WRONLY};
-    let fd = open_cstr(path, O_WRONLY | O_CREAT | O_TRUNC | O_SYNC)?;
+    use slopos_abi::fs::{O_CREAT, O_TRUNC, O_WRONLY};
+    let mut staged = path.to_bytes().to_vec();
+    staged.extend_from_slice(b".new");
+    let staged = std::ffi::CString::new(staged)
+        .map_err(|_| super::error::SyscallError::from(slopos_slibc::errno::EINVAL))?;
+    let fd = open_cstr(&staged, O_WRONLY | O_CREAT | O_TRUNC)?;
     let mut written = 0usize;
     while written < data.len() {
         match write_slice(fd.raw(), &data[written..])? {
@@ -89,7 +93,8 @@ pub fn write_durable(path: &CStr, data: &[u8]) -> SyscallResult<()> {
             n => written += n,
         }
     }
-    Ok(())
+    rename(staged.as_ptr(), path.as_ptr())?;
+    fsync(fd.raw())
 }
 
 /// Consumes the handle so `Drop` cannot double-close. On failure the fd is

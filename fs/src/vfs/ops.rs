@@ -291,7 +291,7 @@ pub fn set_owner(
         return Ok(());
     }
     fs.set_owner(inode, uid, gid)?;
-    let mode = crate::vfs::perm::mode_after_chown(perm.mode, perm.is_dir);
+    let mode = who.mode_after_chown(perm.mode, perm.gid, perm.is_dir);
     if mode != perm.mode {
         fs.set_mode(inode, mode)?;
     }
@@ -701,13 +701,15 @@ fn check_rename(
     new_name: &[u8],
     who: &Subject,
 ) -> VfsResult<()> {
-    old_parent.perm.check_entries(who)?;
-    new_parent.perm.check_entries(who)?;
-    let moved = match old_parent.fs.lookup(old_parent.inode, old_name) {
-        Ok(inode) => InodePerm::of(&old_parent.fs.stat(inode)?),
-        Err(VfsError::NotFound) => return Ok(()),
-        Err(e) => return Err(e),
-    };
+    old_parent.perm.check(who, Perm::Exec)?;
+    new_parent.perm.check(who, Perm::Exec)?;
+    let moved = InodePerm::of(
+        &old_parent
+            .fs
+            .stat(old_parent.fs.lookup(old_parent.inode, old_name)?)?,
+    );
+    old_parent.perm.check(who, Perm::Write)?;
+    new_parent.perm.check(who, Perm::Write)?;
     old_parent.perm.check_sticky(who, moved.uid)?;
     match new_parent.fs.lookup(new_parent.inode, new_name) {
         Ok(inode) => {

@@ -22,9 +22,12 @@ and the operation it guards look the name up separately with no directory
 lock across both, so a racing rename can swap what a check saw — the one
 check it can evade is write on a directory moved between parents, which only
 guards that directory's `..`, and every sticky-bit check survives it, since
-only a name the attacker could already remove can be swapped in; and pty
-slaves are 0666 to every uid, which phase 4 must close before the session
-leaves uid 0.
+only a name the attacker could already remove can be swapped in; and three
+gaps that phase 4 must close before the session leaves uid 0, each harmless
+while every process is uid 0: pty slaves are 0666, `AF_UNIX` names bypass the
+filesystem's checks, and a symlink in sticky `/tmp` is followed for anyone.
+The ext4 reserve now admits its superblock's uid, which the whole session is
+until phase 4, so a runaway build can now spend what init's writes kept.
 
 Swept 2026-10-12: the authority model's move off `task.flags` — the spawn
 boundary and its retired flag bits, the grant table now naming capabilities,

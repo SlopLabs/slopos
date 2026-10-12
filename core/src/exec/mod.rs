@@ -153,20 +153,10 @@ pub fn task_is_init(task: &slopos_sched::task_struct::Task) -> bool {
     init != INVALID_TASK_ID && (task.task_id == init || task.tgid == init)
 }
 
-/// The running task's identity, or `None` for a kernel thread, which no
-/// identity describes and which ext2's reserve admits: a refused writeback
-/// makes a full disk an unrecoverable one.
+/// The running task's identity, or `None` for a kernel thread, which the ext4
+/// reserve admits: a refused writeback makes a full disk an unrecoverable one.
 pub fn current_task_cred() -> Option<slopos_ostd::process::Cred> {
-    use slopos_ostd::process::{Cred, cred::ID_UNCHANGED};
-    let current = slopos_sched::task_struct::Current::get()?;
-    let task = current.task();
-    if task.flags & TASK_FLAG_USER_MODE == 0 {
-        return None;
-    }
-    Some(
-        task.process()
-            .map_or(Cred::of(ID_UNCHANGED, ID_UNCHANGED), |p| p.cred()),
-    )
+    crate::syscall::context::cred_of(slopos_sched::task_struct::Current::get()?.task())
 }
 
 pub fn launch_init() -> Result<u32, Errno> {
@@ -338,11 +328,13 @@ pub fn spawn_program_with_cwd(
     parent_task_id: u32,
     cwd: &[u8],
 ) -> Result<u32, Errno> {
-    let spawner = &match task_find_by_id(parent_task_id) {
-        Some(parent) => crate::syscall::context::subject_of(&parent),
-        None if parent_task_id == INVALID_TASK_ID => Subject::KERNEL,
-        None => return Err(Errno::ESRCH),
-    };
+    let parent_ref = task_find_by_id(parent_task_id);
+    if parent_ref.is_none() && parent_task_id != INVALID_TASK_ID {
+        return Err(Errno::ESRCH);
+    }
+    let spawner = &parent_ref.as_ref().map_or(Subject::KERNEL, |parent| {
+        crate::syscall::context::subject_of(parent)
+    });
     let result = (|| {
         // Resolved once so the grant table and the loader agree on the file:
         // for a script, its interpreter. `comm` takes the path as passed.
@@ -367,10 +359,9 @@ pub fn spawn_program_with_cwd(
         // `/bin/sh` and every `#!/bin/sh` script load the granted shell.
         let mut raised = CAP_NONE;
         if granted != CAP_NONE || delegated != CAP_NONE {
-            // No parent task: a spawn the kernel makes itself, which no
-            // userland can reach.
-            let spawner_caps = task_find_by_id(parent_task_id)
-                .map(|parent| slopos_ostd::task::ops::task_caps(&parent));
+            let spawner_caps = parent_ref
+                .as_ref()
+                .map(|parent| slopos_ostd::task::ops::task_caps(parent));
             if spawner_caps.is_none_or(|held| mask_permits(held, Capability::Launch)) {
                 raised = granted;
                 if let Some(tier) = granted_priority {
@@ -405,7 +396,7 @@ pub fn spawn_program_with_cwd(
         if spawn.with_child(|child| {
             child
                 .process()
-                .map(|process| process.change_cred(|_| Ok(spawner.cred)))
+                .map(|process| process.change_cred(|_| Ok(spawner.cred.saved_at_exec())))
         }) != Some(Some(Ok(())))
         {
             return Err(Errno::ENOMEM);
@@ -460,8 +451,6 @@ pub fn spawn_program_with_cwd(
 
         // Inherited so the child joins the parent's session; without it the
         // shell cannot make the child its foreground group.
-        let parent_ref = task_find_by_id(parent_task_id);
-
         // Resolved — and for NEW_PGRP allocated — before the child borrow
         // opens: that borrow runs preempt-disabled, where a fallible allocation
         // has no business.
@@ -610,6 +599,15 @@ pub fn do_exec(
         stack_ptr_out,
         tls_tp_out,
     )
+}
+
+/// `execve`'s half of [`Cred::saved_at_exec`].
+///
+/// [`Cred::saved_at_exec`]: slopos_ostd::process::Cred::saved_at_exec
+pub fn save_ids_for_exec(task: &slopos_sched::task_struct::Task) {
+    if let Some(process) = task.process() {
+        let _ = process.change_cred(|cred| Ok(cred.saved_at_exec()));
+    }
 }
 
 /// An identity whose effective ids differ from its real ones, which a program

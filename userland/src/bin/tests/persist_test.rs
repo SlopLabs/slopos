@@ -165,7 +165,7 @@ fn o_sync_write_needs_no_fsync() -> bool {
         Err(_) => return false,
     };
     let payload = b"o-sync-v1\n";
-    if let Err(e) = slopos_userland::syscall::fs::write_durable(&cpath, payload) {
+    if let Err(e) = o_sync_write(&cpath, payload) {
         println!("OSYNC: durable write failed: {e:?}");
         return false;
     }
@@ -176,6 +176,16 @@ fn o_sync_write_needs_no_fsync() -> bool {
             false
         }
     }
+}
+
+fn o_sync_write(path: &std::ffi::CStr, data: &[u8]) -> slopos_userland::syscall::SyscallResult<()> {
+    use slopos_abi::fs::{O_CREAT, O_SYNC, O_TRUNC, O_WRONLY};
+    let fd = fs_syscall::open_cstr(path, O_WRONLY | O_CREAT | O_TRUNC | O_SYNC)?;
+    let written = fs_syscall::write_slice(fd.raw(), data)?;
+    if written != data.len() {
+        return Err(slopos_slibc::errno::EIO.into());
+    }
+    Ok(())
 }
 
 /// The root the test image boots is the disk. A RAM root passes every other

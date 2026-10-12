@@ -1,6 +1,6 @@
 //! Permission bits against a caller's identity.
 
-pub use slopos_ostd::process::cred::{Perm, Subject, mode_after_chown};
+pub use slopos_ostd::process::cred::{Perm, Subject};
 
 use crate::vfs::traits::{FileStat, FileType, Owner, VfsError, VfsResult};
 

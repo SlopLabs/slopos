@@ -62,6 +62,7 @@ define_syscall!(syscall_ring_enter
         min_complete,
         flags,
         &ctx.subject(),
+        crate::syscall::fs::at_handlers::creation_mode(0o666),
     );
     if rc < 0 {
         return Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL));

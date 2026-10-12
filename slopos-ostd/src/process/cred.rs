@@ -34,6 +34,10 @@ pub struct Cred {
 impl Cred {
     pub const ROOT: Self = Self::of(ROOT_UID, ROOT_UID);
 
+    /// The identity of a user task whose process is gone: one no file or task
+    /// holds.
+    pub const NOBODY: Self = Self::of(ID_UNCHANGED, ID_UNCHANGED);
+
     /// Every id `uid` or `gid`, and no supplementary group.
     pub const fn of(uid: u32, gid: u32) -> Self {
         Self {
@@ -63,6 +67,16 @@ impl Cred {
         Self {
             euid: self.ruid,
             egid: self.rgid,
+            ..*self
+        }
+    }
+
+    /// What an exec leaves: the effective ids saved, as POSIX has it, so the
+    /// new image cannot return to an id the old one set aside.
+    pub fn saved_at_exec(&self) -> Self {
+        Self {
+            suid: self.euid,
+            sgid: self.egid,
             ..*self
         }
     }
@@ -192,7 +206,6 @@ fn set_res(ids: [u32; 3], want: [u32; 3], set_id: bool) -> Result<[u32; 3], Errn
 #[derive(Clone, Copy, Debug)]
 pub struct Subject {
     pub cred: Cred,
-    /// Holds `DacOverride`.
     pub dac_override: bool,
 }
 
@@ -239,44 +252,55 @@ impl Subject {
         (self.cred.euid, gid)
     }
 
-    /// The mode a child asked for as `mode` takes there: a directory inherits
-    /// set-group-ID, and anything else loses one in a group its creator is not
+    /// The mode a child asked for as `mode` takes there. A directory takes no
+    /// set-ID bit but its parent's set-group-ID; anything else loses a
+    /// set-group-ID that means group execution in a group its creator is not
     /// in.
     pub fn child_mode(&self, dir_mode: u16, dir_gid: u32, mode: u16, is_dir: bool) -> u16 {
-        if is_dir && dir_mode & S_ISGID != 0 {
-            return mode | S_ISGID;
+        if is_dir {
+            return mode & !(S_ISUID | S_ISGID) | dir_mode & S_ISGID;
         }
         let (_, gid) = self.child_owner(dir_mode, dir_gid);
-        self.chmod_mode(mode, gid)
+        if mode & S_IXGRP != 0 && !self.in_group_or_override(gid) {
+            mode & !S_ISGID
+        } else {
+            mode
+        }
     }
 
     /// The mode `chmod` stores: set-group-ID survives only for a caller in the
     /// file's group.
     pub fn chmod_mode(&self, mode: u16, gid: u32) -> u16 {
-        if self.dac_override || self.cred.in_group(gid) {
+        if self.in_group_or_override(gid) {
             mode
         } else {
             mode & !S_ISGID
         }
     }
+
+    /// A non-directory's mode once its owner changes: no set-user-ID, and no
+    /// set-group-ID where it means group execution or the caller is outside
+    /// the file's group `gid`.
+    pub fn mode_after_chown(&self, mode: u16, gid: u32, is_dir: bool) -> u16 {
+        if is_dir {
+            return mode;
+        }
+        let mode = mode & !S_ISUID;
+        if mode & S_IXGRP != 0 || !self.in_group_or_override(gid) {
+            mode & !S_ISGID
+        } else {
+            mode
+        }
+    }
+
+    fn in_group_or_override(&self, gid: u32) -> bool {
+        self.dac_override || self.cred.in_group(gid)
+    }
 }
 
 const S_ISUID: u16 = slopos_abi::fs::S_ISUID as u16;
 const S_ISGID: u16 = slopos_abi::fs::S_ISGID as u16;
-
-/// A non-directory's mode once its owner changes: no set-user-ID, and no
-/// set-group-ID where that bit means group execution rather than locking.
-pub fn mode_after_chown(mode: u16, is_dir: bool) -> u16 {
-    if is_dir {
-        return mode;
-    }
-    let mode = mode & !S_ISUID;
-    if mode & 0o010 != 0 {
-        mode & !S_ISGID
-    } else {
-        mode
-    }
-}
+const S_IXGRP: u16 = 0o010;
 
 /// A mode bit a caller asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -517,9 +541,11 @@ mod tests {
         assert_eq!(who.child_owner(0o755, OTHER), (U, U));
         assert_eq!(who.child_owner(0o2775, OTHER), (U, OTHER));
         assert_eq!(who.child_mode(0o2775, OTHER, 0o755, true), 0o2755);
-        assert_eq!(who.child_mode(0o2775, OTHER, 0o2644, false), 0o644);
-        assert_eq!(who.child_mode(0o2775, 7, 0o2644, false), 0o2644);
-        assert_eq!(who.child_mode(0o755, OTHER, 0o2644, false), 0o2644);
+        assert_eq!(who.child_mode(0o755, OTHER, 0o6755, true), 0o755);
+        assert_eq!(who.child_mode(0o2775, OTHER, 0o2654, false), 0o654);
+        assert_eq!(who.child_mode(0o2775, OTHER, 0o2644, false), 0o2644);
+        assert_eq!(who.child_mode(0o2775, 7, 0o2654, false), 0o2654);
+        assert_eq!(who.child_mode(0o755, OTHER, 0o2654, false), 0o2654);
     }
 
     #[test]
@@ -536,9 +562,20 @@ mod tests {
 
     #[test]
     fn a_new_owner_takes_the_set_id_bits_off_a_file() {
-        assert_eq!(mode_after_chown(0o6755, false), 0o755);
-        assert_eq!(mode_after_chown(0o6745, false), 0o2745);
-        assert_eq!(mode_after_chown(0o6755, true), 0o6755);
+        let who = user();
+        assert_eq!(who.mode_after_chown(0o6755, U, false), 0o755);
+        assert_eq!(who.mode_after_chown(0o6745, U, false), 0o2745);
+        assert_eq!(who.mode_after_chown(0o6745, OTHER, false), 0o745);
+        assert_eq!(who.mode_after_chown(0o6755, U, true), 0o6755);
+    }
+
+    #[test]
+    fn exec_saves_the_effective_ids() {
+        let c = cred(U, U, 0);
+        assert_eq!(c.set_uid(0, false).map(|c| uids(&c)), Ok([U, 0, 0]));
+        let after = c.saved_at_exec();
+        assert_eq!(uids(&after), [U, U, U]);
+        assert_eq!(after.set_uid(0, false), Err(Errno::EPERM));
     }
 
     #[test]

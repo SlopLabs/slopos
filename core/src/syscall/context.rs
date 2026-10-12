@@ -9,6 +9,7 @@ use slopos_abi::Errno;
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::process::Cred;
 use slopos_ostd::process::cred::Subject;
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::wl_currency::{self, WL_DELTA};
@@ -22,11 +23,22 @@ use crate::syscall::result::SyscallResult;
 /// which the `syscall` instruction clobbers.
 pub type SyscallRegs = [u64; 6];
 
+/// `task`'s identity, or `None` for a kernel task.
+pub fn cred_of(task: &Task) -> Option<Cred> {
+    if task.flags & slopos_abi::task::TASK_FLAG_USER_MODE == 0 {
+        return None;
+    }
+    Some(
+        task.process()
+            .map_or(Cred::NOBODY, |process| process.cred()),
+    )
+}
+
 /// Who `task`'s permission checks are for. A kernel task is the kernel.
 pub fn subject_of(task: &Task) -> Subject {
-    match task.process() {
-        Some(process) => Subject {
-            cred: process.cred(),
+    match cred_of(task) {
+        Some(cred) => Subject {
+            cred,
             dac_override: slopos_ostd::authority::mask_permits(
                 slopos_ostd::task::ops::task_caps(task),
                 slopos_ostd::authority::Capability::DacOverride,
@@ -134,10 +146,8 @@ impl<'a> SyscallContext<'a> {
     }
 
     /// The caller's identity. A kernel task acts as uid 0.
-    pub fn cred(&self) -> slopos_ostd::process::Cred {
-        self.task
-            .process()
-            .map_or(slopos_ostd::process::Cred::ROOT, |process| process.cred())
+    pub fn cred(&self) -> Cred {
+        cred_of(self.task).unwrap_or(Cred::ROOT)
     }
 
     /// Who this caller's permission checks are for.

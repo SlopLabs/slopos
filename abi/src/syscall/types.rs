@@ -154,7 +154,7 @@ pub struct UserTaskEntry {
     pub total_runtime_us: u64,
     pub creation_time_ms: u64,
     pub yield_count: u32,
-    /// The real uid of the task's process.
+    /// The effective uid of the task's process, the one `ps` shows.
     pub uid: u32,
     pub name: [u8; 32],
 }

@@ -17,9 +17,10 @@ use slopos_abi::ring::{
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT};
 
 use slopos_fs::fileio::{
-    FileRef, file_close_fd, file_open_for_process, file_poll_ref, file_read_ref_nonblock,
+    FileRef, file_close_fd, file_open_at, file_poll_ref, file_read_ref_nonblock,
     file_write_ref_nonblock,
 };
+use slopos_fs::vfs::path::RESOLVE_FOLLOW;
 use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
 use slopos_mm::user_ptr::UserBytes;
 
@@ -105,7 +106,6 @@ pub fn probe(
     sqe: &Sqe,
     file: Option<&FileRef>,
     buffers: &mut BufferRegistry,
-    who: &Subject,
 ) -> Outcome {
     let sel = buf_sel(sqe);
     match sqe.opcode {
@@ -149,7 +149,6 @@ pub fn probe(
             })
         }),
         // Path-addressed and fd-number-addressed: no target reference held.
-        OP_OPENAT => reject_buf(sel).unwrap_or_else(|| probe_openat(table, sqe, who)),
         OP_CLOSE => reject_buf(sel).unwrap_or_else(|| probe_close(table, sqe)),
         OP_ACCEPT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_accept(table, f))),
         OP_CONNECT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_connect(f, sqe))),
@@ -179,12 +178,7 @@ fn reject_buf(sel: Option<BufSel>) -> Option<Outcome> {
 /// Re-probe an in-flight row at harvest time. Same dispatch as `probe`,
 /// reconstructed from the stored row (re-validating the user buffer via
 /// a fresh `UserReadBuf`/`UserWriteBuf` each time — SLOPRING § 9).
-pub fn reprobe(
-    table: FdTable,
-    row: &InFlight,
-    buffers: &mut BufferRegistry,
-    who: &Subject,
-) -> Outcome {
+pub fn reprobe(table: FdTable, row: &InFlight, buffers: &mut BufferRegistry) -> Outcome {
     let sqe = Sqe {
         opcode: row.opcode,
         flags: row.buf_flags,
@@ -203,7 +197,7 @@ pub fn reprobe(
         _resv0: 0,
         _resv1: 0,
     };
-    probe(table, &sqe, row.file.as_ref(), buffers, who)
+    probe(table, &sqe, row.file.as_ref(), buffers)
 }
 
 fn probe_read(file: &FileRef, sqe: &Sqe) -> Outcome {
@@ -230,11 +224,15 @@ fn probe_write(file: &FileRef, sqe: &Sqe) -> Outcome {
     }
 }
 
-/// `OP_OPENAT`: non-blocking file open (SLOPRING § 12). SlopOS fs opens are
-/// immediate, so this always completes inline with the new fd (`>= 0`) or a
-/// negated errno. An ownership op (installs an fd), so the caller reserves a
-/// CQE slot first.
-fn probe_openat(table: FdTable, sqe: &Sqe, who: &Subject) -> Outcome {
+/// `OP_OPENAT`: non-blocking file open (SLOPRING § 12) as `who`, a file it
+/// creates taking `create_mode`. SlopOS fs opens are immediate, so this always
+/// completes inline with the new fd (`>= 0`) or a negated errno, and is never
+/// reprobed. An ownership op (installs an fd), so the caller reserves a CQE
+/// slot first.
+pub fn open(table: FdTable, sqe: &Sqe, who: &Subject, create_mode: u16) -> Outcome {
+    if let Some(rejected) = reject_buf(buf_sel(sqe)) {
+        return rejected;
+    }
     if sqe.addr == 0 {
         return Outcome::Inline(Errno::EFAULT.raw());
     }
@@ -260,7 +258,15 @@ fn probe_openat(table: FdTable, sqe: &Sqe, who: &Subject) -> Outcome {
         Some(n) => &buf[..n],
         None => &buf[..copied],
     };
-    Outcome::Inline(file_open_for_process(table, path, sqe.op_flags, who))
+    Outcome::Inline(file_open_at(
+        table,
+        path,
+        b"/",
+        sqe.op_flags,
+        RESOLVE_FOLLOW,
+        Some(create_mode),
+        who,
+    ))
 }
 
 /// `OP_CLOSE`: close `fd` via the ring (SLOPRING § 12). Always inline; returns

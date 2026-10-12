@@ -9,7 +9,6 @@
 use slopos_abi::Errno;
 use slopos_abi::fs::{MNT_DETACH, MOUNT_FSTYPE_MAX, MS_RDONLY};
 use slopos_fs::ext2_vfs::Ext2Mount;
-use slopos_fs::vfs::VfsError;
 use slopos_fs::vfs::canon::canonicalise_at;
 use slopos_fs::vfs::init::{
     vfs_devfs_instance, vfs_ext2_mount_named, vfs_ext2_mounted_instance, vfs_ext2_pool_release,
@@ -21,6 +20,7 @@ use slopos_fs::vfs::mount::{
 use slopos_fs::vfs::orphan::{drain_releasable, forget_filesystem, has_open_refs};
 use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_at};
 use slopos_fs::vfs::traits::{FileSystem, FileType, same_filesystem};
+use slopos_fs::vfs::{Subject, VfsError};
 
 use crate::syscall::args::{UserCStr, UserPath};
 use crate::syscall::fs::dirfd::with_cwd_base;
@@ -38,8 +38,9 @@ define_syscall!(syscall_mount
     if data != 0 {
         return Err(Errno::EINVAL);
     }
+    let who = ctx.subject();
     with_cwd_base(ctx, |cwd| {
-        mount_apply_at(source.as_bytes(), target.as_bytes(), cwd, fstype.as_bytes(), flags)
+        mount_apply_at(source.as_bytes(), target.as_bytes(), cwd, fstype.as_bytes(), flags, &who)
     })
 });
 
@@ -51,10 +52,8 @@ define_syscall!(syscall_umount2
     with_cwd_base(ctx, |cwd| umount_path_at(path.as_bytes(), cwd, flags))
 });
 
-fn target_is_directory(path: &[u8]) -> Result<bool, Errno> {
-    // A `Mount` holder's: the walk is the kernel's, as for the boot step.
-    let resolved = resolve_path_at(path, b"/", RESOLVE_FOLLOW, &slopos_fs::vfs::Subject::KERNEL)
-        .map_err(vfs_errno)?;
+fn target_is_directory(path: &[u8], who: &Subject) -> Result<bool, Errno> {
+    let resolved = resolve_path_at(path, b"/", RESOLVE_FOLLOW, who).map_err(vfs_errno)?;
     let stat = resolved.fs.stat(resolved.inode).map_err(vfs_errno)?;
     Ok(stat.file_type == FileType::Directory)
 }
@@ -72,6 +71,7 @@ pub fn mount_apply_at(
     cwd: &[u8],
     fstype: &[u8],
     flags: u32,
+    who: &Subject,
 ) -> Result<(), Errno> {
     let canon = canonicalise_at(target, cwd).map_err(vfs_errno)?;
     let target = canon.as_bytes();
@@ -92,7 +92,7 @@ pub fn mount_apply_at(
     if mount_at(target).is_some() {
         return Err(Errno::EBUSY);
     }
-    if !target_is_directory(target)? {
+    if !target_is_directory(target, who)? {
         return Err(Errno::ENOTDIR);
     }
 

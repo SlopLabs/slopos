@@ -1219,14 +1219,15 @@ escapes the ceiling or the measure. A memfd outlives its sizer whenever another
 process holds its fd, so the sizer's address-space teardown hands each memfd it
 sized to the root (`ChargeSlot::bequeath`): the root is never released, so the
 machine's ceiling keeps counting it until the memfd goes, and it is no
-process's own, since no death gives it back. Only processes the writer could
-`kill` (`signal_dominates`: the writer holds every capability the target
-holds) are ever taken, as Linux's `oom_score_adj=-1000` is absolute: one holding
-a capability the writer lacks is never killed for its write, so a leaking privileged service is taken
-by its own write, once it is the heaviest process it may signal, and an
-unprivileged writer dies rather than take it. Init's own write is the
-exception, shielded from nothing, since it cannot be impersonated and its
-death takes the machine down; init itself is never taken. The victim is
+process's own, since no death gives it back. Only processes whose every
+capability the writer holds (`signal_dominates`, the capability half of
+`kill`'s rule; no uid is consulted, as Linux's OOM killer consults none) are
+ever taken, as Linux's `oom_score_adj=-1000` is absolute: one holding a
+capability the writer lacks is never killed for its write, so a leaking
+privileged service is taken by its own write, once it is the heaviest process
+it dominates, and an unprivileged writer dies rather than take it. Init's own
+write is the exception, shielded from nothing, since it cannot be impersonated
+and its death takes the machine down; init itself is never taken. The victim is
 killed the way every kill works (the flag each thread unwinds from, I8). The
 writer drops the address space, waits — killable, bounded — for the victim's
 frames to be back (noted once the teardown has dropped the address space, not
@@ -1234,7 +1235,7 @@ inferred from the slot's unbind), and writes again; while a victim is dying
 nobody picks a second — a victim whose last task left before the kill reached
 it included — and one still holding its memory five seconds after the kill
 stops holding back the next choice. Only when nothing but init, the dying,
-processes the writer may not signal and processes holding none of what is
+processes the writer does not dominate and processes holding none of what is
 missing is left does the write fail, as a `SIGKILL`
 (`TaskFaultReason::UserOom`). A
 write the kernel makes for the task takes the same road wherever it may
@@ -1350,7 +1351,7 @@ on its own. A signal also needs the sender's real or effective uid to be the
 target's real or saved uid; `ProcSignal` waives both halves, and `SIGCONT` to
 a task of the sender's session needs neither. `process_list` reports every
 task to everyone. The ext4 reserve is the superblock's `s_def_resuid` and
-`s_def_resgid`.
+`s_def_resgid`, which admit every process until the session leaves uid 0.
 
 ### Licensing discipline
 

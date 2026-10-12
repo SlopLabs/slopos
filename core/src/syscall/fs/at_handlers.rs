@@ -35,7 +35,7 @@ fn reject_unknown(flags: u32, allowed: u32) -> Result<(), Errno> {
     }
 }
 
-fn creation_mode(mode: u32) -> u16 {
+pub(crate) fn creation_mode(mode: u32) -> u16 {
     let umask = slopos_sched::task_struct::Current::get()
         .map_or(slopos_ostd::task::fs_context::DEFAULT_UMASK, |current| {
             current.task().umask()
@@ -69,8 +69,6 @@ pub(crate) fn open_at(
     }
 }
 
-/// The mode goes on the inode `create` returned: re-resolving the name to
-/// chmod it can land on a replacement, or on a symlink's target.
 pub(crate) fn mkdir_at(path: &[u8], cwd: &[u8], mode: u32, who: &Subject) -> Result<(), Errno> {
     slopos_fs::vfs::vfs_mkdir_at(path, cwd, Some(creation_mode(mode)), who)
         .map_err(|e| e.to_errno())

@@ -4099,8 +4099,8 @@ fn symlink_roundtrip_body_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str>
 /// tables still have room, and a handle with the reserve waived spends into
 /// it. Both tables: `s_r_blocks_count` is the image's own number, and the
 /// inode reserve is that number's ratio applied to the inode table, because
-/// ext2 carries no `s_r_inodes_count` and an inode exhaustion denies
-/// `/sbin/init` a file with every block still free.
+/// ext2 carries no `s_r_inodes_count` and an inode exhaustion denies the
+/// reserve's holders a file with every block still free.
 pub fn test_ext2_reserve_refuses_unprivileged_allocation() -> TestResult {
     let Some(device) = phase3_image(b"r.txt", b"x") else {
         return TestResult::Skipped;
@@ -4139,6 +4139,41 @@ fn reserve_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     fs.create_file(2, b"granted")
         .map_err(|_| "a waived reserve still refused")?;
     Ok(())
+}
+
+/// Who spends the reserve is ext4's rule over the superblock's
+/// `s_def_resuid` and `s_def_resgid`, with the kernel's threads admitted.
+pub fn test_ext2_reserve_admits_its_uid_and_group() -> TestResult {
+    use crate::ext2::ondisk::reserved_blocks_of;
+    use slopos_ostd::process::Cred;
+    let Ok(mut raw) = slopos_ostd::KVec::<u8>::zeroed(1024) else {
+        return slopos_testing::fail!("no superblock buffer");
+    };
+    raw[0x50..0x52].copy_from_slice(&1000u16.to_le_bytes());
+    raw[0x52..0x54].copy_from_slice(&50u16.to_le_bytes());
+    let reserve = reserved_blocks_of(&raw);
+    let member = Cred::of(2000, 2000).set_groups(&[50], true);
+    let verdicts = (
+        reserve.admits(None),
+        reserve.admits(Some(&Cred::of(1000, 1000))),
+        member.as_ref().is_ok_and(|cred| reserve.admits(Some(cred))),
+        reserve.admits(Some(&Cred::of(2000, 2000))),
+        reserve.admits(Some(&Cred::ROOT)),
+    );
+    if verdicts != (true, true, true, false, false) {
+        return slopos_testing::fail!(
+            "(kernel, resuid, resgid member, stranger, uid 0) admitted as {:?}",
+            verdicts
+        );
+    }
+    let ungrouped = crate::ext2::ondisk::BlockReserve {
+        resgid: 0,
+        ..reserve
+    };
+    if ungrouped.admits(Some(&Cred::of(2000, 0))) {
+        return slopos_testing::fail!("a reserve group of 0 admitted group 0");
+    }
+    TestResult::Pass
 }
 
 /// `set_mode` writes permission bits through and leaves the type nibble;
@@ -4602,6 +4637,10 @@ slopos_testing::stest!(name = test_ext2_symlink_roundtrip, suite = fs);
 slopos_testing::stest!(name = test_ext2_mode_and_seal, suite = fs);
 slopos_testing::stest!(
     name = test_ext2_reserve_refuses_unprivileged_allocation,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_reserve_admits_its_uid_and_group,
     suite = fs
 );
 slopos_testing::stest!(name = test_ext2_seal_survives_a_remount, suite = fs);

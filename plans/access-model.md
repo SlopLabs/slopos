@@ -43,7 +43,7 @@ value below zero is init's, by task id.
 **Privilege is raised at exactly one site, by path.**
 `spawn_program_with_cwd` ORs in `grant_for(image)` when the spawner holds
 `Launch`, and otherwise spawns the image ungranted
-(`core/src/exec/mod.rs:342-370`). `PROGRAM_GRANTS` has 25 rows: 13 shipped rows
+(`core/src/exec/mod.rs:358-378`). `PROGRAM_GRANTS` has 25 rows: 13 shipped rows
 that raise, 6 delegated e2fsprogs rows and 6 test rows
 (`core/src/exec/grants.rs:39-245`). A path key is sound only because the base
 directories are sealed and pinned, mount refuses grant paths and `/lib`
@@ -55,7 +55,7 @@ e2fsprogs with an emptied environment (`userland/src/apps/installer/disk.rs:473`
 
 **exec narrows all of it.** `narrow_authority_for_exec` keeps
 `caps & (universal | grant | delegated)` in every thread of the process
-(`core/src/exec/mod.rs:588-621`), and `caps_drop` sheds capabilities from a
+(`core/src/exec/mod.rs:629-656`), and `caps_drop` sheds capabilities from a
 whole process for good
 (`sched/src/task/task_lifecycle.rs:2647-2667`). The Verus proof
 (`verification/proofs/authority.rs`) models both.
@@ -222,9 +222,8 @@ The failures on record each set a rule here:
   the target's gated capabilities are a subset of the sender's. Holding
   `ProcSignal`, which nothing in the shipped system is given, waives both, and
   `SIGCONT` to a task of the sender's own session needs neither, as Linux's
-  `kill` allows, so the shell's `fg` resumes a granted job. The subset half is
-  the relation today (`signal.rs:87-92`); the uid rule and the `SIGCONT`
-  exemption join it in phase 2.
+  `kill` allows, so the shell's `fg` resumes a granted job
+  (`core/src/syscall/signal.rs:132-143`).
 - **Enumeration** is universal, as Linux's `/proc` is. `process_list` reports
   every task to every caller, so `SysInspect` no longer widens it. An id another
   uid owns can be read and not signalled.
@@ -453,37 +452,22 @@ raw block and signal gates), `test_caps_drop_is_total_and_process_wide`,
 ### Phase 2: Credentials and DAC — done
 
 Each process carries a `Cred`, process-wide, that fork and spawn copy and exec
-keeps. The ten id syscalls and the four chown calls sit at the Linux numbers;
-an id the process does not hold, and `setgroups`, take `SetId`. Every VFS entry
-takes the `Subject` it acts for: a walk needs search on each directory it
-crosses, open needs read or write, a name made or removed needs write and
-search on its parent and passes the sticky bit, `chmod`, `utimensat` and
-`chown` follow ownership and strip set-ID bits as Linux does, a setgid
-directory hands down its group, a new inode is born with its final mode, and
-`faccessat2` checks the real ids unless `AT_EACCESS`; ring opcodes check as
-their submitter. `DacOverride` passes every mode check. `stat` reports ext4's
-`i_uid`/`i_gid`, ramfs's creator and basefs's 0:0, and the ext4 reserve is the
-superblock's `s_def_resuid` and `s_def_resgid` rather than init's. A signal
-also needs POSIX's uid rule, which `ProcSignal` and a same-session `SIGCONT`
-waive, and `si_uid` is the sender's real uid. `process_list` lists every task
-with its uid, so `/bin/sysmon` lost its `SysInspect` row. `AT_SECURE` also
-marks a program whose effective ids differ from its real ones. slibc's
-root-only emulation became the syscalls, its passwd and group rows gained
-`user`, and `prctl` reports `PR_GET_NO_NEW_PRIVS` set. The owner bits admit the
-uid-0 session wherever they admitted it before, except that uid 0 without
-`DacOverride` is held to a mode that denies the owner: a 0444 file is read-only
-even to it. That exposed userland's `open_path`, behind the shell's
-redirections and `write_durable`, creating files 0000; it creates 0666 less the
-umask now, and a file a preserved root kept from before is its owner's to
-`chmod`. Until phase 4 the whole session is the reserve's uid. Graded by
-`dac_test` (as uid 1000: no create or write in `/etc`, no read, chmod or chown
-of a 0600 root file, no unlink of or rename over another owner's name in sticky
-`/tmp`, each beside what it may do; and uid 0 held to its own 0444 file), the
-`cred` kernel tests (the id rules, DAC on open, create, mkdir, link, symlink,
-unlink, rename, a directory moved between parents, truncate, chdir, chmod,
-chown, times, inode flags and `faccessat2`, setgid directories, the signal
-rule), `cred.rs`'s host tests, `persist_test`'s reserve against a uid-1000
-filler and `libc_abi_test`'s group calls.
+keeps with its effective ids saved. The id syscalls and the chown family sit at
+the Linux numbers; any other id, and `setgroups`, takes `SetId`. Every VFS
+entry takes the `Subject` it acts for and checks owner, group and mode as Linux
+does: search on the walk, read and write on open, write and search on a parent
+with the sticky bit, write on a directory moved between parents, ownership for
+`chmod`, `chown`, times and inode flags, set-ID stripping and setgid
+directories. `DacOverride` passes every mode check, and ring opcodes check as
+their submitter. `stat` reports the stored owner, a new inode is born with its
+owner and final mode, and the ext4 reserve is the superblock's uid and group.
+Signals add POSIX's uid rule, waived by `ProcSignal` and a same-session
+`SIGCONT`, and `process_list` lists every task, so `/bin/sysmon` lost its
+`SysInspect` row. slibc calls the syscalls and gained the `user` rows. uid 0
+without `DacOverride` meets a mode that denies the owner, which exposed
+userland creating files 0000; such a file on a preserved root is its owner's to
+`chmod`. Graded by `dac_test`, the `cred` kernel tests, `cred.rs`'s host tests
+and `persist_test`'s reserve against a uid-1000 filler.
 
 ### Phase 3: Peer identity
 
@@ -507,10 +491,16 @@ session. A row whose program writes root-owned state (`keymap`'s `/etc/keymap`,
 the installer's new root) also names `DacOverride` until privd runs it as
 uid 0. The ownership map lands with the uid change: the image builders,
 `fs_tree.py`, the installer, and init's one-time migration on a preserved
-root. `utest!` declarations replace the test rows. A pty's slave takes the
-opener's uid, mode 0620, as Linux's devpts gives it, since devfs reports every
-character device 0:0 0666 and the session's terminals would otherwise be open
-to every uid.
+root. `utest!` declarations replace the test rows. Three gaps close before
+the session leaves uid 0, each harmless while every process is uid 0:
+- a pty's slave takes the opener's uid, mode 0620, as Linux's devpts gives
+  it, since devfs reports every character device 0:0 0666;
+- an `AF_UNIX` name is bound and connected through the filesystem's search
+  and write checks, which today's global name table never consults;
+- a sticky, world-writable directory follows a symlink only for the link's
+  owner or the directory's, as Linux's `protected_symlinks` does, so a
+  root-run program cannot be steered through a link the session planted in
+  `/tmp`.
 
 Ends with:
 - a test that a spawn asking beyond its spawner's mask is `EPERM`, and one that
@@ -665,9 +655,11 @@ Ends with:
   `SECBIT_NOROOT`.
 - **The VFS is told who asks.** Every entry takes a `Subject` — the effective
   ids and whether `DacOverride` is held — and nothing below the syscall layer
-  reads the current task for a permission check. The kernel's own callers and
-  kernel threads pass `Subject::KERNEL`; a ring opcode passes its submitter's.
-  privd's mechanisms and a peer's attested identity need no VFS change.
+  reads the current task for a mode check; the ext4 reserve, which every
+  allocation reaches, reads the running task's ids instead. The kernel's own
+  callers and kernel threads pass `Subject::KERNEL`; a ring opcode passes its
+  submitter's. privd's mechanisms and a peer's attested identity need no VFS
+  change.
 - **`DacOverride` is Linux's `CAP_DAC_OVERRIDE`, `CAP_FOWNER` and `CAP_CHOWN`
   in one bit.** It passes read and write, execute where some class may execute
   or on a directory, every ownership test, and any `chown`. One broker grants

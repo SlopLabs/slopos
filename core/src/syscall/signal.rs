@@ -110,7 +110,7 @@ impl Sender {
     pub(crate) fn of(task: &Task) -> Self {
         Self {
             caps: slopos_ostd::task::ops::task_caps(task),
-            cred: task.process().map_or(Cred::ROOT, |process| process.cred()),
+            cred: crate::syscall::context::cred_of(task).unwrap_or(Cred::ROOT),
             sid: task.sid(),
         }
     }
