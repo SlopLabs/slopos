@@ -29,6 +29,7 @@ use slopos_ext4_core::xattr;
 use types::{BlockNum, FileBlock, GroupIdx, InodeNum};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError};
+use crate::vfs::Owner;
 use slopos_ostd::klog_info;
 
 pub use ondisk::EXT2_MAX_BLOCK_SIZE;
@@ -148,7 +149,7 @@ pub type Ext2Inode = Inode;
 
 /// What `create_inode_entry` is being asked to build.
 #[derive(Copy, Clone)]
-enum NewInode<'a> {
+pub enum NewInode<'a> {
     File,
     Fifo,
     Directory,
@@ -408,7 +409,7 @@ impl<'a> Ext2Fs<'a> {
     /// Its own read rather than a third element on [`Self::mount_params`]'s
     /// tuple, which every other caller would have to name and discard.
     #[inline(never)]
-    pub fn read_block_reserve(device: &dyn BlockDevice) -> Result<u32, Ext2Error> {
+    pub fn read_block_reserve(device: &dyn BlockDevice) -> Result<ondisk::BlockReserve, Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         device.read_at(1024, &mut sb_buf).map_err(Ext2Error::from)?;
         Ok(ondisk::reserved_blocks_of(&sb_buf))
@@ -1518,6 +1519,27 @@ impl<'a> Ext2Fs<'a> {
         })
     }
 
+    #[inline(never)]
+    pub fn set_owner(
+        &mut self,
+        ino: u32,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            let ino_num = InodeNum(ino);
+            let mut inode = fs.read_inode_num(ino_num)?;
+            if inode.is_sealed() {
+                return Err(Ext2Error::Immutable);
+            }
+            inode.uid = uid.unwrap_or(inode.uid);
+            inode.gid = gid.unwrap_or(inode.gid);
+            time::stamp(&mut inode.ctime);
+            fs.write_inode_num(ino_num, &inode)
+        })
+    }
+
     /// Write access and modification times through. `None` leaves a field
     /// alone, which is `UTIME_OMIT`. A 128-byte record keeps whole seconds.
     #[inline(never)]
@@ -1864,26 +1886,17 @@ impl<'a> Ext2Fs<'a> {
         Ok(current.raw())
     }
 
-    #[inline(never)]
     pub fn create_file(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        self.check_writable()?;
-        self.transaction(|fs| fs.create_inode_entry(InodeNum(parent), name, NewInode::File))
-            .map(|n| n.raw())
+        self.create_owned(parent, name, NewInode::File, Owner::ROOT)
     }
 
-    #[inline(never)]
     pub fn create_directory(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        self.check_writable()?;
-        self.transaction(|fs| fs.create_inode_entry(InodeNum(parent), name, NewInode::Directory))
-            .map(|n| n.raw())
+        self.create_owned(parent, name, NewInode::Directory, Owner::ROOT)
     }
 
     /// A named pipe: a blockless inode whose data lives in the kernel's pipe.
-    #[inline(never)]
     pub fn create_fifo(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        self.check_writable()?;
-        self.transaction(|fs| fs.create_inode_entry(InodeNum(parent), name, NewInode::Fifo))
-            .map(|n| n.raw())
+        self.create_owned(parent, name, NewInode::Fifo, Owner::ROOT)
     }
 
     /// Create a symlink under `parent` pointing at `target`. Targets of 60
@@ -1894,11 +1907,20 @@ impl<'a> Ext2Fs<'a> {
         name: &[u8],
         target: &[u8],
     ) -> Result<u32, Ext2Error> {
+        self.create_owned(parent, name, NewInode::Symlink(target), Owner::ROOT)
+    }
+
+    #[inline(never)]
+    pub fn create_owned(
+        &mut self,
+        parent: u32,
+        name: &[u8],
+        kind: NewInode<'_>,
+        owner: Owner,
+    ) -> Result<u32, Ext2Error> {
         self.check_writable()?;
-        self.transaction(|fs| {
-            fs.create_inode_entry(InodeNum(parent), name, NewInode::Symlink(target))
-        })
-        .map(|n| n.raw())
+        self.transaction(|fs| fs.create_inode_entry(InodeNum(parent), name, kind, owner))
+            .map(|n| n.raw())
     }
 
     #[inline(never)]
@@ -1907,6 +1929,7 @@ impl<'a> Ext2Fs<'a> {
         parent_num: InodeNum,
         name: &[u8],
         kind: NewInode<'_>,
+        owner: Owner,
     ) -> Result<InodeNum, Ext2Error> {
         if name.is_empty() || name.len() > 255 {
             return Err(Ext2Error::NameTooLong);
@@ -1934,7 +1957,7 @@ impl<'a> Ext2Fs<'a> {
         }
         self.deindex_directory(parent_num, &mut parent)?;
 
-        let new_ino = self.allocate_new_inode(parent_num, kind)?;
+        let new_ino = self.allocate_new_inode(parent_num, kind, owner)?;
 
         let ft = match kind {
             NewInode::Directory => DIR_FT_DIR,
@@ -1974,6 +1997,7 @@ impl<'a> Ext2Fs<'a> {
         &mut self,
         parent_num: InodeNum,
         kind: NewInode<'_>,
+        owner: Owner,
     ) -> Result<InodeNum, Ext2Error> {
         let parent_group = self
             .geom
@@ -1991,6 +2015,8 @@ impl<'a> Ext2Fs<'a> {
         self.init_inode_record(new_ino)?;
 
         let mut new_inode = self.build_new_inode(new_ino, parent_num, kind)?;
+        new_inode.uid = owner.uid;
+        new_inode.gid = owner.gid;
         let now = time::now_or_unset();
         new_inode.atime = now;
         new_inode.ctime = now;

@@ -217,7 +217,8 @@ fn spawn_child_cwd(
     if requested.is_empty() {
         return Err(Errno::EINVAL);
     }
-    ctx.with_cwd(|cwd| resolve_new_cwd(requested, cwd))
+    let who = ctx.subject();
+    ctx.with_cwd(|cwd| resolve_new_cwd(requested, cwd, &who))
 }
 
 /// Stage the program path off the caller's buffer. Length-delimited rather
@@ -599,7 +600,8 @@ define_syscall!(syscall_execve
     };
     // Resolved here: `do_exec` cannot see the cwd, and the grant lookup below
     // keys on the file loaded, for a script its interpreter.
-    let program = match ctx.with_cwd(|cwd| exec::resolve_exec(path.as_bytes(), cwd)) {
+    let who = ctx.subject();
+    let program = match ctx.with_cwd(|cwd| exec::resolve_exec(path.as_bytes(), cwd, &who)) {
         Ok(program) => program,
         Err(e) => {
             return SyscallResult::Err(e);
@@ -669,6 +671,7 @@ define_syscall!(syscall_execve
         &program.image,
         argv_refs.as_deref(),
         envp_refs.as_deref(),
+        &who,
         &mut entry_point,
         &mut stack_ptr,
         &mut tls_tp,
@@ -993,15 +996,6 @@ define_syscall!(syscall_setsid (ctx)
     Ok(task.sid())
 });
 
-define_syscall!(syscall_getuid (ctx) cap(NoneSelf)
-    -> u32 { 0 });
-define_syscall!(syscall_getgid (ctx) cap(NoneSelf)
-    -> u32 { 0 });
-define_syscall!(syscall_geteuid (ctx) cap(NoneSelf)
-    -> u32 { 0 });
-define_syscall!(syscall_getegid (ctx) cap(NoneSelf)
-    -> u32 { 0 });
-
 /// Resolve `path` against `cwd` and require a directory, returning the
 /// canonical path the walk ended on.
 ///
@@ -1009,11 +1003,22 @@ define_syscall!(syscall_getegid (ctx) cap(NoneSelf)
 /// the spelling and erasing a symlink the `..` crossed. The stored cwd is
 /// prefixed onto every later relative lookup, so a lexical answer would leave
 /// the task resolving against a directory this call never checked.
+/// The directory must be searchable too, since every later relative walk
+/// starts in it.
 #[inline(never)]
-fn resolve_new_cwd(path: &[u8], cwd: &[u8]) -> Result<CanonPath, Errno> {
-    slopos_fs::vfs::resolve_path_canon_at(path, cwd, RESOLVE_MUST_BE_DIR)
-        .map(|(_, canon)| canon)
-        .map_err(VfsError::to_errno)
+fn resolve_new_cwd(
+    path: &[u8],
+    cwd: &[u8],
+    who: &slopos_fs::vfs::Subject,
+) -> Result<CanonPath, Errno> {
+    let (resolved, canon) =
+        slopos_fs::vfs::resolve_path_canon_at(path, cwd, RESOLVE_MUST_BE_DIR, who)
+            .map_err(VfsError::to_errno)?;
+    resolved
+        .perm
+        .check(who, slopos_fs::vfs::Perm::Exec)
+        .map_err(VfsError::to_errno)?;
+    Ok(canon)
 }
 
 define_syscall!(syscall_chdir
@@ -1023,7 +1028,8 @@ define_syscall!(syscall_chdir
     if path.is_empty() {
         return Err(Errno::EINVAL);
     }
-    let canon = ctx.with_cwd(|cwd| resolve_new_cwd(path.as_bytes(), cwd))?;
+    let who = ctx.subject();
+    let canon = ctx.with_cwd(|cwd| resolve_new_cwd(path.as_bytes(), cwd, &who))?;
     store_cwd(&canon)
 });
 
@@ -1033,7 +1039,10 @@ define_syscall!(syscall_fchdir
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
-    let canon = slopos_fs::fileio::with_fd_dir_path(pid, fd.raw(), |dir| resolve_new_cwd(b".", dir))??;
+    let who = ctx.subject();
+    let canon = slopos_fs::fileio::with_fd_dir_path(pid, fd.raw(), |dir| {
+        resolve_new_cwd(b".", dir, &who)
+    })??;
     store_cwd(&canon)
 });
 
@@ -1280,9 +1289,8 @@ define_syscall!(syscall_prlimit64
     use slopos_ostd::process::quota::{KindStats, NO_LIMIT, set_limit, stats};
 
     let process = process_id.process().ok_or(Errno::ESRCH)?;
-    // Self only: there is no privilege principal in this kernel (getuid returns
-    // a literal 0), so a cross-process limit change has no answer but
-    // "everyone may".
+    // Self only: narrower than Linux, which lets a process with all of the
+    // target's ids change its limits too.
     if pid != 0 && pid != process.id() {
         return Err(Errno::EPERM);
     }

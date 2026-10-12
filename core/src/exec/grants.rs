@@ -98,14 +98,6 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         delegated: CAP_NONE,
         priority: None,
     },
-    // Sees every task, past the relation `process_list` otherwise applies, but
-    // gains no power over what it sees: `kill` checks the caller's own mask.
-    ProgramGrant {
-        path: b"/bin/sysmon",
-        caps: SYS_INSPECT,
-        delegated: CAP_NONE,
-        priority: None,
-    },
     // The diagnostic console's informational commands print every task and
     // every CPU. Commands that change the machine stay the physical console's.
     ProgramGrant {

@@ -7,6 +7,8 @@ use slopos_fs::vfs::CanonPath;
 use slopos_fs::vfs::canon::canonicalise_at;
 use slopos_ostd::KVec;
 
+use slopos_fs::vfs::Subject;
+
 use super::{open_executable, read_exact_at, resolve_program, trim_nul_bytes};
 
 /// Bytes examined for a `#!` line: Linux's `BINPRM_BUF_SIZE`.
@@ -58,13 +60,14 @@ impl ExecProgram {
 }
 
 /// Resolve `path` against `cwd` and follow its `#!` chain to the binary that
-/// runs it. Relative interpreters resolve against `cwd`, as Linux's do.
+/// runs it, each link of which `who` must be able to execute. Relative
+/// interpreters resolve against `cwd`, as Linux's do.
 #[inline(never)]
-pub fn resolve_exec(path: &[u8], cwd: &[u8]) -> Result<ExecProgram, Errno> {
-    let mut image = resolve_program(path, cwd)?;
+pub fn resolve_exec(path: &[u8], cwd: &[u8], who: &Subject) -> Result<ExecProgram, Errno> {
+    let mut image = resolve_program(path, cwd, who)?;
     let mut prefix: KVec<KVec<u8>> = KVec::new();
     for _ in 0..=SCRIPT_NESTING_MAX {
-        let header = read_header(&image)?;
+        let header = read_header(&image, who)?;
         let Some(line) = parse_shebang(header.as_slice())? else {
             return Ok(ExecProgram { image, prefix });
         };
@@ -82,7 +85,7 @@ pub fn resolve_exec(path: &[u8], cwd: &[u8]) -> Result<ExecProgram, Errno> {
             push(&mut next, word)?;
         }
         prefix = next;
-        image = resolve_program(line.interpreter, cwd)?;
+        image = resolve_program(line.interpreter, cwd, who)?;
     }
     Err(Errno::ELOOP)
 }
@@ -95,8 +98,8 @@ fn push(list: &mut KVec<KVec<u8>>, word: KVec<u8>) -> Result<(), Errno> {
     list.push(word).map_err(|_| Errno::ENOMEM)
 }
 
-fn read_header(image: &CanonPath) -> Result<KVec<u8>, Errno> {
-    let (handle, size) = open_executable(image.as_bytes())?;
+fn read_header(image: &CanonPath, who: &Subject) -> Result<KVec<u8>, Errno> {
+    let (handle, size) = open_executable(image.as_bytes(), who)?;
     let len = (size as usize).min(SCRIPT_HEADER_MAX);
     let mut header = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
     read_exact_at(&handle, 0, header.as_mut_slice())?;

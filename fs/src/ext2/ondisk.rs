@@ -228,14 +228,37 @@ pub struct Superblock {
 /// for the reason [`SuperblockBookkeeping`] is not one either; it moves only
 /// when `tune2fs` moves it, so
 /// [`Ext2Geometry`](super::geometry::Ext2Geometry) reads it once at mount.
-pub fn reserved_blocks_of(data: &[u8]) -> u32 {
+pub fn reserved_blocks_of(data: &[u8]) -> BlockReserve {
     let lo = u64::from(le32(data, soff::R_BLOCKS_COUNT_LO));
     let hi = if le32(data, soff::FEATURE_INCOMPAT) & incompat::BIT64 != 0 {
         u64::from(le32(data, soff::R_BLOCKS_COUNT_HI))
     } else {
         0
     };
-    u32::try_from(lo | (hi << 32)).unwrap_or(u32::MAX)
+    BlockReserve {
+        blocks: u32::try_from(lo | (hi << 32)).unwrap_or(u32::MAX),
+        resuid: u32::from(le16(data, soff::DEF_RESUID)),
+        resgid: u32::from(le16(data, soff::DEF_RESGID)),
+    }
+}
+
+/// The blocks only the volume's reserve user and group may allocate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlockReserve {
+    pub blocks: u32,
+    pub resuid: u32,
+    pub resgid: u32,
+}
+
+impl BlockReserve {
+    /// ext4's rule, with the kernel's own threads standing in for
+    /// `CAP_SYS_RESOURCE`: the reserve user, or a member of a reserve group
+    /// other than 0.
+    pub fn admits(&self, cred: Option<&slopos_ostd::process::Cred>) -> bool {
+        cred.is_none_or(|cred| {
+            cred.euid == self.resuid || (self.resgid != 0 && cred.in_group(self.resgid))
+        })
+    }
 }
 
 /// Restamp the checksum of a raw superblock a caller changed, when the

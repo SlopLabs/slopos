@@ -445,24 +445,16 @@ define_syscall!(syscall_sysinfo (ctx, info_out: UserPtr<Sysinfo>) cap(NoneSelf)
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)
 });
 
+// Every task, as Linux's `/proc` shows every process: acting on one is what
+// the signal rule guards.
 define_syscall!(syscall_process_list
-    (ctx, buf: UserPtr<slopos_abi::syscall::UserTaskEntry>, max: u64) cap(NoneRelation)
+    (ctx, buf: UserPtr<slopos_abi::syscall::UserTaskEntry>, max: u64) cap(NoneSelf)
     -> Result<u64, Errno>
 {
     use slopos_abi::syscall::UserTaskEntry;
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
     use slopos_ostd::KVec;
-    use slopos_ostd::authority::Capability;
     use slopos_sched::task::task_try_for_each_enumerable;
-    use crate::syscall::signal::{signal_may_name, signal_permitted};
-
-    // Enumeration answers to the same relation `kill` does, so an id this
-    // refuses to report is also one `kill` would refuse to act on.
-    let caller_caps = ctx.caps();
-    let unrestricted = ctx.holds(Capability::SysInspect);
-    let visible = |task: &slopos_sched::task_struct::Task| {
-        unrestricted || (signal_may_name(task.flags) && signal_permitted(caller_caps, task))
-    };
 
     let max_entries = (max as usize).min(MAX_TASKS);
     let mut entries = match KVec::<UserTaskEntry>::with_capacity(max_entries) {
@@ -485,9 +477,6 @@ define_syscall!(syscall_process_list
         if task.task_id == INVALID_TASK_ID {
             return ControlFlow::Continue(());
         }
-        if !visible(task) {
-            return ControlFlow::Continue(());
-        }
         let entry = &mut entries[count];
         entry.task_id = task.task_id;
         entry.parent_task_id = task.parent_task_id();
@@ -501,6 +490,7 @@ define_syscall!(syscall_process_list
             slopos_kernel_services::clock::ticks_to_microseconds(task.total_runtime());
         entry.creation_time_ms = task.creation_time;
         entry.yield_count = task.yield_count();
+        entry.uid = task.process().map_or(0, |process| process.cred().ruid);
         entry.name = task.name.get();
         count += 1;
         ControlFlow::Continue(())

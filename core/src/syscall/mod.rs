@@ -4,6 +4,7 @@ pub mod args;
 pub mod common;
 pub mod context;
 pub mod core_handlers;
+pub mod cred_handlers;
 pub mod dispatch;
 pub mod font_handlers;
 pub mod fs;
@@ -30,6 +31,8 @@ pub mod tests_build_floor_fs;
 pub mod tests_build_floor_proc;
 #[cfg(feature = "test-hooks")]
 pub mod tests_build_floor_signal;
+#[cfg(feature = "test-hooks")]
+pub mod tests_cred;
 pub mod ui_handlers;
 pub mod user_loop;
 

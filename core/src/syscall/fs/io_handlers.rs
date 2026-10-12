@@ -129,7 +129,24 @@ define_syscall!(syscall_fchmod
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
-    let rc = file_fchmod_fd(pid, fd.raw(), (mode & 0o7777) as u16);
+    let rc = file_fchmod_fd(pid, fd.raw(), (mode & 0o7777) as u16, &ctx.subject());
+    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+});
+
+define_syscall!(syscall_fchown
+    (ctx, fd: Fd, uid: u32, gid: u32)
+    cap(NoneFd)
+    requires(let pid: process_id)
+    -> Result<(), Errno>
+{
+    use crate::syscall::fs::at_handlers::chown_id;
+    let rc = slopos_fs::fileio::file_fchown_fd(
+        pid,
+        fd.raw(),
+        chown_id(uid),
+        chown_id(gid),
+        &ctx.subject(),
+    );
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 

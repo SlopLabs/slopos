@@ -402,7 +402,13 @@ impl FileSystem for BaseFs {
         Err(VfsError::ReadOnly)
     }
 
-    fn create(&self, _parent: InodeId, _name: &[u8], _file_type: FileType) -> VfsResult<InodeId> {
+    fn create_owned(
+        &self,
+        _parent: InodeId,
+        _name: &[u8],
+        _file_type: FileType,
+        _owner: crate::vfs::Owner,
+    ) -> VfsResult<InodeId> {
         Err(VfsError::ReadOnly)
     }
 

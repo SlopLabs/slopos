@@ -4,6 +4,7 @@ use crate::vfs::path::{
     RESOLVE_FOLLOW, RESOLVE_NOFOLLOW_FINAL, ResolvedPath, resolve_parent_at, resolve_path,
     resolve_path_at, resolve_path_canon_at,
 };
+use crate::vfs::perm::{InodePerm, Perm, Subject};
 use crate::vfs::traits::{FileStat, FileType, InodeId, VfsError, VfsResult, same_filesystem};
 use slopos_abi::fs::{FS_TYPE_DIRECTORY, UserFsEntry};
 use slopos_ostd::KVec;
@@ -44,6 +45,7 @@ pub struct VfsOpenFlags {
     pub create: bool,
     pub exclusive: bool,
     pub truncate: bool,
+    pub readable: bool,
     pub writable: bool,
 }
 
@@ -53,6 +55,7 @@ impl VfsOpenFlags {
             create: false,
             exclusive: false,
             truncate: false,
+            readable: true,
             writable: false,
         }
     }
@@ -62,6 +65,7 @@ impl VfsOpenFlags {
             create: true,
             exclusive: false,
             truncate: false,
+            readable: false,
             writable: true,
         }
     }
@@ -81,6 +85,7 @@ fn check_name_len(name: &[u8]) -> VfsResult<()> {
     Ok(())
 }
 
+/// The kernel's own opens, which no mode bit refuses.
 pub fn vfs_open(path: &[u8], create: bool) -> VfsResult<VfsHandle> {
     vfs_open_flags(
         path,
@@ -88,22 +93,27 @@ pub fn vfs_open(path: &[u8], create: bool) -> VfsResult<VfsHandle> {
             create,
             exclusive: false,
             truncate: false,
+            readable: true,
             writable: create,
         },
     )
 }
 
 pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> {
-    vfs_open_flags_at(path, b"/", flags, RESOLVE_FOLLOW)
+    vfs_open_flags_at(path, b"/", flags, RESOLVE_FOLLOW, &Subject::KERNEL, None)
 }
 
+/// Open `path` as `who`. A file this call creates takes `create_mode`, which
+/// the bits it is opened for are not checked against.
 pub fn vfs_open_flags_at(
     path: &[u8],
     cwd: &[u8],
     flags: VfsOpenFlags,
     resolve_flags: u32,
+    who: &Subject,
+    create_mode: Option<u16>,
 ) -> VfsResult<VfsHandle> {
-    match resolve_path_at(path, cwd, resolve_flags) {
+    match resolve_path_at(path, cwd, resolve_flags, who) {
         Ok(resolved) => {
             if flags.create && flags.exclusive {
                 return Err(VfsError::AlreadyExists);
@@ -113,6 +123,12 @@ pub fn vfs_open_flags_at(
                 FileType::Directory => return Err(VfsError::IsDirectory),
                 FileType::Symlink => return Err(VfsError::TooManySymlinks),
                 _ => {}
+            }
+            if flags.readable {
+                resolved.perm.check(who, Perm::Read)?;
+            }
+            if flags.writable {
+                resolved.perm.check(who, Perm::Write)?;
             }
             // Refused at open, not at the first write: a descriptor obtained
             // before the check is a descriptor that outlives it. A FIFO's
@@ -141,12 +157,20 @@ pub fn vfs_open_flags_at(
             })
         }
         Err(VfsError::NotFound) if flags.create => {
-            let (parent, name) = resolve_parent_at(path, cwd)?;
+            let (parent, name) = resolve_parent_at(path, cwd, who)?;
             check_name_len(name.as_bytes())?;
             parent.check_writable()?;
-            let new_inode = parent
-                .fs
-                .create(parent.inode, name.as_bytes(), FileType::Regular)?;
+            parent.perm.check_entries(who)?;
+            let new_inode = parent.fs.create_owned(
+                parent.inode,
+                name.as_bytes(),
+                FileType::Regular,
+                parent.perm.owner_for_child(who),
+            )?;
+            if let Some(mode) = create_mode {
+                let mode = who.child_mode(parent.perm.mode, parent.perm.gid, mode, false);
+                let _ = parent.fs.set_mode(new_inode, mode);
+            }
             Ok(VfsHandle {
                 inode: new_inode,
                 fs: parent.fs,
@@ -159,31 +183,37 @@ pub fn vfs_open_flags_at(
 }
 
 pub fn vfs_stat(path: &[u8]) -> VfsResult<FileStat> {
-    vfs_stat_at(path, b"/", RESOLVE_FOLLOW)
+    vfs_stat_at(path, b"/", RESOLVE_FOLLOW, &Subject::KERNEL)
 }
 
-pub fn vfs_stat_at(path: &[u8], cwd: &[u8], flags: u32) -> VfsResult<FileStat> {
-    let resolved = resolve_path_at(path, cwd, flags)?;
+pub fn vfs_stat_at(path: &[u8], cwd: &[u8], flags: u32, who: &Subject) -> VfsResult<FileStat> {
+    let resolved = resolve_path_at(path, cwd, flags, who)?;
     resolved.fs.stat(resolved.inode)
 }
 
 pub fn vfs_mkdir(path: &[u8]) -> VfsResult<()> {
-    vfs_mkdir_at(path, b"/", None)
+    vfs_mkdir_at(path, b"/", None, &Subject::KERNEL)
 }
 
 /// `mkdirat(2)`. `mode` lands on the inode `create` returned: re-resolving the
 /// path to chmod it could hand the mode to a replacement, or to a symlink's
 /// target.
-pub fn vfs_mkdir_at(path: &[u8], cwd: &[u8], mode: Option<u16>) -> VfsResult<()> {
-    create_node_at(path, cwd, FileType::Directory, mode)
+pub fn vfs_mkdir_at(path: &[u8], cwd: &[u8], mode: Option<u16>, who: &Subject) -> VfsResult<()> {
+    create_node_at(path, cwd, FileType::Directory, mode, who)
 }
 
 /// `mknodat(2)` for a regular file or FIFO, the only node kinds stored here.
-pub fn vfs_mknod_at(path: &[u8], cwd: &[u8], file_type: FileType, mode: u16) -> VfsResult<()> {
+pub fn vfs_mknod_at(
+    path: &[u8],
+    cwd: &[u8],
+    file_type: FileType,
+    mode: u16,
+    who: &Subject,
+) -> VfsResult<()> {
     if !matches!(file_type, FileType::Regular | FileType::Pipe) {
         return Err(VfsError::NotSupported);
     }
-    create_node_at(path, cwd, file_type, Some(mode))
+    create_node_at(path, cwd, file_type, Some(mode), who)
 }
 
 fn create_node_at(
@@ -191,11 +221,26 @@ fn create_node_at(
     cwd: &[u8],
     file_type: FileType,
     mode: Option<u16>,
+    who: &Subject,
 ) -> VfsResult<()> {
-    let (parent, name) = resolve_parent_at(path, cwd)?;
+    let (parent, name) = resolve_parent_at(path, cwd, who)?;
     check_name_len(name.as_bytes())?;
     parent.check_writable()?;
-    let inode = parent.fs.create(parent.inode, name.as_bytes(), file_type)?;
+    parent.perm.check_entries(who)?;
+    let inode = parent.fs.create_owned(
+        parent.inode,
+        name.as_bytes(),
+        file_type,
+        parent.perm.owner_for_child(who),
+    )?;
+    let is_dir = file_type == FileType::Directory;
+    let mode = match mode {
+        Some(mode) => Some(who.child_mode(parent.perm.mode, parent.perm.gid, mode, is_dir)),
+        None if is_dir && parent.perm.mode & slopos_abi::fs::S_ISGID as u16 != 0 => {
+            Some(0o755 | slopos_abi::fs::S_ISGID as u16)
+        }
+        None => None,
+    };
     if let Some(mode) = mode {
         parent.fs.set_mode(inode, mode)?;
     }
@@ -203,23 +248,95 @@ fn create_node_at(
 }
 
 pub fn vfs_set_mode(path: &[u8], mode: u16) -> VfsResult<()> {
-    vfs_set_mode_at(path, b"/", mode, RESOLVE_FOLLOW)
+    vfs_set_mode_at(path, b"/", mode, RESOLVE_FOLLOW, &Subject::KERNEL)
 }
 
-pub fn vfs_set_mode_at(path: &[u8], cwd: &[u8], mode: u16, flags: u32) -> VfsResult<()> {
-    if path_is_sealed_at(path, cwd, flags) {
+/// `chmod(2)`: the owner's alone.
+pub fn vfs_set_mode_at(
+    path: &[u8],
+    cwd: &[u8],
+    mode: u16,
+    flags: u32,
+    who: &Subject,
+) -> VfsResult<()> {
+    if path_is_sealed_at(path, cwd, flags, who) {
         return Err(VfsError::PermissionDenied);
     }
-    let resolved = resolve_path_at(path, cwd, flags)?;
+    let resolved = resolve_path_at(path, cwd, flags, who)?;
     resolved.check_writable()?;
-    resolved.fs.set_mode(resolved.inode, mode)
+    resolved.perm.check_owner(who)?;
+    resolved
+        .fs
+        .set_mode(resolved.inode, who.chmod_mode(mode, resolved.perm.gid))
+}
+
+/// `chown(2)`; `None` keeps an id.
+pub fn vfs_set_owner_at(
+    path: &[u8],
+    cwd: &[u8],
+    uid: Option<u32>,
+    gid: Option<u32>,
+    flags: u32,
+    who: &Subject,
+) -> VfsResult<()> {
+    if path_is_sealed_at(path, cwd, flags, who) {
+        return Err(VfsError::PermissionDenied);
+    }
+    let resolved = resolve_path_at(path, cwd, flags, who)?;
+    resolved.check_writable()?;
+    set_owner(resolved.fs, resolved.inode, &resolved.perm, uid, gid, who)
+}
+
+/// The shared tail of `chown` and `fchown`: the rule, the owner, and the
+/// set-ID bits a change of owner takes away.
+pub fn set_owner(
+    fs: &'static dyn crate::vfs::FileSystem,
+    inode: InodeId,
+    perm: &InodePerm,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    who: &Subject,
+) -> VfsResult<()> {
+    perm.check_chown(who, uid, gid)?;
+    if uid.is_none() && gid.is_none() {
+        return Ok(());
+    }
+    fs.set_owner(inode, uid, gid)?;
+    let mode = crate::vfs::perm::mode_after_chown(perm.mode, perm.is_dir);
+    if mode != perm.mode {
+        fs.set_mode(inode, mode)?;
+    }
+    Ok(())
 }
 
 /// Seal `path` against every future mutation; only a `Seal` holder clears it.
+/// The kernel's own: the image builder and the initramfs unpack.
 pub fn vfs_set_sealed(path: &[u8]) -> VfsResult<()> {
     let resolved = resolve_path(path)?;
     resolved.check_writable()?;
     resolved.fs.set_sealed(resolved.inode)
+}
+
+/// What a `utimensat` asks to set, which decides who may.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimesChange {
+    /// Both times `UTIME_OMIT`: nothing, and nothing to check.
+    None,
+    /// Both times to now: the owner or anyone who may write the file.
+    Now,
+    /// Any other time: the owner's alone.
+    Explicit,
+}
+
+impl TimesChange {
+    fn check(self, perm: &InodePerm, who: &Subject) -> VfsResult<()> {
+        match self {
+            Self::None => Ok(()),
+            Self::Now if who.owns(perm.uid) => Ok(()),
+            Self::Now => perm.check(who, Perm::Write),
+            Self::Explicit => perm.check_owner(who),
+        }
+    }
 }
 
 /// Set an inode's times; `None` leaves a field alone, which is `UTIME_OMIT`.
@@ -228,13 +345,16 @@ pub fn vfs_utimens(
     cwd: &[u8],
     atime: Option<crate::vfs::Timestamp>,
     mtime: Option<crate::vfs::Timestamp>,
+    change: TimesChange,
     flags: u32,
+    who: &Subject,
 ) -> VfsResult<()> {
-    if path_is_sealed_at(path, cwd, flags) {
+    if path_is_sealed_at(path, cwd, flags, who) {
         return Err(VfsError::PermissionDenied);
     }
-    let resolved = resolve_path_at(path, cwd, flags)?;
+    let resolved = resolve_path_at(path, cwd, flags, who)?;
     resolved.check_writable()?;
+    change.check(&resolved.perm, who)?;
     resolved.fs.set_times(resolved.inode, atime, mtime)
 }
 
@@ -246,13 +366,16 @@ pub fn vfs_set_times(
     inode: InodeId,
     atime: Option<crate::vfs::Timestamp>,
     mtime: Option<crate::vfs::Timestamp>,
+    change: TimesChange,
+    who: &Subject,
 ) -> VfsResult<()> {
+    change.check(&InodePerm::of(&fs.stat(inode)?), who)?;
     fs.set_times(inode, atime, mtime)
 }
 
 /// `link(2)`: a second name for an existing inode.
 pub fn vfs_link(old_path: &[u8], new_path: &[u8], cwd: &[u8]) -> VfsResult<()> {
-    vfs_link_at(old_path, cwd, new_path, cwd, false)
+    vfs_link_at(old_path, cwd, new_path, cwd, false, &Subject::KERNEL)
 }
 
 /// `linkat(2)`. `follow` is `AT_SYMLINK_FOLLOW`: without it a symlink source
@@ -267,13 +390,14 @@ pub fn vfs_link_at(
     new_path: &[u8],
     new_cwd: &[u8],
     follow: bool,
+    who: &Subject,
 ) -> VfsResult<()> {
     let source_flags = if follow {
         RESOLVE_FOLLOW
     } else {
         RESOLVE_NOFOLLOW_FINAL
     };
-    let source = resolve_path_at(old_path, old_cwd, source_flags)?;
+    let source = resolve_path_at(old_path, old_cwd, source_flags, who)?;
     let stat = source.fs.stat(source.inode)?;
     // POSIX leaves a directory hard link implementation-defined and every
     // implementation refuses it: `..` cannot describe a graph.
@@ -283,16 +407,17 @@ pub fn vfs_link_at(
     if stat.sealed {
         return Err(VfsError::PermissionDenied);
     }
-    if path_is_sealed_at(new_path, new_cwd, RESOLVE_NOFOLLOW_FINAL) {
+    if path_is_sealed_at(new_path, new_cwd, RESOLVE_NOFOLLOW_FINAL, who) {
         return Err(VfsError::PermissionDenied);
     }
 
-    let (parent, name) = resolve_parent_at(new_path, new_cwd)?;
+    let (parent, name) = resolve_parent_at(new_path, new_cwd, who)?;
     check_name_len(name.as_bytes())?;
     if !same_filesystem(source.fs, parent.fs) {
         return Err(VfsError::CrossDevice);
     }
     parent.check_writable()?;
+    parent.perm.check_entries(who)?;
     parent.fs.link(parent.inode, name.as_bytes(), source.inode)
 }
 
@@ -305,8 +430,8 @@ pub fn vfs_link_at(
 /// as permission. A path that genuinely resolves to nothing is not sealed —
 /// the caller's own lookup reports that, and `NotFound` is the one error that
 /// carries no ambiguity.
-fn path_is_sealed_at(path: &[u8], cwd: &[u8], flags: u32) -> bool {
-    match resolve_path_at(path, cwd, flags).and_then(|r| r.fs.stat(r.inode)) {
+fn path_is_sealed_at(path: &[u8], cwd: &[u8], flags: u32, who: &Subject) -> bool {
+    match resolve_path_at(path, cwd, flags, who).and_then(|r| r.fs.stat(r.inode)) {
         Ok(stat) => stat.sealed,
         // Decided by resolution before any inode is consulted, so a path that
         // trips them cannot be naming a sealed inode; answering "sealed" would
@@ -315,7 +440,8 @@ fn path_is_sealed_at(path: &[u8], cwd: &[u8], flags: u32) -> bool {
         | Err(VfsError::NameTooLong)
         | Err(VfsError::NotFound)
         | Err(VfsError::NotDirectory)
-        | Err(VfsError::TooManySymlinks) => false,
+        | Err(VfsError::TooManySymlinks)
+        | Err(VfsError::PermissionDenied) => false,
         Err(_) => true,
     }
 }
@@ -331,18 +457,19 @@ fn path_is_sealed_at(path: &[u8], cwd: &[u8], flags: u32) -> bool {
 /// The cheap path is the common one: nothing holds the inode open, and the
 /// filesystem frees it with the name exactly as before.
 pub fn vfs_unlink(path: &[u8]) -> VfsResult<()> {
-    vfs_unlink_at(path, b"/")
+    vfs_unlink_at(path, b"/", &Subject::KERNEL)
 }
 
-pub fn vfs_unlink_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
+pub fn vfs_unlink_at(path: &[u8], cwd: &[u8], who: &Subject) -> VfsResult<()> {
     use crate::vfs::orphan::{DetachPlan, RemovalOutcome, begin_removal, end_removal};
 
-    if path_is_sealed_at(path, cwd, RESOLVE_NOFOLLOW_FINAL) {
+    if path_is_sealed_at(path, cwd, RESOLVE_NOFOLLOW_FINAL, who) {
         return Err(VfsError::PermissionDenied);
     }
-    let (parent, name) = resolve_parent_at(path, cwd)?;
+    let (parent, name) = resolve_parent_at(path, cwd, who)?;
     let name = name.as_bytes();
     parent.check_writable()?;
+    parent.perm.check_entries(who)?;
 
     // A filesystem that reports its own `ENOENT` gives a better error than a
     // lookup here would.
@@ -352,9 +479,11 @@ pub fn vfs_unlink_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
         Err(e) => return Err(e),
     };
 
+    let victim = parent.fs.stat(inode)?;
+    parent.perm.check_sticky(who, victim.uid)?;
     // `FileSystem::rmdir` defaults to `unlink`, so a filesystem drawing no
     // distinction of its own would let either call remove either kind.
-    if inode_is_directory(parent.fs, inode)? {
+    if victim.file_type == FileType::Directory {
         return Err(VfsError::IsDirectory);
     }
 
@@ -407,26 +536,21 @@ fn forget_if_freed(fs: &'static dyn crate::vfs::FileSystem, inode: InodeId, link
     }
 }
 
-#[inline(never)]
-fn inode_is_directory(fs: &'static dyn crate::vfs::FileSystem, inode: InodeId) -> VfsResult<bool> {
-    Ok(fs.stat(inode)?.file_type == FileType::Directory)
-}
-
 /// `rmdir(2)`: remove an empty directory. Refuses a mount point outright —
 /// removing the directory a filesystem is mounted on would leave the mount
 /// table naming a path with nothing behind it.
 pub fn vfs_rmdir(path: &[u8]) -> VfsResult<()> {
-    vfs_rmdir_at(path, b"/")
+    vfs_rmdir_at(path, b"/", &Subject::KERNEL)
 }
 
-pub fn vfs_rmdir_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
-    if path_is_sealed_at(path, cwd, RESOLVE_NOFOLLOW_FINAL) {
+pub fn vfs_rmdir_at(path: &[u8], cwd: &[u8], who: &Subject) -> VfsResult<()> {
+    if path_is_sealed_at(path, cwd, RESOLVE_NOFOLLOW_FINAL, who) {
         return Err(VfsError::PermissionDenied);
     }
     // Keyed on the path the walk ends on, not a lexical canonicalisation: `..`
     // after a symlink names a different directory, and the mount table is
     // keyed on the real one.
-    match resolve_path_canon_at(path, cwd, RESOLVE_NOFOLLOW_FINAL) {
+    match resolve_path_canon_at(path, cwd, RESOLVE_NOFOLLOW_FINAL, who) {
         Ok((resolved, canon))
             if crate::vfs::mount::mount_at(canon.as_bytes()).is_some()
                 || holds_pinned_mount(&resolved, &canon) =>
@@ -436,13 +560,16 @@ pub fn vfs_rmdir_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
         Ok(_) | Err(VfsError::NotFound) => {}
         Err(e) => return Err(e),
     }
-    let (parent, name) = resolve_parent_at(path, cwd)?;
+    let (parent, name) = resolve_parent_at(path, cwd, who)?;
     parent.check_writable()?;
+    parent.perm.check_entries(who)?;
     // Only a regular file can carry a page set while `mmap` refuses every
     // other type, and that is not a rule to leave load-bearing.
     match parent.fs.lookup(parent.inode, name.as_bytes()) {
         Ok(inode) => {
-            if !inode_is_directory(parent.fs, inode)? {
+            let victim = parent.fs.stat(inode)?;
+            parent.perm.check_sticky(who, victim.uid)?;
+            if victim.file_type != FileType::Directory {
                 return Err(VfsError::NotDirectory);
             }
             crate::filemap::detach_inode(parent.fs, inode);
@@ -461,30 +588,36 @@ pub fn vfs_rmdir_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
 /// (`Ext2Fs::create_inode_entry`), so this is defence in depth rather than the
 /// only barrier — which is exactly what the seal warrants.
 pub fn vfs_symlink(target: &[u8], link_path: &[u8]) -> VfsResult<()> {
-    vfs_symlink_at(target, link_path, b"/")
+    vfs_symlink_at(target, link_path, b"/", &Subject::KERNEL)
 }
 
-pub fn vfs_symlink_at(target: &[u8], link_path: &[u8], cwd: &[u8]) -> VfsResult<()> {
+pub fn vfs_symlink_at(target: &[u8], link_path: &[u8], cwd: &[u8], who: &Subject) -> VfsResult<()> {
     if target.is_empty() {
         return Err(VfsError::InvalidArgument);
     }
     if target.len() > crate::MAX_PATH_LEN {
         return Err(VfsError::NameTooLong);
     }
-    if path_is_sealed_at(link_path, cwd, RESOLVE_NOFOLLOW_FINAL) {
+    if path_is_sealed_at(link_path, cwd, RESOLVE_NOFOLLOW_FINAL, who) {
         return Err(VfsError::PermissionDenied);
     }
-    let (parent, name) = resolve_parent_at(link_path, cwd)?;
+    let (parent, name) = resolve_parent_at(link_path, cwd, who)?;
     check_name_len(name.as_bytes())?;
     parent.check_writable()?;
+    parent.perm.check_entries(who)?;
     parent
         .fs
-        .symlink(parent.inode, name.as_bytes(), target)
+        .symlink(
+            parent.inode,
+            name.as_bytes(),
+            target,
+            parent.perm.owner_for_child(who),
+        )
         .map(|_| ())
 }
 
-pub fn vfs_readlink_at(path: &[u8], cwd: &[u8], buf: &mut [u8]) -> VfsResult<usize> {
-    let resolved = resolve_path_at(path, cwd, RESOLVE_NOFOLLOW_FINAL)?;
+pub fn vfs_readlink_at(path: &[u8], cwd: &[u8], buf: &mut [u8], who: &Subject) -> VfsResult<usize> {
+    let resolved = resolve_path_at(path, cwd, RESOLVE_NOFOLLOW_FINAL, who)?;
     let stat = resolved.fs.stat(resolved.inode)?;
     if stat.file_type != FileType::Symlink {
         return Err(VfsError::InvalidArgument);
@@ -500,8 +633,8 @@ fn holds_pinned_mount(resolved: &ResolvedPath, canon: &CanonPath) -> bool {
         || crate::vfs::mount::is_pinned_dir(resolved.fs, resolved.inode)
 }
 
-fn leads_to_pinned_mount_at(path: &[u8], cwd: &[u8]) -> VfsResult<bool> {
-    match resolve_path_canon_at(path, cwd, RESOLVE_NOFOLLOW_FINAL) {
+fn leads_to_pinned_mount_at(path: &[u8], cwd: &[u8], who: &Subject) -> VfsResult<bool> {
+    match resolve_path_canon_at(path, cwd, RESOLVE_NOFOLLOW_FINAL, who) {
         Ok((resolved, canon)) => Ok(holds_pinned_mount(&resolved, &canon)),
         Err(VfsError::NotFound) => Ok(false),
         Err(e) => Err(e),
@@ -509,7 +642,7 @@ fn leads_to_pinned_mount_at(path: &[u8], cwd: &[u8]) -> VfsResult<bool> {
 }
 
 pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
-    vfs_rename_at(old_path, b"/", new_path, b"/")
+    vfs_rename_at(old_path, b"/", new_path, b"/", &Subject::KERNEL)
 }
 
 pub fn vfs_rename_at(
@@ -517,20 +650,21 @@ pub fn vfs_rename_at(
     old_cwd: &[u8],
     new_path: &[u8],
     new_cwd: &[u8],
+    who: &Subject,
 ) -> VfsResult<()> {
     // Both ends: renaming a sealed file moves it out from under the path its
     // privilege is keyed on, and renaming over one replaces it just as a write
     // would.
-    if path_is_sealed_at(old_path, old_cwd, RESOLVE_NOFOLLOW_FINAL)
-        || path_is_sealed_at(new_path, new_cwd, RESOLVE_NOFOLLOW_FINAL)
+    if path_is_sealed_at(old_path, old_cwd, RESOLVE_NOFOLLOW_FINAL, who)
+        || path_is_sealed_at(new_path, new_cwd, RESOLVE_NOFOLLOW_FINAL, who)
     {
         return Err(VfsError::PermissionDenied);
     }
-    if leads_to_pinned_mount_at(old_path, old_cwd)? {
+    if leads_to_pinned_mount_at(old_path, old_cwd, who)? {
         return Err(VfsError::Busy);
     }
-    let (old_parent, old_name) = resolve_parent_at(old_path, old_cwd)?;
-    let (new_parent, new_name) = resolve_parent_at(new_path, new_cwd)?;
+    let (old_parent, old_name) = resolve_parent_at(old_path, old_cwd, who)?;
+    let (new_parent, new_name) = resolve_parent_at(new_path, new_cwd, who)?;
     check_name_len(new_name.as_bytes())?;
 
     if !same_filesystem(old_parent.fs, new_parent.fs) {
@@ -538,6 +672,13 @@ pub fn vfs_rename_at(
     }
     old_parent.check_writable()?;
     new_parent.check_writable()?;
+    check_rename(
+        &old_parent,
+        old_name.as_bytes(),
+        &new_parent,
+        new_name.as_bytes(),
+        who,
+    )?;
 
     rename_resolved(
         &old_parent,
@@ -545,6 +686,38 @@ pub fn vfs_rename_at(
         &new_parent,
         new_name.as_bytes(),
     )
+}
+
+/// Both directories' entries, the sticky rule for the name moved and the name
+/// it displaces, and the moved directory itself when its `..` changes.
+#[inline(never)]
+fn check_rename(
+    old_parent: &ResolvedPath,
+    old_name: &[u8],
+    new_parent: &ResolvedPath,
+    new_name: &[u8],
+    who: &Subject,
+) -> VfsResult<()> {
+    old_parent.perm.check_entries(who)?;
+    new_parent.perm.check_entries(who)?;
+    let moved = match old_parent.fs.lookup(old_parent.inode, old_name) {
+        Ok(inode) => InodePerm::of(&old_parent.fs.stat(inode)?),
+        Err(VfsError::NotFound) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    old_parent.perm.check_sticky(who, moved.uid)?;
+    match new_parent.fs.lookup(new_parent.inode, new_name) {
+        Ok(inode) => {
+            let displaced = new_parent.fs.stat(inode)?;
+            new_parent.perm.check_sticky(who, displaced.uid)?;
+        }
+        Err(VfsError::NotFound) => {}
+        Err(e) => return Err(e),
+    }
+    if moved.is_dir && old_parent.inode != new_parent.inode {
+        moved.check(who, Perm::Write)?;
+    }
+    Ok(())
 }
 
 #[inline(never)]
@@ -806,7 +979,7 @@ pub fn vfs_list_from(
     entries: &mut [UserFsEntry],
     cursor: &mut ListCursor,
 ) -> VfsResult<usize> {
-    vfs_list_from_at(path, b"/", entries, cursor)
+    vfs_list_from_at(path, b"/", entries, cursor, &Subject::KERNEL)
 }
 
 pub fn vfs_list_from_at(
@@ -814,16 +987,18 @@ pub fn vfs_list_from_at(
     cwd: &[u8],
     entries: &mut [UserFsEntry],
     cursor: &mut ListCursor,
+    who: &Subject,
 ) -> VfsResult<usize> {
     // One walk for both: the mount table is keyed on the canonical path the
     // walk ends on, so a listing of `//tmp` or of a symlink to it must ask
     // about `/tmp` to see that directory's child mounts.
-    let (resolved, canon) = resolve_path_canon_at(path, cwd, RESOLVE_FOLLOW)?;
+    let (resolved, canon) = resolve_path_canon_at(path, cwd, RESOLVE_FOLLOW, who)?;
     let stat = resolved.fs.stat(resolved.inode)?;
 
     if stat.file_type != FileType::Directory {
         return Err(VfsError::NotDirectory);
     }
+    resolved.perm.check(who, Perm::Read)?;
     if entries.is_empty() {
         return Err(VfsError::InvalidArgument);
     }

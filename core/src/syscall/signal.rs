@@ -6,15 +6,18 @@ use slopos_abi::signal::{
     REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RAX, REG_RBP, REG_RBX, REG_RCX, REG_RDI,
     REG_RDX, REG_RIP, REG_RSI, REG_RSP, REG_TRAPNO, SA_NODEFER, SA_ONSTACK, SA_RESETHAND,
     SA_RESTART, SA_SIGINFO, SI_TKILL, SI_USER, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK,
-    SIG_UNCATCHABLE, SIGSEGV, SS_DISABLE, SS_ONSTACK, SigDefault, SigInfo, SigSet, SignalFrame,
-    UserSigAltStack, UserSigaction, UserSiginfo, UserUcontext, sig_bit, sig_default_action,
+    SIG_UNCATCHABLE, SIGCONT, SIGSEGV, SS_DISABLE, SS_ONSTACK, SigDefault, SigInfo, SigSet,
+    SignalFrame, UserSigAltStack, UserSigaction, UserSiginfo, UserUcontext, sig_bit,
+    sig_default_action,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
 use slopos_mm::user_ptr::{UserBytes, UserPtr as MmUserPtr};
+use slopos_ostd::authority::Capability;
 use slopos_ostd::irq::InterruptFrame;
+use slopos_ostd::process::Cred;
 use slopos_ostd::task::FPU_STATE_SIZE;
 use slopos_ostd::task::sigqueue::DequeuedSignal;
 use slopos_ostd::user::context::{
@@ -91,12 +94,62 @@ pub(crate) fn signal_dominates(caller_caps: u64, target: &Task) -> bool {
     slopos_ostd::task::ops::task_caps(target) & !caller_caps == 0
 }
 
-/// Whether `target` may be named by a sender holding `caller_caps`, ignoring
-/// the category check that answers `ESRCH` on its own. Init never may: a
-/// terminating signal there takes the system down undebuggably, and the
-/// guarantee should not rest on dominance alone.
-pub(crate) fn signal_permitted(caller_caps: u64, target: &Task) -> bool {
-    !crate::exec::task_is_init(target) && signal_dominates(caller_caps, target)
+/// Who sends a signal, as the permission rule reads it.
+pub(crate) struct Sender {
+    caps: u64,
+    cred: Cred,
+    sid: u32,
+}
+
+impl Sender {
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn new(caps: u64, cred: Cred, sid: u32) -> Self {
+        Self { caps, cred, sid }
+    }
+
+    pub(crate) fn of(task: &Task) -> Self {
+        Self {
+            caps: slopos_ostd::task::ops::task_caps(task),
+            cred: task.process().map_or(Cred::ROOT, |process| process.cred()),
+            sid: task.sid(),
+        }
+    }
+
+    /// The real uid a receiver finds as `si_uid`.
+    pub(crate) fn uid(&self) -> u32 {
+        self.cred.ruid
+    }
+}
+
+/// Whether `sender` may send `signum` (0 for the existence probe) to `target`,
+/// ignoring the category check that answers `ESRCH` on its own.
+///
+/// POSIX's uid rule and capability dominance both, so a task can neither
+/// signal another user's nor one more privileged than itself. `ProcSignal`
+/// waives both, and `SIGCONT` within the sender's session needs neither, so a
+/// shell resumes any job it stopped. Init never may be signalled: a
+/// terminating signal there takes the system down undebuggably.
+pub(crate) fn signal_permitted(sender: &Sender, target: &Task, signum: u64) -> bool {
+    if crate::exec::task_is_init(target) {
+        return false;
+    }
+    if slopos_ostd::authority::mask_permits(sender.caps, Capability::ProcSignal) {
+        return true;
+    }
+    if signum == u64::from(SIGCONT) && target.sid() == sender.sid {
+        return true;
+    }
+    uid_permits(&sender.cred, target) && signal_dominates(sender.caps, target)
+}
+
+/// The sender's real or effective uid is the target's real or saved uid.
+fn uid_permits(sender: &Cred, target: &Task) -> bool {
+    target.process().is_some_and(|process| {
+        let target = process.cred();
+        [sender.ruid, sender.euid]
+            .into_iter()
+            .any(|uid| uid == target.ruid || uid == target.suid)
+    })
 }
 
 struct Fanout {
@@ -104,14 +157,19 @@ struct Fanout {
     denied: bool,
 }
 
-fn collect_targets_for_group(pgid: u32, caller_caps: u64, targets: &mut TargetSet) -> Fanout {
+fn collect_targets_for_group(
+    pgid: u32,
+    sender: &Sender,
+    signum: u64,
+    targets: &mut TargetSet,
+) -> Fanout {
     let mut denied = false;
     task_for_each_active(|task| {
         if !signal_may_name(task.flags) || task.pgid() != pgid {
             return;
         }
         let group = sender_pid(task);
-        if signal_permitted(caller_caps, task) {
+        if signal_permitted(sender, task, signum) {
             targets.push(group);
         } else {
             denied = true;
@@ -122,7 +180,8 @@ fn collect_targets_for_group(pgid: u32, caller_caps: u64, targets: &mut TargetSe
 
 fn collect_targets_for_all(
     exclude_group: u32,
-    caller_caps: u64,
+    sender: &Sender,
+    signum: u64,
     targets: &mut TargetSet,
 ) -> Fanout {
     let mut denied = false;
@@ -131,7 +190,7 @@ fn collect_targets_for_all(
         if !signal_may_name(task.flags) || group == INVALID_TASK_ID || group == exclude_group {
             return;
         }
-        if signal_permitted(caller_caps, task) {
+        if signal_permitted(sender, task, signum) {
             targets.push(group);
         } else {
             denied = true;
@@ -325,14 +384,13 @@ define_syscall!(syscall_kill
     -> SyscallResult
 {
     let caller_id = ctx.task_id();
-    let info = SigInfo::sent(SI_USER, sender_pid(ctx.task()), 0, 0);
+    let sender = Sender::of(ctx.task());
+    let info = SigInfo::sent(SI_USER, sender_pid(ctx.task()), sender.uid(), 0);
 
     if raw_pid_arg < i32::MIN as i64 || raw_pid_arg > i32::MAX as i64 {
         return SyscallResult::Err(Errno::ESRCH);
     }
     let pid = raw_pid_arg as i32;
-
-    let caller_caps = ctx.caps();
 
     let mut targets = TargetSet::new();
 
@@ -341,8 +399,9 @@ define_syscall!(syscall_kill
         // the target: without it the id could be recycled onto a stranger
         // between this check and the delivery below.
         let target = match crate::syscall::signalable::resolve_signal_target(
-            caller_caps,
+            &sender,
             pid as u32,
+            sig,
         ) {
             Ok(target) => target,
             Err(e) => return SyscallResult::Err(e),
@@ -377,12 +436,12 @@ define_syscall!(syscall_kill
         if caller_pgid == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_group(caller_pgid, caller_caps, &mut targets)
+        collect_targets_for_group(caller_pgid, &sender, sig, &mut targets)
     } else if pid == -1 {
         if caller_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_all(sender_pid(ctx.task()), caller_caps, &mut targets)
+        collect_targets_for_all(sender_pid(ctx.task()), &sender, sig, &mut targets)
     } else {
         if pid == i32::MIN {
             return SyscallResult::Err(Errno::ESRCH);
@@ -391,7 +450,7 @@ define_syscall!(syscall_kill
         if group_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_group(group_id, caller_caps, &mut targets)
+        collect_targets_for_group(group_id, &sender, sig, &mut targets)
     };
 
     if targets.len() == 0 {
@@ -436,13 +495,14 @@ define_syscall!(syscall_tgkill
     (ctx, raw_tgid: i64, raw_tid: i64, sig: u64) cap(NoneRelation)
     -> SyscallResult
 {
-    let info = SigInfo::sent(SI_TKILL, sender_pid(ctx.task()), 0, 0);
+    let sender = Sender::of(ctx.task());
+    let info = SigInfo::sent(SI_TKILL, sender_pid(ctx.task()), sender.uid(), 0);
     if raw_tgid <= 0 || raw_tid <= 0 || raw_tgid > i32::MAX as i64 || raw_tid > i32::MAX as i64 {
         return SyscallResult::Err(Errno::EINVAL);
     }
     let (tgid, tid) = (raw_tgid as u32, raw_tid as u32);
     // Authorized on the named thread, as `kill` authorizes on the named task.
-    let target = match crate::syscall::signalable::resolve_signal_target(ctx.caps(), tid) {
+    let target = match crate::syscall::signalable::resolve_signal_target(&sender, tid, sig) {
         Ok(target) => target,
         Err(e) => return SyscallResult::Err(e),
     };
@@ -478,14 +538,14 @@ pub(crate) fn sender_pid(task: &Task) -> u32 {
 /// forgery rule: an `si_code` at or above 0, or `SI_TKILL`, aimed at another
 /// process is `EPERM`; `si_pid`/`si_uid` are always the kernel's.
 #[inline(never)]
-fn queued_info(caller: &Task, uinfo: u64, target_tgid: u32) -> Result<SigInfo, Errno> {
+fn queued_info(caller: &Task, uid: u32, uinfo: u64, target_tgid: u32) -> Result<SigInfo, Errno> {
     let ptr = MmUserPtr::<UserSiginfo>::try_new(uinfo).map_err(|_| Errno::EFAULT)?;
     let user = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
     let sender = sender_pid(caller);
     if (user.si_code >= 0 || user.si_code == SI_TKILL) && target_tgid != sender {
         return Err(Errno::EPERM);
     }
-    Ok(SigInfo::sent(user.si_code, sender, 0, user.si_value()))
+    Ok(SigInfo::sent(user.si_code, sender, uid, user.si_value()))
 }
 
 define_syscall!(syscall_rt_sigqueueinfo
@@ -495,14 +555,16 @@ define_syscall!(syscall_rt_sigqueueinfo
     if raw_tgid <= 0 || raw_tgid > i32::MAX as i64 {
         return SyscallResult::Err(Errno::ESRCH);
     }
+    let sender = Sender::of(ctx.task());
     let target = match crate::syscall::signalable::resolve_signal_target(
-        ctx.caps(),
+        &sender,
         raw_tgid as u32,
+        sig,
     ) {
         Ok(target) => target,
         Err(e) => return SyscallResult::Err(e),
     };
-    let info = match queued_info(ctx.task(), uinfo, sender_pid(target.task())) {
+    let info = match queued_info(ctx.task(), sender.uid(), uinfo, sender_pid(target.task())) {
         Ok(info) => info,
         Err(e) => return SyscallResult::Err(e),
     };
@@ -530,14 +592,15 @@ define_syscall!(syscall_rt_tgsigqueueinfo
         return SyscallResult::Err(Errno::EINVAL);
     }
     let (tgid, tid) = (raw_tgid as u32, raw_tid as u32);
-    let target = match crate::syscall::signalable::resolve_signal_target(ctx.caps(), tid) {
+    let sender = Sender::of(ctx.task());
+    let target = match crate::syscall::signalable::resolve_signal_target(&sender, tid, sig) {
         Ok(target) => target,
         Err(e) => return SyscallResult::Err(e),
     };
     if sender_pid(target.task()) != tgid {
         return SyscallResult::Err(Errno::ESRCH);
     }
-    let info = match queued_info(ctx.task(), uinfo, tgid) {
+    let info = match queued_info(ctx.task(), sender.uid(), uinfo, tgid) {
         Ok(info) => info,
         Err(e) => return SyscallResult::Err(e),
     };

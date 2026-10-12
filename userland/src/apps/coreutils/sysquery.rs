@@ -60,10 +60,21 @@ fn nproc(ctx: &mut Ctx, _argv: &[&[u8]]) -> i32 {
     0
 }
 
-/// SlopOS is single-user at uid 0 — a decided property of the system, not a
-/// placeholder for an account database that is coming later.
+/// The effective user's name, or its number when no passwd row names it.
 fn whoami(ctx: &mut Ctx, _argv: &[&[u8]]) -> i32 {
-    ctx.out.s("root");
+    // SAFETY: `getpwuid` returns null or a row whose `pw_name` is a
+    // NUL-terminated string in libc's static storage, read before any other
+    // passwd call can overwrite it.
+    unsafe {
+        let uid = slopos_slibc::process::geteuid();
+        let row = slopos_slibc::conf::getpwuid(uid);
+        if row.is_null() {
+            ctx.out.u(u64::from(uid));
+        } else {
+            let name = core::ffi::CStr::from_ptr((*row).pw_name);
+            ctx.out.s(&String::from_utf8_lossy(name.to_bytes()));
+        }
+    }
     ctx.out.nl();
     0
 }

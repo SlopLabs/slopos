@@ -308,6 +308,7 @@ fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), CpioError> {
             create: true,
             exclusive: false,
             truncate: true,
+            readable: false,
             writable: true,
         },
     )

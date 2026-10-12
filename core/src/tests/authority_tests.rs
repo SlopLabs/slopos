@@ -16,6 +16,8 @@ use slopos_testing::{TestResult, fail, pass};
 
 use crate::exec::grants::{delegated_for, grant_for, granted_paths};
 use crate::syscall::handlers::{cap_counts, syscall_lookup};
+use crate::syscall::signal::Sender;
+use slopos_ostd::process::Cred;
 
 /// What a spawn by a `Launch` holder gives `path`, delegation included.
 fn spawned_holding(path: &[u8]) -> u64 {
@@ -205,8 +207,9 @@ fn signalable_refuses_invalid_targets() -> TestResult {
     use slopos_abi::Errno;
     use slopos_abi::task::INVALID_TASK_ID;
 
+    let sender = Sender::new(CAP_MASK_ALL, Cred::ROOT, 0);
     for (id, label) in [(INVALID_TASK_ID, "an invalid id"), (0, "id 0")] {
-        match resolve_signal_target(CAP_MASK_ALL, id) {
+        match resolve_signal_target(&sender, id, 0) {
             Err(Errno::ESRCH) => {}
             Err(other) => return fail!("{} gave {:?}, want ESRCH", label, other),
             Ok(_) => return fail!("{} must not resolve", label),
@@ -251,8 +254,9 @@ fn init_is_told_apart_by_its_task_id() -> TestResult {
         crate::exec::task_is_init(&init),
         crate::exec::task_is_init(&other),
     );
-    let init_target = resolve_signal_target(CAP_MASK_ALL, init_id).map(|_| ());
-    let other_target = resolve_signal_target(CAP_MASK_ALL, other_id).map(|_| ());
+    let everything = Sender::new(CAP_MASK_ALL, Cred::ROOT, 0);
+    let init_target = resolve_signal_target(&everything, init_id, 0).map(|_| ());
+    let other_target = resolve_signal_target(&everything, other_id, 0).map(|_| ());
     drop((init, other));
     if other_id != INVALID_TASK_ID {
         task_terminate(other_id);
@@ -404,8 +408,7 @@ fn moved_capabilities_are_conferred_by_identity() -> TestResult {
         (
             Capability::SysInspect,
             &[
-                b"/bin/sysmon".as_slice(),
-                b"/bin/kconsole",
+                b"/bin/kconsole".as_slice(),
                 b"/bin/prof",
                 b"/bin/dl_secure_probe",
             ][..],

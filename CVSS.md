@@ -622,8 +622,10 @@ None.
 CVSS 3.1 Base Score; `0.1-3.9 Low`, `4.0-6.9 Medium`, `7.0-8.9 High`,
 `9.0-10.0 Critical`.
 
-SlopOS has no credential model, so "unprivileged local attacker" means any
-process that can execute code: `AV:L/PR:L`.
+Every process runs as uid 0 and every file is 0:0 until the session moves to
+uid 1000 (phase 4 of `plans/access-model.md`), so the owner bits admit any
+program, and "unprivileged local attacker" means any process that can execute
+code: `AV:L/PR:L`.
 
 A panic in a `#![forbid(unsafe_code)]` crate is an availability impact, never a
 memory-safety one. Overflow checks are on in the dev and tests kernels and off

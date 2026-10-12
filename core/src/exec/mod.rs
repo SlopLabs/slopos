@@ -29,8 +29,9 @@ use slopos_fs::fileio::{
     fileio_destroy_table_for_process, fileio_install_file_ref_at, fileio_take_file_ref_matching,
 };
 use slopos_fs::vfs::CanonPath;
-use slopos_fs::vfs::ops::{VfsHandle, vfs_open};
+use slopos_fs::vfs::ops::{VfsHandle, VfsOpenFlags, vfs_open_flags_at};
 use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_canon_at};
+use slopos_fs::vfs::{InodePerm, Perm, Subject};
 use slopos_mm::elf::{
     ELF_HEADER_WINDOW, ElfExecInfo, MAX_LOAD_SEGMENTS, SegmentBudget, ValidatedSegment,
     interpreter_extent,
@@ -152,15 +153,20 @@ pub fn task_is_init(task: &slopos_sched::task_struct::Task) -> bool {
     init != INVALID_TASK_ID && (task.task_id == init || task.tgid == init)
 }
 
-/// Whether the running task is the system itself, which ext2's reserve is
-/// for: a kernel thread, since a refused writeback makes a full disk an
-/// unrecoverable one, or init, which must still write once userland has
-/// filled the volume.
-pub fn current_task_is_system() -> bool {
-    slopos_sched::task_struct::Current::get().is_none_or(|current| {
-        let task = current.task();
-        task.flags & TASK_FLAG_USER_MODE == 0 || task_is_init(task)
-    })
+/// The running task's identity, or `None` for a kernel thread, which no
+/// identity describes and which ext2's reserve admits: a refused writeback
+/// makes a full disk an unrecoverable one.
+pub fn current_task_cred() -> Option<slopos_ostd::process::Cred> {
+    use slopos_ostd::process::{Cred, cred::ID_UNCHANGED};
+    let current = slopos_sched::task_struct::Current::get()?;
+    let task = current.task();
+    if task.flags & TASK_FLAG_USER_MODE == 0 {
+        return None;
+    }
+    Some(
+        task.process()
+            .map_or(Cred::of(ID_UNCHANGED, ID_UNCHANGED), |p| p.cred()),
+    )
 }
 
 pub fn launch_init() -> Result<u32, Errno> {
@@ -332,10 +338,14 @@ pub fn spawn_program_with_cwd(
     parent_task_id: u32,
     cwd: &[u8],
 ) -> Result<u32, Errno> {
+    // No parent task: a spawn the kernel makes itself.
+    let spawner = &task_find_by_id(parent_task_id).map_or(Subject::KERNEL, |parent| {
+        crate::syscall::context::subject_of(&parent)
+    });
     let result = (|| {
         // Resolved once so the grant table and the loader agree on the file:
         // for a script, its interpreter. `comm` takes the path as passed.
-        let program = resolve_exec(path, cwd)?;
+        let program = resolve_exec(path, cwd, spawner)?;
         let normalized_path = program.image.as_bytes();
         let argv = program.argv(argv)?;
         if !exec_arg_bytes_fit(argv.as_deref(), envp) {
@@ -391,6 +401,14 @@ pub fn spawn_program_with_cwd(
         // panic, a kill aborting the blocking calls — must release it here.
         let mut spawn = SpawnGuard::new(pending);
         let task_id = spawn.child_id();
+        if spawn.with_child(|child| {
+            child
+                .process()
+                .map(|process| process.change_cred(|_| Ok(spawner.cred)))
+        }) != Some(Some(Ok(())))
+        {
+            return Err(Errno::ENOMEM);
+        }
 
         let mut entry = 0u64;
         let mut stack_ptr = 0u64;
@@ -417,7 +435,8 @@ pub fn spawn_program_with_cwd(
             &program.image,
             argv.as_deref(),
             envp,
-            raised != CAP_NONE,
+            raised != CAP_NONE || mixed_ids(&spawner.cred),
+            spawner,
             &mut entry,
             &mut stack_ptr,
             &mut tls_tp,
@@ -545,18 +564,19 @@ pub fn spawn_program_with_cwd(
 /// `#[inline(never)]` keeps the walk off the frame of a caller already
 /// holding a `SpawnGuard`.
 #[inline(never)]
-pub fn resolve_program(path: &[u8], cwd: &[u8]) -> Result<CanonPath, Errno> {
+pub fn resolve_program(path: &[u8], cwd: &[u8], who: &Subject) -> Result<CanonPath, Errno> {
     let trimmed = trim_nul_bytes(path);
     if trimmed.is_empty() || trimmed.len() > USER_PATH_MAX {
         return Err(Errno::ENAMETOOLONG);
     }
-    let (_, canon) = resolve_path_canon_at(trimmed, cwd, RESOLVE_FOLLOW).map_err(|e| match e {
-        VfsError::NotFound | VfsError::NotDirectory | VfsError::InvalidPath => Errno::ENOENT,
-        VfsError::NameTooLong => Errno::ENAMETOOLONG,
-        VfsError::IsDirectory | VfsError::PermissionDenied => Errno::EACCES,
-        VfsError::TooManySymlinks => Errno::ELOOP,
-        _ => Errno::EIO,
-    })?;
+    let (_, canon) =
+        resolve_path_canon_at(trimmed, cwd, RESOLVE_FOLLOW, who).map_err(|e| match e {
+            VfsError::NotFound | VfsError::NotDirectory | VfsError::InvalidPath => Errno::ENOENT,
+            VfsError::NameTooLong => Errno::ENAMETOOLONG,
+            VfsError::IsDirectory | VfsError::PermissionDenied => Errno::EACCES,
+            VfsError::TooManySymlinks => Errno::ELOOP,
+            _ => Errno::EIO,
+        })?;
     Ok(canon)
 }
 
@@ -565,12 +585,15 @@ pub fn resolve_program(path: &[u8], cwd: &[u8]) -> Result<CanonPath, Errno> {
 /// resolves against `/`.
 ///
 /// `execve`'s road: it can only narrow the caller's authority, so it never
-/// confers a grant and the image never runs `AT_SECURE`.
+/// confers a grant, and the image runs `AT_SECURE` only when the caller's
+/// effective ids are not its real ones.
+#[allow(clippy::too_many_arguments)]
 pub fn do_exec(
     table: FdTable,
     program: &CanonPath,
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
+    who: &Subject,
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
@@ -580,11 +603,18 @@ pub fn do_exec(
         program,
         argv,
         envp,
-        false,
+        mixed_ids(&who.cred),
+        who,
         entry_out,
         stack_ptr_out,
         tls_tp_out,
     )
+}
+
+/// An identity whose effective ids differ from its real ones, which a program
+/// must treat as it would a setuid start.
+fn mixed_ids(cred: &slopos_ostd::process::Cred) -> bool {
+    cred.euid != cred.ruid || cred.egid != cred.rgid
 }
 
 /// `execve`'s half of the grant table: the caller's process keeps only the
@@ -623,8 +653,8 @@ pub fn narrow_authority_for_exec(
     }
 }
 
-/// `secure` is whether this exec conferred a grant, which is what the image
-/// finds as `AT_SECURE`.
+/// `secure` is what the image finds as `AT_SECURE`. `who` must be able to
+/// execute the image and its interpreter.
 #[allow(clippy::too_many_arguments)]
 fn exec_image(
     table: FdTable,
@@ -632,12 +662,13 @@ fn exec_image(
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
     secure: bool,
+    who: &Subject,
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
 ) -> Result<(), Errno> {
     let vm_process = table.process().ok_or(Errno::ENOMEM)?;
-    let exec_info = load_image(program.as_bytes(), vm_process, entry_out)?;
+    let exec_info = load_image(program.as_bytes(), vm_process, entry_out, who)?;
 
     if process_vm_reset_stack(vm_process) != 0 {
         return Err(Errno::ENOMEM);
@@ -667,17 +698,29 @@ fn exec_image(
 /// Out of line because [`FileStat`](slopos_fs::FileStat) is large enough to
 /// push its caller over the 2 KiB stack gate.
 #[inline(never)]
-fn open_executable(path: &[u8]) -> Result<(VfsHandle, u64), Errno> {
+fn open_executable(path: &[u8], who: &Subject) -> Result<(VfsHandle, u64), Errno> {
+    let neither = VfsOpenFlags {
+        create: false,
+        exclusive: false,
+        truncate: false,
+        readable: false,
+        writable: false,
+    };
     // `EACCES`, not `ENOEXEC`: a `PATH` search skips the former but runs the
     // latter as a shell script.
-    let handle = vfs_open(path, false).map_err(|e| match e {
-        slopos_fs::VfsError::NotFound => Errno::ENOENT,
-        slopos_fs::VfsError::IsDirectory | slopos_fs::VfsError::PermissionDenied => Errno::EACCES,
-        _ => Errno::EIO,
-    })?;
+    let handle =
+        vfs_open_flags_at(path, b"/", neither, RESOLVE_FOLLOW, who, None).map_err(|e| match e {
+            slopos_fs::VfsError::NotFound => Errno::ENOENT,
+            slopos_fs::VfsError::IsDirectory | slopos_fs::VfsError::PermissionDenied => {
+                Errno::EACCES
+            }
+            _ => Errno::EIO,
+        })?;
 
     let stat = handle.fs.stat(handle.inode).map_err(|_| Errno::EIO)?;
-    if stat.file_type != slopos_fs::FileType::Regular || (stat.mode & 0o111) == 0 {
+    if stat.file_type != slopos_fs::FileType::Regular
+        || InodePerm::of(&stat).check(who, Perm::Exec).is_err()
+    {
         return Err(Errno::EACCES);
     }
     if stat.size == 0 || stat.size > EXEC_MAX_ELF_SIZE as u64 {
@@ -710,8 +753,9 @@ fn load_image(
     path: &[u8],
     process: slopos_ostd::process::ProcessId,
     entry_out: &mut u64,
+    who: &Subject,
 ) -> Result<ElfExecInfo, Errno> {
-    let (handle, file_size) = open_executable(path)?;
+    let (handle, file_size) = open_executable(path, who)?;
 
     // Only the header window is staged; the rest goes from the file straight
     // into the mapping, so the image may exceed the 1 MiB slab ceiling.
@@ -720,7 +764,7 @@ fn load_image(
     read_exact_at(&handle, 0, header.as_mut_slice())?;
 
     let interp = match interpreter_extent(header.as_slice(), file_size).map_err(Errno::from)? {
-        Some((offset, len)) => Some(stage_interpreter(&handle, offset, len)?),
+        Some((offset, len)) => Some(stage_interpreter(&handle, offset, len, who)?),
         None => None,
     };
 
@@ -805,6 +849,7 @@ fn stage_interpreter(
     image: &VfsHandle,
     offset: u64,
     len: u64,
+    who: &Subject,
 ) -> Result<KBox<StagedInterpreter>, Errno> {
     let mut path: KVec<u8> = KVec::<u8>::zeroed(len as usize).map_err(|_| Errno::ENOMEM)?;
     read_exact_at(image, offset, path.as_mut_slice())?;
@@ -816,7 +861,7 @@ fn stage_interpreter(
         return Err(Errno::ENOEXEC);
     }
 
-    let (handle, file_len) = open_executable(name)?;
+    let (handle, file_len) = open_executable(name, who)?;
     let window_len = (file_len as usize).min(ELF_HEADER_WINDOW);
     let mut header: KVec<u8> = KVec::<u8>::zeroed(window_len).map_err(|_| Errno::ENOMEM)?;
     read_exact_at(&handle, 0, header.as_mut_slice())?;

@@ -32,18 +32,18 @@ where and how a task runs. Every privilege is a bit of the per-task capability
 mask (`slopos-ostd/src/authority/mod.rs`, bits in `abi/src/caps.rs`), and every
 check reads it: the network-control slots (`NetAdmin`), block nodes, the crash
 records and the `DiskBlocks` ceiling (`RawBlock`), `kconsole(2)` and `prof_ctl`
-(`SysInspect`), and the signal relation, which lets a sender name only a target
-whose capabilities it holds (`core/src/syscall/signal.rs:87-92`). Init and
-every utest binary hold `CAP_MASK_ALL` (`core/src/exec/mod.rs:163-178`,
-`core/src/exec/utest.rs:107`). A spawned program holds the universal
-capabilities (`ConsoleIo`, `ClipboardGlobal`, `Fate`) its spawner holds, and
-what its path earns. The ext2 reserve and a nice value below zero are init's,
-by task id.
+(`SysInspect`), mode bits (`DacOverride`), id changes (`SetId`), and the signal
+relation, which lets a sender name only a target whose capabilities it holds
+(`core/src/syscall/signal.rs:132-143`). Init and every utest binary hold
+`CAP_MASK_ALL` (`core/src/exec/mod.rs:163-178`, `core/src/exec/utest.rs:107`).
+A spawned program holds the universal capabilities (`ConsoleIo`,
+`ClipboardGlobal`, `Fate`) its spawner holds, and what its path earns. A nice
+value below zero is init's, by task id.
 
 **Privilege is raised at exactly one site, by path.**
 `spawn_program_with_cwd` ORs in `grant_for(image)` when the spawner holds
 `Launch`, and otherwise spawns the image ungranted
-(`core/src/exec/mod.rs:342-370`). `PROGRAM_GRANTS` has 26 rows: 14 shipped rows
+(`core/src/exec/mod.rs:342-370`). `PROGRAM_GRANTS` has 25 rows: 13 shipped rows
 that raise, 6 delegated e2fsprogs rows and 6 test rows
 (`core/src/exec/grants.rs:39-245`). A path key is sound only because the base
 directories are sealed and pinned, mount refuses grant paths and `/lib`
@@ -60,17 +60,17 @@ whole process for good
 (`sched/src/task/task_lifecycle.rs:2647-2667`). The Verus proof
 (`verification/proofs/authority.rs`) models both.
 
-**There is one identity and no DAC.**
-- `getuid` and its three siblings return 0 (`core/src/syscall/process_handlers.rs:996-1001`).
-- There are no set\*id, group, chown, capget or prctl syscalls. slibc emulates
-  root-only answers (`slibc/src/process/ids.rs:1-84`) and compiles in one
-  passwd row (`slibc/src/conf.rs:42-48`).
-- Mode bits are stored, but only the execute bit is enforced
-  (`fs/src/fileio/fdops.rs:712-734`, `fs/src/vfs/ops.rs:115-128`).
-- `stat` always reports owner 0 (`fs/src/vfs/traits.rs:139-142`).
-- Every process can write `/etc`, `/var`, `/home`, `/src` and `/usr/local`
-  (`AGENTS.md`, the remote paragraph). `CVSS.md` scores any code execution
-  `PR:L` because "SlopOS has no credential model".
+**Every process has an identity, and it is uid 0.**
+- Each process carries a `Cred` (`slopos-ostd/src/process/cred.rs`). The id
+  syscalls follow POSIX's rules and take `SetId` for any other id
+  (`core/src/syscall/cred_handlers.rs`); slibc calls them and compiles in the
+  `root` and `user` rows (`slibc/src/conf.rs`).
+- The VFS checks owner, group and mode against the `Subject` every entry takes
+  (`fs/src/vfs/perm.rs`), and `stat` reports the stored owner.
+- Every process still runs as uid 0 and every file is 0:0, so every process
+  can write `/etc`, `/var`, `/home`, `/src` and `/usr/local` (`AGENTS.md`, the
+  remote paragraph). `CVSS.md` scores any code execution `PR:L` for that
+  reason.
 
 **IPC carries no identity.**
 - There is no `SO_PEERCRED`. `SCM_CREDENTIALS` is `EINVAL` (`core/src/syscall/tests.rs:9163-9172`).
@@ -377,7 +377,7 @@ acting. This is pkexec's lesson: the privileged side validates.
 | `/bin/roulette` `DisplaySeat` | bootstrap child above |
 | `/bin/keymap` `ConsoleConfig` | `org.slopos.console.keymap`: `ConsoleConfig`, uid 0, session and paired |
 | `/bin/ip` `NetAdmin` | `org.slopos.net.configure`: `NetAdmin`, session with consent |
-| `/bin/sysmon` `SysInspect` | nothing: enumeration is universal, kill follows the signal rule |
+| `/bin/sysmon` `SysInspect` | gone in phase 2: enumeration is universal, kill follows the signal rule |
 | `/bin/kconsole` `SysInspect` | `org.slopos.kconsole`: `SysInspect`, session and paired |
 | `/bin/prof` `SysInspect` | `org.slopos.prof`: `SysInspect`, session and paired |
 | `/bin/halt` `Power` | `org.slopos.power.poweroff`, `.reboot`: `Power`, session and paired |
@@ -450,20 +450,31 @@ grant row through exec's narrowing), `spawn_privilege_test`'s
 raw block and signal gates), `test_caps_drop_is_total_and_process_wide`,
 `caps_drop_is_process_wide` and `test_dispatch_gates_follow_the_capability_mask`.
 
-### Phase 2: Credentials and DAC
+### Phase 2: Credentials and DAC — done
 
-Add `Cred`, the id syscalls, kernel DAC, `DacOverride` and `SetId`, owner
-reporting in `stat`, the passwd and group rows, the signal rule's uid half and
-`SIGCONT` exemption, and a `process_list` that reports every task. Every file
-stays 0:0 and the session still runs as uid 0 in this phase, so the owner bits
-admit everything they admitted before, and only a process that has changed its
-ids meets the new checks.
-
-Ends with:
-- `just test` green;
-- a test that switches to uid 1000 and cannot write `/etc`, read a 0600 root
-  file, or unlink another owner's file from a sticky `/tmp`;
-- the toolchain ladder green.
+Each process carries a `Cred`, process-wide, that fork and spawn copy and exec
+keeps. The ten id syscalls and the four chown calls sit at the Linux numbers;
+an id the process does not hold, and `setgroups`, take `SetId`. Every VFS
+entry takes the `Subject` it acts for: a walk needs search on each directory
+it crosses, open needs read or write, a name made or removed needs write and
+search on its parent and passes the sticky bit, `chmod`, `utimensat` and
+`chown` follow ownership and strip set-ID bits as Linux does, a setgid
+directory hands down its group, and `faccessat2` checks the real ids unless
+`AT_EACCESS`; ring opcodes check as their submitter. `DacOverride` passes every
+mode check. `stat` reports ext4's `i_uid`/`i_gid`, ramfs's creator and
+basefs's 0:0, and the ext4 reserve is the superblock's `s_def_resuid` and
+`s_def_resgid` rather than init's. A signal also needs POSIX's uid rule, which
+`ProcSignal` and a same-session `SIGCONT` waive, and `si_uid` is the sender's
+real uid. `process_list` lists every task with its uid, so `/bin/sysmon` lost
+its `SysInspect` row. `AT_SECURE` also marks a program whose effective ids
+differ from its real ones. slibc's root-only emulation became the syscalls,
+its passwd and group rows gained `user`, and `prctl` reports
+`PR_GET_NO_NEW_PRIVS` set. Graded by `dac_test` (as uid 1000: no create or
+write in `/etc`, no read, chmod or chown of a 0600 root file, no unlink of or
+rename over another owner's name in sticky `/tmp`, each beside what it may
+do), the `cred` kernel tests (the id rules, DAC on open, create, unlink,
+rename, chmod, chown and `faccessat2`, the signal rule), `cred.rs`'s host
+tests and `libc_abi_test`'s group calls.
 
 ### Phase 3: Peer identity
 
@@ -616,22 +627,43 @@ Ends with:
   keeps per-thread sets for history and its newer interfaces (seccomp's and
   Landlock's `TSYNC`, libcap's psx) all go process-wide, and Redox holds
   credentials per process.
-- **A sender holds every capability its target holds.** That goes beyond
-  Linux, whose `kill` compares no capability sets (ptrace and `cap_safe_nice`
-  do), so a session process cannot stop a mechanism; the uid rule joins it in
-  phase 2.
+- **A sender holds every capability its target holds,** beside POSIX's uid
+  rule. That goes beyond Linux, whose `kill` compares no capability sets
+  (ptrace and `cap_safe_nice` do), so a session process cannot stop a
+  mechanism. `SIGCONT` within the sender's session waives both, so the shell's
+  `fg` resumes a job holding more than the shell.
 - **Kernel threads hold no capability.** A gate a kernel thread must pass —
-  raw block devices, the ext2 reserve — names the kernel thread itself.
+  raw block devices, the ext4 reserve — names the kernel thread itself.
 - **What only the system does is init's, by task id,** where no capability
-  names it: the ext2 reserve, until phase 2 hands it to uid 0, and a nice
-  value below zero.
+  names it: a nice value below zero, until phase 4's `SchedHigh`.
 - **A program that holds authority is its own binary.** A grant, and later
   privd's `Base(path)`, keys on the resolved path, so a multicall symlink
   would hand every tool its authority; `prof` left coreutils for this.
 - **Reading machine-wide state needs nothing.** `sys_info`, `cpu_info`,
-  `percpu_stats`, `cpu_perf`, `net_query` and `net_monitor` are `NoneSelf`, as
-  `sysinfo` was; `SysInspect` is for observing every task and steering the
-  profiler.
+  `percpu_stats`, `cpu_perf`, `net_query`, `net_monitor` and `process_list`
+  are `NoneSelf`, as `sysinfo` and Linux's `/proc` are; `SysInspect` is for
+  the diagnostic console and steering the profiler.
+- **Credentials are process-wide,** as POSIX has them and Redox holds them. A
+  `SeqLock` on the process holds them and `change_cred` is the only writer,
+  a read-modify-write under its lock, so no thread sees a torn or stale
+  identity and no setxid broadcast is needed. The filesystem ids are the
+  effective ids; there is no `setfsuid`.
+- **Changing ids changes no capability.** Leaving uid 0 drops nothing and
+  reaching it grants nothing, as with Linux's `SECBIT_NO_SETUID_FIXUP` and
+  `SECBIT_NOROOT`.
+- **The VFS is told who asks.** Every entry takes a `Subject` — the effective
+  ids and whether `DacOverride` is held — and nothing below the syscall layer
+  reads the current task for a permission check. The kernel's own callers and
+  kernel threads pass `Subject::KERNEL`; a ring opcode passes its submitter's.
+  privd's mechanisms and a peer's attested identity need no VFS change.
+- **`DacOverride` is Linux's `CAP_DAC_OVERRIDE`, `CAP_FOWNER` and `CAP_CHOWN`
+  in one bit.** It passes read and write, execute where some class may execute
+  or on a directory, every ownership test, and any `chown`. One broker grants
+  it, so three bits would only be three ways to name the same holder.
+- **Set-ID bits are stored and never honoured.** `chown` strips them and a
+  `chmod` or create outside the file's group drops set-group-ID, as Linux
+  does, so a file copied to a system that honours them carries none it should
+  not.
 - **One broker.** privd, with an action policy in the sealed base, runs
   unchanged mechanism programs. Per-domain daemons would multiply processes and
   protocols for no gain in a single-seat system.

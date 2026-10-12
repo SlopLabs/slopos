@@ -38,10 +38,10 @@ use slopos_abi::syscall::{
 use slopos_abi::unix::SockAddrUn;
 use slopos_slibc::conf::{
     _SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN, _SC_PAGESIZE, getgrgid, getgrgid_r, getgrnam,
-    initgroups, sysconf,
+    getpwnam, getpwuid, initgroups, sysconf,
 };
 use slopos_slibc::errno::{
-    EAGAIN, EBUSY, EINVAL, ENOSYS, EPERM, EPROTONOSUPPORT, ERANGE, ESOCKTNOSUPPORT, ETIMEDOUT,
+    EAGAIN, EBUSY, EINVAL, ENOSYS, EPROTONOSUPPORT, ERANGE, ESOCKTNOSUPPORT, ETIMEDOUT,
 };
 use slopos_slibc::ffi::syscalls::{mmap, mprotect, munmap, realpath, slopos_getdents64, utime};
 use slopos_slibc::ffi::{O_DIRECTORY, O_RDONLY, close, open, read, write};
@@ -53,7 +53,7 @@ use slopos_slibc::net::{
     SOCK_SEQPACKET, SOCK_STREAM, SockAddrIn, accept, accept4, bind, connect, getsockname, listen,
     recvmsg, sendmsg, socket,
 };
-use slopos_slibc::process::ids::{ITIMER_REAL, getitimer, setitimer};
+use slopos_slibc::process::ids::{ITIMER_REAL, getgroups, getitimer, setgroups, setitimer};
 use slopos_slibc::process::{_exit, WEXITSTATUS, WIFEXITED, execl, execle, fork, waitpid};
 use slopos_slibc::signal::{self, SIG_DFL, SIGSEGV, SIGUSR1, SIGUSR2};
 use slopos_slibc::stdio::{self, chars::fputs, file::fflush, file::fileno, file::freopen};
@@ -1772,22 +1772,28 @@ fn freopen_keeps_the_descriptor_number() -> bool {
     true
 }
 
-/// One row, gid 0 named `root`, with an empty NULL-terminated member list.
-/// A gid with no row is NULL without touching `errno`; a short buffer for
-/// the `_r` form is `ERANGE`.
-fn group_database_has_the_one_root_row() -> bool {
-    let row_ok = |g: *mut group| {
+/// Two rows, `root` at gid 0 and `user` at gid 1000, each with an empty
+/// NULL-terminated member list. A gid with no row is NULL without touching
+/// `errno`; a short buffer for the `_r` form is `ERANGE`.
+fn group_database_has_root_and_user() -> bool {
+    let row_ok = |g: *mut group, gid: u32, name: &str| {
         !g.is_null()
             && unsafe {
-                (*g).gr_gid == 0
-                    && c_str_of((*g).gr_name.cast()) == "root"
+                (*g).gr_gid == gid
+                    && c_str_of((*g).gr_name.cast()) == name
                     && !(*g).gr_mem.is_null()
                     && (*(*g).gr_mem).is_null()
             }
     };
-    if !row_ok(unsafe { getgrgid(0) }) || !row_ok(unsafe { getgrnam(c"root".as_ptr()) }) {
-        note("getgrgid(0) or getgrnam(\"root\") is not the root row");
-        return false;
+    for (gid, name, c_name) in [(0, "root", c"root"), (1000, "user", c"user")] {
+        if !row_ok(unsafe { getgrgid(gid) }, gid, name)
+            || !row_ok(unsafe { getgrnam(c_name.as_ptr()) }, gid, name)
+        {
+            note(&format!(
+                "getgrgid({gid}) or getgrnam({name:?}) is not its row"
+            ));
+            return false;
+        }
     }
     errno_set(1234);
     let missing = unsafe { getgrgid(1) };
@@ -1811,17 +1817,44 @@ fn group_database_has_the_one_root_row() -> bool {
     true
 }
 
-/// The group set `initgroups` makes is `{group}`, which only gid 0 may be;
-/// no interval timer is ever armed, so one reads zero, disarming succeeds and
-/// arming is `ENOSYS`.
-fn initgroups_and_the_interval_timer_hold_to_one_principal() -> bool {
-    let root = unsafe { initgroups(c"root".as_ptr(), 0) };
-    errno_set(0);
-    let other = unsafe { initgroups(c"root".as_ptr(), 5) };
-    if root != 0 || other != -1 || errno_get() != EPERM.raw() {
+/// The passwd database answers both rows by uid and by name, and nothing
+/// for a uid it does not hold.
+fn passwd_database_has_root_and_user() -> bool {
+    for (uid, name, dir) in [(0, c"root", "/"), (1000, c"user", "/home/user")] {
+        let by_uid = unsafe { getpwuid(uid) };
+        let ok = !by_uid.is_null()
+            && unsafe {
+                (*by_uid).pw_uid == uid
+                    && (*by_uid).pw_gid == uid
+                    && c_str_of((*by_uid).pw_name.cast()) == name.to_str().unwrap_or("")
+                    && c_str_of((*by_uid).pw_dir.cast()) == dir
+            };
+        let by_name = unsafe { getpwnam(name.as_ptr()) };
+        if !ok || by_name.is_null() || unsafe { (*by_name).pw_uid } != uid {
+            note(&format!("the passwd row for uid {uid} is wrong"));
+            return false;
+        }
+    }
+    if !unsafe { getpwuid(1) }.is_null() {
+        note("getpwuid(1) answered a row");
+        return false;
+    }
+    true
+}
+
+/// The group set `initgroups` makes is `{group}`, which `getgroups` then
+/// reports; no interval timer is ever armed, so one reads zero, disarming
+/// succeeds and arming is `ENOSYS`.
+fn initgroups_and_the_interval_timer() -> bool {
+    let set = unsafe { initgroups(c"user".as_ptr(), 1000) };
+    let mut groups = [0u32; 4];
+    let count = unsafe { getgroups(4, groups.as_mut_ptr()) };
+    let cleared = unsafe { setgroups(0, ptr::null()) };
+    let after = unsafe { getgroups(0, ptr::null_mut()) };
+    if set != 0 || count != 1 || groups[0] != 1000 || cleared != 0 || after != 0 {
         note(&format!(
-            "initgroups gave {root} for gid 0 and {other} (errno {}) for gid 5",
-            errno_get()
+            "initgroups gave {set}, then getgroups {count} {:?}; clearing gave {cleared}, then {after}",
+            groups
         ));
         return false;
     }
@@ -2150,8 +2183,12 @@ const CASES: &[(&str, fn() -> bool)] = &[
         freopen_keeps_the_descriptor_number,
     ),
     (
-        "group_database_has_the_one_root_row",
-        group_database_has_the_one_root_row,
+        "group_database_has_root_and_user",
+        group_database_has_root_and_user,
+    ),
+    (
+        "passwd_database_has_root_and_user",
+        passwd_database_has_root_and_user,
     ),
     (
         "pthread_setcancelstate_round_trips_per_thread",
@@ -2162,8 +2199,8 @@ const CASES: &[(&str, fn() -> bool)] = &[
         execl_and_execle_pass_the_list_as_argv,
     ),
     (
-        "initgroups_and_the_interval_timer_hold_to_one_principal",
-        initgroups_and_the_interval_timer_hold_to_one_principal,
+        "initgroups_and_the_interval_timer",
+        initgroups_and_the_interval_timer,
     ),
     (
         "dn_expand_follows_a_compression_pointer",

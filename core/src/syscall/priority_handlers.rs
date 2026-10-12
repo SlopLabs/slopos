@@ -7,7 +7,7 @@ use slopos_abi::syscall::{PRIO_PGRP, PRIO_PROCESS, PRIO_USER};
 use slopos_sched::task::task_for_each_active;
 use slopos_sched::task_struct::Task;
 
-use crate::syscall::signal::{sender_pid, signal_may_name, signal_permitted};
+use crate::syscall::signal::{Sender, sender_pid, signal_may_name, signal_permitted};
 
 const NICE_MIN: i64 = -20;
 const NICE_MAX: i64 = 19;
@@ -16,7 +16,8 @@ const NICE_MAX: i64 = 19;
 enum Selector {
     Process(u32),
     Group(u32),
-    Everyone,
+    /// The processes whose real uid this is.
+    User(u32),
 }
 
 impl Selector {
@@ -29,9 +30,8 @@ impl Selector {
                 who
             })),
             PRIO_PGRP => Ok(Self::Group(if who == 0 { caller.pgid() } else { who })),
-            // Every process runs as user 0.
-            PRIO_USER if who == 0 => Ok(Self::Everyone),
-            PRIO_USER => Err(Errno::ESRCH),
+            PRIO_USER if who == 0 => Ok(Self::User(real_uid(caller))),
+            PRIO_USER => Ok(Self::User(who)),
             _ => Err(Errno::EINVAL),
         }
     }
@@ -41,9 +41,16 @@ impl Selector {
             && match *self {
                 Self::Process(pid) => sender_pid(task) == pid,
                 Self::Group(pgid) => task.pgid() == pgid,
-                Self::Everyone => true,
+                Self::User(uid) => real_uid(task) == uid,
             }
     }
+}
+
+fn real_uid(task: &Task) -> u32 {
+    task.process()
+        .map_or(slopos_ostd::process::cred::ID_UNCHANGED, |process| {
+            process.cred().ruid
+        })
 }
 
 // Linux's encoding: `20 - nice`, so the highest priority is the largest
@@ -70,7 +77,7 @@ define_syscall!(syscall_setpriority (ctx, which: u64, who: u64, value: i64) cap(
     let selector = Selector::resolve(caller, which, who)?;
     let nice = value.clamp(NICE_MIN, NICE_MAX) as i8;
     let privileged = crate::exec::task_is_init(caller);
-    let caller_caps = ctx.caps();
+    let sender = Sender::of(caller);
     let own = sender_pid(caller);
     let (mut found, mut denied, mut refused) = (false, false, false);
     task_for_each_active(|task| {
@@ -78,7 +85,7 @@ define_syscall!(syscall_setpriority (ctx, which: u64, who: u64, value: i64) cap(
             return;
         }
         found = true;
-        if sender_pid(task) != own && !signal_permitted(caller_caps, task) {
+        if sender_pid(task) != own && !signal_permitted(&sender, task, 0) {
             denied = true;
         } else if nice < task.nice().min(0) && !privileged {
             refused = true;

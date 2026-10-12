@@ -123,6 +123,8 @@ pub trait Pal {
     fn readv(fd: i32, iov: *const UserIovec, iovcnt: i32) -> Result<usize, Errno>;
     fn writev(fd: i32, iov: *const UserIovec, iovcnt: i32) -> Result<usize, Errno>;
     fn fchmod(fd: i32, mode: u32) -> Result<(), Errno>;
+    fn fchown(fd: i32, uid: u32, gid: u32) -> Result<(), Errno>;
+    fn fchownat(dirfd: i32, path: *const u8, uid: u32, gid: u32, flags: u32) -> Result<(), Errno>;
     fn flock(fd: i32, operation: u32) -> Result<(), Errno>;
 
     fn brk(addr: *mut u8) -> Result<*mut u8, Errno>;

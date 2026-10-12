@@ -76,7 +76,7 @@ impl Scratch {
             .as_deref()
             .and_then(FdTable::of)?;
         // `EEXIST` from a previous test in this suite is success here.
-        let _ = file_mkdir_at(ROOT, b"/");
+        let _ = file_mkdir_at(ROOT, b"/", &slopos_fs::vfs::Subject::KERNEL);
         Some(Self { task_id, table })
     }
 }
@@ -97,8 +97,16 @@ fn join(name: &[u8]) -> KVec<u8> {
 
 fn make_file(table: FdTable, name: &[u8], contents: &[u8]) -> Option<KVec<u8>> {
     let path = join(name);
-    let _ = file_unlink_at(&path, b"/");
-    let fd = file_open_at(table, &path, b"/", O_RDWR | O_CREAT, RESOLVE_FOLLOW, None);
+    let _ = file_unlink_at(&path, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    let fd = file_open_at(
+        table,
+        &path,
+        b"/",
+        O_RDWR | O_CREAT,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     if fd < 0 {
         return None;
     }
@@ -113,7 +121,7 @@ fn make_file(table: FdTable, name: &[u8], contents: &[u8]) -> Option<KVec<u8>> {
     Some(path)
 }
 
-fn map_user_pages(table: FdTable, pages: usize) -> Option<u64> {
+pub(crate) fn map_user_pages(table: FdTable, pages: usize) -> Option<u64> {
     let process = table.process()?;
     let len = (pages * 4096) as u64;
     let base = process_vm_alloc(process, len, PageFlags::USER_RW.bits() as u32);
@@ -137,7 +145,7 @@ fn map_user_pages(table: FdTable, pages: usize) -> Option<u64> {
     Some(base)
 }
 
-fn with_user_process_context<R>(table: FdTable, f: impl FnOnce() -> R) -> Option<R> {
+pub(crate) fn with_user_process_context<R>(table: FdTable, f: impl FnOnce() -> R) -> Option<R> {
     let process = table.process()?;
     if slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(process) == 0 {
         return None;
@@ -225,21 +233,53 @@ pub fn test_openat_resolves_against_cwd_and_dirfd() -> TestResult {
     };
     let table = scratch.table;
     let dir = join(b"atdir");
-    let _ = file_mkdir_at(&dir, b"/");
+    let _ = file_mkdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL);
     let inner = join(b"atdir/leaf.txt");
-    let _ = file_unlink_at(&inner, b"/");
-    let created = file_open_at(table, &inner, b"/", O_RDWR | O_CREAT, RESOLVE_FOLLOW, None);
+    let _ = file_unlink_at(&inner, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    let created = file_open_at(
+        table,
+        &inner,
+        b"/",
+        O_RDWR | O_CREAT,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(created >= 0, "could not create the fixture file");
     let _ = file_close_fd(table, created);
 
-    let by_cwd = file_open_at(table, b"leaf.txt", &dir, O_RDONLY, RESOLVE_FOLLOW, None);
+    let by_cwd = file_open_at(
+        table,
+        b"leaf.txt",
+        &dir,
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(by_cwd >= 0, "a relative open against a cwd failed");
     let _ = file_close_fd(table, by_cwd);
 
-    let dirfd = file_open_at(table, &dir, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let dirfd = file_open_at(
+        table,
+        &dir,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(dirfd >= 0, "a directory could not be opened");
     let by_dirfd = with_fd_dir_path(table, dirfd, |base| {
-        file_open_at(table, b"leaf.txt", base, O_RDONLY, RESOLVE_FOLLOW, None)
+        file_open_at(
+            table,
+            b"leaf.txt",
+            base,
+            O_RDONLY,
+            RESOLVE_FOLLOW,
+            None,
+            &slopos_fs::vfs::Subject::KERNEL,
+        )
     });
     assert_test!(
         matches!(by_dirfd, Ok(fd) if fd >= 0),
@@ -249,7 +289,15 @@ pub fn test_openat_resolves_against_cwd_and_dirfd() -> TestResult {
         let _ = file_close_fd(table, fd);
     }
 
-    let filefd = file_open_at(table, &inner, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let filefd = file_open_at(
+        table,
+        &inner,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(filefd >= 0, "could not open the fixture file");
     assert_eq_test!(
         with_fd_dir_path(table, filefd, |_| ()).err(),
@@ -259,8 +307,8 @@ pub fn test_openat_resolves_against_cwd_and_dirfd() -> TestResult {
 
     let _ = file_close_fd(table, filefd);
     let _ = file_close_fd(table, dirfd);
-    let _ = file_unlink_at(&inner, b"/");
-    let _ = file_rmdir_at(&dir, b"/");
+    let _ = file_unlink_at(&inner, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    let _ = file_rmdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL);
     pass!()
 }
 
@@ -279,16 +327,20 @@ pub fn test_unlinkat_removedir_separates_file_from_directory() -> TestResult {
     };
     let table = scratch.table;
     let dir = join(b"rmdir_target");
-    let _ = file_rmdir_at(&dir, b"/");
-    assert_eq_test!(file_mkdir_at(&dir, b"/"), 0, "mkdir of the fixture failed");
+    let _ = file_rmdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    assert_eq_test!(
+        file_mkdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL),
+        0,
+        "mkdir of the fixture failed"
+    );
 
     assert_eq_test!(
-        file_unlink_at(&dir, b"/"),
+        file_unlink_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL),
         Errno::EISDIR.raw(),
         "unlinkat without AT_REMOVEDIR did not refuse a directory with EISDIR"
     );
     assert_eq_test!(
-        file_rmdir_at(&dir, b"/"),
+        file_rmdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL),
         0,
         "unlinkat with AT_REMOVEDIR did not remove the directory"
     );
@@ -297,12 +349,12 @@ pub fn test_unlinkat_removedir_separates_file_from_directory() -> TestResult {
         return fail!("could not create the fixture file");
     };
     assert_eq_test!(
-        file_rmdir_at(&file, b"/"),
+        file_rmdir_at(&file, b"/", &slopos_fs::vfs::Subject::KERNEL),
         Errno::ENOTDIR.raw(),
         "AT_REMOVEDIR did not refuse a regular file with ENOTDIR"
     );
     assert_eq_test!(
-        file_unlink_at(&file, b"/"),
+        file_unlink_at(&file, b"/", &slopos_fs::vfs::Subject::KERNEL),
         0,
         "unlinkat did not remove a regular file"
     );
@@ -326,20 +378,32 @@ pub fn test_fstatat_nofollow_reports_the_link() -> TestResult {
         return fail!("could not create the link target");
     };
     let link = join(b"the_link");
-    let _ = file_unlink_at(&link, b"/");
-    if file_symlink_at(&target, &link, b"/") != 0 {
+    let _ = file_unlink_at(&link, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    if file_symlink_at(&target, &link, b"/", &slopos_fs::vfs::Subject::KERNEL) != 0 {
         return fail!("this filesystem refused a symlink");
     }
 
     let mut followed = UserFsStat::default();
     assert_eq_test!(
-        file_stat_at(&link, b"/", RESOLVE_FOLLOW, &mut followed),
+        file_stat_at(
+            &link,
+            b"/",
+            RESOLVE_FOLLOW,
+            &mut followed,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
         0,
         "the follow form failed"
     );
     let mut raw = UserFsStat::default();
     assert_eq_test!(
-        file_stat_at(&link, b"/", RESOLVE_NOFOLLOW_FINAL, &mut raw),
+        file_stat_at(
+            &link,
+            b"/",
+            RESOLVE_NOFOLLOW_FINAL,
+            &mut raw,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
         0,
         "the nofollow form failed"
     );
@@ -356,8 +420,8 @@ pub fn test_fstatat_nofollow_reports_the_link() -> TestResult {
     );
     assert_eq_test!(followed.st_size, 5, "the target's size was not reported");
 
-    let _ = file_unlink_at(&link, b"/");
-    let _ = file_unlink_at(&target, b"/");
+    let _ = file_unlink_at(&link, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    let _ = file_unlink_at(&target, b"/", &slopos_fs::vfs::Subject::KERNEL);
     pass!()
 }
 
@@ -379,20 +443,32 @@ pub fn test_open_nofollow_refuses_a_final_symlink() -> TestResult {
         return fail!("could not create the link target");
     };
     let link = join(b"nofollow_link");
-    let _ = file_unlink_at(&link, b"/");
-    if file_symlink_at(&target, &link, b"/") != 0 {
+    let _ = file_unlink_at(&link, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    if file_symlink_at(&target, &link, b"/", &slopos_fs::vfs::Subject::KERNEL) != 0 {
         return fail!("this filesystem refused a symlink");
     }
 
-    let through_link =
-        crate::syscall::fs::at_handlers::open_at(table, &link, b"/", O_RDONLY | O_NOFOLLOW, 0);
-    let direct =
-        crate::syscall::fs::at_handlers::open_at(table, &target, b"/", O_RDONLY | O_NOFOLLOW, 0);
+    let through_link = crate::syscall::fs::at_handlers::open_at(
+        table,
+        &link,
+        b"/",
+        O_RDONLY | O_NOFOLLOW,
+        0,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
+    let direct = crate::syscall::fs::at_handlers::open_at(
+        table,
+        &target,
+        b"/",
+        O_RDONLY | O_NOFOLLOW,
+        0,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     if let Ok(fd) = direct {
         let _ = file_close_fd(table, fd as i32);
     }
-    let _ = file_unlink_at(&link, b"/");
-    let _ = file_unlink_at(&target, b"/");
+    let _ = file_unlink_at(&link, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    let _ = file_unlink_at(&target, b"/", &slopos_fs::vfs::Subject::KERNEL);
 
     assert_eq_test!(
         through_link.err(),
@@ -419,9 +495,11 @@ pub fn test_open_directory_nofollow_refuses_a_link_to_a_directory() -> TestResul
     let table = scratch.table;
     let dir = join(b"nofollow_dir");
     let link = join(b"nofollow_dir_link");
-    let _ = file_unlink_at(&link, b"/");
-    let _ = file_rmdir_at(&dir, b"/");
-    if file_mkdir_at(&dir, b"/") != 0 || file_symlink_at(&dir, &link, b"/") != 0 {
+    let _ = file_unlink_at(&link, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    let _ = file_rmdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    if file_mkdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL) != 0
+        || file_symlink_at(&dir, &link, b"/", &slopos_fs::vfs::Subject::KERNEL) != 0
+    {
         return fail!("could not build the directory and its link");
     }
     let open = |path: &[u8]| {
@@ -431,6 +509,7 @@ pub fn test_open_directory_nofollow_refuses_a_link_to_a_directory() -> TestResul
             b"/",
             O_RDONLY | O_DIRECTORY | O_NOFOLLOW,
             0,
+            &slopos_fs::vfs::Subject::KERNEL,
         )
     };
     let through_link = open(&link);
@@ -441,8 +520,8 @@ pub fn test_open_directory_nofollow_refuses_a_link_to_a_directory() -> TestResul
     if let Ok(fd) = through_link {
         let _ = file_close_fd(table, fd as i32);
     }
-    let _ = file_unlink_at(&link, b"/");
-    let _ = file_rmdir_at(&dir, b"/");
+    let _ = file_unlink_at(&link, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    let _ = file_rmdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL);
 
     assert_eq_test!(
         through_link.err(),
@@ -470,7 +549,13 @@ pub fn test_stat_reports_a_regular_file_as_s_ifreg() -> TestResult {
     };
     let mut stat = UserFsStat::default();
     assert_eq_test!(
-        file_stat_at(&path, b"/", RESOLVE_FOLLOW, &mut stat),
+        file_stat_at(
+            &path,
+            b"/",
+            RESOLVE_FOLLOW,
+            &mut stat,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
         0,
         "stat of a regular file failed"
     );
@@ -485,7 +570,13 @@ pub fn test_stat_reports_a_regular_file_as_s_ifreg() -> TestResult {
 
     let mut dir_stat = UserFsStat::default();
     assert_eq_test!(
-        file_stat_at(ROOT, b"/", RESOLVE_FOLLOW, &mut dir_stat),
+        file_stat_at(
+            ROOT,
+            b"/",
+            RESOLVE_FOLLOW,
+            &mut dir_stat,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
         0,
         "stat of a directory failed"
     );
@@ -495,7 +586,7 @@ pub fn test_stat_reports_a_regular_file_as_s_ifreg() -> TestResult {
         "a directory did not report S_IFDIR"
     );
 
-    let _ = file_unlink_at(&path, b"/");
+    let _ = file_unlink_at(&path, b"/", &slopos_fs::vfs::Subject::KERNEL);
     pass!()
 }
 
@@ -546,8 +637,16 @@ fn dent_path(dir: &[u8], name: &[u8]) -> KVec<u8> {
 fn seed_dirents(table: FdTable, dir: &[u8]) -> bool {
     for name in DENT_ENTRIES.iter() {
         let path = dent_path(dir, name);
-        let _ = file_unlink_at(&path, b"/");
-        let fd = file_open_at(table, &path, b"/", O_WRONLY | O_CREAT, RESOLVE_FOLLOW, None);
+        let _ = file_unlink_at(&path, b"/", &slopos_fs::vfs::Subject::KERNEL);
+        let fd = file_open_at(
+            table,
+            &path,
+            b"/",
+            O_WRONLY | O_CREAT,
+            RESOLVE_FOLLOW,
+            None,
+            &slopos_fs::vfs::Subject::KERNEL,
+        );
         if fd < 0 {
             return false;
         }
@@ -560,9 +659,9 @@ fn seed_dirents(table: FdTable, dir: &[u8]) -> bool {
 fn drop_dirents(dir: &[u8]) {
     for name in DENT_ENTRIES.iter() {
         let path = dent_path(dir, name);
-        let _ = file_unlink_at(&path, b"/");
+        let _ = file_unlink_at(&path, b"/", &slopos_fs::vfs::Subject::KERNEL);
     }
-    let _ = file_rmdir_at(dir, b"/");
+    let _ = file_rmdir_at(dir, b"/", &slopos_fs::vfs::Subject::KERNEL);
 }
 
 /// The cursor is committed explicitly, as the syscall does after its
@@ -603,12 +702,20 @@ pub fn test_getdents64_resumes_across_calls() -> TestResult {
     };
     let table = scratch.table;
     let dir = join(b"dents");
-    let _ = file_mkdir_at(&dir, b"/");
+    let _ = file_mkdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL);
     if !seed_dirents(table, &dir) {
         return fail!("could not create a directory entry");
     }
 
-    let dirfd = file_open_at(table, &dir, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let dirfd = file_open_at(
+        table,
+        &dir,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(dirfd >= 0, "the directory could not be opened");
 
     let mut names = KVec::<KVec<u8>>::new();
@@ -651,7 +758,15 @@ pub fn test_getdents64_rejects_a_buffer_below_one_record() -> TestResult {
         return fail!("could not build the fixture");
     };
     let table = scratch.table;
-    let dirfd = file_open_at(table, ROOT, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let dirfd = file_open_at(
+        table,
+        ROOT,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(dirfd >= 0, "the fixture root could not be opened");
 
     let mut tiny = KVec::<u8>::zeroed(16).expect("alloc");
@@ -679,7 +794,15 @@ pub fn test_pread_leaves_the_position_where_read_moves_it() -> TestResult {
     let Some(path) = make_file(table, b"pread.txt", b"ABCDEFGH") else {
         return fail!("could not create the fixture file");
     };
-    let fd = file_open_at(table, &path, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let fd = file_open_at(
+        table,
+        &path,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(fd >= 0, "the fixture file could not be opened");
 
     let mut first = [0u8; 4];
@@ -721,7 +844,7 @@ pub fn test_pread_leaves_the_position_where_read_moves_it() -> TestResult {
     );
 
     let _ = file_close_fd(table, fd);
-    let _ = file_unlink_at(&path, b"/");
+    let _ = file_unlink_at(&path, b"/", &slopos_fs::vfs::Subject::KERNEL);
     pass!()
 }
 
@@ -769,7 +892,15 @@ pub fn test_vectored_io_spans_segments_and_the_staging_bound() -> TestResult {
         },
     ];
 
-    let fd = file_open_at(table, &path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let fd = file_open_at(
+        table,
+        &path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(fd >= 0, "the fixture file could not be opened");
 
     let written = with_user_process_context(table, || {
@@ -816,7 +947,7 @@ pub fn test_vectored_io_spans_segments_and_the_staging_bound() -> TestResult {
     );
 
     let _ = file_close_fd(table, fd);
-    let _ = file_unlink_at(&path, b"/");
+    let _ = file_unlink_at(&path, b"/", &slopos_fs::vfs::Subject::KERNEL);
     pass!()
 }
 
@@ -854,8 +985,24 @@ pub fn test_flock_exclusive_conflict_is_eagain() -> TestResult {
     let Some(path) = make_file(table, b"flock_a.txt", b"x") else {
         return fail!("could not create the fixture file");
     };
-    let first = file_open_at(table, &path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
-    let second = file_open_at(table, &path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let first = file_open_at(
+        table,
+        &path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
+    let second = file_open_at(
+        table,
+        &path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(first >= 0 && second >= 0, "the fixture opens failed");
 
     assert_eq_test!(
@@ -882,7 +1029,7 @@ pub fn test_flock_exclusive_conflict_is_eagain() -> TestResult {
     let _ = file_flock_fd(table, second, LOCK_UN as u32);
     let _ = file_close_fd(table, first);
     let _ = file_close_fd(table, second);
-    let _ = file_unlink_at(&path, b"/");
+    let _ = file_unlink_at(&path, b"/", &slopos_fs::vfs::Subject::KERNEL);
     pass!()
 }
 
@@ -902,8 +1049,24 @@ pub fn test_flock_survives_dup_and_dies_with_the_last_close() -> TestResult {
     let Some(path) = make_file(table, b"flock_b.txt", b"x") else {
         return fail!("could not create the fixture file");
     };
-    let holder = file_open_at(table, &path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
-    let rival = file_open_at(table, &path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let holder = file_open_at(
+        table,
+        &path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
+    let rival = file_open_at(
+        table,
+        &path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(holder >= 0 && rival >= 0, "the fixture opens failed");
 
     assert_eq_test!(
@@ -934,7 +1097,7 @@ pub fn test_flock_survives_dup_and_dies_with_the_last_close() -> TestResult {
 
     let _ = file_flock_fd(table, rival, LOCK_UN as u32);
     let _ = file_close_fd(table, rival);
-    let _ = file_unlink_at(&path, b"/");
+    let _ = file_unlink_at(&path, b"/", &slopos_fs::vfs::Subject::KERNEL);
     pass!()
 }
 
@@ -995,7 +1158,7 @@ slopos_testing::stest!(
 // These go through `dispatch_handler` rather than the `file_*` layer: every
 // defect below lived in what the handler computed before calling down.
 #[inline(never)]
-fn call_syscall(
+pub(crate) fn call_syscall(
     table: FdTable,
     task: &slopos_sched::task::TaskRef,
     handler: crate::syscall::common::SyscallHandler,
@@ -1017,7 +1180,7 @@ fn call_syscall(
     })
 }
 
-fn stage_cstr(table: FdTable, addr: u64, bytes: &[u8]) -> bool {
+pub(crate) fn stage_cstr(table: FdTable, addr: u64, bytes: &[u8]) -> bool {
     let Ok(mut buf) = KVec::<u8>::zeroed(bytes.len() + 1) else {
         return false;
     };
@@ -1083,7 +1246,15 @@ pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
         notdir,
         "unlink of a regular file with a trailing slash was not ENOTDIR"
     );
-    let survivor = file_open_at(table, &file, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let survivor = file_open_at(
+        table,
+        &file,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(
         survivor >= 0,
         "unlink with a trailing slash removed the file anyway"
@@ -1121,7 +1292,7 @@ pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
         let _ = file_close_fd(table, fd as i32);
     }
 
-    let _ = file_unlink_at(&file, b"/");
+    let _ = file_unlink_at(&file, b"/", &slopos_fs::vfs::Subject::KERNEL);
     drop(task);
     pass!()
 }
@@ -1167,7 +1338,15 @@ pub fn test_openat_ignores_the_dirfd_for_an_absolute_path() -> TestResult {
     }
 
     // A regular-file descriptor is equally irrelevant: previously `ENOTDIR`.
-    let filefd = file_open_at(table, &file, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let filefd = file_open_at(
+        table,
+        &file,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(filefd >= 0, "could not open the fixture file");
     let via_file = call_syscall(
         table,
@@ -1201,7 +1380,7 @@ pub fn test_openat_ignores_the_dirfd_for_an_absolute_path() -> TestResult {
     );
 
     let _ = file_close_fd(table, filefd);
-    let _ = file_unlink_at(&file, b"/");
+    let _ = file_unlink_at(&file, b"/", &slopos_fs::vfs::Subject::KERNEL);
     drop(task);
     pass!()
 }
@@ -1227,7 +1406,7 @@ pub fn test_mkdirat_modes_the_directory_it_created() -> TestResult {
     let Some(base) = map_user_pages(table, 1) else {
         return fail!("could not map user pages");
     };
-    let _ = file_rmdir_at(SHADOW, b"/");
+    let _ = file_rmdir_at(SHADOW, b"/", &slopos_fs::vfs::Subject::KERNEL);
     assert_test!(stage_cstr(table, base, SHADOW), "could not stage the path");
 
     // devfs is a registered static whose node tree is global, so a second
@@ -1255,7 +1434,13 @@ pub fn test_mkdirat_modes_the_directory_it_created() -> TestResult {
 
     let mut stat = UserFsStat::default();
     assert_eq_test!(
-        file_stat_at(SHADOW, b"/", RESOLVE_FOLLOW, &mut stat),
+        file_stat_at(
+            SHADOW,
+            b"/",
+            RESOLVE_FOLLOW,
+            &mut stat,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
         0,
         "the created directory does not resolve"
     );
@@ -1265,7 +1450,7 @@ pub fn test_mkdirat_modes_the_directory_it_created() -> TestResult {
         "the mode landed somewhere other than the created directory"
     );
 
-    let _ = file_rmdir_at(SHADOW, b"/");
+    let _ = file_rmdir_at(SHADOW, b"/", &slopos_fs::vfs::Subject::KERNEL);
     drop(task);
     pass!()
 }
@@ -1334,7 +1519,9 @@ pub fn test_utimensat_validates_before_it_no_ops() -> TestResult {
         b"/",
         Some(slopos_fs::vfs::Timestamp::from_secs(1_000_000)),
         Some(slopos_fs::vfs::Timestamp::from_secs(2_000_000)),
+        slopos_fs::vfs::TimesChange::Explicit,
         RESOLVE_FOLLOW,
+        &slopos_fs::vfs::Subject::KERNEL,
     )
     .is_err()
     {
@@ -1344,7 +1531,13 @@ pub fn test_utimensat_validates_before_it_no_ops() -> TestResult {
     let rc = call_syscall(table, &task, utimensat, [at_fdcwd, base, 0, 0, 0, 0]);
     let mut stat = UserFsStat::default();
     assert_eq_test!(
-        file_stat_at(&file, b"/", RESOLVE_FOLLOW, &mut stat),
+        file_stat_at(
+            &file,
+            b"/",
+            RESOLVE_FOLLOW,
+            &mut stat,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
         0,
         "the fixture file does not resolve"
     );
@@ -1368,7 +1561,7 @@ pub fn test_utimensat_validates_before_it_no_ops() -> TestResult {
         None => return fail!("could not enter the user address space"),
     }
 
-    let _ = file_unlink_at(&file, b"/");
+    let _ = file_unlink_at(&file, b"/", &slopos_fs::vfs::Subject::KERNEL);
     drop(task);
     pass!()
 }
@@ -1394,12 +1587,20 @@ pub fn test_getdents64_keeps_its_cursor_when_the_copy_out_faults() -> TestResult
         return fail!("could not map user pages");
     };
     let dir = join(b"dents_fault");
-    let _ = file_mkdir_at(&dir, b"/");
+    let _ = file_mkdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL);
     if !seed_dirents(table, &dir) {
         return fail!("could not create a directory entry");
     }
 
-    let dirfd = file_open_at(table, &dir, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let dirfd = file_open_at(
+        table,
+        &dir,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(dirfd >= 0, "the directory could not be opened");
 
     // A user address a long way past the one mapped page: the read runs, the
@@ -1431,7 +1632,7 @@ pub fn test_getdents64_keeps_its_cursor_when_the_copy_out_faults() -> TestResult
     }
 
     drop_dirents(&dir);
-    let _ = file_rmdir_at(&dir, b"/");
+    let _ = file_rmdir_at(&dir, b"/", &slopos_fs::vfs::Subject::KERNEL);
     drop(task);
     pass!()
 }
@@ -1455,7 +1656,15 @@ pub fn test_a_zero_byte_transfer_at_null_is_not_a_fault() -> TestResult {
     let Some(path) = make_file(table, b"zero_at_null", b"x") else {
         return fail!("could not create the file");
     };
-    let fd = file_open_at(table, &path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let fd = file_open_at(
+        table,
+        &path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(fd >= 0, "the file could not be opened");
     let fd = fd as u32 as u64;
 
@@ -1464,7 +1673,7 @@ pub fn test_a_zero_byte_transfer_at_null_is_not_a_fault() -> TestResult {
     let read = call(crate::syscall::fs::path_handlers::syscall_read, 0);
     let faulted = call(crate::syscall::fs::path_handlers::syscall_write, 1);
     let _ = file_close_fd(table, fd as i32);
-    let _ = file_unlink_at(&path, b"/");
+    let _ = file_unlink_at(&path, b"/", &slopos_fs::vfs::Subject::KERNEL);
     drop(task);
 
     assert_eq_test!(
@@ -1522,8 +1731,24 @@ pub fn test_a_write_from_an_untouched_file_mapping_reads_it_in() -> TestResult {
     ) else {
         return fail!("could not create the files");
     };
-    let source_fd = file_open_at(table, &source, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
-    let sink_fd = file_open_at(table, &sink, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let source_fd = file_open_at(
+        table,
+        &source,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
+    let sink_fd = file_open_at(
+        table,
+        &sink,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(
         source_fd >= 0 && sink_fd >= 0,
         "the files could not be opened"
@@ -1563,8 +1788,8 @@ pub fn test_a_write_from_an_untouched_file_mapping_reads_it_in() -> TestResult {
     }
     let _ = file_close_fd(table, source_fd);
     let _ = file_close_fd(table, sink_fd);
-    let _ = file_unlink_at(&source, b"/");
-    let _ = file_unlink_at(&sink, b"/");
+    let _ = file_unlink_at(&source, b"/", &slopos_fs::vfs::Subject::KERNEL);
+    let _ = file_unlink_at(&sink, b"/", &slopos_fs::vfs::Subject::KERNEL);
     drop(task);
 
     assert_test!(mapped.is_some(), "the file could not be mapped");

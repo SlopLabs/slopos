@@ -83,7 +83,12 @@ pub fn test_resolve_relative_against_cwd() -> TestResult {
         return TestResult::Fail;
     }
 
-    let resolved = match resolve_path_at(b"main.rs", cwd_nul.as_slice(), RESOLVE_FOLLOW) {
+    let resolved = match resolve_path_at(
+        b"main.rs",
+        cwd_nul.as_slice(),
+        RESOLVE_FOLLOW,
+        &crate::vfs::Subject::KERNEL,
+    ) {
         Ok(r) => r,
         Err(e) => return slopos_testing::fail!("a relative path did not resolve: {:?}", e),
     };
@@ -100,6 +105,8 @@ pub fn test_resolve_relative_against_cwd() -> TestResult {
         dir.as_slice(),
         crate::vfs::VfsOpenFlags::read_only(),
         RESOLVE_FOLLOW,
+        &crate::vfs::Subject::KERNEL,
+        None,
     ) {
         Ok(handle) => {
             let mut buf = [0u8; 32];
@@ -118,7 +125,12 @@ pub fn test_resolve_relative_against_cwd() -> TestResult {
     let Ok(via_parent) = joined(parent_probe.as_slice(), b"main.rs") else {
         return TestResult::Fail;
     };
-    match resolve_path_at(via_parent.as_slice(), dir.as_slice(), RESOLVE_FOLLOW) {
+    match resolve_path_at(
+        via_parent.as_slice(),
+        dir.as_slice(),
+        RESOLVE_FOLLOW,
+        &crate::vfs::Subject::KERNEL,
+    ) {
         Ok(r) if r.inode == direct.inode => {}
         other => return slopos_testing::fail!("`..` from a cwd misresolved: {:?}", other.is_ok()),
     }
@@ -162,13 +174,23 @@ fn follows_file_links(dir: &[u8]) -> TestResult {
     };
     let _ = vfs_unlink(rel_link.as_slice());
     let _ = vfs_unlink(abs_link.as_slice());
-    if let Err(e) = vfs_symlink_at(b"target.txt", rel_link.as_slice(), b"/") {
+    if let Err(e) = vfs_symlink_at(
+        b"target.txt",
+        rel_link.as_slice(),
+        b"/",
+        &crate::vfs::Subject::KERNEL,
+    ) {
         return match e {
             VfsError::NotSupported => TestResult::Skipped,
             other => slopos_testing::fail!("relative symlink creation failed: {:?}", other),
         };
     }
-    if let Err(e) = vfs_symlink_at(file.as_slice(), abs_link.as_slice(), b"/") {
+    if let Err(e) = vfs_symlink_at(
+        file.as_slice(),
+        abs_link.as_slice(),
+        b"/",
+        &crate::vfs::Subject::KERNEL,
+    ) {
         return slopos_testing::fail!("absolute symlink creation failed: {:?}", e);
     }
 
@@ -182,7 +204,12 @@ fn follows_file_links(dir: &[u8]) -> TestResult {
         Ok(stat) if stat.file_type == FileType::Regular => {}
         other => return slopos_testing::fail!("stat through a symlink: {:?}", other.is_ok()),
     }
-    match vfs_stat_at(rel_link.as_slice(), b"/", RESOLVE_NOFOLLOW_FINAL) {
+    match vfs_stat_at(
+        rel_link.as_slice(),
+        b"/",
+        RESOLVE_NOFOLLOW_FINAL,
+        &crate::vfs::Subject::KERNEL,
+    ) {
         Ok(stat) if stat.file_type == FileType::Symlink => TestResult::Pass,
         other => slopos_testing::fail!(
             "NOFOLLOW_FINAL did not answer the link: {:?}",
@@ -209,7 +236,12 @@ fn follows_dir_link_midpath(dir: &[u8]) -> TestResult {
         return TestResult::Fail;
     };
     let _ = vfs_unlink(dir_link.as_slice());
-    if let Err(e) = vfs_symlink_at(b"real", dir_link.as_slice(), b"/") {
+    if let Err(e) = vfs_symlink_at(
+        b"real",
+        dir_link.as_slice(),
+        b"/",
+        &crate::vfs::Subject::KERNEL,
+    ) {
         return slopos_testing::fail!("directory symlink creation failed: {:?}", e);
     }
     let Ok(through_link) = joined(dir_link.as_slice(), b"inner.txt") else {
@@ -219,7 +251,7 @@ fn follows_dir_link_midpath(dir: &[u8]) -> TestResult {
         return slopos_testing::fail!("a symlinked directory was not traversed mid-path");
     }
 
-    match resolve_parent_at(through_link.as_slice(), b"/") {
+    match resolve_parent_at(through_link.as_slice(), b"/", &crate::vfs::Subject::KERNEL) {
         Ok((parent, name)) => {
             if name.as_bytes() != b"inner.txt" {
                 return slopos_testing::fail!("resolve_parent lost the final component");
@@ -248,7 +280,12 @@ pub fn test_resolve_symlink_loop_is_eloop() -> TestResult {
         return TestResult::Fail;
     };
     let _ = vfs_unlink(link.as_slice());
-    if let Err(e) = vfs_symlink_at(b"self.lnk", link.as_slice(), b"/") {
+    if let Err(e) = vfs_symlink_at(
+        b"self.lnk",
+        link.as_slice(),
+        b"/",
+        &crate::vfs::Subject::KERNEL,
+    ) {
         return match e {
             VfsError::NotSupported => TestResult::Skipped,
             other => slopos_testing::fail!("self-link creation failed: {:?}", other),
@@ -296,7 +333,7 @@ fn build_chain(dir: &[u8], links: usize, payload: &[u8]) -> VfsResult<KVec<u8>> 
             chain_name(i + 1, &mut next_buf)
         };
         let _ = vfs_unlink(link.as_slice());
-        vfs_symlink_at(next, link.as_slice(), b"/")?;
+        vfs_symlink_at(next, link.as_slice(), b"/", &crate::vfs::Subject::KERNEL)?;
     }
     let mut head_buf = [0u8; 4];
     joined(dir, chain_name(0, &mut head_buf))
@@ -591,7 +628,9 @@ pub fn test_set_times_is_observable_through_stat() -> TestResult {
         b"/",
         Some(atime),
         Some(mtime),
+        crate::vfs::TimesChange::Explicit,
         RESOLVE_FOLLOW,
+        &crate::vfs::Subject::KERNEL,
     ) {
         return slopos_testing::fail!("utimens on a RAM file: {:?}", e);
     }
@@ -609,7 +648,17 @@ pub fn test_set_times_is_observable_through_stat() -> TestResult {
 
     // `None` is `UTIME_OMIT`: the other field must not move.
     let later = Timestamp::from_secs(3_000_000);
-    if vfs_utimens(file.as_slice(), b"/", None, Some(later), RESOLVE_FOLLOW).is_err() {
+    if vfs_utimens(
+        file.as_slice(),
+        b"/",
+        None,
+        Some(later),
+        crate::vfs::TimesChange::Explicit,
+        RESOLVE_FOLLOW,
+        &crate::vfs::Subject::KERNEL,
+    )
+    .is_err()
+    {
         return slopos_testing::fail!("a partial utimens was refused");
     }
     let stat = match vfs_stat(file.as_slice()) {
@@ -722,13 +771,23 @@ fn build_dotdot_fixture(dir: &[u8]) -> TestResult {
     };
     let _ = vfs_unlink(rel_link.as_slice());
     let _ = vfs_unlink(abs_link.as_slice());
-    if let Err(e) = vfs_symlink_at(b"real/inner", rel_link.as_slice(), b"/") {
+    if let Err(e) = vfs_symlink_at(
+        b"real/inner",
+        rel_link.as_slice(),
+        b"/",
+        &crate::vfs::Subject::KERNEL,
+    ) {
         return match e {
             VfsError::NotSupported => TestResult::Skipped,
             other => slopos_testing::fail!("relative symlink creation failed: {:?}", other),
         };
     }
-    if let Err(e) = vfs_symlink_at(inner.as_slice(), abs_link.as_slice(), b"/") {
+    if let Err(e) = vfs_symlink_at(
+        inner.as_slice(),
+        abs_link.as_slice(),
+        b"/",
+        &crate::vfs::Subject::KERNEL,
+    ) {
         return slopos_testing::fail!("absolute symlink creation failed: {:?}", e);
     }
     TestResult::Pass

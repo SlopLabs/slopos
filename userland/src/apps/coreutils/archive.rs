@@ -370,7 +370,7 @@ fn build_header(
     block[157..157 + link.len()].copy_from_slice(link);
     block[257..263].copy_from_slice(b"ustar\0");
     block[263..265].copy_from_slice(b"00");
-    // SlopOS is single-user at uid 0, so every member belongs to root.
+    // Every member is recorded as root's, as a reproducible archive's are.
     block[265..269].copy_from_slice(b"root");
     block[297..301].copy_from_slice(b"root");
 

@@ -1,86 +1,113 @@
 //! Credentials, resource limits and the process-wide odds and ends.
 //!
-//! SlopOS is single-user. The only uid and gid that exist are 0, and the
-//! kernel has no privilege principal to switch between, so every *setter*
-//! below succeeds for 0 and answers `EPERM` for anything else: there is
-//! nothing to become. That is the whole of the reasoning, stated once.
+//! The ids are the kernel's, process-wide as POSIX has them, so no call here
+//! needs to reach the other threads.
 
 use core::ffi::{c_int, c_uint, c_ulong};
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::errno::{EINVAL, ENOSYS, EPERM, errno_set};
+use slopos_abi::syscall::{
+    SYSCALL_GETGROUPS, SYSCALL_GETRESGID, SYSCALL_GETRESUID, SYSCALL_SETGID, SYSCALL_SETGROUPS,
+    SYSCALL_SETREGID, SYSCALL_SETRESGID, SYSCALL_SETRESUID, SYSCALL_SETREUID, SYSCALL_SETUID,
+};
+
+use crate::errno::{EINVAL, ENOSYS, errno_set};
+use crate::pal::raw::{syscall1, syscall2, syscall3};
 use crate::pal::{Pal, Sys};
 use crate::types::{gid_t, itimerval, pid_t, rlimit, rusage, uid_t};
 
-/// The only principal that exists.
-const ROOT: u32 = 0;
+/// `(uid_t)-1`: an id the set*id calls leave alone.
+const KEEP: u64 = u32::MAX as u64;
 
-#[inline]
-fn only_root(id: u32) -> c_int {
-    if id == ROOT {
-        0
-    } else {
-        errno_set(EPERM.raw());
-        -1
+fn answer(ret: u64) -> c_int {
+    match crate::demux(ret) {
+        Ok(value) => value as c_int,
+        Err(e) => {
+            errno_set(e.errno());
+            -1
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setuid(uid: uid_t) -> c_int {
-    only_root(uid)
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn seteuid(uid: uid_t) -> c_int {
-    only_root(uid)
+    answer(syscall1(SYSCALL_SETUID, u64::from(uid)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setgid(gid: gid_t) -> c_int {
-    only_root(gid)
+    answer(syscall1(SYSCALL_SETGID, u64::from(gid)))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seteuid(uid: uid_t) -> c_int {
+    answer(syscall3(SYSCALL_SETRESUID, KEEP, u64::from(uid), KEEP))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setegid(gid: gid_t) -> c_int {
-    only_root(gid)
+    answer(syscall3(SYSCALL_SETRESGID, KEEP, u64::from(gid), KEEP))
 }
 
-/// The supplementary set is fixed at `{0}`, so a call that asks for exactly
-/// that — or for nothing — succeeds and anything else is `EPERM`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setreuid(ruid: uid_t, euid: uid_t) -> c_int {
+    answer(syscall2(SYSCALL_SETREUID, u64::from(ruid), u64::from(euid)))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setregid(rgid: gid_t, egid: gid_t) -> c_int {
+    answer(syscall2(SYSCALL_SETREGID, u64::from(rgid), u64::from(egid)))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setresuid(ruid: uid_t, euid: uid_t, suid: uid_t) -> c_int {
+    answer(syscall3(
+        SYSCALL_SETRESUID,
+        u64::from(ruid),
+        u64::from(euid),
+        u64::from(suid),
+    ))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setresgid(rgid: gid_t, egid: gid_t, sgid: gid_t) -> c_int {
+    answer(syscall3(
+        SYSCALL_SETRESGID,
+        u64::from(rgid),
+        u64::from(egid),
+        u64::from(sgid),
+    ))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getresuid(ruid: *mut uid_t, euid: *mut uid_t, suid: *mut uid_t) -> c_int {
+    answer(syscall3(
+        SYSCALL_GETRESUID,
+        ruid as u64,
+        euid as u64,
+        suid as u64,
+    ))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getresgid(rgid: *mut gid_t, egid: *mut gid_t, sgid: *mut gid_t) -> c_int {
+    answer(syscall3(
+        SYSCALL_GETRESGID,
+        rgid as u64,
+        egid as u64,
+        sgid as u64,
+    ))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setgroups(ngroups: usize, ptr: *const gid_t) -> c_int {
-    if ngroups == 0 {
-        return 0;
-    }
-    if ptr.is_null() {
-        errno_set(EINVAL.raw());
-        return -1;
-    }
-    for i in 0..ngroups {
-        if *ptr.add(i) != ROOT {
-            errno_set(EPERM.raw());
-            return -1;
-        }
-    }
-    0
+    answer(syscall2(SYSCALL_SETGROUPS, ngroups as u64, ptr as u64))
 }
 
-/// One group, gid 0. A zero `ngroups` is the sizing query, as POSIX has it.
+/// A zero `ngroups` is the sizing query, as POSIX has it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getgroups(ngroups: c_int, ptr: *mut gid_t) -> c_int {
-    if ngroups < 0 {
-        errno_set(EINVAL.raw());
-        return -1;
-    }
-    if ngroups == 0 {
-        return 1;
-    }
-    if ptr.is_null() {
-        errno_set(EINVAL.raw());
-        return -1;
-    }
-    *ptr = ROOT;
-    1
+    answer(syscall2(SYSCALL_GETGROUPS, ngroups as u64, ptr as u64))
 }
 
 /// `getpgrp()` is `getpgid(0)`, which is all it has ever been.
@@ -163,6 +190,8 @@ pub unsafe extern "C" fn setitimer(
 
 pub const PR_GET_DUMPABLE: c_int = 3;
 pub const PR_SET_DUMPABLE: c_int = 4;
+pub const PR_SET_NO_NEW_PRIVS: c_int = 38;
+pub const PR_GET_NO_NEW_PRIVS: c_int = 39;
 
 const DUMPABLE_UNSET: u8 = 2;
 static DUMPABLE: AtomicU8 = AtomicU8::new(DUMPABLE_UNSET);
@@ -179,12 +208,22 @@ fn dumpable() -> bool {
 }
 
 /// `prctl(2)`, kept by libc: the kernel has no counterpart, and only the
-/// dumpable flag has state to keep. Any other option — `PR_SET_NAME`,
+/// dumpable flag has state to keep. No exec ever honours a set-ID bit, so
+/// every process already has no new privileges to gain: asking reports 1 and
+/// setting it changes nothing. Any other option — `PR_SET_NAME`,
 /// `PR_SET_PDEATHSIG` — is `ENOSYS`; a thread name is kept through
 /// `pthread_setname_np`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn prctl(option: c_int, mut args: ...) -> c_int {
     match option {
+        PR_GET_NO_NEW_PRIVS => 1,
+        PR_SET_NO_NEW_PRIVS => match args.next_arg::<c_ulong>() {
+            1 => 0,
+            _ => {
+                errno_set(EINVAL.raw());
+                -1
+            }
+        },
         PR_GET_DUMPABLE => c_int::from(dumpable()),
         PR_SET_DUMPABLE => match args.next_arg::<c_ulong>() {
             value @ (0 | 1) => {

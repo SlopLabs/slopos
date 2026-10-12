@@ -117,6 +117,15 @@ pub enum Capability {
     /// ceiling. A raw read bypasses every permission above it and recovers
     /// what a filesystem freed.
     RawBlock,
+    /// Taking a uid or gid the process does not already hold, and setting
+    /// the supplementary groups. Moving among its own real, effective and
+    /// saved ids needs nothing.
+    SetId,
+    /// Bypassing permission bits: reading and writing any file, searching any
+    /// directory, executing anything with an execute bit, and owning every
+    /// file for `chmod`, `chown`, `utimensat` and the sticky bit. uid 0 owns
+    /// the system's files and gets none of this from its uid.
+    DacOverride,
 }
 
 impl Capability {
@@ -147,6 +156,8 @@ impl Capability {
             Self::BootEntry => caps::BOOT_ENTRY,
             Self::NetAdmin => caps::NET_ADMIN,
             Self::RawBlock => caps::RAW_BLOCK,
+            Self::SetId => caps::SET_ID,
+            Self::DacOverride => caps::DAC_OVERRIDE,
         }
     }
 
@@ -182,6 +193,8 @@ impl Capability {
             Self::BootEntry => "BootEntry",
             Self::NetAdmin => "NetAdmin",
             Self::RawBlock => "RawBlock",
+            Self::SetId => "SetId",
+            Self::DacOverride => "DacOverride",
         }
     }
 
@@ -209,6 +222,8 @@ impl Capability {
         Self::BootEntry,
         Self::NetAdmin,
         Self::RawBlock,
+        Self::SetId,
+        Self::DacOverride,
     ];
 }
 

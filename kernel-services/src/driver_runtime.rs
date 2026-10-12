@@ -20,7 +20,7 @@ slopos_service_core::define_service! {
         current_task_pgid() -> u32;
         current_task_sid() -> u32;
         current_task_is_kernel() -> bool;
-        current_task_is_system() -> bool;
+        current_task_cred() -> Option<slopos_ostd::process::Cred>;
         current_task_holds(cap: slopos_ostd::authority::Capability) -> bool;
         current_task_account() -> slopos_ostd::process::AccountId;
         current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex>;

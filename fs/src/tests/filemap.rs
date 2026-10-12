@@ -136,9 +136,17 @@ impl FileSystem for TestFs {
         with_ext2(|fs| fs.write_file(inode as u32, offset, buf))
     }
 
-    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
+    fn create_owned(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        file_type: FileType,
+        owner: crate::vfs::Owner,
+    ) -> VfsResult<InodeId> {
         with_ext2(|fs| match file_type {
-            FileType::Regular => fs.create_file(parent as u32, name).map(|i| i as InodeId),
+            FileType::Regular => fs
+                .create_owned(parent as u32, name, crate::ext2::NewInode::File, owner)
+                .map(|i| i as InodeId),
             _ => Err(Ext2Error::InvalidInode),
         })
     }
@@ -1638,8 +1646,14 @@ impl FileSystem for ShortFs {
         TEST_FS.write(inode, offset, buf)
     }
 
-    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
-        TEST_FS.create(parent, name, file_type)
+    fn create_owned(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        file_type: FileType,
+        owner: crate::vfs::Owner,
+    ) -> VfsResult<InodeId> {
+        TEST_FS.create_owned(parent, name, file_type, owner)
     }
 
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {

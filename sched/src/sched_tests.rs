@@ -7781,7 +7781,7 @@ pub fn test_quota_process_ceiling_refuses_and_refunds() -> TestResult {
     let mut children = slopos_ostd::KVec::new();
     let mut spawned = 0u32;
     for _ in 0..CEILING + 3 {
-        match process_spawn(None, account) {
+        match process_spawn(None, account, slopos_ostd::process::Cred::ROOT) {
             Ok(child) => {
                 spawned += 1;
                 if children.push(child).is_err() {
@@ -7902,7 +7902,9 @@ pub fn test_quota_charge_cost() -> TestResult {
     let mut chain = slopos_ostd::KVec::new();
     let mut deepest = shallow.account();
     loop {
-        let Ok(child) = slopos_ostd::process::process_spawn(None, deepest) else {
+        let Ok(child) =
+            slopos_ostd::process::process_spawn(None, deepest, slopos_ostd::process::Cred::ROOT)
+        else {
             break;
         };
         let candidate = child.account();
@@ -8036,7 +8038,9 @@ pub fn test_quota_a_spawn_past_the_depth_bound_is_still_charged() -> TestResult 
     let mut spawner = scratch.account();
     let mut deepest = scratch.account();
     for _ in 0..SPAWNS {
-        let Ok(child) = slopos_ostd::process::process_spawn(None, deepest) else {
+        let Ok(child) =
+            slopos_ostd::process::process_spawn(None, deepest, slopos_ostd::process::Cred::ROOT)
+        else {
             break;
         };
         spawner = deepest;

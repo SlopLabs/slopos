@@ -6,7 +6,7 @@ use slopos_ostd::{KBox, KVec};
 
 use crate::MAX_NAME_LEN;
 use crate::vfs::{
-    FileStat, FileSystem, FileType, FsStats, InodeId, Timestamp, VfsError, VfsResult,
+    FileStat, FileSystem, FileType, FsStats, InodeId, Owner, Timestamp, VfsError, VfsResult,
 };
 use slopos_ostd::sync::SpinLock;
 use slopos_ostd::sync::lock_tracking::LockClassKey;
@@ -402,6 +402,7 @@ struct RamInode {
     dir_entries: KVec<DirEntry>,
     parent: InodeId,
     mode: u16,
+    owner: Owner,
     nlink: u32,
     atime: Timestamp,
     mtime: Timestamp,
@@ -421,6 +422,7 @@ impl RamInode {
             dir_entries: KVec::new(),
             parent: 0,
             mode: 0o644,
+            owner: Owner::ROOT,
             nlink: 1,
             atime: Timestamp::UNSET,
             mtime: Timestamp::UNSET,
@@ -441,6 +443,7 @@ impl RamInode {
         self.dir_entries.shrink_to_fit();
         self.parent = 0;
         self.mode = 0o644;
+        self.owner = Owner::ROOT;
         self.nlink = 1;
         self.atime = Timestamp::UNSET;
         self.mtime = Timestamp::UNSET;
@@ -873,8 +876,8 @@ impl FileSystem for RamFs {
                 size: ram_inode.data_len() as u64,
                 mode: ram_inode.mode,
                 nlink: ram_inode.nlink,
-                uid: 0,
-                gid: 0,
+                uid: ram_inode.owner.uid,
+                gid: ram_inode.owner.gid,
                 atime: ram_inode.atime,
                 mtime: ram_inode.mtime,
                 ctime: ram_inode.ctime,
@@ -920,7 +923,13 @@ impl FileSystem for RamFs {
         })
     }
 
-    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
+    fn create_owned(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        file_type: FileType,
+        owner: Owner,
+    ) -> VfsResult<InodeId> {
         let max_inodes = ramfs_max_inodes();
         self.with_inner_mut(|inner| {
             {
@@ -944,6 +953,7 @@ impl FileSystem for RamFs {
                 new_inode.file_type = file_type;
                 new_inode.dir_entries.clear();
                 new_inode.parent = parent;
+                new_inode.owner = owner;
 
                 match file_type {
                     FileType::Directory => {
@@ -1202,6 +1212,21 @@ impl FileSystem for RamFs {
         })
     }
 
+    fn set_owner(&self, inode: InodeId, uid: Option<u32>, gid: Option<u32>) -> VfsResult<()> {
+        self.with_inner_mut(|inner| {
+            let ram_inode = inner.get_inode_mut(inode)?;
+            if ram_inode.sealed {
+                return Err(VfsError::PermissionDenied);
+            }
+            ram_inode.owner = Owner {
+                uid: uid.unwrap_or(ram_inode.owner.uid),
+                gid: gid.unwrap_or(ram_inode.owner.gid),
+            };
+            stamp(&mut ram_inode.ctime);
+            Ok(())
+        })
+    }
+
     fn readlink(&self, inode: InodeId, buf: &mut [u8]) -> VfsResult<usize> {
         self.with_inner(|inner| {
             let ram_inode = inner.get_inode(inode)?;
@@ -1214,7 +1239,13 @@ impl FileSystem for RamFs {
 
     /// The target is the inode's data, which is what makes `stat().size` its
     /// length — the resolver sizes its read buffer from that.
-    fn symlink(&self, parent: InodeId, name: &[u8], target: &[u8]) -> VfsResult<InodeId> {
+    fn symlink(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        target: &[u8],
+        owner: Owner,
+    ) -> VfsResult<InodeId> {
         if target.is_empty() || target.len() > crate::MAX_PATH_LEN {
             return Err(VfsError::InvalidArgument);
         }
@@ -1249,6 +1280,7 @@ impl FileSystem for RamFs {
                 new_inode.dir_entries.clear();
                 new_inode.parent = parent;
                 new_inode.mode = 0o777;
+                new_inode.owner = owner;
                 new_inode.nlink = 1;
                 if new_inode
                     .data

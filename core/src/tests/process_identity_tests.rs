@@ -189,7 +189,7 @@ pub fn test_fileio_refuses_a_process_with_no_table() -> TestResult {
     let mut read_fd: c_int = -1;
     let mut write_fd: c_int = -1;
     let pipe_rc = file_pipe_create(table, 0, &mut read_fd, &mut write_fd);
-    let open_rc = file_open_for_process(table, b"/", O_RDONLY);
+    let open_rc = file_open_for_process(table, b"/", O_RDONLY, &slopos_fs::vfs::Subject::KERNEL);
 
     let after = kernel_table_open_fds();
     if let Some(handle) = process.handle() {

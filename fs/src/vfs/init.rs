@@ -23,6 +23,9 @@ static RAMFS_TMP_STATIC: RamFs = RamFs::new_const(lock_class!("RAMFS_TMP", LOCK_
 static RAMFS_SHM_STATIC: RamFs = RamFs::new_const(lock_class!("RAMFS_SHM", LOCK_LEVEL_RESOURCE));
 static DEVFS_STATIC: DevFs = DevFs::new();
 
+/// `/tmp` and `/dev/shm`: anyone may create there, and only an owner remove.
+const SHARED_DIR_MODE: u16 = 0o1777;
+
 /// How many ramfs instances `mount(2)` may have outstanding at once.
 pub const RAMFS_POOL_LEN: usize = 4;
 
@@ -508,6 +511,9 @@ pub fn vfs_init_builtin_filesystems_with(root: RootBacking) -> VfsResult<()> {
     mount(b"/dev", &DEVFS_STATIC, 0)?;
     // Where `shm_open` puts its objects, as glibc does.
     mount(b"/dev/shm", &RAMFS_SHM_STATIC, 0)?;
+    for shared in [&RAMFS_TMP_STATIC, &RAMFS_SHM_STATIC] {
+        shared.set_mode(shared.root_inode(), SHARED_DIR_MODE)?;
+    }
 
     Ok(())
 }
@@ -569,8 +575,12 @@ fn pin_dir(path: &[u8]) -> VfsResult<()> {
 
 /// `path` when it is a directory, not a symlink to one.
 fn directory_itself(path: &[u8]) -> VfsResult<crate::vfs::path::ResolvedPath> {
-    let held =
-        crate::vfs::path::resolve_path_at(path, b"/", crate::vfs::path::RESOLVE_NOFOLLOW_FINAL)?;
+    let held = crate::vfs::path::resolve_path_at(
+        path,
+        b"/",
+        crate::vfs::path::RESOLVE_NOFOLLOW_FINAL,
+        &crate::vfs::Subject::KERNEL,
+    )?;
     if held.fs.stat(held.inode)?.file_type != crate::vfs::traits::FileType::Directory {
         return Err(VfsError::NotDirectory);
     }

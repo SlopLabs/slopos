@@ -133,6 +133,7 @@ fn write_through_vfs(table: FdTable, path: &[u8], bytes: usize, chunk: &[u8]) ->
         O_WRONLY | O_CREAT | O_TRUNC,
         RESOLVE_FOLLOW,
         Some(0o644),
+        &crate::vfs::Subject::KERNEL,
     );
     if fd < 0 {
         return fd as isize;
@@ -505,6 +506,7 @@ fn cap_fill(table: FdTable, path: &mut [u8], base: usize) -> Result<usize, &'sta
             O_WRONLY | O_CREAT,
             RESOLVE_FOLLOW,
             Some(0o644),
+            &crate::vfs::Subject::KERNEL,
         );
         if fd < 0 {
             return Err("a create in the large directory failed");
@@ -623,7 +625,15 @@ fn cap_walk() -> Result<(u64, u64, usize), &'static str> {
 /// Bytes of `path` read back through the descriptor path a `read(2)` takes.
 #[inline(never)]
 fn read_head(table: FdTable, path: &[u8], out: &mut [u8]) -> Result<usize, &'static str> {
-    let fd = file_open_at(table, path, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let fd = file_open_at(
+        table,
+        path,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &crate::vfs::Subject::KERNEL,
+    );
     if fd < 0 {
         return Err("opening a staged file failed");
     }

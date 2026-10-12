@@ -22,7 +22,10 @@ use crate::pipe;
 use crate::pipe::FifoNode;
 use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS, fifo_open, pipe_backings};
 use crate::vfs::path::{RESOLVE_FOLLOW, RESOLVE_MUST_BE_DIR};
-use crate::vfs::{FileType, FsStats, InodeId, VfsError, vfs_mkdir_at, vfs_unlink_at};
+use crate::vfs::{
+    FileType, FsStats, InodeId, InodePerm, Perm, Subject, TimesChange, VfsError, vfs_mkdir_at,
+    vfs_unlink_at,
+};
 use crate::vfs_file_ops::{
     VFS_FILE_OPS, vfs_dir_handle_still_names, vfs_file_inode, vfs_file_statfs,
     vfs_open_dir_handle_at, vfs_open_handle_flags_at, vnode_backing,
@@ -122,8 +125,13 @@ fn current_socket_ops() -> Option<&'static dyn FileOps> {
     with_open_files(|state| external_socket_ops(&state.external_ops))
 }
 
-pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c_int {
-    file_open_at(table, path, b"/", posix_flags, RESOLVE_FOLLOW, None)
+pub fn file_open_for_process(
+    table: FdTable,
+    path: &[u8],
+    posix_flags: u32,
+    who: &Subject,
+) -> c_int {
+    file_open_at(table, path, b"/", posix_flags, RESOLVE_FOLLOW, None, who)
 }
 
 /// `openat(2)`.
@@ -134,6 +142,7 @@ pub fn file_open_at(
     posix_flags: u32,
     resolve_flags: u32,
     create_mode: Option<u16>,
+    who: &Subject,
 ) -> c_int {
     let flags = posix_to_open_mode(posix_flags);
     if !flags.intersects(OpenMode::READ | OpenMode::WRITE) {
@@ -210,20 +219,14 @@ pub fn file_open_at(
         create,
         exclusive,
         truncate,
+        readable: flags.contains(OpenMode::READ),
         writable,
     };
-    let existed = create_mode.is_none()
-        || !create
-        || match crate::vfs::vfs_stat_at(path, cwd, RESOLVE_FOLLOW) {
-            Ok(_) => true,
-            Err(VfsError::NotFound) => false,
-            Err(e) => return e.to_errno().raw() as _,
-        };
     let directory_only = resolve_flags & RESOLVE_MUST_BE_DIR != 0;
     let vfs_handle = if directory_only {
         None
     } else {
-        match vfs_open_handle_flags_at(path, cwd, open_flags, resolve_flags) {
+        match vfs_open_handle_flags_at(path, cwd, open_flags, resolve_flags, who, create_mode) {
             Ok(opened) if opened.fifo => return open_fifo_fd(table, opened.handle, flags),
             Ok(opened) => Some(opened.handle),
             // `open(dir, O_RDONLY)` is how a `dirfd` and `getdents64` are
@@ -239,20 +242,12 @@ pub fn file_open_at(
             if writable || create {
                 return Errno::EISDIR.raw() as _;
             }
-            match open_directory_handle(path, cwd, resolve_flags) {
+            match open_directory_handle(path, cwd, resolve_flags, who) {
                 Ok(pair) => pair,
                 Err(e) => return e.raw() as _,
             }
         }
     };
-
-    // `create` reports the request, not the outcome, so the pre-open lookup is
-    // what separates "created by this call" from "opened something existing".
-    if let Some(mode) = create_mode.filter(|_| create && !existed)
-        && let Some((fs, inode)) = vfs_file_inode(vfs_handle)
-    {
-        let _ = fs.set_mode(inode, mode);
-    }
 
     let Some(backing) = vnode_backing(vfs_handle, table.account()) else {
         return Errno::ENFILE.raw() as _;
@@ -313,8 +308,9 @@ fn open_directory_handle(
     path: &[u8],
     cwd: &[u8],
     resolve_flags: u32,
+    who: &Subject,
 ) -> Result<(usize, Option<KVec<u8>>), Errno> {
-    let (handle, canon) = vfs_open_dir_handle_at(path, cwd, resolve_flags)?;
+    let (handle, canon) = vfs_open_dir_handle_at(path, cwd, resolve_flags, who)?;
     let bytes = canon.as_bytes();
     let mut owned = match KVec::<u8>::zeroed(bytes.len()) {
         Ok(v) => v,
@@ -588,30 +584,35 @@ pub fn file_get_size_fd(table: FdTable, fd: c_int) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-pub fn file_unlink_at(path: &[u8], cwd: &[u8]) -> c_int {
-    errno_of(vfs_unlink_at(path, cwd))
+pub fn file_unlink_at(path: &[u8], cwd: &[u8], who: &Subject) -> c_int {
+    errno_of(vfs_unlink_at(path, cwd, who))
 }
 
-pub fn file_rmdir_at(path: &[u8], cwd: &[u8]) -> c_int {
-    errno_of(crate::vfs::vfs_rmdir_at(path, cwd))
+pub fn file_rmdir_at(path: &[u8], cwd: &[u8], who: &Subject) -> c_int {
+    errno_of(crate::vfs::vfs_rmdir_at(path, cwd, who))
 }
 
-pub fn file_symlink_at(target: &[u8], link_path: &[u8], cwd: &[u8]) -> c_int {
-    errno_of(crate::vfs::vfs_symlink_at(target, link_path, cwd))
+pub fn file_symlink_at(target: &[u8], link_path: &[u8], cwd: &[u8], who: &Subject) -> c_int {
+    errno_of(crate::vfs::vfs_symlink_at(target, link_path, cwd, who))
 }
 
-pub fn file_readlink_at(path: &[u8], cwd: &[u8], buf: &mut [u8]) -> isize {
-    match crate::vfs::vfs_readlink_at(path, cwd, buf) {
+pub fn file_readlink_at(path: &[u8], cwd: &[u8], buf: &mut [u8], who: &Subject) -> isize {
+    match crate::vfs::vfs_readlink_at(path, cwd, buf, who) {
         Ok(n) => n as isize,
         Err(e) => e.to_errno().raw() as isize,
     }
 }
 
-pub fn file_truncate_at(path: &[u8], cwd: &[u8], length: u64) -> c_int {
-    let resolved = match crate::vfs::path::resolve_path_at(path, cwd, RESOLVE_FOLLOW) {
+pub fn file_truncate_at(path: &[u8], cwd: &[u8], length: u64, who: &Subject) -> c_int {
+    let resolved = match crate::vfs::path::resolve_path_at(path, cwd, RESOLVE_FOLLOW, who) {
         Ok(r) => r,
         Err(e) => return e.to_errno().raw() as _,
     };
+    if !resolved.perm.is_dir
+        && let Err(e) = resolved.perm.check(who, Perm::Write)
+    {
+        return e.to_errno().raw() as _;
+    }
     truncate_resolved(resolved.fs, resolved.inode, resolved.read_only(), length)
 }
 
@@ -642,8 +643,38 @@ fn truncate_resolved(
     errno_of(fs.truncate(inode, length))
 }
 
-pub fn file_chmod_at(path: &[u8], cwd: &[u8], mode: u16, resolve_flags: u32) -> c_int {
-    errno_of(crate::vfs::vfs_set_mode_at(path, cwd, mode, resolve_flags))
+pub fn file_chmod_at(
+    path: &[u8],
+    cwd: &[u8],
+    mode: u16,
+    resolve_flags: u32,
+    who: &Subject,
+) -> c_int {
+    errno_of(crate::vfs::vfs_set_mode_at(
+        path,
+        cwd,
+        mode,
+        resolve_flags,
+        who,
+    ))
+}
+
+pub fn file_chown_at(
+    path: &[u8],
+    cwd: &[u8],
+    uid: Option<u32>,
+    gid: Option<u32>,
+    resolve_flags: u32,
+    who: &Subject,
+) -> c_int {
+    errno_of(crate::vfs::vfs_set_owner_at(
+        path,
+        cwd,
+        uid,
+        gid,
+        resolve_flags,
+        who,
+    ))
 }
 
 fn errno_of(result: crate::vfs::VfsResult<()>) -> c_int {
@@ -653,8 +684,8 @@ fn errno_of(result: crate::vfs::VfsResult<()>) -> c_int {
     }
 }
 
-pub fn file_mkdir_at(path: &[u8], cwd: &[u8]) -> c_int {
-    match vfs_mkdir_at(path, cwd, None) {
+pub fn file_mkdir_at(path: &[u8], cwd: &[u8], who: &Subject) -> c_int {
+    match vfs_mkdir_at(path, cwd, None, who) {
         Ok(()) => 0,
         Err(VfsError::AlreadyExists) => Errno::EEXIST.raw() as _,
         Err(VfsError::NotFound) => Errno::ENOENT.raw() as _,
@@ -668,8 +699,14 @@ pub fn file_mkdir_at(path: &[u8], cwd: &[u8]) -> c_int {
 
 /// `stat`/`lstat`/`fstatat`. Zeroes `out` first: it is copied to userland by
 /// size, so a field left alone is a field of kernel memory handed over.
-pub fn file_stat_at(path: &[u8], cwd: &[u8], resolve_flags: u32, out: &mut UserFsStat) -> c_int {
-    match crate::vfs::vfs_stat_at(path, cwd, resolve_flags) {
+pub fn file_stat_at(
+    path: &[u8],
+    cwd: &[u8],
+    resolve_flags: u32,
+    out: &mut UserFsStat,
+    who: &Subject,
+) -> c_int {
+    match crate::vfs::vfs_stat_at(path, cwd, resolve_flags, who) {
         Ok(stat) => {
             *out = UserFsStat::default();
             stat.fill_user_stat(out);
@@ -686,9 +723,10 @@ pub fn file_link_at(
     new_path: &[u8],
     new_cwd: &[u8],
     follow: bool,
+    who: &Subject,
 ) -> c_int {
     errno_of(crate::vfs::vfs_link_at(
-        old_path, old_cwd, new_path, new_cwd, follow,
+        old_path, old_cwd, new_path, new_cwd, follow, who,
     ))
 }
 
@@ -698,25 +736,35 @@ pub fn file_utimens_at(
     cwd: &[u8],
     atime: Option<crate::vfs::Timestamp>,
     mtime: Option<crate::vfs::Timestamp>,
+    change: TimesChange,
     resolve_flags: u32,
+    who: &Subject,
 ) -> c_int {
     errno_of(crate::vfs::vfs_utimens(
         path,
         cwd,
         atime,
         mtime,
+        change,
         resolve_flags,
+        who,
     ))
 }
 
-/// `access(2)`/`faccessat(2)`. Identity is uid 0, so only the file's own mode
-/// bits and the mount's writability can refuse anything.
-pub fn file_access_at(path: &[u8], cwd: &[u8], mode: u32, resolve_flags: u32) -> c_int {
+/// `access(2)`/`faccessat(2)`, checked for `who`: the caller's real ids
+/// unless it asked for `AT_EACCESS`, which is the caller's to decide.
+pub fn file_access_at(
+    path: &[u8],
+    cwd: &[u8],
+    mode: u32,
+    resolve_flags: u32,
+    who: &Subject,
+) -> c_int {
     use slopos_abi::fs::{R_OK, W_OK, X_OK};
     if mode & !(R_OK | W_OK | X_OK) != 0 {
         return Errno::EINVAL.raw() as _;
     }
-    let resolved = match crate::vfs::path::resolve_path_at(path, cwd, resolve_flags) {
+    let resolved = match crate::vfs::path::resolve_path_at(path, cwd, resolve_flags, who) {
         Ok(r) => r,
         Err(e) => return e.to_errno().raw() as _,
     };
@@ -724,10 +772,14 @@ pub fn file_access_at(path: &[u8], cwd: &[u8], mode: u32, resolve_flags: u32) ->
         Ok(s) => s,
         Err(e) => return e.to_errno().raw() as _,
     };
-    if mode & W_OK != 0 && (resolved.read_only() || stat.sealed) {
-        return Errno::EACCES.raw() as _;
+    for (bit, want) in [(R_OK, Perm::Read), (W_OK, Perm::Write), (X_OK, Perm::Exec)] {
+        if mode & bit != 0
+            && let Err(e) = resolved.perm.check(who, want)
+        {
+            return e.to_errno().raw() as _;
+        }
     }
-    if mode & X_OK != 0 && stat.file_type != FileType::Directory && stat.mode & 0o111 == 0 {
+    if mode & W_OK != 0 && (resolved.read_only() || stat.sealed) {
         return Errno::EACCES.raw() as _;
     }
     0
@@ -1313,25 +1365,47 @@ pub fn file_getdents_commit_fd(table: FdTable, fd: c_int, cookie: u64) -> Result
     Ok(())
 }
 
-/// `fchmod(2)`.
-pub fn file_fchmod_fd(table: FdTable, fd: c_int, mode: u16) -> c_int {
-    let snap = match snapshot(table, fd) {
-        Ok(s) => s,
-        Err(e) => return e.raw() as _,
-    };
-    let (fs, inode) = match fd_vnode(&snap) {
+/// `fchmod(2)`: the owner's alone, as `chmod`.
+pub fn file_fchmod_fd(table: FdTable, fd: c_int, mode: u16, who: &Subject) -> c_int {
+    let (fs, inode, perm) = match fd_owned_vnode(table, fd) {
         Ok(v) => v,
         Err(e) => return e.raw() as _,
     };
-    if let Err(e) = fd_writable_fs(fs) {
-        return e.raw() as _;
+    if let Err(e) = perm.check_owner(who) {
+        return e.to_errno().raw() as _;
     }
-    match fs.stat(inode) {
-        Ok(stat) if stat.sealed => return Errno::EACCES.raw() as _,
-        Ok(_) => {}
-        Err(e) => return e.to_errno().raw() as _,
+    errno_of(fs.set_mode(inode, who.chmod_mode(mode, perm.gid)))
+}
+
+/// `fchown(2)`.
+pub fn file_fchown_fd(
+    table: FdTable,
+    fd: c_int,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    who: &Subject,
+) -> c_int {
+    let (fs, inode, perm) = match fd_owned_vnode(table, fd) {
+        Ok(v) => v,
+        Err(e) => return e.raw() as _,
+    };
+    errno_of(crate::vfs::ops::set_owner(fs, inode, &perm, uid, gid, who))
+}
+
+/// The file behind `fd` for an attribute change: on a writable filesystem
+/// and not sealed.
+fn fd_owned_vnode(
+    table: FdTable,
+    fd: c_int,
+) -> Result<(&'static dyn crate::vfs::FileSystem, InodeId, InodePerm), Errno> {
+    let snap = snapshot(table, fd)?;
+    let (fs, inode) = fd_vnode(&snap)?;
+    fd_writable_fs(fs)?;
+    let stat = fs.stat(inode).map_err(VfsError::to_errno)?;
+    if stat.sealed {
+        return Err(Errno::EACCES);
     }
-    errno_of(fs.set_mode(inode, mode))
+    Ok((fs, inode, InodePerm::of(&stat)))
 }
 
 /// `FS_IOC_GETFLAGS`. `ENOTTY` for a descriptor that names no file.
@@ -1404,6 +1478,8 @@ pub fn file_set_times_fd(
     fd: c_int,
     atime: Option<crate::vfs::Timestamp>,
     mtime: Option<crate::vfs::Timestamp>,
+    change: TimesChange,
+    who: &Subject,
 ) -> c_int {
     let snap = match snapshot(table, fd) {
         Ok(s) => s,
@@ -1416,7 +1492,9 @@ pub fn file_set_times_fd(
     if let Err(e) = fd_writable_fs(fs) {
         return e.raw() as _;
     }
-    errno_of(crate::vfs::vfs_set_times(fs, inode, atime, mtime))
+    errno_of(crate::vfs::vfs_set_times(
+        fs, inode, atime, mtime, change, who,
+    ))
 }
 
 /// The lock table's key for the file behind a descriptor.
@@ -1795,11 +1873,17 @@ pub fn fileio_take_file_ref_matching(
 
 /// Open `path` at exactly `target_fd`, displacing any occupant — the spawn
 /// `Open` action. The inherited fd is never close-on-exec.
-pub fn fileio_open_at_fd(table: FdTable, target_fd: c_int, path: &[u8], posix_flags: u32) -> c_int {
+pub fn fileio_open_at_fd(
+    table: FdTable,
+    target_fd: c_int,
+    path: &[u8],
+    posix_flags: u32,
+    who: &Subject,
+) -> c_int {
     if target_fd < 0 || target_fd as usize >= FILEIO_MAX_OPEN_FILES {
         return Errno::EBADF.raw() as _;
     }
-    let opened = file_open_for_process(table, path, posix_flags & !(O_CLOEXEC as u32));
+    let opened = file_open_for_process(table, path, posix_flags & !(O_CLOEXEC as u32), who);
     if opened < 0 {
         return opened;
     }

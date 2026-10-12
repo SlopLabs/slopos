@@ -395,7 +395,7 @@ pub fn test_oom_an_orphaned_memfd_stays_charged_to_nobody() -> TestResult {
     let account = resolve_pid(parent).account();
     let baseline =
         touch_fresh_pages(parent, 1) && touch_fresh_pages(bystander, 1 + u64::from(PAGES / 2));
-    let Ok(sizer) = process_spawn(None, account) else {
+    let Ok(sizer) = process_spawn(None, account, slopos_ostd::process::Cred::ROOT) else {
         return fail!("could not spawn the sizer beneath the parent");
     };
     let sizer_account = sizer.account();

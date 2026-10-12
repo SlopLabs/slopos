@@ -25,7 +25,7 @@ use slopos_abi::quota::ProcCount;
 
 use super::account::{AccountId, alloc_generation};
 use super::quota;
-use super::{Process, pack_process_handle};
+use super::{Cred, Process, pack_process_handle};
 
 /// Slot width of the packed process handle. Matches
 /// [`PROCESS_VM_SLOT_BITS`](crate::handle::PROCESS_VM_SLOT_BITS), so a
@@ -176,6 +176,7 @@ impl ProcessTable {
 fn new_process(
     parent: Option<Handle<Process>>,
     account_parent: AccountId,
+    cred: Cred,
 ) -> Result<KArc<Process>, ProcessAllocError> {
     let id = alloc_process_id().ok_or(ProcessAllocError::IdExhausted)?;
     // The arena slot is the process id, drawn from `1..=MAX_PROCESS_ID`, so it
@@ -196,6 +197,7 @@ fn new_process(
         account,
         account_parent,
         parent_packed,
+        cred,
         charge,
     ))
     .map_err(|_| {
@@ -255,8 +257,9 @@ pub fn with_process_registry<R>(f: impl FnOnce(&ProcessTable) -> R) -> Option<R>
 pub fn process_spawn(
     parent: Option<Handle<Process>>,
     account_parent: AccountId,
+    cred: Cred,
 ) -> Result<KArc<Process>, ProcessAllocError> {
-    let process = new_process(parent, account_parent)?;
+    let process = new_process(parent, account_parent, cred)?;
     match with_registry_mut(|table| table.bind(&process)) {
         // The process's own `Drop` returns the id on either failure path.
         Some(Ok(_)) => Ok(process),
@@ -268,7 +271,7 @@ pub fn process_spawn(
 /// Create the root process: no wait parent, and the kernel's root account as
 /// the accounting parent.
 pub fn process_spawn_root() -> Result<KArc<Process>, ProcessAllocError> {
-    process_spawn(None, quota::root())
+    process_spawn(None, quota::root(), Cred::ROOT)
 }
 
 /// Resolve a handle to an owning reference.
@@ -366,7 +369,7 @@ mod tests {
     }
 
     fn spawn_into(table: &mut ProcessTable) -> (KArc<Process>, Handle<Process>) {
-        let process = new_process(None, AccountId::NONE).expect("process");
+        let process = new_process(None, AccountId::NONE, Cred::ROOT).expect("process");
         let handle = table.bind(&process).expect("bind");
         (process, handle)
     }
@@ -490,7 +493,8 @@ mod tests {
     fn the_wait_edge_rehomes_and_the_accounting_edge_does_not() {
         with_table(|t| {
             let (parent, parent_handle) = spawn_into(t);
-            let child = new_process(Some(parent_handle), parent.account()).expect("child");
+            let child =
+                new_process(Some(parent_handle), parent.account(), Cred::ROOT).expect("child");
             t.bind(&child).expect("bind child");
 
             assert_eq!(child.parent(), Some(parent_handle));
@@ -510,7 +514,8 @@ mod tests {
     fn a_reparented_child_sees_its_old_parent_as_stale_not_as_a_stranger() {
         with_table(|t| {
             let (parent, parent_handle) = spawn_into(t);
-            let child = new_process(Some(parent_handle), parent.account()).expect("child");
+            let child =
+                new_process(Some(parent_handle), parent.account(), Cred::ROOT).expect("child");
             t.bind(&child).expect("bind child");
 
             drop(t.retire(parent_handle));
@@ -580,11 +585,11 @@ mod tests {
         };
         let mut held: KVec<KArc<Process>> = KVec::new();
         for _ in 0..2 {
-            let process = new_process(None, AccountId::NONE).expect("process");
+            let process = new_process(None, AccountId::NONE, Cred::ROOT).expect("process");
             t.bind(&process).expect("bind");
             held.push(process).expect("hold");
         }
-        let overflow = new_process(None, AccountId::NONE).expect("process");
+        let overflow = new_process(None, AccountId::NONE, Cred::ROOT).expect("process");
         assert_eq!(
             t.bind(&overflow).err(),
             Some(ProcessAllocError::NoFreeSlot),
@@ -607,14 +612,14 @@ mod tests {
             "the allocator must hand out exactly the id space, then refuse"
         );
         assert_eq!(
-            new_process(None, AccountId::NONE).err(),
+            new_process(None, AccountId::NONE, Cred::ROOT).err(),
             Some(ProcessAllocError::IdExhausted)
         );
         // Give the space back, or every later test in this binary starves.
         for id in drawn.iter() {
             release_process_id(*id);
         }
-        assert!(new_process(None, AccountId::NONE).is_ok());
+        assert!(new_process(None, AccountId::NONE, Cred::ROOT).is_ok());
     }
 
     #[test]

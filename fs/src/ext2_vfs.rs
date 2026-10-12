@@ -6,14 +6,15 @@ use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
 use crate::ext2::cache::{BlockCache, DataBatch, cache_entries_for};
 use crate::ext2::geometry::Ext2Geometry;
 use crate::ext2::journal::AttachError;
+use crate::ext2::ondisk::BlockReserve;
 use crate::ext2::ondisk::InodeTime;
-use crate::ext2::{Ext2Error, Ext2Fs, Ext2Superblock, ReadOnlyReason, SyncPass};
+use crate::ext2::{Ext2Error, Ext2Fs, Ext2Superblock, NewInode, ReadOnlyReason, SyncPass};
 use crate::ext2_dcache::{Ext2Dcache, InodeAttr, NameKey};
 use crate::verity::{AttestTrust, FsExtent, VerityError, VerityStatus};
 use crate::vfs::{
-    FileStat, FileSystem, FileType, FsStats, InodeId, Timestamp, VfsError, VfsResult, orphan,
+    FileStat, FileSystem, FileType, FsStats, InodeId, Owner, Timestamp, VfsError, VfsResult, orphan,
 };
-use slopos_kernel_services::driver_runtime::{current_task_account, current_task_is_system};
+use slopos_kernel_services::driver_runtime::{current_task_account, current_task_cred};
 use slopos_ostd::KBox;
 use slopos_ostd::authority::{Cap, Seal};
 use slopos_ostd::klog_info;
@@ -251,9 +252,10 @@ struct CachedExt2 {
     superblock: Ext2Superblock,
     /// Derived again once the journal attaches; nothing written after moves it.
     geom: Ext2Geometry,
-    /// `s_r_blocks_count`: what an unprivileged allocation must leave free.
-    /// Read once at mount, because it moves only when `tune2fs` moves it.
-    reserved_blocks: u32,
+    /// What an allocation outside the reserve must leave free, and who may
+    /// spend it. Read once at mount, because it moves only when `tune2fs`
+    /// moves it.
+    reserve: BlockReserve,
     /// Sized to the volume's block size at mount.
     cache: KBox<BlockCache>,
     /// Free-count drift from a mutating op. Lives here — not only on the
@@ -504,8 +506,8 @@ impl Ext2Mount {
         }
         // Per call, because the mount is shared and the entitlement is the
         // caller's.
-        if !current_task_is_system() {
-            fs.set_block_reserve(cached.reserved_blocks);
+        if !cached.reserve.admits(current_task_cred().as_ref()) {
+            fs.set_block_reserve(cached.reserve.blocks);
         }
         // Charged whatever the entitlement: spending the system reserve says
         // nothing about how much of the volume one principal may hold.
@@ -763,16 +765,21 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         self.with_ext2(|fs| fs.write_file(inode as u32, offset, buf))
     }
 
-    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
-        self.with_ext2(|fs| {
-            let inode = match file_type {
-                FileType::Directory => fs.create_directory(parent as u32, name)?,
-                FileType::Regular => fs.create_file(parent as u32, name)?,
-                FileType::Pipe => fs.create_fifo(parent as u32, name)?,
-                _ => return Err(Ext2Error::InvalidInode),
-            };
-            Ok(inode as InodeId)
-        })
+    fn create_owned(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        file_type: FileType,
+        owner: Owner,
+    ) -> VfsResult<InodeId> {
+        let kind = match file_type {
+            FileType::Directory => NewInode::Directory,
+            FileType::Regular => NewInode::File,
+            FileType::Pipe => NewInode::Fifo,
+            _ => return Err(ext2_error_to_vfs(Ext2Error::InvalidInode)),
+        };
+        self.with_ext2(|fs| fs.create_owned(parent as u32, name, kind, owner))
+            .map(InodeId::from)
     }
 
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
@@ -869,11 +876,15 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         self.with_ext2(|fs| fs.read_symlink(inode as u32, buf))
     }
 
-    fn symlink(&self, parent: InodeId, name: &[u8], target: &[u8]) -> VfsResult<InodeId> {
-        self.with_ext2(|fs| {
-            fs.create_symlink(parent as u32, name, target)
-                .map(|i| i as InodeId)
-        })
+    fn symlink(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        target: &[u8],
+        owner: Owner,
+    ) -> VfsResult<InodeId> {
+        self.with_ext2(|fs| fs.create_owned(parent as u32, name, NewInode::Symlink(target), owner))
+            .map(InodeId::from)
     }
 
     fn link(&self, parent: InodeId, name: &[u8], target: InodeId) -> VfsResult<()> {
@@ -901,6 +912,10 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
 
     fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
         self.with_ext2(|fs| fs.set_mode(inode as u32, mode))
+    }
+
+    fn set_owner(&self, inode: InodeId, uid: Option<u32>, gid: Option<u32>) -> VfsResult<()> {
+        self.with_ext2(|fs| fs.set_owner(inode as u32, uid, gid))
     }
 
     fn inode_flags(&self, inode: InodeId) -> VfsResult<u32> {
@@ -1302,7 +1317,7 @@ impl Ext2Mount {
     ) -> VfsResult<()> {
         // Zero on a device that cannot answer: a reserve of zero refuses
         // nothing, rather than failing a mount that would otherwise succeed.
-        let reserved_blocks = Ext2Fs::read_block_reserve(&*device).unwrap_or(0);
+        let reserve = Ext2Fs::read_block_reserve(&*device).unwrap_or_default();
         let device = GatedDevice {
             inner: KArc::try_new(device).map_err(|_| ext2_error_to_vfs(Ext2Error::OutOfMemory))?,
             gate: KArc::try_new(IoGate::new())
@@ -1317,7 +1332,7 @@ impl Ext2Mount {
             device,
             superblock,
             geom,
-            reserved_blocks,
+            reserve,
             cache,
             superblock_dirty: false,
             read_only,
@@ -1338,7 +1353,7 @@ impl Ext2Mount {
         Ok(ext2_stats_of(
             &cached.superblock,
             cached.geom.block_size(),
-            cached.reserved_blocks,
+            cached.reserve.blocks,
             cached.read_only,
         ))
     }

@@ -6,6 +6,7 @@ use slopos_fs::fileio::{
     file_truncate_at, file_unlink_at, file_write_fd,
 };
 
+use slopos_fs::vfs::Subject;
 use slopos_mm::user_copy::copy_bytes_to_user;
 use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
 use slopos_mm::user_ptr::UserBytes as MmUserBytes;
@@ -13,7 +14,9 @@ use slopos_ostd::KVec;
 
 use crate::syscall::args::{Fd, UserBytes, UserPath, UserPtr};
 use crate::syscall::common::{USER_PATH_MAX, errno_from_neg};
-use crate::syscall::fs::at_handlers::{chmod_at, mkdir_at, mknod_at, open_at, stat_at_into_user};
+use crate::syscall::fs::at_handlers::{
+    chmod_at, chown_at, mkdir_at, mknod_at, open_at, stat_at_into_user,
+};
 use crate::syscall::fs::dirfd::{reject_non_directory, with_cwd_base};
 
 define_syscall!(syscall_open
@@ -22,7 +25,8 @@ define_syscall!(syscall_open
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    with_cwd_base(ctx, |cwd| open_at(pid, path.as_bytes(), cwd, flags, mode))
+    let who = ctx.subject();
+    with_cwd_base(ctx, |cwd| open_at(pid, path.as_bytes(), cwd, flags, mode, &who))
 });
 
 define_syscall!(syscall_close
@@ -85,7 +89,7 @@ pub(crate) fn raise_sigpipe_on_epipe(
         let info = slopos_abi::signal::SigInfo::sent(
             slopos_abi::signal::SI_USER,
             crate::syscall::signal::sender_pid(task),
-            0,
+            ctx.cred().ruid,
             0,
         );
         let _ = slopos_sched::task::task_signal_post_info(task, slopos_abi::signal::SIGPIPE, info);
@@ -131,15 +135,17 @@ define_syscall!(syscall_stat
     (ctx, path: UserPath, out: UserPtr<UserFsStat>) cap(NoneFd)
     -> Result<(), Errno>
 {
-    with_cwd_base(ctx, |cwd| stat_at_into_user(path.as_bytes(), cwd, 0, out.inner()))
+    let who = ctx.subject();
+    with_cwd_base(ctx, |cwd| stat_at_into_user(path.as_bytes(), cwd, 0, out.inner(), &who))
 });
 
 define_syscall!(syscall_lstat
     (ctx, path: UserPath, out: UserPtr<UserFsStat>) cap(NoneFd)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     with_cwd_base(ctx, |cwd| {
-        stat_at_into_user(path.as_bytes(), cwd, AT_SYMLINK_NOFOLLOW, out.inner())
+        stat_at_into_user(path.as_bytes(), cwd, AT_SYMLINK_NOFOLLOW, out.inner(), &who)
     })
 });
 
@@ -147,25 +153,28 @@ define_syscall!(syscall_mkdir
     (ctx, path: UserPath, mode: u32) cap(NoneFd)
     -> Result<(), Errno>
 {
-    with_cwd_base(ctx, |cwd| mkdir_at(path.as_bytes(), cwd, mode))
+    let who = ctx.subject();
+    with_cwd_base(ctx, |cwd| mkdir_at(path.as_bytes(), cwd, mode, &who))
 });
 
 define_syscall!(syscall_mknod
     (ctx, path: UserPath, mode: u32, _dev: u64) cap(NoneFd)
     -> Result<(), Errno>
 {
-    with_cwd_base(ctx, |cwd| mknod_at(path.as_bytes(), cwd, mode))
+    let who = ctx.subject();
+    with_cwd_base(ctx, |cwd| mknod_at(path.as_bytes(), cwd, mode, &who))
 });
 
 define_syscall!(syscall_unlink
     (ctx, path: UserPath) cap(NoneFd)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     let rc = with_cwd_base(ctx, |cwd| {
-        if let Err(e) = reject_non_directory(path.as_bytes(), cwd) {
+        if let Err(e) = reject_non_directory(path.as_bytes(), cwd, &who) {
             return e.raw();
         }
-        file_unlink_at(path.as_bytes(), cwd)
+        file_unlink_at(path.as_bytes(), cwd, &who)
     });
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
@@ -174,7 +183,8 @@ define_syscall!(syscall_rmdir
     (ctx, path: UserPath) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let rc = with_cwd_base(ctx, |cwd| file_rmdir_at(path.as_bytes(), cwd));
+    let who = ctx.subject();
+    let rc = with_cwd_base(ctx, |cwd| file_rmdir_at(path.as_bytes(), cwd, &who));
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
@@ -182,8 +192,9 @@ define_syscall!(syscall_symlink
     (ctx, target: UserPath, link_path: UserPath) cap(NoneFd)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     let rc = with_cwd_base(ctx, |cwd| {
-        file_symlink_at(target.as_bytes(), link_path.as_bytes(), cwd)
+        file_symlink_at(target.as_bytes(), link_path.as_bytes(), cwd, &who)
     });
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
@@ -198,8 +209,9 @@ define_syscall!(syscall_readlink
         return Err(Errno::EINVAL);
     }
     let len = buf.len().min(USER_PATH_MAX);
+    let who = ctx.subject();
     let n = with_cwd_base(ctx, |cwd| {
-        readlink_at_into_user(path.as_bytes(), cwd, buf.base_u64(), len)
+        readlink_at_into_user(path.as_bytes(), cwd, buf.base_u64(), len, &who)
     })?;
     Ok(n as u64)
 });
@@ -212,9 +224,10 @@ pub(crate) fn readlink_at_into_user(
     cwd: &[u8],
     user_buf: u64,
     len: usize,
+    who: &Subject,
 ) -> Result<usize, Errno> {
     let mut staging = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
-    let rc = file_readlink_at(path, cwd, &mut staging[..len]);
+    let rc = file_readlink_at(path, cwd, &mut staging[..len], who);
     if rc < 0 {
         return Err(errno_from_neg(rc as i32));
     }
@@ -228,11 +241,12 @@ define_syscall!(syscall_truncate
     (ctx, path: UserPath, length: u64) cap(NoneFd)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     let rc = with_cwd_base(ctx, |cwd| {
-        if let Err(e) = reject_non_directory(path.as_bytes(), cwd) {
+        if let Err(e) = reject_non_directory(path.as_bytes(), cwd, &who) {
             return e.raw();
         }
-        file_truncate_at(path.as_bytes(), cwd, length)
+        file_truncate_at(path.as_bytes(), cwd, length, &who)
     });
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
@@ -241,15 +255,35 @@ define_syscall!(syscall_chmod
     (ctx, path: UserPath, mode: u32) cap(NoneFd)
     -> Result<(), Errno>
 {
-    with_cwd_base(ctx, |cwd| chmod_at(path.as_bytes(), cwd, mode, 0))
+    let who = ctx.subject();
+    with_cwd_base(ctx, |cwd| chmod_at(path.as_bytes(), cwd, mode, 0, &who))
+});
+
+define_syscall!(syscall_chown
+    (ctx, path: UserPath, uid: u32, gid: u32) cap(NoneFd)
+    -> Result<(), Errno>
+{
+    let who = ctx.subject();
+    with_cwd_base(ctx, |cwd| chown_at(path.as_bytes(), cwd, uid, gid, 0, &who))
+});
+
+define_syscall!(syscall_lchown
+    (ctx, path: UserPath, uid: u32, gid: u32) cap(NoneFd)
+    -> Result<(), Errno>
+{
+    let who = ctx.subject();
+    with_cwd_base(ctx, |cwd| {
+        chown_at(path.as_bytes(), cwd, uid, gid, AT_SYMLINK_NOFOLLOW, &who)
+    })
 });
 
 define_syscall!(syscall_rename
     (ctx, old_path: UserPath, new_path: UserPath) cap(NoneFd)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     with_cwd_base(ctx, |cwd| {
-        slopos_fs::vfs::vfs_rename_at(old_path.as_bytes(), cwd, new_path.as_bytes(), cwd)
+        slopos_fs::vfs::vfs_rename_at(old_path.as_bytes(), cwd, new_path.as_bytes(), cwd, &who)
             .map_err(|e| e.to_errno())
     })
 });

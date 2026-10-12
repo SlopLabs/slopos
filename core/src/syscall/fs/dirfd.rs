@@ -82,11 +82,15 @@ pub fn names_directory(path: &[u8]) -> bool {
 /// parent-resolving mutators take no resolve flags, so `unlink("file/")`
 /// would otherwise remove `file`. Every other outcome is the mutator's own.
 #[inline(never)]
-pub fn reject_non_directory(path: &[u8], cwd: &[u8]) -> Result<(), Errno> {
+pub fn reject_non_directory(
+    path: &[u8],
+    cwd: &[u8],
+    who: &slopos_fs::vfs::Subject,
+) -> Result<(), Errno> {
     if !names_directory(path) {
         return Ok(());
     }
-    match slopos_fs::vfs::vfs_stat_at(path, cwd, RESOLVE_MUST_BE_DIR) {
+    match slopos_fs::vfs::vfs_stat_at(path, cwd, RESOLVE_MUST_BE_DIR, who) {
         Err(slopos_fs::VfsError::NotDirectory) => Err(Errno::ENOTDIR),
         _ => Ok(()),
     }

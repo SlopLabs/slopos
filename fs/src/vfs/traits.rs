@@ -138,8 +138,8 @@ impl FileStat {
         out.st_ino = self.inode;
         out.st_nlink = u64::from(self.nlink);
         out.st_mode = self.file_type.to_s_ifmt() | u32::from(self.mode & 0o7777);
-        out.st_uid = 0;
-        out.st_gid = 0;
+        out.st_uid = self.uid;
+        out.st_gid = self.gid;
         out._pad0 = 0;
         out.st_rdev = slopos_abi::fs::makedev(self.dev_major, self.dev_minor);
         out.st_size = i64::try_from(self.size).unwrap_or(i64::MAX);
@@ -249,13 +249,27 @@ pub struct FsStats {
 
 pub type VfsResult<T> = Result<T, VfsError>;
 
+/// Who a new inode belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owner {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl Owner {
+    pub const ROOT: Self = Self { uid: 0, gid: 0 };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VfsError {
     NotFound,
     NotDirectory,
     NotFile,
     IsDirectory,
+    /// The mode bits refuse the caller. `EACCES`.
     PermissionDenied,
+    /// The caller is not the owner the operation needs. `EPERM`.
+    NotPermitted,
     /// The mount, the filesystem or the device refuses every mutation.
     ReadOnly,
     NoSpace,
@@ -287,6 +301,7 @@ impl VfsError {
             Self::NotFile => Errno::EINVAL,
             Self::IsDirectory => Errno::EISDIR,
             Self::PermissionDenied => Errno::EACCES,
+            Self::NotPermitted => Errno::EPERM,
             Self::ReadOnly => Errno::EROFS,
             Self::NoSpace => Errno::ENOSPC,
             Self::IoError => Errno::EIO,
@@ -355,9 +370,20 @@ pub trait FileSystem: Send + Sync {
     /// user-space I/O, so filesystem code never touches a user address.
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize>;
 
-    /// Create an entry under `parent`. `file_type` is `Regular`, `Directory`
-    /// or `Pipe`.
-    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId>;
+    /// Create an entry under `parent`, owned by `owner`. `file_type` is
+    /// `Regular`, `Directory` or `Pipe`.
+    fn create_owned(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        file_type: FileType,
+        owner: Owner,
+    ) -> VfsResult<InodeId>;
+
+    /// [`Self::create_owned`] for uid 0.
+    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
+        self.create_owned(parent, name, file_type, Owner::ROOT)
+    }
 
     /// Remove a non-directory entry. A directory is `EISDIR`; use
     /// [`Self::rmdir`].
@@ -513,8 +539,14 @@ pub trait FileSystem: Send + Sync {
         Err(VfsError::NotSupported)
     }
 
-    fn symlink(&self, parent: InodeId, name: &[u8], target: &[u8]) -> VfsResult<InodeId> {
-        let _ = (parent, name, target);
+    fn symlink(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        target: &[u8],
+        owner: Owner,
+    ) -> VfsResult<InodeId> {
+        let _ = (parent, name, target, owner);
         Err(VfsError::NotSupported)
     }
 
@@ -559,6 +591,13 @@ pub trait FileSystem: Send + Sync {
     /// tightened permissions it never touched.
     fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
         let _ = (inode, mode);
+        Err(VfsError::NotSupported)
+    }
+
+    /// Give an inode a new owner and group; `None` keeps the one it has.
+    /// Refuses rather than no-opping, for the reason [`Self::set_mode`] gives.
+    fn set_owner(&self, inode: InodeId, uid: Option<u32>, gid: Option<u32>) -> VfsResult<()> {
+        let _ = (inode, uid, gid);
         Err(VfsError::NotSupported)
     }
 

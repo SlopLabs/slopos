@@ -17,14 +17,17 @@
 //! arbitrary last release can refuse.
 
 pub mod account;
+pub mod cred;
 pub mod quota;
 mod registry;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::handle::{Handle, HandleError};
+use crate::sync::SeqLock;
 
 pub use account::{ACCOUNT_SLOT_BITS, AccountId, MAX_ACCOUNTS, root_account};
+pub use cred::Cred;
 pub use quota::{Charge, Reservation, TryChargeError, try_charge};
 pub use registry::{
     MAX_PROCESS_ID, PROCESS_SLOT_BITS, ProcessAllocError, ProcessTable, process_count,
@@ -111,6 +114,10 @@ pub struct Process {
     /// the drop cannot keep what its creator held a moment earlier.
     dropped_caps: AtomicU64,
 
+    /// Shared by every thread, so an id change moves the whole process, as
+    /// POSIX requires of `setuid`.
+    cred: SeqLock<Cred>,
+
     /// This process's own existence, charged to its **spawner**.
     ///
     /// Released at the reap rather than at the final `Drop`, because the
@@ -129,6 +136,7 @@ impl Process {
         account: AccountId,
         account_parent: AccountId,
         parent: u64,
+        cred: Cred,
         proc_charge: quota::Reservation<slopos_abi::quota::ProcCount>,
     ) -> Self {
         let slot = quota::ChargeSlot::empty();
@@ -143,6 +151,7 @@ impl Process {
             exited_cpu_ticks: AtomicU64::new(0),
             exited: AtomicBool::new(false),
             dropped_caps: AtomicU64::new(crate::authority::CAP_NONE),
+            cred: SeqLock::new(cred),
             proc_charge: slot,
         }
     }
@@ -235,6 +244,23 @@ impl Process {
     #[inline]
     pub fn dropped_caps(&self) -> u64 {
         self.dropped_caps.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn cred(&self) -> Cred {
+        self.cred.read()
+    }
+
+    /// Replace the identity with what `change` derives from the current one,
+    /// as one step against a racing change from another thread.
+    pub fn change_cred(
+        &self,
+        change: impl FnOnce(&Cred) -> Result<Cred, slopos_abi::Errno>,
+    ) -> Result<(), slopos_abi::Errno> {
+        let mut guard = self.cred.write_lock();
+        let next = change(guard.get_mut())?;
+        guard.write(next);
+        Ok(())
     }
 
     /// Leave this process. Returns `true` if this was the last task.
@@ -434,6 +460,7 @@ mod tests {
             AccountId::NONE,
             AccountId::NONE,
             PROCESS_HANDLE_NONE,
+            Cred::ROOT,
             no_charge(),
         )
     }
@@ -468,6 +495,7 @@ mod tests {
             AccountId::from_parts(4, 9),
             AccountId::from_parts(1, 2),
             PROCESS_HANDLE_NONE,
+            Cred::ROOT,
             no_charge(),
         );
         assert!(p.parent().is_none());

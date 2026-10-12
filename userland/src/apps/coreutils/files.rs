@@ -732,8 +732,7 @@ fn copy_regular(source: &str, dest: &str, flags: &CopyFlags) -> Result<(), std::
         Err(error) => return Err(error),
     };
     copy_through(&mut reader, &mut writer)?;
-    // Only the mtime: there is no path-based `utimensat` in std here, and no
-    // owner or mode to carry on a single-user system.
+    // Only the mtime: there is no path-based `utimensat` in std here.
     if flags.preserve {
         let modified = reader.metadata()?.modified()?;
         writer.set_times(FileTimes::new().set_modified(modified))?;

@@ -52,7 +52,9 @@ define_syscall!(syscall_umount2
 });
 
 fn target_is_directory(path: &[u8]) -> Result<bool, Errno> {
-    let resolved = resolve_path_at(path, b"/", RESOLVE_FOLLOW).map_err(vfs_errno)?;
+    // A `Mount` holder's: the walk is the kernel's, as for the boot step.
+    let resolved = resolve_path_at(path, b"/", RESOLVE_FOLLOW, &slopos_fs::vfs::Subject::KERNEL)
+        .map_err(vfs_errno)?;
     let stat = resolved.fs.stat(resolved.inode).map_err(vfs_errno)?;
     Ok(stat.file_type == FileType::Directory)
 }

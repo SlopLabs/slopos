@@ -510,6 +510,27 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn fchown(fd: i32, uid: u32, gid: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall3(SYSCALL_FCHOWN, fd as u64, uid as u64, gid as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn fchownat(dirfd: i32, path: *const u8, uid: u32, gid: u32, flags: u32) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall5(
+                SYSCALL_FCHOWNAT,
+                dirfd as u64,
+                path as u64,
+                uid as u64,
+                gid as u64,
+                flags as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn flock(fd: i32, operation: u32) -> Result<(), Errno> {
         let ret = unsafe { syscall2(SYSCALL_FLOCK, fd as u64, operation as u64) };
         to_result(ret)?;

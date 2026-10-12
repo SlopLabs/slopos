@@ -393,8 +393,14 @@ impl FileSystem for FlakyLookup {
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
         self.inner.write(inode, offset, buf)
     }
-    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
-        self.inner.create(parent, name, file_type)
+    fn create_owned(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        file_type: FileType,
+        owner: crate::vfs::Owner,
+    ) -> VfsResult<InodeId> {
+        self.inner.create_owned(parent, name, file_type, owner)
     }
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
         self.inner.unlink(parent, name)
@@ -485,8 +491,8 @@ pub fn test_removal_fails_when_a_lookup_does() -> TestResult {
 
 #[inline(never)]
 fn flaky_removal_body() -> Result<(), &'static str> {
-    let unlink = || crate::fileio::file_unlink_at(FLAKY_TARGET, b"/");
-    let rmdir = || crate::fileio::file_rmdir_at(FLAKY_TARGET, b"/");
+    let unlink = || crate::fileio::file_unlink_at(FLAKY_TARGET, b"/", &crate::vfs::Subject::KERNEL);
+    let rmdir = || crate::fileio::file_rmdir_at(FLAKY_TARGET, b"/", &crate::vfs::Subject::KERNEL);
     mount(FLAKY_MP, &FLAKY_FS, 0).map_err(|_| "mount failed")?;
     for failing in [&FLAKY_FS.fail_in, &FLAKY_FS.fail_stat_in] {
         vfs_open(FLAKY_TARGET, true).map_err(|_| "could not create the file")?;
@@ -533,6 +539,7 @@ fn flaky_create_open_body() -> Result<(), &'static str> {
             O_RDWR | O_CREAT,
             crate::vfs::path::RESOLVE_FOLLOW,
             Some(mode ^ 0o077),
+            &crate::vfs::Subject::KERNEL,
         );
         let reached = FLAKY_FS.fail_stat_in.swap(0, Ordering::AcqRel) == 0;
         if fd >= 0 {

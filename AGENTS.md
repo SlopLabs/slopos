@@ -970,9 +970,9 @@ throttle causes, and one `CPUFREQ[run]:` line on stderr), `set
 hwp|epp|limits|placement`, and `bench`, which times one workload pinned to each
 CPU, on an SMT pair and wherever the scheduler puts it (`CPUFREQ[bench]:`).
 `sysmon` shows each CPU's type and clock. `/bin/prof` (`prof_ctl`; granted
-`SysInspect` by path, as `sysmon` is) starts, stops and
-reports the sampling profiler on a running system; its report carries each
-CPU's busy share and effective clock over the span.
+`SysInspect` by path) starts, stops and reports the sampling profiler on a
+running system; its report carries each CPU's busy share and effective clock
+over the span.
 
 **A machine on the LAN is driven from this host.** `/bin/remoted`, which init
 starts when the base carries `/usr/share/slopos/remote/remote.conf`, dials out
@@ -1331,9 +1331,26 @@ earns, init and every utest binary hold `CAP_MASK_ALL`, exec keeps `caps &
 (universal | grant | delegated)` in every thread of the process, a sender may
 signal only a target whose capabilities it all holds, and `caps_drop` takes
 capabilities from a whole process for good, a thread whose clone races it
-included. The ext2 reserve and a nice value below zero are init's by task id.
-A new check that reads `task.flags`, a path or a task id where a capability
-fits is a second authority carrier.
+included. A nice value below zero is init's by task id. A new check that reads
+`task.flags`, a path, a task id or a uid where a capability fits is a second
+authority carrier.
+
+**A uid is an identity, never a power.** Each process carries a `Cred`
+(`slopos_ostd::process::cred`): real, effective and saved uid and gid and up
+to 32 supplementary groups, process-wide, copied by fork and spawn and kept by
+exec, which honours no set-ID bit. The id syscalls follow POSIX's unprivileged
+rules, and any other id, or `setgroups`, takes `SetId`. Every VFS entry takes
+the `Subject` it acts for (the caller's effective ids and whether it holds
+`DacOverride`; the kernel's own callers pass `Subject::KERNEL`) and checks
+owner, group and mode: search on each directory a walk crosses, read and write
+on open, write and search on a parent for a name made or removed, the sticky
+bit, and ownership for `chmod`, `utimensat` and the set-ID bits. `DacOverride`
+passes every mode check and lets `chown` name any owner; uid 0 passes nothing
+on its own. A signal also needs the sender's real or effective uid to be the
+target's real or saved uid; `ProcSignal` waives both halves, and `SIGCONT` to
+a task of the sender's session needs neither. `process_list` reports every
+task to everyone. The ext4 reserve is the superblock's `s_def_resuid` and
+`s_def_resgid`.
 
 ### Licensing discipline
 

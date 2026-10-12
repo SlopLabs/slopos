@@ -496,8 +496,8 @@ fn is_binary(op: &[u8]) -> bool {
     )
 }
 
-/// `-r -w -x` answer from existence: single-user at uid 0, and nothing
-/// consults the permission bits. `-b -c -p -S` answer from `st_mode`'s type.
+/// `-r -w -x` ask the kernel as the effective ids; `-b -c -p -S` answer from
+/// `st_mode`'s type.
 fn unary(ctx: &mut Ctx, op: &[u8], arg: &[u8]) -> bool {
     match op {
         b"-n" => return !arg.is_empty(),
@@ -520,7 +520,10 @@ fn unary(ctx: &mut Ctx, op: &[u8], arg: &[u8]) -> bool {
         return false;
     };
     match op {
-        b"-e" | b"-r" | b"-w" | b"-x" => true,
+        b"-e" => true,
+        b"-r" => fsutil::may(path, slopos_abi::fs::R_OK),
+        b"-w" => fsutil::may(path, slopos_abi::fs::W_OK),
+        b"-x" => fsutil::may(path, slopos_abi::fs::X_OK),
         b"-f" => stat.file_kind() == S_IFREG,
         b"-d" => stat.file_kind() == S_IFDIR,
         b"-s" => stat.st_size > 0,

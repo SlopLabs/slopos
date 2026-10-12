@@ -80,8 +80,15 @@ pub fn vfs_open_handle_flags(
     path: &[u8],
     flags: crate::vfs::ops::VfsOpenFlags,
 ) -> Result<usize, slopos_abi::Errno> {
-    vfs_open_handle_flags_at(path, b"/", flags, crate::vfs::path::RESOLVE_FOLLOW)
-        .map(|opened| opened.handle)
+    vfs_open_handle_flags_at(
+        path,
+        b"/",
+        flags,
+        crate::vfs::path::RESOLVE_FOLLOW,
+        &crate::vfs::Subject::KERNEL,
+        None,
+    )
+    .map(|opened| opened.handle)
 }
 
 /// A registered vnode handle; a FIFO opens as a pipe, not through the filesystem.
@@ -95,12 +102,15 @@ pub fn vfs_open_handle_flags_at(
     cwd: &[u8],
     flags: crate::vfs::ops::VfsOpenFlags,
     resolve_flags: u32,
+    who: &crate::vfs::Subject,
+    create_mode: Option<u16>,
 ) -> Result<OpenedVnode, slopos_abi::Errno> {
     // A create may have *just* made this name: re-resolving it would be a
     // second lookup of something this call itself is responsible for.
     let created = flags.create;
-    let opened = crate::vfs::ops::vfs_open_flags_at(path, cwd, flags, resolve_flags)
-        .map_err(|e| e.to_errno())?;
+    let opened =
+        crate::vfs::ops::vfs_open_flags_at(path, cwd, flags, resolve_flags, who, create_mode)
+            .map_err(|e| e.to_errno())?;
     let handle = register_vnode(path, cwd, resolve_flags, opened.fs, opened.inode, created)?;
     Ok(OpenedVnode {
         handle,
@@ -119,13 +129,17 @@ pub fn vfs_open_dir_handle_at(
     path: &[u8],
     cwd: &[u8],
     resolve_flags: u32,
+    who: &crate::vfs::Subject,
 ) -> Result<(usize, crate::vfs::CanonPath), slopos_abi::Errno> {
-    let (resolved, canon) = crate::vfs::path::resolve_path_canon_at(path, cwd, resolve_flags)
+    let (resolved, canon) = crate::vfs::path::resolve_path_canon_at(path, cwd, resolve_flags, who)
         .map_err(|e| e.to_errno())?;
-    let stat = resolved.fs.stat(resolved.inode).map_err(|e| e.to_errno())?;
-    if stat.file_type != crate::vfs::FileType::Directory {
+    if !resolved.perm.is_dir {
         return Err(slopos_abi::Errno::ENOTDIR);
     }
+    resolved
+        .perm
+        .check(who, crate::vfs::Perm::Read)
+        .map_err(|e| e.to_errno())?;
     let handle = register_vnode(path, cwd, resolve_flags, resolved.fs, resolved.inode, false)?;
     Ok((handle, canon))
 }
@@ -180,7 +194,8 @@ fn still_resolves(
     fs: &'static dyn FileSystem,
     inode: InodeId,
 ) -> bool {
-    match crate::vfs::path::resolve_path_at(path, cwd, resolve_flags) {
+    match crate::vfs::path::resolve_path_at(path, cwd, resolve_flags, &crate::vfs::Subject::KERNEL)
+    {
         Ok(again) => again.inode == inode && same_filesystem(again.fs, fs),
         Err(_) => false,
     }

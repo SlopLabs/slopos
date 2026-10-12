@@ -1,5 +1,6 @@
 use crate::vfs::canon::{CanonPath, normalise_at};
 use crate::vfs::mount::mount_at;
+use crate::vfs::perm::{InodePerm, Perm, Subject};
 use crate::vfs::traits::{FileSystem, FileType, InodeId, VfsError, VfsResult};
 use crate::{MAX_PATH_LEN, MAX_SYMLINK_FOLLOWS};
 use slopos_ostd::KVec;
@@ -17,6 +18,8 @@ pub struct ResolvedPath {
     pub inode: InodeId,
     /// Of the mount the walk ended in.
     pub mount_flags: u32,
+    /// Of `inode`, as the walk found it.
+    pub perm: InodePerm,
 }
 
 impl ResolvedPath {
@@ -61,16 +64,23 @@ impl NameBuf {
     }
 }
 
+/// Resolve `path` for the kernel itself.
 pub fn resolve_path(path: &[u8]) -> VfsResult<ResolvedPath> {
-    resolve_path_at(path, b"/", RESOLVE_FOLLOW)
+    resolve_path_at(path, b"/", RESOLVE_FOLLOW, &Subject::KERNEL)
 }
 
-/// Resolve `path` against `cwd`, following symlinks.
+/// Resolve `path` against `cwd`, following symlinks, as `who`, who must be
+/// able to search every directory the walk crosses.
 ///
 /// [`MAX_SYMLINK_FOLLOWS`] is the budget for the whole resolution, not per
 /// component; exhausting it is [`VfsError::TooManySymlinks`].
-pub fn resolve_path_at(path: &[u8], cwd: &[u8], flags: u32) -> VfsResult<ResolvedPath> {
-    resolve_followed(normalise_at(path, cwd)?.as_bytes(), flags)
+pub fn resolve_path_at(
+    path: &[u8],
+    cwd: &[u8],
+    flags: u32,
+    who: &Subject,
+) -> VfsResult<ResolvedPath> {
+    resolve_followed(normalise_at(path, cwd)?.as_bytes(), flags, who)
 }
 
 /// [`resolve_path_at`] plus the canonical path the walk ended on.
@@ -82,15 +92,20 @@ pub fn resolve_path_canon_at(
     path: &[u8],
     cwd: &[u8],
     flags: u32,
+    who: &Subject,
 ) -> VfsResult<(ResolvedPath, CanonPath)> {
     let normalised = normalise_at(path, cwd)?;
-    let step = walk_followed(normalised.as_bytes(), flags)?;
+    let step = walk_followed(normalised.as_bytes(), flags, who)?;
     Ok((step.resolved, CanonPath::from_buf(step.canon)))
 }
 
 /// The symlink-resolved directory holding `path`'s final component, and that
 /// component, which is left unresolved.
-pub fn resolve_parent_at(path: &[u8], cwd: &[u8]) -> VfsResult<(ResolvedPath, NameBuf)> {
+pub fn resolve_parent_at(
+    path: &[u8],
+    cwd: &[u8],
+    who: &Subject,
+) -> VfsResult<(ResolvedPath, NameBuf)> {
     let canon = normalise_at(path, cwd)?;
     let (parent_len, start) = {
         let bytes = canon.as_bytes();
@@ -102,7 +117,7 @@ pub fn resolve_parent_at(path: &[u8], cwd: &[u8]) -> VfsResult<(ResolvedPath, Na
         }
         (parent.len(), bytes.len() - name.len())
     };
-    let resolved = resolve_followed(&canon.as_bytes()[..parent_len], RESOLVE_MUST_BE_DIR)?;
+    let resolved = resolve_followed(&canon.as_bytes()[..parent_len], RESOLVE_MUST_BE_DIR, who)?;
     Ok((resolved, NameBuf { canon, start }))
 }
 
@@ -124,19 +139,20 @@ struct Ancestor {
     fs: &'static dyn FileSystem,
     inode: InodeId,
     mount_flags: u32,
+    perm: InodePerm,
     canon_len: usize,
 }
 
 #[inline(never)]
-fn resolve_followed(path: &[u8], flags: u32) -> VfsResult<ResolvedPath> {
-    Ok(walk_followed(path, flags)?.resolved)
+fn resolve_followed(path: &[u8], flags: u32, who: &Subject) -> VfsResult<ResolvedPath> {
+    Ok(walk_followed(path, flags, who)?.resolved)
 }
 
 /// Walk `path`, splicing each followed symlink's target in and restarting, so
 /// the budget spans the whole resolution rather than one component's chain.
 #[inline(never)]
-fn walk_followed(path: &[u8], flags: u32) -> VfsResult<Step> {
-    let mut step = walk(path, flags)?;
+fn walk_followed(path: &[u8], flags: u32, who: &Subject) -> VfsResult<Step> {
+    let mut step = walk(path, flags, who)?;
     let Some(mut link) = step.link else {
         return Ok(step);
     };
@@ -145,7 +161,7 @@ fn walk_followed(path: &[u8], flags: u32) -> VfsResult<Step> {
     let mut canon = expand_link(path, &step, link, &mut scratch)?;
     let mut follows = 1u32;
     loop {
-        step = walk(canon.as_bytes(), flags)?;
+        step = walk(canon.as_bytes(), flags, who)?;
         match step.link {
             None => return Ok(step),
             Some(next) => link = next,
@@ -169,14 +185,8 @@ fn walk_followed(path: &[u8], flags: u32) -> VfsResult<Step> {
 /// The mount table is re-asked at every component, against the canonical path
 /// built so far, so a mount point crossed mid-walk is honoured.
 #[inline(never)]
-fn walk(path: &[u8], flags: u32) -> VfsResult<Step> {
-    let root = mount_at(b"/").ok_or(VfsError::NotFound)?;
-    let mut cur = Ancestor {
-        fs: root.fs,
-        inode: root.root,
-        mount_flags: root.flags,
-        canon_len: 1,
-    };
+fn walk(path: &[u8], flags: u32, who: &Subject) -> VfsResult<Step> {
+    let mut cur = mount_root(b"/")?.ok_or(VfsError::NotFound)?;
     // Never reallocates: `..` only shortens, every other component is copied
     // with its separator, so the canonical path is never longer than `path`.
     let mut canon = KVec::<u8>::with_capacity(path.len() + 1).map_err(|_| VfsError::NoSpace)?;
@@ -194,6 +204,7 @@ fn walk(path: &[u8], flags: u32) -> VfsResult<Step> {
         };
         idx = end + 1;
         let name = &path[start..end];
+        cur.perm.check(who, Perm::Exec)?;
 
         if name == b".." {
             if let Some(parent) = ancestors.pop() {
@@ -204,51 +215,25 @@ fn walk(path: &[u8], flags: u32) -> VfsResult<Step> {
         }
 
         push_name(&mut canon, name)?;
-        if let Some(crossed) = mount_at(canon.as_slice()) {
-            if track_parents {
-                ancestors.push(cur).map_err(|_| VfsError::NoSpace)?;
-            }
-            cur = Ancestor {
-                fs: crossed.fs,
-                inode: crossed.root,
-                mount_flags: crossed.flags,
-                canon_len: canon.len(),
-            };
-            continue;
-        }
-
-        let child = cur.fs.lookup(cur.inode, name)?;
-        // `mount_at` released the mount table before returning, which is what
-        // lets this reach a filesystem whose own lock is a sleeping mutex.
-        let (kind, size) = child_kind(cur.fs, child)?;
         let is_final = end == path.len();
-
-        if kind == FileType::Symlink && !(is_final && flags & RESOLVE_NOFOLLOW_FINAL != 0) {
-            canon.truncate(cur.canon_len);
-            return Ok(Step {
-                resolved: ResolvedPath {
-                    fs: cur.fs,
-                    inode: child,
-                    mount_flags: cur.mount_flags,
-                },
-                canon,
-                link: Some(Link { rest: end, size }),
-            });
-        }
-        if !is_final && kind != FileType::Directory {
-            return Err(VfsError::NotDirectory);
-        }
+        let next = match enter(&cur, name, canon.as_slice(), is_final, flags)? {
+            Entered::Child(next) => next,
+            Entered::Link(resolved, size) => {
+                canon.truncate(cur.canon_len);
+                return Ok(Step {
+                    resolved,
+                    canon,
+                    link: Some(Link { rest: end, size }),
+                });
+            }
+        };
         if track_parents {
             ancestors.push(cur).map_err(|_| VfsError::NoSpace)?;
         }
-        cur = Ancestor {
-            inode: child,
-            canon_len: canon.len(),
-            ..cur
-        };
+        cur = next;
     }
 
-    if flags & RESOLVE_MUST_BE_DIR != 0 && child_kind(cur.fs, cur.inode)?.0 != FileType::Directory {
+    if flags & RESOLVE_MUST_BE_DIR != 0 && !cur.perm.is_dir {
         return Err(VfsError::NotDirectory);
     }
     Ok(Step {
@@ -256,10 +241,68 @@ fn walk(path: &[u8], flags: u32) -> VfsResult<Step> {
             fs: cur.fs,
             inode: cur.inode,
             mount_flags: cur.mount_flags,
+            perm: cur.perm,
         },
         canon,
         link: None,
     })
+}
+
+enum Entered {
+    Child(Ancestor),
+    /// A symlink the walk must follow, and its target's length.
+    Link(ResolvedPath, u64),
+}
+
+/// Step from `cur` to its child `name`, now the last component of `canon`:
+/// the root of a filesystem mounted there, else what `cur` holds under it.
+#[inline(never)]
+fn enter(
+    cur: &Ancestor,
+    name: &[u8],
+    canon: &[u8],
+    is_final: bool,
+    flags: u32,
+) -> VfsResult<Entered> {
+    if let Some(root) = mount_root(canon)? {
+        return Ok(Entered::Child(root));
+    }
+    let child = cur.fs.lookup(cur.inode, name)?;
+    // `mount_at` released the mount table before returning, which is what
+    // lets this reach a filesystem whose own lock is a sleeping mutex.
+    let (kind, size, perm) = child_kind(cur.fs, child)?;
+    if kind == FileType::Symlink && !(is_final && flags & RESOLVE_NOFOLLOW_FINAL != 0) {
+        let resolved = ResolvedPath {
+            fs: cur.fs,
+            inode: child,
+            mount_flags: cur.mount_flags,
+            perm,
+        };
+        return Ok(Entered::Link(resolved, size));
+    }
+    if !is_final && kind != FileType::Directory {
+        return Err(VfsError::NotDirectory);
+    }
+    Ok(Entered::Child(Ancestor {
+        inode: child,
+        perm,
+        canon_len: canon.len(),
+        ..*cur
+    }))
+}
+
+/// The root of the filesystem mounted at `path`, if one is.
+fn mount_root(path: &[u8]) -> VfsResult<Option<Ancestor>> {
+    let Some(mounted) = mount_at(path) else {
+        return Ok(None);
+    };
+    Ok(Some(Ancestor {
+        fs: mounted.fs,
+        inode: mounted.root,
+        mount_flags: mounted.flags,
+        perm: child_kind(mounted.fs, mounted.root)?.2,
+        canon_len: path.len(),
+    }))
 }
 
 fn push_name(canon: &mut KVec<u8>, name: &[u8]) -> VfsResult<()> {
@@ -289,9 +332,12 @@ fn has_parent_component(path: &[u8]) -> bool {
 ///
 /// [`FileStat`]: crate::vfs::FileStat
 #[inline(never)]
-fn child_kind(fs: &'static dyn FileSystem, inode: InodeId) -> VfsResult<(FileType, u64)> {
+fn child_kind(
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+) -> VfsResult<(FileType, u64, InodePerm)> {
     let stat = fs.stat(inode)?;
-    Ok((stat.file_type, stat.size))
+    Ok((stat.file_type, stat.size, InodePerm::of(&stat)))
 }
 
 /// Splice a symlink's target into the path that named it: an absolute target

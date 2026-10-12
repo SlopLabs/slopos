@@ -22,7 +22,9 @@ use super::{
     lock_key_for_test, new_open_file,
 };
 use crate::vfs::path::RESOLVE_FOLLOW;
-use crate::vfs::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult};
+use crate::vfs::{
+    FileStat, FileSystem, FileType, FsStats, InodeId, Subject, TimesChange, VfsError, VfsResult,
+};
 
 /// A registered process with an empty descriptor table, released on drop: a
 /// table lives in its process's own registry slot.
@@ -103,8 +105,24 @@ pub fn test_record_lock_share_is_bounded_per_principal() -> TestResult {
     let greedy_table = greedy.table();
     let neighbour_table = neighbour.table();
 
-    let greedy_fd = file_open_at(greedy_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
-    let neighbour_fd = file_open_at(neighbour_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let greedy_fd = file_open_at(
+        greedy_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
+    let neighbour_fd = file_open_at(
+        neighbour_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
     assert_test!(greedy_fd >= 0 && neighbour_fd >= 0, "fixture opens failed");
 
     // Gaps between the ranges, or coalescing would merge them into one row and
@@ -163,7 +181,15 @@ pub fn test_record_lock_coalesces_abutting_ranges() -> TestResult {
         return fail!("could not create the process");
     };
     let table = scratch.table();
-    let fd = file_open_at(table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let fd = file_open_at(
+        table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
     assert_test!(fd >= 0, "the fixture open failed");
 
     let baseline = file_locks_active();
@@ -204,8 +230,24 @@ pub fn test_first_lock_is_admitted_while_the_reserve_holds() -> TestResult {
     };
     let holder_table = holder.table();
     let newcomer_table = newcomer.table();
-    let holder_fd = file_open_at(holder_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
-    let newcomer_fd = file_open_at(newcomer_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let holder_fd = file_open_at(
+        holder_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
+    let newcomer_fd = file_open_at(
+        newcomer_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
     assert_test!(holder_fd >= 0 && newcomer_fd >= 0, "fixture opens failed");
 
     // Two slots left: enough for one row each, and well inside the reserve
@@ -260,7 +302,15 @@ pub fn test_downgrade_wakes_lock_waiters() -> TestResult {
         return fail!("could not create the process");
     };
     let table = scratch.table();
-    let fd = file_open_at(table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let fd = file_open_at(
+        table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
     assert_test!(fd >= 0, "the fixture open failed");
 
     // A plain acquire frees nothing, so it must not wake: that is what makes
@@ -320,8 +370,24 @@ pub fn test_midrange_unlock_keeps_the_tail_it_cannot_split() -> TestResult {
     };
     let holder_table = holder.table();
     let rival_table = rival.table();
-    let holder_fd = file_open_at(holder_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
-    let rival_fd = file_open_at(rival_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let holder_fd = file_open_at(
+        holder_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
+    let rival_fd = file_open_at(
+        rival_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
     assert_test!(holder_fd >= 0 && rival_fd >= 0, "fixture opens failed");
 
     let held = record(holder_table, holder_fd, F_SETLK, F_WRLCK, 0, 3 * 4096);
@@ -373,9 +439,33 @@ pub fn test_close_drops_record_locks_on_that_file() -> TestResult {
     };
     let holder_table = holder.table();
     let rival_table = rival.table();
-    let first = file_open_at(holder_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
-    let second = file_open_at(holder_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
-    let rival_fd = file_open_at(rival_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let first = file_open_at(
+        holder_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
+    let second = file_open_at(
+        holder_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
+    let rival_fd = file_open_at(
+        rival_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
     assert_test!(
         first >= 0 && second >= 0 && rival_fd >= 0,
         "fixture opens failed"
@@ -422,7 +512,15 @@ pub fn test_flock_and_record_locks_are_independent() -> TestResult {
         return fail!("could not create the process");
     };
     let table = scratch.table();
-    let fd = file_open_at(table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let fd = file_open_at(
+        table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
     assert_test!(fd >= 0, "the fixture open failed");
 
     let flocked = file_flock_fd(table, fd, (LOCK_EX | LOCK_NB) as u32);
@@ -477,8 +575,24 @@ pub fn test_record_lock_cycle_is_a_deadlock() -> TestResult {
     };
     let first_table = first.table();
     let second_table = second.table();
-    let first_fd = file_open_at(first_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
-    let second_fd = file_open_at(second_table, path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    let first_fd = file_open_at(
+        first_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
+    let second_fd = file_open_at(
+        second_table,
+        path,
+        b"/",
+        O_RDWR,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
     assert_test!(first_fd >= 0 && second_fd >= 0, "fixture opens failed");
     let Some(key) = lock_key_for_test(first_table, first_fd) else {
         return fail!("could not derive the lock key");
@@ -526,8 +640,24 @@ pub fn test_fcntl_lock_needs_the_matching_access_mode() -> TestResult {
         return fail!("could not create the process");
     };
     let table = scratch.table();
-    let ro = file_open_at(table, path, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
-    let wo = file_open_at(table, path, b"/", O_WRONLY, RESOLVE_FOLLOW, None);
+    let ro = file_open_at(
+        table,
+        path,
+        b"/",
+        O_RDONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
+    let wo = file_open_at(
+        table,
+        path,
+        b"/",
+        O_WRONLY,
+        RESOLVE_FOLLOW,
+        None,
+        &Subject::KERNEL,
+    );
     assert_test!(ro >= 0 && wo >= 0, "fixture opens failed");
 
     let write_on_ro = record(table, ro, F_SETLK, F_WRLCK, 0, 4096);
@@ -584,6 +714,7 @@ pub fn test_dirfd_base_is_the_path_the_walk_ended_on() -> TestResult {
         O_RDONLY,
         RESOLVE_FOLLOW,
         None,
+        &Subject::KERNEL,
     );
     assert_test!(dirfd >= 0, "the symlinked directory could not be opened");
 
@@ -634,6 +765,7 @@ pub fn test_dirfd_base_answers_estale_after_a_rename() -> TestResult {
         O_RDONLY,
         RESOLVE_FOLLOW,
         None,
+        &Subject::KERNEL,
     );
     assert_test!(dirfd >= 0, "the directory could not be opened");
 
@@ -686,6 +818,7 @@ pub fn test_getdents_cursor_is_committed_by_the_caller() -> TestResult {
         O_RDONLY,
         RESOLVE_FOLLOW,
         None,
+        &Subject::KERNEL,
     );
     assert_test!(dirfd >= 0, "the directory could not be opened");
 
@@ -769,7 +902,13 @@ impl FileSystem for StubFs {
         Err(VfsError::ReadOnly)
     }
 
-    fn create(&self, _parent: InodeId, _name: &[u8], _file_type: FileType) -> VfsResult<InodeId> {
+    fn create_owned(
+        &self,
+        _parent: InodeId,
+        _name: &[u8],
+        _file_type: FileType,
+        _owner: crate::vfs::Owner,
+    ) -> VfsResult<InodeId> {
         Err(VfsError::ReadOnly)
     }
 
@@ -839,11 +978,11 @@ pub fn test_read_only_filesystem_refuses_fd_shaped_mutators() -> TestResult {
         return fail!("could not install the writable stub descriptor");
     };
 
-    let chmod_ro = file_fchmod_fd(table, 3, 0o600);
+    let chmod_ro = file_fchmod_fd(table, 3, 0o600, &Subject::KERNEL);
     let one = Some(crate::vfs::Timestamp::from_secs(1));
-    let times_ro = file_set_times_fd(table, 3, one, one);
-    let chmod_rw = file_fchmod_fd(table, 4, 0o600);
-    let times_rw = file_set_times_fd(table, 4, one, one);
+    let times_ro = file_set_times_fd(table, 3, one, one, TimesChange::Explicit, &Subject::KERNEL);
+    let chmod_rw = file_fchmod_fd(table, 4, 0o600, &Subject::KERNEL);
+    let times_rw = file_set_times_fd(table, 4, one, one, TimesChange::Explicit, &Subject::KERNEL);
 
     let _ = file_close_fd(table, 3);
     let _ = file_close_fd(table, 4);

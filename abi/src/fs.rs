@@ -121,7 +121,6 @@ pub const fn makedev(major: u32, minor: u32) -> u64 {
 
 /// `stat(2)` output. Field order, widths and padding are the Linux x86-64
 /// `struct stat` ones, so a libc port needs no translation table.
-/// `st_uid`/`st_gid` exist for layout and always read 0: single-user uid 0.
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct UserFsStat {
@@ -199,6 +198,12 @@ pub const S_IFDIR: u32 = 0o040_000;
 pub const S_IFCHR: u32 = 0o020_000;
 pub const S_IFIFO: u32 = 0o010_000;
 
+/// The mode's special bits. Set-user-ID and set-group-ID on a file are stored
+/// and never honoured at exec.
+pub const S_ISUID: u32 = 0o4000;
+pub const S_ISGID: u32 = 0o2000;
+pub const S_ISVTX: u32 = 0o1000;
+
 impl UserFsStat {
     pub fn file_kind(&self) -> u32 {
         self.st_mode & S_IFMT
@@ -235,7 +240,7 @@ pub const AT_REMOVEDIR: u32 = 0x200;
 pub const AT_SYMLINK_FOLLOW: u32 = 0x400;
 /// An empty `path` names the descriptor itself.
 pub const AT_EMPTY_PATH: u32 = 0x1000;
-/// Accepted and ignored: single-user uid 0. Shares 0x200 with
+/// Check with the effective ids rather than the real ones. Shares 0x200 with
 /// [`AT_REMOVEDIR`] exactly as Linux does; no call takes both.
 pub const AT_EACCESS: u32 = 0x200;
 

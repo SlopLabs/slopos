@@ -9,6 +9,7 @@ use slopos_abi::Errno;
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::process::cred::Subject;
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::wl_currency::{self, WL_DELTA};
 use slopos_sched::task::TaskRef;
@@ -20,6 +21,20 @@ use crate::syscall::result::SyscallResult;
 /// `rdx`, `r10`, `r8`, `r9` — System V AMD64 with `r10` standing in for `rcx`,
 /// which the `syscall` instruction clobbers.
 pub type SyscallRegs = [u64; 6];
+
+/// Who `task`'s permission checks are for. A kernel task is the kernel.
+pub fn subject_of(task: &Task) -> Subject {
+    match task.process() {
+        Some(process) => Subject {
+            cred: process.cred(),
+            dac_override: slopos_ostd::authority::mask_permits(
+                slopos_ostd::task::ops::task_caps(task),
+                slopos_ostd::authority::Capability::DacOverride,
+            ),
+        },
+        None => Subject::KERNEL,
+    }
+}
 
 /// The calling task, its arguments, and its user-mode frame, for the duration
 /// of one syscall. The task is a **borrow**: it is alive because it is
@@ -116,6 +131,18 @@ impl<'a> SyscallContext<'a> {
         &self,
     ) -> Result<slopos_ostd::authority::Cap<'_, R>, Errno> {
         slopos_ostd::authority::check_mask::<R, _>(self.task, self.caps())
+    }
+
+    /// The caller's identity. A kernel task acts as uid 0.
+    pub fn cred(&self) -> slopos_ostd::process::Cred {
+        self.task
+            .process()
+            .map_or(slopos_ostd::process::Cred::ROOT, |process| process.cred())
+    }
+
+    /// Who this caller's permission checks are for.
+    pub fn subject(&self) -> Subject {
+        subject_of(self.task)
     }
 
     /// The calling process's descriptor table, read from the task's own

@@ -1772,7 +1772,15 @@ pub fn test_fchdir_moves_to_the_descriptors_directory() -> TestResult {
     }
 
     let open = |path: &[u8], flags: u32| {
-        crate::syscall::fs::at_handlers::open_at(fx.table, path, b"/", flags, 0).ok()
+        crate::syscall::fs::at_handlers::open_at(
+            fx.table,
+            path,
+            b"/",
+            flags,
+            0,
+            &slopos_fs::vfs::Subject::KERNEL,
+        )
+        .ok()
     };
     let dir_fd = open(
         b"/dev",

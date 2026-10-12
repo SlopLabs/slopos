@@ -835,7 +835,12 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
         return TestResult::Fail;
     };
     make_task_current(task_id);
-    let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY | O_NOCTTY as u32);
+    let fd = file_open_for_process(
+        pid,
+        b"/dev/tty",
+        O_RDONLY | O_NOCTTY as u32,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     park_bootstrap_on_current_cpu();
     assert_test!(fd >= 0, "open(/dev/tty, O_NOCTTY) failed");
 
@@ -986,7 +991,12 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
         return TestResult::Fail;
     };
     make_task_current(task_id);
-    let fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY);
+    let fd = file_open_for_process(
+        pid,
+        &path[..path.len() - 1],
+        O_RDONLY,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/pts/N) failed");
@@ -1044,7 +1054,12 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
         return TestResult::Fail;
     };
     make_task_current(task_id);
-    let fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
+    let fd = file_open_for_process(
+        pid,
+        &path[..path.len() - 1],
+        O_RDONLY | O_NOCTTY as u32,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/pts/N, O_NOCTTY) failed");
@@ -1107,7 +1122,12 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
     make_task_current(task_id);
     let _waiter = assert_some!(slopos_ostd::sync::PollWaiter::new(), "arm poll token");
 
-    let slave_fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
+    let slave_fd = file_open_for_process(
+        pid,
+        &path[..path.len() - 1],
+        O_RDONLY | O_NOCTTY as u32,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(slave_fd >= 0, "open(/dev/pts/N) failed");
 
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, slave_fd, POLLIN);
@@ -1119,7 +1139,12 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
         "registration must go stale once its fd closes"
     );
 
-    let reused_fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
+    let reused_fd = file_open_for_process(
+        pid,
+        &path[..path.len() - 1],
+        O_RDONLY | O_NOCTTY as u32,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(reused_fd >= 0, "reopen(/dev/pts/N) failed");
 
     let reg_reused = slopos_fs::fileio::file_poll_register_fd(pid, reused_fd, POLLIN);
@@ -3789,7 +3814,7 @@ pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
         return TestResult::Fail;
     };
     make_task_current(task_id);
-    let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY);
+    let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY, &slopos_fs::vfs::Subject::KERNEL);
     park_bootstrap_on_current_cpu();
 
     assert_eq_test!(
@@ -3829,7 +3854,7 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
         return TestResult::Fail;
     };
     make_task_current(task_id);
-    let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY);
+    let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY, &slopos_fs::vfs::Subject::KERNEL);
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/tty) with ctty should succeed");
@@ -3883,7 +3908,12 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
         return TestResult::Fail;
     };
     make_task_current(child_id);
-    let fd = file_open_for_process(child_pid, b"/dev/tty", O_RDONLY);
+    let fd = file_open_for_process(
+        child_pid,
+        b"/dev/tty",
+        O_RDONLY,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     park_bootstrap_on_current_cpu();
 
     assert_eq_test!(
@@ -3932,7 +3962,12 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
         return TestResult::Fail;
     };
     make_task_current(child_id);
-    let fd = file_open_for_process(child_pid, b"/dev/tty", O_RDONLY);
+    let fd = file_open_for_process(
+        child_pid,
+        b"/dev/tty",
+        O_RDONLY,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "child open(/dev/tty) should succeed");
@@ -3974,7 +4009,12 @@ pub fn test_vhangup_needs_console_config() -> TestResult {
                 .ok_or("a user task has no fd table")
         };
         let (plain_table, holder_table) = (table_of(&plain)?, table_of(&holder)?);
-        let master_fd = file_open_for_process(plain_table, b"/dev/ptmx", O_RDONLY);
+        let master_fd = file_open_for_process(
+            plain_table,
+            b"/dev/ptmx",
+            O_RDONLY,
+            &slopos_fs::vfs::Subject::KERNEL,
+        );
         if master_fd < 0 {
             return Err("ptmx open failed");
         }
@@ -4273,7 +4313,12 @@ pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
     };
 
     // A PTY master gives a real, independently-tracked tty index.
-    let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
+    let master_fd = file_open_for_process(
+        pid,
+        b"/dev/ptmx",
+        O_RDONLY,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(master_fd >= 0, "ptmx open failed");
     let Some(master_tty) = slopos_fs::fileio::file_get_tty_index(pid, master_fd) else {
         let _ = file_close_fd(pid, master_fd);
@@ -4347,7 +4392,12 @@ pub fn test_tty_ioctl_never_changes_open_state() -> TestResult {
         return TestResult::Fail;
     };
 
-    let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
+    let master_fd = file_open_for_process(
+        pid,
+        b"/dev/ptmx",
+        O_RDONLY,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(master_fd >= 0, "ptmx open failed");
     let Some(master_tty) = slopos_fs::fileio::file_get_tty_index(pid, master_fd) else {
         task_terminate(task_id);
@@ -4417,7 +4467,12 @@ pub fn test_scm_rights_tty_balanced() -> TestResult {
     };
     let (srv, cli) = (pair.server, pair.client);
 
-    let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
+    let master_fd = file_open_for_process(
+        pid,
+        b"/dev/ptmx",
+        O_RDONLY,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     assert_test!(master_fd >= 0, "ptmx open failed");
     let Some(master_tty) = slopos_fs::fileio::file_get_tty_index(pid, master_fd) else {
         task_terminate(task_id);
@@ -7406,15 +7461,19 @@ slopos_testing::stest!(
     suite = syscall_signal
 );
 
-fn broadcast_spared_pending(sender_id: u32, sender_caps: u64) -> slopos_ostd::KVec<(u32, SigSet)> {
-    use crate::syscall::signal::{signal_may_name, signal_permitted};
+fn broadcast_spared_pending(sender_id: u32, signum: u8) -> slopos_ostd::KVec<(u32, SigSet)> {
+    use crate::syscall::signal::{Sender, signal_may_name, signal_permitted};
 
     let mut spared = slopos_ostd::KVec::new();
+    let Some(sender) = task_find_by_id(sender_id).map(|task| Sender::of(&task)) else {
+        return spared;
+    };
     task::task_for_each_active(|target| {
         if target.task_id == sender_id {
             return;
         }
-        let nameable = signal_may_name(target.flags) && signal_permitted(sender_caps, target);
+        let nameable =
+            signal_may_name(target.flags) && signal_permitted(&sender, target, u64::from(signum));
         if !nameable {
             let _ = spared.push((target.task_id, target.signal_pending()));
         }
@@ -7447,7 +7506,7 @@ pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
         return TestResult::Fail;
     };
 
-    let spared = broadcast_spared_pending(user_id, CAP_UNIVERSAL);
+    let spared = broadcast_spared_pending(user_id, SIGTERM);
     assert_test!(
         spared.iter().any(|(task_id, _)| *task_id == kernel_id),
         "the kernel task must be in the set the broadcast may not name"
@@ -7599,7 +7658,7 @@ pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
         return TestResult::Fail;
     };
 
-    let spared = broadcast_spared_pending(sender_id, CAP_UNIVERSAL);
+    let spared = broadcast_spared_pending(sender_id, SIGTERM);
     assert_test!(
         spared.iter().any(|(task_id, _)| *task_id == privileged_id),
         "the privileged task must be in the set the broadcast may not name"
@@ -7995,10 +8054,9 @@ pub fn test_process_list_excludes_exited_tasks() -> TestResult {
     pass!()
 }
 
-/// Enumeration answers to the same relation `kill` does: an unprivileged caller
-/// is not told the id of a task it could not signal, so the two cannot disagree.
-/// Only `SysInspect` sees past the relation.
-pub fn test_process_list_hides_undominated_tasks() -> TestResult {
+/// Enumeration is universal, as Linux's `/proc` is: an unprivileged caller is
+/// shown a task it may not signal and a kernel task, each with its real uid.
+pub fn test_process_list_reports_every_task() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let plain_id = create_test_user_task();
@@ -8019,68 +8077,54 @@ pub fn test_process_list_hides_undominated_tasks() -> TestResult {
         privileged_id != INVALID_TASK_ID,
         "failed to create privileged task"
     );
+    let owned = task_find_by_id(privileged_id)
+        .and_then(|task| task.process())
+        .map(|process| process.change_cred(|cred| cred.set_resuid([4242; 3], true)));
+    assert_test!(
+        owned == Some(Ok(())),
+        "could not give the privileged task another uid"
+    );
 
     let Some(buf) = map_user_rw_page(plain_pid) else {
         return fail!("could not map a user page");
     };
     let capacity = (4096 / core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>()) as u64;
 
-    // (itself, the privileged task, a kernel task) as the caller saw them.
-    let scan = || {
-        let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
-        frame.regs_mut().rdi = buf;
-        frame.regs_mut().rsi = capacity;
-        let _ = with_user_process_context(plain_pid, || {
-            crate::syscall::dispatch::dispatch_handler(
-                crate::syscall::core_handlers::syscall_process_list,
-                &plain_guard,
-                &mut *frame,
-            )
-        });
-        let mut seen = (false, false, false);
-        for i in 0..frame.rax().min(capacity) {
-            let addr = buf + i * core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>() as u64;
-            let Ok(ptr) = UserPtr::<slopos_abi::syscall::UserTaskEntry>::try_new(addr) else {
-                continue;
-            };
-            let Some(Ok(entry)) = with_user_process_context(plain_pid, || copy_from_user(ptr))
-            else {
-                continue;
-            };
-            seen.0 |= entry.task_id == plain_id;
-            seen.1 |= entry.task_id == privileged_id;
-            seen.2 |=
-                task_find_by_id(entry.task_id).is_some_and(|t| t.flags & TASK_FLAG_USER_MODE == 0);
-        }
-        seen
-    };
-
-    let (saw_self, saw_privileged, saw_kernel_task) = scan();
-    slopos_ostd::task::ops::task_set_caps(
-        &plain_guard,
-        CAP_UNIVERSAL | Capability::SysInspect.bit(),
-    );
-    let (_, inspector_saw_privileged, _) = scan();
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rdi = buf;
+    frame.regs_mut().rsi = capacity;
+    let _ = with_user_process_context(plain_pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            crate::syscall::core_handlers::syscall_process_list,
+            &plain_guard,
+            &mut *frame,
+        )
+    });
+    // (itself, the privileged task as uid 4242, a kernel task) as listed.
+    let mut seen = (false, false, false);
+    for i in 0..frame.rax().min(capacity) {
+        let addr = buf + i * core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>() as u64;
+        let Ok(ptr) = UserPtr::<slopos_abi::syscall::UserTaskEntry>::try_new(addr) else {
+            continue;
+        };
+        let Some(Ok(entry)) = with_user_process_context(plain_pid, || copy_from_user(ptr)) else {
+            continue;
+        };
+        seen.0 |= entry.task_id == plain_id;
+        seen.1 |= entry.task_id == privileged_id && entry.uid == 4242;
+        seen.2 |=
+            task_find_by_id(entry.task_id).is_some_and(|t| t.flags & TASK_FLAG_USER_MODE == 0);
+    }
 
     drop(plain_guard);
     task_terminate(plain_id);
     task_terminate(privileged_id);
+    assert_test!(seen.0, "a task could not see itself");
     assert_test!(
-        saw_self,
-        "a task could not see itself, so the filter is too strict"
+        seen.1,
+        "a task it may not signal was hidden, or reported without its uid"
     );
-    assert_test!(
-        !saw_privileged,
-        "an unprivileged task enumerated a seat-holding task it may not signal"
-    );
-    assert_test!(
-        !saw_kernel_task,
-        "an unprivileged task enumerated a kernel task"
-    );
-    assert_test!(
-        inspector_saw_privileged,
-        "a SysInspect holder was not shown a task it does not dominate"
-    );
+    assert_test!(seen.2, "a kernel task was hidden");
     pass!()
 }
 
@@ -8162,7 +8206,7 @@ slopos_testing::stest!(
     suite = syscall_core
 );
 slopos_testing::stest!(
-    name = test_process_list_hides_undominated_tasks,
+    name = test_process_list_reports_every_task,
     suite = syscall_core
 );
 slopos_testing::stest!(name = test_kconsole_needs_sys_inspect, suite = syscall_core);
@@ -10216,7 +10260,12 @@ fn block_ioctls_body(task_id: u32) -> TestResult {
     };
     let page = assert_some!(map_user_rw_page(pid), "no user page");
     make_task_current(task_id);
-    let fd = file_open_for_process(pid, b"/dev/nvme1n2", O_RDONLY);
+    let fd = file_open_for_process(
+        pid,
+        b"/dev/nvme1n2",
+        O_RDONLY,
+        &slopos_fs::vfs::Subject::KERNEL,
+    );
     park_bootstrap_on_current_cpu();
     if fd < 0 {
         return fail!("opening the block node failed: {}", fd);

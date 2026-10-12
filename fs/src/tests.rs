@@ -2207,7 +2207,13 @@ pub fn test_fileio_open_at_fd() -> TestResult {
     let table = scratch.table();
 
     // Next-free would be fd 0; opening at fd 5 must relocate off it.
-    let rc = fileio_open_at_fd(table, 5, b"/fileio_test/open_at.txt", O_RDONLY as u32);
+    let rc = fileio_open_at_fd(
+        table,
+        5,
+        b"/fileio_test/open_at.txt",
+        O_RDONLY as u32,
+        &crate::vfs::Subject::KERNEL,
+    );
     let present = rc == 5 && file_close_fd(table, 5) == 0;
     let low_absent = file_close_fd(table, 0) != 0;
 
@@ -2241,7 +2247,14 @@ pub fn test_fileio_file_ref_move() -> TestResult {
         return TestResult::Fail;
     };
     let table = scratch.table();
-    if fileio_open_at_fd(table, 2, b"/fileio_test/refmove.txt", O_RDONLY as u32) != 2 {
+    if fileio_open_at_fd(
+        table,
+        2,
+        b"/fileio_test/refmove.txt",
+        O_RDONLY as u32,
+        &crate::vfs::Subject::KERNEL,
+    ) != 2
+    {
         return TestResult::Fail;
     }
 
@@ -2763,7 +2776,12 @@ pub fn test_fileio_open_file_limit() -> TestResult {
     let mut opened = 0usize;
     let mut first_failure = 0i32;
     for _ in 0..FILEIO_MAX_OPEN_FILES + 1 {
-        let fd = file_open_for_process(table, b"/fileio_test/limit.txt", O_RDONLY as u32);
+        let fd = file_open_for_process(
+            table,
+            b"/fileio_test/limit.txt",
+            O_RDONLY as u32,
+            &crate::vfs::Subject::KERNEL,
+        );
         if fd < 0 {
             first_failure = fd;
             break;
@@ -2820,7 +2838,7 @@ pub fn test_quota_fdslot_drive_to_full() -> TestResult {
     let mut opened = 0u32;
     let mut first_failure = 0i32;
     for _ in 0..CEILING + 4 {
-        let fd = file_open_for_process(table, path, O_RDONLY as u32);
+        let fd = file_open_for_process(table, path, O_RDONLY as u32, &crate::vfs::Subject::KERNEL);
         if fd < 0 {
             first_failure = fd;
             break;
@@ -2887,7 +2905,7 @@ pub fn test_quota_fdslot_refusal_refunds_once() -> TestResult {
 
     let mut fds = slopos_ostd::KVec::new();
     for _ in 0..CEILING {
-        let fd = file_open_for_process(table, path, O_RDONLY as u32);
+        let fd = file_open_for_process(table, path, O_RDONLY as u32, &crate::vfs::Subject::KERNEL);
         if fd < 0 {
             set_quota_mode(restore);
             return slopos_testing::fail!("open under the ceiling failed with {}", fd);
@@ -2901,7 +2919,7 @@ pub fn test_quota_fdslot_refusal_refunds_once() -> TestResult {
     // Repeat: a refusal that under-refunds drifts the row, which a single
     // refusal could hide.
     for _ in 0..16 {
-        if file_open_for_process(table, path, O_RDONLY as u32) >= 0 {
+        if file_open_for_process(table, path, O_RDONLY as u32, &crate::vfs::Subject::KERNEL) >= 0 {
             set_quota_mode(restore);
             return slopos_testing::fail!("an over-ceiling open succeeded");
         }
@@ -2968,14 +2986,25 @@ pub fn test_quota_fdslot_cross_process_isolation() -> TestResult {
     );
 
     let mut opened = 0u32;
-    while file_open_for_process(greedy_table, path, O_RDONLY as u32) >= 0 {
+    while file_open_for_process(
+        greedy_table,
+        path,
+        O_RDONLY as u32,
+        &crate::vfs::Subject::KERNEL,
+    ) >= 0
+    {
         opened += 1;
         if opened > CEILING {
             break;
         }
     }
 
-    let neighbour_fd = file_open_for_process(neighbour_table, path, O_RDONLY as u32);
+    let neighbour_fd = file_open_for_process(
+        neighbour_table,
+        path,
+        O_RDONLY as u32,
+        &crate::vfs::Subject::KERNEL,
+    );
     set_quota_mode(restore);
 
     if opened != CEILING {
@@ -3048,6 +3077,7 @@ pub fn test_sealed_inode_refuses_mutation() -> TestResult {
         create: true,
         exclusive: false,
         truncate: false,
+        readable: false,
         writable: true,
     };
     let Ok(sealed) = vfs_open_flags(SEALED, writable()) else {
@@ -3170,6 +3200,7 @@ pub fn test_rdonly_mount_refuses_mutation() -> TestResult {
         create: false,
         exclusive: false,
         truncate: false,
+        readable: false,
         writable: true,
     };
     let result = (|| {
@@ -3279,7 +3310,7 @@ pub fn test_quota_objectrow_drive_to_full() -> TestResult {
     let mut opened = 0u32;
     let mut first_failure = 0i32;
     for _ in 0..CEILING + 4 {
-        let fd = file_open_for_process(table, path, O_RDONLY as u32);
+        let fd = file_open_for_process(table, path, O_RDONLY as u32, &crate::vfs::Subject::KERNEL);
         if fd < 0 {
             first_failure = fd;
             break;
@@ -3339,13 +3370,24 @@ pub fn test_quota_objectrow_cross_process_isolation() -> TestResult {
     );
 
     let mut opened = 0u32;
-    while file_open_for_process(greedy_table, path, O_RDONLY as u32) >= 0 {
+    while file_open_for_process(
+        greedy_table,
+        path,
+        O_RDONLY as u32,
+        &crate::vfs::Subject::KERNEL,
+    ) >= 0
+    {
         opened += 1;
         if opened > CEILING {
             break;
         }
     }
-    let neighbour_fd = file_open_for_process(neighbour_table, path, O_RDONLY as u32);
+    let neighbour_fd = file_open_for_process(
+        neighbour_table,
+        path,
+        O_RDONLY as u32,
+        &crate::vfs::Subject::KERNEL,
+    );
     set_quota_mode(restore);
 
     if opened != CEILING {

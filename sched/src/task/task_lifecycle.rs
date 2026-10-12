@@ -8,7 +8,7 @@ use slopos_arch::cpu;
 use slopos_ostd::KArc;
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::process::{
-    AccountId, PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn,
+    AccountId, Cred, PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn,
 };
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::sync::kernel_io_task::{KernelIoTaskIds, MAX_KERNEL_IO_STOPS};
@@ -117,11 +117,11 @@ impl ProcessResourceLease {
     /// The accounting edge is the spawner's account, fixed here with no later
     /// opportunity to set it.
     fn mint_process(parent: Option<&Process>) -> Option<KArc<Process>> {
-        let (wait_parent, account_parent) = match parent {
-            Some(parent) => (parent.handle(), parent.account()),
-            None => (None, slopos_ostd::process::quota::root()),
+        let (wait_parent, account_parent, cred) = match parent {
+            Some(parent) => (parent.handle(), parent.account(), parent.cred()),
+            None => (None, slopos_ostd::process::quota::root(), Cred::ROOT),
         };
-        match process_spawn(wait_parent, account_parent) {
+        match process_spawn(wait_parent, account_parent, cred) {
             Ok(process) => Some(process),
             Err(error) => {
                 klog_info!("task_create: process registration failed: {:?}", error);

@@ -1,7 +1,7 @@
 //! System configuration and the odds and ends that belong to no subsystem.
 
 use core::ffi::{c_char, c_int, c_long};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::errno::{EINVAL, EIO, ENAMETOOLONG, ERANGE, errno_set};
 use crate::pal::raw::syscall6;
@@ -34,18 +34,61 @@ pub const HOST_NAME_MAX: usize = 64;
 /// Symlinks a path resolution will follow. Matches `realpath`'s own bound.
 pub const SYMLOOP_MAX: c_long = 40;
 
-/// Bytes `getpwuid_r` needs for its one row, NULs included. Stated as a
-/// constant so `_SC_GETPW_R_SIZE_MAX` and the row below cannot drift.
-const PASSWD_BUF_MIN: usize =
-    PW_NAME.len() + PW_PASSWD.len() + PW_GECOS.len() + PW_DIR.len() + PW_SHELL.len();
+/// One row of the passwd database. The strings carry their NULs.
+struct User {
+    name: &'static [u8],
+    uid: uid_t,
+    gid: gid_t,
+    dir: &'static [u8],
+}
 
-const PW_NAME: &[u8] = b"root\0";
 const PW_PASSWD: &[u8] = b"x\0";
-const PW_GECOS: &[u8] = b"root\0";
-/// `/` rather than `/root`: that is what the shell's own `HOME` default is,
-/// and the image has no per-user directory.
-const PW_DIR: &[u8] = b"/\0";
 const PW_SHELL: &[u8] = b"/bin/shell\0";
+
+/// The system and the one person at the machine. Compiled in rather than read
+/// from `/etc/passwd` until there is more than one person. root's home is
+/// `/` until the image carries `/root`.
+const USERS: [User; 2] = [
+    User {
+        name: b"root\0",
+        uid: 0,
+        gid: 0,
+        dir: b"/\0",
+    },
+    User {
+        name: b"user\0",
+        uid: 1000,
+        gid: 1000,
+        dir: b"/home/user\0",
+    },
+];
+
+impl User {
+    /// Its name doubles as its gecos field.
+    const fn buf_len(&self) -> usize {
+        2 * self.name.len() + PW_PASSWD.len() + self.dir.len() + PW_SHELL.len()
+    }
+}
+
+/// Bytes `getpwuid_r` needs for any row, NULs included, so
+/// `_SC_GETPW_R_SIZE_MAX` and the rows cannot drift.
+const PASSWD_BUF_MIN: usize = {
+    let mut max = 0;
+    let mut i = 0;
+    while i < USERS.len() {
+        if USERS[i].buf_len() > max {
+            max = USERS[i].buf_len();
+        }
+        i += 1;
+    }
+    max
+};
+
+fn user_named(name: &[u8]) -> Option<&'static User> {
+    USERS
+        .iter()
+        .find(|user| &user.name[..user.name.len() - 1] == name)
+}
 
 /// `sysconf(3)`.
 ///
@@ -143,11 +186,8 @@ pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
     0
 }
 
-/// `getpwuid_r(3)`.
-///
-/// SlopOS is single-user, so there is exactly one row and it is uid 0. Any
-/// other uid is "no such entry", which POSIX spells as success with a null
-/// `*result` — not an error.
+/// `getpwuid_r(3)`. A uid with no row is "no such entry", which POSIX spells
+/// as success with a null `*result` — not an error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpwuid_r(
     uid: uid_t,
@@ -160,22 +200,20 @@ pub unsafe extern "C" fn getpwuid_r(
         return EINVAL.raw();
     }
     *result = core::ptr::null_mut();
-    if uid != 0 {
+    let Some(user) = USERS.iter().find(|user| user.uid == uid) else {
         return 0;
-    }
-    if buflen < PASSWD_BUF_MIN {
+    };
+    if buflen < user.buf_len() {
         return ERANGE.raw();
     }
 
-    // `PASSWD_BUF_MIN` is the total of the five strings, so the check above
-    // is the only bound this loop needs.
     let base = buf as *mut u8;
     let mut at = 0usize;
     for (field, text) in [
-        (&raw mut (*pwd).pw_name, PW_NAME),
+        (&raw mut (*pwd).pw_name, user.name),
         (&raw mut (*pwd).pw_passwd, PW_PASSWD),
-        (&raw mut (*pwd).pw_gecos, PW_GECOS),
-        (&raw mut (*pwd).pw_dir, PW_DIR),
+        (&raw mut (*pwd).pw_gecos, user.name),
+        (&raw mut (*pwd).pw_dir, user.dir),
         (&raw mut (*pwd).pw_shell, PW_SHELL),
     ] {
         let dst = base.add(at);
@@ -183,14 +221,14 @@ pub unsafe extern "C" fn getpwuid_r(
         *field = dst as *mut c_char;
         at += text.len();
     }
-    (*pwd).pw_uid = 0;
-    (*pwd).pw_gid = 0;
+    (*pwd).pw_uid = user.uid;
+    (*pwd).pw_gid = user.gid;
     *result = pwd;
     0
 }
 
-/// `getpwnam_r(3)`. The one row is named `root`; any other name is "no such
-/// entry", which POSIX spells as success with a null `*result`.
+/// `getpwnam_r(3)`. A name with no row is "no such entry", which POSIX spells
+/// as success with a null `*result`.
 ///
 /// # Safety
 /// `name` is a NUL-terminated C string; `buf` addresses `buflen` bytes.
@@ -207,11 +245,11 @@ pub unsafe extern "C" fn getpwnam_r(
     }
     let bytes = name as *const u8;
     let requested = crate::string::slice_from_cstr(bytes, crate::string::u_strlen(bytes));
-    if requested != &PW_NAME[..PW_NAME.len() - 1] {
+    let Some(user) = user_named(requested) else {
         *result = core::ptr::null_mut();
         return 0;
-    }
-    getpwuid_r(0, pwd, buf, buflen, result)
+    };
+    getpwuid_r(user.uid, pwd, buf, buflen, result)
 }
 
 static mut PW_ROW: passwd = passwd {
@@ -266,16 +304,42 @@ pub unsafe extern "C" fn getpwuid(uid: uid_t) -> *mut passwd {
     result
 }
 
-const GR_NAME: &[u8] = b"root\0";
+/// One row of the group database: each user's own group, which lists no
+/// members.
+struct Group {
+    name: &'static [u8],
+    gid: gid_t,
+}
+
+const GROUPS: [Group; 2] = [
+    Group {
+        name: b"root\0",
+        gid: 0,
+    },
+    Group {
+        name: b"user\0",
+        gid: 1000,
+    },
+];
+
 const GR_PASSWD: &[u8] = b"x\0";
 const PTR: usize = size_of::<*mut c_char>();
 
-/// Bytes `getgrgid_r` needs for its one row: the NULL-terminated, empty
-/// member list, the slack to align it, and the two strings.
-const GROUP_BUF_MIN: usize = PTR + (PTR - 1) + GR_NAME.len() + GR_PASSWD.len();
+/// Bytes `getgrgid_r` needs for any row: the NULL-terminated, empty member
+/// list, the slack to align it, and the two strings.
+const GROUP_BUF_MIN: usize = {
+    let mut longest = 0;
+    let mut i = 0;
+    while i < GROUPS.len() {
+        if GROUPS[i].name.len() > longest {
+            longest = GROUPS[i].name.len();
+        }
+        i += 1;
+    }
+    PTR + (PTR - 1) + longest + GR_PASSWD.len()
+};
 
-/// `getgrgid_r(3)`. As the passwd database, there is one row, gid 0 named
-/// `root`, with no members; any other gid is success with a null `*result`.
+/// `getgrgid_r(3)`. A gid with no row is success with a null `*result`.
 ///
 /// # Safety
 /// `buf` addresses `buflen` bytes.
@@ -291,12 +355,12 @@ pub unsafe extern "C" fn getgrgid_r(
         return EINVAL.raw();
     }
     *result = core::ptr::null_mut();
-    if gid != 0 {
+    let Some(row) = GROUPS.iter().find(|row| row.gid == gid) else {
         return 0;
-    }
+    };
     let base = buf as *mut u8;
     let pad = base.align_offset(PTR);
-    if pad > PTR - 1 || buflen < GROUP_BUF_MIN - (PTR - 1) + pad {
+    if pad > PTR - 1 || buflen < PTR + pad + row.name.len() + GR_PASSWD.len() {
         return ERANGE.raw();
     }
 
@@ -304,7 +368,7 @@ pub unsafe extern "C" fn getgrgid_r(
     *members = core::ptr::null_mut();
     let mut at = pad + PTR;
     for (field, text) in [
-        (&raw mut (*grp).gr_name, GR_NAME),
+        (&raw mut (*grp).gr_name, row.name),
         (&raw mut (*grp).gr_passwd, GR_PASSWD),
     ] {
         let dst = base.add(at);
@@ -312,14 +376,13 @@ pub unsafe extern "C" fn getgrgid_r(
         *field = dst as *mut c_char;
         at += text.len();
     }
-    (*grp).gr_gid = 0;
+    (*grp).gr_gid = row.gid;
     (*grp).gr_mem = members;
     *result = grp;
     0
 }
 
-/// `getgrnam_r(3)`. The one row is named `root`; any other name is success
-/// with a null `*result`.
+/// `getgrnam_r(3)`. A name with no row is success with a null `*result`.
 ///
 /// # Safety
 /// `name` is a NUL-terminated C string; `buf` addresses `buflen` bytes.
@@ -336,16 +399,19 @@ pub unsafe extern "C" fn getgrnam_r(
     }
     let bytes = name as *const u8;
     let requested = crate::string::slice_from_cstr(bytes, crate::string::u_strlen(bytes));
-    if requested != &GR_NAME[..GR_NAME.len() - 1] {
+    let Some(row) = GROUPS
+        .iter()
+        .find(|row| &row.name[..row.name.len() - 1] == requested)
+    else {
         *result = core::ptr::null_mut();
         return 0;
-    }
-    getgrgid_r(0, grp, buf, buflen, result)
+    };
+    getgrgid_r(row.gid, grp, buf, buflen, result)
 }
 
 /// `initgroups(3)`: the supplementary groups become `group` and every group
-/// that lists `user` as a member. The one group row lists none, so the set is
-/// `{group}`, which `setgroups` grants for gid 0 alone.
+/// that lists `user` as a member. No row lists a member, so the set is
+/// `{group}`, which only a holder of `SetId` may set.
 ///
 /// # Safety
 /// `user` is a NUL-terminated C string.
@@ -413,13 +479,13 @@ pub extern "C" fn getpagesize() -> c_int {
     slopos_abi::PAGE_SIZE as c_int
 }
 
-static PW_ROW_TAKEN: AtomicBool = AtomicBool::new(false);
-static GR_ROW_TAKEN: AtomicBool = AtomicBool::new(false);
+static PW_NEXT: AtomicUsize = AtomicUsize::new(0);
+static GR_NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// `setpwent(3)`: rewind [`getpwent`].
 #[unsafe(no_mangle)]
 pub extern "C" fn setpwent() {
-    PW_ROW_TAKEN.store(false, Ordering::Relaxed);
+    PW_NEXT.store(0, Ordering::Relaxed);
 }
 
 /// `endpwent(3)`: as [`setpwent`]; there is no file to close.
@@ -428,19 +494,19 @@ pub extern "C" fn endpwent() {
     setpwent();
 }
 
-/// `getpwent(3)`: the passwd database's one row, then `NULL`.
+/// `getpwent(3)`: the passwd database's rows in turn, then `NULL`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpwent() -> *mut passwd {
-    if PW_ROW_TAKEN.swap(true, Ordering::Relaxed) {
-        return core::ptr::null_mut();
+    match USERS.get(PW_NEXT.fetch_add(1, Ordering::Relaxed)) {
+        Some(user) => getpwuid(user.uid),
+        None => core::ptr::null_mut(),
     }
-    getpwuid(0)
 }
 
 /// `setgrent(3)`: rewind [`getgrent`].
 #[unsafe(no_mangle)]
 pub extern "C" fn setgrent() {
-    GR_ROW_TAKEN.store(false, Ordering::Relaxed);
+    GR_NEXT.store(0, Ordering::Relaxed);
 }
 
 /// `endgrent(3)`: as [`setgrent`].
@@ -449,13 +515,13 @@ pub extern "C" fn endgrent() {
     setgrent();
 }
 
-/// `getgrent(3)`: the group database's one row, then `NULL`.
+/// `getgrent(3)`: the group database's rows in turn, then `NULL`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getgrent() -> *mut group {
-    if GR_ROW_TAKEN.swap(true, Ordering::Relaxed) {
-        return core::ptr::null_mut();
+    match GROUPS.get(GR_NEXT.fetch_add(1, Ordering::Relaxed)) {
+        Some(row) => getgrgid(row.gid),
+        None => core::ptr::null_mut(),
     }
-    getgrgid(0)
 }
 
 /// `getentropy(3)`. POSIX caps one call at 256 bytes, and the kernel's

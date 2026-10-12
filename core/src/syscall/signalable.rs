@@ -11,7 +11,7 @@ use slopos_abi::Errno;
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_sched::task::{TaskRef, task_find_by_id};
 
-use crate::syscall::signal::{signal_may_name, signal_permitted};
+use crate::syscall::signal::{Sender, signal_may_name, signal_permitted};
 
 /// A live task the caller has been authorized to signal.
 ///
@@ -45,8 +45,8 @@ impl Signalable {
     }
 }
 
-/// Resolve `target_id` and authorize a caller holding `caller_caps` to signal
-/// it, in one step.
+/// Resolve `target_id` and authorize `sender` to send it `signum`, in one
+/// step.
 ///
 /// The two cannot be separated by construction, which is the point: there is
 /// no `resolve` that skips the check and no `check` that takes an id.
@@ -54,8 +54,12 @@ impl Signalable {
 /// - `ESRCH` — no such task, or a kernel task. Kernel tasks are excluded from
 ///   delivery, so naming one could only reach the `SIGKILL` arm and tear down a
 ///   driver thread holding device state and an interrupt line.
-/// - `EPERM` — the caller does not dominate the target, or the target is init.
-pub fn resolve_signal_target(caller_caps: u64, target_id: u32) -> Result<Signalable, Errno> {
+/// - `EPERM` — [`signal_permitted`] refuses.
+pub(crate) fn resolve_signal_target(
+    sender: &Sender,
+    target_id: u32,
+    signum: u64,
+) -> Result<Signalable, Errno> {
     if target_id == INVALID_TASK_ID || target_id == 0 {
         return Err(Errno::ESRCH);
     }
@@ -65,7 +69,7 @@ pub fn resolve_signal_target(caller_caps: u64, target_id: u32) -> Result<Signala
     if !signal_may_name(target.flags) {
         return Err(Errno::ESRCH);
     }
-    if !signal_permitted(caller_caps, &target) {
+    if !signal_permitted(sender, &target, signum) {
         return Err(Errno::EPERM);
     }
     Ok(Signalable {

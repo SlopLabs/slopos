@@ -7,7 +7,7 @@
 
 use core::ffi::{c_char, c_int, c_uint, c_void};
 
-use crate::errno::{EINVAL, ENOSYS, EPERM, errno_set};
+use crate::errno::{EINVAL, ENOSYS, errno_set};
 use crate::pal::{FutexScope, Pal, Sys};
 use crate::string::u_strlen;
 use crate::types::{
@@ -21,19 +21,6 @@ use slopos_abi::spawn::SpawnAttrs;
 /// are pass-throughs. Re-exported under its historical name because in-repo
 /// callers and the test module name it.
 pub use slopos_abi::fs::UserFsStat as SloposStat;
-
-/// `uid_t`/`gid_t` value meaning "leave this one alone".
-const OWNER_UNCHANGED: u32 = u32::MAX;
-
-/// SlopOS is single-user: the only uid and gid that exist are 0. A `chown`
-/// naming 0 (or `-1`, "no change") therefore succeeds once the target is known
-/// to exist, and any other principal is `EPERM` — there is nothing to change
-/// ownership *to*. This is the one place that reasoning is written down; the
-/// four `*chown` entry points below all share it.
-#[inline]
-fn owner_change_permitted(uid: uid_t, gid: gid_t) -> bool {
-    (uid == 0 || uid == OWNER_UNCHANGED) && (gid == 0 || gid == OWNER_UNCHANGED)
-}
 
 #[inline]
 fn fail<T>(e: crate::errno::Errno, sentinel: T) -> T {
@@ -415,49 +402,21 @@ pub unsafe extern "C" fn fchmodat(
     }
 }
 
-/// The target must exist before the single-user answer is given: otherwise a
-/// `chown` of a missing path would succeed. See [`owner_change_permitted`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chown(path: *const c_char, uid: uid_t, gid: gid_t) -> c_int {
-    let mut probe = Stat::default();
-    if let Err(e) = Sys::stat(path as *const u8, &raw mut probe as *mut u8) {
-        return fail(e, -1);
-    }
-    if owner_change_permitted(uid, gid) {
-        0
-    } else {
-        fail(EPERM, -1)
-    }
+    fchownat(AT_FDCWD, path, uid, gid, 0)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lchown(path: *const c_char, uid: uid_t, gid: gid_t) -> c_int {
-    let mut probe = Stat::default();
-    if let Err(e) = Sys::fstatat(
-        AT_FDCWD,
-        path as *const u8,
-        &raw mut probe,
-        AT_SYMLINK_NOFOLLOW,
-    ) {
-        return fail(e, -1);
-    }
-    if owner_change_permitted(uid, gid) {
-        0
-    } else {
-        fail(EPERM, -1)
-    }
+    fchownat(AT_FDCWD, path, uid, gid, AT_SYMLINK_NOFOLLOW as c_int)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fchown(fd: c_int, uid: uid_t, gid: gid_t) -> c_int {
-    let mut probe = Stat::default();
-    if let Err(e) = Sys::fstat(fd, &raw mut probe as *mut u8) {
-        return fail(e, -1);
-    }
-    if owner_change_permitted(uid, gid) {
-        0
-    } else {
-        fail(EPERM, -1)
+    match Sys::fchown(fd, uid, gid) {
+        Ok(()) => 0,
+        Err(e) => fail(e, -1),
     }
 }
 
@@ -469,14 +428,9 @@ pub unsafe extern "C" fn fchownat(
     gid: gid_t,
     flags: c_int,
 ) -> c_int {
-    let mut probe = Stat::default();
-    if let Err(e) = Sys::fstatat(dirfd, path as *const u8, &raw mut probe, flags as u32) {
-        return fail(e, -1);
-    }
-    if owner_change_permitted(uid, gid) {
-        0
-    } else {
-        fail(EPERM, -1)
+    match Sys::fchownat(dirfd, path as *const u8, uid, gid, flags as u32) {
+        Ok(()) => 0,
+        Err(e) => fail(e, -1),
     }
 }
 

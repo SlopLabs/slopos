@@ -497,7 +497,7 @@ pub fn test_program_path_over_the_limit_is_refused() -> TestResult {
     let Ok(long) = slopos_ostd::KVec::filled(b'a', slopos_abi::fs::USER_PATH_MAX + 1) else {
         return TestResult::Fail;
     };
-    match crate::exec::resolve_program(long.as_slice(), b"/") {
+    match crate::exec::resolve_program(long.as_slice(), b"/", &slopos_fs::vfs::Subject::KERNEL) {
         Err(Errno::ENAMETOOLONG) => {}
         other => {
             klog_info!(
@@ -507,7 +507,7 @@ pub fn test_program_path_over_the_limit_is_refused() -> TestResult {
             return TestResult::Fail;
         }
     }
-    match crate::exec::resolve_program(b"", b"/") {
+    match crate::exec::resolve_program(b"", b"/", &slopos_fs::vfs::Subject::KERNEL) {
         Err(Errno::ENAMETOOLONG) => TestResult::Pass,
         other => {
             klog_info!("EXEC_TEST: BUG - an empty path gave {:?}", other.is_ok());
@@ -531,7 +531,7 @@ pub fn test_program_path_resolves_against_the_cwd() -> TestResult {
     }
 
     for spelling in [b"prog".as_slice(), b"./prog".as_slice()] {
-        match crate::exec::resolve_program(spelling, DIR) {
+        match crate::exec::resolve_program(spelling, DIR, &slopos_fs::vfs::Subject::KERNEL) {
             Ok(canon) if canon.as_bytes() == FULL => {}
             Ok(canon) => {
                 klog_info!(
@@ -547,7 +547,7 @@ pub fn test_program_path_resolves_against_the_cwd() -> TestResult {
         }
     }
 
-    match crate::exec::resolve_program(b"prog", b"/") {
+    match crate::exec::resolve_program(b"prog", b"/", &slopos_fs::vfs::Subject::KERNEL) {
         Err(Errno::ENOENT) => TestResult::Pass,
         other => {
             klog_info!(
@@ -638,7 +638,13 @@ fn stage_exec_file(path: &[u8], body: &[u8], mode: u16) -> bool {
     if handle.write(0, body) != Ok(body.len()) {
         return false;
     }
-    slopos_fs::fileio::file_chmod_at(path, b"/", mode, slopos_fs::vfs::path::RESOLVE_FOLLOW) == 0
+    slopos_fs::fileio::file_chmod_at(
+        path,
+        b"/",
+        mode,
+        slopos_fs::vfs::path::RESOLVE_FOLLOW,
+        &slopos_fs::vfs::Subject::KERNEL,
+    ) == 0
 }
 
 pub fn test_script_exec_resolves_to_its_interpreter() -> TestResult {
@@ -664,7 +670,7 @@ pub fn test_script_exec_resolves_to_its_interpreter() -> TestResult {
     assert_test!(staged, "could not stage the scripts");
 
     let argv_of = |path: &[u8], argv: &[&[u8]], want_image: &[u8], want: &[&[u8]]| {
-        let Ok(program) = resolve_exec(path, DIR) else {
+        let Ok(program) = resolve_exec(path, DIR, &slopos_fs::vfs::Subject::KERNEL) else {
             return false;
         };
         let ok = program.image.as_bytes() == want_image
@@ -699,32 +705,33 @@ pub fn test_script_exec_resolves_to_its_interpreter() -> TestResult {
         "a file that is no script keeps the caller's argv"
     );
     assert_test!(
-        resolve_exec(b"self", DIR).err() == Some(Errno::ELOOP),
+        resolve_exec(b"self", DIR, &slopos_fs::vfs::Subject::KERNEL).err() == Some(Errno::ELOOP),
         "a script that names itself must end in ELOOP"
     );
     assert_test!(
-        resolve_exec(b"orphan", DIR).err() == Some(Errno::ENOENT),
+        resolve_exec(b"orphan", DIR, &slopos_fs::vfs::Subject::KERNEL).err() == Some(Errno::ENOENT),
         "a missing interpreter is ENOENT"
     );
     assert_test!(
-        resolve_exec(b"closed", DIR).err() == Some(Errno::EACCES),
+        resolve_exec(b"closed", DIR, &slopos_fs::vfs::Subject::KERNEL).err() == Some(Errno::EACCES),
         "a script needs execute permission as a binary does, and lacking it is EACCES"
     );
     assert_test!(
-        resolve_exec(b"/tmp", DIR).err() == Some(Errno::EACCES),
+        resolve_exec(b"/tmp", DIR, &slopos_fs::vfs::Subject::KERNEL).err() == Some(Errno::EACCES),
         "a directory is not executable: EACCES, not ENOEXEC"
     );
     // `ENOEXEC` would make a `PATH` search run the loop as a shell script.
     let _ = slopos_fs::vfs::vfs_symlink(b"/tmp/shebang/loop", b"/tmp/shebang/loop");
     assert_test!(
-        resolve_exec(b"loop", DIR).err() == Some(Errno::ELOOP),
+        resolve_exec(b"loop", DIR, &slopos_fs::vfs::Subject::KERNEL).err() == Some(Errno::ELOOP),
         "a symlink loop is ELOOP, as execve(2) answers it"
     );
 
-    if super::resolve_program(b"/bin/shell", b"/").is_ok()
+    if super::resolve_program(b"/bin/shell", b"/", &slopos_fs::vfs::Subject::KERNEL).is_ok()
         && stage_exec_file(b"/tmp/shebang/launcher", b"#!/bin/shell\n", 0o755)
     {
-        let image = resolve_exec(b"launcher", DIR).map(|p| p.image);
+        let image =
+            resolve_exec(b"launcher", DIR, &slopos_fs::vfs::Subject::KERNEL).map(|p| p.image);
         assert_test!(
             matches!(&image, Ok(image) if image.as_bytes() == b"/bin/shell"),
             "a #!/bin/shell script must load the shell"

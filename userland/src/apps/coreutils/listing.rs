@@ -10,6 +10,7 @@ use super::opts::{Opt, Opts};
 use super::time::{self, MONTHS};
 use super::{Ctx, Tool};
 use std::fs::{self, Metadata};
+use std::os::unix::fs::MetadataExt;
 use std::time::UNIX_EPOCH;
 
 const LS_USAGE: &str = "ls [-aAlF1dRhrt] [--color[=WHEN]] [file...]";
@@ -55,6 +56,7 @@ struct Row {
     name: String,
     path: String,
     kind: Kind,
+    mode: u32,
     size: u64,
     mtime: i64,
 }
@@ -64,6 +66,7 @@ fn row(name: String, path: String, meta: &Metadata) -> Row {
         name,
         path,
         kind: Kind::of(meta),
+        mode: meta.mode(),
         size: meta.len(),
         mtime: mtime_secs(meta),
     }
@@ -322,7 +325,7 @@ fn emit_long(ctx: &mut Ctx, rows: &[Row], o: &LsOpts, now: Option<i64>) {
         if ctx.out.broken() {
             return;
         }
-        ctx.out.s(mode_string(entry.kind));
+        ctx.out.s(&mode_string(entry.kind, entry.mode));
         // `Metadata` carries no link count on this target, so the field is 1.
         ctx.out.s(" 1 ");
         for _ in size.len()..width {
@@ -397,15 +400,27 @@ fn term_width(fd: i32) -> usize {
     }
 }
 
-/// Only the type bits are real: SlopOS is single-user at uid 0 and `Metadata`
-/// exposes no mode, so the permission triples are the fixed answer rather than
-/// an invented one.
-fn mode_string(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Dir => "drwxr-xr-x",
-        Kind::Symlink => "lrwxrwxrwx",
-        _ => "-rwxr-xr-x",
+/// `ls -l`'s ten columns: the type, then each class's bits, with a set-ID or
+/// sticky bit shown in its class's execute column.
+fn mode_string(kind: Kind, mode: u32) -> String {
+    let mut out = String::with_capacity(10);
+    out.push(type_char(kind) as char);
+    for (shift, special, set_exec, set_bare) in [
+        (6, 0o4000, 's', 'S'),
+        (3, 0o2000, 's', 'S'),
+        (0, 0o1000, 't', 'T'),
+    ] {
+        let bits = (mode >> shift) & 0o7;
+        out.push(if bits & 4 != 0 { 'r' } else { '-' });
+        out.push(if bits & 2 != 0 { 'w' } else { '-' });
+        out.push(match (bits & 1 != 0, mode & special != 0) {
+            (true, true) => set_exec,
+            (false, true) => set_bare,
+            (true, false) => 'x',
+            (false, false) => '-',
+        });
     }
+    out
 }
 
 fn type_char(kind: Kind) -> u8 {

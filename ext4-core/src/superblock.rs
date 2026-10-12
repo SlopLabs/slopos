@@ -29,6 +29,8 @@ pub mod off {
     pub const LASTCHECK: usize = 0x40;
     pub const CHECKINTERVAL: usize = 0x44;
     pub const REV_LEVEL: usize = 0x4C;
+    pub const DEF_RESUID: usize = 0x50;
+    pub const DEF_RESGID: usize = 0x52;
     pub const FIRST_INO: usize = 0x54;
     pub const INODE_SIZE: usize = 0x58;
     pub const FEATURE_COMPAT: usize = 0x5C;

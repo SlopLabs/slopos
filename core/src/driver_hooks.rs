@@ -235,7 +235,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     current_task_pgid: scheduler::current_task_pgid,
     current_task_sid: scheduler::current_task_sid,
     current_task_is_kernel: scheduler::current_task_is_kernel,
-    current_task_is_system: crate::exec::current_task_is_system,
+    current_task_cred: crate::exec::current_task_cred,
     current_task_holds: scheduler::current_task_holds,
     current_task_account: scheduler::current_task_account,
     current_task_controlling_tty: scheduler::current_task_controlling_tty,

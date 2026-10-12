@@ -12,12 +12,18 @@ pub use crate::syscall::core_handlers::{
     syscall_nanosleep, syscall_percpu_stats, syscall_process_list, syscall_prof_ctl,
     syscall_reboot, syscall_sched_yield, syscall_sys_info, syscall_sysinfo, syscall_uname,
 };
+use crate::syscall::cred_handlers::{
+    syscall_getegid, syscall_geteuid, syscall_getgid, syscall_getgroups, syscall_getresgid,
+    syscall_getresuid, syscall_getuid, syscall_setgid, syscall_setgroups, syscall_setregid,
+    syscall_setresgid, syscall_setresuid, syscall_setreuid, syscall_setuid,
+};
 use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
-    syscall_access, syscall_chmod, syscall_close, syscall_dup, syscall_dup2, syscall_dup3,
-    syscall_faccessat, syscall_faccessat2, syscall_fchmod, syscall_fchmodat, syscall_fchmodat2,
-    syscall_fcntl, syscall_fdatasync, syscall_flock, syscall_fstat, syscall_fstatfs, syscall_fsync,
-    syscall_getdents64, syscall_ioctl, syscall_link, syscall_linkat, syscall_lseek, syscall_lstat,
+    syscall_access, syscall_chmod, syscall_chown, syscall_close, syscall_dup, syscall_dup2,
+    syscall_dup3, syscall_faccessat, syscall_faccessat2, syscall_fchmod, syscall_fchmodat,
+    syscall_fchmodat2, syscall_fchown, syscall_fchownat, syscall_fcntl, syscall_fdatasync,
+    syscall_flock, syscall_fstat, syscall_fstatfs, syscall_fsync, syscall_getdents64,
+    syscall_ioctl, syscall_lchown, syscall_link, syscall_linkat, syscall_lseek, syscall_lstat,
     syscall_mkdir, syscall_mkdirat, syscall_mknod, syscall_mknodat, syscall_mount,
     syscall_newfstatat, syscall_open, syscall_openat, syscall_pipe, syscall_pipe2, syscall_poll,
     syscall_ppoll, syscall_pread64, syscall_pselect6, syscall_pwrite64, syscall_read,
@@ -46,9 +52,8 @@ pub use crate::syscall::pidfd_handlers::syscall_pidfd_open;
 use crate::syscall::priority_handlers::{syscall_getpriority, syscall_setpriority};
 pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_execve, syscall_fchdir, syscall_fork,
-    syscall_futex, syscall_getcpu, syscall_getcwd, syscall_getegid, syscall_geteuid,
-    syscall_getgid, syscall_getpgid, syscall_getpid, syscall_getppid, syscall_getsid,
-    syscall_gettid, syscall_getuid, syscall_prlimit64, syscall_sched_getaffinity,
+    syscall_futex, syscall_getcpu, syscall_getcwd, syscall_getpgid, syscall_getpid,
+    syscall_getppid, syscall_getsid, syscall_gettid, syscall_prlimit64, syscall_sched_getaffinity,
     syscall_sched_setaffinity, syscall_setpgid, syscall_setsid, syscall_sigdefault,
     syscall_spawn_path, syscall_umask, syscall_vhangup, syscall_wait4,
 };
@@ -173,15 +178,28 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_READLINK]          => syscall_readlink,          "readlink";
     [SYSCALL_CHMOD]             => syscall_chmod,             "chmod";
     [SYSCALL_FCHMOD]            => syscall_fchmod,            "fchmod";
+    [SYSCALL_CHOWN]             => syscall_chown,             "chown";
+    [SYSCALL_FCHOWN]            => syscall_fchown,            "fchown";
+    [SYSCALL_LCHOWN]            => syscall_lchown,            "lchown";
     [SYSCALL_SYSINFO]           => syscall_sysinfo,           "sysinfo";
     [SYSCALL_UMASK]             => syscall_umask,             "umask";
     [SYSCALL_GETUID]            => syscall_getuid,            "getuid";
     [SYSCALL_GETGID]            => syscall_getgid,            "getgid";
+    [SYSCALL_SETUID]            => syscall_setuid,            "setuid";
+    [SYSCALL_SETGID]            => syscall_setgid,            "setgid";
     [SYSCALL_GETEUID]           => syscall_geteuid,           "geteuid";
     [SYSCALL_GETEGID]           => syscall_getegid,           "getegid";
     [SYSCALL_SETPGID]           => syscall_setpgid,           "setpgid";
     [SYSCALL_GETPPID]           => syscall_getppid,           "getppid";
     [SYSCALL_SETSID]            => syscall_setsid,            "setsid";
+    [SYSCALL_SETREUID]          => syscall_setreuid,          "setreuid";
+    [SYSCALL_SETREGID]          => syscall_setregid,          "setregid";
+    [SYSCALL_GETGROUPS]         => syscall_getgroups,         "getgroups";
+    [SYSCALL_SETGROUPS]         => syscall_setgroups,         "setgroups";
+    [SYSCALL_SETRESUID]         => syscall_setresuid,         "setresuid";
+    [SYSCALL_GETRESUID]         => syscall_getresuid,         "getresuid";
+    [SYSCALL_SETRESGID]         => syscall_setresgid,         "setresgid";
+    [SYSCALL_GETRESGID]         => syscall_getresgid,         "getresgid";
     [SYSCALL_GETPGID]           => syscall_getpgid,           "getpgid";
     [SYSCALL_GETSID]            => syscall_getsid,            "getsid";
     [SYSCALL_RT_SIGPENDING]     => syscall_rt_sigpending,     "rt_sigpending";
@@ -212,6 +230,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_OPENAT]            => syscall_openat,            "openat";
     [SYSCALL_MKDIRAT]           => syscall_mkdirat,           "mkdirat";
     [SYSCALL_MKNODAT]           => syscall_mknodat,           "mknodat";
+    [SYSCALL_FCHOWNAT]          => syscall_fchownat,          "fchownat";
     [SYSCALL_NEWFSTATAT]        => syscall_newfstatat,        "newfstatat";
     [SYSCALL_UNLINKAT]          => syscall_unlinkat,          "unlinkat";
     [SYSCALL_RENAMEAT]          => syscall_renameat,          "renameat";
@@ -339,7 +358,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 175;
+pub const SYSCALL_ENTRY_COUNT: usize = 189;
 
 /// The recorded shape of the classification.
 ///
@@ -347,11 +366,11 @@ pub const SYSCALL_ENTRY_COUNT: usize = 175;
 /// point to a capability that had none still moves a number here.
 /// `Unimplemented` is the absence of a handler, so its count is 0 by
 /// construction and the assert below holds it there.
-const CAP_COUNTS: [(Capability, usize); 21] = [
+const CAP_COUNTS: [(Capability, usize); 23] = [
     (Capability::Unimplemented, 0),
-    (Capability::NoneSelf, 58),
-    (Capability::NoneFd, 77),
-    (Capability::NoneRelation, 15),
+    (Capability::NoneSelf, 69),
+    (Capability::NoneFd, 81),
+    (Capability::NoneRelation, 14),
     (Capability::Power, 4),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),
@@ -369,6 +388,8 @@ const CAP_COUNTS: [(Capability, usize); 21] = [
     (Capability::BootEntry, 0),
     (Capability::NetAdmin, 4),
     (Capability::RawBlock, 0),
+    (Capability::SetId, 0),
+    (Capability::DacOverride, 0),
 ];
 
 const _: () = {
@@ -433,6 +454,6 @@ const _: () = {
 };
 
 /// Per-capability entry-point counts, for the boot-time dump and the tests.
-pub fn cap_counts() -> &'static [(Capability, usize); 21] {
+pub fn cap_counts() -> &'static [(Capability, usize); 23] {
     &CAP_COUNTS
 }

@@ -294,6 +294,17 @@ pub const SYSCALL_CHMOD: u64 = 90;
 /// `fchmod(fd, mode)` — permission bits of an open descriptor.
 pub const SYSCALL_FCHMOD: u64 = 91;
 
+/// `chown(path, uid, gid)`; `-1` leaves an id alone. Without `DacOverride`
+/// the owner may only give the file to a group it is in, and the owner itself
+/// never changes.
+pub const SYSCALL_CHOWN: u64 = 92;
+
+/// `fchown(fd, uid, gid)`.
+pub const SYSCALL_FCHOWN: u64 = 93;
+
+/// `lchown(path, uid, gid)` — a final symlink itself.
+pub const SYSCALL_LCHOWN: u64 = 94;
+
 /// `umask(mask) -> old` — set the calling process's file creation mask to
 /// `mask & 0o777`, answering the one it replaces.
 pub const SYSCALL_UMASK: u64 = 95;
@@ -302,16 +313,23 @@ pub const SYSCALL_UMASK: u64 = 95;
 /// and the number of tasks.
 pub const SYSCALL_SYSINFO: u64 = 99;
 
-/// `getuid()` — always 0; SlopOS is single-user.
+/// `getuid()` — the real user id.
 pub const SYSCALL_GETUID: u64 = 102;
 
-/// `getgid()` — always 0.
+/// `getgid()` — the real group id.
 pub const SYSCALL_GETGID: u64 = 104;
 
-/// `geteuid()` — always 0.
+/// `setuid(uid)`. Without `SetId`, only the effective id moves, and only to
+/// the real or saved id; with it, all three become `uid`.
+pub const SYSCALL_SETUID: u64 = 105;
+
+/// `setgid(gid)`, as [`SYSCALL_SETUID`] for the group ids.
+pub const SYSCALL_SETGID: u64 = 106;
+
+/// `geteuid()` — the effective user id.
 pub const SYSCALL_GETEUID: u64 = 107;
 
-/// `getegid()` — always 0.
+/// `getegid()` — the effective group id.
 pub const SYSCALL_GETEGID: u64 = 108;
 
 /// `setpgid(pid, pgid)`.
@@ -322,6 +340,31 @@ pub const SYSCALL_GETPPID: u64 = 110;
 
 /// `setsid()`.
 pub const SYSCALL_SETSID: u64 = 112;
+
+/// `setreuid(ruid, euid)`; `-1` leaves an id alone.
+pub const SYSCALL_SETREUID: u64 = 113;
+
+/// `setregid(rgid, egid)`.
+pub const SYSCALL_SETREGID: u64 = 114;
+
+/// `getgroups(size, list) -> count`. A zero `size` asks only for the count.
+pub const SYSCALL_GETGROUPS: u64 = 115;
+
+/// `setgroups(size, list)`. Takes `SetId`.
+pub const SYSCALL_SETGROUPS: u64 = 116;
+
+/// `setresuid(ruid, euid, suid)`; `-1` leaves an id alone. Without `SetId`,
+/// each new id must be one of the three old ones.
+pub const SYSCALL_SETRESUID: u64 = 117;
+
+/// `getresuid(ruid, euid, suid)` — writes the three user ids.
+pub const SYSCALL_GETRESUID: u64 = 118;
+
+/// `setresgid(rgid, egid, sgid)`.
+pub const SYSCALL_SETRESGID: u64 = 119;
+
+/// `getresgid(rgid, egid, sgid)`.
+pub const SYSCALL_GETRESGID: u64 = 120;
 
 /// `getpgid(pid)`.
 pub const SYSCALL_GETPGID: u64 = 121;
@@ -457,6 +500,10 @@ pub const SYSCALL_MKDIRAT: u64 = 258;
 /// `EINVAL` for an unknown type.
 pub const SYSCALL_MKNODAT: u64 = 259;
 
+/// `fchownat(dirfd, path, uid, gid, flags)` — `AT_SYMLINK_NOFOLLOW` and
+/// `AT_EMPTY_PATH` as for `newfstatat`.
+pub const SYSCALL_FCHOWNAT: u64 = 260;
+
 /// `newfstatat(dirfd, path: *const u8, out: *mut UserFsStat, flags)`. The only
 /// stat entry point that can decline a final symlink, so `AT_SYMLINK_NOFOLLOW`
 /// is what makes `lstat` expressible.
@@ -553,8 +600,8 @@ pub const SYSCALL_MEMFD_CREATE: u64 = 319;
 /// `wait4`. The target must be a child of the caller and `flags` must be 0.
 pub const SYSCALL_PIDFD_OPEN: u64 = 434;
 
-/// `faccessat2(dirfd, path: *const u8, mode, flags)` — existence and the
-/// file's own mode bits. `AT_EACCESS` changes nothing: single-user uid 0.
+/// `faccessat2(dirfd, path: *const u8, mode, flags)` — whether the caller's
+/// real ids, or its effective ones under `AT_EACCESS`, may `mode` the file.
 pub const SYSCALL_FACCESSAT2: u64 = 439;
 
 /// `fchmodat2(dirfd, path: *const u8, mode, flags)`.

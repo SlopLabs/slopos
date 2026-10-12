@@ -13,6 +13,8 @@ extern "C" {
 
 #define PR_GET_DUMPABLE (3)
 #define PR_SET_DUMPABLE (4)
+#define PR_SET_NO_NEW_PRIVS (38)
+#define PR_GET_NO_NEW_PRIVS (39)
 
 int prctl(int option, ...);
 

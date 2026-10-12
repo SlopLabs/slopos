@@ -35,8 +35,12 @@ fn statfs_encode(stats: &FsStats, mount_flags: u32) -> UserStatfs {
 /// Its own frame: the path walk stages a canonical path buffer on top of the
 /// caller's heap-staged `UserPath`.
 #[inline(never)]
-fn statfs_of_path(path: &[u8], cwd: &[u8]) -> Result<UserStatfs, Errno> {
-    let (stats, mount_flags) = vfs_statfs_at(path, cwd).map_err(|e| e.to_errno())?;
+fn statfs_of_path(
+    path: &[u8],
+    cwd: &[u8],
+    who: &slopos_fs::vfs::Subject,
+) -> Result<UserStatfs, Errno> {
+    let (stats, mount_flags) = vfs_statfs_at(path, cwd, who).map_err(|e| e.to_errno())?;
     Ok(statfs_encode(&stats, mount_flags))
 }
 
@@ -45,7 +49,8 @@ define_syscall!(syscall_statfs
     cap(NoneFd)
     -> Result<(), Errno>
 {
-    let stats = with_cwd_base(ctx, |cwd| statfs_of_path(path.as_bytes(), cwd))?;
+    let who = ctx.subject();
+    let stats = with_cwd_base(ctx, |cwd| statfs_of_path(path.as_bytes(), cwd, &who))?;
     copy_to_user(out.inner(), &stats).map_err(|_| Errno::EFAULT)?;
     Ok(())
 });

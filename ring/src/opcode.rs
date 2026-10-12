@@ -6,6 +6,7 @@
 
 use core::ffi::c_int;
 use slopos_fs::fileio::FdTable;
+use slopos_fs::vfs::Subject;
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
@@ -104,6 +105,7 @@ pub fn probe(
     sqe: &Sqe,
     file: Option<&FileRef>,
     buffers: &mut BufferRegistry,
+    who: &Subject,
 ) -> Outcome {
     let sel = buf_sel(sqe);
     match sqe.opcode {
@@ -147,7 +149,7 @@ pub fn probe(
             })
         }),
         // Path-addressed and fd-number-addressed: no target reference held.
-        OP_OPENAT => reject_buf(sel).unwrap_or_else(|| probe_openat(table, sqe)),
+        OP_OPENAT => reject_buf(sel).unwrap_or_else(|| probe_openat(table, sqe, who)),
         OP_CLOSE => reject_buf(sel).unwrap_or_else(|| probe_close(table, sqe)),
         OP_ACCEPT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_accept(table, f))),
         OP_CONNECT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_connect(f, sqe))),
@@ -177,7 +179,12 @@ fn reject_buf(sel: Option<BufSel>) -> Option<Outcome> {
 /// Re-probe an in-flight row at harvest time. Same dispatch as `probe`,
 /// reconstructed from the stored row (re-validating the user buffer via
 /// a fresh `UserReadBuf`/`UserWriteBuf` each time — SLOPRING § 9).
-pub fn reprobe(table: FdTable, row: &InFlight, buffers: &mut BufferRegistry) -> Outcome {
+pub fn reprobe(
+    table: FdTable,
+    row: &InFlight,
+    buffers: &mut BufferRegistry,
+    who: &Subject,
+) -> Outcome {
     let sqe = Sqe {
         opcode: row.opcode,
         flags: row.buf_flags,
@@ -196,7 +203,7 @@ pub fn reprobe(table: FdTable, row: &InFlight, buffers: &mut BufferRegistry) -> 
         _resv0: 0,
         _resv1: 0,
     };
-    probe(table, &sqe, row.file.as_ref(), buffers)
+    probe(table, &sqe, row.file.as_ref(), buffers, who)
 }
 
 fn probe_read(file: &FileRef, sqe: &Sqe) -> Outcome {
@@ -227,7 +234,7 @@ fn probe_write(file: &FileRef, sqe: &Sqe) -> Outcome {
 /// immediate, so this always completes inline with the new fd (`>= 0`) or a
 /// negated errno. An ownership op (installs an fd), so the caller reserves a
 /// CQE slot first.
-fn probe_openat(table: FdTable, sqe: &Sqe) -> Outcome {
+fn probe_openat(table: FdTable, sqe: &Sqe, who: &Subject) -> Outcome {
     if sqe.addr == 0 {
         return Outcome::Inline(Errno::EFAULT.raw());
     }
@@ -253,7 +260,7 @@ fn probe_openat(table: FdTable, sqe: &Sqe) -> Outcome {
         Some(n) => &buf[..n],
         None => &buf[..copied],
     };
-    Outcome::Inline(file_open_for_process(table, path, sqe.op_flags))
+    Outcome::Inline(file_open_for_process(table, path, sqe.op_flags, who))
 }
 
 /// `OP_CLOSE`: close `fd` via the ring (SLOPRING § 12). Always inline; returns
@@ -346,9 +353,9 @@ pub fn is_ownership_op(opcode: u8) -> bool {
 }
 
 // Authority classification (SLOPRING § 12). The assert below is what licenses
-// the ring carrying no `Cred` snapshot: no opcode reaches a gated capability,
-// so an opcode running under its creator's credential can be a confused deputy
-// for nothing.
+// the ring carrying no capability snapshot: no opcode reaches a gated
+// capability, and the one that resolves a path is checked as the task entering
+// the ring, which is always of the creator's process.
 
 use slopos_ostd::authority::Capability;
 

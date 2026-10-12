@@ -7,12 +7,12 @@ use slopos_abi::fs::{
     S_IFCHR, S_IFIFO, S_IFMT, S_IFREG, S_IFSOCK, UTIME_NOW, UTIME_OMIT, UserFsStat,
 };
 use slopos_abi::syscall::types::Timespec;
-use slopos_fs::vfs::Timestamp;
+use slopos_fs::vfs::{Subject, TimesChange, Timestamp};
 
 use slopos_fs::fileio::{
-    FdTable, file_access_at, file_chmod_at, file_fstat_fd, file_link_at, file_open_at,
-    file_rmdir_at, file_set_times_fd, file_stat_at, file_symlink_at, file_unlink_at,
-    file_utimens_at,
+    FdTable, file_access_at, file_chmod_at, file_chown_at, file_fchown_fd, file_fstat_fd,
+    file_link_at, file_open_at, file_rmdir_at, file_set_times_fd, file_stat_at, file_symlink_at,
+    file_unlink_at, file_utimens_at,
 };
 
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
@@ -50,9 +50,18 @@ pub(crate) fn open_at(
     cwd: &[u8],
     flags: u32,
     mode: u32,
+    who: &Subject,
 ) -> Result<u64, Errno> {
     let resolve = open_resolve_flags(flags, path);
-    let fd = file_open_at(table, path, cwd, flags, resolve, Some(creation_mode(mode)));
+    let fd = file_open_at(
+        table,
+        path,
+        cwd,
+        flags,
+        resolve,
+        Some(creation_mode(mode)),
+        who,
+    );
     if fd < 0 {
         Err(errno_from_neg(fd))
     } else {
@@ -62,20 +71,21 @@ pub(crate) fn open_at(
 
 /// The mode goes on the inode `create` returned: re-resolving the name to
 /// chmod it can land on a replacement, or on a symlink's target.
-pub(crate) fn mkdir_at(path: &[u8], cwd: &[u8], mode: u32) -> Result<(), Errno> {
-    slopos_fs::vfs::vfs_mkdir_at(path, cwd, Some(creation_mode(mode))).map_err(|e| e.to_errno())
+pub(crate) fn mkdir_at(path: &[u8], cwd: &[u8], mode: u32, who: &Subject) -> Result<(), Errno> {
+    slopos_fs::vfs::vfs_mkdir_at(path, cwd, Some(creation_mode(mode)), who)
+        .map_err(|e| e.to_errno())
 }
 
 /// `mknodat(2)` for regular files and FIFOs, the only nodes stored here. Device
 /// and socket nodes are `EPERM`, as on Linux without `CAP_MKNOD`; others `EINVAL`.
-pub(crate) fn mknod_at(path: &[u8], cwd: &[u8], mode: u32) -> Result<(), Errno> {
+pub(crate) fn mknod_at(path: &[u8], cwd: &[u8], mode: u32, who: &Subject) -> Result<(), Errno> {
     let file_type = match mode & S_IFMT {
         0 | S_IFREG => slopos_fs::FileType::Regular,
         S_IFIFO => slopos_fs::FileType::Pipe,
         S_IFCHR | S_IFBLK | S_IFSOCK => return Err(Errno::EPERM),
         _ => return Err(Errno::EINVAL),
     };
-    slopos_fs::vfs::vfs_mknod_at(path, cwd, file_type, creation_mode(mode))
+    slopos_fs::vfs::vfs_mknod_at(path, cwd, file_type, creation_mode(mode), who)
         .map_err(|e| e.to_errno())
 }
 
@@ -86,10 +96,11 @@ pub(crate) fn stat_at_into_user(
     cwd: &[u8],
     at_flags: u32,
     out: MmUserPtr<UserFsStat>,
+    who: &Subject,
 ) -> Result<(), Errno> {
     let mut stat = UserFsStat::default();
     let resolve = resolve_flags_from(at_flags, path);
-    let rc = file_stat_at(path, cwd, resolve, &mut stat);
+    let rc = file_stat_at(path, cwd, resolve, &mut stat, who);
     if rc != 0 {
         return Err(errno_from_neg(rc));
     }
@@ -107,9 +118,15 @@ fn fstat_fd_into_user(table: FdTable, fd: i32, out: MmUserPtr<UserFsStat>) -> Re
     copy_to_user(out, &stat).map_err(|_| Errno::EFAULT)
 }
 
-pub(crate) fn chmod_at(path: &[u8], cwd: &[u8], mode: u32, at_flags: u32) -> Result<(), Errno> {
+pub(crate) fn chmod_at(
+    path: &[u8],
+    cwd: &[u8],
+    mode: u32,
+    at_flags: u32,
+    who: &Subject,
+) -> Result<(), Errno> {
     let resolve = resolve_flags_from(at_flags, path);
-    let rc = file_chmod_at(path, cwd, (mode & 0o7777) as u16, resolve);
+    let rc = file_chmod_at(path, cwd, (mode & 0o7777) as u16, resolve, who);
     if rc != 0 {
         Err(errno_from_neg(rc))
     } else {
@@ -117,9 +134,41 @@ pub(crate) fn chmod_at(path: &[u8], cwd: &[u8], mode: u32, at_flags: u32) -> Res
     }
 }
 
-pub(crate) fn access_at(path: &[u8], cwd: &[u8], mode: u32, at_flags: u32) -> Result<(), Errno> {
+/// An id argument of `chown(2)`: `-1` keeps the one the file has.
+pub(crate) fn chown_id(id: u32) -> Option<u32> {
+    (id != slopos_ostd::process::cred::ID_UNCHANGED).then_some(id)
+}
+
+pub(crate) fn chown_at(
+    path: &[u8],
+    cwd: &[u8],
+    uid: u32,
+    gid: u32,
+    at_flags: u32,
+    who: &Subject,
+) -> Result<(), Errno> {
     let resolve = resolve_flags_from(at_flags, path);
-    let rc = file_access_at(path, cwd, mode, resolve);
+    let rc = file_chown_at(path, cwd, chown_id(uid), chown_id(gid), resolve, who);
+    if rc != 0 {
+        Err(errno_from_neg(rc))
+    } else {
+        Ok(())
+    }
+}
+
+/// Checked as the real ids unless the caller asked for its effective ones.
+pub(crate) fn access_at(
+    path: &[u8],
+    cwd: &[u8],
+    mode: u32,
+    at_flags: u32,
+    mut who: Subject,
+) -> Result<(), Errno> {
+    if at_flags & slopos_abi::fs::AT_EACCESS == 0 {
+        who.cred = who.cred.as_real();
+    }
+    let resolve = resolve_flags_from(at_flags, path);
+    let rc = file_access_at(path, cwd, mode, resolve, &who);
     if rc != 0 {
         Err(errno_from_neg(rc))
     } else {
@@ -133,8 +182,9 @@ define_syscall!(syscall_openat
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
+    let who = ctx.subject();
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        open_at(pid, path.as_bytes(), cwd, flags, mode)
+        open_at(pid, path.as_bytes(), cwd, flags, mode, &who)
     })?
 });
 
@@ -144,8 +194,9 @@ define_syscall!(syscall_mkdirat
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        mkdir_at(path.as_bytes(), cwd, mode)
+        mkdir_at(path.as_bytes(), cwd, mode, &who)
     })?
 });
 
@@ -155,8 +206,9 @@ define_syscall!(syscall_mknodat
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        mknod_at(path.as_bytes(), cwd, mode)
+        mknod_at(path.as_bytes(), cwd, mode, &who)
     })?
 });
 
@@ -168,14 +220,15 @@ define_syscall!(syscall_unlinkat
 {
     reject_unknown(flags, AT_REMOVEDIR)?;
     let remove_dir = flags & AT_REMOVEDIR != 0;
+    let who = ctx.subject();
     let rc = with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
         if remove_dir {
-            file_rmdir_at(path.as_bytes(), cwd)
+            file_rmdir_at(path.as_bytes(), cwd, &who)
         } else {
-            if let Err(e) = reject_non_directory(path.as_bytes(), cwd) {
+            if let Err(e) = reject_non_directory(path.as_bytes(), cwd, &who) {
                 return e.raw();
             }
-            file_unlink_at(path.as_bytes(), cwd)
+            file_unlink_at(path.as_bytes(), cwd, &who)
         }
     })?;
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
@@ -187,12 +240,19 @@ define_syscall!(syscall_renameat
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     // `with_fd_dir_path` drops the descriptor-table lock before it calls in,
     // so the nested base lookup takes no lock the outer one holds.
     with_dir_base(ctx, pid, olddirfd, old_path.as_bytes(), |old_cwd| {
         with_dir_base(ctx, pid, newdirfd, new_path.as_bytes(), |new_cwd| {
-            slopos_fs::vfs::vfs_rename_at(old_path.as_bytes(), old_cwd, new_path.as_bytes(), new_cwd)
-                .map_err(|e| e.to_errno())
+            slopos_fs::vfs::vfs_rename_at(
+                old_path.as_bytes(),
+                old_cwd,
+                new_path.as_bytes(),
+                new_cwd,
+                &who,
+            )
+            .map_err(|e| e.to_errno())
         })
     })??
 });
@@ -210,8 +270,9 @@ define_syscall!(syscall_newfstatat
         }
         return fstat_fd_into_user(pid, dirfd, out.inner());
     }
+    let who = ctx.subject();
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        stat_at_into_user(path.as_bytes(), cwd, flags, out.inner())
+        stat_at_into_user(path.as_bytes(), cwd, flags, out.inner(), &who)
     })?
 });
 
@@ -226,8 +287,9 @@ define_syscall!(syscall_readlinkat
     }
     let len = buf.len().min(USER_PATH_MAX);
     let base = buf.base_u64();
+    let who = ctx.subject();
     let n = with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        readlink_at_into_user(path.as_bytes(), cwd, base, len)
+        readlink_at_into_user(path.as_bytes(), cwd, base, len, &who)
     })??;
     Ok(n as u64)
 });
@@ -238,8 +300,9 @@ define_syscall!(syscall_symlinkat
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     let rc = with_dir_base(ctx, pid, newdirfd, link_path.as_bytes(), |cwd| {
-        file_symlink_at(target.as_bytes(), link_path.as_bytes(), cwd)
+        file_symlink_at(target.as_bytes(), link_path.as_bytes(), cwd, &who)
     })?;
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
@@ -251,8 +314,9 @@ define_syscall!(syscall_fchmodat2
     -> Result<(), Errno>
 {
     reject_unknown(flags, AT_SYMLINK_NOFOLLOW)?;
+    let who = ctx.subject();
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        chmod_at(path.as_bytes(), cwd, mode, flags)
+        chmod_at(path.as_bytes(), cwd, mode, flags, &who)
     })?
 });
 
@@ -262,13 +326,32 @@ define_syscall!(syscall_fchmodat
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        chmod_at(path.as_bytes(), cwd, mode, 0)
+        chmod_at(path.as_bytes(), cwd, mode, 0, &who)
     })?
 });
 
-// `AT_EACCESS` is accepted and ignored: the machine is single-user uid 0, so
-// the effective and real identities are the same one.
+define_syscall!(syscall_fchownat
+    (ctx, dirfd: i32, path: UserPath, uid: u32, gid: u32, flags: u32)
+    cap(NoneFd)
+    requires(let pid: process_id)
+    -> Result<(), Errno>
+{
+    reject_unknown(flags, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)?;
+    let who = ctx.subject();
+    if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(Errno::ENOENT);
+        }
+        let rc = file_fchown_fd(pid, dirfd, chown_id(uid), chown_id(gid), &who);
+        return if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) };
+    }
+    with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
+        chown_at(path.as_bytes(), cwd, uid, gid, flags, &who)
+    })?
+});
+
 define_syscall!(syscall_faccessat2
     (ctx, dirfd: i32, path: UserPath, mode: u32, flags: u32)
     cap(NoneFd)
@@ -276,8 +359,9 @@ define_syscall!(syscall_faccessat2
     -> Result<(), Errno>
 {
     reject_unknown(flags, AT_SYMLINK_NOFOLLOW | slopos_abi::fs::AT_EACCESS)?;
+    let who = ctx.subject();
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        access_at(path.as_bytes(), cwd, mode, flags)
+        access_at(path.as_bytes(), cwd, mode, flags, who)
     })?
 });
 
@@ -287,8 +371,9 @@ define_syscall!(syscall_faccessat
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        access_at(path.as_bytes(), cwd, mode, 0)
+        access_at(path.as_bytes(), cwd, mode, 0, who)
     })?
 });
 
@@ -297,7 +382,8 @@ define_syscall!(syscall_access
     cap(NoneFd)
     -> Result<(), Errno>
 {
-    with_cwd_base(ctx, |cwd| access_at(path.as_bytes(), cwd, mode, 0))
+    let who = ctx.subject();
+    with_cwd_base(ctx, |cwd| access_at(path.as_bytes(), cwd, mode, 0, who))
 });
 
 define_syscall!(syscall_linkat
@@ -308,9 +394,10 @@ define_syscall!(syscall_linkat
 {
     reject_unknown(flags, AT_SYMLINK_FOLLOW)?;
     let follow = flags & AT_SYMLINK_FOLLOW != 0;
+    let who = ctx.subject();
     let rc = with_dir_base(ctx, pid, olddirfd, old_path.as_bytes(), |old_cwd| {
         with_dir_base(ctx, pid, newdirfd, new_path.as_bytes(), |new_cwd| {
-            file_link_at(old_path.as_bytes(), old_cwd, new_path.as_bytes(), new_cwd, follow)
+            file_link_at(old_path.as_bytes(), old_cwd, new_path.as_bytes(), new_cwd, follow, &who)
         })
     })??;
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
@@ -321,8 +408,9 @@ define_syscall!(syscall_link
     cap(NoneFd)
     -> Result<(), Errno>
 {
+    let who = ctx.subject();
     let rc = with_cwd_base(ctx, |cwd| {
-        file_link_at(old_path.as_bytes(), cwd, new_path.as_bytes(), cwd, false)
+        file_link_at(old_path.as_bytes(), cwd, new_path.as_bytes(), cwd, false, &who)
     });
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
@@ -358,9 +446,9 @@ fn validate_fd(table: FdTable, dirfd: i32) -> i32 {
 
 /// Prove the name resolves without touching it. Its own frame, as above.
 #[inline(never)]
-fn validate_path(path: &[u8], cwd: &[u8], resolve: u32) -> i32 {
+fn validate_path(path: &[u8], cwd: &[u8], resolve: u32, who: &Subject) -> i32 {
     let mut stat = UserFsStat::default();
-    file_stat_at(path, cwd, resolve, &mut stat)
+    file_stat_at(path, cwd, resolve, &mut stat, who)
 }
 
 // A NULL `path` names the descriptor itself, as Linux's `futimens` does;
@@ -373,16 +461,22 @@ define_syscall!(syscall_utimensat
 {
     reject_unknown(flags, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)?;
     let now = Timestamp::now();
-    let (atime, mtime) = match times {
+    let (atime, mtime, change) = match times {
         None => {
             let now = now.ok_or(Errno::EINVAL)?;
-            (Some(now), Some(now))
+            (Some(now), Some(now), TimesChange::Now)
         }
         Some(ptr) => {
             let pair: [Timespec; 2] = copy_from_user(ptr.inner()).map_err(|_| Errno::EFAULT)?;
-            (timestamp_of(&pair[0], now)?, timestamp_of(&pair[1], now)?)
+            let change = match (pair[0].tv_nsec, pair[1].tv_nsec) {
+                (UTIME_OMIT, UTIME_OMIT) => TimesChange::None,
+                (UTIME_NOW, UTIME_NOW) => TimesChange::Now,
+                _ => TimesChange::Explicit,
+            };
+            (timestamp_of(&pair[0], now)?, timestamp_of(&pair[1], now)?, change)
         }
     };
+    let who = ctx.subject();
     // Both omitted is a no-op only once the name has resolved: Linux reports
     // `EBADF`/`ENOENT`, then 0 without reaching the write checks, so a
     // read-only mount answers success.
@@ -399,7 +493,7 @@ define_syscall!(syscall_utimensat
         if both_omitted {
             validate_fd(pid, dirfd)
         } else {
-            file_set_times_fd(pid, dirfd, atime, mtime)
+            file_set_times_fd(pid, dirfd, atime, mtime, change, &who)
         }
     } else {
         let Some(path) = path.as_ref() else {
@@ -408,9 +502,9 @@ define_syscall!(syscall_utimensat
         let resolve = resolve_flags_from(flags, path.as_bytes());
         with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
             if both_omitted {
-                validate_path(path.as_bytes(), cwd, resolve)
+                validate_path(path.as_bytes(), cwd, resolve, &who)
             } else {
-                file_utimens_at(path.as_bytes(), cwd, atime, mtime, resolve)
+                file_utimens_at(path.as_bytes(), cwd, atime, mtime, change, resolve, &who)
             }
         })?
     };

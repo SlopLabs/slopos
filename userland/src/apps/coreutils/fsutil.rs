@@ -81,13 +81,23 @@ pub fn resolve_command(name: &str, path: &str) -> Option<String> {
         .find(|candidate| is_executable_file(candidate))
 }
 
-/// A regular file is executable here: SlopOS is single-user at uid 0 and the
-/// exec permission bit is not consulted by the loader, so claiming otherwise
-/// would answer a question the kernel does not ask.
+/// A regular file the caller may execute.
 pub fn is_executable_file(path: &str) -> bool {
-    fs::metadata(path)
-        .map(|meta| meta.is_file())
-        .unwrap_or(false)
+    fs::metadata(path).is_ok_and(|meta| meta.is_file()) && may(path, slopos_abi::fs::X_OK)
+}
+
+/// Whether the caller's effective ids may `mode` (`R_OK`, `W_OK`, `X_OK`)
+/// on `path`, as `test` and a `PATH` search ask it.
+pub fn may(path: &str, mode: u32) -> bool {
+    CString::new(path).is_ok_and(|c_path| {
+        Sys::faccessat(
+            slopos_abi::fs::AT_FDCWD,
+            c_path.as_ptr().cast(),
+            mode,
+            slopos_abi::fs::AT_EACCESS,
+        )
+        .is_ok()
+    })
 }
 
 /// Join a directory and a name, collapsing the separator so `/` + `bin` is
