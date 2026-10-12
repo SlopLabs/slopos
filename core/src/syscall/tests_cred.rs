@@ -140,12 +140,15 @@ impl Principal {
     fn keep_flags(&self, path: &[u8]) -> Option<i64> {
         use slopos_abi::fs::inode_flags_ioctl::FS_IOC_SETFLAGS;
         let fd = self.open_fd(path, O_RDONLY, 0)?;
-        let flags = slopos_fs::fileio::file_inode_flags_fd(self.table, fd as i32).ok()?;
-        let staged = self.stage(&flags.to_le_bytes())?;
-        let rc = self.call(
-            crate::syscall::fs::poll_ioctl_handlers::syscall_ioctl,
-            [fd as u64, u64::from(FS_IOC_SETFLAGS), staged, 0, 0, 0],
-        );
+        let rc = slopos_fs::fileio::file_inode_flags_fd(self.table, fd as i32)
+            .ok()
+            .and_then(|flags| self.stage(&flags.to_le_bytes()))
+            .and_then(|staged| {
+                self.call(
+                    crate::syscall::fs::poll_ioctl_handlers::syscall_ioctl,
+                    [fd as u64, u64::from(FS_IOC_SETFLAGS), staged, 0, 0, 0],
+                )
+            });
         let _ = slopos_fs::fileio::file_close_fd(self.table, fd as i32);
         rc
     }
@@ -703,8 +706,9 @@ pub fn test_a_new_name_needs_write_and_search() -> TestResult {
         Some(0),
         "symlink in a 0777 directory"
     );
+    let linked = user.two_paths(syscall_link, &target, &hard);
     assert_test!(
-        matches!(user.two_paths(syscall_link, &target, &hard), Some(0 | -95)),
+        linked == Some(0) || linked == errno(Errno::EOPNOTSUPP),
         "link in a 0777 directory, which ramfs answers EOPNOTSUPP"
     );
     let _ = vfs_unlink(&hard);
@@ -940,11 +944,15 @@ slopos_testing::stest!(name = test_uid_zero_meets_the_mode_bits, suite = cred);
 
 pub fn test_exec_needs_the_execute_bit_of_its_class() -> TestResult {
     use crate::exec::resolve_exec;
+    use crate::tests::helpers::install_static_program;
     let _fixture = SyscallFixture::new();
-    assert_test!(fixtures_root(), "could not lay out the fixture root");
-    let Some(tool) = root_file(b"tool", 0o700) else {
-        return fail!("could not lay out the fixture");
-    };
+    let tool = join(b"tool");
+    assert_test!(
+        fixtures_root()
+            && install_static_program(&tool, &[0xeb, 0xfe])
+            && vfs_set_mode(&tool, 0o700).is_ok(),
+        "could not write the program"
+    );
     let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
         return fail!("could not build the principal");
     };
@@ -980,30 +988,14 @@ pub fn test_spawn_saves_the_effective_ids() -> TestResult {
         fixtures_root() && install_static_program(&spin, &[0xeb, 0xfe]),
         "could not write the program"
     );
-    let Some(parent) = Principal::with_uids([USER, USER, 0], CAP_UNIVERSAL) else {
+    let parent = Principal::with_uids([USER, USER, 0], CAP_UNIVERSAL);
+    let child_uids = parent
+        .as_ref()
+        .and_then(|parent| spawned_uids(&spin, parent));
+    let _ = vfs_unlink(&spin);
+    let Some(parent) = parent else {
         return fail!("could not build the spawner");
     };
-    let Ok(child_id) = crate::exec::spawn_program_with_attrs(
-        &spin,
-        None,
-        None,
-        slopos_abi::task::TaskPriority::Normal,
-        TASK_FLAG_USER_MODE,
-        CAP_UNIVERSAL,
-        &[],
-        0,
-        None,
-        parent.task.task_id,
-    ) else {
-        return fail!("could not spawn the program");
-    };
-    let child_uids = task_find_by_id(child_id)
-        .and_then(|child| child.process())
-        .map(|process| process.cred())
-        .map(|cred| [cred.ruid, cred.euid, cred.suid]);
-    task_terminate(child_id);
-    let _ = slopos_sched::task::task_consume_zombie(child_id);
-    let _ = vfs_unlink(&spin);
     assert_eq_test!(
         child_uids,
         Some([USER; 3]),
@@ -1018,3 +1010,28 @@ pub fn test_spawn_saves_the_effective_ids() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_spawn_saves_the_effective_ids, suite = cred);
+
+/// The uids of a child `parent` spawns running `program`, which is then ended.
+#[inline(never)]
+fn spawned_uids(program: &[u8], parent: &Principal) -> Option<[u32; 3]> {
+    let child_id = crate::exec::spawn_program_with_attrs(
+        program,
+        None,
+        None,
+        slopos_abi::task::TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        CAP_UNIVERSAL,
+        &[],
+        0,
+        None,
+        parent.task.task_id,
+    )
+    .ok()?;
+    let uids = task_find_by_id(child_id)
+        .and_then(|child| child.process())
+        .map(|process| process.cred())
+        .map(|cred| [cred.ruid, cred.euid, cred.suid]);
+    task_terminate(child_id);
+    let _ = slopos_sched::task::task_consume_zombie(child_id);
+    uids
+}

@@ -35,7 +35,7 @@ records and the `DiskBlocks` ceiling (`RawBlock`), `kconsole(2)` and `prof_ctl`
 (`SysInspect`), mode bits (`DacOverride`), id changes (`SetId`), and the signal
 relation, which lets a sender name only a target whose capabilities it holds
 (`core/src/syscall/signal.rs:132-143`). Init and every utest binary hold
-`CAP_MASK_ALL` (`core/src/exec/mod.rs:163-178`, `core/src/exec/utest.rs:107`).
+`CAP_MASK_ALL` (`core/src/exec/mod.rs:162-177`, `core/src/exec/utest.rs:107`).
 A spawned program holds the universal capabilities (`ConsoleIo`,
 `ClipboardGlobal`, `Fate`) its spawner holds, and what its path earns. A nice
 value below zero is init's, by task id.
@@ -43,11 +43,11 @@ value below zero is init's, by task id.
 **Privilege is raised at exactly one site, by path.**
 `spawn_program_with_cwd` ORs in `grant_for(image)` when the spawner holds
 `Launch`, and otherwise spawns the image ungranted
-(`core/src/exec/mod.rs:358-378`). `PROGRAM_GRANTS` has 25 rows: 13 shipped rows
+(`core/src/exec/mod.rs:357-377`). `PROGRAM_GRANTS` has 25 rows: 13 shipped rows
 that raise, 6 delegated e2fsprogs rows and 6 test rows
-(`core/src/exec/grants.rs:39-245`). A path key is sound only because the base
+(`core/src/exec/grants.rs:39-237`). A path key is sound only because the base
 directories are sealed and pinned, mount refuses grant paths and `/lib`
-(`grants.rs:282-296`), and the `Seal` capability exists to keep it that way
+(`grants.rs:274-288`), and the `Seal` capability exists to keep it that way
 (`authority/mod.rs:99-103`). That makes every grant row a setuid program by
 another name. It runs `AT_SECURE`, and it inherits argv, environment, cwd and
 descriptors from whoever spawned it. That is why the installer starts
@@ -55,7 +55,7 @@ e2fsprogs with an emptied environment (`userland/src/apps/installer/disk.rs:473`
 
 **exec narrows all of it.** `narrow_authority_for_exec` keeps
 `caps & (universal | grant | delegated)` in every thread of the process
-(`core/src/exec/mod.rs:629-656`), and `caps_drop` sheds capabilities from a
+(`core/src/exec/mod.rs:627-654`), and `caps_drop` sheds capabilities from a
 whole process for good
 (`sched/src/task/task_lifecycle.rs:2647-2667`). The Verus proof
 (`verification/proofs/authority.rs`) models both.
@@ -73,7 +73,7 @@ whole process for good
   reason.
 
 **IPC carries no identity.**
-- There is no `SO_PEERCRED`. `SCM_CREDENTIALS` is `EINVAL` (`core/src/syscall/tests.rs:9163-9172`).
+- There is no `SO_PEERCRED`. `SCM_CREDENTIALS` is `EINVAL` (`core/src/syscall/tests.rs:9205-9214`).
 - `socketpair` is `ENOSYS` (`slibc/src/net/mod.rs:199-207`).
 - `pidfd_open` names only the caller's children.
 - `SCM_RIGHTS` carries leaf descriptors (pipes, files, memfds, pidfds, ttys) but
@@ -166,7 +166,8 @@ The failures on record each set a rule here:
     `/etc/passwd` waits for multi-user.
 - **Credentials.** Each process carries real, effective and saved uid and gid,
   and up to 32 supplementary groups, in a `Cred` the process owns. fork copies
-  it, and exec keeps it with the effective ids saved, as POSIX has it.
+  it, and spawn and exec keep it with the effective ids saved, as POSIX has
+  it.
 - **Id syscalls** are added at the Linux numbers: `setuid`, `setgid`, `setreuid`,
   `setregid`, `setresuid`, `setresgid`, `getresuid`, `getresgid`, `setgroups`
   and `getgroups`.

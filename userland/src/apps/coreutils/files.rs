@@ -722,20 +722,17 @@ fn copy_node(ctx: &mut Ctx, source: &str, kind: Kind, dest: &str, flags: &CopyFl
     }
 }
 
-/// `cp -p`'s owner and mode: an id the copier may not give stays its own, as
-/// POSIX has it, and the set-ID bit that names that id goes with it.
+/// `cp -p`'s owner and mode, as POSIX has them: an owner the copier may not
+/// give stays its own, the group kept where it may be, and a copy that could
+/// not take both ids carries no set-ID bit.
 fn preserved_mode(writer: &File, meta: &std::fs::Metadata) -> u32 {
     use std::os::unix::fs::{MetadataExt, fchown};
-    let uid_kept = fchown(writer, Some(meta.uid()), Some(meta.gid())).is_ok();
-    let gid_kept = uid_kept || fchown(writer, None, Some(meta.gid())).is_ok();
-    let mut mode = meta.mode() & 0o7777;
-    if !uid_kept {
-        mode &= !0o4000;
+    let mode = meta.mode() & 0o7777;
+    if fchown(writer, Some(meta.uid()), Some(meta.gid())).is_ok() {
+        return mode;
     }
-    if !gid_kept {
-        mode &= !0o2000;
-    }
-    mode
+    let _ = fchown(writer, None, Some(meta.gid()));
+    mode & !0o6000
 }
 
 fn copy_regular(source: &str, dest: &str, flags: &CopyFlags) -> Result<(), std::io::Error> {

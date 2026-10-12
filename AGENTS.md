@@ -1338,10 +1338,10 @@ authority carrier.
 
 **A uid is an identity, never a power.** Each process carries a `Cred`
 (`slopos_ostd::process::cred`): real, effective and saved uid and gid and up to
-32 supplementary groups, process-wide, copied by fork and spawn and kept by
-exec, which saves the effective ids and honours no set-ID bit. The id syscalls
-follow POSIX's unprivileged rules, and any other id, or `setgroups`, takes
-`SetId`. Every VFS entry takes the `Subject` it acts for (the caller's
+32 supplementary groups, process-wide, copied by fork and passed on by spawn
+and exec with the effective ids saved; no set-ID bit is honoured. The id
+syscalls follow POSIX's unprivileged rules, and any other id, or `setgroups`,
+takes `SetId`. Every VFS entry takes the `Subject` it acts for (the caller's
 effective ids and whether it holds `DacOverride`; the kernel's own callers pass
 `Subject::KERNEL`) and checks owner, group and mode: search on each directory a
 walk crosses, read and write on open, write and search on a parent for a name

@@ -79,13 +79,16 @@ pub fn sync() -> SyscallResult<()> {
 /// a reboot must not lose. Written whole to a sibling of its own and renamed
 /// over `path`, so no reader sees it half replaced and an old copy this
 /// process may not write is replaced all the same; the replacement keeps the
-/// old file's owner where this process may give it, and the `fsync` after the
-/// rename commits it.
+/// old file's owner where this process may give it. An error from the `fsync`
+/// that commits the rename comes after the new contents are already in place.
 pub fn write_durable(path: &CStr, data: &[u8]) -> SyscallResult<()> {
+    use core::sync::atomic::{AtomicU32, Ordering};
     use slopos_abi::fs::{O_CREAT, O_EXCL, O_NOFOLLOW, O_WRONLY};
     use slopos_slibc::errno::EINVAL;
+    static CALLS: AtomicU32 = AtomicU32::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
     let mut staged = path.to_bytes().to_vec();
-    staged.extend_from_slice(format!(".new.{}", Sys::getpid()).as_bytes());
+    staged.extend_from_slice(format!(".new.{}.{call}", Sys::getpid()).as_bytes());
     let staged = std::ffi::CString::new(staged).map_err(|_| SyscallError::from(EINVAL))?;
     let flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
     let fd = match open_cstr(&staged, flags) {
@@ -95,14 +98,15 @@ pub fn write_durable(path: &CStr, data: &[u8]) -> SyscallResult<()> {
         }
         opened => opened?,
     };
-    let replaced = fill_and_replace(fd.raw(), &staged, path, data);
-    if replaced.is_err() {
+    if let Err(e) = fill(fd.raw(), path, data).and_then(|()| rename(staged.as_ptr(), path.as_ptr()))
+    {
         let _ = unlink_path(staged.as_ptr());
+        return Err(e);
     }
-    replaced
+    fsync(fd.raw())
 }
 
-fn fill_and_replace(fd: RawFd, staged: &CStr, path: &CStr, data: &[u8]) -> SyscallResult<()> {
+fn fill(fd: RawFd, path: &CStr, data: &[u8]) -> SyscallResult<()> {
     let mut old = UserFsStat::default();
     if stat_path(path.as_ptr(), &mut old).is_ok() {
         let _ = Sys::fchown(fd, old.st_uid, old.st_gid);
@@ -114,8 +118,7 @@ fn fill_and_replace(fd: RawFd, staged: &CStr, path: &CStr, data: &[u8]) -> Sysca
             n => written += n,
         }
     }
-    rename(staged.as_ptr(), path.as_ptr())?;
-    fsync(fd)
+    Ok(())
 }
 
 /// Consumes the handle so `Drop` cannot double-close. On failure the fd is
