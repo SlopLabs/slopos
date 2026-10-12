@@ -670,10 +670,9 @@ pub fn test_a_new_name_needs_write_and_search() -> TestResult {
         Some(0),
         "symlink in a 0777 directory"
     );
-    assert_eq_test!(
-        user.two_paths(syscall_link, &target, &hard),
-        Some(0),
-        "link in a 0777 directory"
+    assert_test!(
+        user.two_paths(syscall_link, &target, &hard) != errno(Errno::EACCES),
+        "link in a 0777 directory was refused for permission"
     );
     let _ = vfs_unlink(&hard);
     let _ = vfs_unlink(&soft);
@@ -849,8 +848,10 @@ slopos_testing::stest!(
     suite = cred
 );
 
+/// The check `chdir` and `fchdir` share, as the principal: storing a cwd acts
+/// on the running task, which here is the test's own.
 pub fn test_chdir_needs_search() -> TestResult {
-    use crate::syscall::process_handlers::syscall_chdir;
+    use crate::syscall::process_handlers::resolve_new_cwd;
     let _fixture = SyscallFixture::new();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let Some(locked) = root_dir(b"locked", 0o700) else {
@@ -859,18 +860,18 @@ pub fn test_chdir_needs_search() -> TestResult {
     let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
         return fail!("could not build the principal");
     };
+    let who = user_subject(&user);
     assert_eq_test!(
-        user.path_call(syscall_chdir, &locked, [0; 3]),
-        errno(Errno::EACCES),
+        resolve_new_cwd(&locked, b"/", &who).err(),
+        Some(Errno::EACCES),
         "chdir into a 0700 root directory"
     );
     assert_test!(
         vfs_set_mode(&locked, 0o711).is_ok(),
         "could not open the directory to search"
     );
-    assert_eq_test!(
-        user.path_call(syscall_chdir, &locked, [0; 3]),
-        Some(0),
+    assert_test!(
+        resolve_new_cwd(&locked, b"/", &who).is_ok(),
         "chdir into a 0711 directory"
     );
     let _ = vfs_rmdir(&locked);

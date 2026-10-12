@@ -1005,7 +1005,7 @@ define_syscall!(syscall_setsid (ctx)
 /// the task resolving against a directory this call never checked. As
 /// `chdir(2)` requires, the directory must also be searchable.
 #[inline(never)]
-fn resolve_new_cwd(
+pub(crate) fn resolve_new_cwd(
     path: &[u8],
     cwd: &[u8],
     who: &slopos_fs::vfs::Subject,
