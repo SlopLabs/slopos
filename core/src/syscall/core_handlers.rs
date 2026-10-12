@@ -389,7 +389,7 @@ define_syscall!(syscall_ctty_read (ctx, buf: UserBytes) cap(NoneSelf)
     Ok(n as u64)
 });
 
-define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(SysInspect)
+define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(NoneSelf)
     -> Result<(), Errno> {
     let pages = get_page_allocator_stats();
     let tasks = get_task_stats();
@@ -446,25 +446,22 @@ define_syscall!(syscall_sysinfo (ctx, info_out: UserPtr<Sysinfo>) cap(NoneSelf)
 });
 
 define_syscall!(syscall_process_list
-    (ctx, buf: UserPtr<slopos_abi::syscall::UserTaskEntry>, max: u64) cap(SysInspect)
+    (ctx, buf: UserPtr<slopos_abi::syscall::UserTaskEntry>, max: u64) cap(NoneRelation)
     -> Result<u64, Errno>
 {
     use slopos_abi::syscall::UserTaskEntry;
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
     use slopos_ostd::KVec;
+    use slopos_ostd::authority::Capability;
     use slopos_sched::task::task_try_for_each_enumerable;
-    use crate::syscall::signal::{signal_dominates, signal_is_init, signal_may_name};
+    use crate::syscall::signal::{signal_may_name, signal_permitted};
 
     // Enumeration answers to the same relation `kill` does, so an id this
-    // refuses to report is also one `kill` would refuse to act on. `PROC_ADMIN`
-    // (held by `/bin/sysmon`) sees everything.
-    let caller_flags = ctx.task().flags;
-    let unrestricted = ctx.is_proc_admin();
+    // refuses to report is also one `kill` would refuse to act on.
+    let caller_caps = ctx.caps();
+    let unrestricted = ctx.holds(Capability::SysInspect);
     let visible = |task: &slopos_sched::task_struct::Task| {
-        unrestricted
-            || (signal_may_name(task.flags)
-                && !signal_is_init(task.task_id)
-                && signal_dominates(caller_flags, task.flags))
+        unrestricted || (signal_may_name(task.flags) && signal_permitted(caller_caps, task))
     };
 
     let max_entries = (max as usize).min(MAX_TASKS);
@@ -522,7 +519,7 @@ define_syscall!(syscall_process_list
 });
 
 define_syscall!(syscall_cpu_info
-    (ctx, info_out: UserPtr<slopos_abi::syscall::UserCpuInfo>) cap(SysInspect)
+    (ctx, info_out: UserPtr<slopos_abi::syscall::UserCpuInfo>) cap(NoneSelf)
     -> Result<(), Errno>
 {
     use slopos_abi::syscall::UserCpuInfo;
@@ -543,7 +540,7 @@ define_syscall!(syscall_cpu_info
 });
 
 define_syscall!(syscall_percpu_stats
-    (ctx, buf: UserPtr<slopos_abi::syscall::UserPerCpuStats>, max: u64) cap(SysInspect)
+    (ctx, buf: UserPtr<slopos_abi::syscall::UserPerCpuStats>, max: u64) cap(NoneSelf)
     -> Result<u64, Errno>
 {
     use core::sync::atomic::Ordering;
@@ -580,7 +577,7 @@ define_syscall!(syscall_percpu_stats
 
 define_syscall!(syscall_cpu_perf
     (ctx, info_out: Option<UserPtr<slopos_abi::syscall::UserCpuPerfInfo>>,
-     cpus: UserSlice<slopos_abi::syscall::UserCpuPerf>) cap(SysInspect)
+     cpus: UserSlice<slopos_abi::syscall::UserCpuPerf>) cap(NoneSelf)
     -> Result<u64, Errno>
 {
     use slopos_abi::syscall::UserCpuPerf;
@@ -646,17 +643,12 @@ define_syscall!(syscall_prof_ctl (ctx, op: u64, label: UserBytes) cap(SysInspect
     Ok(0)
 });
 
-// `SysInspect`, as `process_list`, and held to the same `PROC_ADMIN` bound
-// before it sees everything: the commands print every task and every CPU.
 define_syscall!(syscall_kconsole (ctx, key: u64) cap(SysInspect)
     -> Result<u64, Errno> {
     use slopos_ostd::kconsole::{RequestRefused, request_informational, runs};
     const WAIT_MS: u64 = 5_000;
     const POLL_MS: u32 = 10;
 
-    if !ctx.is_proc_admin() {
-        return Err(Errno::EPERM);
-    }
     let key = u8::try_from(key).map_err(|_| Errno::ENOENT)?;
     let before = runs(key);
     request_informational(key).map_err(|refused| match refused {
@@ -676,4 +668,13 @@ define_syscall!(syscall_kconsole (ctx, key: u64) cap(SysInspect)
         sleep_current_task_ms(POLL_MS);
     }
     Ok(0)
+});
+
+define_syscall!(syscall_caps_drop (ctx, mask: u64) cap(NoneSelf)
+    -> Result<u64, Errno> {
+    let held = slopos_sched::task::process_drop_caps(ctx.task(), mask);
+    if let Some(process) = ctx.task().process() {
+        slopos_ostd::process::quota::fit_disk_blocks(process.account(), held);
+    }
+    Ok(held)
 });

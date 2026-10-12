@@ -2,6 +2,32 @@
 
 **No finding is open.**
 
+Swept 2026-10-12: the authority model's move off `task.flags` — the spawn
+boundary and its retired flag bits, the grant table now naming capabilities,
+exec's narrowing, `caps_drop` and the process record a racing clone is
+narrowed by, signal dominance on masks (`kill`, `tgkill`, the sigqueue calls,
+the group and `-1` fan-outs, `setpriority`, the OOM killer's shield),
+`process_list`, `kconsole(2)`, `prof_ctl` and `net_query` under their new
+classes, the four network-control calls under `NetAdmin`, and block nodes,
+`BLKRRPART`, crash records and the `DiskBlocks` ceiling under `RawBlock`.
+Before it, the flag word survived exec, so anything init or a utest started
+by fork and exec kept `SYSTEM`'s raw-device right, the ext2 reserve and
+signal protection; every gate now reads the mask exec narrows. Three reviews
+found defects before it landed: a dropped universal capability came back on
+every child the dropper spawned, so it could no longer signal them; and exec
+narrowed only the calling thread, leaving a sibling running the new image
+with the old program's mask. Two **pre-existing** defects, fixed here:
+`vhangup` sent `SIGHUP` to every process of the caller's session with no
+capability or relation checked, so any program on a terminal could end a
+granted job its `kill` was refused (now `ConsoleConfig`, as Linux's
+`CAP_SYS_TTY_CONFIG`; `test_vhangup_needs_console_config`); and the signal
+check named init by thread id rather than by process. Below the bar:
+`kill(pid, 0)`, `getpriority` and `/dev/kmsg` reveal tasks `process_list`
+hides from a caller that does not dominate them, which phase 2 of
+`plans/access-model.md` makes moot by listing every task; and the shell's `fg`
+cannot resume a job holding a capability the shell lacks, which phase 2's
+same-session `SIGCONT` exemption resolves.
+
 Swept 2026-10-08: the install medium on a stick — the payload volume
 `build_install_medium.sh` builds and `build_iso.sh` appends as a GPT partition,
 `boot-core`'s GPT reader staging xorriso's 176-entry table (`MAX_ENTRIES`
@@ -61,15 +87,16 @@ which already takes the raw-device right or the disk in hand.
 
 Swept 2026-10-02: the installer and its medium — `/bin/installer` writing a
 table, formats and a root onto a disk another system shares, the `install`
-module served at `/media/install`, e2fsprogs run from the base with `Mount`,
-the block ceiling the raw-device right lifts, slibc's additions for
+module served at `/media/install`, e2fsprogs run from the base with a
+delegated `RawBlock`, the block ceiling `RawBlock` lifts, slibc's additions for
 e2fsprogs, `tree-core` installing over a root a guest wrote, and the GPT
 writer and `fat-core`'s long names and format. Four reviews found defects in
 the change before it landed, none in code that had shipped: a partition named
 as the disk got a table written inside it; a disk with an MBR or an
-unreadable GPT was erased without `--mode erase`; e2fsprogs held `Mount` by
-identity, so any script the shell ran could format a disk (it now keeps
-`Mount` only as far as a spawner that names it directly holds it); a link a
+unreadable GPT was erased without `--mode erase`; e2fsprogs held the
+raw-device right (then `Mount`) by identity, so any script the shell ran could
+format a disk (it now keeps `RawBlock` only as far as a spawner that names it
+directly holds it); a link a
 kept root held redirected the installer's manifest and seal writes off the
 root, and a planted `e2fsck.conf` its log; and a reinstall would overwrite
 another system's loader at `\EFI\BOOT\` on an ESP SlopOS had once made. Two
@@ -85,9 +112,9 @@ the installer walks it without following links.
 Swept 2026-10-01: the crash record — the panic path's polled writes to the
 crash partition and the store's claim on it, `/dev/crash`'s listing, reads and
 unlinks, `bootctl collect` writing what a record says into `/var/log/crash`
-and `/var/lib/slopos/slots`, init running it with `Mount` and `Power` on every
+and `/var/lib/slopos/slots`, init running it with `RawBlock` and `Power` on every
 boot, and the boot step that finds the partition by the GUID the loader
-reports. A record is read or erased only with the raw-device right; the store
+reports. A record is read or erased only with `RawBlock`; the store
 holds the partition's write claim, so no other writer reaches it and no table
 re-read or whole-disk write moves the window the panic path writes, and every
 write lands inside that window. Nothing a record holds names a file: the
@@ -107,8 +134,8 @@ Swept 2026-10-01: the boot chain — UEFI variables from user space and the
 and `install_test` reading every block node's GPT and writing the boot
 partition, the kernel's GPT probe moved onto `boot-core`, load options and
 device paths read off the firmware, and the host's disk builder. `Power`
-reaches nothing it did not; `BootEntry`, which only `TASK_FLAG_INSTALL`
-confers and only `install_test` holds, reaches `Boot####`, `BootOrder` and
+reaches nothing it did not; `BootEntry`, which only init, the utests and the
+installer hold, reaches `Boot####`, `BootOrder` and
 `BootNext` and reads `BootCurrent`, and every write there is held to its
 format on the kernel's own copy before the firmware sees it. Four reviews and
 fuzzing of every `boot-core` parser found defects in the change before it
@@ -150,7 +177,7 @@ Swept 2026-10-01: the block layer and NVMe — raw reads, writes and flushes of
 raw write take, `/dev/disk/by-*` and the `PARTUUID=`/`UUID=`/`LABEL=`
 resolver, partition tables and filesystem superblocks read off removable
 media, and an NVMe controller left running by firmware. A raw read, a raw
-write and a re-read need the task to be privileged or hold `Mount`, a write
+write and a re-read need `RawBlock`, a write
 or a re-read is refused while anything holds the disk, and a claim is held to
 the node its source resolved to. Four reviews found defects in the change
 before it landed, none in code that had shipped: two partition entries could
@@ -403,7 +430,7 @@ leaf flags from the region they map (`test_cow_copy_keeps_the_region_no_execute`
 Swept 2026-09-26, second pass: the install path — raw writes to
 `/dev/vd*` nodes, UEFI variables from user space, `bootctl`, and `fat-core`
 parsing an ESP it did not write. Two reviewers. Raw writes are held to a
-`Mount` or `SYSTEM` holder and to the device's exclusive claim, so a mounted
+`RawBlock` holder and to the device's exclusive claim, so a mounted
 device refuses them. The one widening found was closed before it landed:
 `efivar_set` passed any vendor GUID through, which would have let a `Power`
 holder — a capability that exists to reboot — rewrite `BootOrder` or enrol

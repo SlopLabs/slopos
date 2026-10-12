@@ -1420,135 +1420,116 @@ slopos_testing::stest!(
     suite = exec
 );
 
-/// The grant table is the sole source of privilege bits for a user-initiated
-/// spawn. `/sbin/init` is the load-bearing negative case: granting it would let
-/// any task re-spawn it and inherit console administration.
+/// The grant table is the sole source of capabilities a spawn adds. `/sbin/init`
+/// is the load-bearing negative case: granting it would let any task re-spawn
+/// it and inherit what init holds.
 pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
-    use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TaskPriority};
+    use slopos_abi::task::TaskPriority;
+    use slopos_ostd::authority::{CAP_NONE, Capability};
     use slopos_testing::assert_test;
 
     use super::grants::{delegated_for, grant_for};
 
-    let (flags, priority) = grant_for(b"/bin/compositor");
+    const LAUNCH: u64 = Capability::Launch.bit();
+    const SEATS: u64 = Capability::DisplaySeat.bit() | Capability::InputSeat.bit();
+    const POWER: u64 = Capability::Power.bit();
+    const MOUNT: u64 = Capability::Mount.bit();
+    const RAW_BLOCK: u64 = Capability::RawBlock.bit();
+    const INSTALL: u64 =
+        RAW_BLOCK | MOUNT | POWER | Capability::BootEntry.bit() | Capability::Seal.bit();
+
+    let (caps, priority) = grant_for(b"/bin/compositor");
     assert_test!(
-        flags == TASK_FLAG_COMPOSITOR | slopos_abi::task::TASK_FLAG_LAUNCH,
-        "the compositor must be granted COMPOSITOR and LAUNCH"
+        caps == SEATS | LAUNCH,
+        "the compositor must be granted both seats and Launch"
     );
     assert_test!(
         matches!(priority, Some(TaskPriority::High)),
         "the compositor must be granted the High tier the syscall refuses"
     );
-
-    let (flags, priority) = grant_for(b"/bin/roulette");
     assert_test!(
-        flags == TASK_FLAG_DISPLAY_EXCLUSIVE,
-        "roulette must be granted DISPLAY_EXCLUSIVE"
+        grant_for(b"/bin/roulette") == (Capability::DisplaySeat.bit(), None),
+        "roulette must be granted the display seat and no tier"
     );
     assert_test!(
-        priority.is_none(),
-        "roulette needs no tier grant — Normal is user-requestable"
-    );
-
-    let (flags, priority) = grant_for(b"/bin/keymap");
-    assert_test!(
-        flags == slopos_abi::task::TASK_FLAG_CONSOLE_ADMIN,
-        "the keymap program must be granted CONSOLE_ADMIN"
+        grant_for(b"/bin/keymap") == (Capability::ConsoleConfig.bit(), None),
+        "the keymap program must be granted ConsoleConfig and no tier"
     );
     assert_test!(
-        priority.is_none(),
-        "keymap needs no tier grant — Normal is user-requestable"
-    );
-
-    assert_test!(
-        grant_for(b"/bin/seat_test") == (TASK_FLAG_COMPOSITOR, None),
-        "the seat test must be granted COMPOSITOR and nothing more"
+        grant_for(b"/bin/seat_test") == (SEATS, None),
+        "the seat test must be granted both seats and nothing more"
     );
     assert_test!(
-        grant_for(b"/bin/mount_test") == (slopos_abi::task::TASK_FLAG_MOUNT, None),
-        "the mount test must be granted MOUNT and nothing more"
+        grant_for(b"/bin/mount_test") == (MOUNT, None),
+        "the mount test must be granted Mount and nothing more"
     );
     assert_test!(
-        grant_for(b"/bin/dns_concurrent_test") == (slopos_abi::task::TASK_FLAG_NET_ADMIN, None),
-        "the resolver test must be granted NET_ADMIN and nothing more"
+        grant_for(b"/bin/dns_concurrent_test") == (Capability::NetAdmin.bit(), None),
+        "the resolver test must be granted NetAdmin and nothing more"
     );
-    {
-        use slopos_abi::task::{TASK_FLAG_INSTALL, TASK_FLAG_MOUNT, TASK_FLAG_POWER};
+    assert_test!(
+        grant_for(b"/bin/bootctl") == (RAW_BLOCK | POWER, None),
+        "bootctl must be granted RawBlock and Power, not Mount or the installer's role"
+    );
+    assert_test!(
+        grant_for(b"/bin/installer") == (INSTALL, None)
+            && grant_for(b"/bin/install_test") == (INSTALL, None),
+        "the installer and its test must hold the installer's role"
+    );
+    assert_test!(
+        grant_for(b"/bin/installer_test") == (INSTALL | LAUNCH, None),
+        "the installer test must hold the installer's role and Launch, so the shell it \
+         types the installer at keeps its own"
+    );
+    for tool in [
+        "mke2fs",
+        "e2fsck",
+        "resize2fs",
+        "tune2fs",
+        "debugfs",
+        "dumpe2fs",
+    ] {
+        let mut path = [0u8; 32];
+        let base = b"/sbin/";
+        path[..base.len()].copy_from_slice(base);
+        path[base.len()..base.len() + tool.len()].copy_from_slice(tool.as_bytes());
+        let tool = &path[..base.len() + tool.len()];
         assert_test!(
-            grant_for(b"/bin/bootctl") == (TASK_FLAG_MOUNT | TASK_FLAG_POWER, None),
-            "bootctl must be granted MOUNT and POWER, and not the installer's role"
-        );
-        assert_test!(
-            grant_for(b"/bin/installer")
-                == (TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL, None),
-            "the installer must hold the installer's role beside what bootctl holds"
-        );
-        assert_test!(
-            grant_for(b"/bin/install_test")
-                == (TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL, None),
-            "the install test must hold the installer's role beside what bootctl holds"
-        );
-        assert_test!(
-            grant_for(b"/bin/installer_test")
-                == (
-                    TASK_FLAG_POWER
-                        | TASK_FLAG_MOUNT
-                        | TASK_FLAG_INSTALL
-                        | slopos_abi::task::TASK_FLAG_LAUNCH,
-                    None
-                ),
-            "the installer test must hold the installer's role and Launch, so the shell it \
-             types the installer at keeps its own"
-        );
-        for tool in [
-            "mke2fs",
-            "e2fsck",
-            "resize2fs",
-            "tune2fs",
-            "debugfs",
-            "dumpe2fs",
-        ] {
-            let mut path = [0u8; 32];
-            let base = b"/sbin/";
-            path[..base.len()].copy_from_slice(base);
-            path[base.len()..base.len() + tool.len()].copy_from_slice(tool.as_bytes());
-            let tool = &path[..base.len() + tool.len()];
-            assert_test!(
-                grant_for(tool) == (0, None) && delegated_for(tool) == TASK_FLAG_MOUNT,
-                "e2fsprogs must take the raw-device right from its spawner, and nothing more"
-            );
-        }
-        assert_test!(
-            grant_for(b"/usr/local/sbin/mke2fs") == (0, None)
-                && delegated_for(b"/usr/local/sbin/mke2fs") == 0,
-            "a copy a root holds, which the guest can replace, must get nothing"
-        );
-        assert_test!(
-            delegated_for(b"/bin/bootctl") == 0 && delegated_for(b"/bin/shell") == 0,
-            "only e2fsprogs takes its authority from its spawner"
+            grant_for(tool) == (CAP_NONE, None) && delegated_for(tool) == RAW_BLOCK,
+            "e2fsprogs must take the raw-device right from its spawner, and nothing more"
         );
     }
+    assert_test!(
+        grant_for(b"/usr/local/sbin/mke2fs") == (CAP_NONE, None)
+            && delegated_for(b"/usr/local/sbin/mke2fs") == CAP_NONE,
+        "a copy a root holds, which the guest can replace, must get nothing"
+    );
+    assert_test!(
+        delegated_for(b"/bin/bootctl") == CAP_NONE && delegated_for(b"/bin/shell") == CAP_NONE,
+        "only e2fsprogs takes its authority from its spawner"
+    );
 
     assert_test!(
-        grant_for(INIT_PATH) == (0, None),
-        "init must not be grantable: SYSTEM stays kernel-only"
+        grant_for(INIT_PATH) == (CAP_NONE, None),
+        "init must not be grantable: what it holds stays the kernel's to give"
     );
     // The shell is a launcher, not an ordinary program: it holds `Launch` and
     // nothing else, so it may spawn a program whose identity earns authority
     // without holding any of that authority itself.
     assert_test!(
-        grant_for(b"/bin/shell") == (slopos_abi::task::TASK_FLAG_LAUNCH, None),
-        "the shell must be granted LAUNCH and nothing more"
+        grant_for(b"/bin/shell") == (LAUNCH, None),
+        "the shell must be granted Launch and nothing more"
     );
     assert_test!(
-        grant_for(b"/bin/file_manager") == (0, None),
+        grant_for(b"/bin/file_manager") == (CAP_NONE, None),
         "an ordinary program must get nothing"
     );
     assert_test!(
-        grant_for(b"/bin/./roulette") == (0, None),
+        grant_for(b"/bin/./roulette") == (CAP_NONE, None),
         "a non-canonical spelling must fail closed rather than be normalised"
     );
     assert_test!(
-        grant_for(b"") == (0, None),
+        grant_for(b"") == (CAP_NONE, None),
         "the empty path must get nothing"
     );
 
@@ -1591,14 +1572,14 @@ slopos_testing::stest!(
 );
 
 /// The raw-device right frees a process of the per-process block ceiling
-/// where a spawn confers it, and an `execve` that gives the right up holds
-/// the process to the ceiling again.
+/// where a spawn confers it, `Mount` does not, and an `execve` that gives the
+/// right up holds the process to the ceiling again.
 pub fn test_the_block_ceiling_follows_the_raw_device_right() -> TestResult {
     use core::ffi::c_char;
     use slopos_abi::quota::{ResourceKind, default_process_limit};
-    use slopos_abi::task::{TASK_FLAG_MOUNT, TASK_FLAG_USER_MODE};
-    use slopos_ostd::authority::{Capability, caps_from_task_flags, mask_permits};
-    use slopos_ostd::process::quota::{NO_LIMIT, stats};
+    use slopos_abi::task::TASK_FLAG_USER_MODE;
+    use slopos_ostd::authority::{CAP_UNIVERSAL, Capability, mask_permits};
+    use slopos_ostd::process::quota::{NO_LIMIT, fit_disk_blocks, stats};
     use slopos_ostd::task::ops::{task_caps, task_set_caps};
     use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
 
@@ -1618,24 +1599,28 @@ pub fn test_the_block_ceiling_follows_the_raw_device_right() -> TestResult {
     };
     let limit = || stats(account, ResourceKind::DiskBlocks).map(|row| row.limit);
 
-    task_set_caps(
-        &task,
-        caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_MOUNT),
-    );
-    slopos_ostd::process::quota::fit_disk_blocks(account, task_caps(&task));
+    task_set_caps(&task, CAP_UNIVERSAL | Capability::Mount.bit());
+    fit_disk_blocks(account, task_caps(&task));
+    let mounting = limit();
+    task_set_caps(&task, CAP_UNIVERSAL | Capability::RawBlock.bit());
+    fit_disk_blocks(account, task_caps(&task));
     let holding = limit();
     let Ok(sleep) = slopos_fs::vfs::canon::canonicalise_at(b"/bin/sleep", b"/") else {
         task_terminate(id);
         return slopos_testing::fail!("no path for /bin/sleep");
     };
     super::narrow_authority_for_exec(&task, id, &sleep, true);
-    let gave_up = (limit(), mask_permits(task_caps(&task), Capability::Mount));
+    let gave_up = (
+        limit(),
+        mask_permits(task_caps(&task), Capability::RawBlock),
+    );
     task_terminate(id);
 
     let bounded = default_process_limit(ResourceKind::DiskBlocks);
-    if holding != Some(NO_LIMIT) || gave_up != (Some(bounded), false) {
+    if mounting != Some(bounded) || holding != Some(NO_LIMIT) || gave_up != (Some(bounded), false) {
         return slopos_testing::fail!(
-            "block ceiling holding Mount {:?}, after an exec gave it up {:?}",
+            "block ceiling holding Mount {:?}, RawBlock {:?}, after an exec gave it up {:?}",
+            mounting,
             holding,
             gave_up
         );
@@ -1645,5 +1630,115 @@ pub fn test_the_block_ceiling_follows_the_raw_device_right() -> TestResult {
 
 slopos_testing::stest!(
     name = test_the_block_ceiling_follows_the_raw_device_right,
+    suite = exec
+);
+
+/// A task each grant row's spawn would build, exec'ing an image with no row,
+/// keeps exactly the universal set. `NetAdmin` and the raw block right are
+/// gone, and the signal relation follows: an ordinary task that could not
+/// signal it before can now, and it can no longer signal a `NetAdmin` holder.
+/// Init's and the test runner's mask is narrowed the same.
+pub fn test_exec_of_an_ungranted_image_drops_every_grant() -> TestResult {
+    use core::ffi::c_char;
+    use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
+    use slopos_ostd::authority::{CAP_UNIVERSAL, Capability};
+    use slopos_sched::task::{task_create, task_terminate};
+
+    let user_task = |caps: u64| {
+        let id = task_create(
+            b"GrantExecTest\0".as_ptr() as *const c_char,
+            slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+            core::ptr::null_mut(),
+            1,
+            TASK_FLAG_USER_MODE,
+        );
+        if let Some(task) = slopos_sched::task::task_find_by_id(id) {
+            slopos_ostd::task::ops::task_set_caps(&task, caps);
+        }
+        id
+    };
+    let subject_id = user_task(CAP_UNIVERSAL);
+    let net_admin_id = user_task(CAP_UNIVERSAL | Capability::NetAdmin.bit());
+    let outcome = exec_drops_grants_body(subject_id, net_admin_id);
+    for id in [subject_id, net_admin_id] {
+        if id != INVALID_TASK_ID {
+            task_terminate(id);
+        }
+    }
+    return match outcome {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    };
+
+    fn exec_drops_grants_body(subject_id: u32, net_admin_id: u32) -> Result<(), &'static str> {
+        use crate::syscall::signal::signal_dominates;
+        use slopos_ostd::authority::{
+            CAP_MASK_ALL, CAP_NONE, CAP_UNIVERSAL, Capability, mask_permits,
+        };
+        use slopos_ostd::task::ops::{task_caps, task_set_caps};
+
+        use super::grants::{delegated_for, grant_for, granted_paths};
+
+        let subject = slopos_sched::task::task_find_by_id(subject_id)
+            .ok_or("failed to create the subject task")?;
+        let net_admin = slopos_sched::task::task_find_by_id(net_admin_id)
+            .ok_or("failed to create the NetAdmin task")?;
+        let sleep = slopos_fs::vfs::canon::canonicalise_at(b"/bin/sleep", b"/")
+            .map_err(|_| "no path for /bin/sleep")?;
+        if grant_for(sleep.as_bytes()).0 != CAP_NONE || delegated_for(sleep.as_bytes()) != CAP_NONE
+        {
+            return Err("/bin/sleep has a grant row, so it cannot stand for an ungranted image");
+        }
+
+        if granted_paths().next().is_none() {
+            return Err("the grant table names no program");
+        }
+        let spawned = granted_paths().map(|path| {
+            let row = grant_for(path).0 | delegated_for(path);
+            (path, CAP_UNIVERSAL | row, row)
+        });
+        let init = (&b"/sbin/init"[..], CAP_MASK_ALL, CAP_MASK_ALL);
+        for (path, before, row) in spawned.chain([init]) {
+            task_set_caps(&subject, before);
+            if task_caps(&subject) & row != row {
+                slopos_ostd::klog_info!("{:?} lacks its row", core::str::from_utf8(path));
+                return Err("a granted task does not hold its row");
+            }
+            if row & !CAP_UNIVERSAL != 0 && signal_dominates(CAP_UNIVERSAL, &subject) {
+                slopos_ostd::klog_info!("{:?} signalable", core::str::from_utf8(path));
+                return Err("an ordinary task dominates a granted one before its exec");
+            }
+
+            super::narrow_authority_for_exec(&subject, subject_id, &sleep, true);
+            let after = task_caps(&subject);
+            let failure = if mask_permits(after, Capability::NetAdmin)
+                || mask_permits(after, Capability::RawBlock)
+            {
+                Some("NetAdmin or the raw block right survived an ungranted exec")
+            } else if after != CAP_UNIVERSAL {
+                Some("an exec of an ungranted image kept more than the universal set")
+            } else if !signal_dominates(CAP_UNIVERSAL, &subject) {
+                Some("an ordinary task cannot signal a task narrowed to the universal set")
+            } else if signal_dominates(after, &net_admin) {
+                Some("a narrowed task still dominates a NetAdmin holder")
+            } else {
+                None
+            };
+            if let Some(failure) = failure {
+                slopos_ostd::klog_info!(
+                    "{:?}: {:#x} -> {:#x}",
+                    core::str::from_utf8(path),
+                    before,
+                    after
+                );
+                return Err(failure);
+            }
+        }
+        Ok(())
+    }
+}
+
+slopos_testing::stest!(
+    name = test_exec_of_an_ungranted_image_drops_every_grant,
     suite = exec
 );

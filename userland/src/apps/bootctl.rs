@@ -18,8 +18,8 @@
 //! crash store kept to `/var/log/crash` and notes what each slot's last boot
 //! came to under `/var/lib/slopos/slots`, which `status` reports.
 //!
-//! Holds `TASK_FLAG_MOUNT` for the raw partition and the crash records, and
-//! `TASK_FLAG_POWER` for the loader variables and the reboot.
+//! Holds `RawBlock` for the raw partition and the crash records, and `Power`
+//! for the loader variables and the reboot.
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};

@@ -1,33 +1,36 @@
-//! Program-identity privilege grants.
+//! Program-identity grants: the capabilities a spawn adds for the program it
+//! loads.
 //!
-//! `task.flags` is the whole of SlopOS's privilege model. The privileged bits
-//! come from a fixed table keyed on the program's path, applied by
-//! [`spawn_program_with_attrs`](super::spawn_program_with_attrs) *after* the
-//! syscall boundary stripped every privileged bit the caller asked for: that
-//! boundary is purely subtractive — it can reject or strip, never confer.
-//!
-//! `SYSTEM` deliberately appears nowhere below; naming `/sbin/init` here would
-//! let any task re-spawn it and inherit console administration.
+//! A fixed table keyed on the program's path, applied by
+//! [`spawn_program_with_attrs`](super::spawn_program_with_attrs) and narrowed
+//! to by `execve`. Init is deliberately absent: naming `/sbin/init` here would
+//! let any task re-spawn it and inherit what init holds.
 //!
 //! A grant holds because no process can replace the program it names: the
 //! system's programs are the boot slot's base, read-only and pinned, or files
 //! the image sealed.
 
-use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_INSTALL,
-    TASK_FLAG_LAUNCH, TASK_FLAG_MOUNT, TASK_FLAG_NET_ADMIN, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN,
-    TaskPriority,
+use slopos_abi::caps::{
+    BOOT_ENTRY, CONSOLE_CONFIG, DISPLAY_SEAT, INPUT_SEAT, LAUNCH, MOUNT, NET_ADMIN, POWER,
+    RAW_BLOCK, SEAL, SYS_INSPECT,
 };
+use slopos_abi::task::TaskPriority;
+use slopos_ostd::authority::CAP_NONE;
+
+/// What the installer does: partitions and formats a disk beneath every
+/// filesystem, mounts the new root, sets the loader's default, registers the
+/// firmware entry and seals the new root's mount points.
+const INSTALL: u64 = RAW_BLOCK | MOUNT | POWER | BOOT_ENTRY | SEAL;
 
 struct ProgramGrant {
     /// Compared byte-for-byte against the NUL-trimmed request: a non-canonical
     /// spelling fails closed rather than making this a parser.
     path: &'static [u8],
-    /// OR-ed into the child's flag word when the spawner holds `Launch`.
-    flags: u16,
-    /// OR-ed into the child's flag word as far as the spawner holds them
-    /// itself: authority the program may be handed but never raised to.
-    delegated: u16,
+    /// Added to the child's mask when the spawner holds `Launch`.
+    caps: u64,
+    /// Added to the child's mask as far as the spawner holds them itself:
+    /// authority the program may be handed but never raised to.
+    delegated: u64,
     /// Replaces the caller's requested tier, for a program needing one user
     /// space may not ask for.
     priority: Option<TaskPriority>,
@@ -40,28 +43,25 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     ProgramGrant {
         path: b"/bin/compositor",
         // `Launch` because the dock and the shelf spawn programs, and the
-        // network popover spawns `/bin/ip` -- which carries NET_ADMIN, so a
-        // bound excluding the compositor breaks the network toggle. This is
-        // the fourth launcher, and the grant table's own "revisit past about
-        // four entries" threshold is therefore already reached.
-        flags: TASK_FLAG_COMPOSITOR | TASK_FLAG_LAUNCH,
-        delegated: 0,
+        // network popover spawns `/bin/ip`, which holds `NetAdmin`.
+        caps: DISPLAY_SEAT | INPUT_SEAT | LAUNCH,
+        delegated: CAP_NONE,
         priority: Some(TaskPriority::High),
     },
     // Launches every program the user types. Holds `Launch` and nothing else:
-    // a shell that also held Power or NET_ADMIN would put that authority in
+    // a shell that also held `Power` or `NetAdmin` would put that authority in
     // the process that runs every command.
     ProgramGrant {
         path: b"/bin/shell",
-        flags: TASK_FLAG_LAUNCH,
-        delegated: 0,
+        caps: LAUNCH,
+        delegated: CAP_NONE,
         priority: None,
     },
     // Spawns `/bin/shell` onto its PTY slave.
     ProgramGrant {
         path: b"/bin/terminal",
-        flags: TASK_FLAG_LAUNCH,
-        delegated: 0,
+        caps: LAUNCH,
+        delegated: CAP_NONE,
         priority: None,
     },
     // Runs what the paired host asks for, as a shell runs what the user types:
@@ -71,50 +71,54 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     // name one and borrow this grant.
     ProgramGrant {
         path: b"/bin/remoted",
-        flags: TASK_FLAG_LAUNCH,
-        delegated: 0,
+        caps: LAUNCH,
+        delegated: CAP_NONE,
         priority: None,
     },
-    // Draws straight to the framebuffer before a compositor exists — what
-    // `roulette_draw`'s `requires(display_exclusive)` gates.
+    // Draws straight to the framebuffer before a compositor exists.
     ProgramGrant {
         path: b"/bin/roulette",
-        flags: TASK_FLAG_DISPLAY_EXCLUSIVE,
-        delegated: 0,
+        caps: DISPLAY_SEAT,
+        delegated: CAP_NONE,
         priority: None,
     },
     // The one writer of the kernel keyboard layout, a single global table
     // feeding every TTY and the compositor; reading it needs nothing.
     ProgramGrant {
         path: b"/bin/keymap",
-        flags: TASK_FLAG_CONSOLE_ADMIN,
-        delegated: 0,
+        caps: CONSOLE_CONFIG,
+        delegated: CAP_NONE,
         priority: None,
     },
-    // Every mutating net syscall is gated on this bit, so the control plane
+    // Every mutating net syscall is gated on `NetAdmin`, so the control plane
     // has one grammar.
     ProgramGrant {
         path: b"/bin/ip",
-        flags: TASK_FLAG_NET_ADMIN,
-        delegated: 0,
+        caps: NET_ADMIN,
+        delegated: CAP_NONE,
         priority: None,
     },
-    // May enumerate past the dominance relation `process_list` otherwise
-    // applies, but gains no power over what it sees: `kill` re-checks dominance
-    // against the caller's own flags.
+    // Sees every task, past the relation `process_list` otherwise applies, but
+    // gains no power over what it sees: `kill` checks the caller's own mask.
     ProgramGrant {
         path: b"/bin/sysmon",
-        flags: TASK_FLAG_PROC_ADMIN,
-        delegated: 0,
+        caps: SYS_INSPECT,
+        delegated: CAP_NONE,
         priority: None,
     },
     // The diagnostic console's informational commands print every task and
-    // every CPU: the same whole-machine view, through `kconsole(2)`. Commands
-    // that change the machine stay the physical console's.
+    // every CPU. Commands that change the machine stay the physical console's.
     ProgramGrant {
         path: b"/bin/kconsole",
-        flags: TASK_FLAG_PROC_ADMIN,
-        delegated: 0,
+        caps: SYS_INSPECT,
+        delegated: CAP_NONE,
+        priority: None,
+    },
+    // Starts, stops and reports the sampling profiler (`prof_ctl`).
+    ProgramGrant {
+        path: b"/bin/prof",
+        caps: SYS_INSPECT,
+        delegated: CAP_NONE,
         priority: None,
     },
     // The only program that may halt or reboot. Power is deliberately not a
@@ -123,71 +127,68 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     // the resource behind a daemon. The shell spawns this and waits.
     ProgramGrant {
         path: b"/bin/halt",
-        flags: TASK_FLAG_POWER,
-        delegated: 0,
+        caps: POWER,
+        delegated: CAP_NONE,
         priority: None,
     },
-    // Writes the boot partition's slots beneath every filesystem (`Mount`, the
-    // raw-device right) and sets the loader's variables and reboots (`Power`).
+    // Writes the boot partition's slots and reads the crash records beneath
+    // every filesystem, and sets the loader's variables and reboots.
     ProgramGrant {
         path: b"/bin/bootctl",
-        flags: TASK_FLAG_MOUNT | TASK_FLAG_POWER,
-        delegated: 0,
+        caps: RAW_BLOCK | POWER,
+        delegated: CAP_NONE,
         priority: None,
     },
     // Sets the HWP preference and limits and the placement policy every CPU
     // runs under (`cpu_perf_ctl`, classified `Power`).
     ProgramGrant {
         path: b"/bin/cpufreq",
-        flags: TASK_FLAG_POWER,
-        delegated: 0,
+        caps: POWER,
+        delegated: CAP_NONE,
         priority: None,
     },
-    // Partitions and formats a disk beneath every filesystem (`Mount`), sets
-    // the loader's default (`Power`), and registers the firmware entry and
-    // seals the new root's mount points (`Install`).
     ProgramGrant {
         path: b"/bin/installer",
-        flags: TASK_FLAG_MOUNT | TASK_FLAG_POWER | TASK_FLAG_INSTALL,
-        delegated: 0,
+        caps: INSTALL,
+        delegated: CAP_NONE,
         priority: None,
     },
     // e2fsprogs writes the volume beneath it for a spawner that may itself,
     // the installer; started from the shell, a script cannot format a disk.
     ProgramGrant {
         path: b"/sbin/mke2fs",
-        flags: 0,
-        delegated: TASK_FLAG_MOUNT,
+        caps: CAP_NONE,
+        delegated: RAW_BLOCK,
         priority: None,
     },
     ProgramGrant {
         path: b"/sbin/e2fsck",
-        flags: 0,
-        delegated: TASK_FLAG_MOUNT,
+        caps: CAP_NONE,
+        delegated: RAW_BLOCK,
         priority: None,
     },
     ProgramGrant {
         path: b"/sbin/resize2fs",
-        flags: 0,
-        delegated: TASK_FLAG_MOUNT,
+        caps: CAP_NONE,
+        delegated: RAW_BLOCK,
         priority: None,
     },
     ProgramGrant {
         path: b"/sbin/tune2fs",
-        flags: 0,
-        delegated: TASK_FLAG_MOUNT,
+        caps: CAP_NONE,
+        delegated: RAW_BLOCK,
         priority: None,
     },
     ProgramGrant {
         path: b"/sbin/debugfs",
-        flags: 0,
-        delegated: TASK_FLAG_MOUNT,
+        caps: CAP_NONE,
+        delegated: RAW_BLOCK,
         priority: None,
     },
     ProgramGrant {
         path: b"/sbin/dumpe2fs",
-        flags: 0,
-        delegated: TASK_FLAG_MOUNT,
+        caps: CAP_NONE,
+        delegated: RAW_BLOCK,
         priority: None,
     },
     // Granted to the seat test rather than widening the seat capability, so
@@ -195,16 +196,16 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     // path ships only in a tests image, and an absent path grants nothing.
     ProgramGrant {
         path: b"/bin/seat_test",
-        flags: TASK_FLAG_COMPOSITOR,
-        delegated: 0,
+        caps: DISPLAY_SEAT | INPUT_SEAT,
+        delegated: CAP_NONE,
         priority: None,
     },
     // Same bargain as the seat test: no shipped program may graft a
     // filesystem onto the namespace.
     ProgramGrant {
         path: b"/bin/mount_test",
-        flags: TASK_FLAG_MOUNT,
-        delegated: 0,
+        caps: MOUNT,
+        delegated: CAP_NONE,
         priority: None,
     },
     // Keeps its stage in a UEFI variable across the reboots it drives, reads
@@ -212,8 +213,8 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     // installer will.
     ProgramGrant {
         path: b"/bin/install_test",
-        flags: TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL,
-        delegated: 0,
+        caps: INSTALL,
+        delegated: CAP_NONE,
         priority: None,
     },
     // Keeps its stage in a UEFI variable across the boots an install takes,
@@ -221,44 +222,50 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     // starts the installer from a shell, which raises it only under `Launch`.
     ProgramGrant {
         path: b"/bin/installer_test",
-        flags: TASK_FLAG_POWER | TASK_FLAG_MOUNT | TASK_FLAG_INSTALL | TASK_FLAG_LAUNCH,
-        delegated: 0,
+        caps: INSTALL | LAUNCH,
+        delegated: CAP_NONE,
         priority: None,
     },
     // Points the resolver at a nameserver it runs on loopback.
     ProgramGrant {
         path: b"/bin/dns_concurrent_test",
-        flags: TASK_FLAG_NET_ADMIN,
-        delegated: 0,
+        caps: NET_ADMIN,
+        delegated: CAP_NONE,
         priority: None,
     },
     // A dynamically linked program that runs with `AT_SECURE`, so dl_test can
     // show the loader refusing `LD_LIBRARY_PATH` and `$ORIGIN` to it.
-    // `PROC_ADMIN` confers read-only enumeration and no mutating class.
+    // `SysInspect` only observes.
     ProgramGrant {
         path: b"/bin/dl_secure_probe",
-        flags: TASK_FLAG_PROC_ADMIN,
-        delegated: 0,
+        caps: SYS_INSPECT,
+        delegated: CAP_NONE,
         priority: None,
     },
 ];
 
-/// The flags and tier the kernel adds for `path` when the spawner holds
-/// `Launch`; `(0, None)` for any program not named above.
-pub fn grant_for(path: &[u8]) -> (u16, Option<TaskPriority>) {
+/// The capabilities and tier the kernel adds for `path` when the spawner
+/// holds `Launch`; `(CAP_NONE, None)` for any program not named above.
+pub fn grant_for(path: &[u8]) -> (u64, Option<TaskPriority>) {
     match PROGRAM_GRANTS.iter().find(|grant| grant.path == path) {
-        Some(grant) => (grant.flags, grant.priority),
-        None => (0, None),
+        Some(grant) => (grant.caps, grant.priority),
+        None => (CAP_NONE, None),
     }
 }
 
-/// The flags `path` keeps of those its spawner holds; `0` for any program not
-/// named above.
-pub fn delegated_for(path: &[u8]) -> u16 {
+/// The capabilities `path` keeps of those its spawner holds; `CAP_NONE` for
+/// any program not named above.
+pub fn delegated_for(path: &[u8]) -> u64 {
     PROGRAM_GRANTS
         .iter()
         .find(|grant| grant.path == path)
-        .map_or(0, |grant| grant.delegated)
+        .map_or(CAP_NONE, |grant| grant.delegated)
+}
+
+/// Every path the table grants something to.
+#[cfg(feature = "test-hooks")]
+pub fn granted_paths() -> impl Iterator<Item = &'static [u8]> {
+    PROGRAM_GRANTS.iter().map(|grant| grant.path)
 }
 
 /// Where a dynamically linked program's interpreter lives. Not a grant path,
@@ -270,9 +277,8 @@ const INTERPRETER_DIR: &[u8] = b"/lib";
 /// on. `path` must be canonical.
 ///
 /// `mount(2)` asks this: a grant is keyed on a *path*, so a writable ramfs
-/// over `/bin` would let a planted `halt` spawn with `TASK_FLAG_POWER`. The
-/// inode seal cannot see it — a mount changes the namespace rather than an
-/// inode.
+/// over `/bin` would let a planted `halt` spawn holding `Power`. The inode
+/// seal cannot see it — a mount changes the namespace rather than an inode.
 pub fn covers_grant_path(path: &[u8]) -> bool {
     PROGRAM_GRANTS
         .iter()

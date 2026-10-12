@@ -6,9 +6,6 @@
 //! (`exec`, `fork`, `clone`, `rt_sigreturn`).
 
 use slopos_abi::Errno;
-use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_NET_ADMIN, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
-};
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
@@ -102,6 +99,12 @@ impl<'a> SyscallContext<'a> {
         slopos_ostd::task::ops::task_caps(self.task)
     }
 
+    /// Whether this caller holds `cap`.
+    #[inline]
+    pub fn holds(&self, cap: slopos_ostd::authority::Capability) -> bool {
+        slopos_ostd::authority::mask_permits(self.caps(), cap)
+    }
+
     /// Mint the witness for `R`, or `EPERM`.
     ///
     /// Branded to this context's borrow of the calling task, so the witness
@@ -137,40 +140,6 @@ impl<'a> SyscallContext<'a> {
     pub fn vm_space(&self) -> Result<KArc<VmSpace>, Errno> {
         let vm_process = self.require_process()?.process().ok_or(Errno::ESRCH)?;
         slopos_mm::process_vm::process_vm_get_vm_space(vm_process).ok_or(Errno::EFAULT)
-    }
-
-    #[inline]
-    pub fn has_flag(&self, flag: u16) -> bool {
-        self.task.flags & flag != 0
-    }
-
-    #[inline]
-    pub fn is_compositor(&self) -> bool {
-        self.has_flag(TASK_FLAG_COMPOSITOR)
-    }
-
-    /// Network-administration privilege, modelled on Linux's
-    /// `capable(CAP_NET_ADMIN)`. Conferred by path identity at spawn.
-    #[inline]
-    pub fn is_net_admin(&self) -> bool {
-        self.has_flag(TASK_FLAG_NET_ADMIN)
-    }
-
-    /// Whole-machine enumeration privilege, modelled on Linux's `hidepid`
-    /// bypass. Conferred by path identity on `/bin/sysmon`; `TASK_FLAG_SYSTEM`
-    /// implies it.
-    #[inline]
-    pub fn is_proc_admin(&self) -> bool {
-        self.has_flag(TASK_FLAG_SYSTEM) || self.has_flag(TASK_FLAG_PROC_ADMIN)
-    }
-
-    #[inline]
-    pub fn require_net_admin(&self) -> Result<(), Errno> {
-        if self.is_net_admin() {
-            Ok(())
-        } else {
-            Err(Errno::EPERM)
-        }
     }
 
     /// The user-mode register file this syscall entered from. Writes go

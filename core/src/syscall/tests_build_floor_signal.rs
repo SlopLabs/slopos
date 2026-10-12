@@ -14,8 +14,8 @@ use slopos_abi::syscall::{
     CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE,
 };
 use slopos_abi::task::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN,
-    TaskExitReason, TaskStatus,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskExitReason,
+    TaskStatus,
 };
 use slopos_fs::fileio::FdTable;
 use slopos_kernel_services::driver_runtime::{signal_process_group, signal_session};
@@ -30,6 +30,7 @@ use slopos_mm::process_vm::{
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::KBox;
+use slopos_ostd::authority::{CAP_UNIVERSAL, Capability};
 use slopos_ostd::process::quota::{
     quota_mode, root as quota_root, set_limit, set_quota_mode, stats,
 };
@@ -57,19 +58,24 @@ type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 const TEST_HANDLER: u64 = 0x4100_0000;
 const TEST_RESTORER: u64 = 0x4200_0000;
 
-fn create_test_user_task_with(flags: u16) -> u32 {
+fn create_test_user_task_holding(caps: u64) -> u32 {
     let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
-    task_create(
+    let id = task_create(
         b"SigTest\0".as_ptr() as *const c_char,
         user_entry,
         ptr::null_mut(),
         1,
-        flags,
-    )
+        TASK_FLAG_USER_MODE,
+    );
+    if let Some(task) = task_find_by_id(id) {
+        slopos_ostd::task::ops::task_set_caps(&task, caps);
+    }
+    id
 }
 
+/// What a spawned program holds, so a test principal is an ordinary one.
 fn create_test_user_task() -> u32 {
-    create_test_user_task_with(TASK_FLAG_USER_MODE)
+    create_test_user_task_holding(CAP_UNIVERSAL)
 }
 
 /// `TestResult::Fail` on its own would leak the tasks into the rest of the
@@ -1039,13 +1045,12 @@ pub fn test_tty_hangup_continue_resumes_a_stopped_group() -> TestResult {
 }
 
 /// Only the dispatcher checks a capability, so this goes through the table
-/// entry rather than the handler. A capability no task flag confers would
-/// leave the syscall dead for every caller.
+/// entry rather than the handler.
 pub fn test_clock_settime_requires_the_clock_capability() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let plain_id = create_test_user_task();
-    let granted_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM);
+    let granted_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::Clock.bit());
     assert_test!(
         plain_id != INVALID_TASK_ID && granted_id != INVALID_TASK_ID,
         "failed to create the two user tasks"
@@ -1092,7 +1097,7 @@ pub fn test_clock_settime_requires_the_clock_capability() -> TestResult {
     assert_eq_test!(
         call(granted_table, &granted, granted_ts),
         slopos_abi::Errno::EINVAL.as_u64(),
-        "a system task must reach clock_settime's own argument check"
+        "a Clock holder must reach clock_settime's own argument check"
     );
 
     drop(plain);
@@ -2421,6 +2426,7 @@ fn run_probe_to_death(
         None,
         slopos_abi::task::TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
+        CAP_UNIVERSAL,
         &[],
         0,
         None,

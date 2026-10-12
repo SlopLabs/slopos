@@ -38,17 +38,22 @@ type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 /// on a boot whose root is the initramfs.
 const ROOT: &[u8] = b"/build_floor_fs";
 
+/// What a spawned program holds, so a test principal is an ordinary one.
 fn create_user_task() -> u32 {
     let entry = slopos_sched::task::task_entry_from_kernel_va(
         slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA as u64,
     );
-    task_create(
+    let id = task_create(
         b"BuildFloorFs\0".as_ptr() as *const c_char,
         entry,
         ptr::null_mut(),
         1,
         TASK_FLAG_USER_MODE,
-    )
+    );
+    if let Some(task) = task_find_by_id(id) {
+        slopos_ostd::task::ops::task_set_caps(&task, slopos_ostd::authority::CAP_UNIVERSAL);
+    }
+    id
 }
 
 struct Scratch {

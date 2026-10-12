@@ -186,3 +186,10 @@ pub fn prof_ctl(op: u64, label: &[u8]) -> i64 {
 pub fn kconsole(key: u8) -> i64 {
     unsafe { syscall1(SYSCALL_KCONSOLE, u64::from(key)) as i64 }
 }
+
+/// Give up `mask`'s capabilities for this whole process, for good; answers the
+/// mask the calling thread holds afterwards. `caps_drop(0)` only reads it.
+#[inline(always)]
+pub fn caps_drop(mask: u64) -> u64 {
+    unsafe { syscall1(SYSCALL_CAPS_DROP, mask) }
+}

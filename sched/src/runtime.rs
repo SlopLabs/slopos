@@ -10,8 +10,8 @@ use super::scheduler::{
     publish_new_task, run_ready_task_from_idle, set_scheduler_enabled, r#yield,
 };
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM, Task, TaskPriority, TaskStatus,
-    task_create, task_terminate,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskPriority, TaskStatus, task_create,
+    task_terminate,
 };
 use super::work_steal::try_work_steal;
 use crate::task_struct::Idle;
@@ -66,9 +66,7 @@ pub(crate) extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
         return;
     };
 
-    let fatal_if_panics = slopos_ostd::task::TaskAddr::current().is_some_and(per_cpu::is_idle_task)
-        || crate::task_struct::Current::get()
-            .is_some_and(|current| current.task().flags & TASK_FLAG_SYSTEM != 0);
+    let fatal_if_panics = slopos_ostd::task::TaskAddr::current().is_some_and(per_cpu::is_idle_task);
     if fatal_if_panics || !slopos_ostd::panic_recovery::production_recovery_enabled() {
         entry();
         return;

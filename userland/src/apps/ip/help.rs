@@ -58,7 +58,7 @@ fn print_link() {
     println!("  -br   one fixed-width line per interface");
     println!("  -s    include RX/TX counters");
     println!();
-    println!("`set` needs NET_ADMIN, which /bin/ip is granted by its path.");
+    println!("`set` needs NetAdmin, which /bin/ip is granted by its path.");
     println!("Loopback reports state UNKNOWN: it has no link layer to have an");
     println!("operational state about.");
 }
@@ -107,7 +107,7 @@ fn print_net() {
     println!("       ip net on|off        (also spelled enable|disable)");
     println!();
     println!("The switch addresses the whole stack, not one device: turning it");
-    println!("off downs every interface. `on`/`off` need NET_ADMIN, which");
+    println!("off downs every interface. `on`/`off` need NetAdmin, which");
     println!("/bin/ip is granted by its path.");
 }
 

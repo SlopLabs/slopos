@@ -350,7 +350,7 @@ const _: () = assert!(core::mem::offset_of!(UserNeigh, queued_pkts) == 20);
 /// Every caller sees every row, matching `/proc/net/tcp`'s mode 0444; what is
 /// restricted is socket→process attribution. `owner_pid` holds the pid `getpid`
 /// returns in the owning task for rows the caller's address space owns, and
-/// every row to a caller holding `NET_ADMIN`; otherwise [`INVALID_PROCESS_ID`].
+/// every row to a caller holding `NetAdmin`; otherwise [`INVALID_PROCESS_ID`].
 /// That sentinel means either "no process owns this" or "not disclosed to you",
 /// deliberately indistinguishable, so a renderer must print nothing for it
 /// rather than guess.

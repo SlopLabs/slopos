@@ -199,7 +199,7 @@ fn query_routes(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
 }
 
 /// Enumerate every socket. Rows are never withheld, but the owner is disclosed
-/// only for the caller's own address space, or to a holder of `NET_ADMIN`.
+/// only for the caller's own address space, or to a holder of `NetAdmin`.
 fn query_sockets(
     buf: u64,
     len: usize,
@@ -386,7 +386,7 @@ fn query_resolver(buf: u64, len: usize) -> Result<u64, Errno> {
 
 define_syscall!(syscall_net_query
     (ctx, what: u64, index: u64, buf: u64, len: u64)
-    cap(SysInspect)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -399,7 +399,12 @@ define_syscall!(syscall_net_query
         NET_Q_ROUTES => query_routes(buf, len, ifindex),
         NET_Q_GLOBAL => query_global(buf, len),
         NET_Q_DHCP => query_dhcp(buf, len, ifindex),
-        NET_Q_SOCKETS => query_sockets(buf, len, process_id, ctx.is_net_admin()),
+        NET_Q_SOCKETS => query_sockets(
+            buf,
+            len,
+            process_id,
+            ctx.holds(slopos_ostd::authority::Capability::NetAdmin),
+        ),
         NET_Q_NEIGH => query_neigh(buf, len, ifindex),
         NET_Q_RESOLVER => query_resolver(buf, len),
         _ => Err(Errno::EINVAL),

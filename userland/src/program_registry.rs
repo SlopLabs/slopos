@@ -8,9 +8,8 @@ pub struct ProgramSpec {
     /// `Normal` and `Low`; anything else is `EINVAL` at the spawn boundary. A
     /// program needing a higher tier is given it kernel-side by program identity.
     pub priority: TaskPriority,
-    /// The *unprivileged* flags this program is spawned with. Privileged bits
-    /// (`SYSTEM`, `COMPOSITOR`, `DISPLAY_EXCLUSIVE`, `NO_PREEMPT`) are refused
-    /// with `EPERM` if named here; the kernel confers them by program identity.
+    /// The flags this program is spawned with; its capabilities come from the
+    /// kernel's grant for its path.
     pub flags: u16,
     pub desc: &'static str,
 }
@@ -58,7 +57,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Spin the Wheel of Fate",
     },
-    // The kernel confers `Power` on this path alone. Requested unprivileged,
+    // Granted `Power` by path, and nothing else. Requested unprivileged,
     // like every other entry: the grant is the kernel's to make.
     ProgramSpec {
         name: "halt",
@@ -67,7 +66,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Halt or reboot the machine",
     },
-    // Granted `Mount` and `Power` by path, like `halt`.
+    // Granted `RawBlock` and `Power` by path, like `halt`.
     ProgramSpec {
         name: "bootctl",
         path: "/bin/bootctl",
@@ -75,7 +74,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Install a kernel into a boot slot and choose what boots",
     },
-    // Granted `Mount`, `Power` and `Install` by path.
+    // Granted `RawBlock`, `Mount`, `Power`, `BootEntry` and `Seal` by path.
     ProgramSpec {
         name: "installer",
         path: "/bin/installer",
@@ -140,13 +139,21 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Show CPU frequency and core types; set the HWP policy",
     },
-    // Granted `PROC_ADMIN` by path, for `kconsole(2)`.
+    // Granted `SysInspect` by path, for `kconsole(2)`.
     ProgramSpec {
         name: "kconsole",
         path: "/bin/kconsole",
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Run the diagnostic console's informational commands",
+    },
+    // Granted `SysInspect` by path, for `prof_ctl(2)`.
+    ProgramSpec {
+        name: "prof",
+        path: "/bin/prof",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Start, stop or report the kernel's sampling profiler",
     },
     // A service init starts when the base carries a remote pairing, not a
     // launcher entry. Granted `Launch` by path, like the shell.

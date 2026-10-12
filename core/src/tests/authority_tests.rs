@@ -1,39 +1,57 @@
 //! The authority model's load-bearing claims, checked in the kernel.
 //!
 //! These test the *decision*, not the effect: a test that actually called
-//! `halt` would power the machine off mid-run. What matters is that the mask
-//! derivation and the table classification say the right things, because the
-//! dispatcher's behaviour is a total function of those two.
+//! `halt` would power the machine off mid-run. What matters is that the grant
+//! table and the syscall classification say the right things, because the
+//! dispatcher's behaviour is a total function of those two and a task's mask.
 
 use slopos_abi::syscall::{
     SYSCALL_PRIVATE_BASE, SYSCALL_PRIVATE_END, SYSCALL_REBOOT, SYSCALL_ROULETTE_RESULT,
     SYSCALL_TABLE_SIZE,
 };
-use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_POWER, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
-};
 use slopos_ostd::authority::{
-    AuthorityDecision, CAP_NONE, Capability, caps_from_task_flags, decide, mask_permits,
+    AuthorityDecision, CAP_MASK_ALL, CAP_NONE, CAP_UNIVERSAL, Capability, decide, mask_permits,
 };
 use slopos_testing::{TestResult, fail, pass};
 
+use crate::exec::grants::{delegated_for, grant_for, granted_paths};
 use crate::syscall::handlers::{cap_counts, syscall_lookup};
+
+/// What a spawn by a `Launch` holder gives `path`, delegation included.
+fn spawned_holding(path: &[u8]) -> u64 {
+    CAP_UNIVERSAL | grant_for(path).0 | delegated_for(path)
+}
+
+/// `cap` is conferred on exactly the programs `holders` names, and on no other
+/// row of the table.
+fn conferred_on_exactly(cap: Capability, holders: &[&'static [u8]]) -> Result<(), &'static [u8]> {
+    for &path in holders {
+        if !mask_permits(spawned_holding(path), cap) {
+            return Err(path);
+        }
+    }
+    for path in granted_paths() {
+        if mask_permits(spawned_holding(path), cap) != holders.contains(&path) {
+            return Err(path);
+        }
+    }
+    Ok(())
+}
 
 /// The finding this phase closes: `halt` and `reboot` had no authorization
 /// check at all, so one instruction from any task powered off the machine.
 fn power_is_denied_to_an_ordinary_task() -> TestResult {
-    let ordinary = caps_from_task_flags(TASK_FLAG_USER_MODE);
-    if mask_permits(ordinary, Capability::Power) {
+    if mask_permits(CAP_UNIVERSAL, Capability::Power) {
         return fail!("an ordinary user task must not hold Power");
     }
-    if decide(ordinary, Capability::Power) != AuthorityDecision::Deny {
+    if decide(CAP_UNIVERSAL, Capability::Power) != AuthorityDecision::Deny {
         return fail!("Power must be denied under the default enforce mode");
     }
 
     // The compositor holds display authority and no more: a task privileged
     // for one thing must not be privileged for everything, which is the
     // failure mode a single `Admin` capability produces.
-    let compositor = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR);
+    let compositor = spawned_holding(b"/bin/compositor");
     if mask_permits(compositor, Capability::Power) {
         return fail!("the compositor must not hold Power");
     }
@@ -43,33 +61,24 @@ fn power_is_denied_to_an_ordinary_task() -> TestResult {
     pass!()
 }
 
-/// `/bin/halt`'s grant confers `Power` and nothing else, and init keeps it so
-/// the machine can still be brought down by the system itself.
+/// `/bin/halt`'s grant confers `Power` and nothing else, and only the programs
+/// that bring the machine down or drive its firmware are granted it.
 fn power_is_granted_by_program_identity() -> TestResult {
-    let halt_binary = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_POWER);
-    if !mask_permits(halt_binary, Capability::Power) {
-        return fail!("/bin/halt's grant must confer Power");
+    if grant_for(b"/bin/halt").0 != Capability::Power.bit() {
+        return fail!("/bin/halt's grant must be Power and nothing else");
     }
-    // ...and no other privilege: a power binary that could also launch or
-    // signal is a second `Admin`. The universal capabilities are excluded —
-    // holding one says nothing about privilege.
-    for other in [
-        Capability::Launch,
-        Capability::ProcSignal,
-        Capability::ConsoleConfig,
-        Capability::DisplaySeat,
-        Capability::InputSeat,
-        Capability::TestHarness,
-        Capability::BootEntry,
-    ] {
-        if mask_permits(halt_binary, other) {
-            return fail!("/bin/halt's grant leaked {}", other.name());
-        }
-    }
-
-    let init = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM);
-    if !mask_permits(init, Capability::Power) {
-        return fail!("init must retain Power");
+    if let Err(path) = conferred_on_exactly(
+        Capability::Power,
+        &[
+            b"/bin/halt",
+            b"/bin/cpufreq",
+            b"/bin/bootctl",
+            b"/bin/installer",
+            b"/bin/install_test",
+            b"/bin/installer_test",
+        ],
+    ) {
+        return fail!("Power is misgranted at {:?}", core::str::from_utf8(path));
     }
     pass!()
 }
@@ -171,79 +180,33 @@ slopos_testing::stest!(name = ungated_operations_need_nothing, suite = authority
 /// through the controlling TTY and the clipboard becomes fd-passing only,
 /// these entries go, and this test is what fails to say so.
 fn the_universal_capabilities_are_the_recorded_set() -> TestResult {
-    let ordinary = caps_from_task_flags(TASK_FLAG_USER_MODE);
-
-    for cap in [
+    let universal = [
         Capability::ConsoleIo,
         Capability::ClipboardGlobal,
-        Capability::SysInspect,
         Capability::Fate,
-    ] {
-        if !mask_permits(ordinary, cap) {
+    ];
+    for &cap in Capability::ALL.iter().filter(|cap| cap.is_gated()) {
+        if mask_permits(CAP_UNIVERSAL, cap) != universal.contains(&cap) {
             return fail!(
-                "{} is no longer universal -- if deliberate, this test records it",
+                "{} changed universality -- if deliberate, this test records it",
                 cap.name()
             );
-        }
-    }
-
-    // The half that matters: a capability drifting into the universal set is
-    // how a model becomes ambient again, one convenience at a time.
-    for cap in [
-        Capability::Power,
-        Capability::Launch,
-        Capability::ProcSignal,
-        Capability::DisplaySeat,
-        Capability::InputSeat,
-        Capability::ConsoleConfig,
-        Capability::TestHarness,
-        Capability::Mount,
-        Capability::Clock,
-        Capability::Seal,
-        Capability::BootEntry,
-    ] {
-        if mask_permits(ordinary, cap) {
-            return fail!("{} leaked into the universal set", cap.name());
         }
     }
     pass!()
 }
 
-/// `Signalable` resolves and authorizes in one step, and the authorization
-/// carries the object.
-///
-/// There must be no way to hold an authorization for one task and act on
-/// another. The retired `terminate_task` call used to check the compositor bit and then
-/// terminate an arbitrary target; a bare capability witness would have left
-/// that byte-identical, which is why the witness carries the target rather
-/// than merely attesting that a check ran.
-fn signalable_refuses_init_and_invalid_targets() -> TestResult {
+/// A nonexistent id is `ESRCH` even to a caller holding every capability:
+/// never a success, and never a permission answer that would disclose whether
+/// the id names anything. Init's refusal is
+/// [`init_is_told_apart_by_its_task_id`], since init does not exist yet here.
+fn signalable_refuses_invalid_targets() -> TestResult {
     use crate::syscall::signalable::resolve_signal_target;
     use slopos_abi::Errno;
     use slopos_abi::task::INVALID_TASK_ID;
 
-    // A caller holding every privilege: if these refusals hold for it, they
-    // hold for everybody.
-    let omnipotent = u16::MAX;
-
-    // The kernel phase runs at drivers/90, before `/sbin/init` launches, so
-    // `init_task_id()` is unset here and the init arm cannot be exercised from
-    // a `stest!`. Asserting it *is* unset keeps this honest: were it to become
-    // set, the branch below would start running and this test would need to
-    // stop skipping it rather than silently passing.
-    let init = crate::exec::init_task_id();
-    if init != INVALID_TASK_ID {
-        match resolve_signal_target(omnipotent, init) {
-            Err(Errno::EPERM) => {}
-            Err(other) => return fail!("init resolved to {:?}, want EPERM", other),
-            Ok(_) => return fail!("init must never resolve as a signal target"),
-        }
-    }
-
-    // A nonexistent id is ESRCH, never a success and never a permission answer
-    // that would disclose whether the id names anything.
     for (id, label) in [(INVALID_TASK_ID, "an invalid id"), (0, "id 0")] {
-        match resolve_signal_target(omnipotent, id) {
+        match resolve_signal_target(CAP_MASK_ALL, id) {
             Err(Errno::ESRCH) => {}
             Err(other) => return fail!("{} gave {:?}, want ESRCH", label, other),
             Ok(_) => return fail!("{} must not resolve", label),
@@ -256,50 +219,118 @@ slopos_testing::stest!(
     name = the_universal_capabilities_are_the_recorded_set,
     suite = authority
 );
+slopos_testing::stest!(name = signalable_refuses_invalid_targets, suite = authority);
+
+/// Init is told apart by its task id, which is what spends the ext2 reserve,
+/// sets a nice value below zero and is never a signal target. Runs in the
+/// userland phase, the first in which init exists.
+fn init_is_told_apart_by_its_task_id() -> TestResult {
+    use crate::syscall::signalable::resolve_signal_target;
+    use core::ffi::c_char;
+    use slopos_abi::Errno;
+    use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
+    use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+    use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
+
+    let init_id = crate::exec::init_task_id();
+    let Some(init) = task_find_by_id(init_id) else {
+        return fail!("init is not running in the userland phase");
+    };
+    let other_id = task_create(
+        b"NotInit\0".as_ptr() as *const c_char,
+        slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+        core::ptr::null_mut(),
+        1,
+        TASK_FLAG_USER_MODE,
+    );
+    let Some(other) = task_find_by_id(other_id) else {
+        return fail!("no test task");
+    };
+    slopos_ostd::task::ops::task_set_caps(&other, CAP_UNIVERSAL);
+    let identities = (
+        crate::exec::task_is_init(&init),
+        crate::exec::task_is_init(&other),
+    );
+    let init_target = resolve_signal_target(CAP_MASK_ALL, init_id).map(|_| ());
+    let other_target = resolve_signal_target(CAP_MASK_ALL, other_id).map(|_| ());
+    drop((init, other));
+    if other_id != INVALID_TASK_ID {
+        task_terminate(other_id);
+    }
+
+    if identities != (true, false) {
+        return fail!("task_is_init answered {:?} for (init, another)", identities);
+    }
+    if init_target != Err(Errno::EPERM) {
+        return fail!("init resolved as a signal target: {:?}", init_target);
+    }
+    if other_target.is_err() {
+        return fail!("a task holding everything could not signal an ordinary one");
+    }
+    pass!()
+}
+
 slopos_testing::stest!(
-    name = signalable_refuses_init_and_invalid_targets,
-    suite = authority
+    name = init_is_told_apart_by_its_task_id,
+    flags = 0,
+    kind = Userland
 );
 
-/// exec narrows authority to what the new image's identity earns, and the
-/// reduction is monotone.
+/// exec narrows authority to what the new image's identity earns, and never
+/// raises it.
 ///
 /// An entitlement surviving `exec` is one of the two CVE shapes this model is
 /// built against: a privileged program execs an arbitrary binary and the
-/// binary inherits the privilege. The intersection is what prevents it.
-///
-/// Tested at the mask level because that is where the property lives -- the
-/// handler computes `grant(image) & held` and stores it, so what matters is
-/// that the arithmetic cannot widen.
+/// binary inherits the privilege. The other is an unprivileged task execing a
+/// privileged image and gaining its grant. Checked on a real task through the
+/// function `execve` calls.
 fn exec_intersection_never_widens() -> TestResult {
-    let privileged = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM);
-    let ordinary = caps_from_task_flags(TASK_FLAG_USER_MODE);
+    use core::ffi::c_char;
+    use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
+    use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+    use slopos_ostd::task::ops::{task_caps, task_set_caps};
+    use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
 
-    // exec of an image whose identity earns nothing drops every privilege.
-    let after = privileged & ordinary;
-    for cap in [
-        Capability::Power,
-        Capability::Launch,
-        Capability::ProcSignal,
-        Capability::TestHarness,
-    ] {
-        if mask_permits(after, cap) {
-            return fail!("{} survived exec of an unprivileged image", cap.name());
-        }
+    let Ok(halt) = slopos_fs::vfs::canon::canonicalise_at(b"/bin/halt", b"/") else {
+        return fail!("no path for /bin/halt");
+    };
+    let id = task_create(
+        b"ExecNarrowTest\0".as_ptr() as *const c_char,
+        slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+        core::ptr::null_mut(),
+        1,
+        TASK_FLAG_USER_MODE,
+    );
+    let Some(task) = task_find_by_id(id) else {
+        return fail!("no test task");
+    };
+    let power = Capability::Power.bit();
+    let mut after = [CAP_NONE; 3];
+    for (slot, before) in after
+        .iter_mut()
+        .zip([CAP_UNIVERSAL, CAP_UNIVERSAL | power, CAP_MASK_ALL])
+    {
+        task_set_caps(&task, before);
+        crate::exec::narrow_authority_for_exec(&task, id, &halt, true);
+        *slot = task_caps(&task);
+    }
+    drop(task);
+    if id != INVALID_TASK_ID {
+        task_terminate(id);
     }
 
-    // An unprivileged task execing a *privileged* image does not gain the
-    // grant: the intersection bounds it by what was already held. This is the
-    // half that stops exec being a privilege-escalation primitive.
-    let grant = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_POWER);
-    let raised = ordinary & grant;
-    if mask_permits(raised, Capability::Power) {
-        return fail!("exec of a privileged image raised an unprivileged task");
+    let [ordinary, holder, everything] = after;
+    if ordinary != CAP_UNIVERSAL {
+        return fail!(
+            "exec of a privileged image raised an ordinary task to {:#x}",
+            ordinary
+        );
     }
-
-    // Monotone: intersecting with everything changes nothing.
-    if (after & u64::MAX) != after {
-        return fail!("the reduction is not monotone");
+    if holder != CAP_UNIVERSAL | power {
+        return fail!("exec of /bin/halt took Power from a task holding it");
+    }
+    if everything != CAP_UNIVERSAL | power {
+        return fail!("exec of /bin/halt kept {:#x} beyond its grant", everything);
     }
     pass!()
 }
@@ -310,33 +341,22 @@ fn exec_intersection_never_widens() -> TestResult {
 /// path -- an entitlement leaking to an unrelated program with nothing granted
 /// to it.
 fn launch_is_held_by_the_launchers_only() -> TestResult {
-    use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_LAUNCH};
-
-    // The four real launchers: init (SYSTEM), shell, terminal, compositor.
-    for (flags, who) in [
-        (TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM, "init"),
-        (TASK_FLAG_USER_MODE | TASK_FLAG_LAUNCH, "shell/terminal"),
-        (
-            TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR | TASK_FLAG_LAUNCH,
-            "compositor",
-        ),
-    ] {
-        if !mask_permits(caps_from_task_flags(flags), Capability::Launch) {
-            return fail!("{} must hold Launch", who);
-        }
-    }
-
-    // And nobody else. An ordinary program spawning /bin/halt must not thereby
-    // obtain a child holding Power.
-    let ordinary = caps_from_task_flags(TASK_FLAG_USER_MODE);
-    if mask_permits(ordinary, Capability::Launch) {
+    if mask_permits(CAP_UNIVERSAL, Capability::Launch) {
         return fail!("an ordinary task must not hold Launch");
     }
-    // A privileged-but-not-launcher program likewise: holding Power does not
-    // imply being allowed to confer it.
-    let power_only = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_POWER);
-    if mask_permits(power_only, Capability::Launch) {
-        return fail!("/bin/halt must not hold Launch");
+    // The installer test is a launcher because it drives a shell that keeps
+    // its own Launch.
+    if let Err(path) = conferred_on_exactly(
+        Capability::Launch,
+        &[
+            b"/bin/compositor",
+            b"/bin/shell",
+            b"/bin/terminal",
+            b"/bin/remoted",
+            b"/bin/installer_test",
+        ],
+    ) {
+        return fail!("Launch is misgranted at {:?}", core::str::from_utf8(path));
     }
     pass!()
 }
@@ -347,25 +367,95 @@ slopos_testing::stest!(
     suite = authority
 );
 
-/// `BootEntry` is the installer's role and nobody else's: not `bootctl`, which
-/// writes slots and the loader's variables, and not init, which never touches
-/// the firmware's boot manager. It adds to `Power`, under which the UEFI
-/// variable calls are classified, so the role alone reaches no variable. The
-/// role also carries `Seal`, for the mount points a new root holds the base
-/// over.
-fn boot_entry_is_the_installer_s_alone() -> TestResult {
-    use slopos_abi::task::{TASK_FLAG_INSTALL, TASK_FLAG_MOUNT};
+/// `NetAdmin`, `RawBlock`, `Mount` and `SysInspect` land on exactly the
+/// programs that need them: network control on `ip`, raw block access on the
+/// programs that work beneath filesystems (e2fsprogs by delegation, so only
+/// from a spawner that holds it), mounting on the installer's role and the
+/// mount test, and machine inspection on the diagnostic programs. The
+/// universal set holds none of them.
+fn moved_capabilities_are_conferred_by_identity() -> TestResult {
+    let e2fsprogs: [&'static [u8]; 6] = [
+        b"/sbin/mke2fs",
+        b"/sbin/e2fsck",
+        b"/sbin/resize2fs",
+        b"/sbin/tune2fs",
+        b"/sbin/debugfs",
+        b"/sbin/dumpe2fs",
+    ];
+    let installer: [&'static [u8]; 3] = [
+        b"/bin/installer",
+        b"/bin/install_test",
+        b"/bin/installer_test",
+    ];
+    let mut raw_block: [&'static [u8]; 10] = [b""; 10];
+    raw_block[..6].copy_from_slice(&e2fsprogs);
+    raw_block[6..9].copy_from_slice(&installer);
+    raw_block[9] = b"/bin/bootctl";
+    let mut mount: [&'static [u8]; 4] = [b"/bin/mount_test"; 4];
+    mount[..3].copy_from_slice(&installer);
 
-    let installer = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_INSTALL);
-    if !mask_permits(installer, Capability::BootEntry) || !mask_permits(installer, Capability::Seal)
-    {
-        return fail!("the installer's role must confer BootEntry and Seal");
-    }
-    for other in [Capability::Power, Capability::Mount] {
-        if mask_permits(installer, other) {
-            return fail!("the installer's role leaked {}", other.name());
+    for (cap, holders) in [
+        (
+            Capability::NetAdmin,
+            &[b"/bin/ip".as_slice(), b"/bin/dns_concurrent_test"][..],
+        ),
+        (Capability::RawBlock, &raw_block[..]),
+        (Capability::Mount, &mount[..]),
+        (
+            Capability::SysInspect,
+            &[
+                b"/bin/sysmon".as_slice(),
+                b"/bin/kconsole",
+                b"/bin/prof",
+                b"/bin/dl_secure_probe",
+            ][..],
+        ),
+    ] {
+        if mask_permits(CAP_UNIVERSAL, cap) {
+            return fail!("{} is universal", cap.name());
+        }
+        if let Err(path) = conferred_on_exactly(cap, holders) {
+            return fail!(
+                "{} is misgranted at {:?}",
+                cap.name(),
+                core::str::from_utf8(path)
+            );
         }
     }
+    for tool in e2fsprogs {
+        if grant_for(tool).0 & Capability::RawBlock.bit() != 0 {
+            return fail!("e2fsprogs must take RawBlock from its spawner, not be granted it");
+        }
+    }
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = moved_capabilities_are_conferred_by_identity,
+    suite = authority
+);
+
+/// `BootEntry` is the installer's role and nobody else's: not `bootctl`, which
+/// writes slots and the loader's variables. It adds to `Power`, under which the
+/// UEFI variable calls are classified, so the role alone reaches no variable.
+/// The role also carries `Seal`, for the mount points a new root holds the
+/// base over.
+fn boot_entry_is_the_installer_s_alone() -> TestResult {
+    let installer: &[&'static [u8]] = &[
+        b"/bin/installer",
+        b"/bin/install_test",
+        b"/bin/installer_test",
+    ];
+    for cap in [Capability::BootEntry, Capability::Seal] {
+        if let Err(path) = conferred_on_exactly(cap, installer) {
+            return fail!(
+                "{} is misgranted at {:?}",
+                cap.name(),
+                core::str::from_utf8(path)
+            );
+        }
+    }
+    let role_alone = CAP_UNIVERSAL | Capability::BootEntry.bit() | Capability::Seal.bit();
     for sysno in [
         slopos_abi::syscall::SYSCALL_EFIVAR_GET,
         slopos_abi::syscall::SYSCALL_EFIVAR_SET,
@@ -373,20 +463,11 @@ fn boot_entry_is_the_installer_s_alone() -> TestResult {
         let Some(entry) = syscall_lookup(sysno) else {
             return fail!("efivar syscall {} is not registered", sysno);
         };
-        if entry.cap != Capability::Power || decide(installer, entry.cap) != AuthorityDecision::Deny
+        if entry.cap != Capability::Power
+            || decide(role_alone, entry.cap) != AuthorityDecision::Deny
+            || decide(spawned_holding(b"/bin/installer"), entry.cap) != AuthorityDecision::Allow
         {
-            return fail!("the installer's role alone must not pass efivar's Power gate");
-        }
-    }
-    for (flags, who) in [
-        (TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM, "init"),
-        (
-            TASK_FLAG_USER_MODE | TASK_FLAG_MOUNT | TASK_FLAG_POWER,
-            "bootctl",
-        ),
-    ] {
-        if mask_permits(caps_from_task_flags(flags), Capability::BootEntry) {
-            return fail!("{} must not hold BootEntry", who);
+            return fail!("efivar must be gated on Power, which the role alone does not pass");
         }
     }
     pass!()

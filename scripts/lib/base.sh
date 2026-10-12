@@ -3,13 +3,13 @@
 # sh.
 
 # The shipped programs: `/bin/<name>`, and `init` at `/sbin/init`.
-BASE_PROGRAMS="init shell coreutils terminal compositor roulette halt bootctl installer editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted kconsole"
+BASE_PROGRAMS="init shell coreutils terminal compositor roulette halt bootctl installer editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted kconsole prof"
 
 # The multicall utility binary's installed names. `/bin/<name>` is a symlink to
 # `/bin/coreutils`, which dispatches on `argv[0]` — one binary rather than
 # fifty-odd copies of std. This list is the *installed* set; the binary's own
 # table is the implemented set, and `coreutils_test` fails if they disagree.
-COREUTILS_TOOLS="ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less prof"
+COREUTILS_TOOLS="ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less"
 
 # The programs a recipe builds that the base carries, by their path below the
 # recipe prefix, which they keep below `/`: e2fsprogs's, which format, check and

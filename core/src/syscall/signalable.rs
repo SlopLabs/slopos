@@ -11,7 +11,7 @@ use slopos_abi::Errno;
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_sched::task::{TaskRef, task_find_by_id};
 
-use crate::syscall::signal::{signal_dominates, signal_is_init, signal_may_name};
+use crate::syscall::signal::{signal_may_name, signal_permitted};
 
 /// A live task the caller has been authorized to signal.
 ///
@@ -45,7 +45,8 @@ impl Signalable {
     }
 }
 
-/// Resolve `target_id` and authorize `caller_flags` to signal it, in one step.
+/// Resolve `target_id` and authorize a caller holding `caller_caps` to signal
+/// it, in one step.
 ///
 /// The two cannot be separated by construction, which is the point: there is
 /// no `resolve` that skips the check and no `check` that takes an id.
@@ -54,7 +55,7 @@ impl Signalable {
 ///   delivery, so naming one could only reach the `SIGKILL` arm and tear down a
 ///   driver thread holding device state and an interrupt line.
 /// - `EPERM` — the caller does not dominate the target, or the target is init.
-pub fn resolve_signal_target(caller_flags: u16, target_id: u32) -> Result<Signalable, Errno> {
+pub fn resolve_signal_target(caller_caps: u64, target_id: u32) -> Result<Signalable, Errno> {
     if target_id == INVALID_TASK_ID || target_id == 0 {
         return Err(Errno::ESRCH);
     }
@@ -64,13 +65,7 @@ pub fn resolve_signal_target(caller_flags: u16, target_id: u32) -> Result<Signal
     if !signal_may_name(target.flags) {
         return Err(Errno::ESRCH);
     }
-    // A terminating signal to init takes the system down undebuggably.
-    // Dominance already covers it; the guarantee should not rest on that.
-    // Audited, not tested: no test phase can name init's id.
-    if signal_is_init(target_id) {
-        return Err(Errno::EPERM);
-    }
-    if !signal_dominates(caller_flags, target.flags) {
+    if !signal_permitted(caller_caps, &target) {
         return Err(Errno::EPERM);
     }
     Ok(Signalable {

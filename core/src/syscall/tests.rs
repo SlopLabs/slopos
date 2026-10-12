@@ -30,14 +30,12 @@ use slopos_abi::syscall::{
     SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
     SYSCALL_SYS_INFO, SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, SYSCALL_WRITE, TIOCSCTTY, TtyIndex,
 };
-use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_KERNEL_MODE,
-    TASK_FLAG_NET_ADMIN, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskStatus,
-};
+use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
+use slopos_ostd::authority::{CAP_MASK_ALL, CAP_UNIVERSAL, Capability};
 use slopos_ostd::task::SchedPlacement;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
@@ -112,19 +110,24 @@ fn create_test_kernel_task() -> u32 {
     )
 }
 
+/// What a spawned program holds, so a test principal is an ordinary one.
 fn create_test_user_task() -> u32 {
-    create_test_user_task_with(TASK_FLAG_USER_MODE)
+    create_test_user_task_holding(CAP_UNIVERSAL)
 }
 
-fn create_test_user_task_with(flags: u16) -> u32 {
+fn create_test_user_task_holding(caps: u64) -> u32 {
     let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
-    task_create(
+    let id = task_create(
         b"UserTest\0".as_ptr() as *const c_char,
         user_entry,
         ptr::null_mut(),
         1,
-        flags,
-    )
+        TASK_FLAG_USER_MODE,
+    );
+    if let Some(task) = task_find_by_id(id) {
+        slopos_ostd::task::ops::task_set_caps(&task, caps);
+    }
+    id
 }
 
 fn zero_frame() -> UserContext {
@@ -3465,14 +3468,12 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
 }
 
 /// A spawn request cannot name its own privileges. The calling task holds
-/// `TASK_FLAG_USER_MODE` and nothing else, which is the principal under test.
+/// `CAP_UNIVERSAL`, what any spawned program holds, which is the principal
+/// under test.
 pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     use crate::syscall::handlers::syscall_spawn_path;
     use slopos_abi::spawn::SpawnAttrs;
-    use slopos_abi::task::{
-        TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_NEW_PGRP,
-        TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
-    };
+    use slopos_abi::task::{SPAWN_RESERVED, TASK_FLAG_NEW_PGRP, TASK_FLAG_NO_PREEMPT};
 
     let _fixture = SyscallFixture::new();
 
@@ -3537,69 +3538,24 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     let einval = slopos_abi::Errno::EINVAL.as_u64();
     const NORMAL: u8 = 2;
 
-    // EPERM, not EINVAL: the caller is asking for something real that it may
-    // not have.
-    assert_eq_test!(
-        spawn(NORMAL, TASK_FLAG_COMPOSITOR),
-        eperm,
-        "spawning with COMPOSITOR must be EPERM"
-    );
-    assert_eq_test!(
-        spawn(NORMAL, TASK_FLAG_DISPLAY_EXCLUSIVE),
-        eperm,
-        "spawning with DISPLAY_EXCLUSIVE must be EPERM"
-    );
-    assert_eq_test!(
-        spawn(NORMAL, TASK_FLAG_SYSTEM),
-        eperm,
-        "spawning with SYSTEM must be EPERM"
-    );
     assert_eq_test!(
         spawn(NORMAL, TASK_FLAG_NO_PREEMPT),
         eperm,
         "spawning with NO_PREEMPT must be EPERM — it wedges a CPU"
     );
-    assert_eq_test!(
-        spawn(NORMAL, slopos_abi::task::TASK_FLAG_NET_ADMIN),
-        eperm,
-        "spawning with NET_ADMIN must be EPERM — it is conferred by program identity"
-    );
-    assert_eq_test!(
-        spawn(NORMAL, slopos_abi::task::TASK_FLAG_CONSOLE_ADMIN),
-        eperm,
-        "spawning with CONSOLE_ADMIN must be EPERM — it is conferred by program identity"
-    );
-    assert_eq_test!(
-        spawn(NORMAL, slopos_abi::task::TASK_FLAG_PROC_ADMIN),
-        eperm,
-        "spawning with PROC_ADMIN must be EPERM — it is conferred by program identity"
-    );
-    assert_eq_test!(
-        spawn(NORMAL, slopos_abi::task::TASK_FLAG_INSTALL),
-        eperm,
-        "spawning with INSTALL must be EPERM — it is conferred by program identity"
-    );
 
-    // Reserved bits fail closed. Derived from SPAWN_RESERVED rather than a
-    // literal, so a widened flag word moves the probe with it.
-    assert_eq_test!(
-        spawn(
-            NORMAL,
-            1 << slopos_abi::task::SPAWN_RESERVED.trailing_zeros()
-        ),
-        einval,
-        "an undefined flag bit must be EINVAL"
-    );
-    assert_eq_test!(
-        spawn(NORMAL, 0x0040),
-        einval,
-        "the retired FPU_INITIALIZED bit must stay EINVAL"
-    );
-    assert_eq_test!(
-        spawn(NORMAL, 0x0040),
-        einval,
-        "the retired FPU_INITIALIZED bit must stay refused"
-    );
+    // A retired privilege bit asks for nothing that exists.
+    for bit in (0..16).map(|shift| 1u16 << shift) {
+        if SPAWN_RESERVED & bit == 0 {
+            continue;
+        }
+        let got = spawn(NORMAL, bit);
+        if got != einval {
+            klog_info!("reserved spawn flag {:#x} answered {:#x}", bit, got);
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    }
     assert_eq_test!(
         spawn(NORMAL, slopos_abi::task::TASK_FLAG_KERNEL_MODE),
         einval,
@@ -3610,7 +3566,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     assert_eq_test!(
         spawn(
             NORMAL,
-            (1 << slopos_abi::task::SPAWN_RESERVED.trailing_zeros()) | TASK_FLAG_COMPOSITOR
+            (1 << SPAWN_RESERVED.trailing_zeros()) | TASK_FLAG_NO_PREEMPT
         ),
         einval,
         "a reserved bit must be answered before a privileged one"
@@ -3989,16 +3945,56 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_vhangup_syscall_in_dispatch_table() -> TestResult {
-    let Some(entry_ref) = syscall_lookup(SYSCALL_VHANGUP) else {
-        klog_info!("SYSCALL_VHANGUP lookup returned None");
-        return TestResult::Fail;
+/// `vhangup` ends every process of the caller's session, so it takes
+/// `ConsoleConfig`: without it the terminal is refused untouched, and the same
+/// call from a holder hangs it up.
+pub fn test_vhangup_needs_console_config() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let plain_id = create_test_user_task();
+    let holder_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::ConsoleConfig.bit());
+    let outcome = vhangup_body(plain_id, holder_id);
+    for id in [plain_id, holder_id] {
+        if id != INVALID_TASK_ID {
+            task_terminate(id);
+        }
+    }
+    return match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
     };
-    assert_test!(
-        entry_ref.handler.is_some(),
-        "SYSCALL_VHANGUP has no handler"
-    );
-    TestResult::Pass
+
+    fn vhangup_body(plain_id: u32, holder_id: u32) -> Result<(), &'static str> {
+        let plain = task_find_by_id(plain_id).ok_or("failed to create the plain task")?;
+        let holder = task_find_by_id(holder_id).ok_or("failed to create the holder")?;
+        let table_of = |task: &slopos_sched::task::TaskRef| {
+            task.process()
+                .as_deref()
+                .and_then(FdTable::of)
+                .ok_or("a user task has no fd table")
+        };
+        let (plain_table, holder_table) = (table_of(&plain)?, table_of(&holder)?);
+        let master_fd = file_open_for_process(plain_table, b"/dev/ptmx", O_RDONLY);
+        if master_fd < 0 {
+            return Err("ptmx open failed");
+        }
+        let Some(tty) = slopos_fs::fileio::file_get_tty_index(plain_table, master_fd) else {
+            let _ = file_close_fd(plain_table, master_fd);
+            return Err("the ptmx descriptor names no terminal");
+        };
+        plain.set_controlling_tty(Some(tty));
+        holder.set_controlling_tty(Some(tty));
+        let refused = dispatch_gated(&plain, plain_table, SYSCALL_VHANGUP, [0; 4]);
+        let hung_up = dispatch_gated(&holder, holder_table, SYSCALL_VHANGUP, [0; 4]);
+        let _ = file_close_fd(plain_table, master_fd);
+        if refused != Some(slopos_abi::Errno::EPERM.as_u64()) {
+            return Err("a task without ConsoleConfig hung up its terminal");
+        }
+        if hung_up != Some(0) {
+            return Err("a ConsoleConfig holder could not hang up its terminal");
+        }
+        Ok(())
+    }
 }
 
 /// A jobserver client trusts an inherited descriptor only after `fstat`
@@ -4835,7 +4831,7 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 slopos_testing::stest!(
-    name = test_vhangup_syscall_in_dispatch_table,
+    name = test_vhangup_needs_console_config,
     suite = syscall_valid
 );
 
@@ -4959,7 +4955,7 @@ slopos_testing::stest!(
     suite = syscall_compat_smoke
 );
 slopos_testing::stest!(
-    name = test_vhangup_syscall_in_dispatch_table,
+    name = test_vhangup_needs_console_config,
     suite = syscall_compat_smoke
 );
 slopos_testing::stest!(
@@ -7410,17 +7406,15 @@ slopos_testing::stest!(
     suite = syscall_signal
 );
 
-fn broadcast_spared_pending(sender_id: u32, sender_flags: u16) -> slopos_ostd::KVec<(u32, SigSet)> {
-    use crate::syscall::signal::{signal_dominates, signal_is_init, signal_may_name};
+fn broadcast_spared_pending(sender_id: u32, sender_caps: u64) -> slopos_ostd::KVec<(u32, SigSet)> {
+    use crate::syscall::signal::{signal_may_name, signal_permitted};
 
     let mut spared = slopos_ostd::KVec::new();
     task::task_for_each_active(|target| {
         if target.task_id == sender_id {
             return;
         }
-        let nameable = signal_may_name(target.flags)
-            && !signal_is_init(target.task_id)
-            && signal_dominates(sender_flags, target.flags);
+        let nameable = signal_may_name(target.flags) && signal_permitted(sender_caps, target);
         if !nameable {
             let _ = spared.push((target.task_id, target.signal_pending()));
         }
@@ -7453,7 +7447,7 @@ pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
         return TestResult::Fail;
     };
 
-    let spared = broadcast_spared_pending(user_id, user_guard.flags);
+    let spared = broadcast_spared_pending(user_id, CAP_UNIVERSAL);
     assert_test!(
         spared.iter().any(|(task_id, _)| *task_id == kernel_id),
         "the kernel task must be in the set the broadcast may not name"
@@ -7499,14 +7493,17 @@ slopos_testing::stest!(
     suite = syscall_signal
 );
 
-/// A task may not signal one holding a privilege it does not hold itself:
-/// `task.flags` is the whole privilege model, the relation POSIX puts on uids.
+/// A task may not signal one holding a capability it does not hold itself:
+/// the capability mask is the whole privilege model, the relation POSIX puts
+/// on uids.
 pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let plain_id = create_test_user_task();
     assert_test!(plain_id != INVALID_TASK_ID, "failed to create user task");
-    let privileged_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR);
+    let privileged_id = create_test_user_task_holding(
+        CAP_UNIVERSAL | Capability::DisplaySeat.bit() | Capability::InputSeat.bit(),
+    );
     assert_test!(
         privileged_id != INVALID_TASK_ID,
         "failed to create privileged task"
@@ -7538,7 +7535,7 @@ pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
     assert_eq_test!(
         up.rax(),
         slopos_abi::Errno::EPERM.as_u64(),
-        "an unprivileged task named a compositor-flagged one"
+        "an unprivileged task named a seat-holding one"
     );
     assert_eq_test!(
         privileged_guard.signal_pending(),
@@ -7587,7 +7584,7 @@ pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
     assert_test!(sender_id != INVALID_TASK_ID, "failed to create user task");
     let peer_id = create_test_user_task();
     assert_test!(peer_id != INVALID_TASK_ID, "failed to create peer task");
-    let privileged_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_NET_ADMIN);
+    let privileged_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::NetAdmin.bit());
     assert_test!(
         privileged_id != INVALID_TASK_ID,
         "failed to create privileged task"
@@ -7602,7 +7599,7 @@ pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
         return TestResult::Fail;
     };
 
-    let spared = broadcast_spared_pending(sender_id, sender_guard.flags);
+    let spared = broadcast_spared_pending(sender_id, CAP_UNIVERSAL);
     assert_test!(
         spared.iter().any(|(task_id, _)| *task_id == privileged_id),
         "the privileged task must be in the set the broadcast may not name"
@@ -7839,12 +7836,12 @@ slopos_testing::stest!(
 
 /// One layout table feeds every TTY and the compositor's input path, so
 /// installing one is console administration — `loadkeys`, not `setxkbmap`.
-pub fn test_keymap_load_requires_console_admin() -> TestResult {
+pub fn test_keymap_load_requires_console_config() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let plain_id = create_test_user_task();
     assert_test!(plain_id != INVALID_TASK_ID, "failed to create user task");
-    let admin_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_CONSOLE_ADMIN);
+    let admin_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::ConsoleConfig.bit());
     assert_test!(admin_id != INVALID_TASK_ID, "failed to create admin task");
 
     let plain_guard = assert_some!(task_find_by_id(plain_id), "task lookup failed");
@@ -7911,7 +7908,7 @@ pub fn test_keymap_load_requires_console_admin() -> TestResult {
 }
 
 slopos_testing::stest!(
-    name = test_keymap_load_requires_console_admin,
+    name = test_keymap_load_requires_console_config,
     suite = syscall_core
 );
 
@@ -7920,7 +7917,7 @@ slopos_testing::stest!(
 pub fn test_process_list_excludes_exited_tasks() -> TestResult {
     let _fixture = SyscallFixture::new();
 
-    let caller_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM);
+    let caller_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::SysInspect.bit());
     assert_test!(caller_id != INVALID_TASK_ID, "failed to create caller task");
     let caller_guard = assert_some!(task_find_by_id(caller_id), "caller lookup failed");
     let Some(caller_pid) = caller_guard
@@ -8000,6 +7997,7 @@ pub fn test_process_list_excludes_exited_tasks() -> TestResult {
 
 /// Enumeration answers to the same relation `kill` does: an unprivileged caller
 /// is not told the id of a task it could not signal, so the two cannot disagree.
+/// Only `SysInspect` sees past the relation.
 pub fn test_process_list_hides_undominated_tasks() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -8014,7 +8012,9 @@ pub fn test_process_list_hides_undominated_tasks() -> TestResult {
         return fail!("plain caller has no fd table");
     };
 
-    let privileged_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR);
+    let privileged_id = create_test_user_task_holding(
+        CAP_UNIVERSAL | Capability::DisplaySeat.bit() | Capability::InputSeat.bit(),
+    );
     assert_test!(
         privileged_id != INVALID_TASK_ID,
         "failed to create privileged task"
@@ -8025,69 +8025,79 @@ pub fn test_process_list_hides_undominated_tasks() -> TestResult {
     };
     let capacity = (4096 / core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>()) as u64;
 
-    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
-    frame.regs_mut().rdi = buf;
-    frame.regs_mut().rsi = capacity;
-    let _ = with_user_process_context(plain_pid, || {
-        crate::syscall::dispatch::dispatch_handler(
-            crate::syscall::core_handlers::syscall_process_list,
-            &plain_guard,
-            &mut *frame,
-        )
-    });
-    let count = frame.rax();
+    // (itself, the privileged task, a kernel task) as the caller saw them.
+    let scan = || {
+        let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+        frame.regs_mut().rdi = buf;
+        frame.regs_mut().rsi = capacity;
+        let _ = with_user_process_context(plain_pid, || {
+            crate::syscall::dispatch::dispatch_handler(
+                crate::syscall::core_handlers::syscall_process_list,
+                &plain_guard,
+                &mut *frame,
+            )
+        });
+        let mut seen = (false, false, false);
+        for i in 0..frame.rax().min(capacity) {
+            let addr = buf + i * core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>() as u64;
+            let Ok(ptr) = UserPtr::<slopos_abi::syscall::UserTaskEntry>::try_new(addr) else {
+                continue;
+            };
+            let Some(Ok(entry)) = with_user_process_context(plain_pid, || copy_from_user(ptr))
+            else {
+                continue;
+            };
+            seen.0 |= entry.task_id == plain_id;
+            seen.1 |= entry.task_id == privileged_id;
+            seen.2 |=
+                task_find_by_id(entry.task_id).is_some_and(|t| t.flags & TASK_FLAG_USER_MODE == 0);
+        }
+        seen
+    };
 
-    let mut saw_privileged = false;
-    let mut saw_kernel_task = false;
-    let mut saw_self = false;
-    for i in 0..count {
-        let addr = buf + i * core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>() as u64;
-        let Ok(ptr) = UserPtr::<slopos_abi::syscall::UserTaskEntry>::try_new(addr) else {
-            continue;
-        };
-        let Some(Ok(entry)) = with_user_process_context(plain_pid, || copy_from_user(ptr)) else {
-            continue;
-        };
-        if entry.task_id == privileged_id {
-            saw_privileged = true;
-        }
-        if entry.task_id == plain_id {
-            saw_self = true;
-        }
-        if let Some(t) = task_find_by_id(entry.task_id)
-            && t.flags & TASK_FLAG_USER_MODE == 0
-        {
-            saw_kernel_task = true;
-        }
-    }
+    let (saw_self, saw_privileged, saw_kernel_task) = scan();
+    slopos_ostd::task::ops::task_set_caps(
+        &plain_guard,
+        CAP_UNIVERSAL | Capability::SysInspect.bit(),
+    );
+    let (_, inspector_saw_privileged, _) = scan();
 
+    drop(plain_guard);
+    task_terminate(plain_id);
+    task_terminate(privileged_id);
     assert_test!(
         saw_self,
         "a task could not see itself, so the filter is too strict"
     );
     assert_test!(
         !saw_privileged,
-        "an unprivileged task enumerated a COMPOSITOR task it may not signal"
+        "an unprivileged task enumerated a seat-holding task it may not signal"
     );
     assert_test!(
         !saw_kernel_task,
         "an unprivileged task enumerated a kernel task"
     );
-
-    drop(plain_guard);
-    task_terminate(plain_id);
-    task_terminate(privileged_id);
+    assert_test!(
+        inspector_saw_privileged,
+        "a SysInspect holder was not shown a task it does not dominate"
+    );
     pass!()
 }
 
-/// `kconsole` prints every task and CPU, so a task outside `PROC_ADMIN` is
+/// `kconsole` prints every task and CPU, so a task outside `SysInspect` is
 /// refused before anything is queued, informational key or not.
-pub fn test_kconsole_needs_proc_admin() -> TestResult {
+pub fn test_kconsole_needs_sys_inspect() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let plain_id = create_test_user_task();
     assert_test!(plain_id != INVALID_TASK_ID, "failed to create plain task");
+    let inspector_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::SysInspect.bit());
+    assert_test!(
+        inspector_id != INVALID_TASK_ID,
+        "failed to create inspector"
+    );
     let plain_guard = assert_some!(task_find_by_id(plain_id), "plain lookup failed");
+    let inspector_guard = assert_some!(task_find_by_id(inspector_id), "inspector lookup failed");
     let Some(plain_pid) = plain_guard
         .process()
         .as_deref()
@@ -8095,27 +8105,54 @@ pub fn test_kconsole_needs_proc_admin() -> TestResult {
     else {
         return fail!("plain caller has no fd table");
     };
+    let Some(inspector_pid) = inspector_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return fail!("inspector has no fd table");
+    };
+    let entry = assert_some!(
+        crate::syscall::handlers::syscall_lookup(slopos_abi::syscall::SYSCALL_KCONSOLE),
+        "kconsole is not registered"
+    );
 
     let help_runs = slopos_ostd::kconsole::runs(b'h');
     let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     frame.regs_mut().rdi = u64::from(b'h');
     let _ = with_user_process_context(plain_pid, || {
-        crate::syscall::dispatch::dispatch_handler(
-            crate::syscall::core_handlers::syscall_kconsole,
-            &plain_guard,
-            &mut *frame,
-        )
+        crate::syscall::dispatch::dispatch_entry(entry, &plain_guard, &mut *frame)
     });
-    let eperm = slopos_abi::Errno::EPERM.as_u64();
     let answered = frame.rax();
+    let runs_after = slopos_ostd::kconsole::runs(b'h');
+
+    // A key no byte can name: past the gate, the handler answers ENOENT
+    // without queueing anything.
+    let mut control: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    control.regs_mut().rdi = 0x100;
+    let _ = with_user_process_context(inspector_pid, || {
+        crate::syscall::dispatch::dispatch_entry(entry, &inspector_guard, &mut *control)
+    });
+    let control_answered = control.rax();
 
     drop(plain_guard);
+    drop(inspector_guard);
     task_terminate(plain_id);
-    assert_eq_test!(answered, eperm, "a task without PROC_ADMIN ran kconsole");
+    task_terminate(inspector_id);
     assert_eq_test!(
-        slopos_ostd::kconsole::runs(b'h'),
+        answered,
+        slopos_abi::Errno::EPERM.as_u64(),
+        "a task without SysInspect ran kconsole"
+    );
+    assert_eq_test!(
+        runs_after,
         help_runs,
         "a refused kconsole call still queued its command"
+    );
+    assert_eq_test!(
+        control_answered,
+        slopos_abi::Errno::ENOENT.as_u64(),
+        "a SysInspect holder was not let past the gate"
     );
     pass!()
 }
@@ -8128,7 +8165,252 @@ slopos_testing::stest!(
     name = test_process_list_hides_undominated_tasks,
     suite = syscall_core
 );
-slopos_testing::stest!(name = test_kconsole_needs_proc_admin, suite = syscall_core);
+slopos_testing::stest!(name = test_kconsole_needs_sys_inspect, suite = syscall_core);
+
+/// Dispatch through the table entry, so the capability gate is in the path.
+/// `None` when the call could not be staged.
+fn dispatch_gated(
+    task: &slopos_sched::task::TaskRef,
+    table: FdTable,
+    sysno: u64,
+    args: [u64; 4],
+) -> Option<u64> {
+    let entry = syscall_lookup(sysno)?;
+    let mut frame = zero_frame_boxed();
+    frame.regs_mut().rdi = args[0];
+    frame.regs_mut().rsi = args[1];
+    frame.regs_mut().rdx = args[2];
+    frame.regs_mut().r10 = args[3];
+    with_user_process_context(table, || {
+        crate::syscall::dispatch::dispatch_entry(entry, task, &mut frame)
+    })?;
+    Some(frame.rax())
+}
+
+/// What an ordinary task reaches: `caps_drop`, `process_list`, `sys_info` and
+/// `net_query` need nothing; `kconsole` and `prof_ctl` need `SysInspect`; the
+/// four network-control calls need `NetAdmin`. Every refusal is beside a
+/// holder of exactly the missing capability being let through, with
+/// arguments the handler rejects before it changes anything.
+pub fn test_dispatch_gates_follow_the_capability_mask() -> TestResult {
+    use slopos_abi::syscall::{
+        SYSCALL_CAPS_DROP, SYSCALL_KCONSOLE, SYSCALL_NET_ADDR_CTL, SYSCALL_NET_IFACE_CTL,
+        SYSCALL_NET_QUERY, SYSCALL_NET_RESOLVER_SET, SYSCALL_NET_ROUTE_CTL, SYSCALL_PROCESS_LIST,
+        SYSCALL_PROF_CTL,
+    };
+
+    let _fixture = SyscallFixture::new();
+
+    let plain_id = create_test_user_task();
+    let inspector_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::SysInspect.bit());
+    let admin_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::NetAdmin.bit());
+    let outcome = dispatch_gates_body(plain_id, inspector_id, admin_id);
+    for id in [plain_id, inspector_id, admin_id] {
+        if id != INVALID_TASK_ID {
+            task_terminate(id);
+        }
+    }
+    return match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    };
+
+    /// What one principal must be answered.
+    #[derive(Clone, Copy)]
+    enum Want {
+        Is(u64),
+        Not(u64),
+        Within(u64, u64),
+        Skip,
+    }
+
+    fn dispatch_gates_body(
+        plain_id: u32,
+        inspector_id: u32,
+        admin_id: u32,
+    ) -> Result<(), &'static str> {
+        let lookup = |id: u32| {
+            let task = task_find_by_id(id).ok_or("failed to create a user task")?;
+            let table = task
+                .process()
+                .as_deref()
+                .and_then(FdTable::of)
+                .ok_or("a user task has no fd table")?;
+            Ok::<_, &'static str>((task, table))
+        };
+        /// Placeholder for the ordinary task's mapped page, above any user address.
+        const BUF: u64 = u64::MAX - 0xfff;
+        const ENTRIES: u64 =
+            (4096 / core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>()) as u64;
+        const EPERM: Want = Want::Is(slopos_abi::Errno::EPERM.as_u64());
+        const EINVAL: Want = Want::Is(slopos_abi::Errno::EINVAL.as_u64());
+        const PASSED: Want = Want::Not(slopos_abi::Errno::EPERM.as_u64());
+        const SKIP: Want = Want::Skip;
+        // Columns: the ordinary task, the SysInspect holder, the NetAdmin
+        // holder. Only the ordinary task's table holds `BUF`.
+        const ROWS: &[(u64, [u64; 4], [Want; 3])] = &[
+            (
+                SYSCALL_CAPS_DROP,
+                [0; 4],
+                [Want::Is(CAP_UNIVERSAL), SKIP, SKIP],
+            ),
+            (
+                SYSCALL_PROCESS_LIST,
+                [BUF, ENTRIES, 0, 0],
+                [Want::Within(1, ENTRIES), SKIP, SKIP],
+            ),
+            (SYSCALL_SYS_INFO, [BUF, 0, 0, 0], [Want::Is(0), SKIP, SKIP]),
+            (SYSCALL_NET_QUERY, [u32::MAX as u64, 0, 0, 0], [EINVAL; 3]),
+            (
+                SYSCALL_KCONSOLE,
+                [0x100, 0, 0, 0],
+                [EPERM, Want::Is(slopos_abi::Errno::ENOENT.as_u64()), EPERM],
+            ),
+            (
+                SYSCALL_PROF_CTL,
+                [u64::MAX, 0, 0, 0],
+                [EPERM, PASSED, EPERM],
+            ),
+            (
+                SYSCALL_NET_IFACE_CTL,
+                [0, u32::MAX as u64, 0, 0],
+                [EPERM, EPERM, EINVAL],
+            ),
+            (SYSCALL_NET_ADDR_CTL, [0; 4], [EPERM, EPERM, EINVAL]),
+            (SYSCALL_NET_ROUTE_CTL, [0; 4], [EPERM, EPERM, EINVAL]),
+            (SYSCALL_NET_RESOLVER_SET, [0; 4], [EPERM, EPERM, EINVAL]),
+        ];
+
+        let principals = [lookup(plain_id)?, lookup(inspector_id)?, lookup(admin_id)?];
+        let buf = map_user_rw_page(principals[0].1).ok_or("could not map a user page")?;
+        for (sysno, args, wants) in ROWS {
+            let args = args.map(|arg| if arg == BUF { buf } else { arg });
+            for ((task, table), want) in principals.iter().zip(wants) {
+                if matches!(want, Want::Skip) {
+                    continue;
+                }
+                let got = dispatch_gated(task, *table, *sysno, args)
+                    .ok_or("could not dispatch the call")?;
+                let ok = match *want {
+                    Want::Is(v) => got == v,
+                    Want::Not(v) => got != v,
+                    Want::Within(lo, hi) => (lo..=hi).contains(&got),
+                    Want::Skip => true,
+                };
+                if !ok {
+                    klog_info!(
+                        "syscall {:#x} answered {:#x} to a task holding {:#x}",
+                        sysno,
+                        got,
+                        slopos_ostd::task::ops::task_caps(task)
+                    );
+                    return Err("a capability gate answered against the caller's mask");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+slopos_testing::stest!(
+    name = test_dispatch_gates_follow_the_capability_mask,
+    suite = syscall_core
+);
+
+/// `caps_drop` is total and process-wide: it never fails, takes exactly what
+/// it names from every thread of the process, and a thread registered after
+/// the drop is born without it even if its creator's mask had not yet been
+/// narrowed when it was copied.
+pub fn test_caps_drop_is_total_and_process_wide() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let held = CAP_UNIVERSAL | Capability::NetAdmin.bit() | Capability::RawBlock.bit();
+    let leader_id = create_test_user_task_holding(held);
+    if leader_id == INVALID_TASK_ID {
+        return fail!("failed to create the leader");
+    }
+    let mut threads = [INVALID_TASK_ID; 2];
+    let outcome = caps_drop_body(leader_id, held, &mut threads);
+    for id in threads.into_iter().chain([leader_id]) {
+        if id != INVALID_TASK_ID {
+            task_terminate(id);
+        }
+    }
+    return match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    };
+
+    fn caps_drop_body(
+        leader_id: u32,
+        held: u64,
+        threads: &mut [u32; 2],
+    ) -> Result<(), &'static str> {
+        use slopos_ostd::task::ops::{task_caps, task_set_caps};
+        use slopos_sched::task::process_drop_caps;
+
+        let net = Capability::NetAdmin.bit();
+        let leader = task_find_by_id(leader_id).ok_or("leader vanished")?;
+        let spawn_thread = |slot: &mut u32| {
+            let flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD;
+            let id = task_clone(&leader, None, flags, 0, 0, 0, 0)
+                .map_err(|_| "could not clone a thread")?;
+            *slot = id;
+            task_set_state(id, TaskStatus::Blocked);
+            task_find_by_id(id).ok_or("a cloned thread vanished")
+        };
+        let sibling = spawn_thread(&mut threads[0])?;
+        if task_caps(&sibling) != held {
+            return Err("a thread did not start with its creator's mask");
+        }
+
+        let kept = held & !net;
+        if process_drop_caps(&leader, net) != kept {
+            return Err("dropping a held bit did not answer the remaining mask");
+        }
+        if task_caps(&leader) != kept || task_caps(&sibling) != kept {
+            return Err("a dropped bit survived on a thread of the process");
+        }
+        let recorded = leader.process().map_or(0, |process| process.dropped_caps());
+        if recorded & net == 0 {
+            return Err("the process did not record the drop");
+        }
+
+        for (mask, what) in [
+            (Capability::Power.bit(), "an unheld bit"),
+            (!CAP_MASK_ALL, "bits no capability names"),
+            (net, "the same bit twice"),
+            (0, "nothing"),
+        ] {
+            if process_drop_caps(&leader, mask) != kept || task_caps(&sibling) != kept {
+                klog_info!("dropping {} changed what the process holds", what);
+                return Err("a drop took something it did not name");
+            }
+        }
+
+        // As if the clone copied the creator's mask before the drop landed:
+        // only registration stands between the new thread and the bit.
+        task_set_caps(&leader, held);
+        let late = spawn_thread(&mut threads[1])?;
+        task_set_caps(&leader, kept);
+        if task_caps(&late) != kept {
+            return Err("a thread registered after the drop was not born without it");
+        }
+
+        if process_drop_caps(&leader, u64::MAX) != 0 {
+            return Err("dropping every bit left something held");
+        }
+        if task_caps(&sibling) != 0 || task_caps(&late) != 0 {
+            return Err("dropping every bit spared a thread");
+        }
+        Ok(())
+    }
+}
+
+slopos_testing::stest!(
+    name = test_caps_drop_is_total_and_process_wide,
+    suite = syscall_core
+);
 
 /// `waitpid(-1)` reaps whichever child exited, without being told which.
 pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
@@ -9148,8 +9430,7 @@ pub fn test_mount_requires_the_mount_capability() -> TestResult {
 
     let plain_id = create_test_user_task();
     assert_test!(plain_id != INVALID_TASK_ID, "failed to create user task");
-    let granted_id =
-        create_test_user_task_with(TASK_FLAG_USER_MODE | slopos_abi::task::TASK_FLAG_MOUNT);
+    let granted_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::Mount.bit());
     assert_test!(granted_id != INVALID_TASK_ID, "failed to create mount task");
 
     let plain_guard = assert_some!(task_find_by_id(plain_id), "task lookup failed");
@@ -9331,7 +9612,7 @@ fn pool_is_at_full_capacity() -> Result<(), &'static str> {
 ///
 /// Without it a holder of `Capability::Mount` covers `/bin` with a writable
 /// ramfs, creates `halt` in it, and spawns the planted binary into
-/// `TASK_FLAG_POWER`.
+/// `Power`.
 pub fn test_mount_over_a_grant_path_is_refused() -> TestResult {
     use crate::syscall::fs::mount_handlers::mount_apply_at;
 

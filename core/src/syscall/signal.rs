@@ -9,9 +9,7 @@ use slopos_abi::signal::{
     SIG_UNCATCHABLE, SIGSEGV, SS_DISABLE, SS_ONSTACK, SigDefault, SigInfo, SigSet, SignalFrame,
     UserSigAltStack, UserSigaction, UserSiginfo, UserUcontext, sig_bit, sig_default_action,
 };
-use slopos_abi::task::{
-    INVALID_TASK_ID, SPAWN_PRIVILEGED, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason,
-};
+use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
@@ -86,39 +84,19 @@ pub(crate) fn signal_may_name(flags: u16) -> bool {
     (flags & TASK_FLAG_USER_MODE) != 0
 }
 
-/// Whether a task holding `caller_flags` may signal one holding `target_flags`.
-///
-/// A sender may name a task whose privileges it already holds, and no other —
-/// the relation standing in for the user ids POSIX asks about.
-///
-/// Stated on flags rather than on capability masks *deliberately*, and the
-/// distinction matters after exec: `exec` narrows `Task::caps` but leaves
-/// `Task::flags` alone, so a deprivileged process keeps the flag word it was
-/// spawned with. Reading flags here is the conservative direction — the
-/// exec'd process stays *protected* from its unprivileged peers rather than
-/// gaining the ability to signal them — and it keeps this relation answering
-/// the question it has always answered: who may be named, not what may be
-/// invoked.
-///
-/// A capability-mask version would be the wrong shape: `caps` is about
-/// operations, and two tasks with identical operational authority can still
-/// stand in a spawn relation where one should not signal the other.
-pub(crate) fn signal_dominates(caller_flags: u16, target_flags: u16) -> bool {
-    target_flags & SPAWN_PRIVILEGED & !caller_flags == 0
+/// Whether a task holding `caller_caps` may signal `target`: only if it already
+/// holds every capability `target` does, so nothing stops or kills a task more
+/// privileged than itself.
+pub(crate) fn signal_dominates(caller_caps: u64, target: &Task) -> bool {
+    slopos_ostd::task::ops::task_caps(target) & !caller_caps == 0
 }
 
-/// Init is never a signal target: a terminating signal there takes the system
-/// down undebuggably. Dominance already covers init today; the guarantee should
-/// not rest on that.
-pub(crate) fn signal_is_init(task_id: u32) -> bool {
-    let init = crate::exec::init_task_id();
-    init != INVALID_TASK_ID && task_id == init
-}
-
-/// Whether `target` may be named by a sender holding `caller_flags`, ignoring
-/// the category check that answers `ESRCH` on its own.
-fn signal_permitted(caller_flags: u16, target_id: u32, target_flags: u16) -> bool {
-    !signal_is_init(target_id) && signal_dominates(caller_flags, target_flags)
+/// Whether `target` may be named by a sender holding `caller_caps`, ignoring
+/// the category check that answers `ESRCH` on its own. Init never may: a
+/// terminating signal there takes the system down undebuggably, and the
+/// guarantee should not rest on dominance alone.
+pub(crate) fn signal_permitted(caller_caps: u64, target: &Task) -> bool {
+    !crate::exec::task_is_init(target) && signal_dominates(caller_caps, target)
 }
 
 struct Fanout {
@@ -126,14 +104,14 @@ struct Fanout {
     denied: bool,
 }
 
-fn collect_targets_for_group(pgid: u32, caller_flags: u16, targets: &mut TargetSet) -> Fanout {
+fn collect_targets_for_group(pgid: u32, caller_caps: u64, targets: &mut TargetSet) -> Fanout {
     let mut denied = false;
     task_for_each_active(|task| {
         if !signal_may_name(task.flags) || task.pgid() != pgid {
             return;
         }
         let group = sender_pid(task);
-        if signal_permitted(caller_flags, group, task.flags) {
+        if signal_permitted(caller_caps, task) {
             targets.push(group);
         } else {
             denied = true;
@@ -144,7 +122,7 @@ fn collect_targets_for_group(pgid: u32, caller_flags: u16, targets: &mut TargetS
 
 fn collect_targets_for_all(
     exclude_group: u32,
-    caller_flags: u16,
+    caller_caps: u64,
     targets: &mut TargetSet,
 ) -> Fanout {
     let mut denied = false;
@@ -153,7 +131,7 @@ fn collect_targets_for_all(
         if !signal_may_name(task.flags) || group == INVALID_TASK_ID || group == exclude_group {
             return;
         }
-        if signal_permitted(caller_flags, group, task.flags) {
+        if signal_permitted(caller_caps, task) {
             targets.push(group);
         } else {
             denied = true;
@@ -354,7 +332,7 @@ define_syscall!(syscall_kill
     }
     let pid = raw_pid_arg as i32;
 
-    let caller_flags = ctx.task().flags;
+    let caller_caps = ctx.caps();
 
     let mut targets = TargetSet::new();
 
@@ -363,7 +341,7 @@ define_syscall!(syscall_kill
         // the target: without it the id could be recycled onto a stranger
         // between this check and the delivery below.
         let target = match crate::syscall::signalable::resolve_signal_target(
-            caller_flags,
+            caller_caps,
             pid as u32,
         ) {
             Ok(target) => target,
@@ -399,12 +377,12 @@ define_syscall!(syscall_kill
         if caller_pgid == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_group(caller_pgid, caller_flags, &mut targets)
+        collect_targets_for_group(caller_pgid, caller_caps, &mut targets)
     } else if pid == -1 {
         if caller_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_all(sender_pid(ctx.task()), caller_flags, &mut targets)
+        collect_targets_for_all(sender_pid(ctx.task()), caller_caps, &mut targets)
     } else {
         if pid == i32::MIN {
             return SyscallResult::Err(Errno::ESRCH);
@@ -413,7 +391,7 @@ define_syscall!(syscall_kill
         if group_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_group(group_id, caller_flags, &mut targets)
+        collect_targets_for_group(group_id, caller_caps, &mut targets)
     };
 
     if targets.len() == 0 {
@@ -464,7 +442,7 @@ define_syscall!(syscall_tgkill
     }
     let (tgid, tid) = (raw_tgid as u32, raw_tid as u32);
     // Authorized on the named thread, as `kill` authorizes on the named task.
-    let target = match crate::syscall::signalable::resolve_signal_target(ctx.task().flags, tid) {
+    let target = match crate::syscall::signalable::resolve_signal_target(ctx.caps(), tid) {
         Ok(target) => target,
         Err(e) => return SyscallResult::Err(e),
     };
@@ -518,7 +496,7 @@ define_syscall!(syscall_rt_sigqueueinfo
         return SyscallResult::Err(Errno::ESRCH);
     }
     let target = match crate::syscall::signalable::resolve_signal_target(
-        ctx.task().flags,
+        ctx.caps(),
         raw_tgid as u32,
     ) {
         Ok(target) => target,
@@ -552,7 +530,7 @@ define_syscall!(syscall_rt_tgsigqueueinfo
         return SyscallResult::Err(Errno::EINVAL);
     }
     let (tgid, tid) = (raw_tgid as u32, raw_tid as u32);
-    let target = match crate::syscall::signalable::resolve_signal_target(ctx.task().flags, tid) {
+    let target = match crate::syscall::signalable::resolve_signal_target(ctx.caps(), tid) {
         Ok(target) => target,
         Err(e) => return SyscallResult::Err(e),
     };

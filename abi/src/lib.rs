@@ -9,6 +9,7 @@
 pub mod addr;
 pub mod alignment;
 pub mod auxv;
+pub mod caps;
 pub mod damage;
 pub mod display;
 pub mod draw;

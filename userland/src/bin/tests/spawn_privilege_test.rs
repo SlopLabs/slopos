@@ -1,33 +1,41 @@
 //! `spawn_path` privilege containment, exercised through the real syscall entry.
 //!
-//! The utest runner spawns test binaries with `TASK_FLAG_USER_MODE |
-//! TASK_FLAG_SYSTEM`, so **this caller holds `SYSTEM`** — which is what makes
-//! the `SYSTEM` case below load-bearing. The syscall boundary is purely
-//! subtractive: it strips privileged bits regardless of what the caller holds,
-//! and the privileged bits a child ends up with come from the kernel's
-//! program-identity table instead.
+//! The utest runner hands test binaries every capability (`CAP_MASK_ALL`), so
+//! no refusal here is explained by what this caller lacks. The spawn boundary
+//! is purely subtractive: a spawned child holds the universal set plus the
+//! kernel's grant for its path, and an exec narrows the mask to what the new
+//! image is granted.
 
 use slopos_userland as _;
 
+use slopos_abi::caps::{
+    ALL as CAP_MASK_ALL, BOOT_ENTRY as CAP_BOOT_ENTRY, FATE as CAP_FATE,
+    SYS_INSPECT as CAP_SYS_INSPECT, UNIVERSAL as CAP_UNIVERSAL,
+};
+use slopos_abi::net::NET_IFINDEX_GLOBAL;
 use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction};
-use slopos_abi::syscall::SYSCALL_SPAWN_PATH;
+use slopos_abi::syscall::{PROF_OP_STATUS, SYSCALL_SPAWN_PATH};
 use slopos_abi::task::{
-    SPAWN_RESERVED, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-    TASK_FLAG_INSTALL, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NET_ADMIN, TASK_FLAG_NEW_PGRP,
-    TASK_FLAG_NO_PREEMPT, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
+    SPAWN_RESERVED, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NEW_PGRP, TASK_FLAG_NO_PREEMPT,
+    TASK_FLAG_USER_MODE,
 };
 use slopos_boot_core::variables;
+use slopos_slibc::process::shim;
+use slopos_userland::syscall::core::{caps_drop, prof_ctl};
 use slopos_userland::syscall::efi::efivar_get;
 use slopos_userland::syscall::error::SyscallError;
-
-/// The lowest reserved bit, derived rather than written down so a widened
-/// flag word moves the probe instead of invalidating it.
-const UNDEFINED_FLAG: u16 = 1 << SPAWN_RESERVED.trailing_zeros();
+use slopos_userland::syscall::fs::pipe;
+use slopos_userland::syscall::net::net_iface_ctl;
 use slopos_userland::syscall::process;
 use slopos_userland::syscall::raw::syscall5;
 
+use std::ffi::CString;
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::FromRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::{Arc, Barrier};
 
 const EPERM: i32 = -1;
 const EINVAL: i32 = -22;
@@ -37,6 +45,10 @@ const PRIORITY_HIGH: u8 = 0;
 const PRIORITY_KERNEL_IO: u8 = 1;
 const PRIORITY_NORMAL: u8 = 2;
 const PRIORITY_IDLE: u8 = 4;
+
+/// No interface operation has this number, so a caller allowed to reach the
+/// handler is answered `EINVAL` and nothing changes.
+const UNKNOWN_IFOP: u32 = u32::MAX;
 
 /// A path that fails at VFS open, so a request that clears validation is proven
 /// by an exec-stage errno with no child ever created.
@@ -80,89 +92,67 @@ fn expect(label: &str, got: i32, want: i32) -> bool {
     false
 }
 
-/// Privileged bits are refused with `EPERM` — the caller is asking for
-/// something real that it may not have, not making a malformed request.
-/// `SYSTEM` is refused even though this caller holds it.
-fn privileged_flags_are_eperm() -> bool {
-    expect(
-        "COMPOSITOR",
-        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_COMPOSITOR, &[]),
-        EPERM,
-    ) && expect(
-        "DISPLAY_EXCLUSIVE",
-        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_DISPLAY_EXCLUSIVE, &[]),
-        EPERM,
-    ) && expect(
-        "SYSTEM (from a caller that holds SYSTEM)",
-        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_SYSTEM, &[]),
-        EPERM,
-    ) && expect(
-        "NO_PREEMPT",
-        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_NO_PREEMPT, &[]),
-        EPERM,
-    ) && expect(
-        "NET_ADMIN",
-        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_NET_ADMIN, &[]),
-        EPERM,
-    ) && expect(
-        "CONSOLE_ADMIN",
-        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_CONSOLE_ADMIN, &[]),
-        EPERM,
-    ) && expect(
-        "PROC_ADMIN",
-        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_PROC_ADMIN, &[]),
-        EPERM,
-    ) && expect(
-        "INSTALL",
-        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_INSTALL, &[]),
-        EPERM,
-    )
-}
-
-/// This caller holds `SYSTEM`, and so `Power`, which the UEFI variable calls
-/// are gated on, but not the installer's role: the firmware's boot manager
-/// variables stay out of reach, whatever the machine's firmware.
-fn power_alone_reaches_no_boot_entry() -> bool {
-    let mut buf = [0u8; 64];
-    match efivar_get("BootOrder", &variables::GLOBAL.0, &mut buf) {
-        Err(SyscallError::EPERM) => true,
-        other => {
-            eprintln!("spawn_privilege_test: BootOrder without the installer's role: {other:?}");
+/// Fork, run `body` in the child and answer whether it exited 0. The child is
+/// a separate process, so what it gives up this one keeps.
+fn in_forked_child(label: &str, body: fn() -> i32) -> bool {
+    let pid = shim::fork();
+    if pid == 0 {
+        shim::_exit(body());
+    }
+    if pid < 0 {
+        eprintln!("spawn_privilege_test: {label}: fork returned {pid}");
+        return false;
+    }
+    match process::wait_exit_code(pid as u32) {
+        0 => true,
+        code => {
+            eprintln!("spawn_privilege_test: {label}: the child exited {code}");
             false
         }
     }
 }
 
+/// `NO_PREEMPT` is refused with `EPERM`: the caller is asking for something
+/// real that only the kernel sets, not making a malformed request.
+fn no_preempt_is_eperm() -> bool {
+    expect(
+        "NO_PREEMPT",
+        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_NO_PREEMPT, &[]),
+        EPERM,
+    )
+}
+
 /// Reserved bits fail closed, so a widened flag word can give one a meaning no
-/// deployed caller already assumed. `0x0040` is the retired
-/// `TASK_FLAG_FPU_INITIALIZED`: retired, not freed.
+/// deployed caller already assumed. Among them are `0x0040`, the retired
+/// `TASK_FLAG_FPU_INITIALIZED`, and every privilege bit that moved to the
+/// capability mask: retired, not freed.
 ///
-/// A request carrying both a reserved and a privileged bit is answered as
+/// A request carrying both a reserved bit and `NO_PREEMPT` is answered as
 /// malformed, so probing reserved bits cannot learn from an `EPERM` that a bit
 /// means something.
 fn malformed_flags_are_einval() -> bool {
-    expect(
-        "lowest reserved bit",
-        spawn_raw(MISSING, PRIORITY_NORMAL, UNDEFINED_FLAG, &[]),
-        EINVAL,
-    ) && expect(
-        "retired FPU_INITIALIZED bit 0x0040",
-        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0040, &[]),
-        EINVAL,
-    ) && expect(
+    let mut ok = expect(
         "KERNEL_MODE",
         spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_KERNEL_MODE, &[]),
         EINVAL,
-    ) && expect(
-        "reserved bit alongside a privileged one",
-        spawn_raw(
-            MISSING,
-            PRIORITY_NORMAL,
-            UNDEFINED_FLAG | TASK_FLAG_COMPOSITOR,
-            &[],
-        ),
-        EINVAL,
-    )
+    );
+    for shift in 0..u16::BITS {
+        let bit = 1u16 << shift;
+        if SPAWN_RESERVED & bit == 0 {
+            continue;
+        }
+        ok &= expect(
+            &format!("reserved bit {bit:#06x}"),
+            spawn_raw(MISSING, PRIORITY_NORMAL, bit, &[]),
+            EINVAL,
+        );
+        ok &= expect(
+            &format!("reserved bit {bit:#06x} alongside NO_PREEMPT"),
+            spawn_raw(MISSING, PRIORITY_NORMAL, bit | TASK_FLAG_NO_PREEMPT, &[]),
+            EINVAL,
+        );
+    }
+    ok
 }
 
 /// User space picks between `Normal` and `Low` and nothing else. `High` is the
@@ -219,6 +209,42 @@ fn ordinary_spawn_still_works() -> bool {
     true
 }
 
+/// `Power` reaches SlopOS's own UEFI variables and not the firmware's boot
+/// manager, whatever the machine's firmware: a forked child that dropped
+/// `BootEntry` is refused `BootOrder` and still reaches its own namespace,
+/// while this process, holding both, is not refused.
+fn power_alone_reaches_no_boot_entry() -> bool {
+    let mut buf = [0u8; 64];
+    if let Err(SyscallError::EPERM) = efivar_get("BootOrder", &variables::GLOBAL.0, &mut buf) {
+        eprintln!("spawn_privilege_test: BootOrder refused to a BootEntry holder");
+        return false;
+    }
+    in_forked_child("Power without BootEntry", power_without_boot_entry)
+}
+
+fn power_without_boot_entry() -> i32 {
+    let held = caps_drop(CAP_BOOT_ENTRY);
+    if held != CAP_MASK_ALL & !CAP_BOOT_ENTRY {
+        eprintln!("spawn_privilege_test: dropping BootEntry left {held:#x}");
+        return 1;
+    }
+    let mut buf = [0u8; 64];
+    match efivar_get("BootOrder", &variables::GLOBAL.0, &mut buf) {
+        Err(SyscallError::EPERM) => {}
+        other => {
+            eprintln!("spawn_privilege_test: BootOrder without BootEntry: {other:?}");
+            return 2;
+        }
+    }
+    match efivar_get("SpawnPrivProbe", &variables::SLOPOS.0, &mut buf) {
+        Err(SyscallError::EPERM) => {
+            eprintln!("spawn_privilege_test: Power alone was refused SlopOS's own namespace");
+            3
+        }
+        _ => 0,
+    }
+}
+
 /// The binary a grant is keyed on cannot be rewritten: program identity is a
 /// path, so `exec::grants` is only worth anything while every inode the
 /// initramfs unpacks stays sealed.
@@ -252,12 +278,13 @@ fn granted_binaries_are_sealed() -> bool {
 /// `Launch` bounds the raise site: spawning a privileged path does not confer
 /// its grant on a caller that may not launch.
 ///
-/// The utest runner's TASK_FLAG_SYSTEM implies Launch, so this binary can spawn
-/// a granted path; the half without Launch is [`spawns_without_launch`].
+/// The utest runner hands this binary every capability, `Launch` among them,
+/// so it can spawn a granted path; the half without Launch is
+/// [`spawns_without_launch`].
 fn launch_bounds_the_raise_site() -> bool {
     // /bin/halt would power the machine off, so name a path that carries a
     // grant but does nothing on its own -- /bin/keymap, which holds
-    // CONSOLE_ADMIN and exits after printing the layout.
+    // ConsoleConfig and exits after printing the layout.
     let argv: [*const u8; 1] = [b"keymap\0".as_ptr()];
     let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
     let tid = process::spawn_path_with_actions(
@@ -285,9 +312,13 @@ fn launch_bounds_the_raise_site() -> bool {
 
 const SELF: &str = "/bin/spawn_privilege_test";
 const WITHOUT_LAUNCH: &str = "--without-launch";
-/// Holds `Mount` only as far as its spawner does.
+const EXEC_PROBE: &str = "--exec-probe";
+const HOLDS: &str = "--holds";
+/// Holds `RawBlock` only as far as its spawner does.
 const DUMPE2FS: &str = "/sbin/dumpe2fs";
 const ROOT_DISK: &str = "/dev/nvme0n1";
+/// Whole-disk nodes, of which the first present is read raw.
+const BLOCK_NODES: [&str; 2] = [ROOT_DISK, "/dev/vda"];
 
 fn dumps_root_superblock() -> std::io::Result<std::process::Output> {
     Command::new(DUMPE2FS).args(["-h", ROOT_DISK]).output()
@@ -326,16 +357,16 @@ fn spawns_without_launch() -> i32 {
     let dump = dumps_root_superblock();
     if !matches!(&dump, Ok(out) if !out.status.success()) {
         eprintln!(
-            "spawn_privilege_test: e2fsprogs read a disk for a spawner without Mount: {dump:?}"
+            "spawn_privilege_test: e2fsprogs read a disk for a spawner without RawBlock: {dump:?}"
         );
         return 4;
     }
     0
 }
 
-/// A spawner holding `Mount` hands it to e2fsprogs, which reads the disk; the
-/// half without it is [`spawns_without_launch`].
-fn e2fsprogs_takes_mount_from_its_spawner() -> bool {
+/// A spawner holding `RawBlock` hands it to e2fsprogs, which reads the disk;
+/// the half without it is [`spawns_without_launch`].
+fn e2fsprogs_takes_raw_block_from_its_spawner() -> bool {
     match dumps_root_superblock() {
         Ok(out) if out.status.success() => true,
         other => {
@@ -345,8 +376,244 @@ fn e2fsprogs_takes_mount_from_its_spawner() -> bool {
     }
 }
 
+fn block_node() -> Option<&'static str> {
+    BLOCK_NODES
+        .into_iter()
+        .find(|node| std::path::Path::new(node).exists())
+}
+
+fn raw_read(node: &str) -> std::io::Result<()> {
+    let mut sector = [0u8; 512];
+    File::open(node)?.read_exact(&mut sector)
+}
+
+/// Exec narrows the mask to the new image's grant: a forked child of this
+/// process, which holds every capability, execs this binary, which no grant
+/// row names, and keeps the universal set alone. Its network change, raw disk
+/// read and signal to this process are refused; the same three succeed here
+/// first, so the refusals are the exec's doing.
+fn exec_narrows_to_the_images_grant() -> bool {
+    let held = caps_drop(0);
+    if held != CAP_MASK_ALL {
+        eprintln!("spawn_privilege_test: the utest holds {held:#x}, want {CAP_MASK_ALL:#x}");
+        return false;
+    }
+    let Some(node) = block_node() else {
+        eprintln!("spawn_privilege_test: none of {BLOCK_NODES:?} exists");
+        return false;
+    };
+    if let Err(e) = raw_read(node) {
+        eprintln!("spawn_privilege_test: a RawBlock holder could not read {node}: {e}");
+        return false;
+    }
+    if let Err(SyscallError::EPERM) = net_iface_ctl(NET_IFINDEX_GLOBAL, UNKNOWN_IFOP, 0) {
+        eprintln!("spawn_privilege_test: a NetAdmin holder was refused net_iface_ctl");
+        return false;
+    }
+
+    // The probe holds the read end until this process has signalled it, so
+    // the signal reaches a live task rather than a zombie.
+    let Ok((gate_read, gate_write)) = pipe() else {
+        eprintln!("spawn_privilege_test: pipe failed");
+        return false;
+    };
+    let owned: Vec<CString> = [
+        SELF.to_owned(),
+        EXEC_PROBE.to_owned(),
+        gate_read.raw().to_string(),
+        node.to_owned(),
+        process::getpid().to_string(),
+    ]
+    .into_iter()
+    .map(|arg| CString::new(arg).expect("no argument holds a NUL"))
+    .collect();
+    let mut argv: Vec<*const u8> = owned.iter().map(|arg| arg.as_ptr().cast()).collect();
+    argv.push(core::ptr::null());
+    let envp: [*const u8; 1] = [core::ptr::null()];
+
+    let pid = shim::fork();
+    if pid == 0 {
+        drop(gate_write);
+        process::execve(argv[0], argv.as_ptr(), envp.as_ptr());
+        shim::_exit(100);
+    }
+    drop(gate_read);
+    if pid < 0 {
+        eprintln!("spawn_privilege_test: fork returned {pid}");
+        return false;
+    }
+    let signalled = process::kill_pid(pid, 0);
+    drop(gate_write);
+    let code = process::wait_exit_code(pid as u32);
+    let ok = expect("kill(child, 0) from the utest", signalled, 0);
+    if code != 0 {
+        eprintln!("spawn_privilege_test: the exec'd probe exited {code}");
+        return false;
+    }
+    ok
+}
+
+/// The exec'd half of [`exec_narrows_to_the_images_grant`]. Answers once the
+/// parent closes the gate.
+fn exec_probe(args: &[String]) -> i32 {
+    let [gate, node, parent] = args else {
+        eprintln!("spawn_privilege_test: {EXEC_PROBE} takes GATE_FD NODE PARENT_PID");
+        return 10;
+    };
+    let (Ok(gate), Ok(parent)) = (gate.parse::<i32>(), parent.parse::<i32>()) else {
+        eprintln!("spawn_privilege_test: {EXEC_PROBE}: unparsable {args:?}");
+        return 11;
+    };
+    let code = exec_probe_checks(node, parent);
+    // SAFETY: the parent passed this descriptor across the exec, and nothing
+    // else in this process owns it.
+    let mut gate = unsafe { File::from_raw_fd(gate) };
+    let _ = gate.read_to_end(&mut Vec::new());
+    code
+}
+
+fn exec_probe_checks(node: &str, parent: i32) -> i32 {
+    let held = caps_drop(0);
+    if held != CAP_UNIVERSAL {
+        eprintln!("spawn_privilege_test: after exec holds {held:#x}, want {CAP_UNIVERSAL:#x}");
+        return 1;
+    }
+    match net_iface_ctl(NET_IFINDEX_GLOBAL, UNKNOWN_IFOP, 0) {
+        Err(SyscallError::EPERM) => {}
+        other => {
+            eprintln!("spawn_privilege_test: net_iface_ctl after exec: {other:?}, want EPERM");
+            return 2;
+        }
+    }
+    match raw_read(node) {
+        Err(e) if matches!(e.raw_os_error(), Some(1 | 13)) => {}
+        other => {
+            eprintln!("spawn_privilege_test: raw read of {node} after exec: {other:?}");
+            return 3;
+        }
+    }
+    match process::kill_pid(parent, 0) {
+        EPERM => 0,
+        other => {
+            eprintln!("spawn_privilege_test: kill(parent, 0) after exec returned {other}");
+            4
+        }
+    }
+}
+
+/// `prof_ctl(PROF_OP_STATUS)`: the profiler's state to a `SysInspect` holder,
+/// `-EPERM` to anyone else.
+fn prof_status() -> i64 {
+    prof_ctl(PROF_OP_STATUS, b"")
+}
+
+/// `caps_drop` narrows the whole process, not the calling thread: a thread
+/// parked across the drop loses the capability, a thread started after it
+/// never has it, and dropping it again changes nothing. The drop happens in a
+/// forked child, and this process still holds everything afterwards.
+fn caps_drop_is_process_wide() -> bool {
+    if !in_forked_child("caps_drop across threads", drop_across_threads) {
+        return false;
+    }
+    match caps_drop(0) {
+        CAP_MASK_ALL => true,
+        held => {
+            eprintln!("spawn_privilege_test: after its child's drop this process holds {held:#x}");
+            false
+        }
+    }
+}
+
+fn drop_across_threads() -> i32 {
+    let gate = Arc::new(Barrier::new(2));
+    let parked = {
+        let gate = Arc::clone(&gate);
+        std::thread::spawn(move || {
+            let before = (caps_drop(0), prof_status());
+            gate.wait();
+            gate.wait();
+            (before, (caps_drop(0), prof_status()))
+        })
+    };
+    gate.wait();
+    let held = caps_drop(CAP_SYS_INSPECT);
+    gate.wait();
+    let Ok(((mask_before, status_before), (mask_after, status_after))) = parked.join() else {
+        eprintln!("spawn_privilege_test: the parked thread panicked");
+        return 1;
+    };
+    if mask_before & CAP_SYS_INSPECT == 0 || status_before < 0 {
+        eprintln!(
+            "spawn_privilege_test: before the drop a thread held {mask_before:#x}, prof_ctl {status_before}"
+        );
+        return 2;
+    }
+    if held != CAP_MASK_ALL & !CAP_SYS_INSPECT || prof_status() != i64::from(EPERM) {
+        eprintln!("spawn_privilege_test: dropping SysInspect left {held:#x}");
+        return 3;
+    }
+    if mask_after != held || status_after != i64::from(EPERM) {
+        eprintln!(
+            "spawn_privilege_test: the parked thread kept {mask_after:#x}, prof_ctl {status_after}"
+        );
+        return 4;
+    }
+    match std::thread::spawn(|| (caps_drop(0), prof_status())).join() {
+        Ok((mask, status)) if mask == held && status == i64::from(EPERM) => {}
+        other => {
+            eprintln!("spawn_privilege_test: a thread started after the drop: {other:?}");
+            return 5;
+        }
+    }
+    match caps_drop(CAP_SYS_INSPECT) {
+        again if again == held => 0,
+        again => {
+            eprintln!("spawn_privilege_test: a second drop left {again:#x}, the first {held:#x}");
+            6
+        }
+    }
+}
+
+/// A program spawned after a drop holds none of what was dropped, the
+/// universal set included, so its spawner still holds everything it holds.
+fn a_spawn_after_a_drop_lacks_it() -> bool {
+    in_forked_child("spawn after a drop", spawn_after_drop)
+}
+
+fn spawned_child_holds(mask: u64) -> bool {
+    matches!(
+        Command::new(SELF).args([HOLDS, &mask.to_string()]).status(),
+        Ok(status) if status.success()
+    )
+}
+
+fn spawn_after_drop() -> i32 {
+    if !spawned_child_holds(CAP_UNIVERSAL) {
+        eprintln!(
+            "spawn_privilege_test: before the drop a spawned child lacked {CAP_UNIVERSAL:#x}"
+        );
+        return 1;
+    }
+    let held = caps_drop(CAP_FATE);
+    if !spawned_child_holds(CAP_UNIVERSAL & held) {
+        eprintln!(
+            "spawn_privilege_test: a child spawned after dropping Fate held more than {held:#x}"
+        );
+        return 2;
+    }
+    0
+}
+
+/// Exit 0 when this process holds exactly `args[0]`.
+fn holds(args: &[String]) -> i32 {
+    match args.first().and_then(|mask| mask.parse::<u64>().ok()) {
+        Some(want) if caps_drop(0) == want => 0,
+        _ => 1,
+    }
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
-    ("privileged_flags_are_eperm", privileged_flags_are_eperm),
+    ("no_preempt_is_eperm", no_preempt_is_eperm),
     ("malformed_flags_are_einval", malformed_flags_are_einval),
     ("privileged_tiers_are_einval", privileged_tiers_are_einval),
     (
@@ -358,12 +625,21 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("grant_directories_are_sealed", grant_directories_are_sealed),
     ("launch_bounds_the_raise_site", launch_bounds_the_raise_site),
     (
-        "e2fsprogs_takes_mount_from_its_spawner",
-        e2fsprogs_takes_mount_from_its_spawner,
+        "e2fsprogs_takes_raw_block_from_its_spawner",
+        e2fsprogs_takes_raw_block_from_its_spawner,
     ),
     (
         "power_alone_reaches_no_boot_entry",
         power_alone_reaches_no_boot_entry,
+    ),
+    (
+        "exec_narrows_to_the_images_grant",
+        exec_narrows_to_the_images_grant,
+    ),
+    ("caps_drop_is_process_wide", caps_drop_is_process_wide),
+    (
+        "a_spawn_after_a_drop_lacks_it",
+        a_spawn_after_a_drop_lacks_it,
     ),
 ];
 
@@ -400,8 +676,11 @@ fn grant_directories_are_sealed() -> bool {
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some(WITHOUT_LAUNCH) {
-        std::process::exit(spawns_without_launch());
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some(WITHOUT_LAUNCH) => std::process::exit(spawns_without_launch()),
+        Some(EXEC_PROBE) => std::process::exit(exec_probe(&args[2..])),
+        Some(HOLDS) => std::process::exit(holds(&args[2..])),
+        _ => slopos_slibc::test_harness::run(CASES),
     }
-    slopos_slibc::test_harness::run(CASES);
 }

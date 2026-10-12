@@ -7,8 +7,7 @@
 //! ```
 //!
 //! A program rather than a shell builtin because installing a layout needs
-//! `TASK_FLAG_CONSOLE_ADMIN`, which the kernel confers on this path and on no
-//! caller.
+//! `ConsoleConfig`, which the kernel grants this path and no caller.
 //!
 //! The file → parse → serialise → upload pipeline lives in [`crate::keymap`],
 //! shared with the boot-time applier in init; the kernel never parses layout

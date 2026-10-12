@@ -124,10 +124,10 @@ pub fn cmd_clear(_argc: i32, _argv: &[&[u8]]) -> i32 {
 /// Ask `/bin/halt` to bring the machine down.
 ///
 /// Spawned rather than issued directly: `halt` and `reboot` need the `Power`
-/// capability, which the kernel confers on exactly one program. A shell that
-/// held it would put whole-machine authority in the process that runs every
-/// command the user types — which is why Linux ships `/sbin/halt` as a
-/// separate binary, `systemctl poweroff` asks logind, and Redox puts the
+/// capability, which the kernel grants by path to the few programs that use it.
+/// A shell that held it would put whole-machine authority in the process that
+/// runs every command the user types — which is why Linux ships `/sbin/halt`
+/// as a separate binary, `systemctl poweroff` asks logind, and Redox puts the
 /// resource behind a daemon.
 ///
 /// Returns only on failure; on success the child powers the machine off.

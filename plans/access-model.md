@@ -27,44 +27,38 @@ done.
 
 ## Where it stands
 
-**One flag word carries privilege, and it is full.** `abi/src/task.rs:200-355`
-defines sixteen bits. Five of them describe how a task runs (`USER_MODE`,
-`KERNEL_MODE`, `NO_PREEMPT`, `NEW_PGRP`, `FOREGROUND`) and the rest are
-privileges. `TASK_FLAG_INSTALL` is "the last bit of the flag word"
-(`abi/src/task.rs:286-295`). A u64 capability mask is derived from the word by
-`caps_from_task_flags` (`slopos-ostd/src/authority/mod.rs:469-519`), which
-calls itself "a bridge, not the model". The process-owned `Cred` it names as
-its replacement exists only in comments (`core/src/syscall/dispatch.rs:47-55`).
+**One mask carries authority.** `task.flags` (`abi/src/task.rs:200-251`) says
+where and how a task runs. Every privilege is a bit of the per-task capability
+mask (`slopos-ostd/src/authority/mod.rs`, bits in `abi/src/caps.rs`), and every
+check reads it: the network-control slots (`NetAdmin`), block nodes, the crash
+records and the `DiskBlocks` ceiling (`RawBlock`), `kconsole(2)` and `prof_ctl`
+(`SysInspect`), and the signal relation, which lets a sender name only a target
+whose capabilities it holds (`core/src/syscall/signal.rs:87-92`). Init and
+every utest binary hold `CAP_MASK_ALL` (`core/src/exec/mod.rs:163-178`,
+`core/src/exec/utest.rs:107`). A spawned program holds the universal
+capabilities (`ConsoleIo`, `ClipboardGlobal`, `Fate`) its spawner holds, and
+what its path earns. The ext2 reserve and a nice value below zero are init's,
+by task id.
 
 **Privilege is raised at exactly one site, by path.**
 `spawn_program_with_cwd` ORs in `grant_for(image)` when the spawner holds
 `Launch`, and otherwise spawns the image ungranted
-(`core/src/exec/mod.rs:322-358`). `PROGRAM_GRANTS` has 25 rows: 13 shipped rows
+(`core/src/exec/mod.rs:342-370`). `PROGRAM_GRANTS` has 26 rows: 14 shipped rows
 that raise, 6 delegated e2fsprogs rows and 6 test rows
-(`core/src/exec/grants.rs:36-244`). A path key is sound only because the base
+(`core/src/exec/grants.rs:39-245`). A path key is sound only because the base
 directories are sealed and pinned, mount refuses grant paths and `/lib`
-(`grants.rs:262-290`), and the `Seal` capability exists to keep it that way
-(`authority/mod.rs:97-101`). That makes every grant row a setuid program by
+(`grants.rs:282-296`), and the `Seal` capability exists to keep it that way
+(`authority/mod.rs:99-103`). That makes every grant row a setuid program by
 another name. It runs `AT_SECURE`, and it inherits argv, environment, cwd and
 descriptors from whoever spawned it. That is why the installer starts
 e2fsprogs with an emptied environment (`userland/src/apps/installer/disk.rs:473`).
 
-**exec narrows the mask and leaves the flag word.**
-`narrow_authority_for_exec` intersects `caps` with the image's grant
-(`core/src/exec/mod.rs:584-617`). `task.flags` survives exec, and these checks
-read it:
-
-- NET_ADMIN (`core/src/syscall/context.rs:152-174`; not a capability at all);
-- PROC_ADMIN (`context.rs:159-165`);
-- the raw block-device right (`fs/src/devfs/block.rs:653-683`);
-- SYSTEM, for priority, the ext2 reserve and panic fatality;
-- signal dominance (`core/src/syscall/signal.rs:89-108`).
-
-So the exec narrowing and the Verus proof (`verification/proofs/authority.rs:9-50`)
-cover only half the authority. The proof also models a voluntary `Drop` step
-that no syscall implements, and it speaks of "the five" grants the table names.
-`plans/README.md` says 177 classified slots where `core/src/syscall/handlers.rs:341`
-has 174.
+**exec narrows all of it.** `narrow_authority_for_exec` keeps
+`caps & (universal | grant | delegated)` in every thread of the process
+(`core/src/exec/mod.rs:588-621`), and `caps_drop` sheds capabilities from a
+whole process for good
+(`sched/src/task/task_lifecycle.rs:2647-2667`). The Verus proof
+(`verification/proofs/authority.rs`) models both.
 
 **There is one identity and no DAC.**
 - `getuid` and its three siblings return 0 (`core/src/syscall/process_handlers.rs:996-1001`).
@@ -79,24 +73,24 @@ has 174.
   `PR:L` because "SlopOS has no credential model".
 
 **IPC carries no identity.**
-- There is no `SO_PEERCRED`. `SCM_CREDENTIALS` is `EINVAL` (`core/src/syscall/tests.rs:8884-8888`).
+- There is no `SO_PEERCRED`. `SCM_CREDENTIALS` is `EINVAL` (`core/src/syscall/tests.rs:9163-9172`).
 - `socketpair` is `ENOSYS` (`slibc/src/net/mod.rs:199-207`).
 - `pidfd_open` names only the caller's children.
 - `SCM_RIGHTS` carries leaf descriptors (pipes, files, memfds, pidfds, ttys) but
   not sockets or rings (`core/src/syscall/net_handlers.rs:675-695`).
 
 **The model's cost shows up as workarounds:**
-- The compositor spawns `/bin/ip` because it must not hold NET_ADMIN, which
+- The compositor spawns `/bin/ip` because it must not hold `NetAdmin`, which
   is why it needs `Launch` (`userland/src/apps/compositor/popover.rs:650-675`,
-  `grants.rs:42-46`).
+  `grants.rs:40-50`).
 - The remote pairing must live in the sealed base because any program can
   write `/etc`.
 - The shell must *spawn* registry programs because fork+exec keeps no grant
   (`userland/src/apps/shell/exec.rs:1467-1469`). A granted program in a
   pipeline, a subshell, a bash script, or a `posix_spawn` that falls back to
   fork+exec runs ungranted.
-- utest binaries run with SYSTEM (`core/src/exec/utest.rs:107`), so they cannot
-  test an unprivileged gate.
+- utest binaries hold every capability (`core/src/exec/utest.rs:107`), so they
+  test an unprivileged gate only through an ungranted child or `caps_drop`.
 - No sshd runs: OpenSSH's needs credentials and a privilege separation SlopOS
   lacks, so the remote control dials out to a broker instead.
 - A GUI cannot hand install authority to a helper: an app the dock launches
@@ -205,7 +199,7 @@ The failures on record each set a rule here:
   - A new file takes the effective uid, and the effective gid unless its
     directory is setgid.
   - The ext4 reserved blocks are uid 0's, as ext4 defines them. That replaces
-    the SYSTEM test in `current_task_is_privileged`.
+    init's claim to them in `current_task_is_system`.
 - **Ownership map.** The image builders, the installer, and a one-time
   migration on a preserved root hold the root to this map once the session runs
   as uid 1000 (phase 4):
@@ -226,43 +220,23 @@ The failures on record each set a rule here:
 - **Signals.** A task may signal another when POSIX's uid rule admits it
   (sender real or effective uid equals the target's real or saved uid) *and*
   the target's gated capabilities are a subset of the sender's. Holding
-  `ProcSignal`, which nothing in the shipped system is given, waives both. The
-  dominance relation today stands in "for the user ids POSIX asks about"
-  (`signal.rs:91-92`); it becomes those ids, plus the capability subset that
-  keeps a session process from killing a mechanism or the compositor.
+  `ProcSignal`, which nothing in the shipped system is given, waives both, and
+  `SIGCONT` to a task of the sender's own session needs neither, as Linux's
+  `kill` allows, so the shell's `fg` resumes a granted job. The subset half is
+  the relation today (`signal.rs:87-92`); the uid rule and the `SIGCONT`
+  exemption join it in phase 2.
 - **Enumeration** is universal, as Linux's `/proc` is. `process_list` reports
-  every task. An id another uid owns can be read and not signalled, and
-  `PROC_ADMIN` retires.
+  every task to every caller, so `SysInspect` no longer widens it. An id another
+  uid owns can be read and not signalled.
 
 ### One authority carrier
 
-- **Capabilities.**
-  - New: `NetAdmin`, `RawBlock`, `SetId`, `DacOverride`, `SchedHigh`.
-  - `RawBlock` takes block-node I/O, `BLKRRPART`, crash-record access and the
-    lifted `DiskBlocks` ceiling.
-  - `Mount` keeps only `mount`/`umount2`.
-  - `SysInspect` stops being universal; it gates `kconsole(2)` and `prof_ctl`.
-  - The universal set shrinks to `ConsoleIo`, `ClipboardGlobal` and `Fate`,
-    each with its stated deletion condition.
-  - The warn-once set widens from u16 (`authority/mod.rs:378`).
-- **What leaves the flag word.** Every privileged bit leaves `task.flags`:
-  `SYSTEM`, `COMPOSITOR`, `DISPLAY_EXCLUSIVE`, `NET_ADMIN`, `CONSOLE_ADMIN`,
-  `PROC_ADMIN`, `POWER`, `LAUNCH`, `MOUNT` and `INSTALL`. `NO_PREEMPT` stays,
-  kernel-only.
-- **Init by task id.** Init is told apart by its task id, as it already is
-  (`core/src/exec/mod.rs:143-148`). Init and the utest runner hold
-  `CAP_MASK_ALL` instead of a SYSTEM bit.
-- **Classification.** `define_syscall!` loses `requires(net_admin)`. The four
-  network-control slots become `cap(NetAdmin)`, and the histogram moves with
-  them.
-- **exec.** Narrowing keeps its form, `caps' = caps & grant(image)`, until the
-  grant table goes. Once nothing else carries authority, it covers everything.
-  With no grants left, the same expression drops every gated capability at
-  exec, which is Linux's behaviour without ambient capabilities.
-- **`caps_drop(mask)`.** A private, total, irreversible syscall lets a
-  mechanism shed what it no longer needs, for example the installer after it
-  registers its firmware entry. It gives the proof's `Drop` step a real
-  counterpart.
+Built by phase 1. Later phases add three capabilities under the same rules:
+`SetId` and `DacOverride` (phase 2), and `SchedHigh` for the `High` tier
+(phase 4). Exec's narrowing keeps its form, `caps & (universal | grant |
+delegated)`, until the grant table goes; with no grants left, the same
+expression drops every gated capability at exec, which is Linux's behaviour
+without ambient capabilities.
 
 ### Delegation at spawn
 
@@ -299,9 +273,9 @@ privd the delegable set, and `bootctl collect` its `RawBlock` and `Power`.
 
 **utests declare what they run with.** `utest!(…, caps = …, uid = …)` sets
 what the runner gives the test. The default stays every capability as uid 0,
-which is what SYSTEM gives today, so the suite keeps its behaviour. A test of an
-unprivileged gate declares `caps = none, uid = 1000`, and so does a test that
-acts as the person (git in `/src`, whose ownership check refuses a uid-0
+which is what the runner gives today, so the suite keeps its behaviour. A test
+of an unprivileged gate declares `caps = none, uid = 1000`, and so does a test
+that acts as the person (git in `/src`, whose ownership check refuses a uid-0
 caller). The six test rows in `grants.rs` become declarations.
 
 **A root test drives the person's loop through its own connection.** A uid-0
@@ -397,19 +371,20 @@ acting. This is pkexec's lesson: the privileged side validates.
 
 | Today | Becomes |
 |---|---|
-| `/bin/compositor` `COMPOSITOR\|LAUNCH`, High | bootstrap child above; the network toggle asks for `org.slopos.net.toggle` (`allow program /bin/compositor`) |
-| `/bin/shell`, `/bin/terminal` `LAUNCH` | nothing |
-| `/bin/remoted` `LAUNCH` | bootstrap child above |
-| `/bin/roulette` `DISPLAY_EXCLUSIVE` | bootstrap child above |
-| `/bin/keymap` `CONSOLE_ADMIN` | `org.slopos.console.keymap`: `ConsoleConfig`, uid 0, session and paired |
-| `/bin/ip` `NET_ADMIN` | `org.slopos.net.configure`: `NetAdmin`, session with consent |
-| `/bin/sysmon` `PROC_ADMIN` | nothing: enumeration is universal, kill follows the signal rule |
-| `/bin/kconsole` `PROC_ADMIN` | `org.slopos.kconsole`: `SysInspect`, session and paired |
-| `/bin/halt` `POWER` | `org.slopos.power.poweroff`, `.reboot`: `Power`, session and paired |
-| `/bin/bootctl` `MOUNT\|POWER` | `org.slopos.boot.install`, `.set-default` (session with consent); `.oneshot`, `.commit`, `.spare`, `.status` (session); all paired; `collect` is init's |
-| `/bin/cpufreq` `POWER` | `org.slopos.cpufreq.set`: `Power`, session and paired; reading needs nothing |
-| `/bin/installer` `MOUNT\|POWER\|INSTALL` | `org.slopos.install`: `RawBlock Mount Power BootEntry Seal DacOverride`, uid 0, session with consent, never paired |
-| six e2fsprogs rows, `delegated: MOUNT` | the installer spawns them with `RawBlock` delegated |
+| `/bin/compositor` `DisplaySeat InputSeat Launch`, High | bootstrap child above; the network toggle asks for `org.slopos.net.toggle` (`allow program /bin/compositor`) |
+| `/bin/shell`, `/bin/terminal` `Launch` | nothing |
+| `/bin/remoted` `Launch` | bootstrap child above |
+| `/bin/roulette` `DisplaySeat` | bootstrap child above |
+| `/bin/keymap` `ConsoleConfig` | `org.slopos.console.keymap`: `ConsoleConfig`, uid 0, session and paired |
+| `/bin/ip` `NetAdmin` | `org.slopos.net.configure`: `NetAdmin`, session with consent |
+| `/bin/sysmon` `SysInspect` | nothing: enumeration is universal, kill follows the signal rule |
+| `/bin/kconsole` `SysInspect` | `org.slopos.kconsole`: `SysInspect`, session and paired |
+| `/bin/prof` `SysInspect` | `org.slopos.prof`: `SysInspect`, session and paired |
+| `/bin/halt` `Power` | `org.slopos.power.poweroff`, `.reboot`: `Power`, session and paired |
+| `/bin/bootctl` `RawBlock Power` | `org.slopos.boot.install`, `.set-default` (session with consent); `.oneshot`, `.commit`, `.spare`, `.status` (session); all paired; `collect` is init's |
+| `/bin/cpufreq` `Power` | `org.slopos.cpufreq.set`: `Power`, session and paired; reading needs nothing |
+| `/bin/installer` `RawBlock Mount Power BootEntry Seal` | `org.slopos.install`: `RawBlock Mount Power BootEntry Seal DacOverride`, uid 0, session with consent, never paired |
+| six e2fsprogs rows, delegated `RawBlock` | the installer spawns them with `RawBlock` delegated |
 | six test rows | `utest!` declarations |
 
 ### Consent
@@ -443,7 +418,7 @@ requests are attested as remoted's.
 - `org.slopos.boot.*`;
 - `org.slopos.power.*`;
 - `org.slopos.cpufreq.set`;
-- `org.slopos.kconsole`;
+- `org.slopos.kconsole` and `org.slopos.prof`;
 - `org.slopos.console.keymap`.
 
 The installer and network reconfiguration are not on the list, so a paired host
@@ -455,32 +430,34 @@ network. Everything else remoted runs, runs as the session user.
 Six phases. Each ends with something that runs, and each lands as commits of
 its own.
 
-### Phase 1: One authority carrier
+### Phase 1: One authority carrier — done
 
-Move every privilege off `task.flags`:
-- `NetAdmin` and `RawBlock` become capabilities, and the network slots take
-  `cap(NetAdmin)`.
-- `SysInspect` stops being universal and gates `kconsole(2)` and `prof_ctl`;
-  the PROC_ADMIN flag check folds into it.
-- Signal dominance moves to capability masks.
-- Init and the utest runner hold `CAP_MASK_ALL`, and SYSTEM's other uses become
-  init identity.
-- `grants.rs` rows name capabilities instead of flag bits.
-
-The exec narrowing then covers all authority. Fix the proof's drift (five
-grants, the modelled-but-absent `Drop`) and `plans/README.md`'s slot count.
-
-Ends with: every authority check reads `caps`. A test execs an unprivileged
-image from each granted program and finds NET_ADMIN, raw block access and the
-signal relation gone.
+Every privilege moved off `task.flags` onto the per-task mask, whose bits are
+ABI (`abi/src/caps.rs`). `NetAdmin` gates the four network-control slots;
+`RawBlock` gates block nodes, `BLKRRPART` and the crash records and lifts the
+`DiskBlocks` ceiling, leaving `Mount` only `mount`/`umount2`; `SysInspect` left
+the universal set and gates `kconsole(2)`, `prof_ctl` and an unrestricted
+`process_list`, and `/bin/prof` became its own program to hold it. Signals, the
+OOM killer's shield and `process_list` compare masks, and `vhangup`, which
+would hang up a whole session past that relation, takes `ConsoleConfig`, as
+Linux's takes `CAP_SYS_TTY_CONFIG`. Init and utests hold `CAP_MASK_ALL`; grant
+rows name capabilities; exec narrows every thread of the process. `caps_drop`
+gave the proof's `Drop` a syscall, and the proof, `STATUS.md` and
+`plans/README.md` match the tree. Graded by
+`test_exec_of_an_ungranted_image_drops_every_grant` (every
+grant row through exec's narrowing), `spawn_privilege_test`'s
+`exec_narrows_to_the_images_grant` (a real `execve` that loses the network,
+raw block and signal gates), `test_caps_drop_is_total_and_process_wide`,
+`caps_drop_is_process_wide` and `test_dispatch_gates_follow_the_capability_mask`.
 
 ### Phase 2: Credentials and DAC
 
 Add `Cred`, the id syscalls, kernel DAC, `DacOverride` and `SetId`, owner
-reporting in `stat`, and the passwd and group rows. Every file stays 0:0 and
-the session still runs as uid 0 in this phase, so the owner bits admit
-everything they admitted before, and only a process that has changed its ids
-meets the new checks.
+reporting in `stat`, the passwd and group rows, the signal rule's uid half and
+`SIGCONT` exemption, and a `process_list` that reports every task. Every file
+stays 0:0 and the session still runs as uid 0 in this phase, so the owner bits
+admit everything they admitted before, and only a process that has changed its
+ids meets the new checks.
 
 Ends with:
 - `just test` green;
@@ -624,6 +601,37 @@ Ends with:
   fresh child of privd.
 - **Authority flows from holders.** A spawn may delegate a subset of the
   spawner's mask. exec keeps no gated capability once the table is gone.
+- **`task.flags` never carries authority.** It says where and how a task runs.
+  The retired privilege bits are reserved, so a spawn naming one is `EINVAL`,
+  and authority reaches a child only as a capability mask.
+- **Capability bits are ABI.** `abi/src/caps.rs` states them once, and
+  `slopos_ostd::authority::Capability` is held to exactly those bits, because a
+  mask crosses the syscall boundary (`caps_drop` now, `SpawnAttrs` in phase 4).
+- **A drop is process-wide, total and irreversible.** `caps_drop` takes the
+  bits from every task sharing the caller's process and records them on the
+  process, so a thread whose clone races the drop loses them as it is
+  registered; it has no error. A fork or spawn racing the drop is ordered
+  before it.
+  Threads share an address space, so a per-thread drop protects nothing: Linux
+  keeps per-thread sets for history and its newer interfaces (seccomp's and
+  Landlock's `TSYNC`, libcap's psx) all go process-wide, and Redox holds
+  credentials per process.
+- **A sender holds every capability its target holds.** That goes beyond
+  Linux, whose `kill` compares no capability sets (ptrace and `cap_safe_nice`
+  do), so a session process cannot stop a mechanism; the uid rule joins it in
+  phase 2.
+- **Kernel threads hold no capability.** A gate a kernel thread must pass —
+  raw block devices, the ext2 reserve — names the kernel thread itself.
+- **What only the system does is init's, by task id,** where no capability
+  names it: the ext2 reserve, until phase 2 hands it to uid 0, and a nice
+  value below zero.
+- **A program that holds authority is its own binary.** A grant, and later
+  privd's `Base(path)`, keys on the resolved path, so a multicall symlink
+  would hand every tool its authority; `prof` left coreutils for this.
+- **Reading machine-wide state needs nothing.** `sys_info`, `cpu_info`,
+  `percpu_stats`, `cpu_perf`, `net_query` and `net_monitor` are `NoneSelf`, as
+  `sysinfo` was; `SysInspect` is for observing every task and steering the
+  profiler.
 - **One broker.** privd, with an action policy in the sealed base, runs
   unchanged mechanism programs. Per-domain daemons would multiply processes and
   protocols for no gain in a single-seat system.
@@ -634,8 +642,8 @@ Ends with:
   It defaults to Deny, expires in 120 s, and fails closed. A password waits for
   multi-user.
 - **A pairing is consent for a fixed allowlist.** That covers the boot slots,
-  power, cpufreq, kconsole and the keymap, and leaves out the installer and the
-  network.
+  power, cpufreq, kconsole, the profiler and the keymap, and leaves out the
+  installer and the network.
 - **uid-0 requesters need no consent.** Only init and privd create uid-0
   processes, so a uid-0 requester is already the system, and the tests run as
   uid 0.

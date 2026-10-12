@@ -16,6 +16,7 @@ pub fn test_heap_allocator_suite() -> TestResult {
         None,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
+        slopos_ostd::authority::CAP_UNIVERSAL,
         &[],
         0,
         INVALID_PROCESS_ID,

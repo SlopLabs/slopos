@@ -4,11 +4,10 @@
 
 use slopos_abi::Errno;
 use slopos_abi::syscall::{PRIO_PGRP, PRIO_PROCESS, PRIO_USER};
-use slopos_abi::task::TASK_FLAG_SYSTEM;
 use slopos_sched::task::task_for_each_active;
 use slopos_sched::task_struct::Task;
 
-use crate::syscall::signal::{sender_pid, signal_dominates, signal_is_init, signal_may_name};
+use crate::syscall::signal::{sender_pid, signal_may_name, signal_permitted};
 
 const NICE_MIN: i64 = -20;
 const NICE_MAX: i64 = 19;
@@ -64,13 +63,14 @@ define_syscall!(syscall_getpriority (ctx, which: u64, who: u64) cap(NoneRelation
 });
 
 // A task's nice value is for whoever may signal it, and init's for init alone;
-// one below both zero and the task's own also takes `TASK_FLAG_SYSTEM`.
+// only init sets one below both zero and the task's own.
 define_syscall!(syscall_setpriority (ctx, which: u64, who: u64, value: i64) cap(NoneRelation)
     -> Result<(), Errno> {
     let caller = ctx.task();
     let selector = Selector::resolve(caller, which, who)?;
     let nice = value.clamp(NICE_MIN, NICE_MAX) as i8;
-    let privileged = caller.flags & TASK_FLAG_SYSTEM != 0;
+    let privileged = crate::exec::task_is_init(caller);
+    let caller_caps = ctx.caps();
     let own = sender_pid(caller);
     let (mut found, mut denied, mut refused) = (false, false, false);
     task_for_each_active(|task| {
@@ -78,10 +78,7 @@ define_syscall!(syscall_setpriority (ctx, which: u64, who: u64, value: i64) cap(
             return;
         }
         found = true;
-        let target = sender_pid(task);
-        if target != own
-            && (signal_is_init(target) || !signal_dominates(caller.flags, task.flags))
-        {
+        if sender_pid(task) != own && !signal_permitted(caller_caps, task) {
             denied = true;
         } else if nice < task.nice().min(0) && !privileged {
             refused = true;

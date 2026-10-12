@@ -106,6 +106,11 @@ pub struct Process {
     /// with — and so the id cannot be handed to a stranger in that window.
     exited: AtomicBool,
 
+    /// Capabilities a task of this process gave up with `caps_drop`. A task
+    /// joining the process loses them as it is registered, so a clone racing
+    /// the drop cannot keep what its creator held a moment earlier.
+    dropped_caps: AtomicU64,
+
     /// This process's own existence, charged to its **spawner**.
     ///
     /// Released at the reap rather than at the final `Drop`, because the
@@ -137,6 +142,7 @@ impl Process {
             task_count: AtomicU32::new(0),
             exited_cpu_ticks: AtomicU64::new(0),
             exited: AtomicBool::new(false),
+            dropped_caps: AtomicU64::new(crate::authority::CAP_NONE),
             proc_charge: slot,
         }
     }
@@ -217,6 +223,18 @@ impl Process {
     #[inline]
     pub fn task_join(&self) -> u32 {
         self.task_count.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Record `mask` as given up by this process for good.
+    #[inline]
+    pub fn drop_caps(&self, mask: u64) {
+        self.dropped_caps.fetch_or(mask, Ordering::AcqRel);
+    }
+
+    /// Every capability this process has given up.
+    #[inline]
+    pub fn dropped_caps(&self) -> u64 {
+        self.dropped_caps.load(Ordering::Acquire)
     }
 
     /// Leave this process. Returns `true` if this was the last task.

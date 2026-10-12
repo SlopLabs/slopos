@@ -26,7 +26,7 @@ fn authorize(task: &Task, entry: &SyscallEntry, sysno: u64) -> bool {
     if !entry.cap.is_gated() {
         return true;
     }
-    match decide(task_caps(task), entry.cap) {
+    match decide(slopos_ostd::task::ops::task_caps(task), entry.cap) {
         AuthorityDecision::Allow => true,
         AuthorityDecision::WarnAndAllow => {
             // Also userland-driven: a loop on a syscall it lacks the
@@ -41,17 +41,6 @@ fn authorize(task: &Task, entry: &SyscallEntry, sysno: u64) -> bool {
         }
         AuthorityDecision::Deny => false,
     }
-}
-
-/// The caller's effective capability mask.
-///
-/// Derived from `task.flags` until the `Cred` lands: the flags *are* the whole
-/// of today's privilege model, so deriving keeps one source of truth rather
-/// than adding a second that could disagree with it. The `Process`-owned
-/// `Cred` replaces this body without moving the call site.
-#[inline]
-fn task_caps(task: &Task) -> u64 {
-    slopos_ostd::task::ops::task_caps(task)
 }
 
 pub fn syscall_handle(user_ctx: &UserContext) {

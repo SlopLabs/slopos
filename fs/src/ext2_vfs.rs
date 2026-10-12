@@ -13,7 +13,7 @@ use crate::verity::{AttestTrust, FsExtent, VerityError, VerityStatus};
 use crate::vfs::{
     FileStat, FileSystem, FileType, FsStats, InodeId, Timestamp, VfsError, VfsResult, orphan,
 };
-use slopos_kernel_services::driver_runtime::{current_task_account, current_task_is_privileged};
+use slopos_kernel_services::driver_runtime::{current_task_account, current_task_is_system};
 use slopos_ostd::KBox;
 use slopos_ostd::authority::{Cap, Seal};
 use slopos_ostd::klog_info;
@@ -504,7 +504,7 @@ impl Ext2Mount {
         }
         // Per call, because the mount is shared and the entitlement is the
         // caller's.
-        if !current_task_is_privileged() {
+        if !current_task_is_system() {
             fs.set_block_reserve(cached.reserved_blocks);
         }
         // Charged whatever the entitlement: spending the system reserve says

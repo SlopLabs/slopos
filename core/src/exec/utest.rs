@@ -3,10 +3,9 @@
 //! The companion [`utest!`](crate::utest) macro lives here too, so
 //! `slopos-testing` need not depend on `slopos-core` and cycle.
 
-use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskExitReason, TaskPriority,
-};
+use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskPriority};
 use slopos_ostd::KVec;
+use slopos_ostd::authority::CAP_MASK_ALL;
 use slopos_ostd::{catch_panic, klog_info};
 use slopos_testing::{TestDesc, TestResult, ktap};
 
@@ -104,7 +103,8 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         argv,
         None,
         TaskPriority::Normal,
-        TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
+        TASK_FLAG_USER_MODE,
+        CAP_MASK_ALL,
         &stdio,
         0,
         parent_table,

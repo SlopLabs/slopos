@@ -63,15 +63,20 @@ fn make_task_current(task_id: u32) -> bool {
     dispatch_task_for_test(slopos_arch::pcr::get_current_cpu(), task_id)
 }
 
+/// What a spawned program holds, so a test principal is an ordinary one.
 fn create_user_task() -> u32 {
     let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
-    task_create(
+    let id = task_create(
         b"BuildFloorProc\0".as_ptr() as *const c_char,
         user_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_USER_MODE,
-    )
+    );
+    if let Some(task) = task_find_by_id(id) {
+        slopos_ostd::task::ops::task_set_caps(&task, slopos_ostd::authority::CAP_UNIVERSAL);
+    }
+    id
 }
 
 fn create_kernel_task() -> u32 {

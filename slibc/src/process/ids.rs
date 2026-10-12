@@ -258,7 +258,7 @@ pub extern "C" fn getpriority(which: c_int, who: crate::types::id_t) -> c_int {
 }
 
 /// `setpriority(2)`: `nice` is clamped to -20..=19, and lowering a task's
-/// below both 0 and its current value takes `TASK_FLAG_SYSTEM`.
+/// below both 0 and its current value is init's alone.
 #[unsafe(no_mangle)]
 pub extern "C" fn setpriority(which: c_int, who: crate::types::id_t, nice: c_int) -> c_int {
     match Sys::setpriority(which, who, nice) {

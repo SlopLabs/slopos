@@ -545,11 +545,11 @@ pub fn set_limit(id: AccountId, kind: ResourceKind, limit: u32) {
     }
 }
 
-/// Hold `id` to the per-process block ceiling unless `caps` carry the
-/// raw-device right, whose holder may write any disk beneath every
-/// filesystem anyway; the installer fills a whole root in one process.
+/// Hold `id` to the per-process block ceiling unless `caps` carry `RawBlock`,
+/// whose holder may write any disk beneath every filesystem anyway; the
+/// installer fills a whole root in one process.
 pub fn fit_disk_blocks(id: AccountId, caps: u64) {
-    let raw_device = crate::authority::mask_permits(caps, crate::authority::Capability::Mount);
+    let raw_device = crate::authority::mask_permits(caps, crate::authority::Capability::RawBlock);
     let limit = if raw_device {
         NO_LIMIT
     } else {

@@ -57,8 +57,9 @@ pub enum Capability {
     Launch,
     /// Signalling across a session boundary, or a fan-out that crosses one.
     ProcSignal,
-    /// Whole-machine enumeration. Read-only, and deliberately never fused with
-    /// a mutating class.
+    /// Observing the whole machine: the diagnostic console's informational
+    /// commands, the sampling profiler, and every task in `process_list`.
+    /// Never fused with a class that changes what it observes.
     SysInspect,
     /// Acquiring the screen seat. Deletion condition: collapses into the seat
     /// handle itself.
@@ -66,8 +67,8 @@ pub enum Capability {
     /// Acquiring the input seat. Same deletion condition.
     InputSeat,
     /// Console reconfiguration: the font and the keyboard layout, both single
-    /// global tables. Deletion condition: becomes an ioctl on the console
-    /// descriptor.
+    /// global tables, and `vhangup`, which ends a whole session. Deletion
+    /// condition: becomes an ioctl on the console descriptor.
     ConsoleConfig,
     /// Writing the global kernel console with no descriptor. Deletion
     /// condition: dies when it routes through the caller's controlling TTY.
@@ -75,7 +76,8 @@ pub enum Capability {
     /// The global clipboard. Deletion condition: dies when the clipboard is
     /// memfd-plus-fd-passing only.
     ClipboardGlobal,
-    /// The Wheel of Fate.
+    /// The Wheel of Fate. Deletion condition: dies when the wheel is a
+    /// descriptor init hands `/bin/roulette`.
     Fate,
     /// The test harness entry points. Empty in shipped images.
     TestHarness,
@@ -107,6 +109,14 @@ pub enum Capability {
     /// Deletion condition: dies when firmware variables are objects named by
     /// descriptor and the installer is handed the boot manager's.
     BootEntry,
+    /// Changing the network's configuration: interface state, addresses,
+    /// routes, the resolver and the DHCP client. Reading it needs nothing.
+    NetAdmin,
+    /// Block devices beneath every filesystem: reading and writing the block
+    /// nodes, `BLKRRPART`, the crash records, and no per-process `DiskBlocks`
+    /// ceiling. A raw read bypasses every permission above it and recovers
+    /// what a filesystem freed.
+    RawBlock,
 }
 
 impl Capability {
@@ -117,23 +127,26 @@ impl Capability {
     /// process holds, which is not a capability.
     #[inline]
     pub const fn bit(self) -> u64 {
+        use slopos_abi::caps;
         match self {
             Self::Unimplemented | Self::NoneSelf | Self::NoneFd | Self::NoneRelation => 0,
-            Self::Power => 1 << 0,
-            Self::Launch => 1 << 1,
-            Self::ProcSignal => 1 << 2,
-            Self::SysInspect => 1 << 3,
-            Self::DisplaySeat => 1 << 4,
-            Self::InputSeat => 1 << 5,
-            Self::ConsoleConfig => 1 << 6,
-            Self::ConsoleIo => 1 << 7,
-            Self::ClipboardGlobal => 1 << 8,
-            Self::Fate => 1 << 9,
-            Self::TestHarness => 1 << 10,
-            Self::Mount => 1 << 11,
-            Self::Clock => 1 << 12,
-            Self::Seal => 1 << 13,
-            Self::BootEntry => 1 << 14,
+            Self::Power => caps::POWER,
+            Self::Launch => caps::LAUNCH,
+            Self::ProcSignal => caps::PROC_SIGNAL,
+            Self::SysInspect => caps::SYS_INSPECT,
+            Self::DisplaySeat => caps::DISPLAY_SEAT,
+            Self::InputSeat => caps::INPUT_SEAT,
+            Self::ConsoleConfig => caps::CONSOLE_CONFIG,
+            Self::ConsoleIo => caps::CONSOLE_IO,
+            Self::ClipboardGlobal => caps::CLIPBOARD_GLOBAL,
+            Self::Fate => caps::FATE,
+            Self::TestHarness => caps::TEST_HARNESS,
+            Self::Mount => caps::MOUNT,
+            Self::Clock => caps::CLOCK,
+            Self::Seal => caps::SEAL,
+            Self::BootEntry => caps::BOOT_ENTRY,
+            Self::NetAdmin => caps::NET_ADMIN,
+            Self::RawBlock => caps::RAW_BLOCK,
         }
     }
 
@@ -167,6 +180,8 @@ impl Capability {
             Self::Clock => "Clock",
             Self::Seal => "Seal",
             Self::BootEntry => "BootEntry",
+            Self::NetAdmin => "NetAdmin",
+            Self::RawBlock => "RawBlock",
         }
     }
 
@@ -192,6 +207,8 @@ impl Capability {
         Self::Clock,
         Self::Seal,
         Self::BootEntry,
+        Self::NetAdmin,
+        Self::RawBlock,
     ];
 }
 
@@ -207,8 +224,18 @@ pub const CAP_MASK_ALL: u64 = {
     mask
 };
 
-/// No authority. What every ordinary program holds.
+const _: () = assert!(
+    CAP_MASK_ALL == slopos_abi::caps::ALL,
+    "every ABI capability bit needs a Capability, and every Capability an ABI bit",
+);
+
+/// No authority.
 pub const CAP_NONE: u64 = 0;
+
+/// What every program holds: globals with no object form yet, so withholding
+/// one would break every program and protect nothing. Classified rather than
+/// ungated so each one's deletion is a diff here.
+pub const CAP_UNIVERSAL: u64 = slopos_abi::caps::UNIVERSAL;
 
 mod cap_seal {
     pub trait Sealed {}
@@ -368,14 +395,14 @@ impl AuthorityMode {
     }
 }
 
-use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 static MODE: AtomicU8 = AtomicU8::new(AuthorityMode::Enforce as u8);
 
 /// One bit per gated capability, so `warn` reports each distinct denial once
 /// rather than once per call — a frame-rate denial would otherwise bury the
 /// enumeration it exists to produce.
-static WARNED: AtomicU16 = AtomicU16::new(0);
+static WARNED: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 pub fn mode() -> AuthorityMode {
@@ -394,20 +421,8 @@ pub fn set_mode(mode: AuthorityMode) {
 /// Returns `true` the first time only, so the caller logs once per capability.
 pub fn warn_once(cap: Capability) -> bool {
     let bit = cap.bit();
-    if bit == 0 {
-        return false;
-    }
-    // A `u16` holds every gated capability; the truncation is checked below
-    // rather than assumed.
-    let bit16 = bit as u16;
-    let previous = WARNED.fetch_or(bit16, Ordering::Relaxed);
-    previous & bit16 == 0
+    bit != 0 && WARNED.fetch_or(bit, Ordering::Relaxed) & bit == 0
 }
-
-const _: () = assert!(
-    CAP_MASK_ALL <= u16::MAX as u64,
-    "the warn-once set is a u16; a 17th gated capability needs a wider word",
-);
 
 /// The decision a dispatcher makes for one call.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -453,76 +468,6 @@ pub fn decide(mask: u64, cap: Capability) -> AuthorityDecision {
 pub(crate) fn mint_kernel_power() -> Cap<'static, Power> {
     Cap::mint()
 }
-
-/// Derive a capability mask from a task's flag word.
-///
-/// A bridge, not the model: `task.flags` is the whole of today's privilege
-/// model, so deriving from it keeps one source of truth while the classification
-/// mechanism lands. The `Process`-owned `Cred` replaces this function; until
-/// then, a second stored mask could disagree with the flags and nothing would
-/// notice.
-///
-/// Total over the gated set: a capability no flag confers is absent from every
-/// derived mask, which is why the capabilities promoted in later phases must
-/// arrive together with their grant.
-#[inline]
-pub const fn caps_from_task_flags(flags: u16) -> u64 {
-    use slopos_abi::task::{
-        TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-        TASK_FLAG_INSTALL, TASK_FLAG_LAUNCH, TASK_FLAG_MOUNT, TASK_FLAG_POWER,
-        TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
-    };
-
-    // Universal: each names a global with no object form yet, so a grant would
-    // break every program and protect nothing. Classified rather than ungated
-    // so their deletion is a diff here when that form lands.
-    let mut mask = Capability::ConsoleIo.bit()
-        | Capability::ClipboardGlobal.bit()
-        | Capability::SysInspect.bit()
-        | Capability::Fate.bit();
-
-    if flags & TASK_FLAG_COMPOSITOR != 0 {
-        mask |= Capability::DisplaySeat.bit() | Capability::InputSeat.bit();
-    }
-    if flags & TASK_FLAG_DISPLAY_EXCLUSIVE != 0 {
-        mask |= Capability::DisplaySeat.bit();
-    }
-    if flags & (TASK_FLAG_CONSOLE_ADMIN | TASK_FLAG_SYSTEM) != 0 {
-        mask |= Capability::ConsoleConfig.bit();
-    }
-    if flags & (TASK_FLAG_PROC_ADMIN | TASK_FLAG_SYSTEM) != 0 {
-        mask |= Capability::SysInspect.bit();
-    }
-    if flags & (TASK_FLAG_POWER | TASK_FLAG_SYSTEM) != 0 {
-        mask |= Capability::Power.bit();
-    }
-    if flags & (TASK_FLAG_LAUNCH | TASK_FLAG_SYSTEM) != 0 {
-        mask |= Capability::Launch.bit();
-    }
-    if flags & (TASK_FLAG_MOUNT | TASK_FLAG_SYSTEM) != 0 {
-        mask |= Capability::Mount.bit();
-    }
-    if flags & TASK_FLAG_INSTALL != 0 {
-        // The installer seals the mount points a new root carries the base
-        // over.
-        mask |= Capability::BootEntry.bit() | Capability::Seal.bit();
-    }
-    if flags & TASK_FLAG_SYSTEM != 0 {
-        // No flag grants the clock on a program identity, so init is the only
-        // principal that moves it.
-        mask |= Capability::ProcSignal.bit()
-            | Capability::TestHarness.bit()
-            | Capability::Clock.bit()
-            | Capability::Seal.bit();
-    }
-    mask
-}
-
-const _: () = assert!(
-    caps_from_task_flags(u16::MAX) == CAP_MASK_ALL,
-    "a gated capability that no task flag confers is unreachable",
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,6 +564,9 @@ mod tests {
             AuthorityDecision::WarnAndAllow,
             "a different capability still reports"
         );
+        for expected in [AuthorityDecision::WarnAndAllow, AuthorityDecision::Allow] {
+            assert_eq!(decide(CAP_NONE, Capability::RawBlock), expected);
+        }
         set_mode(AuthorityMode::Enforce);
     }
 

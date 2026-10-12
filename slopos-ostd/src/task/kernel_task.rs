@@ -13,11 +13,10 @@ use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
 
 pub use slopos_abi::task::{
-    BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
-    TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
-    TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE,
-    TASK_UNSAFE_STACK_SIZE, TaskExitReason, TaskExitRecord, TaskFaultReason, TaskPriority,
-    TaskStatus,
+    BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
+    TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN,
+    TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, TaskExitReason, TaskExitRecord, TaskFaultReason,
+    TaskPriority, TaskStatus,
 };
 
 use crate::cpu::x86_64::pcr::KernelReturnContext;
@@ -377,14 +376,6 @@ impl Default for TaskName {
 /// `K` is the kernel-mode stack handle and `U` the SafeStack data ("unsafe")
 /// stack handle; the kernel side passes `slopos_sched::task_stack::KernelStack`
 /// and `UnsafeStack`.
-/// `Task::caps` before the authority model has computed one.
-///
-/// Not zero and not `u64::MAX`: either would be a *decision*, and a task whose
-/// mask has never been derived has not had one made. Readers fall back to the
-/// flag-derived value, so a task built on a path that predates the derivation
-/// is neither omnipotent nor powerless.
-pub const CAPS_UNSET: u64 = u64::MAX;
-
 #[repr(C)]
 pub struct TaskInner<K, U> {
     /// ABI sub-struct holding every field naked asm reads via a compile-time
@@ -574,18 +565,10 @@ pub struct TaskInner<K, U> {
     ///
     /// Relaxed: a counter nobody orders anything against.
     pub migration_count: AtomicU32,
-    /// Effective capability mask — the authority model's record for this task.
-    ///
-    /// Atomic and separate from [`flags`](Self::flags) because it is *narrowed
-    /// on exec*, in the task's own context, while other CPUs read it to answer
-    /// "may this task be signalled" and "may it invoke that syscall". `flags`
-    /// is a plain word written only before publication; authority is not, so it
-    /// gets its own.
-    ///
-    /// `u64::MAX` is the "not yet computed" sentinel: a task built before the
-    /// authority model derives its mask reads through to the flag-derived
-    /// value, so no task is accidentally omnipotent and none is accidentally
-    /// powerless.
+    /// Effective capability mask: everything this task may do beyond what
+    /// needs no capability. Atomic because a thread of its process narrows it
+    /// while other CPUs read it to decide whether it may be signalled. A
+    /// kernel task holds none.
     pub caps: AtomicU64,
     /// Signals sent to this thread alone.
     pub(crate) pending: PendingSignals,
@@ -1411,7 +1394,7 @@ impl<K, U> TaskInner<K, U> {
             last_cpu: AtomicU8::new(0),
             fpu_last_cpu: AtomicI32::new(FPU_CPU_NONE),
             migration_count: AtomicU32::new(0),
-            caps: AtomicU64::new(CAPS_UNSET),
+            caps: AtomicU64::new(crate::authority::CAP_NONE),
             pending: PendingSignals::new(),
             shared_pending: None,
             picked_for_shared: AtomicBool::new(false),
@@ -1503,7 +1486,6 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).kernel_stack).write(None);
                 addr_of_mut!((*slot).unsafe_stack).write(None);
                 addr_of_mut!((*slot).process_group).write(RcuArcSlot::empty());
-                addr_of_mut!((*slot).caps).write(AtomicU64::new(CAPS_UNSET));
                 addr_of_mut!((*slot).test_reports).write(SpinLock::new(None, TEST_REPORTS_CLASS));
                 PendingSignals::init_zeroed_in_place(addr_of_mut!((*slot).pending));
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);

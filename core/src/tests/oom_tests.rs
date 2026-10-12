@@ -6,10 +6,7 @@ use core::ffi::c_char;
 use core::ptr;
 
 use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE};
-use slopos_abi::task::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_LAUNCH,
-    TASK_FLAG_USER_MODE,
-};
+use slopos_abi::task::{INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_USER_MODE};
 use slopos_mm::memfd::{memfd_create, memfd_ftruncate};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::oom::{
@@ -22,6 +19,7 @@ use slopos_mm::process_vm::{
     ProcessVm, pack_process_vm_handle, process_vm_handle, process_vm_mmap, process_vm_mmap_shared,
 };
 use slopos_ostd::KArc;
+use slopos_ostd::authority::{CAP_UNIVERSAL, Capability};
 use slopos_ostd::handle::Handle;
 use slopos_ostd::process::quota::FileBacking;
 use slopos_ostd::process::{AccountId, Process, ProcessId};
@@ -34,18 +32,29 @@ use slopos_testing::{assert_test, fail, pass};
 
 use crate::oom::{OOM_OPS, standing_of};
 
-const UNGRANTED: u16 = TASK_FLAG_USER_MODE;
-const PRIVILEGED: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR | TASK_FLAG_LAUNCH;
+const UNGRANTED: u64 = CAP_UNIVERSAL;
+const PRIVILEGED: u64 = CAP_UNIVERSAL
+    | Capability::DisplaySeat.bit()
+    | Capability::InputSeat.bit()
+    | Capability::Launch.bit();
 const WRITE_USER_ABSENT: u64 = 0x06;
 
-fn create_user_task() -> u32 {
-    task_create(
+fn create_user_task_holding(caps: u64) -> u32 {
+    let id = task_create(
         b"OomVictim\0".as_ptr() as *const c_char,
         slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         ptr::null_mut(),
         1,
         TASK_FLAG_USER_MODE,
-    )
+    );
+    if let Some(task) = task_find_by_id(id) {
+        slopos_ostd::task::ops::task_set_caps(&task, caps);
+    }
+    id
+}
+
+fn create_user_task() -> u32 {
+    create_user_task_holding(UNGRANTED)
 }
 
 pub fn test_oom_spares_init_and_passes_over_the_dying() -> TestResult {
@@ -107,14 +116,14 @@ slopos_testing::stest!(
 /// The real task side, confined to the processes a test made.
 struct Among {
     members: [u32; 2],
-    writer: u16,
+    writer: u64,
     /// Init's task id, and the writer's: a test's writer is init only when
     /// this names a task.
     init: u32,
 }
 
 impl Among {
-    fn one(pid: u32, writer: u16) -> Self {
+    fn one(pid: u32, writer: u64) -> Self {
         Self {
             members: [pid, INVALID_PROCESS_ID],
             writer,
@@ -225,14 +234,8 @@ struct Member {
 }
 
 impl Member {
-    fn spawn(flags: u16) -> Option<Self> {
-        let task_id = task_create(
-            b"OomMember\0".as_ptr() as *const c_char,
-            slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
-            ptr::null_mut(),
-            1,
-            flags,
-        );
+    fn spawn(caps: u64) -> Option<Self> {
+        let task_id = create_user_task_holding(caps);
         if task_id == INVALID_TASK_ID {
             return None;
         }
@@ -343,10 +346,10 @@ slopos_testing::stest!(
     suite = oom_killer
 );
 
-/// A process holding privileged flags the writer lacks is never taken for it,
+/// A process holding capabilities the writer lacks is never taken for it,
 /// however much it holds: with nothing else left the write fails — the
 /// writer's `UserOom` — and the privileged process lives. A writer holding
-/// those flags weighs it like any other.
+/// those capabilities weighs it like any other.
 pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult {
     const OWN: usize = 16;
     const PRIVATE: u64 = 64;

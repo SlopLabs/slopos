@@ -1,6 +1,5 @@
 //! UEFI variables, through the kernel's firmware thread. Both calls need
-//! `TASK_FLAG_POWER`, and the firmware's boot manager variables the
-//! installer's role as well.
+//! `Power`, and the firmware's boot manager variables `BootEntry` as well.
 
 use super::error::{SyscallError, SyscallResult};
 use super::numbers::{SYSCALL_EFIVAR_GET, SYSCALL_EFIVAR_SET};

@@ -6,11 +6,11 @@ use slopos_ostd::authority::Capability;
 
 use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
-    syscall_clock_gettime, syscall_clock_settime, syscall_cpu_info, syscall_cpu_perf,
-    syscall_cpu_perf_ctl, syscall_ctty_read, syscall_efivar_get, syscall_efivar_set, syscall_exit,
-    syscall_exit_group, syscall_kconsole, syscall_klog_write, syscall_nanosleep,
-    syscall_percpu_stats, syscall_process_list, syscall_prof_ctl, syscall_reboot,
-    syscall_sched_yield, syscall_sys_info, syscall_sysinfo, syscall_uname,
+    syscall_caps_drop, syscall_clock_gettime, syscall_clock_settime, syscall_cpu_info,
+    syscall_cpu_perf, syscall_cpu_perf_ctl, syscall_ctty_read, syscall_efivar_get,
+    syscall_efivar_set, syscall_exit, syscall_exit_group, syscall_kconsole, syscall_klog_write,
+    syscall_nanosleep, syscall_percpu_stats, syscall_process_list, syscall_prof_ctl,
+    syscall_reboot, syscall_sched_yield, syscall_sys_info, syscall_sysinfo, syscall_uname,
 };
 use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
@@ -285,6 +285,7 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     [SYSCALL_CPU_PERF_CTL]       => syscall_cpu_perf_ctl,       "cpu_perf_ctl";
     [SYSCALL_PROF_CTL]           => syscall_prof_ctl,           "prof_ctl";
     [SYSCALL_KCONSOLE]           => syscall_kconsole,           "kconsole";
+    [SYSCALL_CAPS_DROP]          => syscall_caps_drop,          "caps_drop";
 };
 
 /// The entry for `sysno`, or `None` when nothing is registered there.
@@ -338,7 +339,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 174;
+pub const SYSCALL_ENTRY_COUNT: usize = 175;
 
 /// The recorded shape of the classification.
 ///
@@ -346,18 +347,18 @@ pub const SYSCALL_ENTRY_COUNT: usize = 174;
 /// point to a capability that had none still moves a number here.
 /// `Unimplemented` is the absence of a handler, so its count is 0 by
 /// construction and the assert below holds it there.
-const CAP_COUNTS: [(Capability, usize); 19] = [
+const CAP_COUNTS: [(Capability, usize); 21] = [
     (Capability::Unimplemented, 0),
-    (Capability::NoneSelf, 51),
+    (Capability::NoneSelf, 58),
     (Capability::NoneFd, 77),
-    (Capability::NoneRelation, 19),
+    (Capability::NoneRelation, 15),
     (Capability::Power, 4),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),
-    (Capability::SysInspect, 9),
+    (Capability::SysInspect, 2),
     (Capability::DisplaySeat, 1),
     (Capability::InputSeat, 1),
-    (Capability::ConsoleConfig, 2),
+    (Capability::ConsoleConfig, 3),
     (Capability::ConsoleIo, 1),
     (Capability::ClipboardGlobal, 2),
     (Capability::Fate, 2),
@@ -366,6 +367,8 @@ const CAP_COUNTS: [(Capability, usize); 19] = [
     (Capability::Clock, 1),
     (Capability::Seal, 0),
     (Capability::BootEntry, 0),
+    (Capability::NetAdmin, 4),
+    (Capability::RawBlock, 0),
 ];
 
 const _: () = {
@@ -430,6 +433,6 @@ const _: () = {
 };
 
 /// Per-capability entry-point counts, for the boot-time dump and the tests.
-pub fn cap_counts() -> &'static [(Capability, usize); 19] {
+pub fn cap_counts() -> &'static [(Capability, usize); 21] {
     &CAP_COUNTS
 }

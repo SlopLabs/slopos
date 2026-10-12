@@ -1,25 +1,31 @@
-//! `prof`: start, stop and report the kernel's sampling profiler.
+//! `/bin/prof`: start, stop and report the kernel's sampling profiler.
 //!
 //! A report is printed into the kernel log; `prof report` copies the lines it
 //! added there to its output, so `prof report x > x.log` is a file
 //! `scripts/prof_report.py` reads.
+//!
+//! Its own program rather than a coreutils tool because the kernel grants
+//! `SysInspect` to this path, and a grant follows symlinks to the binary.
 
 use slopos_abi::errno::Errno;
 use slopos_abi::syscall::{
     PROF_LABEL_MAX, PROF_OP_REPORT, PROF_OP_START, PROF_OP_STATUS, PROF_OP_STOP,
 };
 
+use crate::apps::coreutils::Ctx;
 use crate::kmsg;
 use crate::syscall::core as sys_core;
 
-use super::{Ctx, Tool};
-
-pub static TOOLS: &[Tool] = &[Tool {
-    name: "prof",
-    desc: "Start, stop or report the kernel's sampling profiler",
-    usage: USAGE,
-    run: prof,
-}];
+pub fn prof_main() -> ! {
+    let args: Vec<Vec<u8>> = std::env::args().map(String::into_bytes).collect();
+    let argv: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+    let mut ctx = Ctx::stdio();
+    ctx.set_tool("prof");
+    let status = prof(&mut ctx, &argv);
+    ctx.out.flush();
+    ctx.err.flush();
+    sys_core::exit_with_code(status)
+}
 
 const USAGE: &str = "prof start | stop | status | report [LABEL]";
 const DEFAULT_LABEL: &[u8] = b"runtime";

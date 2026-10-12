@@ -334,42 +334,26 @@ pub fn task_has_deliverable_signal<K, U>(task: &TaskInner<K, U>) -> bool {
 // ---------------------------------------------------------------------------
 
 /// This task's effective capability mask.
-///
-/// Falls back to the flag-derived value while the stored mask is
-/// [`CAPS_UNSET`], so a task built on a path that never set one is answered
-/// consistently rather than as omnipotent or powerless.
 #[inline]
 pub fn task_caps<K, U>(task: &TaskInner<K, U>) -> u64 {
-    let stored = task.caps.load(Ordering::Acquire);
-    if stored == crate::task::kernel_task::CAPS_UNSET {
-        crate::authority::caps_from_task_flags(task.flags)
-    } else {
-        stored
-    }
+    task.caps.load(Ordering::Acquire)
 }
 
 /// Publish `mask` as this task's authority.
 ///
-/// The only widening path, and only the loader reaches it: a program-identity
-/// grant at load is where authority enters the system.
+/// The only widening path: a spawn stamps the child it builds before anything
+/// can find it.
 #[inline]
 pub fn task_set_caps<K, U>(task: &TaskInner<K, U>, mask: u64) {
     task.caps.store(mask, Ordering::Release);
 }
 
-/// Narrow this task's authority to `mask`, keeping only what it already held.
+/// Narrow this task's authority to `mask`, keeping only what it already held,
+/// and return the mask now in force.
 ///
-/// **Total and infallible.** A reduction has no error return a caller could
-/// ignore: a historical local root came from an attacker making a privilege
-/// *drop* fail inside a program that ignored the result. Returns the mask now
-/// in force, for the log line.
-///
-/// Monotone by construction — the result is an intersection, so no call to
-/// this can raise authority regardless of what `mask` names.
+/// Total: a reduction has no error a caller could ignore, the shape a
+/// privilege drop that silently fails takes.
 #[inline]
 pub fn task_restrict_caps<K, U>(task: &TaskInner<K, U>, mask: u64) -> u64 {
-    let current = task_caps(task);
-    let narrowed = current & mask;
-    task.caps.store(narrowed, Ordering::Release);
-    narrowed
+    task.caps.fetch_and(mask, Ordering::AcqRel) & mask
 }

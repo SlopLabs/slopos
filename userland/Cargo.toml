@@ -110,6 +110,10 @@ name = "kconsole"
 path = "src/bin/kconsole.rs"
 
 [[bin]]
+name = "prof"
+path = "src/bin/prof.rs"
+
+[[bin]]
 name = "widget_gallery"
 path = "src/bin/widget_gallery.rs"
 

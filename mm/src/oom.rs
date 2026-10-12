@@ -19,8 +19,8 @@
 //! gone, since no death gives it back. A page of a shared memfd or ring counts
 //! toward no mapper, so mapping another process's memory never makes the
 //! mapper the victim; a file page counts toward each process that faulted it
-//! in. Only a process the writer could `kill` is ever taken: one holding
-//! privileged flags the writer lacks is as safe from the killer as from the
+//! in. Only a process the writer could `kill` is ever taken: one holding a
+//! capability the writer lacks is as safe from the killer as from the
 //! writer, unless the writer is init, whose failed write would take the
 //! machine down. Init itself, like a kernel task, which has no address space,
 //! never is.
@@ -80,7 +80,7 @@ pub enum Standing {
     Exempt,
     /// Every task already killed or gone: a second kill frees nothing sooner.
     Dying,
-    /// Holds privileged flags the writer lacks, which `kill` would refuse it:
+    /// Holds a capability the writer lacks, which `kill` would refuse it:
     /// never a victim of this writer's write, as `oom_score_adj=-1000` is
     /// never one on Linux.
     Shielded,

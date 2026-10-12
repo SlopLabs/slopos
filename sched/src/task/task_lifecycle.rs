@@ -30,10 +30,9 @@ use super::task_table::{
     with_task_manager,
 };
 use super::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM,
-    TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE,
-    TASK_UNSAFE_STACK_SIZE, Task, TaskContext, TaskEntry, TaskExitReason, TaskFaultReason,
-    TaskPriority, TaskStatus,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
+    TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
+    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus,
 };
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
@@ -483,7 +482,6 @@ extern "sysv64" fn kernel_task_entry_shim(task_id: u64) {
             return;
         };
         let fatal_if_panics = crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task))
-            || (task.flags & TASK_FLAG_SYSTEM) != 0
             || !slopos_ostd::panic_recovery::production_recovery_enabled();
         // `kernel_thread_trampoline` already wraps the real entry in its own
         // `run_recoverable`; skipping the shim's boundary keeps a panic caught
@@ -740,6 +738,11 @@ pub fn task_commit(pending: PendingTask) -> Option<TaskRef> {
             return None;
         }
     };
+    // After registration, so either `process_drop_caps`'s walk finds this
+    // task or this read finds what that drop recorded before walking.
+    if let Some(process) = registered.process() {
+        slopos_ostd::task::ops::task_restrict_caps(&registered, !process.dropped_caps());
+    }
     record_task_created();
 
     klog_debug!(
@@ -2639,4 +2642,26 @@ pub fn task_group_exit(group_leader_tid: u32, code: u32) -> usize {
 /// itself is its caller's to terminate. Returns how many were killed.
 pub fn task_group_fatal_signal(tid: u32, signum: u8) -> usize {
     kill_group_but_caller(thread_group_of(tid), GroupEnd::Signal(signum)).0
+}
+
+/// Take `mask` from every task sharing `caller`'s process, for good, and
+/// return what `caller` holds afterwards.
+///
+/// Total: it allocates nothing, so no walk is cut short and no member keeps
+/// what a sibling gave up. The drop is recorded before the walk, which is what
+/// lets `task_commit` narrow a task the walk ran past.
+pub fn process_drop_caps(caller: &Task, mask: u64) -> u64 {
+    use slopos_ostd::task::ops::task_restrict_caps;
+
+    let keep = !mask;
+    if let Some(process) = caller.process() {
+        process.drop_caps(mask);
+        let handle = process.handle_raw();
+        super::task_for_each_enumerable_heapless(|task| {
+            if task.process_handle_raw() == handle {
+                task_restrict_caps(task, keep);
+            }
+        });
+    }
+    task_restrict_caps(caller, keep)
 }

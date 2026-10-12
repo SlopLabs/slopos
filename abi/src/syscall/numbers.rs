@@ -373,11 +373,12 @@ pub const SYSCALL_FSTATFS: u64 = 138;
 pub const SYSCALL_GETPRIORITY: u64 = 140;
 
 /// `setpriority(which, who, nice)` — record `nice`, clamped to -20..=19, for
-/// every task named; below both 0 and a task's own it needs `TASK_FLAG_SYSTEM`.
+/// every task named; below both 0 and a task's own only init may set it.
 pub const SYSCALL_SETPRIORITY: u64 = 141;
 
 /// `vhangup()` — revoke the caller's controlling terminal; every other fd
-/// referencing that TTY then fails with `EIO`. `-EPERM` without a ctty.
+/// referencing that TTY then fails with `EIO`. `-EPERM` without a ctty or
+/// without `Capability::ConsoleConfig`.
 pub const SYSCALL_VHANGUP: u64 = 153;
 
 /// `arch_prctl(code, addr)` — `ARCH_SET_FS` takes the new FS_BASE value,
@@ -609,28 +610,28 @@ pub const SYSCALL_RESOLVE: u64 = SYSCALL_PRIVATE_BASE + 8;
 /// (`total_count > record_count`), not the return value, so a header-sized
 /// buffer is the sizing query and anything smaller is `EINVAL`. Unprivileged,
 /// but `NET_Q_SOCKETS` names `owner_pid` only for the caller's own sockets
-/// unless it holds `TASK_FLAG_NET_ADMIN`.
+/// unless it holds `Capability::NetAdmin`.
 pub const SYSCALL_NET_QUERY: u64 = SYSCALL_PRIVATE_BASE + 9;
 
 /// `net_iface_ctl(ifindex, op, arg)` — admin up/down, MTU, DHCP lifecycle,
 /// neighbour and address flushes, plus the global operations addressed to
-/// `NET_IFINDEX_GLOBAL`. Requires `TASK_FLAG_NET_ADMIN`.
+/// `NET_IFINDEX_GLOBAL`. Requires `Capability::NetAdmin`.
 pub const SYSCALL_NET_IFACE_CTL: u64 = SYSCALL_PRIVATE_BASE + 10;
 
 /// `net_addr_ctl(op, ptr, len)`, where `op` is `NET_ADDROP_ADD`/`_DEL` and
 /// `ptr` points at exactly one [`UserAddrReq`](crate::net::UserAddrReq) whose
-/// size `len` must equal. Requires `TASK_FLAG_NET_ADMIN`.
+/// size `len` must equal. Requires `Capability::NetAdmin`.
 pub const SYSCALL_NET_ADDR_CTL: u64 = SYSCALL_PRIVATE_BASE + 11;
 
 /// `net_route_ctl(op, ptr, len)`, where `op` is `NET_ROUTEOP_ADD`/`_DEL` and
 /// `ptr` points at exactly one [`UserRouteReq`](crate::net::UserRouteReq) whose
-/// size `len` must equal. Requires `TASK_FLAG_NET_ADMIN`.
+/// size `len` must equal. Requires `Capability::NetAdmin`.
 pub const SYSCALL_NET_ROUTE_CTL: u64 = SYSCALL_PRIVATE_BASE + 12;
 
 /// `net_resolver_set(ptr, len)` — exactly one
 /// [`UserResolverReq`](crate::net::UserResolverReq) whose size `len` must
 /// equal. Clearing the static override is a request naming zero servers.
-/// Requires `TASK_FLAG_NET_ADMIN`.
+/// Requires `Capability::NetAdmin`.
 pub const SYSCALL_NET_RESOLVER_SET: u64 = SYSCALL_PRIVATE_BASE + 13;
 
 /// `net_monitor(mask, flags) -> fd` that becomes `POLLIN`-ready whenever the
@@ -783,16 +784,24 @@ pub const SYSCALL_CPU_PERF_CTL: u64 = SYSCALL_PRIVATE_BASE + 40;
 /// `prof_ctl(op, label: *const u8, label_len) -> 0` (or the state for
 /// `PROF_OP_STATUS`): start, stop or report the sampling profiler `prof=on`
 /// starts at boot. A report label is 1 to `PROF_LABEL_MAX` bytes of
-/// `[A-Za-z0-9_.-]`, `EINVAL` otherwise.
+/// `[A-Za-z0-9_.-]`, `EINVAL` otherwise. Gated on `Capability::SysInspect`.
 pub const SYSCALL_PROF_CTL: u64 = SYSCALL_PRIVATE_BASE + 41;
 
 /// `kconsole(key) -> 0`: run the diagnostic console's command `key` as the
 /// physical console's trigger would, and return once it has printed into the
 /// kernel log. Only a command that is informational in every registration:
 /// `EPERM` for one that may change the machine and for a caller without
-/// `TASK_FLAG_PROC_ADMIN`, `ENOENT` for a key no command takes, `EOPNOTSUPP`
+/// `Capability::SysInspect`, `ENOENT` for a key no command takes, `EOPNOTSUPP`
 /// under `kconsole=off`, `ETIMEDOUT` if nothing ran it within five seconds.
 pub const SYSCALL_KCONSOLE: u64 = SYSCALL_PRIVATE_BASE + 42;
+
+/// `caps_drop(mask) -> mask now held`: remove `mask`'s capabilities
+/// ([`crate::caps`] bits) from every task of the calling process for good.
+/// Total: it has no error, and a bit the caller does not hold, or no
+/// capability names, is simply not held afterwards. A task the process creates
+/// afterwards holds none of them but what a spawn's program-identity grant
+/// confers through a `Launch` the process kept.
+pub const SYSCALL_CAPS_DROP: u64 = SYSCALL_PRIVATE_BASE + 43;
 
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
 /// call.
@@ -842,6 +851,6 @@ const _: () = assert!(SYSCALL_PRIVATE_BASE > SYSCALL_LINUX_MAX);
 const _: () = assert!(SYSCALL_PRIVATE_BASE & 0x4000_0000 == 0);
 
 const _: () = assert!(
-    SYSCALL_KCONSOLE < SYSCALL_PRIVATE_END,
+    SYSCALL_CAPS_DROP < SYSCALL_PRIVATE_END,
     "private syscall range is full; raise SYSCALL_PRIVATE_TABLE_SIZE",
 );

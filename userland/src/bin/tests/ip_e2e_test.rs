@@ -1,11 +1,11 @@
 //! End-to-end proof of the network management surface against the live stack
 //! in QEMU, from the syscalls up to what `/bin/ip` actually renders.
 //!
-//! The utest runner spawns test binaries with `TASK_FLAG_USER_MODE |
-//! TASK_FLAG_SYSTEM`, so this caller holds `SYSTEM` and does not hold
-//! `NET_ADMIN`: `require_net_admin` tests one flag that only the kernel's
-//! program-identity table confers, on `/bin/ip`. Every mutation below therefore
-//! goes *through* `/bin/ip` rather than being issued directly.
+//! The utest runner hands test binaries every capability, `NetAdmin` among
+//! them. Every mutation below therefore goes *through* `/bin/ip`, the shipped
+//! program granted `NetAdmin` by path, and every refusal is observed from this
+//! binary respawned with [`UNPRIVILEGED`]: an image no grant row names holds
+//! only the universal capabilities.
 //!
 //! Records are decoded by explicit offset — the ones `abi/src/net.rs` pins with
 //! `offset_of!` — rather than through `apps::ip::query`, so a layout bug in the
@@ -109,9 +109,14 @@ fn count_for(what: u32, ifindex: u32) -> Result<u32, SyscallError> {
 
 /// Spawn `path` with `words` as its argv, sending stdout to `stdout_fd`.
 ///
-/// Deliberately nothing but `TASK_FLAG_USER_MODE`: `NET_ADMIN` comes from the
-/// program-identity table keyed on the path, not from what this caller holds.
+/// Deliberately nothing but `TASK_FLAG_USER_MODE`: the child's capabilities
+/// come from the grant keyed on its path, so `/bin/ip` holds `NetAdmin` and
+/// this binary respawned holds nothing beyond the universal set.
 fn spawn_prog(path: &[u8], words: &[&str], stdout_fd: i32) -> i32 {
+    spawn_prog_stdio(path, words, 0, stdout_fd)
+}
+
+fn spawn_prog_stdio(path: &[u8], words: &[&str], stdin_fd: i32, stdout_fd: i32) -> i32 {
     let owned: Vec<Vec<u8>> = words
         .iter()
         .map(|w| {
@@ -125,7 +130,7 @@ fn spawn_prog(path: &[u8], words: &[&str], stdout_fd: i32) -> i32 {
     // trailing NULL; each string is NUL-terminated instead.
     let argv: Vec<*const u8> = owned.iter().map(|s| s.as_ptr()).collect();
     let actions = [
-        process::clone_fd(0, 0),
+        process::clone_fd(stdin_fd, 0),
         process::clone_fd(stdout_fd, 1),
         process::clone_fd(2, 2),
     ];
@@ -147,6 +152,27 @@ fn run_ip(words: &[&str]) -> i32 {
         return tid;
     }
     process::wait_exit_code(tid as u32)
+}
+
+const SELF: &[u8] = b"/bin/ip_e2e_test";
+/// `argv[1]` that runs one of [`UNPRIVILEGED_CHECKS`] instead of the suite.
+const UNPRIVILEGED: &str = "--unprivileged";
+
+/// Run `check` from [`UNPRIVILEGED_CHECKS`] in this binary respawned, which
+/// holds no capability beyond the universal set.
+fn in_unprivileged_child(check: &str) -> bool {
+    let tid = spawn_prog(SELF, &["ip_e2e_test", UNPRIVILEGED, check], 1);
+    if tid <= 0 {
+        eprintln!("ip_e2e_test: spawning the unprivileged {check} check returned {tid}");
+        return false;
+    }
+    match process::wait_exit_code(tid as u32) {
+        0 => true,
+        code => {
+            eprintln!("ip_e2e_test: the unprivileged {check} check exited {code}");
+            false
+        }
+    }
 }
 
 /// Run `path` and collect what it wrote to stdout.
@@ -344,8 +370,14 @@ fn truncation_is_reported_in_the_header() -> bool {
 }
 
 /// The read/write split of this ABI: anyone may ask what the network looks like
-/// and subscribe to changes; only `/bin/ip` may change it.
+/// and subscribe to changes; only a `NetAdmin` holder may change it. Asked from
+/// a child holding only the universal capabilities, since this process holds
+/// them all.
 fn queries_and_monitor_are_unprivileged() -> bool {
+    in_unprivileged_child("queries")
+}
+
+fn queries_and_monitor_answer() -> bool {
     let mut probe = [0u8; HDR];
     if let Err(err) = net_query(NET_Q_IFACES, NET_IFINDEX_NONE, &mut probe) {
         eprintln!(
@@ -374,10 +406,14 @@ fn queries_and_monitor_are_unprivileged() -> bool {
     true
 }
 
-/// A mutating `net_iface_ctl` issued directly from here is `EPERM` even holding
-/// `TASK_FLAG_SYSTEM`. The control is the case below, which performs the same
-/// operation through `/bin/ip` and has it succeed.
-fn direct_mutation_is_eperm_despite_system() -> bool {
+/// A mutating `net_iface_ctl` issued directly by a process without `NetAdmin`
+/// is `EPERM`. The control is [`monitor_fd_wakes_a_blocked_poll`], which
+/// performs the same operation through `/bin/ip` and has it succeed.
+fn direct_mutation_is_eperm_without_net_admin() -> bool {
+    in_unprivileged_child("mutation")
+}
+
+fn direct_mutation_is_refused() -> bool {
     let Ok((_, rows)) = read_ifaces() else {
         eprintln!("ip_e2e_test: net_query(IFACES) failed");
         return false;
@@ -635,43 +671,41 @@ fn socket_query_resolves_a_live_tcp_state() -> bool {
     true
 }
 
-/// The redaction contract: holding `SYSTEM` and not `NET_ADMIN`, this binary's
-/// own socket must name its own pid and no other row may name any pid at all.
-/// Disclosing indiscriminately fails the second; redacting indiscriminately, or
-/// filtering rows by owner, fails the first.
-///
-/// Deliberately a bound UDP socket and no traffic, so it reaches the same
-/// conclusion on a host with no route off the machine.
-fn socket_query_attributes_a_socket_to_its_owner() -> bool {
-    use slopos_userland::syscall::net::{bind_any, socket};
+/// Where [`socket_query_attributes_a_socket_to_its_owner`] binds its socket:
+/// distinctive enough to identify the row, and outside the ephemeral range the
+/// stack allocates from.
+const OWNER_PORT: u16 = 47251;
+/// Where its unprivileged child binds one.
+const CHILD_PORT: u16 = 47253;
 
-    // Distinctive enough to identify this test's row, and outside the ephemeral
-    // range the stack allocates from.
-    const PORT: u16 = 47251;
+fn bind_udp(port: u16) -> Option<slopos_userland::syscall::OwnedFd> {
+    use slopos_userland::syscall::net::{bind_any, socket};
 
     let Ok(fd) = socket(AF_INET as u16, SOCK_DGRAM as u16, 0) else {
         eprintln!("ip_e2e_test: could not create a UDP socket");
-        return false;
+        return None;
     };
-    if bind_any(fd.raw(), PORT).is_err() {
-        eprintln!("ip_e2e_test: could not bind UDP port {PORT}");
-        return false;
+    if bind_any(fd.raw(), port).is_err() {
+        eprintln!("ip_e2e_test: could not bind UDP port {port}");
+        return None;
     }
+    Some(fd)
+}
 
+/// Every socket row, each logged, so a failure shows what the caller was told.
+fn socket_rows() -> Option<Vec<UserSockInfo>> {
     let rows = match fetch_sockets() {
         Ok(rows) => rows,
         Err(err) => {
             eprintln!("ip_e2e_test: NET_Q_SOCKETS failed: {}", err.errno());
-            return false;
+            return None;
         }
     };
-
-    let mine = process::getpid();
     let named = rows.iter().filter(|r| r.owner_pid != INVALID_PROCESS_ID);
     eprintln!(
         "ip_e2e_test: {} socket row(s) as pid {}, {} naming an owner",
         rows.len(),
-        mine,
+        process::getpid(),
         named.count()
     );
     for row in &rows {
@@ -680,36 +714,149 @@ fn socket_query_attributes_a_socket_to_its_owner() -> bool {
             row.sock_idx, row.sock_type, row.state, row.local_port, row.remote_port, row.owner_pid
         );
     }
+    Some(rows)
+}
 
-    let ours = rows
-        .iter()
-        .find(|r| r.local_port == PORT && r.sock_type == SOCK_DGRAM as u8);
-    let Some(ours) = ours else {
+fn udp_row(rows: &[UserSockInfo], port: u16) -> Option<&UserSockInfo> {
+    rows.iter()
+        .find(|r| r.local_port == port && r.sock_type == SOCK_DGRAM as u8)
+}
+
+/// The redaction contract: `NET_Q_SOCKETS` names a socket's owner to that
+/// owner and to a `NetAdmin` holder, and to nobody else. A child holding no
+/// capability beyond the universal set must see its own socket named by its
+/// own pid, this process's socket listed with no owner, and no other row
+/// naming any pid; this process, holding `NetAdmin`, then sees the child's
+/// socket named by the child's pid. Disclosing indiscriminately fails the
+/// child's second check; redacting indiscriminately, or filtering rows by
+/// owner, fails its first; ignoring `NetAdmin` fails the last.
+///
+/// Deliberately bound UDP sockets and no traffic, so it reaches the same
+/// conclusion on a host with no route off the machine.
+fn socket_query_attributes_a_socket_to_its_owner() -> bool {
+    let Some(_socket) = bind_udp(OWNER_PORT) else {
+        return false;
+    };
+    let (Ok((child_in, to_child)), Ok((from_child, child_out))) = (fs::pipe(), fs::pipe()) else {
+        eprintln!("ip_e2e_test: pipe failed");
+        return false;
+    };
+    let tid = spawn_prog_stdio(
+        SELF,
+        &["ip_e2e_test", UNPRIVILEGED, "sockets"],
+        child_in.raw(),
+        child_out.raw(),
+    );
+    drop(child_in);
+    drop(child_out);
+    if tid <= 0 {
+        eprintln!("ip_e2e_test: spawning the unprivileged socket check returned {tid}");
+        return false;
+    }
+
+    // The child prints its pid once its own view is right, then holds its
+    // socket open until its stdin closes.
+    let mut said = Vec::new();
+    let mut chunk = [0u8; 32];
+    while !said.contains(&b'\n') {
+        match fs::read_slice(from_child.raw(), &mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => said.extend_from_slice(&chunk[..n]),
+        }
+    }
+    let said = String::from_utf8_lossy(&said).into_owned();
+    let disclosed = match said.trim().parse::<u32>() {
+        Ok(child) => match socket_rows()
+            .as_deref()
+            .and_then(|rows| udp_row(rows, CHILD_PORT))
+        {
+            Some(row) if row.owner_pid == child => true,
+            Some(row) => {
+                eprintln!(
+                    "ip_e2e_test: a NetAdmin holder sees owner {} on pid {child}'s socket",
+                    row.owner_pid
+                );
+                false
+            }
+            None => {
+                eprintln!("ip_e2e_test: no row for the child's socket on {CHILD_PORT}");
+                false
+            }
+        },
+        Err(_) => {
+            eprintln!("ip_e2e_test: the unprivileged socket check printed {said:?}");
+            false
+        }
+    };
+    drop(to_child);
+    match process::wait_exit_code(tid as u32) {
+        0 => disclosed,
+        code => {
+            eprintln!("ip_e2e_test: the unprivileged socket check exited {code}");
+            false
+        }
+    }
+}
+
+/// The unprivileged half of [`socket_query_attributes_a_socket_to_its_owner`].
+fn socket_owner_is_redacted() -> bool {
+    use std::io::{Read as _, Write as _};
+
+    let Some(_socket) = bind_udp(CHILD_PORT) else {
+        return false;
+    };
+    let Some(rows) = socket_rows() else {
+        return false;
+    };
+    let mine = process::getpid();
+    let Some(ours) = udp_row(&rows, CHILD_PORT) else {
         eprintln!(
-            "ip_e2e_test: no row for the UDP socket this process just bound to {PORT} — \
+            "ip_e2e_test: no row for the UDP socket this process just bound to {CHILD_PORT} — \
              a query that returns every socket is missing one that exists"
         );
         return false;
     };
     if ours.owner_pid != mine {
         eprintln!(
-            "ip_e2e_test: our own socket reports owner {} rather than our pid {} — \
+            "ip_e2e_test: our own socket reports owner {} rather than our pid {mine} — \
              the owner is withheld from the process that owns it",
-            ours.owner_pid, mine
+            ours.owner_pid
         );
         return false;
     }
-
+    match udp_row(&rows, OWNER_PORT) {
+        Some(row) if row.owner_pid == INVALID_PROCESS_ID => {}
+        Some(row) => {
+            eprintln!(
+                "ip_e2e_test: the parent's socket names owner {} to an unprivileged caller",
+                row.owner_pid
+            );
+            return false;
+        }
+        None => {
+            eprintln!("ip_e2e_test: the parent's socket on {OWNER_PORT} is not listed");
+            return false;
+        }
+    }
     for row in &rows {
         if row.owner_pid != mine && row.owner_pid != INVALID_PROCESS_ID {
             eprintln!(
                 "ip_e2e_test: row {}:{} discloses owner {} to an unprivileged caller \
-                 whose pid is {}",
-                row.local_port, row.remote_port, row.owner_pid, mine
+                 whose pid is {mine}",
+                row.local_port, row.remote_port, row.owner_pid
             );
             return false;
         }
     }
+
+    let mut stdout = std::io::stdout();
+    if writeln!(stdout, "{mine}")
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
+        return false;
+    }
+    let _ = std::io::stdin().read_to_end(&mut Vec::new());
     true
 }
 
@@ -1192,8 +1339,8 @@ const CASES: &[(&str, fn() -> bool)] = &[
         queries_and_monitor_are_unprivileged,
     ),
     (
-        "direct_mutation_is_eperm_despite_system",
-        direct_mutation_is_eperm_despite_system,
+        "direct_mutation_is_eperm_without_net_admin",
+        direct_mutation_is_eperm_without_net_admin,
     ),
     (
         "queries_honour_their_ifindex_filter",
@@ -1218,6 +1365,22 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("ip_renders_the_stack", ip_renders_the_stack),
 ];
 
+/// What a respawned [`UNPRIVILEGED`] child runs, by the name in `argv[2]`.
+const UNPRIVILEGED_CHECKS: &[(&str, fn() -> bool)] = &[
+    ("queries", queries_and_monitor_answer),
+    ("mutation", direct_mutation_is_refused),
+    ("sockets", socket_owner_is_redacted),
+];
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(UNPRIVILEGED) {
+        let check = args.get(2).map_or("", String::as_str);
+        let passed = UNPRIVILEGED_CHECKS
+            .iter()
+            .find(|(name, _)| *name == check)
+            .is_some_and(|(_, run)| run());
+        std::process::exit(if passed { 0 } else { 1 });
+    }
     slopos_slibc::test_harness::run_with_progress("ip_e2e", CASES);
 }

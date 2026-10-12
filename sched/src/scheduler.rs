@@ -2100,24 +2100,22 @@ pub fn current_task_sid() -> u32 {
     Current::get().map_or(0, |c| c.task().sid())
 }
 
-/// Whether the running task may spend a resource the system holds in reserve
-/// against exhaustion — ext2's `s_r_blocks_count` today.
-///
-/// A kernel thread answers `true` because the flusher writing back must not be
-/// the caller that is refused, or a full disk becomes an unrecoverable one;
-/// `TASK_FLAG_SYSTEM` is `/sbin/init`, which must still be able to write once
-/// userland has filled the volume.
-pub fn current_task_is_privileged() -> bool {
-    use slopos_abi::task::{TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE};
-    Current::get().is_none_or(|c| {
-        let flags = c.task().flags;
-        flags & TASK_FLAG_USER_MODE == 0 || flags & TASK_FLAG_SYSTEM != 0
+/// The running task's capability mask; none on a CPU with no current task.
+pub fn current_task_caps() -> u64 {
+    Current::get().map_or(slopos_ostd::authority::CAP_NONE, |c| {
+        slopos_ostd::task::ops::task_caps(c.task())
     })
 }
 
-/// The running task's flag word; 0 on a CPU with no current task.
-pub fn current_task_flags() -> u16 {
-    Current::get().map_or(0, |c| c.task().flags)
+/// Whether the running task holds `cap`. A kernel thread holds none.
+pub fn current_task_holds(cap: slopos_ostd::authority::Capability) -> bool {
+    slopos_ostd::authority::mask_permits(current_task_caps(), cap)
+}
+
+/// Whether this CPU runs no user task: a kernel thread, or no task at all.
+pub fn current_task_is_kernel() -> bool {
+    use slopos_abi::task::TASK_FLAG_USER_MODE;
+    Current::get().is_none_or(|c| c.task().flags & TASK_FLAG_USER_MODE == 0)
 }
 
 /// The account the running task's allocations are charged to, or

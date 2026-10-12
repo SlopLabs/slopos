@@ -7,8 +7,8 @@
 //!
 //! Objects the grammar accepts but this kernel does not serve print
 //! `ip: OBJECT: not supported by this kernel yet` and exit 1, never an empty
-//! table. Nothing pre-checks `NET_ADMIN` — there is no syscall to read a task's
-//! own flags, so the syscall is issued and its errno is rendered.
+//! table. Nothing pre-checks `NetAdmin`: the syscall is issued and its errno is
+//! rendered, so the kernel stays the one place that decides.
 
 mod addr;
 mod dhcp;
@@ -67,7 +67,7 @@ impl Failure {
     /// the privilege comes from the path the program was run from.
     pub fn from_errno(context: impl Into<String>, err: SyscallError) -> Failure {
         let message = match err {
-            SyscallError::EPERM => "operation not permitted (need NET_ADMIN; run /bin/ip)",
+            SyscallError::EPERM => "operation not permitted (need NetAdmin; run /bin/ip)",
             SyscallError::ENOSYS => NOT_SUPPORTED,
             SyscallError::ENODEV => "no such device",
             SyscallError::EBUSY => "another administrative change is in flight",

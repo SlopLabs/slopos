@@ -66,10 +66,12 @@ an eviction interact with it, `Ext2Fs::sync_step` for the bounded pass, and
 states the invariants a change there must keep.
 
 The authority model has **landed and its plan is retired**. Authority is a flat
-per-capability mask whose classification is total by compile-time construction:
+per-capability mask, the only authority a task carries — `task.flags` say where and how
+it runs, never what it may do — and its classification is total by compile-time construction:
 `define_syscall!` takes a mandatory `cap(X)` clause and emits it into the dispatch table
 through the handler, so a `const` histogram in `core/src/syscall/handlers.rs` asserts both
-totality over all 177 slots and each capability's recorded entry-point count. Read the code
+totality over all 175 registered entry points and each capability's recorded entry-point
+count. Read the code
 rather than a document: `slopos_ostd::authority` for the vocabulary and the witness,
 `core/src/exec/grants.rs` for where authority enters, `slopos_ostd::seat` for the display
 and input seats, and `verification/proofs/authority.rs` for the four machine-checked

@@ -200,9 +200,6 @@ impl TaskPriority {
 pub const TASK_FLAG_USER_MODE: u16 = 0x01;
 pub const TASK_FLAG_KERNEL_MODE: u16 = 0x02;
 pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;
-pub const TASK_FLAG_SYSTEM: u16 = 0x08;
-pub const TASK_FLAG_COMPOSITOR: u16 = 0x10;
-pub const TASK_FLAG_DISPLAY_EXCLUSIVE: u16 = 0x20;
 /// Place the spawned task into its own process group (`pgid = task_id`) instead
 /// of inheriting the parent's, closing the SMP race between spawn and the
 /// parent's `setpgid` + `tcsetpgrp` calls.
@@ -213,89 +210,8 @@ pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
 /// matches the terminal's controlling session.
 pub const TASK_FLAG_FOREGROUND: u16 = 0x100;
 
-/// May mutate network configuration: interface admin state, addresses, routes,
-/// the resolver, the DHCP client, and the master networking switch. Reading
-/// that state needs nothing — `net_query` and `net_monitor` are unprivileged.
-///
-/// Conferred on exactly one program, `/bin/ip`. That restricts not *who* may
-/// reconfigure the network — any task can spawn any path — but *how*, to one
-/// argument grammar with one set of validation.
-pub const TASK_FLAG_NET_ADMIN: u16 = 0x200;
-
-/// May reconfigure the console: the keyboard layout and the console font. The
-/// layout is one global table feeding every TTY and the compositor's input path
-/// — Linux gates the equivalent `KDSKBENT` on `CAP_SYS_TTY_CONFIG`. Reading it
-/// needs nothing.
-///
-/// Conferred on `/bin/keymap`; `TASK_FLAG_SYSTEM` implies it.
-pub const TASK_FLAG_CONSOLE_ADMIN: u16 = 0x400;
-
-/// May enumerate every task, including kernel threads and more privileged
-/// tasks, and run the diagnostic console's informational commands, which
-/// print them (`kconsole(2)`).
-///
-/// Without it, `process_list` reports only the tasks the caller could already
-/// signal (`slopos_core::syscall::signal::signal_dominates`), so an id the
-/// kernel refuses to act on is one it never handed out.
-///
-/// Conferred on `/bin/sysmon` and `/bin/kconsole`; `TASK_FLAG_SYSTEM`
-/// implies it.
-pub const TASK_FLAG_PROC_ADMIN: u16 = 0x800;
-
-/// May halt or reboot the machine, and set the Boot Loader Interface's
-/// variables that choose what boots next.
-///
-/// Conferred by program identity, through `slopos_core::exec::grants`. Power
-/// is deliberately not a shell builtin: Linux gates `reboot(2)` on
-/// `CAP_SYS_BOOT` and ships `/sbin/halt` as a separate privileged binary,
-/// `systemctl poweroff` asks logind rather than acting, and Redox puts every
-/// such resource behind a daemon that holds the authority. All three keep the
-/// shell as the thing that *asks*, never the thing that holds.
-///
-/// `TASK_FLAG_SYSTEM` implies it, so init can still bring the machine down.
-pub const TASK_FLAG_POWER: u16 = 0x1000;
-
-/// May spawn a program whose identity earns it authority.
-///
-/// The bound on the one raise site. Without it, any task obtains a privileged
-/// child simply by spawning the privileged path -- which is how an entitlement
-/// leaks to an unrelated program without any privilege being *granted* to it.
-///
-/// Deliberately **not** an intersection with the spawner's own authority:
-/// `spawner.caps & grant(image)` is arithmetically self-defeating, because the
-/// shell holds no display authority and `/bin/roulette` could then never draw.
-/// The bound has to be a separate right to *launch*, not a floor on what is
-/// launched.
-///
-/// Conferred on the programs that actually launch: `/sbin/init`,
-/// `/bin/shell`, `/bin/terminal` (which spawns the shell),
-/// `/bin/compositor` (which spawns `/bin/ip` for the network toggle and the
-/// dock's programs) and `/bin/remoted` (which runs what the paired host
-/// asks for). `TASK_FLAG_SYSTEM` implies it.
-pub const TASK_FLAG_LAUNCH: u16 = 0x2000;
-
-/// May attach and detach filesystems: `mount(2)` and `umount2(2)`.
-///
-/// The mount table is one global namespace, so a mount is authority over every
-/// other process's view of the filesystem — a mount over `/bin` replaces the
-/// binaries the program-identity grant table is keyed on. It is also the
-/// raw-device right: `/bin/bootctl` holds it to write the boot partition
-/// beneath every filesystem. `TASK_FLAG_SYSTEM` implies it.
-pub const TASK_FLAG_MOUNT: u16 = 0x4000;
-
-/// The installer's role: register a loader with the firmware, as a `Boot####`
-/// entry ordered in `BootOrder`, and seal the mount points a new root carries
-/// the base over. It adds those variables to what `Power`, which the UEFI
-/// variable calls are gated on, already reaches, so a holder holds both.
-///
-/// The last bit of the flag word. Conferred by program identity on
-/// `/bin/installer` and the two tests that drive what it does;
-/// `TASK_FLAG_SYSTEM` does not imply it, since nothing init does writes a
-/// firmware entry.
-pub const TASK_FLAG_INSTALL: u16 = 0x8000;
-
-// `task.flags` is the entirety of SlopOS's privilege model; the four masks
-// below partition it, so "may a caller set this bit?" is answered once, here.
+// The four masks below partition the word, so "may a caller set this bit?" is
+// answered once, here.
 
 /// Flag bits a `spawn_path` caller may set for its own child. `NEW_PGRP` only
 /// mints a group inside the parent's own session and `FOREGROUND` is
@@ -303,41 +219,24 @@ pub const TASK_FLAG_INSTALL: u16 = 0x8000;
 /// child authority the parent did not already hold.
 pub const SPAWN_USER_SETTABLE: u16 = TASK_FLAG_NEW_PGRP | TASK_FLAG_FOREGROUND;
 
-/// Flag bits that name a privilege. A spawn request carrying any of these is
-/// refused with `EPERM`: the kernel confers them from the program-identity table
-/// in `slopos_core::exec::grants`, keyed on the binary being loaded.
-///
-/// `NO_PREEMPT` is here despite having no path that grants it — the timer tick
-/// and the deferred post-IRQ reschedule both return early for a task carrying
-/// it, so as an accepted spawn input it is an attack surface and nothing else.
-pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT
-    | TASK_FLAG_SYSTEM
-    | TASK_FLAG_COMPOSITOR
-    | TASK_FLAG_DISPLAY_EXCLUSIVE
-    | TASK_FLAG_NET_ADMIN
-    | TASK_FLAG_CONSOLE_ADMIN
-    | TASK_FLAG_PROC_ADMIN
-    | TASK_FLAG_POWER
-    | TASK_FLAG_LAUNCH
-    | TASK_FLAG_MOUNT
-    | TASK_FLAG_INSTALL;
+/// Flag bits only the kernel sets, refused from a spawn with `EPERM`. The timer
+/// tick and the deferred post-IRQ reschedule both return early for a task
+/// carrying `NO_PREEMPT`, so one non-preemptible spinner pinned per CPU wedges
+/// the machine.
+pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT;
 
-/// The two ring bits. They describe where the task executes, not what it may do,
-/// hence classified apart from the privileges. `USER_MODE` is forced on
-/// regardless, so a caller that sets it is redundant rather than wrong;
-/// `KERNEL_MODE` is refused with `EINVAL` here because `task_build`'s own
-/// refusal reaches the exec layer only as `NoMem`.
+/// The two ring bits. `USER_MODE` is forced on regardless, so a caller that
+/// sets it is redundant rather than wrong; `KERNEL_MODE` is refused with
+/// `EINVAL` here because `task_build`'s own refusal reaches the exec layer only
+/// as `NoMem`.
 pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 
-/// Undefined flag bits, all failing closed with `EINVAL`. Written as a literal
-/// on purpose: deriving it from the complement of the other three would make the
-/// partition assert below unfailable, which is the only reason that assert
-/// exists.
-///
-/// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused,
-/// so every bit of the word is spoken for: a new `TASK_FLAG_*` means widening
-/// it, and adding the flag to exactly one of the three masks above.
-pub const SPAWN_RESERVED: u16 = 0x0040;
+/// Undefined flag bits, all failing closed with `EINVAL`: `0x0040` is the
+/// retired `TASK_FLAG_FPU_INITIALIZED`, and the rest are the privileges that
+/// moved to the capability mask. A literal on purpose: deriving it from the
+/// complement of the other three would make the partition assert below
+/// unfailable, which is the only reason that assert exists.
+pub const SPAWN_RESERVED: u16 = 0xFE78;
 
 const _: () = assert!(
     (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS | SPAWN_RESERVED) == u16::MAX,
@@ -350,9 +249,6 @@ const _: () = assert!(
     (SPAWN_RESERVED & (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS)) == 0,
     "a defined flag bit is also marked reserved",
 );
-// Named separately because it is the one bit whose escalation reaches past the
-// requesting task: one non-preemptible spinner pinned per CPU wedges the machine.
-const _: () = assert!((SPAWN_USER_SETTABLE & TASK_FLAG_NO_PREEMPT) == 0);
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

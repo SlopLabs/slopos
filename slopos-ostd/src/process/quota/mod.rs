@@ -108,23 +108,21 @@ mod tests {
         assert_eq!(used(root(), ResourceKind::FdSlot), 0);
     }
 
-    /// The raw-device right frees a principal of the block ceiling, and losing
-    /// it restores the default.
+    /// `RawBlock` frees a principal of the block ceiling, `Mount` does not,
+    /// and losing `RawBlock` restores the default.
     #[test]
     fn the_block_ceiling_follows_the_raw_device_right() {
-        use crate::authority::caps_from_task_flags;
-        use slopos_abi::task::{TASK_FLAG_MOUNT, TASK_FLAG_USER_MODE};
+        use crate::authority::{CAP_UNIVERSAL, Capability};
         let _f = fixture();
         let installer = account(1, root());
         let limit = |id| stats(id, ResourceKind::DiskBlocks).map(|s| s.limit);
         let default = slopos_abi::quota::default_process_limit(ResourceKind::DiskBlocks);
         assert_eq!(limit(installer), Some(default));
-        fit_disk_blocks(
-            installer,
-            caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_MOUNT),
-        );
+        fit_disk_blocks(installer, CAP_UNIVERSAL | Capability::Mount.bit());
+        assert_eq!(limit(installer), Some(default));
+        fit_disk_blocks(installer, CAP_UNIVERSAL | Capability::RawBlock.bit());
         assert_eq!(limit(installer), Some(NO_LIMIT));
-        fit_disk_blocks(installer, caps_from_task_flags(TASK_FLAG_USER_MODE));
+        fit_disk_blocks(installer, CAP_UNIVERSAL);
         assert_eq!(limit(installer), Some(default));
     }
 

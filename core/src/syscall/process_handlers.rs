@@ -167,8 +167,7 @@ fn read_user_spawn_actions(attrs: &SpawnAttrs) -> Result<KVec<exec::FdAction>, E
 ///
 /// Order is load-bearing: an undefined bit is answered as malformed before
 /// anything is said about privilege, so probing reserved bits never learns from
-/// an `EPERM` that a bit *means* something. The privileged bits a child ends up
-/// with come from [`crate::exec::grants`].
+/// an `EPERM` that a bit *means* something.
 fn validate_spawn_flags(flags: u16) -> Result<u16, Errno> {
     if flags & SPAWN_RESERVED != 0 {
         return Err(Errno::EINVAL);
@@ -320,6 +319,7 @@ define_syscall!(syscall_spawn_path
         envp_refs.as_deref(),
         priority,
         flags,
+        ctx.caps() & slopos_ostd::authority::CAP_UNIVERSAL,
         actions.as_slice(),
         attrs.sigdefault_mask,
         parent_table,
@@ -1258,7 +1258,7 @@ define_syscall!(syscall_futex
 });
 
 define_syscall!(syscall_vhangup (ctx)
-    cap(NoneRelation)
+    cap(ConsoleConfig)
     requires(let task_id: task_id)
     -> Result<(), Errno>
 {

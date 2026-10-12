@@ -1069,6 +1069,7 @@ fn panic_recover_smoke_observer() {
 /// boundary kills the task and this observer confirms the kernel outlived it.
 /// The transcript's `panic recovery: syscall` line is the positive assertion.
 fn panic_syscall_smoke_observer() {
+    use slopos_ostd::authority::{CAP_UNIVERSAL, Capability};
     use slopos_sched::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
 
     let pid = match slopos_core::exec::spawn_program_with_attrs(
@@ -1077,6 +1078,7 @@ fn panic_syscall_smoke_observer() {
         None,
         slopos_sched::task::TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
+        CAP_UNIVERSAL | Capability::TestHarness.bit(),
         &[],
         0,
         None,

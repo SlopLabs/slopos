@@ -18,7 +18,7 @@ use crate::blockdev::BlockDevice;
 use crate::partition::{PARTUUID_TEXT_MAX, PartUuid};
 use crate::vfs::{FileStat, FileType, InodeId, VfsError, VfsResult};
 use crate::volume_id::{self, LABEL_MAX, Unreadable, VolumeId};
-use slopos_kernel_services::driver_runtime::{current_task_flags, current_task_is_privileged};
+use slopos_kernel_services::driver_runtime::{current_task_holds, current_task_is_kernel};
 
 pub(super) const DISK_DIR: InodeId = 8;
 pub(super) const BY_PARTUUID_DIR: InodeId = 9;
@@ -651,10 +651,9 @@ pub(crate) fn devfs_block_node_is(name: &[u8], inode: InodeId) -> bool {
 }
 
 /// Whether the running task may touch a device beneath every filesystem: a
-/// kernel thread, `TASK_FLAG_SYSTEM`, or the holder of `TASK_FLAG_MOUNT`, who
-/// may already graft any device onto the namespace.
+/// kernel thread, or a holder of `RawBlock`.
 pub(super) fn raw_block_entitled() -> bool {
-    current_task_is_privileged() || current_task_flags() & slopos_abi::task::TASK_FLAG_MOUNT != 0
+    current_task_is_kernel() || current_task_holds(slopos_ostd::authority::Capability::RawBlock)
 }
 
 /// Serve bytes from a registered block device. A short read is EOF to the

@@ -2,7 +2,7 @@
 //! from a shell or the remote control rather than the physical keyboard, with
 //! what each wrote to the kernel log copied to standard output.
 //!
-//! The kernel grants this program `TASK_FLAG_PROC_ADMIN` by path. A command
+//! The kernel grants this program `SysInspect` by path. A command
 //! that may change the machine stays the physical console's alone; the kernel
 //! refuses it here.
 

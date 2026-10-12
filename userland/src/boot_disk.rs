@@ -5,7 +5,7 @@
 //! disk whose GPT lists that partition is the boot disk, and its partition of
 //! the SlopOS boot type holds the slots, at the node the kernel made from the
 //! same table by the same rule. Reading a whole disk beneath its filesystems
-//! takes `TASK_FLAG_MOUNT`.
+//! takes `RawBlock`.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;

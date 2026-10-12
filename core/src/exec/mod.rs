@@ -22,7 +22,7 @@ use slopos_abi::auxv::{
     AT_BASE, AT_ENTRY, AT_EXECFN, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_SECURE,
 };
 use slopos_abi::fs::USER_PATH_MAX;
-use slopos_abi::task::{TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority};
+use slopos_abi::task::{TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority};
 use slopos_fs::VfsError;
 use slopos_fs::fileio::{
     FileRef, file_close_fd, fileio_clone_file_ref, fileio_create_empty_table_for_process,
@@ -43,6 +43,7 @@ use slopos_mm::process_vm::{
     process_vm_prepay_commit, process_vm_reset_for_exec, process_vm_reset_stack,
     process_vm_write_user_bytes,
 };
+use slopos_ostd::authority::{CAP_MASK_ALL, CAP_NONE, CAP_UNIVERSAL, Capability, mask_permits};
 
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_ostd::task::new_group_in_session;
@@ -140,10 +141,26 @@ fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
 /// before it runs.
 static INIT_TASK_ID: AtomicU32 = AtomicU32::new(INVALID_TASK_ID);
 
-/// Which task is init. There is no structural marker — `TASK_FLAG_SYSTEM` is
-/// shared with the utest runner — so the launch id names it.
+/// Which task is init: the launch id names it.
 pub fn init_task_id() -> u32 {
     INIT_TASK_ID.load(Ordering::Acquire)
+}
+
+/// Whether `task` is a thread of init's process.
+pub fn task_is_init(task: &slopos_sched::task_struct::Task) -> bool {
+    let init = init_task_id();
+    init != INVALID_TASK_ID && (task.task_id == init || task.tgid == init)
+}
+
+/// Whether the running task is the system itself, which ext2's reserve is
+/// for: a kernel thread, since a refused writeback makes a full disk an
+/// unrecoverable one, or init, which must still write once userland has
+/// filled the volume.
+pub fn current_task_is_system() -> bool {
+    slopos_sched::task_struct::Current::get().is_none_or(|current| {
+        let task = current.task();
+        task.flags & TASK_FLAG_USER_MODE == 0 || task_is_init(task)
+    })
 }
 
 pub fn launch_init() -> Result<u32, Errno> {
@@ -152,7 +169,8 @@ pub fn launch_init() -> Result<u32, Errno> {
         None,
         None,
         TaskPriority::Normal,
-        TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
+        TASK_FLAG_USER_MODE,
+        CAP_MASK_ALL,
         &[],
         0,
         None,
@@ -268,6 +286,8 @@ fn resolve_inherited_job_control(
     }
 }
 
+/// `caps` is the authority the kernel's caller hands the child; the image's
+/// grant is added to it.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_program_with_attrs(
     path: &[u8],
@@ -275,6 +295,7 @@ pub fn spawn_program_with_attrs(
     envp: Option<&[&[u8]]>,
     priority: TaskPriority,
     flags: u16,
+    caps: u64,
     actions: &[FdAction],
     sigdefault_mask: u64,
     parent_table: Option<FdTable>,
@@ -286,6 +307,7 @@ pub fn spawn_program_with_attrs(
         envp,
         priority,
         flags,
+        caps,
         actions,
         sigdefault_mask,
         parent_table,
@@ -303,6 +325,7 @@ pub fn spawn_program_with_cwd(
     envp: Option<&[&[u8]]>,
     mut priority: TaskPriority,
     mut flags: u16,
+    caps: u64,
     actions: &[FdAction],
     sigdefault_mask: u64,
     parent_table: Option<FdTable>,
@@ -319,14 +342,11 @@ pub fn spawn_program_with_cwd(
             return Err(Errno::E2BIG);
         }
 
-        // Privilege enters a spawn only here — the syscall boundary already
-        // refused every privileged bit the caller asked for, so flags follow
-        // the program, not the requester.
-        let (mut granted_flags, mut granted_priority) = grants::grant_for(normalized_path);
+        let (granted, granted_priority) = grants::grant_for(normalized_path);
         let delegated = if program.named_directly(path, cwd) {
             grants::delegated_for(normalized_path)
         } else {
-            0
+            CAP_NONE
         };
 
         // A raise needs `Launch`; an ordinary spawn raises nothing and needs
@@ -334,33 +354,23 @@ pub fn spawn_program_with_cwd(
         // shell holds no display authority, so `/bin/roulette` could not draw.
         // A spawner that may not raise gets the image ungranted, not a refusal:
         // `/bin/sh` and every `#!/bin/sh` script load the granted shell.
-        if granted_flags != 0 || delegated != 0 {
-            // No parent task: `launch_init`, the kernel-only root. That is
-            // exactly the raise `Launch` exists to bound, performed by the one
-            // caller that cannot be userland.
+        let mut raised = CAP_NONE;
+        if granted != CAP_NONE || delegated != CAP_NONE {
+            // No parent task: a spawn the kernel makes itself, which no
+            // userland can reach.
             let spawner_caps = task_find_by_id(parent_task_id)
                 .map(|parent| slopos_ostd::task::ops::task_caps(&parent));
-            let spawner_may_launch = spawner_caps.is_none_or(|caps| {
-                slopos_ostd::authority::mask_permits(
-                    caps,
-                    slopos_ostd::authority::Capability::Launch,
-                )
-            });
-            if !spawner_may_launch {
-                granted_flags = 0;
-                granted_priority = None;
+            if spawner_caps.is_none_or(|held| mask_permits(held, Capability::Launch)) {
+                raised = granted;
+                if let Some(tier) = granted_priority {
+                    priority = tier;
+                }
             }
-            let handed = slopos_ostd::authority::caps_from_task_flags(delegated)
-                & !slopos_ostd::authority::caps_from_task_flags(0);
-            if spawner_caps.is_none_or(|caps| handed & !caps == 0) {
-                granted_flags |= delegated;
+            if spawner_caps.is_none_or(|held| delegated & !held == 0) {
+                raised |= delegated;
             }
         }
-
-        flags |= granted_flags;
-        if let Some(granted) = granted_priority {
-            priority = granted;
-        }
+        let child_caps = caps | raised;
 
         flags |= TASK_FLAG_USER_MODE;
         let task_name = task_name_from_path(path)?;
@@ -407,7 +417,7 @@ pub fn spawn_program_with_cwd(
             &program.image,
             argv.as_deref(),
             envp,
-            granted_flags != 0,
+            raised != CAP_NONE,
             &mut entry,
             &mut stack_ptr,
             &mut tls_tp,
@@ -440,10 +450,6 @@ pub fn spawn_program_with_cwd(
             .map(|parent| resolve_inherited_job_control(parent, task_id, flags));
         let nice = parent_ref.as_ref().map_or(0, |parent| parent.nice());
 
-        // Authority enters here, from the program-identity grant applied
-        // above -- the single raise site. Stamped on the child before it is
-        // findable, so no other CPU can observe it with an unset mask.
-        let child_caps = slopos_ostd::authority::caps_from_task_flags(flags);
         if let Some(Some(account)) =
             spawn.with_child(|child| child.process().map(|process| process.account()))
         {
@@ -581,9 +587,12 @@ pub fn do_exec(
     )
 }
 
-/// `execve`'s half of the grant table: the caller keeps only what `image` is
-/// granted, and what it delegates when the caller `named_directly` it, and
-/// the block ceiling follows what it keeps.
+/// `execve`'s half of the grant table: the caller's process keeps only the
+/// universal set, what `image` is granted, and what it delegates when the
+/// caller `named_directly` it, and the block ceiling follows what it keeps.
+///
+/// Process-wide, as `caps_drop` is: a sibling thread runs on in the new
+/// image's address space, so a mask left on it would be the old program's.
 #[inline(never)]
 pub fn narrow_authority_for_exec(
     task: &slopos_sched::task_struct::Task,
@@ -592,17 +601,15 @@ pub fn narrow_authority_for_exec(
     named_directly: bool,
 ) {
     let image = image.as_bytes();
-    let (granted_flags, _) = grants::grant_for(image);
+    let (granted, _) = grants::grant_for(image);
     let delegated = if named_directly {
         grants::delegated_for(image)
     } else {
-        0
+        CAP_NONE
     };
-    let granted = slopos_ostd::authority::caps_from_task_flags(
-        granted_flags | delegated | TASK_FLAG_USER_MODE,
-    );
+    let kept = CAP_UNIVERSAL | granted | delegated;
     let before = slopos_ostd::task::ops::task_caps(task);
-    let after = slopos_ostd::task::ops::task_restrict_caps(task, granted);
+    let after = slopos_sched::task::process_drop_caps(task, !kept);
     if let Some(process) = task.process() {
         slopos_ostd::process::quota::fit_disk_blocks(process.account(), after);
     }

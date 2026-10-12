@@ -42,14 +42,13 @@ pub fn net_query(what: u32, ifindex: u32, buf: &mut [u8]) -> SyscallResult<usize
 }
 
 /// Per-interface control, and the two global operations addressed to
-/// `NET_IFINDEX_GLOBAL`. Requires `TASK_FLAG_NET_ADMIN`.
+/// `NET_IFINDEX_GLOBAL`. Requires `NetAdmin`.
 pub fn net_iface_ctl(ifindex: u32, op: u32, arg: u64) -> SyscallResult<()> {
     let raw = unsafe { syscall3(SYSCALL_NET_IFACE_CTL, ifindex as u64, op as u64, arg) as i64 };
     checked(raw).map(|_| ())
 }
 
-/// Add (`add == true`) or remove an interface address. Requires
-/// `TASK_FLAG_NET_ADMIN`.
+/// Add (`add == true`) or remove an interface address. Requires `NetAdmin`.
 pub fn net_addr_ctl(req: &UserAddrReq, add: bool) -> SyscallResult<()> {
     let raw = unsafe {
         syscall3(
@@ -62,7 +61,7 @@ pub fn net_addr_ctl(req: &UserAddrReq, add: bool) -> SyscallResult<()> {
     checked(raw).map(|_| ())
 }
 
-/// Add (`add == true`) or remove a route. Requires `TASK_FLAG_NET_ADMIN`.
+/// Add (`add == true`) or remove a route. Requires `NetAdmin`.
 pub fn net_route_ctl(req: &UserRouteReq, add: bool) -> SyscallResult<()> {
     let raw = unsafe {
         syscall3(
@@ -79,7 +78,7 @@ pub fn net_route_ctl(req: &UserRouteReq, add: bool) -> SyscallResult<()> {
     checked(raw).map(|_| ())
 }
 
-/// Replace the resolver configuration. Requires `TASK_FLAG_NET_ADMIN`.
+/// Replace the resolver configuration. Requires `NetAdmin`.
 pub fn net_resolver_set(req: &UserResolverReq) -> SyscallResult<()> {
     let raw = unsafe {
         syscall2(

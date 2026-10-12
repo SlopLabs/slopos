@@ -494,10 +494,10 @@ is written at install and never by a commit. The removable-media path
 `\EFI\BOOT\BOOTX64.EFI`, with a copy of the configuration beside it, is written
 only on an ESP SlopOS created: on a shared one it belongs to whoever put a
 loader there. The firmware reaches SlopOS's own copy through a `Boot####`
-entry, which only the installer's role, `TASK_FLAG_INSTALL`, may register:
-`efivar_get` and `efivar_set` are gated on `Power` and reach the Boot Loader
-Interface's namespace and SlopOS's own, and the `BootEntry` capability that
-role confers adds `Boot####`, `BootOrder`, `BootNext` and `BootCurrent` in the
+entry, which only a `BootEntry` holder — the installer, init and the utests —
+may register: `efivar_get` and `efivar_set` are gated on `Power` and reach the
+Boot Loader Interface's namespace and SlopOS's own, and `BootEntry` adds
+`Boot####`, `BootOrder`, `BootNext` and `BootCurrent` in the
 global one and nothing else there, with every write held to non-volatile boot
 and runtime access and to the format the firmware parses. An entry is matched
 by the partition GUID and file it names, wherever its device path puts them,
@@ -528,8 +528,8 @@ carrying the base directories only as sealed mount points; the tests and
 verified images carry a system of their own, which a disk root's base
 covers.
 
-**The guest installs what it builds.** `/bin/bootctl` (granted `Mount` for the
-raw disk and partition and `Power` for the loader's variables) finds the boot
+**The guest installs what it builds.** `/bin/bootctl` (granted `RawBlock` for
+the raw disk and partition and `Power` for the loader's variables) finds the boot
 partition by its type GUID on the disk whose GPT lists `LoaderDevicePartUUID`,
 the ESP Limine was started from, and writes a kernel and its base into a slot
 that is not the default, clearing a one-shot boot armed for that slot first,
@@ -546,7 +546,7 @@ leaves the default unknown, since Limine also resolves menu paths there, and
 `bootctl install` refuses until `bootctl set-default` names one. `bootctl
 spare` names the slot that is not the default. A slot that
 panics resets under `panic=reboot`, and the reset lands on the old default.
-Block device nodes accept writes from a `Mount` or `SYSTEM` holder, each one
+Block device nodes accept reads and writes from a `RawBlock` holder, each write
 through the claim on that disk or partition, so a mounted one answers `EBUSY`
 while its siblings stay writable. UEFI variables are read and written on a
 kernel thread — the firmware is mapped only into the kernel master address
@@ -591,9 +591,9 @@ file — has no payload, and the installer installs without the toolchain,
 saying so when the medium's disk names a payload the kernel did not mount; it
 takes a payload only from the root of a read-only ext4 volume at
 `/media/payload`, since any program can make a directory there.
-`/bin/installer` (granted `Mount`, `Power`, and `Install`, which confers
-`Seal` beside `BootEntry`; a `Mount` holder may write any disk raw, so no
-per-process `DiskBlocks` ceiling binds it, and it fills a whole root in one
+`/bin/installer` (granted `RawBlock`, `Mount`, `Power`, `BootEntry` and
+`Seal`; a `RawBlock` holder may write any disk raw, so no per-process
+`DiskBlocks` ceiling binds it, and it fills a whole root in one
 process; in the shell's program
 registry, because a grant is raised only by a spawn and the shell `exec`s
 anything else in a fork that keeps nothing of it) asks for a whole disk —
@@ -616,7 +616,7 @@ that Limine can boot — makes `slopos-a` the default, holds the root to
 when asked. It writes nothing outside the partitions it made or was given, nor
 anything on a shared ESP outside `\EFI\SlopOS\`. e2fsprogs is the recipe
 `toolchain/recipes/e2fsprogs`, built unpatched; its six programs are in every
-base at `/sbin`, each keeping `Mount` there, and nowhere else, as far as
+base at `/sbin`, each keeping a delegated `RawBlock` there, and nowhere else, as far as
 its spawner holds it: the installer hands it on, the shell has none to give.
 
 **A panic leaves a record.** The boot disk's crash partition is a ring of
@@ -638,7 +638,7 @@ overflow takes, whose data stack is spent, does not. A recovered panic's report
 also goes into the kernel log, so a later record carries it. The panic screen says what became of the
 record. `/dev/crash` has a file per record, named by its sequence number and
 `-torn` after it when its CRC fails; reading one and unlinking it, which erases
-the record, take the raw-device right. Init runs `bootctl collect` before the
+the record, take `RawBlock`, the raw-device right. Init runs `bootctl collect` before the
 tests and the services: it copies each record to
 `/var/log/crash/<index>-<UTC time>-<slot>.txt`, the index taken from
 `/var/log/crash/bounds` before the copy, through a flushed sibling and a
@@ -969,7 +969,8 @@ before. `/bin/cpufreq` (granted `Power` by path) is the tool: `status`, `watch`,
 throttle causes, and one `CPUFREQ[run]:` line on stderr), `set
 hwp|epp|limits|placement`, and `bench`, which times one workload pinned to each
 CPU, on an SMT pair and wherever the scheduler puts it (`CPUFREQ[bench]:`).
-`sysmon` shows each CPU's type and clock. `prof` (`prof_ctl`) starts, stops and
+`sysmon` shows each CPU's type and clock. `/bin/prof` (`prof_ctl`; granted
+`SysInspect` by path, as `sysmon` is) starts, stops and
 reports the sampling profiler on a running system; its report carries each
 CPU's busy share and effective clock over the span.
 
@@ -983,7 +984,7 @@ requests run side by side; it redials with backoff and pings both ways.
 Requests are `remote-core`'s frames: run a program (argv, cwd, env, stdin,
 timeout; stdout, stderr and the exit status streamed back), and write or read
 a file, atomically and checked by SHA-256 end to end. remoted holds `Launch` by
-path, so a program it starts gets its grant — `bootctl` its `Mount` and
+path, so a program it starts gets its grant — `bootctl` its `RawBlock` and
 `Power`, `cpufreq` its `Power` — and whoever holds the broker's key holds the
 machine. **The pairing lives only in the base,** which no process can write:
 every program can write `/etc`, so a pairing read from there would let any
@@ -1039,8 +1040,8 @@ survives a conversion, and the kernel reads such a volume like any other.
 immutable flag is the VFS seal, an append-only file another system marked is
 sealed too, ext4 also stores `nodump` and `noatime`, any other change is
 `EOPNOTSUPP` (a RAM filesystem keeps only the seal, and only sets it), and
-moving the seal takes the `Seal` capability, which only `TASK_FLAG_SYSTEM`
-and the installer's role confer, because a path-keyed program-identity grant
+moving the seal takes the `Seal` capability, which only init, the utests and
+the installer hold, because a path-keyed program-identity grant
 is only as good as the seal on the file it names.
 
 **The root is not the only filesystem.** `mount(2)` with `fstype` `ext2`,
@@ -1219,9 +1220,9 @@ process holds its fd, so the sizer's address-space teardown hands each memfd it
 sized to the root (`ChargeSlot::bequeath`): the root is never released, so the
 machine's ceiling keeps counting it until the memfd goes, and it is no
 process's own, since no death gives it back. Only processes the writer could
-`kill` (`signal_dominates` on the writer's flags) are ever taken, as Linux's
-`oom_score_adj=-1000` is absolute: one holding privileged flags the writer
-lacks is never killed for its write, so a leaking privileged service is taken
+`kill` (`signal_dominates`: the writer holds every capability the target
+holds) are ever taken, as Linux's `oom_score_adj=-1000` is absolute: one holding
+a capability the writer lacks is never killed for its write, so a leaking privileged service is taken
 by its own write, once it is the heaviest process it may signal, and an
 unprivileged writer dies rather than take it. Init's own write is the
 exception, shielded from nothing, since it cannot be impersonated and its
@@ -1315,6 +1316,24 @@ The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-re
 **`slopos_ostd::mm::heap` is the only kernel allocation surface.** Every kernel crate routes heap allocation through `slopos_ostd`'s `KBox`, `KVec`, `KArc`, `KVecDeque`, `KBTreeMap`, and `PinBox` rather than `alloc::*`. The `kernel/src/main.rs` global-allocator carve-out above is the lone exception.
 
 The in-place-init primitive (`slopos_ostd::Init<T, E>`, `Zeroable`, `init_from_closure`, `init_zeroed`, `Field<T, U, OFF>` + `#[derive(SlotFields)]`) is **in-house** — defined in `slopos-ostd/src/mm/init.rs` with no external dependency on `pinned-init` or Rust-for-Linux's `pin-init`. Large structs must be constructed via `KBox::try_init(T::init_…())` / `PinBox::try_init(T::init_…())` so the `T` rvalue never materialises on the caller's stack. `check_stack_sizes.sh` enforces the upper bound from the other direction. `init_struct_with`'s closure must return `Initialised<T>`, which only `SlotPtr::finish` mints, so a caller cannot claim success without going through the slot; `finish` additionally checks field coverage under `debug_assertions`.
+
+### Authority discipline
+
+**The per-task capability mask is the only authority.** `task.flags` says
+where and how a task runs, never what it may do; the privilege bits it once
+carried are reserved, and a spawn naming one is `EINVAL`. Every check reads the
+mask (`slopos_ostd::authority`, its bits stated once in `abi/src/caps.rs`): a
+syscall slot through its `cap(...)` clause, anything finer through
+`SyscallContext::holds` or a witness, and a kernel thread passes a gate only
+where the gate names it. A spawned program holds the universal capabilities
+(`ConsoleIo`, `ClipboardGlobal`, `Fate`) its spawner holds plus what its path
+earns, init and every utest binary hold `CAP_MASK_ALL`, exec keeps `caps &
+(universal | grant | delegated)` in every thread of the process, a sender may
+signal only a target whose capabilities it all holds, and `caps_drop` takes
+capabilities from a whole process for good, a thread whose clone races it
+included. The ext2 reserve and a nice value below zero are init's by task id.
+A new check that reads `task.flags`, a path or a task id where a capability
+fits is a second authority carrier.
 
 ### Licensing discipline
 
@@ -1507,7 +1526,7 @@ without a separate build.
 **physical console** makes the kernel describe itself. Press SysRq
 (Alt+PrintScreen) to arm and one command key to run, or send a serial BREAK and
 then the command key. Press the trigger then `h` for the list. A program may
-run the informational ones too: `/bin/kconsole t` (granted `PROC_ADMIN` by
+run the informational ones too: `/bin/kconsole t` (granted `SysInspect` by
 path) queues `t` through `kconsole(2)`, waits for it to run and prints what it
 added to the kernel log, so `just remote run -- kconsole tp` reads a machine
 nobody is sitting at. The probe (`p`) writes each CPU's RIP, current task and
@@ -1531,7 +1550,7 @@ Three properties are load-bearing:
   which no byte pattern can forge. The one
   other caller of `kconsole::request` is `request_informational`, which refuses
   any key a `KCMD_DESTRUCTIVE` command takes and is reached only by
-  `kconsole(2)` for a `PROC_ADMIN` holder — the shape of Linux's root-only
+  `kconsole(2)` for a `SysInspect` holder — the shape of Linux's root-only
   `/proc/sysrq-trigger`, narrowed to the commands that only print. The facility
   this replaced was reachable by any process holding a PTY master.
 - **One execution tier.** Every command runs at the bottom-half point with

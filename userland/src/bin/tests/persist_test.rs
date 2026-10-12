@@ -269,28 +269,79 @@ fn statfs_agrees_with_fstatfs() -> bool {
 /// The block reserve (`s_r_blocks_count`) is what stops an unprivileged writer
 /// denying the disk to `/sbin/init`.
 ///
-/// Every utest binary runs with `TASK_FLAG_SYSTEM`, which is exactly the
-/// entitlement the reserve waives, so this process cannot be the filler. It
-/// re-spawns itself without that flag as the [`FILL_ARG`] child, which writes
-/// until refused and exits **leaving the filler in place**. The discriminating
-/// observation is then this privileged parent's write: with a reserve it
-/// succeeds into the blocks the child was refused; on a disk that simply
-/// filled, free is zero and it fails. Only after that is the filler removed.
+/// Only init and kernel threads spend the reserve, so this process and the
+/// [`FILL_ARG`] children it spawns are all held to it. Each child writes until
+/// refused and exits **leaving its filler in place**; one child's `DiskBlocks`
+/// ceiling can refuse it first, so fillers are spawned until `f_bavail` reads
+/// zero. The discriminating observation is then `f_bfree`: with a reserve the
+/// refused blocks are still free; on a disk that simply filled, nothing is.
+/// Only after that are the fillers removed. An entitled writer spending the
+/// reserve is `slopos_fs`'s `test_ext2_reserve_refuses_unprivileged_allocation`,
+/// and who is entitled `slopos_core`'s `init_is_told_apart_by_its_task_id`.
 fn the_disk_reserve_refuses_an_unprivileged_filler() -> bool {
-    use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
-    use slopos_userland::syscall::process;
-
     if !root_persists() {
         return true;
     }
-    let _ = fs::remove_file(FILLER_PATH);
+    let mut spawned = 0;
+    let verdict = loop {
+        if spawned == MAX_FILLERS {
+            break Err(format!("{MAX_FILLERS} fillers left f_bavail above zero"));
+        }
+        let path = filler_path(spawned);
+        spawned += 1;
+        let _ = fs::remove_file(&path);
+        match spawn_filler(&path) {
+            0 => {}
+            rc => break Err(format!("unprivileged filler {path} exited {rc}")),
+        }
+        let stats = match fs_syscall::statfs_path(b"/\0".as_ptr() as *const c_char) {
+            Ok(stats) => stats,
+            Err(e) => break Err(format!("statfs(\"/\") failed: {e}")),
+        };
+        if stats.f_bavail == 0 {
+            break if stats.f_bfree > 0 {
+                Ok(())
+            } else {
+                Err("the disk filled to its last block: nothing was held back".to_string())
+            };
+        }
+    };
+    for i in 0..spawned {
+        let _ = fs::remove_file(filler_path(i));
+    }
+    match verdict {
+        Ok(()) => true,
+        Err(why) => {
+            println!("RESERVE: {why}");
+            false
+        }
+    }
+}
+
+/// Each filler is held to its own `DiskBlocks` ceiling, so a volume larger
+/// than one ceiling takes several.
+const MAX_FILLERS: usize = 16;
+
+fn filler_path(index: usize) -> String {
+    format!("/var/reserve-filler.{index}")
+}
+
+/// Spawn this binary, which no grant row names, as a [`FILL_ARG`] child.
+fn spawn_filler(path: &str) -> i32 {
+    use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
+    use slopos_userland::syscall::process;
+
     let stdio = [
         process::clone_fd(0, 0),
         process::clone_fd(1, 1),
         process::clone_fd(2, 2),
     ];
-    let argv0 = b"persist_test\0";
-    let argv = [argv0.as_ptr(), FILL_ARG.as_ptr()];
+    let target = format!("{path}\0");
+    let argv = [
+        b"persist_test\0".as_ptr(),
+        FILL_ARG.as_ptr(),
+        target.as_ptr(),
+    ];
     let tid = process::spawn_path_with_actions(
         b"/bin/persist_test",
         &argv,
@@ -300,27 +351,9 @@ fn the_disk_reserve_refuses_an_unprivileged_filler() -> bool {
         0,
     );
     if tid <= 0 {
-        println!("RESERVE: could not spawn the unprivileged filler ({tid})");
-        return false;
+        return tid;
     }
-    let rc = process::wait_exit_code(tid as u32);
-    if rc != 0 {
-        println!("RESERVE: the unprivileged filler exited {rc}");
-        let _ = fs::remove_file(FILLER_PATH);
-        return false;
-    }
-
-    let after = unique_probe_path("reserve-after");
-    let ok = match fs::write(&after, b"reserve\n") {
-        Ok(()) => true,
-        Err(e) => {
-            println!("RESERVE: nothing was held back for a privileged writer: {e}");
-            false
-        }
-    };
-    let _ = fs::remove_file(&after);
-    let _ = fs::remove_file(FILLER_PATH);
-    ok
+    process::wait_exit_code(tid as u32)
 }
 
 /// `lsattr`'s and `chattr`'s ioctls on the disk root: a new file is extent-mapped,
@@ -368,7 +401,7 @@ fn inode_flags_follow_chattr() -> bool {
     }
     let sealed = flags | FS_NODUMP_FL | FS_IMMUTABLE_FL;
     if let Err(e) = fs_syscall::set_inode_flags(fd, sealed) {
-        failures.push(format!("sealing as init's peer: {e}"));
+        failures.push(format!("sealing as a Seal holder: {e}"));
     }
     if fs::OpenOptions::new().write(true).open(&path).is_ok() {
         failures.push("a sealed file opened for writing".to_string());
@@ -386,7 +419,8 @@ fn inode_flags_follow_chattr() -> bool {
     failures.is_empty()
 }
 
-/// Spawn this binary without `TASK_FLAG_SYSTEM` to try sealing `path`.
+/// Spawn this binary, which no grant row names and so holds no `Seal`, to try
+/// sealing `path`.
 fn unprivileged_seal(path: &str) -> i32 {
     use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
     use slopos_userland::syscall::process;
@@ -748,46 +782,52 @@ fn store_through(base: u64, data: &[u8]) {
 
 const FILL_ARG: &[u8] = b"--fill-until-refused\0";
 const SEAL_ARG: &[u8] = b"--seal\0";
-const FILLER_PATH: &str = "/var/reserve-filler";
 
-/// The unprivileged half: fill the volume until `ENOSPC` and exit 0 with the
-/// filler still on disk, so the parent can ask whether anything was held back.
-/// Something must have been written first, or a refusal for an unrelated
-/// reason reads as the reserve working. Bounded so a reserve that never
-/// refuses ends this process rather than the run.
-fn fill_until_refused() -> i32 {
-    let Ok(mut f) = File::create(FILLER_PATH) else {
-        println!("RESERVE(child): create failed");
+/// The unprivileged half: fill the volume at `path` until `ENOSPC` and exit 0
+/// with the filler still on disk, so the parent can ask whether anything was
+/// held back. Something must have been written first, and the refusal must be
+/// `ENOSPC`, or a refusal for an unrelated reason reads as the reserve
+/// working. Bounded above the `DiskBlocks` ceiling, so a write that is never
+/// refused ends this process rather than the run.
+fn fill_until_refused(path: &str) -> i32 {
+    let Ok(mut f) = File::create(path) else {
+        println!("RESERVE(child): create {path} failed");
         return 2;
     };
     let chunk = [0xABu8; 64 * 1024];
     let mut written = 0u64;
-    let mut refused = false;
-    while written < 256 * 1024 * 1024 {
+    let mut refused = None;
+    while written < 512 * 1024 * 1024 {
         match f.write_all(&chunk) {
             Ok(()) => written += chunk.len() as u64,
-            Err(_) => {
-                refused = true;
+            Err(e) => {
+                refused = Some(e);
                 break;
             }
         }
     }
     drop(f);
-    if !refused {
-        println!("RESERVE(child): wrote {written} bytes and was never refused");
-        return 3;
+    match refused {
+        None => {
+            println!("RESERVE(child): wrote {written} bytes and was never refused");
+            3
+        }
+        Some(_) if written == 0 => {
+            println!("RESERVE(child): refused before writing anything");
+            4
+        }
+        Some(e) if e.kind() != ErrorKind::StorageFull => {
+            println!("RESERVE(child): refused after {written} bytes, not for space: {e}");
+            5
+        }
+        Some(_) => 0,
     }
-    if written == 0 {
-        println!("RESERVE(child): refused before writing anything");
-        return 4;
-    }
-    0
 }
 
 fn main() {
     let mut args = std::env::args().skip(1);
     match (args.next().as_deref(), args.next()) {
-        (Some("--fill-until-refused"), _) => std::process::exit(fill_until_refused()),
+        (Some("--fill-until-refused"), Some(path)) => std::process::exit(fill_until_refused(&path)),
         (Some("--seal"), Some(path)) => std::process::exit(seal_refused(&path)),
         _ => {}
     }

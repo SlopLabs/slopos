@@ -3,7 +3,7 @@
 //!
 //! **Every row is visible to everyone; the owner is not.** `NET_Q_SOCKETS`
 //! reports `owner_pid` only for rows the caller owns or to a caller holding
-//! `NET_ADMIN`, so `-p` prints what it was given and never guesses: a redacted
+//! `NetAdmin`, so `-p` prints what it was given and never guesses: a redacted
 //! owner and an unowned socket arrive as the same value by design.
 
 use core::fmt::Write;
@@ -328,6 +328,6 @@ fn usage(netstat: bool) {
     println!("  -p  show the owning pid    -s  summary");
     println!();
     println!("Every socket is listed. -p names the owner only for sockets you");
-    println!("own; a caller holding NET_ADMIN sees every owner. A blank Process");
+    println!("own; a caller holding NetAdmin sees every owner. A blank Process");
     println!("column means either nobody owns it or you may not be told who does.");
 }

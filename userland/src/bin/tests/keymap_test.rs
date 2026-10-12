@@ -26,8 +26,9 @@ fn get_name_respects_buflen() -> bool {
     n == 1 && one[0] == b'u'
 }
 
-/// Full `keymap <name>` switch, then restore. Runs with `TASK_FLAG_SYSTEM` like
-/// every utest binary, so it says nothing about the unprivileged-caller gate.
+/// Full `keymap <name>` switch, then restore. Runs holding every capability
+/// like every utest binary, so it says nothing about the unprivileged-caller
+/// gate.
 fn load_switches_layout_and_restores() -> bool {
     let de_ok = load_layout_file("de_CH") && current().as_deref() == Some("de_CH");
     // Restore US whatever happened above, so other tests are unaffected.

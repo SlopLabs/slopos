@@ -11,7 +11,7 @@ use slopos_abi::signal::SigInfo;
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_mm::oom::{Killed, OomOps, Standing};
 use slopos_ostd::process::Process;
-use slopos_sched::scheduler::{current_task_flags, current_task_id};
+use slopos_sched::scheduler::{current_task_caps, current_task_id};
 use slopos_sched::task::{
     TaskRef, task_find_by_id, task_for_each_enumerable_heapless, task_sigkill_member,
     task_try_for_each_enumerable_heapless,
@@ -36,13 +36,13 @@ fn group_id(task: &TaskRef) -> u32 {
     }
 }
 
-/// `process`'s standing with the writer `writer_id` holding `writer_flags`
+/// `process`'s standing with the writer `writer_id` holding `writer_caps`
 /// when `init` is init's task id: exempt if init runs in it, dying once every
 /// task it has left is killed, shielded — never taken for this writer — if a
-/// live one holds privileged flags the writer lacks, the relation `kill`
-/// refuses on. Nothing is shielded from init's own write: init cannot be
+/// live one holds a capability the writer lacks, the relation `kill` refuses
+/// on. Nothing is shielded from init's own write: init cannot be
 /// impersonated, and a write it cannot finish takes the machine down.
-pub fn standing_of(process: &Process, init: u32, writer_id: u32, writer_flags: u16) -> Standing {
+pub fn standing_of(process: &Process, init: u32, writer_id: u32, writer_caps: u64) -> Standing {
     let has_init = init != INVALID_TASK_ID;
     if has_init && task_find_by_id(init).is_some_and(|t| in_process(&t, process)) {
         return Standing::Exempt;
@@ -53,7 +53,7 @@ pub fn standing_of(process: &Process, init: u32, writer_id: u32, writer_flags: u
     task_try_for_each_enumerable_heapless(|task| {
         if in_process(task, process) && !task.is_killed() {
             live = true;
-            shielded |= !writer_is_init && !signal_dominates(writer_flags, task.flags);
+            shielded |= !writer_is_init && !signal_dominates(writer_caps, task);
             if shielded {
                 return ControlFlow::Break(());
             }
@@ -73,7 +73,7 @@ impl OomOps for TaskOomOps {
             process,
             crate::exec::init_task_id(),
             current_task_id(),
-            current_task_flags(),
+            current_task_caps(),
         )
     }
 

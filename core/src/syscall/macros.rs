@@ -168,16 +168,6 @@ macro_rules! define_syscall {
         };
         $($crate::define_syscall!(@reqs $ctx, $($rest)*);)?
     };
-    // The retired `compositor` / `display_exclusive` / `console_admin` arms
-    // discarded the `Ok`, so the checked value was never the value used. A new
-    // clause must bind, like the `task_id` and `process_id` arms above.
-    (@reqs $ctx:ident, net_admin $(, $($rest:tt)*)?) => {
-        if let Err(e) = $ctx.require_net_admin() {
-            return $crate::syscall::result::SyscallResult::Err(e);
-        }
-        $($crate::define_syscall!(@reqs $ctx, $($rest)*);)?
-    };
-
     (@parse $ctx:ident, $regs:ident, $cursor:expr, []) => {
         const _: () = {
             assert!($cursor <= 6, "syscall args overflow available register slots");
