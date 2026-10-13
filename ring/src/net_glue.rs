@@ -28,6 +28,7 @@ use slopos_net::types::{Ipv4Addr, Port, SockAddr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{socket, unix_socket, unix_socket_file_ops};
 
+use slopos_ostd::process::Identity;
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
 use crate::buffers::BufferRegistry;
@@ -138,7 +139,12 @@ pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Er
 /// polls. The user address is validated and snapshotted **before** any side
 /// effect, so a faulting address fails cleanly and a re-probe re-reads the same
 /// (caller-stable) pointer.
-pub fn connect_nonblock(file: &FileRef, addr_va: u64, addr_len: u32) -> Result<i32, Errno> {
+pub fn connect_nonblock(
+    file: &FileRef,
+    addr_va: u64,
+    addr_len: u32,
+    who: &dyn Fn() -> Identity,
+) -> Result<i32, Errno> {
     let (handle, ops) = socket_handle_from_ref(file)?;
     if ops.is_unix_socket() {
         // The AF_UNIX `-EAGAIN` means the listener backlog is momentarily full,
@@ -160,8 +166,9 @@ pub fn connect_nonblock(file: &FileRef, addr_va: u64, addr_len: u32) -> Result<i
             return Err(Errno::EINVAL);
         }
         let sh = SocketHandle::from_usize(handle);
-        let rc =
-            with_unix_forced_nonblock(sh, || unix_socket::unix_connect(sh, &sa.path[..actual_len]));
+        let rc = with_unix_forced_nonblock(sh, || {
+            unix_socket::unix_connect(sh, &sa.path[..actual_len], who())
+        });
         return Ok(rc);
     }
     if (addr_len as usize) < core::mem::size_of::<SockAddrIn>() {

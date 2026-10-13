@@ -127,6 +127,94 @@ pub fn bind_unix(fd: RawFd, path: &[u8]) -> SyscallResult<()> {
     Sys::bind(fd, &addr as *const _ as *const u8, (2 + n) as u32).map_err(Into::into)
 }
 
+/// Connect an AF_UNIX socket to the listener bound at `path`.
+pub fn connect_unix(fd: RawFd, path: &[u8]) -> SyscallResult<()> {
+    let mut addr = slopos_abi::unix::SockAddrUn::default();
+    addr.family = slopos_abi::net::AF_UNIX;
+    let n = path.len().min(slopos_abi::unix::UNIX_PATH_MAX);
+    addr.path[..n].copy_from_slice(&path[..n]);
+    Sys::connect(fd, &addr as *const _ as *const u8, (2 + n) as u32).map_err(Into::into)
+}
+
+/// Two connected AF_UNIX stream sockets; `flags` takes `SOCK_NONBLOCK` and
+/// `SOCK_CLOEXEC`.
+pub fn socketpair(flags: u32) -> SyscallResult<(super::OwnedFd, super::OwnedFd)> {
+    let mut sv = [-1i32; 2];
+    Sys::socketpair(
+        slopos_abi::net::AF_UNIX as i32,
+        (u32::from(slopos_abi::net::SOCK_STREAM) | flags) as i32,
+        0,
+        sv.as_mut_ptr(),
+    )
+    .map_err(SyscallError::from)?;
+    // SAFETY: both are fds the kernel just allocated to us.
+    Ok(unsafe {
+        (
+            super::OwnedFd::from_raw(sv[0]),
+            super::OwnedFd::from_raw(sv[1]),
+        )
+    })
+}
+
+/// The peer's pid and effective ids as of its `connect`, `listen` or
+/// `socketpair`.
+pub fn peer_cred(fd: RawFd) -> SyscallResult<slopos_abi::syscall::UCred> {
+    let mut raw = [0u8; 12];
+    let len = getsockopt(
+        fd,
+        slopos_abi::syscall::SOL_SOCKET,
+        slopos_abi::syscall::SO_PEERCRED,
+        &mut raw,
+    )?;
+    if len != raw.len() {
+        return Err(slopos_slibc::errno::EIO.into());
+    }
+    Ok(slopos_abi::syscall::UCred::from_bytes(&raw))
+}
+
+/// A close-on-exec pidfd for the process [`peer_cred`] names.
+pub fn peer_pidfd(fd: RawFd) -> SyscallResult<super::OwnedFd> {
+    let mut raw = [0u8; 4];
+    let len = getsockopt(
+        fd,
+        slopos_abi::syscall::SOL_SOCKET,
+        slopos_abi::syscall::SO_PEERPIDFD,
+        &mut raw,
+    )?;
+    if len != raw.len() {
+        return Err(slopos_slibc::errno::EIO.into());
+    }
+    // SAFETY: the kernel just installed this fd for us.
+    Ok(unsafe { super::OwnedFd::from_raw(i32::from_ne_bytes(raw)) })
+}
+
+/// The base path of the program the peer ran when it connected, or `None` for
+/// a program outside the base.
+pub fn peer_program(fd: RawFd) -> SyscallResult<Option<Vec<u8>>> {
+    let mut need = 0u32;
+    let sized = Sys::getsockopt(
+        fd,
+        slopos_abi::syscall::SOL_SLOPOS,
+        slopos_abi::syscall::SO_PEERPROGRAM,
+        core::ptr::null_mut(),
+        &mut need,
+    );
+    match sized {
+        Ok(()) => return Ok(None),
+        Err(e) if e == slopos_slibc::errno::ERANGE => {}
+        Err(e) => return Err(e.into()),
+    }
+    let mut path = vec![0u8; need as usize];
+    let len = getsockopt(
+        fd,
+        slopos_abi::syscall::SOL_SLOPOS,
+        slopos_abi::syscall::SO_PEERPROGRAM,
+        &mut path,
+    )?;
+    path.truncate(len);
+    Ok(Some(path))
+}
+
 pub fn accept(fd: RawFd, peer: Option<&mut SockAddrIn>) -> SyscallResult<super::OwnedFd> {
     let mut addrlen = core::mem::size_of::<SockAddrIn>() as u32;
     let peer_ptr = peer

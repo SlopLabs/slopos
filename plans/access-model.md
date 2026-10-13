@@ -72,12 +72,15 @@ whole process for good
   remote paragraph). `CVSS.md` scores any code execution `PR:L` for that
   reason.
 
-**IPC carries no identity.**
-- There is no `SO_PEERCRED`. `SCM_CREDENTIALS` is `EINVAL` (`core/src/syscall/tests.rs:9205-9214`).
-- `socketpair` is `ENOSYS` (`slibc/src/net/mod.rs:199-207`).
-- `pidfd_open` names only the caller's children.
+**IPC carries identity.**
+- An `AF_UNIX` socket records who connected (`slopos_ostd::process::identity`)
+  at `listen`, `connect` and `socketpair`; `SO_PEERCRED`, `SO_PEERPIDFD` and
+  `SO_PEERPROGRAM` read it (`core/src/syscall/net_handlers.rs`).
+- A process's program is `Base(inode)` or `Other`, set by spawn, exec and fork
+  and lowered by code from outside the base.
+- `pidfd_open` names any process. `SCM_CREDENTIALS` is still `EINVAL`.
 - `SCM_RIGHTS` carries leaf descriptors (pipes, files, memfds, pidfds, ttys) but
-  not sockets or rings (`core/src/syscall/net_handlers.rs:675-695`).
+  not sockets or rings (`collect_scm_rights` in the same file).
 
 **The model's cost shows up as workarounds:**
 - The compositor spawns `/bin/ip` because it must not hold `NetAdmin`, which
@@ -287,19 +290,26 @@ which is `root`, so they need no consent and no agent.
 ### Peer identity
 
 - **`socketpair(AF_UNIX, SOCK_STREAM)`** at the Linux number.
-- **`SO_PEERCRED`** returns the peer's pid, uid and gid as of `connect`,
-  `listen` or `socketpair`, per
-  [unix(7)](https://man7.org/linux/man-pages/man7/unix.7.html).
-- **`SO_PEERPIDFD`** returns a pidfd of the peer, captured at the same moment.
-  pidfds stop being limited to the caller's children; a peer pidfd polls
-  readable on exit.
-- **Program identity** is recorded on the task by spawn and exec.
-  - `Base(path)` when the image inode is served by the boot slot's pinned
-    basefs at a `BASE_DIRS` path.
-  - `Other` otherwise.
-  - A script is `Base` only when both the script and its interpreter are.
-  - A private `getsockopt` level returns the peer's program identity. Nothing a
-    client sends can set it.
+- **`SO_PEERCRED`** returns the peer's pid, effective uid and effective gid as
+  of `connect`, `listen` or `socketpair`, per
+  [unix(7)](https://man7.org/linux/man-pages/man7/unix.7.html): the server is
+  told the connector, the client the listener.
+- **`SO_PEERPIDFD`** returns a close-on-exec pidfd of the peer, captured at the
+  same moment, which polls readable when the peer's leader thread exits — at
+  once for a peer already gone.
+  `pidfd_open` names any process's leader.
+- **Program identity** is recorded on the process by spawn and exec.
+  - `Base(inode)` when the image is served by the boot slot's pinned basefs
+    at a `BASE_DIRS` path, and so is every script of its `#!` chain and its
+    ELF interpreter. Each interpreter has to be named by an absolute path and
+    each script by the absolute path it was found at, since its interpreter
+    opens that spelling again, through a working directory another process
+    may share.
+  - `Other` otherwise, and from the moment the process maps code that the base
+    did not supply.
+  - `SO_PEERPROGRAM` at the private level `SOL_SLOPOS` returns the peer's
+    program identity as the inode's base path. Nothing a client sends can set
+    it.
 - **Inherited connections speak as their original owner.** A descriptor
   inherited through spawn keeps the identity of whoever connected it. That is
   how remoted's children ask privd as remoted.
@@ -470,16 +480,28 @@ userland creating files 0000; such a file on a preserved root is its owner's to
 `chmod`. Graded by `dac_test`, the `cred` kernel tests, `cred.rs`'s host tests
 and `persist_test`'s reserve against a uid-1000 filler.
 
-### Phase 3: Peer identity
+### Phase 3: Peer identity — done
 
-Add `socketpair`, `SO_PEERCRED`, `SO_PEERPIDFD`, program identity on the task,
-and its `getsockopt`.
-
-Ends with tests that:
-- a connected pair reports each other's pid, uid and identity;
-- an identity survives a descriptor inherited through spawn;
-- a pidfd from `SO_PEERPIDFD` polls readable when the peer exits;
-- a program outside the base reports `Other`.
+`socketpair` sits at the Linux number. An `AF_UNIX` socket records an
+`Identity` — pid, effective ids and program — at `listen`, `connect` (a ring's
+`OP_CONNECT` as the task whose `ring_enter` performs it, when it does) and
+`socketpair`; `SO_PEERCRED`, `SO_PEERPIDFD` and `SO_PEERPROGRAM`
+(`SOL_SLOPOS`) read it, and slibc's `socketpair` calls the kernel. A process's
+program is `Base(inode)` when spawn or exec loaded it wholly from `BASE_FS`,
+each interpreter and script named by its absolute path. Fork copies it with
+the address space; an exec beside another thread, an exec failing past the
+reset and an executable mapping from outside the base leave `Other`.
+`pidfd_open` takes any leader, every pidfd is close-on-exec, and a peer's
+pidfd outlives the peer. `Process` is now built in place. Graded by
+`tests_peer` (each option and refusal, the capture points, a stale pidfd, the
+mapping rules, the exec rules against a stand-in base, the spelling a script
+must be named by), `peer_test` (between real processes: a uid-1000 child
+exec'd from the base, a connection handed through spawn, a ring's connect and
+one that waits while the ids change, a peer's pidfd on exit, the same program
+copied to `/tmp`, foreign code), `test_exec_attests_only_what_the_base_serves`
+against the real base, `libc_abi_test` through slibc, and
+`test_basefs_names_an_inode_by_its_path`. No base program is a script, so a
+base script's attestation is graded only through its spelling.
 
 ### Phase 4: Delegation at spawn
 
@@ -675,6 +697,47 @@ Ends with:
 - **Program identity is the sealed base path, not a content hash.** The base
   cannot change under a running boot, so a hash adds nothing, and a hash would
   churn with every build the guest makes of itself.
+- **A peer's identity is captured, never looked up.** `listen`, `connect` and
+  `socketpair` record it, as Linux records `sk_peer_cred`; a later id change,
+  exec or hand-off of the descriptor changes nothing a peer reads. Task ids are
+  never reused, so the captured pid is the handle polkit's (pid, start-time)
+  was not, and a peer's pidfd is handed out after the peer has gone, as Linux
+  6.16's stale pidfds are.
+- **The socket layer is told who connects.** An `Identity` reaches
+  `unix_connect` and `unix_listen` from the syscall or the ring's submitter, as
+  a `Subject` reaches the VFS; nothing below the syscall layer reads the
+  current task for it. The ring asks its submitter at each try, so a connect
+  that waits for room attests who connects when it does.
+- **`Base` attests code: every executable mapping came from the base.** An
+  executable mapping of anything else — anonymous memory, a memfd, a file
+  elsewhere — and an `mprotect` making any page executable that was not lower
+  the process to `Other` before that code can run, as macOS clears `CS_VALID`
+  when an unsigned page is mapped. Without it a session process could start a
+  dynamically linked base program with `LD_LIBRARY_PATH` naming its own
+  `libc.so`. What the base's own code writes into its own writable text, as
+  the loader's relocations do, is the base's doing, and a connection made, or
+  a socket listening, before a forfeit keeps what it captured: the base
+  program chose both.
+- **A `program` or `paired` principal names a statically linked program.** The
+  loader honours `LD_LIBRARY_PATH` outside `AT_SECURE`, and an object with no
+  executable segment forfeits nothing yet can interpose symbols on base code.
+  `/bin/remoted` and `/bin/compositor` are static; before a principal names a
+  dynamic program, the loader must refuse objects from outside the base for
+  it.
+- **An exec that begins beside another thread attests nothing.** Exec here does
+  not stop sibling threads, which run on in the new image; one could map or
+  patch code there and exit before the exec ends. The process is `Other` from
+  the reset of its address space until its next exec; one that fails before
+  the reset changes nothing.
+- **`Base` does not attest the arguments.** A principal must not name a program
+  whose behaviour its caller steers through argv, the environment or the files
+  it reads — a shell, an interpreter, a launcher — since anyone may start any
+  base program. `program` and `paired` name programs that take their
+  instructions from the sealed base or from their own peers.
+- **`SO_PEERPROGRAM` answers a path, `SO_PEERSEC`-shaped.** The value is the
+  base path with no NUL, no bytes for `Other`, and `ERANGE` with the length
+  needed for a short buffer; a socket with no peer is `ENOTCONN`, so no peer
+  never reads as `Other`.
 - **Consent is presence.** The compositor draws it over an init-made channel.
   It defaults to Deny, expires in 120 s, and fails closed. A password waits for
   multi-user.

@@ -39,7 +39,8 @@ pub enum Capability {
     /// absence of one.
     Unimplemented = 0,
 
-    /// Acts only on the caller itself. `getpid`, `exit`, `yield`, `brk`.
+    /// Acts only on the caller itself, or tells it what every process may
+    /// know. `getpid`, `exit`, `brk`, `process_list`, `pidfd_open`.
     NoneSelf,
     /// Acts only on an object the caller already names by descriptor. The
     /// descriptor *is* the authority; re-checking a capability on top would be

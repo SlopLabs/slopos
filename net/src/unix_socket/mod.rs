@@ -24,8 +24,8 @@ use slopos_ostd::{KVec, KVecDeque};
 
 use pair::{PairSide, PairTable};
 use slopos_fs::{FileRef, LeafFileRef};
-use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::Reservation;
+use slopos_ostd::process::{AccountId, Identity};
 use slot::{MAX_BACKLOG, SlotState, UNIX_PATH_MAX, UnixSlot};
 
 pub use buffer::UNIX_BUF_SIZE;
@@ -118,8 +118,9 @@ pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
     0
 }
 
-/// Mark a bound socket as listening.
-pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
+/// Mark a bound socket as listening, `owner` being who every client that
+/// connects to it is told it reached.
+pub fn unix_listen(handle: SocketHandle, _backlog: u32, owner: Identity) -> i32 {
     let backlog: KVecDeque<SocketHandle> = match KVecDeque::with_capacity(MAX_BACKLOG) {
         Ok(d) => d,
         Err(_) => return Errno::ENOMEM.raw(),
@@ -137,7 +138,11 @@ pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
             return Errno::EINVAL.raw();
         }
     };
-    slot.state = SlotState::Listening { path, backlog };
+    slot.state = SlotState::Listening {
+        path,
+        backlog,
+        owner,
+    };
     0
 }
 
@@ -186,11 +191,11 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
     }
 }
 
-/// Connect to a listening socket identified by path.
+/// Connect to a listening socket identified by path, as `who`.
 ///
 /// Allocates the pair and a fresh slot for the accepted side; the listener's
 /// backlog records that handle for `accept()` to dequeue.
-pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
+pub fn unix_connect(handle: SocketHandle, path: &[u8], who: Identity) -> i32 {
     if path.is_empty() || path.len() > UNIX_PATH_MAX {
         return Errno::EINVAL.raw();
     }
@@ -212,18 +217,19 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
         if let SlotState::Listening {
             path: listener_path,
             backlog,
+            owner,
         } = &slot.state
         {
             if listener_path.as_slice() == path {
                 if backlog.len() >= MAX_BACKLOG {
                     return Errno::EAGAIN.raw();
                 }
-                listener = Some(lh);
+                listener = Some((lh, *owner));
                 break;
             }
         }
     }
-    let Some(h_listener) = listener else {
+    let Some((h_listener, listener_owner)) = listener else {
         return Errno::ECONNREFUSED.raw();
     };
 
@@ -243,11 +249,7 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     };
 
     let Ok(h_b) = state.slots.insert(UnixSlot::created()) else {
-        // `ConnectionPair::new` starts at a refcount of two, so both endpoint
-        // refs must be released rather than leaked. Its queues are still
-        // empty, so the in-lock drop is inert.
-        drop(state.pairs.release(pair_handle));
-        drop(state.pairs.release(pair_handle));
+        state.pairs.discard(pair_handle);
         return Errno::ENFILE.raw();
     };
     let a_handle = SocketHandle::from_handle(h_a);
@@ -259,6 +261,7 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
             side: PairSide::A,
             peer: b_handle,
             peer_closed: false,
+            peer_identity: listener_owner,
         };
     }
 
@@ -268,6 +271,7 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
             side: PairSide::B,
             peer: a_handle,
             peer_closed: false,
+            peer_identity: who,
         };
     }
 
@@ -284,6 +288,62 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     BUS.publish(unix_ev(listener_idx));
 
     0
+}
+
+/// Two sockets connected to each other, each telling the other it reached
+/// `who`.
+pub fn unix_socketpair(who: Identity) -> Result<(SocketHandle, SocketHandle), Errno> {
+    let mut state = UNIX_STATE.lock();
+    if state.slots.len() + 2 > MAX_UNIX_SOCKETS {
+        return Err(Errno::ENFILE);
+    }
+    let pair = match state.pairs.allocate() {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return Err(Errno::ENFILE),
+        Err(_) => return Err(Errno::ENOMEM),
+    };
+    let Ok(h_a) = state.slots.insert(UnixSlot::created()) else {
+        state.pairs.discard(pair);
+        return Err(Errno::ENFILE);
+    };
+    let a = SocketHandle::from_handle(h_a);
+    let Ok(h_b) = state.slots.insert(UnixSlot {
+        state: SlotState::Connected {
+            pair,
+            side: PairSide::B,
+            peer: a,
+            peer_closed: false,
+            peer_identity: who,
+        },
+        nonblocking: false,
+    }) else {
+        let _ = state.slots.remove(h_a);
+        state.pairs.discard(pair);
+        return Err(Errno::ENFILE);
+    };
+    let b = SocketHandle::from_handle(h_b);
+    if let Ok(slot) = state.slots.get_mut(h_a) {
+        slot.state = SlotState::Connected {
+            pair,
+            side: PairSide::A,
+            peer: b,
+            peer_closed: false,
+            peer_identity: who,
+        };
+    }
+    Ok((a, b))
+}
+
+/// Who the peer was when it connected — or, for a listener, who listened —
+/// and `None` for a socket that has neither.
+pub fn unix_peer_identity(handle: SocketHandle) -> Result<Option<Identity>, Errno> {
+    let state = UNIX_STATE.lock();
+    let slot = state.slots.get(handle.handle()).map_err(|_| Errno::EBADF)?;
+    Ok(match slot.state {
+        SlotState::Connected { peer_identity, .. } => Some(peer_identity),
+        SlotState::Listening { owner, .. } => Some(owner),
+        SlotState::Created | SlotState::Bound { .. } => None,
+    })
 }
 
 /// Send data on a connected AF_UNIX socket (no SCM_RIGHTS ancillary).
@@ -316,6 +376,7 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
                             side,
                             peer,
                             peer_closed,
+                            ..
                         } => (slot.nonblocking, pair, side, peer.slot(), peer_closed),
                         _ => return Errno::ENOTCONN.raw(),
                     },
@@ -404,6 +465,7 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
                             side,
                             peer,
                             peer_closed,
+                            ..
                         } => (slot.nonblocking, pair, side, peer.slot(), peer_closed),
                         _ => return Errno::ENOTCONN.raw(),
                     },
@@ -521,6 +583,7 @@ pub fn unix_sendmsg(
                         side,
                         peer,
                         peer_closed,
+                        ..
                     } => Ok((slot.nonblocking, pair, side, peer.slot(), peer_closed)),
                     _ => Err(Errno::ENOTCONN.raw()),
                 },
@@ -633,6 +696,7 @@ pub fn unix_send_from(handle: SocketHandle, reader: &mut slopos_ostd::mm::VmRead
                     side,
                     peer,
                     peer_closed,
+                    ..
                 } => {
                     if peer_closed {
                         return Errno::EPIPE.raw();

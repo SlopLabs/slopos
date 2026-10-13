@@ -5,7 +5,10 @@ use slopos_abi::net::{
     AF_INET, AF_UNIX, IPPROTO_ICMP, IPPROTO_UDP, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_MAX, SOCK_NONBLOCK,
     SOCK_STREAM, SOCK_TYPE_MASK, SockAddrIn,
 };
-use slopos_abi::syscall::{IPPROTO_TCP, MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS};
+use slopos_abi::syscall::{
+    IPPROTO_TCP, MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS, SO_ERROR, SO_PEERCRED, SO_PEERPIDFD,
+    SO_PEERPROGRAM, SOL_SLOPOS, SOL_SOCKET, UCred,
+};
 use slopos_abi::unix::SockAddrUn;
 use slopos_fs::fileio::FdTable;
 use slopos_mm::user_copy::{
@@ -17,6 +20,7 @@ use slopos_net::types::{Ipv4Addr, Port, SockAddr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{dns, socket, unix_socket, unix_socket_file_ops};
 use slopos_ostd::KVec;
+use slopos_ostd::process::Program;
 
 use crate::syscall::args::{Fd, UserBytes, UserPtr};
 use crate::syscall::common::{errno_from_neg, errno_from_neg64};
@@ -151,34 +155,13 @@ define_syscall!(syscall_socket
     -> Result<u64, Errno>
 {
     let flags = NewSocketFlags::parse(sock_type & !SOCK_TYPE_MASK)?;
-    let sock_type = sock_type & SOCK_TYPE_MASK;
-    if sock_type >= SOCK_MAX {
-        return Err(Errno::EINVAL);
-    }
-    let sock_type = sock_type as u16;
-
-    if domain == AF_UNIX as u32 {
-        if protocol != 0 && protocol != AF_UNIX as u32 {
-            return Err(Errno::EPROTONOSUPPORT);
+    let sock_type = match socket_kind(domain, sock_type & SOCK_TYPE_MASK, protocol)? {
+        SocketKind::Unix => {
+            let handle = unix_socket::unix_create().ok_or(Errno::ENOMEM)?;
+            return install_unix_socket(process_id, handle, flags).map(|fd| fd as u64);
         }
-        if sock_type != SOCK_STREAM {
-            return Err(Errno::ESOCKTNOSUPPORT);
-        }
-        let handle = unix_socket::unix_create().ok_or(Errno::ENOMEM)?;
-        return install_unix_socket(process_id, handle, flags).map(|fd| fd as u64);
-    }
-
-    if domain != AF_INET as u32 {
-        return Err(Errno::EAFNOSUPPORT);
-    }
-    let protocols: &[u32] = match sock_type {
-        SOCK_STREAM => &[0, IPPROTO_TCP as u32],
-        SOCK_DGRAM => &[0, IPPROTO_UDP as u32, IPPROTO_ICMP as u32],
-        _ => return Err(Errno::ESOCKTNOSUPPORT),
+        SocketKind::Inet(sock_type) => sock_type,
     };
-    if !protocols.contains(&protocol) {
-        return Err(Errno::EPROTONOSUPPORT);
-    }
 
     // Both halves of the owner come from the syscall context, never from
     // userland: `net_query` gates owner disclosure by comparing against it.
@@ -191,6 +174,70 @@ define_syscall!(syscall_socket
         return Err(errno_from_neg(sock_idx));
     }
     install_inet_socket(process_id, sock_idx as u32, flags).map(|fd| fd as u64)
+});
+
+enum SocketKind {
+    Unix,
+    Inet(u16),
+}
+
+/// What `socket` and `socketpair` may make of these arguments, refused as
+/// Linux refuses them.
+fn socket_kind(domain: u32, sock_type: u32, protocol: u32) -> Result<SocketKind, Errno> {
+    if sock_type >= SOCK_MAX {
+        return Err(Errno::EINVAL);
+    }
+    let sock_type = sock_type as u16;
+    if domain == AF_UNIX as u32 {
+        if protocol != 0 && protocol != AF_UNIX as u32 {
+            return Err(Errno::EPROTONOSUPPORT);
+        }
+        if sock_type != SOCK_STREAM {
+            return Err(Errno::ESOCKTNOSUPPORT);
+        }
+        return Ok(SocketKind::Unix);
+    }
+    if domain != AF_INET as u32 {
+        return Err(Errno::EAFNOSUPPORT);
+    }
+    let protocols: &[u32] = match sock_type {
+        SOCK_STREAM => &[0, IPPROTO_TCP as u32],
+        SOCK_DGRAM => &[0, IPPROTO_UDP as u32, IPPROTO_ICMP as u32],
+        _ => return Err(Errno::ESOCKTNOSUPPORT),
+    };
+    if !protocols.contains(&protocol) {
+        return Err(Errno::EPROTONOSUPPORT);
+    }
+    Ok(SocketKind::Inet(sock_type))
+}
+
+define_syscall!(syscall_socketpair
+    (ctx, domain: u32, sock_type: u32, protocol: u32, sv_ptr: u64)
+    cap(NoneSelf)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
+    let flags = NewSocketFlags::parse(sock_type & !SOCK_TYPE_MASK)?;
+    let sv = MmUserPtr::<[i32; 2]>::try_new(sv_ptr).map_err(|_| Errno::EFAULT)?;
+    // Before either endpoint exists, so an unwritable `sv` leaves nothing to
+    // take back.
+    copy_to_user(sv, &[-1, -1]).map_err(|_| Errno::EFAULT)?;
+    if let SocketKind::Inet(_) = socket_kind(domain, sock_type & SOCK_TYPE_MASK, protocol)? {
+        return Err(Errno::EOPNOTSUPP);
+    }
+
+    let (a, b) = unix_socket::unix_socketpair(ctx.identity())?;
+    let fd_a = install_unix_socket(process_id, a, flags).inspect_err(|_| {
+        let _ = unix_socket::unix_close(b);
+    })?;
+    let fd_b = install_unix_socket(process_id, b, flags).inspect_err(|_| {
+        let _ = slopos_fs::file_close_fd(process_id, fd_a);
+    })?;
+    copy_to_user(sv, &[fd_a, fd_b]).map_err(|_| {
+        let _ = slopos_fs::file_close_fd(process_id, fd_a);
+        let _ = slopos_fs::file_close_fd(process_id, fd_b);
+        Errno::EFAULT
+    })
 });
 
 define_syscall!(syscall_bind
@@ -243,7 +290,9 @@ define_syscall!(syscall_listen
 {
     let sock_fd = socket_fd_for(process_id, fd.raw())?;
     match sock_fd {
-        SocketFd::Unix(sh) => rc_i32_to_unit(unix_socket::unix_listen(sh, backlog)),
+        SocketFd::Unix(sh) => {
+            rc_i32_to_unit(unix_socket::unix_listen(sh, backlog, ctx.identity()))
+        }
         SocketFd::Inet(sock_idx) => rc_i32_to_unit(socket::socket_listen(sock_idx, backlog)),
     }
 });
@@ -378,7 +427,11 @@ define_syscall!(syscall_connect
             if actual_len == 0 {
                 return Err(Errno::EINVAL);
             }
-            rc_i32_to_unit(unix_socket::unix_connect(sh, &sock_addr.path[..actual_len]))
+            rc_i32_to_unit(unix_socket::unix_connect(
+                sh,
+                &sock_addr.path[..actual_len],
+                ctx.identity(),
+            ))
         }
         SocketFd::Inet(sock_idx) => {
             if addr_len < core::mem::size_of::<SockAddrIn>() {
@@ -578,7 +631,9 @@ define_syscall!(syscall_getsockopt
 {
     let sock_idx = match socket_fd_for(process_id, fd.raw())? {
         SocketFd::Inet(idx) => idx,
-        SocketFd::Unix(_) => return Err(Errno::ENOTSOCK),
+        SocketFd::Unix(sh) => {
+            return unix_getsockopt(process_id, sh, level as i32, optname as i32, optval_ptr, optlen_ptr_raw);
+        }
     };
 
     if optval_ptr == 0 || optlen_ptr_raw == 0 {
@@ -606,6 +661,85 @@ define_syscall!(syscall_getsockopt
 
     Ok(())
 });
+
+/// The peer options: what the socket's peer attested when it connected.
+#[inline(never)]
+fn unix_getsockopt(
+    table: FdTable,
+    sh: SocketHandle,
+    level: i32,
+    optname: i32,
+    optval: u64,
+    optlen_ptr: u64,
+) -> Result<(), Errno> {
+    if level != SOL_SOCKET && level != SOL_SLOPOS {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let optlen = MmUserPtr::<u32>::try_new(optlen_ptr).map_err(|_| Errno::EFAULT)?;
+    let len = copy_from_user(optlen).map_err(|_| Errno::EFAULT)?;
+    if (len as i32) < 0 {
+        return Err(Errno::EINVAL);
+    }
+    let len = len as usize;
+    let peer = unix_socket::unix_peer_identity(sh)?;
+    match (level, optname) {
+        (SOL_SOCKET, SO_ERROR) => write_option(&0i32.to_ne_bytes(), len, optval, optlen),
+        (SOL_SOCKET, SO_PEERCRED) => {
+            let cred = peer.map_or(UCred::NONE, |peer| UCred {
+                pid: peer.pid as i32,
+                uid: peer.uid,
+                gid: peer.gid,
+            });
+            write_option(&cred.to_bytes(), len, optval, optlen)
+        }
+        (SOL_SOCKET, SO_PEERPIDFD) => {
+            let pid = peer
+                .map(|peer| peer.pid)
+                .filter(|&pid| pid != 0)
+                .ok_or(Errno::ENODATA)?;
+            let fd = slopos_pidfd::pidfd_install(table, pid);
+            if fd < 0 {
+                return Err(errno_from_neg(fd));
+            }
+            write_option(&fd.to_ne_bytes(), len, optval, optlen).inspect_err(|_| {
+                let _ = slopos_fs::file_close_fd(table, fd);
+            })
+        }
+        (SOL_SLOPOS, SO_PEERPROGRAM) => match peer.ok_or(Errno::ENOTCONN)?.program {
+            Program::Other => write_option(&[], len, optval, optlen),
+            Program::Base(inode) => {
+                let base = &slopos_fs::basefs::BASE_FS;
+                let need = base
+                    .path_of(inode.get(), &mut [])
+                    .map_err(|e| e.to_errno())?;
+                if len < need {
+                    copy_to_user(optlen, &(need as u32)).map_err(|_| Errno::EFAULT)?;
+                    return Err(Errno::ERANGE);
+                }
+                let mut path = KVec::<u8>::zeroed(need).map_err(|_| Errno::ENOMEM)?;
+                base.path_of(inode.get(), &mut path)
+                    .map_err(|e| e.to_errno())?;
+                write_option(&path, len, optval, optlen)
+            }
+        },
+        _ => Err(Errno::ENOPROTOOPT),
+    }
+}
+
+/// Copy `value` out, cut to the caller's `len`, and report how much went.
+fn write_option(
+    value: &[u8],
+    len: usize,
+    optval: u64,
+    optlen: MmUserPtr<u32>,
+) -> Result<(), Errno> {
+    let n = len.min(value.len());
+    if n > 0 {
+        let out = MmUserBytes::try_new(optval, n).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_to_user(out, &value[..n]).map_err(|_| Errno::EFAULT)?;
+    }
+    copy_to_user(optlen, &(n as u32)).map_err(|_| Errno::EFAULT)
+}
 
 define_syscall!(syscall_shutdown
     (ctx, fd: Fd, how: u32)

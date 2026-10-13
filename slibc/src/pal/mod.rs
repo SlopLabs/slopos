@@ -215,6 +215,7 @@ pub trait Pal {
     fn sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack) -> Result<(), Errno>;
 
     fn socket(domain: i32, sock_type: i32, protocol: i32) -> Result<i32, Errno>;
+    fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv: *mut i32) -> Result<(), Errno>;
     fn bind(fd: i32, addr: *const u8, addrlen: u32) -> Result<(), Errno>;
     fn listen(fd: i32, backlog: i32) -> Result<(), Errno>;
     fn accept(fd: i32, addr: *mut u8, addrlen: *mut u32) -> Result<i32, Errno>;

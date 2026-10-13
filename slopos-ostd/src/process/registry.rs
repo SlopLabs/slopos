@@ -192,7 +192,7 @@ fn new_process(
             return Err(ProcessAllocError::QuotaExceeded);
         }
     };
-    let process = KArc::try_new(Process::new(
+    let process = KArc::try_init(Process::init(
         id,
         account,
         account_parent,

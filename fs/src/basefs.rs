@@ -282,6 +282,12 @@ pub static BASE_FS: BaseFs = BaseFs::new();
 /// the base the loader booted.
 pub static MEDIUM_FS: BaseFs = BaseFs::new();
 
+/// Whether `fs` is the boot slot's base, which is reachable only at the
+/// `BASE_DIRS` it is mounted on.
+pub fn is_base(fs: &dyn FileSystem) -> bool {
+    crate::vfs::traits::same_filesystem(fs, &BASE_FS)
+}
+
 impl BaseFs {
     pub const fn new() -> Self {
         Self {
@@ -323,6 +329,33 @@ impl BaseFs {
         path.split(|&b| b == b'/')
             .filter(|name| !name.is_empty())
             .try_fold(self.root_inode(), |dir, name| self.lookup(dir, name))
+    }
+
+    /// Write `inode`'s absolute path into `buf` when it fits, and answer its
+    /// length either way.
+    pub fn path_of(&self, inode: InodeId, buf: &mut [u8]) -> VfsResult<usize> {
+        let index = self.index()?;
+        let mut len = 0;
+        let mut at = index.node(inode)?;
+        while !at.name.is_empty() {
+            len += 1 + at.name.len();
+            at = &index.nodes[at.parent];
+        }
+        if len == 0 {
+            len = 1;
+        }
+        if let Some(out) = buf.get_mut(..len) {
+            out[0] = b'/';
+            let mut end = len;
+            let mut at = index.node(inode)?;
+            while !at.name.is_empty() {
+                out[end - at.name.len()..end].copy_from_slice(at.name);
+                end -= at.name.len() + 1;
+                out[end] = b'/';
+                at = &index.nodes[at.parent];
+            }
+        }
+        Ok(len)
     }
 
     /// The bytes of the regular file at `path`, from the root, where they

@@ -9,8 +9,8 @@ use slopos_abi::Errno;
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
-use slopos_ostd::process::Cred;
 use slopos_ostd::process::cred::Subject;
+use slopos_ostd::process::{Cred, Identity, Program};
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::wl_currency::{self, WL_DELTA};
 use slopos_sched::task::TaskRef;
@@ -32,6 +32,28 @@ pub fn cred_of(task: &Task) -> Option<Cred> {
         task.process()
             .map_or(Cred::NOBODY, |process| process.cred()),
     )
+}
+
+/// What `task` attests to a peer it connects to. A kernel task is the kernel.
+pub fn identity_of(task: &Task) -> Identity {
+    if task.flags & slopos_abi::task::TASK_FLAG_USER_MODE == 0 {
+        return Identity::KERNEL;
+    }
+    let process = task.process();
+    let cred = process
+        .as_deref()
+        .map_or(Cred::NOBODY, |process| process.cred());
+    let tgid = task.tgid;
+    Identity {
+        pid: if tgid == slopos_abi::task::INVALID_TASK_ID {
+            task.task_id
+        } else {
+            tgid
+        },
+        uid: cred.euid,
+        gid: cred.egid,
+        program: process.map_or(Program::Other, |process| process.program()),
+    }
 }
 
 /// Who `task`'s permission checks are for. A kernel task is the kernel.
@@ -153,6 +175,11 @@ impl<'a> SyscallContext<'a> {
     /// Who this caller's permission checks are for.
     pub fn subject(&self) -> Subject {
         subject_of(self.task)
+    }
+
+    /// What this caller attests to a socket it connects.
+    pub fn identity(&self) -> Identity {
+        identity_of(self.task)
     }
 
     /// The calling process's descriptor table, read from the task's own

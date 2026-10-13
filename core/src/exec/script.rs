@@ -4,12 +4,13 @@
 
 use slopos_abi::Errno;
 use slopos_fs::vfs::CanonPath;
-use slopos_fs::vfs::canon::canonicalise_at;
+use slopos_fs::vfs::canon::{canonicalise_at, normalise_at};
 use slopos_ostd::KVec;
 
 use slopos_fs::vfs::Subject;
+use slopos_ostd::process::Program;
 
-use super::{open_executable, read_exact_at, resolve_program, trim_nul_bytes};
+use super::{open_executable, program_of, read_exact_at, resolve_program, trim_nul_bytes};
 
 /// Bytes examined for a `#!` line: Linux's `BINPRM_BUF_SIZE`.
 pub const SCRIPT_HEADER_MAX: usize = 256;
@@ -24,6 +25,12 @@ pub struct ExecProgram {
     /// Words the interpreter chain puts before the caller's `argv[1..]`;
     /// empty for a binary.
     prefix: KVec<KVec<u8>>,
+    /// The file the caller named, as long as every link of the chain is the
+    /// base's, each interpreter is named by an absolute path, and each script
+    /// by the absolute path it was found at: its interpreter opens that
+    /// spelling again, and one that walks a link, a `..` or a working
+    /// directory someone else can change could reach another file by then.
+    pub program: Program,
 }
 
 impl ExecProgram {
@@ -65,29 +72,69 @@ impl ExecProgram {
 #[inline(never)]
 pub fn resolve_exec(path: &[u8], cwd: &[u8], who: &Subject) -> Result<ExecProgram, Errno> {
     let mut image = resolve_program(path, cwd, who)?;
+    let mut spelled_as_found = named_as_found(path, &image);
+    let mut spellings_hold = true;
     let mut prefix: KVec<KVec<u8>> = KVec::new();
+    let mut program = None;
     for _ in 0..=SCRIPT_NESTING_MAX {
-        let header = read_header(&image, who)?;
+        let (header, link) = read_header(&image, who)?;
+        program = match (program, link) {
+            (None, link) => Some(link),
+            (Some(_), Program::Other) => Some(Program::Other),
+            (named, Program::Base(_)) => named,
+        };
         let Some(line) = parse_shebang(header.as_slice())? else {
-            return Ok(ExecProgram { image, prefix });
+            let program = match program {
+                Some(program) if spellings_hold => program,
+                _ => Program::Other,
+            };
+            return Ok(ExecProgram {
+                image,
+                prefix,
+                program,
+            });
         };
-        let passed = match prefix.first() {
-            Some(outer) => owned(outer.as_slice())?,
-            None => owned(trim_nul_bytes(path))?,
-        };
-        let mut next = KVec::with_capacity(prefix.len() + 3).map_err(|_| Errno::ENOMEM)?;
-        push(&mut next, owned(line.interpreter)?)?;
-        if let Some(arg) = line.argument {
-            push(&mut next, owned(arg)?)?;
-        }
-        push(&mut next, passed)?;
-        for word in prefix.into_iter().skip(1) {
-            push(&mut next, word)?;
-        }
-        prefix = next;
+        spellings_hold &= spelled_as_found && line.interpreter.first() == Some(&b'/');
+        prefix = interpreted(&line, prefix, path)?;
         image = resolve_program(line.interpreter, cwd, who)?;
+        spelled_as_found = named_as_found(line.interpreter, &image);
     }
     Err(Errno::ELOOP)
+}
+
+/// Whether `spelling` is `image`'s own absolute path, walking no link, `..` or
+/// working directory. Out of line to keep the path off [`resolve_exec`]'s
+/// measured frame.
+#[inline(never)]
+pub(crate) fn named_as_found(spelling: &[u8], image: &CanonPath) -> bool {
+    let spelling = trim_nul_bytes(spelling);
+    spelling.first() == Some(&b'/')
+        && normalise_at(spelling, b"/").is_ok_and(|named| named.as_bytes() == image.as_bytes())
+}
+
+/// The words `line` puts ahead of what its script was passed: the interpreter,
+/// its argument, then the script as the outer one named it. Out of line to
+/// keep them off [`resolve_exec`]'s measured frame.
+#[inline(never)]
+fn interpreted(
+    line: &ShebangLine<'_>,
+    prefix: KVec<KVec<u8>>,
+    path: &[u8],
+) -> Result<KVec<KVec<u8>>, Errno> {
+    let passed = match prefix.first() {
+        Some(outer) => owned(outer.as_slice())?,
+        None => owned(trim_nul_bytes(path))?,
+    };
+    let mut next = KVec::with_capacity(prefix.len() + 3).map_err(|_| Errno::ENOMEM)?;
+    push(&mut next, owned(line.interpreter)?)?;
+    if let Some(arg) = line.argument {
+        push(&mut next, owned(arg)?)?;
+    }
+    push(&mut next, passed)?;
+    for word in prefix.into_iter().skip(1) {
+        push(&mut next, word)?;
+    }
+    Ok(next)
 }
 
 fn owned(bytes: &[u8]) -> Result<KVec<u8>, Errno> {
@@ -98,12 +145,12 @@ fn push(list: &mut KVec<KVec<u8>>, word: KVec<u8>) -> Result<(), Errno> {
     list.push(word).map_err(|_| Errno::ENOMEM)
 }
 
-fn read_header(image: &CanonPath, who: &Subject) -> Result<KVec<u8>, Errno> {
+fn read_header(image: &CanonPath, who: &Subject) -> Result<(KVec<u8>, Program), Errno> {
     let (handle, size) = open_executable(image.as_bytes(), who)?;
     let len = (size as usize).min(SCRIPT_HEADER_MAX);
     let mut header = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
     read_exact_at(&handle, 0, header.as_mut_slice())?;
-    Ok(header)
+    Ok((header, program_of(&handle)))
 }
 
 /// An interpreter line: the interpreter as written and the rest of the line,

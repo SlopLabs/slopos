@@ -20,7 +20,7 @@ mod ring_obj;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 
-pub use enter::{ring_enter, ring_setup};
+pub use enter::{Submitter, ring_enter, ring_setup};
 pub use file_ops::RING_FILE_OPS;
 pub use register::{
     ring_register_buffers, ring_register_pbuf_ring, ring_unregister_buffers,

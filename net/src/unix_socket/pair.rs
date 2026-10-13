@@ -239,6 +239,14 @@ impl PairTable {
             .and_then(|s| s.as_mut())
     }
 
+    /// Free a pair no socket took. Its queues are empty, so the drop under the
+    /// socket state lock is inert.
+    pub(super) fn discard(&mut self, handle: PairHandle) {
+        if let Some(entry) = self.pairs.get_mut(handle.0 as usize) {
+            *entry = None;
+        }
+    }
+
     /// Decrement the refcount; at zero the pair is detached and returned so the
     /// caller can drop it *after* releasing the socket state lock — its
     /// ancillary `FileRef`s can recurse into `unix_close` on teardown.

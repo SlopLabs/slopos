@@ -13,11 +13,12 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-use slopos_abi::net::SockAddrIn;
+use slopos_abi::net::{AF_UNIX, SockAddrIn};
 use slopos_abi::ring::{
     OP_ACCEPT, OP_CLOSE, OP_CONNECT, OP_NOP, OP_OPENAT, OP_POLL_ADD, OP_READ, OP_RECVFROM,
     OP_RECVMSG, OP_TIMEOUT, OP_WRITE, Sqe,
 };
+use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
 
 use super::reactor::with_reactor;
 
@@ -294,6 +295,17 @@ fn encode_sockaddr_in(a: &SockAddrIn) -> Vec<u8> {
 pub fn connect(fd: i32, addr: &SockAddrIn) -> IntOp {
     let buf = encode_sockaddr_in(addr);
     let sqe = op_sqe(OP_CONNECT, fd, 0, SOCKADDR_IN_LEN as u32, 0);
+    IntOp(OpFuture::new(sqe, Some(buf)))
+}
+
+/// `OP_CONNECT` to the `AF_UNIX` listener bound at `path`. The buffer is a
+/// whole `SockAddrUn`, which the kernel reads entire whatever the length.
+pub fn connect_unix(fd: i32, path: &[u8]) -> IntOp {
+    let mut buf = vec![0u8; core::mem::size_of::<SockAddrUn>()];
+    let n = path.len().min(UNIX_PATH_MAX);
+    buf[..2].copy_from_slice(&AF_UNIX.to_le_bytes());
+    buf[2..2 + n].copy_from_slice(&path[..n]);
+    let sqe = op_sqe(OP_CONNECT, fd, 0, (2 + n) as u32, 0);
     IntOp(OpFuture::new(sqe, Some(buf)))
 }
 

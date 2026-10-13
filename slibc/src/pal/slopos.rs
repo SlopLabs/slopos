@@ -941,6 +941,20 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
+    fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv: *mut i32) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_SOCKETPAIR,
+                domain as u64,
+                sock_type as u64,
+                protocol as u64,
+                sv as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn bind(fd: i32, addr: *const u8, addrlen: u32) -> Result<(), Errno> {
         let ret = unsafe { syscall3(SYSCALL_BIND, fd as u64, addr as u64, addrlen as u64) };
         to_result(ret)?;

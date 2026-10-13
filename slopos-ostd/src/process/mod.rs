@@ -18,16 +18,20 @@
 
 pub mod account;
 pub mod cred;
+pub mod identity;
 pub mod quota;
 mod registry;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::handle::{Handle, HandleError};
+use crate::mm::{AllocError, Init, SlotPtr, init_struct_with};
 use crate::sync::SeqLock;
+use crate::write_field;
 
 pub use account::{ACCOUNT_SLOT_BITS, AccountId, MAX_ACCOUNTS, root_account};
 pub use cred::Cred;
+pub use identity::{Identity, Program};
 pub use quota::{Charge, Reservation, TryChargeError, try_charge};
 pub use registry::{
     MAX_PROCESS_ID, PROCESS_SLOT_BITS, ProcessAllocError, ProcessTable, process_count,
@@ -68,6 +72,7 @@ pub fn unpack_process_handle(packed: u64) -> Option<Handle<Process>> {
 ///
 /// Held by `KArc`; the registry owns one reference for as long as the process
 /// is reachable by handle or by id.
+#[derive(crate::SlotFields)]
 pub struct Process {
     /// Display and ABI only, never a lookup key: nothing resolves an object
     /// through it without a generation check.
@@ -118,6 +123,10 @@ pub struct Process {
     /// POSIX requires of `setuid`.
     cred: SeqLock<Cred>,
 
+    /// A [`Program`] in its word form: set by spawn, exec and fork, lowered to
+    /// `Other` by an exec's reset and by code from outside the base.
+    program: AtomicU64,
+
     /// This process's own existence, charged to its **spawner**.
     ///
     /// Released at the reap rather than at the final `Drop`, because the
@@ -128,32 +137,38 @@ pub struct Process {
 }
 
 impl Process {
-    /// Build an unregistered process. [`process_spawn`] is the only way to
-    /// obtain one: it allocates the id, binds the slot and stamps the
-    /// self-handle as one step.
-    fn new(
+    /// Build an unregistered process in place, its frame never on a stack.
+    /// [`process_spawn`] is the only way to obtain one: it allocates the id,
+    /// binds the slot and stamps the self-handle as one step.
+    fn init(
         id: u32,
         account: AccountId,
         account_parent: AccountId,
         parent: u64,
         cred: Cred,
         proc_charge: quota::Reservation<slopos_abi::quota::ProcCount>,
-    ) -> Self {
-        let slot = quota::ChargeSlot::empty();
-        slot.put(proc_charge);
-        Self {
-            id,
-            handle: AtomicU64::new(PROCESS_HANDLE_NONE),
-            parent: AtomicU64::new(parent),
-            account,
-            account_parent,
-            task_count: AtomicU32::new(0),
-            exited_cpu_ticks: AtomicU64::new(0),
-            exited: AtomicBool::new(false),
-            dropped_caps: AtomicU64::new(crate::authority::CAP_NONE),
-            cred: SeqLock::new(cred),
-            proc_charge: slot,
-        }
+    ) -> impl Init<Self, AllocError> {
+        init_struct_with(move |slot: SlotPtr<Self>| {
+            let charge = quota::ChargeSlot::empty();
+            charge.put(proc_charge);
+            write_field!(slot, id, id);
+            write_field!(slot, handle, AtomicU64::new(PROCESS_HANDLE_NONE));
+            write_field!(slot, parent, AtomicU64::new(parent));
+            write_field!(slot, account, account);
+            write_field!(slot, account_parent, account_parent);
+            write_field!(slot, task_count, AtomicU32::new(0));
+            write_field!(slot, exited_cpu_ticks, AtomicU64::new(0));
+            write_field!(slot, exited, AtomicBool::new(false));
+            write_field!(
+                slot,
+                dropped_caps,
+                AtomicU64::new(crate::authority::CAP_NONE)
+            );
+            write_field!(slot, cred, SeqLock::new(cred));
+            write_field!(slot, program, AtomicU64::new(Program::Other.to_raw()));
+            write_field!(slot, proc_charge, charge);
+            Ok::<_, AllocError>(slot.finish())
+        })
     }
 
     /// Give the spawner back the charge for this process.
@@ -261,6 +276,16 @@ impl Process {
         let next = change(guard.get_mut())?;
         guard.write(next);
         Ok(())
+    }
+
+    #[inline]
+    pub fn program(&self) -> Program {
+        Program::from_raw(self.program.load(Ordering::Acquire))
+    }
+
+    #[inline]
+    pub fn set_program(&self, program: Program) {
+        self.program.store(program.to_raw(), Ordering::Release);
     }
 
     /// Leave this process. Returns `true` if this was the last task.
@@ -454,15 +479,20 @@ mod tests {
             .expect("a charge against no account is vacuous")
     }
 
-    fn scratch(id: u32) -> Process {
-        Process::new(
+    fn scratch(id: u32) -> crate::KArc<Process> {
+        build(id, AccountId::NONE, AccountId::NONE)
+    }
+
+    fn build(id: u32, account: AccountId, account_parent: AccountId) -> crate::KArc<Process> {
+        crate::KArc::try_init(Process::init(
             id,
-            AccountId::NONE,
-            AccountId::NONE,
+            account,
+            account_parent,
             PROCESS_HANDLE_NONE,
             Cred::ROOT,
             no_charge(),
-        )
+        ))
+        .expect("a host allocation")
     }
 
     #[test]
@@ -490,14 +520,7 @@ mod tests {
 
     #[test]
     fn parent_edge_is_rehomeable_and_account_edge_is_not() {
-        let p = Process::new(
-            3,
-            AccountId::from_parts(4, 9),
-            AccountId::from_parts(1, 2),
-            PROCESS_HANDLE_NONE,
-            Cred::ROOT,
-            no_charge(),
-        );
+        let p = build(3, AccountId::from_parts(4, 9), AccountId::from_parts(1, 2));
         assert!(p.parent().is_none());
         let new_parent = Handle::<Process>::from_parts(7, 11);
         p.set_parent(Some(new_parent));

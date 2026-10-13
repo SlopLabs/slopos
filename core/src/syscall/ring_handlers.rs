@@ -61,8 +61,11 @@ define_syscall!(syscall_ring_enter
         to_submit,
         min_complete,
         flags,
-        &ctx.subject(),
-        crate::syscall::fs::at_handlers::creation_mode(0o666),
+        &slopos_ring::Submitter {
+            subject: ctx.subject(),
+            identity: &|| ctx.identity(),
+            create_mode: crate::syscall::fs::at_handlers::creation_mode(0o666),
+        },
     );
     if rc < 0 {
         return Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL));

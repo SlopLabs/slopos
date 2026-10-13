@@ -70,7 +70,7 @@ per-capability mask, the only authority a task carries — `task.flags` say wher
 it runs, never what it may do — and its classification is total by compile-time construction:
 `define_syscall!` takes a mandatory `cap(X)` clause and emits it into the dispatch table
 through the handler, so a `const` histogram in `core/src/syscall/handlers.rs` asserts both
-totality over all 175 registered entry points and each capability's recorded entry-point
+totality over every registered entry point and each capability's recorded entry-point
 count. Read the code
 rather than a document: `slopos_ostd::authority` for the vocabulary and the witness,
 `core/src/exec/grants.rs` for where authority enters, `slopos_ostd::seat` for the display

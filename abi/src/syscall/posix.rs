@@ -31,10 +31,64 @@ pub const SO_KEEPALIVE: i32 = 9;
 /// Urgent data stays in the ordinary stream. Always on: TCP here reads an
 /// urgent byte as a byte of the stream and keeps no out-of-band queue.
 pub const SO_OOBINLINE: i32 = 10;
+/// The `AF_UNIX` peer's [`UCred`], as of its `connect`, `listen` or
+/// `socketpair`.
+pub const SO_PEERCRED: i32 = 17;
 /// Receive timeout (value: [`Timeval`]).
 pub const SO_RCVTIMEO: i32 = 20;
 /// Send timeout (value: [`Timeval`]).
 pub const SO_SNDTIMEO: i32 = 21;
+/// A new close-on-exec pidfd for the process [`SO_PEERCRED`] names (value:
+/// `i32`), which polls readable once its leader thread has exited, at once if
+/// it already has.
+pub const SO_PEERPIDFD: i32 = 77;
+
+/// Linux's `struct ucred`: the effective ids and the process id a peer had
+/// when it connected.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UCred {
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl UCred {
+    /// What a socket with no peer reports, as Linux does.
+    pub const NONE: Self = Self {
+        pid: 0,
+        uid: u32::MAX,
+        gid: u32::MAX,
+    };
+
+    pub fn to_bytes(&self) -> [u8; 12] {
+        let mut out = [0u8; 12];
+        out[..4].copy_from_slice(&self.pid.to_ne_bytes());
+        out[4..8].copy_from_slice(&self.uid.to_ne_bytes());
+        out[8..].copy_from_slice(&self.gid.to_ne_bytes());
+        out
+    }
+
+    pub fn from_bytes(b: &[u8; 12]) -> Self {
+        let word = |at: usize| [b[at], b[at + 1], b[at + 2], b[at + 3]];
+        Self {
+            pid: i32::from_ne_bytes(word(0)),
+            uid: u32::from_ne_bytes(word(4)),
+            gid: u32::from_ne_bytes(word(8)),
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<UCred>() == 12);
+
+/// Socket option level for SlopOS's own options, clear of every `SOL_*` and
+/// `IPPROTO_*` level Linux has allocated.
+pub const SOL_SLOPOS: i32 = 1024;
+/// The `AF_UNIX` peer's program identity, as of its `connect`, `listen` or
+/// `socketpair`: the base path of the program it ran, or no bytes for a
+/// program outside the base. `ERANGE`, with the length needed in `optlen`,
+/// when the buffer is shorter.
+pub const SO_PEERPROGRAM: i32 = 1;
 
 /// POSIX `struct timeval` — the wire format for `SO_RCVTIMEO` / `SO_SNDTIMEO`.
 /// Every layer (kernel, slibc, std) must use this layout.

@@ -15,6 +15,7 @@ use slopos_fs::fileio::FdTable;
 use slopos_abi::Errno;
 use slopos_abi::quota::CommitPagesAxis;
 use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::process::Program;
 use slopos_ostd::process::quota::try_charge;
 use slopos_ostd::{KArc, KBox, KVec};
 
@@ -424,9 +425,9 @@ pub fn spawn_program_with_cwd(
             return Err(Errno::ENOMEM);
         }
 
-        exec_image(
+        let loaded = exec_image(
             child_table,
-            &program.image,
+            &program,
             argv.as_deref(),
             envp,
             raised != CAP_NONE || mixed_ids(&spawner.cred),
@@ -435,6 +436,11 @@ pub fn spawn_program_with_cwd(
             &mut stack_ptr,
             &mut tls_tp,
         )?;
+        if spawn.with_child(|child| child.process().map(|process| process.set_program(loaded)))
+            != Some(Some(()))
+        {
+            return Err(Errno::ENOMEM);
+        }
 
         // A caller with no parent process (`launch_init`) keeps its console
         // bootstrap table untouched.
@@ -571,9 +577,9 @@ pub fn resolve_program(path: &[u8], cwd: &[u8], who: &Subject) -> Result<CanonPa
     Ok(canon)
 }
 
-/// `program` is the image [`resolve_exec`] chose, not a caller's spelling:
-/// the type is what stops a relative path reaching the loader, which
-/// resolves against `/`.
+/// `program` is what [`resolve_exec`] chose, not a caller's spelling: the
+/// type is what stops a relative path reaching the loader, which resolves
+/// against `/`. Answers the identity of what it loaded.
 ///
 /// `execve`'s road: it can only narrow the caller's authority, so it never
 /// confers a grant, and the image runs `AT_SECURE` only when the caller's
@@ -581,14 +587,14 @@ pub fn resolve_program(path: &[u8], cwd: &[u8], who: &Subject) -> Result<CanonPa
 #[allow(clippy::too_many_arguments)]
 pub fn do_exec(
     table: FdTable,
-    program: &CanonPath,
+    program: &ExecProgram,
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
     who: &Subject,
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
-) -> Result<(), Errno> {
+) -> Result<Program, Errno> {
     exec_image(
         table,
         program,
@@ -600,6 +606,23 @@ pub fn do_exec(
         stack_ptr_out,
         tls_tp_out,
     )
+}
+
+/// Whether an exec by `task` may attest what it loads: only as its process's
+/// sole thread, since a sibling runs on in the new image and could patch it.
+#[inline(never)]
+pub fn exec_attests(task: &slopos_sched::task_struct::Task) -> bool {
+    task.process()
+        .is_some_and(|process| process.task_count() == 1)
+}
+
+/// Record `loaded` as `task`'s process's program once its exec is past the
+/// point of no return, if [`exec_attests`] allowed it.
+#[inline(never)]
+pub fn attest_exec(task: &slopos_sched::task_struct::Task, loaded: Program, attests: bool) {
+    if let Some(process) = task.process() {
+        process.set_program(if attests { loaded } else { Program::Other });
+    }
 }
 
 /// `execve`'s half of [`Cred::saved_at_exec`].
@@ -654,11 +677,12 @@ pub fn narrow_authority_for_exec(
 }
 
 /// `secure` is what the image finds as `AT_SECURE`. `who` must be able to
-/// execute the image and its interpreter.
+/// execute the image and its interpreter. Answers the identity of what it
+/// loaded: `program`'s, unless the files it mapped were not all the base's.
 #[allow(clippy::too_many_arguments)]
 fn exec_image(
     table: FdTable,
-    program: &CanonPath,
+    program: &ExecProgram,
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
     secure: bool,
@@ -666,16 +690,17 @@ fn exec_image(
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
-) -> Result<(), Errno> {
+) -> Result<Program, Errno> {
+    let image = program.image.as_bytes();
     let vm_process = table.process().ok_or(Errno::ENOMEM)?;
-    let exec_info = load_image(program.as_bytes(), vm_process, entry_out, who)?;
+    let (exec_info, all_base) = load_image(image, vm_process, entry_out, who)?;
 
     if process_vm_reset_stack(vm_process) != 0 {
         return Err(Errno::ENOMEM);
     }
     process_vm_end_prepay(vm_process);
 
-    let stack_top = setup_user_stack(table, argv, envp, &exec_info, program.as_bytes(), secure)?;
+    let stack_top = setup_user_stack(table, argv, envp, &exec_info, image, secure)?;
     *stack_ptr_out = stack_top;
     *tls_tp_out = exec_info.tls_tp;
 
@@ -690,7 +715,19 @@ fn exec_image(
         *tls_tp_out,
     );
 
-    Ok(())
+    Ok(if all_base {
+        program.program
+    } else {
+        Program::Other
+    })
+}
+
+/// What a file opened for exec attests: the base's own, or not.
+pub(crate) fn program_of(handle: &VfsHandle) -> Program {
+    match core::num::NonZeroU64::new(handle.inode) {
+        Some(inode) if slopos_fs::basefs::is_base(handle.fs) => Program::Base(inode),
+        _ => Program::Other,
+    }
 }
 
 /// Open `path` as an executable and answer its size.
@@ -754,7 +791,7 @@ fn load_image(
     process: slopos_ostd::process::ProcessId,
     entry_out: &mut u64,
     who: &Subject,
-) -> Result<ElfExecInfo, Errno> {
+) -> Result<(ElfExecInfo, bool), Errno> {
     let (handle, file_size) = open_executable(path, who)?;
 
     // Only the header window is staged; the rest goes from the file straight
@@ -789,14 +826,19 @@ fn load_image(
     }
     process_vm_prepay_commit(process, funds);
 
-    install_images(
+    let all_base = program_of(&handle) != Program::Other
+        && interp
+            .as_deref()
+            .is_none_or(|staged| program_of(&staged.handle) != Program::Other);
+    let exec_info = install_images(
         &handle,
         header.as_slice(),
         file_size,
         interp.as_deref(),
         process,
         entry_out,
-    )
+    )?;
+    Ok((exec_info, all_base))
 }
 
 /// Map the executable, then the interpreter, then stream the executable's

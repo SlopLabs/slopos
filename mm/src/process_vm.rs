@@ -11,7 +11,7 @@ use slopos_ostd::mm::uframe::{AnyUFrameMeta, UFrame};
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 use slopos_ostd::panic::AbortOnUnwind;
 use slopos_ostd::process::quota::Reservation;
-use slopos_ostd::process::{Process, ProcessId};
+use slopos_ostd::process::{Process, ProcessId, Program};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
@@ -846,7 +846,7 @@ pub fn process_vm_end_prepay(process: ProcessId) {
 ///
 /// Runs before the new image is loaded, so a failure here is still
 /// recoverable — the caller has not yet destroyed anything the old program
-/// needs.
+/// needs. Once the old image goes, so does the program it attested.
 pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     let slot = match find_slot_for_pid(process) {
         Some(s) => s,
@@ -882,6 +882,9 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
             return -1;
         }
     };
+    if let Some(owner) = inner.process.as_deref() {
+        owner.set_program(Program::Other);
+    }
 
     // Each backing releases what it owns: anonymous frames go back to the
     // buddy allocator, a shared memfd drops its mapcount, a ring drops its
@@ -2919,6 +2922,9 @@ pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
     0
 }
 
+/// Making a page executable that was not forfeits the process's program,
+/// under the lock that applies it, so no other thread can make the page
+/// writable between the test and the change.
 pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64) -> i32 {
     if length == 0 || (addr & (PAGE_SIZE_4KB - 1)) != 0 {
         return -1;
@@ -2950,6 +2956,7 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
     }
 
     let new_prot = prot_to_region(prot);
+    let mut makes_code = false;
 
     // Widening a shared file mapping is write access to the file, and the
     // descriptor that authorised it — with the seal and the mount's read-only
@@ -2967,7 +2974,11 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
         {
             return slopos_abi::Errno::EACCES.raw();
         }
+        makes_code |= new_prot.protection.exec && !region.protection.exec;
         cursor = vma_end;
+    }
+    if makes_code && let Some(owner) = proc.process.as_deref() {
+        owner.set_program(Program::Other);
     }
 
     // Splits at both ends, so a sub-range no longer rewrites the protection of
@@ -3049,7 +3060,18 @@ fn push_clone_snapshot(chunks: &mut ClonePageChunks, entry: ClonePageSnapshot) -
 fn clone_cow_snapshot_parent(
     parent_slot: usize,
     parent_id: u32,
-) -> Option<(u64, u64, u64, u64, u64, u64, u64, u32, KVec<CloneVmaEntry>)> {
+) -> Option<(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u32,
+    Program,
+    KVec<CloneVmaEntry>,
+)> {
     let mut guard = PROCESS_VMS[parent_slot].lock();
     if guard.process_id != parent_id || guard.vm_space.is_none() {
         klog_info!("process_vm_clone_cow: Parent has no address space");
@@ -3081,6 +3103,10 @@ fn clone_cow_snapshot_parent(
         guard.stack_start,
         guard.stack_end,
         guard.flags,
+        guard
+            .process
+            .as_deref()
+            .map_or(Program::Other, Process::program),
         vmas,
     ))
 }
@@ -3342,6 +3368,8 @@ pub fn set_clone_window_hook(hook: Option<(u32, fn())>) {
     }
 }
 
+/// Give `child` a copy-on-write copy of `parent`'s address space, and the
+/// program that space attests as of the same snapshot.
 pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Option<ProcessVmRef> {
     let parent_slot = match find_slot_for_pid(parent) {
         Some(s) => s,
@@ -3363,11 +3391,13 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
         parent_stack_start,
         parent_stack_end,
         parent_flags,
+        parent_program,
         parent_vmas,
     ) = match clone_cow_snapshot_parent(parent_slot, parent.id()) {
         Some(t) => t,
         None => return None,
     };
+    child.set_program(parent_program);
 
     #[cfg(feature = "test-hooks")]
     if CLONE_WINDOW_PARENT.load(core::sync::atomic::Ordering::Acquire) == parent.id() {

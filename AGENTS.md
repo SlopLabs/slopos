@@ -1354,6 +1354,31 @@ halves, and `SIGCONT` to a task of the sender's session needs neither.
 superblock's `s_def_resuid` and `s_def_resgid`, which admit every process until
 the session leaves uid 0.
 
+**A peer is told who connected, as of when it connected.** An `AF_UNIX`
+socket records an `Identity` (`slopos_ostd::process::identity`: the pid
+`getpid` answers, the effective uid and gid, and the program) at `listen` for
+the listener, at `connect` for the connector — for a ring's `OP_CONNECT`, the
+task whose `ring_enter` performs it, asked at each try — and at `socketpair`
+for both ends, and nothing later changes it: not an id change, not an exec,
+not the descriptor passing to another process. `SO_PEERCRED` and
+`SO_PEERPIDFD` read it as Linux's do (`{0, -1, -1}` and `ENODATA` without a
+peer), and `SO_PEERPROGRAM` at `SOL_SLOPOS` reads the program. The socket
+layer is told who connects; nothing below the syscall layer reads the current
+task for it. Task ids are never reused, so the pid is a handle: a peer's pidfd
+is handed out even once the peer is gone, and is readable at once; a live one
+turns readable when the peer's leader thread exits. A process's program is
+`Base(inode)` of the boot slot's base when exec or spawn loaded it with every
+link of its `#!` chain and its ELF interpreter served by `BASE_FS` — each
+interpreter named by an absolute path and each script by the absolute path it
+was found at, since its interpreter opens that spelling again — and `Other`
+otherwise. Fork copies it with the address space. An exec that begins with
+another thread alive attests nothing, and one that fails once the old image is
+gone leaves `Other`. An executable mapping of anything but a base file —
+anonymous memory, a memfd, a file elsewhere — and an `mprotect` making any page
+executable that was not, decided under the lock that applies it, make the
+process `Other` before that code can run, until its next exec. `pidfd_open`
+takes any process's leader, as Linux's does.
+
 ### Licensing discipline
 
 SlopOS is `GPL-3.0-or-later`, except its C library and the CMake platform

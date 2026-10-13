@@ -237,6 +237,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin ip_e2e_test \
         --bin rlimit_test \
         --bin dac_test \
+        --bin peer_test \
         --bin fifo_test \
         --bin session_smoke_test \
         --bin spawn_output_test \
@@ -402,6 +403,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/dac_test" ]; then
         cp "$RELEASE_DIR/dac_test" "$BUILD_DIR/dac_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/peer_test" ]; then
+        cp "$RELEASE_DIR/peer_test" "$BUILD_DIR/peer_test.elf"
     fi
     if [ -f "$RELEASE_DIR/fifo_test" ]; then
         cp "$RELEASE_DIR/fifo_test" "$BUILD_DIR/fifo_test.elf"

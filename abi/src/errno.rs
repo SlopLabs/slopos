@@ -143,6 +143,7 @@ define_errnos! {
     ENOSYS          =  38, "Function not implemented";
     ENOTEMPTY       =  39, "Directory not empty";
     ELOOP           =  40, "Too many levels of symbolic links";
+    ENODATA         =  61, "No data available";
     ETIME           =  62, "Timer expired";
     ENOTSOCK        =  88, "Not a socket";
     EDESTADDRREQ    =  89, "Destination address required";

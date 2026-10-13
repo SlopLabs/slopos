@@ -196,14 +196,15 @@ pub unsafe extern "C" fn getsockname(fd: i32, addr: *mut SockAddr, addrlen: *mut
     }
 }
 
-/// `socketpair(2)` needs a kernel call that creates two already-connected
-/// endpoints at once; SlopOS has none, and the alternative — bind a unique
-/// `AF_UNIX` path, listen, connect, accept, unlink — is racy and leaves a
-/// filesystem artifact behind, so it is refused rather than approximated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn socketpair(_domain: i32, _ty: i32, _protocol: i32, _sv: *mut i32) -> i32 {
-    errno_set(crate::errno::ENOSYS.raw());
-    -1
+pub unsafe extern "C" fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut i32) -> i32 {
+    match Sys::socketpair(domain, ty, protocol, sv) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

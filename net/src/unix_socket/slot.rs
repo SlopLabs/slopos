@@ -3,6 +3,8 @@
 //! Slot occupancy and the generation counter are owned by the registry's
 //! `HandleTable`, not by the slot.
 
+use slopos_ostd::process::Identity;
+
 use super::handle::SocketHandle;
 use super::pair::{PairHandle, PairSide};
 
@@ -21,6 +23,8 @@ pub(super) enum SlotState {
     Listening {
         path: slopos_ostd::KVec<u8>,
         backlog: slopos_ostd::KVecDeque<SocketHandle>,
+        /// Who listened, which every connection's client is told.
+        owner: Identity,
     },
     /// `unix_connect()` (caller side) or accept (peer side) succeeded.
     Connected {
@@ -28,6 +32,9 @@ pub(super) enum SlotState {
         side: PairSide,
         peer: SocketHandle,
         peer_closed: bool,
+        /// Kept here rather than read from the peer's slot, which its close
+        /// frees.
+        peer_identity: Identity,
     },
 }
 

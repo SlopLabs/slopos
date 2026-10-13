@@ -2,6 +2,45 @@
 
 **No finding is open.**
 
+Swept 2026-10-13: peer identity — `socketpair`, `SO_PEERCRED`, `SO_PEERPIDFD`
+and `SO_PEERPROGRAM` on `AF_UNIX`, the identity `listen`, `connect`, a ring's
+`OP_CONNECT` and `socketpair` capture, `pidfd_open` on any leader, the program
+identity spawn, exec and fork set and an executable mapping forfeits, and
+`Process` built in place. Reviews found defects before it landed: an
+`mprotect` tested whether it made code outside the lock that applied it, so a
+sibling thread could make the page writable in between and keep `Base` over
+bytes it wrote; a script was attested by the path exec found while its
+interpreter opened the caller's spelling again, so a link the caller owned, or
+a working directory a `CLONE_FS` process shared, could be pointed elsewhere in
+between — a script is now attested only when named by its absolute path, and
+through an interpreter named by one; fork copied the program before the
+address space, so a sibling's forfeit could miss a child that got its code; an
+exec that failed once the old image was gone kept the old program over
+whatever the new one had mapped; a ring's `OP_CONNECT` that waited for room in
+a backlog connected with the identity its `ring_enter` began with, after a
+sibling thread had changed ids, mapped foreign code or exec'd, and now asks at
+each try; and `peer_test` blocked forever on a child that never connected. Two
+weaknesses of the design itself, closed here because phase 5 will trust the
+attestation: a session process could start a dynamically linked base program
+with `LD_LIBRARY_PATH` naming its own library, which now forfeits it; and exec
+does not stop sibling threads, so one could patch the new image before it ran,
+where an exec that begins beside another thread now attests nothing. One
+**pre-existing** deviation, fixed here: a pidfd survived exec, where Linux
+makes every pidfd close-on-exec. Below the bar: an identity is captured when a
+socket connects or listens, so a base program that later maps foreign code
+keeps `Base` on connections it already made and towards every client of a
+socket it already listens on — its own choice, as handing its connection to a
+child is; a pidfd turns readable when its process's leader thread exits, so a
+process whose leader leaves before its other threads reads as gone while they
+run, as it did before any process could ask; a library with no executable
+segment that the loader takes from `LD_LIBRARY_PATH` forfeits nothing yet can
+interpose symbols, so a `program` principal must name a static program until
+the loader refuses such objects (every program phase 5 names is static);
+`pidfd_open` now tells anyone when any process exits, which `process_list`
+already does; and `socketpair` and `SO_PEERPIDFD`, like `accept`, install a
+descriptor before writing its number out and close it by number if that fails,
+which a sibling thread racing `dup2` onto the number could see.
+
 Swept 2026-10-12: credentials and DAC — the `Cred` on every process and the id
 calls' rules, `SetId` and `DacOverride`, the `Subject` every VFS entry now
 takes and each check it runs (search on the walk, open, create, link, symlink,

@@ -186,6 +186,11 @@ pub const SYSCALL_GETSOCKNAME: u64 = 51;
 /// `getpeername(fd, addr: *mut u8, addrlen: *mut u32)`.
 pub const SYSCALL_GETPEERNAME: u64 = 52;
 
+/// `socketpair(domain, type, protocol, sv: *mut [i32; 2])` — two connected
+/// `AF_UNIX` stream endpoints, each attesting its creator to the other. `type`
+/// may carry `SOCK_NONBLOCK` and `SOCK_CLOEXEC`.
+pub const SYSCALL_SOCKETPAIR: u64 = 53;
+
 /// `setsockopt(fd, level, optname, optval: *const u8, optlen)`.
 pub const SYSCALL_SETSOCKOPT: u64 = 54;
 
@@ -597,7 +602,8 @@ pub const SYSCALL_MEMFD_CREATE: u64 = 319;
 
 /// `pidfd_open(pid, flags) -> fd` that becomes `POLLIN`-ready once the target
 /// task exits. Not readable (`read` → `-EINVAL`); reap the status with
-/// `wait4`. The target must be a child of the caller and `flags` must be 0.
+/// `wait4`. Any live process, by its leader's id; `flags` must be 0. The fd
+/// is close-on-exec.
 pub const SYSCALL_PIDFD_OPEN: u64 = 434;
 
 /// `faccessat2(dirfd, path: *const u8, mode, flags)` — whether the caller's

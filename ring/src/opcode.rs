@@ -7,6 +7,7 @@
 use core::ffi::c_int;
 use slopos_fs::fileio::FdTable;
 use slopos_fs::vfs::Subject;
+use slopos_ostd::process::Identity;
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
@@ -106,6 +107,7 @@ pub fn probe(
     sqe: &Sqe,
     file: Option<&FileRef>,
     buffers: &mut BufferRegistry,
+    who: &dyn Fn() -> Identity,
 ) -> Outcome {
     let sel = buf_sel(sqe);
     match sqe.opcode {
@@ -151,7 +153,9 @@ pub fn probe(
         // Fd-number-addressed: no target reference held.
         OP_CLOSE => reject_buf(sel).unwrap_or_else(|| probe_close(table, sqe)),
         OP_ACCEPT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_accept(table, f))),
-        OP_CONNECT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_connect(f, sqe))),
+        OP_CONNECT => {
+            reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_connect(f, sqe, who)))
+        }
         OP_POLL_ADD => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_poll(f, sqe))),
         OP_TIMEOUT | OP_CANCEL => Outcome::Inline(Errno::EINVAL.raw()),
         _ => Outcome::Inline(Errno::EINVAL.raw()),
@@ -178,7 +182,12 @@ fn reject_buf(sel: Option<BufSel>) -> Option<Outcome> {
 /// Re-probe an in-flight row at harvest time. Same dispatch as `probe`,
 /// reconstructed from the stored row (re-validating the user buffer via
 /// a fresh `UserReadBuf`/`UserWriteBuf` each time — SLOPRING § 9).
-pub fn reprobe(table: FdTable, row: &InFlight, buffers: &mut BufferRegistry) -> Outcome {
+pub fn reprobe(
+    table: FdTable,
+    row: &InFlight,
+    buffers: &mut BufferRegistry,
+    who: &dyn Fn() -> Identity,
+) -> Outcome {
     let sqe = Sqe {
         opcode: row.opcode,
         flags: row.buf_flags,
@@ -197,7 +206,7 @@ pub fn reprobe(table: FdTable, row: &InFlight, buffers: &mut BufferRegistry) -> 
         _resv0: 0,
         _resv1: 0,
     };
-    probe(table, &sqe, row.file.as_ref(), buffers)
+    probe(table, &sqe, row.file.as_ref(), buffers, who)
 }
 
 fn probe_read(file: &FileRef, sqe: &Sqe) -> Outcome {
@@ -290,8 +299,8 @@ fn probe_accept(table: FdTable, file: &FileRef) -> Outcome {
 /// VA of a `SockAddrIn`; [`crate::net_glue::connect_nonblock`] initiates the
 /// handshake once and polls it on each re-probe. Not an ownership op — it
 /// installs no fd and consumes no bytes, so no CQE slot is pre-reserved.
-fn probe_connect(file: &FileRef, sqe: &Sqe) -> Outcome {
-    match crate::net_glue::connect_nonblock(file, sqe.addr, sqe.len) {
+fn probe_connect(file: &FileRef, sqe: &Sqe, who: &dyn Fn() -> Identity) -> Outcome {
+    match crate::net_glue::connect_nonblock(file, sqe.addr, sqe.len, who) {
         Ok(rc) => crate::net_glue::outcome_from_rc(rc),
         Err(e) => Outcome::Inline(e.raw()),
     }

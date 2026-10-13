@@ -33,6 +33,8 @@ pub mod tests_build_floor_proc;
 pub mod tests_build_floor_signal;
 #[cfg(feature = "test-hooks")]
 pub mod tests_cred;
+#[cfg(feature = "test-hooks")]
+pub mod tests_peer;
 pub mod ui_handlers;
 pub mod user_loop;
 

@@ -5037,14 +5037,14 @@ fn unix_create_connected_pair(table: FdTable) -> Option<(i32, i32)> {
         unix_socket::unix_close(srv_handle);
         return None;
     }
-    if unix_socket::unix_listen(srv_handle, 4) != 0 {
+    if unix_socket::unix_listen(srv_handle, 4, slopos_ostd::process::Identity::KERNEL) != 0 {
         unix_socket::unix_close(srv_handle);
         return None;
     }
     unix_socket::unix_set_nonblocking(srv_handle, true);
 
     let cli_handle = unix_socket::unix_create()?;
-    if unix_socket::unix_connect(cli_handle, path) != 0 {
+    if unix_socket::unix_connect(cli_handle, path, slopos_ostd::process::Identity::KERNEL) != 0 {
         unix_socket::unix_close(cli_handle);
         unix_socket::unix_close(srv_handle);
         return None;
@@ -5615,12 +5615,16 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
 
     let listen_handle = unix_socket::unix_create().expect("listen socket create");
     assert_eq_test!(unix_socket::unix_bind(listen_handle, path), 0, "bind");
-    assert_eq_test!(unix_socket::unix_listen(listen_handle, 4), 0, "listen");
+    assert_eq_test!(
+        unix_socket::unix_listen(listen_handle, 4, slopos_ostd::process::Identity::KERNEL),
+        0,
+        "listen"
+    );
     unix_socket::unix_set_nonblocking(listen_handle, true);
 
     // Connect lands in the backlog; nothing has accepted yet.
     let cli_handle = unix_socket::unix_create().expect("client socket create");
-    let rc = unix_socket::unix_connect(cli_handle, path);
+    let rc = unix_socket::unix_connect(cli_handle, path, slopos_ostd::process::Identity::KERNEL);
     assert_eq_test!(rc, 0, "connect");
 
     let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(
@@ -6319,14 +6323,14 @@ fn unix_create_connected_pair_raw() -> Option<(
         unix_socket::unix_close(srv);
         return None;
     }
-    if unix_socket::unix_listen(srv, 4) != 0 {
+    if unix_socket::unix_listen(srv, 4, slopos_ostd::process::Identity::KERNEL) != 0 {
         unix_socket::unix_close(srv);
         return None;
     }
     unix_socket::unix_set_nonblocking(srv, true);
 
     let cli = unix_socket::unix_create()?;
-    if unix_socket::unix_connect(cli, path) != 0 {
+    if unix_socket::unix_connect(cli, path, slopos_ostd::process::Identity::KERNEL) != 0 {
         unix_socket::unix_close(cli);
         unix_socket::unix_close(srv);
         return None;

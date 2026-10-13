@@ -2622,6 +2622,38 @@ pub fn test_basefs_serves_an_archive_in_place() -> TestResult {
     TestResult::Pass
 }
 
+/// An inode's path is the names above it, and a buffer too short for it is
+/// told the length and left as it was.
+pub fn test_basefs_names_an_inode_by_its_path() -> TestResult {
+    use crate::basefs::BaseFs;
+    use crate::vfs::FileSystem;
+    let base = BaseFs::new();
+    if base.install(&BASE_SAMPLE, &[]).is_err() {
+        return slopos_testing::fail!("the sample did not index");
+    }
+    let (Ok(tool), Ok(doc)) = (
+        base.resolve(b"/bin/tool"),
+        base.resolve(b"/usr/share/doc/readme"),
+    ) else {
+        return slopos_testing::fail!("a path the archive names did not resolve");
+    };
+    let mut buf = [0u8; 32];
+    for (inode, path) in [
+        (tool, &b"/bin/tool"[..]),
+        (doc, b"/usr/share/doc/readme"),
+        (base.root_inode(), b"/"),
+    ] {
+        if base.path_of(inode, &mut buf) != Ok(path.len()) || &buf[..path.len()] != path {
+            return slopos_testing::fail!("inode {} is not named {:?}", inode, path);
+        }
+    }
+    let mut short = [0xaau8; 8];
+    if base.path_of(tool, &mut short) != Ok(9) || short != [0xaa; 8] {
+        return slopos_testing::fail!("a short buffer was written or misinformed");
+    }
+    TestResult::Pass
+}
+
 /// An archive whose path climbs out with `..` is no base.
 pub fn test_basefs_refuses_a_climbing_path() -> TestResult {
     match crate::basefs::BaseFs::new().install(&CLIMBING, &[]) {
@@ -2745,6 +2777,7 @@ pub fn test_basefs_indexes_more_than_one_chunk() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_basefs_serves_an_archive_in_place);
+slopos_testing::stest!(name = test_basefs_names_an_inode_by_its_path);
 slopos_testing::stest!(name = test_basefs_refuses_a_climbing_path);
 slopos_testing::stest!(name = test_basefs_serves_files_beside_the_archive);
 slopos_testing::stest!(name = test_basefs_indexes_more_than_one_chunk);

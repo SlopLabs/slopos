@@ -33,7 +33,8 @@ use slopos_abi::signal::{
 };
 use slopos_abi::syscall::{
     CMSG_DATA_OFFSET, CmsgHdr, F_GETFD, F_GETFL, FD_CLOEXEC, MAP_ANONYMOUS, MAP_PRIVATE, MsgHdr,
-    O_NONBLOCK, PROT_READ, PROT_WRITE, SCM_RIGHTS, SOL_SOCKET, cmsg_len, cmsg_space,
+    O_NONBLOCK, PROT_READ, PROT_WRITE, SCM_RIGHTS, SO_PEERCRED, SOL_SOCKET, UCred, cmsg_len,
+    cmsg_space,
 };
 use slopos_abi::unix::SockAddrUn;
 use slopos_slibc::conf::{
@@ -50,11 +51,13 @@ use slopos_slibc::net::netdb::__h_errno_location;
 use slopos_slibc::net::resolv::{_res, RES_INIT, RES_RECURSE, dn_expand, res_query};
 use slopos_slibc::net::{
     AF_INET, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_NONBLOCK,
-    SOCK_SEQPACKET, SOCK_STREAM, SockAddrIn, accept, accept4, bind, connect, getsockname, listen,
-    recvmsg, sendmsg, socket,
+    SOCK_SEQPACKET, SOCK_STREAM, SockAddrIn, accept, accept4, bind, connect, getsockname,
+    getsockopt, listen, recvmsg, sendmsg, socket, socketpair,
 };
 use slopos_slibc::process::ids::{ITIMER_REAL, getgroups, getitimer, setgroups, setitimer};
-use slopos_slibc::process::{_exit, WEXITSTATUS, WIFEXITED, execl, execle, fork, waitpid};
+use slopos_slibc::process::{
+    _exit, WEXITSTATUS, WIFEXITED, execl, execle, fork, getegid, geteuid, waitpid,
+};
 use slopos_slibc::signal::{self, SIG_DFL, SIGSEGV, SIGUSR1, SIGUSR2};
 use slopos_slibc::stdio::{self, chars::fputs, file::fflush, file::fileno, file::freopen};
 use slopos_slibc::stdlib::temp::{mkdtemp, mkstemp};
@@ -851,55 +854,31 @@ fn sigsegv_handler_reads_the_faulting_address() -> bool {
 // `msghdr`/`cmsghdr`: a descriptor over an AF_UNIX socket.
 // ---------------------------------------------------------------------------
 
-/// Two already-connected AF_UNIX stream endpoints.
-///
-/// slibc refuses `socketpair(2)` because SlopOS has no syscall that makes two
-/// endpoints at once, and it declines to fake it. A test may: `unix_connect`
-/// allocates the pair the moment the listener has backlog room, so
-/// connect/accept complete inline in one process with nothing to race.
-fn connected_unix_pair(path: &str) -> Option<(i32, i32, i32)> {
-    let mut addr = SockAddrUn::default();
-    addr.family = AF_UNIX as u16;
-    let bytes = path.as_bytes();
-    addr.path[..bytes.len()].copy_from_slice(bytes);
-    let addrlen = (2 + bytes.len()) as u32;
-    let sa = &addr as *const SockAddrUn as *const slopos_slibc::net::SockAddr;
-
-    let listener = unsafe { socket(AF_UNIX, SOCK_STREAM, 0) };
-    if listener < 0 {
-        eprintln!("libc_abi_test: socket(AF_UNIX) failed");
+/// Two connected AF_UNIX stream endpoints from slibc's `socketpair(2)`, each
+/// told by `SO_PEERCRED` that this process made it.
+fn connected_unix_pair() -> Option<(i32, i32)> {
+    let mut sv = [-1i32; 2];
+    if unsafe { socketpair(AF_UNIX, SOCK_STREAM, 0, sv.as_mut_ptr()) } != 0 {
+        eprintln!("libc_abi_test: socketpair(AF_UNIX) failed");
         return None;
     }
-    if unsafe { bind(listener, sa, addrlen) } != 0 {
-        eprintln!("libc_abi_test: bind({path}) failed");
-        close(listener);
-        return None;
+    let me = UCred {
+        pid: std::process::id() as i32,
+        uid: unsafe { geteuid() },
+        gid: unsafe { getegid() },
+    };
+    for fd in sv {
+        let mut raw = [0u8; 12];
+        let mut len = raw.len() as u32;
+        let rc = unsafe { getsockopt(fd, SOL_SOCKET, SO_PEERCRED, raw.as_mut_ptr(), &mut len) };
+        if rc != 0 || len != 12 || UCred::from_bytes(&raw) != me {
+            eprintln!("libc_abi_test: SO_PEERCRED did not name this process");
+            close(sv[0]);
+            close(sv[1]);
+            return None;
+        }
     }
-    if unsafe { listen(listener, 1) } != 0 {
-        eprintln!("libc_abi_test: listen({path}) failed");
-        close(listener);
-        return None;
-    }
-    let client = unsafe { socket(AF_UNIX, SOCK_STREAM, 0) };
-    if client < 0 {
-        eprintln!("libc_abi_test: socket(AF_UNIX) for the client failed");
-        close(listener);
-        return None;
-    }
-    if unsafe { connect(client, sa, addrlen) } != 0 {
-        eprintln!("libc_abi_test: connect({path}) failed");
-        close(client);
-        close(listener);
-        return None;
-    }
-    let server = unsafe { accept(listener, ptr::null_mut(), ptr::null_mut()) };
-    if server < 0 {
-        eprintln!("libc_abi_test: accept({path}) failed");
-        close(client);
-        close(listener);
-        return None;
-    }
-    Some((listener, client, server))
+    Some((sv[0], sv[1]))
 }
 
 unsafe extern "C" {
@@ -1134,10 +1113,7 @@ fn sendmsg_passes_a_descriptor_and_scattered_data() -> bool {
         eprintln!("libc_abi_test: could not write {file}");
         return false;
     }
-    let sock_path = format!("{WORK}/scm.sock");
-    let _ = fs::remove_file(&sock_path);
-
-    let Some((listener, client, server)) = connected_unix_pair(&sock_path) else {
+    let Some((client, server)) = connected_unix_pair() else {
         return false;
     };
 
@@ -1147,7 +1123,6 @@ fn sendmsg_passes_a_descriptor_and_scattered_data() -> bool {
         eprintln!("libc_abi_test: could not open {file} for passing");
         close(server);
         close(client);
-        close(listener);
         return false;
     }
 
@@ -1194,7 +1169,6 @@ fn sendmsg_passes_a_descriptor_and_scattered_data() -> bool {
         eprintln!("libc_abi_test: sendmsg sent {sent} bytes of 8");
         close(server);
         close(client);
-        close(listener);
         return false;
     }
 
@@ -1225,8 +1199,6 @@ fn sendmsg_passes_a_descriptor_and_scattered_data() -> bool {
     let received = unsafe { recvmsg(server, &mut rmsg, 0) };
     close(server);
     close(client);
-    close(listener);
-    let _ = fs::remove_file(&sock_path);
 
     if received != 8 {
         eprintln!("libc_abi_test: recvmsg read {received} bytes of 8");

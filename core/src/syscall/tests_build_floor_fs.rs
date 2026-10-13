@@ -1696,10 +1696,10 @@ slopos_testing::stest!(
 );
 
 /// The kernel suite runs before boot publishes the page-set registry.
-struct PageSetRegistry(Option<&'static dyn slopos_mm::filemap_hook::FileMapOps>);
+pub(crate) struct PageSetRegistry(Option<&'static dyn slopos_mm::filemap_hook::FileMapOps>);
 
 impl PageSetRegistry {
-    fn publish() -> Self {
+    pub(crate) fn publish() -> Self {
         Self(slopos_mm::filemap_hook::filemap_swap_ops(Some(
             slopos_fs::filemap::filemap_ops(),
         )))

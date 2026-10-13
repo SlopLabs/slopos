@@ -63,7 +63,7 @@ pub fn canonicalise_at(path: &[u8], cwd: &[u8]) -> VfsResult<CanonPath> {
 ///
 /// Lexical `..` erases the symlink it follows: `/a/link/../b` names `b` beside
 /// *link's target*, which only a walk that traversed `link` knows.
-pub(crate) fn normalise_at(path: &[u8], cwd: &[u8]) -> VfsResult<CanonPath> {
+pub fn normalise_at(path: &[u8], cwd: &[u8]) -> VfsResult<CanonPath> {
     build(path, cwd, true)
 }
 

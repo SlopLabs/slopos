@@ -661,6 +661,8 @@ define_syscall!(syscall_execve
     let mut stack_ptr = 0u64;
     let mut tls_tp = 0u64;
 
+    let attests = exec::exec_attests(ctx.task());
+
     let irq_was_enabled = cpu::are_interrupts_enabled();
     if !irq_was_enabled {
         cpu::enable_interrupts();
@@ -668,7 +670,7 @@ define_syscall!(syscall_execve
 
     let exec_result = exec::do_exec(
         process_id,
-        &program.image,
+        &program,
         argv_refs.as_deref(),
         envp_refs.as_deref(),
         &who,
@@ -682,7 +684,7 @@ define_syscall!(syscall_execve
     }
 
     match exec_result {
-        Ok(()) => {
+        Ok(loaded) => {
             if tls_tp != 0 {
                 let user_tp = match MmUserPtr::<u64>::try_new(tls_tp) {
                     Ok(ptr) => ptr,
@@ -702,6 +704,7 @@ define_syscall!(syscall_execve
                 ctx.with_cwd(|cwd| program.named_directly(path.as_bytes(), cwd));
             exec::narrow_authority_for_exec(ctx.task(), task_id, &program.image, named_directly);
             exec::save_ids_for_exec(ctx.task());
+            exec::attest_exec(ctx.task(), loaded, attests);
 
             exec::name_task_after(ctx.task(), path.as_bytes());
             slopos_sched::task::task_cleanup_for_exec(task_id);

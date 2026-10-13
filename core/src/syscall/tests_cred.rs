@@ -36,21 +36,21 @@ fn errno(e: Errno) -> Option<i64> {
 
 /// A user task of its own process, holding `caps`, with `cred` as its ids
 /// and a user page to stage path arguments in.
-struct Principal {
-    task: TaskRef,
-    table: FdTable,
-    page: u64,
+pub(crate) struct Principal {
+    pub(crate) task: TaskRef,
+    pub(crate) table: FdTable,
+    pub(crate) page: u64,
 }
 
 impl Principal {
     #[inline(never)]
-    fn user(uid: u32, caps: u64) -> Option<Self> {
+    pub(crate) fn user(uid: u32, caps: u64) -> Option<Self> {
         Self::new(Cred::of(uid, uid), caps)
     }
 
     /// Real, effective and saved uids as given, every gid the real uid.
     #[inline(never)]
-    fn with_uids(uids: [u32; 3], caps: u64) -> Option<Self> {
+    pub(crate) fn with_uids(uids: [u32; 3], caps: u64) -> Option<Self> {
         Self::new(
             Cred::of(uids[0], uids[0]).set_resuid(uids, true).ok()?,
             caps,
@@ -58,7 +58,7 @@ impl Principal {
     }
 
     #[inline(never)]
-    fn new(cred: Cred, caps: u64) -> Option<Self> {
+    pub(crate) fn new(cred: Cred, caps: u64) -> Option<Self> {
         let entry = slopos_sched::task::task_entry_from_kernel_va(
             slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA as u64,
         );
@@ -81,7 +81,7 @@ impl Principal {
         Some(Self { task, table, page })
     }
 
-    fn call(&self, handler: SyscallHandler, args: [u64; 6]) -> Option<i64> {
+    pub(crate) fn call(&self, handler: SyscallHandler, args: [u64; 6]) -> Option<i64> {
         call_syscall(self.table, &self.task, handler, args)
     }
 
@@ -115,7 +115,7 @@ impl Principal {
 
     /// `bytes` staged in the second half of the page, for an argument that is
     /// not a path.
-    fn stage(&self, bytes: &[u8]) -> Option<u64> {
+    pub(crate) fn stage(&self, bytes: &[u8]) -> Option<u64> {
         let half = self.page + 2048;
         stage_cstr(self.table, half, bytes).then_some(half)
     }

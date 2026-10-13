@@ -294,6 +294,10 @@ name = "dac_test"
 path = "src/bin/tests/dac_test.rs"
 
 [[bin]]
+name = "peer_test"
+path = "src/bin/tests/peer_test.rs"
+
+[[bin]]
 name = "fifo_test"
 path = "src/bin/tests/fifo_test.rs"
 

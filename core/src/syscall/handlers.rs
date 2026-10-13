@@ -45,7 +45,7 @@ use crate::syscall::net_handlers::{
     syscall_accept, syscall_accept4, syscall_bind, syscall_connect, syscall_getpeername,
     syscall_getsockname, syscall_getsockopt, syscall_listen, syscall_recvfrom, syscall_recvmsg,
     syscall_resolve, syscall_sendmsg, syscall_sendto, syscall_setsockopt, syscall_shutdown,
-    syscall_socket,
+    syscall_socket, syscall_socketpair,
 };
 use crate::syscall::net_query_handlers::syscall_net_query;
 pub use crate::syscall::pidfd_handlers::syscall_pidfd_open;
@@ -151,6 +151,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_LISTEN]            => syscall_listen,            "listen";
     [SYSCALL_GETSOCKNAME]       => syscall_getsockname,       "getsockname";
     [SYSCALL_GETPEERNAME]       => syscall_getpeername,       "getpeername";
+    [SYSCALL_SOCKETPAIR]        => syscall_socketpair,        "socketpair";
     [SYSCALL_SETSOCKOPT]        => syscall_setsockopt,        "setsockopt";
     [SYSCALL_GETSOCKOPT]        => syscall_getsockopt,        "getsockopt";
     [SYSCALL_CLONE]             => syscall_clone,             "clone";
@@ -358,7 +359,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 189;
+pub const SYSCALL_ENTRY_COUNT: usize = 190;
 
 /// The recorded shape of the classification.
 ///
@@ -368,9 +369,9 @@ pub const SYSCALL_ENTRY_COUNT: usize = 189;
 /// construction and the assert below holds it there.
 const CAP_COUNTS: [(Capability, usize); 23] = [
     (Capability::Unimplemented, 0),
-    (Capability::NoneSelf, 69),
+    (Capability::NoneSelf, 71),
     (Capability::NoneFd, 81),
-    (Capability::NoneRelation, 14),
+    (Capability::NoneRelation, 13),
     (Capability::Power, 4),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),
