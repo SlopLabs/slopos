@@ -1,3 +1,4 @@
+mod consent;
 pub mod decorations;
 pub mod dock;
 mod hover;
@@ -58,6 +59,9 @@ struct WindowManager {
     shelf: dock::LauncherShelf,
     /// Compositor-owned chrome; holds a pointer grab while open.
     popover: popover::Popover,
+    /// privd's question, while one is up: above everything, and the only
+    /// thing input reaches.
+    consent: consent::Consent,
 
     /// `None` if the AF_UNIX bind failed.
     protocol: Option<Box<ProtocolBridge>>,
@@ -129,6 +133,7 @@ impl WindowManager {
             system_bar: menu_bar::SystemBar::new(),
             shelf,
             popover: popover::Popover::new(),
+            consent: consent::Consent::acquire(),
             protocol,
             protocol_serial: 0,
             protocol_pointer_focus: 0,
@@ -396,6 +401,31 @@ impl WindowManager {
         for i in 0..self.input.raw_event_count {
             let event = self.input.raw_event_buf[i];
             let time = event.timestamp_ms as u32;
+            // Releases still reach whoever saw the press, so nothing is left
+            // held down behind the question.
+            if self.consent.active() {
+                match event.event_type {
+                    InputEventType::PointerMotion => {
+                        self.input.apply_motion(&event);
+                        continue;
+                    }
+                    InputEventType::PointerButtonPress => {
+                        self.consent.press(
+                            self.input.mouse_x,
+                            self.input.mouse_y,
+                            fb_width as u32,
+                            fb_height as u32,
+                        );
+                        continue;
+                    }
+                    InputEventType::KeyPress => {
+                        self.consent.key(event.key_keycode(), event.key_is_repeat());
+                        continue;
+                    }
+                    InputEventType::PointerAxis => continue,
+                    _ => {}
+                }
+            }
             match event.event_type {
                 InputEventType::PointerMotion => {
                     self.input.apply_motion(&event);
@@ -727,6 +757,9 @@ impl WindowManager {
         let wm = self;
         wm.input.drain_events();
         wm.refresh_windows();
+        if wm.consent.take_dirty() {
+            wm.force_full_redraw = true;
+        }
         // Snapshot before any input processing so a change from any source —
         // sync, click, shelf, spawn — is one comparison afterwards.
         let focus_before = wm.input.focused_task();
@@ -746,6 +779,9 @@ impl WindowManager {
             + SHELF_DOT_MARGIN_Y;
 
         wm.process_input_events(fb_info.width as i32, fb_info.height as i32, shelf_h);
+        if wm.consent.take_dirty() {
+            wm.force_full_redraw = true;
+        }
 
         wm.add_pointer_damage();
 
@@ -886,6 +922,7 @@ impl WindowManager {
                     &wm.system_bar,
                     &mut wm.shelf,
                     &mut wm.popover,
+                    &wm.consent,
                     &wm.net_cache,
                     active_app_name,
                     &frame_damage,
@@ -1102,6 +1139,7 @@ async fn compositor_async(
         let event_driven = spawn_net_monitor_task(wm.clone());
         wm.borrow_mut().net_event_driven = event_driven;
     }
+    spawn_consent_task(wm.clone());
 
     // A multishot row can die on a transient error and the listen socket
     // outlives any such transient, so stream-end re-arms rather than ending
@@ -1218,6 +1256,31 @@ fn spawn_net_monitor_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) ->
         }
     });
     true
+}
+
+/// Read privd's questions as they arrive, once privd has been told the
+/// compositor can draw them.
+fn spawn_consent_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
+    let fd = {
+        let mut w = wm.borrow_mut();
+        w.consent.announce();
+        w.consent.fd()
+    };
+    let Some(fd) = fd else {
+        return;
+    };
+    slopfut::spawn(async move {
+        loop {
+            let mut stream = slopfut::poll_add_multishot(fd, POLLIN);
+            while stream.next().await.is_some() {
+                if !wm.borrow_mut().consent.read() {
+                    tty::write(b"COMPOSITOR: privd's consent channel closed\n");
+                    return;
+                }
+            }
+            slopfut::time::sleep_ms(500).await;
+        }
+    });
 }
 
 /// Spawn a per-client task that drains `idx`'s requests on each readiness of

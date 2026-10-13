@@ -2,7 +2,7 @@
 //! what a hybrid part's cores are worth to a thread.
 //!
 //! Reads `cpu_perf`, which every user may; `set` calls `cpu_perf_ctl`, which
-//! needs the `Power` the kernel grants this program by path.
+//! needs `Power`, and so is privd's `org.slopos.cpufreq.set`.
 
 mod bench;
 mod run;
@@ -94,6 +94,7 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
 }
 
 pub fn cpufreq_main() -> ! {
+    crate::privd::hold_inherited();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let status = dispatch(&args).unwrap_or_else(|message| {
         eprintln!("cpufreq: {message}");

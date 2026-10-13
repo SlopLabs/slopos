@@ -2,6 +2,60 @@
 
 **No finding is open.**
 
+Swept 2026-10-13: privd and consent — the action policy's grammar and
+matcher, the request and consent codecs, privd's account of who asks (the
+recorded identity, the pidfd, the paired base program) and its spawn of a
+mechanism (capabilities, uid, environment, directory, descriptors), the
+consent channel's origin, the question queue, the compositor's dialog (focus,
+arming, escaping, the command and directory shown whole), every mechanism's
+`elevate`, the connections remoted, the shell and the compositor hand on, and
+the grant rows this removed. Reviews found defects before it landed: keys
+someone typing elsewhere presses (Space, the vertical arrows, Enter straight
+after Tab) could answer a question; a long command was cut short in the
+dialog, and the directory suffix could be imitated by arguments; replies on a
+connection several processes inherited carried no request id, and a
+withdrawal read together with its request was lost; privd and the compositor
+adopted any socket handed to them at fd 4 as the consent channel; remoted's
+paired connection reached code from outside the base through base programs
+that exec (`env`, `xargs`, `find -exec`, `cpufreq run`) and through a
+concurrent spawn before remoted closed its copy, and the shell passed the
+connection it inherited into everything it execs — a connection now reaches
+only the shell and the mechanisms the policy names, each of which keeps it
+from what it starts; privd waited forever on a requester that left a reply
+unread or on a consent agent that stopped reading, and session code could fill
+every connection slot root and the paired agent needed; a subshell,
+pipeline stage or stopped job of a shell holding a connection shared it with
+the next requester, which could take its replies and leave it waiting for
+good, a redirection the shell undid restored the connection without its
+close-on-exec flag, and one could copy it to another number, so what the
+shell ran next took it to code outside the base; a
+withdrawal of a request waiting behind another was lost, and a request that
+needed no consent was not checked for one before its mechanism started, so a
+`reboot` interrupted at once still rebooted; a descriptor too many on one
+request became the next requester's stdin; a requester forwarding input could
+block on a full pipe while the mechanism blocked on its output, and one
+signalled before its handlers were set died without withdrawing; a remote
+command's timeout killed the requester but left the mechanism it had asked
+for running; and a test
+spawned `dumpe2fs` holding `RawBlock` with no stdout, where its output could
+land on the disk it opened. Below the bar: a session requester that never reads a
+mechanism's output keeps that mechanism, and its exclusive group, until the
+machine restarts — no more than the restart or power-off the session may ask
+for without consent; the installer's consent covers the disk its requester
+then chooses, which its dialog now says; session code can fill the connection
+pool the rest of the session shares; two requests sent on one connection
+before privd reads the first are both refused, since one `recvmsg` takes
+every descriptor waiting; privd and the
+compositor are not restarted: once privd exits nothing is run for anyone, and
+once the compositor exits nothing that needs consent is, until the next boot;
+a script the session can edit, run through `just remote sh`, asks as the
+paired agent, as anything the operator runs does; and `just remote-install`
+stages the kernel and base under `/var/tmp` as uid 1000, remoted's own uid, so
+session code can replace them between their checked transfer and the paired
+`bootctl install` — as it could before privd, remoted being the session; and
+a mechanism that ignores `SIGTERM` keeps a remote command open past its
+timeout, since `SIGKILL` reaches only its requester.
+
 Swept 2026-10-13: delegation at spawn — `SpawnAttrs`' capabilities, ids and
 groups under the subset bound and `SetId`, the `SchedHigh` tier and negative
 nice, `AT_SECURE` for a delegated or re-identified child, init's bootstrap
@@ -729,12 +783,12 @@ CVSS 3.1 Base Score; `0.1-3.9 Low`, `4.0-6.9 Medium`, `7.0-8.9 High`,
 `9.0-10.0 Critical`.
 
 The session runs as uid 1000. A program it starts holds the universal
-capabilities, and `Launch` too where it is the compositor, the terminal,
-remoted or the shell, so an unprivileged local attacker is any code the
-session runs: `AV:L/PR:L`. Init, what it starts as uid 0, and what a grant row
-raises (`DacOverride` among it for `keymap`, `bootctl` and the installer) are
-privileged; steering one from the session scores `PR:L` with that program's
-impact.
+capabilities, and `Launch` too where it is the terminal, remoted or the shell,
+so an unprivileged local attacker is any code the session runs: `AV:L/PR:L`.
+Init, privd and the mechanisms privd runs as uid 0 are privileged; steering
+one from the session scores `PR:L` with that program's impact, and `UI:R`
+where the action waits on the person's consent. A paired host is
+`AV:N/PR:H` for the actions the policy allows it.
 
 A panic in a `#![forbid(unsafe_code)]` crate is an availability impact, never a
 memory-safety one. Overflow checks are on in the dev and tests kernels and off

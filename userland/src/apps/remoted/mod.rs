@@ -8,13 +8,15 @@
 //! arriving on the idle connection is served there while another is dialled,
 //! so requests run concurrently. The wire protocol is `slopos_remote_core`'s.
 //!
-//! What it runs, it runs with remoted's authority, `Launch` by program
-//! identity, so `bootctl` and `halt` get their grants as from a shell. The
-//! broker it dials therefore holds this machine, so where to dial is read
-//! from the boot slot's base alone, which no process can rewrite: the host
-//! pairs a machine by building the base it boots (`REMOTE_PAIRING_DIR`). A
-//! configuration anywhere a program could write would hand any program the
-//! authority of whatever broker it named.
+//! What it runs, it runs as the session, holding nothing. A mechanism or the
+//! shell it runs gets a privd connection of remoted's own, through which
+//! `bootctl`, `halt` and the other mechanisms ask privd as the paired agent,
+//! which the policy allows a fixed list of actions. The broker it dials
+//! therefore holds that list, so where to dial is read from the boot slot's
+//! base alone, which no process can rewrite: the host pairs a machine by
+//! building the base it boots (`REMOTE_PAIRING_DIR`). A configuration
+//! anywhere a program could write would hand any program the authority of
+//! whatever broker it named.
 
 mod link;
 mod serve;

@@ -2,9 +2,9 @@
 //! from a shell or the remote control rather than the physical keyboard, with
 //! what each wrote to the kernel log copied to standard output.
 //!
-//! The kernel grants this program `SysInspect` by path. A command
-//! that may change the machine stays the physical console's alone; the kernel
-//! refuses it here.
+//! `kconsole(2)` takes `SysInspect`, so this is privd's `org.slopos.kconsole`.
+//! A command that may change the machine stays the physical console's alone;
+//! the kernel refuses it here.
 
 use std::io::Write;
 
@@ -25,6 +25,11 @@ pub fn kconsole_main() -> ! {
             sys_core::exit_with_code(2)
         }
     };
+    crate::privd::elevate(
+        Some("org.slopos.kconsole"),
+        &crate::privd::own_args(),
+        crate::privd::Input::Closed,
+    );
     let mut status = 0;
     for key in keys {
         if let Err(why) = run(key) {
@@ -41,9 +46,7 @@ fn run(key: u8) -> Result<(), String> {
     let rc = sys_core::kconsole(key);
     if rc < 0 {
         return Err(match Errno::from_raw(rc as i32) {
-            Some(Errno::EPERM) => "refused: the command may change the machine, \
-                                   or this program was not started with its grant"
-                .into(),
+            Some(Errno::EPERM) => "refused: the command may change the machine".into(),
             Some(Errno::ENOENT) => "no command takes this key".into(),
             Some(errno) => errno.description().into(),
             None => format!("error {rc}"),

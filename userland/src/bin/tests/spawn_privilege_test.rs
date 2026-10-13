@@ -28,7 +28,7 @@ use slopos_slibc::process::shim;
 use slopos_userland::syscall::core::{caps_drop, prof_ctl};
 use slopos_userland::syscall::efi::efivar_get;
 use slopos_userland::syscall::error::SyscallError;
-use slopos_userland::syscall::fs::pipe;
+use slopos_userland::syscall::fs::{self, pipe};
 use slopos_userland::syscall::net::net_iface_ctl;
 use slopos_userland::syscall::process::{self, Endowment};
 use slopos_userland::syscall::raw::syscall5;
@@ -38,7 +38,7 @@ use std::fs::File;
 use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Barrier};
 
 const EPERM: i32 = -1;
@@ -418,14 +418,21 @@ fn power_without_boot_entry() -> i32 {
     }
 }
 
-/// The binary a grant is keyed on cannot be rewritten: program identity is a
-/// path, so `exec::grants` is only worth anything while every inode the
-/// initramfs unpacks stays sealed.
+/// The binaries a grant or privd's policy names cannot be rewritten: program
+/// identity is a path, so each is only worth anything while every inode the
+/// base serves stays sealed.
 fn granted_binaries_are_sealed() -> bool {
     use std::fs::OpenOptions;
 
     let mut ok = true;
-    for path in ["/bin/compositor", "/bin/roulette", "/bin/ip", "/sbin/init"] {
+    for path in [
+        "/bin/compositor",
+        "/bin/roulette",
+        "/bin/ip",
+        "/sbin/init",
+        "/sbin/privd",
+        "/usr/share/slopos/privd/actions",
+    ] {
         if OpenOptions::new().write(true).open(path).is_ok() {
             eprintln!("spawn_privilege_test: {path} opened for write");
             ok = false;
@@ -448,33 +455,9 @@ fn granted_binaries_are_sealed() -> bool {
     ok
 }
 
-/// `Launch` bounds the raise site: spawning a privileged path does not confer
-/// its grant on a caller that may not launch.
-///
-/// The utest runner hands this binary every capability, `Launch` among them,
-/// so it can spawn a granted path; the half without Launch is
+/// A spawner without `Launch` still starts the launchers' paths, ungranted:
 /// [`spawns_without_launch`].
 fn launch_bounds_the_raise_site() -> bool {
-    let argv: [*const u8; 2] = [b"prof\0".as_ptr(), b"status\0".as_ptr()];
-    let actions = [process::clone_fd(2, 2)];
-    let tid = process::spawn_path_with_actions(
-        PROF,
-        &argv,
-        slopos_abi::task::TaskPriority::Normal,
-        slopos_abi::task::TASK_FLAG_USER_MODE,
-        &actions,
-        0,
-    );
-    let status = if tid > 0 {
-        process::wait_exit_code(tid as u32)
-    } else {
-        tid
-    };
-    if status != 0 {
-        eprintln!("spawn_privilege_test: `prof status` from a Launch holder answered {status}");
-        return false;
-    }
-
     match Command::new(SELF).arg(WITHOUT_LAUNCH).status() {
         Ok(status) if status.success() => true,
         other => {
@@ -485,8 +468,6 @@ fn launch_bounds_the_raise_site() -> bool {
 }
 
 const SELF: &str = "/bin/spawn_privilege_test";
-/// Granted `SysInspect`, which `prof status` fails without.
-const PROF: &[u8] = b"/bin/prof";
 const WITHOUT_LAUNCH: &str = "--without-launch";
 const EXEC_PROBE: &str = "--exec-probe";
 const HOLDS: &str = "--holds";
@@ -494,7 +475,7 @@ const RUNS_AS: &str = "--runs-as";
 /// Exits 0 when its `AT_SECURE` is what its third argument says.
 const SECURE_PROBE: &str = "/bin/dl_secure_probe";
 const USER: u32 = 1000;
-/// Holds `RawBlock` only as far as its spawner does.
+/// Holds `RawBlock` only when its spawner hands it over.
 const DUMPE2FS: &str = "/sbin/dumpe2fs";
 const ROOT_DISK: &str = "/dev/nvme0n1";
 /// Whole-disk nodes, of which the first present is read raw.
@@ -505,19 +486,9 @@ fn dumps_root_superblock() -> std::io::Result<std::process::Output> {
 }
 
 /// Runs in a child without Launch. A granted path it spawns runs ungranted, as
-/// its own `execve` would, rather than being refused: `prof status` runs and
-/// is refused the profiler. `#!/bin/sh` scripts run too.
+/// its own `execve` would, rather than being refused: `sh -c` and
+/// `#!/bin/sh` scripts run.
 fn spawns_without_launch() -> i32 {
-    let prof = Command::new("/bin/prof")
-        .arg("status")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if !matches!(prof, Ok(status) if status.code() == Some(1)) {
-        eprintln!("spawn_privilege_test: `prof status` without Launch ran as {prof:?}");
-        return 1;
-    }
-
     // SAFETY: nothing else runs in this process yet.
     unsafe { std::env::set_var("PATH", "/bin") };
     let sh = Command::new("sh").args(["-c", "exit 7"]).status();
@@ -536,26 +507,57 @@ fn spawns_without_launch() -> i32 {
         return 3;
     }
 
-    let dump = dumps_root_superblock();
-    if !matches!(&dump, Ok(out) if !out.status.success()) {
-        eprintln!(
-            "spawn_privilege_test: e2fsprogs read a disk for a spawner without RawBlock: {dump:?}"
-        );
-        return 4;
-    }
     0
 }
 
-/// A spawner holding `RawBlock` hands it to e2fsprogs, which reads the disk;
-/// the half without it is [`spawns_without_launch`].
+/// e2fsprogs reads a disk only when its spawner hands it `RawBlock`, as the
+/// installer does: a spawn that names nothing leaves it the universal set,
+/// whatever its spawner holds.
 fn e2fsprogs_takes_raw_block_from_its_spawner() -> bool {
-    match dumps_root_superblock() {
-        Ok(out) if out.status.success() => true,
-        other => {
-            eprintln!("spawn_privilege_test: {DUMPE2FS} -h {ROOT_DISK} ran as {other:?}");
-            false
-        }
+    let dump = dumps_root_superblock();
+    if !matches!(&dump, Ok(out) if !out.status.success()) {
+        eprintln!(
+            "spawn_privilege_test: e2fsprogs read a disk it was not handed RawBlock for: {dump:?}"
+        );
+        return false;
     }
+    let delegated = dumps_with(CAP_RAW_BLOCK);
+    if delegated != Some(0) {
+        eprintln!(
+            "spawn_privilege_test: {DUMPE2FS} -h {ROOT_DISK} handed RawBlock exited {delegated:?}"
+        );
+        return false;
+    }
+    true
+}
+
+/// `dumpe2fs -h` of the root disk spawned holding `caps`, its output dropped:
+/// a program holding `RawBlock` started with no stdout would open the disk
+/// where its output goes.
+fn dumps_with(caps: u64) -> Option<i32> {
+    let null = fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR).ok()?;
+    let stdio = [0, 1, 2].map(|fd| process::clone_fd(null.raw(), fd));
+    let argv = [
+        CString::new(DUMPE2FS).ok()?,
+        CString::new("-h").ok()?,
+        CString::new(ROOT_DISK).ok()?,
+    ];
+    let argv: Vec<*const u8> = argv.iter().map(|a| a.as_ptr().cast()).collect();
+    let tid = process::spawn_endowed(
+        DUMPE2FS.as_bytes(),
+        &argv,
+        &[],
+        b"/",
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &stdio,
+        0,
+        Endowment {
+            caps,
+            ..Endowment::NONE
+        },
+    );
+    (tid > 0).then(|| process::wait_exit_code(tid as u32))
 }
 
 fn block_node() -> Option<&'static str> {
@@ -852,8 +854,8 @@ const CASES: &[(&str, fn() -> bool)] = &[
 ];
 
 /// A sealed binary is only as safe as the directory that names it: rename
-/// `/bin` aside, `mkdir /bin`, plant a `halt`, and the grant table keyed on
-/// `/bin/halt` confers Power on whatever was planted. So the directory refuses
+/// `/bin` aside, `mkdir /bin`, plant a `shell`, and the grant table keyed on
+/// `/bin/shell` confers Launch on whatever was planted. So the directory refuses
 /// rename, and refuses a create or unlink beneath it, on whichever root booted.
 fn grant_directories_are_sealed() -> bool {
     let mut ok = true;

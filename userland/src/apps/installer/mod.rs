@@ -13,7 +13,9 @@
 //! not name is written, and nothing on a shared ESP outside `\EFI\SlopOS\`.
 //!
 //! Every answer is a flag as well as a question, so a check drives the
-//! program a person runs.
+//! program a person runs. Started without its capabilities, it is privd's
+//! `org.slopos.install`, and its questions are asked through the requester's
+//! terminal.
 
 mod boot;
 mod disk;
@@ -873,6 +875,11 @@ fn install(s: Settled, medium: &Medium) -> Result<(), String> {
 
 fn run(args: &[String]) -> Result<(), String> {
     let opts = parse(args)?;
+    crate::privd::elevate(
+        Some("org.slopos.install"),
+        &crate::privd::own_args(),
+        crate::privd::Input::Forwarded,
+    );
     let medium = Medium::find()?;
     let settled = settle(opts, &medium)?;
     install(settled, &medium)

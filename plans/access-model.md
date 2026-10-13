@@ -44,21 +44,29 @@ carries the child's capabilities, uid, gid and groups. A spawned program holds
 the universal capabilities (`ConsoleIo`, `ClipboardGlobal`, `Fate`) its
 spawner holds and what the spawner delegates, any subset of its own mask
 (`Endowment::check` in `core/src/exec/mod.rs`). Init's bootstrap table
-(`userland/src/apps/init_process.rs`) starts the compositor, the terminal,
-remoted and roulette that way, as uid 1000.
+(`userland/src/apps/init_process.rs`) starts privd as uid 0 with the
+delegable set, and the compositor, the terminal, remoted and roulette as uid
+1000.
+
+**privd runs the mechanisms.** `/sbin/privd` (`userland/src/apps/privd/`)
+runs a named action's base program for whoever the sealed policy
+(`assets/privd/actions`, grammar and matcher in `priv-core`) allows, asking the
+person at the machine through the compositor where it says so. `halt`,
+`bootctl`, `cpufreq`, `ip`, `keymap`, `kconsole`, `prof` and the installer ask
+it through `slopos_userland::privd::elevate` when started without their
+action's capabilities; init's `bootctl collect` and a root test act directly.
 
 **Privilege is still raised by path for the rows that remain.**
 `spawn_program_with_cwd` ORs in `grant_for(image)` when the spawner holds
-`Launch`, and otherwise spawns the image ungranted. `PROGRAM_GRANTS` has 18
-rows: 12 that raise (`shell`, `terminal`, `remoted`, `roulette`, `keymap`,
-`ip`, `kconsole`, `prof`, `halt`, `bootctl`, `cpufreq`, `installer`) and 6
-delegated e2fsprogs rows (`core/src/exec/grants.rs`). A path key is sound only because the base
+`Launch`, and otherwise spawns the image ungranted. `PROGRAM_GRANTS` has 4
+rows: `shell`, `terminal` and `remoted` raise `Launch`, which no longer
+reaches a mechanism, and `roulette` the display seat
+(`core/src/exec/grants.rs`). A path key is sound only because the base
 directories are sealed and pinned, mount refuses grant paths and `/lib`
 (`covers_grant_path`), and the `Seal` capability exists to keep it that way.
-That makes every grant row a setuid program by another name. It runs
-`AT_SECURE`, and it inherits argv, environment, cwd and descriptors from
-whoever spawned it. That is why the installer starts e2fsprogs with an emptied
-environment (`userland/src/apps/installer/disk.rs`).
+That makes every grant row a setuid program by another name: it runs
+`AT_SECURE` and inherits argv, environment, cwd and descriptors from whoever
+spawned it.
 
 **exec narrows all of it.** `narrow_authority_for_exec` keeps
 `caps & (universal | grant | delegated)` in every thread of the process
@@ -76,8 +84,8 @@ process for good (`sched/src/task/task_lifecycle.rs`). The Verus proof
   is its opener's, an `AF_UNIX` name is a socket inode under the same checks,
   and a sticky world-writable directory follows a link only for its owner or
   the directory's.
-- Init and the mechanisms the session starts through a grant row run as uid 0
-  or with `DacOverride`; everything else the session runs is uid 1000. Every
+- Init, privd and the mechanisms privd runs are uid 0; everything else the
+  session runs is uid 1000. Every
   root is held to the ownership map (`slopos_abi::fs::ROOT_LAYOUT`), so the
   session writes `/home`, `/src`, `/usr/local` and `/tmp`, and not `/etc` or
   `/var`.
@@ -92,25 +100,13 @@ process for good (`sched/src/task/task_lifecycle.rs`). The Verus proof
 - `SCM_RIGHTS` carries leaf descriptors (pipes, files, memfds, pidfds, ttys) but
   not sockets or rings (`collect_scm_rights` in the same file).
 
-**The model's cost shows up as workarounds:**
-- The compositor spawns `/bin/ip` because it must not hold `NetAdmin`, which
-  is why init delegates it `Launch`
-  (`userland/src/apps/compositor/popover.rs`).
-- The remote pairing must live in the sealed base because a program holding
-  `DacOverride` through its grant row can write `/etc`.
-- The shell must *spawn* registry programs because fork+exec keeps no grant
-  (`userland/src/apps/shell/exec.rs:1467-1469`). A granted program in a
-  pipeline, a subshell, a bash script, or a `posix_spawn` that falls back to
-  fork+exec runs ungranted.
-- `keymap`, `bootctl` and the installer hold `DacOverride` by path, because
-  the session that starts them is uid 1000 and what they write is uid 0's.
-- The compositor, the terminal and remoted are delegated `Launch`, so the
-  grant rows can be reached from the session.
+**What remains of the old model's cost:**
+- The shell still *spawns* registry programs, the path phase 6 deletes; a
+  mechanism in a pipeline, a subshell or a script asks privd all the same.
+- The remote pairing lives in the sealed base, because a mechanism holding
+  `DacOverride`, the installer's, can write `/etc`.
 - No sshd runs: OpenSSH's needs credentials and a privilege separation SlopOS
   lacks, so the remote control dials out to a broker instead.
-- A GUI cannot hand install authority to a helper: an app the dock launches
-  holds nothing, and a helper it spawns is ungranted unless the app becomes a
-  sixth `Launch` holder.
 
 ## Why this shape
 
@@ -329,112 +325,168 @@ which is `root`, so they need no consent and no agent.
 ### privd and the action policy
 
 **`/sbin/privd`** listens on `/run/privd`, mode 0666: anyone may ask, and the
-policy answers.
+policy answers. Init starts it as uid 0 holding the delegable set,
+`slopos_priv_core::DELEGABLE`, and waits for it to listen before the tests or
+any service run.
 
 **Policy file.** The policy lives in the sealed base at
-`/usr/share/slopos/privd/actions`, so no running program can edit it. Its
-grammar and matcher are `priv-core`, a host-tested crate:
+`/usr/share/slopos/privd/actions` (`assets/privd/actions` in the tree), so no
+running program can edit it. Its grammar and matcher are `priv-core`, a
+host-tested crate:
 
 ```
 action org.slopos.boot.install
-  program  /bin/bootctl
-  args     install *
-  caps     RawBlock Power Mount
-  uid      0
-  allow    session consent
-  allow    paired
-  describe "Install a kernel and base into the spare boot slot"
+  program   /bin/bootctl
+  args      install *
+  caps      RawBlock Power
+  uid       0
+  cwd
+  exclusive boot-slots
+  allow     root
+  allow     session consent
+  allow     paired
+  describe  "Install a kernel and base into a boot slot"
 ```
 
-- An action names one base program, the argv shapes it accepts (fixed leading
-  words, then free), the capabilities and uid it runs with, and who may ask.
-- `allow` principals:
-  - `root`: any uid-0 requester, always without consent. A uid-0 process is
+- An action names one base program (under `/bin`, `/sbin` or `/usr/bin`), the
+  argv shapes it accepts (`args`, repeatable: fixed leading words, then `*`
+  for any further ones), the capabilities it runs with (only from the
+  delegable set), its uid, a `describe` line for the dialog, and who may ask.
+- `allow` principals, tried in order, the first that matches deciding:
+  - `root`: any uid-0 requester, never asked about. A uid-0 process is
     already a system process, because nothing but init and privd makes one.
-  - `session`: uid 1000, any program.
-  - `program <base path>`: a requester with that attested identity.
+    Every shipped action lists it.
+  - `session`: uid 1000, any program but a paired connection.
+  - `program <base path>`: a requester with that attested identity, whatever
+    its uid. privd refuses its whole policy if one names a program with an
+    ELF interpreter.
   - `paired`: a connection whose attested program is `Base(/bin/remoted)`, on a
-    base that carries the pairing.
-- **Consent.** Each `allow` says `consent` or nothing.
-- **`exclusive`.** An action may declare `exclusive`, so only one instance
-  runs.
+    base that carries the pairing. A paired connection matches nothing else,
+    so an action that does not list `paired` is refused to it outright.
+- **Consent.** Each `allow` but `root` and `paired` says `consent` or nothing.
+- **`cwd`.** The request may name its working directory.
+- **`exclusive [group]`.** One mechanism of the group, by default the action's
+  name, runs at a time: the slot writers share `boot-slots`.
 
-**Requests.** A request carries:
-- the action;
-- argv;
-- the caller's stdin, stdout and stderr over `SCM_RIGHTS`;
-- a working directory as a dirfd, when the action allows one.
-
-The wire is framed the way `remote-core` frames its messages.
+**Requests.** A connection serves its requests one after another. A request
+is one frame, framed as `remote-core` frames its messages, carrying an id the
+requester picks, the action, argv past its first word and whether it names a
+directory, with stdin, stdout, stderr and that directory as `SCM_RIGHTS`.
+privd answers `Asking` when the question is on screen, then `Started{pid}` and
+`Exited{code | signal}`, or `Denied{reason}`, marked when the person refused
+or did not answer; every reply names the request's id, so a requester on an
+inherited connection passes over what an earlier request left, and id 0 is a
+denial of the connection itself. The requester may relay `SIGHUP`, `SIGINT`,
+`SIGQUIT` and `SIGTERM`: to the mechanism once it runs, and before that as a
+withdrawal; a second signal stops the requester waiting.
 
 **Running a mechanism.** privd matches the request against the policy, checks
-the peer (`SO_PEERCRED`, `SO_PEERPIDFD`, program identity), and asks for
-consent when the matching `allow` says so. It then spawns the mechanism as a
-fresh child, with:
-- the action's capabilities and uid;
-- an environment holding only a fixed `PATH`, `LANG` and
-  `PRIV_ACTION=<name>`;
-- cwd `/`, or the passed dirfd;
+the peer (`SO_PEERCRED`, `SO_PEERPIDFD`, program identity, all captured at
+connect), and asks for consent when the matching `allow` says so. It then
+spawns the mechanism as a fresh child, with:
+- the action's capabilities and uid, and argv `[basename, args…]`;
+- an environment holding only `PATH=/bin:/sbin`, `LANG=C.UTF-8` and
+  `PRIV_ACTION=<name>`, and the relayed signals at their defaults;
+- cwd `/`, or, for an action that says `cwd`, the path of the directory the
+  request must send;
 - the caller's descriptors as stdio.
 
-It answers `Started{pid}` and then `Exited{status}`, or `Denied{reason}`.
-
-**Failing closed.** Every failure is a denial: a vanished peer, an identity
-lookup that fails, a policy miss, a consent agent that is absent or times out.
-A client that disconnects does not stop a running mechanism.
+**Failing closed.** Every failure is a denial: argv outside every shape, a
+missing descriptor or a malformed frame (which also ends the connection), an
+identity lookup that fails, a policy miss or an unreadable policy, a consent
+agent that is absent, busy or does not answer, and a requester whose process
+has exited — checked before the question and again after it — and an
+exclusive group already running, checked before the question too. A requester
+that leaves or withdraws while the person is asked takes the question off the
+screen. A client that disconnects does not stop a running mechanism. One uid
+running one program holds at most eight connections; every requester but root
+and the paired agent shares 32, so nothing the session runs crowds those two
+out; and a requester that leaves a reply unread for five seconds loses its
+connection rather than holding a privd thread.
 
 **Mechanisms elevate themselves.** `slopos_userland::privd::elevate` does it:
 a mechanism started without `PRIV_ACTION` names the action its parsed argv
-belongs to, sends its own argv and stdio, and exits with the mechanism's
-status. With `PRIV_ACTION` set, it holds its argv to that action before
-acting. This is pkexec's lesson: the privileged side validates.
+belongs to; when it holds that action's capabilities and runs as its uid it
+acts itself, and otherwise it sends its own argv and stdio — through the
+connection it inherited (`PRIVD_FD`, used only when its peer is uid 0 running
+the base's `/sbin/privd`) or a fresh one — and exits with the mechanism's
+status, or 126 when the person refused and 127 when privd did, as pkexec's
+are. With `PRIV_ACTION` set, it acts only when its argv belongs to that
+action. This is pkexec's lesson: the privileged side validates. A terminal
+never reaches a mechanism, which runs in privd's session where the terminal
+answers `EIO`, as run0 isolates one: `elevate` relays the mechanism's output
+to it through pipes, and its input only for the installer, which asks
+questions.
 
-**Today's rows map onto actions:**
+**The rows mapped onto actions:**
 
-| Today | Becomes |
+| Was | Is |
 |---|---|
-| `/bin/compositor` delegated `DisplaySeat InputSeat Launch`, High | bootstrap child above; the network toggle asks for `org.slopos.net.toggle` (`allow program /bin/compositor`) |
-| `/bin/shell`, `/bin/terminal` `Launch` | nothing |
-| `/bin/remoted` `Launch`, also delegated | bootstrap child above |
-| `/bin/roulette` `DisplaySeat`, also delegated | bootstrap child above |
-| `/bin/keymap` `ConsoleConfig DacOverride` | `org.slopos.console.keymap`: `ConsoleConfig`, uid 0, session and paired |
-| `/bin/ip` `NetAdmin` | `org.slopos.net.configure`: `NetAdmin`, session with consent |
+| `/bin/compositor` delegated `DisplaySeat InputSeat Launch`, High | bootstrap child, the seats and `High`; the network toggle hands `ip` a connection the compositor made, `org.slopos.net.toggle` (`allow program /bin/compositor`) |
+| `/bin/shell`, `/bin/terminal` `Launch` | the rows stay until phase 6; they reach nothing a mechanism needs |
+| `/bin/remoted` `Launch`, also delegated | bootstrap child, holding nothing; its row stays until phase 6 |
+| `/bin/roulette` `DisplaySeat`, also delegated | bootstrap child; its row stays until phase 6 |
+| `/bin/keymap` `ConsoleConfig DacOverride` | `org.slopos.console.keymap`: `ConsoleConfig`, session and paired |
+| `/bin/ip` `NetAdmin` | `org.slopos.net.configure`: `NetAdmin`, session with consent; `ip net on` and `off` are `org.slopos.net.toggle`, the compositor without consent and the session with |
 | `/bin/sysmon` `SysInspect` | gone in phase 2: enumeration is universal, kill follows the signal rule |
 | `/bin/kconsole` `SysInspect` | `org.slopos.kconsole`: `SysInspect`, session and paired |
 | `/bin/prof` `SysInspect` | `org.slopos.prof`: `SysInspect`, session and paired |
 | `/bin/halt` `Power` | `org.slopos.power.poweroff`, `.reboot`: `Power`, session and paired |
-| `/bin/bootctl` `RawBlock Power DacOverride` | `org.slopos.boot.install`, `.set-default` (session with consent); `.oneshot`, `.commit`, `.spare`, `.status` (session); all paired; `collect` is init's |
+| `/bin/bootctl` `RawBlock Power DacOverride` | `org.slopos.boot.install`, `.clone`, `.set-default` (session with consent); `.oneshot`, `.commit`, `.spare`, `.status`, `.reboot` (session); all paired; `collect` is init's, with `RawBlock` and `Power` |
 | `/bin/cpufreq` `Power` | `org.slopos.cpufreq.set`: `Power`, session and paired; reading needs nothing |
-| `/bin/installer` `RawBlock Mount Power BootEntry Seal DacOverride` | `org.slopos.install`: `RawBlock Mount Power BootEntry Seal DacOverride`, uid 0, session with consent, never paired |
+| `/bin/installer` `RawBlock Mount Power BootEntry Seal DacOverride` | `org.slopos.install`: the same, session with consent, never paired, exclusive |
 | six e2fsprogs rows, delegated `RawBlock` | the installer spawns them with `RawBlock` delegated |
 | six test rows | `utest!` declarations |
 
 ### Consent
 
 - **The channel.** Init creates a socketpair and gives one end to privd and the
-  other to the compositor. Holding that pair is what makes an answer the
-  compositor's and a question privd's. No other process can open it.
+  other to the compositor, each at fd 4. Holding that pair is what makes an
+  answer the compositor's and a question privd's. No other process can open
+  it, and each end refuses a pair whose `SO_PEERCRED` and `SO_PEERPROGRAM` are
+  not init's, which a socket pair records for both ends. The compositor says
+  `READY` once it can draw; until then privd has nobody to ask. privd's writes
+  to it time out rather than wait on a compositor that stopped reading.
 - **The request.** It carries the action's `describe` text from the sealed
-  policy, the requester's attested program identity, its uid and its pid. It
-  carries no text the requester chose, apart from the argv privd matched.
+  policy, the requester's attested program identity, its uid and its pid, and
+  the command privd will run and where. It carries no text the requester
+  chose, apart from the argv privd matched and its directory, which the dialog
+  shows whole on lines of their own, wrapped, with every byte outside
+  printable ASCII escaped; privd asks about no command line or directory
+  longer than 320 bytes so escaped.
 - **The dialog.**
   - The compositor dims every surface, draws the dialog above all of them, and
-    routes input only to the dialog until it is answered.
-  - Focus starts on Deny. Allow takes a click, or a Tab or arrow followed by
-    Enter, the same no-stray-Enter rule as appkit's `Dialog`.
+    routes input only to the dialog until it is answered; releases still reach
+    whoever saw the press.
+  - Focus starts on Deny. Allow takes a click, or Tab, Left or Right followed
+    by Enter, the same no-stray-Enter rule as appkit's `Dialog`; Escape denies,
+    key repeats count for nothing, and input in the 750 ms after the frame
+    that first shows the dialog, or after focus moves, is ignored, since it
+    was aimed at what was there before.
   - No client can draw over it, move it or feed it input. The compositor owns
     both seats, so the answer comes from the keyboard or pointer at the machine.
-- **Expiry.** A request expires after 120 seconds as a denial. Requests are
-  answered one at a time.
+- **Expiry.** A question expires 120 seconds after it is shown, as a denial.
+  Questions are shown one at a time, at most eight waiting.
+- **A refusal sticks.** When the person refuses, every question waiting is
+  refused too, and so is whatever asks in the next five seconds: a refusal is
+  not answered with another question.
 - **No agent.** With no compositor (a `tests=on` boot, a serial-only boot), an
   action that needs consent is denied. `root` and `paired` principals do not
   need consent.
 
 ### The remote control
 
-remoted runs as uid 1000 with no capabilities. At start it opens a privd
-connection and hands it to every program it runs (`PRIVD_FD`), so their
-requests are attested as remoted's.
+remoted runs as uid 1000 with no capabilities. Each mechanism the policy names
+that it runs, and the shell, gets a privd connection remoted made for it
+(`PRIVD_FD`), so its requests are attested as remoted's; anything else gets
+none, since a base program such as `env` or `xargs` would pass it on to
+whatever it execs. A mechanism keeps the descriptor from what it starts, and
+the shell hands it on only to the mechanisms its own process runs, not from a
+subshell or pipeline stage and not while one it handed it to lives, so
+neither what it execs nor two jobs at once share it. A redirection the shell
+undoes restores close-on-exec with the descriptor. A command's timeout sends
+its group `SIGTERM` first, which a requester relays to the mechanism privd
+runs outside the group.
 
 `paired` admits the actions `just remote` and `remote-install` drive:
 - `org.slopos.boot.*`;
@@ -559,28 +611,49 @@ and a shell as uid 1000 in `/home/user`, and a tests image made into an old
 all-uid-0 root migrated on its first boot and held to the map. Not run: the
 ladder with a toolchain, `test-remote` and the install checks.
 
-### Phase 5: privd and consent
+### Phase 5: privd and consent — done
 
-Build `priv-core` (policy grammar and matcher, request codec, consent request),
-`/sbin/privd`, `slopos_userland::privd::elevate`, the consent channel and the
-compositor's dialog, then move every mechanism onto its action:
-- `halt`, `bootctl`, `cpufreq`, `ip`, `keymap`, `kconsole` and `installer`
-  elevate themselves;
-- the compositor's network toggle asks privd;
-- remoted hands out its connection;
-- `installer` spawns e2fsprogs with `RawBlock` delegated.
+`priv-core` holds the policy grammar and matcher, the request and consent
+codecs, the consent queue (`Questions`) and the dialog's focus and arming
+rules, host-tested with mutation loops over each, a random walk over the
+queue, and the shipped policy, which the base carries at
+`/usr/share/slopos/privd/actions`. `/sbin/privd`, which init starts first and
+waits for, runs an action's mechanism after checking the connection's recorded
+identity, asking the person through the compositor where the policy says so;
+the compositor draws the question over every surface, Deny focused. `halt`,
+`bootctl`, `cpufreq set`, `ip`'s changes, `keymap`, `kconsole`, `prof` and the
+installer elevate themselves through `slopos_userland::privd::elevate`; the
+compositor's network toggle hands `ip` a connection of its own; remoted, the
+shell and a root test hand theirs to mechanisms; the installer spawns
+e2fsprogs with `RawBlock` delegated. The mechanisms' 8 grant rows and
+e2fsprogs' 6 are gone, and init delegates the compositor no `Launch` and
+remoted and the terminal nothing.
 
-The tests base carries no extra policy. Tests run as uid 0, and `root` needs no
-consent. A test that drives the person's loop hands its children its own
-connection.
-
-Ends with:
-- `just test`, `test-installer`, `test-install`, `test-remote` and
-  `test-selfhost` green with every mechanism reached through privd;
-- a uid-1000 test whose consent-requiring request is denied with no agent;
-- a test that a request whose argv falls outside the action is denied;
-- a manual boot where `bootctl install` typed in the terminal raises the
-  compositor's dialog, Deny refuses it and Allow runs it.
+Graded by `privd_test` (root runs an action holding its capabilities, an exit
+status relayed, argv outside an action and an unknown action refused for that
+reason, a request without its descriptors or with one too many refused and
+its connection ended, the working directory taken from the descriptor sent and
+a non-directory or an unwanted one refused, what an earlier request left
+passed over, the per-requester connection cap,
+the session running what it may, refused what needs a person with nobody to
+ask and running it through a root connection it was handed, a uid no
+principal names refused, a departed requester refused beside its control, a
+mechanism holding its argv to `PRIV_ACTION`, and output for the requester's
+controlling terminal relayed); `spawn_privilege_test`'s e2fsprogs case, now
+delegated explicitly; `ip_e2e_test` and `cpufreq_test`, whose mechanisms now
+run through privd; `no_path_earns_a_mechanism_s_authority` and the
+exec-narrowing test; and `priv-core`'s host tests. Checked by hand on the live
+ISO under QEMU: the dialog for `bootctl set-default` as the session, Enter on
+Deny refusing with 126, Enter straight after Tab ignored and then allowing, a
+200-byte argument wrapped whole, Escape refusing, and an unanswered question
+refused after 120 s. Not run: `test-install`, `test-installer`,
+`test-remote` and the ladder with a toolchain; the network toggle's click and
+the refusal cooldown were not reached by hand; and nothing grades a signal
+relayed to a running mechanism, a withdrawal while the person is asked, or an
+exclusive group refusing, since no shipped mechanism runs long enough under
+test and a test boot has nobody to ask. On this TCG host
+`check_fs_throughput.sh`'s `min-fs-over-raw-pct` read under its floor in one
+capture before the change and one after, and passed in the final one.
 
 ### Phase 6: Delete the raise
 
@@ -829,6 +902,64 @@ Ends with:
 - **A test runs as uid 0 holding everything unless it declares otherwise.**
   A test of an unprivileged gate or of the person's work declares `caps =
   none, uid = 1000`; one that needs a single gate declares only that.
+- **A connection speaks as its maker, one request at a time.** privd reads a
+  connection's identity once, at `connect`, and refuses a request once the
+  process that connected has exited, checked before the person is asked and
+  again after. Every reply names the request it answers, so a requester on an
+  inherited connection passes over what an earlier one left. remoted makes one
+  per mechanism it runs, the compositor one per toggle, and a root test one for
+  the loop it drives.
+- **A connection reaches only the shell and mechanisms.** Whoever holds one
+  speaks as its maker, so it is handed only to `/bin/shell` and the programs
+  the policy names, each of which keeps it from what it execs or starts; the
+  shell's own process passes it only to a mechanism it runs, so no subshell
+  or pipeline stage reads it beside another. A base program such as `env`,
+  `xargs` or `find` would hand it to code from outside the base. What the
+  paired agent runs through the shell is the paired agent's, a script the
+  session can edit included.
+- **privd never waits on a requester.** A reply the requester leaves unread
+  for five seconds ends its connection, and root's and the paired agent's
+  connections stand outside the pool the rest share. A mechanism writes to the
+  requester's own descriptors, so one that is never read blocks; that holds
+  only what the session could end anyway by restarting the machine.
+- **The first matching `allow` decides, and a pairing is only ever paired.**
+  The order of an action's lines is policy. A paired connection matches no
+  `session` or `program` line, so an action that does not name `paired` is
+  refused to the host; a `program` principal names the program whatever uid
+  runs it; and `root` is listed on every action rather than implied.
+- **privd holds the delegable set and nothing else,** stated once as
+  `slopos_priv_core::DELEGABLE`; a policy naming any other capability does not
+  parse, and one whose `program` principal names a dynamically linked program
+  is refused whole.
+- **The mechanism validates.** Started by privd, a mechanism acts only when
+  the argv it parses belongs to the action `PRIV_ACTION` names; started by
+  anyone else holding its action's capabilities and uid, it acts itself.
+- **A terminal never reaches a mechanism.** The mechanism runs in privd's
+  session, where a terminal answers `EIO`, and run0 isolates one the same way:
+  `elevate` relays output to a terminal or socket through pipes, and input
+  only for a mechanism that asks questions, the installer.
+- **A requester that leaves withdraws its question, not its mechanism.** The
+  dialog of one that disconnects or exits goes, and a mechanism already
+  started runs to its end; a signal the requester takes before the mechanism
+  starts withdraws the request, and after it `SIGHUP`, `SIGINT`, `SIGQUIT`
+  and `SIGTERM` are relayed.
+- **Consent is never remembered.** Unlike polkit's `auth_*_keep`, every
+  request whose action asks, asks.
+- **A question ignores input for 750 ms after the frame that first shows it
+  and after each move of focus,** since a click or key that lands then was
+  aimed at what was there before; Space and the vertical arrows do nothing,
+  being keys someone typing elsewhere presses.
+- **A refusal sticks for five seconds** and refuses what was waiting, so a
+  requester cannot answer the person's no with the same question.
+- **Consent covers the command shown, and what it asks after.** The dialog
+  shows every byte of the argv and directory privd will use; an interactive
+  mechanism's later answers come from its requester, so the installer's
+  dialog says the requester chooses the disk.
+- **Exit statuses follow pkexec's:** 126 when the person refused or did not
+  answer, 127 for any other refusal.
+- **The slot writers share one exclusive group,** `boot-slots`, since two of
+  them writing one FAT volume at once corrupt it.
+
 - **Strictly before the GUI installer.** `plans/installer-gui.md` starts after
   phase 6.
 

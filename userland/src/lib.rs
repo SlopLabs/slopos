@@ -5,6 +5,7 @@ pub mod keymap;
 pub mod kmsg;
 pub mod net;
 pub mod net_query;
+pub mod privd;
 pub mod program_registry;
 pub mod readiness;
 pub mod root_layout;

@@ -361,3 +361,102 @@ pub fn set_nonblocking(fd: RawFd) -> SyscallResult<()> {
     let _ = Sys::fcntl(fd, F_SETFL as i32, flags).map_err(SyscallError::from)?;
     Ok(())
 }
+
+/// Send `data` with `fds` attached as one `SCM_RIGHTS` item; the bytes sent,
+/// which may be fewer than `data` holds.
+pub fn send_with_fds(fd: RawFd, data: &[u8], fds: &[RawFd]) -> SyscallResult<usize> {
+    use slopos_abi::fs::UserIovec;
+    use slopos_abi::syscall::{CMSG_DATA_OFFSET, CmsgHdr, MsgHdr, SCM_RIGHTS, SOL_SOCKET};
+    let item = core::mem::size_of_val(fds);
+    let mut control = vec![0u8; slopos_abi::syscall::cmsg_space(item)];
+    let header = CmsgHdr {
+        cmsg_len: slopos_abi::syscall::cmsg_len(item) as u64,
+        cmsg_level: SOL_SOCKET,
+        cmsg_type: SCM_RIGHTS,
+    };
+    // SAFETY: `control` holds a header and `fds` past CMSG_DATA_OFFSET, as
+    // cmsg_space sized it; both writes are unaligned-safe.
+    unsafe {
+        core::ptr::write_unaligned(control.as_mut_ptr() as *mut CmsgHdr, header);
+        for (i, &passed) in fds.iter().enumerate() {
+            core::ptr::write_unaligned(
+                control.as_mut_ptr().add(CMSG_DATA_OFFSET + i * 4) as *mut i32,
+                passed,
+            );
+        }
+    }
+    let iov = UserIovec {
+        iov_base: data.as_ptr() as u64,
+        iov_len: data.len() as u64,
+    };
+    let msg = MsgHdr {
+        msg_name: 0,
+        msg_namelen: 0,
+        _pad0: 0,
+        msg_iov: &iov as *const UserIovec as u64,
+        msg_iovlen: 1,
+        msg_control: if fds.is_empty() {
+            0
+        } else {
+            control.as_ptr() as u64
+        },
+        msg_controllen: if fds.is_empty() {
+            0
+        } else {
+            control.len() as u64
+        },
+        msg_flags: 0,
+        _pad1: 0,
+    };
+    Sys::sendmsg(fd, &msg, slopos_abi::syscall::MSG_NOSIGNAL as i32).map_err(Into::into)
+}
+
+/// Receive into `buf`, taking any descriptors that arrived with it, each made
+/// close-on-exec; ones past [`SCM_MAX_FDS`](slopos_abi::syscall::SCM_MAX_FDS)
+/// are closed by the kernel.
+pub fn recv_with_fds(fd: RawFd, buf: &mut [u8]) -> SyscallResult<(usize, Vec<super::OwnedFd>)> {
+    use slopos_abi::fs::UserIovec;
+    use slopos_abi::syscall::{CMSG_DATA_OFFSET, CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS};
+    let mut control = vec![0u8; slopos_abi::syscall::cmsg_space(SCM_MAX_FDS * 4)];
+    let iov = UserIovec {
+        iov_base: buf.as_mut_ptr() as u64,
+        iov_len: buf.len() as u64,
+    };
+    let mut msg = MsgHdr {
+        msg_name: 0,
+        msg_namelen: 0,
+        _pad0: 0,
+        msg_iov: &iov as *const UserIovec as u64,
+        msg_iovlen: 1,
+        msg_control: control.as_mut_ptr() as u64,
+        msg_controllen: control.len() as u64,
+        msg_flags: 0,
+        _pad1: 0,
+    };
+    let n = Sys::recvmsg(fd, &mut msg, 0).map_err(SyscallError::from)?;
+    let mut fds = Vec::new();
+    let used = (msg.msg_controllen as usize).min(control.len());
+    if used >= CMSG_DATA_OFFSET {
+        // SAFETY: the kernel wrote a header at the start of `control`.
+        let header: CmsgHdr =
+            unsafe { core::ptr::read_unaligned(control.as_ptr() as *const CmsgHdr) };
+        if header.cmsg_type == SCM_RIGHTS {
+            let count = (header.cmsg_len as usize)
+                .saturating_sub(CMSG_DATA_OFFSET)
+                .min(used - CMSG_DATA_OFFSET)
+                / 4;
+            for i in 0..count {
+                // SAFETY: `count` keeps the read inside the used control bytes.
+                let raw = unsafe {
+                    core::ptr::read_unaligned(
+                        control.as_ptr().add(CMSG_DATA_OFFSET + i * 4) as *const i32
+                    )
+                };
+                let _ = super::fs::set_fd_cloexec(raw);
+                // SAFETY: the kernel installed this fd for us.
+                fds.push(unsafe { super::OwnedFd::from_raw(raw) });
+            }
+        }
+    }
+    Ok((n, fds))
+}

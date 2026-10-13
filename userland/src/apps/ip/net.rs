@@ -26,7 +26,6 @@ pub fn show() -> Outcome {
     Ok(())
 }
 
-/// Requires `NetAdmin`, which `/bin/ip` holds by path.
 pub fn set(enabled: bool) -> Outcome {
     net_iface_ctl(NET_IFINDEX_GLOBAL, NET_IFOP_SET_ENABLED, u64::from(enabled))
         .map_err(|err| Failure::from_errno("net", err))

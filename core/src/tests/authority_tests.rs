@@ -4,6 +4,8 @@
 //! `halt` would power the machine off mid-run. What matters is that the grant
 //! table and the syscall classification say the right things, because the
 //! dispatcher's behaviour is a total function of those two and a task's mask.
+//! A mechanism's authority comes from privd's delegation, which `userland`'s
+//! `privd_test` grades.
 
 use slopos_abi::syscall::{
     SYSCALL_PRIVATE_BASE, SYSCALL_PRIVATE_END, SYSCALL_REBOOT, SYSCALL_ROULETTE_RESULT,
@@ -40,7 +42,7 @@ fn conferred_on_exactly(cap: Capability, holders: &[&'static [u8]]) -> Result<()
     Ok(())
 }
 
-/// The finding this phase closes: `halt` and `reboot` had no authorization
+/// The finding phase 1 closed: `halt` and `reboot` had no authorization
 /// check at all, so one instruction from any task powered off the machine.
 fn power_is_denied_to_an_ordinary_task() -> TestResult {
     if mask_permits(CAP_UNIVERSAL, Capability::Power) {
@@ -49,36 +51,59 @@ fn power_is_denied_to_an_ordinary_task() -> TestResult {
     if decide(CAP_UNIVERSAL, Capability::Power) != AuthorityDecision::Deny {
         return fail!("Power must be denied under the default enforce mode");
     }
-
-    // `ip` holds network control and no more: a task privileged for one
-    // thing must not be privileged for everything, which is the failure mode
-    // a single `Admin` capability produces.
-    let ip = spawned_holding(b"/bin/ip");
-    if mask_permits(ip, Capability::Power) {
-        return fail!("ip must not hold Power");
-    }
-    if !mask_permits(ip, Capability::NetAdmin) {
-        return fail!("ip must hold NetAdmin");
-    }
     pass!()
 }
 
-/// `/bin/halt`'s grant confers `Power` and nothing else, and only the programs
-/// that bring the machine down or drive its firmware are granted it.
-fn power_is_granted_by_program_identity() -> TestResult {
-    if grant_for(b"/bin/halt") != Capability::Power.bit() {
-        return fail!("/bin/halt's grant must be Power and nothing else");
+/// What a mechanism may hold, which privd's action delegates and no path
+/// earns.
+const MECHANISM_CAPS: [Capability; 10] = [
+    Capability::Power,
+    Capability::Mount,
+    Capability::RawBlock,
+    Capability::NetAdmin,
+    Capability::ConsoleConfig,
+    Capability::SysInspect,
+    Capability::Clock,
+    Capability::Seal,
+    Capability::BootEntry,
+    Capability::DacOverride,
+];
+
+/// No program earns a mechanism's authority by its path: the grant table's
+/// remaining rows confer `Launch` and the display seat, and the programs
+/// privd runs are in it neither as grants nor as delegations.
+fn no_path_earns_a_mechanism_s_authority() -> TestResult {
+    for path in granted_paths() {
+        let earned = spawned_holding(path);
+        if let Some(cap) = MECHANISM_CAPS
+            .iter()
+            .find(|&&cap| mask_permits(earned, cap))
+        {
+            return fail!(
+                "{:?} earns {} by its path",
+                core::str::from_utf8(path),
+                cap.name()
+            );
+        }
     }
-    if let Err(path) = conferred_on_exactly(
-        Capability::Power,
-        &[
-            b"/bin/halt",
-            b"/bin/cpufreq",
-            b"/bin/bootctl",
-            b"/bin/installer",
-        ],
-    ) {
-        return fail!("Power is misgranted at {:?}", core::str::from_utf8(path));
+    for path in [
+        &b"/bin/halt"[..],
+        b"/bin/bootctl",
+        b"/bin/cpufreq",
+        b"/bin/installer",
+        b"/bin/ip",
+        b"/bin/keymap",
+        b"/bin/kconsole",
+        b"/bin/prof",
+        b"/sbin/mke2fs",
+        b"/sbin/privd",
+    ] {
+        if grant_for(path) != CAP_NONE || delegated_for(path) != CAP_NONE {
+            return fail!(
+                "{:?} is still in the grant table",
+                core::str::from_utf8(path)
+            );
+        }
     }
     pass!()
 }
@@ -164,7 +189,7 @@ slopos_testing::stest!(
     suite = authority
 );
 slopos_testing::stest!(
-    name = power_is_granted_by_program_identity,
+    name = no_path_earns_a_mechanism_s_authority,
     suite = authority
 );
 slopos_testing::stest!(name = the_table_classifies_power, suite = authority);
@@ -284,7 +309,9 @@ slopos_testing::stest!(
 /// built against: a privileged program execs an arbitrary binary and the
 /// binary inherits the privilege. The other is an unprivileged task execing a
 /// privileged image and gaining its grant. Checked on a real task through the
-/// function `execve` calls.
+/// function `execve` calls: `/bin/roulette`, which still earns the display
+/// seat, and `/bin/halt`, a mechanism that earns nothing and so keeps nothing
+/// of what a task held when it exec'd it.
 fn exec_intersection_never_widens() -> TestResult {
     use core::ffi::c_char;
     use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
@@ -292,8 +319,11 @@ fn exec_intersection_never_widens() -> TestResult {
     use slopos_ostd::task::ops::{task_caps, task_set_caps};
     use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
 
-    let Ok(halt) = slopos_fs::vfs::canon::canonicalise_at(b"/bin/halt", b"/") else {
-        return fail!("no path for /bin/halt");
+    let (Ok(roulette), Ok(halt)) = (
+        slopos_fs::vfs::canon::canonicalise_at(b"/bin/roulette", b"/"),
+        slopos_fs::vfs::canon::canonicalise_at(b"/bin/halt", b"/"),
+    ) else {
+        return fail!("no path for /bin/roulette or /bin/halt");
     };
     let id = task_create(
         b"ExecNarrowTest\0".as_ptr() as *const c_char,
@@ -305,14 +335,16 @@ fn exec_intersection_never_widens() -> TestResult {
     let Some(task) = task_find_by_id(id) else {
         return fail!("no test task");
     };
-    let power = Capability::Power.bit();
-    let mut after = [CAP_NONE; 3];
-    for (slot, before) in after
-        .iter_mut()
-        .zip([CAP_UNIVERSAL, CAP_UNIVERSAL | power, CAP_MASK_ALL])
-    {
+    let seat = Capability::DisplaySeat.bit();
+    let mut after = [CAP_NONE; 4];
+    for (slot, (before, image)) in after.iter_mut().zip([
+        (CAP_UNIVERSAL, &roulette),
+        (CAP_UNIVERSAL | seat, &roulette),
+        (CAP_MASK_ALL, &roulette),
+        (CAP_MASK_ALL, &halt),
+    ]) {
         task_set_caps(&task, before);
-        crate::exec::narrow_authority_for_exec(&task, id, &halt, true);
+        crate::exec::narrow_authority_for_exec(&task, id, image, true);
         *slot = task_caps(&task);
     }
     drop(task);
@@ -320,18 +352,24 @@ fn exec_intersection_never_widens() -> TestResult {
         task_terminate(id);
     }
 
-    let [ordinary, holder, everything] = after;
+    let [ordinary, holder, everything, mechanism] = after;
     if ordinary != CAP_UNIVERSAL {
         return fail!(
-            "exec of a privileged image raised an ordinary task to {:#x}",
+            "exec of a granted image raised an ordinary task to {:#x}",
             ordinary
         );
     }
-    if holder != CAP_UNIVERSAL | power {
-        return fail!("exec of /bin/halt took Power from a task holding it");
+    if holder != CAP_UNIVERSAL | seat {
+        return fail!("exec of /bin/roulette took the display seat from a task holding it");
     }
-    if everything != CAP_UNIVERSAL | power {
-        return fail!("exec of /bin/halt kept {:#x} beyond its grant", everything);
+    if everything != CAP_UNIVERSAL | seat {
+        return fail!(
+            "exec of /bin/roulette kept {:#x} beyond its grant",
+            everything
+        );
+    }
+    if mechanism != CAP_UNIVERSAL {
+        return fail!("exec of /bin/halt kept {:#x}", mechanism);
     }
     pass!()
 }
@@ -360,85 +398,11 @@ slopos_testing::stest!(
     suite = authority
 );
 
-/// `NetAdmin`, `RawBlock`, `Mount`, `SysInspect` and `DacOverride` land on
-/// exactly the programs that need them: network control on `ip`, raw block
-/// access on the programs that work beneath filesystems (e2fsprogs by
-/// delegation, so only from a spawner that holds it), mounting on the
-/// installer, machine inspection on the diagnostic programs, and the mode-bit
-/// override on the programs that write root-owned state for the session. The
-/// universal set holds none of them.
-fn moved_capabilities_are_conferred_by_identity() -> TestResult {
-    let e2fsprogs: [&'static [u8]; 6] = [
-        b"/sbin/mke2fs",
-        b"/sbin/e2fsck",
-        b"/sbin/resize2fs",
-        b"/sbin/tune2fs",
-        b"/sbin/debugfs",
-        b"/sbin/dumpe2fs",
-    ];
-    let mut raw_block: [&'static [u8]; 8] = [b""; 8];
-    raw_block[..6].copy_from_slice(&e2fsprogs);
-    raw_block[6] = b"/bin/installer";
-    raw_block[7] = b"/bin/bootctl";
-
-    for (cap, holders) in [
-        (Capability::NetAdmin, &[b"/bin/ip".as_slice()][..]),
-        (Capability::RawBlock, &raw_block[..]),
-        (Capability::Mount, &[b"/bin/installer".as_slice()][..]),
-        (
-            Capability::SysInspect,
-            &[b"/bin/kconsole".as_slice(), b"/bin/prof"][..],
-        ),
-        (
-            Capability::DacOverride,
-            &[
-                b"/bin/keymap".as_slice(),
-                b"/bin/bootctl",
-                b"/bin/installer",
-            ][..],
-        ),
-    ] {
-        if mask_permits(CAP_UNIVERSAL, cap) {
-            return fail!("{} is universal", cap.name());
-        }
-        if let Err(path) = conferred_on_exactly(cap, holders) {
-            return fail!(
-                "{} is misgranted at {:?}",
-                cap.name(),
-                core::str::from_utf8(path)
-            );
-        }
-    }
-    for tool in e2fsprogs {
-        if grant_for(tool) & Capability::RawBlock.bit() != 0 {
-            return fail!("e2fsprogs must take RawBlock from its spawner, not be granted it");
-        }
-    }
-    pass!()
-}
-
-slopos_testing::stest!(
-    name = moved_capabilities_are_conferred_by_identity,
-    suite = authority
-);
-
-/// `BootEntry` is the installer's role and nobody else's: not `bootctl`, which
-/// writes slots and the loader's variables. It adds to `Power`, under which the
-/// UEFI variable calls are classified, so the role alone reaches no variable.
-/// The role also carries `Seal`, for the mount points a new root holds the
-/// base over.
-fn boot_entry_is_the_installer_s_alone() -> TestResult {
-    let installer: &[&'static [u8]] = &[b"/bin/installer"];
-    for cap in [Capability::BootEntry, Capability::Seal] {
-        if let Err(path) = conferred_on_exactly(cap, installer) {
-            return fail!(
-                "{} is misgranted at {:?}",
-                cap.name(),
-                core::str::from_utf8(path)
-            );
-        }
-    }
+/// `BootEntry` adds to `Power`, under which the UEFI variable calls are
+/// classified, so the installer's role without `Power` reaches no variable.
+fn boot_entry_alone_reaches_no_variable() -> TestResult {
     let role_alone = CAP_UNIVERSAL | Capability::BootEntry.bit() | Capability::Seal.bit();
+    let installer = role_alone | Capability::Power.bit();
     for sysno in [
         slopos_abi::syscall::SYSCALL_EFIVAR_GET,
         slopos_abi::syscall::SYSCALL_EFIVAR_SET,
@@ -448,7 +412,7 @@ fn boot_entry_is_the_installer_s_alone() -> TestResult {
         };
         if entry.cap != Capability::Power
             || decide(role_alone, entry.cap) != AuthorityDecision::Deny
-            || decide(spawned_holding(b"/bin/installer"), entry.cap) != AuthorityDecision::Allow
+            || decide(installer, entry.cap) != AuthorityDecision::Allow
         {
             return fail!("efivar must be gated on Power, which the role alone does not pass");
         }
@@ -457,6 +421,6 @@ fn boot_entry_is_the_installer_s_alone() -> TestResult {
 }
 
 slopos_testing::stest!(
-    name = boot_entry_is_the_installer_s_alone,
+    name = boot_entry_alone_reaches_no_variable,
     suite = authority
 );

@@ -6,7 +6,8 @@ set -euo pipefail
 #
 # Usage: build_fs_image.sh <image_path> <build_dir> [bin1] [bin2] ...
 #
-# Each binary is placed in /bin/<name> except 'init' which goes to /sbin/init.
+# Each binary is placed in /bin/<name> except 'init' and 'privd', which go to
+# /sbin/<name>.
 # With none, a volume still carries the base's data files (the C library when
 # built, licence texts, fonts, the CA bundle, keymaps, the shell's completion
 # rules), or under `FS_BASE=boot` only the base's sealed mount points.
@@ -190,7 +191,7 @@ build_stamp() {
         sha256sum "${BUILD_DIR}/${so}" 2>/dev/null | cut -d' ' -f1 || echo missing
     done
     for asset in "${REPO_ROOT}/assets/fonts"/* "${REPO_ROOT}/assets/keymaps"/* \
-                 "${REPO_ROOT}/assets/completions"/* \
+                 "${REPO_ROOT}/assets/completions"/* "${REPO_ROOT}/assets/privd"/* \
                  "${REPO_ROOT}/assets/certs"/* "${REPO_ROOT}/assets/logo.png"; do
         [ -f "$asset" ] || continue
         sha256sum "$asset" | cut -d' ' -f1
@@ -651,8 +652,8 @@ install_base() {
         fi
 
         dst="/bin/${bin}"
-        if [ "$bin" = "init" ]; then
-            dst="/sbin/init"
+        if [ "$bin" = "init" ] || [ "$bin" = "privd" ]; then
+            dst="/sbin/${bin}"
         fi
 
         install_binary "$src" "$dst"
@@ -720,8 +721,8 @@ install_base() {
         install_binary "${BUILD_DIR}/${so}" "/lib/${so}"
     done
 
-    # A sealed directory cannot be renamed aside to plant a fresh /bin/halt
-    # under the path its grant is keyed on.
+    # A sealed directory cannot be renamed aside to plant a fresh /bin/shell
+    # under the path its grant is keyed on, or a /bin/bootctl for privd.
     seal /bin
     seal /sbin
     seal /lib
@@ -781,6 +782,10 @@ install_base() {
             echo "Installed doc: /usr/share/slopos/doc/$(basename "$doc")"
         done
     fi
+
+    mkdir_p /usr/share/slopos/privd
+    install_file "${REPO_ROOT}/assets/privd/actions" /usr/share/slopos/privd/actions
+    echo "Installed privd policy: /usr/share/slopos/privd/actions"
 
     if [ -f "${REPO_ROOT}/assets/logo.png" ]; then
         install_file "${REPO_ROOT}/assets/logo.png" /usr/share/slopos/wallpapers/default.png

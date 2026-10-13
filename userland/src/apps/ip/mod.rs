@@ -7,8 +7,9 @@
 //!
 //! Objects the grammar accepts but this kernel does not serve print
 //! `ip: OBJECT: not supported by this kernel yet` and exit 1, never an empty
-//! table. Nothing pre-checks `NetAdmin`: the syscall is issued and its errno is
-//! rendered, so the kernel stays the one place that decides.
+//! table. A command that changes the network is privd's `org.slopos.net.*`
+//! action, run as one when this process lacks `NetAdmin`; the syscall's errno
+//! is still rendered, so the kernel stays the one place that decides.
 
 mod addr;
 mod dhcp;
@@ -62,12 +63,9 @@ impl Failure {
     }
 
     /// Render a syscall's errno for a person.
-    ///
-    /// `EPERM` names the binary because a system with no uids has no `sudo`:
-    /// the privilege comes from the path the program was run from.
     pub fn from_errno(context: impl Into<String>, err: SyscallError) -> Failure {
         let message = match err {
-            SyscallError::EPERM => "operation not permitted (need NetAdmin; run /bin/ip)",
+            SyscallError::EPERM => "operation not permitted (needs NetAdmin)",
             SyscallError::ENOSYS => NOT_SUPPORTED,
             SyscallError::ENODEV => "no such device",
             SyscallError::EBUSY => "another administrative change is in flight",
@@ -174,7 +172,49 @@ fn run_ip(args: &[String]) -> i32 {
         return EXIT_USAGE;
     }
 
+    let sent = match invocation.plan {
+        Plan::NetSet { enabled } => {
+            let verb: &[u8] = if enabled { b"on" } else { b"off" };
+            vec![b"net".to_vec(), verb.to_vec()]
+        }
+        _ => crate::privd::own_args(),
+    };
+    crate::privd::elevate(
+        action_of(&invocation.plan),
+        &sent,
+        crate::privd::Input::Closed,
+    );
     finish(execute(&invocation.plan, invocation.opts, bounds))
+}
+
+/// The action a plan is privd's mechanism for; reading needs none.
+fn action_of(plan: &Plan<'_>) -> Option<&'static str> {
+    match plan {
+        Plan::NetSet { .. } => Some("org.slopos.net.toggle"),
+        Plan::LinkSet { .. }
+        | Plan::AddrAdd { .. }
+        | Plan::AddrDel { .. }
+        | Plan::AddrFlush { .. }
+        | Plan::RouteAdd { .. }
+        | Plan::RouteDel { .. }
+        | Plan::NeighDel { .. }
+        | Plan::NeighFlush { .. }
+        | Plan::DhcpStart { .. }
+        | Plan::DhcpStop { .. }
+        | Plan::DhcpRenew { .. }
+        | Plan::DhcpRelease { .. }
+        | Plan::DnsSet { .. } => Some("org.slopos.net.configure"),
+        Plan::LinkShow { .. }
+        | Plan::AddrShow { .. }
+        | Plan::RouteShow { .. }
+        | Plan::NeighShow { .. }
+        | Plan::DhcpStatus { .. }
+        | Plan::DnsShow
+        | Plan::NetShow
+        | Plan::Monitor { .. }
+        | Plan::Status
+        | Plan::Help { .. } => None,
+    }
 }
 
 fn finish(outcome: Outcome) -> i32 {

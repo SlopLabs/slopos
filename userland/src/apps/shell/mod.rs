@@ -2,6 +2,9 @@ use std::os::unix::ffi::OsStringExt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
+use slopos_abi::syscall::{F_GETFD, FD_CLOEXEC};
+use slopos_slibc::pal::{Pal, Sys};
+
 pub mod args;
 mod banner;
 pub mod buffers;
@@ -110,6 +113,29 @@ pub fn set_last_bg_pid(pid: u32) {
 pub fn shell_pid() -> u32 {
     SHELL_PID.load(Ordering::Relaxed)
 }
+
+/// The privd connection this shell inherited, for `program` spawned by the
+/// shell process itself while no earlier holder lives: two requesters reading
+/// one connection could each take the other's replies, and a forked subshell,
+/// a pipeline stage or a stopped job may run beside the next.
+pub fn privd_for(program: &str) -> Option<i32> {
+    let holder = PRIVD_HOLDER.load(Ordering::Relaxed);
+    let free = holder == 0 || crate::syscall::process::kill(holder, 0) != 0;
+    if !free || std::process::id() != shell_pid() || !crate::privd::takes_connection(program) {
+        return None;
+    }
+    // A redirection of this command may have closed or replaced it.
+    crate::privd::inherited_fd().filter(|&fd| {
+        Sys::fcntl(fd, F_GETFD as i32, 0).is_ok_and(|flags| flags as u64 & FD_CLOEXEC != 0)
+    })
+}
+
+/// `pid` was handed the connection [`privd_for`] gave.
+pub fn privd_handed(pid: u32) {
+    PRIVD_HOLDER.store(pid, Ordering::Relaxed);
+}
+
+static PRIVD_HOLDER: AtomicU32 = AtomicU32::new(0);
 
 pub(crate) const PROMPT_BUF_MAX: usize = 280;
 
@@ -295,6 +321,7 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
         .map_or_else(|_| b"/".to_vec(), |dir| dir.into_os_string().into_vec());
     cwd_set(&cwd);
     env::initialize();
+    crate::privd::hold_inherited();
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);
     exec::initialize_job_control();
 

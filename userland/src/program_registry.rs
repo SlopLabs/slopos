@@ -7,8 +7,8 @@ pub struct ProgramSpec {
     /// The tier this program is *requested* at: `Normal` or `Low`, since
     /// `High` takes `SchedHigh`, which init holds and spends on the compositor.
     pub priority: TaskPriority,
-    /// The flags this program is spawned with; its capabilities come from the
-    /// kernel's grant for its path.
+    /// The flags this program is spawned with. A mechanism asks privd for
+    /// what its action holds; the launchers' rows are the kernel's grants.
     pub flags: u16,
     pub desc: &'static str,
 }
@@ -56,8 +56,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Spin the Wheel of Fate",
     },
-    // Granted `Power` by path, and nothing else. Requested unprivileged,
-    // like every other entry: the grant is the kernel's to make.
     ProgramSpec {
         name: "halt",
         path: "/bin/halt",
@@ -65,7 +63,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Halt or reboot the machine",
     },
-    // Granted `RawBlock`, `Power` and `DacOverride` by path, like `halt`.
     ProgramSpec {
         name: "bootctl",
         path: "/bin/bootctl",
@@ -73,8 +70,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Install a kernel into a boot slot and choose what boots",
     },
-    // Granted `RawBlock`, `Mount`, `Power`, `BootEntry`, `Seal` and
-    // `DacOverride` by path.
     ProgramSpec {
         name: "installer",
         path: "/bin/installer",
@@ -131,7 +126,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Show socket statistics",
     },
-    // Granted `Power` by path, for `cpufreq set`.
     ProgramSpec {
         name: "cpufreq",
         path: "/bin/cpufreq",
@@ -139,7 +133,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Show CPU frequency and core types; set the HWP policy",
     },
-    // Granted `SysInspect` by path, for `kconsole(2)`.
     ProgramSpec {
         name: "kconsole",
         path: "/bin/kconsole",
@@ -147,7 +140,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Run the diagnostic console's informational commands",
     },
-    // Granted `SysInspect` by path, for `prof_ctl(2)`.
     ProgramSpec {
         name: "prof",
         path: "/bin/prof",
@@ -156,7 +148,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "Start, stop or report the kernel's sampling profiler",
     },
     // A service init starts when the base carries a remote pairing, not a
-    // launcher entry. Granted `Launch` by path, like the shell.
+    // launcher entry.
     ProgramSpec {
         name: "remoted",
         path: "/bin/remoted",

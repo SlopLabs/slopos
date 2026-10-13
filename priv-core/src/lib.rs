@@ -1,0 +1,134 @@
+//! What `/sbin/privd` decides and what it says, apart from the system calls
+//! that carry it: the action policy, the request protocol a requester speaks
+//! over `/run/privd`, and the consent protocol privd speaks to the compositor.
+//!
+//! A requester sends one frame per request, framed as `slopos_remote_core`
+//! frames, its descriptors riding along as `SCM_RIGHTS`:
+//!
+//! ```text
+//! client REQUEST{id, action, arg.., cwd?}  + stdin, stdout, stderr[, cwd]
+//!   privd  ASKING{id}                      the person at the machine is asked
+//!   privd  DENIED{id, reason, person?}
+//!   privd  STARTED{id, pid}
+//!   client SIGNAL{id, signo}..             relayed, or withdraws what has not started
+//!   privd  EXITED{id, code | signal}
+//! ```
+//!
+//! A connection carries one request at a time and any number in turn.
+//!
+//! The consent channel is a socket pair init hands privd and the compositor:
+//!
+//! ```text
+//! agent READY                           it can draw a dialog
+//! privd ASK{id, action, describe, program?, uid, pid, cwd, arg..}
+//!   agent ANSWER{id, allow}
+//!   privd CANCEL{id}                    expired
+//! ```
+
+#![no_std]
+#![forbid(unsafe_code)]
+
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
+
+pub mod consent;
+pub mod policy;
+pub mod wire;
+
+pub use policy::{Action, Allow, Policy, PolicyError, Principal, Requester, Shape, Verdict};
+
+use slopos_abi::caps;
+
+/// Where privd listens; anyone may connect, and the policy answers.
+pub const SOCKET: &str = "/run/privd";
+/// The policy, in the sealed base, so no running program can edit it.
+pub const POLICY: &str = "/usr/share/slopos/privd/actions";
+/// privd itself, as `SO_PEERPROGRAM` names the real one.
+pub const PROGRAM: &str = "/sbin/privd";
+/// Who makes the consent channel, as `SO_PEERPROGRAM` names it at either end.
+pub const INIT: &str = "/sbin/init";
+/// The descriptor of an inherited connection, named in the environment.
+pub const ENV_FD: &str = "PRIVD_FD";
+/// The action privd started a mechanism for.
+pub const ENV_ACTION: &str = "PRIV_ACTION";
+/// The whole search path a mechanism sees.
+pub const MECHANISM_PATH: &str = "/bin:/sbin";
+pub const MECHANISM_LANG: &str = "C.UTF-8";
+
+/// What init hands privd, and so all an action may name. Not `SetId`: every
+/// mechanism runs as uid 0, which privd already is.
+pub const DELEGABLE: u64 = caps::POWER
+    | caps::MOUNT
+    | caps::RAW_BLOCK
+    | caps::NET_ADMIN
+    | caps::CONSOLE_CONFIG
+    | caps::SYS_INSPECT
+    | caps::CLOCK
+    | caps::SEAL
+    | caps::BOOT_ENTRY
+    | caps::DAC_OVERRIDE;
+
+/// Whether an ELF image names a program interpreter, `None` when it is not a
+/// 64-bit little-endian ELF image whose program headers it holds.
+pub fn elf_interpreted(image: &[u8]) -> Option<bool> {
+    const PT_INTERP: u32 = 3;
+    if image.get(..6)? != b"\x7fELF\x02\x01" {
+        return None;
+    }
+    let u16_at = |at: usize| Some(u16::from_le_bytes(image.get(at..at + 2)?.try_into().ok()?));
+    let phoff = usize::try_from(u64::from_le_bytes(image.get(32..40)?.try_into().ok()?)).ok()?;
+    let phentsize = usize::from(u16_at(54)?);
+    let phnum = usize::from(u16_at(56)?);
+    if phentsize < 4 {
+        return None;
+    }
+    let mut interpreted = false;
+    for i in 0..phnum {
+        let at = phoff.checked_add(i.checked_mul(phentsize)?)?;
+        let header = image.get(at..at.checked_add(phentsize)?)?;
+        let kind = u32::from_le_bytes(header[..4].try_into().ok()?);
+        interpreted |= kind == PT_INTERP;
+    }
+    Some(interpreted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn image(types: &[u32]) -> Vec<u8> {
+        let mut out = vec![0u8; 64 + 56 * types.len()];
+        out[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        out[32..40].copy_from_slice(&64u64.to_le_bytes());
+        out[54..56].copy_from_slice(&56u16.to_le_bytes());
+        out[56..58].copy_from_slice(&(types.len() as u16).to_le_bytes());
+        for (i, kind) in types.iter().enumerate() {
+            out[64 + 56 * i..68 + 56 * i].copy_from_slice(&kind.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn an_interpreter_header_is_found_among_the_others() {
+        assert_eq!(elf_interpreted(&image(&[1, 1, 4])), Some(false));
+        assert_eq!(elf_interpreted(&image(&[6, 3, 1])), Some(true));
+        assert_eq!(elf_interpreted(&image(&[])), Some(false));
+    }
+
+    #[test]
+    fn what_is_not_a_whole_elf_image_is_unknown() {
+        let good = image(&[1, 3]);
+        for cut in 0..good.len() {
+            assert_eq!(elf_interpreted(&good[..cut]), None, "{cut}");
+        }
+        let mut elf32 = good.clone();
+        elf32[4] = 1;
+        assert_eq!(elf_interpreted(&elf32), None);
+        let mut far = good;
+        far[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(elf_interpreted(&far), None);
+    }
+}

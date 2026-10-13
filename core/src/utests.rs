@@ -122,6 +122,7 @@ crate::utest!(
     uid = 1000
 );
 crate::utest!(name = utest_peer, bin = "/bin/peer_test");
+crate::utest!(name = utest_privd, bin = "/bin/privd_test");
 crate::utest!(name = utest_fifo, bin = "/bin/fifo_test");
 crate::utest!(name = utest_persist, bin = "/bin/persist_test");
 crate::utest!(

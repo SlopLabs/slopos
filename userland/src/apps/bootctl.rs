@@ -18,8 +18,10 @@
 //! crash store kept to `/var/log/crash` and notes what each slot's last boot
 //! came to under `/var/lib/slopos/slots`, which `status` reports.
 //!
-//! Holds `RawBlock` for the raw partition and the crash records, and `Power`
-//! for the loader variables and the reboot.
+//! Needs `RawBlock` for the raw partition and the crash records, and `Power`
+//! for the loader variables and the reboot; started without them, each
+//! command asks privd to run it as its `org.slopos.boot.*` action. `collect`
+//! is init's, which starts it holding both.
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -32,6 +34,7 @@ use slopos_fat_core::{Error as FatError, Volume};
 
 use crate::apps::coreutils::time::utc_from_epoch;
 use crate::boot_disk::{BlockFile, BootDisk, loader_entries, loader_var, open_fat, set_loader_var};
+use crate::privd::{self, Input};
 use crate::syscall::core as sys_core;
 use crate::syscall::process;
 
@@ -585,8 +588,29 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// The action a command line belongs to, `None` for one privd runs nothing
+/// for.
+fn action_for(args: &[String]) -> Option<&'static str> {
+    let command = match args {
+        [flag, _, rest @ ..] if flag == "--boot" => rest.first(),
+        _ => args.first(),
+    }?;
+    Some(match command.as_str() {
+        "status" => "org.slopos.boot.status",
+        "install" => "org.slopos.boot.install",
+        "clone" => "org.slopos.boot.clone",
+        "oneshot" => "org.slopos.boot.oneshot",
+        "set-default" => "org.slopos.boot.set-default",
+        "spare" => "org.slopos.boot.spare",
+        "commit" => "org.slopos.boot.commit",
+        "reboot" => "org.slopos.boot.reboot",
+        _ => return None,
+    })
+}
+
 pub fn bootctl_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    privd::elevate(action_for(&args), &privd::own_args(), Input::Closed);
     if let Err(message) = run(&args) {
         eprintln!("bootctl: {message}");
         sys_core::exit_with_code(1);

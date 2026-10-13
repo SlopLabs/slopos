@@ -42,6 +42,7 @@ members = [
   "tls-core",
   "http-core",
   "remote-core",
+  "priv-core",
   "fat-core",
   "boot-core",
   "tree-core",
@@ -83,7 +84,7 @@ non_upper_case_globals = "deny"
 
 [workspace.lints.cargo]
 # Binary names are ABI, not style: each is a literal /bin/<name> in
-# program_registry, the exec grant table and initramfs.
+# program_registry, the exec grant table, privd's policy and initramfs.
 non_kebab_case_bins = "allow"
 
 [workspace.lints.clippy]
@@ -131,6 +132,7 @@ slopos-ext4-core = { path = "ext4-core" }
 slopos-tls-core = { path = "tls-core" }
 slopos-http-core = { path = "http-core" }
 slopos-remote-core = { path = "remote-core" }
+slopos-priv-core = { path = "priv-core" }
 slopos-fat-core = { path = "fat-core" }
 slopos-boot-core = { path = "boot-core" }
 slopos-tree-core = { path = "tree-core" }

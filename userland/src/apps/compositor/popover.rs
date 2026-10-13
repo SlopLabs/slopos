@@ -647,25 +647,33 @@ fn work_area(screen_w: u32, screen_h: u32) -> Rect {
     )
 }
 
-/// Ask `/bin/ip` to move the master networking switch.
-///
-/// Spawned rather than issued directly: `net_iface_ctl` needs `NetAdmin`, the
-/// compositor holds only its seats and `Launch`, and `/bin/ip` is the one
-/// shipped program the kernel's program-identity table grants `NetAdmin`. Asking
-/// for the capability here would widen the trusted surface of the process that
-/// already owns the framebuffer and every input event.
+/// Ask `/bin/ip` to move the master networking switch, through a privd
+/// connection this process makes: the request is attested as the
+/// compositor's, which the policy lets turn networking on and off without
+/// asking. The compositor itself never holds `NetAdmin`, which would widen
+/// the process that already owns the framebuffer and every input event.
 ///
 /// Returns whether the child started; the operation's own result arrives later
 /// as a `net_monitor` event.
 fn spawn_ip_net(enable: bool) -> bool {
+    let Ok(privd) = crate::privd::Connection::open() else {
+        return false;
+    };
     let verb: &[u8] = if enable { b"on\0" } else { b"off\0" };
     let argv: [*const u8; 3] = [b"ip\0".as_ptr(), b"net\0".as_ptr(), verb.as_ptr()];
+    let env = format!("{}={PRIVD_AT}\0", slopos_priv_core::ENV_FD);
+    let envp = [env.as_ptr()];
     // stdout and stderr only: `ip` reads nothing, and handing it the
     // compositor's stdin would put a child on the console's input.
-    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
-    let tid = process::spawn_path_with_actions(
+    let actions = [
+        process::clone_fd(1, 1),
+        process::clone_fd(2, 2),
+        process::clone_fd(privd.raw(), PRIVD_AT),
+    ];
+    let tid = process::spawn_path_with_env(
         b"/bin/ip",
         &argv,
+        &envp,
         slopos_abi::task::TaskPriority::Normal,
         slopos_abi::task::TASK_FLAG_USER_MODE,
         &actions,
@@ -673,3 +681,6 @@ fn spawn_ip_net(enable: bool) -> bool {
     );
     tid > 0
 }
+
+/// Where `ip` finds the compositor's privd connection.
+const PRIVD_AT: i32 = 3;

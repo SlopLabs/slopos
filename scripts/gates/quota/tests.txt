@@ -14,6 +14,9 @@
 # residentpages, diskblocks, pinnedbytes, task -- keep the previously tracked
 # value where it still holds, since one capture is a point and not a spread;
 # the deterministic rows and every new row carry this capture's exact peak.
+# The custody row after userland rose from 8 to 12 with `privd_test`: every
+# request it sends carries three or four descriptors as SCM_RIGHTS, held in
+# custody until privd reads them or drops a connection it refused unread.
 # The task row after userland rose from 10 with `install_test`, which runs
 # `/bin/bootctl` as a child; it is timing-dependent, and two captures of one
 # tree measured 11 and 12, then 13 once an interrupt-delivered wake preempted
@@ -124,7 +127,7 @@ post-kernel-tests	process	14
 post-kernel-tests	residentpages	2308
 post-kernel-tests	task	9
 post-userland-tests	commitpages	193853
-post-userland-tests	custody	8
+post-userland-tests	custody	12
 post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256
 post-userland-tests	kernelmeta	10035

@@ -1,0 +1,18 @@
+[package]
+name = "slopos-priv-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "privd's action policy, request protocol and consent dialog, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-remote-core = { workspace = true }

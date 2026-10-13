@@ -8,14 +8,16 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use slopos_abi::signal::SIGKILL;
+use slopos_abi::signal::{SIGKILL, SIGTERM};
 use slopos_remote_core::{CHUNK, Digest256, Fields, hex, kind};
 
 use super::link::{Frame, Link};
+use crate::privd;
 use crate::syscall::process;
 use crate::tls;
 
@@ -53,8 +55,7 @@ fn send(link: &Link, kind: u8, fields: Fields) -> Result<(), String> {
 }
 
 /// The file `program` names: itself when it holds a slash, else the first
-/// regular file of that name along `path`. Resolved here so the spawn is by
-/// absolute path, which is what the kernel's program grants key on.
+/// regular file of that name along `path`.
 fn resolve(program: &OsStr, path: &OsStr) -> Option<PathBuf> {
     if program.as_bytes().contains(&b'/') {
         return Some(PathBuf::from(program));
@@ -96,7 +97,10 @@ fn exec(link: &Link, fields: &Fields) -> Result<(), String> {
         .map_or(OsStr::new(""), |&(_, value)| value);
     let image = resolve(program, path)
         .ok_or_else(|| format!("{}: command not found", program.to_string_lossy()))?;
-    let mut cmd = Command::new(image);
+    let mechanism = std::fs::canonicalize(Path::new(cwd).join(&image))
+        .ok()
+        .filter(|real| real.to_str().is_some_and(privd::takes_connection));
+    let mut cmd = Command::new(mechanism.as_deref().unwrap_or(&image));
     cmd.arg0(program)
         .args(args)
         .env_clear()
@@ -116,14 +120,10 @@ fn exec(link: &Link, fields: &Fields) -> Result<(), String> {
         .filter(|&ms| ms > 0)
         .map(Duration::from_millis);
 
-    let mut child = cmd
-        .spawn()
+    let mut child = spawn(&mut cmd, mechanism.is_some())
         .map_err(|e| format!("{}: {e}", program.to_string_lossy()))?;
     let pid = child.id();
     let group = pid as i32;
-    let kill_group = || {
-        let _ = process::kill_pid(-group, SIGKILL);
-    };
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let stdin = child.stdin.take();
@@ -134,7 +134,7 @@ fn exec(link: &Link, fields: &Fields) -> Result<(), String> {
     )
     .is_err()
     {
-        kill_group();
+        end_group(group);
         let _ = child.wait();
         return Ok(());
     }
@@ -150,7 +150,7 @@ fn exec(link: &Link, fields: &Fields) -> Result<(), String> {
         scope.spawn(|| {
             let mut stdin = stdin;
             if !feed(link, &mut stdin) && !reaped.load(Ordering::Acquire) {
-                kill_group();
+                end_group(group);
             }
         });
         let timer = timeout.map(|limit| {
@@ -160,7 +160,7 @@ fn exec(link: &Link, fields: &Fields) -> Result<(), String> {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if left.is_zero() {
                         timed_out.store(true, Ordering::Release);
-                        kill_group();
+                        end_group(group);
                         return;
                     }
                     thread::park_timeout(left);
@@ -198,6 +198,42 @@ fn exec(link: &Link, fields: &Fields) -> Result<(), String> {
         link.finish();
     });
     Ok(())
+}
+
+/// How long a command's group has to end on `SIGTERM` before `SIGKILL`.
+const GRACE: Duration = Duration::from_secs(2);
+
+/// End a command's process group. `SIGTERM` comes first because a
+/// mechanism's requester relays it to the mechanism privd runs, which is
+/// outside the group and out of `SIGKILL`'s reach.
+fn end_group(group: i32) {
+    let _ = process::kill_pid(-group, SIGTERM);
+    thread::sleep(GRACE);
+    let _ = process::kill_pid(-group, SIGKILL);
+}
+
+/// Held across every spawn, so a connection made inheritable for one child
+/// reaches no other.
+static SPAWNING: Mutex<()> = Mutex::new(());
+
+/// Spawn `cmd`; a `mechanism` gets a privd connection of its own made by
+/// this process, so what it asks privd is asked as the paired agent. A child
+/// started without one runs all the same, as the session.
+fn spawn(cmd: &mut Command, mechanism: bool) -> std::io::Result<std::process::Child> {
+    let privd = mechanism.then(privd::Connection::open);
+    if let Some(Err(why)) = &privd {
+        eprintln!("remoted: no privd connection for the command: {why}");
+    }
+    let held = SPAWNING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(Ok(privd)) = &privd {
+        privd.hand_to(cmd);
+    }
+    let child = cmd.spawn();
+    drop(privd);
+    drop(held);
+    child
 }
 
 fn pump(link: &Link, mut from: impl Read, kind: u8) {

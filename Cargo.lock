@@ -367,6 +367,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-priv-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-remote-core",
+]
+
+[[package]]
 name = "slopos-protocol"
 version = "0.1.0"
 dependencies = [
@@ -527,6 +535,7 @@ dependencies = [
  "slopos-image",
  "slopos-keymap-core",
  "slopos-net-core",
+ "slopos-priv-core",
  "slopos-protocol",
  "slopos-remote-core",
  "slopos-rt",

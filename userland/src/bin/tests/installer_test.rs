@@ -40,7 +40,7 @@ use slopos_userland::boot_disk::{
     BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, not_installable,
     open_fat, partition_node, table_of, whole_disks,
 };
-use slopos_userland::selfhost::{selfhost, workspace};
+use slopos_userland::selfhost::{selfhost_installing, workspace};
 use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
 use slopos_userland::syscall::efi::{efivar_get, efivar_set};
@@ -219,7 +219,8 @@ fn leave_kept_file(node: &str) -> Result<(), String> {
 }
 
 /// A person typing `installer` at the shell, then `typed` to its questions:
-/// the shell is what must hand the installer its grant.
+/// started holding nothing, the installer asks privd, which runs it with the
+/// answers on the standard input it was sent.
 fn answer_on_stdin(args: &[String], typed: &str) -> std::io::Result<std::process::ExitStatus> {
     use std::io::Write;
     let line = std::iter::once("installer".to_owned())
@@ -519,9 +520,12 @@ fn first_boot(status: &str) -> bool {
         Ok(root) => {
             let tag = format!("guest-{}", clock_gettime_ns());
             let started = Instant::now();
-            let status = selfhost(root, &["install", "tests"])
-                .env("SLOPOS_BUILD_TAG", &tag)
-                .status();
+            let status =
+                selfhost_installing(root, &["install", "tests"]).and_then(|(mut cmd, privd)| {
+                    let status = cmd.env("SLOPOS_BUILD_TAG", &tag).status();
+                    drop(privd);
+                    status.map_err(|e| e.to_string())
+                });
             if !matches!(status, Ok(s) if s.success()) {
                 note(&format!("selfhost.sh install tests: {status:?}"));
                 return false;

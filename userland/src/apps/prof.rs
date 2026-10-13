@@ -4,8 +4,9 @@
 //! added there to its output, so `prof report x > x.log` is a file
 //! `scripts/prof_report.py` reads.
 //!
-//! Its own program rather than a coreutils tool because the kernel grants
-//! `SysInspect` to this path, and a grant follows symlinks to the binary.
+//! `prof_ctl` takes `SysInspect`, so this is privd's `org.slopos.prof`: its
+//! own program rather than a coreutils tool because privd keys an action on
+//! the program it runs.
 
 use slopos_abi::errno::Errno;
 use slopos_abi::syscall::{
@@ -19,6 +20,13 @@ use crate::syscall::core as sys_core;
 pub fn prof_main() -> ! {
     let args: Vec<Vec<u8>> = std::env::args().map(String::into_bytes).collect();
     let argv: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+    if well_formed(&argv) {
+        crate::privd::elevate(
+            Some("org.slopos.prof"),
+            &crate::privd::own_args(),
+            crate::privd::Input::Closed,
+        );
+    }
     let mut ctx = Ctx::stdio();
     ctx.set_tool("prof");
     let status = prof(&mut ctx, &argv);
@@ -87,6 +95,14 @@ fn report(ctx: &mut Ctx, label: &[u8]) -> i32 {
         return 1;
     }
     0
+}
+
+fn well_formed(argv: &[&[u8]]) -> bool {
+    match argv.get(1..).unwrap_or_default() {
+        [b"start" | b"stop" | b"status" | b"report"] => true,
+        [b"report", label] => label_ok(label),
+        _ => false,
+    }
 }
 
 fn prof(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {

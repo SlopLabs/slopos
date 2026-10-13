@@ -534,9 +534,10 @@ carrying the base directories only as sealed mount points; the tests and
 verified images carry a system of their own, which a disk root's base
 covers.
 
-**The guest installs what it builds.** `/bin/bootctl` (granted `RawBlock` for
-the raw disk and partition, `Power` for the loader's variables and
-`DacOverride` for the slot records under `/var/lib/slopos`) finds the boot
+**The guest installs what it builds.** `/bin/bootctl` (privd's
+`org.slopos.boot.*` actions, run as uid 0 with `RawBlock` for the raw disk and
+partition and `Power` for the loader's variables; `collect` is init's) finds
+the boot
 partition by its type GUID on the disk whose GPT lists `LoaderDevicePartUUID`,
 the ESP Limine was started from, and writes a kernel and its base into a slot
 that is not the default, clearing a one-shot boot armed for that slot first,
@@ -563,7 +564,9 @@ with the toolchain on `PATH`, installs both into `bootctl spare`'s slot and
 arms the one-shot boot, so a system is tried, committed or rolled
 back whole.
 `selfhost_test` and `install_test` run that script as a person at the shell
-does, so the loop a developer types is the loop the tests grade.
+does, so the loop a developer types is the loop the tests grade; a root test
+hands the script a privd connection of its own, so its `bootctl` calls are
+the test's and wait for nobody at the machine.
 
 **An install medium installs SlopOS.** The live ISO is the medium: `just iso`
 builds `builddir/install.cpio` (`scripts/build_install_medium.sh`), which
@@ -598,12 +601,12 @@ file — has no payload, and the installer installs without the toolchain,
 saying so when the medium's disk names a payload the kernel did not mount; it
 takes a payload only from the root of a read-only ext4 volume at
 `/media/payload`, since any program can make a directory there.
-`/bin/installer` (granted `RawBlock`, `Mount`, `Power`, `BootEntry`, `Seal` and
-`DacOverride`; a `RawBlock` holder may write any disk raw, so no per-process
-`DiskBlocks` ceiling binds it, and it fills a whole root in one
-process; in the shell's program
-registry, because a grant is raised only by a spawn and the shell `exec`s
-anything else in a fork that keeps nothing of it) asks for a whole disk —
+`/bin/installer` (privd's `org.slopos.install`: `RawBlock`, `Mount`, `Power`,
+`BootEntry`, `Seal` and `DacOverride`, for the session only once the person
+allows it and never for a paired host; a `RawBlock` holder may write any disk
+raw, so no per-process `DiskBlocks` ceiling binds it, and it fills a whole root
+in one process; its questions are asked through the requester's terminal) asks
+for a whole disk —
 never one that answers `BLKROGET` with 1, nor the one carrying the medium's
 GPT disk GUID, which `installer_test` excludes by the same rule
 (`boot_disk::not_installable`) — and a mode — erase it, install
@@ -623,8 +626,8 @@ that Limine can boot — makes `slopos-a` the default, holds the root to
 when asked. It writes nothing outside the partitions it made or was given, nor
 anything on a shared ESP outside `\EFI\SlopOS\`. e2fsprogs is the recipe
 `toolchain/recipes/e2fsprogs`, built unpatched; its six programs are in every
-base at `/sbin`, each keeping a delegated `RawBlock` there, and nowhere else, as far as
-its spawner holds it: the installer hands it on, the shell has none to give.
+base at `/sbin`, holding nothing a spawn does not delegate: the installer hands
+each the `RawBlock` it formats or checks with, and nothing else does.
 
 **A panic leaves a record.** The boot disk's crash partition is a ring of
 64 KiB slots in the format `boot-core::crash` states: a header sealing each
@@ -971,13 +974,15 @@ beside a busy sibling, the HWP highest level breaking ties and a warm
 `last_cpu` kept when it is as good; the kick that sends an idle CPU to steal
 prefers the same. A running task is not migrated toward a better CPU; it moves
 when it next wakes. Identical CPUs without siblings, as QEMU's are, place as
-before. `/bin/cpufreq` (granted `Power` by path) is the tool: `status`, `watch`,
+before. `/bin/cpufreq` (`set` is privd's `org.slopos.cpufreq.set`, run with
+`Power`) is the tool: `status`, `watch`,
 `run -- CMD` (busy time, effective MHz per class, package temperature and
 throttle causes, and one `CPUFREQ[run]:` line on stderr), `set
 hwp|epp|limits|placement`, and `bench`, which times one workload pinned to each
 CPU, on an SMT pair and wherever the scheduler puts it (`CPUFREQ[bench]:`).
-`sysmon` shows each CPU's type and clock. `/bin/prof` (`prof_ctl`; granted
-`SysInspect` by path) starts, stops and reports the sampling profiler on a
+`sysmon` shows each CPU's type and clock. `/bin/prof` (`prof_ctl`; privd's
+`org.slopos.prof`, run with `SysInspect`) starts, stops and reports the
+sampling profiler on a
 running system; its report carries each CPU's busy share and effective clock
 over the span.
 
@@ -991,12 +996,22 @@ requests run side by side; it redials with backoff and pings both ways.
 Requests are `remote-core`'s frames: run a program (argv, cwd, env, stdin,
 timeout; stdout, stderr and the exit status streamed back), and write or read
 a file, atomically and checked by SHA-256 end to end. Init starts remoted as
-the session, uid 1000, and delegates it `Launch`, so a program it starts gets
-its grant — `bootctl` its `RawBlock` and `Power`, `cpufreq` its `Power` — and
-whoever holds the broker's key holds the machine. **The pairing lives only in
-the base,** which no process can write: a pairing read from `/etc` would let
-whatever writes there — uid 0, or a program holding `DacOverride` — point a
-`Launch` holder at a broker of its own. The host bakes it in
+the session, uid 1000, holding nothing; each program it runs that the policy
+names as a mechanism, and the shell, gets a privd connection remoted made
+(`PRIVD_FD`), through which a mechanism asks as the paired agent, which the
+policy allows the boot slots, power, `cpufreq set`, `kconsole`, the profiler
+and the keymap and nothing else — so whoever holds the broker's key holds
+those. A mechanism keeps the connection from whatever it starts, and the shell
+hands it on only to the mechanisms its own process runs, not from a subshell or
+a pipeline stage and not while one it handed it to lives
+(`slopos_userland::privd::takes_connection`, the shell's `privd_for`), so no
+code from outside the base asks as the paired agent and no two requesters
+share it. A command's timeout sends its group `SIGTERM`, which a requester
+relays to its mechanism, before `SIGKILL`. **The pairing lives only in the
+base,** which no
+process can write: a pairing read from `/etc` would let whatever writes there —
+uid 0, or a program holding `DacOverride` — point remoted at a broker of its
+own. The host bakes it in
 (`REMOTE_PAIRING_DIR`, which `tools/initramfs` packs whole or not at all) into
 a separate base, `builddir/initramfs-remote.cpio`, so the shipped
 `initramfs.cpio` never carries a token; `scripts/selfhost.sh` carries a
@@ -1048,9 +1063,9 @@ survives a conversion, and the kernel reads such a volume like any other.
 immutable flag is the VFS seal, an append-only file another system marked is
 sealed too, ext4 also stores `nodump` and `noatime`, any other change is
 `EOPNOTSUPP` (a RAM filesystem keeps only the seal, and only sets it), and
-moving the seal takes the `Seal` capability, which only init, the utests and
-the installer hold, because a path-keyed program-identity grant
-is only as good as the seal on the file it names.
+moving the seal takes the `Seal` capability, which only init, privd, the
+utests and the installer hold, because a path-keyed grant and privd's
+program identity are only as good as the seal on the file they name.
 
 **The root is not the only filesystem.** `mount(2)` with `fstype` `ext2`,
 `ext3` or `ext4` (one driver) takes a
@@ -1337,7 +1352,8 @@ syscall slot through its `cap(...)` clause, anything finer through
 where the gate names it. A spawned program holds the universal capabilities
 (`ConsoleIo`, `ClipboardGlobal`, `Fate`) its spawner holds, what its spawner
 delegates through `SpawnAttrs` — any subset of the spawner's own mask, else
-`EPERM` — and what its path earns; a spawn asking for ids other than the
+`EPERM` — and what its path earns, which no mechanism's does; a spawn asking
+for ids other than the
 spawner's takes `SetId`, one at the `High` tier `SchedHigh`, and a child that
 holds a gated capability or runs with ids other than its spawner's real ones
 starts `AT_SECURE`. Init holds `CAP_MASK_ALL` and delegates each service what
@@ -1421,6 +1437,47 @@ anonymous memory, a memfd, a file elsewhere — and an `mprotect` making any pag
 executable that was not, decided under the lock that applies it, make the
 process `Other` before that code can run, until its next exec. `pidfd_open`
 takes any process's leader, as Linux's does.
+
+**privd runs what the session may not.** `/sbin/privd`, which init starts as
+uid 0 holding `slopos_priv_core::DELEGABLE` and waits for, listens on
+`/run/privd` (mode 0666) and runs a named action's mechanism — the base program
+`/usr/share/slopos/privd/actions` (`assets/privd/actions`, sealed in the base,
+grammar `slopos_priv_core::policy`) names for it — as a fresh child holding the
+action's capabilities as uid 0, with an environment of `PATH`, `LANG` and
+`PRIV_ACTION` alone, cwd `/` or the directory the requester sent, and the
+requester's descriptors as stdio. Who asks is the connection's recorded
+`Identity`: `root` is uid 0, `paired` is `/bin/remoted` on a base carrying a
+pairing and nothing else, `session` is uid 1000 otherwise, and `program <path>`
+is a static base program; an action's `allow` lines are tried in order and the
+first that matches runs it, asks the person (`consent`) or, with none, refuses.
+argv outside the action's shapes, a request carrying other than its
+descriptors, a requester whose process has exited — before the question and
+after it — and every lookup that fails are refusals. A connection serves its
+requests one after another, every reply naming the request's id, so a requester
+on an inherited connection passes over what an earlier request left; a signal
+relayed before the mechanism starts withdraws the request, a second one stops
+the requester waiting, and a mechanism whose requester leaves is not stopped,
+though the pipes its requester relayed a terminal through close with it. One
+uid running one program holds at most eight connections, every requester but
+root and the paired agent shares 32, and one that leaves a reply unread for
+five seconds loses its connection. A program started without its action's
+capabilities calls `slopos_userland::privd::elevate`, which sends its own argv
+through the connection it inherited (`PRIVD_FD`, held to being the real
+privd's) or a fresh one and exits with the mechanism's status, relaying a
+terminal's output and, for the installer, its lines of input through pipes,
+since the mechanism runs in another session; started by privd, a mechanism acts
+only for the action `PRIV_ACTION` names. Consent travels a socket pair init
+makes and hands privd and the compositor (fd 4 in each), each of which refuses
+a pair init did not make. The compositor draws one question at a time over
+every surface, the whole command line and its directory wrapped (privd asks
+about neither past 320 escaped bytes), Deny focused, Allow by a click or by
+Tab, Left or Right and then Enter, input ignored for 750 ms after the frame
+that first shows the question and after each move; until the compositor says it
+can draw, and with none, an action that needs consent is refused, at most eight
+questions wait, a question unanswered for 120 s from when it is shown is a
+refusal, and a refusal refuses what was waiting and what asks in the next five
+seconds. The grant table keeps only the launchers' rows and roulette's until
+the raise goes.
 
 ### Licensing discipline
 
@@ -1550,8 +1607,8 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext4 volume, attach it as `nvme0n3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
 - `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 6G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
 - `just test-install` — the install check: boot from `builddir/boot-disk.img`, one disk in the bare-metal layout (an ESP holding Limine and `limine.conf` under `\EFI\SlopOS\` and at the removable-media path, the boot partition with a kernel and base per slot under `/boot/<slot>/`, the tests image as the root partition every slot boots with as `root=PARTUUID=`, and the crash partition), and across the resets of one QEMU let `install_test` register SlopOS's firmware entry first in `BootOrder`, clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot` and through that entry, commit it as `LoaderEntryDefault`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default, through the entry again, and find the panic's record moved from the crash partition to `/var/log/crash/` and reported by `bootctl status` as that slot's last boot; then the same for a slot that takes the format-free abort. The host then holds the ESP to the bytes it built, so no commit touched `limine.conf`, and the root partition to `e2fsck -fn` and to being at rest. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
-- `just test-installer` — the installer check: the tests system on a USB stick (`INSTALL_STICK`, `qemu-xhci`), which the kernel reads as `sda` and the installer never offers — write-protected but for the blank disk's install, which takes a writable copy that only its GPT disk GUID excludes and that the host holds to the ISO's bytes afterwards — its install medium carrying the payload in the partition the kernel mounts over USB, which the module Limine loads does not carry, on the pinned NV-varstore OVMF with the varstore kept from one QEMU run to the next (`OVMF_VARS_FILE`) but for the reinstall's, which starts afresh as a person picking the stick from the firmware's menu does, and one NVMe disk without the suite's own (`QEMU_TEST_DISKS=0`), one of three `scripts/make_installer_disk.sh` makes: a blank one, erased; another system's, holding an ESP with `\EFI\other\`, a data partition and the firmware entry `installer_test` gives it, which SlopOS goes beside in free space; and one whose partition is reused as the root. A second blank disk, `optical`, is installed from the ISO in a CD drive the kernel has no driver for (`INSTALL_CDROM`): its install must say `the medium carries no toolchain`, and its disk must clone a slot rather than build one. `installer_test` runs `/bin/installer`, for the blank disk as a person does — typed at `/bin/shell`, which must hand it its grant, its questions answered on standard input — and for the others with flags; booted from the disk with the stick gone, through SlopOS's own firmware entry (`BootCurrent`), it takes the loop once — `scripts/selfhost.sh install tests`, a boot of slot b and `bootctl commit` — after holding the other system's entry to `BootOrder` and Limine's menu. The blank disk then takes a reinstall from the stick that keeps its root, with a file left in it, and a boot that finds the file and the old slots' state gone. The host holds each table to `sfdisk --verify`, each FAT volume to `fsck.fat -n`, each root to `e2fsck -fn`, to being at rest and to sealed base mount points, the other system's entries, partition and files to their bytes, and a reused root to a new PARTUUID. `INSTALLER_PAYLOAD=0` installs without the toolchain, cloning a slot where it would build one, and needs no `just toolchain`; `just test-installer foreign` runs one disk.
-- `just test-remote` — the remote-control check: an installed machine under QEMU, a boot disk whose slots hold a base paired with a broker on this host's loopback (SLIRP's 10.0.2.2), and a root carrying a decoy pairing under `/etc/remote` for a second, live broker; driven through `scripts/remote.py`: the agent's identity and build tags; commands' stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; an 8 MiB file pushed and pulled back byte-identical; `/dev/kmsg`; the base's pairing unwritable and the decoy never dialled; a second daemon, preferred as the newest; an install into the spare slot, the boot into it and its commit; and `/bin/halt`, which must end QEMU.
+- `just test-installer` — the installer check: the tests system on a USB stick (`INSTALL_STICK`, `qemu-xhci`), which the kernel reads as `sda` and the installer never offers — write-protected but for the blank disk's install, which takes a writable copy that only its GPT disk GUID excludes and that the host holds to the ISO's bytes afterwards — its install medium carrying the payload in the partition the kernel mounts over USB, which the module Limine loads does not carry, on the pinned NV-varstore OVMF with the varstore kept from one QEMU run to the next (`OVMF_VARS_FILE`) but for the reinstall's, which starts afresh as a person picking the stick from the firmware's menu does, and one NVMe disk without the suite's own (`QEMU_TEST_DISKS=0`), one of three `scripts/make_installer_disk.sh` makes: a blank one, erased; another system's, holding an ESP with `\EFI\other\`, a data partition and the firmware entry `installer_test` gives it, which SlopOS goes beside in free space; and one whose partition is reused as the root. A second blank disk, `optical`, is installed from the ISO in a CD drive the kernel has no driver for (`INSTALL_CDROM`): its install must say `the medium carries no toolchain`, and its disk must clone a slot rather than build one. `installer_test` runs `/bin/installer`, for the blank disk as a person does — typed at `/bin/shell`, holding nothing, so it asks privd, its questions answered on standard input — and for the others with flags; booted from the disk with the stick gone, through SlopOS's own firmware entry (`BootCurrent`), it takes the loop once — `scripts/selfhost.sh install tests`, a boot of slot b and `bootctl commit` — after holding the other system's entry to `BootOrder` and Limine's menu. The blank disk then takes a reinstall from the stick that keeps its root, with a file left in it, and a boot that finds the file and the old slots' state gone. The host holds each table to `sfdisk --verify`, each FAT volume to `fsck.fat -n`, each root to `e2fsck -fn`, to being at rest and to sealed base mount points, the other system's entries, partition and files to their bytes, and a reused root to a new PARTUUID. `INSTALLER_PAYLOAD=0` installs without the toolchain, cloning a slot where it would build one, and needs no `just toolchain`; `just test-installer foreign` runs one disk.
+- `just test-remote` — the remote-control check: an installed machine under QEMU, a boot disk whose slots hold a base paired with a broker on this host's loopback (SLIRP's 10.0.2.2), and a root carrying a decoy pairing under `/etc/remote` for a second, live broker; driven through `scripts/remote.py`: the agent's identity and build tags; commands' stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; an 8 MiB file pushed and pulled back byte-identical; `/dev/kmsg`; the base's pairing unwritable and the decoy never dialled; a second daemon, preferred as the newest; an install into the spare slot, the boot into it and its commit, every `bootctl` asked of privd as the paired agent; and `/bin/halt`, which must end QEMU.
 - `just test-install-guest` — the two loops in one QEMU: a clean tree, `just toolchain` and the self-hosting root; slot a is the optimized tests kernel, and `install_test`, finding a workspace at `/src/slopos`, fetches the host's `HEAD` into its clone, checks it out and runs `scripts/selfhost.sh install tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is otherwise unset — which builds the tests kernel, userland and base and installs the kernel and base into slot b, then checks the tree's own branch out again; the run boots them once, and that boot must report the tag in `uname -v` and in the base's `/usr/share/slopos/build-tag`. The kernel the guest built then commits a change on the fetched `HEAD` in a scratch clone and pushes it into a scratch repository, which the host fetches and holds to that commit's parent being `HEAD`. The run then commits and rolls back as `test-install` does, and the host holds slot b's kernel and base to the root's `kernel-tests.elf` and `initramfs-tests.cpio` byte for byte, and the boot log's `BOOT: base` line to the base's size. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
 - `just test-selfhost` — the self-hosting check: needs `just toolchain` and a clean working tree (the host grades the guest's build of `HEAD` with its own gates and tests). The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), fetches the host's `HEAD` into the self-hosting root's clone and checks it out — refusing a tree with uncommitted edits — builds the dev and tests systems — kernel, userland and base — with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the clone's `builddir/target/cargo-timings`, and checks the tree's own branch out again; the host holds the commit the guest names to `HEAD`, the root to `e2fsck -fn` and to being at rest, exports both kernels and the tests base, runs the ELF gates on the kernels and runs the suite on the guest's tests kernel and base. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
 - `just bench-selfhost` — the self-hosting build as a profile: boots the optimized tests kernel on the self-hosting root with `prof=on` (`BENCH_PROF=` turns it off), runs only `selfhost_test`, so the guest builds the host's `HEAD`, and hands the log to `scripts/prof_report.py`, which prints the guest's build times, per-CPU busy and halted time, the ext2 lock's wait and hold (writeback's share apart) and the same lock and the per-process VM lock by call site, block I/O counts and latency, syscall costs, and kernel and user ticks symbolized — user ticks through the exec-mapping table the kernel prints, `builddir/bench-libc.so` and the installed toolchain's libraries. No grading and no clean-tree requirement; run it with nothing else loading the host, because every number in it is wall time.
@@ -1613,8 +1670,9 @@ without a separate build.
 **physical console** makes the kernel describe itself. Press SysRq
 (Alt+PrintScreen) to arm and one command key to run, or send a serial BREAK and
 then the command key. Press the trigger then `h` for the list. A program may
-run the informational ones too: `/bin/kconsole t` (granted `SysInspect` by
-path) queues `t` through `kconsole(2)`, waits for it to run and prints what it
+run the informational ones too: `/bin/kconsole t` (privd's
+`org.slopos.kconsole`, run with `SysInspect`) queues `t` through
+`kconsole(2)`, waits for it to run and prints what it
 added to the kernel log, so `just remote run -- kconsole tp` reads a machine
 nobody is sitting at. The probe (`p`) writes each CPU's RIP, current task and
 idle slot there too, beside the NMI handler's own lines on the UART.

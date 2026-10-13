@@ -20,11 +20,13 @@ use crate::program_registry;
 use crate::syscall::{UserFsStat, core as sys_core, fs, process};
 use slopos_abi::fs::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
 use slopos_abi::signal::WUNTRACED;
+use slopos_abi::syscall::{F_DUPFD_CLOEXEC, F_GETFD, FD_CLOEXEC};
 use slopos_shell_core::ast::{
     AndOr, AndOrOp, Command, CommandKind, List, Pipeline, RedirKind, RedirTarget, Redirect, Word,
 };
 use slopos_shell_core::lexer::{self, LexError};
 use slopos_shell_core::syntax::{self, ParseError};
+use slopos_slibc::pal::{Pal, Sys};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -812,7 +814,12 @@ fn trace(argv: &[Vec<u8>]) {
 struct SavedFd {
     fd: i32,
     backup: i32,
+    cloexec: bool,
 }
+
+/// Saved descriptors sit at or above this, clear of the 0-9 POSIX gives
+/// scripts, and close-on-exec, so nothing the shell starts meanwhile gets one.
+const SAVED_FD_MIN: u64 = 10;
 
 /// Redirections installed on the shell's own descriptors, and what it takes to
 /// undo them.
@@ -835,14 +842,15 @@ impl Applied {
             // Backed up *before* the open, because the kernel hands out the
             // lowest free descriptor: `3>out` with only 0/1/2 open lands on
             // fd 3, and a later backup would capture the file itself.
-            let backup = match fs::dup(redirect.fd) {
-                Ok(fd) => fd.into_raw(),
+            let backup = Sys::fcntl(redirect.fd, F_DUPFD_CLOEXEC as i32, SAVED_FD_MIN)
                 // A descriptor that is not open has nothing to restore.
-                Err(_) => -1,
-            };
+                .map_or(-1, |fd| fd as i32);
+            let cloexec = Sys::fcntl(redirect.fd, F_GETFD as i32, 0)
+                .is_ok_and(|flags| flags as u64 & FD_CLOEXEC != 0);
             applied.saved.push(SavedFd {
                 fd: redirect.fd,
                 backup,
+                cloexec,
             });
             let Some(source) = open_target(redirect, &mut applied.writers) else {
                 applied.undo();
@@ -879,7 +887,9 @@ impl Applied {
                 let _ = fs::close_fd_raw(slot.fd);
                 continue;
             }
-            let _ = fs::dup2(slot.backup, slot.fd);
+            if fs::dup2(slot.backup, slot.fd).is_ok() && slot.cloexec {
+                let _ = fs::set_fd_cloexec(slot.fd);
+            }
             let _ = fs::close_fd_raw(slot.backup);
         }
         for pid in self.writers {
@@ -914,6 +924,12 @@ fn open_target(redirect: &Redirect, writers: &mut Vec<u32>) -> Option<Source> {
             let fd = operand.iter().fold(0i32, |acc, b| {
                 acc.saturating_mul(10).saturating_add((b - b'0') as i32)
             });
+            // A copy at another number would outlive the close-on-exec that
+            // keeps the privd connection from what the shell runs.
+            if crate::privd::inherited_fd() == Some(fd) {
+                shell_error_named(&operand, b"bad file descriptor");
+                return None;
+            }
             Some(Source::Dup(fd))
         }
         RedirTarget::Here(body) => {
@@ -1488,11 +1504,13 @@ fn spawn_registry_program(
     // Cloning the shell's own 0/1/2 keeps `isatty(1)` true for the child, so
     // its stdio stays line-buffered and output appears as it is produced — and
     // it is what carries an applied redirection into the child.
-    let actions = [
+    let mut actions = vec![
         process::clone_fd(0, 0),
         process::clone_fd(1, 1),
         process::clone_fd(2, 2),
     ];
+    let privd = super::privd_for(spec.path);
+    actions.extend(privd.map(|fd| process::clone_fd(fd, fd)));
     let tid = process::spawn_path_with_env(
         spec.path.as_bytes(),
         &argv_ptrs[..argv.len()],
@@ -1510,6 +1528,9 @@ fn spawn_registry_program(
         return 1;
     }
     let pid = tid as u32;
+    if privd.is_some() {
+        super::privd_handed(pid);
+    }
     if background {
         register_background(pid, &argv[0]);
         return 0;

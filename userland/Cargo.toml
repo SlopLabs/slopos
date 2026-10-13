@@ -114,6 +114,10 @@ name = "prof"
 path = "src/bin/prof.rs"
 
 [[bin]]
+name = "privd"
+path = "src/bin/privd.rs"
+
+[[bin]]
 name = "widget_gallery"
 path = "src/bin/widget_gallery.rs"
 
@@ -298,6 +302,10 @@ name = "peer_test"
 path = "src/bin/tests/peer_test.rs"
 
 [[bin]]
+name = "privd_test"
+path = "src/bin/tests/privd_test.rs"
+
+[[bin]]
 name = "fifo_test"
 path = "src/bin/tests/fifo_test.rs"
 
@@ -379,6 +387,7 @@ slopos-gfx = { workspace = true }
 slopos-net-core = { workspace = true }
 slopos-image = { workspace = true }
 slopos-protocol = { workspace = true }
+slopos-priv-core = { workspace = true }
 slopos-remote-core = { workspace = true }
 slopos-rt = { workspace = true }
 slopos-shell-core = { workspace = true }

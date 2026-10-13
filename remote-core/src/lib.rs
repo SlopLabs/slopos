@@ -70,7 +70,7 @@ pub mod kind {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WireError {
-    /// A header announcing more than [`MAX_PAYLOAD`] bytes.
+    /// A header announcing more than the deframer's limit.
     TooLarge(usize),
     /// A control payload that is not a well-formed [`Fields`].
     BadFields,
@@ -79,12 +79,7 @@ pub enum WireError {
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WireError::TooLarge(len) => {
-                write!(
-                    f,
-                    "a frame of {len} bytes, past the {MAX_PAYLOAD}-byte bound"
-                )
-            }
+            WireError::TooLarge(len) => write!(f, "a frame of {len} bytes, past the bound"),
             WireError::BadFields => f.write_str("a malformed control payload"),
         }
     }
@@ -104,15 +99,31 @@ pub fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Frames out of a byte stream that arrives in pieces of any size.
-#[derive(Default)]
 pub struct Deframer {
     buf: Vec<u8>,
     start: usize,
+    limit: usize,
+}
+
+impl Default for Deframer {
+    fn default() -> Self {
+        Self::with_limit(MAX_PAYLOAD)
+    }
 }
 
 impl Deframer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A deframer that refuses a payload past `limit`, which is at most
+    /// [`MAX_PAYLOAD`].
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            start: 0,
+            limit: limit.min(MAX_PAYLOAD),
+        }
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
@@ -134,7 +145,7 @@ impl Deframer {
             return Ok(None);
         }
         let len = u32::from_be_bytes([pending[1], pending[2], pending[3], pending[4]]) as usize;
-        if len > MAX_PAYLOAD {
+        if len > self.limit {
             return Err(WireError::TooLarge(len));
         }
         if pending.len() < HEADER_LEN + len {
@@ -198,6 +209,10 @@ impl Fields {
             .iter()
             .filter(move |(k, _)| k == key)
             .map(|(_, v)| v.as_slice())
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|(k, _)| k.as_str())
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -393,6 +408,15 @@ mod tests {
         let mut d = Deframer::new();
         d.push(&[kind::DATA, 0, 0x10, 0, 1]);
         assert_eq!(d.next_frame(), Err(WireError::TooLarge(MAX_PAYLOAD + 1)));
+    }
+
+    #[test]
+    fn a_limited_deframer_refuses_past_its_limit() {
+        let mut d = Deframer::with_limit(4);
+        d.push(&frame(kind::DATA, b"1234"));
+        assert_eq!(d.next_frame(), Ok(Some((kind::DATA, b"1234".to_vec()))));
+        d.push(&[kind::DATA, 0, 0, 0, 5]);
+        assert_eq!(d.next_frame(), Err(WireError::TooLarge(5)));
     }
 
     #[test]

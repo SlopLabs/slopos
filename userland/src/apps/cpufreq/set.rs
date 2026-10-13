@@ -64,9 +64,7 @@ fn request(args: &[String]) -> Result<Option<(u64, u64, String)>, String> {
 fn refusal(rc: i64, op: u64, what: &str) -> String {
     let errno = Errno::from_raw(rc as i32);
     if errno == Some(Errno::EPERM) {
-        return "changing the CPUs' performance settings needs the Power grant: \
-                run it as /bin/cpufreq from the shell or remoted"
-            .into();
+        return "changing the CPUs' performance settings needs Power".into();
     }
     if errno == Some(Errno::EOPNOTSUPP) {
         let flags = Snapshot::take().map_or(0, |snap| snap.info.flags);
@@ -97,6 +95,11 @@ pub(super) fn set(args: &[String]) -> Result<i32, String> {
     let Some((op, value, what)) = request(args)? else {
         return Ok(super::usage());
     };
+    crate::privd::elevate(
+        Some("org.slopos.cpufreq.set"),
+        &crate::privd::own_args(),
+        crate::privd::Input::Closed,
+    );
     let rc = sys_core::cpu_perf_ctl(op, value);
     if rc < 0 {
         return Err(refusal(rc, op, &what));

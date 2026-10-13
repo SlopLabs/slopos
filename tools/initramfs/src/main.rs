@@ -58,6 +58,12 @@ const OWNERS_RECORD: (&str, &str) = (
     "1000:1000 /home\n1000:1000 /src\n1000:1000 /usr/local\n",
 );
 
+/// The programs packed at `/sbin/<name>` rather than `/bin/<name>`.
+const SBIN_PROGRAMS: [&str; 2] = ["init", "privd"];
+
+/// The action policy privd reads, packed at `/usr/share/slopos/privd`.
+const PRIVD_POLICY: &str = "assets/privd/actions";
+
 const SLIBC_LICENSES: [&str; 3] = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"];
 
 /// What a remote pairing directory holds; `remoted` reads these, and nothing
@@ -207,8 +213,8 @@ fn layout(
 
     for program in programs {
         let data = read(&build.join(format!("{program}.elf")))?;
-        let path = if program == "init" {
-            "/sbin/init".into()
+        let path = if SBIN_PROGRAMS.contains(&program.as_str()) {
+            format!("/sbin/{program}")
         } else {
             format!("/bin/{program}")
         };
@@ -300,6 +306,11 @@ fn layout(
             read(&path)?,
         );
     }
+    add(
+        "/usr/share/slopos/privd/actions".into(),
+        MODE_DATA,
+        read(&root.join(PRIVD_POLICY))?,
+    );
     let logo = assets.join("logo.png");
     if logo.is_file() {
         add(
@@ -570,7 +581,8 @@ mod tests {
     fn scratch(tag: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!("slopos-initramfs-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("root")).unwrap();
+        fs::create_dir_all(dir.join("root/assets/privd")).unwrap();
+        fs::write(dir.join("root").join(PRIVD_POLICY), b"# policy\n").unwrap();
         fs::create_dir_all(dir.join("build")).unwrap();
         dir
     }
@@ -639,8 +651,9 @@ mod tests {
         let dir = scratch("programs");
         fs::write(dir.join("build/init.elf"), b"\x7fELF init").unwrap();
         fs::write(dir.join("build/shell.elf"), b"\x7fELF shell").unwrap();
+        fs::write(dir.join("build/privd.elf"), b"\x7fELF privd").unwrap();
         let out = dir.join("out.cpio");
-        let programs = ["init".to_owned(), "shell".to_owned()];
+        let programs = ["init".to_owned(), "shell".to_owned(), "privd".to_owned()];
         let extras = Extras::default();
         run(
             &dir.join("root"),
@@ -656,7 +669,14 @@ mod tests {
         assert_eq!(names[..dirs], ROOT_DIRS.map(|(path, _)| path));
         assert_eq!(
             names[dirs..],
-            [OWNERS_RECORD.0, "/sbin/init", "/bin/shell", "/bin/sh"]
+            [
+                OWNERS_RECORD.0,
+                "/sbin/init",
+                "/bin/shell",
+                "/sbin/privd",
+                "/bin/sh",
+                "/usr/share/slopos/privd/actions"
+            ]
         );
         let modes: Vec<u32> = got[..dirs].iter().map(|(_, mode, _)| *mode).collect();
         assert_eq!(modes, ROOT_DIRS.map(|(_, mode)| mode));
@@ -665,8 +685,16 @@ mod tests {
             ("/sbin/init".to_owned(), MODE_EXEC, b"\x7fELF init".to_vec())
         );
         assert_eq!(
-            got[dirs + 3],
+            got[dirs + 4],
             ("/bin/sh".to_owned(), MODE_LINK, b"shell".to_vec())
+        );
+        assert_eq!(
+            got[dirs + 5],
+            (
+                "/usr/share/slopos/privd/actions".to_owned(),
+                MODE_DATA,
+                b"# policy\n".to_vec()
+            )
         );
         fs::remove_dir_all(&dir).unwrap();
     }

@@ -36,6 +36,20 @@ pub fn selfhost(root: &str, args: &[&str]) -> Command {
     cmd
 }
 
+/// [`selfhost`] for a command that installs: what the script asks privd is
+/// asked through a connection this process makes, so a root test's install is
+/// the test's own and waits for nobody at the machine. The connection is the
+/// caller's to keep until the script exits.
+pub fn selfhost_installing(
+    root: &str,
+    args: &[&str],
+) -> Result<(Command, crate::privd::Connection), String> {
+    let privd = crate::privd::Connection::open()?;
+    let mut cmd = selfhost(root, args);
+    privd.hand_to(&mut cmd);
+    Ok((cmd, privd))
+}
+
 /// `git <args>` in `dir`, the git on the default search path, as the session,
 /// whose clone it is: git refuses a repository another uid owns.
 pub fn git(dir: &str, args: &[&str]) -> Command {

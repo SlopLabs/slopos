@@ -124,19 +124,22 @@ pub fn cmd_clear(_argc: i32, _argv: &[&[u8]]) -> i32 {
 /// Ask `/bin/halt` to bring the machine down.
 ///
 /// Spawned rather than issued directly: `halt` and `reboot` need the `Power`
-/// capability, which the kernel grants by path to the few programs that use it.
-/// A shell that held it would put whole-machine authority in the process that
-/// runs every command the user types — which is why Linux ships `/sbin/halt`
-/// as a separate binary, `systemctl poweroff` asks logind, and Redox puts the
-/// resource behind a daemon.
+/// capability, which a shell must not hold, since it runs every command the
+/// user types. `halt` asks privd, through the connection the shell inherited
+/// when there is one.
 ///
 /// Returns only on failure; on success the child powers the machine off.
 fn spawn_halt(action: &[u8]) -> i32 {
     let argv: [*const u8; 1] = [action.as_ptr()];
-    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
-    let tid = process::spawn_path_with_actions(
+    let mut actions = vec![process::clone_fd(1, 1), process::clone_fd(2, 2)];
+    let inherited = super::super::privd_for("/bin/halt");
+    let env = inherited.map(|fd| format!("{}={fd}\0", slopos_priv_core::ENV_FD));
+    actions.extend(inherited.map(|fd| process::clone_fd(fd, fd)));
+    let envp: Vec<*const u8> = env.iter().map(|var| var.as_ptr()).collect();
+    let tid = process::spawn_path_with_env(
         b"/bin/halt",
         &argv,
+        &envp,
         slopos_abi::task::TaskPriority::Normal,
         slopos_abi::task::TASK_FLAG_USER_MODE,
         &actions,
@@ -146,7 +149,10 @@ fn spawn_halt(action: &[u8]) -> i32 {
         shell_write(b"sh: cannot start /bin/halt\n");
         return 1;
     }
-    let _ = process::waitpid(tid as u32);
+    if inherited.is_some() {
+        super::super::privd_handed(tid as u32);
+    }
+    while process::waitpid(tid as u32).is_none() && process::kill(tid as u32, 0) == 0 {}
     // Reached only if the child failed: a successful halt never returns.
     1
 }

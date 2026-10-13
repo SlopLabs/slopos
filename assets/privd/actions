@@ -1,0 +1,184 @@
+# The actions /sbin/privd runs. In the sealed base at
+# /usr/share/slopos/privd/actions; the grammar is slopos_priv_core::policy's.
+#
+# Every mechanism runs as uid 0 with no more than its action names. Whoever
+# privd may ask about an action is listed in order, and the first line whose
+# principal matches the requester decides.
+
+action org.slopos.power.poweroff
+  program  /bin/halt
+  args     halt
+  args     poweroff
+  args     shutdown
+  caps     Power
+  uid      0
+  allow    root
+  allow    session
+  allow    paired
+  describe "Power off the machine"
+
+action org.slopos.power.reboot
+  program  /bin/halt
+  args     reboot
+  caps     Power
+  uid      0
+  allow    root
+  allow    session
+  allow    paired
+  describe "Restart the machine"
+
+action org.slopos.boot.status
+  program  /bin/bootctl
+  args     status
+  caps     RawBlock Power
+  uid      0
+  allow    root
+  allow    session
+  allow    paired
+  describe "Show what each boot slot holds and what boots"
+
+action org.slopos.boot.install
+  program  /bin/bootctl
+  args     install *
+  caps     RawBlock Power
+  uid      0
+  cwd
+  exclusive boot-slots
+  allow    root
+  allow    session consent
+  allow    paired
+  describe "Install a kernel and base into a boot slot"
+
+action org.slopos.boot.clone
+  program  /bin/bootctl
+  args     clone *
+  caps     RawBlock Power
+  uid      0
+  exclusive boot-slots
+  allow    root
+  allow    session consent
+  allow    paired
+  describe "Copy one boot slot's system into another"
+
+action org.slopos.boot.oneshot
+  program  /bin/bootctl
+  args     oneshot *
+  caps     Power
+  uid      0
+  exclusive boot-slots
+  allow    root
+  allow    session
+  allow    paired
+  describe "Boot an entry once, on the next restart"
+
+action org.slopos.boot.set-default
+  program  /bin/bootctl
+  args     set-default *
+  caps     Power
+  uid      0
+  exclusive boot-slots
+  allow    root
+  allow    session consent
+  allow    paired
+  describe "Change which boot entry starts by default"
+
+action org.slopos.boot.commit
+  program  /bin/bootctl
+  args     commit
+  caps     Power
+  uid      0
+  exclusive boot-slots
+  allow    root
+  allow    session
+  allow    paired
+  describe "Keep the system that booted as the default"
+
+action org.slopos.boot.spare
+  program  /bin/bootctl
+  args     spare
+  caps     Power
+  uid      0
+  allow    root
+  allow    session
+  allow    paired
+  describe "Name the boot slot a new system goes into"
+
+action org.slopos.boot.reboot
+  program  /bin/bootctl
+  args     reboot
+  caps     Power
+  uid      0
+  allow    root
+  allow    session
+  allow    paired
+  describe "Restart the machine"
+
+action org.slopos.cpufreq.set
+  program  /bin/cpufreq
+  args     set *
+  caps     Power
+  uid      0
+  allow    root
+  allow    session
+  allow    paired
+  describe "Change how fast the CPUs run and where tasks go"
+
+action org.slopos.kconsole
+  program  /bin/kconsole
+  args     *
+  caps     SysInspect
+  uid      0
+  allow    root
+  allow    session
+  allow    paired
+  describe "Run the diagnostic console's informational commands"
+
+action org.slopos.prof
+  program  /bin/prof
+  args     *
+  caps     SysInspect
+  uid      0
+  allow    root
+  allow    session
+  allow    paired
+  describe "Start, stop or report the kernel's sampling profiler"
+
+action org.slopos.console.keymap
+  program  /bin/keymap
+  args     *
+  caps     ConsoleConfig
+  uid      0
+  allow    root
+  allow    session
+  allow    paired
+  describe "Change the keyboard layout"
+
+action org.slopos.net.toggle
+  program  /bin/ip
+  args     net on
+  args     net off
+  caps     NetAdmin
+  uid      0
+  allow    root
+  allow    program /bin/compositor
+  allow    session consent
+  describe "Turn networking on or off"
+
+action org.slopos.net.configure
+  program  /bin/ip
+  args     *
+  caps     NetAdmin
+  uid      0
+  allow    root
+  allow    session consent
+  describe "Change the network configuration"
+
+action org.slopos.install
+  program  /bin/installer
+  args     *
+  caps     RawBlock Mount Power BootEntry Seal DacOverride
+  uid      0
+  exclusive
+  allow    root
+  allow    session consent
+  describe "Install SlopOS onto whichever disk the requester names, erasing what it says to"

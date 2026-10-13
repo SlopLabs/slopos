@@ -9692,8 +9692,8 @@ fn pool_is_at_full_capacity() -> Result<(), &'static str> {
 /// A mount over a directory the grant table keys a privilege on is refused.
 ///
 /// Without it a holder of `Capability::Mount` covers `/bin` with a writable
-/// ramfs, creates `halt` in it, and spawns the planted binary into
-/// `Power`.
+/// ramfs, creates `shell` in it, and spawns the planted binary into
+/// `Launch`.
 pub fn test_mount_over_a_grant_path_is_refused() -> TestResult {
     use crate::syscall::fs::mount_handlers::mount_apply_at;
 
@@ -9718,7 +9718,7 @@ pub fn test_mount_over_a_grant_path_is_refused() -> TestResult {
     assert_eq_test!(
         mount_apply_at(
             b"",
-            b"/bin/halt",
+            b"/bin/shell",
             b"/",
             b"ramfs",
             0,

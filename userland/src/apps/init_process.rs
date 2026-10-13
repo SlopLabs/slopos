@@ -1,13 +1,16 @@
-use slopos_abi::caps::{DISPLAY_SEAT, INPUT_SEAT, LAUNCH, POWER, RAW_BLOCK};
+use slopos_abi::caps::{DISPLAY_SEAT, INPUT_SEAT, POWER, RAW_BLOCK};
 use slopos_abi::fs::{SESSION_GID, SESSION_HOME, SESSION_UID};
+use slopos_abi::syscall::F_DUPFD_CLOEXEC;
 use slopos_abi::syscall::{BOOT_FLAG_ROULETTE_SKIP, BOOT_FLAG_TESTS_ENABLED};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_font::atlas::GlyphAtlas;
+use slopos_slibc::pal::{Pal, Sys};
 
-use crate::readiness::ReadinessGate;
+use crate::apps::privd::CONSENT_FD;
+use crate::readiness::{NOTIFIER_FD, ReadinessGate};
 use crate::ring::{Ring, slopfut};
 use crate::syscall::process::Endowment;
-use crate::syscall::{UserSysInfo, core as sys_core, process, tty};
+use crate::syscall::{OwnedFd, UserSysInfo, core as sys_core, net, process, tty};
 
 fn upgrade_console_font() {
     let font_data = match crate::gfx::font_loader::load_font("mono") {
@@ -30,38 +33,49 @@ fn upgrade_console_font() {
     );
 }
 
-/// A service init starts as the session: the capabilities init delegates to
-/// it beside the universal ones, and its tier.
+/// A service init starts: the capabilities init delegates to it beside the
+/// universal ones, its tier, and whether it runs as the session or as uid 0.
 struct Service {
     path: &'static str,
     caps: u64,
     priority: TaskPriority,
+    session: bool,
 }
 
-/// `Launch` until a broker runs what the session asks for: the grant rows
-/// that remain are reached through the session's launchers.
+/// Runs what the policy allows, holding everything an action may name.
+const PRIVD: Service = Service {
+    path: "/sbin/privd",
+    caps: slopos_priv_core::DELEGABLE,
+    priority: TaskPriority::Normal,
+    session: false,
+};
+
 const COMPOSITOR: Service = Service {
     path: "/bin/compositor",
-    caps: DISPLAY_SEAT | INPUT_SEAT | LAUNCH,
+    caps: DISPLAY_SEAT | INPUT_SEAT,
     priority: TaskPriority::High,
+    session: true,
 };
 
 const TERMINAL: Service = Service {
     path: "/bin/terminal",
-    caps: LAUNCH,
+    caps: 0,
     priority: TaskPriority::Normal,
+    session: true,
 };
 
 const REMOTED: Service = Service {
     path: "/bin/remoted",
-    caps: LAUNCH,
+    caps: 0,
     priority: TaskPriority::Normal,
+    session: true,
 };
 
 const ROULETTE: Service = Service {
     path: "/bin/roulette",
     caps: DISPLAY_SEAT,
     priority: TaskPriority::Normal,
+    session: true,
 };
 
 /// The session's runtime directory, its own alone.
@@ -80,30 +94,32 @@ fn session_env() -> [String; 4] {
 }
 
 fn spawn_service(service: &Service) -> i32 {
-    spawn_service_inheriting(service, &[])
+    spawn_service_with(service, &[])
 }
 
-/// The child inherits the caller's stdio plus each fd in `extra_fds` via the
-/// fd-action allow-list. At most two extra fds are honored.
-fn spawn_service_inheriting(service: &Service, extra_fds: &[i32]) -> i32 {
-    let mut actions = [
+/// The child gets the caller's stdio and each `(fd, as)` pair: init's `fd` at
+/// the child's `as`.
+fn spawn_service_with(service: &Service, extra_fds: &[(i32, i32)]) -> i32 {
+    let mut actions = vec![
         process::clone_fd(0, 0),
         process::clone_fd(1, 1),
         process::clone_fd(2, 2),
-        process::clone_fd(-1, -1),
-        process::clone_fd(-1, -1),
     ];
-    let base = 3;
-    let n = extra_fds.len().min(actions.len() - base);
-    for (slot, &fd) in actions[base..base + n].iter_mut().zip(extra_fds) {
-        *slot = process::clone_fd(fd, fd);
-    }
+    actions.extend(extra_fds.iter().map(|&(fd, at)| process::clone_fd(fd, at)));
     let env = session_env();
-    let envp: Vec<*const u8> = env.iter().map(|var| var.as_ptr()).collect();
-    let cwd = if std::path::Path::new(SESSION_HOME).is_dir() {
-        SESSION_HOME
+    let (envp, cwd, ids): (Vec<*const u8>, &str, _) = if service.session {
+        let cwd = if std::path::Path::new(SESSION_HOME).is_dir() {
+            SESSION_HOME
+        } else {
+            "/"
+        };
+        (
+            env.iter().map(|var| var.as_ptr()).collect(),
+            cwd,
+            Some((SESSION_UID, SESSION_GID)),
+        )
     } else {
-        "/"
+        (Vec::new(), "/", None)
     };
     let tid = process::spawn_endowed(
         service.path.as_bytes(),
@@ -112,18 +128,42 @@ fn spawn_service_inheriting(service: &Service, extra_fds: &[i32]) -> i32 {
         cwd.as_bytes(),
         service.priority,
         TASK_FLAG_USER_MODE,
-        &actions[..base + n],
+        &actions,
         0,
         Endowment {
             caps: service.caps,
-            ids: Some((SESSION_UID, SESSION_GID)),
-            groups: Some(&[]),
+            ids,
+            groups: service.session.then_some(&[][..]),
         },
     );
     if tid <= 0 {
         eprintln!("init: failed to spawn {}", service.path);
     }
     tid
+}
+
+/// Start privd and wait until it listens, handing it its end of the consent
+/// channel; the other end is the compositor's, `None` when there is no
+/// channel.
+fn start_privd() -> Option<OwnedFd> {
+    let gate = ReadinessGate::create();
+    let pair = net::socketpair(slopos_abi::net::SOCK_CLOEXEC);
+    let mut fds = Vec::new();
+    if gate.is_some() {
+        fds.push((NOTIFIER_FD, NOTIFIER_FD));
+    }
+    if let Ok((ours, _)) = &pair {
+        fds.push((ours.raw(), CONSENT_FD));
+    }
+    spawn_service_with(&PRIVD, &fds);
+    if let Some(gate) = gate {
+        gate.wait();
+    }
+    let (_, agent) = pair.ok()?;
+    // The compositor's readiness gate takes the notifier's number next.
+    let moved = Sys::fcntl(agent.raw(), F_DUPFD_CLOEXEC as i32, NOTIFIER_FD as u64 + 1).ok()?;
+    // SAFETY: fcntl just opened this descriptor for us.
+    Some(unsafe { OwnedFd::from_raw(moved as i32) })
 }
 
 /// What a crashed boot left goes to `/var/log/crash` before the tests and the
@@ -159,6 +199,9 @@ pub fn init_user_main() {
     collect_crash_records();
     crate::root_layout::lay_out(std::path::Path::new("/"));
     crate::root_layout::make_runtime_dir(&runtime_dir());
+    // Before anything that may ask it; until the compositor says it can draw,
+    // privd has nobody to ask.
+    let consent_agent = start_privd();
 
     // Early, so a machine whose desktop never comes up can still be reached;
     // never waited for. The final loop reaps it if it exits.
@@ -195,11 +238,15 @@ pub fn init_user_main() {
     // Without the inherited notifier (fd 3), init's gate read EOFs at once and
     // races the terminal ahead of a ready compositor. Clone it only when the
     // gate was actually set up.
-    let compositor_tid = if gate.is_some() {
-        spawn_service_inheriting(&COMPOSITOR, &[crate::readiness::NOTIFIER_FD])
-    } else {
-        spawn_service(&COMPOSITOR)
-    };
+    let mut fds = Vec::new();
+    if gate.is_some() {
+        fds.push((NOTIFIER_FD, NOTIFIER_FD));
+    }
+    if let Some(agent) = &consent_agent {
+        fds.push((agent.raw(), CONSENT_FD));
+    }
+    let compositor_tid = spawn_service_with(&COMPOSITOR, &fds);
+    drop(consent_agent);
 
     // Peak in-flight is one gate read followed by one pidfd poll, so a small
     // ring suffices.

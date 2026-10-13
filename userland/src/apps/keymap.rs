@@ -7,7 +7,8 @@
 //! ```
 //!
 //! A program rather than a shell builtin because installing a layout needs
-//! `ConsoleConfig`, which the kernel grants this path and no caller.
+//! `ConsoleConfig` and writing `/etc/keymap` uid 0's ownership: switching is
+//! privd's `org.slopos.console.keymap`.
 //!
 //! The file → parse → serialise → upload pipeline lives in [`crate::keymap`],
 //! shared with the boot-time applier in init; the kernel never parses layout
@@ -22,7 +23,14 @@ pub fn keymap_user_main() -> i32 {
     match args.get(1).map(String::as_str) {
         None => print_current(),
         Some("list" | "-l" | "--list") => list_layouts(),
-        Some(name) if !name.is_empty() => set_layout(name),
+        Some(name) if !name.is_empty() => {
+            crate::privd::elevate(
+                Some("org.slopos.console.keymap"),
+                &crate::privd::own_args(),
+                crate::privd::Input::Closed,
+            );
+            set_layout(name)
+        }
         Some(_) => {
             eprintln!("keymap: invalid layout name");
             1

@@ -635,8 +635,8 @@ pub fn spawn_program_with_cwd(
 /// Resolve a program path the way the loader will open it: against `cwd`,
 /// symlinks expanded, to the canonical path the grant table is keyed on.
 ///
-/// Resolving *before* the grant comparison is what lets `./halt` from `/sbin`
-/// match the grant `/sbin/halt` carries, and cannot invent one: every grant
+/// Resolving *before* the grant comparison is what lets `./shell` from `/bin`
+/// match the grant `/bin/shell` carries, and cannot invent one: every grant
 /// path is sealed, so no name can be pointed at one.
 ///
 /// `#[inline(never)]` keeps the walk off the frame of a caller already

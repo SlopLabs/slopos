@@ -2,11 +2,11 @@
 //! in QEMU, from the syscalls up to what `/bin/ip` actually renders.
 //!
 //! The utest runner hands this binary every capability, `NetAdmin` among
-//! them. Every mutation below therefore goes *through* `/bin/ip`, the shipped
-//! program granted `NetAdmin` by path, and every refusal is observed as the
-//! session: run again with [`SESSION`] at uid 1000 holding no capability, or
-//! respawned with [`UNPRIVILEGED`], an image no grant row names, where the
-//! check needs this process beside it.
+//! them, as uid 0. Every mutation below goes *through* `/bin/ip`, spawned
+//! holding nothing, so it asks privd, which runs it as `org.slopos.net.*` for
+//! a uid-0 requester; every refusal is observed as the session: run again
+//! with [`SESSION`] at uid 1000 holding no capability, or respawned with
+//! [`UNPRIVILEGED`] where the check needs this process beside it.
 //!
 //! Records are decoded by explicit offset — the ones `abi/src/net.rs` pins with
 //! `offset_of!` — rather than through `apps::ip::query`, so a layout bug in the
@@ -110,9 +110,8 @@ fn count_for(what: u32, ifindex: u32) -> Result<u32, SyscallError> {
 
 /// Spawn `path` with `words` as its argv, sending stdout to `stdout_fd`.
 ///
-/// Deliberately nothing but `TASK_FLAG_USER_MODE`: the child's capabilities
-/// come from the grant keyed on its path, so `/bin/ip` holds `NetAdmin` and
-/// this binary respawned holds nothing beyond the universal set.
+/// Deliberately nothing but `TASK_FLAG_USER_MODE`: the child holds the
+/// universal set alone, so `/bin/ip` asks privd for what it changes.
 fn spawn_prog(path: &[u8], words: &[&str], stdout_fd: i32) -> i32 {
     spawn_prog_stdio(path, words, 0, stdout_fd)
 }

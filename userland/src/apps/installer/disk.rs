@@ -1,11 +1,14 @@
 //! The disk an install goes onto: what it holds, its table written and
 //! re-read, and its new partitions formatted.
 
+use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
-use std::process::Command;
+
+use slopos_abi::caps::RAW_BLOCK;
+use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 
 use slopos_boot_core::gpt::{self, Geometry, Header, Location, Partition, Piece};
 use slopos_boot_core::install::Region;
@@ -15,6 +18,7 @@ use slopos_boot_core::{Guid, install};
 use crate::boot_disk::{BlockFile, Table, geometry_of, partition_node, table_of, whole_disks};
 use crate::syscall::error::SyscallError;
 use crate::syscall::fs::reread_partitions;
+use crate::syscall::process::{self, Endowment, WaitStatus};
 
 const MKE2FS: &str = "/sbin/mke2fs";
 const E2FSCK: &str = "/sbin/e2fsck";
@@ -465,33 +469,67 @@ fn contents_of(node: &str, file: &File, geometry: Geometry) -> Result<Contents, 
     Ok(Contents::Blank)
 }
 
-/// `program` with nothing of the installer's environment, which would reach
-/// it with the raw-device right the installer hands it.
-fn e2fsprogs(program: &str) -> Command {
-    let mut command = Command::new(program);
-    command
-        .env_clear()
-        .env("MKE2FS_CONFIG", E2FSPROGS_PROFILE)
-        .env("E2FSCK_CONFIG", E2FSPROGS_PROFILE)
-        .env("E2FSPROGS_UNDO_DIR", "none");
-    command
-}
-
-fn run(mut command: Command, what: &str) -> Result<(), String> {
-    let status = command.status().map_err(|e| format!("{what}: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{what} exited {:?}", status.code()))
+/// Run `program` holding the raw-device right, which it needs to write a
+/// volume beneath every filesystem, and nothing of the installer's
+/// environment, which would reach it with that right.
+fn e2fsprogs(program: &str, args: &[&str]) -> Result<(), String> {
+    let what = format!(
+        "{} {}",
+        program.rsplit('/').next().unwrap_or(program),
+        args.join(" ")
+    );
+    let argv: Vec<CString> = std::iter::once(program)
+        .chain(args.iter().copied())
+        .map(|arg| CString::new(arg).map_err(|_| format!("{what}: an argument holds NUL")))
+        .collect::<Result<_, _>>()?;
+    let env: Vec<CString> = [
+        format!("MKE2FS_CONFIG={E2FSPROGS_PROFILE}"),
+        format!("E2FSCK_CONFIG={E2FSPROGS_PROFILE}"),
+        "E2FSPROGS_UNDO_DIR=none".to_owned(),
+    ]
+    .into_iter()
+    .map(|var| CString::new(var).expect("no NUL in a fixed variable"))
+    .collect();
+    let argv_ptrs: Vec<*const u8> = argv.iter().map(|a| a.as_ptr().cast()).collect();
+    let env_ptrs: Vec<*const u8> = env.iter().map(|v| v.as_ptr().cast()).collect();
+    let stdio = [
+        process::clone_fd(0, 0),
+        process::clone_fd(1, 1),
+        process::clone_fd(2, 2),
+    ];
+    let pid = process::spawn_endowed(
+        program.as_bytes(),
+        &argv_ptrs,
+        &env_ptrs,
+        b"/",
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &stdio,
+        0,
+        Endowment {
+            caps: RAW_BLOCK,
+            ..Endowment::NONE
+        },
+    );
+    if pid <= 0 {
+        return Err(format!("{what}: {}", SyscallError::from_errno(-pid)));
+    }
+    match process::waitpid(pid as u32).map(|(_, status)| process::wait_status(status)) {
+        Some(WaitStatus::Exited(0)) => Ok(()),
+        Some(status) => Err(format!("{what} exited {status:?}")),
+        None => Err(format!("{what}: could not be waited for")),
     }
 }
 
 /// Format `node` as a root in the profile every SlopOS volume has.
 pub fn mke2fs(node: &str) -> Result<(), String> {
     use slopos_ext4_core::profile;
-    let mut command = e2fsprogs(MKE2FS);
-    command
-        .args([
+    let inode_size = profile::inode_size().to_string();
+    let block_size = profile::block_size().to_string();
+    let journal = format!("size={ROOT_JOURNAL_MIB}");
+    e2fsprogs(
+        MKE2FS,
+        &[
             "-q",
             "-F",
             "-t",
@@ -500,18 +538,20 @@ pub fn mke2fs(node: &str) -> Result<(), String> {
             "none",
             "-O",
             profile::features(),
-        ])
-        .args(["-I", &profile::inode_size().to_string()])
-        .args(["-b", &profile::block_size().to_string()])
-        .args(["-J", &format!("size={ROOT_JOURNAL_MIB}")])
-        .args(["-E", "lazy_itable_init=1"])
-        .arg(node);
-    run(command, &format!("mke2fs {node}"))
+            "-I",
+            &inode_size,
+            "-b",
+            &block_size,
+            "-J",
+            &journal,
+            "-E",
+            "lazy_itable_init=1",
+            node,
+        ],
+    )
 }
 
 /// `e2fsck -fn`: a full check that changes nothing.
 pub fn e2fsck(node: &str) -> Result<(), String> {
-    let mut command = e2fsprogs(E2FSCK);
-    command.args(["-f", "-n", node]);
-    run(command, &format!("e2fsck -fn {node}"))
+    e2fsprogs(E2FSCK, &["-f", "-n", node])
 }

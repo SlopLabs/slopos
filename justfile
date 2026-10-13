@@ -1315,9 +1315,9 @@ test-remote: _build-userland _base-recipes
     fi
     echo "test-remote: identity, commands, files, kernel log, the sealed pairing, install and power-off all held"
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, http-core, remote-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, http-core, remote-core, priv-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-http-core -p slopos-remote-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-http-core -p slopos-remote-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

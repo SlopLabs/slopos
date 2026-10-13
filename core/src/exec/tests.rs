@@ -1437,16 +1437,6 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
     use super::grants::{delegated_for, grant_for};
 
     const LAUNCH: u64 = Capability::Launch.bit();
-    const POWER: u64 = Capability::Power.bit();
-    const MOUNT: u64 = Capability::Mount.bit();
-    const RAW_BLOCK: u64 = Capability::RawBlock.bit();
-    const DAC_OVERRIDE: u64 = Capability::DacOverride.bit();
-    const INSTALL: u64 = RAW_BLOCK
-        | MOUNT
-        | POWER
-        | Capability::BootEntry.bit()
-        | Capability::Seal.bit()
-        | DAC_OVERRIDE;
 
     assert_test!(
         grant_for(b"/bin/compositor") == CAP_NONE,
@@ -1473,46 +1463,19 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
             "a test holds what its declaration or its spawner gives it, never a grant"
         );
     }
-    assert_test!(
-        grant_for(b"/bin/keymap") == Capability::ConsoleConfig.bit() | DAC_OVERRIDE,
-        "the keymap program must be granted ConsoleConfig and DacOverride for /etc/keymap"
-    );
-    assert_test!(
-        grant_for(b"/bin/bootctl") == RAW_BLOCK | POWER | DAC_OVERRIDE,
-        "bootctl must be granted RawBlock, Power and DacOverride, not Mount or the \
-         installer's role"
-    );
-    assert_test!(
-        grant_for(b"/bin/installer") == INSTALL,
-        "the installer must hold the installer's role"
-    );
-    for tool in [
-        "mke2fs",
-        "e2fsck",
-        "resize2fs",
-        "tune2fs",
-        "debugfs",
-        "dumpe2fs",
+    for mechanism in [
+        &b"/bin/keymap"[..],
+        b"/bin/bootctl",
+        b"/bin/installer",
+        b"/bin/halt",
+        b"/sbin/mke2fs",
+        b"/sbin/privd",
     ] {
-        let mut path = [0u8; 32];
-        let base = b"/sbin/";
-        path[..base.len()].copy_from_slice(base);
-        path[base.len()..base.len() + tool.len()].copy_from_slice(tool.as_bytes());
-        let tool = &path[..base.len() + tool.len()];
         assert_test!(
-            grant_for(tool) == CAP_NONE && delegated_for(tool) == RAW_BLOCK,
-            "e2fsprogs must take the raw-device right from its spawner, and nothing more"
+            grant_for(mechanism) == CAP_NONE && delegated_for(mechanism) == CAP_NONE,
+            "a mechanism holds what privd's action or its spawner delegates, never a grant"
         );
     }
-    assert_test!(
-        grant_for(b"/usr/local/sbin/mke2fs") == CAP_NONE
-            && delegated_for(b"/usr/local/sbin/mke2fs") == CAP_NONE,
-        "a copy a root holds, which the guest can replace, must get nothing"
-    );
-    assert_test!(
-        delegated_for(b"/bin/bootctl") == CAP_NONE && delegated_for(b"/bin/shell") == CAP_NONE,
-        "only e2fsprogs takes its authority from its spawner"
-    );
 
     assert_test!(
         grant_for(INIT_PATH) == CAP_NONE,
@@ -1530,7 +1493,7 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
         "an ordinary program must get nothing"
     );
     assert_test!(
-        grant_for(b"/bin/./halt") == CAP_NONE,
+        grant_for(b"/bin/./shell") == CAP_NONE,
         "a non-canonical spelling must fail closed rather than be normalised"
     );
     assert_test!(
@@ -1548,7 +1511,7 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
         "the root is an ancestor of every grant path"
     );
     assert_test!(
-        covers_grant_path(b"/bin/halt"),
+        covers_grant_path(b"/bin/shell"),
         "a grant path itself must be uncoverable"
     );
     assert_test!(
@@ -1556,7 +1519,7 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
         "a prefix that is not a component boundary must not match"
     );
     assert_test!(
-        !covers_grant_path(b"/bin/halt/deeper"),
+        !covers_grant_path(b"/bin/shell/deeper"),
         "a path below a grant path covers nothing: no grant is keyed under it"
     );
     assert_test!(
