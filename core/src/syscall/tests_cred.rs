@@ -16,7 +16,7 @@ use slopos_fs::vfs::path::RESOLVE_FOLLOW;
 use slopos_fs::vfs::{
     Subject, vfs_mkdir, vfs_open, vfs_rmdir, vfs_set_mode, vfs_set_owner_at, vfs_unlink,
 };
-use slopos_ostd::authority::{CAP_UNIVERSAL, Capability};
+use slopos_ostd::authority::{CAP_MASK_ALL, CAP_NONE, CAP_UNIVERSAL, Capability};
 use slopos_ostd::process::Cred;
 use slopos_sched::task::{TaskRef, task_create, task_find_by_id, task_terminate};
 use slopos_testing::{TestResult, assert_eq_test, assert_test, fail, pass};
@@ -484,6 +484,71 @@ pub fn test_a_sticky_directory_keeps_names_to_their_owners() -> TestResult {
 
 slopos_testing::stest!(
     name = test_a_sticky_directory_keeps_names_to_their_owners,
+    suite = cred
+);
+
+pub fn test_a_shared_directory_follows_a_link_for_its_owners() -> TestResult {
+    use crate::syscall::fs::path_handlers::syscall_symlink;
+    let _fixture = SyscallFixture::new();
+    assert_test!(fixtures_root(), "could not lay out the fixture root");
+    let (Some(shared), Some(target)) = (root_dir(b"links", 0o1777), root_file(b"followed", 0o644))
+    else {
+        return fail!("could not lay out the fixtures");
+    };
+    let (Some(user), Some(root)) = (
+        Principal::user(USER, CAP_UNIVERSAL),
+        Principal::user(0, CAP_MASK_ALL),
+    ) else {
+        return fail!("could not build the principals");
+    };
+    let theirs = join(b"links/theirs");
+    let roots = join(b"links/roots");
+    let _ = vfs_unlink(&theirs);
+    let _ = vfs_unlink(&roots);
+
+    assert_eq_test!(
+        user.two_paths(syscall_symlink, &target, &theirs),
+        Some(0),
+        "plant a link in a shared directory"
+    );
+    assert_eq_test!(
+        root.two_paths(syscall_symlink, &target, &roots),
+        Some(0),
+        "link as the directory's owner"
+    );
+    assert_eq_test!(
+        user.openat(&theirs, O_RDONLY),
+        Some(0),
+        "follow its own link"
+    );
+    assert_eq_test!(
+        root.openat(&theirs, O_RDONLY),
+        errno(Errno::EACCES),
+        "follow a link another uid planted, holding DacOverride"
+    );
+    assert_eq_test!(
+        user.openat(&roots, O_RDONLY),
+        Some(0),
+        "follow the directory owner's link"
+    );
+    assert_test!(
+        vfs_set_mode(&shared, 0o777).is_ok(),
+        "could not clear the sticky bit"
+    );
+    assert_eq_test!(
+        root.openat(&theirs, O_RDONLY),
+        Some(0),
+        "without the sticky bit any link is followed"
+    );
+    let _ = vfs_unlink(&theirs);
+    let _ = vfs_unlink(&roots);
+    let _ = vfs_rmdir(&shared);
+    let _ = vfs_unlink(&target);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_a_shared_directory_follows_a_link_for_its_owners,
     suite = cred
 );
 
@@ -979,6 +1044,41 @@ slopos_testing::stest!(
     suite = cred
 );
 
+/// A nice value below zero takes `SchedHigh`, whatever the uid; raising one
+/// takes nothing.
+pub fn test_a_negative_nice_takes_sched_high() -> TestResult {
+    use crate::syscall::priority_handlers::syscall_setpriority;
+    use slopos_abi::syscall::PRIO_PROCESS;
+    let _fixture = SyscallFixture::new();
+    let sched_high = Capability::SchedHigh.bit();
+    let (Some(root), Some(user)) = (
+        Principal::user(0, CAP_MASK_ALL & !sched_high),
+        Principal::user(USER, CAP_UNIVERSAL | sched_high),
+    ) else {
+        return fail!("could not build the principals");
+    };
+    let nice = |who: &Principal, value: i64| {
+        who.call(
+            syscall_setpriority,
+            [PRIO_PROCESS, 0, value as u64, 0, 0, 0],
+        )
+    };
+    assert_eq_test!(nice(&root, 5), Some(0), "raise uid 0's own nice");
+    assert_eq_test!(
+        nice(&root, -5),
+        errno(Errno::EACCES),
+        "go below zero without SchedHigh as uid 0"
+    );
+    assert_eq_test!(
+        nice(&user, -5),
+        Some(0),
+        "go below zero holding SchedHigh as uid 1000"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(name = test_a_negative_nice_takes_sched_high, suite = cred);
+
 /// A spawned child saves its effective ids, as an exec does.
 pub fn test_spawn_saves_the_effective_ids() -> TestResult {
     use crate::tests::helpers::install_static_program;
@@ -1011,27 +1111,205 @@ pub fn test_spawn_saves_the_effective_ids() -> TestResult {
 
 slopos_testing::stest!(name = test_spawn_saves_the_effective_ids, suite = cred);
 
-/// The uids of a child `parent` spawns running `program`, which is then ended.
+/// A spawner hands its child capabilities it holds and ids it may take, and
+/// is refused anything else.
+pub fn test_spawn_delegates_within_the_spawner() -> TestResult {
+    use crate::tests::helpers::install_static_program;
+
+    const NET_ADMIN: u64 = Capability::NetAdmin.bit();
+    const RAW_BLOCK: u64 = Capability::RawBlock.bit();
+    const SET_ID: u64 = Capability::SetId.bit();
+
+    let _fixture = SyscallFixture::new();
+    let spin = join(b"spin");
+    assert_test!(
+        fixtures_root() && install_static_program(&spin, &[0xeb, 0xfe]),
+        "could not write the program"
+    );
+    let root = Principal::user(0, CAP_UNIVERSAL | NET_ADMIN);
+    let admin = Principal::user(0, CAP_UNIVERSAL | NET_ADMIN | SET_ID);
+    let setuid = Principal::with_uids([USER, USER, 0], CAP_UNIVERSAL);
+    let outcome = match (&root, &admin, &setuid) {
+        (Some(root), Some(admin), Some(setuid)) => {
+            delegation_cases(&spin, root, admin, setuid, NET_ADMIN, RAW_BLOCK)
+        }
+        _ => Err("could not build the spawners"),
+    };
+    let _ = vfs_unlink(&spin);
+    match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+/// `parent` spawning `program` as `delegation` gets `want`, or fails with
+/// `failure`.
 #[inline(never)]
-fn spawned_uids(program: &[u8], parent: &Principal) -> Option<[u32; 3]> {
+fn delegates(
+    program: &[u8],
+    parent: &Principal,
+    delegation: crate::exec::Delegation<'_>,
+    want: Result<Spawned, Errno>,
+    failure: &'static str,
+) -> Result<(), &'static str> {
+    if spawned(program, parent, delegation) == want {
+        Ok(())
+    } else {
+        Err(failure)
+    }
+}
+
+#[inline(never)]
+fn delegation_cases(
+    spin: &[u8],
+    root: &Principal,
+    admin: &Principal,
+    setuid: &Principal,
+    net_admin: u64,
+    raw_block: u64,
+) -> Result<(), &'static str> {
+    use crate::exec::Delegation;
+
+    let ask = |caps: u64| Delegation {
+        caps,
+        ..Delegation::default()
+    };
+    delegates(
+        spin,
+        root,
+        ask(net_admin),
+        Ok((CAP_UNIVERSAL | net_admin, [0; 6])),
+        "a held capability was not delegated",
+    )?;
+    delegates(
+        spin,
+        root,
+        ask(CAP_NONE),
+        Ok((CAP_UNIVERSAL, [0; 6])),
+        "a spawn delegating nothing passed on a gated capability",
+    )?;
+    delegates(
+        spin,
+        root,
+        ask(raw_block),
+        Err(Errno::EPERM),
+        "a capability the spawner lacks was not refused",
+    )?;
+    delegates(
+        spin,
+        root,
+        ask(net_admin | raw_block),
+        Err(Errno::EPERM),
+        "a set reaching past the spawner was not refused",
+    )?;
+    id_cases(spin, root, admin, setuid)
+}
+
+#[inline(never)]
+fn id_cases(
+    spin: &[u8],
+    root: &Principal,
+    admin: &Principal,
+    setuid: &Principal,
+) -> Result<(), &'static str> {
+    use crate::exec::Delegation;
+
+    let as_uid = |uid: u32| Delegation {
+        uid: Some(uid),
+        gid: Some(uid),
+        ..Delegation::default()
+    };
+    let groups = Delegation {
+        groups: Some(&[]),
+        ..Delegation::default()
+    };
+    delegates(
+        spin,
+        root,
+        as_uid(USER),
+        Err(Errno::EPERM),
+        "a uid the spawner does not hold was taken without SetId",
+    )?;
+    delegates(
+        spin,
+        root,
+        groups,
+        Err(Errno::EPERM),
+        "supplementary groups were set without SetId",
+    )?;
+    delegates(
+        spin,
+        admin,
+        as_uid(USER),
+        Ok((CAP_UNIVERSAL, [USER; 6])),
+        "a SetId holder could not hand its child another uid",
+    )?;
+    delegates(
+        spin,
+        admin,
+        groups,
+        Ok((CAP_UNIVERSAL, [0; 6])),
+        "a SetId holder could not set its child's groups",
+    )?;
+    delegates(
+        spin,
+        setuid,
+        as_uid(0),
+        Err(Errno::EPERM),
+        "a gid the spawner does not hold was taken without SetId",
+    )?;
+    let saved = Delegation {
+        uid: Some(0),
+        ..Delegation::default()
+    };
+    delegates(
+        spin,
+        setuid,
+        saved,
+        Ok((CAP_UNIVERSAL, [0, 0, 0, USER, USER, USER])),
+        "a spawner could not hand its child its own saved uid",
+    )
+}
+
+/// A child's mask, and its real, effective and saved uids and gids.
+type Spawned = (u64, [u32; 6]);
+
+/// What a child `parent` spawns running `program` holds and is, before it is
+/// ended.
+#[inline(never)]
+fn spawned(
+    program: &[u8],
+    parent: &Principal,
+    delegation: crate::exec::Delegation<'_>,
+) -> Result<Spawned, Errno> {
     let child_id = crate::exec::spawn_program_with_attrs(
         program,
         None,
         None,
         slopos_abi::task::TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
-        CAP_UNIVERSAL,
+        crate::exec::Endowment::Delegated(delegation),
         &[],
         0,
         None,
         parent.task.task_id,
-    )
-    .ok()?;
-    let uids = task_find_by_id(child_id)
-        .and_then(|child| child.process())
-        .map(|process| process.cred())
-        .map(|cred| [cred.ruid, cred.euid, cred.suid]);
+    )?;
+    let held = task_find_by_id(child_id).and_then(|child| {
+        let c = child.process()?.cred();
+        let caps = slopos_ostd::task::ops::task_caps(&child);
+        Some((caps, [c.ruid, c.euid, c.suid, c.rgid, c.egid, c.sgid]))
+    });
     task_terminate(child_id);
     let _ = slopos_sched::task::task_consume_zombie(child_id);
-    uids
+    held.ok_or(Errno::ESRCH)
+}
+
+slopos_testing::stest!(name = test_spawn_delegates_within_the_spawner, suite = cred);
+
+/// The uids of a child `parent` spawns running `program`, which is then ended.
+#[inline(never)]
+fn spawned_uids(program: &[u8], parent: &Principal) -> Option<[u32; 3]> {
+    spawned(program, parent, crate::exec::Delegation::default())
+        .ok()
+        .map(|(_, [ruid, euid, suid, ..])| [ruid, euid, suid])
 }

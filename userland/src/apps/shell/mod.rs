@@ -146,7 +146,8 @@ fn expand_ps1(
                     out += copy;
                 }
                 b'u' => {
-                    out += emit_segment(text_buf, color_buf, out, b"root", COLOR_EXEC_GREEN);
+                    let (user, _) = env::account();
+                    out += emit_segment(text_buf, color_buf, out, &user, COLOR_EXEC_GREEN);
                 }
                 b'h' => {
                     out += emit_segment(text_buf, color_buf, out, b"sloptopia", COLOR_EXEC_GREEN);

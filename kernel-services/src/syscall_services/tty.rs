@@ -26,12 +26,13 @@ slopos_service_core::define_service! {
         open_tty(tty_index: slopos_abi::syscall::TtyIndex) -> Result<slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking>, slopos_abi::tty_error::TtyError>;
         hangup(tty_index: slopos_abi::syscall::TtyIndex);
         is_hung_up(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
-        alloc_pty(account: slopos_ostd::process::AccountId) -> Result<(slopos_abi::syscall::TtyIndex, slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking>), slopos_abi::tty_error::TtyError>;
+        alloc_pty(account: slopos_ostd::process::AccountId, owner: (u32, u32)) -> Result<(slopos_abi::syscall::TtyIndex, slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking>), slopos_abi::tty_error::TtyError>;
         grantpt(tty_index: slopos_abi::syscall::TtyIndex) -> Result<(), slopos_abi::tty_error::TtyError>;
         ptsname(tty_index: slopos_abi::syscall::TtyIndex, buf: *mut u8, buflen: usize) -> i32;
         get_pty_number(tty_index: slopos_abi::syscall::TtyIndex) -> Result<u32, slopos_abi::tty_error::TtyError>;
         is_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
-        open_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> Result<slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking>, slopos_abi::tty_error::TtyError>;
+        pty_slave_owner(tty_index: slopos_abi::syscall::TtyIndex) -> Option<(u32, u32)>;
+        open_pty_slave(tty_index: slopos_abi::syscall::TtyIndex, admits: &dyn Fn((u32, u32)) -> bool) -> Result<slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking>, slopos_abi::tty_error::TtyError>;
         open_pty_peer(tty_index: slopos_abi::syscall::TtyIndex) -> Result<(slopos_abi::syscall::TtyIndex, slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking>), slopos_abi::tty_error::TtyError>;
         detach_session_by_id(session_id: u32);
         poll_events(tty_index: slopos_abi::syscall::TtyIndex, requested: u16) -> u16;

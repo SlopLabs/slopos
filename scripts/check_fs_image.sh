@@ -21,11 +21,15 @@
 # after a panicking boot is the gate reporting the truth rather than a false
 # positive.
 #
+# With `--map`, and for the tests image when no image is named, a third: every
+# directory of the ownership map (scripts/lib/root_layout.sh) has the owner and
+# mode it gives, and `/src`, where there is one, is the session's.
+#
 # The verity trailer needs no special handling: `e2fsck` objects when the
 # superblock claims *more* blocks than the device holds, never fewer, and an
 # image with 16 KiB of trailer appended checks clean.
 #
-#     scripts/check_fs_image.sh [image]
+#     scripts/check_fs_image.sh [--map] [image]
 #     scripts/check_fs_image.sh --self-test
 
 set -euo pipefail
@@ -34,6 +38,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/ext4.sh
 . "$SCRIPT_DIR/lib/ext4.sh"
+# shellcheck source=lib/root_layout.sh
+. "$SCRIPT_DIR/lib/root_layout.sh"
 
 DEFAULT_IMAGE="${REPO_ROOT}/fs/assets/ext2-tests.img"
 
@@ -44,11 +50,13 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 SELF_TEST=0
+MAP=0
 IMAGE=""
+[ "${1:-}" != --map ] || { MAP=1; shift; }
 case "${1:-}" in
     --self-test) SELF_TEST=1 ;;
-    "")          IMAGE="$DEFAULT_IMAGE" ;;
-    -*)          echo "usage: check_fs_image.sh [--self-test] [image]" >&2; exit 2 ;;
+    "")          IMAGE="$DEFAULT_IMAGE"; MAP=1 ;;
+    -*)          echo "usage: check_fs_image.sh [--self-test] [--map] [image]" >&2; exit 2 ;;
     *)           IMAGE="$1" ;;
 esac
 
@@ -59,11 +67,34 @@ for tool in e2fsck dumpe2fs; do
     fi
 done
 
+# Each directory of the map whose owner or mode on `image` is not the map's,
+# one line apiece; a missing one too, but `/src`, which only a seeded root has.
+map_departures() {
+    local image="$1" spec path want stat got mode
+    for spec in "${ROOT_LAYOUT[@]}" "/src:$SESSION_OWNER:"; do
+        path="${spec%%:*}"
+        want="${spec#*:}"
+        stat="$(debugfs -R "stat \"$path\"" "$image" 2>/dev/null)"
+        if ! echo "$stat" | grep -q '^Inode:'; then
+            [ "$path" = /src ] || echo "$path is missing"
+            continue
+        fi
+        got="$(echo "$stat" | sed -n 's/^User: *\([0-9]*\) *Group: *\([0-9]*\).*/\1:\2/p')"
+        mode="$(echo "$stat" | sed -n 's/.*Mode: *\([0-7]*\).*/\1/p' | head -n 1)"
+        if [ "${want##*:}" != "" ]; then
+            got="$got:$(printf '%04o' "$(( 8#${mode:-0} ))")"
+        else
+            got="$got:"
+        fi
+        [ "$got" = "$want" ] || echo "$path is $got, the map says $want"
+    done
+}
+
 # ---------------------------------------------------------------------------
 # The check. Exit 0 clean, 1 rejected, 2 nothing to check.
 # ---------------------------------------------------------------------------
 check_image() {
-    local image="$1" quiet="${2:-0}"
+    local image="$1" quiet="${2:-0}" map="${3:-$MAP}"
 
     # Refusing to report OK on an absent image is the point: a recipe that ran
     # before the image was built must fail, not pass vacuously.
@@ -103,7 +134,21 @@ check_image() {
         return 1
     fi
 
-    [ "$quiet" = 1 ] || echo "check_fs_image: OK — $image passes e2fsck -fn and is at rest"
+    if [ "$map" = 1 ]; then
+        local departures
+        departures="$(map_departures "$image")"
+        if [ -n "$departures" ]; then
+            if [ "$quiet" != 1 ]; then
+                echo "check_fs_image: $image departs from the ownership map:" >&2
+                echo "$departures" | sed 's/^/    /' >&2
+            fi
+            return 1
+        fi
+    fi
+
+    local held=""
+    [ "$map" != 1 ] || held=" and holds to the ownership map"
+    [ "$quiet" = 1 ] || echo "check_fs_image: OK — $image passes e2fsck -fn and is at rest$held"
     return 0
 }
 
@@ -124,7 +169,7 @@ if [ "$SELF_TEST" = 1 ]; then
 
     expect() {
         local want="$1" label="$2" image="$3" got=0
-        check_image "$image" 1 || got=$?
+        check_image "$image" 1 "${4:-0}" || got=$?
         if [ "$got" = "$want" ]; then
             echo "  ok    $label (exit $got)"
         else
@@ -164,6 +209,29 @@ if [ "$SELF_TEST" = 1 ]; then
 
     expect 2 "a missing image is refused, not reported OK" "$tmp/absent.img"
 
+    # The map: laid out as it says, then one departure at a time.
+    cp "$tmp/clean.img" "$tmp/mapped.img"
+    for spec in "${ROOT_LAYOUT[@]}"; do
+        path="${spec%%:*}"
+        rest="${spec#*:}"
+        [ "$path" = / ] || echo "mkdir $path"
+        echo "sif $path uid ${rest%%:*}"
+        echo "sif $path gid $(echo "$rest" | cut -d: -f2)"
+        printf 'sif %s mode 0%o\n' "$path" "$(( 0040000 | 8#${rest##*:} ))"
+    done | debugfs -w -f - "$tmp/mapped.img" >/dev/null 2>&1
+    expect 1 "an image without the map's directories is rejected" "$tmp/clean.img" 1
+    expect 0 "an image laid out as the map says passes" "$tmp/mapped.img" 1
+    for departure in "sif /etc uid 1000" "sif /home/user uid 0" "sif /var/tmp mode 040755" \
+        "mkdir /src"; do
+        cp "$tmp/mapped.img" "$tmp/departed.img"
+        debugfs -w -R "$departure" "$tmp/departed.img" >/dev/null 2>&1
+        expect 1 "the map refuses \`$departure\`" "$tmp/departed.img" 1
+    done
+    cp "$tmp/mapped.img" "$tmp/seeded.img"
+    printf 'mkdir /src\nsif /src uid 1000\nsif /src gid 1000\n' |
+        debugfs -w -f - "$tmp/seeded.img" >/dev/null 2>&1
+    expect 0 "a seeded /src that is the session's passes" "$tmp/seeded.img" 1
+
     : > "$tmp/empty.img"
     expect 2 "an empty image is refused, not reported OK" "$tmp/empty.img"
 
@@ -171,7 +239,7 @@ if [ "$SELF_TEST" = 1 ]; then
         echo "check_fs_image --self-test: $failures check(s) failed" >&2
         exit 1
     fi
-    echo "check_fs_image: self-test OK — 8 checks, both directions"
+    echo "check_fs_image: self-test OK — 15 checks, both directions"
     exit 0
 fi
 

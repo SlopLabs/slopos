@@ -6,11 +6,19 @@
 //! static, so it can report through the harness, and it grades the probes'
 //! exit statuses.
 
-use std::fs;
+use std::ffi::CString;
+use std::fs::{self, File};
+use std::io::Read;
+use std::os::fd::FromRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
 use std::sync::LazyLock;
+
+use slopos_abi::caps::SYS_INSPECT;
+use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
+use slopos_userland::syscall::fs::pipe;
+use slopos_userland::syscall::process::{self, Endowment};
 
 const SIGSEGV: i32 = slopos_abi::signal::SIGSEGV as i32;
 
@@ -247,6 +255,49 @@ fn run_search(program: &str, args: &[&str], library_path: Option<&str>) -> Optio
     }
 }
 
+/// Run the secure probe with `args`, `env` its whole environment, holding a
+/// capability delegated to it, which is what starts it `AT_SECURE`. Answers
+/// its exit code and what it wrote to stderr.
+fn run_secure(args: &[&str], env: &[&str]) -> Option<(i32, String)> {
+    let cstrings = |list: &mut dyn Iterator<Item = &str>| -> Vec<CString> {
+        list.map(|s| CString::new(s).expect("no argument holds a NUL"))
+            .collect()
+    };
+    let argv = cstrings(&mut std::iter::once(SECURE_PROBE).chain(args.iter().copied()));
+    let envp = cstrings(&mut env.iter().copied());
+    let pointers =
+        |list: &[CString]| -> Vec<*const u8> { list.iter().map(|s| s.as_ptr().cast()).collect() };
+    let (read, write) = pipe().ok()?;
+    let actions = [
+        process::clone_fd(0, 0),
+        process::clone_fd(1, 1),
+        process::clone_fd(write.raw(), 2),
+    ];
+    let tid = process::spawn_endowed(
+        SECURE_PROBE.as_bytes(),
+        &pointers(&argv),
+        &pointers(&envp),
+        &[],
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &actions,
+        0,
+        Endowment {
+            caps: SYS_INSPECT,
+            ..Endowment::NONE
+        },
+    );
+    drop(write);
+    if tid <= 0 {
+        eprintln!("dl_test: spawning {SECURE_PROBE}: {tid}");
+        return None;
+    }
+    let mut stderr = String::new();
+    // SAFETY: the read end is this process's alone, and `File` takes it over.
+    let _ = unsafe { File::from_raw_fd(read.into_raw()) }.read_to_string(&mut stderr);
+    Some((process::wait_exit_code(tid as u32), stderr))
+}
+
 /// The probe loaded `name` from `expect`, or with `expect == "-"` found none.
 fn loads(program: &str, name: &str, expect: &str, library_path: Option<&str>) -> bool {
     match run_search(program, &["open", name, expect], library_path) {
@@ -348,23 +399,26 @@ fn runpath_suppresses_the_loaders_rpath() -> bool {
         )
 }
 
-/// A program whose exec conferred a grant runs with `AT_SECURE`, and its
-/// loader passes over `LD_LIBRARY_PATH` and the `$ORIGIN` entry — both name a
-/// directory holding the library — for the absolute entry after them.
+/// A program started holding a gated capability runs with `AT_SECURE`, and
+/// its loader passes over `LD_LIBRARY_PATH` and the `$ORIGIN` entry — both
+/// name a directory holding the library — for the absolute entry after them.
 fn secure_exec_ignores_library_path_and_origin() -> bool {
     if !search_tree() {
         return false;
     }
-    if run_search(SECURE_PROBE, &["self", SECURE_PROBE, "1"], None) != Some(0) {
+    if run_secure(&["self", SECURE_PROBE, "1"], &[]).map(|(code, _)| code) != Some(0) {
         eprintln!("dl_test: {SECURE_PROBE} did not see AT_SECURE=1 and its own path");
         return false;
     }
-    loads(
-        SECURE_PROBE,
-        "libdlsearch.so",
-        &format!("{SECURE_ABS_DIR}/libdlsearch.so"),
-        Some(SECURE_ORIGIN_DIR),
-    )
+    let found = format!("{SECURE_ABS_DIR}/libdlsearch.so");
+    let library_path = format!("LD_LIBRARY_PATH={SECURE_ORIGIN_DIR}");
+    match run_secure(&["open", "libdlsearch.so", &found], &[&library_path]) {
+        Some((0, _)) => true,
+        other => {
+            eprintln!("dl_test: {SECURE_PROBE} open libdlsearch.so wanted {found}: {other:?}");
+            false
+        }
+    }
 }
 
 /// The startup-binding report `LD_DEBUG=statistics` asks for, and its
@@ -391,8 +445,8 @@ fn ld_debug_statistics_reports_startup_binding() -> bool {
             return false;
         }
     }
-    match stderr_of(SECURE_PROBE) {
-        Ok(err) if !err.contains("ld.so:") => true,
+    match run_secure(&["self", SECURE_PROBE, "1"], &["LD_DEBUG=statistics"]) {
+        Some((0, err)) if !err.contains("ld.so:") => true,
         other => {
             eprintln!("dl_test: {SECURE_PROBE} honoured LD_DEBUG: {other:?}");
             false

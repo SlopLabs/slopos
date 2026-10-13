@@ -1431,62 +1431,60 @@ slopos_testing::stest!(
 /// is the load-bearing negative case: granting it would let any task re-spawn
 /// it and inherit what init holds.
 pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
-    use slopos_abi::task::TaskPriority;
     use slopos_ostd::authority::{CAP_NONE, Capability};
     use slopos_testing::assert_test;
 
     use super::grants::{delegated_for, grant_for};
 
     const LAUNCH: u64 = Capability::Launch.bit();
-    const SEATS: u64 = Capability::DisplaySeat.bit() | Capability::InputSeat.bit();
     const POWER: u64 = Capability::Power.bit();
     const MOUNT: u64 = Capability::Mount.bit();
     const RAW_BLOCK: u64 = Capability::RawBlock.bit();
-    const INSTALL: u64 =
-        RAW_BLOCK | MOUNT | POWER | Capability::BootEntry.bit() | Capability::Seal.bit();
+    const DAC_OVERRIDE: u64 = Capability::DacOverride.bit();
+    const INSTALL: u64 = RAW_BLOCK
+        | MOUNT
+        | POWER
+        | Capability::BootEntry.bit()
+        | Capability::Seal.bit()
+        | DAC_OVERRIDE;
 
-    let (caps, priority) = grant_for(b"/bin/compositor");
     assert_test!(
-        caps == SEATS | LAUNCH,
-        "the compositor must be granted both seats and Launch"
+        grant_for(b"/bin/compositor") == CAP_NONE,
+        "the compositor holds what init delegates, never a grant"
     );
     assert_test!(
-        matches!(priority, Some(TaskPriority::High)),
-        "the compositor must be granted the High tier the syscall refuses"
+        grant_for(b"/bin/terminal") == LAUNCH && grant_for(b"/bin/remoted") == LAUNCH,
+        "the terminal and remoted must be granted Launch alone"
     );
     assert_test!(
-        grant_for(b"/bin/roulette") == (Capability::DisplaySeat.bit(), None),
-        "roulette must be granted the display seat and no tier"
+        grant_for(b"/bin/roulette") == Capability::DisplaySeat.bit(),
+        "roulette must be granted the display seat alone"
+    );
+    for test in [
+        &b"/bin/seat_test"[..],
+        b"/bin/mount_test",
+        b"/bin/install_test",
+        b"/bin/installer_test",
+        b"/bin/dns_concurrent_test",
+        b"/bin/dl_secure_probe",
+    ] {
+        assert_test!(
+            grant_for(test) == CAP_NONE,
+            "a test holds what its declaration or its spawner gives it, never a grant"
+        );
+    }
+    assert_test!(
+        grant_for(b"/bin/keymap") == Capability::ConsoleConfig.bit() | DAC_OVERRIDE,
+        "the keymap program must be granted ConsoleConfig and DacOverride for /etc/keymap"
     );
     assert_test!(
-        grant_for(b"/bin/keymap") == (Capability::ConsoleConfig.bit(), None),
-        "the keymap program must be granted ConsoleConfig and no tier"
+        grant_for(b"/bin/bootctl") == RAW_BLOCK | POWER | DAC_OVERRIDE,
+        "bootctl must be granted RawBlock, Power and DacOverride, not Mount or the \
+         installer's role"
     );
     assert_test!(
-        grant_for(b"/bin/seat_test") == (SEATS, None),
-        "the seat test must be granted both seats and nothing more"
-    );
-    assert_test!(
-        grant_for(b"/bin/mount_test") == (MOUNT, None),
-        "the mount test must be granted Mount and nothing more"
-    );
-    assert_test!(
-        grant_for(b"/bin/dns_concurrent_test") == (Capability::NetAdmin.bit(), None),
-        "the resolver test must be granted NetAdmin and nothing more"
-    );
-    assert_test!(
-        grant_for(b"/bin/bootctl") == (RAW_BLOCK | POWER, None),
-        "bootctl must be granted RawBlock and Power, not Mount or the installer's role"
-    );
-    assert_test!(
-        grant_for(b"/bin/installer") == (INSTALL, None)
-            && grant_for(b"/bin/install_test") == (INSTALL, None),
-        "the installer and its test must hold the installer's role"
-    );
-    assert_test!(
-        grant_for(b"/bin/installer_test") == (INSTALL | LAUNCH, None),
-        "the installer test must hold the installer's role and Launch, so the shell it \
-         types the installer at keeps its own"
+        grant_for(b"/bin/installer") == INSTALL,
+        "the installer must hold the installer's role"
     );
     for tool in [
         "mke2fs",
@@ -1502,12 +1500,12 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
         path[base.len()..base.len() + tool.len()].copy_from_slice(tool.as_bytes());
         let tool = &path[..base.len() + tool.len()];
         assert_test!(
-            grant_for(tool) == (CAP_NONE, None) && delegated_for(tool) == RAW_BLOCK,
+            grant_for(tool) == CAP_NONE && delegated_for(tool) == RAW_BLOCK,
             "e2fsprogs must take the raw-device right from its spawner, and nothing more"
         );
     }
     assert_test!(
-        grant_for(b"/usr/local/sbin/mke2fs") == (CAP_NONE, None)
+        grant_for(b"/usr/local/sbin/mke2fs") == CAP_NONE
             && delegated_for(b"/usr/local/sbin/mke2fs") == CAP_NONE,
         "a copy a root holds, which the guest can replace, must get nothing"
     );
@@ -1517,26 +1515,26 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
     );
 
     assert_test!(
-        grant_for(INIT_PATH) == (CAP_NONE, None),
+        grant_for(INIT_PATH) == CAP_NONE,
         "init must not be grantable: what it holds stays the kernel's to give"
     );
     // The shell is a launcher, not an ordinary program: it holds `Launch` and
     // nothing else, so it may spawn a program whose identity earns authority
     // without holding any of that authority itself.
     assert_test!(
-        grant_for(b"/bin/shell") == (LAUNCH, None),
+        grant_for(b"/bin/shell") == LAUNCH,
         "the shell must be granted Launch and nothing more"
     );
     assert_test!(
-        grant_for(b"/bin/file_manager") == (CAP_NONE, None),
+        grant_for(b"/bin/file_manager") == CAP_NONE,
         "an ordinary program must get nothing"
     );
     assert_test!(
-        grant_for(b"/bin/./roulette") == (CAP_NONE, None),
+        grant_for(b"/bin/./halt") == CAP_NONE,
         "a non-canonical spelling must fail closed rather than be normalised"
     );
     assert_test!(
-        grant_for(b"") == (CAP_NONE, None),
+        grant_for(b"") == CAP_NONE,
         "the empty path must get nothing"
     );
 
@@ -1692,8 +1690,7 @@ pub fn test_exec_of_an_ungranted_image_drops_every_grant() -> TestResult {
             .ok_or("failed to create the NetAdmin task")?;
         let sleep = slopos_fs::vfs::canon::canonicalise_at(b"/bin/sleep", b"/")
             .map_err(|_| "no path for /bin/sleep")?;
-        if grant_for(sleep.as_bytes()).0 != CAP_NONE || delegated_for(sleep.as_bytes()) != CAP_NONE
-        {
+        if grant_for(sleep.as_bytes()) != CAP_NONE || delegated_for(sleep.as_bytes()) != CAP_NONE {
             return Err("/bin/sleep has a grant row, so it cannot stand for an ungranted image");
         }
 
@@ -1701,7 +1698,7 @@ pub fn test_exec_of_an_ungranted_image_drops_every_grant() -> TestResult {
             return Err("the grant table names no program");
         }
         let spawned = granted_paths().map(|path| {
-            let row = grant_for(path).0 | delegated_for(path);
+            let row = grant_for(path) | delegated_for(path);
             (path, CAP_UNIVERSAL | row, row)
         });
         let init = (&b"/sbin/init"[..], CAP_MASK_ALL, CAP_MASK_ALL);

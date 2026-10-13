@@ -55,6 +55,15 @@ impl InodePerm {
         }
     }
 
+    /// A symlink in this directory owned by `link_owner` may be followed.
+    pub fn check_follow(&self, who: &Subject, link_owner: u32) -> VfsResult<()> {
+        if who.follow_permits(self.mode, self.uid, link_owner) {
+            Ok(())
+        } else {
+            Err(VfsError::PermissionDenied)
+        }
+    }
+
     pub fn check_chown(&self, who: &Subject, uid: Option<u32>, gid: Option<u32>) -> VfsResult<()> {
         if who.may_chown(self.uid, self.gid, uid, gid) {
             Ok(())

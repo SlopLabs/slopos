@@ -26,7 +26,7 @@ const MANIFEST: &str = "/var/lib/slopos/trees/usr_local";
 /// What the host seeds on the self-hosting root for the ladder: a bare
 /// repository of one crate, a sparse registry of one crate, and the guest's
 /// half of the ssh fixture.
-const FIXTURES: &str = "/srv/ladder";
+const FIXTURES: &str = "/home/user/ladder";
 
 /// Gates a rung on the root carrying a toolchain; `Err` is the verdict, a pass
 /// with a note on any root but the self-hosting one.

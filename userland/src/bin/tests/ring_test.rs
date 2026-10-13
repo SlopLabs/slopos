@@ -870,7 +870,8 @@ fn test_tcp_send_zc_shape() -> bool {
 /// AF_UNIX connect allocates the pair immediately when the listener's backlog
 /// has room, so the op completes inline with a single notification-free CQE.
 fn test_connect_unix_inline_success() -> bool {
-    let path = b"/ring-op-connect-unix";
+    let path = b"/tmp/ring-op-connect-unix";
+    let _ = std::fs::remove_file("/tmp/ring-op-connect-unix");
     let Ok(listener) = net::socket(AF_UNIX, SOCK_STREAM, 0) else {
         return false;
     };
@@ -909,15 +910,11 @@ fn test_connect_unix_inline_success() -> bool {
     }
 }
 
-/// An AF_UNIX path with no listener maps to `-ECONNREFUSED` (-111) inline.
-fn test_connect_unix_refused() -> bool {
-    let Ok(sock) = net::socket(AF_UNIX, SOCK_STREAM, 0) else {
-        return false;
-    };
-    let Ok(mut ring) = Ring::setup(8) else {
-        return false;
-    };
-    let path = b"/ring-op-connect-no-listener";
+/// What an `OP_CONNECT` of a fresh AF_UNIX socket to `path` completes with,
+/// once it has completed inline.
+fn ring_connect_unix(path: &[u8]) -> Option<i32> {
+    let sock = net::socket(AF_UNIX, SOCK_STREAM, 0).ok()?;
+    let mut ring = Ring::setup(8).ok()?;
     let mut sa = SockAddrUn::default();
     sa.family = AF_UNIX;
     sa.path[..path.len()].copy_from_slice(path);
@@ -927,18 +924,34 @@ fn test_connect_unix_refused() -> bool {
     sqe.addr = &sa as *const SockAddrUn as u64;
     sqe.len = (2 + path.len()) as u32;
     sqe.user_data = 0xC0DD;
-    if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(1).is_err() {
+    ring.push_sqe(&sqe).ok()?;
+    ring.submit_and_wait(1).ok()?;
+    let cqe = ring.poll_completion()?;
+    (cqe.user_data == 0xC0DD
+        && (cqe.flags & SLOPRING_CQE_F_MORE) == 0
+        && (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0)
+        .then_some(cqe.res)
+}
+
+/// An AF_UNIX name whose socket no longer listens maps to `-ECONNREFUSED`
+/// (-111) inline.
+fn test_connect_unix_refused() -> bool {
+    let path = b"/tmp/ring-op-connect-no-listener";
+    let _ = std::fs::remove_file("/tmp/ring-op-connect-no-listener");
+    let Ok(gone) = net::socket(AF_UNIX, SOCK_STREAM, 0) else {
+        return false;
+    };
+    if net::bind_unix(gone.raw(), path).is_err() {
         return false;
     }
-    match ring.poll_completion() {
-        Some(cqe) => {
-            cqe.user_data == 0xC0DD
-                && cqe.res == -111
-                && (cqe.flags & SLOPRING_CQE_F_MORE) == 0
-                && (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0
-        }
-        None => false,
-    }
+    drop(gone);
+    ring_connect_unix(path) == Some(-111)
+}
+
+/// A ring has no working directory, so a relative AF_UNIX name is `-EINVAL`
+/// (-22) inline, where the absolute one above reaches the name.
+fn test_connect_unix_relative() -> bool {
+    ring_connect_unix(b"tmp/ring-op-connect-no-listener") == Some(-22)
 }
 
 /// A real TCP data round-trip over loopback, driven entirely by the ring:
@@ -1048,6 +1061,7 @@ const CASES: &[(&str, fn() -> bool)] = &[
         test_connect_unix_inline_success,
     ),
     ("connect_unix_refused", test_connect_unix_refused),
+    ("connect_unix_relative", test_connect_unix_relative),
 ];
 
 fn main() {

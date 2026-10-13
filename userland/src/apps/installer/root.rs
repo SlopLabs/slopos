@@ -1,14 +1,16 @@
 //! The new root, mounted while it is filled: the directories a SlopOS root
-//! has, its base mount points sealed, the medium's toolchain installed at
-//! `/usr/local` by the rule host trees follow, and its clone seeded at `/src`.
+//! has with the owners the ownership map gives them, its base mount points
+//! sealed, the medium's toolchain installed at `/usr/local` by the rule host
+//! trees follow, and its clone seeded at `/src`, both the session's.
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{PermissionsExt, lchown, symlink};
 use std::path::Path;
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
+use slopos_abi::fs::{OWNERS_RECORD, ROOT_LAYOUT, SESSION_GID, SESSION_TREES, SESSION_UID};
 use slopos_tree_core::{Kind, MANIFEST_DIR, Manifest, Root, State, Step, manifest_name, plan};
 
 use super::Medium;
@@ -18,9 +20,6 @@ use crate::syscall::fs::{inode_flags, mount, set_inode_flags, sync, umount2};
 /// not see.
 const MOUNT_PARENT: &str = "/tmp";
 pub(super) const EXT4_ROOT_INODE: u64 = 2;
-/// The directories every root carries, as `scripts/build_fs_image.sh` lays
-/// them out.
-const ROOT_DIRS: [&str; 6] = ["/bin", "/sbin", "/etc", "/var", "/home", "/media"];
 const SLOT_STATE: &str = "/var/lib/slopos/slots";
 pub const TOOLCHAIN: &str = "/usr/local";
 pub const SOURCE: &str = "/src";
@@ -83,6 +82,22 @@ impl Mounted {
         self.walk_dirs(path, true).map(drop)
     }
 
+    /// The directory `path`, made where the root lacks it as `owner`'s with
+    /// `mode`. One the root holds keeps its owner and mode.
+    fn owned_dir(&self, path: &str, owner: (u32, u32), mode: u16) -> Result<(), String> {
+        let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        if !parent.is_empty() {
+            self.dir(parent)?;
+        }
+        if self.walk_dirs(path, false)? {
+            return Ok(());
+        }
+        make_dir(&self.path(path))?;
+        give(&self.path(path), owner)?;
+        fs::set_permissions(self.path(path), fs::Permissions::from_mode(mode.into()))
+            .map_err(|e| format!("{path}: {e}"))
+    }
+
     fn unmount(&self) -> Result<(), String> {
         sync().map_err(|e| format!("sync: {e:?}"))?;
         let path = CString::new(self.dir.as_str()).map_err(|_| "a NUL in the mount point")?;
@@ -139,16 +154,34 @@ fn seal(root: &Mounted, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The directories every root has, and the base's mount points sealed.
+/// `path` and, a link included, nothing it names, given to `owner`.
+fn give(path: &str, (uid, gid): (u32, u32)) -> Result<(), String> {
+    lchown(path, Some(uid), Some(gid)).map_err(|e| format!("{path}: {e}"))
+}
+
+/// The directories every root has, as the ownership map gives them, and the
+/// base's mount points sealed.
 pub fn lay_out(root: &Mounted) -> Result<(), String> {
-    for dir in ROOT_DIRS {
-        root.dir(dir)?;
+    for dir in ROOT_LAYOUT.iter().filter(|dir| dir.path != "/") {
+        root.owned_dir(dir.path, (dir.uid, dir.gid), dir.mode)?;
     }
     for dir in slopos_abi::fs::BASE_DIRS {
-        root.dir(dir)?;
+        root.owned_dir(dir, (0, 0), 0o755)?;
         seal(root, dir)?;
     }
     Ok(())
+}
+
+/// Record on a new root that its session trees are the session's, which init
+/// otherwise establishes once on a root that ran everything as uid 0.
+pub fn record_owners(root: &Mounted) -> Result<(), String> {
+    let record: String = SESSION_TREES
+        .iter()
+        .map(|tree| format!("{SESSION_UID}:{SESSION_GID} {tree}\n"))
+        .collect();
+    let path = root.path(OWNERS_RECORD);
+    write_durably(&path, record.as_bytes())?;
+    give(&path, (0, 0))
 }
 
 /// A kept root's slots hold this install's system now, so what they said of
@@ -260,6 +293,7 @@ fn copy_file(from: &Path, to: &str, progress: &mut Progress) -> Result<(), Strin
         .map_err(|e| format!("{to}: {e}"))
 }
 
+/// Install `source` at `path`, the session's.
 fn put(
     root: &Mounted,
     source: &Path,
@@ -276,14 +310,15 @@ fn put(
                 .permissions()
                 .mode();
             fs::set_permissions(&dest, fs::Permissions::from_mode(mode & 0o7777))
-                .map_err(|e| format!("{dest}: {e}"))
+                .map_err(|e| format!("{dest}: {e}"))?;
         }
-        Kind::File => copy_file(source, &dest, progress),
+        Kind::File => copy_file(source, &dest, progress)?,
         Kind::Link => {
             let link = fs::read_link(source).map_err(|e| format!("{}: {e}", source.display()))?;
-            symlink(link, &dest).map_err(|e| format!("{dest}: {e}"))
+            symlink(link, &dest).map_err(|e| format!("{dest}: {e}"))?;
         }
     }
+    give(&dest, (SESSION_UID, SESSION_GID))
 }
 
 /// Install the medium's tree at `guest` by the manifest it carries, keeping
@@ -315,8 +350,9 @@ fn install_tree(root: &Mounted, medium: &Medium, guest: &str) -> Result<Option<u
             conflicts.0.join("\n  ")
         )
     })?;
-    root.dir(MANIFEST_DIR)?;
+    root.owned_dir(MANIFEST_DIR, (0, 0), 0o755)?;
     write_durably(&root.path(&recorded), steps.during.render().as_bytes())?;
+    give(&root.path(&recorded), (0, 0))?;
     let mut progress = Progress {
         copied: 0,
         reported: 0,
@@ -329,7 +365,10 @@ fn install_tree(root: &Mounted, medium: &Medium, guest: &str) -> Result<Option<u
             Step::RemoveDir(path) => {
                 fs::remove_dir(root.path(path)).map_err(|e| format!("{path}: {e}"))?
             }
-            Step::MakeDir(path) => make_dir(&root.path(path))?,
+            Step::MakeDir(path) => {
+                make_dir(&root.path(path))?;
+                give(&root.path(path), (SESSION_UID, SESSION_GID))?;
+            }
             Step::Install { item, path } => put(
                 root,
                 &medium.payload_path(&format!("{guest}/{}", item.rel)),
@@ -340,6 +379,7 @@ fn install_tree(root: &Mounted, medium: &Medium, guest: &str) -> Result<Option<u
         }
     }
     write_durably(&root.path(&recorded), steps.done.render().as_bytes())?;
+    give(&root.path(&recorded), (0, 0))?;
     Ok(Some(progress.copied))
 }
 
@@ -396,6 +436,7 @@ fn seed(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<u64, St
         let config =
             fs::read_to_string(&path).map_err(|e| format!("{SOURCE}/{CLONE_CONFIG}: {e}"))?;
         write_durably(&path, with_origin(&config, url).as_bytes())?;
+        give(&path, (SESSION_UID, SESSION_GID))?;
     }
     sync().map_err(|e| format!("sync: {e:?}"))?;
     fs::rename(root.path(&staging), root.path(SOURCE)).map_err(|e| format!("{SOURCE}: {e}"))?;

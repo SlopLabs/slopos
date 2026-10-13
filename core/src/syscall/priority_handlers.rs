@@ -70,13 +70,13 @@ define_syscall!(syscall_getpriority (ctx, which: u64, who: u64) cap(NoneRelation
 });
 
 // A task's nice value is for whoever may signal it, and init's for init alone;
-// only init sets one below both zero and the task's own.
+// only a `SchedHigh` holder sets one below both zero and the task's own.
 define_syscall!(syscall_setpriority (ctx, which: u64, who: u64, value: i64) cap(NoneRelation)
     -> Result<(), Errno> {
     let caller = ctx.task();
     let selector = Selector::resolve(caller, which, who)?;
     let nice = value.clamp(NICE_MIN, NICE_MAX) as i8;
-    let privileged = crate::exec::task_is_init(caller);
+    let privileged = ctx.holds(slopos_ostd::authority::Capability::SchedHigh);
     let sender = Sender::of(caller);
     let own = sender_pid(caller);
     let (mut found, mut denied, mut refused) = (false, false, false);

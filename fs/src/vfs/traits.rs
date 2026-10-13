@@ -298,6 +298,8 @@ pub enum VfsError {
     Busy,
     /// The calling task was aborted while waiting for the filesystem.
     Interrupted,
+    /// The node is one no file can be opened on, a socket's. `ENXIO`.
+    NoDevice,
 }
 
 impl VfsError {
@@ -325,6 +327,7 @@ impl VfsError {
             Self::BadFileDescriptor => Errno::EBADF,
             Self::Busy => Errno::EBUSY,
             Self::Interrupted => Errno::EINTR,
+            Self::NoDevice => Errno::ENXIO,
         }
     }
 }

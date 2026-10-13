@@ -155,14 +155,18 @@ impl FileOps for TtyFileOps {
     /// `ttyname` finds it by `st_rdev`, and `/dev/ptmx` for a master.
     fn stat(&self, handle: usize, out: &mut UserFsStat) -> i32 {
         use slopos_fs::fileio::{
-            PTMX_MAJOR, PTMX_MINOR, PTY_SLAVE_MAJOR, TTY_DEVICE_MAJOR, fill_char_device_stat,
+            PTMX_MAJOR, PTMX_MINOR, PTY_SLAVE_MAJOR, PTY_SLAVE_MODE, TTY_DEVICE_MAJOR,
+            fill_char_device_stat,
         };
-        let (minor, major, mode) = match TtyHandle::from_usize(handle).map(TtyHandle::index) {
-            Some(index) if tty::is_pty_slave(index) => (handle, PTY_SLAVE_MAJOR, 0o620),
+        let index = TtyHandle::from_usize(handle).map(TtyHandle::index);
+        let slave_owner = index.and_then(tty::pty_slave_owner);
+        let (minor, major, mode) = match index {
+            Some(_) if slave_owner.is_some() => (handle, PTY_SLAVE_MAJOR, PTY_SLAVE_MODE.into()),
             Some(index) if tty::get_pty_number(index).is_ok() => (PTMX_MINOR, PTMX_MAJOR, 0o666),
             _ => (handle, TTY_DEVICE_MAJOR, 0o620),
         };
         fill_char_device_stat(out, minor, major, mode);
+        (out.st_uid, out.st_gid) = slave_owner.unwrap_or((0, 0));
         0
     }
 }

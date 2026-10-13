@@ -1078,7 +1078,10 @@ fn panic_syscall_smoke_observer() {
         None,
         slopos_sched::task::TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
-        CAP_UNIVERSAL | Capability::TestHarness.bit(),
+        slopos_core::exec::Endowment::Kernel {
+            caps: CAP_UNIVERSAL | Capability::TestHarness.bit(),
+            uid: slopos_ostd::process::cred::ROOT_UID,
+        },
         &[],
         0,
         None,

@@ -152,6 +152,7 @@ pub type Ext2Inode = Inode;
 pub enum NewInode<'a> {
     File,
     Fifo,
+    Socket,
     Directory,
     Symlink(&'a [u8]),
 }
@@ -1977,6 +1978,7 @@ impl<'a> Ext2Fs<'a> {
             NewInode::Directory => DIR_FT_DIR,
             NewInode::File => DIR_FT_REG_FILE,
             NewInode::Fifo => ondisk::DIR_FT_FIFO,
+            NewInode::Socket => ondisk::DIR_FT_SOCK,
             NewInode::Symlink(_) => DIR_FT_SYMLINK,
         };
         self.note_entry(parent_num, name);
@@ -2060,12 +2062,14 @@ impl<'a> Ext2Fs<'a> {
             | match kind {
                 NewInode::Directory => MODE_DIRECTORY,
                 NewInode::Fifo => ondisk::MODE_FIFO,
+                NewInode::Socket => ondisk::MODE_SOCKET,
                 _ => MODE_FILE,
             };
         inode.links_count = 1;
         inode.generation = generation;
-        // Readers hold a FIFO's `i_block` to zero, so it takes no extent tree.
-        if self.geom.extents() && !matches!(kind, NewInode::Fifo) {
+        // Readers hold a FIFO's or a socket's `i_block` to zero, so it takes
+        // no extent tree.
+        if self.geom.extents() && !matches!(kind, NewInode::Fifo | NewInode::Socket) {
             inode.flags |= EXT4_EXTENTS_FL;
             extents::init_root(&mut inode);
         }

@@ -1,9 +1,11 @@
 //! Protocol bridge: server-side compositor protocol over AF_UNIX sockets.
 //!
-//! Listens on `/run/compositor`, accepts client connections, and translates
-//! typed protocol requests into local surface state.
+//! Listens in the session's runtime directory, accepts client connections, and
+//! translates typed protocol requests into local surface state.
 
 use core::num::NonZeroU32;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::window::{AppId, MAX_WINDOW_DAMAGE_REGIONS, WindowInfo};
@@ -186,8 +188,14 @@ pub struct ProtocolBridge {
 
 impl ProtocolBridge {
     pub fn new() -> Option<Self> {
-        let server = Server::bind(b"/run/compositor").ok()?;
-        tty::write(b"COMPOSITOR: protocol bridge listening on /run/compositor\n");
+        let path = slopos_protocol::socket_path(crate::syscall::process::geteuid());
+        // A dead compositor's name: only the session writes its runtime
+        // directory.
+        let _ = std::fs::remove_file(OsStr::from_bytes(&path));
+        let server = Server::bind(&path).ok()?;
+        tty::write(b"COMPOSITOR: protocol bridge listening on ");
+        tty::write(&path);
+        tty::write(b"\n");
 
         Some(Self {
             server,

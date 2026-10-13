@@ -711,10 +711,6 @@ unsafe fn spawn_direct(
         0
     };
     let kernel_attrs = SpawnAttrs {
-        priority: TaskPriority::Normal.as_u8(),
-        _pad: [0; 3],
-        flags,
-        _pad2: 0,
         actions_ptr: fd_actions.as_ptr() as u64,
         actions_len: fd_actions.len() as u64,
         sigdefault_mask,
@@ -726,6 +722,7 @@ unsafe fn spawn_direct(
         } else {
             u_strlen(cwd) as u64
         },
+        ..SpawnAttrs::new(TaskPriority::Normal.as_u8(), flags)
     };
     let argc = count_strings(argv) as u32;
     let launch =

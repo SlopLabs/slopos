@@ -28,6 +28,9 @@ pub fn current_name() -> Option<String> {
 /// Load `/usr/share/keymaps/<name>.layout`, parse and validate it, and upload
 /// the binary table to the kernel. The `Err` names the failing stage.
 pub fn load_layout_by_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() || name.contains('/') {
+        return Err("no such layout");
+    }
     let path = format!("{KEYMAP_DIR}/{name}.layout");
     let src = fs::read(&path).map_err(|_| "no such layout")?;
 

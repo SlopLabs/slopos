@@ -47,7 +47,10 @@
 # four principals at once, each a process of 257 resident pages, beside the
 # five tasks and 1280 pages earlier syscall tests leave for their scope's
 # teardown. Two captures measured 9 and 2308 each; skipping the `cred` suite
-# measured 7 and 2049. The boot kernelmeta row measured 1708, and 1713 once every disk went
+# measured 7 and 2049. The kernel-phase commitpages row rose from 2560
+# to 2564 with delegation at spawn: `test_spawn_delegates_within_the_spawner`
+# holds a principal beside each child it spawns, and alone sets the cred
+# suite's peak, 1284 pages with it and 1028 without. The boot kernelmeta row measured 1708, and 1713 once every disk went
 # through the block layer and NVMe: the controllers' queues and engines, the
 # disk registry and the devfs node table. A boot on which an AP is slow to
 # answer its startup peaks 48 pages higher, 1761, and the wired network's
@@ -109,7 +112,7 @@ require-phase post-kernel-tests
 require-phase post-userland-tests
 
 boot	kernelmeta	1802
-post-kernel-tests	commitpages	2560
+post-kernel-tests	commitpages	2564
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256

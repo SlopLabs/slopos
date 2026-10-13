@@ -2,6 +2,42 @@
 
 **No finding is open.**
 
+Swept 2026-10-13: delegation at spawn — `SpawnAttrs`' capabilities, ids and
+groups under the subset bound and `SetId`, the `SchedHigh` tier and negative
+nice, `AT_SECURE` for a delegated or re-identified child, init's bootstrap
+table starting the session as uid 1000, the utest declarations, and the three
+gaps phase 3 left for this one, now closed: a pty slave is its opener's,
+0620; an `AF_UNIX` name is a socket inode under the parent's and its own mode
+bits; a sticky world-writable directory follows a link only for its owner or
+the directory's. Also the ownership map's builders and init's one-time
+migration, and the ext4 reserve, which now admits uid 0 alone. Three reviews
+found defects before it landed: a `/dev/pts/N` open checked the owner of the
+slot and then opened the slot again, so a master closed and reallocated to
+another opener in between handed over that opener's terminal — the open is
+now judged on the slave it takes; a socket was matched by an inode number
+nothing held, so on ext4, whose numbers carry no generation, a listener whose
+name was unlinked and whose inode was reused could take a connect to a name
+the connector never had to reach, and a bound socket did not keep its volume
+mounted — a bound socket and a connect in progress now hold the inode open; a
+zeroed `SpawnAttrs` asked for uid 0, groups included, rather than for nothing
+— each id now counts only under its `SPAWN_SET_*` bit; `keymap`, now holding
+`DacOverride` for the session, took a layout name with `/` in it and so read
+any `*.layout` file, and it and `bootctl` left the system state they created
+the session's — names are refused, and new state takes its directory's owner
+or uid 0; a ring's `OP_CONNECT` resolved a relative name against `/`, where
+`connect(2)` uses the caller's directory, and now refuses one; and an exec of
+a socket node answered `EIO`, which aborts a `PATH` search, where Linux
+answers `EACCES`. Below the bar: `st_dev` is zero for every file, so the
+migration cannot tell a writable volume mounted below a session tree from the
+root, and hands one named by `mount=` to the session on the first boot of an
+old root; `SpawnAttrs` carries no size, so a binary built against the 64-byte
+layout passes 32 bytes of its stack as the new fields — still bounded by its
+mask and `SetId`, with an undefined `set` bit refused; init's `bootctl
+collect` asks for `RawBlock` and `Power` and gets `DacOverride` too from its
+grant row, which init's `Launch` raises, until phase 6 removes the raise; and
+a ring's connect checks the name's bits against its submitter as `ring_enter`
+found it, while it attests the identity as of each try.
+
 Swept 2026-10-13: peer identity — `socketpair`, `SO_PEERCRED`, `SO_PEERPIDFD`
 and `SO_PEERPROGRAM` on `AF_UNIX`, the identity `listen`, `connect`, a ring's
 `OP_CONNECT` and `socketpair` capture, `pidfd_open` on any leader, the program
@@ -692,10 +728,13 @@ None.
 CVSS 3.1 Base Score; `0.1-3.9 Low`, `4.0-6.9 Medium`, `7.0-8.9 High`,
 `9.0-10.0 Critical`.
 
-Every process runs as uid 0 and every file is 0:0 until the session moves to
-uid 1000 (phase 4 of `plans/access-model.md`), so the owner bits admit any
-program, and "unprivileged local attacker" means any process that can execute
-code: `AV:L/PR:L`.
+The session runs as uid 1000. A program it starts holds the universal
+capabilities, and `Launch` too where it is the compositor, the terminal,
+remoted or the shell, so an unprivileged local attacker is any code the
+session runs: `AV:L/PR:L`. Init, what it starts as uid 0, and what a grant row
+raises (`DacOverride` among it for `keymap`, `bootctl` and the installer) are
+privileged; steering one from the session scores `PR:L` with that program's
+impact.
 
 A panic in a `#![forbid(unsafe_code)]` crate is an availability impact, never a
 memory-safety one. Overflow checks are on in the dev and tests kernels and off

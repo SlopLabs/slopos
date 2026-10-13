@@ -124,11 +124,12 @@ pub fn initialize() {
             set_exported(name, value.as_bytes());
         }
     }
+    let (user, home) = account();
     for (name, value) in [
         (b"PATH".as_slice(), DEFAULT_PATH.to_bytes()),
         (b"SHELL", b"/bin/shell"),
-        (b"HOME", b"/"),
-        (b"USER", b"root"),
+        (b"HOME", home.as_slice()),
+        (b"USER", user.as_slice()),
         (b"TERM", b"slopos"),
     ] {
         if !is_set(name) {
@@ -143,6 +144,24 @@ pub fn initialize() {
         if !is_set(name) {
             set(name, value);
         }
+    }
+}
+
+/// The effective user's name and home, or its number and `/` when no passwd
+/// row names it.
+pub fn account() -> (Vec<u8>, Vec<u8>) {
+    // SAFETY: `getpwuid` returns null or a row whose strings are NUL-terminated
+    // in libc's static storage, copied out before any other passwd call can
+    // overwrite them.
+    unsafe {
+        let uid = slopos_slibc::process::geteuid();
+        let row = slopos_slibc::conf::getpwuid(uid);
+        if row.is_null() {
+            return (uid.to_string().into_bytes(), b"/".to_vec());
+        }
+        let name = core::ffi::CStr::from_ptr((*row).pw_name);
+        let dir = core::ffi::CStr::from_ptr((*row).pw_dir);
+        (name.to_bytes().to_vec(), dir.to_bytes().to_vec())
     }
 }
 

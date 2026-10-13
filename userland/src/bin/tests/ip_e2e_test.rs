@@ -1,11 +1,12 @@
 //! End-to-end proof of the network management surface against the live stack
 //! in QEMU, from the syscalls up to what `/bin/ip` actually renders.
 //!
-//! The utest runner hands test binaries every capability, `NetAdmin` among
+//! The utest runner hands this binary every capability, `NetAdmin` among
 //! them. Every mutation below therefore goes *through* `/bin/ip`, the shipped
-//! program granted `NetAdmin` by path, and every refusal is observed from this
-//! binary respawned with [`UNPRIVILEGED`]: an image no grant row names holds
-//! only the universal capabilities.
+//! program granted `NetAdmin` by path, and every refusal is observed as the
+//! session: run again with [`SESSION`] at uid 1000 holding no capability, or
+//! respawned with [`UNPRIVILEGED`], an image no grant row names, where the
+//! check needs this process beside it.
 //!
 //! Records are decoded by explicit offset — the ones `abi/src/net.rs` pins with
 //! `offset_of!` — rather than through `apps::ip::query`, so a layout bug in the
@@ -157,23 +158,6 @@ fn run_ip(words: &[&str]) -> i32 {
 const SELF: &[u8] = b"/bin/ip_e2e_test";
 /// `argv[1]` that runs one of [`UNPRIVILEGED_CHECKS`] instead of the suite.
 const UNPRIVILEGED: &str = "--unprivileged";
-
-/// Run `check` from [`UNPRIVILEGED_CHECKS`] in this binary respawned, which
-/// holds no capability beyond the universal set.
-fn in_unprivileged_child(check: &str) -> bool {
-    let tid = spawn_prog(SELF, &["ip_e2e_test", UNPRIVILEGED, check], 1);
-    if tid <= 0 {
-        eprintln!("ip_e2e_test: spawning the unprivileged {check} check returned {tid}");
-        return false;
-    }
-    match process::wait_exit_code(tid as u32) {
-        0 => true,
-        code => {
-            eprintln!("ip_e2e_test: the unprivileged {check} check exited {code}");
-            false
-        }
-    }
-}
 
 /// Run `path` and collect what it wrote to stdout.
 ///
@@ -370,13 +354,7 @@ fn truncation_is_reported_in_the_header() -> bool {
 }
 
 /// The read/write split of this ABI: anyone may ask what the network looks like
-/// and subscribe to changes; only a `NetAdmin` holder may change it. Asked from
-/// a child holding only the universal capabilities, since this process holds
-/// them all.
-fn queries_and_monitor_are_unprivileged() -> bool {
-    in_unprivileged_child("queries")
-}
-
+/// and subscribe to changes; only a `NetAdmin` holder may change it.
 fn queries_and_monitor_answer() -> bool {
     let mut probe = [0u8; HDR];
     if let Err(err) = net_query(NET_Q_IFACES, NET_IFINDEX_NONE, &mut probe) {
@@ -409,10 +387,6 @@ fn queries_and_monitor_answer() -> bool {
 /// A mutating `net_iface_ctl` issued directly by a process without `NetAdmin`
 /// is `EPERM`. The control is [`monitor_fd_wakes_a_blocked_poll`], which
 /// performs the same operation through `/bin/ip` and has it succeed.
-fn direct_mutation_is_eperm_without_net_admin() -> bool {
-    in_unprivileged_child("mutation")
-}
-
 fn direct_mutation_is_refused() -> bool {
     let Ok((_, rows)) = read_ifaces() else {
         eprintln!("ip_e2e_test: net_query(IFACES) failed");
@@ -1335,14 +1309,6 @@ const CASES: &[(&str, fn() -> bool)] = &[
         truncation_is_reported_in_the_header,
     ),
     (
-        "queries_and_monitor_are_unprivileged",
-        queries_and_monitor_are_unprivileged,
-    ),
-    (
-        "direct_mutation_is_eperm_without_net_admin",
-        direct_mutation_is_eperm_without_net_admin,
-    ),
-    (
         "queries_honour_their_ifindex_filter",
         queries_honour_their_ifindex_filter,
     ),
@@ -1366,14 +1332,27 @@ const CASES: &[(&str, fn() -> bool)] = &[
 ];
 
 /// What a respawned [`UNPRIVILEGED`] child runs, by the name in `argv[2]`.
-const UNPRIVILEGED_CHECKS: &[(&str, fn() -> bool)] = &[
-    ("queries", queries_and_monitor_answer),
-    ("mutation", direct_mutation_is_refused),
-    ("sockets", socket_owner_is_redacted),
+const UNPRIVILEGED_CHECKS: &[(&str, fn() -> bool)] = &[("sockets", socket_owner_is_redacted)];
+
+/// `argv[1]` of the run the session's declaration starts.
+const SESSION: &str = "--session";
+
+const SESSION_CASES: &[(&str, fn() -> bool)] = &[
+    (
+        "queries_and_monitor_are_unprivileged",
+        queries_and_monitor_answer,
+    ),
+    (
+        "direct_mutation_is_eperm_without_net_admin",
+        direct_mutation_is_refused,
+    ),
 ];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(SESSION) {
+        slopos_slibc::test_harness::run_with_progress("ip_e2e_session", SESSION_CASES);
+    }
     if args.get(1).map(String::as_str) == Some(UNPRIVILEGED) {
         let check = args.get(2).map_or("", String::as_str);
         let passed = UNPRIVILEGED_CHECKS

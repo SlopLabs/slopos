@@ -35,9 +35,28 @@ const MODE_LINK: u32 = 0o120_777;
 /// The kernel's cap on one path component.
 const MAX_NAME_LEN: usize = 255;
 
-/// The root's writable directories, recorded even with nothing packed beneath
-/// them; `/media` is where a boot's `mount=` puts a volume.
-const ROOT_DIRS: [&str; 4] = ["/etc", "/var", "/home", "/media"];
+/// The system's directories of the ownership map (`slopos_abi::fs::
+/// ROOT_LAYOUT`), recorded even with nothing packed beneath them, with their
+/// modes; the archive is uid 0's, so init makes the session's own.
+const ROOT_DIRS: [(&str, u32); 10] = [
+    ("/etc", MODE_DIR),
+    ("/var", MODE_DIR),
+    ("/var/lib", MODE_DIR),
+    ("/var/lib/slopos", MODE_DIR),
+    ("/var/log", MODE_DIR),
+    ("/var/tmp", 0o041_777),
+    ("/root", 0o040_700),
+    ("/home", MODE_DIR),
+    ("/media", MODE_DIR),
+    ("/usr", MODE_DIR),
+];
+
+/// `slopos_abi::fs::OWNERS_RECORD` and what init writes there once the
+/// session's trees are its own, which a root with nothing in them already is.
+const OWNERS_RECORD: (&str, &str) = (
+    "/var/lib/slopos/owners",
+    "1000:1000 /home\n1000:1000 /src\n1000:1000 /usr/local\n",
+);
 
 const SLIBC_LICENSES: [&str; 3] = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"];
 
@@ -173,13 +192,18 @@ fn layout(
 ) -> Result<Vec<Entry>, String> {
     let mut entries: Vec<Entry> = ROOT_DIRS
         .iter()
-        .map(|dir| Entry {
-            path: (*dir).into(),
-            mode: MODE_DIR,
+        .map(|&(path, mode)| Entry {
+            path: path.into(),
+            mode,
             data: Vec::new(),
         })
         .collect();
     let mut add = |path: String, mode: u32, data: Vec<u8>| entries.push(Entry { path, mode, data });
+    add(
+        OWNERS_RECORD.0.into(),
+        MODE_DATA,
+        OWNERS_RECORD.1.as_bytes().to_vec(),
+    );
 
     for program in programs {
         let data = read(&build.join(format!("{program}.elf")))?;
@@ -628,23 +652,22 @@ mod tests {
         .unwrap();
         let got = records(&fs::read(&out).unwrap());
         let names: Vec<&str> = got.iter().map(|(name, _, _)| name.as_str()).collect();
+        let dirs = ROOT_DIRS.len();
+        assert_eq!(names[..dirs], ROOT_DIRS.map(|(path, _)| path));
         assert_eq!(
-            names,
-            [
-                "/etc",
-                "/var",
-                "/home",
-                "/media",
-                "/sbin/init",
-                "/bin/shell",
-                "/bin/sh"
-            ]
+            names[dirs..],
+            [OWNERS_RECORD.0, "/sbin/init", "/bin/shell", "/bin/sh"]
         );
+        let modes: Vec<u32> = got[..dirs].iter().map(|(_, mode, _)| *mode).collect();
+        assert_eq!(modes, ROOT_DIRS.map(|(_, mode)| mode));
         assert_eq!(
-            got[4],
+            got[dirs + 1],
             ("/sbin/init".to_owned(), MODE_EXEC, b"\x7fELF init".to_vec())
         );
-        assert_eq!(got[6], ("/bin/sh".to_owned(), MODE_LINK, b"shell".to_vec()));
+        assert_eq!(
+            got[dirs + 3],
+            ("/bin/sh".to_owned(), MODE_LINK, b"shell".to_vec())
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -675,30 +698,95 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// `scripts/build_fs_image.sh` mirrors `ROOT_DIRS`, `SLIBC_LICENSES` and
-    /// `slopos_abi::fs::BASE_DIRS`.
+    fn shell_array(script: &str, name: &str) -> Vec<String> {
+        let prefix = format!("{name}=(");
+        let line = script
+            .lines()
+            .find_map(|l| l.strip_prefix(&prefix))
+            .unwrap();
+        line.trim_end_matches(')')
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// `slopos_abi::fs::ROOT_LAYOUT` as `<path>:<uid>:<gid>:<mode>`.
+    fn abi_root_layout(abi: &str) -> Vec<String> {
+        let rest = &abi[abi.find("pub const ROOT_LAYOUT").unwrap()..];
+        let block = &rest[rest.find("= [").unwrap()..rest.find("];").unwrap()];
+        let quoted = |text: &str| text.split('"').nth(1).unwrap().to_owned();
+        let home = quoted(&abi[abi.find("pub const SESSION_HOME").unwrap()..]);
+        block
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| {
+                if let Some(args) = line.strip_prefix("system(") {
+                    let mode = args.split("0o").nth(1).unwrap().trim_end_matches("),");
+                    Some(format!("{}:0:0:{mode:0>4}", quoted(args)))
+                } else {
+                    let arg = line.strip_prefix("session(")?.trim_end_matches("),");
+                    let path = if arg == "SESSION_HOME" {
+                        home.clone()
+                    } else {
+                        quoted(arg)
+                    };
+                    Some(format!("{path}:1000:1000:0755"))
+                }
+            })
+            .collect()
+    }
+
+    /// `scripts/build_fs_image.sh` mirrors `SLIBC_LICENSES` and
+    /// `slopos_abi::fs::BASE_DIRS`, `scripts/lib/root_layout.sh` mirrors
+    /// `ROOT_LAYOUT`, `SESSION_TREES`, the session's ids and the record,
+    /// `ROOT_DIRS` is the layout's system directories below `/`, and
+    /// `OWNERS_RECORD` names the session's trees as init does.
     #[test]
     fn the_mirrored_lists_agree() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let script = fs::read_to_string(repo.join("scripts/build_fs_image.sh")).unwrap();
-        let array = |name: &str| -> Vec<String> {
-            let prefix = format!("{name}=(");
-            let line = script
-                .lines()
-                .find_map(|l| l.strip_prefix(&prefix))
-                .unwrap();
-            line.trim_end_matches(')')
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect()
-        };
-        assert_eq!(array("ROOT_DIRS"), ROOT_DIRS);
-        assert_eq!(array("SLIBC_LICENSES"), SLIBC_LICENSES);
+        assert_eq!(shell_array(&script, "SLIBC_LICENSES"), SLIBC_LICENSES);
         let abi = fs::read_to_string(repo.join("abi/src/fs.rs")).unwrap();
         let rest = &abi[abi.find("pub const BASE_DIRS").unwrap()..];
         let list = &rest[rest.find("= [").unwrap()..rest.find("];").unwrap()];
         let base_dirs: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
-        assert_eq!(array("BASE_DIRS"), base_dirs);
+        assert_eq!(shell_array(&script, "BASE_DIRS"), base_dirs);
+
+        let layout_sh = fs::read_to_string(repo.join("scripts/lib/root_layout.sh")).unwrap();
+        let layout = abi_root_layout(&abi);
+        assert_eq!(layout.len(), 13);
+        assert_eq!(shell_array(&layout_sh, "ROOT_LAYOUT"), layout);
+        let rest = &abi[abi.find("pub const SESSION_TREES").unwrap()..];
+        let list = &rest[rest.find("= [").unwrap()..rest.find("];").unwrap()];
+        let trees: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
+        assert_eq!(shell_array(&layout_sh, "SESSION_TREES"), trees);
+
+        let constant = |name: &str| {
+            let rest = &abi[abi.find(&format!("pub const {name}")).unwrap()..];
+            let value = &rest[rest.find('=').unwrap() + 1..rest.find(';').unwrap()];
+            value.trim().trim_matches('"').to_owned()
+        };
+        let session = format!("{}:{}", constant("SESSION_UID"), constant("SESSION_GID"));
+        assert_eq!(session, "1000:1000");
+        assert!(layout_sh.contains(&format!("\nSESSION_OWNER={session}\n")));
+        assert_eq!(constant("OWNERS_RECORD"), OWNERS_RECORD.0);
+        assert!(layout_sh.contains(&format!("\nOWNERS_RECORD={}\n", OWNERS_RECORD.0)));
+        let record: String = trees
+            .iter()
+            .map(|tree| format!("{session} {tree}\n"))
+            .collect();
+        assert_eq!(record, OWNERS_RECORD.1);
+
+        let system: Vec<String> = layout
+            .iter()
+            .filter(|spec| spec.contains(":0:0:") && !spec.starts_with("/:"))
+            .cloned()
+            .collect();
+        let packed: Vec<String> = ROOT_DIRS
+            .iter()
+            .map(|&(path, mode)| format!("{path}:0:0:{:04o}", mode & 0o7777))
+            .collect();
+        assert_eq!(packed, system);
     }
 
     #[test]

@@ -234,6 +234,65 @@ pub const BASE_DIRS: [&str; 6] = [
     "/etc/ssl",
 ];
 
+/// The one person at the machine: their uid, their group's gid, and their
+/// home.
+pub const SESSION_UID: u32 = 1000;
+pub const SESSION_GID: u32 = 1000;
+pub const SESSION_HOME: &str = "/home/user";
+
+/// A directory every root carries, who owns it and its mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootDir {
+    pub path: &'static str,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u16,
+}
+
+const fn system(path: &'static str, mode: u16) -> RootDir {
+    RootDir {
+        path,
+        uid: 0,
+        gid: 0,
+        mode,
+    }
+}
+
+const fn session(path: &'static str) -> RootDir {
+    RootDir {
+        path,
+        uid: SESSION_UID,
+        gid: SESSION_GID,
+        mode: 0o755,
+    }
+}
+
+/// Every root's directories, parents first: the system's state is uid 0's
+/// and what the session writes is its own. `/tmp` and `/run` are memory the
+/// kernel mounts, and the base directories its seal.
+pub const ROOT_LAYOUT: [RootDir; 13] = [
+    system("/", 0o755),
+    system("/etc", 0o755),
+    system("/var", 0o755),
+    system("/var/lib", 0o755),
+    system("/var/lib/slopos", 0o755),
+    system("/var/log", 0o755),
+    system("/var/tmp", 0o1777),
+    system("/root", 0o700),
+    system("/home", 0o755),
+    session(SESSION_HOME),
+    system("/media", 0o755),
+    system("/usr", 0o755),
+    session("/usr/local"),
+];
+
+/// The directories whose contents are the session's, whatever lies below
+/// them; each itself is as [`ROOT_LAYOUT`] has it, or the session's.
+pub const SESSION_TREES: [&str; 3] = ["/home", "/src", "/usr/local"];
+
+/// What init records once a root's session trees are the session's.
+pub const OWNERS_RECORD: &str = "/var/lib/slopos/owners";
+
 pub const AT_FDCWD: i32 = -100;
 pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
 pub const AT_REMOVEDIR: u32 = 0x200;

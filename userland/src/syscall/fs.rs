@@ -78,9 +78,11 @@ pub fn sync() -> SyscallResult<()> {
 /// Replace `path`'s contents, committing before returning — for the settings
 /// a reboot must not lose. Written whole to a sibling of its own and renamed
 /// over `path`, so no reader sees it half replaced and an old copy this
-/// process may not write is replaced all the same; the replacement keeps the
-/// old file's owner where this process may give it. An error from the `fsync`
-/// that commits the rename comes after the new contents are already in place.
+/// process may not write is replaced all the same. The replacement keeps the
+/// old file's owner, and a new file takes its directory's, where this process
+/// may give it, so a privileged writer leaves system state the system's. An
+/// error from the `fsync` that commits the rename comes after the new contents
+/// are already in place.
 pub fn write_durable(path: &CStr, data: &[u8]) -> SyscallResult<()> {
     use core::sync::atomic::{AtomicU32, Ordering};
     use slopos_abi::fs::{O_CREAT, O_EXCL, O_NOFOLLOW, O_WRONLY};
@@ -107,9 +109,15 @@ pub fn write_durable(path: &CStr, data: &[u8]) -> SyscallResult<()> {
 }
 
 fn fill(fd: RawFd, path: &CStr, data: &[u8]) -> SyscallResult<()> {
-    let mut old = UserFsStat::default();
-    if stat_path(path.as_ptr(), &mut old).is_ok() {
-        let _ = Sys::fchown(fd, old.st_uid, old.st_gid);
+    let mut owner = UserFsStat::default();
+    let bytes = path.to_bytes();
+    let dir = match bytes.iter().rposition(|&b| b == b'/') {
+        Some(0) => c"/".to_owned(),
+        Some(end) => std::ffi::CString::new(&bytes[..end]).unwrap_or_else(|_| c".".to_owned()),
+        None => c".".to_owned(),
+    };
+    if stat_path(path.as_ptr(), &mut owner).is_ok() || stat_path(dir.as_ptr(), &mut owner).is_ok() {
+        let _ = Sys::fchown(fd, owner.st_uid, owner.st_gid);
     }
     let mut written = 0usize;
     while written < data.len() {

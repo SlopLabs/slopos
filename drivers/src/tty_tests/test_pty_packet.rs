@@ -264,13 +264,14 @@ pub fn test_poll_packet_events_pollin() -> TestResult {
 pub fn test_set_packet_mode_non_master() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
 

@@ -239,13 +239,14 @@ pub fn test_driver_kind_output_pending_dispatch() -> TestResult {
 pub fn test_pty_output_idle_immediate() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master_idx, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(_) => {
-            klog_info!("TTY_TEST: SKIP - could not allocate PTY pair");
-            return TestResult::Pass;
-        }
-    };
+    let (master_idx, master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(_) => {
+                klog_info!("TTY_TEST: SKIP - could not allocate PTY pair");
+                return TestResult::Pass;
+            }
+        };
     let slave_idx = match tty::get_pty_number(master_idx) {
         Ok(n) => TtyIndex(n as u8),
         Err(_) => {
@@ -541,7 +542,7 @@ pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
     tty::table::tty_table_init();
 
     let (master_idx, master_backing) =
-        match crate::tty::pty::pty_alloc(slopos_ostd::process::quota::root()) {
+        match crate::tty::pty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
             Ok(pair) => pair,
             Err(e) => {
                 klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -623,7 +624,7 @@ pub fn test_pty_slave_poll_pollhup_after_master_close() -> TestResult {
     tty::table::tty_table_init();
 
     let (master_idx, master_backing) =
-        match crate::tty::pty::pty_alloc(slopos_ostd::process::quota::root()) {
+        match crate::tty::pty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
             Ok(pair) => pair,
             Err(e) => {
                 klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -2127,7 +2128,8 @@ pub fn test_session_fields_pub_crate_smoke() -> TestResult {
 
 pub fn test_slave_starts_locked() -> TestResult {
     tty::table::tty_table_init();
-    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0))
+    {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);

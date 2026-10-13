@@ -21,7 +21,7 @@ use slopos_ostd::process::Cred;
 
 /// What a spawn by a `Launch` holder gives `path`, delegation included.
 fn spawned_holding(path: &[u8]) -> u64 {
-    CAP_UNIVERSAL | grant_for(path).0 | delegated_for(path)
+    CAP_UNIVERSAL | grant_for(path) | delegated_for(path)
 }
 
 /// `cap` is conferred on exactly the programs `holders` names, and on no other
@@ -50,15 +50,15 @@ fn power_is_denied_to_an_ordinary_task() -> TestResult {
         return fail!("Power must be denied under the default enforce mode");
     }
 
-    // The compositor holds display authority and no more: a task privileged
-    // for one thing must not be privileged for everything, which is the
-    // failure mode a single `Admin` capability produces.
-    let compositor = spawned_holding(b"/bin/compositor");
-    if mask_permits(compositor, Capability::Power) {
-        return fail!("the compositor must not hold Power");
+    // `ip` holds network control and no more: a task privileged for one
+    // thing must not be privileged for everything, which is the failure mode
+    // a single `Admin` capability produces.
+    let ip = spawned_holding(b"/bin/ip");
+    if mask_permits(ip, Capability::Power) {
+        return fail!("ip must not hold Power");
     }
-    if !mask_permits(compositor, Capability::DisplaySeat) {
-        return fail!("the compositor must hold DisplaySeat");
+    if !mask_permits(ip, Capability::NetAdmin) {
+        return fail!("ip must hold NetAdmin");
     }
     pass!()
 }
@@ -66,7 +66,7 @@ fn power_is_denied_to_an_ordinary_task() -> TestResult {
 /// `/bin/halt`'s grant confers `Power` and nothing else, and only the programs
 /// that bring the machine down or drive its firmware are granted it.
 fn power_is_granted_by_program_identity() -> TestResult {
-    if grant_for(b"/bin/halt").0 != Capability::Power.bit() {
+    if grant_for(b"/bin/halt") != Capability::Power.bit() {
         return fail!("/bin/halt's grant must be Power and nothing else");
     }
     if let Err(path) = conferred_on_exactly(
@@ -76,8 +76,6 @@ fn power_is_granted_by_program_identity() -> TestResult {
             b"/bin/cpufreq",
             b"/bin/bootctl",
             b"/bin/installer",
-            b"/bin/install_test",
-            b"/bin/installer_test",
         ],
     ) {
         return fail!("Power is misgranted at {:?}", core::str::from_utf8(path));
@@ -224,9 +222,8 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = signalable_refuses_invalid_targets, suite = authority);
 
-/// Init is told apart by its task id, which is what sets a nice value below
-/// zero and is never a signal target. Runs in the userland phase, the first in
-/// which init exists.
+/// Init is told apart by its task id, which is never a signal target. Runs in
+/// the userland phase, the first in which init exists.
 fn init_is_told_apart_by_its_task_id() -> TestResult {
     use crate::syscall::signalable::resolve_signal_target;
     use core::ffi::c_char;
@@ -348,17 +345,9 @@ fn launch_is_held_by_the_launchers_only() -> TestResult {
     if mask_permits(CAP_UNIVERSAL, Capability::Launch) {
         return fail!("an ordinary task must not hold Launch");
     }
-    // The installer test is a launcher because it drives a shell that keeps
-    // its own Launch.
     if let Err(path) = conferred_on_exactly(
         Capability::Launch,
-        &[
-            b"/bin/compositor",
-            b"/bin/shell",
-            b"/bin/terminal",
-            b"/bin/remoted",
-            b"/bin/installer_test",
-        ],
+        &[b"/bin/shell", b"/bin/terminal", b"/bin/remoted"],
     ) {
         return fail!("Launch is misgranted at {:?}", core::str::from_utf8(path));
     }
@@ -371,11 +360,12 @@ slopos_testing::stest!(
     suite = authority
 );
 
-/// `NetAdmin`, `RawBlock`, `Mount` and `SysInspect` land on exactly the
-/// programs that need them: network control on `ip`, raw block access on the
-/// programs that work beneath filesystems (e2fsprogs by delegation, so only
-/// from a spawner that holds it), mounting on the installer's role and the
-/// mount test, and machine inspection on the diagnostic programs. The
+/// `NetAdmin`, `RawBlock`, `Mount`, `SysInspect` and `DacOverride` land on
+/// exactly the programs that need them: network control on `ip`, raw block
+/// access on the programs that work beneath filesystems (e2fsprogs by
+/// delegation, so only from a spawner that holds it), mounting on the
+/// installer, machine inspection on the diagnostic programs, and the mode-bit
+/// override on the programs that write root-owned state for the session. The
 /// universal set holds none of them.
 fn moved_capabilities_are_conferred_by_identity() -> TestResult {
     let e2fsprogs: [&'static [u8]; 6] = [
@@ -386,31 +376,25 @@ fn moved_capabilities_are_conferred_by_identity() -> TestResult {
         b"/sbin/debugfs",
         b"/sbin/dumpe2fs",
     ];
-    let installer: [&'static [u8]; 3] = [
-        b"/bin/installer",
-        b"/bin/install_test",
-        b"/bin/installer_test",
-    ];
-    let mut raw_block: [&'static [u8]; 10] = [b""; 10];
+    let mut raw_block: [&'static [u8]; 8] = [b""; 8];
     raw_block[..6].copy_from_slice(&e2fsprogs);
-    raw_block[6..9].copy_from_slice(&installer);
-    raw_block[9] = b"/bin/bootctl";
-    let mut mount: [&'static [u8]; 4] = [b"/bin/mount_test"; 4];
-    mount[..3].copy_from_slice(&installer);
+    raw_block[6] = b"/bin/installer";
+    raw_block[7] = b"/bin/bootctl";
 
     for (cap, holders) in [
-        (
-            Capability::NetAdmin,
-            &[b"/bin/ip".as_slice(), b"/bin/dns_concurrent_test"][..],
-        ),
+        (Capability::NetAdmin, &[b"/bin/ip".as_slice()][..]),
         (Capability::RawBlock, &raw_block[..]),
-        (Capability::Mount, &mount[..]),
+        (Capability::Mount, &[b"/bin/installer".as_slice()][..]),
         (
             Capability::SysInspect,
+            &[b"/bin/kconsole".as_slice(), b"/bin/prof"][..],
+        ),
+        (
+            Capability::DacOverride,
             &[
-                b"/bin/kconsole".as_slice(),
-                b"/bin/prof",
-                b"/bin/dl_secure_probe",
+                b"/bin/keymap".as_slice(),
+                b"/bin/bootctl",
+                b"/bin/installer",
             ][..],
         ),
     ] {
@@ -426,7 +410,7 @@ fn moved_capabilities_are_conferred_by_identity() -> TestResult {
         }
     }
     for tool in e2fsprogs {
-        if grant_for(tool).0 & Capability::RawBlock.bit() != 0 {
+        if grant_for(tool) & Capability::RawBlock.bit() != 0 {
             return fail!("e2fsprogs must take RawBlock from its spawner, not be granted it");
         }
     }
@@ -444,11 +428,7 @@ slopos_testing::stest!(
 /// The role also carries `Seal`, for the mount points a new root holds the
 /// base over.
 fn boot_entry_is_the_installer_s_alone() -> TestResult {
-    let installer: &[&'static [u8]] = &[
-        b"/bin/installer",
-        b"/bin/install_test",
-        b"/bin/installer_test",
-    ];
+    let installer: &[&'static [u8]] = &[b"/bin/installer"];
     for cap in [Capability::BootEntry, Capability::Seal] {
         if let Err(path) = conferred_on_exactly(cap, installer) {
             return fail!(

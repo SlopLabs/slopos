@@ -268,7 +268,10 @@ define_syscall!(syscall_bind
             if actual_len == 0 {
                 return Err(Errno::EINVAL);
             }
-            rc_i32_to_unit(unix_socket::unix_bind(sh, &sock_addr.path[..actual_len]))
+            let path = &sock_addr.path[..actual_len];
+            let who = ctx.subject();
+            let mode = crate::syscall::fs::at_handlers::creation_mode(0o777);
+            ctx.with_cwd(|cwd| rc_i32_to_unit(unix_socket::unix_bind(sh, path, cwd, mode, &who)))
         }
         SocketFd::Inet(sock_idx) => {
             if addr_len < core::mem::size_of::<SockAddrIn>() {
@@ -427,11 +430,11 @@ define_syscall!(syscall_connect
             if actual_len == 0 {
                 return Err(Errno::EINVAL);
             }
-            rc_i32_to_unit(unix_socket::unix_connect(
-                sh,
-                &sock_addr.path[..actual_len],
-                ctx.identity(),
-            ))
+            let path = &sock_addr.path[..actual_len];
+            let who = ctx.subject();
+            ctx.with_cwd(|cwd| {
+                rc_i32_to_unit(unix_socket::unix_connect(sh, path, cwd, &who, ctx.identity()))
+            })
         }
         SocketFd::Inet(sock_idx) => {
             if addr_len < core::mem::size_of::<SockAddrIn>() {

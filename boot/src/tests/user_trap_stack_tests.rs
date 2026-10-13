@@ -84,7 +84,10 @@ pub fn test_deep_user_trap_spares_the_round_trip() -> TestResult {
         None,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
-        slopos_ostd::authority::CAP_UNIVERSAL,
+        slopos_core::exec::Endowment::Kernel {
+            caps: slopos_ostd::authority::CAP_UNIVERSAL,
+            uid: slopos_ostd::process::cred::ROOT_UID,
+        },
         &[],
         0,
         None,

@@ -46,14 +46,13 @@ const PW_PASSWD: &[u8] = b"x\0";
 const PW_SHELL: &[u8] = b"/bin/shell\0";
 
 /// The system and the one person at the machine. Compiled in rather than read
-/// from `/etc/passwd` until there is more than one person. root's home is
-/// `/` until the image carries `/root`.
+/// from `/etc/passwd` until there is more than one person.
 const USERS: [User; 2] = [
     User {
         name: b"root\0",
         uid: 0,
         gid: 0,
-        dir: b"/\0",
+        dir: b"/root\0",
     },
     User {
         name: b"user\0",

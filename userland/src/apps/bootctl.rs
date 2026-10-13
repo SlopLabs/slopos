@@ -330,8 +330,23 @@ fn last_boot(slot: &str) -> String {
 
 /// `bytes` at `dir/name` through a sibling written and flushed first, so the
 /// name holds all of it or nothing; the rename is made durable too.
+/// `dir` and each parent it lacks, made uid 0's: slot and crash records are
+/// the system's whoever runs `bootctl`.
+fn system_dir(dir: &str) -> std::io::Result<()> {
+    let mut path = std::path::PathBuf::from("/");
+    for part in std::path::Path::new(dir).components().skip(1) {
+        path.push(part);
+        match fs::create_dir(&path) {
+            Ok(()) => std::os::unix::fs::lchown(&path, Some(0), Some(0))?,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 fn write_durably(dir: &str, name: &str, bytes: &[u8], mode: u32) -> Result<String, String> {
-    fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+    system_dir(dir).map_err(|e| format!("{dir}: {e}"))?;
     let temp = format!("{dir}/.{name}.{}", std::process::id());
     let path = format!("{dir}/{name}");
     let written = OpenOptions::new()
@@ -340,7 +355,10 @@ fn write_durably(dir: &str, name: &str, bytes: &[u8], mode: u32) -> Result<Strin
         .truncate(true)
         .mode(mode)
         .open(&temp)
-        .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
+        .and_then(|mut file| {
+            std::os::unix::fs::fchown(&file, Some(0), Some(0))?;
+            file.write_all(bytes).and_then(|()| file.sync_all())
+        })
         .and_then(|()| fs::rename(&temp, &path))
         .and_then(|()| File::open(dir)?.sync_all());
     if let Err(e) = written {
@@ -505,7 +523,7 @@ fn save_records() -> Result<(), String> {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("{CRASH_STORE}: {e}")),
     };
-    fs::create_dir_all(CRASH_LOG).map_err(|e| format!("{CRASH_LOG}: {e}"))?;
+    system_dir(CRASH_LOG).map_err(|e| format!("{CRASH_LOG}: {e}"))?;
     if !on_disk(CRASH_LOG) {
         return Err(format!(
             "{CRASH_LOG} is on no writable disk; the crash records stay in {CRASH_STORE}"

@@ -327,7 +327,9 @@ persistent root, where the one default search path finds it:
 all take, puts it after the system's own tools, so nothing a writable disk
 holds shadows them. `scripts/build_fs_image.sh` takes two kinds of tree,
 both installed through one debugfs session (`scripts/fs_tree.py`), which
-writes everything as uid 0, the guest's only user. A host tree
+gives each the owner of its destination under the ownership map: the
+session's, uid 1000, under `/home`, `/src` and `/usr/local`, uid 0's
+elsewhere. A host tree
 (`FS_HOST_TREES`, `<host dir>:<guest dir>` pairs) is the host's: what it
 installed is recorded beside the image in `<image>.host/trees/`, where the guest
 cannot edit it, with a copy under `/var/lib/slopos/trees` for the guest to
@@ -401,7 +403,7 @@ down.
 (`just _fs-image-selfhost`), rebuilt every run as the tests image is, is the
 persistent root's shape, booted with the tests base: the toolchain at
 `/usr/local`, the clone seeded `--vendored`, so no build reads a registry,
-and at `/srv/ladder` the fixtures `scripts/stage_ladder_fixtures.sh` makes, a
+and at `/home/user/ladder` the fixtures `scripts/stage_ladder_fixtures.sh` makes, a
 bare repository of one crate and a sparse registry of one crate with a fresh
 test root and server identity, and the guest's half of a fresh ssh key pair
 and host key, whose host half stays in `builddir/ladder-sshd` for both boots
@@ -409,12 +411,16 @@ of `test-toolchain`. Staging them needs `git`, `openssl` and `ssh-keygen` on
 the host, and `test-toolchain` with a toolchain installed needs `sshd` (on
 PATH or at `/usr/sbin/sshd`) as well. `just test-toolchain`, `test-selfhost`,
 `test-install-guest` and `bench-selfhost` boot it as `/`, so `just test`
-never depends on `just toolchain`. `toolchain_test` holds the toolchain to
+never depends on `just toolchain`. `toolchain_test`, `selfhost_test` and
+`reboot_clone_test` run as the session does, uid 1000 holding nothing gated,
+since git refuses a clone another uid owns; a root test runs git and
+`selfhost.sh` in the clone as the session (`slopos_userland::selfhost`).
+`toolchain_test` holds the toolchain to
 the manifest the host installed it with and the clone to its vendored crates,
 and then climbs the toolchain ladder: `rustc --version` under
 `LD_DEBUG=statistics`, rustc linking a program through `cc`, cargo building a
 crate with a build script and a proc macro, cargo fetching a `git =
-"file:///srv/ladder/git/greeting.git"` dependency through libgit2, cargo
+"file:///home/user/ladder/git/greeting.git"` dependency through libgit2, cargo
 fetching a crate through libcurl and Mbed TLS from the fixture registry,
 served over loopback TLS and verified against its test root (the image's own
 CA bundle must refuse it first), clang compiling C and C++, git reading the
@@ -432,7 +438,7 @@ script with a pipeline, a background job and a here-document, Ninja running a gr
 to do, and CMake configuring a C project for the SlopOS platform, generating
 for Ninja and building a program against a shared library it reaches by its
 run path. `reboot_clone_test`
-clones the workspace to `/home/clone` and commits there on one boot and, on
+clones the workspace to `/home/user/clone` and commits there on one boot and, on
 the next boot of the same image, holds the clone to `git fsck --strict` and to a
 clean status over an index without stat data, which rehashes every file.
 
@@ -529,7 +535,8 @@ verified images carry a system of their own, which a disk root's base
 covers.
 
 **The guest installs what it builds.** `/bin/bootctl` (granted `RawBlock` for
-the raw disk and partition and `Power` for the loader's variables) finds the boot
+the raw disk and partition, `Power` for the loader's variables and
+`DacOverride` for the slot records under `/var/lib/slopos`) finds the boot
 partition by its type GUID on the disk whose GPT lists `LoaderDevicePartUUID`,
 the ESP Limine was started from, and writes a kernel and its base into a slot
 that is not the default, clearing a one-shot boot armed for that slot first,
@@ -591,8 +598,8 @@ file — has no payload, and the installer installs without the toolchain,
 saying so when the medium's disk names a payload the kernel did not mount; it
 takes a payload only from the root of a read-only ext4 volume at
 `/media/payload`, since any program can make a directory there.
-`/bin/installer` (granted `RawBlock`, `Mount`, `Power`, `BootEntry` and
-`Seal`; a `RawBlock` holder may write any disk raw, so no per-process
+`/bin/installer` (granted `RawBlock`, `Mount`, `Power`, `BootEntry`, `Seal` and
+`DacOverride`; a `RawBlock` holder may write any disk raw, so no per-process
 `DiskBlocks` ceiling binds it, and it fills a whole root in one
 process; in the shell's program
 registry, because a grant is raised only by a spawn and the shell `exec`s
@@ -983,12 +990,13 @@ an idle connection open and opens another whenever one takes a request, so
 requests run side by side; it redials with backoff and pings both ways.
 Requests are `remote-core`'s frames: run a program (argv, cwd, env, stdin,
 timeout; stdout, stderr and the exit status streamed back), and write or read
-a file, atomically and checked by SHA-256 end to end. remoted holds `Launch` by
-path, so a program it starts gets its grant — `bootctl` its `RawBlock` and
-`Power`, `cpufreq` its `Power` — and whoever holds the broker's key holds the
-machine. **The pairing lives only in the base,** which no process can write:
-every program can write `/etc`, so a pairing read from there would let any
-program point a `Launch` holder at a broker of its own. The host bakes it in
+a file, atomically and checked by SHA-256 end to end. Init starts remoted as
+the session, uid 1000, and delegates it `Launch`, so a program it starts gets
+its grant — `bootctl` its `RawBlock` and `Power`, `cpufreq` its `Power` — and
+whoever holds the broker's key holds the machine. **The pairing lives only in
+the base,** which no process can write: a pairing read from `/etc` would let
+whatever writes there — uid 0, or a program holding `DacOverride` — point a
+`Launch` holder at a broker of its own. The host bakes it in
 (`REMOTE_PAIRING_DIR`, which `tools/initramfs` packs whole or not at all) into
 a separate base, `builddir/initramfs-remote.cpio`, so the shipped
 `initramfs.cpio` never carries a token; `scripts/selfhost.sh` carries a
@@ -1327,12 +1335,20 @@ mask (`slopos_ostd::authority`, its bits stated once in `abi/src/caps.rs`): a
 syscall slot through its `cap(...)` clause, anything finer through
 `SyscallContext::holds` or a witness, and a kernel thread passes a gate only
 where the gate names it. A spawned program holds the universal capabilities
-(`ConsoleIo`, `ClipboardGlobal`, `Fate`) its spawner holds plus what its path
-earns, init and every utest binary hold `CAP_MASK_ALL`, exec keeps `caps &
-(universal | grant | delegated)` in every thread of the process, a sender may
-signal only a target whose capabilities it all holds, and `caps_drop` takes
-capabilities from a whole process for good, a thread whose clone races it
-included. A nice value below zero is init's by task id. A new check that reads
+(`ConsoleIo`, `ClipboardGlobal`, `Fate`) its spawner holds, what its spawner
+delegates through `SpawnAttrs` — any subset of the spawner's own mask, else
+`EPERM` — and what its path earns; a spawn asking for ids other than the
+spawner's takes `SetId`, one at the `High` tier `SchedHigh`, and a child that
+holds a gated capability or runs with ids other than its spawner's real ones
+starts `AT_SECURE`. Init holds `CAP_MASK_ALL` and delegates each service what
+its bootstrap table names (`userland/src/apps/init_process.rs`); a utest
+holds what its `utest!` declares, every capability as uid 0 unless it says
+`caps = …, uid = …`. exec keeps `caps & (universal | grant | delegated)` in
+every thread of the process — `delegated` being a grant row's delegated set,
+so what a spawn handed over does not survive an exec — a sender may signal only a target whose
+capabilities it all holds, and `caps_drop` takes capabilities from a whole
+process for good, a thread whose clone races it included. A nice value below
+zero takes `SchedHigh`. A new check that reads
 `task.flags`, a path, a task id or a uid where a capability fits is a second
 authority carrier.
 
@@ -1351,8 +1367,35 @@ owner; uid 0 passes nothing on its own. A signal also needs the sender's real
 or effective uid to be the target's real or saved uid; `ProcSignal` waives both
 halves, and `SIGCONT` to a task of the sender's session needs neither.
 `process_list` reports every task to everyone. The ext4 reserve is the
-superblock's `s_def_resuid` and `s_def_resgid`, which admit every process until
-the session leaves uid 0.
+superblock's `s_def_resuid` and `s_def_resgid`, uid 0's. A pty's slave
+belongs to whoever opened its master, mode 0620, as Linux's devpts gives it,
+judged on the slave an open takes. An `AF_UNIX` name is an inode of type
+socket, made through the parent's write and search checks at `bind` and
+reached through the name's write check at `connect`; a bound socket holds its
+inode open as a descriptor holds a file, so the inode is no other node's and
+its volume will not unmount, and a ring's `OP_CONNECT` takes only an absolute
+name. `/run` is memory, and the session's runtime directory, `/run/user/1000`,
+mode 0700, holds the compositor's socket. A symlink in a sticky directory
+every class may write is followed only for its owner or the directory's, as
+Linux's `protected_symlinks` has it, `DacOverride` or not.
+
+**The session is uid 1000; the system is uid 0.** Init runs as uid 0 and
+starts the compositor, the terminal, remoted and roulette as uid and gid 1000,
+home `/home/user`, `XDG_RUNTIME_DIR` its runtime directory. Every root is held
+to one ownership map, stated once in `slopos_abi::fs::ROOT_LAYOUT` and
+`SESSION_TREES` and mirrored by `scripts/lib/root_layout.sh` and
+`tools/initramfs`, whose test holds the three equal: `/`, `/etc`, `/var`,
+`/var/lib`, `/var/lib/slopos`, `/var/log`, `/home`, `/media` and `/usr` uid
+0's, 0755; `/root` 0700; `/var/tmp` 1777; `/home/user` and `/usr/local` the
+session's; and everything below `/home`, `/src` and `/usr/local` the
+session's. The image builders lay it out and record it in
+`/var/lib/slopos/owners`, `tools/initramfs` packs the record so a RAM root is
+never migrated, and the installer lays out a new root by it. Init makes
+whatever directory of it a root lacks at every boot and, once per root
+without the record, hands the session its trees and writes the record
+(`userland/src/root_layout.rs`), so a root that ran everything as uid 0 is
+migrated in place. `check_fs_image.sh --map`, the default for the tests
+image, holds a root to it.
 
 **A peer is told who connected, as of when it connected.** An `AF_UNIX`
 socket records an `Identity` (`slopos_ostd::process::identity`: the pid
@@ -1485,7 +1528,7 @@ file's header before changing `task_is_dispatch_pinned`, because the proof
 keeps verifying whether or not the model still describes the tree.
 
 ## Testing Guidelines
-The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`utest!` registration in lex order, and reports results over serial in KTAP grammar. A test flagged `FLAG_EXPLICIT` runs only when a `tests.run` pattern is its full name — `utest!(…, explicit)` is that for a userland test a host drives, its log uncaptured — and `stest!(…, kind = Userland)` runs a kernel test in the userland phase, sorted among the userland tests. The Go host wrapper (`tools/run_tests/` → `builddir/run_tests`) parses that stream into a live progress bar + per-failure detail. `just test` builds `builddir/slop-tests.iso` with `tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on`, runs QEMU with `isa-debug-exit`, and exits 0 green / 1 on any failure.
+The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`utest!` registration in lex order, and reports results over serial in KTAP grammar. A test flagged `FLAG_EXPLICIT` runs only when a `tests.run` pattern is its full name — `utest!(…, explicit)` is that for a userland test a host drives, its log uncaptured — and `stest!(…, kind = Userland)` runs a kernel test in the userland phase, sorted among the userland tests. A utest runs as uid 0 holding every capability unless it declares `caps = …` (`none`, or the gated capabilities it holds beside the universal ones) and `uid = …`, which a test of an unprivileged gate or of the person's work sets to `caps = none, uid = 1000`. The Go host wrapper (`tools/run_tests/` → `builddir/run_tests`) parses that stream into a live progress bar + per-failure detail. `just test` builds `builddir/slop-tests.iso` with `tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on`, runs QEMU with `isa-debug-exit`, and exits 0 green / 1 on any failure.
 
 **Run `just test` before sending changes.** A green `just test` is necessary but **not** sufficient — it runs neither the framekernel gates nor the three boot-log ratchets, all of which CI runs and any of which can fail on a commit whose tests pass. See **Pre-commit (MANDATORY)** below for the full sequence. For manual inspection use `just boot` or `just boot-log` (serial transcript in `test_output.log`; `VIDEO=1` for a framebuffer). Note regressions or warnings in your PR description.
 
@@ -1500,7 +1543,7 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-userland-only` — skip the kernel phase; run only the userland (`utest!`) phase.
 - `just check-tests-host` — run the Go wrapper's own unit tests via `go test ./tools/run_tests/...` (host-side, no QEMU).
 - `just check-test-count` — count-regression CI guard; fails if total planned tests across phases drops below `TEST_COUNT_BASELINE`. The default lives in `scripts/check_test_count.sh` and is written down only there — read it from the script rather than restating it here, and bump it there when the suite grows. Measure the new value with `TEST_COUNT_BASELINE=0 scripts/check_test_count.sh`; never guess it.
-- `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn` and to being at rest: `Filesystem state: clean`, no `needs_recovery`, an empty journal. Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
+- `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn`, to being at rest — `Filesystem state: clean`, no `needs_recovery`, an empty journal — and to the ownership map (`--map`, the default for the tests image). Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
 - `just test-rude-exit` — one boot that fsyncs a file into the root's journal and ends the machine holding it, then `scripts/check_fs_replay.sh`: the image must need recovery, the file must be reachable only through the journal, and after `e2fsck -E journal_only` the image must pass `e2fsck -fn`, be at rest and hold the file. In CI after `test-persist`. The kernel test runs only when `tests.run` names it exactly (`FLAG_EXPLICIT`), since it ends the machine.
 - `just test-usb` — the USB check: a boot from the tests base, with no root disk and none of the suite's (`root=initramfs`, `QEMU_NO_ROOT_DISK=1`, `QEMU_TEST_DISKS=0`, so no image is built for it), carrying both of QEMU's xHCI models, `qemu-xhci` on MSI-X and `nec-usb-xhci` with `msix=off` on MSI, each with two USB 3 and five USB 2 root ports: a SuperSpeed stick, QEMU's full-speed hub with a stick, a tablet and a mouse behind it, a high-speed stick and a full-speed keyboard, the keyboard and the tablet bound to the stdvga `video0`; on `qemu-xhci` a high-speed ext4 stick as well, and a `usb-net` behind the hub on a SLIRP network of its own, `10.0.3.0/24` with the echo peer at `10.0.3.100`, and for `nec-usb-xhci` a read-only ext4 drive the guest asks for. `qemu_run.sh` opens a QMP socket when `QEMU_QMP` names one, and `scripts/test_usb.py` drives the boot at the guest's `USB-TEST:` lines: it deletes and re-adds devices through `device_del` and `device_add`, each stick a `-blockdev` node so it survives its device, and injects keys, buttons and motion through `input-send-event`, naming `video0` for a USB keyboard or the tablet and nothing for the i8042 or the newest usb-mouse. The guest half is kernel tests registered `FLAG_EXPLICIT | FLAG_UNCAPTURED`, which the recipe names in `tests.run`, and the explicit userland tests `usb_disk_test`, `usb_net_test` and `usb_shell_test`; they hold both controllers running, every device enumerated, each 1 MiB stick bound by the `test-hooks` driver `usb-test`, which sends TEST UNIT READY over its bulk pipes, stalls its bulk-in with a stray read and sends TEST UNIT READY again once the endpoint has recovered and the stick's halt is cleared, every keyboard, tablet and mouse tried first by `usb-test-hid`, which abandons a read of its idle interrupt endpoint, waits for the endpoint to come back idle and declines, and bound by `usb-hid`; every posted report, abandoned as a halt leaves it, to being posted again by recovery; a held USB key to repeating and the i8042's second press of a held key to being a repeat; Caps Lock on a USB keyboard to lighting both USB keyboards and the i8042; Alt+PrintScreen and a command key to running the command; the tablet, a USB mouse and the PS/2 mouse to moving one cursor, and a button to staying down while either the tablet or a mouse holds it; a keyboard pulled with Shift held to leaving nothing shifted unless the i8042 still holds it; the `usb-net` to being `eth1` beside virtio-net's `eth0`, leasing `10.0.3.15`, routing its network through itself and resolving its gateway, then to leaving with its interface, routes, neighbours and DHCP client and coming back as `eth1`, and to carrying TCP to the echo peer, segments of every length from 1 to 128 bytes; every device to leaving and returning twice with no slot, claim or page left behind, the ext4 stick `sda` each time; the ext4 stick mounted, written and fsynced, then pulled under a writer that fsyncs in a loop and is refused within a minute, the mount answering `EROFS` to a create, a mkdir and a write, a read of a block never cached failing within ten seconds, `umount` releasing it, and plugged back as `sda` holding what was fsynced; the read-only drive answering `BLKROGET` with 1 and mounting read-only; each controller to interrupting for its pulls and its plugs; the dynamic MMIO registry to eight free ranges; the kconsole listing to running; a shell on the console to running what the host types on a USB keyboard; and last, as a kernel test that runs in the userland phase, each shutdown hook to leaving its controller halted, reset (DCBAAP cleared) and off the bus. The host holds the log to the same, to every device enumerated and removed as often as it was plugged and pulled, to the listing's lines, to QEMU's `ps2_set_ledstate` trace showing Caps Lock, to no enumeration failing, to neither controller answering its first command only when polled, to the ext4 stick named `sda` and the drive `sdb` and the NIC `eth1` each time they were plugged, the stick's image to `check_fs_image.sh` and to holding the guest's fsynced file, and the suite to green. In CI after `test-rude-exit`.

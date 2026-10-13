@@ -84,6 +84,53 @@ pub struct SpawnAttrs {
     /// the spawner's.
     pub cwd_ptr: u64,
     pub cwd_len: u64,
+    /// Gated capabilities the child holds beside the universal ones it
+    /// inherits. Each must be the spawner's, or the spawn is `EPERM`.
+    pub caps: u64,
+    /// The child's real, effective and saved uid under [`SPAWN_SET_UID`]. One
+    /// the spawner does not hold takes `SetId`.
+    pub uid: u32,
+    /// The same for the gid, under [`SPAWN_SET_GID`].
+    pub gid: u32,
+    /// User pointer to the child's supplementary groups, under
+    /// [`SPAWN_SET_GROUPS`], which takes `SetId`.
+    pub groups_ptr: u64,
+    pub ngroups: u32,
+    /// Which ids the child takes from the fields above; it keeps the
+    /// spawner's others, so a zeroed field asks for nothing.
+    pub set: u32,
+}
+
+pub const SPAWN_SET_UID: u32 = 1 << 0;
+pub const SPAWN_SET_GID: u32 = 1 << 1;
+pub const SPAWN_SET_GROUPS: u32 = 1 << 2;
+pub const SPAWN_SET_ALL: u32 = SPAWN_SET_UID | SPAWN_SET_GID | SPAWN_SET_GROUPS;
+
+impl SpawnAttrs {
+    /// A spawn at `priority` with `flags` and nothing else: no fd actions, no
+    /// environment, and the spawner's directory, ids and universal
+    /// capabilities.
+    pub const fn new(priority: u8, flags: u16) -> Self {
+        Self {
+            priority,
+            _pad: [0; 3],
+            flags,
+            _pad2: 0,
+            actions_ptr: 0,
+            actions_len: 0,
+            sigdefault_mask: 0,
+            envp_ptr: 0,
+            envp_len: 0,
+            cwd_ptr: 0,
+            cwd_len: 0,
+            caps: 0,
+            uid: 0,
+            gid: 0,
+            groups_ptr: 0,
+            ngroups: 0,
+            set: 0,
+        }
+    }
 }
 
 /// Upper bound on the action-array length the kernel will read.
@@ -98,7 +145,7 @@ const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_ptr) == 16)
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_len) == 24);
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_flags) == 32);
 
-const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 64);
+const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 96);
 const _: () = assert!(core::mem::align_of::<SpawnAttrs>() == 8);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, priority) == 0);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, flags) == 4);
@@ -109,6 +156,12 @@ const _: () = assert!(core::mem::offset_of!(SpawnAttrs, envp_ptr) == 32);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, envp_len) == 40);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, cwd_ptr) == 48);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, cwd_len) == 56);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, caps) == 64);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, uid) == 72);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, gid) == 76);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, groups_ptr) == 80);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, ngroups) == 88);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, set) == 92);
 
 #[cfg(test)]
 mod tests {

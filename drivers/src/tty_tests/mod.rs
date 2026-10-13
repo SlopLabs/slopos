@@ -399,6 +399,10 @@ slopos_testing::stest!(name = test_pty_close_master_first_frees_pair, suite = tt
 slopos_testing::stest!(name = test_pty_close_slave_first_frees_pair, suite = tty);
 slopos_testing::stest!(name = test_pty_reallocation_after_free, suite = tty);
 slopos_testing::stest!(name = test_pty_open_slave_validates_type, suite = tty);
+slopos_testing::stest!(
+    name = test_pty_open_slave_judges_the_owner_it_opens,
+    suite = tty
+);
 slopos_testing::stest!(name = test_pty_open_slave_prevents_free, suite = tty);
 slopos_testing::stest!(name = test_extra_slave_open_keeps_slave_alive, suite = tty);
 slopos_testing::stest!(name = test_rapid_alloc_free_realloc, suite = tty);

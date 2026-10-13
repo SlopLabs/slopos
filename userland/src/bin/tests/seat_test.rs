@@ -120,17 +120,9 @@ fn seat_fd_is_not_spawn_transferable() -> bool {
             _pad2: 0,
         };
         let attrs = SpawnAttrs {
-            priority: 2,
-            _pad: [0; 3],
-            flags: slopos_abi::task::TASK_FLAG_USER_MODE,
-            _pad2: 0,
             actions_ptr: &action as *const _ as u64,
             actions_len: 1,
-            sigdefault_mask: 0,
-            envp_ptr: 0,
-            envp_len: 0,
-            cwd_ptr: 0,
-            cwd_len: 0,
+            ..SpawnAttrs::new(2, slopos_abi::task::TASK_FLAG_USER_MODE)
         };
         let path = b"/bin/cd_test";
         let argv: [*const u8; 0] = [];

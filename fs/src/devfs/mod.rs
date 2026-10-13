@@ -11,7 +11,7 @@ pub(crate) use block::{block_read_entitled, block_write_entitled};
 pub(crate) use block::{devfs_block_node_is, devfs_resolve_block_node};
 pub use crash::{CrashRecord, CrashStoreOps, devfs_register_crash_store};
 
-use crate::fileio::PTY_SLAVE_MAJOR;
+use crate::fileio::{PTY_SLAVE_MAJOR, PTY_SLAVE_MODE};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_abi::event::MAX_TTYS;
 use slopos_abi::syscall::TtyIndex;
@@ -252,12 +252,15 @@ impl FileSystem for DevFs {
         if inode == ROOT_INODE || inode == PTS_INODE || block::is_dir(inode) {
             return Ok(FileStat::new_directory(inode));
         }
-        if let Some(index) = pty_slave_of(inode) {
-            return Ok(FileStat::new_char_device(
-                inode,
-                PTY_SLAVE_MAJOR,
-                u32::from(index),
-            ));
+        if let Some(index) = pty_slave_of(inode)
+            && let Some((uid, gid)) = tty::pty_slave_owner(TtyIndex(index))
+        {
+            return Ok(FileStat {
+                mode: PTY_SLAVE_MODE,
+                uid,
+                gid,
+                ..FileStat::new_char_device(inode, PTY_SLAVE_MAJOR, u32::from(index))
+            });
         }
 
         for dev in &DEVICES {

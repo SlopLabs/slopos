@@ -43,7 +43,7 @@ pub type ProtocolHandle = Rc<Protocol>;
 /// Retries while the compositor is still starting up.
 pub fn connect() -> Result<ProtocolHandle, ()> {
     for _ in 0..10 {
-        if let Ok(mut client) = Client::connect(b"/run/compositor") {
+        if let Ok(mut client) = Client::connect(&crate::sys::compositor_socket()) {
             let compositor_fd = client.fd();
 
             if client.ensure_output_info().is_err() {

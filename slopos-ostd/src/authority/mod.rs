@@ -127,6 +127,10 @@ pub enum Capability {
     /// file for `chmod`, `chown`, `utimensat` and the sticky bit. uid 0 owns
     /// the system's files and gets none of this from its uid.
     DacOverride,
+    /// Running ahead of everything else: spawning at the `High` tier and
+    /// setting a nice value below zero. One `loop {}` there starves the
+    /// machine.
+    SchedHigh,
 }
 
 impl Capability {
@@ -159,6 +163,7 @@ impl Capability {
             Self::RawBlock => caps::RAW_BLOCK,
             Self::SetId => caps::SET_ID,
             Self::DacOverride => caps::DAC_OVERRIDE,
+            Self::SchedHigh => caps::SCHED_HIGH,
         }
     }
 
@@ -196,6 +201,7 @@ impl Capability {
             Self::RawBlock => "RawBlock",
             Self::SetId => "SetId",
             Self::DacOverride => "DacOverride",
+            Self::SchedHigh => "SchedHigh",
         }
     }
 
@@ -225,6 +231,7 @@ impl Capability {
         Self::RawBlock,
         Self::SetId,
         Self::DacOverride,
+        Self::SchedHigh,
     ];
 }
 

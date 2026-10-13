@@ -5,7 +5,9 @@ use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 use slopos_abi::signal::{
     SIG_DFL, SIG_IGN, SIGKILL, SigSet, UserSigaction, WAIT_STATUS_CONTINUED, WNOHANG,
 };
-use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
+use slopos_abi::spawn::{
+    SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_UID, SpawnAttrs, SpawnFdAction, SpawnFdActionKind,
+};
 use slopos_abi::task::TaskPriority;
 
 /// Signal restorer trampoline — called when a signal handler returns.
@@ -32,6 +34,11 @@ pub fn getpid() -> u32 {
 #[inline(always)]
 pub fn getuid() -> u32 {
     Sys::getuid()
+}
+
+#[inline(always)]
+pub fn geteuid() -> u32 {
+    Sys::geteuid()
 }
 
 #[inline(always)]
@@ -74,6 +81,26 @@ pub fn spawn_path_with_actions(
     spawn_path_with_env(path, argv, &[], priority, flags, actions, sigdefault_mask)
 }
 
+/// What a spawn hands its child beyond the universal capabilities and the
+/// spawner's own ids.
+#[derive(Clone, Copy)]
+pub struct Endowment<'a> {
+    /// Gated capabilities, each of which the spawner must hold.
+    pub caps: u64,
+    /// Every uid and gid the child runs as, `None` for the spawner's.
+    pub ids: Option<(u32, u32)>,
+    /// The child's supplementary groups, `None` for the spawner's.
+    pub groups: Option<&'a [u32]>,
+}
+
+impl Endowment<'_> {
+    pub const NONE: Self = Self {
+        caps: 0,
+        ids: None,
+        groups: None,
+    };
+}
+
 /// An empty `cwd` inherits the caller's.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -87,11 +114,37 @@ pub fn spawn_path_in(
     actions: &[SpawnFdAction],
     sigdefault_mask: SigSet,
 ) -> i32 {
-    let attrs = SpawnAttrs {
-        priority: priority.as_u8(),
-        _pad: [0; 3],
+    spawn_endowed(
+        path,
+        argv,
+        envp,
+        cwd,
+        priority,
         flags,
-        _pad2: 0,
+        actions,
+        sigdefault_mask,
+        Endowment::NONE,
+    )
+}
+
+/// [`spawn_path_in`] handing the child `endowment` too.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_endowed(
+    path: &[u8],
+    argv: &[*const u8],
+    envp: &[*const u8],
+    cwd: &[u8],
+    priority: TaskPriority,
+    flags: u16,
+    actions: &[SpawnFdAction],
+    sigdefault_mask: SigSet,
+    endowment: Endowment<'_>,
+) -> i32 {
+    let (uid, gid) = endowment.ids.unwrap_or_default();
+    let groups = endowment.groups.unwrap_or_default();
+    let set = endowment.ids.map_or(0, |_| SPAWN_SET_UID | SPAWN_SET_GID)
+        | endowment.groups.map_or(0, |_| SPAWN_SET_GROUPS);
+    let attrs = SpawnAttrs {
         actions_ptr: actions.as_ptr() as u64,
         actions_len: actions.len() as u64,
         sigdefault_mask,
@@ -107,6 +160,13 @@ pub fn spawn_path_in(
             cwd.as_ptr() as u64
         },
         cwd_len: cwd.len() as u64,
+        caps: endowment.caps,
+        uid,
+        gid,
+        groups_ptr: groups.as_ptr() as u64,
+        ngroups: groups.len() as u32,
+        set,
+        ..SpawnAttrs::new(priority.as_u8(), flags)
     };
     unsafe {
         syscall5(

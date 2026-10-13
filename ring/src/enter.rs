@@ -256,7 +256,7 @@ pub fn ring_enter(
     drop(reaped);
 
     if min_complete > 0 {
-        let rc = harvest(table, raw_handle, min_complete, who.identity);
+        let rc = harvest(table, raw_handle, min_complete, who);
         // Never discard a submission (SLOPRING § 6.2): EINTR only when nothing
         // was submitted.
         if rc == eno(Errno::EINTR) && n_submitted == 0 {
@@ -386,7 +386,7 @@ fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe, who: &Submitter<'_>) 
     let outcome = if sqe.opcode == OP_OPENAT {
         opcode::open(table, sqe, &who.subject, who.create_mode)
     } else {
-        opcode::probe(table, sqe, file.as_ref(), &mut *ring.buffers, who.identity)
+        opcode::probe(table, sqe, file.as_ref(), &mut *ring.buffers, who)
     };
     match outcome {
         Outcome::Inline(res) => {
@@ -452,7 +452,7 @@ pub fn process_sqe_for_test(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
 /// Test hook: drive one `harvest_step` pass against a fabricated ring.
 #[cfg(feature = "test-hooks")]
 pub fn harvest_step_for_test(table: FdTable, ring: &mut Ring, min_complete: u32) -> bool {
-    harvest_step(table, ring, min_complete, Submitter::KERNEL.identity)
+    harvest_step(table, ring, min_complete, &Submitter::KERNEL)
 }
 
 /// `OP_CANCEL`: remove the in-flight rows matching `Sqe.addr`, posting
@@ -484,12 +484,7 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
 /// Complete phase: block the calling task on the in-flight set until
 /// `min_complete` CQEs are available, a signal arrives, or a deadline elapses
 /// (SLOPRING § 7.1, § 8.3). Returns 0 on progress, `-EINTR` on signal.
-fn harvest(
-    table: FdTable,
-    raw_handle: usize,
-    min_complete: u32,
-    who: &dyn Fn() -> Identity,
-) -> i32 {
+fn harvest(table: FdTable, raw_handle: usize, min_complete: u32, who: &Submitter<'_>) -> i32 {
     // Armed across every iteration: `register_files` below must find a live
     // token, and it must outlast `unregister`. See `PollWaiter`'s module docs.
     let waiter = slopos_ostd::sync::PollWaiter::new();
@@ -600,12 +595,7 @@ fn sleep_budget(deadline: Option<u64>) -> u32 {
 /// Runs under the per-ring lock, so the snapshot below and every reprobe and
 /// CQE post observe one atomic instant, with no concurrent submit/cancel
 /// mutating the table or the indices mid-pass.
-fn harvest_step(
-    table: FdTable,
-    ring: &mut Ring,
-    min_complete: u32,
-    who: &dyn Fn() -> Identity,
-) -> bool {
+fn harvest_step(table: FdTable, ring: &mut Ring, min_complete: u32, who: &Submitter<'_>) -> bool {
     let now = get_time_ms();
     let snapshot = ring.inflight.snapshot();
     // Walk by user_data so removals don't invalidate indices.
@@ -676,7 +666,7 @@ fn harvest_consuming_multishot(
     table: FdTable,
     ring: &mut Ring,
     row: &InFlight,
-    who: &dyn Fn() -> Identity,
+    who: &Submitter<'_>,
 ) {
     let ownership = opcode::is_ownership_op(row.opcode);
     loop {

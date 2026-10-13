@@ -52,9 +52,12 @@ fn spawn(path: &[u8], words: &[&str], extra: Option<i32>) -> i32 {
     )
 }
 
+/// A socket listening at `name`, which anyone may connect to.
 fn listen(name: &str) -> Option<OwnedFd> {
+    let _ = std::fs::remove_file(name);
     let fd = net::socket(slopos_abi::net::AF_UNIX, slopos_abi::net::SOCK_STREAM, 0).ok()?;
     net::bind_unix(fd.raw(), name.as_bytes()).ok()?;
+    std::fs::set_permissions(name, std::fs::Permissions::from_mode(0o666)).ok()?;
     net::listen(fd.raw(), 4).ok()?;
     Some(fd)
 }
@@ -202,7 +205,7 @@ fn socketpair_names_its_creator() -> bool {
 /// server is told the child's pid, ids and program, and the child the
 /// server's as of its `listen`.
 fn connected_pair_names_each_other() -> bool {
-    const NAME: &str = "peer-e2e-pair";
+    const NAME: &str = "/tmp/peer-e2e-pair";
     let Some(listener) = listen(NAME) else {
         eprintln!("peer_test: could not listen");
         return false;
@@ -255,7 +258,7 @@ fn connected_pair_names_each_other() -> bool {
 /// A connection handed to a spawned child still names the process that
 /// connected it, which has exited by the time the server asks.
 fn inherited_connection_keeps_its_connector() -> bool {
-    const NAME: &str = "peer-e2e-hand";
+    const NAME: &str = "/tmp/peer-e2e-hand";
     let Some(listener) = listen(NAME) else {
         eprintln!("peer_test: could not listen");
         return false;
@@ -297,7 +300,7 @@ fn inherited_connection_keeps_its_connector() -> bool {
 /// A peer's pidfd is close-on-exec, quiet while the peer runs and readable
 /// once it exits.
 fn peer_pidfd_polls_on_exit() -> bool {
-    const NAME: &str = "peer-e2e-pidfd";
+    const NAME: &str = "/tmp/peer-e2e-pidfd";
     let Some(listener) = listen(NAME) else {
         eprintln!("peer_test: could not listen");
         return false;
@@ -328,7 +331,7 @@ fn peer_pidfd_polls_on_exit() -> bool {
 
 /// The same program copied out of the base connects as no program at all.
 fn a_program_outside_the_base_is_other() -> bool {
-    const NAME: &str = "peer-e2e-other";
+    const NAME: &str = "/tmp/peer-e2e-other";
     let copied = std::fs::copy("/bin/peer_test", COPY).is_ok()
         && std::fs::set_permissions(COPY, std::fs::Permissions::from_mode(0o755)).is_ok();
     if !copied {
@@ -375,7 +378,7 @@ fn foreign_code_forfeits_the_program() -> bool {
 /// syscall does, not the kernel that ran it.
 fn ring_connect_attests_its_submitter() -> bool {
     use slopos_userland::ring::{Ring, slopfut};
-    const NAME: &str = "peer-e2e-ring";
+    const NAME: &str = "/tmp/peer-e2e-ring";
     let Some(listener) = listen(NAME) else {
         eprintln!("peer_test: could not listen");
         return false;
@@ -408,7 +411,7 @@ fn ring_connect_attests_its_submitter() -> bool {
 /// when it does: the ids change while it waits, within one `ring_enter`.
 fn a_waiting_ring_connect_attests_as_of_its_connect() -> bool {
     use slopos_userland::ring::{Ring, slopfut};
-    const NAME: &str = "peer-e2e-ring-wait";
+    const NAME: &str = "/tmp/peer-e2e-ring-wait";
     const BACKLOG: usize = 32;
     let pid = process::fork();
     if pid != 0 {

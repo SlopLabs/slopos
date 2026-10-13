@@ -34,8 +34,12 @@ static PTY_ALLOC_LOCK: SpinLock<()> =
 /// Allocate a PTY master/slave pair and return the master's owning
 /// backing (the `/dev/ptmx` open). The slave end is created alongside it,
 /// kept alive by the master's strong link, and opened separately via
-/// `pty_open_slave` / `pty_open_peer`.
-pub fn pty_alloc(account: AccountId) -> Result<(TtyIndex, KArc<TtyBacking>), TtyError> {
+/// `pty_open_slave` / `pty_open_peer`. Its node belongs to `owner`, the
+/// opener's effective uid and gid, as Linux's devpts gives it.
+pub fn pty_alloc(
+    account: AccountId,
+    owner: (u32, u32),
+) -> Result<(TtyIndex, KArc<TtyBacking>), TtyError> {
     let _alloc = PTY_ALLOC_LOCK.lock();
 
     let master_slot = find_free_slot().ok_or(TtyError::NotAllocated)?;
@@ -45,7 +49,7 @@ pub fn pty_alloc(account: AccountId) -> Result<(TtyIndex, KArc<TtyBacking>), Tty
     let slave_idx = TtyIndex(slave_slot as u8);
 
     let (master_backing, slave_backing) =
-        TtyBacking::new_pair(master_idx, slave_idx, account).ok_or(TtyError::OutOfMemory)?;
+        TtyBacking::new_pair(master_idx, slave_idx, account, owner).ok_or(TtyError::OutOfMemory)?;
 
     // Both states are built before either is installed, so a mid-way
     // allocation failure leaves the slots untouched.
@@ -207,6 +211,12 @@ pub fn is_pty_slave(idx: TtyIndex) -> bool {
         guard.as_ref().map(|tty| &tty.driver),
         Some(TtyDriverKind::PtySlave { .. })
     )
+}
+
+/// Who a live slave's node belongs to.
+pub fn pty_slave_owner(idx: TtyIndex) -> Option<(u32, u32)> {
+    let backing = TTY_BACKINGS.get(usize::from(idx.0))?.lock().upgrade();
+    backing?.slave_owner()
 }
 
 pub fn get_pty_number(idx: TtyIndex) -> Result<u32, TtyError> {

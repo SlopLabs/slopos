@@ -66,8 +66,9 @@ fn tty_grantpt_adapter(tty_index: TtyIndex) -> Result<(), tty::TtyError> {
 
 fn tty_alloc_pty_adapter(
     account: slopos_ostd::process::AccountId,
+    owner: (u32, u32),
 ) -> Result<(TtyIndex, KArc<dyn FileBacking>), tty::TtyError> {
-    tty::pty_alloc(account).map(|(idx, b)| -> (TtyIndex, KArc<dyn FileBacking>) { (idx, b) })
+    tty::pty_alloc(account, owner).map(|(idx, b)| -> (TtyIndex, KArc<dyn FileBacking>) { (idx, b) })
 }
 
 fn tty_ptsname_adapter(tty_index: TtyIndex, buf: *mut u8, buflen: usize) -> i32 {
@@ -156,7 +157,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
     ptsname: tty_ptsname_adapter,
     get_pty_number: tty::get_pty_number,
     is_pty_slave: tty::is_pty_slave,
-    open_pty_slave: tty::pty_open_slave,
+    pty_slave_owner: tty::pty_slave_owner,
+    open_pty_slave: tty::pty_open_slave_as,
     open_pty_peer: tty::pty_open_peer,
     detach_session_by_id: tty::detach_session_by_id,
     poll_events: tty::poll_events,

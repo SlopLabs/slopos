@@ -210,7 +210,8 @@ pub struct Subject {
 }
 
 impl Subject {
-    /// The kernel acting for itself, which no mode bit refuses.
+    /// The kernel acting for itself, which no mode bit refuses; a link another
+    /// uid planted in a shared sticky directory still is.
     pub const KERNEL: Self = Self {
         cred: Cred::ROOT,
         dac_override: true,
@@ -227,6 +228,10 @@ impl Subject {
 
     pub fn sticky_permits(&self, dir_mode: u16, dir_uid: u32, owner: u32) -> bool {
         sticky_permits(&self.cred, self.dac_override, dir_mode, dir_uid, owner)
+    }
+
+    pub fn follow_permits(&self, dir_mode: u16, dir_uid: u32, link_owner: u32) -> bool {
+        follow_permits(&self.cred, dir_mode, dir_uid, link_owner)
     }
 
     /// `chown`'s rule: a holder of `DacOverride` gives anything to anyone; the
@@ -338,6 +343,14 @@ pub fn permits(
         return true;
     }
     dac_override && (want != Perm::Exec || is_dir || mode & 0o111 != 0)
+}
+
+/// Whether a symlink owned by `link_owner` may be followed: in a sticky,
+/// world-writable directory only by its owner or the directory's, as Linux's
+/// `protected_symlinks` has it, `DacOverride` or not.
+pub fn follow_permits(cred: &Cred, dir_mode: u16, dir_uid: u32, link_owner: u32) -> bool {
+    let shared = slopos_abi::fs::S_ISVTX as u16 | 0o002;
+    dir_mode & shared != shared || cred.euid == link_owner || dir_uid == link_owner
 }
 
 /// The sticky bit's rule for removing or replacing a name: in a sticky
@@ -576,6 +589,23 @@ mod tests {
         let after = c.saved_at_exec();
         assert_eq!(uids(&after), [U, U, U]);
         assert_eq!(after.set_uid(0, false), Err(Errno::EPERM));
+    }
+
+    #[test]
+    fn a_shared_directory_follows_a_link_only_for_its_owners() {
+        let c = Cred::of(U, U);
+        assert!(follow_permits(&c, 0o1777, 0, U), "the link's own owner");
+        assert!(
+            follow_permits(&c, 0o1777, OTHER, OTHER),
+            "the directory owner's link"
+        );
+        assert!(!follow_permits(&c, 0o1777, 0, OTHER), "another user's link");
+        assert!(
+            !follow_permits(&Cred::ROOT, 0o1777, 0, U),
+            "uid 0 is held to it"
+        );
+        assert!(follow_permits(&c, 0o1775, 0, OTHER), "not world-writable");
+        assert!(follow_permits(&c, 0o0777, 0, OTHER), "not sticky");
     }
 
     #[test]

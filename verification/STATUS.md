@@ -31,7 +31,7 @@ own doc-comments — not duplicated here.
 | `slopos_ostd::task` ownership core **LOGIC** | `proofs/task_ownership.rs` | Task ownership: the existence reference is flag-elected and parked/released at most once (T1), container transitions conserve the strong count (T2), registered ⟺ holds its existence reference (T3), no use-after-free (T4), exactly one winner of the 1→0 release with destruction exactly once (T5), a reap never fires on a dispatch-pinned task (T6), destruction implies full detachment (T7) |
 | `slopos_ring` index/state-machine **LOGIC** | `proofs/ring_cursor.rs` + `proofs/ring_layout.rs` | SlopRing cursors: CQ no-overwrite, CQ-full correctness, overflow monotone-latch, cq_tail advance-exactly-one, in-flight cap, submit/consume bound; masked SQE/CQE indices in bounds + `locate` no-OOB/no-straddle |
 | `slopos_net::tcp` zero-copy send queue **LOGIC** | `proofs/tcp_zc_pin.rs` | TCP `MSG_ZEROCOPY` pin lifetime: every (re)transmit reads in-bounds of its pin (INV-TCPZC-PIN-IN-BOUNDS); a pin is held across retransmits and freed only on cumulative ACK / teardown, never mid-DMA (INV-TCPZC-HELD-UNTIL-ACK) |
-| `slopos_ostd::authority` capability **LOGIC** | `proofs/authority.rs` | Authority: only a program load raises a task's mask (S1); exec is `kept(image) & caps`, `kept` being `CAP_UNIVERSAL \| grant \| delegated`, so no capability survives that the image does not keep *and* the task did not hold (S2); a spawn confers the image's grant only to a spawner holding `Launch`, and its delegated set only to a spawner holding all of it (S3); reduction (`task_restrict_caps`, which `caps_drop` takes on every task of the process) is total and idempotent with no error a caller can ignore (S4) |
+| `slopos_ostd::authority` capability **LOGIC** | `proofs/authority.rs` | Authority: only a program load raises a task's mask (S1); exec is `kept(image) & caps`, `kept` being `CAP_UNIVERSAL \| grant \| delegated`, so no capability survives that the image does not keep *and* the task did not hold (S2); a spawn confers the image's grant only to a spawner holding `Launch`, and its delegated set only to a spawner holding all of it (S3); a spawn delegates through `SpawnAttrs` only what its spawner holds (S5); reduction (`task_restrict_caps`, which `caps_drop` takes on every task of the process) is total and idempotent with no error a caller can ignore (S4) |
 
 > `mm::vm_space` uses the coarse lock-per-`VmSpace` model, in two tiers. The
 > borrow checker admits one `CursorMut` per `VmSpace` *object* (`CursorMut<'a>`
@@ -95,11 +95,14 @@ own doc-comments — not duplicated here.
 > `base | (Launch ? grant : 0) | (delegated ⊆ spawner ? delegated : 0)`, proving
 > that authority is raised at exactly one site, that exec's intersection bounds
 > the result by both operands, and that a spawn confers nothing outside `base`
-> and a `Launch` holder's grant that the spawner does not hold itself. `Drop` is `task_restrict_caps`;
+> and a `Launch` holder's grant that the spawner does not hold itself, `base`
+> being the spawner's universal capabilities and what it delegates through
+> `SpawnAttrs`, which must be within its own mask (S5). `Drop` is `task_restrict_caps`;
 > `caps_drop(m)` takes it with `!m` on every task of the calling process, and
 > `task_commit` on each thread the process registers afterwards. Exec's `grant`
 > operand is the tree's whole kept set, `CAP_UNIVERSAL | grant | delegated`.
-> Seven broken witnesses carry the obligations: a widening step, an exec that
+> Eight broken witnesses carry the obligations: an endowment taken without
+> its subset check, a widening step, an exec that
 > takes the grant un-intersected, an exec that keeps the old mask, a spawn that
 > ignores `Launch`, a spawn written as `parent.caps & grant` (which starves the
 > grant — the shell holds no display authority, so `/bin/roulette` could never
@@ -107,7 +110,9 @@ own doc-comments — not duplicated here.
 > `mke2fs` holding `RawBlock`), and a fallible drop. Removing the exec
 > intersection fails two obligations; removing the `Launch` bound fails
 > `spawn_without_launch_confers_only_what_it_holds`, and removing the subset
-> check fails it and `spawn_never_delegates_unheld`, each confirmed by planting.
+> check fails it and `spawn_never_delegates_unheld`, and removing the
+> endowment's check fails `endowment_is_within_the_spawner`, each confirmed by
+> planting.
 >
 > **NOT machine-checked, and audited only:** the memory ordering on
 > `Task::caps`. The store is `Release`, the load `Acquire` and a narrowing one
@@ -120,8 +125,10 @@ own doc-comments — not duplicated here.
 > Also excluded: `caps_drop`'s reach — the drop is recorded on the process
 > before the walk, so a thread whose clone races it loses the bits too, while a
 > fork or spawn racing it is ordered before it and keeps what was read — since the
-> model holds one task; the kernel's own spawns (`launch_init` and the utest
-> runner hand over `CAP_MASK_ALL` themselves); and whether the dispatcher consults the
+> model holds one task; the kernel's own spawns (`launch_init` hands over
+> `CAP_MASK_ALL` and the utest runner what a test declares); the ids a spawn
+> gives its child, POSIX's rule over `Cred`, which the kernel's `cred` tests
+> hold; and whether the dispatcher consults the
 > mask at all — that is the `const` totality assert over the syscall table plus
 > `scripts/check_authority_reachability.sh`, neither of which is a Verus
 > obligation.

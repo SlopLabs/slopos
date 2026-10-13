@@ -195,7 +195,7 @@ pub(super) struct PtyPair {
 pub(super) fn open_pty_pair() -> PtyPair {
     tty::table::tty_table_init();
     let (master, master_backing) =
-        tty::pty_alloc(slopos_ostd::process::quota::root()).expect("pty_alloc");
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).expect("pty_alloc");
     let slave = TtyIndex(tty::get_pty_number(master).expect("get_pty_number") as u8);
     tty::set_pty_lock(master, false).expect("unlock slave");
     let slave_backing = tty::pty_open_slave(slave).expect("open slave");
@@ -230,7 +230,8 @@ pub(super) fn packet_mode_setup_pty() -> Option<(
     PtyGuard,
 )> {
     tty::table::tty_table_init();
-    let (master, master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).ok()?;
+    let (master, master_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).ok()?;
     let slave_num = tty::get_pty_number(master).ok()?;
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).ok()?;

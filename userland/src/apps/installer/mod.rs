@@ -841,6 +841,9 @@ fn install(s: Settled, medium: &Medium) -> Result<(), String> {
         root::forget_slots(&mounted)?;
     }
     root::fill(&mounted, medium, s.remote.as_deref())?;
+    if !s.keep_root {
+        root::record_owners(&mounted)?;
+    }
     mounted.finish()?;
 
     step(5, "writing both slots");

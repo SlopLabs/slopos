@@ -650,7 +650,7 @@ fn work_area(screen_w: u32, screen_h: u32) -> Rect {
 /// Ask `/bin/ip` to move the master networking switch.
 ///
 /// Spawned rather than issued directly: `net_iface_ctl` needs `NetAdmin`, the
-/// compositor is granted only its seats and `Launch`, and `/bin/ip` is the one
+/// compositor holds only its seats and `Launch`, and `/bin/ip` is the one
 /// shipped program the kernel's program-identity table grants `NetAdmin`. Asking
 /// for the capability here would widen the trusted surface of the process that
 /// already owns the framebuffer and every input event.

@@ -18,6 +18,12 @@ pub use connection::Connection;
 pub use server::Server;
 pub use types::*;
 
+/// Where the compositor of `uid`'s session listens: in the session's runtime
+/// directory, which init makes for it alone.
+pub fn socket_path(uid: u32) -> alloc::vec::Vec<u8> {
+    alloc::format!("/run/user/{uid}/compositor").into_bytes()
+}
+
 /// Monotonic timestamp in milliseconds since boot.
 pub(crate) fn timestamp_ms() -> u64 {
     let mut ts = slopos_abi::syscall::types::Timespec {

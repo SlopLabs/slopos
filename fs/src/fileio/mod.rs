@@ -975,6 +975,9 @@ pub const TTY_DEVICE_MAJOR: u32 = 4;
 /// Linux's first Unix98 pseudo-terminal slave major: `/dev/pts/<n>` is
 /// `(136, n)`.
 pub const PTY_SLAVE_MAJOR: u32 = 136;
+/// A slave's node: its owner reads and writes it, its group writes to it, as
+/// a `mesg y` terminal.
+pub const PTY_SLAVE_MODE: u16 = 0o620;
 /// A master is `/dev/ptmx`'s device, `(5, 2)`, as on Linux.
 pub const PTMX_MAJOR: u32 = 5;
 pub const PTMX_MINOR: usize = 2;

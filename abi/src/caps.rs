@@ -20,9 +20,10 @@ pub const NET_ADMIN: u64 = 1 << 15;
 pub const RAW_BLOCK: u64 = 1 << 16;
 pub const SET_ID: u64 = 1 << 17;
 pub const DAC_OVERRIDE: u64 = 1 << 18;
+pub const SCHED_HIGH: u64 = 1 << 19;
 
 /// What every program holds.
 pub const UNIVERSAL: u64 = CONSOLE_IO | CLIPBOARD_GLOBAL | FATE;
 
 /// Every bit a capability names.
-pub const ALL: u64 = (DAC_OVERRIDE << 1) - 1;
+pub const ALL: u64 = (SCHED_HIGH << 1) - 1;

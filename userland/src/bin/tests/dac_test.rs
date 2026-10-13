@@ -4,22 +4,33 @@
 //!
 //! The runner hands this test every capability as uid 0, so the parent lays
 //! out root-owned fixtures and each case runs in a forked child that changes
-//! its ids and drops its overrides first.
+//! its ids and drops its overrides first. Under `--session` it runs as the
+//! session does, declared uid 1000 with nothing gated, and holds the root's
+//! ownership map to what that process may write.
 
 use slopos_userland as _;
 
 use std::fs::{self, File, OpenOptions};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
+use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::caps::{DAC_OVERRIDE, SET_ID};
-use slopos_slibc::process::ids::{getresuid, setgroups, setresgid, setresuid};
+use slopos_abi::net::{AF_UNIX, SOCK_STREAM};
+use slopos_slibc::SyscallResult;
+use slopos_slibc::process::ids::{getresgid, getresuid, setgroups, setresgid, setresuid};
 use slopos_slibc::process::{_exit, WEXITSTATUS, WIFEXITED, fork, waitpid};
 use slopos_slibc::test_harness::note;
+use slopos_userland::root_layout;
 use slopos_userland::syscall::core::caps_drop;
+use slopos_userland::syscall::{OwnedFd, net, process};
 
 const USER: u32 = 1000;
 const EPERM: i32 = 1;
 const EACCES: i32 = 13;
+const SESSION: &str = "--session";
 
 const ETC_FILE: &str = "/etc/dac_test.conf";
 const ETC_NEW: &str = "/etc/dac_test.new";
@@ -29,6 +40,15 @@ const PUBLIC: &str = "/var/dac_test/public";
 const THEIRS: &str = "/tmp/dac_test.theirs";
 const MINE: &str = "/tmp/dac_test.mine";
 const ROOTS_OWN: &str = "/tmp/dac_test.roots";
+const THEIR_LINK: &str = "/tmp/dac_test.link";
+const ROOTS_LINK: &str = "/tmp/dac_test.roots_link";
+const ROOTS_SOCKET: &str = "/var/dac_test/socket";
+const REFUSED_SOCKET: &str = "/var/dac_test/theirs.sock";
+const SHARED_SOCKET: &str = "/tmp/dac_test.sock";
+const OLD_ROOT: &str = "/var/tmp/dac_test.old_root";
+
+static ROOTS_PTS: AtomicU32 = AtomicU32::new(u32::MAX);
+static SAID: Mutex<String> = Mutex::new(String::new());
 
 /// The errno an operation failed with, or 0 for success.
 fn errno_of<T>(result: std::io::Result<T>) -> i32 {
@@ -38,11 +58,24 @@ fn errno_of<T>(result: std::io::Result<T>) -> i32 {
     }
 }
 
+fn sys_errno<T>(result: SyscallResult<T>) -> i32 {
+    match result {
+        Ok(_) => 0,
+        Err(e) => e.errno(),
+    }
+}
+
+/// `note`, kept where a forked case can hand it to its parent.
+fn say(msg: &str) {
+    note(msg);
+    *SAID.lock().unwrap_or_else(|e| e.into_inner()) = msg.to_owned();
+}
+
 fn expect(label: &str, got: i32, want: i32) -> bool {
     if got == want {
         return true;
     }
-    note(&format!("{label}: errno {got}, want {want}"));
+    say(&format!("{label}: errno {got}, want {want}"));
     false
 }
 
@@ -61,22 +94,39 @@ fn become_user() -> bool {
 /// Run `body` as the person in a child process, so what it gives up this
 /// one keeps.
 fn as_user(label: &str, body: fn() -> bool) -> bool {
-    let pid = unsafe { fork() };
-    if pid == 0 {
-        let ok = become_user() && body();
-        unsafe { _exit(if ok { 0 } else { 1 }) };
-    }
-    reaped_cleanly(label, pid)
+    in_child(label, become_user, body)
 }
 
-fn reaped_cleanly(label: &str, pid: i32) -> bool {
+/// `body` in a child that has run `setup` first; what the child said on
+/// failing becomes this case's note.
+fn in_child(label: &str, setup: fn() -> bool, body: fn() -> bool) -> bool {
+    let Ok((mut reader, mut writer)) = std::io::pipe() else {
+        say(&format!("{label}: pipe failed"));
+        return false;
+    };
+    let pid = unsafe { fork() };
+    if pid == 0 {
+        let ok = setup() && body();
+        if !ok {
+            let said = SAID.lock().map(|said| said.clone()).unwrap_or_default();
+            let _ = writer.write_all(said.as_bytes());
+        }
+        unsafe { _exit(if ok { 0 } else { 1 }) };
+    }
+    drop(writer);
     if pid < 0 {
-        note(&format!("{label}: fork failed"));
+        say(&format!("{label}: fork failed"));
         return false;
     }
     let mut status = 0;
     let reaped = unsafe { waitpid(pid, &mut status, 0) };
-    reaped == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0
+    if reaped == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 {
+        return true;
+    }
+    let mut said = String::new();
+    let _ = reader.read_to_string(&mut said);
+    say(&format!("{label}: {said}"));
+    false
 }
 
 fn write_mode(path: &str, mode: u32) -> std::io::Result<()> {
@@ -95,13 +145,26 @@ fn lay_out_fixtures() -> bool {
         && write_mode(PUBLIC, 0o644).is_ok()
         && write_mode(THEIRS, 0o666).is_ok();
     if !laid {
-        note("could not lay out the root-owned fixtures");
+        say("could not lay out the root-owned fixtures");
     }
     laid
 }
 
 fn clean_up() -> bool {
-    for path in [ETC_FILE, ETC_NEW, SECRET, PUBLIC, THEIRS, MINE, ROOTS_OWN] {
+    for path in [
+        ETC_FILE,
+        ETC_NEW,
+        SECRET,
+        PUBLIC,
+        THEIRS,
+        MINE,
+        ROOTS_OWN,
+        THEIR_LINK,
+        ROOTS_LINK,
+        ROOTS_SOCKET,
+        REFUSED_SOCKET,
+        SHARED_SOCKET,
+    ] {
         let _ = fs::remove_file(path);
     }
     fs::remove_dir(PRIVATE_DIR).is_ok()
@@ -111,7 +174,7 @@ fn tmp_is_shared_and_sticky() -> bool {
     let tmp = fs::metadata("/tmp").map(|m| (m.uid(), m.mode() & 0o7777));
     let theirs = fs::metadata(THEIRS).map(|m| (m.uid(), m.mode() & 0o7777));
     if tmp.as_ref().ok() != Some(&(0, 0o1777)) || theirs.as_ref().ok() != Some(&(0, 0o666)) {
-        note(&format!("/tmp is {tmp:?} and the fixture {theirs:?}"));
+        say(&format!("/tmp is {tmp:?} and the fixture {theirs:?}"));
         return false;
     }
     true
@@ -128,15 +191,15 @@ fn the_switch_takes_every_id() -> bool {
             .is_ok_and(|m| m.uid() == USER && m.gid() == USER);
         let _ = fs::remove_file(MINE);
         if read != 0 || (r, e, s) != (USER, USER, USER) {
-            note(&format!("getresuid answered {read}: ({r}, {e}, {s})"));
+            say(&format!("getresuid answered {read}: ({r}, {e}, {s})"));
             return false;
         }
         if back != -1 {
-            note("uid 1000 without SetId became uid 0 again");
+            say("uid 1000 without SetId became uid 0 again");
             return false;
         }
         if !owned {
-            note(&format!("a new file is not uid 1000's: {made:?}"));
+            say(&format!("a new file is not uid 1000's: {made:?}"));
             return false;
         }
         true
@@ -204,35 +267,316 @@ fn a_root_file_stays_root_owned() -> bool {
 
 /// uid 0 without `DacOverride` is held to the owner's bits like anyone.
 fn uid_zero_holds_no_override() -> bool {
-    let pid = unsafe { fork() };
-    if pid == 0 {
-        caps_drop(DAC_OVERRIDE);
-        let ok = write_mode(ROOTS_OWN, 0o444).is_ok()
-            && expect(
-                "write its own 0444 file",
-                errno_of(OpenOptions::new().write(true).open(ROOTS_OWN)),
-                EACCES,
-            )
-            && expect(
-                "chmod its own file",
-                errno_of(fs::set_permissions(
-                    ROOTS_OWN,
-                    fs::Permissions::from_mode(0o644),
-                )),
-                0,
-            )
-            && expect(
-                "write its own 0644 file",
-                errno_of(OpenOptions::new().write(true).open(ROOTS_OWN)),
-                0,
-            );
-        let _ = fs::remove_file(ROOTS_OWN);
-        unsafe { _exit(if ok { 0 } else { 1 }) };
-    }
-    reaped_cleanly("uid 0", pid)
+    in_child(
+        "uid 0",
+        || {
+            caps_drop(DAC_OVERRIDE);
+            true
+        },
+        || {
+            let ok = write_mode(ROOTS_OWN, 0o444).is_ok()
+                && expect(
+                    "write its own 0444 file",
+                    errno_of(OpenOptions::new().write(true).open(ROOTS_OWN)),
+                    EACCES,
+                )
+                && expect(
+                    "chmod its own file",
+                    errno_of(fs::set_permissions(
+                        ROOTS_OWN,
+                        fs::Permissions::from_mode(0o644),
+                    )),
+                    0,
+                )
+                && expect(
+                    "write its own 0644 file",
+                    errno_of(OpenOptions::new().write(true).open(ROOTS_OWN)),
+                    0,
+                );
+            let _ = fs::remove_file(ROOTS_OWN);
+            ok
+        },
+    )
 }
 
+fn pts(index: u32) -> String {
+    format!("/dev/pts/{index}")
+}
+
+fn stat_of(path: &str) -> Option<(u32, u32, u32)> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.uid(), meta.gid(), meta.mode() & 0o7777))
+}
+
+fn read_write(path: &str) -> std::io::Result<File> {
+    OpenOptions::new().read(true).write(true).open(path)
+}
+
+/// A slave belongs to whoever opened its master, so another uid cannot open
+/// it; the same uid's own slave opens.
+fn a_pty_slave_answers_its_opener() -> bool {
+    let Ok((_master, index)) = process::openpty() else {
+        say("root could not open a pty");
+        return false;
+    };
+    ROOTS_PTS.store(index, Ordering::Relaxed);
+    let roots = stat_of(&pts(index));
+    if roots != Some((0, 0, 0o620)) {
+        say(&format!("root's slave is {roots:?}"));
+        return false;
+    }
+    as_user("pty", || {
+        let theirs = read_write(&pts(ROOTS_PTS.load(Ordering::Relaxed)));
+        let Ok((_master, own)) = process::openpty() else {
+            say("the user could not open a pty");
+            return false;
+        };
+        let owned = stat_of(&pts(own));
+        if owned != Some((USER, USER, 0o620)) {
+            say(&format!("the user's slave is {owned:?}"));
+            return false;
+        }
+        expect("open root's slave", errno_of(theirs), EACCES)
+            && expect("open its own slave", errno_of(read_write(&pts(own))), 0)
+    })
+}
+
+fn unix_listener(path: &str) -> SyscallResult<OwnedFd> {
+    let fd = net::socket(AF_UNIX, SOCK_STREAM, 0)?;
+    net::bind_unix(fd.raw(), path.as_bytes())?;
+    net::listen(fd.raw(), 4)?;
+    Ok(fd)
+}
+
+fn unix_connect(path: &str) -> i32 {
+    sys_errno(
+        net::socket(AF_UNIX, SOCK_STREAM, 0)
+            .and_then(|fd| net::connect_unix(fd.raw(), path.as_bytes())),
+    )
+}
+
+/// A socket's name is a file: binding one takes write on its directory, and
+/// connecting takes write on the name.
+fn a_socket_name_is_held_to_its_bits() -> bool {
+    let _ = fs::remove_file(ROOTS_SOCKET);
+    let Ok(_listener) = unix_listener(ROOTS_SOCKET) else {
+        say("root could not listen in its own directory");
+        return false;
+    };
+    let shut = fs::set_permissions(ROOTS_SOCKET, fs::Permissions::from_mode(0o755)).is_ok()
+        && as_user("socket closed", || {
+            let _ = fs::remove_file(SHARED_SOCKET);
+            let refused = unix_listener(REFUSED_SOCKET);
+            let shared = unix_listener(SHARED_SOCKET);
+            let owner = stat_of(SHARED_SOCKET).map(|(uid, ..)| uid);
+            let _ = fs::remove_file(SHARED_SOCKET);
+            expect(
+                "connect to root's 0755 socket",
+                unix_connect(ROOTS_SOCKET),
+                EACCES,
+            ) && expect("bind in root's directory", sys_errno(refused), EACCES)
+                && expect("bind in /tmp", sys_errno(shared), 0)
+                && expect(
+                    "own its name",
+                    owner.map_or(-1, |uid| uid as i32),
+                    USER as i32,
+                )
+        });
+    shut && fs::set_permissions(ROOTS_SOCKET, fs::Permissions::from_mode(0o666)).is_ok()
+        && as_user("socket open", || {
+            expect(
+                "connect to root's 0666 socket",
+                unix_connect(ROOTS_SOCKET),
+                0,
+            )
+        })
+}
+
+/// In a sticky directory anyone may write, a link is followed only by its
+/// owner or the directory's, so a planted name cannot steer a root process.
+fn a_link_in_tmp_is_followed_by_its_owners() -> bool {
+    let _ = fs::remove_file(ROOTS_LINK);
+    let planted = as_user("plant", || {
+        let _ = fs::remove_file(THEIR_LINK);
+        let made = symlink(PUBLIC, THEIR_LINK);
+        expect("plant a link in /tmp", errno_of(made), 0)
+            && expect("follow its own link", errno_of(fs::read(THEIR_LINK)), 0)
+    });
+    let followed = fs::read(THEIR_LINK);
+    let looked_at = fs::symlink_metadata(THEIR_LINK).map(|m| m.uid());
+    let own = symlink(PUBLIC, ROOTS_LINK).and_then(|()| fs::read(ROOTS_LINK));
+    let removed = fs::remove_file(THEIR_LINK);
+    planted
+        && expect("follow a link the user planted", errno_of(followed), EACCES)
+        && expect("look at the link itself", errno_of(looked_at), 0)
+        && expect("follow its own link", errno_of(own), 0)
+        && expect("remove the planted link", errno_of(removed), 0)
+}
+
+fn old_root(rel: &str) -> String {
+    format!("{OLD_ROOT}/{rel}")
+}
+
+fn owner_in_old_root(rel: &str) -> Option<(u32, u32)> {
+    let meta = fs::symlink_metadata(old_root(rel)).ok()?;
+    Some((meta.uid(), meta.gid()))
+}
+
+fn stage_old_root() -> bool {
+    let _ = fs::remove_dir_all(OLD_ROOT);
+    let files = [
+        "home/user/notes",
+        "src/slopos/Cargo.toml",
+        "usr/local/bin/tool",
+        "etc/keymap",
+    ];
+    files.iter().all(|rel| {
+        let path = old_root(rel);
+        Path::new(&path)
+            .parent()
+            .is_some_and(|dir| fs::create_dir_all(dir).is_ok())
+            && fs::write(&path, b"written as uid 0\n").is_ok()
+    }) && fs::hard_link(old_root("etc/keymap"), old_root("home/user/keymap")).is_ok()
+        && symlink(old_root("etc/keymap"), old_root("home/user/link")).is_ok()
+        && fs::set_permissions(old_root("etc"), fs::Permissions::from_mode(0o777)).is_ok()
+}
+
+/// A root every process wrote as uid 0 is migrated once: the session's trees
+/// become its own but for a file with another name, the map's directories
+/// take their owner and mode, and the record keeps a later boot from doing it
+/// again.
+fn a_preserved_root_is_handed_to_the_session() -> bool {
+    if !stage_old_root() {
+        say("could not stage a root written as uid 0");
+        return false;
+    }
+    root_layout::lay_out(Path::new(OLD_ROOT));
+    let session = Some((USER, USER));
+    let system = Some((0, 0));
+    for (rel, want) in [
+        ("home/user", session),
+        ("home/user/notes", session),
+        ("home/user/link", session),
+        ("src", session),
+        ("src/slopos/Cargo.toml", session),
+        ("usr/local", session),
+        ("usr/local/bin/tool", session),
+        ("home/user/keymap", system),
+        ("etc/keymap", system),
+        ("home", system),
+        ("root", system),
+    ] {
+        let held = owner_in_old_root(rel);
+        if held != want {
+            say(&format!("{rel} is {held:?}, not {want:?}"));
+            return false;
+        }
+    }
+    for (rel, mode) in [("etc", 0o755), ("root", 0o700), ("var/tmp", 0o1777)] {
+        let held = stat_of(&old_root(rel)).map_or(0, |(.., held)| held);
+        if held != mode {
+            say(&format!("{rel} has mode {held:o}, not {mode:o}"));
+            return false;
+        }
+    }
+    let record = fs::read_to_string(old_root("var/lib/slopos/owners")).unwrap_or_default();
+    if record != "1000:1000 /home\n1000:1000 /src\n1000:1000 /usr/local\n" {
+        say(&format!("the record reads {record:?}"));
+        return false;
+    }
+    let later = fs::write(old_root("home/user/later"), b"after the migration\n").is_ok();
+    root_layout::lay_out(Path::new(OLD_ROOT));
+    let kept = owner_in_old_root("home/user/later");
+    let _ = fs::remove_dir_all(OLD_ROOT);
+    if !later || kept != system {
+        say(&format!(
+            "a file made after the migration is {kept:?} after a second boot"
+        ));
+        return false;
+    }
+    true
+}
+
+fn session_is_the_person() -> bool {
+    let (mut uids, mut gids) = ([0u32; 3], [0u32; 3]);
+    let read = unsafe {
+        getresuid(&mut uids[0], &mut uids[1], &mut uids[2]) == 0
+            && getresgid(&mut gids[0], &mut gids[1], &mut gids[2]) == 0
+    };
+    if !read || uids != [USER; 3] || gids != [USER; 3] {
+        say(&format!("the session runs as uids {uids:?}, gids {gids:?}"));
+        return false;
+    }
+    true
+}
+
+fn create_errno(dir: &str) -> i32 {
+    let path = format!("{dir}/dac_test.session");
+    let made = File::create(&path);
+    if made.is_ok() {
+        let _ = fs::remove_file(&path);
+    }
+    errno_of(made)
+}
+
+fn session_writes_only_its_own() -> bool {
+    let mut ok = true;
+    for dir in ["/", "/etc", "/var/lib/slopos", "/usr"] {
+        ok &= expect(&format!("create in {dir}"), create_errno(dir), EACCES);
+    }
+    for dir in [slopos_abi::fs::SESSION_HOME, "/tmp", "/var/tmp"] {
+        ok &= expect(&format!("create in {dir}"), create_errno(dir), 0);
+    }
+    ok & expect("list /root", errno_of(fs::read_dir("/root")), EACCES)
+}
+
+fn session_has_its_runtime_dir() -> bool {
+    let dir = format!("/run/user/{USER}");
+    let held = stat_of(&dir);
+    if held != Some((USER, USER, 0o700)) {
+        say(&format!("{dir} is {held:?}"));
+        return false;
+    }
+    true
+}
+
+fn session_owns_its_pty() -> bool {
+    let Ok((_master, index)) = process::openpty() else {
+        say("the session could not open a pty");
+        return false;
+    };
+    let held = stat_of(&pts(index));
+    if held != Some((USER, USER, 0o620)) {
+        say(&format!("its slave is {held:?}"));
+        return false;
+    }
+    expect("open its slave", errno_of(read_write(&pts(index))), 0)
+}
+
+fn session_binds_where_it_writes() -> bool {
+    let _ = fs::remove_file(SHARED_SOCKET);
+    let refused = unix_listener("/etc/dac_test.sock");
+    let shared = unix_listener(SHARED_SOCKET);
+    let _ = fs::remove_file(SHARED_SOCKET);
+    expect("bind in /etc", sys_errno(refused), EACCES)
+        && expect("bind in /tmp", sys_errno(shared), 0)
+}
+
+const SESSION_CASES: &[(&str, fn() -> bool)] = &[
+    ("session_is_the_person", session_is_the_person),
+    ("session_writes_only_its_own", session_writes_only_its_own),
+    ("session_has_its_runtime_dir", session_has_its_runtime_dir),
+    ("session_owns_its_pty", session_owns_its_pty),
+    (
+        "session_binds_where_it_writes",
+        session_binds_where_it_writes,
+    ),
+];
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(SESSION) {
+        slopos_slibc::test_harness::run(SESSION_CASES);
+    }
     slopos_slibc::test_harness::run(&[
         ("lay_out_fixtures", lay_out_fixtures),
         ("tmp_is_shared_and_sticky", tmp_is_shared_and_sticky),
@@ -251,6 +595,22 @@ fn main() {
         ),
         ("a_root_file_stays_root_owned", a_root_file_stays_root_owned),
         ("uid_zero_holds_no_override", uid_zero_holds_no_override),
+        (
+            "a_pty_slave_answers_its_opener",
+            a_pty_slave_answers_its_opener,
+        ),
+        (
+            "a_socket_name_is_held_to_its_bits",
+            a_socket_name_is_held_to_its_bits,
+        ),
+        (
+            "a_link_in_tmp_is_followed_by_its_owners",
+            a_link_in_tmp_is_followed_by_its_owners,
+        ),
+        (
+            "a_preserved_root_is_handed_to_the_session",
+            a_preserved_root_is_handed_to_the_session,
+        ),
         ("clean_up", clean_up),
     ]);
 }

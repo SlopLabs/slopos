@@ -15,8 +15,8 @@ use slopos_fs::fileio::FdTable;
 use slopos_abi::Errno;
 use slopos_abi::quota::CommitPagesAxis;
 use slopos_ostd::mm::vm_space::VmSpace;
-use slopos_ostd::process::Program;
 use slopos_ostd::process::quota::try_charge;
+use slopos_ostd::process::{Cred, Program};
 use slopos_ostd::{KArc, KBox, KVec};
 
 use slopos_abi::auxv::{
@@ -156,7 +156,7 @@ pub fn task_is_init(task: &slopos_sched::task_struct::Task) -> bool {
 
 /// The running task's identity, or `None` for a kernel thread, which the ext4
 /// reserve admits: a refused writeback makes a full disk an unrecoverable one.
-pub fn current_task_cred() -> Option<slopos_ostd::process::Cred> {
+pub fn current_task_cred() -> Option<Cred> {
     crate::syscall::context::cred_of(slopos_sched::task_struct::Current::get()?.task())
 }
 
@@ -167,7 +167,10 @@ pub fn launch_init() -> Result<u32, Errno> {
         None,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
-        CAP_MASK_ALL,
+        Endowment::Kernel {
+            caps: CAP_MASK_ALL,
+            uid: slopos_ostd::process::cred::ROOT_UID,
+        },
         &[],
         0,
         None,
@@ -283,8 +286,91 @@ fn resolve_inherited_job_control(
     }
 }
 
-/// `caps` is the authority the kernel's caller hands the child; the image's
-/// grant is added to it.
+/// What a spawn hands its child beside the image's grant.
+#[derive(Clone, Copy)]
+pub enum Endowment<'a> {
+    /// The kernel's own spawn: exactly these capabilities, every id `uid`.
+    Kernel { caps: u64, uid: u32 },
+    /// A task's spawn, bounded by what the spawner holds.
+    Delegated(Delegation<'a>),
+}
+
+/// What a spawner asks for its child: gated capabilities beside the universal
+/// ones it holds, and ids, `None` keeping its own.
+#[derive(Clone, Copy, Default)]
+pub struct Delegation<'a> {
+    pub caps: u64,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub groups: Option<&'a [u32]>,
+}
+
+impl Delegation<'_> {
+    /// The child's identity, its ids saved as an exec saves them.
+    #[inline(never)]
+    fn cred(&self, spawner: &Cred, set_id: bool) -> Result<Cred, Errno> {
+        let mut cred = *spawner;
+        if let Some(uid) = self.uid {
+            cred = cred.set_resuid([uid; 3], set_id)?;
+        }
+        if let Some(gid) = self.gid {
+            cred = cred.set_resgid([gid; 3], set_id)?;
+        }
+        if let Some(groups) = self.groups {
+            cred = cred.set_groups(groups, set_id)?;
+        }
+        Ok(cred.saved_at_exec())
+    }
+}
+
+/// An [`Endowment`] its spawner may give.
+struct Endowed<'a> {
+    caps: u64,
+    endowment: Endowment<'a>,
+    /// The child starts `AT_SECURE` whatever its grant.
+    secure: bool,
+}
+
+impl<'a> Endowment<'a> {
+    /// A capability the spawner lacks, or an id it may not take, is `EPERM`.
+    #[inline(never)]
+    fn check(self, spawner: &Cred, held: u64) -> Result<Endowed<'a>, Errno> {
+        let ask = match self {
+            Self::Kernel { caps, .. } => {
+                return Ok(Endowed {
+                    caps,
+                    endowment: self,
+                    secure: false,
+                });
+            }
+            Self::Delegated(ask) => ask,
+        };
+        if ask.caps & !held != 0 {
+            return Err(Errno::EPERM);
+        }
+        let cred = ask.cred(spawner, mask_permits(held, Capability::SetId))?;
+        let caps = held & CAP_UNIVERSAL | ask.caps;
+        let foreign_ids = [cred.ruid, cred.euid] != [spawner.ruid; 2]
+            || [cred.rgid, cred.egid] != [spawner.rgid; 2];
+        Ok(Endowed {
+            caps,
+            endowment: self,
+            secure: caps & !CAP_UNIVERSAL != 0 || foreign_ids,
+        })
+    }
+}
+
+impl Endowed<'_> {
+    /// The identity [`Endowment::check`] admitted, for the same spawner.
+    #[inline(never)]
+    fn cred(&self, spawner: &Cred) -> Result<Cred, Errno> {
+        match self.endowment {
+            Endowment::Kernel { uid, .. } => Ok(Cred::of(uid, uid)),
+            Endowment::Delegated(ask) => ask.cred(spawner, true),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_program_with_attrs(
     path: &[u8],
@@ -292,7 +378,7 @@ pub fn spawn_program_with_attrs(
     envp: Option<&[&[u8]]>,
     priority: TaskPriority,
     flags: u16,
-    caps: u64,
+    endowment: Endowment<'_>,
     actions: &[FdAction],
     sigdefault_mask: u64,
     parent_table: Option<FdTable>,
@@ -304,7 +390,7 @@ pub fn spawn_program_with_attrs(
         envp,
         priority,
         flags,
-        caps,
+        endowment,
         actions,
         sigdefault_mask,
         parent_table,
@@ -320,9 +406,9 @@ pub fn spawn_program_with_cwd(
     path: &[u8],
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
-    mut priority: TaskPriority,
+    priority: TaskPriority,
     mut flags: u16,
-    caps: u64,
+    endowment: Endowment<'_>,
     actions: &[FdAction],
     sigdefault_mask: u64,
     parent_table: Option<FdTable>,
@@ -334,10 +420,14 @@ pub fn spawn_program_with_cwd(
         None if parent_task_id == INVALID_TASK_ID => Subject::KERNEL,
         None => return Err(Errno::ESRCH),
         Some(parent) => match crate::syscall::context::subject_of(parent) {
-            who if who.cred == slopos_ostd::process::Cred::NOBODY => return Err(Errno::ESRCH),
+            who if who.cred == Cred::NOBODY => return Err(Errno::ESRCH),
             who => who,
         },
     };
+    let spawner_caps = parent_ref
+        .as_ref()
+        .map(|parent| slopos_ostd::task::ops::task_caps(parent));
+    let endowed = &endowment.check(&spawner.cred, spawner_caps.unwrap_or(CAP_NONE))?;
     let result = (|| {
         // Resolved once so the grant table and the loader agree on the file:
         // for a script, its interpreter. `comm` takes the path as passed.
@@ -348,7 +438,7 @@ pub fn spawn_program_with_cwd(
             return Err(Errno::E2BIG);
         }
 
-        let (granted, granted_priority) = grants::grant_for(normalized_path);
+        let granted = grants::grant_for(normalized_path);
         let delegated = if program.named_directly(path, cwd) {
             grants::delegated_for(normalized_path)
         } else {
@@ -356,26 +446,17 @@ pub fn spawn_program_with_cwd(
         };
 
         // A raise needs `Launch`; an ordinary spawn raises nothing and needs
-        // no right. Not an intersection with the spawner's own authority: the
-        // shell holds no display authority, so `/bin/roulette` could not draw.
-        // A spawner that may not raise gets the image ungranted, not a refusal:
-        // `/bin/sh` and every `#!/bin/sh` script load the granted shell.
+        // no right. A spawner that may not raise gets the image ungranted, not
+        // a refusal: `/bin/sh` and every `#!/bin/sh` script load the granted
+        // shell.
         let mut raised = CAP_NONE;
-        if granted != CAP_NONE || delegated != CAP_NONE {
-            let spawner_caps = parent_ref
-                .as_ref()
-                .map(|parent| slopos_ostd::task::ops::task_caps(parent));
-            if spawner_caps.is_none_or(|held| mask_permits(held, Capability::Launch)) {
-                raised = granted;
-                if let Some(tier) = granted_priority {
-                    priority = tier;
-                }
-            }
-            if spawner_caps.is_none_or(|held| delegated & !held == 0) {
-                raised |= delegated;
-            }
+        if spawner_caps.is_none_or(|held| mask_permits(held, Capability::Launch)) {
+            raised = granted;
         }
-        let child_caps = caps | raised;
+        if spawner_caps.is_none_or(|held| delegated & !held == 0) {
+            raised |= delegated;
+        }
+        let child_caps = endowed.caps | raised;
 
         flags |= TASK_FLAG_USER_MODE;
         let task_name = task_name_from_path(path)?;
@@ -399,7 +480,7 @@ pub fn spawn_program_with_cwd(
         if spawn.with_child(|child| {
             child
                 .process()
-                .map(|process| process.change_cred(|_| Ok(spawner.cred.saved_at_exec())))
+                .map(|process| process.change_cred(|_| endowed.cred(&spawner.cred)))
         }) != Some(Some(Ok(())))
         {
             return Err(Errno::ENOMEM);
@@ -430,7 +511,7 @@ pub fn spawn_program_with_cwd(
             &program,
             argv.as_deref(),
             envp,
-            raised != CAP_NONE || mixed_ids(&spawner.cred),
+            endowed.secure || raised != CAP_NONE,
             spawner,
             &mut entry,
             &mut stack_ptr,
@@ -626,8 +707,6 @@ pub fn attest_exec(task: &slopos_sched::task_struct::Task, loaded: Program, atte
 }
 
 /// `execve`'s half of [`Cred::saved_at_exec`].
-///
-/// [`Cred::saved_at_exec`]: slopos_ostd::process::Cred::saved_at_exec
 pub fn save_ids_for_exec(task: &slopos_sched::task_struct::Task) {
     if let Some(process) = task.process() {
         let _ = process.change_cred(|cred| Ok(cred.saved_at_exec()));
@@ -636,7 +715,7 @@ pub fn save_ids_for_exec(task: &slopos_sched::task_struct::Task) {
 
 /// An identity whose effective ids differ from its real ones, which a program
 /// must treat as it would a setuid start.
-fn mixed_ids(cred: &slopos_ostd::process::Cred) -> bool {
+fn mixed_ids(cred: &Cred) -> bool {
     cred.euid != cred.ruid || cred.egid != cred.rgid
 }
 
@@ -654,7 +733,7 @@ pub fn narrow_authority_for_exec(
     named_directly: bool,
 ) {
     let image = image.as_bytes();
-    let (granted, _) = grants::grant_for(image);
+    let granted = grants::grant_for(image);
     let delegated = if named_directly {
         grants::delegated_for(image)
     } else {
@@ -748,9 +827,9 @@ fn open_executable(path: &[u8], who: &Subject) -> Result<(VfsHandle, u64), Errno
     let handle =
         vfs_open_flags_at(path, b"/", neither, RESOLVE_FOLLOW, who, None).map_err(|e| match e {
             slopos_fs::VfsError::NotFound => Errno::ENOENT,
-            slopos_fs::VfsError::IsDirectory | slopos_fs::VfsError::PermissionDenied => {
-                Errno::EACCES
-            }
+            slopos_fs::VfsError::IsDirectory
+            | slopos_fs::VfsError::PermissionDenied
+            | slopos_fs::VfsError::NoDevice => Errno::EACCES,
             _ => Errno::EIO,
         })?;
 

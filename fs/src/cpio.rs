@@ -198,7 +198,13 @@ pub fn unpack_cpio_into_root(archive: &[u8]) -> Result<usize, CpioError> {
         match entry.mode & S_IFMT {
             S_IFDIR => {
                 ensure_parents(path)?;
-                mkdir_ignore_exists(path)?;
+                match vfs_mkdir(path) {
+                    Ok(()) => {
+                        vfs_set_mode(path, (entry.mode & 0o7777) as u16).map_err(CpioError::Vfs)?
+                    }
+                    Err(VfsError::AlreadyExists) => {}
+                    Err(e) => return Err(CpioError::Vfs(e)),
+                }
                 created += 1;
             }
             S_IFREG => {

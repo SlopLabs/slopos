@@ -2426,7 +2426,10 @@ fn run_probe_to_death(
         None,
         slopos_abi::task::TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
-        CAP_UNIVERSAL,
+        crate::exec::Endowment::Kernel {
+            caps: CAP_UNIVERSAL,
+            uid: slopos_ostd::process::cred::ROOT_UID,
+        },
         &[],
         0,
         None,

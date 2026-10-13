@@ -587,7 +587,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --disable-new-dtags -rpath '${ORIGIN}/rpath'
     "$LD_LLD" -o "$BUILD_DIR/dl_search_runpath.elf" "${DLS_LINK[@]}" \
         --enable-new-dtags -rpath '$ORIGIN/runpath'
-    # Granted in core/src/exec/grants.rs, so it runs with AT_SECURE: both
+    # Spawned holding a delegated capability, so it runs with AT_SECURE: both
     # entries it would honour otherwise point at a copy it must not load.
     "$LD_LLD" -o "$BUILD_DIR/dl_secure_probe.elf" "${DLS_LINK[@]}" \
         --enable-new-dtags -rpath '$ORIGIN/../tmp/dl_secure:/tmp/dl_secure_abs'

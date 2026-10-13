@@ -52,7 +52,9 @@ enum PeerLink {
     /// Serial or virtual console — no peer.
     Console,
     MasterOf(KArc<TtyBacking>),
-    SlaveOf(KWeak<TtyBacking>),
+    /// The master, and the uid and gid the slave's node belongs to: whoever
+    /// opened the master.
+    SlaveOf(KWeak<TtyBacking>, (u32, u32)),
 }
 
 slopos_ostd::charge_audit!(TtyBacking);
@@ -69,7 +71,15 @@ impl TtyBacking {
     }
 
     pub fn is_pty_slave(&self) -> bool {
-        matches!(self.peer, PeerLink::SlaveOf(_))
+        matches!(self.peer, PeerLink::SlaveOf(..))
+    }
+
+    /// Who a slave's node belongs to.
+    pub(crate) fn slave_owner(&self) -> Option<(u32, u32)> {
+        match self.peer {
+            PeerLink::SlaveOf(_, owner) => Some(owner),
+            _ => None,
+        }
     }
 
     /// The slave end of a master backing.
@@ -83,7 +93,7 @@ impl TtyBacking {
     /// The master end of a slave backing, if it is still alive.
     fn master_link(&self) -> Option<KArc<TtyBacking>> {
         match &self.peer {
-            PeerLink::SlaveOf(master) => master.upgrade(),
+            PeerLink::SlaveOf(master, _) => master.upgrade(),
             _ => None,
         }
     }
@@ -95,6 +105,7 @@ impl TtyBacking {
         master_idx: TtyIndex,
         slave_idx: TtyIndex,
         account: AccountId,
+        owner: (u32, u32),
     ) -> Option<(KArc<TtyBacking>, KArc<TtyBacking>)> {
         // Both slots are charged before either object exists, so a refusal
         // never leaves half a pair built. One two-unit token on the master
@@ -106,7 +117,7 @@ impl TtyBacking {
         let master = KArc::try_new_cyclic(|master_weak| {
             match KArc::try_new(TtyBacking {
                 idx: slave_idx,
-                peer: PeerLink::SlaveOf(master_weak.clone()),
+                peer: PeerLink::SlaveOf(master_weak.clone(), owner),
                 object_charge: SharedCharge::Alias(AliasOf {
                     owner: "the master TtyBacking's two-slot charge",
                 }),
@@ -147,7 +158,7 @@ impl Drop for TtyBacking {
                 super::lifecycle::hangup(slave.index());
                 free_slot(self.idx);
             }
-            PeerLink::SlaveOf(_) => {
+            PeerLink::SlaveOf(..) => {
                 // Reachable only once the master (strong holder) is gone
                 // and no slave open holds us: the pair is fully closed.
                 free_slot(self.idx);
@@ -310,7 +321,18 @@ pub fn open_tty(idx: TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> {
 
 /// Open the PTY slave at `idx` (`/dev/pts/N`). Fails on a locked slave
 /// (`TIOCSPTLCK`) and on a dead pair.
+#[cfg(feature = "test-hooks")]
 pub fn pty_open_slave(idx: TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> {
+    pty_open_slave_as(idx, &|_| true)
+}
+
+/// Open the slave at `idx` for a caller its owner's ids and mode `admits`,
+/// judged on the backing this open takes, so a slot freed and reallocated
+/// meanwhile is judged as its new owner's.
+pub fn pty_open_slave_as(
+    idx: TtyIndex,
+    admits: &dyn Fn((u32, u32)) -> bool,
+) -> Result<KArc<dyn FileBacking>, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
@@ -319,8 +341,9 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> 
         let reg = TTY_BACKINGS[slot].lock();
         reg.upgrade().ok_or(TtyError::NotAllocated)?
     };
-    if !existing.is_pty_slave() {
-        return Err(TtyError::NotAllocated);
+    let owner = existing.slave_owner().ok_or(TtyError::NotAllocated)?;
+    if !admits(owner) {
+        return Err(TtyError::AccessDenied);
     }
     if slave_locked(slot) {
         return Err(TtyError::PermissionDenied);

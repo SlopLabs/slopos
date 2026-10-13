@@ -777,6 +777,7 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
             FileType::Directory => NewInode::Directory,
             FileType::Regular => NewInode::File,
             FileType::Pipe => NewInode::Fifo,
+            FileType::Socket => NewInode::Socket,
             _ => return Err(ext2_error_to_vfs(Ext2Error::InvalidInode)),
         };
         self.with_ext2(|fs| fs.create_owned(parent as u32, name, kind, owner, mode))

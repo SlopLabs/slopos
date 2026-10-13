@@ -2,7 +2,10 @@
 //!
 //! Each [`utest!`](crate::utest) here corresponds to a binary in
 //! `userland/src/bin/tests/`, which must also be listed in the justfile's
-//! `test_userland_bins` to be packaged into `ext2-tests.img`.
+//! `test_userland_bins` to be packaged into `ext2-tests.img`. A test of an
+//! unprivileged gate runs as the session does: `caps = none, uid = 1000`.
+
+use slopos_abi::caps::{DISPLAY_SEAT, INPUT_SEAT, MOUNT, NET_ADMIN};
 
 crate::utest!(
     name = utest_heap_allocator,
@@ -19,7 +22,8 @@ crate::utest!(name = utest_curl_e2e, bin = "/bin/curl_e2e_test");
 crate::utest!(name = utest_dns_resolve, bin = "/bin/dns_resolve_test");
 crate::utest!(
     name = utest_dns_concurrent,
-    bin = "/bin/dns_concurrent_test"
+    bin = "/bin/dns_concurrent_test",
+    caps = NET_ADMIN
 );
 crate::utest!(name = utest_https_transfer, bin = "/bin/transfer_test");
 crate::utest!(name = utest_cd, bin = "/bin/cd_test");
@@ -71,24 +75,61 @@ crate::utest!(
     name = utest_spawn_privilege,
     bin = "/bin/spawn_privilege_test"
 );
-crate::utest!(name = utest_seat, bin = "/bin/seat_test");
-crate::utest!(name = utest_mount, bin = "/bin/mount_test");
-crate::utest!(name = utest_toolchain, bin = "/bin/toolchain_test");
+crate::utest!(
+    name = utest_spawn_privilege_session,
+    bin = "/bin/spawn_privilege_test",
+    argv = &["spawn_privilege_test", "--session"],
+    caps = none,
+    uid = 1000
+);
+crate::utest!(
+    name = utest_seat,
+    bin = "/bin/seat_test",
+    caps = DISPLAY_SEAT | INPUT_SEAT
+);
+crate::utest!(name = utest_mount, bin = "/bin/mount_test", caps = MOUNT);
+crate::utest!(
+    name = utest_toolchain,
+    bin = "/bin/toolchain_test",
+    caps = none,
+    uid = 1000
+);
 crate::utest!(name = utest_install, bin = "/bin/install_test");
 crate::utest!(name = utest_installer, bin = "/bin/installer_test");
 crate::utest!(
     name = utest_selfhost,
     bin = "/bin/selfhost_test",
-    uncaptured
+    uncaptured,
+    caps = none,
+    uid = 1000
 );
 crate::utest!(name = utest_stdio_stream, bin = "/bin/stdio_stream_test");
 crate::utest!(name = utest_ip_e2e, bin = "/bin/ip_e2e_test");
+crate::utest!(
+    name = utest_ip_e2e_session,
+    bin = "/bin/ip_e2e_test",
+    argv = &["ip_e2e_test", "--session"],
+    caps = none,
+    uid = 1000
+);
 crate::utest!(name = utest_rlimit, bin = "/bin/rlimit_test");
 crate::utest!(name = utest_dac, bin = "/bin/dac_test");
+crate::utest!(
+    name = utest_dac_session,
+    bin = "/bin/dac_test",
+    argv = &["dac_test", "--session"],
+    caps = none,
+    uid = 1000
+);
 crate::utest!(name = utest_peer, bin = "/bin/peer_test");
 crate::utest!(name = utest_fifo, bin = "/bin/fifo_test");
 crate::utest!(name = utest_persist, bin = "/bin/persist_test");
-crate::utest!(name = utest_reboot_clone, bin = "/bin/reboot_clone_test");
+crate::utest!(
+    name = utest_reboot_clone,
+    bin = "/bin/reboot_clone_test",
+    caps = none,
+    uid = 1000
+);
 crate::utest!(name = utest_cpufreq, bin = "/bin/cpufreq_test");
 crate::utest!(name = utest_usb_disk, bin = "/bin/usb_disk_test", explicit);
 crate::utest!(name = utest_usb_net, bin = "/bin/usb_net_test", explicit);

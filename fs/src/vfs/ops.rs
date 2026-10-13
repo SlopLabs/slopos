@@ -5,7 +5,9 @@ use crate::vfs::path::{
     resolve_path_at, resolve_path_canon_at,
 };
 use crate::vfs::perm::{InodePerm, Perm, Subject};
-use crate::vfs::traits::{FileStat, FileType, InodeId, VfsError, VfsResult, same_filesystem};
+use crate::vfs::traits::{
+    FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult, same_filesystem,
+};
 use slopos_abi::fs::{FS_TYPE_DIRECTORY, UserFsEntry};
 use slopos_ostd::KVec;
 
@@ -122,6 +124,7 @@ pub fn vfs_open_flags_at(
             match stat.file_type {
                 FileType::Directory => return Err(VfsError::IsDirectory),
                 FileType::Symlink => return Err(VfsError::TooManySymlinks),
+                FileType::Socket => return Err(VfsError::NoDevice),
                 _ => {}
             }
             if flags.readable {
@@ -234,6 +237,91 @@ fn create_node_at(
             .mode_for_child(who, mode, file_type == FileType::Directory),
     )?;
     Ok(())
+}
+
+/// An `AF_UNIX` socket node.
+#[derive(Clone, Copy)]
+pub struct SocketNode {
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+}
+
+impl SocketNode {
+    pub fn is(&self, other: &Self) -> bool {
+        same_filesystem(self.fs, other.fs) && self.inode == other.inode
+    }
+}
+
+/// A bound socket's node, held open like a file's, so its inode is neither
+/// freed nor reused while the socket lives, whatever becomes of its names.
+/// Dropped with no spinlock held: the last reference to an unlinked node
+/// frees it.
+pub struct SocketName(SocketNode);
+
+impl SocketName {
+    pub fn node(&self) -> SocketNode {
+        self.0
+    }
+}
+
+impl Drop for SocketName {
+    fn drop(&mut self) {
+        if crate::vfs::orphan::close_ref(self.0.fs, self.0.inode) {
+            crate::vfs::orphan::drain_or_wake(self.0.fs);
+        }
+    }
+}
+
+/// `bind(2)`'s half: make the socket node `path` names as `who`, who must be
+/// able to add a name to its directory. A name already there, a dangling
+/// link included, is `AlreadyExists`.
+pub fn vfs_make_socket_at(
+    path: &[u8],
+    cwd: &[u8],
+    mode: u16,
+    who: &Subject,
+) -> VfsResult<SocketName> {
+    let (parent, name) = resolve_parent_at(path, cwd, who)?;
+    check_name_len(name.as_bytes())?;
+    parent.check_writable()?;
+    parent.perm.check_entries(who)?;
+    let inode = parent.fs.create_owned(
+        parent.inode,
+        name.as_bytes(),
+        FileType::Socket,
+        parent.perm.owner_for_child(who),
+        parent.perm.mode_for_child(who, mode, false),
+    )?;
+    match crate::vfs::orphan::open_ref(parent.fs, inode) {
+        Ok(()) => Ok(SocketName(SocketNode {
+            fs: parent.fs,
+            inode,
+        })),
+        Err(crate::vfs::orphan::OpenRefError::Detached) => Err(VfsError::NotFound),
+        Err(crate::vfs::orphan::OpenRefError::TableFull) => {
+            let _ = vfs_unlink_at(path, cwd, who);
+            Err(VfsError::NoSpace)
+        }
+    }
+}
+
+/// `connect(2)`'s half: the socket node `path` names, which `who` must be
+/// able to reach and write, held until the caller has matched it, so it is no
+/// other node by then. `None` when the name is not a socket's.
+pub fn vfs_socket_at(path: &[u8], cwd: &[u8], who: &Subject) -> VfsResult<Option<SocketName>> {
+    let resolved = resolve_path_at(path, cwd, RESOLVE_FOLLOW, who)?;
+    if resolved.fs.stat(resolved.inode)?.file_type != FileType::Socket {
+        return Ok(None);
+    }
+    resolved.perm.check(who, Perm::Write)?;
+    crate::vfs::orphan::open_ref(resolved.fs, resolved.inode).map_err(|e| match e {
+        crate::vfs::orphan::OpenRefError::Detached => VfsError::NotFound,
+        crate::vfs::orphan::OpenRefError::TableFull => VfsError::NoSpace,
+    })?;
+    Ok(Some(SocketName(SocketNode {
+        fs: resolved.fs,
+        inode: resolved.inode,
+    })))
 }
 
 pub fn vfs_set_mode(path: &[u8], mode: u16) -> VfsResult<()> {

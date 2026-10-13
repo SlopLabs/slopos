@@ -2,15 +2,16 @@
 """Copy a host directory tree into an ext4 image through one debugfs session.
 
 `mke2fs -d` populates only a new filesystem; a preserved image holds what
-its guest wrote, so a tree reaches one through debugfs, which writes
-everything as uid 0.
+its guest wrote, so a tree reaches one through debugfs, every entry owned by
+`--owner` (uid 0's by default) and its manifest copy by uid 0.
 
 A host tree (`install --manifests DIR --name NAME`) is the host's. What it
 installed is recorded in DIR/NAME, on the host, where the guest cannot edit
 it — an `identity` line, then `<kind> <size or -> <path>` per entry — and a reinstall removes exactly that and keeps whatever the guest put
 beside it; a copy goes to /var/lib/slopos/trees/NAME for the guest to read. A
 seed tree (no `--name`) is copied onto an image that lacks its directory and
-is the guest's from then on.
+is the guest's from then on. `--owner UID:GID` is who the tree, its
+directory included, belongs to; a directory made above it is uid 0's.
 
 Nothing on the image is trusted. It is read only through `ls -l` listings of
 directories, each bound to the inode its parent's listing gave it, so no
@@ -22,7 +23,7 @@ the manifest names, refuses the install before anything is written.
     manifest HOST
     installed MANIFESTS NAME
     exists IMAGE PATH
-    install IMAGE HOST GUEST [--manifests DIR --name NAME]
+    install IMAGE HOST GUEST [--manifests DIR --name NAME] [--owner UID:GID]
     --self-test
 
 An install refused before anything was written exits 3, any other failure 1.
@@ -48,6 +49,7 @@ ROOT_INODE = 2
 COMPONENT = re.compile(r'[^/"\\\n\r\t\x00]+')
 TARGET = re.compile(r'[^"\\\n\r\x00]+')
 IDENTITY = re.compile(r"[0-9a-f]{64}")
+OWNER = re.compile(r"(\d+):(\d+)")
 # Recorded while an install is under way, so an interrupted one reinstalls.
 UNFINISHED = "0" * 64
 # An `ls -l` entry: inode, mode, links, owner, size, date, time, and the name
@@ -252,7 +254,12 @@ def exists(image, path):
         return True
 
 
-def plan(image, host, guest, name):
+def owned(path, owner):
+    """The requests that give `path` to `owner`, a `(uid, gid)`."""
+    return [f'sif "{path}" uid {owner[0]}', f'sif "{path}" gid {owner[1]}']
+
+
+def plan(image, host, guest, name, owner=(0, 0)):
     """The requests that install `host` at `guest`, and the manifest they
     leave, or `Refused` naming every conflict."""
     host = os.path.abspath(host)
@@ -307,6 +314,8 @@ def plan(image, host, guest, name):
     def present(path):
         return img.state(path) not in ("absent", "blocked") and path not in removed
 
+    if img.state(guest) in ("absent", "blocked"):
+        creates += owned(guest, owner)
     for kind, mode, rel, target, _ in tree:
         path = join(guest, rel)
         if kind == "d":
@@ -323,6 +332,7 @@ def plan(image, host, guest, name):
             creates.append(f'sif "{path}" mode 0{0o100000 | mode:o}')
         else:
             creates.append(f'symlink "{path}" "{target}"')
+        creates += owned(path, owner)
 
     lines = manifest(host, tree)
     entries = lines[1:]
@@ -363,8 +373,8 @@ def write_manifest(path, lines):
     os.replace(path + ".part", path)
 
 
-def install(image, host, guest, name=None):
-    requests, (during, lines), copy, manifest_path = plan(image, host, guest, name)
+def install(image, host, guest, name=None, owner=(0, 0)):
+    requests, (during, lines), copy, manifest_path = plan(image, host, guest, name, owner)
     work = tempfile.mkdtemp(prefix="fs_tree.")
     try:
         if manifest_path:
@@ -373,6 +383,7 @@ def install(image, host, guest, name=None):
             listing = os.path.join(work, "manifest")
             write_manifest(listing, lines)
             requests.append(f'write "{listing}" "{copy}"')
+            requests.append(f'sif "{copy}" mode 0100644')
         _, said = debugfs(image, requests, write=True)
     finally:
         shutil.rmtree(work)
@@ -423,6 +434,11 @@ def _self_test(work):
     def read(path):
         out, _ = debugfs(image, [f'cat "{path}"'])
         return out.split(b"\n", 1)[1] if out.startswith(b"debugfs: ") else out
+
+    def owner(path, img_=image):
+        out, _ = debugfs(img_, [f'stat "{path}"'])
+        m = re.search(rb"User:\s+(\d+)\s+Group:\s+(\d+)", out)
+        return (int(m[1]), int(m[2])) if m else None
 
     def refused(what, target="/usr/local", manifest=name):
         try:
@@ -518,6 +534,7 @@ def _self_test(work):
     assert exists(other, "/src") and not exists(other, "/nowhere")
     install(other, tree, "/usr/local", None)
     assert kind_in(other, "/usr/local/bin/tool") == "f"
+    assert owner("/usr/local/bin/tool", other) == (0, 0), "a tree given no owner is uid 0's"
     debugfs(other, ["mknod /slashed p"], write=True)
     with contextlib.redirect_stderr(io.StringIO()):
         assert exists(other, "/nowhere"), "a name holding a / passed"
@@ -532,9 +549,10 @@ def _self_test(work):
     os.makedirs(os.path.join(seed, "clone"))
     with open(os.path.join(seed, "clone/README"), "w") as f:
         f.write("seed\n")
-    install(image, seed, "/src")
+    install(image, seed, "/src", owner=(1000, 1000))
     assert read("/src/clone/README") == b"seed\n" and exists(image, "/src")
     assert not exists(image, "/nowhere")
+    assert owner("/src") == owner("/src/clone/README") == (1000, 1000), "a tree takes its owner"
     sound()
 
 
@@ -550,12 +568,23 @@ def main(argv):
             print(installed(argv[1], argv[2]))
         elif len(argv) == 3 and argv[0] == "exists":
             return 0 if exists(argv[1], argv[2]) else 1
-        elif len(argv) == 4 and argv[0] == "install":
-            install(*argv[1:])
-        elif len(argv) == 8 and argv[0] == "install" and argv[4:7:2] == ["--manifests", "--name"]:
-            if not COMPONENT.fullmatch(argv[7]):
-                raise Refused(f"{argv[7]}: not a manifest name")
-            install(argv[1], argv[2], argv[3], (argv[5], argv[7]))
+        elif len(argv) >= 4 and argv[0] == "install":
+            image, host, guest, *rest = argv[1:]
+            options = dict(zip(rest[::2], rest[1::2]))
+            if len(rest) % 2 or set(options) - {"--manifests", "--name", "--owner"} or (
+                ("--manifests" in options) != ("--name" in options)
+            ):
+                print(__doc__.split("\n\n")[-1], file=sys.stderr)
+                return 2
+            name = None
+            if "--name" in options:
+                if not COMPONENT.fullmatch(options["--name"]):
+                    raise Refused(f"{options['--name']}: not a manifest name")
+                name = (options["--manifests"], options["--name"])
+            owner = OWNER.fullmatch(options.get("--owner", "0:0"))
+            if not owner:
+                raise Refused(f"{options['--owner']}: not UID:GID")
+            install(image, host, guest, name, (int(owner[1]), int(owner[2])))
         else:
             print(__doc__.split("\n\n")[-1], file=sys.stderr)
             return 2

@@ -1380,7 +1380,8 @@ pub fn test_ctty_acquire_ctty_pty_master_rejected() -> TestResult {
     let scope = SessionScope::new(100, 100);
     // The master backing is the sole open of the pair: holding it keeps both
     // ends alive, dropping it frees both slots.
-    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0))
+    {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -1405,7 +1406,8 @@ pub fn test_ctty_acquire_ctty_pty_master_rejected() -> TestResult {
 pub fn test_ctty_acquire_ctty_pty_slave_succeeds() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(200, 200);
-    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0))
+    {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -1578,7 +1580,8 @@ pub fn test_ctty_set_fg_pgrp_checked_completes_without_deadlock() -> TestResult 
 pub fn test_ctty_pty_master_ctty_does_not_attach_session() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(700, 700);
-    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0))
+    {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);

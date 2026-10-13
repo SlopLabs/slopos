@@ -116,7 +116,10 @@ fn stage_unix_addr(who: &Principal, name: &[u8]) -> Option<u64> {
     stage_cstr(who.table, who.page + ADDR, &addr[..2 + name.len()]).then_some(2 + name.len() as u64)
 }
 
+/// A socket listening at `name`, which anyone may connect to.
 fn listening(who: &Principal, name: &[u8]) -> Option<i64> {
+    slopos_fs::vfs::vfs_init_builtin_filesystems().ok()?;
+    let _ = slopos_fs::vfs::vfs_unlink(name);
     let fd = socket(who)?;
     let len = stage_unix_addr(who, name)?;
     let bound = call(
@@ -124,8 +127,9 @@ fn listening(who: &Principal, name: &[u8]) -> Option<i64> {
         syscall_bind,
         [fd as u64, who.page + ADDR, len, 0, 0, 0],
     )?;
+    let opened = slopos_fs::vfs::vfs_set_mode(name, 0o666).is_ok();
     let listened = call(who, syscall_listen, [fd as u64, 4, 0, 0, 0, 0])?;
-    (fd >= 0 && bound == 0 && listened == 0).then_some(fd)
+    (fd >= 0 && bound == 0 && opened && listened == 0).then_some(fd)
 }
 
 fn connected(who: &Principal, name: &[u8]) -> Option<i64> {
@@ -340,7 +344,7 @@ slopos_testing::stest!(
 /// that call: a change of ids afterwards reaches a new connection only.
 pub fn test_peer_cred_is_captured_at_listen_and_connect() -> TestResult {
     use crate::syscall::cred_handlers::syscall_setresuid;
-    const NAME: &[u8] = b"peer-test-capture";
+    const NAME: &[u8] = b"/tmp/peer-test-capture";
     let _fixture = SyscallFixture::new();
     let (Some(server), Some(client)) = (
         Principal::user(USER, CAP_UNIVERSAL),
@@ -482,7 +486,7 @@ slopos_testing::stest!(name = test_peer_options_without_a_peer, suite = peer);
 /// A peer's pidfd names the process that connected, polls readable once it
 /// is gone, and is still handed out after.
 pub fn test_peer_pidfd_names_the_peer_and_outlives_it() -> TestResult {
-    const NAME: &[u8] = b"peer-test-pidfd";
+    const NAME: &[u8] = b"/tmp/peer-test-pidfd";
     let _fixture = SyscallFixture::new();
     let Some(server) = Principal::user(USER, CAP_UNIVERSAL) else {
         return fail!("could not build the server");

@@ -304,7 +304,7 @@ pub use self::io::{
 
 pub use self::io::{
     get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
-    queue_packet_event, set_packet_mode, set_pty_lock,
+    pty_slave_owner, queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
 pub use self::termios::{
@@ -318,7 +318,9 @@ pub use self::job_control::{
     set_foreground_pgrp_checked,
 };
 
-pub use self::backing::{TtyBacking, TtySlaveOpen, open_tty, pty_open_peer, pty_open_slave};
+#[cfg(feature = "test-hooks")]
+pub use self::backing::pty_open_slave;
+pub use self::backing::{TtyBacking, TtySlaveOpen, open_tty, pty_open_peer, pty_open_slave_as};
 
 #[cfg(feature = "test-hooks")]
 pub use self::lifecycle::clear_hangup;

@@ -1,8 +1,11 @@
 //! The self-hosting workspace as a test sees it: the clone the host seeds at
 //! `/src/slopos`, built with the toolchain it installs at `/usr/local`.
 
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+use slopos_abi::fs::{SESSION_GID, SESSION_UID};
 
 pub const SOURCE: &str = "/src/slopos";
 /// Room on the root disk; `/tmp` is memory.
@@ -20,20 +23,26 @@ pub fn workspace() -> Result<&'static str, &'static str> {
 }
 
 /// `scripts/selfhost.sh <args>` in the tree at `root`, run as the guest's
-/// developer runs it: executed directly, so its `#!/bin/sh` picks the shell.
+/// developer runs it: as the session, executed directly, so its `#!/bin/sh`
+/// picks the shell.
 pub fn selfhost(root: &str, args: &[&str]) -> Command {
     let mut cmd = Command::new(format!("{root}/scripts/selfhost.sh"));
-    cmd.args(args)
+    cmd.uid(SESSION_UID)
+        .gid(SESSION_GID)
+        .args(args)
         .current_dir(root)
         .env("KERNEL_CARGO_TIMINGS", "1")
         .stdin(Stdio::null());
     cmd
 }
 
-/// `git <args>` in `dir`, the git on the default search path.
+/// `git <args>` in `dir`, the git on the default search path, as the session,
+/// whose clone it is: git refuses a repository another uid owns.
 pub fn git(dir: &str, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
-    cmd.args(args)
+    cmd.uid(SESSION_UID)
+        .gid(SESSION_GID)
+        .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null());

@@ -3,7 +3,10 @@ use slopos_abi::signal::{
     WAIT_OPTIONS_MASK, WAIT_STATUS_CONTINUED, WCONTINUED, WNOHANG, WUNTRACED, wait_status_exited,
     wait_status_signalled, wait_status_stopped,
 };
-use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
+use slopos_abi::spawn::{
+    SPAWN_MAX_FD_ACTIONS, SPAWN_SET_ALL, SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_UID,
+    SpawnAttrs, SpawnFdAction, SpawnFdActionKind,
+};
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, FUTEX_BITSET_MATCH_ANY, FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK,
     FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET,
@@ -19,6 +22,8 @@ use slopos_fs::vfs::canon::{CanonPath, canonicalise_at};
 use slopos_fs::vfs::path::RESOLVE_MUST_BE_DIR;
 use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
+use slopos_ostd::authority::Capability;
+use slopos_ostd::process::cred::NGROUPS_MAX;
 use slopos_ostd::task::{ExitInfo, new_group_in_session, new_session_group};
 use slopos_sched::futex::{self, FutexKey};
 use slopos_sched::scheduler::task_apply_affinity;
@@ -221,6 +226,47 @@ fn spawn_child_cwd(
     ctx.with_cwd(|cwd| resolve_new_cwd(requested, cwd, &who))
 }
 
+/// The tier a spawn asks for. `Normal` and `Low` are anyone's and `High`
+/// takes `SchedHigh`; the rest are the kernel's own.
+fn spawn_priority(
+    ctx: &crate::syscall::context::SyscallContext,
+    raw: u8,
+) -> Result<TaskPriority, Errno> {
+    match TaskPriority::try_from_u8(raw).ok_or(Errno::EINVAL)? {
+        tier @ (TaskPriority::Normal | TaskPriority::Low) => Ok(tier),
+        TaskPriority::High if ctx.holds(Capability::SchedHigh) => Ok(TaskPriority::High),
+        TaskPriority::High => Err(Errno::EPERM),
+        TaskPriority::KernelIo | TaskPriority::Idle => Err(Errno::EINVAL),
+    }
+}
+
+/// The supplementary groups a spawn names, `None` to keep the spawner's.
+#[inline(never)]
+fn spawn_groups(attrs: &SpawnAttrs) -> Result<Option<KVec<u32>>, Errno> {
+    if attrs.set & SPAWN_SET_GROUPS == 0 {
+        return Ok(None);
+    }
+    let count = attrs.ngroups as usize;
+    if count > NGROUPS_MAX {
+        return Err(Errno::EINVAL);
+    }
+    let mut groups = KVec::<u32>::with_capacity(count).map_err(|_| Errno::ENOMEM)?;
+    for idx in 0..count {
+        let slot = attrs
+            .groups_ptr
+            .checked_add((idx * core::mem::size_of::<u32>()) as u64)
+            .ok_or(Errno::EFAULT)?;
+        let user = MmUserPtr::<u32>::try_new(slot).map_err(|_| Errno::EFAULT)?;
+        let gid = copy_from_user(user).map_err(|_| Errno::EFAULT)?;
+        groups.push(gid).map_err(|_| Errno::ENOMEM)?;
+    }
+    Ok(Some(groups))
+}
+
+fn spawn_id(attrs: &SpawnAttrs, which: u32, id: u32) -> Option<u32> {
+    (attrs.set & which != 0).then_some(id)
+}
+
 /// Stage the program path off the caller's buffer. Length-delimited rather
 /// than [`UserPath`], because the spawn ABI passes a length, not a NUL.
 /// `#[inline(never)]`: the handler's own frame is already at the 2 KiB gate.
@@ -253,14 +299,12 @@ define_syscall!(syscall_spawn_path
     let attrs_user = MmUserPtr::<SpawnAttrs>::try_new(attrs_ptr).map_err(|_| Errno::EFAULT)?;
     let attrs = copy_from_user(attrs_user).map_err(|_| Errno::EFAULT)?;
 
-    let priority = TaskPriority::try_from_u8(attrs.priority).ok_or(Errno::EINVAL)?;
-    // Userland picks between the two ordinary tiers and nothing else. `High` is
-    // handed out by program identity (`exec::grants`) — a `loop {}` binary at
-    // that tier starves the machine.
-    if !matches!(priority, TaskPriority::Normal | TaskPriority::Low) {
+    let flags = validate_spawn_flags(attrs.flags)?;
+    if attrs.caps & !slopos_ostd::authority::CAP_MASK_ALL != 0 || attrs.set & !SPAWN_SET_ALL != 0 {
         return Err(Errno::EINVAL);
     }
-    let flags = validate_spawn_flags(attrs.flags)?;
+    let priority = spawn_priority(ctx, attrs.priority)?;
+    let groups = spawn_groups(&attrs)?;
     let argc = argc_raw as usize;
 
     let path_buf = spawn_program_path(&path)?;
@@ -310,27 +354,61 @@ define_syscall!(syscall_spawn_path
     let actions = read_user_spawn_actions(&attrs)?;
     let child_cwd = spawn_child_cwd(ctx, &attrs)?;
 
-    // The spawner's own table, so the child's fd actions clone from the process
-    // that asked rather than from whoever holds its number by then.
-    let parent_table = ctx.require_process().ok();
-    let parent_tid = ctx.task_id();
-    match exec::spawn_program_with_cwd(
+    let spawned = spawn_as_asked(
+        ctx,
         path_buf.as_slice(),
         argv_refs.as_deref(),
         envp_refs.as_deref(),
         priority,
         flags,
-        ctx.caps() & slopos_ostd::authority::CAP_UNIVERSAL,
+        &attrs,
+        groups.as_deref(),
         actions.as_slice(),
-        attrs.sigdefault_mask,
-        parent_table,
-        parent_tid,
         child_cwd.as_bytes(),
-    ) {
+    );
+    match spawned {
         Ok(task_id) => Ok(task_id as u64),
         Err(err) => Ok(err.raw() as u64),
     }
 });
+
+/// The spawn `attrs` asks for, as the calling task. Out of line to keep the
+/// delegation off the handler's frame, which is at the 2 KiB gate.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn spawn_as_asked(
+    ctx: &crate::syscall::context::SyscallContext,
+    path: &[u8],
+    argv: Option<&[&[u8]]>,
+    envp: Option<&[&[u8]]>,
+    priority: TaskPriority,
+    flags: u16,
+    attrs: &SpawnAttrs,
+    groups: Option<&[u32]>,
+    actions: &[exec::FdAction],
+    cwd: &[u8],
+) -> Result<u32, Errno> {
+    // The spawner's own table, so the child's fd actions clone from the process
+    // that asked rather than from whoever holds its number by then.
+    exec::spawn_program_with_cwd(
+        path,
+        argv,
+        envp,
+        priority,
+        flags,
+        exec::Endowment::Delegated(exec::Delegation {
+            caps: attrs.caps,
+            uid: spawn_id(attrs, SPAWN_SET_UID, attrs.uid),
+            gid: spawn_id(attrs, SPAWN_SET_GID, attrs.gid),
+            groups,
+        }),
+        actions,
+        attrs.sigdefault_mask,
+        ctx.require_process().ok(),
+        ctx.task_id(),
+        cwd,
+    )
+}
 
 define_syscall!(syscall_sigdefault
     (ctx, mask: u64) cap(NoneSelf)

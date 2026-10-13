@@ -3,11 +3,12 @@
 // A Verus-annotated mirror of SlopOS's capability model: the per-task mask in
 // `slopos_ostd::task::ops::{task_caps, task_set_caps, task_restrict_caps}`,
 // the exec narrowing in `slopos_core::exec::narrow_authority_for_exec`, the
-// raise site in `slopos_core::exec::spawn_program_with_attrs`, `caps_drop`
+// raise site in `slopos_core::exec::spawn_program_with_attrs`, the delegation
+// check in `Endowment::check` beside it, `caps_drop`
 // (`slopos_sched::task::process_drop_caps`), and `fork`'s explicit copy in
 // `TaskInner::clone_from_raw`.
 //
-// It machine-checks four obligations:
+// It machine-checks five obligations:
 //
 //   (S1) MONOTONE. Every step except `Exec` and `Spawn` preserves or shrinks a
 //        task's authority. Authority is never widened by acting, only by
@@ -24,8 +25,8 @@
 //        on the same entitlement.
 //   (S3) SPAWN BOUND. `child.caps == base | (Launch in parent.caps ? grant :
 //        0) | (delegated ⊆ parent.caps ? delegated : 0)`, `base` being what the
-//        kernel caller hands over (the spawner's own universal capabilities
-//        from the spawn syscall). A spawner without `Launch` confers nothing
+//        kernel caller hands over (from the spawn syscall, S5's endowment).
+//        A spawner without `Launch` confers nothing
 //        beyond `base` and what it holds itself; one with `Launch` confers the
 //        whole grant; none confers a delegated capability it lacks. Without the
 //        `Launch` bound any task obtains a privileged child by spawning the
@@ -37,6 +38,11 @@
 //        every task of the calling process. A historical local root came from
 //        an attacker making a privilege *drop* fail inside a program that
 //        ignored the result.
+//   (S5) DELEGATION BOUND. A spawn asking for `ask` is refused unless
+//        `ask ⊆ parent.caps`, and then hands over `(parent.caps & universal) |
+//        ask`, so S3's `base` is within the spawner's own mask. Without the
+//        check any task names a capability in `SpawnAttrs` and its child holds
+//        it.
 //
 // Every obligation carries a BROKEN WITNESS that must fail `auth_inv` or the
 // obligation's own postcondition, because a proof of a property nothing can
@@ -59,9 +65,12 @@
 //     the bits too. A fork or spawn racing the drop is ordered before it: the
 //     child is a new process and keeps what its creator held when it was
 //     read. The model has one task per state and so states neither.
-//   - The kernel's own spawns: `launch_init` and the utest runner hand over
-//     `CAP_MASK_ALL` themselves, whatever their caller holds. The model's
-//     spawner is always a task.
+//   - The kernel's own spawns: `launch_init` hands over `CAP_MASK_ALL` and the
+//     utest runner what a test declares, whatever their caller holds. The
+//     model's spawner is always a task.
+//   - Ids. Which uid and gid a spawn may give its child is POSIX's rule over
+//     `Cred`, held by the kernel's `cred` tests rather than this model, which
+//     has no ids.
 //   - That the dispatcher actually consults the mask before calling a handler.
 //     That is a `rustc` totality assert over the syscall table plus
 //     `scripts/check_authority_reachability.sh`, not a Verus obligation.
@@ -69,8 +78,7 @@
 // The model is deliberately MORE PERMISSIVE than the tree in one respect:
 // `Spawn` and `Exec` here take an arbitrary base, grant and delegated set,
 // whereas the tree's `grant_for` and `delegated_for` read a fixed table keyed
-// on the image path and the spawn syscall's base is the spawner's universal
-// capabilities.
+// on the image path and the spawn syscall's base is S5's endowment.
 // Proving the bounds for every possible input is strictly stronger than
 // proving them for the rows the table holds.
 
@@ -412,6 +420,44 @@ pub proof fn drop_to_all_is_identity(s: Auth)
 }
 
 // ---------------------------------------------------------------------------
+// S5 — the delegation bound
+// ---------------------------------------------------------------------------
+
+/// Whether a spawn may ask for `ask`: the `EPERM` check.
+pub open spec fn endow_permitted(parent: Auth, ask: Caps) -> bool {
+    ask & !parent.caps == 0
+}
+
+/// What a permitted spawn hands the child before any grant: the spawner's
+/// universal capabilities and what it asked to delegate.
+pub open spec fn endow(parent: Auth, ask: Caps) -> Caps {
+    (parent.caps & universal()) | ask
+}
+
+/// No permitted spawn endows a child with a capability its spawner lacks.
+pub proof fn endowment_is_within_the_spawner(parent: Auth, ask: Caps, b: Caps)
+    requires
+        endow_permitted(parent, ask),
+        (endow(parent, ask) & b) != 0,
+    ensures
+        (parent.caps & b) != 0,
+{
+    let c = parent.caps;
+    assert((ask & !c) == 0 && (((c & 0x380u64) | ask) & b) != 0 ==> (c & b) != 0) by (bit_vector);
+}
+
+/// A permitted spawn hands over everything it asked for.
+pub proof fn endowment_carries_the_ask(parent: Auth, ask: Caps)
+    requires
+        endow_permitted(parent, ask),
+    ensures
+        endow(parent, ask) & ask == ask,
+{
+    let c = parent.caps;
+    assert(((c & 0x380u64) | ask) & ask == ask) by (bit_vector);
+}
+
+// ---------------------------------------------------------------------------
 // Broken witnesses
 //
 // Each is a variant the tree deliberately does NOT implement. Every one must
@@ -490,6 +536,24 @@ pub proof fn broken_exec_keeps_caps_inherits()
     assert(exists|s: Auth, grant: Caps, b: Caps|
         #![trigger broken_exec_keeps_caps(s, grant) & b]
         (grant & b) == 0 && (broken_exec_keeps_caps(s, grant) & b) != 0);
+}
+
+/// Witness that S5's check is load-bearing: an endowment taken unchecked
+/// gives an ordinary task's child `Launch`, against
+/// `endowment_is_within_the_spawner`.
+pub proof fn broken_endowment_unchecked_raises()
+    ensures
+        exists|p: Auth, ask: Caps, b: Caps|
+            #![trigger endow(p, ask) & b]
+            (p.caps & b) == 0 && (endow(p, ask) & b) != 0,
+{
+    let ordinary = Auth { caps: 0, born_with: 0, raises: 0 };
+    assert(endow(ordinary, launch_bit()) == (0u64 & 0x380u64) | 2u64);
+    assert(((0u64 & 0x380u64) | 2u64) & 2u64 != 0) by (bit_vector);
+    assert(0u64 & 2u64 == 0) by (bit_vector);
+    assert(exists|p: Auth, ask: Caps, b: Caps|
+        #![trigger endow(p, ask) & b]
+        (p.caps & b) == 0 && (endow(p, ask) & b) != 0);
 }
 
 /// BROKEN: a spawn that ignores the `Launch` bound.

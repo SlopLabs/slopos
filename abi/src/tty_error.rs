@@ -16,6 +16,8 @@ pub enum TtyError {
     /// No data available and O_NONBLOCK is set — EAGAIN.
     WouldBlock,
     PermissionDenied,
+    /// The caller's ids and the node's mode refuse it — `EACCES`.
+    AccessDenied,
     UnsupportedLineDiscipline,
     /// Caller belongs to a different session than the TTY's controlling session.
     CrossSessionDenied,
@@ -44,6 +46,7 @@ impl crate::KernelErrno for TtyError {
             Self::HungUp => ERRNO_EIO as i32,
             Self::WouldBlock => ERRNO_EAGAIN as i32,
             Self::PermissionDenied => ERRNO_EPERM as i32,
+            Self::AccessDenied => crate::Errno::EACCES.raw(),
             Self::UnsupportedLineDiscipline => ERRNO_EINVAL as i32,
             Self::CrossSessionDenied => ERRNO_EIO as i32,
             Self::SignalInterrupt => ERRNO_EINTR as i32,

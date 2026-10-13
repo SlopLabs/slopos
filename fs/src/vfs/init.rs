@@ -21,6 +21,7 @@ static VFS_INIT: InitFlag = InitFlag::new();
 static RAMFS_ROOT_STATIC: RamFs = RamFs::new_const(lock_class!("RAMFS_ROOT", LOCK_LEVEL_RESOURCE));
 static RAMFS_TMP_STATIC: RamFs = RamFs::new_const(lock_class!("RAMFS_TMP", LOCK_LEVEL_RESOURCE));
 static RAMFS_SHM_STATIC: RamFs = RamFs::new_const(lock_class!("RAMFS_SHM", LOCK_LEVEL_RESOURCE));
+static RAMFS_RUN_STATIC: RamFs = RamFs::new_const(lock_class!("RAMFS_RUN", LOCK_LEVEL_RESOURCE));
 static DEVFS_STATIC: DevFs = DevFs::new();
 
 /// `/tmp` and `/dev/shm`: anyone may create there, and only an owner remove.
@@ -491,7 +492,7 @@ pub enum RootBacking {
     Ext2(&'static Ext2Mount),
 }
 
-/// The one-shot mount of `/`, `/tmp`, `/dev` and `/dev/shm`. Later calls are no-ops
+/// The one-shot mount of `/`, `/tmp`, `/run`, `/dev` and `/dev/shm`. Later calls are no-ops
 /// whatever `root` they pass: the kernel-test phase reaches this first with
 /// ramfs, and the boot step re-mounts `/` itself when it wants the disk.
 pub fn vfs_init_builtin_filesystems_with(root: RootBacking) -> VfsResult<()> {
@@ -508,6 +509,7 @@ pub fn vfs_init_builtin_filesystems_with(root: RootBacking) -> VfsResult<()> {
     }
 
     mount(b"/tmp", &RAMFS_TMP_STATIC, 0)?;
+    mount(b"/run", &RAMFS_RUN_STATIC, 0)?;
     mount(b"/dev", &DEVFS_STATIC, 0)?;
     // Where `shm_open` puts its objects, as glibc does.
     mount(b"/dev/shm", &RAMFS_SHM_STATIC, 0)?;

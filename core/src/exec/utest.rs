@@ -5,19 +5,27 @@
 
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskPriority};
 use slopos_ostd::KVec;
-use slopos_ostd::authority::CAP_MASK_ALL;
+use slopos_ostd::authority::CAP_UNIVERSAL;
 use slopos_ostd::{catch_panic, klog_info};
 use slopos_testing::{TestDesc, TestResult, ktap};
 
-use crate::exec::{FdAction, spawn_program_with_attrs};
+use crate::exec::{Endowment, FdAction, spawn_program_with_attrs};
 use slopos_sched::scheduler::{sleep_current_task_ms, task_wait_for};
 use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
 use slopos_sched::test_reports::TestReport;
 
+/// Who a utest runs as: the gated capabilities it holds beside the universal
+/// ones, and its uid, which is its gid too.
+#[derive(Clone, Copy)]
+pub struct Principal {
+    pub caps: u64,
+    pub uid: u32,
+}
+
 /// Per-utest entry point installed in every `TestDesc::run`. `catch_panic!`
 /// turns a kernel-side panic along that path into a `Panic` outcome for the
 /// parent utest rather than a dead harness.
-pub fn run_thunk(desc: &'static TestDesc) -> TestResult {
+pub fn run_thunk(desc: &'static TestDesc, principal: Principal) -> TestResult {
     let bin = match desc.bin {
         Some(b) => b,
         None => {
@@ -42,7 +50,7 @@ pub fn run_thunk(desc: &'static TestDesc) -> TestResult {
     };
 
     let rc: i32 = catch_panic!({
-        match dispatch(bin, argv_opt) {
+        match dispatch(bin, argv_opt, principal) {
             TestResult::Pass => 0,
             TestResult::Fail => 1,
             _ => 2,
@@ -66,7 +74,7 @@ fn exit_reason_str(reason: TaskExitReason) -> &'static str {
     }
 }
 
-fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
+fn dispatch(bin: &str, argv: Option<&[&[u8]]>, principal: Principal) -> TestResult {
     // Init's pid/tid: the spawned utest resolves its stdio clone-actions
     // against init's console fds, and needs a real `parent_task_id` for
     // `notify_parent_of_child_exit` to deliver SIGCHLD.
@@ -104,7 +112,10 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         None,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
-        CAP_MASK_ALL,
+        Endowment::Kernel {
+            caps: CAP_UNIVERSAL | principal.caps,
+            uid: principal.uid,
+        },
         &stdio,
         0,
         parent_table,

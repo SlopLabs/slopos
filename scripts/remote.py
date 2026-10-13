@@ -67,7 +67,7 @@ TERMINAL = (EXIT, DONE, ERROR)
 
 PING_EVERY = 15
 DEAD_AFTER = 45
-SCRATCH = "/var/lib/slopos-remote/install"
+SCRATCH = "/var/tmp/slopos-remote"
 
 
 class RemoteError(Exception):

@@ -1792,7 +1792,7 @@ fn group_database_has_root_and_user() -> bool {
 /// The passwd database answers both rows by uid and by name, and nothing
 /// for a uid it does not hold.
 fn passwd_database_has_root_and_user() -> bool {
-    for (uid, name, dir) in [(0, c"root", "/"), (1000, c"user", "/home/user")] {
+    for (uid, name, dir) in [(0, c"root", "/root"), (1000, c"user", "/home/user")] {
         let by_uid = unsafe { getpwuid(uid) };
         let ok = !by_uid.is_null()
             && unsafe {

@@ -470,7 +470,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                         );
                     }
                     klog_info!(
-                        "VFS: mounted / (ext2, {}), /tmp (ramfs), /dev (devfs), /dev/shm (ramfs)",
+                        "VFS: mounted / (ext2, {}), /tmp and /run (ramfs), /dev (devfs), /dev/shm (ramfs)",
                         if flags & MOUNT_RDONLY != 0 {
                             "read-only"
                         } else {
@@ -487,7 +487,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                 }
             }
         } else {
-            klog_info!("VFS: mounted /tmp (ramfs), /dev (devfs), /dev/shm (ramfs)");
+            klog_info!("VFS: mounted /tmp and /run (ramfs), /dev (devfs), /dev/shm (ramfs)");
         }
     } else {
         klog_info!("VFS: failed to mount builtin filesystems");

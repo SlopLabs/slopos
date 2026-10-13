@@ -214,7 +214,7 @@ _fs-image-selfhost:
     scripts/stage_workspace.sh "{{selfhost_stage}}/src" --vendored
     scripts/stage_ladder_fixtures.sh "{{selfhost_stage}}/ladder" "{{ladder_sshd}}"
     FS_IMAGE_SIZE=1G FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=0 FS_BASE=boot \
-        FS_HOST_TREES="{{toolchain_install}}:/usr/local {{selfhost_stage}}/ladder:/srv/ladder" \
+        FS_HOST_TREES="{{toolchain_install}}:/usr/local {{selfhost_stage}}/ladder:/home/user/ladder" \
         FS_SEED_TREES="{{selfhost_stage}}/src:/src" FS_FREE_FLOOR={{root_free_floor}} \
         scripts/build_fs_image.sh "{{fs_image_selfhost}}" "{{build_dir}}"
     rm -rf "{{selfhost_stage}}"
@@ -479,7 +479,7 @@ test-install:
     read -r start size <<<"$window"
     root="{{build_dir}}/install-root.img"
     dd if={{boot_disk}} of="$root" bs=1M iflag=skip_bytes,count_bytes skip="$start" count="$size" conv=sparse status=none
-    scripts/check_fs_image.sh "$root" || missing=1
+    scripts/check_fs_image.sh --map "$root" || missing=1
     [ "$missing" = 0 ] || exit 1
     echo "test-install: registered, installed, tried, committed and rolled back with the ESP untouched (qemu rc=$rc); log in $log"
 
@@ -648,7 +648,7 @@ test-installer *DISKS:
                 [ "$type" != "$ESP_TYPE" ] || check_limine_notices "$image" "$disk" || ok=1
                 continue
             fi
-            scripts/check_fs_image.sh "$image" || ok=1
+            scripts/check_fs_image.sh --map "$image" || ok=1
             for dir in /bin /sbin /lib /usr/bin /usr/share /etc/ssl; do
                 flags="$(debugfs -R "stat $dir" "$image" 2>/dev/null |
                     sed -n 's/.*Flags: \(0x[0-9a-f]*\).*/\1/p' | head -n 1)"
@@ -911,7 +911,7 @@ test-persist: _build-run-tests
     TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*persist*" just _iso-tests
     echo "── boot 1: seed ──"
     {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
-    scripts/check_fs_image.sh "{{fs_image_tests}}"
+    scripts/check_fs_image.sh --map "{{fs_image_tests}}"
     echo "── boot 2: verify (same image, no rebuild) ──"
     # `set -e` must not abort: a failing boot 2 is what this recipe reports.
     rc=0
@@ -1028,7 +1028,7 @@ test-toolchain: _build-run-tests
             --timeout-secs 3600 --silence-secs 1800 --raw --no-color >"$log" 2>&1 || rc=$?
         tail -n 30 "$log"
         [ "$rc" -eq 0 ] || { echo "FAIL: boot $boot exited $rc — full log in $log" >&2; exit 1; }
-        scripts/check_fs_image.sh "{{fs_image_selfhost}}"
+        scripts/check_fs_image.sh --map "{{fs_image_selfhost}}"
         # git rides the toolchain: without one there is no clone to grade.
         [ -d "{{toolchain_install}}" ] || exit 0
         grep -aq 'git_reads_the_clone_and_reaches_the_host # git status: clean' "$log" ||
@@ -1044,7 +1044,7 @@ test-toolchain: _build-run-tests
     written="$(grep -aoE 'a_clone_survives_a_reboot # CLONE-WRITTEN [0-9a-f]{40}' "{{build_dir}}/toolchain-boot1.log" | awk '{print $NF}' || true)"
     survived="$(grep -aoE 'a_clone_survives_a_reboot # CLONE-SURVIVED [0-9a-f]{40}' "{{build_dir}}/toolchain-boot2.log" | awk '{print $NF}' || true)"
     [ -n "$written" ] && [ "$written" = "$survived" ] ||
-        { echo "FAIL: boot 1 committed '${written:-nothing}' in /home/clone and boot 2 found '${survived:-nothing}'" >&2; exit 1; }
+        { echo "FAIL: boot 1 committed '${written:-nothing}' in /home/user/clone and boot 2 found '${survived:-nothing}'" >&2; exit 1; }
     echo "test-toolchain: the ladder held on both boots, and the clone's commit $written survived the power-off"
 
 [doc("Self-hosting check: the guest takes HEAD over git and builds the dev and tests systems — kernel, userland and base — on the self-hosting root; the host holds the root to e2fsck, runs the ELF gates on both kernels and the suite on the guest's tests kernel and base")]
@@ -1068,7 +1068,7 @@ test-selfhost: _build-run-tests
     [ "$rc" -eq 0 ] || { echo "FAIL: the self-hosting boot exited $rc — full log in {{build_dir}}/selfhost.log" >&2; exit 1; }
     grep -aqF "guest_takes_the_host_head # SELFHOST-COMMIT $head" {{build_dir}}/selfhost.log ||
         { echo "FAIL: the guest did not build $head — see {{build_dir}}/selfhost.log" >&2; exit 1; }
-    scripts/check_fs_image.sh "{{fs_image_selfhost}}"
+    scripts/check_fs_image.sh --map "{{fs_image_selfhost}}"
     guest="{{build_dir}}/guest"
     mkdir -p "$guest"
     for variant in dev tests; do
@@ -1252,11 +1252,11 @@ test-remote: _build-userland _base-recipes
 
     echo "── push and pull 8 MiB ──"
     head -c 8388608 /dev/urandom >"$work/payload.bin"
-    remote push "$work/payload.bin" /home/payload.bin
-    remote pull /home/payload.bin "$work/payload.back"
+    remote push "$work/payload.bin" /home/user/payload.bin
+    remote pull /home/user/payload.bin "$work/payload.back"
     cmp "$work/payload.bin" "$work/payload.back" || fail "the pulled file differs from the pushed one"
     want="$(sha256sum "$work/payload.bin" | cut -d' ' -f1)"
-    remote run -- sha256sum /home/payload.bin | grep -q "^$want" || fail "the guest's sha256sum disagrees"
+    remote run -- sha256sum /home/user/payload.bin | grep -q "^$want" || fail "the guest's sha256sum disagrees"
 
     echo "── kernel log ──"
     remote klog >"$work/klog.txt"
@@ -1327,7 +1327,7 @@ check-tests-host:
 check-test-count: _build-run-tests
     scripts/check_test_count.sh
 
-[doc("Hold an image a boot wrote to e2fsck -fn and to being at rest: clean, no journal to replay")]
+[doc("Hold an image a boot wrote to e2fsck -fn and to being at rest: clean, no journal to replay; the tests image, or any with --map, also to the ownership map")]
 check-fs-image *ARGS:
     scripts/check_fs_image.sh {{ARGS}}
 

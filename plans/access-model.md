@@ -32,45 +32,55 @@ where and how a task runs. Every privilege is a bit of the per-task capability
 mask (`slopos-ostd/src/authority/mod.rs`, bits in `abi/src/caps.rs`), and every
 check reads it: the network-control slots (`NetAdmin`), block nodes, the crash
 records and the `DiskBlocks` ceiling (`RawBlock`), `kconsole(2)` and `prof_ctl`
-(`SysInspect`), mode bits (`DacOverride`), id changes (`SetId`), and the signal
-relation, which lets a sender name only a target whose capabilities it holds
-(`core/src/syscall/signal.rs:132-143`). Init and every utest binary hold
-`CAP_MASK_ALL` (`core/src/exec/mod.rs:162-177`, `core/src/exec/utest.rs:107`).
-A spawned program holds the universal capabilities (`ConsoleIo`,
-`ClipboardGlobal`, `Fate`) its spawner holds, and what its path earns. A nice
-value below zero is init's, by task id.
+(`SysInspect`), mode bits (`DacOverride`), id changes (`SetId`), the `High`
+tier and a negative nice (`SchedHigh`), and the signal relation, which lets a
+sender name only a target whose capabilities it holds
+(`core/src/syscall/signal.rs`). Init holds `CAP_MASK_ALL`; a utest holds what
+its `utest!` declares, every capability as uid 0 unless it says otherwise
+(`core/src/exec/utest.rs`).
 
-**Privilege is raised at exactly one site, by path.**
+**Authority is delegated at spawn.** `SpawnAttrs` (`abi/src/spawn.rs`)
+carries the child's capabilities, uid, gid and groups. A spawned program holds
+the universal capabilities (`ConsoleIo`, `ClipboardGlobal`, `Fate`) its
+spawner holds and what the spawner delegates, any subset of its own mask
+(`Endowment::check` in `core/src/exec/mod.rs`). Init's bootstrap table
+(`userland/src/apps/init_process.rs`) starts the compositor, the terminal,
+remoted and roulette that way, as uid 1000.
+
+**Privilege is still raised by path for the rows that remain.**
 `spawn_program_with_cwd` ORs in `grant_for(image)` when the spawner holds
-`Launch`, and otherwise spawns the image ungranted
-(`core/src/exec/mod.rs:357-377`). `PROGRAM_GRANTS` has 25 rows: 13 shipped rows
-that raise, 6 delegated e2fsprogs rows and 6 test rows
-(`core/src/exec/grants.rs:39-237`). A path key is sound only because the base
+`Launch`, and otherwise spawns the image ungranted. `PROGRAM_GRANTS` has 18
+rows: 12 that raise (`shell`, `terminal`, `remoted`, `roulette`, `keymap`,
+`ip`, `kconsole`, `prof`, `halt`, `bootctl`, `cpufreq`, `installer`) and 6
+delegated e2fsprogs rows (`core/src/exec/grants.rs`). A path key is sound only because the base
 directories are sealed and pinned, mount refuses grant paths and `/lib`
-(`grants.rs:274-288`), and the `Seal` capability exists to keep it that way
-(`authority/mod.rs:99-103`). That makes every grant row a setuid program by
-another name. It runs `AT_SECURE`, and it inherits argv, environment, cwd and
-descriptors from whoever spawned it. That is why the installer starts
-e2fsprogs with an emptied environment (`userland/src/apps/installer/disk.rs:473`).
+(`covers_grant_path`), and the `Seal` capability exists to keep it that way.
+That makes every grant row a setuid program by another name. It runs
+`AT_SECURE`, and it inherits argv, environment, cwd and descriptors from
+whoever spawned it. That is why the installer starts e2fsprogs with an emptied
+environment (`userland/src/apps/installer/disk.rs`).
 
 **exec narrows all of it.** `narrow_authority_for_exec` keeps
 `caps & (universal | grant | delegated)` in every thread of the process
-(`core/src/exec/mod.rs:627-654`), and `caps_drop` sheds capabilities from a
-whole process for good
-(`sched/src/task/task_lifecycle.rs:2647-2667`). The Verus proof
+(`core/src/exec/mod.rs`), and `caps_drop` sheds capabilities from a whole
+process for good (`sched/src/task/task_lifecycle.rs`). The Verus proof
 (`verification/proofs/authority.rs`) models both.
 
-**Every process has an identity, and it is uid 0.**
+**The session is uid 1000.**
 - Each process carries a `Cred` (`slopos-ostd/src/process/cred.rs`). The id
   syscalls follow POSIX's rules and take `SetId` for any other id
   (`core/src/syscall/cred_handlers.rs`); slibc calls them and compiles in the
-  `root` and `user` rows (`slibc/src/conf.rs`).
+  `root` (home `/root`) and `user` rows (`slibc/src/conf.rs`).
 - The VFS checks owner, group and mode against the `Subject` every entry takes
-  (`fs/src/vfs/perm.rs`), and `stat` reports the stored owner.
-- Every process still runs as uid 0 and every file is 0:0, so every process
-  can write `/etc`, `/var`, `/home`, `/src` and `/usr/local` (`AGENTS.md`, the
-  remote paragraph). `CVSS.md` scores any code execution `PR:L` for that
-  reason.
+  (`fs/src/vfs/perm.rs`), and `stat` reports the stored owner. A pty's slave
+  is its opener's, an `AF_UNIX` name is a socket inode under the same checks,
+  and a sticky world-writable directory follows a link only for its owner or
+  the directory's.
+- Init and the mechanisms the session starts through a grant row run as uid 0
+  or with `DacOverride`; everything else the session runs is uid 1000. Every
+  root is held to the ownership map (`slopos_abi::fs::ROOT_LAYOUT`), so the
+  session writes `/home`, `/src`, `/usr/local` and `/tmp`, and not `/etc` or
+  `/var`.
 
 **IPC carries identity.**
 - An `AF_UNIX` socket records who connected (`slopos_ostd::process::identity`)
@@ -84,16 +94,18 @@ whole process for good
 
 **The model's cost shows up as workarounds:**
 - The compositor spawns `/bin/ip` because it must not hold `NetAdmin`, which
-  is why it needs `Launch` (`userland/src/apps/compositor/popover.rs:650-675`,
-  `grants.rs:40-50`).
-- The remote pairing must live in the sealed base because any program can
-  write `/etc`.
+  is why init delegates it `Launch`
+  (`userland/src/apps/compositor/popover.rs`).
+- The remote pairing must live in the sealed base because a program holding
+  `DacOverride` through its grant row can write `/etc`.
 - The shell must *spawn* registry programs because fork+exec keeps no grant
   (`userland/src/apps/shell/exec.rs:1467-1469`). A granted program in a
   pipeline, a subshell, a bash script, or a `posix_spawn` that falls back to
   fork+exec runs ungranted.
-- utest binaries hold every capability (`core/src/exec/utest.rs:107`), so they
-  test an unprivileged gate only through an ungranted child or `caps_drop`.
+- `keymap`, `bootctl` and the installer hold `DacOverride` by path, because
+  the session that starts them is uid 1000 and what they write is uid 0's.
+- The compositor, the terminal and remoted are delegated `Launch`, so the
+  grant rows can be reached from the session.
 - No sshd runs: OpenSSH's needs credentials and a privilege separation SlopOS
   lacks, so the remote control dials out to a broker instead.
 - A GUI cannot hand install authority to a helper: an app the dock launches
@@ -211,9 +223,9 @@ The failures on record each set a rule here:
 | Path | Owner | Why |
 |---|---|---|
 | the base directories | 0:0, sealed | as archived |
-| `/`, `/etc`, `/var`, `/var/lib/slopos`, `/var/log` | 0:0, 0755 | system state; `/etc/keymap` is written by `/bin/keymap` through privd |
+| `/`, `/etc`, `/var`, `/var/lib`, `/var/lib/slopos`, `/var/log`, `/home`, `/media`, `/usr` | 0:0, 0755 | system state; `/etc/keymap` is written by `/bin/keymap` through privd |
 | `/root` | 0:0, 0700 | |
-| `/tmp` | 0:0, 1777 | |
+| `/var/tmp`, and `/tmp`, a ramfs | 0:0, 1777 | |
 | `/home/user`, `/src` and the clone under it | 1000:1000 | the person's work |
 | `/usr/local` and every host tree in it | 1000:1000 | the session installs there without a broker, as Homebrew owns `/opt/homebrew`; `DEFAULT_PATH` already puts it after the base, so nothing there shadows a system tool |
 
@@ -381,19 +393,19 @@ acting. This is pkexec's lesson: the privileged side validates.
 
 | Today | Becomes |
 |---|---|
-| `/bin/compositor` `DisplaySeat InputSeat Launch`, High | bootstrap child above; the network toggle asks for `org.slopos.net.toggle` (`allow program /bin/compositor`) |
+| `/bin/compositor` delegated `DisplaySeat InputSeat Launch`, High | bootstrap child above; the network toggle asks for `org.slopos.net.toggle` (`allow program /bin/compositor`) |
 | `/bin/shell`, `/bin/terminal` `Launch` | nothing |
-| `/bin/remoted` `Launch` | bootstrap child above |
-| `/bin/roulette` `DisplaySeat` | bootstrap child above |
-| `/bin/keymap` `ConsoleConfig` | `org.slopos.console.keymap`: `ConsoleConfig`, uid 0, session and paired |
+| `/bin/remoted` `Launch`, also delegated | bootstrap child above |
+| `/bin/roulette` `DisplaySeat`, also delegated | bootstrap child above |
+| `/bin/keymap` `ConsoleConfig DacOverride` | `org.slopos.console.keymap`: `ConsoleConfig`, uid 0, session and paired |
 | `/bin/ip` `NetAdmin` | `org.slopos.net.configure`: `NetAdmin`, session with consent |
 | `/bin/sysmon` `SysInspect` | gone in phase 2: enumeration is universal, kill follows the signal rule |
 | `/bin/kconsole` `SysInspect` | `org.slopos.kconsole`: `SysInspect`, session and paired |
 | `/bin/prof` `SysInspect` | `org.slopos.prof`: `SysInspect`, session and paired |
 | `/bin/halt` `Power` | `org.slopos.power.poweroff`, `.reboot`: `Power`, session and paired |
-| `/bin/bootctl` `RawBlock Power` | `org.slopos.boot.install`, `.set-default` (session with consent); `.oneshot`, `.commit`, `.spare`, `.status` (session); all paired; `collect` is init's |
+| `/bin/bootctl` `RawBlock Power DacOverride` | `org.slopos.boot.install`, `.set-default` (session with consent); `.oneshot`, `.commit`, `.spare`, `.status` (session); all paired; `collect` is init's |
 | `/bin/cpufreq` `Power` | `org.slopos.cpufreq.set`: `Power`, session and paired; reading needs nothing |
-| `/bin/installer` `RawBlock Mount Power BootEntry Seal` | `org.slopos.install`: `RawBlock Mount Power BootEntry Seal DacOverride`, uid 0, session with consent, never paired |
+| `/bin/installer` `RawBlock Mount Power BootEntry Seal DacOverride` | `org.slopos.install`: `RawBlock Mount Power BootEntry Seal DacOverride`, uid 0, session with consent, never paired |
 | six e2fsprogs rows, delegated `RawBlock` | the installer spawns them with `RawBlock` delegated |
 | six test rows | `utest!` declarations |
 
@@ -503,35 +515,49 @@ against the real base, `libc_abi_test` through slibc, and
 `test_basefs_names_an_inode_by_its_path`. No base program is a script, so a
 base script's attestation is graded only through its spelling.
 
-### Phase 4: Delegation at spawn
+### Phase 4: Delegation at spawn — done
 
-`SpawnAttrs` carries capabilities and ids under the subset bound, beside the
-`Launch` raise, which still runs for the rows that remain. Init's bootstrap
-table starts the compositor, remoted, roulette and the terminal by delegation,
-as uid 1000. Until phase 6 the compositor, the terminal and remoted are also
-delegated `Launch`, so the grant rows that remain keep working from the
-session. A row whose program writes root-owned state (`keymap`'s `/etc/keymap`,
-the installer's new root) also names `DacOverride` until privd runs it as
-uid 0. The ownership map lands with the uid change: the image builders,
-`fs_tree.py`, the installer, and init's one-time migration on a preserved
-root. `utest!` declarations replace the test rows. Three gaps close before
-the session leaves uid 0, each harmless while every process is uid 0:
-- a pty's slave takes the opener's uid, mode 0620, as Linux's devpts gives
-  it, since devfs reports every character device 0:0 0666;
-- an `AF_UNIX` name is bound and connected through the filesystem's search
-  and write checks, which today's global name table never consults;
-- a sticky, world-writable directory follows a symlink only for the link's
-  owner or the directory's, as Linux's `protected_symlinks` does, so a
-  root-run program cannot be steered through a link the session planted in
-  `/tmp`.
+`SpawnAttrs` carries a capability mask, uid, gid and groups, each id taken
+only under its `SPAWN_SET_*` bit; a spawn asking beyond its spawner's mask is
+`EPERM`, ids other than its own take `SetId`, and the `High` tier and a
+negative nice take the new `SchedHigh`. A delegated or re-identified child
+starts `AT_SECURE`. The raise still runs for 12 rows and e2fsprogs' 6
+delegated ones; the compositor's row and the test rows are gone, and
+`keymap`, `bootctl` and the installer also name `DacOverride`. Init's
+bootstrap table starts the compositor (the seats and `Launch`, at `High`), the
+terminal and remoted (`Launch`) and roulette (the display seat) as uid and gid
+1000 with no groups, `HOME=/home/user` and `XDG_RUNTIME_DIR=/run/user/1000`,
+where the compositor's socket moved, and `bootctl collect` as uid 0 with
+`RawBlock` and `Power`, its row adding `DacOverride`. `utest!` takes `caps =
+…` and `uid = …`. A pty slave is its master opener's, 0620, judged on the
+slave an open takes; an `AF_UNIX` name is a socket inode its bound socket holds
+open, bound through the parent's write and search checks and connected through
+the name's write check, and `/run` is a ramfs; a sticky world-writable
+directory follows a link only for its owner or the directory's. The ownership
+map is `slopos_abi::fs::ROOT_LAYOUT` and `SESSION_TREES`, mirrored in
+`scripts/lib/root_layout.sh` and `tools/initramfs` and held equal by a test.
+The image builders and `tools/initramfs` lay it out and record it,
+`fs_tree.py` gives a tree its destination's owner, the installer lays out and
+records a new root, and init makes what a root lacks at every boot and
+migrates a root without the record once (`userland/src/root_layout.rs`). The
+tests that run git in `/src` run as uid 1000, and a root test runs git and
+`selfhost.sh` there as the session. The ladder's fixtures moved to
+`/home/user/ladder`, since ssh reads a key only its user may, and the remote
+check pushes and stages under the session's directories.
 
-Ends with:
-- a test that a spawn asking beyond its spawner's mask is `EPERM`, and one that
-  a uid change without `SetId` is `EPERM`;
-- the unprivileged-gate tests running at uid 1000;
-- `check-fs-image` holding the tests image to the map;
-- `just boot` reaching the desktop with the session at uid 1000 and a
-  preserved root migrated, and the toolchain ladder green as uid 1000.
+Graded by `test_spawn_delegates_within_the_spawner`,
+`test_a_shared_directory_follows_a_link_for_its_owners`,
+`test_a_negative_nice_takes_sched_high` and
+`test_pty_open_slave_judges_the_owner_it_opens`; `spawn_privilege_test`
+(tiers, the bound, ids, the `SpawnAttrs` fields, `AT_SECURE`) and its
+`--session` run at uid 1000; `dac_test` (pty, socket names, links, a migrated
+root) and its `--session` run, which holds the map; `ip_e2e_test`'s session
+half; the S5 obligation of `verification/proofs/authority.rs`; and
+`check_fs_image.sh --map` on the tests, installed and self-hosting roots.
+Checked by hand: a boot without tests reaching the compositor, the terminal
+and a shell as uid 1000 in `/home/user`, and a tests image made into an old
+all-uid-0 root migrated on its first boot and held to the map. Not run: the
+ladder with a toolchain, `test-remote` and the install checks.
 
 ### Phase 5: privd and consent
 
@@ -642,7 +668,7 @@ Ends with:
   and authority reaches a child only as a capability mask.
 - **Capability bits are ABI.** `abi/src/caps.rs` states them once, and
   `slopos_ostd::authority::Capability` is held to exactly those bits, because a
-  mask crosses the syscall boundary (`caps_drop` now, `SpawnAttrs` in phase 4).
+  mask crosses the syscall boundary in `caps_drop` and `SpawnAttrs`.
 - **A drop is process-wide, total and irreversible.** `caps_drop` takes the
   bits from every task sharing the caller's process and records them on the
   process, so a thread whose clone races the drop loses them as it is
@@ -659,8 +685,9 @@ Ends with:
   `fg` resumes a job holding more than the shell.
 - **Kernel threads hold no capability.** A gate a kernel thread must pass —
   raw block devices, the ext4 reserve — names the kernel thread itself.
-- **What only the system does is init's, by task id,** where no capability
-  names it: a nice value below zero, until phase 4's `SchedHigh`.
+- **Running ahead of everything is `SchedHigh`,** the `High` spawn tier and a
+  nice value below zero alike, as Linux's `CAP_SYS_NICE` covers both. Init
+  holds it and spawns the compositor at `High`; nothing is init's by task id.
 - **A program that holds authority is its own binary.** A grant, and later
   privd's `Base(path)`, keys on the resolved path, so a multicall symlink
   would hand every tool its authority; `prof` left coreutils for this.
@@ -707,7 +734,8 @@ Ends with:
   `unix_connect` and `unix_listen` from the syscall or the ring's submitter, as
   a `Subject` reaches the VFS; nothing below the syscall layer reads the
   current task for it. The ring asks its submitter at each try, so a connect
-  that waits for room attests who connects when it does.
+  that waits for room attests who connects when it does; the name's mode
+  bits are checked once, against the submitter as `ring_enter` found it.
 - **`Base` attests code: every executable mapping came from the base.** An
   executable mapping of anything else — anonymous memory, a memfd, a file
   elsewhere — and an `mprotect` making any page executable that was not lower
@@ -751,6 +779,56 @@ Ends with:
   signal rule.
 - **`/usr/local` is the session's,** because that is where the guest installs
   for itself. System integrity rests on the sealed base.
+- **A spawn asks for nothing it does not name.** Each id field of
+  `SpawnAttrs` counts only under its `SPAWN_SET_*` bit, so a zeroed struct
+  delegates nothing and keeps the spawner's ids rather than asking for uid 0.
+- **A spawn is checked whole before anything is built.** Unknown capability
+  or id bits and more than `NGROUPS_MAX` groups are `EINVAL`; a capability the
+  spawner lacks, an id it could not take itself and the `High` tier without
+  `SchedHigh` are `EPERM`. A child's ids follow POSIX's rules for the spawner
+  moving to them, so a spawner may hand a child any of its own real, effective
+  or saved ids without `SetId`, and the child's saved ids are its effective
+  ones.
+- **`AT_SECURE` follows what the child holds and who it runs as:** set when
+  it holds a gated capability, delegated or raised, or runs with ids other
+  than its spawner's real ones, as Linux sets it for a capability gain or an
+  id change across exec.
+- **A socket name is a file,** as on Linux: `bind` makes an inode of type
+  socket through the parent's write and search checks (`EADDRINUSE` on an
+  existing name), `connect` needs write on it, and `open` refuses it with
+  `ENXIO`. A bound socket holds its inode open, as a descriptor holds a file:
+  the inode is not freed or reused while the socket lives, so the socket table
+  finds a listener by it and a name unlinked and bound again reaches the new
+  listener and never the old, and the volume it is on is busy, as Linux's
+  bound socket pins its path. A ring's `OP_CONNECT` takes only an absolute
+  name, since a ring has no working directory.
+- **A link in a shared directory is followed only for its owners.** In a
+  sticky directory every class may write, a symlink is followed only when the
+  follower's effective uid owns it or the directory's owner does, as Linux's
+  `protected_symlinks`. It holds for every link a walk follows and is not
+  waived by `DacOverride`: the follower it protects is a privileged one. The
+  kernel's re-check of a path it has just opened for a caller resolves as
+  that caller.
+- **A pty's slave is its opener's,** uid and gid, mode 0620, as devpts gives
+  it without a `tty` group; opening it takes those bits, judged on the slave
+  the open takes, so a slot freed and handed to another opener in between is
+  judged as the new opener's.
+- **The ownership map is stated once.** `slopos_abi::fs::ROOT_LAYOUT` and
+  `SESSION_TREES` are the statement, `scripts/lib/root_layout.sh` and
+  `tools/initramfs` mirror it, and a test holds the three equal. Every
+  builder lays a new root out by it and records the session's trees in
+  `/var/lib/slopos/owners`, the initramfs included, so a RAM root is never
+  migrated.
+- **A root is migrated once, in place, by init.** A root without the record
+  has everything below the session's trees handed to uid 1000, links never
+  followed, a file with a second name and a read-only volume left alone, and
+  the map's directories set as it says; the record is written, after a
+  `sync`, only when nothing refused, so an interrupted migration runs again. Init also makes, at every
+  boot, any directory of the map a root lacks, and the session's runtime
+  directory, `/run/user/1000`, mode 0700.
+- **A test runs as uid 0 holding everything unless it declares otherwise.**
+  A test of an unprivileged gate or of the person's work declares `caps =
+  none, uid = 1000`; one that needs a single gate declares only that.
 - **Strictly before the GUI installer.** `plans/installer-gui.md` starts after
   phase 6.
 

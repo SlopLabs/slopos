@@ -7,6 +7,11 @@
 use slopos_abi::syscall::types::UserPollFd;
 use slopos_slibc::pal::{Pal, Sys};
 
+/// The socket of the compositor this process's session runs.
+pub fn compositor_socket() -> Vec<u8> {
+    slopos_protocol::socket_path(Sys::geteuid())
+}
+
 /// Returns `(read_fd, write_fd)`.
 pub fn pipe2(flags: u32) -> Result<(i32, i32), ()> {
     let mut raw = [0i32; 2];

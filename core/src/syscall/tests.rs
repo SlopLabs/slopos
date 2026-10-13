@@ -963,6 +963,7 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
 
     let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty(
         slopos_ostd::process::quota::root(),
+        (0, 0),
     ) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
@@ -1027,6 +1028,7 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
 
     let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty(
         slopos_ostd::process::quota::root(),
+        (0, 0),
     ) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
@@ -1090,6 +1092,7 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
 
     let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty(
         slopos_ostd::process::quota::root(),
+        (0, 0),
     ) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
@@ -3438,19 +3441,7 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
         user_copy_out(pid, user_page, path),
         "failed to write path into user memory"
     );
-    let attrs = SpawnAttrs {
-        priority: 2, // TaskPriority::Normal
-        _pad: [0; 3],
-        flags: 0,
-        _pad2: 0,
-        actions_ptr: 0,
-        actions_len: 0,
-        sigdefault_mask: 0,
-        envp_ptr: 0,
-        envp_len: 0,
-        cwd_ptr: 0,
-        cwd_len: 0,
-    };
+    let attrs = SpawnAttrs::new(slopos_abi::task::TaskPriority::Normal.as_u8(), 0);
     let attrs_addr = user_page + 512;
     assert_test!(
         user_copy_out(pid, attrs_addr, &attrs),
@@ -3529,20 +3520,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     let attrs_addr = user_page + 512;
 
     const NO_CONTEXT: u64 = u64::MAX;
-    let spawn = |priority: u8, flags: u16| -> u64 {
-        let attrs = SpawnAttrs {
-            priority,
-            _pad: [0; 3],
-            flags,
-            _pad2: 0,
-            actions_ptr: 0,
-            actions_len: 0,
-            sigdefault_mask: 0,
-            envp_ptr: 0,
-            envp_len: 0,
-            cwd_ptr: 0,
-            cwd_len: 0,
-        };
+    let spawn_with = |attrs: SpawnAttrs| -> u64 {
         if !user_copy_out(pid, attrs_addr, &attrs) {
             return NO_CONTEXT;
         }
@@ -3558,6 +3536,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         .map(|_| frame.rax())
         .unwrap_or(NO_CONTEXT)
     };
+    let spawn = |priority: u8, flags: u16| spawn_with(SpawnAttrs::new(priority, flags));
 
     let eperm = slopos_abi::Errno::EPERM.as_u64();
     let einval = slopos_abi::Errno::EINVAL.as_u64();
@@ -3597,8 +3576,11 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         "a reserved bit must be answered before a privileged one"
     );
 
-    // Tier restriction: only Normal and Low are user-requestable.
-    assert_eq_test!(spawn(0, TASK_FLAG_USER_MODE), einval, "High must be EINVAL");
+    assert_eq_test!(
+        spawn(0, TASK_FLAG_USER_MODE),
+        eperm,
+        "High without SchedHigh must be EPERM"
+    );
     assert_eq_test!(
         spawn(1, TASK_FLAG_USER_MODE),
         einval,
@@ -5030,10 +5012,19 @@ fn unix_create_connected_pair(table: FdTable) -> Option<(i32, i32)> {
     use slopos_net::unix_socket;
     use slopos_net::unix_socket_file_ops::UNIX_SOCKET_FILE_OPS;
 
-    let path = b"/test/sock";
+    slopos_fs::vfs::vfs_init_builtin_filesystems().ok()?;
+    let path = b"/tmp/test-sock";
+    let _ = slopos_fs::vfs::vfs_unlink(path);
 
     let srv_handle = unix_socket::unix_create()?;
-    if unix_socket::unix_bind(srv_handle, path) != 0 {
+    if unix_socket::unix_bind(
+        srv_handle,
+        path,
+        b"/",
+        0o777,
+        &slopos_fs::vfs::Subject::KERNEL,
+    ) != 0
+    {
         unix_socket::unix_close(srv_handle);
         return None;
     }
@@ -5044,7 +5035,15 @@ fn unix_create_connected_pair(table: FdTable) -> Option<(i32, i32)> {
     unix_socket::unix_set_nonblocking(srv_handle, true);
 
     let cli_handle = unix_socket::unix_create()?;
-    if unix_socket::unix_connect(cli_handle, path, slopos_ostd::process::Identity::KERNEL) != 0 {
+    let connected = unix_socket::unix_connect(
+        cli_handle,
+        path,
+        b"/",
+        &slopos_fs::vfs::Subject::KERNEL,
+        slopos_ostd::process::Identity::KERNEL,
+    );
+    let _ = slopos_fs::vfs::vfs_unlink(path);
+    if connected != 0 {
         unix_socket::unix_close(cli_handle);
         unix_socket::unix_close(srv_handle);
         return None;
@@ -5611,10 +5610,25 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
         return TestResult::Fail;
     };
 
-    let path = b"/test/compositor-handshake";
+    assert_test!(
+        slopos_fs::vfs::vfs_init_builtin_filesystems().is_ok(),
+        "mount the builtin filesystems"
+    );
+    let path = b"/tmp/compositor-handshake";
+    let _ = slopos_fs::vfs::vfs_unlink(path);
 
     let listen_handle = unix_socket::unix_create().expect("listen socket create");
-    assert_eq_test!(unix_socket::unix_bind(listen_handle, path), 0, "bind");
+    assert_eq_test!(
+        unix_socket::unix_bind(
+            listen_handle,
+            path,
+            b"/",
+            0o777,
+            &slopos_fs::vfs::Subject::KERNEL
+        ),
+        0,
+        "bind"
+    );
     assert_eq_test!(
         unix_socket::unix_listen(listen_handle, 4, slopos_ostd::process::Identity::KERNEL),
         0,
@@ -5624,7 +5638,14 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
 
     // Connect lands in the backlog; nothing has accepted yet.
     let cli_handle = unix_socket::unix_create().expect("client socket create");
-    let rc = unix_socket::unix_connect(cli_handle, path, slopos_ostd::process::Identity::KERNEL);
+    let rc = unix_socket::unix_connect(
+        cli_handle,
+        path,
+        b"/",
+        &slopos_fs::vfs::Subject::KERNEL,
+        slopos_ostd::process::Identity::KERNEL,
+    );
+    let _ = slopos_fs::vfs::vfs_unlink(path);
     assert_eq_test!(rc, 0, "connect");
 
     let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(
@@ -6316,10 +6337,12 @@ fn unix_create_connected_pair_raw() -> Option<(
 )> {
     use slopos_net::unix_socket;
 
-    let path = b"/scm-rights/sock";
+    slopos_fs::vfs::vfs_init_builtin_filesystems().ok()?;
+    let path = b"/tmp/scm-rights-sock";
+    let _ = slopos_fs::vfs::vfs_unlink(path);
 
     let srv = unix_socket::unix_create()?;
-    if unix_socket::unix_bind(srv, path) != 0 {
+    if unix_socket::unix_bind(srv, path, b"/", 0o777, &slopos_fs::vfs::Subject::KERNEL) != 0 {
         unix_socket::unix_close(srv);
         return None;
     }
@@ -6330,7 +6353,15 @@ fn unix_create_connected_pair_raw() -> Option<(
     unix_socket::unix_set_nonblocking(srv, true);
 
     let cli = unix_socket::unix_create()?;
-    if unix_socket::unix_connect(cli, path, slopos_ostd::process::Identity::KERNEL) != 0 {
+    let connected = unix_socket::unix_connect(
+        cli,
+        path,
+        b"/",
+        &slopos_fs::vfs::Subject::KERNEL,
+        slopos_ostd::process::Identity::KERNEL,
+    );
+    let _ = slopos_fs::vfs::vfs_unlink(path);
+    if connected != 0 {
         unix_socket::unix_close(cli);
         unix_socket::unix_close(srv);
         return None;

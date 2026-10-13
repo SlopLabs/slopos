@@ -220,6 +220,7 @@ fn walk(path: &[u8], flags: u32, who: &Subject) -> VfsResult<Step> {
         let next = match enter(&cur, name, canon.as_slice(), is_final, flags)? {
             Entered::Child(next) => next,
             Entered::Link(resolved, size) => {
+                cur.perm.check_follow(who, resolved.perm.uid)?;
                 canon.truncate(cur.canon_len);
                 return Ok(Step {
                     resolved,

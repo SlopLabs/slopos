@@ -112,14 +112,8 @@ case "$FS_BASE" in
     *) echo "build_fs_image: FS_BASE must be 'image' or 'boot', got '$FS_BASE'" >&2; exit 2 ;;
 esac
 
-# These three mirror tools/initramfs's ROOT_DIRS and SLIBC_LICENSES and
+# These two mirror tools/initramfs's SLIBC_LICENSES and
 # slopos_abi::fs::BASE_DIRS; a test in tools/initramfs holds them equal.
-#
-# ROOT_DIRS are created on every root rather than left to the first writer: the
-# disk root does not auto-create parents the way ramfs does, and both roots
-# must agree about whether a path is writable. `/media` is where a boot's
-# `mount=` puts a volume.
-ROOT_DIRS=(/etc /var /home /media)
 
 # The on-disk carrier of the VFS seal; `lsattr` shows it as `i`.
 IMMUTABLE_FL=0x10
@@ -154,6 +148,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/ext4.sh
 . "$SCRIPT_DIR/lib/ext4.sh"
+# shellcheck source=lib/root_layout.sh
+. "$SCRIPT_DIR/lib/root_layout.sh"
 FS_TREE=(python3 "$SCRIPT_DIR/fs_tree.py")
 # What the host keeps about an image, where its guest cannot write: the
 # manifests of the trees it installed, and what its last seal attested.
@@ -163,6 +159,7 @@ VERITY_RECORD="$HOST_STATE/verity"
 
 PRESERVE_FS_IMAGE="${PRESERVE_FS_IMAGE:-0}"
 STAMP_PATH="${IMAGE_PATH}.stamp"
+FRESH=0
 # The blocks a preserved v2 image's guest owns, which its seal must not attest.
 TAINT_PATH=""
 CLEANUP=()
@@ -173,7 +170,7 @@ trap 'rm -f -- "${CLEANUP[@]:-}"' EXIT
 build_stamp() {
     echo "size=$FS_IMAGE_SIZE verity=$VERITY journal=$FS_JOURNAL_SIZE links=${COREUTILS_LINKS:-}"
     sha256sum "$EXT4_PROFILE" | cut -d' ' -f1
-    echo "label=$FS_LABEL dirs=${ROOT_DIRS[*]} floor=$FS_FREE_FLOOR base=$FS_BASE"
+    echo "label=$FS_LABEL layout=${ROOT_LAYOUT[*]} trees=${SESSION_TREES[*]} floor=$FS_FREE_FLOOR base=$FS_BASE"
     echo "base_dirs=${BASE_DIRS[*]}"
     local spec
     for spec in $FS_HOST_TREES; do
@@ -525,14 +522,50 @@ install_file() {
 # Asks first: `debugfs mkdir` on a name that exists allocates the inode, fails
 # at the link, and leaves the leak `e2fsck` reports as an unconnected inode.
 mkdir_p() {
+    make_dir "$1" || true
+}
+
+# Like mkdir_p, but false when $1 was already there.
+make_dir() {
     local out
     out="$(debugfs -R "stat $1" "$IMAGE_PATH" 2>&1)"
     case "$out" in
-        *'Inode:'*) return 0 ;;
+        *'Inode:'*) return 1 ;;
         *'File not found by ext2_lookup'*) ;;
         *) echo "build_fs_image: debugfs could not tell whether $1 exists" >&2; exit 1 ;;
     esac
     debugfs -w -R "mkdir $1" "$IMAGE_PATH" >/dev/null 2>&1 || true
+}
+
+# The map's directories: each one the root lacks made with the owner and mode
+# the map gives it, and on a new image the root directory too. A preserved
+# root's existing ones are init's to bring to the map, once.
+lay_out_root() {
+    local spec path rest
+    for spec in "${ROOT_LAYOUT[@]}"; do
+        path="${spec%%:*}"
+        if [ "$path" = / ]; then
+            [ "$FRESH" = 1 ] || continue
+        elif ! make_dir "$path"; then
+            continue
+        fi
+        rest="${spec#*:}"
+        printf 'sif "%s" uid %s\nsif "%s" gid %s\nsif "%s" mode 0%o\n' \
+            "$path" "${rest%%:*}" "$path" "$(echo "$rest" | cut -d: -f2)" \
+            "$path" "$(( 0040000 | 8#${rest##*:} ))" |
+            debugfs -w -f - "$IMAGE_PATH" >/dev/null
+    done
+}
+
+# A new image holds the session's trees as the session's from the start, so
+# init has nothing to hand over on it.
+record_owners() {
+    local record
+    record="$(mktemp "${IMAGE_DIR}/owners.XXXXXX")"
+    CLEANUP+=("$record")
+    root_layout_record > "$record"
+    printf 'write %s %s\nsif %s mode 0100644\n' "$record" "$OWNERS_RECORD" "$OWNERS_RECORD" |
+        debugfs -w -f - "$IMAGE_PATH" >/dev/null
 }
 
 tree_manifest() {
@@ -578,6 +611,7 @@ if [ "$PRESERVE_FS_IMAGE" = "1" ] && [ -f "$IMAGE_PATH" ]; then
         tune2fs -L "$FS_LABEL" "$IMAGE_PATH" >/dev/null
     fi
 else
+    FRESH=1
     echo "Rebuilding ext4 image at $IMAGE_PATH ($FS_IMAGE_SIZE)"
     rm -rf "$IMAGE_PATH" "$STAMP_PATH" "$HOST_STATE"
     truncate -s "$FS_IMAGE_SIZE" "$IMAGE_PATH"
@@ -603,9 +637,8 @@ fi
 
 mkdir_p /bin
 mkdir_p /sbin
-for dir in "${ROOT_DIRS[@]}"; do
-    mkdir_p "$dir"
-done
+lay_out_root
+[ "$FRESH" = 0 ] || record_owners
 
 ensure_room "$(numfmt --from=iec "$FS_FREE_FLOOR")"
 
@@ -826,7 +859,8 @@ install_trees() {
         guest="${spec#*:}"
         rc=0
         "${FS_TREE[@]}" install "$IMAGE_PATH" "$host" "$guest" \
-            --manifests "$TREE_MANIFESTS" --name "$(tree_manifest "$guest")" || rc=$?
+            --manifests "$TREE_MANIFESTS" --name "$(tree_manifest "$guest")" \
+            --owner "$(root_layout_owner "$guest")" || rc=$?
         case "$rc" in
             0) echo "Installed $host at $guest" ;;
             3) echo "build_fs_image: left $guest as it was; the next build tries again" >&2 ;;
@@ -835,7 +869,8 @@ install_trees() {
     done
     for spec in "${seeds[@]}"; do
         rc=0
-        "${FS_TREE[@]}" install "$IMAGE_PATH" "${spec%%:*}" "${spec#*:}" || rc=$?
+        "${FS_TREE[@]}" install "$IMAGE_PATH" "${spec%%:*}" "${spec#*:}" \
+            --owner "$(root_layout_owner "${spec#*:}")" || rc=$?
         case "$rc" in
             0) echo "Seeded ${spec#*:} from ${spec%%:*}" ;;
             3) echo "build_fs_image: did not seed ${spec#*:}; the next build tries again" >&2 ;;

@@ -270,13 +270,14 @@ pub fn test_pty_slave_driver_kind() -> TestResult {
 pub fn test_pty_alloc_pair_both_initialized() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(err) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", err);
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(err) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", err);
+                return TestResult::Fail;
+            }
+        };
     let slave_num = match tty::get_pty_number(master) {
         Ok(n) => n,
         Err(err) => {
@@ -309,7 +310,8 @@ pub fn test_pty_alloc_pair_both_initialized() -> TestResult {
 pub fn test_pty_master_empty_read_would_block_not_eof() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
+    let (master, _master_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let slave_backing = tty::pty_open_slave(slave).unwrap();
@@ -389,7 +391,8 @@ pub fn test_pty_winsize_shared_across_pair() -> TestResult {
 
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
+    let (master, _master_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
@@ -428,7 +431,8 @@ pub fn test_pty_winsize_shared_across_pair() -> TestResult {
 pub fn test_pty_close_master_first_frees_pair() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
+    let (master, master_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let slave_backing = tty::pty_open_slave(slave).unwrap();
@@ -453,7 +457,8 @@ pub fn test_pty_close_master_first_frees_pair() -> TestResult {
 pub fn test_pty_close_slave_first_frees_pair() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
+    let (master, master_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let slave_backing = tty::pty_open_slave(slave).unwrap();
@@ -478,20 +483,22 @@ pub fn test_pty_close_slave_first_frees_pair() -> TestResult {
 pub fn test_pty_reallocation_after_free() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master1, master1_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
+    let (master1, master1_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).unwrap();
     let slave1 = TtyIndex(tty::get_pty_number(master1).unwrap() as u8);
     tty::set_pty_lock(master1, false).unwrap();
     let slave1_backing = tty::pty_open_slave(slave1).unwrap();
     drop(slave1_backing);
     drop(master1_backing);
 
-    let (master2, _master2_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(err) => {
-            klog_info!("TTY_TEST: BUG - reallocation failed: {:?}", err);
-            return TestResult::Fail;
-        }
-    };
+    let (master2, _master2_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(err) => {
+                klog_info!("TTY_TEST: BUG - reallocation failed: {:?}", err);
+                return TestResult::Fail;
+            }
+        };
     let slave2 = TtyIndex(tty::get_pty_number(master2).unwrap() as u8);
 
     tty::set_pty_lock(master2, false).unwrap();
@@ -531,10 +538,42 @@ pub fn test_pty_open_slave_validates_type() -> TestResult {
     TestResult::Pass
 }
 
+/// A slave answers to its master's opener as the backing the open takes
+/// records it, which is what a slot freed and handed to another opener
+/// between a check and an open would otherwise get wrong.
+pub fn test_pty_open_slave_judges_the_owner_it_opens() -> TestResult {
+    tty::table::tty_table_init();
+
+    let user = (1000, 1000);
+    let Ok((master, _master_backing)) = tty::pty_alloc(slopos_ostd::process::quota::root(), user)
+    else {
+        klog_info!("TTY_TEST: BUG - pty_alloc failed");
+        return TestResult::Fail;
+    };
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::set_pty_lock(master, false).unwrap();
+
+    if tty::pty_slave_owner(slave) != Some(user) {
+        klog_info!("TTY_TEST: BUG - the slave is not its opener's");
+        return TestResult::Fail;
+    }
+    let refused = tty::pty_open_slave_as(slave, &|owner| owner == (0, 0));
+    if !matches!(refused, Err(TtyError::AccessDenied)) {
+        klog_info!("TTY_TEST: BUG - another uid opened the slave");
+        return TestResult::Fail;
+    }
+    if tty::pty_open_slave_as(slave, &|owner| owner == user).is_err() {
+        klog_info!("TTY_TEST: BUG - the opener's uid could not open its slave");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 pub fn test_pty_open_slave_prevents_free() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
+    let (master, master_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
 
     tty::set_pty_lock(master, false).unwrap();
@@ -564,7 +603,8 @@ pub fn test_pty_open_slave_prevents_free() -> TestResult {
 pub fn test_extra_slave_open_keeps_slave_alive() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
+    let (master, master_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let slave_open1 = tty::pty_open_slave(slave).unwrap();
@@ -599,13 +639,14 @@ pub fn test_rapid_alloc_free_realloc() -> TestResult {
     tty::table::tty_table_init();
 
     for i in 0..3u8 {
-        let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-            Ok(pair) => pair,
-            Err(err) => {
-                klog_info!("TTY_TEST: BUG - rapid alloc cycle {} failed: {:?}", i, err);
-                return TestResult::Fail;
-            }
-        };
+        let (master, _master_backing) =
+            match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+                Ok(pair) => pair,
+                Err(err) => {
+                    klog_info!("TTY_TEST: BUG - rapid alloc cycle {} failed: {:?}", i, err);
+                    return TestResult::Fail;
+                }
+            };
         let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
 
         tty::set_pty_lock(master, false).unwrap();
@@ -638,7 +679,8 @@ pub fn test_rapid_alloc_free_realloc() -> TestResult {
 pub fn test_pty_open_slave_after_free() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
+    let (master, master_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let slave_backing = tty::pty_open_slave(slave).unwrap();
@@ -676,13 +718,14 @@ pub fn test_max_ttys_is_32() -> TestResult {
 
 pub fn test_master_peer_link_targets_slave() -> TestResult {
     tty::table::tty_table_init();
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed");
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(_) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed");
+                return TestResult::Fail;
+            }
+        };
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     let peer = peer_link_of(master);
     match peer.upgrade() {
@@ -696,13 +739,14 @@ pub fn test_master_peer_link_targets_slave() -> TestResult {
 
 pub fn test_slave_peer_link_targets_master() -> TestResult {
     tty::table::tty_table_init();
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed");
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(_) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed");
+                return TestResult::Fail;
+            }
+        };
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     let peer = peer_link_of(slave);
     match peer.upgrade() {
@@ -716,7 +760,8 @@ pub fn test_slave_peer_link_targets_master() -> TestResult {
 
 pub fn test_backing_dies_on_free() -> TestResult {
     tty::table::tty_table_init();
-    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0))
+    {
         Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed");
@@ -742,7 +787,8 @@ pub fn test_backing_dies_on_free() -> TestResult {
 /// A peer link captured before teardown stops upgrading once the pair frees.
 pub fn test_stale_peer_link_detected() -> TestResult {
     tty::table::tty_table_init();
-    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0))
+    {
         Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed");
@@ -768,13 +814,14 @@ pub fn test_stale_peer_link_detected() -> TestResult {
 
 pub fn test_pty_alloc_links_master_to_slave() -> TestResult {
     tty::table::tty_table_init();
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed");
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(_) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed");
+                return TestResult::Fail;
+            }
+        };
     let reported_slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     let peer = peer_link_of(master);
     let linked_slave = peer.upgrade().map(|b| b.index());
@@ -788,25 +835,27 @@ pub fn test_pty_alloc_links_master_to_slave() -> TestResult {
 pub fn test_stale_write_safe_noop() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master_a, master_a_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - first pty_alloc failed");
-            return TestResult::Fail;
-        }
-    };
+    let (master_a, master_a_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(_) => {
+                klog_info!("TTY_TEST: BUG - first pty_alloc failed");
+                return TestResult::Fail;
+            }
+        };
     let stale_peer = peer_link_of(master_a);
 
     drop(master_a_backing);
 
     // Pair B may reuse the same slots.
-    let (master_b, _master_b_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - second pty_alloc failed");
-            return TestResult::Fail;
-        }
-    };
+    let (master_b, _master_b_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(_) => {
+                klog_info!("TTY_TEST: BUG - second pty_alloc failed");
+                return TestResult::Fail;
+            }
+        };
     let slave_b = TtyIndex(tty::get_pty_number(master_b).unwrap() as u8);
 
     let written = crate::tty::pty::master_write(&stale_peer, b"stale data");
@@ -825,13 +874,14 @@ pub fn test_stale_write_safe_noop() -> TestResult {
 pub fn test_rapid_alloc_free_backing_dies() -> TestResult {
     tty::table::tty_table_init();
     for _ in 0..10 {
-        let (_master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-            Ok(pair) => pair,
-            Err(_) => {
-                klog_info!("TTY_TEST: BUG - pty_alloc failed during stress");
-                return TestResult::Fail;
-            }
-        };
+        let (_master, master_backing) =
+            match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+                Ok(pair) => pair,
+                Err(_) => {
+                    klog_info!("TTY_TEST: BUG - pty_alloc failed during stress");
+                    return TestResult::Fail;
+                }
+            };
         let master_weak = KArc::downgrade(&master_backing);
         drop(master_backing);
         if master_weak.upgrade().is_some() {
@@ -844,13 +894,14 @@ pub fn test_rapid_alloc_free_backing_dies() -> TestResult {
 
 pub fn test_data_flow_through_peer_link() -> TestResult {
     tty::table::tty_table_init();
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed");
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(_) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed");
+                return TestResult::Fail;
+            }
+        };
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
@@ -888,7 +939,7 @@ pub fn test_multiple_pty_pairs() -> TestResult {
     // master backing keeps the pairs live at once.
     let mut backings: [Option<KArc<TtyBacking>>; 10] = [const { None }; 10];
     for (i, slot) in backings.iter_mut().enumerate() {
-        match tty::pty_alloc(slopos_ostd::process::quota::root()) {
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
             Ok((_master, backing)) => *slot = Some(backing),
             Err(_) => {
                 klog_info!("TTY_TEST: BUG - pty_alloc failed at pair {}", i);
@@ -922,13 +973,14 @@ pub fn test_pty_lock_ioctl_constants() -> TestResult {
 pub fn test_slave_locked_by_default() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
     let slave_num = match tty::get_pty_number(master) {
         Ok(n) => n,
         Err(e) => {
@@ -949,13 +1001,14 @@ pub fn test_slave_locked_by_default() -> TestResult {
 pub fn test_locked_slave_open_rejected() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
 
@@ -981,13 +1034,14 @@ pub fn test_locked_slave_open_rejected() -> TestResult {
 pub fn test_unlock_enables_open() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
 
@@ -1010,13 +1064,14 @@ pub fn test_unlock_enables_open() -> TestResult {
 pub fn test_get_lock_round_trip() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
 
     match tty::get_pty_lock(master) {
         Ok(true) => {}
@@ -1059,13 +1114,14 @@ pub fn test_get_lock_round_trip() -> TestResult {
 pub fn test_set_lock_non_master_rejected() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
 
@@ -1086,13 +1142,14 @@ pub fn test_set_lock_non_master_rejected() -> TestResult {
 pub fn test_data_flow_after_unlock() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
-        Ok(pair) => pair,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
 
@@ -1122,7 +1179,8 @@ pub fn test_data_flow_after_unlock() -> TestResult {
 pub fn test_master_close_slave_hangup() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0))
+    {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -1155,7 +1213,7 @@ pub fn test_multiple_pairs_with_locks() -> TestResult {
     let mut pairs: [(TtyIndex, TtyIndex); 5] = [(TtyIndex(0), TtyIndex(0)); 5];
     let mut backings: [Option<KArc<TtyBacking>>; 5] = [const { None }; 5];
     for i in 0..5 {
-        let (master, backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
+        let (master, backing) = match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
             Ok(pair) => pair,
             Err(_) => {
                 klog_info!("TTY_TEST: BUG - pty_alloc failed at pair {}", i);

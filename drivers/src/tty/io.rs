@@ -70,7 +70,7 @@ impl Tty {
 
 pub use super::pty::{
     get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
-    queue_packet_event, set_packet_mode, set_pty_lock,
+    pty_slave_owner, queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
 pub fn push_input<E: Into<InputEvent>>(idx: TtyIndex, event: E) {

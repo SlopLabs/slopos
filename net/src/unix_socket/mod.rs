@@ -23,6 +23,7 @@ use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KVec, KVecDeque};
 
 use pair::{PairSide, PairTable};
+use slopos_fs::vfs::{Subject, VfsError, vfs_make_socket_at, vfs_socket_at};
 use slopos_fs::{FileRef, LeafFileRef};
 use slopos_ostd::process::quota::Reservation;
 use slopos_ostd::process::{AccountId, Identity};
@@ -75,8 +76,8 @@ pub fn unix_create() -> Option<SocketHandle> {
         .map(SocketHandle::from_handle)
 }
 
-/// Bind a socket to an abstract namespace path.
-pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
+/// Bind a socket to `path`, making its node as `who` with `mode`.
+pub fn unix_bind(handle: SocketHandle, path: &[u8], cwd: &[u8], mode: u16, who: &Subject) -> i32 {
     if path.is_empty() || path.len() > UNIX_PATH_MAX {
         return Errno::EINVAL.raw();
     }
@@ -90,32 +91,37 @@ pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
         return Errno::ENOMEM.raw();
     }
 
-    let mut state = UNIX_STATE.lock();
     let h = handle.handle();
-    match state.slots.get(h) {
-        Ok(slot) if matches!(slot.state, SlotState::Created) => {}
-        Ok(_) => return Errno::EINVAL.raw(),
-        Err(_) => return Errno::EBADF.raw(),
-    }
-
-    for (other_h, other) in state.slots.iter() {
-        if other_h == h {
-            continue;
-        }
-        let other_path: &[u8] = match &other.state {
-            SlotState::Bound { path } => path.as_slice(),
-            SlotState::Listening { path, .. } => path.as_slice(),
-            _ => continue,
-        };
-        if other_path == path {
-            return Errno::EADDRINUSE.raw();
+    {
+        let mut state = UNIX_STATE.lock();
+        match state.slots.get_mut(h) {
+            Ok(slot) if matches!(slot.state, SlotState::Created) && !slot.binding => {
+                slot.binding = true;
+            }
+            Ok(_) => return Errno::EINVAL.raw(),
+            Err(_) => return Errno::EBADF.raw(),
         }
     }
 
-    if let Ok(slot) = state.slots.get_mut(h) {
-        slot.state = SlotState::Bound { path: owned_path };
+    // The filesystem may sleep, so the node is made with the state unlocked,
+    // and `made` outlives the guard: dropping a name may free its node.
+    let made = vfs_make_socket_at(path, cwd, mode, who);
+    let mut state = UNIX_STATE.lock();
+    let Ok(slot) = state.slots.get_mut(h) else {
+        return Errno::EBADF.raw();
+    };
+    slot.binding = false;
+    match made {
+        Ok(name) => {
+            slot.state = SlotState::Bound {
+                path: owned_path,
+                name,
+            };
+            0
+        }
+        Err(VfsError::AlreadyExists) => Errno::EADDRINUSE.raw(),
+        Err(e) => e.to_errno().raw(),
     }
-    0
 }
 
 /// Mark a bound socket as listening, `owner` being who every client that
@@ -131,8 +137,8 @@ pub fn unix_listen(handle: SocketHandle, _backlog: u32, owner: Identity) -> i32 
         return Errno::EBADF.raw();
     };
 
-    let path = match core::mem::replace(&mut slot.state, SlotState::Created) {
-        SlotState::Bound { path } => path,
+    let (path, name) = match core::mem::replace(&mut slot.state, SlotState::Created) {
+        SlotState::Bound { path, name } => (path, name),
         other => {
             slot.state = other;
             return Errno::EINVAL.raw();
@@ -140,6 +146,7 @@ pub fn unix_listen(handle: SocketHandle, _backlog: u32, owner: Identity) -> i32 
     };
     slot.state = SlotState::Listening {
         path,
+        name,
         backlog,
         owner,
     };
@@ -191,19 +198,34 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
     }
 }
 
-/// Connect to a listening socket identified by path, as `who`.
+/// Connect to the socket listening at `path`, which `who` must be able to
+/// reach and write, attesting `identity` to it.
 ///
 /// Allocates the pair and a fresh slot for the accepted side; the listener's
 /// backlog records that handle for `accept()` to dequeue.
-pub fn unix_connect(handle: SocketHandle, path: &[u8], who: Identity) -> i32 {
+pub fn unix_connect(
+    handle: SocketHandle,
+    path: &[u8],
+    cwd: &[u8],
+    who: &Subject,
+    identity: Identity,
+) -> i32 {
     if path.is_empty() || path.len() > UNIX_PATH_MAX {
         return Errno::EINVAL.raw();
     }
-
+    // Both declared before the guard, so each drops after it.
+    let named = match vfs_socket_at(path, cwd, who) {
+        Ok(Some(named)) => named,
+        Ok(None) => return Errno::ECONNREFUSED.raw(),
+        Err(e) => return e.to_errno().raw(),
+    };
+    let node = named.node();
+    let mut given_up = None;
     let mut state = UNIX_STATE.lock();
     let h_a = handle.handle();
 
     match state.slots.get(h_a) {
+        Ok(slot) if slot.binding => return Errno::EINVAL.raw(),
         Ok(slot) => match slot.state {
             SlotState::Created | SlotState::Bound { .. } => {}
             SlotState::Connected { .. } => return Errno::EISCONN.raw(),
@@ -214,19 +236,14 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8], who: Identity) -> i32 {
 
     let mut listener = None;
     for (lh, slot) in state.slots.iter() {
-        if let SlotState::Listening {
-            path: listener_path,
-            backlog,
-            owner,
-        } = &slot.state
+        if let SlotState::Listening { backlog, owner, .. } = &slot.state
+            && slot.listening_at(&node)
         {
-            if listener_path.as_slice() == path {
-                if backlog.len() >= MAX_BACKLOG {
-                    return Errno::EAGAIN.raw();
-                }
-                listener = Some((lh, *owner));
-                break;
+            if backlog.len() >= MAX_BACKLOG {
+                return Errno::EAGAIN.raw();
             }
+            listener = Some((lh, *owner));
+            break;
         }
     }
     let Some((h_listener, listener_owner)) = listener else {
@@ -256,13 +273,16 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8], who: Identity) -> i32 {
     let b_handle = SocketHandle::from_handle(h_b);
 
     if let Ok(slot) = state.slots.get_mut(h_a) {
-        slot.state = SlotState::Connected {
+        let connected = SlotState::Connected {
             pair: pair_handle,
             side: PairSide::A,
             peer: b_handle,
             peer_closed: false,
             peer_identity: listener_owner,
         };
+        if let SlotState::Bound { name, .. } = core::mem::replace(&mut slot.state, connected) {
+            given_up = Some(name);
+        }
     }
 
     if let Ok(slot) = state.slots.get_mut(h_b) {
@@ -271,7 +291,7 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8], who: Identity) -> i32 {
             side: PairSide::B,
             peer: a_handle,
             peer_closed: false,
-            peer_identity: who,
+            peer_identity: identity,
         };
     }
 
@@ -285,6 +305,7 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8], who: Identity) -> i32 {
 
     let listener_idx = h_listener.slot() as usize;
     drop(state);
+    drop(given_up);
     BUS.publish(unix_ev(listener_idx));
 
     0
@@ -316,6 +337,7 @@ pub fn unix_socketpair(who: Identity) -> Result<(SocketHandle, SocketHandle), Er
             peer_identity: who,
         },
         nonblocking: false,
+        binding: false,
     }) else {
         let _ = state.slots.remove(h_a);
         state.pairs.discard(pair);
@@ -860,6 +882,8 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
         Ok(v) => v,
         Err(_) => return Errno::ENOMEM.raw(),
     };
+    // Dropped after the lock too: the last hold on an unlinked node frees it.
+    let mut given_up = None;
 
     {
         let mut state = UNIX_STATE.lock();
@@ -885,7 +909,9 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
                     let _ = freed_pairs.push(freed);
                 }
             }
-            SlotState::Listening { backlog, .. } => {
+            SlotState::Bound { name, .. } => given_up = Some(name),
+            SlotState::Listening { backlog, name, .. } => {
+                given_up = Some(name);
                 was_listener = true;
                 backlog_wake_count = close_listener_backlog(
                     slots,
@@ -895,11 +921,12 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
                     &mut freed_pairs,
                 );
             }
-            _ => {}
+            SlotState::Created => {}
         }
     }
 
     drop(freed_pairs);
+    drop(given_up);
 
     if let Some(peer) = wake_peer {
         if peer < MAX_UNIX_SOCKETS {
@@ -1028,7 +1055,7 @@ pub fn unix_get_local_path(handle: SocketHandle) -> Option<[u8; UNIX_PATH_MAX]> 
     let state = UNIX_STATE.lock();
     let slot = state.slots.get(handle.handle()).ok()?;
     let path: &[u8] = match &slot.state {
-        SlotState::Bound { path } => path.as_slice(),
+        SlotState::Bound { path, .. } => path.as_slice(),
         SlotState::Listening { path, .. } => path.as_slice(),
         _ => return None,
     };
@@ -1047,7 +1074,7 @@ pub fn unix_get_local_path_len(handle: SocketHandle) -> usize {
         return 0;
     };
     match &slot.state {
-        SlotState::Bound { path } => path.len(),
+        SlotState::Bound { path, .. } => path.len(),
         SlotState::Listening { path, .. } => path.len(),
         _ => 0,
     }
@@ -1061,7 +1088,7 @@ pub fn unix_get_peer_path(handle: SocketHandle) -> Option<([u8; UNIX_PATH_MAX], 
         _ => return None,
     };
     let peer_path: &[u8] = match &state.slots.get(peer.handle()).ok()?.state {
-        SlotState::Bound { path } => path.as_slice(),
+        SlotState::Bound { path, .. } => path.as_slice(),
         SlotState::Listening { path, .. } => path.as_slice(),
         _ => return Some(([0u8; UNIX_PATH_MAX], 0)),
     };

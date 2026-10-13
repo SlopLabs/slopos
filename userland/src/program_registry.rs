@@ -4,9 +4,8 @@ use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 pub struct ProgramSpec {
     pub name: &'static str,
     pub path: &'static str,
-    /// The tier this program is *requested* at. User space may name only
-    /// `Normal` and `Low`; anything else is `EINVAL` at the spawn boundary. A
-    /// program needing a higher tier is given it kernel-side by program identity.
+    /// The tier this program is *requested* at: `Normal` or `Low`, since
+    /// `High` takes `SchedHigh`, which init holds and spends on the compositor.
     pub priority: TaskPriority,
     /// The flags this program is spawned with; its capabilities come from the
     /// kernel's grant for its path.
@@ -66,7 +65,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Halt or reboot the machine",
     },
-    // Granted `RawBlock` and `Power` by path, like `halt`.
+    // Granted `RawBlock`, `Power` and `DacOverride` by path, like `halt`.
     ProgramSpec {
         name: "bootctl",
         path: "/bin/bootctl",
@@ -74,7 +73,8 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Install a kernel into a boot slot and choose what boots",
     },
-    // Granted `RawBlock`, `Mount`, `Power`, `BootEntry` and `Seal` by path.
+    // Granted `RawBlock`, `Mount`, `Power`, `BootEntry`, `Seal` and
+    // `DacOverride` by path.
     ProgramSpec {
         name: "installer",
         path: "/bin/installer",

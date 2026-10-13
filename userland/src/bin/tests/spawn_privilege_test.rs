@@ -1,32 +1,36 @@
 //! `spawn_path` privilege containment, exercised through the real syscall entry.
 //!
-//! The utest runner hands test binaries every capability (`CAP_MASK_ALL`), so
-//! no refusal here is explained by what this caller lacks. The spawn boundary
-//! is purely subtractive: a spawned child holds the universal set plus the
-//! kernel's grant for its path, and an exec narrows the mask to what the new
-//! image is granted.
+//! The utest runner hands this binary every capability as uid 0, so a refusal
+//! that is the caller's doing is shown in a forked child that dropped what it
+//! names. A spawned child holds the universal set, what its spawner delegates
+//! of its own and the kernel's grant for its path, and an exec narrows the
+//! mask to what the new image is granted.
 
 use slopos_userland as _;
 
 use slopos_abi::caps::{
     ALL as CAP_MASK_ALL, BOOT_ENTRY as CAP_BOOT_ENTRY, FATE as CAP_FATE,
-    SYS_INSPECT as CAP_SYS_INSPECT, UNIVERSAL as CAP_UNIVERSAL,
+    NET_ADMIN as CAP_NET_ADMIN, RAW_BLOCK as CAP_RAW_BLOCK, SCHED_HIGH as CAP_SCHED_HIGH,
+    SET_ID as CAP_SET_ID, SYS_INSPECT as CAP_SYS_INSPECT, UNIVERSAL as CAP_UNIVERSAL,
 };
 use slopos_abi::net::NET_IFINDEX_GLOBAL;
-use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction};
+use slopos_abi::spawn::{
+    SPAWN_SET_ALL, SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_UID, SpawnAttrs, SpawnFdAction,
+};
 use slopos_abi::syscall::{PROF_OP_STATUS, SYSCALL_SPAWN_PATH};
 use slopos_abi::task::{
     SPAWN_RESERVED, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NEW_PGRP, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE,
+    TASK_FLAG_USER_MODE, TaskPriority,
 };
 use slopos_boot_core::variables;
+use slopos_slibc::process::ids::{getresgid, getresuid};
 use slopos_slibc::process::shim;
 use slopos_userland::syscall::core::{caps_drop, prof_ctl};
 use slopos_userland::syscall::efi::efivar_get;
 use slopos_userland::syscall::error::SyscallError;
 use slopos_userland::syscall::fs::pipe;
 use slopos_userland::syscall::net::net_iface_ctl;
-use slopos_userland::syscall::process;
+use slopos_userland::syscall::process::{self, Endowment};
 use slopos_userland::syscall::raw::syscall5;
 
 use std::ffi::CString;
@@ -34,12 +38,13 @@ use std::fs::File;
 use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
 
 const EPERM: i32 = -1;
 const EINVAL: i32 = -22;
 const ENOENT: i32 = -2;
+const EFAULT: i32 = -14;
 
 const PRIORITY_HIGH: u8 = 0;
 const PRIORITY_KERNEL_IO: u8 = 1;
@@ -58,19 +63,44 @@ const MISSING: &[u8] = b"/bin/__no_such_binary__";
 /// hand because `process::spawn_path_with_actions`'s typed `TaskPriority`
 /// cannot express the tiers under test.
 fn spawn_raw(path: &[u8], priority: u8, flags: u16, actions: &[SpawnFdAction]) -> i32 {
-    let attrs = SpawnAttrs {
-        priority,
-        _pad: [0; 3],
-        flags,
-        _pad2: 0,
-        actions_ptr: actions.as_ptr() as u64,
-        actions_len: actions.len() as u64,
-        sigdefault_mask: 0,
-        envp_ptr: 0,
-        envp_len: 0,
-        cwd_ptr: 0,
-        cwd_len: 0,
-    };
+    spawn_attrs(
+        path,
+        &SpawnAttrs {
+            actions_ptr: actions.as_ptr() as u64,
+            actions_len: actions.len() as u64,
+            ..SpawnAttrs::new(priority, flags)
+        },
+    )
+}
+
+/// A spawn of `MISSING` asking for `caps` and, given one, `uid` as every id.
+fn spawn_asking(caps: u64, uid: Option<u32>) -> i32 {
+    spawn_attrs(
+        MISSING,
+        &SpawnAttrs {
+            caps,
+            uid: uid.unwrap_or_default(),
+            gid: uid.unwrap_or_default(),
+            set: uid.map_or(0, |_| SPAWN_SET_UID | SPAWN_SET_GID),
+            ..SpawnAttrs::new(PRIORITY_NORMAL, TASK_FLAG_USER_MODE)
+        },
+    )
+}
+
+/// A spawn of `MISSING` naming `groups` at `ptr`, `count` long.
+fn spawn_naming_groups(ptr: u64, count: u32) -> i32 {
+    spawn_attrs(
+        MISSING,
+        &SpawnAttrs {
+            groups_ptr: ptr,
+            ngroups: count,
+            set: SPAWN_SET_GROUPS,
+            ..SpawnAttrs::new(PRIORITY_NORMAL, TASK_FLAG_USER_MODE)
+        },
+    )
+}
+
+fn spawn_attrs(path: &[u8], attrs: &SpawnAttrs) -> i32 {
     let argv: [*const u8; 0] = [];
     unsafe {
         syscall5(
@@ -79,7 +109,7 @@ fn spawn_raw(path: &[u8], priority: u8, flags: u16, actions: &[SpawnFdAction]) -
             path.len() as u64,
             argv.as_ptr() as u64,
             0,
-            &attrs as *const SpawnAttrs as u64,
+            attrs as *const SpawnAttrs as u64,
         ) as i32
     }
 }
@@ -155,14 +185,13 @@ fn malformed_flags_are_einval() -> bool {
     ok
 }
 
-/// User space picks between `Normal` and `Low` and nothing else. `High` is the
-/// compositor's tier, granted by program identity; `KernelIo` is for kthreads;
-/// `Idle` is the per-CPU idle loop's.
-fn privileged_tiers_are_einval() -> bool {
+/// `Normal` and `Low` are anyone's and `High` takes `SchedHigh`; `KernelIo`
+/// is for kthreads and `Idle` the per-CPU idle loop's, which no spawn names.
+fn tiers_follow_sched_high() -> bool {
     expect(
-        "High",
+        "High holding SchedHigh",
         spawn_raw(MISSING, PRIORITY_HIGH, TASK_FLAG_USER_MODE, &[]),
-        EINVAL,
+        ENOENT,
     ) && expect(
         "KernelIo",
         spawn_raw(MISSING, PRIORITY_KERNEL_IO, TASK_FLAG_USER_MODE, &[]),
@@ -171,7 +200,151 @@ fn privileged_tiers_are_einval() -> bool {
         "Idle",
         spawn_raw(MISSING, PRIORITY_IDLE, TASK_FLAG_USER_MODE, &[]),
         EINVAL,
-    )
+    ) && in_forked_child("High without SchedHigh", high_without_sched_high)
+}
+
+fn high_without_sched_high() -> i32 {
+    caps_drop(CAP_SCHED_HIGH);
+    if expect(
+        "High without SchedHigh",
+        spawn_raw(MISSING, PRIORITY_HIGH, TASK_FLAG_USER_MODE, &[]),
+        EPERM,
+    ) {
+        0
+    } else {
+        1
+    }
+}
+
+/// A spawner hands its child capabilities it holds, and asking for one it
+/// lacks is `EPERM`: shown on a child that reports its mask, then in a forked
+/// child that dropped `RawBlock`.
+fn delegation_is_bounded_by_the_spawner() -> bool {
+    let delegated = Endowment {
+        caps: CAP_SYS_INSPECT,
+        ..Endowment::NONE
+    };
+    let mask = (CAP_UNIVERSAL | CAP_SYS_INSPECT).to_string();
+    if run_endowed(SELF, &[HOLDS, &mask], delegated) != Some(0) {
+        eprintln!("spawn_privilege_test: a child delegated SysInspect does not hold {mask}");
+        return false;
+    }
+    let undefined_set = SpawnAttrs {
+        set: SPAWN_SET_ALL + 1,
+        ..SpawnAttrs::new(PRIORITY_NORMAL, TASK_FLAG_USER_MODE)
+    };
+    let groups = [0u32; 33];
+    expect(
+        "an undefined capability bit",
+        spawn_asking(1 << 63, None),
+        EINVAL,
+    ) && expect(
+        "an undefined id bit",
+        spawn_attrs(MISSING, &undefined_set),
+        EINVAL,
+    ) && expect(
+        "33 groups",
+        spawn_naming_groups(groups.as_ptr() as u64, 33),
+        EINVAL,
+    ) && expect("groups at no address", spawn_naming_groups(8, 1), EFAULT)
+        && expect(
+            "32 groups",
+            spawn_naming_groups(groups.as_ptr() as u64, 32),
+            ENOENT,
+        )
+        && in_forked_child("delegating beyond the spawner", delegate_beyond_the_spawner)
+}
+
+fn delegate_beyond_the_spawner() -> i32 {
+    caps_drop(CAP_RAW_BLOCK);
+    let held = expect(
+        "delegating a held capability",
+        spawn_asking(CAP_NET_ADMIN, None),
+        ENOENT,
+    );
+    let dropped = expect(
+        "delegating a dropped capability",
+        spawn_asking(CAP_RAW_BLOCK, None),
+        EPERM,
+    );
+    if held && dropped { 0 } else { 1 }
+}
+
+/// A child runs as another uid only for a spawner holding `SetId`; without
+/// it, its own uid is the one it may hand on.
+fn ids_need_set_id() -> bool {
+    let as_user = Endowment {
+        ids: Some((USER, USER)),
+        ..Endowment::NONE
+    };
+    if run_endowed(SELF, &[RUNS_AS, &USER.to_string()], as_user) != Some(0) {
+        eprintln!("spawn_privilege_test: a SetId holder's child does not run as {USER}");
+        return false;
+    }
+    in_forked_child("ids without SetId", ids_without_set_id)
+}
+
+fn ids_without_set_id() -> i32 {
+    caps_drop(CAP_SET_ID);
+    let own = expect("its own uid", spawn_asking(0, Some(0)), ENOENT);
+    let other = expect("another uid", spawn_asking(0, Some(USER)), EPERM);
+    if own && other { 0 } else { 1 }
+}
+
+/// A child holding a gated capability, or running as ids its spawner's real
+/// ones are not, starts `AT_SECURE`; one given neither does not.
+fn endowed_children_start_secure() -> bool {
+    let cases = [
+        (
+            "1",
+            Endowment {
+                caps: CAP_SYS_INSPECT,
+                ..Endowment::NONE
+            },
+        ),
+        (
+            "1",
+            Endowment {
+                ids: Some((USER, USER)),
+                ..Endowment::NONE
+            },
+        ),
+        ("0", Endowment::NONE),
+    ];
+    cases.into_iter().all(|(secure, endowment)| {
+        let ran = run_endowed(SECURE_PROBE, &["self", SECURE_PROBE, secure], endowment);
+        if ran != Some(0) {
+            eprintln!("spawn_privilege_test: {SECURE_PROBE} wanted AT_SECURE={secure}: {ran:?}");
+        }
+        ran == Some(0)
+    })
+}
+
+/// Spawn `path` with `args` and `endowment`, sharing this process's stdio,
+/// and answer its exit code.
+fn run_endowed(path: &str, args: &[&str], endowment: Endowment<'_>) -> Option<i32> {
+    let owned: Vec<CString> = std::iter::once(path)
+        .chain(args.iter().copied())
+        .map(|arg| CString::new(arg).expect("no argument holds a NUL"))
+        .collect();
+    let argv: Vec<*const u8> = owned.iter().map(|arg| arg.as_ptr().cast()).collect();
+    let stdio = [
+        process::clone_fd(0, 0),
+        process::clone_fd(1, 1),
+        process::clone_fd(2, 2),
+    ];
+    let tid = process::spawn_endowed(
+        path.as_bytes(),
+        &argv,
+        &[],
+        &[],
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &stdio,
+        0,
+        endowment,
+    );
+    (tid > 0).then(|| process::wait_exit_code(tid as u32))
 }
 
 /// The control: legal attrs clear validation and reach exec. Without it every
@@ -282,24 +455,25 @@ fn granted_binaries_are_sealed() -> bool {
 /// so it can spawn a granted path; the half without Launch is
 /// [`spawns_without_launch`].
 fn launch_bounds_the_raise_site() -> bool {
-    // /bin/halt would power the machine off, so name a path that carries a
-    // grant but does nothing on its own -- /bin/keymap, which holds
-    // ConsoleConfig and exits after printing the layout.
-    let argv: [*const u8; 1] = [b"keymap\0".as_ptr()];
-    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
+    let argv: [*const u8; 2] = [b"prof\0".as_ptr(), b"status\0".as_ptr()];
+    let actions = [process::clone_fd(2, 2)];
     let tid = process::spawn_path_with_actions(
-        b"/bin/keymap",
+        PROF,
         &argv,
         slopos_abi::task::TaskPriority::Normal,
         slopos_abi::task::TASK_FLAG_USER_MODE,
         &actions,
         0,
     );
-    if tid <= 0 {
-        eprintln!("spawn_privilege_test: a Launch holder could not spawn a granted path: {tid}");
+    let status = if tid > 0 {
+        process::wait_exit_code(tid as u32)
+    } else {
+        tid
+    };
+    if status != 0 {
+        eprintln!("spawn_privilege_test: `prof status` from a Launch holder answered {status}");
         return false;
     }
-    let _ = process::waitpid(tid as u32);
 
     match Command::new(SELF).arg(WITHOUT_LAUNCH).status() {
         Ok(status) if status.success() => true,
@@ -311,9 +485,15 @@ fn launch_bounds_the_raise_site() -> bool {
 }
 
 const SELF: &str = "/bin/spawn_privilege_test";
+/// Granted `SysInspect`, which `prof status` fails without.
+const PROF: &[u8] = b"/bin/prof";
 const WITHOUT_LAUNCH: &str = "--without-launch";
 const EXEC_PROBE: &str = "--exec-probe";
 const HOLDS: &str = "--holds";
+const RUNS_AS: &str = "--runs-as";
+/// Exits 0 when its `AT_SECURE` is what its third argument says.
+const SECURE_PROBE: &str = "/bin/dl_secure_probe";
+const USER: u32 = 1000;
 /// Holds `RawBlock` only as far as its spawner does.
 const DUMPE2FS: &str = "/sbin/dumpe2fs";
 const ROOT_DISK: &str = "/dev/nvme0n1";
@@ -325,14 +505,16 @@ fn dumps_root_superblock() -> std::io::Result<std::process::Output> {
 }
 
 /// Runs in a child without Launch. A granted path it spawns runs ungranted, as
-/// its own `execve` would, rather than being refused; `#!/bin/sh` scripts too.
+/// its own `execve` would, rather than being refused: `prof status` runs and
+/// is refused the profiler. `#!/bin/sh` scripts run too.
 fn spawns_without_launch() -> i32 {
-    // AT_SECURE reads 0 only in an image that ran without its grant.
-    let probe = Command::new("/bin/dl_secure_probe")
-        .args(["self", "/bin/dl_secure_probe", "0"])
+    let prof = Command::new("/bin/prof")
+        .arg("status")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
-    if !matches!(probe, Ok(status) if status.success()) {
-        eprintln!("spawn_privilege_test: the granted probe ran as {probe:?}");
+    if !matches!(prof, Ok(status) if status.code() == Some(1)) {
+        eprintln!("spawn_privilege_test: `prof status` without Launch ran as {prof:?}");
         return 1;
     }
 
@@ -612,10 +794,36 @@ fn holds(args: &[String]) -> i32 {
     }
 }
 
+/// Exit 0 when every uid and gid of this process is `args[0]`.
+fn runs_as(args: &[String]) -> i32 {
+    let mut uids = [0u32; 3];
+    let mut gids = [0u32; 3];
+    let read = unsafe {
+        getresuid(&mut uids[0], &mut uids[1], &mut uids[2]) == 0
+            && getresgid(&mut gids[0], &mut gids[1], &mut gids[2]) == 0
+    };
+    match args.first().and_then(|id| id.parse::<u32>().ok()) {
+        Some(want) if read && uids == [want; 3] && gids == [want; 3] => 0,
+        _ => {
+            eprintln!("spawn_privilege_test: runs as uids {uids:?} gids {gids:?}");
+            1
+        }
+    }
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("no_preempt_is_eperm", no_preempt_is_eperm),
     ("malformed_flags_are_einval", malformed_flags_are_einval),
-    ("privileged_tiers_are_einval", privileged_tiers_are_einval),
+    ("tiers_follow_sched_high", tiers_follow_sched_high),
+    (
+        "delegation_is_bounded_by_the_spawner",
+        delegation_is_bounded_by_the_spawner,
+    ),
+    ("ids_need_set_id", ids_need_set_id),
+    (
+        "endowed_children_start_secure",
+        endowed_children_start_secure,
+    ),
     (
         "user_settable_flags_reach_exec",
         user_settable_flags_reach_exec,
@@ -675,12 +883,88 @@ fn grant_directories_are_sealed() -> bool {
     ok
 }
 
+/// The session's view of the spawn boundary: holding nothing beyond the
+/// universal set as uid 1000, it can delegate nothing gated, take no other
+/// uid and ask for no higher tier, and every request one step inside those
+/// bounds reaches exec.
+const SESSION: &str = "--session";
+
+fn session_holds_only_the_universal_set() -> bool {
+    let mut uids = [0u32; 3];
+    let read = unsafe { getresuid(&mut uids[0], &mut uids[1], &mut uids[2]) == 0 };
+    let held = caps_drop(0);
+    if !read || uids != [USER; 3] || held != CAP_UNIVERSAL {
+        eprintln!("spawn_privilege_test: the session runs as {uids:?} holding {held:#x}");
+        return false;
+    }
+    true
+}
+
+fn session_delegates_nothing_gated() -> bool {
+    let mut ok = expect(
+        "delegating a universal capability",
+        spawn_asking(CAP_FATE, None),
+        ENOENT,
+    );
+    for bit in (0..u64::BITS).map(|shift| 1u64 << shift) {
+        if bit & CAP_MASK_ALL & !CAP_UNIVERSAL == 0 {
+            continue;
+        }
+        ok &= expect(
+            &format!("delegating {bit:#x}"),
+            spawn_asking(bit, None),
+            EPERM,
+        );
+    }
+    ok
+}
+
+/// Zeroed id fields ask for nothing: they are uid 0 only under a `set` bit.
+fn session_takes_no_other_uid() -> bool {
+    let zeroed = SpawnAttrs {
+        uid: 0,
+        gid: 0,
+        ..SpawnAttrs::new(PRIORITY_NORMAL, TASK_FLAG_USER_MODE)
+    };
+    expect("its own uid", spawn_asking(0, Some(USER)), ENOENT)
+        && expect("uid 0", spawn_asking(0, Some(0)), EPERM)
+        && expect("zeroed ids", spawn_attrs(MISSING, &zeroed), ENOENT)
+        && expect("no groups", spawn_naming_groups(0, 0), EPERM)
+}
+
+fn session_asks_no_higher_tier() -> bool {
+    expect(
+        "Normal",
+        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_USER_MODE, &[]),
+        ENOENT,
+    ) && expect(
+        "High",
+        spawn_raw(MISSING, PRIORITY_HIGH, TASK_FLAG_USER_MODE, &[]),
+        EPERM,
+    )
+}
+
+const SESSION_CASES: &[(&str, fn() -> bool)] = &[
+    (
+        "session_holds_only_the_universal_set",
+        session_holds_only_the_universal_set,
+    ),
+    (
+        "session_delegates_nothing_gated",
+        session_delegates_nothing_gated,
+    ),
+    ("session_takes_no_other_uid", session_takes_no_other_uid),
+    ("session_asks_no_higher_tier", session_asks_no_higher_tier),
+];
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some(SESSION) => slopos_slibc::test_harness::run(SESSION_CASES),
         Some(WITHOUT_LAUNCH) => std::process::exit(spawns_without_launch()),
         Some(EXEC_PROBE) => std::process::exit(exec_probe(&args[2..])),
         Some(HOLDS) => std::process::exit(holds(&args[2..])),
+        Some(RUNS_AS) => std::process::exit(runs_as(&args[2..])),
         _ => slopos_slibc::test_harness::run(CASES),
     }
 }

@@ -7,6 +7,7 @@ pub mod net;
 pub mod net_query;
 pub mod program_registry;
 pub mod readiness;
+pub mod root_layout;
 pub mod selfhost;
 pub use slopos_rt as ring;
 pub mod runtime;

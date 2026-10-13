@@ -10,7 +10,7 @@ use slopos_userland::syscall::fs::sync;
 use std::fs;
 use std::io::ErrorKind;
 
-const CLONE: &str = "/home/clone";
+const CLONE: &str = "/home/user/clone";
 const WITNESS: &str = "SURVIVES";
 
 fn a_clone_survives_a_reboot() -> bool {

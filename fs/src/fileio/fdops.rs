@@ -176,7 +176,8 @@ pub fn file_open_at(
 
     if path == b"/dev/ptmx" {
         // The `/dev/ptmx` opener is the master, and it pays for the pair's two slots.
-        let (master_idx, backing) = match tty::alloc_pty(table.account()) {
+        let owner = (who.cred.euid, who.cred.egid);
+        let (master_idx, backing) = match tty::alloc_pty(table.account(), owner) {
             Ok(v) => v,
             Err(_) => return Errno::ENFILE.raw() as _,
         };
@@ -194,7 +195,16 @@ pub fn file_open_at(
     }
 
     if let Some(slave_idx) = parse_pts_path(path) {
-        let backing = match tty::open_pty_slave(slave_idx) {
+        let wants = [
+            (flags.contains(OpenMode::READ), Perm::Read),
+            (flags.contains(OpenMode::WRITE), Perm::Write),
+        ];
+        let admits = |(uid, gid)| {
+            wants
+                .into_iter()
+                .all(|(asked, want)| !asked || who.permits(PTY_SLAVE_MODE, uid, gid, false, want))
+        };
+        let backing = match tty::open_pty_slave(slave_idx, &admits) {
             Ok(b) => b,
             Err(e) => return tty_open_errno(e).raw() as _,
         };
@@ -325,6 +335,7 @@ fn tty_open_errno(e: TtyError) -> Errno {
     match e {
         TtyError::DeviceBusy => Errno::EBUSY,
         TtyError::PermissionDenied => Errno::EIO,
+        TtyError::AccessDenied => Errno::EACCES,
         TtyError::OutOfMemory => Errno::ENOMEM,
         _ => Errno::ENXIO,
     }

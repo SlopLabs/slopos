@@ -111,7 +111,15 @@ pub fn vfs_open_handle_flags_at(
     let opened =
         crate::vfs::ops::vfs_open_flags_at(path, cwd, flags, resolve_flags, who, create_mode)
             .map_err(|e| e.to_errno())?;
-    let handle = register_vnode(path, cwd, resolve_flags, opened.fs, opened.inode, created)?;
+    let handle = register_vnode(
+        path,
+        cwd,
+        resolve_flags,
+        who,
+        opened.fs,
+        opened.inode,
+        created,
+    )?;
     Ok(OpenedVnode {
         handle,
         fifo: opened.file_type == crate::vfs::FileType::Pipe,
@@ -140,7 +148,15 @@ pub fn vfs_open_dir_handle_at(
         .perm
         .check(who, crate::vfs::Perm::Read)
         .map_err(|e| e.to_errno())?;
-    let handle = register_vnode(path, cwd, resolve_flags, resolved.fs, resolved.inode, false)?;
+    let handle = register_vnode(
+        path,
+        cwd,
+        resolve_flags,
+        who,
+        resolved.fs,
+        resolved.inode,
+        false,
+    )?;
     Ok((handle, canon))
 }
 
@@ -148,6 +164,7 @@ fn register_vnode(
     path: &[u8],
     cwd: &[u8],
     resolve_flags: u32,
+    who: &crate::vfs::Subject,
     fs: &'static dyn FileSystem,
     inode: InodeId,
     created: bool,
@@ -169,7 +186,7 @@ fn register_vnode(
     // file got the number next. The re-check does not close the window — an
     // inode reallocated *and* re-bound to this same path still passes — but it
     // does close the case that matters, where the name is gone.
-    if !created && !still_resolves(path, cwd, resolve_flags, fs, inode) {
+    if !created && !still_resolves(path, cwd, resolve_flags, who, fs, inode) {
         crate::vfs::orphan::close_ref(fs, inode);
         return Err(slopos_abi::Errno::ENOENT);
     }
@@ -191,11 +208,11 @@ fn still_resolves(
     path: &[u8],
     cwd: &[u8],
     resolve_flags: u32,
+    who: &crate::vfs::Subject,
     fs: &'static dyn FileSystem,
     inode: InodeId,
 ) -> bool {
-    match crate::vfs::path::resolve_path_at(path, cwd, resolve_flags, &crate::vfs::Subject::KERNEL)
-    {
+    match crate::vfs::path::resolve_path_at(path, cwd, resolve_flags, who) {
         Ok(again) => again.inode == inode && same_filesystem(again.fs, fs),
         Err(_) => false,
     }
@@ -210,7 +227,14 @@ pub fn vfs_dir_handle_still_names(handle: usize, path: &[u8]) -> bool {
     let Some((fs, inode)) = resolve(handle) else {
         return false;
     };
-    still_resolves(path, b"/", crate::vfs::path::RESOLVE_FOLLOW, fs, inode)
+    still_resolves(
+        path,
+        b"/",
+        crate::vfs::path::RESOLVE_FOLLOW,
+        &crate::vfs::Subject::KERNEL,
+        fs,
+        inode,
+    )
 }
 
 /// Sole owner of one `OpenVnode` table entry; dropping it closes the vnode.

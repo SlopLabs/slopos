@@ -1571,7 +1571,7 @@ static int llvm_surface(void) {
 
     struct passwd *root = getpwnam("root");
     if (root == NULL || root->pw_uid != 0 || root->pw_gid != 0 ||
-        strcmp(root->pw_name, "root") != 0 || strcmp(root->pw_dir, "/") != 0) {
+        strcmp(root->pw_name, "root") != 0 || strcmp(root->pw_dir, "/root") != 0) {
         return fail("getpwnam(\"root\") is not the uid-0 row");
     }
     if (getpwnam("nobody") != NULL) {

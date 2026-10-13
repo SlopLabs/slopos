@@ -411,9 +411,14 @@ require-phase post-userland-tests
 #               511 and 512. Two runs measure no spread, so each band takes
 #               those values widened by the spread the table below recorded
 #               for that pool, on each side.
+#   2026-10-13  kernel 238 -> 239, userland 249 -> 250: delegation at spawn
+#               (`plans/access-model.md` phase 4) mounts a ramfs at `/run`,
+#               the session's runtime directory, whose `RAMFS_RUN` class
+#               registers the first time either phase walks it. One full
+#               capture counts 239 and 250; boot is unchanged at 95.
 boot	classes	95
-post-kernel-tests	classes	238
-post-userland-tests	classes	249
+post-kernel-tests	classes	239
+post-userland-tests	classes	250
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
