@@ -128,7 +128,7 @@ impl Medium {
         }
         let toolchain_manifest = slopos_tree_core::manifest_path(slopos_tree_core::TOOLCHAIN);
         for (tree, needs) in [
-            (root::TOOLCHAIN, toolchain_manifest.as_str()),
+            (root::LOCAL, toolchain_manifest.as_str()),
             (root::SOURCE, "/src/slopos/.git/config"),
         ] {
             if medium.payload_has(tree) && !medium.payload_has(needs) {
@@ -170,7 +170,7 @@ impl Medium {
     /// The root's least size: the payload and room to build beside it, or the
     /// system's own needs without one.
     fn root_min(&self) -> Result<u64, String> {
-        if !self.payload_has(root::TOOLCHAIN) && !self.payload_has(root::SOURCE) {
+        if !self.payload_has(root::LOCAL) && !self.payload_has(root::SOURCE) {
             return Ok(ROOT_MIN_BYTES);
         }
         let path = std::ffi::CString::new(layout::PAYLOAD_DIR).map_err(|_| "a NUL in a path")?;
@@ -710,7 +710,7 @@ fn summarise(s: &Settled, medium: &Medium) {
             )
         );
     }
-    if medium.payload_has(root::TOOLCHAIN) {
+    if medium.payload_has(root::LOCAL) {
         println!("  /usr/local: the toolchain the medium carries");
     }
     match &s.remote {

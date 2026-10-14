@@ -23,7 +23,7 @@ use crate::tree::{self, create_new, give, make_dir, write_durably};
 const MOUNT_PARENT: &str = "/tmp";
 pub(super) const EXT4_ROOT_INODE: u64 = 2;
 const SLOT_STATE: &str = "/var/lib/slopos/slots";
-pub const TOOLCHAIN: &str = "/usr/local";
+pub const LOCAL: &str = "/usr/local";
 pub const SOURCE: &str = "/src";
 const CLONE_CONFIG: &str = "slopos/.git/config";
 const COPY_CHUNK: usize = 1 << 20;
@@ -269,13 +269,14 @@ fn put(
 }
 
 /// Install the medium's tree `name` from `source` at `/usr/local`, keeping
-/// whatever the root's user put beside what an earlier install left. `None`
-/// when the root holds this tree already.
+/// whatever the root's user put beside what an earlier install left, its
+/// manifest `keeper`'s. `None` when the root holds this tree already.
 fn install_tree(
     root: &Mounted,
     name: &str,
     source: &Path,
     new: &Manifest,
+    keeper: (u32, u32),
 ) -> Result<Option<u64>, String> {
     let mut progress = Progress {
         copied: 0,
@@ -284,9 +285,11 @@ fn install_tree(
     tree::Install {
         root: &root.dir,
         name,
-        guest: TOOLCHAIN,
+        guest: LOCAL,
         source,
         owner: Some((SESSION_UID, SESSION_GID)),
+        keeper: Some(keeper),
+        remedy: "move it aside, or format the root",
     }
     .run(new, &mut |n| progress.add(n))
 }
@@ -381,16 +384,16 @@ fn with_origin(config: &str, url: &str) -> String {
 /// Fill the root from the medium: `/usr/local` with the toolchain and the
 /// apps by their manifests, `/src` once.
 pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(), String> {
-    if !medium.payload_has(TOOLCHAIN) {
+    if !medium.payload_has(LOCAL) {
         println!("installer: the medium carries no toolchain; /usr/local stays as it is");
     } else {
         let recorded = slopos_tree_core::manifest_path(slopos_tree_core::TOOLCHAIN);
         let text = fs::read_to_string(medium.payload_path(&recorded))
-            .map_err(|e| format!("the medium's manifest of {TOOLCHAIN}: {e}"))?;
+            .map_err(|e| format!("the medium's manifest of {LOCAL}: {e}"))?;
         let new = Manifest::parse(&text)
-            .map_err(|e| format!("the medium's manifest of {TOOLCHAIN}, line {}", e.line))?;
-        let source = medium.payload_path(TOOLCHAIN);
-        match install_tree(root, slopos_tree_core::TOOLCHAIN, &source, &new)? {
+            .map_err(|e| format!("the medium's manifest of {LOCAL}, line {}", e.line))?;
+        let source = medium.payload_path(LOCAL);
+        match install_tree(root, slopos_tree_core::TOOLCHAIN, &source, &new, (0, 0))? {
             Some(bytes) => println!(
                 "installer: installed the toolchain at /usr/local ({})",
                 super::disk::human(bytes)
@@ -400,7 +403,13 @@ pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(),
     }
     let apps = medium.path(layout::MEDIUM_APPS);
     let new = tree::scan(&apps)?;
-    match install_tree(root, slopos_tree_core::APPS, &apps, &new)? {
+    match install_tree(
+        root,
+        slopos_tree_core::APPS,
+        &apps,
+        &new,
+        (SESSION_UID, SESSION_GID),
+    )? {
         Some(bytes) => println!(
             "installer: installed the apps at /usr/local ({})",
             super::disk::human(bytes)

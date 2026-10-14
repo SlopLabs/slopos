@@ -3,8 +3,9 @@
 //! follows on the host and the installer, init and `tree-install` in the guest.
 //!
 //! What an install put down is recorded in a manifest under
-//! [`MANIFEST_DIR`], named for the tree: an `identity` line, then
-//! `<kind> <size or -> <path>` per entry, parents first. A reinstall removes
+//! [`MANIFEST_DIR`], named for the tree: an `identity` line, an `at` line
+//! naming where the tree went, then `<kind> <size or -> <path>` per entry,
+//! parents first. A reinstall removes
 //! exactly what the old manifest names and keeps whatever the root's user put
 //! beside it; anything in the way of the new tree that the old manifest does
 //! not name, or that is not the kind it names, refuses the install before
@@ -26,6 +27,7 @@ extern crate std;
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// Where a root keeps the manifest of each tree installed onto it.
@@ -44,6 +46,11 @@ pub fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// An absolute path without an empty, `.` or `..` component.
+pub fn valid_destination(path: &str) -> bool {
+    path == "/" || path.strip_prefix('/').is_some_and(safe_rel)
 }
 
 /// Where a root records the manifest of the tree `name`.
@@ -89,6 +96,9 @@ pub struct Item {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub identity: String,
+    /// Where the install went; `None` in what a manifest made before it
+    /// recorded that says, and in a tree not yet installed.
+    pub at: Option<String>,
     pub items: Vec<Item>,
 }
 
@@ -113,9 +123,19 @@ impl Manifest {
             .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
             .ok_or(ParseError { line: 1 })?
             .to_string();
+        let mut lines = lines.peekable();
+        let at = match lines.next_if(|(_, line)| line.starts_with("at ")) {
+            Some((n, line)) => Some(
+                line.strip_prefix("at ")
+                    .filter(|path| valid_destination(path))
+                    .ok_or(ParseError { line: n + 1 })?
+                    .to_string(),
+            ),
+            None => None,
+        };
         let mut items = Vec::new();
-        for (at, line) in lines {
-            let bad = ParseError { line: at + 1 };
+        for (n, line) in lines {
+            let bad = ParseError { line: n + 1 };
             let mut fields = line.splitn(3, ' ');
             let kind = match fields.next() {
                 Some("d") => Kind::Dir,
@@ -135,11 +155,18 @@ impl Manifest {
                 rel: rel.to_string(),
             });
         }
-        Ok(Manifest { identity, items })
+        Ok(Manifest {
+            identity,
+            at,
+            items,
+        })
     }
 
     pub fn render(&self) -> String {
         let mut out = format!("identity {}\n", self.identity);
+        if let Some(at) = &self.at {
+            out.push_str(&format!("at {at}\n"));
+        }
         for item in &self.items {
             let size = item.size.map_or_else(|| "-".to_string(), |n| n.to_string());
             out.push_str(&format!("{} {size} {}\n", item.kind.letter(), item.rel));
@@ -257,13 +284,18 @@ fn blocked_above(
 }
 
 /// The steps that install the tree `new` describes at `guest` on `root`, where
-/// `old` is the manifest an earlier install there recorded, if any.
+/// `old` is the manifest the tree's earlier install recorded, if any.
 pub fn plan(
     root: &mut impl Root,
     guest: &str,
     old: Option<&Manifest>,
     new: &Manifest,
 ) -> Result<Plan, Conflicts> {
+    if let Some(at) = old.and_then(|m| m.at.as_deref()).filter(|at| *at != guest) {
+        return Err(Conflicts(vec![format!(
+            "the last install of this tree went to {at}, not {guest}"
+        )]));
+    }
     let mut conflicts = Vec::new();
     let mut steps = Vec::new();
     for dir in ancestors(guest).into_iter().chain([guest.to_string()]) {
@@ -380,9 +412,13 @@ pub fn plan(
         steps,
         during: Manifest {
             identity: UNFINISHED.to_string(),
+            at: Some(guest.to_string()),
             items: new.items.iter().cloned().chain(leftover).collect(),
         },
-        done: new.clone(),
+        done: Manifest {
+            at: Some(guest.to_string()),
+            ..new.clone()
+        },
     })
 }
 

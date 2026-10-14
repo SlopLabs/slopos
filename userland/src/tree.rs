@@ -4,12 +4,12 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, lchown, symlink};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, lchown, symlink};
 use std::path::Path;
 
 use slopos_abi::fs::O_NOFOLLOW;
 use slopos_tls_core::hash::{Hash, Sha256};
-use slopos_tree_core::{Item, Kind, MANIFEST_DIR, Manifest, Root, State, Step, plan};
+use slopos_tree_core::{Item, Kind, MANIFEST_DIR, Manifest, Root, State, Step, UNFINISHED, plan};
 
 const COPY_CHUNK: usize = 1 << 20;
 
@@ -155,7 +155,11 @@ pub fn scan(dir: &Path) -> Result<Manifest, String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    Ok(Manifest { identity, items })
+    Ok(Manifest {
+        identity,
+        at: None,
+        items,
+    })
 }
 
 /// A root as `lstat` reads it below `prefix`.
@@ -188,9 +192,13 @@ pub struct Install<'a> {
     pub name: &'a str,
     pub guest: &'a str,
     pub source: &'a Path,
-    /// Who what the install makes, and the manifest, belong to; whoever
-    /// installs when `None`.
+    /// Who what the install makes belongs to; whoever installs when `None`.
     pub owner: Option<(u32, u32)>,
+    /// Who the manifest belongs to: the session for a tree it installs
+    /// again itself, uid 0 for one only uid 0 installs.
+    pub keeper: Option<(u32, u32)>,
+    /// What a refusal tells the person to do with what is in the way.
+    pub remedy: &'a str,
 }
 
 impl Install<'_> {
@@ -235,7 +243,7 @@ impl Install<'_> {
             done => done,
         }
         .map_err(|e| format!("recording {path}: {e}"))?;
-        self.owner.map_or(Ok(()), |owner| give(path, owner))
+        self.keeper.map_or(Ok(()), |keeper| give(path, keeper))
     }
 
     fn copy(&self, from: &Path, to: &str, copied: &mut dyn FnMut(u64)) -> Result<(), String> {
@@ -278,38 +286,66 @@ impl Install<'_> {
         self.owner.map_or(Ok(()), |owner| give(&dest, owner))
     }
 
+    /// The manifest at `path`, and whether its identity is believed: one
+    /// written by neither uid 0 nor this installer could claim any tree is
+    /// there. One that does not parse, which a crash in the middle of an
+    /// in-place rewrite leaves, names the new tree, so the paths it holds are
+    /// taken back from whatever is there.
+    fn recorded(&self, path: &str, new: &Manifest) -> Result<Option<(Manifest, bool)>, String> {
+        let Some(text) = read_regular(path)? else {
+            return Ok(None);
+        };
+        let writer = fs::symlink_metadata(path)
+            .map_err(|e| format!("{path}: {e}"))?
+            .uid();
+        let believed = writer == 0 || writer == crate::syscall::process::geteuid();
+        Ok(Some(match Manifest::parse(&text) {
+            Ok(manifest) => (manifest, believed),
+            Err(_) => (
+                Manifest {
+                    identity: UNFINISHED.to_string(),
+                    at: None,
+                    items: new
+                        .items
+                        .iter()
+                        .map(|item| Item {
+                            size: None,
+                            ..item.clone()
+                        })
+                        .collect(),
+                },
+                false,
+            ),
+        }))
+    }
+
     /// The bytes copied, or `None` when the root records `new` installed
     /// already.
     pub fn run(&self, new: &Manifest, copied: &mut dyn FnMut(u64)) -> Result<Option<u64>, String> {
-        let recorded = slopos_tree_core::manifest_path(self.name);
+        let recorded = self.path(&slopos_tree_core::manifest_path(self.name));
         let old = if self.walk_dirs(MANIFEST_DIR, false)? {
-            read_regular(&self.path(&recorded))?
-                .map(|text| {
-                    Manifest::parse(&text).map_err(|e| {
-                        format!("{recorded} on the root, line {}: not a manifest", e.line)
-                    })
-                })
-                .transpose()?
+            self.recorded(&recorded, new)?
         } else {
             None
         };
-        if old
-            .as_ref()
-            .is_some_and(|old| old.is_finished() && old.identity == new.identity)
-        {
+        if old.as_ref().is_some_and(|(old, believed)| {
+            *believed && old.is_finished() && old.identity == new.identity
+        }) {
             return Ok(None);
         }
+        let old = old.map(|(old, _)| old);
         let steps =
             plan(&mut Target(self.root), self.guest, old.as_ref(), new).map_err(|conflicts| {
                 format!(
-                    "the root holds what installing {} at {} would overwrite:\n  {}\nmove it aside",
+                    "the root holds what installing {} at {} would overwrite:\n  {}\n{}",
                     self.name,
                     self.guest,
-                    conflicts.0.join("\n  ")
+                    conflicts.0.join("\n  "),
+                    self.remedy
                 )
             })?;
         self.walk_dirs(MANIFEST_DIR, true)?;
-        self.record(&self.path(&recorded), &steps.during)?;
+        self.record(&recorded, &steps.during)?;
         let mut total = 0;
         let mut count = |n| {
             total += n;
@@ -332,7 +368,7 @@ impl Install<'_> {
                 Step::Install { item, path } => self.put(item, path, &mut count)?,
             }
         }
-        self.record(&self.path(&recorded), &steps.done)?;
+        self.record(&recorded, &steps.done)?;
         Ok(Some(total))
     }
 }

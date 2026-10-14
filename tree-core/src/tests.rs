@@ -52,6 +52,7 @@ impl Root for Fake {
 fn manifest(identity: char, items: &[(Kind, &str)]) -> Manifest {
     Manifest {
         identity: core::iter::repeat_n(identity, 64).collect(),
+        at: None,
         items: items
             .iter()
             .map(|&(kind, rel)| Item {
@@ -103,6 +104,25 @@ fn what_fs_tree_writes_parses() {
 }
 
 #[test]
+fn a_manifest_says_where_its_tree_went() {
+    let text = format!("identity {}\nat /usr/local\nd - bin\n", "a".repeat(64));
+    let m = Manifest::parse(&text).unwrap();
+    assert_eq!(m.at.as_deref(), Some("/usr/local"));
+    assert_eq!(m.render(), text);
+    let mut root = Fake::with(&[("/usr", State::Dir)]);
+    let first = plan(&mut root, "/usr/local", None, &m).unwrap();
+    assert_eq!(first.during.at.as_deref(), Some("/usr/local"));
+    assert_eq!(first.done.at.as_deref(), Some("/usr/local"));
+    let Err(Conflicts(found)) = plan(&mut root, "/home/user", Some(&first.done), &m) else {
+        panic!("a tree reinstalled somewhere else took its manifest's removals there");
+    };
+    assert_eq!(
+        found,
+        vec!["the last install of this tree went to /usr/local, not /home/user"]
+    );
+}
+
+#[test]
 fn a_damaged_manifest_says_where() {
     for (text, line) in [
         ("", 1),
@@ -111,6 +131,15 @@ fn a_damaged_manifest_says_where() {
         (&*format!("identity {}\nd 3 x\n", "a".repeat(64)), 2),
         (&*format!("identity {}\nd - ../x\n", "a".repeat(64)), 2),
         (&*format!("identity {}\nd - a//b\n", "a".repeat(64)), 2),
+        (&*format!("identity {}\nat usr/local\n", "a".repeat(64)), 2),
+        (
+            &*format!("identity {}\nat /usr/../etc\n", "a".repeat(64)),
+            2,
+        ),
+        (
+            &*format!("identity {}\nd - x\nat /usr\n", "a".repeat(64)),
+            3,
+        ),
     ] {
         assert_eq!(Manifest::parse(text), Err(ParseError { line }), "{text:?}");
     }
@@ -124,7 +153,8 @@ fn a_first_install_makes_the_directories_above_it() {
     assert_eq!(plan.steps[0], Step::MakeDir("/usr/local".to_string()));
     root.apply(&plan);
     assert_eq!(root.state("/usr/local/bin/tool"), State::File);
-    assert_eq!(plan.done, new);
+    assert_eq!(plan.done.items, new.items);
+    assert_eq!(plan.done.identity, new.identity);
     assert!(!plan.during.is_finished());
 }
 

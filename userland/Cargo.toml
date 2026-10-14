@@ -242,6 +242,10 @@ name = "dock_test"
 path = "src/bin/tests/dock_test.rs"
 
 [[bin]]
+name = "tree_install_test"
+path = "src/bin/tests/tree_install_test.rs"
+
+[[bin]]
 name = "spawn_privilege_test"
 path = "src/bin/tests/spawn_privilege_test.rs"
 

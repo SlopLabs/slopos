@@ -210,9 +210,13 @@ fn install_live_apps() {
         guest: "/usr/local",
         source: &apps,
         owner: Some((SESSION_UID, SESSION_GID)),
+        keeper: Some((SESSION_UID, SESSION_GID)),
+        remedy: "move it aside",
     };
-    if let Err(e) = crate::tree::scan(&apps).and_then(|new| install.run(&new, &mut |_| {})) {
-        eprintln!("init: the medium's apps: {e}");
+    match crate::tree::scan(&apps).and_then(|new| install.run(&new, &mut |_| {})) {
+        Ok(Some(_)) => println!("init: installed the medium's apps at /usr/local"),
+        Ok(None) => {}
+        Err(e) => eprintln!("init: the medium's apps: {e}"),
     }
 }
 

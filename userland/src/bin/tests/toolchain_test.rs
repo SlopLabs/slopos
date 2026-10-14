@@ -54,7 +54,10 @@ fn toolchain_matches_its_manifest() -> bool {
         }
     };
     let mut counts = [0usize; 3];
-    for line in text.lines().filter(|l| !l.starts_with("identity ")) {
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with("identity ") && !l.starts_with("at "))
+    {
         let mut fields = line.splitn(3, ' ');
         let (Some(kind), Some(size), Some(rel)) = (fields.next(), fields.next(), fields.next())
         else {
