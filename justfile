@@ -1494,6 +1494,7 @@ check-framekernel-gates:
     python3 scripts/gen_verity.py --self-test
     scripts/check_fs_throughput.sh --self-test
     scripts/check_syscall_abi.sh --self-test
+    scripts/check_base_interface.sh --self-test
     scripts/check_toolchain_pin.sh --self-test
     scripts/check_rustc_target.sh --self-test
     scripts/check_cxx_pin.sh --self-test
@@ -1502,6 +1503,7 @@ check-framekernel-gates:
     scripts/check_bootstrap_config.sh --self-test
     scripts/check_recipes.sh --self-test
     scripts/check_libc_license.sh --self-test
+    scripts/check_libc_exports.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_offline_build.sh --self-test
@@ -1515,6 +1517,7 @@ check-framekernel-gates:
     scripts/check_bootstrap_config.sh
     scripts/check_recipes.sh
     scripts/check_libc_license.sh
+    scripts/check_libc_exports.sh {{build_dir}}/libc.so
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
     scripts/check_no_kernel_async.sh
@@ -1533,6 +1536,7 @@ check-framekernel-gates:
     scripts/check_safe_contract_surface.sh
     scripts/check_charge_linearity.sh
     scripts/check_syscall_abi.sh
+    scripts/check_base_interface.sh
     just check-toolchain-coverage
     scripts/tcb_ratio.sh --max 1.0
 

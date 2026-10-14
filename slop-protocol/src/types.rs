@@ -1,6 +1,14 @@
 //! Core protocol types: Request, Event, ProtocolError, OutputInfo.
 
+/// The newest version this tree speaks. A change to the wire adds a version.
 pub const PROTOCOL_VERSION: u32 = 3;
+
+/// The oldest version a compositor built from this tree still serves.
+/// Raising it cuts off every client built against an older one, so it rises
+/// only as a stated decision with its reason, never as a side effect.
+pub const PROTOCOL_VERSION_MIN: u32 = 3;
+
+const _: () = assert!(0 < PROTOCOL_VERSION_MIN && PROTOCOL_VERSION_MIN <= PROTOCOL_VERSION);
 
 /// Compile-time-safe surface identifier: prevents accidental interchange with
 /// toplevel IDs or raw integers.
@@ -85,15 +93,18 @@ impl Drop for OwnedFd {
     }
 }
 
+/// Also the `code` of the [`Event::Error`] (`object_id` 0) the compositor
+/// sends before it closes a connection, so each value is wire ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 pub enum ProtocolError {
-    Io,
-    MessageTooLarge,
-    MalformedMessage,
-    Timeout,
-    Disconnected,
-    BufferFull,
-    VersionMismatch,
+    Io = 0,
+    MessageTooLarge = 1,
+    MalformedMessage = 2,
+    Timeout = 3,
+    Disconnected = 4,
+    BufferFull = 5,
+    VersionMismatch = 6,
 }
 
 /// Display output info, received during connection bootstrap.
@@ -111,7 +122,9 @@ pub const MAX_STRING_LEN: usize = 128;
 
 /// Client-to-server request.
 pub enum Request {
-    /// Protocol version handshake (client response to server Hello).
+    /// The version the client speaks, its first request. The compositor
+    /// answers in that version or refuses the connection. Like
+    /// [`Event::Hello`], its encoding never changes.
     Hello {
         version: u32,
     },
@@ -225,7 +238,9 @@ pub enum Request {
 /// Server-to-client event.
 #[derive(Clone)]
 pub enum Event {
-    /// Protocol version handshake (server initiates on accept).
+    /// The newest version the compositor speaks, sent on accept before
+    /// anything else. Its encoding never changes: it is how two versions
+    /// find each other.
     Hello {
         version: u32,
         capabilities: u64,

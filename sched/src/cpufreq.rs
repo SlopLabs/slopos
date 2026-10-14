@@ -23,7 +23,8 @@ use slopos_abi::syscall::{
     CPU_PERF_F_APERF_MPERF, CPU_PERF_F_DTS, CPU_PERF_F_EIST, CPU_PERF_F_HWP, CPU_PERF_F_HWP_ACTIVE,
     CPU_PERF_F_HWP_EPP, CPU_PERF_F_HWP_FIRMWARE, CPU_PERF_F_HYBRID, CPU_PERF_F_HYPERVISOR,
     CPU_PERF_F_PTM, CPU_PERF_F_TURBO, CPU_PERF_F_TURBO_DISABLED, CPU_PERF_OP_EPP, CPU_PERF_OP_HWP,
-    CPU_PERF_OP_LIMITS, CPU_PERF_OP_PLACEMENT, UserCpuPerf, UserCpuPerfInfo,
+    CPU_PERF_OP_LIMITS, CPU_PERF_OP_PLACEMENT, CPU_PERF_PLACEMENT_FLAT, CPU_PERF_PLACEMENT_RANKED,
+    CPU_PERF_POLICY_FIRMWARE, CPU_PERF_POLICY_HWP, UserCpuPerf, UserCpuPerfInfo,
 };
 use slopos_arch::MAX_CPUS;
 use slopos_arch::cpu::cpuid::{cpu_vendor_string, cpuid, cpuid_count, hypervisor_present};
@@ -40,6 +41,14 @@ use slopos_cpufreq_core::{
 use slopos_ostd::klog_info;
 
 const PM_ENABLE_HWP: u64 = 1;
+
+const _: () = assert!(
+    Policy::Firmware.raw() == CPU_PERF_POLICY_FIRMWARE
+        && Policy::Hwp.raw() == CPU_PERF_POLICY_HWP
+        && Placement::Flat.raw() == CPU_PERF_PLACEMENT_FLAT
+        && Placement::Ranked.raw() == CPU_PERF_PLACEMENT_RANKED,
+    "cpu_perf reports and cpu_perf_ctl takes cpufreq-core's encodings as slopos-abi states them"
+);
 
 struct CpuState {
     online: AtomicBool,

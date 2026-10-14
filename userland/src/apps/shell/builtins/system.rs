@@ -197,6 +197,11 @@ pub fn cmd_info(_argc: i32, _argv: &[&[u8]]) -> i32 {
     info_kv(b"  Sched yields:     ", info.scheduler_yields);
     info_kv(b"  schedule() calls: ", info.schedule_calls);
 
+    info_kv(
+        b"  Base interfaces:  ",
+        format_args!("{}-{}", info.base_interface_min, info.base_interface_max),
+    );
+
     0
 }
 

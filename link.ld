@@ -43,6 +43,14 @@ SECTIONS
     _rodata_end = .;
   } :rodata
 
+  /* Read from the file by whoever installs a kernel, so its absence is a link
+     failure rather than a kernel no base can be checked against. */
+  .note.slopos.base-interface ALIGN(4) : {
+    KEEP(*(.note.slopos.base-interface))
+  } :rodata
+  ASSERT(SIZEOF(.note.slopos.base-interface) == 28,
+    "link.ld: .note.slopos.base-interface must hold exactly the base-interface note")
+
   /* Binary-search index over .eh_frame, consumed by the unwinder's
      fde-gnu-eh-frame-hdr finder. Emitted only when the target spec sets
      "eh-frame-header": true; the ASSERT turns a missing index into a link

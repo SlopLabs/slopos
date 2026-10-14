@@ -231,6 +231,10 @@ impl ProtocolBridge {
                 capabilities: caps::TOPLEVEL | caps::CLIPBOARD | caps::INTERACTIVE_MOVE_RESIZE,
             },
         );
+    }
+
+    /// The first event in the version the client's `Hello` named.
+    fn send_output_info(&mut self, idx: usize) {
         let _ = self.server.queue_event(
             idx,
             &Event::OutputInfo {
@@ -318,7 +322,12 @@ impl ProtocolBridge {
         }
         loop {
             match self.server.recv_request(client_idx) {
-                Ok(Some(req)) => self.handle_request(client_idx, req),
+                Ok(Some(req)) => {
+                    if let Err(err) = self.handle_request(client_idx, req) {
+                        self.fail_client(client_idx, err);
+                        return false;
+                    }
+                }
                 Ok(None) => break,
                 Err(ProtocolError::Disconnected) => {
                     self.cleanup_client(client_idx);
@@ -351,14 +360,10 @@ impl ProtocolBridge {
         self.cleanup_client(client_idx);
     }
 
-    fn handle_request(&mut self, client_idx: usize, req: Request) {
+    fn handle_request(&mut self, client_idx: usize, req: Request) -> Result<(), ProtocolError> {
         match req {
-            Request::Hello { .. } => {
-                // Client echoing our Hello; the connection is already accepted.
-            }
-            Request::CreateSurface { new_id } => {
-                self.handle_create_surface(client_idx, new_id);
-            }
+            Request::Hello { .. } => self.send_output_info(client_idx),
+            Request::CreateSurface { new_id } => self.handle_create_surface(client_idx, new_id)?,
             Request::SurfaceAttach {
                 surface,
                 buffer_id,
@@ -446,33 +451,22 @@ impl ProtocolBridge {
                 self.handle_clipboard_read(client_idx, serial, buffer_fd, len);
             }
         }
+        Ok(())
     }
 
-    fn handle_create_surface(&mut self, client_idx: usize, new_id: SurfaceId) {
+    fn handle_create_surface(
+        &mut self,
+        client_idx: usize,
+        new_id: SurfaceId,
+    ) -> Result<(), ProtocolError> {
         if new_id == SurfaceId::NONE || self.find_surface(client_idx, new_id).is_some() {
-            let _ = self.server.queue_event(
-                client_idx,
-                &Event::Error {
-                    object_id: 0,
-                    code: 2,
-                },
-            );
-            return;
+            return Err(ProtocolError::MalformedMessage);
         }
-
-        let slot = match self.surfaces.iter().position(|s| !s.active) {
-            Some(idx) => idx,
-            None => {
-                let _ = self.server.queue_event(
-                    client_idx,
-                    &Event::Error {
-                        object_id: 0,
-                        code: 1,
-                    },
-                );
-                return;
-            }
-        };
+        let slot = self
+            .surfaces
+            .iter()
+            .position(|s| !s.active)
+            .ok_or(ProtocolError::BufferFull)?;
 
         self.surfaces[slot] = ProtocolSurface::empty();
         self.surfaces[slot].active = true;
@@ -482,6 +476,7 @@ impl ProtocolBridge {
         self.next_z_order = self.next_z_order.wrapping_add(1).max(1);
         self.surfaces[slot].generation = self.next_surface_gen;
         self.next_surface_gen = self.next_surface_gen.wrapping_add(1).max(1);
+        Ok(())
     }
 
     /// Register or re-select a double-buffer slot for `surface`'s next commit.

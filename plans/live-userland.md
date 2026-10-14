@@ -79,8 +79,8 @@ plans lands second re-baselines that step.
 - The dock pins five compiled paths (`userland/src/apps/compositor/dock.rs:137-173`).
   The shell's registry is compiled in (`userland/src/program_registry.rs`).
 - The loader searches only `/lib` and `/usr/lib` (`slibc/src/ld_so/mod.rs:56-57`).
-- The compositor protocol demands an exact version match
-  (`slop-protocol/src/types.rs:3`, `slop-protocol/src/client.rs:57-58`).
+- The compositor serves protocol versions `PROTOCOL_VERSION_MIN` through
+  `PROTOCOL_VERSION`, both 3 (Phase 1).
 - The shipped programs are static: slibc is linked as an rlib, and raw
   syscalls are made through `slopos_userland::syscall`.
 - `libc.so` reaches four SlopOS-only calls itself: `spawn_path`, `resolve`,
@@ -96,10 +96,11 @@ plans lands second re-baselines that step.
   
   The editor, the file manager and the image viewer make none.
 
-**Kernel and base are never checked against each other.** Both carry a build
-tag (`core/src/syscall/core_handlers.rs:121-143`,
-`tools/initramfs/src/main.rs:354-358`). Nothing compares them, and the private
-call shapes in `abi/` change freely.
+**Kernel and base carry an interface number nothing yet acts on.** The kernel
+states the base interfaces it serves in `sys_info` and its ELF note, and
+`check_base_interface.sh` holds the private call surface to the number
+(Phase 1). No base records the number it needs yet, and no boot or install
+compares the two: that is Phase 3.
 
 **Trees.** `tree-core` installs a tree by manifest, replacing what the old
 manifest names and keeping what the user added. It keys the manifest by
@@ -125,6 +126,11 @@ of it (`scripts/selfhost.sh:76-82`).
 | Haiku package activation ([infrastructure](https://www.haiku-os.org/docs/develop/packages/Infrastructure.html)) | Packages activate live; the last consistent state is recorded | "previous always holds the base that last ran" |
 | Linux audit session id, systemd login scopes | A login session is a tag every child inherits, not the POSIX session | The login tag that bounds a desktop session |
 | Linux live USB, macOS Recovery | Booting recovery media is full power for whoever holds the machine | The rescue action, offered only on the medium |
+| Linux `check-uapi.sh` ([docs](https://docs.kernel.org/dev-tools/checkuapi.html)) | A gate compares the UAPI headers' ABI across commits with libabigail and fails an incompatible change | A gate over the private call surface; the tree records the surface's digest itself, so a shallow CI checkout can grade it without a base commit |
+| Linux vDSO `.note.Linux` ([glibc's use](https://www.spinics.net/lists/stable/msg443097.html)) | The kernel states its version in an ELF note that glibc reads without a syscall | The kernel states the base interfaces it serves in an ELF note, read from the file before booting it |
+| Redox relibc and libredox ([libraries](https://doc.redox-os.org/book/libraries-apis.html), [FAQ](https://doc.redox-os.org/book/developer-faq.html)) | The stable ABI is in userspace, not at the syscall layer; relibc breaks when a function is removed or renamed, its arguments change, or a struct's size or alignment changes | `check_libc_exports.sh` holds removals and struct layouts; the syscall layer stays free behind the interface number |
+| Asterinas ([book](https://asterinas.github.io/book/kernel/index.html)) | A kernel that offers only Linux's ABI has no private calls to number | Not taken: SlopOS keeps a private range, so it numbers it |
+| Wayland versioning ([protocol](https://wayland.freedesktop.org/docs/html/ch04.html)) | A server keeps serving every version up to the one it advertises, and speaks the one a client binds | The compositor serves a version range and speaks the client's `Hello` |
 
 ## Design
 
@@ -261,8 +267,9 @@ no dialog, because the person approved that base when it was installed.
   symbol table to `scripts/gates/libc/exports.txt`:
   - a removal fails;
   - an addition is a diff to that file;
-  - the size and field offsets of every header structure an export takes are
-    held to `scripts/gates/libc/layouts.txt`.
+  - the size, alignment and field offsets of every struct and union the
+    headers define are held to `scripts/gates/libc/layouts.txt` — every one,
+    since exports also take structures through `void *`.
   
   It carries a `--self-test`.
 - A statically linked program outside the base is unsupported, as on macOS.
@@ -395,14 +402,23 @@ no dialog, because the person approved that base when it was installed.
 Six phases. Each ends with something that runs, and each lands as commits of
 its own.
 
-### Phase 1: The contracts
+### Phase 1: The contracts — done
 
-`BASE_INTERFACE` and its range, the ELF note and `sys_info`'s report;
-`check_base_interface.sh`; `check_libc_exports.sh` with its tracked lists; the
-protocol's version range. No layout changes.
-
-Graded by each gate's self-test and by a test client speaking
-`PROTOCOL_VERSION_MIN` against the current compositor.
+- `slopos_abi::BASE_INTERFACE` and `BASE_INTERFACE_MIN`, both 1
+  (`abi/src/base_interface.rs`). The kernel reports the range in `sys_info`
+  (`base_interface_min`/`_max`, printed by the shell's `info`) and carries it
+  in `.note.slopos.base-interface`, which `link.ld` keeps and asserts.
+- `scripts/check_base_interface.sh` with `scripts/lib/base_interface.py` and
+  the roots and ledger in `scripts/gates/base-interface.txt`; interface 1 is
+  recorded. The boot flags and the seat ranks are now stated once, in abi.
+- `scripts/check_libc_exports.sh` with `scripts/lib/libc_layouts.py`,
+  `scripts/gates/libc/exports.txt` (932 exports) and `layouts.txt` (84
+  records), checked against clang 18 and 23.
+- `PROTOCOL_VERSION_MIN` beside `PROTOCOL_VERSION`, both 3, negotiated in
+  `slop-protocol`'s server; every compositor `Error` now ends its
+  connection. `protocol_test` (`utest_protocol`) starts the real compositor:
+  a client at the minimum draws a window, and one outside the range, one
+  speaking before `Hello` and one reusing a surface id are refused.
 
 ### Phase 2: Apps leave the base
 
@@ -438,7 +454,10 @@ Graded by:
 
 The service table with crash restarts, the login tag, `/run/init`, ending and
 restarting the session, the consent pair kept by init with `Reset`, init's
-re-exec, and `/bin/session`.
+re-exec, and `/bin/session`. A dead compositor's seats are revoked by the
+exit path's cleanup hooks after its parent is woken (Phase 1's
+`protocol_test` waits for the seat), so a restarted compositor waits for its
+seat rather than coming up without one.
 
 Graded by:
 - kernel tests of the login tag: inherited, and set only with `SetId`;
@@ -551,6 +570,46 @@ Graded by:
   row never push the running one off the disk.
 - **No in-place migration.** A reinstall keeping the root moves an installed
   disk to the layout, because `bootctl` never writes the ESP.
+- **The interface surface is the compiler's view of `slopos-abi`.**
+  `check_base_interface.sh` digests rustdoc's JSON, not source text: each
+  private call's number and the backticked signature its doc states, register
+  packing included, what those signatures name and the docs link, everything
+  reachable through field and alias types, and `root` globs for what no
+  signature can name. The methods of a rooted type are in it, since they
+  carry wire packing, so refactoring one takes a bump. Linux's own shapes a
+  private call passes through (`sockaddr`, `msghdr`, `iovec`) are held by
+  Linux compatibility instead. What a private call takes from outside
+  `slopos-abi` — the font's glyph ranges, the kconsole keys, the EFI GUIDs,
+  limits written into a handler — is not held and moves into abi before it
+  changes; an encoding another crate keeps for an abi value is held to it by
+  a const assertion where both meet, as `sched::cpufreq` does. Every call a
+  later phase adds states its signature in its doc.
+- **An issued interface is never rewritten.** The ledger only appends, and a
+  changed surface takes the next number. `BASE_INTERFACE_MIN` rises only when
+  a change takes away or reshapes something an older base calls. A bump the
+  surface did not need still costs: a base built after it refuses the older
+  kernels.
+- **The kernel's note is a section, not a segment.**
+  `.note.slopos.base-interface` (owner `SlopOS`, type
+  `NT_SLOPOS_BASE_INTERFACE` = 1, descriptor `min, max` as little-endian
+  `u32`s) sits in the read-only `PT_LOAD` with no `PT_NOTE`: Limine ignores
+  notes, and a new `PHDRS` keyword would need a linker-gate probe. Phase 3's
+  reader finds it by name in the kernel file.
+- **`libc.so` holds its exports and every header record.** A data export
+  carries its size. Field types are not held, since clang's spelling of them
+  moves between releases; nor are function prototypes, or an alignment set on
+  a typedef rather than its record. `--record` only adds.
+- **The protocol handshake is fixed.** Both `Hello`s keep their encoding for
+  good. The compositor's `Hello` is all it sends before the client's; the
+  first request must be a `Hello` naming a served version, and anything else
+  is answered `Error { object_id: 0, code }` (`VersionMismatch` or
+  `MalformedMessage`) before the connection closes. The server records each
+  client's version for the first request or event that differs by version.
+- **A compositor `Error` ends the connection.** It is always on object 0, its
+  code a `ProtocolError` value fixed on the wire, and the close follows: a
+  reused or zero surface id is `MalformedMessage` and a full surface table
+  `BufferFull`, as Wayland makes a protocol error and running out of memory
+  fatal. A client never has to tell a fatal error from a recoverable one.
 
 ## Constraints
 

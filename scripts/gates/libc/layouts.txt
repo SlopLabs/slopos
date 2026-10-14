@@ -1,0 +1,567 @@
+# Layout of every struct/union slibc/include defines, held by
+# scripts/check_libc_exports.sh.
+#
+# `<record> size <n> align <n>`, then `<record> <member.path> <offset>` per
+# field in declaration order (bit-fields as `<byte>:<first>-<last>`). An
+# anonymous record named by a typedef is `typedef <name>`. Lines are only ever
+# added, by `scripts/check_libc_exports.sh --record`; changing one breaks
+# programs built outside the base.
+
+struct __jmp_buf_tag size 200 align 8
+struct __jmp_buf_tag __jmpbuf 0
+struct __jmp_buf_tag __mask_was_saved 64
+struct __jmp_buf_tag __saved_mask 72
+struct __res_state size 72 align 8
+struct __res_state retrans 0
+struct __res_state retry 4
+struct __res_state options 8
+struct __res_state nscount 16
+struct __res_state nsaddr_list 20
+struct __slibc_siginfo_fault size 8 align 8
+struct __slibc_siginfo_fault __si_addr 0
+struct __slibc_siginfo_kill size 12 align 4
+struct __slibc_siginfo_kill __si_pid 0
+struct __slibc_siginfo_kill __si_uid 4
+struct __slibc_siginfo_kill __si_status 8
+struct __slibc_siginfo_rt size 16 align 8
+struct __slibc_siginfo_rt __si_pid 0
+struct __slibc_siginfo_rt __si_uid 4
+struct __slibc_siginfo_rt __si_value 8
+struct __slibc_siginfo_rt __si_value.sival_int 8
+struct __slibc_siginfo_rt __si_value.sival_ptr 8
+struct addrinfo size 48 align 8
+struct addrinfo ai_flags 0
+struct addrinfo ai_family 4
+struct addrinfo ai_socktype 8
+struct addrinfo ai_protocol 12
+struct addrinfo ai_addrlen 16
+struct addrinfo ai_addr 24
+struct addrinfo ai_canonname 32
+struct addrinfo ai_next 40
+struct cmsghdr size 16 align 8
+struct cmsghdr cmsg_len 0
+struct cmsghdr cmsg_level 8
+struct cmsghdr cmsg_type 12
+struct dirent size 280 align 8
+struct dirent d_ino 0
+struct dirent d_off 8
+struct dirent d_reclen 16
+struct dirent d_type 18
+struct dirent d_name 19
+struct dirent64 size 280 align 8
+struct dirent64 d_ino 0
+struct dirent64 d_off 8
+struct dirent64 d_reclen 16
+struct dirent64 d_type 18
+struct dirent64 d_name 19
+struct dl_phdr_info size 64 align 8
+struct dl_phdr_info dlpi_addr 0
+struct dl_phdr_info dlpi_name 8
+struct dl_phdr_info dlpi_phdr 16
+struct dl_phdr_info dlpi_phnum 24
+struct dl_phdr_info dlpi_adds 32
+struct dl_phdr_info dlpi_subs 40
+struct dl_phdr_info dlpi_tls_modid 48
+struct dl_phdr_info dlpi_tls_data 56
+struct flock size 32 align 8
+struct flock l_type 0
+struct flock l_whence 2
+struct flock l_start 8
+struct flock l_len 16
+struct flock l_pid 24
+struct group size 32 align 8
+struct group gr_name 0
+struct group gr_passwd 8
+struct group gr_gid 16
+struct group gr_mem 24
+struct group_req size 136 align 8
+struct group_req gr_interface 0
+struct group_req gr_group 8
+struct group_req gr_group.ss_family 8
+struct group_req gr_group.__ss_padding 10
+struct group_req gr_group.__ss_align 128
+struct group_source_req size 264 align 8
+struct group_source_req gsr_interface 0
+struct group_source_req gsr_group 8
+struct group_source_req gsr_group.ss_family 8
+struct group_source_req gsr_group.__ss_padding 10
+struct group_source_req gsr_group.__ss_align 128
+struct group_source_req gsr_source 136
+struct group_source_req gsr_source.ss_family 136
+struct group_source_req gsr_source.__ss_padding 138
+struct group_source_req gsr_source.__ss_align 256
+struct hostent size 32 align 8
+struct hostent h_name 0
+struct hostent h_aliases 8
+struct hostent h_addrtype 16
+struct hostent h_length 20
+struct hostent h_addr_list 24
+struct ifaddrs size 56 align 8
+struct ifaddrs ifa_next 0
+struct ifaddrs ifa_name 8
+struct ifaddrs ifa_flags 16
+struct ifaddrs ifa_addr 24
+struct ifaddrs ifa_netmask 32
+struct ifaddrs ifa_ifu 40
+struct ifaddrs ifa_data 48
+struct ifconf size 16 align 8
+struct ifconf ifc_len 0
+struct ifconf ifc_ifcu 8
+struct ifconf ifc_ifcu.ifcu_buf 8
+struct ifconf ifc_ifcu.ifcu_req 8
+struct ifmap size 24 align 8
+struct ifmap mem_start 0
+struct ifmap mem_end 8
+struct ifmap base_addr 16
+struct ifmap irq 18
+struct ifmap dma 19
+struct ifmap port 20
+struct ifreq size 40 align 8
+struct ifreq ifr_ifrn 0
+struct ifreq ifr_ifrn.ifrn_name 0
+struct ifreq ifr_ifru 16
+struct ifreq ifr_ifru.ifru_addr 16
+struct ifreq ifr_ifru.ifru_addr.sa_family 16
+struct ifreq ifr_ifru.ifru_addr.sa_data 18
+struct ifreq ifr_ifru.ifru_dstaddr 16
+struct ifreq ifr_ifru.ifru_dstaddr.sa_family 16
+struct ifreq ifr_ifru.ifru_dstaddr.sa_data 18
+struct ifreq ifr_ifru.ifru_broadaddr 16
+struct ifreq ifr_ifru.ifru_broadaddr.sa_family 16
+struct ifreq ifr_ifru.ifru_broadaddr.sa_data 18
+struct ifreq ifr_ifru.ifru_netmask 16
+struct ifreq ifr_ifru.ifru_netmask.sa_family 16
+struct ifreq ifr_ifru.ifru_netmask.sa_data 18
+struct ifreq ifr_ifru.ifru_hwaddr 16
+struct ifreq ifr_ifru.ifru_hwaddr.sa_family 16
+struct ifreq ifr_ifru.ifru_hwaddr.sa_data 18
+struct ifreq ifr_ifru.ifru_flags 16
+struct ifreq ifr_ifru.ifru_ivalue 16
+struct ifreq ifr_ifru.ifru_mtu 16
+struct ifreq ifr_ifru.ifru_map 16
+struct ifreq ifr_ifru.ifru_map.mem_start 16
+struct ifreq ifr_ifru.ifru_map.mem_end 24
+struct ifreq ifr_ifru.ifru_map.base_addr 32
+struct ifreq ifr_ifru.ifru_map.irq 34
+struct ifreq ifr_ifru.ifru_map.dma 35
+struct ifreq ifr_ifru.ifru_map.port 36
+struct ifreq ifr_ifru.ifru_slave 16
+struct ifreq ifr_ifru.ifru_newname 16
+struct ifreq ifr_ifru.ifru_data 16
+struct in6_addr size 16 align 1
+struct in6_addr s6_addr 0
+struct in_addr size 4 align 4
+struct in_addr s_addr 0
+struct iovec size 16 align 8
+struct iovec iov_base 0
+struct iovec iov_len 8
+struct ip_mreq size 8 align 4
+struct ip_mreq imr_multiaddr 0
+struct ip_mreq imr_multiaddr.s_addr 0
+struct ip_mreq imr_interface 4
+struct ip_mreq imr_interface.s_addr 4
+struct ip_mreq_source size 12 align 4
+struct ip_mreq_source imr_multiaddr 0
+struct ip_mreq_source imr_multiaddr.s_addr 0
+struct ip_mreq_source imr_interface 4
+struct ip_mreq_source imr_interface.s_addr 4
+struct ip_mreq_source imr_sourceaddr 8
+struct ip_mreq_source imr_sourceaddr.s_addr 8
+struct ip_mreqn size 12 align 4
+struct ip_mreqn imr_multiaddr 0
+struct ip_mreqn imr_multiaddr.s_addr 0
+struct ip_mreqn imr_address 4
+struct ip_mreqn imr_address.s_addr 4
+struct ip_mreqn imr_ifindex 8
+struct ipv6_mreq size 20 align 4
+struct ipv6_mreq ipv6mr_multiaddr 0
+struct ipv6_mreq ipv6mr_multiaddr.s6_addr 0
+struct ipv6_mreq ipv6mr_interface 16
+struct itimerval size 32 align 8
+struct itimerval it_interval 0
+struct itimerval it_interval.tv_sec 0
+struct itimerval it_interval.tv_usec 8
+struct itimerval it_value 16
+struct itimerval it_value.tv_sec 16
+struct itimerval it_value.tv_usec 24
+struct lconv size 96 align 8
+struct lconv decimal_point 0
+struct lconv thousands_sep 8
+struct lconv grouping 16
+struct lconv int_curr_symbol 24
+struct lconv currency_symbol 32
+struct lconv mon_decimal_point 40
+struct lconv mon_thousands_sep 48
+struct lconv mon_grouping 56
+struct lconv positive_sign 64
+struct lconv negative_sign 72
+struct lconv int_frac_digits 80
+struct lconv frac_digits 81
+struct lconv p_cs_precedes 82
+struct lconv p_sep_by_space 83
+struct lconv n_cs_precedes 84
+struct lconv n_sep_by_space 85
+struct lconv p_sign_posn 86
+struct lconv n_sign_posn 87
+struct lconv int_p_cs_precedes 88
+struct lconv int_p_sep_by_space 89
+struct lconv int_n_cs_precedes 90
+struct lconv int_n_sep_by_space 91
+struct lconv int_p_sign_posn 92
+struct lconv int_n_sign_posn 93
+struct linger size 8 align 4
+struct linger l_onoff 0
+struct linger l_linger 4
+struct msghdr size 56 align 8
+struct msghdr msg_name 0
+struct msghdr msg_namelen 8
+struct msghdr msg_iov 16
+struct msghdr msg_iovlen 24
+struct msghdr msg_control 32
+struct msghdr msg_controllen 40
+struct msghdr msg_flags 48
+struct option size 32 align 8
+struct option name 0
+struct option has_arg 8
+struct option flag 16
+struct option val 24
+struct passwd size 48 align 8
+struct passwd pw_name 0
+struct passwd pw_passwd 8
+struct passwd pw_uid 16
+struct passwd pw_gid 20
+struct passwd pw_gecos 24
+struct passwd pw_dir 32
+struct passwd pw_shell 40
+struct pollfd size 8 align 4
+struct pollfd fd 0
+struct pollfd events 4
+struct pollfd revents 6
+struct rlimit size 16 align 8
+struct rlimit rlim_cur 0
+struct rlimit rlim_max 8
+struct rusage size 144 align 8
+struct rusage ru_utime 0
+struct rusage ru_utime.tv_sec 0
+struct rusage ru_utime.tv_usec 8
+struct rusage ru_stime 16
+struct rusage ru_stime.tv_sec 16
+struct rusage ru_stime.tv_usec 24
+struct rusage ru_maxrss 32
+struct rusage ru_ixrss 40
+struct rusage ru_idrss 48
+struct rusage ru_isrss 56
+struct rusage ru_minflt 64
+struct rusage ru_majflt 72
+struct rusage ru_nswap 80
+struct rusage ru_inblock 88
+struct rusage ru_oublock 96
+struct rusage ru_msgsnd 104
+struct rusage ru_msgrcv 112
+struct rusage ru_nsignals 120
+struct rusage ru_nvcsw 128
+struct rusage ru_nivcsw 136
+struct sched_param size 4 align 4
+struct sched_param sched_priority 0
+struct servent size 32 align 8
+struct servent s_name 0
+struct servent s_aliases 8
+struct servent s_port 16
+struct servent s_proto 24
+struct sigaction size 152 align 8
+struct sigaction sa_handler 0
+struct sigaction sa_sigaction 0
+struct sigaction sa_mask 8
+struct sigaction sa_mask.__val 8
+struct sigaction sa_flags 136
+struct sigaction sa_restorer 144
+struct sigevent size 64 align 8
+struct sigevent sigev_value 0
+struct sigevent sigev_value.sival_int 0
+struct sigevent sigev_value.sival_ptr 0
+struct sigevent sigev_signo 8
+struct sigevent sigev_notify 12
+struct sigevent sigev_notify_thread_id 16
+struct sigevent __unused1 20
+struct sockaddr size 16 align 2
+struct sockaddr sa_family 0
+struct sockaddr sa_data 2
+struct sockaddr_in size 16 align 4
+struct sockaddr_in sin_family 0
+struct sockaddr_in sin_port 2
+struct sockaddr_in sin_addr 4
+struct sockaddr_in sin_addr.s_addr 4
+struct sockaddr_in sin_zero 8
+struct sockaddr_in6 size 28 align 4
+struct sockaddr_in6 sin6_family 0
+struct sockaddr_in6 sin6_port 2
+struct sockaddr_in6 sin6_flowinfo 4
+struct sockaddr_in6 sin6_addr 8
+struct sockaddr_in6 sin6_addr.s6_addr 8
+struct sockaddr_in6 sin6_scope_id 24
+struct sockaddr_storage size 128 align 8
+struct sockaddr_storage ss_family 0
+struct sockaddr_storage __ss_padding 2
+struct sockaddr_storage __ss_align 120
+struct sockaddr_un size 110 align 2
+struct sockaddr_un sun_family 0
+struct sockaddr_un sun_path 2
+struct stat size 144 align 8
+struct stat st_dev 0
+struct stat st_ino 8
+struct stat st_nlink 16
+struct stat st_mode 24
+struct stat st_uid 28
+struct stat st_gid 32
+struct stat __pad0 36
+struct stat st_rdev 40
+struct stat st_size 48
+struct stat st_blksize 56
+struct stat st_blocks 64
+struct stat st_atim 72
+struct stat st_atim.tv_sec 72
+struct stat st_atim.tv_nsec 80
+struct stat st_mtim 88
+struct stat st_mtim.tv_sec 88
+struct stat st_mtim.tv_nsec 96
+struct stat st_ctim 104
+struct stat st_ctim.tv_sec 104
+struct stat st_ctim.tv_nsec 112
+struct stat __unused 120
+struct stat64 size 144 align 8
+struct stat64 st_dev 0
+struct stat64 st_ino 8
+struct stat64 st_nlink 16
+struct stat64 st_mode 24
+struct stat64 st_uid 28
+struct stat64 st_gid 32
+struct stat64 __pad0 36
+struct stat64 st_rdev 40
+struct stat64 st_size 48
+struct stat64 st_blksize 56
+struct stat64 st_blocks 64
+struct stat64 st_atim 72
+struct stat64 st_atim.tv_sec 72
+struct stat64 st_atim.tv_nsec 80
+struct stat64 st_mtim 88
+struct stat64 st_mtim.tv_sec 88
+struct stat64 st_mtim.tv_nsec 96
+struct stat64 st_ctim 104
+struct stat64 st_ctim.tv_sec 104
+struct stat64 st_ctim.tv_nsec 112
+struct stat64 __unused 120
+struct statfs size 120 align 8
+struct statfs f_type 0
+struct statfs f_bsize 8
+struct statfs f_blocks 16
+struct statfs f_bfree 24
+struct statfs f_bavail 32
+struct statfs f_files 40
+struct statfs f_ffree 48
+struct statfs f_fsid 56
+struct statfs f_fsid.__val 56
+struct statfs f_namelen 64
+struct statfs f_frsize 72
+struct statfs f_flags 80
+struct statfs f_spare 88
+struct statvfs size 112 align 8
+struct statvfs f_bsize 0
+struct statvfs f_frsize 8
+struct statvfs f_blocks 16
+struct statvfs f_bfree 24
+struct statvfs f_bavail 32
+struct statvfs f_files 40
+struct statvfs f_ffree 48
+struct statvfs f_favail 56
+struct statvfs f_fsid 64
+struct statvfs f_flag 72
+struct statvfs f_namemax 80
+struct statvfs __f_spare 88
+struct sysinfo size 112 align 8
+struct sysinfo uptime 0
+struct sysinfo loads 8
+struct sysinfo totalram 32
+struct sysinfo freeram 40
+struct sysinfo sharedram 48
+struct sysinfo bufferram 56
+struct sysinfo totalswap 64
+struct sysinfo freeswap 72
+struct sysinfo procs 80
+struct sysinfo pad 82
+struct sysinfo totalhigh 88
+struct sysinfo freehigh 96
+struct sysinfo mem_unit 104
+struct termios size 44 align 4
+struct termios c_iflag 0
+struct termios c_oflag 4
+struct termios c_cflag 8
+struct termios c_lflag 12
+struct termios c_line 16
+struct termios c_cc 17
+struct termios c_ispeed 36
+struct termios c_ospeed 40
+struct timespec size 16 align 8
+struct timespec tv_sec 0
+struct timespec tv_nsec 8
+struct timeval size 16 align 8
+struct timeval tv_sec 0
+struct timeval tv_usec 8
+struct tm size 56 align 8
+struct tm tm_sec 0
+struct tm tm_min 4
+struct tm tm_hour 8
+struct tm tm_mday 12
+struct tm tm_mon 16
+struct tm tm_year 20
+struct tm tm_wday 24
+struct tm tm_yday 28
+struct tm tm_isdst 32
+struct tm tm_gmtoff 40
+struct tm tm_zone 48
+struct tms size 32 align 8
+struct tms tms_utime 0
+struct tms tms_stime 8
+struct tms tms_cutime 16
+struct tms tms_cstime 24
+struct ucred size 12 align 4
+struct ucred pid 0
+struct ucred uid 4
+struct ucred gid 8
+struct utimbuf size 16 align 8
+struct utimbuf actime 0
+struct utimbuf modtime 8
+struct utsname size 390 align 1
+struct utsname sysname 0
+struct utsname nodename 65
+struct utsname release 130
+struct utsname version 195
+struct utsname machine 260
+struct utsname domainname 325
+struct winsize size 8 align 2
+struct winsize ws_row 0
+struct winsize ws_col 2
+struct winsize ws_xpixel 4
+struct winsize ws_ypixel 6
+typedef Dl_info size 32 align 8
+typedef Dl_info dli_fname 0
+typedef Dl_info dli_fbase 8
+typedef Dl_info dli_sname 16
+typedef Dl_info dli_saddr 24
+typedef Elf64_Phdr size 56 align 8
+typedef Elf64_Phdr p_type 0
+typedef Elf64_Phdr p_flags 4
+typedef Elf64_Phdr p_offset 8
+typedef Elf64_Phdr p_vaddr 16
+typedef Elf64_Phdr p_paddr 24
+typedef Elf64_Phdr p_filesz 32
+typedef Elf64_Phdr p_memsz 40
+typedef Elf64_Phdr p_align 48
+typedef HEADER size 12 align 4
+typedef HEADER id 0:0-15
+typedef HEADER rd 2:0-0
+typedef HEADER tc 2:1-1
+typedef HEADER aa 2:2-2
+typedef HEADER opcode 2:3-6
+typedef HEADER qr 2:7-7
+typedef HEADER rcode 3:0-3
+typedef HEADER cd 3:4-4
+typedef HEADER ad 3:5-5
+typedef HEADER unused 3:6-6
+typedef HEADER ra 3:7-7
+typedef HEADER qdcount 4:0-15
+typedef HEADER ancount 6:0-15
+typedef HEADER nscount 8:0-15
+typedef HEADER arcount 10:0-15
+typedef div_t size 8 align 4
+typedef div_t quot 0
+typedef div_t rem 4
+typedef fd_set size 128 align 8
+typedef fd_set fds_bits 0
+typedef fenv_t size 32 align 4
+typedef fenv_t __control_word 0
+typedef fenv_t __unused1 2
+typedef fenv_t __status_word 4
+typedef fenv_t __unused2 6
+typedef fenv_t __tags 8
+typedef fenv_t __unused3 10
+typedef fenv_t __eip 12
+typedef fenv_t __cs_selector 16
+typedef fenv_t __opcode 18
+typedef fenv_t __data_offset 20
+typedef fenv_t __data_selector 24
+typedef fenv_t __unused5 26
+typedef fenv_t __mxcsr 28
+typedef fsid_t size 8 align 4
+typedef fsid_t __val 0
+typedef imaxdiv_t size 16 align 8
+typedef imaxdiv_t quot 0
+typedef imaxdiv_t rem 8
+typedef ldiv_t size 16 align 8
+typedef ldiv_t quot 0
+typedef ldiv_t rem 8
+typedef lldiv_t size 16 align 8
+typedef lldiv_t quot 0
+typedef lldiv_t rem 8
+typedef mbstate_t size 8 align 4
+typedef mbstate_t __size 0
+typedef posix_spawn_file_actions_t size 80 align 8
+typedef posix_spawn_file_actions_t __allocated 0
+typedef posix_spawn_file_actions_t __used 4
+typedef posix_spawn_file_actions_t __actions 8
+typedef posix_spawn_file_actions_t __pad 16
+typedef posix_spawnattr_t size 336 align 8
+typedef posix_spawnattr_t __flags 0
+typedef posix_spawnattr_t __pgrp 4
+typedef posix_spawnattr_t __sd 8
+typedef posix_spawnattr_t __sd.__val 8
+typedef posix_spawnattr_t __ss 136
+typedef posix_spawnattr_t __ss.__val 136
+typedef posix_spawnattr_t __sp 264
+typedef posix_spawnattr_t __sp.sched_priority 264
+typedef posix_spawnattr_t __policy 268
+typedef posix_spawnattr_t __pad 272
+typedef pthread_attr_t size 56 align 8
+typedef pthread_attr_t __size 0
+typedef pthread_cond_t size 48 align 8
+typedef pthread_cond_t __size 0
+typedef pthread_condattr_t size 4 align 4
+typedef pthread_condattr_t __size 0
+typedef pthread_mutex_t size 40 align 8
+typedef pthread_mutex_t __size 0
+typedef pthread_mutexattr_t size 4 align 4
+typedef pthread_mutexattr_t __size 0
+typedef pthread_once_t size 4 align 4
+typedef pthread_once_t __size 0
+typedef pthread_rwlock_t size 56 align 8
+typedef pthread_rwlock_t __size 0
+typedef pthread_rwlockattr_t size 8 align 8
+typedef pthread_rwlockattr_t __size 0
+typedef sem_t size 32 align 8
+typedef sem_t __size 0
+typedef siginfo_t size 128 align 8
+typedef siginfo_t si_signo 0
+typedef siginfo_t si_errno 4
+typedef siginfo_t si_code 8
+typedef siginfo_t __si_fill 12
+typedef siginfo_t _pad 16
+typedef siginfo_t __si_fields 16
+typedef siginfo_t __si_fields.__si_pid 16
+typedef siginfo_t __si_fields.__si_uid 20
+typedef siginfo_t __si_fields.__si_status 24
+typedef siginfo_t __si_rt 16
+typedef siginfo_t __si_rt.__si_pid 16
+typedef siginfo_t __si_rt.__si_uid 20
+typedef siginfo_t __si_rt.__si_value 24
+typedef siginfo_t __si_rt.__si_value.sival_int 24
+typedef siginfo_t __si_rt.__si_value.sival_ptr 24
+typedef siginfo_t __si_fault 16
+typedef siginfo_t __si_fault.__si_addr 16
+typedef sigset_t size 128 align 8
+typedef sigset_t __val 0
+typedef stack_t size 24 align 8
+typedef stack_t ss_sp 0
+typedef stack_t ss_flags 8
+typedef stack_t ss_size 16
+union sigval size 8 align 8
+union sigval sival_int 0
+union sigval sival_ptr 0

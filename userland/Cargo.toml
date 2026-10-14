@@ -249,6 +249,10 @@ name = "seat_test"
 path = "src/bin/tests/seat_test.rs"
 
 [[bin]]
+name = "protocol_test"
+path = "src/bin/tests/protocol_test.rs"
+
+[[bin]]
 name = "mount_test"
 path = "src/bin/tests/mount_test.rs"
 

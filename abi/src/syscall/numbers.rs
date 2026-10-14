@@ -701,12 +701,12 @@ pub const SYSCALL_FB_INFO: u64 = SYSCALL_PRIVATE_BASE + 15;
 /// seat's back buffer.
 pub const SYSCALL_FB_FLIP: u64 = SYSCALL_PRIVATE_BASE + 16;
 
-/// `cursor_set_image(image: *const u8, len, hotspot)` — a 64x64 BGRA image,
-/// `hotspot` packing `(hot_x << 16) | hot_y`. Compositor-only.
+/// `cursor_set_image(image: *const u8, len, hotspot: (hot_x << 16) | hot_y)` —
+/// a 64x64 BGRA image. Compositor-only.
 pub const SYSCALL_CURSOR_SET_IMAGE: u64 = SYSCALL_PRIVATE_BASE + 17;
 
-/// `cursor_move(pos)` in absolute display coords, `pos` packing
-/// `(x << 16) | y`. Compositor-only.
+/// `cursor_move(pos: (x << 16) | y)` in absolute display coords.
+/// Compositor-only.
 pub const SYSCALL_CURSOR_MOVE: u64 = SYSCALL_PRIVATE_BASE + 18;
 
 /// `set_display_mode(width: u32, height: u32)`. Compositor-only.
@@ -724,7 +724,8 @@ pub const SYSCALL_SCREEN_ACQUIRE: u64 = SYSCALL_PRIVATE_BASE + 20;
 /// input event stream that `input_poll_batch` drains.
 pub const SYSCALL_INPUT_SINK_ACQUIRE: u64 = SYSCALL_PRIVATE_BASE + 21;
 
-/// `input_poll_batch(out: *mut u8, max) -> events written`.
+/// `input_poll_batch(out: *mut InputEvent, max) -> events written`: whole
+/// [`InputEvent`](crate::InputEvent) records, at most `max` of them.
 pub const SYSCALL_INPUT_POLL_BATCH: u64 = SYSCALL_PRIVATE_BASE + 22;
 
 /// `clipboard_copy(buf: *const u8, len)`.
@@ -772,10 +773,12 @@ pub const SYSCALL_RING_ENTER: u64 = SYSCALL_PRIVATE_BASE + 29;
 /// one is `-ENOSYS`.
 pub const SYSCALL_RING_REGISTER: u64 = SYSCALL_PRIVATE_BASE + 30;
 
-/// `roulette()` — spin the Wheel of Fate.
+/// `roulette() -> (token << 32) | fate` — spin the Wheel of Fate; an odd
+/// `fate` wins.
 pub const SYSCALL_ROULETTE: u64 = SYSCALL_PRIVATE_BASE + 31;
 
-/// `roulette_result(packed)` — report a spin's outcome.
+/// `roulette_result(packed: (token << 32) | fate)` — report the outcome of the
+/// spin `token` names.
 pub const SYSCALL_ROULETTE_RESULT: u64 = SYSCALL_PRIVATE_BASE + 32;
 
 /// `roulette_draw(fate: u32)` — draw the wheel for a fate.
@@ -787,18 +790,19 @@ pub const SYSCALL_ROULETTE_DRAW: u64 = SYSCALL_PRIVATE_BASE + 33;
 /// `TEST_REPORT_MSG_MAX`.
 pub const SYSCALL_TEST_REPORT: u64 = SYSCALL_PRIVATE_BASE + 34;
 
-/// Drive the kernel-side userland-test phase: spawn each `TestKind::Userland`
-/// entry of the `.test_registry`, drain its `SYSCALL_TEST_REPORT` ring, emit
-/// KTAP, and merge with the kernel-phase summary.
+/// `run_userland_tests() -> 0` — drive the kernel-side userland-test phase:
+/// spawn each `TestKind::Userland` entry of the `.test_registry`, drain its
+/// `SYSCALL_TEST_REPORT` ring, emit KTAP, and merge with the kernel-phase
+/// summary.
 ///
 /// Caller must be a real kernel-scheduled task (`/sbin/init` is the canonical
 /// one) — `task_wait_for` requires a non-null `current_task`.
 pub const SYSCALL_RUN_USERLAND_TESTS: u64 = SYSCALL_PRIVATE_BASE + 35;
 
-/// Deliberately panic in syscall context to exercise the task-scoped
-/// panic-recovery boundary. `ENOSYS` unless the `panic.recover_smoke` boot flag
-/// is set, so production images expose no panic trigger; when armed the call
-/// does not return.
+/// `test_panic()` — deliberately panic in syscall context to exercise the
+/// task-scoped panic-recovery boundary. `ENOSYS` unless the
+/// `panic.recover_smoke` boot flag is set, so production images expose no
+/// panic trigger; when armed the call does not return.
 pub const SYSCALL_TEST_PANIC: u64 = SYSCALL_PRIVATE_BASE + 36;
 
 /// `efivar_get(name: *const u8, name_len, guid: *const [u8; 16], buf: *mut u8,

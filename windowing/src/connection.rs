@@ -15,7 +15,7 @@ use slopos_abi::pixel::PixelFormat;
 use slopos_abi::syscall::posix::POLLIN;
 use slopos_abi::syscall::types::UserPollFd;
 use slopos_protocol::client::Client;
-use slopos_protocol::types::{SurfaceId, ToplevelId};
+use slopos_protocol::types::{ProtocolError, SurfaceId, ToplevelId};
 
 /// Protocol connection state.
 ///
@@ -40,38 +40,41 @@ pub type ProtocolHandle = Rc<Protocol>;
 
 /// Connect to the compositor protocol socket.
 ///
-/// Retries while the compositor is still starting up.
+/// Retries while the compositor is still starting up; a compositor that
+/// refuses this client's version refuses it every time.
 pub fn connect() -> Result<ProtocolHandle, ()> {
     for _ in 0..10 {
-        if let Ok(mut client) = Client::connect(&crate::sys::compositor_socket()) {
-            let compositor_fd = client.fd();
-
-            if client.ensure_output_info().is_err() {
+        let connected = Client::connect(&crate::sys::compositor_socket())
+            .and_then(|mut client| client.ensure_output_info().map(|()| client));
+        let client = match connected {
+            Ok(client) => client,
+            Err(ProtocolError::VersionMismatch) => return Err(()),
+            Err(_) => {
                 crate::sys::sleep_ms(200);
                 continue;
             }
-            let display_format =
-                PixelFormat::from_u32(client.display_format()).unwrap_or(PixelFormat::Argb8888);
-            let display_width = client.display_width();
-            let display_height = client.display_height();
+        };
+        let compositor_fd = client.fd();
+        let display_format =
+            PixelFormat::from_u32(client.display_format()).unwrap_or(PixelFormat::Argb8888);
+        let display_width = client.display_width();
+        let display_height = client.display_height();
 
-            // Self-pipe: lets UiSender::post() wake a poll()-sleeping UI thread.
-            let (wakeup_read_fd, wakeup_write_fd) =
-                crate::sys::pipe2(slopos_abi::syscall::posix::O_NONBLOCK as u32)?;
+        // Self-pipe: lets UiSender::post() wake a poll()-sleeping UI thread.
+        let (wakeup_read_fd, wakeup_write_fd) =
+            crate::sys::pipe2(slopos_abi::syscall::posix::O_NONBLOCK as u32)?;
 
-            return Ok(Rc::new(Protocol {
-                client: RefCell::new(client),
-                pending_destroys: RefCell::new(PendingDestroys::new()),
-                ui_queue: Arc::new(UiQueue::with_wakeup(wakeup_write_fd)),
-                compositor_fd,
-                wakeup_read_fd,
-                wakeup_write_fd,
-                display_format,
-                display_width,
-                display_height,
-            }));
-        }
-        crate::sys::sleep_ms(200);
+        return Ok(Rc::new(Protocol {
+            client: RefCell::new(client),
+            pending_destroys: RefCell::new(PendingDestroys::new()),
+            ui_queue: Arc::new(UiQueue::with_wakeup(wakeup_write_fd)),
+            compositor_fd,
+            wakeup_read_fd,
+            wakeup_write_fd,
+            display_format,
+            display_width,
+            display_height,
+        }));
     }
     Err(())
 }

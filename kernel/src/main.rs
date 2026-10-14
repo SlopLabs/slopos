@@ -10,6 +10,7 @@ use core::alloc::Layout;
 use core::arch::global_asm;
 use core::panic::PanicInfo;
 
+use slopos_abi::base_interface::BaseInterfaceNote;
 use slopos_drivers::serial;
 use slopos_ostd::mm::heap::KernelHeap;
 mod ffi;
@@ -22,6 +23,10 @@ global_asm!(include_str!("../../boot/limine_entry.s"));
 // Ensure the boot crate is linked so kernel_main is available for the assembly entry.
 #[used]
 static BOOT_LINK_GUARD: ffi::BootEntry = ffi::BOOT_ENTRY;
+
+#[used]
+#[unsafe(link_section = ".note.slopos.base-interface")]
+static BASE_INTERFACE_NOTE: BaseInterfaceNote = BaseInterfaceNote::SERVED;
 
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {

@@ -534,6 +534,29 @@ carrying the base directories only as sealed mount points; the tests and
 verified images carry a system of their own, which a disk root's base
 covers.
 
+**A base names the interface it needs; a kernel names the ones it serves.**
+`slopos_abi::BASE_INTERFACE` numbers the private call surface: every private
+syscall's number and the signature its doc states, and every structure and
+constant those calls take. `scripts/check_base_interface.sh` holds that
+surface, as rustdoc's JSON describes `slopos-abi`, to the digest recorded for
+the number in `scripts/gates/base-interface.txt`, so the surface cannot change
+while the number stays. A kernel serves `BASE_INTERFACE_MIN` through
+`BASE_INTERFACE` and says so twice: in `sys_info`, which the shell's `info`
+prints, and in the ELF note `.note.slopos.base-interface` (owner `SlopOS`,
+type `NT_SLOPOS_BASE_INTERFACE`, `slopos_abi::base_interface`), readable from
+the file without booting it; `link.ld` fails a link that lost it. The minimum
+rises only when a change takes away or reshapes something an older base
+calls. A program outside the base reaches SlopOS through `libc.so` alone,
+which only grows: `scripts/check_libc_exports.sh` holds its dynamic symbols
+to `scripts/gates/libc/exports.txt` and the layout of every struct and union
+`slibc/include` defines to `scripts/gates/libc/layouts.txt`. The compositor
+serves `PROTOCOL_VERSION_MIN` through `PROTOCOL_VERSION`: its `Hello` names
+the newest, a client's first request is a `Hello` naming the version it
+speaks, which the compositor answers in or refuses with `VersionMismatch`
+before closing, and a client accepts any compositor at its version or newer.
+The two `Hello`s never change encoding, and raising the minimum is a
+decision with a stated reason.
+
 **The guest installs what it builds.** `/bin/bootctl` (privd's
 `org.slopos.boot.*` actions, run as uid 0 with `RawBlock` for the raw disk and
 partition and `Power` for the loader's variables; `collect` is init's) finds
@@ -1304,7 +1327,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 
 One documented exempt site exists outside `slopos-ostd/`:
 
-- **`kernel/src/main.rs`** — global allocator + alloc-error-handler declarations (`#[global_allocator]`, `#[alloc_error_handler]`) require `extern crate alloc;` direct.
+- **`kernel/src/main.rs`** — global allocator + alloc-error-handler declarations (`#[global_allocator]`, `#[alloc_error_handler]`) require `extern crate alloc;` direct. The base-interface ELF note's `#[unsafe(link_section)]` static lives there too, the one written outside OSTD's macros: the note describes the kernel file, so it belongs to the crate that is the file.
 
 Three C-ABI entry points keep `#[unsafe(no_mangle)]` in `boot/src/ffi_boundary.rs` — `kernel_main`, `common_exception_handler`, `isr_iret_frame_corrupt`. Their callers are assembly, so the symbols have to resolve at link time; routing them through a registered hook would leave an uninstalled window across early boot in which a fault triple-faults instead of panicking. `check_unsafe_expansion.sh` allowlists them by name.
 
@@ -1334,6 +1357,8 @@ The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-re
 - **`scripts/check_linker_script.sh`** — holds a linker to the eighteen linker-script constructs `link.ld` uses, from `. = KERNEL_VIRT_BASE` through `PHDRS`, `(NOLOAD)`, all three spellings of `ALIGN`, `KEEP` under `--gc-sections` and the four page-table reservations past `_bss_end`. Each probe's script carries the construct under test and nothing else a probe grades — a script that scaffolds itself with an `ALIGN` reports the linker's `ALIGN` support under whatever name that probe carries — with one deliberate exception, `composed-layout`, which links a `link.ld`-shaped script because a linker can take every construct alone and compose them differently. That exception is what the gate is built around: wild 0.10.0 refuses `link.ld` on its location-counter assignment, and given the shape it does accept it keeps the script's section order and still starts the image 0x13e8 past the base it was given. A second, self-maintaining half compares the constructs probed against the keywords `link.ld` actually uses, so a construct added to the script with no probe fails the gate and a probe whose construct left the script fails as a dead entry. `scripts/gates/linker/<linker>.txt`; `lld` is graded on every `just check-framekernel-gates`, `wild` reports `skipped` when it is not installed and is pinned in the CI job that installs it.
 - **`scripts/check_recipes.sh`** — holds every recipe under `toolchain/recipes/` to a pinned upstream tarball built as shipped bar a patch that teaches the target: one 64-hex `sha256`, an `https` URL naming the recipe's version, a licence, a known template, a `soname` or `program` to install, dependencies that are recipes, no file beside `recipe` but its declared `config` and `patch`es, each named `NNNN-slopos-<what>.patch` and held to the grammar the recipes paragraph above states, `arg`s that pick among upstream's options (a `cmake` or `meson` arg is `-D<name>=<value>` with the built-in names a recipe may set allowlisted and no flag, file, program or search root among the project's; an `autotools` arg a `--enable`/`--disable`/`--with`/`--without` switch or a configure cache answer naming no program, path or system triple), a `NOTICE.md` entry, and — for a recipe that has been built — the stamp `build_recipes.sh --print-stamp` computes now, and, for a built `GPL-2.0-only` recipe, a `DT_NEEDED` closure of libraries a recipe or the sysroot provides under a licence that code may be combined with, each of whose objects carries a symbol table and defines, even locally, no symbol an incompatible recipe's library exports. Nothing built (CI's gates job) skips the stamp and closure halves.
 - **`scripts/check_libc_license.sh`** — holds every crate `cargo metadata` resolves for `libc.so`, `libc.a`, `crt0.o` and `libbuiltins.a` to an SPDX expression MIT alone satisfies: the four packages and everything they depend on under `--all-features`, except through dev-dependencies (build-dependencies count: a build script's output is compiled in). MIT is the licence `slibc/NOTICE` gives such crates, and a third-party one needs an entry there; another licence needs its text there and a change to the gate. A crate of this tree must keep its manifest and every target under `slibc/`, `slibc-core/` or `abi/`, so neither a new crate elsewhere nor a crate root pointed outside passes on its licence field. `core`, `alloc` and `compiler_builtins` come from the standard library's workspace, which `cargo metadata` does not describe, and `slibc/NOTICE` records them by hand. The walk must reach slibc, `slibc-core` and `slopos-abi`, so a graph the gate cannot read fails instead of passing on the roots alone. Under those three directories every `include!`, `include_str!`, `include_bytes!` and attribute `path =`, read past comments and literals, must be a literal naming a file inside them, a `.rs` file where it is code, or a single file in `OUT_DIR`; a symlink there is refused. It reads spellings, not macro expansions. The one outside input is `toolchain/libc/`, which `slibc/build.rs` renders the headers from and which is `MIT OR Apache-2.0` itself. The library's licence is the sum of what it is built from, so one dependency on a GPL-3.0-or-later crate compiles, links and passes every test, and leaves git undistributable. `--self-test` grades twenty-seven fixtures, twenty-one of them rejections. Runs from `just check-framekernel-gates`: ~0.7 s, the self-test ~1.2 s.
+- **`scripts/check_base_interface.sh`** — holds the private call surface to `slopos_abi::BASE_INTERFACE`. The surface is what rustdoc's JSON says of `slopos-abi`, not its source text: each private syscall's number and the backticked `name(args) -> result` signature its doc states, packing included (a call whose doc states none fails), the items those signatures name and the docs link, everything reachable from them through field and alias types, and the `root` globs in `scripts/gates/base-interface.txt` for what no signature can name — records behind a byte buffer, op and flag families, the wire-packing methods of rooted types. Its sha256 is held to that file's ledger row for the current number. `--record` appends a row only for the number one past the last, so a changed surface takes the next number and an issued row is never rewritten; `--print` writes the surface for a diff. Doc prose, comments, formatting and item order change nothing, and a root that reaches nothing the surface renders fails as dead. Not held: Linux's own shapes a private call passes through (`sockaddr`, `msghdr`, `iovec`, `AF_*`), which Linux compatibility holds, and what a private call takes from outside `slopos-abi` — the font's glyph ranges, the kconsole keys, the EFI GUIDs, limits written into a handler — so such a fact moves into `slopos-abi` before it changes. A parser crash, or a rustdoc `format_version` other than the one the parser reads, exits 2. ~0.6 s cold.
+- **`scripts/check_libc_exports.sh`** — holds `libc.so` to only growing. Every defined dynamic symbol is held to `scripts/gates/libc/exports.txt` as `func`, or `object`/`tls` with its size, since a non-PIE program copy-relocates a data export; and the size, alignment and every field offset of every struct and union `slibc/include` defines — not only those a prototype names, because exports take structures through `void *` too — to `scripts/gates/libc/layouts.txt`, as clang's `-fdump-record-layouts-complete` measures them under the target, field types left out because their spelling moves between clang releases. `--record` only adds lines and refuses while anything recorded was removed or changed, so a removal lands only as a hand edit a reviewer sees. Skipped without a library, the layout half without the host clang `cxx_host_tools.sh` resolves; `--require` in CI's `toolchain` job, where both exist. Not held: function prototypes, and an alignment set on a typedef rather than its record.
 - **`scripts/tcb_ratio.sh`** (via `just tcb-ratio`) — a hard gate at `--max 1.0` from both `just check-framekernel-gates` and `KERNEL_BUILD_GATES=1` builds. Prints lines of `unsafe` in `slopos-ostd/` divided by total kernel Rust LoC. Read it as a trend, not as a TCB fraction comparable to other projects': the denominator is raw LoC including the 41 kLoC vendored DWARF reader, and published comparators measure post-LTO linked code size.
 
 `scripts/check_return_types.sh` is a separate, advisory `just check-return-types` recipe that flags `pub fn`s returning large by-value types — useful when reviewing new code, not part of the load-bearing build path.
@@ -1753,9 +1778,11 @@ just _build-run-tests
 set -o pipefail
 builddir/run_tests --raw --no-color 2>&1 | tee builddir/ci-test.log
 
-# The tests userland has staged the cross-built runtime now, so the stamp and
-# symbol halves of the C++ gate run. Both are skipped by the gates above.
+# The tests userland has staged the cross-built runtime and this commit's
+# libc.so now, so the stamp and symbol halves of the C++ gate and the libc
+# export gate hold what was just built.
 scripts/check_cxx_pin.sh
+scripts/check_libc_exports.sh --require builddir/libc.so
 
 # The LLVM port and the clang driver in it. `just llvm-src` materialises the
 # sources first — 1.5 GB, so it is a deliberate step rather than something a

@@ -421,6 +421,8 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(NoneS
         committed_pages: commit.committed,
         oom_kills: oom.kills,
         oom_last_victim: oom.last_victim,
+        base_interface_min: slopos_abi::BASE_INTERFACE_MIN,
+        base_interface_max: slopos_abi::BASE_INTERFACE,
     };
 
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;

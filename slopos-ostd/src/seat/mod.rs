@@ -21,15 +21,17 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use slopos_abi::window::{SEAT_COMPOSITOR_PRIMARY, SEAT_VIRTCON};
+
 /// Which seat. Ordered by rank: a higher discriminant wins arbitration.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum SeatId {
     /// The compositor's seat. What every GUI client's frames land through.
-    CompositorPrimary = 0,
+    CompositorPrimary = SEAT_COMPOSITOR_PRIMARY as u8,
     /// The kernel log's and `/bin/roulette`'s seat. Always wins, so the
     /// display is recoverable from a wedged compositor.
-    Virtcon = 1,
+    Virtcon = SEAT_VIRTCON as u8,
 }
 
 impl SeatId {
@@ -47,9 +49,9 @@ impl SeatId {
     /// already bounded; `None` for an unrecognised encoding.
     #[inline]
     pub const fn try_from_u8(raw: u8) -> Option<Self> {
-        match raw {
-            0 => Some(Self::CompositorPrimary),
-            1 => Some(Self::Virtcon),
+        match raw as u32 {
+            SEAT_COMPOSITOR_PRIMARY => Some(Self::CompositorPrimary),
+            SEAT_VIRTCON => Some(Self::Virtcon),
             _ => None,
         }
     }

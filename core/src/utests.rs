@@ -87,6 +87,12 @@ crate::utest!(
     bin = "/bin/seat_test",
     caps = DISPLAY_SEAT | INPUT_SEAT
 );
+crate::utest!(
+    name = utest_protocol,
+    bin = "/bin/protocol_test",
+    caps = DISPLAY_SEAT | INPUT_SEAT,
+    uid = 1000
+);
 crate::utest!(name = utest_mount, bin = "/bin/mount_test", caps = MOUNT);
 crate::utest!(
     name = utest_toolchain,

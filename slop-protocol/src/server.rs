@@ -7,7 +7,7 @@
 
 use crate::codec::Encode;
 use crate::connection::Connection;
-use crate::types::{Event, ProtocolError, Request};
+use crate::types::{Event, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, ProtocolError, Request};
 use slopos_abi::net::AF_UNIX;
 use slopos_abi::syscall::MSG_NOSIGNAL;
 use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
@@ -86,6 +86,7 @@ pub struct ClientConn {
     pub conn: Connection,
     pub active: bool,
     write_buf: WriteBuf,
+    hello_version: Option<u32>,
 }
 
 pub struct Server {
@@ -165,16 +166,35 @@ impl Server {
             conn,
             active: true,
             write_buf: WriteBuf::new(),
+            hello_version: None,
         }));
         self.client_count += 1;
         Ok(Some(idx))
     }
 
     /// Read one request from a client (non-blocking).
+    ///
+    /// The first request must be a `Hello` naming a version this server
+    /// serves, and only the first may be one; anything else is an error the
+    /// caller ends the connection on.
     pub fn recv_request(&mut self, client: usize) -> Result<Option<Request>, ProtocolError> {
-        match self.clients.get_mut(client) {
-            Some(Some(c)) if c.active => c.conn.recv::<Request>(),
-            _ => Ok(None),
+        let c = match self.clients.get_mut(client) {
+            Some(Some(c)) if c.active => c,
+            _ => return Ok(None),
+        };
+        let request = c.conn.recv::<Request>()?;
+        match (c.hello_version, request) {
+            (None, Some(Request::Hello { version })) => {
+                if !(PROTOCOL_VERSION_MIN..=PROTOCOL_VERSION).contains(&version) {
+                    return Err(ProtocolError::VersionMismatch);
+                }
+                c.hello_version = Some(version);
+                Ok(Some(Request::Hello { version }))
+            }
+            (None, Some(_)) | (Some(_), Some(Request::Hello { .. })) => {
+                Err(ProtocolError::MalformedMessage)
+            }
+            (_, request) => Ok(request),
         }
     }
 

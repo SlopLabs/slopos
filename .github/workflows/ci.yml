@@ -451,6 +451,15 @@ jobs:
         if: ${{ !cancelled() && steps.userland.outcome == 'success' }}
         run: scripts/check_cxx_pin.sh
 
+      # Here rather than only in the gates job, which has no libc.so and no
+      # clang: the self-test grades the layout extraction against this job's
+      # clang, and the real run holds the library this commit built.
+      - name: libc.so only grows
+        if: ${{ !cancelled() && steps.userland.outcome == 'success' }}
+        run: |
+          scripts/check_libc_exports.sh --self-test
+          scripts/check_libc_exports.sh --require builddir/libc.so
+
       # Every recipe links `-z defs` against this commit's libc.so, so a
       # symbol slibc lost fails here rather than hours into `just toolchain`.
       - name: Recipes against slibc

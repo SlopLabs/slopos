@@ -227,6 +227,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin editor_test \
         --bin spawn_privilege_test \
         --bin seat_test \
+        --bin protocol_test \
         --bin mount_test \
         --bin toolchain_test \
         --bin install_test \
@@ -371,6 +372,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/seat_test" ]; then
         cp "$RELEASE_DIR/seat_test" "$BUILD_DIR/seat_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/protocol_test" ]; then
+        cp "$RELEASE_DIR/protocol_test" "$BUILD_DIR/protocol_test.elf"
     fi
     if [ -f "$RELEASE_DIR/mount_test" ]; then
         cp "$RELEASE_DIR/mount_test" "$BUILD_DIR/mount_test.elf"

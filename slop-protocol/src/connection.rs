@@ -235,7 +235,7 @@ impl Connection {
                 }
                 _ => {}
             }
-            if pfd.revents & (POLLERR | POLLHUP) != 0 {
+            if pfd.revents & POLLIN == 0 && pfd.revents & (POLLERR | POLLHUP) != 0 {
                 return Err(ProtocolError::Disconnected);
             }
             return Ok(());

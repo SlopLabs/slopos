@@ -1,0 +1,74 @@
+# The private call surface behind slopos_abi::BASE_INTERFACE. Data for
+# scripts/check_base_interface.sh.
+#
+# The surface is every SlopOS-private syscall's number and signature, the abi
+# items those signatures name or the calls' docs link, everything reachable
+# from them through field and alias types — and the `root` globs below, for
+# what a call reads or writes that its signature cannot name: records behind
+# a byte buffer, op and flag families, wire-packing helpers. A glob matches
+# `::`-joined canonical paths, inherent members included
+# (`slopos_abi::ring::*` takes `RingLayout::new`'s offsets too). A glob that
+# matches nothing fails as dead. Never root slopos_abi::base_interface: the
+# number cannot digest itself.
+#
+# Below the roots, the ledger: `interface <n> <sha256 of the surface>`, oldest
+# first, contiguous from 1, appended only by `check_base_interface.sh
+# --record`. A row is never rewritten: a changed surface takes the next number.
+
+# caps_drop's mask bits; spawn_path's `caps`.
+root slopos_abi::caps::*
+# fb_flip clamps to the region bound and skips the rects DamageRect::is_valid
+# refuses.
+root slopos_abi::damage::*
+# clipboard_copy / clipboard_paste truncate at it.
+root slopos_abi::input::CLIPBOARD_MAX_SIZE
+# input_poll_batch's records and the packing their accessors define.
+root slopos_abi::input::InputEvent*
+root slopos_abi::input::KEY_FLAG_*
+root slopos_abi::input::MODIFIER_*
+root slopos_abi::input::POINTER_AXIS_*
+root slopos_abi::input::keycode::*
+# keymap_load's blob; keymap_get_name's LAYOUT_NAME_LEN.
+root slopos_abi::input::layout::*
+# net_query's selectors, records and flags; the ctl ops; net_monitor's events.
+root slopos_abi::net::IFF_*
+root slopos_abi::net::NET_*
+root slopos_abi::net::NetEvent*
+root slopos_abi::net::User*
+# ring_setup / ring_enter / ring_register: opcodes, SQE/CQE, params, the
+# shared ring layout and the register commands.
+root slopos_abi::ring::*
+root slopos_abi::syscall::numbers::RING_*
+# spawn_path's attrs, fd actions and limits; the flag bits it decodes, the
+# masks over them, and its path bound.
+root slopos_abi::spawn::*
+root slopos_abi::task::TASK_FLAG_*
+root slopos_abi::task::SPAWN_*
+root slopos_abi::fs::USER_PATH_MAX
+# efivar_get / efivar_set.
+root slopos_abi::syscall::numbers::EFIVAR_DATA_MAX
+# font_set's `format`.
+root slopos_abi::syscall::numbers::FONT_FORMAT_*
+# The SlopOS-only socket option on Linux's getsockopt.
+root slopos_abi::syscall::posix::SOL_SLOPOS
+root slopos_abi::syscall::posix::SO_PEERPROGRAM
+# test_report's status and bounds.
+root slopos_abi::syscall::test_report::*
+# sys_info's boot_flags; cpu_perf's flags and policies, cpu_perf_ctl's ops;
+# prof_ctl's ops and label bound.
+root slopos_abi::syscall::types::BOOT_FLAG_*
+root slopos_abi::syscall::types::CPU_PERF_*
+root slopos_abi::syscall::types::PROF_*
+# process_list's state, block_reason and priority bytes, its entry bound, and
+# the ids that mean "none" there and in net_query's socket owners.
+root slopos_abi::task::TaskStatus
+root slopos_abi::task::BlockReason
+root slopos_abi::task::TaskPriority
+root slopos_abi::task::INVALID_TASK_ID
+root slopos_abi::task::MAX_TASKS
+root slopos_abi::task::INVALID_PROCESS_ID
+# screen_acquire / input_sink_acquire's seat ranks.
+root slopos_abi::window::SEAT_*
+
+# Ledger. Appended by --record only.
+interface 1 17d78169ae6cdcc6acf1b503af88072e94c186cc9f01f774384070f83137cd63

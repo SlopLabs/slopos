@@ -26,7 +26,8 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connect to the compositor and perform the version handshake.
+    /// Connect to the compositor and perform the version handshake: a
+    /// compositor speaking this client's version or a newer one is accepted.
     ///
     /// Display geometry (`OutputInfo`) is received lazily via
     /// [`ensure_output_info()`] before the first surface operation.
@@ -54,7 +55,7 @@ impl Client {
                 version,
                 capabilities,
             } => {
-                if version != PROTOCOL_VERSION {
+                if version < PROTOCOL_VERSION {
                     return Err(ProtocolError::VersionMismatch);
                 }
                 capabilities
@@ -360,7 +361,8 @@ impl Client {
         }
     }
 
-    /// Block until OutputInfo has been received.
+    /// Block until OutputInfo has been received, or the compositor refuses
+    /// this client's version.
     pub fn ensure_output_info(&mut self) -> Result<(), ProtocolError> {
         if self.output.width > 0 {
             return Ok(());
@@ -382,22 +384,29 @@ impl Client {
                     self.conn.wait_recv::<Event>(remaining)?
                 }
             };
-            if let Event::OutputInfo {
-                width,
-                height,
-                format,
-                pitch,
-                scale,
-            } = event
-            {
-                self.output = OutputInfo {
+            match event {
+                Event::OutputInfo {
                     width,
                     height,
                     format,
                     pitch,
                     scale,
-                };
-                return Ok(());
+                } => {
+                    self.output = OutputInfo {
+                        width,
+                        height,
+                        format,
+                        pitch,
+                        scale,
+                    };
+                    return Ok(());
+                }
+                Event::Error { object_id: 0, code }
+                    if code == ProtocolError::VersionMismatch as u32 =>
+                {
+                    return Err(ProtocolError::VersionMismatch);
+                }
+                _ => {}
             }
         }
     }

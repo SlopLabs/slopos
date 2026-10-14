@@ -30,7 +30,9 @@
 #   - kernel/src/main.rs            global allocator + alloc error
 #                                   handler declarations (must name
 #                                   `alloc` directly; same exemption
-#                                   pattern as check_alloc_dep.sh).
+#                                   pattern as check_alloc_dep.sh), and
+#                                   the base-interface ELF note's
+#                                   `#[unsafe(link_section)]` static.
 #
 # Userland-side crates (userland, slibc, slop-protocol, appkit, editor-core)
 # are out of scope — slibc-core's integration tests with them, which build

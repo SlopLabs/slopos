@@ -13,6 +13,7 @@ tests = ["slopos-boot/tests", "slopos-fs/tests", "slopos-testing/tests", "test-h
 test-hooks = ["slopos-boot/test-hooks"]
 
 [dependencies]
+slopos-abi = { workspace = true }
 slopos-boot = { workspace = true }
 slopos-core = { workspace = true }
 slopos-drivers = { workspace = true }

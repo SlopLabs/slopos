@@ -9,6 +9,7 @@
 pub mod addr;
 pub mod alignment;
 pub mod auxv;
+pub mod base_interface;
 pub mod caps;
 pub mod damage;
 pub mod display;
@@ -41,6 +42,7 @@ pub const PAGE_SIZE: u64 = 0x1000;
 
 pub use addr::*;
 pub use alignment::{align_down_u64, align_down_usize, align_up_u64, align_up_usize};
+pub use base_interface::{BASE_INTERFACE, BASE_INTERFACE_MIN};
 pub use damage::{DamageRect, MAX_DAMAGE_REGIONS, MAX_INTERNAL_DAMAGE_REGIONS};
 pub use display::{DisplayInfo, FramebufferData};
 pub use draw::{Canvas, Color32, EncodedPixel};

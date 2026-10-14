@@ -44,10 +44,14 @@ pub struct UserSysInfo {
     pub oom_kills: u32,
     /// The pid of the last of them; `INVALID_TASK_ID` before the first.
     pub oom_last_victim: u32,
+    /// The base interfaces this kernel serves, `BASE_INTERFACE_MIN` through
+    /// `BASE_INTERFACE` of the tree it was built from.
+    pub base_interface_min: u32,
+    pub base_interface_max: u32,
 }
 
 const _: () = assert!(
-    core::mem::size_of::<UserSysInfo>() == 88,
+    core::mem::size_of::<UserSysInfo>() == 96,
     "UserSysInfo must carry no implicit padding"
 );
 
@@ -83,6 +87,16 @@ pub const SI_LOAD_SHIFT: u32 = 16;
 
 pub const BOOT_FLAG_ROULETTE_SKIP: u32 = 1 << 0;
 pub const BOOT_FLAG_TESTS_ENABLED: u32 = 1 << 1;
+pub const BOOT_FLAG_PANIC_ON_OOPS: u32 = 1 << 2;
+pub const BOOT_FLAG_PANIC_RECOVER_SMOKE: u32 = 1 << 3;
+/// The Wheel of Fate's loss arm may reboot the machine.
+///
+/// A second key on `roulette_result`, in the idiom `test_panic` already uses:
+/// the capability admits a caller to the syscall, this says the *image* is
+/// one where losing costs a reboot. Set for an interactive boot, clear under
+/// `tests=on` — a test image must not have a user-reachable path that
+/// power-cycles the machine mid-run.
+pub const BOOT_FLAG_FATE_REBOOT: u32 = 1 << 4;
 /// `/` is backed by a block device: a write there survives the reboot. Clear
 /// for a RAM root, whose successful `fsync` still loses the data at power-off.
 pub const BOOT_FLAG_ROOT_PERSISTENT: u32 = 1 << 5;

@@ -4,12 +4,7 @@ use super::numbers::*;
 use super::raw::{syscall1, syscall2, syscall3};
 use slopos_abi::DisplayInfo;
 use slopos_abi::damage::DamageRect;
-
-/// Seat ranks, mirroring `slopos_ostd::seat::SeatId`. Virtcon outranks the
-/// compositor so the kernel log and `/bin/roulette` can always take the
-/// display back.
-pub const SEAT_COMPOSITOR_PRIMARY: u32 = 0;
-pub const SEAT_VIRTCON: u32 = 1;
+pub use slopos_abi::window::{SEAT_COMPOSITOR_PRIMARY, SEAT_VIRTCON};
 
 /// Take the framebuffer seat, returning a non-duplicable descriptor naming it.
 ///
