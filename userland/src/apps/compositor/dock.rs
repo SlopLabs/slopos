@@ -13,8 +13,8 @@ use crate::theme::*;
 
 const MAX_ENTRIES: usize = 16;
 
-/// An icon is drawn at most `SHELF_ICON_SIZE_MAX` square; a larger one is
-/// refused before it is decoded.
+/// Well past the size an icon is drawn at, so a huge one is refused before
+/// it is decoded.
 const ICON_PIXELS_MAX: usize = 256 * 256;
 const ICON_BYTES_MAX: u64 = 1 << 20;
 
@@ -596,9 +596,8 @@ fn draw_letter_icon(
         let ty = icon_y + (l.size - th) / 2;
         f.draw_text(buf, tx, ty, s, ICON_LABEL_FONT_SIZE, text_color, Color32(c));
     } else {
-        // Bitmap fallback: the glyph cell is 8x16.
-        let tx = icon_x + (l.size - 8) / 2;
-        let ty = icon_y + (l.size - 16) / 2;
+        let tx = icon_x + (l.size - gfx::font::string_width(s)) / 2;
+        let ty = icon_y + (l.size - gfx::font::string_height(s)) / 2;
         gfx::draw_str_clipped(buf, tx, ty, s, text_color, Color32(c), clip);
     }
 }

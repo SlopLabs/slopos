@@ -540,12 +540,9 @@ cp "$RELEASE_DIR/libc.so" "$BUILD_DIR/libc.so"
 
 echo "C shared library built: $BUILD_DIR/libc.so"
 
-# The apps outside the base, built as `cargo build` builds a program for this
-# target: the target's std and panic strategy, and the link line the clang
-# driver's `toolchains::SlopOS` writes for `cc`, which the host has not got.
-# Staged with their entries and icons as the tree `apps` installs at
-# /usr/local; a file whose bytes did not change keeps its time, so the tree's
-# identity moves only when the apps do.
+# The link line the clang driver's `toolchains::SlopOS` writes for `cc`, which
+# the host has not got. A staged file whose bytes did not change keeps its
+# time, so the tree's identity moves only when the apps do.
 APPS_RUSTFLAGS="-C linker=rust-lld -C linker-flavor=ld.lld -C link-arg=$CRT0_OBJ \
 -C link-arg=--image-base=0x400000 -C link-arg=--dynamic-linker=/lib/ld-slopos.so.1 \
 -C link-arg=--eh-frame-hdr -C link-arg=-znow -C link-arg=-L$RELEASE_DIR -C link-arg=-lc \
