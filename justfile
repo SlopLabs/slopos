@@ -151,8 +151,6 @@ test_shared_objects := `. scripts/lib/base.sh && printf %s "$BASE_TEST_SHARED_OB
 base_recipe_programs := `. scripts/lib/base.sh && printf %s "$BASE_RECIPE_PROGRAMS"`
 base_recipes        := `. scripts/lib/base.sh && printf %s "$BASE_RECIPES"`
 recipes_prefix      := build_dir / "slopos-recipes/prefix"
-# The apps outside the base, as build_userland.sh stages them: a host tree of
-# its own beside the toolchain at /usr/local.
 apps_tree           := build_dir / "apps:/usr/local:apps"
 base_recipe_env     := "RECIPE_PREFIX=" + recipes_prefix + " RECIPE_PROGRAMS=\"" + base_recipe_programs + "\" RECIPE_LICENSES=\"" + base_recipes + "\""
 

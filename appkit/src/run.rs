@@ -257,10 +257,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
         } else {
             -1
         };
-        // A zero timeout deliberately waits for nothing.
-        if timeout_ms != 0 {
-            handle.wait_events(timeout_ms);
-        }
+        handle.wait_events(timeout_ms);
     }
 }
 

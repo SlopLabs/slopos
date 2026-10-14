@@ -5,8 +5,7 @@
 # The shipped programs: `/bin/<name>`, and `init` and `privd` at `/sbin/<name>`.
 BASE_PROGRAMS="init privd shell coreutils terminal compositor roulette halt bootctl installer sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted kconsole prof tree-install"
 
-# The apps outside the base: built against libc.so into the tree named `apps`,
-# which every root holds at /usr/local.
+# The apps outside the base, the tree `apps` every root holds at /usr/local.
 APPS="editor file_manager image_viewer"
 
 # The multicall utility binary's installed names. `/bin/<name>` is a symlink to
