@@ -5,7 +5,8 @@
 //! kernel phase.
 
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::lock_graph;
+use slopos_ostd::sync::lock_graph::{self, LockClassKey};
+use slopos_ostd::sync::{Mutex, WaitQueue};
 
 use crate::{assert_test, TestResult};
 
@@ -264,6 +265,45 @@ fn lockdep_no_unreported_violations() -> TestResult {
     TestResult::Pass
 }
 
+fn class_registered(key: &'static LockClassKey) -> bool {
+    (0..lock_graph::class_count()).any(|i| {
+        lock_graph::class_info(i)
+            .is_some_and(|c| c.subclass == 0 && c.name == key.name() && c.site == key.site())
+    })
+}
+
+/// Whether a waiter ever sleeps is timing, so a sleeping lock's class must not
+/// wait for one: the headroom gate holds the class count exactly.
+fn lockdep_sleeping_classes_register_at_first_use() -> TestResult {
+    if validator_deliberately_off() || !lock_graph::validator_alive() {
+        return TestResult::Skipped;
+    }
+    let mutex_key = lock_class!("selftest.mutex", lock_graph::LOCK_LEVEL_RESOURCE);
+    let queue_key = lock_class!("selftest.queue", lock_graph::LOCK_LEVEL_RESOURCE);
+    assert_test!(
+        !class_registered(mutex_key) && !class_registered(queue_key),
+        "a self-test class was registered before its lock was used"
+    );
+
+    let mutex = Mutex::new((), mutex_key);
+    assert_test!(mutex.lock().is_ok(), "an uncontended lock failed");
+    let queue = WaitQueue::new(queue_key);
+    assert_test!(
+        queue.wait_event(|| true).is_ok(),
+        "a wait whose condition held failed"
+    );
+
+    assert_test!(
+        class_registered(mutex_key),
+        "an uncontended Mutex::lock left its class unregistered"
+    );
+    assert_test!(
+        class_registered(queue_key),
+        "a wait that never slept left its queue's class unregistered"
+    );
+    TestResult::Pass
+}
+
 crate::stest!(name = lockdep_ab_ba_is_detected);
 crate::stest!(name = lockdep_no_unreported_violations);
 crate::stest!(name = lockdep_pool_headroom);
@@ -272,3 +312,4 @@ crate::stest!(name = lockdep_no_class_collisions);
 crate::stest!(name = lockdep_updates_run_with_interrupts_masked);
 crate::stest!(name = lockdep_no_unmatched_releases);
 crate::stest!(name = lockdep_overflow_is_announced);
+crate::stest!(name = lockdep_sleeping_classes_register_at_first_use);

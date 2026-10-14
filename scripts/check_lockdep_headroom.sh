@@ -343,6 +343,10 @@ run_gate() {
                 if [ "$val" -gt "${CAPS[$gkey]}" ]; then
                     echo "FAIL: LOCKDEP[$phase] $pool grew to $val, over the recorded cap ${CAPS[$gkey]}." >&2
                     echo "      Re-measure with --emit-allowlist and say what added the locks." >&2
+                    if [ "$pool" = classes ]; then
+                        echo "      The log's LOCKDEP-CLASS lines name each class a phase registered;" >&2
+                        echo "      a diff against a passing run's names the one that moved." >&2
+                    fi
                     fail=1
                 fi
                 unset "CAPS[$gkey]"

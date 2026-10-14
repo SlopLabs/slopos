@@ -1,6 +1,6 @@
 use core::arch::asm;
 use core::ffi::c_int;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::tsc;
 use crate::cpu::x86_64 as cpu;
@@ -393,6 +393,33 @@ pub fn kdiag_dump_lock_graph(phase: &str) {
         leaked,
         lg::lockdep_mode(),
     );
+
+    if crate::boot_flags::has_flag(crate::boot_flags::BOOT_FLAG_TESTS_ENABLED) {
+        list_new_lock_classes(phase);
+    }
+}
+
+/// The first class slot the previous report did not list.
+static CLASSES_LISTED: AtomicUsize = AtomicUsize::new(0);
+
+/// Name every class registered since the previous report, so a run whose class
+/// count moved says which lock moved it. `LOCKDEP-CLASS`, not `LOCKDEP[`: the
+/// headroom gate parses every `LOCKDEP[` line as a report.
+fn list_new_lock_classes(phase: &str) {
+    use crate::sync::lock_graph as lg;
+
+    let end = lg::class_count();
+    for i in CLASSES_LISTED.swap(end, Ordering::Relaxed)..end {
+        if let Some(c) = lg::class_info(i) {
+            crate::klog_info!(
+                "LOCKDEP-CLASS[{}]: {}{} ({})",
+                phase,
+                c.name,
+                if c.subclass != 0 { "/nested" } else { "" },
+                c.site,
+            );
+        }
+    }
 }
 
 /// Dump up to `limit` registered lock classes, bounded so a full table cannot

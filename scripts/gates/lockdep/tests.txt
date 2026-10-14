@@ -24,13 +24,16 @@
 # Why the split: exact where the measurement is deterministic
 # ----------------------------------------------------------
 #
-# A class registers on the first acquire of a declaration site, and by the end
-# of a phase every site that phase reaches has been reached. So a class count is
-# a property of the kernel, identical on every run — this file's own history
-# below records "identical in all 8 runs" and "193 on every run" — and one extra
-# class is a new lock, or a lock reached one phase earlier, which is exactly
-# what should require a deliberate bump. Class caps are exact, with no margin,
-# in every phase.
+# A class registers on the first acquire of a declaration site — a mutex's or
+# a wait queue's on its first lock or wait, not on the first waiter that
+# sleeps, which is timing — and by the end of a phase every site that phase
+# reaches has been reached. So a class count is a property of the kernel,
+# identical on every run — this file's own history below records "identical
+# in all 8 runs" and "193 on every run" — and one extra class is a new lock, or
+# a lock reached one phase earlier, which is exactly what should require a
+# deliberate bump. Class caps are exact, with no margin, in every phase. Under
+# `tests=on` each report is followed by `LOCKDEP-CLASS[<phase>]:` lines naming
+# the classes that phase registered, so a count that moved names its lock.
 #
 # `boot` reaches its report by a fixed sequence with no test dispatch in it, and
 # measures 43 edges and 110 chains on every run. Its edge and chain counts are
@@ -416,9 +419,20 @@ require-phase post-userland-tests
 #               the session's runtime directory, whose `RAMFS_RUN` class
 #               registers the first time either phase walks it. One full
 #               capture counts 239 and 250; boot is unchanged at 95.
-boot	classes	95
-post-kernel-tests	classes	239
-post-userland-tests	classes	250
+#   2026-10-15  boot 95 -> 105, kernel 239 -> 260, userland 250 -> 273; the
+#               userland edge band moved. A mutex's class lived on its wait
+#               queue's inner lock, which only a waiter that sleeps takes, so
+#               each mutex registered on its first contention: CI counted
+#               240/251 on unchanged trees while local runs held 239/250.
+#               `Mutex::lock` and every wait now register the class at first
+#               use, which adds every mutex a phase locks, plus the
+#               `selftest.mutex` and `selftest.queue` classes of the test that
+#               holds it. Three full captures name identical class sets in
+#               every phase (`LOCKDEP-CLASS` lines). Userland edges measured
+#               249, 256 and 259, past the band's 256, as CI had.
+boot	classes	105
+post-kernel-tests	classes	260
+post-userland-tests	classes	273
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
@@ -435,7 +449,7 @@ boot	chains	156
 # a re-measurement that finds a wider spread widens the band with it.
 #
 #   post-kernel-tests    edges   193-198  (spread 20)  ->  173-218
-#   post-userland-tests  edges   243-245  (spread 11)  ->  232-256
+#   post-userland-tests  edges   243-259  (spread 16)  ->  227-275
 #   post-kernel-tests    chains  444-452  (spread 36)  ->  408-488
 #   post-userland-tests  chains  511-512  (spread 36)  ->  475-548
 #
@@ -456,6 +470,6 @@ boot	chains	156
 # not a failure, so a band set slightly tight costs a DRIFT line to read,
 # never a red run.
 band post-kernel-tests edges 173 218
-band post-userland-tests edges 232 256
+band post-userland-tests edges 227 275
 band post-kernel-tests chains 408 488
 band post-userland-tests chains 475 548

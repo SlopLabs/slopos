@@ -291,6 +291,11 @@ impl<T> SpinLock<T> {
         }
     }
 
+    #[inline]
+    pub(crate) fn class(&self) -> &'static LockClassKey {
+        self.core.class
+    }
+
     /// The payload, reached through an exclusive borrow of the lock itself:
     /// `&mut self` already proves exclusivity, so acquiring would only demand
     /// the per-CPU state a caller may not have.

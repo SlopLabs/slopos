@@ -534,6 +534,7 @@ unsafe impl Send for WaitQueueInner {}
 pub struct WaitQueue {
     inner: SpinLock<WaitQueueInner>,
     generation: AtomicU32,
+    class_noted: AtomicBool,
 }
 
 // SAFETY: cross-CPU access to the wait nodes is mediated by the `SpinLock`; the
@@ -552,6 +553,25 @@ impl WaitQueue {
         Self {
             inner: SpinLock::new(WaitQueueInner::new(), class),
             generation: AtomicU32::new(0),
+            class_noted: AtomicBool::new(false),
+        }
+    }
+
+    /// Register the queue's class with the lock-order validator, which would
+    /// otherwise first see it when somebody sleeps here: whether anybody does
+    /// is timing, and the class count must not be.
+    #[inline]
+    pub(crate) fn note_class(&self) {
+        if !self.class_noted.load(Ordering::Relaxed) {
+            self.note_class_slow();
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn note_class_slow(&self) {
+        if crate::sync::lock_graph::note_class(self.inner.class()) {
+            self.class_noted.store(true, Ordering::Relaxed);
         }
     }
 
@@ -695,6 +715,7 @@ impl WaitQueue {
         F: FnMut() -> Option<R>,
     {
         let bk = backend();
+        self.note_class();
         let _parked = ParkedQueueScope::enter(self);
         let node = core::pin::pin!(WaitNode::new());
         let mut deadline_ms: Option<u64> = None;

@@ -100,6 +100,7 @@ impl<T> Mutex<T> {
     /// paths) the acquire degrades to busy-waiting on the flag.
     #[must_use = "an unacquired lock guards nothing"]
     pub fn lock(&self) -> WaitResult<MutexGuard<'_, T>> {
+        self.waiters.note_class();
         if let Some(guard) = self.try_lock() {
             return Ok(guard);
         }

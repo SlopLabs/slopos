@@ -1330,6 +1330,17 @@ pub fn register_class_eagerly(key: &'static LockClassKey) {
     let _ = register_class(key, 0);
 }
 
+/// [`register_class_eagerly`] for a lock whose tracked acquire runs only when
+/// a waiter sleeps. `false` until the validator starts, so the caller asks
+/// again.
+pub(crate) fn note_class(key: &'static LockClassKey) -> bool {
+    if !TRACKING_ENABLED.load(Ordering::Relaxed) {
+        return false;
+    }
+    register_class_eagerly(key);
+    true
+}
+
 /// Assert that `outer` is always acquired before `inner`.
 ///
 /// Without a declaration, the polarity of a class pair is whatever ran first
