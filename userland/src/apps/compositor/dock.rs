@@ -34,6 +34,10 @@ pub struct ShelfEntry {
 }
 
 impl ShelfEntry {
+    pub fn has_icon(&self) -> bool {
+        self.icon.is_some()
+    }
+
     fn pinned(entry: AppEntry) -> Self {
         let icon = entry
             .icon
@@ -142,11 +146,13 @@ impl LauncherShelf {
         for win in &windows[..(count as usize).min(windows.len())] {
             let title = title_str(&win.title);
             let app_id = win.app_id.as_str();
-            // An app's id names its entry; a window that sets none is matched
-            // by title.
-            let pinned = self.entries.iter_mut().find(|entry| {
-                (!app_id.is_empty() && entry.app_id == app_id) || names_match(&entry.name, title)
-            });
+            let pinned = if app_id.is_empty() {
+                self.entries
+                    .iter_mut()
+                    .find(|entry| names_match(&entry.name, title))
+            } else {
+                self.entries.iter_mut().find(|entry| entry.app_id == app_id)
+            };
             if let Some(entry) = pinned {
                 entry.running = true;
                 entry.task_id = win.task_id;
@@ -621,10 +627,13 @@ fn full_screen_clip(w: u32, h: u32) -> DamageRect {
     }
 }
 
-/// The title up to the first NUL.
+/// The title up to the first NUL, less a character the cut split.
 fn title_str(title: &[u8; 32]) -> &str {
     let len = title.iter().position(|&b| b == 0).unwrap_or(title.len());
-    core::str::from_utf8(&title[..len]).unwrap_or("")
+    match core::str::from_utf8(&title[..len]) {
+        Ok(title) => title,
+        Err(e) => core::str::from_utf8(&title[..e.valid_up_to()]).unwrap_or(""),
+    }
 }
 
 /// Case-insensitive prefix match of a shelf entry name against a window title.
