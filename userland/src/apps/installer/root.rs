@@ -267,21 +267,22 @@ fn put(
     give(&dest, (SESSION_UID, SESSION_GID))
 }
 
-/// Install the medium's tree `name` from `source` at `/usr/local`, keeping
-/// whatever the root's user put beside what an earlier install left, its
-/// manifest `keeper`'s. `None` when the root holds this tree already.
+/// Install the medium's tree `name`, the `what` it says it installs, from
+/// `source` at `/usr/local`, keeping whatever the root's user put beside what
+/// an earlier install left, its manifest `keeper`'s.
 fn install_tree(
     root: &Mounted,
     name: &str,
+    what: &str,
     source: &Path,
     new: &Manifest,
     keeper: (u32, u32),
-) -> Result<Option<u64>, String> {
+) -> Result<(), String> {
     let mut progress = Progress {
         copied: 0,
         reported: 0,
     };
-    tree::Install {
+    let installed = tree::Install {
         root: &root.dir,
         name,
         guest: LOCAL,
@@ -290,7 +291,15 @@ fn install_tree(
         keeper: Some(keeper),
         remedy: "move it aside, or format the root",
     }
-    .run(new, &mut |n| progress.add(n))
+    .run(new, &mut |n| progress.add(n))?;
+    match installed {
+        Some(bytes) => println!(
+            "installer: installed {what} at {LOCAL} ({})",
+            super::disk::human(bytes)
+        ),
+        None => println!("installer: {LOCAL} already holds this medium's {what}"),
+    }
+    Ok(())
 }
 
 fn copy_tree(root: &Mounted, medium: &Medium, dir: &str, to: &str) -> Result<u64, String> {
@@ -392,29 +401,25 @@ pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(),
         let new = Manifest::parse(&text)
             .map_err(|e| format!("the medium's manifest of {LOCAL}, line {}", e.line))?;
         let source = medium.payload_path(LOCAL);
-        match install_tree(root, slopos_tree_core::TOOLCHAIN, &source, &new, (0, 0))? {
-            Some(bytes) => println!(
-                "installer: installed the toolchain at /usr/local ({})",
-                super::disk::human(bytes)
-            ),
-            None => println!("installer: /usr/local already holds this medium's toolchain"),
-        }
+        install_tree(
+            root,
+            slopos_tree_core::TOOLCHAIN,
+            "the toolchain",
+            &source,
+            &new,
+            (0, 0),
+        )?;
     }
     let apps = medium.path(layout::MEDIUM_APPS);
     let new = tree::scan(&apps)?;
-    match install_tree(
+    install_tree(
         root,
         slopos_tree_core::APPS,
+        "the apps",
         &apps,
         &new,
         (SESSION_UID, SESSION_GID),
-    )? {
-        Some(bytes) => println!(
-            "installer: installed the apps at /usr/local ({})",
-            super::disk::human(bytes)
-        ),
-        None => println!("installer: /usr/local already holds this medium's apps"),
-    }
+    )?;
     if !medium.payload_has(SOURCE) {
         return Ok(());
     }

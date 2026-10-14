@@ -39,7 +39,9 @@ pub fn create_new(path: &str) -> std::io::Result<File> {
     OpenOptions::new().write(true).create_new(true).open(path)
 }
 
-fn replace(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+/// `bytes` at `path`, `owner`'s when given, through a flushed sibling and a
+/// rename, so a crash leaves the old file or the new one.
+fn replace(path: &str, bytes: &[u8], owner: Option<(u32, u32)>) -> std::io::Result<()> {
     let temp = format!("{path}.part");
     match fs::remove_file(&temp) {
         Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
@@ -47,13 +49,14 @@ fn replace(path: &str, bytes: &[u8]) -> std::io::Result<()> {
     }
     create_new(&temp)
         .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        .and_then(|()| owner.map_or(Ok(()), |(uid, gid)| lchown(&temp, Some(uid), Some(gid))))
         .and_then(|()| fs::rename(&temp, path))
 }
 
 /// `bytes` at `path` through a flushed sibling and a rename, so a crash
 /// leaves the old file or the new one.
 pub fn write_durably(path: &str, bytes: &[u8]) -> Result<(), String> {
-    replace(path, bytes).map_err(|e| format!("{path}: {e}"))
+    replace(path, bytes, None).map_err(|e| format!("{path}: {e}"))
 }
 
 /// A file the root holds at `path`, if any; anything else there is refused.
@@ -79,15 +82,13 @@ pub fn hand_over(name: &str, keeper: (u32, u32)) -> Result<(), String> {
         items: Vec::new(),
     };
     make_dir(MANIFEST_DIR)?;
-    match create_new(&path) {
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(format!("{path}: {e}")),
-        Ok(mut file) => {
-            file.write_all(empty.render().as_bytes())
-                .and_then(|()| file.sync_all())
-                .map_err(|e| format!("{path}: {e}"))?;
-            give(&path, keeper)
+    match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            replace(&path, empty.render().as_bytes(), Some(keeper))
+                .map_err(|e| format!("{path}: {e}"))
         }
+        Err(e) => Err(format!("{path}: {e}")),
+        Ok(_) => Ok(()),
     }
 }
 
@@ -116,6 +117,9 @@ pub fn scan(dir: &Path) -> Result<Manifest, String> {
             } else {
                 format!("{prefix}/{name}")
             };
+            if !slopos_tree_core::valid_rel(&rel) {
+                return Err(format!("{}: a manifest cannot name it", path.display()));
+            }
             let meta =
                 fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let kind = if meta.file_type().is_symlink() {
@@ -262,7 +266,7 @@ impl Install<'_> {
     /// directory.
     fn record(&self, path: &str, manifest: &Manifest) -> Result<(), String> {
         let text = manifest.render();
-        match replace(path, text.as_bytes()) {
+        match replace(path, text.as_bytes(), self.keeper) {
             Err(e) if e.kind() == ErrorKind::PermissionDenied => OpenOptions::new()
                 .write(true)
                 .truncate(true)
@@ -274,8 +278,7 @@ impl Install<'_> {
         .map_err(|e| match e.kind() {
             ErrorKind::NotFound => format!("{path} does not exist, and only uid 0 may make it"),
             _ => format!("recording {path}: {e}"),
-        })?;
-        self.keeper.map_or(Ok(()), |keeper| give(path, keeper))
+        })
     }
 
     fn copy(&self, from: &Path, to: &str, copied: &mut dyn FnMut(u64)) -> Result<(), String> {

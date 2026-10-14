@@ -396,6 +396,7 @@ impl LauncherShelf {
             }
         }
 
+        let mut label = None;
         if let Some(hi) = self.hovered_index {
             let entry = &self.entries[hi];
             let l = &layouts[hi];
@@ -420,6 +421,7 @@ impl LauncherShelf {
                     let lbl_h = th + 2 * SHELF_LABEL_PADDING_Y;
                     let lbl_x = l.center_x - lbl_w / 2;
                     let lbl_y = pill_y - SHELF_LABEL_GAP_Y - lbl_h;
+                    label = Some(bounds(lbl_x, lbl_y, lbl_w, lbl_h));
 
                     slopos_gfx::canvas_ops::rounded_rect_filled(
                         buf,
@@ -440,12 +442,11 @@ impl LauncherShelf {
                         label_bg,
                     );
                 } else {
-                    let tw = 8 * name.len() as i32;
-                    let th = 16i32;
-                    let lbl_w = tw + 2 * SHELF_LABEL_PADDING_X;
-                    let lbl_h = th + 2 * SHELF_LABEL_PADDING_Y;
+                    let lbl_w = gfx::font::string_width(name) + 2 * SHELF_LABEL_PADDING_X;
+                    let lbl_h = gfx::font::string_height(name) + 2 * SHELF_LABEL_PADDING_Y;
                     let lbl_x = l.center_x - lbl_w / 2;
                     let lbl_y = pill_y - SHELF_LABEL_GAP_Y - lbl_h;
+                    label = Some(bounds(lbl_x, lbl_y, lbl_w, lbl_h));
 
                     gfx::fill_rect_blended(buf, lbl_x, lbl_y, lbl_w, lbl_h, label_bg);
                     gfx::draw_str_clipped(
@@ -461,20 +462,9 @@ impl LauncherShelf {
             }
         }
 
-        // The damage footprint includes the label above and the dots below.
-        let label_overhead = if self.hovered_index.is_some() {
-            SHELF_LABEL_GAP_Y + 16 + 2 * SHELF_LABEL_PADDING_Y
-        } else {
-            0
-        };
-        let dot_overhead = SHELF_DOT_MARGIN_Y + SHELF_DOT_DIAMETER;
-
-        self.last_bounds = DamageRect {
-            x0: pill_x,
-            y0: pill_y - label_overhead,
-            x1: pill_x + pill_w - 1,
-            y1: pill_y + pill_h + dot_overhead,
-        };
+        let dots = SHELF_DOT_MARGIN_Y + SHELF_DOT_DIAMETER;
+        let shelf = bounds(pill_x, pill_y, pill_w, pill_h + dots + 1);
+        self.last_bounds = label.map_or(shelf, |label| shelf.union(&label));
     }
 
     /// Hit-test a screen coordinate against shelf icons.
@@ -615,6 +605,15 @@ fn max_in_slice(arr: &[i32; MAX_ENTRIES], n: usize) -> i32 {
         }
     }
     m
+}
+
+fn bounds(x: i32, y: i32, w: i32, h: i32) -> DamageRect {
+    DamageRect {
+        x0: x,
+        y0: y,
+        x1: x + w - 1,
+        y1: y + h - 1,
+    }
 }
 
 fn full_screen_clip(w: u32, h: u32) -> DamageRect {

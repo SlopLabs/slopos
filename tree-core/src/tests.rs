@@ -142,6 +142,7 @@ fn a_damaged_manifest_says_where() {
         (&*format!("identity {}\nd 3 x\n", "a".repeat(64)), 2),
         (&*format!("identity {}\nd - ../x\n", "a".repeat(64)), 2),
         (&*format!("identity {}\nd - a//b\n", "a".repeat(64)), 2),
+        (&*format!("identity {}\nd - a\tb\n", "a".repeat(64)), 2),
         (&*format!("identity {}\nat usr/local\n", "a".repeat(64)), 2),
         (
             &*format!("identity {}\nat /usr/../etc\n", "a".repeat(64)),
