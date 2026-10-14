@@ -115,8 +115,7 @@ pub fn close(fd: i32) -> Result<(), Errno> {
     check(c::close(fd)).map(drop)
 }
 
-/// `fcntl` with an integer argument, which every command but the lock ones
-/// takes.
+/// `fcntl` for a command whose argument, if it takes one, is an integer.
 pub fn fcntl(fd: i32, cmd: i32, arg: i32) -> Result<i32, Errno> {
     // SAFETY: an integer argument is what these commands read.
     check(unsafe { c::fcntl(fd, cmd, arg) })
@@ -248,10 +247,6 @@ impl SharedMemory {
 
     pub fn len(&self) -> usize {
         self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     pub fn as_slice(&self) -> &[u8] {
