@@ -177,10 +177,12 @@ fn a_share_cannot_stall_or_swell_the_dock() -> bool {
     let entry = |id: &str, icon: &str| format!("id={id}\nname={id}\nexec=/bin/terminal\n{icon}");
     let mut big_icon = fs::read(&icon).unwrap_or_default();
     big_icon.resize((1 << 20) + 1, 0);
-    let staged = write(
-        &format!("{HOME}/elsewhere.app"),
-        &entry("org.slopos.linked", ""),
-    ) && fs::create_dir_all(&icons).is_ok()
+    let staged = fs::create_dir_all(&apps).is_ok()
+        && fs::create_dir_all(&icons).is_ok()
+        && write(
+            &format!("{HOME}/elsewhere.app"),
+            &entry("org.slopos.linked", ""),
+        )
         && symlink(
             format!("{HOME}/elsewhere.app"),
             format!("{apps}/org.slopos.linked.app"),
@@ -189,7 +191,7 @@ fn a_share_cannot_stall_or_swell_the_dock() -> bool {
         && make_fifo(&format!("{apps}/org.slopos.fifo.app"))
         && write(
             &format!("{apps}/org.slopos.big.app"),
-            &(entry("org.slopos.big", "") + &"x".repeat(4096)),
+            &entry("org.slopos.big", &format!("note={}\n", "x".repeat(4096))),
         )
         && write(
             &format!("{apps}/org.slopos.fifoicon.app"),
@@ -206,6 +208,11 @@ fn a_share_cannot_stall_or_swell_the_dock() -> bool {
             &entry("org.slopos.bigicon", "icon=big.png\n"),
         )
         && fs::write(format!("{icons}/big.png"), &big_icon).is_ok();
+    if !staged {
+        eprintln!("dock_test: staging the share failed");
+        let _ = fs::remove_dir_all(HOME);
+        return false;
+    }
     let (entries, shelf) = pinned(Some(HOME));
     let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
     let refused = ["org.slopos.linked", "org.slopos.fifo", "org.slopos.big"];
@@ -243,7 +250,7 @@ fn a_share_cannot_stall_or_swell_the_dock() -> bool {
         eprintln!("dock_test: a share of a hundred entries gave {read}");
         held = false;
     }
-    staged && many && held
+    many && held
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[
