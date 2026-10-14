@@ -175,9 +175,9 @@ fn long_name_refused_on_the_root() -> bool {
     ok
 }
 
-/// Refused even though this binary holds the mount capability: every
-/// program-identity grant is keyed on a path under `/bin`, so covering it with
-/// a caller-written filesystem would hand the caller those privileges.
+/// Refused even though this binary holds the mount capability: `/bin` is the
+/// base's, and covering it with a caller-written filesystem would replace
+/// every program the system runs.
 fn mount_over_bin_refused() -> bool {
     match fs_syscall::mount(b"", b"/bin", b"ramfs", 0) {
         Err(e) if e == SyscallError::EPERM => true,

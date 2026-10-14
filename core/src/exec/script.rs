@@ -1,10 +1,9 @@
 //! `#!` dispatch per Linux `execve(2)`: an interpreter and at most one
-//! argument, run with the script's path as its operand. Grants key on the
-//! interpreter, never the script, so a script is as privileged as `interp script`.
+//! argument, run with the script's path as its operand.
 
 use slopos_abi::Errno;
 use slopos_fs::vfs::CanonPath;
-use slopos_fs::vfs::canon::{canonicalise_at, normalise_at};
+use slopos_fs::vfs::canon::normalise_at;
 use slopos_ostd::KVec;
 
 use slopos_fs::vfs::Subject;
@@ -20,7 +19,7 @@ pub const SCRIPT_NESTING_MAX: usize = 5;
 
 /// A program after `#!` dispatch.
 pub struct ExecProgram {
-    /// The file the loader maps and the grant table is keyed on.
+    /// The file the loader maps.
     pub image: CanonPath,
     /// Words the interpreter chain puts before the caller's `argv[1..]`;
     /// empty for a binary.
@@ -34,15 +33,6 @@ pub struct ExecProgram {
 }
 
 impl ExecProgram {
-    /// Whether `path`, the caller's spelling against `cwd`, names the image
-    /// itself, with no `#!` line or link between: only then are the
-    /// arguments the image runs with the caller's own.
-    pub fn named_directly(&self, path: &[u8], cwd: &[u8]) -> bool {
-        self.prefix.is_empty()
-            && canonicalise_at(trim_nul_bytes(path), cwd)
-                .is_ok_and(|named| named.as_bytes() == self.image.as_bytes())
-    }
-
     /// The argument vector the loaded image receives: the caller's, or for a
     /// script `[interpreter, optional argument, script path, argv[1..]]`.
     pub fn argv<'a>(&'a self, argv: Option<&[&'a [u8]]>) -> Result<Option<KVec<&'a [u8]>>, Errno> {

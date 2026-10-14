@@ -39,8 +39,10 @@ pub const AT_GID: u64 = 13;
 
 pub const AT_EGID: u64 = 14;
 
-/// 1 when the exec conferred a program-identity grant, else 0. The loader
-/// then ignores `LD_LIBRARY_PATH` and `$ORIGIN`, as for a setuid program.
+/// 1 when a spawn delegated the program a gated capability or ids other than
+/// its spawner's real ones, or an exec runs it with effective ids other than
+/// its real ones, else 0. The loader then ignores `LD_LIBRARY_PATH` and
+/// `$ORIGIN`, as for a setuid program.
 pub const AT_SECURE: u64 = 23;
 
 /// Address of 16 kernel-supplied random bytes.

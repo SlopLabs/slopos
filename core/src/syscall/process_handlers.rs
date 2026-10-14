@@ -676,8 +676,7 @@ define_syscall!(syscall_execve
         Ok(path) => path,
         Err(err) => return SyscallResult::Err(err),
     };
-    // Resolved here: `do_exec` cannot see the cwd, and the grant lookup below
-    // keys on the file loaded, for a script its interpreter.
+    // Resolved here: `do_exec` cannot see the cwd.
     let who = ctx.subject();
     let program = match ctx.with_cwd(|cwd| exec::resolve_exec(path.as_bytes(), cwd, &who)) {
         Ok(program) => program,
@@ -778,9 +777,7 @@ define_syscall!(syscall_execve
 
             // Here rather than in `do_exec`: past every fallible step, before
             // the new image's first instruction.
-            let named_directly =
-                ctx.with_cwd(|cwd| program.named_directly(path.as_bytes(), cwd));
-            exec::narrow_authority_for_exec(ctx.task(), task_id, &program.image, named_directly);
+            exec::drop_authority_for_exec(ctx.task(), task_id);
             exec::save_ids_for_exec(ctx.task());
             exec::attest_exec(ctx.task(), loaded, attests);
 

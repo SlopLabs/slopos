@@ -2,7 +2,6 @@
 //! `slopos_ostd::authority::Capability` says what each one gates.
 
 pub const POWER: u64 = 1 << 0;
-pub const LAUNCH: u64 = 1 << 1;
 pub const PROC_SIGNAL: u64 = 1 << 2;
 pub const SYS_INSPECT: u64 = 1 << 3;
 pub const DISPLAY_SEAT: u64 = 1 << 4;
@@ -25,5 +24,9 @@ pub const SCHED_HIGH: u64 = 1 << 19;
 /// What every program holds.
 pub const UNIVERSAL: u64 = CONSOLE_IO | CLIPBOARD_GLOBAL | FATE;
 
+/// Bits a retired capability named, never named again: a spawn naming one is
+/// `EINVAL`.
+pub const RETIRED: u64 = 1 << 1;
+
 /// Every bit a capability names.
-pub const ALL: u64 = (SCHED_HIGH << 1) - 1;
+pub const ALL: u64 = ((SCHED_HIGH << 1) - 1) & !RETIRED;

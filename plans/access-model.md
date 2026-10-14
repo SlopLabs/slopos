@@ -56,23 +56,17 @@ person at the machine through the compositor where it says so. `halt`,
 it through `slopos_userland::privd::elevate` when started without their
 action's capabilities; init's `bootctl collect` and a root test act directly.
 
-**Privilege is still raised by path for the rows that remain.**
-`spawn_program_with_cwd` ORs in `grant_for(image)` when the spawner holds
-`Launch`, and otherwise spawns the image ungranted. `PROGRAM_GRANTS` has 4
-rows: `shell`, `terminal` and `remoted` raise `Launch`, which no longer
-reaches a mechanism, and `roulette` the display seat
-(`core/src/exec/grants.rs`). A path key is sound only because the base
-directories are sealed and pinned, mount refuses grant paths and `/lib`
-(`covers_grant_path`), and the `Seal` capability exists to keep it that way.
-That makes every grant row a setuid program by another name: it runs
-`AT_SECURE` and inherits argv, environment, cwd and descriptors from whoever
-spawned it.
+**No path earns authority.** A child holds what `Endowment::check` admits
+and nothing for the program it loads, and `mount(2)` refuses only what is
+pinned, the base and the install medium
+(`core/src/syscall/fs/mount_handlers.rs`). Capability bit 1 is
+`caps::RETIRED`.
 
-**exec narrows all of it.** `narrow_authority_for_exec` keeps
-`caps & (universal | grant | delegated)` in every thread of the process
-(`core/src/exec/mod.rs`), and `caps_drop` sheds capabilities from a whole
-process for good (`sched/src/task/task_lifecycle.rs`). The Verus proof
-(`verification/proofs/authority.rs`) models both.
+**exec drops every gated capability.** `drop_authority_for_exec` keeps
+`caps & universal` in every thread of the process (`core/src/exec/mod.rs`),
+and `caps_drop` sheds capabilities from a whole process for good
+(`sched/src/task/task_lifecycle.rs`). The Verus proof
+(`verification/proofs/authority.rs`) models both and the spawn bound.
 
 **The session is uid 1000.**
 - Each process carries a `Cred` (`slopos-ostd/src/process/cred.rs`). The id
@@ -101,8 +95,6 @@ process for good (`sched/src/task/task_lifecycle.rs`). The Verus proof
   not sockets or rings (`collect_scm_rights` in the same file).
 
 **What remains of the old model's cost:**
-- The shell still *spawns* registry programs, the path phase 6 deletes; a
-  mechanism in a pipeline, a subshell or a script asks privd all the same.
 - The remote pairing lives in the sealed base, because a mechanism holding
   `DacOverride`, the installer's, can write `/etc`.
 - No sshd runs: OpenSSH's needs credentials and a privilege separation SlopOS
@@ -244,10 +236,8 @@ The failures on record each set a rule here:
 
 Built by phase 1. Later phases add three capabilities under the same rules:
 `SetId` and `DacOverride` (phase 2), and `SchedHigh` for the `High` tier
-(phase 4). Exec's narrowing keeps its form, `caps & (universal | grant |
-delegated)`, until the grant table goes; with no grants left, the same
-expression drops every gated capability at exec, which is Linux's behaviour
-without ambient capabilities.
+(phase 4). Exec keeps `caps & universal`, Linux's behaviour for a process
+that is not root and has no file or ambient capabilities.
 
 ### Delegation at spawn
 
@@ -263,7 +253,7 @@ uid, gid and groups:
 - **fork+exec.** The fork+exec road cannot delegate, because exec drops. The
   spawn primitive is how authority moves.
 
-This bound is the intersection that `verification/proofs/authority.rs` keeps as
+This bound is the intersection `verification/proofs/authority.rs` once kept as
 a broken witness: "`parent.caps & grant` would mean `/bin/roulette` could never
 draw". That objection held only while conferral came from launchers that did
 not hold the authority they conferred. Here authority flows from holders. Init
@@ -287,7 +277,7 @@ what the runner gives the test. The default stays every capability as uid 0,
 which is what the runner gives today, so the suite keeps its behaviour. A test
 of an unprivileged gate declares `caps = none, uid = 1000`, and so does a test
 that acts as the person (git in `/src`, whose ownership check refuses a uid-0
-caller). The six test rows in `grants.rs` become declarations.
+caller). The six test rows the grant table carried are declarations.
 
 **A root test drives the person's loop through its own connection.** A uid-0
 test that runs the person's loop at uid 1000 (`selfhost_test`, `install_test`,
@@ -423,9 +413,9 @@ questions.
 | Was | Is |
 |---|---|
 | `/bin/compositor` delegated `DisplaySeat InputSeat Launch`, High | bootstrap child, the seats and `High`; the network toggle hands `ip` a connection the compositor made, `org.slopos.net.toggle` (`allow program /bin/compositor`) |
-| `/bin/shell`, `/bin/terminal` `Launch` | the rows stay until phase 6; they reach nothing a mechanism needs |
-| `/bin/remoted` `Launch`, also delegated | bootstrap child, holding nothing; its row stays until phase 6 |
-| `/bin/roulette` `DisplaySeat`, also delegated | bootstrap child; its row stays until phase 6 |
+| `/bin/shell`, `/bin/terminal` `Launch` | gone; the shell forks and execs a mechanism and hands it its connection |
+| `/bin/remoted` `Launch`, also delegated | bootstrap child, holding nothing |
+| `/bin/roulette` `DisplaySeat`, also delegated | bootstrap child; started from a shell it holds no seat and prints its fate |
 | `/bin/keymap` `ConsoleConfig DacOverride` | `org.slopos.console.keymap`: `ConsoleConfig`, session and paired |
 | `/bin/ip` `NetAdmin` | `org.slopos.net.configure`: `NetAdmin`, session with consent; `ip net on` and `off` are `org.slopos.net.toggle`, the compositor without consent and the session with |
 | `/bin/sysmon` `SysInspect` | gone in phase 2: enumeration is universal, kill follows the signal rule |
@@ -480,9 +470,10 @@ remoted runs as uid 1000 with no capabilities. Each mechanism the policy names
 that it runs, and the shell, gets a privd connection remoted made for it
 (`PRIVD_FD`), so its requests are attested as remoted's; anything else gets
 none, since a base program such as `env` or `xargs` would pass it on to
-whatever it execs. A mechanism keeps the descriptor from what it starts, and
-the shell hands it on only to the mechanisms its own process runs, not from a
-subshell or pipeline stage and not while one it handed it to lives, so
+whatever it execs. A mechanism keeps the descriptor its environment names
+from what it starts, and the shell hands it on only to the mechanisms its own
+process runs while its environment names it, not from a subshell or pipeline
+stage and not while one it handed it to lives, so
 neither what it execs nor two jobs at once share it. A redirection the shell
 undoes restores close-on-exec with the descriptor. A command's timeout sends
 its group `SIGTERM` first, which a requester relays to the mechanism privd
@@ -655,31 +646,31 @@ test and a test boot has nobody to ask. On this TCG host
 `check_fs_throughput.sh`'s `min-fs-over-raw-pct` read under its floor in one
 capture before the change and one after, and passed in the final one.
 
-### Phase 6: Delete the raise
+### Phase 6: Delete the raise — done
 
-Remove the following, and nothing grants at exec any more:
-- `Launch`;
-- `PROGRAM_GRANTS` and `grant_for`/`delegated_for`;
-- `covers_grant_path`, keeping only the pinned-mount refusal;
-- the registry's flags and priorities;
-- the shell's spawn-for-grant path.
-
-After that:
-- exec drops every gated capability;
-- `Seal`'s deletion condition is restated: the seal holds the base's integrity,
-  and that is what privd's `Base(path)` identity rests on;
-- the Verus proof is rewritten: S2 exec drops, S3 delegation is bounded by the
-  spawner, S4 drop is total for the real `caps_drop`, each with a broken
-  witness, and the old "intersection starves" witness is deleted with the
-  reason;
-- `AGENTS.md`'s authority paragraphs, `CVSS.md`'s `PR` reasoning, and every
-  ledger entry about grants are re-examined.
-
-Ends with:
-- `grants.rs` gone;
-- `check_authority_reachability.sh` and the proof green;
-- `rg Launch` matching nothing in the kernel;
-- the full pre-commit sequence green.
+`grants.rs`, `Launch`, `covers_grant_path`, the registry's flags and
+priorities and the shell's spawn of registry programs are gone, and
+capability bit 1 is `caps::RETIRED`. A child holds what `Endowment::check`
+admits, exec keeps `caps & universal` process-wide, and `mount(2)` refuses
+only what is pinned. The shell runs a registry program by fork and exec like
+any other, handing its privd connection only to a mechanism its own process
+runs whose environment names it; the dock spawns at the normal tier.
+`Seal`'s deletion condition is restated. The Verus proof is rewritten: S1 no
+step widens, S2 exec drops, S3 delegation is bounded by the spawner and no
+operand names the program, S4 `caps_drop` is total and reaches every thread,
+through the process's record those registered after it; each has broken
+witnesses, eleven in all, the deleted grant table among them, and the
+`parent.caps & grant` witness went with its reason. Graded by
+`test_exec_drops_every_gated_capability`,
+`test_mount_over_the_base_is_refused` (beside an ordinary mount),
+`spawn_privilege_test` (a shell spawned with nothing signalled by a task
+holding the universal set, a retired bit refused, an exec dropping
+everything, the base's programs and directories sealed), `privd_test`'s
+shell hand-off beside a subshell and a renamed or unset `PRIVD_FD` that may
+not take it, and the proof, each obligation failing with its broken variant
+planted. Not run: `test-install`, `test-installer`, `test-remote`,
+`test-install-guest` and the ladder with a toolchain, which drive the shell's
+hand-off from a paired agent and a root test.
 
 ## Grading
 
@@ -735,7 +726,39 @@ Ends with:
 - **No setuid, ever.** Every process is `no_new_privs`, and elevation is a
   fresh child of privd.
 - **Authority flows from holders.** A spawn may delegate a subset of the
-  spawner's mask. exec keeps no gated capability once the table is gone.
+  spawner's mask. exec keeps no gated capability, and nothing about the
+  program a child loads adds to what it holds.
+- **A retired capability's bit is never named again.** `Launch`'s bit is
+  `caps::RETIRED`: `caps::ALL` leaves it out, so a spawn naming it is
+  `EINVAL`, as one naming a retired flag bit is, and no later capability
+  takes it.
+- **`mount(2)` refuses only what is pinned:** the base's directories, the
+  install medium's and what lies beneath them. With no privilege keyed on a
+  path, nothing else is a target a mount must never cover.
+- **The seal holds the base whole.** Every base inode is sealed and no
+  capability unseals it; on a writable volume `Seal` moves the seal on the
+  directories a root keeps for the base and on a system an image carries.
+  privd's `Base` identity rests on the base being what booted, and privd
+  starts an action's program by path, so the base's directories refuse a
+  rename, a create beneath them and their removal. `Seal` dies when no root
+  holds anything for the base.
+- **The shell hands its connection to a mechanism alone.** It decides before
+  starting it, on the path it then execs: a program the policy names, never a
+  nested shell, while the environment names the connection, since a mechanism
+  keeps back from what it starts only the connection its environment names. A
+  command assigning `PATH` or `PRIVD_FD` is not handed it, and the forked
+  child clears close-on-exec only on the connection itself, never on a
+  descriptor a redirection put at its number.
+- **Nothing shields remoted from the session.** It holds no capability and
+  runs as uid 1000, so any session program may signal it and the OOM killer
+  may take it for a session writer, and init does not restart it. A
+  capability held only to fend off signals would be a catch-all bit by
+  another name, and the session may power the machine off without consent
+  anyway, which ends the remote control as surely.
+- **The registry names programs and nothing more:** a name, a path and a
+  description, for the shell's lookup, its aliases and `help`. A program the
+  dock spawns runs at the normal tier, and one the shell forks at the
+  shell's.
 - **`task.flags` never carries authority.** It says where and how a task runs.
   The retired privilege bits are reserved, so a spawn naming one is `EINVAL`,
   and authority reaches a child only as a capability mask.
@@ -761,9 +784,9 @@ Ends with:
 - **Running ahead of everything is `SchedHigh`,** the `High` spawn tier and a
   nice value below zero alike, as Linux's `CAP_SYS_NICE` covers both. Init
   holds it and spawns the compositor at `High`; nothing is init's by task id.
-- **A program that holds authority is its own binary.** A grant, and later
-  privd's `Base(path)`, keys on the resolved path, so a multicall symlink
-  would hand every tool its authority; `prof` left coreutils for this.
+- **A program that holds authority is its own binary.** privd's `Base(path)`
+  keys on the resolved path, so a multicall symlink would hand every tool its
+  authority; `prof` left coreutils for this.
 - **Reading machine-wide state needs nothing.** `sys_info`, `cpu_info`,
   `percpu_stats`, `cpu_perf`, `net_query`, `net_monitor` and `process_list`
   are `NoneSelf`, as `sysinfo` and Linux's `/proc` are; `SysInspect` is for
@@ -863,7 +886,7 @@ Ends with:
   or saved ids without `SetId`, and the child's saved ids are its effective
   ones.
 - **`AT_SECURE` follows what the child holds and who it runs as:** set when
-  it holds a gated capability, delegated or raised, or runs with ids other
+  it holds a gated capability its spawner delegated, or runs with ids other
   than its spawner's real ones, as Linux sets it for a capability gain or an
   id change across exec.
 - **A socket name is a file,** as on Linux: `bind` makes an inode of type

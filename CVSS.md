@@ -2,6 +2,37 @@
 
 **No finding is open.**
 
+Swept 2026-10-14: the raise deleted — a spawn whose child's mask and
+`AT_SECURE` come from `Endowment::check` alone, exec keeping `caps &
+universal` on every thread of the process, `mount(2)` refusing only what is
+pinned, the retired capability bit, the shell's privd hand-off moved
+from a spawn to its fork and exec, the dock spawning at the normal tier, and
+the seal's restated purpose. Re-examined: no scoring note names a launcher
+any more, and the residual phase 4's sweep left — `bootctl collect` taking
+`DacOverride` from a grant row init's `Launch` raised — went with the row in
+phase 5 and the raise here. One **pre-existing** defect, fixed here: the
+shell handed its connection to a mechanism whose environment named another
+descriptor — `unset PRIVD_FD` or `PRIVD_FD=9` before it — so the mechanism
+kept nothing back from what it started, and `cpufreq run -- prog` passed the
+paired or root connection to a program from outside the base; the shell now
+hands it over only where the environment names it, and only to a program
+the policy names, on the path the child then execs. Reviews also found, before
+it landed, that the shell's fallback for a file the kernel refuses as
+`ENOEXEC` would have run `/bin/sh` holding the connection — unreachable, every
+mechanism being a static base program — and a hand-off no longer falls back.
+Below the bar: remoted,
+the terminal and the shells they start held `Launch` from grant rows, which
+kept every session program from signalling them and the OOM killer from
+taking them for a session writer; holding the universal set alone, they are
+any session program's to stop or kill, and init does not restart remoted —
+though the session may power the machine off without consent, which ends the
+remote control as surely. A
+registry program the shell forks inherits every descriptor the shell holds
+without close-on-exec, where its spawn passed stdio alone — what any program
+the shell runs inherits, and never the privd connection but where it is
+handed over; `/bin/roulette` started from a shell holds no seat and prints its
+fate rather than drawing it; and `nmap` and `ping` run at the normal tier.
+
 Swept 2026-10-13: privd and consent — the action policy's grammar and
 matcher, the request and consent codecs, privd's account of who asks (the
 recorded identity, the pidfd, the paired base program) and its spawn of a
@@ -783,8 +814,8 @@ CVSS 3.1 Base Score; `0.1-3.9 Low`, `4.0-6.9 Medium`, `7.0-8.9 High`,
 `9.0-10.0 Critical`.
 
 The session runs as uid 1000. A program it starts holds the universal
-capabilities, and `Launch` too where it is the terminal, remoted or the shell,
-so an unprivileged local attacker is any code the session runs: `AV:L/PR:L`.
+capabilities alone, whatever its path, so an unprivileged local attacker is
+any code the session runs: `AV:L/PR:L`.
 Init, privd and the mechanisms privd runs as uid 0 are privileged; steering
 one from the session scores `PR:L` with that program's impact, and `UI:R`
 where the action waits on the person's consent. A paired host is

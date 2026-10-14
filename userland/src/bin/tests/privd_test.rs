@@ -8,9 +8,9 @@
 //! be asked, so an action that needs consent is refused there.
 
 use slopos_priv_core::wire::{self, Exit, Reply, Request};
-use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, Policy};
+use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy};
 use slopos_userland::privd::{Connection, STATUS_REFUSED, request_id};
-use slopos_userland::syscall::{OwnedFd, RawFd, fs, process};
+use slopos_userland::syscall::{OwnedFd, RawFd, fs, net, process};
 
 use std::io::Read;
 use std::os::fd::FromRawFd;
@@ -38,6 +38,8 @@ const STRANGER_ARG: &str = "--stranger";
 /// requester, at [`CROWD_UID`].
 const CROWD: &str = "--crowd";
 const CROWD_UID: u32 = 4243;
+/// `argv[1]` of a probe that exits 1 when it holds a connection to privd.
+const HOLDS_PRIVD: &str = "--holds-privd";
 
 fn note(why: &str) {
     eprintln!("privd_test: {why}");
@@ -433,7 +435,10 @@ fn run_self(args: &[&str], uid: u32, privd: Option<&Connection>) -> Option<std::
 
 /// The session runs what the policy lets it without asking, is refused what
 /// needs a person when nobody can be asked, and through a connection a uid-0
-/// process made and handed it, asks as that process.
+/// process made and handed it, asks as that process, as does a mechanism the
+/// shell runs with it, which keeps it from what it starts, but not one a
+/// subshell runs, and not one whose environment names another descriptor,
+/// which would keep nothing back.
 fn the_session_asks_as_itself_or_as_who_handed_it_a_connection() -> bool {
     let Some(privd) = connect() else {
         return false;
@@ -472,6 +477,28 @@ fn session() -> i32 {
         note("ip link set through the root connection this process was handed did not run");
         return 4;
     }
+    if run("/bin/shell", &["-c", "ip link set lo up"], true) != Some(0) {
+        note("the shell did not hand its connection to the mechanism it ran");
+        return 7;
+    }
+    if run("/bin/shell", &["-c", "(ip link set lo up)"], true) != Some(STATUS_REFUSED) {
+        note("a subshell handed on the connection the shell holds");
+        return 8;
+    }
+    if run(SELF, &[HOLDS_PRIVD], true) != Some(1) {
+        note("the probe found no connection where one was inherited");
+        return 9;
+    }
+    for line in [
+        format!("cpufreq run -- {SELF} {HOLDS_PRIVD}"),
+        format!("PRIVD_FD=99 cpufreq run -- {SELF} {HOLDS_PRIVD}"),
+        format!("unset PRIVD_FD; cpufreq run -- {SELF} {HOLDS_PRIVD}"),
+    ] {
+        if run("/bin/shell", &["-c", &line], true) != Some(0) {
+            note(&format!("`{line}` passed the connection on"));
+            return 10;
+        }
+    }
     let Some(mut privd) = connect() else {
         return 5;
     };
@@ -487,6 +514,11 @@ fn session() -> i32 {
         return 6;
     }
     0
+}
+
+fn holds_privd() -> i32 {
+    let to_privd = |fd| net::peer_program(fd).ok().flatten().as_deref() == Some(PROGRAM.as_bytes());
+    i32::from((3..256).any(to_privd))
 }
 
 /// A uid no principal names is refused every action.
@@ -736,6 +768,7 @@ fn main() {
         SESSION => std::process::exit(session()),
         STRANGER_ARG => std::process::exit(stranger()),
         CROWD => std::process::exit(crowd()),
+        HOLDS_PRIVD => std::process::exit(holds_privd()),
         CONNECT => std::process::exit(connect_and_hand(arg(2))),
         ASK => std::process::exit(ask_handed(arg(2), arg(3))),
         _ => slopos_slibc::test_harness::run(CASES),

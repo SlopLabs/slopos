@@ -84,7 +84,7 @@ non_upper_case_globals = "deny"
 
 [workspace.lints.cargo]
 # Binary names are ABI, not style: each is a literal /bin/<name> in
-# program_registry, the exec grant table, privd's policy and initramfs.
+# program_registry, privd's policy and initramfs.
 non_kebab_case_bins = "allow"
 
 [workspace.lints.clippy]

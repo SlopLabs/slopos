@@ -1,6 +1,5 @@
 //! exec() syscall implementation for loading and executing ELF binaries from filesystem.
 
-pub mod grants;
 pub mod script;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
@@ -286,7 +285,7 @@ fn resolve_inherited_job_control(
     }
 }
 
-/// What a spawn hands its child beside the image's grant.
+/// What a spawn hands its child.
 #[derive(Clone, Copy)]
 pub enum Endowment<'a> {
     /// The kernel's own spawn: exactly these capabilities, every id `uid`.
@@ -327,7 +326,6 @@ impl Delegation<'_> {
 struct Endowed<'a> {
     caps: u64,
     endowment: Endowment<'a>,
-    /// The child starts `AT_SECURE` whatever its grant.
     secure: bool,
 }
 
@@ -426,37 +424,14 @@ pub fn spawn_program_with_cwd(
     };
     let spawner_caps = parent_ref
         .as_ref()
-        .map(|parent| slopos_ostd::task::ops::task_caps(parent));
-    let endowed = &endowment.check(&spawner.cred, spawner_caps.unwrap_or(CAP_NONE))?;
+        .map_or(CAP_NONE, |parent| slopos_ostd::task::ops::task_caps(parent));
+    let endowed = &endowment.check(&spawner.cred, spawner_caps)?;
     let result = (|| {
-        // Resolved once so the grant table and the loader agree on the file:
-        // for a script, its interpreter. `comm` takes the path as passed.
         let program = resolve_exec(path, cwd, spawner)?;
-        let normalized_path = program.image.as_bytes();
         let argv = program.argv(argv)?;
         if !exec_arg_bytes_fit(argv.as_deref(), envp) {
             return Err(Errno::E2BIG);
         }
-
-        let granted = grants::grant_for(normalized_path);
-        let delegated = if program.named_directly(path, cwd) {
-            grants::delegated_for(normalized_path)
-        } else {
-            CAP_NONE
-        };
-
-        // A raise needs `Launch`; an ordinary spawn raises nothing and needs
-        // no right. A spawner that may not raise gets the image ungranted, not
-        // a refusal: `/bin/sh` and every `#!/bin/sh` script load the granted
-        // shell.
-        let mut raised = CAP_NONE;
-        if spawner_caps.is_none_or(|held| mask_permits(held, Capability::Launch)) {
-            raised = granted;
-        }
-        if spawner_caps.is_none_or(|held| delegated & !held == 0) {
-            raised |= delegated;
-        }
-        let child_caps = endowed.caps | raised;
 
         flags |= TASK_FLAG_USER_MODE;
         let task_name = task_name_from_path(path)?;
@@ -511,7 +486,7 @@ pub fn spawn_program_with_cwd(
             &program,
             argv.as_deref(),
             envp,
-            endowed.secure || raised != CAP_NONE,
+            endowed.secure,
             spawner,
             &mut entry,
             &mut stack_ptr,
@@ -550,11 +525,11 @@ pub fn spawn_program_with_cwd(
         if let Some(Some(account)) =
             spawn.with_child(|child| child.process().map(|process| process.account()))
         {
-            slopos_ostd::process::quota::fit_disk_blocks(account, child_caps);
+            slopos_ostd::process::quota::fit_disk_blocks(account, endowed.caps);
         }
 
         let Some((fg_handoff, displaced_group)) = spawn.with_child(|child| {
-            slopos_ostd::task::ops::task_set_caps(child, child_caps);
+            slopos_ostd::task::ops::task_set_caps(child, endowed.caps);
             child.entry_point = entry;
             child.context.get_mut().rip = entry;
             child.context.get_mut().rsp = stack_ptr;
@@ -633,11 +608,7 @@ pub fn spawn_program_with_cwd(
 }
 
 /// Resolve a program path the way the loader will open it: against `cwd`,
-/// symlinks expanded, to the canonical path the grant table is keyed on.
-///
-/// Resolving *before* the grant comparison is what lets `./shell` from `/bin`
-/// match the grant `/bin/shell` carries, and cannot invent one: every grant
-/// path is sealed, so no name can be pointed at one.
+/// symlinks expanded, to its canonical path.
 ///
 /// `#[inline(never)]` keeps the walk off the frame of a caller already
 /// holding a `SpawnGuard`.
@@ -662,9 +633,8 @@ pub fn resolve_program(path: &[u8], cwd: &[u8], who: &Subject) -> Result<CanonPa
 /// type is what stops a relative path reaching the loader, which resolves
 /// against `/`. Answers the identity of what it loaded.
 ///
-/// `execve`'s road: it can only narrow the caller's authority, so it never
-/// confers a grant, and the image runs `AT_SECURE` only when the caller's
-/// effective ids are not its real ones.
+/// `execve`'s road: it confers nothing, so the image runs `AT_SECURE` only
+/// when the caller's effective ids are not its real ones.
 #[allow(clippy::too_many_arguments)]
 pub fn do_exec(
     table: FdTable,
@@ -719,29 +689,15 @@ fn mixed_ids(cred: &Cred) -> bool {
     cred.euid != cred.ruid || cred.egid != cred.rgid
 }
 
-/// `execve`'s half of the grant table: the caller's process keeps only the
-/// universal set, what `image` is granted, and what it delegates when the
-/// caller `named_directly` it, and the block ceiling follows what it keeps.
+/// `execve` keeps no gated capability: the caller's process keeps only the
+/// universal capabilities it held, and the block ceiling follows.
 ///
 /// Process-wide, as `caps_drop` is: a sibling thread runs on in the new
 /// image's address space, so a mask left on it would be the old program's.
 #[inline(never)]
-pub fn narrow_authority_for_exec(
-    task: &slopos_sched::task_struct::Task,
-    task_id: u32,
-    image: &CanonPath,
-    named_directly: bool,
-) {
-    let image = image.as_bytes();
-    let granted = grants::grant_for(image);
-    let delegated = if named_directly {
-        grants::delegated_for(image)
-    } else {
-        CAP_NONE
-    };
-    let kept = CAP_UNIVERSAL | granted | delegated;
+pub fn drop_authority_for_exec(task: &slopos_sched::task_struct::Task, task_id: u32) {
     let before = slopos_ostd::task::ops::task_caps(task);
-    let after = slopos_sched::task::process_drop_caps(task, !kept);
+    let after = slopos_sched::task::process_drop_caps(task, !CAP_UNIVERSAL);
     if let Some(process) = task.process() {
         slopos_ostd::process::quota::fit_disk_blocks(process.account(), after);
     }

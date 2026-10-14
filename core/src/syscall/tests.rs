@@ -9689,55 +9689,44 @@ fn pool_is_at_full_capacity() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A mount over a directory the grant table keys a privilege on is refused.
+/// A mount over the base, or anything beneath it, is refused, and one over
+/// an ordinary directory is not.
 ///
 /// Without it a holder of `Capability::Mount` covers `/bin` with a writable
-/// ramfs, creates `shell` in it, and spawns the planted binary into
-/// `Launch`.
-pub fn test_mount_over_a_grant_path_is_refused() -> TestResult {
-    use crate::syscall::fs::mount_handlers::mount_apply_at;
+/// ramfs and replaces every program the system runs.
+pub fn test_mount_over_the_base_is_refused() -> TestResult {
+    use crate::syscall::fs::mount_handlers::{mount_apply_at, umount_path_at};
+    use slopos_fs::vfs::Subject;
+    const CONTROL: &[u8] = b"/tmp/mount_base_control";
 
     if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
         return fail!("the VFS is unavailable");
     }
-
+    let ramfs_at = |target: &[u8]| mount_apply_at(b"", target, b"/", b"ramfs", 0, &Subject::KERNEL);
+    for target in [
+        &b"/bin"[..],
+        b"/bin/shell",
+        b"/tmp/../bin",
+        b"/lib",
+        b"/usr/bin",
+    ] {
+        if ramfs_at(target) != Err(slopos_abi::Errno::EPERM) {
+            return fail!(
+                "a mount over {:?} was not refused",
+                core::str::from_utf8(target)
+            );
+        }
+    }
+    let _ = slopos_fs::vfs::vfs_mkdir(CONTROL);
+    let control = ramfs_at(CONTROL);
+    if control.is_ok() {
+        let _ = umount_path_at(CONTROL, b"/", 0, &Subject::KERNEL);
+    }
+    let _ = slopos_fs::vfs::vfs_rmdir(CONTROL);
     assert_eq_test!(
-        mount_apply_at(
-            b"",
-            b"/bin",
-            b"/",
-            b"ramfs",
-            0,
-            &slopos_fs::vfs::Subject::KERNEL
-        ),
-        Err(slopos_abi::Errno::EPERM),
-        "a mount over /bin was allowed"
-    );
-    // Non-canonical too: the target is canonicalised before the table is
-    // consulted.
-    assert_eq_test!(
-        mount_apply_at(
-            b"",
-            b"/bin/shell",
-            b"/",
-            b"ramfs",
-            0,
-            &slopos_fs::vfs::Subject::KERNEL
-        ),
-        Err(slopos_abi::Errno::EPERM),
-        "a mount over a granted program was allowed"
-    );
-    assert_eq_test!(
-        mount_apply_at(
-            b"",
-            b"/tmp/../bin",
-            b"/",
-            b"ramfs",
-            0,
-            &slopos_fs::vfs::Subject::KERNEL
-        ),
-        Err(slopos_abi::Errno::EPERM),
-        "a non-canonical spelling of /bin got past the grant check"
+        control,
+        Ok(()),
+        "a mount over an ordinary directory was refused"
     );
     pass!()
 }
@@ -9943,8 +9932,9 @@ slopos_testing::stest!(
     suite = syscall_core
 );
 slopos_testing::stest!(
-    name = test_mount_over_a_grant_path_is_refused,
-    suite = syscall_core
+    name = test_mount_over_the_base_is_refused,
+    flags = 0,
+    kind = Userland
 );
 slopos_testing::stest!(
     name = test_umount2_of_a_second_mount_spares_the_first,

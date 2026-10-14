@@ -121,11 +121,8 @@ pub struct FileStat {
     pub dev_major: u32,
     pub dev_minor: u32,
     /// The inode refuses every mutation: write, truncate, unlink, rename,
-    /// being renamed over, and any change to its mode. Set when the initramfs
-    /// is unpacked and cleared only under the `Seal` capability —
-    /// program-identity privilege is keyed on a binary's path, so without this
-    /// any task could overwrite `/bin/compositor` and spawn the replacement
-    /// into the grant.
+    /// being renamed over, and any change to its mode. Every inode of the base
+    /// is sealed; on a writable volume only the `Seal` capability moves it.
     pub sealed: bool,
 }
 
@@ -590,8 +587,7 @@ pub trait FileSystem: Send + Sync {
         Err(VfsError::NotSupported)
     }
 
-    /// Seal an inode against every future mutation: a binary's contents must
-    /// not change under a privilege grant keyed on its path. Only
+    /// Seal an inode against every future mutation. Only
     /// [`Self::set_inode_flags`], with the `Seal` capability, unseals.
     /// Defaults to a refusal rather than a no-op, so a filesystem that cannot
     /// store the bit says so instead of leaving the caller falsely reassured.

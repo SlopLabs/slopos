@@ -32,11 +32,8 @@ use slopos_testing::{assert_test, fail, pass};
 
 use crate::oom::{OOM_OPS, standing_of};
 
-const UNGRANTED: u64 = CAP_UNIVERSAL;
-const PRIVILEGED: u64 = CAP_UNIVERSAL
-    | Capability::DisplaySeat.bit()
-    | Capability::InputSeat.bit()
-    | Capability::Launch.bit();
+const ORDINARY: u64 = CAP_UNIVERSAL;
+const PRIVILEGED: u64 = CAP_UNIVERSAL | Capability::DisplaySeat.bit() | Capability::InputSeat.bit();
 const WRITE_USER_ABSENT: u64 = 0x06;
 
 fn create_user_task_holding(caps: u64) -> u32 {
@@ -54,7 +51,7 @@ fn create_user_task_holding(caps: u64) -> u32 {
 }
 
 fn create_user_task() -> u32 {
-    create_user_task_holding(UNGRANTED)
+    create_user_task_holding(ORDINARY)
 }
 
 pub fn test_oom_spares_init_and_passes_over_the_dying() -> TestResult {
@@ -74,7 +71,7 @@ pub fn test_oom_spares_init_and_passes_over_the_dying() -> TestResult {
         return fail!("the user task has no process");
     };
 
-    let plain = standing_of(&process, INVALID_TASK_ID, INVALID_TASK_ID, UNGRANTED);
+    let plain = standing_of(&process, INVALID_TASK_ID, INVALID_TASK_ID, ORDINARY);
     let as_init = standing_of(&process, task_id, INVALID_TASK_ID, PRIVILEGED);
     let killed = OOM_OPS.kill(&process);
     let marked = task.is_killed();
@@ -201,7 +198,7 @@ pub fn test_oom_kills_the_hog_without_a_task_snapshot() -> TestResult {
 
     oom_forget_victim_for_test();
     fail_task_snapshots_for_test(true);
-    let awaited = oom_decide_for_test(&Among::one(process.id(), UNGRANTED), OomTrigger::Frames);
+    let awaited = oom_decide_for_test(&Among::one(process.id(), ORDINARY), OomTrigger::Frames);
     fail_task_snapshots_for_test(false);
     oom_forget_victim_for_test();
     let marked = task.is_killed();
@@ -291,7 +288,7 @@ pub fn test_oom_takes_the_holder_not_the_mapper() -> TestResult {
     const SURFACE: usize = 64;
     let _scope = KernelTestScope::new();
 
-    let (Some(holder), Some(mapper)) = (Member::spawn(UNGRANTED), Member::spawn(UNGRANTED)) else {
+    let (Some(holder), Some(mapper)) = (Member::spawn(ORDINARY), Member::spawn(ORDINARY)) else {
         return fail!("could not create the two user tasks");
     };
     let account = holder.process.account();
@@ -314,7 +311,7 @@ pub fn test_oom_takes_the_holder_not_the_mapper() -> TestResult {
 
     let ops = Among {
         members: [holder.pid(), mapper.pid()],
-        writer: UNGRANTED,
+        writer: ORDINARY,
         init: INVALID_TASK_ID,
     };
     let for_commit = oom_choose_for_test(&ops, OomTrigger::Commit);
@@ -355,7 +352,7 @@ pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult 
     const PRIVATE: u64 = 64;
     let _scope = KernelTestScope::new();
 
-    let (Some(writer), Some(privileged)) = (Member::spawn(UNGRANTED), Member::spawn(PRIVILEGED))
+    let (Some(writer), Some(privileged)) = (Member::spawn(ORDINARY), Member::spawn(PRIVILEGED))
     else {
         return fail!("could not create the two user tasks");
     };
@@ -365,10 +362,10 @@ pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult 
     let (writer_vm, privileged_vm) = (writer.vm(), privileged.vm());
     let both = [writer.pid(), privileged.pid()];
 
-    let as_ungranted = oom_choose_for_test(
+    let as_ordinary = oom_choose_for_test(
         &Among {
             members: both,
-            writer: UNGRANTED,
+            writer: ORDINARY,
             init: INVALID_TASK_ID,
         },
         OomTrigger::Commit,
@@ -381,7 +378,7 @@ pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult 
         },
         OomTrigger::Commit,
     );
-    let alone = Among::one(privileged.pid(), UNGRANTED);
+    let alone = Among::one(privileged.pid(), ORDINARY);
     oom_forget_victim_for_test();
     let for_commit = oom_serve_for_test(&alone, OomTrigger::Commit);
     let for_frames = oom_serve_for_test(&alone, OomTrigger::Frames);
@@ -397,10 +394,10 @@ pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult 
         "could not make the privileged process hold its pages"
     );
     assert_test!(
-        as_ungranted == writer_vm,
-        "an ungranted writer's killer chose {:?}, want the writer's own {:?}, not the \
+        as_ordinary == writer_vm,
+        "an ordinary writer's killer chose {:?}, want the writer's own {:?}, not the \
          privileged {:?}",
-        as_ungranted,
+        as_ordinary,
         writer_vm,
         privileged_vm
     );
@@ -412,7 +409,7 @@ pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult 
     );
     assert_test!(
         for_commit == OomVerdict::Unresolved && for_frames == OomVerdict::Unresolved,
-        "with only the privileged process left, the ungranted write got {:?} for the \
+        "with only the privileged process left, the ordinary write got {:?} for the \
          ceiling and {:?} for the frames, want it failed",
         for_commit,
         for_frames
@@ -435,7 +432,7 @@ pub fn test_oom_init_takes_a_holder_it_could_not_signal() -> TestResult {
     const PRIVATE: u64 = 64;
     let _scope = KernelTestScope::new();
 
-    let (Some(init), Some(privileged)) = (Member::spawn(UNGRANTED), Member::spawn(PRIVILEGED))
+    let (Some(init), Some(privileged)) = (Member::spawn(ORDINARY), Member::spawn(PRIVILEGED))
     else {
         return fail!("could not create the two user tasks");
     };
@@ -443,7 +440,7 @@ pub fn test_oom_init_takes_a_holder_it_could_not_signal() -> TestResult {
     let privileged_vm = privileged.vm();
     let as_init = Among {
         members: [init.pid(), privileged.pid()],
-        writer: UNGRANTED,
+        writer: ORDINARY,
         init: init.task_id,
     };
 

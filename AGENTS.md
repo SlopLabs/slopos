@@ -1001,9 +1001,10 @@ names as a mechanism, and the shell, gets a privd connection remoted made
 (`PRIVD_FD`), through which a mechanism asks as the paired agent, which the
 policy allows the boot slots, power, `cpufreq set`, `kconsole`, the profiler
 and the keymap and nothing else — so whoever holds the broker's key holds
-those. A mechanism keeps the connection from whatever it starts, and the shell
-hands it on only to the mechanisms its own process runs, not from a subshell or
-a pipeline stage and not while one it handed it to lives
+those. A mechanism keeps the connection its environment names from whatever
+it starts, and the shell hands it on only to the mechanisms its own process
+starts while its environment names it, not from a subshell or a
+pipeline stage and not while one it handed it to lives
 (`slopos_userland::privd::takes_connection`, the shell's `privd_for`), so no
 code from outside the base asks as the paired agent and no two requesters
 share it. A command's timeout sends its group `SIGTERM`, which a requester
@@ -1064,8 +1065,9 @@ immutable flag is the VFS seal, an append-only file another system marked is
 sealed too, ext4 also stores `nodump` and `noatime`, any other change is
 `EOPNOTSUPP` (a RAM filesystem keeps only the seal, and only sets it), and
 moving the seal takes the `Seal` capability, which only init, privd, the
-utests and the installer hold, because a path-keyed grant and privd's
-program identity are only as good as the seal on the file they name.
+utests and the installer hold: the seal holds the base whole — every base
+inode is sealed for good, and the directories a root keeps for it are sealed
+too — and privd's program identity rests on the base being what booted.
 
 **The root is not the only filesystem.** `mount(2)` with `fstype` `ext2`,
 `ext3` or `ext4` (one driver) takes a
@@ -1345,23 +1347,26 @@ The in-place-init primitive (`slopos_ostd::Init<T, E>`, `Zeroable`, `init_from_c
 
 **The per-task capability mask is the only authority.** `task.flags` says
 where and how a task runs, never what it may do; the privilege bits it once
-carried are reserved, and a spawn naming one is `EINVAL`. Every check reads the
+carried are reserved, and a spawn naming one is `EINVAL`, as is a spawn
+naming a retired capability's bit (`caps::RETIRED`). Every check reads the
 mask (`slopos_ostd::authority`, its bits stated once in `abi/src/caps.rs`): a
 syscall slot through its `cap(...)` clause, anything finer through
 `SyscallContext::holds` or a witness, and a kernel thread passes a gate only
 where the gate names it. A spawned program holds the universal capabilities
 (`ConsoleIo`, `ClipboardGlobal`, `Fate`) its spawner holds, what its spawner
 delegates through `SpawnAttrs` — any subset of the spawner's own mask, else
-`EPERM` — and what its path earns, which no mechanism's does; a spawn asking
+`EPERM` — and nothing for its path; a spawn asking
 for ids other than the
 spawner's takes `SetId`, one at the `High` tier `SchedHigh`, and a child that
 holds a gated capability or runs with ids other than its spawner's real ones
 starts `AT_SECURE`. Init holds `CAP_MASK_ALL` and delegates each service what
 its bootstrap table names (`userland/src/apps/init_process.rs`); a utest
 holds what its `utest!` declares, every capability as uid 0 unless it says
-`caps = …, uid = …`. exec keeps `caps & (universal | grant | delegated)` in
-every thread of the process — `delegated` being a grant row's delegated set,
-so what a spawn handed over does not survive an exec — a sender may signal only a target whose
+`caps = …, uid = …`. exec keeps `caps & universal` in every thread of the
+process, so nothing a spawn handed over survives an exec, as Linux keeps no
+capability across one for a process that is not root and has no file
+capabilities or ambient set; a sender
+may signal only a target whose
 capabilities it all holds, and `caps_drop` takes capabilities from a whole
 process for good, a thread whose clone races it included. A nice value below
 zero takes `SchedHigh`. A new check that reads
@@ -1476,8 +1481,7 @@ that first shows the question and after each move; until the compositor says it
 can draw, and with none, an action that needs consent is refused, at most eight
 questions wait, a question unanswered for 120 s from when it is shown is a
 refusal, and a refusal refuses what was waiting and what asks in the next five
-seconds. The grant table keeps only the launchers' rows and roulette's until
-the raise goes.
+seconds.
 
 ### Licensing discipline
 

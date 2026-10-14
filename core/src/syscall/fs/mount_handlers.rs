@@ -82,10 +82,9 @@ pub fn mount_apply_at(
     if target == b"/" {
         return Err(Errno::EBUSY);
     }
-    // `EPERM`, not `EBUSY`: covering a path a grant is keyed on would let the
-    // caller hand itself that privilege, and covering the base would replace
-    // the system, so the refusal is permanent.
-    if crate::exec::grants::covers_grant_path(target) || under_pinned_mount(target) {
+    // `EPERM`, not `EBUSY`: covering the base would replace the system, so
+    // the refusal is permanent.
+    if under_pinned_mount(target) {
         return Err(Errno::EPERM);
     }
     // Before the directory check: an occupied path is by construction a valid

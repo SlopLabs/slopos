@@ -74,10 +74,10 @@ fn spawned_program_output_is_not_empty() -> bool {
     true
 }
 
-/// A registry program spawned through the same path must reach its own `main`
+/// A program the shell finds by its registry entry must reach its own `main`
 /// and report an exit code it chose. `nc -h` prints usage and exits 0; a child
 /// that never ran cannot produce that.
-fn spawned_registry_program_reaches_main() -> bool {
+fn a_registry_program_reaches_main() -> bool {
     shell_ready();
     let rc = run(&[b"nc", b"-h"]);
     if rc != 0 {
@@ -131,8 +131,8 @@ fn main() {
             spawned_program_output_is_not_empty,
         ),
         (
-            "spawned_registry_program_reaches_main",
-            spawned_registry_program_reaches_main,
+            "a_registry_program_reaches_main",
+            a_registry_program_reaches_main,
         ),
         (
             "consecutive_spawns_each_produce_output",

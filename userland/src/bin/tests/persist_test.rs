@@ -344,8 +344,7 @@ fn filler_path(index: usize) -> String {
     format!("{FILLER_DIR}/{index}")
 }
 
-/// Run this binary, which no grant row names, as a [`FILL_ARG`] child of uid
-/// [`FILLER_UID`].
+/// Run this binary as a [`FILL_ARG`] child of uid [`FILLER_UID`].
 fn spawn_filler(path: &str) -> i32 {
     use std::os::unix::process::CommandExt;
 
@@ -428,7 +427,7 @@ fn inode_flags_follow_chattr() -> bool {
     failures.is_empty()
 }
 
-/// Spawn this binary, which no grant row names and so holds no `Seal`, to try
+/// Spawn this binary, delegating nothing and so holding no `Seal`, to try
 /// sealing `path`.
 fn unprivileged_seal(path: &str) -> i32 {
     use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};

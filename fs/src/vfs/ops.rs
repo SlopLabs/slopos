@@ -459,8 +459,7 @@ pub fn vfs_link(old_path: &[u8], new_path: &[u8], cwd: &[u8]) -> VfsResult<()> {
 /// is linked as itself.
 ///
 /// Both ends are seal-checked: a link over a sealed name would give that path
-/// a second, unsealed inode to reach, and the seal is what the
-/// program-identity grants stand on.
+/// a second, unsealed inode to reach.
 pub fn vfs_link_at(
     old_path: &[u8],
     old_cwd: &[u8],
@@ -501,12 +500,11 @@ pub fn vfs_link_at(
 /// Whether `path` names a sealed inode.
 ///
 /// Fails **closed**: a resolve or stat that errors for any reason other than
-/// the path not existing answers "sealed". This gate is what stops a task
-/// replacing `/bin/compositor` and inheriting that path's privilege grant, so
-/// an induced `IoError` or an out-of-memory in the block cache must not read
-/// as permission. A path that genuinely resolves to nothing is not sealed —
-/// the caller's own lookup reports that, and `NotFound` is the one error that
-/// carries no ambiguity.
+/// the path not existing answers "sealed". This gate is what keeps a sealed
+/// file from being replaced, so an induced `IoError` or an out-of-memory in the
+/// block cache must not read as permission. A path that genuinely resolves to
+/// nothing is not sealed — the caller's own lookup reports that, and
+/// `NotFound` is the one error that carries no ambiguity.
 fn path_is_sealed_at(path: &[u8], cwd: &[u8], flags: u32, who: &Subject) -> bool {
     match resolve_path_at(path, cwd, flags, who).and_then(|r| r.fs.stat(r.inode)) {
         Ok(stat) => stat.sealed,
@@ -674,8 +672,8 @@ fn check_missing_removable(parent: &ResolvedPath, who: &Subject) -> VfsResult<()
 /// Create a symlink at `link_path` pointing at `target`.
 ///
 /// The seal is checked on `link_path` as it is for every other mutator: a
-/// symlink written over a sealed name would redirect the path a privilege
-/// grant is keyed on. The filesystem refuses a duplicate name underneath
+/// symlink written over a sealed name would redirect every walk through it.
+/// The filesystem refuses a duplicate name underneath
 /// (`Ext2Fs::create_inode_entry`), so this is defence in depth rather than the
 /// only barrier — which is exactly what the seal warrants.
 pub fn vfs_symlink(target: &[u8], link_path: &[u8]) -> VfsResult<()> {
@@ -743,9 +741,8 @@ pub fn vfs_rename_at(
     new_cwd: &[u8],
     who: &Subject,
 ) -> VfsResult<()> {
-    // Both ends: renaming a sealed file moves it out from under the path its
-    // privilege is keyed on, and renaming over one replaces it just as a write
-    // would.
+    // Both ends: renaming a sealed file moves it out from under its path, and
+    // renaming over one replaces it just as a write would.
     if path_is_sealed_at(old_path, old_cwd, RESOLVE_NOFOLLOW_FINAL, who)
         || path_is_sealed_at(new_path, new_cwd, RESOLVE_NOFOLLOW_FINAL, who)
     {

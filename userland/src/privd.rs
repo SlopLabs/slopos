@@ -197,29 +197,33 @@ pub fn hold_inherited() {
 }
 
 /// Whether `program`, a canonical path, may be handed a privd connection:
-/// the shell, which hands it on only to these, and the mechanisms the base's
-/// policy names, none of which hands it to what it starts. Anything else
-/// could pass the connection, and whoever made it, to code from outside the
-/// base.
+/// the shell, which hands it on only to mechanisms, and the mechanisms
+/// themselves. Anything else could pass the connection, and whoever made it,
+/// to code from outside the base.
 pub fn takes_connection(program: &str) -> bool {
+    program == SHELL || is_mechanism(program)
+}
+
+/// Whether the base's policy names `program`, a canonical path, for an
+/// action. A mechanism keeps the connection from what it starts.
+pub fn is_mechanism(program: &str) -> bool {
     static MECHANISMS: OnceLock<Vec<String>> = OnceLock::new();
-    program == SHELL
-        || MECHANISMS
-            .get_or_init(|| {
-                std::fs::read_to_string(POLICY)
-                    .ok()
-                    .and_then(|text| Policy::parse(&text).ok())
-                    .map(|policy| {
-                        policy
-                            .actions()
-                            .iter()
-                            .map(|action| action.program.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            })
-            .iter()
-            .any(|mechanism| mechanism == program)
+    MECHANISMS
+        .get_or_init(|| {
+            std::fs::read_to_string(POLICY)
+                .ok()
+                .and_then(|text| Policy::parse(&text).ok())
+                .map(|policy| {
+                    policy
+                        .actions()
+                        .iter()
+                        .map(|action| action.program.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .iter()
+        .any(|mechanism| mechanism == program)
 }
 
 const SHELL: &str = "/bin/shell";

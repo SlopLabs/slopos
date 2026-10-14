@@ -54,13 +54,11 @@ pub enum Capability {
     /// Halt and reboot. Deletion condition: becomes a `/dev/power` descriptor
     /// delegated to init.
     Power,
-    /// Raising authority at a program-identity grant. The one raise site.
-    Launch,
     /// Signalling across a session boundary, or a fan-out that crosses one.
     ProcSignal,
     /// Observing the whole machine: the diagnostic console's informational
-    /// commands, the sampling profiler, and every task in `process_list`.
-    /// Never fused with a class that changes what it observes.
+    /// commands and the sampling profiler. Never fused with a class that
+    /// changes what it observes.
     SysInspect,
     /// Acquiring the screen seat. Deletion condition: collapses into the seat
     /// handle itself.
@@ -85,9 +83,9 @@ pub enum Capability {
 
     /// Attaching and detaching filesystems. The mount table is one global
     /// namespace, so a mount changes every other process's view of every path
-    /// — including the paths the program-identity grant table is keyed on.
-    /// Deletion condition: dies with per-namespace mounts on a descriptor for
-    /// the directory covered.
+    /// but those pinned: the base's and the install medium's. Deletion
+    /// condition: dies with per-namespace mounts on a descriptor for the
+    /// directory covered.
     Mount,
 
     /// Setting the wall clock. One global anchor that every filesystem
@@ -98,9 +96,12 @@ pub enum Capability {
     Clock,
 
     /// Setting or clearing a file's immutable flag. The descriptor naming the
-    /// file is not enough: the flag is what holds a program-identity grant,
-    /// keyed on a path, to the bytes it was granted for. Deletion condition:
-    /// dies when grants are keyed on content rather than path.
+    /// file is not enough: the seal holds the base whole, which privd's `Base`
+    /// identity rests on. The base's own inodes are sealed for good; this
+    /// moves the seal on a writable volume, where it guards the directories a
+    /// root keeps for the base and a system an image carries. Deletion
+    /// condition: dies when no root holds either, the kernel making the mount
+    /// points at boot and no image carrying a system of its own.
     Seal,
     /// Reaching the firmware's boot manager: reading and writing `Boot####`,
     /// `BootOrder` and `BootNext`, and reading `BootCurrent`. `Power` reaches
@@ -145,7 +146,6 @@ impl Capability {
         match self {
             Self::Unimplemented | Self::NoneSelf | Self::NoneFd | Self::NoneRelation => 0,
             Self::Power => caps::POWER,
-            Self::Launch => caps::LAUNCH,
             Self::ProcSignal => caps::PROC_SIGNAL,
             Self::SysInspect => caps::SYS_INSPECT,
             Self::DisplaySeat => caps::DISPLAY_SEAT,
@@ -183,7 +183,6 @@ impl Capability {
             Self::NoneFd => "none/fd",
             Self::NoneRelation => "none/relation",
             Self::Power => "Power",
-            Self::Launch => "Launch",
             Self::ProcSignal => "ProcSignal",
             Self::SysInspect => "SysInspect",
             Self::DisplaySeat => "DisplaySeat",
@@ -213,7 +212,6 @@ impl Capability {
         Self::NoneFd,
         Self::NoneRelation,
         Self::Power,
-        Self::Launch,
         Self::ProcSignal,
         Self::SysInspect,
         Self::DisplaySeat,
@@ -294,7 +292,6 @@ macro_rules! cap_kinds {
 
 cap_kinds!(
     Power,
-    Launch,
     ProcSignal,
     SysInspect,
     DisplaySeat,
@@ -538,7 +535,7 @@ mod tests {
     #[test]
     fn a_witness_is_zero_sized_for_every_kind() {
         assert_eq!(core::mem::size_of::<Cap<'static, Power>>(), 0);
-        assert_eq!(core::mem::size_of::<Cap<'static, Launch>>(), 0);
+        assert_eq!(core::mem::size_of::<Cap<'static, Mount>>(), 0);
         assert_eq!(core::mem::size_of::<Cap<'static, TestHarness>>(), 0);
         assert_eq!(
             core::mem::size_of::<Result<Cap<'static, Power>, Errno>>(),
@@ -553,7 +550,7 @@ mod tests {
         assert!(check_mask::<Power, _>(&holder, Capability::Power.bit()).is_ok());
         assert!(check_mask::<Power, _>(&holder, CAP_NONE).is_err());
         // A different capability's bit does not mint this one.
-        assert!(check_mask::<Power, _>(&holder, Capability::Launch.bit()).is_err());
+        assert!(check_mask::<Power, _>(&holder, Capability::Mount.bit()).is_err());
     }
 
     #[test]

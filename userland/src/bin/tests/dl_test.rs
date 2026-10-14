@@ -455,7 +455,7 @@ fn ld_debug_statistics_reports_startup_binding() -> bool {
 }
 
 /// `getauxval(AT_EXECFN)` and `dladdr` on the executable name the file the
-/// kernel opened, symlinks resolved, and an ungranted exec has
+/// kernel opened, symlinks resolved, and an exec that changes no ids has
 /// `AT_SECURE` 0.
 fn execfn_names_the_resolved_executable() -> bool {
     if !search_tree() {

@@ -73,12 +73,12 @@ through the handler, so a `const` histogram in `core/src/syscall/handlers.rs` as
 totality over every registered entry point and each capability's recorded entry-point
 count. Read the code
 rather than a document: `slopos_ostd::authority` for the vocabulary and the witness,
-`core/src/exec/grants.rs` for where authority enters, `slopos_ostd::seat` for the display
-and input seats, and `verification/proofs/authority.rs` for the four machine-checked
-obligations. `scripts/check_authority_reachability.sh` is what catches an unprivileged
-syscall reaching a power primitive two calls away, which a slot-level gate cannot see.
-`access-model.md` replaces where authority enters: the grant table and `Launch` give way
-to delegation from holders and to `privd`.
+`Endowment::check` in `core/src/exec/mod.rs` for the one place authority enters a child,
+`slopos_ostd::seat` for the display and input seats, and `verification/proofs/authority.rs`
+for the four machine-checked obligations. `scripts/check_authority_reachability.sh` is what
+catches an unprivileged syscall reaching a power primitive two calls away, which a
+slot-level gate cannot see. A mechanism's authority comes from `privd`
+(`access-model.md`).
 
 ## When To Promote A Plan
 

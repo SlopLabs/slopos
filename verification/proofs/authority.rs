@@ -2,51 +2,43 @@
 //
 // A Verus-annotated mirror of SlopOS's capability model: the per-task mask in
 // `slopos_ostd::task::ops::{task_caps, task_set_caps, task_restrict_caps}`,
-// the exec narrowing in `slopos_core::exec::narrow_authority_for_exec`, the
-// raise site in `slopos_core::exec::spawn_program_with_attrs`, the delegation
-// check in `Endowment::check` beside it, `caps_drop`
-// (`slopos_sched::task::process_drop_caps`), and `fork`'s explicit copy in
+// exec's drop in `slopos_core::exec::drop_authority_for_exec`, the spawn
+// bound in `Endowment::check` beside it, `caps_drop`
+// (`slopos_sched::task::process_drop_caps`, and the record `task_commit`
+// narrows each thread a process registers by), and `fork`'s explicit copy in
 // `TaskInner::clone_from_raw`.
 //
-// It machine-checks five obligations:
+// It machine-checks four obligations:
 //
-//   (S1) MONOTONE. Every step except `Exec` and `Spawn` preserves or shrinks a
-//        task's authority. Authority is never widened by acting, only by
-//        loading a new program image — which is the single raise site the whole
-//        model rests on.
-//   (S2) EXEC INTERSECTS. `caps' == kept(image) & caps`, where the tree's
-//        `kept` is `CAP_UNIVERSAL | grant(image) | delegated(image)` (the
-//        delegated set only for an image named directly); the model's `grant`
-//        operand is that whole set. Both halves are load-bearing: dropping the
-//        `& caps` lets an unprivileged task exec a privileged image and gain its
-//        grant; dropping the `kept(image)` lets a privileged program's authority
-//        survive into an arbitrary binary. Those are the two CVE shapes this
-//        model exists to prevent, two years apart in the same vendor's kernel,
-//        on the same entitlement.
-//   (S3) SPAWN BOUND. `child.caps == base | (Launch in parent.caps ? grant :
-//        0) | (delegated ⊆ parent.caps ? delegated : 0)`, `base` being what the
-//        kernel caller hands over (from the spawn syscall, S5's endowment).
-//        A spawner without `Launch` confers nothing
-//        beyond `base` and what it holds itself; one with `Launch` confers the
-//        whole grant; none confers a delegated capability it lacks. Without the
-//        `Launch` bound any task obtains a privileged child by spawning the
-//        privileged path; without the subset check, by spawning a delegated
-//        one. A task that dropped capabilities but kept `Launch` still raises a
-//        granted image: dropping `Launch` is what stops it.
-//   (S4) DROP TOTALITY. `task_restrict_caps` is total: it has no failure case
-//        a caller could ignore, and neither has `caps_drop`, which takes it on
-//        every task of the calling process. A historical local root came from
-//        an attacker making a privilege *drop* fail inside a program that
-//        ignored the result.
-//   (S5) DELEGATION BOUND. A spawn asking for `ask` is refused unless
+//   (S1) MONOTONE. No step widens a task's authority: acting and forking
+//        leave its mask as it is, dropping and exec'ing narrow it. A new
+//        task's authority comes from its creator, by fork's copy or by S3,
+//        and never from the program it runs.
+//   (S2) EXEC DROPS. `caps' == caps & universal`: every gated capability goes,
+//        and a universal one stays only where the task held it. Both halves
+//        are load-bearing: an exec that keeps the mask lets a privileged
+//        program's authority survive into an arbitrary binary, and one that
+//        hands the new image the universal set gives back what the task
+//        dropped.
+//   (S3) SPAWN BOUND. A spawn asking for `ask` is refused unless
 //        `ask ⊆ parent.caps`, and then hands over `(parent.caps & universal) |
-//        ask`, so S3's `base` is within the spawner's own mask. Without the
-//        check any task names a capability in `SpawnAttrs` and its child holds
-//        it.
+//        ask`, so a child holds nothing its spawner lacks and nothing gated it
+//        was not handed, whatever program it runs. Without the check any task
+//        names a capability in `SpawnAttrs` and its child holds it; without
+//        the `& parent.caps`, a dropped universal capability comes back on
+//        every child; and a spawn that added a grant for the program it loads
+//        would raise a child above any spawner.
+//   (S4) DROP TOTALITY. `caps_drop(m)` has no failure case a caller could
+//        ignore, and takes `m` from every thread of the calling process: the
+//        threads registered when it runs, and through the process's record,
+//        a thread whose clone read its creator's mask before the drop and
+//        registers after. A historical local root came from an attacker
+//        making a privilege *drop* fail inside a program that ignored the
+//        result.
 //
-// Every obligation carries a BROKEN WITNESS that must fail `auth_inv` or the
-// obligation's own postcondition, because a proof of a property nothing can
-// violate is a proof about the model rather than about the tree.
+// Every obligation carries a BROKEN WITNESS that must fail its own
+// postcondition, because a proof of a property nothing can violate is a proof
+// about the model rather than about the tree.
 //
 // NOT COVERED, and deliberately excluded rather than assumed:
 //
@@ -59,12 +51,12 @@
 //     caller's context, so a sibling's syscall already past its check
 //     finishes under the mask it checked, as a Linux thread does across a
 //     sibling's `setuid`.
-//   - `caps_drop`'s reach. The tree records the drop on the process before
-//     walking its tasks and `task_commit` narrows every thread the process
-//     registers by that record, so a thread whose clone races the drop loses
-//     the bits too. A fork or spawn racing the drop is ordered before it: the
-//     child is a new process and keeps what its creator held when it was
-//     read. The model has one task per state and so states neither.
+//   - That the tree's walk reaches every registered thread. The model's
+//     process is the sequence of its threads' masks; the tree's is every task
+//     whose process handle matches, which `process_drop_caps` walks with an
+//     allocation-free enumeration. A fork or spawn racing the drop is ordered
+//     before it: the child is a new process and keeps what its creator held
+//     when it was read.
 //   - The kernel's own spawns: `launch_init` hands over `CAP_MASK_ALL` and the
 //     utest runner what a test declares, whatever their caller holds. The
 //     model's spawner is always a task.
@@ -75,63 +67,51 @@
 //     That is a `rustc` totality assert over the syscall table plus
 //     `scripts/check_authority_reachability.sh`, not a Verus obligation.
 //
-// The model is deliberately MORE PERMISSIVE than the tree in one respect:
-// `Spawn` and `Exec` here take an arbitrary base, grant and delegated set,
-// whereas the tree's `grant_for` and `delegated_for` read a fixed table keyed
-// on the image path and the spawn syscall's base is S5's endowment.
-// Proving the bounds for every possible input is strictly stronger than
-// proving them for the rows the table holds.
+// Deleted with the grant table: the witness that a spawn bound written as
+// `parent.caps & grant` starved a grant (the shell held no display authority,
+// so `/bin/roulette` could never have drawn). It defended conferral by a
+// launcher that did not hold what it conferred; authority now flows only from
+// holders, and that intersection is S3 itself.
 
 use vstd::prelude::*;
 
 verus! {
 
-/// A capability mask. `u64` in the tree; `nat`-free `u64` here so the bitwise
-/// operations are the ones the kernel actually performs.
+/// A capability mask, a `u64` as in the tree, so the bitwise operations are
+/// the kernel's.
 pub type Caps = u64;
 
-/// Bit 1 in `slopos_ostd::authority::Capability::Launch`. Named rather than
-/// inlined so S3 reads as the rule it is.
-pub open spec fn launch_bit() -> Caps {
-    2
+/// `CAP_UNIVERSAL`: `ConsoleIo | ClipboardGlobal | Fate`, bits 7 to 9.
+pub open spec fn universal() -> Caps {
+    0x380
 }
 
-/// Does this mask name `Launch`?
-pub open spec fn has_launch(c: Caps) -> bool {
-    c & launch_bit() != 0
+/// Bit 0 in `slopos_ostd::authority::Capability::Power`, a gated capability
+/// for the witnesses.
+pub open spec fn power_bit() -> Caps {
+    1
 }
 
-/// One task's authority state.
+/// Bit 9 in `slopos_ostd::authority::Capability::Fate`, a universal one.
+pub open spec fn fate_bit() -> Caps {
+    0x200
+}
+
+/// One task's authority state: `Task::caps`, the effective mask.
 pub struct Auth {
-    /// `Task::caps` — the effective mask.
     pub caps: Caps,
-    /// Ghost: the mask this task was created with. Nothing may exceed it
-    /// except an `Exec`, which is the point of tracking it.
-    pub born_with: Caps,
-    /// Ghost: how many times authority was raised outside a load. Must stay 0.
-    pub raises: nat,
-}
-
-/// The inductive invariant.
-pub open spec fn auth_inv(s: Auth) -> bool {
-    // (S1) Authority is only ever raised by loading an image. Any other step
-    //      that widened it would have incremented this.
-    &&& s.raises == 0
 }
 
 /// The operations that can change a task's authority.
 pub enum Step {
     /// A syscall, a signal, a scheduling decision — anything that is not a
-    /// program load. Must not touch the mask.
+    /// drop or a program load. Must not touch the mask.
     Act,
     /// Voluntary reduction, `task_restrict_caps(task, mask)`: keep only `mask`.
-    /// `caps_drop(m)` is this step with `!m` on every task of the calling
-    /// process, and `task_commit` takes it on each thread the process
-    /// registers afterwards.
+    /// S4 states `caps_drop`, which takes it on every thread of a process.
     Drop(Caps),
-    /// `execve`: the mask becomes `kept & caps`, `kept` being
-    /// `CAP_UNIVERSAL | grant | delegated` for the image.
-    Exec(Caps),
+    /// `execve`: the mask becomes `caps & universal`.
+    Exec,
     /// `fork`: the child is the same principal and copies the mask.
     Fork,
 }
@@ -141,21 +121,9 @@ pub open spec fn step(s: Auth, e: Step) -> Auth {
     match e {
         Step::Act => s,
         // Total: an intersection, defined for every input, with no error case.
-        Step::Drop(mask) => Auth { caps: s.caps & mask, ..s },
-        // The intersection. Both operands, in this order.
-        Step::Exec(grant) => Auth { caps: grant & s.caps, ..s },
+        Step::Drop(mask) => Auth { caps: s.caps & mask },
+        Step::Exec => Auth { caps: s.caps & universal() },
         Step::Fork => s,
-    }
-}
-
-/// `x & y` never has a bit that `x` lacks. The whole model reduces to this.
-pub proof fn and_is_subset(x: Caps, y: Caps)
-    ensures
-        x & y == x & y,
-        forall|b: Caps| #[trigger] (x & y & b) != 0 ==> (x & b) != 0,
-{
-    assert forall|b: Caps| #[trigger] (x & y & b) != 0 implies (x & b) != 0 by {
-        assert((x & y & b) != 0 ==> (x & b) != 0) by (bit_vector);
     }
 }
 
@@ -163,264 +131,70 @@ pub proof fn and_is_subset(x: Caps, y: Caps)
 // S1 — monotone
 // ---------------------------------------------------------------------------
 
-/// Every step preserves the invariant.
-pub proof fn step_preserves(s: Auth, e: Step)
+/// No step widens the mask. Stated per capability, because "narrows" for a
+/// bitmask means no bit appears that was not already there.
+pub proof fn no_step_widens(s: Auth, e: Step, b: Caps)
     requires
-        auth_inv(s),
-    ensures
-        auth_inv(step(s, e)),
-{
-}
-
-/// `Act` and `Fork` do not touch the mask at all, and `Drop` can only shrink
-/// it. Stated per-capability, because "shrinks" for a bitmask means no bit
-/// appears that was not already there.
-pub proof fn non_load_steps_never_widen(s: Auth, e: Step, b: Caps)
-    requires
-        auth_inv(s),
-        !matches!(e, Step::Exec(_)),
         (step(s, e).caps & b) != 0,
     ensures
         (s.caps & b) != 0,
 {
+    let c = s.caps;
     match e {
         Step::Act => {},
         Step::Fork => {},
         Step::Drop(mask) => {
             // Bound to locals: `by (bit_vector)` reasons over plain integers,
             // not struct field projections.
-            let c = s.caps;
             assert(((c & mask) & b) != 0 ==> (c & b) != 0) by (bit_vector);
         },
-        Step::Exec(_) => {},
+        Step::Exec => {
+            assert(((c & 0x380u64) & b) != 0 ==> (c & b) != 0) by (bit_vector);
+        },
     }
 }
 
 // ---------------------------------------------------------------------------
-// S2 — exec intersects
+// S2 — exec drops
 // ---------------------------------------------------------------------------
 
-/// The exec result is bounded by BOTH operands. This is the obligation stated
-/// exactly: a capability survives exec only if the image keeps it (the
-/// universal set, its grant or its delegated set) *and* the task already held it.
-pub proof fn exec_is_bounded_by_both(s: Auth, grant: Caps, b: Caps)
+/// No gated capability survives an exec, whatever the task held.
+pub proof fn exec_keeps_nothing_gated(s: Auth, b: Caps)
     requires
-        (step(s, Step::Exec(grant)).caps & b) != 0,
+        (b & universal()) == 0,
     ensures
-        (s.caps & b) != 0,
-        (grant & b) != 0,
+        (step(s, Step::Exec).caps & b) == 0,
 {
     let c = s.caps;
-    assert(((grant & c) & b) != 0 ==> (c & b) != 0) by (bit_vector);
-    assert(((grant & c) & b) != 0 ==> (grant & b) != 0) by (bit_vector);
+    assert((b & 0x380u64) == 0 ==> ((c & 0x380u64) & b) == 0) by (bit_vector);
 }
 
-/// An unprivileged task cannot gain a capability by exec'ing a privileged
-/// image. The escalation direction, stated on its own because it is the half a
-/// naive "just take the grant" implementation gets wrong.
-pub proof fn exec_cannot_raise(s: Auth, grant: Caps, b: Caps)
+/// A universal capability the task held survives its exec.
+pub proof fn exec_keeps_the_universal_set_it_held(s: Auth, b: Caps)
+    requires
+        (b & !universal()) == 0,
+        (s.caps & b) == b,
+    ensures
+        (step(s, Step::Exec).caps & b) == b,
+{
+    let c = s.caps;
+    assert((b & !0x380u64) == 0 && (c & b) == b ==> ((c & 0x380u64) & b) == b) by (bit_vector);
+}
+
+/// Nothing a task lacks comes back at its exec: a dropped universal
+/// capability stays dropped.
+pub proof fn exec_cannot_raise(s: Auth, b: Caps)
     requires
         (s.caps & b) == 0,
     ensures
-        (step(s, Step::Exec(grant)).caps & b) == 0,
+        (step(s, Step::Exec).caps & b) == 0,
 {
     let c = s.caps;
-    assert((c & b) == 0 ==> ((grant & c) & b) == 0) by (bit_vector);
-}
-
-/// An entitlement does not survive exec of an image that does not earn it.
-/// The inheritance direction — the CVE where a privileged program execs an
-/// arbitrary binary and the binary keeps the entitlement.
-pub proof fn exec_drops_ungranted(s: Auth, grant: Caps, b: Caps)
-    requires
-        (grant & b) == 0,
-    ensures
-        (step(s, Step::Exec(grant)).caps & b) == 0,
-{
-    let c = s.caps;
-    assert((grant & b) == 0 ==> ((grant & c) & b) == 0) by (bit_vector);
+    assert((c & b) == 0 ==> ((c & 0x380u64) & b) == 0) by (bit_vector);
 }
 
 // ---------------------------------------------------------------------------
 // S3 — the spawn bound
-// ---------------------------------------------------------------------------
-
-/// `CAP_UNIVERSAL`: `ConsoleIo | ClipboardGlobal | Fate`, bits 7 to 9, what the
-/// spawn syscall hands the child of a spawner holding all three.
-pub open spec fn universal() -> Caps {
-    0x380
-}
-
-/// Bit 16 in `slopos_ostd::authority::Capability::RawBlock`, e2fsprogs'
-/// delegated set.
-pub open spec fn raw_block_bit() -> Caps {
-    0x1_0000
-}
-
-/// The delegated set when the spawner holds all of it, else nothing.
-pub open spec fn delegation(parent: Auth, delegated: Caps) -> Caps {
-    if delegated & !parent.caps == 0 {
-        delegated
-    } else {
-        0
-    }
-}
-
-/// What a spawn gives the child, per the tree's rule: `base` from the kernel
-/// caller, the grant under `Launch`, the delegated set as far as the spawner
-/// holds it.
-pub open spec fn spawn_child(parent: Auth, base: Caps, grant: Caps, delegated: Caps) -> Caps {
-    base | (if has_launch(parent.caps) {
-        grant
-    } else {
-        0
-    }) | delegation(parent, delegated)
-}
-
-/// A spawner without `Launch` confers nothing beyond `base` and what it holds
-/// itself, whatever the image's grant says.
-pub proof fn spawn_without_launch_confers_only_what_it_holds(
-    parent: Auth,
-    base: Caps,
-    grant: Caps,
-    delegated: Caps,
-    b: Caps,
-)
-    requires
-        !has_launch(parent.caps),
-        (spawn_child(parent, base, grant, delegated) & b) != 0,
-    ensures
-        (base & b) != 0 || (parent.caps & b) != 0,
-{
-    let c = parent.caps;
-    let d = delegation(parent, delegated);
-    assert(spawn_child(parent, base, grant, delegated) == base | 0u64 | d);
-    if delegated & !c == 0 {
-        assert((delegated & !c) == 0 && ((base | 0u64 | delegated) & b) != 0 ==> (base & b) != 0
-            || (c & b) != 0) by (bit_vector);
-    } else {
-        assert(((base | 0u64 | 0u64) & b) != 0 ==> (base & b) != 0) by (bit_vector);
-    }
-}
-
-/// A spawner WITH `Launch` hands over the image's whole grant — not the
-/// parent's own authority, and not an intersection with it.
-///
-/// The intersection is the tempting mistake and it is arithmetically
-/// self-defeating: the shell holds no display authority, so
-/// `parent.caps & grant` would mean `/bin/roulette` could never draw.
-pub proof fn spawn_with_launch_confers_the_grant(
-    parent: Auth,
-    base: Caps,
-    grant: Caps,
-    delegated: Caps,
-)
-    requires
-        has_launch(parent.caps),
-    ensures
-        spawn_child(parent, base, grant, delegated) & grant == grant,
-{
-    let d = delegation(parent, delegated);
-    assert(spawn_child(parent, base, grant, delegated) == base | grant | d);
-    assert((base | grant | d) & grant == grant) by (bit_vector);
-}
-
-/// No spawner confers a delegated capability it lacks: a bit outside `base`
-/// and the grant reaches the child only if the spawner holds it.
-pub proof fn spawn_never_delegates_unheld(
-    parent: Auth,
-    base: Caps,
-    grant: Caps,
-    delegated: Caps,
-    b: Caps,
-)
-    requires
-        (parent.caps & b) == 0,
-        (base & b) == 0,
-        (grant & b) == 0,
-    ensures
-        (spawn_child(parent, base, grant, delegated) & b) == 0,
-{
-    let c = parent.caps;
-    let g: Caps = if has_launch(c) {
-        grant
-    } else {
-        0
-    };
-    assert((g & b) == 0) by {
-        if !has_launch(c) {
-            assert(0u64 & b == 0) by (bit_vector);
-        }
-    }
-    if delegated & !c == 0 {
-        assert(spawn_child(parent, base, grant, delegated) == base | g | delegated);
-        assert((delegated & !c) == 0 && (c & b) == 0 && (base & b) == 0 && (g & b) == 0 ==> ((base
-            | g | delegated) & b) == 0) by (bit_vector);
-    } else {
-        assert(spawn_child(parent, base, grant, delegated) == base | g | 0u64);
-        assert((base & b) == 0 && (g & b) == 0 ==> ((base | g | 0u64) & b) == 0) by (bit_vector);
-    }
-}
-
-/// A spawner holding the whole delegated set hands it over, `Launch` or not:
-/// the installer gives `mke2fs` its `RawBlock`.
-pub proof fn spawn_delegates_what_the_spawner_holds(
-    parent: Auth,
-    base: Caps,
-    grant: Caps,
-    delegated: Caps,
-)
-    requires
-        delegated & !parent.caps == 0,
-    ensures
-        spawn_child(parent, base, grant, delegated) & delegated == delegated,
-{
-    let g: Caps = if has_launch(parent.caps) {
-        grant
-    } else {
-        0
-    };
-    assert(spawn_child(parent, base, grant, delegated) == base | g | delegated);
-    assert((base | g | delegated) & delegated == delegated) by (bit_vector);
-}
-
-// ---------------------------------------------------------------------------
-// S4 — drop totality
-// ---------------------------------------------------------------------------
-
-/// `Drop` is defined for every mask and every state: there is no input for
-/// which it has no result, hence no error a caller could ignore.
-pub proof fn drop_is_total(s: Auth, mask: Caps)
-    ensures
-        step(s, Step::Drop(mask)) == (Auth { caps: s.caps & mask, ..s }),
-{
-}
-
-/// Dropping is idempotent, so a caller that retries a reduction cannot end up
-/// with more than one that succeeded.
-pub proof fn drop_is_idempotent(s: Auth, mask: Caps)
-    ensures
-        step(step(s, Step::Drop(mask)), Step::Drop(mask)).caps == step(
-            s,
-            Step::Drop(mask),
-        ).caps,
-{
-    let c = s.caps;
-    assert((c & mask) & mask == c & mask) by (bit_vector);
-}
-
-/// Restricting to "everything" is a no-op — the monotonicity guard that makes
-/// `task_restrict_caps` safe to call with any mask, including a wider one.
-pub proof fn drop_to_all_is_identity(s: Auth)
-    ensures
-        step(s, Step::Drop(0xFFFF_FFFF_FFFF_FFFF)).caps == s.caps,
-{
-    let c = s.caps;
-    assert(c & 0xFFFF_FFFF_FFFF_FFFFu64 == c) by (bit_vector);
-}
-
-// ---------------------------------------------------------------------------
-// S5 — the delegation bound
 // ---------------------------------------------------------------------------
 
 /// Whether a spawn may ask for `ask`: the `EPERM` check.
@@ -428,14 +202,14 @@ pub open spec fn endow_permitted(parent: Auth, ask: Caps) -> bool {
     ask & !parent.caps == 0
 }
 
-/// What a permitted spawn hands the child before any grant: the spawner's
-/// universal capabilities and what it asked to delegate.
+/// What a permitted spawn hands the child: the spawner's universal
+/// capabilities and what it asked to delegate. No operand names the program.
 pub open spec fn endow(parent: Auth, ask: Caps) -> Caps {
     (parent.caps & universal()) | ask
 }
 
 /// No permitted spawn endows a child with a capability its spawner lacks.
-pub proof fn endowment_is_within_the_spawner(parent: Auth, ask: Caps, b: Caps)
+pub proof fn spawn_is_within_the_spawner(parent: Auth, ask: Caps, b: Caps)
     requires
         endow_permitted(parent, ask),
         (endow(parent, ask) & b) != 0,
@@ -446,8 +220,22 @@ pub proof fn endowment_is_within_the_spawner(parent: Auth, ask: Caps, b: Caps)
     assert((ask & !c) == 0 && (((c & 0x380u64) | ask) & b) != 0 ==> (c & b) != 0) by (bit_vector);
 }
 
-/// A permitted spawn hands over everything it asked for.
-pub proof fn endowment_carries_the_ask(parent: Auth, ask: Caps)
+/// A child holds nothing gated that its spawner did not hand it.
+pub proof fn spawn_hands_only_what_it_asks(parent: Auth, ask: Caps, b: Caps)
+    requires
+        (b & universal()) == 0,
+        (ask & b) == 0,
+    ensures
+        (endow(parent, ask) & b) == 0,
+{
+    let c = parent.caps;
+    assert((b & 0x380u64) == 0 && (ask & b) == 0 ==> (((c & 0x380u64) | ask) & b) == 0)
+        by (bit_vector);
+}
+
+/// A permitted spawn hands over everything it asked for: the installer gives
+/// `mke2fs` its `RawBlock`.
+pub proof fn spawn_carries_the_ask(parent: Auth, ask: Caps)
     requires
         endow_permitted(parent, ask),
     ensures
@@ -458,235 +246,346 @@ pub proof fn endowment_carries_the_ask(parent: Auth, ask: Caps)
 }
 
 // ---------------------------------------------------------------------------
+// S4 — drop totality, process-wide
+// ---------------------------------------------------------------------------
+
+/// A process: what `caps_drop` has recorded on it, and each registered
+/// thread's mask.
+pub struct Process {
+    pub dropped: Caps,
+    pub threads: Seq<Caps>,
+}
+
+/// `caps_drop(m)`: the record first, then every registered thread.
+pub open spec fn caps_drop(p: Process, m: Caps) -> Process {
+    Process { dropped: p.dropped | m, threads: p.threads.map_values(|c: Caps| c & !m) }
+}
+
+/// `task_commit` of a thread whose clone read `creator` from its creator,
+/// at any time before it registers: narrowed by the record as it registers.
+pub open spec fn register(p: Process, creator: Caps) -> Process {
+    Process { threads: p.threads.push(creator & !p.dropped), ..p }
+}
+
+/// `caps_drop` is defined for every process and mask: there is no input for
+/// which it has no result, hence no error a caller could ignore.
+pub proof fn caps_drop_is_total(p: Process, m: Caps)
+    ensures
+        caps_drop(p, m).threads.len() == p.threads.len(),
+        caps_drop(p, m).dropped == p.dropped | m,
+{
+}
+
+/// Every thread registered when `caps_drop` runs loses what it names, and
+/// keeps every other bit it held.
+pub proof fn caps_drop_reaches_every_thread(p: Process, m: Caps, i: int, b: Caps)
+    requires
+        0 <= i < p.threads.len(),
+    ensures
+        caps_drop(p, m).threads[i] & m == 0,
+        (b & m) == 0 ==> (caps_drop(p, m).threads[i] & b) == (p.threads[i] & b),
+{
+    let c = p.threads[i];
+    assert(caps_drop(p, m).threads[i] == c & !m);
+    assert((c & !m) & m == 0) by (bit_vector);
+    assert((b & m) == 0 ==> ((c & !m) & b) == (c & b)) by (bit_vector);
+}
+
+/// A thread registered after the drop lacks what it names, whatever its
+/// creator held when the clone read the mask.
+pub proof fn a_thread_registered_after_lacks_it(p: Process, m: Caps, creator: Caps)
+    ensures
+        ({
+            let q = register(caps_drop(p, m), creator);
+            q.threads[q.threads.len() - 1] & m == 0
+        }),
+{
+    let q = register(caps_drop(p, m), creator);
+    let d = p.dropped;
+    assert(q.threads[q.threads.len() - 1] == creator & !(d | m));
+    assert((creator & !(d | m)) & m == 0) by (bit_vector);
+}
+
+/// Dropping again changes nothing, so a caller that retries a drop cannot end
+/// up holding more than one that succeeded.
+pub proof fn caps_drop_is_idempotent(p: Process, m: Caps, i: int)
+    requires
+        0 <= i < p.threads.len(),
+    ensures
+        caps_drop(caps_drop(p, m), m).threads[i] == caps_drop(p, m).threads[i],
+{
+    let c = p.threads[i];
+    assert(caps_drop(p, m).threads[i] == c & !m);
+    assert(caps_drop(caps_drop(p, m), m).threads[i] == (c & !m) & !m);
+    assert((c & !m) & !m == c & !m) by (bit_vector);
+}
+
+// ---------------------------------------------------------------------------
 // Broken witnesses
 //
 // Each is a variant the tree deliberately does NOT implement. Every one must
 // break something, or the corresponding obligation is vacuous.
 // ---------------------------------------------------------------------------
 
-/// BROKEN: a step that widens authority without a load — the shape any "just
-/// add the bit" convenience would take.
+/// BROKEN: a step that widens authority — the shape any "just add the bit"
+/// convenience, or a grant at exec, would take.
 pub open spec fn broken_widening_step(s: Auth, extra: Caps) -> Auth {
-    Auth { caps: s.caps | extra, raises: (s.raises + 1) as nat, ..s }
+    Auth { caps: s.caps | extra }
 }
 
-/// Witness that S1 is load-bearing: a widening step exists that breaks the
-/// invariant, while every real `Step` preserves it.
-pub proof fn broken_widening_violates_invariant()
+/// Witness that S1 is load-bearing: a widening step gives a task a bit it
+/// lacked, against `no_step_widens`.
+pub proof fn broken_widening_step_raises()
     ensures
-        exists|s: Auth, extra: Caps|
-            #![trigger broken_widening_step(s, extra)]
-            auth_inv(s) && !auth_inv(broken_widening_step(s, extra)),
-        forall|s: Auth, e: Step| auth_inv(s) ==> #[trigger] auth_inv(step(s, e)),
+        exists|s: Auth, extra: Caps, b: Caps|
+            #![trigger broken_widening_step(s, extra).caps & b]
+            (broken_widening_step(s, extra).caps & b) != 0 && (s.caps & b) == 0,
 {
-    let ordinary = Auth { caps: 0, born_with: 0, raises: 0 };
-    assert(auth_inv(ordinary));
-    let widened = broken_widening_step(ordinary, launch_bit());
-    assert(widened.raises == 1);
-    assert(!auth_inv(widened));
-    assert(exists|s: Auth, extra: Caps|
-        #![trigger broken_widening_step(s, extra)]
-        auth_inv(s) && !auth_inv(broken_widening_step(s, extra)));
-    assert forall|s: Auth, e: Step| auth_inv(s) implies #[trigger] auth_inv(step(s, e)) by {
-        step_preserves(s, e);
+    let ordinary = Auth { caps: 0 };
+    assert((0u64 | 1u64) & 1u64 != 0) by (bit_vector);
+    assert(0u64 & 1u64 == 0) by (bit_vector);
+    assert(exists|s: Auth, extra: Caps, b: Caps|
+        #![trigger broken_widening_step(s, extra).caps & b]
+        (broken_widening_step(s, extra).caps & b) != 0 && (s.caps & b) == 0) by {
+        assert(broken_widening_step(ordinary, power_bit()).caps == 0u64 | 1u64);
     }
 }
 
-/// BROKEN: exec that takes the grant WITHOUT intersecting — an unprivileged
-/// task exec'ing a privileged image gains its authority.
-pub open spec fn broken_exec_ungated(_s: Auth, grant: Caps) -> Caps {
-    grant
-}
-
-/// Witness that the `& caps` half of S2 is load-bearing.
-pub proof fn broken_exec_ungated_escalates()
-    ensures
-        exists|s: Auth, grant: Caps, b: Caps|
-            #![trigger broken_exec_ungated(s, grant) & b]
-            (s.caps & b) == 0 && (broken_exec_ungated(s, grant) & b) != 0,
-{
-    // An ordinary task exec'ing an image whose identity earns `Launch`.
-    let ordinary = Auth { caps: 0, born_with: 0, raises: 0 };
-    assert(0u64 & 2u64 == 0) by (bit_vector);
-    assert(broken_exec_ungated(ordinary, launch_bit()) == launch_bit());
-    assert(2u64 & 2u64 != 0) by (bit_vector);
-    assert(exists|s: Auth, grant: Caps, b: Caps|
-        #![trigger broken_exec_ungated(s, grant) & b]
-        (s.caps & b) == 0 && (broken_exec_ungated(s, grant) & b) != 0);
-}
-
-/// BROKEN: exec that keeps the old mask un-intersected — the entitlement
-/// survives into an arbitrary binary.
-pub open spec fn broken_exec_keeps_caps(s: Auth, _grant: Caps) -> Caps {
+/// BROKEN: an exec that keeps the mask — a privileged program's authority
+/// survives into whatever it execs.
+pub open spec fn broken_exec_keeps_caps(s: Auth) -> Caps {
     s.caps
 }
 
-/// Witness that the `grant &` half of S2 is load-bearing.
+/// Witness that the `& universal` half of S2 is load-bearing, against
+/// `exec_keeps_nothing_gated`.
 pub proof fn broken_exec_keeps_caps_inherits()
     ensures
-        exists|s: Auth, grant: Caps, b: Caps|
-            #![trigger broken_exec_keeps_caps(s, grant) & b]
-            (grant & b) == 0 && (broken_exec_keeps_caps(s, grant) & b) != 0,
+        exists|s: Auth, b: Caps|
+            #![trigger broken_exec_keeps_caps(s) & b]
+            (b & universal()) == 0 && (broken_exec_keeps_caps(s) & b) != 0,
 {
-    // A privileged program exec'ing an image that earns nothing.
-    let privileged = Auth { caps: launch_bit(), born_with: launch_bit(), raises: 0 };
-    assert(broken_exec_keeps_caps(privileged, 0) == launch_bit());
-    assert(0u64 & 2u64 == 0) by (bit_vector);
-    assert(2u64 & 2u64 != 0) by (bit_vector);
-    assert(exists|s: Auth, grant: Caps, b: Caps|
-        #![trigger broken_exec_keeps_caps(s, grant) & b]
-        (grant & b) == 0 && (broken_exec_keeps_caps(s, grant) & b) != 0);
+    let privileged = Auth { caps: power_bit() };
+    assert(1u64 & 0x380u64 == 0) by (bit_vector);
+    assert(1u64 & 1u64 != 0) by (bit_vector);
+    assert(exists|s: Auth, b: Caps|
+        #![trigger broken_exec_keeps_caps(s) & b]
+        (b & universal()) == 0 && (broken_exec_keeps_caps(s) & b) != 0) by {
+        assert(broken_exec_keeps_caps(privileged) == power_bit());
+    }
 }
 
-/// Witness that S5's check is load-bearing: an endowment taken unchecked
-/// gives an ordinary task's child `Launch`, against
-/// `endowment_is_within_the_spawner`.
+/// BROKEN: an exec that clears the mask.
+pub open spec fn broken_exec_clears(_s: Auth) -> Caps {
+    0
+}
+
+/// Witness that S2 keeps what it should: a task holding `Fate` loses it to an
+/// exec that clears the mask, against `exec_keeps_the_universal_set_it_held`.
+pub proof fn broken_exec_clears_loses_fate()
+    ensures
+        exists|s: Auth, b: Caps|
+            #![trigger broken_exec_clears(s) & b]
+            (b & !universal()) == 0 && (s.caps & b) == b && (broken_exec_clears(s) & b) != b,
+{
+    let ordinary = Auth { caps: universal() };
+    assert(0x200u64 & !0x380u64 == 0) by (bit_vector);
+    assert(0x380u64 & 0x200u64 == 0x200u64) by (bit_vector);
+    assert(0u64 & 0x200u64 != 0x200u64) by (bit_vector);
+    assert(exists|s: Auth, b: Caps|
+        #![trigger broken_exec_clears(s) & b]
+        (b & !universal()) == 0 && (s.caps & b) == b && (broken_exec_clears(s) & b) != b) by {
+        assert(broken_exec_clears(ordinary) == 0u64);
+        assert((ordinary.caps & fate_bit()) == fate_bit());
+    }
+}
+
+/// BROKEN: an exec that hands the new image the universal set.
+pub open spec fn broken_exec_hands_universal(_s: Auth) -> Caps {
+    universal()
+}
+
+/// Witness that the `caps &` half of S2 is load-bearing: a task that dropped
+/// `Fate` gets it back by exec'ing, against `exec_cannot_raise`.
+pub proof fn broken_exec_hands_universal_restores()
+    ensures
+        exists|s: Auth, b: Caps|
+            #![trigger broken_exec_hands_universal(s) & b]
+            (s.caps & b) == 0 && (broken_exec_hands_universal(s) & b) != 0,
+{
+    let dropped_fate = Auth { caps: 0x180 };
+    assert(0x180u64 & 0x200u64 == 0) by (bit_vector);
+    assert(0x380u64 & 0x200u64 != 0) by (bit_vector);
+    assert(exists|s: Auth, b: Caps|
+        #![trigger broken_exec_hands_universal(s) & b]
+        (s.caps & b) == 0 && (broken_exec_hands_universal(s) & b) != 0) by {
+        assert(broken_exec_hands_universal(dropped_fate) == universal());
+        assert((dropped_fate.caps & fate_bit()) == 0);
+    }
+}
+
+/// Witness that S3's check is load-bearing: an endowment taken unchecked
+/// gives an ordinary task's child `Power`, against
+/// `spawn_is_within_the_spawner`.
 pub proof fn broken_endowment_unchecked_raises()
     ensures
         exists|p: Auth, ask: Caps, b: Caps|
             #![trigger endow(p, ask) & b]
             (p.caps & b) == 0 && (endow(p, ask) & b) != 0,
 {
-    let ordinary = Auth { caps: 0, born_with: 0, raises: 0 };
-    assert(endow(ordinary, launch_bit()) == (0u64 & 0x380u64) | 2u64);
-    assert(((0u64 & 0x380u64) | 2u64) & 2u64 != 0) by (bit_vector);
-    assert(0u64 & 2u64 == 0) by (bit_vector);
+    let ordinary = Auth { caps: universal() };
+    assert(endow(ordinary, power_bit()) == (0x380u64 & 0x380u64) | 1u64);
+    assert(((0x380u64 & 0x380u64) | 1u64) & 1u64 != 0) by (bit_vector);
+    assert(0x380u64 & 1u64 == 0) by (bit_vector);
     assert(exists|p: Auth, ask: Caps, b: Caps|
         #![trigger endow(p, ask) & b]
         (p.caps & b) == 0 && (endow(p, ask) & b) != 0);
 }
 
-/// BROKEN: a spawn that ignores the `Launch` bound.
-pub open spec fn broken_spawn_unbounded(
-    parent: Auth,
-    base: Caps,
-    grant: Caps,
-    delegated: Caps,
-) -> Caps {
-    base | grant | delegation(parent, delegated)
+/// BROKEN: a spawn that hands every child the universal set.
+pub open spec fn broken_spawn_hands_universal(_parent: Auth, ask: Caps) -> Caps {
+    universal() | ask
 }
 
-/// Witness that S3's `Launch` bound is load-bearing: without it an
-/// unprivileged spawner produces a child holding what neither `base` nor the
-/// spawner holds, against `spawn_without_launch_confers_only_what_it_holds`.
-pub proof fn broken_spawn_unbounded_raises()
+/// Witness that S3's `parent.caps &` is load-bearing: a spawner that dropped
+/// `Fate` hands it back to its child, against `spawn_is_within_the_spawner`.
+pub proof fn broken_spawn_hands_universal_restores()
     ensures
-        exists|p: Auth, base: Caps, grant: Caps, delegated: Caps, b: Caps|
-            #![trigger broken_spawn_unbounded(p, base, grant, delegated) & b]
-            !has_launch(p.caps) && (base & b) == 0 && (p.caps & b) == 0 && (
-            broken_spawn_unbounded(p, base, grant, delegated) & b) != 0,
+        exists|p: Auth, ask: Caps, b: Caps|
+            #![trigger broken_spawn_hands_universal(p, ask) & b]
+            endow_permitted(p, ask) && (p.caps & b) == 0 && (broken_spawn_hands_universal(p, ask)
+                & b) != 0,
 {
-    // An ordinary task spawning an image whose identity earns `Launch`.
-    let ordinary = Auth { caps: 0, born_with: 0, raises: 0 };
-    assert(0u64 & 2u64 == 0) by (bit_vector);
-    assert(!has_launch(ordinary.caps));
-    assert(0u64 & !0u64 == 0) by (bit_vector);
-    assert(delegation(ordinary, 0) == 0);
-    assert(broken_spawn_unbounded(ordinary, universal(), launch_bit(), 0) == 0x380u64 | 2u64
-        | 0u64);
-    assert((0x380u64 | 2u64 | 0u64) & 2u64 != 0) by (bit_vector);
-    assert(0x380u64 & 2u64 == 0) by (bit_vector);
-    assert(exists|p: Auth, base: Caps, grant: Caps, delegated: Caps, b: Caps|
-        #![trigger broken_spawn_unbounded(p, base, grant, delegated) & b]
-        !has_launch(p.caps) && (base & b) == 0 && (p.caps & b) == 0 && (broken_spawn_unbounded(
-            p,
-            base,
-            grant,
-            delegated,
-        ) & b) != 0);
+    let dropped_fate = Auth { caps: 0x180 };
+    assert(0u64 & !0x180u64 == 0) by (bit_vector);
+    assert(endow_permitted(dropped_fate, 0));
+    assert(0x180u64 & 0x200u64 == 0) by (bit_vector);
+    assert((0x380u64 | 0u64) & 0x200u64 != 0) by (bit_vector);
+    assert(exists|p: Auth, ask: Caps, b: Caps|
+        #![trigger broken_spawn_hands_universal(p, ask) & b]
+        endow_permitted(p, ask) && (p.caps & b) == 0 && (broken_spawn_hands_universal(p, ask) & b)
+            != 0) by {
+        assert(broken_spawn_hands_universal(dropped_fate, 0) == 0x380u64 | 0u64);
+    }
 }
 
-/// BROKEN: the spawn bound written as an intersection with the parent's own
-/// authority — the tempting mistake S3 names.
-pub open spec fn broken_spawn_intersects_parent(
-    parent: Auth,
-    base: Caps,
-    grant: Caps,
-    delegated: Caps,
-) -> Caps {
-    base | (parent.caps & grant) | delegation(parent, delegated)
+/// BROKEN: a spawn that hands the child its spawner's whole mask —
+/// inheritance where the tree delegates.
+pub open spec fn broken_spawn_inherits(parent: Auth, ask: Caps) -> Caps {
+    parent.caps | ask
 }
 
-/// Witness that the intersection form is not merely different but WRONG: a
-/// launcher holding `Launch` and nothing else could confer no grant at all, so
-/// no privileged program could ever start, against
-/// `spawn_with_launch_confers_the_grant`.
-pub proof fn broken_spawn_intersection_starves_the_grant()
+/// Witness that S3 hands only what is asked: a spawner holding `Power` that
+/// delegates nothing still passes it on, which `spawn_is_within_the_spawner`
+/// does not catch and `spawn_hands_only_what_it_asks` does.
+pub proof fn broken_spawn_inherits_passes_power_on()
     ensures
-        exists|p: Auth, base: Caps, grant: Caps, delegated: Caps|
-            #![trigger broken_spawn_intersects_parent(p, base, grant, delegated)]
-            has_launch(p.caps) && broken_spawn_intersects_parent(p, base, grant, delegated) & grant
-                != grant,
+        exists|p: Auth, ask: Caps, b: Caps|
+            #![trigger broken_spawn_inherits(p, ask) & b]
+            (b & universal()) == 0 && (ask & b) == 0 && (broken_spawn_inherits(p, ask) & b) != 0,
 {
-    // The shell: holds `Launch`, holds no display authority.
-    let shell = Auth { caps: launch_bit(), born_with: launch_bit(), raises: 0 };
-    // `/bin/roulette`'s grant: a display bit, which the shell does not hold.
-    let display: Caps = 16;
-    assert(2u64 & 2u64 != 0) by (bit_vector);
-    assert(has_launch(shell.caps));
-    assert(0u64 & !2u64 == 0) by (bit_vector);
-    assert(delegation(shell, 0) == 0);
-    assert(broken_spawn_intersects_parent(shell, universal(), display, 0) == 0x380u64 | (2u64
-        & 16u64) | 0u64);
-    assert((0x380u64 | (2u64 & 16u64) | 0u64) & 16u64 != 16u64) by (bit_vector);
-    assert(exists|p: Auth, base: Caps, grant: Caps, delegated: Caps|
-        #![trigger broken_spawn_intersects_parent(p, base, grant, delegated)]
-        has_launch(p.caps) && broken_spawn_intersects_parent(p, base, grant, delegated) & grant
-            != grant);
+    let holder = Auth { caps: power_bit() };
+    assert(1u64 & 0x380u64 == 0) by (bit_vector);
+    assert(0u64 & 1u64 == 0) by (bit_vector);
+    assert((1u64 | 0u64) & 1u64 != 0) by (bit_vector);
+    assert(exists|p: Auth, ask: Caps, b: Caps|
+        #![trigger broken_spawn_inherits(p, ask) & b]
+        (b & universal()) == 0 && (ask & b) == 0 && (broken_spawn_inherits(p, ask) & b) != 0) by {
+        assert(broken_spawn_inherits(holder, 0) == 1u64 | 0u64);
+    }
 }
 
-/// BROKEN: delegation without the subset check — the image's delegated set
-/// handed over whether or not the spawner holds it.
-pub open spec fn broken_spawn_delegates_unheld(
-    parent: Auth,
-    base: Caps,
-    grant: Caps,
-    delegated: Caps,
-) -> Caps {
-    base | (if has_launch(parent.caps) {
-        grant
-    } else {
-        0
-    }) | delegated
+/// BROKEN: the grant table this tree deleted — a spawn that adds what the
+/// program it loads is granted.
+pub open spec fn broken_spawn_raises_a_grant(parent: Auth, ask: Caps, grant: Caps) -> Caps {
+    endow(parent, ask) | grant
 }
 
-/// Witness that S3's subset check is load-bearing: without it the shell,
-/// which holds `Launch` and no `RawBlock`, starts `mke2fs` able to write any
-/// disk raw, against `spawn_never_delegates_unheld`.
-pub proof fn broken_spawn_delegation_raises()
+/// Witness that S3 holds only because no operand names the program: a spawn
+/// granting `/bin/halt` `Power` hands it to the child of a spawner holding the
+/// universal set alone, against `spawn_is_within_the_spawner`.
+pub proof fn broken_spawn_raises_a_grant_escalates()
     ensures
-        exists|p: Auth, base: Caps, grant: Caps, delegated: Caps, b: Caps|
-            #![trigger broken_spawn_delegates_unheld(p, base, grant, delegated) & b]
-            (p.caps & b) == 0 && (base & b) == 0 && (grant & b) == 0 && (
-            broken_spawn_delegates_unheld(p, base, grant, delegated) & b) != 0,
+        exists|p: Auth, ask: Caps, grant: Caps, b: Caps|
+            #![trigger broken_spawn_raises_a_grant(p, ask, grant) & b]
+            endow_permitted(p, ask) && (p.caps & b) == 0 && (broken_spawn_raises_a_grant(
+                p,
+                ask,
+                grant,
+            ) & b) != 0,
 {
-    let shell = Auth { caps: launch_bit(), born_with: launch_bit(), raises: 0 };
-    assert(2u64 & 2u64 != 0) by (bit_vector);
-    assert(has_launch(shell.caps));
-    // `mke2fs`: no grant, `RawBlock` delegated.
-    assert(broken_spawn_delegates_unheld(shell, universal(), 0, raw_block_bit()) == 0x380u64
-        | 0u64 | 0x1_0000u64);
-    assert((0x380u64 | 0u64 | 0x1_0000u64) & 0x1_0000u64 != 0) by (bit_vector);
-    assert(2u64 & 0x1_0000u64 == 0) by (bit_vector);
-    assert(0x380u64 & 0x1_0000u64 == 0) by (bit_vector);
-    assert(0u64 & 0x1_0000u64 == 0) by (bit_vector);
-    assert(exists|p: Auth, base: Caps, grant: Caps, delegated: Caps, b: Caps|
-        #![trigger broken_spawn_delegates_unheld(p, base, grant, delegated) & b]
-        (p.caps & b) == 0 && (base & b) == 0 && (grant & b) == 0 && (broken_spawn_delegates_unheld(
-            p,
-            base,
-            grant,
-            delegated,
-        ) & b) != 0);
+    let ordinary = Auth { caps: universal() };
+    assert(0u64 & !0x380u64 == 0) by (bit_vector);
+    assert(endow_permitted(ordinary, 0));
+    assert(0x380u64 & 1u64 == 0) by (bit_vector);
+    assert((((0x380u64 & 0x380u64) | 0u64) | 1u64) & 1u64 != 0) by (bit_vector);
+    assert(exists|p: Auth, ask: Caps, grant: Caps, b: Caps|
+        #![trigger broken_spawn_raises_a_grant(p, ask, grant) & b]
+        endow_permitted(p, ask) && (p.caps & b) == 0 && (broken_spawn_raises_a_grant(p, ask, grant)
+            & b) != 0) by {
+        assert(broken_spawn_raises_a_grant(ordinary, 0, power_bit()) == ((0x380u64 & 0x380u64)
+            | 0u64) | 1u64);
+    }
+}
+
+/// BROKEN: a drop that narrows only the calling thread.
+pub open spec fn broken_drop_caller_only(p: Process, m: Caps) -> Process {
+    Process { dropped: p.dropped | m, threads: p.threads.update(0, p.threads[0] & !m) }
+}
+
+/// Witness that S4's reach is load-bearing: a sibling of the dropping thread
+/// keeps `Power`, against `caps_drop_reaches_every_thread`.
+pub proof fn broken_drop_caller_only_spares_a_sibling()
+    ensures
+        exists|p: Process, m: Caps, i: int|
+            #![trigger broken_drop_caller_only(p, m).threads[i]]
+            0 <= i < p.threads.len() && broken_drop_caller_only(p, m).threads[i] & m != 0,
+{
+    let p = Process { dropped: 0, threads: seq![power_bit(), power_bit()] };
+    let q = broken_drop_caller_only(p, power_bit());
+    assert(q.threads[1] == power_bit());
+    assert(1u64 & 1u64 != 0) by (bit_vector);
+    assert(exists|p: Process, m: Caps, i: int|
+        #![trigger broken_drop_caller_only(p, m).threads[i]]
+        0 <= i < p.threads.len() && broken_drop_caller_only(p, m).threads[i] & m != 0);
+}
+
+/// BROKEN: a drop that narrows the threads but records nothing on the process.
+pub open spec fn broken_drop_unrecorded(p: Process, m: Caps) -> Process {
+    Process { threads: p.threads.map_values(|c: Caps| c & !m), ..p }
+}
+
+/// Witness that S4's record is load-bearing: a thread whose clone read the
+/// creator's mask before the drop registers holding `Power`, against
+/// `a_thread_registered_after_lacks_it`.
+pub proof fn broken_drop_unrecorded_misses_a_racing_clone()
+    ensures
+        exists|p: Process, m: Caps, creator: Caps|
+            #![trigger register(broken_drop_unrecorded(p, m), creator)]
+            ({
+                let q = register(broken_drop_unrecorded(p, m), creator);
+                q.threads[q.threads.len() - 1] & m != 0
+            }),
+{
+    let p = Process { dropped: 0, threads: seq![power_bit()] };
+    let q = register(broken_drop_unrecorded(p, power_bit()), power_bit());
+    assert(q.threads[q.threads.len() - 1] == 1u64 & !0u64);
+    assert((1u64 & !0u64) & 1u64 != 0) by (bit_vector);
+    assert(exists|p: Process, m: Caps, creator: Caps|
+        #![trigger register(broken_drop_unrecorded(p, m), creator)]
+        ({
+            let q = register(broken_drop_unrecorded(p, m), creator);
+            q.threads[q.threads.len() - 1] & m != 0
+        }));
 }
 
 /// BROKEN: a fallible drop. Modelled as a reduction that sometimes leaves the
-/// mask untouched — what a caller that ignores an error return observes.
-pub open spec fn broken_drop_may_fail(s: Auth, mask: Caps, fails: bool) -> Caps {
+/// process untouched — what a caller that ignores an error return observes.
+pub open spec fn broken_drop_may_fail(p: Process, m: Caps, fails: bool) -> Process {
     if fails {
-        s.caps
+        p
     } else {
-        s.caps & mask
+        caps_drop(p, m)
     }
 }
 
@@ -694,19 +593,16 @@ pub open spec fn broken_drop_may_fail(s: Auth, mask: Caps, fails: bool) -> Caps 
 /// caller believes it dropped, which is the historical local-root shape.
 pub proof fn broken_fallible_drop_retains_authority()
     ensures
-        exists|s: Auth, mask: Caps, b: Caps|
-            #![trigger broken_drop_may_fail(s, mask, true) & b]
-            ((s.caps & mask) & b) == 0 && (broken_drop_may_fail(s, mask, true) & b) != 0,
+        exists|p: Process, m: Caps, i: int|
+            #![trigger broken_drop_may_fail(p, m, true).threads[i]]
+            0 <= i < p.threads.len() && broken_drop_may_fail(p, m, true).threads[i] & m != 0,
 {
-    let privileged = Auth { caps: launch_bit(), born_with: launch_bit(), raises: 0 };
-    // The program asks to drop everything.
-    assert(2u64 & 0u64 == 0) by (bit_vector);
-    assert((2u64 & 0u64) & 2u64 == 0) by (bit_vector);
-    assert(broken_drop_may_fail(privileged, 0, true) == launch_bit());
-    assert(launch_bit() & launch_bit() != 0) by (bit_vector);
-    assert(exists|s: Auth, mask: Caps, b: Caps|
-        #![trigger broken_drop_may_fail(s, mask, true) & b]
-        ((s.caps & mask) & b) == 0 && (broken_drop_may_fail(s, mask, true) & b) != 0);
+    let p = Process { dropped: 0, threads: seq![power_bit()] };
+    assert(broken_drop_may_fail(p, power_bit(), true).threads[0] == power_bit());
+    assert(1u64 & 1u64 != 0) by (bit_vector);
+    assert(exists|p: Process, m: Caps, i: int|
+        #![trigger broken_drop_may_fail(p, m, true).threads[i]]
+        0 <= i < p.threads.len() && broken_drop_may_fail(p, m, true).threads[i] & m != 0);
 }
 
 } // verus!

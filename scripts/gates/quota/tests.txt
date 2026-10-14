@@ -88,6 +88,12 @@
 # landed, whose kernel tests allocate nothing: the two highest ended 61 and 67
 # pages above the others too, the late-AP spread the boot row records, and the
 # tree before it reached 6681. The spread, and the cap is the largest.
+# The kernelmeta row after userland measured 10197 in one capture on a host
+# without KVM, 162 pages over the single capture 10035 recorded, once the shell
+# forked its registry programs instead of spawning them, two kernel tests moved
+# into the userland phase and privd_test and spawn_privilege_test began
+# starting shells, cpufreq and a descriptor probe; the phase ends holding 9927,
+# so the row follows what the suite leaves allocated.
 # The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
@@ -130,7 +136,7 @@ post-userland-tests	commitpages	193853
 post-userland-tests	custody	12
 post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	10035
+post-userland-tests	kernelmeta	10197
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308

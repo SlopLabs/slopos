@@ -2,16 +2,16 @@
 //!
 //! The utest runner hands this binary every capability as uid 0, so a refusal
 //! that is the caller's doing is shown in a forked child that dropped what it
-//! names. A spawned child holds the universal set, what its spawner delegates
-//! of its own and the kernel's grant for its path, and an exec narrows the
-//! mask to what the new image is granted.
+//! names. A spawned child holds the universal set and what its spawner
+//! delegates of its own, and an exec keeps the universal set alone.
 
 use slopos_userland as _;
 
 use slopos_abi::caps::{
     ALL as CAP_MASK_ALL, BOOT_ENTRY as CAP_BOOT_ENTRY, FATE as CAP_FATE,
-    NET_ADMIN as CAP_NET_ADMIN, RAW_BLOCK as CAP_RAW_BLOCK, SCHED_HIGH as CAP_SCHED_HIGH,
-    SET_ID as CAP_SET_ID, SYS_INSPECT as CAP_SYS_INSPECT, UNIVERSAL as CAP_UNIVERSAL,
+    NET_ADMIN as CAP_NET_ADMIN, RAW_BLOCK as CAP_RAW_BLOCK, RETIRED as CAP_RETIRED,
+    SCHED_HIGH as CAP_SCHED_HIGH, SET_ID as CAP_SET_ID, SYS_INSPECT as CAP_SYS_INSPECT,
+    UNIVERSAL as CAP_UNIVERSAL,
 };
 use slopos_abi::net::NET_IFINDEX_GLOBAL;
 use slopos_abi::spawn::{
@@ -37,8 +37,8 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::FromRawFd;
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Barrier};
 
 const EPERM: i32 = -1;
@@ -239,6 +239,10 @@ fn delegation_is_bounded_by_the_spawner() -> bool {
         spawn_asking(1 << 63, None),
         EINVAL,
     ) && expect(
+        "a retired capability bit",
+        spawn_asking(CAP_RETIRED, None),
+        EINVAL,
+    ) && expect(
         "an undefined id bit",
         spawn_attrs(MISSING, &undefined_set),
         EINVAL,
@@ -371,8 +375,7 @@ fn ordinary_spawn_still_works() -> bool {
         process::clone_fd(1, 1),
         process::clone_fd(2, 2),
     ];
-    // The kernel confers no privilege on `nc` by identity, and with no
-    // arguments it prints usage and exits.
+    // With no arguments `nc` prints usage and exits.
     let tid = spawn_raw(b"/bin/nc", PRIORITY_NORMAL, TASK_FLAG_USER_MODE, &stdio);
     if tid <= 0 {
         eprintln!("spawn_privilege_test: ordinary spawn of /bin/nc returned {tid}");
@@ -418,10 +421,10 @@ fn power_without_boot_entry() -> i32 {
     }
 }
 
-/// The binaries a grant or privd's policy names cannot be rewritten: program
-/// identity is a path, so each is only worth anything while every inode the
-/// base serves stays sealed.
-fn granted_binaries_are_sealed() -> bool {
+/// The programs init and privd's policy name, and the policy, cannot be
+/// rewritten: privd's `Base` identity is worth something only while the base
+/// stays as it booted.
+fn base_programs_are_sealed() -> bool {
     use std::fs::OpenOptions;
 
     let mut ok = true;
@@ -455,20 +458,79 @@ fn granted_binaries_are_sealed() -> bool {
     ok
 }
 
-/// A spawner without `Launch` still starts the launchers' paths, ungranted:
-/// [`spawns_without_launch`].
-fn launch_bounds_the_raise_site() -> bool {
-    match Command::new(SELF).arg(WITHOUT_LAUNCH).status() {
-        Ok(status) if status.success() => true,
-        other => {
-            eprintln!("spawn_privilege_test: the child without Launch reported {other:?}");
-            false
-        }
+/// No program earns a capability by its path: `/bin/shell`, which a grant
+/// once raised, spawned delegating nothing, is signalled by a task holding the
+/// universal set alone, while the same shell delegated `SysInspect` is not.
+fn no_program_earns_a_capability_by_its_path() -> bool {
+    let Ok((script_read, script_write)) = pipe() else {
+        eprintln!("spawn_privilege_test: pipe failed");
+        return false;
+    };
+    let delegated = Endowment {
+        caps: CAP_SYS_INSPECT,
+        ..Endowment::NONE
+    };
+    let shells =
+        [Endowment::NONE, delegated].map(|endowment| waiting_shell(script_read.raw(), endowment));
+    for (slot, pid) in WAITING_SHELLS.iter().zip(shells) {
+        slot.store(pid, Ordering::Relaxed);
     }
+    drop(script_read);
+    let ok = shells.iter().all(|&pid| pid > 0)
+        && in_forked_child("signalling the shells", signal_the_shells);
+    drop(script_write);
+    for pid in shells.into_iter().filter(|&pid| pid > 0) {
+        let _ = process::wait_exit_code(pid as u32);
+    }
+    ok
+}
+
+/// The shell spawned with nothing, then the one delegated `SysInspect`.
+static WAITING_SHELLS: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
+
+/// `/bin/shell` reading its script from `stdin`, which blocks it until the
+/// write end closes.
+fn waiting_shell(stdin: i32, endowment: Endowment<'_>) -> i32 {
+    let Ok(null) = fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR) else {
+        return -1;
+    };
+    let stdio = [
+        process::clone_fd(stdin, 0),
+        process::clone_fd(null.raw(), 1),
+        process::clone_fd(null.raw(), 2),
+    ];
+    let argv = [c"shell".as_ptr().cast()];
+    process::spawn_endowed(
+        b"/bin/shell",
+        &argv,
+        &[],
+        b"/",
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &stdio,
+        0,
+        endowment,
+    )
+}
+
+fn signal_the_shells() -> i32 {
+    caps_drop(!CAP_UNIVERSAL);
+    let [plain, delegated] = WAITING_SHELLS
+        .each_ref()
+        .map(|slot| slot.load(Ordering::Relaxed));
+    let ok = expect(
+        "signalling a shell spawned with nothing",
+        process::kill_pid(plain, 0),
+        0,
+    ) && expect(
+        "signalling a shell delegated SysInspect",
+        process::kill_pid(delegated, 0),
+        EPERM,
+    );
+    if ok { 0 } else { 2 }
 }
 
 const SELF: &str = "/bin/spawn_privilege_test";
-const WITHOUT_LAUNCH: &str = "--without-launch";
 const EXEC_PROBE: &str = "--exec-probe";
 const HOLDS: &str = "--holds";
 const RUNS_AS: &str = "--runs-as";
@@ -483,31 +545,6 @@ const BLOCK_NODES: [&str; 2] = [ROOT_DISK, "/dev/vda"];
 
 fn dumps_root_superblock() -> std::io::Result<std::process::Output> {
     Command::new(DUMPE2FS).args(["-h", ROOT_DISK]).output()
-}
-
-/// Runs in a child without Launch. A granted path it spawns runs ungranted, as
-/// its own `execve` would, rather than being refused: `sh -c` and
-/// `#!/bin/sh` scripts run.
-fn spawns_without_launch() -> i32 {
-    // SAFETY: nothing else runs in this process yet.
-    unsafe { std::env::set_var("PATH", "/bin") };
-    let sh = Command::new("sh").args(["-c", "exit 7"]).status();
-    if !matches!(&sh, Ok(status) if status.code() == Some(7)) {
-        eprintln!("spawn_privilege_test: `sh -c` without Launch ran as {sh:?}");
-        return 2;
-    }
-
-    let script = "/tmp/spawn_priv_script";
-    let staged = std::fs::write(script, "#!/bin/sh\nexit 9\n").is_ok()
-        && std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).is_ok();
-    let run = staged.then(|| Command::new(script).status());
-    let _ = std::fs::remove_file(script);
-    if !matches!(&run, Some(Ok(status)) if status.code() == Some(9)) {
-        eprintln!("spawn_privilege_test: a #!/bin/sh script without Launch ran as {run:?}");
-        return 3;
-    }
-
-    0
 }
 
 /// e2fsprogs reads a disk only when its spawner hands it `RawBlock`, as the
@@ -571,12 +608,12 @@ fn raw_read(node: &str) -> std::io::Result<()> {
     File::open(node)?.read_exact(&mut sector)
 }
 
-/// Exec narrows the mask to the new image's grant: a forked child of this
-/// process, which holds every capability, execs this binary, which no grant
-/// row names, and keeps the universal set alone. Its network change, raw disk
-/// read and signal to this process are refused; the same three succeed here
-/// first, so the refusals are the exec's doing.
-fn exec_narrows_to_the_images_grant() -> bool {
+/// Exec keeps no gated capability: a forked child of this process, which
+/// holds every capability, execs this binary and keeps the universal set
+/// alone. Its network change, raw disk read and signal to this process are
+/// refused; the same three succeed here first, so the refusals are the exec's
+/// doing.
+fn exec_drops_every_gated_capability() -> bool {
     let held = caps_drop(0);
     if held != CAP_MASK_ALL {
         eprintln!("spawn_privilege_test: the utest holds {held:#x}, want {CAP_MASK_ALL:#x}");
@@ -637,7 +674,7 @@ fn exec_narrows_to_the_images_grant() -> bool {
     ok
 }
 
-/// The exec'd half of [`exec_narrows_to_the_images_grant`]. Answers once the
+/// The exec'd half of [`exec_drops_every_gated_capability`]. Answers once the
 /// parent closes the gate.
 fn exec_probe(args: &[String]) -> i32 {
     let [gate, node, parent] = args else {
@@ -831,9 +868,12 @@ const CASES: &[(&str, fn() -> bool)] = &[
         user_settable_flags_reach_exec,
     ),
     ("ordinary_spawn_still_works", ordinary_spawn_still_works),
-    ("granted_binaries_are_sealed", granted_binaries_are_sealed),
-    ("grant_directories_are_sealed", grant_directories_are_sealed),
-    ("launch_bounds_the_raise_site", launch_bounds_the_raise_site),
+    ("base_programs_are_sealed", base_programs_are_sealed),
+    ("base_directories_are_sealed", base_directories_are_sealed),
+    (
+        "no_program_earns_a_capability_by_its_path",
+        no_program_earns_a_capability_by_its_path,
+    ),
     (
         "e2fsprogs_takes_raw_block_from_its_spawner",
         e2fsprogs_takes_raw_block_from_its_spawner,
@@ -843,8 +883,8 @@ const CASES: &[(&str, fn() -> bool)] = &[
         power_alone_reaches_no_boot_entry,
     ),
     (
-        "exec_narrows_to_the_images_grant",
-        exec_narrows_to_the_images_grant,
+        "exec_drops_every_gated_capability",
+        exec_drops_every_gated_capability,
     ),
     ("caps_drop_is_process_wide", caps_drop_is_process_wide),
     (
@@ -853,11 +893,12 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ),
 ];
 
-/// A sealed binary is only as safe as the directory that names it: rename
-/// `/bin` aside, `mkdir /bin`, plant a `shell`, and the grant table keyed on
-/// `/bin/shell` confers Launch on whatever was planted. So the directory refuses
-/// rename, and refuses a create or unlink beneath it, on whichever root booted.
-fn grant_directories_are_sealed() -> bool {
+/// A sealed program is only as safe as the directory that names it: privd
+/// starts an action's program by its path, so a `/bin` renamed aside and
+/// planted again would hand a stranger the action's capabilities. The base's
+/// directories refuse a rename, a create beneath them and their removal, on
+/// whichever root booted.
+fn base_directories_are_sealed() -> bool {
     let mut ok = true;
     for dir in ["/bin", "/sbin", "/lib"] {
         if std::fs::rename(dir, "/spawn_priv_moved").is_ok() {
@@ -963,7 +1004,6 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some(SESSION) => slopos_slibc::test_harness::run(SESSION_CASES),
-        Some(WITHOUT_LAUNCH) => std::process::exit(spawns_without_launch()),
         Some(EXEC_PROBE) => std::process::exit(exec_probe(&args[2..])),
         Some(HOLDS) => std::process::exit(holds(&args[2..])),
         Some(RUNS_AS) => std::process::exit(runs_as(&args[2..])),

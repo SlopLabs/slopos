@@ -508,9 +508,6 @@ install_binary() {
     debugfs -w -R "rm $dst" "$IMAGE_PATH" >/dev/null 2>&1 || true
     debugfs -w -R "write $src $dst" "$IMAGE_PATH" >/dev/null
     debugfs -w -R "set_inode_field $dst mode 0100755" "$IMAGE_PATH" >/dev/null
-    # Program-identity privilege is keyed on a binary's path, so a shipped
-    # binary that is not sealed is one any task holding a write descriptor can
-    # replace and then spawn into the grant.
     seal "$dst"
 }
 
@@ -659,7 +656,6 @@ install_base() {
         install_binary "$src" "$dst"
     done
 
-    # A symlink, so the exec grant keyed on `/bin/shell` follows `/bin/sh`.
     for bin in "${BINS[@]}"; do
         if [ "$bin" = "shell" ]; then
             debugfs -w -R "rm /bin/sh" "$IMAGE_PATH" >/dev/null 2>&1 || true
@@ -681,7 +677,7 @@ install_base() {
         set -f
         for tool in $COREUTILS_LINKS; do
             # This runs after the binaries are installed, so a name in both
-            # lists would replace a program -- and inherit its grant.
+            # lists would replace a program.
             for bin in "${BINS[@]}"; do
                 if [ "$tool" = "$bin" ]; then
                     echo "COREUTILS_LINKS name '$tool' collides with an installed binary" >&2
@@ -721,8 +717,6 @@ install_base() {
         install_binary "${BUILD_DIR}/${so}" "/lib/${so}"
     done
 
-    # A sealed directory cannot be renamed aside to plant a fresh /bin/shell
-    # under the path its grant is keyed on, or a /bin/bootctl for privd.
     seal /bin
     seal /sbin
     seal /lib

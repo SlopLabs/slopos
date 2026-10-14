@@ -852,8 +852,7 @@ pub const SYSCALL_KCONSOLE: u64 = SYSCALL_PRIVATE_BASE + 42;
 /// ([`crate::caps`] bits) from every task of the calling process for good.
 /// Total: it has no error, and a bit the caller does not hold, or no
 /// capability names, is simply not held afterwards. A task the process creates
-/// afterwards holds none of them but what a spawn's program-identity grant
-/// confers through a `Launch` the process kept.
+/// afterwards holds none of them.
 pub const SYSCALL_CAPS_DROP: u64 = SYSCALL_PRIVATE_BASE + 43;
 
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one

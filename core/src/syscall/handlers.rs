@@ -367,13 +367,12 @@ pub const SYSCALL_ENTRY_COUNT: usize = 190;
 /// point to a capability that had none still moves a number here.
 /// `Unimplemented` is the absence of a handler, so its count is 0 by
 /// construction and the assert below holds it there.
-const CAP_COUNTS: [(Capability, usize); 24] = [
+const CAP_COUNTS: [(Capability, usize); Capability::ALL.len()] = [
     (Capability::Unimplemented, 0),
     (Capability::NoneSelf, 71),
     (Capability::NoneFd, 81),
     (Capability::NoneRelation, 13),
     (Capability::Power, 4),
-    (Capability::Launch, 0),
     (Capability::ProcSignal, 0),
     (Capability::SysInspect, 2),
     (Capability::DisplaySeat, 1),
@@ -395,13 +394,6 @@ const CAP_COUNTS: [(Capability, usize); 24] = [
 ];
 
 const _: () = {
-    // Every capability the enum defines is recorded here: a new variant that
-    // nobody adds a row for fails this, rather than silently counting zero.
-    assert!(
-        CAP_COUNTS.len() == Capability::ALL.len(),
-        "every Capability needs a row in CAP_COUNTS",
-    );
-
     let mut i = 0;
     let mut total = 0;
     while i < CAP_COUNTS.len() {
@@ -456,6 +448,6 @@ const _: () = {
 };
 
 /// Per-capability entry-point counts, for the boot-time dump and the tests.
-pub fn cap_counts() -> &'static [(Capability, usize); 24] {
+pub fn cap_counts() -> &'static [(Capability, usize); Capability::ALL.len()] {
     &CAP_COUNTS
 }

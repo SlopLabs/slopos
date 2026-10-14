@@ -13,7 +13,7 @@ fn test_ifconfig() -> bool {
     tokens.push_token(b"ifconfig");
     let rc = shell::exec::execute_tokens(&tokens);
     eprintln!("io_capture_test: ifconfig exit={}", rc);
-    // Any exit code passes; this only checks ifconfig spawns via the registry.
+    // Any exit code passes: this only checks the registry's alias runs.
     true
 }
 

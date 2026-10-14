@@ -2,7 +2,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
-use slopos_abi::syscall::{F_GETFD, FD_CLOEXEC};
+use slopos_abi::syscall::{F_GETFD, F_SETFD, FD_CLOEXEC};
 use slopos_slibc::pal::{Pal, Sys};
 
 pub mod args;
@@ -114,20 +114,36 @@ pub fn shell_pid() -> u32 {
     SHELL_PID.load(Ordering::Relaxed)
 }
 
-/// The privd connection this shell inherited, for `program` spawned by the
-/// shell process itself while no earlier holder lives: two requesters reading
-/// one connection could each take the other's replies, and a forked subshell,
-/// a pipeline stage or a stopped job may run beside the next.
+/// The privd connection this shell inherited, for the mechanism `program`
+/// run by the shell process itself while no earlier holder lives and the
+/// environment names the connection: two requesters reading one connection
+/// could each take the other's replies, a forked subshell, a pipeline stage or
+/// a stopped job may run beside the next, and a mechanism keeps back from what
+/// it starts only the connection its environment names.
 pub fn privd_for(program: &str) -> Option<i32> {
+    let fd = crate::privd::inherited_fd().filter(|&fd| close_on_exec(fd) && named(fd))?;
     let holder = PRIVD_HOLDER.load(Ordering::Relaxed);
     let free = holder == 0 || crate::syscall::process::kill(holder, 0) != 0;
-    if !free || std::process::id() != shell_pid() || !crate::privd::takes_connection(program) {
-        return None;
+    (free && std::process::id() == shell_pid() && crate::privd::is_mechanism(program)).then_some(fd)
+}
+
+/// In the child forked for the program [`privd_for`] gave `fd` for, let `fd`
+/// reach what it execs, unless a redirection replaced or closed it.
+pub fn privd_pass_on(fd: i32) {
+    if close_on_exec(fd) {
+        let _ = Sys::fcntl(fd, F_SETFD as i32, 0);
     }
-    // A redirection of this command may have closed or replaced it.
-    crate::privd::inherited_fd().filter(|&fd| {
-        Sys::fcntl(fd, F_GETFD as i32, 0).is_ok_and(|flags| flags as u64 & FD_CLOEXEC != 0)
-    })
+}
+
+/// Whether `fd` is still the connection: a redirection onto its number
+/// leaves a descriptor without the flag.
+fn close_on_exec(fd: i32) -> bool {
+    Sys::fcntl(fd, F_GETFD as i32, 0).is_ok_and(|flags| flags as u64 & FD_CLOEXEC != 0)
+}
+
+fn named(fd: i32) -> bool {
+    let var = slopos_priv_core::ENV_FD.as_bytes();
+    env::is_exported(var) && env::get(var) == Some(fd.to_string().into_bytes())
 }
 
 /// `pid` was handed the connection [`privd_for`] gave.

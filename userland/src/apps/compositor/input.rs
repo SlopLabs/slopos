@@ -4,7 +4,6 @@ use slopos_abi::task::TaskPriority;
 use slopos_chrome_core::Rect as ChromeRect;
 use slopos_chrome_core::status::StatusKind;
 
-use crate::program_registry;
 use crate::syscall::{UserWindowInfo, input, process, tty};
 use crate::theme::*;
 use std::time::Instant;
@@ -920,11 +919,7 @@ impl InputHandler {
     /// keyed by the protocol bridge's surface pseudo-ids, and the two id spaces
     /// never match. `sync_keyboard_focus` picks the window up once it maps.
     fn spawn_program(&mut self, path: &str) {
-        let tid = if let Some(spec) = program_registry::resolve_program_path(path) {
-            process::spawn_path_with_attrs(spec.path.as_bytes(), spec.priority, spec.flags)
-        } else {
-            process::spawn_path_with_attrs(path.as_bytes(), TaskPriority::Normal, 0)
-        };
+        let tid = process::spawn_path_with_attrs(path.as_bytes(), TaskPriority::Normal, 0);
         if tid <= 0 {
             tty::write(b"COMPOSITOR: spawn failed for program\n");
         }

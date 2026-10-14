@@ -220,7 +220,6 @@ fn layout(
         };
         add(path, MODE_EXEC, data);
     }
-    // A symlink, so the exec grant keyed on `/bin/shell` follows `/bin/sh`.
     if programs.iter().any(|p| p == "shell") {
         add("/bin/sh".into(), MODE_LINK, b"shell".to_vec());
     }

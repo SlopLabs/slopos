@@ -517,7 +517,7 @@ pub fn test_program_path_over_the_limit_is_refused() -> TestResult {
 }
 
 /// A relative program path resolves against the caller's working directory,
-/// and the canonical answer is what the grant table keys on.
+/// to the canonical path the loader opens.
 pub fn test_program_path_resolves_against_the_cwd() -> TestResult {
     const DIR: &[u8] = b"/tmp/exec_rel";
     const FULL: &[u8] = b"/tmp/exec_rel/prog";
@@ -1427,118 +1427,6 @@ slopos_testing::stest!(
     suite = exec
 );
 
-/// The grant table is the sole source of capabilities a spawn adds. `/sbin/init`
-/// is the load-bearing negative case: granting it would let any task re-spawn
-/// it and inherit what init holds.
-pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
-    use slopos_ostd::authority::{CAP_NONE, Capability};
-    use slopos_testing::assert_test;
-
-    use super::grants::{delegated_for, grant_for};
-
-    const LAUNCH: u64 = Capability::Launch.bit();
-
-    assert_test!(
-        grant_for(b"/bin/compositor") == CAP_NONE,
-        "the compositor holds what init delegates, never a grant"
-    );
-    assert_test!(
-        grant_for(b"/bin/terminal") == LAUNCH && grant_for(b"/bin/remoted") == LAUNCH,
-        "the terminal and remoted must be granted Launch alone"
-    );
-    assert_test!(
-        grant_for(b"/bin/roulette") == Capability::DisplaySeat.bit(),
-        "roulette must be granted the display seat alone"
-    );
-    for test in [
-        &b"/bin/seat_test"[..],
-        b"/bin/mount_test",
-        b"/bin/install_test",
-        b"/bin/installer_test",
-        b"/bin/dns_concurrent_test",
-        b"/bin/dl_secure_probe",
-    ] {
-        assert_test!(
-            grant_for(test) == CAP_NONE,
-            "a test holds what its declaration or its spawner gives it, never a grant"
-        );
-    }
-    for mechanism in [
-        &b"/bin/keymap"[..],
-        b"/bin/bootctl",
-        b"/bin/installer",
-        b"/bin/halt",
-        b"/sbin/mke2fs",
-        b"/sbin/privd",
-    ] {
-        assert_test!(
-            grant_for(mechanism) == CAP_NONE && delegated_for(mechanism) == CAP_NONE,
-            "a mechanism holds what privd's action or its spawner delegates, never a grant"
-        );
-    }
-
-    assert_test!(
-        grant_for(INIT_PATH) == CAP_NONE,
-        "init must not be grantable: what it holds stays the kernel's to give"
-    );
-    // The shell is a launcher, not an ordinary program: it holds `Launch` and
-    // nothing else, so it may spawn a program whose identity earns authority
-    // without holding any of that authority itself.
-    assert_test!(
-        grant_for(b"/bin/shell") == LAUNCH,
-        "the shell must be granted Launch and nothing more"
-    );
-    assert_test!(
-        grant_for(b"/bin/file_manager") == CAP_NONE,
-        "an ordinary program must get nothing"
-    );
-    assert_test!(
-        grant_for(b"/bin/./shell") == CAP_NONE,
-        "a non-canonical spelling must fail closed rather than be normalised"
-    );
-    assert_test!(
-        grant_for(b"") == CAP_NONE,
-        "the empty path must get nothing"
-    );
-
-    use super::grants::covers_grant_path;
-    assert_test!(
-        covers_grant_path(b"/bin"),
-        "/bin holds every grant path and must be uncoverable"
-    );
-    assert_test!(
-        covers_grant_path(b"/"),
-        "the root is an ancestor of every grant path"
-    );
-    assert_test!(
-        covers_grant_path(b"/bin/shell"),
-        "a grant path itself must be uncoverable"
-    );
-    assert_test!(
-        !covers_grant_path(b"/bindings"),
-        "a prefix that is not a component boundary must not match"
-    );
-    assert_test!(
-        !covers_grant_path(b"/bin/shell/deeper"),
-        "a path below a grant path covers nothing: no grant is keyed under it"
-    );
-    assert_test!(
-        !covers_grant_path(b"/tmp"),
-        "an ordinary directory must stay mountable"
-    );
-    assert_test!(
-        covers_grant_path(b"/lib"),
-        "the interpreter runs before the program, so its directory is uncoverable"
-    );
-
-    TestResult::Pass
-}
-
-slopos_testing::stest!(
-    name = test_program_grants_are_keyed_on_exact_path,
-    suite = exec
-);
-
 /// The raw-device right frees a process of the per-process block ceiling
 /// where a spawn confers it, `Mount` does not, and an `execve` that gives the
 /// right up holds the process to the ceiling again.
@@ -1573,11 +1461,7 @@ pub fn test_the_block_ceiling_follows_the_raw_device_right() -> TestResult {
     task_set_caps(&task, CAP_UNIVERSAL | Capability::RawBlock.bit());
     fit_disk_blocks(account, task_caps(&task));
     let holding = limit();
-    let Ok(sleep) = slopos_fs::vfs::canon::canonicalise_at(b"/bin/sleep", b"/") else {
-        task_terminate(id);
-        return slopos_testing::fail!("no path for /bin/sleep");
-    };
-    super::narrow_authority_for_exec(&task, id, &sleep, true);
+    super::drop_authority_for_exec(&task, id);
     let gave_up = (
         limit(),
         mask_permits(task_caps(&task), Capability::RawBlock),
@@ -1601,12 +1485,9 @@ slopos_testing::stest!(
     suite = exec
 );
 
-/// A task each grant row's spawn would build, exec'ing an image with no row,
-/// keeps exactly the universal set. `NetAdmin` and the raw block right are
-/// gone, and the signal relation follows: an ordinary task that could not
-/// signal it before can now, and it can no longer signal a `NetAdmin` holder.
-/// Init's and the test runner's mask is narrowed the same.
-pub fn test_exec_of_an_ungranted_image_drops_every_grant() -> TestResult {
+/// An exec keeps only the universal capabilities a task held, whatever it
+/// held, and the signal relation follows the narrowed mask.
+pub fn test_exec_drops_every_gated_capability() -> TestResult {
     use core::ffi::c_char;
     use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
     use slopos_ostd::authority::{CAP_UNIVERSAL, Capability};
@@ -1614,7 +1495,7 @@ pub fn test_exec_of_an_ungranted_image_drops_every_grant() -> TestResult {
 
     let user_task = |caps: u64| {
         let id = task_create(
-            b"GrantExecTest\0".as_ptr() as *const c_char,
+            b"ExecDropTest\0".as_ptr() as *const c_char,
             slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
             core::ptr::null_mut(),
             1,
@@ -1625,87 +1506,70 @@ pub fn test_exec_of_an_ungranted_image_drops_every_grant() -> TestResult {
         }
         id
     };
-    let subject_id = user_task(CAP_UNIVERSAL);
     let net_admin_id = user_task(CAP_UNIVERSAL | Capability::NetAdmin.bit());
-    let outcome = exec_drops_grants_body(subject_id, net_admin_id);
-    for id in [subject_id, net_admin_id] {
-        if id != INVALID_TASK_ID {
-            task_terminate(id);
-        }
+    let outcome = exec_drop_body(user_task, net_admin_id);
+    if net_admin_id != INVALID_TASK_ID {
+        task_terminate(net_admin_id);
     }
     return match outcome {
         Ok(()) => TestResult::Pass,
         Err(msg) => slopos_testing::fail!("{}", msg),
     };
 
-    fn exec_drops_grants_body(subject_id: u32, net_admin_id: u32) -> Result<(), &'static str> {
+    fn exec_drop_body(
+        user_task: impl Fn(u64) -> u32,
+        net_admin_id: u32,
+    ) -> Result<(), &'static str> {
         use crate::syscall::signal::signal_dominates;
-        use slopos_ostd::authority::{
-            CAP_MASK_ALL, CAP_NONE, CAP_UNIVERSAL, Capability, mask_permits,
-        };
-        use slopos_ostd::task::ops::{task_caps, task_set_caps};
+        use slopos_ostd::authority::{CAP_MASK_ALL, CAP_UNIVERSAL, Capability};
+        use slopos_ostd::task::ops::task_caps;
 
-        use super::grants::{delegated_for, grant_for, granted_paths};
-
-        let subject = slopos_sched::task::task_find_by_id(subject_id)
-            .ok_or("failed to create the subject task")?;
         let net_admin = slopos_sched::task::task_find_by_id(net_admin_id)
             .ok_or("failed to create the NetAdmin task")?;
-        let sleep = slopos_fs::vfs::canon::canonicalise_at(b"/bin/sleep", b"/")
-            .map_err(|_| "no path for /bin/sleep")?;
-        if grant_for(sleep.as_bytes()) != CAP_NONE || delegated_for(sleep.as_bytes()) != CAP_NONE {
-            return Err("/bin/sleep has a grant row, so it cannot stand for an ungranted image");
-        }
-
-        if granted_paths().next().is_none() {
-            return Err("the grant table names no program");
-        }
-        let spawned = granted_paths().map(|path| {
-            let row = grant_for(path) | delegated_for(path);
-            (path, CAP_UNIVERSAL | row, row)
-        });
-        let init = (&b"/sbin/init"[..], CAP_MASK_ALL, CAP_MASK_ALL);
-        for (path, before, row) in spawned.chain([init]) {
-            task_set_caps(&subject, before);
-            if task_caps(&subject) & row != row {
-                slopos_ostd::klog_info!("{:?} lacks its row", core::str::from_utf8(path));
-                return Err("a granted task does not hold its row");
+        let gated = Capability::ALL
+            .iter()
+            .filter(|cap| cap.is_gated() && cap.bit() & CAP_UNIVERSAL == 0)
+            .map(|cap| CAP_UNIVERSAL | cap.bit());
+        let fate = Capability::Fate.bit();
+        let wholes = [
+            CAP_MASK_ALL,
+            (CAP_UNIVERSAL & !fate) | Capability::NetAdmin.bit(),
+        ];
+        for before in gated.chain(wholes) {
+            let id = user_task(before);
+            let subject = slopos_sched::task::task_find_by_id(id);
+            let outcome = subject
+                .as_ref()
+                .ok_or("failed to create the subject task")
+                .and_then(|subject| {
+                    if task_caps(subject) != before {
+                        return Err("the subject does not hold the mask it was given");
+                    }
+                    if signal_dominates(CAP_UNIVERSAL, subject) {
+                        return Err("an ordinary task dominates a task holding a gated capability");
+                    }
+                    super::drop_authority_for_exec(subject, id);
+                    let after = task_caps(subject);
+                    if after != before & CAP_UNIVERSAL {
+                        slopos_ostd::klog_info!("exec: {:#x} -> {:#x}", before, after);
+                        return Err("an exec kept more, or less, than the universal set it held");
+                    }
+                    if !signal_dominates(CAP_UNIVERSAL, subject) {
+                        return Err("an ordinary task cannot signal a task an exec narrowed");
+                    }
+                    if signal_dominates(after, &net_admin) {
+                        return Err("a task an exec narrowed still dominates a NetAdmin holder");
+                    }
+                    Ok(())
+                });
+            drop(subject);
+            if id != INVALID_TASK_ID {
+                slopos_sched::task::task_terminate(id);
             }
-            if row & !CAP_UNIVERSAL != 0 && signal_dominates(CAP_UNIVERSAL, &subject) {
-                slopos_ostd::klog_info!("{:?} signalable", core::str::from_utf8(path));
-                return Err("an ordinary task dominates a granted one before its exec");
-            }
-
-            super::narrow_authority_for_exec(&subject, subject_id, &sleep, true);
-            let after = task_caps(&subject);
-            let failure = if mask_permits(after, Capability::NetAdmin)
-                || mask_permits(after, Capability::RawBlock)
-            {
-                Some("NetAdmin or the raw block right survived an ungranted exec")
-            } else if after != CAP_UNIVERSAL {
-                Some("an exec of an ungranted image kept more than the universal set")
-            } else if !signal_dominates(CAP_UNIVERSAL, &subject) {
-                Some("an ordinary task cannot signal a task narrowed to the universal set")
-            } else if signal_dominates(after, &net_admin) {
-                Some("a narrowed task still dominates a NetAdmin holder")
-            } else {
-                None
-            };
-            if let Some(failure) = failure {
-                slopos_ostd::klog_info!(
-                    "{:?}: {:#x} -> {:#x}",
-                    core::str::from_utf8(path),
-                    before,
-                    after
-                );
-                return Err(failure);
-            }
+            outcome?;
         }
         Ok(())
     }
 }
 
-slopos_testing::stest!(
-    name = test_exec_of_an_ungranted_image_drops_every_grant,
-    suite = exec
-);
+slopos_testing::stest!(name = test_exec_drops_every_gated_capability, suite = exec);

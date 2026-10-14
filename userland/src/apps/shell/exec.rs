@@ -747,20 +747,6 @@ fn run_simple(cmd: &Command, assigns: &[Word], words: &[Word]) -> Outcome {
         return outcome;
     }
 
-    if let Some(spec) = registry_spec(&argv[0]) {
-        let saved_env = apply_assignments(&pairs, true);
-        let outcome = match Applied::install(&cmd.redirects) {
-            Some(applied) => {
-                let status = spawn_registry_program(spec, &argv, false);
-                applied.undo();
-                Outcome::normal(status)
-            }
-            None => Outcome::normal(1),
-        };
-        restore_assignments(saved_env);
-        return outcome;
-    }
-
     spawn_external(cmd, &pairs, &argv, false)
 }
 
@@ -1386,19 +1372,24 @@ fn become_command(cmd: &Command) -> ! {
     sys_core::exit_with_code(traps::run_exit_trap(outcome.status));
 }
 
-/// The tail of a forked child running an external program. A file the kernel
-/// refuses as `ENOEXEC` runs as a script of this shell (XCU 2.9.1.1).
+/// The tail of a forked child running an external program.
 fn exec_external(argv: &[Vec<u8>]) -> ! {
     let mut path_buf = buffers::path_scratch();
     if !resolve_exec_path(&argv[0], Search::Environment, &mut path_buf) {
         shell_error_named(&argv[0], b"not found");
         sys_core::exit_with_code(STATUS_NOT_FOUND);
     }
+    exec_path(&path_buf, argv, true)
+}
+
+/// Exec `path_buf`, a NUL-terminated path. With `script_fallback`, a file the
+/// kernel refuses as `ENOEXEC` runs as a script of this shell (XCU 2.9.1.1).
+fn exec_path(path_buf: &[u8], argv: &[Vec<u8>], script_fallback: bool) -> ! {
     let (envp_owned, envp_ptrs) = build_c_envp();
     let (argv_owned, argv_ptrs) = build_c_argv(argv);
     let mut rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
     drop(argv_owned);
-    if rc == slopos_abi::Errno::ENOEXEC.raw() as i64 {
+    if script_fallback && rc == slopos_abi::Errno::ENOEXEC.raw() as i64 {
         let path_len = path_buf
             .iter()
             .position(|&b| b == 0)
@@ -1457,6 +1448,7 @@ fn spawn_external(
     argv: &[Vec<u8>],
     background: bool,
 ) -> Outcome {
+    let handoff = privd_handoff(pairs, &argv[0]);
     let pid = process::fork();
     if pid < 0 {
         shell_error(b"sh: cannot fork\n");
@@ -1466,9 +1458,18 @@ fn spawn_external(
         child_setup(0, !background);
         apply_assignments(pairs, false);
         install_redirects_in_child(&cmd.redirects);
-        exec_external(argv);
+        match &handoff {
+            Some((fd, path)) => {
+                super::privd_pass_on(*fd);
+                exec_path(path, argv, false)
+            }
+            None => exec_external(argv),
+        }
     }
     let child = pid as u32;
+    if handoff.is_some() {
+        super::privd_handed(child);
+    }
     if super::is_interactive() {
         let _ = process::setpgid(child, child);
     }
@@ -1480,67 +1481,25 @@ fn spawn_external(
     Outcome::normal(finish_foreground(child, child, &argv[0]))
 }
 
-/// A registry program: one the kernel gives special authority or placement,
-/// spawned rather than forked so the grant is applied to a fresh task.
-fn spawn_registry_program(
-    spec: &'static program_registry::ProgramSpec,
-    argv: &[Vec<u8>],
-    background: bool,
-) -> i32 {
-    // A foreground job gets its own pgrp and the kernel-side handoff, so it is
-    // the terminal's foreground group before its first fd-0 read.  Only a shell
-    // that owns the terminal may ask: the kernel resolves the handoff from the
-    // inherited controlling tty, so a script shell would hand the *user's*
-    // foreground group to the child with no way to restore it.
-    let spawn_flags = if background || !super::is_interactive() {
-        spec.flags
-    } else {
-        spec.flags | slopos_abi::task::TASK_FLAG_NEW_PGRP | slopos_abi::task::TASK_FLAG_FOREGROUND
-    };
-
-    let (argv_owned, argv_ptrs) = build_c_argv(argv);
-    let (envp_owned, envp_ptrs) = build_c_envp();
-
-    // Cloning the shell's own 0/1/2 keeps `isatty(1)` true for the child, so
-    // its stdio stays line-buffered and output appears as it is produced — and
-    // it is what carries an applied redirection into the child.
-    let mut actions = vec![
-        process::clone_fd(0, 0),
-        process::clone_fd(1, 1),
-        process::clone_fd(2, 2),
-    ];
-    let privd = super::privd_for(spec.path);
-    actions.extend(privd.map(|fd| process::clone_fd(fd, fd)));
-    let tid = process::spawn_path_with_env(
-        spec.path.as_bytes(),
-        &argv_ptrs[..argv.len()],
-        &envp_ptrs[..envp_owned.len()],
-        spec.priority,
-        spawn_flags,
-        &actions,
-        0,
-    );
-    drop(argv_owned);
-    drop(envp_owned);
-
-    if tid <= 0 {
-        shell_error(b"sh: spawn failed\n");
-        return 1;
+/// The privd connection and the NUL-terminated mechanism `name` resolves to,
+/// which the child execs holding it. Not for a command assigning `PATH` or
+/// `PRIVD_FD`.
+fn privd_handoff(pairs: &[(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<(i32, Vec<u8>)> {
+    crate::privd::inherited_fd()?;
+    let reassigned = [b"PATH".as_slice(), slopos_priv_core::ENV_FD.as_bytes()];
+    if pairs
+        .iter()
+        .any(|(var, _)| reassigned.contains(&var.as_slice()))
+    {
+        return None;
     }
-    let pid = tid as u32;
-    if privd.is_some() {
-        super::privd_handed(pid);
+    let mut path = buffers::path_scratch();
+    if !resolve_exec_path(name, Search::Environment, &mut path) {
+        return None;
     }
-    if background {
-        register_background(pid, &argv[0]);
-        return 0;
-    }
-    // Idempotent: the child already has this pgid via TASK_FLAG_NEW_PGRP.
-    if super::is_interactive() {
-        let _ = process::setpgid(pid, pid);
-    }
-    enter_foreground(pid);
-    finish_foreground(pid, pid, &argv[0])
+    let len = path.iter().position(|&b| b == 0)?;
+    let fd = super::privd_for(core::str::from_utf8(&path[..len]).ok()?)?;
+    Some((fd, path[..=len].to_vec()))
 }
 
 /// A pipeline of two or more stages: one pipe between each pair, one fork per

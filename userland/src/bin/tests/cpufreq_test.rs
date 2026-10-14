@@ -134,7 +134,7 @@ fn test_run_passes_the_exit_status_on() -> bool {
     true
 }
 
-/// Without the Power grant (`EPERM`) or without HWP (`EOPNOTSUPP`) the
+/// Without `Power` (`EPERM`) or without HWP (`EOPNOTSUPP`) the
 /// change is refused, said so, and nothing crashes.
 fn test_unsupported_set_fails_cleanly() -> bool {
     let Some(out) = spawn("/bin/cpufreq", &["set", "epp", "performance"]) else {
