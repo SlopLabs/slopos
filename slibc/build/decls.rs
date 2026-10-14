@@ -1580,7 +1580,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         includes: &["sys/types.h"],
         types: &[],
         consts: &["PROT_*", "MAP_*", "MS_*", "MADV_*"],
-        slibc_consts: &[],
+        slibc_consts: &["MFD_CLOEXEC"],
         macros: &[],
         functions: &[
             "mmap",
@@ -1594,6 +1594,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[
             "mlock(addr: *const c_void, len: size_t) -> c_int",
             "munlock(addr: *const c_void, len: size_t) -> c_int",
+            "memfd_create(name: *const c_char, flags: c_uint) -> c_int",
         ],
         variables: &[],
         raw: &[],

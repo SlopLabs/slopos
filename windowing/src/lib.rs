@@ -24,10 +24,8 @@ pub mod app;
 pub mod clipboard;
 pub mod connection;
 pub mod event;
-pub(crate) mod memfd_buf;
 pub mod soft_surface;
 pub mod surface;
-pub(crate) mod sys;
 pub mod window;
 
 pub use app::{ControlFlow, WindowedApp, run};
@@ -49,5 +47,5 @@ pub use slopos_gfx::HeadlessSurface;
 /// Get monotonic time in milliseconds.
 #[inline]
 pub fn get_time_ms() -> u64 {
-    sys::get_time_ms()
+    slopos_cabi::monotonic_ms()
 }

@@ -44,13 +44,13 @@ pub type ProtocolHandle = Rc<Protocol>;
 /// refuses this client's version refuses it every time.
 pub fn connect() -> Result<ProtocolHandle, ()> {
     for _ in 0..10 {
-        let connected = Client::connect(&crate::sys::compositor_socket())
+        let connected = Client::connect(&slopos_protocol::socket_path(slopos_cabi::geteuid()))
             .and_then(|mut client| client.ensure_output_info().map(|()| client));
         let client = match connected {
             Ok(client) => client,
             Err(ProtocolError::VersionMismatch) => return Err(()),
             Err(_) => {
-                crate::sys::sleep_ms(200);
+                slopos_cabi::sleep_ms(200);
                 continue;
             }
         };
@@ -62,7 +62,7 @@ pub fn connect() -> Result<ProtocolHandle, ()> {
 
         // Self-pipe: lets UiSender::post() wake a poll()-sleeping UI thread.
         let (wakeup_read_fd, wakeup_write_fd) =
-            crate::sys::pipe2(slopos_abi::syscall::posix::O_NONBLOCK as u32)?;
+            slopos_cabi::pipe2(slopos_abi::syscall::posix::O_NONBLOCK as i32).map_err(drop)?;
 
         return Ok(Rc::new(Protocol {
             client: RefCell::new(client),
@@ -200,7 +200,7 @@ impl Protocol {
                 revents: 0,
             },
         ];
-        let _ = crate::sys::poll(&mut fds, timeout_ms);
+        let _ = slopos_cabi::poll(&mut fds, timeout_ms.clamp(-1, i32::MAX.into()) as i32);
 
         if fds[1].revents & POLLIN != 0 {
             self.drain_wakeup();
@@ -210,14 +210,14 @@ impl Protocol {
     /// Drain the self-pipe so a pending wakeup doesn't fire again next iteration.
     pub fn drain_wakeup(&self) {
         let mut drain = [0u8; 64];
-        while crate::sys::read(self.wakeup_read_fd, &mut drain) > 0 {}
+        while slopos_cabi::read(self.wakeup_read_fd, &mut drain).is_ok_and(|n| n > 0) {}
     }
 }
 
 impl Drop for Protocol {
     fn drop(&mut self) {
-        crate::sys::close(self.wakeup_read_fd);
-        crate::sys::close(self.wakeup_write_fd);
+        let _ = slopos_cabi::close(self.wakeup_read_fd);
+        let _ = slopos_cabi::close(self.wakeup_write_fd);
     }
 }
 
@@ -238,7 +238,7 @@ impl PendingDestroys {
         if self.entries.len() < PENDING_DESTROY_CAP {
             self.entries.push((toplevel_id, surface_id));
         } else {
-            crate::sys::tty_write(b"warn: destroy queue full, surface leak\n");
+            eprintln!("warn: destroy queue full, surface leak");
         }
     }
 
@@ -274,7 +274,7 @@ impl UiQueue {
         }
         // EAGAIN (pipe full) is fine: a wakeup is already pending.
         if self.wakeup_fd >= 0 {
-            let _ = crate::sys::write(self.wakeup_fd, &[1u8]);
+            let _ = slopos_cabi::write(self.wakeup_fd, &[1u8]);
         }
     }
 

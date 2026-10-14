@@ -52,9 +52,6 @@ fn to_result(ret: u64) -> Result<u64, Errno> {
 /// scheduler tracks.
 const CPU_MASK_BYTES: usize = 8;
 
-/// `memfd_create` validates its name and keeps nothing else about it.
-const MEMFD_NAME: &[u8] = b"slopos\0";
-
 /// `reboot(2)` with the magics it demands. It only returns on failure — a
 /// task without `Capability::Power` — and there is nothing left to do then.
 fn power_off_or_spin(cmd: u64) -> ! {
@@ -1311,18 +1308,8 @@ impl Pal for Sys {
 
     /// The name is only validated, never reported: there is no `/proc` for it
     /// to appear in.
-    fn memfd_create(flags: u32) -> Result<i32, Errno> {
-        if flags & !MFD_CLOEXEC != 0 {
-            crate::errno::errno_set(crate::errno::EINVAL.raw());
-            return Err(crate::errno::EINVAL);
-        }
-        let ret = unsafe {
-            syscall2(
-                SYSCALL_MEMFD_CREATE,
-                MEMFD_NAME.as_ptr() as u64,
-                flags as u64,
-            )
-        };
+    fn memfd_create(name: *const u8, flags: u32) -> Result<i32, Errno> {
+        let ret = unsafe { syscall2(SYSCALL_MEMFD_CREATE, name as u64, flags as u64) };
         let val = to_result(ret)?;
         Ok(val as i32)
     }

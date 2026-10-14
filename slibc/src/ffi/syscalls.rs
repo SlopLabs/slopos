@@ -884,6 +884,21 @@ pub unsafe extern "C" fn mmap(
     }
 }
 
+pub const MFD_CLOEXEC: c_uint = 0x0001;
+
+/// `memfd_create(2)`: an anonymous file a descriptor names, which another
+/// process can map once it is passed the descriptor.
+///
+/// # Safety
+/// `name` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memfd_create(name: *const c_char, flags: c_uint) -> c_int {
+    match Sys::memfd_create(name as *const u8, flags) {
+        Ok(fd) => fd,
+        Err(e) => fail(e, -1),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
     match Sys::munmap(addr as *mut u8, len) {

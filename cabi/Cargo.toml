@@ -1,0 +1,19 @@
+[package]
+name = "slopos-cabi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Safe wrappers over the C library's exported functions: how the toolkit reaches the system from a program linked against libc.so"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+slopos-abi = { workspace = true }

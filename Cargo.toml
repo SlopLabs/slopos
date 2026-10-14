@@ -3,6 +3,7 @@ members = [
   "abi",
   "acpi",
   "appkit",
+  "cabi",
   "karch",
   "boot",
   "core",
@@ -99,6 +100,7 @@ slopos-arch = { path = "karch" }
 slopos-abi = { path = "abi" }
 slopos-acpi = { path = "acpi" }
 slopos-appkit = { path = "appkit" }
+slopos-cabi = { path = "cabi" }
 slopos-boot = { path = "boot" }
 slopos-core = { path = "core" }
 slopos-drivers = { path = "drivers" }

@@ -13,6 +13,7 @@
 extern "C" {
 #endif
 
+#define MFD_CLOEXEC (0x0001)
 #define MADV_DONTNEED (4)
 #define MADV_FREE (8)
 #define MADV_NORMAL (0)
@@ -44,6 +45,7 @@ int shm_open(const char *name, int oflag, mode_t mode);
 int shm_unlink(const char *name);
 int mlock(const void *addr, size_t len);
 int munlock(const void *addr, size_t len);
+int memfd_create(const char *name, unsigned int flags);
 
 #ifdef __cplusplus
 }

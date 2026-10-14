@@ -24,6 +24,4 @@ slopos-keymap-core = { workspace = true }
 slopos-font = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-protocol = { workspace = true }
-slopos-rt = { workspace = true }
-slopos-slibc = { workspace = true }
 slopos-windowing = { workspace = true }

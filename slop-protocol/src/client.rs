@@ -6,9 +6,7 @@ use crate::types::{
     Event, MAX_STRING_LEN, OutputInfo, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId,
     ToplevelId,
 };
-use slopos_abi::net::AF_UNIX;
-use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
-use slopos_slibc::pal::{Pal, Sys};
+use slopos_abi::net::{AF_UNIX, SOCK_STREAM};
 
 pub struct Client {
     conn: Connection,
@@ -32,18 +30,10 @@ impl Client {
     /// Display geometry (`OutputInfo`) is received lazily via
     /// [`ensure_output_info()`] before the first surface operation.
     pub fn connect(path: &[u8]) -> Result<Self, ProtocolError> {
-        let fd = Sys::socket(AF_UNIX as i32, slopos_abi::net::SOCK_STREAM as i32, 0)
+        let fd = slopos_cabi::socket(AF_UNIX as i32, SOCK_STREAM as i32, 0)
             .map_err(|_| ProtocolError::Io)?;
-
-        let mut addr = SockAddrUn::default();
-        addr.family = AF_UNIX;
-        let copy_len = path.len().min(UNIX_PATH_MAX - 1);
-        addr.path[..copy_len].copy_from_slice(&path[..copy_len]);
-
-        let addr_ptr = &addr as *const SockAddrUn as *const u8;
-        let addr_len = core::mem::size_of::<SockAddrUn>() as u32;
-        if Sys::connect(fd, addr_ptr, addr_len).is_err() {
-            let _ = Sys::close(fd);
+        if slopos_cabi::connect_unix(fd, path).is_err() {
+            let _ = slopos_cabi::close(fd);
             return Err(ProtocolError::Io);
         }
 
@@ -369,14 +359,14 @@ impl Client {
         }
 
         const TOTAL_TIMEOUT_MS: u64 = 10_000;
-        let start = crate::timestamp_ms();
+        let start = slopos_cabi::monotonic_ms();
         let deadline = start.saturating_add(TOTAL_TIMEOUT_MS);
 
         loop {
             let event = match self.conn.recv::<Event>()? {
                 Some(e) => e,
                 None => {
-                    let now = crate::timestamp_ms();
+                    let now = slopos_cabi::monotonic_ms();
                     if now >= deadline {
                         return Err(ProtocolError::Timeout);
                     }

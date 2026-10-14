@@ -1,9 +1,6 @@
 use slopos_abi::Canvas;
-use slopos_abi::syscall::posix::POLLIN;
 use slopos_gfx::RenderSurface;
 use slopos_protocol::types::Event as ProtocolEvent;
-use slopos_rt::Ring;
-use slopos_rt::slopfut;
 
 use slopos_windowing::Event;
 use slopos_windowing::connection;
@@ -20,12 +17,7 @@ use super::traits::{FocusPolicy, Widget};
 use super::tree;
 
 /// Run a widget-framework-driven application.
-pub fn run_app<A: App>(app: A, width: u32, height: u32) -> ! {
-    let ring = Ring::setup(16).expect("appkit: ring setup failed");
-    slopfut::block_on(ring, run_app_async(app, width, height))
-}
-
-async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
+pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
     let handle = connection::connect().expect("compositor not running");
     let mut win = Window::new(handle.clone(), width, height).expect("failed to create window");
     win.set_title(app.title());
@@ -265,32 +257,9 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
         } else {
             -1
         };
-        // A zero timeout deliberately awaits nothing.
-        if timeout_ms < 0 {
-            match slopfut::select2(
-                slopfut::poll_add(handle.compositor_fd(), POLLIN),
-                slopfut::poll_add(handle.wakeup_read_fd(), POLLIN),
-            )
-            .await
-            {
-                slopfut::Either2::A(_) => {}
-                slopfut::Either2::B(_) => handle.drain_wakeup(),
-            }
-        } else if timeout_ms > 0 {
-            // `sleep_ms` is not `Unpin`, and `select3` takes it by reference.
-            let timer: core::pin::Pin<Box<dyn core::future::Future<Output = ()>>> =
-                Box::pin(slopfut::time::sleep_ms(timeout_ms as u64));
-            match slopfut::select3(
-                slopfut::poll_add(handle.compositor_fd(), POLLIN),
-                slopfut::poll_add(handle.wakeup_read_fd(), POLLIN),
-                timer,
-            )
-            .await
-            {
-                slopfut::Either3::A(_) => {}
-                slopfut::Either3::B(_) => handle.drain_wakeup(),
-                slopfut::Either3::C(_) => {}
-            }
+        // A zero timeout deliberately waits for nothing.
+        if timeout_ms != 0 {
+            handle.wait_events(timeout_ms);
         }
     }
 }

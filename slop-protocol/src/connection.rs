@@ -9,6 +9,7 @@
 
 use crate::codec::{Decode, Encode, FdFifo};
 use crate::types::ProtocolError;
+use slopos_abi::errno::Errno;
 use slopos_abi::fs::UserIovec;
 use slopos_abi::syscall::posix::{F_SETFL, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_abi::syscall::types::UserPollFd;
@@ -16,8 +17,6 @@ use slopos_abi::syscall::{
     CMSG_DATA_OFFSET, CmsgHdr, MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS, SOL_SOCKET, cmsg_len,
     cmsg_space,
 };
-use slopos_slibc::errno;
-use slopos_slibc::pal::{Pal, Sys};
 
 const READ_BUF_SIZE: usize = 16384;
 const MAX_MSG_SIZE: usize = 8192;
@@ -47,8 +46,8 @@ const _: () = assert!(
 /// Set O_NONBLOCK on a socket FD, preserving any existing flags.
 pub fn set_nonblock(fd: i32) {
     use slopos_abi::syscall::posix::F_GETFL;
-    let flags = Sys::fcntl(fd, F_GETFL as i32, 0).unwrap_or(0) as u64;
-    let _ = Sys::fcntl(fd, F_SETFL as i32, flags | O_NONBLOCK);
+    let flags = slopos_cabi::fcntl(fd, F_GETFL as i32, 0).unwrap_or(0);
+    let _ = slopos_cabi::fcntl(fd, F_SETFL as i32, flags | O_NONBLOCK as i32);
 }
 
 pub struct Connection {
@@ -86,7 +85,7 @@ impl Connection {
             self.pending_fds[self.pending_fd_count as usize] = fd;
             self.pending_fd_count += 1;
         } else if fd >= 0 {
-            let _ = Sys::close(fd);
+            let _ = slopos_cabi::close(fd);
         }
     }
 
@@ -103,12 +102,10 @@ impl Connection {
 
         let mut sent = 0usize;
         while sent < total {
-            let ptr = unsafe { buf.as_ptr().add(sent) };
-            let remaining = total - sent;
-            match Sys::send(self.fd, ptr, remaining, MSG_NOSIGNAL as i32) {
+            match slopos_cabi::send(self.fd, &buf[sent..total], MSG_NOSIGNAL as i32) {
                 Ok(n) if n > 0 => sent += n,
                 Ok(0) => return Err(ProtocolError::Disconnected),
-                Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {
+                Err(Errno::EAGAIN) => {
                     self.poll_writable(2000)?;
                 }
                 Err(_) => return Err(ProtocolError::Io),
@@ -156,10 +153,11 @@ impl Connection {
         // one sendmsg; a short write here commits the fd plus `n` bytes and the
         // tail must still be drained below, or the receiver's framing desyncs.
         let mut sent = loop {
-            match Sys::sendmsg(self.fd, &msg_hdr, MSG_NOSIGNAL as i32) {
+            // SAFETY: `msg_hdr` points at `iov` over `buf` and at `cmsg`, all live.
+            match unsafe { slopos_cabi::sendmsg(self.fd, &msg_hdr, MSG_NOSIGNAL as i32) } {
                 Ok(n) if n > 0 => break n,
                 Ok(_) => return Err(ProtocolError::Disconnected),
-                Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {
+                Err(Errno::EAGAIN) => {
                     self.poll_writable(2000)?;
                 }
                 Err(_) => return Err(ProtocolError::Io),
@@ -167,12 +165,10 @@ impl Connection {
         };
 
         while sent < total {
-            let ptr = unsafe { buf.as_ptr().add(sent) };
-            let remaining = total - sent;
-            match Sys::send(self.fd, ptr, remaining, MSG_NOSIGNAL as i32) {
+            match slopos_cabi::send(self.fd, &buf[sent..total], MSG_NOSIGNAL as i32) {
                 Ok(n) if n > 0 => sent += n,
                 Ok(_) => return Err(ProtocolError::Disconnected),
-                Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => {
+                Err(Errno::EAGAIN) => {
                     self.poll_writable(2000)?;
                 }
                 Err(_) => return Err(ProtocolError::Io),
@@ -197,14 +193,14 @@ impl Connection {
             return Ok(msg);
         }
 
-        let start = crate::timestamp_ms();
+        let start = slopos_cabi::monotonic_ms();
         let deadline = if timeout_ms < 0 {
             u64::MAX
         } else {
             start.saturating_add(timeout_ms as u64)
         };
         loop {
-            let now = crate::timestamp_ms();
+            let now = slopos_cabi::monotonic_ms();
             if now >= deadline {
                 return Err(ProtocolError::Timeout);
             }
@@ -224,16 +220,10 @@ impl Connection {
             revents: 0,
         };
         loop {
-            match Sys::poll(&mut pfd as *mut _ as *mut u8, 1, timeout_ms) {
-                Ok(rc) if rc < 0 => return Err(ProtocolError::Io),
-                Err(_) => {
-                    let e = errno::errno_get();
-                    if e == errno::EINTR.raw() {
-                        continue;
-                    }
-                    return Err(ProtocolError::Io);
-                }
-                _ => {}
+            match slopos_cabi::poll(core::slice::from_mut(&mut pfd), timeout_ms) {
+                Err(Errno::EINTR) => continue,
+                Err(_) => return Err(ProtocolError::Io),
+                Ok(_) => {}
             }
             if pfd.revents & POLLIN == 0 && pfd.revents & (POLLERR | POLLHUP) != 0 {
                 return Err(ProtocolError::Disconnected);
@@ -248,10 +238,8 @@ impl Connection {
             events: POLLOUT,
             revents: 0,
         };
-        match Sys::poll(&mut pfd as *mut _ as *mut u8, 1, timeout_ms) {
-            Ok(rc) if rc < 0 => return Err(ProtocolError::Io),
-            Err(_) => return Err(ProtocolError::Io),
-            _ => {}
+        if slopos_cabi::poll(core::slice::from_mut(&mut pfd), timeout_ms).is_err() {
+            return Err(ProtocolError::Io);
         }
         if pfd.revents & (POLLERR | POLLHUP) != 0 {
             return Err(ProtocolError::Io);
@@ -294,8 +282,8 @@ impl Connection {
             }
         }
 
-        let ptr = unsafe { self.read_buf.as_mut_ptr().add(self.read_len) };
-        let avail = READ_BUF_SIZE - self.read_len;
+        let free = &mut self.read_buf[self.read_len..];
+        let (ptr, avail) = (free.as_mut_ptr(), free.len());
 
         let mut cmsg = ScmRightsBuf::default();
         let iov = UserIovec {
@@ -311,12 +299,14 @@ impl Connection {
             ..Default::default()
         };
 
-        match Sys::recvmsg(self.fd, &mut msg_hdr, 0) {
+        // SAFETY: `msg_hdr` points at `iov` over the free tail of `read_buf`
+        // and at `cmsg`, both live and otherwise unborrowed for the call.
+        match unsafe { slopos_cabi::recvmsg(self.fd, &mut msg_hdr, 0) } {
             Ok(n) if n > 0 => {
                 self.read_len += n;
             }
             Ok(0) => return Err(ProtocolError::Disconnected),
-            Err(e) if e == errno::EAGAIN || e == errno::EWOULDBLOCK => return Ok(()),
+            Err(Errno::EAGAIN) => return Ok(()),
             Err(_) => return Err(ProtocolError::Io),
             Ok(_) => return Ok(()),
         }
@@ -365,11 +355,11 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         if self.fd >= 0 {
-            let _ = Sys::close(self.fd);
+            let _ = slopos_cabi::close(self.fd);
         }
         for i in 0..self.pending_fd_count as usize {
             if self.pending_fds[i] >= 0 {
-                let _ = Sys::close(self.pending_fds[i]);
+                let _ = slopos_cabi::close(self.pending_fds[i]);
             }
         }
     }

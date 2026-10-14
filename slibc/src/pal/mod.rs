@@ -302,7 +302,7 @@ pub trait Pal {
         flags: i32,
     ) -> Result<usize, Errno>;
     fn recvmsg(fd: i32, msg: *mut slopos_abi::syscall::MsgHdr, flags: i32) -> Result<usize, Errno>;
-    fn memfd_create(flags: u32) -> Result<i32, Errno>;
+    fn memfd_create(name: *const u8, flags: u32) -> Result<i32, Errno>;
     fn ftruncate(fd: i32, size: u64) -> Result<(), Errno>;
 
     /// Whole-filesystem, so `fdatasync` is today identical to `fsync`.
