@@ -597,17 +597,20 @@ Graded by:
 - **A manifest belongs to whoever installs its tree again.** The apps' is the
   session's, which keeps them with no capability: `tree-install` rewrites it
   in place in uid 0's directory, which it may not add to, and init makes it
-  for the session on a root without one. The toolchain's is uid 0's.
-  `tree-install` refuses a manifest another uid keeps, so no install locks
-  the session out of its tree.
+  for the session on a root without one, owned before it is in place. The
+  toolchain's is uid 0's. `tree-install` refuses a manifest another uid
+  keeps, so a uid 0 run never takes over a tree the session keeps.
 - **An installer acts only on a record it trusts.** A manifest neither uid 0
   nor the installing uid wrote is not read, and one that does not parse, as
   an in-place rewrite cut short leaves, is not believed: either stands for
   the new tree unfinished, whose paths the install takes back, so nothing the
   session writes in a manifest steers what uid 0 removes. A skip also needs
-  the recorded destination and every entry of the kind and size recorded. A
-  per-tree directory the session owns would have made the rewrite a rename,
-  at the cost of a second shape of manifest directory.
+  the recorded destination and every entry of the kind and size recorded; it
+  checks no content, so a reinstall keeping the root does not restore what
+  the session changed in place inside its own trees, and leaves an app the
+  new tree dropped, entry and all, for the session to remove. A per-tree
+  directory the session owns would have made the rewrite a rename, at the
+  cost of a second shape of manifest directory.
 - **On a host-built root the host's record counts.** It stays outside the
   image, so the guest's copy takes its tree's owner. A guest install over a
   host tree stands until the host's tree changes; the host then replaces what
@@ -617,10 +620,11 @@ Graded by:
   slot's base carries: `selfhost.sh install` installs them at once only over
   the same `libc.so`, and a rollback keeps them. Exports only grow, so apps
   built against an older `libc.so` run on a newer one.
-- **In the guest, a manifest is computed from the tree it describes**: its
-  identity is a digest of every entry, and nothing ships a manifest beside a
-  tree it could disagree with. The host's `fs_tree.py` keeps its own
-  identity; the two are never compared.
+- **The apps' manifest is computed from the tree where it is installed**: its
+  identity is a digest of every entry, so no manifest ships beside the apps to
+  disagree with them. The toolchain's comes with the payload, written by the
+  host's `fs_tree.py`, whose identity is its own; the two are never
+  compared.
 - **App entries rank like the XDG data directories** (`~/.local/share` over
   `/usr/local/share` over `/usr/share`, by id) and the dock orders them by
   name, as Redox's launcher does. An entry passes over a key it does not

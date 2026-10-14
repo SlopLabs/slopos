@@ -15,17 +15,18 @@ installs: `tree-install` holding nothing and refusing a manifest another uid
 keeps, init installing a live boot's apps before any session process exists,
 and the installer writing a kept root inside a directory only uid 0 may
 search. Reviews found, before it landed, that the installer read the session's
-manifest of a tree, the toolchain's included: a forged identity would have
-kept a planted `/usr/local` through a repair reinstall, and a forged entry
-would have had the apps' reinstall remove a toolchain file the skipped
-toolchain then never put back; and that a manifest keyed by name applied its
-removals wherever an install named. The installer now reads no manifest uid 0
-did not write, an install skips a tree only with every recorded entry in
-place, and a manifest names its destination. Below the bar: everything a tree
+manifest of a tree, the toolchain's included, so a forged entry would have had
+the apps' reinstall remove a toolchain file the skipped toolchain then never
+put back; and that a manifest keyed by name applied its removals wherever an
+install named. The installer now reads no manifest uid 0 did not write, an
+install skips a tree only with every recorded entry of its recorded kind and
+size, and a manifest names its destination. Below the bar: everything a tree
 install removes or replaces stays under the destination the installer chose,
-which on every root is the session's, and a symlink on the way is refused; an
-entry in the person's own share may name any program, which the dock runs as
-the session with nothing the session lacks.
+which on every root is the session's, and a symlink on the way is refused; a
+skip checks no content, so a reinstall keeping the root leaves what the
+session changed in place inside its own trees, which it may change again at
+any time; an entry in the person's own share may name any program, which the
+dock runs as the session with nothing the session lacks.
 
 Swept 2026-10-14: the raise deleted — a spawn whose child's mask and
 `AT_SECURE` come from `Endowment::check` alone, exec keeping `caps &
