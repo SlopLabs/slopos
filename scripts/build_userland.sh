@@ -224,6 +224,8 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin clipboard_test \
         --bin keymap_test \
         --bin appkit_test \
+        --bin apps_test \
+        --bin dock_test \
         --bin editor_test \
         --bin spawn_privilege_test \
         --bin seat_test \
@@ -363,6 +365,12 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/appkit_test" ]; then
         cp "$RELEASE_DIR/appkit_test" "$BUILD_DIR/appkit_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/apps_test" ]; then
+        cp "$RELEASE_DIR/apps_test" "$BUILD_DIR/apps_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/dock_test" ]; then
+        cp "$RELEASE_DIR/dock_test" "$BUILD_DIR/dock_test.elf"
     fi
     if [ -f "$RELEASE_DIR/editor_test" ]; then
         cp "$RELEASE_DIR/editor_test" "$BUILD_DIR/editor_test.elf"
@@ -527,6 +535,52 @@ fi
 cp "$RELEASE_DIR/libc.so" "$BUILD_DIR/libc.so"
 
 echo "C shared library built: $BUILD_DIR/libc.so"
+
+# The apps outside the base, built as `cargo build` builds a program for this
+# target: the target's std and panic strategy, and the link line the clang
+# driver's `toolchains::SlopOS` writes for `cc`, which the host has not got.
+# Staged with their entries and icons as the tree `apps` installs at
+# /usr/local; a file whose bytes did not change keeps its time, so the tree's
+# identity moves only when the apps do.
+APPS_RUSTFLAGS="-C linker=rust-lld -C linker-flavor=ld.lld -C link-arg=$CRT0_OBJ \
+-C link-arg=--image-base=0x400000 -C link-arg=--dynamic-linker=/lib/ld-slopos.so.1 \
+-C link-arg=--eh-frame-hdr -C link-arg=-znow -C link-arg=-L$RELEASE_DIR -C link-arg=-lc \
+-C link-arg=$RELEASE_DIR/libbuiltins.a"
+APP_ARGS=()
+for app in $APPS; do
+    APP_ARGS+=(--bin "$app")
+done
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+RUSTFLAGS="$APPS_RUSTFLAGS" \
+$CARGO build --locked \
+    -Zbuild-std=std,panic_unwind \
+    -Zunstable-options \
+    -Zjson-target-spec \
+    --target "$USERLAND_TARGET" \
+    --package slopos-apps \
+    "${APP_ARGS[@]}" \
+    --release
+
+APPS_TREE="$BUILD_DIR/apps"
+stage() {
+    mkdir -p "$(dirname "$APPS_TREE/$2")"
+    cmp -s "$1" "$APPS_TREE/$2" || cp -p "$1" "$APPS_TREE/$2"
+    printf '%s\n' "$2"
+}
+staged="$(
+    for app in $APPS; do
+        [ -f "$RELEASE_DIR/$app" ] || { echo "build_userland: slopos-apps emitted no $app" >&2; exit 1; }
+        stage "$RELEASE_DIR/$app" "bin/$app"
+    done
+    (cd "$REPO_ROOT/apps" && find share -type f) | while IFS= read -r rel; do
+        stage "$REPO_ROOT/apps/$rel" "$rel"
+    done
+)"
+(cd "$APPS_TREE" && find . -type f -o -type l) | sed 's|^\./||' | while IFS= read -r rel; do
+    printf '%s\n' "$staged" | grep -qxF "$rel" || rm -f "$APPS_TREE/$rel"
+done
+find "$APPS_TREE" -mindepth 1 -type d -empty -delete
+echo "Apps built: $APPS_TREE"
 
 if [ "$TEST_MODE" = "--test" ]; then
     # The dynamically linked probe and the object it dlopens. Built against

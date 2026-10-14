@@ -1,20 +1,22 @@
 //! The new root, mounted while it is filled: the directories a SlopOS root
 //! has with the owners the ownership map gives them, its base mount points
-//! sealed, the medium's toolchain installed at `/usr/local` by the rule host
-//! trees follow, and its clone seeded at `/src`, both the session's.
+//! sealed, the medium's toolchain and apps installed at `/usr/local` by the
+//! rule host trees follow, and its clone seeded at `/src`, all the session's.
 
 use std::ffi::CString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{PermissionsExt, lchown, symlink};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::Path;
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{OWNERS_RECORD, ROOT_LAYOUT, SESSION_GID, SESSION_TREES, SESSION_UID};
-use slopos_tree_core::{Kind, MANIFEST_DIR, Manifest, Root, State, Step, manifest_name, plan};
+use slopos_boot_core::layout;
+use slopos_tree_core::{Kind, Manifest};
 
 use super::Medium;
 use crate::syscall::fs::{inode_flags, mount, set_inode_flags, sync, umount2};
+use crate::tree::{self, create_new, give, make_dir, write_durably};
 
 /// Where the new root's mount point is made: memory, which the next boot does
 /// not see.
@@ -27,10 +29,13 @@ const CLONE_CONFIG: &str = "slopos/.git/config";
 const COPY_CHUNK: usize = 1 << 20;
 const PROGRESS_EVERY: u64 = 256 << 20;
 
-/// The new root, mounted on a directory this install made under a name
-/// nobody could foresee, so no link planted ahead of it redirects the mount;
-/// unmounted on drop.
+/// The new root, mounted inside a directory this install made under a name
+/// nobody could foresee, so no link planted ahead of it redirects the mount,
+/// and that only uid 0 may search: the live session is the uid that owns a
+/// kept root's `/usr/local`, and could otherwise turn a directory the install
+/// writes through into a link while it works. Unmounted on drop.
 pub struct Mounted {
+    private: String,
     dir: String,
 }
 
@@ -40,11 +45,24 @@ impl Mounted {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        let dir = format!("{MOUNT_PARENT}/installer-root-{name}");
-        fs::create_dir(&dir).map_err(|e| format!("{dir}: {e}"))?;
-        mount(node.as_bytes(), dir.as_bytes(), b"ext4", 0)
-            .map_err(|e| format!("mounting {node} at {dir}: {e:?}"))?;
-        let mounted = Mounted { dir };
+        let private = format!("{MOUNT_PARENT}/installer-{name}");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&private)
+            .map_err(|e| format!("{private}: {e}"))?;
+        let dir = format!("{private}/root");
+        let mounted = fs::create_dir(&dir)
+            .map_err(|e| format!("{dir}: {e}"))
+            .and_then(|()| {
+                mount(node.as_bytes(), dir.as_bytes(), b"ext4", 0)
+                    .map_err(|e| format!("mounting {node} at {dir}: {e:?}"))
+            });
+        if let Err(e) = mounted {
+            let _ = fs::remove_dir(&dir);
+            let _ = fs::remove_dir(&private);
+            return Err(e);
+        }
+        let mounted = Mounted { private, dir };
         let root =
             fs::symlink_metadata(&mounted.dir).map_err(|e| format!("{}: {e}", mounted.dir))?;
         if !root.is_dir() || std::os::unix::fs::MetadataExt::ino(&root) != EXT4_ROOT_INODE {
@@ -103,6 +121,7 @@ impl Mounted {
         let path = CString::new(self.dir.as_str()).map_err(|_| "a NUL in the mount point")?;
         umount2(path.as_ptr(), 0).map_err(|e| format!("unmounting {}: {e:?}", self.dir))?;
         let _ = fs::remove_dir(&self.dir);
+        let _ = fs::remove_dir(&self.private);
         Ok(())
     }
 
@@ -117,19 +136,6 @@ impl Mounted {
 impl Drop for Mounted {
     fn drop(&mut self) {
         let _ = self.unmount();
-    }
-}
-
-fn make_dir(path: &str) -> Result<(), String> {
-    match fs::create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(e)
-            if e.kind() == ErrorKind::AlreadyExists
-                && fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) =>
-        {
-            Ok(())
-        }
-        Err(e) => Err(format!("{path}: {e}")),
     }
 }
 
@@ -152,11 +158,6 @@ fn seal(root: &Mounted, path: &str) -> Result<(), String> {
             .map_err(|e| format!("sealing {path}: {e:?}"))?;
     }
     Ok(())
-}
-
-/// `path` and, a link included, nothing it names, given to `owner`.
-fn give(path: &str, (uid, gid): (u32, u32)) -> Result<(), String> {
-    lchown(path, Some(uid), Some(gid)).map_err(|e| format!("{path}: {e}"))
 }
 
 /// The directories every root has, as the ownership map gives them, and the
@@ -199,60 +200,6 @@ pub fn forget_slots(root: &Mounted) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// The new root as `lstat` reads it.
-struct Target<'a>(&'a Mounted);
-
-impl Root for Target<'_> {
-    fn state(&mut self, path: &str) -> State {
-        match fs::symlink_metadata(self.0.path(path)) {
-            Err(_) => State::Absent,
-            Ok(meta) if meta.file_type().is_symlink() => State::Link,
-            Ok(meta) if meta.is_dir() => State::Dir,
-            Ok(meta) if meta.is_file() => State::File,
-            Ok(_) => State::Other,
-        }
-    }
-
-    fn children(&mut self, dir: &str) -> Vec<String> {
-        fs::read_dir(self.0.path(dir))
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .collect()
-    }
-}
-
-/// A file made where nothing is, a link included, which a plain create
-/// would follow.
-fn create_new(path: &str) -> std::io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).open(path)
-}
-
-fn write_durably(path: &str, bytes: &[u8]) -> Result<(), String> {
-    let temp = format!("{path}.part");
-    match fs::remove_file(&temp) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{temp}: {e}")),
-    }
-    create_new(&temp)
-        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
-        .and_then(|()| fs::rename(&temp, path))
-        .map_err(|e| format!("{path}: {e}"))
-}
-
-/// A file the root holds at `path`, if any; anything else there is refused.
-fn read_regular(path: &str) -> Result<Option<String>, String> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => fs::read_to_string(path)
-            .map(Some)
-            .map_err(|e| format!("{path}: {e}")),
-        Ok(_) => Err(format!("{path} is not a file")),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{path}: {e}")),
-    }
 }
 
 struct Progress {
@@ -321,66 +268,27 @@ fn put(
     give(&dest, (SESSION_UID, SESSION_GID))
 }
 
-/// Install the medium's tree at `guest` by the manifest it carries, keeping
+/// Install the medium's tree `name` from `source` at `/usr/local`, keeping
 /// whatever the root's user put beside what an earlier install left. `None`
 /// when the root holds this tree already.
-fn install_tree(root: &Mounted, medium: &Medium, guest: &str) -> Result<Option<u64>, String> {
-    let name = manifest_name(guest);
-    let recorded = format!("{MANIFEST_DIR}/{name}");
-    let new_text = fs::read_to_string(medium.payload_path(&recorded))
-        .map_err(|e| format!("the medium's manifest of {guest}: {e}"))?;
-    let new = Manifest::parse(&new_text)
-        .map_err(|e| format!("the medium's manifest of {guest}, line {}", e.line))?;
-    root.walk_dirs(MANIFEST_DIR, false)?;
-    let old = read_regular(&root.path(&recorded))?
-        .map(|text| {
-            Manifest::parse(&text)
-                .map_err(|e| format!("{recorded} on the root, line {}: not a manifest", e.line))
-        })
-        .transpose()?;
-    if old
-        .as_ref()
-        .is_some_and(|old| old.is_finished() && old.identity == new.identity)
-    {
-        return Ok(None);
-    }
-    let steps = plan(&mut Target(root), guest, old.as_ref(), &new).map_err(|conflicts| {
-        format!(
-            "the root holds what installing {guest} would overwrite:\n  {}\nmove it aside, or format the root",
-            conflicts.0.join("\n  ")
-        )
-    })?;
-    root.owned_dir(MANIFEST_DIR, (0, 0), 0o755)?;
-    write_durably(&root.path(&recorded), steps.during.render().as_bytes())?;
-    give(&root.path(&recorded), (0, 0))?;
+fn install_tree(
+    root: &Mounted,
+    name: &str,
+    source: &Path,
+    new: &Manifest,
+) -> Result<Option<u64>, String> {
     let mut progress = Progress {
         copied: 0,
         reported: 0,
     };
-    for step in &steps.steps {
-        match step {
-            Step::Remove(path) => {
-                fs::remove_file(root.path(path)).map_err(|e| format!("{path}: {e}"))?
-            }
-            Step::RemoveDir(path) => {
-                fs::remove_dir(root.path(path)).map_err(|e| format!("{path}: {e}"))?
-            }
-            Step::MakeDir(path) => {
-                make_dir(&root.path(path))?;
-                give(&root.path(path), (SESSION_UID, SESSION_GID))?;
-            }
-            Step::Install { item, path } => put(
-                root,
-                &medium.payload_path(&format!("{guest}/{}", item.rel)),
-                item.kind,
-                path,
-                &mut progress,
-            )?,
-        }
+    tree::Install {
+        root: &root.dir,
+        name,
+        guest: TOOLCHAIN,
+        source,
+        owner: Some((SESSION_UID, SESSION_GID)),
     }
-    write_durably(&root.path(&recorded), steps.done.render().as_bytes())?;
-    give(&root.path(&recorded), (0, 0))?;
-    Ok(Some(progress.copied))
+    .run(new, &mut |n| progress.add(n))
 }
 
 fn copy_tree(root: &Mounted, medium: &Medium, dir: &str, to: &str) -> Result<u64, String> {
@@ -470,18 +378,34 @@ fn with_origin(config: &str, url: &str) -> String {
     out.join("\n") + "\n"
 }
 
-/// Fill the root from the medium: `/usr/local` by its manifest, `/src` once.
+/// Fill the root from the medium: `/usr/local` with the toolchain and the
+/// apps by their manifests, `/src` once.
 pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(), String> {
     if !medium.payload_has(TOOLCHAIN) {
         println!("installer: the medium carries no toolchain; /usr/local stays as it is");
     } else {
-        match install_tree(root, medium, TOOLCHAIN)? {
+        let recorded = slopos_tree_core::manifest_path(slopos_tree_core::TOOLCHAIN);
+        let text = fs::read_to_string(medium.payload_path(&recorded))
+            .map_err(|e| format!("the medium's manifest of {TOOLCHAIN}: {e}"))?;
+        let new = Manifest::parse(&text)
+            .map_err(|e| format!("the medium's manifest of {TOOLCHAIN}, line {}", e.line))?;
+        let source = medium.payload_path(TOOLCHAIN);
+        match install_tree(root, slopos_tree_core::TOOLCHAIN, &source, &new)? {
             Some(bytes) => println!(
                 "installer: installed the toolchain at /usr/local ({})",
                 super::disk::human(bytes)
             ),
             None => println!("installer: /usr/local already holds this medium's toolchain"),
         }
+    }
+    let apps = medium.path(layout::MEDIUM_APPS);
+    let new = tree::scan(&apps)?;
+    match install_tree(root, slopos_tree_core::APPS, &apps, &new)? {
+        Some(bytes) => println!(
+            "installer: installed the apps at /usr/local ({})",
+            super::disk::human(bytes)
+        ),
+        None => println!("installer: /usr/local already holds this medium's apps"),
     }
     if !medium.payload_has(SOURCE) {
         return Ok(());

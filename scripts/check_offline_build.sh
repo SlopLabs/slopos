@@ -8,9 +8,9 @@ set -euo pipefail
 #          toolchain's library/Cargo.lock names is vendored as the package its
 #          lockfile checksums; nothing vendored is unnamed, since that is a pin
 #          nobody reviews; and the directory's `library.lock` is std's.
-#   build  `cargo check` of the kernel and the userland, `--offline --locked`,
-#          from an *empty* CARGO_HOME, where a warm registry cache cannot
-#          answer for a missing crate.
+#   build  `cargo check` of the kernel, the userland and the apps,
+#          `--offline --locked`, from an *empty* CARGO_HOME, where a warm
+#          registry cache cannot answer for a missing crate.
 #
 # Host builds read the registry, so a lockfile the vendored copy no longer
 # describes, or a directory missing std's own dependencies, fails nowhere else.
@@ -262,4 +262,11 @@ offline_check "$TP_TOOLCHAIN_NAME" "-C panic=abort" -Zjson-target-spec \
     --no-default-features --features testbins ||
     { echo "$SELF: FAIL — the userland does not build from $VENDOR_REL alone" >&2; exit 1; }
 
-echo "$SELF: build OK — kernel and userland check from an empty CARGO_HOME, offline, against $VENDOR_REL"
+# The apps outside the base keep the target's unwinding, whose std units the
+# abort build above never resolves.
+offline_check "$TP_TOOLCHAIN_NAME" "" -Zjson-target-spec \
+    -Zbuild-std=std,panic_unwind \
+    --target targets/x86_64-unknown-slopos.json --package slopos-apps --bins ||
+    { echo "$SELF: FAIL — the apps do not build from $VENDOR_REL alone" >&2; exit 1; }
+
+echo "$SELF: build OK — kernel, userland and apps check from an empty CARGO_HOME, offline, against $VENDOR_REL"

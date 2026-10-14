@@ -117,6 +117,7 @@ impl Medium {
             layout::MEDIUM_LOADER,
             layout::MEDIUM_LOADER_LICENSE,
             layout::MEDIUM_LOADER_NOTICES,
+            layout::MEDIUM_APPS,
         ] {
             if !medium.has(file) {
                 return Err(format!(
@@ -125,11 +126,7 @@ impl Medium {
                 ));
             }
         }
-        let toolchain_manifest = format!(
-            "{}/{}",
-            slopos_tree_core::MANIFEST_DIR,
-            slopos_tree_core::manifest_name(root::TOOLCHAIN)
-        );
+        let toolchain_manifest = slopos_tree_core::manifest_path(slopos_tree_core::TOOLCHAIN);
         for (tree, needs) in [
             (root::TOOLCHAIN, toolchain_manifest.as_str()),
             (root::SOURCE, "/src/slopos/.git/config"),

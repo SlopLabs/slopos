@@ -1,15 +1,20 @@
-//! A tree installed onto a root — the toolchain at `/usr/local` — and the rule
-//! that replaces it with a newer one, which `scripts/fs_tree.py` follows on
-//! the host and the installer in the guest.
+//! A tree installed onto a root — the toolchain and the apps at `/usr/local` —
+//! and the rule that replaces it with a newer one, which `scripts/fs_tree.py`
+//! follows on the host and the installer, init and `tree-install` in the guest.
 //!
 //! What an install put down is recorded in a manifest under
-//! [`MANIFEST_DIR`]: an `identity` line, then `<kind> <size or -> <path>` per
-//! entry, parents first. A reinstall removes exactly what the old manifest
-//! names and keeps whatever the root's user put beside it; anything in the way
-//! of the new tree that the old manifest does not name, or that is not the
-//! kind it names, refuses the install before anything is written. While an
-//! install is under way the manifest names the old entries and the new under
-//! [`UNFINISHED`], so one cut short is redone, never trusted.
+//! [`MANIFEST_DIR`], named for the tree: an `identity` line, then
+//! `<kind> <size or -> <path>` per entry, parents first. A reinstall removes
+//! exactly what the old manifest names and keeps whatever the root's user put
+//! beside it; anything in the way of the new tree that the old manifest does
+//! not name, or that is not the kind it names, refuses the install before
+//! anything is written. While an install is under way the manifest names the
+//! old entries and the new under [`UNFINISHED`], so one cut short is redone,
+//! never trusted.
+//!
+//! Trees may share a destination. Each manifest names only its own entries,
+//! a directory stays while anything is in it, and a file one tree holds
+//! refuses the other's install of the same path, so the trees stay disjoint.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -28,10 +33,22 @@ pub const MANIFEST_DIR: &str = "/var/lib/slopos/trees";
 /// The identity a manifest carries while its install is under way.
 pub const UNFINISHED: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// The manifest name of the tree installed at `guest`: its path with `/`
-/// written `_`, `usr_local` for `/usr/local`.
-pub fn manifest_name(guest: &str) -> String {
-    guest.trim_start_matches('/').replace('/', "_")
+/// The toolchain's tree, at `/usr/local`.
+pub const TOOLCHAIN: &str = "usr_local";
+/// The apps outside the base, beside the toolchain at `/usr/local`.
+pub const APPS: &str = "apps";
+
+/// Lowercase letters, digits and `_`: a name that is one path component.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Where a root records the manifest of the tree `name`.
+pub fn manifest_path(name: &str) -> String {
+    format!("{MANIFEST_DIR}/{name}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

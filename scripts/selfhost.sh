@@ -5,10 +5,11 @@
 #
 # `build` makes the kernel, the userland and the base image the kernel boots
 # with: `builddir/kernel-<variant>.elf` and `builddir/initramfs.cpio`, or for
-# `tests` the tests userland and `builddir/initramfs-tests.cpio`. `install`
-# puts both into the slot that is not the default and arms one boot of it:
-# `bootctl reboot` tries it and `bootctl commit` keeps it; without the commit
-# the next boot is the default.
+# `tests` the tests userland and `builddir/initramfs-tests.cpio`, and the apps
+# outside the base, `builddir/apps`. `install` puts the apps at /usr/local at
+# once, as whoever runs it, and the kernel and base into the slot that is not
+# the default, arming one boot of it: `bootctl reboot` tries it and
+# `bootctl commit` keeps it; without the commit the next boot is the default.
 set -eu
 
 usage() {
@@ -75,6 +76,7 @@ COREUTILS_LINKS="$COREUTILS_TOOLS" EXTRA_SHARED_OBJECTS="$shared" \
     REMOTE_PAIRING_DIR="$pairing" scripts/build_initramfs.sh "$base" builddir $programs
 [ "$1" = install ] || exit 0
 
+tree-install apps "$REPO_ROOT/builddir/apps" /usr/local
 elf="$REPO_ROOT/builddir/kernel-$variant.elf"
 slot="$(bootctl spare)"
 bootctl install "$slot" "$elf" "$REPO_ROOT/$base"

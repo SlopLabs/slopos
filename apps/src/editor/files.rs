@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 
 use slopos_editor_core::document::DiskStamp;
 use slopos_editor_core::filetree::DirEntry;
@@ -59,9 +60,9 @@ pub fn read_file(path: &str) -> Result<String, String> {
 pub fn write_file(path: &str, text: &str) -> Result<(), String> {
     // A new inode does not inherit the old one's mode, so an executable script
     // would come back un-executable.
-    let mode = crate::apps::coreutils::fsutil::mode_of(path)
+    let mode = fs::metadata(path)
         .ok()
-        .map(|mode| mode & 0o7777);
+        .map(|meta| meta.permissions().mode() & 0o7777);
     let temp = temp_path(path);
     let write = || -> Result<(), String> {
         let mut file = fs::File::create(&temp).map_err(|e| format!("{temp}: {e}"))?;
@@ -76,7 +77,7 @@ pub fn write_file(path: &str, text: &str) -> Result<(), String> {
         return Err(message);
     }
     if let Some(mode) = mode {
-        let _ = crate::apps::coreutils::fsutil::chmod(&temp, mode);
+        let _ = fs::set_permissions(&temp, fs::Permissions::from_mode(mode));
     }
     if let Err(e) = fs::rename(&temp, path) {
         let _ = fs::remove_file(&temp);

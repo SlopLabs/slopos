@@ -1,12 +1,14 @@
 use std::env;
 use std::path::Path;
 
+use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::Color32;
+use slopos_appkit::text::draw_str_clipped;
+use slopos_gfx::DrawBuffer;
+use slopos_gfx::canvas_ops::fill_rect;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_image::{DecodeOptions, Image};
 use slopos_windowing::{ControlFlow, Event, Window, WindowedApp};
-
-use crate::gfx::{self, DamageRect, DrawBuffer};
 
 const DEFAULT_IMAGE: &str = "/usr/share/slopos/wallpapers/default.png";
 const STATUS_HEIGHT: i32 = 22;
@@ -115,7 +117,7 @@ impl ImageViewer {
     }
 
     fn draw_checkerboard(&self, fb: &mut DrawBuffer<'_>, view_h: i32) {
-        gfx::fill_rect(fb, 0, 0, fb.width() as i32, view_h, BG);
+        fill_rect(fb, 0, 0, fb.width() as i32, view_h, BG);
         let cols = (fb.width() as i32 + CHECKER_SIZE - 1) / CHECKER_SIZE;
         let rows = (view_h + CHECKER_SIZE - 1) / CHECKER_SIZE;
         for row in 0..rows {
@@ -125,7 +127,7 @@ impl ImageViewer {
                 } else {
                     CHECKER_B
                 };
-                gfx::fill_rect(
+                fill_rect(
                     fb,
                     col * CHECKER_SIZE,
                     row * CHECKER_SIZE,
@@ -138,10 +140,10 @@ impl ImageViewer {
     }
 
     fn draw_status(&self, fb: &mut DrawBuffer<'_>, view_h: i32, zoom: f64) {
-        gfx::fill_rect(fb, 0, view_h, fb.width() as i32, STATUS_HEIGHT, STATUS_BG);
+        fill_rect(fb, 0, view_h, fb.width() as i32, STATUS_HEIGHT, STATUS_BG);
         let label = self.status_text(zoom);
         let clip = full_clip(fb);
-        gfx::draw_str_clipped(fb, 8, view_h + 4, &label, STATUS_FG, STATUS_BG, &clip);
+        draw_str_clipped(fb, 8, view_h + 4, &label, STATUS_FG, STATUS_BG, &clip);
     }
 
     fn status_text(&self, zoom: f64) -> String {
@@ -262,8 +264,8 @@ impl WindowedApp for ImageViewer {
             }
             Err(ref message) => {
                 let clip = full_clip(fb);
-                gfx::draw_str_clipped(fb, 16, 16, "Could not load image", ERROR_FG, BG, &clip);
-                gfx::draw_str_clipped(fb, 16, 34, message, STATUS_FG, BG, &clip);
+                draw_str_clipped(fb, 16, 16, "Could not load image", ERROR_FG, BG, &clip);
+                draw_str_clipped(fb, 16, 34, message, STATUS_FG, BG, &clip);
             }
         }
 

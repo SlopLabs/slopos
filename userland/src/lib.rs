@@ -1,3 +1,4 @@
+pub mod app_entry;
 pub mod apps;
 pub mod boot_disk;
 pub mod gfx;
@@ -15,6 +16,7 @@ pub mod runtime;
 pub mod syscall;
 pub mod theme;
 pub mod tls;
+pub mod tree;
 pub mod ui_utils;
 
 pub use slopos_slibc as slibc;

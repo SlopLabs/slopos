@@ -2,8 +2,8 @@
 """Copy a host directory tree into an ext4 image through one debugfs session.
 
 `mke2fs -d` populates only a new filesystem; a preserved image holds what
-its guest wrote, so a tree reaches one through debugfs, every entry owned by
-`--owner` (uid 0's by default) and its manifest copy by uid 0.
+its guest wrote, so a tree reaches one through debugfs, every entry and its
+manifest copy owned by `--owner` (uid 0's by default).
 
 A host tree (`install --manifests DIR --name NAME`) is the host's. What it
 installed is recorded in DIR/NAME, on the host, where the guest cannot edit
@@ -384,6 +384,7 @@ def install(image, host, guest, name=None, owner=(0, 0)):
             write_manifest(listing, lines)
             requests.append(f'write "{listing}" "{copy}"')
             requests.append(f'sif "{copy}" mode 0100644')
+            requests += owned(copy, owner)
         _, said = debugfs(image, requests, write=True)
     finally:
         shutil.rmtree(work)
@@ -544,6 +545,37 @@ def _self_test(work):
         pass
     else:
         raise AssertionError("not refused: a listing holding a name with a /")
+
+    # Two trees at one destination: each names only its own entries, and a
+    # file of one in the way of the other refuses that install.
+    shared = os.path.join(work, "shared.img")
+    with open(shared, "wb") as f:
+        f.truncate(8 << 20)
+    subprocess.run(["mke2fs", "-q", "-F", *mkfs_args(), shared], check=True)
+    apps = os.path.join(work, "apps")
+    for rel in ("bin/editor", "share/slopos/apps/editor.app"):
+        os.makedirs(os.path.dirname(os.path.join(apps, rel)), exist_ok=True)
+        with open(os.path.join(apps, rel), "w") as f:
+            f.write("app\n")
+    both = os.path.join(work, "shared-trees")
+    session = (1000, 1000)
+    install(shared, tree, "/usr/local", (both, "usr_local"), session)
+    install(shared, apps, "/usr/local", (both, "apps"), session)
+    assert kind_in(shared, "/usr/local/bin/tool") == kind_in(shared, "/usr/local/bin/editor") == "f"
+    assert owner(f"{IMAGE_MANIFESTS}/apps", shared) == session, "a manifest copy takes its owner"
+    with open(os.path.join(apps, "bin/tool"), "w") as f:
+        f.write("clash\n")
+    try:
+        install(shared, apps, "/usr/local", (both, "apps"), session)
+    except Conflict:
+        pass
+    else:
+        raise AssertionError("not refused: one tree's file in the way of another")
+    os.unlink(os.path.join(apps, "bin/tool"))
+    os.unlink(os.path.join(apps, "bin/editor"))
+    install(shared, apps, "/usr/local", (both, "apps"), session)
+    assert kind_in(shared, "/usr/local/bin/editor") == "absent"
+    assert kind_in(shared, "/usr/local/bin/tool") == "f", "a tree's reinstall kept the other's file"
 
     seed = os.path.join(work, "seed")
     os.makedirs(os.path.join(seed, "clone"))

@@ -93,6 +93,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-apps"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-appkit",
+ "slopos-editor-core",
+ "slopos-gfx",
+ "slopos-image",
+ "slopos-windowing",
+]
+
+[[package]]
 name = "slopos-arch"
 version = "0.1.0"
 dependencies = [
@@ -529,6 +541,7 @@ version = "0.1.0"
 dependencies = [
  "slopos-abi",
  "slopos-appkit",
+ "slopos-apps",
  "slopos-boot-core",
  "slopos-chrome-core",
  "slopos-cpufreq-core",

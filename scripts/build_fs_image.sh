@@ -49,12 +49,14 @@ set -euo pipefail
 #                   not block a refresh. An image short of the profile is
 #                   converted in place, or the build refuses and names
 #                   `just reset root`.
-#   FS_HOST_TREES - `<host dir>:<guest dir>` pairs, space-separated: trees the
-#                   host owns, installed whenever the host directory exists
-#                   and replaced when it changes (scripts/fs_tree.py). What
-#                   each installed is recorded beside the image, in
-#                   `<image>.host/trees/`, so a replacement removes exactly
-#                   that.
+#   FS_HOST_TREES - `<host dir>:<guest dir>[:<name>]`, space-separated: trees
+#                   the host owns, installed whenever the host directory
+#                   exists and replaced when it changes (scripts/fs_tree.py).
+#                   What each installed is recorded beside the image, in
+#                   `<image>.host/trees/<name>`, so a replacement removes
+#                   exactly that; the name is the guest directory with `/`
+#                   written `_` unless given, and two trees sharing a guest
+#                   directory need names of their own.
 #                   One that would overwrite what the guest put there is left
 #                   as it was, with a warning, and retried on the next build.
 #   FS_SEED_TREES - `<host dir>:<guest dir>` pairs: trees the guest owns once
@@ -192,6 +194,7 @@ build_stamp() {
     done
     for asset in "${REPO_ROOT}/assets/fonts"/* "${REPO_ROOT}/assets/keymaps"/* \
                  "${REPO_ROOT}/assets/completions"/* "${REPO_ROOT}/assets/privd"/* \
+                 "${REPO_ROOT}/assets/apps"/* "${REPO_ROOT}/assets/icons"/* \
                  "${REPO_ROOT}/assets/certs"/* "${REPO_ROOT}/assets/logo.png"; do
         [ -f "$asset" ] || continue
         sha256sum "$asset" | cut -d' ' -f1
@@ -566,15 +569,22 @@ record_owners() {
         debugfs -w -f - "$IMAGE_PATH" >/dev/null
 }
 
-tree_manifest() {
-    printf '%s' "${1#/}" | tr '/' '_'
+# Sets TREE_HOST, TREE_GUEST and TREE_NAME from a FS_HOST_TREES entry.
+host_tree() {
+    local rest="${1#*:}"
+    TREE_HOST="${1%%:*}"
+    TREE_GUEST="${rest%%:*}"
+    TREE_NAME="${rest#"$TREE_GUEST"}"
+    TREE_NAME="${TREE_NAME#:}"
+    [ -n "$TREE_NAME" ] || TREE_NAME="$(printf '%s' "${TREE_GUEST#/}" | tr '/' '_')"
 }
 
 tree_pending() {
-    local host="$1" guest="$2" want
-    [ -d "$host" ] || return 1
-    want="$("${FS_TREE[@]}" identity "$host")" || exit 1
-    [ "$("${FS_TREE[@]}" installed "$TREE_MANIFESTS" "$(tree_manifest "$guest")")" != "$want" ]
+    local want
+    host_tree "$1"
+    [ -d "$TREE_HOST" ] || return 1
+    want="$("${FS_TREE[@]}" identity "$TREE_HOST")" || exit 1
+    [ "$("${FS_TREE[@]}" installed "$TREE_MANIFESTS" "$TREE_NAME")" != "$want" ]
 }
 
 seed_pending() {
@@ -586,7 +596,7 @@ seed_pending() {
 image_owes_work() {
     local spec
     for spec in $FS_HOST_TREES; do
-        tree_pending "${spec%%:*}" "${spec#*:}" && return 0
+        tree_pending "$spec" && return 0
     done
     for spec in $FS_SEED_TREES; do
         seed_pending "${spec%%:*}" "${spec#*:}" && return 0
@@ -777,6 +787,16 @@ install_base() {
         done
     fi
 
+    # The base's own app entries, which the dock reads with the apps tree's.
+    mkdir_p /usr/share/slopos/apps
+    mkdir_p /usr/share/slopos/icons
+    for entry in "${REPO_ROOT}/assets/apps"/*.app; do
+        install_file "$entry" "/usr/share/slopos/apps/$(basename "$entry")"
+    done
+    for icon in "${REPO_ROOT}/assets/icons"/*.png; do
+        install_file "$icon" "/usr/share/slopos/icons/$(basename "$icon")"
+    done
+
     mkdir_p /usr/share/slopos/privd
     install_file "${REPO_ROOT}/assets/privd/actions" /usr/share/slopos/privd/actions
     echo "Installed privd policy: /usr/share/slopos/privd/actions"
@@ -840,10 +860,10 @@ else
 fi
 
 install_trees() {
-    local spec host guest pending=0 hosts=() seeds=() rc
+    local spec pending=0 hosts=() seeds=() rc
     for spec in $FS_HOST_TREES; do
-        tree_pending "${spec%%:*}" "${spec#*:}" || continue
-        pending=$(( pending + $(tree_bytes "${spec%%:*}") ))
+        tree_pending "$spec" || continue
+        pending=$(( pending + $(tree_bytes "$TREE_HOST") ))
         hosts+=("$spec")
     done
     for spec in $FS_SEED_TREES; do
@@ -854,15 +874,14 @@ install_trees() {
     [ "${#hosts[@]}" -gt 0 ] || [ "${#seeds[@]}" -gt 0 ] || return 0
     ensure_room $(( pending + $(numfmt --from=iec "$FS_FREE_FLOOR") ))
     for spec in "${hosts[@]}"; do
-        host="${spec%%:*}"
-        guest="${spec#*:}"
+        host_tree "$spec"
         rc=0
-        "${FS_TREE[@]}" install "$IMAGE_PATH" "$host" "$guest" \
-            --manifests "$TREE_MANIFESTS" --name "$(tree_manifest "$guest")" \
-            --owner "$(root_layout_owner "$guest")" || rc=$?
+        "${FS_TREE[@]}" install "$IMAGE_PATH" "$TREE_HOST" "$TREE_GUEST" \
+            --manifests "$TREE_MANIFESTS" --name "$TREE_NAME" \
+            --owner "$(root_layout_owner "$TREE_GUEST")" || rc=$?
         case "$rc" in
-            0) echo "Installed $host at $guest" ;;
-            3) echo "build_fs_image: left $guest as it was; the next build tries again" >&2 ;;
+            0) echo "Installed $TREE_HOST at $TREE_GUEST as $TREE_NAME" ;;
+            3) echo "build_fs_image: left $TREE_NAME at $TREE_GUEST as it was; the next build tries again" >&2 ;;
             *) exit 1 ;;
         esac
     done

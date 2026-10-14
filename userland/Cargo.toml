@@ -46,16 +46,8 @@ name = "terminal"
 path = "src/bin/terminal.rs"
 
 [[bin]]
-name = "editor"
-path = "src/bin/editor.rs"
-
-[[bin]]
-name = "file_manager"
-path = "src/bin/file_manager.rs"
-
-[[bin]]
-name = "image_viewer"
-path = "src/bin/image_viewer.rs"
+name = "tree-install"
+path = "src/bin/tree-install.rs"
 
 [[bin]]
 name = "sysmon"
@@ -235,10 +227,19 @@ path = "src/bin/tests/keymap_test.rs"
 [[bin]]
 name = "editor_test"
 path = "src/bin/tests/editor_test.rs"
+required-features = ["testbins"]
 
 [[bin]]
 name = "appkit_test"
 path = "src/bin/tests/appkit_test.rs"
+
+[[bin]]
+name = "apps_test"
+path = "src/bin/tests/apps_test.rs"
+
+[[bin]]
+name = "dock_test"
+path = "src/bin/tests/dock_test.rs"
 
 [[bin]]
 name = "spawn_privilege_test"
@@ -372,11 +373,12 @@ path = "src/bin/tests/cxx_test.rs"
 
 [features]
 default = []
-testbins = ["slopos-tls-core/test-server"]
+testbins = ["slopos-tls-core/test-server", "dep:slopos-apps"]
 
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-appkit = { workspace = true }
+slopos-apps = { workspace = true, optional = true }
 slopos-editor-core = { workspace = true }
 slopos-chrome-core = { workspace = true }
 slopos-font = { workspace = true }
