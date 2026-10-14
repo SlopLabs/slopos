@@ -6,10 +6,12 @@
 # `build` makes the kernel, the userland and the base image the kernel boots
 # with: `builddir/kernel-<variant>.elf` and `builddir/initramfs.cpio`, or for
 # `tests` the tests userland and `builddir/initramfs-tests.cpio`, and the apps
-# outside the base, `builddir/apps`. `install` puts the apps at /usr/local at
-# once, as whoever runs it, and the kernel and base into the slot that is not
-# the default, arming one boot of it: `bootctl reboot` tries it and
-# `bootctl commit` keeps it; without the commit the next boot is the default.
+# outside the base, `builddir/apps`. `install` puts the kernel and base into
+# the slot that is not the default, arming one boot of it: `bootctl reboot`
+# tries it and `bootctl commit` keeps it; without the commit the next boot is
+# the default. The apps go to /usr/local at once, as whoever runs it, when the
+# running libc.so is the one they were built against; otherwise the command
+# that installs them is printed for the new boot.
 set -eu
 
 usage() {
@@ -76,9 +78,14 @@ COREUTILS_LINKS="$COREUTILS_TOOLS" EXTRA_SHARED_OBJECTS="$shared" \
     REMOTE_PAIRING_DIR="$pairing" scripts/build_initramfs.sh "$base" builddir $programs
 [ "$1" = install ] || exit 0
 
-tree-install apps "$REPO_ROOT/builddir/apps" /usr/local
 elf="$REPO_ROOT/builddir/kernel-$variant.elf"
 slot="$(bootctl spare)"
 bootctl install "$slot" "$elf" "$REPO_ROOT/$base"
 bootctl oneshot "slopos-$slot"
+apps="builddir/tree-install.elf apps builddir/apps /usr/local"
+if cmp -s /lib/libc.so builddir/libc.so; then
+    builddir/tree-install.elf apps builddir/apps /usr/local
+else
+    echo "selfhost: the apps need this build's libc.so; once slopos-$slot is up, run in $REPO_ROOT: $apps"
+fi
 echo "selfhost: bootctl reboot tries slopos-$slot once; bootctl commit there keeps it"
