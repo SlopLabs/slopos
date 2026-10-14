@@ -2,6 +2,31 @@
 
 **No finding is open.**
 
+Swept 2026-10-14: the apps outside the base — the loader's `/usr/local/lib`
+rule (searched only for a process neither `AT_SECURE` nor of effective uid 0,
+exec marking mixed ids `AT_SECURE`, so no process holding more than the
+session finds a library the session put there), the app entries and icons the
+compositor reads from what the session writes (regular files only, opened
+without following a link, non-blocking and without a controlling terminal,
+bounded in size, at most 64 per share, the icon decoded under a pixel cap),
+the dock spawning an entry's program with nothing delegated, the
+`memfd_create` export (its flags still validated by the kernel), and the tree
+installs: `tree-install` holding nothing and refusing a manifest another uid
+keeps, init installing a live boot's apps before any session process exists,
+and the installer writing a kept root inside a directory only uid 0 may
+search. Reviews found, before it landed, that the installer read the session's
+manifest of a tree, the toolchain's included: a forged identity would have
+kept a planted `/usr/local` through a repair reinstall, and a forged entry
+would have had the apps' reinstall remove a toolchain file the skipped
+toolchain then never put back; and that a manifest keyed by name applied its
+removals wherever an install named. The installer now reads no manifest uid 0
+did not write, an install skips a tree only with every recorded entry in
+place, and a manifest names its destination. Below the bar: everything a tree
+install removes or replaces stays under the destination the installer chose,
+which on every root is the session's, and a symlink on the way is refused; an
+entry in the person's own share may name any program, which the dock runs as
+the session with nothing the session lacks.
+
 Swept 2026-10-14: the raise deleted — a spawn whose child's mask and
 `AT_SECURE` come from `Endowment::check` alone, exec keeping `caps &
 universal` on every thread of the process, `mount(2)` refusing only what is

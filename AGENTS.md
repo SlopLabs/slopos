@@ -573,18 +573,23 @@ against slibc's rlib. A tree's manifest is keyed by its name
 (`tree-core::{TOOLCHAIN, APPS}`), names where the tree went (`at`), so an
 install elsewhere is refused, and belongs to whoever installs the tree again:
 the toolchain's to uid 0, the apps' to the session, which rewrites it in place
-in uid 0's directory. An install skips a tree whose finished manifest carries
-its identity only when uid 0 or the installer itself wrote it, so the installer
-never takes the session's word, and a manifest that does not parse — an
-in-place rewrite cut short — names the new tree, whose paths the install takes
-back. Two trees at one destination stay disjoint: a file one holds refuses the
-other's install of it.
+in uid 0's directory, where init makes it for the session on a root without
+one. A manifest neither uid 0 nor the installing uid wrote is not read, and
+one that does not parse — an in-place rewrite cut short — is not believed:
+either stands for the new tree unfinished, whose paths the install takes back,
+so the installer never acts on what the session wrote. An install skips a tree
+whose believed manifest records its identity at that destination with every
+entry still of the kind and size it names. Two trees at one destination stay
+disjoint: a file one holds refuses the other's install of it. On a host-built
+root the host keeps the record that counts, and the guest's copy takes its
+tree's owner.
 The apps reach a root four ways: the image builders install them as a host
 tree; the install medium carries them at `apps/` (`layout::MEDIUM_APPS`) and
 the installer installs them; init installs them into a live boot's RAM root;
-and `scripts/selfhost.sh install` installs them as the session through
-`/bin/tree-install`, a base program over `tree-core` that holds nothing and
-writes as whoever runs it. In the guest a manifest is computed from the tree
+and `scripts/selfhost.sh install` installs them as the session with the
+`tree-install` it built — `/bin/tree-install`, a base program over `tree-core`
+that holds nothing, writes as whoever runs it and refuses a tree whose
+manifest another uid keeps. In the guest a manifest is computed from the tree
 (`slopos_userland::tree::scan`), its identity a digest of every entry. The
 dock pins the app entries — `share/slopos/apps/<id>.app`, `key=value` lines
 naming the `id`, a `name`, the program it `exec`s and an `icon` PNG in that
