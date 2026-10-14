@@ -570,8 +570,15 @@ in `DT_NEEDED` or holds a `syscall` instruction. The toolkit under them
 `slopos-cabi`, safe wrappers over functions `libc.so` exports — never slibc's
 raw calls or the ring — so the same code links into a static base program
 against slibc's rlib. A tree's manifest is keyed by its name
-(`tree-core::{TOOLCHAIN, APPS}`) and owned with the tree, and two trees at one
-destination stay disjoint: a file one holds refuses the other's install of it.
+(`tree-core::{TOOLCHAIN, APPS}`), names where the tree went (`at`), so an
+install elsewhere is refused, and belongs to whoever installs the tree again:
+the toolchain's to uid 0, the apps' to the session, which rewrites it in place
+in uid 0's directory. An install skips a tree whose finished manifest carries
+its identity only when uid 0 or the installer itself wrote it, so the installer
+never takes the session's word, and a manifest that does not parse — an
+in-place rewrite cut short — names the new tree, whose paths the install takes
+back. Two trees at one destination stay disjoint: a file one holds refuses the
+other's install of it.
 The apps reach a root four ways: the image builders install them as a host
 tree; the install medium carries them at `apps/` (`layout::MEDIUM_APPS`) and
 the installer installs them; init installs them into a live boot's RAM root;
@@ -615,9 +622,11 @@ while its siblings stay writable. UEFI variables are read and written on a
 kernel thread — the firmware is mapped only into the kernel master address
 space and may use the vector registers. In the guest, `scripts/selfhost.sh install` is the one
 command for the whole of it: it builds the kernel, the userland and the base
-with the toolchain on `PATH`, installs the apps at `/usr/local` at once and
-the kernel and base into `bootctl spare`'s slot, and arms the one-shot boot, so
-a system is tried, committed or rolled back whole.
+with the toolchain on `PATH`, installs the kernel and base into `bootctl
+spare`'s slot and arms the one-shot boot, so a system is tried, committed or
+rolled back whole. The apps are no slot's: they go to `/usr/local` at once
+when the running `libc.so` is the one they were built against, and otherwise
+by the command the script prints for the new boot, and a rollback keeps them.
 `selfhost_test` and `install_test` run that script as a person at the shell
 does, so the loop a developer types is the loop the tests grade; a root test
 hands the script a privd connection of its own, so its `bootctl` calls are
@@ -735,9 +744,9 @@ wrapper crates enable, and both are built `-C force-unwind-tables` because the
 first frame of every unwind is one of their own. The cost is that the shipped
 `libc.so` carries the DWARF reader — 45 904 bytes of a 571 696-byte library,
 re-measured by building the cdylib with the feature off — which `--gc-sections` cannot drop while startup registers the frame finder
-unconditionally. The 60 static Rust binaries are unaffected: they take slibc as
-an rlib with the feature off, and `userland/userland.ld` discards `.eh_frame`
-outright.
+unconditionally. The base's static Rust binaries are unaffected: they take
+slibc as an rlib with the feature off, and `userland/userland.ld` discards
+`.eh_frame` outright. The apps outside the base unwind through `libc.so`'s.
 
 `just boot-live` and `just boot-log` boot `builddir/slop.iso` with `BOOT_CMDLINE` as its command line — `root=initramfs` unless it says otherwise — plus `boot.debug=on` under `DEBUG=1` and `roulette=skip` under `ROULETTE=0`; `VIDEO=0` makes `just boot` and `just boot-live` serial-only.
 

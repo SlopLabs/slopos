@@ -107,15 +107,18 @@ compares the two: that is Phase 3.
 
 **Trees.** `tree-core` installs a tree by manifest, replacing what the old
 manifest names and keeping what the user added. A manifest is keyed by the
-tree's name: `usr_local` for the toolchain and `apps` for the apps, both at
-`/usr/local`. `scripts/fs_tree.py` applies it on the host, and
-`slopos_userland::tree` in the guest, for the installer, init and
-`/bin/tree-install`.
+tree's name, `usr_local` for the toolchain and `apps` for the apps, both at
+`/usr/local`, and names where its tree went. `scripts/fs_tree.py` applies it
+on the host, and `slopos_userland::tree` in the guest, for the installer,
+init and `/bin/tree-install`.
 
 **Building in the guest.** `scripts/selfhost.sh install` builds the kernel,
-the userland, the base and the apps, installs the apps at once through
-`tree-install`, installs the kernel and base into the spare slot and arms one
-boot of it.
+the userland, the base and the apps, installs the kernel and base into the
+spare slot and arms one boot of it. It installs the apps through the
+`tree-install` it built when the running `libc.so` is the one they link, and
+otherwise prints the command for the new boot. `just remote-install` and a
+bare `bootctl install` carry no apps: a machine moved by them from a base
+that held the apps has none until a tree install (Phase 5).
 
 ## What the prior art settles
 
@@ -296,7 +299,8 @@ no dialog, because the person approved that base when it was installed.
   person's `cargo build` would build them: against the target's std, linked
   dynamically against `libc.so` with `--dynamic-linker=/lib/ld-slopos.so.1`.
   `scripts/check_loose_programs.sh` fails one that is static, lacks
-  `libc.so` in `DT_NEEDED`, or holds a `syscall` instruction.
+  `libc.so` in `DT_NEEDED`, or holds a `syscall` instruction. It carries a
+  `--self-test`.
 - **Location.**
   - programs in `/usr/local/bin/`;
   - app entries in `share/slopos/apps/<id>.app`, as `key=value` lines: `id`,
@@ -438,7 +442,8 @@ its own.
   bounded and non-blocking. The shell's registry dropped the apps.
 - The loader searches `/usr/local/lib` last for a process neither
   `AT_SECURE` nor uid 0's.
-- `tree-core` keys manifests by name (`TOOLCHAIN`, `APPS`).
+- `tree-core` keys manifests by name (`TOOLCHAIN`, `APPS`) and records each
+  tree's destination in an `at` line, refusing a reinstall elsewhere.
   `slopos_userland::tree` scans and installs a tree for the installer, init
   and `/bin/tree-install`. `FS_HOST_TREES` takes `<host>:<guest>[:<name>]`.
 - The apps tree is on the tests, verified, persistent and self-hosting
@@ -447,9 +452,12 @@ its own.
 - The installer mounts the new root inside a directory only uid 0 may
   search.
 - Graded by `apps_test` (each app, run from `/usr/local/bin`, connects to a
-  stand-in compositor and names its window), `dock_test`, `dl_test`'s root
-  and session cases, `tree-core`'s and `fs_tree.py`'s tests of two trees at
-  one destination, and `test-installer`'s markers for the apps.
+  stand-in compositor and names its window), `dock_test` (with links, FIFOs,
+  oversized files and a hundred entries in the person's share),
+  `tree_install_test` (the session's own tree over a manifest it rewrites in
+  place), `dl_test`'s root and session cases, `tree-core`'s and
+  `fs_tree.py`'s tests of two trees at one destination, and
+  `test-installer`'s markers for the apps.
 
 ### Phase 3: The boot partition
 
@@ -582,11 +590,24 @@ Graded by:
   programs alone.
 - **Apps keep the target's panic strategy.** They unwind, through the
   unwinder `libc.so` carries; base programs stay `panic = abort`.
-- **A tree is named, and its manifest is its owner's.** Trees share a
-  destination, kept disjoint by `tree-core`'s refusal; a manifest copy is
-  owned with its tree, so the session keeps its own trees with no
-  capability: `tree-install` rewrites its manifest in place in uid 0's
-  directory, which it may not add to.
+- **A tree is named, and its manifest says where it went.** Trees share a
+  destination, kept disjoint by `tree-core`'s refusal. Keyed by name, a
+  manifest would otherwise apply its removals wherever an install named;
+  the `at` line refuses that.
+- **A manifest belongs to whoever installs its tree again.** The apps' is the
+  session's, which keeps them with no capability: `tree-install` rewrites it
+  in place in uid 0's directory, which it may not add to. The toolchain's is
+  uid 0's. An install skips a tree only on a manifest uid 0 or the installer
+  itself wrote, so the installer's repair never takes the session's word. A
+  manifest that does not parse, as an in-place rewrite cut short leaves,
+  names the new tree, whose paths the install takes back; a per-tree
+  directory the session owns would have made the rewrite a rename, at the
+  cost of a second shape of manifest directory. On the host the record that
+  counts stays outside the image, so a copy there takes its tree's owner.
+- **The apps are no slot's.** They follow the `libc.so` they link, which a
+  slot's base carries: `selfhost.sh install` installs them at once only over
+  the same `libc.so`, and a rollback keeps them. Exports only grow, so apps
+  built against an older `libc.so` run on a newer one.
 - **In the guest, a manifest is computed from the tree it describes**: its
   identity is a digest of every entry, and nothing ships a manifest beside a
   tree it could disagree with. The host's `fs_tree.py` keeps its own
