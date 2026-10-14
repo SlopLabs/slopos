@@ -119,7 +119,10 @@ struct WindowManager {
 impl WindowManager {
     fn new() -> Self {
         let mut shelf = dock::LauncherShelf::new();
-        shelf.init_defaults();
+        let home = std::env::var("HOME").ok();
+        shelf.pin(crate::app_entry::read(&crate::app_entry::shares(
+            home.as_deref(),
+        )));
         let protocol = ProtocolBridge::new().map(Box::new);
         Self {
             windows: [UserWindowInfo::default(); MAX_WINDOWS],

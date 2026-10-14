@@ -237,9 +237,106 @@ fn an_unfinished_manifest_names_both_trees() {
 }
 
 #[test]
-fn a_tree_is_named_for_where_it_goes() {
-    assert_eq!(manifest_name("/usr/local"), "usr_local");
-    assert_eq!(manifest_name("/srv/ladder"), "srv_ladder");
+fn a_tree_is_named_by_one_component() {
+    assert_eq!(manifest_path(TOOLCHAIN), "/var/lib/slopos/trees/usr_local");
+    assert_eq!(manifest_path(APPS), "/var/lib/slopos/trees/apps");
+    for name in [TOOLCHAIN, APPS, "home_user_ladder"] {
+        assert!(valid_name(name), "{name}");
+    }
+    for name in ["", "..", "a/b", "Apps", "a-b", "a b"] {
+        assert!(!valid_name(name), "{name:?}");
+    }
+}
+
+fn toolchain() -> Manifest {
+    manifest(
+        't',
+        &[
+            (D, "bin"),
+            (F, "bin/rustc"),
+            (D, "lib"),
+            (F, "lib/librustc.so"),
+        ],
+    )
+}
+
+fn install(root: &mut Fake, old: Option<&Manifest>, new: &Manifest) {
+    let steps = plan(root, "/usr/local", old, new).unwrap();
+    root.apply(&steps);
+}
+
+/// The toolchain, then the apps, both at `/usr/local`.
+fn two_trees() -> (Fake, Manifest) {
+    let mut root = Fake::with(&[("/usr", State::Dir)]);
+    install(&mut root, None, &toolchain());
+    let first = manifest(
+        'a',
+        &[
+            (D, "bin"),
+            (F, "bin/editor"),
+            (D, "share"),
+            (D, "share/slopos"),
+            (F, "share/slopos/editor.app"),
+        ],
+    );
+    install(&mut root, None, &first);
+    (root, first)
+}
+
+#[test]
+fn two_trees_share_a_destination() {
+    let (mut root, _) = two_trees();
+    for path in [
+        "/usr/local/bin/rustc",
+        "/usr/local/lib/librustc.so",
+        "/usr/local/bin/editor",
+    ] {
+        assert_eq!(root.state(path), State::File, "{path}");
+    }
+}
+
+#[test]
+fn a_file_of_one_tree_refuses_the_other() {
+    let (mut root, first) = two_trees();
+    let clash = manifest('b', &[(D, "bin"), (F, "bin/editor"), (F, "bin/rustc")]);
+    let Err(Conflicts(found)) = plan(&mut root, "/usr/local", Some(&first), &clash) else {
+        panic!("the apps took the toolchain's rustc");
+    };
+    assert_eq!(
+        found,
+        vec!["/usr/local/bin/rustc is already there, and the new tree has one"]
+    );
+    let Err(Conflicts(found)) = plan(&mut root, "/usr/local", None, &toolchain()) else {
+        panic!("a second toolchain install with no manifest took its own files");
+    };
+    assert_eq!(found.len(), 2, "{found:?}");
+}
+
+#[test]
+fn replacing_one_tree_keeps_the_others() {
+    let (mut root, first) = two_trees();
+    install(
+        &mut root,
+        Some(&first),
+        &manifest('c', &[(D, "bin"), (F, "bin/viewer")]),
+    );
+    assert_eq!(root.state("/usr/local/bin/editor"), State::Absent);
+    assert_eq!(root.state("/usr/local/bin/viewer"), State::File);
+    assert_eq!(root.state("/usr/local/bin/rustc"), State::File);
+    assert_eq!(root.state("/usr/local/share"), State::Absent);
+    assert_eq!(root.state("/usr/local/lib/librustc.so"), State::File);
+}
+
+#[test]
+fn a_directory_both_trees_hold_outlives_one() {
+    let (mut root, first) = two_trees();
+    install(&mut root, Some(&first), &manifest('d', &[]));
+    assert_eq!(root.state("/usr/local/bin"), State::Dir);
+    assert_eq!(root.state("/usr/local/bin/rustc"), State::File);
+    assert_eq!(root.state("/usr/local/bin/editor"), State::Absent);
+    install(&mut root, Some(&toolchain()), &manifest('e', &[]));
+    assert_eq!(root.state("/usr/local/bin"), State::Absent);
+    assert_eq!(root.state("/usr/local"), State::Dir);
 }
 
 #[test]

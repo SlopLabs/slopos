@@ -3,12 +3,20 @@
 
 use slopos_abi::draw::Color32;
 use slopos_font::FontRenderer;
+use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
+use slopos_image::{DecodeOptions, Image};
 
+use crate::app_entry::AppEntry;
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::syscall::UserWindowInfo;
 use crate::theme::*;
 
 const MAX_ENTRIES: usize = 16;
+
+/// An icon is drawn at most `SHELF_ICON_SIZE_MAX` square; a larger one is
+/// refused before it is decoded.
+const ICON_PIXELS_MAX: usize = 256 * 256;
+const ICON_BYTES_MAX: u64 = 1 << 20;
 
 /// Font size for the hover label tooltip (the bitmap fallback uses cell size).
 const LABEL_FONT_SIZE: u16 = 11;
@@ -16,64 +24,38 @@ const LABEL_FONT_SIZE: u16 = 11;
 const ICON_LABEL_FONT_SIZE: u16 = 20;
 
 pub struct ShelfEntry {
-    pub name: [u8; 32],
-    pub name_len: usize,
-    pub program_path: [u8; 64],
-    pub path_len: usize,
+    pub name: String,
+    pub exec: String,
+    pub app_id: String,
     pub pinned: bool,
     pub running: bool,
     pub task_id: u32,
-    pub icon_color: u32,
-    pub icon_letter: u8,
-    pub app_id: [u8; 32],
-    pub app_id_len: usize,
+    icon: Option<Image>,
 }
 
 impl ShelfEntry {
-    const fn empty() -> Self {
+    fn pinned(entry: AppEntry) -> Self {
+        let icon = entry
+            .icon
+            .as_deref()
+            .and_then(|path| crate::app_entry::read_bounded(path, ICON_BYTES_MAX))
+            .and_then(|bytes| {
+                let options = DecodeOptions {
+                    max_pixels: ICON_PIXELS_MAX,
+                    ..DecodeOptions::default()
+                };
+                slopos_image::decode(&bytes, options).ok()
+            });
         Self {
-            name: [0u8; 32],
-            name_len: 0,
-            program_path: [0u8; 64],
-            path_len: 0,
-            pinned: false,
+            name: entry.name,
+            exec: entry.exec,
+            app_id: entry.id,
+            pinned: true,
             running: false,
             task_id: 0,
-            icon_color: 0,
-            icon_letter: 0,
-            app_id: [0u8; 32],
-            app_id_len: 0,
+            icon,
         }
     }
-
-    fn name_str(&self) -> &str {
-        let len = self.name_len.min(self.name.len());
-        core::str::from_utf8(&self.name[..len]).unwrap_or("")
-    }
-}
-
-fn make_pinned(
-    name: &[u8],
-    path: &[u8],
-    app_id: &[u8],
-    color: Color32,
-    alpha: u8,
-    letter: u8,
-) -> ShelfEntry {
-    let mut entry = ShelfEntry::empty();
-    let n = name.len().min(entry.name.len());
-    entry.name[..n].copy_from_slice(&name[..n]);
-    entry.name_len = n;
-    let p = path.len().min(entry.program_path.len());
-    entry.program_path[..p].copy_from_slice(&path[..p]);
-    entry.path_len = p;
-    entry.pinned = true;
-    entry.icon_color = argb(color, alpha);
-    entry.icon_letter = letter;
-    let a = app_id.len().min(entry.app_id.len());
-    entry.app_id[..a].copy_from_slice(&app_id[..a]);
-    entry.app_id_len = a;
-    entry
 }
 
 #[derive(Clone, Copy)]
@@ -100,8 +82,7 @@ struct ShelfGeometry {
 }
 
 pub struct LauncherShelf {
-    entries: [ShelfEntry; MAX_ENTRIES],
-    entry_count: usize,
+    entries: Vec<ShelfEntry>,
     hovered_index: Option<usize>,
     last_bounds: DamageRect,
     /// Captured at draw time so `hit_test` can compute geometry for any cursor
@@ -114,8 +95,7 @@ pub struct LauncherShelf {
 impl LauncherShelf {
     pub fn new() -> Self {
         Self {
-            entries: [const { ShelfEntry::empty() }; MAX_ENTRIES],
-            entry_count: 0,
+            entries: Vec::new(),
             hovered_index: None,
             last_bounds: DamageRect::invalid(),
             screen_w: 0,
@@ -131,130 +111,61 @@ impl LauncherShelf {
         dirty
     }
 
-    /// Populate the default pinned applications.
-    pub fn init_defaults(&mut self) {
-        self.entries[0] = make_pinned(
-            b"Terminal",
-            b"/bin/terminal",
-            b"org.slopos.terminal",
-            ICON_SHELL,
-            ICON_SHELL_ALPHA,
-            b'T',
-        );
-        self.entries[1] = make_pinned(
-            b"Files",
-            b"/bin/file_manager",
-            b"org.slopos.files",
-            ICON_FILES,
-            ICON_FILES_ALPHA,
-            b'F',
-        );
-        self.entries[2] = make_pinned(
-            b"Editor",
-            b"/bin/editor",
-            b"org.slopos.editor",
-            ICON_EDITOR,
-            ICON_EDITOR_ALPHA,
-            b'E',
-        );
-        self.entries[3] = make_pinned(
-            b"System Monitor",
-            b"/bin/sysmon",
-            b"org.slopos.sysmon",
-            ICON_MONITOR,
-            ICON_MONITOR_ALPHA,
-            b'M',
-        );
-        self.entries[4] = make_pinned(
-            b"Image Viewer",
-            b"/bin/image_viewer",
-            b"org.slopos.image-viewer",
-            ICON_IMAGES,
-            ICON_IMAGES_ALPHA,
-            b'I',
-        );
-        self.entry_count = 5;
+    /// Pin the apps `entries` name, in order, as many as the shelf holds.
+    pub fn pin(&mut self, entries: Vec<AppEntry>) {
+        self.entries = entries
+            .into_iter()
+            .take(MAX_ENTRIES)
+            .map(ShelfEntry::pinned)
+            .collect();
+        self.content_dirty = true;
+    }
+
+    pub fn entries(&self) -> &[ShelfEntry] {
+        &self.entries
     }
 
     /// Synchronize running state from the current window list; running apps
     /// that match no pinned entry are appended after the pinned group.
     pub fn sync_running_apps(&mut self, windows: &[UserWindowInfo], count: u32) {
-        let pinned_count = self.pinned_count();
-
-        let prev_count = self.entry_count;
-        let mut prev_running = [false; MAX_ENTRIES];
-        let mut prev_task_ids = [0u32; MAX_ENTRIES];
-        for i in 0..prev_count {
-            prev_running[i] = self.entries[i].running;
-            prev_task_ids[i] = self.entries[i].task_id;
+        let before: Vec<(bool, u32)> = self
+            .entries
+            .iter()
+            .map(|e| (e.running, e.task_id))
+            .collect();
+        self.entries.retain(|entry| entry.pinned);
+        for entry in &mut self.entries {
+            entry.running = false;
+            entry.task_id = 0;
         }
 
-        for i in 0..pinned_count {
-            self.entries[i].running = false;
-            self.entries[i].task_id = 0;
-        }
-
-        // Drops the dynamic (non-pinned) entries; they are rebuilt below.
-        self.entry_count = pinned_count;
-
-        let wcount = (count as usize).min(windows.len());
-        for wi in 0..wcount {
-            let win = &windows[wi];
-            let win_title = title_bytes(&win.title);
-
-            // Try to match against a pinned entry — prefer app_id, fall back to title.
-            let mut matched_pinned = false;
-            for pi in 0..pinned_count {
-                let entry = &self.entries[pi];
-                if entry.app_id_len > 0 && !win.app_id.is_empty() {
-                    let entry_id = &entry.app_id[..entry.app_id_len];
-                    let win_id = win.app_id.as_str().as_bytes();
-                    if entry_id == win_id {
-                        self.entries[pi].running = true;
-                        self.entries[pi].task_id = win.task_id;
-                        matched_pinned = true;
-                        break;
-                    }
-                }
-                if names_match(&entry.name, entry.name_len, win_title) {
-                    self.entries[pi].running = true;
-                    self.entries[pi].task_id = win.task_id;
-                    matched_pinned = true;
-                    break;
-                }
-            }
-
-            if !matched_pinned && self.entry_count < MAX_ENTRIES {
-                let idx = self.entry_count;
-                let mut entry = ShelfEntry::empty();
-                let n = win_title.len().min(entry.name.len());
-                entry.name[..n].copy_from_slice(&win_title[..n]);
-                entry.name_len = n;
-                entry.pinned = false;
+        for win in &windows[..(count as usize).min(windows.len())] {
+            let title = title_str(&win.title);
+            let app_id = win.app_id.as_str();
+            // An app's id names its entry; a window that sets none is matched
+            // by title.
+            let pinned = self.entries.iter_mut().find(|entry| {
+                (!app_id.is_empty() && entry.app_id == app_id) || names_match(&entry.name, title)
+            });
+            if let Some(entry) = pinned {
                 entry.running = true;
                 entry.task_id = win.task_id;
-                entry.icon_color = argb(ICON_DEFAULT, ICON_DEFAULT_ALPHA);
-                entry.icon_letter = if n > 0 {
-                    win_title[0].to_ascii_uppercase()
-                } else {
-                    b'?'
-                };
-                self.entries[idx] = entry;
-                self.entry_count += 1;
+            } else if self.entries.len() < MAX_ENTRIES {
+                self.entries.push(ShelfEntry {
+                    name: title.to_string(),
+                    exec: String::new(),
+                    app_id: app_id.to_string(),
+                    pinned: false,
+                    running: true,
+                    task_id: win.task_id,
+                    icon: None,
+                });
             }
         }
 
-        if self.entry_count != prev_count {
+        let after = self.entries.iter().map(|e| (e.running, e.task_id));
+        if !before.iter().copied().eq(after) {
             self.content_dirty = true;
-        } else {
-            for i in 0..self.entry_count {
-                if self.entries[i].running != prev_running[i]
-                    || self.entries[i].task_id != prev_task_ids[i]
-                {
-                    self.content_dirty = true;
-                    break;
-                }
-            }
         }
     }
 
@@ -268,7 +179,7 @@ impl LauncherShelf {
         cursor_y: i32,
     ) -> ShelfGeometry {
         let pinned_count = self.pinned_count();
-        let running_non_pinned = self.entry_count - pinned_count;
+        let running_non_pinned = self.entries.len() - pinned_count;
         let has_separator = running_non_pinned > 0;
 
         // Magnification scale is 8.8 fixed-point; proximity is measured against
@@ -287,7 +198,7 @@ impl LauncherShelf {
 
         if in_y_proximity {
             let mut cx = base_pill_x + SHELF_PILL_PADDING_X;
-            for i in 0..self.entry_count {
+            for i in 0..self.entries.len() {
                 if i == pinned_count && has_separator {
                     cx +=
                         SHELF_SEPARATOR_MARGIN_X + SHELF_SEPARATOR_WIDTH + SHELF_SEPARATOR_MARGIN_X;
@@ -307,7 +218,7 @@ impl LauncherShelf {
 
         let total_w = self.scaled_content_width(&icon_sizes, pinned_count, has_separator);
         let pill_w = total_w + 2 * SHELF_PILL_PADDING_X;
-        let max_icon_size = max_in_slice(&icon_sizes, self.entry_count);
+        let max_icon_size = max_in_slice(&icon_sizes, self.entries.len());
         let pill_h = max_icon_size + 2 * SHELF_PILL_PADDING_Y;
         let pill_x = (screen_width as i32 - pill_w) / 2;
         let pill_y = screen_height as i32 - SHELF_BOTTOM_MARGIN - pill_h;
@@ -322,7 +233,7 @@ impl LauncherShelf {
         let mut cx = pill_x + SHELF_PILL_PADDING_X;
         let mut separator_x = 0i32;
 
-        for i in 0..self.entry_count {
+        for i in 0..self.entries.len() {
             if i == pinned_count && has_separator {
                 separator_x = cx + SHELF_SEPARATOR_MARGIN_X;
                 cx += SHELF_SEPARATOR_MARGIN_X + SHELF_SEPARATOR_WIDTH + SHELF_SEPARATOR_MARGIN_X;
@@ -337,7 +248,7 @@ impl LauncherShelf {
         }
 
         let mut hovered = None;
-        for i in 0..self.entry_count {
+        for i in 0..self.entries.len() {
             let l = &layouts[i];
             let left = l.center_x - l.size / 2;
             if cursor_x >= left
@@ -372,7 +283,7 @@ impl LauncherShelf {
         mut font: Option<&mut FontRenderer>,
         clip: Option<DamageRect>,
     ) {
-        if self.entry_count == 0 {
+        if self.entries.len() == 0 {
             self.last_bounds = DamageRect::invalid();
             return;
         }
@@ -383,7 +294,7 @@ impl LauncherShelf {
         let clip_rect = clip.unwrap_or_else(|| full_screen_clip(screen_width, screen_height));
 
         let pinned_count = self.pinned_count();
-        let running_non_pinned = self.entry_count - pinned_count;
+        let running_non_pinned = self.entries.len() - pinned_count;
         let has_separator = running_non_pinned > 0;
 
         let geo = self.compute_geometry(screen_width, screen_height, cursor_x, cursor_y);
@@ -434,45 +345,36 @@ impl LauncherShelf {
             );
         }
 
-        for i in 0..self.entry_count {
+        for i in 0..self.entries.len() {
             let l = &layouts[i];
             let entry = &self.entries[i];
             let icon_x = l.center_x - l.size / 2;
             let icon_y = l.top_y;
 
-            let c = Color32(entry.icon_color);
-            slopos_gfx::canvas_ops::rounded_rect_filled(
-                buf,
-                icon_x,
-                icon_y,
-                l.size,
-                l.size,
-                SHELF_ICON_CORNER_RADIUS,
-                c,
-            );
-
-            let letter_str = [entry.icon_letter];
-            if let Ok(s) = core::str::from_utf8(&letter_str) {
-                let text_color = Color32::new(
-                    TEXT_PRIMARY.red(),
-                    TEXT_PRIMARY.green(),
-                    TEXT_PRIMARY.blue(),
-                    TEXT_PRIMARY_ALPHA,
+            if let Some(icon) = &entry.icon
+                && let Some(bitmap) = BitmapRef::new(icon.width, icon.height, &icon.pixels)
+            {
+                slopos_gfx::image::draw_image_clipped(
+                    buf,
+                    bitmap,
+                    icon_x,
+                    icon_y,
+                    l.size,
+                    l.size,
+                    ImageFit::Stretch,
+                    ImageSampling::for_resize(icon.width, icon.height, l.size, l.size),
+                    &clip_rect,
                 );
-
-                if let Some(ref mut f) = font {
-                    let (tw, th) = f.measure_text(s, ICON_LABEL_FONT_SIZE);
-                    let tx = icon_x + (l.size - tw) / 2;
-                    let ty = icon_y + (l.size - th) / 2;
-                    f.draw_text(buf, tx, ty, s, ICON_LABEL_FONT_SIZE, text_color, c);
-                } else {
-                    // Bitmap fallback: the glyph cell is 8x16.
-                    let tw = 8;
-                    let th = 16;
-                    let tx = icon_x + (l.size - tw) / 2;
-                    let ty = icon_y + (l.size - th) / 2;
-                    gfx::draw_str_clipped(buf, tx, ty, s, text_color, c, &clip_rect);
-                }
+            } else {
+                draw_letter_icon(
+                    buf,
+                    font.as_deref_mut(),
+                    entry,
+                    l,
+                    icon_x,
+                    icon_y,
+                    &clip_rect,
+                );
             }
 
             if entry.running {
@@ -491,7 +393,7 @@ impl LauncherShelf {
         if let Some(hi) = self.hovered_index {
             let entry = &self.entries[hi];
             let l = &layouts[hi];
-            let name = entry.name_str();
+            let name = entry.name.as_str();
             if !name.is_empty() {
                 let label_bg = Color32::new(
                     SHELF_LABEL_BG.red(),
@@ -576,7 +478,7 @@ impl LauncherShelf {
     /// brought the cursor here would otherwise be tested against where the
     /// cursor was at the previous render.
     pub fn hit_test(&self, px: i32, py: i32) -> Option<usize> {
-        if self.entry_count == 0 || self.screen_w == 0 || self.screen_h == 0 {
+        if self.entries.len() == 0 || self.screen_w == 0 || self.screen_h == 0 {
             return None;
         }
         self.compute_geometry(self.screen_w, self.screen_h, px, py)
@@ -589,7 +491,7 @@ impl LauncherShelf {
     }
 
     pub fn entry(&self, index: usize) -> Option<&ShelfEntry> {
-        if index < self.entry_count {
+        if index < self.entries.len() {
             Some(&self.entries[index])
         } else {
             None
@@ -599,7 +501,7 @@ impl LauncherShelf {
     /// Count how many entries are pinned (they are always at the front).
     fn pinned_count(&self) -> usize {
         let mut n = 0;
-        for i in 0..self.entry_count {
+        for i in 0..self.entries.len() {
             if self.entries[i].pinned {
                 n += 1;
             } else {
@@ -611,11 +513,11 @@ impl LauncherShelf {
 
     /// Total content width at the base (un-magnified) icon size.
     fn base_content_width(&self, _pinned_count: usize, has_separator: bool) -> i32 {
-        if self.entry_count == 0 {
+        if self.entries.len() == 0 {
             return 0;
         }
-        let icon_total = SHELF_ICON_SIZE * self.entry_count as i32
-            + SHELF_ICON_SPACING * (self.entry_count as i32 - 1);
+        let icon_total = SHELF_ICON_SIZE * self.entries.len() as i32
+            + SHELF_ICON_SPACING * (self.entries.len() as i32 - 1);
         let sep_total = if has_separator {
             SHELF_SEPARATOR_MARGIN_X + SHELF_SEPARATOR_WIDTH + SHELF_SEPARATOR_MARGIN_X
                 - SHELF_ICON_SPACING // separator replaces one inter-icon gap
@@ -631,20 +533,67 @@ impl LauncherShelf {
         pinned_count: usize,
         has_separator: bool,
     ) -> i32 {
-        if self.entry_count == 0 {
+        if self.entries.len() == 0 {
             return 0;
         }
         let mut w = 0i32;
-        for i in 0..self.entry_count {
+        for i in 0..self.entries.len() {
             if i == pinned_count && has_separator {
                 w += SHELF_SEPARATOR_MARGIN_X + SHELF_SEPARATOR_WIDTH + SHELF_SEPARATOR_MARGIN_X;
             }
             w += sizes[i];
-            if i + 1 < self.entry_count {
+            if i + 1 < self.entries.len() {
                 w += SHELF_ICON_SPACING;
             }
         }
         w
+    }
+}
+
+/// An entry without an icon, and a running app no entry names: its name's
+/// first letter on a square.
+fn draw_letter_icon(
+    buf: &mut DrawBuffer,
+    font: Option<&mut FontRenderer>,
+    entry: &ShelfEntry,
+    l: &IconLayout,
+    icon_x: i32,
+    icon_y: i32,
+    clip: &DamageRect,
+) {
+    let c = argb(ICON_DEFAULT, ICON_DEFAULT_ALPHA);
+    slopos_gfx::canvas_ops::rounded_rect_filled(
+        buf,
+        icon_x,
+        icon_y,
+        l.size,
+        l.size,
+        SHELF_ICON_CORNER_RADIUS,
+        Color32(c),
+    );
+    let letter = entry
+        .name
+        .chars()
+        .next()
+        .map_or('?', |c| c.to_ascii_uppercase());
+    let mut utf8 = [0u8; 4];
+    let s = letter.encode_utf8(&mut utf8);
+    let text_color = Color32::new(
+        TEXT_PRIMARY.red(),
+        TEXT_PRIMARY.green(),
+        TEXT_PRIMARY.blue(),
+        TEXT_PRIMARY_ALPHA,
+    );
+    if let Some(f) = font {
+        let (tw, th) = f.measure_text(s, ICON_LABEL_FONT_SIZE);
+        let tx = icon_x + (l.size - tw) / 2;
+        let ty = icon_y + (l.size - th) / 2;
+        f.draw_text(buf, tx, ty, s, ICON_LABEL_FONT_SIZE, text_color, Color32(c));
+    } else {
+        // Bitmap fallback: the glyph cell is 8x16.
+        let tx = icon_x + (l.size - 8) / 2;
+        let ty = icon_y + (l.size - 16) / 2;
+        gfx::draw_str_clipped(buf, tx, ty, s, text_color, Color32(c), clip);
     }
 }
 
@@ -672,22 +621,16 @@ fn full_screen_clip(w: u32, h: u32) -> DamageRect {
     }
 }
 
-/// The title bytes up to the first NUL.
-fn title_bytes(title: &[u8; 32]) -> &[u8] {
+/// The title up to the first NUL.
+fn title_str(title: &[u8; 32]) -> &str {
     let len = title.iter().position(|&b| b == 0).unwrap_or(title.len());
-    &title[..len]
+    core::str::from_utf8(&title[..len]).unwrap_or("")
 }
 
 /// Case-insensitive prefix match of a shelf entry name against a window title.
-fn names_match(name: &[u8; 32], name_len: usize, win_title: &[u8]) -> bool {
-    if name_len == 0 || win_title.is_empty() {
-        return false;
-    }
-    let n = name_len.min(win_title.len());
-    for i in 0..n {
-        if name[i].to_ascii_lowercase() != win_title[i].to_ascii_lowercase() {
-            return false;
-        }
-    }
-    name_len <= win_title.len()
+fn names_match(name: &str, title: &str) -> bool {
+    !name.is_empty()
+        && title
+            .get(..name.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
 }

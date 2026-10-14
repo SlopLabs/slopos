@@ -908,10 +908,8 @@ impl InputHandler {
             }
         }
 
-        let path_len = entry.path_len.min(entry.program_path.len());
-        let path_bytes = &entry.program_path[..path_len];
-        if let Ok(path_str) = core::str::from_utf8(path_bytes) {
-            self.spawn_program(path_str);
+        if entry.pinned {
+            self.spawn_program(&entry.exec);
         }
     }
 

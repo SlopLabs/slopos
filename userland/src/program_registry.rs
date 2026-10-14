@@ -32,21 +32,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "Install SlopOS onto a disk from the live medium",
     },
     ProgramSpec {
-        name: "editor",
-        path: "/bin/editor",
-        desc: "Edit text and source files",
-    },
-    ProgramSpec {
-        name: "file_manager",
-        path: "/bin/file_manager",
-        desc: "Browse filesystem",
-    },
-    ProgramSpec {
-        name: "image_viewer",
-        path: "/bin/image_viewer",
-        desc: "View PNG images",
-    },
-    ProgramSpec {
         name: "sysmon",
         path: "/bin/sysmon",
         desc: "System Monitor",

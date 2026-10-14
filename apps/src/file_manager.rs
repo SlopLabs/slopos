@@ -6,11 +6,30 @@ use std::fs;
 use std::path::PathBuf;
 use std::string::String;
 
-use crate::theme;
 use slopos_appkit::{
     Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Key, Length, Modifiers, NamedKey,
     Node, TableColumn, TableColumnWidth, TextAlignment,
 };
+
+mod theme {
+    use slopos_abi::draw::Color32;
+
+    pub const FM_COLOR_BG: Color32 = Color32::rgb(0x1E, 0x1E, 0x20);
+    pub const FM_DIR_COLOR: Color32 = Color32::rgb(0x60, 0x9C, 0xF0);
+    pub const FM_ERROR_COLOR: Color32 = Color32::rgb(0xE0, 0x50, 0x50);
+    pub const FM_FILE_COLOR: Color32 = Color32::rgb(0xD0, 0xD0, 0xD0);
+    pub const FM_ITEM_HEIGHT: i32 = 22;
+    pub const FM_NAV_BG: Color32 = Color32::rgb(0x25, 0x25, 0x28);
+    pub const FM_SIDEBAR_BG: Color32 = Color32::rgb(0x1A, 0x1A, 0x1C);
+    pub const FM_SIDEBAR_HEADING: Color32 = Color32::rgb(0x70, 0x70, 0x74);
+    pub const FM_SIDEBAR_ITEM_HEIGHT: i32 = 22;
+    pub const FM_SIDEBAR_TEXT: Color32 = Color32::rgb(0xB0, 0xB0, 0xB0);
+    pub const FM_SIDEBAR_WIDTH: i32 = 140;
+    pub const FM_SIZE_COLOR: Color32 = Color32::rgb(0x80, 0x80, 0x84);
+    pub const FM_STATUS_BG: Color32 = Color32::rgb(0x22, 0x22, 0x24);
+    pub const FM_STATUS_TEXT: Color32 = Color32::rgb(0x90, 0x90, 0x94);
+    pub const TEXT_PRIMARY: Color32 = Color32::rgb(0xE0, 0xE0, 0xE0);
+}
 
 #[derive(Clone, Debug)]
 pub enum FileMsg {

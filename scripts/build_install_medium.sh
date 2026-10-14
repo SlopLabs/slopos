@@ -10,7 +10,9 @@ set -euo pipefail
 # Always Limine's loader, its licence and notices, and NOTICE.md, under boot/,
 # which the installer puts on the ESP and beside the slots, with the GPT disk
 # GUID chosen for this medium, also left beside the archive as
-# <out.cpio>.disk-guid for scripts/build_iso.sh to build the image with; under sources/
+# <out.cpio>.disk-guid for scripts/build_iso.sh to build the image with; under
+# apps/ the apps outside the base, which the installer puts at /usr/local and
+# a live boot's init at its RAM root's; under sources/
 # the pinned tarball and recipe of each recipe the base takes programs from,
 # with the scripts that build them, the source of what the medium distributes
 # of them.
@@ -28,6 +30,8 @@ set -euo pipefail
 #   LIMINE_DIR       Limine's binaries (default: third_party/limine)
 #   CARGO            cargo command, split on blanks (default: cargo)
 #   CARGO_TARGET_DIR where the packer is built (default: <out dir>/target)
+#   APPS_TREE        the apps tree scripts/build_userland.sh staged
+#                    (default: <out dir>/apps)
 
 SELF="build_install_medium"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -106,6 +110,10 @@ for script in build_recipes.sh make_slopos_cross.sh cxx_host_tools.sh make_slopo
     cp "$SCRIPT_DIR/$script" "$STAGE/sources/scripts/$script"
 done
 trees+=("$STAGE/sources=sources")
+
+APPS_TREE="${APPS_TREE:-$OUT_DIR/apps}"
+[ -d "$APPS_TREE/bin" ] || die "$APPS_TREE holds no apps; build the userland first"
+trees+=("$APPS_TREE=$MEDIUM_APPS")
 
 if [ -n "$TOOLCHAIN" ]; then
     "$SCRIPT_DIR/stage_workspace.sh" "$STAGE/src" --vendored --remote "$REMOTE"

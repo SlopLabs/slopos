@@ -151,6 +151,9 @@ test_shared_objects := `. scripts/lib/base.sh && printf %s "$BASE_TEST_SHARED_OB
 base_recipe_programs := `. scripts/lib/base.sh && printf %s "$BASE_RECIPE_PROGRAMS"`
 base_recipes        := `. scripts/lib/base.sh && printf %s "$BASE_RECIPES"`
 recipes_prefix      := build_dir / "slopos-recipes/prefix"
+# The apps outside the base, as build_userland.sh stages them: a host tree of
+# its own beside the toolchain at /usr/local.
+apps_tree           := build_dir / "apps:/usr/local:apps"
 base_recipe_env     := "RECIPE_PREFIX=" + recipes_prefix + " RECIPE_PROGRAMS=\"" + base_recipe_programs + "\" RECIPE_LICENSES=\"" + base_recipes + "\""
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
@@ -167,6 +170,7 @@ _build-userland:
     scripts/ensure_toolchain.sh
     CARGO="{{cargo}} +slopos" USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}"
+    scripts/check_loose_programs.sh {{build_dir}}/apps/bin/*
 
 _build-userland-tests: _build-userland
     CARGO="{{cargo}} +slopos" USERLAND_TARGET={{userland_target}} \
@@ -179,11 +183,12 @@ _build-userland-tests: _build-userland
 # from, so CI is order-independent only if each run starts from a fresh one.
 _fs-image: _build-userland
     FS_IMAGE_SIZE={{fs_image_size}} VERITY=on PRESERVE_FS_IMAGE=0 COREUTILS_LINKS="{{coreutils_tools}}" \
+        FS_HOST_TREES="{{apps_tree}}" \
         scripts/build_fs_image.sh "{{fs_image}}" "{{build_dir}}" {{userland_bins}}
 
 _fs-image-tests: _build-userland-tests
     FS_IMAGE_SIZE={{fs_image_size_tests}} VERITY=off PRESERVE_FS_IMAGE=0 COREUTILS_LINKS="{{coreutils_tools}}" \
-        EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" \
+        EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" FS_HOST_TREES="{{apps_tree}}" \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
 # `VERITY=rw`: writable, and attested wherever no boot rewrote a block. The
@@ -191,7 +196,7 @@ _fs-image-tests: _build-userland-tests
 # toolchain at /usr/local is the host's, replaced when it changes; the clone at
 # /src/slopos is the guest's once seeded, so it is staged only for a root
 # without one.
-_fs-image-persist:
+_fs-image-persist: _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
     seed=""
@@ -200,21 +205,21 @@ _fs-image-persist:
         seed="{{build_dir}}/workspace:/src"
     fi
     FS_IMAGE_SIZE={{persist_image_size}} FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=1 FS_BASE=boot \
-        FS_HOST_TREES="{{toolchain_install}}:/usr/local" FS_SEED_TREES="$seed" FS_FREE_FLOOR={{root_free_floor}} \
+        FS_HOST_TREES="{{toolchain_install}}:/usr/local {{apps_tree}}" FS_SEED_TREES="$seed" FS_FREE_FLOOR={{root_free_floor}} \
         scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}"
     rm -rf "{{build_dir}}/workspace"
 
 # The persistent root's shape, with the clone seeded `--vendored`, so a build
 # in the guest reads no network, and the fixtures the toolchain ladder fetches
 # from. The tests base comes from the boot module.
-_fs-image-selfhost:
+_fs-image-selfhost: _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
     rm -rf "{{selfhost_stage}}"
     scripts/stage_workspace.sh "{{selfhost_stage}}/src" --vendored
     scripts/stage_ladder_fixtures.sh "{{selfhost_stage}}/ladder" "{{ladder_sshd}}"
     FS_IMAGE_SIZE=1G FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=0 FS_BASE=boot \
-        FS_HOST_TREES="{{toolchain_install}}:/usr/local {{selfhost_stage}}/ladder:/home/user/ladder" \
+        FS_HOST_TREES="{{toolchain_install}}:/usr/local {{apps_tree}} {{selfhost_stage}}/ladder:/home/user/ladder" \
         FS_SEED_TREES="{{selfhost_stage}}/src:/src" FS_FREE_FLOOR={{root_free_floor}} \
         scripts/build_fs_image.sh "{{fs_image_selfhost}}" "{{build_dir}}"
     rm -rf "{{selfhost_stage}}"
@@ -328,7 +333,7 @@ build: _fs-image (_kernel kernel_variant)
 [doc("Build the kernel ELF alone, skipping the fs image — for gate-only jobs")]
 build-kernel-only: (_kernel kernel_variant)
 
-_install-medium:
+_install-medium: _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
     toolchain=""
@@ -715,7 +720,8 @@ test-installer *DISKS:
             cp {{iso_installer}} "$stick"
         fi
         built="$payload"
-        markers=("INSTALLER-INSTALLED" "ok 1 - installed_built_and_committed")
+        markers=("INSTALLER-INSTALLED" "ok 1 - installed_built_and_committed"
+            "installed the apps at /usr/local")
         if [ "$kind" = optical ]; then
             medium="cdrom:{{iso_installer}}" built=0
             markers+=("INSTALL: no disk carries the medium's GPT disk GUID"
@@ -753,7 +759,8 @@ test-installer *DISKS:
             # from its boot menu, which a fresh varstore stands in for.
             rm -f "$vars"
             markers=("INSTALLER-NOT-OFFERED /dev/sda: write-protected"
-                "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed")
+                "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed"
+                "/usr/local already holds this medium's apps")
             [ "$payload" = 0 ] ||
                 markers+=("/usr/local already holds this medium's toolchain" "the root has a /src already")
             boot_once "$logs-reinstall.log" "$install_budget" "stick:{{iso_installer}}" \
@@ -1504,6 +1511,7 @@ check-framekernel-gates:
     scripts/check_recipes.sh --self-test
     scripts/check_libc_license.sh --self-test
     scripts/check_libc_exports.sh --self-test
+    scripts/check_loose_programs.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_offline_build.sh --self-test

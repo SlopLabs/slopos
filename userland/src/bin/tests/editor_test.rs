@@ -11,7 +11,7 @@ use slopos_appkit::widgets::code_view::CodeInput;
 use slopos_appkit::widgets::editor_tabs::TabInput;
 use slopos_appkit::widgets::tree_view::TreeInput;
 use slopos_appkit::{App, Key, Modifiers, NamedKey};
-use slopos_userland::apps::editor::{Command, EditorApp, EditorMsg};
+use slopos_apps::editor::{Command, EditorApp, EditorMsg};
 
 const DIR: &str = "/home/editor_test";
 
@@ -249,8 +249,8 @@ fn finder_reaches_unexpanded_directories() -> bool {
 
 /// A binary file is refused rather than opened as replacement characters.
 fn refuses_a_binary_file() -> bool {
-    // A fixture, not `/bin/editor`: that would be refused for its size once it
-    // outgrows `MAX_FILE_BYTES`, and pass for the wrong reason.
+    // A fixture, not `/usr/local/bin/editor`: that would be refused for its
+    // size once it outgrows `MAX_FILE_BYTES`, and pass for the wrong reason.
     let path = format!("{DIR}/blob.bin");
     if std::fs::write(&path, [0x7f, b'E', b'L', b'F', 0x00, 0x01, 0x02, 0x00]).is_err() {
         return false;
@@ -405,7 +405,7 @@ mod dispatch {
     use slopos_appkit::event::{EventPhase, Key, MessageSink, Modifiers, WidgetEvent};
     use slopos_appkit::traits::Widget;
     use slopos_appkit::{App, StyleSheet, constraints::Size, tree};
-    use slopos_userland::apps::editor::{EditorApp, EditorMsg};
+    use slopos_apps::editor::{EditorApp, EditorMsg};
 
     pub const WINDOW: Size = Size {
         width: 1100,
@@ -499,7 +499,7 @@ fn palette_window_follows_rather_than_pins() -> bool {
         return false;
     }
     // Stepping past the last drawn row scrolls by exactly one.
-    let rows = slopos_userland::apps::editor::PALETTE_MAX_ROWS;
+    let rows = slopos_apps::editor::PALETTE_MAX_ROWS;
     for _ in 3..rows {
         dispatch::press(&mut app, Key::Named(NamedKey::Down), Modifiers::default());
     }

@@ -330,10 +330,10 @@ both installed through one debugfs session (`scripts/fs_tree.py`), which
 gives each the owner of its destination under the ownership map: the
 session's, uid 1000, under `/home`, `/src` and `/usr/local`, uid 0's
 elsewhere. A host tree
-(`FS_HOST_TREES`, `<host dir>:<guest dir>` pairs) is the host's: what it
-installed is recorded beside the image in `<image>.host/trees/`, where the guest
-cannot edit it, with a copy under `/var/lib/slopos/trees` for the guest to
-read, and whenever the host directory changes the tree is replaced — exactly
+(`FS_HOST_TREES`, `<host dir>:<guest dir>[:<name>]`) is the host's: what it
+installed is recorded beside the image in `<image>.host/trees/<name>`, where the
+guest cannot edit it, with a copy under `/var/lib/slopos/trees` for the guest to
+read, owned with the tree, and whenever the host directory changes the tree is replaced — exactly
 what the manifest names removed, whatever the guest put beside it kept. The
 image is read only through `ls -l` listings of directories bound to the
 inodes their parents gave them, so no symlink the guest makes redirects a
@@ -557,6 +557,38 @@ before closing, and a client accepts any compositor at its version or newer.
 The two `Hello`s never change encoding, and raising the minimum is a
 decision with a stated reason.
 
+**The apps live outside the base.** The editor, the file manager and the
+image viewer are `slopos-apps` (`apps/`), built as `cargo build` builds a
+program for this target — the target's std and panic strategy, linked
+dynamically against `libc.so` by the line the clang driver writes — and staged
+by `build_userland.sh` with their app entries and icons as `builddir/apps`:
+the tree `apps`, which every root holds at `/usr/local` beside the toolchain's
+`usr_local`. `scripts/check_loose_programs.sh`, after every host userland
+build, fails one that is static, names another interpreter, lacks `libc.so`
+in `DT_NEEDED` or holds a `syscall` instruction. The toolkit under them
+(`appkit`, `windowing`, `slop-protocol`) reaches the system only through
+`slopos-cabi`, safe wrappers over functions `libc.so` exports — never slibc's
+raw calls or the ring — so the same code links into a static base program
+against slibc's rlib. A tree's manifest is keyed by its name
+(`tree-core::{TOOLCHAIN, APPS}`) and owned with the tree, and two trees at one
+destination stay disjoint: a file one holds refuses the other's install of it.
+The apps reach a root four ways: the image builders install them as a host
+tree; the install medium carries them at `apps/` (`layout::MEDIUM_APPS`) and
+the installer installs them; init installs them into a live boot's RAM root;
+and `scripts/selfhost.sh install` installs them as the session through
+`/bin/tree-install`, a base program over `tree-core` that holds nothing and
+writes as whoever runs it. In the guest a manifest is computed from the tree
+(`slopos_userland::tree::scan`), its identity a digest of every entry. The
+dock pins the app entries — `share/slopos/apps/<id>.app`, `key=value` lines
+naming the `id`, a `name`, the program it `exec`s and an `icon` PNG in that
+share's `slopos/icons/` (`slopos_userland::app_entry`) — read at session start
+from `/usr/share`, `/usr/local/share` and `~/.local/share`, a later one
+replacing an earlier with its id as the XDG data directories rank, in name
+order. The shell's program registry names no app; `PATH` finds them. The
+loader searches `/usr/local/lib` after `/lib` and `/usr/lib` only for a
+process that is neither `AT_SECURE` nor uid 0's, so nothing the session puts
+there reaches a program holding more than the session does.
+
 **The guest installs what it builds.** `/bin/bootctl` (privd's
 `org.slopos.boot.*` actions, run as uid 0 with `RawBlock` for the raw disk and
 partition and `Power` for the loader's variables; `collect` is init's) finds
@@ -583,9 +615,9 @@ while its siblings stay writable. UEFI variables are read and written on a
 kernel thread — the firmware is mapped only into the kernel master address
 space and may use the vector registers. In the guest, `scripts/selfhost.sh install` is the one
 command for the whole of it: it builds the kernel, the userland and the base
-with the toolchain on `PATH`, installs both into `bootctl spare`'s slot and
-arms the one-shot boot, so a system is tried, committed or rolled
-back whole.
+with the toolchain on `PATH`, installs the apps at `/usr/local` at once and
+the kernel and base into `bootctl spare`'s slot, and arms the one-shot boot, so
+a system is tried, committed or rolled back whole.
 `selfhost_test` and `install_test` run that script as a person at the shell
 does, so the loop a developer types is the loop the tests grade; a root test
 hands the script a privd connection of its own, so its `bootctl` calls are
@@ -639,9 +671,10 @@ go, on 1 MiB boundaries, sharing the disk's ESP and keeping SlopOS's own on a
 reinstall; `BLKRRPART` re-reads the table it writes. It formats new FAT32
 volumes with `fat-core`, which creates long names, the root with
 `/sbin/mke2fs` in the profile, and zeroes a new crash partition; seals the
-root's base mount points; installs the medium's `/usr/local` by the rule host
-trees follow (`tree-core`: what the manifest under `/var/lib/slopos/trees`
-names is replaced, what the user added kept) and seeds `/src` once, its origin
+root's base mount points; installs the medium's toolchain and apps at
+`/usr/local` by the rule host trees follow (`tree-core`: what the manifest
+under `/var/lib/slopos/trees` names is replaced, what the user added kept) and
+seeds `/src` once, its origin
 where the user says; writes both slots and `limine.conf` — `root=PARTUUID=`, a
 five-second menu, an `efi_boot_entry` for each other system `BootOrder` lists
 that Limine can boot — makes `slopos-a` the default, holds the root to
@@ -1321,7 +1354,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `usb-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `usb-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `apps/`, `cabi/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 
@@ -1359,6 +1392,7 @@ The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-re
 - **`scripts/check_libc_license.sh`** — holds every crate `cargo metadata` resolves for `libc.so`, `libc.a`, `crt0.o` and `libbuiltins.a` to an SPDX expression MIT alone satisfies: the four packages and everything they depend on under `--all-features`, except through dev-dependencies (build-dependencies count: a build script's output is compiled in). MIT is the licence `slibc/NOTICE` gives such crates, and a third-party one needs an entry there; another licence needs its text there and a change to the gate. A crate of this tree must keep its manifest and every target under `slibc/`, `slibc-core/` or `abi/`, so neither a new crate elsewhere nor a crate root pointed outside passes on its licence field. `core`, `alloc` and `compiler_builtins` come from the standard library's workspace, which `cargo metadata` does not describe, and `slibc/NOTICE` records them by hand. The walk must reach slibc, `slibc-core` and `slopos-abi`, so a graph the gate cannot read fails instead of passing on the roots alone. Under those three directories every `include!`, `include_str!`, `include_bytes!` and attribute `path =`, read past comments and literals, must be a literal naming a file inside them, a `.rs` file where it is code, or a single file in `OUT_DIR`; a symlink there is refused. It reads spellings, not macro expansions. The one outside input is `toolchain/libc/`, which `slibc/build.rs` renders the headers from and which is `MIT OR Apache-2.0` itself. The library's licence is the sum of what it is built from, so one dependency on a GPL-3.0-or-later crate compiles, links and passes every test, and leaves git undistributable. `--self-test` grades twenty-seven fixtures, twenty-one of them rejections. Runs from `just check-framekernel-gates`: ~0.7 s, the self-test ~1.2 s.
 - **`scripts/check_base_interface.sh`** — holds the private call surface to `slopos_abi::BASE_INTERFACE`. The surface is what rustdoc's JSON says of `slopos-abi`, not its source text: each private syscall's number and the backticked `name(args) -> result` signature its doc states, packing included (a call whose doc states none fails), the items those signatures name and the docs link, everything reachable from them through field and alias types, and the `root` globs in `scripts/gates/base-interface.txt` for what no signature can name — records behind a byte buffer, op and flag families, the wire-packing methods of rooted types. Its sha256 is held to that file's ledger row for the current number. `--record` appends a row only for the number one past the last, so a changed surface takes the next number and an issued row is never rewritten; `--print` writes the surface for a diff. Doc prose, comments, formatting and item order change nothing, and a root that reaches nothing the surface renders fails as dead. Not held: Linux's own shapes a private call passes through (`sockaddr`, `msghdr`, `iovec`, `AF_*`), which Linux compatibility holds, and what a private call takes from outside `slopos-abi` — the font's glyph ranges, the kconsole keys, the EFI GUIDs, limits written into a handler — so such a fact moves into `slopos-abi` before it changes. A parser crash, or a rustdoc `format_version` other than the one the parser reads, exits 2. ~0.6 s cold.
 - **`scripts/check_libc_exports.sh`** — holds `libc.so` to only growing. Every defined dynamic symbol is held to `scripts/gates/libc/exports.txt` as `func`, or `object`/`tls` with its size, since a non-PIE program copy-relocates a data export; and the size, alignment and every field offset of every struct and union `slibc/include` defines — not only those a prototype names, because exports take structures through `void *` too — to `scripts/gates/libc/layouts.txt`, as clang's `-fdump-record-layouts-complete` measures them under the target, field types left out because their spelling moves between clang releases. `--record` only adds lines and refuses while anything recorded was removed or changed, so a removal lands only as a hand edit a reviewer sees. Skipped without a library, the layout half without the host clang `cxx_host_tools.sh` resolves; `--require` in CI's `toolchain` job, where both exist. Not held: function prototypes, and an alignment set on a typedef rather than its record.
+- **`scripts/check_loose_programs.sh`** — holds each program shipped outside the base to `libc.so` as its one interface: a `PT_INTERP` naming `/lib/ld-slopos.so.1`, `libc.so` in `DT_NEEDED`, and no `syscall` instruction in its disassembly. A static program carries slibc's own copy, and a system call made in place reaches the private surface `BASE_INTERFACE` numbers, or a Linux one, without the library that only grows between them, so either ties a program that changes on its own schedule to one base. Runs on `builddir/apps/bin/*` after every host userland build (`_build-userland`), since the toolkit's crates compile into base programs too and a raw call creeping back into one fails nothing else; `--self-test`, from `check-framekernel-gates`, links a good program and four bad ones with `llc` and `rust-lld` and asserts each finding.
 - **`scripts/tcb_ratio.sh`** (via `just tcb-ratio`) — a hard gate at `--max 1.0` from both `just check-framekernel-gates` and `KERNEL_BUILD_GATES=1` builds. Prints lines of `unsafe` in `slopos-ostd/` divided by total kernel Rust LoC. Read it as a trend, not as a TCB fraction comparable to other projects': the denominator is raw LoC including the 41 kLoC vendored DWARF reader, and published comparators measure post-LTO linked code size.
 
 `scripts/check_return_types.sh` is a separate, advisory `just check-return-types` recipe that flags `pub fn`s returning large by-value types — useful when reviewing new code, not part of the load-bearing build path.

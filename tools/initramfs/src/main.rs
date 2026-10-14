@@ -305,6 +305,20 @@ fn layout(
             read(&path)?,
         );
     }
+    for (name, path) in listing(&assets.join("apps"), |n| n.ends_with(".app"))? {
+        add(
+            format!("/usr/share/slopos/apps/{name}"),
+            MODE_DATA,
+            read(&path)?,
+        );
+    }
+    for (name, path) in listing(&assets.join("icons"), |n| n.ends_with(".png"))? {
+        add(
+            format!("/usr/share/slopos/icons/{name}"),
+            MODE_DATA,
+            read(&path)?,
+        );
+    }
     add(
         "/usr/share/slopos/privd/actions".into(),
         MODE_DATA,

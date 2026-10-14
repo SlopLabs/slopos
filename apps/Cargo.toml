@@ -1,0 +1,36 @@
+[package]
+name = "slopos-apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The apps SlopOS ships outside its base: built against the target's std, linked dynamically against libc.so, installed at /usr/local"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+test = false
+doctest = false
+
+[[bin]]
+name = "editor"
+path = "src/bin/editor.rs"
+
+[[bin]]
+name = "file_manager"
+path = "src/bin/file_manager.rs"
+
+[[bin]]
+name = "image_viewer"
+path = "src/bin/image_viewer.rs"
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-appkit = { workspace = true }
+slopos-editor-core = { workspace = true }
+slopos-gfx = { workspace = true }
+slopos-image = { workspace = true }
+slopos-windowing = { workspace = true }

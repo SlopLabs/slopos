@@ -137,21 +137,6 @@ pub const STATUS_ITEM_HOVER_BG_ALPHA: u8 = 0xFF;
 /// Shadow base colour; the alpha varies per ring.
 pub const SHADOW_COLOR: Color32 = Color32::rgb(0x00, 0x00, 0x00);
 
-pub const ICON_SHELL: Color32 = Color32::rgb(0x4A, 0x6F, 0xA5);
-pub const ICON_SHELL_ALPHA: u8 = 0xFF;
-
-pub const ICON_FILES: Color32 = Color32::rgb(0x6B, 0x8E, 0x5A);
-pub const ICON_FILES_ALPHA: u8 = 0xFF;
-
-pub const ICON_MONITOR: Color32 = Color32::rgb(0x8E, 0x6B, 0x5A);
-pub const ICON_MONITOR_ALPHA: u8 = 0xFF;
-
-pub const ICON_IMAGES: Color32 = Color32::rgb(0x4C, 0x8E, 0x8A);
-pub const ICON_IMAGES_ALPHA: u8 = 0xFF;
-
-pub const ICON_EDITOR: Color32 = Color32::rgb(0x74, 0xad, 0xe8);
-pub const ICON_EDITOR_ALPHA: u8 = 0xFF;
-
 pub const ICON_DEFAULT: Color32 = Color32::rgb(0x6B, 0x5A, 0x8E);
 pub const ICON_DEFAULT_ALPHA: u8 = 0xFF;
 
@@ -180,47 +165,5 @@ pub const START_MENU_ITEM_HEIGHT: i32 = 24;
 pub const START_MENU_PADDING: i32 = 6;
 pub const COLOR_TASKBAR: Color32 = PANEL_BG;
 pub const COLOR_START_MENU_BG: Color32 = PANEL_BG;
-
-pub const FM_WIDTH: i32 = 640;
-pub const FM_HEIGHT: i32 = 420;
-pub const FM_TITLE_HEIGHT: i32 = TITLE_BAR_HEIGHT;
-pub const FM_ITEM_HEIGHT: i32 = 22;
-pub const FM_COLOR_BG: Color32 = Color32::rgb(0x1E, 0x1E, 0x20);
-pub const FM_COLOR_FG: Color32 = Color32::rgb(0xE0, 0xE0, 0xE0);
-pub const FM_COLOR_HL: Color32 = Color32::rgb(0x3E, 0x3E, 0x42);
-pub const FM_BUTTON_WIDTH: i32 = 40;
-
-pub const FM_SIDEBAR_WIDTH: i32 = 140;
-pub const FM_SIDEBAR_BG: Color32 = Color32::rgb(0x1A, 0x1A, 0x1C);
-pub const FM_SIDEBAR_ITEM_HEIGHT: i32 = 22;
-pub const FM_SIDEBAR_HOVER: Color32 = Color32::rgb(0x2A, 0x2A, 0x2E);
-pub const FM_SIDEBAR_ACTIVE: Color32 = Color32::rgb(0x30, 0x50, 0x80);
-pub const FM_SIDEBAR_TEXT: Color32 = Color32::rgb(0xB0, 0xB0, 0xB0);
-pub const FM_SIDEBAR_HEADING: Color32 = Color32::rgb(0x70, 0x70, 0x74);
-
-pub const FM_NAV_HEIGHT: i32 = 28;
-pub const FM_NAV_BG: Color32 = Color32::rgb(0x25, 0x25, 0x28);
-pub const FM_NAV_BUTTON: Color32 = Color32::rgb(0x38, 0x38, 0x3C);
-pub const FM_NAV_BUTTON_HOVER: Color32 = Color32::rgb(0x48, 0x48, 0x4E);
-pub const FM_NAV_BUTTON_DISABLED: Color32 = Color32::rgb(0x2A, 0x2A, 0x2E);
-
-pub const FM_LIST_HEADER_HEIGHT: i32 = 20;
-pub const FM_LIST_HEADER_BG: Color32 = Color32::rgb(0x22, 0x22, 0x24);
-pub const FM_LIST_HEADER_BORDER: Color32 = Color32::rgb(0x35, 0x35, 0x38);
-pub const FM_LIST_HOVER: Color32 = Color32::rgb(0x2A, 0x2A, 0x2E);
-pub const FM_LIST_SELECTED: Color32 = Color32::rgb(0x28, 0x48, 0x78);
-pub const FM_LIST_ALT_BG: Color32 = Color32::rgb(0x20, 0x20, 0x22);
-pub const FM_DIR_COLOR: Color32 = Color32::rgb(0x60, 0x9C, 0xF0);
-pub const FM_FILE_COLOR: Color32 = Color32::rgb(0xD0, 0xD0, 0xD0);
-pub const FM_SIZE_COLOR: Color32 = Color32::rgb(0x80, 0x80, 0x84);
-pub const FM_ERROR_COLOR: Color32 = Color32::rgb(0xE0, 0x50, 0x50);
-
-pub const FM_STATUS_HEIGHT: i32 = 20;
-pub const FM_STATUS_BG: Color32 = Color32::rgb(0x22, 0x22, 0x24);
-pub const FM_STATUS_TEXT: Color32 = Color32::rgb(0x90, 0x90, 0x94);
-
-pub const FM_SCROLLBAR_WIDTH: i32 = 6;
-pub const FM_SCROLLBAR_BG: Color32 = Color32::rgb(0x1E, 0x1E, 0x20);
-pub const FM_SCROLLBAR_THUMB: Color32 = Color32::rgb(0x50, 0x50, 0x54);
 
 pub const SYSINFO_BUTTON_WIDTH: i32 = 48;

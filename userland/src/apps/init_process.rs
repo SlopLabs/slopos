@@ -194,10 +194,33 @@ fn collect_crash_records() {
 /// only there.
 const REMOTE_CONF: &str = "/usr/share/slopos/remote/remote.conf";
 
+/// On a live boot, the medium's apps at the RAM root's `/usr/local`, where an
+/// install puts them on a disk.
+fn install_live_apps() {
+    use slopos_boot_core::layout::{MEDIUM_APPS, MEDIUM_DIR};
+    let live = crate::syscall::fs::statfs_path(c"/".as_ptr())
+        .is_ok_and(|stats| stats.f_type == slopos_abi::fs::RAMFS_MAGIC);
+    let apps = std::path::Path::new(MEDIUM_DIR).join(MEDIUM_APPS);
+    if !live || !apps.is_dir() {
+        return;
+    }
+    let install = crate::tree::Install {
+        root: "",
+        name: slopos_tree_core::APPS,
+        guest: "/usr/local",
+        source: &apps,
+        owner: Some((SESSION_UID, SESSION_GID)),
+    };
+    if let Err(e) = crate::tree::scan(&apps).and_then(|new| install.run(&new, &mut |_| {})) {
+        eprintln!("init: the medium's apps: {e}");
+    }
+}
+
 pub fn init_user_main() {
     upgrade_console_font();
     collect_crash_records();
     crate::root_layout::lay_out(std::path::Path::new("/"));
+    install_live_apps();
     crate::root_layout::make_runtime_dir(&runtime_dir());
     // Before anything that may ask it; until the compositor says it can draw,
     // privd has nobody to ask.

@@ -6,7 +6,7 @@
 
 use slopos_appkit::{Key, Modifiers, NamedKey};
 
-use crate::apps::editor::commands::Command;
+use crate::editor::commands::Command;
 
 /// Text and caret for one input line. The widget draws it and reports keys;
 /// this is where they take effect.
