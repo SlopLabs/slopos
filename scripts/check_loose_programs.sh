@@ -40,7 +40,11 @@ findings() {
     if ! printf '%s\n' "$headers" | grep -qE '\(NEEDED\)[[:space:]]+Shared library: \[libc\.so\]'; then
         echo "$program: libc.so is not among its DT_NEEDED"
     fi
-    calls="$("$OBJDUMP" -d --no-show-raw-insn "$program" | grep -cE '^[[:space:]]*[0-9a-f]+:[[:space:]]+syscall$' || true)"
+    calls="$("$OBJDUMP" -d --no-show-raw-insn "$program" |
+        awk '/^[[:space:]]*[0-9a-f]+:[[:space:]]+syscall$/ { n++ } END { print n + 0 }')" || {
+        echo "$program: llvm-objdump cannot disassemble it"
+        return
+    }
     if [ "$calls" -gt 0 ]; then
         echo "$program: $calls syscall instruction(s) of its own"
     fi
