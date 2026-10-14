@@ -16,6 +16,7 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 use slopos_abi::caps::SYS_INSPECT;
+use slopos_abi::fs::{SESSION_GID, SESSION_UID};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_userland::syscall::fs::pipe;
 use slopos_userland::syscall::process::{self, Endowment};
@@ -34,6 +35,11 @@ const TREE: &str = "/tmp/dl_search";
 const SECURE_PROBE: &str = "/bin/dl_secure_probe";
 const SECURE_ORIGIN_DIR: &str = "/tmp/dl_secure";
 const SECURE_ABS_DIR: &str = "/tmp/dl_secure_abs";
+/// What the session installs libraries into, searched last for it alone.
+const LOCAL_LIB: &str = "/usr/local/lib";
+/// A probe whose only search entry, `${ORIGIN}/rpath`, names nothing, so a
+/// bare name falls through to the loader's own directories.
+const DEFAULT_PROBE: &str = "/bin/dl_search_rpath";
 
 /// The interpreter is one artifact under two names, which is what keeps a
 /// process to one allocator however many objects it loads.
@@ -175,10 +181,23 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "ld_debug_statistics_reports_startup_binding",
         ld_debug_statistics_reports_startup_binding,
     ),
+    (
+        "usr_local_lib_is_not_searched_for_root_or_secure",
+        usr_local_lib_is_not_searched_for_root_or_secure,
+    ),
 ];
 
+/// Run as the session, from `utest_dl_session`.
+const SESSION_CASES: &[(&str, fn() -> bool)] = &[(
+    "usr_local_lib_is_searched_for_the_session",
+    usr_local_lib_is_searched_for_the_session,
+)];
+
 fn main() {
-    slopos_slibc::test_harness::run(CASES);
+    match std::env::args().nth(1).as_deref() {
+        Some("--session") => slopos_slibc::test_harness::run(SESSION_CASES),
+        _ => slopos_slibc::test_harness::run(CASES),
+    }
 }
 
 fn stage(src: &str, dst: &str) -> bool {
@@ -259,11 +278,28 @@ fn run_search(program: &str, args: &[&str], library_path: Option<&str>) -> Optio
 /// capability delegated to it, which is what starts it `AT_SECURE`. Answers
 /// its exit code and what it wrote to stderr.
 fn run_secure(args: &[&str], env: &[&str]) -> Option<(i32, String)> {
+    run_endowed(
+        SECURE_PROBE,
+        args,
+        env,
+        Endowment {
+            caps: SYS_INSPECT,
+            ..Endowment::NONE
+        },
+    )
+}
+
+fn run_endowed(
+    program: &str,
+    args: &[&str],
+    env: &[&str],
+    endowment: Endowment<'_>,
+) -> Option<(i32, String)> {
     let cstrings = |list: &mut dyn Iterator<Item = &str>| -> Vec<CString> {
         list.map(|s| CString::new(s).expect("no argument holds a NUL"))
             .collect()
     };
-    let argv = cstrings(&mut std::iter::once(SECURE_PROBE).chain(args.iter().copied()));
+    let argv = cstrings(&mut std::iter::once(program).chain(args.iter().copied()));
     let envp = cstrings(&mut env.iter().copied());
     let pointers =
         |list: &[CString]| -> Vec<*const u8> { list.iter().map(|s| s.as_ptr().cast()).collect() };
@@ -274,7 +310,7 @@ fn run_secure(args: &[&str], env: &[&str]) -> Option<(i32, String)> {
         process::clone_fd(write.raw(), 2),
     ];
     let tid = process::spawn_endowed(
-        SECURE_PROBE.as_bytes(),
+        program.as_bytes(),
         &pointers(&argv),
         &pointers(&envp),
         &[],
@@ -282,14 +318,11 @@ fn run_secure(args: &[&str], env: &[&str]) -> Option<(i32, String)> {
         TASK_FLAG_USER_MODE,
         &actions,
         0,
-        Endowment {
-            caps: SYS_INSPECT,
-            ..Endowment::NONE
-        },
+        endowment,
     );
     drop(write);
     if tid <= 0 {
-        eprintln!("dl_test: spawning {SECURE_PROBE}: {tid}");
+        eprintln!("dl_test: spawning {program}: {tid}");
         return None;
     }
     let mut stderr = String::new();
@@ -476,4 +509,90 @@ fn execfn_names_the_resolved_executable() -> bool {
         }
     }
     true
+}
+
+/// The fixture under its own name in [`LOCAL_LIB`] for as long as this
+/// lives, the directory too when it was not there.
+struct LocalLibrary {
+    made_dir: bool,
+}
+
+impl LocalLibrary {
+    fn path() -> String {
+        format!("{LOCAL_LIB}/libdlsearch.so")
+    }
+
+    fn stage() -> Option<LocalLibrary> {
+        let made_dir = !std::path::Path::new(LOCAL_LIB).is_dir();
+        let staged = LocalLibrary { made_dir };
+        stage(FIXTURE, &Self::path()).then_some(staged)
+    }
+}
+
+impl Drop for LocalLibrary {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(Self::path());
+        if self.made_dir {
+            let _ = fs::remove_dir(LOCAL_LIB);
+        }
+    }
+}
+
+/// A library the session put in [`LOCAL_LIB`] reaches no process of uid 0's
+/// and no `AT_SECURE` one, even of the session's uid: either may hold more
+/// than the session does.
+fn usr_local_lib_is_not_searched_for_root_or_secure() -> bool {
+    let Some(_staged) = LocalLibrary::stage() else {
+        return false;
+    };
+    if run_search(DEFAULT_PROBE, &["open", "libdlsearch.so", "-"], None) != Some(0) {
+        eprintln!("dl_test: a uid 0 program found libdlsearch.so in {LOCAL_LIB}");
+        return false;
+    }
+    let as_session = Endowment {
+        ids: Some((SESSION_UID, SESSION_GID)),
+        ..Endowment::NONE
+    };
+    match run_endowed(
+        DEFAULT_PROBE,
+        &["self", DEFAULT_PROBE, "1"],
+        &[],
+        as_session,
+    ) {
+        Some((0, _)) => {}
+        other => {
+            eprintln!(
+                "dl_test: {DEFAULT_PROBE} as the session from uid 0 is not AT_SECURE: {other:?}"
+            );
+            return false;
+        }
+    }
+    match run_endowed(
+        DEFAULT_PROBE,
+        &["open", "libdlsearch.so", "-"],
+        &[],
+        as_session,
+    ) {
+        Some((0, _)) => true,
+        other => {
+            eprintln!("dl_test: an AT_SECURE program searched {LOCAL_LIB}: {other:?}");
+            false
+        }
+    }
+}
+
+fn usr_local_lib_is_searched_for_the_session() -> bool {
+    let Some(_staged) = LocalLibrary::stage() else {
+        return false;
+    };
+    let found = LocalLibrary::path();
+    match run_search(DEFAULT_PROBE, &["open", "libdlsearch.so", &found], None) {
+        Some(0) => true,
+        other => {
+            eprintln!(
+                "dl_test: the session's {DEFAULT_PROBE} did not load {found}: exit {other:?}"
+            );
+            false
+        }
+    }
 }

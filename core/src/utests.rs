@@ -31,6 +31,13 @@ crate::utest!(name = utest_script_exec, bin = "/bin/script_exec_test");
 crate::utest!(name = utest_buildctl, bin = "/bin/buildctl_test");
 crate::utest!(name = utest_coreutils, bin = "/bin/coreutils_test");
 crate::utest!(name = utest_dl, bin = "/bin/dl_test");
+crate::utest!(
+    name = utest_dl_session,
+    bin = "/bin/dl_test",
+    argv = &["dl_test", "--session"],
+    caps = none,
+    uid = 1000
+);
 crate::utest!(name = utest_cxx, bin = "/bin/cxx_test");
 crate::utest!(name = utest_spawn_output, bin = "/bin/spawn_output_test");
 crate::utest!(name = utest_ring, bin = "/bin/ring_test");
