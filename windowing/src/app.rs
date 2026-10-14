@@ -5,7 +5,6 @@
 
 use slopos_gfx::{DrawBuffer, RenderSurface};
 
-use crate::sys;
 use slopos_protocol::types::Event as ProtocolEvent;
 
 use crate::connection;
@@ -51,13 +50,13 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
     let mut win = match Window::new(handle.clone(), width, height) {
         Ok(w) => w,
         Err(e) => {
-            let msg: &[u8] = match e {
-                SurfaceError::NoDisplay => b"windowing: no display\n",
-                SurfaceError::BadSize => b"windowing: bad surface size\n",
-                SurfaceError::ShmFailed => b"windowing: shm alloc failed\n",
-                SurfaceError::AttachFailed => b"windowing: surface attach failed\n",
+            let msg = match e {
+                SurfaceError::NoDisplay => "no display",
+                SurfaceError::BadSize => "bad surface size",
+                SurfaceError::ShmFailed => "shm alloc failed",
+                SurfaceError::AttachFailed => "surface attach failed",
             };
-            sys::tty_write(msg);
+            eprintln!("windowing: {msg}");
             std::process::exit(1);
         }
     };
@@ -65,7 +64,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
     app.init(&mut win);
 
     let refresh_interval = app.refresh_interval_ms();
-    let mut last_refresh = sys::get_time_ms();
+    let mut last_refresh = slopos_cabi::monotonic_ms();
 
     loop {
         handle.flush_pending_destroys();
@@ -93,7 +92,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
         }
 
         if let Some(interval) = refresh_interval {
-            let now = sys::get_time_ms();
+            let now = slopos_cabi::monotonic_ms();
             if now.saturating_sub(last_refresh) >= interval {
                 last_refresh = now;
                 win.request_redraw();
@@ -112,7 +111,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
         let timeout_ms: i64 = if win.needs_redraw() {
             0
         } else if let Some(interval) = refresh_interval {
-            let now = sys::get_time_ms();
+            let now = slopos_cabi::monotonic_ms();
             let elapsed = now.saturating_sub(last_refresh);
             if elapsed >= interval {
                 0

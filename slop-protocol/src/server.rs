@@ -8,10 +8,9 @@
 use crate::codec::Encode;
 use crate::connection::Connection;
 use crate::types::{Event, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, ProtocolError, Request};
-use slopos_abi::net::AF_UNIX;
+use slopos_abi::errno::Errno;
+use slopos_abi::net::{AF_UNIX, SOCK_STREAM};
 use slopos_abi::syscall::MSG_NOSIGNAL;
-use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
-use slopos_slibc::pal::{Pal, Sys};
 
 /// Maximum number of simultaneous client connections the server tracks.
 /// Exposed so owners can size the index array passed to
@@ -55,7 +54,7 @@ impl WriteBuf {
     /// - `Err(…)`    — hard error (disconnected / IO).
     fn flush(&mut self, fd: i32) -> Result<bool, ProtocolError> {
         while self.len > 0 {
-            match Sys::send(fd, self.data.as_ptr(), self.len, MSG_NOSIGNAL as i32) {
+            match slopos_cabi::send(fd, &self.data[..self.len], MSG_NOSIGNAL as i32) {
                 Ok(n) if n > 0 => {
                     let remaining = self.len - n;
                     if remaining > 0 {
@@ -64,12 +63,7 @@ impl WriteBuf {
                     self.len = remaining;
                 }
                 Ok(0) => return Err(ProtocolError::Disconnected),
-                Err(e)
-                    if e == slopos_slibc::errno::EAGAIN
-                        || e == slopos_slibc::errno::EWOULDBLOCK =>
-                {
-                    return Ok(false);
-                }
+                Err(Errno::EAGAIN) => return Ok(false),
                 Err(_) => return Err(ProtocolError::Io),
                 Ok(_) => unreachable!(),
             }
@@ -116,18 +110,10 @@ impl Server {
 
     /// Create a listening Unix domain socket at the given path.
     pub fn bind(path: &[u8]) -> Result<Self, ProtocolError> {
-        let fd = Sys::socket(AF_UNIX as i32, slopos_abi::net::SOCK_STREAM as i32, 0)
+        let fd = slopos_cabi::socket(AF_UNIX as i32, SOCK_STREAM as i32, 0)
             .map_err(|_| ProtocolError::Io)?;
-
-        let mut addr = SockAddrUn::default();
-        addr.family = AF_UNIX;
-        let copy_len = path.len().min(UNIX_PATH_MAX - 1);
-        addr.path[..copy_len].copy_from_slice(&path[..copy_len]);
-
-        let addr_ptr = &addr as *const SockAddrUn as *const u8;
-        let addr_len = core::mem::size_of::<SockAddrUn>() as u32;
-        Sys::bind(fd, addr_ptr, addr_len).map_err(|_| ProtocolError::Io)?;
-        Sys::listen(fd, 32).map_err(|_| ProtocolError::Io)?;
+        slopos_cabi::bind_unix(fd, path).map_err(|_| ProtocolError::Io)?;
+        slopos_cabi::listen(fd, 32).map_err(|_| ProtocolError::Io)?;
         crate::connection::set_nonblock(fd);
 
         const NONE: Option<alloc::boxed::Box<ClientConn>> = None;
@@ -141,22 +127,16 @@ impl Server {
     /// Non-blocking accept. Returns the client index if a connection was
     /// accepted, `Ok(None)` on EAGAIN/EWOULDBLOCK, `Err` on a real error.
     pub fn accept(&mut self) -> Result<Option<usize>, ProtocolError> {
-        let client_fd =
-            match Sys::accept(self.listen_fd, core::ptr::null_mut(), core::ptr::null_mut()) {
-                Ok(fd) => fd,
-                Err(e)
-                    if e == slopos_slibc::errno::EAGAIN
-                        || e == slopos_slibc::errno::EWOULDBLOCK =>
-                {
-                    return Ok(None);
-                }
-                Err(_) => return Err(ProtocolError::Io),
-            };
+        let client_fd = match slopos_cabi::accept(self.listen_fd) {
+            Ok(fd) => fd,
+            Err(Errno::EAGAIN) => return Ok(None),
+            Err(_) => return Err(ProtocolError::Io),
+        };
 
         let idx = match self.clients.iter().position(|c| c.is_none()) {
             Some(i) => i,
             None => {
-                let _ = Sys::close(client_fd);
+                let _ = slopos_cabi::close(client_fd);
                 return Err(ProtocolError::BufferFull);
             }
         };
@@ -368,6 +348,6 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         // Client FDs close via `Connection::drop`; the listen FD is owned here.
-        let _ = Sys::close(self.listen_fd);
+        let _ = slopos_cabi::close(self.listen_fd);
     }
 }

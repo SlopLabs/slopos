@@ -37,7 +37,7 @@ use super::raw::syscall6;
 /// `flags` accepts `MFD_CLOEXEC` only; anything else is `-EINVAL`.
 #[inline(always)]
 pub fn memfd_create(flags: u32) -> i32 {
-    match Sys::memfd_create(flags) {
+    match Sys::memfd_create(c"slopos".as_ptr().cast(), flags) {
         Ok(fd) => fd,
         Err(e) => -e.raw(),
     }

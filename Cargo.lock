@@ -89,8 +89,6 @@ dependencies = [
  "slopos-gfx",
  "slopos-keymap-core",
  "slopos-protocol",
- "slopos-rt",
- "slopos-slibc",
  "slopos-windowing",
 ]
 
@@ -133,6 +131,13 @@ name = "slopos-bootdisk"
 version = "0.1.0"
 dependencies = [
  "slopos-boot-core",
+]
+
+[[package]]
+name = "slopos-cabi"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
 ]
 
 [[package]]
@@ -380,7 +385,7 @@ name = "slopos-protocol"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
- "slopos-slibc",
+ "slopos-cabi",
 ]
 
 [[package]]
@@ -579,10 +584,9 @@ name = "slopos-windowing"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
+ "slopos-cabi",
  "slopos-gfx",
- "slopos-ostd",
  "slopos-protocol",
- "slopos-slibc",
 ]
 
 [[package]]

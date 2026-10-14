@@ -465,6 +465,7 @@ memalign func
 memchr func
 memcmp func
 memcpy func
+memfd_create func
 memmove func
 memset func
 mkdir func

@@ -1,6 +1,6 @@
 //! Software rendering surface backed by shared memory.
 //!
-//! `SoftSurface` owns a pair of [`MemfdBuffer`]s and implements [`RenderSurface`]
+//! `SoftSurface` owns a pair of [`SharedMemory`]s and implements [`RenderSurface`]
 //! as a CPU rendering backend for compositor-managed windows;
 //! [`Surface`](crate::surface::Surface) handles the windowing lifecycle.
 //!
@@ -15,8 +15,8 @@ use slopos_gfx::{DrawBuffer, RenderError, RenderSurface};
 use slopos_protocol::types::SurfaceId;
 
 use crate::connection::ProtocolHandle;
-use crate::memfd_buf::MemfdBuffer;
 use crate::surface::SurfaceError;
+use slopos_cabi::SharedMemory;
 
 const NUM_BUFFERS: usize = 2;
 
@@ -25,7 +25,7 @@ const AGE_UNDEFINED: u32 = u32::MAX;
 /// A CPU/SHM rendering backend for compositor-managed surfaces.
 pub struct SoftSurface {
     handle: ProtocolHandle,
-    bufs: [MemfdBuffer; NUM_BUFFERS],
+    bufs: [SharedMemory; NUM_BUFFERS],
     /// Whether the compositor has been sent this slot's fd yet.
     registered: [bool; NUM_BUFFERS],
     /// Whether this slot is committed and awaiting a `BufferRelease`.
@@ -67,8 +67,8 @@ impl SoftSurface {
             .ok_or(SurfaceError::BadSize)?;
 
         let bufs = [
-            MemfdBuffer::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?,
-            MemfdBuffer::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?,
+            SharedMemory::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?,
+            SharedMemory::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?,
         ];
 
         Ok(Self {
@@ -193,8 +193,8 @@ impl RenderSurface for SoftSurface {
             .ok_or(RenderError::BadSize)?;
 
         let bufs = [
-            MemfdBuffer::create(buffer_size).map_err(|_| RenderError::BufferUnavailable)?,
-            MemfdBuffer::create(buffer_size).map_err(|_| RenderError::BufferUnavailable)?,
+            SharedMemory::create(buffer_size).map_err(|_| RenderError::BufferUnavailable)?,
+            SharedMemory::create(buffer_size).map_err(|_| RenderError::BufferUnavailable)?,
         ];
 
         // New fds must be re-registered; the compositor evicts the old slot

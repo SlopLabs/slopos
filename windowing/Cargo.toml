@@ -21,6 +21,5 @@ workspace = true
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-gfx = { workspace = true }
-slopos-ostd = { workspace = true }
 slopos-protocol = { workspace = true }
-slopos-slibc = { workspace = true }
+slopos-cabi = { workspace = true }

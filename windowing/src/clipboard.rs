@@ -9,7 +9,7 @@
 //! which is the whole of the state a client needs to keep.
 
 use crate::connection::ProtocolHandle;
-use crate::memfd_buf::MemfdBuffer;
+use slopos_cabi::SharedMemory;
 
 /// Ceiling on one transfer, matching the compositor's.
 pub const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
@@ -25,7 +25,7 @@ enum Paste {
     #[default]
     Idle,
     AwaitingOffer,
-    AwaitingData(MemfdBuffer),
+    AwaitingData(SharedMemory),
 }
 
 #[derive(Default)]
@@ -45,7 +45,7 @@ impl Clipboard {
         if bytes.is_empty() || bytes.len() > MAX_CLIPBOARD_BYTES {
             return false;
         }
-        let Ok(mut buffer) = MemfdBuffer::create(bytes.len()) else {
+        let Ok(mut buffer) = SharedMemory::create(bytes.len()) else {
             return false;
         };
         buffer.as_mut_slice()[..bytes.len()].copy_from_slice(bytes);
@@ -91,7 +91,7 @@ impl Clipboard {
         if len == 0 || len > MAX_CLIPBOARD_BYTES {
             return false;
         }
-        let Ok(buffer) = MemfdBuffer::create(len) else {
+        let Ok(buffer) = SharedMemory::create(len) else {
             return false;
         };
         let Some(mut client) = handle.try_borrow_client() else {
@@ -114,7 +114,7 @@ impl Clipboard {
         let Paste::AwaitingData(mut buffer) = core::mem::take(&mut self.paste) else {
             return None;
         };
-        let len = (len as usize).min(buffer.size());
+        let len = (len as usize).min(buffer.len());
         let bytes = &buffer.as_mut_slice()[..len];
         let mut out: Vec<u8> = Vec::with_capacity(len);
         for &byte in bytes {
