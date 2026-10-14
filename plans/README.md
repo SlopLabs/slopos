@@ -14,10 +14,10 @@ editing.
 
 | Document | Scope |
 |----------|-------|
-| `access-model.md` | Principals and brokered authority: Unix uid/gid and kernel DAC for compatibility, the capability mask as the only authority carrier, delegation at spawn in place of the path-keyed grant table, kernel-attested peer identity, `privd` running named actions, and consent drawn by the compositor; comes before `installer-gui.md` |
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
-| `installer-gui.md` | A graphical installer on the live medium: an engine that emits events, a typed protocol between an unprivileged window and the engine privd runs, a linear wizard with before/after partition bars and a guarded review, and a root size choice; starts after `access-model.md` |
+| `installer-gui.md` | A graphical installer on the live medium: an engine that emits events, a typed protocol between an unprivileged window and the engine privd runs, a linear wizard with before/after partition bars and a guarded review, and a root size choice |
+| `live-userland.md` | Only a kernel change reboots: one sealed base on the boot partition shared by the kernel slots, replaced live with the previous kept, an interface number between kernel and base, `libc.so` and a versioned compositor protocol as the stable interfaces for software outside the base, init as a service manager with session restart, and rescue from the live medium |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive the
@@ -77,8 +77,22 @@ rather than a document: `slopos_ostd::authority` for the vocabulary and the witn
 `slopos_ostd::seat` for the display and input seats, and `verification/proofs/authority.rs`
 for the four machine-checked obligations. `scripts/check_authority_reachability.sh` is what
 catches an unprivileged syscall reaching a power primitive two calls away, which a
-slot-level gate cannot see. A mechanism's authority comes from `privd`
-(`access-model.md`).
+slot-level gate cannot see. A mechanism's authority comes from `privd`, below.
+
+The access model has **landed and its plan is retired**. Two principals carry
+Unix identity: uid 0 for init, privd and the mechanisms privd runs, uid 1000
+for the session. The VFS enforces owner, group and mode against the `Subject`
+every entry takes, with `DacOverride` the only bypass. Authority reaches a
+child only by delegation at spawn, a subset of the spawner's mask, and exec
+keeps none of it. `/sbin/privd` runs a named action's mechanism for whoever the
+sealed policy allows, judged by the identity the kernel captured when the
+requester connected, and asks the person at the machine through a dialog only
+the compositor can draw. Read the code rather than a document:
+`slopos-ostd/src/process/cred.rs` and `fs/src/vfs/perm.rs` for credentials and
+DAC, `slopos-ostd/src/process/identity.rs` for peer and program identity,
+`priv-core` and `assets/privd/actions` for the policy, `userland/src/apps/privd/`
+for the broker, and `userland/src/apps/init_process.rs` for who starts holding
+what. `AGENTS.md`'s authority discipline states the invariants.
 
 ## When To Promote A Plan
 

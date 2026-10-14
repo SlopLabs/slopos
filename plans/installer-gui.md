@@ -26,14 +26,13 @@ is done:
 
 ## Depends on
 
-`plans/access-model.md`, completely. This plan uses:
+The access model, which has landed (`AGENTS.md`, *Authority discipline*). This
+plan uses:
 - the session uid;
 - privd, its action policy and `slopos_userland::privd::elevate`;
 - compositor consent;
 - `RawBlock` delegation to e2fsprogs;
 - `DacOverride` for the new root's ownership map.
-
-It starts once that plan's last phase lands.
 
 ## Where it stands
 
