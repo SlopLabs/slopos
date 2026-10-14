@@ -12,7 +12,8 @@ use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use slopos_abi::syscall::posix::O_NONBLOCK;
+use slopos_abi::fs::O_NOFOLLOW;
+use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
 
 /// The directories holding entries, as `<share>/slopos/apps`, in the order a
 /// later one replaces an earlier one's entry.
@@ -27,14 +28,17 @@ pub fn shares(home: Option<&str>) -> Vec<PathBuf> {
 
 /// Larger than any entry, so a stray file is not read whole.
 const ENTRY_MAX: u64 = 4096;
+/// More than a share ever holds, so a directory of millions is not listed
+/// whole.
+const ENTRIES_PER_SHARE_MAX: usize = 64;
 
 /// The bytes of the regular file at `path`, if it holds at most `max`. The
-/// session writes these files and the compositor reads them, so a FIFO or a
-/// huge file there must neither block nor exhaust it.
+/// session writes these files and the compositor reads them, so a link, a
+/// FIFO or a huge file there must neither redirect, block nor exhaust it.
 pub fn read_bounded(path: &Path, max: u64) -> Option<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(O_NONBLOCK as i32)
+        .custom_flags((O_NONBLOCK | O_NOCTTY) as i32 | O_NOFOLLOW as i32)
         .open(path)
         .ok()?;
     let meta = file.metadata().ok()?;
@@ -90,7 +94,7 @@ pub fn read(shares: &[PathBuf]) -> Vec<AppEntry> {
         let Ok(listing) = fs::read_dir(&dir) else {
             continue;
         };
-        for file in listing.flatten() {
+        for file in listing.flatten().take(ENTRIES_PER_SHARE_MAX) {
             let path = file.path();
             let Some(id) = path
                 .file_name()
