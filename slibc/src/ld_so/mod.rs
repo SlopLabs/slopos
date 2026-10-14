@@ -56,6 +56,11 @@ impl DlError {
 /// Where a bare `DT_NEEDED`/`dlopen` name is looked for last, in order.
 const SEARCH_DIRS: [&[u8]; 2] = [b"/lib", b"/usr/lib"];
 
+/// Searched after [`SEARCH_DIRS`] only by a process that is neither
+/// `AT_SECURE` nor uid 0's: a library the session put there must never reach
+/// a program holding more than the session does.
+const LOCAL_DIR: &[u8] = b"/usr/local/lib";
+
 /// Longest path the loader will build. Matches the kernel's `PATH_MAX`.
 const DL_PATH_MAX: usize = 4096;
 
@@ -73,6 +78,8 @@ pub struct Loader {
     library_path: *const u8,
     /// `AT_SECURE`: no `$ORIGIN` and no relative directory is searched.
     secure: bool,
+    /// [`LOCAL_DIR`] is searched.
+    local: bool,
 }
 
 // SAFETY: every access goes through [`lock`].
@@ -85,6 +92,7 @@ static LOADER: SyncUnsafeCell<Loader> = SyncUnsafeCell::new(Loader {
     global_count: 0,
     library_path: ptr::null(),
     secure: false,
+    local: false,
 });
 
 static LOCK: AtomicBool = AtomicBool::new(false);
@@ -621,6 +629,7 @@ impl Loader {
         self.objects[EXE as usize].path = execfn as *mut u8;
         self.library_path = if secure { ptr::null() } else { library_path };
         self.secure = secure;
+        self.local = !secure && Sys::geteuid() != 0;
     }
 
     /// Expand a `DT_NEEDED`/`dlopen` name into a path that exists.
@@ -629,7 +638,8 @@ impl Loader {
     /// bare one is looked for in `LD_LIBRARY_PATH`; then, when `requester`
     /// has no `DT_RUNPATH`, in the `DT_RPATH` of `requester`, of each object
     /// up its `loader` chain and of the executable (glibc's order); otherwise
-    /// in `requester`'s `DT_RUNPATH` alone; then in [`SEARCH_DIRS`].
+    /// in `requester`'s `DT_RUNPATH` alone; then in [`SEARCH_DIRS`], and
+    /// [`LOCAL_DIR`] last where the process may take what it holds.
     fn resolve_path(
         &self,
         name: *const u8,
@@ -656,6 +666,7 @@ impl Loader {
             }
             || SEARCH_DIRS
                 .iter()
+                .chain(self.local.then_some(&LOCAL_DIR))
                 .any(|dir| self.compose(dir, EXE, bare, out) && exists(out));
         if found {
             Ok(out.as_ptr())
