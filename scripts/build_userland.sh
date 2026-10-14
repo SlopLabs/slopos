@@ -226,6 +226,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin appkit_test \
         --bin apps_test \
         --bin dock_test \
+        --bin tree_install_test \
         --bin editor_test \
         --bin spawn_privilege_test \
         --bin seat_test \
@@ -371,6 +372,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/dock_test" ]; then
         cp "$RELEASE_DIR/dock_test" "$BUILD_DIR/dock_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/tree_install_test" ]; then
+        cp "$RELEASE_DIR/tree_install_test" "$BUILD_DIR/tree_install_test.elf"
     fi
     if [ -f "$RELEASE_DIR/editor_test" ]; then
         cp "$RELEASE_DIR/editor_test" "$BUILD_DIR/editor_test.elf"

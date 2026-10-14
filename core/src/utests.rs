@@ -89,6 +89,7 @@ crate::utest!(
     caps = none,
     uid = 1000
 );
+crate::utest!(name = utest_tree_install, bin = "/bin/tree_install_test");
 crate::utest!(name = utest_editor, bin = "/bin/editor_test");
 crate::utest!(
     name = utest_spawn_privilege,

@@ -13,21 +13,13 @@ use crate::tree::{self, Install};
 
 const USAGE: &str = "usage: tree-install NAME TREE DEST";
 
-fn normal(dest: &str) -> bool {
-    dest == "/"
-        || dest.strip_prefix('/').is_some_and(|rest| {
-            rest.split('/')
-                .all(|part| !part.is_empty() && part != "." && part != "..")
-        })
-}
-
 fn run(name: &str, source: &str, dest: &str) -> Result<String, String> {
     if !slopos_tree_core::valid_name(name) {
         return Err(format!(
             "{name:?} is not a tree's name: lowercase letters, digits and _"
         ));
     }
-    if !normal(dest) {
+    if !slopos_tree_core::valid_destination(dest) {
         return Err(format!("{dest:?} is not an absolute path without . or .."));
     }
     let source = Path::new(source);
@@ -38,6 +30,8 @@ fn run(name: &str, source: &str, dest: &str) -> Result<String, String> {
         guest: dest,
         source,
         owner: None,
+        keeper: None,
+        remedy: "move it aside",
     };
     Ok(match install.run(&new, &mut |_| {})? {
         Some(bytes) => format!("installed {name} at {dest} ({bytes} bytes copied)"),

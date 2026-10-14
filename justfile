@@ -760,7 +760,7 @@ test-installer *DISKS:
             rm -f "$vars"
             markers=("INSTALLER-NOT-OFFERED /dev/sda: write-protected"
                 "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed"
-                "/usr/local already holds this medium's apps")
+                "installed the apps at /usr/local")
             [ "$payload" = 0 ] ||
                 markers+=("/usr/local already holds this medium's toolchain" "the root has a /src already")
             boot_once "$logs-reinstall.log" "$install_budget" "stick:{{iso_installer}}" \

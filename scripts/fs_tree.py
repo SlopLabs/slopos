@@ -217,22 +217,29 @@ class Image:
 
 
 def read_manifest(path):
-    """The identity and `(kind, rel)` entries a host manifest records."""
+    """The identity, destination and `(kind, rel)` entries a host manifest
+    records; a manifest written before it named its destination names none."""
     try:
         with open(path) as f:
             lines = f.read().splitlines()
     except FileNotFoundError:
-        return None, []
+        return None, None, []
     head = lines[0].split(" ", 1) if lines else []
     if len(head) != 2 or head[0] != "identity" or not IDENTITY.fullmatch(head[1]):
         raise Refused(f"{path} is not a manifest")
+    at = None
+    if len(lines) > 1 and lines[1].startswith("at "):
+        at = lines[1][3:]
+        if not safe_abs(at):
+            raise Refused(f"{path}: {lines[1]!r} names no destination")
+        lines = lines[1:]
     out = []
     for line in lines[1:]:
         kind, size, rel = (line.split(" ", 2) + ["", ""])[:3]
         if kind not in ("d", "f", "l") or not (size == "-" or size.isdigit()) or not safe_rel(rel):
             raise Refused(f"{path}: {line!r} is not a manifest entry")
         out.append((kind, rel))
-    return head[1], out
+    return head[1], at, out
 
 
 def installed(manifests, name):
@@ -267,7 +274,9 @@ def plan(image, host, guest, name, owner=(0, 0)):
         raise Refused(f"cannot install {host} at {guest}")
     tree = walk(host)
     manifest_path = os.path.join(name[0], name[1]) if name else None
-    known, old = read_manifest(manifest_path) if manifest_path else (None, [])
+    known, at, old = read_manifest(manifest_path) if manifest_path else (None, None, [])
+    if at not in (None, guest):
+        raise Refused(f"{manifest_path} installed its tree at {at}, not {guest}")
     copy = join(IMAGE_MANIFESTS, name[1]) if name else None
 
     dirs = {guest} | {join(guest, rel) for kind, rel in old if kind == "d"}
@@ -334,9 +343,11 @@ def plan(image, host, guest, name, owner=(0, 0)):
             creates.append(f'symlink "{path}" "{target}"')
         creates += owned(path, owner)
 
-    lines = manifest(host, tree)
-    entries = lines[1:]
-    during = [f"identity {UNFINISHED}"] + sorted(set(entries) | {f"{k} - {r}" for k, r in old})
+    head, *entries = manifest(host, tree)
+    lines = [head, f"at {guest}"] + entries
+    during = [f"identity {UNFINISHED}", f"at {guest}"] + sorted(
+        set(entries) | {f"{k} - {r}" for k, r in old}
+    )
     if copy:
         for a in ancestors(copy):
             if a != "/" and claim_dir(a, copy) == "absent":
@@ -457,7 +468,9 @@ def _self_test(work):
     os.symlink("tool", os.path.join(tree, "bin/alias"))
     install(image, tree, "/usr/local", name)
     assert kind("/usr/local/bin/tool") == "f" and kind("/usr/local/bin/alias") == "l"
-    assert read(f"{IMAGE_MANIFESTS}/usr_local") == "".join(f"{x}\n" for x in manifest(tree)).encode()
+    head, *entries = manifest(tree)
+    recorded = "".join(f"{x}\n" for x in [head, "at /usr/local", *entries]).encode()
+    assert read(f"{IMAGE_MANIFESTS}/usr_local") == recorded
     assert installed(manifests, "usr_local") == identity(tree)
     sound()
 
@@ -488,6 +501,8 @@ def _self_test(work):
             refused(what)
         finally:
             module.debugfs = honest
+
+    refused("a reinstall at another destination", "/opt/local")
 
     guest("write /dev/null /usr/local/bin/new")
     put("bin/new")
