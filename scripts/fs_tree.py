@@ -7,8 +7,9 @@ manifest copy owned by `--owner` (uid 0's by default).
 
 A host tree (`install --manifests DIR --name NAME`) is the host's. What it
 installed is recorded in DIR/NAME, on the host, where the guest cannot edit
-it — an `identity` line, then `<kind> <size or -> <path>` per entry — and a reinstall removes exactly that and keeps whatever the guest put
-beside it; a copy goes to /var/lib/slopos/trees/NAME for the guest to read. A
+it — an `identity` line, an `at` line naming the destination, then
+`<kind> <size or -> <path>` per entry — and a reinstall removes exactly that
+and keeps whatever the guest put beside it; a copy goes to /var/lib/slopos/trees/NAME for the guest to read. A
 seed tree (no `--name`) is copied onto an image that lacks its directory and
 is the guest's from then on. `--owner UID:GID` is who the tree, its
 directory included, belongs to; a directory made above it is uid 0's.
@@ -373,8 +374,8 @@ def plan(image, host, guest, name, owner=(0, 0)):
 
 
 def manifest(host, tree=None):
-    """The manifest an install of `host` records, as lines; what the
-    installer finds in the install medium beside the tree it copies."""
+    """The identity and entries an install of `host` records, as lines; the
+    install adds its destination."""
     tree = walk(host) if tree is None else tree
     entries = [f"{k} {st.st_size if k == 'f' else '-'} {rel}" for k, _, rel, _, st in tree]
     return [f"identity {identity(host)}"] + entries

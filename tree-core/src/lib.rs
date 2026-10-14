@@ -49,7 +49,7 @@ pub fn valid_name(name: &str) -> bool {
 
 /// An absolute path without an empty, `.` or `..` component.
 pub fn valid_destination(path: &str) -> bool {
-    path == "/" || path.strip_prefix('/').is_some_and(safe_rel)
+    path == "/" || path.strip_prefix('/').is_some_and(valid_rel)
 }
 
 /// Where a root records the manifest of the tree `name`.
@@ -95,8 +95,8 @@ pub struct Item {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub identity: String,
-    /// Where the install went; `None` in what a manifest made before it
-    /// recorded that says, and in a tree not yet installed.
+    /// Where the tree was installed; `None` in a scan and in a manifest older
+    /// than the `at` line.
     pub at: Option<String>,
     pub items: Vec<Item>,
 }
@@ -106,11 +106,13 @@ pub struct ParseError {
     pub line: usize,
 }
 
-fn safe_rel(rel: &str) -> bool {
+/// A relative path a manifest line can carry: no empty, `.` or `..`
+/// component and no control character.
+pub fn valid_rel(rel: &str) -> bool {
     !rel.is_empty()
-        && rel
-            .split('/')
-            .all(|part| !part.is_empty() && part != "." && part != "..")
+        && rel.split('/').all(|part| {
+            !part.is_empty() && part != "." && part != ".." && !part.contains(char::is_control)
+        })
 }
 
 impl Manifest {
@@ -147,7 +149,7 @@ impl Manifest {
                 Some(n) if kind == Kind::File => Some(n.parse().map_err(|_| bad.clone())?),
                 _ => return Err(bad),
             };
-            let rel = fields.next().filter(|r| safe_rel(r)).ok_or(bad)?;
+            let rel = fields.next().filter(|r| valid_rel(r)).ok_or(bad)?;
             items.push(Item {
                 kind,
                 size,
