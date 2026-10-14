@@ -75,26 +75,29 @@ plans lands second re-baselines that step.
 - init hands its end of the consent pair to the compositor and drops it
   (`:245-249`). After the compositor exits, init only reaps (`:280-285`).
 
-**What a program outside the base would meet.**
-- The dock pins five compiled paths (`userland/src/apps/compositor/dock.rs:137-173`).
-  The shell's registry is compiled in (`userland/src/program_registry.rs`).
-- The loader searches only `/lib` and `/usr/lib` (`slibc/src/ld_so/mod.rs:56-57`).
+**Programs outside the base (Phase 2).**
+- The editor, the file manager and the image viewer are `slopos-apps`
+  (`apps/`): dynamic against `libc.so`, with no `syscall` instruction of their
+  own, installed as the tree `apps` at `/usr/local`.
+- The dock pins the app entries under `/usr/share`, `/usr/local/share` and
+  `~/.local/share` (`userland/src/app_entry.rs`). The shell's registry names
+  no app.
+- The loader searches `/usr/local/lib` last, for a process neither
+  `AT_SECURE` nor uid 0's (`slibc/src/ld_so/mod.rs`).
 - The compositor serves protocol versions `PROTOCOL_VERSION_MIN` through
   `PROTOCOL_VERSION`, both 3 (Phase 1).
-- The shipped programs are static: slibc is linked as an rlib, and raw
+- The base programs are static: slibc is linked as an rlib, and raw
   syscalls are made through `slopos_userland::syscall`.
 - `libc.so` reaches four SlopOS-only calls itself: `spawn_path`, `resolve`,
-  `net_query` and `klog_write` (`slibc/src/pal/slopos.rs:1121-1416`). It
-  exports one SlopOS-named entry to them, `slopos_spawn_path`
-  (`slibc/src/ffi/syscalls.rs:1070`).
-- These programs make SlopOS-only calls directly:
+  `net_query` and `klog_write` (`slibc/src/pal/slopos.rs`). It exports one
+  SlopOS-named entry to them, `slopos_spawn_path`
+  (`slibc/src/ffi/syscalls.rs`).
+- These base programs make SlopOS-only calls directly:
   - sysmon: `sys_info`, `process_list`, `percpu_stats`, `cpu_perf`, `cpu_info`
-    and `net_query` (`userland/src/apps/sysmon/state.rs:196-233`);
+    and `net_query` (`userland/src/apps/sysmon/state.rs`);
   - ss and nmap: `net_query`;
   - ping and nc: `resolve` and the rings;
   - oops_smoke: `test_panic`.
-  
-  The editor, the file manager and the image viewer make none.
 
 **Kernel and base carry an interface number nothing yet acts on.** The kernel
 states the base interfaces it serves in `sys_info` and its ELF note, and
@@ -103,15 +106,16 @@ states the base interfaces it serves in `sys_info` and its ELF note, and
 compares the two: that is Phase 3.
 
 **Trees.** `tree-core` installs a tree by manifest, replacing what the old
-manifest names and keeping what the user added. It keys the manifest by
-destination, `usr_local` for `/usr/local` (`tree-core/src/lib.rs:33-35`), so
-one tree owns a destination. `scripts/fs_tree.py` applies it on the host, and
-the installer applies it for the medium's toolchain
-(`userland/src/apps/installer/root.rs:473-486`).
+manifest names and keeping what the user added. A manifest is keyed by the
+tree's name: `usr_local` for the toolchain and `apps` for the apps, both at
+`/usr/local`. `scripts/fs_tree.py` applies it on the host, and
+`slopos_userland::tree` in the guest, for the installer, init and
+`/bin/tree-install`.
 
 **Building in the guest.** `scripts/selfhost.sh install` builds the kernel,
-the userland and the base, installs both into the spare slot and arms one boot
-of it (`scripts/selfhost.sh:76-82`).
+the userland, the base and the apps, installs the apps at once through
+`tree-install`, installs the kernel and base into the spare slot and arms one
+boot of it.
 
 ## What the prior art settles
 
@@ -131,6 +135,9 @@ of it (`scripts/selfhost.sh:76-82`).
 | Redox relibc and libredox ([libraries](https://doc.redox-os.org/book/libraries-apis.html), [FAQ](https://doc.redox-os.org/book/developer-faq.html)) | The stable ABI is in userspace, not at the syscall layer; relibc breaks when a function is removed or renamed, its arguments change, or a struct's size or alignment changes | `check_libc_exports.sh` holds removals and struct layouts; the syscall layer stays free behind the interface number |
 | Asterinas ([book](https://asterinas.github.io/book/kernel/index.html)) | A kernel that offers only Linux's ABI has no private calls to number | Not taken: SlopOS keeps a private range, so it numbers it |
 | Wayland versioning ([protocol](https://wayland.freedesktop.org/docs/html/ch04.html)) | A server keeps serving every version up to the one it advertises, and speaks the one a client binds | The compositor serves a version range and speaks the client's `Hello` |
+| Redox launcher ([orbutils](https://gitlab.redox-os.org/redox-os/orbutils)) and libredox ([libraries](https://doc.redox-os.org/book/libraries-apis.html)) | Native app files are `key=value` lines (`name`, `binary`, `icon`) beside XDG `.desktop` entries, sorted by name; Rust programs reach relibc's C ABI rather than raw syscalls | `key=value` app entries in name order; the toolkit's `slopos-cabi` |
+| XDG desktop entries ([file naming](https://specifications.freedesktop.org/desktop-entry/latest/file-naming.html)) | Of two entries with one id, the directory first in precedence wins, the user's data home ahead of `/usr/local/share` ahead of `/usr/share` | The dock's three shares and their precedence |
+| glibc `ld.so` and `ld.so.conf` | `LD_LIBRARY_PATH` and `$ORIGIN` are ignored under `AT_SECURE`; `/usr/local/lib` is a search entry a distribution adds | `/usr/local/lib` searched last, and never for uid 0 or `AT_SECURE` |
 
 ## Design
 
@@ -289,34 +296,30 @@ no dialog, because the person approved that base when it was installed.
   person's `cargo build` would build them: against the target's std, linked
   dynamically against `libc.so` with `--dynamic-linker=/lib/ld-slopos.so.1`.
   `scripts/check_loose_programs.sh` fails one that is static, lacks
-  `libc.so` in `DT_NEEDED`, or holds a `syscall` instruction. It carries a
-  `--self-test`.
+  `libc.so` in `DT_NEEDED`, or holds a `syscall` instruction.
 - **Location.**
   - programs in `/usr/local/bin/`;
   - app entries in `share/slopos/apps/<id>.app`, as `key=value` lines: `id`,
-    `name`, `exec`, `icon`;
-  - icons as PNG files in `share/slopos/icons/`.
-  
+    `name`, `exec`, `icon`, the icon a PNG file named in the same share's
+    `slopos/icons/`.
+
   The base carries the entries for its own apps (terminal, sysmon) under
   `/usr/share/slopos/apps/`.
 - **The dock** reads entries at session start from `/usr/share/slopos/apps`,
   `/usr/local/share/slopos/apps` and `~/.local/share/slopos/apps`, in that
-  order, a later entry replacing an earlier one with the same id. The compiled
-  list goes.
+  order, a later entry replacing an earlier one with the same id.
 - **The shell's registry** drops the apps. `PATH` finds them.
 - **The loader** appends `/usr/local/lib` to its default search, only for a
   process that is not `AT_SECURE` and whose effective uid is not 0.
-- **Install.** The apps form a tree named `apps`. `tree-core` keys a manifest
-  by tree name rather than destination; `usr_local` stays the toolchain's, so
-  two disjoint trees share `/usr/local` and the existing refusal keeps them
-  disjoint. The tree reaches a root four ways:
+- **Install.** The apps form a tree named `apps`, beside the toolchain's
+  `usr_local` at `/usr/local`. It reaches a root four ways:
   - the host image builders install it as a host tree, like the toolchain;
-  - the install medium carries it at `apps/` beside its manifest, and the
-    installer installs it onto the new root;
+  - the install medium carries it at `apps/`, and the installer installs it
+    onto the new root;
   - on a live boot, init installs it into the RAM root's `/usr/local`;
   - in the guest, `scripts/selfhost.sh install` installs it as the session,
-    through `/bin/tree-install`. That is a base program over `tree-core` that
-    holds no capability.
+    through `/bin/tree-install NAME TREE DEST`, a base program over
+    `tree-core` that holds no capability.
 
 ### Nothing with authority runs loose code
 
@@ -420,21 +423,33 @@ its own.
   a client at the minimum draws a window, and one outside the range, one
   speaking before `Hello` and one reusing a surface id are refused.
 
-### Phase 2: Apps leave the base
+### Phase 2: Apps leave the base — done
 
-The dynamic build of the three apps and `check_loose_programs.sh`. App entries
-and the dock reading them, the registry without the apps, and the loader's
-`/usr/local/lib`. `tree-core` keyed by tree name and `/bin/tree-install`. The
-apps tree on host images, on the medium, on a live boot's RAM root, and from
-`selfhost.sh`. Tests that named `/bin/editor`, `/bin/file_manager` or
-`/bin/image_viewer` follow them.
-
-Graded by:
-- `editor_test` and the app tests running the apps from `/usr/local/bin`;
-- a utest holding the dock to the entries;
-- `dl_secure_probe` extended to `/usr/local/lib`: searched as uid 1000, not as
-  uid 0 or under `AT_SECURE`;
-- `tree-core` host tests for two trees sharing a destination.
+- `editor`, `file_manager` and `image_viewer` are `slopos-apps` (`apps/`),
+  built by `build_userland.sh` with the target's std and unwinding, linked
+  against `libc.so` by the clang driver's line, and staged with their entries
+  and icons as `builddir/apps`. `check_loose_programs.sh` holds them after
+  every host userland build; its `--self-test` runs in the gates.
+- `appkit`, `windowing` and `slop-protocol` call `slopos-cabi`, safe wrappers
+  over `libc.so`'s exports; appkit waits in `poll`, not the ring. `libc.so`
+  gained `memfd_create`.
+- App entries and 64 px PNG icons, the base's in `assets/`, the apps' in
+  `apps/share/`. The dock pins them in name order, reading entries and icons
+  bounded and non-blocking. The shell's registry dropped the apps.
+- The loader searches `/usr/local/lib` last for a process neither
+  `AT_SECURE` nor uid 0's.
+- `tree-core` keys manifests by name (`TOOLCHAIN`, `APPS`).
+  `slopos_userland::tree` scans and installs a tree for the installer, init
+  and `/bin/tree-install`. `FS_HOST_TREES` takes `<host>:<guest>[:<name>]`.
+- The apps tree is on the tests, verified, persistent and self-hosting
+  images, on the medium at `apps/`, on a live boot's RAM root, and installed
+  by `selfhost.sh install`.
+- The installer mounts the new root inside a directory only uid 0 may
+  search.
+- Graded by `apps_test` (each app, run from `/usr/local/bin`, connects to a
+  stand-in compositor and names its window), `dock_test`, `dl_test`'s root
+  and session cases, `tree-core`'s and `fs_tree.py`'s tests of two trees at
+  one destination, and `test-installer`'s markers for the apps.
 
 ### Phase 3: The boot partition
 
@@ -560,6 +575,30 @@ Graded by:
   unsupported.
 - **The compositor protocol is versioned now,** because three GUI apps leave
   the base in this plan.
+- **The toolkit is outside-the-base code.** `appkit`, `windowing` and
+  `slop-protocol` reach the system only through `libc.so`'s exports
+  (`slopos-cabi`), so a base program and an app run the same code, and
+  nothing an app links makes a system call in place. The ring is for base
+  programs alone.
+- **Apps keep the target's panic strategy.** They unwind, through the
+  unwinder `libc.so` carries; base programs stay `panic = abort`.
+- **A tree is named, and its manifest is its owner's.** Trees share a
+  destination, kept disjoint by `tree-core`'s refusal; a manifest copy is
+  owned with its tree, so the session keeps its own trees with no
+  capability: `tree-install` rewrites its manifest in place in uid 0's
+  directory, which it may not add to.
+- **In the guest, a manifest is computed from the tree it describes**: its
+  identity is a digest of every entry, and nothing ships a manifest beside a
+  tree it could disagree with. The host's `fs_tree.py` keeps its own
+  identity; the two are never compared.
+- **App entries rank like the XDG data directories** (`~/.local/share` over
+  `/usr/local/share` over `/usr/share`, by id) and the dock orders them by
+  name, as Redox's launcher does. An entry passes over a key it does not
+  know, so a newer entry still works on an older dock.
+- **What the session writes, a holder of more reads bounded and
+  non-blocking.** The compositor holds the seats and draws the consent
+  question, and reads entries and icons the session can replace with a FIFO
+  or a huge file.
 - **A base install asks the session for consent; a rollback does not.** root
   and the paired agent need no consent, as for `boot.install`.
 - **Only what changed restarts.** A changed compositor or terminal asks for a
