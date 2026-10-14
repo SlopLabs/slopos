@@ -579,7 +579,9 @@ one that does not parse — an in-place rewrite cut short — is not believed:
 either stands for the new tree unfinished, whose paths the install takes back,
 so the installer never acts on what the session wrote. An install skips a tree
 whose believed manifest records its identity at that destination with every
-entry still of the kind and size it names. Two trees at one destination stay
+entry still of the kind and size it names; no content is checked, so a
+reinstall keeping the root leaves what the session changed in place inside
+its own trees. Two trees at one destination stay
 disjoint: a file one holds refuses the other's install of it. On a host-built
 root the host keeps the record that counts, and the guest's copy takes its
 tree's owner.
@@ -589,8 +591,9 @@ the installer installs them; init installs them into a live boot's RAM root;
 and `scripts/selfhost.sh install` installs them as the session with the
 `tree-install` it built — `/bin/tree-install`, a base program over `tree-core`
 that holds nothing, writes as whoever runs it and refuses a tree whose
-manifest another uid keeps. In the guest a manifest is computed from the tree
-(`slopos_userland::tree::scan`), its identity a digest of every entry. The
+manifest another uid keeps. The apps' manifest is computed from the tree where
+it is installed (`slopos_userland::tree::scan`), its identity a digest of every
+entry; the toolchain's comes with the payload, written by the host. The
 dock pins the app entries — `share/slopos/apps/<id>.app`, `key=value` lines
 naming the `id`, a `name`, the program it `exec`s and an `icon` PNG in that
 share's `slopos/icons/` (`slopos_userland::app_entry`) — read at session start
