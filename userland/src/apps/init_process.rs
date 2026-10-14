@@ -224,6 +224,9 @@ pub fn init_user_main() {
     upgrade_console_font();
     collect_crash_records();
     crate::root_layout::lay_out(std::path::Path::new("/"));
+    if let Err(e) = crate::tree::hand_over(slopos_tree_core::APPS, (SESSION_UID, SESSION_GID)) {
+        eprintln!("init: the apps' manifest: {e}");
+    }
     install_live_apps();
     crate::root_layout::make_runtime_dir(&runtime_dir());
     // Before anything that may ask it; until the compositor says it can draw,

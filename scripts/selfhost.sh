@@ -84,7 +84,8 @@ bootctl install "$slot" "$elf" "$REPO_ROOT/$base"
 bootctl oneshot "slopos-$slot"
 apps="builddir/tree-install.elf apps builddir/apps /usr/local"
 if cmp -s /lib/libc.so builddir/libc.so; then
-    builddir/tree-install.elf apps builddir/apps /usr/local
+    builddir/tree-install.elf apps builddir/apps /usr/local ||
+        echo "selfhost: the apps stay as they were; slopos-$slot is armed all the same"
 else
     echo "selfhost: the apps need this build's libc.so; once slopos-$slot is up, run in $REPO_ROOT: $apps"
 fi

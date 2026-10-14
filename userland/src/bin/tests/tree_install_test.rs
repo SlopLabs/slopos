@@ -3,13 +3,14 @@
 //! tree's last install put down and nothing else.
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::{MetadataExt, lchown, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
 use slopos_abi::fs::{SESSION_GID, SESSION_UID};
-use slopos_tree_core::{MANIFEST_DIR, Manifest};
+use slopos_tree_core::Manifest;
 use slopos_userland::tree::{self, Install};
 
 const NAME: &str = "tree_install_test";
@@ -83,11 +84,10 @@ fn stage() -> bool {
     let _ = fs::remove_file(manifest());
     fs::create_dir_all(format!("{}/bin", src())).is_ok()
         && fs::create_dir_all(format!("{}/share", src())).is_ok()
-        && fs::create_dir_all(MANIFEST_DIR).is_ok()
         && fs::write(format!("{}/bin/tool", src()), "tool\n").is_ok()
         && fs::write(format!("{}/share/gone", src()), "gone\n").is_ok()
         && symlink("bin/tool", format!("{}/tool", src())).is_ok()
-        && fs::write(manifest(), "").is_ok()
+        && tree::hand_over(NAME, (SESSION_UID, SESSION_GID)).is_ok()
         && [
             WORK.to_string(),
             src(),
@@ -96,7 +96,6 @@ fn stage() -> bool {
             format!("{}/bin/tool", src()),
             format!("{}/share/gone", src()),
             format!("{}/tool", src()),
-            manifest(),
         ]
         .iter()
         .all(|path| give(path))
@@ -110,55 +109,99 @@ fn owner(path: &str) -> Option<u32> {
     fs::symlink_metadata(path).ok().map(|meta| meta.uid())
 }
 
-/// The session installs a tree over the empty manifest uid 0 made for it,
-/// finds it installed the second time, is refused for a file of its own in
-/// the way and for another destination, and then replaces exactly what the
-/// last install put down; uid 0 does not take the session's record for it.
+fn holds(path: &str, text: &str) -> bool {
+    fs::read_to_string(path).is_ok_and(|t| t == text)
+}
+
+const INSTALLED: &str = "installed tree_install_test";
+
+/// Each step of [`the_session_installs_a_tree_of_its_own`], in order.
+const STEPS: [(&str, fn(&str) -> bool); 9] = [
+    (
+        "a first install over the manifest uid 0 handed over",
+        |dest| {
+            said(&install(dest), 0, INSTALLED)
+                && holds(&format!("{dest}/bin/tool"), "tool\n")
+                && fs::read_link(format!("{dest}/tool")).is_ok_and(|t| t.as_os_str() == "bin/tool")
+                && owner(&format!("{dest}/bin/tool")) == Some(SESSION_UID)
+                && owner(&manifest()) == Some(SESSION_UID)
+                && recorded().is_some_and(|m| m.is_finished() && m.at.as_deref() == Some(dest))
+        },
+    ),
+    ("the same tree again", |dest| {
+        said(&install(dest), 0, "already holds")
+    }),
+    ("again with a file of the tree gone", |dest| {
+        fs::remove_file(format!("{dest}/bin/tool")).is_ok()
+            && said(&install(dest), 0, INSTALLED)
+            && holds(&format!("{dest}/bin/tool"), "tool\n")
+    }),
+    ("a file of the session's where the tree adds one", |dest| {
+        let before = recorded();
+        fs::write(format!("{}/bin/new", src()), "new\n").is_ok()
+            && give(&format!("{}/bin/new", src()))
+            && fs::remove_file(format!("{}/share/gone", src())).is_ok()
+            && fs::write(format!("{dest}/bin/new"), "mine\n").is_ok()
+            && fs::write(format!("{dest}/bin/kept"), "kept\n").is_ok()
+            && said(&install(dest), 1, "move it aside")
+            && recorded() == before
+    }),
+    ("another destination", |dest| {
+        said(
+            &install(&format!("{WORK}/elsewhere")),
+            1,
+            &format!("went to {dest}"),
+        )
+    }),
+    ("a reinstall replacing only its own", |dest| {
+        fs::remove_file(format!("{dest}/bin/new")).is_ok()
+            && said(&install(dest), 0, INSTALLED)
+            && holds(&format!("{dest}/bin/new"), "new\n")
+            && holds(&format!("{dest}/bin/kept"), "kept\n")
+            && fs::symlink_metadata(format!("{dest}/share/gone")).is_err()
+    }),
+    ("a manifest an in-place rewrite left empty", |dest| {
+        fs::write(manifest(), "").is_ok()
+            && said(&install(dest), 0, INSTALLED)
+            && recorded().is_some_and(|m| m.is_finished())
+            && holds(&format!("{dest}/bin/kept"), "kept\n")
+    }),
+    (
+        "uid 0 over a session manifest naming the session's file",
+        |dest| {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(manifest())
+                .and_then(|mut f| f.write_all(b"f 5 bin/kept\n"))
+                .is_ok()
+                && doubted(dest)
+                && holds(&format!("{dest}/bin/kept"), "kept\n")
+        },
+    ),
+    ("a manifest uid 0 keeps", |dest| {
+        lchown(manifest(), Some(0), Some(0)).is_ok() && said(&install(dest), 1, "is uid 0's")
+    }),
+];
+
+/// The session installs a tree over the manifest uid 0 handed it, and again
+/// only when the tree or what it put down changed; is refused for a file of
+/// its own in the way, another destination and a manifest it does not keep;
+/// recovers from a manifest rewrite cut short; and uid 0 takes back only the
+/// tree's own paths whatever the session's manifest names.
 fn the_session_installs_a_tree_of_its_own() -> bool {
     if !stage() {
         eprintln!("tree_install_test: staging {WORK} failed");
         return false;
     }
-    let dest = dest();
-    let first = said(&install(&dest), 0, "installed tree_install_test")
-        && fs::read_to_string(format!("{dest}/bin/tool")).is_ok_and(|t| t == "tool\n")
-        && fs::read_link(format!("{dest}/tool")).is_ok_and(|t| t.as_os_str() == "bin/tool")
-        && owner(&format!("{dest}/bin/tool")) == Some(SESSION_UID)
-        && owner(&manifest()) == Some(SESSION_UID)
-        && recorded().is_some_and(|m| m.is_finished() && m.at.as_deref() == Some(dest.as_str()));
-    if !first {
-        eprintln!("tree_install_test: the first install did not record {dest}");
-        return false;
-    }
-    let again = said(&install(&dest), 0, "already holds");
-
-    let planted = fs::write(format!("{}/bin/new", src()), "new\n").is_ok()
-        && give(&format!("{}/bin/new", src()))
-        && fs::remove_file(format!("{}/share/gone", src())).is_ok()
-        && fs::write(format!("{dest}/bin/new"), "mine\n").is_ok()
-        && fs::write(format!("{dest}/bin/kept"), "kept\n").is_ok();
-    let before = recorded();
-    let refused = said(&install(&dest), 1, "move it aside")
-        && said(
-            &install(&format!("{WORK}/elsewhere")),
-            1,
-            &format!("went to {dest}"),
-        )
-        && recorded() == before;
-
-    let replaced = fs::remove_file(format!("{dest}/bin/new")).is_ok()
-        && said(&install(&dest), 0, "installed tree_install_test")
-        && fs::read_to_string(format!("{dest}/bin/new")).is_ok_and(|t| t == "new\n")
-        && fs::read_to_string(format!("{dest}/bin/kept")).is_ok_and(|t| t == "kept\n")
-        && fs::symlink_metadata(format!("{dest}/share/gone")).is_err();
-    if !replaced {
-        eprintln!("tree_install_test: the reinstall did not replace exactly its own");
-    }
-    let doubted = doubted(&dest);
-
+    let held = STEPS.iter().all(|(step, passes)| {
+        passes(&dest()) || {
+            eprintln!("tree_install_test: {step} failed");
+            false
+        }
+    });
     let _ = fs::remove_dir_all(WORK);
     let _ = fs::remove_file(manifest());
-    again && planted && refused && replaced && doubted
+    held
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[(

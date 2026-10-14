@@ -21,7 +21,7 @@ the manifest names, refuses the install before anything is written.
 
     identity HOST
     manifest HOST
-    installed MANIFESTS NAME
+    installed MANIFESTS NAME GUEST
     exists IMAGE PATH
     install IMAGE HOST GUEST [--manifests DIR --name NAME] [--owner UID:GID]
     --self-test
@@ -242,11 +242,13 @@ def read_manifest(path):
     return head[1], at, out
 
 
-def installed(manifests, name):
+def installed(manifests, name, guest):
+    """The identity of the tree `name` recorded at `guest`; none elsewhere."""
     try:
-        return read_manifest(os.path.join(manifests, name))[0] or ""
+        recorded, at, _ = read_manifest(os.path.join(manifests, name))
     except Refused:
         return ""
+    return recorded or "" if at in (None, guest) else ""
 
 
 def exists(image, path):
@@ -471,7 +473,8 @@ def _self_test(work):
     head, *entries = manifest(tree)
     recorded = "".join(f"{x}\n" for x in [head, "at /usr/local", *entries]).encode()
     assert read(f"{IMAGE_MANIFESTS}/usr_local") == recorded
-    assert installed(manifests, "usr_local") == identity(tree)
+    assert installed(manifests, "usr_local", "/usr/local") == identity(tree)
+    assert installed(manifests, "usr_local", "/opt/local") == "", "a tree recorded elsewhere"
     sound()
 
     guest("write /dev/null /usr/local/bin/guest", "mkdir /usr/local/lib/guest")
@@ -561,8 +564,6 @@ def _self_test(work):
     else:
         raise AssertionError("not refused: a listing holding a name with a /")
 
-    # Two trees at one destination: each names only its own entries, and a
-    # file of one in the way of the other refuses that install.
     shared = os.path.join(work, "shared.img")
     with open(shared, "wb") as f:
         f.truncate(8 << 20)
@@ -611,8 +612,8 @@ def main(argv):
             print(identity(argv[1]))
         elif len(argv) == 2 and argv[0] == "manifest":
             print("\n".join(manifest(argv[1])))
-        elif len(argv) == 3 and argv[0] == "installed":
-            print(installed(argv[1], argv[2]))
+        elif len(argv) == 4 and argv[0] == "installed":
+            print(installed(argv[1], argv[2], argv[3]))
         elif len(argv) == 3 and argv[0] == "exists":
             return 0 if exists(argv[1], argv[2]) else 1
         elif len(argv) >= 4 and argv[0] == "install":
