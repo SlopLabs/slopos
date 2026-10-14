@@ -322,7 +322,7 @@ no dialog, because the person approved that base when it was installed.
     onto the new root;
   - on a live boot, init installs it into the RAM root's `/usr/local`;
   - in the guest, `scripts/selfhost.sh install` installs it as the session,
-    through `/bin/tree-install NAME TREE DEST`, a base program over
+    through the `tree-install NAME TREE DEST` it built, a base program over
     `tree-core` that holds no capability.
 
 ### Nothing with authority runs loose code
@@ -596,14 +596,23 @@ Graded by:
   the `at` line refuses that.
 - **A manifest belongs to whoever installs its tree again.** The apps' is the
   session's, which keeps them with no capability: `tree-install` rewrites it
-  in place in uid 0's directory, which it may not add to. The toolchain's is
-  uid 0's. An install skips a tree only on a manifest uid 0 or the installer
-  itself wrote, so the installer's repair never takes the session's word. A
-  manifest that does not parse, as an in-place rewrite cut short leaves,
-  names the new tree, whose paths the install takes back; a per-tree
-  directory the session owns would have made the rewrite a rename, at the
-  cost of a second shape of manifest directory. On the host the record that
-  counts stays outside the image, so a copy there takes its tree's owner.
+  in place in uid 0's directory, which it may not add to, and init makes it
+  for the session on a root without one. The toolchain's is uid 0's.
+  `tree-install` refuses a manifest another uid keeps, so no install locks
+  the session out of its tree.
+- **An installer acts only on a record it trusts.** A manifest neither uid 0
+  nor the installing uid wrote is not read, and one that does not parse, as
+  an in-place rewrite cut short leaves, is not believed: either stands for
+  the new tree unfinished, whose paths the install takes back, so nothing the
+  session writes in a manifest steers what uid 0 removes. A skip also needs
+  the recorded destination and every entry of the kind and size recorded. A
+  per-tree directory the session owns would have made the rewrite a rename,
+  at the cost of a second shape of manifest directory.
+- **On a host-built root the host's record counts.** It stays outside the
+  image, so the guest's copy takes its tree's owner. A guest install over a
+  host tree stands until the host's tree changes; the host then replaces what
+  its own record names and refuses, with a warning each build, a path the
+  guest's install added that its tree now adds too.
 - **The apps are no slot's.** They follow the `libc.so` they link, which a
   slot's base carries: `selfhost.sh install` installs them at once only over
   the same `libc.so`, and a rollback keeps them. Exports only grow, so apps
