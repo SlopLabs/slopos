@@ -12,7 +12,7 @@ use slopos_slibc::ffi::syscalls::mkfifo;
 use slopos_userland::app_entry::{self, AppEntry};
 use slopos_userland::apps::compositor::dock::LauncherShelf;
 
-const HOME: &str = "/tmp/dock_test";
+const HOME: &str = "/var/tmp/dock_test";
 
 const INSTALLED: &[(&str, &str)] = &[
     ("org.slopos.editor", "/usr/local/bin/editor"),
