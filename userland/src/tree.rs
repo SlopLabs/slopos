@@ -9,6 +9,8 @@ use std::path::Path;
 
 use slopos_abi::fs::O_NOFOLLOW;
 use slopos_tls_core::hash::{Hash, Sha256};
+
+use crate::syscall::process::geteuid;
 use slopos_tree_core::{Item, Kind, MANIFEST_DIR, Manifest, Root, State, Step, UNFINISHED, plan};
 
 const COPY_CHUNK: usize = 1 << 20;
@@ -66,6 +68,29 @@ pub fn read_regular(path: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// The manifest of the tree `name`, made for `keeper` to rewrite in place
+/// where it may not make one: an install begun with nothing recorded. Kept
+/// when there is one.
+pub fn hand_over(name: &str, keeper: (u32, u32)) -> Result<(), String> {
+    let path = slopos_tree_core::manifest_path(name);
+    let empty = Manifest {
+        identity: UNFINISHED.to_string(),
+        at: None,
+        items: Vec::new(),
+    };
+    make_dir(MANIFEST_DIR)?;
+    match create_new(&path) {
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(format!("{path}: {e}")),
+        Ok(mut file) => {
+            file.write_all(empty.render().as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|e| format!("{path}: {e}"))?;
+            give(&path, keeper)
+        }
+    }
+}
+
 /// The manifest installing `dir` records: its entries parents first, and an
 /// identity that is a digest of every entry's kind, mode, path and bytes.
 pub fn scan(dir: &Path) -> Result<Manifest, String> {
@@ -115,6 +140,7 @@ pub fn scan(dir: &Path) -> Result<Manifest, String> {
             digest.update(&[0]);
             let size = match kind {
                 Kind::File => {
+                    digest.update(&meta.len().to_le_bytes());
                     let mut file =
                         File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
                     let mut chunk = vec![0u8; COPY_CHUNK];
@@ -130,7 +156,9 @@ pub fn scan(dir: &Path) -> Result<Manifest, String> {
                 Kind::Link => {
                     let target =
                         fs::read_link(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                    digest.update(target.as_os_str().as_encoded_bytes());
+                    let target = target.as_os_str().as_encoded_bytes();
+                    digest.update(&(target.len() as u64).to_le_bytes());
+                    digest.update(target);
                     None
                 }
                 Kind::Dir => None,
@@ -195,7 +223,8 @@ pub struct Install<'a> {
     /// Who what the install makes belongs to; whoever installs when `None`.
     pub owner: Option<(u32, u32)>,
     /// Who the manifest belongs to: the session for a tree it installs
-    /// again itself, uid 0 for one only uid 0 installs.
+    /// again itself, uid 0 for one only uid 0 installs. `None` is whoever
+    /// installs, who must keep a manifest already there.
     pub keeper: Option<(u32, u32)>,
     /// What a refusal tells the person to do with what is in the way.
     pub remedy: &'a str,
@@ -228,9 +257,9 @@ impl Install<'_> {
         Ok(true)
     }
 
-    /// The manifest at `path`, whose directory holds a manifest of every
-    /// tree, rewritten in place when the installer may not make a sibling
-    /// there: the session's own manifest in uid 0's directory.
+    /// Record `manifest` at `path` through a sibling and a rename, or in place
+    /// where the installer may not make a sibling: as the session, in uid 0's
+    /// directory.
     fn record(&self, path: &str, manifest: &Manifest) -> Result<(), String> {
         let text = manifest.render();
         match replace(path, text.as_bytes()) {
@@ -242,7 +271,10 @@ impl Install<'_> {
                 .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all())),
             done => done,
         }
-        .map_err(|e| format!("recording {path}: {e}"))?;
+        .map_err(|e| match e.kind() {
+            ErrorKind::NotFound => format!("{path} does not exist, and only uid 0 may make it"),
+            _ => format!("recording {path}: {e}"),
+        })?;
         self.keeper.map_or(Ok(()), |keeper| give(path, keeper))
     }
 
@@ -286,66 +318,97 @@ impl Install<'_> {
         self.owner.map_or(Ok(()), |owner| give(&dest, owner))
     }
 
-    /// The manifest at `path`, and whether its identity is believed: one
-    /// written by neither uid 0 nor this installer could claim any tree is
-    /// there. One that does not parse, which a crash in the middle of an
-    /// in-place rewrite leaves, names the new tree, so the paths it holds are
-    /// taken back from whatever is there.
-    fn recorded(&self, path: &str, new: &Manifest) -> Result<Option<(Manifest, bool)>, String> {
-        let Some(text) = read_regular(path)? else {
-            return Ok(None);
+    /// The manifest at `path` if uid 0 or this installer wrote it and it
+    /// parses; otherwise the new tree unfinished, so the install takes back
+    /// only the new tree's paths.
+    fn recorded(&self, path: &str, new: &Manifest) -> Result<Option<Manifest>, String> {
+        let meta = match fs::symlink_metadata(path) {
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{path}: {e}")),
+            Ok(meta) if !meta.is_file() => return Err(format!("{path} is not a file")),
+            Ok(meta) => meta,
         };
-        let writer = fs::symlink_metadata(path)
-            .map_err(|e| format!("{path}: {e}"))?
-            .uid();
-        let believed = writer == 0 || writer == crate::syscall::process::geteuid();
-        Ok(Some(match Manifest::parse(&text) {
-            Ok(manifest) => (manifest, believed),
-            Err(_) => (
-                Manifest {
-                    identity: UNFINISHED.to_string(),
-                    at: None,
-                    items: new
-                        .items
-                        .iter()
-                        .map(|item| Item {
-                            size: None,
-                            ..item.clone()
-                        })
-                        .collect(),
-                },
-                false,
-            ),
-        }))
+        let believed = meta.uid() == 0 || meta.uid() == geteuid();
+        let read = believed
+            .then(|| fs::read(path).ok())
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| Manifest::parse(&text).ok());
+        Ok(Some(read.unwrap_or_else(|| {
+            Manifest {
+                identity: UNFINISHED.to_string(),
+                at: None,
+                items: new
+                    .items
+                    .iter()
+                    .map(|item| Item {
+                        size: None,
+                        ..item.clone()
+                    })
+                    .collect(),
+            }
+        })))
     }
 
-    /// The bytes copied, or `None` when the root records `new` installed
-    /// already.
+    /// Whether every entry `manifest` names is on the root as it names it.
+    fn intact(&self, manifest: &Manifest) -> bool {
+        manifest.items.iter().all(|item| {
+            let path = format!("{}/{}", self.guest.trim_end_matches('/'), item.rel);
+            fs::symlink_metadata(self.path(&path)).is_ok_and(|meta| {
+                let kind = match item.kind {
+                    Kind::Dir => meta.is_dir(),
+                    Kind::File => meta.is_file(),
+                    Kind::Link => meta.file_type().is_symlink(),
+                };
+                kind && item.size.is_none_or(|size| size == meta.len())
+            })
+        })
+    }
+
+    /// The bytes copied, or `None` when the root holds `new` already.
     pub fn run(&self, new: &Manifest, copied: &mut dyn FnMut(u64)) -> Result<Option<u64>, String> {
         let recorded = self.path(&slopos_tree_core::manifest_path(self.name));
-        let old = if self.walk_dirs(MANIFEST_DIR, false)? {
-            self.recorded(&recorded, new)?
-        } else {
-            None
-        };
-        if old.as_ref().is_some_and(|(old, believed)| {
-            *believed && old.is_finished() && old.identity == new.identity
-        }) {
+        if !self.walk_dirs(MANIFEST_DIR, false)? {
+            return self.install(&recorded, None, new, copied).map(Some);
+        }
+        if self.keeper.is_none()
+            && let Ok(meta) = fs::symlink_metadata(&recorded)
+            && meta.uid() != geteuid()
+        {
+            return Err(format!(
+                "{recorded} is uid {}'s, which installs {} again",
+                meta.uid(),
+                self.name
+            ));
+        }
+        let old = self.recorded(&recorded, new)?;
+        if old
+            .as_ref()
+            .is_some_and(|old| old.installs(&new.identity, self.guest) && self.intact(old))
+        {
             return Ok(None);
         }
-        let old = old.map(|(old, _)| old);
-        let steps =
-            plan(&mut Target(self.root), self.guest, old.as_ref(), new).map_err(|conflicts| {
-                format!(
-                    "the root holds what installing {} at {} would overwrite:\n  {}\n{}",
-                    self.name,
-                    self.guest,
-                    conflicts.0.join("\n  "),
-                    self.remedy
-                )
-            })?;
+        self.install(&recorded, old.as_ref(), new, copied).map(Some)
+    }
+
+    fn install(
+        &self,
+        recorded: &str,
+        old: Option<&Manifest>,
+        new: &Manifest,
+        copied: &mut dyn FnMut(u64),
+    ) -> Result<u64, String> {
+        let steps = plan(&mut Target(self.root), self.guest, old, new).map_err(|conflicts| {
+            format!(
+                "the root holds what installing {} at {} would overwrite:\n  {}\n{}",
+                self.name,
+                self.guest,
+                conflicts.0.join("\n  "),
+                self.remedy
+            )
+        })?;
         self.walk_dirs(MANIFEST_DIR, true)?;
-        self.record(&recorded, &steps.during)?;
+        self.record(recorded, &steps.during)?;
         let mut total = 0;
         let mut count = |n| {
             total += n;
@@ -368,7 +431,7 @@ impl Install<'_> {
                 Step::Install { item, path } => self.put(item, path, &mut count)?,
             }
         }
-        self.record(&recorded, &steps.done)?;
-        Ok(Some(total))
+        self.record(recorded, &steps.done)?;
+        Ok(total)
     }
 }

@@ -120,6 +120,17 @@ fn a_manifest_says_where_its_tree_went() {
         found,
         vec!["the last install of this tree went to /usr/local, not /home/user"]
     );
+    assert!(first.done.installs(&m.identity, "/usr/local"));
+    assert!(!first.done.installs(&m.identity, "/home/user"));
+    assert!(!first.during.installs(&m.identity, "/usr/local"));
+    let older = Manifest {
+        at: None,
+        ..m.clone()
+    };
+    assert!(
+        older.installs(&m.identity, "/home/user"),
+        "an older manifest names no place"
+    );
 }
 
 #[test]

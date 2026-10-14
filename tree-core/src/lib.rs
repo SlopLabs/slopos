@@ -5,11 +5,10 @@
 //! What an install put down is recorded in a manifest under
 //! [`MANIFEST_DIR`], named for the tree: an `identity` line, an `at` line
 //! naming where the tree went, then `<kind> <size or -> <path>` per entry,
-//! parents first. A reinstall removes
-//! exactly what the old manifest names and keeps whatever the root's user put
-//! beside it; anything in the way of the new tree that the old manifest does
-//! not name, or that is not the kind it names, refuses the install before
-//! anything is written. While an install is under way the manifest names the
+//! parents first. A reinstall removes exactly what the old manifest names and
+//! keeps whatever the root's user put beside it; anything in the way of the
+//! new tree that the old manifest does not name, or that is not the kind it
+//! names, refuses the install before anything is written. While an install is under way the manifest names the
 //! old entries and the new under [`UNFINISHED`], so one cut short is redone,
 //! never trusted.
 //!
@@ -176,6 +175,14 @@ impl Manifest {
 
     pub fn is_finished(&self) -> bool {
         self.identity != UNFINISHED
+    }
+
+    /// Whether this records the tree `identity` names installed whole at
+    /// `guest`; one that names no destination is taken at its word.
+    pub fn installs(&self, identity: &str, guest: &str) -> bool {
+        self.is_finished()
+            && self.identity == identity
+            && self.at.as_deref().is_none_or(|at| at == guest)
     }
 }
 

@@ -29,11 +29,10 @@ const CLONE_CONFIG: &str = "slopos/.git/config";
 const COPY_CHUNK: usize = 1 << 20;
 const PROGRESS_EVERY: u64 = 256 << 20;
 
-/// The new root, mounted inside a directory this install made under a name
-/// nobody could foresee, so no link planted ahead of it redirects the mount,
-/// and that only uid 0 may search: the live session is the uid that owns a
-/// kept root's `/usr/local`, and could otherwise turn a directory the install
-/// writes through into a link while it works. Unmounted on drop.
+/// The new root, mounted in a directory made under a name nobody could
+/// foresee, so no planted link redirects the mount, and that only uid 0 may
+/// search, so the session, which owns a kept root's `/usr/local`, cannot turn
+/// a directory the install writes through into a link. Unmounted on drop.
 pub struct Mounted {
     private: String,
     dir: String,
@@ -385,7 +384,7 @@ fn with_origin(config: &str, url: &str) -> String {
 /// apps by their manifests, `/src` once.
 pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(), String> {
     if !medium.payload_has(LOCAL) {
-        println!("installer: the medium carries no toolchain; /usr/local stays as it is");
+        println!("installer: the medium carries no toolchain");
     } else {
         let recorded = slopos_tree_core::manifest_path(slopos_tree_core::TOOLCHAIN);
         let text = fs::read_to_string(medium.payload_path(&recorded))

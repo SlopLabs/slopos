@@ -584,7 +584,7 @@ tree_pending() {
     host_tree "$1"
     [ -d "$TREE_HOST" ] || return 1
     want="$("${FS_TREE[@]}" identity "$TREE_HOST")" || exit 1
-    [ "$("${FS_TREE[@]}" installed "$TREE_MANIFESTS" "$TREE_NAME")" != "$want" ]
+    [ "$("${FS_TREE[@]}" installed "$TREE_MANIFESTS" "$TREE_NAME" "$TREE_GUEST")" != "$want" ]
 }
 
 seed_pending() {
@@ -787,7 +787,6 @@ install_base() {
         done
     fi
 
-    # The base's own app entries, which the dock reads with the apps tree's.
     mkdir_p /usr/share/slopos/apps
     mkdir_p /usr/share/slopos/icons
     for entry in "${REPO_ROOT}/assets/apps"/*.app; do
