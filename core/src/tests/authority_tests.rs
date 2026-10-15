@@ -222,6 +222,59 @@ slopos_testing::stest!(
     kind = Userland
 );
 
+/// An exec keeps a task's capabilities only for init re-executing the base's
+/// `/sbin/init` as its sole thread; every other exec drops them.
+fn only_init_reexecuting_itself_keeps_its_authority() -> TestResult {
+    use core::ffi::c_char;
+    use core::num::NonZeroU64;
+    use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
+    use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+    use slopos_ostd::process::Program;
+    use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
+
+    use crate::exec::{INIT_PATH, exec_keeps_authority};
+
+    let Some(init) = task_find_by_id(crate::exec::init_task_id()) else {
+        return fail!("init is not running in the userland phase");
+    };
+    let other_id = task_create(
+        b"NotInit\0".as_ptr() as *const c_char,
+        slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+        core::ptr::null_mut(),
+        1,
+        TASK_FLAG_USER_MODE,
+    );
+    let Some(other) = task_find_by_id(other_id) else {
+        return fail!("no test task");
+    };
+    let base = Program::Base(NonZeroU64::MIN);
+    let answers = [
+        exec_keeps_authority(&init, INIT_PATH, base, true),
+        exec_keeps_authority(&other, INIT_PATH, base, true),
+        exec_keeps_authority(&init, INIT_PATH, Program::Other, true),
+        exec_keeps_authority(&init, b"/sbin/privd", base, true),
+        exec_keeps_authority(&init, INIT_PATH, base, false),
+    ];
+    drop((init, other));
+    if other_id != INVALID_TASK_ID {
+        task_terminate(other_id);
+    }
+    if answers != [true, false, false, false, false] {
+        return fail!(
+            "exec kept authority for (init re-exec, another task, a program outside the \
+             base, another base program, a second thread): {:?}",
+            answers
+        );
+    }
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = only_init_reexecuting_itself_keeps_its_authority,
+    flags = 0,
+    kind = Userland
+);
+
 /// `BootEntry` adds to `Power`, under which the UEFI variable calls are
 /// classified, so the installer's role without `Power` reaches no variable.
 fn boot_entry_alone_reaches_no_variable() -> TestResult {

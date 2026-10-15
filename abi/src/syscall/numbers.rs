@@ -645,8 +645,10 @@ pub const SYSCALL_PERCPU_STATS: u64 = SYSCALL_PRIVATE_BASE + 5;
 ///
 /// The child begins with an empty fd table; the `SpawnAttrs` action list
 /// installs exactly the descriptors it inherits (`posix_spawn` file-actions).
-/// Linux leaves this to libc over `clone3`/`execveat`; here it is one call so
-/// nothing allocates between fork and exec.
+/// Under `SPAWN_SET_LOGIN`, `attrs` is a
+/// [`SpawnLoginAttrs`](crate::spawn::SpawnLoginAttrs). Linux leaves this to
+/// libc over `clone3`/`execveat`; here it is one call so nothing allocates
+/// between fork and exec.
 pub const SYSCALL_SPAWN_PATH: u64 = SYSCALL_PRIVATE_BASE + 6;
 
 /// `sigdefault(mask: SigSet)` — force every signal in the mask to `SIG_DFL`,

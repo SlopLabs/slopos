@@ -1313,3 +1313,100 @@ fn spawned_uids(program: &[u8], parent: &Principal) -> Option<[u32; 3]> {
         .ok()
         .map(|(_, [ruid, euid, suid, ..])| [ruid, euid, suid])
 }
+
+/// A login tag is a `SetId` holder's to give at spawn; spawn and fork
+/// otherwise pass the creator's on.
+pub fn test_a_login_tag_is_set_only_with_set_id() -> TestResult {
+    use crate::tests::helpers::install_static_program;
+
+    let _fixture = SyscallFixture::new();
+    let spin = join(b"spin");
+    assert_test!(
+        fixtures_root() && install_static_program(&spin, &[0xeb, 0xfe]),
+        "could not write the program"
+    );
+    let plain = Principal::user(0, CAP_UNIVERSAL);
+    let admin = Principal::user(0, CAP_UNIVERSAL | Capability::SetId.bit());
+    let outcome = match (&plain, &admin) {
+        (Some(plain), Some(admin)) => login_cases(&spin, plain, admin),
+        _ => Err("could not build the spawners"),
+    };
+    let _ = vfs_unlink(&spin);
+    match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+slopos_testing::stest!(
+    name = test_a_login_tag_is_set_only_with_set_id,
+    suite = cred
+);
+
+#[inline(never)]
+fn login_cases(spin: &[u8], plain: &Principal, admin: &Principal) -> Result<(), &'static str> {
+    use crate::exec::Delegation;
+
+    let tagged = Delegation {
+        login: Some(7),
+        ..Delegation::default()
+    };
+    if spawned_login(spin, plain, tagged) != Err(Errno::EPERM) {
+        return Err("a spawner without SetId set its child's login tag");
+    }
+    if spawned_login(spin, admin, tagged) != Ok(7) {
+        return Err("a SetId holder could not set its child's login tag");
+    }
+    plain
+        .task
+        .process()
+        .ok_or("the spawner has no process")?
+        .set_login(5);
+    if spawned_login(spin, plain, Delegation::default()) != Ok(5) {
+        return Err("a spawned child did not carry its spawner's login tag");
+    }
+    if forked_login(plain) != Some(5) {
+        return Err("a forked child did not carry its parent's login tag");
+    }
+    Ok(())
+}
+
+/// The login tag of a child `parent` spawns running `program`, which is then
+/// ended.
+#[inline(never)]
+fn spawned_login(
+    program: &[u8],
+    parent: &Principal,
+    delegation: crate::exec::Delegation<'_>,
+) -> Result<u32, Errno> {
+    let child_id = crate::exec::spawn_program_with_attrs(
+        program,
+        None,
+        None,
+        slopos_abi::task::TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        crate::exec::Endowment::Delegated(delegation),
+        &[],
+        0,
+        None,
+        parent.task.task_id,
+    )?;
+    let login = task_find_by_id(child_id)
+        .and_then(|child| child.process())
+        .map(|process| process.login());
+    task_terminate(child_id);
+    let _ = slopos_sched::task::task_consume_zombie(child_id);
+    login.ok_or(Errno::ESRCH)
+}
+
+#[inline(never)]
+fn forked_login(parent: &Principal) -> Option<u32> {
+    let child_id = slopos_sched::task::task_clone(&parent.task, None, 0, 0, 0, 0, 0).ok()?;
+    slopos_sched::task::task_set_state(child_id, slopos_abi::task::TaskStatus::Blocked);
+    let login = task_find_by_id(child_id)
+        .and_then(|child| child.process())
+        .map(|process| process.login());
+    task_terminate(child_id);
+    let _ = slopos_sched::task::task_consume_zombie(child_id);
+    login
+}

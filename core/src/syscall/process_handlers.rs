@@ -4,8 +4,8 @@ use slopos_abi::signal::{
     wait_status_signalled, wait_status_stopped,
 };
 use slopos_abi::spawn::{
-    SPAWN_MAX_FD_ACTIONS, SPAWN_SET_ALL, SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_UID,
-    SpawnAttrs, SpawnFdAction, SpawnFdActionKind,
+    SPAWN_MAX_FD_ACTIONS, SPAWN_SET_ALL, SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_LOGIN,
+    SPAWN_SET_UID, SpawnAttrs, SpawnFdAction, SpawnFdActionKind, SpawnLoginAttrs,
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, FUTEX_BITSET_MATCH_ANY, FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK,
@@ -267,6 +267,20 @@ fn spawn_id(attrs: &SpawnAttrs, which: u32, id: u32) -> Option<u32> {
     (attrs.set & which != 0).then_some(id)
 }
 
+/// The login tag past `attrs` at `attrs_ptr`, read only when asked for: a
+/// caller built against interface 1 passes no more than [`SpawnAttrs`].
+#[inline(never)]
+fn spawn_login(attrs: &SpawnAttrs, attrs_ptr: u64) -> Result<Option<u32>, Errno> {
+    if attrs.set & SPAWN_SET_LOGIN == 0 {
+        return Ok(None);
+    }
+    let at = attrs_ptr
+        .checked_add(core::mem::offset_of!(SpawnLoginAttrs, login) as u64)
+        .ok_or(Errno::EFAULT)?;
+    let user = MmUserPtr::<u32>::try_new(at).map_err(|_| Errno::EFAULT)?;
+    copy_from_user(user).map(Some).map_err(|_| Errno::EFAULT)
+}
+
 /// Stage the program path off the caller's buffer. Length-delimited rather
 /// than [`UserPath`], because the spawn ABI passes a length, not a NUL.
 /// `#[inline(never)]`: the handler's own frame is already at the 2 KiB gate.
@@ -362,6 +376,7 @@ define_syscall!(syscall_spawn_path
         priority,
         flags,
         &attrs,
+        attrs_ptr,
         groups.as_deref(),
         actions.as_slice(),
         child_cwd.as_bytes(),
@@ -384,10 +399,12 @@ fn spawn_as_asked(
     priority: TaskPriority,
     flags: u16,
     attrs: &SpawnAttrs,
+    attrs_ptr: u64,
     groups: Option<&[u32]>,
     actions: &[exec::FdAction],
     cwd: &[u8],
 ) -> Result<u32, Errno> {
+    let login = spawn_login(attrs, attrs_ptr)?;
     // The spawner's own table, so the child's fd actions clone from the process
     // that asked rather than from whoever holds its number by then.
     exec::spawn_program_with_cwd(
@@ -401,6 +418,7 @@ fn spawn_as_asked(
             uid: spawn_id(attrs, SPAWN_SET_UID, attrs.uid),
             gid: spawn_id(attrs, SPAWN_SET_GID, attrs.gid),
             groups,
+            login,
         }),
         actions,
         attrs.sigdefault_mask,
@@ -777,7 +795,10 @@ define_syscall!(syscall_execve
 
             // Here rather than in `do_exec`: past every fallible step, before
             // the new image's first instruction.
-            exec::drop_authority_for_exec(ctx.task(), task_id);
+            if !exec::exec_keeps_authority(ctx.task(), program.image.as_bytes(), loaded, attests)
+            {
+                exec::drop_authority_for_exec(ctx.task(), task_id);
+            }
             exec::save_ids_for_exec(ctx.task());
             exec::attest_exec(ctx.task(), loaded, attests);
 

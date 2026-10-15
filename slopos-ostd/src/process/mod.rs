@@ -127,6 +127,10 @@ pub struct Process {
     /// `Other` by an exec's reset and by code from outside the base.
     program: AtomicU64,
 
+    /// The login tag, 0 for none: copied from the creator, or set by a
+    /// spawner holding `SetId` before the process runs.
+    login: AtomicU32,
+
     /// This process's own existence, charged to its **spawner**.
     ///
     /// Released at the reap rather than at the final `Drop`, because the
@@ -166,6 +170,7 @@ impl Process {
             );
             write_field!(slot, cred, SeqLock::new(cred));
             write_field!(slot, program, AtomicU64::new(Program::Other.to_raw()));
+            write_field!(slot, login, AtomicU32::new(0));
             write_field!(slot, proc_charge, charge);
             Ok::<_, AllocError>(slot.finish())
         })
@@ -286,6 +291,17 @@ impl Process {
     #[inline]
     pub fn set_program(&self, program: Program) {
         self.program.store(program.to_raw(), Ordering::Release);
+    }
+
+    #[inline]
+    pub fn login(&self) -> u32 {
+        self.login.load(Ordering::Acquire)
+    }
+
+    /// Only before the process runs: its creator's tag, or a spawner's choice.
+    #[inline]
+    pub fn set_login(&self, login: u32) {
+        self.login.store(login, Ordering::Release);
     }
 
     /// Leave this process. Returns `true` if this was the last task.

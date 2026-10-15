@@ -492,7 +492,10 @@ define_syscall!(syscall_process_list
             slopos_kernel_services::clock::ticks_to_microseconds(task.total_runtime());
         entry.creation_time_ms = task.creation_time;
         entry.yield_count = task.yield_count();
-        entry.uid = task.process().map_or(0, |process| process.cred().euid);
+        if let Some(process) = task.process() {
+            entry.uid = process.cred().euid;
+            entry.login = process.login();
+        }
         entry.name = task.name.get();
         count += 1;
         ControlFlow::Continue(())

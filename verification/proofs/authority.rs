@@ -19,7 +19,11 @@
 //        are load-bearing: an exec that keeps the mask lets a privileged
 //        program's authority survive into an arbitrary binary, and one that
 //        hands the new image the universal set gives back what the task
-//        dropped.
+//        dropped. The one exec that keeps the mask is init re-executing the
+//        base's `/sbin/init` as its sole thread (`exec_keeps_authority`): it
+//        loads no program but init's own, so S1 still holds of it. The model
+//        takes that guard as given; `only_init_reexecuting_itself_keeps_its_
+//        authority` grades it.
 //   (S3) SPAWN BOUND. A spawn asking for `ask` is refused unless
 //        `ask ⊆ parent.caps`, and then hands over `(parent.caps & universal) |
 //        ask`, so a child holds nothing its spawner lacks and nothing gated it
@@ -112,6 +116,8 @@ pub enum Step {
     Drop(Caps),
     /// `execve`: the mask becomes `caps & universal`.
     Exec,
+    /// Init re-executing `/sbin/init`: the mask stays as it is.
+    Reexec,
     /// `fork`: the child is the same principal and copies the mask.
     Fork,
 }
@@ -123,6 +129,7 @@ pub open spec fn step(s: Auth, e: Step) -> Auth {
         // Total: an intersection, defined for every input, with no error case.
         Step::Drop(mask) => Auth { caps: s.caps & mask },
         Step::Exec => Auth { caps: s.caps & universal() },
+        Step::Reexec => s,
         Step::Fork => s,
     }
 }
@@ -142,6 +149,7 @@ pub proof fn no_step_widens(s: Auth, e: Step, b: Caps)
     let c = s.caps;
     match e {
         Step::Act => {},
+        Step::Reexec => {},
         Step::Fork => {},
         Step::Drop(mask) => {
             // Bound to locals: `by (bit_vector)` reasons over plain integers,

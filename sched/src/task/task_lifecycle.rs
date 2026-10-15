@@ -117,12 +117,20 @@ impl ProcessResourceLease {
     /// The accounting edge is the spawner's account, fixed here with no later
     /// opportunity to set it.
     fn mint_process(parent: Option<&Process>) -> Option<KArc<Process>> {
-        let (wait_parent, account_parent, cred) = match parent {
-            Some(parent) => (parent.handle(), parent.account(), parent.cred()),
-            None => (None, slopos_ostd::process::quota::root(), Cred::ROOT),
+        let (wait_parent, account_parent, cred, login) = match parent {
+            Some(parent) => (
+                parent.handle(),
+                parent.account(),
+                parent.cred(),
+                parent.login(),
+            ),
+            None => (None, slopos_ostd::process::quota::root(), Cred::ROOT, 0),
         };
         match process_spawn(wait_parent, account_parent, cred) {
-            Ok(process) => Some(process),
+            Ok(process) => {
+                process.set_login(login);
+                Some(process)
+            }
             Err(error) => {
                 klog_info!("task_create: process registration failed: {:?}", error);
                 None

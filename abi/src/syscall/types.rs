@@ -165,6 +165,8 @@ pub struct UserTaskEntry {
     pub priority: u8,
     pub last_cpu: u8,
     pub cpu_affinity: u32,
+    /// The login tag of the task's process, 0 for none.
+    pub login: u32,
     pub total_runtime_us: u64,
     pub creation_time_ms: u64,
     pub yield_count: u32,
@@ -172,6 +174,10 @@ pub struct UserTaskEntry {
     pub uid: u32,
     pub name: [u8; 32],
 }
+
+const _: () = assert!(core::mem::size_of::<UserTaskEntry>() == 80);
+const _: () = assert!(core::mem::offset_of!(UserTaskEntry, login) == 20);
+const _: () = assert!(core::mem::offset_of!(UserTaskEntry, total_runtime_us) == 24);
 
 /// CPU identification returned by SYSCALL_CPU_INFO.
 #[repr(C)]

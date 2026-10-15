@@ -295,13 +295,14 @@ pub enum Endowment<'a> {
 }
 
 /// What a spawner asks for its child: gated capabilities beside the universal
-/// ones it holds, and ids, `None` keeping its own.
+/// ones it holds, and ids and a login tag, `None` keeping its own.
 #[derive(Clone, Copy, Default)]
 pub struct Delegation<'a> {
     pub caps: u64,
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub groups: Option<&'a [u32]>,
+    pub login: Option<u32>,
 }
 
 impl Delegation<'_> {
@@ -343,10 +344,11 @@ impl<'a> Endowment<'a> {
             }
             Self::Delegated(ask) => ask,
         };
-        if ask.caps & !held != 0 {
+        let set_id = mask_permits(held, Capability::SetId);
+        if ask.caps & !held != 0 || ask.login.is_some() && !set_id {
             return Err(Errno::EPERM);
         }
-        let cred = ask.cred(spawner, mask_permits(held, Capability::SetId))?;
+        let cred = ask.cred(spawner, set_id)?;
         let caps = held & CAP_UNIVERSAL | ask.caps;
         let foreign_ids = [cred.ruid, cred.euid] != [spawner.ruid; 2]
             || [cred.rgid, cred.egid] != [spawner.rgid; 2];
@@ -365,6 +367,15 @@ impl Endowed<'_> {
         match self.endowment {
             Endowment::Kernel { uid, .. } => Ok(Cred::of(uid, uid)),
             Endowment::Delegated(ask) => ask.cred(spawner, true),
+        }
+    }
+
+    /// The child's login tag: the kernel's spawns carry none, a task's the
+    /// one it asked for or its own.
+    fn login(&self, spawner: u32) -> u32 {
+        match self.endowment {
+            Endowment::Kernel { .. } => 0,
+            Endowment::Delegated(ask) => ask.login.unwrap_or(spawner),
         }
     }
 }
@@ -452,10 +463,17 @@ pub fn spawn_program_with_cwd(
         // panic, a kill aborting the blocking calls — must release it here.
         let mut spawn = SpawnGuard::new(pending);
         let task_id = spawn.child_id();
+        let login = endowed.login(
+            parent_ref
+                .as_ref()
+                .and_then(|parent| parent.process())
+                .map_or(0, |process| process.login()),
+        );
         if spawn.with_child(|child| {
-            child
-                .process()
-                .map(|process| process.change_cred(|_| endowed.cred(&spawner.cred)))
+            child.process().map(|process| {
+                process.set_login(login);
+                process.change_cred(|_| endowed.cred(&spawner.cred))
+            })
         }) != Some(Some(Ok(())))
         {
             return Err(Errno::ENOMEM);
@@ -674,6 +692,19 @@ pub fn attest_exec(task: &slopos_sched::task_struct::Task, loaded: Program, atte
     if let Some(process) = task.process() {
         process.set_program(if attests { loaded } else { Program::Other });
     }
+}
+
+/// Whether an `execve` by `task` keeps its capabilities: init re-executing
+/// the base's `/sbin/init` as its process's sole thread, which loads no
+/// program but its own and so gains nothing it did not hold.
+#[inline(never)]
+pub fn exec_keeps_authority(
+    task: &slopos_sched::task_struct::Task,
+    image: &[u8],
+    loaded: Program,
+    attests: bool,
+) -> bool {
+    attests && task_is_init(task) && image == INIT_PATH && matches!(loaded, Program::Base(_))
 }
 
 /// `execve`'s half of [`Cred::saved_at_exec`].

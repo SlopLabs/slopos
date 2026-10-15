@@ -104,7 +104,22 @@ pub struct SpawnAttrs {
 pub const SPAWN_SET_UID: u32 = 1 << 0;
 pub const SPAWN_SET_GID: u32 = 1 << 1;
 pub const SPAWN_SET_GROUPS: u32 = 1 << 2;
-pub const SPAWN_SET_ALL: u32 = SPAWN_SET_UID | SPAWN_SET_GID | SPAWN_SET_GROUPS;
+/// The child takes [`SpawnLoginAttrs::login`], which takes `SetId`.
+pub const SPAWN_SET_LOGIN: u32 = 1 << 3;
+pub const SPAWN_SET_ALL: u32 = SPAWN_SET_UID | SPAWN_SET_GID | SPAWN_SET_GROUPS | SPAWN_SET_LOGIN;
+
+/// [`SpawnAttrs`] and the login tag a spawn reads after them under
+/// [`SPAWN_SET_LOGIN`]. Interface 1's attributes end where `login` begins, so a
+/// spawn that sets no tag passes [`SpawnAttrs`] alone.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SpawnLoginAttrs {
+    pub attrs: SpawnAttrs,
+    /// The login tag the child's process carries. Fork, spawn and exec pass a
+    /// process's tag on, and nothing changes it after.
+    pub login: u32,
+    pub _pad: u32,
+}
 
 impl SpawnAttrs {
     /// A spawn at `priority` with `flags` and nothing else: no fd actions, no
@@ -162,6 +177,9 @@ const _: () = assert!(core::mem::offset_of!(SpawnAttrs, gid) == 76);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, groups_ptr) == 80);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, ngroups) == 88);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, set) == 92);
+
+const _: () = assert!(core::mem::size_of::<SpawnLoginAttrs>() == 104);
+const _: () = assert!(core::mem::offset_of!(SpawnLoginAttrs, login) == 96);
 
 #[cfg(test)]
 mod tests {
