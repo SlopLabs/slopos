@@ -67,13 +67,23 @@ plans lands second re-baselines that step.
   a path through whatever `BASE_FS` is now
   (`core/src/syscall/net_handlers.rs:711-730`).
 - privd reads its policy and whether the base is paired once, at start
-  (`userland/src/apps/privd/mod.rs:82-88`).
+  (`userland/src/apps/privd/mod.rs:87-93`).
 
-**init starts everything once.**
-- The service table (`userland/src/apps/init_process.rs:46-79`) is spawned
-  once. Nothing restarts a service.
-- init hands its end of the consent pair to the compositor and drops it
-  (`:245-249`). After the compositor exits, init only reaps (`:280-285`).
+**init is a service manager (Phase 4).**
+- A single-threaded poll loop (`userland/src/apps/init/`) starts privd,
+  remoted and the desktop session again when they exit, at most five times in
+  any minute each. A test boot runs the tests in a copy of init and no session
+  until one is asked for or the tests fail.
+- The desktop's processes carry the login tag `DESKTOP`, remoted's `REMOTE`
+  and privd's `PRIVD` (`userland/src/init_control.rs`); a session ends by its
+  tag, and a privd started again takes no exclusive group while its
+  predecessor's mechanisms run.
+- `/run/init` takes `restart-session` (session, uid 0), `end-session` and
+  `reexec` (uid 0). Init re-executes keeping its pid, children, capabilities,
+  service table and descriptors (`init/reexec.rs`); nothing triggers it yet but
+  a request.
+- init keeps both ends of the consent pair; each new privd or compositor
+  resynchronises with `RESET`/`RESET_SEEN` (`priv-core/src/consent.rs`).
 
 **Programs outside the base (Phase 2).**
 - The editor, the file manager and the image viewer are `slopos-apps`
@@ -137,6 +147,9 @@ held the apps has none until a tree install (Phase 5).
 | systemd `soft-reboot` ([man](https://www.freedesktop.org/software/systemd/man/latest/systemd-soft-reboot.service.html)) | Userspace switches root without reinitialising the kernel | Not taken: it ends every process, which a mount switch does not need |
 | Haiku package activation ([infrastructure](https://www.haiku-os.org/docs/develop/packages/Infrastructure.html)) | Packages activate live; the last consistent state is recorded | "previous always holds the base that last ran" |
 | Linux audit session id, systemd login scopes | A login session is a tag every child inherits, not the POSIX session | The login tag that bounds a desktop session |
+| systemd `daemon-reexec` ([systemctl(1)](https://man7.org/linux/man-pages/man1/systemctl.1.html)) | PID 1 serializes its state into a memfd, clears close-on-exec on the descriptors the state names and executes itself again | init's re-exec: the state in a pipe, the descriptors it names kept |
+| systemd start limits and kill ([systemd.unit(5)](https://man7.org/linux/man-pages/man5/systemd.unit.5.html), [systemd.kill(5)](https://man7.org/linux/man-pages/man5/systemd.kill.5.html)) | A unit started too often in an interval stays failed until reset; a stop sends `SIGTERM`, then `SIGCONT`, then `SIGKILL` after a timeout | Five starts a minute; the session's end |
+| Redox init ([boot process](https://doc.redox-os.org/book/boot-process.html)) | Starts services in order and only reaps after | Not taken: a crashed service is started again |
 | Linux live USB, macOS Recovery | Booting recovery media is full power for whoever holds the machine | The rescue action, offered only on the medium |
 | Linux `check-uapi.sh` ([docs](https://docs.kernel.org/dev-tools/checkuapi.html)) | A gate compares the UAPI headers' ABI across commits with libabigail and fails an incompatible change | A gate over the private call surface; the tree records the surface's digest itself, so a shallow CI checkout can grade it without a base commit |
 | Linux vDSO `.note.Linux` ([glibc's use](https://www.spinics.net/lists/stable/msg443097.html)) | The kernel states its version in an ELF note that glibc reads without a syscall | The kernel states the base interfaces it serves in an ELF note, read from the file before booting it |
@@ -360,7 +373,7 @@ ships both actions without `BaseUpdate`, which Phase 5 adds.
   - **A session-bound service** stays. The compositor shows a notice offering
     a session restart, which the person may postpone.
   - **`/sbin/init`** re-executes itself and keeps its process. It passes its
-    service table and descriptors in a memfd.
+    service table and descriptors in a pipe.
 - **The consent pair outlives both of its users.** init keeps both ends for
   the boot and hands one to each privd and the other to each compositor
   instance. A new instance sends `Reset` first, and the other side drops what
@@ -376,8 +389,9 @@ ships both actions without `BaseUpdate`, which Phase 5 adds.
     end;
   - remoted and what it runs carry their own tag and survive.
 - **`/run/init`** accepts `restart-session` from the session uid and from uid
-  0, judged by `SO_PEERCRED`. The compositor's system menu and the base
-  program `/bin/session restart` send it.
+  0, and `end-session` and `reexec` from uid 0, judged by `SO_PEERCRED`. The
+  compositor's system menu and the base program `/bin/session restart` send
+  the first.
 
 ### Rescue on the install medium
 
@@ -506,21 +520,38 @@ its own.
   reinstall keeping the root and removing a per-slot base) and `test-remote`
   (a new base and kernel installed as the paired agent).
 
-### Phase 4: init as a service manager
+### Phase 4: init as a service manager — done
 
-The service table with crash restarts, the login tag, `/run/init`, ending and
-restarting the session, the consent pair kept by init with `Reset`, init's
-re-exec, and `/bin/session`. A dead compositor's seats are revoked by the
-exit path's cleanup hooks after its parent is woken (Phase 1's
-`protocol_test` waits for the seat), so a restarted compositor waits for its
-seat rather than coming up without one.
-
-Graded by:
-- kernel tests of the login tag: inherited, and set only with `SetId`;
-- a root test that kills privd and finds a new one serving;
-- a root test that restarts the session and finds remoted's tagged process
-  alive;
-- `privd_test` asking for consent across a compositor restart.
+- **Kernel.** A process carries a login tag (`Process::login`) that fork,
+  spawn and exec pass on and that a `SetId` holder sets at spawn through
+  `SpawnLoginAttrs`; `process_list` reports it. Init's exec of the base's
+  `/sbin/init` as its sole thread keeps its capabilities
+  (`exec::exec_keeps_authority`), the authority proof's `Reexec` step, whose
+  guard a kernel test grades. Base interface 2, minimum still 1. A
+  `recvmsg` that finds no bytes no longer takes, and drops, descriptors sent
+  with bytes that land under it.
+- **init** (`userland/src/apps/init/`): the service table with rate-limited
+  restarts, the session's start, end (`SIGTERM`+`SIGCONT`, `SIGKILL` at 5 s,
+  given up at 10 s) and restart, `/run/init`, re-exec through a pipe, and the
+  test runner as `/sbin/init --run-tests`. `/bin/session restart|end`, and a
+  system menu under the bar's icon with "Restart session".
+- **Consent across restarts**: `consent::Link`'s `RESET`/`RESET_SEEN`,
+  `READY` as a one-question credit, `Refusal::Interrupted`, init resetting
+  for a side that exited and discarding what is written to one not running,
+  and the compositor reading the channel through a oneshot poll. A privd
+  started again refuses exclusive actions while its predecessor's mechanisms
+  run. The compositor waits up to five seconds for seats a predecessor's exit
+  still holds; `elevate` waits two seconds for a privd being started again.
+- Graded by the kernel's `test_a_login_tag_is_set_only_with_set_id` (spawn
+  and fork) and `only_init_reexecuting_itself_keeps_its_authority`,
+  `spawn_privilege_test` (a tag through spawn, fork and exec; refused without
+  `SetId`), `supervision_test` (re-exec keeps privd; a
+  killed privd is replaced by one that serves; strangers and the session are
+  refused what is uid 0's, and a session uid 0 ended; a session restart ends
+  the desktop's tagged process, spares remoted's, starts a new session),
+  `privd_test` (asked; a question on screen interrupted when the session ends,
+  with nobody left to ask; asked again once it restarts) and `priv-core`'s
+  host tests of the handshake and credits.
 
 ### Phase 5: Live activation
 
@@ -765,6 +796,77 @@ Graded by:
   reused or zero surface id is `MalformedMessage` and a full surface table
   `BufferFull`, as Wayland makes a protocol error and running out of memory
   fatal. A client never has to tell a fatal error from a recoverable one.
+- **A login tag names a role, not an instance.** The desktop is always
+  `DESKTOP` and remoted `REMOTE`, so every restart ends every process the
+  desktop ever started, a straggler from an earlier session included. Only a
+  `SetId` holder sets one, at spawn; nothing changes a process's tag after,
+  as Linux's audit session id is set once at login.
+- **The tag joined the private surface compatibly.** `UserTaskEntry.login`
+  sits in what was padding and `SpawnLoginAttrs` is read past `SpawnAttrs` only
+  under `SPAWN_SET_LOGIN`, so a kernel serving interface 2 still serves 1.
+- **Init alone keeps its capabilities across an exec,** and only re-executing
+  the base's `/sbin/init` as its sole thread. The exec rule is otherwise
+  unchanged; this is the authority proof's one exception to S2.
+- **A compositor that exits takes its session with it.** Its clients lost
+  their surfaces anyway, so init ends what carries the desktop's tag and starts
+  the session again, which the five-a-minute limit bounds. Any
+  `restart-session` clears that limit; nothing else does.
+- **A start limit delays, never gives up.** Past five starts in a minute the
+  next waits until the minute allows it, so a service that crashes on a
+  transient fault comes back without anyone asking.
+- **A restarted privd refuses exclusive actions while its predecessor's
+  mechanisms run.** They carry the tag `PRIVD`, and it notes the ones alive
+  when it starts: it cannot know which groups they hold, and two writers of
+  one boot partition is the failure. Waiting for them to end instead would
+  let one stuck mechanism keep privd, reboot included, down for the boot.
+- **uid 0's `end-session` holds.** The session cannot restart a session uid
+  0 ended; only uid 0's `restart-session` or a failed test run starts it
+  again, and no number of the session's requests waiting crowds uid 0's out.
+- **Init's state crosses an exec in a pipe,** not a mapped file: under 4 KiB,
+  written before the exec, it cannot fail to be read. Its first line names
+  the descriptors kept, in a form every version reads, so an image that
+  cannot read the rest, as a newer init's may not be, closes them, adopts
+  the privd and remoted among its children, starts the session again and runs
+  without consent until the next boot.
+- **A session end is a scan, not an atomic kill.** Init signals what carries
+  the tag, again each pass, so a process forking faster than that can outlast
+  the ten seconds; the requester is told how many did. A kernel kill by tag,
+  as a cgroup's `cgroup.kill` is, would close it.
+- **Init answers a session request once it is done.** `end-session` returns
+  when the session's processes are gone, `restart-session` likewise (its
+  requester is usually among them), and `reexec` from the new image, which
+  gets the request's descriptor in its state. Re-exec is refused while a
+  session starts or ends, whose timers and ready pipe the state does not carry.
+- **The consent pair is resynchronised, never re-made.** A new instance's
+  `RESET` names a fresh epoch and it acts only after `RESET_SEEN` names it
+  back, so nothing written for a predecessor is read as its own — above all no
+  answer to a question with the same id. A `RESET` interrupts every pending
+  question rather than re-asking it. privd sends a question only on a `READY`
+  sent since the last, which bounds what one side ever has unread to one
+  question and one cancel: every send fits the socket's buffer whole, so the
+  stream is never left torn by a side that exits mid-frame. Init discards
+  what is written to a side that is not running, so nothing piles up for its
+  next instance; that may discard a peer's own `RESET`, so a side whose
+  `RESET` is unanswered sends it again with each `RESET_SEEN`, and a `RESET`
+  heard again from the same epoch is only acknowledged, or each copy would
+  grant privd another `READY`.
+- **Init speaks for a side that exited.** It writes a `RESET` toward the
+  survivor, so privd refuses at once what a dead compositor was showing and a
+  compositor drops what a dead privd asked. It is the only consent frame init
+  writes.
+- **A reader that must not miss a frame polls oneshot.** The ring's multishot
+  `OP_POLL_ADD` posts only when readiness changes between two of the reader's
+  own harvests, so bytes landing after a drain and before its next
+  `ring_enter` wake nothing. The compositor's consent task re-arms a oneshot
+  after each read, as the runtime's wakeup pipe does; its protocol client
+  tasks and the net monitor still stream a multishot and can stall the same
+  way until the kernel re-fires a row whose file was woken since its last
+  completion.
+- **The test runner is a copy of init.** `run_userland_tests` runs in
+  `/sbin/init --run-tests`, holding `TestHarness` alone, so init supervises
+  while the suite runs and a test can kill privd or restart the session.
+- **`elevate` waits for a restarting privd** two seconds, from Phase 4 on,
+  since a crash restart leaves the same window a base switch will.
 
 ## Constraints
 

@@ -1485,12 +1485,14 @@ for ids other than the
 spawner's takes `SetId`, one at the `High` tier `SchedHigh`, and a child that
 holds a gated capability or runs with ids other than its spawner's real ones
 starts `AT_SECURE`. Init holds `CAP_MASK_ALL` and delegates each service what
-its bootstrap table names (`userland/src/apps/init_process.rs`); a utest
+its service table names (`userland/src/apps/init/service.rs`); a utest
 holds what its `utest!` declares, every capability as uid 0 unless it says
 `caps = …, uid = …`. exec keeps `caps & universal` in every thread of the
 process, so nothing a spawn handed over survives an exec, as Linux keeps no
 capability across one for a process that is not root and has no file
-capabilities or ambient set; a sender
+capabilities or ambient set; the one exec that keeps the mask is init's own
+re-execution of the base's `/sbin/init` as its sole thread
+(`exec::exec_keeps_authority`), which loads no other program; a sender
 may signal only a target whose
 capabilities it all holds, and `caps_drop` takes capabilities from a whole
 process for good, a thread whose clone races it included. A nice value below
@@ -1512,7 +1514,12 @@ set-ID bits. `DacOverride` passes every mode check and lets `chown` name any
 owner; uid 0 passes nothing on its own. A signal also needs the sender's real
 or effective uid to be the target's real or saved uid; `ProcSignal` waives both
 halves, and `SIGCONT` to a task of the sender's session needs neither.
-`process_list` reports every task to everyone. The ext4 reserve is the
+`process_list` reports every task to everyone, with its process's login tag:
+a number fork, spawn and exec pass on and that only a `SetId` holder sets, at
+spawn (`SpawnLoginAttrs`, under `SPAWN_SET_LOGIN`), as Linux's audit session
+id is inherited and set once at login. Init gives the desktop session one
+(`init_control::DESKTOP`) and remoted another (`REMOTE`), so a session's
+processes are found, and ended, whatever uid they run as. The ext4 reserve is the
 superblock's `s_def_resuid` and `s_def_resgid`, uid 0's. A pty's slave
 belongs to whoever opened its master, mode 0620, as Linux's devpts gives it,
 judged on the slave an open takes. An `AF_UNIX` name is an inode of type
@@ -1542,6 +1549,41 @@ without the record, hands the session its trees and writes the record
 (`userland/src/root_layout.rs`), so a root that ran everything as uid 0 is
 migrated in place. `check_fs_image.sh --map`, the default for the tests
 image, holds a root to it.
+
+**Init keeps the services running.** It starts privd and waits for it,
+remoted where the base is paired, and the desktop session — the compositor,
+then the terminal once the compositor is ready or a minute has passed — and
+starts privd, remoted or the session again when one exits, at most five times
+in any minute each, as systemd's start limit counts them, the next start
+waiting until the minute allows it (`userland/src/apps/init/`). A privd
+started again takes no exclusive group while what its predecessor started and
+was running when it started runs, since it cannot know which they hold. A dead compositor's
+seats are revoked by its exit's cleanup hooks, after init is woken, so the
+next compositor waits up to five seconds for them. Init is single-threaded,
+waiting on a poll of pidfds, its ready pipes, the consent ends of sides not
+running and `/run/init`. The session
+ends as systemd's `KillMode` stops a unit: `SIGTERM` and `SIGCONT` to every
+live process carrying the desktop's login tag, again to each one forked since,
+`SIGKILL` to all after five seconds, given up on after ten, so remoted's
+processes, privd's mechanisms and anything else the session did not start
+survive it. A process that forks faster than init signals can outlast the
+ten seconds, and the request that asked is answered with how many did.
+`/run/init` (mode 0666) takes one line per connection, judged by
+`SO_PEERCRED`, four connections waiting per uid: `restart-session` from the
+session or uid 0, which `/bin/session restart` and the compositor's system
+menu send, and `end-session` and `reexec` from uid 0, as privd's `root`
+principal is, since `SO_PEERCRED` names no capability; each is answered once
+done, eight at most waiting on the session but uid 0's, and a session uid 0
+ended stays down until uid 0 restarts it or a test run fails. Init re-executes `/sbin/init
+--resume <fd>`, as systemd's `daemon-reexec` does, carrying its service table
+and budgets, the consent pair, its listener and the request in a pipe, and
+keeps its pid, its children and its capabilities; an image that cannot read
+the state closes the descriptors its first line names, adopts the privd and
+remoted among its children, starts the session again, and runs without consent
+until the next boot. A test boot runs the userland tests in a
+copy of init (`/sbin/init --run-tests`, holding `TestHarness`), so init serves
+while they run, and starts no session until one is asked for or the tests
+fail.
 
 **A peer is told who connected, as of when it connected.** An `AF_UNIX`
 socket records an `Identity` (`slopos_ostd::process::identity`: the pid
@@ -1596,9 +1638,20 @@ through the connection it inherited (`PRIVD_FD`, held to being the real
 privd's) or a fresh one and exits with the mechanism's status, relaying a
 terminal's output and, for the installer, its lines of input through pipes,
 since the mechanism runs in another session; started by privd, a mechanism acts
-only for the action `PRIV_ACTION` names. Consent travels a socket pair init
-makes and hands privd and the compositor (fd 4 in each), each of which refuses
-a pair init did not make. The compositor draws one question at a time over
+only for the action `PRIV_ACTION` names; while init starts privd again, a
+fresh request waits two seconds for it to listen. Consent travels a socket pair
+init makes and keeps for the boot, handing one end to each privd and the other
+to each compositor (fd 4 in each), each of which refuses a pair init did not
+make. Init holds both ends, so neither reads end of file when the other side exits,
+and each new instance first sends
+`RESET` naming an epoch of its own and acts on nothing until a `RESET_SEEN`
+naming it comes back (`consent::Link`), sending the `RESET` again with each
+`RESET_SEEN` it writes until then; a side that reads a new `RESET` drops what it
+had pending — privd interrupts every question — and init sends one on behalf
+of a side that exited, and discards what is written to a side not running.
+privd puts a question to the compositor only after a `READY` sent since the
+last, so one question at most is in flight and no frame is ever left torn in
+the pair's buffer. The compositor draws one question at a time over
 every surface, the whole command line and its directory wrapped (privd asks
 about neither past 320 escaped bytes), Deny focused, Allow by a click or by
 Tab, Left or Right and then Enter, input ignored for 750 ms after the frame

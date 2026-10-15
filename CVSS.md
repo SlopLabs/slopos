@@ -2,6 +2,42 @@
 
 **No finding is open.**
 
+Swept 2026-10-15: init as a service manager — the login tag a `SetId`
+holder sets at spawn under `SPAWN_SET_LOGIN` and `process_list` reports;
+init's exec of the base's `/sbin/init` keeping its capabilities; `/run/init`,
+mode 0666, judged by `SO_PEERCRED`; the session ended by its tag; init
+re-executing with the descriptors it keeps across the exec; privd started
+again after a crash; and the consent pair init keeps across restarts of either
+side. Reviews found, before it landed, that a privd started again did not know
+the exclusive groups its predecessor's mechanisms held, so two could write one
+boot partition; that a flood of connections to `/run/init` could hold init
+accepting or crowd uid 0's requests out; that the session could start again a
+session uid 0 had ended; that a session forking in a loop outlived its end
+while the requester was told it had ended; that an image unable to read its
+state started a second privd and left the descriptors it was handed open;
+that the compositor's multishot poll could miss a consent frame, after which
+no question reached the person until the compositor restarted; and that
+`recvmsg` could drop the descriptors a concurrent send had just queued, so a
+request reached privd without them. Now a privd started again takes no
+exclusive group while what its predecessor started still runs; init takes
+sixteen connections a pass, four waiting per uid, and never refuses uid 0's
+for the queue; uid 0's end holds until uid 0 restarts the session; the end
+signals each pass and answers with how many processes outlived it; an image
+that cannot resume closes what the state named and keeps the privd that
+listens; the compositor re-arms a oneshot poll; and a read that finds no
+bytes takes only descriptors sent without any, reading again when bytes
+arrive under it. Below the bar: only init holds `SetId`, so only init tags a
+process, and a tag cannot be shed, so a session program cannot leave its
+session's end, though one forking faster than init signals outlasts it and is
+reported; the session may restart itself as often as it likes, which ends only
+its own processes; a mechanism an earlier privd started that never ends keeps
+the boot slots' actions refused until a reboot, which takes no exclusive
+group; the compositor's protocol client tasks still stream a multishot
+poll and can stall the same way the consent task did; and a `recvmsg` drains
+every queued descriptor, dropping those past `SCM_MAX_FDS` and handing one
+whose bytes arrive during the read to the bytes that read took, which costs a
+sender only its own messages.
+
 Swept 2026-10-15: the bases beside the slots — the kernel choosing between
 the `initramfs` and `initramfs-previous` modules by the interface each names
 against the range its ELF note serves, and giving the other's pages to the

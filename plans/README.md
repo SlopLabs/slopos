@@ -91,7 +91,7 @@ the compositor can draw. Read the code rather than a document:
 `slopos-ostd/src/process/cred.rs` and `fs/src/vfs/perm.rs` for credentials and
 DAC, `slopos-ostd/src/process/identity.rs` for peer and program identity,
 `priv-core` and `assets/privd/actions` for the policy, `userland/src/apps/privd/`
-for the broker, and `userland/src/apps/init_process.rs` for who starts holding
+for the broker, and `userland/src/apps/init/service.rs` for who starts holding
 what. `AGENTS.md`'s authority discipline states the invariants.
 
 ## When To Promote A Plan

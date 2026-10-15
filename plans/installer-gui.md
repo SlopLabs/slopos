@@ -93,7 +93,7 @@ renamed, and the firmware entry comes last.
 
 **The live desktop.**
 - init starts the compositor and then the terminal; nothing knows it is live
-  (`userland/src/apps/init_process.rs:90-170`).
+  (`userland/src/apps/init/`).
 - The dock pins five programs (`userland/src/apps/compositor/dock.rs:135-177`).
 
 **appkit is Elm-shaped and close to enough.**
