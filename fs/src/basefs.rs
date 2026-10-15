@@ -1,5 +1,5 @@
-//! The boot slot's base: a read-only filesystem over the `newc` archive the
-//! boot module carries, served where it lies. A file's bytes are a slice of
+//! The booted base: a read-only filesystem over the `newc` archive of the
+//! boot module the kernel chose, served where it lies. A file's bytes are a slice of
 //! the module, which the loader keeps mapped for the kernel's lifetime, so
 //! the base costs an index and no copy. The install medium is a second
 //! instance, over the `install` module.
@@ -275,14 +275,14 @@ pub struct BaseFs {
     index: OnceLock<Index>,
 }
 
-/// The base the boot module carries, indexed by [`BaseFs::install`].
+/// The booted base, indexed by [`BaseFs::install`].
 pub static BASE_FS: BaseFs = BaseFs::new();
 
 /// The install medium: the `install` module's archive, beside the kernel and
 /// the base the loader booted.
 pub static MEDIUM_FS: BaseFs = BaseFs::new();
 
-/// Whether `fs` is the boot slot's base, which is reachable only at the
+/// Whether `fs` is the booted base, which is reachable only at the
 /// `BASE_DIRS` it is mounted on.
 pub fn is_base(fs: &dyn FileSystem) -> bool {
     crate::vfs::traits::same_filesystem(fs, &BASE_FS)

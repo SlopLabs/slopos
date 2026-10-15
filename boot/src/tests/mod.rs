@@ -1,4 +1,5 @@
 pub mod abort_core_tests;
+pub mod base_tests;
 pub mod gdt_tests;
 pub mod ist_premap_tests;
 pub mod panic_recovery_tests;

@@ -190,7 +190,7 @@ _fs-image-tests: _build-userland-tests
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
 # `VERITY=rw`: writable, and attested wherever no boot rewrote a block. The
-# system is the boot slot's base, mounted over the root's base directories; the
+# system is the booted base, mounted over the root's base directories; the
 # toolchain at /usr/local is the host's, replaced when it changes; the clone at
 # /src/slopos is the guest's once seeded, so it is staged only for a root
 # without one.
@@ -449,30 +449,57 @@ boot-debug:
 boot-live: iso
     just _qemu-boot "interactive" "${VIDEO:-1}" {{iso}} {{fs_image}} QEMU_NO_ROOT_DISK=1 {{net_env}}
 
-[doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics and one that aborts, each leaving its crash record, across the reboots of one QEMU, with the ESP untouched")]
+[doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics and one that aborts, each leaving its crash record; then install a base and roll it back, and install one the kernel does not serve, which it passes over for the previous; across the reboots of one QEMU, with the ESP untouched")]
 test-install:
     #!/usr/bin/env bash
     set -euo pipefail
-    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*install*" BOOTDISK_PANIC_ENTRY=1 \
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*install*,*base_tests*" BOOTDISK_PANIC_ENTRY=1 \
         BOOTDISK_ROOT_IMAGE={{fs_image_tests}} just _boot-disk
     . scripts/lib/bootdisk.sh
     bootdisk_layout
     esp="$(bootdisk_partition_sha256 {{boot_disk}} "$ESP_TYPE")"
     log="{{build_dir}}/install.log"
     rc=0
-    # `bootctl clone` holds a slot's tests kernel and base in memory at once.
-    # The root is the boot disk's own partition, as on bare metal.
-    timeout "${INSTALL_TIMEOUT_SECS:-900}" \
+    # A base install holds the tests base three times over, beside the one
+    # the test repacks in /tmp. The root is the boot disk's own partition, as
+    # on bare metal.
+    timeout "${INSTALL_TIMEOUT_SECS:-1800}" \
         just _qemu-boot "test" "0" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} \
-        QEMU_NO_ROOT_DISK=1 QEMU_MEM=1G >"$log" 2>&1 || rc=$?
+        QEMU_NO_ROOT_DISK=1 QEMU_MEM=2G >"$log" 2>&1 || rc=$?
     missing=0
     entry="$(grep -aoE 'INSTALL-FIRMWARE-ENTRY Boot[0-9A-F]{4}' "$log" | head -n1 | cut -d' ' -f2 || true)"
     for marker in "INSTALL-FIRMWARE-ENTRY ${entry:-Boot????} first" "INSTALL-STAGE 1: rebooting into slopos-b" \
         "INSTALL-THROUGH $entry at stage 1" "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" \
         "INSTALL-THROUGH $entry at stage 2" "INSTALL-CRASH-RECORD /var/log/crash/" "INSTALL-STAGE 3: rebooting into slopos-abort" \
-        "crash record: written" "INSTALL-THROUGH $entry at stage 3" "ok 1 - boot_slot_install_commit_rollback"; do
+        "crash record: written" "INSTALL-THROUGH $entry at stage 3" "INSTALL-BASE-INSTALLED install-test-base-b" \
+        "INSTALL-STAGE 4: rebooting into the default" "INSTALL-BASES at stage 4" "INSTALL-STAGE 5: rebooting into the default" \
+        "INSTALL-BASE-INSTALLED install-test-base-c" "INSTALL-STAGE 6: rebooting into the default" \
+        "BOOT: base previous (" "INSTALL-PASSED-OVER install-test-base-c" "INSTALL-REFUSED a kernel" \
+        "INSTALL-REFUSED a base" \
+        "not booted; its memory goes to the allocator" "KiB of the unused base are usable" \
+        "ok 1 - boot_slot_install_commit_rollback"; do
         grep -aqF "$marker" "$log" || { echo "FAIL: '$marker' not in $log" >&2; missing=1; }
     done
+    grep -aqE "ok [0-9]+ - [^ ]*test_base_unused_pages_are_usable_memory" "$log" ||
+        { echo "FAIL: no boot graded the unused base's pages; see $log" >&2; missing=1; }
+    window="$(bootdisk_partition {{boot_disk}} "$BOOT_TYPE")"
+    read -r boot_at _ <<<"$window"
+    export MTOOLS_SKIP_CHECK=1
+    for slot in $SLOTS bad abort; do
+        [ "$(mdir -b -i "{{boot_disk}}@@$boot_at" "::$SLOTS_DIR/$slot" | sed 's|.*/||')" = "$KERNEL_FILE" ] ||
+            { echo "FAIL: $SLOTS_DIR/$slot holds more than its kernel" >&2; missing=1; }
+    done
+    bases="{{build_dir}}/install-bases"
+    mkdir -p "$bases"
+    for base in "$BASE_CURRENT" "$BASE_PREVIOUS"; do
+        mcopy -o -i "{{boot_disk}}@@$boot_at" "::$base" "$bases/${base##*/}"
+        "$(bootdisk_tool)" base "$bases/${base##*/}" >/dev/null || missing=1
+    done
+    cmp -s "$bases/current.img" {{initramfs_tests}} ||
+        { echo "FAIL: the last rollback left $BASE_CURRENT other than the base the disk was built with" >&2; missing=1; }
+    grep -qx "build-tag install-test-base-d" < <("$(bootdisk_tool)" base "$bases/previous.img") ||
+        { echo "FAIL: $BASE_PREVIOUS is not the base the last rollback replaced" >&2; missing=1; }
+    rm -rf "$bases"
     grep -aqE "crash record: [0-9]+ written to nvme[0-9]+n[0-9]+p[0-9]+ slot [0-9]+" "$log" ||
         { echo "FAIL: the panic wrote no crash record; see $log" >&2; missing=1; }
     grep -aq "not ok" "$log" && { echo "FAIL: a test failed; see $log" >&2; missing=1; }
@@ -484,9 +511,9 @@ test-install:
     dd if={{boot_disk}} of="$root" bs=1M iflag=skip_bytes,count_bytes skip="$start" count="$size" conv=sparse status=none
     scripts/check_fs_image.sh --map "$root" || missing=1
     [ "$missing" = 0 ] || exit 1
-    echo "test-install: registered, installed, tried, committed and rolled back with the ESP untouched (qemu rc=$rc); log in $log"
+    echo "test-install: registered, installed, tried, committed and rolled back a kernel and a base, with the ESP untouched (qemu rc=$rc); log in $log"
 
-[doc("Guest install check: the guest takes HEAD over git, builds its kernel and base on the self-hosting root, installs them into slot b and boots them; that system pushes a commit the host fetches; then it commits the slot and rolls back a slot that panics")]
+[doc("Guest install check: the guest takes HEAD over git, builds its kernel and base on the self-hosting root, installs the base as the one every slot boots and the kernel into slot b, and boots them; that system pushes a commit the host fetches; then it commits the slot and rolls back a slot that panics")]
 test-install-guest:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -538,17 +565,17 @@ test-install-guest:
     window="$(bootdisk_partition {{boot_disk}} "$BOOT_TYPE")"
     read -r boot_at _ <<<"$window"
     mcopy -o -i "{{boot_disk}}@@$boot_at" "::$SLOTS_DIR/b/$KERNEL_FILE" "$guest/slot-b.elf"
-    mcopy -o -i "{{boot_disk}}@@$boot_at" "::$SLOTS_DIR/b/$BASE_FILE" "$guest/slot-b.cpio"
+    mcopy -o -i "{{boot_disk}}@@$boot_at" "::$BASE_CURRENT" "$guest/current.cpio"
     cmp "$guest/installed.elf" "$guest/slot-b.elf" ||
         { echo "FAIL: slot b does not hold the kernel the guest built" >&2; exit 1; }
-    cmp "$guest/installed.cpio" "$guest/slot-b.cpio" ||
-        { echo "FAIL: slot b does not hold the base the guest built" >&2; exit 1; }
+    cmp "$guest/installed.cpio" "$guest/current.cpio" ||
+        { echo "FAIL: $BASE_CURRENT is not the base the guest built" >&2; exit 1; }
     size="$(stat -c %s "$guest/installed.elf")"
     grep -qF "($size bytes)" <<<"$booted" ||
         { echo "FAIL: the booted kernel's size is not the guest build's $size bytes: $booted" >&2; exit 1; }
     base_size="$(stat -c %s "$guest/installed.cpio")"
-    grep -aqE "BOOT: base .*/boot/b/base.img \($base_size bytes\)" "$log" ||
-        { echo "FAIL: no boot of /boot/b/base.img reports the guest build's $base_size bytes" >&2; exit 1; }
+    grep -aqF "BOOT: base current ($base_size bytes)" "$log" ||
+        { echo "FAIL: no boot of $BASE_CURRENT reports the guest build's $base_size bytes" >&2; exit 1; }
     echo "test-install-guest: the guest built $head as $tag (kernel $size bytes, base $base_size bytes), booted it from slot b, pushed $pushed, committed the slot and rolled back a panicking slot (qemu rc=$rc); log in $log"
 
 # Each disk: a QEMU on the NV-varstore OVMF with the medium on a USB stick
@@ -631,9 +658,23 @@ test-installer *DISKS:
         done
         return "$ok"
     }
+    check_boot_layout() {
+        local image="$1" disk="$2" slot base ok=0
+        for slot in $SLOTS; do
+            [ "$(MTOOLS_SKIP_CHECK=1 mdir -b -i "$image" "::$SLOTS_DIR/$slot" | sed 's|.*/||')" = "$KERNEL_FILE" ] ||
+                { echo "FAIL: $SLOTS_DIR/$slot on $disk holds more than its kernel" >&2; ok=1; }
+        done
+        for base in "$BASE_CURRENT" "$BASE_PREVIOUS"; do
+            MTOOLS_SKIP_CHECK=1 mcopy -o -i "$image" "::$base" "$image.base" &&
+                "$(bootdisk_tool)" base "$image.base" >/dev/null ||
+                { echo "FAIL: $base on $disk is no base" >&2; ok=1; }
+        done
+        rm -f "$image.base"
+        return "$ok"
+    }
     # The table whole, every FAT volume SlopOS wrote clean, the ESP carrying
-    # Limine's notices, and the root clean, at rest and with the base's mount
-    # points sealed.
+    # Limine's notices, the boot partition in the layout, and the root clean,
+    # at rest and with the base's mount points sealed.
     check_disk() {
         local disk="$1" kind="$2" window start size image type dir flags said ok=0
         said="$(sfdisk --verify "$disk" 2>&1)" && grep -qF "No errors detected" <<<"$said" ||
@@ -649,6 +690,7 @@ test-installer *DISKS:
                 fsck.fat -n "$image" >/dev/null 2>&1 ||
                     { echo "FAIL: fsck.fat finds the $type volume on $disk wrong" >&2; ok=1; }
                 [ "$type" != "$ESP_TYPE" ] || check_limine_notices "$image" "$disk" || ok=1
+                [ "$type" != "$BOOT_TYPE" ] || check_boot_layout "$image" "$disk" || ok=1
                 continue
             fi
             scripts/check_fs_image.sh --map "$image" || ok=1
@@ -744,7 +786,7 @@ test-installer *DISKS:
             [ "$built" = 0 ] || budget=28800
             markers=("INSTALLER-BOOTED slopos-a" "INSTALLER-STAGE 2: rebooting into slopos-b"
                 "INSTALLER-COMMITTED slopos-b" "ok 1 - installed_built_and_committed")
-            [ "$built" = 0 ] || markers+=("INSTALLER-BUILT guest-" "INSTALLER-RUNS ")
+            [ "$built" = 0 ] || markers+=("INSTALLER-BUILT guest-" "INSTALLER-RUNS " "INSTALLER-RUNS-BASE guest-")
             [ "$kind" != foreign ] || markers+=("INSTALLER-FOREIGN-KEPT")
             boot_once "$logs-boot.log" "${INSTALLER_BOOT_TIMEOUT_SECS:-$budget}" "" "${markers[@]}" || missing=1
             [ "$built" = 1 ] || ! grep -aqF "INSTALLER-BUILT" "$logs-boot.log" ||
@@ -757,6 +799,8 @@ test-installer *DISKS:
             # from its boot menu, which a fresh varstore stands in for.
             rm -f "$vars"
             markers=("INSTALLER-NOT-OFFERED /dev/sda: write-protected"
+                "INSTALLER-LEFT-SLOT-BASE /boot/a/base.img"
+                "removed /boot/a/base.img, a base the disk kept per slot"
                 "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed"
                 "installed the apps at /usr/local")
             [ "$payload" = 0 ] ||
@@ -1142,7 +1186,7 @@ remote-serve *ARGS: (_kernel "release")
         --offer base={{initramfs_remote}} "$@"
 
 [positional-arguments]
-[doc("Build the release kernel and a base paired with the broker under a fresh SLOPOS_BUILD_TAG, install them into the paired machine's spare slot, boot it once and wait for it to come back with that tag; --commit then makes it the default")]
+[doc("Build the release kernel and a base paired with the broker under a fresh SLOPOS_BUILD_TAG, install the base and put the kernel into the paired machine's spare slot, boot it once and wait for it to come back with that tag; --commit then makes it the default")]
 remote-install *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1153,7 +1197,7 @@ remote-install *ARGS:
     scripts/remote.py install --kernel {{build_dir}}/kernel-release.elf --base {{initramfs_remote}} --tag "$tag" "$@"
 
 # An installed machine as the bare-metal layout has it — a boot disk whose
-# slots hold a base paired with a broker on this host's loopback, which SLIRP
+# slots boot a base paired with a broker on this host's loopback, which SLIRP
 # shows the guest as 10.0.2.2, and a root partition where a pairing with
 # another broker is planted under /etc/remote, which remoted must ignore. The
 # kernel carries a build tag and is built in a target directory of its own, so
@@ -1171,7 +1215,7 @@ test-remote: _build-userland _base-recipes
     state="$work/state"
     # Per run: a broker left over from an aborted one keeps its own socket.
     sock="$work/broker.$$.sock"
-    rm -rf "$state" "$work/decoy-state" "$work/pairing" "$work/planted" "$work/base.cpio" "$work/root.img" \
+    rm -rf "$state" "$work/decoy-state" "$work/pairing" "$work/planted" "$work/base.cpio" "$work/base-next.cpio" "$work/root.img" \
         "$work/root.img.host" "$work/boot-disk.img" "$work"/*.log "$work"/broker.*.sock
     remote() { timeout "${REMOTE_STEP_TIMEOUT:-180}" scripts/remote.py --state "$state" --socket "$sock" "$@"; }
     broker="" decoy="" qemu=""
@@ -1193,8 +1237,10 @@ test-remote: _build-userland _base-recipes
     }
 
     remote provision "$work/pairing" --broker "10.0.2.2:$port"
-    COREUTILS_LINKS="{{coreutils_tools}}" {{base_recipe_env}} SLOPOS_BUILD_TAG="$tag" REMOTE_PAIRING_DIR="$work/pairing" \
-        scripts/build_initramfs.sh "$work/base.cpio" "{{build_dir}}" {{userland_bins}}
+    for base in "$tag:base.cpio" "$tag-next:base-next.cpio"; do
+        COREUTILS_LINKS="{{coreutils_tools}}" {{base_recipe_env}} SLOPOS_BUILD_TAG="${base%%:*}" REMOTE_PAIRING_DIR="$work/pairing" \
+            scripts/build_initramfs.sh "$work/${base#*:}" "{{build_dir}}" {{userland_bins}}
+    done
     # Where remoted once read a pairing, and any program can write: one with
     # a broker of its own, which must never hear from the machine.
     scripts/remote.py --state "$work/decoy-state" provision "$work/planted" --broker "10.0.2.2:$decoy_port"
@@ -1214,8 +1260,8 @@ test-remote: _build-userland _base-recipes
     [ -S "$sock" ] && kill -0 "$broker" 2>/dev/null || fail "the broker did not come up: $(cat "$work/broker.log")"
     [ -S "$work/decoy.$$.sock" ] || fail "the decoy broker did not come up: $(cat "$work/decoy.log")"
     # setsid and timeout: the launcher and QEMU under it, in the foreground
-    # of `interactive` mode, are one group to end. `bootctl install` holds a
-    # kernel and its base in memory at once.
+    # of `interactive` mode, are one group to end. `bootctl base install`
+    # holds the base three times over.
     setsid timeout "${REMOTE_TEST_TIMEOUT_SECS:-900}" \
         just _qemu-boot interactive 0 "$work/boot-disk.img" "$work/root.img" BOOT_DISK_IMG="$work/boot-disk.img" \
         QEMU_NO_ROOT_DISK=1 QEMU_ALLOW_REBOOT=1 QEMU_MEM=1G >"$work/qemu.log" 2>&1 &
@@ -1298,10 +1344,13 @@ test-remote: _build-userland _base-recipes
     echo "── install into the spare slot, reboot into it, commit it ──"
     # A fresh boot disk names no default; an installed machine's does.
     remote run -- bootctl set-default slopos-a
-    REMOTE_STEP_TIMEOUT=600 remote install --kernel "$work/kernel-dev.elf" --base "$work/base.cpio" --tag "$tag" --commit \
+    REMOTE_STEP_TIMEOUT=600 remote install --kernel "$work/kernel-dev.elf" --base "$work/base-next.cpio" --tag "$tag" --commit \
         >"$work/install.log" 2>&1 || fail "install: $(tail -n 5 "$work/install.log")"
-    grep -qx 'installed slot b (entry slopos-b)' "$work/install.log" && grep -qx 'booted: slopos-b' "$work/install.log" &&
+    grep -q '^installed slot b (entry slopos-b)' "$work/install.log" && grep -qx 'booted: slopos-b' "$work/install.log" &&
         grep -qx 'default: slopos-b' "$work/install.log" || fail "install did not boot and commit slopos-b; see $work/install.log"
+    grep -q "^base current: .*, build tag $tag-next, .*, running\$" "$work/install.log" &&
+        grep -q "^base previous: .*, build tag $tag, " "$work/install.log" ||
+        fail "install did not make the new base current and keep the one that ran; see $work/install.log"
     sed 's/^/  /' "$work/install.log"
 
     echo "── power off ──"

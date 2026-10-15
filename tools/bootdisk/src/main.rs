@@ -9,6 +9,10 @@
 //!     --slot <slot>[:<cmdline>]... -- <cmdline>`
 //!   `bootdisk medium <image> <disk guid> [<payload>]` — hold a built install
 //!     medium's table to what the kernel finds its payload by
+//!   `bootdisk base <image>` — the base's interface and build tag, once it
+//!     checks out as `bootctl` holds one
+//!   `bootdisk kernel <elf>` — the first and last base interface a kernel
+//!     serves
 
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -17,14 +21,16 @@ use std::process::ExitCode;
 use slopos_boot_core::Guid;
 use slopos_boot_core::gpt::{self, Geometry, Header, Partition};
 use slopos_boot_core::layout::{
-    ALIGN_BYTES, BASE_FILE, BOOT_BYTES, BOOT_LABEL, BOOT_NAME, BOOT_TYPE, CRASH_BYTES, CRASH_NAME,
-    CRASH_TYPE, ESP_LABEL, ESP_NAME, ESP_TYPE, FALLBACK_CONFIG, FALLBACK_LOADER, KERNEL_FILE,
-    LOADER, LOADER_CONFIG, LOADER_DIR, LOADER_LICENSE, LOADER_NOTICES, MEDIUM_APPS, MEDIUM_BASE,
-    MEDIUM_DIR, MEDIUM_DISK_GUID, MEDIUM_KERNEL, MEDIUM_LOADER, MEDIUM_LOADER_LICENSE,
-    MEDIUM_LOADER_NOTICES, MEDIUM_MODULE, MEDIUM_NOTICE, NEW_ESP_BYTES, PAYLOAD_DIR, PAYLOAD_TYPE,
-    ROOT_NAME, ROOT_TYPE, SLOTS, SLOTS_DIR,
+    ALIGN_BYTES, BASE_CURRENT, BASE_DIR, BASE_MODULE, BASE_PREVIOUS, BOOT_BYTES, BOOT_LABEL,
+    BOOT_NAME, BOOT_TYPE, CRASH_BYTES, CRASH_NAME, CRASH_TYPE, ESP_LABEL, ESP_NAME, ESP_TYPE,
+    FALLBACK_CONFIG, FALLBACK_LOADER, KERNEL_FILE, LOADER, LOADER_CONFIG, LOADER_DIR,
+    LOADER_LICENSE, LOADER_NOTICES, MEDIUM_APPS, MEDIUM_BASE, MEDIUM_DIR, MEDIUM_DISK_GUID,
+    MEDIUM_KERNEL, MEDIUM_LOADER, MEDIUM_LOADER_LICENSE, MEDIUM_LOADER_NOTICES, MEDIUM_MODULE,
+    MEDIUM_NOTICE, NEW_ESP_BYTES, PAYLOAD_DIR, PAYLOAD_TYPE, PREVIOUS_BASE_MODULE, ROOT_NAME,
+    ROOT_TYPE, SLOTS, SLOTS_DIR,
 };
 use slopos_boot_core::limine::{Config, MenuEntry};
+use slopos_tls_core::hash::{Hash, Sha256};
 
 const MIB: u64 = 1 << 20;
 
@@ -66,7 +72,11 @@ fn layout() {
         ("SLOTS", &slots),
         ("SLOTS_DIR", SLOTS_DIR),
         ("KERNEL_FILE", KERNEL_FILE),
-        ("BASE_FILE", BASE_FILE),
+        ("BASE_DIR", BASE_DIR),
+        ("BASE_CURRENT", BASE_CURRENT),
+        ("BASE_PREVIOUS", BASE_PREVIOUS),
+        ("BASE_MODULE", BASE_MODULE),
+        ("PREVIOUS_BASE_MODULE", PREVIOUS_BASE_MODULE),
         ("MEDIUM_DIR", MEDIUM_DIR),
         ("MEDIUM_MODULE", MEDIUM_MODULE),
         ("MEDIUM_KERNEL", MEDIUM_KERNEL),
@@ -254,6 +264,31 @@ fn held_to(image: &File, (start, len): (u64, u64), path: &str) -> Result<(), Str
     Ok(())
 }
 
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    let mut hash = Sha256::new();
+    hash.update(data);
+    hash.finish_into(&mut digest);
+    digest
+}
+
+fn base(image: &str) -> Result<(), String> {
+    let bytes = std::fs::read(image).map_err(|e| format!("{image}: {e}"))?;
+    let checked =
+        slopos_boot_core::base::check(&bytes, sha256).map_err(|e| format!("{image}: {e}"))?;
+    println!("interface {}", checked.interface);
+    println!("build-tag {}", checked.build_tag.unwrap_or("-"));
+    Ok(())
+}
+
+fn kernel(elf: &str) -> Result<(), String> {
+    let bytes = std::fs::read(elf).map_err(|e| format!("{elf}: {e}"))?;
+    let served = slopos_boot_core::kernel::served_interfaces(&bytes)
+        .map_err(|e| format!("{elf}: no base-interface note ({e:?})"))?;
+    println!("{} {}", served.start(), served.end());
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -265,7 +300,12 @@ fn main() -> ExitCode {
         Some("medium") if (3..=4).contains(&args.len()) => {
             medium(&args[1], &args[2], args.get(3).map(String::as_str))
         }
-        _ => Err("usage: bootdisk layout | bootdisk limine-conf ... | bootdisk medium ...".into()),
+        Some("base") if args.len() == 2 => base(&args[1]),
+        Some("kernel") if args.len() == 2 => kernel(&args[1]),
+        _ => Err(
+            "usage: bootdisk layout | limine-conf ... | medium ... | base <image> | kernel <elf>"
+                .into(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

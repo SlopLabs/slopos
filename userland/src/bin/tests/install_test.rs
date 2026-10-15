@@ -1,37 +1,56 @@
 //! A kernel installed into a boot slot, tried once, committed, and a broken
-//! one rolled back — across the reboots that takes, on a boot disk
-//! `just test-install` attaches, and through the firmware entry an installer
-//! registers for SlopOS's loader. Each boot runs this test again; a
-//! non-volatile UEFI variable says which stage the last boot reached.
+//! one rolled back; then a base installed and rolled back, and one the kernel
+//! does not serve passed over for the previous — across the reboots that
+//! takes, on a boot disk `just test-install` attaches, and through the
+//! firmware entry an installer registers for SlopOS's loader. Each boot runs
+//! this test again; a non-volatile UEFI variable says which stage the last
+//! boot reached.
 //!
 //! 0 (booted `slopos-a` by the removable-media path, as a disk the firmware
 //!   has no entry for is): register SlopOS's firmware entry first in
 //!   `BootOrder`. With a workspace at `/src/slopos`, check out the host's
 //!   `HEAD` there, build the tests kernel and base under a fresh build tag,
-//!   install them into slot b and return the tree to its own checkout;
+//!   install the base, put the kernel into slot b and return the tree to its
+//!   own checkout;
 //!   without one, clone slot a into b. Boot b once.
-//! 1 (booted `slopos-b` through the firmware entry, default still a): the
-//!   running kernel and base carry the tag stage 0 built them with, if it
-//!   built them, and the kernel then commits a change on the host's `HEAD`
-//!   and pushes it to the host; commit b, boot `slopos-bad` once — a kernel
-//!   whose command line panics it with `panic=reboot` — and reboot.
+//! 1 (booted `slopos-b` through the firmware entry, default still a): slot b
+//!   holds a kernel alone and boots the current base, which slot a booted
+//!   too unless stage 0 built a new one; the running kernel and base carry
+//!   the tag stage 0 built them with, if it built them, and the kernel then
+//!   commits a change on the host's `HEAD` and pushes it to the host; commit
+//!   b, boot `slopos-bad` once — a kernel whose command line panics it with
+//!   `panic=reboot` — and reboot.
 //! 2 (booted `slopos-b` again, through the firmware entry): the panic reset
 //!   back to the default, and init's `bootctl collect` moved the record the
 //!   panic left in the crash partition to `/var/log/crash`, which `bootctl
 //!   status` reports as slot bad's last boot. Boot `slopos-abort` once — its
 //!   kernel takes the format-free abort a lockup takes — and reboot.
-//! 3 (booted `slopos-b` again): that abort left a record too.
+//! 3 (booted `slopos-b` again): that abort left a record too. Install a base
+//!   repacked from the current one under the tag [`TAG_B`], which moves the
+//!   running base to previous, and reboot.
+//! 4: the boot runs base b from current. Roll back, and reboot.
+//! 5: the boot runs the first base from current again, b is previous.
+//!   Install one tagged [`TAG_C`] naming an interface this kernel does not
+//!   serve, which moves the running base to previous again, and reboot.
+//! 6: the kernel passed base c over and runs previous. A base installed now
+//!   replaces c alone, since previous runs; a kernel serving neither base is
+//!   refused a slot, and with such a kernel the default, a base it would serve
+//!   neither of is refused too.
 //!
 //! Without a boot disk it has nothing to do and passes, as `toolchain_test`
 //! does without a toolchain.
 
 use slopos_userland as _;
 
+use slopos_boot_core::base::{self, BUILD_TAG_PATH, INTERFACE_PATH, MANIFEST_PATH, ManifestLine};
 use slopos_boot_core::crash::Summary;
-use slopos_boot_core::variables;
+use slopos_boot_core::newc::{self, Record};
+use slopos_boot_core::{layout, variables};
 use slopos_slibc::test_harness::note;
+use slopos_tls_core::hash::{Hash, Sha256};
 use slopos_userland::boot_disk::{
-    BootDisk, FindError, boot_current, boot_order, firmware_entry, register_firmware_entry,
+    BootDisk, FindError, boot_current, boot_order, firmware_entry, open_fat,
+    register_firmware_entry,
 };
 use slopos_userland::selfhost::{
     SCRATCH, check_out, git, selfhost_installing, stdout_of, take_host_head, workspace,
@@ -43,7 +62,14 @@ use slopos_userland::syscall::error::SyscallError;
 use std::process::Command;
 use std::time::Instant;
 
-const BASE_TAG_FILE: &str = "/usr/share/slopos/build-tag";
+const BASE_TAG_FILE: &str = BUILD_TAG_PATH;
+const TAG_B: &str = "install-test-base-b";
+const TAG_C: &str = "install-test-base-c";
+const TAG_D: &str = "install-test-base-d";
+const TAG_E: &str = "install-test-base-e";
+/// Where a repacked base waits for `bootctl`: memory, since the tests root
+/// has no room for one.
+const FIXTURE: &str = "/tmp/install-test-base.img";
 
 const STAGE: &str = "SlopOSInstallTestStage";
 /// The build tag stage 0 gave the system it built, for stage 1 to find in
@@ -304,6 +330,265 @@ fn panic_collected(status: &str, slot: &str, panic: &str, heading: &str) -> bool
     true
 }
 
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    let mut hash = Sha256::new();
+    hash.update(data);
+    hash.finish_into(&mut digest);
+    digest
+}
+
+/// `image` tagged `tag` and, when given, naming `interface`, its manifest
+/// sealed again as the packer seals one.
+fn repacked(image: &[u8], tag: &str, interface: Option<u32>) -> Result<Vec<u8>, String> {
+    let replaced = |path: &[u8]| {
+        [MANIFEST_PATH, BUILD_TAG_PATH]
+            .iter()
+            .chain(interface.is_some().then_some(&INTERFACE_PATH))
+            .any(|own| newc::same_path(path, own.as_bytes()))
+    };
+    let mut records: Vec<(Vec<u8>, u32, Vec<u8>)> = Vec::new();
+    for entry in newc::entries(image) {
+        let entry = entry.map_err(|e| format!("the current base: {e:?}"))?;
+        if !replaced(entry.path) {
+            records.push((entry.path.to_vec(), entry.mode, entry.data.to_vec()));
+        }
+    }
+    let data = slopos_abi::fs::S_IFREG | 0o644;
+    records.push((BUILD_TAG_PATH.into(), data, format!("{tag}\n").into_bytes()));
+    if let Some(n) = interface {
+        records.push((INTERFACE_PATH.into(), data, format!("{n}\n").into_bytes()));
+    }
+    let mut manifest = String::new();
+    for (path, mode, bytes) in &records {
+        let path = std::str::from_utf8(path).map_err(|e| e.to_string())?;
+        ManifestLine {
+            digest: sha256(bytes),
+            mode: *mode,
+            path,
+        }
+        .write(&mut manifest)
+        .map_err(|_| format!("{path}: no manifest line"))?;
+    }
+    records.push((MANIFEST_PATH.into(), data, manifest.into_bytes()));
+    let mut out = Vec::with_capacity(image.len() + 4096);
+    for (path, mode, bytes) in &records {
+        let record = Record::new(path, *mode, bytes).ok_or("a record too large")?;
+        record
+            .pieces()
+            .iter()
+            .for_each(|piece| out.extend_from_slice(piece));
+    }
+    Record::trailer()
+        .pieces()
+        .iter()
+        .for_each(|piece| out.extend_from_slice(piece));
+    base::check(&out, sha256).map_err(|e| format!("the repacked base: {e}"))?;
+    Ok(out)
+}
+
+/// The current base repacked as `tag` at [`FIXTURE`].
+fn write_fixture(disk: &BootDisk, tag: &str, interface: Option<u32>) -> bool {
+    let written = open_fat(&disk.boot_node)
+        .and_then(|mut volume| {
+            volume
+                .read_file(layout::BASE_CURRENT)
+                .map_err(|e| format!("{}: {e:?}", layout::BASE_CURRENT))
+        })
+        .and_then(|current| repacked(&current, tag, interface))
+        .and_then(|image| std::fs::write(FIXTURE, image).map_err(|e| format!("{FIXTURE}: {e}")));
+    if let Err(why) = written {
+        note(&why);
+        return false;
+    }
+    true
+}
+
+/// Install the current base repacked as `tag` through `bootctl`, naming its
+/// SHA-256 as `remote.py` does, once another digest is refused.
+fn install_repacked(disk: &BootDisk, tag: &str, interface: Option<u32>) -> Option<String> {
+    if !write_fixture(disk, tag, interface) {
+        return None;
+    }
+    let said = std::fs::read(FIXTURE)
+        .map_err(|e| note(&format!("{FIXTURE}: {e}")))
+        .ok()
+        .and_then(|image| {
+            let digest: String = sha256(&image).iter().map(|b| format!("{b:02x}")).collect();
+            let other = "0".repeat(64);
+            if !refused(
+                &["base", "install", FIXTURE, &other],
+                "not the image whose sha256 is",
+            ) {
+                note("bootctl installed a base whose sha256 is not the one named");
+                return None;
+            }
+            bootctl(&["base", "install", FIXTURE, &digest])
+        });
+    let _ = std::fs::remove_file(FIXTURE);
+    let said = said?;
+    println!("INSTALL-BASE-INSTALLED {tag}");
+    Some(said)
+}
+
+fn refused(args: &[&str], saying: &str) -> bool {
+    Command::new("/bin/bootctl")
+        .args(args)
+        .output()
+        .is_ok_and(|out| {
+            !out.status.success() && String::from_utf8_lossy(&out.stderr).contains(saying)
+        })
+}
+
+/// With slot bad the default and `kernel` put there behind `bootctl`'s
+/// back, a base install that would leave it serving neither base is
+/// refused, and so is making it the default again.
+fn default_kept_bootable(disk: &BootDisk, kernel: &[u8]) -> bool {
+    if bootctl(&["set-default", "slopos-bad"]).is_none() {
+        return false;
+    }
+    let path = format!("{}/bad/{}", layout::SLOTS_DIR, layout::KERNEL_FILE);
+    let planted = open_fat(&disk.boot_node).and_then(|mut volume| {
+        volume
+            .write_file(&path, kernel)
+            .map_err(|e| format!("{path}: {e:?}"))
+    });
+    if let Err(why) = planted {
+        note(&why);
+        return false;
+    }
+    if !write_fixture(disk, TAG_E, Some(slopos_abi::BASE_INTERFACE + 1)) {
+        return false;
+    }
+    let base_refused = refused(
+        &["base", "install", FIXTURE],
+        "slopos-bad's kernel serves base interfaces 90-99",
+    );
+    let _ = std::fs::remove_file(FIXTURE);
+    let restored = bootctl(&["set-default", "slopos-b"]).is_some();
+    let default_refused = refused(
+        &["set-default", "slopos-bad"],
+        "the kernel serves base interfaces 90-99",
+    );
+    if !base_refused {
+        note("bootctl installed a base that leaves the default kernel serving neither");
+    }
+    if !default_refused {
+        note("bootctl made the default a kernel that serves neither base");
+    }
+    base_refused && restored && default_refused
+}
+
+/// What `bootctl status` says of base `which`: its interface, its build
+/// tag, and whether it is the one running.
+fn base_of(status: &str, which: &str) -> Option<(u32, String, bool)> {
+    let line = field(status, &format!("base {which}"))?;
+    let mut parts = line.split(", ");
+    let interface = parts.next()?.strip_prefix("interface ")?.parse().ok()?;
+    let tag = parts.find_map(|part| part.strip_prefix("build tag "))?;
+    Some((interface, tag.to_owned(), line.ends_with(", running")))
+}
+
+/// The bases as `bootctl status` says this boot holds them: `(tag, running)`
+/// for current and previous, each tag `None` for any.
+fn bases_are(
+    status: &str,
+    stage: u8,
+    current: (Option<&str>, bool),
+    previous: (Option<&str>, bool),
+) -> bool {
+    let holds = |which, (tag, running): (Option<&str>, bool)| {
+        base_of(status, which).is_some_and(|(interface, found, runs)| {
+            let built_for = if [TAG_C, TAG_D].contains(&found.as_str()) {
+                slopos_abi::BASE_INTERFACE + 1
+            } else {
+                slopos_abi::BASE_INTERFACE
+            };
+            tag.is_none_or(|tag| found == tag) && runs == running && interface == built_for
+        })
+    };
+    if holds("current", current) && holds("previous", previous) {
+        println!("INSTALL-BASES at stage {stage}: {current:?} then {previous:?}");
+        return true;
+    }
+    note(&format!(
+        "stage {stage}: wanted current {current:?} and previous {previous:?}:\n{status}"
+    ));
+    false
+}
+
+/// A kernel file whose note serves `min..=max` and that holds nothing else:
+/// what `bootctl install` must refuse a slot when it serves neither base.
+fn unserved_kernel(min: u32, max: u32) -> Vec<u8> {
+    let mut note = Vec::new();
+    for word in [
+        7u32,
+        8,
+        slopos_abi::base_interface::NT_SLOPOS_BASE_INTERFACE,
+    ] {
+        note.extend_from_slice(&word.to_le_bytes());
+    }
+    note.extend_from_slice(b"SlopOS\0\0");
+    note.extend_from_slice(&min.to_le_bytes());
+    note.extend_from_slice(&max.to_le_bytes());
+    let names = b"\0.note.slopos.base-interface\0.shstrtab\0";
+    let mut file = vec![0u8; 64];
+    file[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    let note_at = file.len() as u64;
+    file.extend_from_slice(&note);
+    let names_at = file.len() as u64;
+    file.extend_from_slice(names);
+    file.resize(file.len().next_multiple_of(8), 0);
+    let table = file.len() as u64;
+    let section = |name: u32, kind: u32, at: u64, len: usize| {
+        let mut header = [0u8; 64];
+        header[0..4].copy_from_slice(&name.to_le_bytes());
+        header[4..8].copy_from_slice(&kind.to_le_bytes());
+        header[24..32].copy_from_slice(&at.to_le_bytes());
+        header[32..40].copy_from_slice(&(len as u64).to_le_bytes());
+        header[48..56].copy_from_slice(&4u64.to_le_bytes());
+        header
+    };
+    file.extend_from_slice(&[0u8; 64]);
+    file.extend_from_slice(&section(1, 7, note_at, note.len()));
+    file.extend_from_slice(&section(29, 3, names_at, names.len()));
+    file[0x28..0x30].copy_from_slice(&table.to_le_bytes());
+    file[0x3A..0x3C].copy_from_slice(&64u16.to_le_bytes());
+    file[0x3C..0x3E].copy_from_slice(&3u16.to_le_bytes());
+    file[0x3E..0x40].copy_from_slice(&2u16.to_le_bytes());
+    file
+}
+
+fn reboot_default(next: u8) -> bool {
+    if !set_stage(Some(next)) {
+        return false;
+    }
+    println!("INSTALL-STAGE {next}: rebooting into the default");
+    let _ = bootctl(&["reboot"]);
+    note("bootctl reboot returned");
+    false
+}
+
+/// Slot b's directory holds its kernel and nothing more.
+fn slot_holds_a_kernel_alone(disk: &BootDisk) -> bool {
+    let dir = format!("{}/b", layout::SLOTS_DIR);
+    let names: Option<Vec<String>> = open_fat(&disk.boot_node).ok().and_then(|mut volume| {
+        let entries = volume.list(&dir).ok()?;
+        Some(
+            entries
+                .into_iter()
+                .map(|e| e.name)
+                .filter(|n| n != "." && n != "..")
+                .collect(),
+        )
+    });
+    if names.as_deref() != Some(&[layout::KERNEL_FILE.to_owned()]) {
+        note(&format!("{dir} holds {names:?}, not a kernel alone"));
+        return false;
+    }
+    true
+}
+
 fn reboot_into(entry: &str, next: u8) -> bool {
     if bootctl(&["oneshot", entry]).is_none() || !set_stage(Some(next)) {
         return false;
@@ -378,7 +663,10 @@ fn boot_slot_install_commit_rollback() -> bool {
                 ));
                 return false;
             }
-            if !booted_through_entry(&disk, 1) {
+            if !booted_through_entry(&disk, 1)
+                || !slot_holds_a_kernel_alone(&disk)
+                || !bases_are(&status, 1, (None, true), (None, built_tag().is_none()))
+            {
                 return false;
             }
             if let Some(tag) = built_tag() {
@@ -393,7 +681,7 @@ fn boot_slot_install_commit_rollback() -> bool {
                 match std::fs::read_to_string(BASE_TAG_FILE) {
                     Ok(base) if base.trim() == tag => println!("INSTALL-BASE {tag}"),
                     other => {
-                        note(&format!("slot b's base carries {other:?}, not {tag}"));
+                        note(&format!("the running base carries {other:?}, not {tag}"));
                         return false;
                     }
                 }
@@ -432,20 +720,107 @@ fn boot_slot_install_commit_rollback() -> bool {
             reboot_into("slopos-abort", 3)
         }
         Some(3) => {
-            let _ = set_stage(None);
             if booted != "slopos-b" || default != "slopos-b" || oneshot != "-" {
                 note(&format!(
                     "after the aborting slot: booted {booted}, default {default}, oneshot {oneshot}"
                 ));
+                let _ = set_stage(None);
                 return false;
             }
             if !booted_through_entry(&disk, 3)
                 || !panic_collected(&status, "abort", "panic.boot=abort", "=== KERNEL ABORT ===")
+                || install_repacked(&disk, TAG_B, None).is_none()
             {
+                let _ = set_stage(None);
+                return false;
+            }
+            let Some(status) = bootctl(&["status"]) else {
+                let _ = set_stage(None);
+                return false;
+            };
+            bases_are(&status, 3, (Some(TAG_B), false), (None, true)) && reboot_default(4)
+        }
+        Some(4) => {
+            let running = std::fs::read_to_string(BASE_TAG_FILE).unwrap_or_default();
+            let ok = booted == "slopos-b"
+                && running.trim() == TAG_B
+                && bases_are(&status, 4, (Some(TAG_B), true), (None, false))
+                && bootctl(&["base", "rollback"]).is_some();
+            if !ok {
+                note(&format!(
+                    "stage 4 runs {booted} on the base tagged {running:?}"
+                ));
+                let _ = set_stage(None);
+                return false;
+            }
+            reboot_default(5)
+        }
+        Some(5) => {
+            let running = std::fs::read_to_string(BASE_TAG_FILE).unwrap_or_default();
+            let unserved = slopos_abi::BASE_INTERFACE + 1;
+            let ok = booted == "slopos-b"
+                && running.trim() != TAG_B
+                && bases_are(&status, 5, (None, true), (Some(TAG_B), false))
+                && install_repacked(&disk, TAG_C, Some(unserved)).is_some_and(|said| {
+                    said.contains(&format!("only a boot of one that serves {unserved}"))
+                });
+            if !ok {
+                note(&format!(
+                    "stage 5 runs {booted} on the base tagged {running:?}"
+                ));
+                let _ = set_stage(None);
+                return false;
+            }
+            reboot_default(6)
+        }
+        Some(6) => {
+            let _ = set_stage(None);
+            let running = std::fs::read_to_string(BASE_TAG_FILE).unwrap_or_default();
+            if booted != "slopos-b"
+                || running.trim() == TAG_C
+                || !bases_are(&status, 6, (Some(TAG_C), false), (None, true))
+            {
+                note(&format!(
+                    "stage 6 runs {booted} on the base tagged {running:?}"
+                ));
+                return false;
+            }
+            println!("INSTALL-PASSED-OVER {TAG_C}");
+            if install_repacked(&disk, TAG_D, Some(slopos_abi::BASE_INTERFACE + 1)).is_none() {
+                return false;
+            }
+            let Some(status) = bootctl(&["status"]) else {
+                return false;
+            };
+            if !bases_are(&status, 6, (Some(TAG_D), false), (None, true)) {
+                return false;
+            }
+            let kernel = "/tmp/install-test-unserved.elf";
+            let unserved = unserved_kernel(90, 99);
+            let refused = std::fs::write(kernel, &unserved).is_ok()
+                && Command::new("/bin/bootctl")
+                    .args(["install", "a", kernel])
+                    .output()
+                    .is_ok_and(|out| {
+                        !out.status.success()
+                            && String::from_utf8_lossy(&out.stderr)
+                                .contains("the kernel serves base interfaces 90-99")
+                    });
+            let _ = std::fs::remove_file(kernel);
+            if !refused {
+                note("bootctl gave a slot a kernel that serves neither base");
+                return false;
+            }
+            println!("INSTALL-REFUSED a kernel that serves neither base");
+            if !default_kept_bootable(&disk, &unserved) {
+                return false;
+            }
+            println!("INSTALL-REFUSED a base that leaves the default serving neither");
+            if bootctl(&["base", "rollback"]).is_none() {
                 return false;
             }
             note(
-                "slot b installed, tried and committed; a panicking and an aborting slot rolled back, each leaving its record",
+                "slot b installed, tried and committed; a panicking and an aborting slot rolled back, each leaving its record; a base installed, rolled back, and one the kernel does not serve passed over",
             );
             true
         }

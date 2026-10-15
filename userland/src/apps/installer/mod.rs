@@ -2,13 +2,15 @@
 //! system booted, beside whatever else the disk holds.
 //!
 //! The medium is what the loader brought, served at [`layout::MEDIUM_DIR`]:
-//! the kernel and base every slot gets and Limine for the ESP; and on a stick
+//! the kernel every slot gets, the base every slot boots and Limine for the
+//! ESP; and on a stick
 //! built with the payload, the partition the kernel mounts at
 //! [`layout::PAYLOAD_DIR`], the toolchain for `/usr/local` and a clone of the
 //! source for `/src`. An install writes the partition table — a fresh one, or
 //! new entries beside the disk's own — and has the kernel re-read it, formats
-//! the new partitions, fills the root, writes both slots and the loader with
-//! its configuration, makes slot a the default, checks the root with
+//! the new partitions, fills the root, writes both kernel slots, the base and
+//! the loader with its configuration, makes slot a the default, checks the
+//! root with
 //! `e2fsck -fn`, and last registers the firmware entry. Nothing the plan does
 //! not name is written, and nothing on a shared ESP outside `\EFI\SlopOS\`.
 //!
@@ -845,11 +847,12 @@ fn install(s: Settled, medium: &Medium) -> Result<(), String> {
     }
     mounted.finish()?;
 
-    step(5, "writing both slots");
-    boot::write_slots(&boot_node, medium)?;
+    step(5, "writing both kernel slots and the base");
+    boot::write_boot(&boot_node, medium)?;
 
     step(6, "writing the loader and its configuration");
     boot::write_loader(&esp_node, s.own_esp, &s.limine_conf, medium)?;
+    boot::forget_slot_bases(&boot_node)?;
 
     step(7, "making slot a the default");
     let entry = boot::set_default()?;

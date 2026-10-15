@@ -140,7 +140,17 @@ crate::boot_init!(
 /// Runs before [`boot_step_fs_init`]; a no-op on the disk path, where that
 /// step mounts the ext2 disk at `/` instead.
 fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
-    let archive = crate::limine_protocol::initramfs();
+    if let crate::base::Choice::Refused { current, previous } = crate::base::choice() {
+        klog_info!(
+            "ROOTFS: this kernel serves base interfaces {}-{}; current is {} and previous {}",
+            crate::base::SERVED.start(),
+            crate::base::SERVED.end(),
+            current,
+            previous
+        );
+        return -1;
+    }
+    let archive = crate::base::booted();
     // Before the decision, not after: `root=auto` picks the disk, so the
     // outcome of attaching it is the input to the choice.
     let disk = attach_root_once();
@@ -549,17 +559,16 @@ fn apply_cmdline_mount(spec: &str) {
 }
 
 /// Serve the install medium when the loader carried one: the `install`
-/// module's archive, with the kernel and base it booted at the paths a slot
-/// holds them under, read-only at [`layout::MEDIUM_DIR`], then its payload.
-/// The loader keeps the archive, kernel and base mapped, so nothing is copied.
+/// module's archive, with the kernel and base it booted at
+/// [`layout::MEDIUM_KERNEL`] and [`layout::MEDIUM_BASE`], read-only at
+/// [`layout::MEDIUM_DIR`], then its payload. The loader keeps the archive,
+/// kernel and base mapped, so nothing is copied.
 fn boot_step_install_medium_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    let Some(archive) = crate::limine_protocol::module(layout::MEDIUM_MODULE) else {
+    let Some(archive) = crate::limine_protocol::install_archive() else {
         return;
     };
-    let (Some(kernel), Some(base)) = (
-        crate::limine_protocol::kernel_file(),
-        crate::limine_protocol::initramfs(),
-    ) else {
+    let (Some(kernel), Some(base)) = (crate::limine_protocol::kernel_file(), crate::base::booted())
+    else {
         klog_info!("INSTALL: the medium came without a kernel file or a base; not served");
         return;
     };

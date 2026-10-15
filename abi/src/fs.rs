@@ -223,7 +223,7 @@ impl UserFsStat {
 }
 
 /// The directories of a boot's base, served from the boot module and mounted
-/// read-only over whatever `/` is, so the system is the boot slot's and the
+/// read-only over whatever `/` is, so the system is the booted base and the
 /// root holds what the machine wrote.
 pub const BASE_DIRS: [&str; 6] = [
     "/bin",

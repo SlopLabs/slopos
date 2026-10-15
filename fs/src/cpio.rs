@@ -1,24 +1,12 @@
-//! Minimal `newc` cpio archive reader for the initramfs.
-//!
-//! The archive is bootloader-supplied data, so every offset is computed with
-//! `checked_add` and bounds-checked against the slice: a malformed archive
-//! yields a [`CpioError`], never a panic or an out-of-bounds read.
+//! The initramfs's `newc` cpio archive, read through `slopos_boot_core::newc`
+//! — the reading `bootctl` gives a base too — and unpacked into the root.
 
+use slopos_boot_core::newc;
 use slopos_ostd::{KVec, klog_info};
 
 use crate::vfs::{VfsError, VfsOpenFlags, vfs_mkdir, vfs_open_flags, vfs_set_mode, vfs_symlink};
 use crate::{MAX_NAME_LEN, MAX_PATH_LEN};
 use slopos_abi::fs::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
-
-/// Fixed `newc` header size: 6-byte magic + 13 fields × 8 ASCII-hex chars.
-const HEADER_LEN: usize = 110;
-const MAGIC: &[u8] = b"070701";
-const TRAILER: &[u8] = b"TRAILER!!!";
-
-/// Field byte offsets within the header (each field is 8 ASCII-hex chars).
-const OFF_MODE: usize = 6 + 8;
-const OFF_FILESIZE: usize = 6 + 8 * 6;
-const OFF_NAMESIZE: usize = 6 + 8 * 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpioError {
@@ -40,35 +28,18 @@ pub enum CpioError {
     Vfs(VfsError),
 }
 
+impl From<newc::Error> for CpioError {
+    fn from(e: newc::Error) -> Self {
+        match e {
+            newc::Error::Truncated => CpioError::Truncated,
+            newc::Error::BadMagic => CpioError::BadMagic,
+            newc::Error::BadField => CpioError::BadField,
+        }
+    }
+}
+
 /// One decoded archive entry. `path` and `data` borrow into the archive.
-pub struct CpioEntry<'a> {
-    pub path: &'a [u8],
-    pub mode: u32,
-    pub data: &'a [u8],
-}
-
-const fn align4(n: usize) -> Option<usize> {
-    match n.checked_add(3) {
-        Some(x) => Some(x & !3),
-        None => None,
-    }
-}
-
-/// Parse an 8-character ASCII-hex field. The caller always passes an 8-byte
-/// slice, so the result fits in `u32`.
-fn parse_hex8(field: &[u8]) -> Result<u32, CpioError> {
-    let mut val: u32 = 0;
-    for &b in field {
-        let digit = match b {
-            b'0'..=b'9' => b - b'0',
-            b'a'..=b'f' => b - b'a' + 10,
-            b'A'..=b'F' => b - b'A' + 10,
-            _ => return Err(CpioError::BadField),
-        };
-        val = (val << 4) | digit as u32;
-    }
-    Ok(val)
-}
+pub use slopos_boot_core::newc::Entry as CpioEntry;
 
 /// The stored name is NUL-terminated within its `namesize` field.
 pub(crate) fn nul_terminated(bytes: &[u8]) -> &[u8] {
@@ -85,87 +56,12 @@ pub fn for_each_cpio_entry<'a, F>(archive: &'a [u8], mut f: F) -> Result<usize, 
 where
     F: FnMut(&CpioEntry<'a>) -> Result<(), CpioError>,
 {
-    let mut pos = 0usize;
     let mut count = 0usize;
-
-    loop {
-        let Some(record) = parse_record(archive, pos)? else {
-            return Ok(count);
-        };
-        f(&record.entry)?;
+    for entry in newc::entries(archive) {
+        f(&entry?)?;
         count += 1;
-        pos = pos
-            .checked_add(record.advance)
-            .ok_or(CpioError::Truncated)?;
     }
-}
-
-struct CpioRecord<'a> {
-    entry: CpioEntry<'a>,
-    advance: usize,
-}
-
-/// Decode one `newc` record, or `None` at the `TRAILER!!!` sentinel.
-///
-/// Out of line: at opt-level 0 the `checked_*(…)?` chains are a stack slot
-/// each, and inlining charges them to every instantiation of the generic,
-/// putting all of them over the frame ceiling.
-#[inline(never)]
-fn parse_record(archive: &[u8], pos: usize) -> Result<Option<CpioRecord<'_>>, CpioError> {
-    let header_end = pos.checked_add(HEADER_LEN).ok_or(CpioError::Truncated)?;
-    if header_end > archive.len() {
-        return Err(CpioError::Truncated);
-    }
-    let header = &archive[pos..header_end];
-    if header[0..6] != *MAGIC {
-        return Err(CpioError::BadMagic);
-    }
-
-    let mode = parse_hex8(&header[OFF_MODE..OFF_MODE + 8])?;
-    let filesize = parse_hex8(&header[OFF_FILESIZE..OFF_FILESIZE + 8])? as usize;
-    let namesize = parse_hex8(&header[OFF_NAMESIZE..OFF_NAMESIZE + 8])? as usize;
-    if namesize == 0 {
-        return Err(CpioError::BadField);
-    }
-
-    let name_end = header_end
-        .checked_add(namesize)
-        .ok_or(CpioError::Truncated)?;
-    if name_end > archive.len() {
-        return Err(CpioError::Truncated);
-    }
-    let name = nul_terminated(&archive[header_end..name_end]);
-
-    if name == TRAILER {
-        return Ok(None);
-    }
-
-    // newc pads header+name, and the data itself, to 4-byte boundaries
-    // measured from the record start.
-    let after_name = HEADER_LEN
-        .checked_add(namesize)
-        .ok_or(CpioError::Truncated)?;
-    let data_rel = align4(after_name).ok_or(CpioError::Truncated)?;
-    let data_start = pos.checked_add(data_rel).ok_or(CpioError::Truncated)?;
-    let data_end = data_start
-        .checked_add(filesize)
-        .ok_or(CpioError::Truncated)?;
-    if data_end > archive.len() {
-        return Err(CpioError::Truncated);
-    }
-    let data = &archive[data_start..data_end];
-
-    let padded = align4(filesize).ok_or(CpioError::Truncated)?;
-    let advance = data_rel.checked_add(padded).ok_or(CpioError::Truncated)?;
-
-    Ok(Some(CpioRecord {
-        entry: CpioEntry {
-            path: name,
-            mode,
-            data,
-        },
-        advance,
-    }))
+    Ok(count)
 }
 
 fn in_base(path: &[u8]) -> bool {

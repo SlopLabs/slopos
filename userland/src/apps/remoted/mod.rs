@@ -12,8 +12,8 @@
 //! shell it runs gets a privd connection of remoted's own, through which
 //! `bootctl`, `halt` and the other mechanisms ask privd as the paired agent,
 //! which the policy allows a fixed list of actions. The broker it dials
-//! therefore holds that list, so where to dial is read from the boot slot's
-//! base alone, which no process can rewrite: the host pairs a machine by
+//! therefore holds that list, so where to dial is read from the booted base
+//! alone, which no process can rewrite: the host pairs a machine by
 //! building the base it boots (`REMOTE_PAIRING_DIR`). A configuration
 //! anywhere a program could write would hand any program the authority of
 //! whatever broker it named.

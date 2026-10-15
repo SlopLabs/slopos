@@ -7,7 +7,7 @@ fn ask() -> Ask {
     Ask {
         id: 7,
         action: "org.slopos.boot.install".into(),
-        describe: "Install a kernel and base into a boot slot".into(),
+        describe: "Install a kernel into a boot slot".into(),
         program: Some("/bin/shell".into()),
         uid: SESSION_UID,
         pid: 42,

@@ -137,12 +137,16 @@ dependencies = [
 [[package]]
 name = "slopos-boot-core"
 version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+]
 
 [[package]]
 name = "slopos-bootdisk"
 version = "0.1.0"
 dependencies = [
  "slopos-boot-core",
+ "slopos-tls-core",
 ]
 
 [[package]]
@@ -293,6 +297,11 @@ dependencies = [
 [[package]]
 name = "slopos-initramfs"
 version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-boot-core",
+ "slopos-tls-core",
+]
 
 [[package]]
 name = "slopos-kallsyms"

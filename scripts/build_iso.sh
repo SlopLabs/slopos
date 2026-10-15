@@ -8,7 +8,8 @@ set -euo pipefail
 # Environment:
 #   KERNEL_ELF      - path to the kernel ELF to stage (required)
 #   LIMINE_DIR      - path to Limine directory (default: third_party/limine)
-#   INITRAMFS_FILE  - the base, loaded as the module `initramfs`
+#   INITRAMFS_FILE  - the base, staged where a boot partition keeps the current
+#                     one and loaded as that module
 #   INSTALL_ARCHIVE - the install medium's archive (scripts/build_install_medium.sh),
 #                     loaded as the module `install` the installer reads; the
 #                     image takes the GPT disk GUID it records, and the payload
@@ -34,6 +35,8 @@ fi
 
 # Ensure Limine is available
 "$SCRIPT_DIR/ensure_limine.sh"
+. "$SCRIPT_DIR/lib/bootdisk.sh"
+bootdisk_layout
 
 # Beside the output rather than in /tmp, which is often memory: an install
 # medium's payload is a toolchain.
@@ -71,15 +74,14 @@ fi
 # Done dynamically (rather than statically in limine.conf) so an ISO built
 # without an initramfs never points Limine at a missing module.
 if [ -n "${INITRAMFS_FILE:-}" ] && [ -f "${INITRAMFS_FILE}" ]; then
-    cp "${INITRAMFS_FILE}" "$ISO_ROOT/boot/initramfs.cpio"
-    printf '    module_path: boot():/boot/initramfs.cpio\n' >> "$ISO_ROOT/boot/limine.conf"
-    printf '    module_string: initramfs\n' >> "$ISO_ROOT/boot/limine.conf"
+    mkdir -p "$ISO_ROOT$BASE_DIR"
+    cp "${INITRAMFS_FILE}" "$ISO_ROOT$BASE_CURRENT"
+    printf '    module_path: boot():%s\n' "$BASE_CURRENT" >> "$ISO_ROOT/boot/limine.conf"
+    printf '    module_string: %s\n' "$BASE_MODULE" >> "$ISO_ROOT/boot/limine.conf"
 fi
 GPT_ARGS=()
 if [ -n "${INSTALL_ARCHIVE:-}" ]; then
     [ -f "$INSTALL_ARCHIVE" ] || { echo "No install archive at $INSTALL_ARCHIVE" >&2; exit 1; }
-    . "$SCRIPT_DIR/lib/bootdisk.sh"
-    bootdisk_layout
     ln "$INSTALL_ARCHIVE" "$ISO_ROOT/boot/install.cpio" 2>/dev/null ||
         cp "$INSTALL_ARCHIVE" "$ISO_ROOT/boot/install.cpio"
     printf '    module_path: boot():/boot/install.cpio\n' >> "$ISO_ROOT/boot/limine.conf"

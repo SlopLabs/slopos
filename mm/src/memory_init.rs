@@ -14,6 +14,7 @@ use crate::paging::init_paging;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::init_process_vm;
 use core::ffi::{c_char, c_int};
+use core::ops::Range;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::lock_class;
 
@@ -165,6 +166,26 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
         panic!("MM: Missing Limine memmap for usable regions");
     }
     INIT_STATS.lock().total_memory_bytes = total;
+}
+
+/// The whole pages of a base the boot left unused, which nothing reads
+/// again.
+fn record_unused_base(frames: Range<u64>) {
+    let aligned = frames.start % PAGE_SIZE_4KB == 0 && frames.end % PAGE_SIZE_4KB == 0;
+    if !aligned || frames.end <= frames.start {
+        return;
+    }
+    let bytes = frames.end - frames.start;
+    if mm_region_add_usable(
+        frames.start,
+        bytes,
+        b"unused base\0".as_ptr() as *const c_char,
+    ) != 0
+    {
+        klog_info!("MM: no room to record the unused base; its memory stays out");
+        return;
+    }
+    klog_info!("MM: {} KiB of the unused base are usable", bytes / 1024);
 }
 
 fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
@@ -488,7 +509,8 @@ fn display_memory_summary() {
 }
 /// Runs at memory-phase priority 2, before `META_SLOTS` is installed (5) and
 /// the OSTD `FrameAlloc` shim is registered (6), so nothing here may use the
-/// typestate `Frame<_>` alloc path.
+/// typestate `Frame<_>` alloc path. `unused_base` is the page range of a boot
+/// module the kernel will never read, which joins usable memory.
 pub fn init_memory_system_pre_typestate(
     memmap: *const LimineMemmapResponse,
     hhdm_offset: u64,
@@ -496,6 +518,7 @@ pub fn init_memory_system_pre_typestate(
     framebuffer: Option<(u64, &DisplayInfo)>,
     kernel_phys_base: u64,
     kernel_virt_base: u64,
+    unused_base: Option<Range<u64>>,
 ) -> c_int {
     klog_debug!("========== SlopOS Memory System Initialization ==========");
     klog_debug!("Initializing complete memory management system...");
@@ -528,6 +551,9 @@ pub fn init_memory_system_pre_typestate(
 
     configure_region_store(memmap);
     record_memmap_usable(memmap);
+    if let Some(frames) = unused_base {
+        record_unused_base(frames);
+    }
     record_kernel_core_reservations(kernel_phys_base, kernel_virt_base);
     record_memmap_reservations(memmap);
     record_framebuffer_reservation();

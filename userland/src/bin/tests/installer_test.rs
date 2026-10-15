@@ -13,14 +13,17 @@
 //! 1 (`slopos-a` of the installed disk): the root is the disk's, the other
 //!   system's entry is still in `BootOrder` and in Limine's menu, and the
 //!   clone fetches from the remote it was given. With a toolchain at
-//!   `/usr/local`, `scripts/selfhost.sh install tests` builds the system and
-//!   installs it into slot b, as a person at the shell runs it; without one,
-//!   slot a is cloned into b. Boot b once.
-//! 2 (`slopos-b`): it runs the build stage 1 tagged, and `bootctl commit`
-//!   makes it the default.
+//!   `/usr/local`, `scripts/selfhost.sh install tests` builds the system,
+//!   installs its base and puts its kernel into slot b, as a person at the
+//!   shell runs it; without one, slot a's kernel is cloned into b. Boot b
+//!   once.
+//! 2 (`slopos-b`): it runs the kernel and the base stage 1 built and tagged,
+//!   and `bootctl commit` makes it the default.
 //!
 //! Booted from the medium again with SlopOS on the disk, it leaves a file in
-//! the root and reinstalls over the same partitions, keeping the root:
+//! the root and a base in slot a, as a boot partition laid out before the
+//! bases moved beside the slots holds, and reinstalls over the same
+//! partitions, keeping the root:
 //!
 //! 3 (`slopos-a` again): the file is there, and what the slots said of the
 //!   system they held is gone.
@@ -34,7 +37,7 @@ use std::time::Instant;
 
 use slopos_boot_core::gpt::Partition;
 use slopos_boot_core::layout::{self, ESP_TYPE, ROOT_TYPE};
-use slopos_boot_core::{device_path, load_option, variables};
+use slopos_boot_core::{base, device_path, load_option, variables};
 use slopos_slibc::test_harness::note;
 use slopos_userland::boot_disk::{
     BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, not_installable,
@@ -206,6 +209,21 @@ fn register_foreign(esp: &Partition) -> Result<u16, String> {
     Ok(number)
 }
 
+/// Leave a base in slot a, where a boot partition laid out before the bases
+/// moved beside the slots kept one, for the reinstall to remove.
+fn leave_slot_base(disk: &str, partitions: &[Partition]) -> Result<(), String> {
+    let boot = partitions
+        .iter()
+        .find(|p| p.entry.type_guid == layout::BOOT_TYPE)
+        .ok_or("the disk has no boot partition")?;
+    let path = format!("{}/a/base.img", layout::SLOTS_DIR);
+    open_fat(&partition_node(disk, boot)?)?
+        .write_file(&path, b"a base kept per slot\n")
+        .map_err(|e| format!("{path}: {e:?}"))?;
+    println!("INSTALLER-LEFT-SLOT-BASE {path}");
+    Ok(())
+}
+
 /// Leave [`KEPT`] on the root partition `node`, as a person's work would be.
 fn leave_kept_file(node: &str) -> Result<(), String> {
     std::fs::create_dir_all(KEPT_MOUNT).map_err(|e| format!("{KEPT_MOUNT}: {e}"))?;
@@ -343,7 +361,10 @@ fn install() -> bool {
                     return false;
                 }
             };
-            if reinstall && let Err(why) = leave_kept_file(&node) {
+            if reinstall
+                && let Err(why) =
+                    leave_kept_file(&node).and_then(|()| leave_slot_base(&disk, &partitions))
+            {
                 note(&why);
                 return false;
             }
@@ -582,6 +603,15 @@ fn tried_boot(status: &str) -> bool {
             return false;
         }
         println!("INSTALLER-RUNS {version}");
+        match std::fs::read_to_string(base::BUILD_TAG_PATH) {
+            Ok(base) if base.trim() == tag => println!("INSTALLER-RUNS-BASE {tag}"),
+            other => {
+                note(&format!(
+                    "the base runs {other:?}, not the build tagged {tag}"
+                ));
+                return false;
+            }
+        }
     }
     match bootctl(&["commit"]) {
         Some(said) if said.contains("default: slopos-b") => {

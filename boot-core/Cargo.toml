@@ -3,7 +3,7 @@ name = "slopos-boot-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The boot disk as data: GUIDs, GPT, UEFI load options and device paths, the Boot Loader Interface, the disk layout and its Limine configuration, host-testable"
+description = "The boot disk as data: GUIDs, GPT, UEFI load options and device paths, the Boot Loader Interface, the disk layout and its Limine configuration, base images and kernel notes, host-testable"
 
 [lints]
 workspace = true
@@ -12,3 +12,6 @@ workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib"]
 doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }

@@ -58,7 +58,7 @@ plan uses:
   2. re-reading it
   3. formatting the new partitions
   4. filling the root
-  5. writing both slots
+  5. writing both kernel slots and the base
   6. writing the loader and its configuration
   7. making slot a the default
   8. checking the root

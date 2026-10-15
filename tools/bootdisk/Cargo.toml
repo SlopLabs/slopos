@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The boot disk's layout and Limine configuration, asked of boot-core by the host's disk builder"
+description = "The boot disk's layout, Limine configuration, bases and kernel notes, asked of boot-core by the host's disk builder"
 
 [lints]
 workspace = true
@@ -15,3 +15,4 @@ path = "src/main.rs"
 
 [dependencies]
 slopos-boot-core = { workspace = true }
+slopos-tls-core = { workspace = true }

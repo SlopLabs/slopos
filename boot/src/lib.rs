@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod apic_id;
+pub mod base;
 pub mod boot_drivers;
 pub mod boot_impl;
 pub mod boot_memory;

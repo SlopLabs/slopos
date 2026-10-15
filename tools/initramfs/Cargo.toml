@@ -14,3 +14,6 @@ name = "initramfs"
 path = "src/main.rs"
 
 [dependencies]
+slopos-abi = { workspace = true }
+slopos-boot-core = { workspace = true }
+slopos-tls-core = { workspace = true }

@@ -2,6 +2,52 @@
 
 **No finding is open.**
 
+Swept 2026-10-15: the bases beside the slots — the kernel choosing between
+the `initramfs` and `initramfs-previous` modules by the interface each names
+against the range its ELF note serves, and giving the other's pages to the
+allocator before memory is laid out; `boot-core`'s newc reader, base check
+and note reader, on images and kernels nothing has vouched for;
+`bootctl install` writing a kernel alone, and `bootctl base install` and
+`rollback` (privd's `org.slopos.base.*`, `RawBlock` and `Power`, an install
+asking the session's consent, a rollback asking none); and the installer
+writing both bases. Reviews found, before it landed, that a base install could
+leave the default slot's kernel serving neither base, so the fallback from a
+failed try would boot nothing, and `set-default` could make such a slot the
+default; that a cut between a rollback's or an install's two writes could
+leave only the image the default kernel cannot boot; that the check passed
+shapes the kernel's index, mounts or unpack refuse once the other base is
+freed — a name not canonical, a file where a base directory goes, a record in
+devfs, an empty symlink; that a manifest naming no mode let two bases
+differing only in modes count as one running base, and a boot partition named
+by another spelling of its node let none count; that a signal privd relays
+could stop `bootctl` between its writes; that the image named was read
+whatever its kind and size, as uid 0; and that `remote.py install` staged its
+kernel and base under `/var/tmp/slopos-remote`, where a session program could
+replace either before the paired agent installed it, which for the base now
+meant every slot's next boot with no consent asked. A base install now refuses
+what leaves the default, the running or the armed slot's kernel serving
+neither base,
+`set-default` takes only a slot whose kernel serves a base on the partition,
+both writes go first over the image the default does not need, the check
+holds every record to what the kernel takes and to a manifest naming each
+record's mode and digest in archive order, the running base is found by the
+boot partition's node rather than its name, `bootctl` ignores the termination
+signals once it writes the bases, an image is a regular file opened without
+following a link or blocking, a base within half the machine's memory with
+the base kept beside it, and `bootctl install` and `base install` take the
+SHA-256 `remote.py` pushed and install only those bytes, saying of another
+file only that it is not that image. Below the
+bar: a rollback takes no consent, as `oneshot` takes none, so the session may
+put back the base that last ran; a base install takes effect for every slot
+with no trial boot, so a base that checks out and fails in userland stays
+current until a reinstall that keeps the root writes the medium's, or the
+rescue shell `plans/live-userland.md` plans rolls it back; a power cut between
+two base writes leaves one image twice, which the default kernel still boots;
+the person's consent to a base install names a path, whose contents the
+session may change before `bootctl` reads them, as with `boot.install`; and
+the unused base's pages reach the allocator holding the base's bytes, which
+every program may read.
+
 Swept 2026-10-14: the apps outside the base — the loader's `/usr/local/lib`
 rule (searched only for a process neither `AT_SECURE` nor of effective uid 0,
 exec marking mixed ids `AT_SECURE`, so no process holding more than the

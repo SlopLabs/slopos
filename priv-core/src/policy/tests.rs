@@ -17,7 +17,7 @@ action org.slopos.boot.install
   allow    root
   allow    session consent
   allow    paired
-  describe \"Install a kernel and base into a boot slot\"
+  describe \"Install a kernel into a boot slot\"
 
 action org.slopos.net.toggle
   program /bin/ip
@@ -44,10 +44,7 @@ fn the_example_parses_into_what_it_says() {
     assert_eq!(install.uid, 0);
     assert!(install.cwd);
     assert_eq!(install.exclusive_group(), Some("boot-slots"));
-    assert_eq!(
-        install.describe,
-        "Install a kernel and base into a boot slot"
-    );
+    assert_eq!(install.describe, "Install a kernel into a boot slot");
     assert_eq!(
         install.shapes,
         vec![
@@ -379,6 +376,7 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     let paired = Requester::new(SESSION_UID, Some(REMOTED), true);
     let paired_list = [
         "org.slopos.boot.",
+        "org.slopos.base.",
         "org.slopos.power.",
         "org.slopos.cpufreq.set",
         "org.slopos.kconsole",
@@ -410,7 +408,9 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     for (name, args) in [
         ("org.slopos.power.poweroff", &["halt"][..]),
         ("org.slopos.power.reboot", &["reboot"]),
-        ("org.slopos.boot.install", &["install", "b", "/k", "/b"]),
+        ("org.slopos.boot.install", &["install", "b", "/k"]),
+        ("org.slopos.base.install", &["base", "install", "/b"]),
+        ("org.slopos.base.rollback", &["base", "rollback"]),
         ("org.slopos.net.toggle", &["net", "off"]),
         ("org.slopos.net.configure", &["link", "set", "lo", "up"]),
         ("org.slopos.cpufreq.set", &["set", "hwp"]),
@@ -420,11 +420,34 @@ fn the_shipped_policy_says_what_the_access_model_does() {
             "{name}"
         );
     }
-    assert!(
-        !policy
-            .action("org.slopos.power.reboot")
+    for (name, args) in [
+        ("org.slopos.power.reboot", &["halt"][..]),
+        ("org.slopos.base.rollback", &["base", "rollback", "/b"]),
+        ("org.slopos.base.install", &["install", "b", "/k"]),
+        ("org.slopos.boot.install", &["base", "install", "/b"]),
+    ] {
+        assert!(
+            !policy.action(name).unwrap().accepts(&args_of(args)),
+            "{name} {args:?}"
+        );
+    }
+    let slots = policy
+        .action("org.slopos.boot.install")
+        .unwrap()
+        .exclusive_group();
+    for name in ["org.slopos.base.install", "org.slopos.base.rollback"] {
+        assert_eq!(
+            policy.action(name).unwrap().exclusive_group(),
+            slots,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        policy
+            .action("org.slopos.base.rollback")
             .unwrap()
-            .accepts(&args_of(&["halt"]))
+            .admits(&session),
+        Verdict::Run
     );
     let toggle = policy.action("org.slopos.net.toggle").unwrap();
     assert_eq!(
@@ -433,6 +456,7 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     );
     for name in [
         "org.slopos.boot.install",
+        "org.slopos.base.install",
         "org.slopos.boot.set-default",
         "org.slopos.net.configure",
     ] {

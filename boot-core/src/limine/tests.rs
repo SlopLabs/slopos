@@ -39,24 +39,45 @@ fn rendered(config: &Config<'_>) -> String {
 }
 
 #[test]
-fn slots_boot_from_the_boot_partition_and_nothing_names_a_default() {
+fn slots_boot_their_kernels_on_both_bases_and_nothing_names_a_default() {
     let text = rendered(&Config {
         serial: true,
         resolution: Some((1920, 1080)),
         ..config(&SLOTS, "tests=on root=auto")
     });
     let boot = "guid(11111111-2222-4333-8444-555555555555)";
+    let bases = format!(
+        "    module_path: {boot}:/boot/base/current.img\n    module_string: initramfs\n    \
+         module_path: {boot}:/boot/base/previous.img\n    module_string: initramfs-previous\n"
+    );
     let expected = format!(
         "timeout: 0\nserial: yes\nverbose: yes\n\
          /slopos-a\n    protocol: limine\n    path: {boot}:/boot/a/kernel.elf\n    \
-         cmdline: tests=on root=auto slot=a\n    module_path: {boot}:/boot/a/base.img\n    \
-         module_string: initramfs\n    resolution: 1920x1080\n\
+         cmdline: tests=on root=auto slot=a\n{bases}    resolution: 1920x1080\n\
          /slopos-b\n    protocol: limine\n    path: {boot}:/boot/b/kernel.elf\n    \
-         cmdline: tests=on root=auto slot=b\n    module_path: {boot}:/boot/b/base.img\n    \
-         module_string: initramfs\n    resolution: 1920x1080\n"
+         cmdline: tests=on root=auto slot=b\n{bases}    resolution: 1920x1080\n"
     );
     assert_eq!(text, expected);
     assert!(!text.contains("default_entry"));
+}
+
+#[test]
+fn every_entry_loads_the_same_two_bases_whatever_its_slot() {
+    let entries = [
+        SLOTS[0],
+        MenuEntry::Firmware { title: "cachyos" },
+        MenuEntry::Slot {
+            slot: "bad",
+            cmdline: "panic.boot=on",
+        },
+    ];
+    let text = rendered(&config(&entries, ""));
+    for path in ["/boot/base/current.img", "/boot/base/previous.img"] {
+        assert_eq!(text.matches(path).count(), 2, "{path} in {text}");
+    }
+    assert!(!text.contains("base.img"));
+    let firmware = &text[text.find("/cachyos").unwrap()..text.find("/slopos-bad").unwrap()];
+    assert!(!firmware.contains("module_path"));
 }
 
 #[test]

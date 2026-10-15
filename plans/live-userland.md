@@ -41,22 +41,22 @@ plans lands second re-baselines that step.
 
 ## Where it stands
 
-**The base is per slot and fixed for the boot.**
-- Each slot holds a kernel and its base: `/boot/<slot>/kernel.elf` and
-  `base.img` (`boot-core/src/layout.rs:93-96`). Each Limine entry loads its
-  slot's `base.img` as module `initramfs` (`boot-core/src/limine.rs:153-191`).
-  Booting the other slot therefore also swaps the userland.
-- The kernel takes the module named `initramfs`, else the first
-  (`boot/src/limine_protocol.rs:440-469`). Module memory stays mapped for the
-  kernel's lifetime.
+**The base is the boot partition's and fixed for the boot (Phase 3).**
+- Slots hold kernels only; every entry loads `/boot/base/current.img` and
+  `previous.img` as `initramfs` and `initramfs-previous`
+  (`boot-core/src/layout.rs`, `limine.rs`).
+- In the loader handoff the kernel boots the first base whose interface it
+  serves and hands the other's pages to memory init as usable
+  (`boot/src/base.rs`, `mm/src/memory_init.rs`). Nothing can reach the
+  module after; there is no API to give the allocator memory after boot.
 - `BASE_FS` is a static whose index is a `OnceLock`, installed once at boot
-  (`fs/src/basefs.rs:274-318`). File data are slices of the module.
-  `MEDIUM_FS` is a second static instance for the install medium (`:283`).
+  (`fs/src/basefs.rs`). File data are slices of the chosen module.
+  `MEDIUM_FS` is a second static instance for the install medium.
 - `BASE_DIRS` are mounted read-only and pinned (`fs/src/vfs/init.rs:536-555`).
   The syscall layer refuses to unmount them or mount over them
   (`core/src/syscall/fs/mount_handlers.rs`).
 - Sizes, measured: the shipped base is 21 MB and the release kernel 12 MB. The
-  boot partition is 1 GiB (`boot-core/src/layout.rs:42`).
+  boot partition is 1 GiB (`layout::BOOT_BYTES`).
 
 **Program identity assumes one base per boot.**
 - Exec records `Program::Base(inode)` when the image and its interpreter come
@@ -99,11 +99,11 @@ plans lands second re-baselines that step.
   - ping and nc: `resolve` and the rings;
   - oops_smoke: `test_panic`.
 
-**Kernel and base carry an interface number nothing yet acts on.** The kernel
-states the base interfaces it serves in `sys_info` and its ELF note, and
-`check_base_interface.sh` holds the private call surface to the number
-(Phase 1). No base records the number it needs yet, and no boot or install
-compares the two: that is Phase 3.
+**Kernel and base each carry their interface number.** The kernel states the
+range it serves in `sys_info` and its ELF note, which `boot-core::kernel`
+reads from the file; a base carries `base-interface` and `base-manifest`,
+which `boot-core::base` reads (Phases 1 and 3). The boot chooses by them,
+and `bootctl install` refuses a kernel that serves neither base.
 
 **Trees.** `tree-core` installs a tree by manifest, replacing what the old
 manifest names and keeping what the user added. A manifest is keyed by the
@@ -113,12 +113,13 @@ on the host, and `slopos_userland::tree` in the guest, for the installer,
 init and `/bin/tree-install`.
 
 **Building in the guest.** `scripts/selfhost.sh install` builds the kernel,
-the userland, the base and the apps, installs the kernel and base into the
-spare slot and arms one boot of it. It installs the apps through the
-`tree-install` it built when the running `libc.so` is the one they link, and
-otherwise prints the command for the new boot. `just remote-install` and a
-bare `bootctl install` carry no apps: a machine moved by them from a base
-that held the apps has none until a tree install (Phase 5).
+the userland, the base and the apps, runs `bootctl base install` (offline:
+the next boot takes it), installs the kernel into the spare slot and arms
+one boot of it. It installs the apps through the `tree-install` it built
+when the running `libc.so` is the one they link, and otherwise prints the
+command for the new boot. `just remote-install` does the same base and
+kernel install and carries no apps: a machine moved by it from a base that
+held the apps has none until a tree install (Phase 5).
 
 ## What the prior art settles
 
@@ -128,6 +129,10 @@ that held the apps has none until a tree install (Phase 5).
 | macOS: sealed system volume and libSystem | System files are sealed; the only stable interface is the system library, not raw syscalls | `libc.so` as the contract for programs outside the base |
 | Fuchsia base packages ([packages](https://fuchsia.dev/fuchsia-src/concepts/packages/package)) | The base is updated whole; other packages are updated independently | One sealed unit for the core |
 | Android APEX ([format](https://source.android.com/docs/core/ota/apex)) and soft restart ([docs](https://source.android.com/docs/core/runtime/soft-restart)) | A module is swapped live and only its dependents restart | Restart only the services whose program changed |
+| FreeBSD `installkernel` ([kern.post.mk](https://github.com/freebsd/freebsd-src/blob/main/sys/conf/kern.post.mk)) | `/boot/kernel` moves to `kernel.old` only when the running kernel is the one in `/boot/kernel`; otherwise it is replaced, keeping the `kernel.old` that booted | "previous always holds the base that last ran", decided by the running base's manifest |
+| Fuchsia base packages and A/B/R slots ([assembly RFC](https://fuchsia.dev/docs/contribute/governance/rfcs/0072_standalone_image_assembly_tool)) | Each slot boots a kernel image; the base packages live in a shared store the slot's boot arguments name | Slots hold kernels; the base is the boot partition's, beside them |
+| Linux initrd ([initramfs.c](https://github.com/torvalds/linux/blob/master/init/initramfs.c)) | The initrd's whole pages are freed once it is unpacked; Linux never chooses between archives | The unused base's pages go back; here before the allocator is seeded, so nothing reads them after |
+| Limine protocol ([PROTOCOL.md](https://github.com/limine-bootloader/limine-protocol/blob/trunk/PROTOCOL.md)) | A module is 4 KiB aligned; module memmap entries are illustrative only; a `module_path` it cannot open fails the entry | The page range freed is the module's whole pages, computed from the module, not the memmap; every disk holds both bases |
 | NixOS `switch-to-configuration` ([manual](https://nixos.org/manual/nixos/stable/)) | Activation restarts only the units that changed; old generations stay for rollback | Digest-driven restarts; `previous.img` |
 | systemd `soft-reboot` ([man](https://www.freedesktop.org/software/systemd/man/latest/systemd-soft-reboot.service.html)) | Userspace switches root without reinitialising the kernel | Not taken: it ends every process, which a mount switch does not need |
 | Haiku package activation ([infrastructure](https://www.haiku-os.org/docs/develop/packages/Infrastructure.html)) | Packages activate live; the last consistent state is recorded | "previous always holds the base that last ran" |
@@ -169,7 +174,8 @@ states the list, with the apps in a list of their own.
 
 The archive gains two files, which `tools/initramfs` writes:
 - `/usr/share/slopos/base-interface`: the interface number it needs;
-- `/usr/share/slopos/base-manifest`: one `<sha256> <path>` line per file.
+- `/usr/share/slopos/base-manifest`: one `<sha256> <mode> <path>` line per
+  record but itself, in archive order.
 
 ### The boot partition
 
@@ -190,8 +196,8 @@ The archive gains two files, which `tools/initramfs` writes:
 - **Previous always holds the base that last ran.**
   - `base install` copies `current` over `previous` only when `current` is the
     running base; otherwise it replaces `current` alone.
-  - `base rollback` writes `current` with the previous image, then `previous`
-    with the image it rolled back from.
+  - `base rollback` swaps the two, writing first over the image the default
+    slot's kernel does not need.
 - **No in-place migration.** An installed disk moves to this layout by a
   reinstall that keeps its root. `bootctl` never writes the ESP, and
   `limine.conf` lives there.
@@ -261,11 +267,14 @@ The policy gains:
 
 | Action | Command | Capabilities | Allow |
 |---|---|---|---|
-| `org.slopos.base.install` | `base install *` | `RawBlock BaseUpdate`, `cwd`, exclusive `boot-slots` | `root`; `session consent`; `paired` |
-| `org.slopos.base.rollback` | `base rollback` | `RawBlock BaseUpdate`, exclusive `boot-slots` | `root`; `session`; `paired` |
+| `org.slopos.base.install` | `base install *` | `RawBlock Power BaseUpdate`, `cwd`, exclusive `boot-slots` | `root`; `session consent`; `paired` |
+| `org.slopos.base.rollback` | `base rollback` | `RawBlock Power BaseUpdate`, exclusive `boot-slots` | `root`; `session`; `paired` |
 
 `org.slopos.boot.install` takes `install <slot> <kernel>`. A rollback needs
 no dialog, because the person approved that base when it was installed.
+`Power` finds the boot partition, through `LoaderDevicePartUUID`; Phase 3
+ships both actions without `BaseUpdate`, which Phase 5 adds.
+`org.slopos.boot.set-default` gains `RawBlock`, to read the slot's kernel.
 
 ### `libc.so` as the stable interface
 
@@ -461,19 +470,41 @@ its own.
   `fs_tree.py`'s tests of two trees at one destination, and
   `test-installer`'s markers for the apps.
 
-### Phase 3: The boot partition
+### Phase 3: The boot partition — done
 
-The layout, both modules in every entry, the kernel choosing a base by
-interface number and freeing the other. `bootctl install <slot> <kernel>` and
-`bootctl base install|rollback`, offline, applied at the next boot. The
-installer, `build_bootdisk.sh` and the ISO on the new layout.
-
-Graded by:
-- `boot-core` host tests of the rendered entries;
-- kernel tests choosing current, previous or neither among synthetic archives;
-- `test-install` booting both kernel slots on one base, and installing then
-  rolling back a base across boots;
-- `test-installer` on the new layout, its reinstall keeping the root.
+- `boot-core`: `layout::BASE_*` (slots hold kernels; no slot is `base`),
+  every entry rendering both modules; `newc`, the one reader and writer of
+  the archive format, under the kernel's `fs::cpio`, the packer, `bootctl`
+  and the tests; `base` (interface, manifest lines, `choose`, `check`,
+  `describe`); `kernel::served_interfaces`, the note found by section name.
+- `tools/initramfs` writes `base-interface` and `base-manifest` and holds its
+  output to `base::check`.
+- The kernel chooses in the loader handoff (`boot/src/base.rs`), logs
+  `BOOT: base current|previous (<n> bytes), interface <i>`, fails `initramfs
+  root` naming both readings when it serves neither, and hands the unused
+  base's pages to memory init (`init_memory_system_pre_typestate`'s
+  `unused_base`). The ISO stages its one base at `/boot/base/current.img`, as
+  the medium serves it (`MEDIUM_BASE`).
+- `bootctl install <slot> <kernel>` and `clone` move a kernel alone and refuse
+  one that serves neither base; `bootctl base install <image>` and `base
+  rollback` (`org.slopos.base.*`) write the bases offline by the previous
+  rule, guarding the default and running kernels; `set-default` takes only a
+  slot that serves a base; `status` names each base's interface, build tag
+  and whether it runs.
+- The installer writes both kernel slots and the base (removing a kept
+  boot partition's per-slot `base.img`); `build_bootdisk.sh` refuses a base
+  that does not check out or a kernel that does not serve it;
+  `selfhost.sh install` and `remote.py install` install the base, then the
+  kernel; `bootdisk base|kernel` answer the host's recipes.
+- Graded by `boot-core`'s host tests (rendering, `newc`, `base`, `check`, the
+  note), the kernel's `base_tests` (current, previous or neither over
+  synthetic archives, and a two-base boot's freed pages in usable memory),
+  `test-install` (both kernel slots on one base; a base installed, booted,
+  rolled back; an unserved one passed over for previous; an unserved kernel,
+  and a base or default leaving the default unserved, refused),
+  `test-installer` (the layout on every disk, the built base running, the
+  reinstall keeping the root and removing a per-slot base) and `test-remote`
+  (a new base and kernel installed as the paired agent).
 
 ### Phase 4: init as a service manager
 
@@ -618,10 +649,12 @@ Graded by:
   host tree stands until the host's tree changes; the host then replaces what
   its own record names and refuses, with a warning each build, a path the
   guest's install added that its tree now adds too.
-- **The apps are no slot's.** They follow the `libc.so` they link, which a
-  slot's base carries: `selfhost.sh install` installs them at once only over
-  the same `libc.so`, and a rollback keeps them. Exports only grow, so apps
-  built against an older `libc.so` run on a newer one.
+- **The apps are no slot's.** They follow the `libc.so` they link, which the
+  base carries: `selfhost.sh install` installs them at once only over the
+  same `libc.so`, and a rollback keeps them. Exports only grow, so apps
+  built against an older `libc.so` run on a newer one; apps installed for a
+  base that was then rolled back may need an export the older one lacks,
+  and are installed again from a build of the base that runs.
 - **The apps' manifest is computed from the tree where it is installed**: its
   identity is a digest of every entry, so no manifest ships beside the apps to
   disagree with them. The toolchain's comes with the payload, written by the
@@ -642,9 +675,57 @@ Graded by:
 - **Repair is the medium's:** one consent, a rescue shell with every delegable
   capability, and tools that work on a mounted disk. There is no chroot.
 - **Previous always holds the base that last ran.** Two uninstalled bases in a
-  row never push the running one off the disk.
+  row never push the running one off the disk. The running base is the one
+  whose manifest `/usr/share/slopos/base-manifest` serves, on the disk the
+  system booted from: no flag records which module a boot took, so a live
+  switch (Phase 5) changes what runs without a second record to keep true.
+  The manifest names every record, its mode and digest, so equal manifests
+  are one tree. Installing the image current already holds writes nothing.
+- **No base write leaves the default or the running kernel serving neither
+  base.** A base install checks the kernel notes of the default slot, the
+  running one and the one armed to boot once first, since a try that fails falls back on the default, and
+  `set-default` takes only a slot whose kernel serves a base on the
+  partition. Writing both bases, an install or a rollback writes first over
+  the image the default does not need, and ignores the termination signals
+  privd relays once the writes begin. A power cut
+  between the two writes still leaves one image twice. Both bases together
+  take at most half the machine's memory, since every boot loads both.
+- **An image a privileged install reads may name its digest.** `bootctl
+  install` and `base install` take a SHA-256 after the path and install only
+  those bytes: `remote.py` pushes as the session, which may replace the file
+  before the paired agent's install reads it.
+- **The kernel chooses before memory is laid out.** It reads only each base's
+  interface, in the loader handoff, and the unused base's pages are usable
+  memory before the frame allocator is seeded: no API gives the allocator
+  memory after boot, frame descriptors and metadata slots cover those pages
+  as any others, and nothing can read the module after. The page range comes
+  from the module, every whole 4 KiB page it covers, so nothing else can lie
+  in one; its memmap entries are not authoritative.
+- **The base the kernel would index is decided before it reaches the disk.**
+  The other base is freed before the chosen one is indexed, mounted and
+  unpacked, so a base any of those would refuse must never be chosen:
+  `boot-core::base::check` (canonical names, each once and none beneath a
+  file; the base directories, those on the way to them and the kernel's own
+  mount points directories, nothing in devfs; symlinks the kernel takes; an
+  interface; the manifest, read in one pass in archive order) is what the
+  packer writes, what `bootctl base install` takes and what the host's disk
+  builder takes. It allocates nothing and compares records pairwise, so it
+  caps a base at 2048 records.
+- **One reading of the archive.** `boot-core::newc` reads and writes `newc`
+  for the kernel's base and RAM root, the packer, `bootctl`, the host tools
+  and the tests, and a path names the last record at it, as the base's index
+  serves it.
+- **A kernel's note is read by section name**, through the section headers;
+  `bootctl status` reads no kernel, since the FAT reader reads whole files
+  and a tests kernel is 130 MB.
+- **A base goes in before the kernel that needs it.** `bootctl install`
+  refuses a kernel serving neither base, so `selfhost.sh install` and
+  `remote.py install` install the base first: a kernel that serves only a
+  newer interface is accepted against it.
+- **No slot is named `base`**: the bases' directory sits among the slots'.
 - **No in-place migration.** A reinstall keeping the root moves an installed
-  disk to the layout, because `bootctl` never writes the ESP.
+  disk to the layout, because `bootctl` never writes the ESP; it removes the
+  per-slot `base.img` a kept boot partition held.
 - **The interface surface is the compiler's view of `slopos-abi`.**
   `check_base_interface.sh` digests rustdoc's JSON, not source text: each
   private call's number and the backticked signature its doc states, register
@@ -668,8 +749,7 @@ Graded by:
   `.note.slopos.base-interface` (owner `SlopOS`, type
   `NT_SLOPOS_BASE_INTERFACE` = 1, descriptor `min, max` as little-endian
   `u32`s) sits in the read-only `PT_LOAD` with no `PT_NOTE`: Limine ignores
-  notes, and a new `PHDRS` keyword would need a linker-gate probe. Phase 3's
-  reader finds it by name in the kernel file.
+  notes, and a new `PHDRS` keyword would need a linker-gate probe.
 - **`libc.so` holds its exports and every header record.** A data export
   carries its size. Field types are not held, since clang's spelling of them
   moves between releases; nor are function prototypes, or an alignment set on

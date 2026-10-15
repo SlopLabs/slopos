@@ -12,7 +12,7 @@
 //!   allow    root
 //!   allow    session consent
 //!   allow    paired
-//!   describe "Install a kernel and base into a boot slot"
+//!   describe "Install a kernel into a boot slot"
 //! ```
 //!
 //! `args` repeats, one shape each: fixed leading words, then `*` for any
@@ -128,7 +128,7 @@ pub struct Requester<'a> {
 
 impl<'a> Requester<'a> {
     /// `program` is the base path `SO_PEERPROGRAM` answered, `None` for code
-    /// from outside the base; `base_paired` whether the boot slot's base
+    /// from outside the base; `base_paired` whether the booted base
     /// carries a remote pairing.
     pub fn new(uid: u32, program: Option<&'a str>, base_paired: bool) -> Self {
         Self {

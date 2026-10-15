@@ -18,7 +18,7 @@ use limine::{
 };
 
 use slopos_abi::DisplayInfo;
-use slopos_boot_core::Guid;
+use slopos_boot_core::{Guid, layout};
 use slopos_ostd::sync::{InitInPlace, KernelSync, OnceLock};
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -301,13 +301,6 @@ fn build_system_info() -> SystemInfo {
             kernel_file.data().len(),
             slopos_core::syscall::core_handlers::BUILD_TAG.unwrap_or("-")
         );
-        if let Some(module) = initramfs_module() {
-            klog_info!(
-                "BOOT: base {} ({} bytes)",
-                module.path(),
-                module.data().len()
-            );
-        }
         let (cmdline_str, cmdline_ptr) = merged_cmdline(kernel_file.cmdline());
         if !cmdline_str.is_empty() {
             info.cmdline_ptr = KernelSync::new(cmdline_ptr);
@@ -319,6 +312,8 @@ fn build_system_info() -> SystemInfo {
             klog_debug!("Kernel cmdline: <empty>");
         }
     }
+
+    record_base(info.hhdm_offset);
 
     if let Some(memmap) = MEMMAP_REQUEST.response() {
         let entries = memmap.entries();
@@ -435,37 +430,43 @@ pub fn kernel_disk_guid() -> Option<Guid> {
     (!guid.is_zero()).then_some(guid)
 }
 
-/// Bytes of the initramfs module loaded by Limine, if present.
-///
-/// A `newc` cpio archive declared in `limine.conf` as `module_string: initramfs`.
-/// `'static` because Limine keeps module memory mapped for the kernel's lifetime.
-pub fn initramfs() -> Option<&'static [u8]> {
-    initramfs_module().map(|module| module.data())
+/// The entry's two bases, read and chosen between where the loader placed
+/// them, which the HHDM maps.
+fn record_base(hhdm: u64) {
+    let module = |string: &str| {
+        let file = module(string)?;
+        let archive = file.data();
+        Some(crate::base::Module {
+            archive,
+            at: (archive.as_ptr() as u64)
+                .checked_sub(hhdm)
+                .filter(|_| hhdm != 0),
+        })
+    };
+    crate::base::record(
+        module(layout::BASE_MODULE),
+        module(layout::PREVIOUS_BASE_MODULE),
+    );
 }
 
-/// Bytes of the module `limine.conf` names with `module_string: <string>`.
-pub fn module(string: &str) -> Option<&'static [u8]> {
+fn module(string: &str) -> Option<&'static LimineFile> {
     MODULES_REQUEST
         .response()?
         .modules()
         .iter()
+        .copied()
         .find(|module| module.cmdline() == string)
-        .map(|module| module.data())
+}
+
+/// The install medium's archive, when the loader carried one.
+pub fn install_archive() -> Option<&'static [u8]> {
+    module(layout::MEDIUM_MODULE).map(LimineFile::data)
 }
 
 /// The kernel's own ELF file as the loader read it, kept for the kernel's
 /// lifetime as its modules are.
 pub fn kernel_file() -> Option<&'static [u8]> {
     Some(KERNEL_FILE_REQUEST.response()?.executable_file().data())
-}
-
-fn initramfs_module() -> Option<&'static LimineFile> {
-    let modules = MODULES_REQUEST.response()?.modules();
-    modules
-        .iter()
-        .copied()
-        .find(|module| module.cmdline() == "initramfs")
-        .or_else(|| modules.first().copied())
 }
 
 pub fn is_framebuffer_available() -> i32 {

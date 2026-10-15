@@ -186,6 +186,7 @@ fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         framebuffer,
         boot_info.kernel_phys_base,
         boot_info.kernel_virt_base,
+        crate::base::unused_frames(),
     );
     if rc != 0 {
         klog_info!("ERROR: Memory system pre-typestate init failed");

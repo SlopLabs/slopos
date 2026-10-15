@@ -3,16 +3,18 @@
 //! `LoaderEntryDefault` only while that is unset, so the Boot Loader Interface
 //! variable is what chooses the slot.
 //!
-//! Each slot's kernel and base are named by the boot partition's GUID, which
-//! resolves wherever Limine was started from. Another system's firmware entry
-//! is offered as an `efi_boot_entry`, which sets `BootNext` to it and resets.
+//! Each slot's kernel, and the two bases every slot loads, are named by the
+//! boot partition's GUID, which resolves wherever Limine was started from.
+//! Limine fails an entry whose module it cannot open, so a disk always holds
+//! both bases. Another system's firmware entry is offered as an
+//! `efi_boot_entry`, which sets `BootNext` to it and resets.
 
 use core::fmt::{self, Write};
 
 use crate::guid::Guid;
 use crate::layout::{
-    BASE_FILE, ENTRY_PREFIX, FALLBACK_LOADER, FIRMWARE_ENTRY, KERNEL_FILE, LOADER, SLOTS_DIR,
-    valid_slot,
+    BASE_CURRENT, BASE_MODULE, BASE_PREVIOUS, ENTRY_PREFIX, FALLBACK_LOADER, FIRMWARE_ENTRY,
+    KERNEL_FILE, LOADER, PREVIOUS_BASE_MODULE, SLOTS_DIR, valid_slot,
 };
 use crate::load_option::LoadOption;
 
@@ -21,8 +23,8 @@ const FIRMWARE_TITLE_MAX: usize = 127;
 
 #[derive(Clone, Copy)]
 pub enum MenuEntry<'a> {
-    /// The entry `slopos-<slot>`, booting the slot's kernel and base with
-    /// `cmdline` appended to the shared one.
+    /// The entry `slopos-<slot>`, booting the slot's kernel with `cmdline`
+    /// appended to the shared one.
     Slot { slot: &'a str, cmdline: &'a str },
     /// Another system, booted through its firmware entry of this description.
     Firmware { title: &'a str },
@@ -179,11 +181,13 @@ impl Config<'_> {
             write!(out, " {word}")?;
         }
         writeln!(out)?;
-        writeln!(
-            out,
-            "    module_path: guid({boot}):{SLOTS_DIR}/{slot}/{BASE_FILE}"
-        )?;
-        writeln!(out, "    module_string: initramfs")?;
+        for (path, module) in [
+            (BASE_CURRENT, BASE_MODULE),
+            (BASE_PREVIOUS, PREVIOUS_BASE_MODULE),
+        ] {
+            writeln!(out, "    module_path: guid({boot}):{path}")?;
+            writeln!(out, "    module_string: {module}")?;
+        }
         if let Some((width, height)) = self.resolution {
             writeln!(out, "    resolution: {width}x{height}")?;
         }

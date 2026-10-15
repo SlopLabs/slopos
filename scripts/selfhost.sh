@@ -6,10 +6,12 @@
 # `build` makes the kernel, the userland and the base image the kernel boots
 # with: `builddir/kernel-<variant>.elf` and `builddir/initramfs.cpio`, or for
 # `tests` the tests userland and `builddir/initramfs-tests.cpio`, and the apps
-# outside the base, `builddir/apps`. `install` puts the kernel and base into
-# the slot that is not the default, arming one boot of it: `bootctl reboot`
-# tries it and `bootctl commit` keeps it; without the commit the next boot is
-# the default. The apps go to /usr/local at once, as whoever runs it, when the
+# outside the base, `builddir/apps`. `install` makes the base the one every
+# slot boots from the next boot on, and puts the kernel into the slot that is
+# not the default, arming one boot of it: `bootctl reboot` tries it and
+# `bootctl commit` keeps it; without the commit the next boot is the default
+# kernel, on the new base all the same, which `bootctl base rollback` takes
+# back. The apps go to /usr/local at once, as whoever runs it, when the
 # running libc.so is the one they were built against; otherwise the command
 # that installs them is printed for the new boot.
 set -eu
@@ -79,8 +81,9 @@ COREUTILS_LINKS="$COREUTILS_TOOLS" EXTRA_SHARED_OBJECTS="$shared" \
 [ "$1" = install ] || exit 0
 
 elf="$REPO_ROOT/builddir/kernel-$variant.elf"
+bootctl base install "$REPO_ROOT/$base"
 slot="$(bootctl spare)"
-bootctl install "$slot" "$elf" "$REPO_ROOT/$base"
+bootctl install "$slot" "$elf"
 bootctl oneshot "slopos-$slot"
 apps="builddir/tree-install.elf apps builddir/apps /usr/local"
 if cmp -s /lib/libc.so builddir/libc.so; then
@@ -89,4 +92,4 @@ if cmp -s /lib/libc.so builddir/libc.so; then
 else
     echo "selfhost: the apps need this build's libc.so; once slopos-$slot is up, run in $REPO_ROOT: $apps"
 fi
-echo "selfhost: bootctl reboot tries slopos-$slot once; bootctl commit there keeps it"
+echo "selfhost: bootctl reboot tries slopos-$slot once on the new base; bootctl commit there keeps the kernel, bootctl base rollback the old base"

@@ -67,7 +67,7 @@ set -euo pipefail
 #   FS_BASE       - `image` (default) installs the binaries and assets; `boot`
 #                   refuses binaries, COREUTILS_LINKS and EXTRA_SHARED_OBJECTS
 #                   and leaves the base directories as sealed mount points,
-#                   for a root the boot slot's base image is mounted over.
+#                   for a root the booted base image is mounted over.
 
 IMAGE_PATH="${1:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
 BUILD_DIR="${2:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
@@ -108,7 +108,7 @@ case "$FS_BASE" in
     image) ;;
     boot)
         if [ "${#BINS[@]}" -gt 0 ] || [ -n "${COREUTILS_LINKS:-}${EXTRA_SHARED_OBJECTS:-}" ]; then
-            echo "build_fs_image: FS_BASE=boot installs no binaries; the boot slot's base carries them" >&2
+            echo "build_fs_image: FS_BASE=boot installs no binaries; the booted base carries them" >&2
             exit 2
         fi
         ;;

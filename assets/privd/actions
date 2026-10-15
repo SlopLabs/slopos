@@ -35,7 +35,7 @@ action org.slopos.boot.status
   allow    root
   allow    session
   allow    paired
-  describe "Show what each boot slot holds and what boots"
+  describe "Show what each boot slot and base holds and what boots"
 
 action org.slopos.boot.install
   program  /bin/bootctl
@@ -47,7 +47,7 @@ action org.slopos.boot.install
   allow    root
   allow    session consent
   allow    paired
-  describe "Install a kernel and base into a boot slot"
+  describe "Install a kernel into a boot slot"
 
 action org.slopos.boot.clone
   program  /bin/bootctl
@@ -58,7 +58,30 @@ action org.slopos.boot.clone
   allow    root
   allow    session consent
   allow    paired
-  describe "Copy one boot slot's system into another"
+  describe "Copy one boot slot's kernel into another"
+
+action org.slopos.base.install
+  program  /bin/bootctl
+  args     base install *
+  caps     RawBlock Power
+  uid      0
+  cwd
+  exclusive boot-slots
+  allow    root
+  allow    session consent
+  allow    paired
+  describe "Replace the base every boot slot boots, from the next boot"
+
+action org.slopos.base.rollback
+  program  /bin/bootctl
+  args     base rollback
+  caps     RawBlock Power
+  uid      0
+  exclusive boot-slots
+  allow    root
+  allow    session
+  allow    paired
+  describe "Go back to the base that ran before, from the next boot"
 
 action org.slopos.boot.oneshot
   program  /bin/bootctl
@@ -74,7 +97,7 @@ action org.slopos.boot.oneshot
 action org.slopos.boot.set-default
   program  /bin/bootctl
   args     set-default *
-  caps     Power
+  caps     RawBlock Power
   uid      0
   exclusive boot-slots
   allow    root

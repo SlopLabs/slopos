@@ -1,6 +1,6 @@
-//! What boots the new system: both slots on the boot partition, Limine and
-//! its configuration in `\EFI\SlopOS\` on the ESP, the slot the loader picks,
-//! and the firmware's entry for the loader.
+//! What boots the new system: both kernel slots and the base on the boot
+//! partition, Limine and its configuration in `\EFI\SlopOS\` on the ESP, the
+//! slot the loader picks, and the firmware's entry for the loader.
 
 use slopos_boot_core::gpt::Partition;
 use slopos_boot_core::limine::{self, Config, MenuEntry};
@@ -53,26 +53,34 @@ fn write_verified(volume: &mut Volume<BlockFile>, path: &str, bytes: &[u8]) -> R
     Ok(())
 }
 
-/// The medium's kernel and base into every slot, and its notices beside them.
-pub fn write_slots(boot_node: &str, medium: &Medium) -> Result<(), String> {
+/// Where a disk laid out before the base moved beside the slots kept each
+/// slot's base.
+const SLOT_BASE: &str = "base.img";
+
+/// The medium's kernel into every slot, its base as both the current and the
+/// previous base, which every entry loads, and its notices beside them.
+pub fn write_boot(boot_node: &str, medium: &Medium) -> Result<(), String> {
     let kernel = medium.read(layout::MEDIUM_KERNEL)?;
     let base = medium.read(layout::MEDIUM_BASE)?;
     let mut volume = open_fat(boot_node)?;
     make_dir(&mut volume, layout::SLOTS_DIR)?;
+    make_dir(&mut volume, layout::BASE_DIR)?;
+    for path in [layout::BASE_CURRENT, layout::BASE_PREVIOUS] {
+        write_verified(&mut volume, path, &base)?;
+    }
+    println!(
+        "installer:   base: {} bytes, current and previous",
+        base.len()
+    );
     for slot in layout::SLOTS {
         let dir = format!("{}/{slot}", layout::SLOTS_DIR);
         make_dir(&mut volume, &dir)?;
-        write_verified(&mut volume, &format!("{dir}/{}", layout::BASE_FILE), &base)?;
         write_verified(
             &mut volume,
             &format!("{dir}/{}", layout::KERNEL_FILE),
             &kernel,
         )?;
-        println!(
-            "installer:   slot {slot}: kernel {} bytes, base {} bytes",
-            kernel.len(),
-            base.len()
-        );
+        println!("installer:   slot {slot}: kernel {} bytes", kernel.len());
     }
     if medium.has(layout::MEDIUM_NOTICE) {
         let notice = medium.read(layout::MEDIUM_NOTICE)?;
@@ -81,6 +89,27 @@ pub fn write_slots(boot_node: &str, medium: &Medium) -> Result<(), String> {
             &format!("{}/NOTICE.md", layout::SLOTS_DIR),
             &notice,
         )?;
+    }
+    Ok(())
+}
+
+/// The bases a boot partition kept per slot, which only the configuration
+/// written before this install loads.
+pub fn forget_slot_bases(boot_node: &str) -> Result<(), String> {
+    let mut volume = open_fat(boot_node)?;
+    let kept: Vec<String> = volume
+        .list(layout::SLOTS_DIR)
+        .map_err(|e| format!("{}: {e:?}", layout::SLOTS_DIR))?
+        .into_iter()
+        .filter(|entry| entry.is_dir && layout::valid_slot(&entry.name))
+        .map(|entry| format!("{}/{}/{SLOT_BASE}", layout::SLOTS_DIR, entry.name))
+        .collect();
+    for path in kept {
+        match volume.remove(&path) {
+            Ok(()) => println!("installer:   removed {path}, a base the disk kept per slot"),
+            Err(FatError::NotFound) => {}
+            Err(e) => return Err(format!("{path}: {e:?}")),
+        }
     }
     Ok(())
 }

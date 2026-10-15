@@ -6,6 +6,8 @@
 //! `COREUTILS_LINKS` names the multicall binary's installed names,
 //! `EXTRA_SHARED_OBJECTS` the shared objects a tests image adds to `/lib`, and
 //! `SLOPOS_BUILD_TAG`, when set, is written to `/usr/share/slopos/build-tag`.
+//! Every base names the interface it was built against and lists each record
+//! it holds with its mode and SHA-256, as `slopos_boot_core::base` reads them.
 //! `REMOTE_PAIRING_DIR`, when set, names a directory holding the broker
 //! `remoted` dials ([`REMOTE_PAIRING`]), packed at `/usr/share/slopos/remote`,
 //! where no process can rewrite it.
@@ -18,14 +20,19 @@
 //! the install medium, whose payload is a toolchain and a source tree.
 //!
 //! The output is a function of the inputs alone: entries in a fixed order,
-//! every timestamp, owner and inode number 0. Dependency-free, so it builds
-//! for the Linux host and the SlopOS guest alike.
+//! every timestamp, owner and inode number 0. It takes nothing but this
+//! workspace's `no_std` crates, so it builds for the Linux host and the SlopOS
+//! guest alike.
 
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+use slopos_boot_core::base::{INTERFACE_PATH, MANIFEST_PATH, ManifestLine};
+use slopos_boot_core::newc::Record;
+use slopos_tls_core::hash::{Hash, Sha256};
 
 const MODE_EXEC: u32 = 0o100_755;
 const MODE_DATA: u32 = 0o100_644;
@@ -143,19 +150,15 @@ fn run(
     programs: &[String],
     extras: &Extras,
 ) -> Result<(), String> {
-    let entries = layout(root, build, programs, extras)?;
-    check_tree(&entries)?;
+    let mut entries = layout(root, build, programs, extras)?;
+    seal(&mut entries)?;
     let mut archive = Vec::new();
     for entry in &entries {
-        if entry.path.split('/').any(|name| name.len() > MAX_NAME_LEN) {
-            return Err(format!(
-                "{}: a component exceeds {MAX_NAME_LEN} bytes",
-                entry.path
-            ));
-        }
-        emit(&mut archive, &entry.path, entry.mode, &entry.data);
+        emit(&mut archive, &entry.path, entry.mode, &entry.data)?;
     }
-    emit(&mut archive, "TRAILER!!!", 0, &[]);
+    append(&mut archive, &Record::trailer());
+    slopos_boot_core::base::check(&archive, sha256)
+        .map_err(|e| format!("the base this would write is none bootctl takes: {e}"))?;
     if let Some(dir) = out.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -169,24 +172,29 @@ fn run(
     Ok(())
 }
 
-/// The kernel refuses a base in which a path is two things, so the packer
-/// refuses to write one.
-fn check_tree(entries: &[Entry]) -> Result<(), String> {
-    let mut modes = BTreeMap::new();
-    for entry in entries {
-        if modes.insert(entry.path.as_str(), entry.mode).is_some() {
-            return Err(format!("{} is packed twice", entry.path));
+/// The interface the base was built against, then the manifest of every
+/// record before it.
+fn seal(entries: &mut Vec<Entry>) -> Result<(), String> {
+    entries.push(Entry {
+        path: INTERFACE_PATH.into(),
+        mode: MODE_DATA,
+        data: format!("{}\n", slopos_abi::BASE_INTERFACE).into_bytes(),
+    });
+    let mut manifest = String::new();
+    for entry in entries.iter() {
+        ManifestLine {
+            digest: sha256(&entry.data),
+            mode: entry.mode,
+            path: &entry.path,
         }
+        .write(&mut manifest)
+        .map_err(|_| format!("{}: a path the manifest cannot name", entry.path))?;
     }
-    for entry in entries {
-        let mut parent = entry.path.as_str();
-        while let Some(at) = parent.rfind('/') {
-            parent = &parent[..at];
-            if modes.get(parent).is_some_and(|&mode| mode != MODE_DIR) {
-                return Err(format!("{} lies beneath {parent}, a file", entry.path));
-            }
-        }
-    }
+    entries.push(Entry {
+        path: MANIFEST_PATH.into(),
+        mode: MODE_DATA,
+        data: manifest.into_bytes(),
+    });
     Ok(())
 }
 
@@ -480,12 +488,12 @@ impl<W: std::io::Write> Sink<W> {
         if name.split('/').any(|part| part.len() > MAX_NAME_LEN) {
             return Err(format!("{name}: a component exceeds {MAX_NAME_LEN} bytes"));
         }
-        let size = u32::try_from(data.len()).map_err(|_| format!("{name}: too large for newc"))?;
-        let mut head = Vec::with_capacity(128 + name.len());
-        emit_header(&mut head, name, mode, size);
-        self.write(&head)?;
-        self.write(data)?;
-        self.write(&[0; 3][..(4 - data.len() % 4) % 4])
+        let record = Record::new(name.as_bytes(), mode, data)
+            .ok_or_else(|| format!("{name}: too large for newc"))?;
+        record
+            .pieces()
+            .iter()
+            .try_for_each(|piece| self.write(piece))
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -544,47 +552,26 @@ fn pack_dir<W: std::io::Write>(
     Ok(())
 }
 
-/// One `newc` record: the ASCII header, the NUL-terminated name and the body,
-/// each padded to four bytes.
-fn emit(archive: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
-    emit_header(archive, name, mode, data.len() as u32);
-    archive.extend_from_slice(data);
-    pad(archive);
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    let mut hash = Sha256::new();
+    hash.update(data);
+    hash.finish_into(&mut digest);
+    digest
 }
 
-/// The record's header and name, padded to four bytes.
-fn emit_header(archive: &mut Vec<u8>, name: &str, mode: u32, size: u32) {
-    let start = archive.len();
-    let fields = [
-        0,
-        mode,
-        0,
-        0,
-        1,
-        0,
-        size,
-        0,
-        0,
-        0,
-        0,
-        name.len() as u32 + 1,
-        0,
-    ];
-    archive.extend_from_slice(b"070701");
-    for field in fields {
-        archive.extend_from_slice(format!("{field:08X}").as_bytes());
-    }
-    archive.extend_from_slice(name.as_bytes());
-    archive.push(0);
-    while (archive.len() - start) % 4 != 0 {
-        archive.push(0);
-    }
+fn append(archive: &mut Vec<u8>, record: &Record<'_>) {
+    record
+        .pieces()
+        .iter()
+        .for_each(|piece| archive.extend_from_slice(piece));
 }
 
-fn pad(archive: &mut Vec<u8>) {
-    while archive.len() % 4 != 0 {
-        archive.push(0);
-    }
+fn emit(archive: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) -> Result<(), String> {
+    let record = Record::new(name.as_bytes(), mode, data)
+        .ok_or_else(|| format!("{name}: too large for newc"))?;
+    append(archive, &record);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -660,6 +647,47 @@ mod tests {
     }
 
     #[test]
+    fn seals_the_base_with_its_interface_and_every_record_s_digest() {
+        let dir = scratch("seal");
+        fs::write(dir.join("build/shell.elf"), b"\x7fELF shell").unwrap();
+        let out = dir.join("out.cpio");
+        let programs = ["shell".to_owned()];
+        run(
+            &dir.join("root"),
+            &out,
+            &dir.join("build"),
+            &programs,
+            &Extras::default(),
+        )
+        .unwrap();
+        let archive = fs::read(&out).unwrap();
+        assert_eq!(
+            slopos_boot_core::base::interface(&archive),
+            Ok(slopos_abi::BASE_INTERFACE)
+        );
+        let got = records(&archive);
+        let (_, _, manifest) = got.iter().find(|(name, ..)| name == MANIFEST_PATH).unwrap();
+        let manifest = std::str::from_utf8(manifest).unwrap();
+        let listed: Vec<_> = slopos_boot_core::base::manifest_lines(manifest)
+            .map(Result::unwrap)
+            .collect();
+        let records: Vec<_> = got
+            .iter()
+            .filter(|(name, ..)| name != MANIFEST_PATH)
+            .collect();
+        assert_eq!(listed.len(), records.len());
+        for (line, (name, mode, data)) in listed.iter().zip(&records) {
+            assert_eq!(
+                (line.path, line.mode, line.digest),
+                (name.as_str(), *mode, sha256(data))
+            );
+        }
+        assert!(listed.iter().any(|l| l.path == "/bin/sh"));
+        assert!(listed.iter().any(|l| l.path == INTERFACE_PATH));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn packs_programs_after_the_empty_directories() {
         let dir = scratch("programs");
         fs::write(dir.join("build/init.elf"), b"\x7fELF init").unwrap();
@@ -688,7 +716,9 @@ mod tests {
                 "/bin/shell",
                 "/sbin/privd",
                 "/bin/sh",
-                "/usr/share/slopos/privd/actions"
+                "/usr/share/slopos/privd/actions",
+                INTERFACE_PATH,
+                MANIFEST_PATH,
             ]
         );
         let modes: Vec<u32> = got[..dirs].iter().map(|(_, mode, _)| *mode).collect();
@@ -845,7 +875,10 @@ mod tests {
             &["shell".to_owned()],
             &extras,
         );
-        assert_eq!(packed, Err("/bin/shell is packed twice".into()));
+        assert_eq!(
+            packed,
+            Err("the base this would write is none bootctl takes: /bin/shell: packed twice".into())
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

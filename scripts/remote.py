@@ -781,9 +781,9 @@ def cmd_serve(args):
         print("    mkdir -p /var/tmp")
         for name in ("kernel", "base"):
             print(f"    curl -fsS -o /var/tmp/{name} http://{addr}/files/{name}")
-        print("    sha256sum /var/tmp/kernel /var/tmp/base    # as above")
+        print(f"    bootctl base install /var/tmp/base {sha256_file(offers['base'])}")
         print("    slot=$(bootctl spare)")
-        print("    bootctl install $slot /var/tmp/kernel /var/tmp/base")
+        print(f"    bootctl install $slot /var/tmp/kernel {sha256_file(offers['kernel'])}")
         print("    bootctl oneshot slopos-$slot")
         print("    bootctl reboot")
         log("init starts remoted there; once `just remote status` shows it, keep the slot with:")
@@ -1145,15 +1145,16 @@ def cmd_install(args):
         link.close()
     log(f"installing onto boot {before['boot'][:12]} ({before['version']})")
     capture(args, ["mkdir", "-p", SCRATCH])
-    remote_kernel, size, sha = push(args, kernel, f"{SCRATCH}/kernel.elf")
-    log(f"pushed {kernel}: {size} bytes, sha256 {sha}")
-    remote_base, size, sha = push(args, base, f"{SCRATCH}/base.img")
-    log(f"pushed {base}: {size} bytes, sha256 {sha}")
+    remote_kernel, size, kernel_sha = push(args, kernel, f"{SCRATCH}/kernel.elf")
+    log(f"pushed {kernel}: {size} bytes, sha256 {kernel_sha}")
+    remote_base, size, base_sha = push(args, base, f"{SCRATCH}/base.img")
+    log(f"pushed {base}: {size} bytes, sha256 {base_sha}")
+    # The session may replace what was pushed; bootctl installs only these bytes.
+    sys.stdout.write(capture(args, ["bootctl", "base", "install", remote_base, base_sha], timeout=600))
     slot = capture(args, ["bootctl", "spare"]).strip()
     if not slot:
         die("install: bootctl spare named no slot")
-    out = capture(args, ["bootctl", "install", slot, remote_kernel, remote_base], timeout=600)
-    sys.stdout.write(out)
+    sys.stdout.write(capture(args, ["bootctl", "install", slot, remote_kernel, kernel_sha], timeout=600))
     capture(args, ["rm", "-f", remote_kernel, remote_base])
     capture(args, ["bootctl", "oneshot", f"slopos-{slot}"])
     log(f"slot {slot} installed; rebooting into slopos-{slot} once")
@@ -1168,12 +1169,14 @@ def cmd_install(args):
     if args.tag is not None and after["tag"] != args.tag:
         print(capture(args, ["bootctl", "status"]), end="")
         die(f"install: the machine came back with kernel tag {after['tag'] or '-'!r}, not {args.tag!r}: "
-            f"slopos-{slot} did not boot (it fell back) and nothing was committed")
+            f"slopos-{slot} did not boot (it fell back) and nothing was committed; the new base is "
+            f"current for every slot, which `remote.py run -- bootctl base rollback` takes back")
     if args.commit:
         capture(args, ["bootctl", "commit"])
         log(f"committed slopos-{slot}: it boots by default now")
     else:
-        log(f"not committed: the next reboot goes back to the default; `remote.py run -- bootctl commit` keeps slopos-{slot}")
+        log(f"not committed: the next reboot goes back to the default kernel, on the new base; "
+            f"`remote.py run -- bootctl commit` keeps slopos-{slot}")
     print(capture(args, ["bootctl", "status"]), end="")
 
 
@@ -1237,7 +1240,7 @@ def main():
     p.add_argument("--follow", "-f", action="store_true")
     p.set_defaults(func=cmd_klog)
 
-    p = sub.add_parser("install", help="install a kernel and base into the spare slot and boot it")
+    p = sub.add_parser("install", help="install a base, and a kernel into the spare slot, and boot it")
     p.add_argument("--kernel", required=True)
     p.add_argument("--base", required=True)
     p.add_argument("--tag", help="the SLOPOS_BUILD_TAG the new kernel reports")

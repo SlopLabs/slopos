@@ -6,8 +6,9 @@ set -euo pipefail
 #
 #   ESP           Limine and its configuration under \EFI\SlopOS\, and the
 #                 removable-media copy an ESP SlopOS created carries
-#   SlopOS boot   FAT32: a directory per slot under /boot, each a kernel and
-#                 the base image it boots with
+#   SlopOS boot   FAT32: a directory per slot under /boot, each a kernel, and
+#                 /boot/base, the base every slot boots as both the current
+#                 and the previous base
 #   SlopOS root   the ext4 image BOOTDISK_ROOT_IMAGE names, when it names one
 #   SlopOS crash  raw, zero
 #
@@ -21,7 +22,7 @@ set -euo pipefail
 #   LIMINE_DIR - path to Limine directory (default: third_party/limine)
 #   BOOTDISK_ROOT_IMAGE - an ext4 image the disk carries as its root
 #     partition; every slot boots with it as root=PARTUUID=
-#   BOOTDISK_PANIC_ENTRY=1 - add slots bad and abort, holding the same system
+#   BOOTDISK_PANIC_ENTRY=1 - add slots bad and abort, holding the same kernel
 #     with command lines that panic and reset it, through the report and
 #     through the format-free abort: what `just test-install` rolls back from
 #   QEMU_FB_WIDTH, QEMU_FB_HEIGHT, QEMU_FB_AUTO, QEMU_FB_AUTO_POLICY,
@@ -65,6 +66,17 @@ done
 "$SCRIPT_DIR/ensure_limine.sh"
 BOOTDISK="$(bootdisk_tool)"
 bootdisk_layout
+
+# A disk the kernel would not boot is not built: the base must check out as
+# bootctl holds one, and the kernel serve its interface.
+read -r _ interface < <("$BOOTDISK" base "$BASE" | grep '^interface ') ||
+    { echo "$SELF: $BASE is no base" >&2; exit 1; }
+read -r served_min served_max < <("$BOOTDISK" kernel "$KERNEL") ||
+    { echo "$SELF: $KERNEL states no base interfaces" >&2; exit 1; }
+if [ "$interface" -lt "$served_min" ] || [ "$interface" -gt "$served_max" ]; then
+    echo "$SELF: $KERNEL serves base interfaces $served_min-$served_max, not $BASE's $interface" >&2
+    exit 1
+fi
 
 fb_w="${QEMU_FB_WIDTH:-1920}"
 fb_h="${QEMU_FB_HEIGHT:-1080}"
@@ -174,8 +186,10 @@ mmd -i "$BOOT" "::$SLOTS_DIR"
 for slot in "${slots[@]}"; do
     mmd -i "$BOOT" "::$SLOTS_DIR/$slot"
     mcopy -i "$BOOT" "$KERNEL" "::$SLOTS_DIR/$slot/$KERNEL_FILE"
-    mcopy -i "$BOOT" "$BASE" "::$SLOTS_DIR/$slot/$BASE_FILE"
 done
+mmd -i "$BOOT" "::$BASE_DIR"
+mcopy -i "$BOOT" "$BASE" "::$BASE_CURRENT"
+mcopy -i "$BOOT" "$BASE" "::$BASE_PREVIOUS"
 mcopy -i "$BOOT" "$REPO_ROOT/NOTICE.md" "::$SLOTS_DIR/NOTICE.md"
 
 place() {

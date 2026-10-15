@@ -1,10 +1,14 @@
-//! `/bin/bootctl` — install a system into a boot slot and choose what boots.
+//! `/bin/bootctl` — install a kernel into a boot slot, replace the base every
+//! slot boots, and choose what boots.
 //!
-//! The boot partition, on the disk the loader was started from, holds per slot
-//! a kernel at `/boot/<slot>/kernel.elf` and the base image it boots with at
-//! `/boot/<slot>/base.img`; each slot is a Limine entry named `slopos-<slot>`.
+//! The boot partition, on the disk the loader was started from, holds a
+//! kernel per slot at `/boot/<slot>/kernel.elf`, each a Limine entry
+//! `slopos-<slot>`, and beside them the bases every slot boots,
+//! `/boot/base/current.img` and `previous.img`, the one that last ran. A new
+//! base is taken at the next boot.
+//!
 //! What boots is chosen through the Boot Loader Interface alone, and nothing
-//! on the ESP is written. A new system is tried once, not adopted: `oneshot`
+//! on the ESP is written. A new kernel is tried once, not adopted: `oneshot`
 //! sets `LoaderEntryOneShot`, and `LoaderConfigTimeoutOneShot` to skip the
 //! menu, which Limine consumes on the next boot, so a reset after a panic
 //! boots the default again. `commit`, run once the tried
@@ -20,23 +24,32 @@
 //!
 //! Needs `RawBlock` for the raw partition and the crash records, and `Power`
 //! for the loader variables and the reboot; started without them, each
-//! command asks privd to run it as its `org.slopos.boot.*` action. `collect`
-//! is init's, which starts it holding both.
+//! command asks privd to run it as its `org.slopos.boot.*` or
+//! `org.slopos.base.*` action. `collect` is init's, which starts it holding
+//! both.
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::Path;
 
+use std::ops::RangeInclusive;
+
+use slopos_boot_core::base::{self, Which};
 use slopos_boot_core::crash::Summary;
-use slopos_boot_core::{bli, layout};
+use slopos_boot_core::{bli, kernel, layout};
 use slopos_fat_core::{Error as FatError, Volume};
+use slopos_tls_core::hash::{Hash, Sha256};
 
+use crate::app_entry::read_bounded;
 use crate::apps::coreutils::time::utc_from_epoch;
 use crate::boot_disk::{BlockFile, BootDisk, loader_entries, loader_var, open_fat, set_loader_var};
 use crate::privd::{self, Input};
+use crate::syscall::UserSysInfo;
 use crate::syscall::core as sys_core;
 use crate::syscall::process;
+use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 
 const CRASH_STORE: &str = "/dev/crash";
 const CRASH_LOG: &str = "/var/log/crash";
@@ -49,8 +62,10 @@ const CRASH_LOG_BOUNDS: &str = "bounds";
 /// then the record its last crash left. A boot that died with no record
 /// leaves the one before it as the last recorded.
 const SLOT_STATE: &str = "/var/lib/slopos/slots";
-const CPIO_NEWC_MAGIC: &[u8] = b"070701";
-const CPIO_TRAILER: &[u8] = b"TRAILER!!!\0";
+const BASES: [(Which, &str); 2] = [
+    (Which::Current, layout::BASE_CURRENT),
+    (Which::Previous, layout::BASE_PREVIOUS),
+];
 
 fn boot_partition(named: Option<&str>) -> Result<String, String> {
     match named {
@@ -116,18 +131,43 @@ fn status(boot: &str) -> Result<(), String> {
     println!("oneshot: {}", show(loader.one_shot.as_deref()));
     println!("entries: {}", loader.entries.join(" "));
     let mut volume = open_fat(boot)?;
+    let running = running_manifest(boot);
+    for (which, path) in BASES {
+        let line = match volume.read_file(path) {
+            Ok(image) => {
+                let described = base::describe(&image);
+                let interface = match described.interface {
+                    Ok(n) => format!("interface {n}"),
+                    Err(e) => e.to_string(),
+                };
+                let runs = running.is_some() && described.manifest == running.as_deref();
+                format!(
+                    "{interface}, build tag {}, {} bytes{}",
+                    described.build_tag.unwrap_or("-"),
+                    image.len(),
+                    if runs { ", running" } else { "" }
+                )
+            }
+            Err(e) => format!("- ({e:?})"),
+        };
+        println!("base {}: {line}", which.name());
+    }
     if let Ok(slots) = volume.list(layout::SLOTS_DIR) {
-        for slot in slots.iter().filter(|e| e.is_dir) {
-            let mut size = |file: &str| {
-                volume
-                    .stat(&format!("{}/{}/{file}", layout::SLOTS_DIR, slot.name))
-                    .map_or_else(|_| "-".to_owned(), |entry| entry.size.to_string())
-            };
-            let (kernel, base) = (size(layout::KERNEL_FILE), size(layout::BASE_FILE));
-            if kernel != "-" {
+        for slot in slots
+            .iter()
+            .filter(|e| e.is_dir && layout::valid_slot(&e.name))
+        {
+            let path = format!(
+                "{}/{}/{}",
+                layout::SLOTS_DIR,
+                slot.name,
+                layout::KERNEL_FILE
+            );
+            if let Ok(kernel) = volume.stat(&path) {
                 println!(
-                    "slot {}: kernel {kernel} bytes, base {base} bytes{}",
+                    "slot {}: kernel {} bytes{}",
                     slot.name,
+                    kernel.size,
                     last_boot(&slot.name)
                 );
             }
@@ -136,22 +176,81 @@ fn status(boot: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_base_image(image: &[u8]) -> bool {
-    let tail = &image[image.len().saturating_sub(512)..];
-    image.starts_with(CPIO_NEWC_MAGIC)
-        && tail.windows(CPIO_TRAILER.len()).any(|w| w == CPIO_TRAILER)
+fn sha256(data: &[u8]) -> base::Digest {
+    let mut digest = [0u8; 32];
+    let mut hash = Sha256::new();
+    hash.update(data);
+    hash.finish_into(&mut digest);
+    digest
+}
+
+fn same_node(a: &str, b: &str) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
+/// The manifest of the base this system runs, when it booted from `boot`.
+fn running_manifest(boot: &str) -> Option<Vec<u8>> {
+    let booted = BootDisk::find().ok()?;
+    if !same_node(&booted.boot_node, boot) {
+        return None;
+    }
+    fs::read(base::MANIFEST_PATH).ok()
+}
+
+fn read_base(volume: &mut Volume<BlockFile>, path: &str) -> Result<Vec<u8>, String> {
+    volume.read_file(path).map_err(|e| match e {
+        FatError::NotFound => format!(
+            "{path}: the boot partition holds no base there; a disk laid out with a base \
+             per slot moves to one shared base by a reinstall that keeps its root"
+        ),
+        e => format!("{path}: {e:?}"),
+    })
+}
+
+fn served_by(kernel_path: &str, kernel: &[u8]) -> Result<RangeInclusive<u32>, String> {
+    kernel::served_interfaces(kernel).map_err(|e| {
+        format!(
+            "{kernel_path}: no {} note to say which bases it serves ({e:?})",
+            kernel::NOTE_SECTION
+        )
+    })
+}
+
+/// A kernel goes into a slot only when it serves one of the bases the slots
+/// boot.
+fn check_serves_a_base(
+    volume: &mut Volume<BlockFile>,
+    served: &RangeInclusive<u32>,
+) -> Result<(), String> {
+    let mut found = Vec::new();
+    for (which, path) in BASES {
+        match base::interface(&read_base(volume, path)?) {
+            Ok(n) if served.contains(&n) => return Ok(()),
+            Ok(n) => found.push(format!("{} interface {n}", which.name())),
+            Err(e) => found.push(format!("{} {e}", which.name())),
+        }
+    }
+    Err(format!(
+        "the kernel serves base interfaces {}-{}, and the boot partition holds {}",
+        served.start(),
+        served.end(),
+        found.join(" and ")
+    ))
 }
 
 /// The slot's directory, created if need be, once the loader is known to
 /// offer it and not to boot it by default.
 fn slot_dir(volume: &mut Volume<BlockFile>, loader: &Loader, slot: &str) -> Result<String, String> {
     if !layout::valid_slot(slot) {
-        return Err(format!("slot '{slot}': 1-8 lowercase letters or digits"));
+        return Err(format!(
+            "slot '{slot}': 1-8 lowercase letters or digits, other than base"
+        ));
     }
     let entry = format!("{}{slot}", layout::ENTRY_PREFIX);
     loader.offered(&entry)?;
-    // A slot is written as two files, so the one that boots by default is
-    // never the one being written.
     if loader.default_entry()? == Some(entry.as_str()) {
         return Err(format!(
             "{entry} is the default; install into another slot and try it"
@@ -182,12 +281,7 @@ fn write_verified(volume: &mut Volume<BlockFile>, path: &str, bytes: &[u8]) -> R
 
 /// A one-shot already armed for the slot is cleared first, so a failed install
 /// leaves nothing armed to boot it.
-fn install_slot(
-    volume: &mut Volume<BlockFile>,
-    slot: &str,
-    kernel: &[u8],
-    base: &[u8],
-) -> Result<(), String> {
+fn install_slot(volume: &mut Volume<BlockFile>, slot: &str, kernel: &[u8]) -> Result<(), String> {
     let loader = Loader::read()?;
     let dir = slot_dir(volume, &loader, slot)?;
     let entry = format!("{}{slot}", layout::ENTRY_PREFIX);
@@ -196,7 +290,6 @@ fn install_slot(
         set_loader_var(bli::TIMEOUT_ONE_SHOT, None)?;
         println!("{entry} is no longer armed to boot once");
     }
-    write_verified(volume, &format!("{dir}/{}", layout::BASE_FILE), base)?;
     write_verified(volume, &format!("{dir}/{}", layout::KERNEL_FILE), kernel)?;
     forget_last_boot(slot);
     Ok(())
@@ -210,38 +303,252 @@ fn forget_last_boot(slot: &str) {
     }
 }
 
-fn install(boot: &str, slot: &str, kernel_path: &str, base_path: &str) -> Result<(), String> {
-    let kernel = std::fs::read(kernel_path).map_err(|e| format!("{kernel_path}: {e}"))?;
-    if !kernel.starts_with(b"\x7fELF") {
-        return Err(format!("{kernel_path}: not an ELF file"));
-    }
-    let base = std::fs::read(base_path).map_err(|e| format!("{base_path}: {e}"))?;
-    if !is_base_image(&base) {
-        return Err(format!("{base_path}: not a newc cpio archive"));
-    }
+fn install(
+    boot: &str,
+    slot: &str,
+    kernel_path: &str,
+    digest: Option<&String>,
+) -> Result<(), String> {
+    let kernel = read_image(kernel_path, layout::BOOT_BYTES.min(bases_limit()), digest)?;
+    let served = served_by(kernel_path, &kernel)?;
     let mut volume = open_fat(boot)?;
-    install_slot(&mut volume, slot, &kernel, &base)?;
+    check_serves_a_base(&mut volume, &served)?;
+    install_slot(&mut volume, slot, &kernel)?;
     println!(
-        "installed slot {slot} (entry {}{slot})",
-        layout::ENTRY_PREFIX
+        "installed slot {slot} (entry {}{slot}), serving base interfaces {}-{}",
+        layout::ENTRY_PREFIX,
+        served.start(),
+        served.end()
     );
     Ok(())
 }
 
 fn clone_slot(boot: &str, from: &str, to: &str) -> Result<(), String> {
     if !layout::valid_slot(from) {
-        return Err(format!("slot '{from}': 1-8 lowercase letters or digits"));
+        return Err(format!(
+            "slot '{from}': 1-8 lowercase letters or digits, other than base"
+        ));
     }
     let mut volume = open_fat(boot)?;
-    let mut read = |file: &str| {
-        let path = format!("{}/{from}/{file}", layout::SLOTS_DIR);
-        volume
+    let path = format!("{}/{from}/{}", layout::SLOTS_DIR, layout::KERNEL_FILE);
+    let kernel = volume
+        .read_file(&path)
+        .map_err(|e| format!("{path}: {e:?}"))?;
+    let served = served_by(&path, &kernel)?;
+    check_serves_a_base(&mut volume, &served)?;
+    install_slot(&mut volume, to, &kernel)?;
+    println!("copied slot {from}'s kernel to slot {to}");
+    Ok(())
+}
+
+/// A slot's kernel no base write may leave serving neither base: the
+/// default's, what a failed try falls back on, the running one's and the one
+/// armed to boot once.
+struct Guarded {
+    entry: String,
+    served: RangeInclusive<u32>,
+    default: bool,
+}
+
+fn default_kernel(guarded: &[Guarded]) -> Option<&Guarded> {
+    guarded.iter().find(|kernel| kernel.default)
+}
+
+/// When the base takes over: the default kernel is what boots next with
+/// nothing armed.
+fn when_taken(guarded: &[Guarded], interface: u32) -> String {
+    match default_kernel(guarded) {
+        Some(kernel) if kernel.served.contains(&interface) => {
+            format!("the next boot of {} takes it", kernel.entry)
+        }
+        Some(kernel) => format!(
+            "{}'s kernel serves base interfaces {}-{}, so only a boot of one that \
+             serves {interface} takes it",
+            kernel.entry,
+            kernel.served.start(),
+            kernel.served.end()
+        ),
+        None => format!("a boot of a kernel that serves interface {interface} takes it"),
+    }
+}
+
+/// The [`Guarded`] kernels; an entry that is no slot's has none.
+fn guarded_kernels(volume: &mut Volume<BlockFile>) -> Result<Vec<Guarded>, String> {
+    let loader = Loader::read()?;
+    let default = loader.default_entry()?.map(str::to_owned);
+    let mut guarded: Vec<Guarded> = Vec::new();
+    let entries = [&default, &loader.selected, &loader.one_shot];
+    for entry in entries.into_iter().flatten() {
+        let Some(slot) = entry
+            .strip_prefix(layout::ENTRY_PREFIX)
+            .filter(|slot| layout::valid_slot(slot))
+        else {
+            continue;
+        };
+        if guarded.iter().any(|seen| seen.entry == *entry) {
+            continue;
+        }
+        let path = format!("{}/{slot}/{}", layout::SLOTS_DIR, layout::KERNEL_FILE);
+        let kernel = volume
             .read_file(&path)
-            .map_err(|e| format!("{path}: {e:?}"))
+            .map_err(|e| format!("{path}: {e:?}"))?;
+        guarded.push(Guarded {
+            entry: entry.clone(),
+            served: served_by(&path, &kernel)?,
+            default: default.as_ref() == Some(entry),
+        });
+    }
+    Ok(guarded)
+}
+
+/// The SHA-256 a command line may name after an image, in hex.
+fn digest_arg(words: &[String]) -> Result<Option<&String>, String> {
+    match words {
+        [] => Ok(None),
+        [digest] if digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            Ok(Some(digest))
+        }
+        _ => Err(USAGE.into()),
+    }
+}
+
+/// The image at `path`, a regular file of at most `limit` bytes, and with
+/// `digest` the one whose SHA-256 it is: what was put there for this install
+/// may have been replaced since.
+fn read_image(path: &str, limit: u64, digest: Option<&String>) -> Result<Vec<u8>, String> {
+    let bytes = read_bounded(Path::new(path), limit)
+        .ok_or_else(|| format!("{path}: no regular file of at most {limit} bytes"))?;
+    if let Some(want) = digest {
+        let found: String = sha256(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        if !found.eq_ignore_ascii_case(want) {
+            return Err(format!("{path}: not the image whose sha256 is {want}"));
+        }
+    }
+    Ok(bytes)
+}
+
+/// Every boot loads both bases: together they take at most half of what
+/// this machine has, or no entry may load at all.
+fn bases_limit() -> u64 {
+    let mut info = UserSysInfo::default();
+    if sys_core::sys_info(&mut info) != 0 {
+        return u64::MAX;
+    }
+    u64::from(info.total_pages) * 4096 / 2
+}
+
+/// A relayed signal between the two base writes would leave both files one
+/// image, so none reaches this process once they begin.
+fn shield_writes() {
+    for signum in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
+        let _ = process::ignore_signal(signum);
+    }
+}
+
+/// `previous` gets `current` only while `current` runs, so two bases installed
+/// without a boot between them keep the one that last ran, and no
+/// [`Guarded`] kernel is left serving neither base.
+fn base_install(boot: &str, image_path: &str, digest: Option<&String>) -> Result<(), String> {
+    let image = read_image(image_path, bases_limit(), digest)?;
+    let new = base::check(&image, sha256).map_err(|e| format!("{image_path}: {e}"))?;
+    let mut volume = open_fat(boot)?;
+    let current = read_base(&mut volume, layout::BASE_CURRENT)?;
+    if current == image {
+        println!("{image_path} is the current base already");
+        return Ok(());
+    }
+    let running = running_manifest(boot);
+    let keeps_current =
+        running.is_some() && base::describe(&current).manifest == running.as_deref();
+    let (kept, kept_len) = if keeps_current {
+        (base::interface(&current), current.len())
+    } else {
+        let previous = read_base(&mut volume, layout::BASE_PREVIOUS)?;
+        (base::interface(&previous), previous.len())
     };
-    let (kernel, base) = (read(layout::KERNEL_FILE)?, read(layout::BASE_FILE)?);
-    install_slot(&mut volume, to, &kernel, &base)?;
-    println!("copied slot {from} to slot {to}");
+    if (image.len() + kept_len) as u64 > bases_limit() {
+        return Err(format!(
+            "{image_path}: with the base kept beside it, more than half this machine's \
+             memory, and every boot loads both"
+        ));
+    }
+    let guarded = guarded_kernels(&mut volume)?;
+    for kernel in &guarded {
+        let served = &kernel.served;
+        if !served.contains(&new.interface) && !kept.is_ok_and(|n| served.contains(&n)) {
+            return Err(format!(
+                "{}'s kernel serves base interfaces {}-{}; with this base it would \
+                 serve neither, so commit a kernel that serves {} first",
+                kernel.entry,
+                served.start(),
+                served.end(),
+                new.interface
+            ));
+        }
+    }
+    if keeps_current {
+        write_bases(&mut volume, &guarded, &image, &current)?;
+    } else {
+        drop(current);
+        shield_writes();
+        write_verified(&mut volume, layout::BASE_CURRENT, &image)?;
+    }
+    println!(
+        "base installed: interface {}, build tag {}; {}",
+        new.interface,
+        new.build_tag.unwrap_or("-"),
+        when_taken(&guarded, new.interface)
+    );
+    Ok(())
+}
+
+/// `current` and `previous` replace both bases, `previous` being the image
+/// `current` holds now. Each write is whole but the pair is not: cut between
+/// them, one image is on the partition twice, so `previous` is written first
+/// only when the default kernel serves it.
+fn write_bases(
+    volume: &mut Volume<BlockFile>,
+    guarded: &[Guarded],
+    current: &[u8],
+    previous: &[u8],
+) -> Result<(), String> {
+    let previous_first = default_kernel(guarded)
+        .is_none_or(|kernel| base::interface(previous).is_ok_and(|n| kernel.served.contains(&n)));
+    let writes = if previous_first {
+        [
+            (layout::BASE_PREVIOUS, previous),
+            (layout::BASE_CURRENT, current),
+        ]
+    } else {
+        [
+            (layout::BASE_CURRENT, current),
+            (layout::BASE_PREVIOUS, previous),
+        ]
+    };
+    shield_writes();
+    for (path, image) in writes {
+        write_verified(volume, path, image)?;
+    }
+    Ok(())
+}
+
+fn base_rollback(boot: &str) -> Result<(), String> {
+    let mut volume = open_fat(boot)?;
+    let previous = read_base(&mut volume, layout::BASE_PREVIOUS)?;
+    let current = read_base(&mut volume, layout::BASE_CURRENT)?;
+    if previous == current {
+        println!("previous is the current base already; nothing to roll back");
+        return Ok(());
+    }
+    let interface =
+        base::interface(&previous).map_err(|e| format!("{}: {e}", layout::BASE_PREVIOUS))?;
+    let guarded = guarded_kernels(&mut volume)?;
+    write_bases(&mut volume, &guarded, &previous, &current)?;
+    println!(
+        "rolled back to the base previous held: interface {interface}, build tag {}; {}",
+        base::describe(&previous).build_tag.unwrap_or("-"),
+        when_taken(&guarded, interface)
+    );
     Ok(())
 }
 
@@ -261,9 +568,26 @@ fn oneshot(entry: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn set_default(entry: &str) -> Result<(), String> {
+/// A slot becomes the default only while its kernel serves a base the boot
+/// partition holds, since a failed try falls back on it.
+fn set_default(boot: impl Fn() -> Result<String, String>, entry: &str) -> Result<(), String> {
     let loader = Loader::read()?;
     loader.offered(entry)?;
+    if let Some(slot) = entry
+        .strip_prefix(layout::ENTRY_PREFIX)
+        .filter(|slot| layout::valid_slot(slot))
+    {
+        let mut volume = open_fat(&boot()?)?;
+        let path = format!("{}/{slot}/{}", layout::SLOTS_DIR, layout::KERNEL_FILE);
+        let kernel = volume
+            .read_file(&path)
+            .map_err(|e| format!("{path}: {e:?}"))?;
+        check_serves_a_base(&mut volume, &served_by(&path, &kernel)?)?;
+    }
+    write_default(&loader, entry)
+}
+
+fn write_default(loader: &Loader, entry: &str) -> Result<(), String> {
     if loader.default.as_deref() != Some(entry) {
         set_loader_var(bli::ENTRY_DEFAULT, Some(entry))?;
     }
@@ -331,8 +655,6 @@ fn last_boot(slot: &str) -> String {
     LastBoot::read(slot).map_or_else(String::new, |last| last.status_tail())
 }
 
-/// `bytes` at `dir/name` through a sibling written and flushed first, so the
-/// name holds all of it or nothing; the rename is made durable too.
 /// `dir` and each parent it lacks, made uid 0's: slot and crash records are
 /// the system's whoever runs `bootctl`.
 fn system_dir(dir: &str) -> std::io::Result<()> {
@@ -348,6 +670,8 @@ fn system_dir(dir: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `bytes` at `dir/name` through a sibling written and flushed first, so the
+/// name holds all of it or nothing; the rename is made durable too.
 fn write_durably(dir: &str, name: &str, bytes: &[u8], mode: u32) -> Result<String, String> {
     system_dir(dir).map_err(|e| format!("{dir}: {e}"))?;
     let temp = format!("{dir}/.{name}.{}", std::process::id());
@@ -548,20 +872,27 @@ fn save_records() -> Result<(), String> {
     failed
 }
 
+/// The entry that booted runs a base, so it needs no check.
 fn commit() -> Result<(), String> {
-    let booted = loader_var(bli::ENTRY_SELECTED)?
+    let loader = Loader::read()?;
+    let booted = loader
+        .selected
+        .clone()
         .ok_or("the boot loader did not report the booted entry")?;
-    set_default(&booted)
+    write_default(&loader, &booted)
 }
 
 const USAGE: &str = "usage: bootctl [--boot /dev/<node>] <command>
-  status                      what booted, what is default, the slots
-  install <slot> <kernel.elf> <base.img>
-                              copy a kernel and its base into /boot/<slot>/
-  clone <from> <to>           copy one slot's kernel and base into another
+  status                      what booted, what is default, the bases, the slots
+  install <slot> <kernel.elf> [<sha256>]
+                              copy a kernel into /boot/<slot>/
+  clone <from> <to>           copy one slot's kernel into another
+  base install <base.img> [<sha256>]
+                              make <base.img> the base every slot boots
+  base rollback               go back to the base that ran before
   oneshot <entry>             boot <entry> once, on the next boot only
   set-default <entry>         make <entry> the default
-  spare                       the slot a new system goes into: not the default
+  spare                       the slot a new kernel goes into: not the default
   commit                      make the entry that booted the default
   collect                     save the kernel's crash records under /var/log/crash
   reboot                      restart now";
@@ -576,10 +907,16 @@ fn run(args: &[String]) -> Result<(), String> {
     let boot = || boot_partition(named);
     match rest {
         [cmd] if cmd == "status" => status(&boot()?),
-        [cmd, slot, kernel, base] if cmd == "install" => install(&boot()?, slot, kernel, base),
+        [cmd, slot, kernel, digest @ ..] if cmd == "install" => {
+            install(&boot()?, slot, kernel, digest_arg(digest)?)
+        }
         [cmd, from, to] if cmd == "clone" => clone_slot(&boot()?, from, to),
+        [cmd, sub, image, digest @ ..] if cmd == "base" && sub == "install" => {
+            base_install(&boot()?, image, digest_arg(digest)?)
+        }
+        [cmd, sub] if cmd == "base" && sub == "rollback" => base_rollback(&boot()?),
         [cmd, entry] if cmd == "oneshot" => oneshot(entry),
-        [cmd, entry] if cmd == "set-default" => set_default(entry),
+        [cmd, entry] if cmd == "set-default" => set_default(boot, entry),
         [cmd] if cmd == "spare" => spare(),
         [cmd] if cmd == "commit" => commit(),
         [cmd] if cmd == "collect" => collect(),
@@ -591,11 +928,16 @@ fn run(args: &[String]) -> Result<(), String> {
 /// The action a command line belongs to, `None` for one privd runs nothing
 /// for.
 fn action_for(args: &[String]) -> Option<&'static str> {
-    let command = match args {
-        [flag, _, rest @ ..] if flag == "--boot" => rest.first(),
-        _ => args.first(),
-    }?;
-    Some(match command.as_str() {
+    let words = match args {
+        [flag, _, rest @ ..] if flag == "--boot" => rest,
+        _ => args,
+    };
+    Some(match words.first()?.as_str() {
+        "base" => match words.get(1)?.as_str() {
+            "install" => "org.slopos.base.install",
+            "rollback" => "org.slopos.base.rollback",
+            _ => return None,
+        },
         "status" => "org.slopos.boot.status",
         "install" => "org.slopos.boot.install",
         "clone" => "org.slopos.boot.clone",

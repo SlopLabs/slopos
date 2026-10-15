@@ -3,7 +3,7 @@
 //! | Partition    | Holds                                                   |
 //! |--------------|---------------------------------------------------------|
 //! | ESP          | Limine at [`LOADER`] and its configuration at [`LOADER_CONFIG`] |
-//! | SlopOS boot  | FAT32: each slot's kernel and base, under `/boot/<slot>/` |
+//! | SlopOS boot  | FAT32: each slot's kernel, under `/boot/<slot>/`, and the base every slot boots, under [`BASE_DIR`] |
 //! | SlopOS root  | ext4: `/`                                               |
 //! | SlopOS crash | raw: the last panic                                     |
 //!
@@ -38,7 +38,8 @@ pub const ALIGN_BYTES: u64 = MIB;
 /// An ESP SlopOS creates: room for FAT32's least 65525 clusters at 4 KiB
 /// beside their two FATs, so the same size formats on a 4K-native disk.
 pub const NEW_ESP_BYTES: u64 = 260 * MIB;
-/// Two slots of the largest system, the tests kernel and base, with room.
+/// Two kernels and two bases of the largest system, the tests kernel and
+/// base, with room.
 pub const BOOT_BYTES: u64 = 1024 * MIB;
 pub const CRASH_BYTES: u64 = 4 * MIB;
 /// The largest root the kernel mounts: its block numbers are 32 bits wide,
@@ -63,11 +64,11 @@ pub const FALLBACK_CONFIG: &str = r"\EFI\BOOT\limine.conf";
 
 /// Where the live system serves its install medium: the archive the loader
 /// carries as the module [`MEDIUM_MODULE`], beside the kernel and base it
-/// booted, which an install copies into every slot.
+/// booted, which an install copies into every slot and both bases.
 pub const MEDIUM_DIR: &str = "/media/install";
 pub const MEDIUM_MODULE: &str = "install";
 pub const MEDIUM_KERNEL: &str = "boot/kernel.elf";
-pub const MEDIUM_BASE: &str = "boot/base.img";
+pub const MEDIUM_BASE: &str = "boot/base/current.img";
 /// Limine, as the archive carries it for an ESP, with its licence and
 /// notices.
 pub const MEDIUM_LOADER: &str = "boot/BOOTX64.EFI";
@@ -92,19 +93,31 @@ pub const FIRMWARE_ENTRY: &str = "SlopOS";
 pub const SLOTS: [&str; 2] = ["a", "b"];
 /// A slot's Limine entry is `slopos-<slot>`.
 pub const ENTRY_PREFIX: &str = "slopos-";
-/// On the boot partition, a slot is `<SLOTS_DIR>/<slot>/`, holding these two.
+/// On the boot partition, a slot is `<SLOTS_DIR>/<slot>/`, holding its
+/// kernel.
 pub const SLOTS_DIR: &str = "/boot";
 pub const KERNEL_FILE: &str = "kernel.elf";
-pub const BASE_FILE: &str = "base.img";
 pub const SLOT_NAME_MAX: usize = 8;
 
-/// One to eight lowercase letters or digits: a FAT 8.3 directory name, which
-/// is all the boot partition's writer creates.
+/// The base every slot's kernel boots, the module [`BASE_MODULE`], and the
+/// one that ran before it, [`PREVIOUS_BASE_MODULE`], kept for the kernel to
+/// fall back on and for a rollback. Beside the slots, so no slot is named
+/// [`BASE_NAME`].
+pub const BASE_DIR: &str = "/boot/base";
+const BASE_NAME: &str = "base";
+pub const BASE_CURRENT: &str = "/boot/base/current.img";
+pub const BASE_PREVIOUS: &str = "/boot/base/previous.img";
+pub const BASE_MODULE: &str = "initramfs";
+pub const PREVIOUS_BASE_MODULE: &str = "initramfs-previous";
+
+/// One to eight lowercase letters or digits, a FAT 8.3 directory name, which
+/// is all the boot partition's writer creates, but [`BASE_NAME`].
 pub fn valid_slot(slot: &str) -> bool {
     (1..=SLOT_NAME_MAX).contains(&slot.len())
         && slot
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && slot != BASE_NAME
 }
 
 pub fn slot_of_kernel(path: &str) -> Option<&str> {
@@ -152,6 +165,20 @@ mod tests {
     }
 
     #[test]
+    fn the_bases_lie_beside_the_slots_where_no_slot_can() {
+        assert_eq!(BASE_DIR, std::format!("{SLOTS_DIR}/{BASE_NAME}"));
+        assert!(!valid_slot(BASE_NAME));
+        for file in [BASE_CURRENT, BASE_PREVIOUS] {
+            let (dir, name) = file.rsplit_once('/').unwrap();
+            assert!(dir == BASE_DIR && name.len() <= 12 && name.ends_with(".img"));
+            assert_eq!(slot_of_kernel(file), None);
+        }
+        assert_eq!(slot_of_kernel("/boot/base/kernel.elf"), None);
+        assert_ne!(BASE_MODULE, PREVIOUS_BASE_MODULE);
+        assert_ne!(BASE_MODULE, MEDIUM_MODULE);
+    }
+
+    #[test]
     fn a_slot_kernel_names_its_slot() {
         assert_eq!(slot_of_kernel("/boot/b/kernel.elf"), Some("b"));
         assert_eq!(slot_of_kernel("/boot/bad/kernel.elf"), Some("bad"));
@@ -159,7 +186,7 @@ mod tests {
             "/boot/kernel.elf",
             "/boot/B/kernel.elf",
             "/boot/a/b/kernel.elf",
-            "/boot/a/base.img",
+            "/boot/base/current.img",
             "boot/a/kernel.elf",
         ] {
             assert_eq!(slot_of_kernel(other), None, "{other}");
