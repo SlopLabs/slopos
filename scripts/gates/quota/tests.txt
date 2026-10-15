@@ -96,6 +96,10 @@
 # so the row follows what the suite leaves allocated. Then 10239, 9887 and 9914
 # in three captures of the tree that added `protocol_test`, the last with it
 # skipped: the spread, not the compositor it starts, and the cap is the largest.
+# Then 10588 in one capture once init became a service manager:
+# `supervision_test` re-executes init, kills privd for init to start again and
+# restarts the session around stand-ins, and privd_test's consent case starts
+# the session twice; the phase ends holding 10270.
 # The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
@@ -138,7 +142,7 @@ post-userland-tests	commitpages	193853
 post-userland-tests	custody	12
 post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	10239
+post-userland-tests	kernelmeta	10588
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
