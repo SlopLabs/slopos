@@ -46,8 +46,23 @@ fn one_question_is_shown_at_a_time_and_numbered() {
     assert_eq!((shown.pid, asker, shown.id), (1, 1, 1));
     assert!(q.next(0).is_none());
     assert_eq!(q.answer(allow(1), 10), vec![(1, Ok(()))]);
+    assert!(q.next(10).is_none());
+    q.ready();
     let (shown, asker) = q.next(10).map(|(a, t)| (a, *t)).unwrap();
     assert_eq!((shown.pid, asker, shown.id), (2, 2, 2));
+}
+
+#[test]
+fn a_question_waits_for_the_agent_to_say_it_can_take_one() {
+    let mut q = ready();
+    q.offer(ask(1), 1, 0).unwrap();
+    q.offer(ask(2), 2, 0).unwrap();
+    let id = q.next(0).unwrap().0.id;
+    assert_eq!(q.expired(EXPIRY_MS), Some((id, 1)));
+    assert!(q.next(EXPIRY_MS).is_none());
+    assert_eq!(q.offer(ask(3), 3, EXPIRY_MS), Ok(()));
+    q.ready();
+    assert_eq!(q.next(EXPIRY_MS).map(|(a, _)| a.pid), Some(2));
 }
 
 #[test]
@@ -103,6 +118,7 @@ fn an_allowing_answer_leaves_the_rest_waiting() {
     let id = q.next(0).unwrap().0.id;
     assert_eq!(q.answer(allow(id), 0), vec![(1, Ok(()))]);
     assert_eq!(q.offer(ask(3), 3, 1), Ok(()));
+    q.ready();
     assert_eq!(q.next(1).map(|(a, _)| a.pid), Some(2));
 }
 
@@ -115,6 +131,7 @@ fn a_question_expires_from_when_it_is_shown() {
     assert!(q.expired(EXPIRY_MS - 1).is_none());
     assert_eq!(q.expired(EXPIRY_MS), Some((1, 1)));
     let shown_at = EXPIRY_MS + 50;
+    q.ready();
     let id = q.next(shown_at).unwrap().0.id;
     assert!(q.expired(shown_at + EXPIRY_MS - 1).is_none());
     assert_eq!(q.expired(shown_at + EXPIRY_MS), Some((id, 2)));
@@ -129,6 +146,7 @@ fn a_withdrawn_question_leaves_the_queue_or_the_screen() {
     let id = q.next(0).unwrap().0.id;
     assert_eq!(q.withdraw(|&n| n == 2), None);
     assert_eq!(q.withdraw(|&n| n == 1), Some((id, 1)));
+    q.ready();
     assert_eq!(q.next(0).map(|(a, _)| a.pid), Some(3));
     assert!(q.next(0).is_none());
 }
@@ -143,6 +161,9 @@ fn a_lost_agent_refuses_everyone_from_then_on() {
     assert_eq!(q.lost(), vec![1, 2, 3]);
     assert_eq!(q.offer(ask(4), 4, 0), Err((4, Refusal::NoAgent)));
     assert!(q.next(0).is_none());
+    q.ready();
+    assert_eq!(q.offer(ask(5), 5, 0), Ok(()));
+    assert_eq!(q.next(0).map(|(a, _)| a.pid), Some(5));
 }
 
 /// Any sequence of steps shows every id once at most and settles every

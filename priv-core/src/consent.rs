@@ -28,6 +28,89 @@ pub mod kind {
     pub const ASK: u8 = 0x21;
     pub const ANSWER: u8 = 0x22;
     pub const CANCEL: u8 = 0x23;
+    pub const RESET: u8 = 0x24;
+    pub const RESET_SEEN: u8 = 0x25;
+}
+
+/// One end of the channel across restarts of either side. Init keeps the pair
+/// for the boot, so neither end ever reads end of file, and a new instance may
+/// find frames written for the one before it.
+///
+/// A new instance first sends `RESET` naming an epoch of its own, and acts on
+/// nothing until a `RESET_SEEN` naming that epoch comes back: what precedes it
+/// was written for its predecessor. A side that reads a `RESET` drops what it
+/// had pending and answers it.
+pub struct Link {
+    epoch: u64,
+    synced: bool,
+    /// The other side's epoch, once its `RESET` is answered.
+    peer: Option<u64>,
+}
+
+/// What a frame from the other side asks of this one.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Inbound {
+    Frame(u8, Vec<u8>),
+    /// The other side is new: drop what was pending, then send it this, the
+    /// acknowledgement and, while this side's own hello is unanswered, the
+    /// hello again, which init may have discarded unread.
+    Reset(Vec<u8>),
+    /// The other side said its hello again: send it this and nothing more.
+    Again(Vec<u8>),
+    /// Written for a predecessor, or an acknowledgement.
+    Stale,
+}
+
+impl Link {
+    /// `epoch` must differ from every earlier instance's at this end.
+    pub fn new(epoch: u64) -> Link {
+        Link {
+            epoch,
+            synced: false,
+            peer: None,
+        }
+    }
+
+    /// What a new instance sends before anything else.
+    pub fn hello(&self) -> Vec<u8> {
+        reset_frame(self.epoch)
+    }
+
+    pub fn take(&mut self, kind: u8, payload: Vec<u8>) -> Result<Inbound, Malformed> {
+        match kind {
+            kind::RESET => {
+                let peer = decode_epoch(&payload)?;
+                let mut reply = frame(kind::RESET_SEEN, &epoch_fields(peer).encode());
+                if !self.synced {
+                    reply.extend(self.hello());
+                }
+                if self.peer.replace(peer) == Some(peer) {
+                    return Ok(Inbound::Again(reply));
+                }
+                Ok(Inbound::Reset(reply))
+            }
+            kind::RESET_SEEN => {
+                self.synced |= decode_epoch(&payload)? == self.epoch;
+                Ok(Inbound::Stale)
+            }
+            _ if self.synced => Ok(Inbound::Frame(kind, payload)),
+            _ => Ok(Inbound::Stale),
+        }
+    }
+}
+
+/// A `RESET` for `epoch`. Init sends one on behalf of a side that has exited,
+/// so the other drops what it was waiting on at once.
+pub fn reset_frame(epoch: u64) -> Vec<u8> {
+    frame(kind::RESET, &epoch_fields(epoch).encode())
+}
+
+fn epoch_fields(epoch: u64) -> Fields {
+    Fields::new().with("epoch", epoch.to_string())
+}
+
+fn decode_epoch(payload: &[u8]) -> Result<u64, Malformed> {
+    number(&known(payload, &["epoch"])?, "epoch")
 }
 
 /// One question: everything in it comes from the sealed policy or from the
@@ -182,6 +265,7 @@ pub enum Refusal {
     Refused,
     Expired,
     Withdrawn,
+    Interrupted,
 }
 
 impl Refusal {
@@ -200,6 +284,9 @@ impl fmt::Display for Refusal {
             Refusal::Refused => "the person at the machine did not allow it",
             Refusal::Expired => "the person at the machine did not answer",
             Refusal::Withdrawn => "the requester withdrew the request",
+            Refusal::Interrupted => {
+                "the question went from the screen before the person at the machine answered"
+            }
         })
     }
 }

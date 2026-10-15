@@ -117,7 +117,7 @@ struct WindowManager {
 }
 
 impl WindowManager {
-    fn new() -> Self {
+    fn new(consent: consent::Consent) -> Self {
         let mut shelf = dock::LauncherShelf::new();
         let home = std::env::var("HOME").ok();
         shelf.pin(crate::app_entry::read(&crate::app_entry::shares(
@@ -136,7 +136,7 @@ impl WindowManager {
             system_bar: menu_bar::SystemBar::new(),
             shelf,
             popover: popover::Popover::new(),
-            consent: consent::Consent::acquire(),
+            consent,
             protocol,
             protocol_serial: 0,
             protocol_pointer_focus: 0,
@@ -849,12 +849,12 @@ impl WindowManager {
             let screen_w = output.width;
             let screen_h = output.height;
             match request {
-                input::ChromeRequest::PopoverToggle(kind) => {
-                    if let Some(item) = wm.system_bar.item_rect(screen_w, kind) {
+                input::ChromeRequest::PopoverToggle(panel) => {
+                    if let Some(item) = wm.system_bar.item_rect(screen_w, panel) {
                         // Read out first: `toggle` sizes the panel from it and
                         // borrows `wm` mutably.
                         let model = wm.net_cache;
-                        wm.popover.toggle(kind, item, &model, screen_w, screen_h);
+                        wm.popover.toggle(panel, item, &model, screen_w, screen_h);
                     }
                 }
                 input::ChromeRequest::PopoverDismiss => wm.popover.dismiss(),
@@ -1007,7 +1007,30 @@ impl WindowManager {
     }
 }
 
+/// How long a seat may stay taken: a compositor that just exited holds its
+/// seats until its exit's cleanup hooks run, which is after init is woken to
+/// start the next.
+const SEAT_WAIT_MS: u64 = 5000;
+
+fn acquire_seat(acquire: fn(u32) -> i64) -> bool {
+    let deadline = sys_core::get_time_ms() + SEAT_WAIT_MS;
+    loop {
+        let fd = acquire(window::SEAT_COMPOSITOR_PRIMARY);
+        if fd >= 0 {
+            return true;
+        }
+        if fd != i64::from(slopos_abi::Errno::EBUSY.raw()) || sys_core::get_time_ms() >= deadline {
+            return false;
+        }
+        sys_core::sleep_ms(10);
+    }
+}
+
 pub fn compositor_user_main() {
+    // Before any descriptor is opened: one could land at the number of an
+    // inherited one the compositor was started without.
+    let readiness = crate::readiness::ReadinessNotifier::acquire();
+    let consent = consent::Consent::acquire();
     tty::write(b"COMPOSITOR: starting\n");
 
     // Ownership of the screen and the input stream is announced here, once,
@@ -1015,14 +1038,14 @@ pub fn compositor_user_main() {
     // for the process lifetime: closing one would not release the seat anyway
     // (release is arbiter revocation at task exit), and holding them keeps the
     // descriptor's existence honest about what this process owns.
-    if window::screen_acquire(window::SEAT_COMPOSITOR_PRIMARY) < 0 {
+    if !acquire_seat(window::screen_acquire) {
         tty::write(b"COMPOSITOR: screen seat unavailable\n");
     }
-    if window::input_sink_acquire(window::SEAT_COMPOSITOR_PRIMARY) < 0 {
+    if !acquire_seat(window::input_sink_acquire) {
         tty::write(b"COMPOSITOR: input seat unavailable\n");
     }
 
-    let mut wm = WindowManager::new();
+    let mut wm = WindowManager::new(consent);
     let mut fb_info = DisplayInfo::default();
 
     if window::fb_info(&mut fb_info) < 0 {
@@ -1057,7 +1080,6 @@ pub fn compositor_user_main() {
     }
 
     let pixel_format = fb_info.format;
-    let readiness = crate::readiness::ReadinessNotifier::acquire();
 
     // Ring sized for the peak armed-row count: one accept-readiness stream,
     // one per connected client (MAX_CLIENTS), and the frame timer.
@@ -1262,7 +1284,9 @@ fn spawn_net_monitor_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) ->
 }
 
 /// Read privd's questions as they arrive, once privd has been told the
-/// compositor can draw them.
+/// compositor can draw them. A oneshot poll each time: a multishot fires only
+/// when readiness changes, so a frame landing between a read and the ring's
+/// next pass would wake nothing, and privd answers a `READY` at once.
 fn spawn_consent_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
     let fd = {
         let mut w = wm.borrow_mut();
@@ -1273,16 +1297,14 @@ fn spawn_consent_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
         return;
     };
     slopfut::spawn(async move {
-        loop {
-            let mut stream = slopfut::poll_add_multishot(fd, POLLIN);
-            while stream.next().await.is_some() {
-                if !wm.borrow_mut().consent.read() {
-                    tty::write(b"COMPOSITOR: privd's consent channel closed\n");
-                    return;
-                }
+        while wm.borrow().consent.fd().is_some() {
+            if slopfut::poll_add(fd, POLLIN).await < 0 {
+                slopfut::time::sleep_ms(500).await;
+            } else if !wm.borrow_mut().consent.read() {
+                break;
             }
-            slopfut::time::sleep_ms(500).await;
         }
+        tty::write(b"COMPOSITOR: privd's consent channel closed\n");
     });
 }
 

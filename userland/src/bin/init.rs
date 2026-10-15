@@ -1,3 +1,3 @@
 fn main() {
-    slopos_userland::apps::init_process::init_user_main();
+    slopos_userland::apps::init::init_user_main();
 }

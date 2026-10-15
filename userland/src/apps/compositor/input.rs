@@ -2,7 +2,6 @@ use slopos_abi::InputEvent;
 use slopos_abi::input::MODIFIER_SUPER;
 use slopos_abi::task::TaskPriority;
 use slopos_chrome_core::Rect as ChromeRect;
-use slopos_chrome_core::status::StatusKind;
 
 use crate::syscall::{UserWindowInfo, input, process, tty};
 use crate::theme::*;
@@ -15,6 +14,7 @@ use super::decorations;
 use super::dock::LauncherShelf;
 use super::menu_bar::SystemBar;
 use super::output::WINDOW_STATE_MINIMIZED;
+use super::popover::Panel;
 
 /// What a press on compositor chrome asks the frame loop to do.
 ///
@@ -23,7 +23,7 @@ use super::output::WINDOW_STATE_MINIMIZED;
 /// presses in one batch mean the second is what the person meant.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ChromeRequest {
-    PopoverToggle(StatusKind),
+    PopoverToggle(Panel),
     PopoverDismiss,
     /// A press inside the open popover, in screen coordinates.
     PopoverPress {
@@ -98,7 +98,7 @@ pub enum CursorPart {
     /// Light dismiss: the press is spent closing the popover and must not also
     /// reach whatever is under it.
     PopoverOutside,
-    SystemBar(Option<StatusKind>),
+    SystemBar(Option<Panel>),
     Shelf(usize),
     ResizeEdge(ResizeEdge),
     /// A window's signal button: 0 = close, 1 = minimize, 2 = expand.
@@ -380,8 +380,8 @@ impl InputHandler {
             }
             // The bar consumes every click; only a named item opens a popover.
             CursorPart::SystemBar(item) => {
-                if let Some(kind) = item {
-                    self.chrome_request = Some(ChromeRequest::PopoverToggle(kind));
+                if let Some(panel) = item {
+                    self.chrome_request = Some(ChromeRequest::PopoverToggle(panel));
                 }
                 false
             }

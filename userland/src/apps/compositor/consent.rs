@@ -13,7 +13,9 @@ use slopos_abi::syscall::{F_GETFD, MSG_NOSIGNAL};
 use slopos_gfx::blend::fill_rect_blended;
 use slopos_gfx::canvas_ops::rounded_rect_filled;
 use slopos_priv_core::INIT;
-use slopos_priv_core::consent::{self as protocol, Answer, Ask, Button, Dialog, Key, kind};
+use slopos_priv_core::consent::{
+    self as protocol, Answer, Ask, Button, Dialog, Inbound, Key, Link, kind,
+};
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -35,7 +37,12 @@ const LEADING: i32 = 2;
 pub struct Consent {
     fd: Option<OwnedFd>,
     frames: Deframer,
+    link: Link,
     showing: Option<Dialog>,
+    /// The compositor can draw a question.
+    drawing: bool,
+    /// privd may send a question: a `READY` went since the last one came.
+    offered: bool,
     dirty: bool,
 }
 
@@ -130,12 +137,19 @@ impl Consent {
                 && net::peer_program(fd.raw()).ok().flatten().as_deref() == Some(INIT.as_bytes())
                 && net::set_nonblocking(fd.raw()).is_ok()
         });
-        Consent {
+        let mut consent = Consent {
             fd,
             frames: slopos_priv_core::wire::deframer(),
+            link: Link::new(crate::privd::request_id()),
             showing: None,
+            drawing: false,
+            offered: false,
             dirty: false,
+        };
+        if !consent.write(&consent.link.hello()) {
+            consent.fd = None;
         }
+        consent
     }
 
     pub fn fd(&self) -> Option<RawFd> {
@@ -143,6 +157,16 @@ impl Consent {
     }
 
     pub fn announce(&mut self) {
+        self.drawing = true;
+        self.offer();
+    }
+
+    /// Tell privd a question can be drawn, once nothing is on screen.
+    fn offer(&mut self) {
+        if !self.drawing || self.offered || self.showing.is_some() {
+            return;
+        }
+        self.offered = true;
         if !self.write(&protocol::ready_frame()) {
             self.fd = None;
         }
@@ -177,25 +201,45 @@ impl Consent {
             }
         }
         loop {
-            match self.frames.next_frame() {
+            let inbound = match self.frames.next_frame() {
                 Ok(None) => return true,
-                Ok(Some((kind::ASK, payload))) => match Ask::decode(&payload) {
+                Ok(Some((kind, payload))) => self.link.take(kind, payload),
+                Err(_) => return self.close(),
+            };
+            match inbound {
+                Ok(Inbound::Stale) => {}
+                Ok(Inbound::Reset(seen)) => {
+                    self.dirty |= self.showing.take().is_some();
+                    self.offered = false;
+                    if !self.write(&seen) {
+                        return self.close();
+                    }
+                    self.offer();
+                }
+                Ok(Inbound::Again(seen)) => {
+                    if !self.write(&seen) {
+                        return self.close();
+                    }
+                }
+                Ok(Inbound::Frame(kind::ASK, payload)) => match Ask::decode(&payload) {
                     Ok(ask) => {
+                        self.offered = false;
                         self.showing = Some(Dialog::new(ask));
                         self.dirty = true;
                     }
                     Err(_) => return self.close(),
                 },
-                Ok(Some((kind::CANCEL, payload))) => {
+                Ok(Inbound::Frame(kind::CANCEL, payload)) => {
                     let Ok(id) = protocol::decode_cancel(&payload) else {
                         return self.close();
                     };
                     if self.showing.as_ref().is_some_and(|d| d.ask().id == id) {
                         self.showing = None;
                         self.dirty = true;
+                        self.offer();
                     }
                 }
-                Ok(Some(_)) | Err(_) => return self.close(),
+                Ok(Inbound::Frame(..)) | Err(_) => return self.close(),
             }
         }
     }
@@ -271,6 +315,7 @@ impl Consent {
         if !self.write(&answer.frame()) {
             self.fd = None;
         }
+        self.offer();
     }
 
     /// Dim `clip` and draw the question over it.

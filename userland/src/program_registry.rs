@@ -22,6 +22,11 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "Halt or reboot the machine",
     },
     ProgramSpec {
+        name: "session",
+        path: "/bin/session",
+        desc: "End the desktop session and start it again",
+    },
+    ProgramSpec {
         name: "bootctl",
         path: "/bin/bootctl",
         desc: "Install a kernel into a boot slot and choose what boots",

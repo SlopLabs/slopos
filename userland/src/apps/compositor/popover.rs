@@ -182,8 +182,20 @@ const SWITCH_SETTLE_MS: u128 = 10_000;
 /// the wrong order and leave the kernel in the state asked for *first*.
 const SWITCH_RETRY_MS: u128 = 750;
 
+/// What a popover shows: the system menu under the bar's icon, or a status
+/// item's panel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Panel {
+    System,
+    Status(StatusKind),
+}
+
+const NETWORK: Panel = Panel::Status(StatusKind::Network);
+
+const RESTART_SESSION: &str = "Restart session";
+
 pub struct Popover {
-    open: Option<StatusKind>,
+    open: Option<Panel>,
     rect: Rect,
     /// Where it was last frame, so closing or moving repaints what it vacated.
     prev_rect: Rect,
@@ -231,17 +243,17 @@ impl Popover {
         }
     }
 
-    /// Open the popover for `kind` under `item`, or close it if that item's
-    /// popover is already the open one.
+    /// Open the popover for `panel` under `item`, or close it if that panel
+    /// is already the open one.
     pub fn toggle(
         &mut self,
-        kind: StatusKind,
+        panel: Panel,
         item: DamageRect,
         model: &NetPanelModel,
         screen_w: u32,
         screen_h: u32,
     ) {
-        if self.open == Some(kind) {
+        if self.open == Some(panel) {
             self.dismiss();
             return;
         }
@@ -254,12 +266,18 @@ impl Popover {
         self.anchor = anchor;
         // Sized from the model at open, so the panel does not appear at header
         // height and resize on the next frame.
-        let size = Size {
-            w: PANEL_WIDTH,
-            h: if kind == StatusKind::Network {
-                layout(model).height
-            } else {
-                2 * PANEL_PAD + 2 * line_h()
+        let size = match panel {
+            NETWORK => Size {
+                w: PANEL_WIDTH,
+                h: layout(model).height,
+            },
+            Panel::System => Size {
+                w: gfx::font::string_width(RESTART_SESSION) + 2 * PANEL_PAD,
+                h: line_h() + 2 * PANEL_PAD,
+            },
+            Panel::Status(_) => Size {
+                w: PANEL_WIDTH,
+                h: 2 * PANEL_PAD + 2 * line_h(),
             },
         };
         let work_area = work_area(screen_w, screen_h);
@@ -267,7 +285,7 @@ impl Popover {
             &Positioner::below_bar_item(anchor, size, PANEL_GAP_Y),
             work_area,
         );
-        self.open = Some(kind);
+        self.open = Some(panel);
     }
 
     /// Close the popover. Idempotent: a dismiss with nothing open is what a
@@ -281,7 +299,7 @@ impl Popover {
     /// Resize the open popover to fit `model`, so the panel is as tall as its
     /// content rather than a guess made at open.
     pub fn fit_to(&mut self, model: &NetPanelModel, screen_w: u32, screen_h: u32) {
-        if self.open != Some(StatusKind::Network) || self.rect.is_empty() {
+        if self.open != Some(NETWORK) || self.rect.is_empty() {
             return;
         }
         let wanted = layout(model).height;
@@ -374,9 +392,17 @@ impl Popover {
     /// Route a press inside the panel. Returns whether anything took it; the
     /// mutation itself is spawned, see [`spawn_ip_net`].
     pub fn press(&mut self, x: i32, y: i32, model: &NetPanelModel) -> bool {
+        if self.open == Some(Panel::System) {
+            if self.rect().is_some_and(|rect| rect.contains(x, y)) {
+                spawn_session_restart();
+                self.dismiss();
+                return true;
+            }
+            return false;
+        }
         // Only the network panel has controls; without this a click on another
         // kind's popover — which draws nothing — reports "taken" and eats it.
-        if self.open != Some(StatusKind::Network) {
+        if self.open != Some(NETWORK) {
             return false;
         }
         let Some(rect) = self.rect() else {
@@ -429,7 +455,22 @@ impl Popover {
         let Some(rect) = self.rect() else {
             return;
         };
-        if self.open != Some(StatusKind::Network) {
+        if self.open == Some(Panel::System) {
+            buf.with_scissor(*clip, |buf| {
+                draw_frame(buf, rect);
+                gfx::draw_str_clipped(
+                    buf,
+                    rect.x + PANEL_PAD,
+                    rect.y + PANEL_PAD,
+                    RESTART_SESSION,
+                    TEXT_PRIMARY,
+                    PANEL_BG_OPAQUE,
+                    clip,
+                );
+            });
+            return;
+        }
+        if self.open != Some(NETWORK) {
             return;
         }
 
@@ -450,27 +491,7 @@ impl Popover {
         let gw_value_w = rect.x + rect.w - PANEL_PAD - gw_value_x;
 
         buf.with_scissor(*clip, |buf| {
-            // Two concentric opaque fills, not fill-then-outline: a stroked
-            // rounded rect blends its corner arcs against the fill's own
-            // antialiased boundary and fades out across each corner.
-            rounded_rect_filled(
-                buf,
-                rect.x,
-                rect.y,
-                rect.w,
-                rect.h,
-                PANEL_RADIUS,
-                SHELF_SEPARATOR,
-            );
-            rounded_rect_filled(
-                buf,
-                rect.x + RULE_H,
-                rect.y + RULE_H,
-                rect.w - 2 * RULE_H,
-                rect.h - 2 * RULE_H,
-                PANEL_RADIUS - RULE_H,
-                PANEL_BG_OPAQUE,
-            );
+            draw_frame(buf, rect);
 
             // The colour rule, panel-wide: TEXT_PRIMARY names the thing,
             // TEXT_SECONDARY describes it. With one font size and no weight
@@ -632,6 +653,45 @@ impl Popover {
             }
         });
     }
+}
+
+/// Two concentric opaque fills, not fill-then-outline: a stroked rounded rect
+/// blends its corner arcs against the fill's own antialiased boundary and
+/// fades out across each corner.
+fn draw_frame(buf: &mut DrawBuffer, rect: Rect) {
+    rounded_rect_filled(
+        buf,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        PANEL_RADIUS,
+        SHELF_SEPARATOR,
+    );
+    rounded_rect_filled(
+        buf,
+        rect.x + RULE_H,
+        rect.y + RULE_H,
+        rect.w - 2 * RULE_H,
+        rect.h - 2 * RULE_H,
+        PANEL_RADIUS - RULE_H,
+        PANEL_BG_OPAQUE,
+    );
+}
+
+/// Ask init, through `/bin/session`, to end the session and start it again,
+/// which takes the compositor too.
+fn spawn_session_restart() {
+    let argv: [*const u8; 2] = [b"session\0".as_ptr(), b"restart\0".as_ptr()];
+    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
+    let _ = process::spawn_path_with_actions(
+        b"/bin/session",
+        &argv,
+        slopos_abi::task::TaskPriority::Normal,
+        slopos_abi::task::TASK_FLAG_USER_MODE,
+        &actions,
+        0,
+    );
 }
 
 /// The region a popover may occupy: the screen below the bar, inset on the other

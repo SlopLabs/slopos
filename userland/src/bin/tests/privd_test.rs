@@ -4,16 +4,20 @@
 //!
 //! The runner hands this binary every capability as uid 0, which the policy
 //! admits to every action without asking. The session's half runs in a child
-//! at uid 1000 holding nothing; with no compositor in a test boot, nobody can
-//! be asked, so an action that needs consent is refused there.
+//! at uid 1000 holding nothing; a test boot runs no compositor until a case
+//! asks init for a session, and until then nobody can be asked, so an action
+//! that needs consent is refused there.
 
+use slopos_abi::syscall::{POLLIN, UserPollFd};
+use slopos_priv_core::consent::Refusal;
 use slopos_priv_core::wire::{self, Exit, Reply, Request};
 use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy};
+use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, STATUS_REFUSED, request_id};
 use slopos_userland::syscall::{OwnedFd, RawFd, fs, net, process};
 
 use std::io::Read;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -40,6 +44,20 @@ const CROWD: &str = "--crowd";
 const CROWD_UID: u32 = 4243;
 /// `argv[1]` of a probe that exits 1 when it holds a connection to privd.
 const HOLDS_PRIVD: &str = "--holds-privd";
+/// `argv[1]` of a uid-1000 child that asks for an action needing a person and
+/// leaves once it is asked: [`ASKED`], or [`NOBODY`] when nobody can be.
+const CONSENT: &str = "--consent";
+/// `argv[1]` of a uid-1000 child that asks as [`CONSENT`] does, says `asked`
+/// on stdout, and exits 0 once the question is interrupted.
+const CONSENT_HELD: &str = "--consent-held";
+const ASKED: i32 = 0;
+const NOBODY: i32 = 3;
+/// The probe's question was interrupted by a session ending or starting.
+const INTERRUPTED: i32 = 4;
+/// Long enough for a session to end and a compositor to start under TCG.
+const SESSION_DEADLINE: Duration = Duration::from_secs(120);
+/// How long a consent probe may take to be asked or refused.
+const PROBE_DEADLINE: Duration = Duration::from_secs(60);
 
 fn note(why: &str) {
     eprintln!("privd_test: {why}");
@@ -759,7 +777,186 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "output_for_a_terminal_is_relayed",
         output_for_a_terminal_is_relayed,
     ),
+    (
+        "consent_is_asked_across_a_compositor_restart",
+        consent_is_asked_across_a_compositor_restart,
+    ),
 ];
+
+/// With a desktop session up, the session's request that needs a person is
+/// put to the compositor. Ending the session interrupts a question on screen,
+/// though no compositor is left to say so, and nobody can be asked after; a
+/// compositor started again is asked the next one.
+fn consent_is_asked_across_a_compositor_restart() -> bool {
+    let outcome = (|| {
+        ask_init(InitCommand::RestartSession)
+            && asked_within(SESSION_DEADLINE)
+            && held_across_the_end()
+            && nobody_within(SESSION_DEADLINE)
+            && ask_init(InitCommand::RestartSession)
+            && asked_within(SESSION_DEADLINE)
+    })();
+    ask_init(InitCommand::EndSession) && outcome
+}
+
+fn ask_init(command: InitCommand) -> bool {
+    init_control::ask(command)
+        .map_err(|why| note(&format!("{}: {why}", command.word())))
+        .is_ok()
+}
+
+/// A question on screen when the session ends is interrupted.
+fn held_across_the_end() -> bool {
+    let held = Command::new(SELF)
+        .arg(CONSENT_HELD)
+        .uid(USER)
+        .gid(USER)
+        .env_remove(ENV_FD)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn();
+    let Ok(mut held) = held else {
+        note("the held request did not start");
+        return false;
+    };
+    let mut said = [0u8; 6];
+    let asked = held.stdout.take().is_some_and(|mut out| {
+        let mut fds = [UserPollFd {
+            fd: out.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        }];
+        let ready = fs::poll(&mut fds, PROBE_DEADLINE.as_millis() as i64);
+        matches!(ready, Ok(n) if n > 0) && out.read_exact(&mut said).is_ok() && &said == b"asked\n"
+    });
+    let ended = asked && ask_init(InitCommand::EndSession);
+    if !ended {
+        let _ = held.kill();
+    }
+    let interrupted = held.wait().ok().and_then(|status| status.code());
+    if !ended || interrupted != Some(0) {
+        note(&format!(
+            "a question across the end: asked {asked}, ended {ended}, the requester exited \
+             {interrupted:?}"
+        ));
+        return false;
+    }
+    true
+}
+
+/// Whether the consent probe says nobody can be asked within `deadline`:
+/// privd learns that the compositor has gone a moment after init does.
+fn nobody_within(deadline: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        match probe() {
+            Some(NOBODY) => return true,
+            Some(ASKED | INTERRUPTED) if start.elapsed() < deadline => {
+                std::thread::sleep(Duration::from_millis(250))
+            }
+            other => {
+                note(&format!(
+                    "with the session ended, the consent probe exited {other:?}"
+                ));
+                return false;
+            }
+        }
+    }
+}
+
+/// The consent probe's exit status, `None` once it has run past
+/// [`PROBE_DEADLINE`].
+fn probe() -> Option<i32> {
+    let mut child = Command::new(SELF)
+        .arg(CONSENT)
+        .uid(USER)
+        .gid(USER)
+        .env_remove(ENV_FD)
+        .stderr(Stdio::inherit())
+        .spawn()
+        .ok()?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.code(),
+            Ok(None) if start.elapsed() < PROBE_DEADLINE => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            _ => {
+                note("the consent probe was neither asked nor refused in time");
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// Whether a uid-1000 request is put to the person within `deadline`, asking
+/// again while nobody can be asked yet.
+fn asked_within(deadline: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        match probe() {
+            Some(ASKED) => return true,
+            Some(NOBODY | INTERRUPTED) if start.elapsed() < deadline => {
+                std::thread::sleep(Duration::from_millis(250))
+            }
+            other => {
+                note(&format!("the consent probe exited {other:?}"));
+                return false;
+            }
+        }
+    }
+}
+
+/// Ask for `ip link set lo up`, which the session needs a person for, and
+/// answer how the request went: asked, nobody to ask, or anything else.
+fn consent(hold: bool) -> i32 {
+    let Some(mut privd) = connect() else {
+        return 1;
+    };
+    let devnull = null();
+    let request = request("org.slopos.net.configure", &["link", "set", "lo", "up"]);
+    if !send(&privd, &request, devnull.raw()) {
+        return 1;
+    }
+    match privd.reply(request.id) {
+        Ok(Some(Reply::Asking)) => {}
+        Ok(Some(Reply::Denied { reason, .. })) if reason.contains("nothing can ask them") => {
+            return NOBODY;
+        }
+        Ok(Some(Reply::Denied { reason, .. })) if reason == Refusal::Interrupted.to_string() => {
+            return INTERRUPTED;
+        }
+        other => {
+            note(&format!("the consent probe was answered {other:?}"));
+            return 1;
+        }
+    }
+    if !hold {
+        return ASKED;
+    }
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        if out
+            .write_all(b"asked\n")
+            .and_then(|()| out.flush())
+            .is_err()
+        {
+            return 1;
+        }
+    }
+    let interrupted = Refusal::Interrupted.to_string();
+    match privd.reply(request.id) {
+        Ok(Some(Reply::Denied { reason, .. })) if reason == interrupted => 0,
+        other => {
+            note(&format!("the held question ended as {other:?}"));
+            1
+        }
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -769,6 +966,8 @@ fn main() {
         STRANGER_ARG => std::process::exit(stranger()),
         CROWD => std::process::exit(crowd()),
         HOLDS_PRIVD => std::process::exit(holds_privd()),
+        CONSENT => std::process::exit(consent(false)),
+        CONSENT_HELD => std::process::exit(consent(true)),
         CONNECT => std::process::exit(connect_and_hand(arg(2))),
         ASK => std::process::exit(ask_handed(arg(2), arg(3))),
         _ => slopos_slibc::test_harness::run(CASES),

@@ -50,6 +50,10 @@ name = "tree-install"
 path = "src/bin/tree-install.rs"
 
 [[bin]]
+name = "session"
+path = "src/bin/session.rs"
+
+[[bin]]
 name = "sysmon"
 path = "src/bin/sysmon.rs"
 
@@ -313,6 +317,10 @@ path = "src/bin/tests/peer_test.rs"
 [[bin]]
 name = "privd_test"
 path = "src/bin/tests/privd_test.rs"
+
+[[bin]]
+name = "supervision_test"
+path = "src/bin/tests/supervision_test.rs"
 
 [[bin]]
 name = "fifo_test"

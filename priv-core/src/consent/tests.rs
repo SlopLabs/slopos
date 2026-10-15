@@ -235,3 +235,126 @@ fn a_question_too_long_to_show_whole_is_malformed() {
     assert!(!deep.fits());
     assert_eq!(Ask::decode(&payload(&deep.frame()).1), Err(Malformed));
 }
+
+fn take(link: &mut Link, framed: &[u8]) -> Inbound {
+    let (kind, body) = payload(framed);
+    link.take(kind, body).unwrap()
+}
+
+fn reset(inbound: Inbound) -> Vec<u8> {
+    match inbound {
+        Inbound::Reset(seen) => seen,
+        other => panic!("not a reset: {other:?}"),
+    }
+}
+
+/// Every frame `link` takes from `framed`, which may hold several.
+fn take_all(link: &mut Link, framed: &[u8]) -> Vec<Inbound> {
+    let mut frames = deframer();
+    frames.push(framed);
+    let mut taken = Vec::new();
+    while let Some((kind, body)) = frames.next_frame().unwrap() {
+        taken.push(link.take(kind, body).unwrap());
+    }
+    taken
+}
+
+#[test]
+fn a_new_end_acts_only_on_what_follows_the_acknowledgement_of_its_reset() {
+    let mut privd = Link::new(1);
+    let mut agent = Link::new(2);
+    let question = ask().frame();
+    assert_eq!(take(&mut agent, &question), Inbound::Stale);
+    let to_privd = reset(take(&mut agent, &privd.hello()));
+    assert_eq!(take(&mut agent, &question), Inbound::Stale);
+    let to_agent = reset(take(&mut privd, &agent.hello()));
+    assert_eq!(take(&mut privd, &ready_frame()), Inbound::Stale);
+    assert_eq!(take(&mut agent, &to_agent), Inbound::Stale);
+    assert_eq!(
+        take(&mut agent, &question),
+        Inbound::Frame(kind::ASK, payload(&question).1)
+    );
+    assert_eq!(take(&mut privd, &to_privd), Inbound::Stale);
+    assert_eq!(
+        take(&mut privd, &ready_frame()),
+        Inbound::Frame(kind::READY, vec![])
+    );
+}
+
+#[test]
+fn a_reset_reaches_an_end_already_talking_and_leaves_it_talking() {
+    let mut privd = Link::new(1);
+    let seen = reset(take(&mut Link::new(2), &privd.hello()));
+    take(&mut privd, &seen);
+    let mut successor = Link::new(3);
+    let to_successor = reset(take(&mut privd, &successor.hello()));
+    assert_eq!(
+        take(&mut privd, &ready_frame()),
+        Inbound::Frame(kind::READY, vec![])
+    );
+    assert_eq!(take(&mut successor, &seen), Inbound::Stale);
+    assert_eq!(take(&mut successor, &ready_frame()), Inbound::Stale);
+    take(&mut successor, &to_successor);
+    assert_eq!(
+        take(&mut successor, &ready_frame()),
+        Inbound::Frame(kind::READY, vec![])
+    );
+}
+
+#[test]
+fn an_end_whose_hello_went_unread_says_it_again() {
+    let mut privd = Link::new(1);
+    let mut agent = Link::new(2);
+    let _unread = agent.hello();
+    let to_privd = reset(take(&mut agent, &privd.hello()));
+    let taken = take_all(&mut privd, &to_privd);
+    let [Inbound::Stale, Inbound::Reset(to_agent)] = &taken[..] else {
+        panic!("not an acknowledgement and a hello: {taken:?}");
+    };
+    assert_eq!(take_all(&mut agent, to_agent), [Inbound::Stale]);
+    assert_eq!(
+        take(&mut agent, &ask().frame()),
+        Inbound::Frame(kind::ASK, payload(&ask().frame()).1)
+    );
+    assert_eq!(
+        take(&mut privd, &ready_frame()),
+        Inbound::Frame(kind::READY, vec![])
+    );
+}
+
+#[test]
+fn a_hello_said_again_is_only_acknowledged() {
+    let mut agent = Link::new(2);
+    let hello = Link::new(1).hello();
+    let first = reset(take(&mut agent, &hello));
+    assert_eq!(take(&mut agent, &hello), Inbound::Again(first));
+    assert!(matches!(
+        take(&mut agent, &Link::new(3).hello()),
+        Inbound::Reset(_)
+    ));
+}
+
+#[test]
+fn a_reset_init_sends_for_a_side_that_exited_is_one_like_any_other() {
+    let mut agent = Link::new(2);
+    assert!(matches!(
+        take(&mut agent, &reset_frame(u64::MAX)),
+        Inbound::Reset(_)
+    ));
+    assert_eq!(take(&mut agent, &ready_frame()), Inbound::Stale);
+}
+
+#[test]
+fn a_reset_outside_the_protocol_is_malformed() {
+    let mut link = Link::new(1);
+    for fields in [
+        Fields::new(),
+        Fields::new().with("epoch", "x"),
+        Fields::new().with("epoch", "1").with("epoch", "2"),
+        Fields::new().with("epoch", "1").with("extra", "1"),
+    ] {
+        let body = fields.encode();
+        assert_eq!(link.take(kind::RESET, body.clone()), Err(Malformed));
+        assert_eq!(link.take(kind::RESET_SEEN, body), Err(Malformed));
+    }
+}

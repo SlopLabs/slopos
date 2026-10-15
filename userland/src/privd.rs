@@ -40,6 +40,9 @@ pub enum Input {
     Forwarded,
 }
 
+/// How long a request waits for privd while init starts it again.
+const RESTART_WAIT: Duration = Duration::from_secs(2);
+
 /// Exit statuses for a request that ran nothing, as pkexec gives them.
 pub const STATUS_REFUSED_BY_PERSON: i32 = 126;
 pub const STATUS_REFUSED: i32 = 127;
@@ -53,10 +56,27 @@ pub struct Connection {
 impl Connection {
     /// A fresh connection, attested as this process.
     pub fn open() -> Result<Connection, String> {
-        let fd = net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0)
-            .map_err(|e| format!("socket: {e}"))?;
-        let fd = above_stdio(fd)?;
-        net::connect_unix(fd.raw(), SOCKET.as_bytes()).map_err(|e| format!("{SOCKET}: {e}"))?;
+        Self::open_within(Duration::ZERO)
+    }
+
+    /// [`open`](Self::open), waiting `wait` for a privd that is not listening
+    /// yet, as one init has just started again is not.
+    pub fn open_within(wait: Duration) -> Result<Connection, String> {
+        let started = Instant::now();
+        let fd = loop {
+            let fd = net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0)
+                .map_err(|e| format!("socket: {e}"))?;
+            let fd = above_stdio(fd)?;
+            match net::connect_unix(fd.raw(), SOCKET.as_bytes()) {
+                Ok(()) => break fd,
+                Err(SyscallError::ECONNREFUSED | SyscallError::ENOENT)
+                    if started.elapsed() < wait =>
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(format!("{SOCKET}: {e}")),
+            }
+        };
         is_privd(fd.raw())
             .then(|| Connection::new(fd))
             .ok_or_else(|| format!("{SOCKET} is not privd"))
@@ -297,7 +317,8 @@ fn ask(action: &str, args: &[Vec<u8>], input: Input) -> Result<Asked, String> {
     }
     let mut connection = match Connection::inherited() {
         Some(inherited) => inherited,
-        None => Connection::open().map_err(|why| format!("cannot reach privd: {why}"))?,
+        None => Connection::open_within(RESTART_WAIT)
+            .map_err(|why| format!("cannot reach privd: {why}"))?,
     };
     let request = Request {
         id: request_id(),

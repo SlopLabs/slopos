@@ -8,10 +8,11 @@
 //! both the old and the new rect when a hover flips.
 
 use slopos_abi::draw::Color32;
-use slopos_chrome_core::status::{StatusKind, StatusLayout, hit_status_item, layout_status_items};
+use slopos_chrome_core::status::{StatusLayout, hit_status_item, layout_status_items};
 use slopos_font::FontRenderer;
 
 use super::hover::HOVER_STATUS_ITEM_BASE;
+use super::popover::Panel;
 use super::status_item::{STATUS_ITEM_COUNT, StatusItems, hover_rect};
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::theme::*;
@@ -36,6 +37,11 @@ pub const MAX_BAR_DAMAGE: usize = STATUS_ITEM_COUNT;
 
 /// A cursor position no bar pixel can hold, for geometry-only layouts.
 const NO_CURSOR: i32 = i32::MIN;
+
+/// The system icon is 8 px; its press target runs from the screen's edge to
+/// halfway to the app name.
+const SYSTEM_ICON_HIT_W: i32 =
+    SYSTEM_BAR_PADDING_X + SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP / 2;
 
 pub struct SystemBar {
     items: StatusItems,
@@ -139,16 +145,31 @@ impl SystemBar {
         py >= 0 && py < SYSTEM_BAR_HEIGHT
     }
 
-    /// Which status item `(px, py)` lands on.  Laid out at the passed position,
-    /// so a click batched with the motion that brought the cursor here is
-    /// tested against where the cursor now is.
-    pub fn hit_test(&self, screen_width: u32, px: i32, py: i32) -> Option<StatusKind> {
+    /// Which panel the item at `(px, py)` opens: the system icon's or a
+    /// status item's.  Laid out at the passed position, so a click batched
+    /// with the motion that brought the cursor here is tested against where
+    /// the cursor now is.
+    pub fn hit_test(&self, screen_width: u32, px: i32, py: i32) -> Option<Panel> {
+        if Self::covers(py) && (0..SYSTEM_ICON_HIT_W).contains(&px) {
+            return Some(Panel::System);
+        }
         let layout = self.layout(screen_width, px, py);
-        hit_status_item(&layout, px, py)
+        hit_status_item(&layout, px, py).map(Panel::Status)
     }
 
-    /// The screen rect a status item occupies, for anchoring a popover to it.
-    pub fn item_rect(&self, screen_width: u32, kind: StatusKind) -> Option<DamageRect> {
+    /// The screen rect an item occupies, for anchoring its popover.
+    pub fn item_rect(&self, screen_width: u32, panel: Panel) -> Option<DamageRect> {
+        let kind = match panel {
+            Panel::System => {
+                return Some(DamageRect {
+                    x0: SYSTEM_BAR_PADDING_X,
+                    y0: 0,
+                    x1: SYSTEM_BAR_PADDING_X + SYSTEM_BAR_ICON_SIZE - 1,
+                    y1: SYSTEM_BAR_HEIGHT,
+                });
+            }
+            Panel::Status(kind) => kind,
+        };
         let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);
         layout.slot_for(kind).map(|slot| DamageRect {
             x0: slot.x,

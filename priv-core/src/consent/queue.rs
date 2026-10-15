@@ -11,7 +11,12 @@ pub const DECLINED_MS: u64 = 5_000;
 
 /// privd's questions for the person, one on screen at a time, each with its
 /// asker `T`. Times are milliseconds on any clock that only goes forward.
+///
+/// The agent takes a question only after a `READY` it sent since the last
+/// one, so privd never has more than one question in flight to it: whatever
+/// privd writes fits the channel whole, and a frame is never left torn.
 pub struct Questions<T> {
+    agent: bool,
     ready: bool,
     waiting: VecDeque<(Ask, T)>,
     showing: Option<Showing<T>>,
@@ -28,6 +33,7 @@ struct Showing<T> {
 impl<T> Default for Questions<T> {
     fn default() -> Self {
         Self {
+            agent: false,
             ready: false,
             waiting: VecDeque::new(),
             showing: None,
@@ -38,14 +44,16 @@ impl<T> Default for Questions<T> {
 }
 
 impl<T> Questions<T> {
-    /// The agent can draw a question.
+    /// The agent can draw a question now: it says so once it can draw, and
+    /// again each time the question it was shown goes.
     pub fn ready(&mut self) {
+        self.agent = true;
         self.ready = true;
     }
 
     /// Queue `ask`, or hand its asker back with why it is refused at once.
     pub fn offer(&mut self, ask: Ask, asker: T, now: u64) -> Result<(), (T, Refusal)> {
-        let refusal = if !self.ready {
+        let refusal = if !self.agent {
             Refusal::NoAgent
         } else if self.declined_until.is_some_and(|until| now < until) {
             Refusal::Declined
@@ -64,6 +72,7 @@ impl<T> Questions<T> {
             return None;
         }
         let (mut ask, asker) = self.waiting.pop_front()?;
+        self.ready = false;
         ask.id = self.next_id;
         self.next_id += 1;
         let showing = self.showing.insert(Showing {
@@ -113,8 +122,10 @@ impl<T> Questions<T> {
         settled
     }
 
-    /// The agent has gone for good: every asker, to be refused.
+    /// The agent has gone, or another took its place, and nothing it was
+    /// asked can be answered: every asker, to be refused.
     pub fn lost(&mut self) -> Vec<T> {
+        self.agent = false;
         self.ready = false;
         let mut askers: Vec<T> = self.showing.take().map(|s| s.asker).into_iter().collect();
         askers.extend(self.waiting.drain(..).map(|(_, asker)| asker));

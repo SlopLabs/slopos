@@ -35,6 +35,7 @@ use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 
 use self::consent::{Broker, Waiting};
+use crate::init_control;
 use crate::readiness::ReadinessNotifier;
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, core as sys_core, fs, net, pidfd};
@@ -75,11 +76,28 @@ struct Daemon {
     /// working directory is the process's, shared by every connection.
     cwd: Mutex<()>,
     connections: Mutex<Vec<(Key, bool)>>,
+    /// The threads of what an earlier privd started that still ran when this
+    /// one did, whose exclusive groups this one cannot know: none is taken
+    /// while any of them runs.
+    inherited: Vec<u32>,
+}
+
+impl Daemon {
+    fn inherited_runs(&self) -> bool {
+        !self.inherited.is_empty()
+            && init_control::threads_elsewhere(init_control::PRIVD)
+                .iter()
+                .any(|thread| self.inherited.contains(thread))
+    }
 }
 
 static DAEMON: OnceLock<Daemon> = OnceLock::new();
 
 pub fn privd_main() -> ! {
+    // Before any descriptor is opened: one could land at the number of an
+    // inherited one privd was started without.
+    let ready = ReadinessNotifier::acquire();
+    let channel = consent_channel();
     let policy = load_policy();
     if let Err(why) = &policy {
         log!("privd: {why}; every request will be refused");
@@ -87,10 +105,11 @@ pub fn privd_main() -> ! {
     let daemon = Daemon {
         policy,
         paired: std::path::Path::new(REMOTE_CONF).is_file(),
-        consent: Broker::start(consent_channel()),
+        consent: Broker::start(channel),
         running: Mutex::new(Vec::new()),
         cwd: Mutex::new(()),
         connections: Mutex::new(Vec::new()),
+        inherited: init_control::threads_elsewhere(init_control::PRIVD),
     };
     let daemon: &'static Daemon = DAEMON.get_or_init(|| daemon);
     let listener = match listen() {
@@ -100,7 +119,7 @@ pub fn privd_main() -> ! {
             sys_core::exit_with_code(1);
         }
     };
-    if let Some(ready) = ReadinessNotifier::acquire() {
+    if let Some(ready) = ready {
         ready.signal_ready();
     }
     loop {
@@ -462,8 +481,13 @@ fn claim<'a>(daemon: &'a Daemon, action: &Action) -> Result<Claim<'a>, Reply> {
             action.exclusive_group().unwrap_or(&action.name)
         ))
     };
-    let mut running = daemon.running.lock().map_err(|_| busy())?;
     let group = action.exclusive_group().map(str::to_owned);
+    if group.is_some() && daemon.inherited_runs() {
+        return Err(Reply::denied(
+            "a mechanism an earlier privd started is still running",
+        ));
+    }
+    let mut running = daemon.running.lock().map_err(|_| busy())?;
     if let Some(group) = &group {
         if running.contains(group) {
             return Err(busy());
@@ -692,7 +716,7 @@ fn spawn(action: &Action, args: &[Vec<u8>], stdio: &[OwnedFd], cwd: &str) -> Res
         Endowment {
             caps: action.caps,
             ids: Some((action.uid, action.uid)),
-            groups: None,
+            ..Endowment::NONE
         },
     );
     if pid <= 0 {

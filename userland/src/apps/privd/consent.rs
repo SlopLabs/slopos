@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use slopos_abi::syscall::{MSG_NOSIGNAL, POLLHUP, POLLIN, POLLOUT, UserPollFd};
 use slopos_priv_core::consent::{
-    self as protocol, Answer, Ask, EXPIRY_MS, Questions, Refusal, WAITING_MAX, kind,
+    self as protocol, Answer, Ask, EXPIRY_MS, Inbound, Link, Questions, Refusal, WAITING_MAX, kind,
 };
 use slopos_remote_core::Deframer;
 
@@ -109,6 +109,7 @@ impl Broker {
 struct Agent {
     fd: OwnedFd,
     frames: Deframer,
+    link: Link,
 }
 
 impl Agent {
@@ -139,13 +140,16 @@ impl Agent {
 fn serve(channel: Option<OwnedFd>, incoming: Receiver<(Ask, Asker)>) {
     let epoch = Instant::now();
     let now = || epoch.elapsed().as_millis() as u64;
-    let mut agent = channel.map(|fd| {
-        let _ = net::set_nonblocking(fd.raw());
-        Agent {
-            fd,
-            frames: slopos_priv_core::wire::deframer(),
-        }
-    });
+    let mut agent = channel
+        .map(|fd| {
+            let _ = net::set_nonblocking(fd.raw());
+            Agent {
+                fd,
+                frames: slopos_priv_core::wire::deframer(),
+                link: Link::new(crate::privd::request_id()),
+            }
+        })
+        .filter(|agent| agent.write(&agent.link.hello()));
     let mut questions: Questions<Asker> = Questions::default();
     loop {
         let Some(live) = agent.as_mut() else {
@@ -203,7 +207,8 @@ fn serve(channel: Option<OwnedFd>, incoming: Receiver<(Ask, Asker)>) {
 }
 
 /// Take what the agent sent; `false` once it is gone or broke the protocol,
-/// either of which ends it as the agent.
+/// either of which ends it as the agent. A new agent, or init on behalf of
+/// one that exited, interrupts every question.
 fn read(agent: &mut Agent, questions: &mut Questions<Asker>, now: u64) -> bool {
     let mut buf = [0u8; 1024];
     loop {
@@ -215,10 +220,28 @@ fn read(agent: &mut Agent, questions: &mut Questions<Asker>, now: u64) -> bool {
         }
     }
     loop {
-        match agent.frames.next_frame() {
+        let inbound = match agent.frames.next_frame() {
             Ok(None) => return true,
-            Ok(Some((kind::READY, payload))) if payload.is_empty() => questions.ready(),
-            Ok(Some((kind::ANSWER, payload))) => {
+            Ok(Some((kind, payload))) => agent.link.take(kind, payload),
+            Err(_) => return false,
+        };
+        match inbound {
+            Ok(Inbound::Stale) => {}
+            Ok(Inbound::Reset(seen)) => {
+                for asker in questions.lost() {
+                    asker.settle(Err(Refusal::Interrupted));
+                }
+                if !agent.write(&seen) {
+                    return false;
+                }
+            }
+            Ok(Inbound::Again(seen)) => {
+                if !agent.write(&seen) {
+                    return false;
+                }
+            }
+            Ok(Inbound::Frame(kind::READY, payload)) if payload.is_empty() => questions.ready(),
+            Ok(Inbound::Frame(kind::ANSWER, payload)) => {
                 let Ok(answer) = Answer::decode(&payload) else {
                     return false;
                 };
@@ -226,7 +249,7 @@ fn read(agent: &mut Agent, questions: &mut Questions<Asker>, now: u64) -> bool {
                     asker.settle(result);
                 }
             }
-            Ok(Some(_)) | Err(_) => return false,
+            Ok(Inbound::Frame(..)) | Err(_) => return false,
         }
     }
 }

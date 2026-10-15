@@ -25,6 +25,7 @@ use slopos_abi::task::{
 use slopos_boot_core::variables;
 use slopos_slibc::process::ids::{getresgid, getresuid};
 use slopos_slibc::process::shim;
+use slopos_userland::init_control;
 use slopos_userland::syscall::core::{caps_drop, prof_ctl};
 use slopos_userland::syscall::efi::efivar_get;
 use slopos_userland::syscall::error::SyscallError;
@@ -37,6 +38,7 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::FromRawFd;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Barrier};
@@ -295,6 +297,68 @@ fn ids_without_set_id() -> i32 {
     if own && other { 0 } else { 1 }
 }
 
+/// A login tag is given at spawn by a `SetId` holder alone, and every spawn,
+/// fork and exec after passes it on.
+fn a_login_tag_passes_through_spawn_fork_and_exec() -> bool {
+    let tagged = Endowment {
+        login: Some(LOGIN),
+        ..Endowment::NONE
+    };
+    if run_endowed(SELF, &[LOGIN_PROBE], tagged) != Some(0) {
+        eprintln!("spawn_privilege_test: a tagged child or what it started lost the tag");
+        return false;
+    }
+    in_forked_child("a login tag without SetId", login_without_set_id)
+}
+
+fn login_without_set_id() -> i32 {
+    caps_drop(CAP_SET_ID);
+    let tagged = Endowment {
+        login: Some(LOGIN),
+        ..Endowment::NONE
+    };
+    let rc = process::spawn_endowed(
+        MISSING,
+        &[],
+        &[],
+        &[],
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &[],
+        0,
+        tagged,
+    );
+    i32::from(!expect("a login tag", rc, EPERM))
+}
+
+/// Exit 0 when this process carries [`LOGIN`], and so do a child it spawns
+/// and one it forks and execs.
+fn login_probe(args: &[String]) -> i32 {
+    let own = init_control::login_of(std::process::id());
+    if own != Some(LOGIN) {
+        eprintln!("spawn_privilege_test: the probe carries the login tag {own:?}");
+        return 1;
+    }
+    if !args.is_empty() {
+        return 0;
+    }
+    let spawned = Command::new(SELF).args([LOGIN_PROBE, "spawned"]).status();
+    // SAFETY: the hook only returns, which is safe in a forked child.
+    let forked = unsafe {
+        Command::new(SELF)
+            .args([LOGIN_PROBE, "forked"])
+            .pre_exec(|| Ok(()))
+            .status()
+    };
+    match (spawned, forked) {
+        (Ok(spawned), Ok(forked)) if spawned.success() && forked.success() => 0,
+        other => {
+            eprintln!("spawn_privilege_test: the probe's spawned and forked children: {other:?}");
+            1
+        }
+    }
+}
+
 /// A child holding a gated capability, or running as ids its spawner's real
 /// ones are not, starts `AT_SECURE`; one given neither does not.
 fn endowed_children_start_secure() -> bool {
@@ -534,6 +598,8 @@ const SELF: &str = "/bin/spawn_privilege_test";
 const EXEC_PROBE: &str = "--exec-probe";
 const HOLDS: &str = "--holds";
 const RUNS_AS: &str = "--runs-as";
+const LOGIN_PROBE: &str = "--login-probe";
+const LOGIN: u32 = 77;
 /// Exits 0 when its `AT_SECURE` is what its third argument says.
 const SECURE_PROBE: &str = "/bin/dl_secure_probe";
 const USER: u32 = 1000;
@@ -860,6 +926,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ),
     ("ids_need_set_id", ids_need_set_id),
     (
+        "a_login_tag_passes_through_spawn_fork_and_exec",
+        a_login_tag_passes_through_spawn_fork_and_exec,
+    ),
+    (
         "endowed_children_start_secure",
         endowed_children_start_secure,
     ),
@@ -1007,6 +1077,7 @@ fn main() {
         Some(EXEC_PROBE) => std::process::exit(exec_probe(&args[2..])),
         Some(HOLDS) => std::process::exit(holds(&args[2..])),
         Some(RUNS_AS) => std::process::exit(runs_as(&args[2..])),
+        Some(LOGIN_PROBE) => std::process::exit(login_probe(&args[2..])),
         _ => slopos_slibc::test_harness::run(CASES),
     }
 }

@@ -6,7 +6,8 @@ use slopos_abi::signal::{
     SIG_DFL, SIG_IGN, SIGKILL, SigSet, UserSigaction, WAIT_STATUS_CONTINUED, WNOHANG,
 };
 use slopos_abi::spawn::{
-    SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_UID, SpawnAttrs, SpawnFdAction, SpawnFdActionKind,
+    SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_LOGIN, SPAWN_SET_UID, SpawnAttrs, SpawnFdAction,
+    SpawnFdActionKind, SpawnLoginAttrs,
 };
 use slopos_abi::task::TaskPriority;
 
@@ -91,6 +92,9 @@ pub struct Endowment<'a> {
     pub ids: Option<(u32, u32)>,
     /// The child's supplementary groups, `None` for the spawner's.
     pub groups: Option<&'a [u32]>,
+    /// The child's login tag, `None` for the spawner's; setting one takes
+    /// `SetId`.
+    pub login: Option<u32>,
 }
 
 impl Endowment<'_> {
@@ -98,6 +102,7 @@ impl Endowment<'_> {
         caps: 0,
         ids: None,
         groups: None,
+        login: None,
     };
 }
 
@@ -143,7 +148,8 @@ pub fn spawn_endowed(
     let (uid, gid) = endowment.ids.unwrap_or_default();
     let groups = endowment.groups.unwrap_or_default();
     let set = endowment.ids.map_or(0, |_| SPAWN_SET_UID | SPAWN_SET_GID)
-        | endowment.groups.map_or(0, |_| SPAWN_SET_GROUPS);
+        | endowment.groups.map_or(0, |_| SPAWN_SET_GROUPS)
+        | endowment.login.map_or(0, |_| SPAWN_SET_LOGIN);
     let attrs = SpawnAttrs {
         actions_ptr: actions.as_ptr() as u64,
         actions_len: actions.len() as u64,
@@ -168,6 +174,11 @@ pub fn spawn_endowed(
         set,
         ..SpawnAttrs::new(priority.as_u8(), flags)
     };
+    let attrs = SpawnLoginAttrs {
+        attrs,
+        login: endowment.login.unwrap_or_default(),
+        _pad: 0,
+    };
     unsafe {
         syscall5(
             SYSCALL_SPAWN_PATH,
@@ -175,7 +186,7 @@ pub fn spawn_endowed(
             path.len() as u64,
             argv.as_ptr() as u64,
             argv.len() as u64,
-            &attrs as *const SpawnAttrs as u64,
+            &attrs as *const SpawnLoginAttrs as u64,
         ) as i32
     }
 }
