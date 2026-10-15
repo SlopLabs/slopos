@@ -445,7 +445,9 @@ its own.
 - `tree-core` keys manifests by name (`TOOLCHAIN`, `APPS`) and records each
   tree's destination in an `at` line, refusing a reinstall elsewhere.
   `slopos_userland::tree` scans and installs a tree for the installer, init
-  and `/bin/tree-install`. `FS_HOST_TREES` takes `<host>:<guest>[:<name>]`.
+  and `/bin/tree-install`; init hands the session the apps' manifest, and an
+  install reads only one uid 0 or the installing uid wrote. `FS_HOST_TREES`
+  takes `<host>:<guest>[:<name>]`.
 - The apps tree is on the tests, verified, persistent and self-hosting
   images, on the medium at `apps/`, on a live boot's RAM root, and installed
   by `selfhost.sh install`.
