@@ -756,8 +756,14 @@ pub fn unix_send_from(handle: SocketHandle, reader: &mut slopos_ostd::mm::VmRead
 
 /// Drain this side's pending SCM_RIGHTS files: up to `max_fds` move into
 /// `out_files`; any excess is carried out of the state lock and dropped
-/// here (closing those aliases). Returns the number delivered.
-fn drain_ancillary(handle: SocketHandle, out_files: &mut KVec<FileRef>, max_fds: usize) -> usize {
+/// here (closing those aliases). Returns the number delivered, or `None`
+/// having taken nothing when `alone` and bytes are waiting.
+fn drain_ancillary(
+    handle: SocketHandle,
+    out_files: &mut KVec<FileRef>,
+    max_fds: usize,
+    alone: bool,
+) -> Option<usize> {
     // Pure move out of the locked region: nothing drops while the state lock
     // is held.
     let mut drained = {
@@ -771,6 +777,9 @@ fn drain_ancillary(handle: SocketHandle, out_files: &mut KVec<FileRef>, max_fds:
         };
         match conn {
             Some((pair, side)) => match state.pairs.get_mut(pair) {
+                Some(pair_ref) if alone && !pair_ref.recv_fifo_ref(side).is_empty() => {
+                    return None;
+                }
                 Some(pair_ref) => pair_ref.recv_anc(side).drain(),
                 None => KVec::new(),
             },
@@ -786,20 +795,25 @@ fn drain_ancillary(handle: SocketHandle, out_files: &mut KVec<FileRef>, max_fds:
             received += 1;
         }
     }
-    received
+    Some(received)
 }
 
 /// Receive data from a connected AF_UNIX socket, with any in-flight files
-/// appended to `out_files`.
+/// appended to `out_files`. Files sent with bytes come with those bytes: a
+/// read that finds none takes only files sent alone, and reads again when
+/// bytes arrive between its look and its drain.
 pub fn unix_recvmsg(
     handle: SocketHandle,
     buf: &mut [u8],
     out_files: &mut KVec<FileRef>,
     max_fds: usize,
 ) -> (i32, usize) {
-    let bytes_read = unix_recv(handle, buf);
-    let received_fds = drain_ancillary(handle, out_files, max_fds);
-    (bytes_read, received_fds)
+    loop {
+        let bytes_read = unix_recv(handle, buf);
+        if let Some(fds) = drain_ancillary(handle, out_files, max_fds, bytes_read < 0) {
+            return (bytes_read, fds);
+        }
+    }
 }
 
 /// Single-direct-copy [`unix_recvmsg`]: data drains straight into the pinned
@@ -811,9 +825,12 @@ pub fn unix_recvmsg_into(
     out_files: &mut KVec<FileRef>,
     max_fds: usize,
 ) -> (i32, usize) {
-    let bytes_read = unix_recv_into(handle, writer);
-    let received_fds = drain_ancillary(handle, out_files, max_fds);
-    (bytes_read, received_fds)
+    loop {
+        let bytes_read = unix_recv_into(handle, writer);
+        if let Some(fds) = drain_ancillary(handle, out_files, max_fds, bytes_read < 0) {
+            return (bytes_read, fds);
+        }
+    }
 }
 
 /// Tear down a closing listener's pending backlog: each entry is a side-B slot
