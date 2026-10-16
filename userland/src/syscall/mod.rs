@@ -2,6 +2,7 @@
 //! `error` demultiplexing into `SyscallResult`, domain modules on top (`fs`
 //! returns `SyscallResult`, `tty` raw `i64`), and `wrappers` for RAII types.
 
+pub mod base;
 pub mod core;
 pub mod efi;
 pub mod error;

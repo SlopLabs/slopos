@@ -1,6 +1,7 @@
 //! `/sbin/init`: lays out the root, starts the services and starts them again
 //! when they crash, ends and restarts the desktop session, and re-executes
-//! itself keeping all of that.
+//! itself keeping all of that. When a new base comes in live it starts again
+//! each service the switch changed, itself included.
 
 mod control;
 mod reexec;
@@ -24,6 +25,7 @@ use self::service::{
 };
 use self::session::{Ended, Ending, Session, Then};
 use crate::apps::privd::CONSENT_FD;
+use crate::base_watch::BaseWatch;
 use crate::init_control::{self, Command, SOCKET};
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, UserSysInfo, core as sys_core, fs, net, tty};
@@ -179,6 +181,14 @@ fn boot() -> ! {
     init.run()
 }
 
+fn watch_base() -> Option<BaseWatch> {
+    let watch = BaseWatch::open();
+    if watch.is_none() {
+        eprintln!("init: no base monitor: a base switched to live restarts nothing");
+    }
+    watch
+}
+
 fn boot_flag(flag: u32) -> bool {
     let mut info = UserSysInfo::default();
     sys_core::sys_info(&mut info) == 0 && info.boot_flags & flag != 0
@@ -199,7 +209,17 @@ struct Consent {
 struct Init {
     consent: Option<Consent>,
     control: Option<Control>,
+    base: Option<BaseWatch>,
+    /// When init next tries to re-execute for a switch that changed
+    /// `/sbin/init`.
+    reexec_due: Option<u64>,
     privd: Supervised,
+    /// What a service left draining past [`service::DRAIN_MS`]: no longer
+    /// supervised, only reaped.
+    retired: Vec<Child>,
+    /// A switch changed the pairing: what the old broker ran has until then
+    /// to end before `SIGKILL`, and remoted starts after.
+    remote_ending: Option<u64>,
     remoted: Option<Supervised>,
     session: Session,
     session_budget: Budget,
@@ -226,7 +246,11 @@ impl Init {
         let mut init = Init {
             consent: consent.map(|(privd, agent)| Consent { privd, agent }),
             control,
+            base: watch_base(),
+            reexec_due: None,
             privd: Supervised::new(&PRIVD),
+            retired: Vec::new(),
+            remote_ending: None,
             remoted: std::path::Path::new(REMOTE_CONF)
                 .exists()
                 .then(|| Supervised::new(&REMOTED)),
@@ -278,6 +302,7 @@ impl Init {
                 service,
                 child: carried.pid.map(Child::watch),
                 due: carried.pid.is_none().then(|| budget.next(now)),
+                draining: None,
                 budget,
             }
         };
@@ -287,7 +312,11 @@ impl Init {
                 agent: adopt(agent),
             }),
             control,
+            base: watch_base(),
+            reexec_due: None,
             privd: supervised(&PRIVD, state.privd),
+            retired: Vec::new(),
+            remote_ending: None,
             remoted: state.remoted.map(|remoted| supervised(&REMOTED, remoted)),
             session: match state.session {
                 Some(pid) => Session::Running {
@@ -319,6 +348,8 @@ impl Init {
         loop {
             let now = sys_core::get_time_ms();
             self.reap(now);
+            self.step_base(now);
+            self.step_remote_ending(now);
             self.step_session(now);
             self.drain_consent();
             self.start_due(now);
@@ -348,6 +379,13 @@ impl Init {
         if let Some(control) = &self.control {
             control.poll_fds(fds);
         }
+        if let Some(base) = &self.base {
+            fds.push(UserPollFd {
+                fd: base.fd(),
+                events: POLLIN,
+                revents: 0,
+            });
+        }
         let children = [
             self.privd.child.as_ref(),
             self.remoted.as_ref().and_then(|r| r.child.as_ref()),
@@ -363,6 +401,7 @@ impl Init {
             children
                 .into_iter()
                 .flatten()
+                .chain(&self.retired)
                 .filter_map(|child| child.exited.as_ref())
                 .map(poll),
         );
@@ -378,8 +417,12 @@ impl Init {
         [
             self.control.as_ref().and_then(Control::deadline),
             self.privd.due,
+            self.privd.draining,
             self.remoted.as_ref().and_then(|r| r.due),
+            self.remoted.as_ref().and_then(|r| r.draining),
             self.session_due,
+            self.remote_ending,
+            self.reexec_due.filter(|_| self.may_reexec()),
         ]
         .into_iter()
         .flatten()
@@ -420,10 +463,13 @@ impl Init {
         ]
         .into_iter()
         .flatten()
+        .chain(self.retired.iter_mut())
     }
 
     fn exited(&mut self, pid: u32, status: WaitStatus, now: u64) {
-        if self.privd.is(pid) {
+        if let Some(at) = self.retired.iter().position(|child| child.pid == pid) {
+            self.retired.swap_remove(at);
+        } else if self.privd.is(pid) {
             self.reset_consent(Side::Agent);
             self.privd.exited(status, now);
         } else if let Some(remoted) = self.remoted.as_mut().filter(|r| r.is(pid)) {
@@ -453,6 +499,72 @@ impl Init {
         }
     }
 
+    /// Start again what a new base changed: privd, which drains first, and
+    /// remoted, or start or stop remoted as the base is paired or not; and
+    /// re-execute init once it may. The session stays, and the compositor
+    /// offers the person its restart.
+    fn step_base(&mut self, now: u64) {
+        if let Some(switch) = self
+            .base
+            .as_mut()
+            .filter(|base| base.switched())
+            .and_then(BaseWatch::take)
+        {
+            if self.privd.changed_by(&switch) {
+                println!("init: the new base changes privd; it drains and starts again");
+                self.privd.restart(now);
+            }
+            if switch.changed(&[service::PAIRING]) {
+                self.end_remote(now);
+            } else if let Some(remoted) = self.remoted.as_mut().filter(|r| r.changed_by(&switch)) {
+                remoted.restart(now);
+            }
+            if switch.changed(&[slopos_priv_core::INIT]) {
+                self.reexec_due = Some(now);
+            }
+        }
+        if self.reexec_due.is_some_and(|at| at <= now) && self.may_reexec() {
+            println!("init: the new base changes init; it re-executes");
+            self.reexec(None);
+            self.reexec_due = Some(now + service::WINDOW_MS);
+        }
+    }
+
+    /// End remoted and what it ran for a broker the base no longer pairs
+    /// with, as a session ends: remoted for a new pairing starts after.
+    fn end_remote(&mut self, now: u64) {
+        let paired = std::path::Path::new(REMOTE_CONF).exists();
+        let mut remoted = self.remoted.take();
+        if let Some(remoted) = remoted.as_mut() {
+            self.retired.extend(remoted.child.take());
+            remoted.due = None;
+            remoted.draining = None;
+        }
+        self.remoted = paired.then(|| remoted.unwrap_or_else(|| Supervised::new(&REMOTED)));
+        for pid in init_control::processes(init_control::REMOTE) {
+            let _ = process::kill(pid, slopos_abi::signal::SIGTERM);
+            let _ = process::kill(pid, slopos_abi::signal::SIGCONT);
+        }
+        self.remote_ending = Some(now + service::DRAIN_MS);
+    }
+
+    fn step_remote_ending(&mut self, now: u64) {
+        let Some(deadline) = self.remote_ending else {
+            return;
+        };
+        let left = init_control::processes(init_control::REMOTE);
+        if !left.is_empty() && deadline > now {
+            return;
+        }
+        for pid in left {
+            let _ = process::kill(pid, slopos_abi::signal::SIGKILL);
+        }
+        self.remote_ending = None;
+        if let Some(remoted) = self.remoted.as_mut().filter(|r| r.child.is_none()) {
+            remoted.due = Some(now);
+        }
+    }
+
     fn is_compositor(&self, pid: u32) -> bool {
         matches!(
             &self.session,
@@ -464,6 +576,11 @@ impl Init {
     /// Start what is due: a service that exited, once its budget allows, and
     /// the session.
     fn start_due(&mut self, now: u64) {
+        let retired = [Some(&mut self.privd), self.remoted.as_mut()]
+            .into_iter()
+            .flatten()
+            .filter_map(|supervised| supervised.retire(now));
+        self.retired.extend(retired);
         if self.privd.due_by(now) {
             let fds = self.privd_fds();
             self.privd.start(now, &fds);
@@ -566,7 +683,7 @@ impl Init {
             reply,
         } = request;
         let then = match command {
-            Command::Reexec => return self.reexec(reply),
+            Command::Reexec => return self.reexec(Some(reply)),
             Command::RestartSession if self.session_held && uid != 0 => {
                 return answer(reply, "refused: uid 0 ended the session");
             }
@@ -603,12 +720,36 @@ impl Init {
         }
     }
 
+    /// A re-exec carries the session and each service as they stand: one
+    /// starting, ending, due, draining or left running has timers, a pipe
+    /// or a child it does not.
+    fn may_reexec(&self) -> bool {
+        let draining = self.privd.draining.is_some()
+            || self.remoted.as_ref().is_some_and(|r| r.draining.is_some())
+            || self.remote_ending.is_some()
+            || !self.retired.is_empty();
+        !draining
+            && match &self.session {
+                Session::Down => self.session_due.is_none(),
+                Session::Running { .. } => true,
+                _ => false,
+            }
+    }
+
     /// The new image answers `reply`; this one only when the exec failed.
-    fn reexec(&mut self, reply: OwnedFd) {
+    fn reexec(&mut self, reply: Option<OwnedFd>) {
+        if !self.may_reexec() {
+            if let Some(reply) = reply {
+                answer(
+                    reply,
+                    "refused: the session is starting or ending, or a service drains",
+                );
+            }
+            return;
+        }
         let session = match &self.session {
-            Session::Down if self.session_due.is_none() => None,
             Session::Running { compositor } => Some(compositor.pid),
-            _ => return answer(reply, "refused: the session is starting or ending"),
+            _ => None,
         };
         let carried = |supervised: &Supervised| reexec::Service {
             pid: supervised.child.as_ref().map(|child| child.pid),
@@ -620,7 +761,7 @@ impl Init {
                 .as_ref()
                 .map(|consent| (consent.privd.raw(), consent.agent.raw())),
             control: self.control.as_ref().map(Control::listener),
-            reply: Some(reply.raw()),
+            reply: reply.as_ref().map(OwnedFd::raw),
             privd: carried(&self.privd),
             remoted: self.remoted.as_ref().map(carried),
             session,
@@ -630,7 +771,9 @@ impl Init {
         };
         let why = reexec::reexec(&state);
         eprintln!("init: cannot re-execute: {why}");
-        answer(reply, &format!("refused: {why}"));
+        if let Some(reply) = reply {
+            answer(reply, &format!("refused: {why}"));
+        }
     }
 
     fn runs(&self, side: Side) -> bool {

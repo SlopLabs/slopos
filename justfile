@@ -432,7 +432,7 @@ boot:
         refresh=""
     fi
     just _boot-disk-dev $refresh
-    echo "boot: in the guest: cd /src/slopos; git pull; scripts/selfhost.sh install; bootctl reboot"
+    echo "boot: in the guest: cd /src/slopos; git pull; scripts/selfhost.sh install; for a kernel, scripts/selfhost.sh install-kernel; bootctl reboot"
     echo "boot: the guest's git push lands in {{guest_push_repo}}; git fetch {{guest_push_repo}} <branch> takes it"
     QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" GIT_PUSH_REPO="$PWD/{{guest_push_repo}}" \
         just _qemu-boot "interactive" "${VIDEO:-1}" {{boot_disk}} {{fs_image_persist}} BOOT_DISK_IMG={{boot_disk}} {{net_env}}
@@ -449,7 +449,7 @@ boot-debug:
 boot-live: iso
     just _qemu-boot "interactive" "${VIDEO:-1}" {{iso}} {{fs_image}} QEMU_NO_ROOT_DISK=1 {{net_env}}
 
-[doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics and one that aborts, each leaving its crash record; then install a base and roll it back, and install one the kernel does not serve, which it passes over for the previous; across the reboots of one QEMU, with the ESP untouched")]
+[doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics and one that aborts, each leaving its crash record; then install a base, which runs at once and a reboot keeps, roll it back, which runs at once too, and install one the kernel does not serve, which it passes over for the previous; across the reboots of one QEMU, with the ESP untouched")]
 test-install:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -472,7 +472,8 @@ test-install:
         "INSTALL-THROUGH $entry at stage 1" "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" \
         "INSTALL-THROUGH $entry at stage 2" "INSTALL-CRASH-RECORD /var/log/crash/" "INSTALL-STAGE 3: rebooting into slopos-abort" \
         "crash record: written" "INSTALL-THROUGH $entry at stage 3" "INSTALL-BASE-INSTALLED install-test-base-b" \
-        "INSTALL-STAGE 4: rebooting into the default" "INSTALL-BASES at stage 4" "INSTALL-STAGE 5: rebooting into the default" \
+        "INSTALL-BASE-LIVE at stage 3" "INSTALL-STAGE 4: rebooting into the default" \
+        "INSTALL-BASES at stage 4" "INSTALL-BASE-LIVE at stage 4" "INSTALL-STAGE 5: rebooting into the default" \
         "INSTALL-BASE-INSTALLED install-test-base-c" "INSTALL-STAGE 6: rebooting into the default" \
         "BOOT: base previous (" "INSTALL-PASSED-OVER install-test-base-c" "INSTALL-REFUSED a kernel" \
         "INSTALL-REFUSED a base" \
@@ -1186,15 +1187,27 @@ remote-serve *ARGS: (_kernel "release")
         --offer base={{initramfs_remote}} "$@"
 
 [positional-arguments]
-[doc("Build the release kernel and a base paired with the broker under a fresh SLOPOS_BUILD_TAG, install the base and put the kernel into the paired machine's spare slot, boot it once and wait for it to come back with that tag; --commit then makes it the default")]
+[doc("Build a base paired with the broker under a fresh SLOPOS_BUILD_TAG and install it on the paired machine, which runs it at once when its kernel serves it; when the release kernel differs from the one running, build it under the tag too, put it into the spare slot, boot it once and wait for it to come back with that tag; --commit then makes it the default")]
 remote-install *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     tag="remote-$(date -u +%Y%m%dT%H%M%SZ)"
-    export SLOPOS_BUILD_TAG="$tag"
-    just _initramfs-remote
-    just _kernel release
-    scripts/remote.py install --kernel {{build_dir}}/kernel-release.elf --base {{initramfs_remote}} --tag "$tag" "$@"
+    SLOPOS_BUILD_TAG="$tag" just _initramfs-remote
+    # What the kernel is, built with no tag in the shared target directory;
+    # the tagged one, built only when that differs from the running kernel,
+    # gets a directory of its own so the tag never rebuilds the shared one.
+    env -u SLOPOS_BUILD_TAG just _kernel release
+    identity="$(sha256sum {{build_dir}}/kernel-release.elf | cut -d' ' -f1)"
+    kernel=()
+    case "$(scripts/remote.py kernel-changed --identity "$identity" | tail -n 1)" in
+    changed)
+        BUILD_DIR="{{build_dir}}/remote-kernel" SLOPOS_BUILD_TAG="$tag" just _kernel release
+        kernel=(--kernel "{{build_dir}}/remote-kernel/kernel-release.elf" --identity "$identity")
+        ;;
+    same) ;;
+    *) exit 1 ;;
+    esac
+    scripts/remote.py install --base {{initramfs_remote}} ${kernel[@]+"${kernel[@]}"} --tag "$tag" "$@"
 
 # An installed machine as the bare-metal layout has it — a boot disk whose
 # slots boot a base paired with a broker on this host's loopback, which SLIRP
@@ -1202,7 +1215,7 @@ remote-install *ARGS:
 # another broker is planted under /etc/remote, which remoted must ignore. The
 # kernel carries a build tag and is built in a target directory of its own, so
 # the tag never rebuilds the shared one.
-[doc("Remote-control check: boot an installed machine whose base is paired with a broker on this host and drive it through scripts/remote.py — wait for its build tag; run commands and check stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; push a random 8 MiB file, pull it back byte-identical; read /dev/kmsg; find the base's pairing unwritable and a pairing planted on the root ignored; serve from two daemons; install into the spare slot, reboot into it and commit it; power off with /bin/halt and require QEMU to exit")]
+[doc("Remote-control check: boot an installed machine whose base is paired with a broker on this host and drive it through scripts/remote.py — wait for its build tag; run commands and check stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; push a random 8 MiB file, pull it back byte-identical; read /dev/kmsg; find the base's pairing unwritable and a pairing planted on the root ignored; serve from two daemons; install a base that runs at once; install into the spare slot, reboot into it and commit it, keeping that base; power off with /bin/halt and require QEMU to exit")]
 test-remote: _build-userland _base-recipes
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1244,6 +1257,8 @@ test-remote: _build-userland _base-recipes
     # Where remoted once read a pairing, and any program can write: one with
     # a broker of its own, which must never hear from the machine.
     scripts/remote.py --state "$work/decoy-state" provision "$work/planted" --broker "10.0.2.2:$decoy_port"
+    # Readable by the session, which the check runs as: a decoy keeps nothing.
+    chmod -R a+rX "$work/planted"
     # Room for the kernel and base `install` pushes.
     FS_IMAGE_SIZE=256M VERITY=off PRESERVE_FS_IMAGE=0 FS_BASE=boot FS_HOST_TREES="$work/planted:/etc/remote" \
         scripts/build_fs_image.sh "$work/root.img" "{{build_dir}}"
@@ -1341,16 +1356,29 @@ test-remote: _build-userland _base-recipes
     EOF
     [ "$(remote run -- echo via-second)" = via-second ] || fail "a command through the second daemon"
 
-    echo "── install into the spare slot, reboot into it, commit it ──"
+    echo "── a base installed, running at once ──"
     # A fresh boot disk names no default; an installed machine's does.
     remote run -- bootctl set-default slopos-a
-    REMOTE_STEP_TIMEOUT=600 remote install --kernel "$work/kernel-dev.elf" --base "$work/base-next.cpio" --tag "$tag" --commit \
+    REMOTE_STEP_TIMEOUT=600 remote install --base "$work/base-next.cpio" \
+        >"$work/install-base.log" 2>&1 || fail "base install: $(tail -n 5 "$work/install-base.log")"
+    grep -q '^base installed: .*the system runs it now' "$work/install-base.log" ||
+        fail "the base did not run at once; see $work/install-base.log"
+    grep -q "^base current: .*, build tag $tag-next, .*, running\$" "$work/install-base.log" &&
+        grep -q "^base previous: .*, build tag $tag, " "$work/install-base.log" ||
+        fail "the base install did not make the new base current and keep the one that ran; see $work/install-base.log"
+    [ "$(remote run -- cat /usr/share/slopos/build-tag)" = "$tag-next" ] || fail "the base that runs is not $tag-next"
+    remote klog >"$work/klog-base.txt"
+    grep -q 'BASE: generation 2 is the base' "$work/klog-base.txt" ||
+        fail "the base was not activated live in the boot that installed it"
+    sed 's/^/  /' "$work/install-base.log"
+
+    echo "── install into the spare slot, reboot into it, commit it ──"
+    REMOTE_STEP_TIMEOUT=600 remote install --kernel "$work/kernel-dev.elf" --tag "$tag" --commit \
         >"$work/install.log" 2>&1 || fail "install: $(tail -n 5 "$work/install.log")"
     grep -q '^installed slot b (entry slopos-b)' "$work/install.log" && grep -qx 'booted: slopos-b' "$work/install.log" &&
         grep -qx 'default: slopos-b' "$work/install.log" || fail "install did not boot and commit slopos-b; see $work/install.log"
-    grep -q "^base current: .*, build tag $tag-next, .*, running\$" "$work/install.log" &&
-        grep -q "^base previous: .*, build tag $tag, " "$work/install.log" ||
-        fail "install did not make the new base current and keep the one that ran; see $work/install.log"
+    grep -q "^base current: .*, build tag $tag-next, .*, running\$" "$work/install.log" ||
+        fail "the reboot did not keep the base installed live; see $work/install.log"
     sed 's/^/  /' "$work/install.log"
 
     echo "── power off ──"

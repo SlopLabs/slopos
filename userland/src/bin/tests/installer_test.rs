@@ -43,7 +43,7 @@ use slopos_userland::boot_disk::{
     BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, not_installable,
     open_fat, partition_node, table_of, whole_disks,
 };
-use slopos_userland::selfhost::{selfhost_installing, workspace};
+use slopos_userland::selfhost::{selfhost_install, workspace};
 use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
 use slopos_userland::syscall::efi::{efivar_get, efivar_set};
@@ -541,14 +541,8 @@ fn first_boot(status: &str) -> bool {
         Ok(root) => {
             let tag = format!("guest-{}", clock_gettime_ns());
             let started = Instant::now();
-            let status =
-                selfhost_installing(root, &["install", "tests"]).and_then(|(mut cmd, privd)| {
-                    let status = cmd.env("SLOPOS_BUILD_TAG", &tag).status();
-                    drop(privd);
-                    status.map_err(|e| e.to_string())
-                });
-            if !matches!(status, Ok(s) if s.success()) {
-                note(&format!("selfhost.sh install tests: {status:?}"));
+            if let Err(why) = selfhost_install(root, "tests", &tag) {
+                note(&why);
                 return false;
             }
             println!("INSTALLER-BUILT {tag} in {} s", started.elapsed().as_secs());

@@ -18,7 +18,8 @@ one place remoted reads them from.
     sh [--timeout S] 'CMDLINE'          through /bin/shell -c
     push LOCAL REMOTE | pull REMOTE LOCAL   SHA-256 checked end to end
     klog [--follow]
-    install --kernel ELF --base IMG [--tag T] [--commit] [--timeout S]
+    install [--base IMG] [--kernel ELF --tag T] [--commit] [--timeout S]
+    kernel-changed --identity SHA256   prints `changed`, or `same` for that kernel
 
 Every command but `serve` and `provision` goes to the newest boot connected
 (`--boot ID` names another) and fails, after `--connect-timeout` seconds, when
@@ -72,6 +73,10 @@ SCRATCH = "/var/tmp/slopos-remote"
 
 class RemoteError(Exception):
     pass
+
+
+class CommandFailed(RemoteError):
+    """The agent ran the command, which failed."""
 
 
 def frame(kind, payload=b""):
@@ -134,8 +139,11 @@ PAIRING_DIR = "usr/share/slopos/remote/"
 PAIRING_FILES = ("remote.conf", "ca.pem", "token")
 
 
-def base_pairing(path):
-    """The pairing files a base image (a newc cpio) carries, by name."""
+BUILD_TAG = "usr/share/slopos/build-tag"
+
+
+def base_records(path, wanted):
+    """The records of a base image (a newc cpio) whose names `wanted` takes, by name."""
     found = {}
     with open(path, "rb") as f:
         while True:
@@ -147,11 +155,24 @@ def base_pairing(path):
             f.seek((-(110 + name_len)) % 4, os.SEEK_CUR)
             if name == "TRAILER!!!":
                 return found
-            if name.startswith(PAIRING_DIR) and name[len(PAIRING_DIR):] in PAIRING_FILES:
-                found[name[len(PAIRING_DIR):]] = f.read(size)
+            if wanted(name):
+                found[name] = f.read(size)
             else:
                 f.seek(size, os.SEEK_CUR)
             f.seek((-size) % 4, os.SEEK_CUR)
+
+
+def base_pairing(path):
+    """The pairing files a base image carries, by name."""
+    records = base_records(path, lambda name: name.startswith(PAIRING_DIR)
+                           and name[len(PAIRING_DIR):] in PAIRING_FILES)
+    return {name[len(PAIRING_DIR):]: data for name, data in records.items()}
+
+
+def base_build_tag(path):
+    """The build tag a base image names, or None."""
+    tag = base_records(path, lambda name: name == BUILD_TAG).get(BUILD_TAG)
+    return tag.decode("utf-8", "replace").strip() if tag is not None else None
 
 
 def check_paired(state, path):
@@ -621,12 +642,15 @@ class Broker:
 
     async def op_wait(self, writer, req):
         tag, boot, exclude = req.get("tag"), req.get("boot"), set(req.get("exclude_boots") or ())
+        base_tag = req.get("base_tag")
 
         def match():
             for agent in self.live():
                 if agent.ident["boot"] in exclude or (boot and agent.ident["boot"] != boot):
                     continue
                 if tag is not None and agent.ident["tag"] != tag:
+                    continue
+                if base_tag is not None and agent.ident["base_tag"] != base_tag:
                     continue
                 return agent
             return None
@@ -638,6 +662,7 @@ class Broker:
         seen = ", ".join(f"{a.ident['boot'][:12]} tag {a.ident['tag'] or '-'}" for a in self.live())
         await self.reply(writer, {"ok": False, "error": "timed out waiting for "
                                   + (f"an agent with build tag {tag!r}" if tag is not None else "an agent")
+                                  + (f" running base tag {base_tag!r}" if base_tag is not None else "")
                                   + (" on a new boot" if exclude else "")
                                   + (f" with boot id {boot}" if boot else "")
                                   + (f"; connected: {seen}" if seen else "; none connected")})
@@ -953,7 +978,7 @@ def capture(args, argv, timeout=120):
     if code != 0 or signal is not None or timed_out:
         why = "timed out" if timed_out else f"signal {signal}" if signal is not None else f"exit {code}"
         detail = (err.getvalue() or out.getvalue()).decode(errors="replace").strip()
-        raise RemoteError(f"`{' '.join(argv)}` failed ({why}){': ' + detail if detail else ''}")
+        raise CommandFailed(f"`{' '.join(argv)}` failed ({why}){': ' + detail if detail else ''}")
     return out.getvalue().decode(errors="replace")
 
 
@@ -1104,7 +1129,7 @@ def cmd_status(args):
     return 0 if agents else 1
 
 
-def wait_agent(args, tag=None, exclude_boots=(), timeout=60):
+def wait_agent(args, tag=None, exclude_boots=(), timeout=60, base_tag=None):
     """The agent the broker reports matching; a broker still starting up is waited for too."""
     deadline = time.monotonic() + timeout
     while True:
@@ -1116,7 +1141,8 @@ def wait_agent(args, tag=None, exclude_boots=(), timeout=60):
                 raise
             time.sleep(0.5)
     try:
-        return link.control(op="wait", tag=tag, boot=args.boot, exclude_boots=list(exclude_boots),
+        return link.control(op="wait", tag=tag, base_tag=base_tag, boot=args.boot,
+                            exclude_boots=list(exclude_boots),
                             timeout=max(deadline - time.monotonic(), 0))["agent"]
     finally:
         link.close()
@@ -1127,35 +1153,69 @@ def cmd_wait(args):
     print(json.dumps(agent, indent=2) if args.json else describe(agent))
 
 
-def cmd_install(args):
-    kernel, base = Path(args.kernel), Path(args.base)
-    for path in (kernel, base):
-        if not path.is_file():
-            die(f"install: no file at {path}")
-    # A base without this broker's pairing boots a machine nothing can reach
-    # to commit it, or to do anything else.
+def kernel_identities(state):
+    """The kernels `install` booted, by build tag: what each is with no tag."""
+    try:
+        return json.loads((state.path / "kernels.json").read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def cmd_kernel_changed(args):
+    """Print `same` when the agent's kernel is the one `--identity` names, else `changed`."""
+    running = wait_agent(args, timeout=args.connect_timeout)["tag"]
+    same = running and kernel_identities(State(args.state)).get(running) == args.identity
+    print(f"remote: the running kernel (tag {running or '-'}) is " + ("this one" if same else "another"),
+          file=sys.stderr, flush=True)
+    print("same" if same else "changed")
+
+
+def install_base(args, base):
+    """Install `base` and wait for it to run, when the running kernel serves it."""
     paired = check_paired(State(args.state), base)
-    log(f"{base} is paired with {paired}")
-    before = wait_agent(args, timeout=args.connect_timeout)
-    args.boot = before["boot"]
+    tag = base_build_tag(base)
+    log(f"{base} is paired with {paired}, build tag {tag or '-'}")
+    remote_base, size, base_sha = push(args, base, f"{SCRATCH}/base.img")
+    log(f"pushed {base}: {size} bytes, sha256 {base_sha}")
+    # The session may replace what was pushed; bootctl installs only these bytes.
+    try:
+        said = capture(args, ["bootctl", "base", "install", remote_base, base_sha], timeout=600)
+        sys.stdout.write(said)
+        live = "runs it now" in said or "runs already" in said
+    except CommandFailed:
+        raise
+    except RemoteError as e:
+        # A base that changes the pairing ends what remoted runs, this command among it.
+        log(f"the agent went while the base went in ({e}); waiting for it on the new base")
+        live = True
+    if not live:
+        log(f"the base does not run yet: {said.strip().splitlines()[-1] if said.strip() else '-'}")
+        capture(args, ["rm", "-f", remote_base])
+        return
+    if tag is None:
+        log(f"{base} names no build tag to recognise it running by; not waiting for it")
+        return
+    args.boot = None
+    agent = wait_agent(args, base_tag=tag, timeout=args.timeout)
+    args.boot = agent["boot"]
+    log(f"the base runs now, without a reboot: boot {agent['boot'][:12]}, base tag {tag}")
+    capture(args, ["rm", "-f", remote_base])
+
+
+def install_kernel(args, kernel):
+    """Put `kernel` into the spare slot and boot it once, then commit it with --commit."""
     link = BrokerLink(args.socket)
     try:
         old_boots = [a["boot"] for a in link.control(op="status")["agents"]]
     finally:
         link.close()
-    log(f"installing onto boot {before['boot'][:12]} ({before['version']})")
-    capture(args, ["mkdir", "-p", SCRATCH])
     remote_kernel, size, kernel_sha = push(args, kernel, f"{SCRATCH}/kernel.elf")
     log(f"pushed {kernel}: {size} bytes, sha256 {kernel_sha}")
-    remote_base, size, base_sha = push(args, base, f"{SCRATCH}/base.img")
-    log(f"pushed {base}: {size} bytes, sha256 {base_sha}")
-    # The session may replace what was pushed; bootctl installs only these bytes.
-    sys.stdout.write(capture(args, ["bootctl", "base", "install", remote_base, base_sha], timeout=600))
     slot = capture(args, ["bootctl", "spare"]).strip()
     if not slot:
         die("install: bootctl spare named no slot")
     sys.stdout.write(capture(args, ["bootctl", "install", slot, remote_kernel, kernel_sha], timeout=600))
-    capture(args, ["rm", "-f", remote_kernel, remote_base])
+    capture(args, ["rm", "-f", remote_kernel])
     capture(args, ["bootctl", "oneshot", f"slopos-{slot}"])
     log(f"slot {slot} installed; rebooting into slopos-{slot} once")
     try:
@@ -1169,14 +1229,40 @@ def cmd_install(args):
     if args.tag is not None and after["tag"] != args.tag:
         print(capture(args, ["bootctl", "status"]), end="")
         die(f"install: the machine came back with kernel tag {after['tag'] or '-'!r}, not {args.tag!r}: "
-            f"slopos-{slot} did not boot (it fell back) and nothing was committed; the new base is "
-            f"current for every slot, which `remote.py run -- bootctl base rollback` takes back")
+            f"slopos-{slot} did not boot (it fell back) and nothing was committed")
+    if args.identity and args.tag:
+        state = State(args.state)
+        identities = kernel_identities(state)
+        identities[args.tag] = args.identity
+        write_private(state.path / "kernels.json", json.dumps(identities, indent=1).encode())
     if args.commit:
         capture(args, ["bootctl", "commit"])
         log(f"committed slopos-{slot}: it boots by default now")
     else:
-        log(f"not committed: the next reboot goes back to the default kernel, on the new base; "
+        log(f"not committed: the next reboot goes back to the default kernel; "
             f"`remote.py run -- bootctl commit` keeps slopos-{slot}")
+
+
+def cmd_install(args):
+    kernel = Path(args.kernel) if args.kernel else None
+    base = Path(args.base) if args.base else None
+    if not (kernel or base):
+        die("install: name a --base, a --kernel or both")
+    for path in filter(None, (kernel, base)):
+        if not path.is_file():
+            die(f"install: no file at {path}")
+    before = wait_agent(args, timeout=args.connect_timeout)
+    args.boot = before["boot"]
+    log(f"installing onto boot {before['boot'][:12]} ({before['version']})")
+    capture(args, ["mkdir", "-p", SCRATCH])
+    # The base first: a kernel serving only a newer interface is refused a
+    # slot until a base it serves is on the boot partition.
+    if base:
+        install_base(args, base)
+    if kernel:
+        install_kernel(args, kernel)
+    elif args.commit:
+        sys.stdout.write(capture(args, ["bootctl", "commit"]))
     print(capture(args, ["bootctl", "status"]), end="")
 
 
@@ -1240,13 +1326,18 @@ def main():
     p.add_argument("--follow", "-f", action="store_true")
     p.set_defaults(func=cmd_klog)
 
-    p = sub.add_parser("install", help="install a base, and a kernel into the spare slot, and boot it")
-    p.add_argument("--kernel", required=True)
-    p.add_argument("--base", required=True)
+    p = sub.add_parser("install", help="install a base, running it at once, and a kernel into the spare slot, booting it")
+    p.add_argument("--kernel")
+    p.add_argument("--base")
     p.add_argument("--tag", help="the SLOPOS_BUILD_TAG the new kernel reports")
+    p.add_argument("--identity", help="the kernel's sha256 built with no tag, recorded for kernel-changed")
     p.add_argument("--commit", action="store_true", help="make the new slot the default once it is up")
-    p.add_argument("--timeout", type=float, default=600, help="seconds to wait for the new boot")
+    p.add_argument("--timeout", type=float, default=600, help="seconds to wait for the new base or boot")
     p.set_defaults(func=cmd_install)
+
+    p = sub.add_parser("kernel-changed", help="print same when the running kernel is the one IDENTITY names, else changed")
+    p.add_argument("--identity", required=True, help="the kernel's sha256, built with no tag")
+    p.set_defaults(func=cmd_kernel_changed)
 
     args = parser.parse_args()
     args.state = args.state or default_state()

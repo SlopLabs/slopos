@@ -1,29 +1,31 @@
 #!/bin/sh
-# Build the system in the guest and try it from the spare boot slot.
+# Build the system in the guest, run its base at once and try its kernel from
+# the spare boot slot.
 #
-# Usage: scripts/selfhost.sh build|install [release|dev|tests]
+# Usage: scripts/selfhost.sh build|install|install-kernel [release|dev|tests]
 #
 # `build` makes the kernel, the userland and the base image the kernel boots
 # with: `builddir/kernel-<variant>.elf` and `builddir/initramfs.cpio`, or for
 # `tests` the tests userland and `builddir/initramfs-tests.cpio`, and the apps
-# outside the base, `builddir/apps`. `install` makes the base the one every
-# slot boots from the next boot on, and puts the kernel into the slot that is
-# not the default, arming one boot of it: `bootctl reboot` tries it and
-# `bootctl commit` keeps it; without the commit the next boot is the default
-# kernel, on the new base all the same, which `bootctl base rollback` takes
-# back. The apps go to /usr/local at once, as whoever runs it, when the
-# running libc.so is the one they were built against; otherwise the command
-# that installs them is printed for the new boot.
+# outside the base, `builddir/apps`. `install` builds the userland, the base
+# and the apps and makes the base the one every slot boots, running it at
+# once when the running kernel serves it and leaving it for the next boot
+# otherwise; `bootctl base rollback` takes it back. The apps go to /usr/local
+# as whoever runs it, once the running libc.so is the one they were built
+# against; otherwise the command that installs them is printed. A new base
+# needing a new kernel goes in first: `install-kernel` builds the kernel and
+# puts it into the slot that is not the default, arming one boot of it, which
+# `bootctl reboot` tries and `bootctl commit` keeps.
 set -eu
 
 usage() {
-    echo "usage: scripts/selfhost.sh build|install [release|dev|tests]" >&2
+    echo "usage: scripts/selfhost.sh build|install|install-kernel [release|dev|tests]" >&2
     exit 2
 }
 
 [ $# -ge 1 ] && [ $# -le 2 ] || usage
 case "$1" in
-build | install) ;;
+build | install | install-kernel) ;;
 *) usage ;;
 esac
 
@@ -50,18 +52,21 @@ tests)
 *) usage ;;
 esac
 
+[ "$1" = install-kernel ] && tools=cargo
 for tool in $tools; do
     command -v "$tool" >/dev/null || {
         echo "selfhost: no $tool on PATH; on the host, just toolchain and then just boot installs one at /usr/local" >&2
         exit 1
     }
 done
-for program in $BASE_RECIPE_PROGRAMS; do
-    [ -x "/usr/local/$program" ] || {
-        echo "selfhost: no /usr/local/$program for the base; on the host, just toolchain and then just boot installs one" >&2
-        exit 1
-    }
-done
+if [ "$1" != install-kernel ]; then
+    for program in $BASE_RECIPE_PROGRAMS; do
+        [ -x "/usr/local/$program" ] || {
+            echo "selfhost: no /usr/local/$program for the base; on the host, just toolchain and then just boot installs one" >&2
+            exit 1
+        }
+    done
+fi
 
 export CARGO_HOME="${CARGO_HOME:-$REPO_ROOT/builddir/cargo-home}"
 export KERNEL_RELEASE="$release"
@@ -73,23 +78,29 @@ pairing=
 [ -f /usr/share/slopos/remote/remote.conf ] && pairing=/usr/share/slopos/remote
 
 cd "$REPO_ROOT"
-scripts/build_kernel.sh builddir builddir/target "$features"
+elf="$REPO_ROOT/builddir/kernel-$variant.elf"
+if [ "$1" != install ]; then
+    scripts/build_kernel.sh builddir builddir/target "$features"
+fi
+if [ "$1" = install-kernel ]; then
+    slot="$(bootctl spare)"
+    bootctl install "$slot" "$elf"
+    bootctl oneshot "slopos-$slot"
+    echo "selfhost: bootctl reboot tries slopos-$slot once; bootctl commit there keeps it"
+    exit 0
+fi
 bash scripts/build_userland.sh builddir builddir/target $userland
 COREUTILS_LINKS="$COREUTILS_TOOLS" EXTRA_SHARED_OBJECTS="$shared" \
     RECIPE_PREFIX=/usr/local RECIPE_PROGRAMS="$BASE_RECIPE_PROGRAMS" RECIPE_LICENSES="$BASE_RECIPES" \
     REMOTE_PAIRING_DIR="$pairing" scripts/build_initramfs.sh "$base" builddir $programs
 [ "$1" = install ] || exit 0
 
-elf="$REPO_ROOT/builddir/kernel-$variant.elf"
 bootctl base install "$REPO_ROOT/$base"
-slot="$(bootctl spare)"
-bootctl install "$slot" "$elf"
-bootctl oneshot "slopos-$slot"
 apps="builddir/tree-install.elf apps builddir/apps /usr/local"
 if cmp -s /lib/libc.so builddir/libc.so; then
     builddir/tree-install.elf apps builddir/apps /usr/local ||
-        echo "selfhost: the apps stay as they were; slopos-$slot is armed all the same"
+        echo "selfhost: the apps stay as they were"
 else
-    echo "selfhost: the apps need this build's libc.so; once slopos-$slot is up, run in $REPO_ROOT: $apps"
+    echo "selfhost: the apps need this build's libc.so; once its base runs, run in $REPO_ROOT: $apps"
 fi
-echo "selfhost: bootctl reboot tries slopos-$slot once on the new base; bootctl commit there keeps the kernel, bootctl base rollback the old base"
+echo "selfhost: bootctl base rollback takes the base back; a kernel it needs goes in with selfhost.sh install-kernel"

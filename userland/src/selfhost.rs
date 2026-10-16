@@ -44,10 +44,26 @@ pub fn selfhost_installing(
     root: &str,
     args: &[&str],
 ) -> Result<(Command, crate::privd::Connection), String> {
-    let privd = crate::privd::Connection::open()?;
+    let privd = crate::privd::Connection::open_within(crate::privd::SWITCH_WAIT)?;
     let mut cmd = selfhost(root, args);
     privd.hand_to(&mut cmd);
     Ok((cmd, privd))
+}
+
+/// `selfhost.sh install <variant>`, then `install-kernel <variant>`, under
+/// the build tag `tag`, each through a privd connection of its own: a base
+/// that runs at once drains the privd the first one asked.
+pub fn selfhost_install(root: &str, variant: &str, tag: &str) -> Result<(), String> {
+    for command in ["install", "install-kernel"] {
+        let (mut cmd, privd) = selfhost_installing(root, &[command, variant])?;
+        let status = cmd.env("SLOPOS_BUILD_TAG", tag).status();
+        drop(privd);
+        match status {
+            Ok(status) if status.success() => {}
+            status => return Err(format!("selfhost.sh {command} {variant}: {status:?}")),
+        }
+    }
+    Ok(())
 }
 
 /// `git <args>` in `dir`, the git on the default search path, as the session,

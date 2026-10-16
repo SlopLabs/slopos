@@ -17,11 +17,18 @@
 //! building the base it boots (`REMOTE_PAIRING_DIR`). A configuration
 //! anywhere a program could write would hand any program the authority of
 //! whatever broker it named.
+//!
+//! A base installed live is the one the next hello names: the idle
+//! connection is dialled again, so the broker hears the new base's tag.
+//! `SIGTERM`, which init sends when a switch changes remoted, drains it: it
+//! closes its idle connection, dials no other and exits once what it serves
+//! has finished.
 
 mod link;
 mod serve;
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,7 +36,7 @@ use std::time::{Duration, Instant};
 use slopos_remote_core::{Backoff, Conf, Fields, PROTOCOL, hex, kind};
 
 use self::link::Link;
-use crate::syscall::{UserUtsname, core as sys_core};
+use crate::syscall::{UserUtsname, core as sys_core, process};
 use crate::tls::{self, TrustStore};
 
 /// In the sealed base: `remote.conf`, `ca.pem`, `token`.
@@ -47,6 +54,18 @@ dial the broker the base names in /usr/share/slopos/remote and serve it";
 /// a loop.
 const STABLE: Duration = Duration::from_secs(5);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
+/// How often an idle connection looks for a base switch.
+const IDLE_TICK: Duration = Duration::from_secs(1);
+const BUILD_TAG: &str = "/usr/share/slopos/build-tag";
+
+/// Bases switched to live since remoted started.
+static SWITCHES: AtomicU64 = AtomicU64::new(0);
+static DRAINING: AtomicBool = AtomicBool::new(false);
+static SERVING: AtomicUsize = AtomicUsize::new(0);
+
+extern "C" fn drain(_: i32) {
+    DRAINING.store(true, Ordering::SeqCst);
+}
 
 pub(crate) struct Settings {
     pub broker: String,
@@ -56,7 +75,6 @@ pub(crate) struct Settings {
     boot: String,
     host: String,
     version: String,
-    base_tag: String,
 }
 
 impl Settings {
@@ -68,7 +86,7 @@ impl Settings {
             .with("host", &self.host)
             .with("version", &self.version)
             .with("tag", tag)
-            .with("base_tag", &self.base_tag)
+            .with("base_tag", base_tag())
             .with("boot", &self.boot)
             .with("uptime_ms", sys_core::get_time_ms().to_string())
             .with("pid", std::process::id().to_string())
@@ -105,10 +123,38 @@ fn load(dir: &str) -> Result<Settings, String> {
         boot: hex(&boot),
         host: uts_field(&uts.nodename),
         version: uts_field(&uts.version),
-        base_tag: std::fs::read_to_string("/usr/share/slopos/build-tag")
-            .map(|t| t.trim().to_string())
-            .unwrap_or_default(),
     })
+}
+
+/// The running base's tag, read at each hello: a base installed live
+/// changes it.
+fn base_tag() -> String {
+    std::fs::read_to_string(BUILD_TAG)
+        .map(|t| t.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Count each base switch, for idle connections to redial on.
+fn watch_base() {
+    let Some(mut watch) = crate::base_watch::BaseWatch::open() else {
+        return;
+    };
+    let _ = thread::Builder::new()
+        .name("remoted-base".into())
+        .spawn(move || {
+            loop {
+                let mut fds = [slopos_abi::syscall::UserPollFd {
+                    fd: watch.fd(),
+                    events: slopos_abi::syscall::POLLIN,
+                    revents: 0,
+                }];
+                let _ = crate::syscall::fs::poll(&mut fds, -1);
+                if watch.switched() {
+                    let _ = watch.take();
+                    SWITCHES.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+        });
 }
 
 enum Event {
@@ -117,9 +163,15 @@ enum Event {
     /// The idle connection took a request, or was lost, after `lived`.
     Claimed(Duration),
     Lost(String, Duration),
+    /// The idle connection was closed for a base switched to live, or a
+    /// drain.
+    Closed,
 }
 
 fn connection(s: &'static Settings, events: Sender<Event>) {
+    // Before the hello names the running base, so a switch while it dials
+    // redials.
+    let switches = SWITCHES.load(Ordering::Acquire);
     let link = match Link::open(s) {
         Ok(link) => link,
         Err(why) => {
@@ -154,13 +206,33 @@ fn connection(s: &'static Settings, events: Sender<Event>) {
     }
     let _ = events.send(Event::Ready);
     let born = Instant::now();
-    match link.recv() {
-        Ok(request) => {
-            let _ = events.send(Event::Claimed(born.elapsed()));
-            serve::serve(&link, request);
-        }
-        Err(why) => {
-            let _ = events.send(Event::Lost(why, born.elapsed()));
+    loop {
+        match link.wait(IDLE_TICK) {
+            Ok(Some(_)) if DRAINING.load(Ordering::SeqCst) => {
+                link.finish();
+                let _ = events.send(Event::Closed);
+                return;
+            }
+            Ok(Some(request)) => {
+                SERVING.fetch_add(1, Ordering::SeqCst);
+                let _ = events.send(Event::Claimed(born.elapsed()));
+                serve::serve(&link, request);
+                SERVING.fetch_sub(1, Ordering::SeqCst);
+                return;
+            }
+            Ok(None)
+                if SWITCHES.load(Ordering::Acquire) != switches
+                    || DRAINING.load(Ordering::SeqCst) =>
+            {
+                link.finish();
+                let _ = events.send(Event::Closed);
+                return;
+            }
+            Ok(None) => {}
+            Err(why) => {
+                let _ = events.send(Event::Lost(why, born.elapsed()));
+                return;
+            }
         }
     }
 }
@@ -176,7 +248,11 @@ fn supervise(s: &'static Settings) -> ! {
     let mut complaint: Option<String> = None;
     let mut up = false;
     loop {
-        if idle == 0 && !dialing && Instant::now() >= next {
+        let draining = DRAINING.load(Ordering::SeqCst);
+        if draining && idle == 0 && !dialing && SERVING.load(Ordering::SeqCst) == 0 {
+            std::process::exit(0);
+        }
+        if !draining && idle == 0 && !dialing && Instant::now() >= next {
             let events = tx.clone();
             match thread::Builder::new()
                 .name("remoted-conn".into())
@@ -193,7 +269,8 @@ fn supervise(s: &'static Settings) -> ! {
             next.saturating_duration_since(Instant::now())
         } else {
             Duration::from_secs(3600)
-        };
+        }
+        .min(IDLE_TICK);
         let event = match rx.recv_timeout(wait) {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => continue,
@@ -226,6 +303,10 @@ fn supervise(s: &'static Settings) -> ! {
                 }
                 next = Instant::now();
             }
+            Event::Closed => {
+                idle -= 1;
+                next = Instant::now();
+            }
             Event::Lost(why, lived) => {
                 idle -= 1;
                 if lived >= STABLE {
@@ -250,6 +331,8 @@ fn daemon() -> Result<(), String> {
         "remoted: dialing {} (boot {})",
         settings.broker, settings.boot
     );
+    watch_base();
+    process::set_signal_handler(slopos_abi::signal::SIGTERM, drain);
     supervise(settings)
 }
 
@@ -265,6 +348,6 @@ pub fn remoted_main() {
     };
     if let Err(msg) = result {
         eprintln!("remoted: {msg}");
-        sys_core::exit_with_code(1);
+        std::process::exit(1);
     }
 }

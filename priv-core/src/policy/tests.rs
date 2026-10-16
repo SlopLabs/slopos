@@ -436,19 +436,14 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         .unwrap()
         .exclusive_group();
     for name in ["org.slopos.base.install", "org.slopos.base.rollback"] {
-        assert_eq!(
-            policy.action(name).unwrap().exclusive_group(),
-            slots,
-            "{name}"
+        let action = policy.action(name).unwrap();
+        assert_eq!(action.exclusive_group(), slots, "{name}");
+        assert_ne!(
+            action.caps & slopos_abi::caps::BASE_UPDATE,
+            0,
+            "{name} runs the base it writes"
         );
     }
-    assert_eq!(
-        policy
-            .action("org.slopos.base.rollback")
-            .unwrap()
-            .admits(&session),
-        Verdict::Run
-    );
     let toggle = policy.action("org.slopos.net.toggle").unwrap();
     assert_eq!(
         toggle.admits(&Requester::new(SESSION_UID, Some("/bin/compositor"), false)),
@@ -457,6 +452,7 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     for name in [
         "org.slopos.boot.install",
         "org.slopos.base.install",
+        "org.slopos.base.rollback",
         "org.slopos.boot.set-default",
         "org.slopos.net.configure",
     ] {

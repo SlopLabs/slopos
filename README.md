@@ -78,7 +78,8 @@ To build SlopOS inside SlopOS, cross-build the toolchain once (`just toolchain`,
 hours), `just boot`, and in the guest:
 
 ```sh
-cd /src/slopos && scripts/selfhost.sh install
+cd /src/slopos && scripts/selfhost.sh install   # the new base runs at once
+scripts/selfhost.sh install-kernel              # only for a kernel change
 bootctl reboot      # boots the new kernel once; `bootctl commit` keeps it
 ```
 

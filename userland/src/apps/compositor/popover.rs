@@ -193,6 +193,9 @@ pub enum Panel {
 const NETWORK: Panel = Panel::Status(StatusKind::Network);
 
 const RESTART_SESSION: &str = "Restart session";
+/// Above the restart while a new base waits on one: the compositor and the
+/// terminal run from the base they started from until the session restarts.
+const RESTART_NOTE: &str = "A new base changes the desktop";
 
 pub struct Popover {
     open: Option<Panel>,
@@ -215,6 +218,12 @@ pub struct Popover {
     /// The item the panel was anchored under, kept so a resize re-anchors to
     /// the same place instead of to a synthesised rect one pixel off.
     anchor: Rect,
+    /// A new base changed the session's programs; the system panel says so
+    /// until the session restarts.
+    restart_wanted: bool,
+    /// The system panel opened on its own; until then a press on it was
+    /// meant for what was under the pointer before.
+    restart_armed_at: Option<Instant>,
 }
 
 impl Popover {
@@ -230,7 +239,22 @@ impl Popover {
             line: String::new(),
             fitted: String::new(),
             anchor: Rect::EMPTY,
+            restart_wanted: false,
+            restart_armed_at: None,
         }
+    }
+
+    /// Whether the system panel notes that the session wants a restart;
+    /// `true` when it did not before.
+    pub fn want_restart(&mut self, wanted: bool) -> bool {
+        let newly = wanted && !self.restart_wanted;
+        self.switch_dirty |= wanted != self.restart_wanted;
+        self.restart_wanted = wanted;
+        newly
+    }
+
+    fn system_lines(&self) -> i32 {
+        1 + i32::from(self.restart_wanted)
     }
 
     /// The popover's rect while it is open; `None` when closed, which
@@ -257,6 +281,34 @@ impl Popover {
             self.dismiss();
             return;
         }
+        self.restart_armed_at = None;
+        self.open(panel, item, model, screen_w, screen_h);
+    }
+
+    /// Open the system panel under `item` unasked, to offer the restart a
+    /// new base wants.
+    pub fn offer_restart(
+        &mut self,
+        item: DamageRect,
+        model: &NetPanelModel,
+        screen_w: u32,
+        screen_h: u32,
+    ) {
+        self.open(Panel::System, item, model, screen_w, screen_h);
+        self.restart_armed_at = Some(
+            Instant::now() + std::time::Duration::from_millis(slopos_priv_core::consent::ARMING_MS),
+        );
+    }
+
+    /// Open the popover for `panel` under `item`, whatever is open now.
+    pub fn open(
+        &mut self,
+        panel: Panel,
+        item: DamageRect,
+        model: &NetPanelModel,
+        screen_w: u32,
+        screen_h: u32,
+    ) {
         let anchor = Rect::new(
             item.x0,
             item.y0,
@@ -271,10 +323,19 @@ impl Popover {
                 w: PANEL_WIDTH,
                 h: layout(model).height,
             },
-            Panel::System => Size {
-                w: gfx::font::string_width(RESTART_SESSION) + 2 * PANEL_PAD,
-                h: line_h() + 2 * PANEL_PAD,
-            },
+            Panel::System => {
+                let note = if self.restart_wanted {
+                    RESTART_NOTE
+                } else {
+                    ""
+                };
+                let text_w =
+                    gfx::font::string_width(RESTART_SESSION).max(gfx::font::string_width(note));
+                Size {
+                    w: text_w + 2 * PANEL_PAD,
+                    h: self.system_lines() * line_h() + 2 * PANEL_PAD,
+                }
+            }
             Panel::Status(_) => Size {
                 w: PANEL_WIDTH,
                 h: 2 * PANEL_PAD + 2 * line_h(),
@@ -393,12 +454,15 @@ impl Popover {
     /// mutation itself is spawned, see [`spawn_ip_net`].
     pub fn press(&mut self, x: i32, y: i32, model: &NetPanelModel) -> bool {
         if self.open == Some(Panel::System) {
-            if self.rect().is_some_and(|rect| rect.contains(x, y)) {
+            let Some(rect) = self.rect().filter(|rect| rect.contains(x, y)) else {
+                return false;
+            };
+            let armed = self.restart_armed_at.is_none_or(|at| Instant::now() >= at);
+            if armed && y >= rect.y + PANEL_PAD + (self.system_lines() - 1) * line_h() {
                 spawn_session_restart();
                 self.dismiss();
-                return true;
             }
-            return false;
+            return true;
         }
         // Only the network panel has controls; without this a click on another
         // kind's popover — which draws nothing — reports "taken" and eats it.
@@ -456,12 +520,25 @@ impl Popover {
             return;
         };
         if self.open == Some(Panel::System) {
+            let restart_y = rect.y + PANEL_PAD + (self.system_lines() - 1) * line_h();
+            let note = self.restart_wanted;
             buf.with_scissor(*clip, |buf| {
                 draw_frame(buf, rect);
+                if note {
+                    gfx::draw_str_clipped(
+                        buf,
+                        rect.x + PANEL_PAD,
+                        rect.y + PANEL_PAD,
+                        RESTART_NOTE,
+                        TEXT_SECONDARY,
+                        PANEL_BG_OPAQUE,
+                        clip,
+                    );
+                }
                 gfx::draw_str_clipped(
                     buf,
                     rect.x + PANEL_PAD,
-                    rect.y + PANEL_PAD,
+                    restart_y,
                     RESTART_SESSION,
                     TEXT_PRIMARY,
                     PANEL_BG_OPAQUE,

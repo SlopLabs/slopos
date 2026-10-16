@@ -220,7 +220,10 @@ static SPAWNING: Mutex<()> = Mutex::new(());
 /// this process, so what it asks privd is asked as the paired agent. A child
 /// started without one runs all the same, as the session.
 fn spawn(cmd: &mut Command, mechanism: bool) -> std::io::Result<std::process::Child> {
-    let privd = mechanism.then(privd::Connection::open);
+    if super::DRAINING.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(std::io::Error::other("remoted is ending for a new base"));
+    }
+    let privd = mechanism.then(|| privd::Connection::open_within(privd::SWITCH_WAIT));
     if let Some(Err(why)) = &privd {
         eprintln!("remoted: no privd connection for the command: {why}");
     }

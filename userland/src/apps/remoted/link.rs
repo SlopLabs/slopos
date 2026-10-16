@@ -195,6 +195,15 @@ impl Link {
         lock(&self.frames).recv().map_err(|_| self.shared.reason())
     }
 
+    /// [`Self::recv`] for at most `wait`: `None` when nothing came.
+    pub fn wait(&self, wait: Duration) -> Result<Option<Frame>, String> {
+        match lock(&self.frames).recv_timeout(wait) {
+            Ok(frame) => Ok(Some(frame)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err(self.shared.reason()),
+        }
+    }
+
     pub fn recv_timeout(&self, wait: Duration) -> Result<Frame, String> {
         match lock(&self.frames).recv_timeout(wait) {
             Ok(frame) => Ok(frame),

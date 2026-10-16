@@ -14,10 +14,12 @@ use crate::syscall::process::{self, Endowment};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, pidfd};
 
 /// A program init starts: the capabilities it delegates beside the universal
-/// ones, its tier, whether it runs as the session or as uid 0, and the login
-/// tag its process carries.
+/// ones, its tier, whether it runs as the session or as uid 0, the login tag
+/// its process carries, and what of the base it reads beside its program, a
+/// path ending in `/` naming all beneath it.
 pub struct Service {
     pub path: &'static str,
+    pub reads: &'static [&'static str],
     pub args: &'static [&'static str],
     pub caps: u64,
     pub priority: TaskPriority,
@@ -28,6 +30,7 @@ pub struct Service {
 /// Runs what the policy allows, holding everything an action may name.
 pub const PRIVD: Service = Service {
     path: "/sbin/privd",
+    reads: &["/usr/share/slopos/privd/", PAIRING],
     args: &[],
     caps: slopos_priv_core::DELEGABLE,
     priority: TaskPriority::Normal,
@@ -36,7 +39,8 @@ pub const PRIVD: Service = Service {
 };
 
 pub const COMPOSITOR: Service = Service {
-    path: "/bin/compositor",
+    path: init_control::COMPOSITOR,
+    reads: &[],
     args: &[],
     caps: DISPLAY_SEAT | INPUT_SEAT,
     priority: TaskPriority::High,
@@ -45,7 +49,8 @@ pub const COMPOSITOR: Service = Service {
 };
 
 pub const TERMINAL: Service = Service {
-    path: "/bin/terminal",
+    path: init_control::TERMINAL,
+    reads: &[],
     args: &[],
     caps: 0,
     priority: TaskPriority::Normal,
@@ -55,6 +60,7 @@ pub const TERMINAL: Service = Service {
 
 pub const REMOTED: Service = Service {
     path: "/bin/remoted",
+    reads: &[PAIRING],
     args: &[],
     caps: 0,
     priority: TaskPriority::Normal,
@@ -64,6 +70,7 @@ pub const REMOTED: Service = Service {
 
 pub const ROULETTE: Service = Service {
     path: "/bin/roulette",
+    reads: &[],
     args: &[],
     caps: DISPLAY_SEAT,
     priority: TaskPriority::Normal,
@@ -73,10 +80,15 @@ pub const ROULETTE: Service = Service {
 
 pub const RUN_TESTS: &str = "--run-tests";
 
+/// A paired base's pairing, which remoted dials with and privd's `paired`
+/// principal depends on.
+pub const PAIRING: &str = "/usr/share/slopos/remote/";
+
 /// A copy of init that runs the userland tests and exits with their verdict,
 /// so init goes on serving while they run.
 pub const TESTS: Service = Service {
     path: "/sbin/init",
+    reads: &[],
     args: &[RUN_TESTS],
     caps: TEST_HARNESS,
     priority: TaskPriority::Normal,
@@ -194,6 +206,11 @@ pub struct Budget {
 pub const STARTS: usize = 5;
 pub const WINDOW_MS: u64 = 60_000;
 
+/// How long a service told to end for a new base may take before its
+/// successor starts beside it: each finishes what it serves first, and a
+/// mechanism waiting on its terminal may take far longer than this.
+pub const DRAIN_MS: u64 = 5_000;
+
 impl Budget {
     /// When a start may happen, `now` at the earliest.
     pub fn next(&self, now: u64) -> u64 {
@@ -236,15 +253,47 @@ pub struct Supervised {
     pub budget: Budget,
     /// When it is to start again, while it is not running.
     pub due: Option<u64>,
+    /// When its successor starts beside it, once it was told to end.
+    pub draining: Option<u64>,
 }
 
 impl Supervised {
+    /// Whether `switch` changed what this service runs or reads.
+    pub fn changed_by(&self, switch: &crate::base_watch::Switch) -> bool {
+        switch.changed(&[self.service.path]) || switch.changed(self.service.reads)
+    }
+
+    /// Have it end so the base it runs from now starts in its place, its
+    /// budget cleared: privd and remoted drain on `SIGTERM`.
+    pub fn restart(&mut self, now: u64) {
+        self.budget.clear();
+        match &self.child {
+            Some(child) => {
+                let _ = process::kill(child.pid, slopos_abi::signal::SIGTERM);
+                self.draining = Some(now + DRAIN_MS);
+            }
+            None => self.due = Some(now),
+        }
+    }
+
+    /// The child, once it has drained for [`DRAIN_MS`] without exiting: it
+    /// is no longer this service's, which starts again now.
+    pub fn retire(&mut self, now: u64) -> Option<Child> {
+        if !self.draining.is_some_and(|at| at <= now) {
+            return None;
+        }
+        self.draining = None;
+        self.due = Some(now);
+        self.child.take()
+    }
+
     pub fn new(service: &'static Service) -> Supervised {
         Supervised {
             service,
             child: None,
             budget: Budget::default(),
             due: None,
+            draining: None,
         }
     }
 
@@ -265,6 +314,7 @@ impl Supervised {
 
     pub fn exited(&mut self, status: process::WaitStatus, now: u64) {
         self.child = None;
+        self.draining = None;
         let due = self.budget.next(now);
         let path = self.service.path;
         if due > now {

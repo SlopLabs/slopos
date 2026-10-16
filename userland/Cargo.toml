@@ -323,6 +323,10 @@ name = "supervision_test"
 path = "src/bin/tests/supervision_test.rs"
 
 [[bin]]
+name = "live_base_test"
+path = "src/bin/tests/live_base_test.rs"
+
+[[bin]]
 name = "fifo_test"
 path = "src/bin/tests/fifo_test.rs"
 

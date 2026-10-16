@@ -53,7 +53,7 @@ use slopos_userland::boot_disk::{
     register_firmware_entry,
 };
 use slopos_userland::selfhost::{
-    SCRATCH, check_out, git, selfhost_installing, stdout_of, take_host_head, workspace,
+    SCRATCH, check_out, git, selfhost_install, stdout_of, take_host_head, workspace,
 };
 use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
@@ -164,14 +164,10 @@ fn install_guest_build() -> Option<bool> {
         let _ = std::fs::remove_file(format!("{root}/builddir/{built}"));
     }
     let started = Instant::now();
-    let status = selfhost_installing(root, &["install", "tests"]).and_then(|(mut cmd, privd)| {
-        let status = cmd.env("SLOPOS_BUILD_TAG", &tag).status();
-        drop(privd);
-        status.map_err(|e| e.to_string())
-    });
+    let installed = selfhost_install(root, "tests", &tag);
     let returned = check_out(root, &head.before);
-    if !matches!(status, Ok(s) if s.success()) {
-        note(&format!("selfhost.sh install tests: {status:?}"));
+    if let Err(why) = installed {
+        note(&why);
         return Some(false);
     }
     if let Err(why) = returned {
@@ -429,6 +425,33 @@ fn install_repacked(disk: &BootDisk, tag: &str, interface: Option<u32>) -> Optio
     let said = said?;
     println!("INSTALL-BASE-INSTALLED {tag}");
     Some(said)
+}
+
+/// The base installed or rolled back to runs without a boot: the build tag
+/// the base directories show is `tagged`, and `bootctl status` names
+/// `current` and `previous`.
+fn runs_live(
+    stage: u8,
+    tagged: impl Fn(&str) -> bool,
+    current: (Option<&str>, bool),
+    previous: (Option<&str>, bool),
+) -> bool {
+    let running = std::fs::read_to_string(BASE_TAG_FILE).unwrap_or_default();
+    let tag = running.trim();
+    if !tagged(tag) {
+        note(&format!(
+            "stage {stage}: the base running now is tagged {tag:?}"
+        ));
+        return false;
+    }
+    let Some(status) = bootctl(&["status"]) else {
+        return false;
+    };
+    if !bases_are(&status, stage, current, previous) {
+        return false;
+    }
+    println!("INSTALL-BASE-LIVE at stage {stage}: {tag:?}");
+    true
 }
 
 fn refused(args: &[&str], saying: &str) -> bool {
@@ -734,11 +757,11 @@ fn boot_slot_install_commit_rollback() -> bool {
                 let _ = set_stage(None);
                 return false;
             }
-            let Some(status) = bootctl(&["status"]) else {
+            if !runs_live(3, |tag| tag == TAG_B, (Some(TAG_B), true), (None, false)) {
                 let _ = set_stage(None);
                 return false;
-            };
-            bases_are(&status, 3, (Some(TAG_B), false), (None, true)) && reboot_default(4)
+            }
+            reboot_default(4)
         }
         Some(4) => {
             let running = std::fs::read_to_string(BASE_TAG_FILE).unwrap_or_default();
@@ -750,6 +773,10 @@ fn boot_slot_install_commit_rollback() -> bool {
                 note(&format!(
                     "stage 4 runs {booted} on the base tagged {running:?}"
                 ));
+                let _ = set_stage(None);
+                return false;
+            }
+            if !runs_live(4, |tag| tag != TAG_B, (None, true), (Some(TAG_B), false)) {
                 let _ = set_stage(None);
                 return false;
             }

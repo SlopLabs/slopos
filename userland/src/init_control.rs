@@ -10,6 +10,11 @@ use crate::syscall::{SyscallError, core as sys_core, fs, net};
 
 pub const SOCKET: &str = "/run/init";
 
+/// The desktop session's programs, which a new base changes only once the
+/// session restarts.
+pub const COMPOSITOR: &str = "/bin/compositor";
+pub const TERMINAL: &str = "/bin/terminal";
+
 /// The login tag of every process the desktop session runs.
 pub const DESKTOP: u32 = 1;
 /// The login tag of remoted and what it runs, which a session restart spares.

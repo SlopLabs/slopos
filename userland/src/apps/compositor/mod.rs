@@ -62,6 +62,9 @@ struct WindowManager {
     /// privd's question, while one is up: above everything, and the only
     /// thing input reaches.
     consent: consent::Consent,
+    /// A new base changed the session's programs: open the system panel,
+    /// which offers the restart, on the next frame.
+    restart_offer_due: bool,
 
     /// `None` if the AF_UNIX bind failed.
     protocol: Option<Box<ProtocolBridge>>,
@@ -137,6 +140,7 @@ impl WindowManager {
             shelf,
             popover: popover::Popover::new(),
             consent,
+            restart_offer_due: false,
             protocol,
             protocol_serial: 0,
             protocol_pointer_focus: 0,
@@ -865,6 +869,15 @@ impl WindowManager {
                 }
             }
         }
+        if std::mem::take(&mut wm.restart_offer_due)
+            && let Some(item) = wm
+                .system_bar
+                .item_rect(output.width, popover::Panel::System)
+        {
+            let model = wm.net_cache;
+            wm.popover
+                .offer_restart(item, &model, output.width, output.height);
+        }
         // Before the panel is measured, so a switch request that timed out
         // this frame reverts in the same frame rather than one later.
         wm.popover.settle(&wm.net_cache);
@@ -1165,6 +1178,7 @@ async fn compositor_async(
         wm.borrow_mut().net_event_driven = event_driven;
     }
     spawn_consent_task(wm.clone());
+    spawn_base_task(wm.clone());
 
     // A multishot row can die on a transient error and the listen socket
     // outlives any such transient, so stream-end re-arms rather than ending
@@ -1305,6 +1319,35 @@ fn spawn_consent_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
             }
         }
         tty::write(b"COMPOSITOR: privd's consent channel closed\n");
+    });
+}
+
+/// Hear a new base come in, and offer a session restart while it holds
+/// another compositor or terminal than the session started from, which run
+/// until then. A oneshot poll each time, as [`spawn_consent_task`]'s is.
+fn spawn_base_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
+    use crate::init_control::{COMPOSITOR, TERMINAL};
+    let Some(mut watch) = crate::base_watch::BaseWatch::open() else {
+        return;
+    };
+    let started = watch.manifest().to_owned();
+    slopfut::spawn(async move {
+        loop {
+            if !watch.switched() && slopfut::poll_add(watch.fd(), POLLIN).await < 0 {
+                slopfut::time::sleep_ms(500).await;
+                continue;
+            }
+            let Some(switch) = watch.take() else {
+                slopfut::time::sleep_ms(1000).await;
+                continue;
+            };
+            let wanted =
+                slopos_boot_core::base::changed(&started, &switch.new, &[COMPOSITOR, TERMINAL]);
+            let mut w = wm.borrow_mut();
+            if w.popover.want_restart(wanted) {
+                w.restart_offer_due = true;
+            }
+        }
     });
 }
 

@@ -97,6 +97,9 @@ impl Broker {
                 Err(RecvTimeoutError::Timeout) if started.elapsed() >= limit => {
                     return give_up(Refusal::Expired);
                 }
+                Err(RecvTimeoutError::Timeout) if super::DRAINING.load(Ordering::SeqCst) => {
+                    return give_up(Refusal::Interrupted);
+                }
                 Err(RecvTimeoutError::Timeout) if waiting.withdrawn() => {
                     return give_up(Refusal::Withdrawn);
                 }
@@ -152,6 +155,10 @@ fn serve(channel: Option<OwnedFd>, incoming: Receiver<(Ask, Asker)>) {
         .filter(|agent| agent.write(&agent.link.hello()));
     let mut questions: Questions<Asker> = Questions::default();
     loop {
+        // The pair is shared with the privd that starts after this one.
+        if super::DRAINING.load(Ordering::SeqCst) {
+            agent = None;
+        }
         let Some(live) = agent.as_mut() else {
             for asker in questions.lost() {
                 asker.settle(Err(Refusal::NoAgent));

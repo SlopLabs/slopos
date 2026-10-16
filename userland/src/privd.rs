@@ -41,7 +41,11 @@ pub enum Input {
 }
 
 /// How long a request waits for privd while init starts it again.
-const RESTART_WAIT: Duration = Duration::from_secs(2);
+pub const RESTART_WAIT: Duration = Duration::from_secs(2);
+
+/// How long a program whose requests may span a base switch waits for the
+/// new base's privd, which starts once its predecessor has drained.
+pub const SWITCH_WAIT: Duration = Duration::from_secs(60);
 
 /// Exit statuses for a request that ran nothing, as pkexec gives them.
 pub const STATUS_REFUSED_BY_PERSON: i32 = 126;

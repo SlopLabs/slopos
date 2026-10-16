@@ -63,25 +63,25 @@ action org.slopos.boot.clone
 action org.slopos.base.install
   program  /bin/bootctl
   args     base install *
-  caps     RawBlock Power
+  caps     RawBlock Power BaseUpdate
   uid      0
   cwd
   exclusive boot-slots
   allow    root
   allow    session consent
   allow    paired
-  describe "Replace the base every boot slot boots, from the next boot"
+  describe "Replace the base every boot slot boots, and the one running now"
 
 action org.slopos.base.rollback
   program  /bin/bootctl
   args     base rollback
-  caps     RawBlock Power
+  caps     RawBlock Power BaseUpdate
   uid      0
   exclusive boot-slots
   allow    root
-  allow    session
+  allow    session consent
   allow    paired
-  describe "Go back to the base that ran before, from the next boot"
+  describe "Go back to the base that ran before, now"
 
 action org.slopos.boot.oneshot
   program  /bin/bootctl

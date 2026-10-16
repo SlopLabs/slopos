@@ -244,6 +244,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin peer_test \
         --bin privd_test \
         --bin supervision_test \
+        --bin live_base_test \
         --bin fifo_test \
         --bin session_smoke_test \
         --bin spawn_output_test \
@@ -430,6 +431,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/supervision_test" ]; then
         cp "$RELEASE_DIR/supervision_test" "$BUILD_DIR/supervision_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/live_base_test" ]; then
+        cp "$RELEASE_DIR/live_base_test" "$BUILD_DIR/live_base_test.elf"
     fi
     if [ -f "$RELEASE_DIR/fifo_test" ]; then
         cp "$RELEASE_DIR/fifo_test" "$BUILD_DIR/fifo_test.elf"

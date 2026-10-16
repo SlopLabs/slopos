@@ -5,7 +5,8 @@
 //! kernel per slot at `/boot/<slot>/kernel.elf`, each a Limine entry
 //! `slopos-<slot>`, and beside them the bases every slot boots,
 //! `/boot/base/current.img` and `previous.img`, the one that last ran. A new
-//! base is taken at the next boot.
+//! base runs at once when the running kernel serves it and the system booted
+//! from that partition, and at the next boot otherwise.
 //!
 //! What boots is chosen through the Boot Loader Interface alone, and nothing
 //! on the ESP is written. A new kernel is tried once, not adopted: `oneshot`
@@ -22,8 +23,9 @@
 //! crash store kept to `/var/log/crash` and notes what each slot's last boot
 //! came to under `/var/lib/slopos/slots`, which `status` reports.
 //!
-//! Needs `RawBlock` for the raw partition and the crash records, and `Power`
-//! for the loader variables and the reboot; started without them, each
+//! Needs `RawBlock` for the raw partition and the crash records, `Power` for
+//! the loader variables and the reboot, and `BaseUpdate` to run a base
+//! installed; started without them, each
 //! command asks privd to run it as its `org.slopos.boot.*` or
 //! `org.slopos.base.*` action. `collect` is init's, which starts it holding
 //! both.
@@ -453,11 +455,22 @@ fn base_install(boot: &str, image_path: &str, digest: Option<&String>) -> Result
     let new = base::check(&image, sha256).map_err(|e| format!("{image_path}: {e}"))?;
     let mut volume = open_fat(boot)?;
     let current = read_base(&mut volume, layout::BASE_CURRENT)?;
+    let running = running_manifest(boot);
     if current == image {
-        println!("{image_path} is the current base already");
+        let taken = match running.as_deref() {
+            Some(manifest) if manifest == new.manifest => Some("it runs already".to_owned()),
+            Some(_) => Some(activate(true, &image, new.interface, || {
+                guarded_kernels(&mut volume)
+                    .map_or_else(|e| e, |guarded| when_taken(&guarded, new.interface))
+            })),
+            None => None,
+        };
+        println!(
+            "{image_path} is the current base already{}",
+            taken.map(|t| format!("; {t}")).unwrap_or_default()
+        );
         return Ok(());
     }
-    let running = running_manifest(boot);
     let keeps_current =
         running.is_some() && base::describe(&current).manifest == running.as_deref();
     let (kept, kept_len) = if keeps_current {
@@ -493,13 +506,44 @@ fn base_install(boot: &str, image_path: &str, digest: Option<&String>) -> Result
         shield_writes();
         write_verified(&mut volume, layout::BASE_CURRENT, &image)?;
     }
+    let taken = match running.as_deref() {
+        Some(manifest) if manifest == new.manifest => "it runs already".to_owned(),
+        _ => activate(running.is_some(), &image, new.interface, || {
+            when_taken(&guarded, new.interface)
+        }),
+    };
     println!(
-        "base installed: interface {}, build tag {}; {}",
+        "base installed: interface {}, build tag {}; {taken}",
         new.interface,
         new.build_tag.unwrap_or("-"),
-        when_taken(&guarded, new.interface)
     );
     Ok(())
+}
+
+/// The oldest base interface whose init, privd and remoted take over a
+/// running system: an older init cannot resume the state this one hands it.
+const LIVE_SINCE: u32 = 3;
+
+/// Make `image` the base this system runs, when it booted from the
+/// partition just written, the running kernel serves `interface` and the
+/// base can take over; what happened, with `later` saying when a boot takes
+/// it otherwise.
+fn activate(
+    booted_here: bool,
+    image: &[u8],
+    interface: u32,
+    later: impl FnOnce() -> String,
+) -> String {
+    let mut info = UserSysInfo::default();
+    let served = sys_core::sys_info(&mut info) == 0
+        && (info.base_interface_min..=info.base_interface_max).contains(&interface);
+    if !booted_here || !served || interface < LIVE_SINCE {
+        return later();
+    }
+    match crate::syscall::base::base_activate(image) {
+        Ok(generation) => format!("the system runs it now (generation {generation})"),
+        Err(e) => format!("it could not run now ({e}); {}", later()),
+    }
 }
 
 /// `current` and `previous` replace both bases, `previous` being the image
@@ -544,10 +588,16 @@ fn base_rollback(boot: &str) -> Result<(), String> {
         base::interface(&previous).map_err(|e| format!("{}: {e}", layout::BASE_PREVIOUS))?;
     let guarded = guarded_kernels(&mut volume)?;
     write_bases(&mut volume, &guarded, &previous, &current)?;
+    let described = base::describe(&previous);
+    let taken = match running_manifest(boot) {
+        Some(running) if described.manifest == Some(&running[..]) => "it runs already".to_owned(),
+        running => activate(running.is_some(), &previous, interface, || {
+            when_taken(&guarded, interface)
+        }),
+    };
     println!(
-        "rolled back to the base previous held: interface {interface}, build tag {}; {}",
-        base::describe(&previous).build_tag.unwrap_or("-"),
-        when_taken(&guarded, interface)
+        "rolled back to the base previous held: interface {interface}, build tag {}; {taken}",
+        described.build_tag.unwrap_or("-"),
     );
     Ok(())
 }

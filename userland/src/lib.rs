@@ -1,5 +1,6 @@
 pub mod app_entry;
 pub mod apps;
+pub mod base_watch;
 pub mod boot_disk;
 pub mod gfx;
 pub mod init_control;

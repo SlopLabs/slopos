@@ -5,6 +5,12 @@
 //! Who asks is what the kernel recorded when the connection was made: the
 //! uid, a pidfd and the program. Every failure on the way is a denial, and a
 //! requester whose process has exited is refused, before consent and after.
+//!
+//! `SIGTERM` drains it, as init asks when a new base changes privd, its
+//! policy or the pairing: it stops accepting, refuses what is asked next,
+//! interrupts what waits on the person and lets go of the consent pair, and
+//! exits once every request it took is answered. Init starts the new base's
+//! privd then, or beside it once the drain has taken five seconds.
 
 macro_rules! log {
     ($($arg:tt)*) => {{
@@ -17,12 +23,15 @@ mod consent;
 
 use std::collections::VecDeque;
 use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGPIPE, SIGQUIT, SIGTERM, sig_bit};
-use slopos_abi::syscall::{F_GETFD, MSG_NOSIGNAL, POLLHUP, POLLIN, POLLOUT, UserPollFd};
+use slopos_abi::syscall::{
+    F_GETFD, MSG_NOSIGNAL, O_CLOEXEC, O_NONBLOCK, POLLHUP, POLLIN, POLLOUT, UserPollFd,
+};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::consent::{Ask, Refusal};
 use slopos_priv_core::policy::{Principal, REMOTED};
@@ -38,7 +47,7 @@ use self::consent::{Broker, Waiting};
 use crate::init_control;
 use crate::readiness::ReadinessNotifier;
 use crate::syscall::process::{self, Endowment, WaitStatus};
-use crate::syscall::{OwnedFd, RawFd, SyscallError, core as sys_core, fs, net, pidfd};
+use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, net, pidfd};
 
 /// Init's readiness notifier is fd 3, the consent channel fd 4.
 pub const CONSENT_FD: RawFd = 4;
@@ -93,6 +102,25 @@ impl Daemon {
 
 static DAEMON: OnceLock<Daemon> = OnceLock::new();
 
+pub(super) static DRAINING: AtomicBool = AtomicBool::new(false);
+/// Requests between being read and being answered.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+/// The write end of the pipe the accept loop polls beside the listener.
+static WAKE: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn drain(_: i32) {
+    DRAINING.store(true, Ordering::SeqCst);
+    let _ = fs::write_slice(WAKE.load(Ordering::Relaxed), &[0]);
+}
+
+fn finish_draining() -> ! {
+    log!("privd: draining for a new base");
+    while IN_FLIGHT.load(Ordering::SeqCst) != 0 {
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::process::exit(0);
+}
+
 pub fn privd_main() -> ! {
     // Before any descriptor is opened: one could land at the number of an
     // inherited one privd was started without.
@@ -116,13 +144,32 @@ pub fn privd_main() -> ! {
         Ok(listener) => listener,
         Err(why) => {
             log!("privd: {SOCKET}: {why}");
-            sys_core::exit_with_code(1);
+            std::process::exit(1);
         }
     };
+    let Ok((woken, wake)) = fs::pipe2((O_CLOEXEC | O_NONBLOCK) as u32) else {
+        log!("privd: no pipe to hear a drain on");
+        std::process::exit(1);
+    };
+    WAKE.store(wake.raw(), Ordering::Relaxed);
+    process::set_signal_handler(SIGTERM, drain);
     if let Some(ready) = ready {
         ready.signal_ready();
     }
     loop {
+        let mut fds = [listener.raw(), woken.raw()].map(|fd| UserPollFd {
+            fd,
+            events: POLLIN,
+            revents: 0,
+        });
+        let _ = fs::poll(&mut fds, -1);
+        if DRAINING.load(Ordering::SeqCst) {
+            drop(listener);
+            finish_draining();
+        }
+        if fds[0].revents & POLLIN == 0 {
+            continue;
+        }
         let fd = match net::accept(listener.raw(), None) {
             Ok(fd) => fd,
             Err(SyscallError::EINTR) => continue,
@@ -424,8 +471,10 @@ fn send(fd: &OwnedFd, reply: &Reply, id: u64) -> bool {
                     events: POLLOUT,
                     revents: 0,
                 }];
-                if !matches!(fs::poll(&mut fds, REPLY_MS), Ok(n) if n > 0) {
-                    return false;
+                match fs::poll(&mut fds, REPLY_MS) {
+                    Ok(n) if n > 0 => {}
+                    Err(SyscallError::EINTR) => {}
+                    _ => return false,
                 }
             }
             Err(SyscallError::EINTR) => {}
@@ -446,7 +495,15 @@ fn serve(daemon: &Daemon, peer: &Peer, fd: OwnedFd) {
     while conn.open {
         match conn.next_request() {
             Ok(Some((request, fds, withdrawn))) => {
-                handle(daemon, peer, &mut conn, &request, &fds, withdrawn)
+                IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+                if DRAINING.load(Ordering::SeqCst) {
+                    let denial = Reply::denied("privd is restarting for a new base; ask again");
+                    conn.reply(&denial, request.id);
+                    IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+                    return;
+                }
+                handle(daemon, peer, &mut conn, &request, &fds, withdrawn);
+                IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
             }
             Ok(None) => return,
             Err(why) => {
@@ -756,7 +813,14 @@ fn wait(conn: &mut Conn, pid: u32, id: u64) -> Exit {
         }
         relay(conn);
     }
-    match process::waitpid(pid).map(|(_, status)| process::wait_status(status)) {
+    let mut status = 0;
+    let reaped = loop {
+        match process::waitpid_raw(pid as i32, &mut status, 0) {
+            rc if rc == i64::from(slopos_abi::Errno::EINTR.raw()) => {}
+            rc => break rc > 0,
+        }
+    };
+    match reaped.then(|| process::wait_status(status)) {
         Some(WaitStatus::Exited(code)) => Exit::Code(code),
         Some(WaitStatus::Signalled(signal)) => Exit::Signal(signal),
         _ => Exit::Code(-1),
