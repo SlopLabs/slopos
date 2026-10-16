@@ -88,6 +88,11 @@ When it wedges, ask it why: press **SysRq** (Alt+PrintScreen) — or send a
 every task with a symbolized park site. Only the physical console can trigger
 it, and `kconsole=off` on the kernel cmdline turns it off entirely.
 
+When an installed system will not come back, boot the live ISO and type
+`shell --rescue`: one consent at the machine gives a root shell there that can
+`e2fsck` and `mount` the installed disk and repair its boot partition with
+`bootctl --boot /dev/<boot partition> base rollback`.
+
 <details>
 <summary><b>Advanced knobs</b></summary>
 

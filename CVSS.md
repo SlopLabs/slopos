@@ -2,6 +2,43 @@
 
 **No finding is open.**
 
+Swept 2026-10-16: rescue — `BOOT_FLAG_MEDIUM`, set only once the `install
+medium` boot step serves the medium Limine loaded; the policy's `medium` line
+and `org.slopos.rescue`, which privd and every other reader drop off the
+medium; `elevate`'s `Input::Terminal`, a pseudo-terminal the requester opens
+and relays for the mechanism; `shell --rescue` and the forked process that
+spawns each program holding the shell's whole mask; `SLOPOS_RESCUE`;
+coreutils `mount` and `umount`; `bootctl --boot` reading another disk's
+loader; and the PTY master paths under them. Reviews found, before it landed,
+that the rescue shell's terminal was the session's, which opened its master,
+so any session process could open its slave by path during the consent
+dialog, read what the person typed to the root shell and claim it first;
+that the process waiting on a program set its signal handling only after
+spawning it, so an interrupt in that window killed it alone and left the
+program, holding every capability, running outside the job, and that its
+forwarder would have signalled its whole group before the program existed;
+that a master write the slave's high-water mark cut short reported the whole
+batch written, dropping the rest; that what followed a signal character in
+one master write was discarded; that a master polled writable while its
+slave refused input; and that a hangup left the slave throttled, so a master
+write after it spun in the kernel. Now the slave is locked again once the
+requester holds it and fed nothing before the shell starts; the waiter
+ignores interrupts and holds hangup and termination until the program's pid
+is known; a short master write says what the slave took; what follows a
+signal character is input; a master is writable only while its slave takes
+input, its blocked writers waiting on its own event; and a hangup lifts the
+throttle. Below the bar: in the instant between `openpty`'s unlock and the
+relock a session process may still claim the slave, which costs only the
+rescue shell, whose reads and writes another session's terminal refuses;
+`TIOCSWINSZ`, `TIOCSETD`, `TCFLSH` and `TCXONC` on a held slave check no
+session, as before; a terminal whose foreground group has died answers any
+session until the shell takes it back; a paired host can still ask as the
+session through a shell started without its privd connection, which the
+person answers as for the installer; the dialog does not say which terminal
+asked; a forged `SLOPOS_RESCUE` prints the rescue banner holding nothing;
+queued input is relayed ahead of a later interrupt; and serial and console
+input still drops what follows a signal character in one burst.
+
 Swept 2026-10-16: live activation — `base_activate` (`BaseUpdate`, which
 privd's base actions hold) staging an archive from the caller's memory into a
 generation the kernel owns, indexing it, checking its interface and moving

@@ -776,6 +776,30 @@ anything on a shared ESP outside `\EFI\SlopOS\`. e2fsprogs is the recipe
 base at `/sbin`, holding nothing a spawn does not delegate: the installer hands
 each the `RawBlock` it formats or checks with, and nothing else does.
 
+**The medium repairs an installed system.** `shell --rescue` asks privd for
+`org.slopos.rescue`, the one `medium` action: `/bin/shell` as uid 0 holding
+every delegable capability, for root and, once the person allows it, the
+session, never a paired host; the kernel sets `BOOT_FLAG_MEDIUM` only once it
+has served a medium Limine carried, so no command line names it. Exec keeps
+only the universal capabilities, so the rescue shell runs each program by
+spawning it with its whole mask from the process forked for it, which ignores
+`SIGINT` and `SIGQUIT` while it waits, passes on a `SIGHUP` or `SIGTERM`
+another process sends it, and then ends as the program ended; its `exec`
+builtin refuses. It takes `PRIV_ACTION` out of the environment, so a
+mechanism it runs acts itself, and puts `SLOPOS_RESCUE` in, so a shell it
+starts, a script's included, passes on what it holds the same way; its
+`PATH` is privd's `/bin:/sbin`. `mount` and `umount` are
+coreutils' in util-linux's spelling, a device's type ext4 unless `-t` names
+another. `bootctl --boot <partition>` acts on another disk's boot partition,
+whose loader has not run this boot: it offers what that disk's own
+`limine.conf` renders (`limine::offered_entries`), it boots by default and
+once what the machine's variables say, and the running root's records under
+`/var/lib/slopos/slots` are not its. `installer_test` grades it from the
+stick: `e2fsck`, a read-only mount by a nested shell, a base rolled back with
+a default the medium's loader does not offer, and at a rescue shell's
+terminal its size and a resize, an interrupt ending the program it ran, and
+the requester's terminal restored.
+
 **A panic leaves a record.** The boot disk's crash partition is a ring of
 64 KiB slots in the format `boot-core::crash` states: a header sealing each
 record's text with a CRC-32, then a summary of `key: value` lines, the panic
@@ -1522,7 +1546,9 @@ process, so nothing a spawn handed over survives an exec, as Linux keeps no
 capability across one for a process that is not root and has no file
 capabilities or ambient set; the one exec that keeps the mask is init's own
 re-execution of the base's `/sbin/init` as its sole thread
-(`exec::exec_keeps_authority`), which loads no other program; a sender
+(`exec::exec_keeps_authority`), which loads no other program, and a program
+that hands its mask on spawns rather than execs, as the rescue shell does
+(`apps::shell::rescue`); a sender
 may signal only a target whose
 capabilities it all holds, and `caps_drop` takes capabilities from a whole
 process for good, a thread whose clone races it included. A nice value below
@@ -1666,6 +1692,10 @@ requester's descriptors as stdio. Who asks is the connection's recorded
 pairing and nothing else, `session` is uid 1000 otherwise, and `program <path>`
 is a static base program; an action's `allow` lines are tried in order and the
 first that matches runs it, asks the person (`consent`) or, with none, refuses.
+An action marked `medium` exists only on a boot the kernel says served the
+install medium (`BOOT_FLAG_MEDIUM` in `sys_info`): off it privd answers it as
+no action, and so does a requester's own reading of the policy
+(`slopos_userland::privd::policy`).
 argv outside the action's shapes, a request carrying other than its
 descriptors, a requester whose process has exited — before the question and
 after it — and every lookup that fails are refusals. A connection serves its
@@ -1673,7 +1703,8 @@ requests one after another, every reply naming the request's id, so a requester
 on an inherited connection passes over what an earlier request left; a signal
 relayed before the mechanism starts withdraws the request, a second one stops
 the requester waiting, and a mechanism whose requester leaves is not stopped,
-though the pipes its requester relayed a terminal through close with it. One
+though the pipes its requester relayed a terminal through close with it and a
+terminal of its own hangs up. One
 uid running one program holds at most eight connections, every requester but
 root and the paired agent shares 32, and one that leaves a reply unread for
 five seconds loses its connection. A program started without its action's
@@ -1681,7 +1712,10 @@ capabilities calls `slopos_userland::privd::elevate`, which sends its own argv
 through the connection it inherited (`PRIVD_FD`, held to being the real
 privd's) or a fresh one and exits with the mechanism's status, relaying a
 terminal's output and, for the installer, its lines of input through pipes,
-since the mechanism runs in another session; started by privd, a mechanism acts
+and for the rescue shell every byte through a terminal of its own, locked
+against opens by its path once the requester holds it and fed nothing before
+the mechanism starts, with the requester's terminal raw while it runs, since
+the mechanism runs in another session; started by privd, a mechanism acts
 only for the action `PRIV_ACTION` names; while init starts privd again, a
 fresh request waits two seconds for it to listen. On `SIGTERM`, which init
 sends when a base switch changes privd, it drains: it stops listening, lets

@@ -132,6 +132,16 @@ remote-install` installs the base live and a kernel only when it changed,
 and carries no apps: a machine moved by it from a base that held the apps
 has none until a tree install.
 
+**Rescue on the medium (Phase 6).**
+- The kernel sets `BOOT_FLAG_MEDIUM` once it serves a medium. An action
+  marked `medium` exists only then, in privd and in each requester's reading
+  of the policy (`slopos_userland::privd::policy`).
+- `shell --rescue` (`org.slopos.rescue`) is a shell holding `DELEGABLE` as uid
+  0, on a terminal of its own (`Input::Terminal`). It spawns each program
+  with its whole mask (`userland/src/apps/shell/rescue.rs`).
+- coreutils has `mount` and `umount`. `bootctl --boot` naming another disk
+  reads that disk's loader from its own `limine.conf`.
+
 ## What the prior art settles
 
 | Source | What it shows | Taken here |
@@ -164,6 +174,15 @@ has none until a tree install.
 | Asterinas VFS ([book](https://asterinas.github.io/book/kernel/index.html)) | A filesystem lives as long as the last `Arc` to it | Not taken: a generation is freed by scanning its holders, since `&'static dyn FileSystem` carries no count |
 | Fuchsia open-package tracking ([RFC 0217](https://fuchsia.dev/fuchsia-src/contribute/governance/rfcs/0217_open_package_tracking)) | The garbage collector keeps every package something has open | A generation stays while a file, a mapping or a running program holds it |
 | Android APEX ([updates](https://source.android.com/docs/core/ota/apex)) | Most modules activate only at the next boot, since a running process may hold the old one | Activate live and keep the old generation resident instead |
+| sudo `use_pty` ([sudoers(5)](https://www.sudo.ws/docs/man/sudoers.man/), [sudo(8)](https://www.sudo.ws/docs/man/sudo.man/)) | A command runs on a pty of its own when sudo has a terminal, the default since 1.9.14; only the descriptors that are the user's terminal are wired to it; sudo dies by the command's signal | The rescue shell's terminal, chosen per descriptor; the waiting child dies by the program's signal |
+| `system(3)` ([man](https://man7.org/linux/man-pages/man3/system.3.html)) | The caller ignores `SIGINT` and `SIGQUIT` while it waits; the child keeps its defaults | The forked child that waits for a rescue program |
+| Debian installer rescue mode ([manual](https://www.debian.org/releases/stable/amd64/ch08s06.en.html)) | Booted from the install medium, a shell over the installed root, asking nothing, for boot repair above all | Rescue from the medium; SlopOS asks one consent |
+| systemd conditions ([systemd.unit(5)](https://man7.org/linux/man-pages/man5/systemd.unit.5.html)) and Fedora's live-only units | A unit whose condition fails is skipped, not failed; Fedora's live units key on a command-line word | A `medium` action does not exist off the medium, and the flag is the kernel's, not the command line's |
+| macOS Recovery and `csrutil` ([Apple](https://support.apple.com/guide/security/startup-disk-security-policy-control-sec7d92dc49f/web)) | Some changes are possible only from recoveryOS, which a human at the machine reaches | Rescue is the medium's alone |
+| util-linux `mount(8)` and `umount(8)` ([mount](https://man7.org/linux/man-pages/man8/mount.8.html), [umount](https://man7.org/linux/man-pages/man8/umount.8.html)), BusyBox | `-r`, `-w`, `-t`, `-o ro,rw` with the last winning, `umount -l`; an omitted `-t` probes | The spelling; ext4 for an omitted `-t`, since probing would need `RawBlock` |
+| Asterinas mount flags ([coverage](https://asterinas.github.io/book/kernel/linux-compatibility/syscall-flag-coverage/file-systems-and-mount-control/index.html)) | `MS_RDONLY` and `MNT_DETACH` are accepted with no effect | Not taken: `mount -r` and `umount -l` reach a kernel that honours both |
+| systemd `bootctl --image` ([bootctl(1)](https://man7.org/linux/man-pages/man1/bootctl.1.html)) | Operations apply to the filesystems on a named image or block device | `bootctl --boot <partition>` on the disk a rescue repairs |
+| Redox installer ([book](https://doc.redox-os.org/book/real-hardware.html)) | Its Clone option shows only on a live disk | An action that exists only on the medium |
 
 ## Design
 
@@ -399,25 +418,32 @@ too, since it replaces the running base at once.
 
 ### Rescue on the install medium
 
-- The kernel sets `BOOT_FLAG_MEDIUM` in `sys_info` when it installs the medium
-  (`boot/src/boot_services.rs:571`).
+- The kernel sets `BOOT_FLAG_MEDIUM` in `sys_info` once the `install medium`
+  step serves a medium (`boot/src/boot_services.rs`).
 - The policy grammar gains a `medium` line: an action that carries it exists
   only when that flag is set.
-- `org.slopos.rescue` runs `/bin/shell`:
+- `org.slopos.rescue` runs `/bin/shell --rescue`:
   - with every delegable capability, as uid 0;
   - `allow root`, `allow session consent`, never `paired`;
-  - `medium`, with a `describe` that says it controls every disk.
-- `elevate` relays its input, as it does the installer's.
-- **The rescue shell passes its power on.** Started with
-  `PRIV_ACTION=org.slopos.rescue`, the shell:
-  - runs every command through spawn, delegating its whole mask, since exec
-    drops gated capabilities;
-  - removes `PRIV_ACTION` from the environment those commands get, so a
-    mechanism holding its action's capabilities acts itself.
+  - `medium`, with a `describe` that says it can change every disk.
+- `elevate` gives the shell a terminal of its own, as sudo's `use_pty` does:
+  a pseudo-terminal in place of each descriptor that is the requester's
+  terminal, relayed byte for byte with the requester's terminal raw while the
+  shell runs. Without a terminal it forwards lines, as for the installer.
+- **The rescue shell passes its power on.** Once it is the rescue shell, it:
+  - runs every program from the process forked for it, which spawns the
+    program with the whole mask, since exec drops gated capabilities, and
+    ends as the program ended;
+  - removes `PRIV_ACTION` from the environment those programs get, so a
+    mechanism holding its action's capabilities acts itself;
+  - puts `SLOPOS_RESCUE` in it, so a shell it starts, a script's included,
+    does the same with what it holds.
 - coreutils gains `mount` and `umount`.
-- `bootctl --boot <disk>` (`userland/src/apps/bootctl.rs:572-575`) already
-  names another disk. With it, `base install` and `base rollback` repair an
-  installed system's boot partition from the medium.
+- `bootctl --boot <partition>` names another disk's boot partition, whose
+  loader has not run this boot: the entries offered are what that disk's
+  `limine.conf` renders, and the default and one-shot are the machine's
+  variables. With it, `base install` and `base rollback` repair an installed
+  system's boot partition from the medium.
 
 ### Building and installing in the guest
 
@@ -589,15 +615,47 @@ its own.
   same way), `test-install` (a base live, kept across a reboot, rolled back
   live) and `test-remote` (a base live, no reboot).
 
-### Phase 6: Rescue
+### Phase 6: Rescue — done
 
-`BOOT_FLAG_MEDIUM`, the `medium` policy line, `org.slopos.rescue`, the
-shell's rescue mode, and `mount` and `umount`.
-
-Graded by:
-- `privd_test`: the action absent without the flag;
-- `test-installer`: from the medium, the rescue shell mounts an installed
-  root, runs `e2fsck`, and rolls its base back with `bootctl --boot`.
+- **Kernel**: `BOOT_FLAG_MEDIUM` in `sys_info`, set once the `install medium`
+  step serves a medium. Base interface 4, minimum still 1. On a PTY master,
+  what follows a signal character in one write is input again, the flush
+  taking only what came before it; a write the slave's high-water mark cuts
+  short says how much the slave took; the master polls writable only while
+  its slave takes input; and a blocked writer waits on the master's own
+  event, which the slave's unthrottle and hangup publish, a hangup lifting the
+  throttle with the input it flushes.
+- **Policy**: a `medium` line; `Policy::for_boot` drops such an action off the
+  medium, in privd and in `elevate`, `is_mechanism` and every other reader
+  (`slopos_userland::privd::policy`). `org.slopos.rescue` runs `/bin/shell
+  --rescue` as uid 0 holding `DELEGABLE`: `allow root`, `allow session
+  consent`.
+- **elevate**: `Input::Terminal`, a pseudo-terminal for the mechanism in place
+  of each descriptor that is the requester's terminal, locked against opens
+  by its path once the requester holds it, relayed byte for byte from
+  `Started` with the requester's terminal raw until `Exited`, and resized
+  with it.
+- **Shell**: `--rescue` elevates on that terminal, drops `PRIV_ACTION` and
+  exports `SLOPOS_RESCUE`, which makes every shell it starts one too. Every
+  program is spawned with the whole mask by the process forked for it, which
+  ignores `SIGINT` and `SIGQUIT`, passes on a `SIGHUP` or `SIGTERM` another
+  process sent, and ends as the program ended. The `exec` builtin refuses.
+- **Tools**: coreutils `mount` and `umount`. bootctl's `Loader::of` reads
+  another disk's entries from its `limine.conf` (`limine::offered_entries`)
+  and leaves the running root's slot records out of it.
+  `slopos_userland::base_image` holds the base digest and re-tagging the
+  install tests share.
+- Graded by `priv-core`'s and `boot-core`'s host tests, `privd_test` (off the
+  medium the action is no action, and `shell --rescue` refuses) and
+  `test-installer`'s reinstall boot. From the stick, a rescue shell `e2fsck`s
+  the installed root, mounts it read-only through a nested shell and reads a
+  file, and rolls its base back through `bootctl --boot` while
+  `LoaderEntryDefault` names an entry the medium's loader does not offer. At
+  a terminal it takes the terminal's size and a resize, Ctrl+C ends a `sleep`
+  with status 130 and the shell lives on, and the requester's terminal is
+  cooked again after `exit`. The kernel's tty tests hold a master write past
+  a signal, a short master write's count, a master write once its throttled
+  slave hung up, and a master's poll under throttle.
 
 ## Grading
 
@@ -721,6 +779,51 @@ Graded by:
   session restart and never forces one.
 - **Repair is the medium's:** one consent, a rescue shell with every delegable
   capability, and tools that work on a mounted disk. There is no chroot.
+- **Only the kernel says it booted the medium.** `BOOT_FLAG_MEDIUM` is set
+  once the kernel has served an `install` module that checks out as a medium,
+  never from a command-line word anyone can type at the boot menu, as live
+  Linux media key on one. An action outside it does not exist, as a systemd
+  unit whose condition fails is skipped, rather than refused as polkit refuses.
+- **One consent for the whole machine.** Every Linux live medium surveyed
+  gives root unasked; Apple's Recovery asks for credentials. A paired host is
+  never the rescue shell's requester. A shell a paired host started can still
+  ask as the session, which the person at the machine answers, as for the
+  installer: the login tag is not attested over the socket.
+- **A rescue shell has a terminal of its own.** Over pipes a shell has no
+  line editor, no job control and no Ctrl+C. The pseudo-terminal goes only in
+  place of descriptors that are the requester's terminal, so a redirected
+  output stays byte for byte, as sudo and ssh decide per descriptor. Its
+  slave belongs to the session, which opened the master, so it is locked
+  again once the requester holds it, and nothing typed reaches it before the
+  shell starts and claims it: no session process opens it by its path to read
+  the root shell's input. A session process can still ask for a rescue shell
+  of its own, which the person answers.
+- **A rescue shell spawns, from a fork.** Exec keeps only the universal
+  capabilities. Spawning from the forked child keeps every redirection,
+  pipeline and job-control path the shell already has. That child sits in the
+  job's group, ignores `SIGINT` and `SIGQUIT` as `system(3)` does, and dies by
+  the program's signal as sudo does, so the shell sees an interrupted job as
+  one. It passes on a `SIGHUP` or `SIGTERM` a process sends, for a `kill` of
+  `$!`, not one the kernel raised, which reached the group already; a `kill`
+  of the job's group still reaches the program twice. A stop aimed at the job
+  stops both; a program stopped alone leaves the job running, since mirroring
+  the stop would stop the child again after an `fg` whose continue raced the
+  report. A spawned program starts with every signal at its default, so `trap
+  '' INT` does not reach it. `exec` has no child to keep the mask in, so it
+  refuses.
+- **What a rescue shell starts is a rescue shell.** `SLOPOS_RESCUE` in the
+  environment makes a shell pass on what it holds, so a script and `sh -c`
+  keep the power. It grants nothing: a shell passes on only what it holds.
+- **`--boot` reads the named disk's loader.** Its loader has not run this
+  boot, so what it offers is its own `limine.conf`, its default and one-shot
+  are the machine's variables, and the slot records under
+  `/var/lib/slopos/slots` are the running root's, not its.
+- **`mount` without `-t` mounts ext4.** The kernel mounts nothing else from a
+  device, and its driver refuses a device that holds no ext volume. Probing
+  in userland, as util-linux does, would need `RawBlock`, which `mount(2)`
+  does not.
+- **Interface 4 is one boot flag more.** `BOOT_FLAG_*` is in the private
+  surface; a base built at 4 needs a kernel serving 4.
 - **Previous always holds the base that last ran.** Two uninstalled bases in a
   row never push the running one off the disk. The running base is the one
   whose manifest `/usr/share/slopos/base-manifest` serves, on the disk the
