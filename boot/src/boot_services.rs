@@ -585,12 +585,15 @@ fn boot_step_install_medium_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     };
     match slopos_fs::vfs::init::vfs_mount_readonly(layout::MEDIUM_DIR.as_bytes(), medium) {
-        Ok(()) => klog_info!(
-            "INSTALL: the medium is at {} ({} entries, {} bytes)",
-            layout::MEDIUM_DIR,
-            entries,
-            archive.len()
-        ),
+        Ok(()) => {
+            slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_MEDIUM);
+            klog_info!(
+                "INSTALL: the medium is at {} ({} entries, {} bytes)",
+                layout::MEDIUM_DIR,
+                entries,
+                archive.len()
+            );
+        }
         Err(e) => {
             klog_info!(
                 "INSTALL: the medium could not be mounted at {}: {:?}",

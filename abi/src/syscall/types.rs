@@ -100,6 +100,8 @@ pub const BOOT_FLAG_FATE_REBOOT: u32 = 1 << 4;
 /// `/` is backed by a block device: a write there survives the reboot. Clear
 /// for a RAM root, whose successful `fsync` still loses the data at power-off.
 pub const BOOT_FLAG_ROOT_PERSISTENT: u32 = 1 << 5;
+/// The kernel serves the install medium it booted from at `/media/install`.
+pub const BOOT_FLAG_MEDIUM: u32 = 1 << 6;
 
 /// POSIX `struct timespec`. Signed, as Linux and every libc have it:
 /// `UTIME_OMIT` is a specific `tv_nsec` value and a pre-1970 `st_mtim` is
