@@ -168,7 +168,7 @@ bar: a rollback takes no consent, as `oneshot` takes none, so the session may
 put back the base that last ran; a base install takes effect for every slot
 with no trial boot, so a base that checks out and fails in userland stays
 current until a reinstall that keeps the root writes the medium's, or the
-rescue shell `plans/live-userland.md` plans rolls it back; a power cut between
+medium's rescue shell rolls it back; a power cut between
 two base writes leaves one image twice, which the default kernel still boots;
 the person's consent to a base install names a path, whose contents the
 session may change before `bootctl` reads them, as with `boot.install`; and

@@ -17,7 +17,8 @@ editing.
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
 | `installer-gui.md` | A graphical installer on the live medium: an engine that emits events, a typed protocol between an unprivileged window and the engine privd runs, a linear wizard with before/after partition bars and a guarded review, and a root size choice |
-| `live-userland.md` | Only a kernel change reboots: one sealed base on the boot partition shared by the kernel slots, replaced live with the previous kept, an interface number between kernel and base, `libc.so` and a versioned compositor protocol as the stable interfaces for software outside the base, init as a service manager with session restart, and rescue from the live medium |
+| `system-extensions.md` | System software outside the base: sealed, optionally signed extension images beside the base, attested by the kernel as base files are, declaring services, privd actions, commands and users that the owner grants once — by consent or by trusting a signing key with a capability ceiling — then updated and rolled back live without a question |
+| `users-and-login.md` | More than one person: a sealed user database with an `admin` group and Argon2id passwords, privd principals `user`, `admin` and `greeter` with confirm, password and alone levels, a login screen, console login and switching between sessions with the seat and clipboard following the one in front, `priv <command>` in the `run0` model running as the person with a capability ceiling, `/usr/local` system-wide from the second person on and `~/.local` per person — with a one-person install unchanged |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive the
@@ -93,6 +94,17 @@ DAC, `slopos-ostd/src/process/identity.rs` for peer and program identity,
 `priv-core` and `assets/privd/actions` for the policy, `userland/src/apps/privd/`
 for the broker, and `userland/src/apps/init/service.rs` for who starts holding
 what. `AGENTS.md`'s authority discipline states the invariants.
+
+The live userland has **landed and its plan is retired**. Only a kernel change
+needs a reboot: one sealed base on the boot partition, shared by the kernel
+slots, is replaced and rolled back while the system runs, with the previous kept;
+kernel and base each name the interface they serve or need; `libc.so` and a
+versioned compositor protocol are the stable interfaces for the apps outside the
+base; init supervises its services, restarts what a base switch changed and
+re-executes itself; and the install medium opens a rescue shell that repairs an
+installed disk. Read `AGENTS.md` rather than a document: its paragraphs on the
+base, init, privd and the medium state the invariants, and `just test-install`,
+`just test-installer` and `just test-remote` grade them.
 
 ## When To Promote A Plan
 
