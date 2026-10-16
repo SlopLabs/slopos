@@ -18,11 +18,13 @@ the other's mark; that the new mount helpers canonicalised a path, an
 allocation, under the mount table's write lock; that an init re-execution
 failing once its old image was gone, or whose reset failed partway, left its
 program and instance standing; that an activation staged a whole archive
-before finding the pool full; and that three kernel frames passed the 2 KiB
-gate once the identity grew. Now privd refuses a lapsed requester before its
-verdict; one reap pass runs at a time; paths are canonical before the lock;
-a failed re-execution forfeits; the pool is checked first; and the frames
-are split. Below the bar: uid-0 code outside the base can start a base
+before finding the pool full; that three kernel frames passed the 2 KiB
+gate once the identity grew; and that a peer could still read an exited
+process's program after its parent had reaped it, the program lapsing only
+once the last task's cleanup ran. Now privd refuses a lapsed requester
+before its verdict; one reap pass runs at a time; paths are canonical before
+the lock; a failed re-execution forfeits; the pool is checked first; the
+frames are split; and a leader's exit forfeits before its status is set. Below the bar: uid-0 code outside the base can start a base
 program as uid 0 and ask as root through it, which only no extension running
 as uid 0 (Phase 3) closes; a process holding a file of a replaced activation
 keeps that copy against the shared pool and budget, so it can hold off that
