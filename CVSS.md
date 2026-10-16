@@ -2,6 +2,60 @@
 
 **No finding is open.**
 
+Swept 2026-10-16: live activation — `base_activate` (`BaseUpdate`, which
+privd's base actions hold) staging an archive from the caller's memory into a
+generation the kernel owns, indexing it, checking its interface and moving
+the six base mounts under the mount table's lock; base generations, their
+numbers in every inode, and the reaper that frees one nothing holds by
+scanning open files, page sets and processes' programs; `SO_PEERPROGRAM`
+naming a program in its own generation; `base_monitor`, unprivileged; exec
+holding the base files it reads; bootctl activating what it installs or rolls
+back; privd and remoted draining on `SIGTERM` and init starting their
+successors; init restarting what a switch changed and re-executing; and
+`remote.py install` running a base without a reboot. Reviews found, before
+it landed, that freeing the booted generation turned the identity of init's
+consent pair into no program, after which every privd and compositor refused
+the pair and nothing could ask the person for the rest of the boot; that a
+drained privd exited only its main thread, so its consent thread lived on and
+every later privd counted it as a predecessor's mechanism and refused
+exclusive actions; that a drain waited on every request it took, so one
+waiting on its terminal held every privileged request; that a session
+rollback, consent-free while it waited for a boot, now swapped the running
+base at once and could be looped; that a switch to another pairing left the
+old broker's commands running and a draining remoted still took requests,
+which then reached the new privd as the paired agent; that an interface-1
+base switched to live re-executed init into one that cannot resume; that
+`base_monitor` kept its state in 64 slots every process shared, so a session
+program holding them all left init deaf to switches after its next
+re-execution, and that its descriptor survived exec; that four generation
+slots filled in ordinary use; that an archive could imply millions of
+directories within its byte limit; and that an open or a directory
+descriptor whose walk began before a switch failed rather than keeping its
+generation, and an exec straddling one could lose the image it was loading.
+Now the booted generation stays for the boot; a drained privd exits whole,
+lets go of the consent pair at once and is left to finish beside its
+successor after five seconds; a session rollback asks the person; a pairing
+change ends what remoted ran, `SIGKILL` after five seconds and the new
+remoted only then, and a draining remoted refuses what arrives and spawns
+nothing;
+only a base of interface 3 or newer runs live; monitors are charged to their
+opener's account and are close-on-exec; generations share a quarter of
+memory across sixteen slots; a staged generation holds at most twice a
+base's records in nodes; a base open or directory descriptor keeps working
+while its generation is resident; and exec holds the base files it reads.
+Below the bar: a process may pin old generations by holding a base file open,
+which costs at most the quarter of memory every copy shares and makes the
+next activation `EBUSY`, after which the boot takes the base; generations are
+charged to no account; a request privd reads in the instant its drain begins
+can see its connection close rather than the "ask again" denial, and that
+denial is not retried; a process of the old broker forking faster than init
+signals can outlast a pairing change, as a session's end; a switch
+landing during init's re-execution is not acted on; an old-generation process
+is judged by the current policy for its path until it exits, and an exec
+straddling a switch may attest the image of one generation while its
+interpreter comes from the next; and every base lookup takes the generation
+table's lock.
+
 Swept 2026-10-15: init as a service manager — the login tag a `SetId`
 holder sets at spawn under `SPAWN_SET_LOGIN` and `process_list` reports;
 init's exec of the base's `/sbin/init` keeping its capabilities; `/run/init`,

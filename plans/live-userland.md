@@ -41,7 +41,7 @@ plans lands second re-baselines that step.
 
 ## Where it stands
 
-**The base is the boot partition's and fixed for the boot (Phase 3).**
+**The base is the boot partition's (Phase 3) and replaced live (Phase 5).**
 - Slots hold kernels only; every entry loads `/boot/base/current.img` and
   `previous.img` as `initramfs` and `initramfs-previous`
   (`boot-core/src/layout.rs`, `limine.rs`).
@@ -49,25 +49,25 @@ plans lands second re-baselines that step.
   serves and hands the other's pages to memory init as usable
   (`boot/src/base.rs`, `mm/src/memory_init.rs`). Nothing can reach the
   module after; there is no API to give the allocator memory after boot.
-- `BASE_FS` is a static whose index is a `OnceLock`, installed once at boot
-  (`fs/src/basefs.rs`). File data are slices of the chosen module.
-  `MEDIUM_FS` is a second static instance for the install medium.
-- `BASE_DIRS` are mounted read-only and pinned (`fs/src/vfs/init.rs:536-555`).
-  The syscall layer refuses to unmount them or mount over them
-  (`core/src/syscall/fs/mount_handlers.rs`).
+- `BASE_FS` holds up to sixteen generations (`fs/src/basefs/`). The boot's
+  file data are slices of the chosen module; a generation activated since
+  owns a copy. `MEDIUM_FS` is a second instance, of one generation, for the
+  install medium.
+- `BASE_DIRS` are mounted read-only and pinned (`fs/src/vfs/init.rs`). The
+  syscall layer refuses to unmount them or mount over them
+  (`core/src/syscall/fs/mount_handlers.rs`); only `base_activate` moves them,
+  all together (`fs/src/vfs/mount.rs`, `switch_roots`).
 - Sizes, measured: the shipped base is 21 MB and the release kernel 12 MB. The
   boot partition is 1 GiB (`layout::BOOT_BYTES`).
 
-**Program identity assumes one base per boot.**
+**Program identity names its generation.**
 - Exec records `Program::Base(inode)` when the image and its interpreter come
-  from `BASE_FS`. The check is pointer identity against the static
-  (`core/src/exec/mod.rs:761-766`, `fs/src/basefs.rs:287-289`).
-- The identity is an inode number in an `AtomicU64`
-  (`slopos-ostd/src/process/identity.rs:8-27`). `SO_PEERPROGRAM` turns it into
-  a path through whatever `BASE_FS` is now
-  (`core/src/syscall/net_handlers.rs:711-730`).
-- privd reads its policy and whether the base is paired once, at start
-  (`userland/src/apps/privd/mod.rs:87-93`).
+  from `BASE_FS` (`core/src/exec/mod.rs`); the inode's high half is its
+  generation (`fs/src/basefs/mod.rs`, `generation_of`).
+- `SO_PEERPROGRAM` answers the path in that generation, and nothing once it
+  is freed (`core/src/syscall/net_handlers.rs`, `program_path`).
+- privd reads its policy and whether the base is paired once, at start; a
+  switch that changes either restarts it.
 
 **init is a service manager (Phase 4).**
 - A single-threaded poll loop (`userland/src/apps/init/`) starts privd,
@@ -80,8 +80,8 @@ plans lands second re-baselines that step.
   predecessor's mechanisms run.
 - `/run/init` takes `restart-session` (session, uid 0), `end-session` and
   `reexec` (uid 0). Init re-executes keeping its pid, children, capabilities,
-  service table and descriptors (`init/reexec.rs`); nothing triggers it yet but
-  a request.
+  service table and descriptors (`init/reexec.rs`), on a request or when a
+  base switch changes `/sbin/init`.
 - init keeps both ends of the consent pair; each new privd or compositor
   resynchronises with `RESET`/`RESET_SEEN` (`priv-core/src/consent.rs`).
 
@@ -122,14 +122,15 @@ tree's name, `usr_local` for the toolchain and `apps` for the apps, both at
 on the host, and `slopos_userland::tree` in the guest, for the installer,
 init and `/bin/tree-install`.
 
-**Building in the guest.** `scripts/selfhost.sh install` builds the kernel,
-the userland, the base and the apps, runs `bootctl base install` (offline:
-the next boot takes it), installs the kernel into the spare slot and arms
-one boot of it. It installs the apps through the `tree-install` it built
-when the running `libc.so` is the one they link, and otherwise prints the
-command for the new boot. `just remote-install` does the same base and
-kernel install and carries no apps: a machine moved by it from a base that
-held the apps has none until a tree install (Phase 5).
+**Building in the guest.** `scripts/selfhost.sh install` builds the
+userland, the base and the apps and runs `bootctl base install`, which runs
+the base at once when the kernel serves it; `install-kernel` builds the
+kernel, installs it into the spare slot and arms one boot of it. The apps go
+in through the `tree-install` it built when the running `libc.so` is the one
+they link, and otherwise it prints the command for the new boot. `just
+remote-install` installs the base live and a kernel only when it changed,
+and carries no apps: a machine moved by it from a base that held the apps
+has none until a tree install.
 
 ## What the prior art settles
 
@@ -159,6 +160,10 @@ held the apps has none until a tree install (Phase 5).
 | Redox launcher ([orbutils](https://gitlab.redox-os.org/redox-os/orbutils)) and libredox ([libraries](https://doc.redox-os.org/book/libraries-apis.html)) | Native app files are `key=value` lines (`name`, `binary`, `icon`) beside XDG `.desktop` entries, sorted by name; Rust programs reach relibc's C ABI rather than raw syscalls | `key=value` app entries in name order; the toolkit's `slopos-cabi` |
 | XDG desktop entries ([file naming](https://specifications.freedesktop.org/desktop-entry/latest/file-naming.html)) | Of two entries with one id, the directory first in precedence wins, the user's data home ahead of `/usr/local/share` ahead of `/usr/share` | The dock's three shares and their precedence |
 | glibc `ld.so` and `ld.so.conf` | `LD_LIBRARY_PATH` and `$ORIGIN` are ignored under `AT_SECURE`; `/usr/local/lib` is a search entry a distribution adds | `/usr/local/lib` searched last, and never for uid 0 or `AT_SECURE` |
+| Linux mounts ([mount(2)](https://man7.org/linux/man-pages/man2/mount.2.html), [umount(2)](https://man7.org/linux/man-pages/man2/umount.2.html)) | An open file holds its mount and superblock; `MNT_DETACH` leaves busy users on the old tree; no call replaces several mounts at once | Old descriptors keep their generation; the six base mounts move under one lock, all or none |
+| Asterinas VFS ([book](https://asterinas.github.io/book/kernel/index.html)) | A filesystem lives as long as the last `Arc` to it | Not taken: a generation is freed by scanning its holders, since `&'static dyn FileSystem` carries no count |
+| Fuchsia open-package tracking ([RFC 0217](https://fuchsia.dev/fuchsia-src/contribute/governance/rfcs/0217_open_package_tracking)) | The garbage collector keeps every package something has open | A generation stays while a file, a mapping or a running program holds it |
+| Android APEX ([updates](https://source.android.com/docs/core/ota/apex)) | Most modules activate only at the next boot, since a running process may hold the old one | Activate live and keep the old generation resident instead |
 
 ## Design
 
@@ -241,29 +246,29 @@ fails naming both numbers.
 
 ### Base generations in the kernel
 
-- `BaseFs` becomes a generation: an index over bytes the generation owns, and
-  a generation number never repeated within a boot. The boot generation's
-  bytes are the chosen module.
-- A live generation's bytes are copied into memory it owns. The heap
-  discipline applies, so no 21 MB contiguous allocation is assumed.
-- `is_base` asks whether a filesystem is *a* base generation.
-- `Program::Base` carries the generation beside the inode. `SO_PEERPROGRAM`
-  resolves the path in the process's own generation.
-- A generation stays resident while a mount, an open file, a mapping or a
-  socket's captured identity refers to it. An identity whose generation has
-  gone reads as no program, so privd refuses it.
-- `base_activate(fd)` is a new private call gated on a new capability,
-  `BaseUpdate` (bit 20):
-  - it reads an archive from `fd`, checks its interface number against the
-    kernel's range, and builds the new generation;
+- `BaseFs` holds generations: each an index over bytes it owns, numbered from
+  1 and never renumbered within a boot. The boot generation's bytes are the
+  chosen module; a live one's are a copy in 64 KiB pieces, so no 21 MB
+  contiguous allocation is assumed.
+- `is_base` asks whether a filesystem is the base, whichever generation.
+- A generation's number is the high half of each inode it serves, so
+  `Program::Base` carries it, and `SO_PEERPROGRAM` resolves the path in the
+  process's own generation.
+- A generation no longer current stays resident while an open file, a page
+  set or a live process's program refers to it. A socket's captured identity
+  does not hold one; an identity whose generation has gone reads as no
+  program, so privd refuses it.
+- `base_activate(archive, len)` is a private call gated on `BaseUpdate`
+  (bit 20):
+  - it stages the archive from the caller's memory a record at a time,
+    checks its interface number against the kernel's range, and admits it;
   - it switches every `BASE_DIRS` mount to it in one step under the mount
     table's lock; descriptors already open keep the old generation;
   - the mounts stay pinned and sealed.
 - `base_monitor() -> fd` turns readable whenever the generation changes, as
-  `net_monitor`'s does.
-- Both calls fit the private table: 44 of 48 slots are used
-  (`abi/src/syscall/numbers.rs:33-39`).
-- `BaseUpdate` joins `slopos_priv_core::DELEGABLE` and init's grant to privd.
+  `net_monitor`'s does, and reads the current number.
+- The private table has 46 of 48 slots used.
+- `BaseUpdate` is in `slopos_priv_core::DELEGABLE` and init's grant to privd.
 
 ### Replacing a base: `bootctl`
 
@@ -281,12 +286,11 @@ The policy gains:
 | Action | Command | Capabilities | Allow |
 |---|---|---|---|
 | `org.slopos.base.install` | `base install *` | `RawBlock Power BaseUpdate`, `cwd`, exclusive `boot-slots` | `root`; `session consent`; `paired` |
-| `org.slopos.base.rollback` | `base rollback` | `RawBlock Power BaseUpdate`, exclusive `boot-slots` | `root`; `session`; `paired` |
+| `org.slopos.base.rollback` | `base rollback` | `RawBlock Power BaseUpdate`, exclusive `boot-slots` | `root`; `session consent`; `paired` |
 
-`org.slopos.boot.install` takes `install <slot> <kernel>`. A rollback needs
-no dialog, because the person approved that base when it was installed.
-`Power` finds the boot partition, through `LoaderDevicePartUUID`; Phase 3
-ships both actions without `BaseUpdate`, which Phase 5 adds.
+`org.slopos.boot.install` takes `install <slot> <kernel>`. A rollback asks
+too, since it replaces the running base at once.
+`Power` finds the boot partition, through `LoaderDevicePartUUID`.
 `org.slopos.boot.set-default` gains `RawBlock`, to read the slot's kernel.
 
 ### `libc.so` as the stable interface
@@ -553,27 +557,37 @@ its own.
   with nobody left to ask; asked again once it restarts) and `priv-core`'s
   host tests of the handshake and credits.
 
-### Phase 5: Live activation
+### Phase 5: Live activation — done
 
-Base generations, identity per generation, `base_activate` and
-`base_monitor`, `BaseUpdate`, `bootctl` activating live, init's
-digest-driven restarts and the compositor's notice. The `selfhost.sh` and
-`remote-install` changes.
-
-Graded by:
-- kernel tests:
-  - a process from generation N keeps its identity and its path after N+1
-    activates;
-  - generation N stays resident while mapped and is freed after;
-  - the six mounts switch together;
-  - an archive outside the kernel's range is refused;
-- a utest that activates a fixture base differing in one program and in
-  privd, and finds:
-  - a new exec running the new bytes;
-  - an old process attested in its own generation;
-  - privd restarted and serving;
-- `test-install` with a base installed live, then a reboot that keeps it;
-- `test-remote` installing a base without a reboot.
+- **Kernel** (`fs/src/basefs/`): `BaseFs` holds up to sixteen generations, each
+  an index and, past the boot's, a copy in 64 KiB pieces; a generation's
+  number is the high half of its inodes, so `Program::Base` and
+  `SO_PEERPROGRAM` resolve in the program's own generation.
+  `base_activate(archive, len)` (`BaseUpdate`, bit 20) stages the archive a
+  record at a time from the caller's memory, refuses an interface outside the
+  kernel's range, and moves every base mount in one pass under the mount
+  table's lock (`vfs::mount::switch_roots`). `base_monitor()` turns readable
+  at each switch. The `basefs-reap` thread frees an old generation two quiet
+  passes after nothing holds it; exec holds what it reads, and the copies
+  resident share a quarter of memory. Base interface 3, minimum still 1.
+- **Userland**: `bootctl base install` and `base rollback` activate and say
+  so; privd drains on `SIGTERM`; init restarts privd or remoted when the
+  switch changed what they run or `reads`, and re-executes when `/sbin/init`
+  changed (`slopos_userland::base_watch`); the compositor's system menu
+  offers a session restart when the compositor or terminal changed; remoted
+  names the running base's tag in each hello.
+- **Scripts**: `selfhost.sh install` installs the base live and
+  `install-kernel` tries a kernel; `remote.py install` waits for the live
+  base's tag, and `just remote-install` boots a kernel only when it changed.
+- Graded by `fs`'s `generations` tests (a staged copy served, an inode naming
+  its generation after the next, residency while open or mapped and freed
+  after, a running program holding its generation, six mounts switched
+  together or not at all, an archive past the range, the limit or its end
+  refused), `live_base_test` (a fixture base differing in privd, one program
+  and one more: the new bytes run, an old process stays attested in its
+  generation, privd restarts and serves, and the original base comes back the
+  same way), `test-install` (a base live, kept across a reboot, rolled back
+  live) and `test-remote` (a base live, no reboot).
 
 ### Phase 6: Rescue
 
@@ -699,8 +713,10 @@ Graded by:
   non-blocking.** The compositor holds the seats and draws the consent
   question, and reads entries and icons the session can replace with a FIFO
   or a huge file.
-- **A base install asks the session for consent; a rollback does not.** root
-  and the paired agent need no consent, as for `boot.install`.
+- **A base install or rollback asks the session for consent.** root and the
+  paired agent need no consent, as for `boot.install`. A rollback asked none
+  while it waited for a boot; run live, a session program looping it would
+  swap the running base and restart privd at will.
 - **Only what changed restarts.** A changed compositor or terminal asks for a
   session restart and never forces one.
 - **Repair is the medium's:** one consent, a rescue shell with every delegable
@@ -836,7 +852,9 @@ Graded by:
   when the session's processes are gone, `restart-session` likewise (its
   requester is usually among them), and `reexec` from the new image, which
   gets the request's descriptor in its state. Re-exec is refused while a
-  session starts or ends, whose timers and ready pipe the state does not carry.
+  session starts or ends, whose timers and ready pipe the state does not carry,
+  and while a service drains or what it left still runs, which it does not
+  carry either.
 - **The consent pair is resynchronised, never re-made.** A new instance's
   `RESET` names a fresh epoch and it acts only after `RESET_SEEN` names it
   back, so nothing written for a predecessor is read as its own — above all no
@@ -867,6 +885,54 @@ Graded by:
   while the suite runs and a test can kill privd or restart the session.
 - **`elevate` waits for a restarting privd** two seconds, from Phase 4 on,
   since a crash restart leaves the same window a base switch will.
+- **A generation's lifetime is read where its references live.** An open
+  file, a page set and a process's program are where a base inode outlives a
+  system call, so the reaper scans those tables instead of keeping counts
+  beside them that every path taking an inode would have to keep right. Two
+  quiet passes a second apart outlast a walk that resolved an inode just
+  before its generation stopped being current.
+- **A socket's identity holds no generation, and the booted one stays.**
+  Numbers are never reused, so a stale identity names no other program: it
+  reads as none, and privd refuses it, where otherwise any long-lived
+  connection would pin a whole base. The booted generation costs no copy and
+  is what init made the consent pair as, which privd and every compositor
+  check, so it is never freed.
+- **Generations are bounded by what their copies take.** At most a quarter
+  of memory across every copy resident, in sixteen slots; past either an
+  activation is `EBUSY`, so held bases cannot pile up. The boot's costs no
+  copy, and a terminal left open on each of a day's bases is no reason to
+  refuse the next one.
+- **`base_activate` reads the caller's memory, not a descriptor.** `bootctl`
+  holds the image to check its digest and `base::check`; the kernel stages
+  those very bytes, so the session cannot swap the file between the check
+  and the read. A memfd would need read and write paths it lacks. An archive
+  past a quarter of memory is `EFBIG`.
+- **Everything that can fail runs before the switch.** Staging, the interface
+  check, admission and finding each mounted directory come first; the switch
+  is one pass under the mount table's lock.
+- **A base runs live only on the system it was installed for, and only a
+  base built to.** `bootctl` activates only when the system booted from the
+  boot partition it wrote, the running kernel serves the base's interface and
+  that interface is 3 or newer: an older init cannot resume the state the
+  running one hands it. Otherwise the next boot takes it, and it says which.
+- **A service restarts for what it reads, not only its program.** A service
+  entry names the base paths it reads (privd: its policy and the pairing;
+  remoted: the pairing), compared by manifest line.
+- **privd drains, never drops a request.** On `SIGTERM` it stops listening,
+  lets go of the consent pair, refuses what it reads after as restarting, and
+  exits once every request it took is answered. Init starts its successor
+  then, or beside it after five seconds: a mechanism waiting on its
+  terminal, the installer's, would otherwise hold every privileged request
+  for as long. A
+  connection to the old privd is useless after; a tool spanning a switch
+  opens a fresh one and waits a minute for it (`selfhost_install`, remoted).
+- **remoted names the running base in each hello,** not once at start: a
+  switch that does not change remoted leaves its process running. It drains
+  as privd does, and a switch that changes the pairing ends what the old
+  broker ran, so no work begun for one broker runs on another's authority.
+- **A remote kernel is installed only when it changed.** `remote-install`
+  builds it untagged and compares that digest with the one recorded for the
+  running tag, so a base-only change needs no reboot.
 
 ## Constraints
 
