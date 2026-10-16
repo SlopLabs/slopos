@@ -6,7 +6,7 @@ use slopos_abi::syscall::{
 use slopos_fs::fileio::OpenMode;
 use slopos_fs::filemap;
 use slopos_fs::vfs::FileType;
-use slopos_ostd::process::{ProcessId, Program};
+use slopos_ostd::process::ProcessId;
 
 use crate::syscall::args::{Fd, RawFd, UserCStr};
 use crate::syscall::result::SyscallResult;
@@ -18,11 +18,11 @@ const PAGE_SIZE: u64 = 4096;
 /// fills the buffer is one that never terminated inside the bound.
 const MEMFD_NAME_MAX: usize = 250;
 
-/// Called before code from outside the base is mapped executable, so no
-/// thread runs it as the base program.
+/// Called before code the program may not run is mapped executable, so no
+/// thread runs it as that program.
 fn forfeit_program(process: ProcessId) {
     if let Some(process) = process.get() {
-        process.set_program(Program::Other);
+        process.forfeit_program();
     }
 }
 
@@ -62,7 +62,11 @@ fn mmap_regular_file(
     }
 
     let (fs, inode) = slopos_fs::vfs_file_ops::vfs_file_inode(handle).ok_or(Errno::EBADF)?;
-    if prot & PROT_EXEC != 0 && !slopos_fs::basefs::is_base(fs) {
+    if prot & PROT_EXEC != 0
+        && !process
+            .get()
+            .is_some_and(|p| p.program().admits(slopos_fs::basefs::program_of(fs, inode)))
+    {
         forfeit_program(process);
     }
     let stat = fs.stat(inode).map_err(|e| e.to_errno())?;

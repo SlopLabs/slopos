@@ -848,6 +848,16 @@ pub fn process_vm_end_prepay(process: ProcessId) {
 /// recoverable — the caller has not yet destroyed anything the old program
 /// needs. Once the old image goes, so does the program it attested.
 pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
+    reset_for_exec(process, true)
+}
+
+/// [`process_vm_reset_for_exec`] for init re-executing itself, whose program
+/// instance stands until the new image is attested in its place.
+pub fn process_vm_reset_for_reexec(process: ProcessId) -> c_int {
+    reset_for_exec(process, false)
+}
+
+fn reset_for_exec(process: ProcessId, forfeit: bool) -> c_int {
     let slot = match find_slot_for_pid(process) {
         Some(s) => s,
         None => return -1,
@@ -882,8 +892,15 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
             return -1;
         }
     };
-    if let Some(owner) = inner.process.as_deref() {
-        owner.set_program(Program::Other);
+    // A re-executing init keeps its program only past a reset that
+    // completes: one that fails leaves no image to keep it for.
+    let lapse = |inner: &ProcessVm| {
+        if let Some(owner) = inner.process.as_deref() {
+            owner.forfeit_program();
+        }
+    };
+    if forfeit {
+        lapse(inner);
     }
 
     // Each backing releases what it owns: anonymous frames go back to the
@@ -893,6 +910,7 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
         if let Err(err) = unmap_region_range_dir(&mut vm_space_taken, key, *start, *end, region) {
             klog_info!("process_vm_reset_for_exec: unmap failed: {:?}", err.err);
             inner.vm_space = Some(vm_space_taken);
+            lapse(inner);
             abort_guard.disarm();
             return -1;
         }
@@ -918,6 +936,9 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     // `process_vm_reset_stack` straight after loading the image, which maps
     // the whole extent against a settled address space.
     let rc = seed_fresh_layout(inner);
+    if rc != 0 {
+        lapse(inner);
+    }
     abort_guard.disarm();
     drop(proc);
     // The per-process lock is gone, so the writeback the releases queued can
@@ -2978,7 +2999,7 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
         cursor = vma_end;
     }
     if makes_code && let Some(owner) = proc.process.as_deref() {
-        owner.set_program(Program::Other);
+        owner.forfeit_program();
     }
 
     // Splits at both ends, so a sub-range no longer rewrites the protection of

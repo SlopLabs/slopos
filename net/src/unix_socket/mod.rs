@@ -17,13 +17,13 @@ use slopos_abi::Errno;
 use slopos_abi::event::{KernelEvent, UnixSocketSlot};
 use slopos_abi::quota::CustodyAxis;
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
-use slopos_ostd::handle::HandleTable;
+use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KVec, KVecDeque};
 
-use pair::{PairSide, PairTable};
-use slopos_fs::vfs::{Subject, VfsError, vfs_make_socket_at, vfs_socket_at};
+use pair::{PairHandle, PairSide, PairTable};
+use slopos_fs::vfs::{SocketName, Subject, VfsError, vfs_make_socket_at, vfs_socket_at};
 use slopos_fs::{FileRef, LeafFileRef};
 use slopos_ostd::process::quota::Reservation;
 use slopos_ostd::process::{AccountId, Identity};
@@ -220,7 +220,6 @@ pub fn unix_connect(
         Err(e) => return e.to_errno().raw(),
     };
     let node = named.node();
-    let mut given_up = None;
     let mut state = UNIX_STATE.lock();
     let h_a = handle.handle();
 
@@ -269,39 +268,13 @@ pub fn unix_connect(
         state.pairs.discard(pair_handle);
         return Errno::ENFILE.raw();
     };
-    let a_handle = SocketHandle::from_handle(h_a);
-    let b_handle = SocketHandle::from_handle(h_b);
-
-    if let Ok(slot) = state.slots.get_mut(h_a) {
-        let connected = SlotState::Connected {
-            pair: pair_handle,
-            side: PairSide::A,
-            peer: b_handle,
-            peer_closed: false,
-            peer_identity: listener_owner,
-        };
-        if let SlotState::Bound { name, .. } = core::mem::replace(&mut slot.state, connected) {
-            given_up = Some(name);
-        }
-    }
-
-    if let Ok(slot) = state.slots.get_mut(h_b) {
-        slot.state = SlotState::Connected {
-            pair: pair_handle,
-            side: PairSide::B,
-            peer: a_handle,
-            peer_closed: false,
-            peer_identity: identity,
-        };
-    }
-
-    if let Ok(slot) = state.slots.get_mut(h_listener) {
-        if let SlotState::Listening { backlog, .. } = &mut slot.state {
-            backlog
-                .push_back(b_handle)
-                .expect("backlog pre-reserved at listen");
-        }
-    }
+    let given_up = join(
+        &mut state.slots,
+        pair_handle,
+        (h_a, &listener_owner),
+        (h_b, &identity),
+        h_listener,
+    );
 
     let listener_idx = h_listener.slot() as usize;
     drop(state);
@@ -309,6 +282,51 @@ pub fn unix_connect(
     BUS.publish(unix_ev(listener_idx));
 
     0
+}
+
+/// Pair slots A and B, each told the other's identity, and queue B on the
+/// listener; answers the name A held. Out of line to keep the slot states off
+/// `unix_connect`'s frame.
+#[inline(never)]
+fn join(
+    slots: &mut HandleTable<UnixSlot>,
+    pair: PairHandle,
+    (h_a, a_peer): (Handle<UnixSlot>, &Identity),
+    (h_b, b_peer): (Handle<UnixSlot>, &Identity),
+    h_listener: Handle<UnixSlot>,
+) -> Option<SocketName> {
+    let a_handle = SocketHandle::from_handle(h_a);
+    let b_handle = SocketHandle::from_handle(h_b);
+    let mut given_up = None;
+    if let Ok(slot) = slots.get_mut(h_a) {
+        let connected = SlotState::Connected {
+            pair,
+            side: PairSide::A,
+            peer: b_handle,
+            peer_closed: false,
+            peer_identity: *a_peer,
+        };
+        if let SlotState::Bound { name, .. } = core::mem::replace(&mut slot.state, connected) {
+            given_up = Some(name);
+        }
+    }
+    if let Ok(slot) = slots.get_mut(h_b) {
+        slot.state = SlotState::Connected {
+            pair,
+            side: PairSide::B,
+            peer: a_handle,
+            peer_closed: false,
+            peer_identity: *b_peer,
+        };
+    }
+    if let Ok(slot) = slots.get_mut(h_listener)
+        && let SlotState::Listening { backlog, .. } = &mut slot.state
+    {
+        backlog
+            .push_back(b_handle)
+            .expect("backlog pre-reserved at listen");
+    }
+    given_up
 }
 
 /// Two sockets connected to each other, each telling the other it reached

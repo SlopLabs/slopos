@@ -3,6 +3,7 @@ pub mod dcache;
 pub mod dirchurn;
 pub mod dquota;
 pub mod ext4;
+pub mod extensions;
 pub mod filemap;
 pub mod fsperf;
 pub mod generations;

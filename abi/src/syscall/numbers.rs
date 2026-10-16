@@ -880,6 +880,29 @@ pub const SYSCALL_BASE_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 44;
 /// never blocks. Unprivileged.
 pub const SYSCALL_BASE_MONITOR: u64 = SYSCALL_PRIVATE_BASE + 45;
 
+/// `ext_activate(name: *const u8, archive: *const u8, len, digest: *const
+/// [u8; 32]) -> activation`: index the archive the caller's `len` bytes at
+/// `archive` hold and show it, read-only and pinned, at `/opt/<name>`,
+/// replacing the activation shown there in one step; descriptors, mappings
+/// and programs of the one replaced keep it. `name` is NUL-terminated and
+/// [`crate::extension::valid_name`]; the activation is labelled with it and
+/// the `digest` the caller vouches for, which `SO_PEEREXTENSION` answers.
+/// `EINVAL` for a name the grammar refuses or an archive the kernel cannot
+/// index, `EFBIG` past the extensions' budget, `EBUSY` while
+/// [`crate::extension::MAX_ACTIVATIONS`] are resident, while those resident
+/// would take more than the budget with this one, or while `/opt/<name>` holds
+/// a mount that is no activation, `EPERM` on a boot with
+/// [`crate::syscall::BOOT_FLAG_EXTENSIONS_OFF`], what making `/opt` answers
+/// (`ENOTDIR` for one that is no directory, `EROFS`), `EFAULT`, `ENOMEM` and
+/// `EINTR`. Gated on `Capability::ExtensionUpdate`.
+pub const SYSCALL_EXT_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 46;
+
+/// `ext_deactivate(name: *const u8)`: take the activation at `/opt/<name>`
+/// away; what holds it keeps it. `ENOENT` when none is shown there, `EINVAL`
+/// for a name the grammar refuses, `EFAULT` and `EINTR`. Gated on
+/// `Capability::ExtensionUpdate`.
+pub const SYSCALL_EXT_DEACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 47;
+
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
 /// call.
 pub const EFIVAR_DATA_MAX: usize = 4096;

@@ -99,7 +99,7 @@ pub struct Allow {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Principal {
-    /// Any uid-0 requester.
+    /// A uid-0 requester running a base program: uid 0 alone is no authority.
     Root,
     /// The person's uid, from any program but `remoted` on a paired base.
     Session,
@@ -121,7 +121,8 @@ impl fmt::Display for PolicyError {
     }
 }
 
-/// Who asks, as the kernel attested it when the connection was made.
+/// Who asks, as the kernel attests it: the ids as of the connection, the
+/// program as of the request.
 #[derive(Clone, Copy, Debug)]
 pub struct Requester<'a> {
     uid: u32,
@@ -130,9 +131,9 @@ pub struct Requester<'a> {
 }
 
 impl<'a> Requester<'a> {
-    /// `program` is the base path `SO_PEERPROGRAM` answered, `None` for code
-    /// from outside the base; `base_paired` whether the booted base
-    /// carries a remote pairing.
+    /// `program` is the path of the base program the requester runs, `None`
+    /// for any other program, an extension's included; `base_paired` whether
+    /// the booted base carries a remote pairing.
     pub fn new(uid: u32, program: Option<&'a str>, base_paired: bool) -> Self {
         Self {
             uid,
@@ -147,7 +148,7 @@ impl<'a> Requester<'a> {
 
     fn is(&self, principal: &Principal) -> bool {
         match principal {
-            Principal::Root => self.uid == 0,
+            Principal::Root => self.uid == 0 && self.program.is_some(),
             Principal::Paired => self.paired,
             Principal::Session => !self.paired && self.uid == SESSION_UID,
             Principal::Program(path) => !self.paired && self.program == Some(path.as_str()),

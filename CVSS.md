@@ -2,6 +2,41 @@
 
 **No finding is open.**
 
+Swept 2026-10-16: extension activation and identity — `ext_activate` and
+`ext_deactivate` (`ExtensionUpdate`) staging an archive into an instance of a
+pool of 32 and showing it read-only and pinned at `/opt/<name>`, replaced or
+taken away under the mount table's lock; activation numbers and labels;
+`Program::Extension` and `Program::admits` at exec, `mmap` and `mprotect`; the
+64-bit program instance and `Identity::now` behind `SO_PEERPROGRAM` and the
+new `SO_PEEREXTENSION`; init's re-execution keeping its instance;
+`extensions=off` and `ext.memory=`; privd's `root` and `/run/init`'s uid-0
+commands requiring a base program, read again per request; and `/opt` in the
+ownership map. Reviews found, before it landed, that privd refused a
+requester whose identity had lapsed only after judging it, by the wrong rule;
+that a test's reap pass and the reaper thread could interleave, one undoing
+the other's mark; that the new mount helpers canonicalised a path, an
+allocation, under the mount table's write lock; that an init re-execution
+failing once its old image was gone, or whose reset failed partway, left its
+program and instance standing; that an activation staged a whole archive
+before finding the pool full; and that three kernel frames passed the 2 KiB
+gate once the identity grew. Now privd refuses a lapsed requester before its
+verdict; one reap pass runs at a time; paths are canonical before the lock;
+a failed re-execution forfeits; the pool is checked first; and the frames
+are split. Below the bar: uid-0 code outside the base can start a base
+program as uid 0 and ask as root through it, which only no extension running
+as uid 0 (Phase 3) closes; a process holding a file of a replaced activation
+keeps that copy against the shared pool and budget, so it can hold off that
+extension's updates; a script is reopened by path, so across a replacement
+it reads the next activation's bytes, and after a deactivation whatever an
+`ExtensionUpdate` or `DacOverride` holder left on the root there, under the
+first's identity; a `Mount` holder can still mount over `/opt` itself,
+covering `/opt/bin` though not an activation; an activation's index is
+outside `ext.memory`, and a staged archive may briefly take up to the budget
+beside the resident copies; a private mapping of an admitted file made
+writable once executable keeps the identity, which takes the program's own
+cooperation; and a descriptor a uid-0 base connector hands on speaks as root
+while the connector runs.
+
 Swept 2026-10-16: rescue — `BOOT_FLAG_MEDIUM`, set only once the `install
 medium` boot step serves the medium Limine loaded; the policy's `medium` line
 and `org.slopos.rescue`, which privd and every other reader drop off the

@@ -14,7 +14,9 @@ pub use at_handlers::{
     syscall_newfstatat, syscall_openat, syscall_readlinkat, syscall_renameat, syscall_symlinkat,
     syscall_unlinkat, syscall_utimensat,
 };
-pub use base_handlers::{syscall_base_activate, syscall_base_monitor};
+pub use base_handlers::{
+    syscall_base_activate, syscall_base_monitor, syscall_ext_activate, syscall_ext_deactivate,
+};
 pub use fd_handlers::{
     syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fstat, syscall_lseek,
     syscall_pipe, syscall_pipe2,

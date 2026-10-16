@@ -1,8 +1,9 @@
 //! The base: replacing it while the system runs, and hearing that it was.
+//! Extensions: showing one beside it, and taking one away.
 
 use super::error::{SyscallError, SyscallResult};
 use super::numbers::*;
-use super::raw::{syscall0, syscall2};
+use super::raw::{syscall0, syscall1, syscall2, syscall4};
 use super::{OwnedFd, RawFd};
 
 fn checked(raw: i64) -> SyscallResult<u64> {
@@ -39,4 +40,36 @@ pub fn base_generation(monitor: RawFd) -> SyscallResult<u32> {
         8 => Ok(u64::from_le_bytes(bytes) as u32),
         _ => Err(SyscallError::EIO),
     }
+}
+
+fn nul_terminated(name: &[u8]) -> SyscallResult<Vec<u8>> {
+    if name.contains(&0) {
+        return Err(SyscallError::EINVAL);
+    }
+    let mut owned = name.to_vec();
+    owned.push(0);
+    Ok(owned)
+}
+
+/// Show the extension archive `archive`, whose SHA-256 the caller vouches is
+/// `digest`, at `/opt/<name>`; answers its activation.
+pub fn ext_activate(name: &[u8], archive: &[u8], digest: &[u8; 32]) -> SyscallResult<u32> {
+    let name = nul_terminated(name)?;
+    let raw = unsafe {
+        syscall4(
+            SYSCALL_EXT_ACTIVATE,
+            name.as_ptr() as u64,
+            archive.as_ptr() as u64,
+            archive.len() as u64,
+            digest.as_ptr() as u64,
+        ) as i64
+    };
+    checked(raw).map(|activation| activation as u32)
+}
+
+/// Take away the extension shown at `/opt/<name>`.
+pub fn ext_deactivate(name: &[u8]) -> SyscallResult<()> {
+    let name = nul_terminated(name)?;
+    let raw = unsafe { syscall1(SYSCALL_EXT_DEACTIVATE, name.as_ptr() as u64) as i64 };
+    checked(raw).map(drop)
 }

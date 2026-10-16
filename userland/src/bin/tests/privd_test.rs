@@ -40,6 +40,9 @@ const CONNECT: &str = "--connect";
 const ASK: &str = "--ask";
 /// `argv[1]` of the [`STRANGER`] child.
 const STRANGER_ARG: &str = "--stranger";
+/// `argv[1]` of a uid-0 child that asks as this base program, then runs
+/// code from outside the base and asks again.
+const OUTSIDE: &str = "--outside";
 /// `argv[1]` of a child that holds as many connections as privd lets one
 /// requester, at [`CROWD_UID`].
 const CROWD: &str = "--crowd";
@@ -567,6 +570,76 @@ fn stranger() -> i32 {
     }
 }
 
+/// uid 0 is root only running a base program: the same process is run as
+/// root, then, once it maps code from outside the base, refused by privd on
+/// the connection it made before and on a new one, and by init.
+fn uid_0_outside_the_base_is_no_root() -> bool {
+    match Command::new(SELF)
+        .arg(OUTSIDE)
+        .env_remove(ENV_FD)
+        .stderr(Stdio::inherit())
+        .status()
+    {
+        Ok(status) if status.success() => true,
+        other => {
+            note(&format!("the uid-0 child outside the base: {other:?}"));
+            false
+        }
+    }
+}
+
+fn outside() -> i32 {
+    use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ};
+    use slopos_slibc::pal::{Pal, Sys};
+    let Some(mut privd) = connect() else {
+        return 1;
+    };
+    let devnull = null();
+    let as_base = ask(&mut privd, "org.slopos.prof", &["status"], devnull.raw());
+    if exited(&as_base) != Some(Exit::Code(0)) {
+        note(&format!("prof status as root: {as_base:?}"));
+        return 2;
+    }
+    let mapped = Sys::mmap(
+        core::ptr::null_mut(),
+        4096,
+        PROT_READ | PROT_EXEC,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if mapped.is_err() {
+        note("could not map code from outside the base");
+        return 3;
+    }
+    let lapsed = ask(&mut privd, "org.slopos.prof", &["status"], devnull.raw());
+    if !denied(&lapsed).is_some_and(|why| why.contains("no longer runs")) {
+        note(&format!(
+            "prof status on the connection made as root: {lapsed:?}"
+        ));
+        return 4;
+    }
+    let Some(mut fresh) = connect() else {
+        return 5;
+    };
+    let refused = ask(&mut fresh, "org.slopos.prof", &["status"], devnull.raw());
+    if !denied(&refused).is_some_and(|why| why.contains("may not ask")) {
+        note(&format!(
+            "prof status from outside the base as uid 0: {refused:?}"
+        ));
+        return 6;
+    }
+    match init_control::ask(InitCommand::EndSession) {
+        Err(why) if why.contains("outside the base") => 0,
+        other => {
+            note(&format!(
+                "end-session from outside the base as uid 0: {other:?}"
+            ));
+            7
+        }
+    }
+}
+
 /// A connection outlives its maker only as a refusal: once the process that
 /// connected has exited, nothing is run for whoever holds the connection. Its
 /// control is the same hand-off with the maker still there.
@@ -808,6 +881,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
         a_uid_the_policy_names_nowhere_is_refused,
     ),
     (
+        "uid_0_outside_the_base_is_no_root",
+        uid_0_outside_the_base_is_no_root,
+    ),
+    (
         "a_requester_that_has_exited_is_refused",
         a_requester_that_has_exited_is_refused,
     ),
@@ -1010,6 +1087,7 @@ fn main() {
     match arg(1) {
         SESSION => std::process::exit(session()),
         STRANGER_ARG => std::process::exit(stranger()),
+        OUTSIDE => std::process::exit(outside()),
         CROWD => std::process::exit(crowd()),
         HOLDS_PRIVD => std::process::exit(holds_privd()),
         CONSENT => std::process::exit(consent(false)),

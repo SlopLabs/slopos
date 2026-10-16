@@ -270,7 +270,7 @@ const fn session(path: &'static str) -> RootDir {
 /// Every root's directories, parents first: the system's state is uid 0's
 /// and what the session writes is its own. `/tmp` and `/run` are memory the
 /// kernel mounts, and the base directories its seal.
-pub const ROOT_LAYOUT: [RootDir; 13] = [
+pub const ROOT_LAYOUT: [RootDir; 15] = [
     system("/", 0o755),
     system("/etc", 0o755),
     system("/var", 0o755),
@@ -284,6 +284,8 @@ pub const ROOT_LAYOUT: [RootDir; 13] = [
     system("/media", 0o755),
     system("/usr", 0o755),
     session("/usr/local"),
+    system("/opt", 0o755),
+    system("/opt/bin", 0o755),
 ];
 
 /// The directories whose contents are the session's, whatever lies below

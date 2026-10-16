@@ -608,6 +608,26 @@ fn apply_mem_commit_option(cmdline: &str) {
     }
 }
 
+/// `extensions=off` and `ext.memory=<percent>`. Out of line so the
+/// boot-config step's frame stays under the 2 KiB gate.
+#[inline(never)]
+fn apply_extension_options(cmdline: &str) {
+    for token in cmdline.split_whitespace() {
+        if token == "extensions=off" {
+            slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_EXTENSIONS_OFF);
+            boot_info(b"Boot option: extensions=off (none is activated)\0");
+        } else if let Some(value) = token.strip_prefix("ext.memory=") {
+            match value.parse::<u32>() {
+                Ok(percent) if (1..=50).contains(&percent) => {
+                    slopos_fs::basefs::extension::set_memory_percent(percent);
+                    boot_info(b"Boot option: ext.memory set\0");
+                }
+                _ => boot_info(b"Boot option: ext.memory ignored (want a percentage, 1-50)\0"),
+            }
+        }
+    }
+}
+
 fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let cmdline = BOOT_RUNTIME.lock().cmdline.unwrap_or_default();
     let enable_debug = cmdline.contains("boot.debug=on")
@@ -812,6 +832,7 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
 
     apply_mem_commit_option(cmdline);
     apply_cpufreq_option(cmdline);
+    apply_extension_options(cmdline);
 
     // A typed parser rather than more `contains` arms, so a malformed value
     // degrades to the shipped policy instead of to a disabled console.

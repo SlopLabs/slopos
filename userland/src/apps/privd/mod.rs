@@ -208,7 +208,8 @@ pub fn privd_main() -> ! {
 
 impl Admitted {
     fn take(daemon: &'static Daemon, peer: &Peer, paired: bool) -> Option<Admitted> {
-        let pooled = peer.uid != 0 && !peer.requester(paired).is_paired();
+        let root = peer.uid == 0 && peer.program.is_some();
+        let pooled = !root && !peer.requester(paired).is_paired();
         let key = (peer.uid, peer.program.clone());
         let mut connections = daemon.connections.lock().ok()?;
         let in_pool = connections.iter().filter(|(_, pooled)| *pooled).count();
@@ -291,7 +292,8 @@ fn listen() -> Result<OwnedFd, String> {
     Ok(fd)
 }
 
-/// Who made a connection, as the kernel recorded it at `connect`.
+/// Who made a connection, as the kernel recorded it at `connect`: the base
+/// program it ran then, which stands only while it still runs it.
 struct Peer {
     pid: u32,
     uid: u32,
@@ -299,22 +301,34 @@ struct Peer {
     pidfd: OwnedFd,
 }
 
+const LAPSED: &str = "the requester no longer runs the program it connected as";
+
+/// The base program the peer at `fd` runs now, `None` for any other.
+fn base_program(fd: &OwnedFd) -> Result<Option<String>, String> {
+    match net::peer_base_program(fd.raw()).map_err(|e| format!("SO_PEERPROGRAM: {e}"))? {
+        None => Ok(None),
+        Some(path) => String::from_utf8(path)
+            .map(Some)
+            .map_err(|_| "SO_PEERPROGRAM: not UTF-8".to_owned()),
+    }
+}
+
 impl Peer {
     fn of(fd: &OwnedFd) -> Result<Peer, String> {
         let cred = net::peer_cred(fd.raw()).map_err(|e| format!("SO_PEERCRED: {e}"))?;
         let pidfd = net::peer_pidfd(fd.raw()).map_err(|e| format!("SO_PEERPIDFD: {e}"))?;
-        let program = match net::peer_program(fd.raw())
-            .map_err(|e| format!("SO_PEERPROGRAM: {e}"))?
-        {
-            None => None,
-            Some(path) => Some(String::from_utf8(path).map_err(|_| "SO_PEERPROGRAM: not UTF-8")?),
-        };
         Ok(Peer {
             pid: cred.pid as u32,
             uid: cred.uid,
-            program,
+            program: base_program(fd)?,
             pidfd,
         })
+    }
+
+    /// Whether the program read at `accept` still stands: the peer has not
+    /// exec'd, mapped code from elsewhere or exited since.
+    fn still_runs(&self, fd: &OwnedFd) -> bool {
+        base_program(fd).is_ok_and(|now| now == self.program)
     }
 
     fn requester(&self, paired: bool) -> Requester<'_> {
@@ -598,10 +612,14 @@ impl Waiting for Pending<'_> {
     }
 }
 
-/// Refused once the requester has exited or withdrawn request `id`.
+/// Refused once the requester has exited, runs another program than it
+/// connected as, or has withdrawn request `id`.
 fn still_wanted(peer: &Peer, conn: &mut Conn, id: u64) -> Result<(), Reply> {
     if !peer.alive() {
         return Err(Reply::denied("the requester has exited"));
+    }
+    if !peer.still_runs(&conn.fd) {
+        return Err(Reply::denied(LAPSED));
     }
     if conn.signals(id).is_none_or(|s| !s.is_empty()) {
         return Err(Reply::denied(Refusal::Withdrawn.to_string()));
@@ -636,6 +654,9 @@ fn run(
         } else {
             "the action takes no working directory"
         }));
+    }
+    if !peer.still_runs(&conn.fd) {
+        return Err(Reply::denied(LAPSED));
     }
     let verdict = action.admits(&peer.requester(daemon.paired));
     if verdict == Verdict::Refuse {

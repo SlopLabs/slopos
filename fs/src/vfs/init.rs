@@ -568,6 +568,13 @@ pub fn vfs_mount_readonly(path: &[u8], fs: &'static dyn FileSystem) -> VfsResult
     crate::vfs::mount::mount(path, fs, MOUNT_RDONLY | crate::vfs::mount::MOUNT_PINNED)
 }
 
+/// Make `path` a directory if the root lacks one there, and hold it where it
+/// is, as a pinned mount point's parent.
+pub(crate) fn hold_dir(path: &[u8]) -> VfsResult<()> {
+    make_dir(path)?;
+    pin_dir(path)
+}
+
 /// A symlink on the way would take the walk past the mount point, so the base
 /// refuses a root that has one where it goes.
 fn pin_dir(path: &[u8]) -> VfsResult<()> {

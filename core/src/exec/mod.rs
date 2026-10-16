@@ -41,8 +41,8 @@ use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm::{
     InterpreterImage, exec_commit_pages, process_vm_end_prepay, process_vm_get_stack_top,
     process_vm_get_vm_space, process_vm_map_elf_image, process_vm_map_interpreter,
-    process_vm_prepay_commit, process_vm_reset_for_exec, process_vm_reset_stack,
-    process_vm_write_user_bytes,
+    process_vm_prepay_commit, process_vm_reset_for_exec, process_vm_reset_for_reexec,
+    process_vm_reset_stack, process_vm_write_user_bytes,
 };
 use slopos_ostd::authority::{CAP_MASK_ALL, CAP_NONE, CAP_UNIVERSAL, Capability, mask_permits};
 
@@ -499,17 +499,19 @@ pub fn spawn_program_with_cwd(
             return Err(Errno::ENOMEM);
         }
 
-        let loaded = exec_image(
+        let (loaded, standing) = exec_image(
             child_table,
             &program,
             argv.as_deref(),
             envp,
             endowed.secure,
+            false,
             spawner,
             &mut entry,
             &mut stack_ptr,
             &mut tls_tp,
         )?;
+        standing.keep();
         if spawn.with_child(|child| child.process().map(|process| process.set_program(loaded)))
             != Some(Some(()))
         {
@@ -652,24 +654,27 @@ pub fn resolve_program(path: &[u8], cwd: &[u8], who: &Subject) -> Result<CanonPa
 /// against `/`. Answers the identity of what it loaded.
 ///
 /// `execve`'s road: it confers nothing, so the image runs `AT_SECURE` only
-/// when the caller's effective ids are not its real ones.
+/// when the caller's effective ids are not its real ones. `reexec` is
+/// [`may_keep_authority`]'s answer for it.
 #[allow(clippy::too_many_arguments)]
 pub fn do_exec(
     table: FdTable,
     program: &ExecProgram,
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
+    reexec: bool,
     who: &Subject,
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
-) -> Result<Program, Errno> {
+) -> Result<(Program, Standing), Errno> {
     exec_image(
         table,
         program,
         argv,
         envp,
         mixed_ids(&who.cred),
+        reexec,
         who,
         entry_out,
         stack_ptr_out,
@@ -686,12 +691,53 @@ pub fn exec_attests(task: &slopos_sched::task_struct::Task) -> bool {
 }
 
 /// Record `loaded` as `task`'s process's program once its exec is past the
-/// point of no return, if [`exec_attests`] allowed it.
+/// point of no return, if [`exec_attests`] allowed it: as the instance that
+/// ran before when the exec keeps its authority, else as a new one.
 #[inline(never)]
-pub fn attest_exec(task: &slopos_sched::task_struct::Task, loaded: Program, attests: bool) {
+pub fn attest_exec(
+    task: &slopos_sched::task_struct::Task,
+    loaded: Program,
+    attests: bool,
+    keeps: bool,
+) {
     if let Some(process) = task.process() {
-        process.set_program(if attests { loaded } else { Program::Other });
+        match (attests, keeps) {
+            (true, true) => process.keep_program(loaded),
+            (true, false) => process.set_program(loaded),
+            (false, _) => process.forfeit_program(),
+        }
     }
+}
+
+/// Make `task`'s authority and program what its completed `execve` of
+/// `program` loaded, `attests` being [`exec_attests`]'s answer for it.
+#[inline(never)]
+pub fn commit_exec(
+    task: &slopos_sched::task_struct::Task,
+    task_id: u32,
+    program: &ExecProgram,
+    (loaded, standing): (Program, Standing),
+    attests: bool,
+) {
+    standing.keep();
+    let keeps = exec_keeps_authority(task, program.image.as_bytes(), loaded, attests);
+    if !keeps {
+        drop_authority_for_exec(task, task_id);
+    }
+    save_ids_for_exec(task);
+    attest_exec(task, loaded, attests, keeps);
+}
+
+/// Whether an `execve` by `task` of `program` would keep its capabilities
+/// when what it loads is the program it names: [`exec_keeps_authority`]
+/// asked before the old image goes.
+#[inline(never)]
+pub fn may_keep_authority(
+    task: &slopos_sched::task_struct::Task,
+    program: &ExecProgram,
+    attests: bool,
+) -> bool {
+    exec_keeps_authority(task, program.image.as_bytes(), program.program, attests)
 }
 
 /// Whether an `execve` by `task` keeps its capabilities: init re-executing
@@ -744,7 +790,8 @@ pub fn drop_authority_for_exec(task: &slopos_sched::task_struct::Task, task_id: 
 
 /// `secure` is what the image finds as `AT_SECURE`. `who` must be able to
 /// execute the image and its interpreter. Answers the identity of what it
-/// loaded: `program`'s, unless the files it mapped were not all the base's.
+/// loaded: `program`'s, unless a file it mapped was one that program may not
+/// run. `reexec` is init re-executing itself, whose program stands meanwhile.
 #[allow(clippy::too_many_arguments)]
 fn exec_image(
     table: FdTable,
@@ -752,14 +799,15 @@ fn exec_image(
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
     secure: bool,
+    reexec: bool,
     who: &Subject,
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
-) -> Result<Program, Errno> {
+) -> Result<(Program, Standing), Errno> {
     let image = program.image.as_bytes();
     let vm_process = table.process().ok_or(Errno::ENOMEM)?;
-    let (exec_info, all_base) = load_image(image, vm_process, entry_out, who)?;
+    let (exec_info, admitted, standing) = load_image(program, vm_process, entry_out, who, reexec)?;
 
     if process_vm_reset_stack(vm_process) != 0 {
         return Err(Errno::ENOMEM);
@@ -781,19 +829,38 @@ fn exec_image(
         *tls_tp_out,
     );
 
-    Ok(if all_base {
+    let loaded = if admitted {
         program.program
     } else {
         Program::Other
-    })
+    };
+    Ok((loaded, standing))
 }
 
-/// What a file opened for exec attests: the base's own, or not.
-pub(crate) fn program_of(handle: &VfsHandle) -> Program {
-    match core::num::NonZeroU64::new(handle.inode) {
-        Some(inode) if slopos_fs::basefs::is_base(handle.fs) => Program::Base(inode),
-        _ => Program::Other,
+/// A re-executing init's program across the exec that replaces its image: it
+/// stands if the exec completes and is forfeited, as any exec's is at its
+/// reset, if the exec fails once the old image is gone.
+#[must_use]
+pub struct Standing(Option<slopos_ostd::process::ProcessId>);
+
+impl Standing {
+    pub fn keep(mut self) {
+        self.0 = None;
     }
+}
+
+impl Drop for Standing {
+    fn drop(&mut self) {
+        if let Some(process) = self.0.and_then(|process| process.get()) {
+            process.forfeit_program();
+        }
+    }
+}
+
+/// What a file opened for exec attests: the base's own, an activation's, or
+/// neither.
+pub(crate) fn program_of(handle: &VfsHandle) -> Program {
+    slopos_fs::basefs::program_of(handle.fs, handle.inode)
 }
 
 /// Open `path` as an executable and answer its size.
@@ -853,12 +920,13 @@ struct StagedInterpreter {
 /// costs the caller its address space.
 #[inline(never)]
 fn load_image(
-    path: &[u8],
+    program: &ExecProgram,
     process: slopos_ostd::process::ProcessId,
     entry_out: &mut u64,
     who: &Subject,
-) -> Result<(ElfExecInfo, bool), Errno> {
-    let (handle, file_size) = open_executable(path, who)?;
+    reexec: bool,
+) -> Result<(ElfExecInfo, bool, Standing), Errno> {
+    let (handle, file_size) = open_executable(program.image.as_bytes(), who)?;
     let _image_held = slopos_fs::basefs::Hold::of(handle.fs, handle.inode);
 
     // Only the header window is staged; the rest goes from the file straight
@@ -891,15 +959,21 @@ fn load_image(
     // The address-space boundary. Everything the old image mapped — heap,
     // mmap arena, shared memfds, rings — is severed here, before the new
     // image exists, so no mapping outlives the program that made it.
-    if process_vm_reset_for_exec(process) != 0 {
+    let reset = if reexec {
+        process_vm_reset_for_reexec(process)
+    } else {
+        process_vm_reset_for_exec(process)
+    };
+    if reset != 0 {
         return Err(Errno::ENOMEM);
     }
+    let standing = Standing(reexec.then_some(process));
     process_vm_prepay_commit(process, funds);
 
-    let all_base = program_of(&handle) != Program::Other
+    let admitted = program.program.admits(program_of(&handle))
         && interp
             .as_deref()
-            .is_none_or(|staged| program_of(&staged.handle) != Program::Other);
+            .is_none_or(|staged| program.program.admits(program_of(&staged.handle)));
     let exec_info = install_images(
         &handle,
         header.as_slice(),
@@ -908,7 +982,7 @@ fn load_image(
         process,
         entry_out,
     )?;
-    Ok((exec_info, all_base))
+    Ok((exec_info, admitted, standing))
 }
 
 /// Map the executable, then the interpreter, then stream the executable's

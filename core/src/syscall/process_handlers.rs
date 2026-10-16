@@ -757,6 +757,7 @@ define_syscall!(syscall_execve
     let mut tls_tp = 0u64;
 
     let attests = exec::exec_attests(ctx.task());
+    let reexec = exec::may_keep_authority(ctx.task(), &program, attests);
 
     let irq_was_enabled = cpu::are_interrupts_enabled();
     if !irq_was_enabled {
@@ -768,6 +769,7 @@ define_syscall!(syscall_execve
         &program,
         argv_refs.as_deref(),
         envp_refs.as_deref(),
+        reexec,
         &who,
         &mut entry_point,
         &mut stack_ptr,
@@ -779,7 +781,7 @@ define_syscall!(syscall_execve
     }
 
     match exec_result {
-        Ok(loaded) => {
+        Ok(exec) => {
             if tls_tp != 0 {
                 let user_tp = match MmUserPtr::<u64>::try_new(tls_tp) {
                     Ok(ptr) => ptr,
@@ -795,12 +797,7 @@ define_syscall!(syscall_execve
 
             // Here rather than in `do_exec`: past every fallible step, before
             // the new image's first instruction.
-            if !exec::exec_keeps_authority(ctx.task(), program.image.as_bytes(), loaded, attests)
-            {
-                exec::drop_authority_for_exec(ctx.task(), task_id);
-            }
-            exec::save_ids_for_exec(ctx.task());
-            exec::attest_exec(ctx.task(), loaded, attests);
+            exec::commit_exec(ctx.task(), task_id, &program, exec, attests);
 
             exec::name_task_after(ctx.task(), path.as_bytes());
             slopos_sched::task::task_cleanup_for_exec(task_id);
@@ -819,20 +816,7 @@ define_syscall!(syscall_execve
                 t.set_fs_base(tls_tp);
             }
             slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
-            let uc = ctx.user_ctx();
-            let mut regs = uc.regs();
-            regs.rip = entry_point;
-            regs.rsp = stack_ptr;
-            regs.rax = 0;
-            regs.rdi = 0;
-            regs.rsi = 0;
-            regs.rdx = 0;
-            regs.rcx = 0;
-            regs.r8 = 0;
-            regs.r9 = 0;
-            regs.r10 = 0;
-            regs.r11 = 0;
-            uc.set_regs(regs);
+            enter_image(ctx.user_ctx(), entry_point, stack_ptr);
 
             // The new image must never see the previous program's vector
             // registers. Reset and load the default under IRQ-off, so a context
@@ -850,6 +834,26 @@ define_syscall!(syscall_execve
         Err(e) => SyscallResult::Err(e),
     }
 });
+
+/// Point the frame at the new image's entry with its argument registers
+/// cleared. Out of line so the register snapshot stays off
+/// `syscall_execve`'s measured frame.
+#[inline(never)]
+fn enter_image(uc: &slopos_ostd::user::context::UserContext, entry: u64, stack: u64) {
+    let mut regs = uc.regs();
+    regs.rip = entry;
+    regs.rsp = stack;
+    regs.rax = 0;
+    regs.rdi = 0;
+    regs.rsi = 0;
+    regs.rdx = 0;
+    regs.rcx = 0;
+    regs.r8 = 0;
+    regs.r9 = 0;
+    regs.r10 = 0;
+    regs.r11 = 0;
+    uc.set_regs(regs);
+}
 
 /// The kernel's own affinity mask is a `u32`, so that is the widest cpu set a
 /// `sched_*affinity` call can carry. A caller naming a wider `cpusetsize` —

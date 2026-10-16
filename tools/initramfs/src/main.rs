@@ -45,7 +45,7 @@ const MAX_NAME_LEN: usize = 255;
 /// The system's directories of the ownership map (`slopos_abi::fs::
 /// ROOT_LAYOUT`), recorded even with nothing packed beneath them, with their
 /// modes; the archive is uid 0's, so init makes the session's own.
-const ROOT_DIRS: [(&str, u32); 10] = [
+const ROOT_DIRS: [(&str, u32); 12] = [
     ("/etc", MODE_DIR),
     ("/var", MODE_DIR),
     ("/var/lib", MODE_DIR),
@@ -56,6 +56,8 @@ const ROOT_DIRS: [(&str, u32); 10] = [
     ("/home", MODE_DIR),
     ("/media", MODE_DIR),
     ("/usr", MODE_DIR),
+    ("/opt", MODE_DIR),
+    ("/opt/bin", MODE_DIR),
 ];
 
 /// `slopos_abi::fs::OWNERS_RECORD` and what init writes there once the
@@ -825,7 +827,7 @@ mod tests {
 
         let layout_sh = fs::read_to_string(repo.join("scripts/lib/root_layout.sh")).unwrap();
         let layout = abi_root_layout(&abi);
-        assert_eq!(layout.len(), 13);
+        assert_eq!(layout.len(), 15);
         assert_eq!(shell_array(&layout_sh, "ROOT_LAYOUT"), layout);
         let rest = &abi[abi.find("pub const SESSION_TREES").unwrap()..];
         let list = &rest[rest.find("= [").unwrap()..rest.find("];").unwrap()];

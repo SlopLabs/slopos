@@ -15,7 +15,7 @@ use slopos_testing::TestResult;
 use super::BASE_SAMPLE;
 use crate::basefs::activate::{ActivateError, activate_on};
 use crate::basefs::reap::runs_from;
-use crate::basefs::{BaseFs, StageError, generation_of, stage};
+use crate::basefs::{BASE_FS, BaseFs, StageError, generation_of, stage};
 use crate::vfs::mount::{mount_at, mount_subtree, unmount};
 use crate::vfs::traits::{FileSystem, FileType, InodeId};
 use crate::vfs::{VfsError, vfs_init_builtin_filesystems, vfs_mkdir};
@@ -24,7 +24,7 @@ const DIR: u32 = S_IFDIR | 0o755;
 const FILE: u32 = S_IFREG | 0o644;
 const BIG: usize = 70_000;
 
-fn archive(records: &[(&str, u32, &[u8])]) -> Option<KVec<u8>> {
+pub fn archive(records: &[(&str, u32, &[u8])]) -> Option<KVec<u8>> {
     let mut out = KVec::new();
     for &(path, mode, data) in records {
         append(&mut out, &Record::new(path.as_bytes(), mode, data)?)?;
@@ -61,7 +61,10 @@ fn interface(buf: &mut [u8; 12]) -> &[u8] {
 }
 
 /// `archive` handed over at most `piece` bytes a read.
-fn pieces(archive: &[u8], piece: usize) -> impl FnMut(u64, &mut [u8]) -> Result<usize, Errno> + '_ {
+pub fn pieces(
+    archive: &[u8],
+    piece: usize,
+) -> impl FnMut(u64, &mut [u8]) -> Result<usize, Errno> + '_ {
     move |offset, buf| {
         let start = usize::try_from(offset).map_or(archive.len(), |o| o.min(archive.len()));
         let n = (archive.len() - start).min(buf.len()).min(piece);
@@ -74,7 +77,7 @@ fn activate(fs: &'static BaseFs, image: &[u8]) -> Result<u32, ActivateError> {
     activate_on(fs, &[], &mut pieces(image, 4093), image.len() as u64)
 }
 
-fn read_all(fs: &BaseFs, inode: InodeId, buf: &mut [u8]) -> Option<usize> {
+pub(super) fn read_all(fs: &BaseFs, inode: InodeId, buf: &mut [u8]) -> Option<usize> {
     let mut done = 0;
     loop {
         match fs.read(inode, done as u64, &mut buf[done..]) {
@@ -324,11 +327,11 @@ pub fn test_a_running_program_holds_its_generation() -> TestResult {
         return slopos_testing::fail!("could not spawn a process");
     };
     let inode = core::num::NonZeroU64::new((u64::from(NUMBER) << 32) | 1).expect("nonzero");
-    let before = runs_from(NUMBER);
+    let before = runs_from(&BASE_FS, NUMBER);
     process.set_program(Program::Base(inode));
-    let running = runs_from(NUMBER);
+    let running = runs_from(&BASE_FS, NUMBER);
     process.mark_exited();
-    let exited = runs_from(NUMBER);
+    let exited = runs_from(&BASE_FS, NUMBER);
     if let Some(handle) = process.handle() {
         process_retire(handle);
     }

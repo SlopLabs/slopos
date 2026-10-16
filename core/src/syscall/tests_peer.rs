@@ -11,8 +11,8 @@ use slopos_abi::fs::{AT_FDCWD, O_RDONLY};
 use slopos_abi::net::{AF_INET, AF_UNIX, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
     F_GETFD, FD_CLOEXEC, IPPROTO_TCP, MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, POLLIN, PROT_EXEC,
-    PROT_READ, PROT_WRITE, SO_ERROR, SO_PEERCRED, SO_PEERPIDFD, SO_PEERPROGRAM, SOL_SLOPOS,
-    SOL_SOCKET, UCred,
+    PROT_READ, PROT_WRITE, SO_ERROR, SO_PEERCRED, SO_PEEREXTENSION, SO_PEERPIDFD, SO_PEERPROGRAM,
+    SOL_SLOPOS, SOL_SOCKET, UCred,
 };
 use slopos_fs::fileio::fileio_get_handle_and_ops;
 use slopos_mm::user_copy::copy_from_user;
@@ -729,12 +729,12 @@ pub fn test_an_exec_beside_another_thread_attests_nothing() -> TestResult {
         crate::exec::exec_attests(&user.task),
         "a sole thread's exec attests what it loads"
     );
-    crate::exec::attest_exec(&user.task, BASE, true);
+    crate::exec::attest_exec(&user.task, BASE, true, false);
     assert_eq_test!(program_of(&user), BASE, "and takes it");
 
     process.task_join();
     let attests = crate::exec::exec_attests(&user.task);
-    crate::exec::attest_exec(&user.task, BASE, attests);
+    crate::exec::attest_exec(&user.task, BASE, attests, false);
     let loaded = program_of(&user);
     process.task_leave();
     assert_test!(!attests, "an exec beside a sibling does not attest");
@@ -798,7 +798,7 @@ pub fn test_an_exec_failing_past_the_reset_forfeits_the_program() -> TestResult 
     };
     let staged = stage_executable(BROKEN, &elf_entering_nowhere())
         && stage_executable(NOT_ELF, b"not a program\n");
-    let exec = |path: &[u8]| {
+    let exec = |path: &[u8], reexec: bool| {
         let program = crate::exec::resolve_exec(path, b"/", &Subject::KERNEL)?;
         let (mut entry, mut stack, mut tp) = (0, 0, 0);
         crate::exec::do_exec(
@@ -806,17 +806,25 @@ pub fn test_an_exec_failing_past_the_reset_forfeits_the_program() -> TestResult 
             &program,
             None,
             None,
+            reexec,
             &Subject::KERNEL,
             &mut entry,
             &mut stack,
             &mut tp,
         )
+        .map(|(loaded, standing)| {
+            standing.keep();
+            loaded
+        })
     };
     set_program(&user, BASE);
-    let refused = exec(NOT_ELF);
+    let refused = exec(NOT_ELF, false);
     let kept = program_of(&user);
-    let failed = exec(BROKEN);
+    let failed = exec(BROKEN, false);
     let forfeit = program_of(&user);
+    set_program(&user, BASE);
+    let failed_reexec = exec(BROKEN, true);
+    let reexec_forfeit = program_of(&user);
     let _ = slopos_fs::vfs::vfs_unlink(BROKEN);
     let _ = slopos_fs::vfs::vfs_unlink(NOT_ELF);
     assert_test!(staged, "could not stage the two files");
@@ -824,6 +832,8 @@ pub fn test_an_exec_failing_past_the_reset_forfeits_the_program() -> TestResult 
     assert_eq_test!(kept, BASE, "is refused before the reset");
     assert_test!(failed.is_err(), "an entry outside every segment");
     assert_eq_test!(forfeit, Program::Other, "fails after it");
+    assert_test!(failed_reexec.is_err(), "a re-execution entering nowhere");
+    assert_eq_test!(reexec_forfeit, Program::Other, "fails after the reset too");
     pass!()
 }
 
@@ -904,4 +914,276 @@ slopos_testing::stest!(
     name = test_exec_attests_only_what_the_base_serves,
     flags = 0,
     kind = Userland
+);
+
+fn activate_extension(name: &[u8], records: &[(&str, u32, &[u8])]) -> Option<u32> {
+    use slopos_fs::tests::generations::{archive, pieces};
+    slopos_fs::vfs::vfs_init_builtin_filesystems().ok()?;
+    let image = archive(records)?;
+    slopos_fs::basefs::extension::activate(name, [name[0]; 32], &mut pieces(&image, 509), 1 << 20)
+        .ok()
+}
+
+fn deactivate_extension(name: &[u8]) {
+    let _ = slopos_fs::basefs::extension::deactivate(name);
+}
+
+/// The program a file of the VFS at `path` attests as.
+fn file_program(path: &[u8]) -> Program {
+    use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_at};
+    resolve_path_at(path, b"/", RESOLVE_FOLLOW, &slopos_fs::vfs::Subject::KERNEL)
+        .map_or(Program::Other, |r| {
+            slopos_fs::basefs::program_of(r.fs, r.inode)
+        })
+}
+
+/// `SO_PEERPROGRAM` and `SO_PEEREXTENSION` on `fd`: the path and the label's
+/// name, each empty for none.
+fn peer_program_and_extension(who: &Principal, fd: i64) -> Option<([u8; 64], u32, [u8; 64], u32)> {
+    let (rc, len, path) = getsockopt(who, fd, SOL_SLOPOS, SO_PEERPROGRAM, 64)?;
+    let (rc2, label_len, label) = getsockopt(who, fd, SOL_SLOPOS, SO_PEEREXTENSION, 64)?;
+    (rc == 0 && rc2 == 0).then_some((path, len, label, label_len))
+}
+
+fn names(who: &Principal, fd: i64, path: &[u8], extension: &[u8]) -> bool {
+    peer_program_and_extension(who, fd).is_some_and(|(p, len, label, label_len)| {
+        p.get(..len as usize) == Some(path)
+            && label_len as usize == slopos_abi::extension::Label::LEN
+            && slopos_abi::extension::Label::from_bytes(&label[..label_len as usize]).is_some_and(
+                |label| label.name() == extension && label.digest == [extension[0]; 32],
+            )
+    })
+}
+
+fn names_nothing(who: &Principal, fd: i64) -> bool {
+    peer_program_and_extension(who, fd)
+        .is_some_and(|(_, len, _, label_len)| len == 0 && label_len == 0)
+}
+
+const TOOL: u32 = slopos_abi::fs::S_IFREG | 0o755;
+const LIB: u32 = slopos_abi::fs::S_IFREG | 0o644;
+
+/// Exec attests an activation's file as that activation's program, a script
+/// of it run by another of its files included, and as nothing a script whose
+/// interpreter is another activation's or one outside both run by it.
+pub fn test_exec_attests_an_activation_s_files_as_its_own() -> TestResult {
+    use crate::exec::resolve_exec;
+    use slopos_fs::vfs::Subject;
+    const OUTSIDE: &[u8] = b"/tmp/ext-outside";
+    let _fixture = SyscallFixture::new();
+    let shown = activate_extension(
+        b"ext-exec",
+        &[
+            ("bin/tool", TOOL, b"\x7fELF tool"),
+            ("bin/script", TOOL, b"#!/opt/ext-exec/bin/tool\n"),
+            ("bin/stray", TOOL, b"#!/opt/ext-other/bin/tool\n"),
+        ],
+    )
+    .is_some()
+        && activate_extension(b"ext-other", &[("bin/tool", TOOL, b"\x7fELF other")]).is_some()
+        && stage_executable(OUTSIDE, b"#!/opt/ext-exec/bin/tool\n");
+    let attested = |path: &[u8]| resolve_exec(path, b"/", &Subject::KERNEL).map(|p| p.program);
+    let tool = file_program(b"/opt/ext-exec/bin/tool");
+    let script = file_program(b"/opt/ext-exec/bin/script");
+    let (as_tool, as_script, as_stray, as_outside) = (
+        attested(b"/opt/ext-exec/bin/tool"),
+        attested(b"/opt/ext-exec/bin/script"),
+        attested(b"/opt/ext-exec/bin/stray"),
+        attested(OUTSIDE),
+    );
+    let _ = slopos_fs::vfs::vfs_unlink(OUTSIDE);
+    deactivate_extension(b"ext-exec");
+    deactivate_extension(b"ext-other");
+    assert_test!(shown, "could not show the two activations and the script");
+    assert_test!(
+        matches!(tool, Program::Extension(_)),
+        "the tool is an activation's"
+    );
+    assert_eq_test!(as_tool, Ok(tool), "the tool attests as itself");
+    assert_eq_test!(as_script, Ok(script), "a script its own tool runs");
+    assert_eq_test!(
+        as_stray,
+        Ok(Program::Other),
+        "a script another activation runs"
+    );
+    assert_eq_test!(as_outside, Ok(Program::Other), "a script outside both");
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_exec_attests_an_activation_s_files_as_its_own,
+    suite = peer
+);
+
+/// An extension program keeps its identity mapping its own activation's code
+/// and the base's, and loses it, with what its sockets attest, mapping
+/// another activation's.
+pub fn test_code_of_another_activation_ends_an_extension_program() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let _registry = PageSetRegistry::publish();
+    let page = [0xc3u8; 64];
+    let shown = activate_extension(
+        b"ext-map",
+        &[
+            ("bin/tool", TOOL, b"\x7fELF tool"),
+            ("lib/libown.so", LIB, &page),
+        ],
+    )
+    .is_some()
+        && activate_extension(b"ext-alien", &[("lib/libalien.so", LIB, &page)]).is_some();
+    let outcome = (|| {
+        if !shown {
+            return Err("could not show the two activations");
+        }
+        let user = Principal::user(USER, CAP_UNIVERSAL).ok_or("no principal")?;
+        let tool = file_program(b"/opt/ext-map/bin/tool");
+        set_program(&user, tool);
+        let (rc, [a, _b]) = socketpair(&user, 0).ok_or("no socketpair")?;
+        if rc != 0 || !names(&user, a.into(), b"/opt/ext-map/bin/tool", b"ext-map") {
+            return Err("the pair does not name the extension program");
+        }
+        let map = |path: &[u8]| {
+            stage_cstr(user.table, user.page + DATA, path)
+                .then(|| {
+                    call(
+                        &user,
+                        crate::syscall::fs::at_handlers::syscall_openat,
+                        [
+                            AT_FDCWD as i64 as u64,
+                            user.page + DATA,
+                            u64::from(O_RDONLY),
+                            0,
+                            0,
+                            0,
+                        ],
+                    )
+                })
+                .flatten()
+                .filter(|&fd| fd >= 0)
+                .and_then(|fd| {
+                    call(
+                        &user,
+                        syscall_mmap,
+                        [0, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd as u64, 0],
+                    )
+                })
+                .is_some_and(|addr| addr > 0)
+        };
+        if !map(b"/opt/ext-map/lib/libown.so") || program_of(&user) != tool {
+            return Err("its own activation's code ended the program");
+        }
+        if !names(&user, a.into(), b"/opt/ext-map/bin/tool", b"ext-map") {
+            return Err("its own activation's code ended what the pair attests");
+        }
+        if !map(b"/opt/ext-alien/lib/libalien.so") || program_of(&user) != Program::Other {
+            return Err("another activation's code did not end the program");
+        }
+        if !names_nothing(&user, a.into()) {
+            return Err("the pair still attests a program that ended");
+        }
+        Ok(())
+    })();
+    deactivate_extension(b"ext-map");
+    deactivate_extension(b"ext-alien");
+    match outcome {
+        Ok(()) => pass!(),
+        Err(why) => fail!("{}", why),
+    }
+}
+
+slopos_testing::stest!(
+    name = test_code_of_another_activation_ends_an_extension_program,
+    suite = peer
+);
+
+/// A socket attests its creator's program while that process runs it: an
+/// exec ends it, a new pair names the new instance, init's re-execution of
+/// itself keeps it, and an exit ends it.
+pub fn test_an_exec_or_an_exit_ends_what_a_socket_attests() -> TestResult {
+    use slopos_ostd::process::{Cred, Identity, process_retire, process_spawn, root_account};
+    let _fixture = SyscallFixture::new();
+    let shown = activate_extension(b"ext-life", &[("bin/tool", TOOL, b"\x7fELF tool")]).is_some();
+    let tool = file_program(b"/opt/ext-life/bin/tool");
+    let outcome = (|| {
+        if !shown {
+            return Err("could not show the activation");
+        }
+        let user = Principal::user(USER, CAP_UNIVERSAL).ok_or("no principal")?;
+        set_program(&user, tool);
+        let (_, [before, _]) = socketpair(&user, 0).ok_or("no socketpair")?;
+        if !names(&user, before.into(), b"/opt/ext-life/bin/tool", b"ext-life") {
+            return Err("the pair does not name the program");
+        }
+        crate::exec::attest_exec(&user.task, tool, true, true);
+        if !names(&user, before.into(), b"/opt/ext-life/bin/tool", b"ext-life") {
+            return Err("an exec that keeps its authority ended the pair's program");
+        }
+        crate::exec::attest_exec(&user.task, tool, true, false);
+        if !names_nothing(&user, before.into()) {
+            return Err("an exec of the same program kept what the pair attests");
+        }
+        let (_, [after, _]) = socketpair(&user, 0).ok_or("no second socketpair")?;
+        if !names(&user, after.into(), b"/opt/ext-life/bin/tool", b"ext-life") {
+            return Err("a pair after the exec does not name the program");
+        }
+
+        let process = process_spawn(None, root_account(), Cred::ROOT).map_err(|_| "no process")?;
+        process.set_program(tool);
+        let (program, instance) = process.program_as_of_now();
+        let identity = Identity {
+            pid: process.id(),
+            uid: 0,
+            gid: 0,
+            program,
+            process: process.handle_raw(),
+            instance,
+        };
+        let running = identity.now().program;
+        process.mark_exited();
+        let exited = identity.now().program;
+        if let Some(handle) = process.handle() {
+            process_retire(handle);
+        }
+        let reaped = identity.now().program;
+        if running != tool || exited != Program::Other || reaped != Program::Other {
+            return Err("an identity did not end with its process");
+        }
+        Ok(())
+    })();
+    deactivate_extension(b"ext-life");
+    match outcome {
+        Ok(()) => pass!(),
+        Err(why) => fail!("{}", why),
+    }
+}
+
+slopos_testing::stest!(
+    name = test_an_exec_or_an_exit_ends_what_a_socket_attests,
+    suite = peer
+);
+
+/// An archive past the extensions' budget is refused before a byte of it is
+/// read.
+pub fn test_an_extension_past_the_budget_is_refused() -> TestResult {
+    use crate::syscall::fs::syscall_ext_activate;
+    let _fixture = SyscallFixture::new();
+    let Some(holder) = Principal::user(0, slopos_ostd::authority::CAP_MASK_ALL) else {
+        return fail!("could not build the principal");
+    };
+    assert_test!(
+        stage_cstr(holder.table, holder.page + DATA, b"ext-big"),
+        "could not stage the name"
+    );
+    let refused = call(
+        &holder,
+        syscall_ext_activate,
+        [holder.page + DATA, 0, u64::MAX, holder.page + OPTVAL, 0, 0],
+    );
+    assert_eq_test!(refused, errno(Errno::EFBIG), "an archive past the budget");
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_an_extension_past_the_budget_is_refused,
+    suite = peer
 );

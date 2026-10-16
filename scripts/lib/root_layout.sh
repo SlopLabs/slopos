@@ -3,7 +3,7 @@
 # Sourced.
 
 # `<path>:<uid>:<gid>:<mode>`, parents first.
-ROOT_LAYOUT=(/:0:0:0755 /etc:0:0:0755 /var:0:0:0755 /var/lib:0:0:0755 /var/lib/slopos:0:0:0755 /var/log:0:0:0755 /var/tmp:0:0:1777 /root:0:0:0700 /home:0:0:0755 /home/user:1000:1000:0755 /media:0:0:0755 /usr:0:0:0755 /usr/local:1000:1000:0755)
+ROOT_LAYOUT=(/:0:0:0755 /etc:0:0:0755 /var:0:0:0755 /var/lib:0:0:0755 /var/lib/slopos:0:0:0755 /var/log:0:0:0755 /var/tmp:0:0:1777 /root:0:0:0700 /home:0:0:0755 /home/user:1000:1000:0755 /media:0:0:0755 /usr:0:0:0755 /usr/local:1000:1000:0755 /opt:0:0:0755 /opt/bin:0:0:0755)
 SESSION_TREES=(/home /src /usr/local)
 SESSION_OWNER=1000:1000
 OWNERS_RECORD=/var/lib/slopos/owners

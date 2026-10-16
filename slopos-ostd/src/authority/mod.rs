@@ -137,6 +137,12 @@ pub enum Capability {
     /// is as much as writing the base. Deletion condition: dies when a base
     /// is activated only from a signed image the kernel checks itself.
     BaseUpdate,
+    /// Activating and deactivating an extension: `ext_activate` and
+    /// `ext_deactivate`. The kernel takes the caller's word for an image's
+    /// digest and attests its programs by it, so this is as much as writing
+    /// what privd's program identity names under `/opt`. Deletion condition:
+    /// as `BaseUpdate`'s.
+    ExtensionUpdate,
 }
 
 impl Capability {
@@ -170,6 +176,7 @@ impl Capability {
             Self::DacOverride => caps::DAC_OVERRIDE,
             Self::SchedHigh => caps::SCHED_HIGH,
             Self::BaseUpdate => caps::BASE_UPDATE,
+            Self::ExtensionUpdate => caps::EXTENSION_UPDATE,
         }
     }
 
@@ -208,6 +215,7 @@ impl Capability {
             Self::DacOverride => "DacOverride",
             Self::SchedHigh => "SchedHigh",
             Self::BaseUpdate => "BaseUpdate",
+            Self::ExtensionUpdate => "ExtensionUpdate",
         }
     }
 
@@ -238,6 +246,7 @@ impl Capability {
         Self::DacOverride,
         Self::SchedHigh,
         Self::BaseUpdate,
+        Self::ExtensionUpdate,
     ];
 }
 

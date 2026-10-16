@@ -568,6 +568,31 @@ carrying the base directories only as sealed mount points; the tests and
 verified images carry a system of their own, which a disk root's base
 covers.
 
+**An extension is shown beside the base.** `ext_activate(name, archive, len,
+digest)` (`ExtensionUpdate`, which only init and the utests hold) copies a
+`newc` archive as `base_activate` does and shows it read-only and
+`MOUNT_PINNED` at `/opt/<name>`, in place of the activation shown there in one
+step under the mount table's lock (`vfs::mount::mount_replacing`), keeping the
+mount's id; `ext_deactivate(name)` takes it away (`basefs::extension`). A name
+is lowercase letters, digits and `-`, at most 32 bytes, none of
+`slopos_abi::extension::RESERVED`. Each activation is an instance of its own
+from a pool of `MAX_ACTIVATIONS` (32) `BaseFs`es, serving one generation whose
+number, issued across every activation and never within a boot again, is the
+high half of each inode it serves; it carries the name and the digest its
+caller vouched for, its label, which `SO_PEEREXTENSION` answers. The kernel
+checks no signature: the caller holds `ExtensionUpdate` and has checked the
+bytes, and the kernel serves the copy it made. One replaced or deactivated is
+freed by the `basefs-reap` thread as a retired base generation is. `/opt` is
+made where the root lacks it and held by identity, as `/usr` is for the base;
+a mount there that is no activation is neither replaced nor taken away
+(`EBUSY`, `ENOENT`). The copies resident together, those held after their
+replacement included, take at most an eighth of usable memory
+(`ext.memory=<percent>`, 1 to 50; `EFBIG` for one archive past it, `EBUSY`
+for the sum), and the mount table grew by the pool's 32 mounts. Under
+`extensions=off` (`BOOT_FLAG_EXTENSIONS_OFF` in `sys_info`) `ext_activate`
+answers `EPERM`. Its log lines are `EXT: activation <n> is <name>`, `EXT:
+<name> deactivated` and `EXT: activation <n> freed`.
+
 **A base names the interface it needs; a kernel names the ones it serves.**
 `slopos_abi::BASE_INTERFACE` numbers the private call surface: every private
 syscall's number and the signature its doc states, and every structure and
@@ -1594,8 +1619,8 @@ home `/home/user`, `XDG_RUNTIME_DIR` its runtime directory. Every root is held
 to one ownership map, stated once in `slopos_abi::fs::ROOT_LAYOUT` and
 `SESSION_TREES` and mirrored by `scripts/lib/root_layout.sh` and
 `tools/initramfs`, whose test holds the three equal: `/`, `/etc`, `/var`,
-`/var/lib`, `/var/lib/slopos`, `/var/log`, `/home`, `/media` and `/usr` uid
-0's, 0755; `/root` 0700; `/var/tmp` 1777; `/home/user` and `/usr/local` the
+`/var/lib`, `/var/lib/slopos`, `/var/log`, `/home`, `/media`, `/usr`, `/opt`
+and `/opt/bin` uid 0's, 0755; `/root` 0700; `/var/tmp` 1777; `/home/user` and `/usr/local` the
 session's; and everything below `/home`, `/src` and `/usr/local` the
 session's. The image builders lay it out and record it in
 `/var/lib/slopos/owners`, `tools/initramfs` packs the record so a RAM root is
@@ -1637,10 +1662,13 @@ processes, privd's mechanisms and anything else the session did not start
 survive it. A process that forks faster than init signals can outlast the
 ten seconds, and the request that asked is answered with how many did.
 `/run/init` (mode 0666) takes one line per connection, judged by
-`SO_PEERCRED`, four connections waiting per uid: `restart-session` from the
-session or uid 0, which `/bin/session restart` and the compositor's system
-menu send, and `end-session` and `reexec` from uid 0, as privd's `root`
-principal is, since `SO_PEERCRED` names no capability; each is answered once
+`SO_PEERCRED` and, as of the request, `SO_PEEREXTENSION` and
+`SO_PEERPROGRAM` (`peer_base_program`), four connections
+waiting per uid: `restart-session` from the session or root, which
+`/bin/session restart` and the compositor's system menu send, and
+`end-session` and `reexec` from root — uid 0 running a base program, as
+privd's `root` principal is, since `SO_PEERCRED` names no capability and uid
+0 alone is no authority; each is answered once
 done, eight at most waiting on the session but uid 0's, and a session uid 0
 ended stays down until uid 0 restarts it or a test run fails. Init re-executes `/sbin/init
 --resume <fd>`, as systemd's `daemon-reexec` does, carrying its service table
@@ -1653,32 +1681,47 @@ copy of init (`/sbin/init --run-tests`, holding `TestHarness`), so init serves
 while they run, and starts no session until one is asked for or the tests
 fail.
 
-**A peer is told who connected, as of when it connected.** An `AF_UNIX`
-socket records an `Identity` (`slopos_ostd::process::identity`: the pid
-`getpid` answers, the effective uid and gid, and the program) at `listen` for
-the listener, at `connect` for the connector — for a ring's `OP_CONNECT`, the
+**A peer is told who connected, for as long as it runs what it ran then.**
+An `AF_UNIX` socket records an `Identity` (`slopos_ostd::process::identity`:
+the pid `getpid` answers, the effective uid and gid, the program, and the
+process and program instance it was taken from) at `listen` for the
+listener, at `connect` for the connector — for a ring's `OP_CONNECT`, the
 task whose `ring_enter` performs it, asked at each try — and at `socketpair`
-for both ends, and nothing later changes it: not an id change, not an exec,
-not the descriptor passing to another process. `SO_PEERCRED` and
-`SO_PEERPIDFD` read it as Linux's do (`{0, -1, -1}` and `ENODATA` without a
-peer), and `SO_PEERPROGRAM` at `SOL_SLOPOS` reads the program. The socket
-layer is told who connects; nothing below the syscall layer reads the current
-task for it. Task ids are never reused, so the pid is a handle: a peer's pidfd
-is handed out even once the peer is gone, and is readable at once; a live one
-turns readable when the peer's leader thread exits. A process's program is
-`Base(inode)` of a base generation when exec or spawn loaded it with every
-link of its `#!` chain and its ELF interpreter served by `BASE_FS` — each
-interpreter named by an absolute path and each script by the absolute path it
-was found at, since its interpreter opens that spelling again — and `Other`
-otherwise. Fork copies it with the address space. An exec that begins with
-another thread alive attests nothing, and one that fails once the old image is
-gone leaves `Other`. An executable mapping of anything but a base file —
-anonymous memory, a memfd, a file elsewhere — and an `mprotect` making any page
-executable that was not, decided under the lock that applies it, make the
-process `Other` before that code can run, until its next exec. The inode
-names its generation, so `SO_PEERPROGRAM` answers the path in the program's
-own generation, and nothing once that generation is freed. `pidfd_open`
-takes any process's leader, as Linux's does.
+for both ends. `SO_PEERCRED` and `SO_PEERPIDFD` read the ids and pid as
+recorded, as Linux's do (`{0, -1, -1}` and `ENODATA` without a peer): not an
+id change, not an exec, not the descriptor passing to another process moves
+them. `SO_PEERPROGRAM` at `SOL_SLOPOS` reads the program and
+`SO_PEEREXTENSION` its activation's label, each only while the process it was
+taken from is live and runs the program instance it ran then
+(`Identity::now`): an exec, an executable mapping of code the program may not
+run, or its leader's exit, before its parent is told, end it for good, and it
+reads as no program, never as a later program's. Every change of a process's
+program moves its instance, a 64-bit counter, but init's re-execution of the
+base's `/sbin/init`, which keeps its capabilities (`exec_keeps_authority`)
+and so its instance, so the consent pair init made at boot, under the booted
+generation, stays init's. The socket layer is told who connects; nothing below the syscall layer reads the current task for it. Task ids are
+never reused, so the pid is a handle: a peer's pidfd is handed out even once
+the peer is gone, and is readable at once; a live one turns readable when the
+peer's leader thread exits. A process's program is `Base(inode)` of a base
+generation when exec or spawn loaded it with every link of its `#!` chain and
+its ELF interpreter served by `BASE_FS`, `Extension(inode)` of an activation
+when the file named is that activation's and every other link the base's or
+that activation's — each interpreter named by an absolute path and each script
+by the absolute path it was found at, since its interpreter opens that
+spelling again — and `Other` otherwise. Fork copies it with the address
+space. An exec that begins with another thread alive attests nothing, and one
+that fails once the old image is gone leaves `Other`. An executable mapping of
+anything but a base file or, for an extension's program, a file of its own
+activation — anonymous memory, a memfd, a file elsewhere, another
+activation's — and an `mprotect` making any page executable that was not,
+decided under the lock that applies it, make the process `Other` before that
+code can run, until its next exec. The inode names its generation, so
+`SO_PEERPROGRAM` answers the path in the program's own generation,
+`/opt/<name>/<path>` for an activation's, and nothing once that generation is
+freed. `pidfd_open` takes any process's leader, as Linux's does. A
+descriptor passed on or inherited speaks as its connector for as long as the
+connector runs its program. uid 0 alone is no principal, at privd or at
+`/run/init`; what keeps an extension from root is that none runs as uid 0.
 
 **privd runs what the session may not.** `/sbin/privd`, which init starts as
 uid 0 holding `slopos_priv_core::DELEGABLE` and waits for, listens on
@@ -1688,9 +1731,13 @@ grammar `slopos_priv_core::policy`) names for it — as a fresh child holding th
 action's capabilities as uid 0, with an environment of `PATH`, `LANG` and
 `PRIV_ACTION` alone, cwd `/` or the directory the requester sent, and the
 requester's descriptors as stdio. Who asks is the connection's recorded
-`Identity`: `root` is uid 0, `paired` is `/bin/remoted` on a base carrying a
-pairing and nothing else, `session` is uid 1000 otherwise, and `program <path>`
-is a static base program; an action's `allow` lines are tried in order and the
+`Identity`, its program read again before every verdict and before the
+mechanism starts, so a requester whose base program has stopped running since
+it connected — it exec'd, mapped code from elsewhere or exited — is refused:
+`root` is uid 0 running a
+base program, `paired` is `/bin/remoted` on a base carrying a pairing and
+nothing else, `session` is uid 1000 otherwise, and `program <path>` is a
+static base program; an action's `allow` lines are tried in order and the
 first that matches runs it, asks the person (`consent`) or, with none, refuses.
 An action marked `medium` exists only on a boot the kernel says served the
 install medium (`BOOT_FLAG_MEDIUM` in `sys_info`): off it privd answers it as
@@ -1920,6 +1967,8 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `cpufreq` | `hwp` / `firmware` | `hwp` (default) enables HWP where the CPU has it and asks every CPU for autonomous selection between its lowest and highest level; `firmware` leaves every frequency register as the firmware left it |
 | `cpufreq.epp` | `performance` / `balance_performance` / `balance_power` / `power` / 0-255 | the energy-performance preference HWP is given; default `balance_performance` (128) |
 | `sched.hybrid` | `on` / `off` | `on` (default) places a task on the best idle CPU by class — a P-core with nothing on it, then an E-core, then a busy core's sibling thread — on a part whose CPUs differ; `off` treats every idle CPU alike |
+| `extensions` | `off` | activate no extension this boot: `ext_activate` answers `EPERM`, and `BOOT_FLAG_EXTENSIONS_OFF` tells userland |
+| `ext.memory` | integer | percent of usable memory every extension activation's copy may take together, 1 to 50; default an eighth |
 | `panic` | `reboot` | a kernel panic resets the machine (ACPI, then `0xCF9`, then the keyboard controller; the format-free abort triple-faults) instead of halting it: how a boot slot that panics falls back to the loader's default. The crash record is written first; on bare metal a panic's screen stays up for ten seconds before the reset, under a hypervisor not at all |
 | `panic.boot` | `on` / `abort` | panic as soon as boot initialisation completes, or take the format-free abort a lockup takes — the broken slots `just test-install` rolls back from |
 | `usb` | `on` / `off` / `report` | `on` (default) takes every xHCI controller it can drive from the firmware and runs it; `off` binds none, touching nothing; `report` logs each controller's capabilities, protocols and ports and leaves it to the firmware |

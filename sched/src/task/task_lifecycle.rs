@@ -980,6 +980,12 @@ fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
     } else {
         TaskStatus::Terminated
     };
+    // Ahead of the status, so whoever sees the exit finds the program gone.
+    if !is_non_leader_thread(task)
+        && let Some(process) = process.as_deref()
+    {
+        process.forfeit_program();
+    }
     let _ = task.set_status(final_status);
     task.clear_fate();
 

@@ -9,7 +9,7 @@ use slopos_abi::syscall::{
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_slibc::pal::{Pal, Sys};
 use slopos_userland as _;
-use slopos_userland::syscall::{OwnedFd, UserPollFd, core as sys_core, fs, net, process};
+use slopos_userland::syscall::{OwnedFd, UserPollFd, base, core as sys_core, fs, net, process};
 
 use std::os::unix::fs::PermissionsExt;
 
@@ -25,6 +25,9 @@ const CONNECT: &str = "--connect";
 const HAND: &str = "--hand";
 /// `argv[1]` of a child that reports its pid on fd 3 and exits once told to.
 const SPEAK: &str = "--speak";
+/// `argv[1]` of a child that connects and then execs a `SPEAK` child of
+/// itself on the connection.
+const EXEC_AFTER: &str = "--exec-after-connect";
 /// `argv[1]` of a child that exits once fd 3 reaches its end.
 const HOLD: &str = "--hold";
 
@@ -256,7 +259,7 @@ fn connected_pair_names_each_other() -> bool {
 }
 
 /// A connection handed to a spawned child still names the process that
-/// connected it, which has exited by the time the server asks.
+/// connected it, and once that has exited, no program.
 fn inherited_connection_keeps_its_connector() -> bool {
     const NAME: &str = "/tmp/peer-e2e-hand";
     let Some(listener) = listen(NAME) else {
@@ -286,15 +289,74 @@ fn inherited_connection_keeps_its_connector() -> bool {
         && spoke
         && speaker != connector as u32
         && seen.is_ok_and(|cred| cred.pid == connector)
-        && is_self(program)
+        && matches!(program, Ok(None))
         && gone;
     if !ok {
         eprintln!(
             "peer_test: connector {connector} exited {handed}, speaker {speaker}, \
-             server saw {seen:?}, its pidfd readable: {gone}"
+             server saw {seen:?} running {program:?}, its pidfd readable: {gone}"
         );
     }
     ok
+}
+
+/// A connection names its connector's program until the connector execs, even
+/// into the same program, after which it names no program while the ids and
+/// the pid stand.
+fn an_exec_after_a_connect_ends_the_program() -> bool {
+    const NAME: &str = "/tmp/peer-e2e-exec";
+    let Some(listener) = listen(NAME) else {
+        eprintln!("peer_test: could not listen");
+        return false;
+    };
+    let child = spawn(SELF, &["peer_test", EXEC_AFTER, NAME], None);
+    if child <= 0 {
+        eprintln!("peer_test: spawning the connector returned {child}");
+        return false;
+    }
+    let Some(conn) = accept_from(&listener, child) else {
+        return false;
+    };
+    let before = net::peer_program(conn.raw());
+    let _ = send_all(conn.raw(), b"x");
+    let mut spoke = [0u8; 4];
+    let exec_d = recv_exact(conn.raw(), &mut spoke) && u32::from_ne_bytes(spoke) == child as u32;
+    let after = net::peer_program(conn.raw());
+    let seen = net::peer_cred(conn.raw());
+    let _ = send_all(conn.raw(), b"x");
+    let code = process::wait_exit_code(child as u32);
+    let ok = is_self(before.clone())
+        && exec_d
+        && matches!(after, Ok(None))
+        && seen.is_ok_and(|cred| cred.pid == child)
+        && code == 0;
+    if !ok {
+        eprintln!(
+            "peer_test: connected as {before:?}, after its exec ({exec_d}) {after:?}, \
+             {seen:?}, exited {code}"
+        );
+    }
+    ok
+}
+
+/// The `EXEC_AFTER` child: connect, wait for the word, then become a `SPEAK`
+/// child on the connection.
+fn connect_then_exec(name: &str) -> i32 {
+    let Ok(fd) = net::socket(slopos_abi::net::AF_UNIX, slopos_abi::net::SOCK_STREAM, 0) else {
+        return 2;
+    };
+    let mut go = [0u8; 1];
+    if net::connect_unix(fd.raw(), name.as_bytes()).is_err()
+        || !recv_exact(fd.raw(), &mut go)
+        || fs::dup2(fd.raw(), 3).is_err()
+    {
+        return 3;
+    }
+    let words = [cstr("peer_test"), cstr(SPEAK)];
+    let argv = [words[0].as_ptr(), words[1].as_ptr(), core::ptr::null()];
+    let path = cstr("/bin/peer_test");
+    process::execve(path.as_ptr(), argv.as_ptr(), core::ptr::null());
+    4
 }
 
 /// A peer's pidfd is close-on-exec, quiet while the peer runs and readable
@@ -361,6 +423,86 @@ fn a_program_outside_the_base_is_other() -> bool {
         eprintln!("peer_test: the copy connected as {program:?}, {seen:?}, exited {code}");
     }
     ok
+}
+
+const EXTENSION: &str = "peer-test";
+const EXTENSION_SELF: &str = "/opt/peer-test/bin/peer_test";
+
+/// This program, activated as an extension, connects as that extension's:
+/// its path under `/opt` and the name and digest it was activated as. Taken
+/// away again, the path shows nothing.
+fn an_extension_program_names_its_activation() -> bool {
+    const NAME: &str = "/tmp/peer-e2e-extension";
+    let image = match std::fs::read("/bin/peer_test").map(|program| extension_of(&program)) {
+        Ok(Some(image)) => image,
+        other => {
+            eprintln!("peer_test: could not pack this program: {:?}", other.err());
+            return false;
+        }
+    };
+    let digest = slopos_userland::base_image::sha256(&image);
+    if let Err(e) = base::ext_activate(EXTENSION.as_bytes(), &image, &digest) {
+        eprintln!("peer_test: ext_activate: {e}");
+        return false;
+    }
+    let outcome = (|| {
+        let listener = listen(NAME).ok_or("could not listen")?;
+        let child = spawn(
+            EXTENSION_SELF.as_bytes(),
+            &["peer_test", CONNECT, NAME],
+            None,
+        );
+        if child <= 0 {
+            return Err(format!("spawning the extension's program returned {child}"));
+        }
+        let conn =
+            accept_from(&listener, child).ok_or("the extension's program did not connect")?;
+        let program = net::peer_program(conn.raw());
+        let extension = net::peer_extension(conn.raw());
+        let base = net::peer_base_program(conn.raw());
+        let _ = read_report(conn.raw());
+        let _ = send_all(conn.raw(), b"x");
+        let code = process::wait_exit_code(child as u32);
+        let named = program
+            .as_ref()
+            .is_ok_and(|p| p.as_deref() == Some(EXTENSION_SELF.as_bytes()));
+        let labelled = extension.as_ref().is_ok_and(|label| {
+            label.is_some_and(|l| l.name() == EXTENSION.as_bytes() && l.digest == digest)
+        });
+        if !named || !labelled || !matches!(base, Ok(None)) || code != 0 {
+            return Err(format!(
+                "connected as {program:?} of {extension:?}, base {base:?}, exited {code}"
+            ));
+        }
+        Ok(())
+    })();
+    let taken = base::ext_deactivate(EXTENSION.as_bytes());
+    let gone = std::fs::metadata(EXTENSION_SELF).is_err();
+    if let Err(why) = outcome {
+        eprintln!("peer_test: {why}");
+        return false;
+    }
+    if taken.is_err() || !gone {
+        eprintln!("peer_test: the extension stayed: {taken:?}");
+        return false;
+    }
+    true
+}
+
+/// `program` as an extension's `bin/peer_test`.
+fn extension_of(program: &[u8]) -> Option<Vec<u8>> {
+    use slopos_boot_core::newc::Record;
+    let mut out = Vec::new();
+    for record in [
+        Record::new(b"bin/peer_test", slopos_abi::fs::S_IFREG | 0o755, program)?,
+        Record::trailer(),
+    ] {
+        record
+            .pieces()
+            .iter()
+            .for_each(|piece| out.extend_from_slice(piece));
+    }
+    Some(out)
 }
 
 /// Mapping memory executable that the base did not supply ends a process's
@@ -612,6 +754,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "inherited_connection_keeps_its_connector",
         inherited_connection_keeps_its_connector,
     ),
+    (
+        "an_exec_after_a_connect_ends_the_program",
+        an_exec_after_a_connect_ends_the_program,
+    ),
     ("peer_pidfd_polls_on_exit", peer_pidfd_polls_on_exit),
     (
         "a_program_outside_the_base_is_other",
@@ -631,6 +777,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
         a_waiting_ring_connect_attests_as_of_its_connect,
     ),
     ("a_forfeit_follows_fork_order", a_forfeit_follows_fork_order),
+    (
+        "an_extension_program_names_its_activation",
+        an_extension_program_names_its_activation,
+    ),
     ("pidfd_open_takes_any_leader", pidfd_open_takes_any_leader),
 ];
 
@@ -683,6 +833,7 @@ fn main() {
         Some(CONNECT) => std::process::exit(connect_and_report(name)),
         Some(HAND) => std::process::exit(connect_and_hand(name)),
         Some(SPEAK) => std::process::exit(speak()),
+        Some(EXEC_AFTER) => std::process::exit(connect_then_exec(name)),
         Some(HOLD) => {
             let mut end = [0u8; 1];
             let _ = Sys::read(3, end.as_mut_ptr(), 1);

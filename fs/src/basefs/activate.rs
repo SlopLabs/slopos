@@ -29,6 +29,7 @@ pub enum ActivateError {
     NoMemory,
     Mounts(VfsError),
     Interrupted,
+    Name,
 }
 
 static ACTIVATING: Mutex<()> =

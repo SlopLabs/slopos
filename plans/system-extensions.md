@@ -50,23 +50,23 @@ model:
   paths, privd's mechanisms from `MECHANISM_PATH`, and the loader keeps
   `/usr/local/lib` from uid 0 and every `AT_SECURE` process.
 
-**uid 0 is still a principal.** privd's `root` is any requester whose uid is 0
-(`priv-core/src/policy.rs:150`), and every action allows it without a
-question, `base.install` and `rescue` included. `/run/init` takes
-`end-session` and `reexec` from uid 0 judged by `SO_PEERCRED`
-(`userland/src/apps/init/control.rs:155-158`). This is sound only while every
-uid-0 process is base code.
+**uid 0 is not a principal.** privd's `root` is uid 0 running a base
+program, read again before every verdict, and every action allows it without
+a question, `base.install` and `rescue` included. `/run/init` takes
+`end-session` and `reexec` from uid 0 running a base program as of the
+request (Phase 1).
 
-**Identity is base membership.**
-- Exec records `Program::Base(inode)` when the image, its `#!` chain and its
-  interpreter are files of `BASE_FS`, and `Program::Other` otherwise
-  (`core/src/exec/mod.rs:792-797`, `:897-902`). A later executable mapping of
-  anything else makes the process `Other` (`mm/src/process_vm.rs`).
+**Identity is what the kernel serves, while the program runs** (Phase 1).
+- Exec records `Program::Base(inode)` for a base program,
+  `Program::Extension(inode)` for an activation's whose other links are the
+  base's or its own, and `Program::Other` otherwise
+  (`core/src/exec/script.rs`, `Program::admits`). An executable mapping of
+  code the program may not run makes the process `Other`.
 - A socket records its peer's identity at `listen`, `connect` or
-  `socketpair`, a value nothing later changes
-  (`slopos-ostd/src/process/identity.rs`). privd reads `SO_PEERCRED` and
-  `SO_PEERPROGRAM` once, at accept, and judges every request on that
-  connection by them (`userland/src/apps/privd/mod.rs:183`, `:303-318`).
+  `socketpair`; its program stands while that process runs that program
+  instance (`Identity::now`), and `SO_PEEREXTENSION` names the activation.
+  privd reads the program again before every verdict and before a mechanism
+  starts (`userland/src/apps/privd/mod.rs`).
 - privd's `program <path>` principal names only a static program under
   `/bin`, `/sbin` or `/usr/bin` (`priv-core/src/policy.rs:42`, `:475`); a
   dynamically linked one is refused because the loader would take libraries
@@ -77,26 +77,24 @@ uid-0 process is base code.
   whatever broker it named" (`userland/src/apps/remoted/mod.rs:16-20`). The
   same holds for anything that grants authority.
 
-**Serving sealed archives is solved, for one archive.** `fs/src/basefs/`
-serves a newc archive from memory, with up to sixteen generations
-(`MAX_GENERATIONS`, `:42`), every inode sealed, and two static instances,
-`BASE_FS` and `MEDIUM_FS` (`:110`, `:114`). Every entry point that attests or
-holds is keyed to `BASE_FS`: `is_base` (`:118-120`), `Hold::of` (`:124-128`),
-activation (`activate.rs`), the reaper (`reap.rs`) and `program_path`
-(`core/src/syscall/net_handlers.rs:725-746`). The mount table holds 32 mounts
-(`fs/src/vfs/mount.rs:8`).
+**Serving sealed archives is solved, for the base and in memory for
+extensions.** `fs/src/basefs/` serves a newc archive from memory, every inode
+sealed: `BASE_FS` with up to sixteen generations, `MEDIUM_FS`, and a pool of
+32 activation instances (`basefs/extension.rs`) shown at `/opt/<name>`
+(Phase 1). The mount table holds 64 mounts.
 
 **Verity is an integrity check, not an authenticity one.** `fs/src/verity.rs`
 verifies a disk against a CRC-32 per block from a trailer (`:1-33`); nothing
 verifies a SHA-256 tree, and no kernel crate computes SHA-256. There is no
 file-backed block device (`fs/src/blockdev.rs` holds `MemoryBlockDevice`).
 
-**The private call table is nearly full.** `SYSCALL_PRIVATE_TABLE_SIZE` is 48
-(`abi/src/syscall/numbers.rs:36`) and offsets 0 through 45 are taken.
+**The private call table is full.** `SYSCALL_PRIVATE_TABLE_SIZE` is 48 and
+`ext_activate` and `ext_deactivate` took the last two slots; the next private
+call grows the table.
 
 **The kernel's command line stays in the kernel.** It is parsed in
-`boot/src/early_init.rs:505-611`; userland learns of it only through
-`sys_info`'s boot flags.
+`boot/src/early_init.rs`; userland learns of it only through `sys_info`'s boot
+flags, `BOOT_FLAG_EXTENSIONS_OFF` among them.
 
 **Outside the base, software has the session's power only.**
 - Apps install into `/usr/local` or `~/.local` as the session, with no
@@ -113,8 +111,8 @@ more than one person" (`slibc/src/conf.rs:48-63`); there is no `/etc/passwd`.
 **Ports are not privileged.** `Port::is_privileged` (`net/src/types.rs:124`)
 gates nothing; any process may bind any port.
 
-**`/run` is uid 0's** (`fs/src/vfs/init.rs:512`): only init makes directories
-there.
+**`/run` is uid 0's** (`fs/src/vfs/init.rs`): only init makes directories
+there. `/opt` and `/opt/bin` are in `ROOT_LAYOUT`, uid 0's.
 
 **Signatures.** `tls-core` has SHA-256, SHA-512, X25519, ECDSA and RSA, and no
 Ed25519. OpenSSH's `ssh-keygen` is in every toolchain install.
@@ -267,9 +265,9 @@ named as `slopos_abi::caps` names them.
   next program's.
 - **Peers.** `SO_PEERPROGRAM` answers `/opt/<name>/<path>` in the activation's
   tree, and `SO_PEEREXTENSION` at `SOL_SLOPOS` answers its label. privd reads
-  both, and `SO_PEERCRED`, before every verdict.
+  both before every verdict; `SO_PEERCRED` stands as connected.
 - **`BOOT_FLAG_EXTENSIONS_OFF`** in `sys_info`, set by `extensions=off` on the
-  command line.
+  command line, under which `ext_activate` answers `EPERM`.
 - **Memory.** Activations share a budget, an eighth of usable memory by
   default (`ext.memory=<percent>`), at most 32 at once. Phase 5 lifts it.
 - **Base interface 5**: the two calls, the socket option, the boot flag, the
@@ -427,20 +425,21 @@ extensions to disk:
 Five phases. Each ends with something that runs, and lands as commits of its
 own.
 
-### Phase 1: Activation and identity
+### Phase 1: Activation and identity — done
 
-- `ExtensionUpdate`; `ext_activate` and `ext_deactivate`; `basefs`
-  generalised to a pool of instances; `/opt/<name>` mounts and the mount
-  table; `Program::Extension`; identity that lasts while the program does;
-  `SO_PEEREXTENSION`; `BOOT_FLAG_EXTENSIONS_OFF`; the memory budget; base
-  interface 5.
-- `root` and `/run/init` require a base program.
-- `/opt` and `/opt/bin` in `ROOT_LAYOUT` and its mirrors.
-- Graded by kernel tests: an activation served and attested; a replacement
-  switching the mount in one step; a library mapped from elsewhere turning
-  the process and its sockets `Other`; an exec after a connect turning the
-  socket `Other`; the budget refusing; an old activation reaped once unheld;
-  and a utest in which a uid-0 program outside the base is refused as `root`.
+`ExtensionUpdate`; `ext_activate` and `ext_deactivate` over a pool of 32
+`basefs` instances shown read-only and pinned at `/opt/<name>`, replaced in
+one step and reaped once unheld; `Program::Extension` and `Program::admits`;
+a 64-bit program instance behind `Identity::now`, so `SO_PEERPROGRAM` and the
+new `SO_PEEREXTENSION` end with an exec, a foreign mapping or the exit;
+`extensions=off` and `ext.memory=`; base interface 5. privd's `root` and
+`/run/init`'s uid-0 commands require a base program, read again per request.
+`/opt` and `/opt/bin` joined `ROOT_LAYOUT` and its mirrors. Graded by
+`fs::tests::extensions`, the extension cases of `syscall::tests_peer`,
+`peer_test`'s `an_extension_program_names_its_activation` and
+`an_exec_after_a_connect_ends_the_program`, `privd_test`'s
+`uid_0_outside_the_base_is_no_root`, and `supervision_test` holding
+`/run/init` to `/sbin/init` across a re-execution.
 
 ### Phase 2: Format, signatures and the install
 
@@ -448,8 +447,8 @@ own.
   the record, the keys file, the ceilings, the symbol check.
 - Ed25519 and SSHSIG verification in `tls-core`, beside its other primitives,
   tested against `ssh-keygen -Y sign` output.
-- `/bin/extctl` and the actions in the table; the base ceiling file; the
-  sealed, pinned store.
+- `/bin/extctl` and the actions in the table, with `ExtensionUpdate` joining
+  `DELEGABLE` for them; the base ceiling file; the sealed, pinned store.
 - `tools/extension`, `just extension DIR`, and `remote.py install
   --extension`.
 - Graded by `extension_test`: a first install asks and grants what it read;
@@ -536,7 +535,10 @@ own, all building on extensions:
   authority, a recorded identity ends with the program it names, and a base
   program, not the kernel, checks signatures.
 - **uid 0 is not authority.** `root` is uid 0 running base code; an extension
-  never runs as uid 0, its mechanisms included.
+  never runs as uid 0, its mechanisms included. A connection code outside the
+  base makes is never root, but uid-0 code outside the base can still start a
+  base program as uid 0, so it is that no extension runs as uid 0 that keeps
+  extensions from root.
 - **The extension declares; the owner grants; the base bounds.** A first
   install's grant is the line the person read; a signed install's is its
   declaration under the key's ceilings; both sit under the base's ceiling,
@@ -561,6 +563,42 @@ own, all building on extensions:
 - **Memory first, then disk.** In-memory activation reuses `basefs` and makes
   every layer above testable at once; on-disk images follow and replace the
   in-memory form for extensions.
+- **An activation is an instance.** Each is a `basefs` instance of its own
+  from a fixed pool, numbered across every activation, so an inode names its
+  activation for good, replacement is a mount swap rather than a generation
+  switch, and the reaper frees an activation as it frees a retired base
+  generation. A program's word tags an extension's inode with its top bit, so
+  every generation number stays below 2^31. A replacement takes a vacant
+  instance, so with the pool full an extension can be deactivated but not
+  updated until one is freed; and a program of the activation replaced that
+  opens a library by its `/opt/<name>` path afterwards reaches the new
+  activation's and forfeits, as mixing two activations' code must. Any
+  process that keeps a file of a replaced activation open keeps that copy
+  resident against the shared budget and pool, as with the base; on-disk
+  images lift the budget. Like a base directory across a switch, a working
+  directory or `dirfd` under `/opt/<name>` follows a replacement to the next
+  activation's. A script is attested by the path it was found at
+  and reopened there by its interpreter, so across a replacement it can read
+  the next activation's bytes under the first's identity, and after a
+  deactivation whatever the root holds at that path: privd judges an
+  extension's script by its label from Phase 4, and only an `ExtensionUpdate`
+  or `DacOverride` holder can stage either.
+- **A program instance, never a socket walk.** Every change of a process's
+  program moves a 64-bit counter (the lesson of Linux's 32-bit `exec_id`);
+  a recorded identity holds its process handle and instance and is judged
+  when read. Exec, exit and a foreign mapping touch no socket. Init's
+  re-execution of itself keeps its instance, decided before its old image
+  goes, so no reader sees its identity lapse in between.
+- **A lapse is for good, so read the label first.** A recorded program only
+  ever stops holding; a reader asks `SO_PEEREXTENSION` before
+  `SO_PEERPROGRAM`, so an extension's identity lapsing between the two reads
+  answers no path rather than a path that looks like the base's.
+- **`extensions=off` is the kernel's.** The flag refuses `ext_activate`
+  itself, not only init's boot step, so recovery holds whatever userland
+  does.
+- **No authority before its user.** `ExtensionUpdate` exists from Phase 1 and
+  init holds it, but joins `DELEGABLE` only with the Phase 2 actions that run
+  under it.
 
 ## Constraints
 

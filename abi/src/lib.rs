@@ -17,6 +17,7 @@ pub mod draw;
 pub mod errno;
 pub mod error;
 pub mod event;
+pub mod extension;
 pub mod fate;
 pub mod file_ops;
 pub mod fs;

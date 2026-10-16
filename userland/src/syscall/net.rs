@@ -188,8 +188,9 @@ pub fn peer_pidfd(fd: RawFd) -> SyscallResult<super::OwnedFd> {
     Ok(unsafe { super::OwnedFd::from_raw(i32::from_ne_bytes(raw)) })
 }
 
-/// The base path of the program the peer ran when it connected, or `None` for
-/// a program outside the base.
+/// The path of the program the peer ran when it connected, as long as it
+/// still runs it: a base path, or `/opt/<name>/…` for an extension's; `None`
+/// for any other.
 pub fn peer_program(fd: RawFd) -> SyscallResult<Option<Vec<u8>>> {
     let mut need = 0u32;
     let sized = Sys::getsockopt(
@@ -212,7 +213,36 @@ pub fn peer_program(fd: RawFd) -> SyscallResult<Option<Vec<u8>>> {
         &mut path,
     )?;
     path.truncate(len);
-    Ok(Some(path))
+    Ok((!path.is_empty()).then_some(path))
+}
+
+/// The activation the peer's program is of, as long as it still runs it;
+/// `None` for a base program or any other.
+pub fn peer_extension(fd: RawFd) -> SyscallResult<Option<slopos_abi::extension::Label>> {
+    let mut raw = [0u8; slopos_abi::extension::Label::LEN];
+    let len = getsockopt(
+        fd,
+        slopos_abi::syscall::SOL_SLOPOS,
+        slopos_abi::syscall::SO_PEEREXTENSION,
+        &mut raw,
+    )?;
+    match len {
+        0 => Ok(None),
+        _ => slopos_abi::extension::Label::from_bytes(&raw[..len])
+            .map(Some)
+            .ok_or(slopos_slibc::errno::EIO.into()),
+    }
+}
+
+/// The base path of the program the peer runs, `None` once it runs anything
+/// else: code from outside the base, an extension's among it.
+pub fn peer_base_program(fd: RawFd) -> SyscallResult<Option<Vec<u8>>> {
+    // In this order: a program that stops holding never holds again, so an
+    // extension's that lapses between the two reads answers no path.
+    if peer_extension(fd)?.is_some() {
+        return Ok(None);
+    }
+    peer_program(fd)
 }
 
 pub fn accept(fd: RawFd, peer: Option<&mut SockAddrIn>) -> SyscallResult<super::OwnedFd> {

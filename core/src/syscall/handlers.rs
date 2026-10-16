@@ -20,9 +20,10 @@ use crate::syscall::cred_handlers::{
 use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
     syscall_access, syscall_base_activate, syscall_base_monitor, syscall_chmod, syscall_chown,
-    syscall_close, syscall_dup, syscall_dup2, syscall_dup3, syscall_faccessat, syscall_faccessat2,
-    syscall_fchmod, syscall_fchmodat, syscall_fchmodat2, syscall_fchown, syscall_fchownat,
-    syscall_fcntl, syscall_fdatasync, syscall_flock, syscall_fstat, syscall_fstatfs, syscall_fsync,
+    syscall_close, syscall_dup, syscall_dup2, syscall_dup3, syscall_ext_activate,
+    syscall_ext_deactivate, syscall_faccessat, syscall_faccessat2, syscall_fchmod,
+    syscall_fchmodat, syscall_fchmodat2, syscall_fchown, syscall_fchownat, syscall_fcntl,
+    syscall_fdatasync, syscall_flock, syscall_fstat, syscall_fstatfs, syscall_fsync,
     syscall_getdents64, syscall_ioctl, syscall_lchown, syscall_link, syscall_linkat, syscall_lseek,
     syscall_lstat, syscall_mkdir, syscall_mkdirat, syscall_mknod, syscall_mknodat, syscall_mount,
     syscall_newfstatat, syscall_open, syscall_openat, syscall_pipe, syscall_pipe2, syscall_poll,
@@ -308,6 +309,8 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     [SYSCALL_CAPS_DROP]          => syscall_caps_drop,          "caps_drop";
     [SYSCALL_BASE_ACTIVATE]      => syscall_base_activate,      "base_activate";
     [SYSCALL_BASE_MONITOR]       => syscall_base_monitor,       "base_monitor";
+    [SYSCALL_EXT_ACTIVATE]       => syscall_ext_activate,       "ext_activate";
+    [SYSCALL_EXT_DEACTIVATE]     => syscall_ext_deactivate,     "ext_deactivate";
 };
 
 /// The entry for `sysno`, or `None` when nothing is registered there.
@@ -361,7 +364,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 192;
+pub const SYSCALL_ENTRY_COUNT: usize = 194;
 
 /// The recorded shape of the classification.
 ///
@@ -394,6 +397,7 @@ const CAP_COUNTS: [(Capability, usize); Capability::ALL.len()] = [
     (Capability::DacOverride, 0),
     (Capability::SchedHigh, 0),
     (Capability::BaseUpdate, 1),
+    (Capability::ExtensionUpdate, 2),
 ];
 
 const _: () = {

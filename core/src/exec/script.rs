@@ -24,11 +24,12 @@ pub struct ExecProgram {
     /// Words the interpreter chain puts before the caller's `argv[1..]`;
     /// empty for a binary.
     prefix: KVec<KVec<u8>>,
-    /// The file the caller named, as long as every link of the chain is the
-    /// base's, each interpreter is named by an absolute path, and each script
-    /// by the absolute path it was found at: its interpreter opens that
-    /// spelling again, and one that walks a link, a `..` or a working
-    /// directory someone else can change could reach another file by then.
+    /// The file the caller named, as long as it is the base's or an
+    /// activation's, every other link of the chain is one it may run, each
+    /// interpreter is named by an absolute path, and each script by the
+    /// absolute path it was found at: its interpreter opens that spelling
+    /// again, and one that walks a link, a `..` or a working directory someone
+    /// else can change could reach another file by then.
     pub program: Program,
 }
 
@@ -68,10 +69,10 @@ pub fn resolve_exec(path: &[u8], cwd: &[u8], who: &Subject) -> Result<ExecProgra
     let mut program = None;
     for _ in 0..=SCRIPT_NESTING_MAX {
         let (header, link) = read_header(&image, who)?;
-        program = match (program, link) {
-            (None, link) => Some(link),
-            (Some(_), Program::Other) => Some(Program::Other),
-            (named, Program::Base(_)) => named,
+        program = match program {
+            None => Some(link),
+            Some(named) if named.admits(link) => Some(named),
+            Some(_) => Some(Program::Other),
         };
         let Some(line) = parse_shebang(header.as_slice())? else {
             let program = match program {

@@ -44,6 +44,9 @@ pub fn identity_of(task: &Task) -> Identity {
         .as_deref()
         .map_or(Cred::NOBODY, |process| process.cred());
     let tgid = task.tgid;
+    let (program, instance) = process
+        .as_deref()
+        .map_or((Program::Other, 0), |process| process.program_as_of_now());
     Identity {
         pid: if tgid == slopos_abi::task::INVALID_TASK_ID {
             task.task_id
@@ -52,7 +55,9 @@ pub fn identity_of(task: &Task) -> Identity {
         },
         uid: cred.euid,
         gid: cred.egid,
-        program: process.map_or(Program::Other, |process| process.program()),
+        program,
+        process: process.map_or(0, |process| process.handle_raw()),
+        instance,
     }
 }
 

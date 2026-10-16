@@ -108,7 +108,7 @@ impl Control {
         let mut kept = Vec::new();
         for mut client in std::mem::take(&mut self.clients) {
             match client.read() {
-                Some(Ok(line)) => match judge(client.uid, &line) {
+                Some(Ok(line)) => match judge(client.uid, base_program(&client.fd), &line) {
                     Ok(command) => admitted.push(Request {
                         command,
                         uid: client.uid,
@@ -151,13 +151,23 @@ impl Client {
     }
 }
 
-/// The session may restart itself; anything else is uid 0's, as privd's
-/// `root` principal is: `SO_PEERCRED` names no capability.
-fn judge(uid: u32, line: &[u8]) -> Result<Command, String> {
+/// Whether the peer at `fd` runs a base program, as of its request.
+fn base_program(fd: &OwnedFd) -> bool {
+    net::peer_base_program(fd.raw()).is_ok_and(|program| program.is_some())
+}
+
+/// The session may restart itself; anything else is uid 0 running a base
+/// program's, as privd's `root` principal is: `SO_PEERCRED` names no
+/// capability, and uid 0 alone is no authority.
+fn judge(uid: u32, base: bool, line: &[u8]) -> Result<Command, String> {
     let command = Command::parse(line).ok_or("not a request init takes")?;
-    let allowed = uid == 0 || (uid == SESSION_UID && command == Command::RestartSession);
+    let allowed = (uid == 0 && base) || (uid == SESSION_UID && command == Command::RestartSession);
     if !allowed {
-        return Err(format!("uid {uid} may not ask for {}", command.word()));
+        let program = if base { "" } else { " outside the base" };
+        return Err(format!(
+            "uid {uid}{program} may not ask for {}",
+            command.word()
+        ));
     }
     Ok(command)
 }

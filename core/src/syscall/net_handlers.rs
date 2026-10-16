@@ -6,8 +6,8 @@ use slopos_abi::net::{
     SOCK_STREAM, SOCK_TYPE_MASK, SockAddrIn,
 };
 use slopos_abi::syscall::{
-    IPPROTO_TCP, MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS, SO_ERROR, SO_PEERCRED, SO_PEERPIDFD,
-    SO_PEERPROGRAM, SOL_SLOPOS, SOL_SOCKET, UCred,
+    IPPROTO_TCP, MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS, SO_ERROR, SO_PEERCRED, SO_PEEREXTENSION,
+    SO_PEERPIDFD, SO_PEERPROGRAM, SOL_SLOPOS, SOL_SOCKET, UCred,
 };
 use slopos_abi::unix::SockAddrUn;
 use slopos_fs::fileio::FdTable;
@@ -20,7 +20,7 @@ use slopos_net::types::{Ipv4Addr, Port, SockAddr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{dns, socket, unix_socket, unix_socket_file_ops};
 use slopos_ostd::KVec;
-use slopos_ostd::process::Program;
+use slopos_ostd::process::{Identity, Program};
 
 use crate::syscall::args::{Fd, UserBytes, UserPtr};
 use crate::syscall::common::{errno_from_neg, errno_from_neg64};
@@ -665,7 +665,8 @@ define_syscall!(syscall_getsockopt
     Ok(())
 });
 
-/// The peer options: what the socket's peer attested when it connected.
+/// The peer options: what the socket's peer attested when it connected, its
+/// program for as long as it still runs it.
 #[inline(never)]
 fn unix_getsockopt(
     table: FdTable,
@@ -684,7 +685,7 @@ fn unix_getsockopt(
         return Err(Errno::EINVAL);
     }
     let len = len as usize;
-    let peer = unix_socket::unix_peer_identity(sh)?;
+    let peer = unix_socket::unix_peer_identity(sh)?.map(Identity::now);
     match (level, optname) {
         (SOL_SOCKET, SO_ERROR) => write_option(&0i32.to_ne_bytes(), len, optval, optlen),
         (SOL_SOCKET, SO_PEERCRED) => {
@@ -708,36 +709,54 @@ fn unix_getsockopt(
                 let _ = slopos_fs::file_close_fd(table, fd);
             })
         }
-        (SOL_SLOPOS, SO_PEERPROGRAM) => match program_path(peer.ok_or(Errno::ENOTCONN)?.program)? {
-            None => write_option(&[], len, optval, optlen),
-            Some(path) if len < path.len() => {
-                copy_to_user(optlen, &(path.len() as u32)).map_err(|_| Errno::EFAULT)?;
-                Err(Errno::ERANGE)
-            }
-            Some(path) => write_option(&path, len, optval, optlen),
-        },
+        (SOL_SLOPOS, SO_PEERPROGRAM) => {
+            let path = program_path(peer.ok_or(Errno::ENOTCONN)?.program)?;
+            whole_option(path.as_deref().unwrap_or_default(), len, optval, optlen)
+        }
+        (SOL_SLOPOS, SO_PEEREXTENSION) => {
+            let label =
+                slopos_fs::basefs::extension::label_of(peer.ok_or(Errno::ENOTCONN)?.program);
+            let bytes = label.map(|label| label.to_bytes());
+            whole_option(
+                bytes.as_ref().map_or(&[][..], |b| &b[..]),
+                len,
+                optval,
+                optlen,
+            )
+        }
         _ => Err(Errno::ENOPROTOOPT),
     }
 }
 
+/// `value` whole, or `ERANGE` with the length it needs in `optlen`.
+fn whole_option(
+    value: &[u8],
+    len: usize,
+    optval: u64,
+    optlen: MmUserPtr<u32>,
+) -> Result<(), Errno> {
+    if len < value.len() {
+        copy_to_user(optlen, &(value.len() as u32)).map_err(|_| Errno::EFAULT)?;
+        return Err(Errno::ERANGE);
+    }
+    write_option(value, len, optval, optlen)
+}
+
 /// The path of `program` in its own generation, `None` for a program outside
-/// the base or of a generation that has gone.
+/// the base and every activation, or of a generation that has gone.
 fn program_path(program: Program) -> Result<Option<KVec<u8>>, Errno> {
-    let Program::Base(inode) = program else {
-        return Ok(None);
-    };
-    let base = &slopos_fs::basefs::BASE_FS;
     let gone = |e: slopos_fs::VfsError| match e {
         slopos_fs::VfsError::NotFound => Ok(None),
         e => Err(e.to_errno()),
     };
-    let need = match base.path_of(inode.get(), &mut []) {
+    let need = match slopos_fs::basefs::program_path(program, &mut []) {
         Ok(need) => need,
         Err(e) => return gone(e),
     };
     let mut path = KVec::<u8>::zeroed(need).map_err(|_| Errno::ENOMEM)?;
-    match base.path_of(inode.get(), &mut path) {
-        Ok(_) => Ok(Some(path)),
+    match slopos_fs::basefs::program_path(program, &mut path) {
+        Ok(len) if len == need => Ok(Some(path)),
+        Ok(_) => Ok(None),
         Err(e) => gone(e),
     }
 }

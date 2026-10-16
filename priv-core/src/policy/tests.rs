@@ -105,7 +105,8 @@ fn the_first_matching_principal_decides() {
     let policy = Policy::parse(EXAMPLE).unwrap();
     let install = policy.action("org.slopos.boot.install").unwrap();
     let toggle = policy.action("org.slopos.net.toggle").unwrap();
-    let root = Requester::new(0, None, false);
+    let root = Requester::new(0, Some("/bin/shell"), false);
+    let root_outside = Requester::new(0, None, false);
     let session = Requester::new(SESSION_UID, Some("/bin/shell"), false);
     let outsider = Requester::new(SESSION_UID, None, false);
     let compositor = Requester::new(SESSION_UID, Some("/bin/compositor"), false);
@@ -114,6 +115,11 @@ fn the_first_matching_principal_decides() {
     let stranger = Requester::new(4242, None, false);
 
     assert_eq!(install.admits(&root), Verdict::Run);
+    assert_eq!(
+        install.admits(&root_outside),
+        Verdict::Refuse,
+        "uid 0 outside the base is no principal"
+    );
     assert_eq!(install.admits(&session), Verdict::Ask);
     assert_eq!(install.admits(&outsider), Verdict::Ask);
     assert_eq!(install.admits(&paired), Verdict::Run);
@@ -385,7 +391,7 @@ fn mutated_policies_parse_or_name_a_line() {
 #[test]
 fn the_shipped_policy_says_what_the_access_model_does() {
     let policy = Policy::parse(SHIPPED).unwrap();
-    let root = Requester::new(0, None, false);
+    let root = Requester::new(0, Some("/bin/shell"), false);
     let session = Requester::new(SESSION_UID, Some("/bin/shell"), false);
     let paired = Requester::new(SESSION_UID, Some(REMOTED), true);
     let paired_list = [
@@ -400,6 +406,12 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     for action in policy.actions() {
         assert_eq!(action.uid, 0, "{}", action.name);
         assert_eq!(action.admits(&root), Verdict::Run, "{}", action.name);
+        assert_eq!(
+            action.admits(&Requester::new(0, None, false)),
+            Verdict::Refuse,
+            "{}: uid 0 outside the base",
+            action.name
+        );
         assert_ne!(action.admits(&session), Verdict::Refuse, "{}", action.name);
         let pairable = paired_list.iter().any(|p| action.name.starts_with(p));
         assert_eq!(

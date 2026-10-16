@@ -124,8 +124,13 @@ pub struct Process {
     cred: SeqLock<Cred>,
 
     /// A [`Program`] in its word form: set by spawn, exec and fork, lowered to
-    /// `Other` by an exec's reset and by code from outside the base.
+    /// `Other` by an exec's reset and by code from outside what it may run.
     program: AtomicU64,
+
+    /// Moved on by every change of [`program`](Self::program) but init's
+    /// re-execution of itself, so an [`Identity`] captured under one program
+    /// never stands for the next. 64 bits, so it never wraps.
+    instance: AtomicU64,
 
     /// The login tag, 0 for none: copied from the creator, or set by a
     /// spawner holding `SetId` before the process runs.
@@ -170,6 +175,7 @@ impl Process {
             );
             write_field!(slot, cred, SeqLock::new(cred));
             write_field!(slot, program, AtomicU64::new(Program::Other.to_raw()));
+            write_field!(slot, instance, AtomicU64::new(0));
             write_field!(slot, login, AtomicU32::new(0));
             write_field!(slot, proc_charge, charge);
             Ok::<_, AllocError>(slot.finish())
@@ -288,9 +294,42 @@ impl Process {
         Program::from_raw(self.program.load(Ordering::Acquire))
     }
 
+    /// Run `program` as a new instance of it.
     #[inline]
     pub fn set_program(&self, program: Program) {
         self.program.store(program.to_raw(), Ordering::Release);
+        self.instance.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Run no attested program from now on.
+    #[inline]
+    pub fn forfeit_program(&self) {
+        self.set_program(Program::Other);
+    }
+
+    /// Run `program` as the instance already running: init re-executing
+    /// itself, which keeps what it attested.
+    #[inline]
+    pub fn keep_program(&self, program: Program) {
+        self.program.store(program.to_raw(), Ordering::Release);
+    }
+
+    #[inline]
+    pub fn program_instance(&self) -> u64 {
+        self.instance.load(Ordering::Acquire)
+    }
+
+    /// The program and the instance it is, read as one: the instance moves
+    /// after the program does, so a pair read across a change names an
+    /// instance that ends.
+    pub fn program_as_of_now(&self) -> (Program, u64) {
+        loop {
+            let instance = self.instance.load(Ordering::Acquire);
+            let program = self.program();
+            if self.instance.load(Ordering::Acquire) == instance {
+                return (program, instance);
+            }
+        }
     }
 
     #[inline]

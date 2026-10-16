@@ -142,10 +142,15 @@ fn privd_serves() -> bool {
 }
 
 /// A uid-0 request to re-execute is answered by the new image, which keeps
-/// the privd it ran and starts privd again when it dies.
+/// the privd it ran, starts privd again when it dies, and is still the
+/// program its sockets attest: the consent pair rests on that.
 fn init_reexecutes_keeping_what_it_serves() -> bool {
     if asked_as(SESSION_UID, Command::Reexec) != Some(false) {
         note("the session had init re-execute");
+        return false;
+    }
+    if !init_listens() {
+        note("/run/init does not attest /sbin/init before the re-execution");
         return false;
     }
     let privd = || init_control::listener(slopos_priv_core::SOCKET);
@@ -159,7 +164,24 @@ fn init_reexecutes_keeping_what_it_serves() -> bool {
         note(&format!("privd was {before:?} and is {after:?}"));
         return false;
     }
+    if !init_listens() {
+        note("/run/init no longer attests /sbin/init after the re-execution");
+        return false;
+    }
     a_killed_privd_is_started_again()
+}
+
+/// Whether `/run/init`, which init bound at boot and keeps across a
+/// re-execution, attests `/sbin/init`.
+fn init_listens() -> bool {
+    use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
+    use slopos_userland::syscall::net;
+    let Ok(fd) = net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0) else {
+        return false;
+    };
+    net::connect_unix(fd.raw(), init_control::SOCKET.as_bytes()).is_ok()
+        && net::peer_program(fd.raw()).ok().flatten().as_deref()
+            == Some(slopos_priv_core::INIT.as_bytes())
 }
 
 /// A privd killed outright is replaced by one that serves.

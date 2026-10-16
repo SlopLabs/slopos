@@ -7,8 +7,8 @@ use slopos_abi::syscall::{POLLIN, POLLOUT};
 use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::lock_class;
-use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{Charge, FileBacking, try_charge};
+use slopos_ostd::process::{AccountId, Program};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use crate::fileio::OpenMode;
@@ -186,9 +186,9 @@ fn register_vnode(
     // file got the number next. The re-check does not close the window — an
     // inode reallocated *and* re-bound to this same path still passes — but it
     // does close the case that matters, where the name is gone.
-    // A base inode is never reused: an open keeps the generation its walk
-    // found while that is resident.
-    let gone = if crate::basefs::is_base(fs) {
+    // A base or activation inode is never reused: an open keeps the
+    // generation its walk found while that is resident.
+    let gone = if crate::basefs::program_of(fs, inode) != Program::Other {
         fs.stat(inode).is_err()
     } else {
         !still_resolves(path, cwd, resolve_flags, who, fs, inode)
@@ -234,16 +234,23 @@ pub fn vfs_dir_handle_still_names(handle: usize, path: &[u8]) -> bool {
     let Some((fs, inode)) = resolve(handle) else {
         return false;
     };
-    // A switch moves every base directory to another generation's inode at
-    // the same path.
-    if crate::basefs::is_base(fs) {
+    // A switch or a replacement moves every directory of the base or an
+    // activation to another generation's inode at the same path.
+    let attested = crate::basefs::program_of(fs, inode);
+    if attested != Program::Other {
         return crate::vfs::path::resolve_path_at(
             path,
             b"/",
             crate::vfs::path::RESOLVE_FOLLOW,
             &crate::vfs::Subject::KERNEL,
         )
-        .is_ok_and(|again| crate::basefs::is_base(again.fs));
+        .is_ok_and(|again| {
+            matches!(
+                (attested, crate::basefs::program_of(again.fs, again.inode)),
+                (Program::Base(_), Program::Base(_))
+                    | (Program::Extension(_), Program::Extension(_))
+            )
+        });
     }
     still_resolves(
         path,
