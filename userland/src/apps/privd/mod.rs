@@ -253,12 +253,12 @@ fn consent_channel() -> Option<OwnedFd> {
     from_init.then_some(fd)
 }
 
-/// The base's policy, refused whole when a principal names a dynamically
-/// linked program: the loader would take a library from outside the base for
-/// it while its identity still reads as the base's.
+/// The base's policy as it stands on this boot, refused whole when a
+/// principal of any action names a dynamically linked program: the loader
+/// would take a library from outside the base for it while its identity still
+/// reads as the base's.
 fn load_policy() -> Result<Policy, String> {
-    let text = std::fs::read_to_string(POLICY).map_err(|e| format!("{POLICY}: {e}"))?;
-    let policy = Policy::parse(&text).map_err(|e| format!("{POLICY}: {e}"))?;
+    let policy = crate::privd::whole_policy()?;
     for action in policy.actions() {
         for allow in &action.allows {
             let path = match &allow.principal {
@@ -275,7 +275,7 @@ fn load_policy() -> Result<Policy, String> {
             }
         }
     }
-    Ok(policy)
+    Ok(policy.for_boot(crate::privd::on_the_medium()))
 }
 
 fn listen() -> Result<OwnedFd, String> {

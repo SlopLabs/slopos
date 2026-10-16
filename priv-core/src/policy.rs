@@ -20,7 +20,8 @@
 //! principal matches decides. With `cwd` the mechanism runs in the directory
 //! the request must send, and without it in `/`; `exclusive` lets one
 //! mechanism of its group run at a time, the group being the action's name
-//! unless one is given.
+//! unless one is given. An action marked `medium` exists only on a boot of
+//! the install medium.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -80,6 +81,7 @@ pub struct Action {
     pub describe: String,
     pub cwd: bool,
     pub exclusive: Option<String>,
+    pub medium: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -245,6 +247,13 @@ impl Policy {
     pub fn actions(&self) -> &[Action] {
         &self.actions
     }
+
+    /// The actions that exist on a boot: those marked `medium` only when it
+    /// booted the install medium.
+    pub fn for_boot(mut self, medium: bool) -> Policy {
+        self.actions.retain(|action| medium || !action.medium);
+        self
+    }
 }
 
 #[derive(Default)]
@@ -258,6 +267,7 @@ struct Draft {
     describe: Option<String>,
     cwd: bool,
     exclusive: Option<String>,
+    medium: bool,
 }
 
 impl Draft {
@@ -370,6 +380,7 @@ impl Draft {
                 once(&mut self.describe, text.to_string())
             }
             "cwd" if rest.is_empty() => flag(&mut self.cwd),
+            "medium" if rest.is_empty() => flag(&mut self.medium),
             "exclusive" => {
                 let group = match single_or_none(&mut words)? {
                     Some(group) if valid_word(group) => group.to_string(),
@@ -400,6 +411,7 @@ impl Draft {
             allows: self.allows,
             cwd: self.cwd,
             exclusive: self.exclusive,
+            medium: self.medium,
         })
     }
 }

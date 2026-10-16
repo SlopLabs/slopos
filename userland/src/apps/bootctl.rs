@@ -16,6 +16,12 @@
 //! system is up, makes the entry Limine reports as booted
 //! (`LoaderEntrySelected`) the default, `LoaderEntryDefault`.
 //!
+//! `--boot` names another boot partition, as a rescue from the install
+//! medium does for the disk it repairs. Its loader has not run this boot, so
+//! what it offers is what the configuration beside SlopOS's loader on that
+//! disk renders, and what it boots by default and once is what the machine's
+//! variables say.
+//!
 //! Every file write is copy-on-write (`slopos_fat_core`), so no kernel or base
 //! is ever half replaced on the medium.
 //!
@@ -40,13 +46,16 @@ use std::ops::RangeInclusive;
 
 use slopos_boot_core::base::{self, Which};
 use slopos_boot_core::crash::Summary;
-use slopos_boot_core::{bli, kernel, layout};
+use slopos_boot_core::{bli, kernel, layout, limine};
 use slopos_fat_core::{Error as FatError, Volume};
-use slopos_tls_core::hash::{Hash, Sha256};
 
 use crate::app_entry::read_bounded;
 use crate::apps::coreutils::time::utc_from_epoch;
-use crate::boot_disk::{BlockFile, BootDisk, loader_entries, loader_var, open_fat, set_loader_var};
+use crate::base_image::sha256;
+use crate::boot_disk::{
+    BlockFile, BootDisk, loader_entries, loader_var, open_fat, partition_node, set_loader_var,
+    table_of, whole_disks,
+};
 use crate::privd::{self, Input};
 use crate::syscall::UserSysInfo;
 use crate::syscall::core as sys_core;
@@ -78,22 +87,37 @@ fn boot_partition(named: Option<&str>) -> Result<String, String> {
     }
 }
 
-/// What the loader reported on this boot, and what the system asked of it.
+/// What the loader of a boot partition offers, and what the system asked of it.
 struct Loader {
     entries: Vec<String>,
     selected: Option<String>,
     default: Option<String>,
     one_shot: Option<String>,
+    /// The loader is this boot's, and the records under [`SLOT_STATE`] its
+    /// slots'.
+    here: bool,
 }
 
 impl Loader {
-    fn read() -> Result<Loader, String> {
-        Ok(Loader {
-            entries: loader_entries()?,
-            selected: loader_var(bli::ENTRY_SELECTED)?,
-            default: loader_var(bli::ENTRY_DEFAULT)?,
-            one_shot: loader_var(bli::ENTRY_ONE_SHOT)?,
-        })
+    /// This boot's loader when no partition is `named` or the system booted
+    /// from it, and the loader of the disk it names otherwise.
+    fn of(named: Option<&str>) -> Result<Loader, String> {
+        match named {
+            Some(boot) if !booted_from(boot) => Ok(Loader {
+                entries: configured_entries(boot)?,
+                selected: None,
+                default: loader_var(bli::ENTRY_DEFAULT)?,
+                one_shot: loader_var(bli::ENTRY_ONE_SHOT)?,
+                here: false,
+            }),
+            _ => Ok(Loader {
+                entries: loader_entries()?,
+                selected: loader_var(bli::ENTRY_SELECTED)?,
+                default: loader_var(bli::ENTRY_DEFAULT)?,
+                one_shot: loader_var(bli::ENTRY_ONE_SHOT)?,
+                here: true,
+            }),
+        }
     }
 
     /// The entry a boot with nothing armed takes, or why it is not known.
@@ -121,8 +145,7 @@ impl Loader {
     }
 }
 
-fn status(boot: &str) -> Result<(), String> {
-    let loader = Loader::read()?;
+fn status(boot: &str, loader: &Loader) -> Result<(), String> {
     let show = |value: Option<&str>| value.unwrap_or("-").to_owned();
     println!("boot: {boot}");
     println!("booted: {}", show(loader.selected.as_deref()));
@@ -166,24 +189,16 @@ fn status(boot: &str) -> Result<(), String> {
                 layout::KERNEL_FILE
             );
             if let Ok(kernel) = volume.stat(&path) {
-                println!(
-                    "slot {}: kernel {} bytes{}",
-                    slot.name,
-                    kernel.size,
+                let last = if loader.here {
                     last_boot(&slot.name)
-                );
+                } else {
+                    String::new()
+                };
+                println!("slot {}: kernel {} bytes{last}", slot.name, kernel.size);
             }
         }
     }
     Ok(())
-}
-
-fn sha256(data: &[u8]) -> base::Digest {
-    let mut digest = [0u8; 32];
-    let mut hash = Sha256::new();
-    hash.update(data);
-    hash.finish_into(&mut digest);
-    digest
 }
 
 fn same_node(a: &str, b: &str) -> bool {
@@ -193,10 +208,46 @@ fn same_node(a: &str, b: &str) -> bool {
     }
 }
 
+fn booted_from(boot: &str) -> bool {
+    BootDisk::find().is_ok_and(|booted| same_node(&booted.boot_node, boot))
+}
+
+/// The entries the configuration beside SlopOS's loader offers on the disk
+/// whose boot partition is `boot`.
+fn configured_entries(boot: &str) -> Result<Vec<String>, String> {
+    let path = layout::LOADER_CONFIG.replace('\\', "/");
+    for disk in whole_disks()? {
+        let Some(table) = table_of(&disk) else {
+            continue;
+        };
+        let of_type = |kind| {
+            table
+                .partitions()
+                .filter(move |p| p.entry.type_guid == kind)
+        };
+        let holds_boot = of_type(layout::BOOT_TYPE)
+            .any(|p| partition_node(&disk, &p).is_ok_and(|node| same_node(&node, boot)));
+        if !holds_boot {
+            continue;
+        }
+        for esp in of_type(layout::ESP_TYPE) {
+            let config = partition_node(&disk, &esp)
+                .and_then(|node| open_fat(&node))
+                .and_then(|mut volume| volume.read_file(&path).map_err(|e| format!("{e:?}")));
+            if let Ok(config) = config {
+                let config = String::from_utf8_lossy(&config);
+                let ids = limine::offered_entries(&config).map(|id| id.map(char::from).collect());
+                return Ok(ids.collect());
+            }
+        }
+        return Err(format!("no ESP on {disk} holds {}", layout::LOADER_CONFIG));
+    }
+    Err(format!("{boot} is no disk's boot partition"))
+}
+
 /// The manifest of the base this system runs, when it booted from `boot`.
 fn running_manifest(boot: &str) -> Option<Vec<u8>> {
-    let booted = BootDisk::find().ok()?;
-    if !same_node(&booted.boot_node, boot) {
+    if !booted_from(boot) {
         return None;
     }
     fs::read(base::MANIFEST_PATH).ok()
@@ -283,9 +334,13 @@ fn write_verified(volume: &mut Volume<BlockFile>, path: &str, bytes: &[u8]) -> R
 
 /// A one-shot already armed for the slot is cleared first, so a failed install
 /// leaves nothing armed to boot it.
-fn install_slot(volume: &mut Volume<BlockFile>, slot: &str, kernel: &[u8]) -> Result<(), String> {
-    let loader = Loader::read()?;
-    let dir = slot_dir(volume, &loader, slot)?;
+fn install_slot(
+    volume: &mut Volume<BlockFile>,
+    loader: &Loader,
+    slot: &str,
+    kernel: &[u8],
+) -> Result<(), String> {
+    let dir = slot_dir(volume, loader, slot)?;
     let entry = format!("{}{slot}", layout::ENTRY_PREFIX);
     if loader.one_shot.as_deref() == Some(entry.as_str()) {
         set_loader_var(bli::ENTRY_ONE_SHOT, None)?;
@@ -293,7 +348,9 @@ fn install_slot(volume: &mut Volume<BlockFile>, slot: &str, kernel: &[u8]) -> Re
         println!("{entry} is no longer armed to boot once");
     }
     write_verified(volume, &format!("{dir}/{}", layout::KERNEL_FILE), kernel)?;
-    forget_last_boot(slot);
+    if loader.here {
+        forget_last_boot(slot);
+    }
     Ok(())
 }
 
@@ -307,6 +364,7 @@ fn forget_last_boot(slot: &str) {
 
 fn install(
     boot: &str,
+    loader: &Loader,
     slot: &str,
     kernel_path: &str,
     digest: Option<&String>,
@@ -315,7 +373,7 @@ fn install(
     let served = served_by(kernel_path, &kernel)?;
     let mut volume = open_fat(boot)?;
     check_serves_a_base(&mut volume, &served)?;
-    install_slot(&mut volume, slot, &kernel)?;
+    install_slot(&mut volume, loader, slot, &kernel)?;
     println!(
         "installed slot {slot} (entry {}{slot}), serving base interfaces {}-{}",
         layout::ENTRY_PREFIX,
@@ -325,7 +383,7 @@ fn install(
     Ok(())
 }
 
-fn clone_slot(boot: &str, from: &str, to: &str) -> Result<(), String> {
+fn clone_slot(boot: &str, loader: &Loader, from: &str, to: &str) -> Result<(), String> {
     if !layout::valid_slot(from) {
         return Err(format!(
             "slot '{from}': 1-8 lowercase letters or digits, other than base"
@@ -338,7 +396,7 @@ fn clone_slot(boot: &str, from: &str, to: &str) -> Result<(), String> {
         .map_err(|e| format!("{path}: {e:?}"))?;
     let served = served_by(&path, &kernel)?;
     check_serves_a_base(&mut volume, &served)?;
-    install_slot(&mut volume, to, &kernel)?;
+    install_slot(&mut volume, loader, to, &kernel)?;
     println!("copied slot {from}'s kernel to slot {to}");
     Ok(())
 }
@@ -375,8 +433,10 @@ fn when_taken(guarded: &[Guarded], interface: u32) -> String {
 }
 
 /// The [`Guarded`] kernels; an entry that is no slot's has none.
-fn guarded_kernels(volume: &mut Volume<BlockFile>) -> Result<Vec<Guarded>, String> {
-    let loader = Loader::read()?;
+fn guarded_kernels(
+    volume: &mut Volume<BlockFile>,
+    loader: &Loader,
+) -> Result<Vec<Guarded>, String> {
     let default = loader.default_entry()?.map(str::to_owned);
     let mut guarded: Vec<Guarded> = Vec::new();
     let entries = [&default, &loader.selected, &loader.one_shot];
@@ -450,7 +510,12 @@ fn shield_writes() {
 /// `previous` gets `current` only while `current` runs, so two bases installed
 /// without a boot between them keep the one that last ran, and no
 /// [`Guarded`] kernel is left serving neither base.
-fn base_install(boot: &str, image_path: &str, digest: Option<&String>) -> Result<(), String> {
+fn base_install(
+    boot: &str,
+    named: Option<&str>,
+    image_path: &str,
+    digest: Option<&String>,
+) -> Result<(), String> {
     let image = read_image(image_path, bases_limit(), digest)?;
     let new = base::check(&image, sha256).map_err(|e| format!("{image_path}: {e}"))?;
     let mut volume = open_fat(boot)?;
@@ -460,7 +525,8 @@ fn base_install(boot: &str, image_path: &str, digest: Option<&String>) -> Result
         let taken = match running.as_deref() {
             Some(manifest) if manifest == new.manifest => Some("it runs already".to_owned()),
             Some(_) => Some(activate(true, &image, new.interface, || {
-                guarded_kernels(&mut volume)
+                Loader::of(named)
+                    .and_then(|loader| guarded_kernels(&mut volume, &loader))
                     .map_or_else(|e| e, |guarded| when_taken(&guarded, new.interface))
             })),
             None => None,
@@ -485,7 +551,7 @@ fn base_install(boot: &str, image_path: &str, digest: Option<&String>) -> Result
              memory, and every boot loads both"
         ));
     }
-    let guarded = guarded_kernels(&mut volume)?;
+    let guarded = guarded_kernels(&mut volume, &Loader::of(named)?)?;
     for kernel in &guarded {
         let served = &kernel.served;
         if !served.contains(&new.interface) && !kept.is_ok_and(|n| served.contains(&n)) {
@@ -576,7 +642,7 @@ fn write_bases(
     Ok(())
 }
 
-fn base_rollback(boot: &str) -> Result<(), String> {
+fn base_rollback(boot: &str, named: Option<&str>) -> Result<(), String> {
     let mut volume = open_fat(boot)?;
     let previous = read_base(&mut volume, layout::BASE_PREVIOUS)?;
     let current = read_base(&mut volume, layout::BASE_CURRENT)?;
@@ -586,7 +652,7 @@ fn base_rollback(boot: &str) -> Result<(), String> {
     }
     let interface =
         base::interface(&previous).map_err(|e| format!("{}: {e}", layout::BASE_PREVIOUS))?;
-    let guarded = guarded_kernels(&mut volume)?;
+    let guarded = guarded_kernels(&mut volume, &Loader::of(named)?)?;
     write_bases(&mut volume, &guarded, &previous, &current)?;
     let described = base::describe(&previous);
     let taken = match running_manifest(boot) {
@@ -604,8 +670,8 @@ fn base_rollback(boot: &str) -> Result<(), String> {
 
 /// A boot armed here runs unattended, so it skips Limine's menu and its
 /// timeout.
-fn oneshot(entry: &str) -> Result<(), String> {
-    Loader::read()?.offered(entry)?;
+fn oneshot(loader: &Loader, entry: &str) -> Result<(), String> {
+    loader.offered(entry)?;
     let armed = loader_var(bli::TIMEOUT_ONE_SHOT)?;
     // The timeout first: left armed alone it skips one menu, where the entry
     // left alone would go through it.
@@ -620,8 +686,11 @@ fn oneshot(entry: &str) -> Result<(), String> {
 
 /// A slot becomes the default only while its kernel serves a base the boot
 /// partition holds, since a failed try falls back on it.
-fn set_default(boot: impl Fn() -> Result<String, String>, entry: &str) -> Result<(), String> {
-    let loader = Loader::read()?;
+fn set_default(
+    boot: impl Fn() -> Result<String, String>,
+    loader: &Loader,
+    entry: &str,
+) -> Result<(), String> {
     loader.offered(entry)?;
     if let Some(slot) = entry
         .strip_prefix(layout::ENTRY_PREFIX)
@@ -634,7 +703,7 @@ fn set_default(boot: impl Fn() -> Result<String, String>, entry: &str) -> Result
             .map_err(|e| format!("{path}: {e:?}"))?;
         check_serves_a_base(&mut volume, &served_by(&path, &kernel)?)?;
     }
-    write_default(&loader, entry)
+    write_default(loader, entry)
 }
 
 fn write_default(loader: &Loader, entry: &str) -> Result<(), String> {
@@ -647,8 +716,7 @@ fn write_default(loader: &Loader, entry: &str) -> Result<(), String> {
 
 /// The first of the layout's slots that does not boot by default: where a
 /// new system goes to be tried.
-fn spare() -> Result<(), String> {
-    let loader = Loader::read()?;
+fn spare(loader: &Loader) -> Result<(), String> {
     let default = loader.default_entry()?;
     let slot = layout::SLOTS
         .iter()
@@ -923,13 +991,19 @@ fn save_records() -> Result<(), String> {
 }
 
 /// The entry that booted runs a base, so it needs no check.
-fn commit() -> Result<(), String> {
-    let loader = Loader::read()?;
+fn commit(loader: &Loader) -> Result<(), String> {
+    if !loader.here {
+        return Err(
+            "commit keeps what this boot booted, and the system did not boot from \
+                    the partition --boot names"
+                .into(),
+        );
+    }
     let booted = loader
         .selected
         .clone()
         .ok_or("the boot loader did not report the booted entry")?;
-    write_default(&loader, &booted)
+    write_default(loader, &booted)
 }
 
 const USAGE: &str = "usage: bootctl [--boot /dev/<node>] <command>
@@ -955,20 +1029,21 @@ fn run(args: &[String]) -> Result<(), String> {
         rest = &rest[2..];
     }
     let boot = || boot_partition(named);
+    let loader = || Loader::of(named);
     match rest {
-        [cmd] if cmd == "status" => status(&boot()?),
+        [cmd] if cmd == "status" => status(&boot()?, &loader()?),
         [cmd, slot, kernel, digest @ ..] if cmd == "install" => {
-            install(&boot()?, slot, kernel, digest_arg(digest)?)
+            install(&boot()?, &loader()?, slot, kernel, digest_arg(digest)?)
         }
-        [cmd, from, to] if cmd == "clone" => clone_slot(&boot()?, from, to),
+        [cmd, from, to] if cmd == "clone" => clone_slot(&boot()?, &loader()?, from, to),
         [cmd, sub, image, digest @ ..] if cmd == "base" && sub == "install" => {
-            base_install(&boot()?, image, digest_arg(digest)?)
+            base_install(&boot()?, named, image, digest_arg(digest)?)
         }
-        [cmd, sub] if cmd == "base" && sub == "rollback" => base_rollback(&boot()?),
-        [cmd, entry] if cmd == "oneshot" => oneshot(entry),
-        [cmd, entry] if cmd == "set-default" => set_default(boot, entry),
-        [cmd] if cmd == "spare" => spare(),
-        [cmd] if cmd == "commit" => commit(),
+        [cmd, sub] if cmd == "base" && sub == "rollback" => base_rollback(&boot()?, named),
+        [cmd, entry] if cmd == "oneshot" => oneshot(&loader()?, entry),
+        [cmd, entry] if cmd == "set-default" => set_default(boot, &loader()?, entry),
+        [cmd] if cmd == "spare" => spare(&loader()?),
+        [cmd] if cmd == "commit" => commit(&loader()?),
         [cmd] if cmd == "collect" => collect(),
         [cmd] if cmd == "reboot" => process::reboot(),
         _ => Err(USAGE.into()),

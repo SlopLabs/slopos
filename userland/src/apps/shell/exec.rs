@@ -1387,7 +1387,7 @@ fn exec_external(argv: &[Vec<u8>]) -> ! {
 fn exec_path(path_buf: &[u8], argv: &[Vec<u8>], script_fallback: bool) -> ! {
     let (envp_owned, envp_ptrs) = build_c_envp();
     let (argv_owned, argv_ptrs) = build_c_argv(argv);
-    let mut rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+    let mut rc = become_program(path_buf, &argv_ptrs, &envp_ptrs);
     drop(argv_owned);
     if script_fallback && rc == slopos_abi::Errno::ENOEXEC.raw() as i64 {
         let path_len = path_buf
@@ -1397,7 +1397,7 @@ fn exec_path(path_buf: &[u8], argv: &[Vec<u8>], script_fallback: bool) -> ! {
         let mut sh_argv = vec![b"sh".to_vec(), path_buf[..path_len].to_vec()];
         sh_argv.extend_from_slice(&argv[1..]);
         let (sh_owned, sh_ptrs) = build_c_argv(&sh_argv);
-        rc = process::execve(b"/bin/sh\0".as_ptr(), sh_ptrs.as_ptr(), envp_ptrs.as_ptr());
+        rc = become_program(b"/bin/sh\0", &sh_ptrs, &envp_ptrs);
         drop(sh_owned);
     }
     drop(envp_owned);
@@ -1405,6 +1405,24 @@ fn exec_path(path_buf: &[u8], argv: &[Vec<u8>], script_fallback: bool) -> ! {
         shell_error_named(&argv[0], b"cannot execute");
     }
     sys_core::exit_with_code(STATUS_CANNOT_EXECUTE);
+}
+
+/// Exec the program at `path_buf`, a NUL-terminated path, with null-terminated
+/// `argv` and `envp`; in a rescue shell, run it holding the capabilities an
+/// exec would drop instead. Returns only the errno of one that did not start.
+fn become_program(path_buf: &[u8], argv: &[*const u8], envp: &[*const u8]) -> i64 {
+    if !super::rescue::active() {
+        return process::execve(path_buf.as_ptr(), argv.as_ptr(), envp.as_ptr());
+    }
+    let path_len = path_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(path_buf.len());
+    super::rescue::run(
+        &path_buf[..path_len],
+        &argv[..argv.len() - 1],
+        &envp[..envp.len() - 1],
+    )
 }
 
 /// Run one command in a fork of this shell — a subshell, a pipeline stage that

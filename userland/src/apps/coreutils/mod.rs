@@ -24,6 +24,7 @@ mod grep;
 mod gzip;
 mod hash;
 mod listing;
+mod mounts;
 mod pager;
 mod pathname;
 mod sed;
@@ -53,6 +54,7 @@ static TOOL_SETS: &[&[Tool]] = &[
     gzip::TOOLS,
     hash::TOOLS,
     listing::TOOLS,
+    mounts::TOOLS,
     pager::TOOLS,
     pathname::TOOLS,
     sed::TOOLS,

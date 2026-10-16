@@ -19,6 +19,8 @@ pub struct Invocation {
     pub source: Source,
     /// `-i`: force interactive even without a terminal.
     pub force_interactive: bool,
+    /// `--rescue`: run as privd's rescue shell.
+    pub rescue: bool,
 }
 
 pub struct UsageError(pub &'static str);
@@ -35,6 +37,7 @@ pub fn parse(argv: &[&str]) -> Result<Invocation, UsageError> {
     let mut rest = argv.iter().skip(1);
 
     let mut force_interactive = false;
+    let mut rescue = false;
     let mut command: Option<Vec<u8>> = None;
     let mut read_stdin = false;
     let mut operands: Vec<Vec<u8>> = Vec::new();
@@ -47,6 +50,7 @@ pub fn parse(argv: &[&str]) -> Result<Invocation, UsageError> {
                 break;
             }
             "-i" => force_interactive = true,
+            super::rescue::OPTION => rescue = true,
             "-c" => match rest.next() {
                 Some(text) => {
                     command = Some(text.as_bytes().to_vec());
@@ -92,6 +96,7 @@ pub fn parse(argv: &[&str]) -> Result<Invocation, UsageError> {
     Ok(Invocation {
         source,
         force_interactive,
+        rescue,
     })
 }
 

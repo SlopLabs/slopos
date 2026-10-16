@@ -191,6 +191,7 @@ fn every_rule_of_the_grammar_refuses() {
         ("  describe \"y\"", "the setting is given twice"),
         ("  cwd\n  cwd", "the setting is given twice"),
         ("  exclusive\n  exclusive", "the setting is given twice"),
+        ("  medium\n  medium", "the setting is given twice"),
         ("  args *", "the shape is already listed"),
         ("  args * more", "* ends a shape"),
         ("  args a\"b", "an argument word is printable and unquoted"),
@@ -228,6 +229,7 @@ fn every_rule_of_the_grammar_refuses() {
         ("  exclusive two words", "one word at most"),
         ("  frobnicate", "unknown setting"),
         ("  cwd please", "unknown setting"),
+        ("  medium please", "unknown setting"),
     ] {
         assert_eq!(refusal(&with(line)).msg, msg, "{line}");
     }
@@ -308,6 +310,18 @@ fn errors_name_the_line_they_are_on() {
     // A missing setting is reported at the action that lacks it.
     let incomplete = format!("{}action org.slopos.y\n  args *\n", with(""));
     assert_eq!(refusal(&incomplete).line, 9);
+}
+
+#[test]
+fn a_medium_action_exists_only_on_a_boot_of_the_medium() {
+    let text = format!("{EXAMPLE}{}", with("  medium"));
+    let policy = Policy::parse(&text).unwrap();
+    assert!(policy.action("org.slopos.x").unwrap().medium);
+    assert!(!policy.action("org.slopos.boot.install").unwrap().medium);
+    let installed = policy.clone().for_boot(false);
+    assert_eq!(installed.action("org.slopos.x"), None);
+    assert_eq!(installed.actions().len(), 2);
+    assert_eq!(policy.clone().for_boot(true), policy);
 }
 
 #[test]
@@ -462,6 +476,20 @@ fn the_shipped_policy_says_what_the_access_model_does() {
             "{name}"
         );
     }
+    let installed = policy.clone().for_boot(false);
+    let medium: Vec<&str> = policy
+        .actions()
+        .iter()
+        .filter(|a| installed.action(&a.name).is_none())
+        .map(|a| a.name.as_str())
+        .collect();
+    assert_eq!(medium, ["org.slopos.rescue"]);
+    let rescue = policy.action("org.slopos.rescue").unwrap();
+    assert_eq!(rescue.program, "/bin/shell");
+    assert_eq!(rescue.caps, DELEGABLE);
+    assert_eq!(rescue.admits(&session), Verdict::Ask);
+    assert!(rescue.accepts(&args_of(&["--rescue"])));
+    assert!(!rescue.accepts(&args_of(&["--rescue", "-c", "id"])));
 }
 
 fn args_of<'a>(words: &[&'a str]) -> Vec<&'a [u8]> {

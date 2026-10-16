@@ -8,12 +8,13 @@
 //! asks init for a session, and until then nobody can be asked, so an action
 //! that needs consent is refused there.
 
-use slopos_abi::syscall::{POLLIN, UserPollFd};
+use slopos_abi::syscall::{BOOT_FLAG_MEDIUM, POLLIN, UserPollFd};
 use slopos_priv_core::consent::Refusal;
 use slopos_priv_core::wire::{self, Exit, Reply, Request};
 use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy};
 use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, STATUS_REFUSED, request_id};
+use slopos_userland::syscall::core::boot_flag;
 use slopos_userland::syscall::{OwnedFd, RawFd, fs, net, process};
 
 use std::io::Read;
@@ -26,6 +27,7 @@ const SELF: &str = "/bin/privd_test";
 const USER: u32 = 1000;
 /// A uid the policy names no principal for.
 const STRANGER: u32 = 4242;
+const RESCUE: &str = "org.slopos.rescue";
 
 /// `argv[1]` of the uid-1000 child, which holds a connection this process
 /// made at [`ENV_FD`].
@@ -724,6 +726,46 @@ fn output_for_a_terminal_is_relayed() -> bool {
     true
 }
 
+/// The rescue shell exists only on a boot of the install medium, which this
+/// is not: the policy carries it marked so, privd answers it as no action,
+/// and the shell asked for one refuses as a mechanism does.
+fn the_rescue_shell_is_offered_only_on_the_medium() -> bool {
+    if boot_flag(BOOT_FLAG_MEDIUM) {
+        note("booted from the install medium, where installer_test asks for a rescue shell");
+        return true;
+    }
+    let policy = std::fs::read_to_string(POLICY)
+        .map_err(|e| e.to_string())
+        .and_then(|text| Policy::parse(&text).map_err(|e| e.to_string()));
+    if !policy
+        .as_ref()
+        .is_ok_and(|p| p.action(RESCUE).is_some_and(|a| a.medium))
+    {
+        note(&format!("{POLICY} names no medium action {RESCUE}"));
+        return false;
+    }
+    let Some(mut privd) = connect() else {
+        return false;
+    };
+    let devnull = null();
+    let replies = ask(&mut privd, RESCUE, &["--rescue"], devnull.raw());
+    if !denied(&replies).is_some_and(|reason| reason.contains("no action")) {
+        note(&format!("{RESCUE} off the medium: {replies:?}"));
+        return false;
+    }
+    let shell = Command::new("/bin/shell")
+        .arg("--rescue")
+        .stdin(Stdio::null())
+        .output();
+    match shell {
+        Ok(out) if out.status.code() == Some(STATUS_REFUSED) => true,
+        other => {
+            note(&format!("shell --rescue off the medium: {other:?}"));
+            false
+        }
+    }
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_policy_is_the_bases_and_parses",
@@ -776,6 +818,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "output_for_a_terminal_is_relayed",
         output_for_a_terminal_is_relayed,
+    ),
+    (
+        "the_rescue_shell_is_offered_only_on_the_medium",
+        the_rescue_shell_is_offered_only_on_the_medium,
     ),
     (
         "consent_is_asked_across_a_compositor_restart",

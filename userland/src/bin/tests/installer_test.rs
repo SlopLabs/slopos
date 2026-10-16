@@ -22,8 +22,10 @@
 //!
 //! Booted from the medium again with SlopOS on the disk, it leaves a file in
 //! the root and a base in slot a, as a boot partition laid out before the
-//! bases moved beside the slots holds, and reinstalls over the same
-//! partitions, keeping the root:
+//! bases moved beside the slots holds. In the medium's rescue shell it checks
+//! the root, reads the file through a mount and rolls the disk's base back
+//! through `bootctl --boot`, and at a terminal interrupts what a rescue shell
+//! runs. Then it reinstalls over the same partitions, keeping the root:
 //!
 //! 3 (`slopos-a` again): the file is there, and what the slots said of the
 //!   system they held is gone.
@@ -32,23 +34,30 @@
 
 use slopos_userland as _;
 
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::FromRawFd;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use slopos_abi::syscall::UserWinsize;
 use slopos_boot_core::gpt::Partition;
 use slopos_boot_core::layout::{self, ESP_TYPE, ROOT_TYPE};
-use slopos_boot_core::{base, device_path, load_option, variables};
+use slopos_boot_core::{base, bli, device_path, load_option, variables};
 use slopos_slibc::test_harness::note;
+use slopos_userland::base_image::retagged;
 use slopos_userland::boot_disk::{
     BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, not_installable,
-    open_fat, partition_node, table_of, whole_disks,
+    open_fat, partition_node, set_loader_var, table_of, whole_disks,
 };
 use slopos_userland::selfhost::{selfhost_install, workspace};
 use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
 use slopos_userland::syscall::efi::{efivar_get, efivar_set};
 use slopos_userland::syscall::error::SyscallError;
-use slopos_userland::syscall::fs::{mount, sync, umount2};
+use slopos_userland::syscall::fs::{self, mount, sync, umount2};
+use slopos_userland::syscall::{net, process};
 
 const STAGE: &str = "SlopOSInstallerTestStage";
 /// The build tag stage 1 gave the system it built, for stage 2 to find.
@@ -73,6 +82,13 @@ const KEPT: &str = "/home/installer-kept";
 const KEPT_TEXT: &str = "written before the reinstall\n";
 /// Where the live system mounts the installed root to leave that file.
 const KEPT_MOUNT: &str = "/tmp/installer-test-root";
+/// The default the installed system left in the machine's variables, which a
+/// rescue from the medium finds there.
+const RESCUE_DEFAULT: &str = "slopos-b";
+/// The base a rescue rolls the installed disk back to.
+const RESCUE_TAG: &str = "installer-test-rescued";
+/// How long the rescue shell at a terminal may take to answer, under TCG.
+const TERMINAL_DEADLINE: Duration = Duration::from_secs(120);
 /// What the installed system boots with: this test again, and a slot that
 /// panics falls back.
 const INSTALLED_CMDLINE: &str = "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip panic=reboot watchdog.miss_threshold=300 tests.run=*ext2_aaa*,*installer*";
@@ -236,11 +252,186 @@ fn leave_kept_file(node: &str) -> Result<(), String> {
     written.map_err(|e| format!("{KEPT}: {e}"))
 }
 
+/// What a person repairing the installed disk from the medium does in its
+/// rescue shell: check the root, read it mounted, and roll the boot
+/// partition's base back, with the default the installed system left and a
+/// base it kept before the one it runs.
+fn rescue(disk: &str, partitions: &[Partition], root: &str) -> Result<(), String> {
+    let boot = partitions
+        .iter()
+        .find(|p| p.entry.type_guid == layout::BOOT_TYPE)
+        .ok_or("the disk has no boot partition")?;
+    let boot = partition_node(disk, boot)?;
+    set_loader_var(bli::ENTRY_DEFAULT, Some(RESCUE_DEFAULT))?;
+    let current = open_fat(&boot)?
+        .read_file(layout::BASE_CURRENT)
+        .map_err(|e| format!("{}: {e:?}", layout::BASE_CURRENT))?;
+    let kept = retagged(&current, RESCUE_TAG, None)?;
+    open_fat(&boot)?
+        .write_file(layout::BASE_PREVIOUS, &kept)
+        .map_err(|e| format!("{}: {e:?}", layout::BASE_PREVIOUS))?;
+    let script = format!(
+        "set -e\n\
+         e2fsck -fn {root}\n\
+         mkdir -p {KEPT_MOUNT}\n\
+         sh -c 'mount -r {root} {KEPT_MOUNT}'\n\
+         cat {KEPT_MOUNT}{KEPT}\n\
+         umount {KEPT_MOUNT}\n\
+         bootctl --boot {boot} status\n\
+         bootctl --boot {boot} base rollback\n"
+    );
+    let mut shell = Command::new("/bin/shell")
+        .arg("--rescue")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("shell --rescue: {e}"))?;
+    shell
+        .stdin
+        .take()
+        .ok_or("no stdin")?
+        .write_all(script.as_bytes())
+        .map_err(|e| format!("shell --rescue: {e}"))?;
+    let out = shell
+        .wait_with_output()
+        .map_err(|e| format!("shell --rescue: {e}"))?;
+    let said = String::from_utf8_lossy(&out.stdout);
+    let expected = [
+        KEPT_TEXT,
+        &format!("default: {RESCUE_DEFAULT}\n"),
+        "entries: slopos-a slopos-b\n",
+        &format!("build tag {RESCUE_TAG}"),
+    ];
+    if !out.status.success() || expected.iter().any(|line| !said.contains(line)) {
+        return Err(format!("the rescue shell exited {:?}:\n{said}", out.status));
+    }
+    let mut volume = open_fat(&boot)?;
+    if volume.read_file(layout::BASE_CURRENT).ok() != Some(kept)
+        || volume.read_file(layout::BASE_PREVIOUS).ok() != Some(current)
+    {
+        return Err(format!(
+            "the rollback through {boot} left the bases unswapped"
+        ));
+    }
+    println!("INSTALLER-RESCUED {root} checked and read, the base on {boot} rolled back");
+    Ok(())
+}
+
+/// The rescue shell asked for at a terminal runs on one of its own, as large
+/// as this one and following it when it is resized: an interrupt typed there
+/// ends the program it runs and not the shell, and this terminal is as it was
+/// once the shell exits, as a shell around the request reads it.
+fn rescue_at_a_terminal() -> Result<(), String> {
+    let (master, _) = process::openpty().map_err(|e| format!("no pty: {e}"))?;
+    let slave = fs::ioctl_tiocgptpeer(master.raw()).map_err(|e| format!("no pty slave: {e}"))?;
+    let resize = |rows, cols| {
+        let size = UserWinsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        fs::tiocswinsz(master.raw(), &size).map_err(|e| format!("resizing: {e}"))
+    };
+    resize(37, 101)?;
+    let tty = || {
+        fs::dup(slave.raw())
+            // SAFETY: `dup` just opened this descriptor for us.
+            .map(|dup| std::process::Stdio::from(unsafe { File::from_raw_fd(dup.into_raw()) }))
+            .map_err(|e| format!("dup: {e}"))
+    };
+    let mut cmd = Command::new("/bin/shell");
+    cmd.args([
+        "-c",
+        "echo before-$(stty -g)-; shell --rescue && echo after-$(stty -g)-",
+    ])
+    .stdin(tty()?)
+    .stdout(tty()?)
+    .stderr(tty()?);
+    // SAFETY: the closure makes two system calls and allocates nothing.
+    unsafe {
+        cmd.pre_exec(|| {
+            if process::setsid() < 0 || fs::tiocsctty(0).is_err() {
+                return Err(std::io::Error::other("no controlling terminal"));
+            }
+            Ok(())
+        });
+    }
+    let mut shell = cmd.spawn().map_err(|e| format!("shell --rescue: {e}"))?;
+    let _ = net::set_nonblocking(master.raw());
+    let mut seen = Vec::new();
+    let mut until = |marker: &str| {
+        let deadline = Instant::now() + TERMINAL_DEADLINE;
+        let mut buf = [0u8; 512];
+        while Instant::now() < deadline {
+            match fs::read_slice(master.raw(), &mut buf) {
+                Ok(n) if n > 0 => seen.extend_from_slice(&buf[..n]),
+                _ => std::thread::sleep(Duration::from_millis(50)),
+            }
+            if String::from_utf8_lossy(&seen).contains(marker) {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "no {marker:?} from the rescue shell's terminal, which showed {:?}",
+            String::from_utf8_lossy(&seen)
+        ))
+    };
+    let typed = |text: &[u8]| {
+        fs::write_slice(master.raw(), text)
+            .map(drop)
+            .map_err(|e| format!("typing at the rescue shell: {e}"))
+    };
+    until("Rescue shell:")?;
+    typed(b"stty size\r")?;
+    until("37 101")?;
+    resize(38, 102)?;
+    std::thread::sleep(Duration::from_secs(1));
+    typed(b"stty size\r")?;
+    until("38 102")?;
+    typed(b"echo ready-$((40+2)); sleep 600\r")?;
+    until("ready-42")?;
+    std::thread::sleep(Duration::from_secs(2));
+    typed(b"\x03")?;
+    typed(b"echo status-$?\r")?;
+    until("status-130")?;
+    typed(b"exit\r")?;
+    until("after-")?;
+    let deadline = Instant::now() + TERMINAL_DEADLINE;
+    loop {
+        match shell.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            other => {
+                let _ = shell.kill();
+                return Err(format!("the rescue shell at a terminal ended as {other:?}"));
+            }
+        }
+    }
+    let mut buf = [0u8; 512];
+    while let Ok(n) = fs::read_slice(master.raw(), &mut buf)
+        && n > 0
+    {
+        seen.extend_from_slice(&buf[..n]);
+    }
+    let shown = String::from_utf8_lossy(&seen);
+    let settings = |label: &str| {
+        let from = shown.find(label)? + label.len();
+        shown[from..].split('-').next()
+    };
+    if settings("before-").is_none() || settings("before-") != settings("after-") {
+        return Err(format!(
+            "the terminal was not given back as it was: {shown:?}"
+        ));
+    }
+    println!("INSTALLER-RESCUED at a terminal: an interrupt ended the program it ran");
+    Ok(())
+}
+
 /// A person typing `installer` at the shell, then `typed` to its questions:
 /// started holding nothing, the installer asks privd, which runs it with the
 /// answers on the standard input it was sent.
 fn answer_on_stdin(args: &[String], typed: &str) -> std::io::Result<std::process::ExitStatus> {
-    use std::io::Write;
     let line = std::iter::once("installer".to_owned())
         .chain(args.iter().map(|arg| format!("'{arg}'")))
         .collect::<Vec<_>>()
@@ -362,8 +553,10 @@ fn install() -> bool {
                 }
             };
             if reinstall
-                && let Err(why) =
-                    leave_kept_file(&node).and_then(|()| leave_slot_base(&disk, &partitions))
+                && let Err(why) = leave_kept_file(&node)
+                    .and_then(|()| leave_slot_base(&disk, &partitions))
+                    .and_then(|()| rescue(&disk, &partitions, &node))
+                    .and_then(|()| rescue_at_a_terminal())
             {
                 note(&why);
                 return false;

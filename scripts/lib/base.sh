@@ -12,7 +12,7 @@ APPS="editor file_manager image_viewer"
 # `/bin/coreutils`, which dispatches on `argv[0]` — one binary rather than
 # fifty-odd copies of std. This list is the *installed* set; the binary's own
 # table is the implemented set, and `coreutils_test` fails if they disagree.
-COREUTILS_TOOLS="ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less"
+COREUTILS_TOOLS="ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less mount umount"
 
 # The programs a recipe builds that the base carries, by their path below the
 # recipe prefix, which they keep below `/`: e2fsprogs's, which format, check and

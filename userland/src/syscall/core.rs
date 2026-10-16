@@ -111,6 +111,12 @@ pub fn sys_info(info: &mut UserSysInfo) -> i64 {
     unsafe { syscall1(SYSCALL_SYS_INFO, info as *mut _ as u64) as i64 }
 }
 
+/// Whether the kernel set `flag`, one of the `BOOT_FLAG_*` bits, for this boot.
+pub fn boot_flag(flag: u32) -> bool {
+    let mut info = UserSysInfo::default();
+    sys_info(&mut info) == 0 && info.boot_flags & flag != 0
+}
+
 /// Drives the kernel-side userland-test phase from this task; `/sbin/init`
 /// calls it when the kernel was booted with `tests=on`.
 #[inline(always)]

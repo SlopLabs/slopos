@@ -80,5 +80,11 @@ pub fn print_welcome_banner() {
         shell_write(b"\n");
     }
 
+    if super::rescue::active() {
+        shell_write_idx(
+            b"  Rescue shell: what runs here holds everything privd can give.\n",
+            COLOR_WARN_YELLOW,
+        );
+    }
     shell_write(b"\n");
 }

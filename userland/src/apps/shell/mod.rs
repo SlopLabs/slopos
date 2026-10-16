@@ -21,6 +21,7 @@ pub mod input;
 pub mod interrupt;
 pub mod jobs;
 pub mod parser;
+mod rescue;
 pub mod script;
 pub mod traps;
 
@@ -323,6 +324,11 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
             return exec::STATUS_SYNTAX_ERROR;
         }
     };
+    if invocation.rescue {
+        rescue::enter();
+    } else {
+        rescue::inherit();
+    }
 
     // POSIX interactivity rule: stdin decides whether a user is typing, stderr
     // whether there is anywhere to complain to; stdout is not consulted, so
@@ -337,6 +343,10 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
         .map_or_else(|_| b"/".to_vec(), |dir| dir.into_os_string().into_vec());
     cwd_set(&cwd);
     env::initialize();
+    if rescue::active() {
+        env::unset(slopos_priv_core::ENV_ACTION.as_bytes());
+        env::set_exported(rescue::ENV.as_bytes(), b"1");
+    }
     crate::privd::hold_inherited();
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);
     exec::initialize_job_control();

@@ -28,7 +28,7 @@ use crate::apps::privd::CONSENT_FD;
 use crate::base_watch::BaseWatch;
 use crate::init_control::{self, Command, SOCKET};
 use crate::syscall::process::{self, Endowment, WaitStatus};
-use crate::syscall::{OwnedFd, RawFd, UserSysInfo, core as sys_core, fs, net, tty};
+use crate::syscall::{OwnedFd, RawFd, core as sys_core, fs, net, tty};
 
 fn upgrade_console_font() {
     let font_data = match crate::gfx::font_loader::load_font("mono") {
@@ -171,7 +171,7 @@ fn boot() -> ! {
             sys_core::exit_with_code(0);
         }
     } else {
-        if !boot_flag(BOOT_FLAG_ROULETTE_SKIP)
+        if !sys_core::boot_flag(BOOT_FLAG_ROULETTE_SKIP)
             && let Some(roulette) = start(&ROULETTE, &[])
         {
             let _ = process::waitpid(roulette.pid);
@@ -189,13 +189,8 @@ fn watch_base() -> Option<BaseWatch> {
     watch
 }
 
-fn boot_flag(flag: u32) -> bool {
-    let mut info = UserSysInfo::default();
-    sys_core::sys_info(&mut info) == 0 && info.boot_flags & flag != 0
-}
-
 fn tests_enabled() -> bool {
-    boot_flag(BOOT_FLAG_TESTS_ENABLED)
+    sys_core::boot_flag(BOOT_FLAG_TESTS_ENABLED)
 }
 
 /// The two ends of the consent channel, kept for the boot: one for each

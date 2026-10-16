@@ -586,7 +586,7 @@ test-install-guest:
 # root, and a boot after it. The optical disk is blank too, installed from
 # the medium in a CD drive the kernel has no driver for, so without its
 # payload.
-[doc("Installer check: from the ISO on a USB stick, visible as sda and never offered, its payload partition read over USB, install SlopOS onto a blank disk (erase), beside another system (free space) and over an existing partition (reuse), then boot each disk with the stick gone, build and install the system there and commit it, and reinstall over the blank disk keeping its root; from the ISO in a CD drive the kernel cannot read, install onto a blank disk without the toolchain (optical); the host holds every table to sfdisk, every root to e2fsck, every FAT volume to fsck.fat and the other system's partitions, entries and files to their bytes. INSTALLER_PAYLOAD=0 installs without the toolchain and clones a slot instead of building one; names a subset: just test-installer foreign")]
+[doc("Installer check: from the ISO on a USB stick, visible as sda and never offered, its payload partition read over USB, install SlopOS onto a blank disk (erase), beside another system (free space) and over an existing partition (reuse), then boot each disk with the stick gone, build and install the system there and commit it, and, from the stick again, check, mount and roll back the blank disk in the rescue shell, interrupt one at a terminal, and reinstall keeping its root; from the ISO in a CD drive the kernel cannot read, install onto a blank disk without the toolchain (optical); the host holds every table to sfdisk, every root to e2fsck, every FAT volume to fsck.fat and the other system's partitions, entries and files to their bytes. INSTALLER_PAYLOAD=0 installs without the toolchain and clones a slot instead of building one; names a subset: just test-installer foreign")]
 test-installer *DISKS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -801,6 +801,7 @@ test-installer *DISKS:
             rm -f "$vars"
             markers=("INSTALLER-NOT-OFFERED /dev/sda: write-protected"
                 "INSTALLER-LEFT-SLOT-BASE /boot/a/base.img"
+                "INSTALLER-RESCUED /dev/" "INSTALLER-RESCUED at a terminal"
                 "removed /boot/a/base.img, a base the disk kept per slot"
                 "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed"
                 "installed the apps at /usr/local")

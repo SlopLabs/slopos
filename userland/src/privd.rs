@@ -6,23 +6,25 @@
 //! ([`ENV_FD`]), which speaks as whoever made it, or else a fresh one, which
 //! speaks as this process.
 //!
-//! A terminal is never handed over. A mechanism runs outside the requester's
-//! session, where the terminal answers `EIO`, so output for one, or for a
-//! socket, is relayed through pipes, and input only for a mechanism that
-//! reads it.
+//! The requester's terminal is never handed over. A mechanism runs outside
+//! the requester's session, where that terminal answers `EIO`, so output for
+//! one, or for a socket, is relayed through pipes, and input only for a
+//! mechanism that reads it; one that runs a terminal session gets a
+//! terminal of its own, whose master the requester relays.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::process::Command;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use slopos_abi::fs::{O_DIRECTORY, O_RDONLY, O_RDWR, S_IFSOCK, UserFsStat};
 use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
+use slopos_abi::signal::SIGWINCH;
 use slopos_abi::syscall::{
-    F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, FD_CLOEXEC, MSG_NOSIGNAL, O_CLOEXEC, POLLIN, POLLOUT,
-    UserPollFd,
+    BOOT_FLAG_MEDIUM, F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, FD_CLOEXEC, MSG_NOSIGNAL, O_CLOEXEC,
+    POLLIN, POLLOUT, TIOCSPTLCK, UserPollFd, UserTermios,
 };
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request};
 use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy, SOCKET};
@@ -38,6 +40,11 @@ pub enum Input {
     Closed,
     /// Lines typed at the terminal while the mechanism runs.
     Forwarded,
+    /// A terminal of the mechanism's own in place of each descriptor that is
+    /// this process's terminal, when standard input is one: relayed byte for
+    /// byte once the mechanism starts, with this terminal raw until it exits.
+    /// Lines forwarded otherwise.
+    Terminal,
 }
 
 /// How long a request waits for privd while init starts it again.
@@ -228,26 +235,34 @@ pub fn takes_connection(program: &str) -> bool {
     program == SHELL || is_mechanism(program)
 }
 
+/// The base's policy, every action of it.
+pub fn whole_policy() -> Result<Policy, String> {
+    let text = std::fs::read_to_string(POLICY).map_err(|e| format!("{POLICY}: {e}"))?;
+    Policy::parse(&text).map_err(|e| format!("{POLICY}: {e}"))
+}
+
+/// The base's policy as it stands on this boot: an action marked `medium`
+/// exists only when the kernel serves the install medium it booted from.
+pub fn policy() -> Result<Policy, String> {
+    Ok(whole_policy()?.for_boot(on_the_medium()))
+}
+
+pub fn on_the_medium() -> bool {
+    sys_core::boot_flag(BOOT_FLAG_MEDIUM)
+}
+
 /// Whether the base's policy names `program`, a canonical path, for an
 /// action. A mechanism keeps the connection from what it starts.
 pub fn is_mechanism(program: &str) -> bool {
-    static MECHANISMS: OnceLock<Vec<String>> = OnceLock::new();
-    MECHANISMS
-        .get_or_init(|| {
-            std::fs::read_to_string(POLICY)
-                .ok()
-                .and_then(|text| Policy::parse(&text).ok())
-                .map(|policy| {
-                    policy
-                        .actions()
-                        .iter()
-                        .map(|action| action.program.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-        .iter()
-        .any(|mechanism| mechanism == program)
+    static MECHANISMS: LazyLock<Vec<String>> = LazyLock::new(|| {
+        policy()
+            .map(|policy| {
+                let programs = policy.actions().iter().map(|action| action.program.clone());
+                programs.collect()
+            })
+            .unwrap_or_default()
+    });
+    MECHANISMS.iter().any(|mechanism| mechanism == program)
 }
 
 const SHELL: &str = "/bin/shell";
@@ -310,8 +325,7 @@ enum Asked {
 }
 
 fn ask(action: &str, args: &[Vec<u8>], input: Input) -> Result<Asked, String> {
-    let text = std::fs::read_to_string(POLICY).map_err(|e| format!("{POLICY}: {e}"))?;
-    let policy = Policy::parse(&text).map_err(|e| format!("{POLICY}: {e}"))?;
+    let policy = policy()?;
     let spec = policy
         .action(action)
         .ok_or_else(|| format!("{POLICY} has no action {action}"))?;
@@ -350,6 +364,9 @@ struct Stdio {
     passed: Vec<OwnedFd>,
     to_stdin: Option<Forward>,
     from_out: [Option<OwnedFd>; 2],
+    /// The master of the mechanism's own terminal, under [`Input::Terminal`].
+    terminal: Option<OwnedFd>,
+    raw: Option<RawTerminal>,
 }
 
 /// Input typed at the terminal on its way to the mechanism, held here while
@@ -404,12 +421,67 @@ fn pipe() -> Result<(OwnedFd, OwnedFd), String> {
     Ok((above_stdio(read)?, above_stdio(write)?))
 }
 
+fn dup(fd: &OwnedFd) -> Result<OwnedFd, String> {
+    above_stdio(fs::dup(fd.raw()).map_err(|e| format!("dup: {e}"))?)
+}
+
+/// A pseudo-terminal's master and slave, with this terminal's size. The slave
+/// is locked again once this process holds it, so no other process opens it
+/// by its path before the mechanism makes it its own.
+fn terminal_pair() -> Result<(OwnedFd, OwnedFd), String> {
+    let fail = |why: String| format!("no terminal for the mechanism: {why}");
+    let (master, _) =
+        process::openpty().map_err(|e| fail(SyscallError::from_errno((-e) as i32).to_string()))?;
+    let slave = fs::ioctl_tiocgptpeer(master.raw()).map_err(|e| fail(e.to_string()))?;
+    let mut locked: i32 = 1;
+    Sys::ioctl(master.raw(), TIOCSPTLCK, (&mut locked as *mut i32) as u64)
+        .map_err(|e| fail(SyscallError::from(e).to_string()))?;
+    let (master, slave) = (above_stdio(master)?, above_stdio(slave)?);
+    for end in [&master, &slave] {
+        fs::set_fd_cloexec(end.raw()).map_err(|e| format!("fcntl: {e}"))?;
+    }
+    if let Ok(size) = fs::tiocgwinsz(0) {
+        let _ = fs::tiocswinsz(master.raw(), &size);
+    }
+    Ok((master, slave))
+}
+
+/// This process's terminal, raw while the mechanism's own terminal stands in
+/// for it, so every byte typed reaches that one unchanged; as it was again
+/// once dropped.
+struct RawTerminal(UserTermios);
+
+impl RawTerminal {
+    fn enter() -> Option<RawTerminal> {
+        let saved = fs::tcgetattr(0).ok()?;
+        let mut raw = saved;
+        // SAFETY: `raw` is a termios this function owns, which the call only
+        // rewrites in place.
+        unsafe { slopos_slibc::tty::cfmakeraw(&mut raw) };
+        fs::tcsetattr(0, &raw).ok()?;
+        Some(RawTerminal(saved))
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        let _ = fs::tcsetattr(0, &self.0);
+    }
+}
+
 impl Stdio {
     fn build(input: Input) -> Result<Stdio, String> {
         let mut stdio = Stdio {
             passed: Vec::new(),
             to_stdin: None,
             from_out: [None, None],
+            terminal: None,
+            raw: None,
+        };
+        let shown_at = [1, 2].into_iter().find(|&fd| fs::isatty(fd));
+        let pair = match shown_at {
+            Some(_) if input == Input::Terminal && fs::isatty(0) => Some(terminal_pair()?),
+            _ => None,
         };
         for fd in 0..3 {
             let open = Sys::fcntl(fd, F_GETFD as i32, 0).is_ok();
@@ -417,6 +489,8 @@ impl Stdio {
                 null()?
             } else if !relayed(fd) {
                 above_stdio(fs::dup(fd).map_err(|e| format!("fd {fd}: {e}"))?)?
+            } else if let Some((_, slave)) = pair.as_ref().filter(|_| fs::isatty(fd)) {
+                dup(slave)?
             } else if fd == 0 {
                 if input == Input::Closed {
                     null()?
@@ -436,6 +510,16 @@ impl Stdio {
                 write
             };
             stdio.passed.push(passed);
+        }
+        if let (Some((master, _)), Some(shown_at)) = (pair, shown_at) {
+            net::set_nonblocking(master.raw()).map_err(|e| format!("the terminal: {e}"))?;
+            stdio.to_stdin = Some(Forward {
+                pipe: dup(&master)?,
+                held: Vec::new(),
+                ended: false,
+            });
+            stdio.from_out[shown_at as usize - 1] = Some(dup(&master)?);
+            stdio.terminal = Some(master);
         }
         Ok(stdio)
     }
@@ -481,6 +565,9 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
     for signal in wire::RELAYED_SIGNALS {
         process::set_signal_handler(signal, note_signal);
     }
+    if stdio.terminal.is_some() {
+        process::set_signal_handler(SIGWINCH, note_signal);
+    }
     connection.send(&request, &fds)?;
     drop(cwd);
     stdio.passed.clear();
@@ -496,6 +583,11 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
             .into_iter()
             .filter(|&signal| pending & (1 << signal) != 0)
             .collect();
+        if pending & (1 << SIGWINCH) != 0
+            && let (Some(master), Ok(size)) = (&stdio.terminal, fs::tiocgwinsz(0))
+        {
+            let _ = fs::tiocswinsz(master.raw(), &size);
+        }
         if let Some(&first) = caught.first()
             && exited.is_none()
         {
@@ -512,7 +604,12 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
         }
         while exited.is_none() {
             match connection.buffered(request.id)? {
-                Some(Reply::Started { .. }) => started = true,
+                Some(Reply::Started { .. }) => {
+                    started = true;
+                    if stdio.terminal.is_some() {
+                        stdio.raw = RawTerminal::enter();
+                    }
+                }
                 Some(Reply::Asking) => {
                     eprintln!("{program}: asking the person at this machine to allow it");
                 }
@@ -520,6 +617,7 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
                     exited = Some(exit);
                     drain_until = Some(Instant::now() + DRAIN);
                     stdio.to_stdin = None;
+                    stdio.raw = None;
                 }
                 Some(Reply::Denied { reason, by_person }) => {
                     if let Some(signal) = withdrawn_by {
@@ -553,7 +651,7 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
             polled.push(poll(out.raw(), POLLIN));
         }
         if let Some(forward) = &stdio.to_stdin {
-            if forward.wants_input() {
+            if forward.wants_input() && (started || stdio.terminal.is_none()) {
                 polled.push(poll(0, POLLIN));
             }
             if !forward.held.is_empty() {
@@ -608,6 +706,7 @@ fn relay_output(from: &mut [Option<OwnedFd>; 2], fd: RawFd) {
         Ok(n) if n > 0 => {
             let _ = write_all(index as RawFd + 1, &buf[..n]);
         }
+        Err(SyscallError::EAGAIN | SyscallError::EINTR) => {}
         _ => from[index] = None,
     }
 }
@@ -615,6 +714,7 @@ fn relay_output(from: &mut [Option<OwnedFd>; 2], fd: RawFd) {
 fn write_all(fd: RawFd, mut bytes: &[u8]) -> Result<(), ()> {
     while !bytes.is_empty() {
         match fs::write_slice(fd, bytes) {
+            Err(SyscallError::EINTR) => {}
             Ok(0) | Err(_) => return Err(()),
             Ok(n) => bytes = &bytes[n..],
         }

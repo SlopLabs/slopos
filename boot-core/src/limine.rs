@@ -123,6 +123,17 @@ pub fn collide(a: &MenuEntry<'_>, b: &MenuEntry<'_>) -> bool {
     titles || entry_id(name_of(a)).eq(entry_id(name_of(b)))
 }
 
+/// The Boot Loader Interface identifier of each top-level entry a rendered
+/// configuration offers, in menu order: what Limine publishes in
+/// `LoaderEntries` when it boots that configuration.
+pub fn offered_entries(config: &str) -> impl Iterator<Item = impl Iterator<Item = u8> + '_> + '_ {
+    config
+        .lines()
+        .filter_map(|line| line.strip_prefix('/'))
+        .filter(|name| !name.starts_with('/'))
+        .map(|name| entry_id(name.bytes()))
+}
+
 impl Config<'_> {
     pub fn render(&self, out: &mut impl Write) -> Result<(), RenderError> {
         if !cmdline_ok(self.cmdline) {

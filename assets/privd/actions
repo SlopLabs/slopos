@@ -205,3 +205,13 @@ action org.slopos.install
   allow    root
   allow    session consent
   describe "Install SlopOS onto whichever disk the requester names, erasing what it says to"
+
+action org.slopos.rescue
+  program  /bin/shell
+  args     --rescue
+  caps     Power Mount RawBlock NetAdmin ConsoleConfig SysInspect Clock Seal BootEntry DacOverride BaseUpdate
+  uid      0
+  medium
+  allow    root
+  allow    session consent
+  describe "Open a rescue shell holding everything privd can give, which can read and change every disk"

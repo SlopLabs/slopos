@@ -42,12 +42,11 @@
 
 use slopos_userland as _;
 
-use slopos_boot_core::base::{self, BUILD_TAG_PATH, INTERFACE_PATH, MANIFEST_PATH, ManifestLine};
+use slopos_boot_core::base::BUILD_TAG_PATH;
 use slopos_boot_core::crash::Summary;
-use slopos_boot_core::newc::{self, Record};
 use slopos_boot_core::{layout, variables};
 use slopos_slibc::test_harness::note;
-use slopos_tls_core::hash::{Hash, Sha256};
+use slopos_userland::base_image::{retagged, sha256};
 use slopos_userland::boot_disk::{
     BootDisk, FindError, boot_current, boot_order, firmware_entry, open_fat,
     register_firmware_entry,
@@ -326,63 +325,6 @@ fn panic_collected(status: &str, slot: &str, panic: &str, heading: &str) -> bool
     true
 }
 
-fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut digest = [0u8; 32];
-    let mut hash = Sha256::new();
-    hash.update(data);
-    hash.finish_into(&mut digest);
-    digest
-}
-
-/// `image` tagged `tag` and, when given, naming `interface`, its manifest
-/// sealed again as the packer seals one.
-fn repacked(image: &[u8], tag: &str, interface: Option<u32>) -> Result<Vec<u8>, String> {
-    let replaced = |path: &[u8]| {
-        [MANIFEST_PATH, BUILD_TAG_PATH]
-            .iter()
-            .chain(interface.is_some().then_some(&INTERFACE_PATH))
-            .any(|own| newc::same_path(path, own.as_bytes()))
-    };
-    let mut records: Vec<(Vec<u8>, u32, Vec<u8>)> = Vec::new();
-    for entry in newc::entries(image) {
-        let entry = entry.map_err(|e| format!("the current base: {e:?}"))?;
-        if !replaced(entry.path) {
-            records.push((entry.path.to_vec(), entry.mode, entry.data.to_vec()));
-        }
-    }
-    let data = slopos_abi::fs::S_IFREG | 0o644;
-    records.push((BUILD_TAG_PATH.into(), data, format!("{tag}\n").into_bytes()));
-    if let Some(n) = interface {
-        records.push((INTERFACE_PATH.into(), data, format!("{n}\n").into_bytes()));
-    }
-    let mut manifest = String::new();
-    for (path, mode, bytes) in &records {
-        let path = std::str::from_utf8(path).map_err(|e| e.to_string())?;
-        ManifestLine {
-            digest: sha256(bytes),
-            mode: *mode,
-            path,
-        }
-        .write(&mut manifest)
-        .map_err(|_| format!("{path}: no manifest line"))?;
-    }
-    records.push((MANIFEST_PATH.into(), data, manifest.into_bytes()));
-    let mut out = Vec::with_capacity(image.len() + 4096);
-    for (path, mode, bytes) in &records {
-        let record = Record::new(path, *mode, bytes).ok_or("a record too large")?;
-        record
-            .pieces()
-            .iter()
-            .for_each(|piece| out.extend_from_slice(piece));
-    }
-    Record::trailer()
-        .pieces()
-        .iter()
-        .for_each(|piece| out.extend_from_slice(piece));
-    base::check(&out, sha256).map_err(|e| format!("the repacked base: {e}"))?;
-    Ok(out)
-}
-
 /// The current base repacked as `tag` at [`FIXTURE`].
 fn write_fixture(disk: &BootDisk, tag: &str, interface: Option<u32>) -> bool {
     let written = open_fat(&disk.boot_node)
@@ -391,7 +333,7 @@ fn write_fixture(disk: &BootDisk, tag: &str, interface: Option<u32>) -> bool {
                 .read_file(layout::BASE_CURRENT)
                 .map_err(|e| format!("{}: {e:?}", layout::BASE_CURRENT))
         })
-        .and_then(|current| repacked(&current, tag, interface))
+        .and_then(|current| retagged(&current, tag, interface))
         .and_then(|image| std::fs::write(FIXTURE, image).map_err(|e| format!("{FIXTURE}: {e}")));
     if let Err(why) = written {
         note(&why);

@@ -300,3 +300,26 @@ fn offered_titles_that_collide_are_told_apart_before_rendering() {
     assert!(collide(&slot, &posing));
     assert!(!collide(&slot, &paren));
 }
+
+#[test]
+fn a_rendered_configuration_offers_its_entries_as_limine_names_them() {
+    let entries = [
+        SLOTS[0],
+        SLOTS[1],
+        MenuEntry::Firmware { title: "Other OS" },
+        MenuEntry::Firmware { title: ".." },
+    ];
+    let ids = |text: &str| -> Vec<String> {
+        offered_entries(text)
+            .map(|id| String::from_utf8(id.collect()).unwrap())
+            .collect()
+    };
+    assert_eq!(
+        ids(&rendered(&config(&entries, ""))),
+        ["slopos-a", "slopos-b", "Other-OS", "..-"]
+    );
+    assert_eq!(
+        ids("timeout: 0\n/SlopOS Kernel\n    protocol: limine\n//sub entry\n/x\n"),
+        ["SlopOS-Kernel", "x"]
+    );
+}
