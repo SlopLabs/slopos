@@ -430,9 +430,20 @@ require-phase post-userland-tests
 #               holds it. Three full captures name identical class sets in
 #               every phase (`LOCKDEP-CLASS` lines). Userland edges measured
 #               249, 256 and 259, past the band's 256, as CI had.
+#   2026-10-16  kernel 260 -> 262, userland 273 -> 278: bases replaced live
+#               (`plans/live-userland.md` phase 5). The kernel phase's
+#               generation tests take `BASEFS_GENERATIONS` and
+#               `BASEFS_ACTIVATING`; the userland phase adds `BASE_MONITORS`,
+#               `evbus.base_generation` and `BASEFS_REAP_STOP.waiters`, which
+#               init's monitor and `live_base_test`'s switch reach. A capture
+#               on a host without KVM counts 261/277 and the unchanged tree
+#               259 in its kernel phase, one under the 260 recorded, so each
+#               cap adds the named classes to the recorded count. Every
+#               banded pool stayed inside its band (kernel edges 200, chains
+#               460; userland edges 265, chains 546).
 boot	classes	105
-post-kernel-tests	classes	260
-post-userland-tests	classes	273
+post-kernel-tests	classes	262
+post-userland-tests	classes	278
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
