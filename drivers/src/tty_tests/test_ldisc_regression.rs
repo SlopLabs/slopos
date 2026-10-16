@@ -2372,9 +2372,9 @@ pub fn test_batched_ingress_signal_in_middle() -> TestResult {
     let mut out = [0u8; 8];
     let n = tty::read(slave, &mut out, true).unwrap_or(0);
     packet_mode_teardown_pty(master, slave, &saved);
-    if n != 0 {
+    if &out[..n] != b"b" {
         klog_info!(
-            "TTY_TEST: BUG - signal in batch should flush/discard trailing bytes, got {:?}",
+            "TTY_TEST: BUG - a signal mid-write should flush what came before it and keep what follows, got {:?}",
             &out[..n]
         );
         return TestResult::Fail;

@@ -926,6 +926,133 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_master_poll_follows_slave_throttle() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_HIGH_WATER;
+    use slopos_abi::syscall::POLLOUT;
+    tty::table::tty_table_init();
+
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
+
+    let saved = tty::get_termios(slave).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    tty::set_termios(slave, &raw).unwrap();
+
+    let before = tty::poll_events(master, POLLOUT);
+    for _ in 0..=THROTTLE_HIGH_WATER {
+        tty::push_input(slave, b'A');
+    }
+    let throttled = tty::poll_events(master, POLLOUT);
+    drain_tty_nonblock(slave);
+    let drained = tty::poll_events(master, POLLOUT);
+    tty::set_termios(slave, &saved).unwrap();
+
+    if before & POLLOUT == 0 || throttled & POLLOUT != 0 || drained & POLLOUT == 0 {
+        klog_info!(
+            "TTY_TEST: BUG - master POLLOUT before {:#x}, throttled {:#x}, drained {:#x}",
+            before,
+            throttled,
+            drained
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_master_write_counts_what_the_slave_took() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_HIGH_WATER;
+    tty::table::tty_table_init();
+
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
+
+    let saved = tty::get_termios(slave).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    tty::set_termios(slave, &raw).unwrap();
+
+    let before = THROTTLE_HIGH_WATER - 1;
+    for _ in 0..before {
+        tty::push_input(slave, b'A');
+    }
+    let burst = [b'B'; 256];
+    let written = tty::write(master, &burst, true);
+    let held = {
+        let guard = TTY_SLOTS[slave.0 as usize].lock();
+        guard.as_ref().map_or(0, |t| t.ldisc.bytes_available())
+    };
+    drain_tty_nonblock(slave);
+    tty::set_termios(slave, &saved).unwrap();
+
+    match written {
+        Ok(n) if n > 0 && n < burst.len() && held == before + n => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - a throttled master write said {:?}, the slave holds {} of {} before it",
+                other,
+                held,
+                before
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_master_write_after_throttled_slave_hangs_up() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_HIGH_WATER;
+    tty::table::tty_table_init();
+
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
+
+    let mut raw = tty::get_termios(slave).unwrap();
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    tty::set_termios(slave, &raw).unwrap();
+    for _ in 0..=THROTTLE_HIGH_WATER {
+        tty::push_input(slave, b'A');
+    }
+    tty::hangup(slave);
+
+    match tty::write(master, b"after", true) {
+        Ok(5) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - a master write after its throttled slave hung up said {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
 pub fn test_read_unthrottles_slave() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
@@ -1309,5 +1436,17 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_master_write_full_when_not_throttled,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_master_poll_follows_slave_throttle,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_master_write_counts_what_the_slave_took,
+    suite = tty_test_ldisc_flow
+);
+slopos_testing::stest!(
+    name = test_master_write_after_throttled_slave_hangs_up,
     suite = tty_test_ldisc_flow
 );

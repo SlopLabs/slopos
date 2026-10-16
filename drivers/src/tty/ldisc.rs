@@ -208,14 +208,17 @@ pub struct BatchResult {
     pub signal: Option<(u8, bool)>,
     pub should_wake: bool,
     pub throttle_check: bool,
+    /// The events taken: all of them, or those up to the signal's.
+    pub consumed: usize,
 }
 
 impl BatchResult {
-    const fn new() -> Self {
+    const fn new(consumed: usize) -> Self {
         Self {
             signal: None,
             should_wake: false,
             throttle_check: false,
+            consumed,
         }
     }
 }
@@ -1583,8 +1586,8 @@ impl LineDisc {
     /// Process a batch of input events, staging echo and capturing at most one
     /// signal — processing stops at the first signal-generating character.
     pub fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
-        let mut result = BatchResult::new();
-        for &event in events {
+        let mut result = BatchResult::new(events.len());
+        for (index, &event) in events.iter().enumerate() {
             match self.input_char(event) {
                 InputAction::Echo { buf, len } => {
                     self.echo_out(&buf[..len as usize]);
@@ -1605,6 +1608,7 @@ impl LineDisc {
                         }
                     }
                     result.signal = Some((sig, !lflag.contains(LocalFlags::NOFLSH)));
+                    result.consumed = index + 1;
                     break;
                 }
                 InputAction::ReprintLine => {
@@ -1834,7 +1838,7 @@ impl RawDisc {
         for &event in events {
             let _ = self.input_char(event);
         }
-        let mut result = BatchResult::new();
+        let mut result = BatchResult::new(events.len());
         result.should_wake = !self.buf.is_empty();
         result.throttle_check = true;
         result

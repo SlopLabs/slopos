@@ -347,25 +347,20 @@ pub fn get_packet_mode(idx: TtyIndex) -> Result<bool, TtyError> {
     }
 }
 
+/// The master paired with the slave at `slave_idx`, pinned.
+pub(crate) fn master_of(slave_idx: TtyIndex) -> Option<KArc<TtyBacking>> {
+    let guard = TTY_SLOTS.get(slave_idx.0 as usize)?.lock();
+    match &guard.as_ref()?.driver {
+        TtyDriverKind::PtySlave { peer } => peer.upgrade(),
+        _ => None,
+    }
+}
+
 /// Queue packet event bits on the PTY master paired with a slave at `slave_idx`.
 pub fn queue_packet_event(slave_idx: TtyIndex, event_bits: u8) {
-    let slot = slave_idx.0 as usize;
-    if slot >= MAX_TTYS {
+    let Some(master_pin) = master_of(slave_idx) else {
         return;
-    }
-
-    let master_pin = {
-        let guard = TTY_SLOTS[slot].lock();
-        let Some(tty) = guard.as_ref() else { return };
-        match &tty.driver {
-            TtyDriverKind::PtySlave { peer } => match peer.upgrade() {
-                Some(pin) => pin,
-                None => return,
-            },
-            _ => return,
-        }
     };
-
     let master_slot = master_pin.index().0 as usize;
     let should_wake = {
         let mut guard = TTY_SLOTS[master_slot].lock();

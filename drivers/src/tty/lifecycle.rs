@@ -83,6 +83,7 @@ pub(crate) fn hangup_mark(idx: TtyIndex) -> Option<u32> {
     let tty = guard.as_mut()?;
     let sid = tty.session.session_id();
     tty.ldisc.flush_all();
+    tty.flags.remove(TtyFlags::THROTTLED);
     // Packet events are deferred past the lock drop; emitting here self-deadlocks.
     tty.session.detach();
     tty.mark_hung_up();
@@ -106,9 +107,13 @@ pub(crate) fn hangup_notify(idx: TtyIndex, session_id: u32) {
     }
 
     if scheduler_is_enabled() != 0 {
-        // Readers, writers and poll waiters must all get to observe POLLHUP.
+        // Readers, writers and poll waiters must all get to observe POLLHUP,
+        // as must the master's writers and pollers the slave's throttle held.
         BUS.publish(tty_input_event(slot));
         BUS.publish(tty_output_event(slot));
+        if let Some(master) = pty::master_of(idx) {
+            BUS.publish(tty_output_event(master.index().0 as usize));
+        }
     }
 }
 

@@ -87,9 +87,19 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
 /// master's own write lock still held — the acquisition
 /// [`WriteNesting::PeerNested`] names.
 pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nesting: WriteNesting) {
+    let mut rest = events;
+    while !rest.is_empty() {
+        rest = &rest[push_input_through_signal(idx, rest, nesting)..];
+    }
+}
+
+/// Push `events` up to and including the first that raises a signal, whose
+/// flush and delivery land before what follows it is input; how many it took,
+/// all of them when the TTY is gone.
+fn push_input_through_signal(idx: TtyIndex, events: &[InputEvent], nesting: WriteNesting) -> usize {
     let slot = idx.0 as usize;
-    if slot >= MAX_TTYS || events.is_empty() {
-        return;
+    if slot >= MAX_TTYS {
+        return events.len();
     }
 
     let mut deferred = PostLockWork::new();
@@ -98,15 +108,15 @@ pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nest
     // lock ordering) and before the caret echo, so `^C` lands in an empty
     // buffer. The held backing pins the master's slot until the flush lands.
     let mut signal_flush_master: Option<slopos_ostd::KArc<super::backing::TtyBacking>> = None;
-    let wake = {
+    let (wake, consumed) = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
             Some(t) => t,
-            None => return,
+            None => return events.len(),
         };
 
         if tty.flags.contains(TtyFlags::HUNG_UP) {
-            return;
+            return events.len();
         }
 
         let was_stopped = tty.ldisc.is_stopped();
@@ -157,7 +167,7 @@ pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nest
             }
         }
 
-        batch.should_wake
+        (batch.should_wake, batch.consumed)
     };
 
     if let Some(master_pin) = signal_flush_master {
@@ -182,6 +192,7 @@ pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nest
     }
 
     deferred.execute();
+    consumed
 }
 
 fn notify_input_ready(idx: TtyIndex) {
@@ -628,7 +639,7 @@ fn wait_for_write_ready(
             }
         } else {
             match BUS
-                .subscribe(tty_output_event(peer_slot))
+                .subscribe(tty_output_event(slot))
                 .wait_event_interruptible(|| {
                     let guard = TTY_SLOTS[peer_slot].lock();
                     match guard.as_ref() {
@@ -824,6 +835,8 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         let mut out_buf = [0u8; OUT_BUF_CAP];
         let mut out_len = 0;
         let driver_id;
+        let batch_start = pos;
+        let byte_for_byte;
 
         {
             let mut guard = TTY_SLOTS[slot].lock();
@@ -832,8 +845,9 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                 None => return Err(TtyError::NotAllocated),
             };
             driver_id = tty.driver.id();
+            byte_for_byte =
+                peer_slave_slot.is_some() && matches!(tty.ldisc, ldisc::LdiscKind::Raw(_));
             tty.ldisc.clear_flusho();
-
             while pos < input_limit {
                 match tty.ldisc.process_output_byte(data[pos]) {
                     OutputAction::Emit { buf, len } => {
@@ -863,6 +877,12 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         let driver_written =
             output::write_processed(slot, driver_id, &out_buf[..out_len], WriteNesting::Toplevel);
         if driver_written < out_len {
+            if byte_for_byte {
+                pos = batch_start + driver_written;
+                if pos == 0 {
+                    continue;
+                }
+            }
             break;
         }
         if admission == WriteAdmission::PriorityControlOnly {

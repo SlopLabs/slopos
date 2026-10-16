@@ -709,6 +709,15 @@ slopos_testing::stest!(
     name = test_master_write_full_when_not_throttled,
     suite = tty
 );
+slopos_testing::stest!(name = test_master_poll_follows_slave_throttle, suite = tty);
+slopos_testing::stest!(
+    name = test_master_write_counts_what_the_slave_took,
+    suite = tty
+);
+slopos_testing::stest!(
+    name = test_master_write_after_throttled_slave_hangs_up,
+    suite = tty
+);
 slopos_testing::stest!(name = test_control_flag_values, suite = tty);
 slopos_testing::stest!(name = test_default_cflag, suite = tty);
 slopos_testing::stest!(name = test_cflag_roundtrip, suite = tty);

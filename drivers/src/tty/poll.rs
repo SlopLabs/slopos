@@ -6,6 +6,7 @@ use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
 
 use slopos_ostd::sync::BUS;
 
+use super::driver::TtyDriverKind;
 use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 
@@ -64,7 +65,8 @@ pub fn get_compositor_focus() -> Result<u32, TtyError> {
 
 /// Poll readiness for a TTY fd, after draining pending hardware input. `POLLERR`
 /// accompanies `POLLHUP` as in Linux's `tty_poll()`, so a program testing
-/// write-readiness through `POLLERR` still sees the error.
+/// write-readiness through `POLLERR` still sees the error. A PTY master is
+/// writable only while its slave takes input, as its write admits.
 pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -72,7 +74,7 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
     }
 
     let mut deferred = PostLockWork::new();
-    let revents = {
+    let (mut revents, slave) = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
             Some(t) => t,
@@ -106,8 +108,26 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
             }
         }
 
-        revents
+        let slave = match &tty.driver {
+            TtyDriverKind::PtyMaster { peer } => peer.upgrade(),
+            _ => None,
+        };
+        (revents, slave)
     };
+
+    if revents & POLLOUT != 0
+        && let Some(slave) = slave
+    {
+        let guard = TTY_SLOTS[slave.index().0 as usize].lock();
+        if guard.as_ref().is_some_and(|tty| {
+            tty.flags.contains(TtyFlags::THROTTLED)
+                && !tty
+                    .flags
+                    .intersects(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED)
+        }) {
+            revents &= !POLLOUT;
+        }
+    }
 
     deferred.execute();
     revents
