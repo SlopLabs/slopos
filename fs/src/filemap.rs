@@ -1283,12 +1283,29 @@ pub fn forget_inode(fs: &'static dyn FileSystem, inode: InodeId) {
 /// be handed to another mount: an idle set is dropped, a live one is
 /// forgotten as an unlinked inode's is.
 pub fn forget_filesystem(fs: &'static dyn FileSystem) {
+    forget_where(fs, |_| true);
+}
+
+/// Whether a mapping, or a fault in flight, holds a set of `fs` whose inode
+/// `test` holds for.
+pub fn any_mapped(fs: &'static dyn FileSystem, test: impl Fn(InodeId) -> bool) -> bool {
+    let sets = FILEMAP.lock();
+    sets.iter().any(|entry| {
+        entry.refs > 0
+            && entry
+                .fs
+                .is_some_and(|mine| same_filesystem(mine, fs) && test(entry.inode))
+    })
+}
+
+/// [`forget_filesystem`] for the sets of `fs` whose inode `test` holds for.
+pub fn forget_where(fs: &'static dyn FileSystem, test: impl Fn(InodeId) -> bool) {
     let mut sets = FILEMAP.lock();
     for entry in sets.iter_mut() {
-        let Some(mine) = entry.fs else {
-            continue;
-        };
-        if !same_filesystem(mine, fs) {
+        if !entry
+            .fs
+            .is_some_and(|mine| same_filesystem(mine, fs) && test(entry.inode))
+        {
             continue;
         }
         if entry.pending_release || entry.pending_flush {

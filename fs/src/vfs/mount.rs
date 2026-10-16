@@ -281,6 +281,31 @@ pub fn mount_subtree(
     MOUNT_TABLE.write().mount(path, fs, root, flags)
 }
 
+/// Move each `(path, root)`'s mount of `fs` to show `root`, as one step: all
+/// of them, or `NotFound` and none when a path has no mount of `fs`.
+pub fn switch_roots(fs: &'static dyn FileSystem, roots: &[(&[u8], InodeId)]) -> VfsResult<()> {
+    let mut slots = [0usize; MAX_MOUNTS];
+    let slots = slots
+        .get_mut(..roots.len())
+        .ok_or(VfsError::InvalidArgument)?;
+    let mut table = MOUNT_TABLE.write();
+    for (slot, (path, _)) in slots.iter_mut().zip(roots) {
+        *slot = table
+            .mounts
+            .iter()
+            .position(|mp| {
+                mp.is_active()
+                    && mp.path_bytes() == *path
+                    && mp.fs.is_some_and(|mine| same_filesystem(mine, fs))
+            })
+            .ok_or(VfsError::NotFound)?;
+    }
+    for (&slot, &(_, root)) in slots.iter().zip(roots) {
+        table.mounts[slot].root = root;
+    }
+    Ok(())
+}
+
 /// Hold the directory `inode` of `fs`, which a pinned mount point's path
 /// passes through, where it is: [`is_pinned_dir`] answers for it by identity,
 /// so a second mount of `fs` is no way around the pin.

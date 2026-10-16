@@ -5,6 +5,7 @@ pub mod dquota;
 pub mod ext4;
 pub mod filemap;
 pub mod fsperf;
+pub mod generations;
 pub mod journal;
 pub mod mount;
 pub mod partition;

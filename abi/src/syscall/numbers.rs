@@ -861,6 +861,25 @@ pub const SYSCALL_KCONSOLE: u64 = SYSCALL_PRIVATE_BASE + 42;
 /// afterwards holds none of them.
 pub const SYSCALL_CAPS_DROP: u64 = SYSCALL_PRIVATE_BASE + 43;
 
+/// `base_activate(archive: *const u8, len) -> generation`: index the base
+/// archive the caller's `len` bytes at `archive` hold as the base's next
+/// generation and show it at every base directory the base is mounted on, all
+/// of them in one step; descriptors already open keep the generation they
+/// opened. `ENOEXEC` for an archive whose `base-interface` names no interface
+/// this kernel serves, `EINVAL` for one that is not a base the kernel can
+/// index or that lacks a base directory, `EFBIG` past a quarter of usable
+/// memory, `EBUSY` while every generation slot is held or the generations
+/// still resident would take more than that with this one, `EFAULT` for
+/// memory the caller cannot read, `ENOMEM` and `EINTR`. Gated on
+/// `Capability::BaseUpdate`.
+pub const SYSCALL_BASE_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 44;
+
+/// `base_monitor() -> fd`, close-on-exec, that becomes `POLLIN`-ready
+/// whenever the base's generation changes since what it last answered;
+/// `read` answers the current generation as eight bytes, little-endian, and
+/// never blocks. Unprivileged.
+pub const SYSCALL_BASE_MONITOR: u64 = SYSCALL_PRIVATE_BASE + 45;
+
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
 /// call.
 pub const EFIVAR_DATA_MAX: usize = 4096;
@@ -909,6 +928,6 @@ const _: () = assert!(SYSCALL_PRIVATE_BASE > SYSCALL_LINUX_MAX);
 const _: () = assert!(SYSCALL_PRIVATE_BASE & 0x4000_0000 == 0);
 
 const _: () = assert!(
-    SYSCALL_CAPS_DROP < SYSCALL_PRIVATE_END,
+    SYSCALL_BASE_MONITOR < SYSCALL_PRIVATE_END,
     "private syscall range is full; raise SYSCALL_PRIVATE_TABLE_SIZE",
 );

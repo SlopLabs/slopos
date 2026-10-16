@@ -45,6 +45,9 @@ pub enum FileKind {
     /// Non-transferable and non-duplicable — see
     /// [`file_kind_transferable`].
     Seat = 10,
+    /// Base-generation monitor (`base_monitor`). `POLLIN`-ready when the base
+    /// changed since its last `read`, which answers the current generation.
+    BaseMonitor = 11,
 }
 
 /// Whether a descriptor of this kind may be duplicated into another process.
@@ -71,7 +74,8 @@ pub const fn file_kind_transferable(kind: FileKind) -> bool {
         | FileKind::Ring
         | FileKind::Pidfd
         | FileKind::Signalfd
-        | FileKind::Netmon => true,
+        | FileKind::Netmon
+        | FileKind::BaseMonitor => true,
         FileKind::Seat => false,
     }
 }
@@ -106,6 +110,7 @@ pub const fn file_kind_containment(kind: FileKind) -> FdContainment {
         | FileKind::Pidfd
         | FileKind::Signalfd
         | FileKind::Netmon
+        | FileKind::BaseMonitor
         | FileKind::Seat => FdContainment::Leaf,
     }
 }

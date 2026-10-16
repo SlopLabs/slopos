@@ -199,5 +199,19 @@ pub fn manifest_lines(text: &str) -> impl Iterator<Item = Result<ManifestLine<'_
     })
 }
 
+/// Whether any of `paths` reads differently in manifest `new` than in `old`:
+/// a path ending in `/` stands for everything beneath it.
+pub fn changed(old: &str, new: &str, paths: &[&str]) -> bool {
+    paths.iter().any(|path| {
+        let under = |line: &ManifestLine<'_>| match path.strip_suffix('/') {
+            Some(_) => line.path.starts_with(path),
+            None => line.path == *path,
+        };
+        let lines = |text| manifest_lines(text).flatten().filter(under);
+        lines(old).count() != lines(new).count()
+            || lines(old).any(|was| !lines(new).any(|is| is == was))
+    })
+}
+
 #[cfg(test)]
 mod tests;

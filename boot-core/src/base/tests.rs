@@ -145,3 +145,33 @@ fn a_manifest_line_that_is_not_digest_mode_path_is_refused_where_it_stands() {
     };
     assert!(refused.write(&mut String::new()).is_err());
 }
+
+fn manifest_of(lines: &[(&str, u8)]) -> String {
+    let mut out = String::new();
+    for &(path, byte) in lines {
+        ManifestLine {
+            digest: [byte; 32],
+            mode: S_IFREG | 0o755,
+            path,
+        }
+        .write(&mut out)
+        .unwrap();
+    }
+    out
+}
+
+#[test]
+fn a_change_is_a_path_or_what_lies_beneath_a_directory_reading_otherwise() {
+    let old = manifest_of(&[("/bin/a", 1), ("/usr/share/p/x", 1), ("/usr/share/q", 1)]);
+    let new = manifest_of(&[("/usr/share/q", 1), ("/bin/a", 1), ("/usr/share/p/x", 2)]);
+    assert!(!changed(&old, &new, &["/bin/a"]));
+    assert!(changed(&old, &new, &["/usr/share/p/"]));
+    assert!(!changed(&old, &new, &["/usr/share/q", "/bin/a"]));
+    assert!(changed(&old, &new, &["/usr/share/q", "/usr/share/p/"]));
+    let gone = manifest_of(&[("/usr/share/p/x", 1), ("/usr/share/q", 1)]);
+    assert!(changed(&old, &gone, &["/bin/a"]));
+    assert!(!changed(&old, &gone, &["/usr/share/p/"]));
+    let added = manifest_of(&[("/bin/a", 1), ("/usr/share/p/x", 1), ("/usr/share/p/y", 1)]);
+    assert!(changed(&old, &added, &["/usr/share/p/"]));
+    assert!(!changed(&old, &old, &["/usr/share/"]));
+}

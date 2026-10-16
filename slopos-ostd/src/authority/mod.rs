@@ -132,6 +132,11 @@ pub enum Capability {
     /// setting a nice value below zero. One `loop {}` there starves the
     /// machine.
     SchedHigh,
+    /// Making an archive the base every process runs from: `base_activate`.
+    /// What the base holds is what privd's program identity names, so this
+    /// is as much as writing the base. Deletion condition: dies when a base
+    /// is activated only from a signed image the kernel checks itself.
+    BaseUpdate,
 }
 
 impl Capability {
@@ -164,6 +169,7 @@ impl Capability {
             Self::SetId => caps::SET_ID,
             Self::DacOverride => caps::DAC_OVERRIDE,
             Self::SchedHigh => caps::SCHED_HIGH,
+            Self::BaseUpdate => caps::BASE_UPDATE,
         }
     }
 
@@ -201,6 +207,7 @@ impl Capability {
             Self::SetId => "SetId",
             Self::DacOverride => "DacOverride",
             Self::SchedHigh => "SchedHigh",
+            Self::BaseUpdate => "BaseUpdate",
         }
     }
 
@@ -230,6 +237,7 @@ impl Capability {
         Self::SetId,
         Self::DacOverride,
         Self::SchedHigh,
+        Self::BaseUpdate,
     ];
 }
 

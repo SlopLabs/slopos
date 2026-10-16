@@ -859,6 +859,7 @@ fn load_image(
     who: &Subject,
 ) -> Result<(ElfExecInfo, bool), Errno> {
     let (handle, file_size) = open_executable(path, who)?;
+    let _image_held = slopos_fs::basefs::Hold::of(handle.fs, handle.inode);
 
     // Only the header window is staged; the rest goes from the file straight
     // into the mapping, so the image may exceed the 1 MiB slab ceiling.
@@ -870,6 +871,9 @@ fn load_image(
         Some((offset, len)) => Some(stage_interpreter(&handle, offset, len, who)?),
         None => None,
     };
+    let _interpreter_held = interp
+        .as_deref()
+        .map(|staged| slopos_fs::basefs::Hold::of(staged.handle.fs, staged.handle.inode));
 
     // Charged beside the old image, so a program that cannot fit is refused
     // while the caller still has one to return to.

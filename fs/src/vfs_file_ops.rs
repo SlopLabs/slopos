@@ -186,7 +186,14 @@ fn register_vnode(
     // file got the number next. The re-check does not close the window — an
     // inode reallocated *and* re-bound to this same path still passes — but it
     // does close the case that matters, where the name is gone.
-    if !created && !still_resolves(path, cwd, resolve_flags, who, fs, inode) {
+    // A base inode is never reused: an open keeps the generation its walk
+    // found while that is resident.
+    let gone = if crate::basefs::is_base(fs) {
+        fs.stat(inode).is_err()
+    } else {
+        !still_resolves(path, cwd, resolve_flags, who, fs, inode)
+    };
+    if !created && gone {
         crate::vfs::orphan::close_ref(fs, inode);
         return Err(slopos_abi::Errno::ENOENT);
     }
@@ -227,6 +234,17 @@ pub fn vfs_dir_handle_still_names(handle: usize, path: &[u8]) -> bool {
     let Some((fs, inode)) = resolve(handle) else {
         return false;
     };
+    // A switch moves every base directory to another generation's inode at
+    // the same path.
+    if crate::basefs::is_base(fs) {
+        return crate::vfs::path::resolve_path_at(
+            path,
+            b"/",
+            crate::vfs::path::RESOLVE_FOLLOW,
+            &crate::vfs::Subject::KERNEL,
+        )
+        .is_ok_and(|again| crate::basefs::is_base(again.fs));
+    }
     still_resolves(
         path,
         b"/",

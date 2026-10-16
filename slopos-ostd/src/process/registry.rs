@@ -142,6 +142,11 @@ impl ProcessTable {
         self.slots.len()
     }
 
+    /// Whether `test` holds for some registered process.
+    pub fn any(&self, mut test: impl FnMut(&Process) -> bool) -> bool {
+        self.slots.iter().any(|(_, process)| test(process))
+    }
+
     fn find_by_id(&self, id: u32) -> Option<KArc<Process>> {
         self.slots
             .iter()

@@ -127,3 +127,40 @@ fn every_byte_flipped_is_read_or_refused_without_a_panic() {
         let _ = find_last(&flipped, "/usr/share/a");
     }
 }
+
+#[test]
+fn a_record_at_a_time_reads_what_the_whole_archive_reads() {
+    let archive = sample();
+    let mut at = 0;
+    let mut read = Vec::new();
+    loop {
+        let found = read_header(&archive[at..]).unwrap();
+        let name_at = at + HEADER_LEN;
+        let name = &archive[name_at..name_at + found.name_size];
+        let data_at = align4(name_at + found.name_size).unwrap();
+        at = align4(data_at + found.size).unwrap();
+        let Some(path) = path_of(name) else {
+            break;
+        };
+        read.push((path, found.mode, &archive[data_at..data_at + found.size]));
+    }
+    assert_eq!(at, archive.len());
+    let whole: Vec<(&[u8], u32, &[u8])> = entries(&archive)
+        .map(|e| e.map(|e| (e.path, e.mode, e.data)).unwrap())
+        .collect();
+    assert_eq!(read, whole);
+}
+
+#[test]
+fn a_header_is_refused_short_unmarked_or_nameless() {
+    let archive = sample();
+    for cut in 0..HEADER_LEN {
+        assert_eq!(read_header(&archive[..cut]), Err(Error::Truncated), "{cut}");
+    }
+    let mut unmarked = archive.clone();
+    unmarked[0] = b'1';
+    assert_eq!(read_header(&unmarked), Err(Error::BadMagic));
+    let mut nameless = archive;
+    nameless[94..102].copy_from_slice(b"00000000");
+    assert_eq!(read_header(&nameless), Err(Error::BadField));
+}

@@ -67,7 +67,8 @@ pub const DELEGABLE: u64 = caps::POWER
     | caps::CLOCK
     | caps::SEAL
     | caps::BOOT_ENTRY
-    | caps::DAC_OVERRIDE;
+    | caps::DAC_OVERRIDE
+    | caps::BASE_UPDATE;
 
 /// Whether an ELF image names a program interpreter, `None` when it is not a
 /// 64-bit little-endian ELF image whose program headers it holds.

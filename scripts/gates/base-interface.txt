@@ -73,3 +73,4 @@ root slopos_abi::window::SEAT_*
 # Ledger. Appended by --record only.
 interface 1 17d78169ae6cdcc6acf1b503af88072e94c186cc9f01f774384070f83137cd63
 interface 2 54613fa12f0ef276bd148799c3d86d226f7d50f4709a01f558498a1cd8a2d05c
+interface 3 5f7f881f55dcf04c6d240095f0c35a43c4f0bb65dd260f6064e85e9d4a55a078

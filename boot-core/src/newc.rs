@@ -2,7 +2,7 @@
 //! record by record. Every offset is checked against the archive, so a
 //! malformed one is an [`Error`], never a panic.
 
-const HEADER_LEN: usize = 110;
+pub const HEADER_LEN: usize = 110;
 const MAGIC: &[u8] = b"070701";
 const TRAILER: &[u8] = b"TRAILER!!!";
 const MODE_AT: usize = 14;
@@ -70,11 +70,45 @@ fn hex8(field: &[u8]) -> Result<usize, Error> {
     })
 }
 
-const fn align4(n: usize) -> Option<usize> {
+pub const fn align4(n: usize) -> Option<usize> {
     match n.checked_add(3) {
         Some(n) => Some(n & !3),
         None => None,
     }
+}
+
+/// A record's header: what follows it is `name_size` bytes of name, padding
+/// to four bytes, `size` bytes of data and padding again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Header {
+    pub mode: u32,
+    pub size: usize,
+    pub name_size: usize,
+}
+
+/// The header `bytes` begins with, for a reader that takes the archive a
+/// record at a time rather than whole.
+pub fn read_header(bytes: &[u8]) -> Result<Header, Error> {
+    let header = bytes.get(..HEADER_LEN).ok_or(Error::Truncated)?;
+    if &header[..MAGIC.len()] != MAGIC {
+        return Err(Error::BadMagic);
+    }
+    let field = |offset: usize| hex8(&header[offset..offset + 8]);
+    let parsed = Header {
+        mode: field(MODE_AT)? as u32,
+        size: field(FILESIZE_AT)?,
+        name_size: field(NAMESIZE_AT)?,
+    };
+    if parsed.name_size == 0 {
+        return Err(Error::BadField);
+    }
+    Ok(parsed)
+}
+
+/// A stored name as a path: up to its NUL, and `None` for the trailer.
+pub fn path_of(name: &[u8]) -> Option<&[u8]> {
+    let path = name.split(|&b| b == 0).next().unwrap_or_default();
+    (path != TRAILER).then_some(path)
 }
 
 /// The record at `at` and where the next one starts, or `None` at the
@@ -82,29 +116,19 @@ const fn align4(n: usize) -> Option<usize> {
 /// the kernel's stack-frame ceiling.
 #[inline(never)]
 fn record(archive: &[u8], at: usize) -> Result<Option<(Entry<'_>, usize)>, Error> {
-    let header = at
-        .checked_add(HEADER_LEN)
-        .and_then(|end| archive.get(at..end))
-        .ok_or(Error::Truncated)?;
-    if &header[..MAGIC.len()] != MAGIC {
-        return Err(Error::BadMagic);
-    }
-    let field = |offset: usize| hex8(&header[offset..offset + 8]);
-    let mode = field(MODE_AT)? as u32;
-    let size = field(FILESIZE_AT)?;
-    let name_size = field(NAMESIZE_AT)?;
-    if name_size == 0 {
-        return Err(Error::BadField);
-    }
+    let Header {
+        mode,
+        size,
+        name_size,
+    } = read_header(archive.get(at..).ok_or(Error::Truncated)?)?;
     let name_at = at + HEADER_LEN;
     let name = name_at
         .checked_add(name_size)
         .and_then(|end| archive.get(name_at..end))
         .ok_or(Error::Truncated)?;
-    let path = name.split(|&b| b == 0).next().unwrap_or_default();
-    if path == TRAILER {
+    let Some(path) = path_of(name) else {
         return Ok(None);
-    }
+    };
     let data_at = align4(name_at + name_size).ok_or(Error::Truncated)?;
     let data_end = data_at.checked_add(size).ok_or(Error::Truncated)?;
     let data = archive.get(data_at..data_end).ok_or(Error::Truncated)?;

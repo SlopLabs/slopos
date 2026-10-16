@@ -708,24 +708,37 @@ fn unix_getsockopt(
                 let _ = slopos_fs::file_close_fd(table, fd);
             })
         }
-        (SOL_SLOPOS, SO_PEERPROGRAM) => match peer.ok_or(Errno::ENOTCONN)?.program {
-            Program::Other => write_option(&[], len, optval, optlen),
-            Program::Base(inode) => {
-                let base = &slopos_fs::basefs::BASE_FS;
-                let need = base
-                    .path_of(inode.get(), &mut [])
-                    .map_err(|e| e.to_errno())?;
-                if len < need {
-                    copy_to_user(optlen, &(need as u32)).map_err(|_| Errno::EFAULT)?;
-                    return Err(Errno::ERANGE);
-                }
-                let mut path = KVec::<u8>::zeroed(need).map_err(|_| Errno::ENOMEM)?;
-                base.path_of(inode.get(), &mut path)
-                    .map_err(|e| e.to_errno())?;
-                write_option(&path, len, optval, optlen)
+        (SOL_SLOPOS, SO_PEERPROGRAM) => match program_path(peer.ok_or(Errno::ENOTCONN)?.program)? {
+            None => write_option(&[], len, optval, optlen),
+            Some(path) if len < path.len() => {
+                copy_to_user(optlen, &(path.len() as u32)).map_err(|_| Errno::EFAULT)?;
+                Err(Errno::ERANGE)
             }
+            Some(path) => write_option(&path, len, optval, optlen),
         },
         _ => Err(Errno::ENOPROTOOPT),
+    }
+}
+
+/// The path of `program` in its own generation, `None` for a program outside
+/// the base or of a generation that has gone.
+fn program_path(program: Program) -> Result<Option<KVec<u8>>, Errno> {
+    let Program::Base(inode) = program else {
+        return Ok(None);
+    };
+    let base = &slopos_fs::basefs::BASE_FS;
+    let gone = |e: slopos_fs::VfsError| match e {
+        slopos_fs::VfsError::NotFound => Ok(None),
+        e => Err(e.to_errno()),
+    };
+    let need = match base.path_of(inode.get(), &mut []) {
+        Ok(need) => need,
+        Err(e) => return gone(e),
+    };
+    let mut path = KVec::<u8>::zeroed(need).map_err(|_| Errno::ENOMEM)?;
+    match base.path_of(inode.get(), &mut path) {
+        Ok(_) => Ok(Some(path)),
+        Err(e) => gone(e),
     }
 }
 

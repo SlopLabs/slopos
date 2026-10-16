@@ -7,9 +7,10 @@ use core::num::NonZeroU64;
 /// Which program a process runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Program {
-    /// The base file with this inode in the booted base: the image, every
-    /// script of its `#!` chain and its ELF interpreter are the base's, and no
-    /// code from outside the base has been mapped executable since.
+    /// The base file with this inode, which names the generation it is of:
+    /// the image, every script of its `#!` chain and its ELF interpreter are
+    /// the base's, and no code from outside the base has been mapped
+    /// executable since.
     Base(NonZeroU64),
     Other,
 }

@@ -103,4 +103,6 @@ pub enum KernelEvent {
     NetMonitor {
         mon: NetMonSlot,
     },
+    /// The base's generation changed; every `base_monitor` poller re-checks.
+    BaseGeneration,
 }

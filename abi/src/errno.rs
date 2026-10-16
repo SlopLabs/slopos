@@ -131,6 +131,7 @@ define_errnos! {
     ENFILE          =  23, "Too many open files in system";
     EMFILE          =  24, "Too many open files";
     ENOTTY          =  25, "Inappropriate ioctl for device";
+    EFBIG           =  27, "File too large";
     ENOSPC          =  28, "No space left on device";
     ESPIPE          =  29, "Illegal seek";
     EROFS           =  30, "Read-only file system";

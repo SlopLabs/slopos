@@ -375,6 +375,14 @@ pub fn has_open_refs(fs: &'static dyn FileSystem) -> bool {
         .any(|e| e.refs > 0 && same_filesystem(e.fs, fs))
 }
 
+/// Whether an open reference names an inode of `fs` that `test` holds for.
+pub fn any_open(fs: &'static dyn FileSystem, test: impl Fn(InodeId) -> bool) -> bool {
+    let table = TRACKED.lock();
+    table
+        .iter()
+        .any(|e| e.refs > 0 && same_filesystem(e.fs, fs) && test(e.inode))
+}
+
 /// Tracked inodes: open, detached, or both.
 pub fn tracked_count() -> usize {
     TRACKED.lock().len()

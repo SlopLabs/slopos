@@ -91,6 +91,7 @@ pub struct EventBus {
     any_child_exit: [WaitQueue; CHILD_EXIT_BUCKETS],
     signal_pending: [WaitQueue; SIGNAL_PENDING_BUCKETS],
     netmon: [WaitQueue; MAX_NETMON],
+    base_generation: WaitQueue,
 }
 
 const EMPTY_BUS: EventBus = EventBus {
@@ -118,6 +119,7 @@ const EMPTY_BUS: EventBus = EventBus {
         SIGNAL_PENDING_BUCKETS],
     netmon: [const { WaitQueue::new(lock_class!("evbus.netmon", LOCK_LEVEL_RESOURCE)) };
         MAX_NETMON],
+    base_generation: WaitQueue::new(lock_class!("evbus.base_generation", LOCK_LEVEL_RESOURCE)),
 };
 
 /// The kernel-wide event bus.
@@ -183,6 +185,7 @@ impl EventBus {
                 &self.signal_pending[(task.0 as usize) % SIGNAL_PENDING_BUCKETS]
             }
             KernelEvent::NetMonitor { mon } => &self.netmon[(mon.0 as usize) % MAX_NETMON],
+            KernelEvent::BaseGeneration => &self.base_generation,
         }
     }
 

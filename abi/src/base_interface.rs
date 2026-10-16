@@ -7,7 +7,7 @@
 
 /// The interface of this tree's private call surface. Any change to a
 /// SlopOS-only call's number, arguments or structures takes the next number.
-pub const BASE_INTERFACE: u32 = 2;
+pub const BASE_INTERFACE: u32 = 3;
 
 /// The oldest interface a kernel built from this tree still serves. It rises
 /// only when a change takes away or reshapes something an older base calls; a

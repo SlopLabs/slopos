@@ -40,7 +40,7 @@ const MAX_DESCRIBE: usize = 120;
 const MAX_PATH: usize = 255;
 const PROGRAM_DIRS: [&str; 3] = ["/bin/", "/sbin/", "/usr/bin/"];
 
-const CAP_NAMES: [(&str, u64); 10] = [
+const CAP_NAMES: [(&str, u64); 11] = [
     ("Power", caps::POWER),
     ("Mount", caps::MOUNT),
     ("RawBlock", caps::RAW_BLOCK),
@@ -51,6 +51,7 @@ const CAP_NAMES: [(&str, u64); 10] = [
     ("Seal", caps::SEAL),
     ("BootEntry", caps::BOOT_ENTRY),
     ("DacOverride", caps::DAC_OVERRIDE),
+    ("BaseUpdate", caps::BASE_UPDATE),
 ];
 
 const _: () = {
