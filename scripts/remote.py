@@ -69,6 +69,9 @@ TERMINAL = (EXIT, DONE, ERROR)
 PING_EVERY = 15
 DEAD_AFTER = 45
 SCRATCH = "/var/tmp/slopos-remote"
+# bootctl reads what install pushes as uid 0 holding no DacOverride, and a
+# paired base is 0600 here for its token, which the base serves anyway.
+INSTALL_MODE = 0o644
 
 
 class RemoteError(Exception):
@@ -1005,11 +1008,12 @@ def drain_error(link):
         return None
 
 
-def push(args, local, remote):
+def push(args, local, remote, mode=None):
     local = Path(local)
     if remote.endswith("/"):
         remote += local.name
-    mode = stat.S_IMODE(local.stat().st_mode)
+    if mode is None:
+        mode = stat.S_IMODE(local.stat().st_mode)
     digest, size = hashlib.sha256(), 0
     link = session(args)
     try:
@@ -1175,7 +1179,7 @@ def install_base(args, base):
     paired = check_paired(State(args.state), base)
     tag = base_build_tag(base)
     log(f"{base} is paired with {paired}, build tag {tag or '-'}")
-    remote_base, size, base_sha = push(args, base, f"{SCRATCH}/base.img")
+    remote_base, size, base_sha = push(args, base, f"{SCRATCH}/base.img", INSTALL_MODE)
     log(f"pushed {base}: {size} bytes, sha256 {base_sha}")
     # The session may replace what was pushed; bootctl installs only these bytes.
     try:
@@ -1209,7 +1213,7 @@ def install_kernel(args, kernel):
         old_boots = [a["boot"] for a in link.control(op="status")["agents"]]
     finally:
         link.close()
-    remote_kernel, size, kernel_sha = push(args, kernel, f"{SCRATCH}/kernel.elf")
+    remote_kernel, size, kernel_sha = push(args, kernel, f"{SCRATCH}/kernel.elf", INSTALL_MODE)
     log(f"pushed {kernel}: {size} bytes, sha256 {kernel_sha}")
     slot = capture(args, ["bootctl", "spare"]).strip()
     if not slot:
