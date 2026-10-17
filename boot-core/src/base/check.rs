@@ -68,9 +68,25 @@ impl fmt::Display for Shown<'_> {
     }
 }
 
-impl fmt::Display for CheckError<'_> {
+impl CheckError<'_> {
+    /// The error, naming `manifest` as the manifest the archive is sealed by.
+    pub fn shown<'s>(&'s self, manifest: &'s str) -> impl fmt::Display + 's {
+        Against {
+            error: self,
+            manifest,
+        }
+    }
+}
+
+struct Against<'s, 'a> {
+    error: &'s CheckError<'a>,
+    manifest: &'s str,
+}
+
+impl fmt::Display for Against<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
+        let manifest = self.manifest;
+        match *self.error {
             CheckError::Archive(e) => write!(f, "not a newc archive ({e:?})"),
             CheckError::TooMany => write!(f, "more than {MAX_RECORDS} records"),
             CheckError::Kind(path) => write!(f, "{}: no file, directory or symlink", Shown(path)),
@@ -87,21 +103,20 @@ impl fmt::Display for CheckError<'_> {
             }
             CheckError::InDevfs(path) => write!(f, "{}: in the kernel's devfs", Shown(path)),
             CheckError::Interface(e) => write!(f, "{e}"),
-            CheckError::NoManifest => write!(f, "no {MANIFEST_PATH}"),
-            CheckError::ManifestLine(line) => {
-                write!(f, "{MANIFEST_PATH}: line {line} is malformed")
-            }
+            CheckError::NoManifest => write!(f, "no {manifest}"),
+            CheckError::ManifestLine(line) => write!(f, "{manifest}: line {line} is malformed"),
             CheckError::Unknown(path) => {
-                write!(
-                    f,
-                    "{MANIFEST_PATH} names {path} where the archive holds another"
-                )
+                write!(f, "{manifest} names {path} where the archive holds another")
             }
-            CheckError::Unlisted(path) => {
-                write!(f, "{MANIFEST_PATH} leaves out {}", Shown(path))
-            }
-            CheckError::Misstated(path) => write!(f, "{path}: not what {MANIFEST_PATH} says"),
+            CheckError::Unlisted(path) => write!(f, "{manifest} leaves out {}", Shown(path)),
+            CheckError::Misstated(path) => write!(f, "{path}: not what {manifest} says"),
         }
+    }
+}
+
+impl fmt::Display for CheckError<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.shown(MANIFEST_PATH).fmt(f)
     }
 }
 
@@ -138,16 +153,41 @@ fn wants_directory(path: &[u8]) -> bool {
         .any(|dir| dir.as_bytes() == path || beneath(dir.as_bytes(), path))
 }
 
-fn is_manifest(entry: &Entry<'_>) -> bool {
-    entry.path == MANIFEST_PATH.as_bytes()
-}
-
 /// The base `image` is, or the first thing that makes it none; `digest` is
 /// SHA-256.
 pub fn check<'a>(
     image: &'a [u8],
     digest: impl Fn(&[u8]) -> Digest,
 ) -> Result<Checked<'a>, CheckError<'a>> {
+    let manifest = sealed(image, MANIFEST_PATH, digest, |entry| {
+        if entry.kind() != S_IFDIR && wants_directory(entry.path) {
+            return Err(CheckError::NotDirectory(entry.path));
+        }
+        if beneath(entry.path, DEVFS.as_bytes()) {
+            return Err(CheckError::InDevfs(entry.path));
+        }
+        Ok(())
+    })?;
+    let interface = interface(image).map_err(CheckError::Interface)?;
+    Ok(Checked {
+        interface,
+        manifest,
+        build_tag: build_tag(image),
+    })
+}
+
+/// The manifest of `image`, an archive sealed by one at `manifest_path`, or
+/// the first thing that makes it none. Every record is a file, directory or
+/// symlink under a canonical name, once, beneath no file, and is what
+/// `placed` admits; the manifest lists every other record in archive order
+/// with its mode and the `digest` of its bytes.
+pub fn sealed<'a>(
+    image: &'a [u8],
+    manifest_path: &str,
+    digest: impl Fn(&[u8]) -> Digest,
+    placed: impl Fn(&Entry<'a>) -> Result<(), CheckError<'a>>,
+) -> Result<&'a [u8], CheckError<'a>> {
+    let is_manifest = |entry: &Entry<'_>| entry.path == manifest_path.as_bytes();
     let mut records = 0;
     let mut manifest = None;
     for entry in newc::entries(image) {
@@ -166,12 +206,7 @@ pub fn check<'a>(
         if entry.kind() == S_IFLNK && !target_ok(entry.data) {
             return Err(CheckError::Target(path));
         }
-        if entry.kind() != S_IFDIR && wants_directory(path) {
-            return Err(CheckError::NotDirectory(path));
-        }
-        if beneath(path, DEVFS.as_bytes()) {
-            return Err(CheckError::InDevfs(path));
-        }
+        placed(&entry)?;
         for earlier in newc::entries(image).take(records - 1).flatten() {
             if earlier.path == path {
                 return Err(CheckError::Twice(path));
@@ -186,7 +221,6 @@ pub fn check<'a>(
             manifest = Some(entry.data);
         }
     }
-    let interface = interface(image).map_err(CheckError::Interface)?;
     let manifest = manifest.ok_or(CheckError::NoManifest)?;
     let text = core::str::from_utf8(manifest).map_err(|_| CheckError::ManifestLine(1))?;
     let mut lines = manifest_lines(text);
@@ -206,11 +240,7 @@ pub fn check<'a>(
         let line = line.map_err(|bad| CheckError::ManifestLine(bad.line))?;
         return Err(CheckError::Unknown(line.path));
     }
-    Ok(Checked {
-        interface,
-        manifest,
-        build_tag: build_tag(image),
-    })
+    Ok(manifest)
 }
 
 fn build_tag(image: &[u8]) -> Option<&str> {
