@@ -70,6 +70,59 @@ pub const DELEGABLE: u64 = caps::POWER
     | caps::DAC_OVERRIDE
     | caps::BASE_UPDATE;
 
+/// Every capability, by the name `slopos_ostd::authority::Capability` gives
+/// it.
+pub const CAPABILITIES: [(&str, u64); 21] = [
+    ("Power", caps::POWER),
+    ("ProcSignal", caps::PROC_SIGNAL),
+    ("SysInspect", caps::SYS_INSPECT),
+    ("DisplaySeat", caps::DISPLAY_SEAT),
+    ("InputSeat", caps::INPUT_SEAT),
+    ("ConsoleConfig", caps::CONSOLE_CONFIG),
+    ("ConsoleIo", caps::CONSOLE_IO),
+    ("ClipboardGlobal", caps::CLIPBOARD_GLOBAL),
+    ("Fate", caps::FATE),
+    ("TestHarness", caps::TEST_HARNESS),
+    ("Mount", caps::MOUNT),
+    ("Clock", caps::CLOCK),
+    ("Seal", caps::SEAL),
+    ("BootEntry", caps::BOOT_ENTRY),
+    ("NetAdmin", caps::NET_ADMIN),
+    ("RawBlock", caps::RAW_BLOCK),
+    ("SetId", caps::SET_ID),
+    ("DacOverride", caps::DAC_OVERRIDE),
+    ("SchedHigh", caps::SCHED_HIGH),
+    ("BaseUpdate", caps::BASE_UPDATE),
+    ("ExtensionUpdate", caps::EXTENSION_UPDATE),
+];
+
+const _: () = {
+    let mut all = 0;
+    let mut i = 0;
+    while i < CAPABILITIES.len() {
+        assert!(all & CAPABILITIES[i].1 == 0);
+        all |= CAPABILITIES[i].1;
+        i += 1;
+    }
+    assert!(all == caps::ALL);
+};
+
+/// The capability `name` names.
+pub fn capability(name: &str) -> Option<u64> {
+    CAPABILITIES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|&(_, bit)| bit)
+}
+
+/// The names of the capabilities in `mask`, in [`CAPABILITIES`]' order.
+pub fn capability_names(mask: u64) -> impl Iterator<Item = &'static str> {
+    CAPABILITIES
+        .iter()
+        .filter(move |(_, bit)| mask & bit != 0)
+        .map(|&(name, _)| name)
+}
+
 /// Whether an ELF image names a program interpreter, `None` when it is not a
 /// 64-bit little-endian ELF image whose program headers it holds.
 pub fn elf_interpreted(image: &[u8]) -> Option<bool> {

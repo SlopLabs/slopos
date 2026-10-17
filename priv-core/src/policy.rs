@@ -27,7 +27,6 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use slopos_abi::caps;
 use slopos_abi::fs::SESSION_UID;
 
 use crate::DELEGABLE;
@@ -40,30 +39,6 @@ const MAX_WORD: usize = 64;
 const MAX_DESCRIBE: usize = 120;
 const MAX_PATH: usize = 255;
 const PROGRAM_DIRS: [&str; 3] = ["/bin/", "/sbin/", "/usr/bin/"];
-
-const CAP_NAMES: [(&str, u64); 11] = [
-    ("Power", caps::POWER),
-    ("Mount", caps::MOUNT),
-    ("RawBlock", caps::RAW_BLOCK),
-    ("NetAdmin", caps::NET_ADMIN),
-    ("ConsoleConfig", caps::CONSOLE_CONFIG),
-    ("SysInspect", caps::SYS_INSPECT),
-    ("Clock", caps::CLOCK),
-    ("Seal", caps::SEAL),
-    ("BootEntry", caps::BOOT_ENTRY),
-    ("DacOverride", caps::DAC_OVERRIDE),
-    ("BaseUpdate", caps::BASE_UPDATE),
-];
-
-const _: () = {
-    let mut all = 0;
-    let mut i = 0;
-    while i < CAP_NAMES.len() {
-        all |= CAP_NAMES[i].1;
-        i += 1;
-    }
-    assert!(all == DELEGABLE);
-};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Policy {
@@ -186,6 +161,27 @@ impl Action {
 }
 
 impl Shape {
+    /// An `args` line's words: fixed ones, then `*` for any further ones.
+    pub fn parse(rest: &str) -> Result<Shape, &'static str> {
+        let mut shape = Shape {
+            words: Vec::new(),
+            open: false,
+        };
+        for word in rest.split_ascii_whitespace() {
+            if shape.open {
+                return Err("* ends a shape");
+            }
+            if word == "*" {
+                shape.open = true;
+            } else if valid_word(word) {
+                shape.words.push(word.to_string());
+            } else {
+                return Err("an argument word is printable and unquoted");
+            }
+        }
+        Ok(shape)
+    }
+
     pub fn matches(&self, args: &[&[u8]]) -> bool {
         let fixed = self.words.len();
         let count_ok = if self.open {
@@ -290,22 +286,7 @@ impl Draft {
                 once(&mut self.program, path.to_string())
             }
             "args" => {
-                let mut shape = Shape {
-                    words: Vec::new(),
-                    open: false,
-                };
-                for word in words {
-                    if shape.open {
-                        return Err("* ends a shape");
-                    }
-                    if word == "*" {
-                        shape.open = true;
-                    } else if valid_word(word) {
-                        shape.words.push(word.to_string());
-                    } else {
-                        return Err("an argument word is printable and unquoted");
-                    }
-                }
+                let shape = Shape::parse(rest)?;
                 if self.shapes.contains(&shape) {
                     return Err("the shape is already listed");
                 }
@@ -315,9 +296,8 @@ impl Draft {
             "caps" => {
                 let mut mask = 0;
                 for word in words {
-                    let (_, bit) = CAP_NAMES
-                        .iter()
-                        .find(|(name, _)| *name == word)
+                    let bit = crate::capability(word)
+                        .filter(|bit| bit & DELEGABLE != 0)
                         .ok_or("caps names capabilities privd holds")?;
                     if mask & bit != 0 {
                         return Err("a capability named twice");
@@ -367,19 +347,7 @@ impl Draft {
                 self.allows.push(Allow { principal, consent });
                 Ok(())
             }
-            "describe" => {
-                let text = rest
-                    .strip_prefix('"')
-                    .and_then(|r| r.strip_suffix('"'))
-                    .ok_or("describe takes one quoted line")?;
-                if text.is_empty()
-                    || text.len() > MAX_DESCRIBE
-                    || !text.bytes().all(|b| (0x20..0x7f).contains(&b) && b != b'"')
-                {
-                    return Err("describe is printable ASCII, without quotes inside");
-                }
-                once(&mut self.describe, text.to_string())
-            }
+            "describe" => once(&mut self.describe, describe(rest)?),
             "cwd" if rest.is_empty() => flag(&mut self.cwd),
             "medium" if rest.is_empty() => flag(&mut self.medium),
             "exclusive" => {
@@ -463,7 +431,22 @@ pub fn valid_name(name: &str) -> bool {
         })
 }
 
-fn valid_word(word: &str) -> bool {
+/// A `describe` line's one quoted line of printable ASCII.
+pub fn describe(rest: &str) -> Result<String, &'static str> {
+    let text = rest
+        .strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .ok_or("describe takes one quoted line")?;
+    if text.is_empty()
+        || text.len() > MAX_DESCRIBE
+        || !text.bytes().all(|b| (0x20..0x7f).contains(&b) && b != b'"')
+    {
+        return Err("describe is printable ASCII, without quotes inside");
+    }
+    Ok(text.to_string())
+}
+
+pub fn valid_word(word: &str) -> bool {
     !word.is_empty()
         && word.len() <= MAX_WORD
         && word
@@ -471,7 +454,9 @@ fn valid_word(word: &str) -> bool {
             .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'*')
 }
 
-fn valid_program(path: &str) -> bool {
+/// A base program's canonical path, under a directory the base holds
+/// programs in.
+pub fn valid_program(path: &str) -> bool {
     path.len() <= MAX_PATH
         && PROGRAM_DIRS.iter().any(|dir| path.starts_with(dir))
         && path[1..].split('/').all(|part| {
