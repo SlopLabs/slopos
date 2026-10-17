@@ -1320,6 +1320,12 @@ inode is sealed for good, and the directories a root keeps for it are sealed
 too — and privd's program identity rests on the base being what booted or
 what a `BaseUpdate` holder activated since.
 
+**A seal is final for readers.** `FS_IOC_SETFLAGS` refuses to seal a file a
+writable shared mapping holds (`EBUSY`, as Linux refuses `F_SEAL_WRITE` on a
+memfd so mapped), and a `write(2)` through a descriptor opened before the
+seal is refused at the page set as the filesystem refuses it, so what a
+sealer reads back once the seal is set is what every reader reads after.
+
 **The root is not the only filesystem.** `mount(2)` with `fstype` `ext2`,
 `ext3` or `ext4` (one driver) takes a
 `source` naming a block device — `mount("/dev/nvme0n1p3", "/home", "ext4", …)`

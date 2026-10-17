@@ -1433,7 +1433,60 @@ pub fn test_filemap_sealed_inode_refuses_a_writable_set() -> TestResult {
     TestResult::Pass
 }
 
+/// A seal is final for what a file's readers see: refused while a writable
+/// shared mapping could store past it, and a `write(2)` through a descriptor
+/// opened before it lands nowhere.
+pub fn test_filemap_a_seal_holds_against_the_page_set() -> TestResult {
+    if !ensure_mount() {
+        return slopos_testing::fail!("could not build the fixture image");
+    }
+    let inode = match seed_file(b"sealset", PAGE, 71) {
+        Ok(i) => i,
+        Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
+    };
+    let seal = || filemap::seal_unmapped(test_fs(), inode, || test_fs().set_sealed(inode));
+    let mapped_seal = match map_page(inode, 0, true, AccountId::NONE) {
+        Ok(map) => {
+            let sealed = seal();
+            filemap::release(map, 1);
+            filemap::drain_pending();
+            sealed
+        }
+        Err(e) => return slopos_testing::fail!("mapping the page writable failed: {:?}", e),
+    };
+    let reader = map_page(inode, 0, false, AccountId::NONE);
+    let sealed = seal();
+    let wrote = crate::vfs_file_ops::write_chunk(test_fs(), inode, 0, b"past-the-seal");
+    let seen = read_path(inode, 0, 16);
+    if let Ok(map) = reader {
+        filemap::release(map, 1);
+    }
+    filemap::drain_pending();
+    drop_file(b"sealset");
+
+    if mapped_seal != Err(VfsError::Busy) {
+        return slopos_testing::fail!("a writably mapped file sealed: {:?}", mapped_seal);
+    }
+    if let Err(e) = reader {
+        return slopos_testing::fail!("mapping the page read-only failed: {:?}", e);
+    }
+    if sealed.is_err() {
+        return slopos_testing::fail!("a file mapped read-only refused its seal: {:?}", sealed);
+    }
+    if wrote != Err(VfsError::PermissionDenied) {
+        return slopos_testing::fail!("a write into a sealed file's page set took {:?}", wrote);
+    }
+    match (seen, pattern(16, 71)) {
+        (Some(seen), Some(want)) if seen.as_slice() == want.as_slice() => TestResult::Pass,
+        _ => slopos_testing::fail!("a sealed file's readers saw other bytes"),
+    }
+}
+
 slopos_testing::stest!(name = test_filemap_fault_serves_the_files_bytes, suite = fs);
+slopos_testing::stest!(
+    name = test_filemap_a_seal_holds_against_the_page_set,
+    suite = fs
+);
 slopos_testing::stest!(
     name = test_filemap_fault_zero_fills_past_the_end,
     suite = fs

@@ -398,7 +398,11 @@ pub(crate) fn write_chunk(
         }
         crate::filemap::Coverage::Here => {}
     }
-    let size = fs.stat(inode)?.size;
+    let stat = fs.stat(inode)?;
+    if stat.sealed {
+        return Err(crate::vfs::VfsError::PermissionDenied);
+    }
+    let size = stat.size;
     let written = match crate::filemap::write_through(fs, inode, offset, buf) {
         crate::filemap::WriteThrough::Served(n) => n,
         crate::filemap::WriteThrough::Interrupted => {
