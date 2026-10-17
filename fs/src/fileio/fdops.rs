@@ -1426,7 +1426,8 @@ pub fn file_inode_flags_fd(table: FdTable, fd: c_int) -> Result<u32, Errno> {
 }
 
 /// `FS_IOC_SETFLAGS`, the owner's. A change to the seal without `seal` is
-/// `EPERM`, a flag the filesystem does not keep `EOPNOTSUPP`.
+/// `EPERM`, a flag the filesystem does not keep `EOPNOTSUPP`, and a seal of a
+/// file a writable shared mapping holds `EBUSY`.
 pub fn file_set_inode_flags_fd(
     table: FdTable,
     fd: c_int,
@@ -1444,7 +1445,14 @@ pub fn file_set_inode_flags_fd(
     if (current ^ flags) & FS_IMMUTABLE_FL != 0 && seal.is_none() {
         return Err(Errno::EPERM);
     }
-    fs.set_inode_flags(inode, flags, seal).map_err(|e| match e {
+    let set = || fs.set_inode_flags(inode, flags, seal);
+    let seals = flags & !current & FS_IMMUTABLE_FL != 0;
+    if seals {
+        crate::filemap::seal_unmapped(fs, inode, set)
+    } else {
+        set()
+    }
+    .map_err(|e| match e {
         VfsError::PermissionDenied => Errno::EPERM,
         e => e.to_errno(),
     })

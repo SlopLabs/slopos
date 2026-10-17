@@ -505,11 +505,13 @@ pub fn reserve_range(
     // a boot that runs no ext2 flusher, and the slot it holds would refuse
     // every later mapping.
     drain_pending();
+    // Under the stripe, which `seal_unmapped` holds across its check and the
+    // seal: either this set is seen there or the seal is seen here.
+    let _io = io_lock(inode)?;
     if writable && fs.stat(inode).map_err(|_| FileMapError::Io)?.sealed {
         return Err(FileMapError::WriteRefused);
     }
-    let _io = io_lock(inode)?;
-    reserve_slot(fs, inode, first_page, page_count, owner)
+    reserve_slot(fs, inode, first_page, page_count, writable, owner)
 }
 
 /// The bookkeeping half of [`reserve_range`]: claim the slot, widen the extent
@@ -520,6 +522,7 @@ fn reserve_slot(
     inode: InodeId,
     first_page: u64,
     page_count: u32,
+    writable: bool,
     owner: AccountId,
 ) -> Result<FileMapRef, FileMapError> {
     let mut sets = FILEMAP.lock();
@@ -637,6 +640,7 @@ fn reserve_slot(
         index::insert(fs, inode, slot);
     }
     take_refs(entry, page_count);
+    entry.dirtyable |= writable;
     revive(entry);
 
     Ok(ref_for(slot, entry.generation))
@@ -1150,6 +1154,26 @@ pub fn around_uncovered_write(
         return Err(crate::vfs::VfsError::Interrupted);
     };
     write()
+}
+
+/// Run `seal` on `inode` unless a writable shared mapping holds its set:
+/// what such a mapping stores reaches every `read(2)` of the file, past any
+/// seal. `Busy` then, as Linux refuses `F_SEAL_WRITE` on a memfd so mapped.
+pub fn seal_unmapped(
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+    seal: impl FnOnce() -> crate::vfs::VfsResult<()>,
+) -> crate::vfs::VfsResult<()> {
+    let _io = io_lock(inode).map_err(|_| crate::vfs::VfsError::Interrupted)?;
+    let mapped = {
+        let sets = FILEMAP.lock();
+        find_set(sets.as_slice(), fs, inode)
+            .is_some_and(|slot| sets[slot].refs > 0 && sets[slot].dirtyable)
+    };
+    if mapped {
+        return Err(crate::vfs::VfsError::Busy);
+    }
+    seal()
 }
 
 /// Add `pages` mapping references; `false` if the handle is stale.
