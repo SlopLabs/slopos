@@ -145,6 +145,8 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
         ("service s\n  caps Power\n", 1),
         (&service("  program /opt/hello/bin/t\n"), 4),
         (&service("  program /opt/other/bin/s\n"), 4),
+        (&service("  program /opt/hello/lib/s\n"), 4),
+        (&action("  allow program /opt/hello/lib/x\n"), 6),
         (&service("  user ghost\n"), 2),
         (&service("  caps Wizard\n"), 4),
         (&service("  listen tcp 0\n"), 4),
@@ -211,6 +213,11 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
         Err(1),
         "ext.<name>.<action> is past privd's 64 bytes"
     );
+    let text = "action a\n  program /opt/2fa/bin/a\n  args a\n  caps Power\n  allow user\n  describe \"A\"\n";
+    assert_eq!(
+        Declaration::parse("2fa", text).map_err(|e| e.msg),
+        Err("privd names no action by a word that starts with a digit")
+    );
 }
 
 #[test]
@@ -245,16 +252,22 @@ action shell
   caps     Mount
   allow    program /bin/shell
   describe \"B\"
+action admin
+  program  /opt/hello/libexec/d
+  args     d
+  caps     Clock
+  allow    admin
+  describe \"D\"
 action asked
   program  /opt/hello/libexec/c
   args     c
   caps     RawBlock
   allow    user confirm
-  allow    admin
+  allow    admin password
   allow    paired
   describe \"C\"
 ";
     let d = Declaration::parse("hello", declare).unwrap();
-    assert_eq!(d.grant().unasked, ["alone", "shell"]);
-    assert_eq!(d.unasked_caps(), caps::POWER | caps::MOUNT);
+    assert_eq!(d.grant().unasked, ["alone", "shell", "admin"]);
+    assert_eq!(d.unasked_caps(), caps::POWER | caps::MOUNT | caps::CLOCK);
 }

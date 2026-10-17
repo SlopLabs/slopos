@@ -65,7 +65,11 @@ fn names(dir: &Path) -> io::Result<Vec<String>> {
 fn add(packer: &mut Packer, host: &Path, inside: &str) -> Result<(), String> {
     let fail = |e: io::Error| format!("{}: {e}", host.display());
     let meta = fs::symlink_metadata(host).map_err(fail)?;
-    let permissions = meta.permissions().mode() & 0o7777;
+    let permissions = if meta.is_dir() || meta.permissions().mode() & 0o111 != 0 {
+        0o755
+    } else {
+        0o644
+    };
     let kind = meta.file_type();
     if kind.is_symlink() {
         let target = fs::read_link(host).map_err(fail)?;
@@ -131,6 +135,18 @@ mod tests {
             pack(&dir).unwrap().0,
             image,
             "the same tree packs the same bytes"
+        );
+        fs::set_permissions(dir.join("share/doc"), fs::Permissions::from_mode(0o775)).unwrap();
+        fs::set_permissions(
+            dir.join("share/doc/README"),
+            fs::Permissions::from_mode(0o664),
+        )
+        .unwrap();
+        fs::set_permissions(dir.join("bin/hello"), fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(
+            pack(&dir).unwrap().0,
+            image,
+            "a looser umask packs the same bytes"
         );
         fs::write(dir.join("README"), b"x").unwrap();
         assert!(pack(&dir).unwrap_err().contains("outside bin"));

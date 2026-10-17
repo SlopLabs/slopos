@@ -28,19 +28,13 @@ case "$TARGET_DIR" in
 esac
 
 (cd "$REPO_ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" $CARGO build --locked --release --quiet -p slopos-extension)
-programs=""
-for sub in bin libexec; do
-    [ -d "$DIR/$sub" ] || continue
-    for file in $(find "$DIR/$sub" -type f | sort); do
-        if [ "$(head -c 4 "$file" | od -An -c | tr -d ' ')" = '177ELF' ]; then
-            programs="$programs $file"
+# Every ELF file outside lib/ is a program, as the image check holds it.
+find "$DIR" \( -path "$DIR/lib" -o -path "$DIR/.extension" \) -prune -o -type f -exec sh -c '
+    for file; do
+        if [ "$(head -c 4 "$file" | od -An -c | tr -d " ")" = 177ELF ]; then
+            printf "%s\0" "$file"
         fi
-    done
-done
-if [ -n "$programs" ]; then
-    # shellcheck disable=SC2086
-    "$REPO_ROOT/scripts/check_loose_programs.sh" $programs
-fi
+    done' sh {} + | xargs -0r "$REPO_ROOT/scripts/check_loose_programs.sh"
 report="$("$TARGET_DIR/release/extension" "$DIR" "$OUT" "$LIBC")"
 printf '%s\n' "$report"
 sidecar="$(printf '%s\n' "$report" | sed -n 's/^sidecar //p')"

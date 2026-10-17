@@ -1,14 +1,9 @@
-//! `/bin/extctl` — installs extensions and keeps the store of them.
-//!
-//! A first install names what it grants on its command line, which is what
-//! the person approving it reads; a signed install names no grant and goes in
-//! unasked within the ceilings of the key that signed it. Every activation
-//! holds the image again to its record, its key and the base's ceiling, and
-//! one that no longer fits is stopped and says why.
-//!
-//! `status` and `build` need nothing. The rest run as privd's
-//! `org.slopos.extension.*` actions, holding `ExtensionUpdate` and `Seal`;
-//! `activate-all` is init's, which holds both.
+//! `/bin/extctl`: installs extensions and keeps their store. A first
+//! install's command line names what it grants, which the person approves; a
+//! signed one goes in unasked within its key's ceilings; every activation
+//! holds the image to its record, its key and the base's ceiling again.
+//! `status` and `build` need nothing, `activate-all` the capabilities its
+//! caller holds, and the rest are privd's `org.slopos.extension.*` actions.
 
 mod store;
 
@@ -132,13 +127,17 @@ fn canonical(args: &[String]) -> Result<Vec<String>, String> {
                 }
                 [file, tail @ ..] => {
                     let text = read_file(file, 4096)?;
-                    let line = String::from_utf8_lossy(&text).trim().to_owned();
-                    let mut words = line.splitn(3, ' ');
+                    let line = String::from_utf8_lossy(&text);
+                    let mut words = line.split_ascii_whitespace();
                     let key = key_of(words.next().unwrap_or(""), words.next().unwrap_or(""))
                         .map_err(|e| format!("{file}: {e}"))?;
-                    let comment = words.next().unwrap_or("");
-                    let comment = if valid_comment(comment) { comment } else { "" };
-                    (key, comment.to_owned(), tail)
+                    let comment = words.collect::<Vec<_>>().join(" ");
+                    let comment = if valid_comment(&comment) {
+                        comment
+                    } else {
+                        String::new()
+                    };
+                    (key, comment, tail)
                 }
                 [] => return Err(USAGE.into()),
             };
