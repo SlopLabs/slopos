@@ -568,6 +568,17 @@ pub fn vfs_mount_readonly(path: &[u8], fs: &'static dyn FileSystem) -> VfsResult
     crate::vfs::mount::mount(path, fs, MOUNT_RDONLY | crate::vfs::mount::MOUNT_PINNED)
 }
 
+/// Make `path` and each directory on the way to it where the root lacks
+/// one, and hold every one of them where it is.
+pub fn vfs_keep_dir(path: &[u8]) -> VfsResult<()> {
+    let mut at = 0;
+    while let Some(next) = path[at + 1..].iter().position(|&b| b == b'/') {
+        at += next + 1;
+        hold_dir(&path[..at])?;
+    }
+    hold_dir(path)
+}
+
 /// Make `path` a directory if the root lacks one there, and hold it where it
 /// is, as a pinned mount point's parent.
 pub(crate) fn hold_dir(path: &[u8]) -> VfsResult<()> {

@@ -295,6 +295,15 @@ pub const SESSION_TREES: [&str; 3] = ["/home", "/src", "/usr/local"];
 /// What init records once a root's session trees are the session's.
 pub const OWNERS_RECORD: &str = "/var/lib/slopos/owners";
 
+/// The keys the owner trusts with extensions and what each one installed
+/// keeps, uid 0's and sealed by the mechanisms that write it.
+pub const EXTENSION_STORE: &str = "/var/lib/slopos/extensions";
+
+/// Directories the kernel keeps where they are from boot: neither one nor a
+/// directory on the way to one is renamed or removed, and no mount covers
+/// one, one on the way to it or anything beneath it.
+pub const KEPT_DIRS: [&str; 1] = [EXTENSION_STORE];
+
 pub const AT_FDCWD: i32 = -100;
 pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
 pub const AT_REMOVEDIR: u32 = 0x200;

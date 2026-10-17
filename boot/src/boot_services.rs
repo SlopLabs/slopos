@@ -222,6 +222,7 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     if !install_base(archive) || mount_base() != 0 {
         return -1;
     }
+    keep_dirs();
 
     ROOTFS_IS_RAMFS.store(true, Ordering::Relaxed);
     0
@@ -240,6 +241,17 @@ fn install_base(archive: &'static [u8]) -> bool {
         Err(e) => {
             klog_info!("ROOTFS: the boot module is no base: {:?}", e);
             false
+        }
+    }
+}
+
+/// Hold the directories the kernel keeps where they are on the root just
+/// made final. One that cannot be held, behind a link or on a read-only
+/// root, is left as it is: what reads it holds it to being a directory.
+fn keep_dirs() {
+    for dir in slopos_abi::fs::KEPT_DIRS {
+        if let Err(e) = slopos_fs::vfs::init::vfs_keep_dir(dir.as_bytes()) {
+            klog_info!("VFS: {} is not kept where it is: {:?}", dir, e);
         }
     }
 }
@@ -490,6 +502,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                     if BASE_OVER_DISK.load(Ordering::Relaxed) && mount_base() != 0 {
                         return -1;
                     }
+                    keep_dirs();
                 }
                 Err(e) => {
                     klog_info!("VFS: failed to install ext2 root: {:?}", e);

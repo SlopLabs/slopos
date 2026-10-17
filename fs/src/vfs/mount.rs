@@ -7,9 +7,11 @@ use crate::MAX_PATH_LEN;
 
 pub const MAX_MOUNTS: usize = 32 + slopos_abi::extension::MAX_ACTIVATIONS;
 
-/// Directories pinned mount points' paths pass through: `/usr` and `/etc` for
-/// the base, `/media` for the install medium, `/opt` for the extensions.
-const MAX_PINNED_DIRS: usize = 8;
+/// Directories held where they are: those pinned mount points' paths pass
+/// through, `/usr` and `/etc` for the base, `/media` for the install medium
+/// and `/opt` for the extensions, and the kept directories and those on the
+/// way to them.
+const MAX_PINNED_DIRS: usize = 32;
 
 /// Every mutation through this mount fails with `EROFS` at the VFS, before
 /// the filesystem sees it.
@@ -378,6 +380,18 @@ pub fn leads_to_pinned_mount(path: &[u8]) -> bool {
             && mount.starts_with(path)
             && (mount.len() == path.len() || path == b"/" || mount[path.len()] == b'/')
     })
+}
+
+/// Whether a mount at `path` would cover a directory the kernel keeps: one
+/// of [`KEPT_DIRS`](slopos_abi::fs::KEPT_DIRS), a directory on the way to it,
+/// or anything beneath it.
+pub fn covers_kept_dir(path: &[u8]) -> bool {
+    let within = |inner: &[u8], outer: &[u8]| {
+        inner.starts_with(outer) && (inner.len() == outer.len() || inner[outer.len()] == b'/')
+    };
+    slopos_abi::fs::KEPT_DIRS
+        .iter()
+        .any(|kept| within(path, kept.as_bytes()) || within(kept.as_bytes(), path))
 }
 
 /// Whether `path` is a pinned mount point or lies beneath one.

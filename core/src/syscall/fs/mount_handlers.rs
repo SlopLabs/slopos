@@ -15,7 +15,7 @@ use slopos_fs::vfs::init::{
     vfs_ramfs_pool_claim, vfs_ramfs_pool_release,
 };
 use slopos_fs::vfs::mount::{
-    MOUNT_RDONLY, mount, mount_at, under_pinned_mount, unmount, with_mount_table,
+    MOUNT_RDONLY, covers_kept_dir, mount, mount_at, under_pinned_mount, unmount, with_mount_table,
 };
 use slopos_fs::vfs::orphan::{drain_releasable, forget_filesystem, has_open_refs};
 use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_at};
@@ -84,7 +84,7 @@ pub fn mount_apply_at(
     }
     // `EPERM`, not `EBUSY`: covering the base would replace the system, so
     // the refusal is permanent.
-    if under_pinned_mount(target) {
+    if under_pinned_mount(target) || covers_kept_dir(target) {
         return Err(Errno::EPERM);
     }
     // Before the directory check: an occupied path is by construction a valid

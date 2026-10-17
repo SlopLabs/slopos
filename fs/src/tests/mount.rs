@@ -1226,7 +1226,57 @@ pub fn test_ext2_mount_by_label() -> TestResult {
     TestResult::Pass
 }
 
+/// A kept directory and each one on the way to it stay where they are: no
+/// rename or removal moves one, and a mount at one, above one or beneath one
+/// would cover the store, so it is refused.
+pub fn test_a_kept_directory_stays_where_it_is() -> TestResult {
+    use crate::vfs::init::vfs_keep_dir;
+    use crate::vfs::mount::covers_kept_dir;
+    use crate::vfs::vfs_rename;
+    if !ready() {
+        return slopos_testing::fail!("vfs init failed");
+    }
+    let store = slopos_abi::fs::EXTENSION_STORE.as_bytes();
+    if let Err(e) = vfs_keep_dir(store) {
+        return slopos_testing::fail!("the store was not kept: {:?}", e);
+    }
+    for path in [&b"/var"[..], b"/var/lib", b"/var/lib/slopos", store] {
+        if vfs_rename(path, b"/kept-moved") != Err(VfsError::Busy) {
+            return slopos_testing::fail!("{:?} was renamed", core::str::from_utf8(path));
+        }
+    }
+    if vfs_rmdir(store) != Err(VfsError::Busy) || vfs_stat(store).is_err() {
+        return slopos_testing::fail!("the store was removed");
+    }
+    for covering in [
+        &b"/var"[..],
+        b"/var/lib",
+        b"/var/lib/slopos",
+        store,
+        b"/var/lib/slopos/extensions/hello",
+    ] {
+        if !covers_kept_dir(covering) {
+            return slopos_testing::fail!(
+                "{:?} may be mounted over",
+                core::str::from_utf8(covering)
+            );
+        }
+    }
+    for beside in [
+        &b"/var/log"[..],
+        b"/var/lib/slopos/slots",
+        b"/var/lib/slopos/extensions2",
+        b"/opt",
+    ] {
+        if covers_kept_dir(beside) {
+            return slopos_testing::fail!("{:?} is refused a mount", core::str::from_utf8(beside));
+        }
+    }
+    TestResult::Pass
+}
+
 slopos_testing::stest!(name = test_mount_id_is_never_reused, suite = fs);
+slopos_testing::stest!(name = test_a_kept_directory_stays_where_it_is, suite = fs);
 slopos_testing::stest!(name = test_mount_table_child_queries, suite = fs);
 slopos_testing::stest!(
     name = test_paged_listing_survives_a_mount_change,
