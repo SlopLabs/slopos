@@ -19,7 +19,7 @@ use slopos_abi::syscall::BOOT_FLAG_EXTENSIONS_OFF;
 use slopos_extension_core::admit::{self, Admitted, Authority, Bounds};
 use slopos_extension_core::grant::Grant;
 use slopos_extension_core::image::Image;
-use slopos_extension_core::keys::{Key, Keys};
+use slopos_extension_core::keys::{Key, Keys, valid_comment};
 use slopos_extension_core::record::{Record, valid_fingerprint};
 use slopos_extension_core::{CEILING, LIBC, ceiling, hex, parse_digest, sha256};
 use slopos_tls_core::sshsig::{KEY_TYPE, PublicKey};
@@ -49,14 +49,15 @@ fn caps_of(mask: u64) -> String {
     slopos_extension_core::render_caps(mask)
 }
 
-/// What every activation of an extension may take together: the kernel's
-/// own budget, so a larger image is refused before it is read whole.
+/// The most `ext.memory=` lets every activation take together, so a larger
+/// image is refused before it is read whole; the kernel holds one to the
+/// budget it booted with.
 fn image_max() -> u64 {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
         return u64::MAX;
     }
-    u64::from(info.total_pages) * 4096 / 8
+    u64::from(info.total_pages) * 4096 / 2
 }
 
 fn read_file(path: &str, max: u64) -> Result<Vec<u8>, String> {
@@ -135,7 +136,9 @@ fn canonical(args: &[String]) -> Result<Vec<String>, String> {
                     let mut words = line.splitn(3, ' ');
                     let key = key_of(words.next().unwrap_or(""), words.next().unwrap_or(""))
                         .map_err(|e| format!("{file}: {e}"))?;
-                    (key, words.next().unwrap_or("").to_owned(), tail)
+                    let comment = words.next().unwrap_or("");
+                    let comment = if valid_comment(comment) { comment } else { "" };
+                    (key, comment.to_owned(), tail)
                 }
                 [] => return Err(USAGE.into()),
             };
@@ -227,23 +230,29 @@ fn run(args: &[String]) -> Result<String, String> {
     }
 }
 
-fn others(store: &Store, name: &str) -> Result<Vec<(String, Vec<String>)>, String> {
+/// Every other installed extension's name and grant.
+fn others(store: &Store, name: &str) -> Result<Vec<(String, Grant)>, String> {
     let mut out = Vec::new();
     for other in store.names()? {
         if other == name {
             continue;
         }
         if let Some(current) = store.record(&other)?.and_then(|r| r.current) {
-            out.push((other, current.grant.commands));
+            out.push((other, current.grant));
         }
     }
     Ok(out)
 }
 
-/// Put `admitted` in the store as `name`'s current image and run it.
+fn borrowed(others: &[(String, Grant)]) -> Vec<(&str, &Grant)> {
+    others.iter().map(|(n, g)| (n.as_str(), g)).collect()
+}
+
+/// Put `admitted` in the store as `name`'s current image and run it. One
+/// that will not run leaves the store as it was, and what ran before runs on.
 fn install(
     store: &Store,
-    record: Option<Record>,
+    before: Option<Record>,
     name: &str,
     image: &[u8],
     digest: [u8; 32],
@@ -255,14 +264,32 @@ fn install(
         Admitted::Install(installed) => installed,
     };
     let version = installed.version;
-    let mut record = record.unwrap_or_else(|| Record::new(name));
+    let mut record = before.clone().unwrap_or_else(|| Record::new(name));
     record.install(installed);
     store.edit(name, |edit| {
         edit.put_image(&digest, image, signed)?;
         edit.put_record(&record)
     })?;
-    let ran = run_image(store, &mut record, image, digest)?;
-    Ok(format!("{name} {version} installed; {ran}"))
+    if !record.enabled {
+        return Ok(format!(
+            "{name} {version} installed; it is disabled, so it runs once enabled"
+        ));
+    }
+    match activate(name, image, digest) {
+        Ok(ran) => Ok(format!("{name} {version} installed; {ran}")),
+        Err(why) => match before {
+            Some(before) if before.current.is_some() => {
+                store.edit(name, |edit| edit.put_record(&before))?;
+                Err(format!(
+                    "{name} {version} not installed: {why}; what ran before runs on"
+                ))
+            }
+            _ => {
+                stop(store, &mut record, &why)?;
+                Err(format!("{name}: {why}"))
+            }
+        },
+    }
 }
 
 fn install_approved(
@@ -278,17 +305,13 @@ fn install_approved(
     let base = Base::read()?;
     let record = store.record(name)?;
     let others = others(&store, name)?;
-    let others: Vec<(&str, &[String])> = others
-        .iter()
-        .map(|(n, c)| (n.as_str(), c.as_slice()))
-        .collect();
     let admitted = admit::install(
         record.as_ref(),
         &image,
         digest,
         &Authority::Person { name, grant },
         &base.bounds(&keys),
-        &others,
+        &borrowed(&others),
     )
     .map_err(|e| format!("{path}: {e}"))?;
     install(&store, record, name, &bytes, digest, admitted, None)
@@ -305,10 +328,6 @@ fn install_signed(path: &str, sidecar_path: &str, signature_path: &str) -> Resul
     let base = Base::read()?;
     let record = store.record(&name)?;
     let others = others(&store, &name)?;
-    let others: Vec<(&str, &[String])> = others
-        .iter()
-        .map(|(n, c)| (n.as_str(), c.as_slice()))
-        .collect();
     let authority = Authority::Signed {
         sidecar: &sidecar,
         signature: &signature,
@@ -319,7 +338,7 @@ fn install_signed(path: &str, sidecar_path: &str, signature_path: &str) -> Resul
         digest,
         &authority,
         &base.bounds(&keys),
-        &others,
+        &borrowed(&others),
     )
     .map_err(|e| format!("{path}: {e}"))?;
     install(
@@ -333,26 +352,29 @@ fn install_signed(path: &str, sidecar_path: &str, signature_path: &str) -> Resul
     )
 }
 
-/// Show `image` at `/opt/<name>`; a refusal stops the extension and says why.
+/// Show `image` at `/opt/<name>` in place of what is shown there.
+fn activate(name: &str, image: &[u8], digest: [u8; 32]) -> Result<String, String> {
+    if sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
+        return Ok(
+            "extensions are off this boot, so it runs from the next that allows them".into(),
+        );
+    }
+    crate::syscall::base::ext_activate(name.as_bytes(), image, &digest)
+        .map(|activation| format!("it runs as activation {activation}"))
+        .map_err(|e| format!("it could not be activated: {e}"))
+}
+
+/// [`activate`], stopping the extension when it will not run.
 fn run_image(
     store: &Store,
     record: &mut Record,
     image: &[u8],
     digest: [u8; 32],
 ) -> Result<String, String> {
-    if sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
-        return Ok(
-            "extensions are off this boot, so it runs from the next that allows them".into(),
-        );
-    }
-    match crate::syscall::base::ext_activate(record.name.as_bytes(), image, &digest) {
-        Ok(activation) => Ok(format!("it runs as activation {activation}")),
-        Err(e) => {
-            let why = format!("it could not be activated: {e}");
-            stop(store, record, &why)?;
-            Err(format!("{}: {why}", record.name))
-        }
-    }
+    activate(&record.name, image, digest).or_else(|why| {
+        stop(store, record, &why)?;
+        Err(format!("{}: {why}", record.name))
+    })
 }
 
 /// Stop `record`'s extension because `why`, and say so in its record.
@@ -461,6 +483,10 @@ fn rollback(name: &str) -> Result<String, String> {
     let keys = store.keys()?;
     let base = Base::read()?;
     record.roll_back().map_err(|e| format!("{name}: {e}"))?;
+    if let Some(current) = &record.current {
+        admit::clashes(name, &current.grant, &borrowed(&others(&store, name)?))
+            .map_err(|e| format!("{name}: {e}"))?;
+    }
     record.enabled = true;
     record.why = None;
     store.edit(name, |edit| edit.put_record(&record))?;
@@ -650,12 +676,15 @@ fn build(dir: &str, out: &str) -> Result<String, String> {
 
 pub fn extctl_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let args = match canonical(&args) {
-        Ok(args) => args,
-        Err(why) => {
+    // The person approved the command line privd was sent, so the mechanism
+    // runs it as it came.
+    let args = if std::env::var_os(slopos_priv_core::ENV_ACTION).is_some() {
+        args
+    } else {
+        canonical(&args).unwrap_or_else(|why| {
             eprintln!("extctl: {why}");
-            sys_core::exit_with_code(2);
-        }
+            sys_core::exit_with_code(2)
+        })
     };
     let bytes: Vec<Vec<u8>> = args.iter().map(|a| a.clone().into_bytes()).collect();
     privd::elevate(action_for(&args), &bytes, Input::Closed);

@@ -103,8 +103,12 @@ impl Record {
     }
 
     /// `image` made current, the current one kept as previous; the floor
-    /// rises to it and what it is newer than is no longer refused.
+    /// rises to it and what it is newer than is no longer refused. A person's
+    /// install enables the extension; a key's leaves one the person disabled
+    /// as it is.
     pub fn install(&mut self, image: Installed) {
+        let disabled = !self.enabled && self.why.is_none() && self.current.is_some();
+        self.enabled = image.signer.is_none() || !disabled;
         if self
             .floor
             .is_none_or(|(version, _)| image.version > version)
@@ -113,7 +117,6 @@ impl Record {
         }
         self.refused.retain(|&v| v > image.version);
         self.signer = image.signer.clone();
-        self.enabled = true;
         self.why = None;
         if let Some(current) = self.current.replace(image) {
             self.previous = Some(current);
@@ -121,8 +124,8 @@ impl Record {
     }
 
     /// The previous image made current and the current one previous; the
-    /// floor falls to the one that runs, and the version left is refused
-    /// until a newer one installs.
+    /// floor falls to the one that runs, which is refused no longer, and the
+    /// version left is refused until a newer one installs.
     pub fn roll_back(&mut self) -> Result<(), &'static str> {
         let previous = self
             .previous
@@ -132,6 +135,8 @@ impl Record {
         let current = self.current.as_ref().expect("just set");
         self.floor = Some((current.version, current.sha256));
         self.signer = current.signer.clone();
+        let running = current.version;
+        self.refused.retain(|&v| v != running);
         if let Some(left) = left {
             if !self.refused.contains(&left.version) && left.version != current.version {
                 self.refused.push(left.version);

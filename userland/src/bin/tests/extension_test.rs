@@ -1,8 +1,9 @@
 //! Extensions installed end to end, through `/bin/extctl` and the privd init
 //! started: what a first install asks and grants, what a trusted key's
 //! signature lets in unasked, the version floor and a rollback's refusal, a
-//! key's removal or lowered ceiling stopping what it let in, the symbol check
-//! and the name grammar, and the store the kernel keeps uncovered.
+//! person's disable holding against a key's update, a key's removal or
+//! lowered ceiling stopping what it let in, the symbol check and the name
+//! grammar, and the store the kernel keeps uncovered.
 //!
 //! The runner hands this binary every capability as uid 0, which privd's
 //! `root` admits unasked; the session's requests run in children at uid
@@ -21,8 +22,8 @@ use slopos_extension_core::elf::{self, Kind};
 use slopos_extension_core::image::{DECLARE, MANIFEST, Packer, RELEASE};
 use slopos_extension_core::record::Record;
 use slopos_extension_core::sidecar::Sidecar;
-use slopos_extension_core::{INTERPRETER, NAMESPACE, RECORD, STORE, hex, sha256};
-use slopos_priv_core::ENV_FD;
+use slopos_extension_core::{INTERPRETER, NAMESPACE, RECORD, STORE, generation, hex, sha256};
+use slopos_priv_core::{ENV_ACTION, ENV_FD};
 use slopos_slibc::test_harness::note;
 use slopos_tls_core::ed25519::SigningKey;
 use slopos_tls_core::sshsig::{self, KEY_TYPE, PublicKey};
@@ -169,9 +170,42 @@ fn trust(key: &SigningKey, ceiling: &str, user: &str) -> bool {
     ran.ok() || fail(format!("key add: {}", ran.shown()))
 }
 
+fn flags(path: &str) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::open(path).ok()?;
+    fs::inode_flags(file.as_raw_fd()).ok()
+}
+
+fn sealed(path: &str) -> bool {
+    flags(path).is_some_and(|flags| flags & FS_IMMUTABLE_FL != 0)
+}
+
+fn set_sealed(path: &str, seal: bool) -> bool {
+    use std::os::fd::AsRawFd;
+    let (Ok(file), Some(flags)) = (std::fs::File::open(path), flags(path)) else {
+        return false;
+    };
+    let flags = if seal {
+        flags | FS_IMMUTABLE_FL
+    } else {
+        flags & !FS_IMMUTABLE_FL
+    };
+    fs::set_inode_flags(file.as_raw_fd(), flags).is_ok()
+}
+
+/// The record the store believes: its newest sealed generation.
 fn record(name: &str) -> Option<Record> {
-    let text = std::fs::read_to_string(format!("{STORE}/{name}/{RECORD}")).ok()?;
-    Record::parse(&text)
+    let dir = format!("{STORE}/{name}");
+    let mut generations: Vec<u64> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| generation(e.ok()?.file_name().to_str()?, RECORD))
+        .collect();
+    generations.sort_unstable_by(|a, b| b.cmp(a));
+    let path = generations
+        .into_iter()
+        .map(|g| format!("{dir}/{RECORD}.{g}"))
+        .find(|path| sealed(path))?;
+    Record::parse(&std::fs::read_to_string(path).ok()?)
 }
 
 fn shown(name: &str) -> bool {
@@ -222,7 +256,15 @@ fn a_first_install_asks_and_grants_what_it_read() -> bool {
     if line != "grant NetAdmin unasked - users ext-first commands -" || current.signer.is_some() {
         return fail(format!("granted {line}, signed by {:?}", current.signer));
     }
-    true
+    let unexpanded = Command::new(EXTCTL)
+        .args(["install", &path])
+        .env(ENV_ACTION, "org.slopos.extension.install")
+        .env_remove(ENV_FD)
+        .output();
+    let mechanism_refused = unexpanded.is_ok_and(|out| {
+        !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("usage")
+    });
+    mechanism_refused || fail("a mechanism read an image the person was not shown")
 }
 
 /// A command line approving less than the image declares is refused, and
@@ -345,6 +387,49 @@ fn a_rollback_refuses_the_version_it_left() -> bool {
     ) && installed("ext-signed", 1)
 }
 
+/// A key's update of what the person disabled goes in disabled, and only the
+/// person enables it again.
+fn a_disabled_one_stays_disabled_until_enabled() -> bool {
+    let Some(v3) = image("ext-signed", 3, "NetAdmin", "Power") else {
+        return false;
+    };
+    let disable = extctl(ROOT, &["disable", "ext-signed"]);
+    if !disable.ok() || shown("ext-signed") {
+        return fail(format!("disable: {}", disable.shown()));
+    }
+    if !sign(&key(1), &v3) {
+        return false;
+    }
+    let update = extctl(USER, &["install-signed", &v3]);
+    let held = record("ext-signed").is_some_and(|r| {
+        !r.enabled && r.current.is_some_and(|c| c.version == 3) && r.refused.is_empty()
+    });
+    if !update.ok() || !update.says("it is disabled") || !held || shown("ext-signed") {
+        return fail(format!("the disabled one's update: {}", update.shown()));
+    }
+    let enable = extctl(ROOT, &["enable", "ext-signed"]);
+    enable.ok() && installed("ext-signed", 3) || fail(format!("enable: {}", enable.shown()))
+}
+
+/// A key file's comment that would not read back stays out of the keys.
+fn a_key_file_s_comment_never_breaks_the_keys() -> bool {
+    let line = format!(
+        "{KEY_TYPE} {} J\u{fc}rgen's \"key\"\n",
+        PublicKey(key(6).public()).base64()
+    );
+    let file = put("odd.pub", line.as_bytes());
+    let add = extctl(ROOT, &["key", "add", &file, "ceiling", "-", "user", "-"]);
+    let status = extctl(USER, &["status"]);
+    let remove = extctl(ROOT, &["key", "remove", &fingerprint(&key(6))]);
+    add.ok() && status.ok() && status.says(&fingerprint(&key(6))) && remove.ok()
+        || fail(format!(
+            "add: {}; status: {}; remove: {}",
+            add.shown(),
+            status.shown(),
+            remove.shown()
+        ))
+}
+
 /// What a key let in stops once the key's ceiling no longer covers it, and
 /// once the key is no longer trusted, saying why.
 fn a_removed_key_or_a_lowered_ceiling_stops_its_extension() -> bool {
@@ -457,16 +542,10 @@ fn a_reserved_name_is_refused() -> bool {
 }
 
 /// The store is sealed, so not even uid 0 holding `DacOverride` adds to it,
-/// and the kernel keeps it: no rename moves it and no mount covers it.
+/// and the kernel keeps it: no rename moves it or the directory it is in, no
+/// mount covers it, and a record nobody sealed is not believed.
 fn the_store_is_sealed_and_kept_where_it_is() -> bool {
-    let sealed = std::fs::File::open(STORE)
-        .ok()
-        .and_then(|dir| {
-            use std::os::fd::AsRawFd;
-            fs::inode_flags(dir.as_raw_fd()).ok()
-        })
-        .is_some_and(|flags| flags & FS_IMMUTABLE_FL != 0);
-    if !sealed {
+    if !sealed(STORE) {
         return fail("the store is not sealed");
     }
     if std::fs::write(format!("{STORE}/keys.forged"), b"x").is_ok() {
@@ -474,6 +553,22 @@ fn the_store_is_sealed_and_kept_where_it_is() -> bool {
     }
     if std::fs::rename(STORE, "/var/lib/slopos/moved").is_ok() {
         return fail("the store was renamed");
+    }
+    if std::fs::rename("/var/lib/slopos", "/var/lib/moved").is_ok() {
+        let _ = std::fs::rename("/var/lib/moved", "/var/lib/slopos");
+        return fail("the directory the store is in was renamed");
+    }
+    let dir = format!("{STORE}/ext-signed");
+    let forged = format!("{dir}/{RECORD}.999999");
+    let planted = set_sealed(&dir, false)
+        && std::fs::write(
+            &forged,
+            "name ext-signed\nenabled no\nsigner -\nrefused -\n",
+        )
+        .is_ok()
+        && set_sealed(&dir, true);
+    if !planted {
+        return fail("could not plant an unsealed record");
     }
     for target in ["/var/lib", STORE] {
         if fs::mount(b"", target.as_bytes(), b"ramfs", 0).is_ok() {
@@ -489,12 +584,21 @@ fn cleanup() -> bool {
     for name in ["ext-first", "ext-signed"] {
         let _ = extctl(ROOT, &["remove", name]);
     }
+    let back = extctl(
+        USER,
+        &["install-signed", &format!("{DIR}/ext-signed-3.ext")],
+    );
     for seed in [1, 2, 4] {
         let _ = extctl(ROOT, &["key", "remove", &fingerprint(&key(seed))]);
     }
     let gone = ["ext-first", "ext-signed"].iter().all(|n| !shown(n));
     let kept = record("ext-signed").is_some_and(|r| r.current.is_none() && r.floor.is_some());
-    gone && kept || fail("a removed extension still runs, or its record went with it")
+    let forged = Path::new(&format!("{STORE}/ext-signed/{RECORD}.999999")).exists();
+    if !refused(&back, "it was removed") {
+        return false;
+    }
+    gone && kept && !forged
+        || fail("a removed extension still runs, its record went with it, or a forged one stayed")
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[
@@ -517,6 +621,14 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "a_rollback_refuses_the_version_it_left",
         a_rollback_refuses_the_version_it_left,
+    ),
+    (
+        "a_disabled_one_stays_disabled_until_enabled",
+        a_disabled_one_stays_disabled_until_enabled,
+    ),
+    (
+        "a_key_file_s_comment_never_breaks_the_keys",
+        a_key_file_s_comment_never_breaks_the_keys,
     ),
     (
         "a_removed_key_or_a_lowered_ceiling_stops_its_extension",

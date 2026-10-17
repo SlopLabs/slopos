@@ -110,7 +110,7 @@ mod tests {
         fs::write(dir.join("bin/hello"), b"program").unwrap();
         fs::set_permissions(dir.join("bin/hello"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(dir.join("share/doc/README"), b"hi").unwrap();
-        symlink("../bin/hello", dir.join("share/hello")).unwrap();
+        symlink("doc/README", dir.join("share/hello")).unwrap();
         let (image, sidecar) = pack(&dir).unwrap();
         let checked = Image::check(&image).unwrap();
         assert_eq!((sidecar.name.as_str(), sidecar.version), ("hello", 2));
@@ -121,7 +121,7 @@ mod tests {
         );
         assert_eq!(
             checked.entry("/share/hello").map(|e| e.data),
-            Some(&b"../bin/hello"[..])
+            Some(&b"doc/README"[..])
         );
         assert_eq!(
             checked.entry("/share/doc").map(|e| e.mode & S_IFDIR),

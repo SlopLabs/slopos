@@ -1,31 +1,35 @@
 //! The extension store on disk. The kernel keeps the store's directory and
-//! those on the way to it where they are; every file and directory in it is
-//! sealed by the mechanism that wrote it, and nothing unsealed is believed,
+//! those on the way to it where they are. Only a sealed file is believed, and
+//! a writer seals each one through the descriptor it wrote and reads it back,
 //! so a process holding `DacOverride` without `Seal` can neither rewrite a
-//! record nor plant a key. A writer takes the store's lock, opens a sealed
-//! directory only for as long as it writes in it, and replaces a file by
-//! renaming a whole new one over it.
+//! record nor plant a key. Nothing is renamed or rewritten in place: a record
+//! or the keys go in as a generation beside the last, which stays believed
+//! until the new one is sealed, so a writer cut off anywhere leaves either.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{O_DIRECTORY, O_NOFOLLOW};
-use slopos_abi::syscall::posix::{LOCK_EX, LOCK_SH, O_CLOEXEC, O_NONBLOCK};
+use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC, O_NONBLOCK};
 use slopos_extension_core::keys::Keys;
 use slopos_extension_core::record::Record;
-use slopos_extension_core::{KEYS, RECORD, STORE, image_file, sidecar_file, signature_file};
+use slopos_extension_core::{
+    KEYS, RECORD, STORE, generation, image_file, sidecar_file, signature_file,
+};
 
 use crate::syscall::fs as sys_fs;
+use crate::syscall::process;
 
 const SMALL_MAX: u64 = 64 * 1024;
 
 pub struct Store {
     root: PathBuf,
-    _lock: File,
+    _lock: Option<File>,
 }
 
 fn shown(path: &Path, e: impl std::fmt::Display) -> String {
@@ -50,15 +54,16 @@ fn set_sealed(file: &File, sealed: bool) -> Result<(), String> {
     } else {
         flags & !FS_IMMUTABLE_FL
     };
-    match sys_fs::set_inode_flags(file.as_raw_fd(), want) {
-        _ if want == flags => Ok(()),
-        Ok(()) => Ok(()),
-        Err(crate::syscall::SyscallError::EOPNOTSUPP) => Err(
-            "a filesystem that keeps a seal for good, as a RAM root does; extensions need a disk root"
-                .into(),
-        ),
-        Err(e) => Err(e.to_string()),
+    if want == flags {
+        return Ok(());
     }
+    sys_fs::set_inode_flags(file.as_raw_fd(), want).map_err(|e| match e {
+        crate::syscall::SyscallError::EOPNOTSUPP => {
+            "a filesystem that keeps a seal for good, as a RAM root does; extensions need a disk root"
+                .into()
+        }
+        e => e.to_string(),
+    })
 }
 
 /// The entry at `path`, never followed: a file or a directory.
@@ -70,7 +75,7 @@ fn open_entry(path: &Path) -> std::io::Result<File> {
 }
 
 /// The sealed regular file at `path`, `None` when there is none; one there
-/// unsealed is something other than a mechanism wrote, and an error.
+/// unsealed is something other than a writer left, and an error.
 fn read_sealed(path: &Path, max: u64) -> Result<Option<Vec<u8>>, String> {
     let file = match open_entry(path) {
         Ok(file) => file,
@@ -87,11 +92,13 @@ fn read_sealed(path: &Path, max: u64) -> Result<Option<Vec<u8>>, String> {
     if meta.len() > max {
         return Err(shown(path, format!("larger than {max} bytes")));
     }
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
-    file.take(max + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| shown(path, e))?;
-    Ok(Some(bytes))
+    read_all(&file, max).map(Some).map_err(|e| shown(path, e))
+}
+
+fn read_all(file: &File, max: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(max + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Run `f` with the sealed directory `dir` open for changes, sealing it
@@ -104,44 +111,63 @@ fn unsealed<T>(dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, S
     out
 }
 
-/// Make `bytes` the sealed file `name` in `dir`, which is open for changes,
-/// in one rename.
-fn write_sealed(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
-    let staged = dir.join(format!(".{name}.new"));
-    remove_entry(&staged)?;
+/// Make `bytes` the sealed file `name` in `dir`, which is open for changes.
+/// What another process wrote into it before the seal is found reading it
+/// back, a name it gave it before the seal in its link count, and what it
+/// put at its name after is found there.
+fn create_sealed(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+    let path = dir.join(name);
+    remove_entry(&path)?;
     let mut file = OpenOptions::new()
+        .read(true)
         .write(true)
         .create_new(true)
         .mode(0o644)
         .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
-        .open(&staged)
-        .map_err(|e| shown(&staged, e))?;
+        .open(&path)
+        .map_err(|e| shown(&path, e))?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|e| shown(&staged, e))?;
-    drop(file);
-    let target = dir.join(name);
-    match open_entry(&target) {
-        Ok(old) => set_sealed(&old, false).map_err(|e| shown(&target, e))?,
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(shown(&target, e)),
+        .map_err(|e| shown(&path, e))?;
+    set_sealed(&file, true).map_err(|e| shown(&path, format!("sealing: {e}")))?;
+    let back = file
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| read_all(&file, bytes.len() as u64));
+    let here = fs::symlink_metadata(&path)
+        .ok()
+        .map(|m| (m.dev(), m.ino(), 1));
+    let ours = file.metadata().ok().map(|m| (m.dev(), m.ino(), m.nlink()));
+    if back.ok().as_deref() != Some(bytes) || here.is_none() || here != ours {
+        let _ = set_sealed(&file, false);
+        return Err(shown(&path, "changed by another process as it was written"));
     }
-    fs::rename(&staged, &target).map_err(|e| shown(&target, e))?;
-    let written = open_entry(&target).map_err(|e| shown(&target, e))?;
-    set_sealed(&written, true).map_err(|e| shown(&target, format!("sealing: {e}")))?;
-    written.sync_all().map_err(|e| shown(&target, e))
+    Ok(())
+}
+
+/// [`create_sealed`], unless `name` holds `bytes` sealed already.
+fn put_sealed(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+    let held = read_sealed(&dir.join(name), bytes.len() as u64)
+        .ok()
+        .flatten();
+    if held.as_deref() == Some(bytes) {
+        return Ok(());
+    }
+    create_sealed(dir, name, bytes)
 }
 
 /// Take away what is at `path` in a directory open for changes, sealed or
-/// not; nothing there is no error. Only an unsealed directory, which no
-/// mechanism made, goes with what it holds.
+/// not; nothing there is no error. A sealed file with a second name is
+/// left sealed, since unsealing it would unseal that name too.
 fn remove_entry(path: &Path) -> Result<(), String> {
     match open_entry(path) {
         Ok(file) if file.metadata().is_ok_and(|m| m.is_dir()) => {
             fs::remove_dir_all(path).map_err(|e| shown(path, e))
         }
         Ok(file) => {
-            let _ = set_sealed(&file, false);
+            if is_sealed(&file) && !file.metadata().is_ok_and(|m| m.nlink() == 1) {
+                return Err(shown(path, "sealed under another name too"));
+            }
+            set_sealed(&file, false).map_err(|e| shown(path, e))?;
             fs::remove_file(path).map_err(|e| shown(path, e))
         }
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
@@ -152,66 +178,104 @@ fn remove_entry(path: &Path) -> Result<(), String> {
     }
 }
 
+/// The believed generation of `stem` in `dir`, the newest sealed one, and
+/// its bytes.
+fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> {
+    let mut generations: Vec<u64> = fs::read_dir(dir)
+        .map_err(|e| shown(dir, e))?
+        .filter_map(|entry| generation(entry.ok()?.file_name().to_str()?, stem))
+        .collect();
+    generations.sort_unstable_by(|a, b| b.cmp(a));
+    for g in generations {
+        if let Ok(Some(bytes)) = read_sealed(&dir.join(format!("{stem}.{g}")), SMALL_MAX) {
+            return Ok(Some((g, bytes)));
+        }
+    }
+    Ok(None)
+}
+
+/// Seal `bytes` as the next generation of `stem` in `dir`, which is open for
+/// changes, then take every other away.
+fn put_generation(dir: &Path, stem: &str, bytes: &[u8]) -> Result<(), String> {
+    let next = newest(dir, stem)?.map_or(1, |(g, _)| g + 1);
+    let name = format!("{stem}.{next}");
+    create_sealed(dir, &name, bytes)?;
+    let prefix = format!("{stem}.");
+    for entry in fs::read_dir(dir).map_err(|e| shown(dir, e))? {
+        let entry = entry.map_err(|e| shown(dir, e))?;
+        let other = entry.file_name();
+        let other = other.to_string_lossy();
+        if other != name && other.starts_with(&prefix) {
+            remove_entry(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn text(path: &Path, bytes: Vec<u8>) -> Result<String, String> {
+    String::from_utf8(bytes).map_err(|_| shown(path, "not UTF-8"))
+}
+
 impl Store {
-    /// The store, locked against every other `extctl`: shared to read, and
-    /// to write exclusively and sealed first if no writer has sealed it yet.
+    /// The store. A writer locks out every other, ignores the termination
+    /// signals a requester relays, and seals the store's directory if no
+    /// writer has yet; a reader takes nothing, since nothing it can see is
+    /// half made.
     pub fn open(write: bool) -> Result<Store, String> {
         let root = PathBuf::from(STORE);
         let mut walked = PathBuf::from("/");
         for part in root.iter().skip(1) {
             walked.push(part);
-            let dir = open_dir(&walked).map_err(|e| shown(&walked, e))?;
-            if !dir.metadata().is_ok_and(|m| m.is_dir()) {
-                return Err(shown(&walked, "not a directory"));
-            }
+            open_dir(&walked).map_err(|e| shown(&walked, e))?;
         }
-        let lock = open_dir(&root).map_err(|e| shown(&root, e))?;
-        let operation = if write { LOCK_EX } else { LOCK_SH };
-        sys_fs::flock(lock.as_raw_fd(), operation).map_err(|e| shown(&root, e))?;
-        if write && !is_sealed(&lock) {
-            set_sealed(&lock, true).map_err(|e| shown(&root, format!("sealing: {e}")))?;
+        if !write {
+            return Ok(Store { root, _lock: None });
         }
-        Ok(Store { root, _lock: lock })
-    }
-
-    /// Whether anything in the store is believed: a writer has sealed it.
-    pub fn believed(&self) -> bool {
-        is_sealed(&self._lock)
+        for signum in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
+            let _ = process::ignore_signal(signum);
+        }
+        let at = PathBuf::from(format!("{STORE}.lock"));
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
+            .open(&at)
+            .map_err(|e| shown(&at, e))?;
+        sys_fs::flock(lock.as_raw_fd(), LOCK_EX).map_err(|e| shown(&at, e))?;
+        let dir = open_dir(&root).map_err(|e| shown(&root, e))?;
+        set_sealed(&dir, true).map_err(|e| shown(&root, format!("sealing: {e}")))?;
+        Ok(Store {
+            root,
+            _lock: Some(lock),
+        })
     }
 
     pub fn keys(&self) -> Result<Keys, String> {
-        if !self.believed() {
+        let Some((g, bytes)) = newest(&self.root, KEYS)? else {
             return Ok(Keys::default());
-        }
-        let path = self.root.join(KEYS);
-        match read_sealed(&path, SMALL_MAX)? {
-            None => Ok(Keys::default()),
-            Some(bytes) => {
-                let text = String::from_utf8(bytes).map_err(|_| shown(&path, "not UTF-8"))?;
-                Keys::parse(&text).map_err(|e| shown(&path, e))
-            }
-        }
+        };
+        let path = self.root.join(format!("{KEYS}.{g}"));
+        Keys::parse(&text(&path, bytes)?).map_err(|e| shown(&path, e))
     }
 
     pub fn put_keys(&self, keys: &Keys) -> Result<(), String> {
         unsealed(&self.root, || {
-            write_sealed(&self.root, KEYS, keys.render().as_bytes())
+            put_generation(&self.root, KEYS, keys.render().as_bytes())
         })
     }
 
-    /// The extensions the store keeps a sealed directory for, by name.
+    /// The extensions the store keeps a directory for, by name.
     pub fn names(&self) -> Result<Vec<String>, String> {
-        if !self.believed() {
-            return Ok(Vec::new());
-        }
         let mut names = Vec::new();
         for entry in fs::read_dir(&self.root).map_err(|e| shown(&self.root, e))? {
             let entry = entry.map_err(|e| shown(&self.root, e))?;
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            let sealed_dir = open_dir(&entry.path()).is_ok_and(|dir| is_sealed(&dir));
-            if slopos_abi::extension::valid_name(name.as_bytes()) && sealed_dir {
+            if slopos_abi::extension::valid_name(name.as_bytes()) && open_dir(&entry.path()).is_ok()
+            {
                 names.push(name);
             }
         }
@@ -224,17 +288,18 @@ impl Store {
     }
 
     pub fn record(&self, name: &str) -> Result<Option<Record>, String> {
-        if !self.names()?.iter().any(|n| n == name) {
-            return Ok(None);
+        let dir = self.dir(name);
+        match open_dir(&dir) {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(shown(&dir, e)),
         }
-        let path = self.dir(name).join(RECORD);
-        let Some(bytes) = read_sealed(&path, SMALL_MAX)? else {
+        let Some((g, bytes)) = newest(&dir, RECORD)? else {
             return Ok(None);
         };
-        let record = std::str::from_utf8(&bytes)
-            .ok()
-            .and_then(Record::parse)
-            .ok_or_else(|| shown(&path, "not a record"))?;
+        let path = dir.join(format!("{RECORD}.{g}"));
+        let record =
+            Record::parse(&text(&path, bytes)?).ok_or_else(|| shown(&path, "not a record"))?;
         if record.name != name {
             return Err(shown(&path, "the record of another extension"));
         }
@@ -259,20 +324,18 @@ impl Store {
     }
 
     /// Change what the store keeps of `name`: `f` writes through the
-    /// [`Edit`] it is handed, the record last, and what the record no
-    /// longer names is taken away after.
+    /// [`Edit`] it is handed, the record last, and what the believed record
+    /// does not name is taken away after.
     pub fn edit(
         &self,
         name: &str,
         f: impl FnOnce(&Edit<'_>) -> Result<(), String>,
     ) -> Result<(), String> {
         let dir = self.dir(name);
-        let exists = open_dir(&dir).is_ok();
-        if !exists {
+        if open_dir(&dir).is_err() {
             unsealed(&self.root, || {
-                fs::create_dir(&dir).map_err(|e| shown(&dir, e))?;
-                let made = open_dir(&dir).map_err(|e| shown(&dir, e))?;
-                set_sealed(&made, true).map_err(|e| shown(&dir, e))
+                remove_entry(&dir)?;
+                fs::create_dir(&dir).map_err(|e| shown(&dir, e))
             })?;
         }
         unsealed(&dir, || {
@@ -295,25 +358,28 @@ impl Edit<'_> {
         image: &[u8],
         signed: Option<(&[u8], &[u8])>,
     ) -> Result<(), String> {
-        write_sealed(self.dir, &image_file(digest), image)?;
+        put_sealed(self.dir, &image_file(digest), image)?;
         if let Some((sidecar, signature)) = signed {
-            write_sealed(self.dir, &sidecar_file(digest), sidecar)?;
-            write_sealed(self.dir, &signature_file(digest), signature)?;
+            put_sealed(self.dir, &sidecar_file(digest), sidecar)?;
+            put_sealed(self.dir, &signature_file(digest), signature)?;
         }
         Ok(())
     }
 
     pub fn put_record(&self, record: &Record) -> Result<(), String> {
-        write_sealed(self.dir, RECORD, record.render().as_bytes())
+        put_generation(self.dir, RECORD, record.render().as_bytes())
     }
 
-    /// Take away every file the record does not name: images it left, and
-    /// what was staged and never renamed into place.
     fn collect(&self) -> Result<(), String> {
-        let record = read_sealed(&self.dir.join(RECORD), SMALL_MAX)?
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .and_then(|text| Record::parse(&text));
-        let mut kept = vec![RECORD.to_owned()];
+        let believed = newest(self.dir, RECORD)?;
+        let record = believed
+            .as_ref()
+            .and_then(|(_, bytes)| std::str::from_utf8(bytes).ok())
+            .and_then(Record::parse);
+        let mut kept: Vec<String> = believed
+            .iter()
+            .map(|(g, _)| format!("{RECORD}.{g}"))
+            .collect();
         for image in record
             .iter()
             .flat_map(|r| r.current.iter().chain(&r.previous))

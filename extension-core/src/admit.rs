@@ -62,16 +62,29 @@ fn caps_of(mask: u64) -> String {
     render_list(capability_names(mask))
 }
 
+/// Whether `grant`, `name`'s, claims a command or a user `others`, every
+/// other installed extension's name and grant, claims already.
+pub fn clashes(name: &str, grant: &Grant, others: &[(&str, &Grant)]) -> Result<(), Refusal> {
+    for (other, theirs) in others.iter().filter(|(other, _)| *other != name) {
+        if let Some(command) = grant.commands.iter().find(|c| theirs.commands.contains(c)) {
+            return refuse(format!("{other} declares the command {command} already"));
+        }
+        if let Some(user) = grant.users.iter().find(|u| theirs.users.contains(u)) {
+            return refuse(format!("{other} declares the user {user} already"));
+        }
+    }
+    Ok(())
+}
+
 /// Whether `image`, whose SHA-256 is `digest`, goes in under `authority`,
-/// beside `record` when the store keeps one; `others` are the commands
-/// every other extension the store keeps declares.
+/// beside `record` when the store keeps one, and beside `others`.
 pub fn install(
     record: Option<&Record>,
     image: &Image<'_>,
     digest: [u8; 32],
     authority: &Authority<'_>,
     bounds: &Bounds<'_>,
-    others: &[(&str, &[String])],
+    others: &[(&str, &Grant)],
 ) -> Result<Admitted, Refusal> {
     let release = &image.release;
     let declared = image.declaration.grant();
@@ -98,6 +111,9 @@ pub fn install(
                 return refuse(
                     "the store's record names another authority than this key, so a person approves it",
                 );
+            }
+            if record.is_some_and(|r| r.current.is_none()) {
+                return refuse("it was removed, so it goes back in only as a first install");
             }
             if record.is_some_and(|r| r.refused.contains(&release.version)) {
                 return refuse(format!(
@@ -130,13 +146,8 @@ pub fn install(
         }
     }
     within_base(&declared, bounds.ceiling)?;
-    if let Some((other, _)) = others.iter().find(|(name, commands)| {
-        *name != release.name && commands.iter().any(|c| declared.commands.contains(c))
-    }) {
-        return refuse(format!("{other} declares one of its commands already"));
-    }
-    let files: alloc::vec::Vec<(&str, &[u8])> = image.files().collect();
-    symbols::check(&files, bounds.libc).map_err(|e| Refusal(e.to_string()))?;
+    clashes(&release.name, &declared, others)?;
+    symbols::check_image(image, bounds.libc).map_err(|e| Refusal(e.to_string()))?;
     Ok(Admitted::Install(Installed {
         version: release.version,
         sha256: digest,
@@ -180,12 +191,12 @@ pub fn activation(
     if record
         .floor
         .is_some_and(|(floor, _)| current.version < floor)
+        || record.refused.contains(&current.version)
     {
-        return refuse("its version is below the floor");
+        return refuse("its version is below the floor or refused");
     }
     within_base(&declared, bounds.ceiling)?;
-    let files: alloc::vec::Vec<(&str, &[u8])> = image.files().collect();
-    symbols::check(&files, bounds.libc).map_err(|e| Refusal(e.to_string()))
+    symbols::check_image(image, bounds.libc).map_err(|e| Refusal(e.to_string()))
 }
 
 /// The trusted key `signature` names over `sidecar`, once the sidecar

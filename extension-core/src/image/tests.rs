@@ -22,7 +22,7 @@ pub(crate) fn packer() -> Packer {
         S_IFREG | 0o644,
         b"id=hello\n".to_vec(),
     );
-    packer.add("/share/link", S_IFLNK | 0o777, b"../bin/hello".to_vec());
+    packer.add("/share/link", S_IFLNK | 0o777, b"slopos/apps".to_vec());
     packer
 }
 
@@ -36,6 +36,10 @@ fn what_the_packer_writes_checks_out() {
     );
     assert_eq!(image.declaration.commands, ["hello"]);
     assert!(image.manifest.ends_with(b" 100644 /.extension/declare\n"));
+    assert_eq!(
+        image.links().collect::<Vec<_>>(),
+        [("/share/link", "slopos/apps")]
+    );
     let files: Vec<&str> = image.files().map(|(path, _)| path).collect();
     assert_eq!(
         files,
@@ -81,6 +85,12 @@ fn an_image_out_of_shape_is_refused_saying_why() {
     ] {
         let why = refusal(packer(), RELEASE_TEXT, declare);
         assert!(why.contains(missing), "{declare:?}: {why}");
+    }
+    for target in ["../bin/hello", "/usr/local/lib", "a/../../x", ""] {
+        let mut escapes = packer();
+        escapes.add("/lib", S_IFLNK | 0o777, target.as_bytes().to_vec());
+        let why = refusal(escapes, RELEASE_TEXT, DECLARE_TEXT);
+        assert!(why.contains("/lib: a symlink"), "{target:?}: {why}");
     }
     let mut plain = packer();
     plain.add("/bin/plain", S_IFREG | 0o644, b"x".to_vec());

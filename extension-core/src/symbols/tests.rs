@@ -12,7 +12,7 @@ fn program(needed: &[&str], imports: &[&str]) -> Vec<u8> {
 
 fn check_files(files: &[(&str, Vec<u8>)]) -> Result<(), SymbolError> {
     let files: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (*p, b.as_slice())).collect();
-    check(&files, &libc())
+    check(&files, &[], &libc())
 }
 
 #[test]
@@ -93,7 +93,47 @@ fn what_binds_nothing_it_needs_is_refused() {
         assert_eq!(check_files(&files), Err(why));
     }
     assert!(matches!(
-        check(&[], b"not an elf"),
+        check(&[], &[], b"not an elf"),
         Err(SymbolError::Libc(_))
     ));
+}
+
+#[test]
+fn a_library_is_found_through_its_soname_link() {
+    let files = [
+        ("/bin/a", program(&["libc.so", "libx.so.1"], &["x"])),
+        (
+            "/lib/real/libx.so.1.2",
+            build(Kind::Shared, None, &[], &[], &["x"]),
+        ),
+    ];
+    let files: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (*p, b.as_slice())).collect();
+    assert_eq!(
+        check(&files, &[("/lib/libx.so.1", "real/libx.so.1.2")], &libc()),
+        Ok(())
+    );
+    assert_eq!(
+        check(&files, &[("/lib/libx.so.1", "libx.so.1")], &libc()),
+        Err(SymbolError::Needs("/bin/a".into(), "libx.so.1".into()))
+    );
+}
+
+#[test]
+fn a_program_the_interpreter_does_not_load_is_refused_wherever_it_is() {
+    let static_pie = build(Kind::Shared, None, &["libc.so"], &[], &[]);
+    for path in ["/bin/a", "/libexec/a", "/share/a"] {
+        assert_eq!(
+            check_files(&[(path, static_pie.clone())]),
+            Err(SymbolError::Interpreter(path.into())),
+            "{path}"
+        );
+    }
+    assert_eq!(check_files(&[("/lib/liba.so", static_pie)]), Ok(()));
+    assert_eq!(
+        check_files(&[(
+            "/lib/a",
+            build(Kind::Executable, None, &["libc.so"], &[], &[])
+        )]),
+        Err(SymbolError::Interpreter("/lib/a".into()))
+    );
 }
