@@ -161,42 +161,79 @@ fn key_of(kind: &str, base64: &str) -> Result<PublicKey, String> {
     PublicKey::from_openssh(kind, base64).ok_or_else(|| "not an ssh-ed25519 public key".into())
 }
 
-/// The action a command line belongs to, `None` for one that needs nothing.
-fn action_for(args: &[String]) -> Option<&'static str> {
-    Some(match args.first()?.as_str() {
-        "install" => "org.slopos.extension.install",
-        "install-signed" => "org.slopos.extension.install-signed",
-        "key" => "org.slopos.extension.trust",
-        "enable" | "disable" | "remove" | "rollback" => "org.slopos.extension.manage",
-        _ => return None,
-    })
-}
-
-fn named(name: &str) -> Result<&str, String> {
+fn named(name: &str) -> Result<String, String> {
     if valid_name(name.as_bytes()) {
-        Ok(name)
+        Ok(name.to_owned())
     } else {
         Err(format!("{name:?} is no extension's name"))
     }
 }
 
-fn run(args: &[String]) -> Result<String, String> {
+/// Who vouches for an install, as its command line names them.
+enum Vouched {
+    /// The person approved `grant` for `name` and the image of `digest`.
+    Approved {
+        digest: [u8; 32],
+        name: String,
+        grant: Grant,
+    },
+    /// A key signed the sidecar at `sidecar` with the signature at
+    /// `signature`.
+    Signed { sidecar: String, signature: String },
+}
+
+/// A command line, read.
+enum Request {
+    Status(Option<String>),
+    Build { dir: String, out: String },
+    Install { image: String, vouched: Vouched },
+    KeyAdd(Key),
+    KeyRemove(String),
+    Enable(String),
+    Disable(String),
+    Remove(String),
+    Rollback(String),
+    ActivateAll,
+}
+
+fn parse(args: &[String]) -> Result<Request, String> {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
-    match words.as_slice() {
-        ["status"] => status(None),
-        ["status", name] => status(Some(named(name)?)),
-        ["build", dir] => build(dir, "."),
-        ["build", dir, out] => build(dir, out),
-        ["install", image, digest, "name", name, grant @ ..] => {
-            let digest = parse_digest(digest).ok_or(USAGE)?;
-            let grant = Grant::parse(grant).ok_or(USAGE)?;
-            install_approved(image, digest, named(name)?, &grant)
-        }
+    Ok(match words.as_slice() {
+        ["status"] => Request::Status(None),
+        ["status", name] => Request::Status(Some(named(name)?)),
+        ["build", dir] => Request::Build {
+            dir: (*dir).into(),
+            out: ".".into(),
+        },
+        ["build", dir, out] => Request::Build {
+            dir: (*dir).into(),
+            out: (*out).into(),
+        },
+        ["install", image, digest, "name", name, grant @ ..] => Request::Install {
+            image: (*image).into(),
+            vouched: Vouched::Approved {
+                digest: parse_digest(digest).ok_or(USAGE)?,
+                name: named(name)?,
+                grant: Grant::parse(grant).ok_or(USAGE)?,
+            },
+        },
         ["install-signed", image] => {
             let stem = image.strip_suffix(".ext").unwrap_or(image);
-            install_signed(image, &format!("{stem}.meta"), &format!("{stem}.meta.sig"))
+            Request::Install {
+                image: (*image).into(),
+                vouched: Vouched::Signed {
+                    sidecar: format!("{stem}.meta"),
+                    signature: format!("{stem}.meta.sig"),
+                },
+            }
         }
-        ["install-signed", image, sidecar, signature] => install_signed(image, sidecar, signature),
+        ["install-signed", image, sidecar, signature] => Request::Install {
+            image: (*image).into(),
+            vouched: Vouched::Signed {
+                sidecar: (*sidecar).into(),
+                signature: (*signature).into(),
+            },
+        },
         [
             "key",
             "add",
@@ -217,16 +254,81 @@ fn run(args: &[String]) -> Result<String, String> {
                 slopos_extension_core::parse_caps(list)
                     .ok_or_else(|| format!("{list} names no capabilities"))
             };
-            let key = Key::new(key, caps(ceiling)?, caps(user)?, &comment.join(" "))?;
-            key_add(key)
+            Request::KeyAdd(Key::new(
+                key,
+                caps(ceiling)?,
+                caps(user)?,
+                &comment.join(" "),
+            )?)
         }
-        ["key", "remove", fingerprint] => key_remove(fingerprint),
-        ["enable", name] => enable(named(name)?),
-        ["disable", name] => disable(named(name)?),
-        ["remove", name] => remove(named(name)?),
-        ["rollback", name] => rollback(named(name)?),
-        ["activate-all"] => activate_all(),
-        _ => Err(USAGE.into()),
+        ["key", "remove", fingerprint] => Request::KeyRemove((*fingerprint).into()),
+        ["enable", name] => Request::Enable(named(name)?),
+        ["disable", name] => Request::Disable(named(name)?),
+        ["remove", name] => Request::Remove(named(name)?),
+        ["rollback", name] => Request::Rollback(named(name)?),
+        ["activate-all"] => Request::ActivateAll,
+        _ => return Err(USAGE.into()),
+    })
+}
+
+impl Request {
+    /// The action it runs as, `None` for one that needs nothing.
+    fn action(&self) -> Option<&'static str> {
+        Some(match self {
+            Request::Install {
+                vouched: Vouched::Approved { .. },
+                ..
+            } => "org.slopos.extension.install",
+            Request::Install {
+                vouched: Vouched::Signed { .. },
+                ..
+            } => "org.slopos.extension.install-signed",
+            Request::KeyAdd(_) | Request::KeyRemove(_) => "org.slopos.extension.trust",
+            Request::Enable(_)
+            | Request::Disable(_)
+            | Request::Remove(_)
+            | Request::Rollback(_) => "org.slopos.extension.manage",
+            Request::Status(_) | Request::Build { .. } | Request::ActivateAll => return None,
+        })
+    }
+
+    /// What the mechanism would refuse, judged against the store as the
+    /// requester reads it, so the person is asked only about what would go in.
+    fn check(&self) -> Result<(), String> {
+        let store = || Store::open(false);
+        match self {
+            Request::Install { image, vouched } => prepare(&store()?, image, vouched).map(drop),
+            Request::KeyAdd(key) => within_base(key),
+            Request::KeyRemove(fingerprint) => store()?
+                .keys()?
+                .by_fingerprint(fingerprint)
+                .map(drop)
+                .ok_or_else(|| format!("no trusted key is {fingerprint}")),
+            Request::Enable(name) | Request::Disable(name) | Request::Remove(name) => {
+                record_of(&store()?, name).map(drop)
+            }
+            Request::Rollback(name) => rolled_back(&store()?, name).map(drop),
+            Request::Status(_) | Request::Build { .. } | Request::ActivateAll => Ok(()),
+        }
+    }
+
+    fn run(self) -> Result<String, String> {
+        match self {
+            Request::Status(only) => status(only.as_deref()),
+            Request::Build { dir, out } => build(&dir, &out),
+            Request::Install { image, vouched } => {
+                let store = Store::open(true)?;
+                let prepared = prepare(&store, &image, &vouched)?;
+                install(&store, prepared)
+            }
+            Request::KeyAdd(key) => key_add(key),
+            Request::KeyRemove(fingerprint) => key_remove(&fingerprint),
+            Request::Enable(name) => enable(&name),
+            Request::Disable(name) => disable(&name),
+            Request::Remove(name) => remove(&name),
+            Request::Rollback(name) => rollback(&name),
+            Request::ActivateAll => activate_all(),
+        }
     }
 }
 
@@ -248,41 +350,143 @@ fn borrowed(others: &[(String, Grant)]) -> Vec<(&str, &Grant)> {
     others.iter().map(|(n, g)| (n.as_str(), g)).collect()
 }
 
-/// Put `admitted` in the store as `name`'s current image and run it. One
-/// that will not run leaves the store as it was, and what ran before runs on.
-fn install(
-    store: &Store,
-    before: Option<Record>,
-    name: &str,
-    image: &[u8],
+/// The authority an install goes in under, read.
+enum Voucher {
+    Person {
+        name: String,
+        grant: Grant,
+    },
+    Key {
+        sidecar: Vec<u8>,
+        signature: Vec<u8>,
+    },
+}
+
+impl Voucher {
+    fn read(vouched: &Vouched) -> Result<Voucher, String> {
+        Ok(match vouched {
+            Vouched::Approved { name, grant, .. } => Voucher::Person {
+                name: name.clone(),
+                grant: grant.clone(),
+            },
+            Vouched::Signed { sidecar, signature } => Voucher::Key {
+                sidecar: read_file(sidecar, SIDECAR_MAX)?,
+                signature: read_file(signature, SIDECAR_MAX)?,
+            },
+        })
+    }
+
+    fn authority(&self) -> Authority<'_> {
+        match self {
+            Voucher::Person { name, grant } => Authority::Person { name, grant },
+            Voucher::Key { sidecar, signature } => Authority::Signed { sidecar, signature },
+        }
+    }
+
+    fn signed(&self) -> Option<(&[u8], &[u8])> {
+        match self {
+            Voucher::Person { .. } => None,
+            Voucher::Key { sidecar, signature } => Some((sidecar, signature)),
+        }
+    }
+}
+
+/// An image read and held to the store as it stands.
+struct Prepared {
+    bytes: Vec<u8>,
     digest: [u8; 32],
+    name: String,
+    voucher: Voucher,
+    before: Option<Record>,
     admitted: Admitted,
-    signed: Option<(&[u8], &[u8])>,
-) -> Result<String, String> {
+}
+
+fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, String> {
+    let named_digest = match vouched {
+        Vouched::Approved { digest, .. } => Some(*digest),
+        Vouched::Signed { .. } => None,
+    };
+    let (bytes, digest) = read_image(path, named_digest)?;
+    let voucher = Voucher::read(vouched)?;
+    let image = Image::check(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    let name = image.release.name.clone();
+    let keys = store.keys()?;
+    let base = Base::read()?;
+    let before = store.record(&name)?;
+    let others = others(store, &name)?;
+    let admitted = admit::install(
+        before.as_ref(),
+        &image,
+        digest,
+        &voucher.authority(),
+        &base.bounds(&keys),
+        &borrowed(&others),
+    )
+    .map_err(|e| format!("{path}: {e}"))?;
+    Ok(Prepared {
+        bytes,
+        digest,
+        name,
+        voucher,
+        before,
+        admitted,
+    })
+}
+
+/// Why `record` does not run, or `None` when it does.
+fn idle(record: &Record) -> Option<String> {
+    match (&record.why, record.enabled) {
+        (Some(why), _) => Some(format!("it is stopped: {why}")),
+        (None, false) => Some(format!(
+            "it is disabled; `extctl enable {}` runs it",
+            record.name
+        )),
+        (None, true) => None,
+    }
+}
+
+/// Put what `prepared` admitted in the store as its current image and run
+/// it. One that will not run leaves the store as it was.
+fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
+    let Prepared {
+        bytes,
+        digest,
+        name,
+        voucher,
+        before,
+        admitted,
+    } = prepared;
     let installed = match admitted {
-        Admitted::Current => return Ok(format!("{name} is installed already")),
+        Admitted::Current => {
+            let idle = before.as_ref().and_then(idle);
+            return Ok(format!(
+                "{name} is installed already{}",
+                idle.map_or_else(String::new, |why| format!("; {why}"))
+            ));
+        }
         Admitted::Install(installed) => installed,
     };
     let version = installed.version;
-    let mut record = before.clone().unwrap_or_else(|| Record::new(name));
+    let mut record = before.clone().unwrap_or_else(|| Record::new(&name));
     record.install(installed);
-    store.edit(name, |edit| {
-        edit.put_image(&digest, image, signed)?;
+    store.edit(&name, |edit| {
+        edit.put_image(&digest, &bytes, voucher.signed())?;
         edit.put_record(&record)
     })?;
-    if !record.enabled {
-        return Ok(format!(
-            "{name} {version} installed; it is disabled, so it runs once enabled"
-        ));
+    if let Some(why) = idle(&record) {
+        return Ok(format!("{name} {version} installed; {why}"));
     }
-    match activate(name, image, digest) {
+    match activate(&name, &bytes, digest) {
         Ok(ran) => Ok(format!("{name} {version} installed; {ran}")),
         Err(why) => match before {
             Some(before) if before.current.is_some() => {
-                store.edit(name, |edit| edit.put_record(&before))?;
-                Err(format!(
-                    "{name} {version} not installed: {why}; what ran before runs on"
-                ))
+                store.edit(&name, |edit| edit.put_record(&before))?;
+                let kept = if idle(&before).is_none() {
+                    "what ran before runs on"
+                } else {
+                    "the store keeps what it had"
+                };
+                Err(format!("{name} {version} not installed: {why}; {kept}"))
             }
             _ => {
                 stop(store, &mut record, &why)?;
@@ -292,72 +496,12 @@ fn install(
     }
 }
 
-fn install_approved(
-    path: &str,
-    digest: [u8; 32],
-    name: &str,
-    grant: &Grant,
-) -> Result<String, String> {
-    let (bytes, digest) = read_image(path, Some(digest))?;
-    let image = Image::check(&bytes).map_err(|e| format!("{path}: {e}"))?;
-    let store = Store::open(true)?;
-    let keys = store.keys()?;
-    let base = Base::read()?;
-    let record = store.record(name)?;
-    let others = others(&store, name)?;
-    let admitted = admit::install(
-        record.as_ref(),
-        &image,
-        digest,
-        &Authority::Person { name, grant },
-        &base.bounds(&keys),
-        &borrowed(&others),
-    )
-    .map_err(|e| format!("{path}: {e}"))?;
-    install(&store, record, name, &bytes, digest, admitted, None)
-}
-
-fn install_signed(path: &str, sidecar_path: &str, signature_path: &str) -> Result<String, String> {
-    let (bytes, digest) = read_image(path, None)?;
-    let sidecar = read_file(sidecar_path, SIDECAR_MAX)?;
-    let signature = read_file(signature_path, SIDECAR_MAX)?;
-    let image = Image::check(&bytes).map_err(|e| format!("{path}: {e}"))?;
-    let name = image.release.name.clone();
-    let store = Store::open(true)?;
-    let keys = store.keys()?;
-    let base = Base::read()?;
-    let record = store.record(&name)?;
-    let others = others(&store, &name)?;
-    let authority = Authority::Signed {
-        sidecar: &sidecar,
-        signature: &signature,
-    };
-    let admitted = admit::install(
-        record.as_ref(),
-        &image,
-        digest,
-        &authority,
-        &base.bounds(&keys),
-        &borrowed(&others),
-    )
-    .map_err(|e| format!("{path}: {e}"))?;
-    install(
-        &store,
-        record,
-        &name,
-        &bytes,
-        digest,
-        admitted,
-        Some((&sidecar, &signature)),
-    )
-}
-
 /// Show `image` at `/opt/<name>` in place of what is shown there.
 fn activate(name: &str, image: &[u8], digest: [u8; 32]) -> Result<String, String> {
     if sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
-        return Ok(
-            "extensions are off this boot, so it runs from the next that allows them".into(),
-        );
+        return Ok(format!(
+            "extensions are off this boot, so it is not shown; `extctl enable {name}` shows it on a boot that allows them"
+        ));
     }
     crate::syscall::base::ext_activate(name.as_bytes(), image, &digest)
         .map(|activation| format!("it runs as activation {activation}"))
@@ -392,31 +536,31 @@ fn deactivate(name: &str) -> Result<(), String> {
 }
 
 /// `record`'s current image, once it holds to everything it was installed
-/// under; one that no longer fits is stopped.
+/// under.
+fn checked(store: &Store, record: &Record, keys: &Keys, base: &Base) -> Result<Vec<u8>, String> {
+    let current = record
+        .current
+        .as_ref()
+        .ok_or_else(|| "nothing is installed".to_owned())?;
+    let bytes = store.image(&record.name, &current.sha256, image_max())?;
+    let signed = store.signed(&record.name, &current.sha256)?;
+    let image = Image::check(&bytes).map_err(|e| e.to_string())?;
+    let signed = signed.as_ref().map(|(s, g)| (s.as_slice(), g.as_slice()));
+    admit::activation(record, &image, current.sha256, signed, &base.bounds(keys))
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+/// [`checked`], stopping one that no longer fits.
 fn fitting(
     store: &Store,
     record: &mut Record,
     keys: &Keys,
     base: &Base,
 ) -> Result<Vec<u8>, String> {
-    let name = record.name.clone();
-    let current = record
-        .current
-        .clone()
-        .ok_or_else(|| format!("{name}: nothing is installed"))?;
-    let checked = store
-        .image(&name, &current.sha256, image_max())
-        .and_then(|bytes| {
-            let signed = store.signed(&name, &current.sha256)?;
-            let image = Image::check(&bytes).map_err(|e| e.to_string())?;
-            let signed = signed.as_ref().map(|(s, g)| (s.as_slice(), g.as_slice()));
-            admit::activation(record, &image, current.sha256, signed, &base.bounds(keys))
-                .map_err(|e| e.to_string())?;
-            Ok(bytes)
-        });
-    checked.or_else(|why| {
+    checked(store, record, keys, base).or_else(|why| {
         stop(store, record, &why)?;
-        Err(format!("{name} stopped: {why}"))
+        Err(format!("{} stopped: {why}", record.name))
     })
 }
 
@@ -477,27 +621,43 @@ fn floor_of(record: &Record) -> String {
         .map_or_else(|| "-".to_owned(), |(version, _)| version.to_string())
 }
 
-fn rollback(name: &str) -> Result<String, String> {
-    let store = Store::open(true)?;
-    let mut record = record_of(&store, name)?;
-    let keys = store.keys()?;
-    let base = Base::read()?;
+/// `name`'s record rolled back and its image, once that image fits and
+/// claims nothing another extension claims.
+fn rolled_back(store: &Store, name: &str) -> Result<(Record, Vec<u8>), String> {
+    let mut record = record_of(store, name)?;
     record.roll_back().map_err(|e| format!("{name}: {e}"))?;
-    if let Some(current) = &record.current {
-        admit::clashes(name, &current.grant, &borrowed(&others(&store, name)?))
-            .map_err(|e| format!("{name}: {e}"))?;
-    }
     record.enabled = true;
     record.why = None;
-    store.edit(name, |edit| edit.put_record(&record))?;
-    let version = record.current.as_ref().map_or(0, |c| c.version);
-    let ran = bring_up(&store, &mut record, &keys, &base)?;
-    Ok(format!(
-        "{name} is back at version {version}, which updates are held above; {ran}"
-    ))
+    if let Some(current) = &record.current {
+        admit::clashes(name, &current.grant, &borrowed(&others(store, name)?))
+            .map_err(|e| format!("{name}: {e}"))?;
+    }
+    let bytes = checked(store, &record, &store.keys()?, &Base::read()?)
+        .map_err(|why| format!("{name}: the previous image does not fit: {why}"))?;
+    Ok((record, bytes))
 }
 
-fn key_add(key: Key) -> Result<String, String> {
+fn rollback(name: &str) -> Result<String, String> {
+    let store = Store::open(true)?;
+    let before = record_of(&store, name)?;
+    let (record, bytes) = rolled_back(&store, name)?;
+    store.edit(name, |edit| edit.put_record(&record))?;
+    let version = record.current.as_ref().map_or(0, |c| c.version);
+    match activate(name, &bytes, sha256(&bytes)) {
+        Ok(ran) => Ok(format!(
+            "{name} is back at version {version}, which updates are held above; {ran}"
+        )),
+        Err(why) => {
+            store.edit(name, |edit| edit.put_record(&before))?;
+            Err(format!(
+                "{name} not rolled back: {why}; the store keeps what it had"
+            ))
+        }
+    }
+}
+
+/// The key's ceilings, held to the base's.
+fn within_base(key: &Key) -> Result<(), String> {
     let base = Base::read()?;
     let past = (key.ceiling | key.user) & !base.ceiling;
     if past != 0 {
@@ -506,6 +666,12 @@ fn key_add(key: Key) -> Result<String, String> {
             caps_of(past)
         ));
     }
+    Ok(())
+}
+
+fn key_add(key: Key) -> Result<String, String> {
+    within_base(&key)?;
+    let base = Base::read()?;
     let store = Store::open(true)?;
     let mut keys = store.keys()?;
     let fingerprint = key.key.fingerprint();
@@ -540,8 +706,13 @@ fn key_remove(fingerprint: &str) -> Result<String, String> {
 fn recheck(store: &Store, keys: &Keys, base: &Base, fingerprint: &str) -> Result<String, String> {
     let mut said = String::new();
     for name in store.names()? {
-        let Some(mut record) = store.record(&name)? else {
-            continue;
+        let mut record = match store.record(&name) {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            Err(why) => {
+                said.push_str(&format!("\n{why}"));
+                continue;
+            }
         };
         let signed_by = record.current.as_ref().and_then(|c| c.signer.as_deref());
         if record.enabled && signed_by == Some(fingerprint) {
@@ -560,17 +731,15 @@ fn activate_all() -> Result<String, String> {
     let base = Base::read()?;
     let mut said = Vec::new();
     for name in store.names()? {
-        let Some(mut record) = store.record(&name)? else {
-            continue;
+        let ran = match store.record(&name) {
+            Ok(Some(mut record)) if record.enabled => {
+                bring_up(&store, &mut record, &keys, &base).map(|ran| format!("{name}: {ran}"))
+            }
+            Ok(Some(_)) => deactivate(&name).map(|()| format!("{name}: disabled")),
+            Ok(None) => continue,
+            Err(why) => Err(why),
         };
-        if !record.enabled {
-            deactivate(&name)?;
-            continue;
-        }
-        said.push(match bring_up(&store, &mut record, &keys, &base) {
-            Ok(ran) => format!("{name}: {ran}"),
-            Err(why) => why,
-        });
+        said.push(ran.unwrap_or_else(|why| why));
     }
     Ok(said.join("\n"))
 }
@@ -597,10 +766,11 @@ fn status(only: Option<&str>) -> Result<String, String> {
         if only.is_some_and(|only| only != name) {
             continue;
         }
-        let Some(record) = store.record(&name)? else {
-            continue;
-        };
-        out.push(describe(&record));
+        match store.record(&name) {
+            Ok(Some(record)) => out.push(describe(&record)),
+            Ok(None) => {}
+            Err(why) => out.push(format!("{name}: unreadable: {why}")),
+        }
     }
     if let Some(name) = only
         && out.is_empty()
@@ -678,7 +848,8 @@ pub fn extctl_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // The person approved the command line privd was sent, so the mechanism
     // runs it as it came.
-    let args = if std::env::var_os(slopos_priv_core::ENV_ACTION).is_some() {
+    let mechanism = std::env::var_os(slopos_priv_core::ENV_ACTION).is_some();
+    let args = if mechanism {
         args
     } else {
         canonical(&args).unwrap_or_else(|why| {
@@ -686,13 +857,18 @@ pub fn extctl_main() {
             sys_core::exit_with_code(2)
         })
     };
+    let fail = |code: i32, why: String| -> ! {
+        eprintln!("extctl: {why}");
+        sys_core::exit_with_code(code)
+    };
+    let request = parse(&args).unwrap_or_else(|why| fail(2, why));
+    if !mechanism {
+        request.check().unwrap_or_else(|why| fail(1, why));
+    }
     let bytes: Vec<Vec<u8>> = args.iter().map(|a| a.clone().into_bytes()).collect();
-    privd::elevate(action_for(&args), &bytes, Input::Closed);
-    match run(&args) {
+    privd::elevate(request.action(), &bytes, Input::Closed);
+    match request.run() {
         Ok(said) => println!("{said}"),
-        Err(why) => {
-            eprintln!("extctl: {why}");
-            sys_core::exit_with_code(1);
-        }
+        Err(why) => fail(1, why),
     }
 }
