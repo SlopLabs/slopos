@@ -235,6 +235,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-extension-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-boot-core",
+ "slopos-priv-core",
+ "slopos-tls-core",
+]
+
+[[package]]
 name = "slopos-fat-core"
 version = "0.1.0"
 

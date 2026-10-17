@@ -1,0 +1,6 @@
+# What any extension can ever be granted, in the sealed base at
+# /usr/share/slopos/privd/extensions; the grammar is
+# slopos_extension_core::ceiling's. Every install and every activation holds
+# an extension's grant to it. RawBlock, Mount and DacOverride can rewrite or
+# cover the root, so an extension granted one holds the machine.
+ceiling Power Mount RawBlock NetAdmin ConsoleConfig SysInspect Clock DacOverride SchedHigh
