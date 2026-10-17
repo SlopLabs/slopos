@@ -865,8 +865,12 @@ trusts `/etc/ssl/certs/ca-certificates.crt`, Mozilla's root store committed
 under `assets/certs/` and replaced only by `scripts/update_ca_bundle.sh`,
 which checks the digest curl.se publishes. `tls-core` and `http-core` are host
 crates under `just test-host` because no userland unit test runs anywhere;
-`tls-core`'s interop tests drive `openssl s_server` and `s_client` and need
-`openssl` on PATH.
+`tls-core`'s interop tests drive `openssl s_server` and `s_client` and
+`ssh-keygen -Y` and need `openssl` and `ssh-keygen` on PATH. It verifies
+Ed25519 (RFC 8032) strictly — a canonical key outside the small-order
+subgroup, `S` below the order, `R` the canonical encoding of `[S]B - [k]A` —
+and the SSH signatures `ssh-keygen -Y sign` writes over such keys; its signers
+for both are under `test-server`, which nothing shipped enables.
 
 **The unwinder is not test-only.** `libc.so` and `libc.a` supply the Level-1
 Itanium unwinder (`vendor/unwinding`, seventeen `_Unwind_*` entry points) on
