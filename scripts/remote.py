@@ -1255,10 +1255,13 @@ def install_extension(args, image):
     signed sidecar names."""
     stem = image.name[:-len(".ext")] if image.name.endswith(".ext") else image.name
     sidecar, signature = image.with_name(f"{stem}.meta"), image.with_name(f"{stem}.meta.sig")
+    signed = sidecar.is_file() and signature.is_file()
+    if signed and f"sha256 {sha256_file(image)}\n" not in sidecar.read_text(errors="replace"):
+        die(f"{sidecar} describes another image than {image}; run `just extension` again")
     remote, size, sha = push(args, image, f"{SCRATCH}/{stem}.ext", INSTALL_MODE)
     log(f"pushed {image}: {size} bytes, sha256 {sha}")
     pushed = [remote]
-    if sidecar.is_file() and signature.is_file():
+    if signed:
         for local in (sidecar, signature):
             pushed.append(push(args, local, f"{SCRATCH}/{local.name}", INSTALL_MODE)[0])
         argv = ["extctl", "install-signed", *pushed]
