@@ -10,7 +10,7 @@ use slopos_abi::fs::{S_IFREG, USER_PATH_MAX};
 use crate::newc;
 
 mod check;
-pub use check::{CheckError, Checked, Described, Digest, MAX_RECORDS, check, describe};
+pub use check::{CheckError, Checked, Described, Digest, MAX_RECORDS, check, describe, sealed};
 
 pub const INTERFACE_PATH: &str = "/usr/share/slopos/base-interface";
 /// One [`ManifestLine`] per record but its own, in the order the archive
