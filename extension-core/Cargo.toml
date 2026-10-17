@@ -1,0 +1,29 @@
+[package]
+name = "slopos-extension-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "System extensions as data: the image, what it declares and is granted, its signed sidecar, the store's records and keys, the ceilings and the symbol check, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+doctest = false
+
+[features]
+# Packing an image from a directory, for the tools that build one.
+std = []
+# Writes ELF files for tests, which nothing shipped needs.
+test-elf = []
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-boot-core = { workspace = true }
+slopos-priv-core = { workspace = true }
+slopos-tls-core = { workspace = true }
+
+[dev-dependencies]
+slopos-tls-core = { workspace = true, features = ["test-server"] }
