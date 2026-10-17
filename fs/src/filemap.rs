@@ -1818,6 +1818,8 @@ pub enum WriteThrough {
     /// filesystem must *not* be written behind the set's back: bytes landing
     /// there would leave every mapper reading stale pages.
     Interrupted,
+    /// The inode is sealed, or its seal could not be read.
+    Refused(crate::vfs::VfsError),
 }
 
 /// Apply a `write(2)` to the page set, when it covers `offset`.
@@ -1840,6 +1842,15 @@ pub fn write_through(
     let Ok(_io) = io_lock(inode) else {
         return WriteThrough::Interrupted;
     };
+    // Under the stripe `seal_unmapped` seals under: a seal is seen here, or
+    // these bytes land before it and its sealer reads them back.
+    match fs.stat(inode) {
+        Ok(stat) if stat.sealed => {
+            return WriteThrough::Refused(crate::vfs::VfsError::PermissionDenied);
+        }
+        Ok(_) => {}
+        Err(e) => return WriteThrough::Refused(e),
+    }
     let mut sets = FILEMAP.lock();
     let Some(slot) = find_set(sets.as_slice(), fs, inode) else {
         return WriteThrough::NotCovered;

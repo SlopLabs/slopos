@@ -1457,6 +1457,7 @@ pub fn test_filemap_a_seal_holds_against_the_page_set() -> TestResult {
     let reader = map_page(inode, 0, false, AccountId::NONE);
     let sealed = seal();
     let wrote = crate::vfs_file_ops::write_chunk(test_fs(), inode, 0, b"past-the-seal");
+    let through = filemap::write_through(test_fs(), inode, 0, b"past-the-seal");
     let seen = read_path(inode, 0, 16);
     if let Ok(map) = reader {
         filemap::release(map, 1);
@@ -1473,8 +1474,14 @@ pub fn test_filemap_a_seal_holds_against_the_page_set() -> TestResult {
     if sealed.is_err() {
         return slopos_testing::fail!("a file mapped read-only refused its seal: {:?}", sealed);
     }
-    if wrote != Err(VfsError::PermissionDenied) {
-        return slopos_testing::fail!("a write into a sealed file's page set took {:?}", wrote);
+    if wrote != Err(VfsError::PermissionDenied)
+        || through != filemap::WriteThrough::Refused(VfsError::PermissionDenied)
+    {
+        return slopos_testing::fail!(
+            "a write into a sealed file's page set took {:?}, {:?}",
+            wrote,
+            through
+        );
     }
     match (seen, pattern(16, 71)) {
         (Some(seen), Some(want)) if seen.as_slice() == want.as_slice() => TestResult::Pass,
