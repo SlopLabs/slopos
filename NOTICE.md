@@ -34,12 +34,14 @@ offsets) are reproduced where compatibility requires it; those are interface
 facts rather than authorship.
 
 The TLS stack in [`tls-core/`](tls-core/) is written from the specifications it
-implements — RFC 8446, 8439, 7748, 8017, 5280 and 6125, FIPS 180-4, 186-5 and
-197, NIST SP 800-38D and SEC 1. Its AES S-box is the Boolean circuit Boyar and
-Peralta published in "A new combinational logic minimization technique with
-applications to cryptology" (2010). Its test vectors were generated with
-pyca/cryptography, and its interop tests run it against OpenSSL's `s_server`
-and `s_client`; no code from either is incorporated.
+implements — RFC 8446, 8439, 7748, 8032, 8709, 8017, 5280 and 6125, FIPS
+180-4, 186-5 and 197, NIST SP 800-38D, SEC 1 and OpenSSH's `PROTOCOL.sshsig`.
+Its AES S-box is the Boolean circuit Boyar and Peralta published in "A new
+combinational logic minimization technique with applications to cryptology"
+(2010). Its test vectors were generated with pyca/cryptography or taken from
+RFC 8032, and its interop tests run it against OpenSSL's `s_server` and
+`s_client` and OpenSSH's `ssh-keygen -Y`; no code from any of them is
+incorporated.
 
 ## Pinned Rust standard library, `libc` and compiler forks
 

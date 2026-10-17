@@ -1,4 +1,4 @@
-//! PEM (RFC 7468) certificate blocks.
+//! PEM (RFC 7468) blocks and the base64 under them.
 
 use alloc::vec::Vec;
 
@@ -59,11 +59,11 @@ pub fn certificates(pem: &[u8]) -> Vec<Option<Vec<u8>>> {
     out
 }
 
-pub fn encode_certificate(der: &[u8]) -> Vec<u8> {
+/// Standard base64 with padding, unwrapped.
+pub fn base64_encode(data: &[u8]) -> Vec<u8> {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::from(&b"-----BEGIN CERTIFICATE-----\n"[..]);
-    let mut line = 0;
-    for chunk in der.chunks(3) {
+    let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
         let b = [
             chunk[0],
             *chunk.get(1).unwrap_or(&0),
@@ -71,22 +71,33 @@ pub fn encode_certificate(der: &[u8]) -> Vec<u8> {
         ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         for i in 0..4 {
-            let c = if i <= chunk.len() {
+            out.push(if i <= chunk.len() {
                 ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]
             } else {
                 b'='
-            };
-            out.push(c);
-        }
-        line += 4;
-        if line == 64 {
-            out.push(b'\n');
-            line = 0;
+            });
         }
     }
-    if line != 0 {
+    out
+}
+
+/// `body` between `-----BEGIN <label>-----` and `-----END <label>-----`
+/// lines, wrapped at `width`.
+pub fn armor(label: &str, body: &[u8], width: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"-----BEGIN ");
+    out.extend_from_slice(label.as_bytes());
+    out.extend_from_slice(b"-----\n");
+    for line in base64_encode(body).chunks(width) {
+        out.extend_from_slice(line);
         out.push(b'\n');
     }
-    out.extend_from_slice(b"-----END CERTIFICATE-----\n");
+    out.extend_from_slice(b"-----END ");
+    out.extend_from_slice(label.as_bytes());
+    out.extend_from_slice(b"-----\n");
     out
+}
+
+pub fn encode_certificate(der: &[u8]) -> Vec<u8> {
+    armor("CERTIFICATE", der, 64)
 }

@@ -17,12 +17,15 @@ pub mod conn;
 pub mod ct;
 pub mod der;
 pub mod ec;
+pub mod ed25519;
+mod field25519;
 pub mod gcm;
 pub mod hash;
 pub mod pem;
 pub mod rsa;
 #[cfg(any(test, feature = "test-server"))]
 pub mod server;
+pub mod sshsig;
 pub mod suite;
 #[cfg(any(test, feature = "test-server"))]
 pub mod testpki;
