@@ -1,6 +1,7 @@
 use super::*;
 use alloc::format;
 use alloc::vec;
+use slopos_abi::caps;
 
 const SHIPPED: &str = include_str!("../../../assets/privd/actions");
 
@@ -332,13 +333,15 @@ fn a_medium_action_exists_only_on_a_boot_of_the_medium() {
 
 #[test]
 fn every_capability_name_is_one_privd_holds() {
-    for (name, bit) in CAP_NAMES {
-        let policy =
-            Policy::parse(&with("").replace("caps Power", &format!("caps {name}"))).unwrap();
-        assert_eq!(policy.actions()[0].caps, bit);
-        assert_eq!(bit & DELEGABLE, bit);
+    for (name, bit) in crate::CAPABILITIES {
+        let parsed = Policy::parse(&with("").replace("caps Power", &format!("caps {name}")));
+        if bit & DELEGABLE == 0 {
+            assert!(parsed.is_err(), "{name} is no capability privd holds");
+            continue;
+        }
+        assert_eq!(parsed.unwrap().actions()[0].caps, bit);
     }
-    let all: Vec<&str> = CAP_NAMES.iter().map(|(n, _)| *n).collect();
+    let all: Vec<&str> = crate::capability_names(DELEGABLE).collect();
     let policy =
         Policy::parse(&with("").replace("caps Power", &format!("caps {}", all.join(" ")))).unwrap();
     assert_eq!(policy.actions()[0].caps, DELEGABLE);
