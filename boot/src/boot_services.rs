@@ -222,7 +222,6 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     if !install_base(archive) || mount_base() != 0 {
         return -1;
     }
-    keep_dirs();
 
     ROOTFS_IS_RAMFS.store(true, Ordering::Relaxed);
     0
@@ -245,9 +244,10 @@ fn install_base(archive: &'static [u8]) -> bool {
     }
 }
 
-/// Hold the directories the kernel keeps where they are on the root just
-/// made final. One that cannot be held, behind a link or on a read-only
-/// root, is left as it is: what reads it holds it to being a directory.
+/// Hold the directories the kernel keeps where they are, on whatever volume
+/// the root and `mount=` left at their paths. One that cannot be held,
+/// behind a link or on a read-only volume, is left as it is: what reads it
+/// holds it to being a directory.
 fn keep_dirs() {
     for dir in slopos_abi::fs::KEPT_DIRS {
         if let Err(e) = slopos_fs::vfs::init::vfs_keep_dir(dir.as_bytes()) {
@@ -502,7 +502,6 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                     if BASE_OVER_DISK.load(Ordering::Relaxed) && mount_base() != 0 {
                         return -1;
                     }
-                    keep_dirs();
                 }
                 Err(e) => {
                     klog_info!("VFS: failed to install ext2 root: {:?}", e);
@@ -523,18 +522,17 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 /// `mount=<source>:<path>`, repeatable and applied in cmdline order, so a later
 /// entry may mount inside an earlier one. Each is an ext2 mount through the
 /// same path `mount(2)` takes; a failure is one line and the boot goes on, as
-/// an absent `root=` device does.
+/// an absent `root=` device does. The kept directories are held after them,
+/// so a `/var` of its own holds the store.
 fn boot_step_cmdline_mounts_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    let Some(cmdline) =
-        slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(crate::early_init::boot_get_cmdline())
-    else {
-        return;
-    };
-    for token in cmdline.split_ascii_whitespace() {
+    let cmdline =
+        slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(crate::early_init::boot_get_cmdline());
+    for token in cmdline.iter().flat_map(|c| c.split_ascii_whitespace()) {
         if let Some(spec) = token.strip_prefix("mount=") {
             apply_cmdline_mount(spec);
         }
     }
+    keep_dirs();
 }
 
 #[inline(never)]
