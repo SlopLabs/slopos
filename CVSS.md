@@ -2,6 +2,63 @@
 
 **No finding is open.**
 
+Swept 2026-10-17: extensions going in — `extension-core`'s image, declaration,
+grant, sidecar, record, keys and ceiling grammars, its ELF reader and symbol
+check, and its install and activation verdicts; `tls-core`'s strict Ed25519
+and SSHSIG; `/bin/extctl` under privd's four `org.slopos.extension.*`
+actions with `ExtensionUpdate` and `Seal`, and its sealed store; the kernel
+keeping the store's directories (`KEPT_DIRS`) and refusing mounts over them;
+the seal made final against the page set; and the host's packer, signer and
+`remote.py install --extension`. Three review passes found, before it
+landed, that the mechanism re-read an install's image after the person
+approved a command line naming only its path, so neither the bytes nor the
+grant were what was shown; that a store edit cut off by a relayed signal or
+a power loss left a record unsealed, and an unsealed record read as none, so
+a signed install skipped the floor; that files were sealed by path once
+other processes could reach them, so a `DacOverride` holder could swap or
+hard-link what got sealed, and a later clean-up could unseal a sealed file
+through a planted second name; that any process could hold the store's lock
+for ever; that a key comment that did not read back broke the keys file;
+that `allow user alone` and `allow program` escaped the user ceiling; that a
+signed update re-enabled what the person disabled and put back what they
+removed; that two extensions could claim one user, and a rollback one
+command; that an image's symlinks could leave the image and a static PIE
+passed the symbol check; that two rollbacks left the running version
+refused; that a failed update stopped the version that ran, and a rollback
+to an image that no longer fitted left nothing running; that a program
+declared under the image's `lib/` escaped the interpreter check, and an
+action allowing `admin` with no level the user ceiling; that the person was
+asked about requests the mechanism would then refuse; and, in the
+kernel, that a `write(2)` through a descriptor opened before a seal, or a
+writable shared mapping, kept changing what readers of a sealed file saw,
+the first by racing the seal check too. Now the requester writes out the
+command line and the mechanism runs only that; records and keys are sealed
+generations, sealed through the descriptor that wrote them, read back and
+held to one name, and nothing is renamed; writers lock a 0600 file and
+ignore relayed signals; the comment is checked; every principal a person
+reaches unasked counts; the person's disable and removal hold; users and
+commands are checked at install and rollback; symlinks are relative without
+`..`, a declared program lives outside `lib/` and every ELF outside it is a
+program; a rollback stops refusing the version it returns to and checks the
+image fits before it commits; a failed update leaves the record and the
+running image; the requester holds every request to the store before privd
+asks; and the kernel refuses to seal a writably mapped file (`EBUSY`) and
+checks the seal under the stripe a seal is taken under. Below the bar: a
+`DacOverride` holder can still fill the store's directories with unsealed
+files and so fail an edit, and can open a store file before its seal and
+write it then, which the read-back after the seal catches but a power loss
+between the seal and the read-back would leave believed; the mechanism reads
+the files a request names as uid 0, so it learns whether a uid-0 file of
+mode 0600 exists and its size; two extensions' users are checked against
+each other only, not against users the base or a person made, which Phase 3's
+user database must do; a `key add` naming the whole base ceiling twice is
+past privd's 320-byte question, so the session cannot trust such a key,
+though root and the paired agent can; a file once writably mapped, or written
+through its page set, and still mapped read-only is refused a seal (`EBUSY`)
+until that mapping goes, which fails safe; and no mount may cover `/var`
+once boot has kept the store, so a separate `/var` is mounted by `mount=`
+alone.
+
 Swept 2026-10-16: extension activation and identity — `ext_activate` and
 `ext_deactivate` (`ExtensionUpdate`) staging an archive into an instance of a
 pool of 32 and showing it read-only and pinned at `/opt/<name>`, replaced or
