@@ -279,12 +279,54 @@ fn a_rollback_refuses_the_version_it_left_until_a_newer_one() {
     assert_eq!(back.version, 2);
     record.install(installed(owner.signed(Some(&record), &v3)));
     assert!(record.refused.is_empty());
+    record.roll_back().unwrap();
+    record.roll_back().unwrap();
+    assert_eq!(
+        (
+            record.current.as_ref().map(|c| c.version),
+            record.refused.clone()
+        ),
+        (Some(3), vec![1])
+    );
+    assert_eq!(owner.runs(&record, &v3), Ok(()));
     record.remove();
-    refused(owner.signed(Some(&record), &v2), "older than version 3");
+    refused(owner.signed(Some(&record), &v3), "it was removed");
+    refused(
+        owner.approved(Some(&record), &v2, &grant(caps::NET_ADMIN)),
+        "older than version 3",
+    );
     assert!(matches!(
-        owner.signed(Some(&record), &v3),
+        owner.approved(Some(&record), &v3, &grant(caps::NET_ADMIN)),
         Ok(Admitted::Install(_))
     ));
+}
+
+#[test]
+fn a_key_s_update_leaves_a_disabled_extension_disabled() {
+    let owner = Owner::new(CEILING, 0);
+    let mut record = Record::new("hello");
+    let (v1, v2, v3) = (
+        image(1, "NetAdmin", "", &["puts"]),
+        image(2, "NetAdmin", "", &["puts"]),
+        image(3, "NetAdmin", "", &["puts"]),
+    );
+    record.install(installed(owner.signed(None, &v1)));
+    assert!(record.enabled);
+    record.enabled = false;
+    record.install(installed(owner.signed(Some(&record), &v2)));
+    assert!(!record.enabled, "a key re-enabled what the person disabled");
+    record.stop("its key's ceiling fell");
+    record.install(installed(owner.signed(Some(&record), &v3)));
+    assert!(
+        record.enabled,
+        "a fitting update left a stopped extension stopped"
+    );
+    record.enabled = false;
+    record.why = None;
+    let v4 = image(4, "NetAdmin", "", &["puts"]);
+    let by_person = installed(owner.approved(Some(&record), &v4, &grant(caps::NET_ADMIN)));
+    record.install(by_person);
+    assert!(record.enabled);
 }
 
 #[test]
@@ -352,8 +394,12 @@ fn two_extensions_never_declare_one_command() {
         name: "hello",
         grant: &grant,
     };
-    let taken = [("other", &["hi".into()][..])];
-    let ours = [("hello", &["hi".into()][..])];
+    let theirs = Grant {
+        commands: vec!["hi".into()],
+        ..Grant::default()
+    };
+    let taken = [("other", &theirs)];
+    let ours = [("hello", &theirs)];
     refused(
         install(
             None,
@@ -363,7 +409,7 @@ fn two_extensions_never_declare_one_command() {
             &owner.bounds(),
             &taken,
         ),
-        "other declares one of its commands",
+        "other declares the command hi",
     );
     assert!(
         install(
@@ -375,5 +421,32 @@ fn two_extensions_never_declare_one_command() {
             &ours
         )
         .is_ok()
+    );
+}
+
+#[test]
+fn two_extensions_never_declare_one_user() {
+    let owner = Owner::new(CEILING, 0);
+    let bytes = image(1, "NetAdmin", "", &["puts"]);
+    let image = Image::check(&bytes).unwrap();
+    let grant = image.declaration.grant();
+    let authority = Authority::Person {
+        name: "hello",
+        grant: &grant,
+    };
+    let theirs = Grant {
+        users: vec!["hel-lo".into(), "hello".into()],
+        ..Grant::default()
+    };
+    refused(
+        install(
+            None,
+            &image,
+            sha256(&bytes),
+            &authority,
+            &owner.bounds(),
+            &[("hel", &theirs)],
+        ),
+        "hel declares the user hello",
     );
 }

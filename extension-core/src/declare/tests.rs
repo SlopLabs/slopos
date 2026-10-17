@@ -229,3 +229,32 @@ fn every_prefix_and_every_byte_replaced_parses_or_names_a_line() {
         }
     }
 }
+
+#[test]
+fn an_action_any_person_reaches_unasked_counts_as_unasked() {
+    let declare = "\
+action alone
+  program  /opt/hello/libexec/a
+  args     a
+  caps     Power
+  allow    user alone
+  describe \"A\"
+action shell
+  program  /opt/hello/libexec/b
+  args     b
+  caps     Mount
+  allow    program /bin/shell
+  describe \"B\"
+action asked
+  program  /opt/hello/libexec/c
+  args     c
+  caps     RawBlock
+  allow    user confirm
+  allow    admin
+  allow    paired
+  describe \"C\"
+";
+    let d = Declaration::parse("hello", declare).unwrap();
+    assert_eq!(d.grant().unasked, ["alone", "shell"]);
+    assert_eq!(d.unasked_caps(), caps::POWER | caps::MOUNT);
+}

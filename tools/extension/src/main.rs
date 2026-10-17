@@ -15,8 +15,7 @@ fn run(dir: &Path, out: &Path, libc: &Path) -> Result<String, String> {
     let (image, sidecar) = source::pack(dir)?;
     let checked = Image::check(&image).map_err(|e| e.to_string())?;
     let libc_bytes = fs::read(libc).map_err(|e| format!("{}: {e}", libc.display()))?;
-    let files: Vec<(&str, &[u8])> = checked.files().collect();
-    symbols::check(&files, &libc_bytes).map_err(|e| e.to_string())?;
+    symbols::check_image(&checked, &libc_bytes).map_err(|e| e.to_string())?;
     fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let at = |ext: &str| out.join(format!("{}.{ext}", sidecar.name));
     let (image_at, sidecar_at) = (at("ext"), at("meta"));

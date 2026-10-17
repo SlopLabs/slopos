@@ -59,11 +59,7 @@ impl Key {
             .strip_prefix("user=")
             .and_then(parse_caps)
             .ok_or("user= names capabilities")?;
-        let comment = word();
-        if !comment.is_empty() && !valid_text(comment, COMMENT_MAX) {
-            return Err("a comment is a line of printable ASCII");
-        }
-        Key::new(key, ceiling, user, comment)
+        Key::new(key, ceiling, user, word())
     }
 
     /// The user ceiling sits under the ceiling: an unasked action's
@@ -77,6 +73,9 @@ impl Key {
         if user & !ceiling != 0 {
             return Err("the user ceiling names what the ceiling does not");
         }
+        if !comment.is_empty() && !valid_comment(comment) {
+            return Err("a comment is a line of printable ASCII");
+        }
         Ok(Key {
             key,
             ceiling,
@@ -84,6 +83,11 @@ impl Key {
             comment: comment.to_string(),
         })
     }
+}
+
+/// Whether `comment` goes in a key's line as it is.
+pub fn valid_comment(comment: &str) -> bool {
+    valid_text(comment, COMMENT_MAX)
 }
 
 impl Keys {
@@ -229,5 +233,13 @@ mod tests {
             Keys::parse(&format!("{good}\n{good}\n")).map_err(|e| e.line),
             Err(2)
         );
+    }
+
+    #[test]
+    fn a_comment_that_would_not_read_back_is_refused() {
+        let long = "c".repeat(COMMENT_MAX + 1);
+        for comment in ["J\u{fc}rgen", "a\nssh-ed25519 x", "\"q\"", long.as_str()] {
+            assert!(Key::new(key(1), 0, 0, comment).is_err(), "{comment:?}");
+        }
     }
 }

@@ -601,19 +601,26 @@ shape: a `newc` archive sealed by its `/.extension/manifest`, its records'
 paths those they have below `/opt/<name>`, under `bin/`, `libexec/`, `lib/`
 and `share/` alone, naming itself in `/.extension/release` and what it asks
 for in `/.extension/declare` (`slopos_extension_core::declare`). What it is
-granted is the capabilities its services and actions hold, the actions every
-person runs unasked, its users and its commands. A first install's command
-line names the image's SHA-256 and that grant, which `extctl install <image>`
-writes out and the person approving it reads, and the mechanism refuses an
-image that asks for other than the line; `install-signed`, which the session
+granted is the capabilities its services and actions hold, the actions a
+person reaches unasked (`allow user`, `user alone` or a `program`), its users
+and its commands, none of which another extension declares. A first install's
+command line names the image's SHA-256 and that grant, which `extctl install
+<image>` writes out in the requester and the person approving it reads, and
+the mechanism runs only that form, refusing an image that asks for other than
+the line; `install-signed`, which the session
 runs unasked, takes an image whose sidecar — name, version, SHA-256 — a key
 in the store's `keys` signed with `ssh-keygen -Y sign -n extension@slopos`,
 and holds the grant to that key's ceiling and the unasked actions to its
-`user` ceiling. Every grant sits under the base's ceiling,
+`user` ceiling; it leaves an extension the person disabled disabled, and
+puts back one the person removed only as a first install. Every grant sits
+under the base's ceiling,
 `/usr/share/slopos/privd/extensions` (`assets/privd/extensions`), which never
 names what `ceiling::NEVER` lists, and every program of the image is linked
 through `/lib/ld-slopos.so.1` against `libc.so` and the image's own `/lib`,
-binding only what they export (`slopos_extension_core::symbols`). A record
+binding only what they export (`slopos_extension_core::symbols`): every ELF
+file outside `lib/` is a program, so a static PIE is refused, and a symlink's
+target is relative and never climbs through `..`, so it stays in the image. A
+record
 keeps a version floor — an older version is refused, the same one with other
 bytes too — and the key whose updates go in unasked; any other update is a
 first install. `rollback` makes the previous image current, lowers the floor
@@ -621,12 +628,17 @@ to it and refuses the version it left to a signed install until a newer one
 goes in, and `remove` keeps the record. Every activation (`enable`,
 `rollback`, `activate-all`, and a key's change, which holds what it signed to
 the keys anew) holds the stored image to its record, its key and both
-ceilings again, and stops one that no longer fits, saying why in its record.
-The store is `slopos_abi::fs::EXTENSION_STORE`: `keys`, and per extension its
-`record` and its images named by digest, so a record replaced whole is the
-one commit. Every file and directory in it is sealed and nothing unsealed is
-believed, so `DacOverride` without `Seal` neither rewrites a record nor
-plants a key; a writer takes away what the record does not name. The kernel
+ceilings again, and stops one that no longer fits, saying why in its record;
+an update that will not activate leaves the record as it was and what ran
+before running. The store is `slopos_abi::fs::EXTENSION_STORE`: `keys.<n>`,
+and per extension `record.<n>` and its images named by digest. Only a sealed
+file is believed, and a writer seals each through the descriptor it wrote and
+reads it back, so `DacOverride` without `Seal` neither rewrites a record nor
+plants a key. Nothing is renamed: a record or the keys go in as the next
+generation, the newest sealed one is believed, and a writer then takes away
+the older ones and what the record does not name, so a writer cut off
+anywhere leaves either. Writers lock `EXTENSION_STORE.lock` (mode 0600) and
+ignore the termination signals privd relays; readers take nothing. The kernel
 keeps it where it is (`slopos_abi::fs::KEPT_DIRS`): at boot it makes the
 store and each directory on the way to it and holds them by identity, so no
 rename or removal moves one (`EBUSY`), and `mount(2)` refuses a target at,

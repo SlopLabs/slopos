@@ -30,9 +30,10 @@ pub use words::{LineError, parse_caps, render_caps};
 
 /// The store: a directory per extension and the keys the owner trusts.
 pub const STORE: &str = slopos_abi::fs::EXTENSION_STORE;
-/// The trusted keys, in the store.
+/// The trusted keys, in the store, as generations: `keys.<n>`.
 pub const KEYS: &str = "keys";
-/// What the store keeps of an extension, in its directory.
+/// What the store keeps of an extension, in its directory, as generations:
+/// `record.<n>`.
 pub const RECORD: &str = "record";
 /// What any extension can ever be granted, in the sealed base.
 pub const CEILING: &str = "/usr/share/slopos/privd/extensions";
@@ -58,6 +59,13 @@ impl Slot {
             Slot::Previous => "previous",
         }
     }
+}
+
+/// `<stem>.<n>`'s generation `n`, spelled as it prints. The store believes
+/// the newest sealed one.
+pub fn generation(name: &str, stem: &str) -> Option<u64> {
+    let n = name.strip_prefix(stem)?.strip_prefix('.')?;
+    n.parse::<u64>().ok().filter(|g| alloc::format!("{g}") == n)
 }
 
 /// The files the store keeps an image as, named by its digest, so writing a

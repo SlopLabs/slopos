@@ -2,13 +2,13 @@
 //! at [`MANIFEST`] of `<sha256> <mode> <path>` for every other record, its
 //! records' paths those they have below `/opt/<name>`, under [`TOP`] alone,
 //! and holding [`RELEASE`] and [`DECLARE`]. Every program the declaration
-//! names is an executable file of it.
+//! names is an executable file of it, and every symlink stays inside it.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use slopos_abi::fs::{S_IFDIR, S_IFREG};
+use slopos_abi::fs::{S_IFDIR, S_IFLNK, S_IFREG};
 use slopos_boot_core::base::{self, CheckError, ManifestLine};
 use slopos_boot_core::newc::{self, Entry, Record};
 
@@ -38,6 +38,8 @@ pub enum ImageError<'a> {
     Sealed(CheckError<'a>),
     /// A record outside [`TOP`], or in [`DIR`] but none of its files.
     Placed(&'a [u8]),
+    /// A symlink whose target is absolute or climbs through `..`.
+    Escapes(&'a [u8]),
     Missing(&'static str),
     Release(LineError),
     Declare(LineError),
@@ -53,6 +55,11 @@ impl fmt::Display for ImageError<'_> {
             ImageError::Placed(path) => write!(
                 f,
                 "{}: outside /bin, /libexec, /lib, /share and {DIR}'s own files",
+                String::from_utf8_lossy(path)
+            ),
+            ImageError::Escapes(path) => write!(
+                f,
+                "{}: a symlink that may lead out of the image",
                 String::from_utf8_lossy(path)
             ),
             ImageError::Missing(path) => write!(f, "no {path}"),
@@ -72,10 +79,19 @@ fn beneath(path: &[u8], dir: &str) -> bool {
             .is_some_and(|rest| rest.first() == Some(&b'/'))
 }
 
+/// A symlink's target names a path of the image wherever it is shown:
+/// relative, and never through `..`.
+fn inside_image(target: &[u8]) -> bool {
+    !target.is_empty() && target[0] != b'/' && target.split(|&b| b == b'/').all(|c| c != b"..")
+}
+
 fn placed<'a>(entry: &Entry<'a>) -> Result<(), CheckError<'a>> {
     let path = entry.path;
     if !TOP.iter().any(|top| beneath(path, top)) {
         return Err(CheckError::Kind(path));
+    }
+    if entry.kind() == S_IFLNK && !inside_image(entry.data) {
+        return Err(CheckError::Target(path));
     }
     let own = [DIR, MANIFEST, RELEASE, DECLARE];
     if beneath(path, DIR) && !own.iter().any(|p| p.as_bytes() == path) {
@@ -95,12 +111,13 @@ fn file<'a>(bytes: &'a [u8], path: &'static str) -> Result<&'a str, ImageError<'
 
 impl<'a> Image<'a> {
     pub fn check(bytes: &'a [u8]) -> Result<Image<'a>, ImageError<'a>> {
-        let outside = core::cell::Cell::new(None);
+        let misplaced = core::cell::Cell::new(None);
         let manifest = base::sealed(bytes, MANIFEST, sha256, |entry| {
-            placed(entry).inspect_err(|_| outside.set(outside.get().or(Some(entry.path))))
+            placed(entry).inspect_err(|e| misplaced.set(misplaced.get().or(Some(*e))))
         });
-        let manifest = match (manifest, outside.get()) {
-            (Err(_), Some(path)) => return Err(ImageError::Placed(path)),
+        let manifest = match (manifest, misplaced.get()) {
+            (Err(_), Some(CheckError::Target(path))) => return Err(ImageError::Escapes(path)),
+            (Err(_), Some(CheckError::Kind(path))) => return Err(ImageError::Placed(path)),
             (result, _) => result.map_err(ImageError::Sealed)?,
         };
         let release = Release::parse(file(bytes, RELEASE)?).map_err(ImageError::Release)?;
@@ -127,6 +144,19 @@ impl<'a> Image<'a> {
             .flatten()
             .filter(|entry| entry.kind() == S_IFREG)
             .filter_map(|entry| Some((core::str::from_utf8(entry.path).ok()?, entry.data)))
+    }
+
+    /// Every symlink, by its path below the mount point, and its target.
+    pub fn links(&self) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+        newc::entries(self.bytes)
+            .flatten()
+            .filter(|entry| entry.kind() == S_IFLNK)
+            .filter_map(|entry| {
+                Some((
+                    core::str::from_utf8(entry.path).ok()?,
+                    core::str::from_utf8(entry.data).ok()?,
+                ))
+            })
     }
 
     /// What `/opt/<name>/<rest>` is in the image: `/<rest>`.

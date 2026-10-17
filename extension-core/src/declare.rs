@@ -133,12 +133,16 @@ pub enum Level {
 }
 
 impl Action {
-    /// Whether every person's processes run it unasked: it allows `user`
-    /// with no level.
+    /// Whether a person's processes may run it unasked: it allows `user`
+    /// with no level or `alone`, which one person logged in always is, or a
+    /// program, which any person may run.
     pub fn unasked(&self) -> bool {
-        self.allows
-            .iter()
-            .any(|a| a.principal == Principal::User && a.level == Level::None)
+        self.allows.iter().any(|a| {
+            matches!(
+                (&a.principal, a.level),
+                (Principal::User, Level::None | Level::Alone) | (Principal::Program(_), _)
+            )
+        })
     }
 
     /// The name after `ext.<extension>.`.
