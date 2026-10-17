@@ -136,6 +136,56 @@ action org.slopos.boot.reboot
   allow    paired
   describe "Restart the machine"
 
+action org.slopos.extension.install
+  program  /bin/extctl
+  args     install *
+  caps     ExtensionUpdate Seal
+  uid      0
+  cwd
+  exclusive extensions
+  allow    root
+  allow    session consent
+  allow    paired
+  describe "Install an extension, granting it what the command names; RawBlock, Mount or DacOverride gives it the machine"
+
+action org.slopos.extension.install-signed
+  program  /bin/extctl
+  args     install-signed *
+  caps     ExtensionUpdate Seal
+  uid      0
+  cwd
+  exclusive extensions
+  allow    root
+  allow    session
+  allow    paired
+  describe "Install or update an extension signed by a trusted key, within that key's ceilings"
+
+action org.slopos.extension.trust
+  program  /bin/extctl
+  args     key add *
+  args     key remove *
+  caps     ExtensionUpdate Seal
+  uid      0
+  exclusive extensions
+  allow    root
+  allow    session consent
+  allow    paired
+  describe "Trust a key to install extensions within the ceilings named; RawBlock, Mount or DacOverride is the machine"
+
+action org.slopos.extension.manage
+  program  /bin/extctl
+  args     enable *
+  args     disable *
+  args     remove *
+  args     rollback *
+  caps     ExtensionUpdate Seal
+  uid      0
+  exclusive extensions
+  allow    root
+  allow    session consent
+  allow    paired
+  describe "Turn an extension on or off, remove it, or go back to the version it had before"
+
 action org.slopos.cpufreq.set
   program  /bin/cpufreq
   args     set *
@@ -209,7 +259,7 @@ action org.slopos.install
 action org.slopos.rescue
   program  /bin/shell
   args     --rescue
-  caps     Power Mount RawBlock NetAdmin ConsoleConfig SysInspect Clock Seal BootEntry DacOverride BaseUpdate
+  caps     Power Mount RawBlock NetAdmin ConsoleConfig SysInspect Clock Seal BootEntry DacOverride BaseUpdate ExtensionUpdate
   uid      0
   medium
   allow    root

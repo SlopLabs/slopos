@@ -566,6 +566,7 @@ dependencies = [
  "slopos-cpufreq-core",
  "slopos-editor-core",
  "slopos-ext4-core",
+ "slopos-extension-core",
  "slopos-fat-core",
  "slopos-font",
  "slopos-gfx",

@@ -71,7 +71,9 @@ const OWNERS_RECORD: (&str, &str) = (
 const SBIN_PROGRAMS: [&str; 2] = ["init", "privd"];
 
 /// The action policy privd reads, packed at `/usr/share/slopos/privd`.
-const PRIVD_POLICY: &str = "assets/privd/actions";
+/// privd's policy and the ceiling of what extensions may be granted, from
+/// `assets/privd` to `/usr/share/slopos/privd`.
+const PRIVD_FILES: [&str; 2] = ["actions", "extensions"];
 
 const SLIBC_LICENSES: [&str; 3] = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"];
 
@@ -329,11 +331,13 @@ fn layout(
             read(&path)?,
         );
     }
-    add(
-        "/usr/share/slopos/privd/actions".into(),
-        MODE_DATA,
-        read(&root.join(PRIVD_POLICY))?,
-    );
+    for file in PRIVD_FILES {
+        add(
+            format!("/usr/share/slopos/privd/{file}"),
+            MODE_DATA,
+            read(&assets.join("privd").join(file))?,
+        );
+    }
     let logo = assets.join("logo.png");
     if logo.is_file() {
         add(
@@ -584,7 +588,9 @@ mod tests {
         let dir = env::temp_dir().join(format!("slopos-initramfs-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("root/assets/privd")).unwrap();
-        fs::write(dir.join("root").join(PRIVD_POLICY), b"# policy\n").unwrap();
+        for file in PRIVD_FILES {
+            fs::write(dir.join("root/assets/privd").join(file), b"# policy\n").unwrap();
+        }
         fs::create_dir_all(dir.join("build")).unwrap();
         dir
     }
@@ -719,6 +725,7 @@ mod tests {
                 "/sbin/privd",
                 "/bin/sh",
                 "/usr/share/slopos/privd/actions",
+                "/usr/share/slopos/privd/extensions",
                 INTERFACE_PATH,
                 MANIFEST_PATH,
             ]

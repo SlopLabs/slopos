@@ -3,6 +3,7 @@ pub mod compositor;
 pub mod coreutils;
 pub mod cpufreq;
 pub mod curl;
+pub mod extctl;
 pub mod halt;
 pub mod init;
 pub mod installer;
