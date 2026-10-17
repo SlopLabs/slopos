@@ -18,7 +18,7 @@ one place remoted reads them from.
     sh [--timeout S] 'CMDLINE'          through /bin/shell -c
     push LOCAL REMOTE | pull REMOTE LOCAL   SHA-256 checked end to end
     klog [--follow]
-    install [--base IMG] [--kernel ELF --tag T] [--commit] [--timeout S]
+    install [--base IMG] [--extension EXT ...] [--kernel ELF --tag T] [--commit] [--timeout S]
     kernel-changed --identity SHA256   prints `changed`, or `same` for that kernel
 
 Every command but `serve` and `provision` goes to the newest boot connected
@@ -1247,12 +1247,37 @@ def install_kernel(args, kernel):
             f"`remote.py run -- bootctl commit` keeps slopos-{slot}")
 
 
+def install_extension(args, image):
+    """Install the extension `image` with extctl: under its key when its
+    sidecar and signature lie beside it as `just extension` leaves them, else
+    as a first install. Both run unasked for the paired agent, and both
+    install only the bytes pushed: the digest the host sent, or the one its
+    signed sidecar names."""
+    stem = image.name[:-len(".ext")] if image.name.endswith(".ext") else image.name
+    sidecar, signature = image.with_name(f"{stem}.meta"), image.with_name(f"{stem}.meta.sig")
+    remote, size, sha = push(args, image, f"{SCRATCH}/{stem}.ext", INSTALL_MODE)
+    log(f"pushed {image}: {size} bytes, sha256 {sha}")
+    pushed = [remote]
+    if sidecar.is_file() and signature.is_file():
+        for local in (sidecar, signature):
+            pushed.append(push(args, local, f"{SCRATCH}/{local.name}", INSTALL_MODE)[0])
+        argv = ["extctl", "install-signed", *pushed]
+    else:
+        log(f"{image} carries no signed sidecar beside it; installing it as a first install")
+        argv = ["extctl", "install", remote, sha]
+    try:
+        sys.stdout.write(capture(args, argv, timeout=600))
+    finally:
+        capture(args, ["rm", "-f", *pushed])
+
+
 def cmd_install(args):
     kernel = Path(args.kernel) if args.kernel else None
     base = Path(args.base) if args.base else None
-    if not (kernel or base):
-        die("install: name a --base, a --kernel or both")
-    for path in filter(None, (kernel, base)):
+    extensions = [Path(e) for e in args.extension]
+    if not (kernel or base or extensions):
+        die("install: name a --base, an --extension, a --kernel or several")
+    for path in filter(None, (kernel, base, *extensions)):
         if not path.is_file():
             die(f"install: no file at {path}")
     before = wait_agent(args, timeout=args.connect_timeout)
@@ -1263,11 +1288,17 @@ def cmd_install(args):
     # slot until a base it serves is on the boot partition.
     if base:
         install_base(args, base)
+    # Before a kernel, whose boot would take them off until they are
+    # activated again.
+    for extension in extensions:
+        install_extension(args, extension)
     if kernel:
         install_kernel(args, kernel)
     elif args.commit:
         sys.stdout.write(capture(args, ["bootctl", "commit"]))
     print(capture(args, ["bootctl", "status"]), end="")
+    if extensions:
+        print(capture(args, ["extctl", "status"]), end="")
 
 
 def main():
@@ -1330,9 +1361,11 @@ def main():
     p.add_argument("--follow", "-f", action="store_true")
     p.set_defaults(func=cmd_klog)
 
-    p = sub.add_parser("install", help="install a base, running it at once, and a kernel into the spare slot, booting it")
+    p = sub.add_parser("install", help="install a base, running it at once, extensions, and a kernel into the spare slot, booting it")
     p.add_argument("--kernel")
     p.add_argument("--base")
+    p.add_argument("--extension", action="append", default=[],
+                   help="an extension image `just extension` packed, signed when its .meta.sig lies beside it")
     p.add_argument("--tag", help="the SLOPOS_BUILD_TAG the new kernel reports")
     p.add_argument("--identity", help="the kernel's sha256 built with no tag, recorded for kernel-changed")
     p.add_argument("--commit", action="store_true", help="make the new slot the default once it is up")
