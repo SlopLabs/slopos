@@ -114,8 +114,14 @@ gates nothing; any process may bind any port.
 **`/run` is uid 0's** (`fs/src/vfs/init.rs`): only init makes directories
 there. `/opt` and `/opt/bin` are in `ROOT_LAYOUT`, uid 0's.
 
-**Signatures.** `tls-core` has SHA-256, SHA-512, X25519, ECDSA and RSA, and no
-Ed25519. OpenSSH's `ssh-keygen` is in every toolchain install.
+**Signatures.** `tls-core` has SHA-256, SHA-512, X25519, ECDSA and RSA, and
+verifies Ed25519 strictly and SSHSIG (Phase 2). OpenSSH's `ssh-keygen` is in
+every toolchain install.
+
+**Extensions go in through privd** (Phase 2). `/bin/extctl` runs the four
+`org.slopos.extension.*` actions as uid 0 with `ExtensionUpdate` and `Seal`,
+over a store the kernel keeps where it is; nothing runs `extctl activate-all`
+at boot yet.
 
 ## What the prior art settles
 
@@ -189,8 +195,8 @@ named as `slopos_abi::caps` names them.
   action holds what it declares, intersected with the grant.
 - **For a signed install**, the grant is the declaration, held inside the
   key's ceiling.
-- **An unasked action**, one that allows `user` with no level, hands its
-  capabilities to every person's processes. It counts against a key's
+- **An unasked action**, one that allows `user` with no level or `alone`, or
+  a `program`, hands its capabilities to every person's processes. It counts against a key's
   separate `user` ceiling, empty by default, and it is named in a first
   install's grant line.
 - **The base's ceiling**, `/usr/share/slopos/privd/extensions`, sealed in the
@@ -211,10 +217,11 @@ named as `slopos_abi::caps` names them.
 
 | Path | What | Owner |
 |---|---|---|
-| `/var/lib/slopos/extensions/` | the store, every directory down from `/var` sealed, the store pinned against mounts | uid 0 |
-| `…/keys` | trusted keys, `allowed_signers`-shaped: key, ceiling, session ceiling, comment | uid 0, sealed |
-| `…/<name>/current.ext`, `previous.ext`, their sidecars and signatures | the images | uid 0, sealed |
-| `…/<name>/record` | the grant, the floor, the refused versions, the uids, enabled | uid 0, sealed |
+| `/var/lib/slopos/extensions/` | the store; it and each directory on the way to it kept by the kernel, never renamed, removed or covered | uid 0, sealed |
+| `…/keys.<n>` | trusted keys, `allowed_signers`-shaped: key, ceiling, session ceiling, comment | uid 0, sealed |
+| `…/<name>/<sha256>.ext`, `.meta`, `.meta.sig` | the images, their sidecars and signatures | uid 0, sealed |
+| `…/<name>/record.<n>` | the grant, the floor, the refused versions, enabled and why not | uid 0, sealed |
+| `/var/lib/slopos/extensions.lock` | the writers' lock | uid 0, 0600 |
 | `/opt/<name>` | the active image, read-only and pinned | the kernel |
 | `/opt/bin` | links to declared commands | uid 0 |
 | `/etc/<name>` | the machine's configuration | uid 0, readable by the extension's users |
@@ -228,8 +235,8 @@ named as `slopos_abi::caps` names them.
   shadow the toolchain; two extensions declaring one command are refused at
   install.
 - The seal keeps a `DacOverride` holder from rewriting a record without also
-  holding `Seal`; sealing the store's directories keeps it from renaming the
-  store aside; pinning keeps a `Mount` holder from covering it.
+  holding `Seal`; the kernel's hold keeps anyone from renaming the store aside
+  or covering it.
 - The store is world-readable, so `extctl status` lists every extension, its
   record, every key and its ceilings as whoever runs it.
 
@@ -288,11 +295,14 @@ beside `DELEGABLE` to spawn them so, and delegates neither.
 
 | Action | Command | Capabilities | Allow |
 |---|---|---|---|
-| `org.slopos.extension.install` | `install *` | `ExtensionUpdate Seal DacOverride` | `root`; `admin confirm`; `paired` |
-| `org.slopos.extension.install-signed` | `install-signed *` | `ExtensionUpdate Seal DacOverride` | `root`; `user`; `paired` |
-| `org.slopos.extension.trust` | `key add *`, `key remove *` | `Seal` | `root`; `admin confirm`; `paired` |
-| `org.slopos.extension.manage` | `enable *`, `disable *`, `remove *`, `rollback *` | `ExtensionUpdate Seal DacOverride` | `root`; `admin confirm`; `paired` |
-| `org.slopos.extension.config` | `config *` | `Seal DacOverride` | `root`; `admin confirm`; `paired` |
+| `org.slopos.extension.install` | `install *` | `ExtensionUpdate Seal` | `root`; `session consent`; `paired` |
+| `org.slopos.extension.install-signed` | `install-signed *` | `ExtensionUpdate Seal` | `root`; `session`; `paired` |
+| `org.slopos.extension.trust` | `key add *`, `key remove *` | `ExtensionUpdate Seal` | `root`; `session consent`; `paired` |
+| `org.slopos.extension.manage` | `enable *`, `disable *`, `remove *`, `rollback *` | `ExtensionUpdate Seal` | `root`; `session consent`; `paired` |
+| `org.slopos.extension.config` (Phase 4) | `config *` | `Seal DacOverride` | `root`; `admin confirm`; `paired` |
+
+`session` becomes `admin` and `user` once `plans/users-and-login.md` brings
+more than one person.
 
 - **A first install** is `extctl install <image> <sha256> name <name> grant
   <caps> unasked <actions> users <names> commands <names>`. The person reads
@@ -302,8 +312,10 @@ beside `DELEGABLE` to spawn them so, and delegates neither.
 - **A signed install** names no grant: the mechanism refuses unless the
   sidecar is signed by a trusted key whose ceilings cover the declaration, and
   the version is allowed.
-- **A key** is trusted by `extctl key add <ssh-ed25519 key> ceiling <caps>
-  user <caps>`; the question shows its fingerprint and both ceilings. Where
+- **A key** is trusted by `extctl key add <key.pub> ceiling <caps> user
+  <caps>`, which the requester writes out as `key add <fingerprint>
+  ssh-ed25519 <base64> ceiling <caps> user <caps> [comment]`; the question
+  shows its fingerprint and both ceilings. Where
   the private half lives is the owner's choice: on another machine, where a
   compromised session cannot sign, or in a session, for `sudo NOPASSWD`-like
   convenience that anything running in that session then shares.
@@ -441,23 +453,26 @@ new `SO_PEEREXTENSION` end with an exec, a foreign mapping or the exit;
 `uid_0_outside_the_base_is_no_root`, and `supervision_test` holding
 `/run/init` to `/sbin/init` across a re-execution.
 
-### Phase 2: Format, signatures and the install
+### Phase 2: Format, signatures and the install — done
 
-- `extension-core`: the format, the name grammar, the declaration grammar,
-  the record, the keys file, the ceilings, the symbol check.
-- Ed25519 and SSHSIG verification in `tls-core`, beside its other primitives,
-  tested against `ssh-keygen -Y sign` output.
-- `/bin/extctl` and the actions in the table, with `ExtensionUpdate` joining
-  `DELEGABLE` for them; the base ceiling file; the sealed, pinned store.
-- `tools/extension`, `just extension DIR`, and `remote.py install
-  --extension`.
-- Graded by `extension_test`: a first install asks and grants what it read;
-  one declaring more than its grant line is refused; a signed one installs
-  unasked under a trusted key; one past either ceiling is refused; an update
-  by the same key goes in unasked and an older version is refused; a rollback
-  refuses the version it left; a removed key, or a lowered ceiling, stops its
-  extension; one needing an export `libc.so` lacks is refused; a reserved name
-  is refused.
+`extension-core`: the image (a newc archive sealed by `/.extension/manifest`,
+records under `bin/`, `libexec/`, `lib/` and `share/` and symlinks that stay
+inside it, with `release` and `declare`), the declaration grammar and the
+grant it asks for, the sidecar, the record, the keys file, the base ceiling
+and `NEVER`, an ELF reader and the symbol check, and the install and
+activation verdicts; `boot_core::base::sealed` shares the base's sealed-archive
+check. `tls-core` verifies Ed25519 strictly and SSHSIG, interop-tested both
+ways against `ssh-keygen -Y`. `/bin/extctl` runs the four
+`org.slopos.extension.*` actions with `ExtensionUpdate`, now in `DELEGABLE`,
+and `Seal`, over a store of sealed generations; the base's ceiling is
+`/usr/share/slopos/privd/extensions`; the kernel keeps the store's
+directories where they are (`KEPT_DIRS`) and a seal final against the page
+set. `tools/extension`, `just extension DIR` and `remote.py install
+--extension` build and push one. Graded by `extension_test` (every case the
+phase named, a person's disable against a key's update, a key file's comment,
+and the store's seal, hold and generations), `fs::tests::mount`'s kept
+directory, `fs::tests::filemap`'s seal against the page set, and host tests
+under `just test-host`.
 
 ### Phase 3: Services and users
 
@@ -599,6 +614,79 @@ own, all building on extensions:
 - **No authority before its user.** `ExtensionUpdate` exists from Phase 1 and
   init holds it, but joins `DELEGABLE` only with the Phase 2 actions that run
   under it.
+- **The kernel keeps the store; the store keeps its seal.** The store,
+  `/var/lib/slopos/extensions`, and each directory on the way to it are held
+  by the kernel from boot (`slopos_abi::fs::KEPT_DIRS`): no rename or removal
+  moves one, and no mount covers one, one above it or anything beneath it.
+  Only the store and what it holds are sealed, so the rest of `/var` stays
+  writable, and nothing unsealed in it is believed: a file there that no
+  `Seal` holder sealed is no record and no key. A RAM root keeps a seal for
+  good, so extensions need a disk root.
+- **Images by digest, records by generation, nothing renamed.** The store
+  keeps each image, sidecar and signature under its SHA-256; a record or the
+  keys go in as `record.<n>` or `keys.<n>` beside the last, sealed through
+  the descriptor that wrote it and read back, and the newest sealed one is
+  believed. No rename and no rewrite in place means no moment in which the
+  believed record is unsealed, so a writer cut off anywhere — a crash, a
+  power loss — leaves the old state or the new, never a store that has
+  forgotten an extension's floor. Writers lock a 0600 file beside the store
+  and ignore the termination signals privd relays; readers take nothing.
+- **A seal is final for readers.** The store rests on it, so the kernel
+  refuses to seal a file a writable shared mapping holds and refuses a
+  `write(2)` into a sealed file's page set, as it already refused one to the
+  filesystem: what a sealer reads back is what every reader reads after.
+- **No authority before its user, for files too.** A mechanism reads the
+  files a request names as uid 0 without `DacOverride`, so only what uid 0
+  may read by mode is installed; the actions take `DacOverride` with the
+  phase whose state needs it, and `org.slopos.extension.trust` holds
+  `ExtensionUpdate` because a key's change stops what no longer fits.
+- **The person reads the grant, the mechanism holds the image to it.** A
+  first install's command line is `install <image> <sha256> name <name>
+  grant <caps> unasked <actions> users <users> commands <commands>`, lists
+  joined by commas and `-` for none; `extctl install <image>` writes it out in
+  the requester, the mechanism runs only that form, and it refuses an image
+  whose declaration is not that grant, as sets. A key is trusted by `key add
+  <fingerprint> ssh-ed25519 <base64> ceiling <caps> user <caps> [comment]`,
+  so the question shows its fingerprint; a key file's comment that would not
+  read back is dropped. The keys file is shaped like `allowed_signers` but not
+  readable by `ssh-keygen`, which refuses an option it does not know.
+- **Unasked is what any person reaches unasked.** An action counts toward a
+  key's `user` ceiling and the grant's `unasked` list when it allows `user`
+  with no level or `alone` — one person logged in, which this system always
+  is — or a `program`, which any person may run.
+- **A person's word outlasts a key's.** A signed update of an extension the
+  person disabled goes in disabled; one the person removed goes back in only
+  as a first install. A stop a check made is no person's word, so a fitting
+  update runs again. An update that will not activate leaves the record as
+  it was and what ran before running.
+- **The floor binds every install; the refused list, signed ones.** A version
+  below the floor never goes in, the floor's version only with its own bytes;
+  a version a rollback left goes in again only as a first install, and
+  installing a version clears the refused ones at or below it. A rollback to
+  a version refuses it no longer, and an activation refuses a refused
+  version. A person's install leaves the record naming no key, so later
+  signed updates are first installs.
+- **One name, one owner.** No two installed extensions declare one command
+  or one user, checked at install and at rollback, since `foo`'s `user bar`
+  and `foo-bar`'s own user are both `foo-bar`.
+- **Strict Ed25519.** A key must be a canonical point outside the small-order
+  subgroup, `S` below the order and `R` the canonical encoding of
+  `[S]B - [k]A`, so one message has one signature under one key; every
+  signature `ssh-keygen` makes passes.
+- **What an image holds and declares.** Its records are under `bin/`,
+  `libexec/`, `lib/`, `share/` and `.extension/` alone, and a symlink's
+  target is relative and never climbs through `..`, so it stays inside the
+  mount. A declaration's settings are the indented lines after a `service`
+  or `action`; programs are named by the path they have at `/opt/<name>`; an
+  action's exclusive group is the extension's own, `ext.<name>.<group>`;
+  `reads` names a path under `/opt/<name>` or `/etc/<name>`, a trailing `/`
+  for a directory; a service restarts on failure unless it says otherwise.
+  Every ELF file an image holds that a loader maps is dynamically linked;
+  every one outside `lib/` is a program, loaded through `/lib/ld-slopos.so.1`
+  and needing `libc.so`, so a static PIE is refused wherever it could run
+  from; each needs nothing but `libc.so` and libraries in the image's `/lib`,
+  found through soname links there, and binds only what those export, read
+  from its section headers. SSHSIG blobs carry an empty reserved field.
 
 ## Constraints
 
