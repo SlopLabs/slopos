@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const SHT_DYNAMIC: u32 = 6;
+const SHT_NOBITS: u32 = 8;
 const SHT_DYNSYM: u32 = 11;
 const DT_NULL: u64 = 0;
 const DT_NEEDED: u64 = 1;
@@ -143,8 +144,7 @@ impl<'a> Sections<'a> {
         let header = span(self.elf, self.offset + index * SHDR_LEN, SHDR_LEN)?;
         let kind = u32_at(header, 4)?;
         let size = usize_at(header, 32)?;
-        // A NOBITS section takes no room in the file.
-        let data = if kind == 8 {
+        let data = if kind == SHT_NOBITS {
             &[][..]
         } else {
             span(self.elf, usize_at(header, 24)?, size)?

@@ -1,14 +1,8 @@
-//! Extensions installed end to end, through `/bin/extctl` and the privd init
-//! started: what a first install asks and grants, what a trusted key's
-//! signature lets in unasked, the version floor and a rollback's refusal, a
-//! person's disable holding against a key's update, a key's removal or
-//! lowered ceiling stopping what it let in, the symbol check and the name
-//! grammar, and the store the kernel keeps uncovered.
-//!
-//! The runner hands this binary every capability as uid 0, which privd's
-//! `root` admits unasked; the session's requests run in children at uid
-//! 1000 holding nothing. A test boot runs no compositor, so a request that
-//! needs the person is refused for want of anyone to ask.
+//! Extensions installed end to end through `/bin/extctl` and privd. The
+//! binary runs as uid 0 holding everything, which privd's `root` admits
+//! unasked; the session's requests run in children at uid 1000 holding
+//! nothing, and a test boot runs no compositor, so one that needs the person
+//! is refused for want of anyone to ask.
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -541,9 +535,9 @@ fn a_reserved_name_is_refused() -> bool {
         && (!Path::new(&format!("{STORE}/bin")).exists() || fail("the store holds bin"))
 }
 
-/// The store is sealed, so not even uid 0 holding `DacOverride` adds to it,
-/// and the kernel keeps it: no rename moves it or the directory it is in, no
-/// mount covers it, and a record nobody sealed is not believed.
+/// The store is sealed, so nothing goes in without unsealing it, the kernel
+/// keeps it, so no rename moves it or the directory it is in and no mount
+/// covers it, and a record nobody sealed is not believed.
 fn the_store_is_sealed_and_kept_where_it_is() -> bool {
     if !sealed(STORE) {
         return fail("the store is not sealed");

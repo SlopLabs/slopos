@@ -602,53 +602,59 @@ paths those they have below `/opt/<name>`, under `bin/`, `libexec/`, `lib/`
 and `share/` alone, naming itself in `/.extension/release` and what it asks
 for in `/.extension/declare` (`slopos_extension_core::declare`). What it is
 granted is the capabilities its services and actions hold, the actions a
-person reaches unasked (`allow user`, `user alone` or a `program`), its users
-and its commands, none of which another extension declares. A first install's
-command line names the image's SHA-256 and that grant, which `extctl install
-<image>` writes out in the requester and the person approving it reads, and
-the mechanism runs only that form, refusing an image that asks for other than
-the line; `install-signed`, which the session
-runs unasked, takes an image whose sidecar — name, version, SHA-256 — a key
-in the store's `keys` signed with `ssh-keygen -Y sign -n extension@slopos`,
-and holds the grant to that key's ceiling and the unasked actions to its
-`user` ceiling; it leaves an extension the person disabled disabled, and
-puts back one the person removed only as a first install. Every grant sits
-under the base's ceiling,
+person reaches unasked (`allow user`, `user alone`, `admin` or a `program`),
+its users and its commands, none of which another extension declares. A
+first install's command line names the image's SHA-256 and that grant, which
+`extctl install <image>` writes out in the requester and the person approving
+it reads, and the mechanism runs only that form, refusing an image that asks
+for other than the line; the requester first holds every request to the
+store as it reads it, so the person is asked only about what would go in.
+`install-signed`, which the session runs unasked, takes an image whose
+sidecar — name, version, SHA-256 — a key in the store's keys signed with
+`ssh-keygen -Y sign -n extension@slopos`, and holds the grant to that key's
+ceiling and the unasked actions to its `user` ceiling; it leaves an extension
+the person disabled disabled, and puts back one the person removed only as a
+first install. Every grant sits under the base's ceiling,
 `/usr/share/slopos/privd/extensions` (`assets/privd/extensions`), which never
-names what `ceiling::NEVER` lists, and every program of the image is linked
-through `/lib/ld-slopos.so.1` against `libc.so` and the image's own `/lib`,
-binding only what they export (`slopos_extension_core::symbols`): every ELF
-file outside `lib/` is a program, so a static PIE is refused, and a symlink's
-target is relative and never climbs through `..`, so it stays in the image. A
-record
-keeps a version floor — an older version is refused, the same one with other
-bytes too — and the key whose updates go in unasked; any other update is a
-first install. `rollback` makes the previous image current, lowers the floor
-to it and refuses the version it left to a signed install until a newer one
-goes in, and `remove` keeps the record. Every activation (`enable`,
-`rollback`, `activate-all`, and a key's change, which holds what it signed to
-the keys anew) holds the stored image to its record, its key and both
-ceilings again, and stops one that no longer fits, saying why in its record;
-an update that will not activate leaves the record as it was and what ran
-before running. The store is `slopos_abi::fs::EXTENSION_STORE`: `keys.<n>`,
-and per extension `record.<n>` and its images named by digest. Only a sealed
-file is believed, and a writer seals each through the descriptor it wrote and
-reads it back, so `DacOverride` without `Seal` neither rewrites a record nor
-plants a key. Nothing is renamed: a record or the keys go in as the next
-generation, the newest sealed one is believed, and a writer then takes away
-the older ones and what the record does not name, so a writer cut off
-anywhere leaves either. Writers lock `EXTENSION_STORE.lock` (mode 0600) and
-ignore the termination signals privd relays; readers take nothing. The kernel
-keeps it where it is (`slopos_abi::fs::KEPT_DIRS`): at boot it makes the
-store and each directory on the way to it and holds them by identity, so no
-rename or removal moves one (`EBUSY`), and `mount(2)` refuses a target at,
-above or beneath it (`EPERM`). The mechanism reads the files a request names
-as uid 0 without `DacOverride`, so only what uid 0 may read by mode goes in.
-A RAM root keeps a seal for good, so extensions need a disk root.
-`just extension DIR` packs one on the host (`tools/extension`), signing its
-sidecar with `EXTENSION_KEY`, and `scripts/remote.py install --extension`
-installs it on a paired machine. Nothing yet runs `extctl activate-all` at
-boot, so an activation lasts the boot it was made in.
+names what `ceiling::NEVER` lists. A program the declaration names lives
+outside the image's `lib/`, and every ELF file outside `lib/` is a program:
+linked through `/lib/ld-slopos.so.1` against `libc.so` and libraries in the
+image's `lib/`, found through soname links there, binding only what they
+export (`slopos_extension_core::symbols`), so a static PIE is refused. A
+symlink's target is relative and never climbs through `..`, so it stays in
+the image, and `tools/extension` packs git's modes — 0755 for a directory or
+an executable, 0644 otherwise — so an image is its tree's and not its
+umask's. A record keeps a version floor — an older version is refused, the
+same one with other bytes too — and the key whose updates go in unasked; any
+other update is a first install. `rollback` makes the previous image current
+once it still fits, lowers the floor to it and refuses the version it left
+to a signed install until a newer one goes in, and `remove` keeps the record.
+Every activation (`enable`, `rollback`, `activate-all`, and a key's change,
+which holds what it signed to the keys anew) holds the stored image to its
+record, its key and both ceilings again, and stops one that no longer fits,
+saying why in its record; an update or rollback that will not activate
+leaves the record as it was. The store is `slopos_abi::fs::EXTENSION_STORE`:
+`keys.<n>`, and per extension `record.<n>` and its images named by digest.
+Only a sealed file is believed, and a writer seals each through the
+descriptor it wrote and reads it back, held to one name, so `DacOverride`
+without `Seal` neither rewrites a record nor plants a key. Nothing is
+renamed: a record or the keys go in as the next generation, the newest sealed
+one is believed, and a writer then takes away the older ones and what the
+record does not name, so a writer cut off anywhere leaves either. Writers
+lock `EXTENSION_STORE.lock` (mode 0600) and ignore the termination signals
+privd relays; readers take nothing. The kernel keeps it where it is
+(`slopos_abi::fs::KEPT_DIRS`): once the root and the `mount=` volumes are
+mounted, so a `/var` of its own holds the store, it makes the store and each
+directory on the way to it and holds them by identity, so no rename or
+removal moves one (`EBUSY`), and `mount(2)` refuses a target at, above or
+beneath it (`EPERM`) — `/var` itself among them. The mechanism reads the
+files a request names as uid 0 without `DacOverride`, so only what uid 0 may
+read by mode goes in. A RAM root keeps a seal for good, so extensions need a
+disk root. `just extension DIR` packs one on the host (`tools/extension`),
+signing its sidecar with `EXTENSION_KEY`, and `scripts/remote.py install
+--extension` installs it on a paired machine, refusing a sidecar that names
+another image. Nothing yet runs `extctl activate-all` at boot, so an
+activation lasts the boot it was made in.
 
 **A base names the interface it needs; a kernel names the ones it serves.**
 `slopos_abi::BASE_INTERFACE` numbers the private call surface: every private

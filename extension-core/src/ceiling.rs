@@ -19,10 +19,6 @@ pub const NEVER: u64 = caps::BASE_UPDATE
     | caps::DISPLAY_SEAT
     | caps::INPUT_SEAT;
 
-/// What can rewrite or cover the root, and so is the whole machine: a
-/// question or a key's ceiling naming one says so.
-pub const FULL_CONTROL: u64 = caps::RAW_BLOCK | caps::MOUNT | caps::DAC_OVERRIDE;
-
 pub fn parse(text: &str) -> Result<u64, LineError> {
     let mut ceiling = None;
     for (line, indented, keyword, rest) in lines(text) {

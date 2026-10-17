@@ -134,13 +134,16 @@ pub enum Level {
 
 impl Action {
     /// Whether a person's processes may run it unasked: it allows `user`
-    /// with no level or `alone`, which one person logged in always is, or a
-    /// program, which any person may run.
+    /// with no level or `alone`, which one person logged in always is,
+    /// `admin` with no level, which that person is, or a program, which any
+    /// person may run.
     pub fn unasked(&self) -> bool {
         self.allows.iter().any(|a| {
             matches!(
                 (&a.principal, a.level),
-                (Principal::User, Level::None | Level::Alone) | (Principal::Program(_), _)
+                (Principal::User, Level::None | Level::Alone)
+                    | (Principal::Admin, Level::None)
+                    | (Principal::Program(_), _)
             )
         })
     }
@@ -399,11 +402,20 @@ fn canonical(path: &str, dir: bool) -> bool {
 }
 
 /// A file of the image, by the path it has at `/opt/<name>`.
-fn own_program(name: &str, path: &str) -> bool {
+fn own_file(name: &str, path: &str) -> bool {
     canonical(path, false)
         && path
             .strip_prefix(&mount_point(name))
             .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A file of the image outside its `lib/`, where every ELF file is held to
+/// the base's interpreter and `libc.so`.
+fn own_program(name: &str, path: &str) -> bool {
+    own_file(name, path)
+        && !path
+            .strip_prefix(&format!("{}/lib", mount_point(name)))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 enum Block {
@@ -454,7 +466,7 @@ impl ServiceDraft {
             "program" => {
                 let path = single(rest)
                     .filter(|p| own_program(name, p))
-                    .ok_or("program is a file of the image, under /opt/<name>")?;
+                    .ok_or("program is a file of the image outside its lib/, under /opt/<name>")?;
                 once(&mut self.program, path.to_string())
             }
             "args" => {
@@ -481,7 +493,7 @@ impl ServiceDraft {
                 let path = single(rest).ok_or("reads names one path")?;
                 let dir = path.ends_with('/');
                 let config = format!("/etc/{name}");
-                let ours = own_program(name, path.trim_end_matches('/'))
+                let ours = own_file(name, path.trim_end_matches('/'))
                     || path.trim_end_matches('/') == config
                     || path.starts_with(&format!("{config}/"));
                 if !canonical(path, dir) || !ours {
@@ -593,7 +605,7 @@ impl ActionDraft {
             "program" => {
                 let path = single(rest)
                     .filter(|p| own_program(name, p))
-                    .ok_or("program is a file of the image, under /opt/<name>")?;
+                    .ok_or("program is a file of the image outside its lib/, under /opt/<name>")?;
                 once(&mut self.program, path.to_string())
             }
             "args" => {
@@ -636,6 +648,13 @@ impl ActionDraft {
     }
 
     fn finish(self) -> Result<Action, &'static str> {
+        if self
+            .name
+            .split('.')
+            .any(|word| word.starts_with(|c: char| c.is_ascii_digit()))
+        {
+            return Err("privd names no action by a word that starts with a digit");
+        }
         if !policy::valid_name(&self.name) {
             return Err("the action's whole name is too long for privd");
         }

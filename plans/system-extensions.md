@@ -195,8 +195,9 @@ named as `slopos_abi::caps` names them.
   action holds what it declares, intersected with the grant.
 - **For a signed install**, the grant is the declaration, held inside the
   key's ceiling.
-- **An unasked action**, one that allows `user` with no level or `alone`, or
-  a `program`, hands its capabilities to every person's processes. It counts against a key's
+- **An unasked action**, one that allows `user` with no level or `alone`,
+  `admin` with no level, or a `program`, hands its capabilities to every
+  person's processes. It counts against a key's
   separate `user` ceiling, empty by default, and it is named in a first
   install's grant line.
 - **The base's ceiling**, `/usr/share/slopos/privd/extensions`, sealed in the
@@ -617,7 +618,9 @@ own, all building on extensions:
 - **The kernel keeps the store; the store keeps its seal.** The store,
   `/var/lib/slopos/extensions`, and each directory on the way to it are held
   by the kernel from boot (`slopos_abi::fs::KEPT_DIRS`): no rename or removal
-  moves one, and no mount covers one, one above it or anything beneath it.
+  moves one, and no mount covers one, one above it or anything beneath it —
+  `/var` itself among them — so they are held only once the root and the
+  `mount=` volumes are mounted, and a `/var` of its own holds the store.
   Only the store and what it holds are sealed, so the rest of `/var` stays
   writable, and nothing unsealed in it is believed: a file there that no
   `Seal` holder sealed is no record and no key. A RAM root keeps a seal for
@@ -653,7 +656,8 @@ own, all building on extensions:
 - **Unasked is what any person reaches unasked.** An action counts toward a
   key's `user` ceiling and the grant's `unasked` list when it allows `user`
   with no level or `alone` — one person logged in, which this system always
-  is — or a `program`, which any person may run.
+  is — `admin` with no level, which that person is, or a `program`, which any
+  person may run.
 - **A person's word outlasts a key's.** A signed update of an extension the
   person disabled goes in disabled; one the person removed goes back in only
   as a first install. A stop a check made is no person's word, so a fitting
@@ -681,12 +685,18 @@ own, all building on extensions:
   action's exclusive group is the extension's own, `ext.<name>.<group>`;
   `reads` names a path under `/opt/<name>` or `/etc/<name>`, a trailing `/`
   for a directory; a service restarts on failure unless it says otherwise.
-  Every ELF file an image holds that a loader maps is dynamically linked;
-  every one outside `lib/` is a program, loaded through `/lib/ld-slopos.so.1`
-  and needing `libc.so`, so a static PIE is refused wherever it could run
-  from; each needs nothing but `libc.so` and libraries in the image's `/lib`,
-  found through soname links there, and binds only what those export, read
-  from its section headers. SSHSIG blobs carry an empty reserved field.
+  Every ELF file an image holds that a loader maps is dynamically linked; a
+  program the declaration names lives outside `lib/`, and every ELF file
+  outside `lib/` is a program, loaded through `/lib/ld-slopos.so.1` and
+  needing `libc.so`, so a static PIE is refused wherever it could run from;
+  each needs nothing but `libc.so` and libraries in the image's `/lib`, found
+  through soname links there, and binds only what those export, read from
+  its section headers. An image carries git's modes, so it is its tree's and
+  not its packer's umask's. SSHSIG blobs carry an empty reserved field.
+- **The person is asked only about what would go in.** The requester holds a
+  request to the store as it reads it — the image, its grant, the floor, the
+  ceilings, the symbols, the clashes, a rollback's fit — before privd asks,
+  and the mechanism holds it again with the store locked.
 
 ## Constraints
 
