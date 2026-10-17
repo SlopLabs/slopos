@@ -114,7 +114,12 @@
 # privd while the base again is staged, so both are resident at the peak; the
 # second stays for the rest of the suite. Then 53102 and 52622 in two captures
 # once extensions were activated beside the base, which carries what the kernel
-# phase's extension tests leave allocated.
+# phase's extension tests leave allocated. Then 57719 and 57729 in two
+# captures on a host without KVM once extensions went in through extctl:
+# `extension_test` ends the phase holding 3674 pages more than `dac_test` in
+# its place on otherwise identical filtered boots (7353 against 3679), the
+# heap its images in /tmp's RAM filesystem, its activations' copies and some
+# sixty extctl runs grew, and the suite with it skipped measured 54210.
 # The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
@@ -157,7 +162,7 @@ post-userland-tests	commitpages	193853
 post-userland-tests	custody	12
 post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	53102
+post-userland-tests	kernelmeta	57729
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
