@@ -50,10 +50,15 @@ fn set_sealed(file: &File, sealed: bool) -> Result<(), String> {
     } else {
         flags & !FS_IMMUTABLE_FL
     };
-    if want != flags {
-        sys_fs::set_inode_flags(file.as_raw_fd(), want).map_err(|e| e.to_string())?;
+    match sys_fs::set_inode_flags(file.as_raw_fd(), want) {
+        _ if want == flags => Ok(()),
+        Ok(()) => Ok(()),
+        Err(crate::syscall::SyscallError::EOPNOTSUPP) => Err(
+            "a filesystem that keeps a seal for good, as a RAM root does; extensions need a disk root"
+                .into(),
+        ),
+        Err(e) => Err(e.to_string()),
     }
-    Ok(())
 }
 
 /// The entry at `path`, never followed: a file or a directory.
