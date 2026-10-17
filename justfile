@@ -314,6 +314,10 @@ _initramfs-tests: _build-userland-tests _base-recipes
     COREUTILS_LINKS="{{coreutils_tools}}" EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" {{base_recipe_env}} \
         scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
+[doc("Pack the extension laid out in DIR (bin/, libexec/, lib/, share/ and .extension/{release,declare}) into builddir/extensions/<name>.ext and its sidecar <name>.meta, checked as extctl checks an install against this build's libc.so. EXTENSION_KEY names an SSH Ed25519 key to sign the sidecar with, for `extctl install-signed`; `scripts/remote.py install --extension` installs it on a paired machine")]
+extension DIR: _build-userland
+    scripts/build_extension.sh "{{DIR}}" "{{build_dir}}/extensions" "{{build_dir}}/libc.so"
+
 # The host's half of a kernel build around scripts/build_kernel.sh, which the
 # guest runs alone: the toolchain before, the ELF gates after. `+slopos`, the
 # owned sysroot inside the checkout, so std's sources sit at the same
@@ -1400,9 +1404,9 @@ test-remote: _build-userland _base-recipes
     fi
     echo "test-remote: identity, commands, files, kernel log, the sealed pairing, install and power-off all held"
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, http-core, remote-core, priv-core, fat-core, boot-core, tree-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, http-core, remote-core, priv-core, fat-core, boot-core, tree-core, extension-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, extension, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-http-core -p slopos-remote-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-http-core -p slopos-remote-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

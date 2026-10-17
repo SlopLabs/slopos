@@ -61,6 +61,7 @@ members = [
   "hermetic",
   "verification",
   "tools/bootdisk",
+  "tools/extension",
   "tools/initramfs",
   "tools/kallsyms"
 ]

@@ -235,6 +235,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-extension"
+version = "0.1.0"
+dependencies = [
+ "slopos-extension-core",
+]
+
+[[package]]
 name = "slopos-extension-core"
 version = "0.1.0"
 dependencies = [

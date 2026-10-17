@@ -1,0 +1,20 @@
+[package]
+name = "slopos-extension"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "An extension packed from the directory it is laid out in and checked as an install checks it, on the host"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "extension"
+path = "src/main.rs"
+
+[dependencies]
+slopos-extension-core = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+slopos-extension-core = { workspace = true, features = ["std", "test-elf"] }
