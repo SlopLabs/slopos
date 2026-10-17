@@ -569,7 +569,8 @@ verified images carry a system of their own, which a disk root's base
 covers.
 
 **An extension is shown beside the base.** `ext_activate(name, archive, len,
-digest)` (`ExtensionUpdate`, which only init and the utests hold) copies a
+digest)` (`ExtensionUpdate`, which init, privd, the utests and the
+mechanisms of privd's extension actions hold) copies a
 `newc` archive as `base_activate` does and shows it read-only and
 `MOUNT_PINNED` at `/opt/<name>`, in place of the activation shown there in one
 step under the mount table's lock (`vfs::mount::mount_replacing`), keeping the
@@ -592,6 +593,50 @@ for the sum), and the mount table grew by the pool's 32 mounts. Under
 `extensions=off` (`BOOT_FLAG_EXTENSIONS_OFF` in `sys_info`) `ext_activate`
 answers `EPERM`. Its log lines are `EXT: activation <n> is <name>`, `EXT:
 <name> deactivated` and `EXT: activation <n> freed`.
+
+**An extension goes in by its owner's word.** `/bin/extctl` (privd's
+`org.slopos.extension.*` actions, run as uid 0 with `ExtensionUpdate` and
+`Seal`) installs an image `slopos_extension_core::image` holds to a base's
+shape: a `newc` archive sealed by its `/.extension/manifest`, its records'
+paths those they have below `/opt/<name>`, under `bin/`, `libexec/`, `lib/`
+and `share/` alone, naming itself in `/.extension/release` and what it asks
+for in `/.extension/declare` (`slopos_extension_core::declare`). What it is
+granted is the capabilities its services and actions hold, the actions every
+person runs unasked, its users and its commands. A first install's command
+line names the image's SHA-256 and that grant, which `extctl install <image>`
+writes out and the person approving it reads, and the mechanism refuses an
+image that asks for other than the line; `install-signed`, which the session
+runs unasked, takes an image whose sidecar — name, version, SHA-256 — a key
+in the store's `keys` signed with `ssh-keygen -Y sign -n extension@slopos`,
+and holds the grant to that key's ceiling and the unasked actions to its
+`user` ceiling. Every grant sits under the base's ceiling,
+`/usr/share/slopos/privd/extensions` (`assets/privd/extensions`), which never
+names what `ceiling::NEVER` lists, and every program of the image is linked
+through `/lib/ld-slopos.so.1` against `libc.so` and the image's own `/lib`,
+binding only what they export (`slopos_extension_core::symbols`). A record
+keeps a version floor — an older version is refused, the same one with other
+bytes too — and the key whose updates go in unasked; any other update is a
+first install. `rollback` makes the previous image current, lowers the floor
+to it and refuses the version it left to a signed install until a newer one
+goes in, and `remove` keeps the record. Every activation (`enable`,
+`rollback`, `activate-all`, and a key's change, which holds what it signed to
+the keys anew) holds the stored image to its record, its key and both
+ceilings again, and stops one that no longer fits, saying why in its record.
+The store is `slopos_abi::fs::EXTENSION_STORE`: `keys`, and per extension its
+`record` and its images named by digest, so a record replaced whole is the
+one commit. Every file and directory in it is sealed and nothing unsealed is
+believed, so `DacOverride` without `Seal` neither rewrites a record nor
+plants a key; a writer takes away what the record does not name. The kernel
+keeps it where it is (`slopos_abi::fs::KEPT_DIRS`): at boot it makes the
+store and each directory on the way to it and holds them by identity, so no
+rename or removal moves one (`EBUSY`), and `mount(2)` refuses a target at,
+above or beneath it (`EPERM`). The mechanism reads the files a request names
+as uid 0 without `DacOverride`, so only what uid 0 may read by mode goes in.
+A RAM root keeps a seal for good, so extensions need a disk root.
+`just extension DIR` packs one on the host (`tools/extension`), signing its
+sidecar with `EXTENSION_KEY`, and `scripts/remote.py install --extension`
+installs it on a paired machine. Nothing yet runs `extctl activate-all` at
+boot, so an activation lasts the boot it was made in.
 
 **A base names the interface it needs; a kernel names the ones it serves.**
 `slopos_abi::BASE_INTERFACE` numbers the private call surface: every private
@@ -1269,7 +1314,8 @@ immutable flag is the VFS seal, an append-only file another system marked is
 sealed too, ext4 also stores `nodump` and `noatime`, any other change is
 `EOPNOTSUPP` (a RAM filesystem keeps only the seal, and only sets it), and
 moving the seal takes the `Seal` capability, which only init, privd, the
-utests and the installer hold: the seal holds the base whole — every base
+utests and the mechanisms privd runs with it — the installer, the rescue
+shell and `extctl` — hold: the seal holds the base whole — every base
 inode is sealed for good, and the directories a root keeps for it are sealed
 too — and privd's program identity rests on the base being what booted or
 what a `BaseUpdate` holder activated since.
