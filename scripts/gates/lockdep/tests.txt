@@ -441,9 +441,20 @@ require-phase post-userland-tests
 #               cap adds the named classes to the recorded count. Every
 #               banded pool stayed inside its band (kernel edges 200, chains
 #               460; userland edges 265, chains 546).
+#   2026-10-17  kernel 262 -> 265, userland 278 -> 280: extensions activated
+#               beside the base (`plans/system-extensions.md` phase 1). The
+#               kernel phase's extension tests take `EXT_ACTIVATING`,
+#               `BASEFS_REAP_PASS`, and start the reaper, so
+#               `BASEFS_REAP_STOP.waiters` registers there rather than in the
+#               userland phase; the userland phase adds no class. Two
+#               captures without KVM count 264/279 against the parent's
+#               261/277, and each cap adds the named classes to the recorded
+#               count. Every banded pool stayed inside its band (kernel edges
+#               199 and 202, chains 458 and 459; userland edges 265 and 266,
+#               chains 543 and 543).
 boot	classes	105
-post-kernel-tests	classes	262
-post-userland-tests	classes	278
+post-kernel-tests	classes	265
+post-userland-tests	classes	280
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
