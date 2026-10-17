@@ -449,6 +449,17 @@ static IDLE_SEQ: AtomicU32 = AtomicU32::new(0);
 /// device round trip.
 const READAHEAD_PAGES: u64 = 32;
 
+/// Whether `inode` is sealed, read under its stripe: `seal_unmapped` seals
+/// under it too, so a seal is seen here or comes after whatever the holder
+/// does to the set, which its sealer then reads back.
+fn sealed_under(
+    _stripe: &slopos_ostd::sync::MutexGuard<'static, ()>,
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+) -> crate::vfs::VfsResult<bool> {
+    Ok(fs.stat(inode)?.sealed)
+}
+
 fn io_lock(inode: InodeId) -> Result<slopos_ostd::sync::MutexGuard<'static, ()>, FileMapError> {
     let stripe = ((inode as u32).wrapping_mul(0x9E37_79B9) >> 26) as usize % IO_STRIPES;
     FILEMAP_IO[stripe]
@@ -505,10 +516,8 @@ pub fn reserve_range(
     // a boot that runs no ext2 flusher, and the slot it holds would refuse
     // every later mapping.
     drain_pending();
-    // Under the stripe, which `seal_unmapped` holds across its check and the
-    // seal: either this set is seen there or the seal is seen here.
-    let _io = io_lock(inode)?;
-    if writable && fs.stat(inode).map_err(|_| FileMapError::Io)?.sealed {
+    let io = io_lock(inode)?;
+    if writable && sealed_under(&io, fs, inode).map_err(|_| FileMapError::Io)? {
         return Err(FileMapError::WriteRefused);
     }
     reserve_slot(fs, inode, first_page, page_count, writable, owner)
@@ -1164,7 +1173,7 @@ pub fn seal_unmapped(
     inode: InodeId,
     seal: impl FnOnce() -> crate::vfs::VfsResult<()>,
 ) -> crate::vfs::VfsResult<()> {
-    let _io = io_lock(inode).map_err(|_| crate::vfs::VfsError::Interrupted)?;
+    let _stripe = io_lock(inode).map_err(|_| crate::vfs::VfsError::Interrupted)?;
     let mapped = {
         let sets = FILEMAP.lock();
         find_set(sets.as_slice(), fs, inode)
@@ -1839,16 +1848,12 @@ pub fn write_through(
     }
     // Ordered against an in-flight fault, whose read would otherwise land over
     // a write that arrived mid-read.
-    let Ok(_io) = io_lock(inode) else {
+    let Ok(io) = io_lock(inode) else {
         return WriteThrough::Interrupted;
     };
-    // Under the stripe `seal_unmapped` seals under: a seal is seen here, or
-    // these bytes land before it and its sealer reads them back.
-    match fs.stat(inode) {
-        Ok(stat) if stat.sealed => {
-            return WriteThrough::Refused(crate::vfs::VfsError::PermissionDenied);
-        }
-        Ok(_) => {}
+    match sealed_under(&io, fs, inode) {
+        Ok(true) => return WriteThrough::Refused(crate::vfs::VfsError::PermissionDenied),
+        Ok(false) => {}
         Err(e) => return WriteThrough::Refused(e),
     }
     let mut sets = FILEMAP.lock();
