@@ -102,6 +102,13 @@ fn a_blob_out_of_shape_is_refused() {
         .windows(6)
         .position(|w| w == b"sha512")
         .expect("hash name");
+    let mut reserved = blob.clone();
+    reserved[at - 5] = 1;
+    reserved.insert(at - 4, b'x');
+    assert_eq!(
+        verify(&rearmor(&reserved), NAMESPACE, b"abc"),
+        Err(Error::Malformed)
+    );
     let mut hash = blob.clone();
     hash[at + 5] = b'1';
     assert_eq!(

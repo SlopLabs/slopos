@@ -198,7 +198,9 @@ pub fn verify(armored: &[u8], namespace: &str, message: &[u8]) -> Result<PublicK
     }
     let key = PublicKey(typed(r.string()?)?);
     let signed_under = r.string()?;
-    r.string()?;
+    if !r.string()?.is_empty() {
+        return Err(Error::Malformed);
+    }
     let hash = HashAlgorithm::of(r.string()?).ok_or(Error::HashAlgorithm)?;
     let signature: [u8; ed25519::SIGNATURE_LEN] = typed(r.string()?)?;
     r.end()?;
