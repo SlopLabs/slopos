@@ -68,7 +68,8 @@ pub const DELEGABLE: u64 = caps::POWER
     | caps::SEAL
     | caps::BOOT_ENTRY
     | caps::DAC_OVERRIDE
-    | caps::BASE_UPDATE;
+    | caps::BASE_UPDATE
+    | caps::EXTENSION_UPDATE;
 
 /// Every capability, by the name `slopos_ostd::authority::Capability` gives
 /// it.

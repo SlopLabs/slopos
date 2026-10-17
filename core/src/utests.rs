@@ -149,6 +149,7 @@ crate::utest!(
 );
 crate::utest!(name = utest_peer, bin = "/bin/peer_test");
 crate::utest!(name = utest_privd, bin = "/bin/privd_test");
+crate::utest!(name = utest_extension, bin = "/bin/extension_test");
 crate::utest!(name = utest_supervision, bin = "/bin/supervision_test");
 crate::utest!(name = utest_live_base, bin = "/bin/live_base_test");
 crate::utest!(name = utest_fifo, bin = "/bin/fifo_test");

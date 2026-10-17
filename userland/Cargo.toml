@@ -50,6 +50,10 @@ name = "tree-install"
 path = "src/bin/tree-install.rs"
 
 [[bin]]
+name = "extctl"
+path = "src/bin/extctl.rs"
+
+[[bin]]
 name = "session"
 path = "src/bin/session.rs"
 
@@ -319,6 +323,11 @@ name = "privd_test"
 path = "src/bin/tests/privd_test.rs"
 
 [[bin]]
+name = "extension_test"
+path = "src/bin/tests/extension_test.rs"
+required-features = ["testbins"]
+
+[[bin]]
 name = "supervision_test"
 path = "src/bin/tests/supervision_test.rs"
 
@@ -389,7 +398,11 @@ path = "src/bin/tests/cxx_test.rs"
 
 [features]
 default = []
-testbins = ["slopos-tls-core/test-server", "dep:slopos-apps"]
+testbins = [
+  "slopos-tls-core/test-server",
+  "slopos-extension-core/test-elf",
+  "dep:slopos-apps",
+]
 
 [dependencies]
 slopos-abi = { workspace = true }
@@ -404,6 +417,7 @@ slopos-ext4-core = { workspace = true }
 slopos-cpufreq-core = { workspace = true }
 slopos-fat-core = { workspace = true }
 slopos-tree-core = { workspace = true }
+slopos-extension-core = { workspace = true, features = ["std"] }
 slopos-keymap-core = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-net-core = { workspace = true }

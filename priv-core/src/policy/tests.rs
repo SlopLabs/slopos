@@ -405,6 +405,7 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         "org.slopos.kconsole",
         "org.slopos.prof",
         "org.slopos.console.keymap",
+        "org.slopos.extension.",
     ];
     for action in policy.actions() {
         assert_eq!(action.uid, 0, "{}", action.name);
@@ -505,6 +506,51 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     assert_eq!(rescue.admits(&session), Verdict::Ask);
     assert!(rescue.accepts(&args_of(&["--rescue"])));
     assert!(!rescue.accepts(&args_of(&["--rescue", "-c", "id"])));
+}
+
+/// The extension actions hold what changes the store and the activations
+/// and nothing that could rewrite or cover the root; only a signed install
+/// goes in for the session unasked, and they run one at a time.
+#[test]
+fn the_extension_actions_hold_the_store_and_nothing_wider() {
+    let policy = Policy::parse(SHIPPED).unwrap();
+    let session = Requester::new(SESSION_UID, Some("/bin/shell"), false);
+    let names = [
+        (
+            "org.slopos.extension.install",
+            Verdict::Ask,
+            &["install", "/x.ext"][..],
+        ),
+        (
+            "org.slopos.extension.install-signed",
+            Verdict::Run,
+            &["install-signed", "/x.ext"],
+        ),
+        (
+            "org.slopos.extension.trust",
+            Verdict::Ask,
+            &["key", "remove", "SHA256:x"],
+        ),
+        (
+            "org.slopos.extension.manage",
+            Verdict::Ask,
+            &["rollback", "x"],
+        ),
+    ];
+    for (name, for_session, args) in names {
+        let action = policy.action(name).unwrap();
+        assert_eq!(action.program, "/bin/extctl", "{name}");
+        assert_eq!(action.caps, caps::EXTENSION_UPDATE | caps::SEAL, "{name}");
+        assert_eq!(action.admits(&session), for_session, "{name}");
+        assert_eq!(action.exclusive_group(), Some("extensions"), "{name}");
+        assert!(action.accepts(&args_of(args)), "{name}");
+    }
+    let manage = policy.action("org.slopos.extension.manage").unwrap();
+    assert!(!manage.accepts(&args_of(&["install", "x"])));
+    assert_eq!(
+        policy.action("org.slopos.rescue").unwrap().caps & caps::EXTENSION_UPDATE,
+        caps::EXTENSION_UPDATE
+    );
 }
 
 fn args_of<'a>(words: &[&'a str]) -> Vec<&'a [u8]> {
