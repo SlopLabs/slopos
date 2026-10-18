@@ -101,6 +101,11 @@ pub fn runtime_dir() -> String {
     format!("/run/user/{SESSION_UID}")
 }
 
+/// The session's command search path: the system's directories first, then
+/// the person's own `~/.local/bin` ahead of what `DEFAULT_PATH` puts after
+/// them.
+pub const SESSION_PATH: &str = "/bin:/sbin:/home/user/.local/bin:/usr/local/bin:/opt/bin";
+
 /// What every program the session starts finds in its environment.
 pub fn session_env() -> [String; 4] {
     [
@@ -142,6 +147,7 @@ pub fn start(service: &Service, fds: &[(RawFd, RawFd)]) -> Option<Child> {
     let argv: Vec<*const u8> = argv.iter().map(|arg| arg.as_ptr().cast()).collect();
     let env: Vec<CString> = session_env()
         .into_iter()
+        .chain([format!("PATH={SESSION_PATH}")])
         .map(|var| CString::new(var).expect("no NUL in the session's environment"))
         .collect();
     let (envp, cwd, ids): (Vec<*const u8>, &str, _) = if service.session {

@@ -21,9 +21,6 @@ use crate::privd;
 use crate::syscall::process;
 use crate::tls;
 
-/// A child's whole environment, besides what the request adds.
-const DEFAULT_PATH: &str = "/bin:/sbin:/usr/local/bin";
-
 pub(super) fn serve(link: &Link, (request, payload): Frame) {
     let result = Fields::decode(&payload)
         .map_err(|e| e.to_string())
@@ -77,7 +74,10 @@ fn exec(link: &Link, fields: &Fields) -> Result<(), String> {
         Some(_) => absolute(fields, "cwd")?,
         None => "/",
     };
-    let mut env: Vec<(&OsStr, &OsStr)> = vec![(OsStr::new("PATH"), OsStr::new(DEFAULT_PATH))];
+    let mut env: Vec<(&OsStr, &OsStr)> = vec![(
+        OsStr::new("PATH"),
+        OsStr::from_bytes(slopos_abi::fs::DEFAULT_PATH.to_bytes()),
+    )];
     for pair in fields.all("env") {
         let at = pair
             .iter()

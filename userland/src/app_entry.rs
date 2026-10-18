@@ -2,9 +2,12 @@
 //! `key=value` naming the app's `id`, its `name`, the program it `exec`s and
 //! an `icon`, a PNG in the same tree's `share/slopos/icons/`.
 //!
-//! Entries are read from the base's `/usr/share`, then `/usr/local/share`,
-//! then the person's `~/.local/share`; a later entry replaces an earlier one
-//! with the same id, as the XDG data directories rank.
+//! Entries are read from the `share` of each extension shown at
+//! `/opt/<name>`, by name, then the base's `/usr/share`, then
+//! `/usr/local/share`, then the person's `~/.local/share`; a later entry
+//! replaces an earlier one with the same id, as the XDG data directories
+//! rank. An extension's entry replaces none, as its commands come last on
+//! `PATH`.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -14,14 +17,17 @@ use std::path::{Path, PathBuf};
 
 use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
+use slopos_extension_core::declare::mount_point;
 
 /// The directories holding entries, as `<share>/slopos/apps`, in the order a
 /// later one replaces an earlier one's entry.
 pub fn shares(home: Option<&str>) -> Vec<PathBuf> {
-    let mut shares = vec![
-        PathBuf::from("/usr/share"),
-        PathBuf::from("/usr/local/share"),
-    ];
+    let mut shares: Vec<PathBuf> = crate::activation::names()
+        .iter()
+        .map(|name| Path::new(&mount_point(name)).join("share"))
+        .collect();
+    shares.push(PathBuf::from("/usr/share"));
+    shares.push(PathBuf::from("/usr/local/share"));
     shares.extend(home.map(|home| Path::new(home).join(".local/share")));
     shares
 }
