@@ -1,23 +1,26 @@
 //! `/sbin/init`: lays out the root, starts the services and starts them again
-//! when they crash, ends and restarts the desktop session, and re-executes
-//! itself keeping all of that. When a new base comes in live it starts again
-//! each service the switch changed, itself included.
+//! when they crash, extensions' among them, ends and restarts the desktop
+//! session, and re-executes itself keeping all of that. When a new base comes
+//! in live it starts again each service the switch changed, itself included.
 
 mod control;
+mod extensions;
 mod reexec;
 mod service;
 mod session;
 
-use slopos_abi::caps::{POWER, RAW_BLOCK};
+use slopos_abi::caps::{EXTENSION_UPDATE, POWER, RAW_BLOCK, SEAL};
 use slopos_abi::fs::{SESSION_GID, SESSION_UID};
 use slopos_abi::net::{SOCK_CLOEXEC, SOCK_NONBLOCK};
 use slopos_abi::syscall::{
-    BOOT_FLAG_ROULETTE_SKIP, BOOT_FLAG_TESTS_ENABLED, MSG_NOSIGNAL, POLLIN, UserPollFd,
+    BOOT_FLAG_EXTENSIONS_OFF, BOOT_FLAG_ROULETTE_SKIP, BOOT_FLAG_TESTS_ENABLED, MSG_NOSIGNAL,
+    POLLIN, UserPollFd,
 };
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_font::atlas::GlyphAtlas;
 
 use self::control::{Control, Request, answer};
+use self::extensions::Units;
 use self::reexec::{RESUME, State};
 use self::service::{
     Budget, COMPOSITOR, Child, PRIVD, REMOTED, ROULETTE, RUN_TESTS, Supervised, TERMINAL, TESTS,
@@ -75,6 +78,38 @@ fn collect_crash_records() {
     }
 }
 
+/// The store's enabled extensions shown at `/opt`, each held again to its
+/// record, its key and the base's ceiling, and the user database written
+/// from the records, before privd and the services start.
+fn activate_extensions() {
+    use crate::apps::extctl::store::Store;
+    let any = Store::open(false)
+        .and_then(|store| store.names())
+        .is_ok_and(|names| !names.is_empty());
+    if !any || sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
+        return;
+    }
+    let argv = [b"extctl\0".as_ptr(), b"activate-all\0".as_ptr()];
+    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
+    let tid = process::spawn_endowed(
+        b"/bin/extctl",
+        &argv,
+        &[],
+        &[],
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &actions,
+        0,
+        Endowment {
+            caps: EXTENSION_UPDATE | SEAL,
+            ..Endowment::NONE
+        },
+    );
+    if tid > 0 {
+        let _ = process::waitpid(tid as u32);
+    }
+}
+
 /// Requests answered once the session has ended, each holding a descriptor
 /// of init's.
 const MAX_WAITING: usize = 8;
@@ -122,8 +157,9 @@ pub fn init_user_main() {
             let rc = sys_core::run_userland_tests();
             sys_core::exit_with_code(i32::from(rc != 0));
         }
+        Some(extensions::LOG) => extensions::keep_log(arg(2).unwrap_or_default()),
         Some(RESUME) => match reexec::resume(arg(2).unwrap_or_default()) {
-            Ok(state) => Init::resume(state).run(),
+            Ok(state) => Init::resume(state, reexec::resume_units(arg(3))).run(),
             Err(kept) => {
                 eprintln!(
                     "init: re-executed with no state it can read; starting the session again \
@@ -134,7 +170,7 @@ pub fn init_user_main() {
                 for fd in kept {
                     crate::syscall::memory::close(fd);
                 }
-                let mut init = Init::serving(None);
+                let mut init = Init::serving(None, reexec::resume_units(arg(3)));
                 if tests_enabled() {
                     init.tests = init_control::children(0)
                         .first()
@@ -158,9 +194,10 @@ fn boot() -> ! {
     }
     install_live_apps();
     crate::root_layout::make_runtime_dir(&runtime_dir());
+    activate_extensions();
 
     let consent = net::socketpair(SOCK_CLOEXEC | SOCK_NONBLOCK).ok();
-    let mut init = Init::serving(consent);
+    let mut init = Init::serving(consent, extensions::Carried::default());
     // Must precede anything interactive; a missing or invalid /etc/keymap
     // leaves the built-in US default active.
     crate::keymap::apply_persisted_layout();
@@ -223,6 +260,7 @@ struct Init {
     /// Uid 0 ended the session; only uid 0 starts it again.
     session_held: bool,
     tests: Option<Child>,
+    units: Units,
 }
 
 #[derive(Clone, Copy)]
@@ -234,7 +272,7 @@ enum Side {
 impl Init {
     /// Init with privd started and waited for, and remoted started where the
     /// base is paired; the session down.
-    fn serving(consent: Option<(OwnedFd, OwnedFd)>) -> Init {
+    fn serving(consent: Option<(OwnedFd, OwnedFd)>, units: extensions::Carried) -> Init {
         let control = Control::bind()
             .map_err(|why| eprintln!("init: {SOCKET}: {why}"))
             .ok();
@@ -254,6 +292,7 @@ impl Init {
             session_due: None,
             session_held: false,
             tests: None,
+            units: Units::load(sys_core::get_time_ms(), false, units),
         };
         // Waited for before anything that may ask it. An image that could not
         // resume adopts what its predecessor started.
@@ -281,7 +320,7 @@ impl Init {
         init
     }
 
-    fn resume(state: State) -> Init {
+    fn resume(state: State, units: extensions::Carried) -> Init {
         // SAFETY: the earlier image kept these descriptors for this one alone.
         let adopt = |fd: RawFd| unsafe { OwnedFd::from_raw(fd) };
         let control = match state.control {
@@ -301,6 +340,7 @@ impl Init {
                 budget,
             }
         };
+        let session = state.session.is_some();
         let init = Init {
             consent: state.consent.map(|(privd, agent)| Consent {
                 privd: adopt(privd),
@@ -323,6 +363,7 @@ impl Init {
             session_due: None,
             session_held: state.session_held,
             tests: state.tests.map(Child::watch),
+            units: Units::load(now, session, units),
         };
         if let Some(reply) = state.reply {
             answer(adopt(reply), "ok");
@@ -346,6 +387,8 @@ impl Init {
             self.step_base(now);
             self.step_remote_ending(now);
             self.step_session(now);
+            let session = self.session_runs();
+            self.units.step(now, session);
             self.drain_consent();
             self.start_due(now);
             let mut requests = self
@@ -404,6 +447,7 @@ impl Init {
             fds.push(poll(ready));
         }
         fds.extend(self.idle_consent_ends().map(poll));
+        self.units.poll_fds(fds);
         let tick: u64 = if matches!(self.session, Session::Ending(_)) {
             ENDING_TICK_MS
         } else {
@@ -418,6 +462,7 @@ impl Init {
             self.session_due,
             self.remote_ending,
             self.reexec_due.filter(|_| self.may_reexec()),
+            self.units.deadline(now),
         ]
         .into_iter()
         .flatten()
@@ -459,6 +504,7 @@ impl Init {
         .into_iter()
         .flatten()
         .chain(self.retired.iter_mut())
+        .chain(self.units.children_mut())
     }
 
     fn exited(&mut self, pid: u32, status: WaitStatus, now: u64) {
@@ -491,12 +537,16 @@ impl Init {
         {
             ending.compositor = None;
             self.reset_consent(Side::Privd);
+        } else {
+            let session = self.session_runs();
+            self.units.exited(pid, status, now, session);
         }
     }
 
     /// Start again what a new base changed: privd, which drains first, and
-    /// remoted, or start or stop remoted as the base is paired or not; and
-    /// re-execute init once it may. The session stays, and the compositor
+    /// remoted, or start or stop remoted as the base is paired or not, and
+    /// the extensions' services a new ceiling changes; and re-execute init
+    /// once it may. The session stays, and the compositor
     /// offers the person its restart.
     fn step_base(&mut self, now: u64) {
         if let Some(switch) = self
@@ -517,11 +567,16 @@ impl Init {
             if switch.changed(&[slopos_priv_core::INIT]) {
                 self.reexec_due = Some(now);
             }
+            if switch.changed(&[slopos_extension_core::CEILING]) {
+                let session = self.session_runs();
+                self.units.reload(None, now, session);
+            }
         }
         if self.reexec_due.is_some_and(|at| at <= now) && self.may_reexec() {
             println!("init: the new base changes init; it re-executes");
-            self.reexec(None);
-            self.reexec_due = Some(now + service::WINDOW_MS);
+            if !self.reexec(None, now) {
+                self.reexec_due = Some(now + service::WINDOW_MS);
+            }
         }
     }
 
@@ -558,6 +613,10 @@ impl Init {
         if let Some(remoted) = self.remoted.as_mut().filter(|r| r.child.is_none()) {
             remoted.due = Some(now);
         }
+    }
+
+    fn session_runs(&self) -> bool {
+        matches!(self.session, Session::Running { .. })
     }
 
     fn is_compositor(&self, pid: u32) -> bool {
@@ -644,7 +703,7 @@ impl Init {
                 self.session = Session::Running { compositor };
             }
             Session::Ending(ending) => {
-                let Some(ended) = ending.step(now) else {
+                let Some(ended) = ending.step(now, &self.units.session_tags()) else {
                     return;
                 };
                 let Session::Ending(ending) = std::mem::replace(&mut self.session, Session::Down)
@@ -678,7 +737,14 @@ impl Init {
             reply,
         } = request;
         let then = match command {
-            Command::Reexec => return self.reexec(Some(reply)),
+            Command::Reexec => {
+                self.reexec(Some(reply), now);
+                return;
+            }
+            Command::Extensions => {
+                let session = self.session_runs();
+                return self.units.reload(Some(reply), now, session);
+            }
             Command::RestartSession if self.session_held && uid != 0 => {
                 return answer(reply, "refused: uid 0 ended the session");
             }
@@ -722,7 +788,8 @@ impl Init {
         let draining = self.privd.draining.is_some()
             || self.remoted.as_ref().is_some_and(|r| r.draining.is_some())
             || self.remote_ending.is_some()
-            || !self.retired.is_empty();
+            || !self.retired.is_empty()
+            || self.units.busy();
         !draining
             && match &self.session {
                 Session::Down => self.session_due.is_none(),
@@ -731,8 +798,10 @@ impl Init {
             }
     }
 
-    /// The new image answers `reply`; this one only when the exec failed.
-    fn reexec(&mut self, reply: Option<OwnedFd>) {
+    /// The new image answers `reply`; this one only when the exec failed, or
+    /// when the new image keeps no services and they end first. True when
+    /// this has decided when the re-execution is next due.
+    fn reexec(&mut self, reply: Option<OwnedFd>, now: u64) -> bool {
         if !self.may_reexec() {
             if let Some(reply) = reply {
                 answer(
@@ -740,7 +809,7 @@ impl Init {
                     "refused: the session is starting or ending, or a service drains",
                 );
             }
-            return;
+            return false;
         }
         let session = match &self.session {
             Session::Running { compositor } => Some(compositor.pid),
@@ -764,11 +833,40 @@ impl Init {
             session_starts: self.session_budget.starts().collect(),
             tests: self.tests.as_ref().map(|tests| tests.pid),
         };
-        let why = reexec::reexec(&state);
+        let reads_units = match reexec::reads_units() {
+            Ok(reads) => reads,
+            Err(why) => {
+                eprintln!("init: cannot re-execute: {why}");
+                if let Some(reply) = reply {
+                    answer(reply, &format!("refused: {why}"));
+                }
+                return false;
+            }
+        };
+        if !reads_units && !self.units.is_empty() {
+            eprintln!("init: the new init keeps no extensions' services; they end first");
+            self.units.retire(now);
+            self.reexec_due = Some(now);
+            if let Some(reply) = reply {
+                answer(
+                    reply,
+                    "refused: extensions' services end first, then init re-executes",
+                );
+            }
+            return true;
+        }
+        let units = reads_units.then(|| self.units.carry());
+        let why = reexec::reexec(&state, units.as_ref());
         eprintln!("init: cannot re-execute: {why}");
         if let Some(reply) = reply {
             answer(reply, &format!("refused: {why}"));
         }
+        let session = self.session_runs();
+        if self.units.restore(now, session) {
+            self.reexec_due = None;
+            return true;
+        }
+        false
     }
 
     fn runs(&self, side: Side) -> bool {

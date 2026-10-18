@@ -212,6 +212,60 @@ fn put_generation(dir: &Path, stem: &str, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Make `bytes` the sealed file at `path` in place of what is there, unless
+/// it holds them sealed already. A sealed file can be neither renamed nor
+/// renamed over, so the old one is unsealed for the rename and the new one
+/// sealed after: in between a reader that believes only a sealed file finds
+/// none.
+pub fn replace_sealed(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if read_sealed(path, bytes.len() as u64)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(bytes)
+    {
+        return Ok(());
+    }
+    let dir = path.parent().ok_or_else(|| shown(path, "no directory"))?;
+    let mut fresh = path.as_os_str().to_owned();
+    fresh.push(".new");
+    let fresh = PathBuf::from(fresh);
+    remove_entry(&fresh)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
+        .open(&fresh)
+        .map_err(|e| shown(&fresh, e))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| shown(&fresh, e))?;
+    match open_entry(path) {
+        Ok(old) if is_sealed(&old) => {
+            set_sealed(&old, false).map_err(|e| shown(path, format!("unsealing: {e}")))?
+        }
+        _ => {}
+    }
+    fs::rename(&fresh, path).map_err(|e| shown(path, e))?;
+    set_sealed(&file, true).map_err(|e| shown(path, format!("sealing: {e}")))?;
+    let back = file
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| read_all(&file, bytes.len() as u64));
+    let here = fs::symlink_metadata(path)
+        .ok()
+        .map(|m| (m.dev(), m.ino(), 1));
+    let ours = file.metadata().ok().map(|m| (m.dev(), m.ino(), m.nlink()));
+    if back.ok().as_deref() != Some(bytes) || here.is_none() || here != ours {
+        let _ = set_sealed(&file, false);
+        return Err(shown(path, "changed by another process as it was written"));
+    }
+    open_dir(dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| shown(dir, e))
+}
+
 fn text(path: &Path, bytes: Vec<u8>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| shown(path, "not UTF-8"))
 }

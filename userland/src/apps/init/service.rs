@@ -102,7 +102,7 @@ pub fn runtime_dir() -> String {
 }
 
 /// What every program the session starts finds in its environment.
-fn session_env() -> [String; 4] {
+pub fn session_env() -> [String; 4] {
     [
         format!("HOME={SESSION_HOME}"),
         "USER=user".to_owned(),

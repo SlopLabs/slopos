@@ -1,5 +1,6 @@
 //! The desktop session: the compositor and the terminal, and whatever they
-//! start, all carrying the desktop's login tag, by which the session is ended.
+//! start, all carrying the desktop's login tag, and the extensions' session
+//! services, each carrying its own; by those tags the session is ended.
 
 use slopos_abi::signal::{SIGCONT, SIGKILL, SIGTERM};
 
@@ -7,8 +8,8 @@ use super::service::Child;
 use crate::init_control::{self, DESKTOP};
 use crate::syscall::{OwnedFd, process};
 
-/// How long the session's processes have to end on `SIGTERM` before
-/// `SIGKILL`, and how long after that init stops waiting for them.
+/// How long what is ended has on `SIGTERM` before `SIGKILL`, and how long
+/// after that init stops waiting for it.
 const KILL_AFTER_MS: u64 = 5000;
 const GIVE_UP_AFTER_MS: u64 = 10_000;
 
@@ -40,8 +41,7 @@ pub enum Ended {
 }
 
 pub struct Ending {
-    since: u64,
-    signalled: Vec<u32>,
+    termination: Termination,
     /// The compositor until init has seen it exit, which privd hears of.
     pub compositor: Option<u32>,
     pub then: Then,
@@ -56,51 +56,90 @@ const PASSES: usize = 8;
 impl Ending {
     pub fn new(now: u64, then: Then, compositor: Option<u32>) -> Ending {
         Ending {
-            since: now,
-            signalled: Vec::new(),
+            termination: Termination::new(now),
             compositor,
             then,
             waiting: Vec::new(),
         }
     }
 
-    /// Signal what is left of the session; `Some` once nothing carrying its
-    /// tag runs, or once init has waited long enough for it.
-    pub fn step(&mut self, now: u64) -> Option<Ended> {
-        let waited = now.saturating_sub(self.since);
+    /// Signal what is left of the session, the processes carrying the
+    /// desktop's tag and each of `services`; `Some` once none runs, or once
+    /// init has waited long enough for them.
+    pub fn step(&mut self, now: u64, services: &[u32]) -> Option<Ended> {
+        let tags: Vec<u32> = std::iter::once(DESKTOP)
+            .chain(services.iter().copied())
+            .collect();
+        let ended = self.termination.step(now, &tags);
+        if let Some(Ended::GaveUp(left)) = &ended {
+            eprintln!("init: {left} processes of the desktop session would not end");
+        }
+        ended
+    }
+}
+
+/// Ending everything that carries some login tags: `SIGTERM` and `SIGCONT`
+/// to each process, then to each forked since, `SIGKILL` to all after
+/// [`KILL_AFTER_MS`], given up on after [`GIVE_UP_AFTER_MS`].
+pub struct Termination {
+    since: u64,
+    signalled: Vec<u32>,
+}
+
+impl Termination {
+    pub fn new(now: u64) -> Termination {
+        Termination {
+            since: now,
+            signalled: Vec::new(),
+        }
+    }
+
+    /// `Some` once nothing carrying any of `tags` runs, or once init has
+    /// waited long enough.
+    pub fn step(&mut self, now: u64, tags: &[u32]) -> Option<Ended> {
         for _ in 0..PASSES {
-            let left = init_control::processes(DESKTOP);
-            if left.is_empty() {
-                return Some(Ended::All);
+            match self.pass(now, &init_control::processes_of(tags)) {
+                Err(ended) => return Some(ended),
+                Ok(false) => break,
+                Ok(true) => {}
             }
-            if waited >= GIVE_UP_AFTER_MS {
-                eprintln!(
-                    "init: {} processes of the desktop session would not end: {left:?}",
-                    left.len()
-                );
-                return Some(Ended::GaveUp(left.len()));
-            }
-            let fresh: Vec<u32> = left
-                .iter()
-                .copied()
-                .filter(|pid| !self.signalled.contains(pid))
-                .collect();
-            if waited >= KILL_AFTER_MS {
-                for &pid in &left {
-                    let _ = process::kill(pid, SIGKILL);
-                }
-            } else {
-                for &pid in &fresh {
-                    // A stopped process acts on its SIGTERM only once continued.
-                    let _ = process::kill(pid, SIGTERM);
-                    let _ = process::kill(pid, SIGCONT);
-                }
-            }
-            if fresh.is_empty() {
-                break;
-            }
-            self.signalled.extend(fresh);
         }
         None
+    }
+
+    /// [`step`](Self::step) once, `left` being what carries the tags as of
+    /// one reading init takes for everything it ends.
+    pub fn step_seen(&mut self, now: u64, left: &[u32]) -> Option<Ended> {
+        self.pass(now, left).err()
+    }
+
+    /// Signal `left`; whether any of it was new.
+    fn pass(&mut self, now: u64, left: &[u32]) -> Result<bool, Ended> {
+        let waited = now.saturating_sub(self.since);
+        if left.is_empty() {
+            return Err(Ended::All);
+        }
+        if waited >= GIVE_UP_AFTER_MS {
+            return Err(Ended::GaveUp(left.len()));
+        }
+        let fresh: Vec<u32> = left
+            .iter()
+            .copied()
+            .filter(|pid| !self.signalled.contains(pid))
+            .collect();
+        if waited >= KILL_AFTER_MS {
+            for &pid in left {
+                let _ = process::kill(pid, SIGKILL);
+            }
+        } else {
+            for &pid in &fresh {
+                // A stopped process acts on its SIGTERM only once continued.
+                let _ = process::kill(pid, SIGTERM);
+                let _ = process::kill(pid, SIGCONT);
+            }
+        }
+        let signalled = !fresh.is_empty();
+        self.signalled.extend(fresh);
+        Ok(signalled)
     }
 }

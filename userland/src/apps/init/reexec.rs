@@ -1,13 +1,15 @@
 //! Init re-executing itself: what it knows goes into a pipe whose read end,
 //! like the descriptors that state names, survives the exec, and the new
 //! image reads it back. systemd's `daemon-reexec` carries its state across the
-//! same way, in a file descriptor.
+//! same way, in a file descriptor. Extensions' services go in as many more
+//! pipes as they fill, named after it, for an image that reads them.
 
 use std::ffi::CString;
 
 use slopos_abi::syscall::{F_GETFD, F_SETFD, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK};
 use slopos_slibc::pal::{Pal, Sys};
 
+use super::extensions::{CARRIED, Carried};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, process};
 
 pub const RESUME: &str = "--resume";
@@ -126,27 +128,76 @@ fn service(key: &str, pid: Option<u32>, starts: &[u64]) -> String {
     line + "\n"
 }
 
-/// Execute `/sbin/init` again carrying `state`. Returns only when the exec
-/// failed, with every descriptor as it was.
-pub fn reexec(state: &State) -> String {
-    let text = state.encode();
-    // Non-blocking, so a state larger than the pipe holds is refused rather
-    // than waiting on a reader that is this process.
-    let (pipe, writer) = match fs::pipe2((O_CLOEXEC | O_NONBLOCK) as u32) {
-        Ok(ends) => ends,
-        Err(e) => return format!("pipe: {e}"),
-    };
+/// The read end of a pipe holding `text`; a state larger than a pipe holds
+/// is refused rather than waiting on a reader that is this process.
+fn handed(text: &str) -> Result<OwnedFd, String> {
+    let (pipe, writer) =
+        fs::pipe2((O_CLOEXEC | O_NONBLOCK) as u32).map_err(|e| format!("pipe: {e}"))?;
     if fs::write_slice(writer.raw(), text.as_bytes()) != Ok(text.len()) {
-        return "the state does not fit a pipe".into();
+        return Err("the state does not fit a pipe".into());
     }
-    drop(writer);
-    let kept: Vec<RawFd> = state.descriptors().chain([pipe.raw()]).collect();
+    Ok(pipe)
+}
+
+/// What an empty pipe takes in one write while nobody reads it, the kernel's
+/// pipe buffer.
+const PIPE_CAPACITY: usize = 4096;
+
+/// Pipes holding `text` in order, each as many whole lines as it takes.
+fn handed_lines(text: &str) -> Result<Vec<OwnedFd>, String> {
+    let mut pipes = Vec::new();
+    let mut chunk = String::new();
+    for line in text.split_inclusive('\n') {
+        if !chunk.is_empty() && chunk.len() + line.len() > PIPE_CAPACITY {
+            pipes.push(handed(&chunk)?);
+            chunk.clear();
+        }
+        chunk.push_str(line);
+    }
+    if !chunk.is_empty() || pipes.is_empty() {
+        pipes.push(handed(&chunk)?);
+    }
+    Ok(pipes)
+}
+
+/// Whether the image at `/sbin/init` reads the services a re-execution hands
+/// on, its text holding the header they are written under; an error when it
+/// cannot be read.
+pub fn reads_units() -> Result<bool, String> {
+    let header = CARRIED.as_bytes();
+    let image = std::fs::read(ARGV0).map_err(|e| format!("{ARGV0}: {e}"))?;
+    Ok(image.windows(header.len()).any(|w| w == header))
+}
+
+/// Execute `/sbin/init` again carrying `state` and, for an image that reads
+/// them, `units`. Returns only when the exec failed, with every descriptor
+/// as it was.
+pub fn reexec(state: &State, units: Option<&Carried>) -> String {
+    let pipe = match handed(&state.encode()) {
+        Ok(pipe) => pipe,
+        Err(why) => return why,
+    };
+    let units_pipes = match units.map(|units| handed_lines(&units.encode())).transpose() {
+        Ok(units_pipes) => units_pipes.unwrap_or_default(),
+        Err(why) => return why,
+    };
+    let kept: Vec<RawFd> = state
+        .descriptors()
+        .chain(units.iter().flat_map(|units| units.descriptors()))
+        .chain([pipe.raw()])
+        .chain(units_pipes.iter().map(OwnedFd::raw))
+        .collect();
     for &fd in &kept {
         set_cloexec(fd, false);
     }
     let fd = pipe.raw().to_string();
+    let units_fd = (!units_pipes.is_empty()).then(|| {
+        let fds: Vec<String> = units_pipes.iter().map(|fd| fd.raw().to_string()).collect();
+        fds.join(",")
+    });
     let argv: Vec<CString> = [ARGV0, RESUME, &fd]
         .into_iter()
+        .chain(units_fd.as_deref())
         .map(|arg| CString::new(arg).expect("no NUL in init's argv"))
         .collect();
     let mut argv_ptrs: Vec<*const u8> = argv.iter().map(|arg| arg.as_ptr().cast()).collect();
@@ -163,10 +214,9 @@ pub fn reexec(state: &State) -> String {
     format!("execve answered {rc}")
 }
 
-/// The state an earlier image left in the pipe at `fd`, closing it, or the
-/// descriptors it kept when the rest cannot be read.
-pub fn resume(fd: &str) -> Result<State, Vec<RawFd>> {
-    let fd: RawFd = fd.parse().map_err(|_| Vec::new())?;
+/// What the pipe at `fd` holds, closing it, and whether that is all of it.
+fn read_handed(fd: &str) -> Option<(String, bool)> {
+    let fd: RawFd = fd.parse().ok()?;
     // SAFETY: the earlier image passed this descriptor for us alone.
     let pipe = unsafe { OwnedFd::from_raw(fd) };
     let mut text = Vec::new();
@@ -179,7 +229,13 @@ pub fn resume(fd: &str) -> Result<State, Vec<RawFd>> {
             Err(_) => break false,
         }
     };
-    let text = String::from_utf8_lossy(&text);
+    Some((String::from_utf8_lossy(&text).into_owned(), whole))
+}
+
+/// The state an earlier image left in the pipe at `fd`, closing it, or the
+/// descriptors it kept when the rest cannot be read.
+pub fn resume(fd: &str) -> Result<State, Vec<RawFd>> {
+    let (text, whole) = read_handed(fd).ok_or_else(Vec::new)?;
     let mut lines = text.lines();
     let mut first = lines.next().unwrap_or_default().split(' ');
     let kept: Vec<RawFd> = match first.next() {
@@ -191,6 +247,43 @@ pub fn resume(fd: &str) -> Result<State, Vec<RawFd>> {
         set_cloexec(fd, true);
     }
     Ok(state)
+}
+
+/// The extensions' services the pipes `fds` names, `,` between, hold in
+/// turn, each descriptor they name closed when the rest cannot be read.
+pub fn resume_units(fds: Option<&str>) -> Carried {
+    let Some(fds) = fds else {
+        return Carried::default();
+    };
+    let (mut text, mut whole) = (String::new(), true);
+    for fd in fds.split(',') {
+        match read_handed(fd) {
+            Some((part, all)) => {
+                text.push_str(&part);
+                whole &= all;
+            }
+            None => whole = false,
+        }
+    }
+    let decoded = if whole {
+        Carried::decode(&text)
+    } else {
+        Err(Carried::kept(&text))
+    };
+    match decoded {
+        Ok(units) => {
+            for fd in units.descriptors() {
+                set_cloexec(fd, true);
+            }
+            units
+        }
+        Err(kept) => {
+            for fd in kept {
+                crate::syscall::memory::close(fd);
+            }
+            Carried::default()
+        }
+    }
 }
 
 fn set_cloexec(fd: RawFd, on: bool) {

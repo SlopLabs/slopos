@@ -5,22 +5,24 @@
 //! `status` and `build` need nothing, `activate-all` the capabilities its
 //! caller holds, and the rest are privd's `org.slopos.extension.*` actions.
 
-mod store;
+mod accounts;
+pub(crate) mod store;
 
 use std::path::Path;
 
-use slopos_abi::extension::valid_name;
 use slopos_abi::syscall::BOOT_FLAG_EXTENSIONS_OFF;
 use slopos_extension_core::admit::{self, Admitted, Authority, Bounds};
 use slopos_extension_core::grant::Grant;
 use slopos_extension_core::image::Image;
 use slopos_extension_core::keys::{Key, Keys, valid_comment};
 use slopos_extension_core::record::{Record, valid_fingerprint};
-use slopos_extension_core::{CEILING, LIBC, ceiling, hex, parse_digest, sha256};
+use slopos_extension_core::{CEILING, LIBC, ceiling, hex, parse_digest, sha256, valid_name};
 use slopos_tls_core::sshsig::{KEY_TYPE, PublicKey};
 
+use self::accounts::give_uids;
 use self::store::Store;
 use crate::app_entry::read_bounded;
+use crate::init_control::{self, Command};
 use crate::privd::{self, Input};
 use crate::syscall::UserSysInfo;
 use crate::syscall::core as sys_core;
@@ -161,7 +163,7 @@ fn key_of(kind: &str, base64: &str) -> Result<PublicKey, String> {
 }
 
 fn named(name: &str) -> Result<String, String> {
-    if valid_name(name.as_bytes()) {
+    if valid_name(name) {
         Ok(name.to_owned())
     } else {
         Err(format!("{name:?} is no extension's name"))
@@ -312,7 +314,9 @@ impl Request {
     }
 
     fn run(self) -> Result<String, String> {
-        match self {
+        let settles = !matches!(self, Request::Status(_) | Request::Build { .. });
+        let tells_init = settles && !matches!(self, Request::ActivateAll);
+        let outcome = match self {
             Request::Status(only) => status(only.as_deref()),
             Request::Build { dir, out } => build(&dir, &out),
             Request::Install { image, vouched } => {
@@ -327,8 +331,31 @@ impl Request {
             Request::Remove(name) => remove(&name),
             Request::Rollback(name) => rollback(&name),
             Request::ActivateAll => activate_all(),
+        };
+        if !settles {
+            return outcome;
         }
+        let after = settle(tells_init);
+        outcome
+            .map(|said| said + &after)
+            .map_err(|why| why + &after)
     }
+}
+
+/// What a change leaves: the user database the records describe written, and
+/// init told, which starts, stops and restarts services to match. Either
+/// failing is said rather than fatal, since every boot does both again.
+fn settle(tell_init: bool) -> String {
+    let mut said = String::new();
+    if let Err(why) = Store::open(true).and_then(|store| accounts::sync(&store)) {
+        said.push_str(&format!("\nthe user database was not written: {why}"));
+    }
+    if tell_init && let Err(why) = init_control::ask(Command::Extensions) {
+        said.push_str(&format!(
+            "\ninit has not taken the change ({why}); the next boot does"
+        ));
+    }
+    said
 }
 
 /// Every other installed extension's name and grant.
@@ -457,6 +484,11 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     } = prepared;
     let installed = match admitted {
         Admitted::Current => {
+            if let Some(mut record) = before.clone()
+                && give_uids(store, &mut record)?
+            {
+                store.edit(&name, |edit| edit.put_record(&record))?;
+            }
             let idle = before.as_ref().and_then(idle);
             return Ok(format!(
                 "{name} is installed already{}",
@@ -468,6 +500,7 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     let version = installed.version;
     let mut record = before.clone().unwrap_or_else(|| Record::new(&name));
     record.install(installed);
+    give_uids(store, &mut record)?;
     store.edit(&name, |edit| {
         edit.put_image(&digest, &bytes, voucher.signed())?;
         edit.put_record(&record)
@@ -587,6 +620,7 @@ fn enable(name: &str) -> Result<String, String> {
     let base = Base::read()?;
     record.enabled = true;
     record.why = None;
+    give_uids(&store, &mut record)?;
     let ran = bring_up(&store, &mut record, &keys, &base)?;
     store.edit(name, |edit| edit.put_record(&record))?;
     Ok(format!("{name} enabled; {ran}"))
@@ -627,6 +661,7 @@ fn rolled_back(store: &Store, name: &str) -> Result<(Record, Vec<u8>), String> {
     record.roll_back().map_err(|e| format!("{name}: {e}"))?;
     record.enabled = true;
     record.why = None;
+    give_uids(store, &mut record)?;
     if let Some(current) = &record.current {
         admit::clashes(name, &current.grant, &borrowed(&others(store, name)?))
             .map_err(|e| format!("{name}: {e}"))?;
@@ -731,9 +766,14 @@ fn activate_all() -> Result<String, String> {
     let mut said = Vec::new();
     for name in store.names()? {
         let ran = match store.record(&name) {
-            Ok(Some(mut record)) if record.enabled => {
-                bring_up(&store, &mut record, &keys, &base).map(|ran| format!("{name}: {ran}"))
-            }
+            Ok(Some(mut record)) if record.enabled => give_uids(&store, &mut record)
+                .and_then(|given| {
+                    if given {
+                        store.edit(&name, |edit| edit.put_record(&record))?;
+                    }
+                    bring_up(&store, &mut record, &keys, &base)
+                })
+                .map(|ran| format!("{name}: {ran}")),
             Ok(Some(_)) => deactivate(&name).map(|()| format!("{name}: disabled")),
             Ok(None) => continue,
             Err(why) => Err(why),
@@ -811,6 +851,14 @@ fn describe(record: &Record) -> String {
     );
     if let Some(why) = &record.why {
         out.push_str(&format!("\n  stopped: {why}"));
+    }
+    if !record.uids.is_empty() {
+        let uids: Vec<String> = record
+            .uids
+            .iter()
+            .map(|(user, uid)| format!("{user}={uid}"))
+            .collect();
+        out.push_str(&format!("\n  uids {}", uids.join(",")));
     }
     for (slot, image) in [("current", &record.current), ("previous", &record.previous)] {
         if let Some(image) = image {
