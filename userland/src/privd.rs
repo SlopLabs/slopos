@@ -75,7 +75,7 @@ impl Connection {
     pub fn open_within(wait: Duration) -> Result<Connection, String> {
         let started = Instant::now();
         let fd = loop {
-            let fd = net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0)
+            let fd = net::socket(AF_UNIX, u32::from(SOCK_STREAM) | SOCK_CLOEXEC, 0)
                 .map_err(|e| format!("socket: {e}"))?;
             let fd = above_stdio(fd)?;
             match net::connect_unix(fd.raw(), SOCKET.as_bytes()) {

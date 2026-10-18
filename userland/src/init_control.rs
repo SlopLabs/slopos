@@ -63,7 +63,7 @@ impl Command {
 /// Ask init for `command`: `Err` is init's refusal, or why init was not
 /// reached.
 pub fn ask(command: Command) -> Result<(), String> {
-    let fd = net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0)
+    let fd = net::socket(AF_UNIX, u32::from(SOCK_STREAM) | SOCK_CLOEXEC, 0)
         .map_err(|e| format!("socket: {e}"))?;
     net::connect_unix(fd.raw(), SOCKET.as_bytes()).map_err(|e| format!("{SOCKET}: {e}"))?;
     let line = format!("{}\n", command.word());
@@ -144,7 +144,7 @@ pub fn children(login: u32) -> Vec<u32> {
 /// Who listens at the `AF_UNIX` name `path`, as the kernel recorded it at
 /// `listen`.
 pub fn listener(path: &str) -> Option<u32> {
-    let fd = net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0).ok()?;
+    let fd = net::socket(AF_UNIX, u32::from(SOCK_STREAM) | SOCK_CLOEXEC, 0).ok()?;
     net::connect_unix(fd.raw(), path.as_bytes()).ok()?;
     net::peer_cred(fd.raw()).ok().map(|cred| cred.pid as u32)
 }

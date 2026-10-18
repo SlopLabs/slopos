@@ -98,8 +98,13 @@ pub fn net_monitor(mask: u32, flags: u32) -> SyscallResult<super::OwnedFd> {
     checked(raw).map(|fd| unsafe { super::OwnedFd::from_raw(fd as i32) })
 }
 
-pub fn socket(domain: u16, sock_type: u16, protocol: u16) -> SyscallResult<super::OwnedFd> {
-    Sys::socket(domain as i32, sock_type as i32, protocol as i32)
+/// `sock_type` carries `SOCK_NONBLOCK` and `SOCK_CLOEXEC` beside the type.
+pub fn socket(
+    domain: u16,
+    sock_type: impl Into<u32>,
+    protocol: u16,
+) -> SyscallResult<super::OwnedFd> {
+    Sys::socket(domain as i32, sock_type.into() as i32, protocol as i32)
         // SAFETY: v is a valid fd just returned by the kernel.
         .map(|v| unsafe { super::OwnedFd::from_raw(v as i32) })
         .map_err(Into::into)

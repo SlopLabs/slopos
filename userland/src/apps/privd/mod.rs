@@ -280,8 +280,8 @@ fn load_policy() -> Result<Policy, String> {
 }
 
 fn listen() -> Result<OwnedFd, String> {
-    let fd =
-        net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0).map_err(|e| e.to_string())?;
+    let fd = net::socket(AF_UNIX, u32::from(SOCK_STREAM) | SOCK_CLOEXEC, 0)
+        .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(SOCKET);
     net::bind_unix(fd.raw(), SOCKET.as_bytes()).map_err(|e| e.to_string())?;
     std::os::unix::fs::chown(SOCKET, Some(0), Some(0)).map_err(|e| e.to_string())?;

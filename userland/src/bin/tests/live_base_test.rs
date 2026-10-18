@@ -199,7 +199,7 @@ struct Peer {
 impl Peer {
     fn start() -> Result<Peer, String> {
         let _ = std::fs::remove_file(SOCKET);
-        let listener = net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0)
+        let listener = net::socket(AF_UNIX, u32::from(SOCK_STREAM) | SOCK_CLOEXEC, 0)
             .map_err(|e| format!("socket: {e}"))?;
         net::bind_unix(listener.raw(), SOCKET.as_bytes()).map_err(|e| format!("bind: {e}"))?;
         net::listen(listener.raw(), 1).map_err(|e| format!("listen: {e}"))?;
@@ -242,7 +242,7 @@ impl Drop for Peer {
 fn peer(path: &str) -> ! {
     let mut go = [0u8; 1];
     let _ = std::io::stdin().read(&mut go);
-    let connected = net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0)
+    let connected = net::socket(AF_UNIX, u32::from(SOCK_STREAM) | SOCK_CLOEXEC, 0)
         .ok()
         .filter(|fd| net::connect_unix(fd.raw(), path.as_bytes()).is_ok());
     let _ = std::io::stdin().read(&mut go);

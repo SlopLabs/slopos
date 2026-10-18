@@ -176,7 +176,7 @@ fn init_reexecutes_keeping_what_it_serves() -> bool {
 fn init_listens() -> bool {
     use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
     use slopos_userland::syscall::net;
-    let Ok(fd) = net::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC as u16, 0) else {
+    let Ok(fd) = net::socket(AF_UNIX, u32::from(SOCK_STREAM) | SOCK_CLOEXEC, 0) else {
         return false;
     };
     net::connect_unix(fd.raw(), init_control::SOCKET.as_bytes()).is_ok()
