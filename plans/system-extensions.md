@@ -105,8 +105,10 @@ flags, `BOOT_FLAG_EXTENSIONS_OFF` among them.
 - The dock reads app entries from `/usr/share`, `/usr/local/share` and
   `~/.local/share` (`userland/src/app_entry.rs:18-27`).
 
-**There are two users.** slibc compiles in root and `user` "until there is
-more than one person" (`slibc/src/conf.rs:48-63`); there is no `/etc/passwd`.
+**Extensions have users; people are one.** Records keep uids from 100 to
+999, and `/etc/passwd` and `/etc/group` list root, `user` and each installed
+extension's users, sealed (Phase 3); slibc answers root and `user` while
+neither file is sealed.
 
 **Ports are not privileged.** `Port::is_privileged` (`net/src/types.rs:124`)
 gates nothing; any process may bind any port.
@@ -120,8 +122,12 @@ every toolchain install.
 
 **Extensions go in through privd** (Phase 2). `/bin/extctl` runs the four
 `org.slopos.extension.*` actions as uid 0 with `ExtensionUpdate` and `Seal`,
-over a store the kernel keeps where it is; nothing runs `extctl activate-all`
-at boot yet.
+over a store the kernel keeps where it is.
+
+**init runs extensions' services** (Phase 3): `extctl activate-all` at boot,
+each service as its user under a login tag of its own, on sockets init
+keeps, logged by a copy of init running as the extension's user
+(`userland/src/apps/init/extensions.rs`).
 
 ## What the prior art settles
 
@@ -351,7 +357,7 @@ after a base rollback to an older one.
 ### Services
 
 - At boot init runs `/bin/extctl activate-all` itself, holding
-  `ExtensionUpdate`, before it starts privd and unless
+  `ExtensionUpdate` and `Seal`, before it starts privd and unless
   `BOOT_FLAG_EXTENSIONS_OFF` is set; privd then loads the enabled extensions'
   actions as it starts, and init starts their services in `after` order
   before the session.
@@ -364,8 +370,9 @@ after a base rollback to an older one.
   start, hands it over by descriptor, and keeps it across restarts, as
   launchd and systemd do: no other process can take the port while the
   service is down, and a service needs no capability to listen.
-- `session` services start with each person's desktop session, under its
-  tag, as that person and holding their grant, and end with it.
+- `session` services start with each person's desktop session, as that
+  person and holding their grant, each under a tag of its own that the
+  session's end ends with the desktop's.
 - **A live change** reaches init as `/run/init`'s `extensions` command, from
   the mechanism, which is base code running as uid 0. init reloads the
   records, restarts the services whose program or `reads` changed
@@ -373,7 +380,8 @@ after a base rollback to an older one.
   disabled or removed, and restarts privd when an extension's actions
   changed.
 - After a re-execution init carries only the base's services through its pipe
-  and re-derives the extensions' from the records.
+  and re-derives the extensions' from the records, taking what they cannot
+  say from pipes of its own.
 
 ### Actions, commands and apps
 
@@ -475,18 +483,30 @@ and the store's seal, hold and generations), `fs::tests::mount`'s kept
 directory, `fs::tests::filemap`'s seal against the page set, and host tests
 under `just test-host`.
 
-### Phase 3: Services and users
+### Phase 3: Services and users — done
 
-- Extension users in the user database, which this phase creates with
-  slibc's readers if `plans/users-and-login.md` has not; uid allocation.
-- init's boot step, extension services, `after`, readiness, logs, `listen`
-  sockets, restarts, session services, live changes, `extensions=off`, the
-  re-derivation after re-exec.
-- The loader's search for `AT_SECURE` extension programs.
-- Graded by a test extension whose daemon runs as its own user, holds exactly
-  its grant, takes its socket from init, logs, restarts after a crash with its
-  port held, survives a session restart, and is restarted by an update that
-  changes it and not by one that does not.
+Records keep uids (`extension_core::accounts`) and the extension's number,
+the uid of its name; `extctl` writes `/etc/passwd` and `/etc/group` from them
+after every change and tells init `extensions`; slibc's readers believe only
+a sealed database (`slibc/src/pwd.rs`, `slibc_core::passwd`). init runs
+`activate-all` at boot and supervises every service (`init/extensions.rs`):
+login tags from the number and the service's place, `after` on readiness,
+`listen` sockets bound and kept, one service's each, logs through
+`/sbin/init --log`, the restart policy within the start budget, session
+services with the session, replacement of only what an update or a new
+base's ceiling changes, and adoption by tag and pid after a re-execution,
+pipes of their own carrying what the records cannot say. The kernel lets an
+`SO_REUSEADDR` listener take a port only connections hold, shares a UDP
+address only among sockets that all set it, and binds UDP port 0 to an
+ephemeral port at once. The loader searches an attested program's
+`/opt/<name>/lib`. A declaration has at most 16 services, a user for any
+service or directory, a socket per service, and no name `TAKEN` by the
+system's paths. Graded by `extension_service_test`, `tcp_live`'s
+`test_reuse_addr_listens_beside_time_wait`, `udp_demux`'s and
+`socket_framework`'s reuse and port-0 tests, and host tests of the
+accounts, the record's uids, the database's text and the declaration's
+limits. `getgrouplist` stays with `plans/users-and-login.md`, and privd
+starting again for an action change with Phase 4.
 
 ### Phase 4: Actions, commands, apps and configuration
 
@@ -697,6 +717,45 @@ own, all building on extensions:
   request to the store as it reads it — the image, its grant, the floor, the
   ceilings, the symbols, the clashes, a rollback's fit — before privd asks,
   and the mechanism holds it again with the store locked.
+
+- **A service's login tag is its own**, made from its extension's number
+  and its place in the declaration, and a service that moves in its
+  declaration is restarted. Session services carry their own too, which the
+  session's end ends with the desktop's, so init can end one alone.
+- **A re-execution re-derives services from the records and the tags,**
+  and hands on in pipes of its own only what neither can say: whether a
+  service was meant to stay down or gave up, the pid it was started as,
+  its starts, a digest of what it was started as, and its descriptors. The
+  base's pipe stays as every image reads it; a running service whose
+  digest no longer matches the records is started again, and what carries
+  a tag no service claims is ended. An image whose text lacks their header
+  gets none, and the services end before init re-executes into it, so none
+  runs unsupervised.
+- **The user database is a view of the records.** A uid is given once, kept
+  through removal and never given again; the files list only installed
+  extensions' users and are believed only sealed, and nothing that grants
+  takes a uid from them.
+- **init holds the port, not the service's process.** A listen socket is
+  bound before the first start and kept across restarts, re-executions and
+  updates that keep it. TCP's is bound with `SO_REUSEADDR`, which only
+  another listener refuses, so the connections a crashed service left in
+  `TIME_WAIT` do not keep it from its port; UDP's without it, and a UDP
+  address is shared only among sockets that all set it, so no bind takes a
+  held port's datagrams. A port is one service's: a declaration names it
+  once, and of two extensions that would, the lower number keeps it. Init
+  gives its services at most half its descriptors, so no set of extensions
+  starves the rest of init.
+- **An extension's files are written as its user.** Its log is kept by a
+  copy of init running as the extension's first user, never by init as uid 0
+  in a directory the extension owns; a directory it gets is made for it or
+  already its.
+- **The loader asks the kernel which activation a program is of**, through
+  `SO_PEEREXTENSION` on a socket pair, never the path it was started by.
+- **No extension takes a system path's name**: `TAKEN` covers what
+  `/var/log`, `/run` and `/etc` already hold.
+- **An update restarts what it changes**: a service's declaration, user,
+  grant or tag, or its program, `reads` or the image's `lib/` in the
+  manifest; the rest runs on, holding the activation it started from.
 
 ## Constraints
 
