@@ -322,10 +322,13 @@ rustc's, and mixed records crashed the instrumented compiler at exit.
 **The result lands on the root.** `just boot` installs the prefix `just
 toolchain` built, or the one `TOOLCHAIN_STAGE` names, at `/usr/local` on the
 persistent root, where the one default search path finds it:
-`/bin:/sbin:/usr/local/bin` (`slopos_abi::fs::DEFAULT_PATH`), which the shell
-(its exported default and `command -p`), slibc's `execvp` and the coreutils
-all take, puts it after the system's own tools, so nothing a writable disk
-holds shadows them. `scripts/build_fs_image.sh` takes two kinds of tree,
+`/bin:/sbin:/usr/local/bin:/opt/bin` (`slopos_abi::fs::DEFAULT_PATH`), which
+the shell (its exported default and `command -p`), slibc's `execvp`, the
+coreutils and remoted's commands all take, puts it after the system's own
+tools, so nothing a writable disk holds shadows them, and the commands the
+owner granted extensions after it, so they shadow neither; the session's own
+`PATH` (`init::service::SESSION_PATH`) puts `~/.local/bin` between the system's
+tools and `/usr/local/bin`. `scripts/build_fs_image.sh` takes two kinds of tree,
 both installed through one debugfs session (`scripts/fs_tree.py`), which
 gives each the owner of its destination under the ownership map: the
 session's, uid 1000, under `/home`, `/src` and `/usr/local`, uid 0's
@@ -605,7 +608,8 @@ paths those they have below `/opt/<name>`, under `bin/`, `libexec/`, `lib/`
 and `share/` alone, naming itself in `/.extension/release` and what it asks
 for in `/.extension/declare` (`slopos_extension_core::declare`). What it is
 granted is the capabilities its services and actions hold, the actions a
-person reaches unasked (`allow user`, `user alone`, `admin` or a `program`),
+person reaches unasked (`allow user`, `user alone`, `admin` or a `program`)
+and those the paired agent does (`paired`),
 its users and its commands, none of which another extension declares. A
 first install's command line names the image's SHA-256 and that grant, which
 `extctl install <image>` writes out in the requester and the person approving
@@ -720,9 +724,10 @@ mode 0755, and one there that is anyone else's stops the services. On
 `extensions` init reads the store and the activations again and answers once
 no service is ending: it leaves an extension whose record or activation it
 cannot read as it stands, stops what is gone, starts what is new, and
-replaces a service whose declaration, user, grant or tag changed or whose
+replaces a service whose declaration, user, grant or tag changed, whose
 program, `reads` or the image's `lib/` reads differently in the new
-activation's manifest (`boot_core::base::changed`), handing on the sockets
+activation's manifest (`boot_core::base::changed`), or whose `reads` of
+`/etc/<name>` hold other bytes than it started on, handing on the sockets
 both listen on and the log, and leaves the rest running on the activation
 they started from; a new base whose ceiling changed does the same. What it
 could not read it reads again a second on, then twice as long each time, up
@@ -742,6 +747,63 @@ cannot read among them, until it reads them again. The loader searches
 attests is a file of `<name>`'s activation, which it asks through a socket
 pair's `SO_PEEREXTENSION` the first time a search gets there, so an
 `AT_SECURE` service finds its own libraries and nothing a path names.
+
+**An extension's actions run as its first user.** privd reads, at its start
+and again on `SIGHUP`, the actions of every extension that runs (enabled,
+stopped by no check, installed) as the activation shown at `/opt/<name>`
+declares them and its record grants them (`slopos_userland::activation`),
+beside the base's policy, as `ext.<name>.<action>`, and each request takes
+them as they stand when it comes; an action of one that clashes with the base's, or
+names a dynamically linked base program as a principal, is left out alone.
+Its mechanism is the extension's program, run as the extension's first user
+with no supplementary group, holding what it declares within the grant and
+the base's ceiling, with `PATH` `/bin:/sbin:/opt/<name>/bin`, once the file
+opened just before the start is of the activation its action was read from;
+init hands privd `SetId` beside `DELEGABLE` for that, and `ProcSignal` to
+relay a requester's signals to a mechanism running as another uid
+(`slopos_priv_core::PRIVD_CAPS`); no action names either, and privd signals
+only the mechanisms it started. Until privd tells
+people apart (`plans/users-and-login.md`) an extension's `allow` lines read
+as the one person at the machine meets them, its only admin and without a
+password: `user` and `admin` with no level, and `user alone`, run for the
+session's uid unasked, and any other level asks the person; `paired` is
+privd's, and `program` a base program's path or one of the extension's own,
+which matches only a requester running that file of the activation whose
+label (`SO_PEEREXTENSION`) names the extension and the digest its record
+installed, and never `root`. privd reads a requester's label before its
+program, so one that lapses between the two reads is no program; uid 0
+running an extension's program is no `root`. The question names the
+extension after the action's `describe`. Init remembers what the actions
+privd read were read from — each extension's name, image digest and
+activation — and on `extensions` sends privd `SIGHUP` when that changes, so
+privd never leaves its socket for an extension and an exclusive group stays
+its own.
+
+**An extension's commands, apps and configuration are the owner's grant.**
+`/opt/bin` holds a link to `/opt/<name>/bin/<command>` for each command of
+every extension shown, which `extctl` keeps after every change (`extctl::
+commands`), touching nothing there but its links into `/opt`; it is last on
+`DEFAULT_PATH`. The dock reads each shown extension's `share` before the
+base's, so an extension's app entry replaces none. `/etc/<name>`, a sealed
+uid-0 directory of sealed files read by everyone, holds what the machine
+changed of an extension's configuration (`slopos_extension_core::config`),
+for an extension that declares `config`, one file deep, laid out empty and
+sealed before its first activation runs and refused while it holds anything
+unsealed: `extctl config edit
+<name> <file>` edits a copy as sudoedit does and installs what changed
+through `org.slopos.extension.config` (`config install <name> <file>
+<sha256>`, the file the requester's standard input, so the mechanism installs
+only what the requester could read; `Seal` alone, the person asked), and
+`extctl config apply <from>`
+installs, unasked through `org.slopos.extension.config-signed`, a file whose
+sidecar `<from>.meta` — name, file, serial, SHA-256 — the key that installed
+the extension signed with `ssh-keygen -Y sign -n extension-config@slopos`,
+while the owner trusts that key and its serial is past the last, which the
+record keeps (`config <n>`) before the file goes in. Init restarts each
+service whose `reads` of `/etc/<name>` hold other sealed bytes, and holds it
+to no file no `Seal` holder put there. `extctl --root <dir>
+status|enable|disable` acts on the store of a root mounted at `<dir>`, as the
+rescue shell runs it holding everything; no privd action takes `--root`.
 
 **A base names the interface it needs; a kernel names the ones it serves.**
 `slopos_abi::BASE_INTERFACE` numbers the private call surface: every private
@@ -1892,11 +1954,12 @@ connector runs its program. uid 0 alone is no principal, at privd or at
 `/run/init`; what keeps an extension from root is that none runs as uid 0.
 
 **privd runs what the session may not.** `/sbin/privd`, which init starts as
-uid 0 holding `slopos_priv_core::DELEGABLE` and waits for, listens on
+uid 0 holding `slopos_priv_core::PRIVD_CAPS` and waits for, listens on
 `/run/privd` (mode 0666) and runs a named action's mechanism — the base program
 `/usr/share/slopos/privd/actions` (`assets/privd/actions`, sealed in the base,
-grammar `slopos_priv_core::policy`) names for it — as a fresh child holding the
-action's capabilities as uid 0, with an environment of `PATH`, `LANG` and
+grammar `slopos_priv_core::policy`) names for it, or an extension's own — as a
+fresh child holding the action's capabilities as uid 0, or an extension's as
+its first user, with an environment of `PATH`, `LANG` and
 `PRIV_ACTION` alone, cwd `/` or the directory the requester sent, and the
 requester's descriptors as stdio. Who asks is the connection's recorded
 `Identity`, its program read again before every verdict and before the
@@ -1905,7 +1968,8 @@ it connected — it exec'd, mapped code from elsewhere or exited — is refused:
 `root` is uid 0 running a
 base program, `paired` is `/bin/remoted` on a base carrying a pairing and
 nothing else, `session` is uid 1000 otherwise, and `program <path>` is a
-static base program; an action's `allow` lines are tried in order and the
+static base program or, in an extension's action, a program of its own
+activation; an action's `allow` lines are tried in order and the
 first that matches runs it, asks the person (`consent`) or, with none, refuses.
 An action marked `medium` exists only on a boot the kernel says served the
 install medium (`BOOT_FLAG_MEDIUM` in `sys_info`): off it privd answers it as
