@@ -177,17 +177,23 @@ fn a_share_cannot_stall_or_swell_the_dock() -> bool {
     let entry = |id: &str, icon: &str| format!("id={id}\nname={id}\nexec=/bin/terminal\n{icon}");
     let mut big_icon = fs::read(&icon).unwrap_or_default();
     big_icon.resize((1 << 20) + 1, 0);
-    let staged = fs::create_dir_all(&apps).is_ok()
-        && fs::create_dir_all(&icons).is_ok()
+    let made = |what: &str, done: std::io::Result<()>| {
+        done.map_err(|e| eprintln!("dock_test: {what}: {e}"))
+            .is_ok()
+    };
+    let staged = made(&apps, fs::create_dir_all(&apps))
+        && made(&icons, fs::create_dir_all(&icons))
         && write(
             &format!("{HOME}/elsewhere.app"),
             &entry("org.slopos.linked", ""),
         )
-        && symlink(
-            format!("{HOME}/elsewhere.app"),
-            format!("{apps}/org.slopos.linked.app"),
+        && made(
+            "the linked entry",
+            symlink(
+                format!("{HOME}/elsewhere.app"),
+                format!("{apps}/org.slopos.linked.app"),
+            ),
         )
-        .is_ok()
         && make_fifo(&format!("{apps}/org.slopos.fifo.app"))
         && write(
             &format!("{apps}/org.slopos.big.app"),
@@ -202,12 +208,15 @@ fn a_share_cannot_stall_or_swell_the_dock() -> bool {
             &format!("{apps}/org.slopos.linkicon.app"),
             &entry("org.slopos.linkicon", "icon=link.png\n"),
         )
-        && symlink(&icon, format!("{icons}/link.png")).is_ok()
+        && made(
+            "the linked icon",
+            symlink(&icon, format!("{icons}/link.png")),
+        )
         && write(
             &format!("{apps}/org.slopos.bigicon.app"),
             &entry("org.slopos.bigicon", "icon=big.png\n"),
         )
-        && fs::write(format!("{icons}/big.png"), &big_icon).is_ok();
+        && made("big.png", fs::write(format!("{icons}/big.png"), &big_icon));
     if !staged {
         eprintln!("dock_test: staging the share failed");
         let _ = fs::remove_dir_all(HOME);

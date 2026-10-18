@@ -22,8 +22,11 @@ fs_image_size    := env("FS_IMAGE_SIZE", "32M")
 # `persist_test`'s space filler must still meet the volume's reserve before it
 # meets the 8192-block `DiskBlocks` quota. 64M left 809 free blocks against a
 # 819-block reserve once `libc++.so` was on it, which refuses the filler before
-# it has written anything; 80M left 732 once `remoted` and `cpufreq` joined.
-fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "96M")
+# it has written anything; 80M left 732 once `remoted` and `cpufreq` joined,
+# and 96M 1244 against 1228 once the extensions' tests did, so uid 1000 could
+# write nothing. Each filler now has a ceiling of its own, so size is no
+# longer bounded by one quota.
+fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "128M")
 # Sized on its own: this disk holds work, not the shipped appliance root. No
 # longer capped at 1 GiB — the verity hash array is chunked, so what bounds it
 # is the 4 bytes of resident hash per 4 KiB block the machine's RAM can hold,
