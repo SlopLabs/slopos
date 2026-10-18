@@ -2,6 +2,74 @@
 
 **No finding is open.**
 
+Swept 2026-10-18: extensions' actions, commands, apps and configuration —
+privd's attested requester (`SO_PEEREXTENSION` before `SO_PEERPROGRAM`), the
+extension principal and `Action::for_privd`'s reading of `allow` lines, the
+actions it loads beside the base's (`slopos_userland::activation`) and
+re-reads on `SIGHUP`, the mechanisms it spawns as an extension's first user
+under its login tag with `SetId` and signals with `ProcSignal`; init's ending
+of a stopped extension's mechanisms, its tracking of what those actions were
+read from and its digest of what a service reads of `/etc/<name>`; `extctl`'s
+`/opt/bin` links, `config edit|install|apply`, the sealed `/etc/<name>` and
+the record's serial, and `--root`; the dock's extension shares; and
+`DEFAULT_PATH` and the session's `PATH`. Four review passes; nothing reached
+the bar. They found, before it landed, that the mechanism of `config install`
+read the requester's file by a path it opened as uid 0, so a session could
+have a file only uid 0 may read copied where everyone reads it; that a restart
+of privd for every change of an extension's actions left it off its socket
+longer than a requester waits and refused every exclusive action while the old
+instance lived; that privd never drained the pipe its `SIGHUP` handler woke it
+on and spun for the rest of the boot; that privd, uid 0, could not relay a
+requester's signals to a mechanism running as an extension's user, so a
+timeout's `SIGTERM` never reached it; that a service reading `/etc/<name>`
+without a trailing slash was never restarted by a change there, and a
+directory of more than 64 files gave a different digest each read; that
+`/etc/<name>` stayed unsealed until a first configuration went in, so a
+`DacOverride` holder could plant one that a service read and the first install
+sealed in; that an action allowing `paired` ran unasked for the broker yet was
+named in no grant line and held to no key's user ceiling; that privd ran a
+mechanism of an extension holding another's uid, which init refuses; that the
+mechanisms carried privd's login tag, so one an extension's action left
+running outlived the extension's removal holding its grant, and a privd
+started again refused every exclusive group while it ran, `extensions` among
+them, so the owner could not remove the extension; that a configuration file
+another process changed as it was written was left unsealed under its name,
+which a `DacOverride` holder could write and the service would read, and a
+write cut short stopped the extension at its next activation for good; that
+the temporary name a file was written under could be another configuration
+file's; that a `SIGHUP` reaching a privd started again before its handler
+ended it; that `--root` with a relative path held the running root's store
+path, not the mounted one's, to having no link; that an action granted
+`SchedHigh` installed but could never start; that init never told privd of
+actions it read only on a retry; that init ended the running mechanism of an
+extension it could not read in the instant an update holds its record and
+activation apart, and that one unreadable extension stopped it ending any
+other's; that a mechanism added to an ending already under way got no
+`SIGTERM` or was never ended, and that a re-enabled extension's new mechanism
+was ended by the batch that ended its old one; that a privd started again
+after its predecessor crashed took an extension's exclusive group while that
+group's mechanism ran; that a session could have the uid-0 mechanism read and
+check a whole stored image, unasked, with a sidecar any key signed; that
+`config edit` as uid 0 ran an editor found where the session writes, by name
+or by path; that one extension's app entry could replace another's, or show an
+app it never declared; that only the first 64 files of a directory a service
+reads were held, and a 65th signed file spent its serial though refused; that
+the first layout of `/etc/<name>` deleted files the owner had put there; and
+that a re-execution could leave privd reading actions it was never told had
+changed.
+
+Below the bar and left: privd checks an extension mechanism's program against
+the activation it read the action from and then spawns it by path, so an
+activation replaced between the two runs the new image's program with the old
+action's grant until privd reads the actions again (20: the replacement takes
+`ExtensionUpdate`, and the gap is init's for services too); an extension's
+action's `describe` is the extension's text, which privd shows with
+`(extension <name>)` after it and beside the program's `/opt/<name>` path
+(15); an extension installed before an action needed a user stops at its next
+activation (10); and a crash in the instant between a configuration file's
+rename and its seal leaves it unsealed, which the next activation refuses,
+stopping the extension until it is taken away by hand (10).
+
 Swept 2026-10-18: extensions' services and users — records' uids and the
 user database `extctl` writes sealed from them (`extension_core::accounts`,
 `replace_sealed`); slibc's readers of `/etc/passwd` and `/etc/group`; init's
