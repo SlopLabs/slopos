@@ -1,6 +1,7 @@
 use super::*;
 use alloc::vec;
 use slopos_abi::caps;
+use slopos_abi::fs::SESSION_UID;
 
 const FULL: &str = "\
 # everything once
@@ -80,7 +81,7 @@ fn everything_the_grammar_states_reads_as_written() {
         Principal::Program("/bin/compositor".into())
     );
     let reset = &d.actions[1];
-    assert!(!reset.unasked());
+    assert!(reset.unasked(), "the paired agent is never asked");
     assert_eq!(
         reset.allows[0],
         Allow {
@@ -92,12 +93,12 @@ fn everything_the_grammar_states_reads_as_written() {
         d.grant(),
         Grant {
             caps: caps::NET_ADMIN | caps::SCHED_HIGH | caps::POWER | caps::MOUNT,
-            unasked: vec!["greet".into()],
+            unasked: vec!["greet".into(), "reset".into()],
             users: vec!["hello".into(), "hello-worker".into()],
             commands: vec!["hello".into()],
         }
     );
-    assert_eq!(d.unasked_caps(), caps::POWER);
+    assert_eq!(d.unasked_caps(), caps::POWER | caps::MOUNT);
     let programs: Vec<String> = d.programs("hello").collect();
     assert_eq!(
         programs,
@@ -210,6 +211,7 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
             7,
         ),
         (&action("  allow user\n  exclusive Lane\n"), 7),
+        (&action("  allow user\n"), 0),
     ] {
         assert_eq!(refused(text), line, "{text:?}");
     }
@@ -247,8 +249,9 @@ fn every_prefix_and_every_byte_replaced_parses_or_names_a_line() {
 }
 
 #[test]
-fn an_action_any_person_reaches_unasked_counts_as_unasked() {
+fn an_action_that_runs_with_nobody_asked_counts_as_unasked() {
     let declare = "\
+user
 action alone
   program  /opt/hello/libexec/a
   args     a
@@ -273,12 +276,20 @@ action asked
   caps     RawBlock
   allow    user confirm
   allow    admin password
-  allow    paired
   describe \"C\"
+action remote
+  program  /opt/hello/libexec/e
+  args     e
+  caps     NetAdmin
+  allow    paired
+  describe \"E\"
 ";
     let d = Declaration::parse("hello", declare).unwrap();
-    assert_eq!(d.grant().unasked, ["alone", "shell", "admin"]);
-    assert_eq!(d.unasked_caps(), caps::POWER | caps::MOUNT | caps::CLOCK);
+    assert_eq!(d.grant().unasked, ["alone", "shell", "admin", "remote"]);
+    assert_eq!(
+        d.unasked_caps(),
+        caps::POWER | caps::MOUNT | caps::CLOCK | caps::NET_ADMIN
+    );
 }
 
 #[test]
@@ -307,4 +318,74 @@ fn two_services_never_listen_on_one_socket() {
     assert_eq!(refused(&declare("listen tcp 7000")), 7);
     assert_eq!(refused(&declare("listen unix ctl")), 7);
     assert!(Declaration::parse("hello", &declare("listen udp 7000")).is_ok());
+}
+
+#[test]
+fn privd_reads_an_action_as_the_one_person_at_the_machine_meets_it() {
+    use slopos_abi::extension::Label;
+    use slopos_priv_core::{Requester, Verdict};
+    let declare = "\
+user
+action greet
+  program  /opt/hello/libexec/greet
+  args     greet *
+  caps     Power Mount
+  cwd
+  exclusive lane
+  allow    program /opt/hello/bin/client
+  allow    admin password
+  allow    user
+  allow    program /bin/compositor
+  allow    paired
+  describe \"Greet\"
+action calm
+  program  /opt/hello/libexec/greet
+  args     calm
+  caps     Power
+  allow    user alone
+  describe \"Calm\"
+";
+    let d = Declaration::parse("hello", declare).unwrap();
+    let label = Label::new(b"hello", [3; 32]).unwrap();
+    let greet = d.actions[0].for_privd(105, caps::POWER, label);
+    assert_eq!(greet.name, "ext.hello.greet");
+    assert_eq!(greet.program, "/opt/hello/libexec/greet");
+    assert_eq!(greet.uid, 105);
+    assert_eq!(greet.caps, caps::POWER, "held within what was granted");
+    assert!(greet.cwd);
+    assert_eq!(greet.exclusive_group(), Some("ext.hello.lane"));
+    assert_eq!(greet.describe, "Greet (extension hello)");
+    assert_eq!(
+        greet
+            .allows
+            .iter()
+            .map(|a| (a.principal.clone(), a.consent))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                policy::Principal::Extension("/opt/hello/bin/client".into(), label),
+                false
+            ),
+            (policy::Principal::Session, true),
+            (policy::Principal::Program("/bin/compositor".into()), false),
+            (policy::Principal::Paired, false),
+        ],
+        "a later line for the same person is never reached"
+    );
+    let session = Requester::new(SESSION_UID, None, false);
+    assert_eq!(greet.admits(&session), Verdict::Ask);
+    assert_eq!(
+        greet.admits(&Requester::extension(
+            SESSION_UID,
+            "/opt/hello/bin/client",
+            label
+        )),
+        Verdict::Run
+    );
+    assert_eq!(
+        greet.admits(&Requester::new(0, Some("/bin/shell"), false)),
+        Verdict::Refuse
+    );
+    let calm = d.actions[1].for_privd(105, caps::POWER, label);
+    assert_eq!(calm.admits(&session), Verdict::Run);
 }

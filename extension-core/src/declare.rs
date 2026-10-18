@@ -39,6 +39,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use slopos_abi::extension::Label;
 use slopos_priv_core::policy::{self, Shape};
 
 use crate::grant::Grant;
@@ -136,17 +137,17 @@ pub enum Level {
 }
 
 impl Action {
-    /// Whether a person's processes may run it unasked: it allows `user`
-    /// with no level or `alone`, which one person logged in always is,
-    /// `admin` with no level, which that person is, or a program, which any
-    /// person may run.
+    /// Whether it runs with nobody asked: it allows `user` with no level or
+    /// `alone`, which one person logged in always is, `admin` with no level,
+    /// which that person is, a program, which any person may run, or the
+    /// paired agent, which is never asked.
     pub fn unasked(&self) -> bool {
         self.allows.iter().any(|a| {
             matches!(
                 (&a.principal, a.level),
                 (Principal::User, Level::None | Level::Alone)
                     | (Principal::Admin, Level::None)
-                    | (Principal::Program(_), _)
+                    | (Principal::Program(_) | Principal::Paired, _)
             )
         })
     }
@@ -154,6 +155,46 @@ impl Action {
     /// The name after `ext.<extension>.`.
     pub fn short(&self) -> &str {
         self.name.rsplit('.').next().unwrap_or(&self.name)
+    }
+
+    /// What privd runs for it: its program as `uid`, the extension's first
+    /// user, holding what it declares within `held`. Until privd tells people
+    /// apart, its `allow` lines read as the one person at the machine, its
+    /// only admin and without a password, meets them: a level but `alone`
+    /// asks them, and the first line a requester matches decides. `label`
+    /// names the activation whose programs its `program` lines mean.
+    pub fn for_privd(&self, uid: u32, held: u64, label: Label) -> policy::Action {
+        let extension = String::from_utf8_lossy(label.name()).into_owned();
+        let own = format!("{}/", mount_point(&extension));
+        let mut allows: Vec<policy::Allow> = Vec::new();
+        for allow in &self.allows {
+            let (principal, consent) = match (&allow.principal, allow.level) {
+                (Principal::Admin | Principal::User, level) => (
+                    policy::Principal::Session,
+                    !matches!(level, Level::None | Level::Alone),
+                ),
+                (Principal::Paired, _) => (policy::Principal::Paired, false),
+                (Principal::Program(path), _) if path.starts_with(&own) => {
+                    (policy::Principal::Extension(path.clone(), label), false)
+                }
+                (Principal::Program(path), _) => (policy::Principal::Program(path.clone()), false),
+            };
+            if !allows.iter().any(|a| a.principal == principal) {
+                allows.push(policy::Allow { principal, consent });
+            }
+        }
+        policy::Action {
+            name: self.name.clone(),
+            program: self.program.clone(),
+            shapes: self.shapes.clone(),
+            caps: self.caps & held,
+            uid,
+            allows,
+            describe: format!("{} (extension {extension})", self.describe),
+            cwd: self.cwd,
+            exclusive: self.exclusive.clone(),
+            medium: false,
+        }
     }
 }
 
@@ -331,6 +372,11 @@ impl Declaration {
         if (!self.services.is_empty() || self.state || self.runtime) && self.users.is_empty() {
             return Err(whole(
                 "a service's log, state and runtime directory are its extension's first user's, so it declares a user",
+            ));
+        }
+        if !self.actions.is_empty() && self.users.is_empty() {
+            return Err(whole(
+                "an action's mechanism runs as its extension's first user, so it declares a user",
             ));
         }
         Ok(())

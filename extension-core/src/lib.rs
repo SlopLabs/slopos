@@ -14,6 +14,7 @@ extern crate std;
 pub mod accounts;
 pub mod admit;
 pub mod ceiling;
+pub mod config;
 pub mod declare;
 pub mod elf;
 pub mod grant;

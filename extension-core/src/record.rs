@@ -10,6 +10,7 @@
 //! floor 3 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 //! refused 4
 //! uids hello=100,hello-worker=101
+//! config 2
 //! image current
 //!   version 3
 //!   sha256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
@@ -17,8 +18,9 @@
 //!   grant NetAdmin unasked - users hello commands hello
 //! ```
 //!
-//! `uids` follows `refused` once any uid is given, and `why` follows both
-//! when a check stopped the extension. A record has one spelling, the one
+//! `uids` follows `refused` once any uid is given, `config` once a key's
+//! configuration went in, and `why` follows them when a check stopped the
+//! extension. A record has one spelling, the one
 //! [`Record::render`] writes.
 
 use alloc::format;
@@ -44,6 +46,9 @@ pub struct Record {
     /// Every uid ever given it, by name, kept once it is removed:
     /// [`crate::accounts`].
     pub uids: Vec<(String, u32)>,
+    /// The serial of the last configuration a key signed for it,
+    /// [`crate::config`], kept for good so none older goes in again.
+    pub config: u64,
     pub why: Option<String>,
     pub current: Option<Installed>,
     pub previous: Option<Installed>,
@@ -81,6 +86,7 @@ impl Record {
             floor: None,
             refused: Vec::new(),
             uids: Vec::new(),
+            config: 0,
             why: None,
             current: None,
             previous: None,
@@ -92,6 +98,11 @@ impl Record {
             .iter()
             .find(|(name, _)| name == user)
             .map(|&(_, uid)| uid)
+    }
+
+    /// Whether it is to run: enabled, stopped by no check, and installed.
+    pub fn runs(&self) -> bool {
+        self.enabled && self.why.is_none() && self.current.is_some()
     }
 
     /// Its number: the uid of its own name.
@@ -198,6 +209,9 @@ impl Record {
                 .collect();
             out.push_str(&format!("uids {}\n", uids.join(",")));
         }
+        if self.config != 0 {
+            out.push_str(&format!("config {}\n", self.config));
+        }
         if let Some(why) = &self.why {
             out.push_str(&format!("why {why}\n"));
         }
@@ -252,6 +266,9 @@ impl Record {
                     .then_some(())?;
                 record.uids.push((name.to_string(), uid));
             }
+        }
+        if let Some(serial) = lines.take_if("config") {
+            record.config = parse_number(serial)?;
         }
         if let Some(why) = lines.take_if("why") {
             record.why = Some(why.to_string()).filter(|why| valid_text(why, WHY_MAX));

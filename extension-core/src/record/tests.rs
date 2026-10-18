@@ -22,6 +22,7 @@ fn record() -> Record {
         floor: Some((3, [3; 32])),
         refused: vec![4, 5],
         uids: vec![("hello".into(), 100), ("hello-worker".into(), 107)],
+        config: 2,
         why: None,
         current: Some(image(3, 3)),
         previous: Some(Installed {
@@ -48,6 +49,10 @@ fn a_record_reads_back_as_written() {
         },
         Record {
             uids: Vec::new(),
+            ..record()
+        },
+        Record {
+            config: 0,
             ..record()
         },
     ] {
@@ -80,6 +85,9 @@ fn any_other_spelling_is_refused() {
         ("signer SHA256:bbX", "signer SHA256:bb"),
         ("floor 3 ", "floor 03 "),
         ("users hello", "users hello,hello"),
+        ("config 2", "config 02"),
+        ("config 2", "config 0"),
+        ("config 2\n", "config 2\nconfig 3\n"),
     ] {
         let other = text.replacen(from, to, 1);
         assert_ne!(other, text, "{from}");
