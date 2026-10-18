@@ -125,6 +125,12 @@
 # `extension_service_test` installs the test extension three times, each
 # activation's copy held while its daemon runs, beside the daemons, their
 # loggers, the sockets init keeps and the extctl runs that tell init.
+# Then 63720 in one capture on a host without KVM, once extensions' actions
+# ran and the tests image grew to 128M: `extension_action_test` installs and
+# updates its extension, runs its mechanisms through privd and its
+# configuration through extctl, and has privd read the actions again.
+# The diskblocks row after userland is `persist_test`'s filler meeting the
+# root's reserve: 7058 once the tests image grew from 96M, where it was 3658.
 # The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
@@ -165,9 +171,9 @@ post-kernel-tests	residentpages	2308
 post-kernel-tests	task	9
 post-userland-tests	commitpages	193853
 post-userland-tests	custody	12
-post-userland-tests	diskblocks	3658
+post-userland-tests	diskblocks	7058
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	59006
+post-userland-tests	kernelmeta	63720
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
