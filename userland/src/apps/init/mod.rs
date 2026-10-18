@@ -608,10 +608,10 @@ impl Init {
         }
     }
 
-    /// End the mechanisms of each extension whose actions no longer run,
-    /// unless one could not be read, and have privd read the actions again
-    /// when those it read are not those that run. One draining, not running
-    /// or not yet ready reads them as it starts or once it is.
+    /// End the mechanisms of each extension read whose actions no longer run,
+    /// and have privd read the actions again when those it read are not those
+    /// that run. One draining, not running or not yet ready reads them as it
+    /// starts or once it is.
     fn follow_actions(&mut self, now: u64) {
         let actions = match crate::activation::actions() {
             Ok(actions) => actions,
@@ -622,15 +622,15 @@ impl Init {
         };
         if actions.unread {
             self.units.read_again(now);
-        } else {
-            let running: Vec<u32> = actions.loaded.iter().map(|loaded| loaded.login).collect();
-            let stopped: Vec<u32> = init_control::Tasks::read()
-                .action_tags()
-                .into_iter()
-                .filter(|tag| !running.contains(tag))
-                .collect();
-            self.units.end_strays(now, stopped);
         }
+        let running: Vec<u32> = actions.loaded.iter().map(|loaded| loaded.login).collect();
+        self.units.spare(&running);
+        let stopped: Vec<u32> = init_control::Tasks::read()
+            .action_tags()
+            .into_iter()
+            .filter(|tag| actions.stopped.contains(tag))
+            .collect();
+        self.units.end_strays(now, stopped);
         let ready = self.privd.draining.is_none() && self.privd_ready.is_none();
         let Some(child) = self.privd.child.as_ref().filter(|_| ready) else {
             return;
@@ -853,6 +853,7 @@ impl Init {
             || self.remoted.as_ref().is_some_and(|r| r.draining.is_some())
             || self.remote_ending.is_some()
             || !self.retired.is_empty()
+            || self.privd_ready.is_some()
             || self.units.busy();
         !draining
             && match &self.session {

@@ -744,9 +744,20 @@ impl Units {
         std::mem::take(&mut self.reread)
     }
 
-    /// Read the store again later, as when part of it could not be read.
+    /// Read the store again later, as when part of it could not be read,
+    /// unless that is due already.
     pub fn read_again(&mut self, now: u64) {
-        self.recheck_after(now, true);
+        if self.recheck.is_none() {
+            self.recheck_after(now, true);
+        }
+    }
+
+    /// Stop ending what carries any of `tags`, which run again.
+    pub fn spare(&mut self, tags: &[u32]) {
+        self.strays.retain_mut(|(ending, _)| {
+            ending.retain(|tag| !tags.contains(tag));
+            !ending.is_empty()
+        });
     }
 
     /// End what carries any of `tags` not already being ended.

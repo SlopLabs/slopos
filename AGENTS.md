@@ -765,23 +765,24 @@ to relay a requester's signals to a mechanism running as another uid
 only the mechanisms it started. A mechanism carries its extension's login tag
 (`init_control::action_tag`) rather than privd's, which a privd started again
 counts with what its predecessor started, and init ends whatever carries the
-tag of an extension whose actions no longer run, as it ends a service, once it
-could read every extension. What it holds is also within `DELEGABLE`, all
-privd can give. Until privd tells people apart (`plans/users-and-login.md`) an
-extension's `allow` lines read as the one person at the machine meets them,
-its only admin and without a password: `user` and `admin` with no level, and
-`user alone`, run for the session's uid unasked, and any other level asks the
-person; `paired` is privd's, and `program` a base program's path or one of the
-extension's own, which matches only a requester running that file of the
-activation whose label (`SO_PEEREXTENSION`) names the extension and the digest
-its record installed, and never `root`. privd reads a requester's label before
-its program, so one that lapses between the two reads is no program; uid 0
-running an extension's program is no `root`. The question names the extension
-after the action's `describe`. Init remembers what the actions privd read were
-read from — each extension's name, image digest and activation — and on
-`extensions`, and whenever it reads the store again, sends privd `SIGHUP` when
-that changes, once a privd it started has said it is ready, so privd never
-leaves its socket for an extension and an exclusive group stays its own.
+tag of an extension whose actions no longer run, as it ends a service, but not
+one whose record or activation it cannot read, nor one running again. What it
+holds is also within `DELEGABLE`, all privd can give. Until privd tells people
+apart (`plans/users-and-login.md`) an extension's `allow` lines read as the
+one person at the machine meets them, its only admin and without a password:
+`user` and `admin` with no level, and `user alone`, run for the session's uid
+unasked, and any other level asks the person; `paired` is privd's, and
+`program` a base program's path or one of the extension's own, which matches
+only a requester running that file of the activation whose label
+(`SO_PEEREXTENSION`) names the extension and the digest its record installed,
+and never `root`. privd reads a requester's label before its program, so one
+that lapses between the two reads is no program; uid 0 running an extension's
+program is no `root`. The question names the extension after the action's
+`describe`. Init remembers what the actions privd read were read from — each
+extension's name, image digest and activation — and on `extensions`, and
+whenever it reads the store again, sends privd `SIGHUP` when that changes,
+once a privd it started has said it is ready, so privd never leaves its socket
+for an extension and an exclusive group stays its own.
 
 **An extension's commands, apps and configuration are the owner's grant.**
 `/opt/bin` holds a link to `/opt/<name>/bin/<command>` for each command of
@@ -794,24 +795,26 @@ apps it declares that no extension before it in name order showed.
 holds what the machine changed of an extension's configuration
 (`slopos_extension_core::config`), for an extension that declares `config`,
 one file deep and at most 64 files, laid out empty and sealed before its first
-activation runs, mode 0755, with anything unsealed in it — left by a write cut
-short, or put there by no `Seal` holder — taken away at each activation and
-install, and a file another process changes as it is written taken away rather
-than left unsealed: `extctl config edit <name> <file>` edits a copy as
-sudoedit does, as uid 0 with an editor found only in `/bin:/sbin`, and
-installs what changed through `org.slopos.extension.config` (`config install
-<name> <file> <sha256>`, the file the requester's standard input, so the
-mechanism installs only what the requester could read; `Seal` alone, the
-person asked), and `extctl config apply <from>` installs, unasked through
-`org.slopos.extension.config-signed`, a file whose sidecar `<from>.meta` —
-name, file, serial, SHA-256 — the key that installed the extension signed with
-`ssh-keygen -Y sign -n extension-config@slopos`, while the owner trusts that
-key and its serial is past the last, which the record keeps (`config <n>`)
-before the file goes in. Init restarts each service whose `reads` of
-`/etc/<name>` hold other sealed bytes, and holds it to no file no `Seal`
-holder put there. `extctl --root <dir> status|enable|disable` acts on the
-store of a root mounted at `<dir>`, as the rescue shell runs it holding
-everything; no privd action takes `--root`.
+activation runs, mode 0755; at each activation and install anything unsealed
+in a sealed one — left by a write cut short, or put there while a write held
+it open — is taken away, as is a write's temporary file, while anything else
+unsealed, which may be the owner's, is refused, and a file another process
+changes as it is written is taken away rather than left unsealed: `extctl
+config edit <name> <file>` edits a copy as sudoedit does, as uid 0 with an
+editor of `/bin` or `/sbin`, and installs what changed through
+`org.slopos.extension.config` (`config install <name> <file> <sha256>`, the
+file the requester's standard input, so the mechanism installs only what the
+requester could read; `Seal` alone, the person asked), and `extctl config
+apply <from>` installs, unasked through `org.slopos.extension.config-signed`,
+a file whose sidecar `<from>.meta` — name, file, serial, SHA-256 — the key
+that installed the extension signed with `ssh-keygen -Y sign -n
+extension-config@slopos`, while the owner trusts that key and its serial is
+past the last, which the record keeps (`config <n>`) before the file goes in.
+Init restarts each service whose `reads` of `/etc/<name>` hold other sealed
+bytes, and holds it to no file no `Seal` holder put there. `extctl --root
+<dir> status|enable|disable` acts on the store of a root mounted at `<dir>`,
+as the rescue shell runs it holding everything; no privd action takes
+`--root`.
 
 **A base names the interface it needs; a kernel names the ones it serves.**
 `slopos_abi::BASE_INTERFACE` numbers the private call surface: every private

@@ -4,8 +4,9 @@
 //! is a principal only while it runs that program; privd reads an extension's
 //! actions again as it serves; its command comes last on `PATH`, its app entry
 //! replaces none, a configuration edited or signed restarts the service that
-//! reads it, a rescue shell's `extctl --root` reaches a root it mounted, and
-//! its mechanisms end once it stops.
+//! reads it and takes away what no `Seal` holder put beside it, a rescue
+//! shell's `extctl --root` reaches a root it mounted, and its mechanisms end
+//! once it stops.
 //!
 //! The runner hands this binary every capability as uid 0, which privd's
 //! `root` admits unasked to the base's actions and to none of an extension's;
@@ -659,11 +660,22 @@ fn a_configuration_edited_or_signed_restarts_what_reads_it() -> bool {
     let Some(second) = served(Some(first), "edited by the person") else {
         return fail("the service did not start again on the edited file");
     };
+    let dir = format!("/etc/{NAME}");
+    let planted = format!("{dir}/planted.conf");
+    let plant = set_sealed(Path::new(&dir), false)
+        && std::fs::write(&planted, "no Seal holder's\n").is_ok()
+        && set_sealed(Path::new(&dir), true);
+    if !plant {
+        return fail(format!("planting {planted}"));
+    }
     let owner = key(41);
     let applied = signed_config(&owner, "signed.conf", "signed by its key\n", 1);
     let apply = extctl(USER, &["config", "apply", &applied]);
     if !apply.ok() {
         return fail(format!("the signed configuration: {}", apply.shown()));
+    }
+    if Path::new(&planted).exists() {
+        return fail("an unsealed file outlived a configuration going in");
     }
     if served(Some(second), "signed by its key").is_none() {
         return fail("the service did not start again on the signed file");

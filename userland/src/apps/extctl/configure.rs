@@ -126,6 +126,15 @@ pub fn prepare(store: &Store, source: &Source) -> Result<Prepared, String> {
         .current
         .as_ref()
         .ok_or_else(|| format!("{name}: nothing is installed"))?;
+    let dir = PathBuf::from(config::dir(&name));
+    let held = fs::read_dir(&dir).map_or(0, Iterator::count);
+    if held >= config::FILES_MAX && !dir.join(&file).exists() {
+        return Err(format!(
+            "{} holds {} files already",
+            dir.display(),
+            config::FILES_MAX
+        ));
+    }
     let serial = match signed {
         None => None,
         Some((serial, key)) => {
@@ -184,22 +193,16 @@ pub fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     }
     let dir = own_dir(&record.name)?;
     let at = dir.join(&file);
-    let held = fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    if !at.exists() && held.count() >= config::FILES_MAX {
-        return Err(format!(
-            "{} holds {} files already",
-            dir.display(),
-            config::FILES_MAX
-        ));
-    }
     store::unsealed(&dir, || store::replace_sealed(&at, &bytes))?;
     Ok(format!("{} installed", at.display()))
 }
 
 /// `/etc/<name>` as `extctl` keeps it, made so where there is none: a sealed
-/// directory of uid 0's, mode 0755, holding sealed files alone. Anything else
-/// there was put by no `Seal` holder, or left by a write cut short, so it is
-/// taken away rather than sealed in as the extension's configuration.
+/// directory of uid 0's, mode 0755, holding sealed files alone. What else a
+/// sealed one holds was left by a write cut short or put there while one
+/// held it open, so it is taken away, as is a write's temporary file
+/// anywhere; anything else may be the owner's, so it is refused rather than
+/// sealed in as the extension's configuration or lost.
 pub fn own_dir(name: &str) -> Result<PathBuf, String> {
     let dir = PathBuf::from(config::dir(name));
     let shown = |e: std::io::Error| format!("{}: {e}", dir.display());
@@ -212,21 +215,22 @@ pub fn own_dir(name: &str) -> Result<PathBuf, String> {
         }
         Err(e) => return Err(shown(e)),
     };
+    let kept = mode == 0 || store::sealed_dir(&dir);
     let strays = fs::read_dir(&dir)
         .map_err(shown)?
         .map(|entry| entry.map(|entry| entry.path()).map_err(shown))
         .filter(|path| !path.as_ref().is_ok_and(|path| store::sealed_file(path)))
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(path) = strays.iter().find(|path| !kept && !store::temporary(path)) {
+        return Err(format!(
+            "{} is no sealed file, so no configuration of {name}'s; take it away",
+            path.display()
+        ));
+    }
     if mode != 0o755 || !strays.is_empty() {
         store::unsealed(&dir, || {
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).map_err(shown)?;
-            strays.iter().try_for_each(|path| {
-                eprintln!(
-                    "extctl: {} is no sealed file, so no configuration of {name}'s; taken away",
-                    path.display()
-                );
-                store::remove_entry(path)
-            })
+            strays.iter().try_for_each(|path| store::remove_entry(path))
         })?;
     }
     store::seal_dir(&dir)?;
@@ -270,6 +274,17 @@ pub fn edit(name: &str, file: &str) -> Result<i32, String> {
         let words = editor();
         let mut command = Command::new(&words[0]);
         if process::geteuid() == 0 {
+            let base = |dir: &str| {
+                words[0]
+                    .strip_prefix(dir)
+                    .is_some_and(|rest| !rest.contains('/'))
+            };
+            if words[0].contains('/') && !base("/bin/") && !base("/sbin/") {
+                return Err(format!(
+                    "{}: as uid 0 the editor is one in /bin or /sbin",
+                    words[0]
+                ));
+            }
             command.env("PATH", slopos_priv_core::MECHANISM_PATH);
         }
         let status = command

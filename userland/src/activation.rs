@@ -165,6 +165,8 @@ pub struct Actions {
     pub from: String,
     /// The extensions left out, and why.
     pub skipped: Vec<String>,
+    /// The login tags of the extensions read whose actions do not run.
+    pub stopped: Vec<u32>,
     /// One was left out because its record or activation could not be read,
     /// not because it does not run.
     pub unread: bool,
@@ -195,18 +197,25 @@ pub fn actions() -> Result<Actions, String> {
     let mut taken: Vec<u32> = Vec::new();
     for record in records {
         let name = record.name.clone();
+        let login = record.number().and_then(crate::init_control::action_tag);
+        let stopped = |out: &mut Actions| out.stopped.extend(login);
         let uids: Vec<u32> = record.uids.iter().map(|&(_, uid)| uid).collect();
         if uids.iter().any(|uid| taken.contains(uid)) {
             out.skipped
                 .push(format!("{name}: it holds a uid another extension holds"));
+            stopped(&mut out);
             continue;
         }
         taken.extend(uids);
         let Some(current) = record.current.as_ref().filter(|_| record.runs()) else {
+            stopped(&mut out);
             continue;
         };
         let shown = match shown(&record) {
-            Ok(shown) if shown.declaration.actions.is_empty() => continue,
+            Ok(shown) if shown.declaration.actions.is_empty() => {
+                stopped(&mut out);
+                continue;
+            }
             Ok(shown) => shown,
             Err(why) => {
                 out.skipped.push(format!("{name}: {why}"));
@@ -217,12 +226,13 @@ pub fn actions() -> Result<Actions, String> {
         let first = shown.declaration.users.first();
         let (Some(uid), Some(login), Some(label)) = (
             first.and_then(|user| record.uid(user)),
-            record.number().and_then(crate::init_control::action_tag),
+            login,
             Label::new(name.as_bytes(), current.sha256),
         ) else {
             out.skipped.push(format!(
                 "{name}: its record gives it or its first user no uid"
             ));
+            stopped(&mut out);
             continue;
         };
         let held = current.grant.caps & ceiling & DELEGABLE & !NEVER;

@@ -107,6 +107,11 @@ pub fn sealed_file(path: &Path) -> bool {
         .is_ok_and(|file| file.metadata().is_ok_and(|m| m.is_file()) && is_sealed(&file))
 }
 
+/// Whether `path` is a sealed directory, not followed if a link.
+pub fn sealed_dir(path: &Path) -> bool {
+    open_dir(path).is_ok_and(|dir| is_sealed(&dir))
+}
+
 /// Seal the directory at `path`.
 pub fn seal_dir(path: &Path) -> Result<(), String> {
     let dir = open_dir(path).map_err(|e| shown(path, e))?;
@@ -224,6 +229,18 @@ fn put_generation(dir: &Path, stem: &str, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// What `replace_sealed` writes `<name>`'s bytes as before the rename,
+/// `.<name>` with this after it.
+const TEMPORARY: &str = ".new";
+
+/// Whether `path` names a file [`replace_sealed`] writes before its rename.
+pub fn temporary(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix('.')?.strip_suffix(TEMPORARY))
+        .is_some_and(|name| !name.is_empty())
+}
+
 /// Make `bytes` the sealed file at `path` in place of what is there, unless
 /// it holds them sealed already. A sealed file can be neither renamed nor
 /// renamed over, so the old one is unsealed for the rename and the new one
@@ -243,7 +260,7 @@ pub fn replace_sealed(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let name = path.file_name().ok_or_else(|| shown(path, "no name"))?;
     let mut fresh = std::ffi::OsString::from(".");
     fresh.push(name);
-    fresh.push(".new");
+    fresh.push(TEMPORARY);
     let fresh = dir.join(fresh);
     remove_entry(&fresh)?;
     let mut file = OpenOptions::new()

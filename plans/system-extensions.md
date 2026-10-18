@@ -829,16 +829,19 @@ own, all building on extensions:
   reused.
 - **A mechanism carries its extension's login tag**, never privd's: init ends
   what carries it once the extension's actions stop running, as it ends a
-  service, but not while an extension cannot be read, as a service of one
-  is left standing; a privd started again counts it with what its
-  predecessor started, taking no exclusive group while any of it runs.
-  Init signals only a privd it saw ready, since `SIGHUP` before privd's
-  handler would end it.
+  service, but not while that extension cannot be read, as a service of one
+  is left standing, and stops ending it once the actions run again; a privd
+  started again counts it with what its predecessor started, taking no
+  exclusive group while any of it runs. Init signals only a privd it saw
+  ready, since `SIGHUP` before privd's handler would end it, and re-executes
+  only once privd is.
 - **`/etc/<name>` is laid out sealed at activation**: an image that declares
-  `config` gets an empty sealed directory, mode 0755, before it runs, and
-  anything unsealed there is taken away at each activation and install, so
-  nothing a `DacOverride` holder planted, or a write cut short left, is
-  sealed in as configuration; a file another process changed as it was
+  `config` gets an empty sealed directory, mode 0755, before it runs. What
+  is unsealed in a sealed one was left by a write cut short or put there
+  while a write held it open, so it is taken away at each activation and
+  install, as is a write's temporary file; anything unsealed in one extctl
+  never sealed may be the owner's, so it is refused rather than lost or
+  sealed in as configuration. A file another process changed as it was
   written is taken away too rather than left unsealed under its name.
 - **`/opt/bin` is `extctl`'s, and only its links into `/opt`**: it links each
   command of every extension shown after every change, so a disabled,
