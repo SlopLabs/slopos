@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod app_entry;
 pub mod apps;
 pub mod base_image;

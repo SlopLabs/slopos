@@ -246,6 +246,9 @@ struct Init {
     /// `/sbin/init`.
     reexec_due: Option<u64>,
     privd: Supervised,
+    /// The extensions' actions privd read last, as `activation::Actions::from`
+    /// names them.
+    privd_actions: String,
     /// What a service left draining past [`service::DRAIN_MS`]: no longer
     /// supervised, only reaped.
     retired: Vec<Child>,
@@ -282,6 +285,7 @@ impl Init {
             base: watch_base(),
             reexec_due: None,
             privd: Supervised::new(&PRIVD),
+            privd_actions: extension_actions().unwrap_or_default(),
             retired: Vec::new(),
             remote_ending: None,
             remoted: std::path::Path::new(REMOTE_CONF)
@@ -350,6 +354,7 @@ impl Init {
             base: watch_base(),
             reexec_due: None,
             privd: supervised(&PRIVD, state.privd),
+            privd_actions: extension_actions().unwrap_or_default(),
             retired: Vec::new(),
             remote_ending: None,
             remoted: state.remoted.map(|remoted| supervised(&REMOTED, remoted)),
@@ -580,6 +585,29 @@ impl Init {
         }
     }
 
+    /// Have privd read the extensions' actions again when those it read are
+    /// no longer those that run. One draining, or not running, reads them as
+    /// it starts.
+    fn follow_actions(&mut self) {
+        let Some(child) = self
+            .privd
+            .child
+            .as_ref()
+            .filter(|_| self.privd.draining.is_none())
+        else {
+            return;
+        };
+        match extension_actions() {
+            Ok(actions) if actions != self.privd_actions => {
+                println!("init: an extension's actions changed; privd reads them again");
+                let _ = process::kill(child.pid, slopos_abi::signal::SIGHUP);
+                self.privd_actions = actions;
+            }
+            Ok(_) => {}
+            Err(why) => eprintln!("init: {why}"),
+        }
+    }
+
     /// End remoted and what it ran for a broker the base no longer pairs
     /// with, as a session ends: remoted for a new pairing starts after.
     fn end_remote(&mut self, now: u64) {
@@ -637,6 +665,7 @@ impl Init {
         self.retired.extend(retired);
         if self.privd.due_by(now) {
             let fds = self.privd_fds();
+            self.privd_actions = extension_actions().unwrap_or_default();
             self.privd.start(now, &fds);
         }
         if let Some(remoted) = self.remoted.as_mut().filter(|r| r.due_by(now)) {
@@ -743,7 +772,8 @@ impl Init {
             }
             Command::Extensions => {
                 let session = self.session_runs();
-                return self.units.reload(Some(reply), now, session);
+                self.units.reload(Some(reply), now, session);
+                return self.follow_actions();
             }
             Command::RestartSession if self.session_held && uid != 0 => {
                 return answer(reply, "refused: uid 0 ended the session");
@@ -915,6 +945,11 @@ impl Init {
             while matches!(fs::read_slice(end.raw(), &mut buf), Ok(n) if n > 0) {}
         }
     }
+}
+
+/// What the running extensions' actions were read from.
+fn extension_actions() -> Result<String, String> {
+    crate::activation::actions().map(|actions| actions.from)
 }
 
 fn readable(fd: &OwnedFd) -> bool {

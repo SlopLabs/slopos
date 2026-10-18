@@ -128,8 +128,10 @@ impl Agent {
                         events: POLLOUT,
                         revents: 0,
                     }];
-                    if !matches!(fs::poll(&mut fds, WRITE_MS), Ok(n) if n > 0) {
-                        return false;
+                    match fs::poll(&mut fds, WRITE_MS) {
+                        Ok(n) if n > 0 => {}
+                        Err(SyscallError::EINTR) => {}
+                        _ => return false,
                     }
                 }
                 Err(SyscallError::EINTR) => {}

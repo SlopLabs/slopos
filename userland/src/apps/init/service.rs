@@ -32,7 +32,7 @@ pub const PRIVD: Service = Service {
     path: "/sbin/privd",
     reads: &["/usr/share/slopos/privd/", PAIRING],
     args: &[],
-    caps: slopos_priv_core::DELEGABLE,
+    caps: slopos_priv_core::PRIVD_CAPS,
     priority: TaskPriority::Normal,
     session: false,
     login: Some(init_control::PRIVD),

@@ -1,10 +1,15 @@
 //! `/sbin/privd` — runs a named action's mechanism, the base program the
-//! sealed policy names, as a fresh child holding what the action names and
-//! nothing of its requester's but the descriptors it sent.
+//! sealed policy names or an enabled extension's program its activation
+//! declares, as a fresh child holding what the action names and nothing of
+//! its requester's but the descriptors it sent. An extension's mechanism runs
+//! as the extension's first user.
 //!
 //! Who asks is what the kernel recorded when the connection was made: the
 //! uid, a pidfd and the program. Every failure on the way is a denial, and a
 //! requester whose process has exited is refused, before consent and after.
+//!
+//! `SIGHUP` has it read the extensions' actions again, as init asks when they
+//! change; a request reads the policy as it stands when the request comes.
 //!
 //! `SIGTERM` drains it, as init asks when a new base changes privd, its
 //! policy or the pairing: it stops accepting, refuses what is asked next,
@@ -24,15 +29,17 @@ mod consent;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
+use slopos_abi::extension::Label;
 use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGPIPE, SIGQUIT, SIGTERM, sig_bit};
 use slopos_abi::syscall::{
     F_GETFD, MSG_NOSIGNAL, O_CLOEXEC, O_NONBLOCK, POLLHUP, POLLIN, POLLOUT, UserPollFd,
 };
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
+use slopos_extension_core::declare::mount_point;
 use slopos_priv_core::consent::{Ask, Refusal};
 use slopos_priv_core::policy::{Principal, REMOTED};
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request, kind};
@@ -76,8 +83,23 @@ struct Admitted {
     pooled: bool,
 }
 
+/// Where an extension's action was read from.
+struct Origin {
+    action: String,
+    extension: String,
+    generation: u64,
+}
+
+/// The base's actions and the running extensions', and where each of the
+/// latter was read from.
+struct Loaded {
+    policy: Policy,
+    origins: Vec<Origin>,
+}
+
 struct Daemon {
-    policy: Result<Policy, String>,
+    base: Result<Policy, String>,
+    loaded: Mutex<Result<Arc<Loaded>, String>>,
     paired: bool,
     consent: Broker,
     running: Mutex<Vec<String>>,
@@ -92,6 +114,26 @@ struct Daemon {
 }
 
 impl Daemon {
+    fn loaded(&self) -> Result<Arc<Loaded>, String> {
+        self.loaded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Read the extensions' actions again, the base's kept as read at start.
+    fn reload(&self) {
+        let fresh = self
+            .base
+            .clone()
+            .map(|base| Arc::new(with_extensions(base)));
+        *self
+            .loaded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
+        log!("privd: read the extensions' actions again");
+    }
+
     fn inherited_runs(&self) -> bool {
         !self.inherited.is_empty()
             && init_control::threads_elsewhere(init_control::PRIVD)
@@ -103,6 +145,7 @@ impl Daemon {
 static DAEMON: OnceLock<Daemon> = OnceLock::new();
 
 pub(super) static DRAINING: AtomicBool = AtomicBool::new(false);
+static RELOAD: AtomicBool = AtomicBool::new(false);
 /// Requests between being read and being answered.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 /// The write end of the pipe the accept loop polls beside the listener.
@@ -110,6 +153,11 @@ static WAKE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn drain(_: i32) {
     DRAINING.store(true, Ordering::SeqCst);
+    let _ = fs::write_slice(WAKE.load(Ordering::Relaxed), &[0]);
+}
+
+extern "C" fn reload(_: i32) {
+    RELOAD.store(true, Ordering::SeqCst);
     let _ = fs::write_slice(WAKE.load(Ordering::Relaxed), &[0]);
 }
 
@@ -125,13 +173,15 @@ pub fn privd_main() -> ! {
     // Before any descriptor is opened: one could land at the number of an
     // inherited one privd was started without.
     let ready = ReadinessNotifier::acquire();
+    process::set_signal_handler(SIGHUP, reload);
     let channel = consent_channel();
-    let policy = load_policy();
-    if let Err(why) = &policy {
+    let base = base_policy();
+    if let Err(why) = &base {
         log!("privd: {why}; every request will be refused");
     }
     let daemon = Daemon {
-        policy,
+        loaded: Mutex::new(base.clone().map(|base| Arc::new(with_extensions(base)))),
+        base,
         paired: std::path::Path::new(REMOTE_CONF).is_file(),
         consent: Broker::start(channel),
         running: Mutex::new(Vec::new()),
@@ -157,6 +207,9 @@ pub fn privd_main() -> ! {
         ready.signal_ready();
     }
     loop {
+        if RELOAD.swap(false, Ordering::SeqCst) {
+            daemon.reload();
+        }
         let mut fds = [listener.raw(), woken.raw()].map(|fd| UserPollFd {
             fd,
             events: POLLIN,
@@ -166,6 +219,9 @@ pub fn privd_main() -> ! {
         if DRAINING.load(Ordering::SeqCst) {
             drop(listener);
             finish_draining();
+        }
+        if fds[1].revents & POLLIN != 0 {
+            while matches!(fs::read_slice(woken.raw(), &mut [0u8; 16]), Ok(n) if n > 0) {}
         }
         if fds[0].revents & POLLIN == 0 {
             continue;
@@ -208,9 +264,9 @@ pub fn privd_main() -> ! {
 
 impl Admitted {
     fn take(daemon: &'static Daemon, peer: &Peer, paired: bool) -> Option<Admitted> {
-        let root = peer.uid == 0 && peer.program.is_some();
+        let root = peer.uid == 0 && peer.base().is_some();
         let pooled = !root && !peer.requester(paired).is_paired();
-        let key = (peer.uid, peer.program.clone());
+        let key = (peer.uid, peer.program.path().map(str::to_owned));
         let mut connections = daemon.connections.lock().ok()?;
         let in_pool = connections.iter().filter(|(_, pooled)| *pooled).count();
         if (pooled && in_pool >= MAX_CONNECTIONS)
@@ -255,28 +311,62 @@ fn consent_channel() -> Option<OwnedFd> {
 }
 
 /// The base's policy as it stands on this boot, refused whole when a
-/// principal of any action names a dynamically linked program: the loader
-/// would take a library from outside the base for it while its identity still
-/// reads as the base's.
-fn load_policy() -> Result<Policy, String> {
+/// principal of any action names a dynamically linked base program: the
+/// loader would take a library from outside the base for it while its
+/// identity still read as the base's.
+fn base_policy() -> Result<Policy, String> {
     let policy = crate::privd::whole_policy()?;
     for action in policy.actions() {
-        for allow in &action.allows {
-            let path = match &allow.principal {
-                Principal::Program(path) => path.as_str(),
-                Principal::Paired => REMOTED,
-                Principal::Root | Principal::Session => continue,
-            };
-            let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-            if elf_interpreted(&image) != Some(false) {
-                return Err(format!(
-                    "{POLICY}: {}: {path} is not a statically linked program",
-                    action.name
-                ));
-            }
-        }
+        static_principals(action).map_err(|why| format!("{POLICY}: {why}"))?;
     }
     Ok(policy.for_boot(crate::privd::on_the_medium()))
+}
+
+/// `policy` with the running extensions' actions beside it, each refused
+/// alone. An extension's own program stands as a principal only while it
+/// maps nothing from outside the base and its activation.
+fn with_extensions(mut policy: Policy) -> Loaded {
+    let mut origins = Vec::new();
+    let actions = crate::activation::actions().unwrap_or_else(|why| {
+        log!("privd: no extension's actions: {why}");
+        Default::default()
+    });
+    for skipped in actions.skipped {
+        log!("privd: no actions of {skipped}");
+    }
+    for loaded in actions.loaded {
+        let name = loaded.action.name.clone();
+        if let Err(why) = static_principals(&loaded.action) {
+            log!("privd: {}: {why}", loaded.extension);
+        } else if !policy.add(loaded.action) {
+            log!("privd: {}: {name} is an action already", loaded.extension);
+        } else {
+            origins.push(Origin {
+                action: name,
+                extension: loaded.extension,
+                generation: loaded.generation,
+            });
+        }
+    }
+    Loaded { policy, origins }
+}
+
+fn static_principals(action: &Action) -> Result<(), String> {
+    for allow in &action.allows {
+        let path = match &allow.principal {
+            Principal::Program(path) => path.as_str(),
+            Principal::Paired => REMOTED,
+            Principal::Root | Principal::Session | Principal::Extension(..) => continue,
+        };
+        let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        if elf_interpreted(&image) != Some(false) {
+            return Err(format!(
+                "{}: {path} is not a statically linked program",
+                action.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn listen() -> Result<OwnedFd, String> {
@@ -292,25 +382,49 @@ fn listen() -> Result<OwnedFd, String> {
     Ok(fd)
 }
 
-/// Who made a connection, as the kernel recorded it at `connect`: the base
+/// Who made a connection, as the kernel recorded it at `connect`: the
 /// program it ran then, which stands only while it still runs it.
 struct Peer {
     pid: u32,
     uid: u32,
-    program: Option<String>,
+    program: Attested,
     pidfd: OwnedFd,
+}
+
+/// A program as the kernel attests it.
+#[derive(Clone, PartialEq, Eq)]
+enum Attested {
+    Base(String),
+    /// A program of an extension's activation, by its path at `/opt/<name>`.
+    Extension(String, Label),
+    Other,
+}
+
+impl Attested {
+    fn path(&self) -> Option<&str> {
+        match self {
+            Attested::Base(path) | Attested::Extension(path, _) => Some(path),
+            Attested::Other => None,
+        }
+    }
 }
 
 const LAPSED: &str = "the requester no longer runs the program it connected as";
 
-/// The base program the peer at `fd` runs now, `None` for any other.
-fn base_program(fd: &OwnedFd) -> Result<Option<String>, String> {
-    match net::peer_base_program(fd.raw()).map_err(|e| format!("SO_PEERPROGRAM: {e}"))? {
-        None => Ok(None),
-        Some(path) => String::from_utf8(path)
-            .map(Some)
-            .map_err(|_| "SO_PEERPROGRAM: not UTF-8".to_owned()),
-    }
+/// What the peer at `fd` runs now.
+fn attested(fd: &OwnedFd) -> Result<Attested, String> {
+    // In this order: a program that stops holding never holds again, so an
+    // extension's that lapses between the two reads answers no path.
+    let label = net::peer_extension(fd.raw()).map_err(|e| format!("SO_PEEREXTENSION: {e}"))?;
+    let Some(path) = net::peer_program(fd.raw()).map_err(|e| format!("SO_PEERPROGRAM: {e}"))?
+    else {
+        return Ok(Attested::Other);
+    };
+    let path = String::from_utf8(path).map_err(|_| "SO_PEERPROGRAM: not UTF-8".to_owned())?;
+    Ok(match label {
+        Some(label) => Attested::Extension(path, label),
+        None => Attested::Base(path),
+    })
 }
 
 impl Peer {
@@ -320,19 +434,29 @@ impl Peer {
         Ok(Peer {
             pid: cred.pid as u32,
             uid: cred.uid,
-            program: base_program(fd)?,
+            program: attested(fd)?,
             pidfd,
         })
+    }
+
+    fn base(&self) -> Option<&str> {
+        match &self.program {
+            Attested::Base(path) => Some(path),
+            _ => None,
+        }
     }
 
     /// Whether the program read at `accept` still stands: the peer has not
     /// exec'd, mapped code from elsewhere or exited since.
     fn still_runs(&self, fd: &OwnedFd) -> bool {
-        base_program(fd).is_ok_and(|now| now == self.program)
+        attested(fd).is_ok_and(|now| now == self.program)
     }
 
     fn requester(&self, paired: bool) -> Requester<'_> {
-        Requester::new(self.uid, self.program.as_deref(), paired)
+        match &self.program {
+            Attested::Extension(path, label) => Requester::extension(self.uid, path, *label),
+            _ => Requester::new(self.uid, self.base(), paired),
+        }
     }
 
     fn alive(&self) -> bool {
@@ -349,7 +473,7 @@ impl Peer {
             "pid {} (uid {}, {})",
             self.pid,
             self.uid,
-            self.program.as_deref().unwrap_or("outside the base")
+            self.program.path().unwrap_or("outside the base")
         )
     }
 }
@@ -634,11 +758,11 @@ fn run(
     request: &Request,
     fds: &[OwnedFd],
 ) -> Result<Exit, Reply> {
-    let policy = daemon
-        .policy
-        .as_ref()
+    let loaded = daemon
+        .loaded()
         .map_err(|why| Reply::denied(format!("privd has no policy: {why}")))?;
-    let action = policy
+    let action = loaded
+        .policy
         .action(&request.action)
         .ok_or_else(|| Reply::denied(format!("no action {}", request.action)))?;
     if !action.accepts(&request.args()) {
@@ -679,7 +803,7 @@ fn run(
             id: 0,
             action: action.name.clone(),
             describe: action.describe.clone(),
-            program: peer.program.clone(),
+            program: peer.program.path().map(str::to_owned),
             uid: peer.uid,
             pid: peer.pid,
             cwd: cwd.clone(),
@@ -705,7 +829,18 @@ fn run(
     }
     let _claim = claim(daemon, action)?;
     still_wanted(peer, conn, request.id)?;
-    let pid = spawn(action, &request.args, &fds[..wire::STDIO], &cwd)?;
+    let origin = loaded.origins.iter().find(|o| o.action == action.name);
+    if let Some(origin) = origin {
+        crate::activation::holds(&origin.extension, origin.generation, &action.program)
+            .map_err(Reply::denied)?;
+    }
+    let pid = spawn(
+        action,
+        origin.map(|o| o.extension.as_str()),
+        &request.args,
+        &fds[..wire::STDIO],
+        &cwd,
+    )?;
     log!(
         "privd: {} for {}: started pid {pid}{}",
         action.name,
@@ -758,7 +893,15 @@ fn directory_of(daemon: &Daemon, dir: &OwnedFd) -> Result<String, Reply> {
         .ok_or_else(|| Reply::denied("the working directory has no path"))
 }
 
-fn spawn(action: &Action, args: &[Vec<u8>], stdio: &[OwnedFd], cwd: &str) -> Result<u32, Reply> {
+/// Start `action`'s mechanism; an extension's sees its own `bin` on its
+/// path and runs with no supplementary group.
+fn spawn(
+    action: &Action,
+    extension: Option<&str>,
+    args: &[Vec<u8>],
+    stdio: &[OwnedFd],
+    cwd: &str,
+) -> Result<u32, Reply> {
     let name = action.program.rsplit('/').next().unwrap_or(&action.program);
     let mut argv = vec![CString::new(name).map_err(|_| Reply::denied("bad program name"))?];
     for arg in args {
@@ -766,8 +909,12 @@ fn spawn(action: &Action, args: &[Vec<u8>], stdio: &[OwnedFd], cwd: &str) -> Res
             CString::new(arg.as_slice()).map_err(|_| Reply::denied("an argument holds NUL"))?,
         );
     }
+    let path = match extension {
+        Some(name) => format!("{MECHANISM_PATH}:{}/bin", mount_point(name)),
+        None => MECHANISM_PATH.to_owned(),
+    };
     let env = [
-        format!("PATH={MECHANISM_PATH}"),
+        format!("PATH={path}"),
         format!("LANG={MECHANISM_LANG}"),
         format!("{ENV_ACTION}={}", action.name),
     ];
@@ -794,6 +941,7 @@ fn spawn(action: &Action, args: &[Vec<u8>], stdio: &[OwnedFd], cwd: &str) -> Res
         Endowment {
             caps: action.caps,
             ids: Some((action.uid, action.uid)),
+            groups: extension.map(|_| &[][..]),
             ..Endowment::NONE
         },
     );
