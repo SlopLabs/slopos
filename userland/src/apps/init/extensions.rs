@@ -13,17 +13,15 @@ use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, fchown};
 
-use slopos_abi::fs::{
-    BASEFS_MAGIC, O_DIRECTORY, O_NOFOLLOW, O_RDWR, SESSION_GID, SESSION_HOME, SESSION_UID,
-};
+use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
+use slopos_abi::fs::{O_DIRECTORY, O_NOFOLLOW, O_RDWR, SESSION_GID, SESSION_HOME, SESSION_UID};
 use slopos_abi::net::{AF_INET, AF_UNIX, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{BOOT_FLAG_EXTENSIONS_OFF, O_CLOEXEC, O_NONBLOCK, POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
-use slopos_extension_core::ceiling::{self, NEVER};
-use slopos_extension_core::declare::{Declaration, Listen, Restart, Service, mount_point};
-use slopos_extension_core::image::{DECLARE, MANIFEST, RELEASE};
+use slopos_extension_core::ceiling::NEVER;
+use slopos_extension_core::config;
+use slopos_extension_core::declare::{Listen, Restart, Service, mount_point};
 use slopos_extension_core::record::Record;
-use slopos_extension_core::release::Release;
 use slopos_extension_core::{hex, sha256};
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -31,6 +29,7 @@ use super::control::answer;
 use super::readable;
 use super::service::{Budget, Child, STARTS, session_env};
 use super::session::{Ended, Termination};
+use crate::activation;
 use crate::apps::extctl::store::Store;
 use crate::init_control::{LISTEN_FDS_START, LOGGER, Tasks, service_tag};
 use crate::readiness::NOTIFIER_FD;
@@ -58,6 +57,8 @@ const RECHECK_MAX_MS: u64 = 60_000;
 const SERVICE_FDS: usize = 128;
 const FDS_PER_SERVICE: usize = 4;
 const BACKLOG: u32 = 64;
+/// The most files of a directory of `/etc/<name>` a service is held to.
+const CONFIG_FILES_MAX: usize = 64;
 /// A service's unix socket is anyone's to connect to: the service judges
 /// who did.
 const SOCKET_UMASK: u32 = 0o111;
@@ -80,6 +81,8 @@ struct Spec {
     /// The activation its declaration was read from, which its program
     /// must be a file of.
     generation: u64,
+    /// A digest of what it reads of `/etc/<name>`.
+    config: String,
 }
 
 impl Spec {
@@ -123,7 +126,7 @@ impl Spec {
         let mut text = format!(
             "extension {}\nservice {}\nprogram {}\nargs {}\nuser {} {} {}\n\
              caps {:#x}\nowner {} {}\nafter {}\nreads {}\nlisten {}\n\
-             restart {restart}\nsession {}\ntag {}\nstate {}\nruntime {}\n",
+             restart {restart}\nsession {}\ntag {}\nstate {}\nruntime {}\nconfig {}\n",
             self.extension,
             service.name,
             service.program,
@@ -141,6 +144,7 @@ impl Spec {
             self.tag,
             self.state,
             self.runtime,
+            self.config,
         );
         let paths = self.image_paths();
         let mut lines: Vec<String> = slopos_boot_core::base::manifest_lines(manifest)
@@ -1157,38 +1161,10 @@ fn own_dir(path: &str, (uid, gid): (u32, u32)) -> Result<(), String> {
     })
 }
 
-/// `/opt/<name>` opened, once it is an activation's mount rather than a
-/// directory someone made there.
-fn activation(name: &str) -> Result<File, String> {
-    let mount = mount_point(name);
-    let dir = open_dir(&mount).map_err(|e| format!("{mount}: {e}"))?;
-    match sys_fs::fstatfs(dir.as_raw_fd()) {
-        Ok(stats) if stats.f_type == BASEFS_MAGIC => Ok(dir),
-        _ => Err(format!("nothing is shown at {mount}")),
-    }
-}
-
-/// The generation of a file of a basefs mount, the high half of its inode.
-fn generation(file: &File) -> Option<u64> {
-    let on_basefs = sys_fs::fstatfs(file.as_raw_fd()).is_ok_and(|s| s.f_type == BASEFS_MAGIC);
-    on_basefs
-        .then(|| file.metadata().ok().map(|meta| meta.ino() >> 32))
-        .flatten()
-}
-
 /// Whether `spec`'s program is a file of the activation its declaration
 /// was read from, and that activation is still the one shown.
 fn shown(spec: &Spec) -> Result<(), String> {
-    let root = activation(&spec.extension)?;
-    let program = &spec.service.program;
-    let file = File::open(program).map_err(|e| format!("{program}: {e}"))?;
-    let shown = Some(spec.generation);
-    if generation(&root) != shown || generation(&file) != shown {
-        return Err(format!(
-            "{program} is not a file of the activation it was declared by"
-        ));
-    }
-    Ok(())
+    activation::holds(&spec.extension, spec.generation, &spec.service.program)
 }
 
 fn bind(listen: &Listen, extension: &str) -> Result<OwnedFd, String> {
@@ -1349,10 +1325,7 @@ fn wanted(held: impl Fn(&str) -> usize) -> Result<Wanted, String> {
     if names.is_empty() {
         return Ok(out);
     }
-    let ceiling = fs::read_to_string(slopos_extension_core::CEILING)
-        .map_err(|e| e.to_string())
-        .and_then(|text| ceiling::parse(&text).map_err(|e| e.to_string()))
-        .map_err(|why| format!("{}: {why}", slopos_extension_core::CEILING))?;
+    let ceiling = activation::ceiling()?;
     let mut records = Vec::new();
     for name in names {
         match store.record(&name) {
@@ -1378,8 +1351,7 @@ fn wanted(held: impl Fn(&str) -> usize) -> Result<Wanted, String> {
             continue;
         }
         taken_uids.extend(uids);
-        let runs = record.enabled && record.why.is_none() && record.current.is_some();
-        if !runs {
+        if !record.runs() {
             continue;
         }
         match specs(record, ceiling) {
@@ -1420,35 +1392,15 @@ fn wanted(held: impl Fn(&str) -> usize) -> Result<Wanted, String> {
     Ok(out)
 }
 
-/// `path` of the activation of `generation` shown at `mount`.
-fn read_shown(mount: &str, generation: u64, path: &str) -> Result<String, String> {
-    let at = format!("{mount}{path}");
-    let mut file = File::open(&at).map_err(|e| format!("{at}: {e}"))?;
-    if self::generation(&file) != Some(generation) {
-        return Err(format!("{mount} shows another activation than it did"));
-    }
-    let mut text = String::new();
-    file.read_to_string(&mut text)
-        .map_err(|e| format!("{at}: {e}"))?;
-    Ok(text)
-}
-
 /// `record`'s services as its activation declares them.
 fn specs(record: &Record, ceiling: u64) -> Result<Vec<(Spec, String)>, String> {
     let name = &record.name;
     let current = record.current.as_ref().ok_or("nothing is installed")?;
-    let mount = mount_point(name);
-    let shown = generation(&activation(name)?).ok_or("its activation names no generation")?;
-    let read = |path| read_shown(&mount, shown, path);
-    let release = Release::parse(&read(RELEASE)?).map_err(|e| e.to_string())?;
-    if release.name != *name || release.version != current.version {
-        return Err(format!("{mount} shows another image than the record's"));
-    }
-    let declaration = Declaration::parse(name, &read(DECLARE)?).map_err(|e| e.to_string())?;
-    if !declaration.grant().same(&current.grant) {
-        return Err("the image asks for other than it was granted".into());
-    }
-    let manifest = read(MANIFEST)?;
+    let activation::Shown {
+        generation: shown,
+        declaration,
+        manifest,
+    } = activation::shown(record)?;
     let number = record.number().ok_or("its record gives it no number")?;
     let uid = |user: &str| {
         record
@@ -1483,8 +1435,52 @@ fn specs(record: &Record, ceiling: u64) -> Result<Vec<(Spec, String)>, String> {
             state: declaration.state,
             runtime: declaration.runtime,
             generation: shown,
+            config: configured(name, &service.reads),
         };
         out.push((spec, manifest.clone()));
     }
     Ok(out)
+}
+
+/// A digest of what `reads` names of `extension`'s `/etc/<name>` as it
+/// stands: each sealed file's path and SHA-256, a directory's among them.
+/// What no `Seal` holder put there is no configuration of its.
+fn configured(extension: &str, reads: &[String]) -> String {
+    let dir = config::dir(extension);
+    let mut text = String::new();
+    for path in reads.iter().filter(|path| path.starts_with(&dir)) {
+        let path = path.trim_end_matches('/');
+        let mut files: Vec<String> = match fs::read_dir(path) {
+            Ok(listing) => listing
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .map(|file| format!("{path}/{file}"))
+                .collect(),
+            Err(_) => vec![path.to_owned()],
+        };
+        files.sort();
+        for file in files.iter().take(CONFIG_FILES_MAX) {
+            let digest = sealed_bytes(file).map_or_else(|| "-".to_owned(), |b| hex(&sha256(&b)));
+            text.push_str(&format!("{file} {digest}\n"));
+        }
+    }
+    hex(&sha256(text.as_bytes()))
+}
+
+fn sealed_bytes(path: &str) -> Option<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW as i32 | (O_NONBLOCK | O_CLOEXEC) as i32)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    let sealed = sys_fs::inode_flags(file.as_raw_fd()).is_ok_and(|f| f & FS_IMMUTABLE_FL != 0);
+    if !meta.is_file() || !sealed || meta.len() > config::FILE_MAX {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(config::FILE_MAX + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
 }

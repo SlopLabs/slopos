@@ -547,9 +547,10 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     assert!(!rescue.accepts(&args_of(&["--rescue", "-c", "id"])));
 }
 
-/// The extension actions hold what changes the store and the activations
-/// and nothing that could rewrite or cover the root; only a signed install
-/// goes in for the session unasked, and they run one at a time.
+/// The extension actions hold what changes the store and the activations,
+/// or for a configuration the seal alone, and nothing that could rewrite or
+/// cover the root; only what a key signed goes in for the session unasked,
+/// and they run one at a time.
 #[test]
 fn the_extension_actions_hold_the_store_and_nothing_wider() {
     let policy = Policy::parse(SHIPPED).unwrap();
@@ -576,16 +577,41 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
             &["rollback", "x"],
         ),
     ];
-    for (name, for_session, args) in names {
+    let config = [
+        (
+            "org.slopos.extension.config",
+            Verdict::Ask,
+            &["config", "install", "x", "x.conf", "/x"][..],
+        ),
+        (
+            "org.slopos.extension.config-signed",
+            Verdict::Run,
+            &["config", "apply", "/x"],
+        ),
+    ];
+    let store = caps::EXTENSION_UPDATE | caps::SEAL;
+    for (caps, (name, for_session, args)) in names
+        .map(|n| (store, n))
+        .into_iter()
+        .chain(config.map(|n| (caps::SEAL, n)))
+    {
         let action = policy.action(name).unwrap();
         assert_eq!(action.program, "/bin/extctl", "{name}");
-        assert_eq!(action.caps, caps::EXTENSION_UPDATE | caps::SEAL, "{name}");
+        assert_eq!(action.caps, caps, "{name}");
         assert_eq!(action.admits(&session), for_session, "{name}");
         assert_eq!(action.exclusive_group(), Some("extensions"), "{name}");
         assert!(action.accepts(&args_of(args)), "{name}");
     }
     let manage = policy.action("org.slopos.extension.manage").unwrap();
     assert!(!manage.accepts(&args_of(&["install", "x"])));
+    for name in [
+        "org.slopos.extension.config",
+        "org.slopos.extension.config-signed",
+    ] {
+        let action = policy.action(name).unwrap();
+        assert!(!action.accepts(&args_of(&["config", "edit", "x", "x.conf"])));
+        assert!(!action.accepts(&args_of(&["--root", "/mnt", "disable", "x"])));
+    }
     assert_eq!(
         policy.action("org.slopos.rescue").unwrap().caps & caps::EXTENSION_UPDATE,
         caps::EXTENSION_UPDATE

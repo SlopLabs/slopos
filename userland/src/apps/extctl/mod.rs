@@ -1,14 +1,17 @@
-//! `/bin/extctl`: installs extensions and keeps their store. A first
-//! install's command line names what it grants, which the person approves; a
-//! signed one goes in unasked within its key's ceilings; every activation
-//! holds the image to its record, its key and the base's ceiling again.
-//! `status` and `build` need nothing, `activate-all` the capabilities its
-//! caller holds, and the rest are privd's `org.slopos.extension.*` actions.
+//! `/bin/extctl`: installs extensions, keeps their store and their
+//! configuration. A first install's command line names what it grants, which
+//! the person approves; a signed one goes in unasked within its key's
+//! ceilings; every activation holds the image to its record, its key and the
+//! base's ceiling again. `status`, `build` and `config edit` need nothing,
+//! `activate-all` and `--root` the capabilities their caller holds, and the
+//! rest are privd's `org.slopos.extension.*` actions.
 
 mod accounts;
+mod commands;
+mod configure;
 pub(crate) mod store;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use slopos_abi::syscall::BOOT_FLAG_EXTENSIONS_OFF;
 use slopos_extension_core::admit::{self, Admitted, Authority, Bounds};
@@ -37,9 +40,16 @@ const USAGE: &str = "usage: extctl <command>
                                   trust a key; <caps> are names joined by commas, or -
   key remove <SHA256:fingerprint>
   enable|disable|remove|rollback <name>
-  activate-all                    run every enabled extension the store holds";
+  activate-all                    run every enabled extension the store holds
+  config edit <name> <file>       edit /etc/<name>/<file>, installing it once allowed
+  config install <name> <file> <from>
+                                  install <from> as /etc/<name>/<file> once allowed
+  config apply <from> [<meta> <meta.sig>]
+                                  install a file the extension's key signed, unasked
+  --root <dir> status [<name>]|enable <name>|disable <name>
+                                  act on the store of the root mounted at <dir>";
 
-const SIDECAR_MAX: u64 = 4096;
+pub(super) const SIDECAR_MAX: u64 = 4096;
 const LIBC_MAX: u64 = 16 << 20;
 
 fn caps_of(mask: u64) -> String {
@@ -49,7 +59,7 @@ fn caps_of(mask: u64) -> String {
 /// The most `ext.memory=` lets every activation take together, so a larger
 /// image is refused before it is read whole; the kernel holds one to the
 /// budget it booted with.
-fn image_max() -> u64 {
+pub(super) fn image_max() -> u64 {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
         return u64::MAX;
@@ -57,7 +67,7 @@ fn image_max() -> u64 {
     u64::from(info.total_pages) * 4096 / 2
 }
 
-fn read_file(path: &str, max: u64) -> Result<Vec<u8>, String> {
+pub(super) fn read_file(path: &str, max: u64) -> Result<Vec<u8>, String> {
     read_bounded(Path::new(path), max)
         .ok_or_else(|| format!("{path}: no regular file of at most {max} bytes this can read"))
 }
@@ -100,8 +110,10 @@ impl Base {
 }
 
 /// The command line a request carries: an `install` of an image alone names
-/// the image's digest and what it is granted, and a `key add` of a key file
-/// or line names the key's fingerprint, so the person reads both.
+/// the image's digest and what it is granted, a `config install` of a file
+/// hands the file over as standard input and names its digest, and a `key
+/// add` of a key file or line names the key's fingerprint, so the person
+/// reads each.
 fn canonical(args: &[String]) -> Result<Vec<String>, String> {
     match args {
         [cmd, image, digest @ ..] if cmd == "install" && digest.len() < 2 => {
@@ -120,6 +132,16 @@ fn canonical(args: &[String]) -> Result<Vec<String>, String> {
             ];
             out.extend(checked.declaration.grant().words());
             Ok(out)
+        }
+        [cmd, sub, name, file, from] if cmd == "config" && sub == "install" => {
+            let digest = configure::take_as_stdin(from)?;
+            Ok(vec![
+                cmd.clone(),
+                sub.clone(),
+                name.clone(),
+                file.clone(),
+                hex(&digest),
+            ])
         }
         [cmd, sub, rest @ ..] if cmd == "key" && sub == "add" => {
             let (key, comment, tail) = match rest {
@@ -170,6 +192,14 @@ fn named(name: &str) -> Result<String, String> {
     }
 }
 
+fn config_file(file: &str) -> Result<String, String> {
+    if slopos_extension_core::config::valid_file(file) {
+        Ok(file.to_owned())
+    } else {
+        Err(format!("{file:?} names no file of /etc/<name>"))
+    }
+}
+
 /// Who vouches for an install, as its command line names them.
 enum Vouched {
     /// The person approved `grant` for `name` and the image of `digest`.
@@ -186,8 +216,14 @@ enum Vouched {
 /// A command line, read.
 enum Request {
     Status(Option<String>),
-    Build { dir: String, out: String },
-    Install { image: String, vouched: Vouched },
+    Build {
+        dir: String,
+        out: String,
+    },
+    Install {
+        image: String,
+        vouched: Vouched,
+    },
     KeyAdd(Key),
     KeyRemove(String),
     Enable(String),
@@ -195,6 +231,22 @@ enum Request {
     Remove(String),
     Rollback(String),
     ActivateAll,
+    ConfigEdit {
+        name: String,
+        file: String,
+    },
+    Config(configure::Source),
+    /// What a rescue shell asks of a root it mounted.
+    Rooted {
+        root: PathBuf,
+        command: Rooted,
+    },
+}
+
+enum Rooted {
+    Status(Option<String>),
+    Enable(String),
+    Disable(String),
 }
 
 fn parse(args: &[String]) -> Result<Request, String> {
@@ -268,6 +320,37 @@ fn parse(args: &[String]) -> Result<Request, String> {
         ["remove", name] => Request::Remove(named(name)?),
         ["rollback", name] => Request::Rollback(named(name)?),
         ["activate-all"] => Request::ActivateAll,
+        ["config", "edit", name, file] => Request::ConfigEdit {
+            name: named(name)?,
+            file: config_file(file)?,
+        },
+        ["config", "install", name, file, digest] => Request::Config(configure::Source::Approved {
+            name: named(name)?,
+            file: config_file(file)?,
+            digest: parse_digest(digest).ok_or(USAGE)?,
+        }),
+        ["config", "apply", from] => Request::Config(configure::Source::Signed {
+            from: (*from).into(),
+            sidecar: format!("{from}.meta"),
+            signature: format!("{from}.meta.sig"),
+        }),
+        ["config", "apply", from, sidecar, signature] => {
+            Request::Config(configure::Source::Signed {
+                from: (*from).into(),
+                sidecar: (*sidecar).into(),
+                signature: (*signature).into(),
+            })
+        }
+        ["--root", root, rest @ ..] => Request::Rooted {
+            root: PathBuf::from(root),
+            command: match rest {
+                ["status"] => Rooted::Status(None),
+                ["status", name] => Rooted::Status(Some(named(name)?)),
+                ["enable", name] => Rooted::Enable(named(name)?),
+                ["disable", name] => Rooted::Disable(named(name)?),
+                _ => return Err(USAGE.into()),
+            },
+        },
         _ => return Err(USAGE.into()),
     })
 }
@@ -288,8 +371,23 @@ impl Request {
             Request::Enable(_)
             | Request::Disable(_)
             | Request::Remove(_)
-            | Request::Rollback(_) => "org.slopos.extension.manage",
-            Request::Status(_) | Request::Build { .. } | Request::ActivateAll => return None,
+            | Request::Rollback(_)
+            | Request::Rooted {
+                command: Rooted::Enable(_) | Rooted::Disable(_),
+                ..
+            } => "org.slopos.extension.manage",
+            Request::Config(configure::Source::Approved { .. }) => "org.slopos.extension.config",
+            Request::Config(configure::Source::Signed { .. }) => {
+                "org.slopos.extension.config-signed"
+            }
+            Request::Status(_)
+            | Request::Build { .. }
+            | Request::ActivateAll
+            | Request::ConfigEdit { .. }
+            | Request::Rooted {
+                command: Rooted::Status(_),
+                ..
+            } => return None,
         })
     }
 
@@ -309,12 +407,23 @@ impl Request {
                 record_of(&store()?, name).map(drop)
             }
             Request::Rollback(name) => rolled_back(&store()?, name).map(drop),
-            Request::Status(_) | Request::Build { .. } | Request::ActivateAll => Ok(()),
+            Request::Config(source) => configure::prepare(&store()?, source).map(drop),
+            Request::Status(_)
+            | Request::Build { .. }
+            | Request::ActivateAll
+            | Request::ConfigEdit { .. }
+            | Request::Rooted { .. } => Ok(()),
         }
     }
 
     fn run(self) -> Result<String, String> {
-        let settles = !matches!(self, Request::Status(_) | Request::Build { .. });
+        let settles = !matches!(
+            self,
+            Request::Status(_)
+                | Request::Build { .. }
+                | Request::ConfigEdit { .. }
+                | Request::Rooted { .. }
+        );
         let tells_init = settles && !matches!(self, Request::ActivateAll);
         let outcome = match self {
             Request::Status(only) => status(only.as_deref()),
@@ -331,6 +440,16 @@ impl Request {
             Request::Remove(name) => remove(&name),
             Request::Rollback(name) => rollback(&name),
             Request::ActivateAll => activate_all(),
+            Request::ConfigEdit { name, file } => {
+                let code = configure::edit(&name, &file)?;
+                sys_core::exit_with_code(code)
+            }
+            Request::Config(source) => {
+                let store = Store::open(true)?;
+                let prepared = configure::prepare(&store, &source)?;
+                configure::install(&store, prepared)
+            }
+            Request::Rooted { root, command } => rooted(&root, command),
         };
         if !settles {
             return outcome;
@@ -342,13 +461,22 @@ impl Request {
     }
 }
 
-/// What a change leaves: the user database the records describe written, and
-/// init told, which starts, stops and restarts services to match. Either
-/// failing is said rather than fatal, since every boot does both again.
+/// What a change leaves: the user database the records describe written,
+/// `/opt/bin` linking the commands of what is shown, and init told, which
+/// starts, stops and restarts services and privd to match. Each failing is
+/// said rather than fatal, since every boot does all of them again.
 fn settle(tell_init: bool) -> String {
     let mut said = String::new();
-    if let Err(why) = Store::open(true).and_then(|store| accounts::sync(&store)) {
-        said.push_str(&format!("\nthe user database was not written: {why}"));
+    match Store::open(true) {
+        Ok(store) => {
+            if let Err(why) = accounts::sync(&store) {
+                said.push_str(&format!("\nthe user database was not written: {why}"));
+            }
+            if let Err(why) = commands::sync(&store) {
+                said.push_str(&format!("\nthe commands were not linked: {why}"));
+            }
+        }
+        Err(why) => said.push_str(&format!("\nthe store could not be read again: {why}")),
     }
     if tell_init && let Err(why) = init_control::ask(Command::Extensions) {
         said.push_str(&format!(
@@ -528,8 +656,13 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     }
 }
 
-/// Show `image` at `/opt/<name>` in place of what is shown there.
+/// Show `image` at `/opt/<name>` in place of what is shown there, its
+/// `/etc/<name>` laid out first when it declares `config`.
 fn activate(name: &str, image: &[u8], digest: [u8; 32]) -> Result<String, String> {
+    let declared = Image::check(image).map_err(|e| e.to_string())?.declaration;
+    if declared.config {
+        configure::own_dir(name)?;
+    }
     if sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
         return Ok(format!(
             "extensions are off this boot, so it is not shown; `extctl enable {name}` shows it on a boot that allows them"
@@ -607,7 +740,7 @@ fn bring_up(
     run_image(store, record, &bytes, digest)
 }
 
-fn record_of(store: &Store, name: &str) -> Result<Record, String> {
+pub(super) fn record_of(store: &Store, name: &str) -> Result<Record, String> {
     store
         .record(name)?
         .ok_or_else(|| format!("the store keeps no extension {name}"))
@@ -783,8 +916,35 @@ fn activate_all() -> Result<String, String> {
     Ok(said.join("\n"))
 }
 
+/// `command` on the store of the root at `root`, which runs nothing here:
+/// that root's next boot holds what it enables to its record again.
+fn rooted(root: &Path, command: Rooted) -> Result<String, String> {
+    let (name, enabled) = match command {
+        Rooted::Status(only) => {
+            return status_of(&Store::open_at(root, false)?, only.as_deref(), false);
+        }
+        Rooted::Enable(name) => (name, true),
+        Rooted::Disable(name) => (name, false),
+    };
+    let store = Store::open_at(root, true)?;
+    let mut record = record_of(&store, &name)?;
+    record.enabled = enabled;
+    record.why = None;
+    store.edit(&name, |edit| edit.put_record(&record))?;
+    Ok(format!(
+        "{name} {} on the root at {}",
+        if enabled { "enabled" } else { "disabled" },
+        root.display()
+    ))
+}
+
 fn status(only: Option<&str>) -> Result<String, String> {
-    let store = Store::open(false)?;
+    status_of(&Store::open(false)?, only, true)
+}
+
+/// What `store` keeps, and whether each extension runs when `running` asks
+/// it of this root.
+fn status_of(store: &Store, only: Option<&str>, running: bool) -> Result<String, String> {
     let mut out = Vec::new();
     if only.is_none() {
         for key in store.keys()?.iter() {
@@ -806,7 +966,7 @@ fn status(only: Option<&str>) -> Result<String, String> {
             continue;
         }
         match store.record(&name) {
-            Ok(Some(record)) => out.push(describe(&record)),
+            Ok(Some(record)) => out.push(describe(&record, running)),
             Ok(None) => {}
             Err(why) => out.push(format!("{name}: unreadable: {why}")),
         }
@@ -822,19 +982,14 @@ fn status(only: Option<&str>) -> Result<String, String> {
     Ok(out.join("\n"))
 }
 
-fn describe(record: &Record) -> String {
-    let shown = format!(
-        "{}/{}/.extension/release",
-        slopos_abi::extension::DIR,
-        record.name
-    );
-    let running = if Path::new(&shown).exists() {
-        "running"
-    } else {
-        "not running"
+fn describe(record: &Record, running: bool) -> String {
+    let running = match running {
+        false => "",
+        true if crate::activation::open(&record.name).is_ok() => ", running",
+        true => ", not running",
     };
     let mut out = format!(
-        "{}: {}, {running}, floor {}{}",
+        "{}: {}{running}, floor {}{}",
         record.name,
         if record.enabled {
             "enabled"

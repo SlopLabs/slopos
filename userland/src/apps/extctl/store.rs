@@ -101,9 +101,21 @@ fn read_all(file: &File, max: u64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Whether `path` is a sealed regular file, not followed if a link.
+pub fn sealed_file(path: &Path) -> bool {
+    open_entry(path)
+        .is_ok_and(|file| file.metadata().is_ok_and(|m| m.is_file()) && is_sealed(&file))
+}
+
+/// Seal the directory at `path`.
+pub fn seal_dir(path: &Path) -> Result<(), String> {
+    let dir = open_dir(path).map_err(|e| shown(path, e))?;
+    set_sealed(&dir, true).map_err(|e| shown(path, format!("sealing: {e}")))
+}
+
 /// Run `f` with the sealed directory `dir` open for changes, sealing it
 /// again however `f` ends.
-fn unsealed<T>(dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+pub fn unsealed<T>(dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let handle = open_dir(dir).map_err(|e| shown(dir, e))?;
     set_sealed(&handle, false).map_err(|e| shown(dir, format!("unsealing: {e}")))?;
     let out = f();
@@ -276,7 +288,13 @@ impl Store {
     /// writer has yet; a reader takes nothing, since nothing it can see is
     /// half made.
     pub fn open(write: bool) -> Result<Store, String> {
-        let root = PathBuf::from(STORE);
+        Self::open_at(Path::new("/"), write)
+    }
+
+    /// The store of the root at `top`, a mounted disk's as the rescue shell
+    /// reaches one, as [`open`](Self::open) opens this root's.
+    pub fn open_at(top: &Path, write: bool) -> Result<Store, String> {
+        let root = top.join(STORE.trim_start_matches('/'));
         let mut walked = PathBuf::from("/");
         for part in root.iter().skip(1) {
             walked.push(part);
@@ -288,7 +306,9 @@ impl Store {
         for signum in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
             let _ = process::ignore_signal(signum);
         }
-        let at = PathBuf::from(format!("{STORE}.lock"));
+        let mut at = root.clone().into_os_string();
+        at.push(".lock");
+        let at = PathBuf::from(at);
         let lock = OpenOptions::new()
             .read(true)
             .write(true)

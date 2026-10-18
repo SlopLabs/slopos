@@ -186,6 +186,30 @@ action org.slopos.extension.manage
   allow    paired
   describe "Turn an extension on or off, remove it, or go back to the version it had before"
 
+action org.slopos.extension.config
+  program  /bin/extctl
+  args     config install *
+  caps     Seal
+  uid      0
+  cwd
+  exclusive extensions
+  allow    root
+  allow    session consent
+  allow    paired
+  describe "Install a file of an extension's configuration in /etc, which restarts what reads it"
+
+action org.slopos.extension.config-signed
+  program  /bin/extctl
+  args     config apply *
+  caps     Seal
+  uid      0
+  cwd
+  exclusive extensions
+  allow    root
+  allow    session
+  allow    paired
+  describe "Install an extension's configuration signed by the key that installed it"
+
 action org.slopos.cpufreq.set
   program  /bin/cpufreq
   args     set *
