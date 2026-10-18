@@ -67,7 +67,7 @@ fn whoami(ctx: &mut Ctx, _argv: &[&[u8]]) -> i32 {
     // passwd call can overwrite it.
     unsafe {
         let uid = slopos_slibc::process::geteuid();
-        let row = slopos_slibc::conf::getpwuid(uid);
+        let row = slopos_slibc::pwd::getpwuid(uid);
         if row.is_null() {
             ctx.out.u(u64::from(uid));
         } else {

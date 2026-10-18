@@ -155,7 +155,7 @@ pub fn account() -> (Vec<u8>, Vec<u8>) {
     // overwrite them.
     unsafe {
         let uid = slopos_slibc::process::geteuid();
-        let row = slopos_slibc::conf::getpwuid(uid);
+        let row = slopos_slibc::pwd::getpwuid(uid);
         if row.is_null() {
             return (uid.to_string().into_bytes(), b"/".to_vec());
         }

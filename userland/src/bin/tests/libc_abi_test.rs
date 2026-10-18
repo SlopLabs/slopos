@@ -37,10 +37,7 @@ use slopos_abi::syscall::{
     cmsg_space,
 };
 use slopos_abi::unix::SockAddrUn;
-use slopos_slibc::conf::{
-    _SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN, _SC_PAGESIZE, getgrgid, getgrgid_r, getgrnam,
-    getpwnam, getpwuid, initgroups, sysconf,
-};
+use slopos_slibc::conf::{_SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN, _SC_PAGESIZE, sysconf};
 use slopos_slibc::errno::{
     EAGAIN, EBUSY, EINVAL, ENOSYS, EPROTONOSUPPORT, ERANGE, ESOCKTNOSUPPORT, ETIMEDOUT,
 };
@@ -58,6 +55,7 @@ use slopos_slibc::process::ids::{ITIMER_REAL, getgroups, getitimer, setgroups, s
 use slopos_slibc::process::{
     _exit, WEXITSTATUS, WIFEXITED, execl, execle, fork, getegid, geteuid, waitpid,
 };
+use slopos_slibc::pwd::{getgrgid, getgrgid_r, getgrnam, getpwnam, getpwuid, initgroups};
 use slopos_slibc::signal::{self, SIG_DFL, SIGSEGV, SIGUSR1, SIGUSR2};
 use slopos_slibc::stdio::{self, chars::fputs, file::fflush, file::fileno, file::freopen};
 use slopos_slibc::stdlib::temp::{mkdtemp, mkstemp};

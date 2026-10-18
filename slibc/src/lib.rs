@@ -31,6 +31,7 @@ pub mod mem;
 pub mod net;
 pub mod pal;
 pub mod process;
+pub mod pwd;
 pub mod setjmp;
 pub mod signal;
 pub mod stdio;

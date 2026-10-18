@@ -15,5 +15,6 @@ pub mod dtoa;
 pub mod hexfloat;
 pub mod iconv;
 pub mod inet;
+pub mod passwd;
 pub mod strftime;
 pub mod utf8;
