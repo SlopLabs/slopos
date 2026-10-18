@@ -113,14 +113,16 @@ fn decode_epoch(payload: &[u8]) -> Result<u64, Malformed> {
     number(&known(payload, &["epoch"])?, "epoch")
 }
 
-/// One question: everything in it comes from the sealed policy or from the
-/// kernel's account of the requester, bar the argv the policy matched.
+/// One question: everything in it comes from the sealed policy, an
+/// extension's sealed declaration, or the kernel's account of the requester,
+/// bar the argv the policy matched.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Ask {
     pub id: u64,
     pub action: String,
     pub describe: String,
-    /// The requester's base program, `None` for code from outside the base.
+    /// The requester's program as the kernel attests it, a base program or
+    /// an extension's; `None` for any other.
     pub program: Option<String>,
     pub uid: u32,
     pub pid: u32,

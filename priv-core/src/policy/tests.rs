@@ -152,6 +152,45 @@ fn only_remoted_on_a_paired_base_is_paired() {
     assert!(!Requester::new(SESSION_UID, None, true).is_paired());
 }
 
+#[test]
+fn an_extension_s_program_is_a_principal_only_of_its_own_activation() {
+    use slopos_abi::extension::Label;
+    let client = "/opt/hello/bin/client";
+    let label = Label::new(b"hello", [7; 32]).unwrap();
+    let mut policy = Policy::parse(EXAMPLE).unwrap();
+    let mut greet = policy.action("org.slopos.net.toggle").unwrap().clone();
+    greet.name = "ext.hello.greet".into();
+    greet.allows = vec![Allow {
+        principal: Principal::Extension(client.into(), label),
+        consent: false,
+    }];
+    assert!(policy.add(greet.clone()));
+    assert!(!policy.add(greet), "one name is one action");
+    let greet = policy.action("ext.hello.greet").unwrap();
+    for uid in [SESSION_UID, 0, 4242] {
+        assert_eq!(
+            greet.admits(&Requester::extension(uid, client, label)),
+            Verdict::Run
+        );
+    }
+    for other in [
+        Requester::extension(SESSION_UID, client, Label::new(b"hello", [8; 32]).unwrap()),
+        Requester::extension(SESSION_UID, client, Label::new(b"other", [7; 32]).unwrap()),
+        Requester::extension(SESSION_UID, "/opt/hello/bin/x", label),
+        Requester::new(SESSION_UID, Some(client), false),
+        Requester::new(SESSION_UID, None, false),
+    ] {
+        assert_eq!(greet.admits(&other), Verdict::Refuse, "{other:?}");
+    }
+    let install = policy.action("org.slopos.boot.install").unwrap();
+    assert_eq!(
+        install.admits(&Requester::extension(0, client, label)),
+        Verdict::Refuse,
+        "uid 0 running an extension's program is no root"
+    );
+    assert!(!Requester::extension(SESSION_UID, REMOTED, label).is_paired());
+}
+
 fn refusal(text: &str) -> PolicyError {
     Policy::parse(text).expect_err(text)
 }

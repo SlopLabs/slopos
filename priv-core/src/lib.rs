@@ -52,12 +52,12 @@ pub const INIT: &str = "/sbin/init";
 pub const ENV_FD: &str = "PRIVD_FD";
 /// The action privd started a mechanism for.
 pub const ENV_ACTION: &str = "PRIV_ACTION";
-/// The whole search path a mechanism sees.
+/// The search path a base mechanism sees; an extension's sees its own `bin`
+/// after it.
 pub const MECHANISM_PATH: &str = "/bin:/sbin";
 pub const MECHANISM_LANG: &str = "C.UTF-8";
 
-/// What init hands privd, and so all an action may name. Not `SetId`: every
-/// mechanism runs as uid 0, which privd already is.
+/// All an action may name.
 pub const DELEGABLE: u64 = caps::POWER
     | caps::MOUNT
     | caps::RAW_BLOCK
@@ -70,6 +70,11 @@ pub const DELEGABLE: u64 = caps::POWER
     | caps::DAC_OVERRIDE
     | caps::BASE_UPDATE
     | caps::EXTENSION_UPDATE;
+
+/// What init hands privd: what an action may name, and what no action names:
+/// `SetId` to start an extension's mechanisms as its user, and `ProcSignal`
+/// to relay its requester's signals to one, which runs as another uid.
+pub const PRIVD_CAPS: u64 = DELEGABLE | caps::SET_ID | caps::PROC_SIGNAL;
 
 /// Every capability, by the name `slopos_ostd::authority::Capability` gives
 /// it.

@@ -27,6 +27,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+use slopos_abi::extension::Label;
 use slopos_abi::fs::SESSION_UID;
 
 use crate::DELEGABLE;
@@ -82,6 +83,10 @@ pub enum Principal {
     Paired,
     /// A requester running the base program at this path.
     Program(String),
+    /// A requester running the program at this path of the activation the
+    /// label names: an extension's own program, which only that extension's
+    /// actions allow.
+    Extension(String, Label),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,6 +107,7 @@ impl fmt::Display for PolicyError {
 pub struct Requester<'a> {
     uid: u32,
     program: Option<&'a str>,
+    extension: Option<(&'a str, Label)>,
     paired: bool,
 }
 
@@ -113,7 +119,18 @@ impl<'a> Requester<'a> {
         Self {
             uid,
             program,
+            extension: None,
             paired: base_paired && program == Some(REMOTED),
+        }
+    }
+
+    /// A requester running `path` of the activation `label` names.
+    pub fn extension(uid: u32, path: &'a str, label: Label) -> Self {
+        Self {
+            uid,
+            program: None,
+            extension: Some((path, label)),
+            paired: false,
         }
     }
 
@@ -127,6 +144,7 @@ impl<'a> Requester<'a> {
             Principal::Paired => self.paired,
             Principal::Session => !self.paired && self.uid == SESSION_UID,
             Principal::Program(path) => !self.paired && self.program == Some(path.as_str()),
+            Principal::Extension(path, label) => self.extension == Some((path.as_str(), *label)),
         }
     }
 }
@@ -243,6 +261,16 @@ impl Policy {
 
     pub fn actions(&self) -> &[Action] {
         &self.actions
+    }
+
+    /// `action` beside the policy's own; `false`, adding nothing, when one of
+    /// its name is there already.
+    pub fn add(&mut self, action: Action) -> bool {
+        if self.action(&action.name).is_some() {
+            return false;
+        }
+        self.actions.push(action);
+        true
     }
 
     /// The actions that exist on a boot: those marked `medium` only when it
