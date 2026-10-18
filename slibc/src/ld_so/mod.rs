@@ -17,7 +17,7 @@ pub mod reloc;
 pub mod start;
 pub mod sym;
 
-use core::cell::SyncUnsafeCell;
+use core::cell::{Cell, SyncUnsafeCell};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -61,6 +61,10 @@ const SEARCH_DIRS: [&[u8]; 2] = [b"/lib", b"/usr/lib"];
 /// a program holding more than the session does.
 const LOCAL_DIR: &[u8] = b"/usr/local/lib";
 
+/// `/opt/<name>/lib`, the longest an extension's name makes it.
+const OWN_LIB_MAX: usize =
+    slopos_abi::extension::DIR.len() + 1 + slopos_abi::extension::NAME_MAX + 4;
+
 /// Longest path the loader will build. Matches the kernel's `PATH_MAX`.
 const DL_PATH_MAX: usize = 4096;
 
@@ -80,6 +84,10 @@ pub struct Loader {
     secure: bool,
     /// [`LOCAL_DIR`] is searched.
     local: bool,
+    /// The `lib` of the activation the program is of, searched after
+    /// [`SEARCH_DIRS`] and asked of the kernel when a search first gets
+    /// there; empty for any other program.
+    own_lib: Cell<Option<([u8; OWN_LIB_MAX], usize)>>,
 }
 
 // SAFETY: every access goes through [`lock`].
@@ -93,6 +101,7 @@ static LOADER: SyncUnsafeCell<Loader> = SyncUnsafeCell::new(Loader {
     library_path: ptr::null(),
     secure: false,
     local: false,
+    own_lib: Cell::new(None),
 });
 
 static LOCK: AtomicBool = AtomicBool::new(false);
@@ -632,13 +641,26 @@ impl Loader {
         self.local = !secure && Sys::geteuid() != 0;
     }
 
+    fn own_lib(&self) -> ([u8; OWN_LIB_MAX], usize) {
+        if let Some(known) = self.own_lib.get() {
+            return known;
+        }
+        let mut dir = [0; OWN_LIB_MAX];
+        let Some(len) = own_lib(&mut dir) else {
+            return (dir, 0);
+        };
+        self.own_lib.set(Some((dir, len)));
+        (dir, len)
+    }
+
     /// Expand a `DT_NEEDED`/`dlopen` name into a path that exists.
     ///
     /// A name with a slash in it is used as written, as every loader does. A
     /// bare one is looked for in `LD_LIBRARY_PATH`; then, when `requester`
     /// has no `DT_RUNPATH`, in the `DT_RPATH` of `requester`, of each object
     /// up its `loader` chain and of the executable (glibc's order); otherwise
-    /// in `requester`'s `DT_RUNPATH` alone; then in [`SEARCH_DIRS`], and
+    /// in `requester`'s `DT_RUNPATH` alone; then in [`SEARCH_DIRS`], the
+    /// program's own activation's `lib` when it is an extension's, and
     /// [`LOCAL_DIR`] last where the process may take what it holds.
     fn resolve_path(
         &self,
@@ -666,8 +688,12 @@ impl Loader {
             }
             || SEARCH_DIRS
                 .iter()
-                .chain(self.local.then_some(&LOCAL_DIR))
-                .any(|dir| self.compose(dir, EXE, bare, out) && exists(out));
+                .any(|dir| self.compose(dir, EXE, bare, out) && exists(out))
+            || {
+                let (dir, len) = self.own_lib();
+                len > 0 && self.compose(&dir[..len], EXE, bare, out) && exists(out)
+            }
+            || (self.local && self.compose(LOCAL_DIR, EXE, bare, out) && exists(out));
         if found {
             Ok(out.as_ptr())
         } else {
@@ -761,6 +787,49 @@ impl Loader {
         let slash = path.iter().rposition(|b| *b == b'/')?;
         Some(&path[..slash.max(1)])
     }
+}
+
+/// `/opt/<name>/lib` into `out` when the program is a file of the activation
+/// of `<name>`, as the kernel attests it to a socket pair's peer, which is
+/// this process: a path the program was started by can name anything. The
+/// length written, 0 for none; `None` when the kernel could not be asked.
+fn own_lib(out: &mut [u8; OWN_LIB_MAX]) -> Option<usize> {
+    use slopos_abi::extension::{DIR, Label};
+    use slopos_abi::syscall::{SO_PEEREXTENSION, SOL_SLOPOS};
+    let mut pair = [-1i32; 2];
+    let kind = i32::from(slopos_abi::net::SOCK_STREAM) | crate::ffi::O_CLOEXEC;
+    if Sys::socketpair(
+        i32::from(slopos_abi::net::AF_UNIX),
+        kind,
+        0,
+        pair.as_mut_ptr(),
+    )
+    .is_err()
+    {
+        return None;
+    }
+    let mut raw = [0u8; Label::LEN];
+    let mut len = Label::LEN as u32;
+    let asked = Sys::getsockopt(
+        pair[0],
+        SOL_SLOPOS,
+        SO_PEEREXTENSION,
+        raw.as_mut_ptr(),
+        &mut len,
+    );
+    for fd in pair {
+        let _ = Sys::close(fd);
+    }
+    asked.ok()?;
+    let Some(label) = raw.get(..len as usize).and_then(Label::from_bytes) else {
+        return Some(0);
+    };
+    let mut at = 0;
+    for part in [DIR.as_bytes(), b"/", label.name(), b"/lib"] {
+        out[at..at + part.len()].copy_from_slice(part);
+        at += part.len();
+    }
+    Some(at)
 }
 
 /// Run `DT_PREINIT_ARRAY`, `DT_INIT` and `DT_INIT_ARRAY` for `group`,
