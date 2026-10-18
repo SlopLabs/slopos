@@ -151,6 +151,10 @@ crate::utest!(name = utest_peer, bin = "/bin/peer_test");
 crate::utest!(name = utest_privd, bin = "/bin/privd_test");
 crate::utest!(name = utest_extension, bin = "/bin/extension_test");
 crate::utest!(
+    name = utest_extension_action,
+    bin = "/bin/extension_action_test"
+);
+crate::utest!(
     name = utest_extension_service,
     bin = "/bin/extension_service_test"
 );
