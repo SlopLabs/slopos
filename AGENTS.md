@@ -576,7 +576,10 @@ mechanisms of privd's extension actions hold) copies a
 step under the mount table's lock (`vfs::mount::mount_replacing`), keeping the
 mount's id; `ext_deactivate(name)` takes it away (`basefs::extension`). A name
 is lowercase letters, digits and `-`, at most 32 bytes, none of
-`slopos_abi::extension::RESERVED`. Each activation is an instance of its own
+`slopos_abi::extension::RESERVED`, and `extctl` installs none of
+`slopos_extension_core::TAKEN` either, the names whose `/var/log`, `/run` or
+`/etc` directory the system's own paths hold. Each activation is an instance
+of its own
 from a pool of `MAX_ACTIVATIONS` (32) `BaseFs`es, serving one generation whose
 number, issued across every activation and never within a boot again, is the
 high half of each inode it serves; it carries the name and the digest its
@@ -653,8 +656,92 @@ read by mode goes in. A RAM root keeps a seal for good, so extensions need a
 disk root. `just extension DIR` packs one on the host (`tools/extension`),
 signing its sidecar with `EXTENSION_KEY`, and `scripts/remote.py install
 --extension` installs it on a paired machine, refusing a sidecar that names
-another image. Nothing yet runs `extctl activate-all` at boot, so an
-activation lasts the boot it was made in.
+another image. Init runs `extctl activate-all` at every boot, holding
+`ExtensionUpdate` and `Seal`, before privd and unless `extensions=off`; every
+other change a mechanism makes, it tells init through `/run/init`'s
+`extensions`.
+
+**An extension's services run as its own users.** A record keeps a uid for
+its extension's own name and for each user its images are granted, the lowest
+of 100 to 999 no record holds, given at install and kept for good, its
+removal included, so what a user left keeps its owner
+(`slopos_extension_core:: accounts`); the uid of the name is the extension's
+number. `/etc/passwd` and `/etc/group` are written from the records after
+every change, the base's two entries first and then each installed
+extension's users, each with a group of its own, through a file sealed and
+renamed over the old one unsealed for the rename; slibc's readers
+(`slibc/src/pwd.rs`) believe either only while it is a sealed regular file
+and answer the base's entries otherwise, so `DacOverride` without `Seal`
+changes no name, and init and privd take uids from records, never from a
+lookup. Init (`userland/src/apps/init/extensions.rs`) runs each service of
+every enabled, running extension, as the activation shown at `/opt/<name>`
+declares it and as long as that is a `basefs` mount, opened without following
+a link, whose release and grant are the record's: its program once the file
+opened there just before the start, which then names it by path, is of the
+generation its declaration was read from, as a basefs inode's high half names
+it, as its user (a session service as the person, while the desktop session
+runs), holding what it declares within the grant and the base's ceiling, with
+`/dev/null` for input, the readiness notifier on fd 3, the sockets it
+`listen`s on from fd 4 (`LISTEN_FDS`, `LISTEN_FDNAMES`), cwd and `HOME` its
+state directory when it declares one (the person's home for a session
+service, `/` otherwise), and `PATH` `/bin:/sbin:/opt/<name>/bin`. Each
+carries a login tag of its own, `init_control::service_tag` of its
+extension's number and its place among at most 16 services: when its process
+exits, `SIGTERM`, `SIGCONT` and then `SIGKILL` end what else carries the tag
+before it starts again as `restart` says (`on-failure` unless it exited 0),
+within the five-a-minute budget, a start that fails waiting a second and five
+in a row waiting for a change, which the next `extensions` asked of it counts
+as, across a re-execution too; a session's end ends the session services'
+tags with the desktop's. A service starts once each service it is `after` has
+written its notifier, closed it while running, run thirty seconds or will not
+start, and once nothing being ended carries its tag or holds its sockets.
+Init binds a TCP port on every address with `SO_REUSEADDR`, which the kernel
+lets only another listener refuse (`tcp::listen_reusing`, as Linux does), so
+connections an earlier start left in `TIME_WAIT` do not; a UDP port without
+it, which then shares with no socket (a UDP address, or a wildcard and an
+address beneath it, is shared only among sockets that all set `SO_REUSEADDR`,
+the newest receiving, as on Linux, and a bind to port 0 takes an ephemeral
+port at once); or `/run/<name>/<socket>` mode 0666; before the first start,
+and keeps it while the service is to start again, across restarts and
+re-executions, so no other process takes it then, giving it up when the
+service exits not to start again or gives up. Two services of one extension
+never `listen` on one socket, and of two extensions that would, the one of
+the higher number runs no service; nor does an extension whose services would
+take init past the 128 of its descriptors it gives services, four each and
+one per socket. A connector to a service's socket reads init's identity,
+which recorded it at `listen`, through `SO_PEERCRED` and `SO_PEERPROGRAM`,
+not the service's. Its output goes to `/var/log/<name>/<service>.log` through
+a pipe to a copy of init (`/sbin/init --log <service>`, login tag
+`init_control::LOGGER`) that runs as the extension's first user, holding
+nothing, writes only to a regular file and turns it into `<service>.log.1` at
+256 KiB, writing nothing past that when the rename fails. `/var/log/<name>`,
+and `/var/lib/<name>` and `/run/<name>` as declared, are made for that user,
+mode 0755, and one there that is anyone else's stops the services. On
+`extensions` init reads the store and the activations again and answers once
+no service is ending: it leaves an extension whose record or activation it
+cannot read as it stands, stops what is gone, starts what is new, and
+replaces a service whose declaration, user, grant or tag changed or whose
+program, `reads` or the image's `lib/` reads differently in the new
+activation's manifest (`boot_core::base::changed`), handing on the sockets
+both listen on and the log, and leaves the rest running on the activation
+they started from; a new base whose ceiling changed does the same. What it
+could not read it reads again a second on, then twice as long each time, up
+to a minute. A re-execution hands the services on in as many pipes as they
+fill, named after the state's, `--resume <state> <units>,…`, to an image
+whose text holds their header line (`extensions::CARRIED`); before one that
+does not, init ends every service, and an image that cannot read them closes
+the descriptors their first line names: each service's tag, whether it was
+up, starting, due, meant to stay down or given up, the pid it was started as,
+its starts, a digest of what it was started as, and its sockets, notifier and
+log pipe. The new image takes over a service whose pid still carries its tag,
+or exited unreaped, as it stood when the digest still matches what the
+records say, starts again one whose does not or that it knows nothing of, and
+ends what carries a service's tag no service claims, those of an extension it
+cannot read among them, until it reads them again. The loader searches
+`/opt/<name>/lib` after `/lib` and `/usr/lib` for a program the kernel
+attests is a file of `<name>`'s activation, which it asks through a socket
+pair's `SO_PEEREXTENSION` the first time a search gets there, so an
+`AT_SECURE` service finds its own libraries and nothing a path names.
 
 **A base names the interface it needs; a kernel names the ones it serves.**
 `slopos_abi::BASE_INTERFACE` numbers the private call surface: every private
@@ -734,9 +821,10 @@ share's `slopos/icons/` (`slopos_userland::app_entry`) — read at session start
 from `/usr/share`, `/usr/local/share` and `~/.local/share`, a later one
 replacing an earlier with its id as the XDG data directories rank, in name
 order. The shell's program registry names no app; `PATH` finds them. The
-loader searches `/usr/local/lib` after `/lib` and `/usr/lib` only for a
-process that is neither `AT_SECURE` nor uid 0's, so nothing the session puts
-there reaches a program holding more than the session does.
+loader searches `/usr/local/lib` after `/lib`, `/usr/lib` and an extension
+program's own `lib` only for a process that is neither `AT_SECURE` nor uid
+0's, so nothing the session puts there reaches a program holding more than the
+session does.
 
 **The guest installs what it builds.** `/bin/bootctl` (privd's
 `org.slopos.boot.*` and `org.slopos.base.*` actions, run as uid 0 with
@@ -1673,8 +1761,9 @@ halves, and `SIGCONT` to a task of the sender's session needs neither.
 a number fork, spawn and exec pass on and that only a `SetId` holder sets, at
 spawn (`SpawnLoginAttrs`, under `SPAWN_SET_LOGIN`), as Linux's audit session
 id is inherited and set once at login. Init gives the desktop session one
-(`init_control::DESKTOP`) and remoted another (`REMOTE`), so a session's
-processes are found, and ended, whatever uid they run as. The ext4 reserve is the
+(`init_control::DESKTOP`), remoted another (`REMOTE`) and each extension
+service its own (`init_control::service_tag`), so a session's processes are
+found, and ended, whatever uid they run as. The ext4 reserve is the
 superblock's `s_def_resuid` and `s_def_resgid`, uid 0's. A pty's slave
 belongs to whoever opened its master, mode 0620, as Linux's devpts gives it,
 judged on the slave an open takes. An `AF_UNIX` name is an inode of type
@@ -1689,7 +1778,8 @@ Linux's `protected_symlinks` has it, `DacOverride` or not.
 
 **The session is uid 1000; the system is uid 0.** Init runs as uid 0 and
 starts the compositor, the terminal, remoted and roulette as uid and gid 1000,
-home `/home/user`, `XDG_RUNTIME_DIR` its runtime directory. Every root is held
+home `/home/user`, `XDG_RUNTIME_DIR` its runtime directory; an extension's
+services run as its own users, uids 100 to 999. Every root is held
 to one ownership map, stated once in `slopos_abi::fs::ROOT_LAYOUT` and
 `SESSION_TREES` and mirrored by `scripts/lib/root_layout.sh` and
 `tools/initramfs`, whose test holds the three equal: `/`, `/etc`, `/var`,
@@ -1706,7 +1796,8 @@ migrated in place. `check_fs_image.sh --map`, the default for the tests
 image, holds a root to it.
 
 **Init keeps the services running.** It starts privd and waits for it,
-remoted where the base is paired, and the desktop session — the compositor,
+remoted where the base is paired, the extensions' services, and the desktop
+session — the compositor,
 then the terminal once the compositor is ready or a minute has passed — and
 starts privd, remoted or the session again when one exits, at most five times
 in any minute each, as systemd's start limit counts them, the next start
@@ -1730,7 +1821,8 @@ in its system menu, and never forced. Init is single-threaded,
 waiting on a poll of pidfds, its ready pipes, the consent ends of sides not
 running, the base monitor and `/run/init`. The session
 ends as systemd's `KillMode` stops a unit: `SIGTERM` and `SIGCONT` to every
-live process carrying the desktop's login tag, again to each one forked since,
+live process carrying the desktop's login tag or a session service's, again
+to each one forked since,
 `SIGKILL` to all after five seconds, given up on after ten, so remoted's
 processes, privd's mechanisms and anything else the session did not start
 survive it. A process that forks faster than init signals can outlast the
@@ -1740,15 +1832,17 @@ ten seconds, and the request that asked is answered with how many did.
 `SO_PEERPROGRAM` (`peer_base_program`), four connections
 waiting per uid: `restart-session` from the session or root, which
 `/bin/session restart` and the compositor's system menu send, and
-`end-session` and `reexec` from root — uid 0 running a base program, as
+`end-session`, `reexec` and `extensions` from root — uid 0 running a base
+program, as
 privd's `root` principal is, since `SO_PEERCRED` names no capability and uid
 0 alone is no authority; each is answered once
 done, eight at most waiting on the session but uid 0's, and a session uid 0
 ended stays down until uid 0 restarts it or a test run fails. Init re-executes `/sbin/init
 --resume <fd>`, as systemd's `daemon-reexec` does, carrying its service table
 and budgets, the consent pair, its listener and the request in a pipe, and
-keeps its pid, its children and its capabilities; an image that cannot read
-the state closes the descriptors its first line names, adopts the privd and
+keeps its pid, its children and its capabilities, and the extensions'
+services in pipes of their own; an image that cannot read the state closes the
+descriptors its first line names, adopts the privd and
 remoted among its children, starts the session again, and runs without consent
 until the next boot. A test boot runs the userland tests in a
 copy of init (`/sbin/init --run-tests`, holding `TestHarness`), so init serves
