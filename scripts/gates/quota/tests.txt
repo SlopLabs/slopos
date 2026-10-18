@@ -120,6 +120,11 @@
 # its place on otherwise identical filtered boots (7353 against 3679), the
 # heap its images in /tmp's RAM filesystem, its activations' copies and some
 # sixty extctl runs grew, and the suite with it skipped measured 54210.
+# Then 57450, 58189 and 59006 in three captures on a host without KVM, where
+# the parent measured 57179, once init ran extensions' services:
+# `extension_service_test` installs the test extension three times, each
+# activation's copy held while its daemon runs, beside the daemons, their
+# loggers, the sockets init keeps and the extctl runs that tell init.
 # The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
@@ -162,7 +167,7 @@ post-userland-tests	commitpages	193853
 post-userland-tests	custody	12
 post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	57729
+post-userland-tests	kernelmeta	59006
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
