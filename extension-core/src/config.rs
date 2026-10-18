@@ -25,6 +25,8 @@ use crate::{hex, parse_digest};
 pub const NAMESPACE: &str = "extension-config@slopos";
 /// The largest configuration file.
 pub const FILE_MAX: u64 = 256 * 1024;
+/// The most files `/etc/<name>` holds.
+pub const FILES_MAX: usize = 64;
 const NAME_MAX: usize = 64;
 
 /// `/etc/<name>`.

@@ -829,8 +829,9 @@ own, all building on extensions:
   reused.
 - **A mechanism carries its extension's login tag**, never privd's: init ends
   what carries it once the extension's actions stop running, as it ends a
-  service, and a privd started again counts none toward the exclusive groups
-  its predecessor's mechanisms hold, since an extension's action takes none.
+  service, but not while an extension cannot be read, as a service of one
+  is left standing; a privd started again counts it with what its
+  predecessor started, taking no exclusive group while any of it runs.
   Init signals only a privd it saw ready, since `SIGHUP` before privd's
   handler would end it.
 - **`/etc/<name>` is laid out sealed at activation**: an image that declares
@@ -848,21 +849,25 @@ own, all building on extensions:
 - **An extension's app entry replaces none.** The dock reads extensions'
   shares first, so the base's, `/usr/local`'s and the person's entries win,
   as its commands come last on `PATH` and as snapd appends its menu entries
-  to `XDG_DATA_DIRS`. The person's own `~/.local/bin` comes after the base and
-  before `/usr/local/bin` and `/opt/bin` in their session.
+  to `XDG_DATA_DIRS`; of an extension's share it shows only the apps the
+  extension declares, and none an extension earlier in name order showed.
+  The person's own `~/.local/bin` comes after the base and before
+  `/usr/local/bin` and `/opt/bin` in their session.
 - **Configuration is read by everyone and changed only through the seal.**
-  `/etc/<name>` is a sealed uid-0 directory of sealed files, one file deep,
-  so a `DacOverride` holder without `Seal` cannot steer another extension's
-  service; it is world-readable as `/etc` is, so its actions need `Seal` and
-  nothing else, and secrets belong in `/var/lib/<name>`. The person's file
-  reaches the mechanism as the requester's standard input, by the SHA-256 the
-  question shows, never by a path uid 0 opens, which would copy a file only
-  uid 0 may read where everyone reads it; a signed one goes in by a sidecar,
-  as an image's, whose serial the
-  record takes before the file goes in, so a file signed before it never
-  goes in after, as TUF's version and AVB's rollback index never fall. Init
-  holds what a service reads of `/etc/<name>` in what it started on, so a
-  change restarts exactly those services.
+  `/etc/<name>` is a sealed uid-0 directory of at most 64 sealed files, one
+  file deep, so a `DacOverride` holder without `Seal` cannot steer another
+  extension's service; it is world-readable as `/etc` is, so its actions
+  need `Seal` and nothing else, and secrets belong in `/var/lib/<name>`. The
+  person's file reaches the mechanism as the requester's standard input, by
+  the SHA-256 the question shows, never by a path uid 0 opens, which would
+  copy a file only uid 0 may read where everyone reads it; a signed one goes
+  in by a sidecar, as an image's, whose serial the record takes before the
+  file goes in, so a file signed before it never goes in after, as TUF's
+  version and AVB's rollback index never fall; its signer is held to the
+  record before the image is read. Init holds what a service reads of
+  `/etc/<name>` in what it started on, so a change restarts exactly those
+  services. Edited as uid 0, the file is opened in an editor found only in
+  the base, as sudoedit never runs the editor as root.
 - **`--root` is the rescue shell's**: `extctl --root <dir>` acts only on what
   its caller holds, and no privd action takes it, so a session never reaches
   a store other than the running root's.

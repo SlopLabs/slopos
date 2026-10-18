@@ -247,8 +247,8 @@ struct Init {
     reexec_due: Option<u64>,
     privd: Supervised,
     /// The extensions' actions privd read last, as `activation::Actions::from`
-    /// names them.
-    privd_actions: String,
+    /// names them, unknown while a privd started since reads its own.
+    privd_actions: Option<String>,
     /// Readable once a privd started since serving began is ready, before
     /// which a `SIGHUP` would end it rather than have it read its actions.
     privd_ready: Option<OwnedFd>,
@@ -288,7 +288,7 @@ impl Init {
             base: watch_base(),
             reexec_due: None,
             privd: Supervised::new(&PRIVD),
-            privd_actions: extension_actions().unwrap_or_default(),
+            privd_actions: extension_actions().ok(),
             privd_ready: None,
             retired: Vec::new(),
             remote_ending: None,
@@ -358,7 +358,7 @@ impl Init {
             base: watch_base(),
             reexec_due: None,
             privd: supervised(&PRIVD, state.privd),
-            privd_actions: extension_actions().unwrap_or_default(),
+            privd_actions: extension_actions().ok(),
             privd_ready: None,
             retired: Vec::new(),
             remote_ending: None,
@@ -608,10 +608,10 @@ impl Init {
         }
     }
 
-    /// End the mechanisms of each extension whose actions no longer run, and
-    /// have privd read the actions again when those it read are no longer
-    /// those that run. One draining, not running or not yet ready reads them
-    /// as it starts or once it is.
+    /// End the mechanisms of each extension whose actions no longer run,
+    /// unless one could not be read, and have privd read the actions again
+    /// when those it read are not those that run. One draining, not running
+    /// or not yet ready reads them as it starts or once it is.
     fn follow_actions(&mut self, now: u64) {
         let actions = match crate::activation::actions() {
             Ok(actions) => actions,
@@ -620,21 +620,25 @@ impl Init {
                 return self.units.read_again(now);
             }
         };
-        let running: Vec<u32> = actions.loaded.iter().map(|loaded| loaded.login).collect();
-        let stopped: Vec<u32> = init_control::Tasks::read()
-            .action_tags()
-            .into_iter()
-            .filter(|tag| !running.contains(tag))
-            .collect();
-        self.units.end_strays(now, stopped);
+        if actions.unread {
+            self.units.read_again(now);
+        } else {
+            let running: Vec<u32> = actions.loaded.iter().map(|loaded| loaded.login).collect();
+            let stopped: Vec<u32> = init_control::Tasks::read()
+                .action_tags()
+                .into_iter()
+                .filter(|tag| !running.contains(tag))
+                .collect();
+            self.units.end_strays(now, stopped);
+        }
         let ready = self.privd.draining.is_none() && self.privd_ready.is_none();
         let Some(child) = self.privd.child.as_ref().filter(|_| ready) else {
             return;
         };
-        if actions.from != self.privd_actions {
-            println!("init: an extension's actions changed; privd reads them again");
+        if self.privd_actions.as_ref() != Some(&actions.from) {
+            println!("init: privd reads the extensions' actions again");
             let _ = process::kill(child.pid, slopos_abi::signal::SIGHUP);
-            self.privd_actions = actions.from;
+            self.privd_actions = Some(actions.from);
         }
     }
 
@@ -695,7 +699,7 @@ impl Init {
         self.retired.extend(retired);
         if self.privd.due_by(now) {
             let fds = self.privd_fds();
-            self.privd_actions = extension_actions().unwrap_or_default();
+            self.privd_actions = None;
             self.privd_ready = self.privd.start_ready(now, &fds);
         }
         if let Some(remoted) = self.remoted.as_mut().filter(|r| r.due_by(now)) {

@@ -5,11 +5,11 @@
  * `exit` prints a line and exits. `serve <caps_drop>` says it is ready on its
  * notifier, then answers one line per connection on every socket init handed
  * it: `who`, `fds`, `read <path>`, `say <text>`, `spew <bytes>` and `crash`.
- * `who <caps_drop>` prints who it runs as and exits. `client <caps_drop>`
- * connects to privd once and answers each line on fd 0: `ask <action>` asks
- * for it with `who`'s arguments, `map <path>` maps that file executable.
- * `caps_drop` is the number of the call that answers the capabilities it
- * holds. */
+ * `who <caps_drop>` prints who it runs as and exits; `linger` runs until
+ * ended. `client <caps_drop>` connects to privd once and answers each line
+ * on fd 0: `ask <action>` asks for it with `who`'s arguments, `map <path>`
+ * maps that file executable. `caps_drop` is the number of the call that
+ * answers the capabilities it holds. */
 
 #include <errno.h>
 #include <fcntl.h>

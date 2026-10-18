@@ -137,7 +137,7 @@ impl Daemon {
 
     fn inherited_runs(&self) -> bool {
         !self.inherited.is_empty()
-            && init_control::threads_elsewhere(init_control::PRIVD)
+            && init_control::privd_threads_elsewhere()
                 .iter()
                 .any(|thread| self.inherited.contains(thread))
     }
@@ -188,7 +188,7 @@ pub fn privd_main() -> ! {
         running: Mutex::new(Vec::new()),
         cwd: Mutex::new(()),
         connections: Mutex::new(Vec::new()),
-        inherited: init_control::threads_elsewhere(init_control::PRIVD),
+        inherited: init_control::privd_threads_elsewhere(),
     };
     let daemon: &'static Daemon = DAEMON.get_or_init(|| daemon);
     let listener = match listen() {

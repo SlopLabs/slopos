@@ -90,6 +90,21 @@ pub fn names() -> Vec<String> {
         .collect()
 }
 
+/// Each shown extension's name and the apps it declares, by name.
+pub fn apps() -> Vec<(String, Vec<String>)> {
+    let Ok(store) = Store::open(false) else {
+        return Vec::new();
+    };
+    names()
+        .into_iter()
+        .filter_map(|name| {
+            let record = store.record(&name).ok()??;
+            let apps = shown(&record).ok()?.declaration.apps;
+            Some((name, apps))
+        })
+        .collect()
+}
+
 /// An extension's current image as the activation shown for it holds it.
 pub struct Shown {
     pub generation: u64,
@@ -150,6 +165,9 @@ pub struct Actions {
     pub from: String,
     /// The extensions left out, and why.
     pub skipped: Vec<String>,
+    /// One was left out because its record or activation could not be read,
+    /// not because it does not run.
+    pub unread: bool,
 }
 
 pub fn actions() -> Result<Actions, String> {
@@ -167,7 +185,10 @@ pub fn actions() -> Result<Actions, String> {
         match store.record(&name) {
             Ok(Some(record)) => records.push(record),
             Ok(None) => {}
-            Err(why) => out.skipped.push(why),
+            Err(why) => {
+                out.skipped.push(why);
+                out.unread = true;
+            }
         }
     }
     records.sort_by_key(Record::number);
@@ -189,6 +210,7 @@ pub fn actions() -> Result<Actions, String> {
             Ok(shown) => shown,
             Err(why) => {
                 out.skipped.push(format!("{name}: {why}"));
+                out.unread = true;
                 continue;
             }
         };

@@ -44,11 +44,15 @@ pub fn service_tag(number: u32, slot: usize) -> Option<u32> {
 /// per extension, by which init ends them once their extension stops.
 const ACTION_TAGS: u32 = 0x2_0000;
 
-pub fn action_tag(number: u32) -> Option<u32> {
+fn action_tags() -> std::ops::Range<u32> {
     use slopos_extension_core::accounts::{FIRST_UID, LAST_UID};
-    (FIRST_UID..=LAST_UID)
-        .contains(&number)
-        .then(|| ACTION_TAGS + number - FIRST_UID)
+    ACTION_TAGS..ACTION_TAGS + LAST_UID - FIRST_UID + 1
+}
+
+pub fn action_tag(number: u32) -> Option<u32> {
+    use slopos_extension_core::accounts::FIRST_UID;
+    let tag = ACTION_TAGS + number.checked_sub(FIRST_UID)?;
+    action_tags().contains(&tag).then_some(tag)
 }
 
 /// One reading of every task that has not exited, for asking several
@@ -107,8 +111,7 @@ impl Tasks {
 
     /// Every extension mechanism's tag some process carries.
     pub fn action_tags(&self) -> Vec<u32> {
-        use slopos_extension_core::accounts::{FIRST_UID, LAST_UID};
-        self.tags_in(ACTION_TAGS..ACTION_TAGS + LAST_UID - FIRST_UID + 1)
+        self.tags_in(action_tags())
     }
 
     fn tags_in(&self, range: std::ops::Range<u32>) -> Vec<u32> {
@@ -237,9 +240,10 @@ fn leaders<'a>(tasks: impl Iterator<Item = &'a UserTaskEntry>) -> Vec<u32> {
     pids
 }
 
-/// Every live thread carrying `login` outside the caller's process, by its
-/// never-reused id.
-pub fn threads_elsewhere(login: u32) -> Vec<u32> {
+/// Every live thread outside the caller's process that a privd or its
+/// mechanisms started, carrying [`PRIVD`] or an extension mechanism's tag,
+/// by its never-reused id.
+pub fn privd_threads_elsewhere() -> Vec<u32> {
     let tasks = tasks();
     let me = std::process::id();
     let mine = tasks
@@ -248,7 +252,8 @@ pub fn threads_elsewhere(login: u32) -> Vec<u32> {
         .map(|task| task.process_id);
     tasks
         .iter()
-        .filter(|task| task.login == login && Some(task.process_id) != mine)
+        .filter(|task| task.login == PRIVD || action_tags().contains(&task.login))
+        .filter(|task| Some(task.process_id) != mine)
         .map(|task| task.task_id)
         .collect()
 }

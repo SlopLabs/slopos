@@ -215,6 +215,11 @@ fn pack(name: &str, version: u64, declare: &str) -> Option<String> {
         S_IFREG | 0o644,
         entry("org.slopos.terminal", "Not the terminal"),
     );
+    packer.add(
+        "/share/slopos/apps/act-stray.app",
+        S_IFREG | 0o644,
+        entry("act-stray", "Undeclared"),
+    );
     let bytes = packer
         .finish(&format!("name {name}\nversion {version}\n"), declare)
         .map_err(|e| fail(format!("{name} {version} does not pack: {e}")))
@@ -523,7 +528,9 @@ fn its_command_comes_last_on_path() -> bool {
 
 fn its_app_entry_replaces_none() -> bool {
     let shares = app_entry::shares(None);
-    if shares.first().map(|p| p.as_path()) != Some(Path::new(&format!("/opt/{NAME}/share"))) {
+    if shares.first().map(|share| share.dir.as_path())
+        != Some(Path::new(&format!("/opt/{NAME}/share")))
+    {
         return fail(format!("the dock reads {shares:?}"));
     }
     let entries = app_entry::read(&shares);
@@ -531,6 +538,9 @@ fn its_app_entry_replaces_none() -> bool {
     let ours = format!("/opt/{NAME}/bin/{COMMAND}");
     if exec("act-app") != Some(ours.as_str()) {
         return fail(format!("the dock's act-app runs {:?}", exec("act-app")));
+    }
+    if exec("act-stray").is_some() {
+        return fail("the dock shows an app act does not declare");
     }
     exec("org.slopos.terminal") == Some("/bin/terminal")
         || fail(format!(

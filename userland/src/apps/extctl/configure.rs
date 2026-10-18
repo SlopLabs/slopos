@@ -23,6 +23,7 @@ use slopos_extension_core::sha256;
 
 use super::store::{self, Store};
 use super::{SIDECAR_MAX, image_max, read_file, record_of};
+use crate::syscall::process;
 
 const EXTCTL: &str = "/bin/extctl";
 
@@ -125,17 +126,6 @@ pub fn prepare(store: &Store, source: &Source) -> Result<Prepared, String> {
         .current
         .as_ref()
         .ok_or_else(|| format!("{name}: nothing is installed"))?;
-    let image = store.image(&name, &current.sha256, image_max())?;
-    let declared = Image::check(&image)
-        .map_err(|e| format!("{name}: {e}"))?
-        .declaration
-        .config;
-    if !declared {
-        return Err(format!(
-            "{name} declares no configuration in {}",
-            config::dir(&name)
-        ));
-    }
     let serial = match signed {
         None => None,
         Some((serial, key)) => {
@@ -159,6 +149,17 @@ pub fn prepare(store: &Store, source: &Source) -> Result<Prepared, String> {
             Some(serial)
         }
     };
+    let image = store.image(&name, &current.sha256, image_max())?;
+    let declared = Image::check(&image)
+        .map_err(|e| format!("{name}: {e}"))?
+        .declaration
+        .config;
+    if !declared {
+        return Err(format!(
+            "{name} declares no configuration in {}",
+            config::dir(&name)
+        ));
+    }
     Ok(Prepared {
         record,
         file,
@@ -183,6 +184,14 @@ pub fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     }
     let dir = own_dir(&record.name)?;
     let at = dir.join(&file);
+    let held = fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if !at.exists() && held.count() >= config::FILES_MAX {
+        return Err(format!(
+            "{} holds {} files already",
+            dir.display(),
+            config::FILES_MAX
+        ));
+    }
     store::unsealed(&dir, || store::replace_sealed(&at, &bytes))?;
     Ok(format!("{} installed", at.display()))
 }
@@ -237,7 +246,9 @@ fn editor() -> Vec<String> {
 
 /// Edit a copy of `/etc/<name>/<file>` with the person's editor and have
 /// what they saved installed, as `extctl config install` installs a file,
-/// once it differs: the exit status of that install, or 0 for no change.
+/// once it differs: the exit status of that install, or 0 for no change. As
+/// uid 0 the editor is found only in the base, never where the session
+/// writes.
 pub fn edit(name: &str, file: &str) -> Result<i32, String> {
     let installed = Path::new(&config::dir(name)).join(file);
     let before = match fs::read(&installed) {
@@ -257,7 +268,11 @@ pub fn edit(name: &str, file: &str) -> Result<i32, String> {
         let copy = dir.join(file);
         fs::write(&copy, &before).map_err(made)?;
         let words = editor();
-        let status = Command::new(&words[0])
+        let mut command = Command::new(&words[0]);
+        if process::geteuid() == 0 {
+            command.env("PATH", slopos_priv_core::MECHANISM_PATH);
+        }
+        let status = command
             .args(&words[1..])
             .arg(&copy)
             .status()

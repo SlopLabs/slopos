@@ -57,8 +57,6 @@ const RECHECK_MAX_MS: u64 = 60_000;
 const SERVICE_FDS: usize = 128;
 const FDS_PER_SERVICE: usize = 4;
 const BACKLOG: u32 = 64;
-/// The most files of a directory of `/etc/<name>` a service is held to.
-const CONFIG_FILES_MAX: usize = 64;
 /// A service's unix socket is anyone's to connect to: the service judges
 /// who did.
 const SOCKET_UMASK: u32 = 0o111;
@@ -236,8 +234,9 @@ pub struct Units {
     session: bool,
     /// `extensions` requests, answered once no service is ending.
     waiting: Vec<OwnedFd>,
-    /// Tags no unit or running extension claims, whose processes are ended.
-    strays: Option<(Vec<u32>, Termination)>,
+    /// Tags no unit or running extension claims, whose processes are ended,
+    /// each batch on a clock of its own.
+    strays: Vec<(Vec<u32>, Termination)>,
     /// Ended for an image of init that keeps no services.
     retired: bool,
     /// When the store, part of which could not be read, is read again, and
@@ -404,7 +403,7 @@ impl Units {
             off: sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF),
             session,
             waiting: Vec::new(),
-            strays: None,
+            strays: Vec::new(),
             retired: false,
             recheck: None,
             reread: false,
@@ -439,7 +438,7 @@ impl Units {
                 "init: ending the processes of {} services nothing runs",
                 strays.len()
             );
-            units.strays = Some((strays, Termination::new(now)));
+            units.strays.push((strays, Termination::new(now)));
         }
         units
     }
@@ -566,12 +565,12 @@ impl Units {
                 unit.session_changed(now, session);
             }
         }
-        let ending = self.strays.is_some() || self.units.iter().any(Unit::stopping);
+        let ending = !self.strays.is_empty() || self.units.iter().any(Unit::stopping);
         let tasks = ending.then(Tasks::read);
-        if let (Some((tags, ending)), Some(tasks)) = (&mut self.strays, &tasks)
-            && ending.step_seen(now, &tasks.processes_of(tags)).is_some()
-        {
-            self.strays = None;
+        if let Some(tasks) = &tasks {
+            self.strays.retain_mut(|(tags, ending)| {
+                ending.step_seen(now, &tasks.processes_of(tags)).is_none()
+            });
         }
         for unit in &mut self.units {
             if let Some(tasks) = &tasks {
@@ -602,8 +601,8 @@ impl Units {
         let unit = &self.units[at];
         let stray = self
             .strays
-            .as_ref()
-            .is_some_and(|(tags, _)| tags.contains(&unit.spec.tag));
+            .iter()
+            .any(|(tags, _)| tags.contains(&unit.spec.tag));
         !stray
             && !self.units.iter().enumerate().any(|(i, other)| {
                 i != at
@@ -681,7 +680,7 @@ impl Units {
 
     /// When init next has something to do here.
     pub fn deadline(&self, now: u64) -> Option<u64> {
-        let strays = self.strays.as_ref().map(|_| now + STOPPING_TICK_MS);
+        let strays = (!self.strays.is_empty()).then_some(now + STOPPING_TICK_MS);
         let recheck = self.recheck.map(|(at, _)| at);
         self.units
             .iter()
@@ -750,18 +749,11 @@ impl Units {
         self.recheck_after(now, true);
     }
 
-    /// End what carries any of `tags` beside the strays being ended.
-    pub fn end_strays(&mut self, now: u64, tags: Vec<u32>) {
-        match &mut self.strays {
-            Some((ending, _)) => {
-                for tag in tags {
-                    if !ending.contains(&tag) {
-                        ending.push(tag);
-                    }
-                }
-            }
-            None if !tags.is_empty() => self.strays = Some((tags, Termination::new(now))),
-            None => {}
+    /// End what carries any of `tags` not already being ended.
+    pub fn end_strays(&mut self, now: u64, mut tags: Vec<u32>) {
+        tags.retain(|tag| !self.strays.iter().any(|(ending, _)| ending.contains(tag)));
+        if !tags.is_empty() {
+            self.strays.push((tags, Termination::new(now)));
         }
     }
 
@@ -779,7 +771,7 @@ impl Units {
     /// Whether a re-execution would lose what is under way: a service or a
     /// stray ending, or a request waiting on that.
     pub fn busy(&self) -> bool {
-        !self.waiting.is_empty() || self.strays.is_some() || self.units.iter().any(Unit::stopping)
+        !self.waiting.is_empty() || !self.strays.is_empty() || self.units.iter().any(Unit::stopping)
     }
 }
 
@@ -1488,7 +1480,7 @@ fn configured(extension: &str, reads: &[String]) -> String {
             Err(_) => vec![path.to_owned()],
         };
         files.sort();
-        for file in files.iter().take(CONFIG_FILES_MAX) {
+        for file in files.iter().take(config::FILES_MAX) {
             let digest = sealed_bytes(file).map_or_else(|| "-".to_owned(), |b| hex(&sha256(&b)));
             text.push_str(&format!("{file} {digest}\n"));
         }

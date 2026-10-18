@@ -7,7 +7,8 @@
 //! `/usr/local/share`, then the person's `~/.local/share`; a later entry
 //! replaces an earlier one with the same id, as the XDG data directories
 //! rank. An extension's entry replaces none, as its commands come last on
-//! `PATH`.
+//! `PATH`: it shows only the apps it declares, and none another extension
+//! showed first.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -19,16 +20,36 @@ use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
 use slopos_extension_core::declare::mount_point;
 
-/// The directories holding entries, as `<share>/slopos/apps`, in the order a
-/// later one replaces an earlier one's entry.
-pub fn shares(home: Option<&str>) -> Vec<PathBuf> {
-    let mut shares: Vec<PathBuf> = crate::activation::names()
-        .iter()
-        .map(|name| Path::new(&mount_point(name)).join("share"))
+/// A tree holding entries as `<dir>/slopos/apps`.
+#[derive(Debug)]
+pub struct Share {
+    pub dir: PathBuf,
+    /// An extension's declared apps, the only ids it shows.
+    pub only: Option<Vec<String>>,
+}
+
+impl Share {
+    fn all(dir: impl Into<PathBuf>) -> Share {
+        Share {
+            dir: dir.into(),
+            only: None,
+        }
+    }
+}
+
+/// The trees holding entries, in the order a later one replaces an earlier
+/// one's entry.
+pub fn shares(home: Option<&str>) -> Vec<Share> {
+    let mut shares: Vec<Share> = crate::activation::apps()
+        .into_iter()
+        .map(|(name, apps)| Share {
+            dir: Path::new(&mount_point(&name)).join("share"),
+            only: Some(apps),
+        })
         .collect();
-    shares.push(PathBuf::from("/usr/share"));
-    shares.push(PathBuf::from("/usr/local/share"));
-    shares.extend(home.map(|home| Path::new(home).join(".local/share")));
+    shares.push(Share::all("/usr/share"));
+    shares.push(Share::all("/usr/local/share"));
+    shares.extend(home.map(|home| Share::all(Path::new(home).join(".local/share"))));
     shares
 }
 
@@ -92,11 +113,11 @@ pub fn parse(id: &str, text: &str, icons: &Path) -> Option<AppEntry> {
 
 /// Every entry under `shares`, a later one replacing an earlier with its id,
 /// ordered by name.
-pub fn read(shares: &[PathBuf]) -> Vec<AppEntry> {
+pub fn read(shares: &[Share]) -> Vec<AppEntry> {
     let mut entries = BTreeMap::new();
     for share in shares {
-        let dir = share.join("slopos/apps");
-        let icons = share.join("slopos/icons");
+        let dir = share.dir.join("slopos/apps");
+        let icons = share.dir.join("slopos/icons");
         let Ok(listing) = fs::read_dir(&dir) else {
             continue;
         };
@@ -109,6 +130,13 @@ pub fn read(shares: &[PathBuf]) -> Vec<AppEntry> {
             else {
                 continue;
             };
+            if share
+                .only
+                .as_ref()
+                .is_some_and(|only| !only.iter().any(|app| app == id) || entries.contains_key(id))
+            {
+                continue;
+            }
             let entry = read_bounded(&path, ENTRY_MAX)
                 .and_then(|bytes| String::from_utf8(bytes).ok())
                 .and_then(|text| parse(id, &text, &icons));
