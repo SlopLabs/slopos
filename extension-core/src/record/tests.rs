@@ -21,6 +21,7 @@ fn record() -> Record {
         signer: Some(KEY.into()),
         floor: Some((3, [3; 32])),
         refused: vec![4, 5],
+        uids: vec![("hello".into(), 100), ("hello-worker".into(), 107)],
         why: None,
         current: Some(image(3, 3)),
         previous: Some(Installed {
@@ -44,6 +45,10 @@ fn a_record_reads_back_as_written() {
             let mut stopped = record();
             stopped.stop("its key is no \"longer\" trusted\n");
             stopped
+        },
+        Record {
+            uids: Vec::new(),
+            ..record()
         },
     ] {
         let text = record.render();
@@ -94,4 +99,30 @@ fn a_fingerprint_is_sha256_and_43_digits() {
     assert!(!valid_fingerprint(&KEY.replace("SHA256", "MD5")));
     assert!(!valid_fingerprint(&format!("{KEY}=")));
     assert!(!valid_fingerprint(&KEY[..40]));
+}
+
+#[test]
+fn a_uid_is_in_range_and_held_once() {
+    let text = record().render();
+    assert!(
+        text.contains("\nuids hello=100,hello-worker=107\n"),
+        "{text}"
+    );
+    for bad in [
+        "uids hello=99,hello-worker=107",
+        "uids hello=1000,hello-worker=107",
+        "uids hello=100,hello-worker=100",
+        "uids hello=100,hello=107",
+        "uids Hello=100,hello-worker=107",
+        "uids hello=0100,hello-worker=107",
+        "uids hello=100,",
+        "uids -",
+    ] {
+        let text = text.replace("uids hello=100,hello-worker=107", bad);
+        assert_eq!(Record::parse(&text), None, "{bad}");
+    }
+    let mut removed = record();
+    removed.remove();
+    assert_eq!(removed.number(), Some(100));
+    assert_eq!(removed.uid("hello-worker"), Some(107));
 }

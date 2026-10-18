@@ -46,6 +46,9 @@ use crate::words::{LineError, caps_words, flag, lines, once, single, valid_word}
 
 /// A user's name, as `/etc/passwd` takes one.
 pub const USER_MAX: usize = 32;
+/// The most services one extension declares: init's login tags for them are
+/// made from their places.
+pub const MAX_SERVICES: usize = 16;
 const NAME_MAX: usize = 32;
 const LISTEN_NAME_MAX: usize = 64;
 const PATH_MAX: usize = 255;
@@ -159,6 +162,7 @@ impl Declaration {
     pub fn parse(name: &str, text: &str) -> Result<Declaration, LineError> {
         let mut out = Declaration::default();
         let mut open: Option<(usize, Block)> = None;
+        let mut starts = Vec::new();
         for (line, indented, keyword, rest) in lines(text) {
             let fail = |msg| LineError { line, msg };
             if indented {
@@ -169,7 +173,7 @@ impl Declaration {
                 continue;
             }
             if let Some((start, block)) = open.take() {
-                out.close(start, block)?;
+                out.close(start, block, &mut starts)?;
             }
             match keyword {
                 "service" | "action" => {
@@ -189,9 +193,9 @@ impl Declaration {
             }
         }
         if let Some((start, block)) = open {
-            out.close(start, block)?;
+            out.close(start, block, &mut starts)?;
         }
-        out.finish()?;
+        out.finish(&starts)?;
         Ok(out)
     }
 
@@ -230,14 +234,19 @@ impl Declaration {
         Ok(())
     }
 
-    fn close(&mut self, start: usize, block: Block) -> Result<(), LineError> {
+    fn close(
+        &mut self,
+        start: usize,
+        block: Block,
+        starts: &mut Vec<usize>,
+    ) -> Result<(), LineError> {
         let fail = |msg| LineError { line: start, msg };
         match block {
             Block::Service(draft) => {
                 if self.services.iter().any(|s| s.name == draft.name) {
                     return Err(fail("the service is declared already"));
                 }
-                let service = draft.finish(self).map_err(fail)?;
+                let service = draft.finish().map_err(fail)?;
                 for path in &service.reads {
                     if path.starts_with("/etc/") && !self.config {
                         return Err(fail(
@@ -251,6 +260,7 @@ impl Declaration {
                     ));
                 }
                 self.services.push(service);
+                starts.push(start);
             }
             Block::Action(draft) => {
                 let action = draft.finish().map_err(fail)?;
@@ -263,9 +273,34 @@ impl Declaration {
         Ok(())
     }
 
-    /// What needs every block: a service's `after` names one declared, and
-    /// no chain of them returns to where it began.
-    fn finish(&self) -> Result<(), LineError> {
+    /// What needs every line, `starts` holding each service's: a service
+    /// runs as a user declared anywhere, the first when it names none, and
+    /// listens on no socket another does; its `after` names one declared,
+    /// and no chain of them returns to where it began.
+    fn finish(&mut self, starts: &[usize]) -> Result<(), LineError> {
+        let first = self.users.first().cloned();
+        for (at, &line) in starts.iter().enumerate() {
+            let fail = |msg| LineError { line, msg };
+            let service = &self.services[at];
+            if service
+                .user
+                .as_ref()
+                .is_some_and(|user| !self.users.contains(user))
+            {
+                return Err(fail("the service runs as a user the extension declares"));
+            }
+            if self.services[..at]
+                .iter()
+                .any(|other| other.listen.iter().any(|l| service.listen.contains(l)))
+            {
+                return Err(fail("another service listens on that socket"));
+            }
+        }
+        for service in self.services.iter_mut().filter(|s| !s.session) {
+            if service.user.is_none() {
+                service.user.clone_from(&first);
+            }
+        }
         let whole = |msg| LineError { line: 0, msg };
         for service in &self.services {
             for after in &service.after {
@@ -290,9 +325,12 @@ impl Declaration {
                 }
             }
         }
-        if self.services.iter().any(|s| !s.session) && self.users.is_empty() {
+        if self.services.len() > MAX_SERVICES {
+            return Err(whole("an extension declares at most 16 services"));
+        }
+        if (!self.services.is_empty() || self.state || self.runtime) && self.users.is_empty() {
             return Err(whole(
-                "a service that is no session's runs as a declared user",
+                "a service's log, state and runtime directory are its extension's first user's, so it declares a user",
             ));
         }
         Ok(())
@@ -367,6 +405,15 @@ fn user_name(name: &str, rest: &str) -> Result<String, &'static str> {
         return Err("a user's name is at most 32 bytes");
     }
     Ok(full)
+}
+
+/// A user's whole name: `<name>` or `<name>-<suffix>`.
+pub fn valid_user(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= USER_MAX
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn valid_command(word: &str) -> bool {
@@ -535,7 +582,7 @@ impl ServiceDraft {
         }
     }
 
-    fn finish(self, declared: &Declaration) -> Result<Service, &'static str> {
+    fn finish(self) -> Result<Service, &'static str> {
         let program = self.program.ok_or("the service names no program")?;
         let user = if self.session {
             if self.user.is_some() || !self.listen.is_empty() {
@@ -543,11 +590,7 @@ impl ServiceDraft {
             }
             None
         } else {
-            match self.user {
-                Some(user) if declared.users.contains(&user) => Some(user),
-                Some(_) => return Err("the service runs as a user the extension declares"),
-                None => declared.users.first().cloned(),
-            }
+            self.user
         };
         Ok(Service {
             name: self.name,

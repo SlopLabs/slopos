@@ -35,11 +35,9 @@ impl Release {
             }
             match keyword {
                 "name" => {
-                    let word = single(rest)
-                        .filter(|w| slopos_abi::extension::valid_name(w.as_bytes()))
-                        .ok_or(fail(
-                            "name is lowercase letters, digits and -, not reserved",
-                        ))?;
+                    let word = single(rest).filter(|w| crate::valid_name(w)).ok_or(fail(
+                        "name is lowercase letters, digits and -, not reserved",
+                    ))?;
                     once(&mut name, word.to_string()).map_err(fail)?;
                 }
                 "version" => {

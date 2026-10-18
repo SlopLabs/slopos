@@ -11,6 +11,7 @@ extern crate alloc;
 #[cfg(any(test, feature = "std"))]
 extern crate std;
 
+pub mod accounts;
 pub mod admit;
 pub mod ceiling;
 pub mod declare;
@@ -27,6 +28,18 @@ pub mod symbols;
 mod words;
 
 pub use words::{LineError, parse_caps, render_caps};
+
+/// Names the system's own paths take beside
+/// [`slopos_abi::extension::RESERVED`]: an extension's `/var/log/<name>`,
+/// `/run/<name>` or `/etc/<name>` would be one of theirs.
+pub const TAKEN: [&str; 9] = [
+    "crash", "init", "privd", "sessions", "passwd", "group", "shadow", "keymap", "motd",
+];
+
+/// A name an extension may be installed under.
+pub fn valid_name(name: &str) -> bool {
+    slopos_abi::extension::valid_name(name.as_bytes()) && !TAKEN.contains(&name)
+}
 
 /// The store: a directory per extension and the keys the owner trusts.
 pub const STORE: &str = slopos_abi::fs::EXTENSION_STORE;

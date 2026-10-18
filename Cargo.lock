@@ -248,6 +248,7 @@ dependencies = [
  "slopos-abi",
  "slopos-boot-core",
  "slopos-priv-core",
+ "slopos-slibc-core",
  "slopos-tls-core",
 ]
 

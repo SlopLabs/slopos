@@ -23,6 +23,7 @@ test-elf = []
 slopos-abi = { workspace = true }
 slopos-boot-core = { workspace = true }
 slopos-priv-core = { workspace = true }
+slopos-slibc-core = { workspace = true }
 slopos-tls-core = { workspace = true }
 
 [dev-dependencies]

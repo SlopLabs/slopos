@@ -9,6 +9,7 @@
 //! signer SHA256:bbXpuKG6zhzdmnxq256TlqzFBzRl2f6OOg722cYNbU8
 //! floor 3 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 //! refused 4
+//! uids hello=100,hello-worker=101
 //! image current
 //!   version 3
 //!   sha256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
@@ -16,8 +17,9 @@
 //!   grant NetAdmin unasked - users hello commands hello
 //! ```
 //!
-//! `why` follows `refused` when a check stopped the extension. A record has
-//! one spelling, the one [`Record::render`] writes.
+//! `uids` follows `refused` once any uid is given, and `why` follows both
+//! when a check stopped the extension. A record has one spelling, the one
+//! [`Record::render`] writes.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -39,6 +41,9 @@ pub struct Record {
     pub floor: Option<(u64, [u8; 32])>,
     /// Versions a rollback left, refused to a signed install.
     pub refused: Vec<u64>,
+    /// Every uid ever given it, by name, kept once it is removed:
+    /// [`crate::accounts`].
+    pub uids: Vec<(String, u32)>,
     pub why: Option<String>,
     pub current: Option<Installed>,
     pub previous: Option<Installed>,
@@ -75,10 +80,23 @@ impl Record {
             signer: None,
             floor: None,
             refused: Vec::new(),
+            uids: Vec::new(),
             why: None,
             current: None,
             previous: None,
         }
+    }
+
+    pub fn uid(&self, user: &str) -> Option<u32> {
+        self.uids
+            .iter()
+            .find(|(name, _)| name == user)
+            .map(|&(_, uid)| uid)
+    }
+
+    /// Its number: the uid of its own name.
+    pub fn number(&self) -> Option<u32> {
+        self.uid(&self.name)
     }
 
     pub fn image(&self, slot: Slot) -> Option<&Installed> {
@@ -147,8 +165,9 @@ impl Record {
         Ok(())
     }
 
-    /// Its images taken away; the floor, the refused versions and the signer
-    /// stay, so what was refused is refused still.
+    /// Its images taken away; the floor, the refused versions, the signer and
+    /// the uids stay, so what was refused is refused still and what its users
+    /// left keeps its owner.
     pub fn remove(&mut self) {
         self.current = None;
         self.previous = None;
@@ -171,6 +190,14 @@ impl Record {
             "refused {}\n",
             crate::words::render_list(refused.iter().map(String::as_str))
         ));
+        if !self.uids.is_empty() {
+            let uids: Vec<String> = self
+                .uids
+                .iter()
+                .map(|(name, uid)| format!("{name}={uid}"))
+                .collect();
+            out.push_str(&format!("uids {}\n", uids.join(",")));
+        }
         if let Some(why) = &self.why {
             out.push_str(&format!("why {why}\n"));
         }
@@ -214,6 +241,18 @@ impl Record {
             "-" => Vec::new(),
             list => list.split(',').map(parse_number).collect::<Option<_>>()?,
         };
+        if let Some(uids) = lines.take_if("uids") {
+            for pair in uids.split(',') {
+                let (name, uid) = pair.split_once('=')?;
+                let uid = u32::try_from(parse_number(uid)?).ok()?;
+                let fresh = !record.uids.iter().any(|(n, u)| n == name || *u == uid);
+                (crate::declare::valid_user(name)
+                    && (crate::accounts::FIRST_UID..=crate::accounts::LAST_UID).contains(&uid)
+                    && fresh)
+                    .then_some(())?;
+                record.uids.push((name.to_string(), uid));
+            }
+        }
         if let Some(why) = lines.take_if("why") {
             record.why = Some(why.to_string()).filter(|why| valid_text(why, WHY_MAX));
             record.why.as_ref()?;

@@ -161,6 +161,15 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
         (&service("  session\n  listen tcp 1\n"), 2),
         (&service("  frobnicate\n"), 4),
         ("service s\n  program /opt/hello/bin/s\n", 0),
+        ("service s\n  program /opt/hello/bin/s\n  session\n", 0),
+        ("state\n", 0),
+        ("runtime\n", 0),
+        (
+            &(0..=MAX_SERVICES)
+                .map(|i| format!("service s{i}\n  program /opt/hello/bin/s\n"))
+                .fold("user\n".to_string(), |all, s| all + &s),
+            0,
+        ),
         (&service("  after s\n"), 0),
         (&service("  after ghost\n"), 0),
         (
@@ -270,4 +279,32 @@ action asked
     let d = Declaration::parse("hello", declare).unwrap();
     assert_eq!(d.grant().unasked, ["alone", "shell", "admin"]);
     assert_eq!(d.unasked_caps(), caps::POWER | caps::MOUNT | caps::CLOCK);
+}
+
+#[test]
+fn a_service_naming_no_user_runs_as_the_first_declared_wherever_it_is() {
+    let declare = "\
+service early
+  program /opt/hello/bin/early
+user worker
+user
+";
+    let d = Declaration::parse("hello", declare).unwrap();
+    assert_eq!(d.services[0].user.as_deref(), Some("hello-worker"));
+    let named = "service early\n  program /opt/hello/bin/early\n  user worker\nuser\nuser worker\n";
+    let d = Declaration::parse("hello", named).unwrap();
+    assert_eq!(d.services[0].user.as_deref(), Some("hello-worker"));
+}
+
+#[test]
+fn two_services_never_listen_on_one_socket() {
+    let declare = |second: &str| {
+        format!(
+            "user\nruntime\nservice a\n  program /opt/hello/bin/a\n  listen tcp 7000\n  listen unix ctl\n\
+             service b\n  program /opt/hello/bin/b\n  {second}\n"
+        )
+    };
+    assert_eq!(refused(&declare("listen tcp 7000")), 7);
+    assert_eq!(refused(&declare("listen unix ctl")), 7);
+    assert!(Declaration::parse("hello", &declare("listen udp 7000")).is_ok());
 }
