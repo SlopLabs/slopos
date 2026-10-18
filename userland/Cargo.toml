@@ -328,6 +328,11 @@ path = "src/bin/tests/extension_test.rs"
 required-features = ["testbins"]
 
 [[bin]]
+name = "extension_service_test"
+path = "src/bin/tests/extension_service_test.rs"
+required-features = ["testbins"]
+
+[[bin]]
 name = "supervision_test"
 path = "src/bin/tests/supervision_test.rs"
 

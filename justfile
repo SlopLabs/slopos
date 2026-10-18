@@ -173,8 +173,9 @@ _build-userland:
 _build-userland-tests: _build-userland
     CARGO="{{cargo}} +slopos" USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" --test
-    # The program every extension `extension_test` installs carries.
-    scripts/check_loose_programs.sh {{build_dir}}/libc_probe.elf
+    # The programs the extensions `extension_test` and `extension_service_test`
+    # install carry.
+    scripts/check_loose_programs.sh {{build_dir}}/libc_probe.elf {{build_dir}}/ext_daemon.elf
 
 # `VERITY=off` for the tests image because the suite writes to it; the
 # shipped image keeps its trailer and `test_verity_artifact_*` mounts it.

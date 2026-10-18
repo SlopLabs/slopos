@@ -25,8 +25,10 @@ use slopos_userland::privd::STATUS_REFUSED;
 use slopos_userland::syscall::fs;
 
 const EXTCTL: &str = "/bin/extctl";
-/// A program linked against `libc.so` alone, as an extension's are.
-const PROBE: &str = "/bin/libc_probe";
+/// A program linked against `libc.so` and a library of its image's, as an
+/// extension's are, which declared with `exit` exits once started.
+const PROBE: &str = "/bin/ext_daemon";
+const PROBE_LIB: &str = "/lib/libexttest-fixture.so";
 const DIR: &str = "/tmp/extension-test";
 const ROOT: u32 = 0;
 const USER: u32 = 1000;
@@ -93,7 +95,9 @@ fn put(file: &str, bytes: &[u8]) -> String {
 }
 
 fn declaration(name: &str, caps: &str, unasked: &str) -> String {
-    let mut text = format!("user\nservice probe\n  program /opt/{name}/bin/probe\n  caps {caps}\n");
+    let mut text = format!(
+        "user\nservice probe\n  program /opt/{name}/bin/probe\n  args exit\n  caps {caps}\n  restart never\n"
+    );
     if !unasked.is_empty() {
         text.push_str(&format!(
             "action act\n  program /opt/{name}/bin/probe\n  args act\n  caps {unasked}\n  allow user\n  describe \"Act\"\n"
@@ -104,8 +108,12 @@ fn declaration(name: &str, caps: &str, unasked: &str) -> String {
 
 /// `name` at `version`, its program `program`, declared by `declare`.
 fn pack(name: &str, version: u64, declare: &str, program: &[u8]) -> Option<Vec<u8>> {
+    let lib = std::fs::read(PROBE_LIB)
+        .map_err(|e| fail(format!("{PROBE_LIB}: {e}")))
+        .ok()?;
     let mut packer = Packer::default();
     packer.add("/bin/probe", S_IFREG | 0o755, program.to_vec());
+    packer.add("/lib/libexttest.so", S_IFREG | 0o755, lib);
     packer
         .finish(&format!("name {name}\nversion {version}\n"), declare)
         .map_err(|e| fail(format!("{name} {version} does not pack: {e}")))
