@@ -181,32 +181,94 @@ pub fn test_recv_queue_overflow() -> TestResult {
     pass!()
 }
 
+/// A UDP address, or a wildcard and an address beneath it, is shared only by
+/// sockets that all asked for `SO_REUSEADDR`, so none takes over another's.
 pub fn test_so_reuseaddr() -> TestResult {
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
     };
 
-    let a = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
-    let b = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
-    if a < 0 || b < 0 {
-        return fail!("socket_create failed");
+    let mut socks = [0u32; 5];
+    for sock in &mut socks {
+        let fd = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+        if fd < 0 {
+            return fail!("socket_create failed");
+        }
+        *sock = fd as u32;
     }
-    let a = a as u32;
-    let b = b as u32;
+    let [a, b, c, d, e] = socks;
+    let one: i32 = 1;
+    let reuse = |sock| socket_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one.to_ne_bytes());
 
     assert_eq_test!(socket_bind(a, [10, 0, 2, 15], 44000), 0);
     assert_test!(
         socket_bind(b, [10, 0, 2, 15], 44000) < 0,
         "bind fails without reuse"
     );
-
-    let one: i32 = 1;
-    assert_eq_test!(
-        socket_setsockopt(b, SOL_SOCKET, SO_REUSEADDR, &one.to_ne_bytes()),
-        0
+    assert_eq_test!(reuse(b), 0);
+    assert_test!(
+        socket_bind(b, [10, 0, 2, 15], 44000) < 0,
+        "bind fails beside a socket that did not ask for reuse"
     );
-    assert_eq_test!(socket_bind(b, [10, 0, 2, 15], 44000), 0);
+    assert_test!(
+        socket_bind(b, [0, 0, 0, 0], 44000) < 0,
+        "a wildcard bind fails over a socket that did not ask for reuse"
+    );
+
+    for sock in [c, d, e] {
+        assert_eq_test!(reuse(sock), 0);
+    }
+    assert_eq_test!(socket_bind(c, [0, 0, 0, 0], 44001), 0);
+    assert_eq_test!(
+        socket_bind(d, [10, 0, 2, 15], 44001),
+        0,
+        "every sharer asked"
+    );
+    assert_eq_test!(
+        socket_bind(e, [10, 0, 2, 15], 44001),
+        0,
+        "every sharer asked"
+    );
+    for sock in socks {
+        let _ = socket_close(sock);
+    }
+    pass!()
+}
+
+/// A UDP bind to port 0 holds an ephemeral port from the bind on, so two of
+/// them, on a wildcard and on an address beneath it, never share one.
+pub fn test_udp_bind_to_port_zero_draws_a_port() -> TestResult {
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let wildcard = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    let loopback = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    if wildcard < 0 || loopback < 0 {
+        return fail!("socket_create failed");
+    }
+    let (wildcard, loopback) = (wildcard as u32, loopback as u32);
+    let bound = (
+        socket_bind(wildcard, [0, 0, 0, 0], 0),
+        socket_bind(loopback, [127, 0, 0, 1], 0),
+    );
+    let ports = (
+        socket_get_local_addr(wildcard).map(|a| a.port.0),
+        socket_get_local_addr(loopback).map(|a| a.port.0),
+    );
+    let _ = socket_sendto(loopback, b"x", [127, 0, 0, 1], 9);
+    let after_send = socket_get_local_addr(loopback).map(|a| a.port.0);
+    for sock in [wildcard, loopback] {
+        let _ = socket_close(sock);
+    }
+    assert_eq_test!(bound, (0, 0), "both bind");
+    assert_test!(
+        matches!(ports, (Some(a), Some(b)) if a != 0 && b != 0 && a != b),
+        "each holds a port of its own: {:?}",
+        ports
+    );
+    assert_eq_test!(after_send, ports.1, "a send keeps the port it was bound to");
     pass!()
 }
 
@@ -344,6 +406,10 @@ slopos_testing::stest!(name = test_udp_demux_dispatch, suite = socket_framework)
 slopos_testing::stest!(name = test_inaddr_any_wildcard, suite = socket_framework);
 slopos_testing::stest!(name = test_recv_queue_overflow, suite = socket_framework);
 slopos_testing::stest!(name = test_so_reuseaddr, suite = socket_framework);
+slopos_testing::stest!(
+    name = test_udp_bind_to_port_zero_draws_a_port,
+    suite = socket_framework
+);
 slopos_testing::stest!(
     name = test_explicit_ephemeral_bind_is_never_drawn,
     suite = socket_framework

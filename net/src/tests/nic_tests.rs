@@ -6,7 +6,9 @@
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use slopos_abi::net::{AF_INET, NET_DHCP_SELECTING, SOCK_DGRAM, SOCK_STREAM};
-use slopos_abi::syscall::{ERRNO_EINPROGRESS, IP_TOS, IPPROTO_IP, POLLIN};
+use slopos_abi::syscall::{
+    ERRNO_EINPROGRESS, IP_TOS, IPPROTO_IP, POLLIN, SO_REUSEADDR, SOL_SOCKET,
+};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -402,12 +404,18 @@ fn arp_request_frame(sender_mac: MacAddr, sender: [u8; 4], target: [u8; 4]) -> [
 }
 
 fn udp_socket(local: [u8; 4], port: u16) -> Option<u32> {
+    udp_socket_sharing(local, port, false)
+}
+
+fn udp_socket_sharing(local: [u8; 4], port: u16, reuse: bool) -> Option<u32> {
     let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return None;
     }
     let sock = sock as u32;
-    if socket_bind(sock, local, port) != 0 {
+    let one = 1i32.to_ne_bytes();
+    let shared = !reuse || socket_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one) == 0;
+    if !shared || socket_bind(sock, local, port) != 0 {
         let _ = socket_close(sock);
         return None;
     }
@@ -689,8 +697,8 @@ fn test_nic_rx_connected_udp_takes_only_its_peer() -> TestResult {
     let Some(lan) = Lan::up(MacAddr([2, 0, 0, 0, 0x61, 7])) else {
         return fail!("could not bring up the mock NIC");
     };
-    let connected = udp_socket(LAN_LOCAL, PORT);
-    let wildcard = udp_socket([0; 4], PORT);
+    let connected = udp_socket_sharing(LAN_LOCAL, PORT, true);
+    let wildcard = udp_socket_sharing([0; 4], PORT, true);
     let connect_rc = connected.map(|sock| socket_connect(sock, LAN_PEER, PEER_PORT));
 
     let (frame, len) = udp_frame(lan.mock.mac, (LAN_STRANGER, PEER_PORT), (LAN_LOCAL, PORT));

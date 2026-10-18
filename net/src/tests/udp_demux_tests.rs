@@ -69,8 +69,8 @@ pub fn test_udp_demux_exact_over_wildcard() -> TestResult {
     let _clear = ClearOnExit;
 
     let mut demux = UDP_DEMUX.lock();
-    let rc_a = demux.register(Ipv4Addr(LOCAL_IP), Port(7000), 11, false);
-    let rc_b = demux.register(Ipv4Addr::UNSPECIFIED, Port(7000), 12, false);
+    let rc_a = demux.register(Ipv4Addr(LOCAL_IP), Port(7000), 11, true);
+    let rc_b = demux.register(Ipv4Addr::UNSPECIFIED, Port(7000), 12, true);
     assert_test!(rc_a.is_ok() && rc_b.is_ok(), "both registrations succeed");
 
     assert_eq_test!(
@@ -103,7 +103,29 @@ pub fn test_udp_demux_reuse_addr() -> TestResult {
     );
 
     let third = demux.register(Ipv4Addr(LOCAL_IP), Port(8000), 21, true);
-    assert_test!(third.is_ok(), "second register with reuse succeeds");
+    assert_eq_test!(
+        third,
+        Err(NetError::AddressInUse),
+        "reuse does not take a port from a socket that did not ask for it"
+    );
+    let wildcard = demux.register(Ipv4Addr::UNSPECIFIED, Port(8000), 21, true);
+    assert_eq_test!(
+        wildcard,
+        Err(NetError::AddressInUse),
+        "nor does a wildcard beneath it"
+    );
+    assert_eq_test!(demux.lookup(Ipv4Addr(LOCAL_IP), Port(8000)), Some(20));
+
+    let shared = demux.register(Ipv4Addr(LOCAL_IP), Port(8001), 22, true);
+    let sharer = demux.register(Ipv4Addr(LOCAL_IP), Port(8001), 23, true);
+    assert_test!(shared.is_ok() && sharer.is_ok(), "every sharer asked");
+    assert_eq_test!(
+        demux.lookup(Ipv4Addr(LOCAL_IP), Port(8001)),
+        Some(23),
+        "the newest sharer receives"
+    );
+    demux.unregister(Ipv4Addr(LOCAL_IP), Port(8001), 23);
+    assert_eq_test!(demux.lookup(Ipv4Addr(LOCAL_IP), Port(8001)), Some(22));
 
     pass!()
 }

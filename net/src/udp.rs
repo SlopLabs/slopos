@@ -23,19 +23,37 @@ struct UdpDemuxEntry {
     local_ip: Ipv4Addr,
     local_port: Port,
     sock_idx: u32,
+    reuse_addr: bool,
+    /// When it was bound, among the bucket's: of sockets sharing an address,
+    /// the one bound last receives.
+    order: u32,
 }
 
 pub struct UdpDemuxBucket {
     entries: [Option<UdpDemuxEntry>; UDP_ENTRIES_PER_BUCKET],
+    next_order: u32,
 }
 
 impl UdpDemuxBucket {
     const fn new() -> Self {
         Self {
             entries: [None; UDP_ENTRIES_PER_BUCKET],
+            next_order: 0,
         }
     }
 
+    fn newest(&self, matches: impl Fn(&UdpDemuxEntry) -> bool) -> Option<u32> {
+        self.entries
+            .iter()
+            .flatten()
+            .filter(|entry| matches(entry))
+            .max_by_key(|entry| entry.order)
+            .map(|entry| entry.sock_idx)
+    }
+
+    /// An address, or a wildcard and an address beneath it, is shared only
+    /// among sockets that all set `SO_REUSEADDR`, as on Linux, so no bind
+    /// takes over another's port.
     fn register(
         &mut self,
         local_ip: Ipv4Addr,
@@ -49,26 +67,42 @@ impl UdpDemuxBucket {
         }) {
             return Err(NetError::AddressInUse);
         }
-        for slot in &mut self.entries {
-            if let Some(entry) = slot
-                && entry.local_ip == local_ip
-                && entry.local_port == local_port
-            {
-                if !reuse_addr {
-                    return Err(NetError::AddressInUse);
-                }
-                entry.sock_idx = sock_idx;
-                return Ok(());
-            }
+        let overlaps = |entry: &&UdpDemuxEntry| {
+            entry.local_port == local_port
+                && (entry.local_ip == local_ip
+                    || entry.local_ip == Ipv4Addr::UNSPECIFIED
+                    || local_ip == Ipv4Addr::UNSPECIFIED)
+        };
+        if self
+            .entries
+            .iter()
+            .flatten()
+            .filter(overlaps)
+            .any(|entry| entry.sock_idx == sock_idx && entry.local_ip == local_ip)
+        {
+            return Ok(());
+        }
+        if self
+            .entries
+            .iter()
+            .flatten()
+            .filter(overlaps)
+            .any(|entry| !(entry.reuse_addr && reuse_addr))
+        {
+            return Err(NetError::AddressInUse);
         }
 
+        let order = self.next_order;
         for slot in &mut self.entries {
             if slot.is_none() {
                 *slot = Some(UdpDemuxEntry {
                     local_ip,
                     local_port,
                     sock_idx,
+                    reuse_addr,
+                    order,
                 });
+                self.next_order = order.wrapping_add(1);
                 return Ok(());
             }
         }
@@ -89,21 +123,11 @@ impl UdpDemuxBucket {
     }
 
     fn lookup_exact(&self, dst_ip: Ipv4Addr, dst_port: Port) -> Option<u32> {
-        for entry in self.entries.iter().flatten() {
-            if entry.local_ip == dst_ip && entry.local_port == dst_port {
-                return Some(entry.sock_idx);
-            }
-        }
-        None
+        self.newest(|entry| entry.local_ip == dst_ip && entry.local_port == dst_port)
     }
 
     fn lookup_wildcard(&self, dst_port: Port) -> Option<u32> {
-        for entry in self.entries.iter().flatten() {
-            if entry.local_ip == Ipv4Addr::UNSPECIFIED && entry.local_port == dst_port {
-                return Some(entry.sock_idx);
-            }
-        }
-        None
+        self.newest(|entry| entry.local_ip == Ipv4Addr::UNSPECIFIED && entry.local_port == dst_port)
     }
 
     fn clear(&mut self) {

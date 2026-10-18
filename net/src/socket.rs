@@ -1451,9 +1451,12 @@ pub fn socket_recvfrom(sock_idx: u32, out: &mut [u8], src_out: Option<&mut SockA
     }
 }
 
+/// Port 0 binds a UDP socket to an ephemeral port drawn now, as Linux does,
+/// so the address it holds is the one it sends from.
 pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     let mut udp_bind_args: Option<(SockAddr, bool)> = None;
     let mut icmp_bind_args: Option<(u16, bool)> = None;
+    let mut drawn = false;
     {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
@@ -1464,6 +1467,15 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             return errno_i32(ERRNO_EINVAL);
         }
 
+        let port = if port == 0 && socket_is_udp(sock) {
+            let Some(port) = alloc_ephemeral_port() else {
+                return errno_i32(ERRNO_EADDRINUSE);
+            };
+            drawn = true;
+            port.0
+        } else {
+            port
+        };
         let local = SockAddr::new(Ipv4Addr(addr), Port(port));
         sock.local_addr = Some(local);
         sock.state = SocketState::Bound;
@@ -1479,7 +1491,7 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     }
 
     if let Some((local, reuse_addr)) = udp_bind_args {
-        let claimed = EPHEMERAL_PORTS.lock().claim(local.port);
+        let claimed = drawn || EPHEMERAL_PORTS.lock().claim(local.port);
         let ephemeral = (EphemeralPortAllocator::EPHEMERAL_PORT_START
             ..=EphemeralPortAllocator::EPHEMERAL_PORT_END)
             .contains(&local.port.0);
