@@ -40,14 +40,14 @@ model:
 
 ## Where it stands
 
-**Only the base holds authority.**
-- A program gets capabilities two ways: init starts it from its service table
-  (`userland/src/apps/init/service.rs`, every entry a base path), or privd runs
-  it as an action's mechanism (`assets/privd/actions`, searched on
-  `MECHANISM_PATH`, `/bin:/sbin`, `priv-core/src/lib.rs:56`). Every mechanism
-  runs as uid 0 (`priv-core/src/policy.rs:328-336`).
-- So nothing with authority runs loose code: init's services run from base
-  paths, privd's mechanisms from `MECHANISM_PATH`, and the loader keeps
+**Only the base and the owner's extensions hold authority.**
+- A program gets capabilities three ways: init starts it from its service
+  table (`userland/src/apps/init/service.rs`, every entry a base path), init
+  starts it as an enabled extension's service (Phase 3), or privd runs it as
+  an action's mechanism: the base's (`assets/privd/actions`), run as uid 0, or
+  an enabled extension's, run as its first user (Phase 4).
+- So nothing with authority runs loose code: every program it runs is a file
+  the kernel attests, the base's or an activation's, and the loader keeps
   `/usr/local/lib` from uid 0 and every `AT_SECURE` process.
 
 **uid 0 is not a principal.** privd's `root` is uid 0 running a base
@@ -67,11 +67,11 @@ request (Phase 1).
   instance (`Identity::now`), and `SO_PEEREXTENSION` names the activation.
   privd reads the program again before every verdict and before a mechanism
   starts (`userland/src/apps/privd/mod.rs`).
-- privd's `program <path>` principal names only a static program under
-  `/bin`, `/sbin` or `/usr/bin` (`priv-core/src/policy.rs:42`, `:475`); a
-  dynamically linked one is refused because the loader would take libraries
-  from outside the base under the base's identity (`userland/src/apps/privd/
-  mod.rs:260-279`).
+- privd's `program <path>` principal names a static base program under
+  `/bin`, `/sbin` or `/usr/bin`, a dynamically linked one refused because the
+  loader would take libraries from outside the base under the base's
+  identity; in an extension's action it may name one of that extension's own
+  programs, judged by its activation's label (Phase 4).
 - remoted reads its pairing only from the base, because "a configuration
   anywhere a program could write would hand any program the authority of
   whatever broker it named" (`userland/src/apps/remoted/mod.rs:16-20`). The
@@ -88,6 +88,11 @@ verifies a disk against a CRC-32 per block from a trailer (`:1-33`); nothing
 verifies a SHA-256 tree, and no kernel crate computes SHA-256. There is no
 file-backed block device (`fs/src/blockdev.rs` holds `MemoryBlockDevice`).
 
+**Extensions extend privd, `PATH` and the dock** (Phase 4): privd runs the
+running extensions' actions, `/opt/bin` links their commands last on
+`DEFAULT_PATH`, the dock shows their app entries, and `/etc/<name>` holds the
+machine's configuration of each.
+
 **The private call table is full.** `SYSCALL_PRIVATE_TABLE_SIZE` is 48 and
 `ext_activate` and `ext_deactivate` took the last two slots; the next private
 call grows the table.
@@ -96,14 +101,16 @@ call grows the table.
 `boot/src/early_init.rs`; userland learns of it only through `sys_info`'s boot
 flags, `BOOT_FLAG_EXTENSIONS_OFF` among them.
 
-**Outside the base, software has the session's power only.**
+**Outside the base and the extensions, software has the session's power
+only.**
 - Apps install into `/usr/local` or `~/.local` as the session, with no
   capability (`tree-core`, `/bin/tree-install`).
 - The loader searches `/usr/local/lib` only for a process that is neither
   `AT_SECURE` nor uid 0, and refuses `$ORIGIN` under `AT_SECURE`
-  (`slibc/src/ld_so/mod.rs:62`, `:628-633`, `:737-750`).
-- The dock reads app entries from `/usr/share`, `/usr/local/share` and
-  `~/.local/share` (`userland/src/app_entry.rs:18-27`).
+  (`slibc/src/ld_so/mod.rs`).
+- The dock reads app entries from each shown extension's `share`, then
+  `/usr/share`, `/usr/local/share` and `~/.local/share`
+  (`userland/src/app_entry.rs`).
 
 **Extensions have users; people are one.** Records keep uids from 100 to
 999, and `/etc/passwd` and `/etc/group` list root, `user` and each installed
@@ -142,8 +149,15 @@ keeps, logged by a copy of init running as the extension's user
 | [FreeBSD veriexec](https://reviews.freebsd.org/D8575), [IPE](https://docs.kernel.org/admin-guide/LSM/ipe.html), [fs-verity](https://docs.kernel.org/filesystems/fsverity.html) | Trusted userspace verifies a signed manifest and the kernel holds the digests; IPE judges execution by verity roots; fs-verity verifies each page against a Merkle tree | A base program checks signatures; the kernel attests the bytes it serves; a SHA-256 tree is the on-disk form |
 | [composefs](https://github.com/composefs/composefs) | Per-file verity cannot cover metadata; an image can | One signature covers an extension's files, modes and names together |
 | [ssh-keygen -Y](https://man.archlinux.org/man/ssh-keygen.1.en) | SSH keys sign arbitrary data under a namespace, as git's SSH commit signing does | Extensions are signed with the owner's SSH key |
+| [polkit](https://polkit.pages.freedesktop.org/polkit/polkit.8.html), [pkexec](https://polkit.pages.freedesktop.org/polkit/pkexec.1.html), [D-Bus activation](https://dbus.freedesktop.org/doc/dbus-specification.html) | A package ships actions with per-session defaults; a system service runs as its `User=`; the caller is a uid, pid and session, never a program | Extensions ship actions whose mechanisms run as their own users; the kernel attests the calling program too |
+| [sudoedit](https://www.sudo.ws/docs/man/sudo.man/) | The person edits a copy as themselves; changed files go back; the editor's words stay apart from the files | `extctl config edit`, the file going in by path and digest |
+| [snapd](https://github.com/canonical/snapd/blob/master/data/env/snapd.sh.in), [FHS /opt](https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch03s13.html) | Package commands are appended to `PATH` and menu entries to `XDG_DATA_DIRS`; `/opt/bin` links packages' front ends | `/opt/bin` last on `PATH`; an extension's app entry replaces none |
+| [TUF](https://theupdateframework.github.io/specification/latest/), [AVB](https://android.googlesource.com/platform/external/avb/+/refs/heads/main/README.md) | Signed metadata carries a version the client never lets fall | A signed configuration's serial, kept in the record |
+| [systemd.exec](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html) | `ConfigurationDirectory=` stays root's, readable by the service | `/etc/<name>` is uid 0's and sealed |
+| [Redox userutils](https://gitlab.redox-os.org/redox-os/userutils), [pkgar](https://gitlab.redox-os.org/redox-os/pkgar) | `sudo` is one group check with no per-command policy or caller program; packages are Ed25519-signed with no version, so an old one can come back | A policy per action, judged by the attested program, and a version floor per extension |
 
-None of them gets the owner's position right for this system. ChromeOS,
+Asterinas runs Linux's userland unmodified, so what it offers here is
+Linux's. None of them gets the owner's position right for this system. ChromeOS,
 Fuchsia and locked Android admit system add-ons only under the vendor's key,
 so the owner's only way in is all or nothing. Linux, NixOS and plain sysext
 trust whatever root drops in, with no grant step and identity by path.
@@ -203,7 +217,7 @@ named as `slopos_abi::caps` names them.
   key's ceiling.
 - **An unasked action**, one that allows `user` with no level or `alone`,
   `admin` with no level, or a `program`, hands its capabilities to every
-  person's processes. It counts against a key's
+  person's processes; one that allows `paired` hands them to the broker. It counts against a key's
   separate `user` ceiling, empty by default, and it is named in a first
   install's grant line.
 - **The base's ceiling**, `/usr/share/slopos/privd/extensions`, sealed in the
@@ -231,14 +245,14 @@ named as `slopos_abi::caps` names them.
 | `/var/lib/slopos/extensions.lock` | the writers' lock | uid 0, 0600 |
 | `/opt/<name>` | the active image, read-only and pinned | the kernel |
 | `/opt/bin` | links to declared commands | uid 0 |
-| `/etc/<name>` | the machine's configuration | uid 0, readable by the extension's users |
+| `/etc/<name>` | the machine's configuration | uid 0, sealed, readable by everyone |
 | `/var/lib/<name>`, `/var/log/<name>` | state and logs | the extension's first user |
 | `/run/<name>` | runtime directory and sockets | the extension's first user, made by init |
 
 - `/opt` and `/opt/bin` join `ROOT_LAYOUT` and its mirrors, uid 0, 0755.
-- `DEFAULT_PATH` becomes `/bin:/sbin:/usr/local/bin:/opt/bin`: the base first,
+- `DEFAULT_PATH` is `/bin:/sbin:/usr/local/bin:/opt/bin`: the base first,
   then the system-wide software tree, then what the owner granted; a person's
-  `~/.local/bin` comes before them in their session. A granted command cannot
+  `~/.local/bin` comes before the last two in their session. A granted command cannot
   shadow the toolchain; two extensions declaring one command are refused at
   install.
 - The seal keeps a `DacOverride` holder from rewriting a record without also
@@ -296,7 +310,8 @@ the key or the person that vouched for them; and the **grant**.
 **`root` means base code.** privd's `root` principal and `/run/init`'s uid-0
 commands require uid 0 **and** a base program. An extension never runs as
 uid 0, and its mechanisms run as its own first user: privd holds `SetId`
-beside `DELEGABLE` to spawn them so, and delegates neither.
+beside `DELEGABLE` to spawn them so, and `ProcSignal` to relay their
+requesters' signals, and delegates neither.
 
 **Actions.**
 
@@ -306,7 +321,8 @@ beside `DELEGABLE` to spawn them so, and delegates neither.
 | `org.slopos.extension.install-signed` | `install-signed *` | `ExtensionUpdate Seal` | `root`; `session`; `paired` |
 | `org.slopos.extension.trust` | `key add *`, `key remove *` | `ExtensionUpdate Seal` | `root`; `session consent`; `paired` |
 | `org.slopos.extension.manage` | `enable *`, `disable *`, `remove *`, `rollback *` | `ExtensionUpdate Seal` | `root`; `session consent`; `paired` |
-| `org.slopos.extension.config` (Phase 4) | `config *` | `Seal DacOverride` | `root`; `admin confirm`; `paired` |
+| `org.slopos.extension.config` | `config install *` | `Seal` | `root`; `session consent`; `paired` |
+| `org.slopos.extension.config-signed` | `config apply *` | `Seal` | `root`; `session`; `paired` |
 
 `session` becomes `admin` and `user` once `plans/users-and-login.md` brings
 more than one person.
@@ -376,42 +392,41 @@ after a base rollback to an older one.
 - **A live change** reaches init as `/run/init`'s `extensions` command, from
   the mechanism, which is base code running as uid 0. init reloads the
   records, restarts the services whose program or `reads` changed
-  (`boot_core::base::changed` over the two manifests), stops what was
-  disabled or removed, and restarts privd when an extension's actions
-  changed.
+  (`boot_core::base::changed` over the two manifests, and what they read of
+  `/etc/<name>`), stops what was disabled or removed, and has privd read the
+  extensions' actions again when they changed.
 - After a re-execution init carries only the base's services through its pipe
   and re-derives the extensions' from the records, taking what they cannot
   say from pipes of its own.
 
 ### Actions, commands and apps
 
-- privd reads the base's policy and the enabled extensions' actions, each
+- privd reads the base's policy and the running extensions' actions, each
   held to its record. It spawns an extension mechanism as the extension's
-  first user, from `/opt/<name>`, with `MECHANISM_PATH` led by
-  `/opt/<name>/bin`.
-- A `program <path>` principal may name an extension program. Both of today's
-  refusals change: `PROGRAM_DIRS` admits `/opt/<name>/`, and a dynamically
-  linked principal is admitted when it is an extension's, because the kernel
-  turns it `Other` the moment it maps code from outside the base and its
-  activation.
+  first user, from `/opt/<name>`, with `/opt/<name>/bin` after
+  `MECHANISM_PATH`, as a service's.
+- An extension's action may name one of its own programs as a `program`
+  principal, dynamically linked as all of them are, because the kernel turns
+  it `Other` the moment it maps code from outside the base and its
+  activation; privd judges it by its activation's label. The base's policy
+  names base programs alone.
 - The loader searches `/lib` and the program's own `/opt/<name>/lib` for an
-  `AT_SECURE` extension program, the second derived from its path, which only
-  its activation's mount can hold.
-- `/opt/bin` holds a link for each enabled extension's commands, and the dock
-  reads `share/slopos/apps` of every enabled extension after
-  `/usr/local/share`.
+  `AT_SECURE` extension program, the activation the kernel attests.
+- `/opt/bin` holds a link for each shown extension's commands, and the dock
+  reads `share/slopos/apps` of every shown extension before `/usr/share`, so
+  its entries replace none.
 
 ### Configuration
 
-- An extension's defaults ship in its image. `/etc/<name>` holds what the
-  machine changed.
+- An extension's defaults ship in its image. `/etc/<name>`, a sealed
+  directory of sealed files everyone reads, holds what the machine changed.
 - `extctl config edit <name> <file>` is sudoedit's model: the session edits a
-  copy, and `org.slopos.extension.config` installs it, then restarts the
+  copy, and `org.slopos.extension.config` installs it, then init restarts the
   services whose `reads` name it.
-- `extctl config apply <name> <file> <sig>` installs one with no question when
-  signed, under `extension-config@slopos`, by the key the record names, over
-  the extension's name, the file's path, a serial above the record's last and
-  the content.
+- `extctl config apply <from>` installs one with no question when its sidecar
+  `<from>.meta`, naming the extension, the file, a serial above the record's
+  last and the content's SHA-256, is signed under `extension-config@slopos` by
+  the key the record names.
 - Configuration never widens a grant: capabilities come from the record, so a
   configuration only steers what was already granted.
 
@@ -505,20 +520,34 @@ system's paths. Graded by `extension_service_test`, `tcp_live`'s
 `test_reuse_addr_listens_beside_time_wait`, `udp_demux`'s and
 `socket_framework`'s reuse and port-0 tests, and host tests of the
 accounts, the record's uids, the database's text and the declaration's
-limits. `getgrouplist` stays with `plans/users-and-login.md`, and privd
-starting again for an action change with Phase 4.
+limits. `getgrouplist` stays with `plans/users-and-login.md`.
 
-### Phase 4: Actions, commands, apps and configuration
+### Phase 4: Actions, commands, apps and configuration — done
 
-- privd's extension actions, spawned as the extension's user, for which init
-  gives privd `SetId` beside `DELEGABLE`; extension principals; `/opt/bin`,
-  `DEFAULT_PATH`, the dock; `extctl config` edit and apply.
-- Graded by an app in `/usr/local` asking its extension's action with
-  consent and an unasked one without; a principal naming an extension program
-  refused once that program maps foreign code; privd restarted by an action
-  change; a command found on `PATH` after the session's; a configuration
-  edited, applied and its service restarted; a signed configuration with an
-  old serial refused; and `extctl --root` from the rescue shell.
+privd reads the running extensions' actions at its start beside the base's
+policy (`slopos_userland::activation`), each held to its record and its
+activation, translates their `allow` lines to today's principals
+(`Action::for_privd`), and spawns their mechanisms as the extension's first
+user with no supplementary group, holding `SetId` and `ProcSignal` beside
+`DELEGABLE` to start them and relay their requesters' signals
+(`PRIVD_CAPS`); an extension's own program is a principal
+(`Principal::Extension`) while it runs that file of the activation its record
+installed. Init has privd read them again (`SIGHUP`) when what they were
+read from changes. `/opt/bin` links the shown extensions' commands, last on
+`DEFAULT_PATH`; the session's `PATH` puts `~/.local/bin` before
+`/usr/local/bin`; the dock reads extensions' entries first. `extctl config
+edit|install|apply` keeps `/etc/<name>` sealed, the record keeping the last
+signed serial (`slopos_extension_core::config`), and init restarts a service
+whose `/etc/<name>` reads changed; `extctl --root` reaches a mounted root's
+store. Graded by `extension_action_test` (an app in `/usr/local` asking an
+unasked action and one that asks, root refused, an extension program's
+principal lapsing once it maps foreign code, privd reading an action
+change while it keeps serving, the command shadowed by
+`/usr/local/bin`, the dock's entries, a configuration edited, refused to the
+person with nobody to ask, applied signed, its service restarted each time,
+an old serial and another key refused, and `extctl --root` holding every
+capability as the rescue shell runs it), and host tests of the translation,
+the principal, the sidecar and the record's serial.
 
 ### Phase 5: On-disk images
 
@@ -617,7 +646,7 @@ own, all building on extensions:
   and reopened there by its interpreter, so across a replacement it can read
   the next activation's bytes under the first's identity, and after a
   deactivation whatever the root holds at that path: privd judges an
-  extension's script by its label from Phase 4, and only an `ExtensionUpdate`
+  extension's script by its label, and only an `ExtensionUpdate`
   or `DacOverride` holder can stage either.
 - **A program instance, never a socket walk.** Every change of a process's
   program moves a 64-bit counter (the lesson of Linux's 32-bit `exec_id`);
@@ -756,6 +785,77 @@ own, all building on extensions:
 - **An update restarts what it changes**: a service's declaration, user,
   grant or tag, or its program, `reads` or the image's `lib/` in the
   manifest; the rest runs on, holding the activation it started from.
+- **privd reads the actions again in place; init tells it when.** privd
+  reads the running extensions' actions at its start and again on `SIGHUP`,
+  which init sends on an `extensions` that changes what they were read from —
+  each extension's name, image digest and activation — and a request takes
+  them as they stand when it comes. Starting privd again instead, as a base
+  switch does, left it off its socket while the request that made the change
+  drained, longer than a requester waits under emulation, and the new
+  instance refused every exclusive group while the old one lived. An update
+  of an extension with actions has privd read them again even when they read
+  the same, since its programs are another activation's files.
+- **An extension's `allow` lines read as the one person meets them**, until
+  privd tells people apart: `user` and `admin` with no level, and `user
+  alone`, run for the session's uid unasked; `confirm` and `password` ask the
+  person, who has no password to type; the first line a requester matches
+  decides, so a later line for the same person is never reached.
+- **An extension's program is a principal of its own actions alone**,
+  matched by path and by the label of the activation its record installed,
+  so a script reopened across a replacement, or the same path in another
+  activation, is no match. The base's policy names base programs only: what
+  it means cannot depend on what is installed. uid 0 running an extension's
+  program is no `root`.
+- **A mechanism's `PATH` is a service's**, the base first and the
+  extension's own `bin` after it, so what an extension ships shadows no base
+  tool even inside its own mechanisms.
+- **The question names the extension**: its `describe` is the extension's
+  text, so privd shows `(extension <name>)` after it, and the command line
+  shows the program's `/opt/<name>` path.
+- **An action needs a user**: its mechanism runs as the extension's first
+  user, never as uid 0, so an extension that declares an action declares a
+  user, and one installed before this rule with an action and no user stops
+  at its next activation, saying why.
+- **`paired` is unasked too**: privd never asks about the paired agent, so an
+  action that allows it is named in a first install's grant and held to a
+  key's `user` ceiling, as one any person reaches unasked is; otherwise the
+  broker's key would hold what no question named.
+- **privd relays signals with `ProcSignal`**: a mechanism running as an
+  extension's user is no uid privd may signal by the uid rule, so privd holds
+  `ProcSignal`, which no action names, to relay its requester's signals and a
+  timeout's; it signals only the mechanisms it started, whose pids are never
+  reused.
+- **`/etc/<name>` is laid out sealed at activation**: an image that declares
+  `config` gets an empty sealed directory before it runs, and one there that
+  holds anything unsealed is refused, so nothing a `DacOverride` holder
+  planted before the first configuration is sealed in as one.
+- **`/opt/bin` is `extctl`'s, and only its links into `/opt`**: it links each
+  command of every extension shown after every change, so a disabled,
+  stopped or unshown extension's command leaves `PATH` with it, and anything
+  else there is left alone and keeps its name. A script command run through
+  its link is no attested program, as any script found through a link is
+  not.
+- **An extension's app entry replaces none.** The dock reads extensions'
+  shares first, so the base's, `/usr/local`'s and the person's entries win,
+  as its commands come last on `PATH` and as snapd appends its menu entries
+  to `XDG_DATA_DIRS`. The person's own `~/.local/bin` comes after the base and
+  before `/usr/local/bin` and `/opt/bin` in their session.
+- **Configuration is read by everyone and changed only through the seal.**
+  `/etc/<name>` is a sealed uid-0 directory of sealed files, one file deep,
+  so a `DacOverride` holder without `Seal` cannot steer another extension's
+  service; it is world-readable as `/etc` is, so its actions need `Seal` and
+  nothing else, and secrets belong in `/var/lib/<name>`. The person's file
+  reaches the mechanism as the requester's standard input, by the SHA-256 the
+  question shows, never by a path uid 0 opens, which would copy a file only
+  uid 0 may read where everyone reads it; a signed one goes in by a sidecar,
+  as an image's, whose serial the
+  record takes before the file goes in, so a file signed before it never
+  goes in after, as TUF's version and AVB's rollback index never fall. Init
+  holds what a service reads of `/etc/<name>` in what it started on, so a
+  change restarts exactly those services.
+- **`--root` is the rescue shell's**: `extctl --root <dir>` acts only on what
+  its caller holds, and no privd action takes it, so a session never reaches
+  a store other than the running root's.
 
 ## Constraints
 
