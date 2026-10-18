@@ -2,6 +2,81 @@
 
 **No finding is open.**
 
+Swept 2026-10-18: extensions' services and users — records' uids and the
+user database `extctl` writes sealed from them (`extension_core::accounts`,
+`replace_sealed`); slibc's readers of `/etc/passwd` and `/etc/group`; init's
+boot step, its supervision of every service (`init/extensions.rs`: tags,
+directories, listen sockets, loggers, restarts, session services, reloads)
+and its re-execution handing them on; the loader's search of an attested
+extension program's own `lib`; and the kernel's `SO_REUSEADDR` for TCP
+listeners and UDP addresses. Six review passes; nothing reached the bar.
+They found, before it landed, that every userland socket asking for
+`SOCK_CLOEXEC` got none, the flag truncated to 16 bits, so a re-executed init
+kept listening on every service's port with nobody accepting; that a TCP
+port a service had served stayed refused to a new listener while its
+connections sat in `TIME_WAIT`; that any socket setting `SO_REUSEADDR` took
+a bound UDP address over, and any socket bound to a specific address took a
+wildcard's datagrams for it, so a local process could steal those of a port
+init held for a service; that a UDP bind to port 0 registered port 0
+itself; that a service declared before its extension's `user` line ran as
+uid 1000; that a re-executed init started again what was meant to stay down
+or exited across the exec whatever its policy, adopted a service under what
+the records said after a base switch rather than what it ran, adopted a
+worker as a service's process and a logger that had died, closed only the
+descriptors it could parse from a pipe cut short, and left processes of a
+tag nothing claimed running with their capabilities; that a re-execution
+into an image of init from before services left every one running
+unsupervised with its grant, its sockets held in init; that more than about
+thirty services overflowed the pipe they were handed on in, so init could
+never re-execute, and about sixty spent init's descriptors, after which it
+could start nothing, privd included; that a service started under a tag, or
+waited for a port, that a stopping one still held, so the ending killed it
+or it spent its starts and stayed down holding its own sockets, and two
+services or extensions could claim one port; that init held a program to
+being on some basefs, which a `DacOverride` holder could meet with a link
+from a directory planted at `/opt/<name>` while no activation was shown
+there, and read the release, declaration and manifest by path, so an
+activation replaced between reads mixed two images; that a new base
+narrowing the ceiling left services holding what it took away, and an
+unreadable store stopped every service; that a service's own user could
+block another's logger with a FIFO or grow its log without bound, and the
+loggers carried init's own login tag, which the failed-resume path takes the
+tests' copy of init by; and that a FIFO at `/etc/passwd` blocked every user
+lookup. Now the socket wrapper carries the flags whole; the kernel lets an
+`SO_REUSEADDR` listener take a port only connections hold, refuses a second
+listener under the listeners' lock, shares a UDP address, or a wildcard and
+one beneath it, only among sockets that all set the option, and binds port 0
+to an ephemeral port at once; a declaration's default user is resolved once
+every line is read; a re-execution hands each service's state, its pid, a
+canonical digest and its descriptors on in as many pipes as they fill, only
+to an image that reads them, ending the services before one that does not,
+closes everything the first line names when the rest is short, adopts a
+live or unreaped child and only a live logger, and ends strays before their
+tags start again; a service waits for what a stopping one holds and gives
+its own sockets up with its starts, a port is one service's, and init gives
+its services at most half its descriptors; init opens `/opt/<name>` without
+following a link, reads the activation's files and holds the program to the
+generation they were read from, reloads on a new ceiling and keeps its
+services, reading again with backoff, when the store cannot be read; loggers
+carry a tag of their own and write only a regular file within its bound;
+and the database opens without blocking.
+
+Below the bar and left: init checks a service's program against the
+activation's generation and then spawns it by path, so an activation
+replaced between the two runs the new image's program with the old
+declaration's grant until the reload `extctl` sends ends it (20: the
+replacement takes `ExtensionUpdate`, and both images were granted); a
+session service runs as the person, uid 1000, holding what its extension
+declares, so the person's files are open to code holding more than the
+person (20, by design: the person approved the grant); a connector to a
+service's unix socket reads init's identity, recorded at `listen`, which
+privd and the compositor would take for init's own on a descriptor they did
+not get from init (15: documented, and both take the consent pair only from
+fd 4 as init starts them); a service whose port an extension init cannot
+read still holds spends its starts and gives up until that extension reads
+again (10); and a service's log and state are its extension's first user's,
+so one extension's users share them (10).
+
 Swept 2026-10-17: extensions going in — `extension-core`'s image, declaration,
 grant, sidecar, record, keys and ceiling grammars, its ELF reader and symbol
 check, and its install and activation verdicts; `tls-core`'s strict Ed25519
