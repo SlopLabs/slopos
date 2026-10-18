@@ -533,7 +533,8 @@ user with no supplementary group, holding `SetId` and `ProcSignal` beside
 (`PRIVD_CAPS`); an extension's own program is a principal
 (`Principal::Extension`) while it runs that file of the activation its record
 installed. Init has privd read them again (`SIGHUP`) when what they were
-read from changes. `/opt/bin` links the shown extensions' commands, last on
+read from changes, and ends a stopped extension's mechanisms by the login
+tag each carries. `/opt/bin` links the shown extensions' commands, last on
 `DEFAULT_PATH`; the session's `PATH` puts `~/.local/bin` before
 `/usr/local/bin`; the dock reads extensions' entries first. `extctl config
 edit|install|apply` keeps `/etc/<name>` sealed, the record keeping the last
@@ -545,8 +546,9 @@ principal lapsing once it maps foreign code, privd reading an action
 change while it keeps serving, the command shadowed by
 `/usr/local/bin`, the dock's entries, a configuration edited, refused to the
 person with nobody to ask, applied signed, its service restarted each time,
-an old serial and another key refused, and `extctl --root` holding every
-capability as the rescue shell runs it), and host tests of the translation,
+an old serial and another key refused, `extctl --root` holding every
+capability as the rescue shell runs it, and a running mechanism ended when
+its extension is disabled), and host tests of the translation,
 the principal, the sidecar and the record's serial.
 
 ### Phase 5: On-disk images
@@ -825,10 +827,18 @@ own, all building on extensions:
   `ProcSignal`, which no action names, to relay its requester's signals and a
   timeout's; it signals only the mechanisms it started, whose pids are never
   reused.
+- **A mechanism carries its extension's login tag**, never privd's: init ends
+  what carries it once the extension's actions stop running, as it ends a
+  service, and a privd started again counts none toward the exclusive groups
+  its predecessor's mechanisms hold, since an extension's action takes none.
+  Init signals only a privd it saw ready, since `SIGHUP` before privd's
+  handler would end it.
 - **`/etc/<name>` is laid out sealed at activation**: an image that declares
-  `config` gets an empty sealed directory before it runs, and one there that
-  holds anything unsealed is refused, so nothing a `DacOverride` holder
-  planted before the first configuration is sealed in as one.
+  `config` gets an empty sealed directory, mode 0755, before it runs, and
+  anything unsealed there is taken away at each activation and install, so
+  nothing a `DacOverride` holder planted, or a write cut short left, is
+  sealed in as configuration; a file another process changed as it was
+  written is taken away too rather than left unsealed under its name.
 - **`/opt/bin` is `extctl`'s, and only its links into `/opt`**: it links each
   command of every extension shown after every change, so a disabled,
   stopped or unshown extension's command leaves `PATH` with it, and anything

@@ -4,7 +4,8 @@
 //! is a principal only while it runs that program; privd reads an extension's
 //! actions again as it serves; its command comes last on `PATH`, its app entry
 //! replaces none, a configuration edited or signed restarts the service that
-//! reads it, and a rescue shell's `extctl --root` reaches a root it mounted.
+//! reads it, a rescue shell's `extctl --root` reaches a root it mounted, and
+//! its mechanisms end once it stops.
 //!
 //! The runner hands this binary every capability as uid 0, which privd's
 //! `root` admits unasked to the base's actions and to none of an extension's;
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use slopos_abi::caps::{SYS_INSPECT, UNIVERSAL};
 use slopos_abi::fs::{DEFAULT_PATH, S_IFREG, inode_flags::FS_IMMUTABLE_FL};
+use slopos_abi::signal::SIGTERM;
 use slopos_abi::syscall::SYSCALL_CAPS_DROP;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_extension_core::config::{self, Signed};
@@ -36,10 +38,10 @@ use slopos_priv_core::{DELEGABLE, ENV_FD};
 use slopos_slibc::test_harness::note;
 use slopos_tls_core::ed25519::SigningKey;
 use slopos_tls_core::sshsig::{self, KEY_TYPE, PublicKey};
-use slopos_userland::app_entry;
 use slopos_userland::privd::{Connection, RESTART_WAIT, STATUS_REFUSED, request_id};
 use slopos_userland::syscall::process::{self, Endowment};
 use slopos_userland::syscall::{OwnedFd, fs, net};
+use slopos_userland::{app_entry, init_control};
 
 const NAME: &str = "act";
 const EXTCTL: &str = "/bin/extctl";
@@ -49,6 +51,8 @@ const SELF: &str = "/bin/extension_action_test";
 /// The person's app: this binary outside the base.
 const APP: &str = "/usr/local/bin/act-app-probe";
 const COMMAND: &str = "act-hello";
+/// The argument of the action whose mechanism runs until it is ended.
+const LINGER: &str = "linger";
 const DIR: &str = "/tmp/extension-action-test";
 /// A root as a rescue shell finds one mounted.
 const RESCUED: &str = "/var/tmp/extension-action-root";
@@ -178,7 +182,9 @@ fn declaration(version: u64) -> String {
          action careful\n  program /opt/{NAME}/bin/daemon\n  args {who}\n  caps SysInspect\n  \
          allow user confirm\n  describe \"Say who it runs as, once allowed\"\n\
          action own\n  program /opt/{NAME}/bin/daemon\n  args {who}\n  caps\n  \
-         allow program /opt/{NAME}/bin/client\n  describe \"Answer its own client\"\n",
+         allow program /opt/{NAME}/bin/client\n  describe \"Answer its own client\"\n\
+         action linger\n  program /opt/{NAME}/bin/daemon\n  args {LINGER}\n  caps\n  \
+         allow user\n  describe \"Run until ended\"\n",
         caps_drop()
     )
 }
@@ -292,6 +298,10 @@ enum Outcome {
 
 /// Ask `privd` for `action` with `who`'s arguments, its output caught.
 fn ask_privd(privd: &mut Connection, action: &str) -> Outcome {
+    ask_privd_with(privd, action, &["who", &caps_drop()])
+}
+
+fn ask_privd_with(privd: &mut Connection, action: &str, args: &[&str]) -> Outcome {
     let (Ok((out, write)), Ok(null)) = (
         fs::pipe(),
         fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR),
@@ -301,7 +311,7 @@ fn ask_privd(privd: &mut Connection, action: &str) -> Outcome {
     let request = Request {
         id: request_id(),
         action: action.to_owned(),
-        args: vec![b"who".to_vec(), caps_drop().into_bytes()],
+        args: args.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
         cwd: false,
     };
     if let Err(why) = privd.send(&request, &[null.raw(), write.raw(), 2]) {
@@ -333,10 +343,13 @@ fn ask_privd(privd: &mut Connection, action: &str) -> Outcome {
     }
 }
 
-/// The app's half: ask for `action` as this process and say how it went.
-fn app(action: &str) -> i32 {
+/// The app's half: ask for `action`, with `args` if any, as this process and
+/// say how it went.
+fn app(action: &str, args: &[String]) -> i32 {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let outcome = match Connection::open_within(RESTART_WAIT) {
-        Ok(mut privd) => ask_privd(&mut privd, action),
+        Ok(mut privd) if args.is_empty() => ask_privd(&mut privd, action),
+        Ok(mut privd) => ask_privd_with(&mut privd, action, &args),
         Err(why) => Outcome::Lost(why),
     };
     match outcome {
@@ -781,6 +794,47 @@ fn a_rescue_shell_s_extctl_reaches_a_root_it_mounted() -> bool {
     outcome
 }
 
+/// A mechanism its extension runs is ended once the extension stops, as its
+/// services are.
+fn a_stopped_extension_s_mechanisms_end() -> bool {
+    let Some(tag) = record(NAME)
+        .and_then(|record| record.number())
+        .and_then(init_control::action_tag)
+    else {
+        return fail("the record gives act no number");
+    };
+    let app = Command::new(APP)
+        .args([ASK, "ext.act.linger", LINGER])
+        .uid(USER)
+        .gid(USER)
+        .stdout(Stdio::piped())
+        .spawn();
+    let mut app = match app {
+        Ok(app) => app,
+        Err(e) => return fail(format!("{APP}: {e}")),
+    };
+    let ended = until(|| !init_control::processes(tag).is_empty())
+        && {
+            let ran = extctl(ROOT, &["disable", NAME]);
+            ran.ok() || fail(format!("disable {NAME}: {}", ran.shown()))
+        }
+        && (until(|| init_control::processes(tag).is_empty())
+            || fail("the mechanism outlived its extension"));
+    if !ended {
+        let _ = app.kill();
+    }
+    let mut said = String::new();
+    if let Some(mut out) = app.stdout.take() {
+        let _ = out.read_to_string(&mut said);
+    }
+    let _ = app.wait();
+    let enabled = extctl(ROOT, &["enable", NAME]);
+    ended
+        && (said.trim() == format!("EXIT -{SIGTERM}")
+            || fail(format!("the requester, its mechanism ended: {said}")))
+        && (enabled.ok() || fail(format!("enable {NAME}: {}", enabled.shown())))
+}
+
 fn removing_takes_its_actions_and_command_away() -> bool {
     let ran = extctl(ROOT, &["remove", NAME]);
     if !ran.ok() {
@@ -829,6 +883,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
         a_rescue_shell_s_extctl_reaches_a_root_it_mounted,
     ),
     (
+        "a_stopped_extension_s_mechanisms_end",
+        a_stopped_extension_s_mechanisms_end,
+    ),
+    (
         "removing_takes_its_actions_and_command_away",
         removing_takes_its_actions_and_command_away,
     ),
@@ -837,7 +895,8 @@ const CASES: &[(&str, fn() -> bool)] = &[
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some(ASK) {
-        std::process::exit(app(args.get(2).map_or("", String::as_str)));
+        let action = args.get(2).map_or("", String::as_str);
+        std::process::exit(app(action, args.get(3..).unwrap_or_default()));
     }
     let _ = std::fs::create_dir_all(DIR);
     let _ = std::fs::set_permissions(DIR, std::fs::Permissions::from_mode(0o755));

@@ -88,6 +88,7 @@ struct Origin {
     action: String,
     extension: String,
     generation: u64,
+    login: u32,
 }
 
 /// The base's actions and the running extensions', and where each of the
@@ -345,6 +346,7 @@ fn with_extensions(mut policy: Policy) -> Loaded {
                 action: name,
                 extension: loaded.extension,
                 generation: loaded.generation,
+                login: loaded.login,
             });
         }
     }
@@ -834,13 +836,7 @@ fn run(
         crate::activation::holds(&origin.extension, origin.generation, &action.program)
             .map_err(Reply::denied)?;
     }
-    let pid = spawn(
-        action,
-        origin.map(|o| o.extension.as_str()),
-        &request.args,
-        &fds[..wire::STDIO],
-        &cwd,
-    )?;
+    let pid = spawn(action, origin, &request.args, &fds[..wire::STDIO], &cwd)?;
     log!(
         "privd: {} for {}: started pid {pid}{}",
         action.name,
@@ -894,10 +890,11 @@ fn directory_of(daemon: &Daemon, dir: &OwnedFd) -> Result<String, Reply> {
 }
 
 /// Start `action`'s mechanism; an extension's sees its own `bin` on its
-/// path and runs with no supplementary group.
+/// path, runs with no supplementary group and carries its extension's login
+/// tag, by which init ends it once the extension stops.
 fn spawn(
     action: &Action,
-    extension: Option<&str>,
+    extension: Option<&Origin>,
     args: &[Vec<u8>],
     stdio: &[OwnedFd],
     cwd: &str,
@@ -910,7 +907,7 @@ fn spawn(
         );
     }
     let path = match extension {
-        Some(name) => format!("{MECHANISM_PATH}:{}/bin", mount_point(name)),
+        Some(origin) => format!("{MECHANISM_PATH}:{}/bin", mount_point(&origin.extension)),
         None => MECHANISM_PATH.to_owned(),
     };
     let env = [
@@ -942,7 +939,7 @@ fn spawn(
             caps: action.caps,
             ids: Some((action.uid, action.uid)),
             groups: extension.map(|_| &[][..]),
-            ..Endowment::NONE
+            login: extension.map(|origin| origin.login),
         },
     );
     if pid <= 0 {

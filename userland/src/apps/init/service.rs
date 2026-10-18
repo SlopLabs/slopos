@@ -318,6 +318,16 @@ impl Supervised {
         self.due = self.child.is_none().then(|| self.budget.next(now));
     }
 
+    /// [`start`](Self::start), giving the descriptor [`start_ready`]
+    /// answers.
+    pub fn start_ready(&mut self, now: u64, fds: &[(RawFd, RawFd)]) -> Option<OwnedFd> {
+        self.budget.record(now);
+        let (child, ready) = start_ready(self.service, fds).unzip();
+        self.child = child;
+        self.due = self.child.is_none().then(|| self.budget.next(now));
+        ready
+    }
+
     pub fn exited(&mut self, status: process::WaitStatus, now: u64) {
         self.child = None;
         self.draining = None;

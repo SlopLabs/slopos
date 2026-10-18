@@ -17,6 +17,7 @@ use slopos_extension_core::image::{DECLARE, MANIFEST, RELEASE};
 use slopos_extension_core::record::Record;
 use slopos_extension_core::release::Release;
 use slopos_priv_core::Action;
+use slopos_priv_core::DELEGABLE;
 
 use crate::apps::extctl::store::Store;
 use crate::syscall::fs as sys_fs;
@@ -136,6 +137,8 @@ pub struct Loaded {
     pub extension: String,
     /// The activation it was read from, which its program must be a file of.
     pub generation: u64,
+    /// The login tag its mechanism runs under.
+    pub login: u32,
 }
 
 /// Every running extension's actions as privd runs them.
@@ -190,20 +193,23 @@ pub fn actions() -> Result<Actions, String> {
             }
         };
         let first = shown.declaration.users.first();
-        let (Some(uid), Some(label)) = (
+        let (Some(uid), Some(login), Some(label)) = (
             first.and_then(|user| record.uid(user)),
+            record.number().and_then(crate::init_control::action_tag),
             Label::new(name.as_bytes(), current.sha256),
         ) else {
-            out.skipped
-                .push(format!("{name}: its record gives its first user no uid"));
+            out.skipped.push(format!(
+                "{name}: its record gives it or its first user no uid"
+            ));
             continue;
         };
-        let held = current.grant.caps & ceiling & !NEVER;
+        let held = current.grant.caps & ceiling & DELEGABLE & !NEVER;
         for action in &shown.declaration.actions {
             out.loaded.push(Loaded {
                 action: action.for_privd(uid, held, label),
                 extension: name.clone(),
                 generation: shown.generation,
+                login,
             });
         }
         out.from.push_str(&format!(

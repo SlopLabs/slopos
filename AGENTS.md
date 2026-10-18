@@ -762,7 +762,12 @@ opened just before the start is of the activation its action was read from;
 init hands privd `SetId` beside `DELEGABLE` for that, and `ProcSignal` to
 relay a requester's signals to a mechanism running as another uid
 (`slopos_priv_core::PRIVD_CAPS`); no action names either, and privd signals
-only the mechanisms it started. Until privd tells
+only the mechanisms it started. A mechanism carries its extension's login tag
+(`init_control::action_tag`) rather than privd's, so a privd started again
+counts none toward the exclusive groups its predecessor held, and init ends
+whatever carries the tag of an extension whose actions no longer run, as it
+ends a service. What it holds is also within `DELEGABLE`, all privd can
+give. Until privd tells
 people apart (`plans/users-and-login.md`) an extension's `allow` lines read
 as the one person at the machine meets them, its only admin and without a
 password: `user` and `admin` with no level, and `user alone`, run for the
@@ -775,9 +780,10 @@ program, so one that lapses between the two reads is no program; uid 0
 running an extension's program is no `root`. The question names the
 extension after the action's `describe`. Init remembers what the actions
 privd read were read from — each extension's name, image digest and
-activation — and on `extensions` sends privd `SIGHUP` when that changes, so
-privd never leaves its socket for an extension and an exclusive group stays
-its own.
+activation — and on `extensions`, and whenever it reads the store again,
+sends privd `SIGHUP` when that changes, once a privd it started has said it
+is ready, so privd never leaves its socket for an extension and an exclusive
+group stays its own.
 
 **An extension's commands, apps and configuration are the owner's grant.**
 `/opt/bin` holds a link to `/opt/<name>/bin/<command>` for each command of
@@ -788,8 +794,10 @@ base's, so an extension's app entry replaces none. `/etc/<name>`, a sealed
 uid-0 directory of sealed files read by everyone, holds what the machine
 changed of an extension's configuration (`slopos_extension_core::config`),
 for an extension that declares `config`, one file deep, laid out empty and
-sealed before its first activation runs and refused while it holds anything
-unsealed: `extctl config edit
+sealed before its first activation runs, mode 0755, with anything unsealed
+in it — left by a write cut short, or put there by no `Seal` holder — taken
+away at each activation and install, and a file another process changes as
+it is written taken away rather than left unsealed: `extctl config edit
 <name> <file>` edits a copy as sudoedit does and installs what changed
 through `org.slopos.extension.config` (`config install <name> <file>
 <sha256>`, the file the requester's standard input, so the mechanism installs

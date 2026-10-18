@@ -293,6 +293,11 @@ int main(int argc, char **argv) {
         caps_drop_nr = atol(argv[2]);
         return who();
     }
+    if (argc >= 2 && strcmp(argv[1], "linger") == 0) {
+        for (;;) {
+            sleep(60);
+        }
+    }
     printf("ext_daemon: pid %d uid %d %s\n", (int)getpid(), (int)getuid(), exttest_greeting());
     fflush(stdout);
     if (argc < 2 || strcmp(argv[1], "exit") == 0) {

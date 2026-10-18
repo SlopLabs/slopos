@@ -11,7 +11,7 @@
 use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::mem::ManuallyDrop;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -69,7 +69,11 @@ fn stdin_bytes() -> Result<Vec<u8>, String> {
 /// `config install` hands its file over, and give its SHA-256.
 pub fn take_as_stdin(from: &str) -> Result<[u8; 32], String> {
     let file = File::open(from).map_err(|e| format!("{from}: {e}"))?;
-    crate::syscall::fs::dup2(file.as_raw_fd(), 0).map_err(|e| format!("{from}: {e}"))?;
+    if file.as_raw_fd() == 0 {
+        let _ = file.into_raw_fd();
+    } else {
+        crate::syscall::fs::dup2(file.as_raw_fd(), 0).map_err(|e| format!("{from}: {e}"))?;
+    }
     stdin_bytes()
         .map(|bytes| sha256(&bytes))
         .map_err(|why| format!("{from}: {why}"))
@@ -184,28 +188,37 @@ pub fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
 }
 
 /// `/etc/<name>` as `extctl` keeps it, made so where there is none: a sealed
-/// directory of uid 0's holding sealed files alone. Anything else there was
-/// put by no `Seal` holder, so it is refused rather than sealed in as the
-/// extension's configuration.
+/// directory of uid 0's, mode 0755, holding sealed files alone. Anything else
+/// there was put by no `Seal` holder, or left by a write cut short, so it is
+/// taken away rather than sealed in as the extension's configuration.
 pub fn own_dir(name: &str) -> Result<PathBuf, String> {
     let dir = PathBuf::from(config::dir(name));
     let shown = |e: std::io::Error| format!("{}: {e}", dir.display());
-    match fs::symlink_metadata(&dir) {
-        Ok(meta) if meta.is_dir() && meta.uid() == 0 => {}
+    let mode = match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() && meta.uid() == 0 => meta.mode() & 0o7777,
         Ok(_) => return Err(format!("{} is not uid 0's directory", dir.display())),
-        Err(e) if e.kind() == ErrorKind::NotFound => fs::create_dir(&dir)
-            .and_then(|()| fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)))
-            .map_err(shown)?,
-        Err(e) => return Err(shown(e)),
-    }
-    for entry in fs::read_dir(&dir).map_err(shown)? {
-        let path = entry.map_err(shown)?.path();
-        if !store::sealed_file(&path) {
-            return Err(format!(
-                "{} is no sealed file, so no configuration of {name}'s; take it away",
-                path.display()
-            ));
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            fs::create_dir(&dir).map_err(shown)?;
+            0
         }
+        Err(e) => return Err(shown(e)),
+    };
+    let strays = fs::read_dir(&dir)
+        .map_err(shown)?
+        .map(|entry| entry.map(|entry| entry.path()).map_err(shown))
+        .filter(|path| !path.as_ref().is_ok_and(|path| store::sealed_file(path)))
+        .collect::<Result<Vec<_>, _>>()?;
+    if mode != 0o755 || !strays.is_empty() {
+        store::unsealed(&dir, || {
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).map_err(shown)?;
+            strays.iter().try_for_each(|path| {
+                eprintln!(
+                    "extctl: {} is no sealed file, so no configuration of {name}'s; taken away",
+                    path.display()
+                );
+                store::remove_entry(path)
+            })
+        })?;
     }
     store::seal_dir(&dir)?;
     Ok(dir)

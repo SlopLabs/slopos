@@ -1,7 +1,7 @@
 //! `/run/init`, where init takes requests to end and restart the desktop
 //! session, to take a change of the extensions and to re-execute itself, and
 //! the login tags it gives the desktop, remoted, privd and extensions'
-//! services, by which their processes are found.
+//! services and mechanisms, by which their processes are found.
 
 use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
 use slopos_abi::syscall::{MSG_NOSIGNAL, POLLIN, UserPollFd, UserTaskEntry};
@@ -38,6 +38,17 @@ pub fn service_tag(number: u32, slot: usize) -> Option<u32> {
         return None;
     }
     Some(SERVICE_TAGS + (number - FIRST_UID) * MAX_SERVICES as u32 + slot as u32)
+}
+
+/// The login tags of the mechanisms privd runs for extensions' actions, one
+/// per extension, by which init ends them once their extension stops.
+const ACTION_TAGS: u32 = 0x2_0000;
+
+pub fn action_tag(number: u32) -> Option<u32> {
+    use slopos_extension_core::accounts::{FIRST_UID, LAST_UID};
+    (FIRST_UID..=LAST_UID)
+        .contains(&number)
+        .then(|| ACTION_TAGS + number - FIRST_UID)
 }
 
 /// One reading of every task that has not exited, for asking several
@@ -91,12 +102,21 @@ impl Tasks {
     pub fn service_tags(&self) -> Vec<u32> {
         use slopos_extension_core::accounts::{FIRST_UID, LAST_UID};
         use slopos_extension_core::declare::MAX_SERVICES;
-        let last = SERVICE_TAGS + (LAST_UID - FIRST_UID + 1) * MAX_SERVICES as u32;
+        self.tags_in(SERVICE_TAGS..SERVICE_TAGS + (LAST_UID - FIRST_UID + 1) * MAX_SERVICES as u32)
+    }
+
+    /// Every extension mechanism's tag some process carries.
+    pub fn action_tags(&self) -> Vec<u32> {
+        use slopos_extension_core::accounts::{FIRST_UID, LAST_UID};
+        self.tags_in(ACTION_TAGS..ACTION_TAGS + LAST_UID - FIRST_UID + 1)
+    }
+
+    fn tags_in(&self, range: std::ops::Range<u32>) -> Vec<u32> {
         let mut tags: Vec<u32> = self
             .0
             .iter()
             .map(|task| task.login)
-            .filter(|tag| (SERVICE_TAGS..last).contains(tag))
+            .filter(|tag| range.contains(tag))
             .collect();
         tags.sort_unstable();
         tags.dedup();

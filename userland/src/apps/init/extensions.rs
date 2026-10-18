@@ -236,13 +236,16 @@ pub struct Units {
     session: bool,
     /// `extensions` requests, answered once no service is ending.
     waiting: Vec<OwnedFd>,
-    /// Services' tags no unit claims, whose processes are ended.
+    /// Tags no unit or running extension claims, whose processes are ended.
     strays: Option<(Vec<u32>, Termination)>,
     /// Ended for an image of init that keeps no services.
     retired: bool,
     /// When the store, part of which could not be read, is read again, and
     /// how long the wait was.
     recheck: Option<(u64, u64)>,
+    /// The store was read since [`take_reread`](Self::take_reread) last
+    /// asked.
+    reread: bool,
 }
 
 /// What a re-execution hands the next image of each service beside the
@@ -404,6 +407,7 @@ impl Units {
             strays: None,
             retired: false,
             recheck: None,
+            reread: false,
         };
         let tasks = Tasks::read();
         if !units.off {
@@ -500,6 +504,7 @@ impl Units {
                 "init re-executes into an image that keeps no services",
             );
         }
+        self.reread = true;
         let Wanted {
             specs: mut wanted,
             unknown,
@@ -734,6 +739,30 @@ impl Units {
             .iter()
             .filter(|unit| unit.spec.extension == extension);
         units.map(|unit| fds(&unit.spec)).sum()
+    }
+
+    pub fn take_reread(&mut self) -> bool {
+        std::mem::take(&mut self.reread)
+    }
+
+    /// Read the store again later, as when part of it could not be read.
+    pub fn read_again(&mut self, now: u64) {
+        self.recheck_after(now, true);
+    }
+
+    /// End what carries any of `tags` beside the strays being ended.
+    pub fn end_strays(&mut self, now: u64, tags: Vec<u32>) {
+        match &mut self.strays {
+            Some((ending, _)) => {
+                for tag in tags {
+                    if !ending.contains(&tag) {
+                        ending.push(tag);
+                    }
+                }
+            }
+            None if !tags.is_empty() => self.strays = Some((tags, Termination::new(now))),
+            None => {}
+        }
     }
 
     /// Read the store again later when part of it could not be read: a

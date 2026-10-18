@@ -170,7 +170,7 @@ fn put_sealed(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
 /// Take away what is at `path` in a directory open for changes, sealed or
 /// not; nothing there is no error. A sealed file with a second name is
 /// left sealed, since unsealing it would unseal that name too.
-fn remove_entry(path: &Path) -> Result<(), String> {
+pub fn remove_entry(path: &Path) -> Result<(), String> {
     match open_entry(path) {
         Ok(file) if file.metadata().is_ok_and(|m| m.is_dir()) => {
             fs::remove_dir_all(path).map_err(|e| shown(path, e))
@@ -228,7 +228,8 @@ fn put_generation(dir: &Path, stem: &str, bytes: &[u8]) -> Result<(), String> {
 /// it holds them sealed already. A sealed file can be neither renamed nor
 /// renamed over, so the old one is unsealed for the rename and the new one
 /// sealed after: in between a reader that believes only a sealed file finds
-/// none.
+/// none. What another process changed in between is taken away rather than
+/// left at `path` unsealed.
 pub fn replace_sealed(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if read_sealed(path, bytes.len() as u64)
         .ok()
@@ -239,9 +240,11 @@ pub fn replace_sealed(path: &Path, bytes: &[u8]) -> Result<(), String> {
         return Ok(());
     }
     let dir = path.parent().ok_or_else(|| shown(path, "no directory"))?;
-    let mut fresh = path.as_os_str().to_owned();
+    let name = path.file_name().ok_or_else(|| shown(path, "no name"))?;
+    let mut fresh = std::ffi::OsString::from(".");
+    fresh.push(name);
     fresh.push(".new");
-    let fresh = PathBuf::from(fresh);
+    let fresh = dir.join(fresh);
     remove_entry(&fresh)?;
     let mut file = OpenOptions::new()
         .read(true)
@@ -254,14 +257,18 @@ pub fn replace_sealed(path: &Path, bytes: &[u8]) -> Result<(), String> {
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .map_err(|e| shown(&fresh, e))?;
-    match open_entry(path) {
-        Ok(old) if is_sealed(&old) => {
-            set_sealed(&old, false).map_err(|e| shown(path, format!("unsealing: {e}")))?
-        }
-        _ => {}
+    let old = open_entry(path).ok().filter(is_sealed);
+    if let Some(old) = &old {
+        set_sealed(old, false).map_err(|e| shown(path, format!("unsealing: {e}")))?;
     }
-    fs::rename(&fresh, path).map_err(|e| shown(path, e))?;
-    set_sealed(&file, true).map_err(|e| shown(path, format!("sealing: {e}")))?;
+    if let Err(e) = fs::rename(&fresh, path) {
+        if let Some(old) = &old {
+            let _ = set_sealed(old, true);
+        }
+        let _ = remove_entry(&fresh);
+        return Err(shown(path, e));
+    }
+    let sealed = set_sealed(&file, true).map_err(|e| shown(path, format!("sealing: {e}")));
     let back = file
         .seek(SeekFrom::Start(0))
         .and_then(|_| read_all(&file, bytes.len() as u64));
@@ -269,9 +276,13 @@ pub fn replace_sealed(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .ok()
         .map(|m| (m.dev(), m.ino(), 1));
     let ours = file.metadata().ok().map(|m| (m.dev(), m.ino(), m.nlink()));
-    if back.ok().as_deref() != Some(bytes) || here.is_none() || here != ours {
+    if sealed.is_err() || back.ok().as_deref() != Some(bytes) || here.is_none() || here != ours {
         let _ = set_sealed(&file, false);
-        return Err(shown(path, "changed by another process as it was written"));
+        let _ = remove_entry(path);
+        return sealed.and(Err(shown(
+            path,
+            "changed by another process as it was written",
+        )));
     }
     open_dir(dir)
         .and_then(|dir| dir.sync_all())
@@ -294,6 +305,9 @@ impl Store {
     /// The store of the root at `top`, a mounted disk's as the rescue shell
     /// reaches one, as [`open`](Self::open) opens this root's.
     pub fn open_at(top: &Path, write: bool) -> Result<Store, String> {
+        if !top.is_absolute() {
+            return Err(shown(top, "not an absolute path"));
+        }
         let root = top.join(STORE.trim_start_matches('/'));
         let mut walked = PathBuf::from("/");
         for part in root.iter().skip(1) {
