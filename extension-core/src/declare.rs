@@ -138,9 +138,8 @@ pub enum Level {
 
 impl Action {
     /// Whether it runs with nobody asked: it allows `user` with no level or
-    /// `alone`, which one person logged in always is, `admin` with no level,
-    /// which that person is, a program, which any person may run, or the
-    /// paired agent, which is never asked.
+    /// `alone`, `admin` with no level, a program or the paired agent, none of
+    /// whom is asked.
     pub fn unasked(&self) -> bool {
         self.allows.iter().any(|a| {
             matches!(
@@ -158,11 +157,11 @@ impl Action {
     }
 
     /// What privd runs for it: its program as `uid`, the extension's first
-    /// user, holding what it declares within `held`. Until privd tells people
-    /// apart, its `allow` lines read as the one person at the machine, its
-    /// only admin and without a password, meets them: a level but `alone`
-    /// asks them, and the first line a requester matches decides. `label`
-    /// names the activation whose programs its `program` lines mean.
+    /// user, holding what it declares within `held`, its `program` lines
+    /// meaning programs of the activation `label` names. Until privd tells
+    /// people apart, its `allow` lines read as the one person at the machine
+    /// meets them: a level but `alone` asks, and the first line a requester
+    /// matches decides.
     pub fn for_privd(&self, uid: u32, held: u64, label: Label) -> policy::Action {
         let extension = String::from_utf8_lossy(label.name()).into_owned();
         let own = format!("{}/", mount_point(&extension));

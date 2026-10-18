@@ -112,7 +112,6 @@ pub fn sealed_dir(path: &Path) -> bool {
     open_dir(path).is_ok_and(|dir| is_sealed(&dir))
 }
 
-/// Seal the directory at `path`.
 pub fn seal_dir(path: &Path) -> Result<(), String> {
     let dir = open_dir(path).map_err(|e| shown(path, e))?;
     set_sealed(&dir, true).map_err(|e| shown(path, format!("sealing: {e}")))

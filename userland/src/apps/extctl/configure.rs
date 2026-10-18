@@ -1,12 +1,10 @@
-//! An extension's configuration, sealed files in a sealed `/etc/<name>`: the
-//! person installs a file they edited, as sudoedit has them edit a copy, and
-//! a file the key that installed the extension signed goes in unasked once
-//! its serial is past the last. Init restarts each service that reads a file
-//! that changed.
+//! An extension's configuration, sealed files in a sealed `/etc/<name>`: a
+//! copy the person edited, as sudoedit has them edit one, or a file the key
+//! that installed the extension signed under a serial past the last.
 //!
 //! A person's file reaches the mechanism as the requester's standard input,
-//! never by a path the mechanism opens as uid 0, so it installs only what the
-//! requester could read.
+//! never by a path uid 0 opens, so only what the requester could read goes
+//! in.
 
 use std::fs::{self, File};
 use std::io::ErrorKind;
@@ -45,8 +43,8 @@ pub enum Source {
     },
 }
 
-/// Standard input, a regular file, read whole without moving its offset,
-/// which the mechanism it is handed to shares.
+/// Standard input, a regular file, read whole without moving the offset the
+/// mechanism it is handed to shares.
 fn stdin_bytes() -> Result<Vec<u8>, String> {
     // SAFETY: fd 0 is this process's for its life, and ManuallyDrop leaves it
     // open.
@@ -89,10 +87,10 @@ pub struct Prepared {
     serial: Option<u64>,
 }
 
-/// What `source` would install, once its extension is installed and
-/// declares `config`, and for a signed file once the key that installed the
-/// extension signed it, the owner still trusts that key, and its serial is
-/// past the last that went in.
+/// What `source` would install: only for an installed extension declaring
+/// `config`, and a signed file only once the key that installed the
+/// extension signed it, the owner still trusts that key and its serial is
+/// past the last.
 pub fn prepare(store: &Store, source: &Source) -> Result<Prepared, String> {
     let (bytes, name, file, signed) = match source {
         Source::Approved { name, file, digest } => {
@@ -197,12 +195,10 @@ pub fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     Ok(format!("{} installed", at.display()))
 }
 
-/// `/etc/<name>` as `extctl` keeps it, made so where there is none: a sealed
-/// directory of uid 0's, mode 0755, holding sealed files alone. What else a
-/// sealed one holds was left by a write cut short or put there while one
-/// held it open, so it is taken away, as is a write's temporary file
-/// anywhere; anything else may be the owner's, so it is refused rather than
-/// sealed in as the extension's configuration or lost.
+/// `/etc/<name>` as `extctl` keeps it, made where there is none: a sealed
+/// uid-0 directory, mode 0755, of sealed files. An unsealed entry of a sealed
+/// one, or a write's temporary file, is a write's leftover and taken away;
+/// any other may be the owner's and is refused.
 pub fn own_dir(name: &str) -> Result<PathBuf, String> {
     let dir = PathBuf::from(config::dir(name));
     let shown = |e: std::io::Error| format!("{}: {e}", dir.display());
@@ -248,11 +244,10 @@ fn editor() -> Vec<String> {
         .collect()
 }
 
-/// Edit a copy of `/etc/<name>/<file>` with the person's editor and have
-/// what they saved installed, as `extctl config install` installs a file,
-/// once it differs: the exit status of that install, or 0 for no change. As
-/// uid 0 the editor is found only in the base, never where the session
-/// writes.
+/// Edit a copy of `/etc/<name>/<file>` with the person's editor and install
+/// what they saved through `extctl config install` once it differs: that
+/// install's exit status, or 0 for no change. As uid 0 the editor is the
+/// base's, never one the session could have put there.
 pub fn edit(name: &str, file: &str) -> Result<i32, String> {
     let installed = Path::new(&config::dir(name)).join(file);
     let before = match fs::read(&installed) {

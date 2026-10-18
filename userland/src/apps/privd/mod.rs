@@ -415,8 +415,8 @@ const LAPSED: &str = "the requester no longer runs the program it connected as";
 
 /// What the peer at `fd` runs now.
 fn attested(fd: &OwnedFd) -> Result<Attested, String> {
-    // In this order: a program that stops holding never holds again, so an
-    // extension's that lapses between the two reads answers no path.
+    // Label first: a program that stops holding never holds again, so one
+    // that lapses between the two reads answers no path.
     let label = net::peer_extension(fd.raw()).map_err(|e| format!("SO_PEEREXTENSION: {e}"))?;
     let Some(path) = net::peer_program(fd.raw()).map_err(|e| format!("SO_PEERPROGRAM: {e}"))?
     else {

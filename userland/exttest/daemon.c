@@ -251,8 +251,6 @@ static void reply_to(int privd, char *out, size_t size) {
     }
 }
 
-/* One connection to privd, then a line on fd 1 for each line on fd 0:
- * `ask <action>` asks for it, `map <path>` maps that file executable. */
 static int client(const char *caps) {
     int privd = socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un addr;
