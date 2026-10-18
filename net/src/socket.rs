@@ -1552,7 +1552,12 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
         local.port = Port(port);
     }
 
-    match tcp::listen(local.ip.0, local.port.0) {
+    let listened = if sock.options.reuse_addr {
+        tcp::listen_reusing(local.ip.0, local.port.0)
+    } else {
+        tcp::listen(local.ip.0, local.port.0)
+    };
+    match listened {
         Ok(tcp_idx) => {
             sock.local_addr = Some(local);
             if let SocketInner::Tcp(tcp_inner) = &mut sock.inner {

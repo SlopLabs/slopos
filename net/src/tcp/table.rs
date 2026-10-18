@@ -548,6 +548,9 @@ pub fn install_listener(
     let _w = TCP_LISTENERS_WRITE.lock();
 
     let mut idx = load_listener_index();
+    if idx.port_in_use(tuple.local_ip, tuple.local_port) {
+        return Err(TcpError::AddrInUse);
+    }
     let free_slot = idx.first_free().ok_or(TcpError::TableFull)?;
     let generation = idx.generations[free_slot];
 

@@ -580,6 +580,77 @@ fn test_time_wait_keeps_unread_bytes() -> TestResult {
     pass!()
 }
 
+/// A server that closes first leaves its connection in `TIME_WAIT` on the
+/// listener's port. A new listener there is refused while the old one
+/// listens; once it is gone, one is refused for that connection alone unless
+/// it asks for `SO_REUSEADDR`.
+fn test_reuse_addr_listens_beside_time_wait() -> TestResult {
+    use slopos_abi::syscall::{ERRNO_EADDRINUSE, SO_REUSEADDR, SOL_SOCKET};
+
+    let Loopback {
+        server,
+        client,
+        _listener,
+    } = match loopback_pair() {
+        Ok(pair) => pair,
+        Err(result) => return result,
+    };
+    let port = socket::socket_get_local_addr(_listener.0).map_or(0, |a| a.port.0);
+    let Some(server_tcp) = socket::socket_lookup_tcp_idx(server.0) else {
+        return fail!("the server has no connection");
+    };
+    drop(server);
+    let mut probe = [0u8; 16];
+    if await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        (socket::socket_recv(client.0, &mut probe) == 0).then_some(())
+    })
+    .is_none()
+    {
+        return fail!("the client never read the server's FIN");
+    }
+    drop(client);
+    if await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        (tcp::get_state(server_tcp) == Some(tcp::TcpState::TimeWait)).then_some(())
+    })
+    .is_none()
+    {
+        return fail!(
+            "the server never reached TIME_WAIT: {:?}",
+            tcp::get_state(server_tcp)
+        );
+    }
+    let listen = |reuse: bool| -> Result<i32, TestResult> {
+        let sock = stream_socket()?;
+        if reuse {
+            let on = 1i32.to_ne_bytes();
+            let _ = socket::socket_setsockopt(sock.0, SOL_SOCKET, SO_REUSEADDR, &on);
+        }
+        if socket::socket_bind(sock.0, [127, 0, 0, 1], port) != 0 {
+            return Err(fail!("bind to 127.0.0.1:{} failed", port));
+        }
+        Ok(socket::socket_listen(sock.0, 4))
+    };
+    let in_use = errno_i32(ERRNO_EADDRINUSE);
+    match listen(true) {
+        Ok(rc) => assert_eq_test!(rc, in_use, "a second listener beside the first"),
+        Err(result) => return result,
+    }
+    drop(_listener);
+    match listen(false) {
+        Ok(rc) => assert_eq_test!(
+            rc,
+            in_use,
+            "a listener beside TIME_WAIT without SO_REUSEADDR"
+        ),
+        Err(result) => return result,
+    }
+    match listen(true) {
+        Ok(rc) => assert_eq_test!(rc, 0, "a listener beside TIME_WAIT with SO_REUSEADDR"),
+        Err(result) => return result,
+    }
+    pass!()
+}
+
 fn test_last_ack_keeps_unread_bytes() -> TestResult {
     use slopos_abi::syscall::SHUT_WR;
 
@@ -730,6 +801,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_loopback_bulk_transfer, suite = tcp_live);
 slopos_testing::stest!(name = test_time_wait_keeps_unread_bytes, suite = tcp_live);
+slopos_testing::stest!(
+    name = test_reuse_addr_listens_beside_time_wait,
+    suite = tcp_live
+);
 slopos_testing::stest!(name = test_last_ack_keeps_unread_bytes, suite = tcp_live);
 slopos_testing::stest!(
     name = test_a_connection_timers_give_up_on_reports_etimedout,

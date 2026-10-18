@@ -561,7 +561,13 @@ pub fn listen(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
     if table::port_in_use(local_ip, local_port) {
         return Err(TcpError::AddrInUse);
     }
+    listen_reusing(local_ip, local_port)
+}
 
+/// [`listen`] under `SO_REUSEADDR`: as on Linux, only another listener holds
+/// the port, so the connections an earlier listener's server left on it, in
+/// `TIME_WAIT` above all, do not.
+pub fn listen_reusing(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
     let tuple = TcpTuple {
         local_ip,
         local_port,
