@@ -7,11 +7,12 @@
 
 /// The interface of this tree's private call surface. Any change to a
 /// SlopOS-only call's number, arguments or structures takes the next number.
-pub const BASE_INTERFACE: u32 = 5;
+pub const BASE_INTERFACE: u32 = 6;
 
 /// The oldest interface a kernel built from this tree still serves. It rises
-/// only when a change takes away or reshapes something an older base calls; a
-/// change that only adds leaves it where it is.
+/// only when a change reshapes something an older base calls; one that only
+/// adds leaves it where it is, and so does one that retires a call, which a
+/// kernel then answers `ENOSYS` as one it never had.
 pub const BASE_INTERFACE_MIN: u32 = 1;
 
 const _: () = assert!(0 < BASE_INTERFACE_MIN && BASE_INTERFACE_MIN <= BASE_INTERFACE);

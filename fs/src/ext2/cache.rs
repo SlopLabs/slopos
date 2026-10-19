@@ -25,6 +25,10 @@ pub const CACHE_ENTRIES_MIN: usize = 512;
 pub const CACHE_ENTRIES_MAX: usize = 128 * 1024;
 const _: () = assert!(CACHE_ENTRIES_MAX * size_of::<u32>() <= MAX_ALLOC_SIZE / 2);
 
+/// Frames a cache over a volume nothing writes keeps at least: what one
+/// lookup or read pins at once, several times over.
+pub const READ_ENTRIES_MIN: usize = 64;
+
 /// Entries per chunk of [`Slots`]; one chunk is one allocation.
 const SLOT_CHUNK: usize = 4096;
 const _: () = assert!(SLOT_CHUNK * size_of::<CacheEntry>() <= MAX_ALLOC_SIZE);
@@ -347,18 +351,21 @@ impl CacheEntry {
 
 /// The cache's entries in fixed [`SLOT_CHUNK`]-sized allocations, so how many
 /// the cache holds is bounded by memory rather than by one allocation. Chunks
-/// are allocated at full capacity and never reallocate, so an entry never
-/// moves except through [`Slots::swap_remove`].
+/// are allocated at full capacity, the last no larger than the cache's
+/// capacity leaves room for, and never reallocate, so an entry never moves
+/// except through [`Slots::swap_remove`].
 struct Slots {
     chunks: KVec<KVec<CacheEntry>>,
     len: usize,
+    capacity: usize,
 }
 
 impl Slots {
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             chunks: KVec::new(),
             len: 0,
+            capacity,
         }
     }
 
@@ -368,7 +375,7 @@ impl Slots {
 
     fn push(&mut self, entry: CacheEntry) -> Result<(), AllocError> {
         if self.len == self.chunks.len() * SLOT_CHUNK {
-            let chunk = KVec::with_capacity(SLOT_CHUNK)?;
+            let chunk = KVec::with_capacity(SLOT_CHUNK.min(self.capacity - self.len))?;
             self.chunks.push(chunk)?;
         }
         let last = self.chunks.len() - 1;
@@ -533,21 +540,39 @@ impl BlockCache {
     /// The cache, on the heap — which every caller wants, because the 2 KiB
     /// stack gate refuses a frame carrying one alongside an `Ext2Fs`. Written
     /// field by field, so no whole-`BlockCache` rvalue lands on a frame.
-    #[inline(never)]
     pub fn new_boxed(block_size: u32, target_entries: usize) -> Result<KBox<Self>, Ext2Error> {
-        KBox::try_init(Self::init(block_size, target_entries)).map_err(|_| Ext2Error::OutOfMemory)
+        Self::boxed(block_size, target_entries, CACHE_ENTRIES_MIN)
     }
 
-    fn init(block_size: u32, target_entries: usize) -> impl Init<Self, AllocError> {
+    /// [`Self::new_boxed`] for a volume nothing writes, which may keep as few
+    /// as [`READ_ENTRIES_MIN`] frames.
+    pub fn new_boxed_for_reads(
+        block_size: u32,
+        target_entries: usize,
+    ) -> Result<KBox<Self>, Ext2Error> {
+        Self::boxed(block_size, target_entries, READ_ENTRIES_MIN)
+    }
+
+    #[inline(never)]
+    fn boxed(
+        block_size: u32,
+        target_entries: usize,
+        floor: usize,
+    ) -> Result<KBox<Self>, Ext2Error> {
+        KBox::try_init(Self::init(block_size, target_entries, floor))
+            .map_err(|_| Ext2Error::OutOfMemory)
+    }
+
+    fn init(block_size: u32, target_entries: usize, floor: usize) -> impl Init<Self, AllocError> {
         // Callers validate this; a larger size would silently truncate
         // sub-block reads.
         debug_assert!(block_size as usize <= EXT2_MAX_BLOCK_SIZE as usize);
-        let capacity = target_entries.clamp(CACHE_ENTRIES_MIN, CACHE_ENTRIES_MAX);
+        let capacity = target_entries.clamp(floor, CACHE_ENTRIES_MAX);
         // The rest are allocated by the misses that need them.
-        let initial = capacity.min(CACHE_ENTRIES_MIN);
+        let initial = capacity.min(floor);
         init_struct_with(
             move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
-                write_field!(slot, entries, Self::build_entries(initial)?);
+                write_field!(slot, entries, Self::build_entries(initial, capacity)?);
                 write_field!(slot, index, KBTreeMap::new());
                 write_field!(slot, capacity, capacity);
                 write_field!(slot, lru_head, initial as u32 - 1);
@@ -587,8 +612,8 @@ impl BlockCache {
 
     /// The frames, linked into the recency chain tail first so the initial
     /// fill hands out slot 0 upwards.
-    fn build_entries(count: usize) -> Result<Slots, AllocError> {
-        let mut entries = Slots::new();
+    fn build_entries(count: usize, capacity: usize) -> Result<Slots, AllocError> {
+        let mut entries = Slots::new(capacity);
         for i in 0..count {
             let mut entry = CacheEntry::new().map_err(|_| AllocError)?;
             entry.lru_prev = if i + 1 < count { i as u32 + 1 } else { NIL };

@@ -137,3 +137,38 @@ fn a_program_the_interpreter_does_not_load_is_refused_wherever_it_is() {
         Err(SymbolError::Interpreter("/lib/a".into()))
     );
 }
+
+#[test]
+fn a_file_that_needs_too_much_is_refused_and_repeats_count_once() {
+    let names: Vec<String> = (0..=NEEDED_MAX).map(|n| format!("lib{n}.so")).collect();
+    let mut wide: Vec<&str> = names.iter().map(String::as_str).collect();
+    wide.push("libc.so");
+    assert_eq!(
+        check_files(&[("/bin/a", program(&wide, &[]))]),
+        Err(SymbolError::TooMany("/bin/a".into()))
+    );
+
+    let repeated = [["libc.so"; 4096].as_slice(), &["puts"; 4096]];
+    assert_eq!(
+        check_files(&[("/bin/a", program(repeated[0], repeated[1]))]),
+        Ok(())
+    );
+
+    let chain: Vec<(String, Vec<u8>)> = (0..=CLOSURE_MAX)
+        .map(|n| {
+            let next = format!("lib{}.so", n + 1);
+            let needed: &[&str] = if n < CLOSURE_MAX { &[&next] } else { &[] };
+            let library = build(Kind::Shared, None, needed, &[], &[]);
+            (format!("/lib/lib{n}.so"), library)
+        })
+        .chain([("/bin/a".into(), program(&["libc.so", "lib0.so"], &[]))])
+        .collect();
+    let files: Vec<(&str, &[u8])> = chain
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    assert!(matches!(
+        check(&files, &[], &libc()),
+        Err(SymbolError::TooMany(_))
+    ));
+}

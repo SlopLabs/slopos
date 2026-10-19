@@ -353,6 +353,10 @@ pub struct Ext2Mount {
     /// invalidated them behind the replay and orphan drain, cleared before
     /// detach lets the image go.
     dcache_live: AtomicBool,
+    /// Mounts a device that checks its own blocks, one of many attached
+    /// briefly: no trailer is looked for, and no name or attribute caches,
+    /// which an instance keeps for good, are built.
+    checked_image: bool,
     /// The pool flusher passes this instance by, so a test can hold the log
     /// and the open pass in the state it built.
     #[cfg(feature = "tests")]
@@ -390,6 +394,16 @@ const FLUSH_BACKOFF_MAX_MS: u64 = FLUSH_INTERVAL_MS;
 
 impl Ext2Mount {
     pub const fn new_const(class: &'static LockClassKey) -> Self {
+        Self::serving(class, false)
+    }
+
+    /// An instance for a device that checks its own blocks, whose walks
+    /// always take its lock.
+    pub const fn new_for_checked_image(class: &'static LockClassKey) -> Self {
+        Self::serving(class, true)
+    }
+
+    const fn serving(class: &'static LockClassKey, checked_image: bool) -> Self {
         Self {
             cached: Mutex::new(None, class),
             init: InitFlag::new(),
@@ -405,6 +419,7 @@ impl Ext2Mount {
             clean_owed: AtomicBool::new(false),
             dcache: OnceLock::new(),
             dcache_live: AtomicBool::new(false),
+            checked_image,
             #[cfg(feature = "tests")]
             flusher_excluded: AtomicBool::new(false),
         }
@@ -968,7 +983,9 @@ impl Ext2Mount {
         if !self.init.init_once() {
             return Err(VfsError::AlreadyExists);
         }
-        self.dcache.call_once(Ext2Dcache::new);
+        if !self.checked_image {
+            self.dcache.call_once(Ext2Dcache::new);
+        }
         let mounted = self.mount_device(device, read_only);
         // After the replay and the orphan drain, which rewrite blocks without
         // telling the caches, and whatever the last image left in them.
@@ -1087,8 +1104,13 @@ impl Ext2Mount {
         // Read off the raw device: a trailer is found only relative to the extent the
         // filesystem claims, and verity would not check a sub-block read anyway.
         let (superblock, geom) = Ext2Fs::mount_params(&*device).map_err(ext2_error_to_vfs)?;
-        let (device, verity) = wrap_verified(device, &superblock, geom.block_size())?;
-        log_verity_status(verity);
+        let (device, verity) = if self.checked_image {
+            (device, VerityStatus::Absent)
+        } else {
+            let wrapped = wrap_verified(device, &superblock, geom.block_size())?;
+            log_verity_status(wrapped.1);
+            wrapped
+        };
         // Asked before the mount stamps the volume in use: asked after, that
         // stamp would read as the previous mount's crash.
         let read_only_reason = if requested_read_only {
@@ -1325,10 +1347,15 @@ impl Ext2Mount {
             gate: KArc::try_new(IoGate::new())
                 .map_err(|_| ext2_error_to_vfs(Ext2Error::OutOfMemory))?,
         };
-        let target_entries =
-            mount_cache_entries(superblock.blocks_count as u64, superblock.blocks_per_group);
-        let cache =
-            BlockCache::new_boxed(geom.block_size(), target_entries).map_err(ext2_error_to_vfs)?;
+        let volume_blocks = superblock.blocks_count as u64;
+        let target_entries = mount_cache_entries(volume_blocks, superblock.blocks_per_group);
+        let cache = if self.checked_image {
+            let blocks = usize::try_from(volume_blocks).unwrap_or(usize::MAX);
+            BlockCache::new_boxed_for_reads(geom.block_size(), target_entries.min(blocks))
+        } else {
+            BlockCache::new_boxed(geom.block_size(), target_entries)
+        }
+        .map_err(ext2_error_to_vfs)?;
         let mut guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
         *guard = Some(CachedExt2 {
             device,
@@ -1889,20 +1916,24 @@ impl slopos_ostd::mm::reclaim::Reclaimable for Ext2CacheReclaim {
 
     fn reclaimable_pages(&self) -> u32 {
         let mut total = 0u32;
-        crate::vfs::init::ext2_pool_for_each_bound(&mut |mount| {
+        let mut count = |mount: &'static Ext2Mount| {
             total = total.saturating_add(mount.reclaimable_pages());
-        });
+        };
+        crate::vfs::init::ext2_pool_for_each_bound(&mut count);
+        crate::extension::for_each_volume(&mut count);
         total
     }
 
     fn reclaim(&self, want: u32) -> u32 {
         let mut freed = 0u32;
-        crate::vfs::init::ext2_pool_for_each_bound(&mut |mount| {
+        let mut shrink = |mount: &'static Ext2Mount| {
             let left = want.saturating_sub(freed);
             if left > 0 {
                 freed = freed.saturating_add(mount.reclaim_clean(left));
             }
-        });
+        };
+        crate::vfs::init::ext2_pool_for_each_bound(&mut shrink);
+        crate::extension::for_each_volume(&mut shrink);
         freed
     }
 }

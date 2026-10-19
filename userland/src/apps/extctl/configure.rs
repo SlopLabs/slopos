@@ -20,7 +20,7 @@ use slopos_extension_core::record::Record;
 use slopos_extension_core::sha256;
 
 use super::store::{self, Store};
-use super::{SIDECAR_MAX, image_max, read_file, record_of};
+use super::{SIDECAR_MAX, read_file, record_of};
 use crate::syscall::process;
 
 const EXTCTL: &str = "/bin/extctl";
@@ -156,8 +156,8 @@ pub fn prepare(store: &Store, source: &Source) -> Result<Prepared, String> {
             Some(serial)
         }
     };
-    let image = store.image(&name, &current.sha256, image_max())?;
-    let declared = Image::check(&image)
+    let image = store.image(&name, &current.sha256)?;
+    let declared = Image::open(image, Some(current.sha256))
         .map_err(|e| format!("{name}: {e}"))?
         .declaration
         .config;

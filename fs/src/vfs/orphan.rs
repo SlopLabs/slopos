@@ -141,6 +141,18 @@ pub fn open_ref(fs: &'static dyn FileSystem, inode: InodeId) -> Result<(), OpenR
         .map_err(|_| OpenRefError::TableFull)
 }
 
+/// Take another reference on a vnode the caller holds open, which its last
+/// name may have left: no free is in flight while the caller's stands.
+pub fn hold_ref(fs: &'static dyn FileSystem, inode: InodeId) -> Result<(), OpenRefError> {
+    let mut table = TRACKED.lock();
+    if let Some(idx) = find(&table, fs, inode) {
+        table[idx].refs += 1;
+        return Ok(());
+    }
+    drop(table);
+    open_ref(fs, inode)
+}
+
 /// Release a vnode's reference. The deferred free becomes runnable when the
 /// last reference on a detached inode goes.
 ///

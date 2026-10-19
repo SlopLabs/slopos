@@ -11,15 +11,20 @@ mod commands;
 mod configure;
 pub(crate) mod store;
 
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::syscall::BOOT_FLAG_EXTENSIONS_OFF;
+use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
 use slopos_extension_core::admit::{self, Admitted, Authority, Bounds};
 use slopos_extension_core::grant::Grant;
-use slopos_extension_core::image::Image;
+use slopos_extension_core::image::{Image, ImageError, archive_form};
 use slopos_extension_core::keys::{Key, Keys, valid_comment};
-use slopos_extension_core::record::{Record, valid_fingerprint};
-use slopos_extension_core::{CEILING, LIBC, ceiling, hex, parse_digest, sha256, valid_name};
+use slopos_extension_core::record::{Installed, Record, valid_fingerprint};
+use slopos_extension_core::{CEILING, LIBC, ceiling, hex, parse_digest, valid_name};
 use slopos_tls_core::sshsig::{KEY_TYPE, PublicKey};
 
 use self::accounts::give_uids;
@@ -27,13 +32,12 @@ use self::store::Store;
 use crate::app_entry::read_bounded;
 use crate::init_control::{self, Command};
 use crate::privd::{self, Input};
-use crate::syscall::UserSysInfo;
 use crate::syscall::core as sys_core;
 
 const USAGE: &str = "usage: extctl <command>
   status [<name>]                 what the store holds and what runs
   build <dir> [<out-dir>]         pack <dir> as <name>.ext and its sidecar <name>.meta
-  install <image> [<sha256>]      install it, granting what it declares once allowed
+  install <image> [<root>]        install it, granting what it declares once allowed
   install-signed <image> [<meta> <meta.sig>]
                                   install or update it unasked under a trusted key
   key add <key.pub> ceiling <caps> user <caps>
@@ -56,33 +60,43 @@ fn caps_of(mask: u64) -> String {
     slopos_extension_core::render_caps(mask)
 }
 
-/// The most `ext.memory=` lets every activation take together, so a larger
-/// image is refused before it is read whole; the kernel holds one to the
-/// budget it booted with.
-pub(super) fn image_max() -> u64 {
-    let mut info = UserSysInfo::default();
-    if sys_core::sys_info(&mut info) != 0 {
-        return u64::MAX;
-    }
-    u64::from(info.total_pages) * 4096 / 2
-}
-
 pub(super) fn read_file(path: &str, max: u64) -> Result<Vec<u8>, String> {
     read_bounded(Path::new(path), max)
         .ok_or_else(|| format!("{path}: no regular file of at most {max} bytes this can read"))
 }
 
-/// `path`'s bytes, held to `digest` when one is named: what was put there
-/// for this request may have been replaced since.
-fn read_image(path: &str, digest: Option<[u8; 32]>) -> Result<(Vec<u8>, [u8; 32]), String> {
-    let bytes = read_file(path, image_max())?;
-    let found = sha256(&bytes);
-    if digest.is_some_and(|want| want != found) {
-        return Err(format!(
-            "{path}: not the image whose sha256 the request names"
-        ));
+/// The image at `path`, held to the root `named` names when there is one:
+/// what was put there for this request may have been replaced since. Its
+/// files' bytes are checked as they are read.
+fn open_image(path: &str, named: Option<([u8; 32], &str)>) -> Result<Image<File>, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags((O_NONBLOCK | O_NOCTTY) as i32 | O_NOFOLLOW as i32)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))?;
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return Err(format!("{path}: not a regular file"));
     }
-    Ok((bytes, found))
+    Image::open(file, named.map(|(root, _)| root)).map_err(|e| shown_image(path, named, e))
+}
+
+/// [`open_image`], every file held to the manifest.
+fn read_image(path: &str, named: Option<([u8; 32], &str)>) -> Result<Image<File>, String> {
+    let mut image = open_image(path, named)?;
+    image
+        .check_contents()
+        .map_err(|e| shown_image(path, named, e))?;
+    Ok(image)
+}
+
+fn shown_image(path: &str, named: Option<([u8; 32], &str)>, e: ImageError) -> String {
+    match e {
+        ImageError::Other => format!(
+            "{path}: not the image {} names",
+            named.map_or("", |(_, by)| by)
+        ),
+        e => format!("{path}: {e}"),
+    }
 }
 
 /// The base's ceiling and the running `libc.so`, with `keys`.
@@ -121,16 +135,15 @@ fn canonical(args: &[String]) -> Result<Vec<String>, String> {
                 [digest] => Some(parse_digest(digest).ok_or(USAGE)?),
                 _ => None,
             };
-            let (bytes, digest) = read_image(image, want)?;
-            let checked = Image::check(&bytes).map_err(|e| format!("{image}: {e}"))?;
+            let opened = open_image(image, want.map(|root| (root, "the request")))?;
             let mut out = vec![
                 cmd.clone(),
                 image.clone(),
-                hex(&digest),
+                hex(&opened.digest),
                 "name".into(),
-                checked.release.name.clone(),
+                opened.release.name.clone(),
             ];
-            out.extend(checked.declaration.grant().words());
+            out.extend(opened.declaration.grant().words());
             Ok(out)
         }
         [cmd, sub, name, file, from] if cmd == "config" && sub == "install" => {
@@ -545,46 +558,89 @@ impl Voucher {
     }
 }
 
-/// An image read and held to the store as it stands.
-struct Prepared {
-    bytes: Vec<u8>,
-    digest: [u8; 32],
-    name: String,
-    voucher: Voucher,
-    before: Option<Record>,
-    admitted: Admitted,
+/// What an install comes to, held to the store as it stands.
+enum Prepared {
+    /// The bytes it names run already.
+    Current {
+        name: String,
+        before: Option<Record>,
+    },
+    Install {
+        image: Image<File>,
+        name: String,
+        voucher: Voucher,
+        before: Option<Record>,
+        /// `before` as the install was judged against it.
+        judged: Option<Record>,
+        installed: Installed,
+    },
 }
 
 fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, String> {
-    let named_digest = match vouched {
-        Vouched::Approved { digest, .. } => Some(*digest),
-        Vouched::Signed { .. } => None,
-    };
-    let (bytes, digest) = read_image(path, named_digest)?;
     let voucher = Voucher::read(vouched)?;
-    let image = Image::check(&bytes).map_err(|e| format!("{path}: {e}"))?;
-    let name = image.release.name.clone();
     let keys = store.keys()?;
+    let refused = |e: admit::Refusal| format!("{path}: {e}");
+    let named = match (vouched, voucher.signed()) {
+        (Vouched::Approved { digest, .. }, _) => (*digest, "the request"),
+        (Vouched::Signed { .. }, Some((sidecar, signature))) => {
+            let (said, key) = admit::signer(sidecar, signature, &keys).map_err(refused)?;
+            let before = store.record(&said.name)?;
+            let judged = before
+                .clone()
+                .map(|record| archive_floor(store, record, said.sha256));
+            if let Some(Admitted::Current) =
+                admit::ahead(judged.as_ref(), &said, key).map_err(refused)?
+            {
+                return Ok(Prepared::Current {
+                    name: said.name,
+                    before,
+                });
+            }
+            (said.sha256, "its sidecar")
+        }
+        (Vouched::Signed { .. }, None) => return Err(format!("{path}: no signature was read")),
+    };
+    let mut image = read_image(path, Some(named))?;
+    let name = image.release.name.clone();
     let base = Base::read()?;
     let before = store.record(&name)?;
     let others = others(store, &name)?;
+    let judged = before
+        .clone()
+        .map(|record| archive_floor(store, record, image.digest));
     let admitted = admit::install(
-        before.as_ref(),
-        &image,
-        digest,
+        judged.as_ref(),
+        &mut image,
         &voucher.authority(),
         &base.bounds(&keys),
         &borrowed(&others),
     )
-    .map_err(|e| format!("{path}: {e}"))?;
-    Ok(Prepared {
-        bytes,
-        digest,
-        name,
-        voucher,
-        before,
-        admitted,
+    .map_err(refused)?;
+    Ok(match admitted {
+        Admitted::Current => Prepared::Current { name, before },
+        Admitted::Install(installed) => Prepared::Install {
+            image,
+            name,
+            voucher,
+            before,
+            judged,
+            installed,
+        },
     })
+}
+
+/// `record` as an install of `digest` is judged: a floor an archive-form
+/// image set, which no install takes now, holds its version and not its
+/// bytes.
+fn archive_floor(store: &Store, mut record: Record, digest: [u8; 32]) -> Record {
+    if let Some((version, floor)) = record.floor
+        && store
+            .image(&record.name, &floor)
+            .is_ok_and(|mut held| archive_form(&mut held))
+    {
+        record.floor = Some((version, digest));
+    }
+    record
 }
 
 /// Why `record` does not run, or `None` when it does.
@@ -602,16 +658,8 @@ fn idle(record: &Record) -> Option<String> {
 /// Put what `prepared` admitted in the store as its current image and run
 /// it. One that will not run leaves the store as it was.
 fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
-    let Prepared {
-        bytes,
-        digest,
-        name,
-        voucher,
-        before,
-        admitted,
-    } = prepared;
-    let installed = match admitted {
-        Admitted::Current => {
+    let (image, name, voucher, before, judged, installed) = match prepared {
+        Prepared::Current { name, before } => {
             if let Some(mut record) = before.clone()
                 && give_uids(store, &mut record)?
             {
@@ -623,20 +671,31 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
                 idle.map_or_else(String::new, |why| format!("; {why}"))
             ));
         }
-        Admitted::Install(installed) => installed,
+        Prepared::Install {
+            image,
+            name,
+            voucher,
+            before,
+            judged,
+            installed,
+        } => (image, name, voucher, before, judged, installed),
     };
+    let digest = image.digest;
     let version = installed.version;
-    let mut record = before.clone().unwrap_or_else(|| Record::new(&name));
+    let mut record = judged.unwrap_or_else(|| Record::new(&name));
     record.install(installed);
     give_uids(store, &mut record)?;
     store.edit(&name, |edit| {
-        edit.put_image(&digest, &bytes, voucher.signed())?;
+        edit.put_image(&digest, image.source(), image.bytes(), voucher.signed())?;
         edit.put_record(&record)
     })?;
     if let Some(why) = idle(&record) {
         return Ok(format!("{name} {version} installed; {why}"));
     }
-    match activate(&name, &bytes, digest) {
+    let stored = store
+        .image(&name, &digest)
+        .and_then(|file| Image::open(file, Some(digest)).map_err(|e| e.to_string()));
+    match stored.and_then(|stored| activate(&name, &stored)) {
         Ok(ran) => Ok(format!("{name} {version} installed; {ran}")),
         Err(why) => match before {
             Some(before) if before.current.is_some() => {
@@ -656,11 +715,10 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     }
 }
 
-/// Show `image` at `/opt/<name>` in place of what is shown there, its
-/// `/etc/<name>` laid out first when it declares `config`.
-fn activate(name: &str, image: &[u8], digest: [u8; 32]) -> Result<String, String> {
-    let declared = Image::check(image).map_err(|e| e.to_string())?.declaration;
-    if declared.config {
+/// Show `image`, a file of the store, at `/opt/<name>` in place of what is
+/// shown there, its `/etc/<name>` laid out first when it declares `config`.
+fn activate(name: &str, image: &Image<File>) -> Result<String, String> {
+    if image.declaration.config {
         configure::own_dir(name)?;
     }
     if sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
@@ -668,19 +726,14 @@ fn activate(name: &str, image: &[u8], digest: [u8; 32]) -> Result<String, String
             "extensions are off this boot, so it is not shown; `extctl enable {name}` shows it on a boot that allows them"
         ));
     }
-    crate::syscall::base::ext_activate(name.as_bytes(), image, &digest)
+    crate::syscall::base::ext_activate(name.as_bytes(), image.source().as_raw_fd(), &image.digest)
         .map(|activation| format!("it runs as activation {activation}"))
         .map_err(|e| format!("it could not be activated: {e}"))
 }
 
 /// [`activate`], stopping the extension when it will not run.
-fn run_image(
-    store: &Store,
-    record: &mut Record,
-    image: &[u8],
-    digest: [u8; 32],
-) -> Result<String, String> {
-    activate(&record.name, image, digest).or_else(|why| {
+fn run_image(store: &Store, record: &mut Record, image: &Image<File>) -> Result<String, String> {
+    activate(&record.name, image).or_else(|why| {
         stop(store, record, &why)?;
         Err(format!("{}: {why}", record.name))
     })
@@ -701,19 +754,27 @@ fn deactivate(name: &str) -> Result<(), String> {
 }
 
 /// `record`'s current image, once it holds to everything it was installed
-/// under.
-fn checked(store: &Store, record: &Record, keys: &Keys, base: &Base) -> Result<Vec<u8>, String> {
+/// under. Its files were held to its manifest when it went in, and its root
+/// is the one installed, so they are read only as the check needs them.
+fn checked(
+    store: &Store,
+    record: &Record,
+    keys: &Keys,
+    base: &Base,
+) -> Result<Image<File>, String> {
     let current = record
         .current
         .as_ref()
         .ok_or_else(|| "nothing is installed".to_owned())?;
-    let bytes = store.image(&record.name, &current.sha256, image_max())?;
+    let file = store.image(&record.name, &current.sha256)?;
     let signed = store.signed(&record.name, &current.sha256)?;
-    let image = Image::check(&bytes).map_err(|e| e.to_string())?;
+    let mut image = match Image::open(file, Some(current.sha256)) {
+        Err(ImageError::Other) => return Err("the stored image is not the one installed".into()),
+        image => image.map_err(|e| e.to_string())?,
+    };
     let signed = signed.as_ref().map(|(s, g)| (s.as_slice(), g.as_slice()));
-    admit::activation(record, &image, current.sha256, signed, &base.bounds(keys))
-        .map_err(|e| e.to_string())?;
-    Ok(bytes)
+    admit::activation(record, &mut image, signed, &base.bounds(keys)).map_err(|e| e.to_string())?;
+    Ok(image)
 }
 
 /// [`checked`], stopping one that no longer fits.
@@ -722,7 +783,7 @@ fn fitting(
     record: &mut Record,
     keys: &Keys,
     base: &Base,
-) -> Result<Vec<u8>, String> {
+) -> Result<Image<File>, String> {
     checked(store, record, keys, base).or_else(|why| {
         stop(store, record, &why)?;
         Err(format!("{} stopped: {why}", record.name))
@@ -735,9 +796,8 @@ fn bring_up(
     keys: &Keys,
     base: &Base,
 ) -> Result<String, String> {
-    let bytes = fitting(store, record, keys, base)?;
-    let digest = sha256(&bytes);
-    run_image(store, record, &bytes, digest)
+    let image = fitting(store, record, keys, base)?;
+    run_image(store, record, &image)
 }
 
 pub(super) fn record_of(store: &Store, name: &str) -> Result<Record, String> {
@@ -789,7 +849,7 @@ fn floor_of(record: &Record) -> String {
 
 /// `name`'s record rolled back and its image, once that image fits and
 /// claims nothing another extension claims.
-fn rolled_back(store: &Store, name: &str) -> Result<(Record, Vec<u8>), String> {
+fn rolled_back(store: &Store, name: &str) -> Result<(Record, Image<File>), String> {
     let mut record = record_of(store, name)?;
     record.roll_back().map_err(|e| format!("{name}: {e}"))?;
     record.enabled = true;
@@ -799,18 +859,18 @@ fn rolled_back(store: &Store, name: &str) -> Result<(Record, Vec<u8>), String> {
         admit::clashes(name, &current.grant, &borrowed(&others(store, name)?))
             .map_err(|e| format!("{name}: {e}"))?;
     }
-    let bytes = checked(store, &record, &store.keys()?, &Base::read()?)
+    let image = checked(store, &record, &store.keys()?, &Base::read()?)
         .map_err(|why| format!("{name}: the previous image does not fit: {why}"))?;
-    Ok((record, bytes))
+    Ok((record, image))
 }
 
 fn rollback(name: &str) -> Result<String, String> {
     let store = Store::open(true)?;
     let before = record_of(&store, name)?;
-    let (record, bytes) = rolled_back(&store, name)?;
+    let (record, image) = rolled_back(&store, name)?;
     store.edit(name, |edit| edit.put_record(&record))?;
     let version = record.current.as_ref().map_or(0, |c| c.version);
-    match activate(name, &bytes, sha256(&bytes)) {
+    match activate(name, &image) {
         Ok(ran) => Ok(format!(
             "{name} is back at version {version}, which updates are held above; {ran}"
         )),
@@ -1030,19 +1090,14 @@ fn describe(record: &Record, running: bool) -> String {
 }
 
 fn build(dir: &str, out: &str) -> Result<String, String> {
-    let (image, sidecar) = slopos_extension_core::source::pack(Path::new(dir))?;
-    let at = |ext: &str| Path::new(out).join(format!("{}.{ext}", sidecar.name));
-    let (image_at, sidecar_at) = (at("ext"), at("meta"));
-    std::fs::write(&image_at, &image).map_err(|e| format!("{}: {e}", image_at.display()))?;
-    std::fs::write(&sidecar_at, sidecar.render())
-        .map_err(|e| format!("{}: {e}", sidecar_at.display()))?;
+    let packed = slopos_extension_core::source::pack_into(Path::new(dir), Path::new(out))?;
     Ok(format!(
-        "{} {}: {} ({} bytes) and {}",
-        sidecar.name,
-        sidecar.version,
-        image_at.display(),
-        image.len(),
-        sidecar_at.display()
+        "{} {}: {} (root {}) and {}",
+        packed.sidecar.name,
+        packed.sidecar.version,
+        packed.image_at.display(),
+        hex(&packed.sidecar.sha256),
+        packed.sidecar_at.display()
     ))
 }
 

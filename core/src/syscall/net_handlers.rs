@@ -714,8 +714,7 @@ fn unix_getsockopt(
             whole_option(path.as_deref().unwrap_or_default(), len, optval, optlen)
         }
         (SOL_SLOPOS, SO_PEEREXTENSION) => {
-            let label =
-                slopos_fs::basefs::extension::label_of(peer.ok_or(Errno::ENOTCONN)?.program);
+            let label = slopos_fs::extension::label_of(peer.ok_or(Errno::ENOTCONN)?.program);
             let bytes = label.map(|label| label.to_bytes());
             whole_option(
                 bytes.as_ref().map_or(&[][..], |b| &b[..]),

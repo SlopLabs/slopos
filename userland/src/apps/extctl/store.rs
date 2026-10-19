@@ -9,13 +9,14 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{O_DIRECTORY, O_NOFOLLOW};
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC, O_NONBLOCK};
+use slopos_extension_core::image::verify_whole;
 use slopos_extension_core::keys::Keys;
 use slopos_extension_core::record::Record;
 use slopos_extension_core::{
@@ -26,6 +27,9 @@ use crate::syscall::fs as sys_fs;
 use crate::syscall::process;
 
 const SMALL_MAX: u64 = 64 * 1024;
+/// What a copy of an image moves at once.
+const COPY_CHUNK: usize = 64 * 1024;
+const BLOCK: usize = slopos_extension_core::volume::BLOCK;
 
 pub struct Store {
     root: PathBuf,
@@ -169,6 +173,86 @@ fn put_sealed(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
         return Ok(());
     }
     create_sealed(dir, name, bytes)
+}
+
+/// Copy `source`, the image `len` long whose root is `digest`, to the sealed
+/// file `name` in `dir`, open for changes, its zero blocks left holes. A
+/// source of another length is refused before anything is written, and a
+/// copy that is not the image once sealed, held whole, is taken away.
+fn create_sealed_image(
+    dir: &Path,
+    name: &str,
+    source: &File,
+    len: u64,
+    digest: &[u8; 32],
+) -> Result<(), String> {
+    let path = dir.join(name);
+    remove_entry(&path)?;
+    let copied = copy_sealed_image(&path, source, len, digest);
+    if copied.is_err() {
+        let _ = remove_entry(&path);
+    }
+    copied
+}
+
+fn copy_sealed_image(
+    path: &Path,
+    source: &File,
+    len: u64,
+    digest: &[u8; 32],
+) -> Result<(), String> {
+    if source.metadata().map(|m| m.len()).ok() != Some(len) {
+        return Err(shown(path, "the image changed since it was read"));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
+        .open(path)
+        .map_err(|e| shown(path, e))?;
+    let mut chunk = vec![0u8; COPY_CHUNK];
+    let mut at = 0u64;
+    while at < len {
+        let n = (len - at).min(COPY_CHUNK as u64) as usize;
+        source
+            .read_exact_at(&mut chunk[..n], at)
+            .map_err(|e| shown(path, format!("reading the image: {e}")))?;
+        for (k, block) in chunk[..n].chunks(BLOCK).enumerate() {
+            if block.iter().any(|&b| b != 0) {
+                file.write_all_at(block, at + (k * BLOCK) as u64)
+                    .map_err(|e| shown(path, e))?;
+            }
+        }
+        at += n as u64;
+    }
+    file.set_len(len)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| shown(path, e))?;
+    set_sealed(&file, true).map_err(|e| shown(path, format!("sealing: {e}")))?;
+    let here = fs::symlink_metadata(path)
+        .ok()
+        .map(|m| (m.dev(), m.ino(), 1));
+    let ours = file.metadata().ok().map(|m| (m.dev(), m.ino(), m.nlink()));
+    if here.is_none() || here != ours {
+        return Err(shown(path, "changed by another process as it was written"));
+    }
+    verify_whole(&mut file, digest).map_err(|e| shown(path, format!("the copy: {e}")))
+}
+
+/// Whether `path` holds the image whose root is `digest`, sealed, `len`
+/// long and whole.
+fn holds_image(path: &Path, len: u64, digest: &[u8; 32]) -> bool {
+    let Ok(mut file) = open_entry(path) else {
+        return false;
+    };
+    let held = file
+        .metadata()
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.len());
+    is_sealed(&file) && held == Some(len) && verify_whole(&mut file, digest).is_ok()
 }
 
 /// Take away what is at `path` in a directory open for changes, sealed or
@@ -410,9 +494,21 @@ impl Store {
         Ok(Some(record))
     }
 
-    pub fn image(&self, name: &str, digest: &[u8; 32], max: u64) -> Result<Vec<u8>, String> {
+    /// The sealed image `digest` names of `name`.
+    pub fn image(&self, name: &str, digest: &[u8; 32]) -> Result<File, String> {
         let path = self.dir(name).join(image_file(digest));
-        read_sealed(&path, max)?.ok_or_else(|| shown(&path, "missing"))
+        let file = match open_entry(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Err(shown(&path, "missing")),
+            Err(e) => return Err(shown(&path, e)),
+        };
+        if !file.metadata().is_ok_and(|m| m.is_file()) || !is_sealed(&file) {
+            return Err(shown(
+                &path,
+                "not a sealed regular file, so not the store's",
+            ));
+        }
+        Ok(file)
     }
 
     /// The sidecar and signature a key installed `digest` with, if it was.
@@ -429,7 +525,7 @@ impl Store {
 
     /// Change what the store keeps of `name`: `f` writes through the
     /// [`Edit`] it is handed, the record last, and what the believed record
-    /// does not name is taken away after.
+    /// does not name is taken away after, whether or not `f` finished.
     pub fn edit(
         &self,
         name: &str,
@@ -444,8 +540,9 @@ impl Store {
         }
         unsealed(&dir, || {
             let edit = Edit { dir: &dir };
-            f(&edit)?;
-            edit.collect()
+            let written = f(&edit);
+            let collected = edit.collect();
+            written.and(collected)
         })
     }
 }
@@ -456,13 +553,19 @@ pub struct Edit<'a> {
 }
 
 impl Edit<'_> {
+    /// A sealed copy of `source`, the image whose root is `digest`, unless
+    /// the store holds it already, and what signed it.
     pub fn put_image(
         &self,
         digest: &[u8; 32],
-        image: &[u8],
+        source: &File,
+        len: u64,
         signed: Option<(&[u8], &[u8])>,
     ) -> Result<(), String> {
-        put_sealed(self.dir, &image_file(digest), image)?;
+        let name = image_file(digest);
+        if !holds_image(&self.dir.join(&name), len, digest) {
+            create_sealed_image(self.dir, &name, source, len, digest)?;
+        }
         if let Some((sidecar, signature)) = signed {
             put_sealed(self.dir, &sidecar_file(digest), sidecar)?;
             put_sealed(self.dir, &signature_file(digest), signature)?;

@@ -42,6 +42,9 @@ pub const EXT2_SUPER_MAGIC: u64 = 0xEF53;
 pub const RAMFS_MAGIC: u64 = 0x8584_58F6;
 /// The base and the install medium's, a filesystem Linux has no name for.
 pub const BASEFS_MAGIC: u64 = 0x534c_4253;
+/// An extension's activation at `/opt/<name>`: its image's volume, served
+/// only as the kernel verifies it.
+pub const EXTENSION_MAGIC: u64 = 0x534c_4558;
 
 /// POSIX file open flags (access mode in low 2 bits, modifiers above).
 pub const O_RDONLY: u32 = 0;

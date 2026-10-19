@@ -916,16 +916,17 @@ slopos_testing::stest!(
     kind = Userland
 );
 
-fn activate_extension(name: &[u8], records: &[(&str, u32, &[u8])]) -> Option<u32> {
-    use slopos_fs::tests::generations::{archive, pieces};
+/// An image of `records` activated as `name`; answers its root.
+fn activate_extension(name: &[u8], records: &[(&str, u32, &[u8])]) -> Option<[u8; 32]> {
+    use slopos_fs::tests::extensions::{activate_bytes, image};
     slopos_fs::vfs::vfs_init_builtin_filesystems().ok()?;
-    let image = archive(records)?;
-    slopos_fs::basefs::extension::activate(name, [name[0]; 32], &mut pieces(&image, 509), 1 << 20)
-        .ok()
+    let built = image(records)?;
+    activate_bytes(name, &built.bytes, built.root).ok()?;
+    Some(built.root)
 }
 
 fn deactivate_extension(name: &[u8]) {
-    let _ = slopos_fs::basefs::extension::deactivate(name);
+    let _ = slopos_fs::extension::deactivate(name);
 }
 
 /// The program a file of the VFS at `path` attests as.
@@ -945,13 +946,12 @@ fn peer_program_and_extension(who: &Principal, fd: i64) -> Option<([u8; 64], u32
     (rc == 0 && rc2 == 0).then_some((path, len, label, label_len))
 }
 
-fn names(who: &Principal, fd: i64, path: &[u8], extension: &[u8]) -> bool {
+fn names(who: &Principal, fd: i64, path: &[u8], extension: &[u8], root: [u8; 32]) -> bool {
+    let expected = slopos_abi::extension::Label::new(extension, root);
     peer_program_and_extension(who, fd).is_some_and(|(p, len, label, label_len)| {
         p.get(..len as usize) == Some(path)
             && label_len as usize == slopos_abi::extension::Label::LEN
-            && slopos_abi::extension::Label::from_bytes(&label[..label_len as usize]).is_some_and(
-                |label| label.name() == extension && label.digest == [extension[0]; 32],
-            )
+            && slopos_abi::extension::Label::from_bytes(&label[..label_len as usize]) == expected
     })
 }
 
@@ -1022,24 +1022,23 @@ pub fn test_code_of_another_activation_ends_an_extension_program() -> TestResult
     let _fixture = SyscallFixture::new();
     let _registry = PageSetRegistry::publish();
     let page = [0xc3u8; 64];
-    let shown = activate_extension(
+    let root = activate_extension(
         b"ext-map",
         &[
             ("bin/tool", TOOL, b"\x7fELF tool"),
             ("lib/libown.so", LIB, &page),
         ],
-    )
-    .is_some()
-        && activate_extension(b"ext-alien", &[("lib/libalien.so", LIB, &page)]).is_some();
+    );
+    let shown = activate_extension(b"ext-alien", &[("lib/libalien.so", LIB, &page)]).is_some();
     let outcome = (|| {
-        if !shown {
+        let Some(root) = root.filter(|_| shown) else {
             return Err("could not show the two activations");
-        }
+        };
         let user = Principal::user(USER, CAP_UNIVERSAL).ok_or("no principal")?;
         let tool = file_program(b"/opt/ext-map/bin/tool");
         set_program(&user, tool);
         let (rc, [a, _b]) = socketpair(&user, 0).ok_or("no socketpair")?;
-        if rc != 0 || !names(&user, a.into(), b"/opt/ext-map/bin/tool", b"ext-map") {
+        if rc != 0 || !names(&user, a.into(), b"/opt/ext-map/bin/tool", b"ext-map", root) {
             return Err("the pair does not name the extension program");
         }
         let map = |path: &[u8]| {
@@ -1072,7 +1071,7 @@ pub fn test_code_of_another_activation_ends_an_extension_program() -> TestResult
         if !map(b"/opt/ext-map/lib/libown.so") || program_of(&user) != tool {
             return Err("its own activation's code ended the program");
         }
-        if !names(&user, a.into(), b"/opt/ext-map/bin/tool", b"ext-map") {
+        if !names(&user, a.into(), b"/opt/ext-map/bin/tool", b"ext-map", root) {
             return Err("its own activation's code ended what the pair attests");
         }
         if !map(b"/opt/ext-alien/lib/libalien.so") || program_of(&user) != Program::Other {
@@ -1102,20 +1101,32 @@ slopos_testing::stest!(
 pub fn test_an_exec_or_an_exit_ends_what_a_socket_attests() -> TestResult {
     use slopos_ostd::process::{Cred, Identity, process_retire, process_spawn, root_account};
     let _fixture = SyscallFixture::new();
-    let shown = activate_extension(b"ext-life", &[("bin/tool", TOOL, b"\x7fELF tool")]).is_some();
+    let root = activate_extension(b"ext-life", &[("bin/tool", TOOL, b"\x7fELF tool")]);
     let tool = file_program(b"/opt/ext-life/bin/tool");
     let outcome = (|| {
-        if !shown {
+        let Some(root) = root else {
             return Err("could not show the activation");
-        }
+        };
         let user = Principal::user(USER, CAP_UNIVERSAL).ok_or("no principal")?;
         set_program(&user, tool);
         let (_, [before, _]) = socketpair(&user, 0).ok_or("no socketpair")?;
-        if !names(&user, before.into(), b"/opt/ext-life/bin/tool", b"ext-life") {
+        if !names(
+            &user,
+            before.into(),
+            b"/opt/ext-life/bin/tool",
+            b"ext-life",
+            root,
+        ) {
             return Err("the pair does not name the program");
         }
         crate::exec::attest_exec(&user.task, tool, true, true);
-        if !names(&user, before.into(), b"/opt/ext-life/bin/tool", b"ext-life") {
+        if !names(
+            &user,
+            before.into(),
+            b"/opt/ext-life/bin/tool",
+            b"ext-life",
+            root,
+        ) {
             return Err("an exec that keeps its authority ended the pair's program");
         }
         crate::exec::attest_exec(&user.task, tool, true, false);
@@ -1123,7 +1134,13 @@ pub fn test_an_exec_or_an_exit_ends_what_a_socket_attests() -> TestResult {
             return Err("an exec of the same program kept what the pair attests");
         }
         let (_, [after, _]) = socketpair(&user, 0).ok_or("no second socketpair")?;
-        if !names(&user, after.into(), b"/opt/ext-life/bin/tool", b"ext-life") {
+        if !names(
+            &user,
+            after.into(),
+            b"/opt/ext-life/bin/tool",
+            b"ext-life",
+            root,
+        ) {
             return Err("a pair after the exec does not name the program");
         }
 
@@ -1162,28 +1179,25 @@ slopos_testing::stest!(
     suite = peer
 );
 
-/// An archive past the extensions' budget is refused before a byte of it is
-/// read.
-pub fn test_an_extension_past_the_budget_is_refused() -> TestResult {
+/// `ext_activate` of a descriptor that names no file is refused before
+/// anything is read.
+pub fn test_an_extension_of_no_file_is_refused() -> TestResult {
     use crate::syscall::fs::syscall_ext_activate;
     let _fixture = SyscallFixture::new();
     let Some(holder) = Principal::user(0, slopos_ostd::authority::CAP_MASK_ALL) else {
         return fail!("could not build the principal");
     };
     assert_test!(
-        stage_cstr(holder.table, holder.page + DATA, b"ext-big"),
+        stage_cstr(holder.table, holder.page + DATA, b"ext-none"),
         "could not stage the name"
     );
     let refused = call(
         &holder,
         syscall_ext_activate,
-        [holder.page + DATA, 0, u64::MAX, holder.page + OPTVAL, 0, 0],
+        [holder.page + DATA, 999, holder.page + OPTVAL, 0, 0, 0],
     );
-    assert_eq_test!(refused, errno(Errno::EFBIG), "an archive past the budget");
+    assert_eq_test!(refused, errno(Errno::EBADF), "a descriptor of nothing");
     pass!()
 }
 
-slopos_testing::stest!(
-    name = test_an_extension_past_the_budget_is_refused,
-    suite = peer
-);
+slopos_testing::stest!(name = test_an_extension_of_no_file_is_refused, suite = peer);

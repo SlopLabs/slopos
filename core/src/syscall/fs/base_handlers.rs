@@ -5,11 +5,12 @@
 use slopos_abi::Errno;
 use slopos_abi::extension::{DIGEST_LEN, NAME_MAX};
 use slopos_fs::VfsError;
-use slopos_fs::basefs::{ActivateError, Source, StageError};
+use slopos_fs::basefs::{ActivateError, StageError};
+use slopos_fs::extension::{self, OpenError};
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_from_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
-use crate::syscall::args::UserCStr;
+use crate::syscall::args::{Fd, UserCStr};
 
 fn usable_bytes() -> u64 {
     u64::from(slopos_mm::page_alloc::get_page_allocator_stats().total) * 4096
@@ -55,23 +56,21 @@ define_syscall!(syscall_base_monitor
 });
 
 define_syscall!(syscall_ext_activate
-    (ctx, name: UserCStr<{ NAME_MAX + 2 }>, archive: u64, len: u64, digest: u64)
+    (ctx, name: UserCStr<{ NAME_MAX + 2 }>, fd: Fd, digest: u64)
     cap(ExtensionUpdate)
+    requires(let pid: process_id)
     -> Result<u64, Errno>
 {
     if slopos_ostd::boot_flags::has_flag(slopos_abi::syscall::BOOT_FLAG_EXTENSIONS_OFF) {
         return Err(Errno::EPERM);
     }
-    let budget = slopos_fs::basefs::extension::budget(usable_bytes());
-    if len > budget {
-        return Err(Errno::EFBIG);
-    }
     let digest = UserPtr::<[u8; DIGEST_LEN]>::try_new(digest).map_err(|_| Errno::EFAULT)?;
     let digest = copy_from_user(digest).map_err(|_| Errno::EFAULT)?;
-    let source: &mut Source<'_> = &mut from_user(archive, len);
-    slopos_fs::basefs::extension::activate(name.as_bytes(), digest, source, budget)
-        .map(u64::from)
-        .map_err(ext_errno)
+    slopos_fs::with_file_image_fd(pid, fd.raw(), |fs, inode| {
+        extension::activate(name.as_bytes(), digest, fs, inode)
+    })?
+    .map(u64::from)
+    .map_err(ext_errno)
 });
 
 define_syscall!(syscall_ext_deactivate
@@ -79,28 +78,42 @@ define_syscall!(syscall_ext_deactivate
     cap(ExtensionUpdate)
     -> Result<(), Errno>
 {
-    slopos_fs::basefs::extension::deactivate(name.as_bytes()).map_err(ext_errno)
+    extension::deactivate(name.as_bytes()).map_err(ext_errno)
 });
 
 fn activate_errno(e: ActivateError) -> Errno {
     match e {
         ActivateError::Stage(StageError::Read(e)) => e,
         ActivateError::Stage(StageError::NoMemory) | ActivateError::NoMemory => Errno::ENOMEM,
-        ActivateError::Stage(_)
-        | ActivateError::Missing
-        | ActivateError::Mounts(_)
-        | ActivateError::Name => Errno::EINVAL,
+        ActivateError::Stage(_) | ActivateError::Missing | ActivateError::Mounts(_) => {
+            Errno::EINVAL
+        }
         ActivateError::Unserved(_) => Errno::ENOEXEC,
         ActivateError::Busy => Errno::EBUSY,
         ActivateError::Interrupted => Errno::EINTR,
     }
 }
 
-fn ext_errno(e: ActivateError) -> Errno {
+fn ext_errno(e: extension::ActivateError) -> Errno {
+    use extension::{ActivateError as E, IndexError};
     match e {
-        ActivateError::Mounts(VfsError::NotFound) => Errno::ENOENT,
-        ActivateError::Mounts(VfsError::Busy | VfsError::NoSpace) => Errno::EBUSY,
-        ActivateError::Mounts(e) => e.to_errno(),
-        e => activate_errno(e),
+        E::Name | E::Volume(_) | E::Image(OpenError::NotImage) => Errno::EINVAL,
+        E::Index(IndexError::Shape(_) | IndexError::TooMany) => Errno::EINVAL,
+        E::Image(OpenError::Root) => Errno::EIO,
+        E::Image(OpenError::Read(e)) => e.to_errno(),
+        E::Index(IndexError::Read(e)) | E::Attach(e) => match e {
+            VfsError::Interrupted => Errno::EINTR,
+            VfsError::IoError => Errno::EIO,
+            _ => Errno::EINVAL,
+        },
+        E::Image(OpenError::TooMany) => Errno::ENFILE,
+        E::Image(OpenError::NoMemory) | E::Index(IndexError::NoMemory) | E::NoMemory => {
+            Errno::ENOMEM
+        }
+        E::Busy => Errno::EBUSY,
+        E::Mounts(VfsError::NotFound) => Errno::ENOENT,
+        E::Mounts(VfsError::Busy | VfsError::NoSpace) => Errno::EBUSY,
+        E::Mounts(e) => e.to_errno(),
+        E::Interrupted => Errno::EINTR,
     }
 }

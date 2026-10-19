@@ -21,6 +21,7 @@ pub mod devfs;
 pub mod ext2;
 pub mod ext2_dcache;
 pub mod ext2_vfs;
+pub mod extension;
 pub mod fileio;
 pub mod filemap;
 pub mod fsreport;

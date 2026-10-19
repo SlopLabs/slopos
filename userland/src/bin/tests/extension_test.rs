@@ -4,25 +4,24 @@
 //! nothing, and a test boot runs no compositor, so one that needs the person
 //! is refused for want of anyone to ask.
 
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
 use slopos_abi::fs::{S_IFREG, inode_flags::FS_IMMUTABLE_FL};
-use slopos_boot_core::base::ManifestLine;
-use slopos_boot_core::newc::Record as Newc;
 use slopos_extension_core::elf::{self, Kind};
-use slopos_extension_core::image::{DECLARE, MANIFEST, Packer, RELEASE};
+use slopos_extension_core::image::{Image, Packer};
 use slopos_extension_core::record::Record;
 use slopos_extension_core::sidecar::Sidecar;
-use slopos_extension_core::{INTERPRETER, NAMESPACE, RECORD, STORE, generation, hex, sha256};
+use slopos_extension_core::source::write_image;
+use slopos_extension_core::{INTERPRETER, NAMESPACE, RECORD, STORE, generation, hex};
 use slopos_priv_core::{ENV_ACTION, ENV_FD};
 use slopos_slibc::test_harness::note;
 use slopos_tls_core::ed25519::SigningKey;
 use slopos_tls_core::sshsig::{self, KEY_TYPE, PublicKey};
 use slopos_userland::privd::STATUS_REFUSED;
-use slopos_userland::syscall::fs;
+use slopos_userland::syscall::{UserSysInfo, core as sys_core, fs};
 
 const EXTCTL: &str = "/bin/extctl";
 /// A program linked against `libc.so` and a library of its image's, as an
@@ -134,13 +133,13 @@ fn sign(key: &SigningKey, path: &str) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return fail(format!("{path} is gone"));
     };
-    let Ok(image) = slopos_extension_core::image::Image::check(&bytes) else {
+    let Ok(image) = Image::check(&bytes[..]) else {
         return fail(format!("{path} does not check"));
     };
     let sidecar = Sidecar {
         name: image.release.name.clone(),
         version: image.release.version,
-        sha256: sha256(&bytes),
+        sha256: image.digest,
     }
     .render();
     let stem = path.strip_suffix(".ext").unwrap_or(path);
@@ -278,7 +277,10 @@ fn one_declaring_more_than_its_grant_line_is_refused() -> bool {
     let Ok(bytes) = std::fs::read(&path) else {
         return false;
     };
-    let digest = hex(&sha256(&bytes));
+    let Ok(image) = Image::check(&bytes[..]) else {
+        return fail(format!("{path} does not check"));
+    };
+    let digest = hex(&image.digest);
     let ran = extctl(
         ROOT,
         &[
@@ -499,40 +501,14 @@ fn one_needing_an_export_libc_lacks_is_refused() -> bool {
     ) && (record("ext-lacks").is_none() || fail("the image left a record"))
 }
 
-/// An image sealed as the packer seals one but naming a reserved name, which
-/// the packer itself refuses to write.
+/// An image laid out as the packer lays one out but naming a reserved name,
+/// which the packer's own check refuses.
 fn reserved(name: &str) -> Vec<u8> {
-    let records = [
-        (RELEASE, format!("name {name}\nversion 1\n").into_bytes()),
-        (DECLARE, Vec::new()),
-    ];
-    let mut manifest = String::new();
-    for (path, data) in &records {
-        let line = ManifestLine {
-            digest: sha256(data),
-            mode: S_IFREG | 0o644,
-            path,
-        };
-        let _ = line.write(&mut manifest);
-    }
     let mut out = Vec::new();
-    let manifest = manifest.into_bytes();
-    let all = records
-        .iter()
-        .map(|(p, d)| (*p, d.as_slice()))
-        .chain([(MANIFEST, manifest.as_slice())]);
-    for (path, data) in all {
-        if let Some(record) = Newc::new(path.as_bytes(), S_IFREG | 0o644, data) {
-            record
-                .pieces()
-                .iter()
-                .for_each(|piece| out.extend_from_slice(piece));
-        }
-    }
-    Newc::trailer()
-        .pieces()
-        .iter()
-        .for_each(|piece| out.extend_from_slice(piece));
+    let _ = Packer::default().write(&format!("name {name}\nversion 1\n"), "", &mut |block| {
+        out.extend_from_slice(block);
+        Ok(())
+    });
     out
 }
 
@@ -582,8 +558,56 @@ fn the_store_is_sealed_and_kept_where_it_is() -> bool {
         || fail(format!("the session's status: {}", status.shown()))
 }
 
+/// An image past the eighth of memory an extension once had to fit in,
+/// mostly a hole, goes in and is read at both ends through `/opt`. It is
+/// packed on the disk root, since `/tmp` is memory.
+fn one_past_the_old_memory_budget_goes_in() -> bool {
+    let mut info = UserSysInfo::default();
+    if sys_core::sys_info(&mut info) != 0 {
+        return fail("no sys_info");
+    }
+    let size = u64::from(info.total_pages) * 4096 / 8 + (8 << 20);
+    let (zeros, image) = ("/var/tmp/ext-large-zeros", "/var/tmp/ext-large-1.ext");
+    let installed = install_large(size, zeros, image);
+    let _ = std::fs::remove_file(zeros);
+    let _ = std::fs::remove_file(image);
+    if let Err(why) = installed {
+        return fail(why);
+    }
+    let Ok(file) = std::fs::File::open("/opt/ext-large/share/large") else {
+        return fail("the large extension is not shown");
+    };
+    let (mut first, mut last) = ([0; 5], [0; 4]);
+    let read = file
+        .read_exact_at(&mut first, 0)
+        .and(file.read_exact_at(&mut last, size - 4));
+    read.is_ok() && &first == b"first" && &last == b"last"
+        || fail(format!("its ends read {read:?}: {first:?} {last:?}"))
+}
+
+/// An image of a file `size` long, its ends marked and the rest a hole,
+/// packed from `zeros` into `image` and installed.
+fn install_large(size: u64, zeros: &str, image: &str) -> Result<(), String> {
+    let shown = |e: std::io::Error| format!("{zeros}: {e}");
+    let file = std::fs::File::create(zeros).map_err(shown)?;
+    file.set_len(size).map_err(shown)?;
+    file.write_all_at(b"first", 0).map_err(shown)?;
+    file.write_all_at(b"last", size - 4).map_err(shown)?;
+    let mut packer = Packer::default();
+    packer
+        .add_file("/share/large", S_IFREG | 0o644, Path::new(zeros))
+        .map_err(shown)?;
+    write_image(packer, "name ext-large\nversion 1\n", "", Path::new(image))
+        .map_err(|e| format!("ext-large does not pack: {e}"))?;
+    let ran = extctl(ROOT, &["install", image]);
+    if !ran.ok() {
+        return Err(format!("the large install: {}", ran.shown()));
+    }
+    Ok(())
+}
+
 fn cleanup() -> bool {
-    for name in ["ext-first", "ext-signed"] {
+    for name in ["ext-first", "ext-signed", "ext-large"] {
         let _ = extctl(ROOT, &["remove", name]);
     }
     let back = extctl(
@@ -593,7 +617,8 @@ fn cleanup() -> bool {
     for seed in [1, 2, 4] {
         let _ = extctl(ROOT, &["key", "remove", &fingerprint(&key(seed))]);
     }
-    let gone = ["ext-first", "ext-signed"].iter().all(|n| !shown(n));
+    let gone = ["ext-first", "ext-signed"].iter().all(|n| !shown(n))
+        && !Path::new("/opt/ext-large/share/large").exists();
     let kept = record("ext-signed").is_some_and(|r| r.current.is_none() && r.floor.is_some());
     let forged = Path::new(&format!("{STORE}/ext-signed/{RECORD}.999999")).exists();
     if !refused(&back, "it was removed") {
@@ -644,6 +669,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_store_is_sealed_and_kept_where_it_is",
         the_store_is_sealed_and_kept_where_it_is,
+    ),
+    (
+        "one_past_the_old_memory_budget_goes_in",
+        one_past_the_old_memory_budget_goes_in,
     ),
     ("removing_keeps_the_record", cleanup),
 ];

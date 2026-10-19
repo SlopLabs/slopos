@@ -26,6 +26,7 @@ pub mod sidecar;
 #[cfg(any(test, feature = "std"))]
 pub mod source;
 pub mod symbols;
+pub mod volume;
 mod words;
 
 pub use words::{LineError, parse_caps, render_caps};
@@ -96,14 +97,9 @@ pub fn signature_file(digest: &[u8; 32]) -> alloc::string::String {
     alloc::format!("{}.meta.sig", hex(digest))
 }
 
-/// SHA-256, as the image's digest and its manifest's lines take it.
+/// `data`'s SHA-256.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    use slopos_tls_core::hash::{Hash, Sha256};
-    let mut out = [0u8; 32];
-    let mut hash = Sha256::new();
-    hash.update(data);
-    hash.finish_into(&mut out);
-    out
+    slopos_verity_core::sha256::digest(data)
 }
 
 pub fn hex(bytes: &[u8]) -> alloc::string::String {

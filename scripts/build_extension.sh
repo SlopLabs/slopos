@@ -38,7 +38,6 @@ find "$DIR" \( -path "$DIR/lib" -o -path "$DIR/.extension" \) -prune -o -type f 
 report="$("$TARGET_DIR/release/extension" "$DIR" "$OUT" "$LIBC")"
 printf '%s\n' "$report"
 sidecar="$(printf '%s\n' "$report" | sed -n 's/^sidecar //p')"
-rm -f "$sidecar.sig"
 if [ -n "${EXTENSION_KEY:-}" ]; then
     ssh-keygen -Y sign -q -f "$EXTENSION_KEY" -n extension@slopos -O hashalg=sha512 "$sidecar"
     echo "signed $sidecar.sig with $EXTENSION_KEY"

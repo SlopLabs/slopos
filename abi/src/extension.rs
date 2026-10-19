@@ -1,4 +1,4 @@
-//! Extensions: sealed archives activated beside the base, each read-only and
+//! Extensions: sealed images activated beside the base, each read-only and
 //! pinned at `/opt/<name>`.
 
 /// Where every activation is mounted, at `/opt/<name>`.
@@ -7,8 +7,13 @@ pub const DIR: &str = "/opt";
 /// Longest name, in bytes.
 pub const NAME_MAX: usize = 32;
 
-/// The SHA-256 of an image, which the activating caller vouches for.
+/// The root of an image's SHA-256 tree, which the activating caller vouches
+/// for.
 pub const DIGEST_LEN: usize = 32;
+
+/// Entries an image holds beneath its root at most: what the kernel indexes
+/// to name an activation's programs.
+pub const MAX_ENTRIES: usize = 1 << 16;
 
 /// Activations resident at once: those mounted and those still held after
 /// being replaced or deactivated.

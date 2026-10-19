@@ -8,7 +8,7 @@ use slopos_tls_core::sshsig::{self, PublicKey};
 
 use crate::elf::{Kind, build};
 use crate::image::Packer;
-use crate::{INTERPRETER, NAMESPACE, sha256};
+use crate::{INTERPRETER, NAMESPACE};
 
 const CEILING: u64 = caps::POWER | caps::NET_ADMIN | caps::MOUNT | caps::SCHED_HIGH;
 
@@ -77,7 +77,7 @@ impl Owner {
         let sidecar = Sidecar {
             name: image.release.name.clone(),
             version: image.release.version,
-            sha256: sha256(bytes),
+            sha256: image.digest,
         }
         .render()
         .into_bytes();
@@ -91,15 +91,14 @@ impl Owner {
             sidecar: &sidecar,
             signature: &signature,
         };
-        let image = Image::check(bytes).unwrap();
-        install(
-            record,
-            &image,
-            sha256(bytes),
-            &authority,
-            &self.bounds(),
-            &[],
-        )
+        let mut image = Image::check(bytes).unwrap();
+        install(record, &mut image, &authority, &self.bounds(), &[])
+    }
+
+    fn ahead(&self, record: Option<&Record>, bytes: &[u8]) -> Result<Option<Admitted>, Refusal> {
+        let (sidecar, signature) = self.sign(bytes);
+        let (said, key) = signer(&sidecar, &signature, &self.keys)?;
+        ahead(record, &said, key)
     }
 
     fn approved(
@@ -112,24 +111,16 @@ impl Owner {
             name: "hello",
             grant,
         };
-        let image = Image::check(bytes).unwrap();
-        install(
-            record,
-            &image,
-            sha256(bytes),
-            &authority,
-            &self.bounds(),
-            &[],
-        )
+        let mut image = Image::check(bytes).unwrap();
+        install(record, &mut image, &authority, &self.bounds(), &[])
     }
 
     fn runs(&self, record: &Record, bytes: &[u8]) -> Result<(), Refusal> {
         let (sidecar, signature) = self.sign(bytes);
-        let image = Image::check(bytes).unwrap();
+        let mut image = Image::check(bytes).unwrap();
         activation(
             record,
-            &image,
-            sha256(bytes),
+            &mut image,
             Some((&sidecar, &signature)),
             &self.bounds(),
         )
@@ -185,11 +176,8 @@ fn a_first_install_grants_exactly_what_the_person_read() {
     record.install(got);
     let mut runs = record.clone();
     runs.current.as_mut().unwrap().signer = None;
-    let image = Image::check(&bytes).unwrap();
-    assert_eq!(
-        activation(&runs, &image, sha256(&bytes), None, &owner.bounds()),
-        Ok(())
-    );
+    let mut image = Image::check(&bytes[..]).unwrap();
+    assert_eq!(activation(&runs, &mut image, None, &owner.bounds()), Ok(()));
 }
 
 #[test]
@@ -301,6 +289,39 @@ fn a_rollback_refuses_the_version_it_left_until_a_newer_one() {
     ));
 }
 
+/// What a signed install's sidecar and record decide before its image is
+/// read is what the whole install decides.
+#[test]
+fn a_signed_install_judged_ahead_is_judged_as_it_is_whole() {
+    let owner = Owner::new(CEILING, 0);
+    let agree = |record: Option<&Record>, bytes: &[u8]| match (
+        owner.ahead(record, bytes),
+        owner.signed(record, bytes),
+    ) {
+        (Ok(Some(ahead)), Ok(whole)) => assert_eq!(ahead, whole),
+        (Ok(None), Ok(Admitted::Install(_))) => {}
+        (Err(ahead), Err(whole)) => assert_eq!(ahead, whole),
+        (ahead, whole) => panic!("ahead {ahead:?}, whole {whole:?}"),
+    };
+    let (v1, v2, v3) = (
+        image(1, "NetAdmin", "", &["puts"]),
+        image(2, "NetAdmin", "", &["puts"]),
+        image(3, "NetAdmin", "", &["puts"]),
+    );
+    let mut record = Record::new("hello");
+    agree(None, &v1);
+    record.install(installed(owner.signed(None, &v1)));
+    agree(Some(&record), &v1);
+    agree(Some(&record), &v2);
+    record.install(installed(owner.signed(Some(&record), &v2)));
+    agree(Some(&record), &v1);
+    agree(Some(&record), &image(2, "Power", "", &["puts"]));
+    record.roll_back().unwrap();
+    agree(Some(&record), &v2);
+    record.remove();
+    agree(Some(&record), &v3);
+}
+
 #[test]
 fn a_key_s_update_leaves_a_disabled_extension_disabled() {
     let owner = Owner::new(CEILING, 0);
@@ -354,10 +375,9 @@ fn an_activation_holds_the_image_to_its_record_and_its_key() {
         owner.runs(&record, &other).map(|()| Admitted::Current),
         "not the one installed",
     );
-    let image = Image::check(&bytes).unwrap();
+    let mut image = Image::check(&bytes[..]).unwrap();
     refused(
-        activation(&record, &image, sha256(&bytes), None, &owner.bounds())
-            .map(|()| Admitted::Current),
+        activation(&record, &mut image, None, &owner.bounds()).map(|()| Admitted::Current),
         "signature is not in the store",
     );
 }
@@ -388,7 +408,7 @@ fn two_extensions_never_declare_one_command() {
     let bytes = packer
         .finish("name hello\nversion 1\n", "command hi\n")
         .unwrap();
-    let image = Image::check(&bytes).unwrap();
+    let mut image = Image::check(&bytes[..]).unwrap();
     let grant = image.declaration.grant();
     let authority = Authority::Person {
         name: "hello",
@@ -401,34 +421,17 @@ fn two_extensions_never_declare_one_command() {
     let taken = [("other", &theirs)];
     let ours = [("hello", &theirs)];
     refused(
-        install(
-            None,
-            &image,
-            sha256(&bytes),
-            &authority,
-            &owner.bounds(),
-            &taken,
-        ),
+        install(None, &mut image, &authority, &owner.bounds(), &taken),
         "other declares the command hi",
     );
-    assert!(
-        install(
-            None,
-            &image,
-            sha256(&bytes),
-            &authority,
-            &owner.bounds(),
-            &ours
-        )
-        .is_ok()
-    );
+    assert!(install(None, &mut image, &authority, &owner.bounds(), &ours).is_ok());
 }
 
 #[test]
 fn two_extensions_never_declare_one_user() {
     let owner = Owner::new(CEILING, 0);
     let bytes = image(1, "NetAdmin", "", &["puts"]);
-    let image = Image::check(&bytes).unwrap();
+    let mut image = Image::check(&bytes[..]).unwrap();
     let grant = image.declaration.grant();
     let authority = Authority::Person {
         name: "hello",
@@ -441,8 +444,7 @@ fn two_extensions_never_declare_one_user() {
     refused(
         install(
             None,
-            &image,
-            sha256(&bytes),
+            &mut image,
             &authority,
             &owner.bounds(),
             &[("hel", &theirs)],

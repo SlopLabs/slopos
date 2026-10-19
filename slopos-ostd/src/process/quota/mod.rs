@@ -108,8 +108,8 @@ mod tests {
         assert_eq!(used(root(), ResourceKind::FdSlot), 0);
     }
 
-    /// `RawBlock` frees a principal of the block ceiling, `Mount` does not,
-    /// and losing `RawBlock` restores the default.
+    /// `RawBlock` and `ExtensionUpdate` free a principal of the block
+    /// ceiling, `Mount` does not, and losing them restores the default.
     #[test]
     fn the_block_ceiling_follows_the_raw_device_right() {
         use crate::authority::{CAP_UNIVERSAL, Capability};
@@ -121,6 +121,10 @@ mod tests {
         fit_disk_blocks(installer, CAP_UNIVERSAL | Capability::Mount.bit());
         assert_eq!(limit(installer), Some(default));
         fit_disk_blocks(installer, CAP_UNIVERSAL | Capability::RawBlock.bit());
+        assert_eq!(limit(installer), Some(NO_LIMIT));
+        fit_disk_blocks(installer, CAP_UNIVERSAL);
+        assert_eq!(limit(installer), Some(default));
+        fit_disk_blocks(installer, CAP_UNIVERSAL | Capability::ExtensionUpdate.bit());
         assert_eq!(limit(installer), Some(NO_LIMIT));
         fit_disk_blocks(installer, CAP_UNIVERSAL);
         assert_eq!(limit(installer), Some(default));

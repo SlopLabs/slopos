@@ -1458,6 +1458,22 @@ pub fn file_set_inode_flags_fd(
     })
 }
 
+/// Run `f` on the file an extension image is read from, the descriptor's
+/// open file held meanwhile: `EBADF` for a descriptor open for no reading or
+/// of no file, `EINVAL` for one that is no regular file.
+pub fn with_file_image_fd<R>(
+    table: FdTable,
+    fd: c_int,
+    f: impl FnOnce(&'static dyn crate::vfs::FileSystem, InodeId) -> R,
+) -> Result<R, Errno> {
+    let snap = snapshot(table, fd)?;
+    if !snap.status_flags().contains(OpenMode::READ) {
+        return Err(Errno::EBADF);
+    }
+    let (fs, inode) = fd_vnode(&snap)?;
+    Ok(f(fs, inode))
+}
+
 fn flags_vnode(
     table: FdTable,
     fd: c_int,

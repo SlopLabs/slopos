@@ -247,9 +247,11 @@ version = "0.1.0"
 dependencies = [
  "slopos-abi",
  "slopos-boot-core",
+ "slopos-ext4-core",
  "slopos-priv-core",
  "slopos-slibc-core",
  "slopos-tls-core",
+ "slopos-verity-core",
 ]
 
 [[package]]
@@ -278,6 +280,7 @@ dependencies = [
  "slopos-mm",
  "slopos-ostd",
  "slopos-testing",
+ "slopos-verity-core",
 ]
 
 [[package]]

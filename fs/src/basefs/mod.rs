@@ -7,13 +7,10 @@
 //! A generation is numbered from 1 and never renumbered within a boot, and
 //! its number is the high half of every inode it serves, so an inode names
 //! its generation for good: a file, a mapping or a program identity of one
-//! generation never reads another's bytes.
-//!
-//! An extension's activation is an instance of its own, drawn from a pool,
-//! serving one generation whose number is issued across every activation.
+//! generation never reads another's bytes. An extension's activation
+//! ([`crate::extension`]) numbers its inodes the same way.
 
 pub(crate) mod activate;
-pub mod extension;
 mod index;
 pub mod monitor;
 pub(crate) mod reap;
@@ -23,7 +20,6 @@ mod store;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::Errno;
-use slopos_abi::extension::Label;
 use slopos_abi::fs::{BASEFS_MAGIC, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
 use slopos_boot_core::newc;
 use slopos_ostd::process::Program;
@@ -69,8 +65,6 @@ struct Generation {
     index: Index,
     store: Store,
     archive_len: u64,
-    /// An extension's activation: the name and digest it was activated as.
-    label: Option<Label>,
 }
 
 impl Generation {
@@ -141,7 +135,7 @@ pub fn is_base(fs: &dyn FileSystem) -> bool {
 pub fn program_of(fs: &dyn FileSystem, inode: InodeId) -> Program {
     match core::num::NonZeroU64::new(inode) {
         Some(inode) if is_base(fs) => Program::Base(inode),
-        Some(inode) if extension::is_activation(fs) => Program::Extension(inode),
+        Some(inode) if crate::extension::is_activation(fs) => Program::Extension(inode),
         _ => Program::Other,
     }
 }
@@ -154,7 +148,7 @@ pub fn program_path(program: Program, buf: &mut [u8]) -> VfsResult<usize> {
     match program {
         Program::Base(inode) => BASE_FS.path_of(inode.get(), buf),
         Program::Extension(inode) => {
-            extension::path_of(generation_of(inode.get()), inode.get(), buf)
+            crate::extension::path_of(generation_of(inode.get()), inode.get(), buf)
         }
         Program::Other => Err(VfsError::NotFound),
     }
@@ -308,7 +302,6 @@ impl BaseFs {
             index,
             store: Store::default(),
             archive_len: archive.len() as u64,
-            label: None,
         })
         .map_err(|_| CpioError::NoMemory)?;
         let mut table = self.table.lock();
@@ -330,46 +323,22 @@ impl BaseFs {
     /// when every slot is held, the numbers are spent, or the copies resident
     /// with it would take more than `budget` bytes.
     fn admit(&self, staged: Staged, budget: u64) -> Result<u32, ActivateError> {
-        self.admit_as(staged, budget, 0, None, None)
-    }
-
-    /// [`Self::admit`] beside `elsewhere` bytes the budget also covers,
-    /// numbered `number` rather than this instance's next, and labelled
-    /// `label`.
-    fn admit_as(
-        &self,
-        staged: Staged,
-        budget: u64,
-        elsewhere: u64,
-        number: Option<u32>,
-        label: Option<Label>,
-    ) -> Result<u32, ActivateError> {
         let mut generation = KArc::try_new(Generation {
             number: 0,
             archive_len: staged.store.len(),
             index: staged.index,
             store: staged.store,
-            label,
         })
         .map_err(|_| ActivateError::NoMemory)?;
         let mut table = self.table.lock();
-        let number = match number {
-            Some(given) => given,
-            None => table.issued.checked_add(1).ok_or(ActivateError::Busy)?,
-        };
+        let number = table.issued.checked_add(1).ok_or(ActivateError::Busy)?;
         let copied: u64 = table
             .slots
             .iter()
             .flatten()
             .map(|slot| slot.generation.store.len())
             .sum();
-        if copied
-            .saturating_add(elsewhere)
-            .saturating_add(generation.store.len())
-            > budget
-            || number > LAST_NUMBER
-            || number <= table.issued
-        {
+        if copied.saturating_add(generation.store.len()) > budget || number > LAST_NUMBER {
             return Err(ActivateError::Busy);
         }
         let slot = table
@@ -403,14 +372,6 @@ impl BaseFs {
             }
         }
         table.current = number;
-        self.note_retired(&table);
-    }
-
-    /// Show no generation from now on, leaving each to be freed once nothing
-    /// holds it.
-    fn retire(&self) {
-        let mut table = self.table.lock();
-        table.current = 0;
         self.note_retired(&table);
     }
 

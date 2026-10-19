@@ -15,7 +15,7 @@ use slopos_testing::TestResult;
 use super::BASE_SAMPLE;
 use crate::basefs::activate::{ActivateError, activate_on};
 use crate::basefs::reap::runs_from;
-use crate::basefs::{BASE_FS, BaseFs, StageError, generation_of, stage};
+use crate::basefs::{BaseFs, StageError, generation_of, stage};
 use crate::vfs::mount::{mount_at, mount_subtree, unmount};
 use crate::vfs::traits::{FileSystem, FileType, InodeId};
 use crate::vfs::{VfsError, vfs_init_builtin_filesystems, vfs_mkdir};
@@ -327,11 +327,11 @@ pub fn test_a_running_program_holds_its_generation() -> TestResult {
         return slopos_testing::fail!("could not spawn a process");
     };
     let inode = core::num::NonZeroU64::new((u64::from(NUMBER) << 32) | 1).expect("nonzero");
-    let before = runs_from(&BASE_FS, NUMBER);
+    let before = runs_from(NUMBER, false);
     process.set_program(Program::Base(inode));
-    let running = runs_from(&BASE_FS, NUMBER);
+    let running = runs_from(NUMBER, false);
     process.mark_exited();
-    let exited = runs_from(&BASE_FS, NUMBER);
+    let exited = runs_from(NUMBER, false);
     if let Some(handle) = process.handle() {
         process_retire(handle);
     }

@@ -1247,19 +1247,44 @@ def install_kernel(args, kernel):
             f"`remote.py run -- bootctl commit` keeps slopos-{slot}")
 
 
+def image_root(path):
+    """The root of the extension image at `path`, the digest of the top block
+    of the SHA-256 tree that follows its volume, as its sidecar names it."""
+    def tree(data):
+        levels = 0
+        while (data - 1) >> (7 * levels):
+            levels += 1
+        return sum(-(-data // 128 ** (level + 1)) for level in range(levels))
+
+    blocks, partial = divmod(path.stat().st_size, 4096)
+    low, high = 1, blocks
+    while low < high:
+        mid = (low + high) // 2
+        if mid + tree(mid) < blocks:
+            low = mid + 1
+        else:
+            high = mid
+    if partial or not blocks or low + tree(low) != blocks:
+        die(f"{path} is no extension image: its length fits no SHA-256 tree")
+    with open(path, "rb") as f:
+        f.seek((low if tree(low) else 0) * 4096)
+        return hashlib.sha256(f.read(4096)).hexdigest()
+
+
 def install_extension(args, image):
     """Install the extension `image` with extctl: under its key when its
     sidecar and signature lie beside it as `just extension` leaves them, else
     as a first install. Both run unasked for the paired agent, and both
-    install only the bytes pushed: the digest the host sent, or the one its
+    install only the bytes pushed: the root the host sent, or the one its
     signed sidecar names."""
     stem = image.name[:-len(".ext")] if image.name.endswith(".ext") else image.name
     sidecar, signature = image.with_name(f"{stem}.meta"), image.with_name(f"{stem}.meta.sig")
     signed = sidecar.is_file() and signature.is_file()
-    if signed and f"sha256 {sha256_file(image)}\n" not in sidecar.read_text(errors="replace"):
+    root = image_root(image)
+    if signed and f"sha256 {root}\n" not in sidecar.read_text(errors="replace"):
         die(f"{sidecar} describes another image than {image}; run `just extension` again")
     remote, size, sha = push(args, image, f"{SCRATCH}/{stem}.ext", INSTALL_MODE)
-    log(f"pushed {image}: {size} bytes, sha256 {sha}")
+    log(f"pushed {image}: {size} bytes, sha256 {sha}, root {root}")
     pushed = [remote]
     if signed:
         for local in (sidecar, signature):
@@ -1267,7 +1292,7 @@ def install_extension(args, image):
         argv = ["extctl", "install-signed", *pushed]
     else:
         log(f"{image} carries no signed sidecar beside it; installing it as a first install")
-        argv = ["extctl", "install", remote, sha]
+        argv = ["extctl", "install", remote, root]
     try:
         sys.stdout.write(capture(args, argv, timeout=600))
     finally:

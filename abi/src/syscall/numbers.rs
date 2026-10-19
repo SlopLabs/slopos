@@ -33,7 +33,7 @@ pub const SYSCALL_TABLE_SIZE: usize = (SYSCALL_LINUX_MAX as usize) + 1;
 pub const SYSCALL_PRIVATE_BASE: u64 = 1024;
 
 /// Size of the private dispatch table.
-pub const SYSCALL_PRIVATE_TABLE_SIZE: usize = 48;
+pub const SYSCALL_PRIVATE_TABLE_SIZE: usize = 49;
 
 /// One past the last private number.
 pub const SYSCALL_PRIVATE_END: u64 = SYSCALL_PRIVATE_BASE + (SYSCALL_PRIVATE_TABLE_SIZE as u64);
@@ -880,28 +880,42 @@ pub const SYSCALL_BASE_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 44;
 /// never blocks. Unprivileged.
 pub const SYSCALL_BASE_MONITOR: u64 = SYSCALL_PRIVATE_BASE + 45;
 
-/// `ext_activate(name: *const u8, archive: *const u8, len, digest: *const
-/// [u8; 32]) -> activation`: index the archive the caller's `len` bytes at
-/// `archive` hold and show it, read-only and pinned, at `/opt/<name>`,
-/// replacing the activation shown there in one step; descriptors, mappings
-/// and programs of the one replaced keep it. `name` is NUL-terminated and
-/// [`crate::extension::valid_name`]; the activation is labelled with it and
-/// the `digest` the caller vouches for, which `SO_PEEREXTENSION` answers.
-/// `EINVAL` for a name the grammar refuses or an archive the kernel cannot
-/// index, `EFBIG` past the extensions' budget, `EBUSY` while
-/// [`crate::extension::MAX_ACTIVATIONS`] are resident, while those resident
-/// would take more than the budget with this one, or while `/opt/<name>` holds
-/// a mount that is no activation, `EPERM` on a boot with
-/// [`crate::syscall::BOOT_FLAG_EXTENSIONS_OFF`], what making `/opt` answers
-/// (`ENOTDIR` for one that is no directory, `EROFS`), `EFAULT`, `ENOMEM` and
-/// `EINTR`. Gated on `Capability::ExtensionUpdate`.
-pub const SYSCALL_EXT_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 46;
+/// `ext_activate_archive(name: *const u8, archive: *const u8, len, digest: *const [u8; 32]) -> activation`:
+/// interface 5's `ext_activate`, which copied an extension's archive from the
+/// caller's memory. Retired: a kernel answers it `ENOSYS`, and the slot is
+/// never given to another call, so a base that still makes it is refused,
+/// never misread.
+pub const SYSCALL_EXT_ACTIVATE_ARCHIVE: u64 = SYSCALL_PRIVATE_BASE + 46;
 
 /// `ext_deactivate(name: *const u8)`: take the activation at `/opt/<name>`
 /// away; what holds it keeps it. `ENOENT` when none is shown there, `EINVAL`
 /// for a name the grammar refuses, `EFAULT` and `EINTR`. Gated on
 /// `Capability::ExtensionUpdate`.
 pub const SYSCALL_EXT_DEACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 47;
+
+/// `ext_activate(name: *const u8, fd, digest: *const [u8; 32]) -> activation`:
+/// activate the extension image `fd` reads — a regular file of any
+/// filesystem but an activation's, an ext4 volume and then its SHA-256 tree
+/// — whose tree's root the caller vouches is `digest`, and show it, read-only
+/// and pinned, at `/opt/<name>`, replacing the activation shown there in one
+/// step; descriptors, mappings and programs of the one replaced keep it. The
+/// file is read where it lies, each block checked against `digest` as it is
+/// read, so a block the tree does not vouch for fails the read that meets it
+/// with `EIO`. `name` is NUL-terminated and [`crate::extension::valid_name`];
+/// the activation is labelled with it and `digest`, which `SO_PEEREXTENSION`
+/// answers. `EBADF` for an `fd` open for no reading, `EINVAL` for a name the
+/// grammar refuses or a file that is no image the kernel serves — a volume
+/// that is no read-only ext4 of 4 KiB blocks filling the image's data, or
+/// that holds more than [`crate::extension::MAX_ENTRIES`] entries, an inode
+/// at two names, or anything but directories, regular files and symlinks —
+/// `EIO` for one whose first block fails its tree under `digest` or that
+/// cannot be read, `ENFILE` when no further file can be held open, `EBUSY`
+/// while [`crate::extension::MAX_ACTIVATIONS`] are resident or while
+/// `/opt/<name>` holds a mount that is no activation, `EPERM` on a boot with
+/// [`crate::syscall::BOOT_FLAG_EXTENSIONS_OFF`], what making `/opt` answers
+/// (`ENOTDIR` for one that is no directory, `EROFS`), `EFAULT`, `ENOMEM` and
+/// `EINTR`. Gated on `Capability::ExtensionUpdate`.
+pub const SYSCALL_EXT_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 48;
 
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
 /// call.
@@ -951,6 +965,6 @@ const _: () = assert!(SYSCALL_PRIVATE_BASE > SYSCALL_LINUX_MAX);
 const _: () = assert!(SYSCALL_PRIVATE_BASE & 0x4000_0000 == 0);
 
 const _: () = assert!(
-    SYSCALL_BASE_MONITOR < SYSCALL_PRIVATE_END,
+    SYSCALL_EXT_ACTIVATE < SYSCALL_PRIVATE_END,
     "private syscall range is full; raise SYSCALL_PRIVATE_TABLE_SIZE",
 );

@@ -191,14 +191,14 @@ fn index_span(node: &[u8], h: Header, i: usize, hi: u64) -> (u64, u64, u64) {
     (u64::from(key), child, next)
 }
 
-fn write_header(node: &mut [u8], h: Header) {
+pub fn write_header(node: &mut [u8], h: Header) {
     put_le16(node, 0, MAGIC);
     put_le16(node, 2, h.entries);
     put_le16(node, 4, h.max);
     put_le16(node, 6, h.depth);
 }
 
-fn set_entries(node: &mut [u8], entries: u16) {
+pub fn set_entries(node: &mut [u8], entries: u16) {
     put_le16(node, 2, entries);
 }
 
@@ -254,7 +254,7 @@ pub fn leaf(node: &[u8], i: usize) -> Extent {
     }
 }
 
-fn put_leaf(node: &mut [u8], i: usize, e: &Extent) {
+pub fn put_leaf(node: &mut [u8], i: usize, e: &Extent) {
     let at = entry_at(i);
     let raw_len = if e.unwritten { e.len + MAX_LEN } else { e.len };
     put_le32(node, at, e.lblk);
@@ -273,7 +273,7 @@ pub fn index(node: &[u8], i: usize) -> (u32, u64) {
     )
 }
 
-fn put_index(node: &mut [u8], i: usize, key: u32, child: u64) {
+pub fn put_index(node: &mut [u8], i: usize, key: u32, child: u64) {
     let at = entry_at(i);
     put_le32(node, at, key);
     put_le32(node, at + 4, child as u32);

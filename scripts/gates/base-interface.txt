@@ -45,6 +45,10 @@ root slopos_abi::spawn::*
 root slopos_abi::task::TASK_FLAG_*
 root slopos_abi::task::SPAWN_*
 root slopos_abi::fs::USER_PATH_MAX
+# Linux's statfs f_type for what only SlopOS serves: the base and the medium,
+# and an extension's activation, which init and privd tell from a directory.
+root slopos_abi::fs::BASEFS_MAGIC
+root slopos_abi::fs::EXTENSION_MAGIC
 # efivar_get / efivar_set.
 root slopos_abi::syscall::numbers::EFIVAR_DATA_MAX
 # font_set's `format`.
@@ -79,3 +83,4 @@ interface 2 54613fa12f0ef276bd148799c3d86d226f7d50f4709a01f558498a1cd8a2d05c
 interface 3 5f7f881f55dcf04c6d240095f0c35a43c4f0bb65dd260f6064e85e9d4a55a078
 interface 4 4f568e15c68bb6a6833e16b318f1752e35f03ba2691653a9ffc00778e711c431
 interface 5 42d0ec766429ce5cb087e4ba149860b6daa81e3f4599432acdbad8044e104b4f
+interface 6 ac3fcc1b79193afb033bb936a12b384939540a39cc2e25618c0179f298f21957

@@ -31,3 +31,4 @@ slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-ostd = { workspace = true }
+slopos-verity-core = { workspace = true }

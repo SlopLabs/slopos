@@ -24,7 +24,7 @@ use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::{InitFlag, Mutex};
 use slopos_ostd::{klog_info, lock_class};
 
-use super::{BASE_FS, BaseFs, Slot, extension, generation_of, is_base};
+use super::{BASE_FS, BaseFs, Slot, generation_of, is_base};
 
 const PASS_MS: u64 = 1000;
 /// A generation held pass after pass, as one the boot's programs run from
@@ -39,7 +39,8 @@ static REAPER_STARTED: InitFlag = InitFlag::new();
 /// One pass at a time, the reaper's or a caller's of [`BaseFs::reap`]: a pass
 /// judges a generation held and marks it later, so a second pass between the
 /// two would find a mark the first was about to undo.
-static PASSING: Mutex<()> = Mutex::new((), lock_class!("BASEFS_REAP_PASS", LOCK_LEVEL_RESOURCE));
+pub(crate) static PASSING: Mutex<()> =
+    Mutex::new((), lock_class!("BASEFS_REAP_PASS", LOCK_LEVEL_RESOURCE));
 /// A generation stopped being current since the last pass.
 static SWITCHED: AtomicBool = AtomicBool::new(false);
 
@@ -48,7 +49,7 @@ impl BaseFs {
         let mine = |inode| generation_of(inode) == number;
         crate::vfs::orphan::any_open(self, mine)
             || crate::filemap::any_mapped(self, mine)
-            || runs_from(self, number)
+            || (is_base(self) && runs_from(number, false))
     }
 
     /// One pass over the generations that are neither current nor kept: a
@@ -73,11 +74,7 @@ impl BaseFs {
                 Mark::Freed(slot) => {
                     crate::filemap::forget_where(self, |inode| generation_of(inode) == number);
                     drop(slot);
-                    if is_base(self) {
-                        klog_info!("BASE: generation {} freed", number);
-                    } else {
-                        klog_info!("EXT: activation {} freed", number);
-                    }
+                    klog_info!("BASE: generation {} freed", number);
                     pass.freed += 1;
                 }
             }
@@ -126,15 +123,15 @@ impl BaseFs {
 }
 
 #[derive(Default)]
-struct Pass {
-    freed: usize,
+pub(crate) struct Pass {
+    pub(crate) freed: usize,
     /// A generation was found quiet for the first time: the pass that may
     /// free it is due a second later.
-    marked: bool,
+    pub(crate) marked: bool,
 }
 
 impl Pass {
-    fn and(self, other: Pass) -> Pass {
+    pub(crate) fn and(self, other: Pass) -> Pass {
         Pass {
             freed: self.freed + other.freed,
             marked: self.marked || other.marked,
@@ -148,18 +145,15 @@ enum Mark {
     Freed(Slot),
 }
 
-/// Whether a live process runs a program of `fs`'s generation `number`.
-pub(crate) fn runs_from(fs: &BaseFs, number: u32) -> bool {
-    let base = is_base(fs);
-    if !base && !extension::is_activation(fs) {
-        return false;
-    }
+/// Whether a live process runs a program of generation `number`: of an
+/// activation when `extension`, of the base otherwise.
+pub(crate) fn runs_from(number: u32, extension: bool) -> bool {
     with_process_registry(|table| {
         table.any(|process| {
             !process.has_exited()
                 && match process.program() {
-                    Program::Base(inode) => base && generation_of(inode.get()) == number,
-                    Program::Extension(inode) => !base && generation_of(inode.get()) == number,
+                    Program::Base(inode) => !extension && generation_of(inode.get()) == number,
+                    Program::Extension(inode) => extension && generation_of(inode.get()) == number,
                     Program::Other => false,
                 }
         })
@@ -167,17 +161,13 @@ pub(crate) fn runs_from(fs: &BaseFs, number: u32) -> bool {
     .unwrap_or(false)
 }
 
-fn reaped() -> impl Iterator<Item = &'static BaseFs> {
-    core::iter::once(&BASE_FS).chain(extension::POOL.iter())
-}
-
 fn any_retired() -> bool {
-    reaped().any(|fs| fs.retired.load(Ordering::Acquire))
+    BASE_FS.retired.load(Ordering::Acquire) || crate::extension::any_retired()
 }
 
-/// Have the base's and the activations' generations reaped from now on, and
+/// Have the base's generations and the activations reaped from now on, and
 /// wake the reaper.
-pub(super) fn wake() {
+pub(crate) fn wake() {
     SWITCHED.store(true, Ordering::Release);
     if REAPER_STARTED.init_once() && slopos_ostd::spawn_kernel_io!(&REAP_STOP, reaper).is_err() {
         REAPER_STARTED.reset();
@@ -198,7 +188,7 @@ fn reaper(token: KernelIoToken<'static>) {
             return;
         }
         let switched = SWITCHED.swap(false, Ordering::AcqRel);
-        let pass = reaped().fold(Pass::default(), |pass, fs| pass.and(fs.pass()));
+        let pass = BASE_FS.pass().and(crate::extension::pass());
         interval = if pass.freed > 0 || pass.marked || switched {
             PASS_MS
         } else {

@@ -233,13 +233,13 @@ fn sign(key: &SigningKey, path: &str) -> bool {
     let Some(bytes) = read(path) else {
         return false;
     };
-    let Ok(image) = Image::check(&bytes) else {
+    let Ok(image) = Image::check(&bytes[..]) else {
         return fail(format!("{path} does not check"));
     };
     let sidecar = Sidecar {
         name: image.release.name.clone(),
         version: image.release.version,
-        sha256: sha256(&bytes),
+        sha256: image.digest,
     }
     .render();
     let stem = path.strip_suffix(".ext").unwrap_or(path);

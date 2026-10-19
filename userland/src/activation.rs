@@ -9,7 +9,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use slopos_abi::extension::Label;
-use slopos_abi::fs::{BASEFS_MAGIC, O_DIRECTORY, O_NOFOLLOW};
+use slopos_abi::fs::{EXTENSION_MAGIC, O_DIRECTORY, O_NOFOLLOW};
 use slopos_abi::syscall::O_CLOEXEC;
 use slopos_extension_core::ceiling::{self, NEVER};
 use slopos_extension_core::declare::{Declaration, mount_point};
@@ -35,15 +35,16 @@ pub fn open(name: &str) -> Result<File, String> {
     let mount = mount_point(name);
     let dir = open_dir(&mount).map_err(|e| format!("{mount}: {e}"))?;
     match sys_fs::fstatfs(dir.as_raw_fd()) {
-        Ok(stats) if stats.f_type == BASEFS_MAGIC => Ok(dir),
+        Ok(stats) if stats.f_type == EXTENSION_MAGIC => Ok(dir),
         _ => Err(format!("nothing is shown at {mount}")),
     }
 }
 
-/// The generation of a file of a basefs mount, the high half of its inode.
+/// Which activation `file` is of, the high half of its inode, when it is a
+/// file of one.
 pub fn generation(file: &File) -> Option<u64> {
-    let on_basefs = sys_fs::fstatfs(file.as_raw_fd()).is_ok_and(|s| s.f_type == BASEFS_MAGIC);
-    on_basefs
+    let on_one = sys_fs::fstatfs(file.as_raw_fd()).is_ok_and(|s| s.f_type == EXTENSION_MAGIC);
+    on_one
         .then(|| file.metadata().ok().map(|meta| meta.ino() >> 32))
         .flatten()
 }

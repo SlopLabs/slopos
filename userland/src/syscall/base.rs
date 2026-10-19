@@ -3,7 +3,7 @@
 
 use super::error::{SyscallError, SyscallResult};
 use super::numbers::*;
-use super::raw::{syscall0, syscall1, syscall2, syscall4};
+use super::raw::{syscall0, syscall1, syscall2, syscall3};
 use super::{OwnedFd, RawFd};
 
 fn checked(raw: i64) -> SyscallResult<u64> {
@@ -51,16 +51,15 @@ fn nul_terminated(name: &[u8]) -> SyscallResult<Vec<u8>> {
     Ok(owned)
 }
 
-/// Show the extension archive `archive`, whose SHA-256 the caller vouches is
-/// `digest`, at `/opt/<name>`; answers its activation.
-pub fn ext_activate(name: &[u8], archive: &[u8], digest: &[u8; 32]) -> SyscallResult<u32> {
+/// Activate the extension image `fd` reads, whose tree's root the caller
+/// vouches is `digest`, and show it at `/opt/<name>`; answers its activation.
+pub fn ext_activate(name: &[u8], fd: RawFd, digest: &[u8; 32]) -> SyscallResult<u32> {
     let name = nul_terminated(name)?;
     let raw = unsafe {
-        syscall4(
+        syscall3(
             SYSCALL_EXT_ACTIVATE,
             name.as_ptr() as u64,
-            archive.as_ptr() as u64,
-            archive.len() as u64,
+            fd as u64,
             digest.as_ptr() as u64,
         ) as i64
     };

@@ -140,8 +140,9 @@ pub enum Capability {
     /// Activating and deactivating an extension: `ext_activate` and
     /// `ext_deactivate`. The kernel takes the caller's word for an image's
     /// digest and attests its programs by it, so this is as much as writing
-    /// what privd's program identity names under `/opt`. Deletion condition:
-    /// as `BaseUpdate`'s.
+    /// what privd's program identity names under `/opt`. Its holder stores
+    /// whole images, so no per-process `DiskBlocks` ceiling binds it.
+    /// Deletion condition: as `BaseUpdate`'s.
     ExtensionUpdate,
 }
 

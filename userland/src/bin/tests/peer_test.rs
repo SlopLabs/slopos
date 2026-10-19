@@ -440,8 +440,20 @@ fn an_extension_program_names_its_activation() -> bool {
             return false;
         }
     };
-    let digest = slopos_userland::base_image::sha256(&image);
-    if let Err(e) = base::ext_activate(EXTENSION.as_bytes(), &image, &digest) {
+    const IMAGE: &str = "/tmp/peer-e2e-extension.ext";
+    let Ok(digest) = slopos_extension_core::image::root_of(&mut &image[..]).map(|(_, root)| root)
+    else {
+        eprintln!("peer_test: the packed image has no root");
+        return false;
+    };
+    let file = std::fs::write(IMAGE, &image).and_then(|()| std::fs::File::open(IMAGE));
+    let _ = std::fs::remove_file(IMAGE);
+    let activated = file.map_err(|e| e.to_string()).and_then(|file| {
+        use std::os::fd::AsRawFd;
+        base::ext_activate(EXTENSION.as_bytes(), file.as_raw_fd(), &digest)
+            .map_err(|e| e.to_string())
+    });
+    if let Err(e) = activated {
         eprintln!("peer_test: ext_activate: {e}");
         return false;
     }
@@ -491,18 +503,15 @@ fn an_extension_program_names_its_activation() -> bool {
 
 /// `program` as an extension's `bin/peer_test`.
 fn extension_of(program: &[u8]) -> Option<Vec<u8>> {
-    use slopos_boot_core::newc::Record;
-    let mut out = Vec::new();
-    for record in [
-        Record::new(b"bin/peer_test", slopos_abi::fs::S_IFREG | 0o755, program)?,
-        Record::trailer(),
-    ] {
-        record
-            .pieces()
-            .iter()
-            .for_each(|piece| out.extend_from_slice(piece));
-    }
-    Some(out)
+    let mut packer = slopos_extension_core::image::Packer::default();
+    packer.add(
+        "/bin/peer_test",
+        slopos_abi::fs::S_IFREG | 0o755,
+        program.to_vec(),
+    );
+    packer
+        .finish(&format!("name {EXTENSION}\nversion 1\n"), "")
+        .ok()
 }
 
 /// Mapping memory executable that the base did not supply ends a process's

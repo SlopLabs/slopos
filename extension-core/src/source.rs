@@ -2,21 +2,61 @@
 //! `libexec/`, `lib/` and `share/` as they are to be shown under
 //! `/opt/<name>`, and `.extension/release` and `.extension/declare`.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::string::{String, ToString};
 use std::vec::Vec;
 use std::{format, io};
 
 use slopos_abi::fs::{S_IFDIR, S_IFLNK, S_IFREG};
+use slopos_verity_core::{BLOCK, Digest};
 
 use crate::image::{DIR, Image, Packer, TOP};
-use crate::sha256;
+use crate::release::Release;
 use crate::sidecar::Sidecar;
 
-/// The image `dir` lays out and its sidecar.
-pub fn pack(dir: &Path) -> Result<(Vec<u8>, Sidecar), String> {
+/// An image packed into a directory, beside its sidecar.
+pub struct Packed {
+    pub image: Image<File>,
+    pub sidecar: Sidecar,
+    pub image_at: PathBuf,
+    pub sidecar_at: PathBuf,
+}
+
+/// The image `dir` lays out, written to `<out>/<name>.ext` and its sidecar to
+/// `<out>/<name>.meta`; a signature an earlier sidecar had, or an image that
+/// does not check out, is taken away.
+pub fn pack_into(dir: &Path, out: &Path) -> Result<Packed, String> {
+    let release = dir.join(".extension/release");
+    let name = fs::read_to_string(&release)
+        .map_err(|e| e.to_string())
+        .and_then(|text| Release::parse(&text).map_err(|e| e.to_string()))
+        .map_err(|e| format!("{}: {e}", release.display()))?
+        .name;
+    fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let at = |ext: &str| out.join(format!("{name}.{ext}"));
+    let (image_at, sidecar_at) = (at("ext"), at("meta"));
+    let _ = fs::remove_file(&sidecar_at);
+    let _ = fs::remove_file(at("meta.sig"));
+    let packed = pack(dir, &image_at);
+    if packed.is_err() {
+        let _ = fs::remove_file(&image_at);
+    }
+    let (image, sidecar) = packed?;
+    fs::write(&sidecar_at, sidecar.render())
+        .map_err(|e| format!("{}: {e}", sidecar_at.display()))?;
+    Ok(Packed {
+        image,
+        sidecar,
+        image_at,
+        sidecar_at,
+    })
+}
+
+/// The image `dir` lays out, written to `out`, and its sidecar.
+pub fn pack(dir: &Path, out: &Path) -> Result<(Image<File>, Sidecar), String> {
     let read = |file: &str| {
         fs::read_to_string(dir.join(file)).map_err(|e| format!("{}: {e}", dir.join(file).display()))
     };
@@ -38,14 +78,40 @@ pub fn pack(dir: &Path) -> Result<(Vec<u8>, Sidecar), String> {
         }
         add(&mut packer, &dir.join(&name), &inside)?;
     }
-    let image = packer.finish(&release, &declare)?;
-    let checked = Image::check(&image).map_err(|e| e.to_string())?;
+    write_image(packer, &release, &declare, out)?;
+    let file = File::open(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let checked = Image::check(file).map_err(|e| format!("{}: {e}", out.display()))?;
     let sidecar = Sidecar {
         name: checked.release.name.clone(),
         version: checked.release.version,
-        sha256: sha256(&image),
+        sha256: checked.digest,
     };
-    Ok((image, sidecar))
+    Ok((checked, sidecar))
+}
+
+/// Write the image `packer` makes to `out`, a hole where a block is zero;
+/// answers its root.
+pub fn write_image(
+    packer: Packer,
+    release: &str,
+    declare: &str,
+    out: &Path,
+) -> Result<Digest, String> {
+    let shown = |e: io::Error| format!("{}: {e}", out.display());
+    let mut file = File::create(out).map_err(shown)?;
+    let mut len = 0u64;
+    let root = packer.write(release, declare, &mut |block| {
+        len += BLOCK as u64;
+        if block.iter().all(|&b| b == 0) {
+            file.seek(SeekFrom::Current(BLOCK as i64)).map(drop)
+        } else {
+            file.write_all(block)
+        }
+        .map_err(shown)
+    })?;
+    file.set_len(len).map_err(shown)?;
+    file.sync_all().map_err(shown)?;
+    Ok(root)
 }
 
 fn names(dir: &Path) -> io::Result<Vec<String>> {
@@ -85,7 +151,9 @@ fn add(packer: &mut Packer, host: &Path, inside: &str) -> Result<(), String> {
             add(packer, &host.join(&child), &format!("{inside}/{child}"))?;
         }
     } else if kind.is_file() {
-        packer.add(inside, S_IFREG | permissions, fs::read(host).map_err(fail)?);
+        packer
+            .add_file(inside, S_IFREG | permissions, host)
+            .map_err(fail)?;
     } else {
         return Err(format!("{}: no file, directory or link", host.display()));
     }
@@ -115,25 +183,28 @@ mod tests {
         fs::set_permissions(dir.join("bin/hello"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(dir.join("share/doc/README"), b"hi").unwrap();
         symlink("doc/README", dir.join("share/hello")).unwrap();
-        let (image, sidecar) = pack(&dir).unwrap();
-        let checked = Image::check(&image).unwrap();
+        let out = dir.with_extension("ext");
+        let (checked, sidecar) = pack(&dir, &out).unwrap();
+        let image = fs::read(&out).unwrap();
         assert_eq!((sidecar.name.as_str(), sidecar.version), ("hello", 2));
-        assert_eq!(sidecar.sha256, sha256(&image));
+        assert_eq!(sidecar.sha256, checked.digest);
         assert_eq!(
-            checked.entry("/bin/hello").map(|e| e.mode),
+            checked.entry("/bin/hello").map(|e| u32::from(e.mode)),
             Some(S_IFREG | 0o755)
         );
         assert_eq!(
-            checked.entry("/share/hello").map(|e| e.data),
-            Some(&b"doc/README"[..])
+            checked.links().collect::<Vec<_>>(),
+            [("/share/hello", "doc/README")]
         );
         assert_eq!(
-            checked.entry("/share/doc").map(|e| e.mode & S_IFDIR),
+            checked
+                .entry("/share/doc")
+                .map(|e| u32::from(e.mode) & S_IFDIR),
             Some(S_IFDIR)
         );
-        assert_eq!(
-            pack(&dir).unwrap().0,
-            image,
+        pack(&dir, &out).unwrap();
+        assert!(
+            fs::read(&out).unwrap() == image,
             "the same tree packs the same bytes"
         );
         fs::set_permissions(dir.join("share/doc"), fs::Permissions::from_mode(0o775)).unwrap();
@@ -143,13 +214,14 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(dir.join("bin/hello"), fs::Permissions::from_mode(0o775)).unwrap();
-        assert_eq!(
-            pack(&dir).unwrap().0,
-            image,
+        pack(&dir, &out).unwrap();
+        assert!(
+            fs::read(&out).unwrap() == image,
             "a looser umask packs the same bytes"
         );
         fs::write(dir.join("README"), b"x").unwrap();
-        assert!(pack(&dir).unwrap_err().contains("outside bin"));
+        assert!(pack(&dir, &out).unwrap_err().contains("outside bin"));
         let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_file(&out);
     }
 }

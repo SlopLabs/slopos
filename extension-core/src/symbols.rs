@@ -6,14 +6,14 @@
 //! one. Every ELF file outside `/lib` is a program, so a static PIE, which
 //! names no interpreter, is refused wherever it could be run from.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::elf::{self, ElfError, Kind, Linking};
-use crate::image::Image;
+use crate::elf::{self, ElfError, Kind};
+use crate::image::{Image, Source};
 use crate::{INTERPRETER, LIBC_SONAME};
 
 const LIB: &str = "/lib/";
@@ -23,6 +23,8 @@ const LINK_HOPS: usize = 8;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SymbolError {
     Libc(ElfError),
+    /// The image's files could not be read whole.
+    Read(String),
     Elf(String, ElfError),
     /// Linked statically: it carries its own C library.
     Static(String),
@@ -34,12 +36,16 @@ pub enum SymbolError {
     Needs(String, String),
     /// A name nothing it needs exports.
     Unbound(String, String),
+    /// More names than its bytes hold, or more libraries than a program
+    /// needs.
+    TooMany(String),
 }
 
 impl fmt::Display for SymbolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SymbolError::Libc(e) => write!(f, "{}: {e:?}", crate::LIBC),
+            SymbolError::Read(why) => write!(f, "{why}"),
             SymbolError::Elf(path, e) => write!(f, "{path}: an ELF file this cannot read ({e:?})"),
             SymbolError::Static(path) => {
                 write!(f, "{path}: statically linked, not against {LIBC_SONAME}")
@@ -57,6 +63,10 @@ impl fmt::Display for SymbolError {
             SymbolError::Unbound(path, name) => {
                 write!(f, "{path}: binds {name}, which nothing it needs exports")
             }
+            SymbolError::TooMany(path) => write!(
+                f,
+                "{path}: names more than it holds, or needs more than {NEEDED_MAX} libraries or a closure of {CLOSURE_MAX}"
+            ),
         }
     }
 }
@@ -65,11 +75,76 @@ fn shown(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// [`check`] over `image`'s files and symlinks.
-pub fn check_image(image: &Image<'_>, libc: &[u8]) -> Result<(), SymbolError> {
-    let files: Vec<(&str, &[u8])> = image.files().collect();
+/// The largest ELF file of an image this reads whole.
+const ELF_MAX: u64 = 1 << 30;
+
+/// Libraries one file may name, and one program's closure reach, at most:
+/// more than any system links, few enough that checking an image stays
+/// proportional to it.
+const NEEDED_MAX: usize = 64;
+const CLOSURE_MAX: usize = 256;
+
+/// What a file binds and offers, its own copy of each name once, so a
+/// file's bytes go once it is read.
+struct Linked {
+    kind: Kind,
+    dynamic: bool,
+    interpreter: Option<Vec<u8>>,
+    needed: BTreeSet<Vec<u8>>,
+    imports: BTreeSet<Vec<u8>>,
+    exports: BTreeSet<Vec<u8>>,
+}
+
+impl Linked {
+    /// What `bytes` binds and offers; refused when its names, each once,
+    /// come to more than the file holds.
+    fn read(path: &str, bytes: &[u8]) -> Result<Self, SymbolError> {
+        let linking = elf::read(bytes).map_err(|e| SymbolError::Elf(path.into(), e))?;
+        let mut room = bytes.len();
+        let mut owned = |names: &[&[u8]]| {
+            let mut set = BTreeSet::new();
+            for &name in names {
+                if !set.contains(name) {
+                    room = room
+                        .checked_sub(name.len())
+                        .ok_or_else(|| SymbolError::TooMany(path.into()))?;
+                    set.insert(name.to_vec());
+                }
+            }
+            Ok::<_, SymbolError>(set)
+        };
+        let linked = Self {
+            kind: linking.kind,
+            dynamic: linking.dynamic,
+            interpreter: linking.interpreter.map(<[u8]>::to_vec),
+            needed: owned(&linking.needed)?,
+            imports: owned(&linking.imports)?,
+            exports: owned(&linking.exports)?,
+        };
+        if linked.needed.len() > NEEDED_MAX {
+            return Err(SymbolError::TooMany(path.into()));
+        }
+        Ok(linked)
+    }
+}
+
+/// [`check`] over `image`'s files and symlinks, each file read alone.
+pub fn check_image<S: Source>(image: &mut Image<S>, libc: &[u8]) -> Result<(), SymbolError> {
+    let mut read = Vec::new();
+    image
+        .each_elf(ELF_MAX, &mut |path, bytes| {
+            let linked = Linked::read(path, bytes)?;
+            if linked.kind != Kind::Other {
+                read.push((path.to_string(), linked));
+            }
+            Ok(())
+        })
+        .map_err(|e| match e {
+            Ok(e) => SymbolError::Read(e.to_string()),
+            Err(e) => e,
+        })?;
     let links: Vec<(&str, &str)> = image.links().collect();
-    check(&files, &links, libc)
+    bind(&read, &links, libc)
 }
 
 /// Hold `files`, an image's `(path, bytes)`, to binding only what `libc`
@@ -80,65 +155,85 @@ pub fn check(
     links: &[(&str, &str)],
     libc: &[u8],
 ) -> Result<(), SymbolError> {
-    let libc = elf::read(libc).map_err(SymbolError::Libc)?;
-    let libc: BTreeSet<&[u8]> = libc.exports.iter().copied().collect();
-    let mut read: Vec<(&str, Linking<'_>)> = Vec::new();
+    let mut read = Vec::new();
     for &(path, bytes) in files.iter().filter(|(_, bytes)| elf::is_elf(bytes)) {
-        let linking = elf::read(bytes).map_err(|e| SymbolError::Elf(path.into(), e))?;
-        if linking.kind != Kind::Other {
-            read.push((path, linking));
+        let linked = Linked::read(path, bytes)?;
+        if linked.kind != Kind::Other {
+            read.push((path.to_string(), linked));
         }
     }
-    let library = |name: &[u8]| {
-        let mut path = format!("{LIB}{}", core::str::from_utf8(name).ok()?);
-        for _ in 0..LINK_HOPS {
-            if let Some(found) = read
-                .iter()
-                .find(|(at, linking)| *at == path && linking.kind == Kind::Shared)
-            {
-                return Some(found);
-            }
-            let (at, target) = links.iter().find(|(at, _)| *at == path)?;
-            let dir = at.rsplit_once('/').map_or("", |(dir, _)| dir);
-            path = format!("{dir}/{target}");
+    bind(&read, links, libc)
+}
+
+fn bind(read: &[(String, Linked)], links: &[(&str, &str)], libc: &[u8]) -> Result<(), SymbolError> {
+    let libc = elf::read(libc).map_err(SymbolError::Libc)?;
+    let libc: BTreeSet<&[u8]> = libc.exports.iter().copied().collect();
+    let shared: BTreeMap<&str, usize> = read
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, linked))| linked.kind == Kind::Shared)
+        .map(|(at, (path, _))| (path.as_str(), at))
+        .collect();
+    let links: BTreeMap<&str, &str> = links.iter().copied().collect();
+    let mut found: BTreeMap<&[u8], Option<usize>> = BTreeMap::new();
+    for (path, linked) in read {
+        if !linked.dynamic {
+            return Err(SymbolError::Static(path.clone()));
         }
-        None
-    };
-    for (path, linking) in &read {
-        if !linking.dynamic {
-            return Err(SymbolError::Static((*path).into()));
-        }
-        let program = !path.starts_with(LIB) || linking.kind == Kind::Executable;
-        if program || linking.interpreter.is_some() {
-            if linking.interpreter != Some(INTERPRETER.as_bytes()) {
-                return Err(SymbolError::Interpreter((*path).into()));
+        let program = !path.starts_with(LIB) || linked.kind == Kind::Executable;
+        if program || linked.interpreter.is_some() {
+            if linked.interpreter.as_deref() != Some(INTERPRETER.as_bytes()) {
+                return Err(SymbolError::Interpreter(path.clone()));
             }
-            if !linking.needed.contains(&LIBC_SONAME.as_bytes()) {
-                return Err(SymbolError::NoLibc((*path).into()));
+            if !linked.needed.contains(LIBC_SONAME.as_bytes()) {
+                return Err(SymbolError::NoLibc(path.clone()));
             }
         }
-        let mut bound: BTreeSet<&[u8]> = BTreeSet::new();
-        let mut seen: Vec<&[u8]> = Vec::new();
-        let mut frontier: Vec<&[u8]> = linking.needed.clone();
+        let mut reached: BTreeSet<usize> = BTreeSet::new();
+        let mut frontier: Vec<&[u8]> = linked.needed.iter().map(Vec::as_slice).collect();
         while let Some(name) = frontier.pop() {
-            if seen.contains(&name) || name == LIBC_SONAME.as_bytes() {
+            if name == LIBC_SONAME.as_bytes() {
                 continue;
             }
-            seen.push(name);
-            let (_, needed) =
-                library(name).ok_or_else(|| SymbolError::Needs((*path).into(), shown(name)))?;
-            bound.extend(needed.exports.iter().copied());
-            frontier.extend(needed.needed.iter().copied());
+            let library = *found
+                .entry(name)
+                .or_insert_with(|| library(name, &shared, &links));
+            let library = library.ok_or_else(|| SymbolError::Needs(path.clone(), shown(name)))?;
+            if !reached.insert(library) {
+                continue;
+            }
+            if reached.len() > CLOSURE_MAX {
+                return Err(SymbolError::TooMany(path.clone()));
+            }
+            frontier.extend(read[library].1.needed.iter().map(Vec::as_slice));
         }
-        if let Some(name) = linking
-            .imports
-            .iter()
-            .find(|name| !libc.contains(*name) && !bound.contains(*name))
-        {
-            return Err(SymbolError::Unbound((*path).into(), shown(name)));
+        let bound = |name: &[u8]| {
+            libc.contains(name) || reached.iter().any(|&at| read[at].1.exports.contains(name))
+        };
+        if let Some(name) = linked.imports.iter().find(|name| !bound(name)) {
+            return Err(SymbolError::Unbound(path.clone(), shown(name)));
         }
     }
     Ok(())
+}
+
+/// The shared library of the image `name` names in `/lib`, through its
+/// symlinks.
+fn library(
+    name: &[u8],
+    shared: &BTreeMap<&str, usize>,
+    links: &BTreeMap<&str, &str>,
+) -> Option<usize> {
+    let mut path = format!("{LIB}{}", core::str::from_utf8(name).ok()?);
+    for _ in 0..LINK_HOPS {
+        if let Some(&at) = shared.get(path.as_str()) {
+            return Some(at);
+        }
+        let target = links.get(path.as_str())?;
+        let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        path = format!("{dir}/{target}");
+    }
+    None
 }
 
 #[cfg(test)]
