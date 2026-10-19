@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use slopos_abi::fs::{ADMIN_GROUP, PERSON_UIDS};
+use slopos_abi::fs::{ADMIN_GROUP, PERSON_UIDS, SESSION_UID};
 use slopos_accounts_core::password::{Hash, SALT_LEN};
 use slopos_accounts_core::{Accounts, Person};
 use slopos_priv_core::{ENV_ACTION, ENV_UID};
@@ -259,6 +259,8 @@ fn remove_home(person: &Person) -> Result<String, String> {
 /// Until there is a login screen, the desktop starts as the first person
 /// whatever the record says.
 const NO_LOGIN_SCREEN: &str = ", which the desktop honours once it has a login screen";
+const DESKTOP_ADMIN: &str =
+    "the person at the desktop administers the machine until it has a login screen";
 
 /// What a change leaves for once the record holds it: a home made for it,
 /// taken away again should the record not take it, or one to take away.
@@ -412,6 +414,9 @@ fn manage(
             format!("{name}'s password is changed")
         }
         Change::Admin { name, admin } => {
+            if !admin && accounts.person(&name).is_some_and(|p| p.uid == SESSION_UID) {
+                return Err(format!("{name}: {DESKTOP_ADMIN}"));
+            }
             accounts
                 .set_admin(&name, admin)
                 .map_err(|e| format!("{name}: {e}"))?;
