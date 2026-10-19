@@ -42,8 +42,9 @@ pub enum Input {
     Forwarded,
     /// A terminal of the mechanism's own in place of each descriptor that is
     /// this process's terminal, when standard input is one: relayed byte for
-    /// byte once the mechanism starts, with this terminal raw until it exits.
-    /// Lines forwarded otherwise.
+    /// byte once the mechanism starts, with this terminal raw until it exits,
+    /// and shown on standard error when neither output is a terminal. Lines
+    /// forwarded otherwise.
     Terminal,
 }
 
@@ -366,6 +367,10 @@ struct Stdio {
     from_out: [Option<OwnedFd>; 2],
     /// The master of the mechanism's own terminal, under [`Input::Terminal`].
     terminal: Option<OwnedFd>,
+    /// Where `from_out` reads that terminal: relayed only once the mechanism
+    /// has started and this terminal is raw, so a reply typed at a prompt is
+    /// never echoed by it.
+    terminal_out: Option<RawFd>,
     raw: Option<RawTerminal>,
 }
 
@@ -476,12 +481,12 @@ impl Stdio {
             to_stdin: None,
             from_out: [None, None],
             terminal: None,
+            terminal_out: None,
             raw: None,
         };
-        let shown_at = [1, 2].into_iter().find(|&fd| fs::isatty(fd));
-        let pair = match shown_at {
-            Some(_) if input == Input::Terminal && fs::isatty(0) => Some(terminal_pair()?),
-            _ => None,
+        let pair = match input == Input::Terminal && fs::isatty(0) {
+            true => Some(terminal_pair()?),
+            false => None,
         };
         for fd in 0..3 {
             let open = Sys::fcntl(fd, F_GETFD as i32, 0).is_ok();
@@ -511,14 +516,17 @@ impl Stdio {
             };
             stdio.passed.push(passed);
         }
-        if let (Some((master, _)), Some(shown_at)) = (pair, shown_at) {
+        if let Some((master, _)) = pair {
+            let shown_at = [1, 2].into_iter().find(|&fd| fs::isatty(fd)).unwrap_or(2);
             net::set_nonblocking(master.raw()).map_err(|e| format!("the terminal: {e}"))?;
             stdio.to_stdin = Some(Forward {
                 pipe: dup(&master)?,
                 held: Vec::new(),
                 ended: false,
             });
-            stdio.from_out[shown_at as usize - 1] = Some(dup(&master)?);
+            let out = dup(&master)?;
+            stdio.terminal_out = Some(out.raw());
+            stdio.from_out[shown_at as usize - 1] = Some(out);
             stdio.terminal = Some(master);
         }
         Ok(stdio)
@@ -648,7 +656,9 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
             polled.push(poll(connection.raw(), POLLIN));
         }
         for out in stdio.from_out.iter().flatten() {
-            polled.push(poll(out.raw(), POLLIN));
+            if started || Some(out.raw()) != stdio.terminal_out {
+                polled.push(poll(out.raw(), POLLIN));
+            }
         }
         if let Some(forward) = &stdio.to_stdin {
             if forward.wants_input() && (started || stdio.terminal.is_none()) {
