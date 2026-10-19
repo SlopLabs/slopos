@@ -659,7 +659,7 @@ install_base() {
         fi
 
         dst="/bin/${bin}"
-        if [ "$bin" = "init" ] || [ "$bin" = "privd" ]; then
+        if [ "$bin" = "init" ] || [ "$bin" = "privd" ] || [ "$bin" = "authcheck" ]; then
             dst="/sbin/${bin}"
         fi
 

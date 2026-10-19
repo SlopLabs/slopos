@@ -616,6 +616,13 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
         &borrowed(&others),
     )
     .map_err(refused)?;
+    if let Admitted::Install(installed) = &admitted {
+        let people = crate::accounts::Store::read(Path::new("/")).accounts()?;
+        let users = installed.grant.users.iter().chain([&name]);
+        if let Some(user) = users.into_iter().find(|user| people.person(user).is_some()) {
+            return Err(format!("{path}: {user} is a person's name"));
+        }
+    }
     Ok(match admitted {
         Admitted::Current => Prepared::Current { name, before },
         Admitted::Install(installed) => Prepared::Install {

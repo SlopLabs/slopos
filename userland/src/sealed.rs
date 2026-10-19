@@ -185,7 +185,8 @@ pub fn remove_entry(path: &Path) -> Result<(), String> {
 }
 
 /// The believed generation of `stem` in `dir`, the newest sealed one, and
-/// its bytes.
+/// its bytes. One not sealed is a write cut short and passed over; a sealed
+/// one that cannot be read is an error, never the cue to believe an older.
 pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> {
     let mut generations: Vec<u64> = fs::read_dir(dir)
         .map_err(|e| shown(dir, e))?
@@ -193,7 +194,14 @@ pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> 
         .collect();
     generations.sort_unstable_by(|a, b| b.cmp(a));
     for g in generations {
-        if let Ok(Some(bytes)) = read_sealed(&dir.join(format!("{stem}.{g}")), SMALL_MAX) {
+        let path = dir.join(format!("{stem}.{g}"));
+        match open_entry(&path) {
+            Ok(file) if !is_sealed(&file) => continue,
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(shown(&path, e)),
+        }
+        if let Some(bytes) = read_sealed(&path, SMALL_MAX)? {
             return Ok(Some((g, bytes)));
         }
     }

@@ -122,6 +122,39 @@ fn the_last_administrator_stays_one() {
 }
 
 #[test]
+fn the_administrators_fit_the_line_the_c_library_reads() {
+    let mut accounts = Accounts::one_person();
+    let mut promoted = 0;
+    let refused = (0..64).find_map(|i| {
+        let name = alloc::format!("admin{i:02}-{}", "x".repeat(24));
+        match accounts.add(&name, true) {
+            Ok(_) => {
+                promoted += 1;
+                None
+            }
+            Err(e) => Some(e),
+        }
+    });
+    assert_eq!(refused, Some(crate::record::TOO_MANY_ADMINS));
+    let group = group(&accounts, &[]);
+    let line = group.lines().find(|l| l.starts_with("admin:")).unwrap();
+    assert!(
+        line.len() <= slopos_slibc_core::passwd::LINE_MAX,
+        "{}",
+        line.len()
+    );
+    assert!(Group::parse(line.as_bytes()).is_some());
+    assert_eq!(accounts.admins().count(), promoted + 1);
+    let plain = alloc::format!("plain-{}", "y".repeat(26));
+    accounts.add(&plain, false).unwrap();
+    assert_eq!(
+        accounts.set_admin(&plain, true),
+        Err(crate::record::TOO_MANY_ADMINS)
+    );
+    assert_eq!(Accounts::parse(&accounts.render()), Some(accounts));
+}
+
+#[test]
 fn a_rename_keeps_the_uid_home_and_autologin() {
     let mut accounts = Accounts::one_person();
     accounts.rename("user", "ada").unwrap();

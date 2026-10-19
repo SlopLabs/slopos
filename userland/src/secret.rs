@@ -57,7 +57,10 @@ impl Drop for Unechoed {
 pub fn read(prompt: &str) -> Result<Option<Secret>, String> {
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
-    let _quiet = fs::isatty(0).then(Unechoed::enter).flatten();
+    let _quiet = match fs::isatty(0) {
+        true => Some(Unechoed::enter().ok_or("the terminal would show what is typed")?),
+        false => None,
+    };
     let mut line = Secret(String::new());
     match std::io::stdin().lock().read_line(&mut line.0) {
         Ok(0) => Ok(None),

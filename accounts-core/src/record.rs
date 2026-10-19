@@ -19,6 +19,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use slopos_abi::fs::{PERSON_UIDS, SESSION_HOME, SESSION_UID};
+use slopos_slibc_core::passwd::LINE_MAX;
 
 use crate::password::Hash;
 use crate::valid_name;
@@ -46,6 +47,7 @@ pub const NAME_HELD: &str = "the name is held already";
 pub const LAST_ADMIN: &str = "the machine's last administrator stays one";
 pub const DESKTOP_PERSON: &str = "the desktop runs as the first person, who stays";
 pub const NO_UIDS: &str = "every uid for people has been given";
+pub const TOO_MANY_ADMINS: &str = "the administrators' names would not fit the admin group's line";
 const BAD_HASH: &str = "not a password hash this system writes";
 
 /// A home's path: absolute, printable, and without the database's
@@ -57,6 +59,32 @@ fn valid_home(home: &str) -> bool {
 }
 
 impl Accounts {
+    /// Whether the `admin` group's line is one the C library reads.
+    fn admins_fit(&self) -> bool {
+        let names: Vec<&str> = self.admins().map(|p| p.name.as_str()).collect();
+        let line = format!(
+            "{}:x:{}:{}",
+            crate::ADMIN_GROUP,
+            crate::ADMIN_GID,
+            names.join(",")
+        );
+        line.len() <= LINE_MAX
+    }
+
+    /// `change` made on a copy, kept only if the administrators still fit.
+    fn checked<T>(
+        &mut self,
+        change: impl FnOnce(&mut Accounts) -> Result<T, &'static str>,
+    ) -> Result<T, &'static str> {
+        let mut next = self.clone();
+        let out = change(&mut next)?;
+        if !next.admins_fit() {
+            return Err(TOO_MANY_ADMINS);
+        }
+        *self = next;
+        Ok(out)
+    }
+
     /// A root's record before anyone wrote one: one person, `user`, the first
     /// administrator, with no password and logged in by the desktop.
     pub fn one_person() -> Accounts {
@@ -132,16 +160,18 @@ impl Accounts {
         if !PERSON_UIDS.contains(&self.next) {
             return Err(NO_UIDS);
         }
-        let uid = self.next;
-        self.next += 1;
-        self.people.push(Person {
-            uid,
-            name: name.to_string(),
-            home: format!("/home/{name}"),
-            admin,
-            password: None,
-        });
-        Ok(uid)
+        self.checked(|accounts| {
+            let uid = accounts.next;
+            accounts.next += 1;
+            accounts.people.push(Person {
+                uid,
+                name: name.to_string(),
+                home: format!("/home/{name}"),
+                admin,
+                password: None,
+            });
+            Ok(uid)
+        })
     }
 
     /// Take `name` away, their uid with them for good.
@@ -164,11 +194,13 @@ impl Accounts {
     pub fn rename(&mut self, old: &str, new: &str) -> Result<(), &'static str> {
         self.person(old).ok_or(NO_SUCH_PERSON)?;
         self.free_name(new)?;
-        if self.autologin.as_deref() == Some(old) {
-            self.autologin = Some(new.to_string());
-        }
-        self.at(old)?.name = new.to_string();
-        Ok(())
+        self.checked(|accounts| {
+            if accounts.autologin.as_deref() == Some(old) {
+                accounts.autologin = Some(new.to_string());
+            }
+            accounts.at(old)?.name = new.to_string();
+            Ok(())
+        })
     }
 
     pub fn set_admin(&mut self, name: &str, admin: bool) -> Result<(), &'static str> {
@@ -176,8 +208,10 @@ impl Accounts {
         if person.admin && !admin && self.admins().count() == 1 {
             return Err(LAST_ADMIN);
         }
-        self.at(name)?.admin = admin;
-        Ok(())
+        self.checked(|accounts| {
+            accounts.at(name)?.admin = admin;
+            Ok(())
+        })
     }
 
     /// Set `name`'s password to the hash `password` spells, or none.
@@ -271,6 +305,7 @@ impl Accounts {
         };
         let sound = next <= PERSON_UIDS.end() + 1
             && accounts.admins().next().is_some()
+            && accounts.admins_fit()
             && accounts
                 .autologin
                 .as_deref()

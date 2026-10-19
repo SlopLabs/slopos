@@ -225,14 +225,19 @@ fn free(accounts: &Accounts, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `/home/<name>`, the person's alone; refused where something is already.
+/// `/home/<name>`, the person's alone; refused where something is already,
+/// and taken away again should it not become theirs.
 fn make_home(person: &Person) -> Result<(), String> {
     let home = Path::new(&person.home);
+    let shown = |e: std::io::Error| format!("{}: {e}", home.display());
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(home)
-        .map_err(|e| format!("{}: {e}", home.display()))?;
-    lchown(home, Some(person.uid), Some(person.uid)).map_err(|e| format!("{}: {e}", home.display()))
+        .map_err(shown)?;
+    lchown(home, Some(person.uid), Some(person.uid)).map_err(|e| {
+        let _ = std::fs::remove_dir(home);
+        shown(e)
+    })
 }
 
 /// Take away `person`'s home, when it is a directory of theirs, links never
@@ -251,6 +256,10 @@ fn remove_home(person: &Person) -> Result<String, String> {
     Ok(format!("; {} is gone", home.display()))
 }
 
+/// Until there is a login screen, the desktop starts as the first person
+/// whatever the record says.
+const NO_LOGIN_SCREEN: &str = ", which the desktop honours once it has a login screen";
+
 /// What a change leaves for once the record holds it: a home made for it,
 /// taken away again should the record not take it, or one to take away.
 enum Home {
@@ -259,40 +268,99 @@ enum Home {
     Removed(Person),
 }
 
-fn change(request: Request) -> Result<String, String> {
-    let uid = requester()?;
-    let store = Store::write(Path::new("/"))?;
-    let mut accounts = store.accounts()?;
-    let (mut said, home) = match request {
+/// The hashes a change sets, typed and checked before the store is locked,
+/// so nobody's typing holds up another writer.
+#[derive(Default)]
+struct Typed {
+    /// The requester's own password, which an administrator without one
+    /// sets before adding someone.
+    adder: Option<String>,
+    password: Option<String>,
+}
+
+/// Whatever `request` needs typed: the current password of the requester
+/// changing their own, and every new one.
+fn typed(accounts: &Accounts, uid: u32, request: &Request) -> Result<Typed, String> {
+    let mut typed = Typed::default();
+    match request {
         Request::Manage(change) => {
-            administers(&accounts, uid)?;
-            manage(&mut accounts, uid, change)?
+            administers(accounts, uid)?;
+            match change {
+                Change::Add { .. } => {
+                    if let Some(adder) = accounts.by_uid(uid).filter(|p| p.password.is_none()) {
+                        println!(
+                            "{} has no password, which an administrator of a shared machine needs",
+                            adder.name
+                        );
+                        typed.adder = Some(new_password(&adder.name)?);
+                    }
+                }
+                Change::Password(name) => {
+                    let person = accounts
+                        .person(name)
+                        .ok_or_else(|| format!("{name}: no such person"))?;
+                    if person.uid == uid {
+                        prove(person)?;
+                    }
+                    typed.password = Some(new_password(name)?);
+                }
+                _ => {}
+            }
         }
         _ => {
             let person = accounts
                 .by_uid(uid)
-                .ok_or_else(|| format!("uid {uid} has no account; name one"))?
-                .clone();
-            prove(&person)?;
-            let hash = new_password(&person.name)?;
-            accounts.set_password(&person.name, Some(hash))?;
-            (format!("{}'s password is changed", person.name), Home::Kept)
+                .ok_or_else(|| format!("uid {uid} has no account; name one"))?;
+            prove(person)?;
+            typed.password = Some(new_password(&person.name)?);
+        }
+    }
+    Ok(typed)
+}
+
+fn change(request: Request) -> Result<String, String> {
+    let uid = requester()?;
+    let top = Path::new("/");
+    let before = Store::read(top).accounts()?;
+    let typed = typed(&before, uid, &request)?;
+    let store = Store::write(top)?;
+    let mut accounts = store.accounts()?;
+    if accounts != before {
+        return Err("the accounts changed while this was typed; ask again".into());
+    }
+    let (mut said, home) = match request {
+        Request::Manage(change) => manage(&mut accounts, uid, change, typed)?,
+        _ => {
+            let name = accounts
+                .by_uid(uid)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            accounts.set_password(&name, typed.password)?;
+            (format!("{name}'s password is changed"), Home::Kept)
         }
     };
-    if let Err(why) = store.put(&accounts) {
+    if let Err(why) = store.record(&accounts) {
         if let Home::Made(home) = home {
             let _ = std::fs::remove_dir(home);
         }
         return Err(why);
     }
+    let synced = store.sync();
     if let Home::Removed(person) = home {
         let gone = remove_home(&person).unwrap_or_else(|why| format!("; its home stays: {why}"));
         said.push_str(&gone);
     }
-    Ok(said)
+    synced.map(|()| said.clone()).map_err(|why| {
+        format!("{said}, but the user database was not written: {why}; the next boot writes it")
+    })
 }
 
-fn manage(accounts: &mut Accounts, uid: u32, change: Change) -> Result<(String, Home), String> {
+fn manage(
+    accounts: &mut Accounts,
+    uid: u32,
+    change: Change,
+    typed: Typed,
+) -> Result<(String, Home), String> {
     let said = match change {
         Change::Add {
             name,
@@ -300,13 +368,10 @@ fn manage(accounts: &mut Accounts, uid: u32, change: Change) -> Result<(String, 
             keep_autologin,
         } => {
             free(accounts, &name)?;
-            if let Some(adder) = accounts.by_uid(uid).filter(|p| p.password.is_none()) {
-                let adder = adder.name.clone();
-                println!(
-                    "{adder} has no password, which an administrator of a shared machine needs"
-                );
-                let hash = new_password(&adder)?;
-                accounts.set_password(&adder, Some(hash))?;
+            if let Some(adder) = accounts.by_uid(uid).map(|p| p.name.clone())
+                && typed.adder.is_some()
+            {
+                accounts.set_password(&adder, typed.adder)?;
             }
             let given = accounts.add(&name, admin)?;
             let person = accounts.person(&name).ok_or("the person just added")?;
@@ -315,7 +380,8 @@ fn manage(accounts: &mut Accounts, uid: u32, change: Change) -> Result<(String, 
             let mut said = format!("{name} is uid {given}, at home in {}", home.display());
             if !keep_autologin && accounts.autologin().is_some() {
                 accounts.set_autologin(None)?;
-                said.push_str("; the desktop logs nobody in by itself now");
+                said.push_str("; no one is logged in by the desktop by itself now");
+                said.push_str(NO_LOGIN_SCREEN);
             }
             return Ok((said, Home::Made(home)));
         }
@@ -325,14 +391,12 @@ fn manage(accounts: &mut Accounts, uid: u32, change: Change) -> Result<(String, 
                 "{name} is removed; uid {} is given to nobody again",
                 person.uid
             );
-            return Ok((
-                said,
-                if home {
-                    Home::Removed(person)
-                } else {
-                    Home::Kept
-                },
-            ));
+            let home = if home {
+                Home::Removed(person)
+            } else {
+                Home::Kept
+            };
+            return Ok((said, home));
         }
         Change::Rename { old, new } => {
             free(accounts, &new)?;
@@ -342,14 +406,7 @@ fn manage(accounts: &mut Accounts, uid: u32, change: Change) -> Result<(String, 
             format!("{old} is {new} now")
         }
         Change::Password(name) => {
-            let person = accounts
-                .person(&name)
-                .ok_or_else(|| format!("{name}: no such person"))?;
-            if person.uid == uid {
-                prove(person)?;
-            }
-            let hash = new_password(&name)?;
-            accounts.set_password(&name, Some(hash))?;
+            accounts.set_password(&name, typed.password)?;
             format!("{name}'s password is changed")
         }
         Change::Admin { name, admin } => {
@@ -363,10 +420,8 @@ fn manage(accounts: &mut Accounts, uid: u32, change: Change) -> Result<(String, 
         }
         Change::Autologin(name) => {
             accounts.set_autologin(name.as_deref())?;
-            match name {
-                Some(name) => format!("the desktop logs {name} in by itself"),
-                None => "the desktop logs nobody in by itself".to_owned(),
-            }
+            let who = name.as_deref().unwrap_or("no one");
+            format!("{who} is logged in by the desktop by itself{NO_LOGIN_SCREEN}")
         }
     };
     Ok((said, Home::Kept))
@@ -383,8 +438,8 @@ fn sync() -> Result<String, String> {
         store.sync()?;
         return Ok(String::new());
     }
-    let accounts = Accounts::one_person();
-    store.put(&accounts)?;
+    store.record(&Accounts::one_person())?;
+    store.sync()?;
     Ok(
         "user is this machine's first administrator, with no password, logged in by the desktop"
             .into(),
@@ -407,7 +462,7 @@ fn list() -> Result<String, String> {
                     "  no password"
                 });
                 if autologin == Some(p.uid) {
-                    line.push_str("  logged in by the desktop");
+                    line.push_str("  automatic login");
                 }
                 line
             })

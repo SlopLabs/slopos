@@ -131,8 +131,9 @@ impl Store {
         Ok(self.recorded()?.unwrap_or_else(Accounts::one_person))
     }
 
-    /// Make `accounts` the record, then write the database from it.
-    pub fn put(&self, accounts: &Accounts) -> Result<(), String> {
+    /// Make `accounts` the record, which [`sync`](Self::sync) then writes
+    /// the database from.
+    pub fn record(&self, accounts: &Accounts) -> Result<(), String> {
         debug_assert!(self._lock.is_some(), "a writer's store");
         writing();
         let text = accounts.render();
@@ -141,8 +142,7 @@ impl Store {
         }
         unsealed(&self.dir, || {
             crate::sealed::put_generation(&self.dir, RECORD, text.as_bytes(), 0o600)
-        })?;
-        self.sync()
+        })
     }
 
     /// Write the user database the record and the extensions' records
