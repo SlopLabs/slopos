@@ -3,7 +3,7 @@ name = "slopos-tls-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "TLS 1.3 client: record layer, key schedule, AEADs, X25519 and certificate path validation, sans-I/O and host-testable; Ed25519 and SSH signatures"
+description = "TLS 1.3 client: record layer, key schedule, AEADs, X25519 and certificate path validation, sans-I/O and host-testable; Ed25519 and SSH signatures; Argon2id"
 
 [lints]
 workspace = true

@@ -23,6 +23,28 @@ fn hex(b: &[u8]) -> alloc::string::String {
     s
 }
 
+/// RFC 7693's "abc", then lengths either side of a block and digests of
+/// every size, from Python's hashlib.
+#[test]
+fn blake2b_known_answers() {
+    let mut abc = [0u8; 64];
+    crate::blake2b::digest(&[b"abc"], &mut abc);
+    assert_eq!(
+        hex(&abc),
+        "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
+    );
+    for &(len, size, want) in vectors::BLAKE2B {
+        let message: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+        let mut whole = alloc::vec![0u8; size];
+        crate::blake2b::digest(&[&message], &mut whole);
+        assert_eq!(hex(&whole), want, "{len} bytes");
+        let mut split = alloc::vec![0u8; size];
+        let (head, tail) = message.split_at(len / 3);
+        crate::blake2b::digest(&[head, tail], &mut split);
+        assert_eq!(split, whole, "{len} bytes in two parts");
+    }
+}
+
 #[test]
 fn sha2_known_answers() {
     assert_eq!(

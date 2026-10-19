@@ -1,6 +1,7 @@
 //! A sans-I/O TLS 1.3 (RFC 8446) client for SlopOS's userland and every
 //! primitive under it: [`Client`] consumes bytes read from a transport and
-//! produces bytes to write to it.
+//! produces bytes to write to it. Argon2id hashes the user database's
+//! passwords.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -10,7 +11,9 @@ extern crate alloc;
 extern crate std;
 
 pub mod aes;
+pub mod argon2;
 pub mod bignum;
+pub mod blake2b;
 pub mod chacha;
 pub mod client;
 pub mod conn;

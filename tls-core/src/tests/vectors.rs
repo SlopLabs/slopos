@@ -1005,3 +1005,39 @@ pub const RSA: &[&[&str]] = &[
         "0",
     ],
 ];
+
+/// `(message length, digest size, digest)` for the message whose byte `i` is
+/// `7i + 3`, from Python 3's hashlib.blake2b.
+pub const BLAKE2B: &[(usize, usize, &str)] = &[
+    (
+        0,
+        64,
+        "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce",
+    ),
+    (
+        127,
+        64,
+        "71546bbf9110ad184cc60f2eb120fcfd9b4dbbca7a7f1270045b8a23a6a4f4330f65c1f030dd2f5fabc6c57617242c37cf427bd90407fac5b9deffd3ae888c39",
+    ),
+    (
+        128,
+        64,
+        "2d9e329f42afa3601d646692b81c13e87fcaff5bf15972e9813d7373cb6d181f9599f4d513d4af4fd6ebd37497aceb29aba5ee23ed764d8510b552bd088814fb",
+    ),
+    (
+        129,
+        32,
+        "a34a4e1e03c541dfbf3099c4b6c143c022ced65c28bd7e8a10e0a098461aecf0",
+    ),
+    (255, 1, "50"),
+    (
+        256,
+        63,
+        "9a858a341b4b85b5e5abd506810e9d6808376597626df3ff8102940423889c6aab7a36a23ea93d99c6bc77ef74ae417f83a90d1cef8767c33b07a689789d48",
+    ),
+    (
+        1000,
+        48,
+        "3910b84a1fe7f38f69f3cf3b0a217a0ac1a8865dd72e74a315d615e475039f6a7b7299bbfe070081f141f544620926b8",
+    ),
+];
