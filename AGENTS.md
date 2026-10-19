@@ -702,12 +702,12 @@ its extension's own name and for each user its images are granted, the lowest
 of 100 to 999 no record holds, given at install and kept for good, its
 removal included, so what a user left keeps its owner
 (`slopos_extension_core:: accounts`); the uid of the name is the extension's
-number. `/etc/passwd` and `/etc/group` are written from the records after
-every change, the base's two entries first and then each installed
-extension's users, each with a group of its own, through a file sealed and
-renamed over the old one unsealed for the rename; slibc's readers
-(`slibc/src/pwd.rs`) believe either only while it is a sealed regular file
-and answer the base's entries otherwise, so `DacOverride` without `Seal`
+number. The user database lists each installed extension's users after the
+people, each with a group of its own, written after every change through a
+file sealed and renamed over the old one unsealed for the rename (*The
+machine knows its people*); slibc's readers (`slibc/src/pwd.rs`) believe
+`/etc/passwd` or `/etc/group` only while it is a sealed regular file and
+answer the base's entries otherwise, so `DacOverride` without `Seal`
 changes no name, and init and privd take uids from records, never from a
 lookup. Init (`userland/src/apps/init/extensions.rs`) runs each service of
 every enabled, running extension, as the activation shown at `/opt/<name>`
@@ -1131,7 +1131,9 @@ crates under `just test-host` because no userland unit test runs anywhere;
 Ed25519 (RFC 8032) strictly — a canonical key outside the small-order
 subgroup, `S` below the order, `R` the canonical encoding of `[S]B - [k]A` —
 and the SSH signatures `ssh-keygen -Y sign` writes over such keys; its signers
-for both are under `test-server`, which nothing shipped enables.
+for both are under `test-server`, which nothing shipped enables. BLAKE2b (RFC
+7693) and Argon2id (RFC 9106) hash the user database's passwords, held to
+the RFCs' vectors, Argon2d and Argon2i compiled for the tests alone.
 
 **The unwinder is not test-only.** `libc.so` and `libc.a` supply the Level-1
 Itanium unwinder (`vendor/unwinding`, seventeen `_Unwind_*` entry points) on
@@ -1905,6 +1907,53 @@ without the record, hands the session its trees and writes the record
 migrated in place. `check_fs_image.sh --map`, the default for the tests
 image, holds a root to it.
 
+**The machine knows its people.** The accounts record
+(`slopos_accounts_core::record`) keeps each person's uid, name, home, whether
+they administer the machine and their password's Argon2id hash at RFC 9106's
+second recommended cost, as a PHC string (`slopos_accounts_core::password`);
+whom the desktop logs in by itself; and the next uid a person is given, so
+none is given twice. It lives in `slopos_abi::fs::ACCOUNTS_STORE`, a directory
+only uid 0 reads, as sealed generations (`userland/src/sealed.rs`, as the
+extension store's records are), and a root without one has the one person's:
+`user`, uid 1000, the first administrator, with no password and logged in by
+the desktop. `/etc/passwd`, `/etc/group` and `/etc/shadow` (0600) are
+rendered from it and from the extensions' records
+(`slopos_accounts_core::{passwd, group, shadow}`): root, the people, the
+extensions' users, then `nobody`, the first holder of a name or uid winning;
+each person's group is their own, and `admin` (gid 10) lists the
+administrators, which slibc's `initgroups` and `getgrouplist` read. Every
+writer holds `ACCOUNTS_STORE.lock` across reading the record and writing the
+database, `extctl` after an extension changes among them, so the last
+database written is the newest of both. The uids are Debian's division: 1 to
+99 the base's own, 100 to 999 extensions' (`EXTENSION_UIDS`), 1000 to 59999
+people (`PERSON_UIDS`) and 65534 `nobody`. `/bin/users` lists the people to
+anyone and, through privd's `org.slopos.accounts.manage` (`Seal` and
+`DacOverride`), for root or an administrator adds one with a home of their own
+(`/home/<name>`, 0700), removes one — the home kept unless `--home` says —
+renames one, sets a password, promotes and demotes, and sets automatic login;
+the last administrator stays one, and the first person, whom the desktop runs
+as, stays. A passwordless administrator who adds someone sets a password
+first, and an add turns automatic login off unless `--keep-autologin` says.
+`org.slopos.accounts.password` (`Seal`) changes the requester's own password
+once the current one is typed, as does the manage action for an
+administrator's own; a wrong one costs two seconds, and privd runs the
+accounts' mechanisms one at a time. Typed secrets are read from a terminal
+with its echo off, the one privd gives the mechanism (`userland/src/secret.rs`).
+`/sbin/authcheck` is the one program that reads a hash back: it takes
+`<name>\n<secret>\n` on standard input, believes `/etc/shadow` only sealed,
+which only uid 0 reads, and answers by its status — 0 for the password, 1 for
+anything else, 2 when it cannot tell. Init runs `users sync` at every boot,
+holding `Seal`, which writes the database and gives a disk root without a
+record the one person's; a RAM root keeps every seal for good, so it keeps
+slibc's own rows, which are the one person's rendering
+(`slopos_slibc_core::passwd::BASE_PASSWD`). The kernel keeps `/etc` and
+`/var/lib/slopos` (`KEPT_DIRS`), so no mount covers the database or the
+record, and the seal keeps a `DacOverride` holder from rewriting either. The
+installer asks for the first person's name, `user` unless one is given
+(`--person`), and a password unless `--no-password`; a kept root keeps its
+people. The session's `USER` is the first person's name, and their home the
+map's `/home/user`.
+
 **Init keeps the services running.** It starts privd and waits for it,
 remoted where the base is paired, the extensions' services, and the desktop
 session — the compositor,
@@ -2007,8 +2056,8 @@ uid 0 holding `slopos_priv_core::PRIVD_CAPS` and waits for, listens on
 `/usr/share/slopos/privd/actions` (`assets/privd/actions`, sealed in the base,
 grammar `slopos_priv_core::policy`) names for it, or an extension's own — as a
 fresh child holding the action's capabilities as uid 0, or an extension's as
-its first user, with an environment of `PATH`, `LANG` and
-`PRIV_ACTION` alone, cwd `/` or the directory the requester sent, and the
+its first user, with an environment of `PATH`, `LANG`, `PRIV_ACTION` and
+`PRIV_UID`, the requester's uid, alone, cwd `/` or the directory the requester sent, and the
 requester's descriptors as stdio. Who asks is the connection's recorded
 `Identity`, its program read again before every verdict and before the
 mechanism starts, so a requester whose base program has stopped running since
