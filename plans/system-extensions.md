@@ -77,25 +77,25 @@ request (Phase 1).
   whatever broker it named" (`userland/src/apps/remoted/mod.rs:16-20`). The
   same holds for anything that grants authority.
 
-**Serving sealed archives is solved, for the base and in memory for
-extensions.** `fs/src/basefs/` serves a newc archive from memory, every inode
-sealed: `BASE_FS` with up to sixteen generations, `MEDIUM_FS`, and a pool of
-32 activation instances (`basefs/extension.rs`) shown at `/opt/<name>`
-(Phase 1). The mount table holds 64 mounts.
+**The base is served from memory, extensions from disk.** `fs/src/basefs/`
+serves a newc archive from memory, every inode sealed: `BASE_FS` with up to
+sixteen generations and `MEDIUM_FS`. A pool of 32 activations
+(`fs/src/extension/`) serves extension images from files on the root, shown
+at `/opt/<name>` (Phases 1 and 5). The mount table holds 64 mounts.
 
-**Verity is an integrity check, not an authenticity one.** `fs/src/verity.rs`
-verifies a disk against a CRC-32 per block from a trailer (`:1-33`); nothing
-verifies a SHA-256 tree, and no kernel crate computes SHA-256. There is no
-file-backed block device (`fs/src/blockdev.rs` holds `MemoryBlockDevice`).
+**A root image's trailer checks integrity; an extension's tree, the bytes
+vouched for.** `fs/src/verity.rs` holds a disk to a CRC-32 per block from a
+trailer. An extension image is read through a block device over its file
+that holds every block to a SHA-256 tree whose root its record names
+(`slopos-verity-core`, `fs/src/extension/device.rs`; Phase 5).
 
 **Extensions extend privd, `PATH` and the dock** (Phase 4): privd runs the
 running extensions' actions, `/opt/bin` links their commands last on
 `DEFAULT_PATH`, the dock shows their app entries, and `/etc/<name>` holds the
 machine's configuration of each.
 
-**The private call table is full.** `SYSCALL_PRIVATE_TABLE_SIZE` is 48 and
-`ext_activate` and `ext_deactivate` took the last two slots; the next private
-call grows the table.
+**The private call table has 49 slots.** `ext_activate` took slot 48 at
+interface 6; slot 46, interface 5's form of it, answers `ENOSYS`.
 
 **The kernel's command line stays in the kernel.** It is parsed in
 `boot/src/early_init.rs`; userland learns of it only through `sys_info`'s boot
@@ -169,13 +169,15 @@ trust whatever root drops in, with no grant step and identity by path.
 - **A name**: lowercase letters, digits and `-`, at most 32 bytes, no dots.
   `slopos`, `base`, `bin`, `etc`, `lib`, `root`, `user` and the names of the
   base's directories are reserved.
-- **An image**: a newc archive packed and checked as a base is, with a
-  manifest of `<sha256> <mode> <path>` for every record (`boot-core::base`'s
-  format) and, under `/.extension/`, `release` (`name`, `version` an unsigned
-  integer, `display` a free version string, `summary`) and `declare`.
-- **A sidecar** `<name>.meta`: the name, the version and the image's SHA-256.
-  It is what is signed, so the signed object keeps its shape when Phase 5
-  changes the payload's.
+- **An image**: a read-only ext4 volume followed by its SHA-256 tree in
+  dm-verity's layout, whose root names it, sealed by a manifest of
+  `<sha256> <mode> <path>` for everything it holds (`boot-core::base`'s
+  format) and holding, under `/.extension/`, `release` (`name`, `version` an
+  unsigned integer, `display` a free version string, `summary`) and
+  `declare`.
+- **A sidecar** `<name>.meta`: the name, the version and the image's root on
+  its `sha256` line. It is what is signed, so the signed object kept its
+  shape when the payload went from an archive to a volume.
 - **A signature**, optional: `<name>.meta.sig`, `ssh-keygen -Y sign -n
   extension@slopos -O hashalg=sha512` over the sidecar, Ed25519 keys only.
 - **Contents** are relative to its mount point: `bin/`, `libexec/`, `lib/`,
@@ -240,7 +242,7 @@ named as `slopos_abi::caps` names them.
 |---|---|---|
 | `/var/lib/slopos/extensions/` | the store; it and each directory on the way to it kept by the kernel, never renamed, removed or covered | uid 0, sealed |
 | `…/keys.<n>` | trusted keys, `allowed_signers`-shaped: key, ceiling, session ceiling, comment | uid 0, sealed |
-| `…/<name>/<sha256>.ext`, `.meta`, `.meta.sig` | the images, their sidecars and signatures | uid 0, sealed |
+| `…/<name>/<root>.ext`, `.meta`, `.meta.sig` | the images, named by their tree's root, their sidecars and signatures | uid 0, sealed |
 | `…/<name>/record.<n>` | the grant, the floor, the refused versions, enabled and why not | uid 0, sealed |
 | `/var/lib/slopos/extensions.lock` | the writers' lock | uid 0, 0600 |
 | `/opt/<name>` | the active image, read-only and pinned | the kernel |
@@ -266,19 +268,18 @@ named as `slopos_abi::caps` names them.
 - **`ExtensionUpdate`**, a new capability: activating, replacing and
   deactivating an extension. init holds it, as every capability; it joins
   `DELEGABLE` for the extension mechanisms; no extension is ever granted it.
-- **`ext_activate(name, archive, len, digest)`** copies an archive from the
-  caller's memory into kernel memory as `base_activate` does, indexes it, and
-  mounts it read-only and pinned at `/opt/<name>`, replacing a previous
+- **`ext_activate(name, fd, digest)`** serves the image in the file `fd`
+  reads, every block held to the tree whose root is `digest`, indexes it,
+  and mounts it read-only and pinned at `/opt/<name>`, replacing a previous
   activation's mount in one step. It records `name` and `digest` as the
   activation's label: the caller holds `ExtensionUpdate` and has verified the
-  bytes, and the kernel serves the copy it made, so no one swaps them after.
-  `ext_deactivate(name)` unmounts it. These take the last two free private
-  slots.
-- **`basefs` generalised**: `is_base`, `Hold`, activation, the reaper and
-  `program_path` take any instance, and an instance per activation is drawn
-  from a pool. An activation number, never reused within a boot, is the high
-  half of every inode it serves; an old activation is freed once nothing
-  holds it. The mount table grows by the activations it must hold.
+  image, and the kernel serves only what that root vouches for, so no one
+  swaps the bytes after. `ext_deactivate(name)` unmounts it.
+- **A pool of activations**: the reaper and `program_path` take an
+  activation as they take a base generation, and each is drawn from a pool
+  of 32. An activation number, never reused within a boot, is the high half
+  of every inode it serves; an old activation is freed once nothing holds
+  it. The mount table grows by the activations it must hold.
 - **`Program::Extension(inode)`**: exec records it when the image, every link
   of its `#!` chain and its interpreter are files of the base or of that one
   activation. An executable mapping of anything else makes the process
@@ -296,10 +297,8 @@ named as `slopos_abi::caps` names them.
   both before every verdict; `SO_PEERCRED` stands as connected.
 - **`BOOT_FLAG_EXTENSIONS_OFF`** in `sys_info`, set by `extensions=off` on the
   command line, under which `ext_activate` answers `EPERM`.
-- **Memory.** Activations share a budget, an eighth of usable memory by
-  default (`ext.memory=<percent>`), at most 32 at once. Phase 5 lifts it.
 - **Base interface 5**: the two calls, the socket option, the boot flag, the
-  capability's bit and the identity rule.
+  capability's bit and the identity rule; **6**: `ext_activate` of a file.
 
 ### Trust and the install
 
@@ -327,7 +326,7 @@ requesters' signals, and delegates neither.
 `session` becomes `admin` and `user` once `plans/users-and-login.md` brings
 more than one person.
 
-- **A first install** is `extctl install <image> <sha256> name <name> grant
+- **A first install** is `extctl install <image> <root> name <name> grant
   <caps> unasked <actions> users <names> commands <names>`. The person reads
   exactly what is granted; the mechanism refuses an image whose `release` or
   `declare` says anything else. It fits privd's 320-byte question for any
@@ -432,8 +431,8 @@ after a base rollback to an older one.
 
 ### On-disk images
 
-Memory suits daemons and helpers, not large system software. Phase 5 moves
-extensions to disk:
+Memory suits daemons and helpers, not large system software, so extensions
+live on disk:
 
 - The image becomes a read-only ext4 volume followed by a SHA-256 tree in the
   layout dm-verity uses. The sidecar's digest becomes the tree's root.
@@ -551,17 +550,35 @@ capability as the rescue shell runs it, and a running mechanism ended when
 its extension is disabled), and host tests of the translation,
 the principal, the sidecar and the record's serial.
 
-### Phase 5: On-disk images
+### Phase 5: On-disk images — done
 
-- The SHA-256 tree, the file-backed read-only block device, the mount, the
-  path index, the format change; the memory budget removed.
-- Graded by an extension larger than the old budget, a flipped bit in its
-  image failing the read that meets it, and every test of Phases 1–4 but the
-  budget's.
+`slopos-verity-core` computes SHA-256 and dm-verity's tree (4 KiB blocks, no
+salt, no superblock), byte for byte what `veritysetup` writes; `tls-core`
+takes its SHA-256 from there. An image is the ext4 volume
+`extension_core::volume` writes, deterministically, and reads strictly, then
+its tree; a sidecar and a record name the tree's root. `ext_activate(name,
+fd, digest)`, base interface 6, serves a file of the store through a
+read-only block device that holds every block to the tree
+(`fs/src/extension/device.rs`), under an `Ext2Mount` of its own that keeps
+no name cache and caches from 64 frames up to the volume's size, walked once
+into the path index `SO_PEERPROGRAM` reads
+(`extension/index.rs`); interface 5's archive call answers `ENOSYS`, and the
+memory budget and `ext.memory=` are gone. `extctl` reads an image through
+its tree in 64 KiB pieces, answers a signed install from its sidecar where
+the record decides, copies the image into the store with its holes, holds
+the copy whole to its root and activates it; an archive-form image is
+refused, saying to install it again. `tools/extension` and `extctl build` write images with their holes.
+Graded by `extension_test`'s `one_past_the_old_memory_budget_goes_in`, an
+image past an eighth of memory read at both ends through `/opt`;
+`fs::tests::extensions`, a flipped bit failing only the read that meets it,
+a wrong root, a torn top block, and files a volume check or the index
+refuses; every test of Phases 1–4 but the budget's; and host tests of the
+tree against `veritysetup`, the volume against `e2fsck` and `mke2fs`, and the
+image.
 
 ## Grading
 
-- **Gates:** `check_base_interface.sh` for interface 5;
+- **Gates:** `check_base_interface.sh` for interfaces 5 and 6;
   `check_authority_reachability.sh` for the new calls; the unsafe and
   expansion gates; `check_loose_programs.sh` over the test extensions;
   `check_libc_exports.sh` for the user database's readers.
@@ -627,11 +644,11 @@ own, all building on extensions:
   their symbols are checked against `libc.so` at every activation. One
   extension does not load another's libraries until repositories bring
   dependencies.
-- **Memory first, then disk.** In-memory activation reuses `basefs` and makes
-  every layer above testable at once; on-disk images follow and replace the
-  in-memory form for extensions.
-- **An activation is an instance.** Each is a `basefs` instance of its own
-  from a fixed pool, numbered across every activation, so an inode names its
+- **Memory first, then disk.** In-memory activation reused `basefs` and made
+  every layer above testable at once; on-disk images replaced it for
+  extensions, while the base stays in memory.
+- **An activation is an instance.** Each is an instance of its own from a
+  fixed pool, numbered across every activation, so an inode names its
   activation for good, replacement is a mount swap rather than a generation
   switch, and the reaper frees an activation as it frees a retired base
   generation. A program's word tags an extension's inode with its top bit, so
@@ -640,9 +657,8 @@ own, all building on extensions:
   updated until one is freed; and a program of the activation replaced that
   opens a library by its `/opt/<name>` path afterwards reaches the new
   activation's and forfeits, as mixing two activations' code must. Any
-  process that keeps a file of a replaced activation open keeps that copy
-  resident against the shared budget and pool, as with the base; on-disk
-  images lift the budget. Like a base directory across a switch, a working
+  process that keeps a file of a replaced activation open keeps its slot of
+  the pool and its image file held. Like a base directory across a switch, a working
   directory or `dirfd` under `/opt/<name>` follows a replacement to the next
   activation's. A script is attested by the path it was found at
   and reopened there by its interpreter, so across a replacement it can read
@@ -650,6 +666,53 @@ own, all building on extensions:
   deactivation whatever the root holds at that path: privd judges an
   extension's script by its label, and only an `ExtensionUpdate`
   or `DacOverride` holder can stage either.
+- **An image is read only through its tree.** The kernel holds every block
+  it reads to the root its caller vouched for, as dm-verity does, so the
+  file under it may be damaged or replaced and still no byte that root does
+  not vouch for is served; the kernel copies none of it into memory and the
+  mechanism that stores it holds no per-process block ceiling, so the disk
+  bounds an extension's size. The tree is checked lazily, a block at a time;
+  `extctl` seals the store's copy and then holds it whole to its root, a
+  level at a time in room that does not grow with it, so damage on the way
+  in is found at install rather than at a read. The tree separates no level from another,
+  as dm-verity's does not, so a root binds no geometry alone: a volume must
+  say it holds exactly the tree's data blocks, under a checksummed
+  superblock no digest passes for, so the geometry the length implies is the
+  one the volume reads.
+- **One volume shape, read alike on both sides.** The writer is
+  deterministic, its reader believes no feature or inode flag that changes
+  what a block means, nor an inode type, generation or hard link it does not
+  write, nor a block the kernel would not serve, and the kernel's index
+  refuses what a path could not name alone — an inode at two names, a name
+  no path holds or held twice in a directory, a `.` or `..` that lies, an
+  entry whose type is not its inode's — so the tree `extctl` judged is the
+  tree the kernel names programs in, and two images of one manifest are one
+  image.
+- **ext4 under a block device under ext4.** An activation's lock comes
+  before its device's (`EXT_VERITY`), which comes before the filesystem
+  holding the file; the activations share one lock class, since one never
+  nests in another, and keep no name cache, since nothing they serve
+  changes.
+- **An archive's floor binds its version, once.** A record's floor names the
+  bytes its version was installed with, and an archive's can never go in
+  again, so while the store still holds the archive a rebuild of that
+  version goes in, and the floor then names the rebuild; once the archive
+  has left the store nothing says the floor was an archive's, so only a
+  newer version goes in.
+- **A signed install is judged from its sidecar first.** What the record
+  alone decides — another signer, a removal, a refused or older version,
+  the same bytes already current — is answered before the image is read, so
+  no replay of a sidecar the store keeps makes the mechanism read an image
+  while it holds the store's lock and the `extensions` group. A first
+  install has no sidecar and is read whole, after the person said yes.
+- **Retiring a call keeps the minimum.** A private call that goes away keeps
+  its slot, answering `ENOSYS`, and the slot is never given to another: an
+  older base that makes it is refused, never misread, so the interface number
+  rises and `BASE_INTERFACE_MIN` stays where it was. Raising it instead would
+  have the new kernel refuse the base it must first boot beside, so no base
+  or kernel could go in first. An interface-5 base on a newer kernel
+  therefore activates no extension and stops each; `extctl enable` under a
+  newer base brings each back.
 - **A program instance, never a socket walk.** Every change of a process's
   program moves a 64-bit counter (the lesson of Linux's 32-bit `exec_id`);
   a recorded identity holds its process handle and instance and is judged
@@ -677,7 +740,7 @@ own, all building on extensions:
   `Seal` holder sealed is no record and no key. A RAM root keeps a seal for
   good, so extensions need a disk root.
 - **Images by digest, records by generation, nothing renamed.** The store
-  keeps each image, sidecar and signature under its SHA-256; a record or the
+  keeps each image, sidecar and signature under its root; a record or the
   keys go in as `record.<n>` or `keys.<n>` beside the last, sealed through
   the descriptor that wrote it and read back, and the newest sealed one is
   believed. No rename and no rewrite in place means no moment in which the
@@ -695,7 +758,7 @@ own, all building on extensions:
   phase whose state needs it, and `org.slopos.extension.trust` holds
   `ExtensionUpdate` because a key's change stops what no longer fits.
 - **The person reads the grant, the mechanism holds the image to it.** A
-  first install's command line is `install <image> <sha256> name <name>
+  first install's command line is `install <image> <root> name <name>
   grant <caps> unasked <actions> users <users> commands <commands>`, lists
   joined by commas and `-` for none; `extctl install <image>` writes it out in
   the requester, the mechanism runs only that form, and it refuses an image
