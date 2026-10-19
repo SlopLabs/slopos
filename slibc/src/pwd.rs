@@ -20,8 +20,6 @@ const GROUP: &[u8] = b"/etc/group\0";
 
 /// What the kernel lets one process belong to.
 const GROUPS_MAX: usize = 32;
-/// The most groups a user is found in.
-const LIST_MAX: usize = 256;
 
 const PTR: usize = size_of::<*mut c_char>();
 
@@ -355,22 +353,29 @@ pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut group {
     group_static(|grp, buf, len, result| getgrnam_r(name, grp, buf, len, result))
 }
 
-/// `group`, then each other group that lists `user`, the first [`LIST_MAX`]
-/// of them, and how many that is.
-fn group_list(user: &[u8], group: gid_t) -> ([gid_t; LIST_MAX], usize) {
-    let mut gids = [group; LIST_MAX];
-    let mut count = 1;
+/// `group`, then each other group that lists `user`, once each, into `into`
+/// as far as it holds them: how many there are. One past `into` is told
+/// apart only from those `into` holds.
+fn group_list(user: &[u8], group: gid_t, into: &mut [gid_t]) -> usize {
+    let mut count = 0;
+    let mut add = |gid: gid_t| {
+        if !into[..count.min(into.len())].contains(&gid) {
+            if let Some(slot) = into.get_mut(count) {
+                *slot = gid;
+            }
+            count += 1;
+        }
+    };
+    add(group);
     scan(GROUP, BASE_GROUP, |line| {
         if let Some(row) = Group::parse(line)
             && row.lists(user)
-            && !gids[..count].contains(&row.gid)
         {
-            gids[count] = row.gid;
-            count += 1;
+            add(row.gid);
         }
-        count == LIST_MAX
+        false
     });
-    (gids, count)
+    count
 }
 
 /// `initgroups(3)`: the supplementary groups become `group` and every group
@@ -385,7 +390,8 @@ pub unsafe extern "C" fn initgroups(user: *const c_char, group: gid_t) -> c_int 
         errno_set(EINVAL.raw());
         return -1;
     }
-    let (gids, count) = group_list(c_bytes(user), group);
+    let mut gids = [group; GROUPS_MAX];
+    let count = group_list(c_bytes(user), group, &mut gids);
     crate::process::ids::setgroups(count.min(GROUPS_MAX), gids.as_ptr())
 }
 
@@ -406,9 +412,13 @@ pub unsafe extern "C" fn getgrouplist(
         errno_set(EINVAL.raw());
         return -1;
     }
-    let (gids, count) = group_list(c_bytes(user), group);
     let room = usize::try_from(*ngroups).unwrap_or(0);
-    core::ptr::copy_nonoverlapping(gids.as_ptr(), groups, count.min(room));
+    let into: &mut [gid_t] = match room {
+        0 => &mut [],
+        // SAFETY: the caller's `groups` holds `*ngroups` gids.
+        _ => core::slice::from_raw_parts_mut(groups, room),
+    };
+    let count = group_list(c_bytes(user), group, into);
     *ngroups = count as c_int;
     if count > room { -1 } else { count as c_int }
 }
