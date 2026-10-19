@@ -33,10 +33,8 @@ default install still opens straight into one person's desktop:
 - The access model (`AGENTS.md`, *Authority discipline*): capabilities are
   the only authority, a uid is an identity. This plan keeps that: an account
   and the admin role decide **who may approve**, never what a process holds.
-- `plans/system-extensions.md`, whose Phase 1 makes `root` mean uid 0 running
-  base code and whose user database this plan defines. Whichever plan lands
-  first carries the shared parts: `/etc/passwd`, `/etc/group`, the sealed
-  database, privd holding `SetId`.
+- `plans/system-extensions.md`, landed: `root` is uid 0 running base code,
+  extensions' users join the database, and privd holds `SetId`.
 
 ## Where it stands
 
@@ -56,14 +54,15 @@ account.rs`).
   `/home/user`, `/src` and `/usr/local`, recorded once in
   `/var/lib/slopos/owners` and mirrored by `scripts/lib/root_layout.sh` and
   `tools/initramfs`.
-- slibc compiles in two users, root and `user` (`slibc/src/conf.rs:33-63`),
-  `initgroups` answers the primary group alone (`:411-418`), and there is no
-  `getlogin`, no password store and no password hashing anywhere.
+- The people are the accounts record's (Phase 1, below): `/bin/users`
+  changes them through privd, and slibc reads the database rendered from it.
+  There is no `getlogin`.
 - init runs one desktop session tagged `DESKTOP`
   (`userland/src/init_control.rs:14-21`, `userland/src/apps/init/session.rs`),
-  starts it as `SESSION_UID` with `USER=user` and no supplementary groups
-  (`userland/src/apps/init/service.rs:100-157`), and lets the session restart
-  itself and uid 0 end it (`userland/src/apps/init/control.rs:154-158`).
+  starts it as `SESSION_UID`, named as the database names that uid, with no
+  supplementary groups (`userland/src/apps/init/service.rs`), and lets the
+  session restart itself and uid 0 end it
+  (`userland/src/apps/init/control.rs:154-158`).
 - init makes one consent socket pair per boot and hands the same end to every
   compositor it starts; privd keeps one question in flight on it
   (`userland/src/apps/init/mod.rs:162`, `:597-600`).
@@ -72,7 +71,9 @@ account.rs`).
   sits at the machine; the dialog names uid 0 "root", uid 1000 "user" and any
   other a number (`priv-core/src/consent/dialog.rs:95-97`); admission is
   capped per uid and program with one pool of 32 for everyone
-  (`userland/src/apps/privd/mod.rs:55-59`).
+  (`userland/src/apps/privd/mod.rs:55-59`). A mechanism learns its
+  requester's uid from `PRIV_UID`, and the accounts' mechanism checks that
+  the requester administers the machine itself.
 - remoted runs as uid 1000 (`userland/src/apps/init/service.rs:61-69`).
 - The session's own tools write `/usr/local` directly (`tree-install`,
   `scripts/selfhost.sh install`).
@@ -87,13 +88,12 @@ outranks the compositor.
 (`drivers/src/input_event.rs:694-721`) behind `ClipboardGlobal`, which every
 program holds (`abi/src/caps.rs:26`).
 
-**Mounts.** `mount(2)` refuses `/`, the pinned base directories and occupied
-targets (`core/src/syscall/fs/mount_handlers.rs:82-93`); `/etc` is a plain
-directory under the pinned `/etc/ssl`.
+**Mounts.** `mount(2)` refuses `/`, the pinned base directories, occupied
+targets and anything at, above or beneath `/etc` and `/var/lib/slopos`
+(`slopos_abi::fs::KEPT_DIRS`).
 
-**No login exists.** The installer creates no person
-(`userland/src/apps/installer/root.rs:177-185`); a parent's zombie cap notes
-"SlopOS has no uid" (`sched/src/task/task_family.rs:28-31`).
+**No login exists.** The installer names the first person; a parent's zombie
+cap notes "SlopOS has no uid" (`sched/src/task/task_family.rs:28-31`).
 
 ## What the prior art settles
 
@@ -314,21 +314,20 @@ no password and automatic login, and nothing else moves.
 Five phases. Each ends with something that runs, and lands as commits of its
 own.
 
-### Phase 1: Accounts
+### Phase 1: Accounts — done
 
-- `/etc/passwd`, `/etc/group`, `/etc/shadow`, sealed; `/etc` and
-  `/var/lib/slopos` pinned; uid ranges; the `admin` group.
-- Argon2id and BLAKE2b in `tls-core`, tested against RFC 9106's vectors.
-- slibc's readers, `getgrouplist`, `initgroups`.
-- `/bin/users` and the accounts actions; `/sbin/authcheck`.
-- The installer asks for the first person's name, `user` unless one is
-  given, and an optional password; an existing root's `user` becomes the
-  first admin with no password and automatic login.
-- Graded by `accounts_test`: an account made, its home owned and private, its
-  groups seen by a spawned process; a password set, checked, refused when
-  wrong; the last admin kept; a `DacOverride` holder refused at `/etc/group`
-  and a `Mount` holder at `/etc`; and the whole suite unchanged on the
-  one-person default.
+`slopos-accounts-core` holds the accounts record, the database rendered from
+it and Argon2id hashes (`tls-core` gained BLAKE2b and Argon2id, held to RFC
+7693's and RFC 9106's vectors). The record lives sealed in
+`/var/lib/slopos/accounts`; `/etc` and `/var/lib/slopos` are kept against
+mounts; `admin` is gid 10; people are uids 1000 to 59999. `/bin/users` lists
+people and, through `org.slopos.accounts.manage` and
+`org.slopos.accounts.password`, adds, removes, renames, sets passwords,
+promotes, demotes and sets automatic login; `/sbin/authcheck` checks a
+password. slibc gained `getgrouplist`. init's `users sync` gives an existing
+root the one person's record at its first boot; the installer asks for the
+first person and a password. `accounts_test` grades it, `libc_abi_test` the
+groups, and `installer_test` the installed root's person.
 
 ### Phase 2: Principals and approval
 
@@ -422,6 +421,40 @@ own.
 - **System-wide software goes in through privd** once more than one person
   runs it; a shared group-writable tree would let one person's processes
   change what everyone runs.
+- **The accounts record is the truth; `/etc` holds its rendering.** The
+  record keeps everything about people, hashes included, as sealed
+  generations only uid 0 reads, so a writer cut off anywhere leaves the old
+  record or the new. `/etc/passwd`, `/etc/group` and `/etc/shadow` are
+  written from it and the extensions' records under one lock, and again at
+  every boot; who administers is read from the record, never from
+  `/etc/group`.
+- **A root without a record is the one person's**, and slibc's compiled-in
+  rows are that same rendering, so a RAM root, an old root and a fresh one
+  read alike. The kernel keeps the store's directory, so it cannot be moved
+  aside to make a root look recordless.
+- **People come first in the database**, then extensions' users; a name or
+  uid one listed earlier holds is passed over. A person never takes a name an
+  extension's record keeps a uid for.
+- **A uid is given once.** The record's `next` only rises, as an extension
+  record keeps its uids for good.
+- **The first person's home is the map's `/home/user`** until the map drops
+  the person's directories (Phase 5); every other person's is
+  `/home/<name>`, 0700.
+- **Proving oneself is the current password, or a click for a person
+  without one.** Changing one's own password needs the current one through
+  either action; setting a first one needs the click privd's consent gives.
+  Until privd counts failures (Phase 2), a wrong password costs two seconds
+  and the accounts' mechanisms run one at a time.
+- **A mechanism trusts `PRIV_UID` only beside `PRIV_ACTION`**, both set by
+  privd; run directly, it acts for its real uid. Until Phase 2's principals
+  the accounts' mechanism holds its requester to administering the machine
+  itself, and the two actions read `session consent`, which Phase 2
+  translates to `admin confirm` and `user` with the current password.
+- **`/sbin/authcheck` answers by its status alone**: 0 the password, 1
+  anything else, 2 cannot tell. It believes `/etc/shadow` only sealed.
+- **A mechanism that reads secrets runs on a terminal of its own**
+  (`Input::Terminal`) with echo off, claiming it as its controlling terminal
+  so an interrupt reaches it; the installer does too.
 
 ## Constraints
 
