@@ -367,10 +367,11 @@ struct Stdio {
     from_out: [Option<OwnedFd>; 2],
     /// The master of the mechanism's own terminal, under [`Input::Terminal`].
     terminal: Option<OwnedFd>,
-    /// Where `from_out` reads that terminal: relayed only once the mechanism
-    /// has started and this terminal is raw, so a reply typed at a prompt is
-    /// never echoed by it.
-    terminal_out: Option<RawFd>,
+    /// What that terminal shows, relayed to `shown_at` only once the
+    /// mechanism has started and this terminal is raw, so a reply typed at a
+    /// prompt is never echoed by it.
+    terminal_out: Option<OwnedFd>,
+    shown_at: RawFd,
     raw: Option<RawTerminal>,
 }
 
@@ -482,6 +483,7 @@ impl Stdio {
             from_out: [None, None],
             terminal: None,
             terminal_out: None,
+            shown_at: 2,
             raw: None,
         };
         let pair = match input == Input::Terminal && fs::isatty(0) {
@@ -524,9 +526,8 @@ impl Stdio {
                 held: Vec::new(),
                 ended: false,
             });
-            let out = dup(&master)?;
-            stdio.terminal_out = Some(out.raw());
-            stdio.from_out[shown_at as usize - 1] = Some(out);
+            stdio.terminal_out = Some(dup(&master)?);
+            stdio.shown_at = shown_at;
             stdio.terminal = Some(master);
         }
         Ok(stdio)
@@ -641,7 +642,8 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
                 None => break,
             }
         }
-        let outputs_open = stdio.from_out.iter().any(Option::is_some);
+        let outputs_open =
+            stdio.from_out.iter().any(Option::is_some) || stdio.terminal_out.is_some();
         if let Some(exit) = exited
             && (!outputs_open || drain_until.is_some_and(|until| Instant::now() >= until))
         {
@@ -656,9 +658,10 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
             polled.push(poll(connection.raw(), POLLIN));
         }
         for out in stdio.from_out.iter().flatten() {
-            if started || Some(out.raw()) != stdio.terminal_out {
-                polled.push(poll(out.raw(), POLLIN));
-            }
+            polled.push(poll(out.raw(), POLLIN));
+        }
+        if let Some(out) = stdio.terminal_out.as_ref().filter(|_| started) {
+            polled.push(poll(out.raw(), POLLIN));
         }
         if let Some(forward) = &stdio.to_stdin {
             if forward.wants_input() && (started || stdio.terminal.is_none()) {
@@ -689,8 +692,18 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
                 if !forward.write() || (forward.ended && forward.held.is_empty()) {
                     stdio.to_stdin = None;
                 }
-            } else {
-                relay_output(&mut stdio.from_out, entry.fd);
+            } else if stdio
+                .terminal_out
+                .as_ref()
+                .is_some_and(|out| out.raw() == entry.fd)
+            {
+                relay(&mut stdio.terminal_out, stdio.shown_at);
+            } else if let Some(index) = stdio
+                .from_out
+                .iter()
+                .position(|out| out.as_ref().is_some_and(|out| out.raw() == entry.fd))
+            {
+                relay(&mut stdio.from_out[index], index as RawFd + 1);
             }
         }
     }
@@ -704,20 +717,17 @@ fn poll(fd: RawFd, events: u16) -> UserPollFd {
     }
 }
 
-fn relay_output(from: &mut [Option<OwnedFd>; 2], fd: RawFd) {
-    let Some(index) = from
-        .iter()
-        .position(|o| o.as_ref().is_some_and(|f| f.raw() == fd))
-    else {
+fn relay(from: &mut Option<OwnedFd>, to: RawFd) {
+    let Some(fd) = from.as_ref().map(OwnedFd::raw) else {
         return;
     };
     let mut buf = [0u8; 4096];
     match fs::read_slice(fd, &mut buf) {
         Ok(n) if n > 0 => {
-            let _ = write_all(index as RawFd + 1, &buf[..n]);
+            let _ = write_all(to, &buf[..n]);
         }
         Err(SyscallError::EAGAIN | SyscallError::EINTR) => {}
-        _ => from[index] = None,
+        _ => *from = None,
     }
 }
 
