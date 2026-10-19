@@ -22,8 +22,8 @@ pub const COST: Params = Params {
 pub const SALT_LEN: usize = 16;
 const TAG_LEN: usize = 32;
 
-/// The most a hash read back may cost to check, so a record never asks a
-/// checker for more than four times what writing one costs.
+/// The most a hash read back may cost to check: four times a new one's
+/// memory, and passes and lanes a stronger cost could take.
 const MEMORY_MAX_KIB: u32 = 1 << 18;
 const PASSES_MAX: u32 = 16;
 const LANES_MAX: u32 = 16;

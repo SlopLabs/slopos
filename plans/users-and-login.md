@@ -320,14 +320,17 @@ own.
 it and Argon2id hashes (`tls-core` gained BLAKE2b and Argon2id, held to RFC
 7693's and RFC 9106's vectors). The record lives sealed in
 `/var/lib/slopos/accounts`; `/etc` and `/var/lib/slopos` are kept against
-mounts; `admin` is gid 10; people are uids 1000 to 59999. `/bin/users` lists
+mounts and unmounts; `admin` is gid 10; people are uids 1000 to 59999. `/bin/users` lists
 people and, through `org.slopos.accounts.manage` and
 `org.slopos.accounts.password`, adds, removes, renames, sets passwords,
 promotes, demotes and sets automatic login; `/sbin/authcheck` checks a
 password. slibc gained `getgrouplist`. init's `users sync` gives an existing
 root the one person's record at its first boot; the installer asks for the
 first person and a password. `accounts_test` grades it, `libc_abi_test` the
-groups, and `installer_test` the installed root's person.
+groups, and `installer_test` the installed root's person. Since the desktop's
+person stays an administrator, only the host tests reach the last-administrator
+rule, and since nothing starts a person's session yet, `accounts_test` calls
+`initgroups` itself.
 
 ### Phase 2: Principals and approval
 
@@ -449,7 +452,9 @@ groups, and `installer_test` the installed root's person.
   privd; run directly, it acts for its real uid. Until Phase 2's principals
   the accounts' mechanism holds its requester to administering the machine
   itself, and the two actions read `session consent`, which Phase 2
-  translates to `admin confirm` and `user` with the current password.
+  translates to `admin confirm` and `user` with the current password. They
+  name no `paired` line: remoted runs as uid 1000 too, and `PRIV_UID` cannot
+  tell it from the person.
 - **`/sbin/authcheck` answers by its status alone**: 0 the password, 1
   anything else, 2 cannot tell. It believes `/etc/shadow` only sealed, so a
   change whose database was not written leaves the old hashes answering
