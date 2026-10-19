@@ -195,11 +195,13 @@ pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> 
     generations.sort_unstable_by(|a, b| b.cmp(a));
     for g in generations {
         let path = dir.join(format!("{stem}.{g}"));
-        match open_entry(&path) {
-            Ok(file) if !is_sealed(&file) => continue,
-            Ok(_) => {}
+        let flags = match open_entry(&path) {
+            Ok(file) => sys_fs::inode_flags(file.as_raw_fd()).map_err(|e| shown(&path, e))?,
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
             Err(e) => return Err(shown(&path, e)),
+        };
+        if flags & FS_IMMUTABLE_FL == 0 {
+            continue;
         }
         if let Some(bytes) = read_sealed(&path, SMALL_MAX)? {
             return Ok(Some((g, bytes)));

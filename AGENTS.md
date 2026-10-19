@@ -1947,8 +1947,11 @@ holding `Seal`, which writes the database and gives a disk root without a
 record the one person's; a RAM root keeps every seal for good, so it keeps
 slibc's own rows, which are the one person's rendering
 (`slopos_slibc_core::passwd::BASE_PASSWD`). The kernel keeps `/etc` and
-`/var/lib/slopos` (`KEPT_DIRS`), so no mount covers the database or the
-record, and the seal keeps a `DacOverride` holder from rewriting either. The
+`/var/lib/slopos` (`KEPT_DIRS`, which base interface 7 counts, since a
+base's stores rest on it), so no mount covers the database or the record, and
+the seal keeps a `DacOverride` holder from rewriting either. A change the
+record took whose database was not written says so, and the old database —
+a removed person's hash among it — stands until the next boot writes it. The
 installer asks for the first person's name, `user` unless one is given
 (`--person`), and a password unless `--no-password`; a kept root keeps its
 people. The session's `USER` is the first person's name, and their home the

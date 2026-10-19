@@ -2,7 +2,8 @@
 # scripts/build_userland.sh so the host and the guest build one system. POSIX
 # sh.
 
-# The shipped programs: `/bin/<name>`, and `init` and `privd` at `/sbin/<name>`.
+# The shipped programs: `/bin/<name>`, and `init`, `privd` and `authcheck` at
+# `/sbin/<name>`.
 BASE_PROGRAMS="init privd shell coreutils terminal compositor roulette halt bootctl installer sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted kconsole prof tree-install session extctl users authcheck"
 
 # The apps outside the base, the tree `apps` every root holds at /usr/local.

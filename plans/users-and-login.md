@@ -451,7 +451,11 @@ groups, and `installer_test` the installed root's person.
   itself, and the two actions read `session consent`, which Phase 2
   translates to `admin confirm` and `user` with the current password.
 - **`/sbin/authcheck` answers by its status alone**: 0 the password, 1
-  anything else, 2 cannot tell. It believes `/etc/shadow` only sealed.
+  anything else, 2 cannot tell. It believes `/etc/shadow` only sealed, so a
+  change whose database was not written leaves the old hashes answering
+  until the next boot writes it.
+- **The kept directories are part of the base interface** (7), since a
+  base's stores rest on them.
 - **A mechanism that reads secrets runs on a terminal of its own**
   (`Input::Terminal`) with echo off, claiming it as its controlling terminal
   so an interrupt reaches it; the installer does too.

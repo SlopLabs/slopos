@@ -433,6 +433,40 @@ pub fn ignore_signal(signum: u8) -> i32 {
     }
 }
 
+/// [`ignore_signal`], answering the action it replaced, which
+/// [`restore_signal`] puts back.
+pub fn ignore_signal_saving(signum: u8) -> UserSigaction {
+    let ignore = UserSigaction {
+        sa_handler: SIG_IGN,
+        sa_flags: 0,
+        sa_restorer: 0,
+        sa_mask: 0,
+    };
+    let mut old = ignore;
+    unsafe {
+        syscall4(
+            SYSCALL_RT_SIGACTION,
+            signum as u64,
+            (&ignore as *const UserSigaction) as u64,
+            (&mut old as *mut UserSigaction) as u64,
+            core::mem::size_of::<SigSet>() as u64,
+        );
+    }
+    old
+}
+
+pub fn restore_signal(signum: u8, action: &UserSigaction) {
+    unsafe {
+        syscall4(
+            SYSCALL_RT_SIGACTION,
+            signum as u64,
+            (action as *const UserSigaction) as u64,
+            0,
+            core::mem::size_of::<SigSet>() as u64,
+        );
+    }
+}
+
 /// Forked children call this before running a command so terminal-generated
 /// signals act on the job rather than on the shell's interactive handlers.
 #[inline(always)]

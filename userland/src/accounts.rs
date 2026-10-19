@@ -12,7 +12,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, O_NOFOLLOW, RAMFS_MAGIC};
-use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, UserSigaction};
 use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC};
 use slopos_accounts_core::{Accounts, Entry};
 
@@ -26,11 +26,22 @@ const PASSWD: &str = "etc/passwd";
 const GROUP: &str = "etc/group";
 const SHADOW: &str = "etc/shadow";
 
-/// The accounts store of a root.
+/// The accounts store of a root. A writer holds its lock and ignores the
+/// termination signals a requester relays until it is dropped, so none cuts
+/// a change short.
 pub struct Store {
     top: PathBuf,
     dir: PathBuf,
     _lock: Option<File>,
+    held_off: Vec<(u8, UserSigaction)>,
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        for (signum, action) in &self.held_off {
+            process::restore_signal(*signum, action);
+        }
+    }
 }
 
 fn under(top: &Path, path: &str) -> PathBuf {
@@ -57,6 +68,7 @@ impl Store {
             top: top.to_path_buf(),
             dir: under(top, ACCOUNTS_STORE),
             _lock: None,
+            held_off: Vec::new(),
         }
     }
 
@@ -64,7 +76,7 @@ impl Store {
     /// out, and its directory made uid 0's alone and sealed. A root in memory
     /// keeps a seal for good, so it keeps the one person's record.
     pub fn write(top: &Path) -> Result<Store, String> {
-        let store = Store::read(top);
+        let mut store = Store::read(top);
         let parent = store.dir.parent().ok_or("the store has no parent")?;
         let mut walked = PathBuf::from("/");
         for part in parent.iter().skip(1) {
@@ -86,6 +98,10 @@ impl Store {
             .open(&at)
             .map_err(|e| shown(&at, e))?;
         sys_fs::flock(lock.as_raw_fd(), LOCK_EX).map_err(|e| shown(&at, e))?;
+        store._lock = Some(lock);
+        store.held_off = [SIGHUP, SIGINT, SIGQUIT, SIGTERM]
+            .map(|signum| (signum, process::ignore_signal_saving(signum)))
+            .to_vec();
         match fs::create_dir(&store.dir) {
             Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
                 return Err(shown(&store.dir, e));
@@ -103,10 +119,7 @@ impl Store {
                 .map_err(|e| shown(&store.dir, e))?;
         }
         set_sealed(&dir, true).map_err(|e| shown(&store.dir, format!("sealing: {e}")))?;
-        Ok(Store {
-            _lock: Some(lock),
-            ..store
-        })
+        Ok(store)
     }
 
     /// The record written last, `None` on a root none was written on.
@@ -132,23 +145,32 @@ impl Store {
     }
 
     /// Make `accounts` the record, which [`sync`](Self::sync) then writes
-    /// the database from.
+    /// the database from. Once the new generation is believed, what fails in
+    /// taking older ones away or sealing the store again fails nothing.
     pub fn record(&self, accounts: &Accounts) -> Result<(), String> {
         debug_assert!(self._lock.is_some(), "a writer's store");
-        writing();
         let text = accounts.render();
         if text.len() as u64 > SMALL_MAX {
             return Err("the record would be too large".into());
         }
-        unsealed(&self.dir, || {
+        let written = unsealed(&self.dir, || {
             crate::sealed::put_generation(&self.dir, RECORD, text.as_bytes(), 0o600)
-        })
+        });
+        match written {
+            Err(_)
+                if newest(&self.dir, RECORD)
+                    .is_ok_and(|b| b.is_some_and(|(_, b)| b == text.as_bytes())) =>
+            {
+                Ok(())
+            }
+            written => written,
+        }
     }
 
     /// Write the user database the record and the extensions' records
     /// describe.
     pub fn sync(&self) -> Result<(), String> {
-        writing();
+        debug_assert!(self._lock.is_some(), "a writer's store");
         let accounts = self.accounts()?;
         let others = extension_entries(&self.top)?;
         let files = [
@@ -171,8 +193,15 @@ impl Store {
     }
 }
 
-/// What the user database calls `uid`.
-pub fn name_of(uid: u32) -> Option<String> {
+/// The entry of the user database `find` fills in, as its uid and name.
+fn entry(
+    find: impl FnOnce(
+        *mut slopos_slibc::types::passwd,
+        *mut core::ffi::c_char,
+        usize,
+        *mut *mut slopos_slibc::types::passwd,
+    ) -> core::ffi::c_int,
+) -> Option<(u32, String)> {
     let null = core::ptr::null_mut();
     let mut row = slopos_slibc::types::passwd {
         pw_name: null,
@@ -185,27 +214,33 @@ pub fn name_of(uid: u32) -> Option<String> {
     };
     let mut buf = [0u8; slopos_slibc::pwd::PASSWD_BUF_MIN];
     let mut found = core::ptr::null_mut();
-    // SAFETY: `row`, `buf` and `found` outlive the call, and `buf` holds as
-    // many bytes as it is said to; a row found points into `buf`.
-    let name = unsafe {
-        let rc = slopos_slibc::pwd::getpwuid_r(
-            uid,
-            &mut row,
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            &mut found,
-        );
-        (rc == 0 && !found.is_null()).then(|| core::ffi::CStr::from_ptr(row.pw_name))?
-    };
-    name.to_str().ok().map(str::to_owned)
+    let rc = find(&mut row, buf.as_mut_ptr().cast(), buf.len(), &mut found);
+    if rc != 0 || found.is_null() {
+        return None;
+    }
+    // SAFETY: a row found has its name NUL-terminated in `buf`, alive here.
+    let name = unsafe { core::ffi::CStr::from_ptr(row.pw_name) };
+    Some((row.pw_uid, name.to_str().ok()?.to_owned()))
 }
 
-/// From here on the termination signals a requester relays are ignored, so
-/// none cuts a write short.
-fn writing() {
-    for signum in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
-        let _ = process::ignore_signal(signum);
-    }
+/// Whose uid the user database gives `name`.
+pub fn uid_of(name: &str) -> Option<u32> {
+    let name = std::ffi::CString::new(name).ok()?;
+    // SAFETY: `name` is a C string, and `entry` hands a row, a buffer as long
+    // as it says and a result slot, all outliving the call.
+    entry(|row, buf, len, found| unsafe {
+        slopos_slibc::pwd::getpwnam_r(name.as_ptr(), row, buf, len, found)
+    })
+    .map(|(uid, _)| uid)
+}
+
+/// What the user database calls `uid`.
+pub fn name_of(uid: u32) -> Option<String> {
+    // SAFETY: as `uid_of`'s.
+    entry(|row, buf, len, found| unsafe {
+        slopos_slibc::pwd::getpwuid_r(uid, row, buf, len, found)
+    })
+    .map(|(_, name)| name)
 }
 
 /// The installed extensions' users, none on a root without the store.
