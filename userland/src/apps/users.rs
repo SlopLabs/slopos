@@ -339,6 +339,7 @@ fn change(request: Request) -> Result<String, String> {
         return Err(why);
     }
     let synced = store.sync();
+    drop(store);
     if let Home::Removed(person) = home {
         let gone = remove_home(&person).unwrap_or_else(|why| format!("; its home stays: {why}"));
         said.push_str(&gone);

@@ -443,8 +443,14 @@ impl Request {
             Request::Build { dir, out } => build(&dir, &out),
             Request::Install { image, vouched } => {
                 let store = Store::open(true)?;
-                let _people = crate::accounts::Store::write(Path::new("/"))?;
                 let prepared = prepare(&store, &image, &vouched)?;
+                let _people = crate::accounts::Store::write(Path::new("/"))?;
+                if let Prepared::Install {
+                    name, installed, ..
+                } = &prepared
+                {
+                    no_person_named(&image, name, installed)?;
+                }
                 install(&store, prepared)
             }
             Request::KeyAdd(key) => key_add(key),
@@ -577,6 +583,21 @@ enum Prepared {
     },
 }
 
+/// Refuse an install whose extension or users take a person's name; asked
+/// again holding the accounts lock, since a person may be added meanwhile.
+fn no_person_named(path: &str, name: &str, installed: &Installed) -> Result<(), String> {
+    let mut users = installed
+        .grant
+        .users
+        .iter()
+        .map(String::as_str)
+        .chain([name]);
+    match users.find(|user| crate::accounts::names_a_person(user)) {
+        Some(user) => Err(format!("{path}: {user} is a person's name")),
+        None => Ok(()),
+    }
+}
+
 fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, String> {
     let voucher = Voucher::read(vouched)?;
     let keys = store.keys()?;
@@ -618,10 +639,7 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
     )
     .map_err(refused)?;
     if let Admitted::Install(installed) = &admitted {
-        let mut users = installed.grant.users.iter().chain([&name]);
-        if let Some(user) = users.find(|user| crate::accounts::names_a_person(user)) {
-            return Err(format!("{path}: {user} is a person's name"));
-        }
+        no_person_named(path, &name, installed)?;
     }
     Ok(match admitted {
         Admitted::Current => Prepared::Current { name, before },
