@@ -32,37 +32,41 @@ impl Drop for Secret {
     }
 }
 
-/// The terminal's settings, echo off until dropped.
-struct Unechoed(slopos_abi::syscall::UserTermios);
+/// Standard input's terminal with its echo off, as it was again once dropped.
+pub struct Quiet(slopos_abi::syscall::UserTermios);
 
-impl Unechoed {
-    fn enter() -> Option<Unechoed> {
-        let saved = fs::tcgetattr(0).ok()?;
-        let mut quiet = saved;
-        quiet.c_lflag.remove(LocalFlags::ECHO);
-        fs::tcsetattr(0, &quiet).ok()?;
-        Some(Unechoed(saved))
+/// Turn standard input's echo off while the result lives: `None` when it is
+/// no terminal, refused when it is one that would show what is typed.
+pub fn quiet() -> Result<Option<Quiet>, String> {
+    if !fs::isatty(0) {
+        return Ok(None);
     }
+    const SHOWN: &str = "the terminal would show what is typed";
+    let saved = fs::tcgetattr(0).map_err(|_| SHOWN)?;
+    let mut quiet = saved;
+    quiet.c_lflag.remove(LocalFlags::ECHO);
+    fs::tcsetattr(0, &quiet).map_err(|_| SHOWN)?;
+    Ok(Some(Quiet(saved)))
 }
 
-impl Drop for Unechoed {
+impl Drop for Quiet {
     fn drop(&mut self) {
         let _ = fs::tcsetattr(0, &self.0);
-        eprintln!();
     }
 }
 
 /// A line typed after `prompt`, which goes to standard error; `None` at the
 /// end of input.
 pub fn read(prompt: &str) -> Result<Option<Secret>, String> {
+    let quiet = quiet()?;
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
-    let _quiet = match fs::isatty(0) {
-        true => Some(Unechoed::enter().ok_or("the terminal would show what is typed")?),
-        false => None,
-    };
     let mut line = Secret(String::new());
-    match std::io::stdin().lock().read_line(&mut line.0) {
+    let read = std::io::stdin().lock().read_line(&mut line.0);
+    if quiet.is_some() {
+        eprintln!();
+    }
+    match read {
         Ok(0) => Ok(None),
         Ok(_) => {
             if line.0.ends_with('\n') {
@@ -76,6 +80,7 @@ pub fn read(prompt: &str) -> Result<Option<Secret>, String> {
 
 /// A new password, typed twice to the same; `None` at the end of input.
 pub fn read_new(whose: &str) -> Result<Option<Secret>, String> {
+    let _quiet = quiet()?;
     let Some(first) = read(&format!("New password for {whose}: "))? else {
         return Ok(None);
     };

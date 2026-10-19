@@ -299,6 +299,7 @@ fn typed(accounts: &Accounts, uid: u32, request: &Request) -> Result<Typed, Stri
                     let person = accounts
                         .person(name)
                         .ok_or_else(|| format!("{name}: no such person"))?;
+                    let _quiet = secret::quiet()?;
                     if person.uid == uid {
                         prove(person)?;
                     }
@@ -311,6 +312,7 @@ fn typed(accounts: &Accounts, uid: u32, request: &Request) -> Result<Typed, Stri
             let person = accounts
                 .by_uid(uid)
                 .ok_or_else(|| format!("uid {uid} has no account; name one"))?;
+            let _quiet = secret::quiet()?;
             prove(person)?;
             typed.password = Some(new_password(&person.name)?);
         }
