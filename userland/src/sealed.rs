@@ -184,9 +184,10 @@ pub fn remove_entry(path: &Path) -> Result<(), String> {
     }
 }
 
-/// The believed generation of `stem` in `dir`, the newest sealed one, and
-/// its bytes. One not sealed is a write cut short and passed over; a sealed
-/// one that cannot be read is an error, never the cue to believe an older.
+/// The believed generation of `stem` in `dir`, the newest sealed regular
+/// file, and its bytes. Anything else under a generation's name, a write cut
+/// short among it, is passed over; a sealed one that cannot be read is an
+/// error, never the cue to believe an older.
 pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> {
     let mut generations: Vec<u64> = fs::read_dir(dir)
         .map_err(|e| shown(dir, e))?
@@ -195,17 +196,30 @@ pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> 
     generations.sort_unstable_by(|a, b| b.cmp(a));
     for g in generations {
         let path = dir.join(format!("{stem}.{g}"));
-        let flags = match open_entry(&path) {
-            Ok(file) => sys_fs::inode_flags(file.as_raw_fd()).map_err(|e| shown(&path, e))?,
-            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+        let file = match open_entry(&path) {
+            Ok(file) => file,
+            Err(e)
+                if e.kind() == ErrorKind::NotFound
+                    || e.raw_os_error() == Some(slopos_abi::Errno::ELOOP.raw()) =>
+            {
+                continue;
+            }
             Err(e) => return Err(shown(&path, e)),
         };
+        let meta = file.metadata().map_err(|e| shown(&path, e))?;
+        if !meta.is_file() {
+            continue;
+        }
+        let flags = sys_fs::inode_flags(file.as_raw_fd()).map_err(|e| shown(&path, e))?;
         if flags & FS_IMMUTABLE_FL == 0 {
             continue;
         }
-        if let Some(bytes) = read_sealed(&path, SMALL_MAX)? {
-            return Ok(Some((g, bytes)));
+        if meta.len() > SMALL_MAX {
+            return Err(shown(&path, format!("larger than {SMALL_MAX} bytes")));
         }
+        return read_all(&file, SMALL_MAX)
+            .map(|bytes| Some((g, bytes)))
+            .map_err(|e| shown(&path, e));
     }
     Ok(None)
 }
