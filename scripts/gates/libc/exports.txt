@@ -284,6 +284,7 @@ getgrgid func
 getgrgid_r func
 getgrnam func
 getgrnam_r func
+getgrouplist func
 getgroups func
 gethostbyname func
 gethostname func
