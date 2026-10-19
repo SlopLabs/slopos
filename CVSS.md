@@ -2,6 +2,37 @@
 
 **No finding is open.**
 
+Swept 2026-10-19: the accounts — `tls-core`'s BLAKE2b and Argon2id;
+`slopos-accounts-core`'s record, PHC hashes and the database it renders;
+slibc's compiled-in rows, `getgrouplist` and `initgroups`; `/etc` and
+`/var/lib/slopos` kept against moves, mounts and unmounts; `userland::sealed`,
+`userland::accounts` and `userland::secret`; `/bin/users`, `/sbin/authcheck`,
+the two accounts actions and `PRIV_UID`; privd's terminal relay; init's boot
+sync and ownership migration; `extctl`'s person names and lock order; and the
+installer's first person. Seven review passes; nothing reached the bar.
+They found, before it landed, that a sealed record that could not be read made a root fall back to
+the passwordless one-person record and overwrite its people; that a
+`DacOverride` holder's chown between a generation's create and its seal hid
+the record the same way; that a `mount=` volume at `/var` could be detached
+to the same end; that a symlink, FIFO, socket, unreadable file or directory
+left at a writer's names stalled every accounts writer for good and kept
+`/etc/shadow`'s old hashes answering, as did an extension record `extctl`
+could not read; that a password was echoed when the requester's output was
+piped, and a reply typed ahead of a prompt when echo came back between
+prompts; that an extension could take a person's name, from a database
+behind its record; that the ownership migration would hand other people's
+homes to the session; that the desktop's person could be demoted, leaving
+nobody privd would ask; that a person at a prompt held the accounts lock, as
+`extctl` did across a whole image; that `getgrouplist` under-counted past 256
+groups; and that a password past 4 KiB was stored but never checkable. Now a
+store reader errs on a sealed generation it cannot read or that is not as
+its writer left it, and a writer holds what it sealed to its bytes, name,
+owner and mode; `umount(2)` refuses what `mount(2)` refuses at a kept
+directory; a writer unlinks or moves aside what it finds at its names and
+writes `/etc/shadow` first from the record alone; a mechanism reading
+secrets gets a terminal of its own whenever standard input is one, echo off
+from before the first prompt; and the locks are held only while writing.
+
 Swept 2026-10-19: on-disk extension images — `slopos-verity-core`'s SHA-256,
 tree, verified read and `verify_all`; `extension-core`'s volume writer and
 strict reader, the image and symbol checks and the packer;
