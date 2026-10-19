@@ -62,8 +62,8 @@ fn own(path: &Path, dir: &RootDir) -> std::io::Result<()> {
 }
 
 /// A root that ran everything as uid 0 holds the session's work as uid 0's.
-/// Hand the session everything below its trees, set each directory of the map
-/// as it says, and record that it was done.
+/// Hand the session what uid 0 holds below its trees, set each directory of
+/// the map as it says, and record that it was done.
 fn migrate(root: &Path, record: &Path) {
     let mut refused = 0usize;
     for tree in SESSION_TREES {
@@ -104,9 +104,11 @@ fn migrate(root: &Path, record: &Path) {
     }
 }
 
-/// Every entry below `top`, itself left alone, links never followed. A file
-/// with more than one name keeps its owner: its other name may be the
-/// system's. A read-only volume mounted there is not this root's to change.
+/// Every entry uid 0 holds below `top`, itself left alone, links never
+/// followed, and nothing in a directory another uid holds: another person's
+/// home is theirs. A file with more than one name keeps its owner: its other
+/// name may be the system's. A read-only volume mounted there is not this
+/// root's to change.
 fn hand_over_below(top: &Path) -> usize {
     let mut refused = 0usize;
     let mut dirs: Vec<PathBuf> = vec![top.to_path_buf()];
@@ -124,10 +126,14 @@ fn hand_over_below(top: &Path) -> usize {
                 refused += 1;
                 continue;
             };
-            if !meta.is_dir() && meta.nlink() > 1 {
+            if ![0, SESSION_UID].contains(&meta.uid()) || !meta.is_dir() && meta.nlink() > 1 {
                 continue;
             }
-            match lchown(&path, Some(SESSION_UID), Some(SESSION_GID)) {
+            let handed = match meta.uid() {
+                0 => lchown(&path, Some(SESSION_UID), Some(SESSION_GID)),
+                _ => Ok(()),
+            };
+            match handed {
                 Ok(()) if meta.is_dir() => dirs.push(path),
                 Ok(()) => {}
                 Err(e) if e.kind() == ErrorKind::ReadOnlyFilesystem => {}
