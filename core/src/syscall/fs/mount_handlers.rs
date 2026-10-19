@@ -169,6 +169,9 @@ pub(crate) fn umount_path_at(
     if target == b"/" {
         return Err(Errno::EBUSY);
     }
+    if covers_kept_dir(target) {
+        return Err(Errno::EPERM);
+    }
     let mounted = mount_at(target).ok_or(Errno::EINVAL)?;
     if mounted.pinned() {
         return Err(Errno::EPERM);
