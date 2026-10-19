@@ -243,6 +243,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin dac_test \
         --bin peer_test \
         --bin privd_test \
+        --bin accounts_test \
         --bin extension_test \
         --bin extension_action_test \
         --bin supervision_test \
@@ -431,6 +432,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/privd_test" ]; then
         cp "$RELEASE_DIR/privd_test" "$BUILD_DIR/privd_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/accounts_test" ]; then
+        cp "$RELEASE_DIR/accounts_test" "$BUILD_DIR/accounts_test.elf"
     fi
     if [ -f "$RELEASE_DIR/extension_test" ]; then
         cp "$RELEASE_DIR/extension_test" "$BUILD_DIR/extension_test.elf"
