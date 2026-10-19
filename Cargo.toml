@@ -49,6 +49,7 @@ members = [
   "boot-core",
   "tree-core",
   "extension-core",
+  "verity-core",
   "shell-core",
   "editor-core",
   "video",
@@ -136,6 +137,7 @@ slopos-hid-core = { path = "hid-core" }
 slopos-cpufreq-core = { path = "cpufreq-core" }
 slopos-ext4-core = { path = "ext4-core" }
 slopos-tls-core = { path = "tls-core" }
+slopos-verity-core = { path = "verity-core" }
 slopos-http-core = { path = "http-core" }
 slopos-remote-core = { path = "remote-core" }
 slopos-priv-core = { path = "priv-core" }

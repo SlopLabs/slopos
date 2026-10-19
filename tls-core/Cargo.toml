@@ -18,3 +18,6 @@ doctest = false
 # Ed25519 signing without constant-time scalar multiplication, so nothing
 # shipped may enable it.
 test-server = []
+
+[dependencies]
+slopos-verity-core = { workspace = true }

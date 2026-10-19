@@ -553,6 +553,9 @@ dependencies = [
 [[package]]
 name = "slopos-tls-core"
 version = "0.1.0"
+dependencies = [
+ "slopos-verity-core",
+]
 
 [[package]]
 name = "slopos-tree-core"
@@ -598,6 +601,10 @@ dependencies = [
 
 [[package]]
 name = "slopos-verification"
+version = "0.1.0"
+
+[[package]]
+name = "slopos-verity-core"
 version = "0.1.0"
 
 [[package]]
