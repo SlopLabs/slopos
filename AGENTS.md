@@ -571,53 +571,80 @@ carrying the base directories only as sealed mount points; the tests and
 verified images carry a system of their own, which a disk root's base
 covers.
 
-**An extension is shown beside the base.** `ext_activate(name, archive, len,
-digest)` (`ExtensionUpdate`, which init, privd, the utests and the
-mechanisms of privd's extension actions hold) copies a
-`newc` archive as `base_activate` does and shows it read-only and
+**An extension is shown beside the base.** `ext_activate(name, fd, digest)`
+(`ExtensionUpdate`, which init, privd, the utests and the mechanisms of
+privd's extension actions hold) serves the image in the file `fd` reads — an
+ext4 volume followed by a SHA-256 tree in dm-verity's layout
+(`slopos-verity-core`), `digest` the tree's root — read-only and
 `MOUNT_PINNED` at `/opt/<name>`, in place of the activation shown there in one
 step under the mount table's lock (`vfs::mount::mount_replacing`), keeping the
-mount's id; `ext_deactivate(name)` takes it away (`basefs::extension`). A name
+mount's id; `ext_deactivate(name)` takes it away (`fs/src/extension/`).
+Nothing is copied: a read-only block device over the file
+(`extension::device`), which holds it open, checks every block it reads
+against the tree, keeping the sixteen hash blocks it checked last, so a block
+the tree refuses fails the read that meets it with `EIO`. The volume must say
+it holds exactly the tree's data blocks, carry ext4's `read-only` feature and
+need no recovery; it is mounted through an `Ext2Mount` of its own that keeps
+no name cache, looks for no CRC trailer and caches from 64 frames up to the
+volume's size (`READ_ENTRIES_MIN`), and walked once at activation into the path index
+`SO_PEERPROGRAM` answers from (`extension::index`), which refuses an inode at
+two names, a name no path holds or held twice in a directory, a `.` or `..`
+that lies, an entry whose type is not its inode's, anything but a directory,
+regular file or symlink, directories larger together than the volume and
+more than `MAX_ENTRIES` entries. Its locks nest as the layering does: an activation's,
+then its device's (`EXT_VERITY`), then the filesystem the file is on. A name
 is lowercase letters, digits and `-`, at most 32 bytes, none of
 `slopos_abi::extension::RESERVED`, and `extctl` installs none of
 `slopos_extension_core::TAKEN` either, the names whose `/var/log`, `/run` or
 `/etc` directory the system's own paths hold. Each activation is an instance
-of its own
-from a pool of `MAX_ACTIVATIONS` (32) `BaseFs`es, serving one generation whose
-number, issued across every activation and never within a boot again, is the
-high half of each inode it serves; it carries the name and the digest its
-caller vouched for, its label, which `SO_PEEREXTENSION` answers. The kernel
-checks no signature: the caller holds `ExtensionUpdate` and has checked the
-bytes, and the kernel serves the copy it made. One replaced or deactivated is
-freed by the `basefs-reap` thread as a retired base generation is. `/opt` is
-made where the root lacks it and held by identity, as `/usr` is for the base;
-a mount there that is no activation is neither replaced nor taken away
-(`EBUSY`, `ENOENT`). The copies resident together, those held after their
-replacement included, take at most an eighth of usable memory
-(`ext.memory=<percent>`, 1 to 50; `EFBIG` for one archive past it, `EBUSY`
-for the sum), and the mount table grew by the pool's 32 mounts. Under
+of its own from a pool of `MAX_ACTIVATIONS` (32), numbered across every
+activation and never within a boot again; the number is the high half of
+each inode it serves, and `statfs` names it `EXTENSION_MAGIC`. It carries the
+name and the root its caller vouched for, its label, which `SO_PEEREXTENSION`
+answers. The kernel checks no signature: the caller holds `ExtensionUpdate`
+and has checked the image, and the kernel serves only the bytes that root
+vouches for. One replaced or deactivated is freed by the `basefs-reap` thread
+once nothing holds it, as a retired base generation is. `/opt` is made where
+the root lacks it and held by identity, as `/usr` is for the base; a mount
+there that is no activation is neither replaced nor taken away (`EBUSY`,
+`ENOENT`), and the mount table grew by the pool's 32 mounts. Interface 5's
+`ext_activate`, which copied an archive from the caller's memory, is retired:
+its slot answers `ENOSYS` and is never given to another call. Under
 `extensions=off` (`BOOT_FLAG_EXTENSIONS_OFF` in `sys_info`) `ext_activate`
 answers `EPERM`. Its log lines are `EXT: activation <n> is <name>`, `EXT:
-<name> deactivated` and `EXT: activation <n> freed`.
+<name> deactivated`, `EXT: activation <n> freed` and `EXT: image block <n>
+fails its tree`.
 
 **An extension goes in by its owner's word.** `/bin/extctl` (privd's
 `org.slopos.extension.*` actions, run as uid 0 with `ExtensionUpdate` and
 `Seal`) installs an image `slopos_extension_core::image` holds to a base's
-shape: a `newc` archive sealed by its `/.extension/manifest`, its records'
-paths those they have below `/opt/<name>`, under `bin/`, `libexec/`, `lib/`
-and `share/` alone, naming itself in `/.extension/release` and what it asks
-for in `/.extension/declare` (`slopos_extension_core::declare`). What it is
+shape: a volume sealed by its `/.extension/manifest`, its paths those they
+have below `/opt/<name>`, under `bin/`, `libexec/`, `lib/` and `share/`
+alone, naming itself in `/.extension/release` and what it asks for in
+`/.extension/declare` (`slopos_extension_core::declare`). The volume is the
+ext4 `slopos_extension_core::volume` writes — `ext4-core`'s profile less
+the journal, plus `read-only`, every file an extent tree, inodes numbered
+breadth first in name order, its UUID from the manifest's digest — and its
+reader believes no other: a feature or inode flag that changes what a block
+means, an inode type, generation or hard link it does not write, a block the
+kernel would not serve, a checksum that fails or a block the tree refuses is
+no image, so what extctl reads is what the kernel's index serves. An image of the archive form extensions took before
+is refused, saying to install it again, and a floor such an image set binds
+its version and not its bytes while the store holds it, so the same version
+goes back in rebuilt. A signed install whose sidecar names the bytes its
+record runs, or one its record refuses whatever the image holds, is answered
+before the image is read. What it is
 granted is the capabilities its services and actions hold, the actions a
 person reaches unasked (`allow user`, `user alone`, `admin` or a `program`)
 and those the paired agent does (`paired`),
 its users and its commands, none of which another extension declares. A
-first install's command line names the image's SHA-256 and that grant, which
+first install's command line names the image's root and that grant, which
 `extctl install <image>` writes out in the requester and the person approving
 it reads, and the mechanism runs only that form, refusing an image that asks
 for other than the line; the requester first holds every request to the
 store as it reads it, so the person is asked only about what would go in.
 `install-signed`, which the session runs unasked, takes an image whose
-sidecar — name, version, SHA-256 — a key in the store's keys signed with
+sidecar — name, version, root — a key in the store's keys signed with
 `ssh-keygen -Y sign -n extension@slopos`, and holds the grant to that key's
 ceiling and the unasked actions to its `user` ceiling; it leaves an extension
 the person disabled disabled, and puts back one the person removed only as a
@@ -641,7 +668,12 @@ which holds what it signed to the keys anew) holds the stored image to its
 record, its key and both ceilings again, and stops one that no longer fits,
 saying why in its record; an update or rollback that will not activate
 leaves the record as it was. The store is `slopos_abi::fs::EXTENSION_STORE`:
-`keys.<n>`, and per extension `record.<n>` and its images named by digest.
+`keys.<n>`, and per extension `record.<n>` and its images named by root,
+each copied with its holes kept, sealed and then held whole to its root —
+a copy that is not the image is taken away — and one the store holds
+already held whole to its root again before it is reused; an
+`ExtensionUpdate` holder stores whole images, so no per-process `DiskBlocks`
+ceiling binds it.
 Only a sealed file is believed, and a writer seals each through the
 descriptor it wrote and reads it back, held to one name, so `DacOverride`
 without `Seal` neither rewrites a record nor plants a key. Nothing is
@@ -679,11 +711,11 @@ and answer the base's entries otherwise, so `DacOverride` without `Seal`
 changes no name, and init and privd take uids from records, never from a
 lookup. Init (`userland/src/apps/init/extensions.rs`) runs each service of
 every enabled, running extension, as the activation shown at `/opt/<name>`
-declares it and as long as that is a `basefs` mount, opened without following
-a link, whose release and grant are the record's: its program once the file
-opened there just before the start, which then names it by path, is of the
-generation its declaration was read from, as a basefs inode's high half names
-it, as its user (a session service as the person, while the desktop session
+declares it and as long as that is an activation's mount, opened without
+following a link, whose release and grant are the record's: its program once
+the file opened there just before the start, which then names it by path, is
+of the activation its declaration was read from, as its inode's high half
+names it, as its user (a session service as the person, while the desktop session
 runs), holding what it declares within the grant and the base's ceiling, with
 `/dev/null` for input, the readiness notifier on fd 3, the sockets it
 `listen`s on from fd 4 (`LISTEN_FDS`, `LISTEN_FDNAMES`), cwd and `HOME` its
@@ -839,8 +871,13 @@ in devfs, no symlink the kernel refuses, at most 2048 records, an interface,
 and the manifest — which `bootctl base install` and `bootdisk base` hold an
 image to as well, so a base the kernel would refuse to index, mount or
 unpack after freeing the other never reaches the boot partition. The minimum
-rises only when a change takes away or reshapes something an older base
-calls. A program outside the base reaches SlopOS through `libc.so` alone,
+rises only when a change reshapes something an older base calls: a call
+taken away keeps its slot and answers `ENOSYS`, as interface 5's
+`ext_activate` does, so an older base still boots, without what that call
+did — an interface-5 base on a newer kernel activates no extension, and its
+`extctl` stops each at boot, which `extctl enable` under a newer base brings
+back; rolled back to while the system runs, its init and privd read the
+newer activations as nothing shown and wait for them. A program outside the base reaches SlopOS through `libc.so` alone,
 which only grows: `scripts/check_libc_exports.sh` holds its dynamic symbols
 to `scripts/gates/libc/exports.txt` and the layout of every struct and union
 `slibc/include` defines to `scripts/gates/libc/layouts.txt`. The compositor
@@ -1734,7 +1771,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `usb-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `apps/`, `cabi/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `usb-core`, `verity-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `apps/`, `cabi/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 
@@ -2211,7 +2248,6 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `cpufreq.epp` | `performance` / `balance_performance` / `balance_power` / `power` / 0-255 | the energy-performance preference HWP is given; default `balance_performance` (128) |
 | `sched.hybrid` | `on` / `off` | `on` (default) places a task on the best idle CPU by class — a P-core with nothing on it, then an E-core, then a busy core's sibling thread — on a part whose CPUs differ; `off` treats every idle CPU alike |
 | `extensions` | `off` | activate no extension this boot: `ext_activate` answers `EPERM`, and `BOOT_FLAG_EXTENSIONS_OFF` tells userland |
-| `ext.memory` | integer | percent of usable memory every extension activation's copy may take together, 1 to 50; default an eighth |
 | `panic` | `reboot` | a kernel panic resets the machine (ACPI, then `0xCF9`, then the keyboard controller; the format-free abort triple-faults) instead of halting it: how a boot slot that panics falls back to the loader's default. The crash record is written first; on bare metal a panic's screen stays up for ten seconds before the reset, under a hypervisor not at all |
 | `panic.boot` | `on` / `abort` | panic as soon as boot initialisation completes, or take the format-free abort a lockup takes — the broken slots `just test-install` rolls back from |
 | `usb` | `on` / `off` / `report` | `on` (default) takes every xHCI controller it can drive from the firmware and runs it; `off` binds none, touching nothing; `report` logs each controller's capabilities, protocols and ports and leaves it to the firmware |
