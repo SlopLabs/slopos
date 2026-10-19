@@ -714,6 +714,56 @@ fn the_database_holds_against_mount() -> bool {
     held
 }
 
+/// A sealed generation of the record that is not uid 0's, as a `DacOverride`
+/// holder's chown before the seal would leave it, makes the record an error,
+/// never the cue to believe an older one or none.
+fn a_record_not_as_written_is_an_error() -> bool {
+    let store = Path::new(ACCOUNTS_STORE);
+    let newest = std::fs::read_dir(store).ok().and_then(|entries| {
+        entries
+            .filter_map(|e| {
+                e.ok()?
+                    .file_name()
+                    .to_str()?
+                    .strip_prefix("record.")?
+                    .parse::<u64>()
+                    .ok()
+            })
+            .max()
+    });
+    let Some(newest) = newest.filter(|&n| n > 0) else {
+        return fail("the store holds no record");
+    };
+    let last = store.join(format!("record.{newest}"));
+    let planted = store.join(format!("record.{}", newest + 1));
+    let Ok(bytes) = std::fs::read(&last) else {
+        return fail(format!("{} could not be read", last.display()));
+    };
+    let set_flags = |path: &Path, flags: u32| {
+        std::fs::File::open(path)
+            .map_err(|e| e.to_string())
+            .and_then(|f| fs::set_inode_flags(f.as_raw_fd(), flags).map_err(|e| format!("{e:?}")))
+    };
+    let made = set_flags(store, 0)
+        .and_then(|()| std::fs::write(&planted, &bytes).map_err(|e| e.to_string()))
+        .and_then(|()| {
+            std::os::unix::fs::lchown(&planted, Some(SESSION_UID), None).map_err(|e| e.to_string())
+        })
+        .and_then(|()| set_flags(&planted, FS_IMMUTABLE_FL));
+    let _ = set_flags(store, FS_IMMUTABLE_FL);
+    let read = Store::read(Path::new("/"))
+        .recorded()
+        .map(|r| r.map(|a| a.people().len()));
+    let _ = set_flags(store, 0);
+    let _ = set_flags(&planted, 0);
+    let _ = std::fs::remove_file(&planted);
+    let _ = set_flags(store, FS_IMMUTABLE_FL);
+    if let Err(why) = made {
+        return fail(format!("{} could not be planted: {why}", planted.display()));
+    }
+    read.is_err() || fail(format!("a record not uid 0's was read as {read:?}"))
+}
+
 fn a_renamed_or_removed_account_keeps_its_uid_given() -> bool {
     let Some(uid) = uid_of(NAME) else {
         return fail(format!("{NAME} is gone"));
@@ -798,6 +848,10 @@ fn main() {
         (
             "the_database_holds_against_mount",
             the_database_holds_against_mount,
+        ),
+        (
+            "a_record_not_as_written_is_an_error",
+            a_record_not_as_written_is_an_error,
         ),
         (
             "a_renamed_or_removed_account_keeps_its_uid_given",
