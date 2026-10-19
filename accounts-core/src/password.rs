@@ -13,7 +13,6 @@ use alloc::vec::Vec;
 use slopos_tls_core::argon2::{self, Params};
 use slopos_tls_core::ct;
 
-/// What a new hash costs: 64 MiB, 3 passes, 4 lanes.
 pub const COST: Params = Params {
     memory_kib: 1 << 16,
     passes: 3,

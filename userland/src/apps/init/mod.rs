@@ -54,7 +54,6 @@ fn upgrade_console_font() {
     );
 }
 
-/// Run the base's `program`, as `argv` names it, holding `caps`, and wait.
 fn run_holding(program: &[u8], argv: &[&core::ffi::CStr], caps: u64) {
     let argv: Vec<*const u8> = argv.iter().map(|arg| arg.as_ptr().cast()).collect();
     let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];

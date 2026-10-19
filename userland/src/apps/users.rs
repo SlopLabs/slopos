@@ -46,7 +46,6 @@ enum Request {
     Manage(Change),
 }
 
-/// What an administrator changes.
 enum Change {
     Add {
         name: String,
@@ -127,7 +126,6 @@ impl Request {
     }
 }
 
-/// Who asked: the requester privd names, or whoever runs this.
 fn requester() -> Result<u32, String> {
     if std::env::var_os(ENV_ACTION).is_none() {
         return Ok(crate::syscall::process::getuid());
@@ -138,7 +136,6 @@ fn requester() -> Result<u32, String> {
         .ok_or_else(|| format!("privd named no requester in {ENV_UID}"))
 }
 
-/// Root, or a person who administers the machine.
 fn administers(accounts: &Accounts, uid: u32) -> Result<(), String> {
     match accounts.by_uid(uid) {
         _ if uid == 0 => Ok(()),
@@ -171,7 +168,6 @@ pub fn check(name: &str, secret: &Secret) -> Result<bool, String> {
     }
 }
 
-/// A new password for `name`, typed twice.
 fn new_password(name: &str) -> Result<String, String> {
     match secret::read_new(name)? {
         Some(secret) => secret.hash(),

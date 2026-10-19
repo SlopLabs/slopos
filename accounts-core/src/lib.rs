@@ -65,7 +65,6 @@ struct Row<'a> {
     shell: &'a str,
 }
 
-/// Every row in order, each name and uid once.
 fn rows<'a>(accounts: &'a Accounts, others: &'a [Entry]) -> Vec<Row<'a>> {
     let root = Row {
         name: "root",

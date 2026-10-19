@@ -45,8 +45,8 @@ root slopos_abi::spawn::*
 root slopos_abi::task::TASK_FLAG_*
 root slopos_abi::task::SPAWN_*
 root slopos_abi::fs::USER_PATH_MAX
-# The directories the kernel keeps where they are, against moves and mounts,
-# which the base's sealed stores and user database rest on.
+# The directories the kernel keeps where they are, against moves, mounts and
+# unmounts, which the base's sealed stores and user database rest on.
 root slopos_abi::fs::KEPT_DIRS
 root slopos_abi::fs::EXTENSION_STORE
 root slopos_abi::fs::ACCOUNTS_STORE

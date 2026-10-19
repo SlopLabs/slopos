@@ -1,7 +1,7 @@
 //! Files only a holder of `Seal` makes believable. A reader believes a file
 //! only while it is a sealed regular file; a writer seals each one through the
-//! descriptor it wrote and reads it back, so a process holding `DacOverride`
-//! without `Seal` neither rewrites one nor plants one. A file written as
+//! descriptor it wrote and holds it to what it wrote, so a process holding
+//! `DacOverride` without `Seal` neither rewrites one nor plants one. A file written as
 //! generations is never renamed or rewritten in place: the next generation
 //! goes in beside the last, which stays believed until the new one is sealed,
 //! so a writer cut off anywhere leaves either.
@@ -117,10 +117,8 @@ pub fn unsealed<T>(dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<
     out
 }
 
-/// Make `bytes` the sealed file `name` in `dir`, which is open for changes.
-/// What another process wrote into it before the seal is found reading it
-/// back, a name it gave it before the seal in its link count, and what it
-/// put at its name after is found there.
+/// Make `bytes` the sealed file `name` in `dir`, which is open for changes,
+/// refused when another process changed it before the seal.
 pub fn create_sealed(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), String> {
     let path = dir.join(name);
     remove_entry(&path)?;

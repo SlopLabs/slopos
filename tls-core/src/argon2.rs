@@ -11,7 +11,6 @@ const VERSION: u32 = 0x13;
 
 type Block = [u64; WORDS];
 
-/// The cost of a hash: memory in KiB, passes over it and lanes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Params {
     pub memory_kib: u32,

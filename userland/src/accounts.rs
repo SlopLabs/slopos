@@ -20,7 +20,6 @@ use crate::sealed::{
 };
 use crate::syscall::{fs as sys_fs, process};
 
-/// The record, as generations in the store: `record.<n>`.
 const RECORD: &str = "record";
 const PASSWD: &str = "etc/passwd";
 const GROUP: &str = "etc/group";
