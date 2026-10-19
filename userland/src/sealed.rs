@@ -17,7 +17,7 @@ use slopos_abi::fs::{O_DIRECTORY, O_NOFOLLOW};
 use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC, O_NONBLOCK};
 use slopos_extension_core::generation;
 
-use crate::syscall::{core as sys_core, fs as sys_fs};
+use crate::syscall::{core as sys_core, fs as sys_fs, process};
 
 /// The most a small sealed file, a record or a key list, may hold.
 pub const SMALL_MAX: u64 = 64 * 1024;
@@ -137,26 +137,45 @@ pub fn create_sealed(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<
         .and_then(|()| file.sync_all())
         .map_err(|e| shown(&path, e))?;
     set_sealed(&file, true).map_err(|e| shown(&path, format!("sealing: {e}")))?;
-    let back = file
-        .seek(SeekFrom::Start(0))
-        .and_then(|_| read_all(&file, bytes.len() as u64));
-    let here = fs::symlink_metadata(&path)
-        .ok()
-        .map(|m| (m.dev(), m.ino(), 1));
-    let ours = file.metadata().ok().map(|m| (m.dev(), m.ino(), m.nlink()));
-    if back.ok().as_deref() != Some(bytes) || here.is_none() || here != ours {
+    if !as_written(&file, &path, bytes, mode) {
         let _ = set_sealed(&file, false);
         return Err(shown(&path, "changed by another process as it was written"));
     }
     Ok(())
 }
 
+/// Whether `file`, just sealed, is as its writer left it: `bytes`, this
+/// process's, of `mode`, and `path` its one name. A sealed inode changes none
+/// of those again.
+fn as_written(file: &File, path: &Path, bytes: &[u8], mode: u32) -> bool {
+    let back = (&*file)
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| read_all(file, bytes.len() as u64));
+    let here = fs::symlink_metadata(path).ok().map(|m| (m.dev(), m.ino()));
+    back.is_ok_and(|back| back == bytes)
+        && file.metadata().is_ok_and(|m| {
+            here == Some((m.dev(), m.ino()))
+                && m.nlink() == 1
+                && m.uid() == process::geteuid()
+                && m.mode() & 0o7777 == mode
+        })
+}
+
+/// Whether `path` is a sealed regular file holding `bytes` as a writer of
+/// `mode` leaves one.
+fn holds(path: &Path, bytes: &[u8], mode: u32) -> bool {
+    open_entry(path).is_ok_and(|file| {
+        is_sealed(&file)
+            && file.metadata().is_ok_and(|m| {
+                m.is_file() && m.uid() == process::geteuid() && m.mode() & 0o7777 == mode
+            })
+            && read_all(&file, bytes.len() as u64).is_ok_and(|back| back == bytes)
+    })
+}
+
 /// [`create_sealed`], unless `name` holds `bytes` sealed already.
 pub fn put_sealed(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
-    let held = read_sealed(&dir.join(name), bytes.len() as u64)
-        .ok()
-        .flatten();
-    if held.as_deref() == Some(bytes) {
+    if holds(&dir.join(name), bytes, 0o644) {
         return Ok(());
     }
     create_sealed(dir, name, bytes, 0o644)
@@ -191,21 +210,19 @@ pub fn remove_entry(path: &Path) -> Result<(), String> {
     fs::remove_file(path).map_err(|e| shown(path, e))
 }
 
-/// Rename the directory at `path` to a name of its own beside it, for one
-/// that cannot be taken away whole: what is in it may not be ours to read.
+/// Rename the directory at `path` to a random name beside it, for one that
+/// cannot be taken away whole: what is in it may not be ours to read.
 fn move_aside(path: &Path) -> std::io::Result<()> {
     let mut random = [0u8; 8];
     sys_core::getrandom(&mut random);
-    let mut aside = std::ffi::OsString::from(".");
-    aside.push(path.file_name().unwrap_or_default());
-    aside.push(format!(".{:016x}.aside", u64::from_le_bytes(random)));
+    let aside = format!(".{:016x}.aside", u64::from_le_bytes(random));
     fs::rename(path, path.with_file_name(aside))
 }
 
 /// The lock file at `path`, held exclusively, whatever else was left at its
 /// name taken away first.
 pub fn lock(path: &Path) -> Result<File, String> {
-    for _ in 0..2 {
+    for _ in 0..3 {
         let opened = OpenOptions::new()
             .read(true)
             .write(true)
@@ -218,7 +235,10 @@ pub fn lock(path: &Path) -> Result<File, String> {
                 sys_fs::flock(file.as_raw_fd(), LOCK_EX).map_err(|e| shown(path, e))?;
                 return Ok(file);
             }
-            _ => remove_entry(path)?,
+            _ => match fs::symlink_metadata(path) {
+                Ok(meta) if meta.is_file() && open_entry(path).is_ok() => {}
+                _ => remove_entry(path)?,
+            },
         }
     }
     Err(shown(
@@ -228,9 +248,10 @@ pub fn lock(path: &Path) -> Result<File, String> {
 }
 
 /// The believed generation of `stem` in `dir`, the newest sealed regular
-/// file uid 0 may read, and its bytes. Anything else under a generation's
-/// name, a write cut short among it, is passed over; a sealed one that cannot
-/// be read is an error, never the cue to believe an older.
+/// file, and its bytes. Anything else under a generation's name, a write cut
+/// short or what uid 0 may not open among it, is passed over; a sealed one
+/// that is not uid 0's to read, or cannot be read, is an error, never the cue
+/// to believe an older.
 pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> {
     let mut generations: Vec<u64> = fs::read_dir(dir)
         .map_err(|e| shown(dir, e))?
@@ -240,14 +261,14 @@ pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> 
     for g in generations {
         let path = dir.join(format!("{stem}.{g}"));
         match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_file() && meta.uid() == 0 && meta.mode() & 0o400 != 0 => {}
+            Ok(meta) if meta.is_file() => {}
             Err(e) if e.kind() != ErrorKind::NotFound => return Err(shown(&path, e)),
             _ => continue,
         }
         let file = match open_entry(&path) {
             Ok(file) => file,
             Err(e)
-                if e.kind() == ErrorKind::NotFound
+                if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied)
                     || e.raw_os_error() == Some(slopos_abi::Errno::ELOOP.raw()) =>
             {
                 continue;
@@ -261,6 +282,9 @@ pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> 
         let flags = sys_fs::inode_flags(file.as_raw_fd()).map_err(|e| shown(&path, e))?;
         if flags & FS_IMMUTABLE_FL == 0 {
             continue;
+        }
+        if meta.uid() != 0 || meta.mode() & 0o400 == 0 {
+            return Err(shown(&path, "sealed, but not as a writer leaves it"));
         }
         if meta.len() > SMALL_MAX {
             return Err(shown(&path, format!("larger than {SMALL_MAX} bytes")));
@@ -309,12 +333,7 @@ pub fn temporary(path: &Path) -> bool {
 /// none. What another process changed in between is taken away rather than
 /// left at `path` unsealed.
 pub fn replace_sealed(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
-    if read_sealed(path, bytes.len() as u64)
-        .ok()
-        .flatten()
-        .as_deref()
-        == Some(bytes)
-    {
+    if holds(path, bytes, mode) {
         return Ok(());
     }
     let dir = path.parent().ok_or_else(|| shown(path, "no directory"))?;
@@ -351,14 +370,7 @@ pub fn replace_sealed(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String
         return Err(shown(path, e));
     }
     let sealed = set_sealed(&file, true).map_err(|e| shown(path, format!("sealing: {e}")));
-    let back = file
-        .seek(SeekFrom::Start(0))
-        .and_then(|_| read_all(&file, bytes.len() as u64));
-    let here = fs::symlink_metadata(path)
-        .ok()
-        .map(|m| (m.dev(), m.ino(), 1));
-    let ours = file.metadata().ok().map(|m| (m.dev(), m.ino(), m.nlink()));
-    if sealed.is_err() || back.ok().as_deref() != Some(bytes) || here.is_none() || here != ours {
+    if sealed.is_err() || !as_written(&file, path, bytes, mode) {
         let _ = set_sealed(&file, false);
         let _ = remove_entry(path);
         return sealed.and(Err(shown(

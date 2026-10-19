@@ -675,8 +675,10 @@ already held whole to its root again before it is reused; an
 `ExtensionUpdate` holder stores whole images, so no per-process `DiskBlocks`
 ceiling binds it.
 Only a sealed file is believed, and a writer seals each through the
-descriptor it wrote and reads it back, held to one name, so `DacOverride`
-without `Seal` neither rewrites a record nor plants a key. Nothing is
+descriptor it wrote and reads it back, held to one name, its owner and its
+mode, and a sealed one held to none of them is an error rather than passed
+over, so `DacOverride` without `Seal` neither rewrites a record nor plants a
+key nor hides one. Nothing is
 renamed: a record or the keys go in as the next generation, the newest sealed
 one is believed, and a writer then takes away the older ones and what the
 record does not name, so a writer cut off anywhere leaves either. Writers
