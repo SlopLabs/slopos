@@ -1574,7 +1574,11 @@ static int llvm_surface(void) {
         strcmp(root->pw_name, "root") != 0 || strcmp(root->pw_dir, "/root") != 0) {
         return fail("getpwnam(\"root\") is not the uid-0 row");
     }
-    if (getpwnam("nobody") != NULL) {
+    struct passwd *nobody = getpwnam("nobody");
+    if (nobody == NULL || nobody->pw_uid != 65534 || strcmp(nobody->pw_shell, "/bin/false") != 0) {
+        return fail("getpwnam(\"nobody\") is not the overflow row");
+    }
+    if (getpwnam("no-such-person") != NULL) {
         return fail("getpwnam found a user that does not exist");
     }
     return 1;
