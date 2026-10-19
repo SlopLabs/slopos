@@ -9,10 +9,12 @@
 //! 0 (the live system, the medium at `/media/install`): on a disk another
 //!   system is on, give it the firmware entry that system would have; run
 //!   the installer, on a blank disk from the shell answering its questions,
-//!   on the others with every answer a flag.
-//! 1 (`slopos-a` of the installed disk): the root is the disk's, the other
-//!   system's entry is still in `BootOrder` and in Limine's menu, and the
-//!   clone fetches from the remote it was given. With a toolchain at
+//!   a person named and a password typed among them, on the others with
+//!   every answer a flag.
+//! 1 (`slopos-a` of the installed disk): the root is the disk's, its first
+//!   administrator the person the installer was told of, the other system's
+//!   entry is still in `BootOrder` and in Limine's menu, and the clone
+//!   fetches from the remote it was given. With a toolchain at
 //!   `/usr/local`, `scripts/selfhost.sh install tests` builds the system,
 //!   installs its base and puts its kernel into slot b, as a person at the
 //!   shell runs it; without one, slot a's kernel is cloned into b. Boot b
@@ -27,8 +29,8 @@
 //! through `bootctl --boot`, and at a terminal interrupts what a rescue shell
 //! runs. Then it reinstalls over the same partitions, keeping the root:
 //!
-//! 3 (`slopos-a` again): the file is there, and what the slots said of the
-//!   system they held is gone.
+//! 3 (`slopos-a` again): the file and the root's people are there, and what
+//!   the slots said of the system they held is gone.
 //!
 //! Without the medium and with no stage set, it has nothing to do and passes.
 
@@ -41,11 +43,13 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use slopos_abi::fs::SESSION_UID;
 use slopos_abi::syscall::UserWinsize;
 use slopos_boot_core::gpt::Partition;
 use slopos_boot_core::layout::{self, ESP_TYPE, ROOT_TYPE};
 use slopos_boot_core::{base, bli, device_path, load_option, variables};
 use slopos_slibc::test_harness::note;
+use slopos_userland::accounts::Store;
 use slopos_userland::base_image::retagged;
 use slopos_userland::boot_disk::{
     BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, not_installable,
@@ -67,6 +71,11 @@ const FOREIGN: &str = "SlopOSInstallerTestForeign";
 /// Whether stage 0 asked for SlopOS first in `BootOrder`, so that its entry
 /// is what boots the disk; otherwise the firmware's own may come first.
 const FIRST: &str = "SlopOSInstallerTestFirst";
+/// The first person stage 0 named to the installer.
+const PERSON: &str = "SlopOSInstallerTestPerson";
+/// Who the blank disk's install is for, and the password typed for them.
+const TYPED_PERSON: &str = "ada";
+const TYPED_PASSWORD: &str = "correct horse battery";
 
 /// The partition a disk offers as the root to reuse.
 const REUSED_NAME: &str = "installer-test-root";
@@ -509,9 +518,15 @@ fn install() -> bool {
                 answers.push('\n');
             }
             answers.push_str("yes\n");
+            answers.push_str(&format!(
+                "{TYPED_PERSON}\n{TYPED_PASSWORD}\n{TYPED_PASSWORD}\n"
+            ));
             answers.push_str(disk.rsplit('/').next().unwrap_or(&disk));
             answers.push('\n');
             typed = Some(answers);
+            if !set_var(PERSON, TYPED_PERSON.as_bytes()) {
+                return false;
+            }
         }
         Kind::Free => {
             let Some(esp) = partitions.iter().find(|p| p.entry.type_guid == ESP_TYPE) else {
@@ -532,6 +547,10 @@ fn install() -> bool {
             }
             args.extend(flagged);
             args.extend(["--mode", "free", "--first"].map(str::to_owned));
+            args.extend(["--person", "user", "--no-password"].map(str::to_owned));
+            if !set_var(PERSON, b"user") {
+                return false;
+            }
         }
         Kind::Reuse | Kind::Reinstall => {
             let reinstall = kind == Kind::Reinstall;
@@ -564,6 +583,10 @@ fn install() -> bool {
             let root_choice = if reinstall {
                 "--keep-root"
             } else {
+                args.extend(["--person", "user", "--no-password"].map(str::to_owned));
+                if !set_var(PERSON, b"user") {
+                    return false;
+                }
                 "--format-root"
             };
             args.extend(flagged);
@@ -645,6 +668,10 @@ fn reinstalled_boot(status: &str) -> bool {
             return false;
         }
     }
+    if let Err(why) = first_person(TYPED_PERSON, Some(TYPED_PASSWORD)) {
+        note(&format!("the kept root's people: {why}"));
+        return false;
+    }
     let forgotten = format!("/var/lib/slopos/slots/{}", layout::SLOTS[1]);
     if std::path::Path::new(&forgotten).exists() {
         note(&format!(
@@ -654,6 +681,35 @@ fn reinstalled_boot(status: &str) -> bool {
     }
     println!("INSTALLER-KEPT {KEPT}");
     true
+}
+
+/// The root's first person is `name`, its first administrator, logged in by
+/// the desktop, with `password` alone when one was typed.
+fn first_person(name: &str, password: Option<&str>) -> Result<(), String> {
+    let accounts = Store::read(std::path::Path::new("/"))
+        .recorded()?
+        .ok_or("the root holds no accounts record")?;
+    let first = accounts.by_uid(SESSION_UID);
+    let logged_in = accounts.autologin().map(|p| p.uid) == Some(SESSION_UID);
+    let named = first
+        .is_some_and(|p| p.name == name && p.admin && p.password.is_some() == password.is_some());
+    if !named || !logged_in {
+        return Err(format!("the record names {:?}", first.map(|p| &p.name)));
+    }
+    let Some(password) = password else {
+        return Ok(());
+    };
+    let mut check = Command::new("/sbin/authcheck")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("authcheck: {e}"))?;
+    if let Some(mut stdin) = check.stdin.take() {
+        let _ = writeln!(stdin, "{name}\n{password}");
+    }
+    match check.wait() {
+        Ok(status) if status.success() => Ok(()),
+        other => Err(format!("authcheck refused the typed password: {other:?}")),
+    }
 }
 
 /// The disk's ESP holds a configuration offering the other system.
@@ -684,6 +740,12 @@ fn first_boot(status: &str) -> bool {
     }
     if std::path::Path::new(layout::MEDIUM_DIR).exists() {
         note("the installed system serves an install medium");
+        return false;
+    }
+    let person = var(PERSON).and_then(|v| String::from_utf8(v).ok());
+    let password = (person.as_deref() == Some(TYPED_PERSON)).then_some(TYPED_PASSWORD);
+    if let Err(why) = first_person(person.as_deref().unwrap_or("user"), password) {
+        note(&format!("the installed root's people: {why}"));
         return false;
     }
     let disk = match target() {
@@ -774,6 +836,7 @@ fn tried_boot(status: &str) -> bool {
     let _ = set_var(TAG, &[]);
     let _ = set_var(FOREIGN, &[]);
     let _ = set_var(FIRST, &[]);
+    let _ = set_var(PERSON, &[]);
     let (booted, default) = (field(status, "booted"), field(status, "default"));
     if booted != "slopos-b" || default != "slopos-a" {
         note(&format!(

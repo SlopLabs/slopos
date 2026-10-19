@@ -198,13 +198,16 @@ struct Options {
     keep_root: Option<bool>,
     remote: Option<String>,
     first: Option<bool>,
+    person: Option<String>,
+    no_password: bool,
     cmdline: Option<String>,
     yes: bool,
 }
 
 const USAGE: &str = "usage: installer [--disk /dev/<disk>] [--mode erase|free|reuse] [--region <n>]
                  [--root /dev/<partition>] [--keep-root | --format-root] [--remote <url>]
-                 [--first | --not-first] [--cmdline <words>] [--yes]
+                 [--first | --not-first] [--person <name>] [--no-password]
+                 [--cmdline <words>] [--yes]
   --disk         the disk to install onto
   --mode         erase: a new partition table over the whole disk
                  free: SlopOS's partitions in free space, beside the others
@@ -216,6 +219,8 @@ const USAGE: &str = "usage: installer [--disk /dev/<disk>] [--mode erase|free|re
   --remote       the URL /src/slopos fetches from and pushes to
   --first        put SlopOS first in the firmware's boot order
   --not-first    leave it where it stands, or after the systems there
+  --person       the name of the person the new root is for (default: user)
+  --no-password  give them no password, where one is otherwise typed
   --cmdline      what the installed kernel boots with
   --yes          write the disk without asking";
 
@@ -253,6 +258,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--remote" => opts.remote = Some(value()?),
             "--first" => opts.first = Some(true),
             "--not-first" => opts.first = Some(false),
+            "--person" => opts.person = Some(value()?),
+            "--no-password" => opts.no_password = true,
             "--cmdline" => opts.cmdline = Some(value()?),
             "--yes" => opts.yes = true,
             "--help" | "-h" => return Err(USAGE.to_owned()),
@@ -370,6 +377,47 @@ fn choose_region(disk: &Disk, given: Option<usize>, ask_it: bool) -> Result<Opti
         .ok_or_else(|| format!("{answer}: no free region of that number"))
 }
 
+/// The new root's first person, an administrator the desktop logs in, and
+/// their password's hash, which none typed is none of.
+fn choose_person(
+    named: Option<String>,
+    no_password: bool,
+) -> Result<(String, Option<String>), String> {
+    let name = match named {
+        Some(name) => name,
+        None => ask(
+            "Name of the person this machine is for",
+            Some("user"),
+            "--person",
+        )?,
+    };
+    if !slopos_accounts_core::valid_name(&name) {
+        return Err(format!(
+            "{name}: {}",
+            slopos_accounts_core::record::BAD_NAME
+        ));
+    }
+    if no_password {
+        return Ok((name, None));
+    }
+    let typed = crate::secret::read(&format!("Password for {name}, or nothing for none: "))?
+        .ok_or("no password typed; pass --no-password for none")?;
+    if typed.is_empty() {
+        return Ok((name, None));
+    }
+    let again = crate::secret::read("Again: ")?.ok_or("no password typed again")?;
+    if again != typed {
+        return Err("the two passwords differ; nothing was written".into());
+    }
+    let mut salt = [0u8; slopos_accounts_core::password::SALT_LEN];
+    if sys_core::getrandom(&mut salt) != salt.len() as isize {
+        return Err("no randomness for the password's salt".into());
+    }
+    let hash = slopos_accounts_core::password::Hash::new(typed.bytes(), &salt)
+        .map_err(|e| format!("hashing the password: {e:?}"))?;
+    Ok((name, Some(hash.render())))
+}
+
 fn explain(e: PlanError, disk: &Disk) -> String {
     let node = &disk.node;
     match e {
@@ -463,6 +511,9 @@ struct Settled {
     keep_root: bool,
     remote: Option<String>,
     first: bool,
+    /// The person a new root is for and their password's hash, if they have
+    /// one; a kept root keeps its own people.
+    person: Option<(String, Option<String>)>,
     cmdline: String,
     /// Whether the ESP is SlopOS's own, whose removable-media path it writes.
     own_esp: bool,
@@ -571,6 +622,15 @@ fn settle(opts: Options, medium: &Medium) -> Result<Settled, String> {
             "--first or --not-first",
         )?,
     };
+    let person = match keep_root {
+        true if opts.person.is_some() || opts.no_password => {
+            return Err(
+                "--person and --no-password are a new root's; a kept root keeps its people".into(),
+            );
+        }
+        true => None,
+        false => Some(choose_person(opts.person, opts.no_password)?),
+    };
     let cmdline = opts.cmdline.unwrap_or_else(|| DEFAULT_CMDLINE.to_owned());
     let mut array = array;
     let mut uniques = [slopos_boot_core::Guid::ZERO; 4];
@@ -606,6 +666,7 @@ fn settle(opts: Options, medium: &Medium) -> Result<Settled, String> {
         format,
         remote,
         first,
+        person,
         cmdline,
         own_esp,
         limine_conf,
@@ -721,6 +782,17 @@ fn summarise(s: &Settled, medium: &Medium) {
         ),
         Some(url) => println!("  /src/slopos: the medium's clone, fetching from {url}"),
         None => {}
+    }
+    match &s.person {
+        Some((name, password)) => println!(
+            "  {name}: its first administrator, logged in by the desktop, {}",
+            if password.is_some() {
+                "with the password typed"
+            } else {
+                "with no password"
+            }
+        ),
+        None => println!("  people: the root's own"),
     }
     println!("  boots with: {}", s.cmdline);
     println!(
@@ -842,6 +914,9 @@ fn install(s: Settled, medium: &Medium) -> Result<(), String> {
         root::forget_slots(&mounted)?;
     }
     root::fill(&mounted, medium, s.remote.as_deref())?;
+    if let Some((name, password)) = &s.person {
+        root::make_people(&mounted, name, password.clone())?;
+    }
     if !s.keep_root {
         root::record_owners(&mounted)?;
     }
@@ -878,8 +953,9 @@ fn run(args: &[String]) -> Result<(), String> {
     crate::privd::elevate(
         Some("org.slopos.install"),
         &crate::privd::own_args(),
-        crate::privd::Input::Forwarded,
+        crate::privd::Input::Terminal,
     );
+    crate::secret::claim_terminal();
     let medium = Medium::find()?;
     let settled = settle(opts, &medium)?;
     install(settled, &medium)

@@ -184,6 +184,15 @@ pub fn record_owners(root: &Mounted) -> Result<(), String> {
     give(&path, (0, 0))
 }
 
+/// A new root's accounts: `name`, its first administrator, whom the desktop
+/// logs in, with the password `password` is the hash of, and the user
+/// database written from them.
+pub fn make_people(root: &Mounted, name: &str, password: Option<String>) -> Result<(), String> {
+    let accounts = slopos_accounts_core::Accounts::first(name, password)
+        .map_err(|e| format!("{name}: {e}"))?;
+    crate::accounts::Store::write(Path::new(&root.dir))?.put(&accounts)
+}
+
 /// A kept root's slots hold this install's system now, so what they said of
 /// the last one goes, as `bootctl install` has it.
 pub fn forget_slots(root: &Mounted) -> Result<(), String> {
