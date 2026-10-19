@@ -312,7 +312,7 @@ fn change(request: Request) -> Result<String, String> {
     let top = Path::new("/");
     let before = Store::read(top).accounts()?;
     let typed = typed(&before, uid, &request)?;
-    let store = Store::write(top)?;
+    let mut store = Store::write(top)?;
     let mut accounts = store.accounts()?;
     if accounts != before {
         return Err("the accounts changed while this was typed; ask again".into());
@@ -335,7 +335,7 @@ fn change(request: Request) -> Result<String, String> {
         return Err(why);
     }
     let synced = store.sync();
-    drop(store);
+    store.unlock();
     if let Home::Removed(person) = home {
         let gone = remove_home(&person).unwrap_or_else(|why| format!("; its home stays: {why}"));
         said.push_str(&gone);

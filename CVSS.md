@@ -25,9 +25,10 @@ homes to the session; that the desktop's person could be demoted, leaving
 nobody privd would ask; that a person at a prompt held the accounts lock, as
 `extctl` did across a whole image; that `getgrouplist` under-counted past 256
 groups; and that a password past 4 KiB was stored but never checkable. Now a
-store reader errs on a sealed generation it cannot read or that is not as
-its writer left it, and a writer holds what it sealed to its bytes, name,
-owner and mode; `umount(2)` refuses what `mount(2)` refuses at a kept
+writer holds what it sealed to its bytes, name, owner and mode, takes the
+older generations away only once it is so held, and goes past a leftover it
+cannot take away, and a reader errs on a writer's generation it cannot read
+and passes over anything else; `umount(2)` refuses what `mount(2)` refuses at a kept
 directory; a writer unlinks or moves aside what it finds at its names and
 writes `/etc/shadow` first from the record alone; a mechanism reading
 secrets gets a terminal of its own whenever standard input is one, echo off

@@ -112,6 +112,12 @@ impl Store {
         Ok(store)
     }
 
+    /// Let the other writers in, the termination signals still held off
+    /// until this is dropped.
+    pub fn unlock(&mut self) {
+        self._lock = None;
+    }
+
     /// The record written last, `None` on a root none was written on.
     pub fn recorded(&self) -> Result<Option<Accounts>, String> {
         if open_dir(&self.dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {

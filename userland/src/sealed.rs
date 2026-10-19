@@ -217,9 +217,14 @@ fn move_aside(path: &Path) -> std::io::Result<()> {
     fs::rename(path, path.with_file_name(aside))
 }
 
-/// The lock file at `path`, held exclusively, whatever else was left at its
-/// name taken away first.
+/// The lock file at `path`, this process's uid's and held exclusively while
+/// `path` still names it, whatever else was left at its name taken away.
 pub fn lock(path: &Path) -> Result<File, String> {
+    let named = |file: &File| {
+        let here = fs::symlink_metadata(path).ok().map(|m| (m.dev(), m.ino()));
+        file.metadata()
+            .is_ok_and(|m| here == Some((m.dev(), m.ino())))
+    };
     for _ in 0..3 {
         let opened = OpenOptions::new()
             .read(true)
@@ -227,16 +232,21 @@ pub fn lock(path: &Path) -> Result<File, String> {
             .create(true)
             .mode(0o600)
             .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32 | O_NONBLOCK as i32)
-            .open(path);
-        match opened {
-            Ok(file) if file.metadata().is_ok_and(|m| m.is_file()) => {
-                sys_fs::flock(file.as_raw_fd(), LOCK_EX).map_err(|e| shown(path, e))?;
-                return Ok(file);
-            }
-            _ => match fs::symlink_metadata(path) {
-                Ok(meta) if meta.is_file() && open_entry(path).is_ok() => {}
-                _ => remove_entry(path)?,
-            },
+            .open(path)
+            .ok()
+            .filter(|file| {
+                file.metadata()
+                    .is_ok_and(|m| m.is_file() && m.uid() == process::geteuid())
+            });
+        let Some(file) = opened else {
+            remove_entry(path)?;
+            continue;
+        };
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|e| shown(path, e))?;
+        sys_fs::flock(file.as_raw_fd(), LOCK_EX).map_err(|e| shown(path, e))?;
+        if named(&file) {
+            return Ok(file);
         }
     }
     Err(shown(
@@ -245,11 +255,11 @@ pub fn lock(path: &Path) -> Result<File, String> {
     ))
 }
 
-/// The believed generation of `stem` in `dir`, the newest sealed regular
-/// file, and its bytes. Anything else under a generation's name, a write cut
-/// short or what uid 0 may not open among it, is passed over; a sealed one
-/// that is not uid 0's to read, or cannot be read, is an error, never the cue
-/// to believe an older.
+/// The believed generation of `stem` in `dir` and its bytes: the newest as a
+/// writer leaves one, a sealed regular file uid 0's to read. Anything else
+/// under a generation's name is passed over, since a writer takes the older
+/// generations away only once its own is so held; one so held that cannot be
+/// read is an error, never the cue to believe an older.
 pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> {
     let mut generations: Vec<u64> = fs::read_dir(dir)
         .map_err(|e| shown(dir, e))?
@@ -282,7 +292,7 @@ pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> 
             continue;
         }
         if meta.uid() != 0 || meta.mode() & 0o400 == 0 {
-            return Err(shown(&path, "sealed, but not as a writer leaves it"));
+            continue;
         }
         if meta.len() > SMALL_MAX {
             return Err(shown(&path, format!("larger than {SMALL_MAX} bytes")));
@@ -295,18 +305,22 @@ pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> 
 }
 
 /// Seal `bytes` as the next generation of `stem` in `dir`, which is open for
-/// changes, then take every other away.
+/// changes, past the believed one and any sealed leftover that will not go,
+/// then take every other away as far as it will go: the new one is believed
+/// whatever stays.
 pub fn put_generation(dir: &Path, stem: &str, bytes: &[u8], mode: u32) -> Result<(), String> {
-    let next = newest(dir, stem)?.map_or(1, |(g, _)| g + 1);
+    let mut next = newest(dir, stem)?.map_or(1, |(g, _)| g + 1);
+    while remove_entry(&dir.join(format!("{stem}.{next}"))).is_err() {
+        next += 1;
+    }
     let name = format!("{stem}.{next}");
     create_sealed(dir, &name, bytes, mode)?;
     let prefix = format!("{stem}.");
-    for entry in fs::read_dir(dir).map_err(|e| shown(dir, e))? {
-        let entry = entry.map_err(|e| shown(dir, e))?;
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let other = entry.file_name();
         let other = other.to_string_lossy();
         if other != name && other.starts_with(&prefix) {
-            remove_entry(&entry.path())?;
+            let _ = remove_entry(&entry.path());
         }
     }
     Ok(())
