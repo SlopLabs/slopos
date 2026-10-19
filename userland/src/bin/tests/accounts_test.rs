@@ -15,7 +15,7 @@ use slopos_userland as _;
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -31,6 +31,7 @@ use slopos_slibc::process::ids::{getgroups, setgroups, setresgid, setresuid};
 use slopos_slibc::process::{_exit, WEXITSTATUS, WIFEXITED, fork, waitpid};
 use slopos_slibc::test_harness::note;
 use slopos_userland::accounts::Store;
+use slopos_userland::sealed::{open_entry, set_sealed};
 use slopos_userland::syscall::core::caps_drop;
 use slopos_userland::syscall::process::{self, Endowment};
 use slopos_userland::syscall::{OwnedFd, RawFd, SyscallError, fs, net};
@@ -715,10 +716,14 @@ fn the_database_holds_against_mount() -> bool {
 }
 
 /// A sealed generation of the record that is not uid 0's, as a `DacOverride`
-/// holder's chown before the seal would leave it, makes the record an error,
-/// never the cue to believe an older one or none.
-fn a_record_not_as_written_is_an_error() -> bool {
+/// holder's chown before the seal would leave one, is passed over for the
+/// last one a writer finished, and a writer that may not take it away goes
+/// past it.
+fn a_record_not_as_written_is_passed_over() -> bool {
     let store = Path::new(ACCOUNTS_STORE);
+    let (Some(before), Some(uid)) = (record(), uid_of(NAME)) else {
+        return fail(format!("no record, or no {NAME}"));
+    };
     let newest = std::fs::read_dir(store).ok().and_then(|entries| {
         entries
             .filter_map(|e| {
@@ -731,37 +736,50 @@ fn a_record_not_as_written_is_an_error() -> bool {
             })
             .max()
     });
-    let Some(newest) = newest.filter(|&n| n > 0) else {
+    let Some(newest) = newest else {
         return fail("the store holds no record");
     };
-    let last = store.join(format!("record.{newest}"));
     let planted = store.join(format!("record.{}", newest + 1));
-    let Ok(bytes) = std::fs::read(&last) else {
-        return fail(format!("{} could not be read", last.display()));
-    };
-    let set_flags = |path: &Path, flags: u32| {
-        std::fs::File::open(path)
+    let seal = |path: &Path, sealed: bool| {
+        open_entry(path)
             .map_err(|e| e.to_string())
-            .and_then(|f| fs::set_inode_flags(f.as_raw_fd(), flags).map_err(|e| format!("{e:?}")))
+            .and_then(|file| set_sealed(&file, sealed))
     };
-    let made = set_flags(store, 0)
-        .and_then(|()| std::fs::write(&planted, &bytes).map_err(|e| e.to_string()))
+    let made = seal(store, false)
+        .and_then(|()| std::fs::write(&planted, before.render()).map_err(|e| e.to_string()))
+        .and_then(|()| {
+            std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())
+        })
         .and_then(|()| {
             std::os::unix::fs::lchown(&planted, Some(SESSION_UID), None).map_err(|e| e.to_string())
         })
-        .and_then(|()| set_flags(&planted, FS_IMMUTABLE_FL));
-    let _ = set_flags(store, FS_IMMUTABLE_FL);
-    let read = Store::read(Path::new("/"))
-        .recorded()
-        .map(|r| r.map(|a| a.people().len()));
-    let _ = set_flags(store, 0);
-    let _ = set_flags(&planted, 0);
+        .and_then(|()| seal(&planted, true));
+    let _ = seal(store, true);
+    let read = record();
+    let input = "past a file\npast a record\npast a record\n";
+    let changed = made
+        .is_ok()
+        .then(|| mechanism(OWN, uid, &["passwd"], input));
+    let _ = seal(store, false);
+    let _ = seal(&planted, false);
     let _ = std::fs::remove_file(&planted);
-    let _ = set_flags(store, FS_IMMUTABLE_FL);
+    let _ = seal(store, true);
     if let Err(why) = made {
         return fail(format!("{} could not be planted: {why}", planted.display()));
     }
-    read.is_err() || fail(format!("a record not uid 0's was read as {read:?}"))
+    if read.as_ref() != Some(&before) {
+        return fail(format!(
+            "past a record not uid 0's the record read {read:?}"
+        ));
+    }
+    match changed {
+        Some(ran) if ran.ok() && authcheck(NAME, "past a record") == Some(0) => true,
+        other => fail(format!(
+            "a Seal-only writer past it: {:?}",
+            other.map(|ran| ran.shown())
+        )),
+    }
 }
 
 fn a_renamed_or_removed_account_keeps_its_uid_given() -> bool {
@@ -850,8 +868,8 @@ fn main() {
             the_database_holds_against_mount,
         ),
         (
-            "a_record_not_as_written_is_an_error",
-            a_record_not_as_written_is_an_error,
+            "a_record_not_as_written_is_passed_over",
+            a_record_not_as_written_is_passed_over,
         ),
         (
             "a_renamed_or_removed_account_keeps_its_uid_given",
