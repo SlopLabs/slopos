@@ -457,8 +457,15 @@ groups, and `installer_test` the installed root's person.
 - **The kept directories are part of the base interface** (7), since a
   base's stores rest on them.
 - **A mechanism that reads secrets runs on a terminal of its own**
-  (`Input::Terminal`) with echo off, claiming it as its controlling terminal
-  so an interrupt reaches it; the installer does too.
+  (`Input::Terminal`) whenever the requester's standard input is a terminal,
+  with echo off from before the first prompt to after the last, claiming it
+  as its controlling terminal so an interrupt reaches it; the installer does
+  too. The requester relays nothing it shows before its own terminal is raw.
+- **The first person stays an administrator until there is a login screen**,
+  since privd's `session` is theirs alone and nobody else could reach the
+  accounts' mechanisms.
+- **A volume holding a kept directory is not unmounted**, so the store cannot
+  be taken from under a running root to make it look recordless.
 
 ## Constraints
 

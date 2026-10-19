@@ -685,8 +685,8 @@ privd relays; readers take nothing. The kernel keeps it where it is
 (`slopos_abi::fs::KEPT_DIRS`): once the root and the `mount=` volumes are
 mounted, so a `/var` of its own holds the store, it makes the store and each
 directory on the way to it and holds them by identity, so no rename or
-removal moves one (`EBUSY`), and `mount(2)` refuses a target at, above or
-beneath it (`EPERM`) — `/var` itself among them. The mechanism reads the
+removal moves one (`EBUSY`), and `mount(2)` and `umount(2)` refuse a target
+at, above or beneath it (`EPERM`) — `/var` itself among them. The mechanism reads the
 files a request names as uid 0 without `DacOverride`, so only what uid 0 may
 read by mode goes in. A RAM root keeps a seal for good, so extensions need a
 disk root. `just extension DIR` packs one on the host (`tools/extension`),
@@ -1898,11 +1898,12 @@ to one ownership map, stated once in `slopos_abi::fs::ROOT_LAYOUT` and
 `/var/lib`, `/var/lib/slopos`, `/var/log`, `/home`, `/media`, `/usr`, `/opt`
 and `/opt/bin` uid 0's, 0755; `/root` 0700; `/var/tmp` 1777; `/home/user` and `/usr/local` the
 session's; and everything below `/home`, `/src` and `/usr/local` the
-session's. The image builders lay it out and record it in
+session's, but another person's home. The image builders lay it out and record it in
 `/var/lib/slopos/owners`, `tools/initramfs` packs the record so a RAM root is
 never migrated, and the installer lays out a new root by it. Init makes
 whatever directory of it a root lacks at every boot and, once per root
-without the record, hands the session its trees and writes the record
+without the record, hands the session what uid 0 holds in its trees, never
+descending into what another uid holds, and writes the record
 (`userland/src/root_layout.rs`), so a root that ran everything as uid 0 is
 migrated in place. `check_fs_image.sh --map`, the default for the tests
 image, holds a root to it.
@@ -1932,13 +1933,15 @@ anyone and, through privd's `org.slopos.accounts.manage` (`Seal` and
 (`/home/<name>`, 0700), removes one — the home kept unless `--home` says —
 renames one, sets a password, promotes and demotes, and sets automatic login;
 the last administrator stays one, and the first person, whom the desktop runs
-as, stays. A passwordless administrator who adds someone sets a password
+as and privd's `session` names, stays, an administrator until there is a
+login screen. A passwordless administrator who adds someone sets a password
 first, and an add turns automatic login off unless `--keep-autologin` says.
 `org.slopos.accounts.password` (`Seal`) changes the requester's own password
 once the current one is typed, as does the manage action for an
 administrator's own; a wrong one costs two seconds, and privd runs the
 accounts' mechanisms one at a time. Typed secrets are read from a terminal
-with its echo off, the one privd gives the mechanism (`userland/src/secret.rs`).
+whose echo goes off before the prompt and stays off across the exchange, the
+one privd gives the mechanism (`userland/src/secret.rs`).
 `/sbin/authcheck` is the one program that reads a hash back: it takes
 `<name>\n<secret>\n` on standard input, believes `/etc/shadow` only sealed,
 which only uid 0 reads, and answers by its status — 0 for the password, 1 for
@@ -1948,7 +1951,8 @@ record the one person's; a RAM root keeps every seal for good, so it keeps
 slibc's own rows, which are the one person's rendering
 (`slopos_slibc_core::passwd::BASE_PASSWD`). The kernel keeps `/etc` and
 `/var/lib/slopos` (`KEPT_DIRS`, which base interface 7 counts, since a
-base's stores rest on it), so no mount covers the database or the record, and
+base's stores rest on it), so no mount covers the database or the record and
+no volume holding either is unmounted, and
 the seal keeps a `DacOverride` holder from rewriting either. A change the
 record took whose database was not written says so, and the old database —
 a removed person's hash among it — stands until the next boot writes it. The
@@ -2090,11 +2094,12 @@ five seconds loses its connection. A program started without its action's
 capabilities calls `slopos_userland::privd::elevate`, which sends its own argv
 through the connection it inherited (`PRIVD_FD`, held to being the real
 privd's) or a fresh one and exits with the mechanism's status, relaying a
-terminal's output and, for the installer, its lines of input through pipes,
-and for the rescue shell every byte through a terminal of its own, locked
-against opens by its path once the requester holds it and fed nothing before
-the mechanism starts, with the requester's terminal raw while it runs, since
-the mechanism runs in another session; started by privd, a mechanism acts
+terminal's output through pipes, and for the installer, the accounts'
+mechanisms and the rescue shell, whenever standard input is a terminal, every
+byte through a terminal of its own, locked against opens by its path once the
+requester holds it, fed nothing before the mechanism starts and relayed only
+once the requester's terminal is raw, which it stays while the mechanism
+runs, since the mechanism runs in another session; started by privd, a mechanism acts
 only for the action `PRIV_ACTION` names; while init starts privd again, a
 fresh request waits two seconds for it to listen. On `SIGTERM`, which init
 sends when a base switch changes privd, it drains: it stops listening, lets
