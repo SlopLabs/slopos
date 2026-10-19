@@ -6,18 +6,18 @@
 //! database, so the last one written is the newest of both; a reader takes
 //! nothing, since nothing it can see is half made.
 
-use std::fs::{self, File, OpenOptions};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::fs::{self, File};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, O_NOFOLLOW, PERSON_UIDS, RAMFS_MAGIC};
+use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, PERSON_UIDS, RAMFS_MAGIC};
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, UserSigaction};
-use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC};
 use slopos_accounts_core::{Accounts, Entry};
 
 use crate::apps::extctl::store::Store as Extensions;
-use crate::sealed::{SMALL_MAX, newest, open_dir, replace_sealed, set_sealed, shown, unsealed};
+use crate::sealed::{
+    SMALL_MAX, lock, newest, open_dir, replace_sealed, set_sealed, shown, unsealed,
+};
 use crate::syscall::{fs as sys_fs, process};
 
 /// The record, as generations in the store: `record.<n>`.
@@ -89,16 +89,7 @@ impl Store {
         let mut at = store.dir.clone().into_os_string();
         at.push(".lock");
         let at = PathBuf::from(at);
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
-            .open(&at)
-            .map_err(|e| shown(&at, e))?;
-        sys_fs::flock(lock.as_raw_fd(), LOCK_EX).map_err(|e| shown(&at, e))?;
-        store._lock = Some(lock);
+        store._lock = Some(lock(&at)?);
         store.held_off = [SIGHUP, SIGINT, SIGQUIT, SIGTERM]
             .map(|signum| (signum, process::ignore_signal_saving(signum)))
             .to_vec();
@@ -168,28 +159,28 @@ impl Store {
     }
 
     /// Write the user database the record and the extensions' records
-    /// describe.
+    /// describe: `/etc/shadow` first and from the record alone, so no
+    /// extension's record keeps a changed password's old hash in place.
     pub fn sync(&self) -> Result<(), String> {
         debug_assert!(self._lock.is_some(), "a writer's store");
         let accounts = self.accounts()?;
-        let others = extension_entries(&self.top)?;
-        let files = [
-            (
+        let write = |path: &str, text: String, mode: u32| {
+            replace_sealed(&self.top.join(path), text.as_bytes(), mode)
+        };
+        let shadow = write(SHADOW, slopos_accounts_core::shadow(&accounts), 0o600);
+        let listed = extension_entries(&self.top).and_then(|others| {
+            write(
                 PASSWD,
                 slopos_accounts_core::passwd(&accounts, &others),
                 0o644,
-            ),
-            (
+            )?;
+            write(
                 GROUP,
                 slopos_accounts_core::group(&accounts, &others),
                 0o644,
-            ),
-            (SHADOW, slopos_accounts_core::shadow(&accounts), 0o600),
-        ];
-        for (path, text, mode) in files {
-            replace_sealed(&self.top.join(path), text.as_bytes(), mode)?;
-        }
-        Ok(())
+            )
+        });
+        shadow.and(listed)
     }
 }
 

@@ -5,23 +5,21 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
-use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC};
+use slopos_abi::syscall::posix::O_CLOEXEC;
 use slopos_extension_core::image::verify_whole;
 use slopos_extension_core::keys::Keys;
 use slopos_extension_core::record::Record;
 use slopos_extension_core::{KEYS, RECORD, STORE, image_file, sidecar_file, signature_file};
 
 use crate::sealed::{
-    SMALL_MAX, is_sealed, newest, open_dir, open_entry, put_generation, put_sealed, read_sealed,
-    remove_entry, set_sealed, shown, unsealed,
+    SMALL_MAX, is_sealed, lock, newest, open_dir, open_entry, put_generation, put_sealed,
+    read_sealed, remove_entry, set_sealed, shown, unsealed,
 };
-use crate::syscall::fs as sys_fs;
 use crate::syscall::process;
 
 /// What a copy of an image moves at once.
@@ -147,15 +145,7 @@ impl Store {
         let mut at = root.clone().into_os_string();
         at.push(".lock");
         let at = PathBuf::from(at);
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
-            .open(&at)
-            .map_err(|e| shown(&at, e))?;
-        sys_fs::flock(lock.as_raw_fd(), LOCK_EX).map_err(|e| shown(&at, e))?;
+        let lock = lock(&at)?;
         let dir = open_dir(&root).map_err(|e| shown(&root, e))?;
         set_sealed(&dir, true).map_err(|e| shown(&root, format!("sealing: {e}")))?;
         Ok(Store {

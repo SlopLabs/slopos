@@ -9,15 +9,15 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{O_DIRECTORY, O_NOFOLLOW};
-use slopos_abi::syscall::posix::{O_CLOEXEC, O_NONBLOCK};
+use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC, O_NONBLOCK};
 use slopos_extension_core::generation;
 
-use crate::syscall::fs as sys_fs;
+use crate::syscall::{core as sys_core, fs as sys_fs};
 
 /// The most a small sealed file, a record or a key list, may hold.
 pub const SMALL_MAX: u64 = 64 * 1024;
@@ -132,7 +132,8 @@ pub fn create_sealed(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<
         .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
         .open(&path)
         .map_err(|e| shown(&path, e))?;
-    file.write_all(bytes)
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .and_then(|()| file.write_all(bytes))
         .and_then(|()| file.sync_all())
         .map_err(|e| shown(&path, e))?;
     set_sealed(&file, true).map_err(|e| shown(&path, format!("sealing: {e}")))?;
@@ -171,22 +172,65 @@ pub fn remove_entry(path: &Path) -> Result<(), String> {
         Err(e) => return Err(shown(path, e)),
     };
     if meta.is_dir() {
-        return fs::remove_dir_all(path).map_err(|e| shown(path, e));
+        return fs::remove_dir_all(path)
+            .or_else(|_| move_aside(path))
+            .map_err(|e| shown(path, e));
     }
     if meta.is_file() {
-        let file = open_entry(path).map_err(|e| shown(path, e))?;
-        if is_sealed(&file) && !file.metadata().is_ok_and(|m| m.nlink() == 1) {
-            return Err(shown(path, "sealed under another name too"));
+        match open_entry(path) {
+            Ok(file) => {
+                if is_sealed(&file) && !file.metadata().is_ok_and(|m| m.nlink() == 1) {
+                    return Err(shown(path, "sealed under another name too"));
+                }
+                set_sealed(&file, false).map_err(|e| shown(path, e))?;
+            }
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {}
+            Err(e) => return Err(shown(path, e)),
         }
-        set_sealed(&file, false).map_err(|e| shown(path, e))?;
     }
     fs::remove_file(path).map_err(|e| shown(path, e))
 }
 
+/// Rename the directory at `path` to a name of its own beside it, for one
+/// that cannot be taken away whole: what is in it may not be ours to read.
+fn move_aside(path: &Path) -> std::io::Result<()> {
+    let mut random = [0u8; 8];
+    sys_core::getrandom(&mut random);
+    let mut aside = std::ffi::OsString::from(".");
+    aside.push(path.file_name().unwrap_or_default());
+    aside.push(format!(".{:016x}.aside", u64::from_le_bytes(random)));
+    fs::rename(path, path.with_file_name(aside))
+}
+
+/// The lock file at `path`, held exclusively, whatever else was left at its
+/// name taken away first.
+pub fn lock(path: &Path) -> Result<File, String> {
+    for _ in 0..2 {
+        let opened = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32 | O_NONBLOCK as i32)
+            .open(path);
+        match opened {
+            Ok(file) if file.metadata().is_ok_and(|m| m.is_file()) => {
+                sys_fs::flock(file.as_raw_fd(), LOCK_EX).map_err(|e| shown(path, e))?;
+                return Ok(file);
+            }
+            _ => remove_entry(path)?,
+        }
+    }
+    Err(shown(
+        path,
+        "something other than a lock keeps taking its name",
+    ))
+}
+
 /// The believed generation of `stem` in `dir`, the newest sealed regular
-/// file, and its bytes. Anything else under a generation's name, a write cut
-/// short among it, is passed over; a sealed one that cannot be read is an
-/// error, never the cue to believe an older.
+/// file uid 0 may read, and its bytes. Anything else under a generation's
+/// name, a write cut short among it, is passed over; a sealed one that cannot
+/// be read is an error, never the cue to believe an older.
 pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> {
     let mut generations: Vec<u64> = fs::read_dir(dir)
         .map_err(|e| shown(dir, e))?
@@ -196,7 +240,7 @@ pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> 
     for g in generations {
         let path = dir.join(format!("{stem}.{g}"));
         match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_file() => {}
+            Ok(meta) if meta.is_file() && meta.uid() == 0 && meta.mode() & 0o400 != 0 => {}
             Err(e) if e.kind() != ErrorKind::NotFound => return Err(shown(&path, e)),
             _ => continue,
         }
@@ -288,9 +332,13 @@ pub fn replace_sealed(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String
         .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
         .open(&fresh)
         .map_err(|e| shown(&fresh, e))?;
-    file.write_all(bytes)
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .and_then(|()| file.write_all(bytes))
         .and_then(|()| file.sync_all())
         .map_err(|e| shown(&fresh, e))?;
+    if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
+        remove_entry(path)?;
+    }
     let old = open_entry(path).ok().filter(is_sealed);
     if let Some(old) = &old {
         set_sealed(old, false).map_err(|e| shown(path, format!("unsealing: {e}")))?;
