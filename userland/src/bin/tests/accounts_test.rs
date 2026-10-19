@@ -36,6 +36,7 @@ const USERS: &str = "/bin/users";
 const AUTHCHECK: &str = "/sbin/authcheck";
 const NAME: &str = "accounts-test";
 const RENAMED: &str = "accounts-renamed";
+const THIRD: &str = "accounts-third";
 const OWN: &str = "org.slopos.accounts.password";
 const MANAGE: &str = "org.slopos.accounts.manage";
 const GROUPS: &str = "--groups";
@@ -303,6 +304,30 @@ fn an_account_has_a_private_home_and_its_groups() -> bool {
         ))
 }
 
+/// An administrator with no password who adds someone types one first, and
+/// adds nobody without.
+fn an_administrator_sets_a_password_to_add_someone() -> bool {
+    let Some(uid) = uid_of(NAME) else {
+        return fail(format!("{NAME} is gone"));
+    };
+    let untyped = mechanism(MANAGE, uid, &["add", THIRD, "--keep-autologin"], "");
+    if untyped.ok() || uid_of(THIRD).is_some() {
+        return fail(format!("added with no password typed: {}", untyped.shown()));
+    }
+    let typed = mechanism(
+        MANAGE,
+        uid,
+        &["add", THIRD, "--keep-autologin"],
+        "first secret\nfirst secret\n",
+    );
+    let removed = asked(&["remove", THIRD, "--home"], "");
+    (typed.ok() && removed.ok() && authcheck(NAME, "first secret") == Some(0))
+        || fail(format!(
+            "added once {NAME} had a password: {}",
+            typed.shown()
+        ))
+}
+
 fn a_password_is_set_checked_and_refused_when_wrong() -> bool {
     let set = asked(&["passwd", NAME], "first secret\nfirst secret\n");
     if !set.ok() {
@@ -543,7 +568,7 @@ fn a_renamed_or_removed_account_keeps_its_uid_given() -> bool {
 }
 
 fn clean_up() -> bool {
-    for name in [NAME, RENAMED] {
+    for name in [NAME, RENAMED, THIRD] {
         if uid_of(name).is_some() {
             let _ = asked(&["promote", "user"], "");
             let _ = asked(&["remove", name, "--home"], "");
@@ -566,6 +591,10 @@ fn main() {
         (
             "an_account_has_a_private_home_and_its_groups",
             an_account_has_a_private_home_and_its_groups,
+        ),
+        (
+            "an_administrator_sets_a_password_to_add_someone",
+            an_administrator_sets_a_password_to_add_someone,
         ),
         (
             "a_password_is_set_checked_and_refused_when_wrong",

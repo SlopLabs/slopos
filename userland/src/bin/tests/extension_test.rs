@@ -519,6 +519,34 @@ fn a_reserved_name_is_refused() -> bool {
         && (!Path::new(&format!("{STORE}/bin")).exists() || fail("the store holds bin"))
 }
 
+fn users(args: &[&str]) -> bool {
+    Command::new("/bin/users")
+        .args(args)
+        .env_remove(ENV_FD)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// A person and an extension never share a name: a person takes no name an
+/// extension's record keeps a uid for, and an extension no person's.
+fn a_person_and_an_extension_share_no_name() -> bool {
+    let Some(path) = image("ext-person", 1, "NetAdmin", "") else {
+        return false;
+    };
+    if users(&["add", "ext-first", "--keep-autologin"]) {
+        let _ = users(&["remove", "ext-first", "--home"]);
+        return fail("a person took ext-first's user");
+    }
+    if !users(&["add", "ext-person", "--keep-autologin"]) {
+        return fail("ext-person could not be added as a person");
+    }
+    let ran = extctl(ROOT, &["install", &path]);
+    let removed = users(&["remove", "ext-person", "--home"]);
+    refused(&ran, "a person's name")
+        && (record("ext-person").is_none() || fail("an extension took a person's name"))
+        && (removed || fail("ext-person could not be removed"))
+}
+
 /// The store is sealed, so nothing goes in without unsealing it, the kernel
 /// keeps it, so no rename moves it or the directory it is in and no mount
 /// covers it, and a record nobody sealed is not believed.
@@ -632,6 +660,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "a_first_install_asks_and_grants_what_it_read",
         a_first_install_asks_and_grants_what_it_read,
+    ),
+    (
+        "a_person_and_an_extension_share_no_name",
+        a_person_and_an_extension_share_no_name,
     ),
     (
         "one_declaring_more_than_its_grant_line_is_refused",
