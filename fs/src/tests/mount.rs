@@ -1230,33 +1230,40 @@ pub fn test_ext2_mount_by_label() -> TestResult {
 /// rename or removal moves one, and a mount at one, above one or beneath one
 /// would cover what it keeps, so it is refused.
 pub fn test_a_kept_directory_stays_where_it_is() -> TestResult {
-    use crate::vfs::init::vfs_keep_dir;
-    use crate::vfs::mount::covers_kept_dir;
-    use crate::vfs::vfs_rename;
-    use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, KEPT_DIRS};
     if !ready() {
         return slopos_testing::fail!("vfs init failed");
     }
-    for kept in KEPT_DIRS {
-        if let Err(e) = vfs_keep_dir(kept.as_bytes()) {
+    for kept in slopos_abi::fs::KEPT_DIRS {
+        if let Err(e) = crate::vfs::init::vfs_keep_dir(kept.as_bytes()) {
             return slopos_testing::fail!("{} was not kept: {:?}", kept, e);
         }
     }
+    match kept_dirs_stay_put().or_else(kept_dirs_refuse_mounts) {
+        Some(path) => slopos_testing::fail!("{:?} is not kept", core::str::from_utf8(path)),
+        None => TestResult::Pass,
+    }
+}
+
+/// A kept directory or one on the way to it that a rename or removal moved.
+fn kept_dirs_stay_put() -> Option<&'static [u8]> {
+    use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE};
     let stores = [EXTENSION_STORE.as_bytes(), ACCOUNTS_STORE.as_bytes()];
-    for path in [&b"/etc"[..], b"/var", b"/var/lib", b"/var/lib/slopos"]
+    let on_the_way = [&b"/etc"[..], b"/var", b"/var/lib", b"/var/lib/slopos"];
+    let renamed = on_the_way
         .into_iter()
         .chain(stores)
-    {
-        if vfs_rename(path, b"/kept-moved") != Err(VfsError::Busy) {
-            return slopos_testing::fail!("{:?} was renamed", core::str::from_utf8(path));
-        }
-    }
-    for store in stores {
-        if vfs_rmdir(store) != Err(VfsError::Busy) || vfs_stat(store).is_err() {
-            return slopos_testing::fail!("{:?} was removed", core::str::from_utf8(store));
-        }
-    }
-    for covering in [
+        .find(|path| crate::vfs::vfs_rename(path, b"/kept-moved") != Err(VfsError::Busy));
+    renamed.or_else(|| {
+        stores
+            .into_iter()
+            .find(|store| vfs_rmdir(store) != Err(VfsError::Busy) || vfs_stat(store).is_err())
+    })
+}
+
+/// A path a mount would wrongly cover or wrongly be refused at.
+fn kept_dirs_refuse_mounts() -> Option<&'static [u8]> {
+    use crate::vfs::mount::covers_kept_dir;
+    let covering = [
         &b"/etc"[..],
         b"/etc/passwd",
         b"/etc/hello",
@@ -1266,26 +1273,18 @@ pub fn test_a_kept_directory_stays_where_it_is() -> TestResult {
         b"/var/lib/slopos/slots",
         b"/var/lib/slopos/accounts",
         b"/var/lib/slopos/extensions/hello",
-    ] {
-        if !covers_kept_dir(covering) {
-            return slopos_testing::fail!(
-                "{:?} may be mounted over",
-                core::str::from_utf8(covering)
-            );
-        }
-    }
-    for beside in [
+    ];
+    let beside = [
         &b"/var/log"[..],
         b"/var/lib/hello",
         b"/var/lib/slopos2",
         b"/etc2",
         b"/opt",
-    ] {
-        if covers_kept_dir(beside) {
-            return slopos_testing::fail!("{:?} is refused a mount", core::str::from_utf8(beside));
-        }
-    }
-    TestResult::Pass
+    ];
+    covering
+        .into_iter()
+        .find(|path| !covers_kept_dir(path))
+        .or_else(|| beside.into_iter().find(|path| covers_kept_dir(path)))
 }
 
 slopos_testing::stest!(name = test_mount_id_is_never_reused, suite = fs);
