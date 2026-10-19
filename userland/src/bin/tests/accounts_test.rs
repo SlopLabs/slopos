@@ -474,6 +474,28 @@ fn a_password_typed_at_a_terminal_is_never_shown() -> bool {
     true
 }
 
+const PLANTED: &str = "/etc/.shadow.new";
+
+fn plant_a_fifo() -> bool {
+    let path = CString::new(PLANTED).expect("no NUL");
+    // SAFETY: `path` is a C string that outlives the call.
+    let made = unsafe { slopos_slibc::ffi::syscalls::mkfifo(path.as_ptr(), 0o644) };
+    made == 0 || fail(format!("a DacOverride holder made no FIFO at {PLANTED}"))
+}
+
+/// What a `DacOverride` holder leaves at the database's temporary name is
+/// taken away by the next writer, never opened.
+fn a_fifo_at_the_databases_temporary_name_is_taken_away() -> bool {
+    if !holding(DAC_OVERRIDE, plant_a_fifo) {
+        return false;
+    }
+    let set = asked(&["passwd", NAME], "past a fifo\npast a fifo\n");
+    let left = std::fs::symlink_metadata(PLANTED).is_ok();
+    let _ = std::fs::remove_file(PLANTED);
+    (set.ok() && !left && authcheck(NAME, "past a fifo") == Some(0))
+        || fail(format!("a FIFO at {PLANTED}, left {left}: {}", set.shown()))
+}
+
 fn only_an_administrator_manages_and_the_last_stays() -> bool {
     let Some(uid) = uid_of(NAME) else {
         return fail(format!("{NAME} is gone"));
@@ -726,6 +748,10 @@ fn main() {
         (
             "a_password_typed_at_a_terminal_is_never_shown",
             a_password_typed_at_a_terminal_is_never_shown,
+        ),
+        (
+            "a_fifo_at_the_databases_temporary_name_is_taken_away",
+            a_fifo_at_the_databases_temporary_name_is_taken_away,
         ),
         (
             "only_an_administrator_manages_and_the_last_stays",
