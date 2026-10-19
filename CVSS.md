@@ -2,6 +2,71 @@
 
 **No finding is open.**
 
+Swept 2026-10-19: on-disk extension images — `slopos-verity-core`'s SHA-256,
+tree, verified read and `verify_all`; `extension-core`'s volume writer and
+strict reader, the image and symbol checks and the packer;
+`ext_activate(name, fd, digest)` and the retired archive slot; the verifying
+device over a file of the root, the activation pool, its index and reaper;
+`orphan::hold_ref`; the block ceiling `ExtensionUpdate` lifts; `extctl`'s
+reads, signed pre-judgment, store copies and archive floors; and
+`remote.py`'s root. Five review passes; nothing reached the bar. They found,
+before it landed, that a freed activation's unlinked image was never freed
+on a RAM root and kept the ext2 flusher from parking; that an instance whose
+volume would not detach was lost to the pool; that a directory whose
+extents all named one block, or 65 536 names sharing an FNV-1a hash, held
+the activation lock for hours; that the index took an empty name, a name
+holding `/` or NUL, a repeated `.`, an entry of another type or a reserved
+inode; that the inode an activation held open could be freed between the
+descriptor's snapshot and its reference; that the userland reader divided
+by zero on a descriptor size past 4 KiB, read past a directory block with
+checksums off, overflowed an inode table's end, disagreed with the kernel
+on a directory's or symlink's high size word and on the entry limit, and
+hashed a 16 TiB file of holes or directories of aliased blocks for hours,
+aborting or stalling the uid-0 mechanism, and took files whose extents named
+the descriptor tables, ran past the volume or were sealed under another
+generation, symlinks with a hole or a NUL and descriptors the kernel
+refuses, which the kernel would then not serve, let a file size near 2^64
+wrap past its size bound, read a directory's records whole before any
+limit, and named an unnamed manifest entry in quadratic time; that `install-signed` parsed a
+whole unsigned image unasked before its signature, and that a replay of a
+sidecar the store keeps made the mechanism read a whole image holding the
+store's lock and the `extensions` group; that a FIFO at the image path
+blocked the mechanism there; that a store copy was believed by its length
+and top block alone, a failed copy or a failed edit left one behind, and a
+requester appending to its file after the judgment had the copy fill the
+disk; that the symbol and whole-image checks held every ELF file and the
+whole tree in memory; that the symbol check copied a file's names
+unbounded and walked each program's libraries through linear searches
+rebuilt per program; that every activation took 2 MiB of cache frames and
+some 350 KiB of heap whatever its image's size, 64 MiB of frames for a full
+pool; that the per-process block ceiling refused a dense
+image past 256 MiB; and that an archive-form floor refused the same version
+rebuilt, or let a key replace its bytes again and again. Now the device
+drains what it frees; a stuck instance goes to the reaper; the index walk is
+bounded by the volume and sorted, and refuses those names and inodes; the
+reference is taken under the snapshot; the reader requires the writer's
+geometry, checksums, first inode and generation, bounds every header, path,
+directory, entry, file, descriptor and extent by the volume's own blocks in
+checked arithmetic, and matches the kernel's sizes and limit; a signed
+install is judged from its sidecar before its image is read; the image is
+opened without blocking or following a link; a copy takes exactly the
+judged length, is held whole and is taken away with whatever an edit leaves;
+files are read one at a time and the tree a level at a time; a
+file's names are kept once and bounded by its bytes, and its libraries
+are indexed, resolved once and bounded per file and per program; an
+activation's cache starts at 64 frames and its index and cache slots grow
+with the volume; an
+`ExtensionUpdate` holder has no block ceiling; and an archive floor binds
+its version once. Below the bar: an activation's index can hold up to
+65 536 names of 255 bytes, about 17 MB of kernel heap, and 32 activations
+about 570 MB, which only an `ExtensionUpdate` holder can make; image blocks
+are cached by both the root's filesystem and the activation's; each block
+that fails its tree logs a line, unthrottled; every boot's `activate-all`
+reads each extension's ELF files whole through the tree before privd
+starts; an interface-5 base on a newer kernel stops every extension until
+`extctl enable`; and the 2026-10-16 notes below on the activation budget
+describe the in-memory form this sweep's change replaced.
+
 Swept 2026-10-18: extensions' actions, commands, apps and configuration —
 privd's attested requester (`SO_PEEREXTENSION` before `SO_PEERPROGRAM`), the
 extension principal and `Action::for_privd`'s reading of `allow` lines, the
