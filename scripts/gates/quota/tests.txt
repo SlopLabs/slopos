@@ -97,6 +97,11 @@
 # parent's 6896 and 6512, so the growth is what those tests leave allocated,
 # the static `BaseFs` the replacement test mounts at a name among it, while
 # every activation they make is freed.
+# Then 8455 in one capture on a host without KVM, where the parent measured
+# 7222, once activations served images from disk:
+# `test_activations_stay_within_the_pool` holds 32 at once, each its image as
+# a file of the RAM root beside its volume's cache, index and verifying
+# device, and the heap keeps the pages that peak took.
 # The kernelmeta row after userland measured 10197 in one capture on a host
 # without KVM, 162 pages over the single capture 10035 recorded, once the shell
 # forked its registry programs instead of spawning them, two kernel tests moved
@@ -162,7 +167,7 @@ post-kernel-tests	commitpages	2564
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	7217
+post-kernel-tests	kernelmeta	8455
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	539050
 post-kernel-tests	pinnedbytes	4

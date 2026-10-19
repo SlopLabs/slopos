@@ -452,9 +452,22 @@ require-phase post-userland-tests
 #               count. Every banded pool stayed inside its band (kernel edges
 #               199 and 202, chains 458 and 459; userland edges 265 and 266,
 #               chains 543 and 543).
+#   2026-10-19  kernel 265 -> 268, userland 280 -> 283: activations served
+#               from disk (`plans/system-extensions.md` phase 5). The kernel
+#               phase's extension tests mount each image through an
+#               `Ext2Mount` of the pool's own class, `EXT_ACTIVATION`, beside
+#               `EXT_ACTIVATION_STATE` and the verifying device's
+#               `EXT_VERITY`; `EXT_ACTIVATING` only moved its declaration
+#               site. Two captures without KVM count 267/282 against the
+#               parent's 264/279 on the same host, whose boot counts 106 for
+#               both, and each cap adds the named classes to the recorded
+#               count. Kernel bands held (edges 206 and 208, chains 465 and
+#               465); userland chains drifted to 556 and 552 above 548, the
+#               new nesting of an activation, its device and the root's
+#               filesystem, with edges 274 and 273.
 boot	classes	105
-post-kernel-tests	classes	265
-post-userland-tests	classes	280
+post-kernel-tests	classes	268
+post-userland-tests	classes	283
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
