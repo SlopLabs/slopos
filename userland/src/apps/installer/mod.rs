@@ -400,6 +400,7 @@ fn choose_person(
     if no_password {
         return Ok((name, None));
     }
+    let _quiet = crate::secret::quiet()?;
     let typed = crate::secret::read(&format!("Password for {name}, or nothing for none: "))?
         .ok_or("no password typed; pass --no-password for none")?;
     if typed.is_empty() {
@@ -409,13 +410,7 @@ fn choose_person(
     if again != typed {
         return Err("the two passwords differ; nothing was written".into());
     }
-    let mut salt = [0u8; slopos_accounts_core::password::SALT_LEN];
-    if sys_core::getrandom(&mut salt) != salt.len() as isize {
-        return Err("no randomness for the password's salt".into());
-    }
-    let hash = slopos_accounts_core::password::Hash::new(typed.bytes(), &salt)
-        .map_err(|e| format!("hashing the password: {e:?}"))?;
-    Ok((name, Some(hash.render())))
+    Ok((name, Some(typed.hash()?)))
 }
 
 fn explain(e: PlanError, disk: &Disk) -> String {

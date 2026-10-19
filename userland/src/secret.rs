@@ -5,7 +5,9 @@ use std::io::{BufRead, Write};
 
 use slopos_abi::syscall::termios::LocalFlags;
 
-use crate::syscall::{fs, process};
+use slopos_accounts_core::password::{Hash, SALT_LEN};
+
+use crate::syscall::{core as sys_core, fs, process};
 
 pub struct Secret(String);
 
@@ -16,6 +18,17 @@ impl Secret {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// The PHC string of this password's hash under a fresh salt.
+    pub fn hash(&self) -> Result<String, String> {
+        let mut salt = [0u8; SALT_LEN];
+        if sys_core::getrandom(&mut salt) != SALT_LEN as isize {
+            return Err("no randomness for a salt".into());
+        }
+        Hash::new(self.bytes(), &salt)
+            .map(|hash| hash.render())
+            .map_err(|e| format!("hashing the password: {e:?}"))
     }
 }
 

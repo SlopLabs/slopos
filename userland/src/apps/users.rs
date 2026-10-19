@@ -14,7 +14,6 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use slopos_abi::fs::{ADMIN_GROUP, PERSON_UIDS, SESSION_UID};
-use slopos_accounts_core::password::{Hash, SALT_LEN};
 use slopos_accounts_core::{Accounts, Person};
 use slopos_priv_core::{ENV_ACTION, ENV_UID};
 use slopos_slibc_core::passwd::{BASE_GROUP, BASE_PASSWD, Group, Passwd, lines};
@@ -172,20 +171,10 @@ pub fn check(name: &str, secret: &Secret) -> Result<bool, String> {
     }
 }
 
-fn hash(secret: &Secret) -> Result<String, String> {
-    let mut salt = [0u8; SALT_LEN];
-    if sys_core::getrandom(&mut salt) != SALT_LEN as isize {
-        return Err("no randomness for a salt".into());
-    }
-    Hash::new(secret.bytes(), &salt)
-        .map(|hash| hash.render())
-        .map_err(|e| format!("hashing the password: {e:?}"))
-}
-
 /// A new password for `name`, typed twice.
 fn new_password(name: &str) -> Result<String, String> {
     match secret::read_new(name)? {
-        Some(secret) => hash(&secret),
+        Some(secret) => secret.hash(),
         None => Err(format!("no password typed for {name}")),
     }
 }
