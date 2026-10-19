@@ -370,6 +370,7 @@ fn group_list(user: &[u8], group: gid_t, into: &mut [gid_t]) -> usize {
     scan(GROUP, BASE_GROUP, |line| {
         if let Some(row) = Group::parse(line)
             && row.lists(user)
+            && row.gid != group
         {
             add(row.gid);
         }
