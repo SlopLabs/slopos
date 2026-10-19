@@ -16,12 +16,15 @@ use std::ffi::CString;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use slopos_abi::caps::{ALL, DAC_OVERRIDE, MOUNT, SEAL, SET_ID};
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
-use slopos_abi::fs::{ACCOUNTS_STORE, ADMIN_GID, PERSON_UIDS, SESSION_UID};
+use slopos_abi::fs::{ACCOUNTS_STORE, ADMIN_GID, MNT_DETACH, PERSON_UIDS, SESSION_UID};
+use slopos_abi::syscall::termios::LocalFlags;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::{ENV_ACTION, ENV_FD, ENV_UID};
 use slopos_slibc::process::ids::{getgroups, setgroups, setresgid, setresuid};
@@ -30,7 +33,7 @@ use slopos_slibc::test_harness::note;
 use slopos_userland::accounts::Store;
 use slopos_userland::syscall::core::caps_drop;
 use slopos_userland::syscall::process::{self, Endowment};
-use slopos_userland::syscall::{SyscallError, fs};
+use slopos_userland::syscall::{OwnedFd, RawFd, SyscallError, fs, net};
 
 const USERS: &str = "/bin/users";
 const AUTHCHECK: &str = "/sbin/authcheck";
@@ -374,10 +377,114 @@ fn ones_own_password_takes_the_current_one() -> bool {
     !mismatched.ok() || fail("the manage action changed an own password")
 }
 
+fn drain(fd: RawFd, into: &mut Vec<u8>) {
+    let mut buf = [0u8; 512];
+    while let Ok(n @ 1..) = fs::read_slice(fd, &mut buf) {
+        into.extend_from_slice(&buf[..n]);
+    }
+}
+
+/// `users passwd` started at a terminal, its output there or, `logged`, in a
+/// pipe, with `secret` typed at each prompt once the terminal echoes nothing:
+/// its status, what the terminal showed and what the pipe took.
+fn passwd_at_a_terminal(
+    logged: bool,
+    secret: &str,
+) -> Result<(Option<i32>, String, String), String> {
+    let (master, _) = process::openpty().map_err(|e| format!("no pty: {e:?}"))?;
+    let slave = fs::ioctl_tiocgptpeer(master.raw()).map_err(|e| format!("no slave: {e:?}"))?;
+    let log = match logged {
+        true => Some(fs::pipe().map_err(|e| format!("no pipe: {e:?}"))?),
+        false => None,
+    };
+    let stdio = |fd: &OwnedFd| -> Result<Stdio, String> {
+        let dup = fs::dup(fd.raw()).map_err(|e| format!("dup: {e:?}"))?;
+        // SAFETY: `dup` just opened this descriptor for us.
+        Ok(Stdio::from(unsafe {
+            std::fs::File::from_raw_fd(dup.into_raw())
+        }))
+    };
+    let shown = log.as_ref().map_or(&slave, |(_, end)| end);
+    let mut cmd = Command::new(USERS);
+    cmd.args(["passwd", NAME])
+        .env_remove(ENV_FD)
+        .stdin(stdio(&slave)?)
+        .stdout(stdio(shown)?)
+        .stderr(stdio(shown)?);
+    // SAFETY: the closure makes two system calls and allocates nothing.
+    unsafe {
+        cmd.pre_exec(|| {
+            if process::setsid() < 0 || fs::tiocsctty(0).is_err() {
+                return Err(std::io::Error::other("no controlling terminal"));
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("users: {e}"))?;
+    let log = log.map(|(read, _)| read);
+    let _ = net::set_nonblocking(master.raw());
+    if let Some(read) = &log {
+        let _ = net::set_nonblocking(read.raw());
+    }
+    let (mut screen, mut piped) = (Vec::new(), Vec::new());
+    let mut answered = 0;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        drain(master.raw(), &mut screen);
+        if let Some(read) = &log {
+            drain(read.raw(), &mut piped);
+        }
+        let shown = String::from_utf8_lossy(if logged { &piped } else { &screen });
+        let prompts = shown.matches("New password for").count() + shown.matches("Again:").count();
+        let quiet = fs::tcgetattr(slave.raw()).is_ok_and(|t| !t.c_lflag.contains(LocalFlags::ECHO));
+        if prompts > answered && quiet {
+            let _ = fs::write_slice(master.raw(), format!("{secret}\n").as_bytes());
+            answered += 1;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            break status.code();
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            return Err(format!("it did not finish, after {answered} answers"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    drain(master.raw(), &mut screen);
+    if let Some(read) = &log {
+        drain(read.raw(), &mut piped);
+    }
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    Ok((status, text(&screen), text(&piped)))
+}
+
+/// What is typed at a terminal for a password is never shown, whether the
+/// prompts go to that terminal or to a log.
+fn a_password_typed_at_a_terminal_is_never_shown() -> bool {
+    for (logged, secret) in [(false, "typed at a terminal"), (true, "typed beside a log")] {
+        match passwd_at_a_terminal(logged, secret) {
+            Ok((Some(0), screen, piped))
+                if !screen.contains(secret)
+                    && !piped.contains(secret)
+                    && authcheck(NAME, secret) == Some(0) => {}
+            other => return fail(format!("at a terminal, logged {logged}: {other:?}")),
+        }
+    }
+    true
+}
+
 fn only_an_administrator_manages_and_the_last_stays() -> bool {
     let Some(uid) = uid_of(NAME) else {
         return fail(format!("{NAME} is gone"));
     };
+    let first = asked(&["demote", "user"], "");
+    if first.ok() || !first.said.contains("login screen") {
+        return fail(format!(
+            "users demote user beside {NAME}: {}",
+            first.shown()
+        ));
+    }
     let demoted = asked(&["demote", NAME], "");
     if !demoted.ok() || record().and_then(|r| r.person(NAME).map(|p| p.admin)) != Some(false) {
         return fail(format!("users demote {NAME}: {}", demoted.shown()));
@@ -519,11 +626,23 @@ fn mount_covers_no_database() -> bool {
             SyscallError::EPERM.errno(),
         )
     };
+    let detach_refused = |target: &str| {
+        let path = CString::new(target).expect("no NUL");
+        let got = fs::umount2(path.as_ptr(), MNT_DETACH).map_or_else(|e| e.errno(), |()| 0);
+        expect(
+            &format!("detaching {target}"),
+            got,
+            SyscallError::EPERM.errno(),
+        )
+    };
     let control = fs::mount(b"", MOUNTED_HERE.as_bytes(), b"ramfs", 0);
     let unmounted = CString::new(MOUNTED_HERE).map(|path| fs::umount2(path.as_ptr(), 0));
     ["/etc", UNDER_ETC, "/var/lib/slopos", ACCOUNTS_STORE]
         .into_iter()
         .all(refused)
+        && ["/var", "/etc", ACCOUNTS_STORE]
+            .into_iter()
+            .all(detach_refused)
         && (control.is_ok() && matches!(unmounted, Ok(Ok(())))
             || fail(format!("the control mount at {MOUNTED_HERE}: {control:?}")))
 }
@@ -603,6 +722,10 @@ fn main() {
         (
             "ones_own_password_takes_the_current_one",
             ones_own_password_takes_the_current_one,
+        ),
+        (
+            "a_password_typed_at_a_terminal_is_never_shown",
+            a_password_typed_at_a_terminal_is_never_shown,
         ),
         (
             "only_an_administrator_manages_and_the_last_stays",
