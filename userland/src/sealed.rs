@@ -165,23 +165,22 @@ pub fn put_sealed(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
 /// not; nothing there is no error. A sealed file with a second name is
 /// left sealed, since unsealing it would unseal that name too.
 pub fn remove_entry(path: &Path) -> Result<(), String> {
-    match open_entry(path) {
-        Ok(file) if file.metadata().is_ok_and(|m| m.is_dir()) => {
-            fs::remove_dir_all(path).map_err(|e| shown(path, e))
-        }
-        Ok(file) => {
-            if is_sealed(&file) && !file.metadata().is_ok_and(|m| m.nlink() == 1) {
-                return Err(shown(path, "sealed under another name too"));
-            }
-            set_sealed(&file, false).map_err(|e| shown(path, e))?;
-            fs::remove_file(path).map_err(|e| shown(path, e))
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        Err(e) if e.raw_os_error() == Some(slopos_abi::Errno::ELOOP.raw()) => {
-            fs::remove_file(path).map_err(|e| shown(path, e))
-        }
-        Err(e) => Err(shown(path, e)),
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(shown(path, e)),
+    };
+    if meta.is_dir() {
+        return fs::remove_dir_all(path).map_err(|e| shown(path, e));
     }
+    if meta.is_file() {
+        let file = open_entry(path).map_err(|e| shown(path, e))?;
+        if is_sealed(&file) && !file.metadata().is_ok_and(|m| m.nlink() == 1) {
+            return Err(shown(path, "sealed under another name too"));
+        }
+        set_sealed(&file, false).map_err(|e| shown(path, e))?;
+    }
+    fs::remove_file(path).map_err(|e| shown(path, e))
 }
 
 /// The believed generation of `stem` in `dir`, the newest sealed regular
@@ -196,6 +195,11 @@ pub fn newest(dir: &Path, stem: &str) -> Result<Option<(u64, Vec<u8>)>, String> 
     generations.sort_unstable_by(|a, b| b.cmp(a));
     for g in generations {
         let path = dir.join(format!("{stem}.{g}"));
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {}
+            Err(e) if e.kind() != ErrorKind::NotFound => return Err(shown(&path, e)),
+            _ => continue,
+        }
         let file = match open_entry(&path) {
             Ok(file) => file,
             Err(e)
