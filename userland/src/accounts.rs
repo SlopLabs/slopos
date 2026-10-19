@@ -11,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, O_NOFOLLOW, RAMFS_MAGIC};
+use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, O_NOFOLLOW, PERSON_UIDS, RAMFS_MAGIC};
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, UserSigaction};
 use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC};
 use slopos_accounts_core::{Accounts, Entry};
@@ -221,6 +221,14 @@ fn entry(
     // SAFETY: a row found has its name NUL-terminated in `buf`, alive here.
     let name = unsafe { core::ffi::CStr::from_ptr(row.pw_name) };
     Some((row.pw_uid, name.to_str().ok()?.to_owned()))
+}
+
+/// Whether `name` is a person's: in the record, when this process may read
+/// it, or in the database, which a failed write leaves behind the record.
+pub fn names_a_person(name: &str) -> bool {
+    let recorded = Store::read(Path::new("/")).recorded();
+    recorded.is_ok_and(|accounts| accounts.is_some_and(|a| a.person(name).is_some()))
+        || uid_of(name).is_some_and(|uid| PERSON_UIDS.contains(&uid))
 }
 
 /// Whose uid the user database gives `name`.

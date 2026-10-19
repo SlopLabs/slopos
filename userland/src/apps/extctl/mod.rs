@@ -16,7 +16,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use slopos_abi::fs::{O_NOFOLLOW, PERSON_UIDS};
+use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::syscall::BOOT_FLAG_EXTENSIONS_OFF;
 use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
 use slopos_extension_core::admit::{self, Admitted, Authority, Bounds};
@@ -619,10 +619,7 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
     .map_err(refused)?;
     if let Admitted::Install(installed) = &admitted {
         let mut users = installed.grant.users.iter().chain([&name]);
-        let person = |user: &&String| {
-            crate::accounts::uid_of(user).is_some_and(|uid| PERSON_UIDS.contains(&uid))
-        };
-        if let Some(user) = users.find(person) {
+        if let Some(user) = users.find(|user| crate::accounts::names_a_person(user)) {
             return Err(format!("{path}: {user} is a person's name"));
         }
     }
