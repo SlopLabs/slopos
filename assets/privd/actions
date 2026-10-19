@@ -210,6 +210,32 @@ action org.slopos.extension.config-signed
   allow    paired
   describe "Install an extension's configuration signed by the key that installed it"
 
+action org.slopos.accounts.password
+  program  /bin/users
+  args     passwd
+  caps     Seal
+  uid      0
+  exclusive accounts
+  allow    root
+  allow    session consent
+  describe "Change your own password, typing the current one first"
+
+action org.slopos.accounts.manage
+  program  /bin/users
+  args     add *
+  args     remove *
+  args     rename *
+  args     passwd *
+  args     promote *
+  args     demote *
+  args     autologin *
+  caps     Seal DacOverride
+  uid      0
+  exclusive accounts
+  allow    root
+  allow    session consent
+  describe "Add, remove or rename a person, set their password, or change who administers the machine"
+
 action org.slopos.cpufreq.set
   program  /bin/cpufreq
   args     set *

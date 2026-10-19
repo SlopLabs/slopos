@@ -106,12 +106,14 @@ pub fn runtime_dir() -> String {
 /// them.
 pub const SESSION_PATH: &str = "/bin:/sbin:/home/user/.local/bin:/usr/local/bin:/opt/bin";
 
-/// What every program the session starts finds in its environment.
+/// What every program the session starts finds in its environment, its
+/// person named as the user database names them.
 pub fn session_env() -> [String; 4] {
+    let name = crate::accounts::name_of(SESSION_UID).unwrap_or_else(|| "user".to_owned());
     [
         format!("HOME={SESSION_HOME}"),
-        "USER=user".to_owned(),
-        "LOGNAME=user".to_owned(),
+        format!("USER={name}"),
+        format!("LOGNAME={name}"),
         format!("XDG_RUNTIME_DIR={}", runtime_dir()),
     ]
 }

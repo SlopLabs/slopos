@@ -54,13 +54,12 @@ fn upgrade_console_font() {
     );
 }
 
-/// What a crashed boot left goes to `/var/log/crash` before the tests and the
-/// services run.
-fn collect_crash_records() {
-    let argv = [b"bootctl\0".as_ptr(), b"collect\0".as_ptr()];
+/// Run the base's `program`, as `argv` names it, holding `caps`, and wait.
+fn run_holding(program: &[u8], argv: &[&core::ffi::CStr], caps: u64) {
+    let argv: Vec<*const u8> = argv.iter().map(|arg| arg.as_ptr().cast()).collect();
     let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
     let tid = process::spawn_endowed(
-        b"/bin/bootctl",
+        program,
         &argv,
         &[],
         &[],
@@ -69,13 +68,29 @@ fn collect_crash_records() {
         &actions,
         0,
         Endowment {
-            caps: RAW_BLOCK | POWER,
+            caps,
             ..Endowment::NONE
         },
     );
     if tid > 0 {
         let _ = process::waitpid(tid as u32);
     }
+}
+
+/// What a crashed boot left goes to `/var/log/crash` before the tests and the
+/// services run.
+fn collect_crash_records() {
+    run_holding(
+        b"/bin/bootctl",
+        &[c"bootctl", c"collect"],
+        RAW_BLOCK | POWER,
+    );
+}
+
+/// The user database written from the accounts record, and a root without
+/// one given the one person's, before anything reads either.
+fn sync_accounts() {
+    run_holding(b"/bin/users", &[c"users", c"sync"], SEAL);
 }
 
 /// The store's enabled extensions shown at `/opt`, each held again to its
@@ -89,25 +104,11 @@ fn activate_extensions() {
     if !any || sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
         return;
     }
-    let argv = [b"extctl\0".as_ptr(), b"activate-all\0".as_ptr()];
-    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
-    let tid = process::spawn_endowed(
+    run_holding(
         b"/bin/extctl",
-        &argv,
-        &[],
-        &[],
-        TaskPriority::Normal,
-        TASK_FLAG_USER_MODE,
-        &actions,
-        0,
-        Endowment {
-            caps: EXTENSION_UPDATE | SEAL,
-            ..Endowment::NONE
-        },
+        &[c"extctl", c"activate-all"],
+        EXTENSION_UPDATE | SEAL,
     );
-    if tid > 0 {
-        let _ = process::waitpid(tid as u32);
-    }
 }
 
 /// Requests answered once the session has ended, each holding a descriptor
@@ -194,6 +195,7 @@ fn boot() -> ! {
     }
     install_live_apps();
     crate::root_layout::make_runtime_dir(&runtime_dir());
+    sync_accounts();
     activate_extensions();
 
     let consent = net::socketpair(SOCK_CLOEXEC | SOCK_NONBLOCK).ok();

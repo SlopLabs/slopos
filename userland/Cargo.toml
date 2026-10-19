@@ -54,6 +54,14 @@ name = "extctl"
 path = "src/bin/extctl.rs"
 
 [[bin]]
+name = "users"
+path = "src/bin/users.rs"
+
+[[bin]]
+name = "authcheck"
+path = "src/bin/authcheck.rs"
+
+[[bin]]
 name = "session"
 path = "src/bin/session.rs"
 
@@ -321,6 +329,10 @@ path = "src/bin/tests/peer_test.rs"
 [[bin]]
 name = "privd_test"
 path = "src/bin/tests/privd_test.rs"
+
+[[bin]]
+name = "accounts_test"
+path = "src/bin/tests/accounts_test.rs"
 
 [[bin]]
 name = "extension_test"

@@ -68,7 +68,7 @@ const OWNERS_RECORD: (&str, &str) = (
 );
 
 /// The programs packed at `/sbin/<name>` rather than `/bin/<name>`.
-const SBIN_PROGRAMS: [&str; 2] = ["init", "privd"];
+const SBIN_PROGRAMS: [&str; 3] = ["init", "privd", "authcheck"];
 
 /// The action policy privd reads, packed at `/usr/share/slopos/privd`.
 /// privd's policy and the ceiling of what extensions may be granted, from

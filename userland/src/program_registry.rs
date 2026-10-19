@@ -27,6 +27,11 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "End the desktop session and start it again",
     },
     ProgramSpec {
+        name: "users",
+        path: "/bin/users",
+        desc: "List the people this machine knows, and add or change them",
+    },
+    ProgramSpec {
         name: "bootctl",
         path: "/bin/bootctl",
         desc: "Install a kernel into a boot slot and choose what boots",

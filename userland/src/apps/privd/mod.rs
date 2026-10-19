@@ -44,8 +44,8 @@ use slopos_priv_core::consent::{Ask, Refusal};
 use slopos_priv_core::policy::{Principal, REMOTED};
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request, kind};
 use slopos_priv_core::{
-    Action, ENV_ACTION, INIT, MECHANISM_LANG, MECHANISM_PATH, POLICY, Policy, Requester, SOCKET,
-    Verdict, elf_interpreted,
+    Action, ENV_ACTION, ENV_UID, INIT, MECHANISM_LANG, MECHANISM_PATH, POLICY, Policy, Requester,
+    SOCKET, Verdict, elf_interpreted,
 };
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
@@ -836,7 +836,14 @@ fn run(
         crate::activation::holds(&origin.extension, origin.generation, &action.program)
             .map_err(Reply::denied)?;
     }
-    let pid = spawn(action, origin, &request.args, &fds[..wire::STDIO], &cwd)?;
+    let pid = spawn(
+        action,
+        origin,
+        peer.uid,
+        &request.args,
+        &fds[..wire::STDIO],
+        &cwd,
+    )?;
     log!(
         "privd: {} for {}: started pid {pid}{}",
         action.name,
@@ -889,12 +896,13 @@ fn directory_of(daemon: &Daemon, dir: &OwnedFd) -> Result<String, Reply> {
         .ok_or_else(|| Reply::denied("the working directory has no path"))
 }
 
-/// Start `action`'s mechanism; an extension's sees its own `bin` on its
-/// path, runs with no supplementary group and carries its extension's login
-/// tag, by which init ends it once the extension stops.
+/// Start `action`'s mechanism for the requester `uid`; an extension's sees
+/// its own `bin` on its path, runs with no supplementary group and carries
+/// its extension's login tag, by which init ends it once the extension stops.
 fn spawn(
     action: &Action,
     extension: Option<&Origin>,
+    uid: u32,
     args: &[Vec<u8>],
     stdio: &[OwnedFd],
     cwd: &str,
@@ -914,6 +922,7 @@ fn spawn(
         format!("PATH={path}"),
         format!("LANG={MECHANISM_LANG}"),
         format!("{ENV_ACTION}={}", action.name),
+        format!("{ENV_UID}={uid}"),
     ];
     let env: Vec<CString> = env
         .into_iter()

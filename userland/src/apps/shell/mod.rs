@@ -345,6 +345,7 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
     env::initialize();
     if rescue::active() {
         env::unset(slopos_priv_core::ENV_ACTION.as_bytes());
+        env::unset(slopos_priv_core::ENV_UID.as_bytes());
         env::set_exported(rescue::ENV.as_bytes(), b"1");
     }
     crate::privd::hold_inherited();

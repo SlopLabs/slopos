@@ -1,3 +1,4 @@
+pub mod authcheck;
 pub mod bootctl;
 pub mod compositor;
 pub mod coreutils;
@@ -23,4 +24,5 @@ pub mod ss;
 pub mod sysmon;
 pub mod terminal;
 pub mod tree_install;
+pub mod users;
 pub mod widget_gallery;

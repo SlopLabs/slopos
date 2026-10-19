@@ -19,6 +19,7 @@ pub mod selfhost;
 pub use slopos_rt as ring;
 pub mod runtime;
 pub mod sealed;
+pub mod secret;
 pub mod syscall;
 pub mod theme;
 pub mod tls;

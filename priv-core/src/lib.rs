@@ -52,6 +52,9 @@ pub const INIT: &str = "/sbin/init";
 pub const ENV_FD: &str = "PRIVD_FD";
 /// The action privd started a mechanism for.
 pub const ENV_ACTION: &str = "PRIV_ACTION";
+/// The uid of the requester privd started a mechanism for, as its connection
+/// recorded it.
+pub const ENV_UID: &str = "PRIV_UID";
 /// The search path a base mechanism sees; an extension's sees its own `bin`
 /// after it.
 pub const MECHANISM_PATH: &str = "/bin:/sbin";
