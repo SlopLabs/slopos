@@ -1953,7 +1953,11 @@ slibc's own rows, which are the one person's rendering
 `/var/lib/slopos` (`KEPT_DIRS`, which base interface 7 counts, since a
 base's stores rest on it), so no mount covers the database or the record and
 no volume holding either is unmounted, and
-the seal keeps a `DacOverride` holder from rewriting either. A change the
+the seal keeps a `DacOverride` holder from rewriting either; what such a
+holder leaves at a writer's names — a link, a FIFO, a socket, a file uid 0
+may not read, a directory — is taken away, a directory moved aside if it
+will not go, and never believed, and `/etc/shadow` is written first and from
+the record alone. A change the
 record took whose database was not written says so, and the old database —
 a removed person's hash among it — stands until the next boot writes it. The
 installer asks for the first person's name, `user` unless one is given

@@ -15,7 +15,7 @@ use slopos_userland as _;
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -110,7 +110,11 @@ fn mechanism(action: &str, for_uid: u32, args: &[&str], input: &str) -> Ran {
         format!("{ENV_UID}={for_uid}"),
         "PATH=/bin:/sbin".to_owned(),
     ];
-    spawned(USERS, args, &env, input, SEAL | DAC_OVERRIDE, None)
+    let caps = match action {
+        OWN => SEAL,
+        _ => SEAL | DAC_OVERRIDE,
+    };
+    spawned(USERS, args, &env, input, caps, None)
 }
 
 /// `program` holding `caps`, as `ids` when given, with `input` typed; what
@@ -483,17 +487,46 @@ fn plant_a_fifo() -> bool {
     made == 0 || fail(format!("a DacOverride holder made no FIFO at {PLANTED}"))
 }
 
+fn plant_an_unreadable_file() -> bool {
+    let made = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0)
+        .open(PLANTED);
+    made.is_ok() || fail(format!("a DacOverride holder made no file at {PLANTED}"))
+}
+
 /// What a `DacOverride` holder leaves at the database's temporary name is
-/// taken away by the next writer, never opened.
-fn a_fifo_at_the_databases_temporary_name_is_taken_away() -> bool {
+/// taken away by the next writer, never opened: a FIFO, and a file the own
+/// password's mechanism, which holds no `DacOverride`, may not read.
+fn what_is_left_at_the_databases_temporary_name_is_taken_away() -> bool {
+    let Some(uid) = uid_of(NAME) else {
+        return fail(format!("{NAME} is gone"));
+    };
     if !holding(DAC_OVERRIDE, plant_a_fifo) {
         return false;
     }
-    let set = asked(&["passwd", NAME], "past a fifo\npast a fifo\n");
+    let past_fifo = asked(&["passwd", NAME], "past a fifo\npast a fifo\n");
     let left = std::fs::symlink_metadata(PLANTED).is_ok();
     let _ = std::fs::remove_file(PLANTED);
-    (set.ok() && !left && authcheck(NAME, "past a fifo") == Some(0))
-        || fail(format!("a FIFO at {PLANTED}, left {left}: {}", set.shown()))
+    if !past_fifo.ok() || left || authcheck(NAME, "past a fifo") != Some(0) {
+        return fail(format!(
+            "a FIFO at {PLANTED}, left {left}: {}",
+            past_fifo.shown()
+        ));
+    }
+    if !holding(DAC_OVERRIDE, plant_an_unreadable_file) {
+        return false;
+    }
+    let input = "past a fifo\npast a file\npast a file\n";
+    let past_file = mechanism(OWN, uid, &["passwd"], input);
+    let left = std::fs::symlink_metadata(PLANTED).is_ok();
+    let _ = std::fs::remove_file(PLANTED);
+    (past_file.ok() && !left && authcheck(NAME, "past a file") == Some(0))
+        || fail(format!(
+            "a file at {PLANTED}, left {left}: {}",
+            past_file.shown()
+        ))
 }
 
 fn only_an_administrator_manages_and_the_last_stays() -> bool {
@@ -750,8 +783,8 @@ fn main() {
             a_password_typed_at_a_terminal_is_never_shown,
         ),
         (
-            "a_fifo_at_the_databases_temporary_name_is_taken_away",
-            a_fifo_at_the_databases_temporary_name_is_taken_away,
+            "what_is_left_at_the_databases_temporary_name_is_taken_away",
+            what_is_left_at_the_databases_temporary_name_is_taken_away,
         ),
         (
             "only_an_administrator_manages_and_the_last_stays",
