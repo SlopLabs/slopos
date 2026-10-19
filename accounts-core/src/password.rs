@@ -20,6 +20,9 @@ pub const COST: Params = Params {
     lanes: 4,
 };
 pub const SALT_LEN: usize = 16;
+/// The longest password a hash is made of, which `/sbin/authcheck` reads
+/// whole.
+pub const SECRET_MAX: usize = 1024;
 const TAG_LEN: usize = 32;
 
 /// The most a hash read back may cost to check: four times a new one's

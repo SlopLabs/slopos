@@ -8,15 +8,15 @@
 use std::io::Read;
 use std::path::Path;
 
-use slopos_accounts_core::password::Hash;
-use slopos_accounts_core::shadow_hash;
+use slopos_accounts_core::password::{Hash, SECRET_MAX};
+use slopos_accounts_core::{NAME_MAX, shadow_hash};
 
 use crate::sealed::{SMALL_MAX, read_sealed};
 use crate::syscall::core as sys_core;
 
 const SHADOW: &str = "/etc/shadow";
 /// A name, a password and their two newlines.
-const INPUT_MAX: u64 = 4096;
+const INPUT_MAX: u64 = (NAME_MAX + SECRET_MAX + 2) as u64;
 
 fn check(input: &[u8]) -> Result<bool, String> {
     let text = input

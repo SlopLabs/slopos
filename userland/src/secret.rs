@@ -5,7 +5,7 @@ use std::io::{BufRead, Write};
 
 use slopos_abi::syscall::termios::LocalFlags;
 
-use slopos_accounts_core::password::{Hash, SALT_LEN};
+use slopos_accounts_core::password::{Hash, SALT_LEN, SECRET_MAX};
 
 use crate::syscall::{core as sys_core, fs, process};
 
@@ -22,6 +22,9 @@ impl Secret {
 
     /// The PHC string of this password's hash under a fresh salt.
     pub fn hash(&self) -> Result<String, String> {
+        if self.0.len() > SECRET_MAX {
+            return Err(format!("a password is at most {SECRET_MAX} bytes"));
+        }
         let mut salt = [0u8; SALT_LEN];
         if sys_core::getrandom(&mut salt) != SALT_LEN as isize {
             return Err("no randomness for a salt".into());
