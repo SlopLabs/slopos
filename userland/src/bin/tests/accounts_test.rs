@@ -19,11 +19,12 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use slopos_abi::caps::{ALL, DAC_OVERRIDE, MOUNT, SEAL};
+use slopos_abi::caps::{ALL, DAC_OVERRIDE, MOUNT, SEAL, SET_ID};
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{ACCOUNTS_STORE, ADMIN_GID, PERSON_UIDS, SESSION_UID};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::{ENV_ACTION, ENV_FD, ENV_UID};
+use slopos_slibc::process::ids::{getgroups, setgroups, setresgid, setresuid};
 use slopos_slibc::process::{_exit, WEXITSTATUS, WIFEXITED, fork, waitpid};
 use slopos_slibc::test_harness::note;
 use slopos_userland::accounts::Store;
@@ -39,6 +40,7 @@ const OWN: &str = "org.slopos.accounts.password";
 const MANAGE: &str = "org.slopos.accounts.manage";
 const GROUPS: &str = "--groups";
 const EPERM: i32 = 1;
+const EACCES: i32 = 13;
 const EBUSY: i32 = 16;
 
 fn fail(why: impl AsRef<str>) -> bool {
@@ -229,11 +231,26 @@ fn the_one_person_is_the_first_administrator() -> bool {
     listed.ok() && listed.said.contains("admin") || fail(format!("users list: {}", listed.shown()))
 }
 
+/// `initgroups` gives the account its own group and the administrators'.
+fn initgroups_reads_the_database() -> bool {
+    let (Some(uid), Ok(name)) = (uid_of(NAME), CString::new(NAME)) else {
+        return fail(format!("{NAME} is nobody"));
+    };
+    let mut groups = [0u32; 8];
+    // SAFETY: `name` is a C string and `groups` holds 8 gids.
+    let count = unsafe {
+        slopos_slibc::pwd::initgroups(name.as_ptr(), uid);
+        getgroups(8, groups.as_mut_ptr())
+    };
+    count == 2 && groups[..2] == [uid, ADMIN_GID]
+        || fail(format!("initgroups gave {count}: {groups:?}"))
+}
+
 /// The supplementary groups this process holds, printed for its parent.
 fn print_groups() -> ! {
     let mut groups = [0u32; 32];
     // SAFETY: `groups` holds as many gids as it is said to.
-    let count = unsafe { slopos_slibc::process::ids::getgroups(32, groups.as_mut_ptr()) };
+    let count = unsafe { getgroups(32, groups.as_mut_ptr()) };
     let shown: Vec<String> = groups[..count.max(0) as usize]
         .iter()
         .map(u32::to_string)
@@ -271,6 +288,9 @@ fn an_account_has_a_private_home_and_its_groups() -> bool {
     };
     if found != 2 || groups[..2] != [uid, ADMIN_GID] {
         return fail(format!("{NAME}'s groups are {found}: {groups:?}"));
+    }
+    if !holding(SET_ID, initgroups_reads_the_database) {
+        return false;
     }
     let me = std::env::current_exe().map(|p| p.display().to_string());
     let me = me.unwrap_or_else(|_| "/bin/accounts_test".into());
@@ -377,46 +397,89 @@ fn expect(what: &str, got: i32, want: i32) -> bool {
     got == want || fail(format!("{what}: errno {got}, want {want}"))
 }
 
+/// A sealed file or directory refuses a change whatever the mode says;
+/// only the seal's own ioctl answers `EPERM`, and a kept directory that is
+/// not sealed answers a move `EBUSY`.
 fn dac_override_reaches_no_database() -> bool {
     let unseal = std::fs::File::open("/etc/group")
         .map(|file| fs::set_inode_flags(file.as_raw_fd(), 0).map_err(|e| e.errno()));
     let staged = std::fs::write("/etc/accounts_test.group", b"admin:x:10:mallory\n");
     let swapped = std::fs::rename("/etc/accounts_test.group", "/etc/group");
     let _ = std::fs::remove_file("/etc/accounts_test.group");
-    expect(
-        "writing /etc/group",
-        errno_of(std::fs::OpenOptions::new().write(true).open("/etc/group")),
-        EPERM,
-    ) && expect(
-        "removing /etc/group",
-        errno_of(std::fs::remove_file("/etc/group")),
-        EPERM,
-    ) && (staged.is_ok() || fail("/etc took no new file"))
-        && expect("renaming over /etc/group", errno_of(swapped), EPERM)
-        && expect(
+    let refusals = [
+        (
+            "writing /etc/group",
+            errno_of(std::fs::OpenOptions::new().write(true).open("/etc/group")),
+            EACCES,
+        ),
+        (
+            "removing /etc/group",
+            errno_of(std::fs::remove_file("/etc/group")),
+            EACCES,
+        ),
+        ("renaming over /etc/group", errno_of(swapped), EACCES),
+        (
             "unsealing /etc/group",
             unseal.ok().and_then(Result::err).unwrap_or(0),
             EPERM,
-        )
-        && expect(
+        ),
+        (
             "writing in the store",
             errno_of(std::fs::write(format!("{ACCOUNTS_STORE}/record.99"), b"x")),
-            EPERM,
-        )
-        && expect(
+            EACCES,
+        ),
+        (
             "moving the store",
             errno_of(std::fs::rename(ACCOUNTS_STORE, "/var/lib/slopos/moved")),
+            EACCES,
+        ),
+        (
+            "moving /var/lib/slopos",
+            errno_of(std::fs::rename("/var/lib/slopos", "/var/lib/moved")),
             EBUSY,
-        )
-        && expect(
+        ),
+        (
             "moving /etc",
             errno_of(std::fs::rename("/etc", "/etc.moved")),
             EBUSY,
-        )
+        ),
+    ];
+    (staged.is_ok() || fail("/etc took no new file"))
+        && refusals
+            .into_iter()
+            .all(|(what, got, want)| expect(what, got, want))
 }
 
 fn the_database_holds_against_dac_override() -> bool {
     holding(DAC_OVERRIDE, dac_override_reaches_no_database)
+}
+
+/// The session reads neither `/etc/shadow` nor the record, and `authcheck`
+/// it runs cannot tell anything.
+fn session_reads_no_hash() -> bool {
+    // SAFETY: plain id calls on this forked child.
+    let became = unsafe {
+        setgroups(0, core::ptr::null()) == 0
+            && setresgid(SESSION_UID, SESSION_UID, SESSION_UID) == 0
+            && setresuid(SESSION_UID, SESSION_UID, SESSION_UID) == 0
+    };
+    caps_drop(SET_ID);
+    became
+        && expect(
+            "reading /etc/shadow",
+            errno_of(std::fs::read("/etc/shadow")),
+            EACCES,
+        )
+        && expect(
+            "listing the store",
+            errno_of(std::fs::read_dir(ACCOUNTS_STORE)),
+            EACCES,
+        )
+        && (authcheck(NAME, "second") == Some(2) || fail("authcheck told the session something"))
+}
+
+fn the_session_reads_no_hash() -> bool {
+    holding(SET_ID, session_reads_no_hash)
 }
 
 const MOUNTED_HERE: &str = "/tmp/accounts_test.mnt";
@@ -520,6 +583,7 @@ fn main() {
             "the_database_holds_against_dac_override",
             the_database_holds_against_dac_override,
         ),
+        ("the_session_reads_no_hash", the_session_reads_no_hash),
         (
             "the_database_holds_against_mount",
             the_database_holds_against_mount,
