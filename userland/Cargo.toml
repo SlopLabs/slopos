@@ -416,6 +416,7 @@ testbins = [
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-accounts-core = { workspace = true }
 slopos-appkit = { workspace = true }
 slopos-apps = { workspace = true, optional = true }
 slopos-editor-core = { workspace = true }

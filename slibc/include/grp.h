@@ -28,6 +28,7 @@ void setgrent(void);
 struct group *getgrent(void);
 void endgrent(void);
 int initgroups(const char *user, gid_t group);
+int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups);
 
 #ifdef __cplusplus
 }

@@ -238,11 +238,22 @@ pub const BASE_DIRS: [&str; 6] = [
     "/etc/ssl",
 ];
 
-/// The one person at the machine: their uid, their group's gid, and their
-/// home.
+/// The first person, whom the desktop runs as: their uid, their group's gid,
+/// and their home.
 pub const SESSION_UID: u32 = 1000;
 pub const SESSION_GID: u32 = 1000;
 pub const SESSION_HOME: &str = "/home/user";
+
+/// The uids the user database gives, as Debian's policy divides them: 1 to
+/// 99 are the base's own system users, then extensions' users, then people,
+/// each with a group of their own whose gid is their uid.
+pub const EXTENSION_UIDS: core::ops::RangeInclusive<u32> = 100..=999;
+pub const PERSON_UIDS: core::ops::RangeInclusive<u32> = SESSION_UID..=59_999;
+pub const NOBODY_UID: u32 = 65_534;
+
+/// The group whose members administer the machine.
+pub const ADMIN_GROUP: &str = "admin";
+pub const ADMIN_GID: u32 = 10;
 
 /// A directory every root carries, who owns it and its mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,10 +314,15 @@ pub const OWNERS_RECORD: &str = "/var/lib/slopos/owners";
 /// keeps, uid 0's and sealed by the mechanisms that write it.
 pub const EXTENSION_STORE: &str = "/var/lib/slopos/extensions";
 
+/// The people the machine knows, which administer it and their passwords'
+/// hashes, uid 0's alone and sealed by the mechanisms that write it.
+pub const ACCOUNTS_STORE: &str = "/var/lib/slopos/accounts";
+
 /// Directories the kernel keeps where they are from boot: neither one nor a
 /// directory on the way to one is renamed or removed, and no mount covers
-/// one, one on the way to it or anything beneath it.
-pub const KEPT_DIRS: [&str; 1] = [EXTENSION_STORE];
+/// one, one on the way to it or anything beneath it. `/etc` holds the user
+/// database and `/var/lib/slopos` the system's records.
+pub const KEPT_DIRS: [&str; 4] = ["/etc", "/var/lib/slopos", EXTENSION_STORE, ACCOUNTS_STORE];
 
 pub const AT_FDCWD: i32 = -100;
 pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;

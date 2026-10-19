@@ -71,6 +71,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-accounts-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-slibc-core",
+ "slopos-tls-core",
+]
+
+[[package]]
 name = "slopos-acpi"
 version = "0.1.0"
 dependencies = [
@@ -246,6 +255,7 @@ name = "slopos-extension-core"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
+ "slopos-accounts-core",
  "slopos-boot-core",
  "slopos-ext4-core",
  "slopos-priv-core",
@@ -573,6 +583,7 @@ name = "slopos-userland"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
+ "slopos-accounts-core",
  "slopos-appkit",
  "slopos-apps",
  "slopos-boot-core",

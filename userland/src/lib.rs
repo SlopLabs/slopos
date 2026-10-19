@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod activation;
 pub mod app_entry;
 pub mod apps;
@@ -17,6 +18,7 @@ pub mod root_layout;
 pub mod selfhost;
 pub use slopos_rt as ring;
 pub mod runtime;
+pub mod sealed;
 pub mod syscall;
 pub mod theme;
 pub mod tls;

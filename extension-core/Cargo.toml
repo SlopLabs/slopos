@@ -21,6 +21,7 @@ test-elf = []
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-accounts-core = { workspace = true }
 slopos-boot-core = { workspace = true }
 slopos-ext4-core = { workspace = true }
 slopos-priv-core = { workspace = true }

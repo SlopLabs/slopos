@@ -48,6 +48,7 @@ members = [
   "fat-core",
   "boot-core",
   "tree-core",
+  "accounts-core",
   "extension-core",
   "verity-core",
   "shell-core",
@@ -144,6 +145,7 @@ slopos-priv-core = { path = "priv-core" }
 slopos-fat-core = { path = "fat-core" }
 slopos-boot-core = { path = "boot-core" }
 slopos-tree-core = { path = "tree-core" }
+slopos-accounts-core = { path = "accounts-core" }
 slopos-extension-core = { path = "extension-core" }
 slopos-shell-core = { path = "shell-core" }
 slopos-editor-core = { path = "editor-core" }

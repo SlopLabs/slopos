@@ -2516,6 +2516,8 @@ pub const HEADERS: &[HeaderSpec] = &[
             "getgrent() -> *mut group",
             "endgrent()",
             "initgroups(user: *const c_char, group: gid_t) -> c_int",
+            "getgrouplist(user: *const c_char, group: gid_t, groups: *mut gid_t, \
+             ngroups: *mut c_int) -> c_int",
         ],
         variables: &[],
         raw: &[],

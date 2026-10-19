@@ -17,7 +17,7 @@ use slopos_userland::syscall::UserCpuInfo;
 use slopos_userland::syscall::core as sys_core;
 
 use std::collections::BTreeSet;
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 use std::fs;
 use std::mem;
 use std::os::unix::process::ExitStatusExt;
@@ -55,7 +55,9 @@ use slopos_slibc::process::ids::{ITIMER_REAL, getgroups, getitimer, setgroups, s
 use slopos_slibc::process::{
     _exit, WEXITSTATUS, WIFEXITED, execl, execle, fork, getegid, geteuid, waitpid,
 };
-use slopos_slibc::pwd::{getgrgid, getgrgid_r, getgrnam, getpwnam, getpwuid, initgroups};
+use slopos_slibc::pwd::{
+    getgrgid, getgrgid_r, getgrnam, getgrouplist, getpwnam, getpwuid, initgroups,
+};
 use slopos_slibc::signal::{self, SIG_DFL, SIGSEGV, SIGUSR1, SIGUSR2};
 use slopos_slibc::stdio::{self, chars::fputs, file::fflush, file::fileno, file::freopen};
 use slopos_slibc::stdlib::temp::{mkdtemp, mkstemp};
@@ -1812,19 +1814,32 @@ fn passwd_database_has_root_and_user() -> bool {
     true
 }
 
-/// The group set `initgroups` makes is `{group}`, which `getgroups` then
-/// reports; no interval timer is ever armed, so one reads zero, disarming
-/// succeeds and arming is `ENOSYS`.
+/// The group set `initgroups` makes is `{group}` and the administrators',
+/// which `getgroups` then reports and `getgrouplist` lists, saying how many
+/// there are when given too little room; no interval timer is ever armed,
+/// so one reads zero, disarming succeeds and arming is `ENOSYS`.
 fn initgroups_and_the_interval_timer() -> bool {
     let set = unsafe { initgroups(c"user".as_ptr(), 1000) };
     let mut groups = [0u32; 4];
     let count = unsafe { getgroups(4, groups.as_mut_ptr()) };
     let cleared = unsafe { setgroups(0, ptr::null()) };
     let after = unsafe { getgroups(0, ptr::null_mut()) };
-    if set != 0 || count != 1 || groups[0] != 1000 || cleared != 0 || after != 0 {
+    let want = [1000, slopos_abi::fs::ADMIN_GID];
+    if set != 0 || count != 2 || groups[..2] != want || cleared != 0 || after != 0 {
         note(&format!(
             "initgroups gave {set}, then getgroups {count} {:?}; clearing gave {cleared}, then {after}",
             groups
+        ));
+        return false;
+    }
+    let mut listed = [0u32; 4];
+    let mut room: c_int = 1;
+    let short = unsafe { getgrouplist(c"user".as_ptr(), 1000, listed.as_mut_ptr(), &mut room) };
+    let mut whole: c_int = 4;
+    let found = unsafe { getgrouplist(c"user".as_ptr(), 1000, listed.as_mut_ptr(), &mut whole) };
+    if (short, room) != (-1, 2) || (found, whole) != (2, 2) || listed[..2] != want {
+        note(&format!(
+            "getgrouplist with room for 1 gave {short} and {room}, with room for 4 {found} and {whole}: {listed:?}"
         ));
         return false;
     }

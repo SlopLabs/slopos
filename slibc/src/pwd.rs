@@ -20,6 +20,8 @@ const GROUP: &[u8] = b"/etc/group\0";
 
 /// What the kernel lets one process belong to.
 const GROUPS_MAX: usize = 32;
+/// The most groups a user is found in.
+const LIST_MAX: usize = 256;
 
 const PTR: usize = size_of::<*mut c_char>();
 
@@ -353,19 +355,10 @@ pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut group {
     group_static(|grp, buf, len, result| getgrnam_r(name, grp, buf, len, result))
 }
 
-/// `initgroups(3)`: the supplementary groups become `group` and every group
-/// that lists `user`, which only a holder of `SetId` may set.
-///
-/// # Safety
-/// `user` is a NUL-terminated C string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn initgroups(user: *const c_char, group: gid_t) -> c_int {
-    if user.is_null() {
-        errno_set(EINVAL.raw());
-        return -1;
-    }
-    let user = c_bytes(user);
-    let mut gids = [group; GROUPS_MAX];
+/// `group`, then each other group that lists `user`, the first [`LIST_MAX`]
+/// of them, and how many that is.
+fn group_list(user: &[u8], group: gid_t) -> ([gid_t; LIST_MAX], usize) {
+    let mut gids = [group; LIST_MAX];
     let mut count = 1;
     scan(GROUP, BASE_GROUP, |line| {
         if let Some(row) = Group::parse(line)
@@ -375,9 +368,49 @@ pub unsafe extern "C" fn initgroups(user: *const c_char, group: gid_t) -> c_int 
             gids[count] = row.gid;
             count += 1;
         }
-        count == GROUPS_MAX
+        count == LIST_MAX
     });
-    crate::process::ids::setgroups(count, gids.as_ptr())
+    (gids, count)
+}
+
+/// `initgroups(3)`: the supplementary groups become `group` and every group
+/// that lists `user`, as many as the kernel holds, which only a holder of
+/// `SetId` may set.
+///
+/// # Safety
+/// `user` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn initgroups(user: *const c_char, group: gid_t) -> c_int {
+    if user.is_null() {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    let (gids, count) = group_list(c_bytes(user), group);
+    crate::process::ids::setgroups(count.min(GROUPS_MAX), gids.as_ptr())
+}
+
+/// `getgrouplist(3)`: `group` and every group that lists `user`, into
+/// `groups`, which holds `*ngroups` of them. `*ngroups` becomes how many
+/// there are, which is the answer, or `-1` when `groups` holds fewer.
+///
+/// # Safety
+/// `user` is a NUL-terminated C string; `groups` holds `*ngroups` gids.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrouplist(
+    user: *const c_char,
+    group: gid_t,
+    groups: *mut gid_t,
+    ngroups: *mut c_int,
+) -> c_int {
+    if user.is_null() || ngroups.is_null() || (*ngroups > 0 && groups.is_null()) {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    let (gids, count) = group_list(c_bytes(user), group);
+    let room = usize::try_from(*ngroups).unwrap_or(0);
+    core::ptr::copy_nonoverlapping(gids.as_ptr(), groups, count.min(room));
+    *ngroups = count as c_int;
+    if count > room { -1 } else { count as c_int }
 }
 
 static PW_NEXT: AtomicUsize = AtomicUsize::new(0);

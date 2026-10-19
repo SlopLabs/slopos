@@ -2,10 +2,11 @@
 //! entry a line, fields separated by `:`, a group's members by `,`.
 
 /// What stands for each database while its file is absent or not sealed: the
-/// system and the one person at the machine.
+/// system, the one person at the machine, who administers it, and `nobody`.
 pub const BASE_PASSWD: &str = "root:x:0:0:root:/root:/bin/shell\n\
-                               user:x:1000:1000:user:/home/user:/bin/shell\n";
-pub const BASE_GROUP: &str = "root:x:0:\nuser:x:1000:\n";
+                               user:x:1000:1000:user:/home/user:/bin/shell\n\
+                               nobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
+pub const BASE_GROUP: &str = "root:x:0:\nadmin:x:10:user\nuser:x:1000:\nnobody:x:65534:\n";
 
 /// The longest line either database takes. A longer one is no entry, so
 /// every entry fits a buffer of this size with its fields' NULs.
@@ -112,20 +113,29 @@ mod tests {
 
     #[test]
     fn the_base_rows_read_back() {
-        let users: [Passwd<'_>; 2] = {
+        let users: [Passwd<'_>; 3] = {
             let mut rows = lines(BASE_PASSWD.as_bytes()).map(|l| Passwd::parse(l).unwrap());
-            [rows.next().unwrap(), rows.next().unwrap()]
+            core::array::from_fn(|_| rows.next().unwrap())
         };
         assert_eq!(users[0].name, b"root");
         assert_eq!((users[0].uid, users[0].gid), (0, 0));
         assert_eq!(users[1].name, b"user");
         assert_eq!((users[1].uid, users[1].dir), (1000, &b"/home/user"[..]));
         assert_eq!(users[1].strings_len(), 5 + 2 + 5 + 11 + 11);
-        let groups: usize = lines(BASE_GROUP.as_bytes())
-            .map(|l| Group::parse(l).unwrap())
-            .filter(|g| g.members().next().is_none())
-            .count();
-        assert_eq!(groups, 2);
+        assert_eq!((users[2].name, users[2].uid), (&b"nobody"[..], 65534));
+        let groups: [Group<'_>; 4] = {
+            let mut rows = lines(BASE_GROUP.as_bytes()).map(|l| Group::parse(l).unwrap());
+            core::array::from_fn(|_| rows.next().unwrap())
+        };
+        assert_eq!((groups[1].name, groups[1].gid), (&b"admin"[..], 10));
+        assert!(groups[1].lists(b"user"));
+        assert_eq!(
+            groups
+                .iter()
+                .filter(|g| g.members().next().is_none())
+                .count(),
+            3
+        );
     }
 
     #[test]

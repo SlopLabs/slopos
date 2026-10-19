@@ -482,7 +482,7 @@ fn settle(tell_init: bool) -> String {
     let mut said = String::new();
     match Store::open(true) {
         Ok(store) => {
-            if let Err(why) = accounts::sync(&store) {
+            if let Err(why) = accounts::sync() {
                 said.push_str(&format!("\nthe user database was not written: {why}"));
             }
             if let Err(why) = commands::sync(&store) {

@@ -1,0 +1,237 @@
+//! The accounts store on a root and the user database written from it. The
+//! record of the people goes in as sealed generations in a directory only uid
+//! 0 reads ([`crate::sealed`]); `/etc/passwd`, `/etc/group` and `/etc/shadow`
+//! are rendered from it and from the extensions' users, sealed too. A writer
+//! holds the store's lock across reading the record and writing the
+//! database, so the last one written is the newest of both; a reader takes
+//! nothing, since nothing it can see is half made.
+
+use std::fs::{self, File, OpenOptions};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, O_NOFOLLOW, RAMFS_MAGIC};
+use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC};
+use slopos_accounts_core::{Accounts, Entry};
+
+use crate::apps::extctl::store::Store as Extensions;
+use crate::sealed::{SMALL_MAX, newest, open_dir, replace_sealed, set_sealed, shown, unsealed};
+use crate::syscall::{fs as sys_fs, process};
+
+/// The record, as generations in the store: `record.<n>`.
+const RECORD: &str = "record";
+const PASSWD: &str = "etc/passwd";
+const GROUP: &str = "etc/group";
+const SHADOW: &str = "etc/shadow";
+
+/// The accounts store of a root.
+pub struct Store {
+    top: PathBuf,
+    dir: PathBuf,
+    _lock: Option<File>,
+}
+
+fn under(top: &Path, path: &str) -> PathBuf {
+    top.join(path.trim_start_matches('/'))
+}
+
+/// Whether the root at `top` keeps its records in memory, where a seal is for
+/// good and nothing could be changed a second time.
+pub fn in_memory(top: &Path) -> bool {
+    under(top, ACCOUNTS_STORE).parent().is_some_and(on_ram)
+}
+
+fn on_ram(dir: &Path) -> bool {
+    std::ffi::CString::new(dir.as_os_str().as_encoded_bytes())
+        .ok()
+        .and_then(|path| sys_fs::statfs_path(path.as_ptr()).ok())
+        .is_some_and(|stats| stats.f_type == RAMFS_MAGIC)
+}
+
+impl Store {
+    /// The store of the root at `top`, `/` for this system's, to read.
+    pub fn read(top: &Path) -> Store {
+        Store {
+            top: top.to_path_buf(),
+            dir: under(top, ACCOUNTS_STORE),
+            _lock: None,
+        }
+    }
+
+    /// The store of the root at `top` to change: every other writer locked
+    /// out, and its directory made uid 0's alone and sealed. A root in memory
+    /// keeps a seal for good, so it keeps the one person's record.
+    pub fn write(top: &Path) -> Result<Store, String> {
+        let store = Store::read(top);
+        let parent = store.dir.parent().ok_or("the store has no parent")?;
+        let mut walked = PathBuf::from("/");
+        for part in parent.iter().skip(1) {
+            walked.push(part);
+            open_dir(&walked).map_err(|e| shown(&walked, e))?;
+        }
+        if on_ram(parent) {
+            return Err("accounts need a disk root: a RAM root keeps every seal for good".into());
+        }
+        let mut at = store.dir.clone().into_os_string();
+        at.push(".lock");
+        let at = PathBuf::from(at);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
+            .open(&at)
+            .map_err(|e| shown(&at, e))?;
+        sys_fs::flock(lock.as_raw_fd(), LOCK_EX).map_err(|e| shown(&at, e))?;
+        match fs::create_dir(&store.dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+                return Err(shown(&store.dir, e));
+            }
+            _ => {}
+        }
+        let dir = open_dir(&store.dir).map_err(|e| shown(&store.dir, e))?;
+        let meta = dir.metadata().map_err(|e| shown(&store.dir, e))?;
+        if meta.uid() != 0 {
+            return Err(shown(&store.dir, "not uid 0's"));
+        }
+        if meta.mode() & 0o777 != 0o700 {
+            set_sealed(&dir, false).map_err(|e| shown(&store.dir, e))?;
+            dir.set_permissions(fs::Permissions::from_mode(0o700))
+                .map_err(|e| shown(&store.dir, e))?;
+        }
+        set_sealed(&dir, true).map_err(|e| shown(&store.dir, format!("sealing: {e}")))?;
+        Ok(Store {
+            _lock: Some(lock),
+            ..store
+        })
+    }
+
+    /// The record written last, `None` on a root none was written on.
+    pub fn recorded(&self) -> Result<Option<Accounts>, String> {
+        if open_dir(&self.dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+            return Ok(None);
+        }
+        let Some((g, bytes)) = newest(&self.dir, RECORD)? else {
+            return Ok(None);
+        };
+        let path = self.dir.join(format!("{RECORD}.{g}"));
+        std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(Accounts::parse)
+            .map(Some)
+            .ok_or_else(|| shown(&path, "not an accounts record"))
+    }
+
+    /// The people as the record has them, the one person on a root none was
+    /// written on.
+    pub fn accounts(&self) -> Result<Accounts, String> {
+        Ok(self.recorded()?.unwrap_or_else(Accounts::one_person))
+    }
+
+    /// Make `accounts` the record, then write the database from it.
+    pub fn put(&self, accounts: &Accounts) -> Result<(), String> {
+        debug_assert!(self._lock.is_some(), "a writer's store");
+        writing();
+        let text = accounts.render();
+        if text.len() as u64 > SMALL_MAX {
+            return Err("the record would be too large".into());
+        }
+        unsealed(&self.dir, || {
+            crate::sealed::put_generation(&self.dir, RECORD, text.as_bytes(), 0o600)
+        })?;
+        self.sync()
+    }
+
+    /// Write the user database the record and the extensions' records
+    /// describe.
+    pub fn sync(&self) -> Result<(), String> {
+        writing();
+        let accounts = self.accounts()?;
+        let others = extension_entries(&self.top)?;
+        let files = [
+            (
+                PASSWD,
+                slopos_accounts_core::passwd(&accounts, &others),
+                0o644,
+            ),
+            (
+                GROUP,
+                slopos_accounts_core::group(&accounts, &others),
+                0o644,
+            ),
+            (SHADOW, slopos_accounts_core::shadow(&accounts), 0o600),
+        ];
+        for (path, text, mode) in files {
+            replace_sealed(&self.top.join(path), text.as_bytes(), mode)?;
+        }
+        Ok(())
+    }
+}
+
+/// What the user database calls `uid`.
+pub fn name_of(uid: u32) -> Option<String> {
+    let null = core::ptr::null_mut();
+    let mut row = slopos_slibc::types::passwd {
+        pw_name: null,
+        pw_passwd: null,
+        pw_uid: 0,
+        pw_gid: 0,
+        pw_gecos: null,
+        pw_dir: null,
+        pw_shell: null,
+    };
+    let mut buf = [0u8; slopos_slibc::pwd::PASSWD_BUF_MIN];
+    let mut found = core::ptr::null_mut();
+    // SAFETY: `row`, `buf` and `found` outlive the call, and `buf` holds as
+    // many bytes as it is said to; a row found points into `buf`.
+    let name = unsafe {
+        let rc = slopos_slibc::pwd::getpwuid_r(
+            uid,
+            &mut row,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut found,
+        );
+        (rc == 0 && !found.is_null()).then(|| core::ffi::CStr::from_ptr(row.pw_name))?
+    };
+    name.to_str().ok().map(str::to_owned)
+}
+
+/// From here on the termination signals a requester relays are ignored, so
+/// none cuts a write short.
+fn writing() {
+    for signum in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
+        let _ = process::ignore_signal(signum);
+    }
+}
+
+/// The installed extensions' users, none on a root without the store.
+fn extension_entries(top: &Path) -> Result<Vec<Entry>, String> {
+    Ok(slopos_extension_core::accounts::entries(
+        &extension_records(top)?,
+    ))
+}
+
+fn extension_records(top: &Path) -> Result<Vec<slopos_extension_core::record::Record>, String> {
+    if !under(top, EXTENSION_STORE).is_dir() {
+        return Ok(Vec::new());
+    }
+    let store = Extensions::open_at(top, false)?;
+    let mut out = Vec::new();
+    for name in store.names()? {
+        out.extend(store.record(&name)?);
+    }
+    Ok(out)
+}
+
+/// Every name an extension's record keeps a uid for, its removed ones
+/// included, which no person takes.
+pub fn extension_users(top: &Path) -> Result<Vec<String>, String> {
+    Ok(extension_records(top)?
+        .into_iter()
+        .flat_map(|record| record.uids.into_iter().map(|(name, _)| name))
+        .collect())
+}

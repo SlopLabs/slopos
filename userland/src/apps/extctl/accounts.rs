@@ -1,16 +1,12 @@
-//! The user database, `/etc/passwd` and `/etc/group`: the base's entries and
-//! the installed extensions' users, written sealed from the records, which
-//! keep the uids. slibc believes either only while it is sealed.
+//! The uids extensions' users take, which their records keep, and the user
+//! database written from the records and the people's.
 
 use std::path::Path;
 
 use slopos_extension_core::accounts;
 use slopos_extension_core::record::Record;
 
-use super::store::{Store, replace_sealed};
-
-const PASSWD: &str = "/etc/passwd";
-const GROUP: &str = "/etc/group";
+use super::store::Store;
 
 /// Every record the store keeps. One it cannot read is an error: the uids it
 /// holds would be given again.
@@ -31,9 +27,7 @@ pub fn give_uids(store: &Store, record: &mut Record) -> Result<bool, String> {
     accounts::allocate(record, &others).map_err(|e| format!("{}: {e}", record.name))
 }
 
-/// Write the database the store's records describe.
-pub fn sync(store: &Store) -> Result<(), String> {
-    let records = records(store)?;
-    replace_sealed(Path::new(PASSWD), accounts::passwd(&records).as_bytes())?;
-    replace_sealed(Path::new(GROUP), accounts::group(&records).as_bytes())
+/// Write the database the records describe beside the people.
+pub fn sync() -> Result<(), String> {
+    crate::accounts::Store::write(Path::new("/"))?.sync()
 }

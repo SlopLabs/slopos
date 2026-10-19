@@ -1228,31 +1228,43 @@ pub fn test_ext2_mount_by_label() -> TestResult {
 
 /// A kept directory and each one on the way to it stay where they are: no
 /// rename or removal moves one, and a mount at one, above one or beneath one
-/// would cover the store, so it is refused.
+/// would cover what it keeps, so it is refused.
 pub fn test_a_kept_directory_stays_where_it_is() -> TestResult {
     use crate::vfs::init::vfs_keep_dir;
     use crate::vfs::mount::covers_kept_dir;
     use crate::vfs::vfs_rename;
+    use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, KEPT_DIRS};
     if !ready() {
         return slopos_testing::fail!("vfs init failed");
     }
-    let store = slopos_abi::fs::EXTENSION_STORE.as_bytes();
-    if let Err(e) = vfs_keep_dir(store) {
-        return slopos_testing::fail!("the store was not kept: {:?}", e);
+    for kept in KEPT_DIRS {
+        if let Err(e) = vfs_keep_dir(kept.as_bytes()) {
+            return slopos_testing::fail!("{} was not kept: {:?}", kept, e);
+        }
     }
-    for path in [&b"/var"[..], b"/var/lib", b"/var/lib/slopos", store] {
+    let stores = [EXTENSION_STORE.as_bytes(), ACCOUNTS_STORE.as_bytes()];
+    for path in [&b"/etc"[..], b"/var", b"/var/lib", b"/var/lib/slopos"]
+        .into_iter()
+        .chain(stores)
+    {
         if vfs_rename(path, b"/kept-moved") != Err(VfsError::Busy) {
             return slopos_testing::fail!("{:?} was renamed", core::str::from_utf8(path));
         }
     }
-    if vfs_rmdir(store) != Err(VfsError::Busy) || vfs_stat(store).is_err() {
-        return slopos_testing::fail!("the store was removed");
+    for store in stores {
+        if vfs_rmdir(store) != Err(VfsError::Busy) || vfs_stat(store).is_err() {
+            return slopos_testing::fail!("{:?} was removed", core::str::from_utf8(store));
+        }
     }
     for covering in [
-        &b"/var"[..],
+        &b"/etc"[..],
+        b"/etc/passwd",
+        b"/etc/hello",
+        b"/var",
         b"/var/lib",
         b"/var/lib/slopos",
-        store,
+        b"/var/lib/slopos/slots",
+        b"/var/lib/slopos/accounts",
         b"/var/lib/slopos/extensions/hello",
     ] {
         if !covers_kept_dir(covering) {
@@ -1264,8 +1276,9 @@ pub fn test_a_kept_directory_stays_where_it_is() -> TestResult {
     }
     for beside in [
         &b"/var/log"[..],
-        b"/var/lib/slopos/slots",
-        b"/var/lib/slopos/extensions2",
+        b"/var/lib/hello",
+        b"/var/lib/slopos2",
+        b"/etc2",
         b"/opt",
     ] {
         if covers_kept_dir(beside) {

@@ -19,8 +19,9 @@ use slopos_extension_core::image::Image;
 use slopos_extension_core::record::Record;
 use slopos_extension_core::sha256;
 
-use super::store::{self, Store};
+use super::store::Store;
 use super::{SIDECAR_MAX, read_file, record_of};
+use crate::sealed;
 use crate::syscall::process;
 
 const EXTCTL: &str = "/bin/extctl";
@@ -191,7 +192,7 @@ pub fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     }
     let dir = own_dir(&record.name)?;
     let at = dir.join(&file);
-    store::unsealed(&dir, || store::replace_sealed(&at, &bytes))?;
+    sealed::unsealed(&dir, || sealed::replace_sealed(&at, &bytes, 0o644))?;
     Ok(format!("{} installed", at.display()))
 }
 
@@ -211,25 +212,27 @@ pub fn own_dir(name: &str) -> Result<PathBuf, String> {
         }
         Err(e) => return Err(shown(e)),
     };
-    let kept = mode == 0 || store::sealed_dir(&dir);
+    let kept = mode == 0 || sealed::sealed_dir(&dir);
     let strays = fs::read_dir(&dir)
         .map_err(shown)?
         .map(|entry| entry.map(|entry| entry.path()).map_err(shown))
-        .filter(|path| !path.as_ref().is_ok_and(|path| store::sealed_file(path)))
+        .filter(|path| !path.as_ref().is_ok_and(|path| sealed::sealed_file(path)))
         .collect::<Result<Vec<_>, _>>()?;
-    if let Some(path) = strays.iter().find(|path| !kept && !store::temporary(path)) {
+    if let Some(path) = strays.iter().find(|path| !kept && !sealed::temporary(path)) {
         return Err(format!(
             "{} is no sealed file, so no configuration of {name}'s; take it away",
             path.display()
         ));
     }
     if mode != 0o755 || !strays.is_empty() {
-        store::unsealed(&dir, || {
+        sealed::unsealed(&dir, || {
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).map_err(shown)?;
-            strays.iter().try_for_each(|path| store::remove_entry(path))
+            strays
+                .iter()
+                .try_for_each(|path| sealed::remove_entry(path))
         })?;
     }
-    store::seal_dir(&dir)?;
+    sealed::seal_dir(&dir)?;
     Ok(dir)
 }
 
