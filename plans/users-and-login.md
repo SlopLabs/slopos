@@ -166,8 +166,9 @@ privd's grammar gains principals and levels, and `session` is retired:
 - **Only a session in front is asked.** A request from a session not on the
   seat is refused at a `confirm` or `password` level, unless its terminal
   agent answers, below.
-- **`keep <seconds>`** keeps an answer for the same requesting session,
-  action, exact command line and working directory, and nothing wider.
+- **`keep <seconds>`** keeps an answer for the same requesting session and
+  parent process, action, exact command line and working directory, and
+  nothing wider.
 - **The dialog names the person** asking, their session and terminal, the
   program, the command and its directory, and for an admin answer the admin
   answering.
@@ -257,9 +258,9 @@ privd's grammar gains principals and levels, and `session` is retired:
   nothing inherited but the command line, the working directory and a minimal
   environment.
 - **As the person, holding the ceiling.** The mechanism spawns the command as
-  the requesting admin's uid, in their session's login tag, holding `Power`,
-  `Mount`, `NetAdmin`, `ConsoleConfig`, `SysInspect`, `Clock` and
-  `DacOverride`; privd holds `SetId` to spawn it so. Never `RawBlock`,
+  the requesting admin's uid, in their session's login tag, holding `Mount`,
+  `NetAdmin`, `ConsoleConfig`, `SysInspect`, `Clock` and `DacOverride`;
+  privd holds `SetId` to spawn it so. Never `Power`, `RawBlock`,
   `BaseUpdate`, `ExtensionUpdate`, `Seal`, `BootEntry` or `SetId`. Because it
   runs as the person, its own requests to privd and to `/run/init` are the
   person's, judged by `admin` lines like any other, never as `root`; the
@@ -267,10 +268,11 @@ privd's grammar gains principals and levels, and `session` is retired:
 - The command is resolved on `/bin:/sbin:/opt/bin`, and `/usr/local/bin` once
   uid 0 owns it: never on a directory the person's processes can write.
 - `priv -s` opens a shell with that power, which passes it on to what it
-  runs, as the rescue shell passes its own.
+  runs, as the rescue shell passes its own; it is an action of its own,
+  `org.slopos.priv.shell`, whose answer is never kept.
 - It takes no `sudo` options beyond those, and reads no `sudoers`: a command
   run through it is asked for like any other action, by its level.
-- The prompt and the terminal show that the power is held.
+- The shell's banner and prompt show that the power is held.
 
 ### Software trees
 
@@ -354,16 +356,26 @@ power-off beside another person; `extension_action_test` a kept answer
 reused for its own command and directory and not for another; the host
 tests the rest.
 
-### Phase 3: `priv <command>`
+### Phase 3: `priv <command>` — done
 
-- `/bin/priv`, `org.slopos.priv`, `priv -s`; privd's `SetId`.
-- Depends on `plans/system-extensions.md` Phase 1's `root` rule, or carries
-  it.
-- Graded by a `priv` command editing a uid-0 file in `/etc`, refused at the
-  boot partition, the base, the user database and a sealed file; a `bootctl
-  base install` from `priv -s` still asked; a `keep` window reused; a
-  standard user's `priv` answered by an admin; a command shadowed in
-  `~/.local/bin` not run.
+`/bin/priv` asks privd's `org.slopos.priv`, kept 300 s, or the unkept
+`org.slopos.priv.shell` for `priv -s`, both `allow root` and
+`allow admin confirm` and the first actions with `uid requester`: privd starts
+it again as the person, in their groups and session, holding
+`REQUESTER_CEILING` on a terminal of its own, and that copy runs the command
+holding the same with an environment of its own (`slopos_userland::held`,
+which the rescue shell now shares). The command is found only in
+`DEFAULT_PATH`'s directories that only uid 0 can change, every link and `#!`
+interpreter on the way held to the same; a shell `priv -s` runs hands the
+power on and names it before its prompt. Every action's kept answer now also
+keys on the requester's live parent, and privd holds a mechanism's directory
+to the one the request sent. `priv_test` grades what a command runs with as
+root, as the first person after a kept click and as a standard user after an
+administrator's password; the person's programs, links, scripts and shells
+refused or asked for every time; `priv -s` at a terminal; a relayed signal;
+and, from `priv -s`, a uid-0 file in `/etc` edited while the raw disk, the
+base, `/etc/passwd` and a sealed file refuse and `bootctl base install` is
+still asked.
 
 ### Phase 4: Sessions and login
 
@@ -499,7 +511,8 @@ tests the rest.
   hand anyone who can raise a dialog a way to shut the administrators out.
 - **A kept answer is privd's memory of one exact request**: uid, session
   (its login tag and its eldest task, so a later session tagged alike reuses
-  nothing), action and the activation it was read from, how it was asked,
+  nothing), the live task that started the requester, action and the
+  activation it was read from, how it was asked,
   command line and directory, for at most 900 seconds, forgotten when privd
   reads the extensions again, and nothing for a requester carrying no login
   tag, which is no session. One an administrator's password gave holds only
@@ -537,6 +550,60 @@ tests the rest.
   able to allow what the system does.
 - **A volume holding a kept directory is not unmounted**, so the store cannot
   be taken from under a running root to make it look recordless.
+- **An action may run its mechanism as its requester, under a ceiling stated
+  once.** `uid requester` runs it as whoever asked, which only `root`, `user`
+  and `admin` may be, holding no more than `REQUESTER_CEILING`, a constant of
+  `slopos-priv-core` rather than a policy line, so no edit to an action widens
+  what a person's own process may hold. It never names `Power`, `RawBlock`,
+  `BaseUpdate`, `ExtensionUpdate`, `Seal`, `BootEntry`, `SetId` or
+  `ProcSignal`.
+- **`Power` stays out of the ceiling.** It writes the firmware's variables in
+  the loader's namespace and SlopOS's, which choose what boots behind
+  bootctl's checks and can fill the firmware's store; powering off,
+  restarting, choosing a boot entry and the CPUs' speed each have an action
+  an administrator runs unasked, which a program `priv` runs asks for as the
+  person.
+- **A kept answer covers one requester's parent as well as its session**, as
+  polkit keys one on a live parent: one given to a person's shell covers that
+  shell and what it starts, as sudo's covers a terminal, and nothing else
+  running in their session. A shell, which runs whatever its input says, is
+  never kept: `priv -s`, and the shell named with nothing after it, is an
+  action of its own without `keep`; the shell told to read its input
+  otherwise is refused, and `priv` never runs `priv`. A kept
+  command still repeats with whatever input the person's processes give it,
+  as sudo's timestamp lets them run anything.
+- **A mechanism's directory is held to the one the request sent.** privd
+  refuses to start one whose directory's path no longer leads where the
+  descriptor sent did, so the person's processes cannot move an answered
+  request into `/etc`. A working directory is a path, so they can still move
+  one from under what already runs there.
+- **What runs with power is found only where only uid 0 writes.** The program
+  is in one of `DEFAULT_PATH`'s directories; it, every link on the way from
+  it, what they lead to, a script's interpreter, and every directory from `/`
+  down to each are uid 0's and writable by nobody else; the requester's
+  `PATH` is never read. What it runs reads `$HOME` as the person's, whose
+  processes can change it: no program of the base reads a file there today,
+  which Phase 5 holds to when `/usr/local` becomes uid 0's.
+  `/usr/local/bin` joins by that rule once uid 0 holds `/usr/local`
+  (Phase 5), with no change to `priv`.
+- **A standard user's `priv` runs as them**, not as the administrator who
+  answered: the answer allows the request and lends no identity, so its own
+  requests are still a standard user's. `DacOverride` reaches every person's
+  files, so the administrator who answers hands them every person.
+- **The ceiling reads every file not sealed, hashes included.** `DacOverride`
+  reads `/etc/shadow`; an Argon2id hash at RFC 9106's second cost is what a
+  reader gets, and whoever runs `priv` was allowed that much by an
+  administrator.
+- **What `priv` makes is the person's**, since it runs as them: a file it
+  makes in a uid-0 directory stays theirs, and writable by everything they
+  run, until a `priv chown` gives it to uid 0. A sudoedit-style flow for
+  system configuration is not part of this plan.
+- **What `priv` runs says nothing of `priv`'s.** Its output is the command's
+  alone, so it pipes; the shell names the power in its banner and prompt, as
+  the terminal has no background tint for it the way `run0` tints one.
+- **What hands its mask on spawns, and passes signals on**: a signal another
+  process sends, privd's relays among them, goes on to the program; one the
+  terminal raised reached the program's group already.
 
 ## Constraints
 
