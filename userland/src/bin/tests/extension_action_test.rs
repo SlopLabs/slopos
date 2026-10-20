@@ -5,14 +5,20 @@
 //! actions again as it serves; its command comes last on `PATH`, its app entry
 //! replaces none, a configuration edited or signed restarts the service that
 //! reads it and takes away what no `Seal` holder put beside it, a rescue
-//! shell's `extctl --root` reaches a root it mounted, and its mechanisms end
-//! once it stops.
+//! shell's `extctl --root` reaches a root it mounted, its mechanisms end
+//! once it stops, and an answer it keeps covers its own command and
+//! directory alone.
 //!
 //! The runner hands this binary every capability as uid 0, which privd's
 //! `root` admits unasked to the base's actions and to none of an extension's;
 //! the person's requests come from a copy of this binary in `/usr/local/bin`,
-//! run at uid 1000 holding nothing. A test boot runs no compositor, so a
-//! request that needs the person is refused for want of anyone to ask.
+//! run at uid 1000 holding nothing. A test boot runs no compositor until a
+//! case asks init for a session, so a request that needs the person is
+//! refused for want of anyone to ask; with one up, the person's answer is
+//! keys the kernel delivers to the compositor as a keyboard's.
+
+#[path = "support/asking.rs"]
+mod asking;
 
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -43,6 +49,8 @@ use slopos_userland::privd::{Connection, RESTART_WAIT, STATUS_REFUSED, request_i
 use slopos_userland::syscall::process::{self, Endowment};
 use slopos_userland::syscall::{OwnedFd, fs, net};
 use slopos_userland::{app_entry, init_control};
+
+use self::asking::Asker;
 
 const NAME: &str = "act";
 const EXTCTL: &str = "/bin/extctl";
@@ -185,7 +193,9 @@ fn declaration(version: u64) -> String {
          action own\n  program /opt/{NAME}/bin/daemon\n  args {who}\n  caps\n  \
          allow program /opt/{NAME}/bin/client\n  describe \"Answer its own client\"\n\
          action linger\n  program /opt/{NAME}/bin/daemon\n  args {LINGER}\n  caps\n  \
-         allow user\n  describe \"Run until ended\"\n",
+         allow user\n  describe \"Run until ended\"\n\
+         action kept\n  program /opt/{NAME}/bin/daemon\n  args who *\n  caps SysInspect\n  \
+         cwd\n  keep 300\n  allow user confirm\n  describe \"Say who it runs as, allowed for a while\"\n",
         caps_drop()
     )
 }
@@ -878,10 +888,52 @@ fn removing_takes_its_actions_and_command_away() -> bool {
     }) || fail(format!("greet once removed: {said:?}"))
 }
 
+/// A kept answer runs the same command from the same directory unasked in
+/// the session that gave it, and nothing wider: from another directory, or
+/// with another argument, the person is asked again.
+fn a_kept_answer_covers_its_command_and_directory_alone() -> bool {
+    let calls = caps_drop();
+    let here = Asker {
+        path: SELF,
+        uid: USER,
+        login: Some(init_control::DESKTOP),
+        cwd: DIR,
+        with_cwd: true,
+    };
+    let elsewhere = Asker { cwd: "/", ..here };
+    let kept = ["ext.act.kept", "who", calls.as_str()];
+    let other = ["ext.act.kept", "who", calls.as_str(), "again"];
+    if let Err(why) = init_control::ask(init_control::Command::RestartSession) {
+        return fail(format!("restart-session: {why}"));
+    }
+    let up = until(|| here.ask(&other, None) == "asked");
+    let first = here.ask(&kept, Some(asking::tab_and_enter));
+    let again = here.ask(&kept, None);
+    let moved = elsewhere.ask(&kept, None);
+    let changed = here.ask(&other, None);
+    let ended = init_control::ask(init_control::Command::EndSession);
+    if !up {
+        return fail("the desktop never asked the person");
+    }
+    if (first.as_str(), again.as_str()) != ("ran 0", "ran 0") {
+        return fail(format!("allowed once, then again: {first}, {again}"));
+    }
+    if (moved.as_str(), changed.as_str()) != ("asked", "asked") {
+        return fail(format!(
+            "elsewhere, or with another argument: {moved}, {changed}"
+        ));
+    }
+    ended.is_ok() || fail(format!("end-session: {ended:?}"))
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_app_asks_its_extension_s_actions",
         the_app_asks_its_extension_s_actions,
+    ),
+    (
+        "a_kept_answer_covers_its_command_and_directory_alone",
+        a_kept_answer_covers_its_command_and_directory_alone,
     ),
     (
         "its_own_program_is_a_principal_until_it_maps_foreign_code",
@@ -916,6 +968,9 @@ const CASES: &[(&str, fn() -> bool)] = &[
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(asking::REQUEST) {
+        std::process::exit(asking::request_child(&args[2..]));
+    }
     if args.get(1).map(String::as_str) == Some(ASK) {
         let action = args.get(2).map_or("", String::as_str);
         std::process::exit(app(action, args.get(3..).unwrap_or_default()));

@@ -28,6 +28,7 @@
 //!   caps     NetAdmin
 //!   cwd
 //!   exclusive                   one at a time; a group is the extension's own
+//!   keep     300                an answer kept for the same command and directory
 //!   allow    admin confirm      admin [confirm|password], user [alone|
 //!   allow    program /bin/x     confirm|password], paired, program <path>
 //!   describe "Greet the network"
@@ -40,6 +41,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use slopos_abi::extension::Label;
+pub use slopos_priv_core::Level;
 use slopos_priv_core::policy::{self, Shape};
 
 use crate::grant::Grant;
@@ -107,6 +109,7 @@ pub struct Action {
     pub caps: u64,
     pub cwd: bool,
     pub exclusive: Option<String>,
+    pub keep: Option<u32>,
     pub allows: Vec<Allow>,
     pub describe: String,
 }
@@ -124,16 +127,6 @@ pub enum Principal {
     Paired,
     /// The extension's own program or a base program at this path.
     Program(String),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Level {
-    /// Run unasked.
-    None,
-    /// Unasked while the person asking is the only one logged in.
-    Alone,
-    Confirm,
-    Password,
 }
 
 impl Action {
@@ -158,30 +151,29 @@ impl Action {
 
     /// What privd runs for it: its program as `uid`, the extension's first
     /// user, holding what it declares within `held`, its `program` lines
-    /// meaning programs of the activation `label` names. Until privd tells
-    /// people apart, its `allow` lines read as the one person at the machine
-    /// meets them: a level but `alone` asks, and the first line a requester
-    /// matches decides.
+    /// meaning programs of the activation `label` names.
     pub fn for_privd(&self, uid: u32, held: u64, label: Label) -> policy::Action {
         let extension = String::from_utf8_lossy(label.name()).into_owned();
         let own = format!("{}/", mount_point(&extension));
-        let mut allows: Vec<policy::Allow> = Vec::new();
-        for allow in &self.allows {
-            let (principal, consent) = match (&allow.principal, allow.level) {
-                (Principal::Admin | Principal::User, level) => (
-                    policy::Principal::Session,
-                    !matches!(level, Level::None | Level::Alone),
-                ),
-                (Principal::Paired, _) => (policy::Principal::Paired, false),
-                (Principal::Program(path), _) if path.starts_with(&own) => {
-                    (policy::Principal::Extension(path.clone(), label), false)
+        let allows = self
+            .allows
+            .iter()
+            .map(|allow| {
+                let principal = match &allow.principal {
+                    Principal::Admin => policy::Principal::Admin,
+                    Principal::User => policy::Principal::User,
+                    Principal::Paired => policy::Principal::Paired,
+                    Principal::Program(path) if path.starts_with(&own) => {
+                        policy::Principal::Extension(path.clone(), label)
+                    }
+                    Principal::Program(path) => policy::Principal::Program(path.clone()),
+                };
+                policy::Allow {
+                    principal,
+                    level: allow.level,
                 }
-                (Principal::Program(path), _) => (policy::Principal::Program(path.clone()), false),
-            };
-            if !allows.iter().any(|a| a.principal == principal) {
-                allows.push(policy::Allow { principal, consent });
-            }
-        }
+            })
+            .collect();
         policy::Action {
             name: self.name.clone(),
             program: self.program.clone(),
@@ -192,6 +184,7 @@ impl Action {
             describe: format!("{} (extension {extension})", self.describe),
             cwd: self.cwd,
             exclusive: self.exclusive.clone(),
+            keep: self.keep,
             medium: false,
         }
     }
@@ -670,6 +663,7 @@ struct ActionDraft {
     caps: Option<u64>,
     cwd: bool,
     exclusive: Option<String>,
+    keep: Option<u32>,
     allows: Vec<Allow>,
     describe: Option<String>,
 }
@@ -683,6 +677,7 @@ impl ActionDraft {
             caps: None,
             cwd: false,
             exclusive: None,
+            keep: None,
             allows: Vec::new(),
             describe: None,
         }
@@ -730,6 +725,7 @@ impl ActionDraft {
                 self.allows.push(allow);
                 Ok(())
             }
+            "keep" => once(&mut self.keep, policy::keep(rest)?),
             "describe" => once(&mut self.describe, policy::describe(rest)?),
             _ => Err("unknown action setting"),
         }
@@ -759,6 +755,7 @@ impl ActionDraft {
             caps: self.caps.ok_or("the action names no caps")?,
             cwd: self.cwd,
             exclusive: self.exclusive,
+            keep: self.keep,
             allows: self.allows,
             describe: self.describe.ok_or("the action has no describe")?,
         })
@@ -781,20 +778,11 @@ fn allow(name: &str, rest: &str) -> Result<Allow, &'static str> {
         Some("root") => return Err("an extension's action never allows root"),
         _ => return Err("allow names admin, user, paired or program <path>"),
     };
-    let level = match words.next() {
-        None => Level::None,
-        Some("alone") if principal == Principal::User => Level::Alone,
-        Some("confirm") if matches!(principal, Principal::User | Principal::Admin) => {
-            Level::Confirm
-        }
-        Some("password") if matches!(principal, Principal::User | Principal::Admin) => {
-            Level::Password
-        }
-        Some(_) => return Err("the level is not one that principal takes"),
-    };
-    if words.next().is_some() {
-        return Err("allow ends with its level");
-    }
+    let level = policy::level(
+        words,
+        principal == Principal::User,
+        principal == Principal::Admin,
+    )?;
     Ok(Allow { principal, level })
 }
 

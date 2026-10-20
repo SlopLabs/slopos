@@ -31,7 +31,7 @@ pub trait Waiting {
 
 enum Event {
     Shown,
-    Answered(Result<(), Refusal>),
+    Answered(Result<Answer, Refusal>),
 }
 
 struct Asker {
@@ -40,7 +40,7 @@ struct Asker {
 }
 
 impl Asker {
-    fn settle(&self, result: Result<(), Refusal>) {
+    fn settle(&self, result: Result<Answer, Refusal>) {
         let _ = self.events.send(Event::Answered(result));
     }
 }
@@ -64,8 +64,8 @@ impl Broker {
         }
     }
 
-    /// The person's answer, or why there is none.
-    pub fn ask(&self, ask: Ask, waiting: &mut impl Waiting) -> Result<(), Refusal> {
+    /// The person's allowing answer, or why there is none.
+    pub fn ask(&self, ask: Ask, waiting: &mut impl Waiting) -> Result<Answer, Refusal> {
         let (events, received) = mpsc::channel();
         let withdrawn = Arc::new(AtomicBool::new(false));
         let asker = Asker {
@@ -193,12 +193,15 @@ fn serve(channel: Option<OwnedFd>, incoming: Receiver<(Ask, Asker)>) {
                 continue;
             }
         }
+        let version = questions.version();
         if let Some((ask, asker)) = questions.next(now()) {
-            if !live.write(&ask.frame()) {
+            if !live.write(&ask.frame(version)) {
                 agent = None;
                 continue;
             }
-            let _ = asker.events.send(Event::Shown);
+            if !protocol::says_shown(version) {
+                let _ = asker.events.send(Event::Shown);
+            }
         }
         let mut fds = [UserPollFd {
             fd: live.fd.raw(),
@@ -225,9 +228,13 @@ fn read(agent: &mut Agent, questions: &mut Questions<Asker>, now: u64) -> bool {
             Ok(n) if n > 0 => agent.frames.push(&buf[..n]),
             Err(SyscallError::EAGAIN) => break,
             Err(SyscallError::EINTR) => {}
-            _ => return false,
+            _ => {
+                protocol::wipe(&mut buf);
+                return false;
+            }
         }
     }
+    protocol::wipe(&mut buf);
     loop {
         let inbound = match agent.frames.next_frame() {
             Ok(None) => return true,
@@ -249,12 +256,33 @@ fn read(agent: &mut Agent, questions: &mut Questions<Asker>, now: u64) -> bool {
                     return false;
                 }
             }
-            Ok(Inbound::Frame(kind::READY, payload)) if payload.is_empty() => questions.ready(),
-            Ok(Inbound::Frame(kind::ANSWER, payload)) => {
-                let Ok(answer) = Answer::decode(&payload) else {
+            Ok(Inbound::Frame(kind::READY, payload)) => {
+                let Ok(version) = protocol::decode_ready(&payload) else {
                     return false;
                 };
-                for (asker, result) in questions.answer(answer, now) {
+                questions.ready(version);
+            }
+            Ok(Inbound::Frame(kind::SHOWN, payload))
+                if protocol::says_shown(questions.version()) =>
+            {
+                let Ok(id) = protocol::decode_shown(&payload) else {
+                    return false;
+                };
+                if let Some(asker) = questions.shown(id) {
+                    let _ = asker.events.send(Event::Shown);
+                }
+            }
+            Ok(Inbound::Frame(kind::ANSWER, mut payload)) => {
+                let settled = match Answer::decode(&payload) {
+                    Ok(answer) => questions.answer(answer, now),
+                    Err(_) => Err(()),
+                };
+                protocol::wipe(&mut payload);
+                agent.frames.scrub();
+                let Ok(settled) = settled else {
+                    return false;
+                };
+                for (asker, result) in settled {
                     asker.settle(result);
                 }
             }

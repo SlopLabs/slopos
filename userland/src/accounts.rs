@@ -9,16 +9,26 @@
 use std::fs::{self, File};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, PERSON_UIDS, RAMFS_MAGIC};
-use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, UserSigaction};
+use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, O_RDWR, PERSON_UIDS, RAMFS_MAGIC};
+use slopos_abi::signal::{SIGHUP, SIGINT, SIGKILL, SIGQUIT, SIGTERM, UserSigaction};
+use slopos_abi::syscall::{O_CLOEXEC, POLLHUP, POLLIN, UserPollFd};
+use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_accounts_core::{Accounts, Entry};
+use slopos_tls_core::ct::wipe;
 
 use crate::apps::extctl::store::Store as Extensions;
 use crate::sealed::{
     SMALL_MAX, lock, newest, open_dir, replace_sealed, set_sealed, shown, unsealed,
 };
-use crate::syscall::{fs as sys_fs, process};
+use crate::syscall::process::{Endowment, WaitStatus};
+use crate::syscall::{SyscallError, fs as sys_fs, pidfd, process};
+
+/// The one program that reads a hash back.
+pub const AUTHCHECK: &str = "/sbin/authcheck";
+/// Longer than Argon2id takes on the slowest machine this runs on.
+const CHECK: Duration = Duration::from_secs(120);
 
 const RECORD: &str = "record";
 const PASSWD: &str = "etc/passwd";
@@ -273,4 +283,88 @@ pub fn extension_users(top: &Path) -> Result<Vec<String>, String> {
         .into_iter()
         .flat_map(|record| record.uids.into_iter().map(|(name, _)| name))
         .collect())
+}
+
+/// Whether `secret` is `name`'s password, as [`AUTHCHECK`] answers. The
+/// child gets three descriptors and no other, since privd's threads hold
+/// other requesters' while they serve them, and is killed past [`CHECK`].
+pub fn check(name: &str, secret: &[u8]) -> Result<bool, String> {
+    let fail = |why: &dyn std::fmt::Display| format!("{AUTHCHECK}: {why}");
+    let (input, typed) = sys_fs::pipe2(O_CLOEXEC as u32).map_err(|e| fail(&e))?;
+    let null = sys_fs::open_cstr(c"/dev/null", O_RDWR | O_CLOEXEC as u32).map_err(|e| fail(&e))?;
+    let actions = [
+        process::clone_fd(input.raw(), 0),
+        process::clone_fd(null.raw(), 1),
+        process::clone_fd(2, 2),
+    ];
+    let pid = process::spawn_endowed(
+        AUTHCHECK.as_bytes(),
+        &[c"authcheck".as_ptr().cast()],
+        &[],
+        b"/",
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &actions,
+        0,
+        Endowment::NONE,
+    );
+    drop((input, null));
+    if pid <= 0 {
+        return Err(fail(&SyscallError::from_errno(-pid)));
+    }
+    let pid = pid as u32;
+    let mut line = Vec::with_capacity(name.len() + secret.len() + 2);
+    line.extend_from_slice(name.as_bytes());
+    line.push(b'\n');
+    line.extend_from_slice(secret);
+    line.push(b'\n');
+    let mut sent = 0;
+    while sent < line.len() {
+        match sys_fs::write_slice(typed.raw(), &line[sent..]) {
+            Ok(n) if n > 0 => sent += n,
+            Err(SyscallError::EINTR) => {}
+            _ => break,
+        }
+    }
+    wipe(&mut line);
+    drop(typed);
+    match exit_within(pid, CHECK) {
+        Ok(WaitStatus::Exited(0)) => Ok(true),
+        Ok(WaitStatus::Exited(1)) => Ok(false),
+        Ok(_) => Err(fail(&"could not check")),
+        Err(why) => Err(fail(&why)),
+    }
+}
+
+/// How `pid` ended, or why it was killed and reaped instead.
+fn exit_within(pid: u32, limit: Duration) -> Result<WaitStatus, &'static str> {
+    let deadline = Instant::now() + limit;
+    let ended = match pidfd::pidfd_open_owned(pid) {
+        Some(exited) => loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let mut fds = [UserPollFd {
+                fd: exited.raw(),
+                events: POLLIN,
+                revents: 0,
+            }];
+            match sys_fs::poll(&mut fds, left.as_millis() as i64) {
+                Ok(_) if fds[0].revents & (POLLIN | POLLHUP) != 0 => break Ok(()),
+                Ok(_) if left.is_zero() => break Err("did not answer in time"),
+                Ok(_) | Err(SyscallError::EINTR) => {}
+                Err(_) => break Err("could not be waited for"),
+            }
+        },
+        None => Err("could not be waited for"),
+    };
+    if ended.is_err() {
+        let _ = process::kill(pid, SIGKILL);
+    }
+    let mut status = 0;
+    loop {
+        match process::waitpid_raw(pid as i32, &mut status, 0) {
+            rc if rc == i64::from(slopos_abi::Errno::EINTR.raw()) => {}
+            rc if rc > 0 => return ended.map(|()| process::wait_status(status)),
+            _ => return Err(ended.err().unwrap_or("could not be reaped")),
+        }
+    }
 }

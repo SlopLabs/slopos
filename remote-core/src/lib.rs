@@ -156,6 +156,16 @@ impl Deframer {
         self.start += HEADER_LEN + len;
         Ok(Some((kind, payload)))
     }
+
+    /// Zero the frames already taken and the room past what is buffered,
+    /// where a frame moved down by [`push`](Self::push) left its old bytes.
+    pub fn scrub(&mut self) {
+        self.buf[..self.start].fill(0);
+        for byte in self.buf.spare_capacity_mut() {
+            byte.write(0);
+        }
+        core::hint::black_box(&mut self.buf);
+    }
 }
 
 /// A control payload: `(key, value)` pairs in order, a key repeating for a
@@ -216,7 +226,12 @@ impl Fields {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        let size = self
+            .entries
+            .iter()
+            .map(|(key, value)| 1 + key.len() + 4 + value.len())
+            .sum();
+        let mut out = Vec::with_capacity(size);
         for (key, value) in &self.entries {
             out.push(key.len() as u8);
             out.extend_from_slice(key.as_bytes());
@@ -224,6 +239,15 @@ impl Fields {
             out.extend_from_slice(value);
         }
         out
+    }
+
+    /// Zero every value, which may hold what nobody else should read once
+    /// it is freed.
+    pub fn wipe(&mut self) {
+        for (_, value) in &mut self.entries {
+            value.fill(0);
+            core::hint::black_box(&mut *value);
+        }
     }
 
     pub fn decode(mut bytes: &[u8]) -> Result<Self, WireError> {

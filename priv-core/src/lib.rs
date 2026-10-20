@@ -19,9 +19,11 @@
 //! The consent channel is a socket pair init hands privd and the compositor:
 //!
 //! ```text
-//! agent READY                           it can draw a dialog
-//! privd ASK{id, action, describe, program?, uid, pid, cwd, arg..}
-//!   agent ANSWER{id, allow}
+//! agent READY{version?}                 it can draw a dialog
+//! privd ASK{id, action, describe, program?, uid, pid, cwd, arg..,
+//!           kind, person?, admin..}
+//!   agent SHOWN{id}                     on screen
+//!   agent ANSWER{id, allow, secret?, as?}
 //!   privd CANCEL{id}                    expired
 //! ```
 
@@ -36,7 +38,10 @@ pub mod consent;
 pub mod policy;
 pub mod wire;
 
-pub use policy::{Action, Allow, Policy, PolicyError, Principal, Requester, Shape, Verdict};
+pub use policy::{
+    Action, Allow, Level, People, Person, Policy, PolicyError, Principal, Question, Refused,
+    Requester, Shape, Verdict,
+};
 
 use slopos_abi::caps;
 

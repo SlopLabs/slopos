@@ -15,4 +15,6 @@ doctest = false
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-accounts-core = { workspace = true }
 slopos-remote-core = { workspace = true }
+slopos-tls-core = { workspace = true }

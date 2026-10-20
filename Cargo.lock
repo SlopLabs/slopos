@@ -429,7 +429,9 @@ name = "slopos-priv-core"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
+ "slopos-accounts-core",
  "slopos-remote-core",
+ "slopos-tls-core",
 ]
 
 [[package]]

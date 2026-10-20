@@ -13,6 +13,34 @@ fn ask() -> Ask {
         pid: 42,
         cwd: "/".into(),
         command: vec![b"/bin/bootctl".to_vec(), b"install".to_vec(), b"b".to_vec()],
+        kind: Kind::Confirm,
+        person: Some("user".into()),
+        admins: vec![],
+    }
+}
+
+fn admin_ask() -> Ask {
+    Ask {
+        kind: Kind::Admin,
+        person: Some("bob".into()),
+        admins: vec!["alice".into(), "dave".into()],
+        uid: 1002,
+        ..ask()
+    }
+}
+
+fn typed(text: &str) -> Secret {
+    let mut secret = Secret::default();
+    text.chars().for_each(|ch| assert!(secret.push(ch)));
+    secret
+}
+
+fn allow(id: u64) -> Answer {
+    Answer {
+        id,
+        allow: true,
+        secret: None,
+        admin: None,
     }
 }
 
@@ -24,23 +52,71 @@ fn payload(framed: &[u8]) -> (u8, Vec<u8>) {
 
 #[test]
 fn a_question_and_its_answer_round_trip() {
-    let (kind, body) = payload(&ask().frame());
+    let (kind, body) = payload(&ask().frame(VERSION));
     assert_eq!(kind, kind::ASK);
     assert_eq!(Ask::decode(&body), Ok(ask()));
     let outsider = Ask {
         program: None,
+        person: None,
         ..ask()
     };
-    assert_eq!(Ask::decode(&payload(&outsider.frame()).1), Ok(outsider));
-    for allow in [true, false] {
-        let answer = Answer { id: 9, allow };
+    assert_eq!(
+        Ask::decode(&payload(&outsider.frame(VERSION)).1),
+        Ok(outsider)
+    );
+    assert_eq!(
+        Ask::decode(&payload(&admin_ask().frame(VERSION)).1),
+        Ok(admin_ask())
+    );
+    for answer in [
+        allow(9),
+        Answer::deny(9),
+        Answer {
+            secret: Some(typed("p\u{e4}ss w0rd")),
+            admin: Some("alice".into()),
+            ..allow(9)
+        },
+        Answer {
+            secret: Some(typed("x")),
+            ..allow(9)
+        },
+    ] {
         let (kind, body) = payload(&answer.frame());
         assert_eq!(kind, kind::ANSWER);
         assert_eq!(Answer::decode(&body), Ok(answer));
     }
     let (kind, body) = payload(&cancel_frame(11));
     assert_eq!((kind, decode_cancel(&body)), (kind::CANCEL, Ok(11)));
-    assert_eq!(payload(&ready_frame()), (kind::READY, vec![]));
+    let (kind, body) = payload(&shown_frame(12));
+    assert_eq!((kind, decode_shown(&body)), (kind::SHOWN, Ok(12)));
+    let (kind, body) = payload(&ready_frame(VERSION));
+    assert_eq!((kind, decode_ready(&body)), (kind::READY, Ok(VERSION)));
+}
+
+/// An agent of the first version sends an empty `READY` and reads only the
+/// first version's fields, and a question from a privd of that version reads
+/// as one to confirm.
+#[test]
+fn the_first_version_is_read_and_written_as_it_was() {
+    assert_eq!(decode_ready(&[]), Ok(1));
+    for version in ["0", "1", "x", ""] {
+        let body = Fields::new().with("version", version).encode();
+        assert_eq!(decode_ready(&body), Err(Malformed), "{version:?}");
+    }
+    let first = payload(&admin_ask().frame(1)).1;
+    let fields = Fields::decode(&first).unwrap();
+    assert!(
+        fields
+            .keys()
+            .all(|k| !["kind", "person", "admin"].contains(&k))
+    );
+    let old = Ask {
+        person: None,
+        ..ask()
+    };
+    assert_eq!(Ask::decode(&payload(&old.frame(1)).1), Ok(old));
+    let unsigned = Fields::new().with("id", "1").with("allow", "1").encode();
+    assert_eq!(Answer::decode(&unsigned), Ok(allow(1)));
 }
 
 #[test]
@@ -55,9 +131,19 @@ fn a_question_outside_the_protocol_is_malformed() {
             .with("cwd", "/")
     };
     assert!(Ask::decode(&base().with("arg", "/bin/x").encode()).is_ok());
+    let arg = || base().with("arg", "/bin/x");
     for fields in [
         base(),
-        base().with("arg", "/bin/x").with("extra", "1"),
+        arg().with("extra", "1"),
+        arg().with("kind", "consent"),
+        arg().with("kind", "confirm").with("kind", "confirm"),
+        arg().with("kind", "admin"),
+        arg().with("kind", "admin").with("admin", "a b"),
+        arg().with("kind", "confirm").with("admin", "alice"),
+        arg().with("kind", "password"),
+        arg().with("person", ""),
+        arg().with("person", "x".repeat(33)),
+        arg().with("person", "a").with("person", "b"),
         base()
             .with("arg", "/bin/x")
             .with("program", "a")
@@ -76,7 +162,30 @@ fn a_question_outside_the_protocol_is_malformed() {
             "{allow:?}"
         );
     }
-    let mutated = payload(&ask().frame()).1;
+    let allowing = || Fields::new().with("id", "1").with("allow", "1");
+    for fields in [
+        Fields::new()
+            .with("id", "1")
+            .with("allow", "0")
+            .with("secret", "x"),
+        allowing().with("secret", ""),
+        allowing().with("secret", "a\nb"),
+        allowing().with("secret", "a\0b"),
+        allowing().with("secret", [0xffu8]),
+        allowing().with("secret", vec![b'a'; SECRET_MAX + 1]),
+        allowing().with("secret", "x").with("secret", "y"),
+        allowing().with("as", "alice"),
+        allowing().with("secret", "x").with("as", ""),
+    ] {
+        assert_eq!(
+            Answer::decode(&fields.encode()),
+            Err(Malformed),
+            "{fields:?}"
+        );
+    }
+    let longest = allowing().with("secret", vec![b'a'; SECRET_MAX]).encode();
+    assert!(Answer::decode(&longest).is_ok());
+    let mutated = payload(&admin_ask().frame(VERSION)).1;
     for at in 0..mutated.len() {
         let mut bytes = mutated.clone();
         bytes[at] ^= 0x20;
@@ -87,43 +196,59 @@ fn a_question_outside_the_protocol_is_malformed() {
 
 /// A dialog drawn at 0, so armed from [`ARMING_MS`].
 fn drawn() -> Dialog {
-    let mut dialog = Dialog::new(ask());
-    dialog.drawn(0);
+    shown(ask())
+}
+
+fn shown(ask: Ask) -> Dialog {
+    let mut dialog = Dialog::new(ask);
+    assert!(dialog.drawn(0));
+    assert!(!dialog.drawn(5));
     dialog
+}
+
+fn allows(answer: Option<Answer>) -> Option<bool> {
+    answer.map(|a| a.allow)
 }
 
 #[test]
 fn focus_starts_on_deny_so_a_stray_enter_refuses() {
     let mut dialog = drawn();
-    assert_eq!(dialog.focus(), Button::Deny);
-    assert_eq!(dialog.key(Key::Press, ARMING_MS), Some(false));
+    assert_eq!(dialog.focus(), Focus::Deny);
+    assert_eq!(dialog.key(Key::Press, ARMING_MS), Some(Answer::deny(7)));
 }
 
 #[test]
 fn allow_takes_a_move_then_a_press() {
     let mut dialog = drawn();
     assert_eq!(dialog.key(Key::Move, ARMING_MS), None);
-    assert_eq!(dialog.focus(), Button::Allow);
-    assert_eq!(dialog.key(Key::Press, 2 * ARMING_MS), Some(true));
+    assert_eq!(dialog.focus(), Focus::Allow);
+    assert_eq!(dialog.key(Key::Press, 2 * ARMING_MS), Some(allow(7)));
     let mut back = drawn();
     back.key(Key::Move, ARMING_MS);
     back.key(Key::Move, 2 * ARMING_MS);
-    assert_eq!(back.key(Key::Press, 3 * ARMING_MS), Some(false));
+    assert_eq!(allows(back.key(Key::Press, 3 * ARMING_MS)), Some(false));
 }
 
 #[test]
 fn input_before_the_dialog_is_drawn_or_armed_counts_for_nothing() {
     let mut unseen = Dialog::new(ask());
     assert_eq!(unseen.key(Key::Press, u64::MAX), None);
-    assert_eq!(unseen.click(Button::Allow, u64::MAX), None);
+    assert_eq!(unseen.click(Focus::Allow, u64::MAX), None);
     let mut dialog = drawn();
     dialog.drawn(10 * ARMING_MS);
     for key in [Key::Move, Key::Press, Key::Dismiss] {
         assert_eq!(dialog.key(key, ARMING_MS - 1), None);
     }
-    assert_eq!(dialog.focus(), Button::Deny);
-    assert_eq!(dialog.click(Button::Allow, ARMING_MS - 1), None);
-    assert_eq!(dialog.click(Button::Allow, ARMING_MS), Some(true));
+    assert_eq!(dialog.focus(), Focus::Deny);
+    assert_eq!(dialog.click(Focus::Allow, ARMING_MS - 1), None);
+    assert_eq!(dialog.click(Focus::Allow, ARMING_MS), Some(allow(7)));
+    let mut field = shown(admin_ask());
+    field.key(Key::Text('x'), ARMING_MS - 1);
+    assert_eq!(
+        field.typed_chars(),
+        0,
+        "what was typed for what was there before"
+    );
 }
 
 #[test]
@@ -131,23 +256,119 @@ fn a_press_just_after_a_move_counts_for_nothing() {
     let mut dialog = drawn();
     dialog.key(Key::Move, ARMING_MS);
     assert_eq!(dialog.key(Key::Press, 2 * ARMING_MS - 1), None);
-    assert_eq!(dialog.click(Button::Allow, 2 * ARMING_MS - 1), None);
-    assert_eq!(dialog.focus(), Button::Allow);
-    assert_eq!(dialog.key(Key::Press, 2 * ARMING_MS), Some(true));
+    assert_eq!(dialog.click(Focus::Allow, 2 * ARMING_MS - 1), None);
+    assert_eq!(dialog.focus(), Focus::Allow);
+    assert_eq!(allows(dialog.key(Key::Press, 2 * ARMING_MS)), Some(true));
 }
 
 #[test]
 fn dismissing_denies_whatever_has_focus() {
     let mut dialog = drawn();
     dialog.key(Key::Move, ARMING_MS);
-    assert_eq!(dialog.key(Key::Dismiss, 2 * ARMING_MS), Some(false));
+    assert_eq!(allows(dialog.key(Key::Dismiss, 2 * ARMING_MS)), Some(false));
+    let mut typing = shown(admin_ask());
+    typing.key(Key::Text('a'), ARMING_MS);
+    assert_eq!(
+        typing.key(Key::Dismiss, ARMING_MS),
+        Some(Answer::deny(7)),
+        "and what was typed goes nowhere"
+    );
 }
 
 #[test]
 fn a_click_answers_with_the_button_clicked() {
-    let dialog = drawn();
-    assert_eq!(dialog.click(Button::Allow, ARMING_MS), Some(true));
-    assert_eq!(dialog.click(Button::Deny, ARMING_MS), Some(false));
+    let mut dialog = drawn();
+    assert_eq!(allows(dialog.click(Focus::Allow, ARMING_MS)), Some(true));
+    assert_eq!(allows(dialog.click(Focus::Deny, ARMING_MS)), Some(false));
+    assert_eq!(dialog.click(Focus::Field, ARMING_MS), None);
+}
+
+#[test]
+fn a_password_is_typed_into_its_field_and_allows_once_there_is_one() {
+    let ask = Ask {
+        kind: Kind::Password,
+        person: Some("bob".into()),
+        ..ask()
+    };
+    let mut dialog = shown(ask);
+    assert_eq!(dialog.focus(), Focus::Field);
+    assert_eq!(
+        dialog.key(Key::Press, ARMING_MS),
+        None,
+        "a stray Enter in an empty field does nothing"
+    );
+    assert_eq!(dialog.click(Focus::Allow, ARMING_MS), None);
+    for ch in "s\u{e9}cret!".chars() {
+        assert_eq!(dialog.key(Key::Text(ch), ARMING_MS), None);
+    }
+    dialog.key(Key::Text('\n'), ARMING_MS);
+    dialog.key(Key::Text('\u{7}'), ARMING_MS);
+    dialog.key(Key::Erase, ARMING_MS);
+    assert_eq!(dialog.typed_chars(), 6);
+    dialog.key(Key::Arrow, ARMING_MS);
+    assert_eq!(
+        dialog.focus(),
+        Focus::Field,
+        "an arrow in the field moves nothing"
+    );
+    dialog.key(Key::Move, ARMING_MS);
+    assert_eq!(dialog.focus(), Focus::Deny);
+    dialog.key(Key::Arrow, 2 * ARMING_MS);
+    assert_eq!(dialog.focus(), Focus::Allow);
+    dialog.key(Key::Arrow, 3 * ARMING_MS);
+    assert_eq!(dialog.focus(), Focus::Deny);
+    dialog.key(Key::Text('?'), 4 * ARMING_MS);
+    assert_eq!(dialog.focus(), Focus::Field, "typing takes focus back");
+    let answer = dialog.key(Key::Press, 4 * ARMING_MS).unwrap();
+    assert_eq!(answer.secret, Some(typed("s\u{e9}cret?")));
+    assert_eq!((answer.allow, answer.admin), (true, None));
+    assert_eq!(dialog.typed_chars(), 0, "the answer took the password");
+}
+
+#[test]
+fn an_administrator_is_chosen_and_types_their_own_password() {
+    let mut dialog = shown(admin_ask());
+    assert_eq!(dialog.admin(), Some(("alice", 2)));
+    dialog.key(Key::Text('a'), ARMING_MS);
+    dialog.key(Key::Choose { next: true }, ARMING_MS);
+    assert_eq!(dialog.admin(), Some(("dave", 2)));
+    assert_eq!(dialog.typed_chars(), 0, "a password typed for another goes");
+    assert_eq!(dialog.key(Key::Text('d'), 2 * ARMING_MS - 1), None);
+    assert_eq!(dialog.typed_chars(), 0);
+    dialog.key(Key::Choose { next: true }, 2 * ARMING_MS);
+    dialog.key(Key::Choose { next: false }, 3 * ARMING_MS);
+    assert_eq!(dialog.admin(), Some(("dave", 2)));
+    dialog.key(Key::Text('d'), 4 * ARMING_MS);
+    dialog.key(Key::Move, 4 * ARMING_MS);
+    dialog.key(Key::Move, 5 * ARMING_MS);
+    assert_eq!(dialog.focus(), Focus::Allow);
+    let answer = dialog.click(Focus::Allow, 6 * ARMING_MS).unwrap();
+    assert_eq!(answer.admin.as_deref(), Some("dave"));
+    assert_eq!(answer.secret, Some(typed("d")));
+    let mut alone = shown(Ask {
+        admins: vec!["alice".into()],
+        ..admin_ask()
+    });
+    alone.key(Key::Text('a'), ARMING_MS);
+    alone.key(Key::Choose { next: true }, ARMING_MS);
+    assert_eq!(
+        (alone.admin(), alone.typed_chars()),
+        (Some(("alice", 1)), 1)
+    );
+}
+
+#[test]
+fn a_password_field_holds_only_so_much() {
+    let mut secret = Secret::default();
+    while secret.push('\u{20ac}') {}
+    assert!(secret.bytes().len() <= SECRET_MAX);
+    assert!(secret.bytes().len() + 3 > SECRET_MAX);
+    assert_eq!(secret.chars(), secret.bytes().len() / 3);
+    secret.pop();
+    assert!(core::str::from_utf8(secret.bytes()).is_ok());
+    secret.clear();
+    assert!(secret.is_empty());
+    assert_eq!(alloc::format!("{:?}", typed("hidden")), "Secret(6 bytes)");
 }
 
 #[test]
@@ -159,16 +380,35 @@ fn the_dialog_names_who_asks() {
     let root = Ask {
         uid: 0,
         program: None,
+        person: None,
         ..ask()
     };
     assert_eq!(
         Dialog::new(root).requester(),
         "a program from outside the system, as root, pid 42"
     );
-    let other = Ask { uid: 5, ..ask() };
+    let other = Ask {
+        uid: 5,
+        person: None,
+        ..ask()
+    };
     assert_eq!(
         Dialog::new(other).requester(),
         "/bin/shell, as uid 5, pid 42"
+    );
+    assert_eq!(Dialog::new(ask()).prompt(), None);
+    assert_eq!(
+        Dialog::new(admin_ask()).prompt().as_deref(),
+        Some("An administrator's password allows it")
+    );
+    let password = Ask {
+        kind: Kind::Password,
+        person: Some("bob".into()),
+        ..ask()
+    };
+    assert_eq!(
+        Dialog::new(password).prompt().as_deref(),
+        Some("bob's password allows it")
     );
 }
 
@@ -217,23 +457,35 @@ fn a_question_too_long_to_show_whole_is_malformed() {
         ..ask()
     };
     assert_eq!(fitting.command_line().len(), MAX_SHOWN);
-    assert_eq!(Ask::decode(&payload(&fitting.frame()).1), Ok(fitting));
+    assert_eq!(
+        Ask::decode(&payload(&fitting.frame(VERSION)).1),
+        Ok(fitting)
+    );
     let over = Ask {
         command: vec![vec![b'a'; MAX_SHOWN + 1]],
         ..ask()
     };
-    assert_eq!(Ask::decode(&payload(&over.frame()).1), Err(Malformed));
+    assert_eq!(
+        Ask::decode(&payload(&over.frame(VERSION)).1),
+        Err(Malformed)
+    );
     let escaped = Ask {
         command: vec![vec![0x1b; MAX_SHOWN / 4]],
         ..ask()
     };
-    assert_eq!(Ask::decode(&payload(&escaped.frame()).1), Err(Malformed));
+    assert_eq!(
+        Ask::decode(&payload(&escaped.frame(VERSION)).1),
+        Err(Malformed)
+    );
     let deep = Ask {
         cwd: alloc::format!("/{}", "d".repeat(MAX_SHOWN)),
         ..ask()
     };
     assert!(!deep.fits());
-    assert_eq!(Ask::decode(&payload(&deep.frame()).1), Err(Malformed));
+    assert_eq!(
+        Ask::decode(&payload(&deep.frame(VERSION)).1),
+        Err(Malformed)
+    );
 }
 
 fn take(link: &mut Link, framed: &[u8]) -> Inbound {
@@ -263,12 +515,12 @@ fn take_all(link: &mut Link, framed: &[u8]) -> Vec<Inbound> {
 fn a_new_end_acts_only_on_what_follows_the_acknowledgement_of_its_reset() {
     let mut privd = Link::new(1);
     let mut agent = Link::new(2);
-    let question = ask().frame();
+    let question = ask().frame(VERSION);
     assert_eq!(take(&mut agent, &question), Inbound::Stale);
     let to_privd = reset(take(&mut agent, &privd.hello()));
     assert_eq!(take(&mut agent, &question), Inbound::Stale);
     let to_agent = reset(take(&mut privd, &agent.hello()));
-    assert_eq!(take(&mut privd, &ready_frame()), Inbound::Stale);
+    assert_eq!(take(&mut privd, &ready_frame(VERSION)), Inbound::Stale);
     assert_eq!(take(&mut agent, &to_agent), Inbound::Stale);
     assert_eq!(
         take(&mut agent, &question),
@@ -276,8 +528,8 @@ fn a_new_end_acts_only_on_what_follows_the_acknowledgement_of_its_reset() {
     );
     assert_eq!(take(&mut privd, &to_privd), Inbound::Stale);
     assert_eq!(
-        take(&mut privd, &ready_frame()),
-        Inbound::Frame(kind::READY, vec![])
+        take(&mut privd, &ready_frame(VERSION)),
+        Inbound::Frame(kind::READY, payload(&ready_frame(VERSION)).1)
     );
 }
 
@@ -289,15 +541,15 @@ fn a_reset_reaches_an_end_already_talking_and_leaves_it_talking() {
     let mut successor = Link::new(3);
     let to_successor = reset(take(&mut privd, &successor.hello()));
     assert_eq!(
-        take(&mut privd, &ready_frame()),
-        Inbound::Frame(kind::READY, vec![])
+        take(&mut privd, &ready_frame(VERSION)),
+        Inbound::Frame(kind::READY, payload(&ready_frame(VERSION)).1)
     );
     assert_eq!(take(&mut successor, &seen), Inbound::Stale);
-    assert_eq!(take(&mut successor, &ready_frame()), Inbound::Stale);
+    assert_eq!(take(&mut successor, &ready_frame(VERSION)), Inbound::Stale);
     take(&mut successor, &to_successor);
     assert_eq!(
-        take(&mut successor, &ready_frame()),
-        Inbound::Frame(kind::READY, vec![])
+        take(&mut successor, &ready_frame(VERSION)),
+        Inbound::Frame(kind::READY, payload(&ready_frame(VERSION)).1)
     );
 }
 
@@ -313,12 +565,12 @@ fn an_end_whose_hello_went_unread_says_it_again() {
     };
     assert_eq!(take_all(&mut agent, to_agent), [Inbound::Stale]);
     assert_eq!(
-        take(&mut agent, &ask().frame()),
-        Inbound::Frame(kind::ASK, payload(&ask().frame()).1)
+        take(&mut agent, &ask().frame(VERSION)),
+        Inbound::Frame(kind::ASK, payload(&ask().frame(VERSION)).1)
     );
     assert_eq!(
-        take(&mut privd, &ready_frame()),
-        Inbound::Frame(kind::READY, vec![])
+        take(&mut privd, &ready_frame(VERSION)),
+        Inbound::Frame(kind::READY, payload(&ready_frame(VERSION)).1)
     );
 }
 
@@ -341,7 +593,7 @@ fn a_reset_init_sends_for_a_side_that_exited_is_one_like_any_other() {
         take(&mut agent, &reset_frame(u64::MAX)),
         Inbound::Reset(_)
     ));
-    assert_eq!(take(&mut agent, &ready_frame()), Inbound::Stale);
+    assert_eq!(take(&mut agent, &ready_frame(VERSION)), Inbound::Stale);
 }
 
 #[test]

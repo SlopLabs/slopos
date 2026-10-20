@@ -186,6 +186,8 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
         (&action("  allow admin alone\n"), 6),
         (&action("  allow paired confirm\n"), 6),
         (&action("  allow user\n  allow user confirm\n"), 7),
+        (&action("  keep 0\n"), 6),
+        (&action("  keep 60\n  keep 60\n"), 7),
         (&action("  allow program /opt/other/bin/x\n"), 6),
         (&action("  allow user extra words\n"), 6),
         (
@@ -321,9 +323,10 @@ fn two_services_never_listen_on_one_socket() {
 }
 
 #[test]
-fn privd_reads_an_action_as_the_one_person_at_the_machine_meets_it() {
+fn privd_reads_an_action_s_principals_and_levels_as_declared() {
     use slopos_abi::extension::Label;
-    use slopos_priv_core::{Requester, Verdict};
+    use slopos_priv_core::consent::Kind;
+    use slopos_priv_core::{People, Person, Requester, Verdict};
     let declare = "\
 user
 action greet
@@ -332,6 +335,7 @@ action greet
   caps     Power Mount
   cwd
   exclusive lane
+  keep     60
   allow    program /opt/hello/bin/client
   allow    admin password
   allow    user
@@ -353,39 +357,70 @@ action calm
     assert_eq!(greet.uid, 105);
     assert_eq!(greet.caps, caps::POWER, "held within what was granted");
     assert!(greet.cwd);
+    assert_eq!(greet.keep, Some(60));
     assert_eq!(greet.exclusive_group(), Some("ext.hello.lane"));
     assert_eq!(greet.describe, "Greet (extension hello)");
     assert_eq!(
         greet
             .allows
             .iter()
-            .map(|a| (a.principal.clone(), a.consent))
+            .map(|a| (a.principal.clone(), a.level))
             .collect::<Vec<_>>(),
         vec![
             (
                 policy::Principal::Extension("/opt/hello/bin/client".into(), label),
-                false
+                Level::None
             ),
-            (policy::Principal::Session, true),
-            (policy::Principal::Program("/bin/compositor".into()), false),
-            (policy::Principal::Paired, false),
-        ],
-        "a later line for the same person is never reached"
+            (policy::Principal::Admin, Level::Password),
+            (policy::Principal::User, Level::None),
+            (
+                policy::Principal::Program("/bin/compositor".into()),
+                Level::None
+            ),
+            (policy::Principal::Paired, Level::None),
+        ]
     );
-    let session = Requester::new(SESSION_UID, None, false);
-    assert_eq!(greet.admits(&session), Verdict::Ask);
+    let person = |uid, name: &str, admin| Person {
+        uid,
+        name: name.into(),
+        admin,
+        password: true,
+    };
+    let people = People {
+        people: vec![
+            person(SESSION_UID, "user", true),
+            person(SESSION_UID + 1, "bob", false),
+        ],
+        logged_in: vec![SESSION_UID, SESSION_UID + 1],
+        front: Some(SESSION_UID),
+    };
+    let admin = Requester::new(SESSION_UID, None, false);
+    let standard = Requester::new(SESSION_UID + 1, None, false);
+    assert!(matches!(
+        greet.admits(&admin, &people),
+        Verdict::Ask(q) if q.kind == Kind::Password
+    ));
+    assert_eq!(greet.admits(&standard, &people), Verdict::Run);
     assert_eq!(
-        greet.admits(&Requester::extension(
-            SESSION_UID,
-            "/opt/hello/bin/client",
-            label
-        )),
+        greet.admits(
+            &Requester::extension(SESSION_UID, "/opt/hello/bin/client", label),
+            &people
+        ),
         Verdict::Run
     );
-    assert_eq!(
-        greet.admits(&Requester::new(0, Some("/bin/shell"), false)),
-        Verdict::Refuse
-    );
+    assert!(matches!(
+        greet.admits(&Requester::new(0, Some("/bin/shell"), false), &people),
+        Verdict::Refuse(_)
+    ));
     let calm = d.actions[1].for_privd(105, caps::POWER, label);
-    assert_eq!(calm.admits(&session), Verdict::Run);
+    assert_eq!(calm.admits(&admin, &people), Verdict::Run);
+    assert!(matches!(
+        calm.admits(&standard, &people),
+        Verdict::Ask(q) if q.kind == Kind::Admin
+    ));
+    let bob_alone = People {
+        logged_in: vec![SESSION_UID + 1],
+        ..people
+    };
+    assert_eq!(calm.admits(&standard, &bob_alone), Verdict::Run);
 }

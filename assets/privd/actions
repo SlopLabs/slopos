@@ -2,8 +2,9 @@
 # /usr/share/slopos/privd/actions; the grammar is slopos_priv_core::policy's.
 #
 # Every mechanism runs as uid 0 with no more than its action names. Whoever
-# privd may ask about an action is listed in order, and the first line whose
-# principal matches the requester decides.
+# may ask for an action is listed in order, and the first line whose principal
+# matches the requester decides, at its level; a person no line matches is
+# answered by an administrator's password where an admin line stands.
 
 action org.slopos.power.poweroff
   program  /bin/halt
@@ -13,7 +14,8 @@ action org.slopos.power.poweroff
   caps     Power
   uid      0
   allow    root
-  allow    session
+  allow    user alone
+  allow    admin
   allow    paired
   describe "Power off the machine"
 
@@ -23,7 +25,8 @@ action org.slopos.power.reboot
   caps     Power
   uid      0
   allow    root
-  allow    session
+  allow    user alone
+  allow    admin
   allow    paired
   describe "Restart the machine"
 
@@ -33,7 +36,7 @@ action org.slopos.boot.status
   caps     RawBlock Power
   uid      0
   allow    root
-  allow    session
+  allow    user
   allow    paired
   describe "Show what each boot slot and base holds and what boots"
 
@@ -45,7 +48,7 @@ action org.slopos.boot.install
   cwd
   exclusive boot-slots
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe "Install a kernel into a boot slot"
 
@@ -56,7 +59,7 @@ action org.slopos.boot.clone
   uid      0
   exclusive boot-slots
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe "Copy one boot slot's kernel into another"
 
@@ -68,7 +71,7 @@ action org.slopos.base.install
   cwd
   exclusive boot-slots
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe "Replace the base every boot slot boots, and the one running now"
 
@@ -79,7 +82,7 @@ action org.slopos.base.rollback
   uid      0
   exclusive boot-slots
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe "Go back to the base that ran before, now"
 
@@ -90,7 +93,7 @@ action org.slopos.boot.oneshot
   uid      0
   exclusive boot-slots
   allow    root
-  allow    session
+  allow    admin
   allow    paired
   describe "Boot an entry once, on the next restart"
 
@@ -101,7 +104,7 @@ action org.slopos.boot.set-default
   uid      0
   exclusive boot-slots
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe "Change which boot entry starts by default"
 
@@ -112,7 +115,7 @@ action org.slopos.boot.commit
   uid      0
   exclusive boot-slots
   allow    root
-  allow    session
+  allow    admin
   allow    paired
   describe "Keep the system that booted as the default"
 
@@ -122,7 +125,7 @@ action org.slopos.boot.spare
   caps     Power
   uid      0
   allow    root
-  allow    session
+  allow    user
   allow    paired
   describe "Name the boot slot a new system goes into"
 
@@ -132,7 +135,8 @@ action org.slopos.boot.reboot
   caps     Power
   uid      0
   allow    root
-  allow    session
+  allow    user alone
+  allow    admin
   allow    paired
   describe "Restart the machine"
 
@@ -144,7 +148,7 @@ action org.slopos.extension.install
   cwd
   exclusive extensions
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe "Install an extension, granting it what the command names; RawBlock, Mount or DacOverride gives it the machine"
 
@@ -156,7 +160,7 @@ action org.slopos.extension.install-signed
   cwd
   exclusive extensions
   allow    root
-  allow    session
+  allow    admin
   allow    paired
   describe "Install or update an extension signed by a trusted key, within that key's ceilings"
 
@@ -168,7 +172,7 @@ action org.slopos.extension.trust
   uid      0
   exclusive extensions
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe "Trust a key to install extensions within the ceilings named; RawBlock, Mount or DacOverride is the machine"
 
@@ -182,7 +186,7 @@ action org.slopos.extension.manage
   uid      0
   exclusive extensions
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe "Turn an extension on or off, remove it, or go back to the version it had before"
 
@@ -194,7 +198,7 @@ action org.slopos.extension.config
   cwd
   exclusive extensions
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe "Install a file of an extension's configuration in /etc, which restarts what reads it"
 
@@ -206,7 +210,7 @@ action org.slopos.extension.config-signed
   cwd
   exclusive extensions
   allow    root
-  allow    session
+  allow    admin
   allow    paired
   describe "Install an extension's configuration signed by the key that installed it"
 
@@ -217,7 +221,7 @@ action org.slopos.accounts.password
   uid      0
   exclusive accounts
   allow    root
-  allow    session consent
+  allow    user confirm
   describe "Change your own password, typing the current one first"
 
 action org.slopos.accounts.manage
@@ -233,7 +237,7 @@ action org.slopos.accounts.manage
   uid      0
   exclusive accounts
   allow    root
-  allow    session consent
+  allow    admin confirm
   describe "Add, remove or rename a person, set their password, or change who administers the machine"
 
 action org.slopos.cpufreq.set
@@ -242,7 +246,7 @@ action org.slopos.cpufreq.set
   caps     Power
   uid      0
   allow    root
-  allow    session
+  allow    admin
   allow    paired
   describe "Change how fast the CPUs run and where tasks go"
 
@@ -252,7 +256,7 @@ action org.slopos.kconsole
   caps     SysInspect
   uid      0
   allow    root
-  allow    session
+  allow    admin
   allow    paired
   describe "Run the diagnostic console's informational commands"
 
@@ -262,7 +266,7 @@ action org.slopos.prof
   caps     SysInspect
   uid      0
   allow    root
-  allow    session
+  allow    admin
   allow    paired
   describe "Start, stop or report the kernel's sampling profiler"
 
@@ -272,7 +276,8 @@ action org.slopos.console.keymap
   caps     ConsoleConfig
   uid      0
   allow    root
-  allow    session
+  allow    user alone
+  allow    admin
   allow    paired
   describe "Change the keyboard layout"
 
@@ -283,8 +288,7 @@ action org.slopos.net.toggle
   caps     NetAdmin
   uid      0
   allow    root
-  allow    program /bin/compositor
-  allow    session consent
+  allow    admin
   describe "Turn networking on or off"
 
 action org.slopos.net.configure
@@ -293,7 +297,7 @@ action org.slopos.net.configure
   caps     NetAdmin
   uid      0
   allow    root
-  allow    session consent
+  allow    admin confirm
   describe "Change the network configuration"
 
 action org.slopos.install
@@ -303,7 +307,7 @@ action org.slopos.install
   uid      0
   exclusive
   allow    root
-  allow    session consent
+  allow    admin confirm
   describe "Install SlopOS onto whichever disk the requester names, erasing what it says to"
 
 action org.slopos.rescue
@@ -313,5 +317,5 @@ action org.slopos.rescue
   uid      0
   medium
   allow    root
-  allow    session consent
+  allow    admin confirm
   describe "Open a rescue shell holding everything privd can give, which can read and change every disk"

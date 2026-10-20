@@ -2,20 +2,22 @@
 //!
 //! The channel is the socket pair init made, so an answer here is the
 //! compositor's and nothing else's; the compositor owns both seats, so the
-//! answer is the keyboard's or the pointer's. While a question is up, no
-//! client sees input and every surface is dimmed beneath it.
+//! answer is the keyboard's or the pointer's. While a question is up, no key
+//! or button pressed reaches a client and every surface is dimmed beneath it,
+//! so a password typed into it reaches privd alone.
 
 use std::string::String;
 
+use slopos_abi::InputEvent;
 use slopos_abi::draw::Color32;
-use slopos_abi::input::keycode::{KEY_ENTER, KEY_ESC, KEY_KP_ENTER, KEY_LEFT, KEY_RIGHT, KEY_TAB};
+use slopos_abi::input::keycode::{
+    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_KP_ENTER, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP,
+};
 use slopos_abi::syscall::{F_GETFD, MSG_NOSIGNAL};
 use slopos_gfx::blend::fill_rect_blended;
 use slopos_gfx::canvas_ops::rounded_rect_filled;
 use slopos_priv_core::INIT;
-use slopos_priv_core::consent::{
-    self as protocol, Answer, Ask, Button, Dialog, Inbound, Key, Link, kind,
-};
+use slopos_priv_core::consent::{self as protocol, Ask, Dialog, Focus, Inbound, Key, Link, kind};
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -33,6 +35,12 @@ const BUTTON_H: i32 = 28;
 const RADIUS: i32 = 12;
 const BORDER: i32 = 1;
 const LEADING: i32 = 2;
+/// More keys than a hand holds down at once.
+const TAKEN_MAX: usize = 16;
+/// How long after its last key a password question that went unanswered
+/// keeps taking keys, so the rest of a password typed into it reaches no
+/// client.
+const QUIET_MS: u64 = 1500;
 
 pub struct Consent {
     fd: Option<OwnedFd>,
@@ -44,12 +52,30 @@ pub struct Consent {
     /// privd may send a question: a `READY` went since the last one came.
     offered: bool,
     dirty: bool,
+    /// Keys pressed into the dialog, whose releases no client may see: a
+    /// release names its key, and so would spell a password typed there.
+    taken: Vec<u16>,
+    quiet_until: Option<u64>,
+    /// The version privd reads, which this side names in `READY`.
+    speaks: u32,
+}
+
+/// The version the running base's privd reads.
+fn privd_reads() -> u32 {
+    let interface = std::fs::read(slopos_boot_core::base::INTERFACE_PATH)
+        .ok()
+        .and_then(|text| slopos_boot_core::base::parse_interface(&text).ok());
+    match interface {
+        Some(n) if n >= protocol::SINCE_INTERFACE => protocol::VERSION,
+        _ => 1,
+    }
 }
 
 struct Layout {
     card: DamageRect,
     deny: DamageRect,
     allow: DamageRect,
+    field: Option<DamageRect>,
     lines: Vec<(String, Color32, i32)>,
 }
 
@@ -85,7 +111,7 @@ fn layout(dialog: &Dialog, screen_w: u32, screen_h: u32) -> Layout {
     let line = gfx::cell_height();
     let w = CARD_W.min(screen_w as i32 - 2 * PAD);
     let text_w = w - 2 * PAD;
-    let paragraphs = [
+    let mut paragraphs = vec![
         (format!("Allow: {}?", dialog.ask().describe), TEXT_PRIMARY),
         (format!("Asked by {}", dialog.requester()), TEXT_SECONDARY),
         (
@@ -94,6 +120,14 @@ fn layout(dialog: &Dialog, screen_w: u32, screen_h: u32) -> Layout {
         ),
         (format!("In {}", dialog.ask().directory()), TEXT_SECONDARY),
     ];
+    paragraphs.extend(dialog.prompt().map(|prompt| (prompt, TEXT_PRIMARY)));
+    if let Some((admin, count)) = dialog.admin() {
+        let choose = match count {
+            1 => String::new(),
+            n => format!(", one of {n}: Up and Down choose"),
+        };
+        paragraphs.push((format!("Administrator: {admin}{choose}"), TEXT_PRIMARY));
+    }
     let mut lines = Vec::new();
     let mut y = PAD;
     for (i, (text, colour)) in paragraphs.into_iter().enumerate() {
@@ -104,6 +138,10 @@ fn layout(dialog: &Dialog, screen_w: u32, screen_h: u32) -> Layout {
             lines.push((piece, colour, y));
             y += line + LEADING;
         }
+    }
+    let field_y = y - LEADING + GAP;
+    if dialog.ask().kind.takes_secret() {
+        y = field_y + BUTTON_H + LEADING;
     }
     let h = y - LEADING + PAD + BUTTON_H + PAD;
     let x = (screen_w as i32 - w) / 2;
@@ -117,6 +155,11 @@ fn layout(dialog: &Dialog, screen_w: u32, screen_h: u32) -> Layout {
         card: rect(x, top, w, h),
         allow: rect(allow_x, buttons_y, BUTTON_W, BUTTON_H),
         deny: rect(allow_x - GAP - BUTTON_W, buttons_y, BUTTON_W, BUTTON_H),
+        field: dialog
+            .ask()
+            .kind
+            .takes_secret()
+            .then(|| rect(x + PAD, top + field_y, text_w, BUTTON_H)),
         lines,
     }
 }
@@ -145,6 +188,9 @@ impl Consent {
             drawing: false,
             offered: false,
             dirty: false,
+            taken: Vec::new(),
+            quiet_until: None,
+            speaks: privd_reads(),
         };
         if !consent.write(&consent.link.hello()) {
             consent.fd = None;
@@ -167,7 +213,7 @@ impl Consent {
             return;
         }
         self.offered = true;
-        if !self.write(&protocol::ready_frame()) {
+        if !self.write(&protocol::ready_frame(self.speaks)) {
             self.fd = None;
         }
     }
@@ -209,7 +255,8 @@ impl Consent {
             match inbound {
                 Ok(Inbound::Stale) => {}
                 Ok(Inbound::Reset(seen)) => {
-                    self.dirty |= self.showing.take().is_some();
+                    self.withdraw();
+                    self.speaks = privd_reads();
                     self.offered = false;
                     if !self.write(&seen) {
                         return self.close();
@@ -234,8 +281,7 @@ impl Consent {
                         return self.close();
                     };
                     if self.showing.as_ref().is_some_and(|d| d.ask().id == id) {
-                        self.showing = None;
-                        self.dirty = true;
+                        self.withdraw();
                         self.offer();
                     }
                 }
@@ -246,8 +292,43 @@ impl Consent {
 
     fn close(&mut self) -> bool {
         self.fd = None;
-        if self.showing.take().is_some() {
-            self.dirty = true;
+        self.withdraw();
+        false
+    }
+
+    fn withdraw(&mut self) {
+        let Some(dialog) = self.showing.take() else {
+            return;
+        };
+        self.dirty = true;
+        if dialog.ask().kind.takes_secret() {
+            self.quiet_until = Some(sys_core::get_time_ms() + QUIET_MS);
+        }
+    }
+
+    fn quiet(&self, now: u64) -> bool {
+        self.quiet_until.is_some_and(|until| now < until)
+    }
+
+    /// Whether every key pressed now is the dialog's: one is up, or one that
+    /// took a password went from under someone typing into it.
+    pub fn capturing(&self) -> bool {
+        self.showing.is_some() || self.quiet(sys_core::get_time_ms())
+    }
+
+    /// Whether a key press is the dialog's, which then takes it: while it
+    /// is [`capturing`](Self::capturing), or when the press repeats a key
+    /// pressed into the dialog. A fresh press of a key the dialog took is a
+    /// client's, release and all, since the dialog's release was lost.
+    pub fn takes_press(&mut self, event: &InputEvent) -> bool {
+        let keycode = event.key_keycode();
+        let held = self.taken.contains(&keycode);
+        if self.capturing() || (held && event.key_is_repeat()) {
+            self.key(event);
+            return true;
+        }
+        if held {
+            self.taken.retain(|&k| k != keycode);
         }
         false
     }
@@ -257,64 +338,102 @@ impl Consent {
     }
 
     /// Whether the dialog appeared, changed or went since the last frame,
-    /// which the frame about to be composed shows.
+    /// which the frame about to be composed shows. privd hears when a
+    /// question first goes on screen.
     pub fn take_dirty(&mut self) -> bool {
-        if let Some(dialog) = &mut self.showing {
-            dialog.drawn(sys_core::get_time_ms());
+        if let Some(dialog) = self.showing.as_mut()
+            && dialog.drawn(sys_core::get_time_ms())
+            && protocol::says_shown(self.speaks)
+        {
+            let id = dialog.ask().id;
+            if !self.write(&protocol::shown_frame(id)) {
+                self.close();
+            }
         }
         std::mem::take(&mut self.dirty)
     }
 
-    pub fn key(&mut self, keycode: u16, repeat: bool) {
-        if repeat {
+    /// Whether the release of `keycode` is the dialog's, which took its press.
+    /// Any other release reaches the client that saw the press, question or
+    /// not, so nothing stays held down behind one.
+    pub fn takes_release(&mut self, keycode: u16) -> bool {
+        let Some(at) = self.taken.iter().position(|&k| k == keycode) else {
+            return false;
+        };
+        self.taken.remove(at);
+        true
+    }
+
+    fn key(&mut self, event: &InputEvent) {
+        if !event.key_is_repeat() && !self.taken.contains(&event.key_keycode()) {
+            if self.taken.len() >= TAKEN_MAX {
+                self.taken.remove(0);
+            }
+            self.taken.push(event.key_keycode());
+        }
+        let now = sys_core::get_time_ms();
+        let Some(dialog) = self.showing.as_mut() else {
+            if self.quiet(now) {
+                self.quiet_until = Some(now + QUIET_MS);
+            }
+            return;
+        };
+        if event.key_is_repeat() && event.key_keycode() != KEY_BACKSPACE {
             return;
         }
-        let key = match keycode {
-            KEY_TAB | KEY_LEFT | KEY_RIGHT => Key::Move,
+        let key = match event.key_keycode() {
+            KEY_TAB => Key::Move,
+            KEY_LEFT | KEY_RIGHT => Key::Arrow,
             KEY_ENTER | KEY_KP_ENTER => Key::Press,
             KEY_ESC => Key::Dismiss,
-            _ => return,
+            KEY_BACKSPACE => Key::Erase,
+            KEY_UP => Key::Choose { next: false },
+            KEY_DOWN => Key::Choose { next: true },
+            _ => match char::from_u32(event.key_codepoint()) {
+                Some(ch) if ch != '\0' => Key::Text(ch),
+                _ => return,
+            },
         };
-        let Some(dialog) = self.showing.as_mut() else {
-            return;
-        };
-        let focus = dialog.focus();
-        let answer = dialog.key(key, sys_core::get_time_ms());
-        self.dirty |= dialog.focus() != focus;
-        if let Some(allow) = answer {
-            self.answer(allow);
+        let answer = dialog.key(key, now);
+        self.dirty = true;
+        if let Some(answer) = answer {
+            self.answer(answer);
         }
     }
 
     pub fn press(&mut self, x: i32, y: i32, screen_w: u32, screen_h: u32) {
-        let Some(dialog) = &self.showing else {
+        let Some(dialog) = self.showing.as_mut() else {
             return;
         };
         let at = layout(dialog, screen_w, screen_h);
-        let button = if contains(&at.allow, x, y) {
-            Button::Allow
+        let target = if contains(&at.allow, x, y) {
+            Focus::Allow
         } else if contains(&at.deny, x, y) {
-            Button::Deny
+            Focus::Deny
+        } else if at.field.as_ref().is_some_and(|f| contains(f, x, y)) {
+            Focus::Field
         } else {
             return;
         };
-        if let Some(allow) = dialog.click(button, sys_core::get_time_ms()) {
-            self.answer(allow);
+        let focus = dialog.focus();
+        let answer = dialog.click(target, sys_core::get_time_ms());
+        self.dirty |= dialog.focus() != focus;
+        if let Some(answer) = answer {
+            self.answer(answer);
         }
     }
 
-    fn answer(&mut self, allow: bool) {
-        let Some(dialog) = self.showing.take() else {
+    fn answer(&mut self, answer: protocol::Answer) {
+        if self.showing.take().is_none() {
             return;
-        };
+        }
         self.dirty = true;
-        let answer = Answer {
-            id: dialog.ask().id,
-            allow,
-        };
-        if !self.write(&answer.frame()) {
+        let mut frame = answer.frame();
+        drop(answer);
+        if !self.write(&frame) {
             self.fd = None;
         }
+        protocol::wipe(&mut frame);
         self.offer();
     }
 
@@ -347,9 +466,38 @@ impl Consent {
         for (text, colour, y) in &at.lines {
             gfx::draw_str_clipped(buf, card.x0 + PAD, *y, text, *colour, PANEL_BG_OPAQUE, clip);
         }
+        if let Some(field) = &at.field {
+            let (w, h) = (field.x1 - field.x0 + 1, field.y1 - field.y0 + 1);
+            let edge = match dialog.focus() {
+                Focus::Field => SIGNAL_EXPAND,
+                _ => SHELF_SEPARATOR,
+            };
+            rounded_rect_filled(buf, field.x0, field.y0, w, h, RADIUS / 2, edge);
+            rounded_rect_filled(
+                buf,
+                field.x0 + BORDER,
+                field.y0 + BORDER,
+                w - 2 * BORDER,
+                h - 2 * BORDER,
+                RADIUS / 2 - BORDER,
+                PANEL_BG_OPAQUE,
+            );
+            let room = (w - 2 * PAD) / gfx::font::string_width("*").max(1);
+            let masked = "*".repeat(dialog.typed_chars().min(room.max(0) as usize));
+            let text_y = field.y0 + (h - gfx::cell_height()) / 2;
+            gfx::draw_str_clipped(
+                buf,
+                field.x0 + PAD,
+                text_y,
+                &masked,
+                TEXT_PRIMARY,
+                PANEL_BG_OPAQUE,
+                clip,
+            );
+        }
         for (button, label, r) in [
-            (Button::Deny, "Deny", &at.deny),
-            (Button::Allow, "Allow", &at.allow),
+            (Focus::Deny, "Deny", &at.deny),
+            (Focus::Allow, "Allow", &at.allow),
         ] {
             let focused = dialog.focus() == button;
             let fill = if focused {

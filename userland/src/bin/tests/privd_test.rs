@@ -6,8 +6,16 @@
 //! admits to every action without asking. The session's half runs in a child
 //! at uid 1000 holding nothing; a test boot runs no compositor until a case
 //! asks init for a session, and until then nobody can be asked, so an action
-//! that needs consent is refused there.
+//! that needs consent is refused there. With a session up, the person's
+//! answers are keys the kernel delivers to the compositor as a keyboard's,
+//! which only a test boot takes: a click for the first person, an
+//! administrator's password for a standard user, two people this binary adds
+//! through `/bin/users` and takes away again.
 
+#[path = "support/asking.rs"]
+mod asking;
+
+use slopos_abi::input::keycode::KEY_ENTER;
 use slopos_abi::syscall::{BOOT_FLAG_MEDIUM, POLLIN, UserPollFd};
 use slopos_priv_core::consent::Refusal;
 use slopos_priv_core::wire::{self, Exit, Reply, Request};
@@ -16,6 +24,8 @@ use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, STATUS_REFUSED, request_id};
 use slopos_userland::syscall::core::boot_flag;
 use slopos_userland::syscall::{OwnedFd, RawFd, fs, net, process};
+
+use self::asking::{Asker, Child};
 
 use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -59,6 +69,11 @@ const ASKED: i32 = 0;
 const NOBODY: i32 = 3;
 /// The probe's question was interrupted by a session ending or starting.
 const INTERRUPTED: i32 = 4;
+/// `argv[1]` of a child that runs until its standard input ends.
+const LINGER: &str = "--linger";
+const ALICE: &str = "privd-alice";
+const BOB: &str = "privd-bob";
+const ALICE_PASSWORD: &str = "alice-pw";
 /// Long enough for a session to end and a compositor to start under TCG.
 const SESSION_DEADLINE: Duration = Duration::from_secs(120);
 /// How long a consent probe may take to be asked or refused.
@@ -904,7 +919,209 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "consent_is_asked_across_a_compositor_restart",
         consent_is_asked_across_a_compositor_restart,
     ),
+    (
+        "a_standard_user_is_refused_while_no_administrator_has_a_password",
+        a_standard_user_is_refused_while_no_administrator_has_a_password,
+    ),
+    (
+        "alone_runs_unasked_and_refuses_a_power_off_beside_another",
+        alone_runs_unasked_and_refuses_a_power_off_beside_another,
+    ),
+    (
+        "the_first_person_s_click_allows_and_escape_denies",
+        the_first_person_s_click_allows_and_escape_denies,
+    ),
+    (
+        "an_administrator_s_password_answers_for_a_standard_user",
+        an_administrator_s_password_answers_for_a_standard_user,
+    ),
+    (
+        "the_people_added_are_taken_away",
+        the_people_added_are_taken_away,
+    ),
 ];
+
+/// `/bin/users` with `input` typed, asked of privd as root: its status.
+fn users(args: &[&str], input: &str) -> Option<i32> {
+    use std::io::Write;
+    let mut child = Command::new("/bin/users")
+        .args(args)
+        .env_remove(ENV_FD)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    child.wait().ok()?.code()
+}
+
+fn uid_of(name: &str) -> Option<u32> {
+    slopos_userland::accounts::uid_of(name)
+}
+
+fn linger() -> i32 {
+    let mut byte = [0u8; 1];
+    while fs::read_slice(0, &mut byte).is_ok_and(|n| n > 0) {}
+    0
+}
+
+fn as_person(uid: u32, login: Option<u32>) -> Asker<'static> {
+    Asker {
+        path: SELF,
+        uid,
+        login,
+        cwd: "/",
+        with_cwd: false,
+    }
+}
+
+fn alice_s_password() {
+    asking::armed();
+    asking::type_text(ALICE_PASSWORD);
+    asking::key(KEY_ENTER, 0);
+}
+
+fn a_wrong_password() {
+    asking::armed();
+    asking::type_text("not-hers");
+    asking::key(KEY_ENTER, 0);
+}
+
+const CONFIGURE: [&str; 5] = ["org.slopos.net.configure", "link", "set", "lo", "up"];
+
+/// Beside the first person, who has none, an administrator and a standard
+/// user with a password: a standard user's request for what only an
+/// administrator may do is refused while no administrator has a password to
+/// type, without asking anyone.
+fn a_standard_user_is_refused_while_no_administrator_has_a_password() -> bool {
+    let added = [
+        users(&["add", ALICE, "--admin", "--keep-autologin"], ""),
+        users(&["add", BOB, "--keep-autologin"], ""),
+        users(&["passwd", BOB], "bob-pw\nbob-pw\n"),
+    ];
+    let (Some(bob), Some(_)) = (uid_of(BOB), uid_of(ALICE)) else {
+        note(&format!("{ALICE} and {BOB} were not added: {added:?}"));
+        return false;
+    };
+    let said = as_person(bob, None).ask(&CONFIGURE, None);
+    if !said.contains("no administrator has one") {
+        note(&format!(
+            "{BOB}'s net.configure with no administrator's password: {said}"
+        ));
+        return false;
+    }
+    true
+}
+
+/// `user alone` runs a standard user's request unasked while they are the
+/// only person logged in, and once another is, takes an administrator's
+/// password, which nobody has to type yet: the keymap list is refused, and
+/// only then is the power-off asked for, which a fault would let end the run.
+/// An administrator beside another is run unasked.
+fn alone_runs_unasked_and_refuses_a_power_off_beside_another() -> bool {
+    use init_control::DESKTOP;
+    let Some(bob) = uid_of(BOB) else {
+        return false;
+    };
+    let keymap = ["org.slopos.console.keymap", "list"];
+    let alone = as_person(bob, Some(DESKTOP)).ask(&keymap, None);
+    if alone != "ran 0" {
+        note(&format!("{BOB}'s keymap list, alone: {alone}"));
+        return false;
+    }
+    let (Some(_first), Some(_bob)) = (
+        Child::start(SELF, USER, Some(DESKTOP), "/", &[LINGER]),
+        Child::start(SELF, bob, Some(DESKTOP), "/", &[LINGER]),
+    ) else {
+        return false;
+    };
+    let beside = as_person(bob, Some(DESKTOP)).ask(&keymap, None);
+    if !beside.contains("no administrator has one") {
+        note(&format!(
+            "{BOB}'s keymap list beside the first person: {beside}"
+        ));
+        return false;
+    }
+    let poweroff = ["org.slopos.power.poweroff", "halt"];
+    let off = as_person(bob, Some(DESKTOP)).ask(&poweroff, None);
+    if !off.contains("no administrator has one") {
+        note(&format!("{BOB}'s power-off beside the first person: {off}"));
+        return false;
+    }
+    let first = as_person(USER, Some(DESKTOP)).ask(&keymap, None);
+    if first != "ran 0" {
+        note(&format!(
+            "the first person's keymap list beside {BOB}: {first}"
+        ));
+        return false;
+    }
+    true
+}
+
+/// With a desktop up, the first person, an administrator without a password,
+/// is asked for a click as they always were: Tab and Enter allow, Escape
+/// refuses.
+fn the_first_person_s_click_allows_and_escape_denies() -> bool {
+    if users(
+        &["passwd", ALICE],
+        &format!("{ALICE_PASSWORD}\n{ALICE_PASSWORD}\n"),
+    ) != Some(0)
+    {
+        note(&format!("{ALICE}'s password was not set"));
+        return false;
+    }
+    if !(ask_init(InitCommand::RestartSession) && asked_within(SESSION_DEADLINE)) {
+        return false;
+    }
+    let allowed = as_person(USER, None).ask(&CONFIGURE, Some(asking::tab_and_enter));
+    if allowed != "ran 0" {
+        note(&format!("the first person's click: {allowed}"));
+        return false;
+    }
+    let refused = as_person(USER, None).ask(&CONFIGURE, Some(asking::escape));
+    if !refused.starts_with("denied by the person") {
+        note(&format!("the first person's Escape: {refused}"));
+        return false;
+    }
+    true
+}
+
+/// A standard user's request is answered by an administrator typing their
+/// own password into the dialog, which privd checks through authcheck, and
+/// is refused by a wrong one.
+fn an_administrator_s_password_answers_for_a_standard_user() -> bool {
+    let Some(bob) = uid_of(BOB) else {
+        return false;
+    };
+    let allowed = as_person(bob, None).ask(&CONFIGURE, Some(alice_s_password));
+    let wrong = as_person(bob, None).ask(&CONFIGURE, Some(a_wrong_password));
+    let ended = ask_init(InitCommand::EndSession);
+    if allowed != "ran 0" {
+        note(&format!(
+            "{BOB}'s request answered by {ALICE}'s password: {allowed}"
+        ));
+        return false;
+    }
+    if !wrong.starts_with("denied by the person") || !wrong.contains("password typed was wrong") {
+        note(&format!(
+            "{BOB}'s request answered by a wrong password: {wrong}"
+        ));
+        return false;
+    }
+    ended
+}
+
+fn the_people_added_are_taken_away() -> bool {
+    let removed = [BOB, ALICE].map(|name| users(&["remove", name, "--home"], ""));
+    if uid_of(ALICE).is_some() || uid_of(BOB).is_some() {
+        note(&format!("{ALICE} or {BOB} stayed: {removed:?}"));
+        return false;
+    }
+    true
+}
 
 /// With a desktop session up, the session's request that needs a person is
 /// put to the compositor. Ending the session interrupts a question on screen,
@@ -1093,6 +1310,8 @@ fn main() {
         CONSENT => std::process::exit(consent(false)),
         CONSENT_HELD => std::process::exit(consent(true)),
         CONNECT => std::process::exit(connect_and_hand(arg(2))),
+        asking::REQUEST => std::process::exit(asking::request_child(&args[2..])),
+        LINGER => std::process::exit(linger()),
         ASK => std::process::exit(ask_handed(arg(2), arg(3))),
         _ => slopos_slibc::test_harness::run(CASES),
     }

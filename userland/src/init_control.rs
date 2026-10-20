@@ -62,8 +62,17 @@ pub struct Tasks(Vec<UserTaskEntry>, Vec<u32>);
 
 impl Tasks {
     pub fn read() -> Tasks {
+        Self::of(every_task())
+    }
+
+    /// [`read`](Self::read), `None` when the kernel would not list the tasks.
+    pub fn try_read() -> Option<Tasks> {
+        Some(Self::of(listed()?))
+    }
+
+    fn of(every: Vec<UserTaskEntry>) -> Tasks {
         let me = std::process::id();
-        let (live, gone): (Vec<_>, Vec<_>) = every_task().into_iter().partition(|task| {
+        let (live, gone): (Vec<_>, Vec<_>) = every.into_iter().partition(|task| {
             !matches!(
                 TaskStatus::from_u8(task.state),
                 TaskStatus::Invalid | TaskStatus::Terminated | TaskStatus::Zombie
@@ -88,6 +97,37 @@ impl Tasks {
     /// [`processes_of`] as of this reading.
     pub fn processes_of(&self, logins: &[u32]) -> Vec<u32> {
         leaders(self.0.iter().filter(|task| logins.contains(&task.login)))
+    }
+
+    /// The effective uids of the live processes carrying any of `logins`.
+    pub fn uids_of(&self, logins: &[u32]) -> Vec<u32> {
+        let mut uids: Vec<u32> = self
+            .0
+            .iter()
+            .filter(|task| logins.contains(&task.login))
+            .map(|task| task.uid)
+            .collect();
+        uids.sort_unstable();
+        uids.dedup();
+        uids
+    }
+
+    /// The login tag of the live process `pid` names by its leader.
+    pub fn login_of(&self, pid: u32) -> Option<u32> {
+        self.0
+            .iter()
+            .find(|task| task.task_id == pid)
+            .map(|task| task.login)
+    }
+
+    /// The first task still alive that carries `login`: task ids are never
+    /// reused, so a session started again has another.
+    pub fn eldest(&self, login: u32) -> Option<u32> {
+        self.0
+            .iter()
+            .filter(|task| task.login == login)
+            .map(|task| task.task_id)
+            .min()
     }
 
     /// [`children`] as of this reading.
@@ -273,17 +313,18 @@ pub fn listener(path: &str) -> Option<u32> {
 
 /// The login tag of process `pid` while it is alive.
 pub fn login_of(pid: u32) -> Option<u32> {
-    tasks()
-        .into_iter()
-        .find(|task| task.task_id == pid)
-        .map(|task| task.login)
+    Tasks::read().login_of(pid)
 }
 
 fn every_task() -> Vec<UserTaskEntry> {
+    listed().unwrap_or_default()
+}
+
+fn listed() -> Option<Vec<UserTaskEntry>> {
     let mut tasks = vec![UserTaskEntry::default(); MAX_TASKS];
-    let count = sys_core::process_list(&mut tasks).clamp(0, MAX_TASKS as i64) as usize;
-    tasks.truncate(count);
-    tasks
+    let count = usize::try_from(sys_core::process_list(&mut tasks)).ok()?;
+    tasks.truncate(count.min(MAX_TASKS));
+    Some(tasks)
 }
 
 /// Every task that has not exited.

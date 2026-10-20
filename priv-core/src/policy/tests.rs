@@ -2,6 +2,7 @@ use super::*;
 use alloc::format;
 use alloc::vec;
 use slopos_abi::caps;
+use slopos_abi::fs::SESSION_UID;
 
 const SHIPPED: &str = include_str!("../../../assets/privd/actions");
 
@@ -15,8 +16,9 @@ action org.slopos.boot.install
   uid      0
   cwd
   exclusive boot-slots
+  keep     300
   allow    root
-  allow    session consent
+  allow    admin confirm
   allow    paired
   describe \"Install a kernel into a boot slot\"
 
@@ -26,7 +28,7 @@ action org.slopos.net.toggle
   caps NetAdmin
   uid 0
   allow program /bin/compositor
-  allow session consent
+  allow user password
   exclusive
   describe \"Turn networking on or off\"
 ";
@@ -34,6 +36,58 @@ action org.slopos.net.toggle
 fn args(words: &[&'static str]) -> Vec<&'static [u8]> {
     words.iter().map(|w| w.as_bytes()).collect()
 }
+
+const USER: u32 = SESSION_UID;
+const ALICE: u32 = 1001;
+const BOB: u32 = 1002;
+const CAROL: u32 = 1003;
+
+fn person(uid: u32, name: &str, admin: bool, password: bool) -> Person {
+    Person {
+        uid,
+        name: name.into(),
+        admin,
+        password,
+    }
+}
+
+/// The one person a fresh install has: an administrator with no password,
+/// logged in at the desktop in front.
+fn one_person() -> People {
+    People {
+        people: vec![person(USER, "user", true, false)],
+        logged_in: vec![USER],
+        front: Some(USER),
+    }
+}
+
+/// Beside the first person, an administrator with a password, a standard
+/// user with one and a standard user without, nobody logged in.
+fn four() -> People {
+    People {
+        people: vec![
+            person(USER, "user", true, false),
+            person(ALICE, "alice", true, true),
+            person(BOB, "bob", false, true),
+            person(CAROL, "carol", false, false),
+        ],
+        logged_in: Vec::new(),
+        front: Some(USER),
+    }
+}
+
+fn shell(uid: u32) -> Requester<'static> {
+    Requester::new(uid, Some("/bin/shell"), false)
+}
+
+fn asks(verdict: Verdict) -> Option<(Kind, String, Vec<String>)> {
+    match verdict {
+        Verdict::Ask(q) => Some((q.kind, q.person.name, q.admins)),
+        _ => None,
+    }
+}
+
+const NO: Verdict = Verdict::Refuse(Refused::NotAllowed);
 
 #[test]
 fn the_example_parses_into_what_it_says() {
@@ -45,6 +99,7 @@ fn the_example_parses_into_what_it_says() {
     assert_eq!(install.uid, 0);
     assert!(install.cwd);
     assert_eq!(install.exclusive_group(), Some("boot-slots"));
+    assert_eq!(install.keep, Some(300));
     assert_eq!(install.describe, "Install a kernel into a boot slot");
     assert_eq!(
         install.shapes,
@@ -64,20 +119,21 @@ fn the_example_parses_into_what_it_says() {
         vec![
             Allow {
                 principal: Principal::Root,
-                consent: false
+                level: Level::None
             },
             Allow {
-                principal: Principal::Session,
-                consent: true
+                principal: Principal::Admin,
+                level: Level::Confirm
             },
             Allow {
                 principal: Principal::Paired,
-                consent: false
+                level: Level::None
             },
         ]
     );
     let toggle = policy.action("org.slopos.net.toggle").unwrap();
     assert!(!toggle.cwd);
+    assert_eq!(toggle.keep, None);
     assert_eq!(toggle.exclusive_group(), Some("org.slopos.net.toggle"));
     assert_eq!(policy.action("org.slopos.nothing"), None);
 }
@@ -106,40 +162,215 @@ fn the_first_matching_principal_decides() {
     let policy = Policy::parse(EXAMPLE).unwrap();
     let install = policy.action("org.slopos.boot.install").unwrap();
     let toggle = policy.action("org.slopos.net.toggle").unwrap();
-    let root = Requester::new(0, Some("/bin/shell"), false);
+    let people = one_person();
+    let root = shell(0);
     let root_outside = Requester::new(0, None, false);
-    let session = Requester::new(SESSION_UID, Some("/bin/shell"), false);
-    let outsider = Requester::new(SESSION_UID, None, false);
-    let compositor = Requester::new(SESSION_UID, Some("/bin/compositor"), false);
-    let paired = Requester::new(SESSION_UID, Some(REMOTED), true);
-    let unpaired_remoted = Requester::new(SESSION_UID, Some(REMOTED), false);
+    let session = shell(USER);
+    let outsider = Requester::new(USER, None, false);
+    let compositor = Requester::new(USER, Some("/bin/compositor"), false);
+    let paired = Requester::new(USER, Some(REMOTED), true);
+    let unpaired_remoted = Requester::new(USER, Some(REMOTED), false);
     let stranger = Requester::new(4242, None, false);
+    let confirm = Some((Kind::Confirm, "user".into(), vec![]));
 
-    assert_eq!(install.admits(&root), Verdict::Run);
+    assert_eq!(install.admits(&root, &people), Verdict::Run);
     assert_eq!(
-        install.admits(&root_outside),
-        Verdict::Refuse,
+        install.admits(&root_outside, &people),
+        NO,
         "uid 0 outside the base is no principal"
     );
-    assert_eq!(install.admits(&session), Verdict::Ask);
-    assert_eq!(install.admits(&outsider), Verdict::Ask);
-    assert_eq!(install.admits(&paired), Verdict::Run);
-    assert_eq!(install.admits(&unpaired_remoted), Verdict::Ask);
-    assert_eq!(install.admits(&stranger), Verdict::Refuse);
-
-    assert_eq!(toggle.admits(&compositor), Verdict::Run);
+    assert_eq!(asks(install.admits(&session, &people)), confirm);
+    assert_eq!(asks(install.admits(&outsider, &people)), confirm);
+    assert_eq!(install.admits(&paired, &people), Verdict::Run);
+    assert_eq!(asks(install.admits(&unpaired_remoted, &people)), confirm);
+    assert_eq!(install.admits(&stranger, &people), NO);
     assert_eq!(
-        toggle.admits(&Requester::new(4242, Some("/bin/compositor"), false)),
+        install.admits(&session, &People::default()),
+        NO,
+        "a person is one the accounts name"
+    );
+
+    assert_eq!(toggle.admits(&compositor, &people), Verdict::Run);
+    assert_eq!(
+        toggle.admits(
+            &Requester::new(4242, Some("/bin/compositor"), false),
+            &people
+        ),
         Verdict::Run,
         "a program principal names the program, whatever runs it"
     );
-    assert_eq!(toggle.admits(&session), Verdict::Ask);
-    assert_eq!(toggle.admits(&root), Verdict::Refuse);
-    assert_eq!(toggle.admits(&stranger), Verdict::Refuse);
     assert_eq!(
-        toggle.admits(&paired),
-        Verdict::Refuse,
+        asks(toggle.admits(&session, &people)),
+        confirm,
+        "a person without a password confirms where another would type one"
+    );
+    assert_eq!(toggle.admits(&root, &people), NO);
+    assert_eq!(toggle.admits(&stranger, &people), NO);
+    assert_eq!(
+        toggle.admits(&paired, &people),
+        NO,
         "a paired connection is only ever paired"
+    );
+}
+
+fn action(allows: &str) -> Action {
+    let text = format!(
+        "action org.slopos.x\n  program /bin/x\n  args *\n  caps Power\n  uid 0\n{allows}  \
+         describe \"x\"\n"
+    );
+    Policy::parse(&text).unwrap().actions()[0].clone()
+}
+
+#[test]
+fn only_a_person_s_line_reads_the_people() {
+    assert!(!action("  allow root\n  allow paired\n").names_people());
+    assert!(action("  allow root\n  allow admin\n").names_people());
+    assert!(action("  allow user alone\n").names_people());
+}
+
+#[test]
+fn a_person_answers_for_themselves_by_a_click_at_their_screen_or_their_password() {
+    let people = four();
+    let confirm = action("  allow user confirm\n");
+    let password = action("  allow user password\n");
+    let unasked = action("  allow user\n");
+    let mine = |kind, name: &str| Some((kind, name.into(), vec![]));
+    assert_eq!(
+        asks(confirm.admits(&shell(USER), &people)),
+        mine(Kind::Confirm, "user")
+    );
+    assert_eq!(
+        asks(confirm.admits(&shell(BOB), &people)),
+        mine(Kind::Password, "bob"),
+        "a click at another's screen answers for nobody else"
+    );
+    assert_eq!(
+        confirm.admits(&shell(CAROL), &people),
+        Verdict::Refuse(Refused::Away("carol".into()))
+    );
+    assert_eq!(
+        asks(password.admits(&shell(USER), &people)),
+        mine(Kind::Confirm, "user"),
+        "without a password, a click where it would be typed"
+    );
+    assert_eq!(
+        asks(password.admits(&shell(ALICE), &people)),
+        mine(Kind::Password, "alice")
+    );
+    assert_eq!(
+        asks(password.admits(&shell(BOB), &people)),
+        mine(Kind::Password, "bob")
+    );
+    assert_eq!(
+        password.admits(&shell(CAROL), &people),
+        Verdict::Refuse(Refused::Away("carol".into()))
+    );
+    let at_alice = People {
+        front: Some(ALICE),
+        ..four()
+    };
+    assert_eq!(
+        asks(confirm.admits(&shell(ALICE), &at_alice)),
+        mine(Kind::Confirm, "alice")
+    );
+    assert_eq!(
+        asks(confirm.admits(&shell(USER), &at_alice)),
+        None,
+        "the first person has no password to type at alice's screen"
+    );
+    for uid in [USER, ALICE, BOB, CAROL] {
+        assert_eq!(unasked.admits(&shell(uid), &people), Verdict::Run);
+    }
+}
+
+#[test]
+fn a_standard_user_at_an_admin_line_is_answered_by_an_administrator_s_password() {
+    let admin = action("  allow admin\n");
+    let confirm = action("  allow admin confirm\n");
+    let password = action("  allow admin password\n");
+    let people = four();
+    let by_alice = Some((Kind::Admin, "bob".into(), vec!["alice".into()]));
+    for action in [&admin, &confirm, &password] {
+        assert_eq!(asks(action.admits(&shell(BOB), &people)), by_alice);
+        assert_eq!(
+            asks(action.admits(&shell(CAROL), &people)).map(|(k, _, a)| (k, a)),
+            Some((Kind::Admin, vec!["alice".into()]))
+        );
+    }
+    assert_eq!(admin.admits(&shell(USER), &people), Verdict::Run);
+    assert_eq!(admin.admits(&shell(ALICE), &people), Verdict::Run);
+    assert_eq!(
+        asks(confirm.admits(&shell(USER), &people)).map(|(k, ..)| k),
+        Some(Kind::Confirm)
+    );
+    assert_eq!(
+        asks(password.admits(&shell(ALICE), &people)).map(|(k, ..)| k),
+        Some(Kind::Password)
+    );
+    let no_password = People {
+        people: vec![
+            person(USER, "user", true, false),
+            person(BOB, "bob", false, true),
+        ],
+        ..four()
+    };
+    assert_eq!(
+        admin.admits(&shell(BOB), &no_password),
+        Verdict::Refuse(Refused::NoAdminPassword),
+        "an administrator without a password answers for nobody else"
+    );
+    let many = People {
+        people: (0..40)
+            .map(|i| person(2000 + i, &format!("admin{i}"), true, true))
+            .chain([person(BOB, "bob", false, true)])
+            .collect(),
+        ..four()
+    };
+    let listed = asks(admin.admits(&shell(BOB), &many)).map(|(_, _, a)| a.len());
+    assert_eq!(listed, Some(crate::consent::MAX_ADMINS));
+    let unlisted = action("  allow root\n");
+    assert_eq!(unlisted.admits(&shell(BOB), &people), NO);
+    let user_first = action("  allow admin password\n  allow user\n");
+    assert_eq!(user_first.admits(&shell(BOB), &people), Verdict::Run);
+    assert_eq!(
+        asks(user_first.admits(&shell(ALICE), &people)).map(|(k, ..)| k),
+        Some(Kind::Password)
+    );
+}
+
+#[test]
+fn alone_runs_unasked_only_while_nobody_else_is_logged_in() {
+    let alone = action("  allow user alone\n  allow admin\n");
+    let bare = action("  allow user alone\n");
+    let logged_in = |uids: &[u32]| People {
+        logged_in: uids.to_vec(),
+        ..four()
+    };
+    for (people, bob) in [
+        (logged_in(&[]), Verdict::Run),
+        (logged_in(&[BOB]), Verdict::Run),
+        (logged_in(&[BOB, BOB]), Verdict::Run),
+    ] {
+        assert_eq!(alone.admits(&shell(BOB), &people), bob);
+    }
+    let others = logged_in(&[USER, BOB]);
+    let by_alice = Some((Kind::Admin, "bob".into(), vec!["alice".into()]));
+    assert_eq!(asks(alone.admits(&shell(BOB), &others)), by_alice);
+    assert_eq!(asks(bare.admits(&shell(BOB), &others)), by_alice);
+    assert_eq!(alone.admits(&shell(USER), &others), Verdict::Run);
+    assert_eq!(bare.admits(&shell(USER), &others), Verdict::Run);
+    let without = People {
+        people: vec![
+            person(USER, "user", true, false),
+            person(BOB, "bob", false, true),
+        ],
+        logged_in: vec![USER, BOB],
+        front: Some(USER),
+    };
+    assert_eq!(
+        alone.admits(&shell(BOB), &without),
+        Verdict::Refuse(Refused::NoAdminPassword),
+        "a power-off while another is logged in, with no administrator's password to type"
     );
 }
 
@@ -162,14 +393,15 @@ fn an_extension_s_program_is_a_principal_only_of_its_own_activation() {
     greet.name = "ext.hello.greet".into();
     greet.allows = vec![Allow {
         principal: Principal::Extension(client.into(), label),
-        consent: false,
+        level: Level::None,
     }];
     assert!(policy.add(greet.clone()));
     assert!(!policy.add(greet), "one name is one action");
     let greet = policy.action("ext.hello.greet").unwrap();
+    let people = one_person();
     for uid in [SESSION_UID, 0, 4242] {
         assert_eq!(
-            greet.admits(&Requester::extension(uid, client, label)),
+            greet.admits(&Requester::extension(uid, client, label), &people),
             Verdict::Run
         );
     }
@@ -180,13 +412,19 @@ fn an_extension_s_program_is_a_principal_only_of_its_own_activation() {
         Requester::new(SESSION_UID, Some(client), false),
         Requester::new(SESSION_UID, None, false),
     ] {
-        assert_eq!(greet.admits(&other), Verdict::Refuse, "{other:?}");
+        assert_eq!(greet.admits(&other, &people), NO, "{other:?}");
     }
     let install = policy.action("org.slopos.boot.install").unwrap();
     assert_eq!(
-        install.admits(&Requester::extension(0, client, label)),
-        Verdict::Refuse,
+        install.admits(&Requester::extension(0, client, label), &people),
+        NO,
         "uid 0 running an extension's program is no root"
+    );
+    assert_eq!(
+        asks(install.admits(&Requester::extension(SESSION_UID, client, label), &people))
+            .map(|(k, ..)| k),
+        Some(Kind::Confirm),
+        "a person running an extension's program is that person"
     );
     assert!(!Requester::extension(SESSION_UID, REMOTED, label).is_paired());
 }
@@ -244,25 +482,55 @@ fn every_rule_of_the_grammar_refuses() {
         ("  args a*b", "an argument word is printable and unquoted"),
         ("  allow root", "the principal is already allowed"),
         (
-            "  allow root consent",
-            "root and paired requesters are never asked about",
+            "  allow user\n  allow user confirm",
+            "the principal is already allowed",
         ),
         (
-            "  allow paired consent",
-            "root and paired requesters are never asked about",
+            "  allow root confirm",
+            "the level is not one that principal takes",
         ),
         (
-            "  allow session maybe",
-            "allow ends with consent or nothing",
+            "  allow paired password",
+            "the level is not one that principal takes",
         ),
         (
-            "  allow session consent now",
-            "allow ends with consent or nothing",
+            "  allow admin alone",
+            "the level is not one that principal takes",
+        ),
+        (
+            "  allow program /bin/x confirm",
+            "the level is not one that principal takes",
+        ),
+        (
+            "  allow user consent",
+            "the level is not one that principal takes",
+        ),
+        ("  allow user confirm now", "allow ends with its level"),
+        (
+            "  allow session",
+            "allow names root, user, admin, paired or program <path>",
         ),
         (
             "  allow everyone",
-            "allow names root, session, paired or program <path>",
+            "allow names root, user, admin, paired or program <path>",
         ),
+        (
+            "  keep 0",
+            "keep takes the seconds an answer is kept, 1 to 900",
+        ),
+        (
+            "  keep 901",
+            "keep takes the seconds an answer is kept, 1 to 900",
+        ),
+        (
+            "  keep +5",
+            "keep takes the seconds an answer is kept, 1 to 900",
+        ),
+        (
+            "  keep 5 6",
+            "keep takes the seconds an answer is kept, 1 to 900",
+        ),
+        ("  keep 5\n  keep 6", "the setting is given twice"),
         ("  allow program", "allow program takes a path"),
         (
             "  allow program bin/x",
@@ -433,9 +701,10 @@ fn mutated_policies_parse_or_name_a_line() {
 #[test]
 fn the_shipped_policy_says_what_the_access_model_does() {
     let policy = Policy::parse(SHIPPED).unwrap();
-    let root = Requester::new(0, Some("/bin/shell"), false);
-    let session = Requester::new(SESSION_UID, Some("/bin/shell"), false);
-    let paired = Requester::new(SESSION_UID, Some(REMOTED), true);
+    let people = one_person();
+    let root = shell(0);
+    let session = shell(USER);
+    let paired = Requester::new(USER, Some(REMOTED), true);
     let paired_list = [
         "org.slopos.boot.",
         "org.slopos.base.",
@@ -448,31 +717,51 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     ];
     for action in policy.actions() {
         assert_eq!(action.uid, 0, "{}", action.name);
-        assert_eq!(action.admits(&root), Verdict::Run, "{}", action.name);
         assert_eq!(
-            action.admits(&Requester::new(0, None, false)),
-            Verdict::Refuse,
+            action.admits(&root, &people),
+            Verdict::Run,
+            "{}",
+            action.name
+        );
+        assert_eq!(
+            action.admits(&Requester::new(0, None, false), &people),
+            NO,
             "{}: uid 0 outside the base",
             action.name
         );
-        assert_ne!(action.admits(&session), Verdict::Refuse, "{}", action.name);
+        assert!(
+            matches!(
+                action.admits(&session, &people),
+                Verdict::Run
+                    | Verdict::Ask(Question {
+                        kind: Kind::Confirm,
+                        ..
+                    })
+            ),
+            "{}: the one person runs it or clicks",
+            action.name
+        );
         let pairable = paired_list.iter().any(|p| action.name.starts_with(p));
         assert_eq!(
-            action.admits(&paired) == Verdict::Run,
+            action.admits(&paired, &people) == Verdict::Run,
             pairable,
             "{} and a pairing",
             action.name
         );
-        for allow in &action.allows {
-            if let Principal::Program(path) = &allow.principal {
-                assert_eq!(path, "/bin/compositor", "a program principal is static");
-            }
-        }
+        assert!(
+            !action
+                .allows
+                .iter()
+                .any(|a| matches!(a.principal, Principal::Program(_))),
+            "{}: every person's compositor is one program",
+            action.name
+        );
+        assert_eq!(action.keep, None, "{}", action.name);
     }
     let install = policy.action("org.slopos.install").unwrap();
     assert_eq!(install.program, "/bin/installer");
-    assert_eq!(install.admits(&session), Verdict::Ask);
-    assert_eq!(install.admits(&paired), Verdict::Refuse);
+    assert!(asks(install.admits(&session, &people)).is_some());
+    assert_eq!(install.admits(&paired, &people), NO);
     assert!(install.exclusive_group().is_some());
     for (name, args) in [
         ("org.slopos.power.poweroff", &["halt"][..]),
@@ -513,21 +802,21 @@ fn the_shipped_policy_says_what_the_access_model_does() {
             "{name} runs the base it writes"
         );
     }
+    let compositor = Requester::new(USER, Some("/bin/compositor"), false);
     let toggle = policy.action("org.slopos.net.toggle").unwrap();
-    assert_eq!(
-        toggle.admits(&Requester::new(SESSION_UID, Some("/bin/compositor"), false)),
-        Verdict::Run
-    );
+    assert_eq!(toggle.admits(&compositor, &people), Verdict::Run);
     for name in [
         "org.slopos.boot.install",
         "org.slopos.base.install",
         "org.slopos.base.rollback",
         "org.slopos.boot.set-default",
         "org.slopos.net.configure",
+        "org.slopos.accounts.manage",
+        "org.slopos.accounts.password",
     ] {
         assert_eq!(
-            policy.action(name).unwrap().admits(&session),
-            Verdict::Ask,
+            asks(policy.action(name).unwrap().admits(&session, &people)),
+            Some((Kind::Confirm, "user".into(), vec![])),
             "{name}"
         );
     }
@@ -542,50 +831,95 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     let rescue = policy.action("org.slopos.rescue").unwrap();
     assert_eq!(rescue.program, "/bin/shell");
     assert_eq!(rescue.caps, DELEGABLE);
-    assert_eq!(rescue.admits(&session), Verdict::Ask);
+    assert!(asks(rescue.admits(&session, &people)).is_some());
     assert!(rescue.accepts(&args_of(&["--rescue"])));
     assert!(!rescue.accepts(&args_of(&["--rescue", "-c", "id"])));
 }
 
+/// With a second person, the system's actions are an administrator's: a
+/// standard user is answered by an administrator's password, may see what
+/// boots and power the machine off while nobody else is logged in, and
+/// changes their own password by confirming it.
+#[test]
+fn the_shipped_policy_reads_a_standard_user_s_requests_as_an_administrator_s_to_answer() {
+    let policy = Policy::parse(SHIPPED).unwrap();
+    let bob = shell(BOB);
+    let by_alice = Some((Kind::Admin, "bob".into(), vec!["alice".into()]));
+    let alone = People {
+        logged_in: vec![BOB],
+        ..four()
+    };
+    let shared = People {
+        logged_in: vec![USER, BOB],
+        ..four()
+    };
+    for action in policy.actions() {
+        let verdict = action.admits(&bob, &alone);
+        let unasked = [
+            "org.slopos.boot.status",
+            "org.slopos.boot.spare",
+            "org.slopos.power.poweroff",
+            "org.slopos.power.reboot",
+            "org.slopos.boot.reboot",
+            "org.slopos.console.keymap",
+        ];
+        match action.name.as_str() {
+            name if unasked.contains(&name) => assert_eq!(verdict, Verdict::Run, "{name}"),
+            "org.slopos.accounts.password" => {
+                assert_eq!(asks(verdict).map(|(k, ..)| k), Some(Kind::Password))
+            }
+            name => assert_eq!(asks(verdict), by_alice, "{name}"),
+        }
+    }
+    for name in [
+        "org.slopos.power.poweroff",
+        "org.slopos.power.reboot",
+        "org.slopos.boot.reboot",
+        "org.slopos.console.keymap",
+    ] {
+        let action = policy.action(name).unwrap();
+        assert_eq!(asks(action.admits(&bob, &shared)), by_alice, "{name}");
+        assert_eq!(action.admits(&shell(USER), &shared), Verdict::Run, "{name}");
+    }
+}
+
 /// The extension actions hold what changes the store and the activations,
 /// or for a configuration the seal alone, and nothing that could rewrite or
-/// cover the root; only what a key signed goes in for the session unasked,
-/// and they run one at a time.
+/// cover the root; only what a key signed goes in for an administrator
+/// unasked, and they run one at a time.
 #[test]
 fn the_extension_actions_hold_the_store_and_nothing_wider() {
     let policy = Policy::parse(SHIPPED).unwrap();
-    let session = Requester::new(SESSION_UID, Some("/bin/shell"), false);
+    let people = one_person();
+    let session = shell(USER);
+    let asked = |verdict: Verdict| asks(verdict).is_some();
     let names = [
         (
             "org.slopos.extension.install",
-            Verdict::Ask,
+            true,
             &["install", "/x.ext"][..],
         ),
         (
             "org.slopos.extension.install-signed",
-            Verdict::Run,
+            false,
             &["install-signed", "/x.ext"],
         ),
         (
             "org.slopos.extension.trust",
-            Verdict::Ask,
+            true,
             &["key", "remove", "SHA256:x"],
         ),
-        (
-            "org.slopos.extension.manage",
-            Verdict::Ask,
-            &["rollback", "x"],
-        ),
+        ("org.slopos.extension.manage", true, &["rollback", "x"]),
     ];
     let config = [
         (
             "org.slopos.extension.config",
-            Verdict::Ask,
+            true,
             &["config", "install", "x", "x.conf", "/x"][..],
         ),
         (
             "org.slopos.extension.config-signed",
-            Verdict::Run,
+            false,
             &["config", "apply", "/x"],
         ),
     ];
@@ -598,7 +932,11 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
         let action = policy.action(name).unwrap();
         assert_eq!(action.program, "/bin/extctl", "{name}");
         assert_eq!(action.caps, caps, "{name}");
-        assert_eq!(action.admits(&session), for_session, "{name}");
+        assert_eq!(
+            asked(action.admits(&session, &people)),
+            for_session,
+            "{name}"
+        );
         assert_eq!(action.exclusive_group(), Some("extensions"), "{name}");
         assert!(action.accepts(&args_of(args)), "{name}");
     }

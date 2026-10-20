@@ -2,9 +2,9 @@
 //! as its first administrator; an account `/bin/users` makes has a home of
 //! its own and the groups a process spawned as it holds; a password is set,
 //! checked by `/sbin/authcheck` and refused when wrong, and changed by its
-//! person only with the current one; only an administrator manages people
-//! and the last one stays; and neither a `DacOverride` nor a `Mount` holder
-//! reaches the database.
+//! person only with the current one; privd lets only an administrator, or an
+//! administrator's password, manage people and the last administrator stays;
+//! and neither a `DacOverride` nor a `Mount` holder reaches the database.
 //!
 //! The runner hands this test every capability as uid 0. `users` started
 //! without its action's capabilities asks privd, which runs it for root; one
@@ -545,8 +545,8 @@ fn only_an_administrator_manages_and_the_last_stays() -> bool {
     if !demoted.ok() || record().and_then(|r| r.person(NAME).map(|p| p.admin)) != Some(false) {
         return fail(format!("users demote {NAME}: {}", demoted.shown()));
     }
-    let by_them = mechanism(MANAGE, uid, &["promote", NAME], "");
-    if by_them.ok() || !by_them.said.contains("does not administer") {
+    let by_them = spawned(USERS, &["promote", NAME], &[], "", 0, Some((uid, &[])));
+    if by_them.ok() || !by_them.said.contains("no administrator has one") {
         return fail(format!("{NAME} promoted themselves: {}", by_them.shown()));
     }
     for args in [&["demote", "user"][..], &["remove", "user"]] {

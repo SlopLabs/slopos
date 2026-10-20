@@ -5,8 +5,11 @@
 //! as the extension's first user.
 //!
 //! Who asks is what the kernel recorded when the connection was made: the
-//! uid, a pidfd and the program. Every failure on the way is a denial, and a
+//! uid, a pidfd and the program; who that uid is, the accounts record says
+//! as the request comes. Every failure on the way is a denial, and a
 //! requester whose process has exited is refused, before consent and after.
+//! A password typed in the dialog is checked by `/sbin/authcheck`, never
+//! here.
 //!
 //! `SIGHUP` has it read the extensions' actions again, as init asks when they
 //! change; a request reads the policy as it stands when the request comes.
@@ -24,7 +27,9 @@ macro_rules! log {
     }};
 }
 
+mod answers;
 mod consent;
+mod people;
 
 use std::collections::VecDeque;
 use std::ffi::CString;
@@ -40,16 +45,17 @@ use slopos_abi::syscall::{
 };
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_extension_core::declare::mount_point;
-use slopos_priv_core::consent::{Ask, Refusal};
+use slopos_priv_core::consent::{Ask, Kind, Refusal};
 use slopos_priv_core::policy::{Principal, REMOTED};
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request, kind};
 use slopos_priv_core::{
-    Action, ENV_ACTION, ENV_UID, INIT, MECHANISM_LANG, MECHANISM_PATH, POLICY, Policy, Requester,
-    SOCKET, Verdict, elf_interpreted,
+    Action, ENV_ACTION, ENV_UID, INIT, MECHANISM_LANG, MECHANISM_PATH, POLICY, People, Policy,
+    Question, Refused, Requester, SOCKET, Verdict, elf_interpreted,
 };
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 
+use self::answers::{Asked, Checks, Kept};
 use self::consent::{Broker, Waiting};
 use crate::init_control;
 use crate::readiness::ReadinessNotifier;
@@ -59,9 +65,11 @@ use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, net, pidfd};
 /// Init's readiness notifier is fd 3, the consent channel fd 4.
 pub const CONSENT_FD: RawFd = 4;
 const REMOTE_CONF: &str = "/usr/share/slopos/remote/remote.conf";
-/// Shared by every requester but root and the paired agent, whom nothing
-/// else can crowd out.
+/// Per uid, for every requester but root and the paired agent, whom nothing
+/// else can crowd out: no person takes another's connections.
 const MAX_CONNECTIONS: usize = 32;
+/// Of every uid together, so the people do not multiply privd's threads.
+const MAX_POOLED: usize = 128;
 /// Per uid and program, so no one requester takes every connection.
 const MAX_CONNECTIONS_EACH: usize = 8;
 /// One request's descriptors, which may arrive while the request before it is
@@ -112,6 +120,8 @@ struct Daemon {
     /// one did, whose exclusive groups this one cannot know: none is taken
     /// while any of them runs.
     inherited: Vec<u32>,
+    kept: Kept,
+    checks: Checks,
 }
 
 impl Daemon {
@@ -132,6 +142,7 @@ impl Daemon {
             .loaded
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
+        self.kept.clear();
         log!("privd: read the extensions' actions again");
     }
 
@@ -189,6 +200,8 @@ pub fn privd_main() -> ! {
         cwd: Mutex::new(()),
         connections: Mutex::new(Vec::new()),
         inherited: init_control::privd_threads_elsewhere(),
+        kept: Kept::default(),
+        checks: Checks::default(),
     };
     let daemon: &'static Daemon = DAEMON.get_or_init(|| daemon);
     let listener = match listen() {
@@ -269,8 +282,10 @@ impl Admitted {
         let pooled = !root && !peer.requester(paired).is_paired();
         let key = (peer.uid, peer.program.path().map(str::to_owned));
         let mut connections = daemon.connections.lock().ok()?;
-        let in_pool = connections.iter().filter(|(_, pooled)| *pooled).count();
-        if (pooled && in_pool >= MAX_CONNECTIONS)
+        let pool = || connections.iter().filter(|(_, pooled)| *pooled);
+        let full = pool().count() >= MAX_POOLED
+            || pool().filter(|((uid, _), _)| *uid == key.0).count() >= MAX_CONNECTIONS;
+        if (pooled && full)
             || connections.iter().filter(|(k, _)| *k == key).count() >= MAX_CONNECTIONS_EACH
         {
             return None;
@@ -358,7 +373,9 @@ fn static_principals(action: &Action) -> Result<(), String> {
         let path = match &allow.principal {
             Principal::Program(path) => path.as_str(),
             Principal::Paired => REMOTED,
-            Principal::Root | Principal::Session | Principal::Extension(..) => continue,
+            Principal::Root | Principal::User | Principal::Admin | Principal::Extension(..) => {
+                continue;
+            }
         };
         let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
         if elf_interpreted(&image) != Some(false) {
@@ -784,54 +801,86 @@ fn run(
     if !peer.still_runs(&conn.fd) {
         return Err(Reply::denied(LAPSED));
     }
-    let verdict = action.admits(&peer.requester(daemon.paired));
-    if verdict == Verdict::Refuse {
-        return Err(Reply::denied(format!(
-            "{} may not ask for {}",
-            peer.describe(),
-            action.name
-        )));
-    }
+    let tasks = action
+        .names_people()
+        .then(init_control::Tasks::try_read)
+        .flatten();
+    let people = match action.names_people() {
+        true => people::now(tasks.as_ref()),
+        false => Ok(People::default()),
+    };
+    let requester = peer.requester(daemon.paired);
+    let question = match action.admits(&requester, people.as_ref().unwrap_or(&People::default())) {
+        Verdict::Run => None,
+        Verdict::Ask(question) => Some(question),
+        Verdict::Refuse(Refused::NotAllowed) => {
+            let unknown = people
+                .err()
+                .map(|why| format!(": {why}"))
+                .unwrap_or_default();
+            return Err(Reply::denied(format!(
+                "{} may not ask for {}{unknown}",
+                peer.describe(),
+                action.name
+            )));
+        }
+        Verdict::Refuse(why) => return Err(Reply::denied(why.to_string())),
+    };
     still_wanted(peer, conn, request.id)?;
     let cwd = match fds.get(wire::STDIO) {
         Some(dir) => directory_of(daemon, dir)?,
         None => "/".to_owned(),
     };
-    if verdict == Verdict::Ask {
+    let origin = loaded.origins.iter().find(|o| o.action == action.name);
+    let mut allowed = "";
+    if let Some(question) = question {
         drop(claim(daemon, action)?);
         let mut command = vec![action.program.as_bytes().to_vec()];
         command.extend(request.args.iter().cloned());
-        let ask = Ask {
-            id: 0,
-            action: action.name.clone(),
-            describe: action.describe.clone(),
-            program: peer.program.path().map(str::to_owned),
-            uid: peer.uid,
-            pid: peer.pid,
-            cwd: cwd.clone(),
-            command,
-        };
-        if !ask.fits() {
-            return Err(Reply::denied(
-                "the command is too long to show the person at the machine",
-            ));
+        let session = tasks.as_ref().and_then(|tasks| {
+            let login = tasks.login_of(peer.pid).filter(|&login| login != 0)?;
+            Some((login, tasks.eldest(login)?))
+        });
+        let kept = action.keep.zip(session).map(|(keep, session)| {
+            let asked = Asked {
+                uid: peer.uid,
+                session,
+                action: action.name.clone(),
+                origin: origin.map(|o| (o.extension.clone(), o.generation)),
+                kind: question.kind,
+                command: command.clone(),
+                cwd: cwd.clone(),
+            };
+            (asked, keep)
+        });
+        allowed = ", allowed earlier at the machine";
+        if !kept
+            .as_ref()
+            .is_some_and(|(asked, keep)| daemon.kept.holds(asked, *keep, &question.admins))
+        {
+            let ask = Ask {
+                id: 0,
+                action: action.name.clone(),
+                describe: action.describe.clone(),
+                program: peer.program.path().map(str::to_owned),
+                uid: peer.uid,
+                pid: peer.pid,
+                cwd: cwd.clone(),
+                command,
+                kind: question.kind,
+                person: Some(question.person.name.clone()),
+                admins: question.admins.clone(),
+            };
+            let by = answer(daemon, peer, conn, request.id, ask)?;
+            judged_again(action, &requester, &question, by.as_deref())?;
+            if let Some((asked, _)) = kept {
+                daemon.kept.keep(asked, by);
+            }
+            allowed = ", allowed at the machine";
         }
-        let mut pending = Pending {
-            peer,
-            conn,
-            id: request.id,
-        };
-        daemon
-            .consent
-            .ask(ask, &mut pending)
-            .map_err(|refusal| Reply::Denied {
-                reason: refusal.to_string(),
-                by_person: refusal.by_person(),
-            })?;
     }
     let _claim = claim(daemon, action)?;
     still_wanted(peer, conn, request.id)?;
-    let origin = loaded.origins.iter().find(|o| o.action == action.name);
     if let Some(origin) = origin {
         crate::activation::holds(&origin.extension, origin.generation, &action.program)
             .map_err(Reply::denied)?;
@@ -845,17 +894,92 @@ fn run(
         &cwd,
     )?;
     log!(
-        "privd: {} for {}: started pid {pid}{}",
+        "privd: {} for {}: started pid {pid}{allowed}",
         action.name,
         peer.describe(),
-        if verdict == Verdict::Ask {
-            ", allowed at the machine"
-        } else {
-            ""
-        }
     );
     conn.reply(&Reply::Started { pid }, request.id);
     Ok(wait(conn, pid, request.id))
+}
+
+/// Put `ask` to the person at the machine and hold what they answer to what
+/// it takes: a click, or the password of the person it names; the
+/// administrator who answered, for a question an administrator answers.
+fn answer(
+    daemon: &Daemon,
+    peer: &Peer,
+    conn: &mut Conn,
+    id: u64,
+    ask: Ask,
+) -> Result<Option<String>, Reply> {
+    if !ask.fits() {
+        return Err(Reply::denied(
+            "the command is too long to show the person at the machine",
+        ));
+    }
+    let (action, kind, person) = (ask.action.clone(), ask.kind, ask.person.clone());
+    let mut pending = Pending { peer, conn, id };
+    let answer = daemon
+        .consent
+        .ask(ask, &mut pending)
+        .map_err(|refusal| Reply::Denied {
+            reason: refusal.to_string(),
+            by_person: refusal.by_person(),
+        })?;
+    let whose = match kind {
+        Kind::Confirm => return Ok(None),
+        Kind::Password => person.ok_or_else(|| Reply::denied("the question named nobody"))?,
+        Kind::Admin => answer
+            .admin
+            .clone()
+            .ok_or_else(|| Reply::denied("no administrator answered"))?,
+    };
+    let secret = answer
+        .secret
+        .ok_or_else(|| Reply::denied("no password was typed"))?;
+    match daemon.checks.check(&whose, &secret) {
+        Ok(true) => {
+            log!(
+                "privd: {action} for {}: allowed by {whose}'s password",
+                peer.describe()
+            );
+            Ok(answer.admin)
+        }
+        Ok(false) => Err(Reply::Denied {
+            reason: "the password typed was wrong".into(),
+            by_person: true,
+        }),
+        Err(why) => Err(Reply::denied(format!(
+            "the password could not be checked: {why}"
+        ))),
+    }
+}
+
+/// Hold an answered request to the people as they stand now: it runs once
+/// it would ask the same of the same person, the administrator who answered
+/// still listed, or would run unasked.
+fn judged_again(
+    action: &Action,
+    requester: &Requester<'_>,
+    question: &Question,
+    by: Option<&str>,
+) -> Result<(), Reply> {
+    let tasks = init_control::Tasks::try_read();
+    let people = people::now(tasks.as_ref())
+        .map_err(|why| Reply::denied(format!("the answer cannot be held to the people: {why}")))?;
+    match action.admits(requester, &people) {
+        Verdict::Run => Ok(()),
+        Verdict::Ask(again)
+            if again.kind == question.kind
+                && again.person.uid == question.person.uid
+                && by.is_none_or(|by| again.admins.iter().any(|admin| admin == by)) =>
+        {
+            Ok(())
+        }
+        _ => Err(Reply::denied(
+            "who may allow it changed while the person was asked",
+        )),
+    }
 }
 
 fn shown(args: &[Vec<u8>]) -> String {

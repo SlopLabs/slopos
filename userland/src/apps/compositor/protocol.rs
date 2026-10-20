@@ -1010,6 +1010,12 @@ impl ProtocolBridge {
             .queue_event(client_idx, &Event::Modifiers { mods });
     }
 
+    pub fn send_modifiers_for_task(&mut self, task_id: u32, mods: u8) {
+        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+            self.send_modifiers(idx, mods as u32);
+        }
+    }
+
     /// Forward one key event to the keyboard-focus surface. Modifiers are sent
     /// first, per the wl_keyboard rule that a client judges a key against
     /// current modifier state, never the previous event's.

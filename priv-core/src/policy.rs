@@ -9,28 +9,34 @@
 //!   uid      0
 //!   cwd
 //!   exclusive boot-slots
+//!   keep     300
 //!   allow    root
-//!   allow    session consent
+//!   allow    admin confirm
 //!   allow    paired
 //!   describe "Install a kernel into a boot slot"
 //! ```
 //!
 //! `args` repeats, one shape each: fixed leading words, then `*` for any
 //! further ones. `allow` lines are tried in order and the first whose
-//! principal matches decides. With `cwd` the mechanism runs in the directory
-//! the request must send, and without it in `/`; `exclusive` lets one
-//! mechanism of its group run at a time, the group being the action's name
-//! unless one is given. An action marked `medium` exists only on a boot of
-//! the install medium.
+//! principal matches decides, at its level: `user` takes `alone`, `confirm`
+//! or `password`, `admin` takes `confirm` or `password`, and no level runs
+//! the request unasked. A person no line matches is answered by an
+//! administrator's password when an `admin` line stands, which `user alone`
+//! becomes while another person is logged in. With `cwd` the mechanism runs
+//! in the directory the request must send, and without it in `/`;
+//! `exclusive` lets one mechanism of its group run at a time, the group being
+//! the action's name unless one is given; `keep` keeps an answer for that
+//! many seconds for the same session, command line and directory. An action
+//! marked `medium` exists only on a boot of the install medium.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
 use slopos_abi::extension::Label;
-use slopos_abi::fs::SESSION_UID;
 
 use crate::DELEGABLE;
+use crate::consent::Kind;
 
 /// The one program whose connections a pairing speaks through.
 pub const REMOTED: &str = "/bin/remoted";
@@ -39,6 +45,8 @@ const MAX_NAME: usize = 64;
 const MAX_WORD: usize = 64;
 const MAX_DESCRIBE: usize = 120;
 const MAX_PATH: usize = 255;
+/// The longest an answer is kept, as sudo's timestamps commonly last.
+pub const MAX_KEEP: u32 = 900;
 const PROGRAM_DIRS: [&str; 3] = ["/bin/", "/sbin/", "/usr/bin/"];
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -57,6 +65,9 @@ pub struct Action {
     pub describe: String,
     pub cwd: bool,
     pub exclusive: Option<String>,
+    /// Seconds an answer is kept for the same session, command line and
+    /// directory.
+    pub keep: Option<u32>,
     pub medium: bool,
 }
 
@@ -70,15 +81,18 @@ pub struct Shape {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Allow {
     pub principal: Principal,
-    pub consent: bool,
+    pub level: Level,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Principal {
     /// A uid-0 requester running a base program: uid 0 alone is no authority.
     Root,
-    /// The person's uid, from any program but `remoted` on a paired base.
-    Session,
+    /// A person the accounts record names, from any program but `remoted` on
+    /// a paired base.
+    User,
+    /// A person the record names as an administrator, likewise.
+    Admin,
     /// `remoted`'s connection on a base that carries a pairing.
     Paired,
     /// A requester running the base program at this path.
@@ -87,6 +101,19 @@ pub enum Principal {
     /// label names: an extension's own program, which only that extension's
     /// actions allow.
     Extension(String, Label),
+}
+
+/// What a person must do for their request to run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Level {
+    /// Nothing: it runs unasked.
+    None,
+    /// Nothing while nobody else is logged in; otherwise as `admin`.
+    Alone,
+    /// Click Allow.
+    Confirm,
+    /// Type their password.
+    Password,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -138,23 +165,130 @@ impl<'a> Requester<'a> {
         self.paired
     }
 
+    /// Whether the requester is `principal`, one that names no person.
     fn is(&self, principal: &Principal) -> bool {
         match principal {
             Principal::Root => self.uid == 0 && self.program.is_some(),
             Principal::Paired => self.paired,
-            Principal::Session => !self.paired && self.uid == SESSION_UID,
+            Principal::User | Principal::Admin => false,
             Principal::Program(path) => !self.paired && self.program == Some(path.as_str()),
             Principal::Extension(path, label) => self.extension == Some((path.as_str(), *label)),
         }
     }
+
+    /// The person the requester is, when `people` knows them and the
+    /// requester is no paired agent.
+    fn person<'p>(&self, people: &'p People) -> Option<&'p Person> {
+        people.person(self.uid).filter(|_| !self.paired)
+    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// A person as privd judges their requests.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Person {
+    pub uid: u32,
+    pub name: String,
+    pub admin: bool,
+    /// Whether they have a password to type; without one they confirm by a
+    /// click where another would type it.
+    pub password: bool,
+}
+
+/// The people as of a request: whom the accounts record names, who is logged
+/// in, and whose desktop the screen shows, at which only they click.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct People {
+    pub people: Vec<Person>,
+    pub logged_in: Vec<u32>,
+    pub front: Option<u32>,
+}
+
+impl People {
+    pub fn person(&self, uid: u32) -> Option<&Person> {
+        self.people.iter().find(|p| p.uid == uid)
+    }
+
+    fn alone(&self, uid: u32) -> bool {
+        self.logged_in.iter().all(|&other| other == uid)
+    }
+
+    /// What `person` must do to answer for themselves: a click at their own
+    /// screen, else their password, which a person without one cannot type.
+    fn ask_self(&self, person: &Person, confirm: bool) -> Verdict {
+        let kind = match (confirm, self.front == Some(person.uid), person.password) {
+            (true, true, _) | (false, true, false) => Kind::Confirm,
+            (_, _, true) => Kind::Password,
+            (_, false, false) => return Verdict::Refuse(Refused::Away(person.name.clone())),
+        };
+        Verdict::Ask(Question {
+            kind,
+            person: person.clone(),
+            admins: Vec::new(),
+        })
+    }
+
+    /// An administrator's password for `person`'s request: only an
+    /// administrator with a password answers for another.
+    fn ask_admins(&self, person: &Person) -> Verdict {
+        let admins: Vec<String> = self
+            .people
+            .iter()
+            .filter(|p| p.admin && p.password && p.uid != person.uid)
+            .take(crate::consent::MAX_ADMINS)
+            .map(|p| p.name.clone())
+            .collect();
+        if admins.is_empty() {
+            return Verdict::Refuse(Refused::NoAdminPassword);
+        }
+        Verdict::Ask(Question {
+            kind: Kind::Admin,
+            person: person.clone(),
+            admins,
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Verdict {
     Run,
-    /// Run once the person at the machine allows it.
-    Ask,
-    Refuse,
+    /// Run once the question is answered.
+    Ask(Question),
+    Refuse(Refused),
+}
+
+/// What the person at the machine is asked, and for whom.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Question {
+    pub kind: Kind,
+    pub person: Person,
+    /// Who may answer a [`Kind::Admin`] question.
+    pub admins: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Refused {
+    /// No line names the requester.
+    NotAllowed,
+    /// Only an administrator may allow it, and none has a password to type.
+    NoAdminPassword,
+    /// The person must answer at another's screen, and has no password to
+    /// type there.
+    Away(String),
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refused::NotAllowed => f.write_str("the policy allows the requester nothing here"),
+            Refused::NoAdminPassword => {
+                f.write_str("it needs an administrator's password, and no administrator has one")
+            }
+            Refused::Away(name) => write!(
+                f,
+                "only {name} can allow it, and the screen is not theirs and they have no password"
+            ),
+        }
+    }
 }
 
 impl Action {
@@ -164,12 +298,41 @@ impl Action {
         self.shapes.iter().any(|shape| shape.matches(args))
     }
 
-    pub fn admits(&self, who: &Requester<'_>) -> Verdict {
-        match self.allows.iter().find(|allow| who.is(&allow.principal)) {
-            Some(allow) if allow.consent => Verdict::Ask,
-            Some(_) => Verdict::Run,
-            None => Verdict::Refuse,
+    /// What it takes for `who` to run the action, `people` as they stand.
+    pub fn admits(&self, who: &Requester<'_>, people: &People) -> Verdict {
+        let person = who.person(people);
+        let mut admins_answer = false;
+        for allow in &self.allows {
+            match (&allow.principal, person, allow.level) {
+                (Principal::User, Some(p), Level::Alone) if people.alone(p.uid) || p.admin => {
+                    return Verdict::Run;
+                }
+                (Principal::User, Some(_), Level::Alone) => admins_answer = true,
+                (Principal::User, Some(_), Level::None) => return Verdict::Run,
+                (Principal::User, Some(p), level) => {
+                    return people.ask_self(p, level == Level::Confirm);
+                }
+                (Principal::Admin, Some(p), Level::None) if p.admin => return Verdict::Run,
+                (Principal::Admin, Some(p), level) if p.admin => {
+                    return people.ask_self(p, level == Level::Confirm);
+                }
+                (Principal::Admin, Some(_), _) => admins_answer = true,
+                (principal, _, _) if who.is(principal) => return Verdict::Run,
+                _ => {}
+            }
         }
+        match person {
+            Some(p) if admins_answer => people.ask_admins(p),
+            _ => Verdict::Refuse(Refused::NotAllowed),
+        }
+    }
+
+    /// Whether a verdict on it reads the people: an `allow` names `user` or
+    /// `admin`.
+    pub fn names_people(&self) -> bool {
+        self.allows
+            .iter()
+            .any(|allow| matches!(allow.principal, Principal::User | Principal::Admin))
     }
 
     /// The group whose mechanisms run one at a time, if the action has one.
@@ -292,6 +455,7 @@ struct Draft {
     describe: Option<String>,
     cwd: bool,
     exclusive: Option<String>,
+    keep: Option<u32>,
     medium: bool,
 }
 
@@ -345,36 +509,14 @@ impl Draft {
                 once(&mut self.uid, uid)
             }
             "allow" => {
-                let principal = match words.next() {
-                    Some("root") => Principal::Root,
-                    Some("session") => Principal::Session,
-                    Some("paired") => Principal::Paired,
-                    Some("program") => {
-                        let path = words.next().ok_or("allow program takes a path")?;
-                        if !valid_program(path) {
-                            return Err("allow program names a base program's canonical path");
-                        }
-                        Principal::Program(path.to_string())
-                    }
-                    _ => return Err("allow names root, session, paired or program <path>"),
-                };
-                let consent = match words.next() {
-                    None => false,
-                    Some("consent") => true,
-                    Some(_) => return Err("allow ends with consent or nothing"),
-                };
-                if words.next().is_some() {
-                    return Err("allow ends with consent or nothing");
-                }
-                if consent && matches!(principal, Principal::Root | Principal::Paired) {
-                    return Err("root and paired requesters are never asked about");
-                }
-                if self.allows.iter().any(|a| a.principal == principal) {
+                let allow = allow(rest)?;
+                if self.allows.iter().any(|a| a.principal == allow.principal) {
                     return Err("the principal is already allowed");
                 }
-                self.allows.push(Allow { principal, consent });
+                self.allows.push(allow);
                 Ok(())
             }
+            "keep" => once(&mut self.keep, keep(rest)?),
             "describe" => once(&mut self.describe, describe(rest)?),
             "cwd" if rest.is_empty() => flag(&mut self.cwd),
             "medium" if rest.is_empty() => flag(&mut self.medium),
@@ -408,9 +550,63 @@ impl Draft {
             allows: self.allows,
             cwd: self.cwd,
             exclusive: self.exclusive,
+            keep: self.keep,
             medium: self.medium,
         })
     }
+}
+
+/// An `allow` line's principal and level.
+fn allow(rest: &str) -> Result<Allow, &'static str> {
+    let mut words = rest.split_ascii_whitespace();
+    let principal = match words.next() {
+        Some("root") => Principal::Root,
+        Some("user") => Principal::User,
+        Some("admin") => Principal::Admin,
+        Some("paired") => Principal::Paired,
+        Some("program") => {
+            let path = words.next().ok_or("allow program takes a path")?;
+            if !valid_program(path) {
+                return Err("allow program names a base program's canonical path");
+            }
+            Principal::Program(path.to_string())
+        }
+        _ => return Err("allow names root, user, admin, paired or program <path>"),
+    };
+    let level = level(
+        words,
+        principal == Principal::User,
+        principal == Principal::Admin,
+    )?;
+    Ok(Allow { principal, level })
+}
+
+/// What an `allow` line ends with after its principal: a level only `user`
+/// and `admin` take, and `alone` only `user`.
+pub fn level<'a>(
+    mut words: impl Iterator<Item = &'a str>,
+    user: bool,
+    admin: bool,
+) -> Result<Level, &'static str> {
+    let level = match words.next() {
+        None => Level::None,
+        Some("alone") if user => Level::Alone,
+        Some("confirm") if user || admin => Level::Confirm,
+        Some("password") if user || admin => Level::Password,
+        Some(_) => return Err("the level is not one that principal takes"),
+    };
+    if words.next().is_some() {
+        return Err("allow ends with its level");
+    }
+    Ok(level)
+}
+
+/// A `keep` line's seconds, 1 to [`MAX_KEEP`].
+pub fn keep(rest: &str) -> Result<u32, &'static str> {
+    rest.parse::<u32>()
+        .ok()
+        .filter(|s| (1..=MAX_KEEP).contains(s) && rest.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or("keep takes the seconds an answer is kept, 1 to 900")
 }
 
 fn once<T>(slot: &mut Option<T>, value: T) -> Result<(), &'static str> {

@@ -2,15 +2,14 @@
 //! changing them is privd's: `org.slopos.accounts.password` changes the
 //! requester's own password, asking the current one first, and
 //! `org.slopos.accounts.manage` adds, removes and renames people, sets a
-//! person's password and changes who administers the machine, for an
-//! administrator or root. Init runs `users sync` at every boot, holding
-//! `Seal`, which writes the user database and gives a root that has no record
-//! the one person's: `user`, its first administrator.
+//! person's password and changes who administers the machine, for root, an
+//! administrator, or a person an administrator's password answers for. Init
+//! runs `users sync` at every boot, holding `Seal`, which writes the user
+//! database and gives a root that has no record the one person's: `user`, its
+//! first administrator.
 
-use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, lchown};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use slopos_abi::fs::{ADMIN_GROUP, PERSON_UIDS, SESSION_UID};
@@ -20,7 +19,7 @@ use slopos_slibc_core::passwd::{BASE_GROUP, BASE_PASSWD, Group, Passwd, lines};
 
 use crate::accounts::Store;
 use crate::privd::{self, Input};
-use crate::secret::{self, Secret};
+use crate::secret;
 use crate::syscall::core as sys_core;
 
 const USAGE: &str = "usage: users [list]
@@ -34,7 +33,6 @@ const USAGE: &str = "usage: users [list]
 
 const OWN_PASSWORD: &str = "org.slopos.accounts.password";
 const MANAGE: &str = "org.slopos.accounts.manage";
-pub const AUTHCHECK: &str = "/sbin/authcheck";
 /// What a wrong password costs its typist beside the hash, one at a time,
 /// since privd runs the accounts' mechanisms one after another.
 const WRONG_PASSWORD_DELAY: Duration = Duration::from_secs(2);
@@ -145,29 +143,6 @@ fn administers(accounts: &Accounts, uid: u32) -> Result<(), String> {
     }
 }
 
-/// Whether `secret` is `name`'s password, as `/sbin/authcheck` answers.
-pub fn check(name: &str, secret: &Secret) -> Result<bool, String> {
-    let mut child = Command::new(AUTHCHECK)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("{AUTHCHECK}: {e}"))?;
-    let mut input = child.stdin.take().ok_or("no pipe to authcheck")?;
-    let sent = input
-        .write_all(name.as_bytes())
-        .and_then(|()| input.write_all(b"\n"))
-        .and_then(|()| input.write_all(secret.bytes()))
-        .and_then(|()| input.write_all(b"\n"));
-    drop(input);
-    let status = child.wait().map_err(|e| format!("{AUTHCHECK}: {e}"))?;
-    sent.map_err(|e| format!("{AUTHCHECK}: {e}"))?;
-    match status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(format!("{AUTHCHECK} could not check: {status}")),
-    }
-}
-
 fn new_password(name: &str) -> Result<String, String> {
     match secret::read_new(name)? {
         Some(secret) => secret.hash(),
@@ -182,7 +157,7 @@ fn prove(person: &Person) -> Result<(), String> {
     }
     let typed = secret::read(&format!("Current password for {}: ", person.name))?
         .ok_or("no password typed")?;
-    if check(&person.name, &typed)? {
+    if crate::accounts::check(&person.name, typed.bytes())? {
         return Ok(());
     }
     std::thread::sleep(WRONG_PASSWORD_DELAY);
@@ -271,10 +246,17 @@ fn typed(accounts: &Accounts, uid: u32, request: &Request) -> Result<Typed, Stri
     let mut typed = Typed::default();
     match request {
         Request::Manage(change) => {
-            administers(accounts, uid)?;
+            // privd runs it only for root, an administrator, or a person an
+            // administrator's password answered for.
+            if std::env::var_os(ENV_ACTION).is_none() {
+                administers(accounts, uid)?;
+            }
             match change {
                 Change::Add { .. } => {
-                    if let Some(adder) = accounts.by_uid(uid).filter(|p| p.password.is_none()) {
+                    let adder = accounts
+                        .by_uid(uid)
+                        .filter(|p| p.admin && p.password.is_none());
+                    if let Some(adder) = adder {
                         println!(
                             "{} has no password, which an administrator of a shared machine needs",
                             adder.name

@@ -408,8 +408,22 @@ impl WindowManager {
         for i in 0..self.input.raw_event_count {
             let event = self.input.raw_event_buf[i];
             let time = event.timestamp_ms as u32;
-            // Releases still reach whoever saw the press, so nothing is left
-            // held down behind the question.
+            let taken = match event.event_type {
+                InputEventType::KeyPress => self.consent.takes_press(&event),
+                InputEventType::KeyRelease => self.consent.takes_release(event.key_keycode()),
+                _ => false,
+            };
+            if taken {
+                let mods = event.key_modifiers();
+                self.input.set_modifier_state(mods);
+                if event.event_type == InputEventType::KeyRelease
+                    && !self.consent.capturing()
+                    && let Some(p) = proto_box.as_deref_mut()
+                {
+                    p.send_modifiers_for_task(self.input.focused_task(), mods);
+                }
+                continue;
+            }
             if self.consent.active() {
                 match event.event_type {
                     InputEventType::PointerMotion => {
@@ -423,10 +437,6 @@ impl WindowManager {
                             fb_width as u32,
                             fb_height as u32,
                         );
-                        continue;
-                    }
-                    InputEventType::KeyPress => {
-                        self.consent.key(event.key_keycode(), event.key_is_repeat());
                         continue;
                     }
                     InputEventType::PointerAxis => continue,
