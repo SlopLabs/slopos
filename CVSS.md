@@ -2,6 +2,40 @@
 
 **No finding is open.**
 
+Swept 2026-10-20: `priv` — `slopos-priv-core`'s `uid requester` and
+`REQUESTER_CEILING`; `org.slopos.priv` and `org.slopos.priv.shell`; privd
+starting a mechanism as its requester, every kept answer's live parent, a
+mechanism's directory held to the one sent, and a draining privd starting
+nothing; `/bin/priv`'s search of directories only uid 0 can change, link by
+link, its environment and its terminal; `slopos_userland::held` and the
+shell's held mode, which the rescue shell now shares. Four review passes;
+nothing reached the bar. They found, before it landed, that a kept answer
+reached anything in the person's session, a shell included, so any program
+there could take `priv -s` unasked for five minutes, as it could by naming
+the shell or `priv` itself; that `Power` in the ceiling let what `priv` ran
+write the loader's variables behind bootctl's checks and fill the firmware's
+store; that a program found by a link was checked by its target and spawned
+by its link, a middle hop was not checked at all, and a path could name a
+uid-0 program outside the search directories; that the working directory
+sent could be swapped for a link to `/etc` while the person was asked; that
+a `priv` shell kept the old privd draining and the new one refusing every
+exclusive group; that Ctrl+Z stopped a lone command for good; and that a
+shell holding nothing refused `exec`. Now kept answers key on the requester's
+live parent and a shell is its own unkept action, by `-s` or by name, with
+`priv` never running `priv`; the ceiling holds no `Power`; the program is
+walked link by link within the search directories and its target spawned;
+privd refuses a directory that moved and a draining privd starts nothing,
+which the new one no longer waits on; a lone command's terminal takes no
+Ctrl+Z; and a shell hands its mask on only while it holds more than every
+program does. Left below the bar: a working directory is a path, so the
+person's processes can still move one from under what `priv` already runs;
+what the person's shell starts can repeat a kept command within five
+minutes with input of its own, as sudo's timestamp lets it run anything;
+`DacOverride` reads `/etc/shadow`'s hashes and every person's files, so an
+administrator who answers a standard user's `priv` hands them every person;
+what `priv` makes is the person's; and a signal sent to every process of a
+held program's job reaches the program twice.
+
 Swept 2026-10-20: principals and approval — `slopos-priv-core`'s `user` and
 `admin` levels, `Action::admits` and `keep`; the base policy as translated and
 the extensions' actions; the consent channel's second version, its password
