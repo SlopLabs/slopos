@@ -2,6 +2,39 @@
 
 **No finding is open.**
 
+Swept 2026-10-20: principals and approval — `slopos-priv-core`'s `user` and
+`admin` levels, `Action::admits` and `keep`; the base policy as translated and
+the extensions' actions; the consent channel's second version, its password
+answers, `SHOWN` and the version a compositor names; the compositor's password
+field, its key releases and its quiet window; privd's people, kept answers,
+password checks through `/sbin/authcheck` and their delays, per-uid admission
+and the verdict taken again once a question is answered; `users`' manage
+action reached through an administrator's answer; and `test_key`. Three
+review passes; nothing reached the bar. They found, before it landed, that a
+task list privd could not read made every person look alone; that a kept
+answer outlived its requester's demotion and their session, and covered
+another activation of the extension; that authcheck inherited the
+descriptors privd's other threads held for their requesters; that the tail of
+a password reached a client once a question went from under someone typing;
+that one person raising questions held everyone's back, the queue's bound and
+the refusal window being global; that connections had no ceiling across uids;
+that every request listed every task before it was judged; that an
+administrator demoted while the dialog was up still answered; and that a
+wrong password's refusal named the administrator. Now the people are
+unknown, and every request reading them refused, when the tasks cannot be
+listed; a kept answer is keyed by session, activation and kind, and forgotten
+when privd reads the extensions again; authcheck gets three descriptors and is
+killed past two minutes; the dialog swallows keys for 1.5 s after a password
+question goes; a uid waits four questions at most and a refusal holds back
+only its own; privd admits 128 pooled connections in all; tasks are listed
+only for an action that names a person; and an answered
+request is judged again. Left below the bar: the dialog has no secure
+attention key, so a maximised client can draw a likeness of it (Phase 4 of
+`plans/users-and-login.md`), and `SHOWN` tells a requester when the card is
+drawn; an extension's `keep` needs no grant, since it only repeats a command
+the person allowed; the compositor's input ring and the kernel's pipe pages
+keep typed bytes until reused, readable by no other process.
+
 Swept 2026-10-19: the accounts — `tls-core`'s BLAKE2b and Argon2id;
 `slopos-accounts-core`'s record, PHC hashes and the database it renders;
 slibc's compiled-in rows, `getgrouplist` and `initgroups`; `/etc` and
