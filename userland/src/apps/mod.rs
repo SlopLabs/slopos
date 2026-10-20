@@ -14,6 +14,7 @@ pub mod keymap;
 pub mod nc;
 pub mod nmap;
 pub mod ping;
+pub mod r#priv;
 pub mod privd;
 pub mod prof;
 pub mod remoted;

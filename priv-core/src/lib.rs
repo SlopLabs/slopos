@@ -40,7 +40,7 @@ pub mod wire;
 
 pub use policy::{
     Action, Allow, Level, People, Person, Policy, PolicyError, Principal, Question, Refused,
-    Requester, Shape, Verdict,
+    Requester, RunsAs, Shape, Verdict,
 };
 
 use slopos_abi::caps;
@@ -79,9 +79,21 @@ pub const DELEGABLE: u64 = caps::POWER
     | caps::BASE_UPDATE
     | caps::EXTENSION_UPDATE;
 
+/// The most an action run as its requester may name: mounts, the network,
+/// the console and the clock, and every file but a sealed one. Nothing that
+/// writes a raw disk, the base, an extension, a seal, the firmware's or the
+/// loader's variables or another identity.
+pub const REQUESTER_CEILING: u64 = caps::MOUNT
+    | caps::NET_ADMIN
+    | caps::CONSOLE_CONFIG
+    | caps::SYS_INSPECT
+    | caps::CLOCK
+    | caps::DAC_OVERRIDE;
+
 /// What init hands privd: what an action may name, and what no action names:
-/// `SetId` to start an extension's mechanisms as its user, and `ProcSignal`
-/// to relay its requester's signals to one, which runs as another uid.
+/// `SetId` to start a mechanism as an extension's user or as its requester,
+/// and `ProcSignal` to relay its requester's signals to one, which runs as
+/// another uid.
 pub const PRIVD_CAPS: u64 = DELEGABLE | caps::SET_ID | caps::PROC_SIGNAL;
 
 /// Every capability, by the name `slopos_ostd::authority::Capability` gives

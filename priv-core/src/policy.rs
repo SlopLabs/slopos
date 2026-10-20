@@ -26,8 +26,13 @@
 //! in the directory the request must send, and without it in `/`;
 //! `exclusive` lets one mechanism of its group run at a time, the group being
 //! the action's name unless one is given; `keep` keeps an answer for that
-//! many seconds for the same session, command line and directory. An action
-//! marked `medium` exists only on a boot of the install medium.
+//! many seconds for the same session, parent process, command line and
+//! directory. An action marked `medium` exists only on a boot of the install
+//! medium.
+//!
+//! `uid requester` runs the mechanism as whoever asked, in their own groups
+//! and login session, which only `root`, `user` and `admin` may be, holding
+//! no more than [`REQUESTER_CEILING`](crate::REQUESTER_CEILING).
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -35,8 +40,8 @@ use core::fmt;
 
 use slopos_abi::extension::Label;
 
-use crate::DELEGABLE;
 use crate::consent::Kind;
+use crate::{DELEGABLE, REQUESTER_CEILING};
 
 /// The one program whose connections a pairing speaks through.
 pub const REMOTED: &str = "/bin/remoted";
@@ -60,15 +65,24 @@ pub struct Action {
     pub program: String,
     pub shapes: Vec<Shape>,
     pub caps: u64,
-    pub uid: u32,
+    pub runs_as: RunsAs,
     pub allows: Vec<Allow>,
     pub describe: String,
     pub cwd: bool,
     pub exclusive: Option<String>,
-    /// Seconds an answer is kept for the same session, command line and
-    /// directory.
+    /// Seconds an answer is kept for the same session, parent process,
+    /// command line and directory.
     pub keep: Option<u32>,
     pub medium: bool,
+}
+
+/// Whom a mechanism runs as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RunsAs {
+    /// uid 0 for the base's actions, an extension's first user for its own.
+    Uid(u32),
+    /// Whoever asked, in their own groups and login session.
+    Requester,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -450,7 +464,7 @@ struct Draft {
     program: Option<String>,
     shapes: Vec<Shape>,
     caps: Option<u64>,
-    uid: Option<u32>,
+    runs_as: Option<RunsAs>,
     allows: Vec<Allow>,
     describe: Option<String>,
     cwd: bool,
@@ -499,14 +513,12 @@ impl Draft {
                 once(&mut self.caps, mask)
             }
             "uid" => {
-                let uid = single(&mut words)
-                    .and_then(|text| text.parse::<u32>().ok())
-                    .filter(|_| rest.bytes().all(|b| b.is_ascii_digit()))
-                    .ok_or("uid takes a number")?;
-                if uid != 0 {
-                    return Err("a mechanism runs as uid 0, as privd does");
-                }
-                once(&mut self.uid, uid)
+                let runs_as = match single(&mut words) {
+                    Some("0") => RunsAs::Uid(0),
+                    Some("requester") => RunsAs::Requester,
+                    _ => return Err("a mechanism runs as uid 0, or as its requester"),
+                };
+                once(&mut self.runs_as, runs_as)
             }
             "allow" => {
                 let allow = allow(rest)?;
@@ -540,10 +552,30 @@ impl Draft {
         if self.allows.is_empty() {
             return Err(fail("the action allows nobody"));
         }
+        let caps = self.caps.ok_or(fail("the action names no caps"))?;
+        let runs_as = self.runs_as.ok_or(fail("the action names no uid"))?;
+        if runs_as == RunsAs::Requester {
+            if caps & !REQUESTER_CEILING != 0 {
+                return Err(fail(
+                    "an action run as its requester holds no more than the ceiling",
+                ));
+            }
+            let people_or_root = |a: &Allow| {
+                matches!(
+                    a.principal,
+                    Principal::Root | Principal::User | Principal::Admin
+                )
+            };
+            if !self.allows.iter().all(people_or_root) {
+                return Err(fail(
+                    "an action run as its requester allows only root, user and admin",
+                ));
+            }
+        }
         Ok(Action {
             program: self.program.ok_or(fail("the action names no program"))?,
-            caps: self.caps.ok_or(fail("the action names no caps"))?,
-            uid: self.uid.ok_or(fail("the action names no uid"))?,
+            caps,
+            runs_as,
             describe: self.describe.ok_or(fail("the action has no describe"))?,
             name: self.name,
             shapes: self.shapes,

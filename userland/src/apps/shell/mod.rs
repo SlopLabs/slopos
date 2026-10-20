@@ -16,12 +16,12 @@ pub mod exec;
 pub mod expand;
 pub mod funcs;
 pub mod glob;
+mod held;
 pub mod history;
 pub mod input;
 pub mod interrupt;
 pub mod jobs;
 pub mod parser;
-mod rescue;
 pub mod script;
 pub mod traps;
 
@@ -159,9 +159,10 @@ pub(crate) const PROMPT_BUF_MAX: usize = 280;
 const DEFAULT_PS1: &[u8] = b"[\\w] \\$ ";
 
 /// Expand PS1 escape sequences (`\w` `\u` `\h` `\$` `\t` `\n` `\\`) into
-/// `text_buf`/`color_buf`.
+/// `text_buf`/`color_buf` from `start`; where the prompt ends.
 fn expand_ps1(
     ps1: &[u8],
+    start: usize,
     text_buf: &mut [u8; PROMPT_BUF_MAX],
     color_buf: &mut [u8; PROMPT_BUF_MAX],
 ) -> usize {
@@ -171,7 +172,7 @@ fn expand_ps1(
         COLOR_COMMENT_GRAY, COLOR_DEFAULT, COLOR_EXEC_GREEN, COLOR_PATH_BLUE, COLOR_PROMPT_ACCENT,
     };
 
-    let mut out = 0usize;
+    let mut out = start;
     let mut i = 0usize;
 
     while i < ps1.len() && out < PROMPT_BUF_MAX {
@@ -282,14 +283,30 @@ fn fill_color(colors: &mut [u8; PROMPT_BUF_MAX], offset: usize, count: usize, co
     }
 }
 
+/// PS1, after the power this shell hands on when it holds more than every
+/// program does.
 fn build_prompt(
     text_buf: &mut [u8; PROMPT_BUF_MAX],
     color_buf: &mut [u8; PROMPT_BUF_MAX],
 ) -> usize {
-    match env::get(b"PS1") {
-        Some(ps1) => expand_ps1(&ps1, text_buf, color_buf),
-        None => expand_ps1(DEFAULT_PS1, text_buf, color_buf),
+    let mut out = 0;
+    if let Some(held) = held::holding() {
+        out += emit_segment(
+            text_buf,
+            color_buf,
+            out,
+            held.name(),
+            display::COLOR_ERROR_RED,
+        );
+        out += emit_segment(text_buf, color_buf, out, b" ", display::COLOR_DEFAULT);
     }
+    let ps1 = env::get(b"PS1");
+    expand_ps1(
+        ps1.as_deref().unwrap_or(DEFAULT_PS1),
+        out,
+        text_buf,
+        color_buf,
+    )
 }
 
 fn write_colored_prompt(prompt: &[u8], colors: &[u8]) {
@@ -325,9 +342,9 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
         }
     };
     if invocation.rescue {
-        rescue::enter();
+        held::enter_rescue();
     } else {
-        rescue::inherit();
+        held::inherit();
     }
 
     // POSIX interactivity rule: stdin decides whether a user is typing, stderr
@@ -343,10 +360,10 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
         .map_or_else(|_| b"/".to_vec(), |dir| dir.into_os_string().into_vec());
     cwd_set(&cwd);
     env::initialize();
-    if rescue::active() {
+    if let Some(held) = held::held() {
         env::unset(slopos_priv_core::ENV_ACTION.as_bytes());
         env::unset(slopos_priv_core::ENV_UID.as_bytes());
-        env::set_exported(rescue::ENV.as_bytes(), b"1");
+        env::set_exported(held.env().as_bytes(), b"1");
     }
     crate::privd::hold_inherited();
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);

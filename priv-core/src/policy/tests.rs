@@ -96,7 +96,7 @@ fn the_example_parses_into_what_it_says() {
     let install = policy.action("org.slopos.boot.install").unwrap();
     assert_eq!(install.program, "/bin/bootctl");
     assert_eq!(install.caps, caps::RAW_BLOCK | caps::POWER);
-    assert_eq!(install.uid, 0);
+    assert_eq!(install.runs_as, RunsAs::Uid(0));
     assert!(install.cwd);
     assert_eq!(install.exclusive_group(), Some("boot-slots"));
     assert_eq!(install.keep, Some(300));
@@ -210,6 +210,117 @@ fn the_first_matching_principal_decides() {
         toggle.admits(&paired, &people),
         NO,
         "a paired connection is only ever paired"
+    );
+}
+
+/// `uid requester` runs a mechanism as whoever asked, which only a person or
+/// root may be, holding no more than the ceiling.
+#[test]
+fn an_action_run_as_its_requester_stays_under_the_ceiling() {
+    let text = |caps: &str, allows: &str| {
+        format!(
+            "action org.slopos.x\n  program /bin/x\n  args *\n  caps {caps}\n  uid requester\n\
+             {allows}  describe \"x\"\n"
+        )
+    };
+    let all = "Mount NetAdmin ConsoleConfig SysInspect Clock DacOverride";
+    let parsed = Policy::parse(&text(
+        all,
+        "  allow root\n  allow user\n  allow admin confirm\n",
+    ))
+    .unwrap();
+    let action = &parsed.actions()[0];
+    assert_eq!(action.runs_as, RunsAs::Requester);
+    assert_eq!(action.caps, crate::REQUESTER_CEILING);
+    for beyond in [
+        "Power",
+        "RawBlock",
+        "Seal",
+        "BootEntry",
+        "BaseUpdate",
+        "ExtensionUpdate",
+    ] {
+        assert_eq!(
+            refusal(&text(&format!("Mount {beyond}"), "  allow root\n")).msg,
+            "an action run as its requester holds no more than the ceiling",
+            "{beyond}"
+        );
+    }
+    for allow in ["  allow paired\n", "  allow program /bin/compositor\n"] {
+        assert_eq!(
+            refusal(&text("Mount", &format!("  allow admin\n{allow}"))).msg,
+            "an action run as its requester allows only root, user and admin",
+            "{allow}"
+        );
+    }
+}
+
+#[test]
+fn the_ceiling_reaches_no_disk_base_extension_seal_boot_variable_or_identity() {
+    use crate::REQUESTER_CEILING;
+    assert_eq!(REQUESTER_CEILING & !DELEGABLE, 0);
+    for never in [
+        caps::POWER,
+        caps::RAW_BLOCK,
+        caps::BASE_UPDATE,
+        caps::EXTENSION_UPDATE,
+        caps::SEAL,
+        caps::BOOT_ENTRY,
+        caps::SET_ID,
+        caps::PROC_SIGNAL,
+    ] {
+        assert_eq!(REQUESTER_CEILING & never, 0, "{never:#x}");
+    }
+}
+
+/// `priv` runs anything an administrator asks for once they click, keeping
+/// the answer for that command and directory but never for a shell, whose
+/// input says what it runs, as them and holding the ceiling; a standard
+/// user's is answered by an administrator's password, and no program or
+/// pairing reaches it.
+#[test]
+fn the_shipped_priv_is_an_administrator_s_and_keeps_only_a_command_s_answer() {
+    let policy = Policy::parse(SHIPPED).unwrap();
+    let shell_action = policy.action("org.slopos.priv.shell").unwrap();
+    assert_eq!(shell_action.keep, None);
+    assert!(shell_action.accepts(&args(&["-s"])));
+    assert!(!shell_action.accepts(&args(&["-s", "-c", "id"])));
+    let action = policy.action("org.slopos.priv").unwrap();
+    for action in [action, shell_action] {
+        assert_eq!(action.program, "/bin/priv");
+        assert_eq!(action.runs_as, RunsAs::Requester);
+        assert_eq!(action.caps, crate::REQUESTER_CEILING);
+        assert!(action.cwd);
+        assert_eq!(action.exclusive_group(), None);
+        assert_eq!(action.allows, shell_action.allows);
+    }
+    assert_eq!(action.keep, Some(300));
+    assert!(action.accepts(&args(&["/bin/ls", "-l"])));
+    assert!(
+        action.accepts(&args(&["-s"])),
+        "the copy privd starts, not the policy, refuses a shell asked for as a command"
+    );
+    assert_eq!(action.admits(&shell(0), &one_person()), Verdict::Run);
+    assert_eq!(
+        asks(action.admits(&shell(USER), &one_person())),
+        Some((Kind::Confirm, "user".into(), vec![]))
+    );
+    assert_eq!(
+        asks(action.admits(&shell(BOB), &four())),
+        Some((Kind::Admin, "bob".into(), vec!["alice".into()]))
+    );
+    assert_eq!(
+        asks(action.admits(&shell(ALICE), &four())),
+        Some((Kind::Password, "alice".into(), vec![])),
+        "an administrator away from their own screen types their password"
+    );
+    let paired = Requester::new(USER, Some(REMOTED), true);
+    assert_eq!(action.admits(&paired, &one_person()), NO);
+    let compositor = Requester::new(USER, Some("/bin/compositor"), false);
+    assert_eq!(
+        asks(action.admits(&compositor, &one_person())).map(|(kind, ..)| kind),
+        Some(Kind::Confirm),
+        "any program a person runs is the person"
     );
 }
 
@@ -471,6 +582,7 @@ fn every_rule_of_the_grammar_refuses() {
     for (line, msg) in [
         ("  program /bin/y", "the setting is given twice"),
         ("  uid 0", "the setting is given twice"),
+        ("  uid requester", "the setting is given twice"),
         ("  caps Power", "the setting is given twice"),
         ("  describe \"y\"", "the setting is given twice"),
         ("  cwd\n  cwd", "the setting is given twice"),
@@ -588,6 +700,9 @@ fn values_outside_their_grammar_refuse() {
         ("uid", "uid"),
         ("uid 0 0", "uid"),
         ("uid 1000", "uid 0"),
+        ("uid Requester", "uid"),
+        ("uid requester x", "uid"),
+        ("uid requester requester", "uid"),
         ("describe x", "describe"),
         ("describe \"\"", "describe"),
         ("describe \"a\"b\"", "describe"),
@@ -716,7 +831,17 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         "org.slopos.extension.",
     ];
     for action in policy.actions() {
-        assert_eq!(action.uid, 0, "{}", action.name);
+        let requester = action.program == "/bin/priv";
+        assert_eq!(
+            action.runs_as,
+            if requester {
+                RunsAs::Requester
+            } else {
+                RunsAs::Uid(0)
+            },
+            "{}",
+            action.name
+        );
         assert_eq!(
             action.admits(&root, &people),
             Verdict::Run,
@@ -756,7 +881,12 @@ fn the_shipped_policy_says_what_the_access_model_does() {
             "{}: every person's compositor is one program",
             action.name
         );
-        assert_eq!(action.keep, None, "{}", action.name);
+        assert_eq!(
+            action.keep,
+            (action.name == "org.slopos.priv").then_some(300),
+            "{}: only priv's commands keep an answer",
+            action.name
+        );
     }
     let install = policy.action("org.slopos.install").unwrap();
     assert_eq!(install.program, "/bin/installer");

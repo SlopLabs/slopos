@@ -50,7 +50,7 @@ pub fn parse(argv: &[&str]) -> Result<Invocation, UsageError> {
                 break;
             }
             "-i" => force_interactive = true,
-            super::rescue::OPTION => rescue = true,
+            super::held::RESCUE_OPTION => rescue = true,
             "-c" => match rest.next() {
                 Some(text) => {
                     command = Some(text.as_bytes().to_vec());

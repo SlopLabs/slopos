@@ -1069,9 +1069,10 @@ every delegable capability, for root and, once the person allows it, the
 session, never a paired host; the kernel sets `BOOT_FLAG_MEDIUM` only once it
 has served a medium Limine carried, so no command line names it. Exec keeps
 only the universal capabilities, so the rescue shell runs each program by
-spawning it with its whole mask from the process forked for it, which ignores
-`SIGINT` and `SIGQUIT` while it waits, passes on a `SIGHUP` or `SIGTERM`
-another process sends it, and then ends as the program ended; its `exec`
+spawning it with its whole mask from the process forked for it
+(`slopos_userland::held`), which passes on a `SIGHUP`, `SIGINT`, `SIGQUIT` or
+`SIGTERM` another process sends it, one the terminal raised having reached the
+program's group already, and then ends as the program ended; its `exec`
 builtin refuses. It takes `PRIV_ACTION` out of the environment, so a
 mechanism it runs acts itself, and puts `SLOPOS_RESCUE` in, so a shell it
 starts, a script's included, passes on what it holds the same way; its
@@ -1847,8 +1848,8 @@ capability across one for a process that is not root and has no file
 capabilities or ambient set; the one exec that keeps the mask is init's own
 re-execution of the base's `/sbin/init` as its sole thread
 (`exec::exec_keeps_authority`), which loads no other program, and a program
-that hands its mask on spawns rather than execs, as the rescue shell does
-(`apps::shell::rescue`); a sender
+that hands its mask on spawns rather than execs, as the rescue shell and
+`priv` do (`slopos_userland::held`); a sender
 may signal only a target whose
 capabilities it all holds, and `caps_drop` takes capabilities from a whole
 process for good, a thread whose clone races it included. A nice value below
@@ -1996,9 +1997,10 @@ ends as systemd's `KillMode` stops a unit: `SIGTERM` and `SIGCONT` to every
 live process carrying the desktop's login tag or a session service's, again
 to each one forked since,
 `SIGKILL` to all after five seconds, given up on after ten, so remoted's
-processes, privd's mechanisms and anything else the session did not start
-survive it. A process that forks faster than init signals can outlast the
-ten seconds, and the request that asked is answered with how many did.
+processes, privd's mechanisms but those `priv` runs as the person, and
+anything else the session did not start survive it. A process that forks
+faster than init signals can outlast the ten seconds, and the request that
+asked is answered with how many did.
 `/run/init` (mode 0666) takes one line per connection, judged by
 `SO_PEERCRED` and, as of the request, `SO_PEEREXTENSION` and
 `SO_PEERPROGRAM` (`peer_base_program`), four connections
@@ -2068,10 +2070,15 @@ uid 0 holding `slopos_priv_core::PRIVD_CAPS` and waits for, listens on
 `/run/privd` (mode 0666) and runs a named action's mechanism — the base program
 `/usr/share/slopos/privd/actions` (`assets/privd/actions`, sealed in the base,
 grammar `slopos_priv_core::policy`) names for it, or an extension's own — as a
-fresh child holding the action's capabilities as uid 0, or an extension's as
-its first user, with an environment of `PATH`, `LANG`, `PRIV_ACTION` and
+fresh child holding the action's capabilities as uid 0, an extension's as its
+first user, or one whose `uid` is `requester` as whoever asked — their uid,
+their own group and `admin` while the record names them an administrator, and
+their session's login tag — an action only `root`, `user` and `admin` may ask
+for, whose capabilities stay within `slopos_priv_core::REQUESTER_CEILING`,
+with an environment of `PATH`, `LANG`, `PRIV_ACTION` and
 `PRIV_UID`, the requester's uid, alone, cwd `/` or the directory the requester sent, and the
-requester's descriptors as stdio. Who asks is the connection's recorded
+requester's descriptors as stdio, refused when the directory's path no
+longer leads where the descriptor did. Who asks is the connection's recorded
 `Identity`, its program read again before every verdict and before the
 mechanism starts, so a requester whose base program has stopped running since
 it connected — it exec'd, mapped code from elsewhere or exited — is refused:
@@ -2099,12 +2106,15 @@ next check, from two seconds to a minute, for the life of privd. Once it is
 answered privd judges the request again, and runs it only if it would now
 run unasked or ask the same of the same person, the administrator who
 answered still listed. `keep <seconds>`, up to 900, runs a request unasked
-once one of the same uid and session (its login tag and eldest task), the
-same action read from the same place and asked the same way, command line
-and directory was allowed within that time by someone who could answer it
-now, forgotten when privd reads the extensions' actions again and never kept
-for a requester carrying no login tag; a mechanism leaves who may ask to
-privd.
+once one of the same uid and session (its login tag and eldest task), started
+by the same live task, of the same action read from the same place and
+asked the same way, command line and directory was allowed within that time
+by someone who could answer it now, as polkit keys a kept answer on a live
+parent, so one given to a person's shell covers that shell and what it
+starts, as sudo's covers a terminal, and nothing else in their session; it is
+forgotten when privd reads the extensions' actions again and
+never kept for a requester carrying no login tag; a mechanism leaves who may
+ask to privd.
 An action marked `medium` exists only on a boot the kernel says served the
 install medium (`BOOT_FLAG_MEDIUM` in `sys_info`): off it privd answers it as
 no action, and so does a requester's own reading of the policy
@@ -2136,10 +2146,11 @@ fresh request waits two seconds for it to listen. On `SIGTERM`, which init
 sends when a base switch changes privd, it drains: it stops listening, lets
 go of the consent pair, refuses each request it reads from then on as
 restarting, and exits once every request it took is answered, so a mechanism
-mid-run is never cut. Init starts the new base's privd when it exits, or
+mid-run is never cut, and starts no mechanism from then on. Init starts the
+new base's privd when it exits, or
 beside it after five seconds of draining (`service::DRAIN_MS`), which a
 mechanism waiting on its terminal outlasts; the new one takes no exclusive group
-while the old one or its mechanisms run, and a program whose requests span a
+while a mechanism the old one started runs, and a program whose requests span a
 switch waits a minute for it (`privd::SWITCH_WAIT`). Consent travels a socket pair
 init makes and keeps for the boot, handing one end to each privd and the other
 to each compositor (fd 4 in each), each of which refuses a pair init did not
@@ -2179,6 +2190,48 @@ questions wait, four of one uid's, a question unanswered for 120 s from when
 privd sends it is a refusal, and a refusal refuses what that uid had waiting
 and what it asks in the next five seconds; a wrong password refuses only its
 own request.
+
+**`priv` runs a command with power over the machine, as whoever asks.**
+`priv <command> [argument...]` asks privd for `org.slopos.priv` and `priv -s`, or
+the shell named with nothing after it, for `org.slopos.priv.shell`
+(`/bin/priv`, `apps::r#priv`), both `allow root` and `allow admin confirm`,
+the first alone with `keep 300`, since a shell runs whatever its input says,
+and both with `uid requester`: privd starts `/bin/priv` again as the person,
+as `run0` has the service manager start a command, holding `REQUESTER_CEILING`
+— `Mount`, `NetAdmin`, `ConsoleConfig`, `SysInspect`, `Clock` and
+`DacOverride` — on a terminal of its own whenever standard input is one, in
+their directory, with nothing else of theirs but their name and home in its
+environment, never for the paired agent; a standard user's is allowed by an
+administrator's password and runs as the standard user. That copy runs the
+command holding the same (`slopos_userland::held`), with `PATH`, `HOME`,
+`USER`, `LOGNAME`, `SHELL`, `LANG`, `SLOPOS_PRIV` and, on a terminal, `TERM`
+alone, and ends as it ends; a lone command's terminal of its own takes no
+Ctrl+Z as the command starts, since nothing would continue what it stopped.
+The command is a program in one of `DEFAULT_PATH`'s directories that only uid
+0 owns and can write, with every directory above it — `/usr/local/bin` only
+while uid 0 holds `/usr/local` — named there by its path or found there by its
+name, and leading, through links each in a directory only uid 0 can change, to
+a file only uid 0 can change in one, which is what runs, and so is the
+interpreter a script names; never `/bin/priv`, nor the shell told to read what
+it runs; the requester sends privd the path it found, which the dialog shows
+and a kept answer covers, and the copy privd starts holds it to the same rule.
+`-s` runs `/bin/shell`, which finds `SLOPOS_PRIV` in its environment and,
+while it holds more than every program does, hands it on as the rescue shell
+does, naming it in its banner and before its prompt. The ceiling leaves out
+whatever writes a raw disk, the base, an extension, a seal, the firmware's or
+the loader's variables or another identity, so the raw disks, the base, the
+user database and every sealed file refuse what `priv` runs, though `Mount`
+mounts any ext4 volume nothing holds, and a mechanism it runs, `halt` and
+`bootctl` among them, asks privd as the person. `DacOverride` reads
+`/etc/shadow`'s Argon2id hashes and every person's files, so an administrator
+who allows a standard user's `priv` allows them that; what `priv` makes is the
+person's, so a file it makes in a uid-0 directory stays theirs until a
+`priv chown` gives it to uid 0; a working directory is a path, which the person's
+processes can move from under what runs there; and a kept answer repeats its
+command with whatever input the person's shell and what it starts give it, as
+sudo's timestamp lets them run anything. A requester already holding the
+ceiling runs the command itself, handing on its whole mask, which in a rescue
+shell is everything. `priv_test` grades it.
 
 ### Licensing discipline
 

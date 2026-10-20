@@ -6,6 +6,7 @@ pub mod base_image;
 pub mod base_watch;
 pub mod boot_disk;
 pub mod gfx;
+pub mod held;
 pub mod init_control;
 pub mod keymap;
 pub mod kmsg;

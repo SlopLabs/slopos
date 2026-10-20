@@ -126,6 +126,10 @@ name = "privd"
 path = "src/bin/privd.rs"
 
 [[bin]]
+name = "priv"
+path = "src/bin/priv.rs"
+
+[[bin]]
 name = "widget_gallery"
 path = "src/bin/widget_gallery.rs"
 
@@ -333,6 +337,10 @@ path = "src/bin/tests/privd_test.rs"
 [[bin]]
 name = "accounts_test"
 path = "src/bin/tests/accounts_test.rs"
+
+[[bin]]
+name = "priv_test"
+path = "src/bin/tests/priv_test.rs"
 
 [[bin]]
 name = "extension_test"

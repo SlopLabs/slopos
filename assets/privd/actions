@@ -1,10 +1,11 @@
 # The actions /sbin/privd runs. In the sealed base at
 # /usr/share/slopos/privd/actions; the grammar is slopos_priv_core::policy's.
 #
-# Every mechanism runs as uid 0 with no more than its action names. Whoever
-# may ask for an action is listed in order, and the first line whose principal
-# matches the requester decides, at its level; a person no line matches is
-# answered by an administrator's password where an admin line stands.
+# Every mechanism runs as uid 0, or as its requester, with no more than its
+# action names. Whoever may ask for an action is listed in order, and the first
+# line whose principal matches the requester decides, at its level; a person no
+# line matches is answered by an administrator's password where an admin line
+# stands.
 
 action org.slopos.power.poweroff
   program  /bin/halt
@@ -319,3 +320,24 @@ action org.slopos.rescue
   allow    root
   allow    admin confirm
   describe "Open a rescue shell holding everything privd can give, which can read and change every disk"
+
+action org.slopos.priv
+  program  /bin/priv
+  args     *
+  caps     Mount NetAdmin ConsoleConfig SysInspect Clock DacOverride
+  uid      requester
+  cwd
+  keep     300
+  allow    root
+  allow    admin confirm
+  describe "Run a command as the person asking, with power over mounts, the network, the clock and every file not sealed"
+
+action org.slopos.priv.shell
+  program  /bin/priv
+  args     -s
+  caps     Mount NetAdmin ConsoleConfig SysInspect Clock DacOverride
+  uid      requester
+  cwd
+  allow    root
+  allow    admin confirm
+  describe "Open a shell as the person asking, with power over mounts, the network, the clock and every file not sealed"

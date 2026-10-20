@@ -1408,17 +1408,18 @@ fn exec_path(path_buf: &[u8], argv: &[Vec<u8>], script_fallback: bool) -> ! {
 }
 
 /// Exec the program at `path_buf`, a NUL-terminated path, with null-terminated
-/// `argv` and `envp`; in a rescue shell, run it holding the capabilities an
-/// exec would drop instead. Returns only the errno of one that did not start.
+/// `argv` and `envp`; in a shell that hands on what it holds, while it holds
+/// more than every program does, run it holding the capabilities an exec
+/// would drop instead. Returns only the errno of one that did not start.
 fn become_program(path_buf: &[u8], argv: &[*const u8], envp: &[*const u8]) -> i64 {
-    if !super::rescue::active() {
+    if super::held::holding().is_none() {
         return process::execve(path_buf.as_ptr(), argv.as_ptr(), envp.as_ptr());
     }
     let path_len = path_buf
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(path_buf.len());
-    super::rescue::run(
+    crate::held::run(
         &path_buf[..path_len],
         &argv[..argv.len() - 1],
         &envp[..envp.len() - 1],

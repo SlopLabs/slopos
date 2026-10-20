@@ -1,5 +1,7 @@
 use crate::syscall::{UserSysInfo, core as sys_core};
 
+use super::held::Held;
+
 use super::display::{
     COLOR_COMMENT_GRAY, COLOR_ERROR_RED, COLOR_EXEC_GREEN, COLOR_PROMPT_ACCENT, COLOR_WARN_YELLOW,
     shell_write, shell_write_idx,
@@ -80,11 +82,25 @@ pub fn print_welcome_banner() {
         shell_write(b"\n");
     }
 
-    if super::rescue::active() {
-        shell_write_idx(
-            b"  Rescue shell: what runs here holds everything privd can give.\n",
-            COLOR_WARN_YELLOW,
-        );
+    match super::held::holding() {
+        Some(Held::Rescue) => {
+            shell_write_idx(
+                b"  Rescue shell: what runs here holds everything privd can give.\n",
+                COLOR_WARN_YELLOW,
+            );
+        }
+        Some(Held::Priv) => {
+            let held = sys_core::caps_drop(0) & !slopos_abi::caps::UNIVERSAL;
+            let names: Vec<&str> = slopos_priv_core::capability_names(held).collect();
+            let (user, _) = super::env::account();
+            let line = format!(
+                "  priv: what runs here holds {} as {}.\n",
+                names.join(" "),
+                String::from_utf8_lossy(&user)
+            );
+            shell_write_idx(line.as_bytes(), COLOR_WARN_YELLOW);
+        }
+        None => {}
     }
     shell_write(b"\n");
 }

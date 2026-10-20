@@ -354,7 +354,7 @@ action calm
     let greet = d.actions[0].for_privd(105, caps::POWER, label);
     assert_eq!(greet.name, "ext.hello.greet");
     assert_eq!(greet.program, "/opt/hello/libexec/greet");
-    assert_eq!(greet.uid, 105);
+    assert_eq!(greet.runs_as, policy::RunsAs::Uid(105));
     assert_eq!(greet.caps, caps::POWER, "held within what was granted");
     assert!(greet.cwd);
     assert_eq!(greet.keep, Some(60));

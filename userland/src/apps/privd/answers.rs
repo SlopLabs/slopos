@@ -16,14 +16,16 @@ const KEPT_MAX: usize = 64;
 const FIRST_DELAY: Duration = Duration::from_secs(2);
 const LONGEST_DELAY: Duration = Duration::from_secs(60);
 
-/// What a kept answer covers: one requesting session, one action as read
-/// from one place and asked one way, and the exact command line and
-/// directory, since an answer for one command says nothing of another.
+/// What a kept answer covers: one requesting session and the live task that
+/// started the requester, one action as read from one place and asked one
+/// way, and the exact command line and directory, since an answer for one
+/// command says nothing of another.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Asked {
     pub uid: u32,
     /// The session's login tag and its eldest live task.
     pub session: (u32, u32),
+    pub parent: u32,
     pub action: String,
     /// The extension and activation an extension's action was read from.
     pub origin: Option<(String, u64)>,

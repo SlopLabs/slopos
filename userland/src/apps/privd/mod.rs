@@ -33,11 +33,13 @@ mod people;
 
 use std::collections::VecDeque;
 use std::ffi::CString;
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use slopos_abi::extension::Label;
+use slopos_abi::fs::UserFsStat;
 use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGPIPE, SIGQUIT, SIGTERM, sig_bit};
 use slopos_abi::syscall::{
@@ -50,7 +52,7 @@ use slopos_priv_core::policy::{Principal, REMOTED};
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request, kind};
 use slopos_priv_core::{
     Action, ENV_ACTION, ENV_UID, INIT, MECHANISM_LANG, MECHANISM_PATH, POLICY, People, Policy,
-    Question, Refused, Requester, SOCKET, Verdict, elf_interpreted,
+    Question, Refused, Requester, RunsAs, SOCKET, Verdict, elf_interpreted,
 };
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
@@ -429,6 +431,7 @@ impl Attested {
 }
 
 const LAPSED: &str = "the requester no longer runs the program it connected as";
+const RESTARTING: &str = "privd is restarting for a new base; ask again";
 
 /// What the peer at `fd` runs now.
 fn attested(fd: &OwnedFd) -> Result<Attested, String> {
@@ -654,7 +657,7 @@ fn serve(daemon: &Daemon, peer: &Peer, fd: OwnedFd) {
             Ok(Some((request, fds, withdrawn))) => {
                 IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
                 if DRAINING.load(Ordering::SeqCst) {
-                    let denial = Reply::denied("privd is restarting for a new base; ask again");
+                    let denial = Reply::denied(RESTARTING);
                     conn.reply(&denial, request.id);
                     IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
                     return;
@@ -801,8 +804,8 @@ fn run(
     if !peer.still_runs(&conn.fd) {
         return Err(Reply::denied(LAPSED));
     }
-    let tasks = action
-        .names_people()
+    let as_requester = action.runs_as == RunsAs::Requester;
+    let tasks = (action.names_people() || as_requester)
         .then(init_control::Tasks::try_read)
         .flatten();
     let people = match action.names_people() {
@@ -839,12 +842,13 @@ fn run(
         command.extend(request.args.iter().cloned());
         let session = tasks.as_ref().and_then(|tasks| {
             let login = tasks.login_of(peer.pid).filter(|&login| login != 0)?;
-            Some((login, tasks.eldest(login)?))
+            Some(((login, tasks.eldest(login)?), tasks.parent_of(peer.pid)?))
         });
-        let kept = action.keep.zip(session).map(|(keep, session)| {
+        let kept = action.keep.zip(session).map(|(keep, (session, parent))| {
             let asked = Asked {
                 uid: peer.uid,
                 session,
+                parent,
                 action: action.name.clone(),
                 origin: origin.map(|o| (o.extension.clone(), o.generation)),
                 kind: question.kind,
@@ -885,10 +889,27 @@ fn run(
         crate::activation::holds(&origin.extension, origin.generation, &action.program)
             .map_err(Reply::denied)?;
     }
+    let runs_as = match action.runs_as {
+        RunsAs::Uid(uid) => Identity {
+            ids: (uid, uid),
+            groups: origin.map(|_| Vec::new()),
+            login: origin.map(|origin| origin.login),
+        },
+        RunsAs::Requester => requester_identity(peer, tasks.as_ref())?,
+    };
+    if DRAINING.load(Ordering::SeqCst) {
+        return Err(Reply::denied(RESTARTING));
+    }
+    if fds.get(wire::STDIO).is_some_and(|dir| !still_at(dir, &cwd)) {
+        return Err(Reply::denied(
+            "the working directory sent was moved while it was asked about",
+        ));
+    }
     let pid = spawn(
         action,
         origin,
         peer.uid,
+        &runs_as,
         &request.args,
         &fds[..wire::STDIO],
         &cwd,
@@ -1020,13 +1041,61 @@ fn directory_of(daemon: &Daemon, dir: &OwnedFd) -> Result<String, Reply> {
         .ok_or_else(|| Reply::denied("the working directory has no path"))
 }
 
-/// Start `action`'s mechanism for the requester `uid`; an extension's sees
-/// its own `bin` on its path, runs with no supplementary group and carries
-/// its extension's login tag, by which init ends it once the extension stops.
+/// Whether `path` still leads to the directory `dir`, the one the request
+/// sent: a mechanism is given its directory by path, which the requester's
+/// processes could otherwise point elsewhere once the person was asked.
+fn still_at(dir: &OwnedFd, path: &str) -> bool {
+    let mut sent = UserFsStat::default();
+    let stat = (&mut sent as *mut UserFsStat).cast();
+    Sys::fstat(dir.raw(), stat).is_ok()
+        && std::fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == (sent.st_dev, sent.st_ino))
+}
+
+/// Whom a mechanism runs as: its uid and gid, and its groups and login tag,
+/// `None` keeping privd's.
+struct Identity {
+    ids: (u32, u32),
+    groups: Option<Vec<u32>>,
+    login: Option<u32>,
+}
+
+/// The requester as a mechanism run as them: their uid, their own group and
+/// `admin` while the accounts record names them an administrator, as
+/// `initgroups` gives them, and the login tag of their session.
+fn requester_identity(peer: &Peer, tasks: Option<&init_control::Tasks>) -> Result<Identity, Reply> {
+    let login = tasks
+        .and_then(|tasks| tasks.login_of(peer.pid))
+        .ok_or_else(|| Reply::denied("the requester's session is unknown"))?;
+    let admin = match peer.uid {
+        0 => false,
+        uid => {
+            people::now(tasks)
+                .map_err(Reply::denied)?
+                .person(uid)
+                .ok_or_else(|| {
+                    Reply::denied("the requester is no longer a person the machine knows")
+                })?
+                .admin
+        }
+    };
+    let mut groups = vec![peer.uid];
+    if admin {
+        groups.push(slopos_abi::fs::ADMIN_GID);
+    }
+    Ok(Identity {
+        ids: (peer.uid, peer.uid),
+        groups: Some(groups),
+        login: Some(login),
+    })
+}
+
+/// Start `action`'s mechanism for the requester `uid`, as `runs_as`; an
+/// extension's sees its own `bin` on its path.
 fn spawn(
     action: &Action,
     extension: Option<&Origin>,
     uid: u32,
+    runs_as: &Identity,
     args: &[Vec<u8>],
     stdio: &[OwnedFd],
     cwd: &str,
@@ -1070,9 +1139,9 @@ fn spawn(
         DEFAULTED,
         Endowment {
             caps: action.caps,
-            ids: Some((action.uid, action.uid)),
-            groups: extension.map(|_| &[][..]),
-            login: extension.map(|origin| origin.login),
+            ids: Some(runs_as.ids),
+            groups: runs_as.groups.as_deref(),
+            login: runs_as.login,
         },
     );
     if pid <= 0 {

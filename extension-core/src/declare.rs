@@ -179,7 +179,7 @@ impl Action {
             program: self.program.clone(),
             shapes: self.shapes.clone(),
             caps: self.caps & held,
-            uid,
+            runs_as: policy::RunsAs::Uid(uid),
             allows,
             describe: format!("{} (extension {extension})", self.describe),
             cwd: self.cwd,

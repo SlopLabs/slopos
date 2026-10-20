@@ -407,9 +407,9 @@ pub fn cmd_exec(argc: i32, argv: &[&[u8]]) -> i32 {
         shell_write_idx(b"exec: invalid path\n", COLOR_ERROR_RED);
         return 1;
     }
-    if super::super::rescue::active() {
+    if super::super::held::holding().is_some() {
         shell_write_idx(
-            b"exec: a rescue shell's programs keep its capabilities only as its children\n",
+            b"exec: this shell's programs keep its capabilities only as its children\n",
             COLOR_ERROR_RED,
         );
         return 1;

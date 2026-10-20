@@ -27,7 +27,7 @@ use slopos_abi::syscall::{
     POLLIN, POLLOUT, TIOCSPTLCK, UserPollFd, UserTermios,
 };
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request};
-use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy, SOCKET};
+use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy, RunsAs, SOCKET};
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -331,7 +331,11 @@ fn ask(action: &str, args: &[Vec<u8>], input: Input) -> Result<Asked, String> {
         .action(action)
         .ok_or_else(|| format!("{POLICY} has no action {action}"))?;
     let held = sys_core::caps_drop(0);
-    if held & spec.caps == spec.caps && process::geteuid() == spec.uid {
+    let as_itself = match spec.runs_as {
+        RunsAs::Uid(uid) => process::geteuid() == uid,
+        RunsAs::Requester => true,
+    };
+    if held & spec.caps == spec.caps && as_itself {
         return Ok(Asked::Itself);
     }
     let mut connection = match Connection::inherited() {

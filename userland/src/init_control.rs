@@ -120,6 +120,19 @@ impl Tasks {
             .map(|task| task.login)
     }
 
+    /// The live task that started the live process `pid`.
+    pub fn parent_of(&self, pid: u32) -> Option<u32> {
+        let parent = self
+            .0
+            .iter()
+            .find(|task| task.task_id == pid)?
+            .parent_task_id;
+        self.0
+            .iter()
+            .any(|task| task.task_id == parent)
+            .then_some(parent)
+    }
+
     /// The first task still alive that carries `login`: task ids are never
     /// reused, so a session started again has another.
     pub fn eldest(&self, login: u32) -> Option<u32> {
@@ -280,9 +293,10 @@ fn leaders<'a>(tasks: impl Iterator<Item = &'a UserTaskEntry>) -> Vec<u32> {
     pids
 }
 
-/// Every live thread outside the caller's process that a privd or its
-/// mechanisms started, carrying [`PRIVD`] or an extension mechanism's tag,
-/// by its never-reused id.
+/// Every live thread of a mechanism a privd started, carrying [`PRIVD`] or
+/// an extension mechanism's tag, by its never-reused id: an earlier privd,
+/// which init started as it did the caller and which starts nothing once it
+/// drains, is none.
 pub fn privd_threads_elsewhere() -> Vec<u32> {
     let tasks = tasks();
     let me = std::process::id();
@@ -290,10 +304,19 @@ pub fn privd_threads_elsewhere() -> Vec<u32> {
         .iter()
         .find(|task| task.task_id == me)
         .map(|task| task.process_id);
+    let started_by = |process: u32| {
+        tasks
+            .iter()
+            .filter(|task| task.process_id == process)
+            .min_by_key(|task| task.task_id)
+            .map(|task| task.parent_task_id)
+    };
+    let init = mine.and_then(started_by);
     tasks
         .iter()
         .filter(|task| task.login == PRIVD || action_tags().contains(&task.login))
         .filter(|task| Some(task.process_id) != mine)
+        .filter(|task| init.is_none() || started_by(task.process_id) != init)
         .map(|task| task.task_id)
         .collect()
 }

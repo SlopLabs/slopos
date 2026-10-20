@@ -32,6 +32,11 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "List the people this machine knows, and add or change them",
     },
     ProgramSpec {
+        name: "priv",
+        path: "/bin/priv",
+        desc: "Run a command holding power over the machine's settings, as you",
+    },
+    ProgramSpec {
         name: "bootctl",
         path: "/bin/bootctl",
         desc: "Install a kernel into a boot slot and choose what boots",
