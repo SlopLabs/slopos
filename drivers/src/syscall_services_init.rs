@@ -24,7 +24,25 @@ static INPUT_SERVICES: InputServices = InputServices {
     clipboard_copy: input_event::clipboard_copy,
     clipboard_paste: input_event::clipboard_paste,
     register_compositor: input_event::input_register_compositor,
+    route_key: route_key_adapter,
 };
+
+fn route_key_adapter(keycode: u16, codepoint: u32, pressed: bool) {
+    let ascii = u8::try_from(codepoint)
+        .ok()
+        .filter(u8::is_ascii)
+        .unwrap_or(0);
+    input_event::input_route_key_full(
+        0,
+        ascii,
+        keycode,
+        codepoint,
+        0,
+        slopos_abi::input::KEY_FLAG_HAS_CANONICAL,
+        pressed,
+        input_event::get_timestamp_ms(),
+    );
+}
 
 fn tty_read_adapter(
     tty_index: TtyIndex,

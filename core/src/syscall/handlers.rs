@@ -68,7 +68,7 @@ use crate::syscall::signal::{
 };
 pub use crate::syscall::signalfd_handlers::syscall_signalfd4;
 pub use crate::syscall::test_handlers::{
-    syscall_run_userland_tests, syscall_test_panic, syscall_test_report,
+    syscall_run_userland_tests, syscall_test_key, syscall_test_panic, syscall_test_report,
 };
 pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_cursor_move, syscall_cursor_set_image,
@@ -311,6 +311,7 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     [SYSCALL_BASE_MONITOR]       => syscall_base_monitor,       "base_monitor";
     [SYSCALL_EXT_ACTIVATE]       => syscall_ext_activate,       "ext_activate";
     [SYSCALL_EXT_DEACTIVATE]     => syscall_ext_deactivate,     "ext_deactivate";
+    [SYSCALL_TEST_KEY]           => syscall_test_key,           "test_key";
 };
 
 /// The entry for `sysno`, or `None` when nothing is registered there.
@@ -364,7 +365,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 194;
+pub const SYSCALL_ENTRY_COUNT: usize = 195;
 
 /// The recorded shape of the classification.
 ///
@@ -386,7 +387,7 @@ const CAP_COUNTS: [(Capability, usize); Capability::ALL.len()] = [
     (Capability::ConsoleIo, 1),
     (Capability::ClipboardGlobal, 2),
     (Capability::Fate, 2),
-    (Capability::TestHarness, 2),
+    (Capability::TestHarness, 3),
     (Capability::Mount, 2),
     (Capability::Clock, 1),
     (Capability::Seal, 0),

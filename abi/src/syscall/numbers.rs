@@ -33,7 +33,7 @@ pub const SYSCALL_TABLE_SIZE: usize = (SYSCALL_LINUX_MAX as usize) + 1;
 pub const SYSCALL_PRIVATE_BASE: u64 = 1024;
 
 /// Size of the private dispatch table.
-pub const SYSCALL_PRIVATE_TABLE_SIZE: usize = 49;
+pub const SYSCALL_PRIVATE_TABLE_SIZE: usize = 50;
 
 /// One past the last private number.
 pub const SYSCALL_PRIVATE_END: u64 = SYSCALL_PRIVATE_BASE + (SYSCALL_PRIVATE_TABLE_SIZE as u64);
@@ -917,6 +917,16 @@ pub const SYSCALL_EXT_DEACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 47;
 /// `EINTR`. Gated on `Capability::ExtensionUpdate`.
 pub const SYSCALL_EXT_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 48;
 
+/// `test_key(keycode, codepoint, pressed)`: deliver one key press or release,
+/// a [`crate::input::keycode`] and the text it types (0 for none), to the
+/// task that holds the input sink, as if a keyboard had sent it after layout
+/// resolution: the diagnostic console's trigger, the TTY and the locks never
+/// see it. `ENOSYS` unless the boot runs the tests, so no system a person uses
+/// has a keyboard a program types on, and `EINVAL` for a codepoint that is no
+/// scalar of the Basic Multilingual Plane, which is all an input event
+/// carries. Gated on `Capability::TestHarness`.
+pub const SYSCALL_TEST_KEY: u64 = SYSCALL_PRIVATE_BASE + 49;
+
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
 /// call.
 pub const EFIVAR_DATA_MAX: usize = 4096;
@@ -965,6 +975,6 @@ const _: () = assert!(SYSCALL_PRIVATE_BASE > SYSCALL_LINUX_MAX);
 const _: () = assert!(SYSCALL_PRIVATE_BASE & 0x4000_0000 == 0);
 
 const _: () = assert!(
-    SYSCALL_EXT_ACTIVATE < SYSCALL_PRIVATE_END,
+    SYSCALL_TEST_KEY < SYSCALL_PRIVATE_END,
     "private syscall range is full; raise SYSCALL_PRIVATE_TABLE_SIZE",
 );

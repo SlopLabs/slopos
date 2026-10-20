@@ -1,4 +1,5 @@
-//! `SYSCALL_TEST_REPORT` and `SYSCALL_RUN_USERLAND_TESTS` handlers.
+//! `SYSCALL_TEST_REPORT`, `SYSCALL_RUN_USERLAND_TESTS`, `SYSCALL_TEST_PANIC`
+//! and `SYSCALL_TEST_KEY` handlers.
 
 use slopos_abi::Errno;
 use slopos_abi::syscall::{TEST_REPORT_MSG_MAX, TEST_REPORT_NAME_MAX};
@@ -156,4 +157,18 @@ define_syscall!(syscall_test_panic (ctx) cap(TestHarness)
     }
     let _ = ctx;
     panic!("test_panic: deliberate syscall-context panic (panic.recover_smoke)");
+});
+
+define_syscall!(syscall_test_key (ctx, keycode: u32, codepoint: u32, pressed: u32) cap(TestHarness)
+    -> Result<(), Errno> {
+    let _ = ctx;
+    if !kernel_phase_summary::tests_enabled() {
+        return Err(Errno::ENOSYS);
+    }
+    let keycode = u16::try_from(keycode).map_err(|_| Errno::EINVAL)?;
+    if codepoint > 0xFFFF || char::from_u32(codepoint).is_none() || pressed > 1 {
+        return Err(Errno::EINVAL);
+    }
+    slopos_kernel_services::syscall_services::input::route_key(keycode, codepoint, pressed == 1);
+    Ok(())
 });

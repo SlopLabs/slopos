@@ -17,5 +17,6 @@ slopos_service_core::define_service! {
         clipboard_copy(src: &[u8]) -> usize;
         clipboard_paste(dst: &mut [u8]) -> usize;
         register_compositor(task_id: u32);
+        route_key(keycode: u16, codepoint: u32, pressed: bool);
     }
 }

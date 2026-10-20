@@ -124,6 +124,19 @@ pub fn run_userland_tests() -> i64 {
     unsafe { syscall0(SYSCALL_RUN_USERLAND_TESTS) as i64 }
 }
 
+/// A key `keycode` pressed or released, typing `codepoint`, for whoever
+/// holds the input sink; only a test boot takes one.
+pub fn test_key(keycode: u16, codepoint: u32, pressed: bool) -> i64 {
+    unsafe {
+        syscall3(
+            SYSCALL_TEST_KEY,
+            u64::from(keycode),
+            u64::from(codepoint),
+            u64::from(pressed),
+        ) as i64
+    }
+}
+
 #[inline(always)]
 pub fn process_list(buf: &mut [UserTaskEntry]) -> i64 {
     unsafe {
