@@ -802,12 +802,10 @@ only the mechanisms it started. A mechanism carries its extension's login tag
 counts with what its predecessor started, and init ends whatever carries the
 tag of an extension whose actions no longer run, as it ends a service, but not
 one whose record or activation it cannot read, nor one running again. What it
-holds is also within `DELEGABLE`, all privd can give. Until privd tells people
-apart (`plans/users-and-login.md`) an extension's `allow` lines read as the
-one person at the machine meets them, its only admin and without a password:
-`user` and `admin` with no level, and `user alone`, run for the session's uid
-unasked, and any other level asks the person; `paired` is privd's, and
-`program` a base program's path or one of the extension's own, which matches
+holds is also within `DELEGABLE`, all privd can give. Its `allow` lines,
+levels and `keep` are privd's own (`user`, `admin`, below); `paired` is
+privd's, and `program` a base program's path or one of the extension's own,
+which matches
 only a requester running that file of the activation whose label
 (`SO_PEEREXTENSION`) names the extension and the digest its record installed,
 and never `root`. privd reads a requester's label before its program, so one
@@ -1932,13 +1930,14 @@ database written is the newest of both. The uids are Debian's division: 1 to
 99 the base's own, 100 to 999 extensions' (`EXTENSION_UIDS`), 1000 to 59999
 people (`PERSON_UIDS`) and 65534 `nobody`. `/bin/users` lists the people to
 anyone and, through privd's `org.slopos.accounts.manage` (`Seal` and
-`DacOverride`), for root or an administrator adds one with a home of their own
+`DacOverride`), for root, an administrator, or a person an administrator's
+password answers for, adds one with a home of their own
 (`/home/<name>`, 0700), removes one — the home kept unless `--home` says —
 renames one, sets a password, promotes and demotes, and sets automatic login;
 the last administrator stays one, and the first person, whom the desktop runs
-as and privd's `session` names, stays, an administrator until there is a
-login screen. A passwordless administrator who adds someone sets a password
-first, and an add turns automatic login off unless `--keep-autologin` says.
+as, stays, an administrator until there is a login screen. A passwordless
+administrator who adds someone sets a password first, and an add turns
+automatic login off unless `--keep-autologin` says.
 `org.slopos.accounts.password` (`Seal`) changes the requester's own password
 once the current one is typed, as does the manage action for an
 administrator's own; a wrong one costs two seconds, and privd runs the
@@ -2078,10 +2077,34 @@ mechanism starts, so a requester whose base program has stopped running since
 it connected — it exec'd, mapped code from elsewhere or exited — is refused:
 `root` is uid 0 running a
 base program, `paired` is `/bin/remoted` on a base carrying a pairing and
-nothing else, `session` is uid 1000 otherwise, and `program <path>` is a
-static base program or, in an extension's action, a program of its own
-activation; an action's `allow` lines are tried in order and the
-first that matches runs it, asks the person (`consent`) or, with none, refuses.
+nothing else, `user` is a person the accounts record names and `admin` one it
+names an administrator, either from any program but the paired agent and read
+from the record as the request comes, and `program <path>` is a static base
+program or, in an extension's action, a program of its own activation. An
+action's `allow` lines are tried in order and the first that matches decides
+at its level (`slopos_priv_core::policy`, as polkit's `yes`, `auth_self` and
+`auth_admin` do): none runs it, `confirm` asks for a click and `password` for
+the person's own password, a click only from the person whose desktop the
+screen shows — the first person's, until there is a login screen — so anyone
+else types their password, and one without a password, who confirms by a
+click where it would be typed, cannot; `user alone` runs it while no other
+person is logged in, as a process carrying the desktop's login tag, and is
+`admin` otherwise. A person no line matches, at an action with an `admin`
+line, is answered by an administrator's password: the dialog lists the
+administrators who have one, never the asker, and refuses when there are
+none. With no line matching, it refuses. A password reaches privd in the
+consent answer and `/sbin/authcheck` on a pipe, never a command line; checks
+run one at a time, and each wrong one doubles the wait before that person's
+next check, from two seconds to a minute, for the life of privd. Once it is
+answered privd judges the request again, and runs it only if it would now
+run unasked or ask the same of the same person, the administrator who
+answered still listed. `keep <seconds>`, up to 900, runs a request unasked
+once one of the same uid and session (its login tag and eldest task), the
+same action read from the same place and asked the same way, command line
+and directory was allowed within that time by someone who could answer it
+now, forgotten when privd reads the extensions' actions again and never kept
+for a requester carrying no login tag; a mechanism leaves who may ask to
+privd.
 An action marked `medium` exists only on a boot the kernel says served the
 install medium (`BOOT_FLAG_MEDIUM` in `sys_info`): off it privd answers it as
 no action, and so does a requester's own reading of the policy
@@ -2095,9 +2118,10 @@ relayed before the mechanism starts withdraws the request, a second one stops
 the requester waiting, and a mechanism whose requester leaves is not stopped,
 though the pipes its requester relayed a terminal through close with it and a
 terminal of its own hangs up. One
-uid running one program holds at most eight connections, every requester but
-root and the paired agent shares 32, and one that leaves a reply unread for
-five seconds loses its connection. A program started without its action's
+uid running one program holds at most eight connections, every uid but root's
+and the paired agent's at most 32, so no person crowds out another, and those
+uids 128 together, and one that leaves a reply unread for five seconds loses
+its connection. A program started without its action's
 capabilities calls `slopos_userland::privd::elevate`, which sends its own argv
 through the connection it inherited (`PRIVD_FD`, held to being the real
 privd's) or a fresh one and exits with the mechanism's status, relaying a
@@ -2128,15 +2152,33 @@ had pending — privd interrupts every question — and init sends one on behalf
 of a side that exited, and discards what is written to a side not running.
 privd puts a question to the compositor only after a `READY` sent since the
 last, so one question at most is in flight and no frame is ever left torn in
-the pair's buffer. The compositor draws one question at a time over
-every surface, the whole command line and its directory wrapped (privd asks
-about neither past 320 escaped bytes), Deny focused, Allow by a click or by
-Tab, Left or Right and then Enter, input ignored for 750 ms after the frame
-that first shows the question and after each move; until the compositor says it
-can draw, and with none, an action that needs consent is refused, at most eight
-questions wait, a question unanswered for 120 s from when it is shown is a
-refusal, and a refusal refuses what was waiting and what asks in the next five
-seconds.
+the pair's buffer. `READY` names the version the compositor speaks, the one
+the running base's interface says its privd reads, since either side of a
+live base switch may be the older: one of
+the first, which names none, is asked only for a click, in that version's
+words, so a desktop older than a live base switch still confirms and refuses
+what needs a password until its session restarts; from the second on a
+question says what answers it and whose request it is, the compositor says
+`SHOWN` once it is on screen, which is when the requester hears it is being
+asked, and an answer carries the password typed and whose. The compositor
+draws one question at a time over every surface, naming the person asking,
+the whole command line and its directory wrapped (privd asks about neither
+past 320 escaped bytes), Deny focused, or the password field of a question
+that takes one, masked, with Up and Down choosing among the administrators
+listed; Allow by a click, or by Enter once Tab, or Left or Right between the
+buttons, has moved to it, and a question that takes a password only once one
+is typed, which Enter in the field also allows; input is ignored for 750 ms
+after the frame that first shows the question and after each move. No client
+sees what is typed there: no key pressed while a question is up, or after
+one that takes a password goes unanswered until no key has been pressed for
+1.5 s, reaches a client, nor does any pointer press or motion while one is
+up, and a key pressed into it keeps its repeats and its release from every
+client, since a release names its key. Until the compositor says it can
+draw, and with none, an action that needs consent is refused, at most eight
+questions wait, four of one uid's, a question unanswered for 120 s from when
+privd sends it is a refusal, and a refusal refuses what that uid had waiting
+and what it asks in the next five seconds; a wrong password refuses only its
+own request.
 
 ### Licensing discipline
 
@@ -2244,7 +2286,7 @@ file's header before changing `task_is_dispatch_pinned`, because the proof
 keeps verifying whether or not the model still describes the tree.
 
 ## Testing Guidelines
-The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`utest!` registration in lex order, and reports results over serial in KTAP grammar. A test flagged `FLAG_EXPLICIT` runs only when a `tests.run` pattern is its full name — `utest!(…, explicit)` is that for a userland test a host drives, its log uncaptured — and `stest!(…, kind = Userland)` runs a kernel test in the userland phase, sorted among the userland tests. A utest runs as uid 0 holding every capability unless it declares `caps = …` (`none`, or the gated capabilities it holds beside the universal ones) and `uid = …`, which a test of an unprivileged gate or of the person's work sets to `caps = none, uid = 1000`. The Go host wrapper (`tools/run_tests/` → `builddir/run_tests`) parses that stream into a live progress bar + per-failure detail. `just test` builds `builddir/slop-tests.iso` with `tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on`, runs QEMU with `isa-debug-exit`, and exits 0 green / 1 on any failure.
+The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`utest!` registration in lex order, and reports results over serial in KTAP grammar. A test flagged `FLAG_EXPLICIT` runs only when a `tests.run` pattern is its full name — `utest!(…, explicit)` is that for a userland test a host drives, its log uncaptured — and `stest!(…, kind = Userland)` runs a kernel test in the userland phase, sorted among the userland tests. A utest runs as uid 0 holding every capability unless it declares `caps = …` (`none`, or the gated capabilities it holds beside the universal ones) and `uid = …`, which a test of an unprivileged gate or of the person's work sets to `caps = none, uid = 1000`. A test answers the desktop as a person would by `test_key` (`TestHarness`, `ENOSYS` but on a test boot), which hands the input sink's holder a key a keyboard sent after its layout, past the diagnostic console and the TTY; `userland/src/bin/tests/support/asking.rs` is the requester and the keys `privd_test` and `extension_action_test` answer privd's dialog with. The Go host wrapper (`tools/run_tests/` → `builddir/run_tests`) parses that stream into a live progress bar + per-failure detail. `just test` builds `builddir/slop-tests.iso` with `tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on`, runs QEMU with `isa-debug-exit`, and exits 0 green / 1 on any failure.
 
 **Run `just test` before sending changes.** A green `just test` is necessary but **not** sufficient — it runs neither the framekernel gates nor the three boot-log ratchets, all of which CI runs and any of which can fail on a commit whose tests pass. See **Pre-commit (MANDATORY)** below for the full sequence. For manual inspection use `just boot` or `just boot-log` (serial transcript in `test_output.log`; `VIDEO=1` for a framebuffer). Note regressions or warnings in your PR description.
 

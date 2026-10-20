@@ -149,7 +149,7 @@ flowchart LR
     args     *
     caps     RawBlock Mount Power BootEntry Seal DacOverride
     uid      0
-    allow    session consent
+    allow    admin confirm
     exclusive
   ```
 

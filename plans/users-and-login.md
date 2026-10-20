@@ -66,14 +66,11 @@ account.rs`).
 - init makes one consent socket pair per boot and hands the same end to every
   compositor it starts; privd keeps one question in flight on it
   (`userland/src/apps/init/mod.rs:162`, `:597-600`).
-- privd's `session` principal is uid 1000 (`priv-core/src/policy.rs:148-155`);
-  `program` matches the program alone (`:154`); consent is a click by whoever
-  sits at the machine; the dialog names uid 0 "root", uid 1000 "user" and any
-  other a number (`priv-core/src/consent/dialog.rs:95-97`); admission is
-  capped per uid and program with one pool of 32 for everyone
-  (`userland/src/apps/privd/mod.rs:55-59`). A mechanism learns its
-  requester's uid from `PRIV_UID`, and the accounts' mechanism checks that
-  the requester administers the machine itself.
+- privd judges people by the accounts record (Phase 2, below): `user` and
+  `admin` with levels, a click only from the person whose desktop is in
+  front — the first person's, since init runs one desktop as them — and an
+  administrator's password for a standard user. "Logged in" is a process
+  carrying the desktop's login tag; there is no session table.
 - remoted runs as uid 1000 (`userland/src/apps/init/service.rs:61-69`).
 - The session's own tools write `/usr/local` directly (`tree-install`,
   `scripts/selfhost.sh install`).
@@ -174,7 +171,8 @@ privd's grammar gains principals and levels, and `session` is retired:
 - **The dialog names the person** asking, their session and terminal, the
   program, the command and its directory, and for an admin answer the admin
   answering.
-- **Admission** is pooled per person instead of one pool of 32 for everyone.
+- **Admission** is pooled per person instead of one pool of 32 for everyone,
+  under a ceiling for them all.
 - **The existing policy translates line by line.** On a one-person install the
   person is the only admin and has no password, so every row behaves as
   today:
@@ -196,7 +194,7 @@ privd's grammar gains principals and levels, and `session` is retired:
 - **Secrets travel on descriptors**, never in a command line, which privd
   shows and keeps.
 - Failures are counted per account and slow the next attempt; privd keeps the
-  count for the boot.
+  count for as long as it runs.
 - **The dialog collects secrets.** The compositor draws it over every surface,
   as the consent question is drawn today, and no client receives what is
   typed there. That holds because no compositor request injects input or
@@ -332,17 +330,29 @@ person stays an administrator, only the host tests reach the last-administrator
 rule, and since nothing starts a person's session yet, `accounts_test` calls
 `initgroups` itself.
 
-### Phase 2: Principals and approval
+### Phase 2: Principals and approval — done
 
-- The grammar's principals and levels; `keep`; the policy translated; per-
-  person admission; secrets on descriptors.
-- The dialog names the person, takes a password, lists admins for a standard
-  user's request.
-- Graded by `privd_test`: an admin's `confirm`; a standard user's request
-  answered by an admin's password, refused by a wrong one, and refused when
-  the only admin has no password; `alone` refusing a power-off while another
-  person is logged in; a `keep` answer reused for the same command and
-  directory and not for another; and the one-person dialogs unchanged.
+`slopos-priv-core`'s grammar names `user` (none, `alone`, `confirm`,
+`password`), `admin` (none, `confirm`, `password`), `root`, `paired` and
+`program`, and `keep <seconds>`; `session` and `consent` are gone and the
+base policy is translated as the table says, but for `net.toggle` (below).
+`Action::admits` judges a requester against the people privd reads from the
+accounts record as each request comes. The consent channel is version 2:
+`READY` names it, a question says what answers it and whose request it is,
+`SHOWN` says it is on screen, and an answer carries the password typed,
+which privd hands `/sbin/authcheck` one check at a time, each person's
+failures doubling the wait before their next. The compositor's dialog names
+the person, takes a masked password and chooses among the administrators
+listed, and privd judges the request again once it is answered. Admission
+is 32 connections per uid and 128 in all. Extensions' actions take the
+same principals, levels and `keep`. `test_key` (`TestHarness`, a test boot
+only; base interface 8) lets a test type into the dialog. `privd_test`
+grades a click and Escape for the first person, a standard user answered by
+an administrator's password and refused by a wrong one and while no
+administrator has one, and `user alone` running alone and refusing a
+power-off beside another person; `extension_action_test` a kept answer
+reused for its own command and directory and not for another; the host
+tests the rest.
 
 ### Phase 3: `priv <command>`
 
@@ -358,9 +368,15 @@ rule, and since nothing starts a person's session yet, `accounts_test` calls
 ### Phase 4: Sessions and login
 
 - init's session table, tags, `/run/sessions`, `getlogin`; consent links per
-  session; automatic login; the greeter and `org.slopos.login`; `SeatSwitch`;
-  the clipboard by tag; locking; the console login; remoted under its person;
-  per-person quotas.
+  session, a request from a session not in front refused at any level that
+  asks, and privd's "logged in" and "in front" read from the table;
+  automatic login; the greeter user, the `greeter` principal and
+  `org.slopos.login`; `SeatSwitch`; the clipboard by tag; locking; the
+  console login and its terminal agent; remoted under its person; per-person
+  quotas; the compositor's network switch, which retries, offered only to a
+  person `net.toggle` runs unasked for; a secure attention key that only the
+  compositor reads, since a maximised client can draw a likeness of the
+  dialog.
 - Graded by a second person logging in at the greeter, both desktops
   switching with the seat and clipboard following the one in front, a request
   from the session behind refused, a locked session refusing a wrong
@@ -446,15 +462,65 @@ rule, and since nothing starts a person's session yet, `accounts_test` calls
 - **Proving oneself is the current password, or a click for a person
   without one.** Changing one's own password needs the current one through
   either action; setting a first one needs the click privd's consent gives.
-  Until privd counts failures (Phase 2), a wrong password costs two seconds
-  and the accounts' mechanisms run one at a time.
+  A password the accounts' mechanisms read at a terminal costs two seconds
+  when wrong, and those mechanisms run one at a time; one typed in the dialog
+  is counted by privd.
 - **A mechanism trusts `PRIV_UID` only beside `PRIV_ACTION`**, both set by
-  privd; run directly, it acts for its real uid. Until Phase 2's principals
-  the accounts' mechanism holds its requester to administering the machine
-  itself, and the two actions read `session consent`, which Phase 2
-  translates to `admin confirm` and `user` with the current password. They
-  name no `paired` line: remoted runs as uid 1000 too, and `PRIV_UID` cannot
-  tell it from the person.
+  privd; run directly, it acts for its real uid. The accounts' actions are
+  `admin confirm` and `user confirm`, the mechanism asking the current
+  password itself. They name no `paired` line: remoted runs as uid 1000 too,
+  and `PRIV_UID` cannot tell it from the person.
+- **A mechanism leaves who may ask to privd.** Started by privd, it does not
+  judge its requester again, so an administrator's password that answers for
+  a standard user is the whole answer; run directly, it holds its real uid to
+  administering the machine.
+- **`user` matches every person and `admin` every administrator**, so the
+  first of them an action lists decides for those it matches. A person no
+  line matches is answered by an administrator's password only where an
+  `admin` line stands, and `user alone` is that line while another person is
+  logged in: an administrator runs unasked, a standard user is answered for.
+- **A click answers only for the person whose screen it is.** Anyone else
+  types their own password, and a person without one can answer for nothing
+  away from their own screen; an administrator without a password answers
+  for nobody else. Phase 4 adds that a session not in front is not asked.
+- **A key pressed into the dialog keeps its repeats and its release from
+  every client**, since a release names its key and would spell what was
+  typed, and a question taken away under someone typing a password keeps
+  taking keys until they stop.
+- **An answer is judged again before its mechanism runs.** The verdict
+  privd reaches once the person has answered must run the request unasked,
+  or ask the same of the same person and still list the administrator who
+  answered, so a removal or a demotion while the dialog was up refuses it.
+- **One uid's questions wait four at most, and a refusal holds back only that
+  uid's**, so a person who keeps raising questions keeps nobody else's
+  waiting: one Escape clears theirs.
+- **A wrong password slows its person's next check, never locks them out**:
+  two seconds doubling to a minute, for the life of privd. A lockout would
+  hand anyone who can raise a dialog a way to shut the administrators out.
+- **A kept answer is privd's memory of one exact request**: uid, session
+  (its login tag and its eldest task, so a later session tagged alike reuses
+  nothing), action and the activation it was read from, how it was asked,
+  command line and directory, for at most 900 seconds, forgotten when privd
+  reads the extensions again, and nothing for a requester carrying no login
+  tag, which is no session. One an administrator's password gave holds only
+  while they could answer it now. An extension's `keep` needs no grant, since
+  a kept answer only repeats a command the person allowed.
+- **The consent channel names its version in `READY`.** A compositor of the
+  first version, which names none, is asked only for a click in that
+  version's words, so a desktop older than a live base switch keeps working
+  for the one person, and refuses what needs a password until its session
+  restarts. A newer compositor writes the version the running base's
+  interface says its privd reads, since either side of a switch may be the
+  older one, and says `SHOWN` once a question is on screen, which is when the
+  requester hears it is being asked.
+- **`net.toggle` is `admin`**, unasked for every program an administrator
+  runs where the compositor's program line was the only one before: the
+  switch re-asks until the kernel agrees, which no dialog could sit behind,
+  and switching the network is the least an administrator's program could do.
+- **A test types into the desktop through `test_key`**, a private call that
+  only `TestHarness` and a test boot reach, delivering a key after layout
+  resolution past the diagnostic console and the TTY; the greeter's tests use
+  it too.
 - **`/sbin/authcheck` answers by its status alone**: 0 the password, 1
   anything else, 2 cannot tell. It believes `/etc/shadow` only sealed, so a
   change whose database was not written leaves the old hashes answering
@@ -467,8 +533,8 @@ rule, and since nothing starts a person's session yet, `accounts_test` calls
   as its controlling terminal so an interrupt reaches it; the installer does
   too. The requester relays nothing it shows before its own terminal is raw.
 - **The first person stays an administrator until there is a login screen**,
-  since privd's `session` is theirs alone and nobody else could reach the
-  accounts' mechanisms.
+  since the desktop runs as them alone and the person at the screen must be
+  able to allow what the system does.
 - **A volume holding a kept directory is not unmounted**, so the store cannot
   be taken from under a running root to make it look recordless.
 
