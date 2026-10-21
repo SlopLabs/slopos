@@ -49,11 +49,10 @@ Quota accounts already form a tree per process (`slopos-ostd/src/process/
 account.rs`).
 
 **Userland assumes one person.**
-- `SESSION_UID`, `SESSION_GID` and `SESSION_HOME` (`abi/src/fs.rs:239-241`)
-  are "the person"; `ROOT_LAYOUT` and `SESSION_TREES` give that uid
-  `/home/user`, `/src` and `/usr/local`, recorded once in
-  `/var/lib/slopos/owners` and mirrored by `scripts/lib/root_layout.sh` and
-  `tools/initramfs`.
+- `SESSION_UID`, `SESSION_GID` and `SESSION_HOME` (`abi/src/fs.rs`) are the
+  first person; `PERSON_TREES` are their home, `/src` and `/usr/local`, which
+  `/var/lib/slopos/owners` names while they hold them (Phase 5, below),
+  mirrored by `scripts/lib/root_layout.sh` and `tools/initramfs`.
 - The people are the accounts record's (Phase 1, below): `/bin/users`
   changes them through privd, and slibc reads the database rendered from it.
   There is no `getlogin`.
@@ -72,8 +71,9 @@ account.rs`).
   administrator's password for a standard user. "Logged in" is a process
   carrying the desktop's login tag; there is no session table.
 - remoted runs as uid 1000 (`userland/src/apps/init/service.rs:61-69`).
-- The session's own tools write `/usr/local` directly (`tree-install`,
-  `scripts/selfhost.sh install`).
+- The first person's tools write `/usr/local` while nobody else has an
+  account; from the second person on it is the system's, installed into
+  through privd, and a person's own software lives in `~/.local` (Phase 5).
 
 **One seat, one holder.** The seat arbiter gives the display and the input
 sink to one holder; an equal rank cannot take it from a live holder, "so two
@@ -411,15 +411,37 @@ fork bomb beside another's running session; `privd_test`, `priv_test`,
 `supervision_test` and `extension_action_test` now ask from the desktop in
 front.
 
-### Phase 5: Software trees
+### Phase 5: Software trees — done
 
-- `/usr/local` handed to uid 0 at the second person and installed through the
-  action; `~/.local` on `PATH` and the loader's search; the ownership map and
-  its migration; `selfhost.sh install`.
-- Graded by `apps_test` installing system-wide through the action and per
-  person into `~/.local`, the second person running the first's system-wide
-  app and not finding the first's `~/.local` one, and a one-person root
-  passing `check_fs_image.sh --map` unchanged.
+`ROOT_LAYOUT` is the system's directories, `/usr/local` among them, and the
+owners record names which of `PERSON_TREES` — the first person's home, `/src`
+and `/usr/local` — they hold, as `<uid>:<gid> <tree>` lines; init, the
+installer, the image builders (`fs_tree.py read`) and `check_fs_image.sh
+--map` take owners from it, and init rewrites a record from before the map
+named the home `/home`, moving nothing. The `users add` that makes a second
+person shares the root (`root_layout::share`): the first person's home closed
+to others and `/usr/local` uid 0's, whole and writable by uid 0 alone, links
+kept only where every hop is uid 0's, and the record last; init finishes one
+cut short. From then on `tree-install` asks privd's
+`org.slopos.software.install` (`allow admin confirm`, `allow paired`), which
+runs it as uid 0 holding nothing at `/usr/local` alone, from a copy of what
+everyone may read whose links stay in the tree (`tree::stage`), and
+`selfhost.sh install` runs the base's. A person installs into `~/.local` with
+`tree-install`, its manifest kept in their home; `~/.local/bin` is on their
+`PATH`, which the desktop's terminal and dock now hand on with the session's
+environment, and the loader searches `$HOME/.local/lib` ahead of
+`/usr/local/lib` for a process neither `AT_SECURE` nor uid 0's. Every tree
+install leaves its entries writable by their owner alone, and every later
+person's home is 0700. `apps_test --trees` grades the hand-over, a
+system-wide install allowed by the first person's click, their own into
+`~/.local`, the second person running the first's system-wide program and its
+library from `/usr/local/lib` but not finding the first's own, a tree holding
+what not everyone may read refused and one whose link leads out of it, and
+`priv` finding `/usr/local/bin`; `dl_test` the loader's order, and `dac_test`
+the record's migration, the hand-over on a crafted root — a link through a
+person's link among it — and one a boot finishes. `check_fs_image.sh --map` holds the tests image after the suite to
+a `/usr/local` that is the system's to its last entry, and the one-person
+roots `test-persist` and `test-toolchain` boot to the map as before.
 
 ## Grading
 
@@ -484,9 +506,11 @@ front.
   extension's record keeps a uid for.
 - **A uid is given once.** The record's `next` only rises, as an extension
   record keeps its uids for good.
-- **The first person's home is the map's `/home/user`** until the map drops
-  the person's directories (Phase 5); every other person's is
-  `/home/<name>`, 0700.
+- **The first person's home is `/home/user`**, every other person's
+  `/home/<name>`. A home is closed to others once anyone else could open it:
+  the first person's is 0755 while they are alone, as before, and the add
+  that makes a second closes it, as every later person's is made 0700, as
+  Debian's `adduser` has made homes since 12.
 - **Proving oneself is the current password, or a click for a person
   without one.** Changing one's own password needs the current one through
   either action; setting a first one needs the click privd's consent gives.
@@ -561,9 +585,9 @@ front.
   with echo off from before the first prompt to after the last, claiming it
   as its controlling terminal so an interrupt reaches it; the installer does
   too. The requester relays nothing it shows before its own terminal is raw.
-- **The first person stays while the ownership map's trees are theirs**
-  (Phase 5), and may be demoted like anyone once another administrator is,
-  since the login screen lets each person in as themselves.
+- **The first person stays, holding the workspace at `/src`**, and may be
+  demoted like anyone once another administrator is, since the login screen
+  lets each person in as themselves.
 - **A volume holding a kept directory is not unmounted**, so the store cannot
   be taken from under a running root to make it look recordless.
 - **An action may run its mechanism as its requester, under a ceiling stated
@@ -598,10 +622,10 @@ front.
   it, what they lead to, a script's interpreter, and every directory from `/`
   down to each are uid 0's and writable by nobody else; the requester's
   `PATH` is never read. What it runs reads `$HOME` as the person's, whose
-  processes can change it: no program of the base reads a file there today,
-  which Phase 5 holds to when `/usr/local` becomes uid 0's.
-  `/usr/local/bin` joins by that rule once uid 0 holds `/usr/local`
-  (Phase 5), with no change to `priv`.
+  processes can change it: no base program it runs reads a file there, and
+  the loader searches no `~/.local/lib` for what holds more than the person.
+  `/usr/local/bin` joined by that rule once uid 0 held `/usr/local`, with no
+  change to `priv`; the toolchain there reads `$HOME` as any program does.
 - **A standard user's `priv` runs as them**, not as the administrator who
   answered: the answer allows the request and lends no identity, so its own
   requests are still a standard user's. `DacOverride` reaches every person's
@@ -664,6 +688,79 @@ front.
   and the links and the table's pair follow it. It lives only until init
   re-executes into the older base, which runs without consent until the next
   boot.
+
+- **The owners record says what the first person holds; the map says the
+  rest.** `ROOT_LAYOUT` names only the system's directories, `/usr/local`
+  among them, and the record grants the first person their trees, so one
+  rule gives every path its owner: theirs within a tree the record names, uid
+  0's elsewhere. What must decide an owner — init, the installer, the image
+  builders, the map check — reads the record; what only uses `/usr/local` —
+  `priv`'s trusted directories, `tree-install` choosing whether to ask —
+  reads the directory's owner, which DAC enforces anyway.
+- **`/usr/local` is handed to the system once and never back**, at the add
+  that makes a second person, as Debian made `/usr/local` `root:root` after
+  its `staff` group proved root-equivalent: a prefix someone else's programs
+  run from is writable by uid 0 alone. Removing the second person hands
+  nothing back, since what uid 0 installed there an administrator allowed for
+  everyone. The record goes last, so init finishes a hand-over a crash cut
+  short at the next boot, and a recordless root with more than one person is
+  migrated without `/usr/local`.
+- **The hand-over changes each directory before listing it**, so a process of
+  the first person's running meanwhile can put no name behind the walk, and
+  reads an entry's mode again once uid 0 holds it, so a `chmod` between the
+  look and the `chown` is narrowed too. It takes from a file with another
+  name, which another uid holds, only its name in `/usr/local`, since a hard
+  link needs no ownership and chowning someone's file to uid 0 would take it
+  from them. A link stays only where following it, link by link as the
+  kernel does, looks every name up in a directory only uid 0 may change and
+  ends at what only uid 0 may change, so neither a person's file nor a
+  person's link along the way makes a program linked from their build
+  everyone's; what a file's contents name, a script's among them, stays as
+  the first person wrote it, as everything there was theirs to write. The
+  manifests the first person wrote stay theirs: uid 0 believes no manifest
+  another uid wrote, and installs over one as over a tree left unfinished.
+- **A tree is writable by its owner alone**, whatever its source's modes:
+  every install, host and guest, drops group and other write, so a source
+  tree built under umask 002 cannot leave the system's `/usr/local` writable
+  by a group, and `priv`'s rule needs no exception for it.
+- **A system install reads what everyone may and writes `/usr/local`
+  alone.** `org.slopos.software.install` holds no capability, as Flatpak's
+  system helper is the one road to a system installation, and its mechanism
+  refuses any other destination. uid 0 reads its own files by mode, so the
+  mechanism first copies the tree into `/var/lib/slopos/tree-install`, which
+  only uid 0 enters, walking it through descriptors from `/` that follow no
+  link and keeping an entry only where everyone may read it — what a person
+  installs for everyone is everyone's to read, and a stricter rule by the
+  requester's bits would only add a case uid 0 without `DacOverride` refuses
+  anyway — then installs from that copy: no link swapped in under the walk,
+  and no entry changed between its mode and its bytes, publishes what the
+  requester could not read. A link in the tree is relative and climbs no
+  higher than the tree's top before it names anything, so what it names was
+  installed with it. The action is exclusive, so the copy has one directory,
+  and the next run takes away what one cut short left; the copy and the
+  install both count against the mechanism's `DiskBlocks` ceiling. A
+  person's own tree goes into their home holding nothing, its manifest kept
+  there, since the system's manifest directory is uid 0's.
+- **The hand-over changes owners in place**, as `chown` does on any Unix: a
+  file the first person opened for writing before it they write until they
+  close it, and a reboot ends every such descriptor. Copying every file anew
+  would cost a toolchain's size at the add.
+- **What cannot read a record grants nothing.** An image builder that cannot
+  read a preserved root's record installs as uid 0's, init on a root whose
+  record or accounts it cannot read gives the first person nothing and moves
+  nothing, and a hand-over walk
+  that cannot take a directory leaves what is in it for the next boot rather
+  than changing it by path.
+- **The loader takes `HOME` as it takes `LD_LIBRARY_PATH`**: read from the
+  environment the process started with, only when it is neither `AT_SECURE`
+  nor uid 0's, and only absolute, so it reads no passwd file and nothing a
+  person sets reaches a program holding more than they do. `~/.local/lib`
+  comes before `/usr/local/lib` as `~/.local/bin` comes before
+  `/usr/local/bin`; glibc searches neither, and the UAPI hierarchy names
+  `~/.local/lib` for a person's libraries.
+- **The desktop hands its environment on.** The terminal's shell and the
+  dock's apps take the session's, so `~/.local/bin` is on the `PATH` of a
+  shell a person opens and `HOME` names their libraries to an app they start.
 
 ## Constraints
 
