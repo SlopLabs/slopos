@@ -49,6 +49,9 @@ const SYSTEM: (u32, u32) = (0, 0);
 /// Links followed before a name counts as naming nothing, as Linux's
 /// `MAXSYMLINKS`.
 const MAX_LINKS: usize = 40;
+/// Written before a hand-over's first change and taken away once its record
+/// is, so a boot finishes one cut short.
+pub const SHARING: &str = "/var/lib/slopos/owners.sharing";
 
 /// Which of the first person's trees they hold, as the owners record says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,9 +193,9 @@ fn people(root: &Path) -> Option<usize> {
 
 /// Make each directory of the map the root at `root` lacks, hand the first
 /// person their trees once per root, and `/usr/local` to the system once a
-/// second person has an account or uid 0 holds its top, which a hand-over
-/// cut short leaves. What the root's record says now; a record or accounts
-/// that cannot be read grant nothing, and change nothing.
+/// second person has an account or a hand-over was begun. What the root's
+/// record says now; a record that cannot be read, or accounts on a root
+/// without one, grant nothing and change nothing.
 pub fn lay_out(root: &Path) -> Owners {
     let record = under(root, OWNERS_RECORD);
     let (owners, recorded) = match recorded(root) {
@@ -237,7 +240,14 @@ pub fn lay_out(root: &Path) -> Owners {
         }
         Some(_) => {}
     }
-    if !owners.holds(LOCAL) || !taken(root) && people(root).is_none_or(|n| n < 2) {
+    let begun = sharing(root);
+    if !owners.holds(LOCAL) {
+        if begun {
+            let _ = fs::remove_file(under(root, SHARING));
+        }
+        return owners;
+    }
+    if !begun && people(root).is_none_or(|n| n < 2) {
         return owners;
     }
     match share(root) {
@@ -360,6 +370,8 @@ fn hand_over_below(top: &Path) -> usize {
 /// theirs alone, `/usr/local` the system's whatever lies below it, and the
 /// record saying the first person no longer holds it. Takes `DacOverride`.
 pub fn share(root: &Path) -> Result<(), String> {
+    let begun = under(root, SHARING);
+    write_durably(&begun, b"").map_err(|e| format!("{}: {e}", begun.display()))?;
     let refused = home_to_themselves(root) + take_local(root);
     if refused > 0 {
         return Err(format!(
@@ -370,13 +382,15 @@ pub fn share(root: &Path) -> Result<(), String> {
     Owners::of(root)
         .without(LOCAL)
         .write(root)
-        .map_err(|e| format!("{}: {e}", under(root, OWNERS_RECORD).display()))
+        .map_err(|e| format!("{}: {e}", under(root, OWNERS_RECORD).display()))?;
+    let _ = fs::remove_file(begun);
+    Ok(())
 }
 
-/// Whether uid 0 holds the top of `/usr/local` on the root at `root`, as a
-/// hand-over leaves it from its first step on.
-pub fn taken(root: &Path) -> bool {
-    fs::symlink_metadata(under(root, LOCAL)).is_ok_and(|meta| meta.is_dir() && meta.uid() == 0)
+/// Whether a hand-over was begun on the root at `root` and its record not
+/// yet written.
+pub fn sharing(root: &Path) -> bool {
+    fs::symlink_metadata(under(root, SHARING)).is_ok_and(|meta| meta.is_file())
 }
 
 /// The first person's home closed to everyone else, as every later

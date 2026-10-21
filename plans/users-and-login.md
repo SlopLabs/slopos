@@ -754,9 +754,10 @@ roots `test-persist` and `test-toolchain` boot to the map as before.
   init began with `/usr/local` the system's (`/run/slopos-local`), and the
   add tells the administrator to restart before the new person logs in. The
   add shares the root before it records the second person and adds nobody
-  when that fails, so no second person is recorded beside a `/usr/local` the
-  first one still owns; a record naming `/usr/local` whose top uid 0 holds is
-  a hand-over begun, which init finishes at the next boot.
+  when that fails or the root's record cannot be read, so no second person is
+  recorded beside a `/usr/local` the first one still owns; a hand-over marks
+  itself begun before its first change, which init finishes at the next
+  boot.
 - **What cannot read a record grants nothing.** An image builder that cannot
   read a preserved root's record installs as uid 0's, init on a root whose
   record or accounts it cannot read gives the first person nothing and moves

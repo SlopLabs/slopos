@@ -598,7 +598,8 @@ then its device's (`EXT_VERITY`), then the filesystem the file is on. A name
 is lowercase letters, digits and `-`, at most 32 bytes, none of
 `slopos_abi::extension::RESERVED`, and `extctl` installs none of
 `slopos_extension_core::TAKEN` either, the names whose `/var/log`, `/run` or
-`/etc` directory the system's own paths hold. Each activation is an instance
+`/etc` directory the system's own paths hold, though it still shows, stops
+and removes one installed before its name was taken. Each activation is an instance
 of its own from a pool of `MAX_ACTIVATIONS` (32), numbered across every
 activation and never within a boot again; the number is the high half of
 each inode it serves, and `statfs` names it `EXTENSION_MAGIC`. It carries the
@@ -1943,15 +1944,17 @@ and each mode read again once uid 0 holds the entry; a file with another name
 that another uid holds loses only its name there, and a link goes unless
 every name it leads through, link by link, is in a directory only uid 0 may
 change and it ends at what only uid 0 may change, a directory only within
-`/usr/local`; last the record without `/usr/local`. Init finishes at the next
-boot a hand-over cut short — a record naming `/usr/local` whose top uid 0
-holds, or a root of two people whose record still names it — and none is
-undone. Owners change in place, so a descriptor the first person opened there
-for writing before writes until it closes; init notes at a boot whose record
-it read without `/usr/local` (`root_layout::settled`, `/run/slopos-local`)
-that none can be open, `priv` trusts `/usr/local/bin` only then, and the add
-says to restart before the new person logs in, since what they run from
-`/usr/local` such a descriptor could still change. A manifest the first person wrote stays theirs, and uid 0 installs
+`/usr/local`; last the record without `/usr/local`. It leaves
+`/var/lib/slopos/owners.sharing` from its first change until the record is
+written, and init finishes at the next boot a hand-over that mark or a root
+of two people whose record still names `/usr/local` shows cut short; none is
+undone, and an add on a root whose record cannot be read adds nobody. Owners
+change in place, so a descriptor the first person opened there for writing
+before writes until it closes; init notes at a boot whose record it read
+without `/usr/local` (`root_layout::settled`, `/run/slopos-local`) that none
+can be open, `priv` trusts `/usr/local/bin` only then, and an add on a boot
+that is not settled says to restart before the new person logs in, since
+what they run from `/usr/local` such a descriptor could still change. A manifest the first person wrote stays theirs, and uid 0 installs
 over it without believing it. From then on a session installs there through
 privd's `org.slopos.software.install` (`allow admin confirm`, `allow
 paired`, one at a time), which runs `/bin/tree-install` as uid 0 holding

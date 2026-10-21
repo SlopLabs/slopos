@@ -13,7 +13,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, lchown};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use slopos_abi::fs::{ADMIN_GROUP, PERSON_UIDS, SESSION_HOME};
+use slopos_abi::fs::{ADMIN_GROUP, OWNERS_RECORD, PERSON_UIDS, SESSION_HOME};
 use slopos_accounts_core::{Accounts, Person};
 use slopos_priv_core::{ENV_ACTION, ENV_UID};
 use slopos_slibc_core::passwd::{BASE_GROUP, BASE_PASSWD, Group, Passwd, lines};
@@ -311,31 +311,24 @@ fn change(request: Request) -> Result<String, String> {
             (format!("{name}'s password is changed"), Home::Kept)
         }
     };
-    let shares = matches!(home, Home::Made(_))
-        && accounts.people().len() > 1
-        && Owners::read(top).is_some_and(|owners| owners.holds(LOCAL));
-    let recorded = match shares {
-        true => root_layout::share(top)
-            .map_err(|why| match root_layout::taken(top) {
-                true => {
-                    format!("{why}; nobody was added, and the next boot finishes the hand-over")
-                }
-                false => format!("{why}; nobody was added"),
-            })
-            .and_then(|()| {
-                store.record(&accounts).map_err(|why| {
-                    format!("{why}; nobody was added, though {LOCAL} is the system's now")
-                })
-            })
-            .map(|()| {
-                said.push_str(&format!(
-                    "; {LOCAL} is the system's now, installed into through privd, and \
-                     {SESSION_HOME} closed to others; restart before they log in, so \
-                     nothing opened in {LOCAL} before is open still"
-                ))
-            }),
-        false => store.record(&accounts),
+    let second = matches!(home, Home::Made(_)) && accounts.people().len() > 1;
+    let shared = match second {
+        true => share_for_second(top),
+        false => Ok(false),
     };
+    let recorded = shared.and_then(|shared| {
+        store.record(&accounts).map_err(|why| match shared {
+            true => format!("{why}; nobody was added, though {LOCAL} is the system's now"),
+            false => why,
+        })?;
+        if shared {
+            said.push_str(&format!(
+                "; {LOCAL} is the system's now, installed into through privd, and \
+                 {SESSION_HOME} closed to others"
+            ));
+        }
+        Ok(())
+    });
     if let Err(why) = recorded {
         if let Home::Made(home) = home {
             let _ = std::fs::remove_dir(home);
@@ -344,6 +337,14 @@ fn change(request: Request) -> Result<String, String> {
     }
     let synced = store.sync();
     store.unlock();
+    if matches!(home, Home::Made(_))
+        && !root_layout::settled()
+        && Owners::read(top).is_some_and(|owners| !owners.holds(LOCAL))
+    {
+        said.push_str(&format!(
+            "; restart before they log in, so nothing opened in {LOCAL} before is open still"
+        ));
+    }
     if let Home::Removed(person) = home {
         let gone = remove_home(&person).unwrap_or_else(|why| format!("; its home stays: {why}"));
         said.push_str(&gone);
@@ -351,6 +352,25 @@ fn change(request: Request) -> Result<String, String> {
     synced.map(|()| said.clone()).map_err(|why| {
         format!("{said}, but the user database was not written: {why}; the next boot writes it")
     })
+}
+
+/// Share the root for a second person the add records: whether this add
+/// did, and a refusal where the root's owners record cannot be read.
+fn share_for_second(top: &Path) -> Result<bool, String> {
+    let Some(owners) = Owners::read(top) else {
+        return Err(format!(
+            "{OWNERS_RECORD} cannot be read, which a boot writes; nobody was added"
+        ));
+    };
+    if !owners.holds(LOCAL) {
+        return Ok(false);
+    }
+    root_layout::share(top)
+        .map(|()| true)
+        .map_err(|why| match root_layout::sharing(top) {
+            true => format!("{why}; nobody was added, and the next boot finishes the hand-over"),
+            false => format!("{why}; nobody was added"),
+        })
 }
 
 fn manage(

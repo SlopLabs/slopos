@@ -732,24 +732,33 @@ fn a_hand_over_cut_short_is_finished_at_boot() -> bool {
 }
 
 /// A hand-over cut short before the add recorded anyone leaves a root of one
-/// person whose `/usr/local` top uid 0 already holds; a boot finishes it.
+/// person and its mark; a boot finishes it.
 fn a_hand_over_begun_alone_is_finished_at_boot() -> bool {
+    let begun = old_root(root_layout::SHARING.trim_start_matches('/'));
     if !stage_shared_root()
-        || std::os::unix::fs::lchown(old_root("usr/local"), Some(0), Some(0)).is_err()
+        || fs::write(&begun, b"").is_err()
+        || Path::new(&old_root("var/lib/slopos/accounts")).exists()
     {
-        say("could not stage a root whose hand-over began");
+        say("could not stage a root of one person whose hand-over began");
         return false;
     }
     root_layout::lay_out(Path::new(OLD_ROOT));
     let record = fs::read_to_string(old_root("var/lib/slopos/owners")).unwrap_or_default();
     let local = owner_in_old_root("usr/local/bin/tool");
+    let home = stat_of(&old_root("home/user")).map(|(.., mode)| mode);
+    let marked = Path::new(&begun).exists();
     let _ = fs::remove_dir_all(OLD_ROOT);
-    record == "1000:1000 /home/user\n1000:1000 /src\n" && local == Some((0, 0)) || {
-        say(&format!(
-            "after a boot: the record {record:?}, a file of it {local:?}"
-        ));
-        false
-    }
+    record == "1000:1000 /home/user\n1000:1000 /src\n"
+        && local == Some((0, 0))
+        && home == Some(0o700)
+        && !marked
+        || {
+            say(&format!(
+                "after a boot: the record {record:?}, a file of /usr/local {local:?}, \
+                 the home's mode {home:?}, the mark left {marked}"
+            ));
+            false
+        }
 }
 
 /// A root without a record whose accounts name two people is laid out with

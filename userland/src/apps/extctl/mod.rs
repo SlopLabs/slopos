@@ -205,6 +205,16 @@ fn named(name: &str) -> Result<String, String> {
     }
 }
 
+/// The name of an extension already in the store, one taken by the system
+/// since it went in included, so its owner can still see, stop and remove it.
+fn existing(name: &str) -> Result<String, String> {
+    if slopos_abi::extension::valid_name(name.as_bytes()) {
+        Ok(name.to_owned())
+    } else {
+        Err(format!("{name:?} is no extension's name"))
+    }
+}
+
 fn config_file(file: &str) -> Result<String, String> {
     if slopos_extension_core::config::valid_file(file) {
         Ok(file.to_owned())
@@ -266,7 +276,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     Ok(match words.as_slice() {
         ["status"] => Request::Status(None),
-        ["status", name] => Request::Status(Some(named(name)?)),
+        ["status", name] => Request::Status(Some(existing(name)?)),
         ["build", dir] => Request::Build {
             dir: (*dir).into(),
             out: ".".into(),
@@ -329,8 +339,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
         }
         ["key", "remove", fingerprint] => Request::KeyRemove((*fingerprint).into()),
         ["enable", name] => Request::Enable(named(name)?),
-        ["disable", name] => Request::Disable(named(name)?),
-        ["remove", name] => Request::Remove(named(name)?),
+        ["disable", name] => Request::Disable(existing(name)?),
+        ["remove", name] => Request::Remove(existing(name)?),
         ["rollback", name] => Request::Rollback(named(name)?),
         ["activate-all"] => Request::ActivateAll,
         ["config", "edit", name, file] => Request::ConfigEdit {
@@ -358,9 +368,9 @@ fn parse(args: &[String]) -> Result<Request, String> {
             root: PathBuf::from(root),
             command: match rest {
                 ["status"] => Rooted::Status(None),
-                ["status", name] => Rooted::Status(Some(named(name)?)),
+                ["status", name] => Rooted::Status(Some(existing(name)?)),
                 ["enable", name] => Rooted::Enable(named(name)?),
-                ["disable", name] => Rooted::Disable(named(name)?),
+                ["disable", name] => Rooted::Disable(existing(name)?),
                 _ => return Err(USAGE.into()),
             },
         },
