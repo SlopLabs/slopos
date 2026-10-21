@@ -35,7 +35,6 @@ const TREE: &str = "/tmp/dl_search";
 const SECURE_PROBE: &str = "/bin/dl_secure_probe";
 const SECURE_ORIGIN_DIR: &str = "/tmp/dl_secure";
 const SECURE_ABS_DIR: &str = "/tmp/dl_secure_abs";
-/// Where everyone's libraries are installed, searched last for a person alone.
 const LOCAL_LIB: &str = "/usr/local/lib";
 /// Below a person's home, their own libraries, searched ahead of
 /// [`LOCAL_LIB`] for them alone.

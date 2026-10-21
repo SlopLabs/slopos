@@ -10,21 +10,17 @@ use slopos_abi::fs::{
     OWNERS_RECORD, PERSON_TREES, ROOT_LAYOUT, RootDir, SESSION_GID, SESSION_HOME, SESSION_UID,
 };
 
-/// The prefix everyone's software is installed in.
 pub const LOCAL: &str = "/usr/local";
 
-/// Made by init when [`LOCAL`] was the system's before this boot ran
-/// anything as a person, so no descriptor the first person opened on it
-/// for writing before the hand-over is open still.
+/// Made at boot when [`LOCAL`] was the system's before anything ran as a
+/// person, so no descriptor opened for writing before the hand-over is open.
 pub const SETTLED: &str = "/run/slopos-local";
 
-/// Whether [`LOCAL`] has been the system's since this boot began.
 pub fn settled() -> bool {
     fs::symlink_metadata(SETTLED)
         .is_ok_and(|meta| meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0)
 }
 
-/// Note that [`LOCAL`] is the system's from this boot on.
 pub fn settle() -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
@@ -46,8 +42,7 @@ pub fn search_path(home: &str) -> String {
 
 const PERSON: (u32, u32) = (SESSION_UID, SESSION_GID);
 const SYSTEM: (u32, u32) = (0, 0);
-/// Links followed before a name counts as naming nothing, as Linux's
-/// `MAXSYMLINKS`.
+/// Linux's `MAXSYMLINKS`.
 const MAX_LINKS: usize = 40;
 /// Written before a hand-over's first change and taken away once its record
 /// is, so a boot finishes one cut short.
@@ -60,7 +55,6 @@ pub struct Owners {
 }
 
 impl Owners {
-    /// A root made for one person: every tree theirs.
     pub const ONE_PERSON: Owners = Owners {
         held: [true; PERSON_TREES.len()],
     };
@@ -69,9 +63,8 @@ impl Owners {
         held: [false; PERSON_TREES.len()],
     };
 
-    /// What a record grants. One written before the map named the first
-    /// person's home `/home`; a line naming another owner or another tree
-    /// grants nothing.
+    /// What a record grants: `/home` is the first person's home, as records
+    /// before the map named it, and another owner or tree grants nothing.
     pub fn parse(text: &str) -> Owners {
         let mut held = [false; PERSON_TREES.len()];
         let person = format!("{SESSION_UID}:{SESSION_GID}");
@@ -171,7 +164,6 @@ impl Owners {
     }
 }
 
-/// The text of the root's record, `None` where there is none.
 fn recorded(root: &Path) -> std::io::Result<Option<String>> {
     let path = under(root, OWNERS_RECORD);
     match fs::symlink_metadata(&path) {
@@ -182,8 +174,6 @@ fn recorded(root: &Path) -> std::io::Result<Option<String>> {
     }
 }
 
-/// How many people the root's accounts name, `None` when they cannot be
-/// read.
 fn people(root: &Path) -> Option<usize> {
     crate::accounts::Store::read(root)
         .accounts()
@@ -387,14 +377,10 @@ pub fn share(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether a hand-over was begun on the root at `root` and its record not
-/// yet written.
 pub fn sharing(root: &Path) -> bool {
     fs::symlink_metadata(under(root, SHARING)).is_ok_and(|meta| meta.is_file())
 }
 
-/// The first person's home closed to everyone else, as every later
-/// person's is made.
 fn home_to_themselves(root: &Path) -> usize {
     let home = under(root, SESSION_HOME);
     let Ok(meta) = fs::symlink_metadata(&home) else {

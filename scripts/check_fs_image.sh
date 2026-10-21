@@ -245,8 +245,6 @@ if [ "$SELF_TEST" = 1 ]; then
 
     expect 2 "a missing image is refused, not reported OK" "$tmp/absent.img"
 
-    # The map: laid out as a one-person record says, then one departure at a
-    # time; then with /usr/local handed to the system.
     cp "$tmp/clean.img" "$tmp/mapped.img"
     root_layout_record > "$tmp/owners"
     for spec in "${ROOT_LAYOUT[@]}" "${PERSON_TREES[0]}:-:-:0755"; do

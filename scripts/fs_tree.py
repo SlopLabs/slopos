@@ -65,7 +65,6 @@ UNFINISHED = "0" * 64
 LISTED = re.compile(rb"\s*(\d+)\s+([0-7]+)\s+\(\s*\d+\)\s+(\d+)\s+(\d+)\s+(\d+)\s+\S+ \S+ (.+)")
 # What `read` prints at most: a record, not a file the guest grew.
 READ_MAX = 64 << 10
-# Whoever a tree is given to, nobody else writes it.
 OWNER_WRITES = 0o7755
 KINDS = {0o040000: "d", 0o100000: "f", 0o120000: "l"}
 NAMES = {"d": "directory", "f": "file", "l": "symlink", "o": "special file"}

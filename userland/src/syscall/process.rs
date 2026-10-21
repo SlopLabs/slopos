@@ -214,8 +214,7 @@ pub fn spawn_path_with_env(
     )
 }
 
-/// This process's environment as a spawn hands one on: what a session's
-/// programs pass to what they start.
+/// This process's environment, as a spawn hands it on.
 pub fn environment() -> Vec<std::ffi::CString> {
     std::env::vars_os()
         .filter_map(|(name, value)| {

@@ -35,6 +35,7 @@ use slopos_slibc::process::ids::{getgroups, getresgid, getresuid};
 use slopos_slibc::test_harness::note;
 use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, STATUS_REFUSED, request_id};
+use slopos_userland::root_layout;
 use slopos_userland::sealed::{is_sealed, set_sealed};
 use slopos_userland::syscall::core::caps_drop;
 use slopos_userland::syscall::process::{self, Endowment};
@@ -261,10 +262,11 @@ fn said_lines(said: &str, want: &[String]) -> Result<(), String> {
 }
 
 fn trusted(dir: &Path) -> bool {
-    dir.ancestors().all(|at| {
-        std::fs::symlink_metadata(at)
-            .is_ok_and(|m| m.is_dir() && m.uid() == 0 && m.mode() & 0o022 == 0)
-    })
+    (!dir.starts_with(root_layout::LOCAL) || root_layout::settled())
+        && dir.ancestors().all(|at| {
+            std::fs::symlink_metadata(at)
+                .is_ok_and(|m| m.is_dir() && m.uid() == 0 && m.mode() & 0o022 == 0)
+        })
 }
 
 /// What a probe `priv` ran says of itself, run by `uid` in `groups` holding

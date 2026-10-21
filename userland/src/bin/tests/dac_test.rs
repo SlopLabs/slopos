@@ -649,6 +649,10 @@ fn usr_local_is_handed_to_the_system_whole() -> bool {
             "a link through a person's link".into(),
         ),
         (
+            !root_layout::sharing(Path::new(OLD_ROOT)),
+            "the mark of a hand-over begun".into(),
+        ),
+        (
             held("usr/local/bin/fixed").map(|h| h.0) == Some(0),
             "a link within it named from the root".into(),
         ),
@@ -759,6 +763,30 @@ fn a_hand_over_begun_alone_is_finished_at_boot() -> bool {
             ));
             false
         }
+}
+
+/// A mark a hand-over left beside a record already without `/usr/local` is
+/// taken away, and nothing moves.
+fn a_stale_mark_is_taken_away() -> bool {
+    let begun = old_root(root_layout::SHARING.trim_start_matches('/'));
+    let shared = "1000:1000 /home/user\n1000:1000 /src\n";
+    if !stage_shared_root()
+        || fs::write(old_root("var/lib/slopos/owners"), shared).is_err()
+        || fs::write(&begun, b"").is_err()
+    {
+        say("could not stage a root with a stale mark");
+        return false;
+    }
+    root_layout::lay_out(Path::new(OLD_ROOT));
+    let local = owner_in_old_root("usr/local/bin/tool");
+    let marked = Path::new(&begun).exists();
+    let _ = fs::remove_dir_all(OLD_ROOT);
+    !marked && local == Some((USER, USER)) || {
+        say(&format!(
+            "after a boot: the mark left {marked}, a file of /usr/local {local:?}"
+        ));
+        false
+    }
 }
 
 /// A root without a record whose accounts name two people is laid out with
@@ -921,6 +949,7 @@ fn main() {
             "a_hand_over_begun_alone_is_finished_at_boot",
             a_hand_over_begun_alone_is_finished_at_boot,
         ),
+        ("a_stale_mark_is_taken_away", a_stale_mark_is_taken_away),
         (
             "a_recordless_root_of_two_is_shared",
             a_recordless_root_of_two_is_shared,

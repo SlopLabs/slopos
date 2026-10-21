@@ -761,9 +761,10 @@ roots `test-persist` and `test-toolchain` boot to the map as before.
 - **What cannot read a record grants nothing.** An image builder that cannot
   read a preserved root's record installs as uid 0's, init on a root whose
   record or accounts it cannot read gives the first person nothing and moves
-  nothing, and a hand-over walk
-  that cannot take a directory leaves what is in it for the next boot rather
-  than changing it by path.
+  nothing but a hand-over its mark shows begun, an add on a root whose record
+  cannot be read adds nobody, and a hand-over walk that cannot take a
+  directory leaves what is in it for the next boot rather than changing it by
+  path.
 - **The loader takes `HOME` as it takes `LD_LIBRARY_PATH`**: read from the
   environment the process started with, only when it is neither `AT_SECURE`
   nor uid 0's, and only absolute, so it reads no passwd file and nothing a

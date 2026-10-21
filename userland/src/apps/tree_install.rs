@@ -26,7 +26,6 @@ use crate::tree::{self, Install};
 const USAGE: &str = "usage: tree-install NAME TREE DEST";
 const SOFTWARE: &str = "org.slopos.software.install";
 
-/// Whether this process holds `path`, which it then writes itself.
 fn holds(path: &str) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.uid() == geteuid())
 }

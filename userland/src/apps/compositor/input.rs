@@ -916,8 +916,8 @@ impl InputHandler {
     /// Focus is not set here: spawn returns a kernel task id while focus is
     /// keyed by the protocol bridge's surface pseudo-ids, and the two id spaces
     /// never match. `sync_keyboard_focus` picks the window up once it maps.
-    /// The app takes the session's environment, whose `HOME` its loader
-    /// searches the person's own libraries below.
+    /// The app takes the session's environment, `HOME` among it for its
+    /// loader.
     fn spawn_program(&mut self, path: &str) {
         let stdio = [
             process::clone_fd(0, 0),

@@ -539,10 +539,9 @@ make_dir() {
     debugfs -w -R "mkdir $1" "$IMAGE_PATH" >/dev/null 2>&1 || true
 }
 
-# The map's directories and the first person's home where they hold it:
-# each one the root lacks made with the owner the record gives it and the
-# map's mode, and on a new image the root directory too. A preserved root's
-# existing ones are init's to bring to the map, once.
+# Each directory of the map the root lacks, and the first person's home where
+# they hold it, made with the record's owner and the map's mode; a preserved
+# root's existing ones are init's to bring to the map.
 lay_out_root() {
     local spec path owner
     for spec in "${ROOT_LAYOUT[@]}" "${PERSON_TREES[0]}:-:-:$HOME_MODE"; do
@@ -563,10 +562,9 @@ lay_out_root() {
 }
 
 # What the guest's record says its first person holds, read where nothing the
-# guest made can redirect it. Init lays out a root without one at its boot,
-# keeping /usr/local the system's once its accounts name two people, which
-# this cannot count, so a root with accounts gets it as uid 0's and init hands
-# it over if they name one; one this cannot read grants nothing.
+# guest made can redirect it; one this cannot read grants nothing. Without one,
+# a root with accounts may hold two people, which this cannot count, so its
+# /usr/local goes in as uid 0's, which init hands back if they name one.
 read_owners() {
     local record status=0
     record="$("${FS_TREE[@]}" read "$IMAGE_PATH" "$OWNERS_RECORD")" || status=$?

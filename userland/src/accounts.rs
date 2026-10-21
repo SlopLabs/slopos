@@ -266,12 +266,10 @@ fn by_uid(uid: u32) -> Option<(u32, String, String)> {
     })
 }
 
-/// What the user database calls `uid`.
 pub fn name_of(uid: u32) -> Option<String> {
     by_uid(uid).map(|(_, name, _)| name)
 }
 
-/// Where the user database puts `uid`'s home.
 pub fn home_of(uid: u32) -> Option<String> {
     by_uid(uid).map(|(.., home)| home)
 }

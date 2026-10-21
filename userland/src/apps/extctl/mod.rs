@@ -198,10 +198,12 @@ fn key_of(kind: &str, base64: &str) -> Result<PublicKey, String> {
 }
 
 fn named(name: &str) -> Result<String, String> {
-    if valid_name(name) {
-        Ok(name.to_owned())
-    } else {
-        Err(format!("{name:?} is no extension's name"))
+    match valid_name(name) {
+        true => Ok(name.to_owned()),
+        false if existing(name).is_ok() => Err(format!(
+            "the system took {name:?}; an extension under it can only be disabled or removed"
+        )),
+        false => Err(format!("{name:?} is no extension's name")),
     }
 }
 

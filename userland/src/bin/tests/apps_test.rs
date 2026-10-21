@@ -403,7 +403,6 @@ fn script(says: &str) -> Vec<u8> {
     format!("#!/bin/shell\necho {says}\n").into_bytes()
 }
 
-/// Every entry at and below `top`, links not followed.
 fn entries(top: &Path) -> Vec<(PathBuf, fs::Metadata)> {
     let mut out = Vec::new();
     let mut dirs = vec![top.to_path_buf()];
@@ -671,11 +670,9 @@ fn the_second_person_runs_everyone_s_and_not_the_first_s_own() -> bool {
     }
 }
 
-/// What the system installed is found where only uid 0 can change it, so
-/// `priv` runs it, but only from a boot that began with `/usr/local` the
-/// system's, which no descriptor the first person opened there before the
-/// hand-over outlives: here for root, which holds the ceiling and runs it
-/// itself, as the same rule finds it for anyone.
+/// `priv` runs what the system installed only on a boot that began with
+/// `/usr/local` the system's: here for root, which holds the ceiling and runs
+/// it itself, as the same rule finds it for anyone.
 fn priv_runs_what_the_system_installed() -> bool {
     let run = || {
         Command::new("/bin/priv")

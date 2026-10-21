@@ -24,8 +24,6 @@ use crate::syscall::process::geteuid;
 use slopos_tree_core::{Item, Kind, MANIFEST_DIR, Manifest, Root, State, Step, UNFINISHED, plan};
 
 const COPY_CHUNK: usize = 1 << 20;
-/// A tree's entries are writable by their owner alone, whatever the source's
-/// modes say.
 const OWNER_WRITES: u32 = 0o7755;
 
 pub fn make_dir(path: &str) -> Result<(), String> {
@@ -211,7 +209,6 @@ pub fn scan(dir: &Path) -> Result<Manifest, String> {
 /// it may enter, which one install through privd at a time uses.
 const STAGING: &str = "/var/lib/slopos/tree-install";
 
-/// A copy of a tree in a directory only uid 0 enters, removed once dropped.
 pub struct Staged(PathBuf);
 
 impl Staged {
@@ -234,7 +231,6 @@ fn c_name(name: &OsStr) -> std::io::Result<CString> {
     CString::new(name.as_bytes()).map_err(|_| ErrorKind::InvalidInput.into())
 }
 
-/// `name` in the directory `dir`, opened with `flags`, never through a link.
 fn open_at(dir: &File, name: &OsStr, flags: u32) -> std::io::Result<File> {
     let name = c_name(name)?;
     let flags = flags | O_NOFOLLOW | O_CLOEXEC as u32 | O_NONBLOCK as u32;
@@ -244,8 +240,8 @@ fn open_at(dir: &File, name: &OsStr, flags: u32) -> std::io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-/// Whether everyone may read what `meta` describes, and search it when a
-/// directory or when `search` alone is asked.
+/// With `search`, whether everyone may search it; otherwise read it, and
+/// search a directory too.
 fn everyone_may(meta: &fs::Metadata, search: bool) -> bool {
     let want = match (search, meta.is_dir()) {
         (true, _) => 0o1,
