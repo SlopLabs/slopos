@@ -2,6 +2,77 @@
 
 **No finding is open.**
 
+Swept 2026-10-21: sessions — init's session table, `/run/sessions`, its
+re-execution's second version and the `/run/init` commands a person and a
+desktop's compositor may send; the login screen as `greeter`,
+`org.slopos.login`, `org.slopos.session.unlock` and `/bin/session`'s
+password checks and their waits; `/bin/login`'s relay; privd's reach, read
+from the table it hears, a console session's own password asked at its
+terminal, a link per graphical session and the descriptors an older privd
+finds; the compositor's lock screen, its switch and Ctrl+Alt+Delete;
+`seat_switch` and the seat arbiter; the clipboard per login tag; keys
+reaching the console only while nothing holds the input sink; the people's
+quota rows, every task's charge, which now lives on the task, and a zombie's
+on its person's row. Five review passes; nothing reached the bar. They
+found, before it landed, that the console's relay outlived its session and a
+re-execution hung every console login up; that a privd draining or handed no
+table kept judging by the last one it heard; that a compositor took the
+seats before init gave them, a session started behind came up unlocked, and
+one that never drew took the console's keys for good; that a re-execution
+into an image without the table looped; that wrong passwords at the lock
+screen cost nothing; that the person's other processes could fill their
+connections to init so the desktop's "locked" was lost, then restart it
+unlocked, that a lock retold could land after the unlock that followed it,
+and that a password the lock screen took as its desktop went behind unlocked
+it there; that an older privd asked on whichever screen held the first link;
+that `seat_switch` could hand the seats to a task already gone, and a
+departing holder's release clear its successor's; that a request still
+waiting on a screen that went behind could be answered there; that no fork
+or thread was charged a task and tasks whose ids differed by `MAX_TASKS`
+shared one charge, so a person's children left unreaped held nothing and
+filled the machine's task table; that a spawn refused its task leaked its
+process; that a person past the people's rows lost the zombie budget
+altogether; that init read the whole process table on every pass, whose
+freed buffer a base activation's pieces then took whole from the heap's
+large tier, which never splits a region, so each activation cost half again
+its size for good; and that a compositor whose frames ran long heard nothing
+init said, its executor taking completions only when idle, so a desktop init
+counted locked took the keys typed at its lock screen unlocked. Now the
+relay follows the session's entry, which a re-execution carries with its
+terminal; privd goes deaf when the table cannot be heard; init alone hands
+the seats, to a compositor once it says it is ready, and tells one started
+behind to lock first; the waits double from two seconds to a minute; a
+compositor is heard beside its person's connections and says "locked" until
+init hears it or it unlocks, init takes "unlocked" only from the desktop in
+front, and a restart anything else asks for comes back locked; an older
+privd is handed no link; a hand-over to a task gone is undone and a release
+clears only its own holder; a desktop going behind refuses what it was
+asked; every task holds its own charge from before it is registered, which a
+person's zombie keeps on their row until the reap; init reads the process
+table only for a request it judges; and a compositor reads what init said
+before each pass's input, its executor taking completions on every pass.
+Left below the bar: keys typed between one compositor's exit and the next
+one's hand-over reach the console, whose relay may be another person's
+shell; memory is the machine's, under one commit ceiling, so a person's
+processes can promise what another's then cannot; the sixteen people's rows
+are the boot's first sixteen to run anything, a seventeenth debiting the
+root; the first person's runtime directory lives for the boot; and ending a
+person's 256 processes still costs init a kill each, every one a walk of the
+task table, during which it answers nothing else. Seen while grading, and on
+the tree before this change too: under heavy host load an idle CPU's page
+zeroing can take `INVALID_PAGE_FRAME` from its per-CPU cache and fault on
+the physical address it names, which no path a user drives is known to
+reach. Fixed while grading, all older than this change: a client the
+compositor's frame loop refused stayed connected, its own task's armed poll
+holding the socket open; a live base's copy took nearly twice its bytes,
+each 64 KiB piece a 32-page block; init sent each process it ended a
+`SIGCONT` beside its `SIGTERM`, so ending those 256 held it seventeen
+seconds under TCG, and only a stopped one is now continued; and an open of a
+name a rename was replacing answered `ENOENT`, and on the RAM filesystem a
+file renamed over was reset under the descriptors that held it, so a reader
+of `/run/sessions` could find a running desktop missing: such an open walks
+again, and the displaced file lives until its last close.
+
 Swept 2026-10-20: `priv` — `slopos-priv-core`'s `uid requester` and
 `REQUESTER_CEILING`; `org.slopos.priv` and `org.slopos.priv.shell`; privd
 starting a mechanism as its requester, every kept answer's live parent, a
