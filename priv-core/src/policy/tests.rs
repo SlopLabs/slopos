@@ -838,6 +838,7 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         "org.slopos.prof",
         "org.slopos.console.keymap",
         "org.slopos.extension.",
+        "org.slopos.software.install",
     ];
     let login = policy.action("org.slopos.login").unwrap();
     let greeter = Requester::new(slopos_abi::fs::GREETER_UID, Some("/bin/compositor"), false);
@@ -981,6 +982,7 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         "org.slopos.base.rollback",
         "org.slopos.boot.set-default",
         "org.slopos.net.configure",
+        "org.slopos.software.install",
         "org.slopos.accounts.manage",
         "org.slopos.accounts.password",
     ] {
@@ -1004,6 +1006,21 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     assert!(asks(rescue.admits(&session, &people)).is_some());
     assert!(rescue.accepts(&args_of(&["--rescue"])));
     assert!(!rescue.accepts(&args_of(&["--rescue", "-c", "id"])));
+}
+
+/// What goes into `/usr/local` once it is the system's is installed by uid 0
+/// holding nothing, which reads only what uid 0 may by mode, one install at a
+/// time, from the requester's directory.
+#[test]
+fn the_software_action_installs_as_uid_0_holding_nothing() {
+    let policy = Policy::parse(SHIPPED).unwrap();
+    let action = policy.action("org.slopos.software.install").unwrap();
+    assert_eq!(action.program, "/bin/tree-install");
+    assert_eq!(action.caps, 0);
+    assert_eq!(action.runs_as, RunsAs::Uid(0));
+    assert!(action.cwd);
+    assert!(action.exclusive_group().is_some());
+    assert!(action.accepts(&args_of(&["apps", "builddir/apps", "/usr/local"])));
 }
 
 /// With a second person, the system's actions are an administrator's: a

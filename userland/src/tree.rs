@@ -2,18 +2,31 @@
 //! rule: the installer's toolchain and apps, init's apps on a live root, and
 //! `tree-install`'s as the session.
 
-use std::fs::{self, File, OpenOptions};
+use std::ffi::{CString, OsStr};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, lchown, symlink};
-use std::path::Path;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{
+    DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, lchown, symlink,
+};
+use std::path::{Component, Path, PathBuf};
 
-use slopos_abi::fs::O_NOFOLLOW;
+use slopos_abi::UserFsStat;
+use slopos_abi::fs::{
+    AT_SYMLINK_NOFOLLOW, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG,
+};
+use slopos_abi::syscall::{O_CLOEXEC, O_NONBLOCK};
+use slopos_slibc::pal::{Pal, Sys};
 use slopos_tls_core::hash::{Hash, Sha256};
 
 use crate::syscall::process::geteuid;
 use slopos_tree_core::{Item, Kind, MANIFEST_DIR, Manifest, Root, State, Step, UNFINISHED, plan};
 
 const COPY_CHUNK: usize = 1 << 20;
+/// A tree's entries are writable by their owner alone, whatever the source's
+/// modes say.
+const OWNER_WRITES: u32 = 0o7755;
 
 pub fn make_dir(path: &str) -> Result<(), String> {
     match fs::create_dir(path) {
@@ -194,6 +207,188 @@ pub fn scan(dir: &Path) -> Result<Manifest, String> {
     })
 }
 
+/// Where uid 0 copies a tree it installs for someone else: a directory only
+/// it may enter, which one install through privd at a time uses.
+const STAGING: &str = "/var/lib/slopos/tree-install";
+
+/// A copy of a tree in a directory only uid 0 enters, removed once dropped.
+pub struct Staged(PathBuf);
+
+impl Staged {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn io_error(errno: slopos_slibc::errno::Errno) -> std::io::Error {
+    std::io::Error::from_raw_os_error(errno.0)
+}
+
+fn c_name(name: &OsStr) -> std::io::Result<CString> {
+    CString::new(name.as_bytes()).map_err(|_| ErrorKind::InvalidInput.into())
+}
+
+/// `name` in the directory `dir`, opened with `flags`, never through a link.
+fn open_at(dir: &File, name: &OsStr, flags: u32) -> std::io::Result<File> {
+    let name = c_name(name)?;
+    let flags = flags | O_NOFOLLOW | O_CLOEXEC as u32 | O_NONBLOCK as u32;
+    let fd =
+        Sys::openat(dir.as_raw_fd(), name.as_ptr().cast(), flags as i32, 0).map_err(io_error)?;
+    // SAFETY: the descriptor was just opened, and the file takes it over.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// Whether everyone may read what `meta` describes, and search it when a
+/// directory or when `search` alone is asked.
+fn everyone_may(meta: &fs::Metadata, search: bool) -> bool {
+    let want = match (search, meta.is_dir()) {
+        (true, _) => 0o1,
+        (false, true) => 0o5,
+        (false, false) => 0o4,
+    };
+    meta.mode() & want == want
+}
+
+/// Whether a link `depth` directories into a tree, naming `target`, stays in
+/// the tree: relative, and climbing no higher than its top before it names
+/// anything.
+fn stays_within(target: &Path, depth: usize) -> bool {
+    let mut climbed = 0;
+    let mut named = false;
+    for part in target.components() {
+        match part {
+            Component::ParentDir if !named => climbed += 1,
+            Component::Normal(_) => named = true,
+            Component::CurDir => {}
+            _ => return false,
+        }
+    }
+    climbed <= depth
+}
+
+/// A copy of the tree at `source` that uid 0 installs for someone else:
+/// reached from `/` through directories alone, each entry opened without
+/// following a link and copied as its descriptor reads it, so neither a link
+/// nor an entry changed during the copy reaches what not everyone may read,
+/// and every link left naming something within the tree. Anything else in
+/// the tree refuses it. The copy of a run cut short is taken away first.
+pub fn stage(source: &Path) -> Result<Staged, String> {
+    let shown = |e: std::io::Error| format!("{}: {e}", source.display());
+    let absolute = std::env::current_dir().map_err(shown)?.join(source);
+    let mut walked = PathBuf::from("/");
+    let mut dir = File::open("/").map_err(shown)?;
+    for part in absolute.components() {
+        match part {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                walked.push(name);
+                dir = open_at(&dir, name, O_RDONLY | O_DIRECTORY).map_err(shown)?;
+                if !dir.metadata().is_ok_and(|meta| everyone_may(&meta, true)) {
+                    return Err(format!("{}: not everyone may reach it", source.display()));
+                }
+            }
+            _ => return Err(format!("{}: a tree is named without ..", source.display())),
+        }
+    }
+    if Path::new(STAGING).starts_with(&walked) {
+        return Err(format!(
+            "{} holds {STAGING}, where it is copied",
+            source.display()
+        ));
+    }
+    let staging = |e: std::io::Error| format!("{STAGING}: {e}");
+    match fs::remove_dir_all(STAGING) {
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(staging(e)),
+        _ => {}
+    }
+    DirBuilder::new()
+        .mode(0o700)
+        .create(STAGING)
+        .map_err(staging)?;
+    let staged = Staged(PathBuf::from(STAGING));
+    copy_at(&dir, source, staged.path(), 0)?;
+    Ok(staged)
+}
+
+/// What the directory `dir`, `depth` directories into the tree as `from`,
+/// holds as everyone may read it, copied into `to`.
+fn copy_at(dir: &File, from: &Path, to: &Path, depth: usize) -> Result<(), String> {
+    let refused = |what: &Path| format!("{}: not everyone may read it", what.display());
+    if !dir.metadata().is_ok_and(|meta| everyone_may(&meta, false)) {
+        return Err(refused(from));
+    }
+    let names = crate::syscall::fs::names(dir.as_raw_fd())
+        .map_err(|e| format!("{}: {e:?}", from.display()))?;
+    for name in names {
+        let name = std::ffi::OsString::from_vec(name);
+        let (source, dest) = (from.join(&name), to.join(&name));
+        let shown = |e: std::io::Error| format!("{}: {e}", source.display());
+        let c = c_name(&name).map_err(shown)?;
+        let mut stat = UserFsStat::default();
+        Sys::fstatat(
+            dir.as_raw_fd(),
+            c.as_ptr().cast(),
+            &mut stat,
+            AT_SYMLINK_NOFOLLOW,
+        )
+        .map_err(io_error)
+        .map_err(shown)?;
+        match stat.st_mode & S_IFMT {
+            S_IFLNK => {
+                let mut target = vec![0u8; slopos_abi::fs::USER_PATH_MAX];
+                let len = Sys::readlinkat(
+                    dir.as_raw_fd(),
+                    c.as_ptr().cast(),
+                    target.as_mut_ptr(),
+                    target.len(),
+                )
+                .map_err(io_error)
+                .map_err(shown)?;
+                let target = Path::new(OsStr::from_bytes(&target[..len]));
+                if !stays_within(target, depth) {
+                    return Err(format!(
+                        "{} names {}, outside the tree",
+                        source.display(),
+                        target.display()
+                    ));
+                }
+                symlink(target, &dest).map_err(shown)?;
+            }
+            S_IFDIR => {
+                let sub = open_at(dir, &name, O_RDONLY | O_DIRECTORY).map_err(shown)?;
+                fs::create_dir(&dest).map_err(shown)?;
+                copy_at(&sub, &source, &dest, depth + 1)?;
+                let mode = sub.metadata().map_err(shown)?.mode() & 0o7777 | 0o700;
+                fs::set_permissions(&dest, fs::Permissions::from_mode(mode)).map_err(shown)?;
+            }
+            S_IFREG => {
+                let mut file = open_at(dir, &name, O_RDONLY).map_err(shown)?;
+                let meta = file.metadata().map_err(shown)?;
+                if !meta.is_file() || !everyone_may(&meta, false) {
+                    return Err(refused(&source));
+                }
+                let mut copy = create_new(&dest.to_string_lossy()).map_err(shown)?;
+                std::io::copy(&mut file, &mut copy).map_err(shown)?;
+                copy.set_permissions(fs::Permissions::from_mode(meta.mode() & 0o7777 | 0o600))
+                    .map_err(shown)?;
+            }
+            _ => {
+                return Err(format!(
+                    "{} is not a file, directory or link",
+                    source.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A root as `lstat` reads it below `prefix`.
 struct Target<'a>(&'a str);
 
@@ -218,11 +413,13 @@ impl Root for Target<'_> {
 }
 
 /// The tree `name`, read from `source`, installed at `guest` on the root
-/// mounted at `root` (empty for the running system's).
+/// mounted at `root` (empty for the running system's), its manifest kept in
+/// `manifests`.
 pub struct Install<'a> {
     pub root: &'a str,
     pub name: &'a str,
     pub guest: &'a str,
+    pub manifests: &'a str,
     pub source: &'a Path,
     /// Who what the install makes belongs to; whoever installs when `None`.
     pub owner: Option<(u32, u32)>,
@@ -315,7 +512,7 @@ impl Install<'_> {
                 .map_err(|e| format!("{}: {e}", source.display()))?
                 .permissions()
                 .mode();
-            fs::set_permissions(&dest, fs::Permissions::from_mode(mode & 0o7777))
+            fs::set_permissions(&dest, fs::Permissions::from_mode(mode & OWNER_WRITES))
                 .map_err(|e| format!("{dest}: {e}"))?;
         }
         self.owner.map_or(Ok(()), |owner| give(&dest, owner))
@@ -370,11 +567,12 @@ impl Install<'_> {
 
     /// The bytes copied, or `None` when the root holds `new` already.
     pub fn run(&self, new: &Manifest, copied: &mut dyn FnMut(u64)) -> Result<Option<u64>, String> {
-        let recorded = self.path(&slopos_tree_core::manifest_path(self.name));
-        if !self.walk_dirs(MANIFEST_DIR, false)? {
+        let recorded = self.path(&format!("{}/{}", self.manifests, self.name));
+        if !self.walk_dirs(self.manifests, false)? {
             return self.install(&recorded, None, new, copied).map(Some);
         }
         if self.keeper.is_none()
+            && geteuid() != 0
             && let Ok(meta) = fs::symlink_metadata(&recorded)
             && meta.uid() != geteuid()
         {
@@ -410,7 +608,7 @@ impl Install<'_> {
                 self.remedy
             )
         })?;
-        self.walk_dirs(MANIFEST_DIR, true)?;
+        self.walk_dirs(self.manifests, true)?;
         self.record(recorded, &steps.during)?;
         let mut total = 0;
         let mut count = |n| {

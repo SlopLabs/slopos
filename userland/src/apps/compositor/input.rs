@@ -916,8 +916,25 @@ impl InputHandler {
     /// Focus is not set here: spawn returns a kernel task id while focus is
     /// keyed by the protocol bridge's surface pseudo-ids, and the two id spaces
     /// never match. `sync_keyboard_focus` picks the window up once it maps.
+    /// The app takes the session's environment, whose `HOME` its loader
+    /// searches the person's own libraries below.
     fn spawn_program(&mut self, path: &str) {
-        let tid = process::spawn_path_with_attrs(path.as_bytes(), TaskPriority::Normal, 0);
+        let stdio = [
+            process::clone_fd(0, 0),
+            process::clone_fd(1, 1),
+            process::clone_fd(2, 2),
+        ];
+        let env = process::environment();
+        let envp: Vec<*const u8> = env.iter().map(|var| var.as_ptr().cast()).collect();
+        let tid = process::spawn_path_with_env(
+            path.as_bytes(),
+            &[],
+            &envp,
+            TaskPriority::Normal,
+            0,
+            &stdio,
+            0,
+        );
         if tid <= 0 {
             tty::write(b"COMPOSITOR: spawn failed for program\n");
         }

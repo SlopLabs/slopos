@@ -173,7 +173,7 @@ trap 'rm -f -- "${CLEANUP[@]:-}"' EXIT
 build_stamp() {
     echo "size=$FS_IMAGE_SIZE verity=$VERITY journal=$FS_JOURNAL_SIZE links=${COREUTILS_LINKS:-}"
     sha256sum "$EXT4_PROFILE" | cut -d' ' -f1
-    echo "label=$FS_LABEL layout=${ROOT_LAYOUT[*]} trees=${SESSION_TREES[*]} floor=$FS_FREE_FLOOR base=$FS_BASE"
+    echo "label=$FS_LABEL layout=${ROOT_LAYOUT[*]} trees=${PERSON_TREES[*]} floor=$FS_FREE_FLOOR base=$FS_BASE"
     echo "base_dirs=${BASE_DIRS[*]}"
     local spec
     for spec in $FS_HOST_TREES; do
@@ -538,27 +538,46 @@ make_dir() {
     debugfs -w -R "mkdir $1" "$IMAGE_PATH" >/dev/null 2>&1 || true
 }
 
-# The map's directories: each one the root lacks made with the owner and mode
-# the map gives it, and on a new image the root directory too. A preserved
-# root's existing ones are init's to bring to the map, once.
+# The map's directories and the first person's home where they hold it:
+# each one the root lacks made with the owner the record gives it and the
+# map's mode, and on a new image the root directory too. A preserved root's
+# existing ones are init's to bring to the map, once.
 lay_out_root() {
-    local spec path rest
-    for spec in "${ROOT_LAYOUT[@]}"; do
+    local spec path owner
+    for spec in "${ROOT_LAYOUT[@]}" "${PERSON_TREES[0]}:-:-:0755"; do
         path="${spec%%:*}"
         if [ "$path" = / ]; then
             [ "$FRESH" = 1 ] || continue
+        elif [ "$path" = "${PERSON_TREES[0]}" ] && ! root_layout_holds "$path"; then
+            continue
         elif ! make_dir "$path"; then
             continue
         fi
-        rest="${spec#*:}"
+        owner="$(root_layout_owner "$path")"
         printf 'sif "%s" uid %s\nsif "%s" gid %s\nsif "%s" mode 0%o\n' \
-            "$path" "${rest%%:*}" "$path" "$(echo "$rest" | cut -d: -f2)" \
-            "$path" "$(( 0040000 | 8#${rest##*:} ))" |
+            "$path" "${owner%%:*}" "$path" "${owner#*:}" \
+            "$path" "$(( 0040000 | 8#${spec##*:} ))" |
             debugfs -w -f - "$IMAGE_PATH" >/dev/null
     done
 }
 
-# A new image holds the session's trees as the session's from the start, so
+# What the guest's record says its first person holds, read where nothing the
+# guest made can redirect it. Init lays out a root without one at its boot;
+# one this cannot read grants nothing.
+read_owners() {
+    local record status=0
+    record="$("${FS_TREE[@]}" read "$IMAGE_PATH" "$OWNERS_RECORD")" || status=$?
+    case "$status" in
+    0) root_layout_read_record <<<"$record" ;;
+    4) ;;
+    *)
+        echo "build_fs_image: installing as uid 0's, as an unread $OWNERS_RECORD leaves everything" >&2
+        HELD_TREES=()
+        ;;
+    esac
+}
+
+# A new image holds the first person's trees as theirs from the start, so
 # init has nothing to hand over on it.
 record_owners() {
     local record
@@ -645,6 +664,7 @@ fi
 
 mkdir_p /bin
 mkdir_p /sbin
+[ "$FRESH" = 1 ] || read_owners
 lay_out_root
 [ "$FRESH" = 0 ] || record_owners
 

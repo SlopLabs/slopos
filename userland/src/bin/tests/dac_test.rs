@@ -441,10 +441,10 @@ fn stage_old_root() -> bool {
         && fs::set_permissions(old_root("etc"), fs::Permissions::from_mode(0o777)).is_ok()
 }
 
-/// A root every process wrote as uid 0 is migrated once: the session's trees
-/// become its own but for a file with another name, the map's directories
-/// take their owner and mode, and the record keeps a later boot from doing it
-/// again.
+/// A root every process wrote as uid 0 is migrated once: the first person's
+/// trees become their own but for a file with another name, the map's
+/// directories take their owner and mode, and the record keeps a later boot
+/// from doing it again.
 fn a_preserved_root_is_handed_to_the_session() -> bool {
     if !stage_old_root() {
         say("could not stage a root written as uid 0");
@@ -480,7 +480,7 @@ fn a_preserved_root_is_handed_to_the_session() -> bool {
         }
     }
     let record = fs::read_to_string(old_root("var/lib/slopos/owners")).unwrap_or_default();
-    if record != "1000:1000 /home\n1000:1000 /src\n1000:1000 /usr/local\n" {
+    if record != TODAYS_RECORD {
         say(&format!("the record reads {record:?}"));
         return false;
     }
@@ -495,6 +495,226 @@ fn a_preserved_root_is_handed_to_the_session() -> bool {
         return false;
     }
     true
+}
+
+/// The record a root made for one person carries.
+const TODAYS_RECORD: &str = "1000:1000 /home/user\n1000:1000 /src\n1000:1000 /usr/local\n";
+
+/// A record from before the map named the first person's home `/home` is
+/// rewritten as today's, and nothing on the root moves.
+fn an_older_record_is_rewritten_and_nothing_moves() -> bool {
+    if !stage_old_root() {
+        say("could not stage a root written as uid 0");
+        return false;
+    }
+    let record = old_root("var/lib/slopos/owners");
+    let older = "1000:1000 /home\n1000:1000 /src\n1000:1000 /usr/local\n";
+    let staged = fs::create_dir_all(old_root("var/lib/slopos"))
+        .and_then(|()| fs::write(&record, older))
+        .is_ok();
+    root_layout::lay_out(Path::new(OLD_ROOT));
+    let rewritten = fs::read_to_string(&record).unwrap_or_default();
+    let notes = owner_in_old_root("home/user/notes");
+    let _ = fs::remove_dir_all(OLD_ROOT);
+    staged
+        && (rewritten == TODAYS_RECORD || {
+            say(&format!("the older record reads {rewritten:?}"));
+            false
+        })
+        && (notes == Some((0, 0)) || {
+            say(&format!("a file of a recorded root moved to {notes:?}"));
+            false
+        })
+}
+
+/// A root whose `/usr/local` is the first person's, with what a person may
+/// have left there: their file group-writable, a directory anyone writes, a
+/// name for another uid's file, links in and out and one through a link of
+/// theirs, and the apps' manifest.
+fn stage_shared_root() -> bool {
+    let _ = fs::remove_dir_all(OLD_ROOT);
+    let made = [
+        "usr/local/bin",
+        "usr/local/open",
+        "home/user",
+        "var/tmp",
+        "var/lib/slopos/trees",
+    ]
+    .iter()
+    .all(|rel| fs::create_dir_all(old_root(rel)).is_ok());
+    let manifest = |at: &str| format!("identity {}\nat {at}\n", "0".repeat(64));
+    let written = [
+        ("usr/local/bin/tool", "#!/bin/shell\n".to_owned()),
+        ("home/user/build", "#!/bin/shell\n".to_owned()),
+        ("var/tmp/theirs", "another's\n".to_owned()),
+        ("var/lib/slopos/trees/apps", manifest("/usr/local")),
+        ("var/lib/slopos/owners", TODAYS_RECORD.to_owned()),
+    ]
+    .iter()
+    .all(|(rel, text)| fs::write(old_root(rel), text).is_ok());
+    let theirs = |rel: &str, uid: u32| {
+        std::os::unix::fs::lchown(old_root(rel), Some(uid), Some(uid)).is_ok()
+    };
+    made && written
+        && symlink("tool", old_root("usr/local/bin/kept")).is_ok()
+        && symlink(old_root("home/user/build"), old_root("usr/local/bin/away")).is_ok()
+        && symlink("../../../home/user/relay", old_root("usr/local/bin/chain")).is_ok()
+        && symlink("../../usr/local/bin/tool", old_root("home/user/relay")).is_ok()
+        && fs::hard_link(
+            old_root("var/tmp/theirs"),
+            old_root("usr/local/open/theirs"),
+        )
+        .is_ok()
+        && [
+            ("usr/local", USER),
+            ("usr/local/bin", USER),
+            ("usr/local/bin/tool", USER),
+            ("usr/local/bin/kept", USER),
+            ("usr/local/bin/away", USER),
+            ("usr/local/bin/chain", USER),
+            ("usr/local/open", USER),
+            ("home/user", USER),
+            ("home/user/build", USER),
+            ("home/user/relay", USER),
+            ("var/tmp/theirs", USER + 1),
+            ("var/lib/slopos/trees/apps", USER),
+        ]
+        .iter()
+        .all(|(rel, uid)| theirs(rel, *uid))
+        && fs::set_permissions(
+            old_root("usr/local/bin/tool"),
+            fs::Permissions::from_mode(0o775),
+        )
+        .is_ok()
+        && fs::set_permissions(
+            old_root("usr/local/open"),
+            fs::Permissions::from_mode(0o777),
+        )
+        .is_ok()
+}
+
+/// A root shared with a second person has `/usr/local` uid 0's and writable
+/// by uid 0 alone to its last entry; another uid's file loses only its name
+/// there, a link that leads through what another uid may change goes, one
+/// within it stays. The first person's files stay theirs, their home closed
+/// to others, and so does the apps' manifest they wrote, which uid 0 does not
+/// believe.
+fn usr_local_is_handed_to_the_system_whole() -> bool {
+    if !stage_shared_root() {
+        say("could not stage a root whose /usr/local is the first person's");
+        return false;
+    }
+    let handed = root_layout::share(Path::new(OLD_ROOT));
+    let held = |rel: &str| {
+        fs::symlink_metadata(old_root(rel))
+            .ok()
+            .map(|meta| (meta.uid(), meta.mode() & 0o7777))
+    };
+    let record = fs::read_to_string(old_root("var/lib/slopos/owners")).unwrap_or_default();
+    let checks = [
+        (handed.is_ok(), format!("the hand-over: {handed:?}")),
+        (held("usr/local") == Some((0, 0o755)), "/usr/local".into()),
+        (
+            held("usr/local/bin/tool") == Some((0, 0o755)),
+            "a group-writable file".into(),
+        ),
+        (
+            held("usr/local/open") == Some((0, 0o755)),
+            "a directory anyone wrote".into(),
+        ),
+        (
+            held("usr/local/open/theirs").is_none(),
+            "a name for another uid's file".into(),
+        ),
+        (
+            held("var/tmp/theirs").map(|h| h.0) == Some(USER + 1),
+            "another uid's file".into(),
+        ),
+        (
+            held("usr/local/bin/kept").map(|h| h.0) == Some(0),
+            "a link within it".into(),
+        ),
+        (
+            held("usr/local/bin/away").is_none(),
+            "a link to a person's file".into(),
+        ),
+        (
+            held("usr/local/bin/chain").is_none(),
+            "a link through a person's link".into(),
+        ),
+        (held("home/user") == Some((USER, 0o700)), "the home".into()),
+        (
+            held("home/user/build").map(|h| h.0) == Some(USER),
+            "the person's own file".into(),
+        ),
+        (
+            held("var/lib/slopos/trees/apps").map(|h| h.0) == Some(USER),
+            "the apps' manifest".into(),
+        ),
+        (
+            record == "1000:1000 /home/user\n1000:1000 /src\n",
+            format!("the record reads {record:?}"),
+        ),
+    ];
+    let _ = fs::remove_dir_all(OLD_ROOT);
+    match checks.iter().find(|(ok, _)| !ok) {
+        Some((_, what)) => {
+            say(&format!("handed to the system: {what}"));
+            false
+        }
+        None => true,
+    }
+}
+
+/// The accounts store `stage_shared_root` gives two people, taken away with
+/// the root once dropped, unsealed first.
+struct TwoPeople;
+
+impl TwoPeople {
+    fn record() -> Option<TwoPeople> {
+        let mut accounts = slopos_accounts_core::Accounts::one_person();
+        accounts.add("dac-second", false).ok()?;
+        let store = slopos_userland::accounts::Store::write(Path::new(OLD_ROOT)).ok()?;
+        store.record(&accounts).ok()?;
+        Some(TwoPeople)
+    }
+}
+
+impl Drop for TwoPeople {
+    fn drop(&mut self) {
+        use slopos_userland::sealed;
+        let store = old_root("var/lib/slopos/accounts");
+        if let Ok(dir) = sealed::open_dir(Path::new(&store)) {
+            let _ = sealed::set_sealed(&dir, false);
+        }
+        for entry in fs::read_dir(&store).into_iter().flatten().flatten() {
+            let _ = sealed::remove_entry(&entry.path());
+        }
+        let _ = fs::remove_dir_all(OLD_ROOT);
+    }
+}
+
+/// A boot finishes the hand-over an add cut short: on a root whose record
+/// still names `/usr/local` and whose accounts name two people, `/usr/local`
+/// becomes the system's and the record says so.
+fn a_hand_over_cut_short_is_finished_at_boot() -> bool {
+    if !stage_shared_root() {
+        say("could not stage a root whose /usr/local is the first person's");
+        return false;
+    }
+    let Some(_people) = TwoPeople::record() else {
+        say("could not record two people on the staged root");
+        return false;
+    };
+    root_layout::lay_out(Path::new(OLD_ROOT));
+    let record = fs::read_to_string(old_root("var/lib/slopos/owners")).unwrap_or_default();
+    let local = owner_in_old_root("usr/local/bin/tool");
+    record == "1000:1000 /home/user\n1000:1000 /src\n" && local == Some((0, 0)) || {
+        say(&format!(
+            "after a boot: the record {record:?}, a file of it {local:?}"
+        ));
+        false
+    }
 }
 
 fn session_is_the_person() -> bool {
@@ -610,6 +830,18 @@ fn main() {
         (
             "a_preserved_root_is_handed_to_the_session",
             a_preserved_root_is_handed_to_the_session,
+        ),
+        (
+            "an_older_record_is_rewritten_and_nothing_moves",
+            an_older_record_is_rewritten_and_nothing_moves,
+        ),
+        (
+            "usr_local_is_handed_to_the_system_whole",
+            usr_local_is_handed_to_the_system_whole,
+        ),
+        (
+            "a_hand_over_cut_short_is_finished_at_boot",
+            a_hand_over_cut_short_is_finished_at_boot,
         ),
         ("clean_up", clean_up),
     ]);

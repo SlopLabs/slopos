@@ -21,9 +21,12 @@
 # after a panicking boot is the gate reporting the truth rather than a false
 # positive.
 #
-# With `--map`, and for the tests image when no image is named, a third: every
-# directory of the ownership map (scripts/lib/root_layout.sh) has the owner and
-# mode it gives, and `/src`, where there is one, is the session's.
+# With `--map`, and for the tests image when no image is named, a third: the
+# image carries an owners record, every directory of the ownership map
+# (scripts/lib/root_layout.sh) has the mode the map gives and the owner the
+# record does, each tree the first person holds is theirs, `/src` where there
+# is one, and a `/usr/local` they do not hold is the system's to its last
+# entry, none of which anyone but uid 0 may write.
 #
 # The verity trailer needs no special handling: `e2fsck` objects when the
 # superblock claims *more* blocks than the device holds, never fewer, and an
@@ -67,13 +70,32 @@ for tool in e2fsck dumpe2fs; do
     fi
 done
 
-# Each directory of the map whose owner or mode on `image` is not the map's,
-# one line apiece; a missing one too, but `/src`, which only a seeded root has.
+# Each way `image` departs from the map, one line apiece: a directory whose
+# owner is not the record's or whose mode is not the map's, a missing one but
+# `/src`, which only a seeded root has, and below a `/usr/local` that is the
+# system's, an entry another uid holds or may write.
 map_departures() {
-    local image="$1" spec path want stat got mode
-    for spec in "${ROOT_LAYOUT[@]}" "/src:$SESSION_OWNER:"; do
+    local image="$1" record spec path want stat got mode tree
+    local status=0
+    record="$(python3 "$SCRIPT_DIR/fs_tree.py" read "$image" "$OWNERS_RECORD" 2>&1)" || status=$?
+    case "$status" in
+    0) root_layout_read_record <<<"$record" ;;
+    4)
+        echo "$OWNERS_RECORD is missing"
+        HELD_TREES=("${PERSON_TREES[@]}")
+        ;;
+    *)
+        echo "$OWNERS_RECORD could not be read: $record"
+        HELD_TREES=()
+        ;;
+    esac
+    local specs=("${ROOT_LAYOUT[@]}")
+    for tree in "${HELD_TREES[@]}"; do
+        case " ${ROOT_LAYOUT[*]} " in *" $tree:"*) ;; *) specs+=("$tree:-:-:") ;; esac
+    done
+    for spec in "${specs[@]}"; do
         path="${spec%%:*}"
-        want="${spec#*:}"
+        want="$(root_layout_owner "$path"):${spec##*:}"
         stat="$(debugfs -R "stat \"$path\"" "$image" 2>/dev/null)"
         if ! echo "$stat" | grep -q '^Inode:'; then
             [ "$path" = /src ] || echo "$path is missing"
@@ -88,6 +110,20 @@ map_departures() {
         fi
         [ "$got" = "$want" ] || echo "$path is $got, the map says $want"
     done
+    root_layout_holds /usr/local && return 0
+    local walked
+    if ! walked="$(python3 "$SCRIPT_DIR/fs_tree.py" walk "$image" /usr/local 2>&1)"; then
+        echo "/usr/local could not be walked: $walked"
+        return
+    fi
+    while read -r mode got path; do
+        [ -n "$path" ] || continue
+        if [ "$got" != 0:0 ]; then
+            echo "$path is $got in a /usr/local that is the system's"
+        elif [ "$(( 8#$mode & 0170000 ))" != "$(( 0120000 ))" ] && [ "$(( 8#$mode & 022 ))" != 0 ]; then
+            echo "$path has mode $(printf '%o' "$(( 8#$mode & 07777 ))"), which others may write"
+        fi
+    done <<<"$walked" | head -n 20
 }
 
 # ---------------------------------------------------------------------------
@@ -209,20 +245,23 @@ if [ "$SELF_TEST" = 1 ]; then
 
     expect 2 "a missing image is refused, not reported OK" "$tmp/absent.img"
 
-    # The map: laid out as it says, then one departure at a time.
+    # The map: laid out as a one-person record says, then one departure at a
+    # time; then with /usr/local handed to the system.
     cp "$tmp/clean.img" "$tmp/mapped.img"
-    for spec in "${ROOT_LAYOUT[@]}"; do
+    root_layout_record > "$tmp/owners"
+    for spec in "${ROOT_LAYOUT[@]}" "${PERSON_TREES[0]}:-:-:0755"; do
         path="${spec%%:*}"
-        rest="${spec#*:}"
+        owner="$(root_layout_owner "$path")"
         [ "$path" = / ] || echo "mkdir $path"
-        echo "sif $path uid ${rest%%:*}"
-        echo "sif $path gid $(echo "$rest" | cut -d: -f2)"
-        printf 'sif %s mode 0%o\n' "$path" "$(( 0040000 | 8#${rest##*:} ))"
+        echo "sif $path uid ${owner%%:*}"
+        echo "sif $path gid ${owner#*:}"
+        printf 'sif %s mode 0%o\n' "$path" "$(( 0040000 | 8#${spec##*:} ))"
     done | debugfs -w -f - "$tmp/mapped.img" >/dev/null 2>&1
+    debugfs -w -R "write $tmp/owners $OWNERS_RECORD" "$tmp/mapped.img" >/dev/null 2>&1
     expect 1 "an image without the map's directories is rejected" "$tmp/clean.img" 1
     expect 0 "an image laid out as the map says passes" "$tmp/mapped.img" 1
     for departure in "sif /etc uid 1000" "sif /home/user uid 0" "sif /var/tmp mode 040755" \
-        "mkdir /src"; do
+        "mkdir /src" "sif /usr/local uid 0" "rm $OWNERS_RECORD"; do
         cp "$tmp/mapped.img" "$tmp/departed.img"
         debugfs -w -R "$departure" "$tmp/departed.img" >/dev/null 2>&1
         expect 1 "the map refuses \`$departure\`" "$tmp/departed.img" 1
@@ -230,7 +269,23 @@ if [ "$SELF_TEST" = 1 ]; then
     cp "$tmp/mapped.img" "$tmp/seeded.img"
     printf 'mkdir /src\nsif /src uid 1000\nsif /src gid 1000\n' |
         debugfs -w -f - "$tmp/seeded.img" >/dev/null 2>&1
-    expect 0 "a seeded /src that is the session's passes" "$tmp/seeded.img" 1
+    expect 0 "a seeded /src that is the first person's passes" "$tmp/seeded.img" 1
+
+    cp "$tmp/mapped.img" "$tmp/handed.img"
+    grep -v ' /usr/local$' "$tmp/owners" > "$tmp/handed-owners"
+    : > "$tmp/empty"
+    printf '%s\n' "rm $OWNERS_RECORD" "write $tmp/handed-owners $OWNERS_RECORD" \
+        "sif /usr/local uid 0" "sif /usr/local gid 0" "mkdir /usr/local/bin" \
+        "write $tmp/empty /usr/local/bin/tool" "sif /usr/local/bin/tool mode 0100755" \
+        "symlink /usr/local/bin/alias tool" |
+        debugfs -w -f - "$tmp/handed.img" >/dev/null 2>&1
+    expect 0 "a /usr/local handed to the system passes" "$tmp/handed.img" 1
+    for departure in "sif /usr/local/bin/tool uid 1000" "sif /usr/local/bin/tool mode 0100775" \
+        "sif /usr/local/bin mode 040757" "sif /usr/local uid 1000"; do
+        cp "$tmp/handed.img" "$tmp/departed.img"
+        debugfs -w -R "$departure" "$tmp/departed.img" >/dev/null 2>&1
+        expect 1 "a system /usr/local refuses \`$departure\`" "$tmp/departed.img" 1
+    done
 
     : > "$tmp/empty.img"
     expect 2 "an empty image is refused, not reported OK" "$tmp/empty.img"
@@ -239,7 +294,7 @@ if [ "$SELF_TEST" = 1 ]; then
         echo "check_fs_image --self-test: $failures check(s) failed" >&2
         exit 1
     fi
-    echo "check_fs_image: self-test OK — 15 checks, both directions"
+    echo "check_fs_image: self-test OK — 22 checks, both directions"
     exit 0
 fi
 

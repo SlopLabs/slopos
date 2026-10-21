@@ -12,7 +12,11 @@ it — an `identity` line, an `at` line naming the destination, then
 and keeps whatever the guest put beside it; a copy goes to /var/lib/slopos/trees/NAME for the guest to read. A
 seed tree (no `--name`) is copied onto an image that lacks its directory and
 is the guest's from then on. `--owner UID:GID` is who the tree, its
-directory included, belongs to; a directory made above it is uid 0's.
+directory included, belongs to, and nobody else may write it whatever the
+host's modes say; a directory made above it is uid 0's.
+
+`read` prints a small regular file the image holds; `walk` prints `<mode>
+<uid>:<gid> <path>` for a path and everything below it, parents first.
 
 Nothing on the image is trusted. It is read only through `ls -l` listings of
 directories, each bound to the inode its parent's listing gave it, so no
@@ -24,10 +28,13 @@ the manifest names, refuses the install before anything is written.
     manifest HOST
     installed MANIFESTS NAME GUEST
     exists IMAGE PATH
+    read IMAGE PATH
+    walk IMAGE PATH
     install IMAGE HOST GUEST [--manifests DIR --name NAME] [--owner UID:GID]
     --self-test
 
-An install refused before anything was written exits 3, any other failure 1.
+An install refused before anything was written exits 3, a `read` of a path
+the image lacks 4, any other failure 1.
 """
 
 import contextlib
@@ -53,9 +60,13 @@ IDENTITY = re.compile(r"[0-9a-f]{64}")
 OWNER = re.compile(r"(\d+):(\d+)")
 # Recorded while an install is under way, so an interrupted one reinstalls.
 UNFINISHED = "0" * 64
-# An `ls -l` entry: inode, mode, links, owner, size, date, time, and the name
-# with every control byte and backslash written `\xNN`, so one line each.
-LISTED = re.compile(rb"\s*(\d+)\s+([0-7]+)\s+\(\s*\d+\)\s+\d+\s+\d+\s+\d+\s+\S+ \S+ (.+)")
+# An `ls -l` entry: inode, mode, file type, uid, gid, size, date, time, and the
+# name with every control byte and backslash written `\xNN`, so one line each.
+LISTED = re.compile(rb"\s*(\d+)\s+([0-7]+)\s+\(\s*\d+\)\s+(\d+)\s+(\d+)\s+(\d+)\s+\S+ \S+ (.+)")
+# What `read` prints at most: a record, not a file the guest grew.
+READ_MAX = 64 << 10
+# Whoever a tree is given to, nobody else writes it.
+OWNER_WRITES = 0o7755
 KINDS = {0o040000: "d", 0o100000: "f", 0o120000: "l"}
 NAMES = {"d": "directory", "f": "file", "l": "symlink", "o": "special file"}
 
@@ -65,6 +76,10 @@ class Refused(Exception):
 
 
 class Conflict(Refused):
+    pass
+
+
+class Absent(Refused):
     pass
 
 
@@ -153,15 +168,20 @@ def debugfs(image, requests, write=False):
 
 
 class Image:
-    """What the image holds at the paths an install is about, read through
-    directories bound to their inodes."""
+    """What the image holds at the paths an install is about, and at every
+    path below `below`, read through directories bound to their inodes."""
 
-    def __init__(self, image, dirs):
+    def __init__(self, image, dirs, below=None):
         self.entries = {"/": ("d", ROOT_INODE)}
+        self.stats = {}
         self.listed = {}
         want = set(dirs)
         for d in dirs:
             want.update(ancestors(d))
+
+        def wanted(path):
+            return path in want or (below is not None and (path + "/").startswith(below + "/"))
+
         frontier = ["/"]
         while frontier:
             out, _ = debugfs(image, [f'ls -l "{d}"' for d in frontier])
@@ -169,14 +189,15 @@ class Image:
             nxt = []
             for d in frontier:
                 children = parsed[d]
-                if children.get(".", (None, None))[1] != self.entries[d][1]:
+                if children.get(".", (None,))[0] != self.entries[d][1]:
                     raise Conflict(f"{d} did not list as the directory its parent names")
                 children = {n: v for n, v in children.items() if n not in (".", "..")}
                 self.listed[d] = set(children)
-                for name, (kind, ino) in children.items():
+                for name, (ino, kind, stat_) in children.items():
                     path = join(d, name)
                     self.entries[path] = (kind, ino)
-                    if kind == "d" and path in want:
+                    self.stats[path] = stat_
+                    if kind == "d" and wanted(path):
                         nxt.append(path)
             frontier = nxt
 
@@ -194,13 +215,15 @@ class Image:
             if not line:
                 continue
             m = LISTED.fullmatch(line)
-            if cur is None or not m or b"/" in m.group(3):
+            if cur is None or not m or b"/" in m.group(6):
                 raise Conflict(f"{cur or dirs[0]} holds a name this tool cannot read")
-            name = m.group(3).decode(errors="surrogateescape")
-            kind = KINDS.get(int(m.group(2), 8) & 0o170000, "o")
+            name = m.group(6).decode(errors="surrogateescape")
+            mode = int(m.group(2), 8)
+            kind = KINDS.get(mode & 0o170000, "o")
             if name in parsed[cur]:
                 raise Conflict(f"{cur} lists {name!r} twice")
-            parsed[cur][name] = (kind, int(m.group(1)))
+            stat_ = (mode, int(m.group(3)), int(m.group(4)), int(m.group(5)))
+            parsed[cur][name] = (int(m.group(1)), kind, stat_)
         return parsed
 
     def state(self, path):
@@ -262,6 +285,36 @@ def exists(image, path):
     except Conflict as e:
         print(f"fs_tree: {e}", file=sys.stderr)
         return True
+
+
+def read_file(image, path):
+    """The bytes of the regular file at `path`, at most `READ_MAX` of them."""
+    if not safe_abs(path) or path == "/":
+        raise Refused(f"{path}: not a path this tool reads")
+    img = Image(image, [parent_of(path)])
+    if img.state(path) == "absent":
+        raise Absent(f"{path} is not on the image")
+    if img.state(path) != "f":
+        raise Refused(f"{path} is not a file on the image")
+    if img.stats[path][3] > READ_MAX:
+        raise Refused(f"{path} is larger than a record")
+    out, said = debugfs(image, [f"cat <{img.entries[path][1]}>"])
+    if said:
+        raise Refused(f"{path}: " + "; ".join(said[:2]))
+    echo = f"debugfs: cat <{img.entries[path][1]}>\n".encode()
+    return out[len(echo) :] if out.startswith(echo) else out
+
+
+def walk_image(image, top):
+    """`(mode, uid, gid, path)` for `top` and everything below it, parents
+    first; nothing when `top` is not there."""
+    if not safe_abs(top) or top == "/":
+        raise Refused(f"{top}: not a path this tool walks")
+    img = Image(image, [top], below=top)
+    if img.state(top) in ("absent", "blocked"):
+        return []
+    found = [p for p in img.stats if p == top or p.startswith(top + "/")]
+    return [(*img.stats[p][:3], p) for p in sorted(found, key=lambda p: (p.count("/"), p))]
 
 
 def owned(path, owner):
@@ -336,12 +389,12 @@ def plan(image, host, guest, name, owner=(0, 0)):
                     conflict(path, f"is a {NAMES[img.state(path)]}, where {host} has a directory")
             else:
                 creates.append(f'mkdir "{path}"')
-            creates.append(f'sif "{path}" mode 0{0o040000 | mode:o}')
+            creates.append(f'sif "{path}" mode 0{0o040000 | mode & OWNER_WRITES:o}')
         elif present(path):
             conflict(path, f"is already there, and {host} installs one")
         elif kind == "f":
             creates.append(f'write "{os.path.join(host, rel)}" "{path}"')
-            creates.append(f'sif "{path}" mode 0{0o100000 | mode:o}')
+            creates.append(f'sif "{path}" mode 0{0o100000 | mode & OWNER_WRITES:o}')
         else:
             creates.append(f'symlink "{path}" "{target}"')
         creates += owned(path, owner)
@@ -466,7 +519,7 @@ def _self_test(work):
         run = subprocess.run(["e2fsck", "-fn", image], capture_output=True)
         assert run.returncode == 0, run.stdout.decode()
 
-    put("bin/tool", "one\n", 0o755)
+    put("bin/tool", "one\n", 0o775)
     put("lib/libx.so", "lib\n")
     os.symlink("tool", os.path.join(tree, "bin/alias"))
     install(image, tree, "/usr/local", name)
@@ -474,6 +527,20 @@ def _self_test(work):
     head, *entries = manifest(tree)
     recorded = "".join(f"{x}\n" for x in [head, "at /usr/local", *entries]).encode()
     assert read(f"{IMAGE_MANIFESTS}/usr_local") == recorded
+    assert read_file(image, f"{IMAGE_MANIFESTS}/usr_local") == recorded
+    with contextlib.suppress(Absent):
+        read_file(image, f"{IMAGE_MANIFESTS}/nothing")
+        raise AssertionError("a read of nothing answers as absent")
+    for what in ("/usr/local/bin/alias", "/usr/local/bin", "/usr/local/nowhere"):
+        try:
+            read_file(image, what)
+        except Refused:
+            continue
+        raise AssertionError(f"read what is no file: {what}")
+    walked = {path: (mode, uid, gid) for mode, uid, gid, path in walk_image(image, "/usr/local")}
+    assert walked["/usr/local/bin/tool"] == (0o100755, 0, 0), "a tree is its owner's to write"
+    assert list(walked)[:2] == ["/usr/local", "/usr/local/bin"], "parents first"
+    assert walk_image(image, "/nowhere") == []
     assert installed(manifests, "usr_local", "/usr/local") == identity(tree)
     assert installed(manifests, "usr_local", "/opt/local") == "", "a tree recorded elsewhere"
     sound()
@@ -580,6 +647,7 @@ def _self_test(work):
     install(shared, apps, "/usr/local", (both, "apps"), session)
     assert kind_in(shared, "/usr/local/bin/tool") == kind_in(shared, "/usr/local/bin/editor") == "f"
     assert owner(f"{IMAGE_MANIFESTS}/apps", shared) == session, "a manifest copy takes its owner"
+    assert {(u, g) for _, u, g, _ in walk_image(shared, "/usr/local")} == {session}
     with open(os.path.join(apps, "bin/tool"), "w") as f:
         f.write("clash\n")
     try:
@@ -617,6 +685,11 @@ def main(argv):
             print(installed(argv[1], argv[2], argv[3]))
         elif len(argv) == 3 and argv[0] == "exists":
             return 0 if exists(argv[1], argv[2]) else 1
+        elif len(argv) == 3 and argv[0] == "read":
+            sys.stdout.buffer.write(read_file(argv[1], argv[2]))
+        elif len(argv) == 3 and argv[0] == "walk":
+            for mode, uid, gid, path in walk_image(argv[1], argv[2]):
+                print(f"{mode:o} {uid}:{gid} {path}")
         elif len(argv) >= 4 and argv[0] == "install":
             image, host, guest, *rest = argv[1:]
             options = dict(zip(rest[::2], rest[1::2]))
@@ -637,6 +710,8 @@ def main(argv):
         else:
             print(__doc__.split("\n\n")[-1], file=sys.stderr)
             return 2
+    except Absent:
+        return 4
     except Refused as e:
         print(f"fs_tree: {e}", file=sys.stderr)
         return 3 if isinstance(e, Conflict) else 1

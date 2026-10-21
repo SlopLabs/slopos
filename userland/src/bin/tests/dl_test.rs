@@ -16,7 +16,7 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 use slopos_abi::caps::SYS_INSPECT;
-use slopos_abi::fs::{SESSION_GID, SESSION_UID};
+use slopos_abi::fs::{SESSION_GID, SESSION_HOME, SESSION_UID};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_userland::syscall::fs::pipe;
 use slopos_userland::syscall::process::{self, Endowment};
@@ -35,8 +35,11 @@ const TREE: &str = "/tmp/dl_search";
 const SECURE_PROBE: &str = "/bin/dl_secure_probe";
 const SECURE_ORIGIN_DIR: &str = "/tmp/dl_secure";
 const SECURE_ABS_DIR: &str = "/tmp/dl_secure_abs";
-/// What the session installs libraries into, searched last for it alone.
+/// Where everyone's libraries are installed, searched last for a person alone.
 const LOCAL_LIB: &str = "/usr/local/lib";
+/// Below a person's home, their own libraries, searched ahead of
+/// [`LOCAL_LIB`] for them alone.
+const HOME_LIB: &str = ".local/lib";
 /// A probe whose only search entry, `${ORIGIN}/rpath`, names nothing, so a
 /// bare name falls through to the loader's own directories.
 const DEFAULT_PROBE: &str = "/bin/dl_search_rpath";
@@ -185,12 +188,16 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "usr_local_lib_is_not_searched_for_root_or_secure",
         usr_local_lib_is_not_searched_for_root_or_secure,
     ),
+    (
+        "a_person_s_own_libraries_come_before_usr_local_lib",
+        a_person_s_own_libraries_come_before_usr_local_lib,
+    ),
 ];
 
-/// Run as the session, from `utest_dl_session`.
+/// Run as the first person, from `utest_dl_session`.
 const SESSION_CASES: &[(&str, fn() -> bool)] = &[(
-    "usr_local_lib_is_searched_for_the_session",
-    usr_local_lib_is_searched_for_the_session,
+    "a_person_installs_libraries_of_their_own",
+    a_person_installs_libraries_of_their_own,
 )];
 
 fn main() {
@@ -581,17 +588,128 @@ fn usr_local_lib_is_not_searched_for_root_or_secure() -> bool {
     }
 }
 
-fn usr_local_lib_is_searched_for_the_session() -> bool {
-    let Some(_staged) = LocalLibrary::stage() else {
+/// The fixture in the first person's [`HOME_LIB`] for as long as this
+/// lives, theirs with each directory it made on the way, which go with it.
+struct HomeLibrary {
+    made: Vec<String>,
+}
+
+impl HomeLibrary {
+    fn path() -> String {
+        format!("{SESSION_HOME}/{HOME_LIB}/libdlsearch.so")
+    }
+
+    fn stage() -> Option<HomeLibrary> {
+        let theirs = |path: &str| {
+            process::geteuid() == SESSION_UID
+                || std::os::unix::fs::lchown(path, Some(SESSION_UID), Some(SESSION_GID)).is_ok()
+        };
+        let mut staged = HomeLibrary { made: Vec::new() };
+        let mut dir = SESSION_HOME.to_owned();
+        for part in HOME_LIB.split('/') {
+            dir = format!("{dir}/{part}");
+            if fs::create_dir(&dir).is_ok() {
+                staged.made.push(dir.clone());
+                if !theirs(&dir) {
+                    return None;
+                }
+            }
+        }
+        let path = Self::path();
+        (stage(FIXTURE, &path) && theirs(&path)).then_some(staged)
+    }
+}
+
+impl Drop for HomeLibrary {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(Self::path());
+        for dir in self.made.iter().rev() {
+            let _ = fs::remove_dir(dir);
+        }
+    }
+}
+
+/// Whether the probe as the first person, with `HOME` as given or none,
+/// loaded `libdlsearch.so` from `expect`: started by a shell of theirs, which
+/// is `AT_SECURE` for coming from uid 0, so that the probe it runs is not.
+fn loads_as_person(expect: &str, home: Option<&str>) -> bool {
+    let as_person = Endowment {
+        ids: Some((SESSION_UID, SESSION_GID)),
+        ..Endowment::NONE
+    };
+    let probe = format!("{DEFAULT_PROBE} open libdlsearch.so {expect}");
+    let (env, command) = match home {
+        Some(home) => (vec![format!("HOME={home}")], probe),
+        None => (Vec::new(), format!("unset HOME; {probe}")),
+    };
+    let env: Vec<&str> = env.iter().map(String::as_str).collect();
+    match run_endowed("/bin/shell", &["-c", &command], &env, as_person) {
+        Some((0, _)) => true,
+        other => {
+            eprintln!("dl_test: as the person with HOME {home:?}, wanted {expect}: {other:?}");
+            false
+        }
+    }
+}
+
+/// A person's own libraries, below the `HOME` their process started with,
+/// come before everyone's in [`LOCAL_LIB`], and neither reaches uid 0 or an
+/// `AT_SECURE` process of theirs.
+fn a_person_s_own_libraries_come_before_usr_local_lib() -> bool {
+    let (Some(_everyone), Some(_own)) = (LocalLibrary::stage(), HomeLibrary::stage()) else {
         return false;
     };
-    let found = LocalLibrary::path();
-    match run_search(DEFAULT_PROBE, &["open", "libdlsearch.so", &found], None) {
-        Some(0) => true,
+    let home = format!("HOME={SESSION_HOME}");
+    let as_person = Endowment {
+        ids: Some((SESSION_UID, SESSION_GID)),
+        ..Endowment::NONE
+    };
+    let mut root = Command::new(DEFAULT_PROBE);
+    root.args(["open", "libdlsearch.so", "-"])
+        .env_remove("LD_LIBRARY_PATH")
+        .env("HOME", SESSION_HOME);
+    let secure = run_endowed(
+        DEFAULT_PROBE,
+        &["open", "libdlsearch.so", "-"],
+        &[&home],
+        as_person,
+    );
+    loads_as_person(&HomeLibrary::path(), Some(SESSION_HOME))
+        && loads_as_person(&HomeLibrary::path(), Some(&format!("{SESSION_HOME}/")))
+        && loads_as_person(&LocalLibrary::path(), None)
+        && loads_as_person(&LocalLibrary::path(), Some("home/user"))
+        && match root.status().map(|status| status.code()) {
+            Ok(Some(0)) => true,
+            other => {
+                eprintln!("dl_test: uid 0 with HOME={SESSION_HOME} searched it: {other:?}");
+                false
+            }
+        }
+        && match secure {
+            Some((0, _)) => true,
+            other => {
+                eprintln!("dl_test: an AT_SECURE program searched its HOME: {other:?}");
+                false
+            }
+        }
+}
+
+/// The first person puts a library in their own [`HOME_LIB`], holding
+/// nothing, and what they run then loads it.
+fn a_person_installs_libraries_of_their_own() -> bool {
+    let Some(_staged) = HomeLibrary::stage() else {
+        return false;
+    };
+    let found = HomeLibrary::path();
+    let mut probe = Command::new(DEFAULT_PROBE);
+    probe
+        .args(["open", "libdlsearch.so", &found])
+        .env_remove("LD_LIBRARY_PATH")
+        .env("HOME", SESSION_HOME);
+    match probe.status().map(|status| status.code()) {
+        Ok(Some(0)) => true,
         other => {
-            eprintln!(
-                "dl_test: the session's {DEFAULT_PROBE} did not load {found}: exit {other:?}"
-            );
+            eprintln!("dl_test: the person's {DEFAULT_PROBE} did not load {found}: {other:?}");
             false
         }
     }

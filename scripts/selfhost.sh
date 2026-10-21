@@ -11,8 +11,10 @@
 # and the apps and makes the base the one every slot boots, running it at
 # once when the running kernel serves it and leaving it for the next boot
 # otherwise; `bootctl base rollback` takes it back. The apps go to /usr/local
-# as whoever runs it, once the running libc.so is the one they were built
-# against; otherwise the command that installs them is printed. A new base
+# once the running libc.so is the one they were built against, as whoever
+# runs it while /usr/local is theirs and through privd's
+# org.slopos.software.install once it is the system's; otherwise the command
+# that installs them is printed. A new base
 # needing a new kernel goes in first: `install-kernel` builds the kernel and
 # puts it into the slot that is not the default, arming one boot of it, which
 # `bootctl reboot` tries and `bootctl commit` keeps.
@@ -96,9 +98,9 @@ COREUTILS_LINKS="$COREUTILS_TOOLS" EXTRA_SHARED_OBJECTS="$shared" \
 [ "$1" = install ] || exit 0
 
 bootctl base install "$REPO_ROOT/$base"
-apps="builddir/tree-install.elf apps builddir/apps /usr/local"
+apps="/bin/tree-install apps builddir/apps /usr/local"
 if cmp -s /lib/libc.so builddir/libc.so; then
-    builddir/tree-install.elf apps builddir/apps /usr/local ||
+    /bin/tree-install apps builddir/apps /usr/local ||
         echo "selfhost: the apps stay as they were"
 else
     echo "selfhost: the apps need this build's libc.so; once its base runs, run in $REPO_ROOT: $apps"

@@ -282,6 +282,23 @@ fn read_entries(fd: RawFd, list: &mut UserFsList) -> SyscallResult<()> {
     Ok(())
 }
 
+/// Every name the directory `fd` lists but `.` and `..`.
+pub fn names(fd: RawFd) -> SyscallResult<Vec<Vec<u8>>> {
+    let mut names = Vec::new();
+    let mut batch = [0u8; 4096];
+    loop {
+        let filled = Sys::getdents64(fd, batch.as_mut_ptr(), batch.len())?;
+        if filled == 0 {
+            return Ok(names);
+        }
+        names.extend(
+            DirentIter::new(&batch[..filled])
+                .map(|record| record.name.to_vec())
+                .filter(|name| !matches!(name.as_slice(), b"." | b"..")),
+        );
+    }
+}
+
 fn fs_type_of(d_type: u8) -> u8 {
     match d_type {
         DT_REG => FS_TYPE_FILE,

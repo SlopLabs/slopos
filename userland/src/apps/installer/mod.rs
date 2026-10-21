@@ -904,16 +904,13 @@ fn install(s: Settled, medium: &Medium) -> Result<(), String> {
 
     step(4, "filling the root");
     let mounted = root::Mounted::at(&root_node)?;
-    root::lay_out(&mounted)?;
+    let owners = root::lay_out(&mounted, !s.keep_root)?;
     if s.keep_root {
         root::forget_slots(&mounted)?;
     }
-    root::fill(&mounted, medium, s.remote.as_deref())?;
+    root::fill(&mounted, medium, s.remote.as_deref(), &owners)?;
     if let Some((name, password)) = &s.person {
         root::make_people(&mounted, name, password.clone())?;
-    }
-    if !s.keep_root {
-        root::record_owners(&mounted)?;
     }
     mounted.finish()?;
 

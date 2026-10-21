@@ -190,23 +190,13 @@ impl Identity {
         Identity::person(&first, None)
     }
 
-    /// The person's command search path: the system's directories first,
-    /// then their own `~/.local/bin` ahead of what `DEFAULT_PATH` puts after
-    /// them.
-    pub fn path(&self) -> String {
-        format!(
-            "/bin:/sbin:{}/.local/bin:/usr/local/bin:/opt/bin",
-            self.home.trim_end_matches('/')
-        )
-    }
-
     /// What every program they run starts with in its environment.
     pub fn env(&self) -> Vec<String> {
         let mut env = vec![
             format!("HOME={}", self.home),
             format!("USER={}", self.name),
             format!("LOGNAME={}", self.name),
-            format!("PATH={}", self.path()),
+            format!("PATH={}", crate::root_layout::search_path(&self.home)),
         ];
         if self.person {
             env.push(format!("XDG_RUNTIME_DIR={}", runtime_dir(self.uid)));

@@ -199,7 +199,8 @@ impl Store {
     }
 }
 
-/// The entry of the user database `find` fills in, as its uid and name.
+/// The entry of the user database `find` fills in, as its uid, name and
+/// home.
 fn entry(
     find: impl FnOnce(
         *mut slopos_slibc::types::passwd,
@@ -207,7 +208,7 @@ fn entry(
         usize,
         *mut *mut slopos_slibc::types::passwd,
     ) -> core::ffi::c_int,
-) -> Option<(u32, String)> {
+) -> Option<(u32, String, String)> {
     let null = core::ptr::null_mut();
     let mut row = slopos_slibc::types::passwd {
         pw_name: null,
@@ -224,9 +225,19 @@ fn entry(
     if rc != 0 || found.is_null() {
         return None;
     }
-    // SAFETY: a row found has its name NUL-terminated in `buf`, alive here.
-    let name = unsafe { core::ffi::CStr::from_ptr(row.pw_name) };
-    Some((row.pw_uid, name.to_str().ok()?.to_owned()))
+    // SAFETY: a row found has its name and home NUL-terminated in `buf`,
+    // alive here.
+    let (name, home) = unsafe {
+        (
+            core::ffi::CStr::from_ptr(row.pw_name),
+            core::ffi::CStr::from_ptr(row.pw_dir),
+        )
+    };
+    Some((
+        row.pw_uid,
+        name.to_str().ok()?.to_owned(),
+        home.to_str().ok()?.to_owned(),
+    ))
 }
 
 /// Whether `name` is a person's: in the record, when this process may read
@@ -245,16 +256,24 @@ pub fn uid_of(name: &str) -> Option<u32> {
     entry(|row, buf, len, found| unsafe {
         slopos_slibc::pwd::getpwnam_r(name.as_ptr(), row, buf, len, found)
     })
-    .map(|(uid, _)| uid)
+    .map(|(uid, ..)| uid)
 }
 
-/// What the user database calls `uid`.
-pub fn name_of(uid: u32) -> Option<String> {
+fn by_uid(uid: u32) -> Option<(u32, String, String)> {
     // SAFETY: as `uid_of`'s.
     entry(|row, buf, len, found| unsafe {
         slopos_slibc::pwd::getpwuid_r(uid, row, buf, len, found)
     })
-    .map(|(_, name)| name)
+}
+
+/// What the user database calls `uid`.
+pub fn name_of(uid: u32) -> Option<String> {
+    by_uid(uid).map(|(_, name, _)| name)
+}
+
+/// Where the user database puts `uid`'s home.
+pub fn home_of(uid: u32) -> Option<String> {
+    by_uid(uid).map(|(.., home)| home)
 }
 
 /// The installed extensions' users, none on a root without the store.

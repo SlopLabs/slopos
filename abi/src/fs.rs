@@ -278,19 +278,9 @@ const fn system(path: &'static str, mode: u16) -> RootDir {
     }
 }
 
-const fn session(path: &'static str) -> RootDir {
-    RootDir {
-        path,
-        uid: SESSION_UID,
-        gid: SESSION_GID,
-        mode: 0o755,
-    }
-}
-
-/// Every root's directories, parents first: the system's state is uid 0's
-/// and what the session writes is its own. `/tmp` and `/run` are memory the
-/// kernel mounts, and the base directories its seal.
-pub const ROOT_LAYOUT: [RootDir; 15] = [
+/// Every root's directories, parents first, as the system holds them. `/tmp`
+/// and `/run` are memory the kernel mounts, and the base directories its seal.
+pub const ROOT_LAYOUT: [RootDir; 14] = [
     system("/", 0o755),
     system("/etc", 0o755),
     system("/var", 0o755),
@@ -300,19 +290,19 @@ pub const ROOT_LAYOUT: [RootDir; 15] = [
     system("/var/tmp", 0o1777),
     system("/root", 0o700),
     system("/home", 0o755),
-    session(SESSION_HOME),
     system("/media", 0o755),
     system("/usr", 0o755),
-    session("/usr/local"),
+    system("/usr/local", 0o755),
     system("/opt", 0o755),
     system("/opt/bin", 0o755),
 ];
 
-/// The directories whose contents are the session's, whatever lies below
-/// them; each itself is as [`ROOT_LAYOUT`] has it, or the session's.
-pub const SESSION_TREES: [&str; 3] = ["/home", "/src", "/usr/local"];
+/// The first person's trees, theirs with all below them while
+/// [`OWNERS_RECORD`] names them: their home, the workspace, and the prefix
+/// software is installed in, which is the system's from the second person on.
+pub const PERSON_TREES: [&str; 3] = [SESSION_HOME, "/src", "/usr/local"];
 
-/// What init records once a root's session trees are the session's.
+/// `<uid>:<gid> <tree>` for each of [`PERSON_TREES`] the first person holds.
 pub const OWNERS_RECORD: &str = "/var/lib/slopos/owners";
 
 /// The keys the owner trusts with extensions and what each one installed

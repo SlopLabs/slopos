@@ -1,7 +1,8 @@
 //! The new root, mounted while it is filled: the directories a SlopOS root
 //! has with the owners the ownership map gives them, its base mount points
 //! sealed, the medium's toolchain and apps installed at `/usr/local` by the
-//! rule host trees follow, and its clone seeded at `/src`, all the session's.
+//! rule host trees follow, and its clone seeded at `/src`, the first
+//! person's.
 
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -10,11 +11,12 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::Path;
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
-use slopos_abi::fs::{OWNERS_RECORD, ROOT_LAYOUT, SESSION_GID, SESSION_TREES, SESSION_UID};
+use slopos_abi::fs::{ROOT_LAYOUT, SESSION_GID, SESSION_UID};
 use slopos_boot_core::layout;
 use slopos_tree_core::{Kind, Manifest};
 
 use super::Medium;
+use crate::root_layout::{HOME, Owners};
 use crate::syscall::fs::{inode_flags, mount, set_inode_flags, sync, umount2};
 use crate::tree::{self, create_new, give, make_dir, write_durably};
 
@@ -159,29 +161,31 @@ fn seal(root: &Mounted, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The directories every root has, as the ownership map gives them, and the
-/// base's mount points sealed.
-pub fn lay_out(root: &Mounted) -> Result<(), String> {
+/// The directories every root has, owned as the root's record has them: on a
+/// new root, which it records, every tree the first person's. The base's
+/// mount points sealed. What the record says.
+pub fn lay_out(root: &Mounted, new: bool) -> Result<Owners, String> {
+    let top = Path::new(&root.dir);
+    let owners = match new {
+        true => Owners::ONE_PERSON,
+        false => Owners::of(top),
+    };
     for dir in ROOT_LAYOUT.iter().filter(|dir| dir.path != "/") {
-        root.owned_dir(dir.path, (dir.uid, dir.gid), dir.mode)?;
+        root.owned_dir(dir.path, owners.owner(dir.path), dir.mode)?;
+    }
+    if owners.holds(HOME.path) {
+        root.owned_dir(HOME.path, owners.owner(HOME.path), HOME.mode)?;
     }
     for dir in slopos_abi::fs::BASE_DIRS {
         root.owned_dir(dir, (0, 0), 0o755)?;
         seal(root, dir)?;
     }
-    Ok(())
-}
-
-/// Record on a new root that its session trees are the session's, which init
-/// otherwise establishes once on a root that ran everything as uid 0.
-pub fn record_owners(root: &Mounted) -> Result<(), String> {
-    let record: String = SESSION_TREES
-        .iter()
-        .map(|tree| format!("{SESSION_UID}:{SESSION_GID} {tree}\n"))
-        .collect();
-    let path = root.path(OWNERS_RECORD);
-    write_durably(&path, record.as_bytes())?;
-    give(&path, (0, 0))
+    if new {
+        owners
+            .write(top)
+            .map_err(|e| format!("the owners record: {e}"))?;
+    }
+    Ok(owners)
 }
 
 /// A new root's accounts: `name`, its first administrator, whom the desktop
@@ -279,15 +283,15 @@ fn put(
 }
 
 /// Install the medium's tree `name`, the `what` it says it installs, from
-/// `source` at `/usr/local`, keeping whatever the root's user put beside what
-/// an earlier install left, its manifest `keeper`'s.
+/// `source` at `/usr/local` as `holder`'s, keeping whatever the root's user
+/// put beside what an earlier install left, its manifest `keeper`'s.
 fn install_tree(
     root: &Mounted,
     name: &str,
     what: &str,
     source: &Path,
     new: &Manifest,
-    keeper: (u32, u32),
+    (holder, keeper): ((u32, u32), (u32, u32)),
 ) -> Result<(), String> {
     let mut progress = Progress {
         copied: 0,
@@ -297,8 +301,9 @@ fn install_tree(
         root: &root.dir,
         name,
         guest: LOCAL,
+        manifests: slopos_tree_core::MANIFEST_DIR,
         source,
-        owner: Some((SESSION_UID, SESSION_GID)),
+        owner: Some(holder),
         keeper: Some(keeper),
         remedy: "move it aside, or format the root",
     }
@@ -401,8 +406,14 @@ fn with_origin(config: &str, url: &str) -> String {
 }
 
 /// Fill the root from the medium: `/usr/local` with the toolchain and the
-/// apps by their manifests, `/src` once.
-pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(), String> {
+/// apps by their manifests, as whoever `owners` says holds it, `/src` once.
+pub fn fill(
+    root: &Mounted,
+    medium: &Medium,
+    remote: Option<&str>,
+    owners: &Owners,
+) -> Result<(), String> {
+    let holder = owners.owner(LOCAL);
     if !medium.payload_has(LOCAL) {
         println!("installer: the medium carries no toolchain");
     } else {
@@ -418,7 +429,7 @@ pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(),
             "the toolchain",
             &source,
             &new,
-            (0, 0),
+            (holder, (0, 0)),
         )?;
     }
     let apps = medium.path(layout::MEDIUM_APPS);
@@ -429,7 +440,7 @@ pub fn fill(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<(),
         "the apps",
         &apps,
         &new,
-        (SESSION_UID, SESSION_GID),
+        (holder, holder),
     )?;
     if !medium.payload_has(SOURCE) {
         return Ok(());

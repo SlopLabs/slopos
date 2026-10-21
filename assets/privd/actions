@@ -218,6 +218,18 @@ action org.slopos.extension.config-signed
   allow    paired
   describe "Install an extension's configuration signed by the key that installed it"
 
+action org.slopos.software.install
+  program  /bin/tree-install
+  args     *
+  caps
+  uid      0
+  cwd
+  exclusive software
+  allow    root
+  allow    admin confirm
+  allow    paired
+  describe "Install software in /usr/local for everyone, in place of what that tree's last install put there"
+
 action org.slopos.accounts.password
   program  /bin/users
   args     passwd

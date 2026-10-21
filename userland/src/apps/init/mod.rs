@@ -12,7 +12,7 @@ mod service;
 mod session;
 
 use slopos_abi::caps::{EXTENSION_UPDATE, POWER, RAW_BLOCK, SEAL};
-use slopos_abi::fs::{GREETER_UID, SESSION_GID, SESSION_UID};
+use slopos_abi::fs::{GREETER_UID, SESSION_UID};
 use slopos_abi::net::{SOCK_CLOEXEC, SOCK_NONBLOCK};
 use slopos_abi::syscall::{
     BOOT_FLAG_EXTENSIONS_OFF, BOOT_FLAG_ROULETTE_SKIP, BOOT_FLAG_TESTS_ENABLED, MSG_NOSIGNAL,
@@ -33,6 +33,7 @@ use self::session::{Sessions, Then, Want};
 use crate::apps::privd::{LINKS_FD, SESSIONS_FD};
 use crate::base_watch::BaseWatch;
 use crate::init_control::{self, At, Command, SOCKET};
+use crate::root_layout::LOCAL;
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, core as sys_core, fs, net, tty};
 
@@ -125,8 +126,8 @@ const ENDING_TICK_MS: u64 = 50;
 const REMOTE_CONF: &str = "/usr/share/slopos/remote/remote.conf";
 
 /// On a live boot, the medium's apps at the RAM root's `/usr/local`, where an
-/// install puts them on a disk.
-fn install_live_apps() {
+/// install puts them on a disk, `holder`'s.
+fn install_live_apps(holder: (u32, u32)) {
     use slopos_boot_core::layout::{MEDIUM_APPS, MEDIUM_DIR};
     let live = crate::syscall::fs::statfs_path(c"/".as_ptr())
         .is_ok_and(|stats| stats.f_type == slopos_abi::fs::RAMFS_MAGIC);
@@ -137,10 +138,11 @@ fn install_live_apps() {
     let install = crate::tree::Install {
         root: "",
         name: slopos_tree_core::APPS,
-        guest: "/usr/local",
+        guest: LOCAL,
+        manifests: slopos_tree_core::MANIFEST_DIR,
         source: &apps,
-        owner: Some((SESSION_UID, SESSION_GID)),
-        keeper: Some((SESSION_UID, SESSION_GID)),
+        owner: Some(holder),
+        keeper: Some(holder),
         remedy: "move it aside",
     };
     match crate::tree::scan(&apps).and_then(|new| install.run(&new, &mut |_| {})) {
@@ -187,11 +189,12 @@ pub fn init_user_main() {
 fn boot() -> ! {
     upgrade_console_font();
     collect_crash_records();
-    crate::root_layout::lay_out(std::path::Path::new("/"));
-    if let Err(e) = crate::tree::hand_over(slopos_tree_core::APPS, (SESSION_UID, SESSION_GID)) {
+    let root = std::path::Path::new("/");
+    let holder = crate::root_layout::lay_out(root).owner(LOCAL);
+    if let Err(e) = crate::tree::hand_over(slopos_tree_core::APPS, holder) {
         eprintln!("init: the apps' manifest: {e}");
     }
-    install_live_apps();
+    install_live_apps(holder);
     sync_accounts();
     activate_extensions();
 

@@ -44,6 +44,7 @@ fn doubted(dest: &str) -> bool {
         root: "",
         name: NAME,
         guest: dest,
+        manifests: slopos_tree_core::MANIFEST_DIR,
         source: &source,
         owner: Some((SESSION_UID, SESSION_GID)),
         keeper: Some((SESSION_UID, SESSION_GID)),

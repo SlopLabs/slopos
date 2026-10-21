@@ -326,13 +326,14 @@ persistent root, where the one default search path finds it:
 the shell (its exported default and `command -p`), slibc's `execvp`, the
 coreutils and remoted's commands all take, puts it after the system's own
 tools, so nothing a writable disk holds shadows them, and the commands the
-owner granted extensions after it, so they shadow neither; the session's own
-`PATH` (`init::service::SESSION_PATH`) puts `~/.local/bin` between the system's
-tools and `/usr/local/bin`. `scripts/build_fs_image.sh` takes two kinds of tree,
-both installed through one debugfs session (`scripts/fs_tree.py`), which
-gives each the owner of its destination under the ownership map: the
-session's, uid 1000, under `/home`, `/src` and `/usr/local`, uid 0's
-elsewhere. A host tree
+owner granted extensions after it, so they shadow neither; a person's own
+`PATH` (`slopos_userland::root_layout::search_path`) puts `~/.local/bin`
+between the system's tools and `/usr/local/bin`. `scripts/build_fs_image.sh`
+takes two kinds of tree, both installed through one debugfs session
+(`scripts/fs_tree.py`), which gives each the owner of its destination under
+the ownership map — the first person's, uid 1000, within a tree the image's
+owners record says they hold, uid 0's elsewhere — writable by that owner
+alone whatever the host's modes say. A host tree
 (`FS_HOST_TREES`, `<host dir>:<guest dir>[:<name>]`) is the host's: what it
 installed is recorded beside the image in `<image>.host/trees/<name>`, where the
 guest cannot edit it, with a copy under `/var/lib/slopos/trees` for the guest to
@@ -905,9 +906,10 @@ raw calls or the ring — so the same code links into a static base program
 against slibc's rlib. A tree's manifest is keyed by its name
 (`tree-core::{TOOLCHAIN, APPS}`), names where the tree went (`at`), so an
 install elsewhere is refused, and belongs to whoever installs the tree again:
-the toolchain's to uid 0, the apps' to the session, which rewrites it in place
-in uid 0's directory, where init makes it for the session on a root without
-one. A manifest neither uid 0 nor the installing uid wrote is not read, and
+the toolchain's to uid 0, the apps' to whoever holds `/usr/local`, which the
+first person rewrites in place in uid 0's directory while they do, and where
+init makes it for them on a root without one. A manifest neither uid 0 nor
+the installing uid wrote is not read, and
 one that does not parse — an in-place rewrite cut short — is not believed:
 either stands for the new tree unfinished, whose paths the install takes back,
 so the installer never acts on what the session wrote. An install skips a tree
@@ -921,10 +923,10 @@ tree's owner.
 The apps reach a root four ways: the image builders install them as a host
 tree; the install medium carries them at `apps/` (`layout::MEDIUM_APPS`) and
 the installer installs them; init installs them into a live boot's RAM root;
-and `scripts/selfhost.sh install` installs them as the session with the
-`tree-install` it built — `/bin/tree-install`, a base program over `tree-core`
-that holds nothing, writes as whoever runs it and refuses a tree whose
-manifest another uid keeps. The apps' manifest is computed from the tree where
+and `scripts/selfhost.sh install` installs them with `/bin/tree-install`, a
+base program over `tree-core` that writes as whoever runs it and refuses a
+tree whose manifest another uid keeps (*Software is installed for everyone in
+`/usr/local`*, below). The apps' manifest is computed from the tree where
 it is installed (`slopos_userland::tree::scan`), its identity a digest of every
 entry; the toolchain's comes with the payload, written by the host. The
 dock pins the app entries — `share/slopos/apps/<id>.app`, `key=value` lines
@@ -933,10 +935,10 @@ share's `slopos/icons/` (`slopos_userland::app_entry`) — read at session start
 from `/usr/share`, `/usr/local/share` and `~/.local/share`, a later one
 replacing an earlier with its id as the XDG data directories rank, in name
 order. The shell's program registry names no app; `PATH` finds them. The
-loader searches `/usr/local/lib` after `/lib`, `/usr/lib` and an extension
-program's own `lib` only for a process that is neither `AT_SECURE` nor uid
-0's, so nothing the session puts there reaches a program holding more than the
-session does.
+loader searches `$HOME/.local/lib`, then `/usr/local/lib`, after `/lib`,
+`/usr/lib` and an extension program's own `lib`, only for a process that is
+neither `AT_SECURE` nor uid 0's, so nothing a person puts in either reaches a
+program holding more than they do.
 
 **The guest installs what it builds.** `/bin/bootctl` (privd's
 `org.slopos.boot.*` and `org.slopos.base.*` actions, run as uid 0 with
@@ -994,10 +996,11 @@ puts it into `bootctl spare`'s slot and arms the one-shot boot, so the kernel
 is tried and committed or rolled back. A base that needs a new kernel goes in
 first and runs from the boot into it. The apps are no slot's: they go to
 `/usr/local` at once when the running `libc.so` is the one they were built
-against, and otherwise by the command the script prints for the new boot, and
-a rollback keeps them. `selfhost_test` and `install_test` run those as a
-person at the shell does (`slopos_userland::selfhost::selfhost_install` runs
-both), so the loop a developer types is the loop the tests grade; a root test
+against, through privd once it is the system's, and otherwise by the command
+the script prints for the new boot, and a rollback keeps them.
+`selfhost_test` and `install_test` run those as a person at the shell does
+(`slopos_userland::selfhost::selfhost_install` runs both), so the loop a
+developer types is the loop the tests grade; a root test
 hands the script a privd connection of its own, so its `bootctl` calls are
 the test's and wait for nobody at the machine.
 
@@ -1051,7 +1054,8 @@ volumes with `fat-core`, which creates long names, the root with
 `/sbin/mke2fs` in the profile, and zeroes a new crash partition; seals the
 root's base mount points; installs the medium's toolchain and apps at
 `/usr/local` by the rule host trees follow (`tree-core`: what the manifest
-under `/var/lib/slopos/trees` names is replaced, what the user added kept) and
+under `/var/lib/slopos/trees` names is replaced, what the user added kept), as
+whoever a kept root's owners record says holds it, and
 seeds `/src` once, its origin
 where the user says; writes a kernel into both slots, the base as current and
 previous, removing a slot's `base.img` a disk laid out before kept, and `limine.conf` — `root=PARTUUID=`, a
@@ -1465,7 +1469,7 @@ a file, atomically and checked by SHA-256 end to end. Init starts remoted as
 the session, uid 1000, holding nothing; each program it runs that the policy
 names as a mechanism, and the shell, gets a privd connection remoted made
 (`PRIVD_FD`), through which a mechanism asks as the paired agent, which the
-policy allows the boot slots and bases, power, `cpufreq set`, `kconsole`, the profiler
+policy allows the boot slots and bases, software installs, power, `cpufreq set`, `kconsole`, the profiler
 and the keymap and nothing else — so whoever holds the broker's key holds
 those. A mechanism keeps the connection its environment names from whatever
 it starts, and the shell hands it on only to the mechanisms its own process
@@ -1901,20 +1905,65 @@ person the record names for it, and the login screen as the base's
 `greeter` user, uid 50; an extension's services run as its own users, uids
 100 to 999. Every root is held
 to one ownership map, stated once in `slopos_abi::fs::ROOT_LAYOUT` and
-`SESSION_TREES` and mirrored by `scripts/lib/root_layout.sh` and
+`PERSON_TREES` and mirrored by `scripts/lib/root_layout.sh` and
 `tools/initramfs`, whose test holds the three equal: `/`, `/etc`, `/var`,
-`/var/lib`, `/var/lib/slopos`, `/var/log`, `/home`, `/media`, `/usr`, `/opt`
-and `/opt/bin` uid 0's, 0755; `/root` 0700; `/var/tmp` 1777; `/home/user` and `/usr/local` the
-session's; and everything below `/home`, `/src` and `/usr/local` the
-session's, but another person's home. The image builders lay it out and record it in
-`/var/lib/slopos/owners`, `tools/initramfs` packs the record so a RAM root is
-never migrated, and the installer lays out a new root by it. Init makes
-whatever directory of it a root lacks at every boot and, once per root
-without the record, hands the session what uid 0 holds in its trees, never
-descending into what another uid holds, and writes the record
-(`userland/src/root_layout.rs`), so a root that ran everything as uid 0 is
-migrated in place. `check_fs_image.sh --map`, the default for the tests
-image, holds a root to it.
+`/var/lib`, `/var/lib/slopos`, `/var/log`, `/home`, `/media`, `/usr`,
+`/usr/local`, `/opt` and `/opt/bin` uid 0's, 0755; `/root` 0700; `/var/tmp`
+1777; and the first person's trees — their home `/home/user`, the workspace
+`/src` and `/usr/local` — theirs with everything below while
+`/var/lib/slopos/owners` names them, a `<uid>:<gid> <tree>` line each, which a
+root made for one person does for all three. The first person's home is
+0755 while they are alone on the root, and every later person's 0700. The
+image builders lay the map out and write the record on a new image and follow
+the one a preserved image carries, read through the listings its trees are
+(`fs_tree.py read`, which tells a record that is absent from one it cannot
+read), one they cannot read granting nothing; `tools/initramfs` packs the one-person record so a RAM root is never
+migrated; and the installer lays out a new root by it and fills a kept one as
+its record says. Init makes whatever
+directory of the map a root lacks at every boot, and the home the record
+names; a record or accounts it cannot read grant nothing and change nothing;
+once per root without the record, it hands the first person what uid 0
+holds in their trees, never descending into what another uid holds, and writes
+the record (`userland/src/root_layout.rs`), so a root that ran everything as
+uid 0 is migrated in place, and it rewrites a record from before the map named
+the home `/home`, moving nothing. `check_fs_image.sh --map`, the default for
+the tests image, holds a root to the map and its record, and a `/usr/local`
+the record does not name to being uid 0's, and writable by uid 0 alone, to its
+last entry (`fs_tree.py walk`).
+
+**Software is installed for everyone in `/usr/local`, for oneself in
+`~/.local`.** While one person has an account `/usr/local` is theirs, and
+their tools write it. The add that makes a second (`users add`, holding
+`DacOverride`) shares the root (`slopos_userland::root_layout::share`): the
+first person's home closed to others, then every entry of `/usr/local` uid
+0's and writable by uid 0 alone, each directory changed before what is in it
+is listed, so nothing the first person runs puts a name there behind the walk,
+and each mode read again once uid 0 holds the entry; a file with another name
+that another uid holds loses only its name there, and a link goes unless
+every name it leads through, link by link, is in a directory only uid 0 may
+change and it ends at what only uid 0 may change; last the record without
+`/usr/local`. Init finishes a hand-over cut short at the next boot, and none
+is undone. A manifest the first person wrote stays theirs, and uid 0 installs
+over it without believing it. From then on a session installs there through
+privd's `org.slopos.software.install` (`allow admin confirm`, `allow
+paired`, one at a time), which runs `/bin/tree-install` as uid 0 holding
+nothing, installing at `/usr/local` alone from a copy of the tree in
+`/var/lib/slopos/tree-install`, which only uid 0 enters and a run cut short
+leaves for the next to take away, made through descriptors that follow no
+link, of what everyone may read and with every link relative and climbing no
+higher than the tree's top before it names anything (`tree::stage`). Since
+that copy counts with the install against the mechanism's own `DiskBlocks`
+ceiling, a tree through privd is at most half of it. `tree-install` asks for
+it when its destination is `/usr/local` and its caller does not hold it, and
+`scripts/selfhost.sh install` runs the base's, to which a shell hands privd's
+connection. A tree installed in the guest is writable by its owner alone, as
+one the host installs is. A person's own software lives in `~/.local`: `tree-install` into
+their home keeps the manifest in `~/.local/share/slopos/trees`, `~/.local/bin`
+is on their `PATH`, which the desktop's terminal and dock hand what they start
+with the rest of the session's environment, the dock reads `~/.local/share`,
+and the loader searches `$HOME/.local/lib`. Once uid 0 holds `/usr/local`,
+`priv` finds commands in `/usr/local/bin` too. `apps_test --trees` grades it,
+and `dl_test` the loader's search.
 
 **The machine knows its people.** The accounts record
 (`slopos_accounts_core::record`) keeps each person's uid, name, home, whether
@@ -1942,8 +1991,8 @@ password answers for, adds one with a home of their own
 (`/home/<name>`, 0700), removes one — the home kept unless `--home` says —
 renames one, sets a password, promotes and demotes, sets automatic login and
 whom remoted runs as (`users remote`, the first administrator unless set);
-the last administrator stays one, and the first person, whose the map's
-trees are, stays. A passwordless
+the last administrator stays one, and the first person, who holds the
+workspace at `/src`, stays. A passwordless
 administrator who adds someone sets a password first, and an add turns
 automatic login off unless `--keep-autologin` says.
 `org.slopos.accounts.password` (`Seal`) changes the requester's own password

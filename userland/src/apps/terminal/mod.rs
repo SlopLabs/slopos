@@ -154,16 +154,20 @@ fn with_client_fd(handle: &slopos_windowing::ProtocolHandle) -> i32 {
 
 /// The child starts with an empty fd table, so the `CloneFd` actions install
 /// exactly the slave and no cloexec juggling is needed. `TASK_FLAG_NEW_PGRP` is
-/// deliberately omitted: the shell runs its own `setsid()` + `TIOCSCTTY`.
+/// deliberately omitted: the shell runs its own `setsid()` + `TIOCSCTTY`. The
+/// shell takes the session's environment, its search path among it.
 fn spawn_shell_on_slave(slave_fd: i32) {
     let actions = [
         process::clone_fd(slave_fd, 0),
         process::clone_fd(slave_fd, 1),
         process::clone_fd(slave_fd, 2),
     ];
-    let tid = process::spawn_path_with_actions(
+    let env = process::environment();
+    let envp: Vec<*const u8> = env.iter().map(|var| var.as_ptr().cast()).collect();
+    let tid = process::spawn_path_with_env(
         b"/bin/shell",
         &[],
+        &envp,
         TaskPriority::Normal,
         slopos_abi::task::TASK_FLAG_USER_MODE,
         &actions,

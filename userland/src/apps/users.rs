@@ -3,7 +3,8 @@
 //! requester's own password, asking the current one first, and
 //! `org.slopos.accounts.manage` adds, removes and renames people, sets a
 //! person's password and changes who administers the machine, for root, an
-//! administrator, or a person an administrator's password answers for. Init
+//! administrator, or a person an administrator's password answers for. The
+//! add that makes a second person hands `/usr/local` to the system. Init
 //! runs `users sync` at every boot, holding `Seal`, which writes the user
 //! database and gives a root that has no record the one person's: `user`, its
 //! first administrator.
@@ -12,13 +13,14 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, lchown};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use slopos_abi::fs::{ADMIN_GROUP, PERSON_UIDS};
+use slopos_abi::fs::{ADMIN_GROUP, PERSON_UIDS, SESSION_HOME};
 use slopos_accounts_core::{Accounts, Person};
 use slopos_priv_core::{ENV_ACTION, ENV_UID};
 use slopos_slibc_core::passwd::{BASE_GROUP, BASE_PASSWD, Group, Passwd, lines};
 
 use crate::accounts::Store;
 use crate::privd::{self, Input};
+use crate::root_layout::{self, LOCAL, Owners};
 use crate::secret;
 use crate::syscall::core as sys_core;
 
@@ -317,6 +319,17 @@ fn change(request: Request) -> Result<String, String> {
     }
     let synced = store.sync();
     store.unlock();
+    if matches!(home, Home::Made(_))
+        && accounts.people().len() > 1
+        && Owners::read(top).is_some_and(|owners| owners.holds(LOCAL))
+    {
+        said.push_str(&match root_layout::share(top) {
+            Ok(()) => format!(
+                "; {LOCAL} is the system's now, installed into through privd, and {SESSION_HOME} closed to others"
+            ),
+            Err(why) => format!("; {why}"),
+        });
+    }
     if let Home::Removed(person) = home {
         let gone = remove_home(&person).unwrap_or_else(|why| format!("; its home stays: {why}"));
         said.push_str(&gone);

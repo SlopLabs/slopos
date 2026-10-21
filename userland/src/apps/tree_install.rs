@@ -3,15 +3,45 @@
 //! install put down is replaced, what anyone else put beside it is kept, and
 //! anything in the way refuses the install before a file is written.
 //!
-//! It holds no capability and makes everything as whoever runs it, so the
-//! session installs into what is its own: the apps at `/usr/local`, as
-//! `scripts/selfhost.sh install` does.
+//! It makes everything as whoever runs it, writable by them alone, which is
+//! all a person needs for what is their own: `/usr/local` while the first
+//! person holds it, and their home, where a tree's manifest is kept in
+//! `~/.local/share/slopos/trees`. Asked for `/usr/local` by anyone who does
+//! not hold it, it asks privd's `org.slopos.software.install`, which runs it
+//! as uid 0 and lets it install there and nowhere else, from a copy of TREE
+//! holding what everyone may read and links staying within it
+//! (`tree::stage`).
 
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+use slopos_priv_core::ENV_ACTION;
+use slopos_tree_core::MANIFEST_DIR;
+
+use crate::privd::{self, Input};
+use crate::root_layout::LOCAL;
+use crate::syscall::process::geteuid;
 use crate::tree::{self, Install};
 
 const USAGE: &str = "usage: tree-install NAME TREE DEST";
+const SOFTWARE: &str = "org.slopos.software.install";
+
+/// Whether this process holds `path`, which it then writes itself.
+fn holds(path: &str) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.uid() == geteuid())
+}
+
+/// Where the manifest of a tree at `dest` is kept: in the home of whoever
+/// installs it there, the system's directory elsewhere.
+fn manifests(dest: &str) -> String {
+    let home = crate::accounts::home_of(geteuid()).filter(|home| home.starts_with('/'));
+    match home {
+        Some(home) if Path::new(dest).starts_with(&home) && home != "/" => {
+            format!("{}/.local/share/slopos/trees", home.trim_end_matches('/'))
+        }
+        _ => MANIFEST_DIR.to_owned(),
+    }
+}
 
 fn run(name: &str, source: &str, dest: &str) -> Result<String, String> {
     if !slopos_tree_core::valid_name(name) {
@@ -22,12 +52,26 @@ fn run(name: &str, source: &str, dest: &str) -> Result<String, String> {
     if !slopos_tree_core::valid_destination(dest) {
         return Err(format!("{dest:?} is not an absolute path without . or .."));
     }
-    let source = Path::new(source);
+    let by_privd = std::env::var_os(ENV_ACTION).is_some();
+    if by_privd || dest == LOCAL && !holds(LOCAL) {
+        privd::elevate(Some(SOFTWARE), &privd::own_args(), Input::Closed);
+        if dest != LOCAL {
+            return Err(format!("privd installs at {LOCAL} alone"));
+        }
+    }
+    let staged = by_privd
+        .then(|| tree::stage(Path::new(source)))
+        .transpose()?;
+    let source = staged
+        .as_ref()
+        .map_or(Path::new(source), tree::Staged::path);
     let new = tree::scan(source)?;
+    let manifests = manifests(dest);
     let install = Install {
         root: "",
         name,
         guest: dest,
+        manifests: &manifests,
         source,
         owner: None,
         keeper: None,

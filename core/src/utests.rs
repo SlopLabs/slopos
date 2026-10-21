@@ -84,6 +84,11 @@ crate::utest!(
     uid = 1000
 );
 crate::utest!(
+    name = utest_apps_trees,
+    bin = "/bin/apps_test",
+    argv = &["apps_test", "--trees"]
+);
+crate::utest!(
     name = utest_dock,
     bin = "/bin/dock_test",
     caps = none,

@@ -214,6 +214,19 @@ pub fn spawn_path_with_env(
     )
 }
 
+/// This process's environment as a spawn hands one on: what a session's
+/// programs pass to what they start.
+pub fn environment() -> Vec<std::ffi::CString> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let mut var = name.into_encoded_bytes();
+            var.push(b'=');
+            var.extend(value.into_encoded_bytes());
+            std::ffi::CString::new(var).ok()
+        })
+        .collect()
+}
+
 /// Clones the caller's stdio (fd 0/1/2) into the child, which is what
 /// preserves console inheritance for service and app spawns.
 #[inline(always)]

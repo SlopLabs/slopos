@@ -133,6 +133,8 @@ struct EntryStack {
     envp: *const *const core::ffi::c_char,
     /// The value of `LD_LIBRARY_PATH`, or null.
     library_path: *const u8,
+    /// The value of `HOME`, or null.
+    home: *const u8,
     /// `LD_DEBUG` names `statistics`.
     statistics: bool,
     /// `LD_DEBUG` names `libs`.
@@ -162,6 +164,7 @@ unsafe fn read_auxv(stack: *const usize) -> EntryStack {
         secure: false,
         envp: envp as *const *const core::ffi::c_char,
         library_path: ptr::null(),
+        home: ptr::null(),
         statistics: false,
         libs: false,
     };
@@ -170,6 +173,10 @@ unsafe fn read_auxv(stack: *const usize) -> EntryStack {
         let var = *e as *const u8;
         if let Some(value) = env_value(var, b"LD_LIBRARY_PATH=") {
             out.library_path = value;
+        } else if out.home.is_null()
+            && let Some(value) = env_value(var, b"HOME=")
+        {
+            out.home = value;
         } else if let Some(value) = env_value(var, b"LD_DEBUG=") {
             for opt in super::cstr_bytes(value).split(|c| matches!(c, b',' | b':' | b' ')) {
                 out.statistics |= opt == b"statistics";
@@ -236,7 +243,7 @@ unsafe fn link_program(stack: *const usize, base: usize) -> Result<usize, DlErro
     let exe = dl
         .adopt(exe_base, exe_phdr, aux.phnum, ptr::null(), false)
         .ok_or(DlError::TooManyObjects)?;
-    dl.configure_search(aux.execfn, aux.library_path, aux.secure);
+    dl.configure_search(aux.execfn, aux.library_path, aux.home, aux.secure);
 
     let self_ehdr = base as *const Ehdr;
     dl.adopt(
