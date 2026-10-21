@@ -99,6 +99,14 @@ impl Tasks {
         leaders(self.0.iter().filter(|task| logins.contains(&task.login)))
     }
 
+    /// Those of [`processes_of`](Self::processes_of) parked on a stop
+    /// signal.
+    pub fn stopped_of(&self, logins: &[u32]) -> Vec<u32> {
+        leaders(self.0.iter().filter(|task| {
+            logins.contains(&task.login) && TaskStatus::from_u8(task.state) == TaskStatus::Stopped
+        }))
+    }
+
     /// The effective uids of the live processes carrying any of `logins`.
     pub fn uids_of(&self, logins: &[u32]) -> Vec<u32> {
         let mut uids: Vec<u32> = self

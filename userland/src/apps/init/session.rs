@@ -5,7 +5,7 @@
 use slopos_abi::signal::{SIGCONT, SIGKILL, SIGTERM};
 
 use super::service::Child;
-use crate::init_control::{self, DESKTOP};
+use crate::init_control::{DESKTOP, Tasks};
 use crate::syscall::{OwnedFd, process};
 
 /// How long what is ended has on `SIGTERM` before `SIGKILL`, and how long
@@ -78,9 +78,10 @@ impl Ending {
     }
 }
 
-/// Ending everything that carries some login tags: `SIGTERM` and `SIGCONT`
-/// to each process, then to each forked since, `SIGKILL` to all after
-/// [`KILL_AFTER_MS`], given up on after [`GIVE_UP_AFTER_MS`].
+/// Ending everything that carries some login tags: `SIGTERM` to each
+/// process, then to each forked since, and `SIGCONT` to whichever is
+/// stopped, `SIGKILL` to all after [`KILL_AFTER_MS`], given up on after
+/// [`GIVE_UP_AFTER_MS`].
 pub struct Termination {
     since: u64,
     signalled: Vec<u32>,
@@ -98,7 +99,7 @@ impl Termination {
     /// waited long enough.
     pub fn step(&mut self, now: u64, tags: &[u32]) -> Option<Ended> {
         for _ in 0..PASSES {
-            match self.pass(now, &init_control::processes_of(tags)) {
+            match self.pass(now, &Tasks::read(), tags) {
                 Err(ended) => return Some(ended),
                 Ok(false) => break,
                 Ok(true) => {}
@@ -107,14 +108,15 @@ impl Termination {
         None
     }
 
-    /// [`step`](Self::step) once, `left` being what carries the tags as of
-    /// one reading init takes for everything it ends.
-    pub fn step_seen(&mut self, now: u64, left: &[u32]) -> Option<Ended> {
-        self.pass(now, left).err()
+    /// [`step`](Self::step) once, as of one reading init takes for
+    /// everything it ends.
+    pub fn step_seen(&mut self, now: u64, tasks: &Tasks, tags: &[u32]) -> Option<Ended> {
+        self.pass(now, tasks, tags).err()
     }
 
-    /// Signal `left`; whether any of it was new.
-    fn pass(&mut self, now: u64, left: &[u32]) -> Result<bool, Ended> {
+    /// Signal what carries `tags`; whether any of it was new.
+    fn pass(&mut self, now: u64, tasks: &Tasks, tags: &[u32]) -> Result<bool, Ended> {
+        let left = tasks.processes_of(tags);
         let waited = now.saturating_sub(self.since);
         if left.is_empty() {
             return Err(Ended::All);
@@ -128,13 +130,17 @@ impl Termination {
             .filter(|pid| !self.signalled.contains(pid))
             .collect();
         if waited >= KILL_AFTER_MS {
-            for &pid in left {
+            for &pid in &left {
                 let _ = process::kill(pid, SIGKILL);
             }
         } else {
             for &pid in &fresh {
-                // A stopped process acts on its SIGTERM only once continued.
                 let _ = process::kill(pid, SIGTERM);
+            }
+            // A stopped process acts on its SIGTERM only once continued; a
+            // running one is sent nothing more, since every kill walks the
+            // task table.
+            for pid in tasks.stopped_of(tags) {
                 let _ = process::kill(pid, SIGCONT);
             }
         }

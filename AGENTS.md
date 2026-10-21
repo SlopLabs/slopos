@@ -1994,10 +1994,11 @@ compositor or terminal is the compositor's to offer, as a session restart
 in its system menu, and never forced. Init is single-threaded,
 waiting on a poll of pidfds, its ready pipes, the consent ends of sides not
 running, the base monitor and `/run/init`. The session
-ends as systemd's `KillMode` stops a unit: `SIGTERM` and `SIGCONT` to every
-live process carrying the desktop's login tag or a session service's, again
-to each one forked since,
-`SIGKILL` to all after five seconds, given up on after ten, so remoted's
+ends as systemd's `KillMode` stops a unit: `SIGTERM` to every live process
+carrying the desktop's login tag or a session service's, again to each one
+forked since, and `SIGCONT` to each one stopped, since every kill walks the
+task table, `SIGKILL` to all after five seconds, given up on after ten, so
+remoted's
 processes, privd's mechanisms but those `priv` runs as the person, and
 anything else the session did not start survive it. A process that forks
 faster than init signals can outlast the ten seconds, and the request that

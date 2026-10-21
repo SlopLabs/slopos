@@ -568,9 +568,8 @@ impl Units {
         let ending = !self.strays.is_empty() || self.units.iter().any(Unit::stopping);
         let tasks = ending.then(Tasks::read);
         if let Some(tasks) = &tasks {
-            self.strays.retain_mut(|(tags, ending)| {
-                ending.step_seen(now, &tasks.processes_of(tags)).is_none()
-            });
+            self.strays
+                .retain_mut(|(tags, ending)| ending.step_seen(now, tasks, tags).is_none());
         }
         for unit in &mut self.units {
             if let Some(tasks) = &tasks {
@@ -941,7 +940,7 @@ impl Unit {
         let Run::Stopping { ending, .. } = &mut self.run else {
             return;
         };
-        let Some(ended) = ending.step_seen(now, &tasks.processes_of(&[self.spec.tag])) else {
+        let Some(ended) = ending.step_seen(now, tasks, &[self.spec.tag]) else {
             return;
         };
         if let Ended::GaveUp(left) = ended {

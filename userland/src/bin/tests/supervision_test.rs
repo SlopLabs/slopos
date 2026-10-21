@@ -1,7 +1,7 @@
 //! init as a service manager, against the init that booted: a re-executed
 //! init keeps what it serves, a privd that dies is started again, and a
-//! session restart ends what carries the desktop's login tag and spares what
-//! carries remoted's.
+//! session restart ends what carries the desktop's login tag, a stopped
+//! process by its `SIGTERM`, and spares what carries remoted's.
 //!
 //! The runner hands this binary every capability as uid 0. A test boot runs
 //! no desktop session until one is asked for, and this one ends the one it
@@ -11,13 +11,13 @@ use std::ffi::CString;
 use std::time::{Duration, Instant};
 
 use slopos_abi::fs::{O_RDWR, SESSION_UID};
-use slopos_abi::signal::SIGKILL;
+use slopos_abi::signal::{SIGKILL, SIGSTOP, SIGTERM};
 use slopos_abi::syscall::{POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::wire::{Exit, Reply, Request};
 use slopos_userland::init_control::{self, Command, DESKTOP, REMOTE};
 use slopos_userland::privd::{Connection, request_id};
-use slopos_userland::syscall::process::{self, Endowment};
+use slopos_userland::syscall::process::{self, Endowment, WaitStatus};
 use slopos_userland::syscall::{OwnedFd, fs, pidfd};
 
 const SELF: &str = "/bin/supervision_test";
@@ -234,11 +234,11 @@ fn only_uid_0_ends_the_session() -> bool {
 }
 
 /// The session may restart itself, which ends every process carrying the
-/// desktop's tag and leaves remoted's running.
+/// desktop's tag, one stopped among them, and leaves remoted's running.
 fn a_session_restart_spares_remoteds_processes() -> bool {
-    let (desktop, remote) = (linger(DESKTOP), linger(REMOTE));
-    let (Some(desktop), Some(remote)) = (desktop, remote) else {
-        for pid in [desktop, remote].into_iter().flatten() {
+    let (desktop, stopped, remote) = (linger(DESKTOP), linger(DESKTOP), linger(REMOTE));
+    let (Some(desktop), Some(stopped), Some(remote)) = (desktop, stopped, remote) else {
+        for pid in [desktop, stopped, remote].into_iter().flatten() {
             let _ = process::kill(pid, SIGKILL);
             let _ = process::waitpid(pid);
         }
@@ -255,6 +255,11 @@ fn a_session_restart_spares_remoteds_processes() -> bool {
             note(&format!("the stand-ins carry the login tags {tagged:?}"));
             return false;
         }
+        let stopped_now = || init_control::Tasks::read().stopped_of(&[DESKTOP]) == [stopped];
+        if process::kill(stopped, SIGSTOP) != 0 || !until(DEADLINE, stopped_now) {
+            note("the stopped stand-in did not stop");
+            return false;
+        }
         if asked_as(SESSION_UID, Command::RestartSession) != Some(true) {
             note("the session could not restart itself");
             return false;
@@ -264,6 +269,13 @@ fn a_session_restart_spares_remoteds_processes() -> bool {
             .is_some_and(|fd| readable_within(fd, DEADLINE))
         {
             note("the desktop's process outlived the session");
+            return false;
+        }
+        let ended_by = process::waitpid(stopped).map(|(_, status)| process::wait_status(status));
+        if ended_by != Some(WaitStatus::Signalled(SIGTERM)) {
+            note(&format!(
+                "the stopped process ended by {ended_by:?}, not its SIGTERM"
+            ));
             return false;
         }
         if init_control::login_of(remote) != Some(REMOTE) {
@@ -277,7 +289,7 @@ fn a_session_restart_spares_remoteds_processes() -> bool {
         true
     })();
     let ended = init_control::ask(Command::EndSession);
-    for pid in [desktop, remote] {
+    for pid in [desktop, stopped, remote] {
         let _ = process::kill(pid, SIGKILL);
         let _ = process::waitpid(pid);
     }
