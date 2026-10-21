@@ -5,7 +5,9 @@ use slopos_ostd::KVec;
 
 use super::StageError;
 
-const CHUNK: usize = 64 * 1024;
+/// A page short of 64 KiB: the heap's header ahead of a full 64 KiB would
+/// take a 32-page block for 17 pages.
+const CHUNK: usize = 60 * 1024;
 
 /// Where one file's bytes lie in a [`Store`].
 #[derive(Clone, Copy, Debug)]

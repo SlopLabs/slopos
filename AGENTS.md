@@ -537,7 +537,8 @@ paths built at boot, a file's bytes a slice of the module, every inode sealed
 and nothing writable, so the booted base costs no copy. That is generation 1;
 `base_activate(archive, len)` (`BaseUpdate`, which privd's base actions
 hold) makes another the base while the
-system runs, a copy in 64 KiB pieces it owns, refused when its interface is
+system runs, a copy in pieces it owns, each a page short of 64 KiB so that
+with the heap's header it fills a 16-page block, refused when its interface is
 outside the kernel's range, past a quarter of memory (`EFBIG`), or while all
 sixteen slots are held or the copies still resident would take more than that
 quarter with it (`EBUSY`), and moves every base mount to it in one pass under
