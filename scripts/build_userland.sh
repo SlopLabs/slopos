@@ -258,6 +258,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin transfer_test \
         --bin persist_test \
         --bin reboot_clone_test \
+        --bin rename_test \
         --bin libc_abi_test \
         --features testbins \
         --no-default-features \
@@ -478,6 +479,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/reboot_clone_test" ]; then
         cp "$RELEASE_DIR/reboot_clone_test" "$BUILD_DIR/reboot_clone_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/rename_test" ]; then
+        cp "$RELEASE_DIR/rename_test" "$BUILD_DIR/rename_test.elf"
     fi
     if [ -f "$RELEASE_DIR/libc_abi_test" ]; then
         cp "$RELEASE_DIR/libc_abi_test" "$BUILD_DIR/libc_abi_test.elf"

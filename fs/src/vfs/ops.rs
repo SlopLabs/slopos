@@ -43,6 +43,7 @@ impl VfsHandle {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct VfsOpenFlags {
     pub create: bool,
     pub exclusive: bool,

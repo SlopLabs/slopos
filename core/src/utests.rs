@@ -164,6 +164,7 @@ crate::utest!(name = utest_supervision, bin = "/bin/supervision_test");
 crate::utest!(name = utest_live_base, bin = "/bin/live_base_test");
 crate::utest!(name = utest_fifo, bin = "/bin/fifo_test");
 crate::utest!(name = utest_persist, bin = "/bin/persist_test");
+crate::utest!(name = utest_rename, bin = "/bin/rename_test");
 crate::utest!(
     name = utest_reboot_clone,
     bin = "/bin/reboot_clone_test",

@@ -5446,6 +5446,54 @@ pub fn test_vfs_unlink_defers_while_open() -> TestResult {
 
 slopos_testing::stest!(name = test_vfs_unlink_defers_while_open, suite = fs);
 
+/// POSIX: a file a rename displaces while a descriptor holds it keeps its
+/// contents until the last close, as an unlinked one does. On the RAM
+/// filesystem, whose inode is a slot a plain rename resets at once.
+pub fn test_vfs_rename_over_defers_while_open() -> TestResult {
+    use crate::vfs::{VfsOpenFlags, vfs_open_flags};
+    use crate::vfs_file_ops::vfs_open_handle_flags;
+
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
+    let _ = vfs_mkdir(b"/run/rename_open");
+    const HELD: &[u8] = b"/run/rename_open/held";
+    const SIBLING: &[u8] = b"/run/rename_open/.held";
+    for (path, bytes) in [(HELD, &b"held-open"[..]), (SIBLING, &b"successor"[..])] {
+        let _ = vfs_unlink(path);
+        let Ok(seed) = vfs_open_flags(path, VfsOpenFlags::create_only()) else {
+            return slopos_testing::fail!("could not create the fixture");
+        };
+        if seed.write(0, bytes).is_err() {
+            return slopos_testing::fail!("could not seed the fixture");
+        }
+    }
+    let Ok(handle) = vfs_open_handle_flags(HELD, VfsOpenFlags::read_only()) else {
+        return slopos_testing::fail!("could not open the fixture");
+    };
+    if vfs_rename(SIBLING, HELD).is_err() {
+        return slopos_testing::fail!("the rename over a held-open file failed");
+    }
+    let mut buf = [0u8; 16];
+    let read = {
+        let mut sink = slopos_abi::io::KernelIoBuf::new(&mut buf[..9]);
+        slopos_abi::file_ops::FileOps::read(
+            &crate::vfs_file_ops::VFS_FILE_OPS,
+            handle,
+            &mut sink,
+            0,
+            0,
+        )
+    };
+    let _ = vfs_unlink(HELD);
+    if read != 9 || &buf[..9] != b"held-open" {
+        return slopos_testing::fail!("a held-open displaced file became unreadable ({})", read);
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_vfs_rename_over_defers_while_open, suite = fs);
+
 /// Mount `device` and hand the handle to `body`, in its own frame and behind a
 /// `dyn` callback for [`with_mounted`]'s reason: the live superblock, cache and
 /// `Ext2Fs` leave the body no room under the 2 KiB stack gate.

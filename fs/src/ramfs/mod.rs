@@ -723,6 +723,118 @@ impl RamFs {
         })
     }
 
+    /// Move a name over whatever `new_name` held, which `reclaim` says when
+    /// to free, as [`Self::remove_name`]'s does; answers the inode whose free
+    /// was deferred.
+    fn rename_with(
+        &self,
+        old_parent: InodeId,
+        old_name: &[u8],
+        new_parent: InodeId,
+        new_name: &[u8],
+        reclaim: Reclaim,
+    ) -> VfsResult<Option<InodeId>> {
+        // The overwritten file's body leaves the lock as one pointer and is
+        // dropped out here.
+        let mut displaced_body: KVec<FileChunk> = KVec::new();
+        self.with_inner_mut(|inner| {
+            if old_parent == new_parent && old_name == new_name {
+                return Ok(None);
+            }
+
+            let target_inode = {
+                let old_parent_node = inner.get_inode(old_parent)?;
+                if old_parent_node.file_type != FileType::Directory {
+                    return Err(VfsError::NotDirectory);
+                }
+                if old_parent_node.sealed {
+                    return Err(VfsError::PermissionDenied);
+                }
+                old_parent_node.lookup(old_name)?
+            };
+
+            let source_type = inner.get_inode(target_inode)?.file_type;
+
+            // Splicing a directory into its own descendant detaches the whole
+            // subtree: it becomes unreachable from the root and unremovable.
+            if source_type == FileType::Directory
+                && inner.is_ancestor_of(target_inode, new_parent)?
+            {
+                return Err(VfsError::InvalidPath);
+            }
+
+            let displaced = {
+                let new_parent_node = inner.get_inode(new_parent)?;
+                if new_parent_node.file_type != FileType::Directory {
+                    return Err(VfsError::NotDirectory);
+                }
+                if new_parent_node.sealed {
+                    return Err(VfsError::PermissionDenied);
+                }
+                match new_parent_node.lookup(new_name) {
+                    Ok(existing) => Some(existing),
+                    Err(_) => None,
+                }
+            };
+
+            let mut deferred = None;
+            if let Some(existing) = displaced {
+                let existing_type = inner.get_inode(existing)?.file_type;
+                match (source_type, existing_type) {
+                    (FileType::Directory, FileType::Directory) => {
+                        if inner.get_inode(existing)?.dir_entry_count() > 2 {
+                            return Err(VfsError::NotEmpty);
+                        }
+                    }
+                    (FileType::Directory, _) => return Err(VfsError::NotDirectory),
+                    (_, FileType::Directory) => return Err(VfsError::IsDirectory),
+                    _ => {}
+                }
+                inner
+                    .get_inode_mut(new_parent)?
+                    .remove_dir_entry(new_name)?;
+                // Unlinking the entry alone leaks the inode out of the fixed
+                // table, which repeated overwrites then exhaust; one a
+                // descriptor holds is left for `release_detached`.
+                if existing_type == FileType::Directory || reclaim == Reclaim::Now {
+                    displaced_body = inner.inodes[inode_slot(existing)].reset();
+                } else {
+                    inner.get_inode_mut(existing)?.nlink = 0;
+                    deferred = Some(existing);
+                }
+            }
+
+            inner
+                .get_inode_mut(old_parent)?
+                .remove_dir_entry(old_name)?;
+            inner
+                .get_inode_mut(new_parent)?
+                .add_dir_entry(new_name, target_inode)?;
+
+            let is_dir = inner.get_inode(target_inode)?.file_type == FileType::Directory;
+            if is_dir {
+                let target_node = inner.get_inode_mut(target_inode)?;
+                for i in 0..target_node.dir_entries.len() {
+                    if target_node.dir_entries[i].matches(b"..") {
+                        target_node.dir_entries[i].inode = new_parent;
+                        break;
+                    }
+                }
+                target_node.parent = new_parent;
+
+                if old_parent != new_parent {
+                    let old_nlink = inner.get_inode(old_parent)?.nlink;
+                    inner.get_inode_mut(old_parent)?.nlink = old_nlink.saturating_sub(1);
+
+                    let new_nlink = inner.get_inode(new_parent)?.nlink;
+                    inner.get_inode_mut(new_parent)?.nlink = new_nlink.saturating_add(1);
+                }
+            }
+
+            Ok(deferred)
+        })
+    }
+
     /// What a mutation of a regular file's body is refused for. Every hold of
     /// a multi-hold grow repeats this: between two of them the inode may have
     /// been sealed, retyped or recycled.
@@ -838,7 +950,8 @@ impl RamFs {
     }
 }
 
-/// When [`RamFs::remove_name`] gives an inode's slot back.
+/// When [`RamFs::remove_name`] or [`RamFs::rename_with`] gives an inode's slot
+/// back.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Reclaim {
     Now,
@@ -1105,98 +1218,24 @@ impl FileSystem for RamFs {
         new_parent: InodeId,
         new_name: &[u8],
     ) -> VfsResult<()> {
-        // The overwritten file's body leaves the lock as one pointer and is
-        // dropped out here.
-        let mut displaced_body: KVec<FileChunk> = KVec::new();
-        self.with_inner_mut(|inner| {
-            if old_parent == new_parent && old_name == new_name {
-                return Ok(());
-            }
+        self.rename_with(old_parent, old_name, new_parent, new_name, Reclaim::Now)
+            .map(|_| ())
+    }
 
-            let target_inode = {
-                let old_parent_node = inner.get_inode(old_parent)?;
-                if old_parent_node.file_type != FileType::Directory {
-                    return Err(VfsError::NotDirectory);
-                }
-                if old_parent_node.sealed {
-                    return Err(VfsError::PermissionDenied);
-                }
-                old_parent_node.lookup(old_name)?
-            };
-
-            let source_type = inner.get_inode(target_inode)?.file_type;
-
-            // Splicing a directory into its own descendant detaches the whole
-            // subtree: it becomes unreachable from the root and unremovable.
-            if source_type == FileType::Directory
-                && inner.is_ancestor_of(target_inode, new_parent)?
-            {
-                return Err(VfsError::InvalidPath);
-            }
-
-            let displaced = {
-                let new_parent_node = inner.get_inode(new_parent)?;
-                if new_parent_node.file_type != FileType::Directory {
-                    return Err(VfsError::NotDirectory);
-                }
-                if new_parent_node.sealed {
-                    return Err(VfsError::PermissionDenied);
-                }
-                match new_parent_node.lookup(new_name) {
-                    Ok(existing) => Some(existing),
-                    Err(_) => None,
-                }
-            };
-
-            if let Some(existing) = displaced {
-                let existing_type = inner.get_inode(existing)?.file_type;
-                match (source_type, existing_type) {
-                    (FileType::Directory, FileType::Directory) => {
-                        if inner.get_inode(existing)?.dir_entry_count() > 2 {
-                            return Err(VfsError::NotEmpty);
-                        }
-                    }
-                    (FileType::Directory, _) => return Err(VfsError::NotDirectory),
-                    (_, FileType::Directory) => return Err(VfsError::IsDirectory),
-                    _ => {}
-                }
-                inner
-                    .get_inode_mut(new_parent)?
-                    .remove_dir_entry(new_name)?;
-                // Unlinking the entry alone leaks the inode out of the fixed
-                // table, which repeated overwrites then exhaust.
-                displaced_body = inner.inodes[inode_slot(existing)].reset();
-            }
-
-            inner
-                .get_inode_mut(old_parent)?
-                .remove_dir_entry(old_name)?;
-            inner
-                .get_inode_mut(new_parent)?
-                .add_dir_entry(new_name, target_inode)?;
-
-            let is_dir = inner.get_inode(target_inode)?.file_type == FileType::Directory;
-            if is_dir {
-                let target_node = inner.get_inode_mut(target_inode)?;
-                for i in 0..target_node.dir_entries.len() {
-                    if target_node.dir_entries[i].matches(b"..") {
-                        target_node.dir_entries[i].inode = new_parent;
-                        break;
-                    }
-                }
-                target_node.parent = new_parent;
-
-                if old_parent != new_parent {
-                    let old_nlink = inner.get_inode(old_parent)?.nlink;
-                    inner.get_inode_mut(old_parent)?.nlink = old_nlink.saturating_sub(1);
-
-                    let new_nlink = inner.get_inode(new_parent)?.nlink;
-                    inner.get_inode_mut(new_parent)?.nlink = new_nlink.saturating_add(1);
-                }
-            }
-
-            Ok(())
-        })
+    fn rename_detaching(
+        &self,
+        old_parent: InodeId,
+        old_name: &[u8],
+        new_parent: InodeId,
+        new_name: &[u8],
+    ) -> VfsResult<Option<InodeId>> {
+        self.rename_with(
+            old_parent,
+            old_name,
+            new_parent,
+            new_name,
+            Reclaim::Deferred,
+        )
     }
 
     fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {

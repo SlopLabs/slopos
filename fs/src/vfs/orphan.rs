@@ -38,7 +38,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use slopos_ostd::KVec;
 use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock, WaitAbort, WaitQueue};
 
 use crate::vfs::traits::{FileSystem, InodeId, same_filesystem};
 
@@ -79,6 +79,15 @@ static TRACKED: SpinLock<KVec<Tracked>> = SpinLock::new(
 /// Mirrors the number of releasable records, so a writeback thread's wait
 /// predicate reads one relaxed atomic instead of taking the lock above.
 static RELEASABLE: AtomicUsize = AtomicUsize::new(0);
+
+/// Woken as each removal scope closes, for an open whose walk took the name
+/// that scope was removing.
+static REMOVAL_ENDED: WaitQueue =
+    WaitQueue::new(lock_class!("VFS_REMOVAL_ENDED", LOCK_LEVEL_RESOURCE));
+
+/// The longest an open waits out a removal it raced. A removal holds nothing
+/// such an open needs, so it ends in the time a rename takes.
+const REMOVAL_WAIT_MS: u64 = 50;
 
 /// One-shot, so the degraded-mode line below is reported rather than repeated.
 static PLACEHOLDER_REFUSED: InitFlag = InitFlag::new();
@@ -260,6 +269,12 @@ pub enum RemovalOutcome {
 /// `removing` and will not come back.
 #[must_use = "a free that became runnable here needs the caller to drain it"]
 pub fn end_removal(fs: &'static dyn FileSystem, inode: InodeId, outcome: RemovalOutcome) -> bool {
+    let runnable = close_removal(fs, inode, outcome);
+    REMOVAL_ENDED.wake_all();
+    runnable
+}
+
+fn close_removal(fs: &'static dyn FileSystem, inode: InodeId, outcome: RemovalOutcome) -> bool {
     let mut table = TRACKED.lock();
     let Some(idx) = find(&table, fs, inode) else {
         return false;
@@ -284,6 +299,24 @@ pub fn end_removal(fs: &'static dyn FileSystem, inode: InodeId, outcome: Removal
             }
             false
         }
+    }
+}
+
+fn removing(fs: &'static dyn FileSystem, inode: InodeId) -> bool {
+    let table = TRACKED.lock();
+    find(&table, fs, inode).is_some_and(|idx| table[idx].removing)
+}
+
+/// Wait out a removal of `inode`'s last name that a walk raced, so the walk
+/// taken again finds what the removal left: no name, or the file a rename put
+/// in its place. `Err` only for a task killed while it waited.
+pub fn await_removal(fs: &'static dyn FileSystem, inode: InodeId) -> Result<(), WaitAbort> {
+    if !removing(fs, inode) {
+        return Ok(());
+    }
+    match REMOVAL_ENDED.wait_event_timeout(|| !removing(fs, inode), REMOVAL_WAIT_MS) {
+        Err(WaitAbort::Killed) => Err(WaitAbort::Killed),
+        Ok(()) | Err(WaitAbort::Timeout | WaitAbort::Interrupted | WaitAbort::NoRuntime) => Ok(()),
     }
 }
 

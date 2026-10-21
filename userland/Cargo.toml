@@ -378,6 +378,10 @@ name = "reboot_clone_test"
 path = "src/bin/tests/reboot_clone_test.rs"
 
 [[bin]]
+name = "rename_test"
+path = "src/bin/tests/rename_test.rs"
+
+[[bin]]
 name = "session_smoke_test"
 path = "src/bin/tests/session_smoke_test.rs"
 

@@ -108,23 +108,58 @@ pub fn vfs_open_handle_flags_at(
     // A create may have *just* made this name: re-resolving it would be a
     // second lookup of something this call itself is responsible for.
     let created = flags.create;
-    let opened =
-        crate::vfs::ops::vfs_open_flags_at(path, cwd, flags, resolve_flags, who, create_mode)
-            .map_err(|e| e.to_errno())?;
-    let handle = register_vnode(
-        path,
-        cwd,
-        resolve_flags,
-        who,
-        opened.fs,
-        opened.inode,
-        created,
-    )?;
-    Ok(OpenedVnode {
-        handle,
-        fifo: opened.file_type == crate::vfs::FileType::Pipe,
-    })
+    // `rename(2)` keeps the name it replaces visible throughout, so an open
+    // that lost the name between two of its steps walks again: the inode the
+    // walk found may be gone before the walk reads it, or refused once its
+    // removal begins. A name that is truly gone is gone on the next walk too.
+    // An exclusive create answers for the file it made alone.
+    let retry = !flags.exclusive;
+    for _ in 0..RACED_WALKS {
+        let opened = match crate::vfs::ops::vfs_open_flags_at(
+            path,
+            cwd,
+            flags,
+            resolve_flags,
+            who,
+            create_mode,
+        ) {
+            Ok(opened) => opened,
+            Err(crate::vfs::VfsError::NotFound)
+                if retry
+                    && crate::vfs::path::resolve_path_at(path, cwd, resolve_flags, who).is_ok() =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e.to_errno()),
+        };
+        let registered = register_vnode(
+            path,
+            cwd,
+            resolve_flags,
+            who,
+            opened.fs,
+            opened.inode,
+            created,
+        );
+        match registered {
+            Err(slopos_abi::Errno::ENOENT) if retry => {
+                if crate::vfs::orphan::await_removal(opened.fs, opened.inode).is_err() {
+                    return Err(slopos_abi::Errno::EINTR);
+                }
+            }
+            registered => {
+                return registered.map(|handle| OpenedVnode {
+                    handle,
+                    fifo: opened.file_type == crate::vfs::FileType::Pipe,
+                });
+            }
+        }
+    }
+    Err(slopos_abi::Errno::ENOENT)
 }
+
+/// Walks an open takes before a name that keeps changing under it is gone.
+const RACED_WALKS: usize = 8;
 
 /// Open an existing directory as a vnode handle — what a `dirfd` and
 /// `getdents64` need, and what [`crate::vfs::ops::vfs_open_flags_at`] refuses
