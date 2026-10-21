@@ -1913,7 +1913,7 @@ to one ownership map, stated once in `slopos_abi::fs::ROOT_LAYOUT` and
 `/src` and `/usr/local` — theirs with everything below while
 `/var/lib/slopos/owners` names them, a `<uid>:<gid> <tree>` line each, which a
 root made for one person does for all three. The first person's home is
-0755 while they are alone on the root, and every later person's 0700. The
+0755 until a second person joins, and every later person's 0700. The
 image builders lay the map out and write the record on a new image and follow
 the one a preserved image carries, read through the listings its trees are
 (`fs_tree.py read`, which tells a record that is absent from one it cannot
@@ -1934,16 +1934,21 @@ last entry (`fs_tree.py walk`).
 **Software is installed for everyone in `/usr/local`, for oneself in
 `~/.local`.** While one person has an account `/usr/local` is theirs, and
 their tools write it. The add that makes a second (`users add`, holding
-`DacOverride`) shares the root (`slopos_userland::root_layout::share`): the
+`DacOverride`) shares the root (`slopos_userland::root_layout::share`)
+before it records the new person, and adds nobody when that fails: the
 first person's home closed to others, then every entry of `/usr/local` uid
 0's and writable by uid 0 alone, each directory changed before what is in it
 is listed, so nothing the first person runs puts a name there behind the walk,
 and each mode read again once uid 0 holds the entry; a file with another name
 that another uid holds loses only its name there, and a link goes unless
 every name it leads through, link by link, is in a directory only uid 0 may
-change and it ends at what only uid 0 may change; last the record without
-`/usr/local`. Init finishes a hand-over cut short at the next boot, and none
-is undone. A manifest the first person wrote stays theirs, and uid 0 installs
+change and it ends at what only uid 0 may change, a directory only within
+`/usr/local`; last the record without `/usr/local`. Init finishes a hand-over
+cut short at the next boot, and none is undone. Owners change in place, so a
+descriptor the first person opened there for writing before writes until it
+closes; init notes at a boot that began with `/usr/local` the system's
+(`root_layout::settled`, `/run/slopos-local`) that none can be open, and
+`priv` trusts `/usr/local/bin` only then. A manifest the first person wrote stays theirs, and uid 0 installs
 over it without believing it. From then on a session installs there through
 privd's `org.slopos.software.install` (`allow admin confirm`, `allow
 paired`, one at a time), which runs `/bin/tree-install` as uid 0 holding
@@ -1961,8 +1966,8 @@ one the host installs is. A person's own software lives in `~/.local`: `tree-ins
 their home keeps the manifest in `~/.local/share/slopos/trees`, `~/.local/bin`
 is on their `PATH`, which the desktop's terminal and dock hand what they start
 with the rest of the session's environment, the dock reads `~/.local/share`,
-and the loader searches `$HOME/.local/lib`. Once uid 0 holds `/usr/local`,
-`priv` finds commands in `/usr/local/bin` too. `apps_test --trees` grades it,
+and the loader searches `$HOME/.local/lib`. From the boot after the
+hand-over, `priv` finds commands in `/usr/local/bin` too. `apps_test --trees` grades it,
 and `dl_test` the loader's search.
 
 **The machine knows its people.** The accounts record
@@ -2355,7 +2360,8 @@ alone, and ends as it ends; a lone command's terminal of its own takes no
 Ctrl+Z as the command starts, since nothing would continue what it stopped.
 The command is a program in one of `DEFAULT_PATH`'s directories that only uid
 0 owns and can write, with every directory above it — `/usr/local/bin` only
-while uid 0 holds `/usr/local` — named there by its path or found there by its
+once uid 0 has held `/usr/local` since the boot began
+(`slopos_userland::root_layout::settled`) — named there by its path or found there by its
 name, and leading, through links each in a directory only uid 0 can change, to
 a file only uid 0 can change in one, which is what runs, and so is the
 interpreter a script names; never `/bin/priv`, nor the shell told to read what

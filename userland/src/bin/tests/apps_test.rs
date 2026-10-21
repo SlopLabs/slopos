@@ -27,7 +27,7 @@ use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_protocol::{Event, PROTOCOL_VERSION, Request, Server};
 use slopos_tree_core::MANIFEST_DIR;
 use slopos_userland::init_control::{self, Command as InitCommand};
-use slopos_userland::root_layout::search_path;
+use slopos_userland::root_layout::{self, search_path};
 use slopos_userland::syscall::process::{self, Endowment};
 use slopos_userland::syscall::{OwnedFd, fs as sys_fs, net};
 
@@ -493,7 +493,8 @@ fn the_first_person_installs_for_everyone_through_privd() -> bool {
         return false;
     };
     let alias = tree.join("bin").join(EVERYONE_ALIAS);
-    if let Err(e) = std::os::unix::fs::symlink(EVERYONE_COMMAND, &alias) {
+    let aliased = format!("../bin/{EVERYONE_COMMAND}");
+    if let Err(e) = std::os::unix::fs::symlink(&aliased, &alias) {
         return fail(format!("{}: {e}", alias.display()));
     }
     let (code, said) = install_for_everyone(EVERYONE, &tree);
@@ -508,7 +509,7 @@ fn the_first_person_installs_for_everyone_through_privd() -> bool {
         (Ok(file), Ok(target), Ok(kept))
             if file.uid() == 0
                 && file.mode() & 0o7777 == 0o755
-                && target == Path::new(EVERYONE_COMMAND)
+                && target == Path::new(&aliased)
                 && kept.uid() == 0 =>
         {
             true
@@ -671,16 +672,29 @@ fn the_second_person_runs_everyone_s_and_not_the_first_s_own() -> bool {
 }
 
 /// What the system installed is found where only uid 0 can change it, so
-/// `priv` runs it: here for root, which holds the ceiling and runs it
+/// `priv` runs it, but only from a boot that began with `/usr/local` the
+/// system's, which no descriptor the first person opened there before the
+/// hand-over outlives: here for root, which holds the ceiling and runs it
 /// itself, as the same rule finds it for anyone.
 fn priv_runs_what_the_system_installed() -> bool {
-    let ran = Command::new("/bin/priv")
-        .arg(EVERYONE_COMMAND)
-        .env_remove(slopos_priv_core::ENV_FD)
-        .stdin(Stdio::null())
-        .output();
-    match ran {
-        Ok(out) if out.status.success() && out.stdout == b"everyone\n" => true,
+    let run = || {
+        Command::new("/bin/priv")
+            .arg(EVERYONE_COMMAND)
+            .env_remove(slopos_priv_core::ENV_FD)
+            .stdin(Stdio::null())
+            .output()
+    };
+    let _ = fs::remove_file(root_layout::SETTLED);
+    let unsettled = run();
+    let settled = root_layout::settle();
+    let ran = run();
+    let _ = fs::remove_file(root_layout::SETTLED);
+    match (unsettled, settled, ran) {
+        (Ok(early), Ok(()), Ok(out))
+            if !early.status.success() && out.status.success() && out.stdout == b"everyone\n" =>
+        {
+            true
+        }
         other => fail(format!("priv {EVERYONE_COMMAND}: {other:?}")),
     }
 }

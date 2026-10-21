@@ -809,9 +809,10 @@ mod tests {
 
     /// `scripts/build_fs_image.sh` mirrors `SLIBC_LICENSES` and
     /// `slopos_abi::fs::BASE_DIRS`, `scripts/lib/root_layout.sh` mirrors
-    /// `ROOT_LAYOUT`, `PERSON_TREES`, the first person's ids and the record,
-    /// `ROOT_DIRS` is the layout's directories below `/` that are no tree of
-    /// theirs, and `OWNERS_RECORD` names every tree as init does.
+    /// `ROOT_LAYOUT`, `PERSON_TREES`, the first person's ids, the record and
+    /// the accounts store, `ROOT_DIRS` is the layout's directories below `/`
+    /// that are no tree of theirs, and `OWNERS_RECORD` names every tree as
+    /// init does.
     #[test]
     fn the_mirrored_lists_agree() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -851,6 +852,8 @@ mod tests {
         assert!(layout_sh.contains(&format!("\nPERSON_OWNER={person}\n")));
         assert_eq!(constant("OWNERS_RECORD"), OWNERS_RECORD.0);
         assert!(layout_sh.contains(&format!("\nOWNERS_RECORD={}\n", OWNERS_RECORD.0)));
+        let accounts = format!("\nACCOUNTS_STORE={}\n", constant("ACCOUNTS_STORE"));
+        assert!(layout_sh.contains(&accounts));
         let record: String = trees
             .iter()
             .map(|tree| format!("{person} {tree}\n"))

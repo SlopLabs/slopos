@@ -32,6 +32,7 @@ use crate::apps::shell::args::{Invocation, Source};
 use crate::apps::shell::env::account;
 use crate::held::{self, PRIV_ENV};
 use crate::privd::{self, Input};
+use crate::root_layout;
 use crate::syscall::{SyscallError, core as sys_core, fs};
 
 pub const ACTION: &str = "org.slopos.priv";
@@ -207,7 +208,8 @@ fn find(name: &[u8]) -> Result<Found, String> {
 }
 
 /// [`DEFAULT_PATH`]'s directories that only uid 0 can change, in its order:
-/// `/usr/local/bin` only while uid 0 holds `/usr/local`.
+/// `/usr/local/bin` only once uid 0 has held `/usr/local` since the boot
+/// began.
 fn trusted_dirs() -> Vec<PathBuf> {
     DEFAULT_PATH
         .to_bytes()
@@ -262,9 +264,10 @@ fn interpreter(file: &Path) -> Option<PathBuf> {
 
 /// Whether `dir` is a directory by its canonical path that only uid 0 can
 /// change, and so is every directory above it, so none can be renamed away
-/// beneath it.
+/// beneath it; one in `/usr/local` only once that is [`root_layout::settled`].
 fn trusted_dir(dir: &Path) -> bool {
-    std::fs::canonicalize(dir).is_ok_and(|canonical| canonical == dir)
+    (!dir.starts_with(root_layout::LOCAL) || root_layout::settled())
+        && std::fs::canonicalize(dir).is_ok_and(|canonical| canonical == dir)
         && dir.ancestors().all(|at| {
             std::fs::symlink_metadata(at).is_ok_and(|m| m.is_dir() && only_uid_0_writes(&m))
         })

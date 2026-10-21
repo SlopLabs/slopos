@@ -543,8 +543,9 @@ make_dir() {
 # map's mode, and on a new image the root directory too. A preserved root's
 # existing ones are init's to bring to the map, once.
 lay_out_root() {
-    local spec path owner
-    for spec in "${ROOT_LAYOUT[@]}" "${PERSON_TREES[0]}:-:-:0755"; do
+    local spec path owner home=0755
+    root_layout_holds /usr/local || home=0700
+    for spec in "${ROOT_LAYOUT[@]}" "${PERSON_TREES[0]}:-:-:$home"; do
         path="${spec%%:*}"
         if [ "$path" = / ]; then
             [ "$FRESH" = 1 ] || continue
@@ -562,14 +563,20 @@ lay_out_root() {
 }
 
 # What the guest's record says its first person holds, read where nothing the
-# guest made can redirect it. Init lays out a root without one at its boot;
-# one this cannot read grants nothing.
+# guest made can redirect it. Init lays out a root without one at its boot,
+# keeping /usr/local the system's once its accounts name two people, which
+# this cannot count, so a root with accounts gets it as uid 0's and init hands
+# it over if they name one; one this cannot read grants nothing.
 read_owners() {
     local record status=0
     record="$("${FS_TREE[@]}" read "$IMAGE_PATH" "$OWNERS_RECORD")" || status=$?
     case "$status" in
     0) root_layout_read_record <<<"$record" ;;
-    4) ;;
+    4)
+        if "${FS_TREE[@]}" exists "$IMAGE_PATH" "$ACCOUNTS_STORE"; then
+            HELD_TREES=("${PERSON_TREES[0]}" "${PERSON_TREES[1]}")
+        fi
+        ;;
     *)
         echo "build_fs_image: installing as uid 0's, as an unread $OWNERS_RECORD leaves everything" >&2
         HELD_TREES=()

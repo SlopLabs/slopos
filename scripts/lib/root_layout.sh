@@ -7,6 +7,7 @@ ROOT_LAYOUT=(/:0:0:0755 /etc:0:0:0755 /var:0:0:0755 /var/lib:0:0:0755 /var/lib/s
 PERSON_TREES=(/home/user /src /usr/local)
 PERSON_OWNER=1000:1000
 OWNERS_RECORD=/var/lib/slopos/owners
+ACCOUNTS_STORE=/var/lib/slopos/accounts
 # The trees the root's record names, every one on a new root.
 HELD_TREES=("${PERSON_TREES[@]}")
 

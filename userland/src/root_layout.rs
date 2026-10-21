@@ -13,6 +13,28 @@ use slopos_abi::fs::{
 /// The prefix everyone's software is installed in.
 pub const LOCAL: &str = "/usr/local";
 
+/// Made by init when [`LOCAL`] was the system's before this boot ran
+/// anything as a person, so no descriptor the first person opened on it
+/// for writing before the hand-over is open still.
+pub const SETTLED: &str = "/run/slopos-local";
+
+/// Whether [`LOCAL`] has been the system's since this boot began.
+pub fn settled() -> bool {
+    fs::symlink_metadata(SETTLED)
+        .is_ok_and(|meta| meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0)
+}
+
+/// Note that [`LOCAL`] is the system's from this boot on.
+pub fn settle() -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(SETTLED)
+        .map(drop)
+}
+
 /// A person's command search path: the system's own tools, then their
 /// `~/.local/bin` ahead of what `DEFAULT_PATH` puts after them.
 pub fn search_path(home: &str) -> String {
@@ -75,6 +97,21 @@ impl Owners {
             .iter()
             .zip(self.held)
             .any(|(t, held)| held && *t == tree)
+    }
+
+    /// The first person's home where they hold it: open to others while
+    /// they are alone on the root, closed once it is shared.
+    pub fn home(&self) -> Option<RootDir> {
+        let mode = match self.holds(LOCAL) {
+            true => 0o755,
+            false => 0o700,
+        };
+        self.holds(SESSION_HOME).then_some(RootDir {
+            path: SESSION_HOME,
+            uid: SESSION_UID,
+            gid: SESSION_GID,
+            mode,
+        })
     }
 
     fn without(mut self, tree: &str) -> Owners {
@@ -151,14 +188,6 @@ fn people(root: &Path) -> Option<usize> {
         .map(|accounts| accounts.people().len())
 }
 
-/// The first person's home as a root made for them has it.
-pub const HOME: RootDir = RootDir {
-    path: SESSION_HOME,
-    uid: SESSION_UID,
-    gid: SESSION_GID,
-    mode: 0o755,
-};
-
 /// Make each directory of the map the root at `root` lacks, hand the first
 /// person their trees once per root, and `/usr/local` to the system once a
 /// second person has an account. What the root's record says now; a record
@@ -182,8 +211,7 @@ pub fn lay_out(root: &Path) -> Owners {
             return Owners::NOBODY;
         }
     };
-    let held_home = owners.holds(SESSION_HOME).then_some(HOME);
-    for dir in ROOT_LAYOUT.into_iter().chain(held_home) {
+    for dir in ROOT_LAYOUT.into_iter().chain(owners.home()) {
         let path = under(root, dir.path);
         if fs::symlink_metadata(&path).is_ok() {
             continue;
@@ -214,7 +242,7 @@ pub fn lay_out(root: &Path) -> Owners {
     match share(root) {
         Ok(()) => owners.without(LOCAL),
         Err(e) => {
-            eprintln!("init: {e}");
+            eprintln!("init: {e}; the next boot tries again");
             owners
         }
     }
@@ -334,7 +362,7 @@ pub fn share(root: &Path) -> Result<(), String> {
     let refused = home_to_themselves(root) + take_local(root);
     if refused > 0 {
         return Err(format!(
-            "{LOCAL}: {refused} entries are not the system's yet; the next boot tries again"
+            "{LOCAL}: {refused} entries could not be made the system's"
         ));
     }
     let _ = crate::syscall::fs::sync();
@@ -405,16 +433,17 @@ fn take_local(root: &Path) -> usize {
             }
         }
     }
-    for link in links.iter().filter(|link| !names_the_system_s(link)) {
+    for link in links.iter().filter(|link| !names_the_system_s(root, link)) {
         refused += usize::from(fs::remove_file(link).is_err());
     }
     refused
 }
 
-/// Whether `link`, followed as the kernel follows it, finds every name in a
-/// directory only uid 0 may change and ends at what only uid 0 may change,
-/// so nobody else can make it lead anywhere else.
-fn names_the_system_s(link: &Path) -> bool {
+/// Whether `link` on the root at `root`, followed as the kernel follows it,
+/// finds every name in a directory only uid 0 may change and ends at what
+/// only uid 0 may change, a directory only within `/usr/local`, so nobody
+/// else can make it lead anywhere else or put names beneath it.
+fn names_the_system_s(root: &Path, link: &Path) -> bool {
     let (Some(dir), Some(name)) = (link.parent(), link.file_name()) else {
         return false;
     };
@@ -423,8 +452,8 @@ fn names_the_system_s(link: &Path) -> bool {
     let mut followed = 0;
     while let Some(next) = rest.pop() {
         match next.components().next() {
-            Some(Component::RootDir) => at = PathBuf::from("/"),
-            Some(Component::ParentDir) => {
+            Some(Component::RootDir) => at = root.to_path_buf(),
+            Some(Component::ParentDir) if at != root => {
                 at.pop();
             }
             Some(Component::Normal(name)) => {
@@ -455,7 +484,7 @@ fn names_the_system_s(link: &Path) -> bool {
             _ => {}
         }
     }
-    only_uid_0_changes(&at)
+    only_uid_0_changes(&at) && (!at.is_dir() || at.starts_with(under(root, LOCAL)))
 }
 
 fn only_uid_0_changes(path: &Path) -> bool {

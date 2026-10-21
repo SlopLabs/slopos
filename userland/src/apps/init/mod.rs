@@ -191,6 +191,11 @@ fn boot() -> ! {
     collect_crash_records();
     let root = std::path::Path::new("/");
     let holder = crate::root_layout::lay_out(root).owner(LOCAL);
+    if holder == (0, 0)
+        && let Err(e) = crate::root_layout::settle()
+    {
+        eprintln!("init: {LOCAL}: {e}");
+    }
     if let Err(e) = crate::tree::hand_over(slopos_tree_core::APPS, holder) {
         eprintln!("init: the apps' manifest: {e}");
     }

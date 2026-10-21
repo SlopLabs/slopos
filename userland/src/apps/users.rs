@@ -311,7 +311,19 @@ fn change(request: Request) -> Result<String, String> {
             (format!("{name}'s password is changed"), Home::Kept)
         }
     };
-    if let Err(why) = store.record(&accounts) {
+    let shares = matches!(home, Home::Made(_))
+        && accounts.people().len() > 1
+        && Owners::read(top).is_some_and(|owners| owners.holds(LOCAL));
+    let recorded = match shares {
+        true => root_layout::share(top).map(|()| {
+            said.push_str(&format!(
+                "; {LOCAL} is the system's now, installed into through privd, trusted by priv from the next boot, and {SESSION_HOME} closed to others"
+            ))
+        }),
+        false => Ok(()),
+    }
+    .and_then(|()| store.record(&accounts));
+    if let Err(why) = recorded {
         if let Home::Made(home) = home {
             let _ = std::fs::remove_dir(home);
         }
@@ -319,17 +331,6 @@ fn change(request: Request) -> Result<String, String> {
     }
     let synced = store.sync();
     store.unlock();
-    if matches!(home, Home::Made(_))
-        && accounts.people().len() > 1
-        && Owners::read(top).is_some_and(|owners| owners.holds(LOCAL))
-    {
-        said.push_str(&match root_layout::share(top) {
-            Ok(()) => format!(
-                "; {LOCAL} is the system's now, installed into through privd, and {SESSION_HOME} closed to others"
-            ),
-            Err(why) => format!("; {why}"),
-        });
-    }
     if let Home::Removed(person) = home {
         let gone = remove_home(&person).unwrap_or_else(|why| format!("; its home stays: {why}"));
         said.push_str(&gone);

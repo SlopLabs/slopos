@@ -557,7 +557,9 @@ fn stage_shared_root() -> bool {
     };
     made && written
         && symlink("tool", old_root("usr/local/bin/kept")).is_ok()
-        && symlink(old_root("home/user/build"), old_root("usr/local/bin/away")).is_ok()
+        && symlink("/home/user/build", old_root("usr/local/bin/away")).is_ok()
+        && symlink("/usr/local/bin/tool", old_root("usr/local/bin/fixed")).is_ok()
+        && symlink("/home", old_root("usr/local/homes")).is_ok()
         && symlink("../../../home/user/relay", old_root("usr/local/bin/chain")).is_ok()
         && symlink("../../usr/local/bin/tool", old_root("home/user/relay")).is_ok()
         && fs::hard_link(
@@ -572,6 +574,8 @@ fn stage_shared_root() -> bool {
             ("usr/local/bin/kept", USER),
             ("usr/local/bin/away", USER),
             ("usr/local/bin/chain", USER),
+            ("usr/local/bin/fixed", USER),
+            ("usr/local/homes", USER),
             ("usr/local/open", USER),
             ("home/user", USER),
             ("home/user/build", USER),
@@ -595,8 +599,10 @@ fn stage_shared_root() -> bool {
 
 /// A root shared with a second person has `/usr/local` uid 0's and writable
 /// by uid 0 alone to its last entry; another uid's file loses only its name
-/// there, a link that leads through what another uid may change goes, one
-/// within it stays. The first person's files stay theirs, their home closed
+/// there, a link that leads through what another uid may change goes, as
+/// does one to a directory outside it, and one within it stays, named from
+/// the root or from its directory. The first person's files stay theirs,
+/// their home closed
 /// to others, and so does the apps' manifest they wrote, which uid 0 does not
 /// believe.
 fn usr_local_is_handed_to_the_system_whole() -> bool {
@@ -641,6 +647,14 @@ fn usr_local_is_handed_to_the_system_whole() -> bool {
         (
             held("usr/local/bin/chain").is_none(),
             "a link through a person's link".into(),
+        ),
+        (
+            held("usr/local/bin/fixed").map(|h| h.0) == Some(0),
+            "a link within it named from the root".into(),
+        ),
+        (
+            held("usr/local/homes").is_none(),
+            "a link to a directory outside it".into(),
         ),
         (held("home/user") == Some((USER, 0o700)), "the home".into()),
         (
@@ -715,6 +729,36 @@ fn a_hand_over_cut_short_is_finished_at_boot() -> bool {
         ));
         false
     }
+}
+
+/// A root without a record whose accounts name two people is laid out with
+/// `/usr/local` the system's and the first person's home closed, as a
+/// hand-over leaves it.
+fn a_recordless_root_of_two_is_shared() -> bool {
+    if !stage_old_root() || fs::create_dir_all(old_root("var/lib/slopos")).is_err() {
+        say("could not stage a root written as uid 0");
+        return false;
+    }
+    let Some(_people) = TwoPeople::record() else {
+        say("could not record two people on the staged root");
+        return false;
+    };
+    root_layout::lay_out(Path::new(OLD_ROOT));
+    let record = fs::read_to_string(old_root("var/lib/slopos/owners")).unwrap_or_default();
+    let local = owner_in_old_root("usr/local/bin/tool");
+    let notes = owner_in_old_root("home/user/notes");
+    let home = stat_of(&old_root("home/user")).map(|(.., mode)| mode);
+    record == "1000:1000 /home/user\n1000:1000 /src\n"
+        && local == Some((0, 0))
+        && notes == Some((USER, USER))
+        && home == Some(0o700)
+        || {
+            say(&format!(
+                "laid out: the record {record:?}, a file of /usr/local {local:?}, \
+                 one of the home {notes:?}, the home's mode {home:?}"
+            ));
+            false
+        }
 }
 
 fn session_is_the_person() -> bool {
@@ -842,6 +886,10 @@ fn main() {
         (
             "a_hand_over_cut_short_is_finished_at_boot",
             a_hand_over_cut_short_is_finished_at_boot,
+        ),
+        (
+            "a_recordless_root_of_two_is_shared",
+            a_recordless_root_of_two_is_shared,
         ),
         ("clean_up", clean_up),
     ]);

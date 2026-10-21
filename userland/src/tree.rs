@@ -48,7 +48,7 @@ pub fn give(path: &str, (uid, gid): (u32, u32)) -> Result<(), String> {
 
 /// A file made where nothing is, a link included, which a plain create
 /// would follow.
-pub fn create_new(path: &str) -> std::io::Result<File> {
+pub fn create_new(path: impl AsRef<Path>) -> std::io::Result<File> {
     OpenOptions::new().write(true).create_new(true).open(path)
 }
 
@@ -290,7 +290,10 @@ pub fn stage(source: &Path) -> Result<Staged, String> {
                 walked.push(name);
                 dir = open_at(&dir, name, O_RDONLY | O_DIRECTORY).map_err(shown)?;
                 if !dir.metadata().is_ok_and(|meta| everyone_may(&meta, true)) {
-                    return Err(format!("{}: not everyone may reach it", source.display()));
+                    return Err(format!(
+                        "{}: not everyone may reach it, and only what everyone may read goes in for everyone",
+                        source.display()
+                    ));
                 }
             }
             _ => return Err(format!("{}: a tree is named without ..", source.display())),
@@ -373,7 +376,7 @@ fn copy_at(dir: &File, from: &Path, to: &Path, depth: usize) -> Result<(), Strin
                 if !meta.is_file() || !everyone_may(&meta, false) {
                     return Err(refused(&source));
                 }
-                let mut copy = create_new(&dest.to_string_lossy()).map_err(shown)?;
+                let mut copy = create_new(&dest).map_err(shown)?;
                 std::io::copy(&mut file, &mut copy).map_err(shown)?;
                 copy.set_permissions(fs::Permissions::from_mode(meta.mode() & 0o7777 | 0o600))
                     .map_err(shown)?;

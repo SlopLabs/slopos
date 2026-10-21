@@ -419,10 +419,11 @@ and `/usr/local` — they hold, as `<uid>:<gid> <tree>` lines; init, the
 installer, the image builders (`fs_tree.py read`) and `check_fs_image.sh
 --map` take owners from it, and init rewrites a record from before the map
 named the home `/home`, moving nothing. The `users add` that makes a second
-person shares the root (`root_layout::share`): the first person's home closed
-to others and `/usr/local` uid 0's, whole and writable by uid 0 alone, links
-kept only where every hop is uid 0's, and the record last; init finishes one
-cut short. From then on `tree-install` asks privd's
+person shares the root (`root_layout::share`) before recording them: the
+first person's home closed to others and `/usr/local` uid 0's, whole and
+writable by uid 0 alone, links kept only where every hop is uid 0's and a
+directory they end at is within it, and the record last; init finishes one
+cut short, and `priv` trusts `/usr/local/bin` from the next boot. From then on `tree-install` asks privd's
 `org.slopos.software.install` (`allow admin confirm`, `allow paired`), which
 runs it as uid 0 holding nothing at `/usr/local` alone, from a copy of what
 everyone may read whose links stay in the tree (`tree::stage`), and
@@ -439,7 +440,9 @@ library from `/usr/local/lib` but not finding the first's own, a tree holding
 what not everyone may read refused and one whose link leads out of it, and
 `priv` finding `/usr/local/bin`; `dl_test` the loader's order, and `dac_test`
 the record's migration, the hand-over on a crafted root — a link through a
-person's link among it — and one a boot finishes. `check_fs_image.sh --map` holds the tests image after the suite to
+person's link and one to a directory outside among it — one a boot finishes,
+and a recordless root of two people laid out shared; `apps_test` holds `priv`
+to refusing `/usr/local/bin` until the boot is settled. `check_fs_image.sh --map` holds the tests image after the suite to
 a `/usr/local` that is the system's to its last entry, and the one-person
 roots `test-persist` and `test-toolchain` boot to the map as before.
 
@@ -508,9 +511,9 @@ roots `test-persist` and `test-toolchain` boot to the map as before.
   record keeps its uids for good.
 - **The first person's home is `/home/user`**, every other person's
   `/home/<name>`. A home is closed to others once anyone else could open it:
-  the first person's is 0755 while they are alone, as before, and the add
-  that makes a second closes it, as every later person's is made 0700, as
-  Debian's `adduser` has made homes since 12.
+  the first person's is 0755 until a second person joins, as before, and the
+  add that makes a second closes it for good, as every later person's is made
+  0700, as Debian's `adduser` has made homes since 12.
 - **Proving oneself is the current password, or a click for a person
   without one.** Changing one's own password needs the current one through
   either action; setting a first one needs the click privd's consent gives.
@@ -735,8 +738,8 @@ roots `test-persist` and `test-toolchain` boot to the map as before.
   anyway — then installs from that copy: no link swapped in under the walk,
   and no entry changed between its mode and its bytes, publishes what the
   requester could not read. A link in the tree is relative and climbs no
-  higher than the tree's top before it names anything, so what it names was
-  installed with it. The action is exclusive, so the copy has one directory,
+  higher than the tree's top before it names anything, so it names nothing
+  outside `/usr/local`. The action is exclusive, so the copy has one directory,
   and the next run takes away what one cut short left; the copy and the
   install both count against the mechanism's `DiskBlocks` ceiling. A
   person's own tree goes into their home holding nothing, its manifest kept
@@ -744,7 +747,12 @@ roots `test-persist` and `test-toolchain` boot to the map as before.
 - **The hand-over changes owners in place**, as `chown` does on any Unix: a
   file the first person opened for writing before it they write until they
   close it, and a reboot ends every such descriptor. Copying every file anew
-  would cost a toolchain's size at the add.
+  would cost a toolchain's size at the add, so what must not run their code
+  waits for the reboot instead: `priv` trusts `/usr/local/bin` only on a boot
+  init began with `/usr/local` the system's (`/run/slopos-local`). The add
+  shares the root before it records the second person and adds nobody when
+  that fails, so no second person runs from a `/usr/local` the first one
+  still holds.
 - **What cannot read a record grants nothing.** An image builder that cannot
   read a preserved root's record installs as uid 0's, init on a root whose
   record or accounts it cannot read gives the first person nothing and moves

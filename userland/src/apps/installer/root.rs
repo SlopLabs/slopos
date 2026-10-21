@@ -16,7 +16,7 @@ use slopos_boot_core::layout;
 use slopos_tree_core::{Kind, Manifest};
 
 use super::Medium;
-use crate::root_layout::{HOME, Owners};
+use crate::root_layout::Owners;
 use crate::syscall::fs::{inode_flags, mount, set_inode_flags, sync, umount2};
 use crate::tree::{self, create_new, give, make_dir, write_durably};
 
@@ -173,8 +173,8 @@ pub fn lay_out(root: &Mounted, new: bool) -> Result<Owners, String> {
     for dir in ROOT_LAYOUT.iter().filter(|dir| dir.path != "/") {
         root.owned_dir(dir.path, owners.owner(dir.path), dir.mode)?;
     }
-    if owners.holds(HOME.path) {
-        root.owned_dir(HOME.path, owners.owner(HOME.path), HOME.mode)?;
+    if let Some(home) = owners.home() {
+        root.owned_dir(home.path, (home.uid, home.gid), home.mode)?;
     }
     for dir in slopos_abi::fs::BASE_DIRS {
         root.owned_dir(dir, (0, 0), 0o755)?;
