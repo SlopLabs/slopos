@@ -251,6 +251,11 @@ pub const EXTENSION_UIDS: core::ops::RangeInclusive<u32> = 100..=999;
 pub const PERSON_UIDS: core::ops::RangeInclusive<u32> = SESSION_UID..=59_999;
 pub const NOBODY_UID: u32 = 65_534;
 
+/// The base's user the login screen runs as, holding the seats and nothing
+/// a person's account does.
+pub const GREETER_UID: u32 = 50;
+pub const GREETER_NAME: &str = "greeter";
+
 /// The group whose members administer the machine.
 pub const ADMIN_GROUP: &str = "admin";
 pub const ADMIN_GID: u32 = 10;

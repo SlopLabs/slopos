@@ -334,3 +334,38 @@ slopos_testing::stest!(
     name = test_pointer_focus_reseeds_to_the_seat_holder,
     suite = input_event
 );
+
+/// Each session's clipboard is its own, a process of no session has none,
+/// and past the clipboards kept the one copied into longest ago goes.
+pub fn test_each_session_keeps_its_own_clipboard() -> TestResult {
+    use crate::input_event::{clipboard_copy, clipboard_paste};
+    use slopos_abi::task::SESSION_LOGINS;
+
+    let first = SESSION_LOGINS.end - 64;
+    let second = first + 1;
+    let pasted = |login: u32| {
+        let mut buf = [0u8; 16];
+        let n = clipboard_paste(login, &mut buf);
+        (buf, n)
+    };
+    clipboard_copy(first, b"first");
+    clipboard_copy(second, b"second");
+    if pasted(first).0[..5] != *b"first" || pasted(second).0[..6] != *b"second" {
+        return fail!("a session pasted what another copied");
+    }
+    if clipboard_copy(0, b"nobody") != 0 || pasted(0).1 != 0 || pasted(2).1 != 0 {
+        return fail!("a process of no session reached a clipboard");
+    }
+    for login in second + 1..second + 9 {
+        clipboard_copy(login, b"later");
+    }
+    if pasted(first).1 != 0 {
+        return fail!("the clipboard copied into longest ago stayed past the ones kept");
+    }
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_each_session_keeps_its_own_clipboard,
+    suite = input_event
+);

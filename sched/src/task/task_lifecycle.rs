@@ -116,7 +116,7 @@ impl ProcessResourceLease {
     /// Register a process object for `parent`'s child, or log and refuse.
     /// The accounting edge is the spawner's account, fixed here with no later
     /// opportunity to set it.
-    fn mint_process(parent: Option<&Process>) -> Option<KArc<Process>> {
+    fn mint_process(parent: Option<&Process>, account: AccountId) -> Option<KArc<Process>> {
         let (wait_parent, account_parent, cred, login) = match parent {
             Some(parent) => (
                 parent.handle(),
@@ -124,7 +124,7 @@ impl ProcessResourceLease {
                 parent.cred(),
                 parent.login(),
             ),
-            None => (None, slopos_ostd::process::quota::root(), Cred::ROOT, 0),
+            None => (None, account, Cred::ROOT, 0),
         };
         match process_spawn(wait_parent, account_parent, cred) {
             Ok(process) => {
@@ -138,8 +138,8 @@ impl ProcessResourceLease {
         }
     }
 
-    fn create_user_process(parent: Option<&Process>) -> Option<Self> {
-        let process = Self::mint_process(parent)?;
+    fn create_user_process(parent: Option<&Process>, account: AccountId) -> Option<Self> {
+        let process = Self::mint_process(parent, account)?;
 
         // The address-space table and the process registry are one slot space:
         // the address space is indexed by process, never scanned for by id.
@@ -164,7 +164,7 @@ impl ProcessResourceLease {
     }
 
     fn clone_from_parent(parent: &Task) -> Option<Self> {
-        let process = Self::mint_process(parent.process().as_deref())?;
+        let process = Self::mint_process(parent.process().as_deref(), AccountId::NONE)?;
         let parent_id = parent.process().as_deref().and_then(ProcessId::of)?;
         let child = process_vm_clone_cow_for(parent_id, process.clone())?;
         let child_id = ProcessId::of(&process)?;
@@ -312,10 +312,8 @@ fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
     })
 }
 
-fn allocate_user_task_resources() -> Option<TaskCreateResources> {
-    // No parent: this is a process the kernel starts, not one a process
-    // spawned — a spawn goes through `clone_from_parent`.
-    let mut process = ProcessResourceLease::create_user_process(None)?;
+fn allocate_user_task_resources(account: AccountId) -> Option<TaskCreateResources> {
+    let mut process = ProcessResourceLease::create_user_process(None, account)?;
     let vm_id = process.process.as_deref().and_then(ProcessId::of)?;
 
     let stack_top = process_vm_get_stack_top(vm_id);
@@ -344,11 +342,11 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
     })
 }
 
-fn allocate_task_create_resources(flags: u16) -> Option<TaskCreateResources> {
+fn allocate_task_create_resources(flags: u16, account: AccountId) -> Option<TaskCreateResources> {
     if flags & TASK_FLAG_KERNEL_MODE != 0 {
         allocate_kernel_task_resources()
     } else {
-        allocate_user_task_resources()
+        allocate_user_task_resources(account)
     }
 }
 
@@ -388,10 +386,11 @@ fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProce
         return;
     };
 
-    if task_leaves_process(task)
-        && let Some(handle) = process.handle()
-    {
-        fileio_destroy_table_for_process(handle);
+    if task_leaves_process(task) {
+        hold_for_zombie(task, &process);
+        if let Some(handle) = process.handle() {
+            fileio_destroy_table_for_process(handle);
+        }
     }
     if matches!(mode, TaskProcessCleanupMode::DropVm)
         && task.exit_cleanup_claimed(TASK_EXIT_LAST_IN_PROCESS)
@@ -399,6 +398,21 @@ fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProce
         && let Some(id) = ProcessId::of(&process)
     {
         destroy_process_vm(id);
+    }
+}
+
+/// The last task of a person's process leaves its charge to the leader, the
+/// zombie it becomes, on the person's row; one the rows ran out for, who
+/// debits the root, is held to its parent's budget instead.
+fn hold_for_zombie(task: &Task, process: &Process) {
+    let uid = process.cred().ruid;
+    let Some(person) = slopos_ostd::process::quota::person_row(uid) else {
+        return;
+    };
+    if !is_non_leader_thread(task) {
+        task.leave_charge_to(task, person);
+    } else if let Some(leader) = task_find_by_id(task.tgid) {
+        task.leave_charge_to(&leader, person);
     }
 }
 
@@ -591,7 +605,26 @@ pub fn task_build(
     entry_point: TaskEntry,
     arg: *mut c_void,
     priority: u8,
+    flags: u16,
+) -> Option<PendingTask> {
+    task_build_in(
+        name,
+        entry_point,
+        arg,
+        priority,
+        flags,
+        slopos_ostd::process::quota::root(),
+    )
+}
+
+/// [`task_build`], a user task's process debiting through `account`.
+pub fn task_build_in(
+    name: *const c_char,
+    entry_point: TaskEntry,
+    arg: *mut c_void,
+    priority: u8,
     mut flags: u16,
+    account: AccountId,
 ) -> Option<PendingTask> {
     if entry_point as usize == 0 {
         klog_info!("task_create: Invalid entry point");
@@ -624,7 +657,7 @@ pub fn task_build(
     };
     let task_id = pending.id();
 
-    let resources = match allocate_task_create_resources(flags) {
+    let resources = match allocate_task_create_resources(flags, account) {
         Some(resources) => resources,
         None => {
             drop(pending);
@@ -666,19 +699,26 @@ pub fn task_build(
     task_ref.set_process_vm_handle_raw(resources.process_vm_handle);
     // Join before the handle is stored, so the count is never behind the set
     // of tasks naming the process.
-    if let Some(process) = resources.process.as_ref() {
+    // Charged here, not at `allocate_task`: there is no principal to bill
+    // before the task has a process.
+    let refused = resources.process.as_ref().is_some_and(|process| {
         process.task_join();
         task_ref.set_process_handle_raw(process.handle_raw());
-        // Charged here, not at `allocate_task`: there is no principal to bill
-        // before the task has a process. Kept in the side table so the refund
-        // lands at the exit latch rather than at the graveyard drain.
-        if let Some(reservation) = super::task_quota::reserve(process.account()) {
-            super::task_quota::commit(task_id, reservation);
-        } else {
-            process.task_leave();
-            drop(pending);
-            return None;
+        match super::task_quota::reserve(process.account()) {
+            Some(reservation) => {
+                task_ref.hold_charge(reservation);
+                false
+            }
+            None => {
+                process.task_leave();
+                true
+            }
         }
+    });
+    if refused {
+        cleanup_task_create_resources(resources);
+        drop(pending);
+        return None;
     }
     task_ref.tgid = task_id;
     task_ref.set_pgid(task_id);
@@ -883,7 +923,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
         mgr.tasks_terminated = mgr.tasks_terminated.saturating_add(1);
     });
     if account_here {
-        super::task_quota::release(resolved_id);
+        task.release_charge();
     }
 
     auto_reap_exited_thread(&target, resolved_id);
@@ -1169,7 +1209,7 @@ pub fn cleanup_current_task_after_switch(task: &TaskRef) {
         });
         // The task's share of the per-process bound is free now, not when the
         // graveyard drains.
-        super::task_quota::release(resolved_id);
+        task.release_charge();
     }
 
     let _ = task_reap(resolved_id);
@@ -1648,6 +1688,9 @@ pub fn task_fork(
     // `clone_from_raw` cleared the copied handle, so a miss here leaves a child
     // with no process rather than one silently sharing its parent's.
     child.set_process_handle_raw(child_process_handle);
+    if !charge_clone(child, child_process.process.as_deref(), parent) {
+        return INVALID_TASK_ID;
+    }
     // The parent link and children-list membership are published together, after
     // registration, via `link_child` — never a bare field write.
     child.tgid = child_task_id;
@@ -1854,6 +1897,9 @@ pub fn task_clone(
         child_process.process_vm_handle()
     });
     child.set_process_handle_raw(child_process_handle);
+    if !charge_clone(child, child_process.process.as_deref(), parent) {
+        return Err(ERRNO_EAGAIN);
+    }
 
     if is_thread {
         child.tgid = if parent.tgid != INVALID_TASK_ID {
@@ -1995,6 +2041,25 @@ pub fn task_clone(
     }
 
     Ok(child_task_id)
+}
+
+/// Charge a fork or clone its task, against its new process's account or,
+/// for a thread, its parent's, as a spawned task is; `false` once that is
+/// full.
+#[inline(never)]
+fn charge_clone(child: &Task, process: Option<&Process>, parent: &Task) -> bool {
+    let account = match process {
+        Some(process) => process.account(),
+        None => match parent.process() {
+            Some(process) => process.account(),
+            None => return true,
+        },
+    };
+    let Some(reservation) = super::task_quota::reserve(account) else {
+        return false;
+    };
+    child.hold_charge(reservation);
+    true
 }
 
 /// The thread-group id containing `tid`.

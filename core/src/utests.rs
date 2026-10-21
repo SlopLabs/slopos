@@ -202,3 +202,4 @@ crate::utest!(name = utest_libc_abi, bin = "/bin/libc_abi_test");
 // it contributes to the `post-userland-tests` dump is a desktop-shaped
 // population wherever it lands.
 crate::utest!(name = utest_session_smoke, bin = "/bin/session_smoke_test");
+crate::utest!(name = utest_sessions, bin = "/bin/sessions_test");

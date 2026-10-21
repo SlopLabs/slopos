@@ -17,7 +17,8 @@ pub const NEVER: u64 = caps::BASE_UPDATE
     | caps::PROC_SIGNAL
     | caps::TEST_HARNESS
     | caps::DISPLAY_SEAT
-    | caps::INPUT_SEAT;
+    | caps::INPUT_SEAT
+    | caps::SEAT_SWITCH;
 
 pub fn parse(text: &str) -> Result<u64, LineError> {
     let mut ceiling = None;
@@ -66,6 +67,7 @@ mod tests {
             "Seal",
             "BaseUpdate",
             "ExtensionUpdate",
+            "SeatSwitch",
             "SetId",
             "ConsoleIo",
             "Fate",

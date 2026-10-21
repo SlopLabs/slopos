@@ -50,12 +50,13 @@ pub struct Broker {
 }
 
 impl Broker {
-    /// With no channel, every question is refused at once.
-    pub fn start(channel: Option<OwnedFd>) -> Broker {
+    /// With no channel, every question is refused at once, and while
+    /// `shown` is false, as its desktop is behind or locked.
+    pub fn start(channel: Option<OwnedFd>, shown: Arc<AtomicBool>) -> Broker {
         let (tx, rx) = mpsc::channel();
         let spawned = thread::Builder::new()
             .name("privd-consent".into())
-            .spawn(move || serve(channel, rx));
+            .spawn(move || serve(channel, &shown, rx));
         if spawned.is_err() {
             log!("privd: no consent thread; every question will be refused");
         }
@@ -142,7 +143,7 @@ impl Agent {
     }
 }
 
-fn serve(channel: Option<OwnedFd>, incoming: Receiver<(Ask, Asker)>) {
+fn serve(channel: Option<OwnedFd>, shown: &AtomicBool, incoming: Receiver<(Ask, Asker)>) {
     let epoch = Instant::now();
     let now = || epoch.elapsed().as_millis() as u64;
     let mut agent = channel
@@ -173,9 +174,26 @@ fn serve(channel: Option<OwnedFd>, incoming: Receiver<(Ask, Asker)>) {
                 Err(_) => return,
             }
         };
+        let on_screen = shown.load(Ordering::SeqCst);
         while let Ok((ask, asker)) = incoming.try_recv() {
-            if let Err((asker, refusal)) = questions.offer(ask, asker, now()) {
+            let offered = match on_screen {
+                true => questions.offer(ask, asker, now()),
+                false => Err((asker, Refusal::Interrupted)),
+            };
+            if let Err((asker, refusal)) = offered {
                 asker.settle(Err(refusal));
+            }
+        }
+        if !on_screen {
+            let (showing, askers) = questions.hidden();
+            for asker in askers {
+                asker.settle(Err(Refusal::Interrupted));
+            }
+            if let Some(id) = showing
+                && !live.write(&protocol::cancel_frame(id))
+            {
+                agent = None;
+                continue;
             }
         }
         let gone = questions

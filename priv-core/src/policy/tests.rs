@@ -57,7 +57,6 @@ fn one_person() -> People {
     People {
         people: vec![person(USER, "user", true, false)],
         logged_in: vec![USER],
-        front: Some(USER),
     }
 }
 
@@ -72,12 +71,19 @@ fn four() -> People {
             person(CAROL, "carol", false, false),
         ],
         logged_in: Vec::new(),
-        front: Some(USER),
     }
 }
 
+/// A shell of `uid`'s in the session in front, the first person's desktop.
 fn shell(uid: u32) -> Requester<'static> {
-    Requester::new(uid, Some("/bin/shell"), false)
+    at(uid, USER)
+}
+
+/// A shell of `uid`'s in `front`'s desktop, which is in front.
+fn at(uid: u32, front: u32) -> Requester<'static> {
+    Requester::new(uid, Some("/bin/shell"), false).reached(Reach::Screen {
+        theirs: uid == front,
+    })
 }
 
 fn asks(verdict: Verdict) -> Option<(Kind, String, Vec<String>)> {
@@ -166,10 +172,11 @@ fn the_first_matching_principal_decides() {
     let root = shell(0);
     let root_outside = Requester::new(0, None, false);
     let session = shell(USER);
-    let outsider = Requester::new(USER, None, false);
+    let outsider = Requester::new(USER, None, false).reached(Reach::Screen { theirs: true });
     let compositor = Requester::new(USER, Some("/bin/compositor"), false);
-    let paired = Requester::new(USER, Some(REMOTED), true);
-    let unpaired_remoted = Requester::new(USER, Some(REMOTED), false);
+    let paired = Requester::new(USER, Some(REMOTED), true).reached(Reach::Screen { theirs: true });
+    let unpaired_remoted =
+        Requester::new(USER, Some(REMOTED), false).reached(Reach::Screen { theirs: true });
     let stranger = Requester::new(4242, None, false);
     let confirm = Some((Kind::Confirm, "user".into(), vec![]));
 
@@ -316,7 +323,8 @@ fn the_shipped_priv_is_an_administrator_s_and_keeps_only_a_command_s_answer() {
     );
     let paired = Requester::new(USER, Some(REMOTED), true);
     assert_eq!(action.admits(&paired, &one_person()), NO);
-    let compositor = Requester::new(USER, Some("/bin/compositor"), false);
+    let compositor = Requester::new(USER, Some("/bin/compositor"), false)
+        .reached(Reach::Screen { theirs: true });
     assert_eq!(
         asks(action.admits(&compositor, &one_person())).map(|(kind, ..)| kind),
         Some(Kind::Confirm),
@@ -376,16 +384,12 @@ fn a_person_answers_for_themselves_by_a_click_at_their_screen_or_their_password(
         password.admits(&shell(CAROL), &people),
         Verdict::Refuse(Refused::Away("carol".into()))
     );
-    let at_alice = People {
-        front: Some(ALICE),
-        ..four()
-    };
     assert_eq!(
-        asks(confirm.admits(&shell(ALICE), &at_alice)),
+        asks(confirm.admits(&at(ALICE, ALICE), &people)),
         mine(Kind::Confirm, "alice")
     );
     assert_eq!(
-        asks(confirm.admits(&shell(USER), &at_alice)),
+        asks(confirm.admits(&at(USER, ALICE), &people)),
         None,
         "the first person has no password to type at alice's screen"
     );
@@ -476,7 +480,6 @@ fn alone_runs_unasked_only_while_nobody_else_is_logged_in() {
             person(BOB, "bob", false, true),
         ],
         logged_in: vec![USER, BOB],
-        front: Some(USER),
     };
     assert_eq!(
         alone.admits(&shell(BOB), &without),
@@ -532,8 +535,14 @@ fn an_extension_s_program_is_a_principal_only_of_its_own_activation() {
         "uid 0 running an extension's program is no root"
     );
     assert_eq!(
-        asks(install.admits(&Requester::extension(SESSION_UID, client, label), &people))
-            .map(|(k, ..)| k),
+        asks(
+            install.admits(
+                &Requester::extension(SESSION_UID, client, label)
+                    .reached(Reach::Screen { theirs: true }),
+                &people
+            )
+        )
+        .map(|(k, ..)| k),
         Some(Kind::Confirm),
         "a person running an extension's program is that person"
     );
@@ -620,11 +629,11 @@ fn every_rule_of_the_grammar_refuses() {
         ("  allow user confirm now", "allow ends with its level"),
         (
             "  allow session",
-            "allow names root, user, admin, paired or program <path>",
+            "allow names root, greeter, user, admin, paired or program <path>",
         ),
         (
             "  allow everyone",
-            "allow names root, user, admin, paired or program <path>",
+            "allow names root, greeter, user, admin, paired or program <path>",
         ),
         (
             "  keep 0",
@@ -830,6 +839,34 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         "org.slopos.console.keymap",
         "org.slopos.extension.",
     ];
+    let login = policy.action("org.slopos.login").unwrap();
+    let greeter = Requester::new(slopos_abi::fs::GREETER_UID, Some("/bin/compositor"), false);
+    assert_eq!(login.admits(&greeter, &people), Verdict::Run);
+    assert_eq!(
+        login.admits(&session, &people),
+        NO,
+        "a person logs in only at the login screen"
+    );
+    let unlock = "org.slopos.session.unlock";
+    assert_eq!(
+        policy.action(unlock).unwrap().admits(&session, &people),
+        NO,
+        "only a desktop's compositor asks to unlock it"
+    );
+    for action in policy
+        .actions()
+        .iter()
+        .filter(|a| a.name != login.name && a.name != unlock)
+    {
+        let greets = action.admits(&greeter, &People::default()) == Verdict::Run;
+        assert_eq!(
+            greets,
+            action.name.ends_with(".reboot") || action.name.ends_with(".poweroff"),
+            "{}: the login screen restarts or powers off a machine nobody is logged in to",
+            action.name
+        );
+        assert_eq!(action.admits(&greeter, &people), NO, "{}", action.name);
+    }
     for action in policy.actions() {
         let requester = action.program == "/bin/priv";
         assert_eq!(
@@ -855,14 +892,16 @@ fn the_shipped_policy_says_what_the_access_model_does() {
             action.name
         );
         assert!(
-            matches!(
-                action.admits(&session, &people),
-                Verdict::Run
-                    | Verdict::Ask(Question {
-                        kind: Kind::Confirm,
-                        ..
-                    })
-            ),
+            action.name == login.name
+                || action.name == unlock
+                || matches!(
+                    action.admits(&session, &people),
+                    Verdict::Run
+                        | Verdict::Ask(Question {
+                            kind: Kind::Confirm,
+                            ..
+                        })
+                ),
             "{}: the one person runs it or clicks",
             action.name
         );
@@ -874,10 +913,11 @@ fn the_shipped_policy_says_what_the_access_model_does() {
             action.name
         );
         assert!(
-            !action
-                .allows
-                .iter()
-                .any(|a| matches!(a.principal, Principal::Program(_))),
+            action.name == unlock
+                || !action
+                    .allows
+                    .iter()
+                    .any(|a| matches!(a.principal, Principal::Program(_))),
             "{}: every person's compositor is one program",
             action.name
         );
@@ -995,6 +1035,7 @@ fn the_shipped_policy_reads_a_standard_user_s_requests_as_an_administrator_s_to_
         ];
         match action.name.as_str() {
             name if unasked.contains(&name) => assert_eq!(verdict, Verdict::Run, "{name}"),
+            "org.slopos.login" | "org.slopos.session.unlock" => assert_eq!(verdict, NO),
             "org.slopos.accounts.password" => {
                 assert_eq!(asks(verdict).map(|(k, ..)| k), Some(Kind::Password))
             }
@@ -1088,4 +1129,99 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
 
 fn args_of<'a>(words: &[&'a str]) -> Vec<&'a [u8]> {
     words.iter().map(|w| w.as_bytes()).collect()
+}
+
+#[test]
+fn a_person_is_asked_only_where_their_session_is_reached() {
+    let confirm = action("  allow user confirm\n");
+    let admin = action("  allow admin confirm\n");
+    let people = four();
+    let terminal = |uid| Requester::new(uid, Some("/bin/shell"), false).reached(Reach::Terminal);
+    let nowhere = |uid| Requester::new(uid, Some("/bin/shell"), false);
+    assert_eq!(
+        asks(confirm.admits(&terminal(BOB), &people)),
+        Some((Kind::Password, "bob".into(), vec![])),
+        "a click at a terminal cannot be told from a script's"
+    );
+    assert_eq!(
+        asks(confirm.admits(&terminal(USER), &people)),
+        None,
+        "and a person without a password answers nothing there"
+    );
+    assert_eq!(
+        confirm.admits(&terminal(USER), &people),
+        Verdict::Refuse(Refused::NoPasswordToType("user".into()))
+    );
+    assert_eq!(
+        admin.admits(&terminal(BOB), &people),
+        Verdict::Refuse(Refused::AdminAtTerminal),
+        "an administrator's password is never typed at a requester's terminal"
+    );
+    assert_eq!(
+        asks(admin.admits(&terminal(ALICE), &people)).map(|(k, ..)| k),
+        Some(Kind::Password),
+        "an administrator answers for themselves there by their own"
+    );
+    for uid in [USER, ALICE, BOB] {
+        assert_eq!(
+            confirm.admits(&nowhere(uid), &people),
+            Verdict::Refuse(Refused::Unreached),
+            "a session behind, locked or of no person is asked nothing"
+        );
+    }
+    assert_eq!(
+        admin.admits(&nowhere(BOB), &people),
+        Verdict::Refuse(Refused::Unreached)
+    );
+    assert_eq!(
+        action("  allow admin\n").admits(&nowhere(USER), &people),
+        Verdict::Run,
+        "what runs unasked needs no reach"
+    );
+}
+
+#[test]
+fn the_greeter_is_the_login_screen_s_user_running_a_base_program() {
+    use slopos_abi::fs::GREETER_UID;
+    let login = action("  allow greeter\n");
+    let people = four();
+    let greeter = Requester::new(GREETER_UID, Some("/bin/compositor"), false);
+    assert_eq!(login.admits(&greeter, &people), Verdict::Run);
+    assert_eq!(
+        login.admits(&Requester::new(GREETER_UID, None, false), &people),
+        NO,
+        "its uid running a program from outside the base is no greeter"
+    );
+    for uid in [0, USER, ALICE] {
+        assert_eq!(login.admits(&shell(uid), &people), NO);
+    }
+    assert_eq!(
+        refusal(&with("  allow greeter confirm")).msg,
+        "the level is not one that principal takes"
+    );
+    assert_eq!(
+        refusal(&with("  allow greeter alone now")).msg,
+        "allow ends with its level"
+    );
+    let off = action("  allow greeter alone\n  allow user alone\n");
+    let nobody = People {
+        logged_in: Vec::new(),
+        ..four()
+    };
+    assert_eq!(off.admits(&greeter, &nobody), Verdict::Run);
+    let beside = People {
+        logged_in: vec![BOB],
+        ..four()
+    };
+    assert_eq!(
+        off.admits(&greeter, &beside),
+        NO,
+        "the login screen powers off no machine someone is logged in to"
+    );
+    let as_requester = "action org.slopos.x\n  program /bin/x\n  args *\n  caps Mount\n  \
+                        uid requester\n  allow greeter\n  describe \"x\"\n";
+    assert_eq!(
+        refusal(as_requester).msg,
+        "an action run as its requester allows only root, user and admin"
+    );
 }

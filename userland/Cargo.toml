@@ -66,6 +66,10 @@ name = "session"
 path = "src/bin/session.rs"
 
 [[bin]]
+name = "login"
+path = "src/bin/login.rs"
+
+[[bin]]
 name = "sysmon"
 path = "src/bin/sysmon.rs"
 
@@ -384,6 +388,10 @@ path = "src/bin/tests/rename_test.rs"
 [[bin]]
 name = "session_smoke_test"
 path = "src/bin/tests/session_smoke_test.rs"
+
+[[bin]]
+name = "sessions_test"
+path = "src/bin/tests/sessions_test.rs"
 
 [[bin]]
 name = "spawn_output_test"

@@ -9,28 +9,43 @@ use std::ffi::CString;
 use slopos_abi::syscall::{F_GETFD, F_SETFD, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK};
 use slopos_slibc::pal::{Pal, Sys};
 
-use super::extensions::{CARRIED, Carried};
+use slopos_priv_core::sessions::Class;
+
+use super::extensions::{CARRIED, Carried as Units};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, process};
 
 pub const RESUME: &str = "--resume";
-const VERSION: &str = "slopos-init 1";
+/// The state's first line after the descriptors, which an image's text holds
+/// when it reads that state: the session table's version, and the one before.
+const VERSION: &str = "slopos-init 2";
+const VERSION_1: &str = "slopos-init 1";
 const ARGV0: &str = "/sbin/init";
 
 /// What init carries across an exec. A service's pid is `None` while it is
 /// not running; its starts are the times its budget counts.
 #[derive(Default, Debug)]
 pub struct State {
-    pub consent: Option<(RawFd, RawFd)>,
+    /// Each consent link's privd and compositor ends.
+    pub links: Vec<(RawFd, RawFd)>,
+    /// Init's and privd's ends of the pair init tells privd the sessions on.
+    pub sessions_link: Option<(RawFd, RawFd)>,
     pub control: Option<RawFd>,
     /// The request to re-execute, which the new image answers.
     pub reply: Option<RawFd>,
     pub privd: Service,
     pub remoted: Option<Service>,
-    /// The compositor's pid while the session runs.
-    pub session: Option<u32>,
-    pub session_held: bool,
-    pub session_starts: Vec<u64>,
+    pub login: Option<Service>,
+    pub sessions: Vec<Carried>,
+    pub front: Option<u32>,
+    pub next_tag: u32,
+    pub held: bool,
+    pub wanted: bool,
+    pub fresh: bool,
+    pub default_starts: Vec<u64>,
     pub tests: Option<u32>,
+    /// A first-version image's one desktop: its compositor's pid while it
+    /// ran, which this image takes over as the first person's.
+    pub legacy: Option<Service>,
 }
 
 #[derive(Default, Debug)]
@@ -39,24 +54,115 @@ pub struct Service {
     pub starts: Vec<u64>,
 }
 
+/// A session as a re-execution carries it.
+#[derive(Debug)]
+pub struct Carried {
+    pub tag: u32,
+    pub uid: u32,
+    pub class: Class,
+    pub leader: Option<u32>,
+    pub link: Option<u8>,
+    pub locked: bool,
+    /// The pipe init tells its compositor whether it is in front on.
+    pub pipe: Option<RawFd>,
+    /// A console session's terminal, which `/bin/login` relays to while
+    /// `/run/sessions` names it.
+    pub tty: Option<String>,
+    pub starts: Vec<u64>,
+}
+
 impl State {
     fn descriptors(&self) -> impl Iterator<Item = RawFd> + use<> {
-        self.consent
+        let links: Vec<RawFd> = self.links.iter().flat_map(|&(a, b)| [a, b]).collect();
+        let pipes: Vec<RawFd> = self.sessions.iter().filter_map(|s| s.pipe).collect();
+        links
             .into_iter()
-            .flat_map(|(privd, agent)| [privd, agent])
+            .chain(self.sessions_link.into_iter().flat_map(|(a, b)| [a, b]))
             .chain(self.control)
             .chain(self.reply)
+            .chain(pipes)
     }
 
     /// The first line names the descriptors kept, in a form every version
     /// reads, so an image that cannot read the rest still closes them.
     fn encode(&self) -> String {
-        let mut out: String = std::iter::once("kept".to_owned())
-            .chain(self.descriptors().map(|fd| fd.to_string()))
-            .collect::<Vec<_>>()
-            .join(" ");
-        out += &format!("\n{VERSION}\n");
-        if let Some((privd, agent)) = self.consent {
+        let mut out = kept_line(self.descriptors());
+        out += &format!("{VERSION}\n");
+        if !self.links.is_empty() {
+            let fds: Vec<String> = self
+                .links
+                .iter()
+                .flat_map(|&(a, b)| [a.to_string(), b.to_string()])
+                .collect();
+            out += &format!("links {}\n", fds.join(" "));
+        }
+        if let Some((init, privd)) = self.sessions_link {
+            out += &format!("sessions-link {init} {privd}\n");
+        }
+        if let Some(control) = self.control {
+            out += &format!("control {control}\n");
+        }
+        if let Some(reply) = self.reply {
+            out += &format!("reply {reply}\n");
+        }
+        out += &service("privd", self.privd.pid, &self.privd.starts);
+        if let Some(remoted) = &self.remoted {
+            out += &service("remoted", remoted.pid, &remoted.starts);
+        }
+        if let Some(login) = &self.login {
+            out += &service("login", login.pid, &login.starts);
+        }
+        out += &service("default", None, &self.default_starts);
+        for s in &self.sessions {
+            let mut line = format!(
+                "session {} {} {} {} {} {} {} {}",
+                s.tag,
+                s.uid,
+                s.class.word(),
+                s.leader.unwrap_or(0),
+                s.link.map_or("-".to_owned(), |l| l.to_string()),
+                u8::from(s.locked),
+                s.pipe.map_or("-".to_owned(), |p| p.to_string()),
+                s.tty.as_deref().filter(|tty| carries(tty)).unwrap_or("-"),
+            );
+            for start in &s.starts {
+                line += &format!(" {start}");
+            }
+            out += &line;
+            out.push('\n');
+        }
+        if let Some(front) = self.front {
+            out += &format!("front {front}\n");
+        }
+        out += &format!("next {}\n", self.next_tag);
+        for (flag, word) in [
+            (self.held, "held"),
+            (self.wanted, "wanted"),
+            (self.fresh, "fresh"),
+        ] {
+            if flag {
+                out += &format!("{word}\n");
+            }
+        }
+        if let Some(tests) = self.tests {
+            out += &format!("tests {tests}\n");
+        }
+        out
+    }
+
+    /// The state for an image of the first version, which knows one desktop
+    /// and one consent link: what it carries of the services, and none of
+    /// the sessions, which end before it runs.
+    fn encode_first(&self) -> String {
+        let consent = self.links.first().copied();
+        let kept = consent
+            .into_iter()
+            .flat_map(|(a, b)| [a, b])
+            .chain(self.control)
+            .chain(self.reply);
+        let mut out = kept_line(kept);
+        out += &format!("{VERSION_1}\n");
+        if let Some((privd, agent)) = consent {
             out += &format!("consent {privd} {agent}\n");
         }
         if let Some(control) = self.control {
@@ -69,8 +175,8 @@ impl State {
         if let Some(remoted) = &self.remoted {
             out += &service("remoted", remoted.pid, &remoted.starts);
         }
-        out += &service("session", self.session, &self.session_starts);
-        if self.session_held {
+        out += &service("session", None, &self.default_starts);
+        if self.held {
             out += "held\n";
         }
         if let Some(tests) = self.tests {
@@ -80,34 +186,119 @@ impl State {
     }
 
     fn decode<'a>(mut lines: impl Iterator<Item = &'a str>) -> Option<State> {
-        if lines.next() != Some(VERSION) {
-            return None;
-        }
-        let mut state = State::default();
+        let first = match lines.next()? {
+            VERSION => false,
+            VERSION_1 => true,
+            _ => return None,
+        };
+        let mut state = State {
+            wanted: first,
+            ..State::default()
+        };
         for line in lines {
             let mut words = line.split(' ');
             let key = words.next()?;
-            let numbers: Option<Vec<u64>> = words.map(|w| w.parse().ok()).collect();
+            let rest: Vec<&str> = words.collect();
+            if key == "session" && !first {
+                state.sessions.push(carried_session(&rest)?);
+                continue;
+            }
+            let numbers: Option<Vec<u64>> = rest.iter().map(|w| w.parse().ok()).collect();
             let numbers = numbers?;
             let fd = |i: usize| numbers.get(i).and_then(|&n| RawFd::try_from(n).ok());
             match key {
-                "consent" => state.consent = Some((fd(0)?, fd(1)?)),
+                "consent" if first => state.links = vec![(fd(0)?, fd(1)?)],
+                "links" if !first && numbers.len() % 2 == 0 => {
+                    state.links = numbers
+                        .chunks(2)
+                        .map(|pair| {
+                            Some((
+                                RawFd::try_from(pair[0]).ok()?,
+                                RawFd::try_from(pair[1]).ok()?,
+                            ))
+                        })
+                        .collect::<Option<_>>()?;
+                }
+                "sessions-link" => state.sessions_link = Some((fd(0)?, fd(1)?)),
                 "control" => state.control = Some(fd(0)?),
                 "reply" => state.reply = Some(fd(0)?),
                 "privd" => state.privd = Service::decode(&numbers)?,
                 "remoted" => state.remoted = Some(Service::decode(&numbers)?),
+                "login" => state.login = Some(Service::decode(&numbers)?),
+                "default" => state.default_starts = Service::decode(&numbers)?.starts,
                 "session" => {
                     let session = Service::decode(&numbers)?;
-                    state.session = session.pid;
-                    state.session_starts = session.starts;
+                    state.default_starts = session.starts.clone();
+                    state.legacy = Some(session);
                 }
+                "front" => state.front = Some(u32::try_from(*numbers.first()?).ok()?),
+                "next" => state.next_tag = u32::try_from(*numbers.first()?).ok()?,
                 "tests" => state.tests = Some(u32::try_from(*numbers.first()?).ok()?),
-                "held" if numbers.is_empty() => state.session_held = true,
+                "held" if numbers.is_empty() => state.held = true,
+                "wanted" if numbers.is_empty() => state.wanted = true,
+                "fresh" if numbers.is_empty() => state.fresh = true,
                 _ => return None,
             }
         }
         Some(state)
     }
+}
+
+fn kept_line(fds: impl Iterator<Item = RawFd>) -> String {
+    std::iter::once("kept".to_owned())
+        .chain(fds.map(|fd| fd.to_string()))
+        .collect::<Vec<_>>()
+        .join(" ")
+        + "\n"
+}
+
+/// A terminal name a session line can carry as one word.
+fn carries(tty: &str) -> bool {
+    tty != "-" && !tty.is_empty() && !tty.contains(char::is_whitespace)
+}
+
+fn carried_session(words: &[&str]) -> Option<Carried> {
+    let [
+        tag,
+        uid,
+        class,
+        leader,
+        link,
+        locked,
+        pipe,
+        tty,
+        starts @ ..,
+    ] = words
+    else {
+        return None;
+    };
+    let optional = |word: &str| -> Option<Option<u64>> {
+        match word {
+            "-" => Some(None),
+            n => n.parse().ok().map(Some),
+        }
+    };
+    Some(Carried {
+        tag: tag.parse().ok()?,
+        uid: uid.parse().ok()?,
+        class: Class::parse(class)?,
+        leader: match leader.parse::<u32>().ok()? {
+            0 => None,
+            pid => Some(pid),
+        },
+        link: optional(link)?.map(u8::try_from).transpose().ok()?,
+        locked: match *locked {
+            "0" => false,
+            "1" => true,
+            _ => return None,
+        },
+        pipe: optional(pipe)?.map(RawFd::try_from).transpose().ok()?,
+        tty: (*tty != "-").then(|| (*tty).to_owned()),
+        starts: starts
+            .iter()
+            .map(|w| w.parse().ok())
+            .collect::<Option<_>>()?,
+    })
 }
 
 impl Service {
@@ -160,20 +351,34 @@ fn handed_lines(text: &str) -> Result<Vec<OwnedFd>, String> {
     Ok(pipes)
 }
 
-/// Whether the image at `/sbin/init` reads the services a re-execution hands
-/// on, its text holding the header they are written under; an error when it
-/// cannot be read.
-pub fn reads_units() -> Result<bool, String> {
-    let header = CARRIED.as_bytes();
-    let image = std::fs::read(ARGV0).map_err(|e| format!("{ARGV0}: {e}"))?;
-    Ok(image.windows(header.len()).any(|w| w == header))
+/// What the image at `/sbin/init` reads of what a re-execution hands on.
+pub struct Reads {
+    /// The extensions' services, its text holding the header they are
+    /// written under.
+    pub units: bool,
+    /// The session table, its text holding this version's header.
+    pub sessions: bool,
 }
 
-/// Execute `/sbin/init` again carrying `state` and, for an image that reads
-/// them, `units`. Returns only when the exec failed, with every descriptor
-/// as it was.
-pub fn reexec(state: &State, units: Option<&Carried>) -> String {
-    let pipe = match handed(&state.encode()) {
+/// What the image at `/sbin/init` reads; an error when it cannot be read.
+pub fn reads() -> Result<Reads, String> {
+    let image = std::fs::read(ARGV0).map_err(|e| format!("{ARGV0}: {e}"))?;
+    let holds = |header: &str| image.windows(header.len()).any(|w| w == header.as_bytes());
+    Ok(Reads {
+        units: holds(CARRIED),
+        sessions: holds(VERSION),
+    })
+}
+
+/// Execute `/sbin/init` again carrying `state`, in the version the image
+/// reads, and, for an image that reads them, `units`. Returns only when the
+/// exec failed, with every descriptor as it was.
+pub fn reexec(state: &State, sessions: bool, units: Option<&Units>) -> String {
+    let encoded = match sessions {
+        true => state.encode(),
+        false => state.encode_first(),
+    };
+    let pipe = match handed(&encoded) {
         Ok(pipe) => pipe,
         Err(why) => return why,
     };
@@ -181,8 +386,19 @@ pub fn reexec(state: &State, units: Option<&Carried>) -> String {
         Ok(units_pipes) => units_pipes.unwrap_or_default(),
         Err(why) => return why,
     };
-    let kept: Vec<RawFd> = state
-        .descriptors()
+    let carried: Vec<RawFd> = match sessions {
+        true => state.descriptors().collect(),
+        false => state
+            .links
+            .first()
+            .into_iter()
+            .flat_map(|&(a, b)| [a, b])
+            .chain(state.control)
+            .chain(state.reply)
+            .collect(),
+    };
+    let kept: Vec<RawFd> = carried
+        .into_iter()
         .chain(units.iter().flat_map(|units| units.descriptors()))
         .chain([pipe.raw()])
         .chain(units_pipes.iter().map(OwnedFd::raw))
@@ -251,9 +467,9 @@ pub fn resume(fd: &str) -> Result<State, Vec<RawFd>> {
 
 /// The extensions' services the pipes `fds` names, `,` between, hold in
 /// turn, each descriptor they name closed when the rest cannot be read.
-pub fn resume_units(fds: Option<&str>) -> Carried {
+pub fn resume_units(fds: Option<&str>) -> Units {
     let Some(fds) = fds else {
-        return Carried::default();
+        return Units::default();
     };
     let (mut text, mut whole) = (String::new(), true);
     for fd in fds.split(',') {
@@ -266,9 +482,9 @@ pub fn resume_units(fds: Option<&str>) -> Carried {
         }
     }
     let decoded = if whole {
-        Carried::decode(&text)
+        Units::decode(&text)
     } else {
-        Err(Carried::kept(&text))
+        Err(Units::kept(&text))
     };
     match decoded {
         Ok(units) => {
@@ -281,7 +497,7 @@ pub fn resume_units(fds: Option<&str>) -> Carried {
             for fd in kept {
                 crate::syscall::memory::close(fd);
             }
-            Carried::default()
+            Units::default()
         }
     }
 }

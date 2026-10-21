@@ -12,7 +12,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, lchown};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use slopos_abi::fs::{ADMIN_GROUP, PERSON_UIDS, SESSION_UID};
+use slopos_abi::fs::{ADMIN_GROUP, PERSON_UIDS};
 use slopos_accounts_core::{Accounts, Person};
 use slopos_priv_core::{ENV_ACTION, ENV_UID};
 use slopos_slibc_core::passwd::{BASE_GROUP, BASE_PASSWD, Group, Passwd, lines};
@@ -29,7 +29,8 @@ const USAGE: &str = "usage: users [list]
        users passwd [<name>]
        users promote <name>
        users demote <name>
-       users autologin <name> | --off";
+       users autologin <name> | --off
+       users remote <name> | --default";
 
 const OWN_PASSWORD: &str = "org.slopos.accounts.password";
 const MANAGE: &str = "org.slopos.accounts.manage";
@@ -64,6 +65,8 @@ enum Change {
         admin: bool,
     },
     Autologin(Option<String>),
+    /// Whom remoted runs as; `None` for the first administrator.
+    Remote(Option<String>),
 }
 
 fn parse(args: &[String]) -> Result<Request, String> {
@@ -109,6 +112,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
         },
         ["autologin", "--off"] => Change::Autologin(None),
         ["autologin", name] => Change::Autologin(Some(name.to_string())),
+        ["remote", "--default"] => Change::Remote(None),
+        ["remote", name] => Change::Remote(Some(name.to_string())),
         _ => return Err(USAGE.to_owned()),
     };
     Ok(Request::Manage(change))
@@ -215,12 +220,6 @@ fn remove_home(person: &Person) -> Result<String, String> {
     std::fs::remove_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
     Ok(format!("; {} is gone", home.display()))
 }
-
-/// Until there is a login screen, the desktop starts as the first person
-/// whatever the record says.
-const NO_LOGIN_SCREEN: &str = ", which the desktop honours once it has a login screen";
-const DESKTOP_ADMIN: &str =
-    "the person at the desktop administers the machine until it has a login screen";
 
 /// What a change leaves for once the record holds it: a home made for it,
 /// taken away again should the record not take it, or one to take away.
@@ -353,7 +352,6 @@ fn manage(
             if !keep_autologin && accounts.autologin().is_some() {
                 accounts.set_autologin(None)?;
                 said.push_str("; no one is logged in by the desktop by itself now");
-                said.push_str(NO_LOGIN_SCREEN);
             }
             return Ok((said, Home::Made(home)));
         }
@@ -382,9 +380,6 @@ fn manage(
             format!("{name}'s password is changed")
         }
         Change::Admin { name, admin } => {
-            if !admin && accounts.person(&name).is_some_and(|p| p.uid == SESSION_UID) {
-                return Err(format!("{name}: {DESKTOP_ADMIN}"));
-            }
             accounts
                 .set_admin(&name, admin)
                 .map_err(|e| format!("{name}: {e}"))?;
@@ -396,7 +391,12 @@ fn manage(
         Change::Autologin(name) => {
             accounts.set_autologin(name.as_deref())?;
             let who = name.as_deref().unwrap_or("no one");
-            format!("{who} is logged in by the desktop by itself{NO_LOGIN_SCREEN}")
+            format!("{who} is logged in by the desktop by itself")
+        }
+        Change::Remote(name) => {
+            accounts.set_remote(name.as_deref())?;
+            let who = name.as_deref().unwrap_or("the first administrator");
+            format!("remoted runs as {who} from its next start")
         }
     };
     Ok((said, Home::Kept))
@@ -426,6 +426,7 @@ fn sync() -> Result<String, String> {
 fn list() -> Result<String, String> {
     if let Ok(Some(accounts)) = Store::read(Path::new("/")).recorded() {
         let autologin = accounts.autologin().map(|p| p.uid);
+        let remote = accounts.remote().map(|p| p.uid);
         return Ok(accounts
             .people()
             .iter()
@@ -438,6 +439,9 @@ fn list() -> Result<String, String> {
                 });
                 if autologin == Some(p.uid) {
                     line.push_str("  automatic login");
+                }
+                if remote == Some(p.uid) {
+                    line.push_str("  remote");
                 }
                 line
             })

@@ -9,7 +9,9 @@
 # A denial is a finding, with one exception the gate file has to name: a kind
 # whose *refusal* is a tested property. `commitpages` is the machine's commit
 # ceiling, and the suite proves it refuses at `mmap` and at `fork` by asking
-# for more than the machine has, so the root row records those refusals. An
+# for more than the machine has, so the root row records those refusals;
+# `process` and `task` are a person's share of the process and task tables,
+# which `sessions_test`'s fork bomb fills until it is refused. An
 # `expect-denials <phase> <kind> <n>` line holds such a kind to exactly `n`,
 # in both directions -- a refusal that stopped happening and an undeclared one
 # that joined it both fail -- and is refused for any kind not in
@@ -54,7 +56,7 @@ done
 
 # Kinds whose refusal the suite provokes on purpose. Only these may carry an
 # `expect-denials` line.
-REFUSAL_TESTED_KINDS=" commitpages "
+REFUSAL_TESTED_KINDS=" commitpages process task "
 
 # The one line the whole gate reads, matched once and in full. A per-field
 # `sed` would echo its input unchanged when the pattern missed, so a renamed

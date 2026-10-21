@@ -13,7 +13,7 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::quota::ResourceKind;
 
-use super::arena::{bequeath_raw, refund_raw};
+use super::arena::{bequeath_raw, refund_raw, root};
 use super::axis::Refundable;
 use crate::process::AccountId;
 
@@ -358,10 +358,30 @@ impl<A: Refundable> ChargeSlot<A> {
         if dying.is_none() || self.account.load(Ordering::Acquire) != dying.raw() {
             return;
         }
-        let heir = bequeath_raw(dying, A::KIND, self.amount.load(Ordering::Acquire));
+        let heir = bequeath_raw(dying, root(), A::KIND, self.amount.load(Ordering::Acquire));
         if !heir.is_none() {
             self.account.store(heir.raw(), Ordering::Release);
         }
+    }
+
+    /// Move this slot's charge into `into`, held there by `heir`, a row above
+    /// the account charged, which keeps counting it as its own. Answers
+    /// whether it moved; a charge `heir` is not above is refunded instead.
+    pub fn bequeath_into(&self, heir: AccountId, into: &ChargeSlot<A>) -> bool {
+        let raw = self.account.swap(0, Ordering::AcqRel);
+        if raw == 0 {
+            return false;
+        }
+        let amount = self.amount.swap(0, Ordering::AcqRel);
+        let from = AccountId::from_raw(raw);
+        if heir.is_none() || bequeath_raw(from, heir, A::KIND, amount) != heir {
+            refund_raw(from, A::KIND, amount);
+            return false;
+        }
+        into.take();
+        into.amount.store(amount, Ordering::Release);
+        into.account.store(heir.raw(), Ordering::Release);
+        true
     }
 }
 

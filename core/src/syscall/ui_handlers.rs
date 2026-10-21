@@ -57,6 +57,44 @@ define_syscall!(syscall_input_sink_acquire
     Ok(fd as u64)
 });
 
+define_syscall!(syscall_seat_switch
+    (ctx, task_id: u32)
+    cap(SeatSwitch)
+    -> Result<u64, Errno>
+{
+    use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskStatus};
+    let live = || {
+        slopos_sched::task::task_find_by_id(task_id)
+            .filter(|task| task.flags & TASK_FLAG_USER_MODE != 0)
+            .filter(|task| {
+                !matches!(
+                    task.status(),
+                    TaskStatus::Invalid | TaskStatus::Terminated | TaskStatus::Zombie
+                )
+            })
+    };
+    let target = live().ok_or(Errno::ESRCH)?;
+    let seats = slopos_abi::caps::DISPLAY_SEAT | slopos_abi::caps::INPUT_SEAT;
+    if slopos_ostd::task::ops::task_caps(&target) & seats != seats {
+        return Err(Errno::EPERM);
+    }
+    drop(target);
+    slopos_ostd::seat::hand_over_seats(task_id).map_err(|_| Errno::EBUSY)?;
+    video::set_compositor_task_id(task_id);
+    input::switch_compositor(task_id);
+    // Its exit's cleanup may have run before the seats were its: undone
+    // here, as that cleanup would have.
+    if live().is_none() {
+        slopos_ostd::seat::revoke_for_task(task_id);
+        if video::compositor_task_id() == task_id {
+            video::set_compositor_task_id(0);
+        }
+        input::cleanup_task(task_id);
+        return Err(Errno::ESRCH);
+    }
+    Ok(0)
+});
+
 /// Bytes drawn from the CSPRNG between releases of its IRQ mutex. The cap is
 /// on the hold, not on the request.
 const GETRANDOM_SLICE: usize = 256;
@@ -171,13 +209,16 @@ define_syscall!(syscall_input_poll_batch
     Ok(total as u64)
 });
 
+/// The login tag whose clipboard the caller reaches, 0 for none.
+fn clipboard_login(ctx: &crate::syscall::context::SyscallContext<'_>) -> u32 {
+    ctx.task().process().map_or(0, |process| process.login())
+}
+
 define_syscall!(syscall_clipboard_copy
     (ctx, src: UserBytes)
     cap(ClipboardGlobal)
-    requires(task_id: task_id)
     -> Result<u64, Errno>
 {
-    let _ = task_id;
     if src.base_u64() == 0 || src.len() == 0 {
         return Ok(0);
     }
@@ -187,24 +228,22 @@ define_syscall!(syscall_clipboard_copy
     let mut buf = slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE)
         .map_err(|_| Errno::ENOMEM)?;
     copy_bytes_from_user(user_bytes, &mut buf[..copy_len]).map_err(|_| Errno::EFAULT)?;
-    let stored = input::clipboard_copy(&buf[..copy_len]);
+    let stored = input::clipboard_copy(clipboard_login(ctx), &buf[..copy_len]);
     Ok(stored as u64)
 });
 
 define_syscall!(syscall_clipboard_paste
     (ctx, dst: UserBytes)
     cap(ClipboardGlobal)
-    requires(task_id: task_id)
     -> Result<u64, Errno>
 {
-    let _ = task_id;
     if dst.base_u64() == 0 || dst.len() == 0 {
         return Ok(0);
     }
 
     let mut buf = slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE)
         .map_err(|_| Errno::ENOMEM)?;
-    let pasted = input::clipboard_paste(&mut buf);
+    let pasted = input::clipboard_paste(clipboard_login(ctx), &mut buf);
     if pasted == 0 {
         return Ok(0);
     }

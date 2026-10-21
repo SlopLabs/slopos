@@ -1,6 +1,7 @@
 mod consent;
 pub mod decorations;
 pub mod dock;
+mod gate;
 mod hover;
 mod input;
 pub mod menu_bar;
@@ -62,6 +63,12 @@ struct WindowManager {
     /// privd's question, while one is up: above everything, and the only
     /// thing input reaches.
     consent: consent::Consent,
+    /// The login screen, or this desktop's lock screen, above even that.
+    gate: gate::Gate,
+    /// Another session is in front: nothing is drawn, and init says when
+    /// this one is again.
+    behind: bool,
+    init_says: Option<InitSays>,
     /// A new base changed the session's programs: open the system panel,
     /// which offers the restart, on the next frame.
     restart_offer_due: bool,
@@ -120,13 +127,18 @@ struct WindowManager {
 }
 
 impl WindowManager {
-    fn new(consent: consent::Consent) -> Self {
+    fn new(consent: consent::Consent, gate: gate::Gate) -> Self {
         let mut shelf = dock::LauncherShelf::new();
         let home = std::env::var("HOME").ok();
-        shelf.pin(crate::app_entry::read(&crate::app_entry::shares(
-            home.as_deref(),
-        )));
-        let protocol = ProtocolBridge::new().map(Box::new);
+        if !gate.greeter() {
+            shelf.pin(crate::app_entry::read(&crate::app_entry::shares(
+                home.as_deref(),
+            )));
+        }
+        let protocol = match gate.greeter() {
+            true => None,
+            false => ProtocolBridge::new().map(Box::new),
+        };
         Self {
             windows: [UserWindowInfo::default(); MAX_WINDOWS],
             window_count: 0,
@@ -138,8 +150,11 @@ impl WindowManager {
             surface_cache: ClientSurfaceCache::new(),
             system_bar: menu_bar::SystemBar::new(),
             shelf,
-            popover: popover::Popover::new(),
+            popover: popover::Popover::new(net_toggle_unasked()),
             consent,
+            gate,
+            behind: false,
+            init_says: None,
             restart_offer_due: false,
             protocol,
             protocol_serial: 0,
@@ -408,6 +423,26 @@ impl WindowManager {
         for i in 0..self.input.raw_event_count {
             let event = self.input.raw_event_buf[i];
             let time = event.timestamp_ms as u32;
+            let gated = match event.event_type {
+                InputEventType::KeyPress => self.gate.takes_press(&event),
+                InputEventType::KeyRelease => self.gate.takes_release(event.key_keycode()),
+                _ => false,
+            };
+            if gated {
+                self.input.set_modifier_state(event.key_modifiers());
+                continue;
+            }
+            if self.gate.shown() {
+                if event.event_type == InputEventType::PointerMotion {
+                    self.input.apply_motion(&event);
+                }
+                if !matches!(
+                    event.event_type,
+                    InputEventType::KeyRelease | InputEventType::PointerButtonRelease
+                ) {
+                    continue;
+                }
+            }
             let taken = match event.event_type {
                 InputEventType::KeyPress => self.consent.takes_press(&event),
                 InputEventType::KeyRelease => self.consent.takes_release(event.key_keycode()),
@@ -774,7 +809,8 @@ impl WindowManager {
         let wm = self;
         wm.input.drain_events();
         wm.refresh_windows();
-        if wm.consent.take_dirty() {
+        wm.gate.poll();
+        if wm.consent.take_dirty() | wm.gate.take_dirty() {
             wm.force_full_redraw = true;
         }
         // Snapshot before any input processing so a change from any source —
@@ -796,7 +832,7 @@ impl WindowManager {
             + SHELF_DOT_MARGIN_Y;
 
         wm.process_input_events(fb_info.width as i32, fb_info.height as i32, shelf_h);
-        if wm.consent.take_dirty() {
+        if wm.consent.take_dirty() | wm.gate.take_dirty() {
             wm.force_full_redraw = true;
         }
 
@@ -879,6 +915,11 @@ impl WindowManager {
                 }
             }
         }
+        match wm.popover.take_choice() {
+            Some(popover::Choice::Lock) => wm.gate.lock(),
+            Some(choice) => ask_init(choice.command()),
+            None => {}
+        }
         if std::mem::take(&mut wm.restart_offer_due)
             && let Some(item) = wm
                 .system_bar
@@ -949,6 +990,7 @@ impl WindowManager {
                     &mut wm.shelf,
                     &mut wm.popover,
                     &wm.consent,
+                    &wm.gate,
                     &wm.net_cache,
                     active_app_name,
                     &frame_damage,
@@ -1030,6 +1072,57 @@ impl WindowManager {
     }
 }
 
+impl WindowManager {
+    fn told(&mut self, line: &[u8]) {
+        match line {
+            b"front" | b"front unlock" => {
+                if line == b"front unlock" {
+                    self.gate.unlocked();
+                }
+                self.behind = false;
+                self.force_full_redraw = true;
+                self.first_frame = true;
+            }
+            b"behind" => {
+                self.gate.lock();
+                self.popover.dismiss();
+                self.behind = true;
+            }
+            b"lock" => self.gate.lock(),
+            _ => {}
+        }
+    }
+
+    /// Act on what init said since the last pass, before the pass takes any
+    /// input: a lock init sent before handing the seats back is then in
+    /// force for every key typed after.
+    fn hear_init(&mut self) {
+        let Some(says) = self.init_says.as_mut() else {
+            return;
+        };
+        let (lines, closed) = says.read();
+        for line in lines {
+            self.told(&line);
+        }
+        if closed {
+            tty::write(b"COMPOSITOR: init's session pipe closed\n");
+            self.init_says = None;
+        }
+    }
+
+    /// What a compositor behind still does each pass: serve and reap its
+    /// clients, whose frames wait until it is in front again.
+    fn look_after_clients(&mut self) {
+        self.gate.poll();
+        if let Some(ref mut proto) = self.protocol {
+            proto.process_requests();
+            proto.cleanup_disconnected();
+            proto.flush_all();
+        }
+        process::reap_exited_children();
+    }
+}
+
 /// How long a seat may stay taken: a compositor that just exited holds its
 /// seats until its exit's cleanup hooks run, which is after init is woken to
 /// start the next.
@@ -1054,6 +1147,13 @@ pub fn compositor_user_main() {
     // inherited one the compositor was started without.
     let readiness = crate::readiness::ReadinessNotifier::acquire();
     let consent = consent::Consent::acquire();
+    let session = session_pipe();
+    let role = match std::env::args().nth(1).as_deref() {
+        Some(GREETER_ARG) => gate::Role::Greeter,
+        _ => gate::Role::Desktop {
+            name: std::env::var("USER").unwrap_or_default(),
+        },
+    };
     tty::write(b"COMPOSITOR: starting\n");
 
     // Ownership of the screen and the input stream is announced here, once,
@@ -1061,14 +1161,18 @@ pub fn compositor_user_main() {
     // for the process lifetime: closing one would not release the seat anyway
     // (release is arbiter revocation at task exit), and holding them keeps the
     // descriptor's existence honest about what this process owns.
-    if !acquire_seat(window::screen_acquire) {
-        tty::write(b"COMPOSITOR: screen seat unavailable\n");
-    }
-    if !acquire_seat(window::input_sink_acquire) {
-        tty::write(b"COMPOSITOR: input seat unavailable\n");
+    // A session of init's takes the seats only as init hands them over,
+    // once it is the session in front.
+    if session.is_none() {
+        if !acquire_seat(window::screen_acquire) {
+            tty::write(b"COMPOSITOR: screen seat unavailable\n");
+        }
+        if !acquire_seat(window::input_sink_acquire) {
+            tty::write(b"COMPOSITOR: input seat unavailable\n");
+        }
     }
 
-    let mut wm = WindowManager::new(consent);
+    let mut wm = WindowManager::new(consent, gate::Gate::new(role));
     let mut fb_info = DisplayInfo::default();
 
     if window::fb_info(&mut fb_info) < 0 {
@@ -1109,8 +1213,66 @@ pub fn compositor_user_main() {
     let ring = Ring::setup(64).expect("COMPOSITOR: ring setup failed");
     slopfut::block_on(
         ring,
-        compositor_async(wm, output, fb_info, pixel_format, readiness),
+        compositor_async(wm, output, fb_info, pixel_format, readiness, session),
     );
+}
+
+const GREETER_ARG: &str = "--greeter";
+/// Where init tells a compositor whether its session is in front.
+const SESSION_FD: i32 = 5;
+/// How often a compositor behind looks after its clients.
+const BEHIND_FRAME_MS: u64 = 100;
+
+/// The pipe init hands over at [`SESSION_FD`], when it is one.
+fn session_pipe() -> Option<crate::syscall::OwnedFd> {
+    use slopos_abi::syscall::F_GETFD;
+    use slopos_slibc::pal::{Pal, Sys};
+    Sys::fcntl(SESSION_FD, F_GETFD as i32, 0).ok()?;
+    let _ = crate::syscall::fs::set_fd_cloexec(SESSION_FD);
+    // SAFETY: init handed this descriptor over and nothing else here owns it.
+    let fd = unsafe { crate::syscall::OwnedFd::from_raw(SESSION_FD) };
+    let _ = crate::syscall::net::set_nonblocking(fd.raw());
+    Some(fd)
+}
+
+/// Whether the person this desktop runs as may turn networking on and off
+/// unasked, so its switch is worth offering.
+fn net_toggle_unasked() -> bool {
+    use slopos_priv_core::{People, Person, Reach, Requester, Verdict};
+    let Ok(policy) = crate::privd::policy() else {
+        return false;
+    };
+    let Some(action) = policy.action("org.slopos.net.toggle") else {
+        return false;
+    };
+    let uid = process::getuid();
+    let mut groups = [0u32; 32];
+    // SAFETY: `groups` holds as many as the call is told it may write.
+    let n = unsafe { slopos_slibc::process::ids::getgroups(32, groups.as_mut_ptr()) };
+    let admin = groups[..n.max(0) as usize].contains(&slopos_abi::fs::ADMIN_GID);
+    let people = People {
+        people: vec![Person {
+            uid,
+            name: std::env::var("USER").unwrap_or_default(),
+            admin,
+            password: true,
+        }],
+        logged_in: vec![uid],
+    };
+    let requester = Requester::new(uid, Some(crate::init_control::COMPOSITOR), false)
+        .reached(Reach::Screen { theirs: true });
+    action.admits(&requester, &people) == Verdict::Run
+}
+
+/// Ask init on a thread of its own, which init answers once it has acted.
+fn ask_init(command: crate::init_control::Command) {
+    let _ = std::thread::Builder::new()
+        .name("compositor-init".into())
+        .spawn(move || {
+            if let Err(why) = crate::init_control::ask(command) {
+                eprintln!("compositor: init: {why}");
+            }
+        });
 }
 
 const TARGET_FRAME_MS: u64 = 16;
@@ -1152,6 +1314,7 @@ async fn compositor_async(
     fb_info: DisplayInfo,
     pixel_format: slopos_abi::PixelFormat,
     mut readiness: Option<crate::readiness::ReadinessNotifier>,
+    session: Option<crate::syscall::OwnedFd>,
 ) {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1189,6 +1352,7 @@ async fn compositor_async(
     }
     spawn_consent_task(wm.clone());
     spawn_base_task(wm.clone());
+    wm.borrow_mut().init_says = session.map(InitSays::new);
 
     // A multishot row can die on a transient error and the listen socket
     // outlives any such transient, so stream-end re-arms rather than ending
@@ -1244,19 +1408,30 @@ async fn compositor_async(
             }
         }
 
-        wm.borrow_mut().render_frame(
-            &mut output,
-            &fb_info,
-            pixel_format,
-            &mut frame_count,
-            &mut metrics,
-            time_origin,
-            frame_start,
-            TARGET_FRAME_MS,
-        );
+        wm.borrow_mut().hear_init();
+        let behind = wm.borrow().behind;
+        if behind {
+            wm.borrow_mut().look_after_clients();
+        } else {
+            wm.borrow_mut().render_frame(
+                &mut output,
+                &fb_info,
+                pixel_format,
+                &mut frame_count,
+                &mut metrics,
+                time_origin,
+                frame_start,
+                TARGET_FRAME_MS,
+            );
+        }
 
+        let frame_ms = if behind {
+            BEHIND_FRAME_MS
+        } else {
+            TARGET_FRAME_MS
+        };
         let elapsed = frame_start.elapsed().as_millis() as u64;
-        let remaining = TARGET_FRAME_MS.saturating_sub(elapsed);
+        let remaining = frame_ms.saturating_sub(elapsed);
         if remaining > 0 {
             slopfut::time::sleep_ms(remaining).await;
         } else {
@@ -1330,6 +1505,42 @@ fn spawn_consent_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
         }
         tty::write(b"COMPOSITOR: privd's consent channel closed\n");
     });
+}
+
+/// What init says on the session pipe, whether this session is in front:
+/// `front`, `front unlock` once its person proved themselves at the login
+/// screen, `behind`, which locks a desktop, and `lock`.
+struct InitSays {
+    pipe: crate::syscall::OwnedFd,
+    said: Vec<u8>,
+}
+
+impl InitSays {
+    fn new(pipe: crate::syscall::OwnedFd) -> InitSays {
+        InitSays {
+            pipe,
+            said: Vec::new(),
+        }
+    }
+
+    /// The whole lines written since the last read, and whether init has
+    /// closed its end.
+    fn read(&mut self) -> (Vec<Vec<u8>>, bool) {
+        let mut buf = [0u8; 256];
+        let closed = loop {
+            match crate::syscall::fs::read_slice(self.pipe.raw(), &mut buf) {
+                Ok(0) => break true,
+                Ok(n) => self.said.extend_from_slice(&buf[..n]),
+                Err(_) => break false,
+            }
+        };
+        let mut lines = Vec::new();
+        while let Some(end) = self.said.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.said.drain(..=end).collect();
+            lines.push(line[..end].to_vec());
+        }
+        (lines, closed)
+    }
 }
 
 /// Hear a new base come in, and offer a session restart while it holds

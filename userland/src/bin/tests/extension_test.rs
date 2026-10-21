@@ -240,7 +240,7 @@ fn a_first_install_asks_and_grants_what_it_read() -> bool {
         return false;
     };
     let asked = extctl(USER, &["install", &path]);
-    if asked.code != Some(STATUS_REFUSED) || !asked.says("nothing can ask them") {
+    if asked.code != Some(STATUS_REFUSED) || !asked.says("neither on the screen") {
         return fail(format!("the session's first install: {}", asked.shown()));
     }
     if record("ext-first").is_some() {

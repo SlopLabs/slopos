@@ -691,16 +691,35 @@ pub fn input_event_count(task_id: u32) -> u32 {
     with_task_queue(task_id, |queue| queue.events.len() as u32).unwrap_or(0)
 }
 
-struct ClipboardState {
+/// Clipboards kept at once, past which the one copied into longest ago goes.
+const CLIPBOARDS: usize = 8;
+
+#[derive(Clone, Copy)]
+struct Clipboard {
+    login: u32,
+    copied: u64,
     data: [u8; slopos_abi::CLIPBOARD_MAX_SIZE],
     len: usize,
+}
+
+/// One clipboard per login session, so nothing copied in one reaches
+/// another; a tag is never given twice in a boot, so one a session left
+/// behind is nobody's.
+struct ClipboardState {
+    slots: [Clipboard; CLIPBOARDS],
+    copies: u64,
 }
 
 impl ClipboardState {
     const fn new() -> Self {
         Self {
-            data: [0u8; slopos_abi::CLIPBOARD_MAX_SIZE],
-            len: 0,
+            slots: [Clipboard {
+                login: 0,
+                copied: 0,
+                data: [0u8; slopos_abi::CLIPBOARD_MAX_SIZE],
+                len: 0,
+            }; CLIPBOARDS],
+            copies: 0,
         }
     }
 }
@@ -710,22 +729,66 @@ static CLIPBOARD: SpinLock<ClipboardState> = SpinLock::new(
     lock_class!("CLIPBOARD", LOCK_LEVEL_RESOURCE),
 );
 
-pub fn clipboard_copy(src: &[u8]) -> usize {
+fn has_clipboard(login: u32) -> bool {
+    slopos_abi::task::SESSION_LOGINS.contains(&login) || login == slopos_abi::task::DESKTOP_LOGIN
+}
+
+pub fn clipboard_copy(login: u32, src: &[u8]) -> usize {
+    if !has_clipboard(login) {
+        return 0;
+    }
     let mut clip = CLIPBOARD.lock();
+    clip.copies += 1;
+    let copied = clip.copies;
+    let at = clip
+        .slots
+        .iter()
+        .position(|slot| slot.login == login)
+        .or_else(|| (0..CLIPBOARDS).min_by_key(|&i| clip.slots[i].copied))
+        .unwrap_or(0);
+    let slot = &mut clip.slots[at];
     let copy_len = src.len().min(slopos_abi::CLIPBOARD_MAX_SIZE);
-    clip.data[..copy_len].copy_from_slice(&src[..copy_len]);
-    clip.len = copy_len;
+    slot.login = login;
+    slot.copied = copied;
+    slot.data[..copy_len].copy_from_slice(&src[..copy_len]);
+    slot.data[copy_len..].fill(0);
+    slot.len = copy_len;
     copy_len
 }
 
-pub fn clipboard_paste(dst: &mut [u8]) -> usize {
-    let clip = CLIPBOARD.lock();
-    if clip.len == 0 {
+pub fn clipboard_paste(login: u32, dst: &mut [u8]) -> usize {
+    if !has_clipboard(login) {
         return 0;
     }
-    let copy_len = clip.len.min(dst.len());
-    dst[..copy_len].copy_from_slice(&clip.data[..copy_len]);
+    let clip = CLIPBOARD.lock();
+    let Some(slot) = clip.slots.iter().find(|slot| slot.login == login) else {
+        return 0;
+    };
+    let copy_len = slot.len.min(dst.len());
+    dst[..copy_len].copy_from_slice(&slot.data[..copy_len]);
     copy_len
+}
+
+/// Route every input event to `task_id` from now on, the compositor init
+/// brings in front, and drop what was queued for the one it replaces, which
+/// would read it as typed the moment it came back.
+pub fn input_switch_compositor(task_id: u32) {
+    let previous = FOCUS.read().compositor_task_id;
+    if previous != 0 && previous != task_id {
+        let _registry = SLOT_REGISTRY.lock();
+        if let Some(slot) = find_queue(previous) {
+            with_queue(slot, previous, |queue| queue.events.reset());
+        }
+    }
+    input_register_compositor(task_id);
+    input_set_pointer_focus(task_id, get_timestamp_ms());
+}
+
+/// Whether a key press also reaches the console's line discipline: only while
+/// nothing holds the input sink, so nothing typed into the desktop, a
+/// password among it, is ever there for a reader of the console.
+pub fn keys_reach_console() -> bool {
+    !has_keyboard_focus() && FOCUS.read().compositor_task_id == 0
 }
 
 pub fn input_cleanup_task(task_id: u32) {

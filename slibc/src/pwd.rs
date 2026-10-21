@@ -11,7 +11,7 @@ use slopos_abi::fs::{O_NOFOLLOW, O_RDONLY, S_IFMT, S_IFREG, UserFsStat};
 use slopos_abi::syscall::posix::O_NONBLOCK;
 use slopos_slibc_core::passwd::{BASE_GROUP, BASE_PASSWD, Group, LINE_MAX, Passwd, lines};
 
-use crate::errno::{EINTR, EINVAL, ERANGE, errno_set};
+use crate::errno::{EINTR, EINVAL, ENXIO, ERANGE, errno_set};
 use crate::pal::{Pal, Sys};
 use crate::types::{gid_t, group, passwd, uid_t};
 
@@ -487,4 +487,88 @@ pub unsafe extern "C" fn getgrent() -> *mut group {
             result,
         )
     })
+}
+
+/// Where init lists each session, a file named by its login tag.
+const SESSIONS: &[u8] = b"/run/sessions/";
+/// The longest name a session file gives `getlogin`.
+const LOGIN_MAX: usize = 255;
+/// A session file's size, which init keeps far smaller.
+const SESSION_MAX: usize = 1024;
+
+/// The name init lists for the session the caller's process carries the
+/// login tag of, its length written into `out`.
+fn login_name(out: &mut [u8; LOGIN_MAX]) -> Option<usize> {
+    let tag = Sys::login_tag();
+    if tag == 0 {
+        return None;
+    }
+    let mut path = [0u8; SESSIONS.len() + 11];
+    path[..SESSIONS.len()].copy_from_slice(SESSIONS);
+    let mut digits = [0u8; 10];
+    let mut n = tag;
+    let mut len = 0;
+    while n > 0 {
+        digits[len] = b'0' + (n % 10) as u8;
+        n /= 10;
+        len += 1;
+    }
+    for (i, digit) in digits[..len].iter().rev().enumerate() {
+        path[SESSIONS.len() + i] = *digit;
+    }
+    let flags = (O_RDONLY | O_NOFOLLOW) as i32 | crate::ffi::O_CLOEXEC;
+    let fd = Sys::open(path.as_ptr(), flags, 0).ok()?;
+    let mut text = [0u8; SESSION_MAX];
+    let mut have = 0;
+    while have < text.len() {
+        match Sys::read(fd, text[have..].as_mut_ptr(), text.len() - have) {
+            Ok(0) => break,
+            Ok(n) => have += n,
+            Err(e) if e == EINTR => {}
+            Err(_) => break,
+        }
+    }
+    let _ = Sys::close(fd);
+    let user = lines(&text[..have]).find_map(|line| line.strip_prefix(b"USER="))?;
+    if user.is_empty() || user.len() > LOGIN_MAX || user.contains(&0) {
+        return None;
+    }
+    out[..user.len()].copy_from_slice(user);
+    Some(user.len())
+}
+
+/// `getlogin_r(3)`: the name of the person logged in at the session the
+/// caller's process belongs to, which init lists by its login tag; `ENXIO`
+/// for a process of no session, as Linux answers one with no login uid.
+///
+/// # Safety
+/// `buf` is valid for `size` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getlogin_r(buf: *mut c_char, size: usize) -> c_int {
+    let mut name = [0u8; LOGIN_MAX];
+    let Some(len) = login_name(&mut name) else {
+        return ENXIO.raw();
+    };
+    if buf.is_null() || size <= len {
+        return ERANGE.raw();
+    }
+    core::ptr::copy_nonoverlapping(name.as_ptr(), buf.cast(), len);
+    *buf.add(len) = 0;
+    0
+}
+
+static mut LOGIN: [u8; LOGIN_MAX + 1] = [0; LOGIN_MAX + 1];
+
+/// `getlogin(3)`: as [`getlogin_r`], into static storage the next call
+/// overwrites; `NULL` with `errno` set otherwise.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getlogin() -> *mut c_char {
+    let buf: *mut c_char = (&raw mut LOGIN).cast();
+    match getlogin_r(buf, LOGIN_MAX + 1) {
+        0 => buf,
+        e => {
+            errno_set(e);
+            core::ptr::null_mut()
+        }
+    }
 }

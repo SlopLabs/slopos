@@ -144,6 +144,12 @@ pub enum Capability {
     /// whole images, so no per-process `DiskBlocks` ceiling binds it.
     /// Deletion condition: as `BaseUpdate`'s.
     ExtensionUpdate,
+    /// Handing the screen and input seats from the session in front to
+    /// another: `seat_switch`. The seats otherwise refuse an equal rank, so
+    /// this is init's choice of whose desktop the person at the machine sees
+    /// and types into. Deletion condition: dies when a session's seats are
+    /// descriptors init revokes and grants.
+    SeatSwitch,
 }
 
 impl Capability {
@@ -178,6 +184,7 @@ impl Capability {
             Self::SchedHigh => caps::SCHED_HIGH,
             Self::BaseUpdate => caps::BASE_UPDATE,
             Self::ExtensionUpdate => caps::EXTENSION_UPDATE,
+            Self::SeatSwitch => caps::SEAT_SWITCH,
         }
     }
 
@@ -217,6 +224,7 @@ impl Capability {
             Self::SchedHigh => "SchedHigh",
             Self::BaseUpdate => "BaseUpdate",
             Self::ExtensionUpdate => "ExtensionUpdate",
+            Self::SeatSwitch => "SeatSwitch",
         }
     }
 
@@ -248,6 +256,7 @@ impl Capability {
         Self::SchedHigh,
         Self::BaseUpdate,
         Self::ExtensionUpdate,
+        Self::SeatSwitch,
     ];
 }
 

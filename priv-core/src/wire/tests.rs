@@ -7,6 +7,7 @@ fn request() -> Request {
         action: "org.slopos.boot.install".into(),
         args: vec![b"install".to_vec(), b"b".to_vec(), vec![0xff, b' ', b'\n']],
         cwd: true,
+        terminal: true,
     }
 }
 
@@ -26,6 +27,7 @@ fn a_request_round_trips_and_counts_its_descriptors() {
     assert_eq!(back.args()[0], b"install");
     let plain = Request {
         cwd: false,
+        terminal: false,
         args: vec![],
         ..request()
     };
@@ -53,6 +55,8 @@ fn a_request_outside_the_protocol_is_malformed() {
     refuse(base().with("arg", b"a\0b"));
     refuse(base().with("cwd", "0"));
     refuse(base().with("cwd", "1").with("cwd", "1"));
+    refuse(base().with("terminal", "0"));
+    refuse(base().with("terminal", "1").with("terminal", "1"));
     refuse(base().with("env", "LD_PRELOAD=x"));
     refuse(base().with("arg", vec![b'a'; EXEC_MAX_ARG_STRLEN + 1]));
     let mut many = base();
@@ -192,4 +196,48 @@ fn mutated_requests_decode_or_are_malformed() {
             }
         }
     }
+}
+
+#[test]
+fn a_prompt_and_its_secret_round_trip_and_nothing_else_does() {
+    let (kind, body) = payload(&Reply::Prompt("user's password:".into()).frame(9));
+    assert_eq!(kind, kind::PROMPT);
+    assert_eq!(
+        Reply::decode(kind, &body),
+        Ok((9, Reply::Prompt("user's password:".into())))
+    );
+    for bad in ["\x1b[2J", "a\nb"] {
+        let fields = Fields::new().with("id", "9").with("prompt", bad);
+        assert_eq!(
+            Reply::decode(kind::PROMPT, &fields.encode()),
+            Err(Malformed)
+        );
+    }
+    let long = "x".repeat(MAX_PROMPT + 1);
+    let fields = Fields::new().with("id", "9").with("prompt", long);
+    assert_eq!(
+        Reply::decode(kind::PROMPT, &fields.encode()),
+        Err(Malformed)
+    );
+
+    let (kind, body) = payload(&secret_frame(9, b"hunter2"));
+    assert_eq!(kind, kind::SECRET);
+    let (id, secret) = decode_secret(&body).unwrap();
+    assert_eq!((id, secret.bytes()), (9, &b"hunter2"[..]));
+    let (_, none) = decode_secret(&payload(&secret_frame(9, b"")).1).unwrap();
+    assert!(none.is_empty(), "a person without a password types nothing");
+    for bad in [&b"a\nb"[..], b"a\0b", &[0xff]] {
+        assert_eq!(
+            decode_secret(&payload(&secret_frame(9, bad)).1).map(|(id, _)| id),
+            Err(Malformed)
+        );
+    }
+    let twice = Fields::new()
+        .with("id", "9")
+        .with("secret", "a")
+        .with("secret", "b");
+    assert_eq!(
+        decode_secret(&twice.encode()).map(|(id, _)| id),
+        Err(Malformed)
+    );
 }

@@ -15,6 +15,7 @@ action org.slopos.power.poweroff
   caps     Power
   uid      0
   allow    root
+  allow    greeter alone
   allow    user alone
   allow    admin
   allow    paired
@@ -26,6 +27,7 @@ action org.slopos.power.reboot
   caps     Power
   uid      0
   allow    root
+  allow    greeter alone
   allow    user alone
   allow    admin
   allow    paired
@@ -136,6 +138,7 @@ action org.slopos.boot.reboot
   caps     Power
   uid      0
   allow    root
+  allow    greeter alone
   allow    user alone
   allow    admin
   allow    paired
@@ -234,12 +237,13 @@ action org.slopos.accounts.manage
   args     promote *
   args     demote *
   args     autologin *
+  args     remote *
   caps     Seal DacOverride
   uid      0
   exclusive accounts
   allow    root
   allow    admin confirm
-  describe "Add, remove or rename a person, set their password, or change who administers the machine"
+  describe "Add, remove or rename a person, set their password, or change who administers the machine or is logged in by itself"
 
 action org.slopos.cpufreq.set
   program  /bin/cpufreq
@@ -341,3 +345,24 @@ action org.slopos.priv.shell
   allow    root
   allow    admin confirm
   describe "Open a shell as the person asking, with power over mounts, the network, the clock and every file not sealed"
+
+action org.slopos.login
+  program  /bin/session
+  args     login desktop *
+  args     login console *
+  caps
+  uid      0
+  exclusive login
+  allow    root
+  allow    greeter
+  describe "Log a person in, by their password, at the login screen or a terminal"
+
+action org.slopos.session.unlock
+  program  /bin/session
+  args     unlock
+  caps
+  uid      0
+  exclusive unlock
+  allow    root
+  allow    program /bin/compositor
+  describe "Unlock your own desktop by your password"

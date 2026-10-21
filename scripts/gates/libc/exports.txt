@@ -291,6 +291,8 @@ gethostname func
 getifaddrs func
 getitimer func
 getloadavg func
+getlogin func
+getlogin_r func
 getnameinfo func
 getopt func
 getopt_long func

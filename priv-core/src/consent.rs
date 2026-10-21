@@ -138,8 +138,16 @@ impl Secret {
     /// A secret as the channel carries one: no NUL, no newline, at most
     /// [`SECRET_MAX`] bytes of UTF-8.
     fn from_wire(bytes: &[u8]) -> Result<Secret, Malformed> {
-        let fits = !bytes.is_empty()
-            && bytes.len() <= SECRET_MAX
+        if bytes.is_empty() {
+            return Err(Malformed);
+        }
+        Secret::typed(bytes)
+    }
+
+    /// What was typed, as [`from_wire`](Self::from_wire) holds it but empty
+    /// too, which is how a person without a password answers.
+    pub(crate) fn typed(bytes: &[u8]) -> Result<Secret, Malformed> {
+        let fits = bytes.len() <= SECRET_MAX
             && !bytes.iter().any(|&b| b == 0 || b == b'\n')
             && core::str::from_utf8(bytes).is_ok();
         fits.then(|| Secret(bytes.to_vec())).ok_or(Malformed)

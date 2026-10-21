@@ -535,10 +535,12 @@ fn only_an_administrator_manages_and_the_last_stays() -> bool {
         return fail(format!("{NAME} is gone"));
     };
     let first = asked(&["demote", "user"], "");
-    if first.ok() || !first.said.contains("login screen") {
+    let again = asked(&["promote", "user"], "");
+    if !first.ok() || !again.ok() {
         return fail(format!(
-            "users demote user beside {NAME}: {}",
-            first.shown()
+            "users demote and promote user beside {NAME}: {}, {}",
+            first.shown(),
+            again.shown()
         ));
     }
     let demoted = asked(&["demote", NAME], "");

@@ -122,6 +122,31 @@ fn the_last_administrator_stays_one() {
 }
 
 #[test]
+fn remoted_runs_as_the_first_administrator_unless_one_is_named() {
+    let mut accounts = Accounts::one_person();
+    accounts.add("bob", false).unwrap();
+    accounts.add("carol", true).unwrap();
+    assert_eq!(accounts.remote().map(|p| p.uid), Some(SESSION_UID));
+    accounts.set_remote(Some("bob")).unwrap();
+    assert_eq!(accounts.remote().map(|p| p.name.as_str()), Some("bob"));
+    let text = accounts.render();
+    assert!(text.lines().nth(2) == Some("remote bob"), "{text}");
+    assert_eq!(Accounts::parse(&text), Some(accounts.clone()));
+    accounts.rename("bob", "robert").unwrap();
+    assert_eq!(accounts.remote().map(|p| p.name.as_str()), Some("robert"));
+    accounts.remove("robert").unwrap();
+    assert_eq!(accounts.remote().map(|p| p.uid), Some(SESSION_UID));
+    assert_eq!(accounts.set_remote(Some("dave")), Err(NO_SUCH_PERSON));
+    let unknown = text.replace("remote bob", "remote dave");
+    assert_eq!(Accounts::parse(&unknown), None);
+    assert_eq!(
+        Accounts::parse(&Accounts::one_person().render()),
+        Some(Accounts::one_person()),
+        "a record that names nobody spells no remote line"
+    );
+}
+
+#[test]
 fn the_administrators_fit_the_line_the_c_library_reads() {
     let mut accounts = Accounts::one_person();
     let mut promoted = 0;
@@ -199,6 +224,8 @@ fn the_database_lists_people_then_system_users() {
         extension("admin", 102),
         extension("nobody", 103),
         extension("tool", 104),
+        extension("greeter", 105),
+        extension("logind", GREETER_UID),
     ];
     let passwd = passwd(&accounts, &others);
     let rows: Vec<Passwd<'_>> = lines(passwd.as_bytes())
@@ -209,6 +236,7 @@ fn the_database_lists_people_then_system_users() {
         named,
         [
             (&b"root"[..], 0),
+            (b"greeter", GREETER_UID),
             (b"user", 1000),
             (b"bob", 1001),
             (b"hello", 100),
@@ -216,9 +244,10 @@ fn the_database_lists_people_then_system_users() {
             (b"nobody", NOBODY_UID),
         ]
     );
-    assert_eq!(rows[3].dir, b"/var/lib/hello");
-    assert_eq!(rows[3].shell, NO_SHELL.as_bytes());
-    assert_eq!(rows[2].shell, SHELL.as_bytes());
+    assert_eq!(rows[1].shell, NO_SHELL.as_bytes());
+    assert_eq!(rows[4].dir, b"/var/lib/hello");
+    assert_eq!(rows[4].shell, NO_SHELL.as_bytes());
+    assert_eq!(rows[3].shell, SHELL.as_bytes());
     let group = group(&accounts, &others);
     let groups: Vec<Group<'_>> = lines(group.as_bytes())
         .map(|l| Group::parse(l).unwrap())

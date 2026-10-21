@@ -22,11 +22,16 @@ pub const RELAYED_SIGNALS: [u8; 4] = [SIGHUP, SIGINT, SIGQUIT, SIGTERM];
 pub mod kind {
     pub const REQUEST: u8 = 0x01;
     pub const SIGNAL: u8 = 0x02;
+    pub const SECRET: u8 = 0x03;
     pub const STARTED: u8 = 0x10;
     pub const EXITED: u8 = 0x11;
     pub const DENIED: u8 = 0x12;
     pub const ASKING: u8 = 0x13;
+    pub const PROMPT: u8 = 0x14;
 }
+
+/// The longest prompt privd sends a requester to show its person.
+pub const MAX_PROMPT: usize = 512;
 
 /// The id of a reply about the connection rather than a request, which
 /// answers whatever was asked on it. No request takes it.
@@ -59,6 +64,9 @@ pub struct Request {
     /// argv past its first word, which privd sets to the program's name.
     pub args: Vec<Vec<u8>>,
     pub cwd: bool,
+    /// The requester can ask its person for their password at its terminal,
+    /// which privd asks of it in a console session.
+    pub terminal: bool,
 }
 
 impl Request {
@@ -80,11 +88,14 @@ impl Request {
         if self.cwd {
             fields.push("cwd", "1");
         }
+        if self.terminal {
+            fields.push("terminal", "1");
+        }
         frame(kind::REQUEST, &fields.encode())
     }
 
     pub fn decode(payload: &[u8]) -> Result<Request, Malformed> {
-        let fields = known(payload, &["id", "action", "arg", "cwd"])?;
+        let fields = known(payload, &["id", "action", "arg", "cwd", "terminal"])?;
         let action = fields
             .text("action")
             .filter(|name| valid_name(name))
@@ -100,11 +111,13 @@ impl Request {
         {
             return Err(Malformed);
         }
-        let cwd = match (fields.get("cwd"), fields.all("cwd").count()) {
-            (None, _) => false,
-            (Some(b"1"), 1) => true,
-            _ => return Err(Malformed),
+        let flag = |key| match (fields.get(key), fields.all(key).count()) {
+            (None, _) => Ok(false),
+            (Some(b"1"), 1) => Ok(true),
+            _ => Err(Malformed),
         };
+        let cwd = flag("cwd")?;
+        let terminal = flag("terminal")?;
         let id = number(&fields, "id")?;
         if id == CONNECTION {
             return Err(Malformed);
@@ -114,6 +127,7 @@ impl Request {
             action: action.to_string(),
             args,
             cwd,
+            terminal,
         })
     }
 }
@@ -137,6 +151,9 @@ pub enum Reply {
         reason: String,
         by_person: bool,
     },
+    /// Ask the person at the requester's terminal for their password, and
+    /// send it back in a [`secret_frame`].
+    Prompt(String),
 }
 
 impl Reply {
@@ -177,6 +194,7 @@ impl Reply {
                 }
                 frame(kind::DENIED, &fields.encode())
             }
+            Reply::Prompt(prompt) => frame(kind::PROMPT, &fields.with("prompt", prompt).encode()),
         }
     }
 
@@ -218,10 +236,49 @@ impl Reply {
                 };
                 (number(&fields, "id")?, reply)
             }
+            kind::PROMPT => {
+                let fields = known(payload, &["id", "prompt"])?;
+                let prompt = fields
+                    .text("prompt")
+                    .filter(|p| p.len() <= MAX_PROMPT && fields.all("prompt").count() == 1)
+                    .filter(|p| p.bytes().all(|b| (0x20..0x7f).contains(&b)))
+                    .ok_or(Malformed)?;
+                (number(&fields, "id")?, Reply::Prompt(prompt.to_string()))
+            }
             _ => return Err(Malformed),
         };
         Ok(reply)
     }
+}
+
+/// The password the person typed at the requester's terminal for request
+/// `id`'s prompt, empty when they gave none. The frame holds it until the
+/// caller wipes it.
+pub fn secret_frame(id: u64, secret: &[u8]) -> Vec<u8> {
+    let mut fields = Fields::new()
+        .with("id", id.to_string())
+        .with("secret", secret);
+    let mut payload = fields.encode();
+    let framed = frame(kind::SECRET, &payload);
+    crate::consent::wipe(&mut payload);
+    fields.wipe();
+    framed
+}
+
+/// The request a SECRET frame answers and what was typed, at most
+/// `slopos_accounts_core::password::SECRET_MAX` bytes of UTF-8 with no NUL or
+/// newline, or nothing.
+pub fn decode_secret(payload: &[u8]) -> Result<(u64, crate::consent::Secret), Malformed> {
+    let mut fields = known(payload, &["id", "secret"])?;
+    let decoded = (|| {
+        let secret = match (fields.get("secret"), fields.all("secret").count()) {
+            (Some(bytes), 1) => crate::consent::Secret::typed(bytes)?,
+            _ => return Err(Malformed),
+        };
+        Ok((number(&fields, "id")?, secret))
+    })();
+    fields.wipe();
+    decoded
 }
 
 /// Relay `signal` to the mechanism request `id` started, or withdraw the

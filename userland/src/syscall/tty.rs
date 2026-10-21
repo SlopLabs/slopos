@@ -31,3 +31,15 @@ pub fn font_set_coverage(data: &[u8], width: u16, height: u16) -> i64 {
         ) as i64
     }
 }
+
+/// The path of the terminal `fd` reads, as `ttyname` finds it.
+pub fn name_of(fd: super::RawFd) -> Option<String> {
+    let mut buf = [0u8; 64];
+    // SAFETY: `buf` is as long as the length handed with it.
+    let rc = unsafe { slopos_slibc::io::misc::ttyname_r(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0)?;
+    String::from_utf8(buf[..len].to_vec()).ok()
+}

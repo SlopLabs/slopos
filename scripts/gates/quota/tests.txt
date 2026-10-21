@@ -134,6 +134,13 @@
 # ran and the tests image grew to 128M: `extension_action_test` installs and
 # updates its extension, runs its mechanisms through privd and its
 # configuration through extctl, and has privd read the actions again.
+# Then 90858, 90268 and 90239 in three captures on a host without KVM once
+# each person's processes shared a quarter of the process and task tables:
+# `sessions_test`'s fork bomb fills a person's 2048 tasks, each a kernel stack
+# and a task the heap keeps the pages of once the bomb is reaped.
+# The process, task and fdslot rows after userland are the bomb's too, the
+# root row's peak with a person's 256 processes and 2048 tasks live beside
+# the suite's own: 270, 2061 and 861 in all three captures.
 # The diskblocks row after userland is `persist_test`'s filler meeting the
 # root's reserve: 7058 once the tests image grew from 96M, where it was 3658.
 # The pages row
@@ -157,6 +164,10 @@ max-denials 0
 # fewer means a test stopped refusing, more means something else was.
 expect-denials post-kernel-tests commitpages 4
 expect-denials post-userland-tests commitpages 7
+# The bomb stops once twenty forks in a row are refused, at a person's task
+# share with its children left unreaped and then at their process share.
+expect-denials post-userland-tests process 20
+expect-denials post-userland-tests task 20
 
 require-phase boot
 require-phase post-kernel-tests
@@ -177,14 +188,14 @@ post-kernel-tests	task	9
 post-userland-tests	commitpages	193853
 post-userland-tests	custody	12
 post-userland-tests	diskblocks	7058
-post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	63720
+post-userland-tests	fdslot	861
+post-userland-tests	kernelmeta	90858
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
-post-userland-tests	process	23
+post-userland-tests	process	270
 post-userland-tests	residentpages	160371
-post-userland-tests	task	16
+post-userland-tests	task	2061
 
 # The charge path's cost, as ratios rather than cycle counts. A cycle
 # count here measures the accelerator: the same tree reports ~1500

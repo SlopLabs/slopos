@@ -348,8 +348,41 @@ fn ask(action: &str, args: &[Vec<u8>], input: Input) -> Result<Asked, String> {
         action: action.to_owned(),
         args: args.to_vec(),
         cwd: spec.cwd,
+        terminal: fs::isatty(0),
     };
     run(&mut connection, request, input).map(Asked::Ran)
+}
+
+/// Have privd run `action` with `args`, the mechanism reading `input` and
+/// writing to `out`, its errors to this process's standard error: its
+/// status, or why nothing ran.
+pub fn run_feeding(action: &str, args: &[&str], input: &[u8], out: RawFd) -> Result<i32, String> {
+    let mut connection = Connection::open_within(RESTART_WAIT)
+        .map_err(|why| format!("cannot reach privd: {why}"))?;
+    let (read, write) = pipe()?;
+    if fs::write_slice(write.raw(), input) != Ok(input.len()) {
+        return Err("what was typed does not fit a pipe".into());
+    }
+    drop(write);
+    let request = Request {
+        id: request_id(),
+        action: action.to_owned(),
+        args: args.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+        cwd: false,
+        terminal: false,
+    };
+    connection.send(&request, &[read.raw(), out, 2])?;
+    drop(read);
+    loop {
+        match connection.reply(request.id)? {
+            Some(Reply::Asking | Reply::Started { .. }) => {}
+            Some(Reply::Exited(Exit::Code(code))) => return Ok(code),
+            Some(Reply::Exited(Exit::Signal(signal))) => return Ok(128 + i32::from(signal)),
+            Some(Reply::Denied { reason, .. }) => return Err(reason),
+            Some(Reply::Prompt(_)) => return Err("privd asked for a terminal".into()),
+            None => return Err("privd closed the connection".into()),
+        }
+    }
 }
 
 /// A fresh id, so no reply left on an inherited connection passes as this
@@ -585,6 +618,9 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
     drop(cwd);
     stdio.passed.clear();
     let program = program_name();
+    // Typed at a prompt privd sends, never forwarded before the mechanism
+    // starts.
+    let typed_here = fs::isatty(0);
     let mut started = false;
     let mut signalled = false;
     let mut withdrawn_by: Option<u8> = None;
@@ -625,6 +661,14 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
                 }
                 Some(Reply::Asking) => {
                     eprintln!("{program}: asking the person at this machine to allow it");
+                }
+                Some(Reply::Prompt(prompt)) => {
+                    let typed = crate::secret::read(&prompt)?;
+                    let secret = typed.as_ref().map_or(&[][..], |typed| typed.bytes());
+                    let mut frame = wire::secret_frame(request.id, secret);
+                    let sent = connection.send_frame(&frame, &[]);
+                    slopos_priv_core::consent::wipe(&mut frame);
+                    sent?;
                 }
                 Some(Reply::Exited(exit)) => {
                     exited = Some(exit);
@@ -668,7 +712,7 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
             polled.push(poll(out.raw(), POLLIN));
         }
         if let Some(forward) = &stdio.to_stdin {
-            if forward.wants_input() && (started || stdio.terminal.is_none()) {
+            if forward.wants_input() && (started || (stdio.terminal.is_none() && !typed_here)) {
                 polled.push(poll(0, POLLIN));
             }
             if !forward.held.is_empty() {

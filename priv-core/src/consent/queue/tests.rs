@@ -349,3 +349,20 @@ fn the_agent_says_once_that_the_question_is_on_screen() {
     assert_eq!(q.shown(id), Some(&1));
     assert!(q.shown(id).is_none());
 }
+
+#[test]
+fn a_desktop_that_goes_behind_refuses_what_it_was_asked_and_stays_the_agent() {
+    let mut q = ready();
+    for n in 0..3 {
+        assert!(q.offer(ask(n), n, 0).is_ok());
+    }
+    let (shown, _) = q.next(0).expect("the first is shown");
+    let (id, askers) = q.hidden();
+    assert_eq!(id, Some(shown.id), "the one on screen is taken off it");
+    assert_eq!(askers, vec![0, 1, 2]);
+    assert_eq!(q.hidden(), (None, vec![]));
+    assert_eq!(q.version(), VERSION, "the agent stays");
+    q.ready(VERSION);
+    assert!(q.offer(ask(3), 3, 0).is_ok());
+    assert!(q.next(0).is_some(), "and is asked again once back");
+}

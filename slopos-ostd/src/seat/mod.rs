@@ -19,7 +19,7 @@
 //! `FdRights` stamped on its table entry; this module owns only the
 //! arbitration.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::window::{SEAT_COMPOSITOR_PRIMARY, SEAT_VIRTCON};
 
@@ -138,31 +138,47 @@ impl SeatGrant {
     }
 }
 
-/// One arbitrated resource. Lock-free: every transition is a single CAS on
-/// the fused (epoch, holder) pair, so a seat may be revoked from the task
+/// One arbitrated resource. Lock-free, so a seat may be revoked from the task
 /// cleanup hook, which runs with the task lock held.
 struct SeatSlot {
     /// Bumped on every acquire and every revoke, so a grant from a previous
     /// holder never validates. Odd/even carries no meaning; only equality does.
     epoch: AtomicU64,
-    /// The holding task, or 0 for a free seat.
-    holder: AtomicU32,
-    /// The held seat's rank, meaningful only while `holder != 0`.
-    rank: AtomicU32,
+    /// The holding task in the low half, 0 for a free seat, and the held
+    /// seat's rank in the high: one word, so a release clears only the
+    /// holder it names and never a successor's rank.
+    held: AtomicU64,
 }
 
 impl SeatSlot {
     const fn new() -> Self {
         Self {
             epoch: AtomicU64::new(0),
-            holder: AtomicU32::new(0),
-            rank: AtomicU32::new(0),
+            held: AtomicU64::new(0),
         }
     }
 
     #[inline]
+    fn holder(&self) -> u32 {
+        self.held.load(Ordering::Acquire) as u32
+    }
+
+    #[inline]
+    fn rank(&self) -> u8 {
+        (self.held.load(Ordering::Acquire) >> 32) as u8
+    }
+
+    #[inline]
+    fn hold(&self, task_id: u32, id: SeatId) {
+        self.held.store(
+            u64::from(task_id) | (u64::from(id.rank()) << 32),
+            Ordering::Release,
+        );
+    }
+
+    #[inline]
     fn matches(&self, epoch: u64) -> bool {
-        self.holder.load(Ordering::Acquire) != 0 && self.epoch.load(Ordering::Acquire) == epoch
+        self.holder() != 0 && self.epoch.load(Ordering::Acquire) == epoch
     }
 }
 
@@ -188,10 +204,9 @@ pub fn acquire(kind: SeatKind, id: SeatId, task_id: u32) -> Result<SeatGrant, Se
         return Err(SeatError::Busy);
     }
     let slot = seat_slot(kind);
-    let incumbent = slot.holder.load(Ordering::Acquire);
+    let incumbent = slot.holder();
     if incumbent != 0 && incumbent != task_id {
-        let held_rank = slot.rank.load(Ordering::Acquire) as u8;
-        if id.rank() <= held_rank {
+        if id.rank() <= slot.rank() {
             return Err(SeatError::Busy);
         }
     }
@@ -199,8 +214,43 @@ pub fn acquire(kind: SeatKind, id: SeatId, task_id: u32) -> Result<SeatGrant, Se
     // Epoch first: a concurrent `is_current` must never see the new holder
     // still carrying the old epoch, which would validate a revoked grant.
     let epoch = slot.epoch.fetch_add(1, Ordering::AcqRel) + 1;
-    slot.rank.store(id.rank() as u32, Ordering::Release);
-    slot.holder.store(task_id, Ordering::Release);
+    slot.hold(task_id, id);
+    Ok(SeatGrant {
+        kind,
+        id,
+        task_id,
+        epoch,
+    })
+}
+
+/// Give both seats to `task_id` at the compositor's rank, revoking whoever
+/// holds them there: how init brings another session's compositor in front,
+/// which `acquire` refuses an equal rank. Neither moves while the virtual
+/// console holds either.
+pub fn hand_over_seats(task_id: u32) -> Result<(), SeatError> {
+    let kinds = [SeatKind::Screen, SeatKind::InputSink];
+    if task_id == 0 || kinds.into_iter().any(held_above_compositor) {
+        return Err(SeatError::Busy);
+    }
+    for kind in kinds {
+        hand_over(kind, task_id)?;
+    }
+    Ok(())
+}
+
+fn held_above_compositor(kind: SeatKind) -> bool {
+    let slot = seat_slot(kind);
+    slot.holder() != 0 && slot.rank() > SeatId::CompositorPrimary.rank()
+}
+
+fn hand_over(kind: SeatKind, task_id: u32) -> Result<SeatGrant, SeatError> {
+    let id = SeatId::CompositorPrimary;
+    let slot = seat_slot(kind);
+    if task_id == 0 || held_above_compositor(kind) {
+        return Err(SeatError::Busy);
+    }
+    let epoch = slot.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+    slot.hold(task_id, id);
     Ok(SeatGrant {
         kind,
         id,
@@ -212,7 +262,7 @@ pub fn acquire(kind: SeatKind, id: SeatId, task_id: u32) -> Result<SeatGrant, Se
 /// The task holding `kind`'s seat, or `None` when it is free.
 #[inline]
 pub fn holder(kind: SeatKind) -> Option<u32> {
-    match seat_slot(kind).holder.load(Ordering::Acquire) {
+    match seat_slot(kind).holder() {
         0 => None,
         id => Some(id),
     }
@@ -222,16 +272,16 @@ pub fn holder(kind: SeatKind) -> Option<u32> {
 #[inline]
 pub fn held_seat(kind: SeatKind) -> Option<SeatId> {
     let slot = seat_slot(kind);
-    if slot.holder.load(Ordering::Acquire) == 0 {
+    if slot.holder() == 0 {
         return None;
     }
-    SeatId::try_from_u8(slot.rank.load(Ordering::Acquire) as u8)
+    SeatId::try_from_u8(slot.rank())
 }
 
 /// Whether `task_id` currently holds `kind`'s seat.
 #[inline]
 pub fn is_held_by(kind: SeatKind, task_id: u32) -> bool {
-    task_id != 0 && seat_slot(kind).holder.load(Ordering::Acquire) == task_id
+    task_id != 0 && seat_slot(kind).holder() == task_id
 }
 
 /// The live epoch for `kind`. A descriptor minted under a different one names
@@ -251,13 +301,19 @@ pub fn release(kind: SeatKind, task_id: u32) -> bool {
         return false;
     }
     let slot = seat_slot(kind);
-    if slot.holder.load(Ordering::Acquire) != task_id {
+    let held = slot.held.load(Ordering::Acquire);
+    if held as u32 != task_id {
         return false;
     }
     // Holder first: a reader that sees the seat free must not then read an
     // epoch that still validates the departing holder's grant.
-    slot.holder.store(0, Ordering::Release);
-    slot.rank.store(0, Ordering::Release);
+    if slot
+        .held
+        .compare_exchange(held, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
     slot.epoch.fetch_add(1, Ordering::AcqRel);
     true
 }
@@ -277,8 +333,7 @@ pub fn revoke_for_task(task_id: u32) {
 #[doc(hidden)]
 pub fn reset_all() {
     for slot in SEATS.iter() {
-        slot.holder.store(0, Ordering::Release);
-        slot.rank.store(0, Ordering::Release);
+        slot.held.store(0, Ordering::Release);
         slot.epoch.fetch_add(1, Ordering::AcqRel);
     }
 }
@@ -418,6 +473,36 @@ mod tests {
             "0 is the free sentinel and must not be grantable"
         );
         assert_eq!(holder(SeatKind::Screen), None);
+    }
+
+    #[test]
+    fn a_hand_over_revokes_an_equal_rank_holder() {
+        let _seat_guard = fresh();
+        let first = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7).expect("free");
+        hand_over_seats(8).expect("init hands the seats on");
+        assert!(!first.is_current(), "the session behind holds nothing");
+        assert_eq!(holder(SeatKind::Screen), Some(8));
+        assert_eq!(holder(SeatKind::InputSink), Some(8));
+        assert_eq!(
+            acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7),
+            Err(SeatError::Busy),
+            "and cannot take it back by asking"
+        );
+    }
+
+    #[test]
+    fn a_hand_over_leaves_the_virtual_console_its_seat_and_moves_neither() {
+        let _seat_guard = fresh();
+        acquire(SeatKind::Screen, SeatId::Virtcon, 9).expect("free");
+        acquire(SeatKind::InputSink, SeatId::CompositorPrimary, 7).expect("free");
+        assert_eq!(hand_over_seats(8), Err(SeatError::Busy));
+        assert_eq!(holder(SeatKind::Screen), Some(9));
+        assert_eq!(
+            holder(SeatKind::InputSink),
+            Some(7),
+            "nor the seat it could"
+        );
+        assert_eq!(hand_over_seats(0), Err(SeatError::Busy));
     }
 
     #[test]

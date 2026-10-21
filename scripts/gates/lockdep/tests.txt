@@ -465,9 +465,20 @@ require-phase post-userland-tests
 #               465); userland chains drifted to 556 and 552 above 548, the
 #               new nesting of an activation, its device and the root's
 #               filesystem, with edges 274 and 273.
+#   2026-10-21  kernel 268 -> 269, userland 283 -> 284: `VFS_REMOVAL_ENDED`
+#               (fs/src/vfs/orphan.rs), the wait queue an open that raced a
+#               rename over its name waits on until that removal ends. It
+#               registers at the first removal's end, which both test phases
+#               reach, and is the one name the phases' class lists gained
+#               against a capture of the sessions work before it; boot is
+#               unchanged at 105. Three captures of the sessions work without
+#               KVM measured userland edges 282, 277 and 289 and chains 564,
+#               560 and 573, above both bands, which are widened below; the
+#               kernel phase held its bands (edges 213, 211 and 208, chains
+#               473, 472 and 468).
 boot	classes	105
-post-kernel-tests	classes	268
-post-userland-tests	classes	283
+post-kernel-tests	classes	269
+post-userland-tests	classes	284
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
@@ -484,12 +495,14 @@ boot	chains	156
 # a re-measurement that finds a wider spread widens the band with it.
 #
 #   post-kernel-tests    edges   193-198  (spread 20)  ->  173-218
-#   post-userland-tests  edges   243-259  (spread 16)  ->  227-275
+#   post-userland-tests  edges   243-289  (spread 46)  ->  197-335
 #   post-kernel-tests    chains  444-452  (spread 36)  ->  408-488
-#   post-userland-tests  chains  511-512  (spread 36)  ->  475-548
+#   post-userland-tests  chains  511-573  (spread 62)  ->  449-635
 #
-# The spreads are those measured before phase 4 of `plans/usb-xhci.md`; the
-# ranges are its two captures, as the 2026-10-08 entry above records.
+# The kernel spreads are those measured before phase 4 of `plans/usb-xhci.md`;
+# its ranges are that phase's two captures, as the 2026-10-08 entry above
+# records. The userland ranges fold in the five captures since, which the
+# 2026-10-19 and 2026-10-21 entries record.
 #
 # Each recorded range is the union of the measurements this file already
 # carried, not one sitting: the 24-run set taken when the sleep queue moved
@@ -505,6 +518,6 @@ boot	chains	156
 # not a failure, so a band set slightly tight costs a DRIFT line to read,
 # never a red run.
 band post-kernel-tests edges 173 218
-band post-userland-tests edges 227 275
+band post-userland-tests edges 197 335
 band post-kernel-tests chains 408 488
-band post-userland-tests chains 475 548
+band post-userland-tests chains 449 635

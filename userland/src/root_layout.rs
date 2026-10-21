@@ -35,7 +35,7 @@ pub fn lay_out(root: &Path) {
 }
 
 /// `path`, a directory only the session may use, for what it runs this boot.
-pub fn make_runtime_dir(path: &str) {
+pub fn make_runtime_dir(path: &str, uid: u32) {
     let Some(parent) = Path::new(path).parent() else {
         return;
     };
@@ -44,7 +44,7 @@ pub fn make_runtime_dir(path: &str) {
         other => other,
     });
     let owned = made.and_then(|()| {
-        lchown(path, Some(SESSION_UID), Some(SESSION_GID))?;
+        lchown(path, Some(uid), Some(uid))?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
     });
     if let Err(e) = owned {

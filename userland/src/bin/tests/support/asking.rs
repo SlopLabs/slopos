@@ -32,6 +32,7 @@ pub struct Child {
     out: OwnedFd,
     _stdin: OwnedFd,
     seen: Vec<u8>,
+    reaped: bool,
 }
 
 impl Child {
@@ -81,6 +82,7 @@ impl Child {
             out,
             _stdin: stdin_end,
             seen: Vec::new(),
+            reaped: false,
         })
     }
 
@@ -112,10 +114,27 @@ impl Child {
     }
 }
 
+impl Child {
+    /// Its exit status once it exits within `within`; `None` past it.
+    pub fn exited_within(mut self, within: Duration) -> Option<i32> {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if let Some(code) = process::wait_exit_code_nohang(self.pid) {
+                self.reaped = true;
+                return Some(code);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        None
+    }
+}
+
 impl Drop for Child {
     fn drop(&mut self) {
-        let _ = process::kill(self.pid, slopos_abi::signal::SIGKILL);
-        let _ = process::wait_exit_code(self.pid);
+        if !self.reaped {
+            let _ = process::kill(self.pid, slopos_abi::signal::SIGKILL);
+            let _ = process::wait_exit_code(self.pid);
+        }
     }
 }
 
@@ -173,6 +192,7 @@ pub fn request_child(args: &[String]) -> i32 {
         action: action.clone(),
         args: rest.iter().map(|a| a.as_bytes().to_vec()).collect(),
         cwd: cwd == "cwd",
+        terminal: false,
     };
     let mut fds = vec![stdin.raw(), stdin.raw(), 2];
     if request.cwd {

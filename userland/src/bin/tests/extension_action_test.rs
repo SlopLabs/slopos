@@ -329,6 +329,8 @@ fn ask_privd_with(privd: &mut Connection, action: &str, args: &[&str]) -> Outcom
         action: action.to_owned(),
         args: args.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
         cwd: false,
+
+        terminal: false,
     };
     if let Err(why) = privd.send(&request, &[null.raw(), write.raw(), 2]) {
         return Outcome::Lost(why);
@@ -349,10 +351,13 @@ fn ask_privd_with(privd: &mut Connection, action: &str, args: &[&str]) -> Outcom
                 };
                 return Outcome::Ran(code, said.trim().to_owned());
             }
-            Ok(Some(Reply::Denied { reason, .. })) if reason.contains("nothing can ask them") => {
+            Ok(Some(Reply::Denied { reason, .. })) if reason.contains("neither on the screen") => {
                 return Outcome::Asked;
             }
             Ok(Some(Reply::Denied { reason, .. })) => return Outcome::Denied(reason),
+            Ok(Some(Reply::Prompt(_))) => {
+                return Outcome::Lost("privd asked for a terminal".into());
+            }
             Ok(None) => return Outcome::Lost("privd closed the connection".into()),
             Err(why) => return Outcome::Lost(why),
         }
@@ -657,7 +662,7 @@ fn a_configuration_edited_or_signed_restarts_what_reads_it() -> bool {
     };
     let installed = format!("/etc/{NAME}/act.conf");
     let by_person = edit(USER);
-    if by_person.code != Some(STATUS_REFUSED) || !by_person.says("nothing can ask them") {
+    if by_person.code != Some(STATUS_REFUSED) || !by_person.says("neither on the screen") {
         return fail(format!("the person's edit: {}", by_person.shown()));
     }
     if Path::new(&installed).exists() {
@@ -893,19 +898,27 @@ fn removing_takes_its_actions_and_command_away() -> bool {
 /// with another argument, the person is asked again.
 fn a_kept_answer_covers_its_command_and_directory_alone() -> bool {
     let calls = caps_drop();
+    if let Err(why) = init_control::ask(init_control::Command::RestartSession) {
+        return fail(format!("restart-session: {why}"));
+    }
+    let mut front = None;
+    until(|| {
+        front = slopos_userland::sessions::read()
+            .into_iter()
+            .find(|s| s.active && s.uid == USER)
+            .map(|s| s.tag);
+        front.is_some()
+    });
     let here = Asker {
         path: SELF,
         uid: USER,
-        login: Some(init_control::DESKTOP),
+        login: front,
         cwd: DIR,
         with_cwd: true,
     };
     let elsewhere = Asker { cwd: "/", ..here };
     let kept = ["ext.act.kept", "who", calls.as_str()];
     let other = ["ext.act.kept", "who", calls.as_str(), "again"];
-    if let Err(why) = init_control::ask(init_control::Command::RestartSession) {
-        return fail(format!("restart-session: {why}"));
-    }
     let up = until(|| here.ask(&other, None) == "asked");
     let first = here.ask(&kept, Some(asking::tab_and_enter));
     let again = here.ask(&kept, None);

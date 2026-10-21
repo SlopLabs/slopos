@@ -14,9 +14,11 @@
 
 #[path = "support/asking.rs"]
 mod asking;
+#[path = "support/sessions.rs"]
+mod sessions;
 
 use slopos_abi::input::keycode::KEY_ENTER;
-use slopos_abi::syscall::{BOOT_FLAG_MEDIUM, POLLIN, UserPollFd};
+use slopos_abi::syscall::BOOT_FLAG_MEDIUM;
 use slopos_priv_core::consent::Refusal;
 use slopos_priv_core::wire::{self, Exit, Reply, Request};
 use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy};
@@ -28,7 +30,7 @@ use slopos_userland::syscall::{OwnedFd, RawFd, fs, net, process};
 use self::asking::{Asker, Child};
 
 use std::io::Read;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -93,6 +95,7 @@ fn request(action: &str, args: &[&str]) -> Request {
         action: action.to_owned(),
         args: args.iter().map(|a| a.as_bytes().to_vec()).collect(),
         cwd: false,
+        terminal: false,
     }
 }
 
@@ -547,7 +550,7 @@ fn session() -> i32 {
         &["link", "set", "lo", "up"],
         devnull.raw(),
     );
-    if !denied(&replies).is_some_and(|why| why.contains("nothing can ask them")) {
+    if !denied(&replies).is_some_and(|why| why.contains("neither on the screen")) {
         note(&format!("net.configure with nobody to ask: {replies:?}"));
         return 6;
     }
@@ -1022,23 +1025,68 @@ fn a_standard_user_is_refused_while_no_administrator_has_a_password() -> bool {
 /// only then is the power-off asked for, which a fault would let end the run.
 /// An administrator beside another is run unasked.
 fn alone_runs_unasked_and_refuses_a_power_off_beside_another() -> bool {
-    use init_control::DESKTOP;
     let Some(bob) = uid_of(BOB) else {
         return false;
     };
     let keymap = ["org.slopos.console.keymap", "list"];
-    let alone = as_person(bob, Some(DESKTOP)).ask(&keymap, None);
+    let alone = as_person(bob, None).ask(&keymap, None);
     if alone != "ran 0" {
         note(&format!("{BOB}'s keymap list, alone: {alone}"));
         return false;
     }
-    let (Some(_first), Some(_bob)) = (
-        Child::start(SELF, USER, Some(DESKTOP), "/", &[LINGER]),
-        Child::start(SELF, bob, Some(DESKTOP), "/", &[LINGER]),
-    ) else {
+    let Some(at_console) = logged_in_at_a_console(BOB, "bob-pw") else {
         return false;
     };
-    let beside = as_person(bob, Some(DESKTOP)).ask(&keymap, None);
+    let outcome = (|| {
+        if !(ask_init(InitCommand::RestartSession)
+            && sessions::front_within(SESSION_DEADLINE).is_some())
+        {
+            return false;
+        }
+        alone_beside_another(bob)
+    })();
+    let ended = ask_init(InitCommand::EndSession);
+    drop(at_console);
+    outcome && ended
+}
+
+/// A shell `name` logged in to on a terminal of this test's, a session of
+/// its own while the terminal's master is held.
+fn logged_in_at_a_console(name: &str, password: &str) -> Option<OwnedFd> {
+    use std::io::Write;
+    let (master, _) = process::openpty().ok()?;
+    let slave = fs::ioctl_tiocgptpeer(master.raw()).ok()?;
+    // SAFETY: the slave is this function's, and the Stdio takes it over.
+    let stdout = unsafe { Stdio::from_raw_fd(slave.into_raw()) };
+    let mut child = Command::new("/bin/session")
+        .args(["login", "console", name])
+        .env_remove(ENV_FD)
+        .stdin(Stdio::piped())
+        .stdout(stdout)
+        .stderr(Stdio::inherit())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = writeln!(stdin, "{password}");
+    }
+    let logged_in = child.wait().ok()?.success();
+    let listed = sessions::until(SESSION_DEADLINE, || {
+        slopos_userland::sessions::read()
+            .iter()
+            .any(|s| s.user == name && s.class == slopos_userland::sessions::Class::Console)
+    });
+    if !logged_in || !listed {
+        note(&format!(
+            "{name} was not logged in at a console: {logged_in}, listed {listed}"
+        ));
+        return None;
+    }
+    Some(master)
+}
+
+fn alone_beside_another(bob: u32) -> bool {
+    let keymap = ["org.slopos.console.keymap", "list"];
+    let beside = as_person(bob, None).ask(&keymap, None);
     if !beside.contains("no administrator has one") {
         note(&format!(
             "{BOB}'s keymap list beside the first person: {beside}"
@@ -1046,12 +1094,12 @@ fn alone_runs_unasked_and_refuses_a_power_off_beside_another() -> bool {
         return false;
     }
     let poweroff = ["org.slopos.power.poweroff", "halt"];
-    let off = as_person(bob, Some(DESKTOP)).ask(&poweroff, None);
+    let off = as_person(bob, None).ask(&poweroff, None);
     if !off.contains("no administrator has one") {
         note(&format!("{BOB}'s power-off beside the first person: {off}"));
         return false;
     }
-    let first = as_person(USER, Some(DESKTOP)).ask(&keymap, None);
+    let first = as_person(USER, None).ask(&keymap, None);
     if first != "ran 0" {
         note(&format!(
             "the first person's keymap list beside {BOB}: {first}"
@@ -1076,12 +1124,13 @@ fn the_first_person_s_click_allows_and_escape_denies() -> bool {
     if !(ask_init(InitCommand::RestartSession) && asked_within(SESSION_DEADLINE)) {
         return false;
     }
-    let allowed = as_person(USER, None).ask(&CONFIGURE, Some(asking::tab_and_enter));
+    let front = sessions::front_tag();
+    let allowed = as_person(USER, front).ask(&CONFIGURE, Some(asking::tab_and_enter));
     if allowed != "ran 0" {
         note(&format!("the first person's click: {allowed}"));
         return false;
     }
-    let refused = as_person(USER, None).ask(&CONFIGURE, Some(asking::escape));
+    let refused = as_person(USER, front).ask(&CONFIGURE, Some(asking::escape));
     if !refused.starts_with("denied by the person") {
         note(&format!("the first person's Escape: {refused}"));
         return false;
@@ -1096,8 +1145,9 @@ fn an_administrator_s_password_answers_for_a_standard_user() -> bool {
     let Some(bob) = uid_of(BOB) else {
         return false;
     };
-    let allowed = as_person(bob, None).ask(&CONFIGURE, Some(alice_s_password));
-    let wrong = as_person(bob, None).ask(&CONFIGURE, Some(a_wrong_password));
+    let front = sessions::front_tag();
+    let allowed = as_person(bob, front).ask(&CONFIGURE, Some(alice_s_password));
+    let wrong = as_person(bob, front).ask(&CONFIGURE, Some(a_wrong_password));
     let ended = ask_init(InitCommand::EndSession);
     if allowed != "ran 0" {
         note(&format!(
@@ -1145,36 +1195,19 @@ fn ask_init(command: InitCommand) -> bool {
         .is_ok()
 }
 
-/// A question on screen when the session ends is interrupted.
+/// A question on screen when the session ends goes with it: its requester,
+/// a process of the session, is ended with it, or hears it was interrupted.
 fn held_across_the_end() -> bool {
-    let held = Command::new(SELF)
-        .arg(CONSENT_HELD)
-        .uid(USER)
-        .gid(USER)
-        .env_remove(ENV_FD)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn();
-    let Ok(mut held) = held else {
+    let Some(mut held) = Child::start(SELF, USER, sessions::front_tag(), "/", &[CONSENT_HELD])
+    else {
         note("the held request did not start");
         return false;
     };
-    let mut said = [0u8; 6];
-    let asked = held.stdout.take().is_some_and(|mut out| {
-        let mut fds = [UserPollFd {
-            fd: out.as_raw_fd(),
-            events: POLLIN,
-            revents: 0,
-        }];
-        let ready = fs::poll(&mut fds, PROBE_DEADLINE.as_millis() as i64);
-        matches!(ready, Ok(n) if n > 0) && out.read_exact(&mut said).is_ok() && &said == b"asked\n"
-    });
+    let asked = held.line(PROBE_DEADLINE).as_deref() == Some("asked");
     let ended = asked && ask_init(InitCommand::EndSession);
-    if !ended {
-        let _ = held.kill();
-    }
-    let interrupted = held.wait().ok().and_then(|status| status.code());
-    if !ended || interrupted != Some(0) {
+    let interrupted = held.exited_within(PROBE_DEADLINE);
+    let ended_with_it = Some(128 + i32::from(slopos_abi::signal::SIGTERM));
+    if !ended || (interrupted != Some(0) && interrupted != ended_with_it) {
         note(&format!(
             "a question across the end: asked {asked}, ended {ended}, the requester exited \
              {interrupted:?}"
@@ -1205,31 +1238,14 @@ fn nobody_within(deadline: Duration) -> bool {
 }
 
 /// The consent probe's exit status, `None` once it has run past
-/// [`PROBE_DEADLINE`].
+/// [`PROBE_DEADLINE`]. It asks from the desktop in front, if one is.
 fn probe() -> Option<i32> {
-    let mut child = Command::new(SELF)
-        .arg(CONSENT)
-        .uid(USER)
-        .gid(USER)
-        .env_remove(ENV_FD)
-        .stderr(Stdio::inherit())
-        .spawn()
-        .ok()?;
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.code(),
-            Ok(None) if start.elapsed() < PROBE_DEADLINE => {
-                std::thread::sleep(Duration::from_millis(100))
-            }
-            _ => {
-                note("the consent probe was neither asked nor refused in time");
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
+    let child = Child::start(SELF, USER, sessions::front_tag(), "/", &[CONSENT])?;
+    let code = child.exited_within(PROBE_DEADLINE);
+    if code.is_none() {
+        note("the consent probe was neither asked nor refused in time");
     }
+    code
 }
 
 /// Whether a uid-1000 request is put to the person within `deadline`, asking
@@ -1263,7 +1279,10 @@ fn consent(hold: bool) -> i32 {
     }
     match privd.reply(request.id) {
         Ok(Some(Reply::Asking)) => {}
-        Ok(Some(Reply::Denied { reason, .. })) if reason.contains("nothing can ask them") => {
+        Ok(Some(Reply::Denied { reason, .. }))
+            if reason.contains("nothing can ask them")
+                || reason.contains("neither on the screen") =>
+        {
             return NOBODY;
         }
         Ok(Some(Reply::Denied { reason, .. })) if reason == Refusal::Interrupted.to_string() => {

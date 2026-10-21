@@ -11,6 +11,7 @@ pub mod installer;
 pub mod ip;
 pub mod kconsole;
 pub mod keymap;
+pub mod login;
 pub mod nc;
 pub mod nmap;
 pub mod ping;

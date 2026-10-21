@@ -4,48 +4,56 @@ use std::collections::VecDeque;
 use std::ffi::CString;
 
 use slopos_abi::caps::{DISPLAY_SEAT, INPUT_SEAT, TEST_HARNESS};
-use slopos_abi::fs::{SESSION_GID, SESSION_HOME, SESSION_UID};
+use slopos_abi::fs::{ADMIN_GID, GREETER_NAME, GREETER_UID, SESSION_HOME, SESSION_UID};
 use slopos_abi::syscall::O_CLOEXEC;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 
-use crate::init_control::{self, DESKTOP, REMOTE};
+use crate::init_control::{self, REMOTE};
 use crate::readiness::NOTIFIER_FD;
 use crate::syscall::process::{self, Endowment};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, pidfd};
 
 /// A program init starts: the capabilities it delegates beside the universal
-/// ones, its tier, whether it runs as the session or as uid 0, the login tag
-/// its process carries, and what of the base it reads beside its program, a
-/// path ending in `/` naming all beneath it.
+/// ones, its tier, the login tag its process carries unless whom it runs as
+/// names one, whether it reads init's console, and what of the base it reads
+/// beside its program, a path ending in `/` naming all beneath it. Whom it
+/// runs as is the caller's to say.
 pub struct Service {
     pub path: &'static str,
     pub reads: &'static [&'static str],
     pub args: &'static [&'static str],
     pub caps: u64,
     pub priority: TaskPriority,
-    pub session: bool,
     pub login: Option<u32>,
+    pub console: bool,
 }
 
-/// Runs what the policy allows, holding everything an action may name.
+/// Runs what the policy allows, holding everything an action may name, and
+/// hears the session table.
 pub const PRIVD: Service = Service {
     path: "/sbin/privd",
     reads: &["/usr/share/slopos/privd/", PAIRING],
-    args: &[],
+    args: &[crate::apps::privd::SESSIONS_ARG],
     caps: slopos_priv_core::PRIVD_CAPS,
     priority: TaskPriority::Normal,
-    session: false,
     login: Some(init_control::PRIVD),
+    console: false,
 };
 
+/// A person's desktop; the login screen is the same program.
 pub const COMPOSITOR: Service = Service {
     path: init_control::COMPOSITOR,
     reads: &[],
-    args: &[],
+    args: &["--desktop"],
     caps: DISPLAY_SEAT | INPUT_SEAT,
     priority: TaskPriority::High,
-    session: true,
-    login: Some(DESKTOP),
+    login: None,
+    console: false,
+};
+
+pub const GREETER: Service = Service {
+    args: &["--greeter"],
+    ..COMPOSITOR
 };
 
 pub const TERMINAL: Service = Service {
@@ -54,8 +62,19 @@ pub const TERMINAL: Service = Service {
     args: &[],
     caps: 0,
     priority: TaskPriority::Normal,
-    session: true,
-    login: Some(DESKTOP),
+    login: None,
+    console: false,
+};
+
+/// A person's shell at a terminal a console login handed over.
+pub const SHELL: Service = Service {
+    path: "/bin/shell",
+    reads: &[],
+    args: &[],
+    caps: 0,
+    priority: TaskPriority::Normal,
+    login: None,
+    console: false,
 };
 
 pub const REMOTED: Service = Service {
@@ -64,8 +83,8 @@ pub const REMOTED: Service = Service {
     args: &[],
     caps: 0,
     priority: TaskPriority::Normal,
-    session: true,
     login: Some(REMOTE),
+    console: false,
 };
 
 pub const ROULETTE: Service = Service {
@@ -74,8 +93,19 @@ pub const ROULETTE: Service = Service {
     args: &[],
     caps: DISPLAY_SEAT,
     priority: TaskPriority::Normal,
-    session: true,
     login: None,
+    console: true,
+};
+
+/// The console's login prompt, on init's own terminal.
+pub const LOGIN: Service = Service {
+    path: "/bin/login",
+    reads: &[],
+    args: &[],
+    caps: 0,
+    priority: TaskPriority::Normal,
+    login: None,
+    console: true,
 };
 
 pub const RUN_TESTS: &str = "--run-tests";
@@ -92,30 +122,112 @@ pub const TESTS: Service = Service {
     args: &[RUN_TESTS],
     caps: TEST_HARNESS,
     priority: TaskPriority::Normal,
-    session: false,
     login: None,
+    console: true,
 };
 
-/// The session's runtime directory, its own alone.
-pub fn runtime_dir() -> String {
-    format!("/run/user/{SESSION_UID}")
+/// A person's runtime directory, their own alone, which lives while any
+/// session of theirs does.
+pub fn runtime_dir(uid: u32) -> String {
+    format!("/run/user/{uid}")
 }
 
-/// The session's command search path: the system's directories first, then
-/// the person's own `~/.local/bin` ahead of what `DEFAULT_PATH` puts after
-/// them.
-pub const SESSION_PATH: &str = "/bin:/sbin:/home/user/.local/bin:/usr/local/bin:/opt/bin";
+/// Whom a process init starts runs as: a person or the login screen, with
+/// the groups `initgroups` gives them and their session's login tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub uid: u32,
+    pub groups: Vec<u32>,
+    pub name: String,
+    pub home: String,
+    pub person: bool,
+    pub login: Option<u32>,
+}
 
-/// What every program the session starts finds in its environment, its
-/// person named as the user database names them.
-pub fn session_env() -> [String; 4] {
-    let name = crate::accounts::name_of(SESSION_UID).unwrap_or_else(|| "user".to_owned());
-    [
-        format!("HOME={SESSION_HOME}"),
-        format!("USER={name}"),
-        format!("LOGNAME={name}"),
-        format!("XDG_RUNTIME_DIR={}", runtime_dir()),
-    ]
+impl Identity {
+    /// A person as their record names them: their own group, and `admin`
+    /// while they administer the machine.
+    pub fn person(person: &slopos_accounts_core::Person, login: Option<u32>) -> Identity {
+        let mut groups = vec![person.uid];
+        if person.admin {
+            groups.push(ADMIN_GID);
+        }
+        Identity {
+            uid: person.uid,
+            groups,
+            name: person.name.clone(),
+            home: person.home.clone(),
+            person: true,
+            login,
+        }
+    }
+
+    pub fn greeter(login: Option<u32>) -> Identity {
+        Identity {
+            uid: GREETER_UID,
+            groups: Vec::new(),
+            name: GREETER_NAME.to_owned(),
+            home: "/".to_owned(),
+            person: false,
+            login,
+        }
+    }
+
+    /// The first person, whom an extension's session service and the wheel
+    /// run as, as the record names them.
+    pub fn first_person() -> Identity {
+        let record = crate::accounts::Store::read(std::path::Path::new("/")).accounts();
+        let first = record
+            .ok()
+            .and_then(|accounts| accounts.by_uid(SESSION_UID).cloned())
+            .unwrap_or_else(|| slopos_accounts_core::Person {
+                uid: SESSION_UID,
+                name: crate::accounts::name_of(SESSION_UID).unwrap_or_else(|| "user".into()),
+                home: SESSION_HOME.to_owned(),
+                admin: true,
+                password: None,
+            });
+        Identity::person(&first, None)
+    }
+
+    /// The person's command search path: the system's directories first,
+    /// then their own `~/.local/bin` ahead of what `DEFAULT_PATH` puts after
+    /// them.
+    pub fn path(&self) -> String {
+        format!(
+            "/bin:/sbin:{}/.local/bin:/usr/local/bin:/opt/bin",
+            self.home.trim_end_matches('/')
+        )
+    }
+
+    /// What every program they run starts with in its environment.
+    pub fn env(&self) -> Vec<String> {
+        let mut env = vec![
+            format!("HOME={}", self.home),
+            format!("USER={}", self.name),
+            format!("LOGNAME={}", self.name),
+            format!("PATH={}", self.path()),
+        ];
+        if self.person {
+            env.push(format!("XDG_RUNTIME_DIR={}", runtime_dir(self.uid)));
+        }
+        env
+    }
+
+    fn cwd(&self) -> &str {
+        match std::path::Path::new(&self.home).is_dir() {
+            true => &self.home,
+            false => "/",
+        }
+    }
+}
+
+/// What an extension's session service finds in its environment beside its
+/// own, the first person's.
+pub fn session_env() -> Vec<String> {
+    let mut env = Identity::first_person().env();
+    env.retain(|var| !var.starts_with("PATH="));
+    env
 }
 
 /// A child init waits on, and a pidfd that wakes it when the child exits.
@@ -133,11 +245,16 @@ impl Child {
     }
 }
 
-/// Start `service` with init's stdio and each `(fd, at)`: init's `fd` at the
-/// child's `at`.
-pub fn start(service: &Service, fds: &[(RawFd, RawFd)]) -> Option<Child> {
+/// Start `service` as `who`, init itself for `None`, with init's stdout and
+/// stderr, its console as stdin for a service that reads it and nothing
+/// otherwise, and each `(fd, at)`: init's `fd` at the child's `at`.
+pub fn start(service: &Service, who: Option<&Identity>, fds: &[(RawFd, RawFd)]) -> Option<Child> {
+    let null = (!service.console)
+        .then(|| fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDONLY | O_CLOEXEC as u32).ok())
+        .flatten();
+    let stdin = null.as_ref().map_or(0, OwnedFd::raw);
     let mut actions = vec![
-        process::clone_fd(0, 0),
+        process::clone_fd(stdin, 0),
         process::clone_fd(1, 1),
         process::clone_fd(2, 2),
     ];
@@ -147,25 +264,14 @@ pub fn start(service: &Service, fds: &[(RawFd, RawFd)]) -> Option<Child> {
         .map(|arg| CString::new(arg).expect("no NUL in a service's argv"))
         .collect();
     let argv: Vec<*const u8> = argv.iter().map(|arg| arg.as_ptr().cast()).collect();
-    let env: Vec<CString> = session_env()
+    let env: Vec<CString> = who
+        .map(Identity::env)
+        .unwrap_or_default()
         .into_iter()
-        .chain([format!("PATH={SESSION_PATH}")])
-        .map(|var| CString::new(var).expect("no NUL in the session's environment"))
+        .map(|var| CString::new(var).expect("no NUL in a person's environment"))
         .collect();
-    let (envp, cwd, ids): (Vec<*const u8>, &str, _) = if service.session {
-        let cwd = if std::path::Path::new(SESSION_HOME).is_dir() {
-            SESSION_HOME
-        } else {
-            "/"
-        };
-        (
-            env.iter().map(|var| var.as_ptr().cast()).collect(),
-            cwd,
-            Some((SESSION_UID, SESSION_GID)),
-        )
-    } else {
-        (Vec::new(), "/", None)
-    };
+    let envp: Vec<*const u8> = env.iter().map(|var| var.as_ptr().cast()).collect();
+    let cwd = who.map_or("/", Identity::cwd);
     let tid = process::spawn_endowed(
         service.path.as_bytes(),
         &argv,
@@ -177,9 +283,9 @@ pub fn start(service: &Service, fds: &[(RawFd, RawFd)]) -> Option<Child> {
         0,
         Endowment {
             caps: service.caps,
-            ids,
-            groups: service.session.then_some(&[][..]),
-            login: service.login,
+            ids: who.map(|who| (who.uid, who.uid)),
+            groups: who.map(|who| &who.groups[..]),
+            login: who.and_then(|who| who.login).or(service.login),
         },
     );
     if tid <= 0 {
@@ -195,11 +301,15 @@ pub fn start(service: &Service, fds: &[(RawFd, RawFd)]) -> Option<Child> {
 
 /// [`start`], handing the child a readiness notifier: the descriptor answered
 /// turns readable once it is ready, or once it has exited.
-pub fn start_ready(service: &Service, fds: &[(RawFd, RawFd)]) -> Option<(Child, OwnedFd)> {
+pub fn start_ready(
+    service: &Service,
+    who: Option<&Identity>,
+    fds: &[(RawFd, RawFd)],
+) -> Option<(Child, OwnedFd)> {
     let (ready, notifier) = fs::pipe2(O_CLOEXEC as u32).ok()?;
     let mut fds = fds.to_vec();
     fds.push((notifier.raw(), NOTIFIER_FD));
-    let child = start(service, &fds)?;
+    let child = start(service, who, &fds)?;
     Some((child, ready))
 }
 
@@ -254,9 +364,11 @@ impl Budget {
     }
 }
 
-/// A service init starts again when it exits.
+/// A service init starts again when it exits, as `who`, init itself for
+/// `None`.
 pub struct Supervised {
     pub service: &'static Service,
+    pub who: Option<Identity>,
     pub child: Option<Child>,
     pub budget: Budget,
     /// When it is to start again, while it is not running.
@@ -295,9 +407,10 @@ impl Supervised {
         self.child.take()
     }
 
-    pub fn new(service: &'static Service) -> Supervised {
+    pub fn new(service: &'static Service, who: Option<Identity>) -> Supervised {
         Supervised {
             service,
+            who,
             child: None,
             budget: Budget::default(),
             due: None,
@@ -316,7 +429,7 @@ impl Supervised {
     /// A start that fails is tried again when the budget next allows.
     pub fn start(&mut self, now: u64, fds: &[(RawFd, RawFd)]) {
         self.budget.record(now);
-        self.child = start(self.service, fds);
+        self.child = start(self.service, self.who.as_ref(), fds);
         self.due = self.child.is_none().then(|| self.budget.next(now));
     }
 
@@ -324,7 +437,7 @@ impl Supervised {
     /// answers.
     pub fn start_ready(&mut self, now: u64, fds: &[(RawFd, RawFd)]) -> Option<OwnedFd> {
         self.budget.record(now);
-        let (child, ready) = start_ready(self.service, fds).unzip();
+        let (child, ready) = start_ready(self.service, self.who.as_ref(), fds).unzip();
         self.child = child;
         self.due = self.child.is_none().then(|| self.budget.next(now));
         ready

@@ -409,6 +409,7 @@ fn reap_task_registration(id: u32) -> bool {
         // cannot reach the allocator from under this cli-spinlock.
         let entry = mgr.registry.remove(id).expect("found under the same lock");
         drop(entry.weak);
+        task.release_zombie_charge();
         // The temporary upgrade above. Non-final while `existence` is held.
         task_put(task);
         Some(existence)

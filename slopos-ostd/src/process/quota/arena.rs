@@ -19,6 +19,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize
 use slopos_abi::quota::{KIND_COUNT, QuotaMode, ResourceKind, Scope};
 
 use super::axis::Refundable;
+use super::persons::is_person_slot;
 use super::token::Reservation;
 use crate::cpu::x86_64::interrupts::IrqDisabled;
 use crate::cpu::x86_64::pcr::{self, MAX_CPUS};
@@ -611,8 +612,10 @@ pub fn try_charge<A: Refundable>(
             let Some(row) = row_for(current) else {
                 break;
             };
-            // The root's ceilings are the machine's, and bound everything charged.
-            let bounded = subtree || current.slot() == ROOT_ACCOUNT_SLOT;
+            // The root's ceilings are the machine's, and a person's are theirs:
+            // both bound everything charged through them.
+            let bounded =
+                subtree || current.slot() == ROOT_ACCOUNT_SLOT || is_person_slot(current.slot());
             if let Err(()) = charge_row(row, kind, n, mode, bounded) {
                 if let Some(leaf) = leaf {
                     release_own(leaf, kind, n);
@@ -656,18 +659,25 @@ pub(super) fn refund_raw(account: AccountId, kind: ResourceKind, n: u32) {
     });
 }
 
-/// Move `n` units of `kind` held as `from`'s own to the root, answering the
-/// root, or [`AccountId::NONE`] when `from` names no live row. The root, which
-/// is never released, keeps counting the amount against the machine's
-/// ceiling; every row between stops counting it, so no release credits it out
-/// again, and it is no process's own. No ceiling is consulted: the root
-/// admitted the amount when it was charged.
-pub(super) fn bequeath_raw(from: AccountId, kind: ResourceKind, n: u32) -> AccountId {
-    let heir = root();
+/// Move `n` units of `kind` held as `from`'s own to `heir`, the root or a
+/// row above `from`, answering `heir`, or [`AccountId::NONE`] when `from`
+/// names no live row or `heir` is neither. The heir keeps counting the amount
+/// against its ceiling and holds it as its own; every row between stops
+/// counting it, so no release credits it out again. No ceiling is consulted:
+/// the heir admitted the amount when it was charged.
+pub(super) fn bequeath_raw(
+    from: AccountId,
+    heir: AccountId,
+    kind: ResourceKind,
+    n: u32,
+) -> AccountId {
     walk(|| {
         let Some(row) = row_for(from) else {
             return AccountId::NONE;
         };
+        if heir != root() && !is_above(heir, from) {
+            return AccountId::NONE;
+        }
         release_own(row, kind, n);
         let mut current = from;
         let mut depth = 0usize;
@@ -688,6 +698,24 @@ pub(super) fn bequeath_raw(from: AccountId, kind: ResourceKind, n: u32) -> Accou
         }
         heir
     })
+}
+
+/// Whether `ancestor` is on `from`'s chain of parents, `from` excluded.
+fn is_above(ancestor: AccountId, from: AccountId) -> bool {
+    let mut current = from;
+    for _ in 0..MAX_ACCOUNT_DEPTH {
+        let Some(row) = row_for(current) else {
+            return false;
+        };
+        current = parent_of(row);
+        if current == ancestor {
+            return true;
+        }
+        if current.is_none() {
+            return false;
+        }
+    }
+    false
 }
 
 /// Credit `used` on `from` and every ancestor, leaving every `own` alone: the
@@ -1022,7 +1050,9 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
             let peak = usage_peak(usage);
             let limit = row.limit[idx].load(Ordering::Acquire);
             let bounded = match kind.scope() {
-                Scope::Principal if slot != ROOT_ACCOUNT_SLOT as usize => {
+                Scope::Principal
+                    if slot != ROOT_ACCOUNT_SLOT as usize && !is_person_slot(slot as u32) =>
+                {
                     row.own[idx].load(Ordering::Acquire)
                 }
                 _ => used,
@@ -1158,6 +1188,7 @@ pub fn reset_for_test() {
         row.reset_counters();
     }
     ROWS_IN_USE.store(0, Ordering::Release);
+    super::persons::reset();
     set_quota_mode(QuotaMode::Enforce);
 }
 

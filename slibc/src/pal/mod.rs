@@ -152,6 +152,8 @@ pub trait Pal {
     fn getgid() -> u32;
     fn geteuid() -> u32;
     fn getegid() -> u32;
+    /// The login tag the calling process carries, 0 for none.
+    fn login_tag() -> u32;
     fn setpgid(pid: i32, pgid: i32) -> Result<(), Errno>;
     fn getpgid(pid: i32) -> Result<i32, Errno>;
     fn setsid() -> Result<i32, Errno>;

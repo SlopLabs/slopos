@@ -30,6 +30,7 @@ macro_rules! log {
 mod answers;
 mod consent;
 mod people;
+mod sessions;
 
 use std::collections::VecDeque;
 use std::ffi::CString;
@@ -47,25 +48,35 @@ use slopos_abi::syscall::{
 };
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_extension_core::declare::mount_point;
-use slopos_priv_core::consent::{Ask, Kind, Refusal};
+use slopos_priv_core::consent::{Ask, EXPIRY_MS, Kind, Refusal, Secret};
 use slopos_priv_core::policy::{Principal, REMOTED};
+use slopos_priv_core::sessions::LINKS;
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request, kind};
 use slopos_priv_core::{
     Action, ENV_ACTION, ENV_UID, INIT, MECHANISM_LANG, MECHANISM_PATH, POLICY, People, Policy,
-    Question, Refused, Requester, RunsAs, SOCKET, Verdict, elf_interpreted,
+    Question, Reach, Refused, Requester, RunsAs, SOCKET, Verdict, elf_interpreted,
 };
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 
 use self::answers::{Asked, Checks, Kept};
 use self::consent::{Broker, Waiting};
+use self::sessions::Seen;
 use crate::init_control;
 use crate::readiness::ReadinessNotifier;
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, net, pidfd};
 
-/// Init's readiness notifier is fd 3, the consent channel fd 4.
+/// Init's readiness notifier is fd 3. An init that keeps one desktop hands
+/// privd its one link at `CONSENT_FD`; one that keeps sessions leaves that
+/// empty, so a privd of an older base asks nobody on a screen that may be
+/// anyone's, and hands consent link `n` at `LINKS_FD + n` and past them the
+/// pair a privd started with [`SESSIONS_ARG`] hears the table on. A
+/// compositor holds its own link at `CONSENT_FD`.
 pub const CONSENT_FD: RawFd = 4;
+pub const LINKS_FD: RawFd = CONSENT_FD + 1;
+pub const SESSIONS_FD: RawFd = LINKS_FD + LINKS as RawFd;
+pub const SESSIONS_ARG: &str = "--hear-sessions";
 const REMOTE_CONF: &str = "/usr/share/slopos/remote/remote.conf";
 /// Per uid, for every requester but root and the paired agent, whom nothing
 /// else can crowd out: no person takes another's connections.
@@ -112,7 +123,9 @@ struct Daemon {
     base: Result<Policy, String>,
     loaded: Mutex<Result<Arc<Loaded>, String>>,
     paired: bool,
-    consent: Broker,
+    /// One per consent link, by its number.
+    consent: Vec<Broker>,
+    seen: &'static Seen,
     running: Mutex<Vec<String>>,
     /// Held across the `fchdir` that names a requester's directory: the
     /// working directory is the process's, shared by every connection.
@@ -188,7 +201,21 @@ pub fn privd_main() -> ! {
     // inherited one privd was started without.
     let ready = ReadinessNotifier::acquire();
     process::set_signal_handler(SIGHUP, reload);
-    let channel = consent_channel();
+    let hears = std::env::args().nth(1).as_deref() == Some(SESSIONS_ARG);
+    let (seen, links) = match hears {
+        true => (
+            Seen::hear(init_channel(SESSIONS_FD)),
+            (0..LINKS)
+                .map(|i| init_channel(LINKS_FD + i as RawFd))
+                .collect(),
+        ),
+        false => (Seen::legacy(), vec![init_channel(CONSENT_FD)]),
+    };
+    let consent = links
+        .into_iter()
+        .zip(&seen.shown)
+        .map(|(link, shown)| Broker::start(link, shown.clone()))
+        .collect();
     let base = base_policy();
     if let Err(why) = &base {
         log!("privd: {why}; every request will be refused");
@@ -197,7 +224,8 @@ pub fn privd_main() -> ! {
         loaded: Mutex::new(base.clone().map(|base| Arc::new(with_extensions(base)))),
         base,
         paired: std::path::Path::new(REMOTE_CONF).is_file(),
-        consent: Broker::start(channel),
+        consent,
+        seen,
         running: Mutex::new(Vec::new()),
         cwd: Mutex::new(()),
         connections: Mutex::new(Vec::new()),
@@ -313,17 +341,17 @@ impl Drop for Admitted {
     }
 }
 
-/// The end of the socket pair init made: either end of a pair names its
-/// maker, so no other process can hand privd one that passes.
-fn consent_channel() -> Option<OwnedFd> {
-    Sys::fcntl(CONSENT_FD, F_GETFD as i32, 0).ok()?;
-    let _ = fs::set_fd_cloexec(CONSENT_FD);
+/// The end of a socket pair init made at `at`: either end of a pair names
+/// its maker, so no other process can hand privd one that passes.
+fn init_channel(at: RawFd) -> Option<OwnedFd> {
+    Sys::fcntl(at, F_GETFD as i32, 0).ok()?;
+    let _ = fs::set_fd_cloexec(at);
     // SAFETY: init handed this descriptor over and nothing else here owns it.
-    let fd = unsafe { OwnedFd::from_raw(CONSENT_FD) };
+    let fd = unsafe { OwnedFd::from_raw(at) };
     let from_init = net::peer_cred(fd.raw()).is_ok_and(|cred| cred.uid == 0)
         && net::peer_program(fd.raw()).ok().flatten().as_deref() == Some(INIT.as_bytes());
     if !from_init {
-        log!("privd: fd {CONSENT_FD} is not init's consent channel; nobody will be asked");
+        log!("privd: fd {at} is not a channel init made; it is not heard");
     }
     from_init.then_some(fd)
 }
@@ -375,9 +403,11 @@ fn static_principals(action: &Action) -> Result<(), String> {
         let path = match &allow.principal {
             Principal::Program(path) => path.as_str(),
             Principal::Paired => REMOTED,
-            Principal::Root | Principal::User | Principal::Admin | Principal::Extension(..) => {
-                continue;
-            }
+            Principal::Root
+            | Principal::Greeter
+            | Principal::User
+            | Principal::Admin
+            | Principal::Extension(..) => continue,
         };
         let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
         if elf_interpreted(&image) != Some(false) {
@@ -507,6 +537,9 @@ struct Conn {
     /// A request that came while another was served: a connection several
     /// processes inherited is served one request after another.
     waiting: Option<Parked>,
+    /// What the requester's person typed at its terminal, for the request
+    /// that asked.
+    secret: Option<(u64, Secret)>,
     open: bool,
 }
 
@@ -559,6 +592,11 @@ impl Conn {
                 None => match self.frames.next_frame().map_err(|e| e.to_string())? {
                     Some((kind::REQUEST, payload)) => (payload, false),
                     Some((kind::SIGNAL, _)) => continue,
+                    Some((kind::SECRET, mut payload)) => {
+                        slopos_priv_core::consent::wipe(&mut payload);
+                        self.frames.scrub();
+                        continue;
+                    }
                     Some((other, _)) => return Err(format!("frame {other:#04x} is not a request")),
                     None if self.fill(true) => continue,
                     None => return Ok(None),
@@ -604,6 +642,18 @@ impl Conn {
                         withdrawn: false,
                     });
                 }
+                Ok(Some((kind::SECRET, mut payload))) => {
+                    let decoded = wire::decode_secret(&payload);
+                    slopos_priv_core::consent::wipe(&mut payload);
+                    self.frames.scrub();
+                    match decoded {
+                        Ok((of, secret)) if of == id && self.secret.is_none() => {
+                            self.secret = Some((of, secret));
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
                 Ok(Some(_)) | Err(_) => break,
             }
         }
@@ -614,6 +664,28 @@ impl Conn {
     fn reply(&mut self, reply: &Reply, id: u64) {
         if self.open && !send(&self.fd, reply, id) {
             self.open = false;
+        }
+    }
+
+    /// What the person typed at the requester's terminal for request `id`
+    /// once privd asked with `prompt`, waiting as long as the dialog would.
+    fn typed(&mut self, peer: &Peer, id: u64, prompt: String) -> Result<Secret, Reply> {
+        self.secret = None;
+        self.reply(&Reply::Prompt(prompt), id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(EXPIRY_MS);
+        loop {
+            still_wanted(peer, self, id)?;
+            if let Some((_, secret)) = self.secret.take() {
+                return Ok(secret);
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(Reply::Denied {
+                    reason: Refusal::Expired.to_string(),
+                    by_person: true,
+                });
+            }
+            let _ = fs::poll(&mut [self.poll(POLLIN)], left.as_millis().min(250) as i64);
         }
     }
 }
@@ -650,6 +722,7 @@ fn serve(daemon: &Daemon, peer: &Peer, fd: OwnedFd) {
         frames: wire::deframer(),
         fds: VecDeque::new(),
         waiting: None,
+        secret: None,
         open: true,
     };
     while conn.open {
@@ -809,11 +882,18 @@ fn run(
         .then(init_control::Tasks::try_read)
         .flatten();
     let people = match action.names_people() {
-        true => people::now(tasks.as_ref()),
+        true => people::now(tasks.as_ref(), daemon.seen),
         false => Ok(People::default()),
     };
-    let requester = peer.requester(daemon.paired);
-    let question = match action.admits(&requester, people.as_ref().unwrap_or(&People::default())) {
+    let (reach, link) = reach(daemon, peer, tasks.as_ref(), request.terminal);
+    let requester = peer.requester(daemon.paired).reached(reach);
+    // People unknown are judged as if someone were logged in, so `alone`
+    // never holds for want of a reading.
+    let unknown = People {
+        people: Vec::new(),
+        logged_in: vec![slopos_abi::fs::NOBODY_UID],
+    };
+    let question = match action.admits(&requester, people.as_ref().unwrap_or(&unknown)) {
         Verdict::Run => None,
         Verdict::Ask(question) => Some(question),
         Verdict::Refuse(Refused::NotAllowed) => {
@@ -862,21 +942,30 @@ fn run(
             .as_ref()
             .is_some_and(|(asked, keep)| daemon.kept.holds(asked, *keep, &question.admins))
         {
-            let ask = Ask {
-                id: 0,
-                action: action.name.clone(),
-                describe: action.describe.clone(),
-                program: peer.program.path().map(str::to_owned),
-                uid: peer.uid,
-                pid: peer.pid,
-                cwd: cwd.clone(),
-                command,
-                kind: question.kind,
-                person: Some(question.person.name.clone()),
-                admins: question.admins.clone(),
+            let by = match (reach, link) {
+                (Reach::Terminal, _) => {
+                    typed_answer(daemon, peer, conn, request.id, action, &question)?;
+                    None
+                }
+                (_, Some(link)) => {
+                    let ask = Ask {
+                        id: 0,
+                        action: action.name.clone(),
+                        describe: action.describe.clone(),
+                        program: peer.program.path().map(str::to_owned),
+                        uid: peer.uid,
+                        pid: peer.pid,
+                        cwd: cwd.clone(),
+                        command,
+                        kind: question.kind,
+                        person: Some(question.person.name.clone()),
+                        admins: question.admins.clone(),
+                    };
+                    answer(daemon, peer, conn, request.id, link, ask)?
+                }
+                (_, None) => return Err(Reply::denied(Refused::Unreached.to_string())),
             };
-            let by = answer(daemon, peer, conn, request.id, ask)?;
-            judged_again(action, &requester, &question, by.as_deref())?;
+            judged_again(daemon, peer, request, action, &question, by.as_deref())?;
             if let Some((asked, _)) = kept {
                 daemon.kept.keep(asked, by);
             }
@@ -895,7 +984,7 @@ fn run(
             groups: origin.map(|_| Vec::new()),
             login: origin.map(|origin| origin.login),
         },
-        RunsAs::Requester => requester_identity(peer, tasks.as_ref())?,
+        RunsAs::Requester => requester_identity(daemon, peer, tasks.as_ref())?,
     };
     if DRAINING.load(Ordering::SeqCst) {
         return Err(Reply::denied(RESTARTING));
@@ -931,6 +1020,7 @@ fn answer(
     peer: &Peer,
     conn: &mut Conn,
     id: u64,
+    link: u8,
     ask: Ask,
 ) -> Result<Option<String>, Reply> {
     if !ask.fits() {
@@ -940,8 +1030,11 @@ fn answer(
     }
     let (action, kind, person) = (ask.action.clone(), ask.kind, ask.person.clone());
     let mut pending = Pending { peer, conn, id };
-    let answer = daemon
+    let broker = daemon
         .consent
+        .get(usize::from(link))
+        .ok_or_else(|| Reply::denied(Refusal::NoAgent.to_string()))?;
+    let answer = broker
         .ask(ask, &mut pending)
         .map_err(|refusal| Reply::Denied {
             reason: refusal.to_string(),
@@ -958,13 +1051,43 @@ fn answer(
     let secret = answer
         .secret
         .ok_or_else(|| Reply::denied("no password was typed"))?;
-    match daemon.checks.check(&whose, &secret) {
+    checked(daemon, peer, &action, &whose, &secret)?;
+    Ok(answer.admin)
+}
+
+/// The person's own password, typed at the requester's terminal: a console
+/// session's question, which no dialog shows.
+fn typed_answer(
+    daemon: &Daemon,
+    peer: &Peer,
+    conn: &mut Conn,
+    id: u64,
+    action: &Action,
+    question: &Question,
+) -> Result<(), Reply> {
+    if question.kind != Kind::Password {
+        return Err(Reply::denied(Refused::Unreached.to_string()));
+    }
+    let whose = &question.person.name;
+    let prompt = format!("{}: {whose}'s password: ", action.name);
+    let secret = conn.typed(peer, id, prompt)?;
+    checked(daemon, peer, &action.name, whose, &secret)
+}
+
+fn checked(
+    daemon: &Daemon,
+    peer: &Peer,
+    action: &str,
+    whose: &str,
+    secret: &Secret,
+) -> Result<(), Reply> {
+    match daemon.checks.check(whose, secret) {
         Ok(true) => {
             log!(
                 "privd: {action} for {}: allowed by {whose}'s password",
                 peer.describe()
             );
-            Ok(answer.admin)
+            Ok(())
         }
         Ok(false) => Err(Reply::Denied {
             reason: "the password typed was wrong".into(),
@@ -976,19 +1099,37 @@ fn answer(
     }
 }
 
+/// Where the person asking is asked: their session's desktop on screen, its
+/// terminal, or nowhere, and the link that asks on screen.
+fn reach(
+    daemon: &Daemon,
+    peer: &Peer,
+    tasks: Option<&init_control::Tasks>,
+    terminal: bool,
+) -> (Reach, Option<u8>) {
+    let login = tasks
+        .and_then(|tasks| tasks.login_of(peer.pid))
+        .unwrap_or(0);
+    daemon.seen.reach(login, peer.uid, terminal)
+}
+
 /// Hold an answered request to the people as they stand now: it runs once
 /// it would ask the same of the same person, the administrator who answered
 /// still listed, or would run unasked.
 fn judged_again(
+    daemon: &Daemon,
+    peer: &Peer,
+    request: &Request,
     action: &Action,
-    requester: &Requester<'_>,
     question: &Question,
     by: Option<&str>,
 ) -> Result<(), Reply> {
     let tasks = init_control::Tasks::try_read();
-    let people = people::now(tasks.as_ref())
+    let people = people::now(tasks.as_ref(), daemon.seen)
         .map_err(|why| Reply::denied(format!("the answer cannot be held to the people: {why}")))?;
-    match action.admits(requester, &people) {
+    let (reach, _) = reach(daemon, peer, tasks.as_ref(), request.terminal);
+    let requester = peer.requester(daemon.paired).reached(reach);
+    match action.admits(&requester, &people) {
         Verdict::Run => Ok(()),
         Verdict::Ask(again)
             if again.kind == question.kind
@@ -1062,14 +1203,18 @@ struct Identity {
 /// The requester as a mechanism run as them: their uid, their own group and
 /// `admin` while the accounts record names them an administrator, as
 /// `initgroups` gives them, and the login tag of their session.
-fn requester_identity(peer: &Peer, tasks: Option<&init_control::Tasks>) -> Result<Identity, Reply> {
+fn requester_identity(
+    daemon: &Daemon,
+    peer: &Peer,
+    tasks: Option<&init_control::Tasks>,
+) -> Result<Identity, Reply> {
     let login = tasks
         .and_then(|tasks| tasks.login_of(peer.pid))
         .ok_or_else(|| Reply::denied("the requester's session is unknown"))?;
     let admin = match peer.uid {
         0 => false,
         uid => {
-            people::now(tasks)
+            people::now(tasks, daemon.seen)
                 .map_err(Reply::denied)?
                 .person(uid)
                 .ok_or_else(|| {

@@ -9,8 +9,9 @@ pub use crate::syscall::core_handlers::{
     syscall_caps_drop, syscall_clock_gettime, syscall_clock_settime, syscall_cpu_info,
     syscall_cpu_perf, syscall_cpu_perf_ctl, syscall_ctty_read, syscall_efivar_get,
     syscall_efivar_set, syscall_exit, syscall_exit_group, syscall_kconsole, syscall_klog_write,
-    syscall_nanosleep, syscall_percpu_stats, syscall_process_list, syscall_prof_ctl,
-    syscall_reboot, syscall_sched_yield, syscall_sys_info, syscall_sysinfo, syscall_uname,
+    syscall_login_tag, syscall_nanosleep, syscall_percpu_stats, syscall_process_list,
+    syscall_prof_ctl, syscall_reboot, syscall_sched_yield, syscall_sys_info, syscall_sysinfo,
+    syscall_uname,
 };
 use crate::syscall::cred_handlers::{
     syscall_getegid, syscall_geteuid, syscall_getgid, syscall_getgroups, syscall_getresgid,
@@ -74,7 +75,7 @@ pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_cursor_move, syscall_cursor_set_image,
     syscall_fb_flip, syscall_fb_info, syscall_getrandom, syscall_input_poll_batch,
     syscall_input_sink_acquire, syscall_roulette_draw, syscall_roulette_result,
-    syscall_roulette_spin, syscall_screen_acquire, syscall_set_display_mode,
+    syscall_roulette_spin, syscall_screen_acquire, syscall_seat_switch, syscall_set_display_mode,
 };
 
 /// Build a dispatch table; unregistered slots stay `Unimplemented`.
@@ -312,6 +313,8 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     [SYSCALL_EXT_ACTIVATE]       => syscall_ext_activate,       "ext_activate";
     [SYSCALL_EXT_DEACTIVATE]     => syscall_ext_deactivate,     "ext_deactivate";
     [SYSCALL_TEST_KEY]           => syscall_test_key,           "test_key";
+    [SYSCALL_SEAT_SWITCH]        => syscall_seat_switch,        "seat_switch";
+    [SYSCALL_LOGIN_TAG]          => syscall_login_tag,          "login_tag";
 };
 
 /// The entry for `sysno`, or `None` when nothing is registered there.
@@ -365,7 +368,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 195;
+pub const SYSCALL_ENTRY_COUNT: usize = 197;
 
 /// The recorded shape of the classification.
 ///
@@ -375,7 +378,7 @@ pub const SYSCALL_ENTRY_COUNT: usize = 195;
 /// construction and the assert below holds it there.
 const CAP_COUNTS: [(Capability, usize); Capability::ALL.len()] = [
     (Capability::Unimplemented, 0),
-    (Capability::NoneSelf, 72),
+    (Capability::NoneSelf, 73),
     (Capability::NoneFd, 81),
     (Capability::NoneRelation, 13),
     (Capability::Power, 4),
@@ -399,6 +402,7 @@ const CAP_COUNTS: [(Capability, usize); Capability::ALL.len()] = [
     (Capability::SchedHigh, 0),
     (Capability::BaseUpdate, 1),
     (Capability::ExtensionUpdate, 2),
+    (Capability::SeatSwitch, 1),
 ];
 
 const _: () = {

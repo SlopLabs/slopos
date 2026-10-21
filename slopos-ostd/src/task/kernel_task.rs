@@ -9,6 +9,7 @@ use core::sync::atomic::{
     AtomicBool, AtomicI8, AtomicI32, AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering,
 };
 
+use slopos_abi::quota::TaskCount;
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
 
@@ -20,6 +21,8 @@ pub use slopos_abi::task::{
 };
 
 use crate::cpu::x86_64::pcr::KernelReturnContext;
+use crate::process::AccountId;
+use crate::process::quota::{ChargeSlot, Reservation};
 use crate::sync::intrusive::Link;
 use crate::sync::intrusive_dlist::{DLink, IntrusiveDList};
 use crate::sync::{AtomicCell, LOCK_LEVEL_RESOURCE, RcuArcSlot, SpinLock};
@@ -731,6 +734,12 @@ pub struct TaskInner<K, U> {
     pub saved_kernel_return_ctx: TaskOwnCell<KernelReturnContext>,
     /// Durable per-task exit value.
     pub exit_info: AtomicCell<ExitInfo>,
+    /// This task, charged to its process's account from before it is
+    /// registered until its exit's latch.
+    task_charge: ChargeSlot<TaskCount>,
+    /// One of a person's tasks, held while this leader is their process's
+    /// zombie and refunded at the reap.
+    zombie_charge: ChargeSlot<TaskCount>,
 }
 
 impl<K, U> Drop for TaskInner<K, U> {
@@ -1448,6 +1457,8 @@ impl<K, U> TaskInner<K, U> {
                 rip: 0,
             }),
             exit_info: AtomicCell::empty(),
+            task_charge: ChargeSlot::empty(),
+            zombie_charge: ChargeSlot::empty(),
         }
     }
 
@@ -1500,6 +1511,32 @@ impl<K, U> TaskInner<K, U> {
                 Ok(())
             })
         }
+    }
+
+    pub fn hold_charge(&self, reservation: Reservation<TaskCount>) {
+        self.task_charge.put(reservation);
+    }
+
+    /// Refund this task's charge: its exit's latch.
+    pub fn release_charge(&self) {
+        self.task_charge.take();
+    }
+
+    /// Move this task's charge onto `person`'s row, held by `leader` while it
+    /// is the zombie of a process of theirs. Answers whether it moved.
+    pub fn leave_charge_to(&self, leader: &Self, person: AccountId) -> bool {
+        self.task_charge
+            .bequeath_into(person, &leader.zombie_charge)
+    }
+
+    pub fn has_zombie_charge(&self) -> bool {
+        self.zombie_charge.is_occupied()
+    }
+
+    /// Refund the task [`keep_zombie_charge`](Self::keep_zombie_charge)
+    /// held: the reap.
+    pub fn release_zombie_charge(&self) {
+        self.zombie_charge.take();
     }
 
     #[inline]
@@ -1749,6 +1786,8 @@ impl<K, U> TaskInner<K, U> {
         drop(self.fs.replace_exclusive(None));
         drop(self.test_reports.get_mut().take());
         drop(self.pending.take_store());
+        self.task_charge.take();
+        self.zombie_charge.take();
         // The slot's own group set, not the parent's: a new process starts
         // with nothing pending, and a thread has none until it joins its
         // parent's.
@@ -1787,6 +1826,9 @@ impl<K, U> TaskInner<K, U> {
             // rather than drop. The clone path re-arms each explicitly.
             core::ptr::write(&mut self.sighand as *mut _, None);
             core::ptr::write(&mut self.fs as *mut _, RcuArcSlot::empty());
+            // A charge is its holder's alone, and the child is charged its own.
+            core::ptr::write(&mut self.task_charge as *mut _, ChargeSlot::empty());
+            core::ptr::write(&mut self.zombie_charge as *mut _, ChargeSlot::empty());
         }
         self.ready_link.reset();
         self.remote_inbox_link.reset();

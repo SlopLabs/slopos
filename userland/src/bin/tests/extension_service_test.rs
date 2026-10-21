@@ -377,7 +377,7 @@ fn a_session_restart_spares_it_and_runs_its_session_service() -> bool {
     else {
         return fail("no tag for the session service");
     };
-    let was = !init_control::processes(init_control::DESKTOP).is_empty();
+    let was = !slopos_userland::sessions::read().is_empty();
     if let Err(why) = init_control::ask(Init::RestartSession) {
         return fail(format!("restart-session: {why}"));
     }

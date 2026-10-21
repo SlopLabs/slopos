@@ -21,13 +21,14 @@ use slopos_ostd::task::{task_placement_retain, with_parked_node};
 use super::task_table::{TaskRef, task_find_by_id, with_task_manager};
 use super::{INVALID_TASK_ID, Task, TaskStatus};
 
-/// How many unreaped zombies one parent may hold.
+/// How many unreaped zombies one parent may hold beside those a person's
+/// share holds.
 ///
 /// Each retained zombie pins a `Task` (≤ 8 KiB), a 32 KiB kernel stack, a
 /// 16 KiB data stack and one of `MAX_TASKS` registry slots, so a parent that
 /// never calls `waitpid` and never exits walks the machine to spawn failure.
-/// The cap is per-parent rather than per-uid because SlopOS has no uid and the
-/// parent is the principal that owes the reap.
+/// A person's zombie holds one of their tasks until the reap, so their share
+/// bounds those instead.
 pub const MAX_ZOMBIES_PER_PARENT: usize = 64;
 
 /// Not yet tearing down. A `Stopped` parent still owes its children a reap:
@@ -83,8 +84,10 @@ fn overflowing_zombie(parent: &Task) -> Option<NonNull<Task>> {
     let mut zombies = 0usize;
     let mut oldest = None;
     for child in parent.children.iter() {
-        let is_zombie = with_parked_node(child, |c| c.status() == TaskStatus::Zombie);
-        if !is_zombie {
+        let counted = with_parked_node(child, |c| {
+            c.status() == TaskStatus::Zombie && !c.has_zombie_charge()
+        });
+        if !counted {
             continue;
         }
         zombies += 1;

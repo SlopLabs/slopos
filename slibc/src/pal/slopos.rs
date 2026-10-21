@@ -649,6 +649,10 @@ impl Pal for Sys {
         unsafe { syscall0(SYSCALL_GETEUID) as u32 }
     }
 
+    fn login_tag() -> u32 {
+        unsafe { syscall0(SYSCALL_LOGIN_TAG) as u32 }
+    }
+
     fn getegid() -> u32 {
         unsafe { syscall0(SYSCALL_GETEGID) as u32 }
     }

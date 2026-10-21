@@ -137,6 +137,11 @@ pub fn test_key(keycode: u16, codepoint: u32, pressed: bool) -> i64 {
     }
 }
 
+/// The caller's login tag, 0 for none.
+pub fn login_tag() -> u32 {
+    unsafe { syscall0(SYSCALL_LOGIN_TAG) as u32 }
+}
+
 #[inline(always)]
 pub fn process_list(buf: &mut [UserTaskEntry]) -> i64 {
     unsafe {

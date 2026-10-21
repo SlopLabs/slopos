@@ -36,10 +36,11 @@ extern crate std;
 
 pub mod consent;
 pub mod policy;
+pub mod sessions;
 pub mod wire;
 
 pub use policy::{
-    Action, Allow, Level, People, Person, Policy, PolicyError, Principal, Question, Refused,
+    Action, Allow, Level, People, Person, Policy, PolicyError, Principal, Question, Reach, Refused,
     Requester, RunsAs, Shape, Verdict,
 };
 
@@ -98,7 +99,7 @@ pub const PRIVD_CAPS: u64 = DELEGABLE | caps::SET_ID | caps::PROC_SIGNAL;
 
 /// Every capability, by the name `slopos_ostd::authority::Capability` gives
 /// it.
-pub const CAPABILITIES: [(&str, u64); 21] = [
+pub const CAPABILITIES: [(&str, u64); 22] = [
     ("Power", caps::POWER),
     ("ProcSignal", caps::PROC_SIGNAL),
     ("SysInspect", caps::SYS_INSPECT),
@@ -120,6 +121,7 @@ pub const CAPABILITIES: [(&str, u64); 21] = [
     ("SchedHigh", caps::SCHED_HIGH),
     ("BaseUpdate", caps::BASE_UPDATE),
     ("ExtensionUpdate", caps::EXTENSION_UPDATE),
+    ("SeatSwitch", caps::SEAT_SWITCH),
 ];
 
 const _: () = {

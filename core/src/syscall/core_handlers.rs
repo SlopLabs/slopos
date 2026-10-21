@@ -447,6 +447,10 @@ define_syscall!(syscall_sysinfo (ctx, info_out: UserPtr<Sysinfo>) cap(NoneSelf)
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)
 });
 
+define_syscall!(syscall_login_tag (ctx) cap(NoneSelf) -> Result<u64, Errno> {
+    Ok(u64::from(ctx.task().process().map_or(0, |process| process.login())))
+});
+
 // Every task, as Linux's `/proc` shows every process: acting on one is what
 // the signal rule guards.
 define_syscall!(syscall_process_list

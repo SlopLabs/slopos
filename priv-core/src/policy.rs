@@ -20,7 +20,9 @@
 //! further ones. `allow` lines are tried in order and the first whose
 //! principal matches decides, at its level: `user` takes `alone`, `confirm`
 //! or `password`, `admin` takes `confirm` or `password`, and no level runs
-//! the request unasked. A person no line matches is answered by an
+//! the request unasked. A level asks only a person whose session can be
+//! reached: its desktop in front and unlocked, or its terminal. `greeter`
+//! takes `alone`, which runs it while nobody is logged in. A person no line matches is answered by an
 //! administrator's password when an `admin` line stands, which `user alone`
 //! becomes while another person is logged in. With `cwd` the mechanism runs
 //! in the directory the request must send, and without it in `/`;
@@ -102,6 +104,8 @@ pub struct Allow {
 pub enum Principal {
     /// A uid-0 requester running a base program: uid 0 alone is no authority.
     Root,
+    /// The login screen: the base's greeter user running a base program.
+    Greeter,
     /// A person the accounts record names, from any program but `remoted` on
     /// a paired base.
     User,
@@ -122,7 +126,8 @@ pub enum Principal {
 pub enum Level {
     /// Nothing: it runs unasked.
     None,
-    /// Nothing while nobody else is logged in; otherwise as `admin`.
+    /// Nothing while nobody else is logged in; otherwise as `admin`. For the
+    /// greeter, nothing while nobody is logged in, and refused otherwise.
     Alone,
     /// Click Allow.
     Confirm,
@@ -142,14 +147,28 @@ impl fmt::Display for PolicyError {
     }
 }
 
+/// Where a person asking can be asked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reach {
+    /// Their session's desktop is in front and unlocked, and asks in its
+    /// dialog; `theirs` when it is their own session's.
+    Screen { theirs: bool },
+    /// Their session is a terminal's, where the requester itself asks for
+    /// the person's own password.
+    Terminal,
+    /// No question reaches them.
+    Nowhere,
+}
+
 /// Who asks, as the kernel attests it: the ids as of the connection, the
-/// program as of the request.
+/// program as of the request, and where the session it carries can be asked.
 #[derive(Clone, Copy, Debug)]
 pub struct Requester<'a> {
     uid: u32,
     program: Option<&'a str>,
     extension: Option<(&'a str, Label)>,
     paired: bool,
+    reach: Reach,
 }
 
 impl<'a> Requester<'a> {
@@ -162,6 +181,7 @@ impl<'a> Requester<'a> {
             program,
             extension: None,
             paired: base_paired && program == Some(REMOTED),
+            reach: Reach::Nowhere,
         }
     }
 
@@ -172,7 +192,13 @@ impl<'a> Requester<'a> {
             program: None,
             extension: Some((path, label)),
             paired: false,
+            reach: Reach::Nowhere,
         }
+    }
+
+    /// The requester, asked where `reach` says.
+    pub fn reached(self, reach: Reach) -> Self {
+        Self { reach, ..self }
     }
 
     pub fn is_paired(&self) -> bool {
@@ -183,6 +209,7 @@ impl<'a> Requester<'a> {
     fn is(&self, principal: &Principal) -> bool {
         match principal {
             Principal::Root => self.uid == 0 && self.program.is_some(),
+            Principal::Greeter => self.uid == slopos_abi::fs::GREETER_UID && self.program.is_some(),
             Principal::Paired => self.paired,
             Principal::User | Principal::Admin => false,
             Principal::Program(path) => !self.paired && self.program == Some(path.as_str()),
@@ -208,13 +235,12 @@ pub struct Person {
     pub password: bool,
 }
 
-/// The people as of a request: whom the accounts record names, who is logged
-/// in, and whose desktop the screen shows, at which only they click.
+/// The people as of a request: whom the accounts record names, and who is
+/// logged in, at a desktop or a terminal.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct People {
     pub people: Vec<Person>,
     pub logged_in: Vec<u32>,
-    pub front: Option<u32>,
 }
 
 impl People {
@@ -226,13 +252,21 @@ impl People {
         self.logged_in.iter().all(|&other| other == uid)
     }
 
-    /// What `person` must do to answer for themselves: a click at their own
-    /// screen, else their password, which a person without one cannot type.
-    fn ask_self(&self, person: &Person, confirm: bool) -> Verdict {
-        let kind = match (confirm, self.front == Some(person.uid), person.password) {
-            (true, true, _) | (false, true, false) => Kind::Confirm,
+    /// What `person` must do to answer for themselves where `reach` asks: a
+    /// click at their own desktop, else their password, which a person
+    /// without one cannot type.
+    fn ask_self(&self, person: &Person, confirm: bool, reach: Reach) -> Verdict {
+        let kind = match (reach, confirm, person.password) {
+            (Reach::Nowhere, ..) => return Verdict::Refuse(Refused::Unreached),
+            (Reach::Screen { theirs: true }, true, _)
+            | (Reach::Screen { theirs: true }, false, false) => Kind::Confirm,
             (_, _, true) => Kind::Password,
-            (_, false, false) => return Verdict::Refuse(Refused::Away(person.name.clone())),
+            (Reach::Screen { theirs: false }, _, false) => {
+                return Verdict::Refuse(Refused::Away(person.name.clone()));
+            }
+            (Reach::Terminal, _, false) => {
+                return Verdict::Refuse(Refused::NoPasswordToType(person.name.clone()));
+            }
         };
         Verdict::Ask(Question {
             kind,
@@ -242,8 +276,9 @@ impl People {
     }
 
     /// An administrator's password for `person`'s request: only an
-    /// administrator with a password answers for another.
-    fn ask_admins(&self, person: &Person) -> Verdict {
+    /// administrator with a password answers for another, and only in the
+    /// dialog, which nothing of the requester's reads.
+    fn ask_admins(&self, person: &Person, reach: Reach) -> Verdict {
         let admins: Vec<String> = self
             .people
             .iter()
@@ -253,6 +288,11 @@ impl People {
             .collect();
         if admins.is_empty() {
             return Verdict::Refuse(Refused::NoAdminPassword);
+        }
+        match reach {
+            Reach::Screen { .. } => {}
+            Reach::Terminal => return Verdict::Refuse(Refused::AdminAtTerminal),
+            Reach::Nowhere => return Verdict::Refuse(Refused::Unreached),
         }
         Verdict::Ask(Question {
             kind: Kind::Admin,
@@ -288,6 +328,14 @@ pub enum Refused {
     /// The person must answer at another's screen, and has no password to
     /// type there.
     Away(String),
+    /// The requester's session is not on the screen, unlocked, nor at a
+    /// terminal of its own.
+    Unreached,
+    /// The person's session is a terminal's, where only a password answers,
+    /// and they have none.
+    NoPasswordToType(String),
+    /// Only an administrator may allow it, which a terminal never asks.
+    AdminAtTerminal,
 }
 
 impl fmt::Display for Refused {
@@ -300,6 +348,18 @@ impl fmt::Display for Refused {
             Refused::Away(name) => write!(
                 f,
                 "only {name} can allow it, and the screen is not theirs and they have no password"
+            ),
+            Refused::Unreached => f.write_str(
+                "it needs the person asking, and their session is neither on the screen and \
+                 unlocked nor at a terminal",
+            ),
+            Refused::NoPasswordToType(name) => write!(
+                f,
+                "only {name}'s password allows it at a terminal, and they have none"
+            ),
+            Refused::AdminAtTerminal => f.write_str(
+                "it needs an administrator's password, which is typed only into the desktop's \
+                 dialog",
             ),
         }
     }
@@ -324,29 +384,36 @@ impl Action {
                 (Principal::User, Some(_), Level::Alone) => admins_answer = true,
                 (Principal::User, Some(_), Level::None) => return Verdict::Run,
                 (Principal::User, Some(p), level) => {
-                    return people.ask_self(p, level == Level::Confirm);
+                    return people.ask_self(p, level == Level::Confirm, who.reach);
                 }
                 (Principal::Admin, Some(p), Level::None) if p.admin => return Verdict::Run,
                 (Principal::Admin, Some(p), level) if p.admin => {
-                    return people.ask_self(p, level == Level::Confirm);
+                    return people.ask_self(p, level == Level::Confirm, who.reach);
                 }
                 (Principal::Admin, Some(_), _) => admins_answer = true,
+                (Principal::Greeter, _, Level::Alone) if who.is(&Principal::Greeter) => {
+                    if people.logged_in.is_empty() {
+                        return Verdict::Run;
+                    }
+                    break;
+                }
                 (principal, _, _) if who.is(principal) => return Verdict::Run,
                 _ => {}
             }
         }
         match person {
-            Some(p) if admins_answer => people.ask_admins(p),
+            Some(p) if admins_answer => people.ask_admins(p, who.reach),
             _ => Verdict::Refuse(Refused::NotAllowed),
         }
     }
 
     /// Whether a verdict on it reads the people: an `allow` names `user` or
-    /// `admin`.
+    /// `admin`, or `greeter alone`, which asks who is logged in.
     pub fn names_people(&self) -> bool {
-        self.allows
-            .iter()
-            .any(|allow| matches!(allow.principal, Principal::User | Principal::Admin))
+        self.allows.iter().any(|allow| {
+            matches!(allow.principal, Principal::User | Principal::Admin)
+                || (allow.principal == Principal::Greeter && allow.level == Level::Alone)
+        })
     }
 
     /// The group whose mechanisms run one at a time, if the action has one.
@@ -593,6 +660,7 @@ fn allow(rest: &str) -> Result<Allow, &'static str> {
     let mut words = rest.split_ascii_whitespace();
     let principal = match words.next() {
         Some("root") => Principal::Root,
+        Some("greeter") => Principal::Greeter,
         Some("user") => Principal::User,
         Some("admin") => Principal::Admin,
         Some("paired") => Principal::Paired,
@@ -603,8 +671,18 @@ fn allow(rest: &str) -> Result<Allow, &'static str> {
             }
             Principal::Program(path.to_string())
         }
-        _ => return Err("allow names root, user, admin, paired or program <path>"),
+        _ => return Err("allow names root, greeter, user, admin, paired or program <path>"),
     };
+    let mut words = words.peekable();
+    if principal == Principal::Greeter && words.next_if_eq(&"alone").is_some() {
+        if words.next().is_some() {
+            return Err("allow ends with its level");
+        }
+        return Ok(Allow {
+            principal,
+            level: Level::Alone,
+        });
+    }
     let level = level(
         words,
         principal == Principal::User,

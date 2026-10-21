@@ -252,6 +252,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin live_base_test \
         --bin fifo_test \
         --bin session_smoke_test \
+        --bin sessions_test \
         --bin spawn_output_test \
         --bin dns_resolve_test \
         --bin dns_concurrent_test \
@@ -462,6 +463,12 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/session_smoke_test" ]; then
         cp "$RELEASE_DIR/session_smoke_test" "$BUILD_DIR/session_smoke_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/sessions_test" ]; then
+        cp "$RELEASE_DIR/sessions_test" "$BUILD_DIR/sessions_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/rename_test" ]; then
+        cp "$RELEASE_DIR/rename_test" "$BUILD_DIR/rename_test.elf"
+    fi
     if [ -f "$RELEASE_DIR/spawn_output_test" ]; then
         cp "$RELEASE_DIR/spawn_output_test" "$BUILD_DIR/spawn_output_test.elf"
     fi
@@ -479,9 +486,6 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/reboot_clone_test" ]; then
         cp "$RELEASE_DIR/reboot_clone_test" "$BUILD_DIR/reboot_clone_test.elf"
-    fi
-    if [ -f "$RELEASE_DIR/rename_test" ]; then
-        cp "$RELEASE_DIR/rename_test" "$BUILD_DIR/rename_test.elf"
     fi
     if [ -f "$RELEASE_DIR/libc_abi_test" ]; then
         cp "$RELEASE_DIR/libc_abi_test" "$BUILD_DIR/libc_abi_test.elf"

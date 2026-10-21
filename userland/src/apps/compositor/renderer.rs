@@ -214,6 +214,7 @@ impl Renderer {
         shelf: &mut LauncherShelf,
         popover: &mut Popover,
         consent: &super::consent::Consent,
+        gate: &super::gate::Gate,
         net_model: &slopos_chrome_core::NetPanelModel,
         active_app_name: &str,
         frame_damage: &Region,
@@ -347,6 +348,7 @@ impl Renderer {
             // over it would look clickable and not be.
             popover.draw(buf, net_model, rect);
             consent.draw(buf, self.output_width, self.output_height, rect);
+            gate.draw(buf, self.output_width, self.output_height, rect);
             buf.set_scissor(None);
         }
 

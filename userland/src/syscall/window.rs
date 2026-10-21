@@ -17,6 +17,13 @@ pub fn screen_acquire(seat: u32) -> i64 {
     unsafe { syscall1(SYSCALL_SCREEN_ACQUIRE, seat as u64) as i64 }
 }
 
+/// Give the screen and the input sink to the compositor `task_id`, whoever
+/// holds them; init's alone.
+#[inline(always)]
+pub fn seat_switch(task_id: u32) -> i64 {
+    unsafe { syscall1(SYSCALL_SEAT_SWITCH, u64::from(task_id)) as i64 }
+}
+
 /// As [`screen_acquire`], for the raw input stream `input_poll_batch` drains.
 #[inline(always)]
 pub fn input_sink_acquire(seat: u32) -> i64 {

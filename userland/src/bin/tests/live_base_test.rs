@@ -170,6 +170,7 @@ fn privd_serves() -> bool {
         action: "org.slopos.prof".into(),
         args: vec![b"status".to_vec()],
         cwd: false,
+        terminal: false,
     };
     if privd
         .send(&request, &[null.raw(), null.raw(), null.raw()])

@@ -1,10 +1,12 @@
 //! The accounts record: the people the machine knows, which of them
 //! administer it, their passwords' hashes, whom the desktop logs in by
-//! itself, and the uid the next person is given, so none is given twice.
+//! itself, whom remoted runs as when that is not the first administrator,
+//! and the uid the next person is given, so none is given twice.
 //!
 //! ```text
 //! next 1002
 //! autologin user
+//! remote bob
 //! person 1000 user /home/user admin -
 //! person 1001 bob /home/bob - $argon2id$v=19$m=65536,t=3,p=4$<salt>$<tag>
 //! ```
@@ -38,6 +40,7 @@ pub struct Person {
 pub struct Accounts {
     next: u32,
     autologin: Option<String>,
+    remote: Option<String>,
     people: Vec<Person>,
 }
 
@@ -45,7 +48,7 @@ pub const NO_SUCH_PERSON: &str = "no such person";
 pub const BAD_NAME: &str = "a name is a lowercase letter, then lowercase letters, digits, - and _, at most 32 bytes, and none the base holds";
 pub const NAME_HELD: &str = "the name is held already";
 pub const LAST_ADMIN: &str = "the machine's last administrator stays one";
-pub const DESKTOP_PERSON: &str = "the desktop runs as the first person, who stays";
+pub const DESKTOP_PERSON: &str = "the first person keeps /src and /usr/local, so they stay";
 pub const NO_UIDS: &str = "every uid for people has been given";
 pub const TOO_MANY_ADMINS: &str = "the administrators' names would not fit the admin group's line";
 const BAD_HASH: &str = "not a password hash this system writes";
@@ -106,6 +109,7 @@ impl Accounts {
         Ok(Accounts {
             next: SESSION_UID + 1,
             autologin: Some(name.to_string()),
+            remote: None,
             people: alloc::vec![Person {
                 uid: SESSION_UID,
                 name: name.to_string(),
@@ -135,6 +139,24 @@ impl Accounts {
     /// The person the desktop logs in by itself, if any.
     pub fn autologin(&self) -> Option<&Person> {
         self.autologin.as_deref().and_then(|name| self.person(name))
+    }
+
+    /// The person remoted runs as: the one set, else the first
+    /// administrator.
+    pub fn remote(&self) -> Option<&Person> {
+        match self.remote.as_deref() {
+            Some(name) => self.person(name),
+            None => self.admins().min_by_key(|p| p.uid),
+        }
+    }
+
+    /// Have remoted run as `name`, or as the first administrator.
+    pub fn set_remote(&mut self, name: Option<&str>) -> Result<(), &'static str> {
+        if let Some(name) = name {
+            self.person(name).ok_or(NO_SUCH_PERSON)?;
+        }
+        self.remote = name.map(str::to_string);
+        Ok(())
     }
 
     fn at(&mut self, name: &str) -> Result<&mut Person, &'static str> {
@@ -186,6 +208,9 @@ impl Accounts {
         if self.autologin.as_deref() == Some(name) {
             self.autologin = None;
         }
+        if self.remote.as_deref() == Some(name) {
+            self.remote = None;
+        }
         let at = self.people.iter().position(|p| p.name == name);
         Ok(self.people.remove(at.ok_or(NO_SUCH_PERSON)?))
     }
@@ -197,6 +222,9 @@ impl Accounts {
         self.checked(|accounts| {
             if accounts.autologin.as_deref() == Some(old) {
                 accounts.autologin = Some(new.to_string());
+            }
+            if accounts.remote.as_deref() == Some(old) {
+                accounts.remote = Some(new.to_string());
             }
             accounts.at(old)?.name = new.to_string();
             Ok(())
@@ -245,6 +273,9 @@ impl Accounts {
             self.next,
             self.autologin.as_deref().unwrap_or("-")
         );
+        if let Some(remote) = &self.remote {
+            out.push_str(&format!("remote {remote}\n"));
+        }
         for p in &self.people {
             out.push_str(&format!(
                 "person {} {} {} {} {}\n",
@@ -265,6 +296,10 @@ impl Accounts {
             "-" => None,
             name => Some(name.to_string()),
         };
+        let mut lines = lines.peekable();
+        let remote = lines
+            .next_if(|line| line.starts_with("remote "))
+            .map(|line| line["remote ".len()..].to_string());
         let mut people: Vec<Person> = Vec::new();
         for line in lines {
             let mut words = line.strip_prefix("person ")?.split(' ');
@@ -301,6 +336,7 @@ impl Accounts {
         let accounts = Accounts {
             next,
             autologin,
+            remote,
             people,
         };
         let sound = next <= PERSON_UIDS.end() + 1
@@ -308,6 +344,10 @@ impl Accounts {
             && accounts.admins_fit()
             && accounts
                 .autologin
+                .as_deref()
+                .is_none_or(|name| accounts.person(name).is_some())
+            && accounts
+                .remote
                 .as_deref()
                 .is_none_or(|name| accounts.person(name).is_some());
         (sound && accounts.render() == text).then_some(accounts)

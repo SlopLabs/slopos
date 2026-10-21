@@ -1875,10 +1875,11 @@ halves, and `SIGCONT` to a task of the sender's session needs neither.
 `process_list` reports every task to everyone, with its process's login tag:
 a number fork, spawn and exec pass on and that only a `SetId` holder sets, at
 spawn (`SpawnLoginAttrs`, under `SPAWN_SET_LOGIN`), as Linux's audit session
-id is inherited and set once at login. Init gives the desktop session one
-(`init_control::DESKTOP`), remoted another (`REMOTE`) and each extension
-service its own (`init_control::service_tag`), so a session's processes are
-found, and ended, whatever uid they run as. The ext4 reserve is the
+id is inherited and set once at login. Init gives each session one of its
+own (`slopos_abi::task::SESSION_LOGINS`), remoted another (`REMOTE`) and each
+extension service its own (`init_control::service_tag`), so a session's
+processes are found, and ended, whatever uid they run as, and `login_tag()`
+tells a process its own. The ext4 reserve is the
 superblock's `s_def_resuid` and `s_def_resgid`, uid 0's. A pty's slave
 belongs to whoever opened its master, mode 0620, as Linux's devpts gives it,
 judged on the slave an open takes. An `AF_UNIX` name is an inode of type
@@ -1886,15 +1887,19 @@ socket, made through the parent's write and search checks at `bind` and
 reached through the name's write check at `connect`; a bound socket holds its
 inode open as a descriptor holds a file, so the inode is no other node's and
 its volume will not unmount, and a ring's `OP_CONNECT` takes only an absolute
-name. `/run` is memory, and the session's runtime directory, `/run/user/1000`,
-mode 0700, holds the compositor's socket. A symlink in a sticky directory
+name. `/run` is memory, and each person's runtime directory, `/run/user/<uid>`,
+mode 0700, holds their compositor's socket. A symlink in a sticky directory
 every class may write is followed only for its owner or the directory's, as
 Linux's `protected_symlinks` has it, `DacOverride` or not.
 
-**The session is uid 1000; the system is uid 0.** Init runs as uid 0 and
-starts the compositor, the terminal, remoted and roulette as uid and gid 1000,
-home `/home/user`, `XDG_RUNTIME_DIR` its runtime directory; an extension's
-services run as its own users, uids 100 to 999. Every root is held
+**The session is a person's; the system is uid 0.** Init runs as uid 0 and
+starts each person's compositor, terminal and console shell as that person —
+their uid and gid, `admin` while the record names them an administrator,
+their home and `XDG_RUNTIME_DIR` — roulette and an extension's session
+services as the first person, uid 1000, home `/home/user`, remoted as the
+person the record names for it, and the login screen as the base's
+`greeter` user, uid 50; an extension's services run as its own users, uids
+100 to 999. Every root is held
 to one ownership map, stated once in `slopos_abi::fs::ROOT_LAYOUT` and
 `SESSION_TREES` and mirrored by `scripts/lib/root_layout.sh` and
 `tools/initramfs`, whose test holds the three equal: `/`, `/etc`, `/var`,
@@ -1935,9 +1940,10 @@ anyone and, through privd's `org.slopos.accounts.manage` (`Seal` and
 `DacOverride`), for root, an administrator, or a person an administrator's
 password answers for, adds one with a home of their own
 (`/home/<name>`, 0700), removes one — the home kept unless `--home` says —
-renames one, sets a password, promotes and demotes, and sets automatic login;
-the last administrator stays one, and the first person, whom the desktop runs
-as, stays, an administrator until there is a login screen. A passwordless
+renames one, sets a password, promotes and demotes, sets automatic login and
+whom remoted runs as (`users remote`, the first administrator unless set);
+the last administrator stays one, and the first person, whose the map's
+trees are, stays. A passwordless
 administrator who adds someone sets a password first, and an add turns
 automatic login off unless `--keep-autologin` says.
 `org.slopos.accounts.password` (`Seal`) changes the requester's own password
@@ -1970,11 +1976,11 @@ people. The session's `USER` is the first person's name, and their home the
 map's `/home/user`.
 
 **Init keeps the services running.** It starts privd and waits for it,
-remoted where the base is paired, the extensions' services, and the desktop
-session — the compositor,
-then the terminal once the compositor is ready or a minute has passed — and
-starts privd, remoted or the session again when one exits, at most five times
-in any minute each, as systemd's start limit counts them, the next start
+remoted where the base is paired, the extensions' services, the console's
+`/bin/login` on every boot but a test boot, and the sessions — a desktop's
+compositor, then its terminal once the compositor is ready or a minute has
+passed — and starts privd, remoted, the console's prompt or a session's
+leader again when one exits, at most five times in any minute each, as systemd's start limit counts them, the next start
 waiting until the minute allows it (`userland/src/apps/init/`). A privd
 started again takes no exclusive group while what its predecessor started and
 was running when it started runs, since it cannot know which they hold. A dead compositor's
@@ -1993,12 +1999,12 @@ when `/sbin/init` changed; a changed
 compositor or terminal is the compositor's to offer, as a session restart
 in its system menu, and never forced. Init is single-threaded,
 waiting on a poll of pidfds, its ready pipes, the consent ends of sides not
-running, the base monitor and `/run/init`. The session
+running, the base monitor and `/run/init`. A session
 ends as systemd's `KillMode` stops a unit: `SIGTERM` to every live process
-carrying the desktop's login tag or a session service's, again to each one
-forked since, and `SIGCONT` to each one stopped, since every kill walks the
-task table, `SIGKILL` to all after five seconds, given up on after ten, so
-remoted's
+carrying its login tag, or, for the first person's desktop, a session
+service's, again to each one forked since, and `SIGCONT` to each one stopped,
+since every kill walks the task table, `SIGKILL` to all after five seconds,
+given up on after ten, so remoted's
 processes, privd's mechanisms but those `priv` runs as the person, and
 anything else the session did not start survive it. A process that forks
 faster than init signals can outlast the ten seconds, and the request that
@@ -2006,24 +2012,101 @@ asked is answered with how many did.
 `/run/init` (mode 0666) takes one line per connection, judged by
 `SO_PEERCRED` and, as of the request, `SO_PEEREXTENSION` and
 `SO_PEERPROGRAM` (`peer_base_program`), four connections
-waiting per uid: `restart-session` from the session or root, which
-`/bin/session restart` and the compositor's system menu send, and
-`end-session`, `reexec` and `extensions` from root — uid 0 running a base
+waiting per uid and a desktop's compositor's beside them: a person's `restart-session` and `end-session` (which logs
+them out), `lock` and `greeter` for the session their process carries the
+tag of — `greeter` from the desktop in front alone — and `locked` and
+`unlocked` from that desktop's compositor, which `/bin/session` and the
+compositor's system menu send; and from root — uid 0 running a base
 program, as
 privd's `root` principal is, since `SO_PEERCRED` names no capability and uid
-0 alone is no authority; each is answered once
-done, eight at most waiting on the session but uid 0's, and a session uid 0
-ended stays down until uid 0 restarts it or a test run fails. Init re-executes `/sbin/init
+0 alone is no authority — those for any session by its tag, `switch <tag>`,
+`login desktop|console <name>` (a console's handing its terminal over
+`SCM_RIGHTS`), `reexec`, `extensions`, and `restart-session` and
+`end-session` from outside every session, for all of them; each is answered
+once done, eight at most waiting on the sessions but uid 0's, and the
+sessions uid 0 ended stay down until uid 0 restarts them or a test run fails.
+Init re-executes `/sbin/init
 --resume <fd>`, as systemd's `daemon-reexec` does, carrying its service table
-and budgets, the consent pair, its listener and the request in a pipe, and
-keeps its pid, its children and its capabilities, and the extensions'
-services in pipes of their own; an image that cannot read the state closes the
-descriptors its first line names, adopts the privd and
-remoted among its children, starts the session again, and runs without consent
-until the next boot. A test boot runs the userland tests in a
+and budgets, the session table (`slopos-init 2`, a console session's
+terminal name among it, so `/run/sessions` keeps naming it and `/bin/login`
+keeps relaying), the consent links and the sessions' pair, its listener,
+each compositor's session pipe and the request in a pipe, and keeps its pid, its children and its capabilities, and the
+extensions' services in pipes of their own; an image that cannot read the
+state closes the descriptors its first line names, adopts the privd and
+remoted among its children, starts the sessions again, and runs without
+consent until the next boot. Before an image of the first version, which
+knows one desktop, the sessions end and none starts again until it runs; an
+image that resumes the first
+version's state takes its desktop over as the first person's, under
+`DESKTOP`, and starts privd again to hear the table. A test boot runs the userland tests in a
 copy of init (`/sbin/init --run-tests`, holding `TestHarness`), so init serves
 while they run, and starts no session until one is asked for or the tests
 fail.
+
+**People log in to sessions of their own.** Init keeps a session table
+(`userland/src/apps/init/session.rs`): each person's desktop (class `user`),
+the login screen (`greeter`) and a shell a console login started
+(`console`), each under its own login tag from `SESSION_LOGINS`, never given
+twice in a boot; remoted is its person's `background` session. One
+graphical session is in front, holding the screen and the input sink: init
+brings one there with `seat_switch(task_id)` (`SeatSwitch`, init's alone),
+which hands both seats from whoever holds them at the compositor's rank and
+routes input to the new holder, and tells each compositor on its session
+pipe (fd 5) `front`, `front unlock` (its person proved themselves at the
+login screen), `behind` or `lock`; a desktop behind locks and draws nothing.
+The table is written to `/run/sessions/<tag>` (`UID`, `USER`, `CLASS`,
+`ACTIVE`, `LOCKED`, `LEADER`, `TTY`, through a sibling and a rename, as
+logind keeps `/run/systemd/sessions`), which slibc's `getlogin` reads by the
+caller's login tag, `ENXIO` outside every session, and sent whole to privd
+on a socket pair of its own (`slopos_priv_core::sessions`) whenever it
+changes. A person's runtime directory lives while any session of theirs
+does, remoted's among them, and the first person's, whom the boot's own
+programs run as, for the boot, as a lingering user's does. The boot's
+session is the person the record logs in by itself, else
+the login screen, which also comes in front whenever nothing else is. The
+login screen is the compositor run with `--greeter` as `greeter`, serving
+no clients, listing the people and asking privd's `org.slopos.login`
+(`allow greeter`: uid 50 running a base program) with the password on a
+pipe; `/bin/session login desktop|console <name>` checks it through
+authcheck — nothing for a person with none — each wrong one since that
+person's last right one doubling the wait before the mechanism answers,
+from two seconds to a minute, counted under `/run/slopos-auth`, and asks
+init to bring that person's desktop in front, unlocked if
+they had one, or to start a shell on the terminal at its standard output.
+`/bin/login` prompts on init's console as `greeter` and relays the console
+to a terminal of each login's own while init lists that session, since the
+kernel hangs a console up for good once a session's leader on it exits, and
+closes it once the session ends, so nothing the session left can pose as
+the prompt. A compositor init starts takes no seat itself: init hands them
+over once it is the session in front, and one started behind is told so
+before it starts, locked. A desktop locks from its system
+menu, whenever it goes behind, and at Ctrl+Alt+Delete — the secure
+attention key, which only the compositor reads, so the screen that asks for
+a password after it is the compositor's — and its lock screen hands the
+password to `org.slopos.session.unlock` (`allow program /bin/compositor`),
+which answers for the requester's own person, counted as a login is; init
+counts a desktop locked from the moment it goes behind, only the session's
+compositor tells init it locked or unlocked, saying it locked again until
+init has heard and unlocked only while in front, and a restart any other
+process of the person asks for brings the desktop back locked. A compositor init starts is handed the seats only once
+it says it is ready, so one that never draws leaves the console its keys,
+and reads what init said before each pass's input, so a desktop told to
+lock before the seats came back takes no key unlocked.
+The clipboard is a session's: the kernel keeps one per login tag
+in `SESSION_LOGINS`, eight at most, the one copied into longest ago going,
+and a process of no session has none. Each person's processes are charged
+to a quota account of their own (`quota::person_account`), a quarter of
+`MAX_PROCESSES` and of `MAX_TASKS` for all of them together — every task
+counted, a fork's and a thread's as a spawn's (`charge_clone`) — and a zombie
+of theirs holds one of those tasks until it is reaped
+(`ChargeSlot::bequeath_into` onto their row, which outlives the process's
+own) instead of counting against its parent's budget, so one person's fork
+bomb, or what they leave unreaped, leaves another's session running. The
+rows are the boot's first sixteen people to run anything; a later one
+debits the root and keeps the parent's budget. Memory
+stays the machine's, under one commit ceiling. A key reaches the console's line discipline only
+while nothing holds the input sink, so nothing typed into a desktop, a
+password among it, is there for a reader of the console.
 
 **A peer is told who connected, for as long as it runs what it ran then.**
 An `AF_UNIX` socket records an `Identity` (`slopos_ostd::process::identity`:
@@ -2085,21 +2168,27 @@ longer leads where the descriptor did. Who asks is the connection's recorded
 mechanism starts, so a requester whose base program has stopped running since
 it connected — it exec'd, mapped code from elsewhere or exited — is refused:
 `root` is uid 0 running a
-base program, `paired` is `/bin/remoted` on a base carrying a pairing and
-nothing else, `user` is a person the accounts record names and `admin` one it
+base program, `greeter` uid 50 running one, `paired` is `/bin/remoted` on a
+base carrying a pairing and nothing else, `user` is a person the accounts record names and `admin` one it
 names an administrator, either from any program but the paired agent and read
 from the record as the request comes, and `program <path>` is a static base
 program or, in an extension's action, a program of its own activation. An
 action's `allow` lines are tried in order and the first that matches decides
 at its level (`slopos_priv_core::policy`, as polkit's `yes`, `auth_self` and
 `auth_admin` do): none runs it, `confirm` asks for a click and `password` for
-the person's own password, a click only from the person whose desktop the
-screen shows — the first person's, until there is a login screen — so anyone
-else types their password, and one without a password, who confirms by a
-click where it would be typed, cannot; `user alone` runs it while no other
-person is logged in, as a process carrying the desktop's login tag, and is
-`admin` otherwise. A person no line matches, at an action with an `admin`
-line, is answered by an administrator's password: the dialog lists the
+the person's own password. Only the session the requester's process carries
+the tag of is asked, as init's table has it: its desktop's dialog while that
+desktop is in front and unlocked, a click only from the person whose desktop
+it is, so anyone else types their password and one without a password, who
+confirms by a click where it would be typed, cannot; or, for a console
+session's own person, a prompt privd sends the requester (`Reply::Prompt`),
+which reads their password at its terminal with echo off and sends it back,
+whatever the level; any other request that asks is refused, and a desktop
+that goes behind or locks has what it was asked refused. `user alone` runs
+it while no other person is logged in at a desktop or a terminal, and is
+`admin` otherwise; `greeter alone` runs it while nobody is. A person no line
+matches, at an action with an `admin` line, is answered by an
+administrator's password, typed into a dialog alone: the dialog lists the
 administrators who have one, never the asker, and refuses when there are
 none. With no line matching, it refuses. A password reaches privd in the
 consent answer and `/sbin/authcheck` on a pipe, never a command line; checks
@@ -2153,10 +2242,16 @@ new base's privd when it exits, or
 beside it after five seconds of draining (`service::DRAIN_MS`), which a
 mechanism waiting on its terminal outlasts; the new one takes no exclusive group
 while a mechanism the old one started runs, and a program whose requests span a
-switch waits a minute for it (`privd::SWITCH_WAIT`). Consent travels a socket pair
-init makes and keeps for the boot, handing one end to each privd and the other
-to each compositor (fd 4 in each), each of which refuses a pair init did not
-make. Init holds both ends, so neither reads end of file when the other side exits,
+switch waits a minute for it (`privd::SWITCH_WAIT`). Consent travels socket
+pairs init makes and keeps for the boot, one per desktop or login screen
+running at once (`sessions::LINKS`, four): privd holds them at fd 5 to 8
+with a broker on each and, started `--hear-sessions`, the table's pair at fd
+9, which init makes anew for each privd it starts so one still draining
+reads end of file; fd 4, where a privd of a base from before the table looks
+for its one link, is left empty, so that privd asks nobody on a screen that
+may be anyone's, and one told to hear a table and handed none reaches nobody
+and knows nobody logged in. Each compositor holds its own link at fd 4, and
+each side refuses a pair init did not make. Init holds both ends, so neither reads end of file when the other side exits,
 and each new instance first sends
 `RESET` naming an epoch of its own and acts on nothing until a `RESET_SEEN`
 naming it comes back (`consent::Link`), sending the `RESET` again with each

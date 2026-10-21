@@ -32,6 +32,15 @@ pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 /// build of this repository wants at once.
 pub const MAX_PROCESSES: usize = 1024;
 
+/// The login tags init gives the sessions people log in to, one each and
+/// never twice in a boot; only a tag in this range, or the one desktop's of
+/// an init from before them, has a clipboard. Every other tag, and 0, names
+/// something running for the system.
+pub const SESSION_LOGINS: core::ops::Range<u32> = 0x10_0000..0x20_0000;
+/// The login tag of the one desktop an init from before [`SESSION_LOGINS`]
+/// runs.
+pub const DESKTOP_LOGIN: u32 = 1;
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskStatus {

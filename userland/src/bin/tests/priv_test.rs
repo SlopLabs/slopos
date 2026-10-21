@@ -14,6 +14,8 @@
 
 #[path = "support/asking.rs"]
 mod asking;
+#[path = "support/sessions.rs"]
+mod sessions;
 
 use std::fs::File;
 use std::os::fd::FromRawFd;
@@ -31,7 +33,7 @@ use slopos_priv_core::REQUESTER_CEILING;
 use slopos_priv_core::wire::{Exit, Reply, Request};
 use slopos_slibc::process::ids::{getgroups, getresgid, getresuid};
 use slopos_slibc::test_harness::note;
-use slopos_userland::init_control::{self, Command as InitCommand, DESKTOP};
+use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, STATUS_REFUSED, request_id};
 use slopos_userland::sealed::{is_sealed, set_sealed};
 use slopos_userland::syscall::core::caps_drop;
@@ -459,6 +461,8 @@ fn a_shell_asked_for_as_a_command_is_refused() -> bool {
         action: "org.slopos.priv".into(),
         args: vec![b"-s".to_vec()],
         cwd: true,
+
+        terminal: false,
     };
     let replies = (|| {
         let mut privd = Connection::open().ok()?;
@@ -680,13 +684,19 @@ fn the_people_are_added() -> bool {
         || fail(format!("{ALICE} and {BOB} were not added: {added:?}"))
 }
 
+/// The login tag of the desktop in front, whose processes the people are
+/// asked from.
+fn desktop() -> u32 {
+    sessions::front_tag().unwrap_or(0)
+}
+
 /// A desktop to ask the people at.
 fn a_desktop_asks_the_first_person() -> bool {
     if let Err(why) = init_control::ask(InitCommand::RestartSession) {
         return fail(format!("restart-session: {why}"));
     }
     until(|| {
-        Run::start(person(USER, Some(DESKTOP)), "/", &[SELF, PROBE], &[], "")
+        Run::start(person(USER, Some(desktop())), "/", &[SELF, PROBE], &[], "")
             .is_some_and(|mut run| run.says(ASKING, Duration::from_secs(30)))
     }) || fail("the desktop never asked the person")
 }
@@ -696,7 +706,7 @@ fn a_desktop_asks_the_first_person() -> bool {
 /// again from the same directory and parent, and is asked again from another
 /// directory or a shell it did not start from.
 fn the_first_person_s_click_runs_it_as_them_and_is_kept() -> bool {
-    let me = person(USER, Some(DESKTOP));
+    let me = person(USER, Some(desktop()));
     let Some(mut run) = Run::start(me, "/tmp", &[SELF, PROBE], &[], "") else {
         return false;
     };
@@ -708,7 +718,7 @@ fn the_first_person_s_click_runs_it_as_them_and_is_kept() -> bool {
     if code != Some(0) {
         return fail(format!("allowed by a click: {code:?} {said:?}"));
     }
-    if let Err(why) = said_lines(&said, &probed(USER, &[USER, ADMIN_GID], DESKTOP, "/tmp")) {
+    if let Err(why) = said_lines(&said, &probed(USER, &[USER, ADMIN_GID], desktop(), "/tmp")) {
         return fail(why);
     }
     let (code, said) = Run::start(me, "/tmp", &[SELF, PROBE], &[], "")
@@ -742,7 +752,7 @@ fn the_first_person_s_click_runs_it_as_them_and_is_kept() -> bool {
 /// The shell named with nothing after it is `priv -s`, whose answer is never
 /// kept: allowed once, it is asked for again.
 fn a_shell_is_asked_for_every_time() -> bool {
-    let me = person(USER, Some(DESKTOP));
+    let me = person(USER, Some(desktop()));
     let Some(mut first) = Run::start(me, "/tmp", &["sh"], &[], "echo SHELL-RAN\n") else {
         return false;
     };
@@ -806,7 +816,7 @@ fn priv_s_edits_etc_and_is_refused_what_the_ceiling_leaves_out() -> bool {
          bootctl base install /tmp/priv_test.base || echo MECHANISM-REFUSED\n\
          echo DONE\n"
     );
-    let Some(mut run) = Run::start(person(USER, Some(DESKTOP)), "/tmp", &["-s"], &[], &script)
+    let Some(mut run) = Run::start(person(USER, Some(desktop())), "/tmp", &["-s"], &[], &script)
     else {
         return false;
     };
@@ -868,23 +878,23 @@ impl Drop for Cleaned {
     }
 }
 
-/// A standard user's command is allowed by an administrator typing their own
-/// password, and runs as the standard user, without the administrators'
-/// group; a wrong password refuses it. The requester carries no login tag,
-/// so nothing is kept between the two.
+/// A standard user's command from the desktop in front is allowed by an
+/// administrator typing their own password, and runs as the standard user,
+/// without the administrators' group; a wrong password refuses it. The two
+/// run in other directories, so nothing is kept between them.
 fn a_standard_user_s_command_is_answered_by_an_administrator() -> bool {
     let Some(bob) = uid_of(BOB) else {
         return fail(format!("{BOB} is gone"));
     };
-    let answered = |answer: fn()| {
-        let mut run = Run::start(person(bob, Some(0)), "/tmp", &[SELF, PROBE], &[], "")?;
+    let answered = |cwd: &str, answer: fn()| {
+        let mut run = Run::start(person(bob, Some(desktop())), cwd, &[SELF, PROBE], &[], "")?;
         if !run.says(ASKING, SAID_WITHIN) {
             return None;
         }
         answer();
         Some(run.end())
     };
-    let (code, said) = answered(|| {
+    let (code, said) = answered("/tmp", || {
         asking::armed();
         asking::type_text(ALICE_PASSWORD);
         asking::key(slopos_abi::input::keycode::KEY_ENTER, 0);
@@ -895,10 +905,10 @@ fn a_standard_user_s_command_is_answered_by_an_administrator() -> bool {
             "{BOB}'s command, {ALICE}'s password: {code:?} {said:?}"
         ));
     }
-    if let Err(why) = said_lines(&said, &probed(bob, &[bob], 0, "/tmp")) {
+    if let Err(why) = said_lines(&said, &probed(bob, &[bob], desktop(), "/tmp")) {
         return fail(why);
     }
-    let (code, said) = answered(|| {
+    let (code, said) = answered("/", || {
         asking::armed();
         asking::type_text("not-hers");
         asking::key(slopos_abi::input::keycode::KEY_ENTER, 0);

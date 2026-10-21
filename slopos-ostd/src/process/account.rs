@@ -20,8 +20,16 @@ use slopos_abi::task::MAX_PROCESSES;
 /// [`PROCESS_VM_SLOT_BITS`](crate::handle::PROCESS_VM_SLOT_BITS) uses.
 pub const ACCOUNT_SLOT_BITS: u32 = 16;
 
-/// Rows in the account arena: one per process, plus the kernel's root.
-pub const MAX_ACCOUNTS: usize = MAX_PROCESSES + 1;
+/// Rows for the people whose processes run: one each, beside the processes'
+/// own, which every process of that person's debits through.
+pub const PERSON_ACCOUNTS: usize = 16;
+
+/// The first person's row, past every process id.
+pub const FIRST_PERSON_SLOT: u32 = MAX_PROCESSES as u32 + 1;
+
+/// Rows in the account arena: one per process, the kernel's root, and the
+/// people's.
+pub const MAX_ACCOUNTS: usize = MAX_PROCESSES + 1 + PERSON_ACCOUNTS;
 
 const _: () = assert!(MAX_ACCOUNTS <= (1usize << ACCOUNT_SLOT_BITS));
 

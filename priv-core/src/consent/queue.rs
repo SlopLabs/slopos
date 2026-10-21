@@ -177,6 +177,17 @@ impl<T> Questions<T> {
         Ok(settled)
     }
 
+    /// The agent's desktop went from the screen or locked: every asker, to
+    /// be refused, and the id of the question on screen, to be taken off it.
+    /// The agent stays, to be asked once its desktop is back.
+    pub fn hidden(&mut self) -> (Option<u64>, Vec<T>) {
+        let showing = self.showing.take();
+        let id = showing.as_ref().map(|s| s.id);
+        let mut askers: Vec<T> = showing.map(|s| s.asker).into_iter().collect();
+        askers.extend(self.waiting.drain(..).map(|(_, asker)| asker));
+        (id, askers)
+    }
+
     /// The agent has gone, or another took its place, and nothing it was
     /// asked can be answered: every asker, to be refused.
     pub fn lost(&mut self) -> Vec<T> {

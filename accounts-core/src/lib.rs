@@ -4,8 +4,8 @@
 //! `/etc/shadow` — and passwords as Argon2id hashes. `/bin/users`,
 //! `/sbin/authcheck`, the installer and init do the I/O.
 //!
-//! The database lists root, then the people, then the system users beside
-//! them, then `nobody`; an entry whose name or uid one listed before holds is
+//! The database lists root and the login screen's user, then the people,
+//! then the system users beside them, then `nobody`; an entry whose name or uid one listed before holds is
 //! passed over. A person's group is their own, its gid their uid, and the
 //! administrators are the members of [`ADMIN_GROUP`].
 
@@ -25,12 +25,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub use slopos_abi::fs::{ADMIN_GID, ADMIN_GROUP, NOBODY_UID};
+pub use slopos_abi::fs::{ADMIN_GID, ADMIN_GROUP, GREETER_NAME, GREETER_UID, NOBODY_UID};
 
 /// The longest name a person may have.
 pub const NAME_MAX: usize = 32;
 /// The base's own names, which no person takes.
-pub const RESERVED: [&str; 4] = ["root", "nobody", ADMIN_GROUP, "greeter"];
+pub const RESERVED: [&str; 4] = ["root", "nobody", ADMIN_GROUP, GREETER_NAME];
 /// A person's shell.
 pub const SHELL: &str = "/bin/shell";
 /// The shell of a user that logs in nowhere.
@@ -73,6 +73,13 @@ fn rows<'a>(accounts: &'a Accounts, others: &'a [Entry]) -> Vec<Row<'a>> {
         home: "/root",
         shell: SHELL,
     };
+    let greeter = Row {
+        name: GREETER_NAME,
+        uid: GREETER_UID,
+        gecos: "login screen",
+        home: "/",
+        shell: NO_SHELL,
+    };
     let people = accounts.people().iter().map(|p| Row {
         name: &p.name,
         uid: p.uid,
@@ -88,7 +95,7 @@ fn rows<'a>(accounts: &'a Accounts, others: &'a [Entry]) -> Vec<Row<'a>> {
         shell: NO_SHELL,
     });
     let mut out: Vec<Row<'a>> = Vec::new();
-    for row in core::iter::once(root).chain(people).chain(system) {
+    for row in [root, greeter].into_iter().chain(people).chain(system) {
         let held = out.iter().any(|r| r.name == row.name || r.uid == row.uid)
             || [ADMIN_GROUP, "nobody"].contains(&row.name)
             || row.uid == NOBODY_UID;

@@ -49,7 +49,7 @@ use slopos_ostd::authority::{CAP_MASK_ALL, CAP_NONE, CAP_UNIVERSAL, Capability, 
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_ostd::task::new_group_in_session;
 use slopos_sched::scheduler::publish_new_task;
-use slopos_sched::task::{SpawnGuard, link_child, task_build, task_find_by_id, task_terminate};
+use slopos_sched::task::{SpawnGuard, link_child, task_build_in, task_find_by_id, task_terminate};
 use slopos_sched::task::{TaskEntry, task_default_signals_in_mask, task_entry_from_kernel_va};
 
 pub use script::{ExecProgram, resolve_exec};
@@ -380,6 +380,22 @@ impl Endowed<'_> {
     }
 }
 
+/// The account a spawned process debits through: its person's, when it runs
+/// as one, so everything a person runs shares their ceiling; the root's
+/// otherwise.
+#[inline(never)]
+fn account_for(
+    endowed: &Endowed<'_>,
+    spawner: &Cred,
+) -> Result<slopos_ostd::process::AccountId, Errno> {
+    use slopos_ostd::process::quota::{person_account, root};
+    let ruid = endowed.cred(spawner)?.ruid;
+    Ok(match slopos_abi::fs::PERSON_UIDS.contains(&ruid) {
+        true => person_account(ruid),
+        false => root(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_program_with_attrs(
     path: &[u8],
@@ -437,6 +453,7 @@ pub fn spawn_program_with_cwd(
         .as_ref()
         .map_or(CAP_NONE, |parent| slopos_ostd::task::ops::task_caps(parent));
     let endowed = &endowment.check(&spawner.cred, spawner_caps)?;
+    let account = account_for(endowed, &spawner.cred)?;
     let result = (|| {
         let program = resolve_exec(path, cwd, spawner)?;
         let argv = program.argv(argv)?;
@@ -450,12 +467,13 @@ pub fn spawn_program_with_cwd(
 
         // Unregistered and singly owned until `task_commit`, so no lookup,
         // walk or other CPU can observe the field writes below.
-        let Some(pending) = task_build(
+        let Some(pending) = task_build_in(
             task_name.as_ptr() as *const c_char,
             user_code_entry,
             ptr::null_mut(),
             priority.as_u8(),
             flags,
+            account,
         ) else {
             return Err(Errno::ENOMEM);
         };

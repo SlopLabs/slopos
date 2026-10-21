@@ -33,7 +33,7 @@ pub const SYSCALL_TABLE_SIZE: usize = (SYSCALL_LINUX_MAX as usize) + 1;
 pub const SYSCALL_PRIVATE_BASE: u64 = 1024;
 
 /// Size of the private dispatch table.
-pub const SYSCALL_PRIVATE_TABLE_SIZE: usize = 50;
+pub const SYSCALL_PRIVATE_TABLE_SIZE: usize = 52;
 
 /// One past the last private number.
 pub const SYSCALL_PRIVATE_END: u64 = SYSCALL_PRIVATE_BASE + (SYSCALL_PRIVATE_TABLE_SIZE as u64);
@@ -730,10 +730,14 @@ pub const SYSCALL_INPUT_SINK_ACQUIRE: u64 = SYSCALL_PRIVATE_BASE + 21;
 /// [`InputEvent`](crate::InputEvent) records, at most `max` of them.
 pub const SYSCALL_INPUT_POLL_BATCH: u64 = SYSCALL_PRIVATE_BASE + 22;
 
-/// `clipboard_copy(buf: *const u8, len)`.
+/// `clipboard_copy(buf: *const u8, len) -> bytes kept`: the clipboard of the
+/// caller's login session, one per login tag in
+/// [`SESSION_LOGINS`](crate::task::SESSION_LOGINS); a process carrying any
+/// other tag has none, and keeps nothing.
 pub const SYSCALL_CLIPBOARD_COPY: u64 = SYSCALL_PRIVATE_BASE + 23;
 
-/// `clipboard_paste(buf: *mut u8, len) -> bytes written`.
+/// `clipboard_paste(buf: *mut u8, len) -> bytes written`: from the caller's
+/// session's clipboard, as [`SYSCALL_CLIPBOARD_COPY`] keeps it.
 pub const SYSCALL_CLIPBOARD_PASTE: u64 = SYSCALL_PRIVATE_BASE + 24;
 
 /// `font_set(data: *const u8, width, height, glyph_count, format)`.
@@ -927,6 +931,18 @@ pub const SYSCALL_EXT_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 48;
 /// carries. Gated on `Capability::TestHarness`.
 pub const SYSCALL_TEST_KEY: u64 = SYSCALL_PRIVATE_BASE + 49;
 
+/// `seat_switch(task_id) -> 0`: make the live task `task_id`, which must hold
+/// `DisplaySeat` and `InputSeat`, the holder of the screen and the input sink
+/// at the compositor's rank, whoever holds them there now, and route every
+/// input event to it. `ESRCH` for no such task, `EPERM` for one that lacks a
+/// seat capability, `EBUSY` while the virtual console holds a seat. Gated on
+/// `Capability::SeatSwitch`.
+pub const SYSCALL_SEAT_SWITCH: u64 = SYSCALL_PRIVATE_BASE + 50;
+
+/// `login_tag() -> tag`: the caller's login tag, 0 for none, as
+/// `process_list` reports it.
+pub const SYSCALL_LOGIN_TAG: u64 = SYSCALL_PRIVATE_BASE + 51;
+
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
 /// call.
 pub const EFIVAR_DATA_MAX: usize = 4096;
@@ -975,6 +991,6 @@ const _: () = assert!(SYSCALL_PRIVATE_BASE > SYSCALL_LINUX_MAX);
 const _: () = assert!(SYSCALL_PRIVATE_BASE & 0x4000_0000 == 0);
 
 const _: () = assert!(
-    SYSCALL_TEST_KEY < SYSCALL_PRIVATE_END,
+    SYSCALL_LOGIN_TAG < SYSCALL_PRIVATE_END,
     "private syscall range is full; raise SYSCALL_PRIVATE_TABLE_SIZE",
 );

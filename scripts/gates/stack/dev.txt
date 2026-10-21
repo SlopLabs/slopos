@@ -47,8 +47,9 @@ expect-test-registry few
 # Sharing the signal-action table under `CLONE_SIGHAND` put a
 # `KArc<SigHandTable>` handoff in `task_clone`'s frame, which crossed the
 # threshold at 2072 B; giving a non-leader thread its group leader's
-# `real_parent` added a second owning handle and took it to 2136 B.
-2136	*slopos_sched4task14task_lifecycle10task_clone*
+# `real_parent` added a second owning handle and took it to 2136 B; charging
+# a clone its task once it is registered took it to 2152 B.
+2152	*slopos_sched4task14task_lifecycle10task_clone*
 
 # Library smallsort monomorphizations: scratch is the element size, not
 # reducible without changing the sorted element type. One per bus, since

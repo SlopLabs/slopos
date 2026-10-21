@@ -1,11 +1,14 @@
 //! init as a service manager, against the init that booted: a re-executed
 //! init keeps what it serves, a privd that dies is started again, and a
-//! session restart ends what carries the desktop's login tag, a stopped
+//! session restart ends what carries its desktop's login tag, a stopped
 //! process by its `SIGTERM`, and spares what carries remoted's.
 //!
 //! The runner hands this binary every capability as uid 0. A test boot runs
 //! no desktop session until one is asked for, and this one ends the one it
 //! starts.
+
+#[path = "support/sessions.rs"]
+mod sessions;
 
 use std::ffi::CString;
 use std::time::{Duration, Instant};
@@ -15,7 +18,7 @@ use slopos_abi::signal::{SIGKILL, SIGSTOP, SIGTERM};
 use slopos_abi::syscall::{POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::wire::{Exit, Reply, Request};
-use slopos_userland::init_control::{self, Command, DESKTOP, REMOTE};
+use slopos_userland::init_control::{self, Command, REMOTE};
 use slopos_userland::privd::{Connection, request_id};
 use slopos_userland::syscall::process::{self, Endowment, WaitStatus};
 use slopos_userland::syscall::{OwnedFd, fs, pidfd};
@@ -70,21 +73,27 @@ fn linger(login: u32) -> Option<u32> {
     )
 }
 
-/// Whether init did `command` for a requester running as `uid`.
-fn asked_as(uid: u32, command: Command) -> Option<bool> {
-    let child = spawn_self(
-        &[ASK, command.word()],
-        Endowment {
-            ids: Some((uid, uid)),
-            groups: Some(&[]),
-            ..Endowment::NONE
-        },
-    )?;
-    match process::wait_exit_code(child) {
+/// Whether init did `command` for a requester running as `uid`, carrying
+/// `login`.
+fn asked_as(uid: u32, login: Option<u32>, command: Command) -> Option<bool> {
+    match asked_with_code(uid, login, command)? {
         0 => Some(true),
         1 => Some(false),
         _ => None,
     }
+}
+
+fn asked_with_code(uid: u32, login: Option<u32>, command: Command) -> Option<i32> {
+    let child = spawn_self(
+        &[ASK, &command.line()],
+        Endowment {
+            ids: Some((uid, uid)),
+            groups: Some(&[]),
+            login,
+            ..Endowment::NONE
+        },
+    )?;
+    Some(process::wait_exit_code(child))
 }
 
 fn readable_within(fd: &OwnedFd, within: Duration) -> bool {
@@ -121,6 +130,8 @@ fn privd_serves() -> bool {
         action: "org.slopos.prof".into(),
         args: vec![b"status".to_vec()],
         cwd: false,
+
+        terminal: false,
     };
     if privd
         .send(&request, &[null.raw(), null.raw(), null.raw()])
@@ -145,7 +156,7 @@ fn privd_serves() -> bool {
 /// the privd it ran, starts privd again when it dies, and is still the
 /// program its sockets attest: the consent pair rests on that.
 fn init_reexecutes_keeping_what_it_serves() -> bool {
-    if asked_as(SESSION_UID, Command::Reexec) != Some(false) {
+    if asked_as(SESSION_UID, None, Command::Reexec) != Some(false) {
         note("the session had init re-execute");
         return false;
     }
@@ -212,18 +223,19 @@ fn a_killed_privd_is_started_again() -> bool {
     privd_serves()
 }
 
-/// Only uid 0 ends the session, and only uid 0 starts a session it ended.
-fn only_uid_0_ends_the_session() -> bool {
-    if asked_as(STRANGER, Command::RestartSession) != Some(false)
-        || asked_as(SESSION_UID, Command::EndSession) != Some(false)
+/// A person ends or restarts only a session they are in, and only uid 0
+/// starts the sessions it ended.
+fn a_person_ends_only_their_own_session() -> bool {
+    if asked_as(STRANGER, None, Command::RestartSession) != Some(false)
+        || asked_as(SESSION_UID, None, Command::EndSession) != Some(false)
     {
-        note("a uid other than the session's and 0 restarted the session, or the session ended it");
+        note("a uid other than a person's restarted a session, or a person outside one ended it");
         return false;
     }
     if init_control::ask(Command::EndSession).is_err()
-        || asked_as(SESSION_UID, Command::RestartSession) != Some(false)
+        || asked_as(SESSION_UID, None, Command::RestartSession) != Some(false)
     {
-        note("the session started a session uid 0 ended");
+        note("a person started the sessions uid 0 ended");
         return false;
     }
     if let Err(why) = init_control::ask(Command::RestartSession) {
@@ -233,10 +245,15 @@ fn only_uid_0_ends_the_session() -> bool {
     true
 }
 
-/// The session may restart itself, which ends every process carrying the
-/// desktop's tag, one stopped among them, and leaves remoted's running.
+/// The session may restart itself, which ends every process carrying its
+/// tag, the one asking among them and one stopped, and leaves remoted's
+/// running.
 fn a_session_restart_spares_remoteds_processes() -> bool {
-    let (desktop, stopped, remote) = (linger(DESKTOP), linger(DESKTOP), linger(REMOTE));
+    let Some(tag) = sessions::in_front(SESSION_UID, DEADLINE).map(|front| front.tag) else {
+        note("no desktop came in front");
+        return false;
+    };
+    let (desktop, stopped, remote) = (linger(tag), linger(tag), linger(REMOTE));
     let (Some(desktop), Some(stopped), Some(remote)) = (desktop, stopped, remote) else {
         for pid in [desktop, stopped, remote].into_iter().flatten() {
             let _ = process::kill(pid, SIGKILL);
@@ -251,17 +268,19 @@ fn a_session_restart_spares_remoteds_processes() -> bool {
     );
     let desktop_gone = pidfd::pidfd_open_owned(desktop);
     let outcome = (|| {
-        if tagged != (Some(DESKTOP), Some(REMOTE)) {
+        if tagged != (Some(tag), Some(REMOTE)) {
             note(&format!("the stand-ins carry the login tags {tagged:?}"));
             return false;
         }
-        let stopped_now = || init_control::Tasks::read().stopped_of(&[DESKTOP]) == [stopped];
+        let stopped_now = || init_control::Tasks::read().stopped_of(&[tag]) == [stopped];
         if process::kill(stopped, SIGSTOP) != 0 || !until(DEADLINE, stopped_now) {
             note("the stopped stand-in did not stop");
             return false;
         }
-        if asked_as(SESSION_UID, Command::RestartSession) != Some(true) {
-            note("the session could not restart itself");
+        let ended_with_it = 128 + i32::from(slopos_abi::signal::SIGTERM);
+        let asked = asked_with_code(SESSION_UID, Some(tag), Command::RestartSession);
+        if !matches!(asked, Some(0)) && asked != Some(ended_with_it) {
+            note(&format!("the session could not restart itself: {asked:?}"));
             return false;
         }
         if !desktop_gone
@@ -282,7 +301,7 @@ fn a_session_restart_spares_remoteds_processes() -> bool {
             note("remoted's process did not outlive the desktop session");
             return false;
         }
-        if !until(DEADLINE, || !init_control::processes(DESKTOP).is_empty()) {
+        if !until(DEADLINE, || !init_control::processes(tag).is_empty()) {
             note("no new session started");
             return false;
         }
@@ -296,7 +315,7 @@ fn a_session_restart_spares_remoteds_processes() -> bool {
     if let Err(why) = &ended {
         note(&format!("end-session: {why}"));
     }
-    let left = init_control::processes(DESKTOP);
+    let left = init_control::processes(tag);
     if !left.is_empty() {
         note(&format!("processes of an ended session run on: {left:?}"));
     }
@@ -312,7 +331,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "a_killed_privd_is_started_again",
         a_killed_privd_is_started_again,
     ),
-    ("only_uid_0_ends_the_session", only_uid_0_ends_the_session),
+    (
+        "a_person_ends_only_their_own_session",
+        a_person_ends_only_their_own_session,
+    ),
     (
         "a_session_restart_spares_remoteds_processes",
         a_session_restart_spares_remoteds_processes,
@@ -326,7 +348,7 @@ fn main() {
             std::thread::sleep(Duration::from_secs(60));
         },
         Some(ASK) => {
-            let command = args.get(2).and_then(|word| Command::parse(word.as_bytes()));
+            let command = args.get(2).and_then(|line| Command::parse(line.as_bytes()));
             let Some(command) = command else {
                 std::process::exit(2);
             };

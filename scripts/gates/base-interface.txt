@@ -81,6 +81,9 @@ root slopos_abi::task::MAX_TASKS
 root slopos_abi::task::INVALID_PROCESS_ID
 # screen_acquire / input_sink_acquire's seat ranks.
 root slopos_abi::window::SEAT_*
+# The login tags clipboard_copy and clipboard_paste keep a clipboard for.
+root slopos_abi::task::SESSION_LOGINS
+root slopos_abi::task::DESKTOP_LOGIN
 
 # Ledger. Appended by --record only.
 interface 1 17d78169ae6cdcc6acf1b503af88072e94c186cc9f01f774384070f83137cd63
@@ -91,3 +94,4 @@ interface 5 42d0ec766429ce5cb087e4ba149860b6daa81e3f4599432acdbad8044e104b4f
 interface 6 ac3fcc1b79193afb033bb936a12b384939540a39cc2e25618c0179f298f21957
 interface 7 32c554512cb7a34be7433e1d520ac485e30b53a46730e10873881a93b00f6146
 interface 8 f8a199522ffd881dbe97123d4e873c8b3338af17ed943c8f47f0fce2b8469097
+interface 9 8cdf3e3f163853973b864a916963d002f2efe55a8f65caf20e062d575eb11b2e

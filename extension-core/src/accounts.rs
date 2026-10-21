@@ -141,16 +141,16 @@ mod tests {
         let rows: Vec<Passwd<'_>> = lines(passwd.as_bytes())
             .map(|line| Passwd::parse(line).unwrap())
             .collect();
-        assert_eq!(rows.len(), 5);
-        assert_eq!(rows[3].name, b"hello-worker");
-        assert_eq!((rows[3].uid, rows[3].gid), (101, 101));
-        assert_eq!(rows[3].dir, b"/var/lib/hello");
-        assert_eq!(rows[3].gecos, b"hello extension");
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[4].name, b"hello-worker");
+        assert_eq!((rows[4].uid, rows[4].gid), (101, 101));
+        assert_eq!(rows[4].dir, b"/var/lib/hello");
+        assert_eq!(rows[4].gecos, b"hello extension");
         let group = group(&people, &entries);
         let groups: Vec<Group<'_>> = lines(group.as_bytes())
             .map(|line| Group::parse(line).unwrap())
             .collect();
-        assert_eq!(groups.len(), 6);
-        assert_eq!((groups[3].name, groups[3].gid), (&b"hello"[..], 100));
+        assert_eq!(groups.len(), 7);
+        assert_eq!((groups[4].name, groups[4].gid), (&b"hello"[..], 100));
     }
 }

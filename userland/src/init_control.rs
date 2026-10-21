@@ -1,7 +1,8 @@
-//! `/run/init`, where init takes requests to end and restart the desktop
-//! session, to take a change of the extensions and to re-execute itself, and
-//! the login tags it gives the desktop, remoted, privd and extensions'
-//! services and mechanisms, by which their processes are found.
+//! `/run/init`, where init takes requests to log people in, end, restart,
+//! lock and switch their sessions, to take a change of the extensions and to
+//! re-execute itself, and the login tags it gives each session, remoted,
+//! privd and extensions' services and mechanisms, by which their processes
+//! are found.
 
 use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
 use slopos_abi::syscall::{MSG_NOSIGNAL, POLLIN, UserPollFd, UserTaskEntry};
@@ -16,8 +17,9 @@ pub const SOCKET: &str = "/run/init";
 pub const COMPOSITOR: &str = "/bin/compositor";
 pub const TERMINAL: &str = "/bin/terminal";
 
-/// The login tag of every process the desktop session runs.
-pub const DESKTOP: u32 = 1;
+/// The login tag of every process of the one desktop an init from before
+/// the session table ran, which an init that resumes it takes over.
+pub const DESKTOP: u32 = slopos_abi::task::DESKTOP_LOGIN;
 /// The login tag of remoted and what it runs, which a session restart spares.
 pub const REMOTE: u32 = 2;
 /// The login tag of privd and the mechanisms it runs, which outlive it: a
@@ -175,6 +177,11 @@ impl Tasks {
         self.tags_in(action_tags())
     }
 
+    /// Every tag in `range` some process carries.
+    pub fn tags_in_range(&self, range: std::ops::Range<u32>) -> Vec<u32> {
+        self.tags_in(range)
+    }
+
     fn tags_in(&self, range: std::ops::Range<u32>) -> Vec<u32> {
         let mut tags: Vec<u32> = self
             .0
@@ -199,51 +206,155 @@ pub const MAX_REQUEST: usize = 64;
 /// Init answers an end of the session once its processes are gone.
 const REPLY_MS: i64 = 30_000;
 
+/// A person's name as a request carries it, at most
+/// [`slopos_accounts_core::NAME_MAX`] bytes the record's grammar takes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Name {
+    bytes: [u8; slopos_accounts_core::NAME_MAX],
+    len: u8,
+}
+
+impl Name {
+    pub fn new(name: &str) -> Option<Name> {
+        if !slopos_accounts_core::valid_name(name) {
+            return None;
+        }
+        let mut bytes = [0u8; slopos_accounts_core::NAME_MAX];
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        Some(Name {
+            bytes,
+            len: name.len() as u8,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+}
+
+impl core::fmt::Debug for Name {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Where a person logs in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum At {
+    /// Their desktop, from the login screen.
+    Desktop,
+    /// A shell on the terminal the request hands over.
+    Console,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
-    /// End the desktop session and start it again: the session's uid or uid 0.
+    /// End the requester's session and start it again; from uid 0, every
+    /// session but the background's, starting the boot's own again.
     RestartSession,
-    /// End the desktop session and leave it ended: uid 0.
+    /// End the requester's session, which logs its person out; from uid 0,
+    /// every session but the background's, leaving them ended.
     EndSession,
+    /// End the session the login tag names and start it again: uid 0.
+    Restart(u32),
+    /// End the session the login tag names: uid 0.
+    End(u32),
     /// Re-execute `/sbin/init`, keeping its services: uid 0.
     Reexec,
     /// Start, stop and restart extensions' services as the store and the
     /// activations now say: uid 0.
     Extensions,
+    /// Bring the login screen in front, starting it: uid 0, or a person from
+    /// their desktop in front.
+    Greeter,
+    /// Bring the desktop the login tag names in front: uid 0.
+    Switch(u32),
+    /// Log a person in, whose password the requester checked: uid 0.
+    Login(At, Name),
+    /// Lock the requester's desktop.
+    Lock,
+    /// The desktop's compositor says it locked or unlocked.
+    Locked(bool),
 }
 
 impl Command {
-    pub const ALL: [Command; 4] = [
-        Command::RestartSession,
-        Command::EndSession,
-        Command::Reexec,
-        Command::Extensions,
-    ];
-
     pub fn word(self) -> &'static str {
         match self {
-            Command::RestartSession => "restart-session",
-            Command::EndSession => "end-session",
+            Command::RestartSession | Command::Restart(_) => "restart-session",
+            Command::EndSession | Command::End(_) => "end-session",
             Command::Reexec => "reexec",
             Command::Extensions => "extensions",
+            Command::Greeter => "greeter",
+            Command::Switch(_) => "switch",
+            Command::Login(..) => "login",
+            Command::Lock => "lock",
+            Command::Locked(true) => "locked",
+            Command::Locked(false) => "unlocked",
         }
     }
 
-    pub fn parse(word: &[u8]) -> Option<Command> {
-        Command::ALL
-            .into_iter()
-            .find(|command| command.word().as_bytes() == word)
+    /// The request line, without its newline.
+    pub fn line(self) -> String {
+        match self {
+            Command::Restart(tag) | Command::End(tag) | Command::Switch(tag) => {
+                format!("{} {tag}", self.word())
+            }
+            Command::Login(At::Desktop, name) => format!("login desktop {}", name.as_str()),
+            Command::Login(At::Console, name) => format!("login console {}", name.as_str()),
+            _ => self.word().to_owned(),
+        }
+    }
+
+    pub fn parse(line: &[u8]) -> Option<Command> {
+        let line = core::str::from_utf8(line).ok()?;
+        let words: Vec<&str> = line.split(' ').collect();
+        let tag = |word: &str| -> Option<u32> {
+            let canonical = !word.is_empty()
+                && word.bytes().all(|b| b.is_ascii_digit())
+                && !word.starts_with('0');
+            canonical.then(|| word.parse().ok()).flatten()
+        };
+        Some(match words[..] {
+            ["restart-session"] => Command::RestartSession,
+            ["end-session"] => Command::EndSession,
+            ["restart-session", t] => Command::Restart(tag(t)?),
+            ["end-session", t] => Command::End(tag(t)?),
+            ["reexec"] => Command::Reexec,
+            ["extensions"] => Command::Extensions,
+            ["greeter"] => Command::Greeter,
+            ["switch", t] => Command::Switch(tag(t)?),
+            ["login", "desktop", name] => Command::Login(At::Desktop, Name::new(name)?),
+            ["login", "console", name] => Command::Login(At::Console, Name::new(name)?),
+            ["lock"] => Command::Lock,
+            ["locked"] => Command::Locked(true),
+            ["unlocked"] => Command::Locked(false),
+            _ => return None,
+        })
     }
 }
 
 /// Ask init for `command`: `Err` is init's refusal, or why init was not
 /// reached.
 pub fn ask(command: Command) -> Result<(), String> {
+    ask_handing(command, None)
+}
+
+/// [`ask`], handing init `fd` beside the request: the terminal a console
+/// login starts its shell on.
+pub fn ask_handing(command: Command, fd: Option<crate::syscall::RawFd>) -> Result<(), String> {
+    let fd_held = fd;
     let fd = net::socket(AF_UNIX, u32::from(SOCK_STREAM) | SOCK_CLOEXEC, 0)
         .map_err(|e| format!("socket: {e}"))?;
     net::connect_unix(fd.raw(), SOCKET.as_bytes()).map_err(|e| format!("{SOCKET}: {e}"))?;
-    let line = format!("{}\n", command.word());
-    net::send(fd.raw(), line.as_bytes(), MSG_NOSIGNAL).map_err(|e| format!("{SOCKET}: {e}"))?;
+    let line = format!("{}\n", command.line());
+    match fd_held {
+        Some(held) => net::send_with_fds(fd.raw(), line.as_bytes(), &[held])
+            .map(|_| ())
+            .map_err(|e| format!("{SOCKET}: {e}"))?,
+        None => net::send(fd.raw(), line.as_bytes(), MSG_NOSIGNAL)
+            .map(|_| ())
+            .map_err(|e| format!("{SOCKET}: {e}"))?,
+    }
     let mut reply = Vec::new();
     let mut buf = [0u8; 256];
     loop {

@@ -8664,6 +8664,60 @@ pub fn test_zombie_budget_is_enforced_per_parent() -> TestResult {
     pass!()
 }
 
+/// A person's zombie holds one of their tasks until it is reaped, beside
+/// every parent's budget: what they leave unreaped stays within their share.
+pub fn test_a_person_s_zombie_holds_their_task_until_the_reap() -> TestResult {
+    use slopos_abi::quota::ResourceKind;
+    use slopos_ostd::process::Cred;
+    use slopos_ostd::process::quota::{person_account, stats};
+    let _fixture = SyscallFixture::new();
+    task::task_graveyard_drain();
+    slopos_ostd::sync::rcu_barrier();
+
+    let uid = slopos_abi::fs::SESSION_UID;
+    let person = person_account(uid);
+    let held = || stats(person, ResourceKind::Task).map_or(0, |s| s.used);
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
+    let before = held();
+    let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
+    let child = task::task_build_in(
+        b"PersonZombie\0".as_ptr() as *const c_char,
+        user_entry,
+        ptr::null_mut(),
+        1,
+        TASK_FLAG_USER_MODE,
+        person,
+    )
+    .and_then(task::task_commit);
+    let Some(child) = child else {
+        task_terminate(parent_id);
+        return fail!("failed to create the person's task");
+    };
+    let child_id = child.task_id;
+    let made_theirs = child
+        .process()
+        .is_some_and(|process| process.change_cred(|_| Ok(Cred::of(uid, uid))).is_ok());
+    let parented = slopos_sched::task::task_set_parent(child_id, parent_id) == 0;
+    let live = held();
+    task_terminate(child_id);
+    let zombie = held();
+    let charged = child.status() == TaskStatus::Zombie && child.has_zombie_charge();
+    drop(child);
+    task_terminate(parent_id);
+    let reaped = held();
+    assert_test!(made_theirs && parented, "the child is not the person's");
+    assert_eq_test!(live, before + 1, "the live task is the person's");
+    assert_test!(charged, "the zombie holds no task of the person's");
+    assert_eq_test!(zombie, live, "the zombie keeps the task its process held");
+    assert_eq_test!(reaped, before, "the reap gives it back");
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_a_person_s_zombie_holds_their_task_until_the_reap,
+    suite = syscall_core
+);
 slopos_testing::stest!(
     name = test_waitpid_any_reaps_an_unnamed_child,
     suite = syscall_core

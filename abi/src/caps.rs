@@ -22,6 +22,7 @@ pub const DAC_OVERRIDE: u64 = 1 << 18;
 pub const SCHED_HIGH: u64 = 1 << 19;
 pub const BASE_UPDATE: u64 = 1 << 20;
 pub const EXTENSION_UPDATE: u64 = 1 << 21;
+pub const SEAT_SWITCH: u64 = 1 << 22;
 
 /// What every program holds.
 pub const UNIVERSAL: u64 = CONSOLE_IO | CLIPBOARD_GLOBAL | FATE;
@@ -31,4 +32,4 @@ pub const UNIVERSAL: u64 = CONSOLE_IO | CLIPBOARD_GLOBAL | FATE;
 pub const RETIRED: u64 = 1 << 1;
 
 /// Every bit a capability names.
-pub const ALL: u64 = ((EXTENSION_UPDATE << 1) - 1) & !RETIRED;
+pub const ALL: u64 = ((SEAT_SWITCH << 1) - 1) & !RETIRED;

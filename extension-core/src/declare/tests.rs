@@ -326,7 +326,7 @@ fn two_services_never_listen_on_one_socket() {
 fn privd_reads_an_action_s_principals_and_levels_as_declared() {
     use slopos_abi::extension::Label;
     use slopos_priv_core::consent::Kind;
-    use slopos_priv_core::{People, Person, Requester, Verdict};
+    use slopos_priv_core::{People, Person, Reach, Requester, Verdict};
     let declare = "\
 user
 action greet
@@ -392,10 +392,10 @@ action calm
             person(SESSION_UID + 1, "bob", false),
         ],
         logged_in: vec![SESSION_UID, SESSION_UID + 1],
-        front: Some(SESSION_UID),
     };
-    let admin = Requester::new(SESSION_UID, None, false);
-    let standard = Requester::new(SESSION_UID + 1, None, false);
+    let shown = Reach::Screen { theirs: true };
+    let admin = Requester::new(SESSION_UID, None, false).reached(shown);
+    let standard = Requester::new(SESSION_UID + 1, None, false).reached(shown);
     assert!(matches!(
         greet.admits(&admin, &people),
         Verdict::Ask(q) if q.kind == Kind::Password

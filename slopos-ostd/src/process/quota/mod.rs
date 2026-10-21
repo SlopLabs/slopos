@@ -30,6 +30,7 @@ mod arena;
 mod axis;
 mod charged;
 mod disk;
+mod persons;
 mod token;
 
 pub use arena::{
@@ -45,6 +46,7 @@ pub use charged::{
     sealed as charged_sealed,
 };
 pub use disk::{blocks_held, charge_blocks, refund_blocks};
+pub use persons::{person_account, person_row};
 pub use token::{Charge, ChargeSlot, Reservation};
 
 #[cfg(test)]
@@ -128,6 +130,82 @@ mod tests {
         assert_eq!(limit(installer), Some(NO_LIMIT));
         fit_disk_blocks(installer, CAP_UNIVERSAL);
         assert_eq!(limit(installer), Some(default));
+    }
+
+    /// A person's processes are counted against the person's own ceiling,
+    /// over every process beneath it, whatever each process's own allows,
+    /// and one person's being full leaves another's and the root's free.
+    #[test]
+    fn a_person_s_processes_share_a_ceiling_no_other_person_spends() {
+        use slopos_abi::quota::TaskCount;
+        let _f = fixture();
+        let alice = person_account(1000);
+        let bob = person_account(1001);
+        assert_ne!(alice, bob);
+        assert_eq!(person_account(1000), alice, "one row per person");
+        assert_eq!(person_account(0), root(), "uid 0 is no person");
+        let share = (slopos_abi::task::MAX_TASKS / 4) as u32;
+        let shell = account(1, alice);
+        let mut held = std::vec::Vec::new();
+        for slot in 10..30 {
+            let fork = account(slot, shell);
+            match try_charge::<TaskCount>(fork, 256) {
+                Ok(reservation) => held.push(Charge::commit(reservation)),
+                Err(refused) => {
+                    assert_eq!(refused.refused_by, alice);
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            used(alice, ResourceKind::Task),
+            share,
+            "the person's threads stop at their share, though no process holds more than its own"
+        );
+        let refused = try_charge::<TaskCount>(account(3, alice), 1).expect_err("full");
+        assert_eq!(refused.refused_by, alice);
+        let other = account(4, bob);
+        let theirs = try_charge::<TaskCount>(other, 64).expect("another person is untouched");
+        let system = try_charge::<TaskCount>(account(5, root()), 64).expect("and the system");
+        drop((theirs, system, held));
+        assert_eq!(used(alice, ResourceKind::Task), 0);
+    }
+
+    /// A charge handed to a person's row is theirs: the rows between stop
+    /// counting it, it outlives the account it was charged to, and the slot
+    /// holding it refunds it from there. A row not above the account takes
+    /// nothing, and the charge is refunded.
+    #[test]
+    fn a_charge_bequeathed_to_its_person_outlives_its_process() {
+        use slopos_abi::quota::TaskCount;
+        let _f = fixture();
+        let task = ResourceKind::Task;
+        let alice = person_account(1000);
+        let shell = account(1, alice);
+        let child = account(2, shell);
+        let live: ChargeSlot<TaskCount> = ChargeSlot::empty();
+        let zombie: ChargeSlot<TaskCount> = ChargeSlot::empty();
+        live.put(try_charge::<TaskCount>(child, 1).expect("room"));
+        assert!(live.bequeath_into(alice, &zombie));
+        assert!(!live.is_occupied());
+        assert_eq!((used(child, task), used(shell, task)), (0, 0));
+        assert_eq!((used(alice, task), used(root(), task)), (1, 1));
+        let mut faults = KVecFaults::default();
+        assert_eq!(ledger_audit(|f| faults.push(f)), 0, "{:?}", faults.first);
+        account_release(child);
+        assert_eq!(used(alice, task), 1, "the person keeps counting it");
+        assert_eq!(ledger_audit(|f| faults.push(f)), 0, "{:?}", faults.first);
+        zombie.take();
+        assert_eq!((used(alice, task), used(root(), task)), (0, 0));
+
+        let bob = person_account(1001);
+        live.put(try_charge::<TaskCount>(shell, 1).expect("room"));
+        assert!(!live.bequeath_into(bob, &zombie));
+        assert!(!zombie.is_occupied());
+        assert_eq!(
+            (used(shell, task), used(alice, task), used(bob, task)),
+            (0, 0, 0)
+        );
     }
 
     /// L4: a batch that succeeds at level *k* and fails at *k+1* leaves every

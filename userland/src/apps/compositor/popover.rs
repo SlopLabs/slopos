@@ -192,10 +192,48 @@ pub enum Panel {
 
 const NETWORK: Panel = Panel::Status(StatusKind::Network);
 
-const RESTART_SESSION: &str = "Restart session";
-/// Above the restart while a new base waits on one: the compositor and the
-/// terminal run from the base they started from until the session restarts.
+/// Above the entries while a new base waits on a restart: the compositor and
+/// the terminal run from the base they started from until the session
+/// restarts.
 const RESTART_NOTE: &str = "A new base changes the desktop";
+
+/// What the system panel offers, in its order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Choice {
+    Lock,
+    SwitchPerson,
+    LogOut,
+    Restart,
+}
+
+impl Choice {
+    const ALL: [Choice; 4] = [
+        Choice::Lock,
+        Choice::SwitchPerson,
+        Choice::LogOut,
+        Choice::Restart,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Choice::Lock => "Lock",
+            Choice::SwitchPerson => "Switch person",
+            Choice::LogOut => "Log out",
+            Choice::Restart => "Restart session",
+        }
+    }
+
+    /// What init is asked for it; locking is the compositor's own.
+    pub fn command(self) -> crate::init_control::Command {
+        use crate::init_control::Command;
+        match self {
+            Choice::Lock => Command::Lock,
+            Choice::SwitchPerson => Command::Greeter,
+            Choice::LogOut => Command::EndSession,
+            Choice::Restart => Command::RestartSession,
+        }
+    }
+}
 
 pub struct Popover {
     open: Option<Panel>,
@@ -224,10 +262,14 @@ pub struct Popover {
     /// The system panel opened on its own; until then a press on it was
     /// meant for what was under the pointer before.
     restart_armed_at: Option<Instant>,
+    /// The networking switch is shown: the person may move it unasked.
+    switch_offered: bool,
+    /// What the person chose in the system panel, for the frame to act on.
+    choice: Option<Choice>,
 }
 
 impl Popover {
-    pub fn new() -> Self {
+    pub fn new(switch_offered: bool) -> Self {
         Self {
             open: None,
             rect: Rect::EMPTY,
@@ -241,7 +283,13 @@ impl Popover {
             anchor: Rect::EMPTY,
             restart_wanted: false,
             restart_armed_at: None,
+            switch_offered,
+            choice: None,
         }
+    }
+
+    pub fn take_choice(&mut self) -> Option<Choice> {
+        self.choice.take()
     }
 
     /// Whether the system panel notes that the session wants a restart;
@@ -254,7 +302,12 @@ impl Popover {
     }
 
     fn system_lines(&self) -> i32 {
-        1 + i32::from(self.restart_wanted)
+        Choice::ALL.len() as i32 + i32::from(self.restart_wanted)
+    }
+
+    /// Where the system panel's entries start.
+    fn choices_y(&self, rect: Rect) -> i32 {
+        rect.y + PANEL_PAD + i32::from(self.restart_wanted) * line_h()
     }
 
     /// The popover's rect while it is open; `None` when closed, which
@@ -329,8 +382,10 @@ impl Popover {
                 } else {
                     ""
                 };
-                let text_w =
-                    gfx::font::string_width(RESTART_SESSION).max(gfx::font::string_width(note));
+                let text_w = Choice::ALL
+                    .iter()
+                    .map(|choice| gfx::font::string_width(choice.label()))
+                    .fold(gfx::font::string_width(note), i32::max);
                 Size {
                     w: text_w + 2 * PANEL_PAD,
                     h: self.system_lines() * line_h() + 2 * PANEL_PAD,
@@ -458,8 +513,12 @@ impl Popover {
                 return false;
             };
             let armed = self.restart_armed_at.is_none_or(|at| Instant::now() >= at);
-            if armed && y >= rect.y + PANEL_PAD + (self.system_lines() - 1) * line_h() {
-                spawn_session_restart();
+            let row = (y - self.choices_y(rect)).div_euclid(line_h().max(1));
+            let choice = usize::try_from(row)
+                .ok()
+                .and_then(|row| Choice::ALL.get(row).copied());
+            if armed && let Some(choice) = choice {
+                self.choice = Some(choice);
                 self.dismiss();
             }
             return true;
@@ -472,7 +531,7 @@ impl Popover {
         let Some(rect) = self.rect() else {
             return false;
         };
-        if !Self::switch_hit(rect, &layout(model)).contains(x, y) {
+        if !self.switch_offered || !Self::switch_hit(rect, &layout(model)).contains(x, y) {
             return false;
         }
         // Toggle from what the switch is showing, not from what the kernel last
@@ -520,7 +579,7 @@ impl Popover {
             return;
         };
         if self.open == Some(Panel::System) {
-            let restart_y = rect.y + PANEL_PAD + (self.system_lines() - 1) * line_h();
+            let choices_y = self.choices_y(rect);
             let note = self.restart_wanted;
             buf.with_scissor(*clip, |buf| {
                 draw_frame(buf, rect);
@@ -535,15 +594,17 @@ impl Popover {
                         clip,
                     );
                 }
-                gfx::draw_str_clipped(
-                    buf,
-                    rect.x + PANEL_PAD,
-                    restart_y,
-                    RESTART_SESSION,
-                    TEXT_PRIMARY,
-                    PANEL_BG_OPAQUE,
-                    clip,
-                );
+                for (i, choice) in Choice::ALL.iter().enumerate() {
+                    gfx::draw_str_clipped(
+                        buf,
+                        rect.x + PANEL_PAD,
+                        choices_y + i as i32 * line_h(),
+                        choice.label(),
+                        TEXT_PRIMARY,
+                        PANEL_BG_OPAQUE,
+                        clip,
+                    );
+                }
             });
             return;
         }
@@ -553,6 +614,7 @@ impl Popover {
 
         let on = self.switch_on(model);
         let busy = self.pending.is_some();
+        let offered = self.switch_offered;
         let l = layout(model);
         // Split borrows: the closure composes into `line` and fits into
         // `fitted`, so it cannot hold `&self`.
@@ -608,17 +670,19 @@ impl Popover {
             // grey track under an on-position knob reads as a disabled control
             // rather than a moving one.
             let track_colour = if on { SIGNAL_EXPAND } else { SIGNAL_INACTIVE };
-            rounded_rect_filled(
-                buf,
-                track.x,
-                track.y,
-                track.w,
-                track.h,
-                track.h / 2,
-                track_colour,
-            );
+            if offered {
+                rounded_rect_filled(
+                    buf,
+                    track.x,
+                    track.y,
+                    track.w,
+                    track.h,
+                    track.h / 2,
+                    track_colour,
+                );
+            }
             let geometry = toggle_geometry(track, if on { TOGGLE_ON } else { TOGGLE_OFF });
-            if !geometry.knob.is_empty() {
+            if offered && !geometry.knob.is_empty() {
                 rounded_rect_filled(
                     buf,
                     geometry.knob.x,
@@ -753,21 +817,6 @@ fn draw_frame(buf: &mut DrawBuffer, rect: Rect) {
         rect.h - 2 * RULE_H,
         PANEL_RADIUS - RULE_H,
         PANEL_BG_OPAQUE,
-    );
-}
-
-/// Ask init, through `/bin/session`, to end the session and start it again,
-/// which takes the compositor too.
-fn spawn_session_restart() {
-    let argv: [*const u8; 2] = [b"session\0".as_ptr(), b"restart\0".as_ptr()];
-    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
-    let _ = process::spawn_path_with_actions(
-        b"/bin/session",
-        &argv,
-        slopos_abi::task::TaskPriority::Normal,
-        slopos_abi::task::TASK_FLAG_USER_MODE,
-        &actions,
-        0,
     );
 }
 

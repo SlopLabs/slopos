@@ -22,7 +22,7 @@ use slopos_mm::user_io_buf::memdup_user;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, lock_class};
 
-use crate::input_event::{has_keyboard_focus, input_route_key_full};
+use crate::input_event::{input_route_key_full, keys_reach_console};
 use crate::tty::vconsole;
 use crate::tty::{active_tty, push_input};
 
@@ -257,7 +257,7 @@ fn deliver(
         timestamp_ms,
     );
 
-    if pressed && !has_keyboard_focus() {
+    if pressed && keys_reach_console() {
         let flush_byte = if resolved.flush != 0 && resolved.flush <= 0x7F {
             resolved.flush as u8
         } else {
