@@ -15,6 +15,7 @@ use slopos_protocol::types::{
     ToplevelId, caps,
 };
 
+use crate::ring::slopfut::sync::Notify;
 use crate::syscall::CachedShmMapping;
 use crate::syscall::tty;
 
@@ -184,6 +185,9 @@ pub struct ProtocolBridge {
     client_gen: [u64; MAX_CLIENTS],
     /// Monotonic source for `client_gen` values (never reused).
     next_gen: u64,
+    /// Fired when a connection is torn down, so its own task drops the armed
+    /// poll that otherwise holds the socket open past the close.
+    hangups: [Notify; MAX_CLIENTS],
 }
 
 impl ProtocolBridge {
@@ -213,6 +217,7 @@ impl ProtocolBridge {
             configure_serial: 0,
             client_gen: [0u64; MAX_CLIENTS],
             next_gen: 1,
+            hangups: core::array::from_fn(|_| Notify::new()),
         })
     }
 
@@ -279,6 +284,11 @@ impl ProtocolBridge {
         }
     }
 
+    /// Notified once the connection in `idx` is torn down.
+    pub fn hangup(&self, idx: usize) -> Option<Notify> {
+        self.hangups.get(idx).cloned()
+    }
+
     /// Async accept path: greet and record every pending connection as a
     /// `(client_idx, client_fd, client_gen)` triple in `out`, returning the
     /// count. Unlike [`accept_clients`] it drains the full backlog, being driven
@@ -295,6 +305,7 @@ impl ProtocolBridge {
                     self.next_gen = self.next_gen.wrapping_add(1);
                     if idx < MAX_CLIENTS {
                         self.client_gen[idx] = generation;
+                        self.hangups[idx] = Notify::new();
                     }
                     let fd = self.client_fd(idx).unwrap_or(-1);
                     out[n] = (idx, fd, generation);
@@ -1282,6 +1293,9 @@ impl ProtocolBridge {
             }
         }
         self.server.disconnect(client_idx);
+        if let Some(hangup) = self.hangups.get(client_idx) {
+            hangup.notify_one();
+        }
     }
 
     fn reap_disconnected_clients(&mut self) {

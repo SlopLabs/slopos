@@ -1379,10 +1379,21 @@ fn spawn_client_task(
     let owns = move |proto: &ProtocolBridge| {
         proto.client_fd(idx) == Some(fd) && proto.client_gen(idx) == Some(generation)
     };
+    let hangup = match wm.borrow().protocol {
+        Some(ref proto) if owns(proto) => proto.hangup(idx),
+        _ => None,
+    };
+    let Some(hangup) = hangup else {
+        return;
+    };
     slopfut::spawn(async move {
         let mut stream = slopfut::poll_add_multishot(fd, POLLIN);
         loop {
-            match stream.next().await {
+            let readiness = match slopfut::select2(stream.next(), hangup.notified()).await {
+                slopfut::Either2::A(readiness) => readiness,
+                slopfut::Either2::B(()) => break,
+            };
+            match readiness {
                 Some(_revents) => {
                     let still_connected = {
                         let mut w = wm.borrow_mut();
