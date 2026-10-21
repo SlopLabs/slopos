@@ -165,6 +165,9 @@ pub fn block_on<F: Future>(ring: Ring, fut: F) -> F::Output {
         }
         run_ready_tasks();
         if take_root_ready() {
+            if reactor::with_reactor(|r| r.in_flight()) > 0 {
+                reactor::with_reactor(|r| r.reap());
+            }
             poll_root = true;
             continue;
         }

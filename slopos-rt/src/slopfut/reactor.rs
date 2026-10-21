@@ -332,7 +332,18 @@ impl Reactor {
     /// least one completion lands, then drain every available CQE into its
     /// slot and wake the owning task.
     pub(super) fn park(&mut self) {
-        match self.ring.submit_and_wait(1) {
+        self.enter_and_drain(1);
+    }
+
+    /// Take the completions already there without blocking: the kernel posts
+    /// them only on an enter, so a task that yields pass after pass would
+    /// otherwise keep every task waiting on the ring from waking.
+    pub(super) fn reap(&mut self) {
+        self.enter_and_drain(0);
+    }
+
+    fn enter_and_drain(&mut self, min_complete: u32) {
+        match self.ring.submit_and_wait(min_complete) {
             Ok(_) => {}
             // EINTR leaves in-flight ops untouched: drain what is ready and let
             // block_on re-park.
