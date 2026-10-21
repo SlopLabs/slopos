@@ -2,6 +2,45 @@
 
 **No finding is open.**
 
+Swept 2026-10-21: software trees — the ownership map and the owners record,
+init's lay-out and migration of a root, `root_layout::share` at the add that
+makes a second person and its mark, the walk that makes `/usr/local` uid 0's
+and the links it keeps, `/run/slopos-local` and `priv`'s trust of
+`/usr/local/bin`, `org.slopos.software.install` and `tree-install`'s staged
+copy, the loader's `$HOME/.local/lib`, `~/.local/bin` on a person's `PATH`,
+the image builders' record reads and `check_fs_image.sh --map`. Six review
+passes; nothing reached the bar. They found, before it landed, that the
+mechanism read the tree by path as uid 0, so a link swapped in published a
+file only uid 0 could read; that the walk followed into what another uid
+held, chmodded from a mode read before the `chown` so a `chmod` between left
+a file anyone could write, kept a link whose end was uid 0's though a link of
+the first person's led there, and kept one to a directory others fill; that a
+tree's own links could name a person's file outside it; that the copy went to
+guessable names in `/var/tmp`; that uid 0 believed manifests the first person
+wrote; that a record or accounts init could not read laid the root out as one
+person's, and the image builder took an unreadable record for an absent one;
+that `priv` trusted `/usr/local/bin` while a descriptor the first person
+opened before the hand-over could still write there; that the add recorded
+the second person before the hand-over, which no boot then finished alone;
+and that guessing a hand-over begun from a uid-0 top would hand over a
+volume mounted there. Now the copy is made through descriptors from `/`,
+following no link, of what everyone may read, with every link relative and
+staying in the tree, in `/var/lib/slopos/tree-install`, which only uid 0
+enters; the walk changes each directory before listing it, reads each mode
+again once uid 0 holds the entry, and keeps a link only where every name it
+follows is in a directory only uid 0 may change and a directory it ends at
+is within `/usr/local`; uid 0 believes only its own manifests; what cannot be
+read grants nothing; `priv` trusts `/usr/local/bin` only on a boot that began
+with it the system's; and the add shares first, marking the hand-over begun
+until its record is written, and adds nobody when that fails. Left below the
+bar: until the next boot, what a second person runs from `/usr/local` a
+descriptor the first person opened there before the hand-over can still
+change, which the add tells the administrator to restart for; uid 0 running
+`tree-install` itself reads the tree by path, without the copy; a tree through
+privd counts twice against the mechanism's `DiskBlocks` ceiling, so it is at
+most half of it; and once homes are 0700 a person installs for everyone only
+from a tree everyone may reach.
+
 Swept 2026-10-21: sessions — init's session table, `/run/sessions`, its
 re-execution's second version and the `/run/init` commands a person and a
 desktop's compositor may send; the login screen as `greeter`,
