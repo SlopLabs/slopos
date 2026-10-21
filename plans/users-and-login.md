@@ -377,23 +377,39 @@ and, from `priv -s`, a uid-0 file in `/etc` edited while the raw disk, the
 base, `/etc/passwd` and a sealed file refuse and `bootctl base install` is
 still asked.
 
-### Phase 4: Sessions and login
+### Phase 4: Sessions and login — done
 
-- init's session table, tags, `/run/sessions`, `getlogin`; consent links per
-  session, a request from a session not in front refused at any level that
-  asks, and privd's "logged in" and "in front" read from the table;
-  automatic login; the greeter user, the `greeter` principal and
-  `org.slopos.login`; `SeatSwitch`; the clipboard by tag; locking; the
-  console login and its terminal agent; remoted under its person; per-person
-  quotas; the compositor's network switch, which retries, offered only to a
-  person `net.toggle` runs unasked for; a secure attention key that only the
-  compositor reads, since a maximised client can draw a likeness of the
-  dialog.
-- Graded by a second person logging in at the greeter, both desktops
-  switching with the seat and clipboard following the one in front, a request
-  from the session behind refused, a locked session refusing a wrong
-  password, a console login, one person's fork bomb leaving the other's
-  session running, and the one-person boot going straight to the desktop.
+init keeps a session table — each person's desktop, the login screen and a
+console login's shell, each under a login tag of its own from `SESSION_LOGINS`
+— written to `/run/sessions`, which slibc's `getlogin` reads, and sent whole
+to privd on a socket pair of its own. A desktop comes in front by
+`seat_switch` (`SeatSwitch`, init's alone; base interface 9 with `login_tag`),
+which hands the screen and the input sink over; one behind locks and draws
+nothing. privd holds a consent link per desktop, four, and asks a requester
+only at its own session: its desktop while in front and unlocked, or a console
+session's terminal for the person's own password (`Reply::Prompt`); anything
+else that asks is refused, and so is a question whose desktop leaves the
+screen. The record's automatic login starts the boot's desktop; without it,
+and whenever nothing is in front, the login screen does: the compositor run
+`--greeter` as the base's `greeter` user, listing the people and asking
+`org.slopos.login` (`allow greeter`), whose `/bin/session login` mechanism
+checks the password and asks init for the desktop, or for a shell on the
+terminal it hands over. `/bin/login` prompts on the console and relays it to a
+terminal of each login's own. A desktop locks from its system menu, when it
+goes behind, and at Ctrl+Alt+Delete, which only the compositor reads;
+`org.slopos.session.unlock` checks the person's password. The kernel keeps a
+clipboard per login tag and hands the console a key only while no compositor
+holds input; each person's processes share a quarter of the process and task
+tables, and a zombie of theirs holds one of those tasks until it is reaped.
+remoted runs as the person the record names (`users remote`), and the network
+switch shows only where `net.toggle` runs unasked. `sessions_test` grades the
+one-person boot, a second person logging in at the login screen, a clipboard
+per session, a request from the desktop behind refused, the keyboard following
+the desktop in front, a locked desktop refusing a wrong password and locking
+at Ctrl+Alt+Delete, a console login asked at its terminal, and one person's
+fork bomb beside another's running session; `privd_test`, `priv_test`,
+`supervision_test` and `extension_action_test` now ask from the desktop in
+front.
 
 ### Phase 5: Software trees
 
@@ -545,9 +561,9 @@ still asked.
   with echo off from before the first prompt to after the last, claiming it
   as its controlling terminal so an interrupt reaches it; the installer does
   too. The requester relays nothing it shows before its own terminal is raw.
-- **The first person stays an administrator until there is a login screen**,
-  since the desktop runs as them alone and the person at the screen must be
-  able to allow what the system does.
+- **The first person stays while the ownership map's trees are theirs**
+  (Phase 5), and may be demoted like anyone once another administrator is,
+  since the login screen lets each person in as themselves.
 - **A volume holding a kept directory is not unmounted**, so the store cannot
   be taken from under a running root to make it look recordless.
 - **An action may run its mechanism as its requester, under a ceiling stated
@@ -604,6 +620,50 @@ still asked.
 - **What hands its mask on spawns, and passes signals on**: a signal another
   process sends, privd's relays among them, goes on to the program; one the
   terminal raised reached the program's group already.
+
+- **A session is a login tag init gives**, from a range of its own and never
+  twice in a boot, so what a session left behind is nobody's: its processes,
+  its clipboard, a kept answer. Every process of the session carries it and
+  only a `SetId` holder sets it, so init ends a session by its tag whatever uid
+  its processes run as.
+- **Only the session that asks is asked, while it can answer.** privd reads
+  the requester's session from init's table, never from the request: its own
+  desktop's dialog while that desktop is in front and unlocked, or, for a
+  console session, its terminal for its own person's password whatever the
+  level, since a click cannot be told from a script there. An administrator's
+  password is typed only into a dialog.
+- **A desktop behind is locked.** Going behind locks it, so switching to the
+  login screen never leaves an unlocked desktop a click away, and coming back
+  takes the person's password unless they just gave it at the login screen.
+- **Only a compositor says it locked**: init takes `locked` and `unlocked`
+  from the session's leader alone, beside the person's own connections and
+  until it has heard, `unlocked` only while that desktop is in front, and a
+  restart anything else of the person asks for brings the desktop back
+  locked, so nothing else of the person's can unlock their screen.
+- **The login screen is a compositor**, so what holds for the dialog — the
+  seat, keys no client sees — holds for the password typed at login; it runs
+  as `greeter`, uid 50, serves no clients, and `greeter alone` lets it power
+  off only while nobody is logged in.
+- **Ctrl+Alt+Delete is the secure attention key**, read by the compositor
+  alone and never delivered to a client: on a desktop it locks, so the screen
+  asking for a password after it is the compositor's.
+- **The console logs in through a terminal of each login's own**, which
+  `/bin/login` relays to, since the kernel hangs a console up for good once
+  one session's leader on it exits; the shell is the session's leader.
+- **A key reaches the console only while nothing holds the input sink**, so
+  nothing typed into a desktop is there for a reader of the console.
+- **Each person's processes share a quarter of the process and task
+  tables**, under a quota account of their own, every fork and thread
+  counted as a spawn is, and a zombie of theirs holds
+  one of those tasks until it is reaped rather than counting against its
+  parent's budget, so one person's fork bomb, or what they leave unreaped,
+  leaves another's session running. Memory stays the machine's, under one
+  commit ceiling, since a share of it would starve a person's build.
+- **A privd of an older base asks nobody**: the descriptor it reads its one
+  link from is left empty, since the screen behind any link may be anyone's,
+  and the links and the table's pair follow it. It lives only until init
+  re-executes into the older base, which runs without consent until the next
+  boot.
 
 ## Constraints
 
