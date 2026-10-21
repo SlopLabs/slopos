@@ -33,7 +33,7 @@ use self::session::{Sessions, Then, Want};
 use crate::apps::privd::{LINKS_FD, SESSIONS_FD};
 use crate::base_watch::BaseWatch;
 use crate::init_control::{self, At, Command, SOCKET};
-use crate::root_layout::LOCAL;
+use crate::root_layout::{LOCAL, Owners};
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, core as sys_core, fs, net, tty};
 
@@ -191,7 +191,7 @@ fn boot() -> ! {
     collect_crash_records();
     let root = std::path::Path::new("/");
     let holder = crate::root_layout::lay_out(root).owner(LOCAL);
-    if holder == (0, 0)
+    if Owners::read(root).is_some_and(|recorded| !recorded.holds(LOCAL))
         && let Err(e) = crate::root_layout::settle()
     {
         eprintln!("init: {LOCAL}: {e}");

@@ -315,14 +315,27 @@ fn change(request: Request) -> Result<String, String> {
         && accounts.people().len() > 1
         && Owners::read(top).is_some_and(|owners| owners.holds(LOCAL));
     let recorded = match shares {
-        true => root_layout::share(top).map(|()| {
-            said.push_str(&format!(
-                "; {LOCAL} is the system's now, installed into through privd, trusted by priv from the next boot, and {SESSION_HOME} closed to others"
-            ))
-        }),
-        false => Ok(()),
-    }
-    .and_then(|()| store.record(&accounts));
+        true => root_layout::share(top)
+            .map_err(|why| match root_layout::taken(top) {
+                true => {
+                    format!("{why}; nobody was added, and the next boot finishes the hand-over")
+                }
+                false => format!("{why}; nobody was added"),
+            })
+            .and_then(|()| {
+                store.record(&accounts).map_err(|why| {
+                    format!("{why}; nobody was added, though {LOCAL} is the system's now")
+                })
+            })
+            .map(|()| {
+                said.push_str(&format!(
+                    "; {LOCAL} is the system's now, installed into through privd, and \
+                     {SESSION_HOME} closed to others; restart before they log in, so \
+                     nothing opened in {LOCAL} before is open still"
+                ))
+            }),
+        false => store.record(&accounts),
+    };
     if let Err(why) = recorded {
         if let Home::Made(home) = home {
             let _ = std::fs::remove_dir(home);

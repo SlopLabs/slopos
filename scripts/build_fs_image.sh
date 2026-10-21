@@ -154,6 +154,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/root_layout.sh
 . "$SCRIPT_DIR/lib/root_layout.sh"
 FS_TREE=(python3 "$SCRIPT_DIR/fs_tree.py")
+HOME_MODE=0755
 # What the host keeps about an image, where its guest cannot write: the
 # manifests of the trees it installed, and what its last seal attested.
 HOST_STATE="${IMAGE_PATH}.host"
@@ -543,9 +544,8 @@ make_dir() {
 # map's mode, and on a new image the root directory too. A preserved root's
 # existing ones are init's to bring to the map, once.
 lay_out_root() {
-    local spec path owner home=0755
-    root_layout_holds /usr/local || home=0700
-    for spec in "${ROOT_LAYOUT[@]}" "${PERSON_TREES[0]}:-:-:$home"; do
+    local spec path owner
+    for spec in "${ROOT_LAYOUT[@]}" "${PERSON_TREES[0]}:-:-:$HOME_MODE"; do
         path="${spec%%:*}"
         if [ "$path" = / ]; then
             [ "$FRESH" = 1 ] || continue
@@ -571,7 +571,10 @@ read_owners() {
     local record status=0
     record="$("${FS_TREE[@]}" read "$IMAGE_PATH" "$OWNERS_RECORD")" || status=$?
     case "$status" in
-    0) root_layout_read_record <<<"$record" ;;
+    0)
+        root_layout_read_record <<<"$record"
+        root_layout_holds /usr/local || HOME_MODE=0700
+        ;;
     4)
         if "${FS_TREE[@]}" exists "$IMAGE_PATH" "$ACCOUNTS_STORE"; then
             HELD_TREES=("${PERSON_TREES[0]}" "${PERSON_TREES[1]}")

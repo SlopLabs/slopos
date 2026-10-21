@@ -543,9 +543,9 @@ fn install_for_everyone(name: &str, tree: &Path) -> (Option<i32>, String) {
             asking::tab_and_enter();
             return run.end();
         }
-        let (code, said) = run.end();
+        let (_, said) = run.end();
         if !said.contains("nothing can ask them") || Instant::now() >= deadline {
-            return (code, format!("the first person was not asked: {said}"));
+            return (None, format!("the first person was not asked: {said}"));
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -684,11 +684,14 @@ fn priv_runs_what_the_system_installed() -> bool {
             .stdin(Stdio::null())
             .output()
     };
+    let was = root_layout::settled();
     let _ = fs::remove_file(root_layout::SETTLED);
     let unsettled = run();
     let settled = root_layout::settle();
     let ran = run();
-    let _ = fs::remove_file(root_layout::SETTLED);
+    if !was {
+        let _ = fs::remove_file(root_layout::SETTLED);
+    }
     match (unsettled, settled, ran) {
         (Ok(early), Ok(()), Ok(out))
             if !early.status.success() && out.status.success() && out.stdout == b"everyone\n" =>

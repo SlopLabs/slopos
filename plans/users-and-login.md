@@ -423,7 +423,8 @@ person shares the root (`root_layout::share`) before recording them: the
 first person's home closed to others and `/usr/local` uid 0's, whole and
 writable by uid 0 alone, links kept only where every hop is uid 0's and a
 directory they end at is within it, and the record last; init finishes one
-cut short, and `priv` trusts `/usr/local/bin` from the next boot. From then on `tree-install` asks privd's
+cut short — one person or two — and `priv` trusts `/usr/local/bin` from the
+next boot. From then on `tree-install` asks privd's
 `org.slopos.software.install` (`allow admin confirm`, `allow paired`), which
 runs it as uid 0 holding nothing at `/usr/local` alone, from a copy of what
 everyone may read whose links stay in the tree (`tree::stage`), and
@@ -440,8 +441,9 @@ library from `/usr/local/lib` but not finding the first's own, a tree holding
 what not everyone may read refused and one whose link leads out of it, and
 `priv` finding `/usr/local/bin`; `dl_test` the loader's order, and `dac_test`
 the record's migration, the hand-over on a crafted root — a link through a
-person's link and one to a directory outside among it — one a boot finishes,
-and a recordless root of two people laid out shared; `apps_test` holds `priv`
+person's link and one to a directory outside among it — one a boot finishes
+of two people and of one, and a recordless root of two people laid out
+shared; `apps_test` holds `priv`
 to refusing `/usr/local/bin` until the boot is settled. `check_fs_image.sh --map` holds the tests image after the suite to
 a `/usr/local` that is the system's to its last entry, and the one-person
 roots `test-persist` and `test-toolchain` boot to the map as before.
@@ -749,10 +751,12 @@ roots `test-persist` and `test-toolchain` boot to the map as before.
   close it, and a reboot ends every such descriptor. Copying every file anew
   would cost a toolchain's size at the add, so what must not run their code
   waits for the reboot instead: `priv` trusts `/usr/local/bin` only on a boot
-  init began with `/usr/local` the system's (`/run/slopos-local`). The add
-  shares the root before it records the second person and adds nobody when
-  that fails, so no second person runs from a `/usr/local` the first one
-  still holds.
+  init began with `/usr/local` the system's (`/run/slopos-local`), and the
+  add tells the administrator to restart before the new person logs in. The
+  add shares the root before it records the second person and adds nobody
+  when that fails, so no second person is recorded beside a `/usr/local` the
+  first one still owns; a record naming `/usr/local` whose top uid 0 holds is
+  a hand-over begun, which init finishes at the next boot.
 - **What cannot read a record grants nothing.** An image builder that cannot
   read a preserved root's record installs as uid 0's, init on a root whose
   record or accounts it cannot read gives the first person nothing and moves

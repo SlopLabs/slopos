@@ -190,8 +190,9 @@ fn people(root: &Path) -> Option<usize> {
 
 /// Make each directory of the map the root at `root` lacks, hand the first
 /// person their trees once per root, and `/usr/local` to the system once a
-/// second person has an account. What the root's record says now; a record
-/// or accounts that cannot be read grant nothing, and change nothing.
+/// second person has an account or uid 0 holds its top, which a hand-over
+/// cut short leaves. What the root's record says now; a record or accounts
+/// that cannot be read grant nothing, and change nothing.
 pub fn lay_out(root: &Path) -> Owners {
     let record = under(root, OWNERS_RECORD);
     let (owners, recorded) = match recorded(root) {
@@ -236,7 +237,7 @@ pub fn lay_out(root: &Path) -> Owners {
         }
         Some(_) => {}
     }
-    if !owners.holds(LOCAL) || people(root).is_none_or(|n| n < 2) {
+    if !owners.holds(LOCAL) || !taken(root) && people(root).is_none_or(|n| n < 2) {
         return owners;
     }
     match share(root) {
@@ -370,6 +371,12 @@ pub fn share(root: &Path) -> Result<(), String> {
         .without(LOCAL)
         .write(root)
         .map_err(|e| format!("{}: {e}", under(root, OWNERS_RECORD).display()))
+}
+
+/// Whether uid 0 holds the top of `/usr/local` on the root at `root`, as a
+/// hand-over leaves it from its first step on.
+pub fn taken(root: &Path) -> bool {
+    fs::symlink_metadata(under(root, LOCAL)).is_ok_and(|meta| meta.is_dir() && meta.uid() == 0)
 }
 
 /// The first person's home closed to everyone else, as every later

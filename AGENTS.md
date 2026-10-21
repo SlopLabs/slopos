@@ -1943,12 +1943,15 @@ and each mode read again once uid 0 holds the entry; a file with another name
 that another uid holds loses only its name there, and a link goes unless
 every name it leads through, link by link, is in a directory only uid 0 may
 change and it ends at what only uid 0 may change, a directory only within
-`/usr/local`; last the record without `/usr/local`. Init finishes a hand-over
-cut short at the next boot, and none is undone. Owners change in place, so a
-descriptor the first person opened there for writing before writes until it
-closes; init notes at a boot that began with `/usr/local` the system's
-(`root_layout::settled`, `/run/slopos-local`) that none can be open, and
-`priv` trusts `/usr/local/bin` only then. A manifest the first person wrote stays theirs, and uid 0 installs
+`/usr/local`; last the record without `/usr/local`. Init finishes at the next
+boot a hand-over cut short — a record naming `/usr/local` whose top uid 0
+holds, or a root of two people whose record still names it — and none is
+undone. Owners change in place, so a descriptor the first person opened there
+for writing before writes until it closes; init notes at a boot whose record
+it read without `/usr/local` (`root_layout::settled`, `/run/slopos-local`)
+that none can be open, `priv` trusts `/usr/local/bin` only then, and the add
+says to restart before the new person logs in, since what they run from
+`/usr/local` such a descriptor could still change. A manifest the first person wrote stays theirs, and uid 0 installs
 over it without believing it. From then on a session installs there through
 privd's `org.slopos.software.install` (`allow admin confirm`, `allow
 paired`, one at a time), which runs `/bin/tree-install` as uid 0 holding
@@ -1966,8 +1969,8 @@ one the host installs is. A person's own software lives in `~/.local`: `tree-ins
 their home keeps the manifest in `~/.local/share/slopos/trees`, `~/.local/bin`
 is on their `PATH`, which the desktop's terminal and dock hand what they start
 with the rest of the session's environment, the dock reads `~/.local/share`,
-and the loader searches `$HOME/.local/lib`. From the boot after the
-hand-over, `priv` finds commands in `/usr/local/bin` too. `apps_test --trees` grades it,
+and the loader searches `$HOME/.local/lib`. On a boot that began with
+`/usr/local` the system's, `priv` finds commands in `/usr/local/bin` too. `apps_test --trees` grades it,
 and `dl_test` the loader's search.
 
 **The machine knows its people.** The accounts record

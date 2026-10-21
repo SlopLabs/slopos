@@ -731,6 +731,27 @@ fn a_hand_over_cut_short_is_finished_at_boot() -> bool {
     }
 }
 
+/// A hand-over cut short before the add recorded anyone leaves a root of one
+/// person whose `/usr/local` top uid 0 already holds; a boot finishes it.
+fn a_hand_over_begun_alone_is_finished_at_boot() -> bool {
+    if !stage_shared_root()
+        || std::os::unix::fs::lchown(old_root("usr/local"), Some(0), Some(0)).is_err()
+    {
+        say("could not stage a root whose hand-over began");
+        return false;
+    }
+    root_layout::lay_out(Path::new(OLD_ROOT));
+    let record = fs::read_to_string(old_root("var/lib/slopos/owners")).unwrap_or_default();
+    let local = owner_in_old_root("usr/local/bin/tool");
+    let _ = fs::remove_dir_all(OLD_ROOT);
+    record == "1000:1000 /home/user\n1000:1000 /src\n" && local == Some((0, 0)) || {
+        say(&format!(
+            "after a boot: the record {record:?}, a file of it {local:?}"
+        ));
+        false
+    }
+}
+
 /// A root without a record whose accounts name two people is laid out with
 /// `/usr/local` the system's and the first person's home closed, as a
 /// hand-over leaves it.
@@ -886,6 +907,10 @@ fn main() {
         (
             "a_hand_over_cut_short_is_finished_at_boot",
             a_hand_over_cut_short_is_finished_at_boot,
+        ),
+        (
+            "a_hand_over_begun_alone_is_finished_at_boot",
+            a_hand_over_begun_alone_is_finished_at_boot,
         ),
         (
             "a_recordless_root_of_two_is_shared",
