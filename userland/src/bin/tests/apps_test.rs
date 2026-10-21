@@ -520,26 +520,34 @@ fn the_first_person_installs_for_everyone_through_privd() -> bool {
 }
 
 /// `tree-install` of `tree` as `name` at `/usr/local`, asked by the first
-/// person and allowed by their click: its status and what it said.
+/// person and allowed by their click, asked again while their desktop cannot
+/// yet show the question: its status and what it said.
 fn install_for_everyone(name: &str, tree: &Path) -> (Option<i32>, String) {
     let Some(desktop) = sessions::front_desktop() else {
         return (None, "no desktop came in front to ask".into());
     };
     let tree = tree.to_string_lossy();
-    let Some(mut run) = Run::start(
-        "/bin/tree-install",
-        SESSION_UID,
-        Some(desktop),
-        &session_env(SESSION_HOME),
-        &[name, &tree, LOCAL],
-    ) else {
-        return (None, "tree-install did not start".into());
-    };
-    if !run.says(ASKING, asking::DEADLINE) {
-        return (None, "the first person was not asked".into());
+    let deadline = Instant::now() + asking::DEADLINE;
+    loop {
+        let Some(mut run) = Run::start(
+            "/bin/tree-install",
+            SESSION_UID,
+            Some(desktop),
+            &session_env(SESSION_HOME),
+            &[name, &tree, LOCAL],
+        ) else {
+            return (None, "tree-install did not start".into());
+        };
+        if run.says(ASKING, asking::DEADLINE) {
+            asking::tab_and_enter();
+            return run.end();
+        }
+        let (code, said) = run.end();
+        if !said.contains("nothing can ask them") || Instant::now() >= deadline {
+            return (code, format!("the first person was not asked: {said}"));
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
-    asking::tab_and_enter();
-    run.end()
 }
 
 /// What not everyone may read goes into `/usr/local` for nobody, whatever
@@ -689,7 +697,9 @@ fn the_trees_and_the_second_person_go() -> bool {
     ];
     let mut kept: Vec<String> = everyone
         .iter()
-        .filter(|path| fs::remove_file(path).is_err())
+        .filter(|path| {
+            fs::remove_file(path).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
+        })
         .cloned()
         .collect();
     let _ = fs::remove_dir(format!("{LOCAL}/lib"));
