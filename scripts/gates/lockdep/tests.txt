@@ -476,9 +476,24 @@ require-phase post-userland-tests
 #               560 and 573, above both bands, which are widened below; the
 #               kernel phase held its bands (edges 213, 211 and 208, chains
 #               473, 472 and 468).
+#   2026-10-22  kernel 269 -> 270, userland 284 -> 285: `CLIPBOARD`
+#               (drivers/src/input_event.rs), the lock over the clipboards the
+#               sessions work keeps one per session. Nothing acquired it in
+#               either phase until that commit's
+#               `test_each_session_keeps_its_own_clipboard`, a kernel test, so
+#               it registers in the kernel phase and both phases carry it; the
+#               2026-10-21 entry missed it because its baseline already held
+#               the sessions work. Captures with KVM of the last tree CI
+#               passed (90345675) and of 849bc24f count 262/278 and 264/280,
+#               and their class lists differ by `CLIPBOARD` and
+#               `VFS_REMOVAL_ENDED` alone, both new in the kernel phase; boot
+#               counts 99 on both. CI counts 270/285 on 849bc24f, the recorded
+#               268/283 plus those two. Every banded pool stayed inside its
+#               band (kernel edges 204 and 200, chains 455 and 453; userland
+#               edges 266 and 272, chains 540 and 548).
 boot	classes	105
-post-kernel-tests	classes	269
-post-userland-tests	classes	284
+post-kernel-tests	classes	270
+post-userland-tests	classes	285
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
