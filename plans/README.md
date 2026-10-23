@@ -17,8 +17,6 @@ editing.
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
 | `installer-gui.md` | A graphical installer on the live medium: an engine that emits events, a typed protocol between an unprivileged window and the engine privd runs, a linear wizard with before/after partition bars and a guarded review, and a root size choice |
-| `system-extensions.md` | System software outside the base: sealed, optionally signed extension images beside the base, attested by the kernel as base files are, declaring services, privd actions, commands and users that the owner grants once — by consent or by trusting a signing key with a capability ceiling — then updated and rolled back live without a question |
-| `users-and-login.md` | More than one person: a sealed user database with an `admin` group and Argon2id passwords, privd principals `user`, `admin` and `greeter` with confirm, password and alone levels, a login screen, console login and switching between sessions with the seat and clipboard following the one in front, `priv <command>` in the `run0` model running as the person with a capability ceiling, `/usr/local` system-wide from the second person on and `~/.local` per person — with a one-person install unchanged |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive the
@@ -105,6 +103,27 @@ re-executes itself; and the install medium opens a rescue shell that repairs an
 installed disk. Read `AGENTS.md` rather than a document: its paragraphs on the
 base, init, privd and the medium state the invariants, and `just test-install`,
 `just test-installer` and `just test-remote` grade them.
+
+System extensions have **landed and their plan is retired**. System software
+outside the base ships as a sealed ext4 image followed by a verity tree, which
+the kernel serves read-only at `/opt/<name>` and attests as it does base files;
+the owner grants each one's services, privd actions, commands and users once,
+by consent or by trusting a signing key under a capability ceiling, and
+`extctl` updates and rolls it back live. Read `AGENTS.md` rather than a
+document: its paragraphs on extensions state the invariants, and
+`extension-core`, `fs/src/extension/` and `userland/src/apps/init/extensions.rs`
+hold the code.
+
+Users and login have **landed and their plan is retired**: a sealed user
+database with an `admin` group and Argon2id passwords, privd's `user`, `admin`
+and `greeter` principals with confirm, password and alone levels, a login
+screen and console login, sessions that switch with the seat and the
+clipboard following the one in front, `priv` in the `run0` model, and
+`/usr/local` shared from the second person on with `~/.local` per person, a
+one-person install unchanged. Read `AGENTS.md` rather than a document: its
+paragraphs on the machine's people, sessions, privd and `priv` state the
+invariants, and `accounts-core`, `userland/src/apps/init/session.rs` and
+`userland/src/apps/priv.rs` hold the code.
 
 ## When To Promote A Plan
 
