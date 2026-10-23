@@ -218,7 +218,7 @@ impl SysmonApp {
             let pct = self.cpu_usage_pct[i];
             let mhz = self.cpu_eff_mhz[i].map_or_else(|| "-".to_owned(), |mhz| mhz.to_string());
             children.push(Node::ProgressBar {
-                value: pct,
+                value: Some(pct),
                 label: format!(
                     "CPU{} {} {:>3}%  {} MHz",
                     self.percpu[i].cpu_id, self.cpu_type[i], pct, mhz
@@ -240,7 +240,7 @@ impl SysmonApp {
             ((used_bytes.saturating_mul(100) / total_bytes).min(100)) as u32
         };
         children.push(Node::ProgressBar {
-            value: mem_pct,
+            value: Some(mem_pct),
             label: format!(
                 "Used: {} / {} ({}%)",
                 format_bytes_mib(used_bytes),
@@ -492,7 +492,7 @@ impl SysmonApp {
             ((used_bytes.saturating_mul(100) / total_bytes).min(100)) as u32
         };
         children.push(Node::ProgressBar {
-            value: mem_pct,
+            value: Some(mem_pct),
             label: format!(
                 "{} / {} ({}%)",
                 format_bytes_mib(used_bytes),

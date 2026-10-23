@@ -8,12 +8,14 @@ use super::constraints::{
     TextAlignment,
 };
 use super::event::{Key, Modifiers};
+use super::sender::AppSender;
 use super::widgets::code_view::{CodeInput, CodeLine};
 use super::widgets::drag_handle::DragInput;
 use super::widgets::editor_tabs::{EditorTab, TabInput};
 use super::widgets::icon::IconKind;
 use super::widgets::line_edit::LineEditInput;
 use super::widgets::menu_bar::MenuBarInput;
+use super::widgets::slider::{SliderGrab, SliderInput};
 use super::widgets::tree_view::{TreeInput, TreeRow};
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -82,6 +84,29 @@ impl ImageData {
 }
 
 #[derive(Clone, Debug)]
+pub struct RadioOption {
+    pub label: String,
+    /// A second line under the label, as why the option is disabled.
+    pub detail: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SegmentFill {
+    Solid(Color32),
+    /// Diagonal stripes, as free space is drawn.
+    Hatched,
+}
+
+#[derive(Clone, Debug)]
+pub struct BarSegment {
+    pub label: String,
+    /// Its share of the bar, in any unit the bar's other segments share.
+    pub size: u64,
+    pub fill: SegmentFill,
+}
+
+#[derive(Clone, Debug)]
 pub struct TableColumn {
     pub label: String,
     pub width: TableColumnWidth,
@@ -117,6 +142,23 @@ pub enum Node<M> {
         on_toggle: Option<M>,
         enabled: bool,
     },
+    /// One option of several, chosen by a click, the arrows or Space.
+    RadioGroup {
+        options: Vec<RadioOption>,
+        selected: Option<usize>,
+        on_select: Option<fn(usize) -> M>,
+    },
+    /// A horizontal slider over `min + k * step` up to `max`, and `max`.
+    Slider {
+        value: u64,
+        min: u64,
+        max: u64,
+        step: u64,
+        enabled: bool,
+        /// While a drag is live, what its `Begin` carried, until its `End`.
+        grab: Option<SliderGrab>,
+        on_input: Option<fn(SliderInput) -> M>,
+    },
     /// Orientation follows the parent: horizontal in a VStack, vertical in an HStack.
     Divider,
     Image {
@@ -125,9 +167,17 @@ pub enum Node<M> {
         sampling: ImageSampling,
     },
     ProgressBar {
-        value: u32,
+        /// A percentage; `None` sweeps a block to and fro by the clock, which
+        /// the app animates by answering its tick with [`Action::Repaint`].
+        value: Option<u32>,
         label: String,
         color: Option<Color32>,
+    },
+    /// Segments of a whole in proportion, as a disk's partitions; a sliver of
+    /// one still shows.
+    PartitionBar {
+        segments: Vec<BarSegment>,
+        highlight: Option<usize>,
     },
     /// Label with explicit foreground color (bypasses the theme).
     StyledLabel {
@@ -142,7 +192,8 @@ pub enum Node<M> {
         show_scrollbar: ScrollbarVisibility,
         /// Initial scroll offset (preserved across rebuilds).
         scroll_y: i32,
-        /// Emitted with the new `offset_y` whenever it changes.
+        /// Emitted with the new `offset_y` whenever it changes, for the app to
+        /// give back as `scroll_y`; a rebuild in answer would end a thumb drag.
         on_scroll: Option<fn(i32) -> M>,
     },
     ListView {
@@ -315,6 +366,12 @@ pub trait App {
 
     fn update(&mut self, msg: Self::Message) -> Action;
 
+    /// Called once, before the first [`App::view`], with the handle a thread
+    /// sends this app messages through.
+    fn on_start(&mut self, _sender: AppSender<Self::Message>) -> Action {
+        Action::None
+    }
+
     /// Return `Some(ms)` to receive [`App::tick`] calls at that interval.
     fn tick_interval_ms(&self) -> Option<u64> {
         None
@@ -368,6 +425,9 @@ pub trait App {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Action {
     None,
+    /// Paint the tree again without rebuilding it, as a clock-driven widget
+    /// needs, keeping what the widgets hold between messages.
+    Repaint,
     Rebuild,
     Exit,
 }

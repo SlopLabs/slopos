@@ -30,7 +30,7 @@ pub mod window;
 
 pub use app::{ControlFlow, WindowedApp, run};
 pub use clipboard::Clipboard;
-pub use connection::{Protocol, ProtocolHandle, UiSender, connect};
+pub use connection::{Protocol, ProtocolHandle, UiMessage, UiQueue, UiSender, connect};
 pub use event::Event;
 pub use slopos_abi::handle::{
     DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,

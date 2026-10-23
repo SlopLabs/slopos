@@ -6,12 +6,13 @@ use slopos_windowing::Event;
 use slopos_windowing::connection;
 use slopos_windowing::{EVENT_BUF_LEN, Window};
 
-use super::event::{self, HitTestResult, MessageSink, WidgetEvent};
+use super::event::{self, HitTestResult, MessageSink, PointerButton, WidgetEvent};
 use super::focus::FocusManager;
 use super::input::translate_event;
 use super::node::{Action, App};
 use super::overlay::OverlayManager;
 use super::paint::PaintContext;
+use super::sender::AppSender;
 use super::style::StyleSheet;
 use super::traits::{FocusPolicy, Widget};
 use super::tree;
@@ -30,6 +31,12 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
     let mut focus = FocusManager::new();
     let mut overlays = OverlayManager::new();
 
+    let mut needs_rebuild = false;
+    let mut needs_repaint = true;
+    let mut gesture = Gesture::default();
+    let action = app.on_start(AppSender::new(handle.ui_sender()));
+    process_action(action, &mut needs_rebuild, &mut needs_repaint);
+
     let node = app.view();
     let mut root = tree::build_widget_tree(&node);
 
@@ -37,8 +44,6 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
     tree::layout_tree(root.as_mut(), window_size, &style);
     let _ = focus.rebuild_tab_chain(root.as_ref());
 
-    let mut needs_rebuild = false;
-    let mut needs_repaint = true;
     let mut proto_events: [ProtocolEvent; EVENT_BUF_LEN] =
         core::array::from_fn(|_| ProtocolEvent::FrameDone {
             surface: slopos_protocol::types::SurfaceId::NONE,
@@ -120,6 +125,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
             let (px, py) = win.pointer();
             let widget_event = fill_pointer_state(widget_event, px, py, modifiers);
 
+            gesture.note(&widget_event, slopos_windowing::get_time_ms());
             match &widget_event {
                 WidgetEvent::PointerDown { .. } => focus.note_pointer_input(),
                 WidgetEvent::KeyDown { .. } | WidgetEvent::TextInput { .. } => {
@@ -178,6 +184,13 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
             process_action(action, &mut needs_rebuild, &mut needs_repaint);
         }
 
+        for msg in handle.take_messages() {
+            if let Ok(msg) = msg.downcast::<A::Message>() {
+                let action = gesture.hold(app.update(*msg), slopos_windowing::get_time_ms());
+                process_action(action, &mut needs_rebuild, &mut needs_repaint);
+            }
+        }
+
         for (key, mods) in unhandled_keys {
             let action = app.on_key(key, mods);
             process_action(action, &mut needs_rebuild, &mut needs_repaint);
@@ -187,10 +200,11 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
             let now_ms = slopos_windowing::get_time_ms();
             if now_ms.wrapping_sub(last_tick_ms) >= interval {
                 last_tick_ms = now_ms;
-                let action = app.tick();
+                let action = gesture.hold(app.tick(), now_ms);
                 process_action(action, &mut needs_rebuild, &mut needs_repaint);
             }
         }
+        needs_rebuild |= gesture.released(slopos_windowing::get_time_ms());
 
         if needs_rebuild {
             let node = app.view();
@@ -257,13 +271,80 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
         } else {
             -1
         };
+        let timeout_ms = match gesture.wait_ms(slopos_windowing::get_time_ms()) {
+            Some(held) if timeout_ms < 0 => held as i64,
+            Some(held) => timeout_ms.min(held as i64),
+            None => timeout_ms,
+        };
         handle.wait_events(timeout_ms);
     }
 }
 
-fn process_action(action: Action, needs_rebuild: &mut bool, _needs_repaint: &mut bool) {
+/// The longest a press holds rebuilds back, since a release the compositor
+/// drops would otherwise hold them until the next click.
+const HOLD_MS: u64 = 3000;
+
+/// Holds back, while a pointer button is down, a rebuild that the gesture's
+/// own messages did not ask for: a press and the drag it starts live in the
+/// widgets they began on, which a thread's message or a tick would replace.
+#[derive(Default)]
+pub(crate) struct Gesture {
+    buttons: u8,
+    since_ms: u64,
+    waiting: bool,
+}
+
+impl Gesture {
+    pub(crate) fn note(&mut self, event: &WidgetEvent, now_ms: u64) {
+        let bit = |button: &PointerButton| match button {
+            PointerButton::Left => 1,
+            PointerButton::Right => 2,
+            PointerButton::Middle => 4,
+        };
+        match event {
+            WidgetEvent::PointerDown { button, .. } => {
+                if self.buttons == 0 {
+                    self.since_ms = now_ms;
+                }
+                self.buttons |= bit(button);
+            }
+            WidgetEvent::PointerUp { button, .. } => self.buttons &= !bit(button),
+            _ => {}
+        }
+    }
+
+    fn holding(&mut self, now_ms: u64) -> bool {
+        if now_ms.saturating_sub(self.since_ms) >= HOLD_MS {
+            self.buttons = 0;
+        }
+        self.buttons != 0
+    }
+
+    /// `action`, or nothing while a button is down and it would rebuild.
+    pub(crate) fn hold(&mut self, action: Action, now_ms: u64) -> Action {
+        if action == Action::Rebuild && self.holding(now_ms) {
+            self.waiting = true;
+            return Action::None;
+        }
+        action
+    }
+
+    /// Whether a held rebuild may run now.
+    pub(crate) fn released(&mut self, now_ms: u64) -> bool {
+        !self.holding(now_ms) && core::mem::take(&mut self.waiting)
+    }
+
+    /// How long until a held rebuild runs whether or not the button is up.
+    pub(crate) fn wait_ms(&self, now_ms: u64) -> Option<u64> {
+        self.waiting
+            .then(|| (self.since_ms + HOLD_MS).saturating_sub(now_ms))
+    }
+}
+
+fn process_action(action: Action, needs_rebuild: &mut bool, needs_repaint: &mut bool) {
     match action {
         Action::None => {}
+        Action::Repaint => *needs_repaint = true,
         Action::Rebuild => {
             *needs_rebuild = true;
         }

@@ -104,20 +104,19 @@ renamed, and the firmware entry comes last.
   (`userland/src/apps/init/`).
 - The dock pins five programs (`userland/src/apps/compositor/dock.rs:135-177`).
 
-**appkit is Elm-shaped and close to enough.**
+**appkit has what the window needs.**
 - An app implements `App { view, update, tick, on_key, on_close_request }`
-  and calls `run_app` (`appkit/src/node.rs:311-366`).
+  and calls `run_app` (`appkit/src/node.rs`). `on_start` hands it an
+  `AppSender`, through which a thread sends it messages that reach `update`.
 - It has these widgets: Label, Button (Primary, Secondary, Destructive),
-  Checkbox, LineEdit, ProgressBar, ListView, Table, ScrollView, TabBar, and a
-  Dialog whose actions take no focus until Tab or an arrow.
-- It lacks a radio group, a slider, a partition bar and indeterminate progress.
-  `Node::Canvas` is an empty label (`appkit/src/tree.rs:463-471`).
-- The loop waits only on the compositor, a wake pipe and a timer, so a pipe's
-  frames cannot reach `update` (`appkit/src/run.rs:250-300`).
-- ProgressBar's default fill is a load meter that turns yellow and red
-  (`progress_bar.rs:35-45`).
+  Checkbox, RadioGroup, Slider, LineEdit, ProgressBar (indeterminate without a
+  value), PartitionBar, ListView, Table, ScrollView, TabBar, and a Dialog
+  whose actions take no focus until Tab or an arrow. `widget_gallery` shows
+  them.
+- ProgressBar's default fill is a load meter that turns yellow and red; the
+  window names a colour.
 - The theme is dark only, the scale is 1, and a client cannot ask for
-  fullscreen (`slop-protocol/src/types.rs:118-262`).
+  fullscreen (`slop-protocol/src/types.rs`).
 
 ## What the prior art settles
 
@@ -131,6 +130,8 @@ renamed, and the firmware entry comes last.
 | Redox ([installer](https://gitlab.redox-os.org/redox-os/installer), [the book](https://doc.redox-os.org/book/installing.html)) | Its GUI shows "Installation progress is in terminal" because the library prints instead of emitting events. TUI and GUI copy the pipeline, and the copy ends a failed clone on the success page. The GUI runs the library in-process, the whole window elevated through `pkexec` or its sudo scheme. Its one size option is the image file's. It has no review page and no mounted-disk guard, and its CI never boots an installed image. | an engine that emits events and never prints; one pipeline; an unprivileged window beside a privileged engine; review page; the QEMU install tests kept |
 | Anaconda, curtin and Subiquity, Calamares ([anaconda util.py](https://github.com/rhinstaller/anaconda/blob/main/pyanaconda/core/util.py), [curtin install.py](https://github.com/canonical/curtin/blob/main/curtin/commands/install.py), [subiquity storage.py](https://github.com/canonical/subiquity/blob/main/subiquity/server/controllers/storage.py), [Calamares Runner.cpp](https://github.com/calamares/calamares/blob/calamares/src/libcalamares/utils/Runner.cpp)) | Each captures mkfs's output into its log. Anaconda and Subiquity copy their logs to the target only on success; curtin copies its log in a `finally`, so a failed install keeps it. None reads the disk again between confirmation and the first write, and Subiquity stops probing once storage is configured. Byte totals reach a UI only as message text (Anaconda's rsync percentage). | e2fsprogs's output as log lines, the log kept on the root after a failure too, the disk read again before the first write, and typed byte totals |
 | Subiquity and kickstart ([subiquity types/storage.py](https://github.com/canonical/subiquity/blob/main/subiquity/common/types/storage.py), [subiquity server.py](https://github.com/canonical/subiquity/blob/main/subiquity/server/server.py), [pykickstart `part`](https://pykickstart.readthedocs.io/en/latest/kickstart-docs.html)) | Subiquity's server answers each gap with its size range and a reason when too small, refuses a size outside it, and keeps serving after a failed install. Kickstart's `--size` with `--grow --maxsize` clamps between bounds. None of Subiquity, Anaconda, Calamares' KPMcore helper or Redox checks a version between the UI and its privileged backend; each ships both in one package. | each opened disk's choices with the reason they do not fit, the root size clamped, an engine that serves on after `Failed`, and a `Hello` naming the protocol, since a live base switch can put a newer engine under an older window |
+| WAI-ARIA, GTK4, Qt ([APG radio](https://www.w3.org/WAI/ARIA/apg/patterns/radio/), [APG slider](https://www.w3.org/WAI/ARIA/apg/patterns/slider/), [gtkscale.c](https://github.com/GNOME/gtk/blob/main/gtk/gtkscale.c), [gtkprogressbar.c](https://github.com/GNOME/gtk/blob/main/gtk/gtkprogressbar.c), [qabstractslider.cpp](https://github.com/qt/qtbase/blob/dev/src/widgets/widgets/qabstractslider.cpp), [qeventdispatcher_unix.cpp](https://github.com/qt/qtbase/blob/dev/src/corelib/kernel/qeventdispatcher_unix.cpp)) | A radio group is one tab stop whose selection follows the arrows; the APG wraps at the ends, GTK and Qt do not. A slider's arrows work on either axis, Home and End go to the ends, and a page is 10 steps in GTK and Qt, only "larger than a step" in the APG. GTK's pulse moves only while the app pulses, so a stuck worker shows a frozen bar. Qt's wake pipe is written only on a flag's 0→1 and drained before the queue is read. | APG's wrapping radio group; a page as a tenth of the range, since a byte slider's step is a MiB; the app's tick drives the indeterminate bar; the coalesced wake |
+| GParted, KDE Partition Manager, Calamares ([DrawingAreaVisualDisk.cc](https://github.com/GNOME/gparted/blob/master/src/DrawingAreaVisualDisk.cc), [partwidgetbase.cpp](https://lxr.kde.org/source/system/kpmcore/src/gui/partwidgetbase.cpp), [PartitionBarsView.cpp](https://github.com/calamares/calamares/blob/calamares/src/modules/partition/gui/PartitionBarsView.cpp)) | Every segment gets a pixel minimum (10 px, 30 px, 1%), the rest shared in proportion. GParted draws a label inside a segment only when it fits; Calamares and KPM put labels in a legend. | a floor and the rest in proportion, labels inside when they fit, the action list for the rest |
 | Asterinas ([distro README](https://github.com/asterinas/asterinas/blob/ec5bb9ed798851b4c1854e791341321902ac8bc9/book/src/distro/README.md)) | No installer UI: a NixOS ISO, a root shell and a script. Its CI does install end to end in QEMU. | nothing to borrow for the UI; confirms end-to-end install grading |
 
 ## Design
@@ -183,6 +184,9 @@ Phases 1 and 2 built them: `installer::engine`, `installer --serve` and
 ask for a bigger one. Its pages, answers, enablement and wording are
 `installer_core::wizard::Wizard`'s, which also says when to start the
 engine, restart or close; the app renders them and carries frames. The
+request to privd, which waits on the person's consent, and a reader of the
+engine's frames run on threads of their own and send what they get through
+the app's `AppSender`, so the window keeps drawing meanwhile. The
 window has a header with the step strip (*Disk · How · Review · Install*),
 the page, and a footer with Back and the page's primary button. Everything
 is reachable with Tab, Enter activates, and Escape is Back on every page but
@@ -256,26 +260,6 @@ The How page, erasing a 512 GiB disk:
                                                   [ Back ]  [ Review ]
 ```
 
-### appkit additions
-
-Each addition is general, tested in `appkit_test` like the existing widgets,
-and shown in `widget_gallery`:
-
-- **`RadioGroup`.** Arrows move the selection and Space picks. The group takes
-  one tab stop.
-- **`Slider`.** Horizontal, with minimum, maximum and step. Arrows,
-  PageUp/PageDown and Home/End work. The app pairs it with a `LineEdit` for
-  exact entry.
-- **`PartitionBar`.** Proportional segments with a label, a colour or a
-  free-space hatch, and a highlighted segment, painted through `PaintContext`.
-  It is a dedicated widget rather than a general canvas, because nothing else
-  needs one.
-- **Indeterminate progress.** ProgressBar with no value, animated on the
-  app's tick.
-- **Messages from a thread.** `run_app` gives the app a `Send` handle that
-  posts an app message and wakes the loop. `UiSender` already wakes the loop;
-  it gains the message. The UI's reader thread decodes frames and posts them.
-
 ### Where it starts
 
 - **Live boot.** On a live boot (`/media/install` is a basefs, `boot-core`'s
@@ -317,13 +301,20 @@ transitions. `installer --serve` drives the engine over it as privd's
 `installer_test` installs the reuse disk through privd and `--serve` as
 `root`, and the foreign disk with a root size the host holds it to.
 
-### Phase 3: appkit widgets
+### Phase 3: appkit widgets — done
 
-Build `RadioGroup`, `Slider`, `PartitionBar`, indeterminate progress, and
-message posting from a thread.
-
-Ends with: `appkit_test` cases for each widget's layout, focus and keys, and
-`widget_gallery` showing them.
+appkit gained `RadioGroup`, `Slider` over `u64` values with a `SliderInput`
+drag that holds the knob by its `SliderGrab`, `PartitionBar`, an
+indeterminate `ProgressBar` (`value: None`), `Action::Repaint`, focus that
+finds its control again in a chain of another length, scroll views whose
+content takes the pointer beside the bar, rebuilds held while a press is
+live, and `App::on_start`'s `AppSender`, over a windowing `UiQueue` that owns
+its self-pipe and carries typed messages beside the posted closures.
+`appkit_test` holds each widget's layout, focus and keys, the partition bar's
+widths, labels and paint, the sweep, focus across a reshaped chain, pointer
+input through a scroll view, the held rebuild and a thread's messages;
+`widget_gallery`'s *Choices* and *Progress* tabs show them, a job on a thread
+among them.
 
 ### Phase 4: The window
 
@@ -347,7 +338,8 @@ absent on `just boot`.
 
 - **Host:** `installer-core`'s and `boot-core`'s tests under `just
   test-host`.
-- **In the guest:** `installer_ui_test` and the new `appkit_test` cases.
+- **In the guest:** `installer_ui_test`, and `appkit_test`'s cases for the
+  widgets the window uses.
 - **End to end:** `just test-installer` keeps every lane it has: the blank
   disk typed into the CLI, the reuse disk through privd and the protocol.
 - **Not graded by machine:** the window's pixels. It is a program that has to
@@ -494,6 +486,56 @@ absent on `just boot`.
   `--keep-root` has it: a reinstall keeps SlopOS's root once it holds ext4,
   an install cut short after formatting it among them, which keeping
   finishes, and formats one that holds none.
+- **A slider's drag is the window's.** The tree is rebuilt between events,
+  so the app keeps the `SliderGrab` from `SliderInput::Begin` to `End`, as it
+  keeps a `DragInput`'s; the widget a press reached latches it too, since its
+  release can arrive before the rebuild. The grab is where on the knob the
+  press took it, so the knob never jumps its centre to the pointer, and a
+  click on the knob changes nothing, as GTK and Qt keep their offset. A
+  release ends a drag even on a slider disabled during it.
+- **A slider's values are `min + k·step` and `max`.** A drag snaps to the
+  nearest, an arrow goes to the next along, Home and End to the ends, and a
+  page is a tenth of the range: the root size is bytes with a MiB step, where
+  GTK's and Qt's 10 steps would page by 10 MiB.
+- **A radio group is one tab stop whose selection follows the arrows**,
+  skipping disabled options and wrapping at both ends as WAI-ARIA has it;
+  Space chooses the first enabled option while none is chosen. A disabled
+  option says why on its detail line.
+- **A partition bar gives every segment 8 px and the rest in proportion**,
+  so the ESP shows beside a 380 GiB partition; one of no size gets nothing.
+  A label is drawn whole where it fits and not at all elsewhere; the action
+  list carries every partition, and the colours are the window's.
+- **The indeterminate bar moves by the clock, painted on the app's tick.**
+  The tick answers `Action::Repaint`, which paints without rebuilding. The
+  toolkit runs no animation timer; a window that stops ticking shows a
+  frozen bar, as GTK's pulse does.
+- **Focus survives a rebuild that changes the tab chain's length.** A
+  proposal in flight disables Review, so every arrow on the tiles shortens
+  the chain; focus goes back to the stop of the same role and name, as many
+  such stops along, and only failing that to a stop of the same role at the
+  same position in a chain of the same length. A slider or a radio group has no name, so one added above
+  another would take its focus: the window adds a control below the one
+  whose answer brings it, as the region picker comes under the tiles.
+- **A scroll view hands its content the presses, moves and releases its
+  bars do not take**, so a checkbox or a slider works inside one; a vertical
+  one lays its content out beside its bar rather than under it.
+  `on_scroll` reports every vertical offset, however reached, for the app to
+  give back as `scroll_y`, and answers without a rebuild, which would end a
+  thumb drag.
+- **A rebuild waits for the pointer's release unless the gesture asked for
+  it.** A button fires on the release that follows its press, and a scroll
+  view's thumb drag lives in the widget it began on, so a thread's message
+  or a tick that rebuilt the tree under a press would lose the click or the
+  drag: while a button is down their rebuilds are held, and one runs at the
+  release. A rebuild the gesture's own messages ask for runs at once, so a
+  drag the app keeps, as a slider's or an editor's selection, stays live. A
+  press holds them three seconds at most, since the compositor can drop a
+  release and the Install page would freeze until the next click; a thumb
+  drag longer than that ends at the next rebuild, where its offset stays.
+- **A thread's messages are unbounded and a send never blocks**, so the UI
+  thread may send to itself; a producer that can outrun the window throttles
+  itself, as the engine's progress does. Wakes coalesce: the pipe is written
+  once per drain.
 
 ## Constraints
 

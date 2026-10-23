@@ -150,6 +150,13 @@ impl ScrollViewWidget {
         thumb.contains(px, py)
     }
 
+    fn scrolled(&mut self, sink: &mut MessageSink) {
+        self.place_child();
+        if let Some(cb) = &self.on_scroll {
+            sink.emit_raw(cb(self.offset_y));
+        }
+    }
+
     /// Every offset change routes through here, so rect and offset cannot
     /// disagree.
     fn place_child(&mut self) {
@@ -192,6 +199,21 @@ impl Widget for ScrollViewWidget {
         };
 
         self.content_size = measure_widget(self.child.as_mut(), child_constraints, ctx);
+        // Beside the vertical bar rather than under it, where a click reaches it.
+        let bar = match self.show_scrollbar {
+            ScrollbarVisibility::Always => true,
+            ScrollbarVisibility::WhenNeeded => self.content_size.height > constraints.max_height,
+            ScrollbarVisibility::Never => false,
+        };
+        if bar && self.direction == ScrollDirection::Vertical && constraints.is_width_bounded() {
+            let width = (constraints.max_width - ctx.style.scrollbar_width).max(0);
+            let beside = BoxConstraints {
+                min_width: child_constraints.min_width.min(width),
+                max_width: width,
+                ..child_constraints
+            };
+            self.content_size = measure_widget(self.child.as_mut(), beside, ctx);
+        }
 
         constraints.constrain(constraints.max_size())
     }
@@ -304,10 +326,7 @@ impl Widget for ScrollViewWidget {
                 }
 
                 if self.offset_x != old_x || self.offset_y != old_y {
-                    self.place_child();
-                    if let Some(cb) = &self.on_scroll {
-                        sink.emit_raw(cb(self.offset_y));
-                    }
+                    self.scrolled(sink);
                     EventResponse::Consumed
                 } else {
                     EventResponse::Ignored
@@ -315,17 +334,25 @@ impl Widget for ScrollViewWidget {
             }
 
             WidgetEvent::PointerDown { x, y, .. } => {
+                let sb_width = 8;
+                let thumb_min = 20;
                 if self.needs_vertical_scrollbar() {
-                    let sb_width = 8;
-                    let thumb_min = 20;
                     if self.point_in_v_thumb(*x, *y, sb_width, thumb_min) {
                         self.thumb_dragging = true;
                         self.drag_start_y = *y;
                         self.drag_start_offset = self.offset_y;
                         return EventResponse::CapturePointer;
                     }
+                    let (track, _) = self.vertical_scrollbar_rects(sb_width, thumb_min);
+                    if track.contains(*x, *y) {
+                        return EventResponse::Ignored;
+                    }
                 }
-                EventResponse::Ignored
+                let rect = self.layout_rect();
+                if self.needs_horizontal_scrollbar() && *y >= rect.y + rect.height - sb_width {
+                    return EventResponse::Ignored;
+                }
+                self.child.event(event, phase, sink)
             }
 
             WidgetEvent::PointerMove { x, y } => {
@@ -349,8 +376,11 @@ impl Widget for ScrollViewWidget {
                         let dy = *y - self.drag_start_y;
                         let new_offset = self.drag_start_offset
                             + ((dy as i64 * self.max_offset_y() as i64) / usable as i64) as i32;
+                        let old_y = self.offset_y;
                         self.offset_y = new_offset.clamp(0, self.max_offset_y());
-                        self.place_child();
+                        if self.offset_y != old_y {
+                            self.scrolled(sink);
+                        }
                     }
                     return EventResponse::Consumed;
                 }
@@ -360,7 +390,7 @@ impl Widget for ScrollViewWidget {
                     let thumb_min = 20;
                     self.thumb_hovered = self.point_in_v_thumb(*x, *y, sb_width, thumb_min);
                 }
-                EventResponse::Ignored
+                self.child.event(event, phase, sink)
             }
 
             WidgetEvent::PointerUp { .. } => {
@@ -368,7 +398,7 @@ impl Widget for ScrollViewWidget {
                     self.thumb_dragging = false;
                     return EventResponse::ReleasePointer;
                 }
-                EventResponse::Ignored
+                self.child.event(event, phase, sink)
             }
 
             WidgetEvent::KeyDown { key, .. } if self.focused => {
@@ -415,7 +445,7 @@ impl Widget for ScrollViewWidget {
                 }
 
                 if self.offset_x != old_x || self.offset_y != old_y {
-                    self.place_child();
+                    self.scrolled(sink);
                     EventResponse::Consumed
                 } else {
                     EventResponse::Ignored

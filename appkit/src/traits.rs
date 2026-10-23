@@ -188,6 +188,8 @@ pub enum Role {
     Button,
     TextField,
     Checkbox,
+    RadioGroup,
+    Slider,
     Label,
     List,
     ListItem,

@@ -78,6 +78,39 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                 *enabled,
             ))
         }
+        Node::RadioGroup {
+            options,
+            selected,
+            on_select,
+        } => {
+            let erased: Option<Box<dyn Fn(usize) -> Box<dyn Any>>> = on_select.map(|f| {
+                Box::new(move |i: usize| Box::new(f(i)) as Box<dyn Any>)
+                    as Box<dyn Fn(usize) -> Box<dyn Any>>
+            });
+            Box::new(widgets::radio_group::RadioGroupWidget::new(
+                options.clone(),
+                *selected,
+                erased,
+            ))
+        }
+        Node::Slider {
+            value,
+            min,
+            max,
+            step,
+            enabled,
+            grab,
+            on_input,
+        } => {
+            let erased: Option<Box<dyn Fn(widgets::slider::SliderInput) -> Box<dyn Any>>> =
+                on_input.map(|f| {
+                    Box::new(move |i: widgets::slider::SliderInput| Box::new(f(i)) as Box<dyn Any>)
+                        as Box<dyn Fn(widgets::slider::SliderInput) -> Box<dyn Any>>
+                });
+            Box::new(widgets::slider::SliderWidget::new(
+                *value, *min, *max, *step, *enabled, *grab, erased,
+            ))
+        }
         Node::Divider => Box::new(widgets::separator::SeparatorWidget::new()),
         Node::Image {
             image,
@@ -238,6 +271,13 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             *value,
             label.clone(),
             *color,
+        )),
+        Node::PartitionBar {
+            segments,
+            highlight,
+        } => Box::new(widgets::partition_bar::PartitionBarWidget::new(
+            segments.clone(),
+            *highlight,
         )),
         Node::StyledLabel {
             text,

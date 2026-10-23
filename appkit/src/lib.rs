@@ -36,6 +36,7 @@ pub mod node;
 pub mod overlay;
 pub mod paint;
 pub mod run;
+pub mod sender;
 pub mod style;
 pub mod tests;
 pub mod traits;
@@ -43,10 +44,11 @@ pub mod tree;
 pub mod widgets;
 
 pub use node::{
-    Action, App, ButtonStyle, ContextMenuAt, ImageData, MenuItem, MenuItemKind, Node,
-    SortIndicator, TableColumn, TableColumnWidth,
+    Action, App, BarSegment, ButtonStyle, ContextMenuAt, ImageData, MenuItem, MenuItemKind, Node,
+    RadioOption, SegmentFill, SortIndicator, TableColumn, TableColumnWidth,
 };
 pub use run::run_app;
+pub use sender::AppSender;
 pub use widgets::code_view::{
     CodeInput, CodeLine, StyledSpan, gutter_width, text_area_reserved, visible_line_count,
 };
@@ -55,6 +57,7 @@ pub use widgets::editor_tabs::{EditorTab, TabInput};
 pub use widgets::icon::IconKind;
 pub use widgets::line_edit::LineEditInput;
 pub use widgets::menu_bar::MenuBarInput;
+pub use widgets::slider::{SliderGrab, SliderInput};
 pub use widgets::tree_view::{TreeInput, TreeRow};
 
 pub use constraints::{
@@ -73,7 +76,7 @@ pub use style::StyleSheet;
 pub use traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId};
 
 pub use slopos_windowing::{ControlFlow, WindowedApp};
-pub use slopos_windowing::{ProtocolHandle, UiSender};
+pub use slopos_windowing::{ProtocolHandle, UiQueue, UiSender};
 
 pub use slopos_gfx::image::ImageSampling;
 pub use slopos_gfx::{RenderError, RenderSurface};

@@ -1,12 +1,14 @@
 //! Thread-safe protocol connection for compositor communication.
 //!
 //! The protocol client is confined to the UI thread via `Rc` (`!Send + !Sync`).
-//! Background threads that need to post work to the UI thread use [`UiSender`],
-//! which is `Send + Sync + Clone`.
+//! Background threads that need to post work or a message to the UI thread use
+//! [`UiSender`], which is `Send + Sync + Clone`.
 
 use core::cell::RefCell;
+use std::any::Any;
 use std::boxed::Box;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
@@ -27,9 +29,6 @@ pub struct Protocol {
     pending_destroys: RefCell<PendingDestroys>,
     ui_queue: Arc<UiQueue>,
     compositor_fd: i32,
-    wakeup_read_fd: i32,
-    /// Write end — closed on drop; `UiQueue` holds a non-owning copy.
-    wakeup_write_fd: i32,
     display_format: PixelFormat,
     display_width: u32,
     display_height: u32,
@@ -60,17 +59,11 @@ pub fn connect() -> Result<ProtocolHandle, ()> {
         let display_width = client.display_width();
         let display_height = client.display_height();
 
-        // Self-pipe: lets UiSender::post() wake a poll()-sleeping UI thread.
-        let (wakeup_read_fd, wakeup_write_fd) =
-            slopos_cabi::pipe2(slopos_abi::syscall::posix::O_NONBLOCK as i32).map_err(drop)?;
-
         return Ok(Rc::new(Protocol {
             client: RefCell::new(client),
             pending_destroys: RefCell::new(PendingDestroys::new()),
-            ui_queue: Arc::new(UiQueue::with_wakeup(wakeup_write_fd)),
+            ui_queue: UiQueue::new()?,
             compositor_fd,
-            wakeup_read_fd,
-            wakeup_write_fd,
             display_format,
             display_width,
             display_height,
@@ -97,12 +90,13 @@ impl Protocol {
         self.compositor_fd
     }
 
-    /// The read end of the self-pipe written by [`UiSender::post`].
+    /// The read end of the self-pipe a [`UiSender`] writes.
     ///
-    /// Exposed so an async consumer can await readiness on it directly.
+    /// Exposed so an async consumer can await readiness on it directly; it
+    /// drains it with [`Protocol::drain_wakeup`], or no send writes it again.
     #[inline]
     pub fn wakeup_read_fd(&self) -> i32 {
-        self.wakeup_read_fd
+        self.ui_queue.wakeup_fd()
     }
 
     /// Get exclusive access to the protocol client.
@@ -164,9 +158,7 @@ impl Protocol {
 
     /// Create a sender handle for posting work from background threads.
     pub fn ui_sender(&self) -> UiSender {
-        UiSender {
-            queue: Arc::clone(&self.ui_queue),
-        }
+        self.ui_queue.sender()
     }
 
     /// Execute all closures posted by background threads via [`UiSender`].
@@ -177,12 +169,18 @@ impl Protocol {
             Some(c) => c,
             None => return,
         };
-        self.ui_queue.drain(&mut client);
+        self.ui_queue.run_posted(&mut client);
+    }
+
+    /// The messages background threads sent through [`UiSender::send`], oldest
+    /// first.
+    pub fn take_messages(&self) -> Vec<UiMessage> {
+        self.ui_queue.take_messages()
     }
 
     /// Sleep until the compositor sends data or `timeout_ms` elapses.
     ///
-    /// Also woken by [`UiSender::post`] from a background thread.
+    /// Also woken by a [`UiSender`] from a background thread.
     ///
     /// * `timeout_ms > 0` — sleep up to that many milliseconds.
     /// * `timeout_ms == 0` — non-blocking check (returns immediately).
@@ -195,7 +193,7 @@ impl Protocol {
                 revents: 0,
             },
             UserPollFd {
-                fd: self.wakeup_read_fd,
+                fd: self.ui_queue.wakeup_fd(),
                 events: POLLIN,
                 revents: 0,
             },
@@ -209,15 +207,7 @@ impl Protocol {
 
     /// Drain the self-pipe so a pending wakeup doesn't fire again next iteration.
     pub fn drain_wakeup(&self) {
-        let mut drain = [0u8; 64];
-        while slopos_cabi::read(self.wakeup_read_fd, &mut drain).is_ok_and(|n| n > 0) {}
-    }
-}
-
-impl Drop for Protocol {
-    fn drop(&mut self) {
-        let _ = slopos_cabi::close(self.wakeup_read_fd);
-        let _ = slopos_cabi::close(self.wakeup_write_fd);
+        self.ui_queue.drain_wakeup();
     }
 }
 
@@ -253,34 +243,79 @@ impl PendingDestroys {
 
 type UiCallback = Box<dyn FnOnce(&mut Client) + Send>;
 
-/// Push from any thread; drain on the UI thread only.
-struct UiQueue {
-    pending: Mutex<Vec<UiCallback>>,
-    /// Write end of the wakeup pipe; -1 means no pipe.
-    wakeup_fd: i32,
+/// A message a background thread sent the UI thread, typed by whoever reads it.
+pub type UiMessage = Box<dyn Any + Send>;
+
+/// What background threads hand the UI thread, and the self-pipe that wakes it
+/// from `poll`.
+///
+/// Push from any thread; drain on the UI thread only. The queue owns both ends
+/// of the pipe, so a sender that outlives the connection writes to its own
+/// pipe rather than to whatever the descriptor's number names next.
+pub struct UiQueue {
+    posted: Mutex<Vec<UiCallback>>,
+    messages: Mutex<Vec<UiMessage>>,
+    /// Set from the first push after a drain until the next, so a burst
+    /// writes the pipe once.
+    woken: AtomicBool,
+    wakeup_read_fd: i32,
+    wakeup_write_fd: i32,
 }
 
 impl UiQueue {
-    fn with_wakeup(wakeup_fd: i32) -> Self {
-        Self {
-            pending: Mutex::new(Vec::new()),
-            wakeup_fd,
+    pub fn new() -> Result<Arc<UiQueue>, ()> {
+        let (wakeup_read_fd, wakeup_write_fd) =
+            slopos_cabi::pipe2(slopos_abi::syscall::posix::O_NONBLOCK as i32).map_err(drop)?;
+        Ok(Arc::new(UiQueue {
+            posted: Mutex::new(Vec::new()),
+            messages: Mutex::new(Vec::new()),
+            woken: AtomicBool::new(false),
+            wakeup_read_fd,
+            wakeup_write_fd,
+        }))
+    }
+
+    pub fn sender(self: &Arc<Self>) -> UiSender {
+        UiSender {
+            queue: Arc::clone(self),
         }
     }
 
-    fn push(&self, callback: UiCallback) {
-        if let Ok(mut q) = self.pending.lock() {
-            q.push(callback);
+    /// Readable while something was pushed since the last [`Self::drain_wakeup`].
+    pub fn wakeup_fd(&self) -> i32 {
+        self.wakeup_read_fd
+    }
+
+    /// Answers whether a push was waiting. Read the queues after it: a push
+    /// that lands while it drains writes nothing and is found there.
+    pub fn drain_wakeup(&self) -> bool {
+        let mut drain = [0u8; 64];
+        let mut woken = false;
+        while slopos_cabi::read(self.wakeup_read_fd, &mut drain).is_ok_and(|n| n > 0) {
+            woken = true;
         }
-        // EAGAIN (pipe full) is fine: a wakeup is already pending.
-        if self.wakeup_fd >= 0 {
-            let _ = slopos_cabi::write(self.wakeup_fd, &[1u8]);
+        self.woken.store(false, Ordering::SeqCst);
+        woken
+    }
+
+    pub fn take_messages(&self) -> Vec<UiMessage> {
+        self.messages
+            .lock()
+            .map(|mut q| core::mem::take(&mut *q))
+            .unwrap_or_default()
+    }
+
+    fn wake(&self) {
+        if !self.woken.swap(true, Ordering::SeqCst)
+            && slopos_cabi::write(self.wakeup_write_fd, &[1u8]).is_err()
+        {
+            self.woken.store(false, Ordering::SeqCst);
         }
     }
 
-    fn drain(&self, client: &mut Client) {
+    fn run_posted(&self, client: &mut Client) {
         let pending = {
-            let Ok(mut q) = self.pending.lock() else {
+            let Ok(mut q) = self.posted.lock() else {
                 return;
             };
             core::mem::take(&mut *q)
@@ -291,9 +326,17 @@ impl UiQueue {
     }
 }
 
-/// Handle for posting work to the UI thread from any thread.
+impl Drop for UiQueue {
+    fn drop(&mut self) {
+        let _ = slopos_cabi::close(self.wakeup_read_fd);
+        let _ = slopos_cabi::close(self.wakeup_write_fd);
+    }
+}
+
+/// Handle for posting work or a message to the UI thread from any thread.
 ///
-/// Posted closures run on the next [`Protocol::drain_ui_queue`].
+/// Posted closures run on the next [`Protocol::drain_ui_queue`]; messages wait
+/// for [`Protocol::take_messages`].
 pub struct UiSender {
     queue: Arc<UiQueue>,
 }
@@ -301,7 +344,19 @@ pub struct UiSender {
 impl UiSender {
     /// Post a closure to execute on the UI thread.
     pub fn post(&self, f: impl FnOnce(&mut Client) + Send + 'static) {
-        self.queue.push(Box::new(f));
+        if let Ok(mut q) = self.queue.posted.lock() {
+            q.push(Box::new(f));
+        }
+        self.queue.wake();
+    }
+
+    /// Queues `message` for [`Protocol::take_messages`] and wakes the UI
+    /// thread; appkit's loop takes them, [`crate::run`]'s never does.
+    pub fn send(&self, message: impl Any + Send) {
+        if let Ok(mut q) = self.queue.messages.lock() {
+            q.push(Box::new(message));
+        }
+        self.queue.wake();
     }
 }
 
