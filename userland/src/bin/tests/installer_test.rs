@@ -38,14 +38,15 @@ use slopos_userland as _;
 
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::fs::FileExt;
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use slopos_abi::fs::SESSION_UID;
 use slopos_abi::syscall::UserWinsize;
-use slopos_boot_core::gpt::Partition;
+use slopos_boot_core::gpt::{self, Entry, Header, Location, Partition, Piece};
 use slopos_boot_core::layout::{self, ESP_TYPE, ROOT_TYPE};
 use slopos_boot_core::{base, bli, device_path, load_option, variables};
 use slopos_slibc::test_harness::note;
@@ -96,8 +97,11 @@ const KEPT_MOUNT: &str = "/tmp/installer-test-root";
 const RESCUE_DEFAULT: &str = "slopos-b";
 /// The base a rescue rolls the installed disk back to.
 const RESCUE_TAG: &str = "installer-test-rescued";
-/// How long the rescue shell at a terminal may take to answer, under TCG.
+/// How long the rescue shell at a terminal, or the installer, may take to
+/// answer, under TCG.
 const TERMINAL_DEADLINE: Duration = Duration::from_secs(120);
+/// What the install keeps of itself on the root it made or refilled.
+const INSTALL_LOG: &str = "/var/log/installer.log";
 /// What the installed system boots with: this test again, and a slot that
 /// panics falls back.
 const INSTALLED_CMDLINE: &str = "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip panic=reboot watchdog.miss_threshold=300 tests.run=*ext2_aaa*,*installer*";
@@ -457,6 +461,122 @@ fn answer_on_stdin(args: &[String], typed: &str) -> std::io::Result<std::process
     child.wait()
 }
 
+/// Write `header` and `array` as both copies of `disk`'s table.
+fn write_table(disk: &str, header: Header, array: &[u8]) -> Result<(), String> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(disk)
+        .map_err(|e| format!("{disk}: {e}"))?;
+    let geometry = header.geometry();
+    for piece in header.write_order() {
+        let (bytes, lba) = match piece {
+            Piece::Array(copy) => (array.to_vec(), header.array_lba(copy)),
+            Piece::Header(copy) => {
+                let mut sector = vec![0u8; geometry.block() as usize];
+                header.encode(copy, &mut sector);
+                let lba = match copy {
+                    Location::Primary => gpt::PRIMARY_LBA,
+                    Location::Backup => geometry.backup_lba(),
+                };
+                (sector, lba)
+            }
+        };
+        file.write_all_at(&bytes, lba * geometry.block())
+            .and_then(|()| file.sync_data())
+            .map_err(|e| format!("{disk}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The installer reads the disk again once the person confirms, and writes
+/// nothing when it no longer proposes what they reviewed: here the other
+/// system's partition is renamed while the installer waits for the answer.
+fn refused_once_changed(disk: &str, args: &[String]) -> Result<(), String> {
+    const ASKED: &str = "Type yes to write the disk";
+    let table = table_of(disk).ok_or("the foreign disk has no table")?;
+    let mut entry = table
+        .partitions()
+        .find(|p| p.entry.type_guid != ESP_TYPE)
+        .ok_or("the foreign disk has no data partition")?
+        .entry;
+    entry.name = Entry::name_of("renamed under review");
+    let mut renamed = table.array.clone();
+    entry.encode(
+        table
+            .header
+            .slot_mut(&mut renamed, entry.number)
+            .ok_or("the data partition has no slot")?,
+    );
+    let mut installer = Command::new("/bin/installer")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("installer: {e}"))?;
+    let stdout = installer.stdout.take().ok_or("no stdout")?;
+    let _ = net::set_nonblocking(stdout.as_raw_fd());
+    let deadline = Instant::now() + TERMINAL_DEADLINE;
+    let mut shown = Vec::new();
+    let mut buf = [0u8; 512];
+    while !String::from_utf8_lossy(&shown).contains(ASKED) {
+        let shown_so_far = || String::from_utf8_lossy(&shown).into_owned();
+        match fs::read_slice(stdout.as_raw_fd(), &mut buf) {
+            Ok(n) if n > 0 => shown.extend_from_slice(&buf[..n]),
+            Ok(_) => {
+                drop(installer.stdin.take());
+                let said = installer
+                    .wait_with_output()
+                    .map(|out| String::from_utf8_lossy(&out.stderr).into_owned())
+                    .unwrap_or_default();
+                return Err(format!(
+                    "the installer ended without asking to write the disk: {}{said}",
+                    shown_so_far()
+                ));
+            }
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => {
+                drop(installer.stdin.take());
+                let _ = installer.kill();
+                return Err(format!(
+                    "the installer never asked to write the disk: {}",
+                    shown_so_far()
+                ));
+            }
+        }
+    }
+    let changed = write_table(disk, table.header.holding(&renamed), &renamed);
+    let mut stdin = installer.stdin.take().ok_or("no stdin")?;
+    // Unanswered, the installer reads the end of its input and writes nothing.
+    let answered = match &changed {
+        Ok(()) => stdin
+            .write_all(b"yes\n")
+            .map_err(|e| format!("answering the installer: {e}")),
+        Err(_) => Ok(()),
+    };
+    drop((stdin, stdout));
+    let out = installer
+        .wait_with_output()
+        .map_err(|e| format!("installer: {e}"));
+    let after = table_of(disk).map(|t| t.array);
+    let restored = write_table(disk, table.header, &table.array);
+    changed.and(answered).and(restored)?;
+    let out = out?;
+    let said = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() || !said.contains("changed since it was reviewed; nothing was written")
+    {
+        return Err(format!(
+            "the installer, confirmed over a changed disk, exited {:?}: {said}",
+            out.status
+        ));
+    }
+    if after != Some(renamed) {
+        return Err("the installer wrote to the disk it refused".to_owned());
+    }
+    println!("INSTALLER-REVIEWED-CHANGED {disk}: nothing written");
+    Ok(())
+}
+
 /// The payload the kernel mounted stays as it mounted it: nothing unmounts
 /// it, covers it or writes it.
 fn payload_held() -> Result<(), String> {
@@ -549,6 +669,11 @@ fn install() -> bool {
             args.extend(["--mode", "free", "--first"].map(str::to_owned));
             args.extend(["--person", "user", "--no-password"].map(str::to_owned));
             if !set_var(PERSON, b"user") {
+                return false;
+            }
+            let asked: Vec<String> = args.iter().filter(|arg| *arg != "--yes").cloned().collect();
+            if let Err(why) = refused_once_changed(&disk, &asked) {
+                note(&why);
                 return false;
             }
         }
@@ -672,6 +797,10 @@ fn reinstalled_boot(status: &str) -> bool {
         note(&format!("the kept root's people: {why}"));
         return false;
     }
+    if let Err(why) = target().and_then(|(disk, _, _)| install_log(&disk, true)) {
+        note(&why);
+        return false;
+    }
     let forgotten = format!("/var/lib/slopos/slots/{}", layout::SLOTS[1]);
     if std::path::Path::new(&forgotten).exists() {
         note(&format!(
@@ -681,6 +810,29 @@ fn reinstalled_boot(status: &str) -> bool {
     }
     println!("INSTALLER-KEPT {KEPT}");
     true
+}
+
+/// The root holds the log of the install that made it, or of the reinstall
+/// that kept it: its summary and every step before the check.
+fn install_log(disk: &str, kept: bool) -> Result<(), String> {
+    let log = std::fs::read_to_string(INSTALL_LOG).map_err(|e| format!("{INSTALL_LOG}: {e}"))?;
+    let wanted = [
+        format!("SlopOS will be installed on {disk}:"),
+        if kept {
+            "  people: the root's own".to_owned()
+        } else {
+            "its first administrator".to_owned()
+        },
+        "[7/9] making slot a the default".to_owned(),
+        "  LoaderEntryDefault is slopos-a".to_owned(),
+    ];
+    match wanted.iter().find(|line| !log.contains(line.as_str())) {
+        Some(missing) => Err(format!("{INSTALL_LOG} has no {missing:?}:\n{log}")),
+        None => {
+            println!("INSTALLER-LOG {INSTALL_LOG} of {disk}");
+            Ok(())
+        }
+    }
 }
 
 /// The root's first person is `name`, its first administrator, logged in by
@@ -755,6 +907,10 @@ fn first_boot(status: &str) -> bool {
             return false;
         }
     };
+    if let Err(why) = install_log(&disk, false) {
+        note(&why);
+        return false;
+    }
     let registered = BootDisk::find()
         .map_err(|e| format!("{e:?}"))
         .and_then(|boot_disk| firmware_entry(&boot_disk));

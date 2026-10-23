@@ -15,7 +15,8 @@ use slopos_abi::fs::{ROOT_LAYOUT, SESSION_GID, SESSION_UID};
 use slopos_boot_core::layout;
 use slopos_tree_core::{Kind, Manifest};
 
-use super::Medium;
+use super::engine::Events;
+use super::medium::Medium;
 use crate::root_layout::Owners;
 use crate::syscall::fs::{inode_flags, mount, set_inode_flags, sync, umount2};
 use crate::tree::{self, create_new, give, make_dir, write_durably};
@@ -29,7 +30,8 @@ pub const LOCAL: &str = "/usr/local";
 pub const SOURCE: &str = "/src";
 const CLONE_CONFIG: &str = "slopos/.git/config";
 const COPY_CHUNK: usize = 1 << 20;
-const PROGRESS_EVERY: u64 = 256 << 20;
+const LOG: &str = "/var/log/installer.log";
+const LOG_MODE: u32 = 0o644;
 
 /// The new root, mounted in a directory made under a name nobody could
 /// foresee, so no planted link redirects the mount, and that only uid 0 may
@@ -126,6 +128,19 @@ impl Mounted {
         Ok(())
     }
 
+    /// `text` as the root's install log, replacing any an earlier install
+    /// left.
+    pub fn keep_log(&self, text: &str) -> Result<(), String> {
+        let dir = LOG.rsplit_once('/').map_or("", |(dir, _)| dir);
+        if !self.walk_dirs(dir, false)? {
+            return Err(format!("the root has no {dir}"));
+        }
+        let path = self.path(LOG);
+        write_durably(&path, text.as_bytes())?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(LOG_MODE))
+            .map_err(|e| format!("{LOG}: {e}"))
+    }
+
     /// Write everything back and unmount, saying so if either fails.
     pub fn finish(self) -> Result<(), String> {
         let result = self.unmount();
@@ -216,22 +231,21 @@ pub fn forget_slots(root: &Mounted) -> Result<(), String> {
     Ok(())
 }
 
-struct Progress {
-    copied: u64,
-    reported: u64,
+/// A copy under way: the bytes on the root so far, of the total it moves.
+struct Copying<'a> {
+    done: u64,
+    total: u64,
+    events: &'a mut dyn Events,
 }
 
-impl Progress {
+impl Copying<'_> {
     fn add(&mut self, bytes: u64) {
-        self.copied += bytes;
-        if self.copied - self.reported >= PROGRESS_EVERY {
-            self.reported = self.copied;
-            println!("installer:   {} copied", super::disk::human(self.copied));
-        }
+        self.done += bytes;
+        self.events.progress(self.done, self.total);
     }
 }
 
-fn copy_file(from: &Path, to: &str, progress: &mut Progress) -> Result<(), String> {
+fn copy_file(from: &Path, to: &str, copying: &mut Copying<'_>) -> Result<(), String> {
     let mut source = File::open(from).map_err(|e| format!("{}: {e}", from.display()))?;
     let mut dest = create_new(to).map_err(|e| format!("{to}: {e}"))?;
     let mut chunk = vec![0u8; COPY_CHUNK];
@@ -244,7 +258,7 @@ fn copy_file(from: &Path, to: &str, progress: &mut Progress) -> Result<(), Strin
         }
         dest.write_all(&chunk[..n])
             .map_err(|e| format!("{to}: {e}"))?;
-        progress.add(n as u64);
+        copying.add(n as u64);
     }
     let mode = fs::metadata(from)
         .map_err(|e| format!("{}: {e}", from.display()))?
@@ -260,7 +274,7 @@ fn put(
     source: &Path,
     kind: Kind,
     path: &str,
-    progress: &mut Progress,
+    copying: &mut Copying<'_>,
 ) -> Result<(), String> {
     let dest = root.path(path);
     match kind {
@@ -273,7 +287,7 @@ fn put(
             fs::set_permissions(&dest, fs::Permissions::from_mode(mode & 0o7777))
                 .map_err(|e| format!("{dest}: {e}"))?;
         }
-        Kind::File => copy_file(source, &dest, progress)?,
+        Kind::File => copy_file(source, &dest, copying)?,
         Kind::Link => {
             let link = fs::read_link(source).map_err(|e| format!("{}: {e}", source.display()))?;
             symlink(link, &dest).map_err(|e| format!("{dest}: {e}"))?;
@@ -292,10 +306,18 @@ fn install_tree(
     source: &Path,
     new: &Manifest,
     (holder, keeper): ((u32, u32), (u32, u32)),
+    events: &mut dyn Events,
 ) -> Result<(), String> {
-    let mut progress = Progress {
-        copied: 0,
-        reported: 0,
+    let total = new
+        .items
+        .iter()
+        .filter(|item| item.kind == Kind::File)
+        .filter_map(|item| item.size)
+        .sum();
+    let mut copying = Copying {
+        done: 0,
+        total,
+        events: &mut *events,
     };
     let installed = tree::Install {
         root: &root.dir,
@@ -307,19 +329,47 @@ fn install_tree(
         keeper: Some(keeper),
         remedy: "move it aside, or format the root",
     }
-    .run(new, &mut |n| progress.add(n))?;
-    match installed {
-        Some(bytes) => println!(
-            "installer: installed {what} at {LOCAL} ({})",
+    .run(new, &mut |n| copying.add(n))?;
+    events.log(match installed {
+        Some(bytes) => format!(
+            "installed {what} at {LOCAL} ({})",
             super::disk::human(bytes)
         ),
-        None => println!("installer: {LOCAL} already holds this medium's {what}"),
-    }
+        None => format!("{LOCAL} already holds this medium's {what}"),
+    });
     Ok(())
 }
 
-fn copy_tree(root: &Mounted, medium: &Medium, dir: &str, to: &str) -> Result<u64, String> {
-    fn walk(root: &Mounted, from: &Path, to: &str, progress: &mut Progress) -> Result<(), String> {
+fn tree_bytes(dir: &Path) -> Result<u64, String> {
+    let mut bytes = 0;
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        bytes += if meta.is_dir() {
+            tree_bytes(&path)?
+        } else if meta.is_file() {
+            meta.len()
+        } else {
+            0
+        };
+    }
+    Ok(bytes)
+}
+
+fn copy_tree(
+    root: &Mounted,
+    medium: &Medium,
+    dir: &str,
+    to: &str,
+    events: &mut dyn Events,
+) -> Result<u64, String> {
+    fn walk(
+        root: &Mounted,
+        from: &Path,
+        to: &str,
+        copying: &mut Copying<'_>,
+    ) -> Result<(), String> {
         let mut names: Vec<_> = fs::read_dir(from)
             .map_err(|e| format!("{}: {e}", from.display()))?
             .filter_map(Result::ok)
@@ -338,34 +388,40 @@ fn copy_tree(root: &Mounted, medium: &Medium, dir: &str, to: &str) -> Result<u64
             } else {
                 Kind::File
             };
-            put(root, &source, kind, &dest, progress)?;
+            put(root, &source, kind, &dest, copying)?;
             if kind == Kind::Dir {
-                walk(root, &source, &dest, progress)?;
+                walk(root, &source, &dest, copying)?;
             }
         }
         Ok(())
     }
-    let mut progress = Progress {
-        copied: 0,
-        reported: 0,
-    };
     let from = medium.payload_path(dir);
-    put(root, &from, Kind::Dir, to, &mut progress)?;
-    walk(root, &from, to, &mut progress)?;
-    Ok(progress.copied)
+    let mut copying = Copying {
+        done: 0,
+        total: tree_bytes(&from)?,
+        events,
+    };
+    put(root, &from, Kind::Dir, to, &mut copying)?;
+    walk(root, &from, to, &mut copying)?;
+    Ok(copying.done)
 }
 
 /// Copy the medium's clone to the root, which has no `/src`, with its origin
 /// at `remote`, and rename it into place whole, so an interrupted install
 /// leaves no partial copy the next one would keep.
-fn seed(root: &Mounted, medium: &Medium, remote: Option<&str>) -> Result<u64, String> {
+fn seed(
+    root: &Mounted,
+    medium: &Medium,
+    remote: Option<&str>,
+    events: &mut dyn Events,
+) -> Result<u64, String> {
     let staging = format!("{SOURCE}.installing");
     match fs::remove_dir_all(root.path(&staging)) {
         Ok(()) => {}
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(format!("{staging}: {e}")),
     }
-    let bytes = copy_tree(root, medium, SOURCE, &staging)?;
+    let bytes = copy_tree(root, medium, SOURCE, &staging, events)?;
     if let Some(url) = remote {
         let path = root.path(&format!("{staging}/{CLONE_CONFIG}"));
         let config =
@@ -412,10 +468,11 @@ pub fn fill(
     medium: &Medium,
     remote: Option<&str>,
     owners: &Owners,
+    events: &mut dyn Events,
 ) -> Result<(), String> {
     let holder = owners.owner(LOCAL);
-    if !medium.payload_has(LOCAL) {
-        println!("installer: the medium carries no toolchain");
+    if !medium.toolchain {
+        events.log("the medium carries no toolchain".to_owned());
     } else {
         let recorded = slopos_tree_core::manifest_path(slopos_tree_core::TOOLCHAIN);
         let text = fs::read_to_string(medium.payload_path(&recorded))
@@ -430,6 +487,7 @@ pub fn fill(
             &source,
             &new,
             (holder, (0, 0)),
+            events,
         )?;
     }
     let apps = medium.path(layout::MEDIUM_APPS);
@@ -441,21 +499,22 @@ pub fn fill(
         &apps,
         &new,
         (holder, holder),
+        events,
     )?;
-    if !medium.payload_has(SOURCE) {
+    if !medium.source {
         return Ok(());
     }
     if fs::symlink_metadata(root.path(SOURCE)).is_ok() {
-        println!("installer: the root has a /src already; it stays as it is");
+        events.log("the root has a /src already; it stays as it is".to_owned());
         return Ok(());
     }
-    let bytes = seed(root, medium, remote)?;
-    println!(
-        "installer: seeded /src with the medium's clone ({})",
+    let bytes = seed(root, medium, remote, events)?;
+    events.log(format!(
+        "seeded /src with the medium's clone ({})",
         super::disk::human(bytes)
-    );
+    ));
     if let Some(url) = remote {
-        println!("installer: /src/slopos fetches from and pushes to {url}");
+        events.log(format!("/src/slopos fetches from and pushes to {url}"));
     }
     Ok(())
 }

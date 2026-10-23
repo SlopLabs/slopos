@@ -772,7 +772,8 @@ test-installer *DISKS:
         fi
         built="$payload"
         markers=("INSTALLER-INSTALLED" "ok 1 - installed_built_and_committed"
-            "installed the apps at /usr/local")
+            "installed the apps at /usr/local" "installer:   e2fsck: Pass 5: ")
+        [ "$kind" != foreign ] || markers+=("INSTALLER-REVIEWED-CHANGED")
         if [ "$kind" = optical ]; then
             medium="cdrom:{{iso_installer}}" built=0
             markers+=("INSTALL: no disk carries the medium's GPT disk GUID"
@@ -795,7 +796,8 @@ test-installer *DISKS:
             # The build's budget: under TCG the guest's build alone takes hours.
             budget=1800
             [ "$built" = 0 ] || budget=28800
-            markers=("INSTALLER-BOOTED slopos-a" "INSTALLER-STAGE 2: rebooting into slopos-b"
+            markers=("INSTALLER-BOOTED slopos-a" "INSTALLER-LOG /var/log/installer.log"
+                "INSTALLER-STAGE 2: rebooting into slopos-b"
                 "INSTALLER-COMMITTED slopos-b" "ok 1 - installed_built_and_committed")
             [ "$built" = 0 ] || markers+=("INSTALLER-BUILT guest-" "INSTALLER-RUNS " "INSTALLER-RUNS-BASE guest-")
             [ "$kind" != foreign ] || markers+=("INSTALLER-FOREIGN-KEPT")
@@ -814,14 +816,15 @@ test-installer *DISKS:
                 "INSTALLER-RESCUED /dev/" "INSTALLER-RESCUED at a terminal"
                 "removed /boot/a/base.img, a base the disk kept per slot"
                 "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed"
-                "installed the apps at /usr/local")
+                "installed the apps at /usr/local" "installer:   e2fsck: Pass 5: ")
             [ "$payload" = 0 ] ||
                 markers+=("/usr/local already holds this medium's toolchain" "the root has a /src already")
             boot_once "$logs-reinstall.log" "$install_budget" "stick:{{iso_installer}}" \
                 "${markers[@]}" || missing=1
             [ "$missing" = 1 ] ||
                 boot_once "$logs-reinstalled.log" "$install_budget" "" \
-                    "INSTALLER-KEPT" "ok 1 - installed_built_and_committed" || missing=1
+                    "INSTALLER-KEPT" "INSTALLER-LOG /var/log/installer.log" \
+                    "ok 1 - installed_built_and_committed" || missing=1
             check_disk "$disk" "$kind" || missing=1
         fi
         if [ "$missing" = 0 ]; then

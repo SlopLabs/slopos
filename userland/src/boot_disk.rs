@@ -129,6 +129,7 @@ pub fn open_fat(path: &str) -> Result<Volume<BlockFile>, String> {
 }
 
 /// A disk's GUID Partition Table, as one of its copies holds it.
+#[derive(Clone, PartialEq)]
 pub struct Table {
     pub header: Header,
     pub array: Vec<u8>,

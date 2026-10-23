@@ -36,24 +36,26 @@ plan uses:
 
 ## Where it stands
 
-**The CLI.**
-- `/bin/installer` is `userland/src/apps/installer/`: `mod.rs` (884 lines),
-  `disk.rs` (517), `root.rs` (461) and `boot.rs` (224). It shares
+**The installer.**
+- `/bin/installer` is `userland/src/apps/installer/`, an engine and a CLI
+  renderer over the disk, root and boot code. It shares
   `userland/src/boot_disk.rs` with `bootctl` and the tests. Only
-  `installer_main` and `Medium` are public (`mod.rs:18-20,51,878`).
-- The flow runs `Medium::find` (`mod.rs:94-149`), then `settle` (`mod.rs:471-617`),
-  which asks for:
-  - the disk;
-  - the mode: erase, free or reuse, forced to erase on a disk without a
-    readable GPT;
-  - the root partition;
-  - the free region;
-  - whether to keep the root;
-  - the `/src` remote;
-  - whether SlopOS goes first in `BootOrder`.
-- After `settle` it prints a summary and asks for a typed confirmation: the
-  disk's name to erase, `yes` otherwise (`mod.rs:688-758`).
-- `install` then runs nine steps (`mod.rs:791-869`):
+  `installer_main` is public.
+  - `engine.rs`: `System::probe` reads the medium and every whole disk,
+    `System::open` re-reads the chosen disk's table, `System::propose` lays
+    `Choices` out as a `Proposal` or answers an `Issue`, and `System::install`
+    runs the steps, reporting `Event`s, and answers a `Summary` or a
+    `Failure`.
+  - `cli.rs`: the questions, every one also a flag, the summary, the typed
+    confirmation (the disk's name to erase, `yes` otherwise), and the events
+    as `installer:` lines.
+  - `medium.rs`, `disk.rs`, `root.rs` and `boot.rs`: what the engine reads
+    and writes.
+- The CLI asks for the disk, then the mode (erase, free or reuse, forced to
+  erase on a disk without a readable GPT), the root partition, the free
+  region, whether to keep the root, the `/src` remote, whether SlopOS goes
+  first in `BootOrder` and the first person.
+- `install` runs nine steps:
   1. writing the partition table
   2. re-reading it
   3. formatting the new partitions
@@ -63,32 +65,27 @@ plan uses:
   7. making slot a the default
   8. checking the root
   9. registering the firmware entry
-- Every question has a flag (`mod.rs:204-262`).
+- Every type lives in the userland crate, which has no unit tests, and
+  nothing crosses a process boundary: nothing of the engine is host-tested
+  or machine-readable yet.
 
-**Planning is pure; the rest is not.**
-- `boot-core::install::{plan, regions, Plan, PlanError}` is `no_std` and
-  host-tested (`boot-core/src/install.rs:266-369`). The root always takes the
-  rest of the region (`install.rs:344-352`).
-- The app's `Settled` is private and its errors are `String`.
-- The questions are interleaved with I/O: disk reads, a `BLKRRPART`, ESP
-  probes, the EFI-variable reads for the Limine menu.
-- Progress is `println!("installer: [n/9] …")`. The toolchain and `/src`
-  copies print a line every 256 MiB with no total (`root.rs:28-29,225-238`).
-- `mke2fs` and `e2fsck` inherit stdio and are judged by exit code
-  (`disk.rs:470-517`).
-- Nothing is machine-readable.
+**Planning is pure.** `boot-core::install::{plan, regions, Plan, PlanError}`
+is `no_std` and host-tested (`boot-core/src/install.rs:266-369`). The root
+always takes the rest of the region (`install.rs:344-352`).
 
 **Failure is re-runnable, not rolled back.** An interrupted erase leaves a
-disk that only erase installs onto (`disk.rs:248-266`). A half-made ESP or
-boot partition is detected and reformatted (`disk.rs:375-403`). tree-core
+disk that only erase installs onto (`disk::write_table`). A half-made ESP or
+boot partition is detected and reformatted (`System::formats`). tree-core
 writes an `UNFINISHED` manifest before it copies, `/src` is staged and
 renamed, and the firmware entry comes last.
 
 **Tests.**
 - `installer_test` types the blank disk's answers into `/bin/shell -c
-  "installer …"`, and gives the foreign, reuse and reinstall disks flags
-  (`userland/src/bin/tests/installer_test.rs:223-385`).
-- `just test-installer` greps the installer's own lines.
+  "installer …"`, and gives the foreign, reuse and reinstall disks flags.
+  It holds every installed root to its `/var/log/installer.log`, and the
+  foreign disk's install, confirmed after its table was renamed, to writing
+  nothing.
+- `just test-installer` greps the installer's own lines, e2fsck's among them.
 - The host then holds every table, volume and foreign byte to what it must be.
 
 **The live desktop.**
@@ -121,6 +118,7 @@ renamed, and the firmware entry comes last.
 | elementary ([Drive Selection](https://github.com/elementary/installer/wiki/Drive-Selection), [Progress](https://github.com/elementary/installer/wiki/Progress)) | The boot drive and too-small drives are shown but disabled and sorted last; Calamares hides them silently and earns a "my disk isn't visible" FAQ. Progress has no back or forward. | unofferable disks shown disabled with their reason, no cancel after confirm |
 | Agama ([agama#1770](https://github.com/agama-project/agama/issues/1770), [HTTP API](https://github.com/agama-project/agama/blob/master/doc/http_api.md)) | Hub users lose their place. Every config change recomputes the proposal at once. | no hub; every choice re-proposes |
 | Redox ([installer](https://gitlab.redox-os.org/redox-os/installer), [the book](https://doc.redox-os.org/book/installing.html)) | Its GUI shows "Installation progress is in terminal" because the library prints instead of emitting events. TUI and GUI copy the pipeline, and the copy ends a failed clone on the success page. It has no review page and no mounted-disk guard, and its CI never boots an installed image. | an engine that emits events and never prints; one pipeline; review page; the QEMU install tests kept |
+| Anaconda, curtin and Subiquity, Calamares ([anaconda util.py](https://github.com/rhinstaller/anaconda/blob/main/pyanaconda/core/util.py), [curtin install.py](https://github.com/canonical/curtin/blob/main/curtin/commands/install.py), [subiquity storage.py](https://github.com/canonical/subiquity/blob/main/subiquity/server/controllers/storage.py), [Calamares Runner.cpp](https://github.com/calamares/calamares/blob/calamares/src/libcalamares/utils/Runner.cpp)) | Each captures mkfs's output into its log. Anaconda and Subiquity copy their logs to the target only on success; curtin copies its log in a `finally`, so a failed install keeps it. None reads the disk again between confirmation and the first write, and Subiquity stops probing once storage is configured. Byte totals reach a UI only as message text (Anaconda's rsync percentage). | e2fsprogs's output as log lines, the log kept on the root after a failure too, the disk read again before the first write, and typed byte totals |
 | Asterinas ([distro README](https://github.com/asterinas/asterinas/blob/ec5bb9ed798851b4c1854e791341321902ac8bc9/book/src/distro/README.md)) | No installer UI: a NixOS ISO, a root shell and a script. Its CI does install end to end in QEMU. | nothing to borrow for the UI; confirms end-to-end install grading |
 
 ## Design
@@ -162,37 +160,13 @@ flowchart LR
 
 ### The engine
 
-`userland/src/apps/installer/` splits into an engine and two renderers. The
-disk, root and boot code stays where it is.
+Phase 1 built it (see *Decided*). What the later phases add:
 
-- **`engine`.** It has three operations:
-  - `probe() -> System`: the medium and its payload, every whole disk with
-    its layout or why it is not offered, existing SlopOS roots, and the other
-    systems in `BootOrder`.
-  - `propose(&System, &Choices) -> Result<Proposal, Vec<Issue>>`: pure over
-    the probed state, through `boot-core::install::plan`.
-  - `install(&Choices, &Proposal, &mut dyn Events) -> Result<Summary, Failure>`:
-    it re-probes the chosen disk and re-plans first. A result that differs
-    from the reviewed proposal is `Failure` ("the disk changed since review")
-    with nothing written.
-
-  `Settled` becomes the engine's internal state. `String` errors become
-  `Issue` and `Failure { step, message }`, rendered to the CLI's present
-  wording.
-- **`cli`.** Today's questions, flags, summary and typed confirmation are a
-  renderer over `System`, `Proposal` and `Events`. It prints the lines
-  `just test-installer` greps, unchanged.
-- **`serve`.** `installer --serve` speaks the protocol on stdin and stdout. It
-  refuses to start unless `PRIV_ACTION` is `org.slopos.install`.
-- **Progress with totals.** Before copying, the engine sums `Item::size` over
-  the tree-core plan (`tree-core/src/lib.rs:65-67`) for the toolchain, and the
-  file sizes of the `/src` seed. Each copy then emits `Progress{done, total}`
-  as it goes.
-- **e2fsprogs output.** It is piped and forwarded as `Log` lines instead of
-  inheriting stdio. The children get `RawBlock` delegated.
-- **The log.** Every event is kept in memory and written to
-  `/var/log/installer.log` on the new root once that root is mounted, so a
-  failure after step 4 leaves its log behind.
+- **`serve`.** `installer --serve` speaks the protocol on stdin and stdout,
+  holding one `System` from `Probe` to `Install`. It refuses to start unless
+  `PRIV_ACTION` is `org.slopos.install`.
+- **`installer-core`.** The types both sides agree on move there; the engine
+  keeps the I/O.
 
 ### `installer-core`
 
@@ -201,10 +175,12 @@ A new crate, `no_std` with `alloc`, `forbid(unsafe_code)`, host-tested under
 
 - **`Choices`**:
   - the disk;
-  - the mode: `Erase`, `Free{region}`, `Reuse{root, keep}`;
+  - the mode: `Erase`, `Free{region}`, `Reuse{root, region, keep}`;
   - an optional root size;
   - the `/src` remote;
-  - whether SlopOS goes first in `BootOrder`.
+  - whether SlopOS goes first in `BootOrder`;
+  - the CLI's first person and kernel command line, which the window leaves
+    to the engine's defaults.
 - **`System`**: the medium (payload size, whether it carries `/src`) and its
   disks. Each disk has a node, capacity, block size, an offered-or-why, a
   layout of partitions and free runs with type names, and an existing SlopOS
@@ -218,10 +194,9 @@ A new crate, `no_std` with `alloc`, `forbid(unsafe_code)`, host-tested under
 
   It is built by a pure function from a `boot-core` plan and the table it was
   planned on.
-- **`Issue`**: `PlanError` and the medium's and disks' refusals, in the CLI's
-  wording.
-- **`Event`**: `Step{index, total, title}`, `Progress{done, total}`,
-  `Log{line}`, `Done{summary}`, `Failed{step, message}`.
+- **`Issue`** and **`Failure`**: the engine's.
+- **`Event`**: `Step{index, total, title}`, `Progress{done, total}` and
+  `Log{line}`.
 - **The protocol and its codec** (below).
 - **`Wizard`**: the page state machine. It decides which page is reachable,
   when the primary button is enabled, and what Back restores. A page is never
@@ -232,13 +207,16 @@ A new crate, `no_std` with `alloc`, `forbid(unsafe_code)`, host-tested under
 - **UI to engine:**
   - `Hello{version}`
   - `Probe`
+  - `Open{disk}`, which re-reads the disk's table and answers its `System`
+    again
   - `Propose{choices}`
   - `Install{choices, proposal_id}`
 - **Engine to UI:**
   - `Hello{version}`
   - `System`
-  - `Proposal` or `Issues`
-  - a stream of `Event`s, then `Done` or `Failed`
+  - `Proposal` or `Issue`
+  - a stream of `Event`s, then `Done{summary}` or `Failed{step, message}`,
+    the install's result
 - **Framing.** Frames are `remote-core`'s: a kind byte, a big-endian length,
   and a `Fields` payload (`remote-core/src/lib.rs:93-156`). The tree already
   has that framing and its mutation tests, and userland has no serde. The
@@ -304,8 +282,10 @@ on every page but Install.
    `org.slopos.power.reboot`; *Keep using the live system* closes.
 
    **Error.** The failed step, its message and the log. *Back to review*
-   offers the same choices again, which the re-runnable design makes safe, and
-   *Restart* is beside it.
+   opens the disk again, since a failed install may have changed it, and
+   proposes the same choices, which the re-runnable design makes safe; a
+   free-space install cut short after its table finds SlopOS there and offers
+   the reinstall instead. *Restart* is beside it.
 
 The How page, erasing a 512 GiB disk:
 
@@ -368,19 +348,19 @@ every base and, like the engine, refuses without a medium.
 Five phases. Each ends with something that runs, and each lands as commits of
 its own.
 
-### Phase 1: An engine that emits events
+### Phase 1: An engine that emits events — done
 
-Split `apps/installer` into `engine` and `cli`:
-- typed `Issue` and `Failure`;
-- `Event`s with copy totals;
-- piped e2fsprogs output;
-- the install log on the new root;
-- the re-probe and re-plan at install.
-
-The CLI renders exactly what it prints today.
-
-Ends with: `just test-installer` green on all its disks with the same markers,
-and an installed root holding `/var/log/installer.log`.
+`installer::engine` probes, proposes and installs and prints nothing;
+`installer::cli` asks and prints. Errors are a typed `Issue` or
+`Failure { step, message }`. An install reports `Step`, `Progress` (each
+copy's bytes against its total) and `Log` events, e2fsprogs's output among
+the log lines, and keeps them as `/var/log/installer.log` on the root. It
+reads the chosen disk again first and writes nothing when that no longer
+proposes what was reviewed. `just test-installer` grades the log on every
+installed root and the refusal on the foreign disk. The CLI asks and prints
+what it did before, but the root-fill notes are indented as step details,
+copy progress names its total, and a full or unusable ESP and an unreadable
+`BootOrder` are refused before the questions that follow the layout.
 
 ### Phase 2: `installer-core` and `--serve`
 
@@ -474,6 +454,46 @@ absent on `just boot`.
 - **No cancel after Install.** The window refuses to close while installing,
   and a UI that dies does not stop the engine.
 - **Graded by model, protocol and the existing QEMU installs.** No GUI harness.
+- **The engine's results, not its events, end an install.** `System::install`
+  returns `Result<Summary, Failure>`; `Event` is `Step`, `Progress` and `Log`
+  only. The protocol's `Done` and `Failed` frames carry that result.
+- **A proposal answers its first issue.** `propose` returns
+  `Result<Proposal, Issue>`: the planner stops at the first refusal, and the
+  checks after it need its plan. A page shows the one issue that blocks the
+  choice in front of it.
+- **Probing lists; opening reads.** `probe` reads the medium, what it
+  carries and its root minimum, the firmware's `BootOrder` options, and each
+  disk's table and contents, and draws the GUIDs a fresh table and the new
+  partitions get. `open` has the kernel read the chosen disk's table again,
+  which it refuses while anything on the disk is in use, then reads the disk
+  afresh with its partitions: each ESP's free space and removable-media path,
+  each boot partition's volume, each SlopOS root's ext4. Nothing else is
+  re-read or opened, since a re-read replaces a disk's partition nodes under
+  whoever has one open and a slow stick would hold up every install.
+- **Proposals are pure and repeatable.** `propose` reads nothing, so the same
+  choices on the same opened disk give the same `Proposal`.
+- **The re-check is equality.** `install` opens the chosen disk again and
+  proposes the same choices with the reviewed proposal's GUIDs; any
+  difference — the disk's table or contents, which an erase loses, among it —
+  refuses the install with nothing written. The firmware's entries and the
+  medium are not read again: the menu installed is the one reviewed.
+- **Log lines carry no prefix.** An engine detail is plain text; a line a
+  program printed is `<program>: <line>`. The CLI prints each under
+  `installer:   `. Progress is per copy — the toolchain, the apps, `/src` —
+  each from its first byte against its own total; a renderer throttles it.
+- **The install log** is the reviewed proposal, the systems the menu leaves
+  out among it, then one line per step and log event with the seconds since
+  the install began. It is written once the root is laid out, before the
+  copies; again after step 7, so the check covers it and the firmware entry
+  stays the last thing written; and after a failure between the two, with
+  the failure. Nothing writes the root once it has been checked. A log that
+  cannot be written fails no install; a root left mounted after it fails step
+  7, since the check needs it unmounted.
+- **The engine owns the defaults** a renderer may leave out: the `/src`
+  remote, the kernel command line and the first person (`user`, no
+  password). `Choices` carries the CLI's person and command line as options.
+- **`Issue` is worded as the CLI says it**, flags included; a renderer that
+  words it otherwise matches on the variant.
 
 ## Constraints
 

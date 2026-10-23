@@ -8,6 +8,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 
 use slopos_abi::caps::RAW_BLOCK;
+use slopos_abi::fs::O_RDONLY;
+use slopos_abi::syscall::O_CLOEXEC;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 
 use slopos_boot_core::gpt::{self, Geometry, Header, Location, Partition, Piece};
@@ -15,9 +17,10 @@ use slopos_boot_core::install::Region;
 use slopos_boot_core::layout::{self, BOOT_TYPE, CRASH_TYPE, ESP_TYPE, ROOT_TYPE};
 use slopos_boot_core::{Guid, install};
 
-use crate::boot_disk::{BlockFile, Table, geometry_of, partition_node, table_of, whole_disks};
+use super::engine::Events;
+use crate::boot_disk::{BlockFile, Table, geometry_of, partition_node, table_of};
 use crate::syscall::error::SyscallError;
-use crate::syscall::fs::reread_partitions;
+use crate::syscall::fs::{open_cstr, pipe2, read_slice, reread_partitions};
 use crate::syscall::process::{self, Endowment, WaitStatus};
 
 const MKE2FS: &str = "/sbin/mke2fs";
@@ -42,6 +45,7 @@ const FAT_LABEL_AT: usize = 71;
 const BLANK_PROBE_BYTES: usize = 1 << 20;
 
 /// What a disk holds.
+#[derive(Clone, PartialEq)]
 pub enum Contents {
     /// The GUID partition table [`Disk::table`] is.
     Gpt,
@@ -55,6 +59,7 @@ pub enum Contents {
     Data,
 }
 
+#[derive(Clone, PartialEq)]
 pub struct Disk {
     pub node: String,
     pub geometry: Geometry,
@@ -63,14 +68,7 @@ pub struct Disk {
 }
 
 impl Disk {
-    /// The whole disk `node`, which a partition's node is not.
     pub fn open(node: &str) -> Result<Disk, String> {
-        if !whole_disks()?.iter().any(|disk| disk == node) {
-            return Err(format!(
-                "{node} is not a disk; SlopOS installs onto a whole disk, one of {}",
-                whole_disks()?.join(", ")
-            ));
-        }
         let file = File::open(node).map_err(|e| format!("{node}: {e}"))?;
         let geometry = geometry_of(&file).ok_or_else(|| format!("{node}: not a disk"))?;
         let (table, contents) = match (table_of(node), unprotected_gpt(&file, geometry)) {
@@ -102,6 +100,11 @@ impl Disk {
             Contents::Ext4 => Some("an ext4 volume across the whole disk".to_owned()),
             Contents::Data => Some("data that starts no partition table".to_owned()),
         }
+    }
+
+    /// What the disk holds, in words: `nothing` when it is blank.
+    pub fn holding(&self) -> String {
+        self.holds().unwrap_or_else(|| "nothing".to_owned())
     }
 
     pub fn partitions(&self) -> Vec<Partition> {
@@ -294,8 +297,7 @@ pub fn write_table(disk: &Disk, header: &Header, array: &[u8], fresh: bool) -> R
 /// Have the kernel read the disk's table again, which it refuses while
 /// anything on the disk is mounted or claimed, as every write to the table
 /// would be.
-pub fn reread(disk: &Disk) -> Result<(), String> {
-    let node = &disk.node;
+pub fn reread(node: &str) -> Result<(), String> {
     let file = File::open(node).map_err(|e| format!("{node}: {e}"))?;
     reread_partitions(file.as_raw_fd()).map_err(|e| match e {
         SyscallError::EBUSY => {
@@ -469,15 +471,26 @@ fn contents_of(node: &str, file: &File, geometry: Geometry) -> Result<Contents, 
     Ok(Contents::Blank)
 }
 
+/// Hands `on_line` each line of `bytes`, keeping a line's start until its end
+/// arrives.
+fn split_lines(pending: &mut Vec<u8>, bytes: &[u8], on_line: &mut dyn FnMut(&[u8])) {
+    for &byte in bytes {
+        if byte == b'\n' {
+            on_line(pending);
+            pending.clear();
+        } else {
+            pending.push(byte);
+        }
+    }
+}
+
 /// Run `program` holding the raw-device right, which it needs to write a
 /// volume beneath every filesystem, and nothing of the installer's
-/// environment, which would reach it with that right.
-fn e2fsprogs(program: &str, args: &[&str]) -> Result<(), String> {
-    let what = format!(
-        "{} {}",
-        program.rsplit('/').next().unwrap_or(program),
-        args.join(" ")
-    );
+/// environment, which would reach it with that right. What it prints is
+/// logged line by line under its name; it reads nothing.
+fn e2fsprogs(program: &str, args: &[&str], events: &mut dyn Events) -> Result<(), String> {
+    let name = program.rsplit('/').next().unwrap_or(program);
+    let what = format!("{name} {}", args.join(" "));
     let argv: Vec<CString> = std::iter::once(program)
         .chain(args.iter().copied())
         .map(|arg| CString::new(arg).map_err(|_| format!("{what}: an argument holds NUL")))
@@ -492,10 +505,13 @@ fn e2fsprogs(program: &str, args: &[&str]) -> Result<(), String> {
     .collect();
     let argv_ptrs: Vec<*const u8> = argv.iter().map(|a| a.as_ptr().cast()).collect();
     let env_ptrs: Vec<*const u8> = env.iter().map(|v| v.as_ptr().cast()).collect();
+    let (output, said) = pipe2(O_CLOEXEC as u32).map_err(|e| format!("{what}: {e}"))?;
+    let null = open_cstr(c"/dev/null", O_RDONLY | O_CLOEXEC as u32)
+        .map_err(|e| format!("{what}: /dev/null: {e}"))?;
     let stdio = [
-        process::clone_fd(0, 0),
-        process::clone_fd(1, 1),
-        process::clone_fd(2, 2),
+        process::clone_fd(null.raw(), 0),
+        process::clone_fd(said.raw(), 1),
+        process::clone_fd(said.raw(), 2),
     ];
     let pid = process::spawn_endowed(
         program.as_bytes(),
@@ -511,8 +527,24 @@ fn e2fsprogs(program: &str, args: &[&str]) -> Result<(), String> {
             ..Endowment::NONE
         },
     );
+    drop((said, null));
     if pid <= 0 {
         return Err(format!("{what}: {}", SyscallError::from_errno(-pid)));
+    }
+    let mut log = |line: &[u8]| events.log(format!("{name}: {}", String::from_utf8_lossy(line)));
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match read_slice(output.raw(), &mut chunk) {
+            Ok(0) => break,
+            Ok(n) => split_lines(&mut pending, &chunk[..n], &mut log),
+            Err(SyscallError::EINTR) => {}
+            Err(_) => break,
+        }
+    }
+    drop(output);
+    if !pending.is_empty() {
+        log(&pending);
     }
     match process::waitpid(pid as u32).map(|(_, status)| process::wait_status(status)) {
         Some(WaitStatus::Exited(0)) => Ok(()),
@@ -522,7 +554,7 @@ fn e2fsprogs(program: &str, args: &[&str]) -> Result<(), String> {
 }
 
 /// Format `node` as a root in the profile every SlopOS volume has.
-pub fn mke2fs(node: &str) -> Result<(), String> {
+pub fn mke2fs(node: &str, events: &mut dyn Events) -> Result<(), String> {
     use slopos_ext4_core::profile;
     let inode_size = profile::inode_size().to_string();
     let block_size = profile::block_size().to_string();
@@ -548,10 +580,11 @@ pub fn mke2fs(node: &str) -> Result<(), String> {
             "lazy_itable_init=1",
             node,
         ],
+        events,
     )
 }
 
 /// `e2fsck -fn`: a full check that changes nothing.
-pub fn e2fsck(node: &str) -> Result<(), String> {
-    e2fsprogs(E2FSCK, &["-f", "-n", node])
+pub fn e2fsck(node: &str, events: &mut dyn Events) -> Result<(), String> {
+    e2fsprogs(E2FSCK, &["-f", "-n", node], events)
 }

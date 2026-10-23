@@ -7,9 +7,10 @@ use slopos_boot_core::limine::{self, Config, MenuEntry};
 use slopos_boot_core::{Guid, bli, layout};
 use slopos_fat_core::{Error as FatError, Volume};
 
-use super::Medium;
+use super::engine::Events;
+use super::medium::Medium;
 use crate::boot_disk::{
-    BlockFile, BootDisk, boot_order, listed_options, loader_var, open_fat, register_firmware_entry,
+    BlockFile, BootDisk, ListedOption, loader_var, open_fat, register_firmware_entry,
     set_loader_var,
 };
 
@@ -59,7 +60,7 @@ const SLOT_BASE: &str = "base.img";
 
 /// The medium's kernel into every slot, its base as both the current and the
 /// previous base, which every entry loads, and its notices beside them.
-pub fn write_boot(boot_node: &str, medium: &Medium) -> Result<(), String> {
+pub fn write_boot(boot_node: &str, medium: &Medium, events: &mut dyn Events) -> Result<(), String> {
     let kernel = medium.read(layout::MEDIUM_KERNEL)?;
     let base = medium.read(layout::MEDIUM_BASE)?;
     let mut volume = open_fat(boot_node)?;
@@ -68,10 +69,7 @@ pub fn write_boot(boot_node: &str, medium: &Medium) -> Result<(), String> {
     for path in [layout::BASE_CURRENT, layout::BASE_PREVIOUS] {
         write_verified(&mut volume, path, &base)?;
     }
-    println!(
-        "installer:   base: {} bytes, current and previous",
-        base.len()
-    );
+    events.log(format!("base: {} bytes, current and previous", base.len()));
     for slot in layout::SLOTS {
         let dir = format!("{}/{slot}", layout::SLOTS_DIR);
         make_dir(&mut volume, &dir)?;
@@ -80,7 +78,7 @@ pub fn write_boot(boot_node: &str, medium: &Medium) -> Result<(), String> {
             &format!("{dir}/{}", layout::KERNEL_FILE),
             &kernel,
         )?;
-        println!("installer:   slot {slot}: kernel {} bytes", kernel.len());
+        events.log(format!("slot {slot}: kernel {} bytes", kernel.len()));
     }
     if medium.has(layout::MEDIUM_NOTICE) {
         let notice = medium.read(layout::MEDIUM_NOTICE)?;
@@ -95,7 +93,7 @@ pub fn write_boot(boot_node: &str, medium: &Medium) -> Result<(), String> {
 
 /// The bases a boot partition kept per slot, which only the configuration
 /// written before this install loads.
-pub fn forget_slot_bases(boot_node: &str) -> Result<(), String> {
+pub fn forget_slot_bases(boot_node: &str, events: &mut dyn Events) -> Result<(), String> {
     let mut volume = open_fat(boot_node)?;
     let kept: Vec<String> = volume
         .list(layout::SLOTS_DIR)
@@ -106,7 +104,7 @@ pub fn forget_slot_bases(boot_node: &str) -> Result<(), String> {
         .collect();
     for path in kept {
         match volume.remove(&path) {
-            Ok(()) => println!("installer:   removed {path}, a base the disk kept per slot"),
+            Ok(()) => events.log(format!("removed {path}, a base the disk kept per slot")),
             Err(FatError::NotFound) => {}
             Err(e) => return Err(format!("{path}: {e:?}")),
         }
@@ -114,47 +112,49 @@ pub fn forget_slot_bases(boot_node: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Each other system the firmware's `BootOrder` lists that Limine can boot
-/// through `efi_boot_entry`, by the title it would match.
-fn other_systems(own_esp: Option<&Guid>) -> Result<Vec<String>, String> {
-    let order = boot_order()?;
-    let options = listed_options(&order)?;
+/// Each other system `options` lists that Limine can boot through
+/// `efi_boot_entry`, by the title it would match.
+fn other_systems(options: &[ListedOption], own_esp: Option<&Guid>) -> Vec<String> {
     let listed: Vec<_> = options.iter().map(|o| o.as_listed()).collect();
-    let mut titles = Vec::new();
-    for index in 0..listed.len() {
-        let mut buf = [0u8; TITLE_MAX];
-        if let Some(title) = limine::offered_title(&listed, index, own_esp, &mut buf) {
-            titles.push(title.to_owned());
-        }
-    }
-    Ok(titles)
+    (0..listed.len())
+        .filter_map(|index| {
+            let mut buf = [0u8; TITLE_MAX];
+            limine::offered_title(&listed, index, own_esp, &mut buf).map(str::to_owned)
+        })
+        .collect()
+}
+
+pub struct Menu {
+    pub conf: String,
+    /// The other systems left out, each colliding with an entry there.
+    pub left_out: Vec<String>,
 }
 
 /// The configuration the new disk boots from: both slots on `boot`, each
 /// with `root` as its root and `cmdline` after it, then every other system
-/// the firmware lists, but one an entry already in the menu collides with.
-pub fn limine_conf(
+/// `options` lists, but one an entry already in the menu collides with.
+pub fn menu(
     boot: Guid,
     root: Guid,
     cmdline: &str,
     own_esp: Option<&Guid>,
-) -> Result<String, String> {
-    let titles = other_systems(own_esp)?;
+    options: &[ListedOption],
+) -> Result<Menu, String> {
+    let titles = other_systems(options, own_esp);
     let mut entries: Vec<MenuEntry<'_>> = layout::SLOTS
         .iter()
         .map(|&slot| MenuEntry::Slot { slot, cmdline: "" })
         .collect();
+    let mut left_out = Vec::new();
     for title in &titles {
         let entry = MenuEntry::Firmware { title };
         if entries.iter().any(|e| limine::collide(e, &entry)) {
-            println!(
-                "installer:   leaving \"{title}\" out of the menu: an entry there collides with it"
-            );
-            continue;
+            left_out.push(title.clone());
+        } else {
+            entries.push(entry);
         }
-        entries.push(entry);
     }
-    let mut text = String::new();
+    let mut conf = String::new();
     Config {
         timeout: MENU_TIMEOUT_SECS,
         serial: false,
@@ -164,38 +164,65 @@ pub fn limine_conf(
         resolution: None,
         entries: &entries,
     }
-    .render(&mut text)
+    .render(&mut conf)
     .map_err(|e| format!("limine.conf does not render: {e:?}"))?;
-    Ok(text)
+    Ok(Menu { conf, left_out })
 }
 
-/// Whether the ESP is SlopOS's own, whose removable-media path an install
-/// writes: that path holds Limine, as `\EFI\SlopOS\` or the medium carries
-/// it, with a configuration that boots this disk's boot partition `boot`; or
-/// nothing at all on a volume carrying SlopOS's label, as an install cut short
-/// leaves it. Anything else there is another system's.
-pub fn esp_is_ours(esp_node: &str, boot: &Guid, medium: &Medium) -> Result<bool, String> {
-    let mut volume = open_fat(esp_node)?;
-    let fallback = fat_path(layout::FALLBACK_LOADER);
-    match volume.read_file(&fallback) {
-        Err(FatError::NotFound) => {
-            let dir = &fallback[..fallback.rfind('/').unwrap_or(0)];
-            let empty = match volume.list(dir) {
-                Ok(entries) => entries.iter().all(|e| e.name == "." || e.name == ".."),
-                Err(FatError::NotFound) => true,
-                Err(e) => return Err(format!("{dir}: {e:?}")),
-            };
-            Ok(empty && super::disk::fat_label_is(esp_node, layout::ESP_LABEL))
+/// What an ESP's removable-media path holds, which says whose the ESP is.
+pub enum Fallback {
+    /// No loader; whether nothing else is there either, on a volume carrying
+    /// SlopOS's label, as an install cut short leaves it.
+    Absent {
+        ours: bool,
+    },
+    Loader {
+        limine: bool,
+        conf: String,
+    },
+}
+
+impl Fallback {
+    /// Limine is `loader`, or what `\EFI\SlopOS\` holds.
+    pub fn read(
+        volume: &mut Volume<BlockFile>,
+        esp_node: &str,
+        loader: &[u8],
+    ) -> Result<Fallback, String> {
+        let fallback = fat_path(layout::FALLBACK_LOADER);
+        match volume.read_file(&fallback) {
+            Err(FatError::NotFound) => {
+                let dir = &fallback[..fallback.rfind('/').unwrap_or(0)];
+                let empty = match volume.list(dir) {
+                    Ok(entries) => entries.iter().all(|e| e.name == "." || e.name == ".."),
+                    Err(FatError::NotFound) => true,
+                    Err(e) => return Err(format!("{dir}: {e:?}")),
+                };
+                Ok(Fallback::Absent {
+                    ours: empty && super::disk::fat_label_is(esp_node, layout::ESP_LABEL),
+                })
+            }
+            Err(e) => Err(format!("{fallback}: {e:?}")),
+            Ok(found) => Ok(Fallback::Loader {
+                limine: found == loader
+                    || volume.read_file(&fat_path(layout::LOADER)).ok() == Some(found),
+                conf: String::from_utf8_lossy(
+                    &volume
+                        .read_file(&fat_path(layout::FALLBACK_CONFIG))
+                        .unwrap_or_default(),
+                )
+                .into_owned(),
+            }),
         }
-        Err(e) => Err(format!("{fallback}: {e:?}")),
-        Ok(loader) => {
-            let limine = loader == medium.read(layout::MEDIUM_LOADER)?
-                || volume.read_file(&fat_path(layout::LOADER)).ok() == Some(loader);
-            let conf = volume
-                .read_file(&fat_path(layout::FALLBACK_CONFIG))
-                .unwrap_or_default();
-            let boots_this_disk = String::from_utf8_lossy(&conf).contains(&format!("guid({boot})"));
-            Ok(limine && boots_this_disk)
+    }
+
+    /// Whether the ESP is SlopOS's own, whose removable-media path an install
+    /// writes: Limine there, booting the boot partition `boot`, or nothing on
+    /// a volume SlopOS labelled. Anything else is another system's.
+    pub fn ours(&self, boot: &Guid) -> bool {
+        match self {
+            Fallback::Absent { ours } => *ours,
+            Fallback::Loader { limine, conf } => *limine && conf.contains(&format!("guid({boot})")),
         }
     }
 }
