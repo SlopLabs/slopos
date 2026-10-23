@@ -6,15 +6,16 @@
 #     scripts/check_stack_sizes.sh --variant release-tests --emit-allowlist builddir/kernel-release-tests.elf
 #
 # The optimized tests kernel, which `just test-selfhost` boots so the machine
-# running the guest's build is not an unoptimized one. Its one large frame is a
-# test body whose locals the optimizer merged.
+# running the guest's build is not an unoptimized one. Its large frames are
+# test bodies whose locals the optimizer merged.
 #
 # No entry may exceed the 4096 B guard page.
 
-# Measured 2026-09-25: 13033 records, 1 frame over 2048 B.
-min-records 6516
+# Measured 2026-10-23: 16401 records, 2 frames over 2048 B.
+min-records 8200
 
 expect-test-registry many
 
 # <max-bytes> <TAB> <glob over the rustc-mangled symbol>
 3176	*slopos_core7syscall22tests_build_floor_proc44test_uname_reports_a_nul_terminated_identity*
+3320	*slopos_net5tests15tcp_reasm_tests40test_reasm_insert_order_commutative_fuzz*
