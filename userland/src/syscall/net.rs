@@ -397,6 +397,13 @@ pub fn set_nonblocking(fd: RawFd) -> SyscallResult<()> {
     Ok(())
 }
 
+pub fn set_blocking(fd: RawFd) -> SyscallResult<()> {
+    let current = Sys::fcntl(fd, F_GETFL as i32, 0).map_err(SyscallError::from)?;
+    let flags = (current as u64) & !O_NONBLOCK;
+    let _ = Sys::fcntl(fd, F_SETFL as i32, flags).map_err(SyscallError::from)?;
+    Ok(())
+}
+
 /// Send `data` with `fds` attached as one `SCM_RIGHTS` item; the bytes sent,
 /// which may be fewer than `data` holds.
 pub fn send_with_fds(fd: RawFd, data: &[u8], fds: &[RawFd]) -> SyscallResult<usize> {

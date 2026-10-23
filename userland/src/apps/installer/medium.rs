@@ -13,12 +13,6 @@ use slopos_boot_core::layout;
 use super::root;
 use crate::boot_disk::{disk_guid_of, medium_disk_guid, table_of, whole_disks};
 
-/// What a root holds without the payload: the system's own writes.
-const ROOT_MIN_BYTES: u64 = 1 << 30;
-/// The room a root keeps beside the payload for building the system, which a
-/// clean dev and tests build holds 3.8 GiB of.
-const ROOT_WORK_BYTES: u64 = 6 << 30;
-
 pub struct Medium {
     /// The GPT disk GUID its image was built with: the disk never offered.
     pub disk_guid: Guid,
@@ -30,8 +24,9 @@ pub struct Medium {
     /// The disk whose table names the medium's payload when the kernel did
     /// not mount it.
     pub unmounted_payload: Option<String>,
-    /// The root's least size: the payload and room to build beside it, or the
-    /// system's own needs without one.
+    /// The payload volume's size, when it carries a tree an install takes.
+    pub payload_bytes: Option<u64>,
+    /// The least root an install from it takes.
     pub root_min: u64,
 }
 
@@ -94,7 +89,8 @@ impl Medium {
             toolchain: false,
             source: false,
             unmounted_payload: None,
-            root_min: ROOT_MIN_BYTES,
+            payload_bytes: None,
+            root_min: slopos_installer_core::root_min(None),
         };
         for file in [
             layout::MEDIUM_KERNEL,
@@ -132,7 +128,8 @@ impl Medium {
                 std::ffi::CString::new(layout::PAYLOAD_DIR).map_err(|_| "a NUL in a path")?;
             let stats = crate::syscall::fs::statfs_path(path.as_ptr())
                 .map_err(|e| format!("{}: {e:?}", layout::PAYLOAD_DIR))?;
-            medium.root_min = stats.f_blocks * stats.f_bsize + ROOT_WORK_BYTES;
+            medium.payload_bytes = Some(stats.f_blocks * stats.f_bsize);
+            medium.root_min = slopos_installer_core::root_min(medium.payload_bytes);
         }
         Ok(medium)
     }

@@ -13,7 +13,8 @@
 //! asks, with every answer a flag as well as a question, so a check drives
 //! the program a person runs. Started without its capabilities, it is
 //! privd's `org.slopos.install`, and its questions are asked through the
-//! requester's terminal.
+//! requester's terminal. `--serve`, which privd runs for a window, drives
+//! the same engine with the protocol `slopos_installer_core` states.
 
 mod boot;
 mod cli;
@@ -21,12 +22,17 @@ mod disk;
 mod engine;
 mod medium;
 mod root;
+mod serve;
 
 use crate::syscall::core as sys_core;
 
 pub fn installer_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(message) = cli::run(&args) {
+    let ran = match args.as_slice() {
+        [serve] if serve == "--serve" => serve::run(),
+        _ => cli::run(&args),
+    };
+    if let Err(message) = ran {
         eprintln!("installer: {message}");
         sys_core::exit_with_code(1);
     }

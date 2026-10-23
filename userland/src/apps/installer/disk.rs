@@ -14,8 +14,9 @@ use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 
 use slopos_boot_core::gpt::{self, Geometry, Header, Location, Partition, Piece};
 use slopos_boot_core::install::Region;
-use slopos_boot_core::layout::{self, BOOT_TYPE, CRASH_TYPE, ESP_TYPE, ROOT_TYPE};
+use slopos_boot_core::layout;
 use slopos_boot_core::{Guid, install};
+use slopos_installer_core::{Contents, Layout, MbrPartition, human, name_of, type_name};
 
 use super::engine::Events;
 use crate::boot_disk::{BlockFile, Table, geometry_of, partition_node, table_of};
@@ -44,21 +45,6 @@ const FAT_LABEL_AT: usize = 71;
 /// How much of a disk's start must read zero for it to count as blank.
 const BLANK_PROBE_BYTES: usize = 1 << 20;
 
-/// What a disk holds.
-#[derive(Clone, PartialEq)]
-pub enum Contents {
-    /// The GUID partition table [`Disk::table`] is.
-    Gpt,
-    Blank,
-    /// An MBR table's partitions: their index, type byte and size in bytes.
-    Mbr(Vec<(usize, u8, u64)>),
-    /// A GUID partition table with more entries than SlopOS reads, or damaged
-    /// in both copies.
-    UnreadableGpt,
-    Ext4,
-    Data,
-}
-
 #[derive(Clone, PartialEq)]
 pub struct Disk {
     pub node: String,
@@ -84,29 +70,6 @@ impl Disk {
         })
     }
 
-    /// What erasing the disk loses, if anything.
-    pub fn holds(&self) -> Option<String> {
-        match &self.contents {
-            Contents::Gpt => Some("a GUID partition table".to_owned()),
-            Contents::Blank => None,
-            Contents::Mbr(parts) => Some(format!(
-                "an MBR partition table with {} partition(s)",
-                parts.len()
-            )),
-            Contents::UnreadableGpt => Some(format!(
-                "a GUID partition table this installer cannot read: over {} entries, or damaged in both copies",
-                gpt::MAX_ENTRIES
-            )),
-            Contents::Ext4 => Some("an ext4 volume across the whole disk".to_owned()),
-            Contents::Data => Some("data that starts no partition table".to_owned()),
-        }
-    }
-
-    /// What the disk holds, in words: `nothing` when it is blank.
-    pub fn holding(&self) -> String {
-        self.holds().unwrap_or_else(|| "nothing".to_owned())
-    }
-
     pub fn partitions(&self) -> Vec<Partition> {
         self.table
             .as_ref()
@@ -121,20 +84,35 @@ impl Disk {
             .unwrap_or_default()
     }
 
+    /// The region a free-space install takes when none is named.
+    pub fn largest_region(&self) -> Option<usize> {
+        let table = self.table.as_ref()?;
+        install::largest_region(&table.header.grown(), &table.array)
+    }
+
+    /// The disk's table as a driver sees it.
+    pub fn layout(&self) -> Layout {
+        match &self.table {
+            Some(t) => Layout::of(&self.node, &t.header.grown(), &t.array),
+            None => Layout::empty(self.geometry.capacity()),
+        }
+    }
+
     pub fn describe(&self) -> String {
         let mut out = format!("{} — {}", self.node, human(self.geometry.capacity()));
         match &self.table {
             None => {
                 out.push_str(&format!(
                     ", {}\n",
-                    self.holds().unwrap_or_else(|| "blank".to_owned())
+                    self.contents.holds().unwrap_or_else(|| "blank".to_owned())
                 ));
                 if let Contents::Mbr(parts) = &self.contents {
-                    for (index, kind, bytes) in parts {
+                    for part in parts {
                         out.push_str(&format!(
-                            "  MBR partition {}: type {kind:#04x}, {}\n",
-                            index + 1,
-                            human(*bytes)
+                            "  MBR partition {}: type {:#04x}, {}\n",
+                            part.index + 1,
+                            part.kind,
+                            human(part.bytes)
                         ));
                     }
                 }
@@ -181,62 +159,6 @@ impl Disk {
             })
             .copied()
             .ok_or_else(|| format!("{named} is no partition of {}", self.node))
-    }
-}
-
-/// What a partition type GUID names, as `fdisk` would say it.
-pub fn type_name(guid: &Guid) -> String {
-    const KNOWN: [(&str, &str); 10] = [
-        ("0fc63daf-8483-4772-8e79-3d69d8477de4", "Linux filesystem"),
-        (
-            "4f68bce3-e8cd-4db1-96e7-fbcaf984b709",
-            "Linux root (x86-64)",
-        ),
-        ("933ac7e1-2eb4-4f13-b844-0e14e2aef915", "Linux home"),
-        ("0657fd6d-a4ab-43c4-84e5-0933c84b4f4f", "Linux swap"),
-        (
-            "bc13c2ff-59e6-4262-a352-b275fd6f7172",
-            "Linux extended boot",
-        ),
-        ("e6d6d379-f507-44c2-a23c-238f2a3df928", "Linux LVM"),
-        ("a19d880f-05fc-4d3b-a006-743f0f84911e", "Linux RAID"),
-        (
-            "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7",
-            "Microsoft basic data",
-        ),
-        ("e3c9e316-0b5c-4db8-817d-f92df00215ae", "Microsoft reserved"),
-        ("de94bba4-06d1-4d40-a16a-bfd50179d6ac", "Windows recovery"),
-    ];
-    match *guid {
-        ESP_TYPE => "EFI system".to_owned(),
-        BOOT_TYPE => "SlopOS boot".to_owned(),
-        ROOT_TYPE => "SlopOS root".to_owned(),
-        CRASH_TYPE => "SlopOS crash".to_owned(),
-        _ => KNOWN
-            .iter()
-            .find(|(spelling, _)| Guid::parse(spelling) == Some(*guid))
-            .map_or_else(|| guid.to_string(), |(_, name)| (*name).to_owned()),
-    }
-}
-
-pub fn name_of(p: &Partition) -> String {
-    char::decode_utf16(p.entry.name.iter().copied().take_while(|&u| u != 0))
-        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
-        .collect()
-}
-
-pub fn human(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
@@ -409,30 +331,30 @@ pub fn holds_no_volume(node: &str) -> bool {
 }
 
 /// The partitions an MBR in `sector` lists, if it is one.
-fn mbr_entries(sector: &[u8], geometry: Geometry) -> Option<Vec<(usize, u8, u64)>> {
+fn mbr_entries(sector: &[u8], geometry: Geometry) -> Option<Vec<MbrPartition>> {
     (sector[BOOT_SIGNATURE_AT..BOOT_SIGNATURE_AT + 2] == BOOT_SIGNATURE).then(|| {
-        (0..4)
-            .map(|i| &sector[MBR_ENTRIES_AT + i * MBR_ENTRY_BYTES..][..MBR_ENTRY_BYTES])
-            .enumerate()
-            .filter(|(_, e)| e[4] != 0)
-            .map(|(i, e)| {
+        (0..4u8)
+            .map(|i| {
+                let e = &sector[MBR_ENTRIES_AT + usize::from(i) * MBR_ENTRY_BYTES..];
                 let sectors = u32::from_le_bytes([e[12], e[13], e[14], e[15]]);
-                (i, e[4], u64::from(sectors) * geometry.block())
+                MbrPartition {
+                    index: i,
+                    kind: e[4],
+                    bytes: u64::from(sectors) * geometry.block(),
+                }
             })
+            .filter(|part| part.kind != 0)
             .collect()
     })
 }
 
 /// An MBR listing partitions in front of a GPT without protecting it, which
 /// other systems read rather than the GPT.
-fn unprotected_gpt(file: &File, geometry: Geometry) -> Option<Vec<(usize, u8, u64)>> {
+fn unprotected_gpt(file: &File, geometry: Geometry) -> Option<Vec<MbrPartition>> {
     let mut sector = vec![0u8; geometry.block() as usize];
     file.read_exact_at(&mut sector, 0).ok()?;
     mbr_entries(&sector, geometry).filter(|entries| {
-        !entries.is_empty()
-            && entries
-                .iter()
-                .all(|&(_, kind, _)| kind != MBR_PROTECTIVE_TYPE)
+        !entries.is_empty() && entries.iter().all(|e| e.kind != MBR_PROTECTIVE_TYPE)
     })
 }
 
@@ -451,11 +373,7 @@ fn contents_of(node: &str, file: &File, geometry: Geometry) -> Result<Contents, 
         return Ok(Contents::UnreadableGpt);
     }
     match mbr_entries(&read(0, block)?, geometry) {
-        Some(entries)
-            if entries
-                .iter()
-                .any(|&(_, kind, _)| kind == MBR_PROTECTIVE_TYPE) =>
-        {
+        Some(entries) if entries.iter().any(|e| e.kind == MBR_PROTECTIVE_TYPE) => {
             return Ok(Contents::UnreadableGpt);
         }
         Some(entries) if !entries.is_empty() => return Ok(Contents::Mbr(entries)),

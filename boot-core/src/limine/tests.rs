@@ -140,7 +140,7 @@ fn titles_and_command_lines_that_would_break_the_file_are_refused() {
         config(&entries, "").render(&mut sink),
         Err(RenderError::BadSlot)
     );
-    for cmdline in ["a\npath: x", "root=${ROOT}"] {
+    for cmdline in ["a\npath: x", "root=${ROOT}", "a\tb", "a\0b", "a\u{1b}[2J"] {
         assert_eq!(
             config(&SLOTS, cmdline).render(&mut sink),
             Err(RenderError::BadCmdline)
@@ -203,7 +203,7 @@ fn offered(
         .map(|raw| raw.as_deref().map_or(Listed::Absent, Listed::Value))
         .collect();
     let mut buf = [0u8; 127];
-    offered_title(&listed, index, own_fallback, &mut buf).map(String::from)
+    offered_title(&listed, index, own_fallback, &mut buf).map(|(title, _)| String::from(title))
 }
 
 const GRUB: &str = r"\EFI\cachyos\grubx64.efi";
@@ -281,7 +281,10 @@ fn an_unreadable_option_ahead_may_be_what_limine_boots() {
     let ahead = [Listed::Unreadable, Listed::Value(&cachyos)];
     assert_eq!(offered_title(&ahead, 1, None, &mut buf), None);
     let behind = [Listed::Value(&cachyos), Listed::Unreadable];
-    assert_eq!(offered_title(&behind, 0, None, &mut buf), Some("cachyos"));
+    assert_eq!(
+        offered_title(&behind, 0, None, &mut buf).map(|(title, _)| title),
+        Some("cachyos")
+    );
 }
 
 /// Titles can each be offered and still collide in the menu, which the

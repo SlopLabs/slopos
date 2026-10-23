@@ -9,6 +9,10 @@ const DISK: Guid = Guid::from_spelling("0f0e0d0c-0b0a-4908-8706-050403020100");
 const OTHER: Guid = Guid::from_spelling("0fc63daf-8483-4772-8e79-3d69d8477de4");
 const UNIQUES: [Guid; 4] = [Guid([1; 16]), Guid([2; 16]), Guid([3; 16]), Guid([4; 16])];
 
+fn least(min: u64) -> RootSize {
+    RootSize { min, target: None }
+}
+
 /// A table on a disk of `bytes` holding `parts`, each `(number, type, first,
 /// last)` in LBAs.
 fn table(bytes: u64, block: u64, parts: &[(u32, Guid, u64, u64)]) -> (Header, Vec<u8>) {
@@ -45,7 +49,7 @@ fn an_erased_disk_gets_esp_boot_root_and_crash_in_that_order() {
     for block in [512u64, 4096] {
         let bytes = 16 * GIB;
         let (header, array) = table(bytes, block, &[]);
-        let plan = plan(&header, &array, Mode::Free { region: None }, GIB).unwrap();
+        let plan = plan(&header, &array, Mode::Free { region: None }, least(GIB)).unwrap();
         let mib = MIB / block;
         let last = bytes / block - 1;
         assert_eq!(new(plan.esp), (1, mib, 261 * mib - 1));
@@ -69,7 +73,7 @@ fn a_shared_disk_keeps_its_esp_and_fills_the_largest_region() {
             (2, OTHER, 101 * mib, 8293 * mib - 1),
         ],
     );
-    let plan = plan(&header, &array, Mode::Free { region: None }, 4 * GIB).unwrap();
+    let plan = plan(&header, &array, Mode::Free { region: None }, least(4 * GIB)).unwrap();
     assert_eq!(plan.esp, Place::Existing(1));
     assert_eq!(new(plan.boot), (3, 8293 * mib, 9317 * mib - 1));
     assert_eq!(new(plan.root).0, 4);
@@ -88,23 +92,40 @@ fn a_region_is_chosen_by_index_and_aligned_inward() {
     assert_eq!(found[0].first_lba, mib);
     assert_eq!(found[0].last_lba, 3 * GIB / 512 - 1);
     assert_eq!(found[1].first_lba, 4 * GIB / 512);
-    let first = plan(&header, &array, Mode::Free { region: Some(0) }, GIB).unwrap();
+    let first = plan(&header, &array, Mode::Free { region: Some(0) }, least(GIB)).unwrap();
     assert_eq!(new(first.esp).1, mib);
     let (_, _, crash_last) = new(first.crash);
     assert_eq!(crash_last, 3 * GIB / 512 - 1);
-    let largest = plan(&header, &array, Mode::Free { region: None }, GIB).unwrap();
+    let largest = plan(&header, &array, Mode::Free { region: None }, least(GIB)).unwrap();
     assert_eq!(new(largest.esp).1, 4 * GIB / 512);
     assert_eq!(
-        plan(&header, &array, Mode::Free { region: Some(2) }, GIB),
+        plan(&header, &array, Mode::Free { region: Some(2) }, least(GIB)),
         Err(PlanError::NoRegion)
     );
+}
+
+#[test]
+fn the_largest_region_is_the_first_of_equals() {
+    let mib = MIB / 512;
+    let between = (1, OTHER, 1025 * mib, 2049 * mib - 1);
+    let largest = |bytes| {
+        let (header, array) = table(bytes, 512, &[between]);
+        let sizes: Vec<u64> = regions(&header, &array).map(|r| r.blocks()).collect();
+        (sizes, largest_region(&header, &array))
+    };
+    assert_eq!(largest(16 * GIB).1, Some(1));
+    let (sizes, equal) = largest(3074 * MIB);
+    assert_eq!(sizes, [1024 * mib, 1024 * mib]);
+    assert_eq!(equal, Some(0));
+    let (header, array) = table(16 * GIB, 512, &[(1, OTHER, mib, 16 * GIB / 512 - 34)]);
+    assert_eq!(largest_region(&header, &array), None);
 }
 
 #[test]
 fn a_region_too_small_is_refused_with_what_it_lacks() {
     let (header, array) = table(2 * GIB, 512, &[]);
     let Err(PlanError::NoRoom { needed, available }) =
-        plan(&header, &array, Mode::Free { region: None }, GIB)
+        plan(&header, &array, Mode::Free { region: None }, least(GIB))
     else {
         panic!("a 2 GiB disk holds no 1 GiB root beside a 1 GiB boot partition");
     };
@@ -117,7 +138,7 @@ fn free_space_on_a_disk_slopos_is_on_is_refused() {
     let mib = MIB / 512;
     let (header, array) = table(16 * GIB, 512, &[(2, BOOT_TYPE, mib, 1025 * mib - 1)]);
     assert_eq!(
-        plan(&header, &array, Mode::Free { region: None }, GIB),
+        plan(&header, &array, Mode::Free { region: None }, least(GIB)),
         Err(PlanError::Installed(2))
     );
 }
@@ -137,7 +158,7 @@ fn a_reused_root_takes_the_existing_esp_and_new_boot_and_crash() {
         root: 2,
         region: None,
     };
-    let plan = plan(&header, &array, mode, 2 * GIB).unwrap();
+    let plan = plan(&header, &array, mode, least(2 * GIB)).unwrap();
     assert_eq!(plan.esp, Place::Existing(1));
     assert_eq!(plan.root, Place::Existing(2));
     let (boot, boot_first, boot_last) = new(plan.boot);
@@ -164,7 +185,7 @@ fn a_reinstall_keeps_every_slopos_partition() {
         root: 3,
         region: None,
     };
-    let plan = plan(&full.0, &full.1, mode, GIB).unwrap();
+    let plan = plan(&full.0, &full.1, mode, least(GIB)).unwrap();
     assert_eq!(
         [plan.esp, plan.boot, plan.root, plan.crash],
         [1, 2, 3, 4].map(Place::Existing)
@@ -184,7 +205,14 @@ fn what_cannot_be_a_root_is_refused() {
             (4, BOOT_TYPE, 1126 * mib, 2150 * mib - 1),
         ],
     );
-    let reuse = |root| plan(&header, &array, Mode::Reuse { root, region: None }, 2 * MIB);
+    let reuse = |root| {
+        plan(
+            &header,
+            &array,
+            Mode::Reuse { root, region: None },
+            least(2 * MIB),
+        )
+    };
     assert_eq!(reuse(1), Err(PlanError::NotForRoot(1)));
     assert_eq!(reuse(3), Err(PlanError::NotForRoot(3)));
     assert_eq!(reuse(9), Err(PlanError::NoPartition(9)));
@@ -202,7 +230,7 @@ fn what_cannot_be_a_root_is_refused() {
             root: 2,
             region: None,
         },
-        MIB,
+        least(MIB),
     );
     assert_eq!(roomy, Err(PlanError::Ambiguous(Role::Boot)));
 }
@@ -211,7 +239,7 @@ fn what_cannot_be_a_root_is_refused() {
 fn a_root_stops_where_the_kernel_can_number_its_blocks() {
     let block = 4096;
     let (header, array) = table(20 << 40, block, &[]);
-    let plan = plan(&header, &array, Mode::Free { region: None }, GIB).unwrap();
+    let plan = plan(&header, &array, Mode::Free { region: None }, least(GIB)).unwrap();
     let (_, first, last) = new(plan.root);
     assert_eq!((last - first + 1) * block, ROOT_MAX_BYTES);
     assert_eq!(new(plan.crash).1, last + 1);
@@ -225,7 +253,7 @@ fn a_full_array_has_no_slot_for_a_new_partition() {
         .collect();
     let (header, array) = table(16 * GIB, 512, &parts);
     assert_eq!(
-        plan(&header, &array, Mode::Free { region: None }, GIB),
+        plan(&header, &array, Mode::Free { region: None }, least(GIB)),
         Err(PlanError::NoSlot)
     );
 }
@@ -246,7 +274,7 @@ fn applying_a_plan_writes_the_new_entries_and_retypes_a_reused_root() {
         root: 2,
         region: None,
     };
-    let plan = plan(&header, &array, mode, GIB).unwrap();
+    let plan = plan(&header, &array, mode, least(GIB)).unwrap();
     let header = plan.apply(header, &mut array, UNIQUES);
     assert!(header.array_matches(&array));
     assert_eq!(header.slot(&array, 1).unwrap(), &before[..]);
@@ -293,7 +321,7 @@ fn a_reused_root_is_new_to_the_disk_unless_it_was_slopos_s() {
             root: 2,
             region: None,
         };
-        let plan = plan(&header, &array, mode, GIB).unwrap();
+        let plan = plan(&header, &array, mode, least(GIB)).unwrap();
         let header = plan.apply(header, &mut array, UNIQUES);
         let root = header.partitions(&array).nth(1).unwrap().unwrap().entry;
         if kept {
@@ -320,7 +348,99 @@ fn a_reuse_beside_slopos_s_own_root_is_refused() {
             (3, OTHER, 5000 * mib, 10_000 * mib - 1),
         ],
     );
-    let reuse = |root| plan(&header, &array, Mode::Reuse { root, region: None }, GIB);
+    let reuse = |root| {
+        plan(
+            &header,
+            &array,
+            Mode::Reuse { root, region: None },
+            least(GIB),
+        )
+    };
     assert_eq!(reuse(3), Err(PlanError::RootElsewhere(2)));
     assert!(reuse(2).is_ok());
+}
+
+fn sized(min: u64, target: u64) -> RootSize {
+    RootSize {
+        min,
+        target: Some(target),
+    }
+}
+
+#[test]
+fn a_root_takes_the_size_asked_and_leaves_the_rest_free() {
+    for block in [512u64, 4096] {
+        let (header, array) = table(16 * GIB, block, &[]);
+        let whole = plan(&header, &array, Mode::Free { region: None }, least(GIB)).unwrap();
+        let (_, whole_first, whole_last) = new(whole.root);
+        assert_eq!(whole.root_max, (whole_last - whole_first + 1) * block);
+        let mut array = array;
+        let asked = plan(
+            &header,
+            &array,
+            Mode::Free { region: None },
+            sized(GIB, 4 * GIB + MIB / 2),
+        )
+        .unwrap();
+        assert_eq!(asked.root_max, whole.root_max);
+        let (_, first, last) = new(asked.root);
+        assert_eq!(first, whole_first);
+        assert_eq!((last - first + 1) * block, 4 * GIB);
+        let (_, crash_first, crash_last) = new(asked.crash);
+        assert_eq!(crash_first, last + 1);
+        let header = asked.apply(header, &mut array, UNIQUES);
+        let free: Vec<Region> = regions(&header, &array).collect();
+        assert_eq!(free.len(), 1);
+        assert_eq!(free[0].first_lba, crash_last + 1);
+        assert_eq!(
+            free[0].blocks() * block,
+            whole.root_max - 4 * GIB,
+            "what the root left is free"
+        );
+    }
+}
+
+#[test]
+fn a_target_past_either_bound_is_clamped_to_it() {
+    let block = 512;
+    let (header, array) = table(16 * GIB, block, &[]);
+    let root_bytes = |size| {
+        let plan = plan(&header, &array, Mode::Free { region: None }, size).unwrap();
+        let (_, first, last) = new(plan.root);
+        (last - first + 1) * block
+    };
+    let most = plan(&header, &array, Mode::Free { region: None }, least(GIB))
+        .unwrap()
+        .root_max;
+    assert_eq!(root_bytes(sized(2 * GIB, GIB)), 2 * GIB);
+    assert_eq!(root_bytes(sized(2 * GIB, 0)), 2 * GIB);
+    assert_eq!(
+        root_bytes(sized(GIB + 1, GIB)),
+        GIB + MIB,
+        "the minimum rounds up"
+    );
+    assert_eq!(root_bytes(sized(GIB, 2 * GIB)), 2 * GIB, "at the minimum");
+    assert_eq!(root_bytes(sized(GIB, most)), most, "at the maximum");
+    assert_eq!(root_bytes(sized(GIB, most + MIB)), most);
+    assert_eq!(root_bytes(sized(GIB, u64::MAX)), most);
+}
+
+#[test]
+fn a_reused_root_keeps_its_size_whatever_is_asked() {
+    let mib = MIB / 512;
+    let (header, array) = table(
+        16 * GIB,
+        512,
+        &[
+            (1, ESP_TYPE, mib, 101 * mib - 1),
+            (2, OTHER, 101 * mib, 101 * mib + 4 * GIB / 512 - 1),
+        ],
+    );
+    let mode = Mode::Reuse {
+        root: 2,
+        region: None,
+    };
+    let plan = plan(&header, &array, mode, sized(GIB, 2 * GIB)).unwrap();
+    assert_eq!(plan.root, Place::Existing(2));
+    assert_eq!(plan.root_max, 4 * GIB);
 }

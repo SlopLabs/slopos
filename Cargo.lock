@@ -335,6 +335,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-installer-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-boot-core",
+ "slopos-remote-core",
+]
+
+[[package]]
 name = "slopos-kallsyms"
 version = "0.1.0"
 
@@ -599,6 +607,7 @@ dependencies = [
  "slopos-gfx",
  "slopos-http-core",
  "slopos-image",
+ "slopos-installer-core",
  "slopos-keymap-core",
  "slopos-net-core",
  "slopos-priv-core",

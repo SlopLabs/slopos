@@ -333,7 +333,7 @@ fn install_tree(
     events.log(match installed {
         Some(bytes) => format!(
             "installed {what} at {LOCAL} ({})",
-            super::disk::human(bytes)
+            slopos_installer_core::human(bytes)
         ),
         None => format!("{LOCAL} already holds this medium's {what}"),
     });
@@ -434,9 +434,21 @@ fn seed(
     Ok(bytes)
 }
 
+/// `url` as a value in git's configuration: quoted, its quotes and
+/// backslashes escaped, where it holds what git would read as a comment, an
+/// escape or the value's end.
+fn config_value(url: &str) -> String {
+    if !url.contains(['"', '\\', ';', '#']) && url.trim() == url {
+        url.to_owned()
+    } else {
+        format!("\"{}\"", url.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
 /// `config` with `[remote "origin"]` fetching from and pushing to `url`, as
 /// `git remote set-url origin` leaves it.
 fn with_origin(config: &str, url: &str) -> String {
+    let url = config_value(url);
     let mut out = Vec::new();
     let mut in_origin = false;
     let mut found = false;
@@ -511,7 +523,7 @@ pub fn fill(
     let bytes = seed(root, medium, remote, events)?;
     events.log(format!(
         "seeded /src with the medium's clone ({})",
-        super::disk::human(bytes)
+        slopos_installer_core::human(bytes)
     ));
     if let Some(url) = remote {
         events.log(format!("/src/slopos fetches from and pushes to {url}"));

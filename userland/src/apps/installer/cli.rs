@@ -4,11 +4,12 @@
 
 use std::io::{Write, stdin, stdout};
 
-use super::disk::{Disk, human};
-use super::engine::{
-    Choices, DEFAULT_REMOTE, Event, Events, FIRST_PERSON, Issue, Mode, Person, Proposal, State,
-    System,
+use slopos_installer_core::{
+    Choices, DEFAULT_REMOTE, Event, FIRST_PERSON, Issue, Mode, Person, human, parse_size,
 };
+
+use super::disk::Disk;
+use super::engine::{Events, Settled, State, System};
 
 /// How much a copy moves between the lines that say so.
 const PROGRESS_EVERY: u64 = 256 << 20;
@@ -27,6 +28,7 @@ struct Options {
     region: Option<usize>,
     root: Option<String>,
     keep_root: Option<bool>,
+    root_size: Option<u64>,
     remote: Option<String>,
     first: Option<bool>,
     person: Option<String>,
@@ -36,7 +38,8 @@ struct Options {
 }
 
 const USAGE: &str = "usage: installer [--disk /dev/<disk>] [--mode erase|free|reuse] [--region <n>]
-                 [--root /dev/<partition>] [--keep-root | --format-root] [--remote <url>]
+                 [--root-size <size>] [--root /dev/<partition>]
+                 [--keep-root | --format-root] [--remote <url>]
                  [--first | --not-first] [--person <name>] [--no-password]
                  [--cmdline <words>] [--yes]
   --disk         the disk to install onto
@@ -44,6 +47,9 @@ const USAGE: &str = "usage: installer [--disk /dev/<disk>] [--mode erase|free|re
                  free: SlopOS's partitions in free space, beside the others
                  reuse: the root over --root, the rest where the disk has them
   --region       the free region new partitions go into (default: the largest)
+  --root-size    how large a new root is, as 20G or 512M (default: all the
+                 region gives); the crash partition follows it and the rest
+                 stays free
   --root         the partition reuse puts the root on
   --keep-root    keep the SlopOS root reuse finds there, updating /usr/local
   --format-root  format it instead
@@ -82,6 +88,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .filter(|&n| n > 0)
                     .ok_or_else(|| format!("--region {text}: a region's number, from 1"))?;
                 opts.region = Some(n - 1);
+            }
+            "--root-size" => {
+                let text = value()?;
+                opts.root_size = Some(parse_size(&text).ok_or_else(|| {
+                    format!("--root-size {text}: a size such as 20G, 512M or bytes")
+                })?);
             }
             "--root" => opts.root = Some(value()?),
             "--keep-root" => opts.keep_root = Some(true),
@@ -169,7 +181,7 @@ fn choose_kind(disk: &Disk) -> Result<Kind, String> {
         println!(
             "{} holds {}, so only erase can install onto it.",
             disk.node,
-            disk.holding()
+            disk.contents.holding()
         );
         return Ok(Kind::Erase);
     }
@@ -193,9 +205,7 @@ fn choose_region(disk: &Disk, given: Option<usize>, ask_it: bool) -> Result<Opti
     if given.is_some() || !ask_it || regions.len() < 2 {
         return Ok(given);
     }
-    let largest = (0..regions.len())
-        .max_by_key(|&i| regions[i].blocks())
-        .unwrap_or(0);
+    let largest = disk.largest_region().unwrap_or(0);
     let answer = ask(
         "Free region for the new partitions",
         Some(&(largest + 1).to_string()),
@@ -253,7 +263,7 @@ fn choose_person(named: Option<String>, no_password: bool) -> Result<Person, Str
 
 /// What the installer was asked to do, settled and confirmed before anything
 /// is written.
-fn settle(opts: Options, system: &mut System) -> Result<(Choices, Proposal), String> {
+fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), String> {
     let issue = |issue: Issue| issue.to_string();
     let interactive = opts.disk.is_none();
     let node = disk_node(match opts.disk {
@@ -275,10 +285,13 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Proposal), Str
         }
         None => choose_kind(disk)?,
     };
+    if kind == Kind::Reuse && opts.root_size.is_some() {
+        return Err(issue(Issue::RootSize));
+    }
     if kind != Kind::Erase && disk.table.is_none() {
         return Err(issue(Issue::OnlyErase {
             node,
-            holds: disk.holding(),
+            holds: disk.contents.holding(),
         }));
     }
     let asked = opts.mode.is_none();
@@ -302,6 +315,7 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Proposal), Str
     let mut choices = Choices {
         disk: node,
         mode,
+        root_size: opts.root_size,
         remote: None,
         first: false,
         person: None,
@@ -358,22 +372,22 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Proposal), Str
         true => None,
         false => Some(choose_person(opts.person, opts.no_password)?),
     };
-    let proposal = system.propose(&choices).map_err(issue)?;
-    for line in proposal.left_out() {
+    let settled = system.propose(&choices).map_err(issue)?;
+    for line in settled.view.left_out() {
         println!("installer:   {line}");
     }
-    println!("\nSlopOS will be installed on {}:", proposal.disk());
-    for line in &proposal.review {
+    println!("\nSlopOS will be installed on {}:", settled.disk());
+    for line in settled.view.review() {
         println!("  {line}");
     }
     if !opts.yes {
-        confirm(&proposal)?;
+        confirm(&settled)?;
     }
-    Ok((choices, proposal))
+    Ok((choices, settled))
 }
 
-fn confirm(p: &Proposal) -> Result<(), String> {
-    let (want, question) = if p.erase {
+fn confirm(p: &Settled) -> Result<(), String> {
+    let (want, question) = if p.view.erase {
         let name = p.disk().rsplit('/').next().unwrap_or(p.disk()).to_owned();
         let question = format!("Type {name} to erase it");
         (name, question)

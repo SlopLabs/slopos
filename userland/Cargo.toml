@@ -468,6 +468,7 @@ slopos-image = { workspace = true }
 slopos-protocol = { workspace = true }
 slopos-priv-core = { workspace = true }
 slopos-remote-core = { workspace = true }
+slopos-installer-core = { workspace = true }
 slopos-rt = { workspace = true }
 slopos-shell-core = { workspace = true }
 slopos-slibc = { workspace = true }

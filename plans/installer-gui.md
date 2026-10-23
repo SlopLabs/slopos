@@ -37,25 +37,33 @@ plan uses:
 ## Where it stands
 
 **The installer.**
-- `/bin/installer` is `userland/src/apps/installer/`, an engine and a CLI
-  renderer over the disk, root and boot code. It shares
+- `/bin/installer` is `userland/src/apps/installer/`, an engine, a CLI
+  renderer and a protocol server over the disk, root and boot code. It shares
   `userland/src/boot_disk.rs` with `bootctl` and the tests. Only
   `installer_main` is public.
   - `engine.rs`: `System::probe` reads the medium and every whole disk,
     `System::open` re-reads the chosen disk's table, `System::propose` lays
-    `Choices` out as a `Proposal` or answers an `Issue`, and `System::install`
-    runs the steps, reporting `Event`s, and answers a `Summary` or a
-    `Failure`.
+    `Choices` out as a `Settled` install or answers an `Issue`, and
+    `System::install` runs the steps, reporting `Event`s, and answers a
+    `Summary` or a `Failure`. `System::view` is what it read as
+    `installer-core` states it, each opened disk with what every choice on
+    it proposes.
   - `cli.rs`: the questions, every one also a flag, the summary, the typed
     confirmation (the disk's name to erase, `yes` otherwise), and the events
     as `installer:` lines.
+  - `serve.rs`: `installer --serve`, the same engine over the protocol on
+    stdin and stdout, only as privd's `org.slopos.install`.
   - `medium.rs`, `disk.rs`, `root.rs` and `boot.rs`: what the engine reads
     and writes.
+- `installer-core` is what the engine and a driver agree on, `no_std` and
+  host-tested: the views (`System`, `Proposal`), `Choices`, `Issue`,
+  `Event`, `Summary`, `Failure`, the step titles, the protocol and its codec,
+  and the `Wizard` the window's pages follow.
 - The CLI asks for the disk, then the mode (erase, free or reuse, forced to
   erase on a disk without a readable GPT), the root partition, the free
   region, whether to keep the root, the `/src` remote, whether SlopOS goes
-  first in `BootOrder` and the first person.
-- `install` runs nine steps:
+  first in `BootOrder` and the first person. `--root-size` is a flag only.
+- `install` runs the nine steps `installer_core::STEPS` names:
   1. writing the partition table
   2. re-reading it
   3. formatting the new partitions
@@ -65,13 +73,11 @@ plan uses:
   7. making slot a the default
   8. checking the root
   9. registering the firmware entry
-- Every type lives in the userland crate, which has no unit tests, and
-  nothing crosses a process boundary: nothing of the engine is host-tested
-  or machine-readable yet.
 
-**Planning is pure.** `boot-core::install::{plan, regions, Plan, PlanError}`
-is `no_std` and host-tested (`boot-core/src/install.rs:266-369`). The root
-always takes the rest of the region (`install.rs:344-352`).
+**Planning is pure.** `boot-core::install::{plan, regions, Plan, PlanError,
+RootSize}` is `no_std` and host-tested. A new root takes its target clamped
+between the medium's minimum and the rest of the region; the crash partition
+follows it and the rest stays free.
 
 **Failure is re-runnable, not rolled back.** An interrupted erase leaves a
 disk that only erase installs onto (`disk::write_table`). A half-made ESP or
@@ -81,12 +87,17 @@ renamed, and the firmware entry comes last.
 
 **Tests.**
 - `installer_test` types the blank disk's answers into `/bin/shell -c
-  "installer …"`, and gives the foreign, reuse and reinstall disks flags.
-  It holds every installed root to its `/var/log/installer.log`, and the
-  foreign disk's install, confirmed after its table was renamed, to writing
-  nothing.
-- `just test-installer` greps the installer's own lines, e2fsck's among them.
-- The host then holds every table, volume and foreign byte to what it must be.
+  "installer …"`, gives the foreign disk flags and a root size and the
+  reinstall flags, and installs the reuse disk through privd and `--serve`
+  as `root` with a scripted protocol client. It holds every installed root to
+  its `/var/log/installer.log`, the foreign disk's install, confirmed after
+  its table was renamed, to writing nothing, and a driver that leaves before
+  `Install` to the same.
+- `just test-installer` greps the installer's own lines, e2fsck's among them,
+  which the protocol client prints as the CLI does.
+- The host then holds every table, volume and foreign byte to what it must
+  be, and the foreign disk's root to the size asked, the crash partition
+  after it and free space after both.
 
 **The live desktop.**
 - init starts the compositor and then the terminal; nothing knows it is live
@@ -117,8 +128,9 @@ renamed, and the firmware entry comes last.
 | Calamares ([ChoicePage.cpp](https://codeberg.org/Calamares/calamares/src/branch/calamares/src/modules/partition/gui/ChoicePage.cpp)) | "Current:" and "After:" bars. | the Now and After bars |
 | elementary ([Drive Selection](https://github.com/elementary/installer/wiki/Drive-Selection), [Progress](https://github.com/elementary/installer/wiki/Progress)) | The boot drive and too-small drives are shown but disabled and sorted last; Calamares hides them silently and earns a "my disk isn't visible" FAQ. Progress has no back or forward. | unofferable disks shown disabled with their reason, no cancel after confirm |
 | Agama ([agama#1770](https://github.com/agama-project/agama/issues/1770), [HTTP API](https://github.com/agama-project/agama/blob/master/doc/http_api.md)) | Hub users lose their place. Every config change recomputes the proposal at once. | no hub; every choice re-proposes |
-| Redox ([installer](https://gitlab.redox-os.org/redox-os/installer), [the book](https://doc.redox-os.org/book/installing.html)) | Its GUI shows "Installation progress is in terminal" because the library prints instead of emitting events. TUI and GUI copy the pipeline, and the copy ends a failed clone on the success page. It has no review page and no mounted-disk guard, and its CI never boots an installed image. | an engine that emits events and never prints; one pipeline; review page; the QEMU install tests kept |
+| Redox ([installer](https://gitlab.redox-os.org/redox-os/installer), [the book](https://doc.redox-os.org/book/installing.html)) | Its GUI shows "Installation progress is in terminal" because the library prints instead of emitting events. TUI and GUI copy the pipeline, and the copy ends a failed clone on the success page. The GUI runs the library in-process, the whole window elevated through `pkexec` or its sudo scheme. Its one size option is the image file's. It has no review page and no mounted-disk guard, and its CI never boots an installed image. | an engine that emits events and never prints; one pipeline; an unprivileged window beside a privileged engine; review page; the QEMU install tests kept |
 | Anaconda, curtin and Subiquity, Calamares ([anaconda util.py](https://github.com/rhinstaller/anaconda/blob/main/pyanaconda/core/util.py), [curtin install.py](https://github.com/canonical/curtin/blob/main/curtin/commands/install.py), [subiquity storage.py](https://github.com/canonical/subiquity/blob/main/subiquity/server/controllers/storage.py), [Calamares Runner.cpp](https://github.com/calamares/calamares/blob/calamares/src/libcalamares/utils/Runner.cpp)) | Each captures mkfs's output into its log. Anaconda and Subiquity copy their logs to the target only on success; curtin copies its log in a `finally`, so a failed install keeps it. None reads the disk again between confirmation and the first write, and Subiquity stops probing once storage is configured. Byte totals reach a UI only as message text (Anaconda's rsync percentage). | e2fsprogs's output as log lines, the log kept on the root after a failure too, the disk read again before the first write, and typed byte totals |
+| Subiquity and kickstart ([subiquity types/storage.py](https://github.com/canonical/subiquity/blob/main/subiquity/common/types/storage.py), [subiquity server.py](https://github.com/canonical/subiquity/blob/main/subiquity/server/server.py), [pykickstart `part`](https://pykickstart.readthedocs.io/en/latest/kickstart-docs.html)) | Subiquity's server answers each gap with its size range and a reason when too small, refuses a size outside it, and keeps serving after a failed install. Kickstart's `--size` with `--grow --maxsize` clamps between bounds. None of Subiquity, Anaconda, Calamares' KPMcore helper or Redox checks a version between the UI and its privileged backend; each ships both in one package. | each opened disk's choices with the reason they do not fit, the root size clamped, an engine that serves on after `Failed`, and a `Hello` naming the protocol, since a live base switch can put a newer engine under an older window |
 | Asterinas ([distro README](https://github.com/asterinas/asterinas/blob/ec5bb9ed798851b4c1854e791341321902ac8bc9/book/src/distro/README.md)) | No installer UI: a NixOS ISO, a root shell and a script. Its CI does install end to end in QEMU. | nothing to borrow for the UI; confirms end-to-end install grading |
 
 ## Design
@@ -158,84 +170,28 @@ flowchart LR
   same action with its own argv and the terminal as stdio, and asks its
   questions there.
 
-### The engine
+### The engine and its protocol
 
-Phase 1 built it (see *Decided*). What the later phases add:
-
-- **`serve`.** `installer --serve` speaks the protocol on stdin and stdout,
-  holding one `System` from `Probe` to `Install`. It refuses to start unless
-  `PRIV_ACTION` is `org.slopos.install`.
-- **`installer-core`.** The types both sides agree on move there; the engine
-  keeps the I/O.
-
-### `installer-core`
-
-A new crate, `no_std` with `alloc`, `forbid(unsafe_code)`, host-tested under
-`just test-host`. It holds everything both sides agree on:
-
-- **`Choices`**:
-  - the disk;
-  - the mode: `Erase`, `Free{region}`, `Reuse{root, region, keep}`;
-  - an optional root size;
-  - the `/src` remote;
-  - whether SlopOS goes first in `BootOrder`;
-  - the CLI's first person and kernel command line, which the window leaves
-    to the engine's defaults.
-- **`System`**: the medium (payload size, whether it carries `/src`) and its
-  disks. Each disk has a node, capacity, block size, an offered-or-why, a
-  layout of partitions and free runs with type names, and an existing SlopOS
-  root. It also carries the other boot entries.
-- **`Proposal`**:
-  - an id;
-  - the `before` and `after` layouts;
-  - actions tagged `Erase`, `New`, `Format`, `Share`, `Keep` or `Reuse`;
-  - the root's minimum, maximum and chosen size;
-  - the systems the Limine menu will carry, and those it leaves out.
-
-  It is built by a pure function from a `boot-core` plan and the table it was
-  planned on.
-- **`Issue`** and **`Failure`**: the engine's.
-- **`Event`**: `Step{index, total, title}`, `Progress{done, total}` and
-  `Log{line}`.
-- **The protocol and its codec** (below).
-- **`Wizard`**: the page state machine. It decides which page is reachable,
-  when the primary button is enabled, and what Back restores. A page is never
-  derived from widget state.
-
-### Protocol
-
-- **UI to engine:**
-  - `Hello{version}`
-  - `Probe`
-  - `Open{disk}`, which re-reads the disk's table and answers its `System`
-    again
-  - `Propose{choices}`
-  - `Install{choices, proposal_id}`
-- **Engine to UI:**
-  - `Hello{version}`
-  - `System`
-  - `Proposal` or `Issue`
-  - a stream of `Event`s, then `Done{summary}` or `Failed{step, message}`,
-    the install's result
-- **Framing.** Frames are `remote-core`'s: a kind byte, a big-endian length,
-  and a `Fields` payload (`remote-core/src/lib.rs:93-156`). The tree already
-  has that framing and its mutation tests, and userland has no serde. The
-  engine exits after `Done`, after `Failed`, or at end-of-file.
-- **No cancel message.** Nothing after `Install` can be cancelled.
+Phases 1 and 2 built them: `installer::engine`, `installer --serve` and
+`installer-core` (*Where it stands*, *Decided*). The protocol is
+`installer_core::protocol`, whose module doc is its statement.
 
 ### The window
 
 `/bin/installer-ui` is an appkit app with app id `org.slopos.installer` and a
-900 × 640 window. That fits 1280 × 720, and there is no fullscreen request to
-ask for a bigger one. The window has a header with the step strip (*Disk · How
-· Review · Install*), the page, and a footer with Back and the page's primary
-button. Everything is reachable with Tab, Enter activates, and Escape is Back
-on every page but Install.
+900 × 640 window, which fits 1280 × 720; there is no fullscreen request to
+ask for a bigger one. Its pages, answers, enablement and wording are
+`installer_core::wizard::Wizard`'s, which also says when to start the
+engine, restart or close; the app renders them and carries frames. The
+window has a header with the step strip (*Disk · How · Review · Install*),
+the page, and a footer with Back and the page's primary button. Everything
+is reachable with Tab, Enter activates, and Escape is Back on every page but
+Install.
 
 1. **Welcome.** *Try SlopOS* closes the window; *Install SlopOS* asks privd,
    then probes.
-   - A medium with no payload says so, with the CLI's wording ("the medium
-     carries no toolchain").
+   - A medium with no payload says so once probed, with the CLI's wording
+     ("the medium carries no toolchain").
    - A refused or expired consent leaves the person here, with the reason.
 2. **Disk.** Offered disks come first. Each row shows the node, the capacity,
    and what the disk holds: "blank", "GPT: EFI system, Windows (basic data),
@@ -332,17 +288,6 @@ and shown in `widget_gallery`:
 `installer-ui` joins `BASE_PROGRAMS` (`scripts/lib/base.sh:6`). It ships in
 every base and, like the engine, refuses without a medium.
 
-### Root size
-
-- **The planner.** `boot-core::install::plan` takes a root size, a minimum
-  and an optional target. The root is the target clamped between the minimum
-  and the rest of the region. The crash partition follows it, and what remains
-  stays free.
-- **The minimum** is `root_min`: 1 GiB, or the payload plus 6 GiB.
-- **The CLI** gains `--root-size <size>`, given as a flag only, so its
-  questions and the tests' typed answers are unchanged.
-- **The UI.** `installer-core` derives the slider's range from the proposal.
-
 ## Phases
 
 Five phases. Each ends with something that runs, and each lands as commits of
@@ -362,18 +307,15 @@ what it did before, but the root-fill notes are indented as step details,
 copy progress names its total, and a full or unusable ESP and an unreadable
 `BootOrder` are refused before the questions that follow the layout.
 
-### Phase 2: `installer-core` and `--serve`
+### Phase 2: `installer-core` and `--serve` — done
 
-Build the crate: `Choices`, `System`, `Proposal`, `Issue`, `Event`, the
-protocol, the codec and the `Wizard`. Add `installer --serve`, the root size
-in `boot-core`, and `--root-size`.
-
-Ends with:
-- host tests green;
-- `installer_test` installing its reuse disk through privd and `--serve` with
-  a scripted protocol client, which asks as `root`, so no consent is needed;
-- the foreign disk installed with `--root-size` and the host holding the free
-  space after the crash partition.
+`installer-core` holds the views, choices, issues, events, the protocol over
+`remote-core`'s frames and the window's `Wizard`, host-tested with round
+trips, mutation loops, proposals built from real plans and the wizard's
+transitions. `installer --serve` drives the engine over it as privd's
+`org.slopos.install`. The planner takes a `RootSize`, the CLI `--root-size`.
+`installer_test` installs the reuse disk through privd and `--serve` as
+`root`, and the foreign disk with a root size the host holds it to.
 
 ### Phase 3: appkit widgets
 
@@ -385,11 +327,11 @@ Ends with: `appkit_test` cases for each widget's layout, focus and keys, and
 
 ### Phase 4: The window
 
-Build `/bin/installer-ui`'s pages over the protocol. Add `installer_ui_test`,
-in `editor_test`'s style: it drives the app with scripted engine frames and
-holds the page sequence, Back restoring choices, the primary button's
-enablement, the checkbox and button wording per mode, and the frames the app
-sends.
+Build `/bin/installer-ui`'s pages over the `Wizard` and the protocol. Add
+`installer_ui_test`, in `editor_test`'s style: it drives the app with
+scripted engine frames and holds the page sequence, Back restoring choices,
+the primary button's enablement, the checkbox and button wording per mode,
+and the frames the app sends.
 
 Ends with: the test green, and a manual run on `just boot-live` with a blank
 disk, recorded in the commit message, as the visual acceptance.
@@ -403,16 +345,11 @@ absent on `just boot`.
 
 ## Grading
 
-- **Host:**
-  - `installer-core`: codec round trips with mutation loops as `remote-core`
-    has; proposals from `boot-core` plans for erase, free, reuse and
-    reinstall, MBR and blank disks, and root sizes at and past both bounds;
-    the wizard's transitions and enablement.
-  - `boot-core`'s plan tests gain the root size.
+- **Host:** `installer-core`'s and `boot-core`'s tests under `just
+  test-host`.
 - **In the guest:** `installer_ui_test` and the new `appkit_test` cases.
-- **End to end:** `just test-installer` keeps every lane it has. The blank disk
-  stays typed into the CLI, and the reuse disk moves to the protocol through
-  privd. The host-side checks do not change.
+- **End to end:** `just test-installer` keeps every lane it has: the blank
+  disk typed into the CLI, the reuse disk through privd and the protocol.
 - **Not graded by machine:** the window's pixels. It is a program that has to
   work once and keep its contract, and the model and protocol tests hold the
   contract. There is no QMP-driven GUI harness and no screenshot goldens.
@@ -447,7 +384,8 @@ absent on `just boot`.
 - **Before and after bars plus a tagged action list.** The bars show the
   shape, and the list carries it for the keyboard and for anyone who cannot
   read colours.
-- **Root size is the one choice beyond the CLI's.**
+- **Root size is the one choice beyond the CLI's questions.** It is a flag
+  only, so the questions and the tests' typed answers stay as they are.
 - **`remote-core`'s framing on privd-supplied pipes.** No JSON, because there
   is no serde in userland, and no socket, because the pipes are what privd
   hands over.
@@ -494,6 +432,68 @@ absent on `just boot`.
   password). `Choices` carries the CLI's person and command line as options.
 - **`Issue` is worded as the CLI says it**, flags included; a renderer that
   words it otherwise matches on the variant.
+- **The views live in `installer-core`; the engine keeps the I/O.** A
+  `Proposal` is built by a pure function from a plan, the table it was made
+  on and the table it writes, and carries no id: the protocol pairs it with
+  one, so the same choices on the same opened disk give the same proposal.
+  The CLI's review lines and the install log's head are its rendering.
+- **An action per partition.** The whole disk's erase, then SlopOS's four
+  roles in layout order, then every other partition: `Erase`, `New`,
+  `Format` (an ESP or boot partition with no volume, a SlopOS root or crash
+  partition not kept), `Share` (another system's ESP), `Keep`, `Reuse`
+  (another system's partition as the root). A reused root's size range is
+  its partition's.
+- **Opening says what each choice takes.** The opened disk's view carries
+  the issue, or none, of an erase, of free space in the largest region and
+  in each region, of each partition as the root, and of a reinstall over
+  SlopOS's root, keeping it when it holds one: every choice proposed with the
+  engine's defaults. It also names the region free space takes unless told,
+  the first of the largest, which the CLI's question offers too. The window
+  disables a tile or a region with that reason; it never compares sizes
+  itself.
+- **A root size is clamped, not refused.** The planner takes the target on
+  1 MiB boundaries between the medium's minimum and the rest of the region,
+  and the proposal says the size taken and both bounds, as kickstart's
+  `--grow --maxsize` does. The slider never leaves the range, and the CLI's
+  review shows the size before anything is written. A size for a reused
+  root is an `Issue`.
+- **One engine, one proposal.** `--serve` installs only the proposal it made
+  last, for the same choices; anything else is `Failed` at step 0 with
+  nothing written. After a `Failed` the engine serves on, unprobed: *Back to
+  review* probes, opens and proposes again under the one consent. It exits
+  after `Done` and at the end of its input, so it holds the action's
+  `exclusive` claim from consent until the window lets it go: a terminal's
+  `installer` meanwhile is told another one runs.
+- **The engine writes as fast as the window reads.** Its pipes are made
+  blocking whatever the window made them; it reports a copy's progress every
+  16 MiB and at its end. A window that stops reading holds the install at its
+  next frame; one that goes away does not.
+- **`Hello` names the protocol's version.** The engine answers with its own
+  and exits when they differ: a live base switch can put a newer engine
+  under an older window.
+- **The engine owns the step titles.** `installer_core::STEPS` names the
+  nine steps, so the window lists them before the first `Step` arrives.
+- **The wizard keeps one proposal in flight.** A change made while one is
+  out is proposed when its answer comes, and only the answer to the current
+  choices enables Review and Install; the last answer stays shown meanwhile.
+- **The review names what the menu leaves out and why.** Another system
+  colliding with an entry, or whose loader the install removes; the CLI
+  prints the same lines before its summary.
+- **A remote holds no control character.** It becomes a line of the new
+  clone's git configuration, quoted where git would read it otherwise.
+- **The consent covers what the requester sends.** privd's dialog names
+  `installer --serve`; the disk, the mode and every other choice arrive over
+  the pipe from the requester the person allowed, as `args *` already lets
+  the CLI's requester name them. The window leaves the first person and the
+  command line to the engine's defaults; a person given over the protocol is
+  held to what the accounts record takes before anything is written.
+- **The new menu offers no system the install removes.** One whose loader is
+  on a partition an erase or a reused root takes is left out, and the
+  proposal's `beside` names those the install keeps on the disk.
+- **A root to keep is one that holds a volume.** As the CLI's
+  `--keep-root` has it: a reinstall keeps SlopOS's root once it holds ext4,
+  an install cut short after formatting it among them, which keeping
+  finishes, and formats one that holds none.
 
 ## Constraints
 

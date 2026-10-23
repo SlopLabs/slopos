@@ -51,7 +51,8 @@ pub enum RenderError {
     BadTitle,
     /// Two entries Limine would tell apart only by a suffix of its own.
     Duplicate,
-    /// A command line holding a line break or a macro.
+    /// A command line holding a control character, a line break among them,
+    /// or a macro.
     BadCmdline,
     Format,
 }
@@ -77,7 +78,7 @@ pub fn firmware_title_ok(title: &str) -> bool {
 }
 
 fn cmdline_ok(cmdline: &str) -> bool {
-    !cmdline.contains(['\n', '\r', '$'])
+    !cmdline.contains('$') && !cmdline.contains(char::is_control)
 }
 
 /// An entry's menu name: `slopos-<slot>`, or another system's title.
@@ -257,13 +258,14 @@ fn starts_ours(listed: &Listed<'_>) -> bool {
 /// entry, registered after the menu is written, already counts: no title of
 /// its description is offered, nor any if it would take `BootOrder` past what
 /// Limine reads. `own_fallback` is the ESP SlopOS created, whose
-/// removable-media path is its own.
+/// removable-media path is its own. The title comes with the partition the
+/// loader is on.
 pub fn offered_title<'t>(
     listed: &[Listed<'_>],
     index: usize,
     own_fallback: Option<&Guid>,
     out: &'t mut [u8],
-) -> Option<&'t str> {
+) -> Option<(&'t str, Guid)> {
     let registered = listed.len() + usize::from(!listed.iter().any(starts_ours));
     let Listed::Value(raw) = *listed.get(index)? else {
         return None;
@@ -288,7 +290,8 @@ pub fn offered_title<'t>(
         Listed::Value(raw) => limine_takes(raw, title),
     });
     let posing = title.eq_ignore_ascii_case(FIRMWARE_ENTRY);
-    (firmware_title_ok(title) && first == Some(index) && !posing).then_some(title)
+    (firmware_title_ok(title) && first == Some(index) && !posing)
+        .then_some((title, partition.partition))
 }
 
 #[cfg(test)]

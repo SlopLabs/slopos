@@ -44,6 +44,7 @@ members = [
   "tls-core",
   "http-core",
   "remote-core",
+  "installer-core",
   "priv-core",
   "fat-core",
   "boot-core",
@@ -141,6 +142,7 @@ slopos-tls-core = { path = "tls-core" }
 slopos-verity-core = { path = "verity-core" }
 slopos-http-core = { path = "http-core" }
 slopos-remote-core = { path = "remote-core" }
+slopos-installer-core = { path = "installer-core" }
 slopos-priv-core = { path = "priv-core" }
 slopos-fat-core = { path = "fat-core" }
 slopos-boot-core = { path = "boot-core" }

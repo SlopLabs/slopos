@@ -112,47 +112,68 @@ pub fn forget_slot_bases(boot_node: &str, events: &mut dyn Events) -> Result<(),
     Ok(())
 }
 
-/// Each other system `options` lists that Limine can boot through
-/// `efi_boot_entry`, by the title it would match.
-fn other_systems(options: &[ListedOption], own_esp: Option<&Guid>) -> Vec<String> {
+/// A system other than SlopOS that the firmware's `BootOrder` lists.
+pub struct Other {
+    /// The title Limine's `efi_boot_entry` would match.
+    pub title: String,
+    /// The partition its loader is on.
+    pub partition: Guid,
+}
+
+/// Each other system `options` lists that Limine can boot.
+pub fn other_systems(options: &[ListedOption], own_esp: Option<&Guid>) -> Vec<Other> {
     let listed: Vec<_> = options.iter().map(|o| o.as_listed()).collect();
     (0..listed.len())
         .filter_map(|index| {
             let mut buf = [0u8; TITLE_MAX];
-            limine::offered_title(&listed, index, own_esp, &mut buf).map(str::to_owned)
+            let (title, partition) = limine::offered_title(&listed, index, own_esp, &mut buf)?;
+            Some(Other {
+                title: title.to_owned(),
+                partition,
+            })
         })
         .collect()
 }
 
 pub struct Menu {
     pub conf: String,
+    /// The other systems it offers.
+    pub offered: Vec<Other>,
     /// The other systems left out, each colliding with an entry there.
     pub left_out: Vec<String>,
+    /// The other systems whose loader the install removes.
+    pub removed: Vec<String>,
 }
 
 /// The configuration the new disk boots from: both slots on `boot`, each
 /// with `root` as its root and `cmdline` after it, then every other system
-/// `options` lists, but one an entry already in the menu collides with.
+/// `options` lists, but one an entry already in the menu collides with and
+/// one whose loader is on a partition in `gone`, which the install removes.
 pub fn menu(
     boot: Guid,
     root: Guid,
     cmdline: &str,
     own_esp: Option<&Guid>,
     options: &[ListedOption],
+    gone: &[Guid],
 ) -> Result<Menu, String> {
-    let titles = other_systems(options, own_esp);
+    let (removed, others): (Vec<_>, Vec<_>) = other_systems(options, own_esp)
+        .into_iter()
+        .partition(|other| gone.contains(&other.partition));
     let mut entries: Vec<MenuEntry<'_>> = layout::SLOTS
         .iter()
         .map(|&slot| MenuEntry::Slot { slot, cmdline: "" })
         .collect();
-    let mut left_out = Vec::new();
-    for title in &titles {
-        let entry = MenuEntry::Firmware { title };
-        if entries.iter().any(|e| limine::collide(e, &entry)) {
-            left_out.push(title.clone());
-        } else {
+    let mut collides = Vec::new();
+    for other in &others {
+        let entry = MenuEntry::Firmware {
+            title: &other.title,
+        };
+        let collided = entries.iter().any(|e| limine::collide(e, &entry));
+        if !collided {
             entries.push(entry);
         }
+        collides.push(collided);
     }
     let mut conf = String::new();
     Config {
@@ -166,7 +187,16 @@ pub fn menu(
     }
     .render(&mut conf)
     .map_err(|e| format!("limine.conf does not render: {e:?}"))?;
-    Ok(Menu { conf, left_out })
+    let (left_out, offered): (Vec<_>, Vec<_>) = others
+        .into_iter()
+        .zip(collides)
+        .partition(|(_, collided)| *collided);
+    Ok(Menu {
+        conf,
+        offered: offered.into_iter().map(|(other, _)| other).collect(),
+        left_out: left_out.into_iter().map(|(other, _)| other.title).collect(),
+        removed: removed.into_iter().map(|other| other.title).collect(),
+    })
 }
 
 /// What an ESP's removable-media path holds, which says whose the ESP is.

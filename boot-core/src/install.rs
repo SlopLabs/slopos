@@ -4,7 +4,8 @@
 //! moved, and an existing ESP is shared rather than replaced.
 //!
 //! A disk being erased is planned as a fresh table, [`Header::new`], with
-//! nothing used.
+//! nothing used. A new root takes the size asked of it within what the region
+//! leaves, the crash partition follows it, and the rest stays free.
 
 use crate::gpt::{Entry, Header};
 use crate::guid::Guid;
@@ -47,7 +48,7 @@ impl Role {
         }
     }
 
-    /// What a new partition of this role takes; the root takes the rest.
+    /// What a new partition of this role takes; the root's is a [`RootSize`].
     fn bytes(self) -> u64 {
         match self {
             Role::Esp => NEW_ESP_BYTES,
@@ -61,7 +62,7 @@ impl Role {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Every partition SlopOS needs, new, in the free region of that index in
-    /// [`regions`], or the largest; the disk's ESP if it has one.
+    /// [`regions`], or the [`largest_region`]; the disk's ESP if it has one.
     Free { region: Option<usize> },
     /// The root over the partition numbered `root`, whatever it held; the
     /// disk's ESP and SlopOS's boot and crash partitions where it has them,
@@ -93,12 +94,24 @@ impl Place {
     }
 }
 
+/// The bytes a new root takes: `target` on [`ALIGN_BYTES`] boundaries,
+/// clamped between `min` and the rest of the region, which it takes whole
+/// without one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootSize {
+    pub min: u64,
+    pub target: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Plan {
     pub esp: Place,
     pub boot: Place,
     pub root: Place,
     pub crash: Place,
+    /// The most the root could take: the rest of the region, at most
+    /// [`ROOT_MAX_BYTES`], or the reused partition's size.
+    pub root_max: u64,
 }
 
 impl Plan {
@@ -237,16 +250,22 @@ pub fn regions(header: &Header, array: &[u8]) -> impl Iterator<Item = Region> + 
     })
 }
 
+/// The index in [`regions`] of the largest, the first of equals.
+pub fn largest_region(header: &Header, array: &[u8]) -> Option<usize> {
+    regions(header, array)
+        .enumerate()
+        .fold(None, |best: Option<(usize, u64)>, (i, r)| match best {
+            Some((_, blocks)) if blocks >= r.blocks() => best,
+            _ => Some((i, r.blocks())),
+        })
+        .map(|(i, _)| i)
+}
+
 fn region(header: &Header, array: &[u8], index: Option<usize>) -> Result<Region, PlanError> {
-    let mut all = regions(header, array);
-    match index {
-        Some(index) => all.nth(index),
-        None => all.fold(None, |best: Option<Region>, r| match best {
-            Some(b) if b.blocks() >= r.blocks() => Some(b),
-            _ => Some(r),
-        }),
-    }
-    .ok_or(PlanError::NoRegion)
+    index
+        .or_else(|| largest_region(header, array))
+        .and_then(|index| regions(header, array).nth(index))
+        .ok_or(PlanError::NoRegion)
 }
 
 /// The one valid partition of `role`'s type, the first of several ESPs, or
@@ -263,12 +282,14 @@ fn existing(header: &Header, array: &[u8], role: Role) -> Result<Option<u32>, Pl
     Ok(first)
 }
 
-/// Lay out a SlopOS install on the disk whose table is `header` and `array`,
-/// with a root of at least `root_min` bytes.
-pub fn plan(header: &Header, array: &[u8], mode: Mode, root_min: u64) -> Result<Plan, PlanError> {
+/// Lay out a SlopOS install on the disk whose table is `header` and `array`.
+/// A reused root ignores `size`'s target.
+pub fn plan(header: &Header, array: &[u8], mode: Mode, size: RootSize) -> Result<Plan, PlanError> {
+    let root_min = size.min;
     let block = header.geometry().block();
+    let align = align_blocks(header);
     let mut wanted = [None; 4];
-    let reused_root = match mode {
+    let reused = match mode {
         Mode::Free { .. } => {
             for role in [Role::Boot, Role::Root, Role::Crash] {
                 if let Some(number) = existing(header, array, role)? {
@@ -305,7 +326,7 @@ pub fn plan(header: &Header, array: &[u8], mode: Mode, root_min: u64) -> Result<
                 wanted[role as usize] = existing(header, array, role)?.map(Place::Existing);
             }
             wanted[Role::Root as usize] = Some(Place::Existing(root));
-            Some(root)
+            Some(named.len)
         }
     };
     wanted[Role::Esp as usize] = existing(header, array, Role::Esp)?.map(Place::Existing);
@@ -314,7 +335,7 @@ pub fn plan(header: &Header, array: &[u8], mode: Mode, root_min: u64) -> Result<
         .filter(|&role| wanted[role as usize].is_none())
         .map(Role::bytes)
         .sum();
-    let needed = fixed + if reused_root.is_some() { 0 } else { root_min };
+    let needed = fixed + if reused.is_some() { 0 } else { root_min };
     let new_count = wanted.iter().filter(|w| w.is_none()).count();
     let region = if new_count == 0 {
         None
@@ -332,6 +353,7 @@ pub fn plan(header: &Header, array: &[u8], mode: Mode, root_min: u64) -> Result<
         Some(region)
     };
 
+    let mut root_max = reused.unwrap_or(0);
     let mut taken = [0u32; 4];
     let mut next_lba = region.map_or(0, |r| r.first_lba);
     for role in ROLES {
@@ -348,7 +370,14 @@ pub fn plan(header: &Header, array: &[u8], mode: Mode, root_min: u64) -> Result<
                 } else {
                     0
                 };
-                (region.last_lba + 1 - next_lba - after).min(ROOT_MAX_BYTES / block)
+                let rest = (region.last_lba + 1 - next_lba - after).min(ROOT_MAX_BYTES / block);
+                root_max = rest * block;
+                match size.target {
+                    None => rest,
+                    Some(target) => (target / ALIGN_BYTES * align)
+                        .max(root_min.div_ceil(ALIGN_BYTES) * align)
+                        .min(rest),
+                }
             }
             role => role.bytes() / block,
         };
@@ -365,6 +394,7 @@ pub fn plan(header: &Header, array: &[u8], mode: Mode, root_min: u64) -> Result<
         boot,
         root,
         crash,
+        root_max,
     })
 }
 

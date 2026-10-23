@@ -1,0 +1,18 @@
+[package]
+name = "slopos-installer-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "What the installer's engine and the programs that drive it agree on: the machine as probed, the choices, the proposal and its issues, the install's events and result, the frames between them and the window's wizard, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+slopos-boot-core = { workspace = true }
+slopos-remote-core = { workspace = true }

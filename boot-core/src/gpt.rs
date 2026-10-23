@@ -596,5 +596,16 @@ impl Partition {
     }
 }
 
+/// What comes between a disk's node and a partition's number in the
+/// partition's node, as Linux names them: `p` when the disk's name ends in a
+/// digit, so `nvme0n1p2` but `vda2`.
+pub fn partition_separator(disk: &str) -> &'static str {
+    if disk.ends_with(|c: char| c.is_ascii_digit()) {
+        "p"
+    } else {
+        ""
+    }
+}
+
 #[cfg(test)]
 mod tests;

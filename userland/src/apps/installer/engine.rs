@@ -4,18 +4,25 @@
 //! [`System::install`] reads the chosen disk again and writes nothing unless
 //! it still proposes what was reviewed. An install reports each step as an
 //! [`Event`], and keeps its steps and log lines as the new root's
-//! `/var/log/installer.log`.
+//! `/var/log/installer.log`. What it reads and proposes reaches a driver in
+//! another process as `slopos_installer_core`'s views.
 
-use std::fmt;
 use std::time::Instant;
 
 use slopos_boot_core::gpt::{Header, Partition};
-use slopos_boot_core::install::{self, Mode as PlanMode, Place, Plan, PlanError, ROLES, Role};
-use slopos_boot_core::layout::{self, BOOT_LABEL, BOOT_TYPE, ESP_LABEL, ESP_TYPE, ROOT_TYPE};
+use slopos_boot_core::install::{self, Mode as PlanMode, Place, Plan, ROLES, Role, RootSize};
+use slopos_boot_core::layout::{
+    self, BOOT_LABEL, BOOT_TYPE, CRASH_TYPE, ESP_LABEL, ESP_TYPE, ROOT_TYPE,
+};
 use slopos_boot_core::{Guid, bli};
+use slopos_installer_core::{
+    self as view, Choices, DEFAULT_CMDLINE, DEFAULT_REMOTE, Event, FIRST_PERSON, Failure,
+    FirstPerson, Issue, Mode, Opened, Person, Planned, Proposal, STEPS, Setup, Summary,
+    Table as TableView, human,
+};
 
 use super::boot::{self, Fallback};
-use super::disk::{self, Disk, human};
+use super::disk::{self, Disk};
 use super::medium::Medium;
 use super::root;
 use crate::boot_disk::{
@@ -23,27 +30,9 @@ use crate::boot_disk::{
     whole_disks,
 };
 
-const STEPS: u32 = 9;
 const CHECKING_THE_ROOT: u32 = 8;
-pub const DEFAULT_REMOTE: &str = "https://github.com/SlopLabs/slopos";
-/// A slot that panics resets to the default, which is how a tried system
-/// falls back.
-const DEFAULT_CMDLINE: &str = "panic=reboot";
-pub const FIRST_PERSON: &str = "user";
 /// Room an ESP needs beside the loader for its directories and configuration.
 const ESP_SLACK_BYTES: u64 = 1 << 20;
-
-pub enum Event {
-    Step {
-        index: u32,
-        total: u32,
-        title: &'static str,
-    },
-    /// A copy has put `done` of its `total` bytes on the root.
-    Progress { done: u64, total: u64 },
-    /// What a step did, or a line a program it ran printed.
-    Log { line: String },
-}
 
 pub trait Events {
     fn event(&mut self, event: Event);
@@ -55,160 +44,6 @@ pub trait Events {
     fn progress(&mut self, done: u64, total: u64) {
         self.event(Event::Progress { done, total });
     }
-}
-
-/// Why choices cannot be installed, worded as the CLI says it.
-pub enum Issue {
-    Medium(String),
-    /// What could not be read of the machine.
-    Probe(String),
-    Disk(String),
-    /// A disk with no table the installer reads, which only an erase takes.
-    OnlyErase {
-        node: String,
-        holds: String,
-    },
-    Plan {
-        error: PlanError,
-        node: String,
-        /// The node of the SlopOS root the disk holds, if any.
-        root: Option<String>,
-    },
-    NothingToKeep(String),
-    Esp(String),
-    Person(String),
-    /// The firmware's entries, which the new boot menu offers, could not be
-    /// read, or the menu not rendered.
-    Menu(String),
-}
-
-impl fmt::Display for Issue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Issue::Medium(why)
-            | Issue::Probe(why)
-            | Issue::Disk(why)
-            | Issue::Esp(why)
-            | Issue::Person(why)
-            | Issue::Menu(why) => f.write_str(why),
-            Issue::OnlyErase { node, holds } => {
-                write!(
-                    f,
-                    "{node} holds {holds}; only --mode erase installs onto it"
-                )
-            }
-            Issue::NothingToKeep(node) => {
-                write!(f, "--keep-root: {node} holds no SlopOS root to keep")
-            }
-            Issue::Plan { error, node, root } => match *error {
-                PlanError::NoRegion => write!(f, "{node} has no free region of that number"),
-                PlanError::NoRoom { needed, available } => write!(
-                    f,
-                    "the free region holds {}; SlopOS needs {}",
-                    human(available),
-                    human(needed)
-                ),
-                PlanError::NoPartition(n) => write!(f, "{node} has no partition {n}"),
-                PlanError::NotForRoot(n) => write!(
-                    f,
-                    "partition {n} is the ESP or SlopOS's boot or crash partition, not a root"
-                ),
-                PlanError::Installed(n) => write!(
-                    f,
-                    "SlopOS is on {node} already (partition {n}); install over it with --mode reuse{}",
-                    root.as_ref()
-                        .map_or_else(String::new, |root| format!(" --root {root}"))
-                ),
-                PlanError::Ambiguous(role) => {
-                    write!(f, "{node} has two {} partitions", role.name())
-                }
-                PlanError::RootTooSmall { needed, available } => write!(
-                    f,
-                    "the root partition holds {}; the root needs {}",
-                    human(available),
-                    human(needed)
-                ),
-                PlanError::RootElsewhere(n) => write!(
-                    f,
-                    "SlopOS's root is partition {n} of {node}; reinstall over it with --root {}",
-                    root.clone().unwrap_or_else(|| n.to_string())
-                ),
-                PlanError::RootTooLarge { limit, available } => write!(
-                    f,
-                    "the root partition holds {}; a root holds at most {}",
-                    human(available),
-                    human(limit)
-                ),
-                PlanError::NoSlot => {
-                    write!(f, "{node}'s table has no unused entry for a new partition")
-                }
-            },
-        }
-    }
-}
-
-/// Why an install stopped: at step `step`, or with nothing written before
-/// the first when it is 0.
-pub struct Failure {
-    pub step: u32,
-    pub message: String,
-}
-
-pub struct Summary {
-    pub disk: String,
-    /// The firmware entry that boots it: `Boot<entry>`.
-    pub entry: u16,
-}
-
-impl fmt::Display for Summary {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "SlopOS is installed on {}, booted by the firmware entry Boot{:04X}",
-            self.disk, self.entry
-        )
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Erase,
-    /// SlopOS's partitions new, in the free region of that index or the
-    /// largest.
-    Free {
-        region: Option<usize>,
-    },
-    /// The root over partition `root`, keeping what it holds when `keep`; the
-    /// disk's own ESP, boot and crash partitions, and new ones in the free
-    /// region where it has none.
-    Reuse {
-        root: u32,
-        region: Option<usize>,
-        keep: bool,
-    },
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct Person {
-    pub name: String,
-    /// Their password's hash, when they have a password.
-    pub password: Option<String>,
-}
-
-pub struct Choices {
-    pub disk: String,
-    pub mode: Mode,
-    /// Where `/src/slopos` fetches from, when the medium carries a clone;
-    /// [`DEFAULT_REMOTE`] unless given.
-    pub remote: Option<String>,
-    /// Whether SlopOS goes first in the firmware's boot order.
-    pub first: bool,
-    /// A new root's first administrator, [`FIRST_PERSON`] with no password
-    /// unless given; a kept root keeps its own people.
-    pub person: Option<Person>,
-    /// What the installed kernel boots with; [`DEFAULT_CMDLINE`] unless
-    /// given.
-    pub cmdline: Option<String>,
 }
 
 /// What a partition of the ESP's or SlopOS's types holds.
@@ -378,26 +213,20 @@ struct Formats {
 
 /// An install as it will be done, settled before anything is written.
 #[derive(PartialEq)]
-pub struct Proposal {
-    /// The disk as it was read, which an erase loses whole.
+pub struct Settled {
+    /// The disk as it was read, which an install reads it again to match.
     before: Disk,
-    pub erase: bool,
     plan: Plan,
     /// The table as it will be written, the plan applied.
     header: Header,
     array: Vec<u8>,
     formats: Formats,
-    keep_root: bool,
     /// Whether the ESP is SlopOS's own, whose removable-media path it writes.
     own_esp: bool,
     limine_conf: String,
-    left_out: Vec<String>,
-    remote: Option<String>,
     person: Option<Person>,
-    first: bool,
-    /// What the install does, a line each, as it is reviewed.
-    pub review: Vec<String>,
     guids: Guids,
+    pub view: Proposal,
 }
 
 /// What the install medium and the machine hold, as the installer read them.
@@ -471,7 +300,7 @@ impl System {
         Ok(())
     }
 
-    pub fn propose(&self, choices: &Choices) -> Result<Proposal, Issue> {
+    pub fn propose(&self, choices: &Choices) -> Result<Settled, Issue> {
         self.propose_on(self.opened(&choices.disk)?, choices, self.guids)
     }
 
@@ -480,7 +309,7 @@ impl System {
         open: &OpenDisk,
         choices: &Choices,
         guids: Guids,
-    ) -> Result<Proposal, Issue> {
+    ) -> Result<Settled, Issue> {
         let disk = &open.disk;
         let node = &disk.node;
         let erase = choices.mode == Mode::Erase;
@@ -491,22 +320,25 @@ impl System {
         } else {
             let table = disk.table.as_ref().ok_or_else(|| Issue::OnlyErase {
                 node: node.clone(),
-                holds: disk.holding(),
+                holds: disk.contents.holding(),
             })?;
             (table.header.grown(), table.array.clone())
         };
         let (plan_mode, keep_root) = match choices.mode {
             Mode::Erase => (PlanMode::Free { region: None }, false),
             Mode::Free { region } => (PlanMode::Free { region }, false),
+            Mode::Reuse { .. } if choices.root_size.is_some() => return Err(Issue::RootSize),
             Mode::Reuse { root, region, keep } => (PlanMode::Reuse { root, region }, keep),
         };
+        let size = RootSize {
+            min: self.medium.root_min,
+            target: choices.root_size,
+        };
         let plan =
-            install::plan(&header, &array, plan_mode, self.medium.root_min).map_err(|error| {
-                Issue::Plan {
-                    error,
-                    node: node.clone(),
-                    root: open.slopos_root(),
-                }
+            install::plan(&header, &array, plan_mode, size).map_err(|error| Issue::Plan {
+                error,
+                node: node.clone(),
+                root: open.slopos_root(),
             })?;
         if keep_root
             && let Place::Existing(n) = plan.root
@@ -521,13 +353,8 @@ impl System {
                 name: FIRST_PERSON.to_owned(),
                 password: None,
             });
-            if !slopos_accounts_core::valid_name(&person.name) {
-                return Err(Issue::Person(format!(
-                    "{}: {}",
-                    person.name,
-                    slopos_accounts_core::record::BAD_NAME
-                )));
-            }
+            slopos_accounts_core::Accounts::first(&person.name, person.password.clone())
+                .map_err(|why| Issue::Person(format!("{}: {why}", person.name)))?;
             Some(person)
         };
         let formats = self.formats(open, &plan)?;
@@ -558,39 +385,202 @@ impl System {
             .as_ref()
             .map_err(|why| Issue::Menu(why.clone()))?;
         let cmdline = choices.cmdline.as_deref().unwrap_or(DEFAULT_CMDLINE);
+        let after: Vec<Guid> = header
+            .partitions(&array)
+            .filter_map(Result::ok)
+            .map(|p| p.entry.unique)
+            .collect();
+        let gone: Vec<Guid> = disk
+            .partitions()
+            .iter()
+            .map(|p| p.entry.unique)
+            .filter(|unique| !after.contains(unique))
+            .collect();
         let menu = boot::menu(
             boot_unique,
             unique(Role::Root)?,
             cmdline,
             own_esp.then_some(&esp_unique),
             options,
+            &gone,
         )
         .map_err(Issue::Menu)?;
-        let remote = self.medium.source.then(|| {
-            choices
-                .remote
-                .clone()
-                .unwrap_or_else(|| DEFAULT_REMOTE.to_owned())
-        });
-        let mut proposal = Proposal {
+        let remote = match &choices.remote {
+            Some(url) if url.chars().any(char::is_control) => {
+                return Err(Issue::Remote(url.clone()));
+            }
+            remote => self
+                .medium
+                .source
+                .then(|| remote.clone().unwrap_or_else(|| DEFAULT_REMOTE.to_owned())),
+        };
+        let read = disk.table.as_ref().map(|t| (t.header.grown(), &t.array));
+        let beside = menu
+            .offered
+            .iter()
+            .filter(|other| after.contains(&other.partition))
+            .map(|other| other.title.clone())
+            .collect();
+        let view = Proposal::of(
+            Planned {
+                disk: node,
+                contents: disk.contents.clone(),
+                capacity: disk.geometry.capacity(),
+                before: read
+                    .as_ref()
+                    .map(|(header, array)| TableView { header, array }),
+                erase,
+                plan: &plan,
+                after: TableView {
+                    header: &header,
+                    array: &array,
+                },
+                format_esp: formats.esp,
+                format_boot: formats.boot,
+                keep_root,
+                own_esp,
+                root_min: size.min,
+            },
+            Setup {
+                toolchain: self.medium.toolchain,
+                remote,
+                person: person.as_ref().map(|p| FirstPerson {
+                    name: p.name.clone(),
+                    password: p.password.is_some(),
+                }),
+                cmdline: cmdline.to_owned(),
+                first: choices.first,
+                menu: menu.offered.into_iter().map(|other| other.title).collect(),
+                beside,
+                left_out: menu.left_out,
+                removed: menu.removed,
+            },
+        );
+        Ok(Settled {
             before: disk.clone(),
-            erase,
             plan,
             header,
             array,
             formats,
-            keep_root,
             own_esp,
             limine_conf: menu.conf,
-            left_out: menu.left_out,
-            remote,
             person,
-            first: choices.first,
-            review: Vec::new(),
             guids,
+            view,
+        })
+    }
+
+    /// What the engine read, as a driver in another process sees it.
+    pub fn view(&self) -> view::System {
+        let medium = &self.medium;
+        let listing = |disk: &Disk, opened| view::Listing {
+            capacity: disk.geometry.capacity(),
+            block: disk.geometry.block(),
+            contents: disk.contents.clone(),
+            layout: disk.layout(),
+            opened,
         };
-        proposal.review = review(&proposal, &self.medium, cmdline);
-        Ok(proposal)
+        let disks = self
+            .disks
+            .iter()
+            .map(|found| view::Disk {
+                node: found.node.clone(),
+                state: match &found.state {
+                    State::Refused(why) => view::DiskState::Refused((*why).to_owned()),
+                    State::Unreadable(why) => view::DiskState::Unreadable(why.clone()),
+                    State::Listed(disk) => view::DiskState::Listed(listing(disk, None)),
+                    State::Opened(open) => {
+                        view::DiskState::Listed(listing(&open.disk, Some(self.offers(open))))
+                    }
+                },
+            })
+            .collect();
+        view::System {
+            medium: view::Medium {
+                toolchain: medium.toolchain,
+                source: medium.source,
+                payload: medium.payload_bytes,
+                root_min: medium.root_min,
+                unmounted_payload: medium.unmounted_payload.clone(),
+            },
+            disks,
+            others: self
+                .boot_options
+                .as_ref()
+                .map(|options| {
+                    boot::other_systems(options, None)
+                        .into_iter()
+                        .map(|other| other.title)
+                        .collect()
+                })
+                .map_err(Clone::clone),
+        }
+    }
+
+    /// What each choice on the opened disk proposes, with every other answer
+    /// the engine's default.
+    fn offers(&self, open: &OpenDisk) -> Opened {
+        let node = &open.disk.node;
+        let fit = |mode| {
+            self.propose_on(open, &Choices::new(node, mode), self.guids)
+                .map(drop)
+        };
+        let roots: Vec<(u32, view::Fit)> = open
+            .parts
+            .iter()
+            .map(|part| part.entry.entry)
+            .filter(|entry| ![ESP_TYPE, BOOT_TYPE, CRASH_TYPE].contains(&entry.type_guid))
+            .map(|entry| {
+                let mode = Mode::Reuse {
+                    root: entry.number,
+                    region: None,
+                    keep: false,
+                };
+                (entry.number, fit(mode))
+            })
+            .collect();
+        let reuse = match roots.iter().find(|(_, fit)| fit.is_ok()).or(roots.first()) {
+            Some((_, fit)) => fit.clone(),
+            None if open.disk.table.is_none() => Err(Issue::OnlyErase {
+                node: node.clone(),
+                holds: open.disk.contents.holding(),
+            }),
+            None => Err(Issue::Disk(format!(
+                "{node} has no partition the root could go on"
+            ))),
+        };
+        let reinstall = open
+            .parts
+            .iter()
+            .find(|part| part.entry.entry.type_guid == ROOT_TYPE)
+            .map(|part| {
+                let root = part.entry.entry.number;
+                let keep = open.holds_root(root);
+                view::Reinstall {
+                    root,
+                    keep,
+                    fit: fit(Mode::Reuse {
+                        root,
+                        region: None,
+                        keep,
+                    }),
+                }
+            });
+        Opened {
+            erase: fit(Mode::Erase),
+            free: fit(Mode::Free { region: None }),
+            largest: open.disk.largest_region(),
+            regions: (0..open.disk.regions().len())
+                .map(|region| {
+                    fit(Mode::Free {
+                        region: Some(region),
+                    })
+                })
+                .collect(),
+            reuse,
+            roots,
+            reinstall,
+        }
     }
 
     /// A partition the install keeps must already be what it is used as: the
@@ -639,7 +629,7 @@ impl System {
     pub fn install(
         &self,
         choices: &Choices,
-        reviewed: &Proposal,
+        reviewed: &Settled,
         events: &mut dyn Events,
     ) -> Result<Summary, Failure> {
         let mut run = Run {
@@ -658,8 +648,10 @@ impl System {
             });
         if let Err(failure) = &result {
             run.note(&format!(
-                "failed in step {} of {STEPS}: {}",
-                failure.step, failure.message
+                "failed in step {} of {}: {}",
+                failure.step,
+                STEPS.len(),
+                failure.message
             ));
             // Nothing writes the root once it has been checked.
             if failure.step < CHECKING_THE_ROOT {
@@ -674,7 +666,7 @@ impl System {
         &self,
         run: &mut Run<'_>,
         choices: &Choices,
-        reviewed: &Proposal,
+        reviewed: &Settled,
     ) -> Result<Summary, String> {
         let unwritten = |issue: Issue| format!("{issue}; nothing was written");
         let open = self
@@ -693,7 +685,7 @@ impl System {
         let disk = &open.disk;
         let medium = &self.medium;
 
-        run.step(1, "writing the partition table");
+        run.step(1);
         for role in ROLES {
             if let Place::New {
                 first_lba,
@@ -704,8 +696,8 @@ impl System {
                 disk::clear_start(disk, first_lba, last_lba)?;
             }
         }
-        disk::write_table(disk, &p.header, &p.array, p.erase)?;
-        run.step(2, "re-reading it");
+        disk::write_table(disk, &p.header, &p.array, p.view.erase)?;
+        run.step(2);
         disk::reread(&disk.node)?;
         let [
             (esp, esp_node),
@@ -714,7 +706,7 @@ impl System {
             (_, crash_node),
         ] = placed(&disk.node, &p)?;
 
-        run.step(3, "formatting the new partitions");
+        run.step(3);
         if p.plan.esp.is_new() || p.formats.esp {
             disk::format_fat(&esp_node, ESP_LABEL)?;
             run.log(format!("{esp_node}: FAT32, {ESP_LABEL}"));
@@ -725,48 +717,55 @@ impl System {
         }
         // Records of the system a formatted root held, or what an install cut
         // short left, would read as this one's.
-        if p.plan.crash.is_new() || !p.keep_root {
+        let keep_root = p.view.keeps_root();
+        if p.plan.crash.is_new() || !keep_root {
             disk::zero(&crash_node)?;
             run.log(format!("{crash_node}: zeroed for crash records"));
         }
-        if !p.keep_root {
+        if !keep_root {
             disk::mke2fs(&root_node, run)?;
             run.log(format!("{root_node}: ext4"));
         }
 
-        run.step(4, "filling the root");
+        run.step(4);
         let mounted = root::Mounted::at(&root_node)?;
-        let owners = root::lay_out(&mounted, !p.keep_root)?;
-        if p.keep_root {
+        let owners = root::lay_out(&mounted, !keep_root)?;
+        if keep_root {
             root::forget_slots(&mounted)?;
         }
         run.root = Some(root_node.clone());
         run.keep_on(&mounted);
-        root::fill(&mounted, medium, p.remote.as_deref(), &owners, run)?;
+        root::fill(
+            &mounted,
+            medium,
+            p.view.setup.remote.as_deref(),
+            &owners,
+            run,
+        )?;
         if let Some(person) = &p.person {
             root::make_people(&mounted, &person.name, person.password.clone())?;
         }
         mounted.finish()?;
 
-        run.step(5, "writing both kernel slots and the base");
+        run.step(5);
         boot::write_boot(&boot_node, medium, run)?;
 
-        run.step(6, "writing the loader and its configuration");
+        run.step(6);
         boot::write_loader(&esp_node, p.own_esp, &p.limine_conf, medium)?;
         boot::forget_slot_bases(&boot_node, run)?;
 
-        run.step(7, "making slot a the default");
+        run.step(7);
         let entry = boot::set_default()?;
         run.log(format!("{} is {entry}", bli::ENTRY_DEFAULT));
         // Before the check, which then covers the log, and the firmware entry,
         // which stays the last thing written.
         run.keep_remounted()?;
 
-        run.step(CHECKING_THE_ROOT, "checking the root");
+        run.step(CHECKING_THE_ROOT);
         disk::e2fsck(&root_node, run)?;
 
-        run.step(9, "registering the firmware entry");
-        let entry = boot::register(esp, boot_node, p.first)?;
+        run.step(9);
+        let entry = boot::register(esp, boot_node, p.view.setup.first)?;
         Ok(Summary {
             disk: disk.node.clone(),
             entry,
@@ -774,122 +773,29 @@ impl System {
     }
 }
 
-impl Proposal {
+impl Settled {
     pub fn disk(&self) -> &str {
-        &self.before.node
-    }
-
-    /// The other systems the boot menu leaves out, a line each.
-    pub fn left_out(&self) -> impl Iterator<Item = String> + '_ {
-        self.left_out.iter().map(|title| {
-            format!("leaving \"{title}\" out of the menu: an entry there collides with it")
-        })
+        &self.view.disk
     }
 
     /// How the proposal heads the install's log.
     fn head(&self) -> Vec<String> {
         std::iter::once(format!("SlopOS will be installed on {}:", self.disk()))
-            .chain(self.review.iter().map(|line| format!("  {line}")))
-            .chain(self.left_out())
+            .chain(
+                self.view
+                    .review()
+                    .into_iter()
+                    .map(|line| format!("  {line}")),
+            )
+            .chain(self.view.left_out())
             .collect()
     }
-}
-
-fn describe_place(disk: &Disk, role: Role, place: Place, formatted: bool, own: bool) -> String {
-    let block = disk.geometry.block();
-    match place {
-        Place::New {
-            first_lba,
-            last_lba,
-            ..
-        } => format!(
-            "new, {} at {}",
-            human((last_lba - first_lba + 1) * block),
-            human(first_lba * block)
-        ),
-        Place::Existing(n) => {
-            let part = disk.partitions().into_iter().find(|p| p.entry.number == n);
-            let what = part.map_or_else(String::new, |p| {
-                format!(
-                    " ({}, {})",
-                    disk::type_name(&p.entry.type_guid),
-                    human(p.len)
-                )
-            });
-            match role {
-                Role::Esp if formatted => {
-                    format!("partition {n}{what}, FORMATTED: it holds no volume yet")
-                }
-                Role::Esp if own => format!("partition {n}{what}, made by an earlier install"),
-                Role::Esp => {
-                    format!("partition {n}{what}, shared: SlopOS writes \\EFI\\SlopOS\\ only")
-                }
-                _ if formatted => format!("partition {n}{what}, FORMATTED"),
-                _ => format!("partition {n}{what}, kept"),
-            }
-        }
-    }
-}
-
-fn review(p: &Proposal, medium: &Medium, cmdline: &str) -> Vec<String> {
-    let mut lines = vec![if p.erase {
-        format!("a new partition table: EVERYTHING on {} is lost", p.disk())
-    } else {
-        "new entries in its partition table; every other partition stays as it is".to_owned()
-    }];
-    for role in ROLES {
-        let formatted = match role {
-            Role::Esp => p.formats.esp,
-            Role::Boot => p.formats.boot,
-            Role::Root | Role::Crash => !p.keep_root,
-        };
-        lines.push(format!(
-            "{}: {}",
-            role.name(),
-            describe_place(&p.before, role, p.plan.place(role), formatted, p.own_esp)
-        ));
-    }
-    if medium.toolchain {
-        lines.push("/usr/local: the toolchain the medium carries".to_owned());
-    }
-    match &p.remote {
-        Some(url) if p.keep_root => lines.push(format!(
-            "/src/slopos: the root's own if it has one, else the medium's clone, fetching from {url}"
-        )),
-        Some(url) => lines.push(format!(
-            "/src/slopos: the medium's clone, fetching from {url}"
-        )),
-        None => {}
-    }
-    lines.push(match &p.person {
-        Some(person) => format!(
-            "{}: its first administrator, logged in by the desktop, {}",
-            person.name,
-            if person.password.is_some() {
-                "with the password typed"
-            } else {
-                "with no password"
-            }
-        ),
-        None => "people: the root's own".to_owned(),
-    });
-    lines.push(format!("boots with: {cmdline}"));
-    lines.push(format!(
-        "firmware entry \"{}\": {}",
-        layout::FIRMWARE_ENTRY,
-        if p.first {
-            "first in the boot order"
-        } else {
-            "where it stands in the boot order, or after the systems there"
-        }
-    ));
-    lines
 }
 
 /// The plan's partitions, as the table the kernel re-read names them: each
 /// entry must be the one written, GUIDs and blocks alike, since the loader's
 /// configuration was rendered from those.
-fn placed(node: &str, p: &Proposal) -> Result<[(Partition, String); 4], String> {
+fn placed(node: &str, p: &Settled) -> Result<[(Partition, String); 4], String> {
     let reread = Disk::open(node)?.partitions();
     let written: Vec<Partition> = p
         .header
@@ -930,12 +836,8 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
-    fn step(&mut self, index: u32, title: &'static str) {
-        self.event(Event::Step {
-            index,
-            total: STEPS,
-            title,
-        });
+    fn step(&mut self, index: u32) {
+        self.event(Event::step(index));
     }
 
     fn note(&mut self, text: &str) {

@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# A disk `just test-installer` installs onto: 16 GiB, sparse, and as one of
-# three machines would have it.
+# A disk `just test-installer` installs onto: sparse, and as one of three
+# machines would have it.
 #
 # Usage: make_installer_disk.sh blank|foreign|reuse <out.img>
 #
-#   blank    nothing on it.
-#   foreign  another system's: an ESP holding its loader under \EFI\other\,
-#            a data partition, and the rest free.
-#   reuse    a partition named installer-test-root holding a Linux filesystem,
-#            for the root, and the rest free.
+#   blank    16 GiB with nothing on it.
+#   foreign  another system's, 32 GiB, so a root of the size the check asks
+#            for leaves free space: an ESP holding its loader under
+#            \EFI\other\, a data partition, and the rest free.
+#   reuse    16 GiB: a partition named installer-test-root holding a Linux
+#            filesystem, for the root, and the rest free.
 #
 # For `foreign`, `<out.img>.foreign/` keeps what the other system's files and
 # partition held, which the check compares the disk with afterwards.
@@ -33,6 +34,7 @@ done
 bootdisk_layout
 
 rm -rf "$OUT" "$OUT.foreign"
+[ "$KIND" != foreign ] || SIZE=32G
 truncate -s "$SIZE" "$OUT"
 mib() { echo $(( $1 * 2048 )); }
 place() {

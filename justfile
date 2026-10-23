@@ -714,6 +714,23 @@ test-installer *DISKS:
         rm -f "$image"
         return "$ok"
     }
+    # The root as large as the install asked, the crash partition after it,
+    # and the rest of the disk free.
+    check_root_size() {
+        local disk="$1" log="$2" asked root crash start size crash_start crash_size sector last free
+        asked="$(sed -n 's/.*INSTALLER-ROOT-SIZE \([0-9]*\).*/\1/p' "$log" | head -n 1)"
+        root="$(bootdisk_partition "$disk" "$ROOT_TYPE")" &&
+            crash="$(bootdisk_partition "$disk" "$CRASH_TYPE")" ||
+            { echo "FAIL: $disk holds no root and crash partition" >&2; return 1; }
+        read -r start size <<<"$root"
+        read -r crash_start crash_size <<<"$crash"
+        sector="$(sfdisk --dump "$disk" | sed -n 's/^sector-size: *//p')"
+        last="$(sfdisk --dump "$disk" | sed -n 's/^last-lba: *//p')"
+        free=$(( (last + 1) * sector - crash_start - crash_size ))
+        [ -n "$asked" ] && [ "$size" = "$asked" ] && [ "$crash_start" = $((start + size)) ] &&
+            [ "$free" -ge $((1 << 30)) ] ||
+            { echo "FAIL: the root is $size bytes at $start, asked ${asked:-nothing}; the crash partition at $crash_start; $free bytes free after it" >&2; return 1; }
+    }
     # What the disk held before the install, against what it holds after.
     check_kept() {
         local disk="$1" kind="$2" keep="$1.foreign" window start size file old new ok=0
@@ -773,7 +790,8 @@ test-installer *DISKS:
         built="$payload"
         markers=("INSTALLER-INSTALLED" "ok 1 - installed_built_and_committed"
             "installed the apps at /usr/local" "installer:   e2fsck: Pass 5: ")
-        [ "$kind" != foreign ] || markers+=("INSTALLER-REVIEWED-CHANGED")
+        [ "$kind" != foreign ] || markers+=("INSTALLER-REVIEWED-CHANGED" "INSTALLER-ROOT-SIZE ")
+        [ "$kind" != reuse ] || markers+=("INSTALLER-SERVED-LEFT")
         if [ "$kind" = optical ]; then
             medium="cdrom:{{iso_installer}}" built=0
             markers+=("INSTALL: no disk carries the medium's GPT disk GUID"
@@ -806,6 +824,7 @@ test-installer *DISKS:
                 { echo "FAIL: $kind: the disk built a system with no toolchain installed" >&2; missing=1; }
             check_disk "$disk" "$kind" || missing=1
         fi
+        [ "$kind" != foreign ] || check_root_size "$disk" "$logs-install.log" || missing=1
         check_kept "$disk" "$kind" || missing=1
         if [ "$missing" = 0 ] && [ "$kind" = blank ]; then
             # The firmware boots SlopOS first now; a person picks the stick
@@ -1411,9 +1430,9 @@ test-remote: _build-userland _base-recipes
     fi
     echo "test-remote: identity, commands, files, kernel log, the sealed pairing, install and power-off all held"
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, priv-core, fat-core, boot-core, tree-core, accounts-core, extension-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, extension, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, tree-core, accounts-core, extension-core, tls-core, chrome-core, slibc-core, kallsyms, initramfs, extension, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-accounts-core -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-accounts-core -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

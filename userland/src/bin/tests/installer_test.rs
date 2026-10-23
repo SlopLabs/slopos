@@ -9,8 +9,9 @@
 //! 0 (the live system, the medium at `/media/install`): on a disk another
 //!   system is on, give it the firmware entry that system would have; run
 //!   the installer, on a blank disk from the shell answering its questions,
-//!   a person named and a password typed among them, on the others with
-//!   every answer a flag.
+//!   a person named and a password typed among them, beside the other system
+//!   with every answer a flag and a root size, and onto the partition to
+//!   reuse as a window does, through privd's `installer --serve`.
 //! 1 (`slopos-a` of the installed disk): the root is the disk's, its first
 //!   administrator the person the installer was told of, the other system's
 //!   entry is still in `BootOrder` and in Limine's menu, and the clone
@@ -45,10 +46,15 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use slopos_abi::fs::SESSION_UID;
-use slopos_abi::syscall::UserWinsize;
+use slopos_abi::syscall::{O_CLOEXEC, UserWinsize};
 use slopos_boot_core::gpt::{self, Entry, Header, Location, Partition, Piece};
+use slopos_boot_core::install::Role;
 use slopos_boot_core::layout::{self, ESP_TYPE, ROOT_TYPE};
 use slopos_boot_core::{base, bli, device_path, load_option, variables};
+use slopos_installer_core::protocol::{self, Reply as EngineReply, Request as EngineRequest};
+use slopos_installer_core::{Choices, Event, Issue, Mode, Part, Tag, root_min};
+use slopos_priv_core::wire::{Exit, Reply as PrivdReply, Request as PrivdRequest};
+use slopos_remote_core::Deframer;
 use slopos_slibc::test_harness::note;
 use slopos_userland::accounts::Store;
 use slopos_userland::base_image::retagged;
@@ -56,12 +62,13 @@ use slopos_userland::boot_disk::{
     BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, not_installable,
     open_fat, partition_node, set_loader_var, table_of, whole_disks,
 };
+use slopos_userland::privd::{Connection, request_id};
 use slopos_userland::selfhost::{selfhost_install, workspace};
-use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
 use slopos_userland::syscall::efi::{efivar_get, efivar_set};
 use slopos_userland::syscall::error::SyscallError;
 use slopos_userland::syscall::fs::{self, mount, sync, umount2};
+use slopos_userland::syscall::{OwnedFd, UserUtsname};
 use slopos_userland::syscall::{net, process};
 
 const STAGE: &str = "SlopOSInstallerTestStage";
@@ -102,6 +109,9 @@ const RESCUE_TAG: &str = "installer-test-rescued";
 const TERMINAL_DEADLINE: Duration = Duration::from_secs(120);
 /// What the install keeps of itself on the root it made or refilled.
 const INSTALL_LOG: &str = "/var/log/installer.log";
+const INSTALL_ACTION: &str = "org.slopos.install";
+const GIB: u64 = 1 << 30;
+const MIB: u64 = 1 << 20;
 /// What the installed system boots with: this test again, and a slot that
 /// panics falls back.
 const INSTALLED_CMDLINE: &str = "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip panic=reboot watchdog.miss_threshold=300 tests.run=*ext2_aaa*,*installer*";
@@ -577,6 +587,247 @@ fn refused_once_changed(disk: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `installer --serve` as privd runs it for this requester, which asks as
+/// `root` and so is asked nothing, on two pipes this end holds the other
+/// ends of.
+struct Engine {
+    privd: Connection,
+    request: u64,
+    to: OwnedFd,
+    from: OwnedFd,
+    replies: Deframer,
+}
+
+impl Engine {
+    fn start() -> Result<Engine, String> {
+        let mut privd = Connection::open()?;
+        let pipe = || fs::pipe2(O_CLOEXEC as u32).map_err(|e| format!("pipe: {e}"));
+        let ((engine_in, to), (from, engine_out)) = (pipe()?, pipe()?);
+        let request = PrivdRequest {
+            id: request_id(),
+            action: INSTALL_ACTION.into(),
+            args: vec![b"--serve".to_vec()],
+            cwd: false,
+            terminal: false,
+        };
+        privd.send(&request, &[engine_in.raw(), engine_out.raw(), 2])?;
+        drop((engine_in, engine_out));
+        match privd.reply(request.id)? {
+            Some(PrivdReply::Started { .. }) => {}
+            other => return Err(format!("privd answered {other:?} for {INSTALL_ACTION}")),
+        }
+        let mut engine = Engine {
+            privd,
+            request: request.id,
+            to,
+            from,
+            replies: protocol::replies(),
+        };
+        match engine.ask(EngineRequest::Hello {
+            version: protocol::VERSION,
+        })? {
+            EngineReply::Hello { version } if version == protocol::VERSION => Ok(engine),
+            other => Err(format!("the engine said {other:?} to Hello")),
+        }
+    }
+
+    fn send(&self, request: &EngineRequest) -> Result<(), String> {
+        let frame = request.frame();
+        let mut sent = 0;
+        while sent < frame.len() {
+            match fs::write_slice(self.to.raw(), &frame[sent..]) {
+                Ok(n) => sent += n,
+                Err(SyscallError::EINTR) => {}
+                Err(e) => return Err(format!("writing to the engine: {e}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn reply(&mut self) -> Result<EngineReply, String> {
+        let mut buf = [0u8; 4096];
+        loop {
+            if let Some((kind, payload)) = self.replies.next_frame().map_err(|e| e.to_string())? {
+                return EngineReply::decode(kind, &payload).map_err(|e| e.to_string());
+            }
+            match fs::read_slice(self.from.raw(), &mut buf) {
+                Ok(0) => return Err("the engine ended without answering".into()),
+                Ok(n) => self.replies.push(&buf[..n]),
+                Err(SyscallError::EINTR) => {}
+                Err(e) => return Err(format!("reading the engine: {e}")),
+            }
+        }
+    }
+
+    fn ask(&mut self, request: EngineRequest) -> Result<EngineReply, String> {
+        self.send(&request)?;
+        self.reply()
+    }
+
+    /// Probe the machine and open the disk `node`: the partitions it offers
+    /// as a root, each with whether it fits.
+    fn open(&mut self, node: &str) -> Result<Vec<(u32, bool)>, String> {
+        match self.ask(EngineRequest::Probe)? {
+            EngineReply::System(system) if system.disk(node).is_some() => {}
+            other => return Err(format!("the engine probed {other:?}")),
+        }
+        let opened = match self.ask(EngineRequest::Open { disk: node.into() })? {
+            EngineReply::System(system) => system.disk(node).and_then(|d| d.opened().cloned()),
+            other => return Err(format!("the engine opened {other:?}")),
+        };
+        let opened = opened.ok_or_else(|| format!("{node} came back unopened"))?;
+        Ok(opened
+            .roots
+            .iter()
+            .map(|(n, fit)| (*n, fit.is_ok()))
+            .collect())
+    }
+
+    fn propose(&mut self, choices: &Choices) -> Result<EngineReply, String> {
+        self.ask(EngineRequest::Propose(choices.clone()))
+    }
+
+    /// Close the engine's input and wait for privd to say how it exited.
+    fn exited(mut self) -> Result<i32, String> {
+        drop(self.to);
+        let mut buf = [0u8; 4096];
+        while matches!(fs::read_slice(self.from.raw(), &mut buf), Ok(n) if n > 0) {}
+        loop {
+            match self.privd.reply(self.request)? {
+                Some(PrivdReply::Exited(Exit::Code(code))) => return Ok(code),
+                Some(PrivdReply::Exited(Exit::Signal(signal))) => {
+                    return Ok(128 + i32::from(signal));
+                }
+                Some(_) => {}
+                None => return Err("privd closed the connection".into()),
+            }
+        }
+    }
+}
+
+/// The reuse disk installed as the window installs it, through privd's
+/// `installer --serve`: a driver that leaves before `Install` writes
+/// nothing, an install of a proposal it was not last given is refused with
+/// nothing written and the engine serves on, and then the proposal for the
+/// partition to reuse goes in. Its events are printed as the CLI prints them.
+fn served_install(disk: &str, root: u32) -> Result<(), String> {
+    let direct = Command::new("/bin/installer")
+        .arg("--serve")
+        .output()
+        .map_err(|e| format!("installer --serve: {e}"))?;
+    if direct.status.success()
+        || !String::from_utf8_lossy(&direct.stderr).contains("--serve answers only")
+    {
+        return Err(format!(
+            "installer --serve outside privd exited {:?}",
+            direct.status
+        ));
+    }
+    let mut choices = Choices::new(
+        disk,
+        Mode::Reuse {
+            root,
+            region: None,
+            keep: false,
+        },
+    );
+    choices.remote = Some(REMOTE.into());
+    choices.cmdline = Some(INSTALLED_CMDLINE.into());
+
+    let before = table_of(disk).map(|t| t.array);
+    let mut engine = Engine::start()?;
+    let roots = engine.open(disk)?;
+    if !roots.contains(&(root, true)) {
+        return Err(format!(
+            "partition {root} is not offered as a root: {roots:?}"
+        ));
+    }
+    let mut sized = choices.clone();
+    sized.root_size = Some(GIB);
+    match engine.propose(&sized)? {
+        EngineReply::Issue(Issue::RootSize) => {}
+        other => return Err(format!("a size for a reused root was answered {other:?}")),
+    }
+    let EngineReply::Proposal { proposal, .. } = engine.propose(&choices)? else {
+        return Err("the reuse was not proposed".into());
+    };
+    match proposal.role(Role::Root) {
+        Some((Tag::Reuse, Part::Existing { number, .. })) if *number == root => {}
+        other => return Err(format!("the proposal does to the root {other:?}")),
+    }
+    match engine.exited()? {
+        0 if table_of(disk).map(|t| t.array) == before => {
+            println!("INSTALLER-SERVED-LEFT {disk}: nothing written")
+        }
+        code => {
+            return Err(format!(
+                "the engine left before Install exited {code}, or wrote"
+            ));
+        }
+    }
+
+    let mut engine = Engine::start()?;
+    engine.open(disk)?;
+    let EngineReply::Proposal { id, .. } = engine.propose(&choices)? else {
+        return Err("the reuse was not proposed".into());
+    };
+    let stale = EngineRequest::Install {
+        choices: choices.clone(),
+        proposal: id + 1,
+    };
+    match engine.ask(stale)? {
+        EngineReply::Failed(failure)
+            if failure.step == 0 && table_of(disk).map(|t| t.array) == before => {}
+        other => return Err(format!("a stale install was answered {other:?}, or wrote")),
+    }
+    engine.open(disk)?;
+    let EngineReply::Proposal { id, .. } = engine.propose(&choices)? else {
+        return Err("the reuse was not proposed again".into());
+    };
+    engine.send(&EngineRequest::Install {
+        choices,
+        proposal: id,
+    })?;
+    loop {
+        match engine.reply()? {
+            EngineReply::Event(Event::Step {
+                index,
+                total,
+                title,
+            }) => println!("installer: [{index}/{total}] {title}"),
+            EngineReply::Event(Event::Log { line }) => println!("installer:   {line}"),
+            EngineReply::Event(Event::Progress { .. }) => {}
+            EngineReply::Done(summary) => {
+                println!("installer: {summary}");
+                break;
+            }
+            other => return Err(format!("the install ended {other:?}")),
+        }
+    }
+    match engine.exited()? {
+        0 => Ok(()),
+        code => Err(format!("the engine exited {code} after its install")),
+    }
+}
+
+/// The root size the foreign disk's install asks for: a GiB past the least
+/// a root of this medium takes, so it is neither bound.
+fn foreign_root_size() -> Result<u64, String> {
+    let payload = std::path::Path::new(layout::PAYLOAD_DIR);
+    let carried = ["usr/local", "src"]
+        .iter()
+        .any(|tree| payload.join(tree).exists());
+    let bytes = if carried {
+        let path = std::ffi::CString::new(layout::PAYLOAD_DIR).map_err(|_| "a NUL")?;
+        let stats = fs::statfs_path(path.as_ptr())
+            .map_err(|e| format!("{}: {e:?}", layout::PAYLOAD_DIR))?;
+        Some(stats.f_blocks * stats.f_bsize)
+    } else {
+        None
+    };
+    Ok(root_min(bytes).div_ceil(MIB) * MIB + GIB)
+}
+
 /// The payload the kernel mounted stays as it mounted it: nothing unmounts
 /// it, covers it or writes it.
 fn payload_held() -> Result<(), String> {
@@ -627,6 +878,7 @@ fn install() -> bool {
         "--yes".to_owned(),
     ];
     let mut typed = None;
+    let mut served = None;
     match kind {
         Kind::Erase => {
             let mut answers = String::from("\n");
@@ -665,8 +917,17 @@ fn install() -> bool {
                     return false;
                 }
             }
+            let size = match foreign_root_size() {
+                Ok(size) => size,
+                Err(why) => {
+                    note(&why);
+                    return false;
+                }
+            };
+            println!("INSTALLER-ROOT-SIZE {size}");
             args.extend(flagged);
             args.extend(["--mode", "free", "--first"].map(str::to_owned));
+            args.extend(["--root-size".to_owned(), size.to_string()]);
             args.extend(["--person", "user", "--no-password"].map(str::to_owned));
             if !set_var(PERSON, b"user") {
                 return false;
@@ -705,36 +966,41 @@ fn install() -> bool {
                 note(&why);
                 return false;
             }
-            let root_choice = if reinstall {
-                "--keep-root"
+            if reinstall {
+                args.extend(flagged);
+                args.extend(
+                    [
+                        "--mode",
+                        "reuse",
+                        "--root",
+                        &node,
+                        "--keep-root",
+                        "--not-first",
+                    ]
+                    .map(str::to_owned),
+                );
             } else {
-                args.extend(["--person", "user", "--no-password"].map(str::to_owned));
+                served = Some(root.entry.number);
                 if !set_var(PERSON, b"user") {
                     return false;
                 }
-                "--format-root"
-            };
-            args.extend(flagged);
-            args.extend(
-                [
-                    "--mode",
-                    "reuse",
-                    "--root",
-                    &node,
-                    root_choice,
-                    "--not-first",
-                ]
-                .map(str::to_owned),
-            );
+            }
         }
     }
     let started = Instant::now();
-    let status = match &typed {
-        None => Command::new("/bin/installer").args(&args).status(),
-        Some(answers) => answer_on_stdin(&args, answers),
+    let installed = match (&typed, served) {
+        (_, Some(root)) => served_install(&disk, root),
+        (None, None) => match Command::new("/bin/installer").args(&args).status() {
+            Ok(status) if status.success() => Ok(()),
+            other => Err(format!("installer {}: {other:?}", args.join(" "))),
+        },
+        (Some(answers), None) => match answer_on_stdin(&args, answers) {
+            Ok(status) if status.success() => Ok(()),
+            other => Err(format!("installer {}: {other:?}", args.join(" "))),
+        },
     };
-    if !matches!(status, Ok(s) if s.success()) {
-        note(&format!("installer {}: {status:?}", args.join(" ")));
+    if let Err(why) = installed {
+        note(&why);
         return false;
     }
     println!(

@@ -221,13 +221,8 @@ pub fn whole_disks() -> Result<Vec<String>, String> {
     let nodes = block_nodes()?;
     let is_partition = |node: &String| {
         nodes.iter().any(|disk| {
-            let separator = if disk.ends_with(|c: char| c.is_ascii_digit()) {
-                "p"
-            } else {
-                ""
-            };
             node.strip_prefix(disk.as_str())
-                .and_then(|rest| rest.strip_prefix(separator))
+                .and_then(|rest| rest.strip_prefix(gpt::partition_separator(disk)))
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
     };
@@ -245,16 +240,14 @@ fn block_nodes() -> Result<Vec<String>, String> {
     Ok(nodes)
 }
 
-/// The node the kernel names `partition` of `disk` with, as Linux does: a `p`
-/// between them when the disk's name ends in a digit. Held to the partition's
-/// size, so a name that is some other window is refused.
+/// The node the kernel names `partition` of `disk` with, held to the
+/// partition's size, so a name that is some other window is refused.
 pub fn partition_node(disk: &str, partition: &Partition) -> Result<String, String> {
-    let separator = if disk.ends_with(|c: char| c.is_ascii_digit()) {
-        "p"
-    } else {
-        ""
-    };
-    let node = format!("{disk}{separator}{}", partition.entry.number);
+    let node = format!(
+        "{disk}{}{}",
+        gpt::partition_separator(disk),
+        partition.entry.number
+    );
     let size = File::open(&node)
         .and_then(|file| file.metadata())
         .map_err(|e| format!("{node}: {e}"))?
