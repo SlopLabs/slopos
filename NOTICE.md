@@ -450,6 +450,12 @@ QEMU, OVMF / EDK II, Verus and Z3, Miri, rr, `just`, and the Go toolchain
 verify and test SlopOS. None of their code is incorporated into SlopOS or
 distributed with it, and their licenses impose no terms on SlopOS output.
 
+The `caveman-commit` agent skill in
+[`.agents/skills/caveman-commit/`](.agents/skills/caveman-commit/), which
+writes this repository's commit messages, is Caveman's — `Copyright 2026
+Julius Brussee` — checked in unmodified under the Apache License, Version 2.0,
+with its text and notice beside it. It is not built into anything.
+
 ## Trademarks
 
 Linux® is a registered trademark of Linus Torvalds. seL4® is a trademark of

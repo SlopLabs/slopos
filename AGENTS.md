@@ -2637,7 +2637,7 @@ Subjects are `<area>: <imperative summary>` (e.g., `mm: tighten buddy free path`
 ### Commit messages (MANDATORY)
 **Always use the `caveman-commit` skill to write the commit message. Never hand-write one.**
 
-- Load it with `/skill:caveman-commit`, or read `~/.agents/skills/caveman-commit/SKILL.md` directly if skill commands are unavailable.
+- It is checked in at `.agents/skills/caveman-commit/SKILL.md`, which `.claude/skills/caveman-commit/SKILL.md` links, so nothing needs installing. Load it with `/skill:caveman-commit`, or read that file directly if skill commands are unavailable.
 - The skill only *generates* the message; staging and running `git commit` remain your job.
 - This applies to every commit, including one-line and trivial ones.
 
