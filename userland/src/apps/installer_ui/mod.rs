@@ -26,6 +26,11 @@ use crate::syscall::{core as sys_core, process};
 pub const WIDTH: u32 = 900;
 pub const HEIGHT: u32 = 540;
 
+/// The argument init opens the window with on a live boot, whose first page
+/// asks whether to try SlopOS or install it; without it the window asks
+/// privd for the engine at once.
+pub const WELCOME: &str = "--welcome";
+
 /// What privd, and then the engine, said.
 #[derive(Clone, Debug)]
 pub enum EngineSays {
@@ -70,6 +75,7 @@ enum Field {
 pub struct InstallerApp {
     wizard: Wizard,
     link: Box<dyn Link>,
+    welcome: bool,
     sender: Option<AppSender<Msg>>,
     page: Page,
     asking: bool,
@@ -85,10 +91,11 @@ pub struct InstallerApp {
 }
 
 impl InstallerApp {
-    pub fn new(link: Box<dyn Link>) -> InstallerApp {
+    pub fn new(link: Box<dyn Link>, welcome: bool) -> InstallerApp {
         InstallerApp {
             wizard: Wizard::new(),
             link,
+            welcome,
             sender: None,
             page: Page::Welcome,
             asking: false,
@@ -277,7 +284,10 @@ impl App for InstallerApp {
 
     fn on_start(&mut self, sender: AppSender<Msg>) -> Action {
         self.sender = Some(sender);
-        Action::None
+        match self.welcome {
+            true => Action::None,
+            false => self.on(Input::Next),
+        }
     }
 
     fn update(&mut self, msg: Msg) -> Action {
@@ -379,5 +389,7 @@ pub fn installer_ui_main() {
         sys_core::exit_with_code(1);
     }
     process::ignore_signal(SIGPIPE);
-    slopos_appkit::run_app(InstallerApp::new(Box::new(Privd::default())), WIDTH, HEIGHT);
+    let welcome = std::env::args().nth(1).as_deref() == Some(WELCOME);
+    let app = InstallerApp::new(Box::new(Privd::default()), welcome);
+    slopos_appkit::run_app(app, WIDTH, HEIGHT);
 }

@@ -78,11 +78,20 @@ fn fail(why: impl AsRef<str>) -> bool {
 }
 
 impl Window {
+    /// As init opens it on a live boot.
     fn new() -> Window {
+        Window::opened(true)
+    }
+
+    fn from_the_dock() -> Window {
+        Window::opened(false)
+    }
+
+    fn opened(welcome: bool) -> Window {
         let queue = UiQueue::new().expect("a wake pipe");
         let sender = AppSender::new(queue.sender());
         let asked = Arc::new(Mutex::new(Vec::new()));
-        let mut app = InstallerApp::new(Box::new(Recorder(asked.clone())));
+        let mut app = InstallerApp::new(Box::new(Recorder(asked.clone())), welcome);
         app.on_start(sender.clone());
         Window {
             app,
@@ -427,6 +436,9 @@ fn welcome_asks_privd_once_and_probes() -> bool {
     if !(w.enabled("Install SlopOS") && w.button("Try SlopOS").is_some()) {
         return fail("Welcome offers to try or install");
     }
+    if !w.asked().is_empty() {
+        return fail("the welcome asked privd before the person chose");
+    }
     w.press("Install SlopOS");
     if w.asked() != [Asked::Start] || w.enabled("Install SlopOS") {
         return fail("one start, the button waiting on it");
@@ -469,6 +481,26 @@ fn a_refusal_leaves_the_person_at_welcome() -> bool {
         return fail("Install SlopOS does not ask again");
     }
     w.press("Try SlopOS") == Some(Action::Exit)
+}
+
+/// Started from the dock's entry, whose press chose to install, the window
+/// asks privd at once and offers no try, since the boot may keep what is
+/// done; a refusal leaves the person at Welcome, free to ask again.
+fn the_dock_s_entry_asks_privd_at_once() -> bool {
+    let mut w = Window::from_the_dock();
+    if w.asked() != [Asked::Start] || w.page() != Page::Welcome || w.enabled("Install SlopOS") {
+        return fail("the window did not ask privd as it started");
+    }
+    let says_keeps_nothing = w.texts().iter().any(|t| t.contains("keeps nothing"));
+    if w.button("Try SlopOS").is_some() || says_keeps_nothing {
+        return fail("the dock's window offers to try a system that may keep what is done");
+    }
+    let why = "the person at the machine refused";
+    w.app.update(Msg::Engine(EngineSays::Refused(why.into())));
+    if !w.shows(why) || !w.enabled("Install SlopOS") || !w.asked().is_empty() {
+        return fail("the refusal is not left to the person at Welcome");
+    }
+    w.press("Close") == Some(Action::Exit)
 }
 
 /// The disks the engine offers come first, the medium last and disabled;
@@ -1053,6 +1085,10 @@ fn main() {
         (
             "a_refusal_leaves_the_person_at_welcome",
             a_refusal_leaves_the_person_at_welcome,
+        ),
+        (
+            "the_dock_s_entry_asks_privd_at_once",
+            the_dock_s_entry_asks_privd_at_once,
         ),
         (
             "the_disk_page_opens_the_disk_chosen",

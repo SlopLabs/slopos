@@ -549,7 +549,7 @@ fn its_app_entry_replaces_none() -> bool {
     {
         return fail(format!("the dock reads {shares:?}"));
     }
-    let entries = app_entry::read(&shares);
+    let entries = app_entry::read(&shares, false);
     let exec = |id: &str| entries.iter().find(|e| e.id == id).map(|e| e.exec.as_str());
     let ours = format!("/opt/{NAME}/bin/{COMMAND}");
     if exec("act-app") != Some(ours.as_str()) {

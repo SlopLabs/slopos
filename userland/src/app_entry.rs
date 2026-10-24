@@ -1,6 +1,7 @@
 //! App entries, what the dock launches: `share/slopos/apps/<id>.app`, lines of
-//! `key=value` naming the app's `id`, its `name`, the program it `exec`s and
-//! an `icon`, a PNG in the same tree's `share/slopos/icons/`.
+//! `key=value` naming the app's `id`, its `name`, the program it `exec`s, an
+//! `icon`, a PNG in the same tree's `share/slopos/icons/`, and `boot=medium`
+//! for an app shown only on a boot from the install medium.
 //!
 //! Entries are read from the `share` of each extension shown at
 //! `/opt/<name>`, by name, then the base's `/usr/share`, then
@@ -83,11 +84,13 @@ pub struct AppEntry {
     pub name: String,
     pub exec: String,
     pub icon: Option<PathBuf>,
+    pub medium: bool,
 }
 
 /// The entry `text` states as `id`, whose icon is in `icons`. Every line is
 /// `key=value`; a key this reader does not know is passed over, so an entry
-/// can say more than an older dock reads.
+/// can say more than an older dock reads, but a `boot` naming a boot this
+/// reader does not know makes no entry.
 pub fn parse(id: &str, text: &str, icons: &Path) -> Option<AppEntry> {
     let mut fields = BTreeMap::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
@@ -103,17 +106,30 @@ pub fn parse(id: &str, text: &str, icons: &Path) -> Option<AppEntry> {
         Some(file) if !file.is_empty() && !file.contains('/') => Some(icons.join(file)),
         Some(_) => return None,
     };
+    let medium = match fields.get("boot") {
+        None => false,
+        Some(&"medium") => true,
+        Some(_) => return None,
+    };
     (fields.get("id") == Some(&id)).then(|| AppEntry {
         id: id.to_string(),
         name: name.to_string(),
         exec: exec.to_string(),
         icon,
+        medium,
     })
 }
 
-/// Every entry under `shares`, a later one replacing an earlier with its id,
-/// ordered by name.
-pub fn read(shares: &[Share]) -> Vec<AppEntry> {
+/// The entries the dock pins on this boot for the person whose home is
+/// `home`.
+pub fn pinned(home: Option<&str>) -> Vec<AppEntry> {
+    read(&shares(home), crate::privd::on_the_medium())
+}
+
+/// Every entry under `shares` shown on a boot, one from the install medium
+/// when `medium`, a later one replacing an earlier with its id, ordered by
+/// name.
+pub fn read(shares: &[Share], medium: bool) -> Vec<AppEntry> {
     let mut entries = BTreeMap::new();
     for share in shares {
         let dir = share.dir.join("slopos/apps");
@@ -139,7 +155,8 @@ pub fn read(shares: &[Share]) -> Vec<AppEntry> {
             }
             let entry = read_bounded(&path, ENTRY_MAX)
                 .and_then(|bytes| String::from_utf8(bytes).ok())
-                .and_then(|text| parse(id, &text, &icons));
+                .and_then(|text| parse(id, &text, &icons))
+                .filter(|entry| medium || !entry.medium);
             if let Some(entry) = entry {
                 entries.insert(entry.id.clone(), entry);
             }

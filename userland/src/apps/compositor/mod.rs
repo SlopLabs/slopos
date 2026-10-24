@@ -131,9 +131,7 @@ impl WindowManager {
         let mut shelf = dock::LauncherShelf::new();
         let home = std::env::var("HOME").ok();
         if !gate.greeter() {
-            shelf.pin(crate::app_entry::read(&crate::app_entry::shares(
-                home.as_deref(),
-            )));
+            shelf.pin(crate::app_entry::pinned(home.as_deref()));
         }
         let protocol = match gate.greeter() {
             true => None,

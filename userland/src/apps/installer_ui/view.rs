@@ -232,7 +232,7 @@ fn footer(app: &InstallerApp) -> Node<Msg> {
     let w = &app.wizard;
     let left = match app.page {
         Page::Welcome => Some(button(
-            "Try SlopOS",
+            if app.welcome { "Try SlopOS" } else { "Close" },
             Msg::Close,
             ButtonStyle::Secondary,
             true,
@@ -244,7 +244,11 @@ fn footer(app: &InstallerApp) -> Node<Msg> {
             w.can_go_back(),
         )),
         Page::Done => Some(button(
-            "Keep using the live system",
+            if app.welcome {
+                "Keep using the live system"
+            } else {
+                "Close"
+            },
             Msg::Close,
             ButtonStyle::Secondary,
             true,
@@ -285,13 +289,20 @@ fn note(app: &InstallerApp) -> Option<Node<Msg>> {
 }
 
 fn welcome(app: &InstallerApp) -> Vec<Node<Msg>> {
-    let mut page = vec![
-        label("Welcome to SlopOS"),
-        label(
-            "This system runs from the medium it started from, and keeps nothing you do. \
-             Try it as it is, or install it on a disk of this machine.",
-        ),
-    ];
+    let mut page = if app.welcome {
+        vec![
+            label("Welcome to SlopOS"),
+            label(
+                "This system runs from the medium it started from, and keeps nothing you do. \
+                 Try it as it is, or install it on a disk of this machine.",
+            ),
+        ]
+    } else {
+        vec![label(
+            "SlopOS installs from the medium it started from onto a disk of this machine. \
+             Nothing is written before you have reviewed what the install does.",
+        )]
+    };
     page.extend(note(app));
     if app.wizard.waiting() {
         page.push(Node::ProgressBar {
