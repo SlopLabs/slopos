@@ -869,3 +869,159 @@ pub(super) fn test_partition_bar_labels_fit_whole_in_a_readable_ink() {
         "a label that does not fit"
     );
 }
+
+/// A field that is a tab stop is reached and left by Tab, and says so; one
+/// that takes Tab itself, as a find bar does, keeps it.
+pub(super) fn test_a_tab_stop_field_reports_focus_and_lets_tab_through() {
+    use crate::widgets::line_edit::{LineEditInput, LineEditWidget};
+    let make = |tab_stop: bool, focused: bool| {
+        let mut edit = LineEditWidget::new(
+            String::from("https://"),
+            String::from("Remote"),
+            8,
+            focused,
+            None,
+            String::new(),
+            false,
+            Some(Box::new(|i: LineEditInput| Box::new(i) as Box<dyn Any>)),
+        )
+        .with_tab_stop(tab_stop);
+        lay_out(&mut edit, BoxConstraints::tight(Size::new(200, 28)), (0, 0));
+        edit
+    };
+    let tab = key(NamedKey::Tab, false);
+    let text = WidgetEvent::TextInput { character: 'x' };
+
+    let mut field = make(true, false);
+    assert_eq!(field.focus_policy(), FocusPolicy::StrongFocus);
+    let (_, mut sink) = deliver(&mut field, WidgetEvent::FocusGained);
+    assert_eq!(sink.drain_typed::<LineEditInput>(), [LineEditInput::Focus]);
+    let (consumed, mut sink) = deliver(&mut field, text.clone());
+    assert!(consumed, "focused by Tab, it takes what is typed");
+    assert_eq!(
+        sink.drain_typed::<LineEditInput>(),
+        [LineEditInput::Text { character: 'x' }]
+    );
+    let (consumed, sink) = deliver(&mut field, tab.clone());
+    assert!(!consumed && !sink.has_messages(), "Tab moves focus on");
+    let (_, mut sink) = deliver(&mut field, WidgetEvent::FocusLost);
+    assert_eq!(sink.drain_typed::<LineEditInput>(), [LineEditInput::Blur]);
+    let (consumed, _) = deliver(&mut field, text);
+    assert!(!consumed);
+
+    let mut find = make(false, true);
+    assert_eq!(find.focus_policy(), FocusPolicy::ClickFocus);
+    let (_, sink) = deliver(&mut find, WidgetEvent::FocusGained);
+    assert!(!sink.has_messages());
+    let (consumed, mut sink) = deliver(&mut find, tab);
+    assert!(consumed);
+    assert!(matches!(
+        sink.drain_typed::<LineEditInput>().as_slice(),
+        [LineEditInput::Key { .. }]
+    ));
+}
+
+/// A scroll view that follows its end reports it as `i32::MAX`, and given
+/// that back keeps to the end of whatever it holds; one that does not reports
+/// the offset.
+pub(super) fn test_a_scroll_view_that_follows_its_end_reports_it_as_the_largest_offset() {
+    use crate::constraints::{ScrollDirection, ScrollbarVisibility};
+    use crate::widgets::scroll_view::ScrollViewWidget;
+    let view_of = |height: i32, scroll_y: i32| {
+        let mut view = ScrollViewWidget::with_scroll(
+            Box::new(FixedSizeWidget::new(10, height)),
+            ScrollDirection::Vertical,
+            ScrollbarVisibility::WhenNeeded,
+            scroll_y,
+            Some(Box::new(|y: i32| Box::new(y) as Box<dyn Any>)),
+        )
+        .following_end(true);
+        lay_out(
+            &mut view,
+            BoxConstraints::tight(Size::new(240, 120)),
+            (0, 0),
+        );
+        view
+    };
+    for height in [400, 900] {
+        let view = view_of(height, i32::MAX);
+        assert_eq!(view.children()[0].layout_rect().y, 120 - height);
+    }
+    let mut view = view_of(400, 0);
+    focused(&mut view);
+    let (_, mut sink) = deliver(&mut view, key(NamedKey::End, false));
+    assert_eq!(sink.drain_typed::<i32>(), [i32::MAX]);
+    let (_, mut sink) = deliver(&mut view, key(NamedKey::Up, false));
+    let [up] = sink.drain_typed::<i32>()[..] else {
+        panic!("one offset");
+    };
+    assert!(up > 0 && up < 280, "{up}");
+    let (_, mut sink) = deliver(&mut view, key(NamedKey::Home, false));
+    assert_eq!(sink.drain_typed::<i32>(), [0]);
+
+    let mut page = ScrollViewWidget::with_scroll(
+        Box::new(FixedSizeWidget::new(10, 400)),
+        ScrollDirection::Vertical,
+        ScrollbarVisibility::WhenNeeded,
+        0,
+        Some(Box::new(|y: i32| Box::new(y) as Box<dyn Any>)),
+    );
+    lay_out(
+        &mut page,
+        BoxConstraints::tight(Size::new(240, 120)),
+        (0, 0),
+    );
+    focused(&mut page);
+    let (_, mut sink) = deliver(&mut page, key(NamedKey::End, false));
+    assert_eq!(sink.drain_typed::<i32>(), [280], "a page keeps its offset");
+}
+
+/// A control reached by Tab inside a scroll view is scrolled into view: its
+/// bottom to the view's below it, its top to the view's above it or when it
+/// is taller than the view, and nothing moves for one already shown.
+pub(super) fn test_a_control_reached_by_tab_is_scrolled_into_view() {
+    use crate::constraints::{ScrollDirection, ScrollbarVisibility};
+    use crate::widgets::checkbox::CheckboxWidget;
+    use crate::widgets::scroll_view::ScrollViewWidget;
+    let content: Vec<Box<dyn Widget>> = vec![
+        Box::new(FixedSizeWidget::new(10, 300)),
+        Box::new(CheckboxWidget::new(
+            false,
+            String::from("first"),
+            None,
+            true,
+        )),
+        Box::new(FixedSizeWidget::new(10, 300)),
+    ];
+    let mut view = ScrollViewWidget::with_scroll(
+        Box::new(VStackWidget::new(content, 0, CrossAxisAlignment::Stretch)),
+        ScrollDirection::Vertical,
+        ScrollbarVisibility::WhenNeeded,
+        0,
+        Some(Box::new(|y: i32| Box::new(y) as Box<dyn Any>)),
+    );
+    lay_out(
+        &mut view,
+        BoxConstraints::tight(Size::new(240, 120)),
+        (0, 0),
+    );
+    let id_of = |view: &ScrollViewWidget, i: usize| view.children()[0].children()[i].id();
+    let rect_of =
+        |view: &ScrollViewWidget, i: usize| view.children()[0].children()[i].layout_rect();
+
+    let (field, tall) = (id_of(&view, 1), id_of(&view, 0));
+    let mut sink = MessageSink::new();
+    crate::focus::reveal(&mut view, field, &mut sink);
+    let shown = rect_of(&view, 1);
+    assert_eq!(shown.y + shown.height, 120, "{shown:?}");
+    assert_eq!(sink.drain_typed::<i32>(), [300 + shown.height - 120]);
+
+    let mut sink = MessageSink::new();
+    crate::focus::reveal(&mut view, field, &mut sink);
+    assert!(!sink.has_messages(), "a control shown stays where it is");
+
+    let mut sink = MessageSink::new();
+    crate::focus::reveal(&mut view, tall, &mut sink);
+    assert_eq!(rect_of(&view, 0).y, 0, "a tall one shows its top");
+    assert_eq!(sink.drain_typed::<i32>(), [0]);
+}

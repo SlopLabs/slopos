@@ -1,3 +1,5 @@
+use slopos_abi::draw::Color32;
+
 use crate::constraints::{BoxConstraints, Size, TextAlignment};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
@@ -9,6 +11,7 @@ pub struct LabelWidget {
     alignment: TextAlignment,
     wrap: bool,
     max_lines: Option<u32>,
+    color: Option<Color32>,
 }
 
 impl LabelWidget {
@@ -19,7 +22,13 @@ impl LabelWidget {
             alignment,
             wrap,
             max_lines,
+            color: None,
         }
+    }
+
+    pub fn with_color(mut self, color: Color32) -> Self {
+        self.color = Some(color);
+        self
     }
 
     pub fn text(&self) -> &str {
@@ -130,7 +139,7 @@ impl Widget for LabelWidget {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let fg = ctx.style.text_primary;
+        let fg = self.color.unwrap_or(ctx.style.text_primary);
         let line_height = ctx.style.line_height;
         let rect = self.layout_rect();
 

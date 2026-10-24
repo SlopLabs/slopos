@@ -55,7 +55,7 @@ pub use widgets::code_view::{
 pub use widgets::drag_handle::DragInput;
 pub use widgets::editor_tabs::{EditorTab, TabInput};
 pub use widgets::icon::IconKind;
-pub use widgets::line_edit::LineEditInput;
+pub use widgets::line_edit::{LineEditInput, LineInput};
 pub use widgets::menu_bar::MenuBarInput;
 pub use widgets::slider::{SliderGrab, SliderInput};
 pub use widgets::tree_view::{TreeInput, TreeRow};

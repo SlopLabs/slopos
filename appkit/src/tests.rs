@@ -1846,6 +1846,18 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             controls::test_a_rebuild_waits_for_the_pointer_release,
         ),
         (
+            "a_tab_stop_field_reports_focus_and_lets_tab_through",
+            controls::test_a_tab_stop_field_reports_focus_and_lets_tab_through,
+        ),
+        (
+            "a_control_reached_by_tab_is_scrolled_into_view",
+            controls::test_a_control_reached_by_tab_is_scrolled_into_view,
+        ),
+        (
+            "a_scroll_view_that_follows_its_end_reports_it_as_the_largest_offset",
+            controls::test_a_scroll_view_that_follows_its_end_reports_it_as_the_largest_offset,
+        ),
+        (
             "partition_bar_labels_fit_whole_in_a_readable_ink",
             controls::test_partition_bar_labels_fit_whole_in_a_readable_ink,
         ),

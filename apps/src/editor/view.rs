@@ -335,6 +335,7 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
                     icon: Some(IconKind::Search),
                     suffix,
                     invalid: !query.text.is_empty() && *total == 0,
+                    tab_stop: false,
                     on_input: Some(EditorMsg::Prompt),
                 }),
             });
@@ -349,6 +350,7 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
                         icon: None,
                         suffix: String::new(),
                         invalid: false,
+                        tab_stop: false,
                         on_input: Some(EditorMsg::PromptReplace),
                     }),
                 });
@@ -381,6 +383,7 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
                 text: format!("{}:", other.title()),
                 color: Color32::rgb(0xa9, 0xaf, 0xbc),
                 alignment: TextAlignment::Start,
+                wrap: false,
             });
             fields.push(Node::Expand {
                 weight: 1,
@@ -392,6 +395,7 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
                     icon: None,
                     suffix: String::new(),
                     invalid: false,
+                    tab_stop: false,
                     on_input: Some(EditorMsg::Prompt),
                 }),
             });
@@ -453,12 +457,14 @@ fn status_bar(app: &EditorApp) -> Node<EditorMsg> {
                                 text: left,
                                 color: Color32::rgb(0xa9, 0xaf, 0xbc),
                                 alignment: TextAlignment::Start,
+                                wrap: false,
                             }),
                         },
                         Node::StyledLabel {
                             text: right,
                             color: Color32::rgb(0x8b, 0x92, 0x9e),
                             alignment: TextAlignment::End,
+                            wrap: false,
                         },
                     ],
                 }),
@@ -560,6 +566,7 @@ fn overlay_prompt(app: &EditorApp) -> Node<EditorMsg> {
                         icon: Some(IconKind::Search),
                         suffix: String::new(),
                         invalid: false,
+                        tab_stop: false,
                         on_input: Some(EditorMsg::Prompt),
                     },
                     Node::SizedBox {
@@ -607,12 +614,14 @@ fn palette_row(command: &Command, selected: bool) -> Node<EditorMsg> {
                         text: command.label().to_string(),
                         color,
                         alignment: TextAlignment::Start,
+                        wrap: false,
                     }),
                 },
                 Node::StyledLabel {
                     text: command.shortcut().unwrap_or("").to_string(),
                     color: Color32::rgb(0x6b, 0x71, 0x7d),
                     alignment: TextAlignment::End,
+                    wrap: false,
                 },
             ],
         }),
@@ -643,6 +652,7 @@ fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
                     text: name.to_string(),
                     color,
                     alignment: TextAlignment::Start,
+                    wrap: false,
                 },
                 Node::Expand {
                     weight: 1,
@@ -650,6 +660,7 @@ fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
                         text: context.to_string(),
                         color: Color32::rgb(0x6b, 0x71, 0x7d),
                         alignment: TextAlignment::Start,
+                        wrap: false,
                     }),
                 },
             ],

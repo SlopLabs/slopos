@@ -323,6 +323,7 @@ impl WidgetGalleryApp {
                         show_scrollbar: ScrollbarVisibility::WhenNeeded,
                         scroll_y: 0,
                         on_scroll: None,
+                        follow_end: false,
                         child: Box::new(Node::VStack {
                             spacing: 4,
                             align: CrossAxisAlignment::Start,

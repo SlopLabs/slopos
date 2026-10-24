@@ -28,7 +28,7 @@ use slopos_appkit::widgets::editor_tabs::TabInput;
 use slopos_appkit::widgets::line_edit::LineEditInput;
 use slopos_appkit::widgets::menu_bar::MenuBarInput;
 use slopos_appkit::widgets::tree_view::TreeInput;
-use slopos_appkit::{Action, App, Key, Modifiers, NamedKey, Node};
+use slopos_appkit::{Action, App, Key, LineInput, Modifiers, NamedKey, Node};
 
 use slopos_editor_core::buffer::Position;
 use slopos_editor_core::cursor::Motion;
@@ -38,7 +38,7 @@ use slopos_editor_core::search::{self, SearchOptions};
 
 pub use commands::Command;
 use commands::{PALETTE_COMMANDS, menu_command};
-use prompt::{LineInput, Prompt};
+use prompt::Prompt;
 
 /// Rows of context kept between the caret and the edge of the viewport.
 const SCROLL_MARGIN: usize = 3;
@@ -1874,7 +1874,7 @@ impl EditorApp {
                     line.set_caret(col);
                 }
             }
-            LineEditInput::Focus => {}
+            LineEditInput::Focus | LineEditInput::Blur => {}
         }
     }
 }

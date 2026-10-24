@@ -457,6 +457,7 @@ impl SysmonApp {
                 text,
                 color,
                 alignment: TextAlignment::Start,
+                wrap: false,
             }),
         }
     }
@@ -587,6 +588,7 @@ impl SysmonApp {
             show_scrollbar: ScrollbarVisibility::WhenNeeded,
             scroll_y: self.hardware_scroll_y,
             on_scroll: Some(SysmonMsg::HwScroll),
+            follow_end: false,
             child: Box::new(Node::Padding {
                 padding: EdgeInsets::all(10),
                 child: Box::new(Node::VStack {

@@ -2,17 +2,17 @@
 //!
 //! [`super::text_field::TextFieldWidget`] keeps its own text and its own idea of
 //! focus, which works for a form and not for an editor: the widget tree is
-//! rebuilt on every message, so anything the widget remembers is lost, and
-//! `FocusGained` is never delivered because a rebuilt widget has a new identity.
-//! This one holds nothing — text, caret and focus are all given to it, and every
-//! keystroke is reported — which makes a find bar, a path prompt and a command
-//! palette all the same widget with different state behind them.
+//! rebuilt on every message, so anything the widget remembers is lost. This one
+//! holds nothing — text, caret and focus are all given to it, every keystroke is
+//! reported, and a tab stop reports focus arriving and leaving — which makes a
+//! find bar, a path prompt, a command palette and a form's field all the same
+//! widget with different state behind them.
 
 use std::any::Any;
 
 use crate::constraints::{BoxConstraints, Size};
 use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, Modifiers, PointerButton, WidgetEvent,
+    EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
 };
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
@@ -33,6 +33,7 @@ pub enum LineEditInput {
         col: usize,
     },
     Focus,
+    Blur,
 }
 
 type InputCallback = Box<dyn Fn(LineEditInput) -> Box<dyn Any>>;
@@ -49,6 +50,7 @@ pub struct LineEditWidget {
     suffix: String,
     /// Red when the content is not usable — a search with no match.
     invalid: bool,
+    tab_stop: bool,
     on_input: Option<InputCallback>,
     font_size: i32,
     padding_h: i32,
@@ -75,10 +77,16 @@ impl LineEditWidget {
             icon,
             suffix,
             invalid,
+            tab_stop: false,
             on_input,
             font_size: 14,
             padding_h: 8,
         }
+    }
+
+    pub fn with_tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = tab_stop;
+        self
     }
 
     fn text_x(&self) -> i32 {
@@ -258,6 +266,19 @@ impl Widget for LineEditWidget {
         }
 
         match event {
+            WidgetEvent::FocusGained if self.tab_stop => {
+                self.focused = true;
+                self.emit(LineEditInput::Focus, sink)
+            }
+            WidgetEvent::FocusLost if self.tab_stop => {
+                self.focused = false;
+                self.emit(LineEditInput::Blur, sink)
+            }
+            WidgetEvent::KeyDown {
+                key: Key::Named(NamedKey::Tab),
+                ..
+            } if self.tab_stop => EventResponse::Ignored,
+
             WidgetEvent::PointerDown { x, y, button, .. } => {
                 if !self.layout_rect().contains(*x, *y) || *button != PointerButton::Left {
                     return EventResponse::Ignored;
@@ -307,10 +328,179 @@ impl Widget for LineEditWidget {
     }
 
     fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::ClickFocus
+        if self.tab_stop {
+            FocusPolicy::StrongFocus
+        } else {
+            FocusPolicy::ClickFocus
+        }
     }
 
     fn declares_focus(&self) -> bool {
         self.focused
+    }
+}
+
+/// Text and caret for one input line. The widget draws it and reports keys;
+/// this is where they take effect.
+#[derive(Clone, Debug, Default)]
+pub struct LineInput {
+    pub text: String,
+    /// Caret position in characters.
+    pub caret: usize,
+}
+
+impl LineInput {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_text(text: String) -> Self {
+        let caret = text.chars().count();
+        Self { text, caret }
+    }
+
+    fn byte_of(&self, col: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(col)
+            .map(|(b, _)| b)
+            .unwrap_or(self.text.len())
+    }
+
+    pub fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    pub fn insert(&mut self, c: char) {
+        let at = self.byte_of(self.caret);
+        self.text.insert(at, c);
+        self.caret += 1;
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        for c in s.chars() {
+            if c == '\n' || c == '\r' {
+                continue;
+            }
+            self.insert(c);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.caret == 0 {
+            return;
+        }
+        let end = self.byte_of(self.caret);
+        let start = self.byte_of(self.caret - 1);
+        self.text.replace_range(start..end, "");
+        self.caret -= 1;
+    }
+
+    pub fn delete(&mut self) {
+        if self.caret >= self.len() {
+            return;
+        }
+        let start = self.byte_of(self.caret);
+        let end = self.byte_of(self.caret + 1);
+        self.text.replace_range(start..end, "");
+    }
+
+    pub fn set_caret(&mut self, col: usize) {
+        self.caret = col.min(self.len());
+    }
+
+    pub fn left(&mut self) {
+        self.caret = self.caret.saturating_sub(1);
+    }
+
+    pub fn right(&mut self) {
+        self.caret = (self.caret + 1).min(self.len());
+    }
+
+    pub fn home(&mut self) {
+        self.caret = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.caret = self.len();
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.caret = 0;
+    }
+
+    /// Deletes back to the previous word boundary, as Ctrl+Backspace does
+    /// everywhere else.
+    ///
+    /// A separator counts as a boundary, not just whitespace: what this line
+    /// most often holds is a path, and a whitespace-only rule makes one
+    /// Ctrl+Backspace erase the whole of it rather than the last segment.
+    pub fn delete_word_left(&mut self) {
+        let boundary = |c: char| c.is_whitespace() || c == '/';
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut start = self.caret;
+        while start > 0 && boundary(chars[start - 1]) {
+            start -= 1;
+        }
+        while start > 0 && !boundary(chars[start - 1]) {
+            start -= 1;
+        }
+        let end_byte = self.byte_of(self.caret);
+        let start_byte = self.byte_of(start);
+        self.text.replace_range(start_byte..end_byte, "");
+        self.caret = start;
+    }
+
+    /// Applies a key that edits or moves within the line. Returns false for a
+    /// key the caller should interpret itself (Enter, Escape, Up, Down, Tab).
+    pub fn handle_key(&mut self, key: Key, mods: Modifiers) -> bool {
+        match key {
+            Key::Named(NamedKey::Space) if !mods.ctrl && !mods.plain_alt() => {
+                self.insert(' ');
+                true
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if mods.ctrl {
+                    self.delete_word_left();
+                } else {
+                    self.backspace();
+                }
+                true
+            }
+            Key::Named(NamedKey::Delete) => {
+                self.delete();
+                true
+            }
+            Key::Named(NamedKey::Left) => {
+                self.left();
+                true
+            }
+            Key::Named(NamedKey::Right) => {
+                self.right();
+                true
+            }
+            Key::Named(NamedKey::Home) => {
+                self.home();
+                true
+            }
+            Key::Named(NamedKey::End) => {
+                self.end();
+                true
+            }
+            Key::Char('a') if mods.ctrl => {
+                self.home();
+                true
+            }
+            Key::Char('e') if mods.ctrl => {
+                self.end();
+                true
+            }
+            Key::Char('u') if mods.ctrl => {
+                self.clear();
+                true
+            }
+            _ => false,
+        }
     }
 }

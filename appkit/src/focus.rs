@@ -1,3 +1,5 @@
+use super::constraints::Rect;
+use super::event::MessageSink;
 use super::traits::{Role, Widget, WidgetId};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -237,4 +239,22 @@ impl Default for FocusManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub(crate) fn reveal(
+    widget: &mut dyn Widget,
+    id: WidgetId,
+    sink: &mut MessageSink,
+) -> Option<Rect> {
+    if widget.id() == id {
+        return Some(widget.layout_rect());
+    }
+    let mut found = None;
+    for child in widget.children_mut() {
+        found = reveal(child.as_mut(), id, sink);
+        if found.is_some() {
+            break;
+        }
+    }
+    Some(widget.reveal(found?, sink))
 }

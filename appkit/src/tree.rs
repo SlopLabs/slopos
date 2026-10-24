@@ -127,19 +127,23 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             show_scrollbar,
             scroll_y,
             on_scroll,
+            follow_end,
         } => {
             let child_widget = build_widget_tree(child);
             let erased: Option<Box<dyn Fn(i32) -> Box<dyn Any>>> = on_scroll.map(|f| {
                 Box::new(move |v: i32| Box::new(f(v)) as Box<dyn Any>)
                     as Box<dyn Fn(i32) -> Box<dyn Any>>
             });
-            Box::new(widgets::scroll_view::ScrollViewWidget::with_scroll(
-                child_widget,
-                *direction,
-                *show_scrollbar,
-                *scroll_y,
-                erased,
-            ))
+            Box::new(
+                widgets::scroll_view::ScrollViewWidget::with_scroll(
+                    child_widget,
+                    *direction,
+                    *show_scrollbar,
+                    *scroll_y,
+                    erased,
+                )
+                .following_end(*follow_end),
+            )
         }
         Node::ListView {
             item_height,
@@ -283,6 +287,16 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             text,
             color,
             alignment,
+            wrap: true,
+        } => Box::new(
+            widgets::label::LabelWidget::new(text.clone(), *alignment, true, None)
+                .with_color(*color),
+        ),
+        Node::StyledLabel {
+            text,
+            color,
+            alignment,
+            wrap: false,
         } => Box::new(widgets::styled_label::StyledLabelWidget::new(
             text.clone(),
             *color,
@@ -462,6 +476,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             icon,
             suffix,
             invalid,
+            tab_stop,
             on_input,
         } => {
             let erased: Option<Box<dyn Fn(widgets::line_edit::LineEditInput) -> Box<dyn Any>>> =
@@ -471,16 +486,19 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                     })
                         as Box<dyn Fn(widgets::line_edit::LineEditInput) -> Box<dyn Any>>
                 });
-            Box::new(widgets::line_edit::LineEditWidget::new(
-                text.clone(),
-                placeholder.clone(),
-                *caret,
-                *focused,
-                *icon,
-                suffix.clone(),
-                *invalid,
-                erased,
-            ))
+            Box::new(
+                widgets::line_edit::LineEditWidget::new(
+                    text.clone(),
+                    placeholder.clone(),
+                    *caret,
+                    *focused,
+                    *icon,
+                    suffix.clone(),
+                    *invalid,
+                    erased,
+                )
+                .with_tab_stop(*tab_stop),
+            )
         }
         Node::DragHandle {
             orientation,

@@ -170,6 +170,12 @@ pub trait Widget {
         &mut []
     }
 
+    /// Scroll so `rect`, in window coordinates, shows; returns where it is
+    /// then.
+    fn reveal(&mut self, rect: Rect, _sink: &mut MessageSink) -> Rect {
+        rect
+    }
+
     /// Proportional share of leftover stack space; 0 means non-flexible.
     fn flex_weight(&self) -> u16 {
         0

@@ -39,6 +39,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
     let node = app.view();
     let mut root = tree::build_widget_tree(&node);
+    let mut page_key = app.page_key();
 
     let mut window_size = super::constraints::Size::new(width as i32, height as i32);
     tree::layout_tree(root.as_mut(), window_size, &style);
@@ -172,6 +173,9 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
                         focus.move_focus_next();
                     }
                     move_focus_events(root.as_mut(), previous, focus.focused(), &mut sink);
+                    if let Some(id) = focus.focused() {
+                        super::focus::reveal(root.as_mut(), id, &mut sink);
+                    }
                     needs_repaint = true;
                 } else {
                     unhandled_keys.push((*key, *m));
@@ -208,6 +212,10 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
         if needs_rebuild {
             let node = app.view();
+            if app.page_key() != page_key {
+                page_key = app.page_key();
+                focus.set_focused(None);
+            }
             root = tree::build_widget_tree(&node);
             tree::layout_tree(root.as_mut(), window_size, &style);
             // A rebuild replaces every widget, so whoever holds focus has to

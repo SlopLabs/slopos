@@ -231,6 +231,7 @@ impl FileManagerApp {
                 text: String::from("Places"),
                 color: theme::FM_SIDEBAR_HEADING,
                 alignment: TextAlignment::Start,
+                wrap: false,
             }),
         };
 
@@ -255,11 +256,13 @@ impl FileManagerApp {
                                 text: String::from(bm.icon),
                                 color: theme::FM_DIR_COLOR,
                                 alignment: TextAlignment::Start,
+                                wrap: false,
                             },
                             Node::StyledLabel {
                                 text: String::from(bm.label),
                                 color: text_color,
                                 alignment: TextAlignment::Start,
+                                wrap: false,
                             },
                         ],
                     }),
@@ -330,6 +333,7 @@ impl FileManagerApp {
                             text: display_path,
                             color: theme::TEXT_PRIMARY,
                             alignment: TextAlignment::Start,
+                            wrap: false,
                         },
                     ],
                 }),
@@ -355,11 +359,13 @@ impl FileManagerApp {
                 text: name_text,
                 color: name_color,
                 alignment: TextAlignment::Start,
+                wrap: false,
             },
             Node::StyledLabel {
                 text: size_text,
                 color: theme::FM_SIZE_COLOR,
                 alignment: TextAlignment::End,
+                wrap: false,
             },
         ]
     }
@@ -374,6 +380,7 @@ impl FileManagerApp {
                         text: self.error_msg.clone(),
                         color: theme::FM_ERROR_COLOR,
                         alignment: TextAlignment::Center,
+                        wrap: false,
                     }),
                 }),
             },
@@ -385,6 +392,7 @@ impl FileManagerApp {
                         text: String::from("Empty directory"),
                         color: theme::FM_SIZE_COLOR,
                         alignment: TextAlignment::Center,
+                        wrap: false,
                     }),
                 }),
             },
@@ -462,6 +470,7 @@ impl FileManagerApp {
                     text,
                     color: theme::FM_STATUS_TEXT,
                     alignment: TextAlignment::Start,
+                    wrap: false,
                 }),
             }),
         }

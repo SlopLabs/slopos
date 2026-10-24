@@ -184,6 +184,7 @@ pub enum Node<M> {
         text: String,
         color: Color32,
         alignment: TextAlignment,
+        wrap: bool,
     },
 
     ScrollView {
@@ -195,6 +196,9 @@ pub enum Node<M> {
         /// Emitted with the new `offset_y` whenever it changes, for the app to
         /// give back as `scroll_y`; a rebuild in answer would end a thumb drag.
         on_scroll: Option<fn(i32) -> M>,
+        /// Reports its end as `i32::MAX`, which given back keeps it there as
+        /// it grows.
+        follow_end: bool,
     },
     ListView {
         item_height: i32,
@@ -346,6 +350,8 @@ pub enum Node<M> {
         /// Drawn right-aligned inside the field: a match count, a hint.
         suffix: String,
         invalid: bool,
+        /// Reached by Tab, and reports `Focus` and `Blur`.
+        tab_stop: bool,
         on_input: Option<fn(LineEditInput) -> M>,
     },
     /// A draggable divider; reports the start, the pointer's absolute position
@@ -370,6 +376,11 @@ pub trait App {
     /// sends this app messages through.
     fn on_start(&mut self, _sender: AppSender<Self::Message>) -> Action {
         Action::None
+    }
+
+    /// Which page the view shows; a rebuild onto another page drops focus.
+    fn page_key(&self) -> u64 {
+        0
     }
 
     /// Return `Some(ms)` to receive [`App::tick`] calls at that interval.

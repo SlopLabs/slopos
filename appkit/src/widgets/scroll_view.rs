@@ -23,6 +23,7 @@ pub struct ScrollViewWidget {
     drag_start_y: i32,
     drag_start_offset: i32,
     focused: bool,
+    follow_end: bool,
     on_scroll: Option<Box<dyn Fn(i32) -> Box<dyn Any>>>,
 }
 
@@ -46,8 +47,14 @@ impl ScrollViewWidget {
             drag_start_y: 0,
             drag_start_offset: 0,
             focused: false,
+            follow_end: false,
             on_scroll: None,
         }
+    }
+
+    pub fn following_end(mut self, follow_end: bool) -> Self {
+        self.follow_end = follow_end;
+        self
     }
 
     pub fn with_scroll(
@@ -153,7 +160,9 @@ impl ScrollViewWidget {
     fn scrolled(&mut self, sink: &mut MessageSink) {
         self.place_child();
         if let Some(cb) = &self.on_scroll {
-            sink.emit_raw(cb(self.offset_y));
+            let at_end =
+                self.follow_end && self.offset_y > 0 && self.offset_y == self.max_offset_y();
+            sink.emit_raw(cb(if at_end { i32::MAX } else { self.offset_y }));
         }
     }
 
@@ -179,6 +188,24 @@ impl Widget for ScrollViewWidget {
     }
     fn core_mut(&mut self) -> &mut WidgetCore {
         &mut self.core
+    }
+
+    fn reveal(&mut self, rect: Rect, sink: &mut MessageSink) -> Rect {
+        let view = self.layout_rect();
+        let below = (rect.y + rect.height) - (view.y + view.height);
+        let above = rect.y - view.y;
+        let wanted = if above < 0 || rect.height > view.height {
+            above
+        } else {
+            below.max(0)
+        };
+        let before = self.offset_y;
+        self.offset_y = (self.offset_y + wanted).clamp(0, self.max_offset_y());
+        let moved = self.offset_y - before;
+        if moved != 0 {
+            self.scrolled(sink);
+        }
+        Rect::new(rect.x, rect.y - moved, rect.width, rect.height)
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
