@@ -115,9 +115,12 @@ renamed, and the firmware entry comes last.
   frames through its own reader.
 
 **The live desktop.**
-- init starts the compositor and then the terminal; nothing knows it is live
-  (`userland/src/apps/init/`).
-- The dock pins five programs (`userland/src/apps/compositor/dock.rs:135-177`).
+- On a live boot, the medium's onto a RAM root, the boot's own desktop opens
+  `/bin/installer-ui --welcome` in place of its terminal
+  (`userland/src/apps/init/session.rs`).
+- The base carries the *Install SlopOS* entry, `org.slopos.installer`, marked
+  `boot=medium`, which `app_entry::read` passes over off the medium; the dock
+  starts it without `--welcome` and matches the window to it by app id.
 
 ## What the prior art settles
 
@@ -133,6 +136,7 @@ renamed, and the firmware entry comes last.
 | Subiquity and kickstart ([subiquity types/storage.py](https://github.com/canonical/subiquity/blob/main/subiquity/common/types/storage.py), [subiquity server.py](https://github.com/canonical/subiquity/blob/main/subiquity/server/server.py), [pykickstart `part`](https://pykickstart.readthedocs.io/en/latest/kickstart-docs.html)) | Subiquity's server answers each gap with its size range and a reason when too small, refuses a size outside it, and keeps serving after a failed install. Kickstart's `--size` with `--grow --maxsize` clamps between bounds. None of Subiquity, Anaconda, Calamares' KPMcore helper or Redox checks a version between the UI and its privileged backend; each ships both in one package. | each opened disk's choices with the reason they do not fit, the root size clamped, an engine that serves on after `Failed`, and a `Hello` naming the protocol, since a live base switch can put a newer engine under an older window |
 | WAI-ARIA, GTK4, Qt ([APG radio](https://www.w3.org/WAI/ARIA/apg/patterns/radio/), [APG slider](https://www.w3.org/WAI/ARIA/apg/patterns/slider/), [gtkscale.c](https://github.com/GNOME/gtk/blob/main/gtk/gtkscale.c), [gtkprogressbar.c](https://github.com/GNOME/gtk/blob/main/gtk/gtkprogressbar.c), [qabstractslider.cpp](https://github.com/qt/qtbase/blob/dev/src/widgets/widgets/qabstractslider.cpp), [qeventdispatcher_unix.cpp](https://github.com/qt/qtbase/blob/dev/src/corelib/kernel/qeventdispatcher_unix.cpp)) | A radio group is one tab stop whose selection follows the arrows; the APG wraps at the ends, GTK and Qt do not. A slider's arrows work on either axis, Home and End go to the ends, and a page is 10 steps in GTK and Qt, only "larger than a step" in the APG. GTK's pulse moves only while the app pulses, so a stuck worker shows a frozen bar. Qt's wake pipe is written only on a flag's 0→1 and drained before the queue is read. | APG's wrapping radio group; a page as a tenth of the range, since a byte slider's step is a MiB; the app's tick drives the indeterminate bar; the coalesced wake |
 | GParted, KDE Partition Manager, Calamares ([DrawingAreaVisualDisk.cc](https://github.com/GNOME/gparted/blob/master/src/DrawingAreaVisualDisk.cc), [partwidgetbase.cpp](https://lxr.kde.org/source/system/kpmcore/src/gui/partwidgetbase.cpp), [PartitionBarsView.cpp](https://github.com/calamares/calamares/blob/calamares/src/modules/partition/gui/PartitionBarsView.cpp)) | Every segment gets a pixel minimum (10 px, 30 px, 1%), the rest shared in proportion. GParted draws a label inside a segment only when it fits; Calamares and KPM put labels in a legend. | a floor and the rest in proportion, labels inside when they fit, the action list for the rest |
+| Ubuntu, Fedora, Pop!_OS, GNOME Shell ([ubuntu-desktop-installer.service](https://git.launchpad.net/livecd-rootfs/tree/live-build/ubuntu/includes.chroot.minimal.standard.live/usr/lib/systemd/user/ubuntu-desktop-installer.service), [livesys-gnome](https://pagure.io/livesys-scripts/blob/main/f/libexec/livesys/sessions.d/livesys-gnome), [99pop-installer](https://github.com/pop-os/installer/blob/master/debian/99pop-installer), [appFavorites.js](https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/ui/appFavorites.js)) | Ubuntu's live layer alone starts its installer with `--try-or-install` once a graphical session begins; Fedora and Pop!_OS put the welcome in the live user's autostart and the installer in the dock's favourites on the live root only. GNOME drops a favourite whose app is not installed and matches a window to its launcher by app id. Redox's launcher entry is installed everywhere, the installed system included. | the welcome with the boot's desktop on a live boot only, an entry shown only from the medium, the window matched by app id |
 | Asterinas ([distro README](https://github.com/asterinas/asterinas/blob/ec5bb9ed798851b4c1854e791341321902ac8bc9/book/src/distro/README.md)) | No installer UI: a NixOS ISO, a root shell and a script. Its CI does install end to end in QEMU. | nothing to borrow for the UI; confirms end-to-end install grading |
 
 ## Design
@@ -187,15 +191,9 @@ button below it, as the Goal and the prior art have it.
 
 ### Where it starts
 
-- **Live boot.** On a live boot (`/media/install` is a basefs, `boot-core`'s
-  `layout::MEDIUM_DIR`), init spawns `/bin/installer-ui --welcome` as the
-  session user once the compositor's readiness gate opens.
-- **Dock.** The compositor pins *Install SlopOS* only when `/media/install` is
-  a medium, and matches the window by app id.
-- **Terminal.** `installer` remains the CLI.
-
-`installer-ui` is in `BASE_PROGRAMS` already, and refuses to start off the
-medium.
+Phase 5 built it (*Where it stands*, *Decided*): the welcome on a live boot's
+own desktop, the dock's entry on a boot from the medium, and `installer` in a
+terminal.
 
 ## Phases
 
@@ -258,21 +256,25 @@ short and the frames sent. The live ISO, booted as `just boot-live` boots it
 with a blank 32 GiB NVMe disk attached, erased and installed the disk
 through the window by keyboard alone and restarted into it.
 
-### Phase 5: Where it starts
+### Phase 5: Where it starts — done
 
-Add init's welcome on a live boot and the dock entry on a medium.
-
-Ends with: `just iso` booting to the Welcome window, and the dock entry
-absent on `just boot`.
+A live boot's own desktop opens `installer-ui --welcome` in place of its
+terminal, and the dock pins the base's *Install SlopOS* entry on a boot from
+the medium alone; graded by `dock_test`, `installer_ui_test` and
+`installer_test`'s live stage. `just iso` booted to the Welcome window alone,
+whose dock entry, once it was closed, started the window asking privd at
+once, and `just boot`'s dock pinned no entry.
 
 ## Grading
 
 - **Host:** `installer-core`'s and `boot-core`'s tests under `just
   test-host`.
-- **In the guest:** `installer_ui_test`, and `appkit_test`'s cases for the
-  widgets the window uses.
+- **In the guest:** `installer_ui_test`, `appkit_test`'s cases for the
+  widgets the window uses, and `dock_test`'s for the entry.
 - **End to end:** `just test-installer` keeps every lane it has: the blank
-  disk typed into the CLI, the reuse disk through privd and the protocol.
+  disk typed into the CLI, the reuse disk through privd and the protocol,
+  and on the live boot that installs each blank disk the dock's entry and
+  the welcome, opened once.
 - **Not graded by machine:** the window's pixels. It is a program that has to
   work once and keep its contract, and the model and protocol tests hold the
   contract. There is no QMP-driven GUI harness and no screenshot goldens.
@@ -295,8 +297,31 @@ absent on `just boot`.
 
 - **A linear wizard with a review page.** Fedora's and Ubuntu's shape. A hub
   suits long flows, and its users lose their place.
-- **A welcome window on a live boot and a dock entry on a medium only.** The
-  installed system's desktop does not change.
+- **A live boot is the medium's onto a RAM root.** The welcome says the
+  system keeps nothing, which holds only there; init's `live()` decides it
+  for the welcome and for installing the medium's apps alike. A medium booted
+  onto a disk root still shows the dock's entry, since the installer runs
+  there; the installed system's desktop does not change.
+- **The welcome takes the terminal's place, on the boot's own desktop.** The
+  desktop init logs in by itself at boot, or again when uid 0 restarts every
+  session as at boot, opens the welcome once its compositor is ready, so a
+  live boot shows one window, the question it is there to ask. Once the
+  welcome has opened, a desktop's compositor started again, or a person's
+  own session restart, opens its terminal, and the dock keeps the entry for
+  later.
+- **The dock's entry is the base's, shown by the boot.** The entry lives
+  beside its program in every base, marked `boot=medium`, and the dock's
+  reading passes it over off the medium as if it were not there, so the
+  installed system pins nothing it cannot run. A `boot` naming anything else
+  makes no entry.
+- **The welcome asks; the dock's entry installs.** `--welcome` opens on the
+  page that asks whether to try SlopOS or install it; without it the window
+  asks privd for the engine as it starts, since pressing *Install SlopOS* in
+  the dock already chose, as Fedora's welcome hands *Install Fedora…* to the
+  installer's own launcher. That window offers *Close* where the welcome
+  offers *Try SlopOS* and *Keep using the live system*, and never says the
+  system keeps nothing, which is false of a medium booted onto a disk root.
+  A refusal leaves either on Welcome.
 - **Fedora's guard, not a typed name.** A checkbox whose wording follows the
   damage, and a Destructive button labelled by scenario. The CLI keeps its
   typed confirmation, and none of the surveyed installers types one.

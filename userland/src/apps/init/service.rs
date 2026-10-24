@@ -66,6 +66,12 @@ pub const TERMINAL: Service = Service {
     console: false,
 };
 
+pub const WELCOME: Service = Service {
+    path: "/bin/installer-ui",
+    args: &[crate::apps::installer_ui::WELCOME],
+    ..TERMINAL
+};
+
 /// A person's shell at a terminal a console login handed over.
 pub const SHELL: Service = Service {
     path: "/bin/shell",

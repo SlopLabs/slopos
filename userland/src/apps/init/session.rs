@@ -14,7 +14,8 @@ use slopos_accounts_core::Person;
 use slopos_priv_core::sessions::{Class, LINKS, Session as Seen, Table};
 
 use super::service::{
-    Budget, COMPOSITOR, Child, GREETER, Identity, SHELL, TERMINAL, runtime_dir, start, start_ready,
+    Budget, COMPOSITOR, Child, GREETER, Identity, SHELL, TERMINAL, WELCOME, runtime_dir, start,
+    start_ready,
 };
 use crate::init_control::{self, DESKTOP, Tasks};
 use crate::sessions::{self as listed, Entry};
@@ -50,7 +51,8 @@ pub enum State {
     Down {
         due: Option<u64>,
     },
-    /// The compositor, until it says it is ready; a terminal is started then.
+    /// The compositor, until it says it is ready; a desktop's first window is
+    /// started then.
     Starting {
         leader: Child,
         ready: OwnedFd,
@@ -72,6 +74,9 @@ pub struct Session {
     pub state: State,
     pub link: Option<u8>,
     pub locked: bool,
+    /// The boot's desktop on a live boot, which opens the installer's welcome
+    /// rather than a terminal once its compositor is ready.
+    welcome: bool,
     pub budget: Budget,
     /// Where init tells its compositor whether it is in front.
     pipe: Option<OwnedFd>,
@@ -295,6 +300,7 @@ impl Sessions {
             state: State::Down { due: Some(now) },
             link,
             locked: false,
+            welcome: false,
             budget: Budget::default(),
             pipe: None,
             tty,
@@ -337,6 +343,7 @@ impl Sessions {
             state,
             link,
             locked,
+            welcome: false,
             budget: Budget::of(starts),
             pipe,
             tty: None,
@@ -380,7 +387,17 @@ impl Sessions {
         self.default_due = None;
         self.default_budget.record(now);
         let started = match self.fresh.then(autologin).flatten() {
-            Some(person) => self.log_in(&person, false, now),
+            Some(person) => {
+                let started = self.log_in(&person, false, now);
+                // A desktop already running has opened its first window.
+                if let Ok(tag) = started
+                    && let Some(session) = self.find_mut(tag)
+                    && session.leader().is_none()
+                {
+                    session.welcome = super::live();
+                }
+                started
+            }
             None => self.show_greeter(now),
         };
         if let Err(why) = started {
@@ -390,7 +407,7 @@ impl Sessions {
     }
 
     /// A session's compositor said it is ready, or was given up on: a
-    /// desktop gets its terminal.
+    /// desktop gets its first window.
     pub fn step_starting(&mut self, now: u64) {
         for session in &mut self.list {
             if let State::Running { unready, .. } = &mut session.state
@@ -419,7 +436,11 @@ impl Sessions {
                 unreachable!()
             };
             if up && session.class == Class::User {
-                let _ = start(&TERMINAL, Some(&session.who), &[]);
+                let opens = match std::mem::take(&mut session.welcome) {
+                    true => &WELCOME,
+                    false => &TERMINAL,
+                };
+                let _ = start(opens, Some(&session.who), &[]);
             }
             if session.locked {
                 session.tell("lock");

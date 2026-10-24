@@ -125,14 +125,19 @@ const ENDING_TICK_MS: u64 = 50;
 /// only there.
 const REMOTE_CONF: &str = "/usr/share/slopos/remote/remote.conf";
 
+/// A boot from the install medium onto a RAM root, which keeps nothing.
+fn live() -> bool {
+    crate::privd::on_the_medium()
+        && fs::statfs_path(c"/".as_ptr())
+            .is_ok_and(|stats| stats.f_type == slopos_abi::fs::RAMFS_MAGIC)
+}
+
 /// On a live boot, the medium's apps at the RAM root's `/usr/local`, where an
 /// install puts them on a disk, `holder`'s.
 fn install_live_apps(holder: (u32, u32)) {
     use slopos_boot_core::layout::{MEDIUM_APPS, MEDIUM_DIR};
-    let live = crate::syscall::fs::statfs_path(c"/".as_ptr())
-        .is_ok_and(|stats| stats.f_type == slopos_abi::fs::RAMFS_MAGIC);
     let apps = std::path::Path::new(MEDIUM_DIR).join(MEDIUM_APPS);
-    if !live || !apps.is_dir() {
+    if !live() || !apps.is_dir() {
         return;
     }
     let install = crate::tree::Install {

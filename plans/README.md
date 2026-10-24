@@ -16,7 +16,7 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
-| `installer-gui.md` | A graphical installer on the live medium: `/bin/installer-ui`, the unprivileged window over the engine privd runs, built over `installer-core`'s wizard; what remains is where it starts, init's welcome on a live boot and the dock entry on a medium |
+| `installer-gui.md` | A graphical installer on the live medium: `/bin/installer-ui`, the unprivileged window over the engine privd runs, built over `installer-core`'s wizard, which a live boot's desktop opens as its welcome and the dock's entry starts on a boot from the medium; all five phases have landed |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive the

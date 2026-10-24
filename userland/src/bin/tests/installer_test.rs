@@ -6,12 +6,14 @@
 //! table is erased, one with a partition named [`REUSED_NAME`] has it reused as
 //! the root, and any other gets SlopOS in its free space beside what it holds.
 //!
-//! 0 (the live system, the medium at `/media/install`): on a disk another
-//!   system is on, give it the firmware entry that system would have; run
-//!   the installer, on a blank disk from the shell answering its questions,
-//!   a person named and a password typed among them, beside the other system
-//!   with every answer a flag and a root size, and onto the partition to
-//!   reuse as a window does, through privd's `installer --serve`.
+//! 0 (the live system, the medium at `/media/install`): on a blank disk, find
+//!   the installer's entry among the dock's and the boot's desktop opening
+//!   its welcome; on a disk another system is on, give it the firmware entry
+//!   that system would have; run the installer, on a blank disk from the
+//!   shell answering its questions, a person named and a password typed
+//!   among them, beside the other system with every answer a flag and a
+//!   root size, and onto the partition to reuse as a window does, through
+//!   privd's `installer --serve`.
 //! 1 (`slopos-a` of the installed disk): the root is the disk's, its first
 //!   administrator the person the installer was told of, the other system's
 //!   entry is still in `BootOrder` and in Limine's menu, and the clone
@@ -37,6 +39,9 @@
 
 use slopos_userland as _;
 
+#[path = "support/sessions.rs"]
+mod sessions;
+
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -46,7 +51,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use slopos_abi::fs::SESSION_UID;
-use slopos_abi::syscall::{O_CLOEXEC, UserWinsize};
+use slopos_abi::syscall::{O_CLOEXEC, UserTaskEntry, UserWinsize};
+use slopos_abi::task::MAX_TASKS;
 use slopos_boot_core::gpt::{self, Entry, Header, Location, Partition, Piece};
 use slopos_boot_core::install::Role;
 use slopos_boot_core::layout::{self, ESP_TYPE, ROOT_TYPE};
@@ -57,14 +63,16 @@ use slopos_priv_core::wire::{Exit, Reply as PrivdReply, Request as PrivdRequest}
 use slopos_remote_core::Deframer;
 use slopos_slibc::test_harness::note;
 use slopos_userland::accounts::Store;
+use slopos_userland::app_entry;
 use slopos_userland::base_image::retagged;
 use slopos_userland::boot_disk::{
     BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, not_installable,
     open_fat, partition_node, set_loader_var, table_of, whole_disks,
 };
+use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, request_id};
 use slopos_userland::selfhost::{selfhost_install, workspace};
-use slopos_userland::syscall::core::{clock_gettime_ns, uname};
+use slopos_userland::syscall::core::{clock_gettime_ns, process_list, uname};
 use slopos_userland::syscall::efi::{efivar_get, efivar_set};
 use slopos_userland::syscall::error::SyscallError;
 use slopos_userland::syscall::fs::{self, mount, sync, umount2};
@@ -848,6 +856,68 @@ fn payload_held() -> Result<(), String> {
     }
 }
 
+/// The programs of the live processes carrying `tag`, with their uids.
+fn programs(tag: u32) -> Vec<(String, u32)> {
+    let mut tasks = vec![UserTaskEntry::default(); MAX_TASKS];
+    let count = process_list(&mut tasks).clamp(0, MAX_TASKS as i64);
+    tasks.truncate(count as usize);
+    let live = init_control::processes(tag);
+    tasks
+        .iter()
+        .filter(|task| live.contains(&task.task_id))
+        .map(|task| {
+            let end = task
+                .name
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(task.name.len());
+            (
+                String::from_utf8_lossy(&task.name[..end]).into_owned(),
+                task.uid,
+            )
+        })
+        .collect()
+}
+
+/// The entries the live system's dock reads carry the installer's, and the
+/// boot's desktop opens the installer's welcome, as the first person, in
+/// place of a terminal, and its terminal once restarted.
+fn welcomed() -> Result<(), String> {
+    let entries = app_entry::pinned(None);
+    if !entries
+        .iter()
+        .any(|entry| entry.exec == "/bin/installer-ui")
+    {
+        return Err(format!("the live system's dock holds {entries:?}"));
+    }
+    init_control::ask(InitCommand::RestartSession)?;
+    let opened = welcomed_once();
+    init_control::ask(InitCommand::EndSession)?;
+    opened
+}
+
+fn welcomed_once() -> Result<(), String> {
+    let desktop = sessions::in_front(SESSION_UID, sessions::SESSION_DEADLINE)
+        .ok_or("the boot's desktop never came in front")?;
+    let opens = |program: &str, not: &str| {
+        let mut opened = Vec::new();
+        let seen = sessions::until(sessions::SESSION_DEADLINE, || {
+            opened = programs(desktop.tag);
+            opened.contains(&(program.to_owned(), SESSION_UID))
+                && !opened.iter().any(|(other, _)| other == not)
+        });
+        match seen {
+            true => Ok(()),
+            false => Err(format!(
+                "the boot's desktop opened {opened:?}, not {program}"
+            )),
+        }
+    };
+    opens("installer-ui", "terminal")?;
+    init_control::ask(InitCommand::Restart(desktop.tag))?;
+    opens("terminal", "installer-ui")
+}
+
 /// The blank disk is installed as a person answers the questions; the others
 /// with every answer a flag.
 fn install() -> bool {
@@ -881,6 +951,10 @@ fn install() -> bool {
     let mut served = None;
     match kind {
         Kind::Erase => {
+            if let Err(why) = welcomed() {
+                note(&why);
+                return false;
+            }
             let mut answers = String::from("\n");
             if std::path::Path::new(layout::PAYLOAD_DIR)
                 .join("src")
