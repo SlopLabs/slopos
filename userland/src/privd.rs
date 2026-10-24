@@ -354,9 +354,14 @@ fn ask(action: &str, args: &[Vec<u8>], input: Input) -> Result<Asked, String> {
 }
 
 /// Have privd run `action` with `args`, the mechanism reading `input` and
-/// writing to `out`, its errors to this process's standard error: its
-/// status, or why nothing ran.
-pub fn run_feeding(action: &str, args: &[&str], input: &[u8], out: RawFd) -> Result<i32, String> {
+/// writing to `out`, its errors to `err`: its status, or why nothing ran.
+pub fn run_feeding(
+    action: &str,
+    args: &[&str],
+    input: &[u8],
+    out: RawFd,
+    err: RawFd,
+) -> Result<i32, String> {
     let mut connection = Connection::open_within(RESTART_WAIT)
         .map_err(|why| format!("cannot reach privd: {why}"))?;
     let (read, write) = pipe()?;
@@ -371,7 +376,7 @@ pub fn run_feeding(action: &str, args: &[&str], input: &[u8], out: RawFd) -> Res
         cwd: false,
         terminal: false,
     };
-    connection.send(&request, &[read.raw(), out, 2])?;
+    connection.send(&request, &[read.raw(), out, err])?;
     drop(read);
     loop {
         match connection.reply(request.id)? {

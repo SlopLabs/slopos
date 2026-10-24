@@ -7,7 +7,7 @@ use slopos_boot_core::gpt::{Header, Partition};
 use slopos_boot_core::install::{Place, Plan, ROLES, Role};
 use slopos_boot_core::layout::{self, ALIGN_BYTES, ROOT_TYPE};
 
-use crate::{Contents, Layout, human, partition_node, type_name};
+use crate::{Contents, Layout, human, partition_node, short, type_name};
 
 /// An install as it would be done: the disk before and after, what happens
 /// to each partition, and what the install sets up beside them. The same
@@ -45,6 +45,20 @@ pub enum Tag {
     Keep,
     /// Another system's partition, formatted as SlopOS's root.
     Reuse,
+}
+
+impl Tag {
+    /// What the partition comes to, as the review's list tags it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Tag::Erase => "Erased",
+            Tag::New => "New",
+            Tag::Format => "Formatted",
+            Tag::Share => "Shared",
+            Tag::Keep => "Kept",
+            Tag::Reuse => "Reused",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,6 +273,33 @@ impl Proposal {
     /// Whether the root's people and files stay.
     pub fn keeps_root(&self) -> bool {
         matches!(self.role(Role::Root), Some((Tag::Keep, _)))
+    }
+
+    /// Each action's partition as the review's list names it.
+    pub fn action_lines(&self) -> Vec<(Tag, String)> {
+        let part = |part: &Part| match part {
+            Part::New { node, bytes, .. } => format!("{}, {}", short(node), human(*bytes)),
+            Part::Existing {
+                node, kind, bytes, ..
+            } if kind.is_empty() => format!("{}, {}", short(node), human(*bytes)),
+            Part::Existing {
+                node, kind, bytes, ..
+            } => format!("{}, {kind}, {}", short(node), human(*bytes)),
+        };
+        self.actions
+            .iter()
+            .map(|action| {
+                let said = match &action.target {
+                    Target::Disk => match self.contents.holds() {
+                        Some(what) => format!("{}, which holds {what}", short(&self.disk)),
+                        None => format!("{}, which is blank", short(&self.disk)),
+                    },
+                    Target::Role(role, p) => format!("{}: {}", role.name(), part(p)),
+                    Target::Other(p) => part(p),
+                };
+                (action.tag, said)
+            })
+            .collect()
     }
 
     /// The other systems the boot menu leaves out, a line each.

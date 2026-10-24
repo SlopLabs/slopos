@@ -117,6 +117,8 @@ pub struct Progress {
     pub step: u32,
     /// The copy under way: its bytes so far and its total.
     pub bytes: Option<(u64, u64)>,
+    /// The step's last log line.
+    pub detail: Option<String>,
     pub log: Vec<String>,
 }
 
@@ -356,9 +358,13 @@ impl Wizard {
                     Event::Step { index, .. } => {
                         self.progress.step = index;
                         self.progress.bytes = None;
+                        self.progress.detail = None;
                     }
                     Event::Progress { done, total } => self.progress.bytes = Some((done, total)),
-                    Event::Log { line } => self.progress.log.push(line),
+                    Event::Log { line } => {
+                        self.progress.detail = Some(line.clone());
+                        self.progress.log.push(line);
+                    }
                 }
             }
             return Vec::new();
@@ -856,6 +862,10 @@ fn fitting_roots(opened: &Opened) -> Vec<u32> {
         .map(|(number, _)| *number)
         .collect()
 }
+
+mod words;
+
+pub use words::{Row, words};
 
 #[cfg(test)]
 mod tests;

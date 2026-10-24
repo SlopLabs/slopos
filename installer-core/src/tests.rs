@@ -3,139 +3,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use std::string::ToString;
 
-use slopos_boot_core::gpt::{Entry, Geometry, Header};
-use slopos_boot_core::install::{self, Mode as PlanMode, Plan, Role, RootSize};
+use slopos_boot_core::install::{self, Mode as PlanMode, Role};
 use slopos_boot_core::layout::{ESP_NAME, ROOT_NAME};
 
-pub(crate) const MIB: u64 = 1 << 20;
-pub(crate) const GIB: u64 = 1 << 30;
-const DISK: Guid = Guid::from_spelling("0f0e0d0c-0b0a-4908-8706-050403020100");
-pub(crate) const LINUX: Guid = Guid::from_spelling("0fc63daf-8483-4772-8e79-3d69d8477de4");
-const UNIQUES: [Guid; 4] = [Guid([1; 16]), Guid([2; 16]), Guid([3; 16]), Guid([4; 16])];
-
-/// A disk of `bytes` holding `parts`, each `(number, type, first, last)` in
-/// MiB, named as an installer test's would be.
-pub(crate) fn table(bytes: u64, parts: &[(u32, Guid, u64, u64)]) -> (Header, Vec<u8>) {
-    let header = Header::new(Geometry::new(bytes, 512).unwrap(), DISK).unwrap();
-    let mut array = vec![0u8; header.array_bytes()];
-    let mib = MIB / 512;
-    for &(number, type_guid, first, last) in parts {
-        Entry {
-            number,
-            type_guid,
-            unique: Guid([0xA0u8.wrapping_add(number as u8); 16]),
-            first_lba: first * mib,
-            last_lba: last * mib - 1,
-            attributes: 0,
-            name: Entry::name_of(if type_guid == ESP_TYPE {
-                ESP_NAME
-            } else {
-                "theirs"
-            }),
-        }
-        .encode(header.slot_mut(&mut array, number).unwrap());
-    }
-    (header.holding(&array), array)
-}
-
-pub(crate) fn setup() -> Setup {
-    Setup {
-        toolchain: true,
-        remote: Some(DEFAULT_REMOTE.into()),
-        person: Some(FirstPerson {
-            name: FIRST_PERSON.into(),
-            password: false,
-        }),
-        cmdline: DEFAULT_CMDLINE.into(),
-        first: false,
-        menu: vec!["Other OS".into(), "Elsewhere".into()],
-        beside: vec!["Other OS".into()],
-        left_out: Vec::new(),
-        removed: Vec::new(),
-    }
-}
-
-pub(crate) struct Case {
-    pub before: Option<(Header, Vec<u8>)>,
-    pub contents: Contents,
-    pub erase: bool,
-    pub mode: PlanMode,
-    pub size: RootSize,
-    pub keep_root: bool,
-    pub own_esp: bool,
-}
-
-impl Case {
-    pub(crate) fn on(before: (Header, Vec<u8>), mode: PlanMode) -> Case {
-        Case {
-            before: Some(before),
-            contents: Contents::Gpt,
-            erase: false,
-            mode,
-            size: RootSize {
-                min: GIB,
-                target: None,
-            },
-            keep_root: false,
-            own_esp: false,
-        }
-    }
-
-    pub(crate) fn erasing(before: Option<(Header, Vec<u8>)>, contents: Contents) -> Case {
-        Case {
-            before,
-            contents,
-            erase: true,
-            ..Case::on(table(16 * GIB, &[]), PlanMode::Free { region: None })
-        }
-    }
-
-    pub(crate) fn plan(&self) -> (Plan, Header, Vec<u8>) {
-        let (header, array) = match (&self.before, self.erase) {
-            (Some((header, array)), false) => (header.grown(), array.clone()),
-            (before, _) => {
-                let capacity = before
-                    .as_ref()
-                    .map_or(16 * GIB, |(h, _)| h.geometry().capacity());
-                let header = Header::new(Geometry::new(capacity, 512).unwrap(), DISK).unwrap();
-                let array = vec![0u8; header.array_bytes()];
-                (header, array)
-            }
-        };
-        let plan = install::plan(&header, &array, self.mode, self.size).unwrap();
-        let mut after = array.clone();
-        let after_header = plan.apply(header, &mut after, UNIQUES);
-        (plan, after_header, after)
-    }
-
-    pub(crate) fn proposal(&self) -> Proposal {
-        let (plan, header, array) = self.plan();
-        let before = self.before.as_ref().map(|(h, a)| Table {
-            header: h,
-            array: a,
-        });
-        Proposal::of(
-            Planned {
-                disk: "/dev/nvme0n1",
-                contents: self.contents.clone(),
-                capacity: header.geometry().capacity(),
-                before,
-                erase: self.erase,
-                plan: &plan,
-                after: Table {
-                    header: &header,
-                    array: &array,
-                },
-                format_esp: false,
-                format_boot: false,
-                keep_root: self.keep_root,
-                own_esp: self.own_esp,
-                root_min: self.size.min,
-            },
-            setup(),
-        )
-    }
-}
+use crate::fixtures::{Case, GIB, LINUX, MIB, foreign, installed, table};
 
 fn tags(p: &Proposal) -> Vec<(Tag, Option<Role>)> {
     p.actions
@@ -145,10 +16,6 @@ fn tags(p: &Proposal) -> Vec<(Tag, Option<Role>)> {
             Target::Role(role, _) => (a.tag, Some(*role)),
         })
         .collect()
-}
-
-pub(crate) fn foreign() -> (Header, Vec<u8>) {
-    table(16 * GIB, &[(1, ESP_TYPE, 1, 101), (2, LINUX, 101, 613)])
 }
 
 #[test]
@@ -182,6 +49,27 @@ fn sizes_are_read_in_binary_units() {
         "16777216T",
     ] {
         assert_eq!(parse_size(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn a_size_is_written_as_it_is_read() {
+    assert_eq!(size_text(200 * GIB), "200G");
+    assert_eq!(size_text(1536 * MIB), "1536M");
+    assert_eq!(size_text(2 << 40), "2T");
+    assert_eq!(size_text(4097), "4097B");
+    assert_eq!(size_text(0), "0B");
+    for bytes in [
+        0,
+        1,
+        4097,
+        3 * MIB,
+        7 * GIB,
+        7 * GIB + MIB,
+        5 << 40,
+        u64::MAX,
+    ] {
+        assert_eq!(parse_size(&size_text(bytes)), Some(bytes), "{bytes}");
     }
 }
 
@@ -400,18 +288,6 @@ fn a_reused_partition_is_formatted_and_its_size_is_the_root_s() {
         "SlopOS root: partition 1 (Linux filesystem, 10.0 GiB), FORMATTED"
     );
     assert!(!p.keeps_root());
-}
-
-pub(crate) fn installed() -> (Header, Vec<u8>) {
-    table(
-        16 * GIB,
-        &[
-            (1, ESP_TYPE, 1, 261),
-            (2, BOOT_TYPE, 261, 1285),
-            (3, ROOT_TYPE, 1285, 9000),
-            (4, CRASH_TYPE, 9000, 9004),
-        ],
-    )
 }
 
 #[test]

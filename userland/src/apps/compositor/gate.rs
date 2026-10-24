@@ -424,7 +424,7 @@ impl Gate {
 fn asked(action: &str, args: &[&str], input: &[u8]) -> Result<(), String> {
     let null = crate::syscall::fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR)
         .map_err(|e| format!("/dev/null: {e}"))?;
-    match crate::privd::run_feeding(action, args, input, null.raw()) {
+    match crate::privd::run_feeding(action, args, input, null.raw(), 2) {
         Ok(0) => Ok(()),
         Ok(_) => Err("The password is wrong".into()),
         Err(why) => Err(why),

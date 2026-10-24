@@ -13,6 +13,9 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 doctest = false
 
+[features]
+fixtures = []
+
 [dependencies]
 slopos-boot-core = { workspace = true }
 slopos-remote-core = { workspace = true }

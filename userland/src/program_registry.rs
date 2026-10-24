@@ -47,6 +47,11 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "Install SlopOS onto a disk from the live medium",
     },
     ProgramSpec {
+        name: "installer-ui",
+        path: "/bin/installer-ui",
+        desc: "Install SlopOS onto a disk from the live medium, in a window",
+    },
+    ProgramSpec {
         name: "sysmon",
         path: "/bin/sysmon",
         desc: "System Monitor",

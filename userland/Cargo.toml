@@ -30,6 +30,10 @@ name = "installer"
 path = "src/bin/installer.rs"
 
 [[bin]]
+name = "installer-ui"
+path = "src/bin/installer-ui.rs"
+
+[[bin]]
 name = "compositor"
 path = "src/bin/compositor.rs"
 
@@ -258,6 +262,11 @@ name = "appkit_test"
 path = "src/bin/tests/appkit_test.rs"
 
 [[bin]]
+name = "installer_ui_test"
+path = "src/bin/tests/installer_ui_test.rs"
+required-features = ["testbins"]
+
+[[bin]]
 name = "apps_test"
 path = "src/bin/tests/apps_test.rs"
 
@@ -441,6 +450,7 @@ path = "src/bin/tests/cxx_test.rs"
 [features]
 default = []
 testbins = [
+  "slopos-installer-core/fixtures",
   "slopos-tls-core/test-server",
   "slopos-extension-core/test-elf",
   "dep:slopos-apps",

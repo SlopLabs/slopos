@@ -4,7 +4,7 @@
 
 # The shipped programs: `/bin/<name>`, and `init`, `privd` and `authcheck` at
 # `/sbin/<name>`.
-BASE_PROGRAMS="init privd shell coreutils terminal compositor roulette halt bootctl installer sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted kconsole prof tree-install session login extctl users authcheck priv"
+BASE_PROGRAMS="init privd shell coreutils terminal compositor roulette halt bootctl installer installer-ui sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted kconsole prof tree-install session login extctl users authcheck priv"
 
 # The apps outside the base, the tree `apps` every root holds at /usr/local.
 APPS="editor file_manager image_viewer"
@@ -25,7 +25,7 @@ BASE_RECIPES="e2fsprogs"
 
 # The tests base: the shipped programs and the suite's. `bigprog_test` costs
 # ~25 MB of guest RAM on every test boot.
-BASE_TEST_PROGRAMS="$BASE_PROGRAMS dl_probe dl_test dl_search_origin dl_search_rpath dl_search_runpath dl_secure_probe cxx_probe cxx_static_probe cxx_test libc_probe libc_probe_static fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test script_exec_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test apps_test dock_test tree_install_test editor_test spawn_privilege_test seat_test protocol_test mount_test install_test installer_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test dac_test peer_test privd_test accounts_test priv_test extension_test extension_action_test extension_service_test ext_daemon supervision_test live_base_test fifo_test session_smoke_test sessions_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test reboot_clone_test rename_test libc_abi_test toolchain_test selfhost_test buildloop_test exit_stress_test cpufreq_test usb_shell_test usb_disk_test usb_net_test"
+BASE_TEST_PROGRAMS="$BASE_PROGRAMS dl_probe dl_test dl_search_origin dl_search_rpath dl_search_runpath dl_secure_probe cxx_probe cxx_static_probe cxx_test libc_probe libc_probe_static fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test script_exec_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test apps_test dock_test tree_install_test editor_test spawn_privilege_test seat_test protocol_test mount_test install_test installer_test installer_ui_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test dac_test peer_test privd_test accounts_test priv_test extension_test extension_action_test extension_service_test ext_daemon supervision_test live_base_test fifo_test session_smoke_test sessions_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test reboot_clone_test rename_test libc_abi_test toolchain_test selfhost_test buildloop_test exit_stress_test cpufreq_test usb_shell_test usb_disk_test usb_net_test"
 
 # Shared objects the suite dlopens: libraries, not programs, and never on the
 # shipped base.

@@ -44,7 +44,7 @@ pub fn login_main() {
         let mut line = secret.bytes().to_vec();
         line.push(b'\n');
         let tty = crate::syscall::tty::name_of(slave.raw());
-        let ran = run_feeding(LOGIN, &["login", "console", &name], &line, slave.raw());
+        let ran = run_feeding(LOGIN, &["login", "console", &name], &line, slave.raw(), 2);
         slopos_tls_core::ct::wipe(&mut line);
         drop((secret, slave));
         match (ran, tty) {

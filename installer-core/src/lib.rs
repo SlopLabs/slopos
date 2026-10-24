@@ -16,6 +16,8 @@ extern crate alloc;
 extern crate std;
 
 mod choices;
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixtures;
 mod issue;
 mod layout;
 mod proposal;
@@ -81,6 +83,18 @@ pub fn parse_size(text: &str) -> Option<u64> {
         _ => return None,
     };
     number.parse::<u64>().ok()?.checked_mul(1 << shift)
+}
+
+/// A size as [`parse_size`] reads it back: a whole number of the largest unit
+/// that divides it.
+pub fn size_text(bytes: u64) -> String {
+    [(40, "T"), (30, "G"), (20, "M"), (10, "K")]
+        .into_iter()
+        .find(|&(shift, _)| bytes != 0 && bytes.trailing_zeros() >= shift)
+        .map_or_else(
+            || format!("{bytes}B"),
+            |(shift, unit)| format!("{}{unit}", bytes >> shift),
+        )
 }
 
 /// What a partition type GUID names, as `fdisk` would say it.

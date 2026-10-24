@@ -235,6 +235,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin toolchain_test \
         --bin install_test \
         --bin installer_test \
+        --bin installer_ui_test \
         --bin selfhost_test \
         --bin shell_script_test \
         --bin stdio_stream_test \
@@ -408,6 +409,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/installer_test" ]; then
         cp "$RELEASE_DIR/installer_test" "$BUILD_DIR/installer_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/installer_ui_test" ]; then
+        cp "$RELEASE_DIR/installer_ui_test" "$BUILD_DIR/installer_ui_test.elf"
     fi
     if [ -f "$RELEASE_DIR/selfhost_test" ]; then
         cp "$RELEASE_DIR/selfhost_test" "$BUILD_DIR/selfhost_test.elf"

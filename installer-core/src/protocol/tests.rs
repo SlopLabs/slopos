@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use slopos_boot_core::install::{Mode as PlanMode, PlanError};
 
-use crate::tests::{Case, GIB, foreign};
+use crate::fixtures::{Case, GIB, foreign};
 use crate::{Opened, Reinstall};
 
 fn payload(frame: &[u8]) -> (u8, &[u8]) {

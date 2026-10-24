@@ -1068,7 +1068,13 @@ machine and each opened disk as views, every choice on an opened disk
 proposed with the engine's defaults, the proposal — the disk before and
 after, an action per partition tagged erase, new, format, share, keep or
 reuse, the root's size range — its issues worded as the CLI says them, the
-events, the protocol's codec, and the `Wizard` a window's pages follow.
+events, the protocol's codec, and the `Wizard` whose pages, lists and words
+a window renders. `/bin/installer-ui`, in every base and refusing to start
+off the medium, is that window: an appkit app holding nothing, which asks
+privd for `installer --serve` on two pipes when the person presses *Install
+SlopOS*, reads the engine's frames on a thread of its own and refuses to
+close while it installs; `installer_ui_test` drives it with scripted engine
+frames through that reader.
 `boot-core::install` plans where the partitions go, on 1 MiB boundaries,
 sharing the disk's ESP and keeping SlopOS's own on a reinstall, a new root as
 large as `--root-size` asks clamped between the medium's least and what the

@@ -8,6 +8,7 @@ pub mod extctl;
 pub mod halt;
 pub mod init;
 pub mod installer;
+pub mod installer_ui;
 pub mod ip;
 pub mod kconsole;
 pub mod keymap;

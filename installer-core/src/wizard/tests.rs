@@ -1,76 +1,10 @@
 use super::*;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use slopos_boot_core::install::{Mode as PlanMode, PlanError};
 
-use crate::tests::{Case, GIB, foreign, installed};
-use crate::{Contents, Disk, DiskState, Layout, Listing, Medium, Reinstall, Tag};
-
-const NODE: &str = "/dev/nvme0n1";
-
-fn no_room() -> Issue {
-    Issue::Plan {
-        error: PlanError::NoRoom {
-            needed: 8 * GIB,
-            available: GIB,
-        },
-        node: NODE.into(),
-        root: None,
-    }
-}
-
-fn opened(free: Fit, reinstall: Option<Reinstall>) -> Opened {
-    Opened {
-        erase: Ok(()),
-        free: free.clone(),
-        largest: Some(1),
-        regions: vec![free.clone(), free, Err(no_room())],
-        reuse: Ok(()),
-        roots: vec![(1, Err(no_room())), (2, Ok(())), (4, Ok(()))],
-        reinstall,
-    }
-}
-
-fn system(opened: Option<Opened>) -> System {
-    let (header, array) = foreign();
-    System {
-        medium: Medium {
-            toolchain: true,
-            source: true,
-            payload: Some(GIB),
-            root_min: 7 * GIB,
-            unmounted_payload: None,
-        },
-        disks: vec![
-            Disk {
-                node: "/dev/sda".into(),
-                state: DiskState::Refused("the install medium".into()),
-            },
-            Disk {
-                node: NODE.into(),
-                state: DiskState::Listed(Listing {
-                    capacity: 16 * GIB,
-                    block: 512,
-                    contents: Contents::Gpt,
-                    layout: Layout::of(NODE, &header, &array),
-                    opened,
-                }),
-            },
-            Disk {
-                node: "/dev/vda".into(),
-                state: DiskState::Listed(Listing {
-                    capacity: 16 * GIB,
-                    block: 512,
-                    contents: Contents::Blank,
-                    layout: Layout::empty(16 * GIB),
-                    opened: None,
-                }),
-            },
-        ],
-        others: Ok(vec!["Other OS".into()]),
-    }
-}
+use crate::fixtures::{Case, GIB, NODE, foreign, installed, machine as system, no_room, opened};
+use crate::{Contents, DiskState, Reinstall, Tag};
 
 fn sent(out: Vec<Out>) -> Vec<Request> {
     out.into_iter()
@@ -603,7 +537,7 @@ fn an_answer_that_changes_nothing_proposes_nothing() {
     assert!(w.on(Input::Kind(Kind::Free)).is_empty());
     assert!(w.on(Input::First(false)).is_empty());
     assert!(
-        w.on(Input::Root(4)).is_empty(),
+        w.on(Input::Root(3)).is_empty(),
         "a root matters only to a reuse"
     );
     assert_eq!(sent(w.on(Input::Region(0))).len(), 1);
@@ -712,4 +646,351 @@ fn an_engine_that_stops_before_an_install_returns_to_welcome() {
     assert_eq!(w.page(), Page::Welcome);
     assert!(w.note().is_some());
     assert_eq!(w.on(Input::Next), [Out::Start]);
+}
+
+#[test]
+fn the_disks_offered_come_first_each_saying_what_it_holds() {
+    let w = at_disk();
+    let rows = w.disks();
+    let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+    assert_eq!(keys, [NODE, "/dev/vda", "/dev/sda"]);
+    assert_eq!(rows[0].label, "nvme0n1 — 16.0 GiB");
+    let system = w.system().unwrap();
+    let free: u64 = system
+        .disk(NODE)
+        .unwrap()
+        .listing()
+        .unwrap()
+        .layout
+        .regions()
+        .map(|s| s.bytes)
+        .sum();
+    assert_eq!(
+        rows[0].detail,
+        alloc::format!(
+            "GPT: EFI system, Linux filesystem, Linux filesystem, {} free",
+            crate::human(free)
+        )
+    );
+    assert_eq!((rows[1].detail.as_str(), rows[1].enabled), ("blank", true));
+    assert_eq!(rows[2].label, "sda");
+    assert_eq!(
+        (rows[2].detail.as_str(), rows[2].enabled),
+        ("the install medium", false)
+    );
+}
+
+#[test]
+fn a_tile_says_what_it_does_or_why_not_without_a_flag() {
+    let (w, _) = at_how(
+        opened(Err(no_room()), None),
+        Case::erasing(Some(foreign()), Contents::Gpt).proposal(),
+    );
+    let rows = w.tile_rows();
+    let said: Vec<(Kind, &str, bool)> = rows
+        .iter()
+        .map(|r| (r.key, r.detail.as_str(), r.enabled))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (Kind::Erase, "everything on nvme0n1 is lost", true),
+            (
+                Kind::Free,
+                "the free region holds 1.0 GiB; SlopOS needs 8.0 GiB",
+                false
+            ),
+            (
+                Kind::Reuse,
+                "the partition chosen is formatted as the root",
+                true
+            ),
+        ]
+    );
+    assert_eq!(rows[1].label, "Install beside what is there");
+    for issue in [
+        Issue::OnlyErase {
+            node: NODE.into(),
+            holds: "an MBR partition table with 2 partition(s)".into(),
+        },
+        Issue::NothingToKeep("/dev/nvme0n1p3".into()),
+        Issue::RootSize,
+        Issue::Remote("x\n".into()),
+        Issue::Plan {
+            error: PlanError::Installed(3),
+            node: NODE.into(),
+            root: Some("/dev/nvme0n1p3".into()),
+        },
+        Issue::Plan {
+            error: PlanError::RootElsewhere(3),
+            node: NODE.into(),
+            root: None,
+        },
+    ] {
+        let said = words(&issue);
+        assert!(!said.contains("--"), "{said}");
+        assert_ne!(said, issue.to_string());
+    }
+    assert_eq!(words(&no_room()), no_room().to_string());
+}
+
+#[test]
+fn a_reinstall_tile_names_the_root_it_keeps_or_formats() {
+    for (keep, detail) in [
+        (true, "keeps the people and files nvme0n1p3 holds"),
+        (false, "formats nvme0n1p3"),
+    ] {
+        let mut case = Case::on(
+            installed(),
+            PlanMode::Reuse {
+                root: 3,
+                region: None,
+            },
+        );
+        case.keep_root = keep;
+        let reinstall = Some(Reinstall {
+            root: 3,
+            keep,
+            fit: Ok(()),
+        });
+        let (w, _) = at_how(opened(Err(no_room()), reinstall), case.proposal());
+        let rows = w.tile_rows();
+        let tile = rows.iter().find(|r| r.key == Kind::Reinstall).unwrap();
+        assert_eq!(tile.detail, detail);
+    }
+}
+
+#[test]
+fn every_region_is_listed_once_two_take_the_install() {
+    let mut w = at_disk();
+    sent(w.on(Input::Next));
+    reply(&mut w, Reply::System(system(Some(opened(Ok(()), None)))));
+    reply(
+        &mut w,
+        Reply::Proposal {
+            id: 1,
+            proposal: free_proposal(),
+        },
+    );
+    let rows = w.region_rows();
+    let said: Vec<(usize, &str, bool)> = rows
+        .iter()
+        .map(|r| (r.key, r.label.as_str(), r.enabled))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (0, "Free region 1: 1.9 GiB at 101.0 MiB", true),
+            (1, "Free region 2: 4.0 GiB at 4.0 GiB", true),
+            (2, "Free region 3: 383.0 MiB at 15.6 GiB", false),
+        ]
+    );
+    assert_eq!(rows[2].detail, no_room().to_string());
+    sent(w.on(Input::Kind(Kind::Erase)));
+    assert!(w.region_rows().is_empty(), "only a free-space install");
+}
+
+#[test]
+fn a_root_is_listed_by_its_node_type_and_size() {
+    let mut w = at_disk();
+    sent(w.on(Input::Next));
+    reply(&mut w, Reply::System(system(Some(opened(Ok(()), None)))));
+    reply(
+        &mut w,
+        Reply::Proposal {
+            id: 1,
+            proposal: free_proposal(),
+        },
+    );
+    let rows = w.root_rows();
+    let said: Vec<(u32, &str, bool)> = rows
+        .iter()
+        .map(|r| (r.key, r.label.as_str(), r.enabled))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (
+                1,
+                "nvme0n1p1: EFI system, \"EFI system partition\", 100.0 MiB",
+                false
+            ),
+            (2, "nvme0n1p2: Linux filesystem, \"theirs\", 2.0 GiB", true),
+            (3, "nvme0n1p3: Linux filesystem, \"theirs\", 7.6 GiB", true),
+        ]
+    );
+}
+
+#[test]
+fn the_slider_holds_the_size_asked_within_the_engine_s_span() {
+    let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
+    let span = free_proposal().root;
+    assert_eq!(w.root_span(), Some(span));
+    assert_eq!(w.root_size(), Some(span.max), "all the region gives");
+    sent(w.on(Input::RootSize(Some(span.min - 1))));
+    assert_eq!(w.root_span(), Some(span), "the last answer, meanwhile");
+    assert_eq!(w.root_size(), Some(span.min));
+    reply(
+        &mut w,
+        Reply::Proposal {
+            id: 8,
+            proposal: free_proposal(),
+        },
+    );
+    sent(w.on(Input::Kind(Kind::Reuse)));
+    assert_eq!(
+        w.root_span(),
+        None,
+        "a reused root has its partition's size"
+    );
+    assert_eq!(w.root_size(), None);
+}
+
+#[test]
+fn the_review_summarises_the_proposal() {
+    let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
+    sent(w.on(Input::First(true)));
+    assert!(
+        w.summary_lines().is_empty(),
+        "no proposal for the choices yet"
+    );
+    reply(
+        &mut w,
+        Reply::Proposal {
+            id: 8,
+            proposal: free_proposal(),
+        },
+    );
+    w.on(Input::Next);
+    let lines = w.summary_lines();
+    let subjects: Vec<&str> = lines.iter().map(|(s, _)| *s).collect();
+    assert_eq!(
+        subjects,
+        [
+            "Disk",
+            "How",
+            "Root",
+            "Toolchain",
+            "Source",
+            "People",
+            "Boot order",
+            "Boot menu"
+        ]
+    );
+    assert_eq!(lines[0].1, "nvme0n1 — 16.0 GiB");
+    assert_eq!(lines[1].1, "Install beside what is there");
+    assert!(lines[2].1.starts_with("nvme0n1p4, "), "{}", lines[2].1);
+    assert_eq!(lines[5].1, "user, the first administrator");
+    assert_eq!(lines[7].1, "SlopOS, Other OS, Elsewhere");
+}
+
+#[test]
+fn each_action_is_listed_with_its_tag() {
+    let lines = free_proposal().action_lines();
+    let tags: Vec<&str> = lines.iter().map(|(tag, _)| tag.word()).collect();
+    assert_eq!(tags, ["Shared", "New", "New", "New", "Kept"]);
+    assert_eq!(
+        lines[0].1,
+        "EFI system partition: nvme0n1p1, EFI system, 100.0 MiB"
+    );
+    assert_eq!(lines[4].1, "nvme0n1p2, Linux filesystem, 512.0 MiB");
+    let erased = Case::erasing(Some(foreign()), Contents::Gpt).proposal();
+    assert_eq!(
+        erased.action_lines()[0],
+        (
+            Tag::Erase,
+            "nvme0n1, which holds a GUID partition table".into()
+        )
+    );
+}
+
+#[test]
+fn a_step_s_detail_is_its_last_log_line() {
+    let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
+    review(&mut w);
+    reply(&mut w, Reply::Event(Event::step(3)));
+    assert_eq!(w.progress().detail, None);
+    reply(&mut w, Reply::Event(Event::Log { line: "a".into() }));
+    reply(&mut w, Reply::Event(Event::Log { line: "b".into() }));
+    assert_eq!(w.progress().detail.as_deref(), Some("b"));
+    reply(&mut w, Reply::Event(Event::step(4)));
+    assert_eq!(w.progress().detail, None);
+    assert_eq!(w.progress().log, ["a", "b"]);
+    assert_eq!(w.outcome(), ["Installing SlopOS on nvme0n1"]);
+}
+
+#[test]
+fn the_outcome_says_where_and_how_the_install_ended() {
+    let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
+    review(&mut w);
+    reply(
+        &mut w,
+        Reply::Failed(Failure {
+            step: 4,
+            message: "copying".into(),
+        }),
+    );
+    assert_eq!(
+        w.outcome(),
+        [
+            "The install on nvme0n1 did not finish",
+            "It stopped at step 4 of 9, filling the root: copying"
+        ]
+    );
+
+    let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
+    review(&mut w);
+    reply(
+        &mut w,
+        Reply::Failed(Failure {
+            step: 0,
+            message: "/dev/nvme0n1 changed since it was reviewed; nothing was written".into(),
+        }),
+    );
+    assert_eq!(
+        w.outcome()[1],
+        "It stopped before writing anything: /dev/nvme0n1 changed since it was reviewed"
+    );
+
+    let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
+    review(&mut w);
+    w.on(Input::Ended);
+    assert_eq!(
+        w.outcome()[1],
+        "It stopped before its first step: the installer stopped before it said how the install ended"
+    );
+
+    let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
+    review(&mut w);
+    reply(
+        &mut w,
+        Reply::Done(Summary {
+            disk: NODE.into(),
+            entry: 0x1a,
+        }),
+    );
+    let lines = w.outcome();
+    assert_eq!(lines[0], "SlopOS is installed on nvme0n1");
+    assert!(lines[1].starts_with("The firmware boots it as Boot001A."));
+    assert_eq!(lines.len(), 2, "the medium carried the toolchain");
+}
+
+#[test]
+fn a_medium_without_a_toolchain_says_so_once_probed() {
+    let mut w = Wizard::new();
+    assert!(w.medium_notes().is_empty());
+    w.on(Input::Next);
+    sent(w.on(Input::Started));
+    reply(&mut w, Reply::Hello { version: VERSION });
+    let mut machine = system(None);
+    machine.medium.toolchain = false;
+    machine.medium.unmounted_payload = Some("/dev/sdb".into());
+    reply(&mut w, Reply::System(machine));
+    assert_eq!(
+        w.medium_notes(),
+        [
+            "The medium carries no toolchain, so the installed system has none",
+            "sdb carries the medium's payload, which the kernel did not mount; its log says why"
+        ]
+    );
 }

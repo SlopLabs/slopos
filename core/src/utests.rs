@@ -128,6 +128,12 @@ crate::utest!(
 crate::utest!(name = utest_install, bin = "/bin/install_test");
 crate::utest!(name = utest_installer, bin = "/bin/installer_test");
 crate::utest!(
+    name = utest_wizard_window,
+    bin = "/bin/installer_ui_test",
+    caps = none,
+    uid = 1000
+);
+crate::utest!(
     name = utest_selfhost,
     bin = "/bin/selfhost_test",
     uncaptured,

@@ -99,24 +99,25 @@ renamed, and the firmware entry comes last.
   be, and the foreign disk's root to the size asked, the crash partition
   after it and free space after both.
 
+**The window.**
+- `/bin/installer-ui` is `userland/src/apps/installer_ui/`, in every base
+  and refusing to start off the medium: an appkit app, app id
+  `org.slopos.installer`, 900 × 540, that renders the `Wizard`'s pages
+  (`view.rs`) and carries what it asks for through a `Link` (`link.rs`): privd
+  for `org.slopos.install` with `--serve` on two pipes, the engine's frames
+  through a reader thread, and `org.slopos.power.reboot`.
+- What it says of the machine is the wizard's (`installer_core::wizard::words`):
+  the disks with what each holds, the tiles, regions and partitions as `Row`s,
+  issues without the CLI's flags, the root's span and size, the review's
+  summary, the steps' detail and the outcome; the tagged actions are the
+  proposal's (`Proposal::action_lines`).
+- `installer_ui_test` drives it with a recording link and scripted engine
+  frames through its own reader.
+
 **The live desktop.**
 - init starts the compositor and then the terminal; nothing knows it is live
   (`userland/src/apps/init/`).
 - The dock pins five programs (`userland/src/apps/compositor/dock.rs:135-177`).
-
-**appkit has what the window needs.**
-- An app implements `App { view, update, tick, on_key, on_close_request }`
-  and calls `run_app` (`appkit/src/node.rs`). `on_start` hands it an
-  `AppSender`, through which a thread sends it messages that reach `update`.
-- It has these widgets: Label, Button (Primary, Secondary, Destructive),
-  Checkbox, RadioGroup, Slider, LineEdit, ProgressBar (indeterminate without a
-  value), PartitionBar, ListView, Table, ScrollView, TabBar, and a Dialog
-  whose actions take no focus until Tab or an arrow. `widget_gallery` shows
-  them.
-- ProgressBar's default fill is a load meter that turns yellow and red; the
-  window names a colour.
-- The theme is dark only, the scale is 1, and a client cannot ask for
-  fullscreen (`slop-protocol/src/types.rs`).
 
 ## What the prior art settles
 
@@ -179,86 +180,10 @@ Phases 1 and 2 built them: `installer::engine`, `installer --serve` and
 
 ### The window
 
-`/bin/installer-ui` is an appkit app with app id `org.slopos.installer` and a
-900 × 640 window, which fits 1280 × 720; there is no fullscreen request to
-ask for a bigger one. Its pages, answers, enablement and wording are
-`installer_core::wizard::Wizard`'s, which also says when to start the
-engine, restart or close; the app renders them and carries frames. The
-request to privd, which waits on the person's consent, and a reader of the
-engine's frames run on threads of their own and send what they get through
-the app's `AppSender`, so the window keeps drawing meanwhile. The
-window has a header with the step strip (*Disk · How · Review · Install*),
-the page, and a footer with Back and the page's primary button. Everything
-is reachable with Tab, Enter activates, and Escape is Back on every page but
-Install.
-
-1. **Welcome.** *Try SlopOS* closes the window; *Install SlopOS* asks privd,
-   then probes.
-   - A medium with no payload says so once probed, with the CLI's wording
-     ("the medium carries no toolchain").
-   - A refused or expired consent leaves the person here, with the reason.
-2. **Disk.** Offered disks come first. Each row shows the node, the capacity,
-   and what the disk holds: "blank", "GPT: EFI system, Windows (basic data),
-   120 GiB free", or "an MBR partition table with 2 partitions".
-   - Disks the engine will not offer (the medium, write-protected) are shown
-     disabled and sorted last, with the reason.
-   - A *Rescan* button sits below the list.
-3. **How.** Task tiles in a radio group:
-   - *Erase disk and install*.
-   - *Install beside what is there*: free space. It is disabled with the
-     planner's reason when no region fits. A region picker appears when two or
-     more fit, defaulting to the largest.
-   - *Use a partition as the root*: a partition list.
-   - *Reinstall SlopOS*: shown only when a SlopOS root is found. It reuses that
-     root, keeping it.
-
-   A disk without a readable GPT offers erase alone and says why. Under the
-   tiles sit a *Now* bar, an *After* bar and, for erase and free, the root size
-   slider with a numeric box. *Options* holds the `/src` remote (when the
-   payload has `/src`) and "Put SlopOS first in the firmware boot order", which
-   is off by default. Every change sends `Propose`, and the bars and the
-   button follow the reply.
-4. **Review.**
-   - A summary: disk, mode, root size, toolchain, the `/src` remote, boot
-     order.
-   - The action list with its tags.
-   - The other systems the boot menu will offer, and any it leaves out.
-   - A checkbox whose text follows the mode:
-     - erase: "I understand that everything on nvme0n1 will be erased";
-     - free: "I understand that new partitions will be created in free space
-       on nvme0n1, and nothing else on it changes";
-     - reuse: "I understand that nvme0n1p3 will be formatted".
-   - The Destructive primary button stays disabled until the box is ticked. It
-     is labelled by scenario: *Erase nvme0n1 and install*, *Install beside
-     Windows Boot Manager*, *Format nvme0n1p3 and install*, *Reinstall SlopOS*.
-5. **Install.** The nine steps as a list, each pending, running or done, with
-   the current step's detail line.
-   - A ProgressBar in a fixed colour shows bytes over the total during the
-     copies. An indeterminate bar shows otherwise.
-   - *Show log* opens a scroll view of the `Log` lines.
-   - `on_close_request` refuses while the engine runs. There is no cancel.
-6. **Done.** "SlopOS is installed on nvme0n1", the remove-the-medium note, and
-   the no-toolchain note when it applies. *Restart now* asks privd for
-   `org.slopos.power.reboot`; *Keep using the live system* closes.
-
-   **Error.** The failed step, its message and the log. *Back to review*
-   opens the disk again, since a failed install may have changed it, and
-   proposes the same choices, which the re-runnable design makes safe; a
-   free-space install cut short after its table finds SlopOS there and offers
-   the reinstall instead. *Restart* is beside it.
-
-The How page, erasing a 512 GiB disk:
-
-```
- How should SlopOS be installed on nvme0n1?
- ( ) Install beside what is there   — no free region holds 7.0 GiB
- (•) Erase disk and install
- ( ) Use a partition as the root
-     Now   [ EFI |      Windows 380 GiB        | data 130 GiB ]
-     After [E|B|            SlopOS root 200 GiB    |C|  free 310 GiB ]
-     Root size  ──────●──────────────  [ 200 GiB ]   7.0 GiB – 510 GiB
-                                                  [ Back ]  [ Review ]
-```
+Phase 4 built it: `/bin/installer-ui` over `installer_core::wizard`
+(*Where it stands*, *Decided*). Welcome → Disk → How → Review → Install →
+Done or Error, a step strip above the page and Back and the page's primary
+button below it, as the Goal and the prior art have it.
 
 ### Where it starts
 
@@ -269,8 +194,8 @@ The How page, erasing a 512 GiB disk:
   a medium, and matches the window by app id.
 - **Terminal.** `installer` remains the CLI.
 
-`installer-ui` joins `BASE_PROGRAMS` (`scripts/lib/base.sh:6`). It ships in
-every base and, like the engine, refuses without a medium.
+`installer-ui` is in `BASE_PROGRAMS` already, and refuses to start off the
+medium.
 
 ## Phases
 
@@ -316,16 +241,22 @@ input through a scroll view, the held rebuild and a thread's messages;
 `widget_gallery`'s *Choices* and *Progress* tabs show them, a job on a thread
 among them.
 
-### Phase 4: The window
+### Phase 4: The window — done
 
-Build `/bin/installer-ui`'s pages over the `Wizard` and the protocol. Add
-`installer_ui_test`, in `editor_test`'s style: it drives the app with
-scripted engine frames and holds the page sequence, Back restoring choices,
-the primary button's enablement, the checkbox and button wording per mode,
-and the frames the app sends.
-
-Ends with: the test green, and a manual run on `just boot-live` with a blank
-disk, recorded in the commit message, as the visual acceptance.
+`/bin/installer-ui` renders the wizard's pages and carries frames: privd's
+consent asked once at *Install SlopOS*, a reader thread posting the engine's
+replies, Back keeping every answer, the review's box and button worded by
+the damage, the steps with their detail and a copy's bytes, the log, and no
+close while installing. The wizard gained its wording and lists, host-tested,
+and `installer_core::fixtures` the disks and proposals both test suites
+share behind its `fixtures` feature. appkit gained a `LineEdit` that is a
+tab stop, the editor's `LineInput` as its model, a `StyledLabel` that wraps,
+and scroll views that show the control Tab reaches and can follow their end.
+`installer_ui_test` holds the page sequence, Back, the primary button's
+enablement, the wording per mode, the tab stops, the size box, a drag cut
+short and the frames sent. The live ISO, booted as `just boot-live` boots it
+with a blank 32 GiB NVMe disk attached, erased and installed the disk
+through the window by keyboard alone and restarted into it.
 
 ### Phase 5: Where it starts
 
@@ -536,6 +467,70 @@ absent on `just boot`.
   thread may send to itself; a producer that can outrun the window throttles
   itself, as the engine's progress does. Wakes coalesce: the pipe is written
   once per drain.
+
+- **What the window says of the machine is installer-core's.** The disks
+  with what each holds, the tiles, regions and partitions as `Row`s, every
+  issue without the flags the CLI names, the review's summary and tagged
+  actions, a step's detail and the outcome are host-tested there; the window
+  adds the headings, the status lines and the step states, maps the rest
+  onto widgets and chooses the colours.
+- **Escape is Back, never Cancel.** Qt, GTK and Windows have Escape cancel a
+  wizard; here Back keeps every answer, so Escape loses nothing, where a
+  cancel would lose the consent and the engine. Install takes no Escape.
+- **Enter is the primary button but on Review and Done**, as QWizard and
+  GtkAssistant make Next the default. Review's button erases and Done's
+  restarts the machine before the medium may be out, so each acts only when
+  it is pressed or focused.
+- **A new page starts with nothing focused.** appkit restores focus across a
+  rebuild by a control's role and name, or by its place in a chain of the
+  same length, which across pages could land on a control the person never
+  reached, Review's destructive button among them; an app's `page_key` names
+  the page, and a rebuild onto another drops focus.
+- **A field the window types into is the app's.** Every reply rebuilds the
+  tree, which would put a `TextField`'s caret back at the start, so the
+  remote and the size box are `LineEdit`s whose text and caret the app keeps
+  in appkit's `LineInput`. A `LineEdit` marked `tab_stop` is reached and left
+  by Tab and says `Focus` and `Blur`; the editor's find bar, which takes
+  Tab, is not one.
+- **The size box shows the slider's size until it is typed in**, as
+  `size_text` writes it; it reads `parse_size`'s units in either case and a
+  bare number in GiB, since that is what a root is sized in. What does not
+  parse marks the box and proposes nothing, and leaving the box shows the
+  slider's size again.
+- **A log follows its end while it is there**, as Qt's and Ubuntu's do: a
+  scroll view built `follow_end` reports its end as `i32::MAX`, which, given
+  back as `scroll_y`, keeps the view at the end as lines arrive. A page
+  keeps its offset, so a reply that grows it moves nothing under the
+  pointer.
+- **A control Tab reaches is scrolled into view**, as Qt's `QScrollArea`
+  does: each scroll view between it and the window's top scrolls by the
+  least that shows it, its top first when it is taller than the view, and
+  reports the offset as a scroll would.
+- **The log takes the steps' place**, as Calamares' and Ubuntu's take the
+  slideshow's, so the Install page fits the window whichever shows; the
+  Error page names the failed step and shows the log.
+- **The window is 900 × 540.** The compositor puts a window's content at
+  (100, 100), and on 1280 × 720 the dock begins near 656.
+- **A mechanism the window starts gets `/dev/null` for its output.** The
+  window's own may be the terminal it was started from, where a mechanism,
+  running outside that session, is answered `EIO`, and `println!` aborts.
+- **A `Link` stands between the window and the world**: privd's requests and
+  the engine's pipes. `installer_ui_test` puts one that records in its place
+  and feeds the engine's frames through the window's own reader, as
+  `editor_test` drives the editor with no compositor; the fixtures it builds
+  them from are `installer_core::fixtures`, which the host tests share and
+  no shipped program compiles in.
+- **The slider's end, or a size typed past it, is all the region gives**,
+  as no size is, so a larger region or an erase chosen after it fills the
+  space, even while the slider stands at the end of a smaller region with a
+  larger size asked. A size already asked changes nothing, and Enter leaves
+  a box that reads no size where it is.
+- **A restart asked for holds the page** until privd answers, so a consent
+  given later never reboots the machine under an install begun meanwhile.
+- **The window says nothing was written only when the engine did.** A frame
+  it cannot read is passed over; output it cannot frame is read to its end
+  and dropped, since the engine may still be writing a disk, and the outcome
+  of an engine that ended before its first step says only that.
 
 ## Constraints
 
