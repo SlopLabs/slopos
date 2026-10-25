@@ -16,7 +16,6 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
-| `installer-gui.md` | A graphical installer on the live medium: `/bin/installer-ui`, the unprivileged window over the engine privd runs, built over `installer-core`'s wizard, which a live boot's desktop opens as its welcome and the dock's entry starts on a boot from the medium; all five phases have landed |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive the
@@ -124,6 +123,17 @@ one-person install unchanged. Read `AGENTS.md` rather than a document: its
 paragraphs on the machine's people, sessions, privd and `priv` state the
 invariants, and `accounts-core`, `userland/src/apps/init/session.rs` and
 `userland/src/apps/priv.rs` hold the code.
+
+The graphical installer has **landed and its plan is retired**. A live boot's
+desktop opens `/bin/installer-ui --welcome`, an unprivileged appkit window
+over `installer-core`'s `Wizard` that asks privd once for `installer --serve`
+and speaks its typed protocol: Welcome, Disk, How, Review, Install, then Done
+or Error, with before and after partition bars, a tagged action list, a root
+size slider and a review guard worded by the damage. The engine owns every
+proposal and checks the disk again before it writes. Read `AGENTS.md` rather
+than a document: its installer paragraph states the invariants,
+`installer-core` and `userland/src/apps/installer{,_ui}/` hold the code, and
+`installer_ui_test` and `just test-installer` grade it.
 
 ## When To Promote A Plan
 
