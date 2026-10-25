@@ -1,4 +1,4 @@
-use slopos_abi::draw::Color32;
+use slopos_theme_core::{Surface, radius, with_alpha};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
@@ -13,46 +13,37 @@ use crate::traits::{MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_
 /// shadow are what say so.
 pub struct CardWidget {
     core: WidgetCore,
-    color: Color32,
-    border: Option<Color32>,
-    radius: i32,
+    surface: Surface,
+    border: bool,
     shadow: bool,
     child: Box<dyn Widget>,
 }
 
 impl CardWidget {
-    pub fn new(
-        color: Color32,
-        border: Option<Color32>,
-        radius: i32,
-        shadow: bool,
-        child: Box<dyn Widget>,
-    ) -> Self {
+    pub fn new(surface: Surface, border: bool, shadow: bool, child: Box<dyn Widget>) -> Self {
         Self {
             core: WidgetCore::new(),
-            color,
+            surface,
             border,
-            radius,
             shadow,
             child,
         }
     }
 }
 
-/// Concentric one-pixel frames of decreasing alpha around `rect`.
+/// Concentric one-pixel frames of decreasing alpha around `rect`, the theme's
+/// raised shadow.
 ///
 /// Rings rather than filled rects, and blended rather than
 /// [`PaintContext::fill_rounded_rect`](crate::paint::PaintContext::fill_rounded_rect):
 /// the rounded fill encodes its colour opaquely, so a translucent shadow drawn
 /// with it paints a hard black frame instead of a soft one.
 pub fn draw_shadow(ctx: &mut PaintContext, rect: Rect) {
-    const RINGS: i32 = 4;
-    for ring in 1..=RINGS {
-        let alpha = (40 / ring) as u8;
-        let color = Color32::new(0, 0, 0, alpha);
+    let shadow = ctx.theme().shadow_raised;
+    for ring in 1..=shadow.spread {
+        let color = with_alpha(shadow.color, (shadow.color.alpha() as i32 / ring) as u8);
         let x = rect.x - ring;
-        // Offset downward by one: light comes from above.
-        let y = rect.y - ring + 1;
+        let y = rect.y - ring + shadow.offset_y;
         let w = rect.width + ring * 2;
         let h = rect.height + ring * 2;
         ctx.fill_rect_blended(x, y, w, 1, color);
@@ -84,16 +75,12 @@ impl Widget for CardWidget {
         if self.shadow {
             draw_shadow(ctx, rect);
         }
-        ctx.fill_rounded_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            self.radius,
-            self.color,
-        );
-        if let Some(border) = self.border {
-            ctx.draw_rounded_rect(rect.x, rect.y, rect.width, rect.height, self.radius, border);
+        let theme = ctx.theme();
+        let fill = theme.fill(self.surface);
+        ctx.fill_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius::CARD, fill);
+        if self.border {
+            let edge = theme.border;
+            ctx.draw_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius::CARD, edge);
         }
         self.child.paint(ctx);
     }

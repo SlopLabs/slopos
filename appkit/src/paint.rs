@@ -2,8 +2,11 @@ use slopos_abi::draw::Color32;
 use slopos_gfx::DrawBuffer;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 
+use slopos_theme_core::{TextRole, Theme};
+
 use super::constraints::Rect;
 use super::style::StyleSheet;
+use super::text::BODY;
 
 /// Paint target handed to each widget; the framework sets the clip rect before
 /// calling `paint()`, and widgets may only paint within it.
@@ -89,53 +92,34 @@ impl<'a> PaintContext<'a> {
         slopos_gfx::canvas_ops::rounded_rect(self.buffer, x, y, w, h, radius, color);
     }
 
-    /// UI text at the style sheet's body size, with its line box's top-left at
-    /// `(x, y)`.
+    /// Body text with its line box's top-left at `(x, y)`.
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, fg: Color32, bg: Color32) {
         let dr = self.clip.to_damage_rect();
-        let size = self.style.font_size as u16;
-        crate::text::ui::draw_clipped(
-            self.buffer,
-            x,
-            y,
-            text,
-            size,
-            crate::text::ui::Weight::Regular,
-            fg,
-            bg,
-            &dr,
-        );
+        crate::text::ui::draw_clipped(self.buffer, x, y, text, BODY.size, BODY.weight, fg, bg, &dr);
     }
 
     pub fn draw_text_transparent(&mut self, x: i32, y: i32, text: &str, fg: Color32) {
         self.draw_text(x, y, text, fg, Color32::TRANSPARENT);
     }
 
-    /// UI text at the style sheet's body size whose baseline lands on row
-    /// `baseline`, composited over what is there.
+    /// Body text whose baseline lands on row `baseline`, composited over what
+    /// is there.
     pub fn draw_text_on_baseline(&mut self, x: i32, baseline: i32, text: &str, fg: Color32) {
-        let top = baseline - crate::text::ui::ascent(self.style.font_size as u16);
+        let top = baseline - crate::text::ui::ascent(BODY.size);
         self.draw_text(x, top, text, fg, Color32::TRANSPARENT);
     }
 
-    /// UI text at an explicit size and weight, composited over what is there.
-    pub fn draw_text_styled(
-        &mut self,
-        x: i32,
-        y: i32,
-        text: &str,
-        size_px: i32,
-        weight: crate::text::ui::Weight,
-        fg: Color32,
-    ) {
+    /// Text in `role`, composited over what is there.
+    pub fn draw_text_in(&mut self, x: i32, y: i32, text: &str, role: TextRole, fg: Color32) {
         let dr = self.clip.to_damage_rect();
+        let style = role.style();
         crate::text::ui::draw_clipped(
             self.buffer,
             x,
             y,
             text,
-            size_px.max(1) as u16,
-            weight,
+            style.size,
+            style.weight,
             fg,
             Color32::TRANSPARENT,
             &dr,
@@ -150,26 +134,26 @@ impl<'a> PaintContext<'a> {
     }
 
     pub fn text_width(&self, text: &str) -> i32 {
-        crate::text::ui::width(text, self.style.font_size as u16)
+        crate::text::ui::width(text, BODY.size)
     }
 
-    pub fn text_width_styled(
-        &self,
-        text: &str,
-        size_px: i32,
-        weight: crate::text::ui::Weight,
-    ) -> i32 {
-        crate::text::ui::width_weighted(text, size_px.max(1) as u16, weight)
+    pub fn text_width_in(&self, text: &str, role: TextRole) -> i32 {
+        let style = role.style();
+        crate::text::ui::width_weighted(text, style.size, style.weight)
     }
 
-    /// Line height of UI text at the style sheet's body size.
+    /// The font's own line height for body text, less than [`BODY`]'s box.
     pub fn text_height(&self) -> i32 {
-        crate::text::ui::line_height(self.style.font_size as u16)
+        crate::text::ui::line_height(BODY.size)
     }
 
     /// See [`MeasureCtx::baseline_in`](crate::traits::MeasureCtx::baseline_in).
     pub fn baseline_in(&self, height: i32) -> i32 {
-        crate::text::ui::baseline_in(height, self.style.font_size as u16)
+        crate::text::ui::baseline_in(height, BODY.size)
+    }
+
+    pub fn theme(&self) -> &'static Theme {
+        self.style.theme
     }
 
     pub fn mono_cell_width(&self) -> i32 {
@@ -187,20 +171,19 @@ impl<'a> PaintContext<'a> {
         }
         let offset = self.style.focus_ring_offset;
         let width = self.style.focus_ring_width;
-        let color = self.style.focus_ring_color;
+        let color = self.style.theme.focus;
         let x = rect.x - offset - width;
         let y = rect.y - offset - width;
         let w = rect.width + (offset + width) * 2;
-        let _h = rect.height + (offset + width) * 2;
         let inner_x = rect.x - offset;
         let inner_y = rect.y - offset;
         let inner_w = rect.width + offset * 2;
         let inner_h = rect.height + offset * 2;
 
-        self.fill_rect_blended(x, y, w, width, color);
-        self.fill_rect_blended(x, inner_y + inner_h, w, width, color);
-        self.fill_rect_blended(x, inner_y, width, inner_h, color);
-        self.fill_rect_blended(inner_x + inner_w, inner_y, width, inner_h, color);
+        self.fill_rect(x, y, w, width, color);
+        self.fill_rect(x, inner_y + inner_h, w, width, color);
+        self.fill_rect(x, inner_y, width, inner_h, color);
+        self.fill_rect(inner_x + inner_w, inner_y, width, inner_h, color);
     }
 
     #[allow(clippy::too_many_arguments)]

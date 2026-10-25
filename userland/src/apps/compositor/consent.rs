@@ -27,14 +27,8 @@ use crate::gfx::{DamageRect, DrawBuffer};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, core as sys_core, fs, net};
 use crate::theme::*;
 
-const DIM: Color32 = Color32::new(0, 0, 0, 0xA0);
 const CARD_W: i32 = 560;
-const PAD: i32 = 16;
-const GAP: i32 = 8;
 const BUTTON_W: i32 = 96;
-const BUTTON_H: i32 = 28;
-const RADIUS: i32 = 12;
-const BORDER: i32 = 1;
 const LEADING: i32 = 2;
 /// More keys than a hand holds down at once.
 const TAKEN_MAX: usize = 16;
@@ -110,8 +104,8 @@ fn wrap(text: &str, max_w: i32) -> Vec<String> {
 
 fn layout(dialog: &Dialog, screen_w: u32, screen_h: u32) -> Layout {
     let line = ui::line_height(TEXT_PX);
-    let w = CARD_W.min(screen_w as i32 - 2 * PAD);
-    let text_w = w - 2 * PAD;
+    let w = CARD_W.min(screen_w as i32 - 2 * CARD_PAD);
+    let text_w = w - 2 * CARD_PAD;
     let mut paragraphs = vec![
         (format!("Allow: {}?", dialog.ask().describe), TEXT_PRIMARY),
         (format!("Asked by {}", dialog.requester()), TEXT_SECONDARY),
@@ -130,37 +124,42 @@ fn layout(dialog: &Dialog, screen_w: u32, screen_h: u32) -> Layout {
         paragraphs.push((format!("Administrator: {admin}{choose}"), TEXT_PRIMARY));
     }
     let mut lines = Vec::new();
-    let mut y = PAD;
+    let mut y = CARD_PAD;
     for (i, (text, colour)) in paragraphs.into_iter().enumerate() {
         if i > 0 {
-            y += GAP - LEADING;
+            y += CARD_GAP - LEADING;
         }
         for piece in wrap(&text, text_w) {
             lines.push((piece, colour, y));
             y += line + LEADING;
         }
     }
-    let field_y = y - LEADING + GAP;
+    let field_y = y - LEADING + CARD_GAP;
     if dialog.ask().kind.takes_secret() {
-        y = field_y + BUTTON_H + LEADING;
+        y = field_y + CONTROL_H + LEADING;
     }
-    let h = y - LEADING + PAD + BUTTON_H + PAD;
+    let h = y - LEADING + CARD_PAD + CONTROL_H + CARD_PAD;
     let x = (screen_w as i32 - w) / 2;
     let top = ((screen_h as i32 - h) / 2).max(0);
     for (_, _, line_y) in &mut lines {
         *line_y += top;
     }
-    let buttons_y = top + h - PAD - BUTTON_H;
-    let allow_x = x + w - PAD - BUTTON_W;
+    let buttons_y = top + h - CARD_PAD - CONTROL_H;
+    let allow_x = x + w - CARD_PAD - BUTTON_W;
     Layout {
         card: rect(x, top, w, h),
-        allow: rect(allow_x, buttons_y, BUTTON_W, BUTTON_H),
-        deny: rect(allow_x - GAP - BUTTON_W, buttons_y, BUTTON_W, BUTTON_H),
+        allow: rect(allow_x, buttons_y, BUTTON_W, CONTROL_H),
+        deny: rect(
+            allow_x - CARD_GAP - BUTTON_W,
+            buttons_y,
+            BUTTON_W,
+            CONTROL_H,
+        ),
         field: dialog
             .ask()
             .kind
             .takes_secret()
-            .then(|| rect(x + PAD, top + field_y, text_w, BUTTON_H)),
+            .then(|| rect(x + CARD_PAD, top + field_y, text_w, CONTROL_H)),
         lines,
     }
 }
@@ -449,62 +448,62 @@ impl Consent {
             clip.y0,
             clip.x1 - clip.x0 + 1,
             clip.y1 - clip.y0 + 1,
-            DIM,
+            SCRIM,
         );
         let at = layout(dialog, screen_w, screen_h);
         let card = &at.card;
         let (w, h) = (card.x1 - card.x0 + 1, card.y1 - card.y0 + 1);
-        rounded_rect_filled(buf, card.x0, card.y0, w, h, RADIUS, SHELF_SEPARATOR);
+        rounded_rect_filled(buf, card.x0, card.y0, w, h, CARD_RADIUS, CARD_EDGE);
         rounded_rect_filled(
             buf,
-            card.x0 + BORDER,
-            card.y0 + BORDER,
-            w - 2 * BORDER,
-            h - 2 * BORDER,
-            RADIUS - BORDER,
-            PANEL_BG_OPAQUE,
+            card.x0 + EDGE_W,
+            card.y0 + EDGE_W,
+            w - 2 * EDGE_W,
+            h - 2 * EDGE_W,
+            CARD_RADIUS - EDGE_W,
+            CARD_BG,
         );
         for (text, colour, y) in &at.lines {
             ui::draw_clipped(
                 buf,
-                card.x0 + PAD,
+                card.x0 + CARD_PAD,
                 *y,
                 text,
                 TEXT_PX,
                 ui::Weight::Regular,
                 *colour,
-                PANEL_BG_OPAQUE,
+                CARD_BG,
                 clip,
             );
         }
         if let Some(field) = &at.field {
             let (w, h) = (field.x1 - field.x0 + 1, field.y1 - field.y0 + 1);
             let edge = match dialog.focus() {
-                Focus::Field => SIGNAL_EXPAND,
-                _ => SHELF_SEPARATOR,
+                Focus::Field => FOCUS,
+                _ => FIELD_EDGE,
             };
-            rounded_rect_filled(buf, field.x0, field.y0, w, h, RADIUS / 2, edge);
+            rounded_rect_filled(buf, field.x0, field.y0, w, h, FIELD_RADIUS, edge);
             rounded_rect_filled(
                 buf,
-                field.x0 + BORDER,
-                field.y0 + BORDER,
-                w - 2 * BORDER,
-                h - 2 * BORDER,
-                RADIUS / 2 - BORDER,
-                PANEL_BG_OPAQUE,
+                field.x0 + EDGE_W,
+                field.y0 + EDGE_W,
+                w - 2 * EDGE_W,
+                h - 2 * EDGE_W,
+                FIELD_RADIUS - EDGE_W,
+                FIELD_BG,
             );
-            let room = (w - 2 * PAD) / ui::width(ui::BULLET, TEXT_PX).max(1);
+            let room = (w - 2 * CARD_PAD) / ui::width(ui::BULLET, TEXT_PX).max(1);
             let masked = ui::BULLET.repeat(dialog.typed_chars().min(room.max(0) as usize));
             let text_y = ui::centred_top(field.y0, h, TEXT_PX);
             ui::draw_clipped(
                 buf,
-                field.x0 + PAD,
+                field.x0 + CARD_PAD,
                 text_y,
                 &masked,
                 TEXT_PX,
                 ui::Weight::Regular,
                 TEXT_PRIMARY,
-                PANEL_BG_OPAQUE,
+                FIELD_BG,
                 clip,
             );
         }
@@ -513,22 +512,24 @@ impl Consent {
             (Focus::Allow, "Allow", &at.allow),
         ] {
             let focused = dialog.focus() == button;
-            let fill = if focused {
-                SIGNAL_EXPAND
+            let (edge, fill, ink) = if focused {
+                (ACCENT, ACCENT, TEXT_ON_ACCENT)
             } else {
-                SIGNAL_INACTIVE
+                (FIELD_EDGE, CARD_BG, TEXT_PRIMARY)
             };
+            let (w, h) = (r.x1 - r.x0 + 1, r.y1 - r.y0 + 1);
+            rounded_rect_filled(buf, r.x0, r.y0, w, h, CONTROL_H / 2, edge);
             rounded_rect_filled(
                 buf,
-                r.x0,
-                r.y0,
-                r.x1 - r.x0 + 1,
-                r.y1 - r.y0 + 1,
-                BUTTON_H / 2,
+                r.x0 + EDGE_W,
+                r.y0 + EDGE_W,
+                w - 2 * EDGE_W,
+                h - 2 * EDGE_W,
+                CONTROL_H / 2 - EDGE_W,
                 fill,
             );
             let label_x = r.x0 + (BUTTON_W - ui::width(label, TEXT_PX)) / 2;
-            let label_y = ui::centred_top(r.y0, BUTTON_H, TEXT_PX);
+            let label_y = ui::centred_top(r.y0, CONTROL_H, TEXT_PX);
             ui::draw_clipped(
                 buf,
                 label_x,
@@ -536,7 +537,7 @@ impl Consent {
                 label,
                 TEXT_PX,
                 ui::Weight::Regular,
-                TEXT_PRIMARY,
+                ink,
                 fill,
                 clip,
             );

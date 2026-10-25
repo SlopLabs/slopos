@@ -2,6 +2,7 @@ use super::constraints::{BoxConstraints, Rect, Size};
 use super::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use super::paint::PaintContext;
 use super::style::StyleSheet;
+use super::text::BODY;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct WidgetId(pub u32);
@@ -25,18 +26,18 @@ impl MeasureCtx<'_> {
     /// will lay it out — measure and paint must agree or a label is clipped by
     /// its own box.
     pub fn text_width(&self, text: &str) -> i32 {
-        super::text::ui::width(text, self.style.font_size as u16)
+        super::text::ui::width(text, BODY.size)
     }
 
     pub fn text_height(&self) -> i32 {
-        super::text::ui::line_height(self.style.font_size as u16)
+        super::text::ui::line_height(BODY.size)
     }
 
     /// Baseline of body text in a box `height` tall, from the box's top: its
     /// line centred in the box. A one-line text widget's box is one line box,
-    /// `style.line_height` tall, so every label puts its text on the same row.
+    /// [`BODY`]'s, so every label puts its text on the same row.
     pub fn baseline_in(&self, height: i32) -> i32 {
-        super::text::ui::baseline_in(height, self.style.font_size as u16)
+        super::text::ui::baseline_in(height, BODY.size)
     }
 }
 

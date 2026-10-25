@@ -6,13 +6,13 @@
 //! the first lays out with, and because the code surface renders exactly the
 //! rows it is handed rather than as many as fit.
 
-use slopos_abi::draw::Color32;
+use slopos_appkit::theme::space;
 use slopos_appkit::widgets::code_view::{CodeLine, StyledSpan};
 use slopos_appkit::widgets::editor_tabs::EditorTab;
 use slopos_appkit::widgets::tree_view::TreeRow;
 use slopos_appkit::{
     ButtonStyle, CrossAxisAlignment, EdgeInsets, IconKind, Length, MenuItem, MenuItemKind, Node,
-    Orientation, TextAlignment,
+    Orientation, Surface, TextAlignment, Tone,
 };
 
 use slopos_editor_core::document::{Document, file_name};
@@ -20,7 +20,7 @@ use slopos_editor_core::search::{self, SearchOptions};
 
 use super::commands::{Command, MENUS, MenuEntry};
 use super::prompt::Prompt;
-use super::theme;
+use super::syntax;
 use super::{Dialog, EditorApp, EditorMsg, Focus};
 
 pub const DEFAULT_WIDTH: i32 = 1180;
@@ -109,7 +109,7 @@ fn menu_bar(app: &EditorApp) -> Node<EditorMsg> {
         width: None,
         height: Some(Length::Px(MENU_BAR_HEIGHT)),
         child: Box::new(Node::Background {
-            color: bg_titlebar(),
+            surface: Surface::Chrome,
             child: Box::new(Node::HStack {
                 spacing: 0,
                 align: CrossAxisAlignment::Center,
@@ -165,7 +165,7 @@ fn sidebar(app: &EditorApp) -> Node<EditorMsg> {
     let rows = visible_tree_rows(app, visible);
 
     Node::Background {
-        color: bg_sidebar(),
+        surface: Surface::Sunken,
         child: Box::new(Node::TreeView {
             rows,
             first_row: app.tree_scroll,
@@ -287,7 +287,7 @@ fn code_line(doc: &Document, line: usize, query: Option<&str>, options: SearchOp
         .map(|span| StyledSpan {
             start: span.start,
             end: span.end,
-            color: theme::token_color(span.kind),
+            color: syntax::token_color(span.kind),
         })
         .collect();
 
@@ -381,7 +381,7 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
             };
             fields.push(Node::StyledLabel {
                 text: format!("{}:", other.title()),
-                color: Color32::rgb(0xa9, 0xaf, 0xbc),
+                tone: Tone::Secondary,
                 alignment: TextAlignment::Start,
                 wrap: false,
             });
@@ -403,12 +403,12 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
     }
 
     Node::Background {
-        color: bg_panel(),
+        surface: Surface::Raised,
         child: Box::new(Node::Padding {
-            padding: EdgeInsets::new(4, 8, 4, 8),
+            padding: EdgeInsets::symmetric(space::SM, space::XS),
             child: Box::new(Node::HStack {
                 children: fields,
-                spacing: 6,
+                spacing: space::SM,
                 align: CrossAxisAlignment::Center,
             }),
         }),
@@ -440,35 +440,46 @@ fn status_bar(app: &EditorApp) -> Node<EditorMsg> {
         doc.language().label(),
     );
 
+    // The divider is inside the bar's height, which the viewport maths reads.
     Node::SizedBox {
         width: None,
         height: Some(Length::Px(STATUS_BAR_HEIGHT)),
-        child: Box::new(Node::Background {
-            color: bg_titlebar(),
-            child: Box::new(Node::Padding {
-                padding: EdgeInsets::new(0, 10, 0, 10),
-                child: Box::new(Node::HStack {
-                    spacing: 8,
-                    align: CrossAxisAlignment::Center,
-                    children: vec![
-                        Node::Expand {
-                            weight: 1,
-                            child: Box::new(Node::StyledLabel {
-                                text: left,
-                                color: Color32::rgb(0xa9, 0xaf, 0xbc),
-                                alignment: TextAlignment::Start,
-                                wrap: false,
+        child: Box::new(Node::VStack {
+            spacing: 0,
+            align: CrossAxisAlignment::Stretch,
+            children: vec![
+                Node::Divider,
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(Node::Background {
+                        surface: Surface::Chrome,
+                        child: Box::new(Node::Padding {
+                            padding: EdgeInsets::symmetric(space::MD, 0),
+                            child: Box::new(Node::HStack {
+                                spacing: space::SM,
+                                align: CrossAxisAlignment::Center,
+                                children: vec![
+                                    Node::Expand {
+                                        weight: 1,
+                                        child: Box::new(Node::StyledLabel {
+                                            text: left,
+                                            tone: Tone::Secondary,
+                                            alignment: TextAlignment::Start,
+                                            wrap: false,
+                                        }),
+                                    },
+                                    Node::StyledLabel {
+                                        text: right,
+                                        tone: Tone::Secondary,
+                                        alignment: TextAlignment::End,
+                                        wrap: false,
+                                    },
+                                ],
                             }),
-                        },
-                        Node::StyledLabel {
-                            text: right,
-                            color: Color32::rgb(0x8b, 0x92, 0x9e),
-                            alignment: TextAlignment::End,
-                            wrap: false,
-                        },
-                    ],
-                }),
-            }),
+                        }),
+                    }),
+                },
+            ],
         }),
     }
 }
@@ -548,14 +559,13 @@ fn overlay_prompt(app: &EditorApp) -> Node<EditorMsg> {
     let row_count = rows.len() as i32;
 
     let content = Node::Card {
-        color: bg_elevated(),
-        border: Some(Color32::rgb(0x46, 0x4b, 0x57)),
-        radius: 8,
+        surface: Surface::Raised,
+        border: true,
         shadow: true,
         child: Box::new(Node::Padding {
-            padding: EdgeInsets::all(8),
+            padding: EdgeInsets::all(space::SM),
             child: Box::new(Node::VStack {
-                spacing: 6,
+                spacing: space::SM,
                 align: CrossAxisAlignment::Stretch,
                 children: vec![
                     Node::LineEdit {
@@ -597,29 +607,29 @@ fn overlay_prompt(app: &EditorApp) -> Node<EditorMsg> {
 }
 
 fn palette_row(command: &Command, selected: bool) -> Node<EditorMsg> {
-    let color = if selected {
-        Color32::rgb(0xdc, 0xe0, 0xe5)
+    let tone = if selected {
+        Tone::Normal
     } else {
-        Color32::rgb(0xa9, 0xaf, 0xbc)
+        Tone::Secondary
     };
     Node::Padding {
-        padding: EdgeInsets::new(0, 8, 0, 8),
+        padding: EdgeInsets::symmetric(space::SM, 0),
         child: Box::new(Node::HStack {
-            spacing: 8,
+            spacing: space::SM,
             align: CrossAxisAlignment::Center,
             children: vec![
                 Node::Expand {
                     weight: 1,
                     child: Box::new(Node::StyledLabel {
                         text: command.label().to_string(),
-                        color,
+                        tone,
                         alignment: TextAlignment::Start,
                         wrap: false,
                     }),
                 },
                 Node::StyledLabel {
                     text: command.shortcut().unwrap_or("").to_string(),
-                    color: Color32::rgb(0x6b, 0x71, 0x7d),
+                    tone: Tone::Secondary,
                     alignment: TextAlignment::End,
                     wrap: false,
                 },
@@ -629,10 +639,10 @@ fn palette_row(command: &Command, selected: bool) -> Node<EditorMsg> {
 }
 
 fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
-    let color = if selected {
-        Color32::rgb(0xdc, 0xe0, 0xe5)
+    let tone = if selected {
+        Tone::Normal
     } else {
-        Color32::rgb(0xa9, 0xaf, 0xbc)
+        Tone::Secondary
     };
     let root = app.tree.root_path();
     let name = file_name(path);
@@ -643,14 +653,14 @@ fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
     let context = relative.strip_suffix(name).unwrap_or(relative);
     let context = context.trim_end_matches('/');
     Node::Padding {
-        padding: EdgeInsets::new(0, 8, 0, 8),
+        padding: EdgeInsets::symmetric(space::SM, 0),
         child: Box::new(Node::HStack {
-            spacing: 8,
+            spacing: space::SM,
             align: CrossAxisAlignment::Center,
             children: vec![
                 Node::StyledLabel {
                     text: name.to_string(),
-                    color,
+                    tone,
                     alignment: TextAlignment::Start,
                     wrap: false,
                 },
@@ -658,7 +668,7 @@ fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
                     weight: 1,
                     child: Box::new(Node::StyledLabel {
                         text: context.to_string(),
-                        color: Color32::rgb(0x6b, 0x71, 0x7d),
+                        tone: Tone::Secondary,
                         alignment: TextAlignment::Start,
                         wrap: false,
                     }),
@@ -782,20 +792,4 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
             on_dismiss: Some(EditorMsg::Dialog(2)),
         },
     }
-}
-
-fn bg_titlebar() -> Color32 {
-    Color32::rgb(0x3b, 0x41, 0x4d)
-}
-
-fn bg_sidebar() -> Color32 {
-    Color32::rgb(0x2f, 0x34, 0x3e)
-}
-
-fn bg_panel() -> Color32 {
-    Color32::rgb(0x2f, 0x34, 0x3e)
-}
-
-fn bg_elevated() -> Color32 {
-    Color32::rgb(0x32, 0x38, 0x43)
 }

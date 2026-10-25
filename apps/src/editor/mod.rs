@@ -15,7 +15,7 @@
 mod commands;
 mod files;
 mod prompt;
-mod theme;
+mod syntax;
 mod view;
 
 /// Rows the palette and the file finder draw at once, for a test that has to

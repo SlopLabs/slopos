@@ -19,8 +19,10 @@ use std::sync::OnceLock;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_font::atlas::GlyphAtlas;
+use slopos_theme_core::{TextRole, TextStyle};
 
-const FONT_SIZE_PX: u16 = 16;
+/// The line every label, button and field sets its text on.
+pub const BODY: TextStyle = TextRole::Body.style();
 
 static ATLAS: OnceLock<Option<GlyphAtlas>> = OnceLock::new();
 
@@ -30,7 +32,7 @@ fn atlas() -> Option<&'static GlyphAtlas> {
             let font_data = loader::load_font("mono")?;
             GlyphAtlas::new_with_source(
                 font_data,
-                FONT_SIZE_PX,
+                TextRole::Mono.style().size,
                 slopos_font::FontSource::Filesystem,
             )
         })
@@ -127,13 +129,9 @@ pub mod ui {
     /// What a password field shows for each character typed.
     pub const BULLET: &str = "\u{2022}";
 
-    #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-    pub enum Weight {
-        #[default]
-        Regular,
-        /// Falls back to [`Weight::Regular`] when no semibold file is installed.
-        Semibold,
-    }
+    /// [`Weight::Semibold`] falls back to regular when no semibold file is
+    /// installed.
+    pub use slopos_theme_core::Weight;
 
     thread_local! {
         static REGULAR: RefCell<Option<FontRenderer<'static>>> = RefCell::new(load("sans"));

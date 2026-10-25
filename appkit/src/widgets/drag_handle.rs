@@ -78,9 +78,9 @@ impl Widget for DragHandleWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let color = if self.active || self.hovered {
-            ctx.style.text_accent
+            ctx.theme().accent
         } else {
-            ctx.style.border_divider
+            ctx.theme().border
         };
         match self.orientation {
             Orientation::Vertical => {

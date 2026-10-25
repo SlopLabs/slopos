@@ -84,13 +84,13 @@ fn folder(ctx: &mut PaintContext, x: i32, y: i32, s: i32, color: Color32, open: 
     let tab_h = (h / 4).max(2);
     ctx.fill_rect(x, oy, tab_w, tab_h, color);
     if open {
-        ctx.fill_rect(x, oy + tab_h, w, h - tab_h, color);
-        ctx.fill_rect(
+        ctx.draw_rect(x, oy + tab_h, w, h - tab_h, color);
+        ctx.fill_rect_blended(
             x + 1,
             oy + tab_h + 1,
             w - 2,
             h - tab_h - 2,
-            Color32::new(color.red(), color.green(), color.blue(), 0x55),
+            slopos_theme_core::with_alpha(color, 0x55),
         );
     } else {
         ctx.fill_rect(x, oy + tab_h, w, h - tab_h, color);

@@ -24,3 +24,5 @@ pub mod tab_bar;
 pub mod table;
 pub mod text_field;
 pub mod tree_view;
+
+pub(crate) const SELECTED_EDGE: i32 = 2;

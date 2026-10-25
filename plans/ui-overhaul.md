@@ -38,67 +38,18 @@ socket at 1920 × 1080. `screendump` captured the welcome, the consent
 dialog, every installer page, the dock, the terminal, Files, the editor,
 System Monitor, the system menu and the lock screen.
 
-### Text
+### Toolkit
 
-**Every glyph has its own baseline.** `FontRenderer::rasterize_glyph`
-(`font/src/lib.rs:297`) rasterises each glyph so that the outline's top,
-`y_max · scale`, falls exactly on bitmap row 0, which is a fractional
-position. It then places the bitmap at `y + ascender − round(y_max · scale)`
-(`:224`, `:330`). The baseline therefore lands `y_max·s − round(y_max·s)`
-pixels off the line, a different amount per glyph. Measured from
-`Inter-Regular.ttf` (2048 units per em):
-
-| Size | `h d k l T W` | `e s o a n c` | `t` | `S O` | Spread |
-|---|---|---|---|---|---|
-| 14 px (body) | +0.19 | −0.26 | +0.46 | +0.32 | 0.82 px |
-| 17 px (heading) | +0.37 | +0.40 | +0.49 | −0.47 | 0.95 px |
-
-At 14 px, an `h` sits 0.45 px below the `e` beside it, and `t` sits 0.72 px
-below it. Anti-aliasing turns each offset into a differently blurred bottom
-row. That is the up-and-down wobble in the installer.
-
-**Horizontal placement rounds twice.** The pen is rounded (`:217`), then the
-bitmap, whose column 0 is the exact `x_min`, is offset by
-`round(lsb · scale)` (`:329`). Each glyph's ink is up to 1 px from where it
-belongs. In "started" at 14 px, `s` is drawn +0.26 px off and the `t` after
-it −0.53 px off, so the `st` gap shrinks by 0.79 px. `t` and `a` move 0.95 px
-apart. The screenshot reads "st arted", "th e", "volu me". The parser reads
-no kerning table at all, and Inter keeps its kerning in `GPOS`.
-
-**Two line boxes.** `Label` draws at the top of its fixed 20 px row
-(`appkit/src/widgets/label.rs:160`). `StyledLabel` centres the font's 17 px
-line in the same row (`styled_label.rs:52`). On the installer's review page
-the grey labels sit 1 px below their values.
-
-**The compositor sets chrome in the console font.** The consent dialog, the
-lock and login screens, the system menu, the network panel, the clock and
-the dock's tooltips draw through `gfx::draw_str_clipped`, the fixed-cell
-10 × 22 atlas the kernel console uses. Window titles and the menu bar's app
-name use Inter. One screen shows two families, and the atlas has no `…`,
-which is why truncation is spelled `..` or `...` in three places.
-
-### Theme and toolkit
-
-- `appkit/src/style.rs` defines one `StyleSheet::dark()`. `run.rs:30` builds
-  it, and no `App` can read it. Every app keeps its own palette: Files has 12
-  colour constants that are not the theme's, the image viewer 6, the editor
-  about 14 literals plus 15 syntax colours, the installer 9, and System
-  Monitor 4, with a different green.
-- appkit hard-codes colours inside its own widgets: the text field selection
-  is macOS blue `(0,122,255,100)`, the progress bar uses traffic-light
-  colours, the checkbox tick is `WHITE`, and the scrollbar is `#c8ccd4`.
-- `font_size_small` (12) is defined and never used. `font_size_heading` (17)
-  is used only by `Dialog`. `Node` has no heading, caption or body role, so
-  page titles are body text: "Welcome to SlopOS" and "Which disk should
-  SlopOS be installed on?" are the same size as the paragraph under them.
-- `VStack`, `HStack` and `EdgeInsets` take raw numbers. Pages pass 2, 4, 6, 8,
-  10, 12, 16 and 24. The spacing tokens in the style sheet go unused.
-- `LineEdit` and `TextField` share a role but differ in fill, focus ring,
-  caret colour, caret blink and vertical alignment. Focus is shown four
-  different ways: a ring on a button, a ring around the checkbox square, a
-  ring around the radio dot only, and a 1 px line on a scroll view.
+- `Node` has no heading, caption or body role, so page titles are body text:
+  "Welcome to SlopOS" and "Which disk should SlopOS be installed on?" are the
+  same size as the paragraph under them. Only `Dialog` sets a title role.
+- `LineEdit` and `TextField` share a role, a fill and an edge but differ in
+  caret blink and focus ring. Focus is shown four different
+  ways: a ring on a button, a ring around the checkbox square, a ring around
+  the radio dot only, and a 1 px line on a scroll view.
+- A disabled radio option dims its title and not its reason.
 - Only `TreeView` elides with `…`. `Label` and `Button` clip silently, and
-  Files truncates a path by byte index (`file_manager.rs:297`), which panics
+  Files truncates a path by byte index (`build_navbar`), which panics
   on a multi-byte path.
 - Icons are eight shapes drawn from rectangles (`widgets/icon.rs`). Files
   shows `[D] bin` for a folder, uses the letters `/ ~ T D B S` for its places,
@@ -107,26 +58,24 @@ which is why truncation is spelled `..` or `...` in three places.
 
 ### Compositor chrome
 
-- Title bars are `#2D2D30` on windows whose content is `#282c33`, so chrome
-  and content are two different greys. The top corners are rounded without
-  anti-aliasing (`decorations.rs`), the bottom corners are square, and the
-  shadow is a square halo. The three window buttons are aliased circles.
+- Title bars take `chrome`, which is the window's `surface`, but their top
+  corners are rounded without anti-aliasing (`decorations.rs`), the bottom
+  corners are square, and the shadow is a square halo. The three window
+  buttons are aliased circles.
 - Every window opens at (100, 100) (`compositor/protocol.rs:136`). The
   terminal, Files and System Monitor stacked on the installer, and the
   installer covered the wallpaper's logo.
 - The clock is uptime, not the time of day (`status_item.rs:74`), even though
   `CLOCK_REALTIME` answers the wall clock the loader anchored.
 - The system menu offers *Lock*, *Switch person*, *Log out* and *Restart
-  session*, in monospace, with no hover and no icons. There is no way to
+  session*, with no hover and no icons. There is no way to
   restart or power off the computer from the desktop.
-- The lock screen reads "user's desktop is locked" above a green-bordered
-  field and the hint "Enter: unlock  F2: switch person". It has no clock, no
+- The lock screen reads "user's desktop is locked" above a field and the
+  hint "Enter: unlock  F2: switch person". It has no clock, no
   wallpaper and no button. The login screen reads "Log in: a, b, c" above
   "Up, Down: choose  Tab: next field  Enter: log in".
 - A reachable placeholder draws "Window content pending migration" and writes
-  `DEBUG: draw_window_placeholder called!` to stderr (`renderer.rs:931,945`).
-- `userland/src/theme.rs` carries a `TODO(tech-debt)` block of legacy aliases,
-  and `consent.rs` and `gate.rs` each declare their own card constants.
+  `DEBUG: draw_window_placeholder called!` to stderr (`renderer.rs`).
 
 ### The permission dialog
 
@@ -141,15 +90,14 @@ In /
                                      [ Deny ] [ Allow ]
 ```
 
-- The headline is `format!("Allow: {}?", describe)` (`consent.rs:115`) over a
-  policy sentence written for the policy's reader. `wrap` (`:97`) breaks
+- The headline is `format!("Allow: {}?", describe)` (`consent.rs`, `layout`)
+  over a policy sentence written for the policy's reader. `wrap` breaks
   every line by character, so prose breaks mid-word ("reques/ter").
 - The requester is a path, a uid's name and a pid (`priv-core`
   `Dialog::requester`). Nothing names the app the person sees on screen.
-- The focused button is filled with the window-zoom green `#28C840`, so with
-  the default focus *Deny* is the green button. Its label is `#e0e0e0` on
-  that green: a contrast of 1.69:1.
-- The whole dialog is set in the console font, with no icon, title or shadow.
+- The focused button is filled with `accent`, so with the default focus
+  *Deny* is the filled button: focus is shown by fill, not by a ring.
+- The dialog has no icon, title or shadow.
 - 33 `describe` lines in `assets/privd/actions` leak the policy's vocabulary:
   capability names ("RawBlock, Mount or DacOverride gives it the machine"),
   "requester", "slot", "base", "ceilings", "every file not sealed". "Restart
@@ -185,7 +133,7 @@ The installer's pages, from the screenshots and `installer-core`:
   the About box "SlopOS editor". The dock says *Files*, the title bar *File
   Manager*.
 - System Monitor prints `RX: 0.0 MiB (0 pkts)` from a constant
-  (`sysmon/mod.rs:274`), shows "19 total 23 active", and writes its section
+  (`sysmon/mod.rs`, `view_overview`), shows "19 total 23 active", and writes its section
   headings in capitals.
 
 An audit of the string sources counts roughly 95 problem strings in the
@@ -202,6 +150,13 @@ installer, 40 in privd and the dialog, 25 in the chrome, 70 in the editor and
 | GNOME HIG ([writing style](https://developer.gnome.org/hig/guidelines/writing-style.html)), Apple HIG ([writing](https://developer.apple.com/design/human-interface-guidelines/writing)) | Short, direct, second person. Buttons are verbs. An ellipsis marks a command that asks something further. Errors say what happened and what to do next. | the voice guide and the copy rules |
 | WCAG 2.2 ([contrast minimum](https://www.w3.org/TR/WCAG22/#contrast-minimum)) | 4.5:1 for body text and 3:1 for large text and control boundaries. | a host test over every text and surface token pair |
 | Lucide ([licence](https://lucide.dev/license)), Phosphor ([repository](https://github.com/phosphor-icons/homepage)) | Complete icon sets on one grid and stroke weight, shipped as TrueType fonts under ISC and MIT. | an icon font loaded at runtime like Inter, drawn by the same renderer |
+| libadwaita ([CSS variables](https://gnome.pages.gitlab.gnome.org/libadwaita/doc/main/css-variables.html), [`_colors.scss`](https://gitlab.gnome.org/GNOME/libadwaita/-/blob/main/src/stylesheet/_colors.scss)) | Colours named by surface (window, view, card, dialog, popover, headerbar) and by meaning (accent, destructive, success, warning, error). Hover and active lay `currentColor` over a widget at 7% and 16%. | the roles; hover and pressed derived at those shares |
+| Redox orbtk ([`dark.ron`](https://docs.rs/crate/orbtk-theme/0.3.1-alpha3/source/assets/dark/dark.ron)), Orbital ([`config.rs`](https://gitlab.redox-os.org/redox-os/orbital/-/blob/master/src/config.rs)) | A named palette that styles reference, with every state of every style listed by hand; Orbital's chrome is five colours, focused and unfocused listed in pairs. | roles over one palette; states derived rather than listed per style |
+| KDE ([KColorScheme](https://invent.kde.org/frameworks/kcolorscheme/-/blob/master/src/kcolorscheme.h)) | Colour sets per surface, each with normal, inactive, negative, neutral and positive foregrounds. | text tones that hold on every surface |
+| Android lint's third-party `RawColor` and `RawDimen` ([checks](https://googlesamples.github.io/android-custom-lint-rules/checks/RawColor.md.html)), stylelint's [`declaration-strict-value`](https://github.com/AndyOGo/stylelint-declaration-strict-value), Atlassian's [`ensure-design-token-usage`](https://atlassian.design/components/eslint-plugin-design-system/ensure-design-token-usage/usage) | Lints that fail a raw colour or dimension where a token belongs. | `check_ui_literals.sh` |
+
+Asterinas has no toolkit or theme of its own: its desktop is Xfce over its
+Linux ABI.
 
 ## Design
 
@@ -252,8 +207,7 @@ tree), holds the tokens appkit and the compositor both read:
   second table and not a code change.
 
 `theme-core`'s tests hold every text role on every surface it may sit on to
-4.5:1, and `text_disabled`, `border_strong` and `focus` to 3:1. The current
-`text_disabled` on `#282c33` is 2.86:1 and fails.
+4.5:1, and `text_disabled`, `border_strong` and `focus` to 3:1.
 
 ### 3. appkit by default
 
@@ -304,8 +258,8 @@ window.
 terminal's palette and an image's own pixels may use raw colours.
 `scripts/check_ui_literals.sh` scans `apps/` and the appkit apps under
 `userland/src/apps/` for `Color32` constructors, font sizes, and numeric
-spacing and insets. It fails unless the file is allowlisted for one of those
-escape hatches. It carries a `--self-test` with planted violations and
+spacing and insets, and appkit for colours. It fails unless the file is
+allowlisted for one of those escape hatches. It carries a `--self-test` with planted violations and
 accepted forms, and runs from `check-framekernel-gates`.
 
 **The layout audit.** `appkit::audit` walks a laid-out tree and reports:
@@ -356,9 +310,7 @@ several widths and fails on any finding.
   again in a moment."
 - **Dock.** Icons come from the shared template. A dot marks a running app,
   and tooltips use `label`.
-- **Gone.** The pending-migration placeholder, its debug write, the
-  `TODO(tech-debt)` alias block in `userland/src/theme.rs`, and the card
-  constants duplicated across `consent.rs` and `gate.rs`.
+- **Gone.** The pending-migration placeholder and its debug write.
 
 ### 5. The permission dialog
 
@@ -507,17 +459,18 @@ Grading:
 - `appkit_test`: a label beside a styled label shares a baseline.
 - Screenshots of the installer and the consent dialog, before and after.
 
-### Phase 2: One theme
+### Phase 2: One theme (done)
 
-- Add `theme-core` with the roles, the dark table and the contrast tests.
-- appkit reads it through `ctx`. The compositor's `userland/src/theme.rs`
-  becomes a view over it, without the alias block.
-- Move every app palette onto roles. Remove appkit's own hard-coded colours.
-- Add `check_ui_literals.sh`, with its self-test, to
-  `check-framekernel-gates`.
-
-Grading: `theme-core`'s host tests, the gate's self-test, and the gate run
-over the tree.
+`theme-core` holds the dark table's colour roles, with hover and pressed
+derived, the categorical `series`, the text roles, the 4 px scale and its
+page, section, card and control insets, radii and two shadows; its host tests
+hold the contrast floors. appkit reads the theme through `ctx`, and `Node`
+names a `Tone`, a `Surface` or a series where it took a colour. Every app
+palette and appkit's own colours are roles, and `userland/src/theme.rs` is the
+chrome's geometry over theme-core's tokens, its alias block, the dead
+`ui_utils` and the card constants `consent.rs` and `gate.rs` both declared
+gone. `scripts/check_ui_literals.sh`, with its self-test and
+`scripts/gates/ui-literals.txt`, runs from `check-framekernel-gates`.
 
 ### Phase 3: Components, icons, audit and screenshots
 
@@ -564,7 +517,7 @@ Grading:
   to the system menu.
 - Rebuild the lock and login screens and the popovers through the embedded
   runner. Redraw the dock's icons.
-- Remove the placeholder and the alias block.
+- Remove the placeholder.
 
 Grading: the compositor's existing tests, `apps_test` and `dock_test`, plus a
 `chrome-core` host test of the placement rule (centred, cascaded, never under
@@ -623,6 +576,41 @@ Grading:
 - **Roles, not colours, in the app API.** An app that cannot name a colour
   cannot pick a bad one. The raw-literal gate holds that, and its allowlist
   names the few places where colour is the content.
+- **Apps name roles; appkit resolves them.** `Node` takes a `Tone`, a
+  `Surface` or a `SegmentFill::Series`, never a `Color32`, and a widget reads
+  the theme from `ctx` when it paints, so a second theme changes no app. A
+  code view's syntax spans are the one colour an app hands appkit.
+- **States are derived, not listed.** Hover and pressed lay the theme's
+  `state_ink` over a colour at libadwaita's 7% and 16%, and a row over a
+  surface it does not know lays `Theme::overlay` on it. A theme that listed
+  them, as orbtk's did, would repeat every state for every role.
+- **Colours that tell things apart name a series, not a meaning.** A disk's
+  partitions and a chart's series take the theme's `series` by index, never
+  a status tone: a crash partition is not a danger. The series may share hues
+  with the tones; a second theme may not.
+- **The contrast relation is stated, not total.** Body and secondary text
+  hold 4.5:1 on every surface, hovered and selected rows included; status
+  tones hold it on plain surfaces only, so a widget does not set them in a
+  selectable row; `text_on_accent` on every fill in every state and on every
+  series colour; edges, focus and disabled text 3:1. WCAG 1.4.3 exempts
+  disabled text, and SlopOS holds it to 3:1 anyway. Body text also holds on a
+  pressed surface, where a menu's open title sits, and secondary text on
+  `border`. The code view's syntax colours and the wash it lays under a found
+  match are its own.
+- **A state shows.** Hover sits at least 1.1:1 from idle and pressed further,
+  and a fill mixes the ink drawn on it, so a light accent button darkens as
+  libadwaita's does. A selected row also carries an edge, accent while its
+  list has focus, since its wash alone sits too close to a hovered row's.
+- **Apps reach text only by role.** `text::ui` takes pixel sizes for appkit
+  and the compositor; an app that calls it, or names a `font_size`, fails the
+  gate. appkit's fixed-cell atlas is drawn at the `mono` role.
+- **The gate finds apps by what they are.** A module of `userland/src/apps/`
+  is an app when a file of it implements `App` or calls `run_app`, so a new
+  app is scanned without a list. appkit is held to colours alone, since its
+  geometry is the toolkit's own. An exemption names one check for one file
+  and fails once it matches nothing.
+- **The pointer is a sprite.** It stays white edged in black on any theme,
+  the one raw colour the chrome keeps.
 - **The compositor embeds appkit for its dialogs and screens, not its
   frames.** Dialogs, lock and login screens and popovers gain the same
   components, wrapping and focus behaviour as apps. Frames and the dock paint

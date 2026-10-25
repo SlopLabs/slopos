@@ -104,17 +104,13 @@ impl StatusItems {
                 r.x1 - r.x0 + 1,
                 r.y1 - r.y0 + 1,
                 HOVER_RADIUS,
-                STATUS_ITEM_HOVER_BG,
+                BAR_HOVER_BG,
             );
         }
         // Text is blended towards the background it is given, so hovered text
         // must blend towards the highlight or its edges punch the backdrop
         // back out.
-        let text_bg = if hovered {
-            STATUS_ITEM_HOVER_BG
-        } else {
-            PANEL_BG_OPAQUE
-        };
+        let text_bg = if hovered { BAR_HOVER_BG } else { BAR_INK_BG };
 
         match slot.kind {
             StatusKind::Clock => ui::draw_clipped(

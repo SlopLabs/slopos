@@ -35,7 +35,7 @@ pub fn draw_window_decorations(
     };
     let clip = clip.unwrap_or(full_clip);
 
-    draw_title_bar_background(buf, window_x, window_y, window_w, window_h, focused, &clip);
+    draw_title_bar_background(buf, window_x, window_y, window_w, window_h, &clip);
     draw_signal_buttons(buf, window_x, window_y, focused, signal_hovered, &clip);
     draw_title_text(buf, window_x, window_y, window_w, title, focused, &clip);
 }
@@ -105,19 +105,7 @@ pub fn hit_test_resize_edge(
 
     let frame_w = ww;
     let frame_h = wh + theme::TITLE_BAR_HEIGHT;
-    let corner_range = {
-        let r = theme::WINDOW_CORNER_RADIUS * 3; // ~24px
-        let max_w = frame_w / 2;
-        let max_h = frame_h / 2;
-        let mut cr = r;
-        if cr > max_w {
-            cr = max_w;
-        }
-        if cr > max_h {
-            cr = max_h;
-        }
-        cr
-    };
+    let corner_range = theme::RESIZE_CORNER.min(frame_w / 2).min(frame_h / 2);
 
     let near_left = px < frame_x0 + corner_range;
     let near_right = px > frame_x1 - corner_range;
@@ -163,15 +151,9 @@ fn draw_title_bar_background(
     window_y: i32,
     window_w: u32,
     _window_h: u32,
-    focused: bool,
     clip: &DamageRect,
 ) {
-    let bg = if focused {
-        theme::TITLE_BAR_FOCUSED
-    } else {
-        theme::TITLE_BAR_UNFOCUSED
-    };
-
+    let bg = theme::TITLE_BAR;
     let w = window_w as i32;
     let bar_rect = DamageRect {
         x0: window_x,
@@ -267,12 +249,7 @@ fn draw_signal_buttons(
 
 /// Draw the interior glyphs on the signal buttons (X, -, +).
 fn draw_signal_glyphs(buf: &mut DrawBuffer, window_x: i32, window_y: i32, clip: &DamageRect) {
-    let glyph_color = Color32::new(
-        theme::SIGNAL_GLYPH.red(),
-        theme::SIGNAL_GLYPH.green(),
-        theme::SIGNAL_GLYPH.blue(),
-        theme::SIGNAL_GLYPH_ALPHA,
-    );
+    let glyph_color = theme::SIGNAL_GLYPH;
     let cy = window_y + theme::SIGNAL_BUTTON_CY;
 
     let close_cx = window_x + theme::SIGNAL_BUTTON_1_CX;
@@ -360,11 +337,12 @@ fn draw_title_text(
         return;
     }
 
-    let (text_color, bg_color) = if focused {
-        (theme::TEXT_PRIMARY, theme::TITLE_BAR_FOCUSED)
+    let text_color = if focused {
+        theme::TEXT_PRIMARY
     } else {
-        (theme::TEXT_SECONDARY, theme::TITLE_BAR_UNFOCUSED)
+        theme::TEXT_SECONDARY
     };
+    let bg_color = theme::TITLE_BAR;
 
     let max_text_w = (window_w as i32 - theme::TITLE_MAX_TEXT_WIDTH_MARGIN).max(0);
     if max_text_w == 0 {

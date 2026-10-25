@@ -1,9 +1,11 @@
 use std::env;
 use std::path::Path;
 
+mod checker;
+
 use slopos_abi::damage::DamageRect;
-use slopos_abi::draw::Color32;
 use slopos_appkit::text::draw_str_clipped;
+use slopos_appkit::theme;
 use slopos_gfx::DrawBuffer;
 use slopos_gfx::canvas_ops::fill_rect;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
@@ -12,16 +14,8 @@ use slopos_windowing::{ControlFlow, Event, Window, WindowedApp};
 
 const DEFAULT_IMAGE: &str = "/usr/share/slopos/wallpapers/default.png";
 const STATUS_HEIGHT: i32 = 22;
-const CHECKER_SIZE: i32 = 16;
 const MIN_ZOOM: f64 = 0.05;
 const MAX_ZOOM: f64 = 32.0;
-
-const BG: Color32 = Color32::rgb(0x18, 0x1B, 0x20);
-const STATUS_BG: Color32 = Color32::rgb(0x23, 0x26, 0x2B);
-const STATUS_FG: Color32 = Color32::rgb(0xE6, 0xE8, 0xEA);
-const ERROR_FG: Color32 = Color32::rgb(0xFF, 0xB0, 0xA8);
-const CHECKER_A: Color32 = Color32::rgb(0xCF, 0xD4, 0xDA);
-const CHECKER_B: Color32 = Color32::rgb(0xF2, 0xF4, 0xF6);
 
 struct ImageViewer {
     path: String,
@@ -116,34 +110,19 @@ impl ImageViewer {
         self.pan_y = py - base_y - (image_y * self.zoom).round() as i32;
     }
 
-    fn draw_checkerboard(&self, fb: &mut DrawBuffer<'_>, view_h: i32) {
-        fill_rect(fb, 0, 0, fb.width() as i32, view_h, BG);
-        let cols = (fb.width() as i32 + CHECKER_SIZE - 1) / CHECKER_SIZE;
-        let rows = (view_h + CHECKER_SIZE - 1) / CHECKER_SIZE;
-        for row in 0..rows {
-            for col in 0..cols {
-                let color = if (row + col) & 1 == 0 {
-                    CHECKER_A
-                } else {
-                    CHECKER_B
-                };
-                fill_rect(
-                    fb,
-                    col * CHECKER_SIZE,
-                    row * CHECKER_SIZE,
-                    CHECKER_SIZE,
-                    CHECKER_SIZE,
-                    color,
-                );
-            }
-        }
-    }
-
     fn draw_status(&self, fb: &mut DrawBuffer<'_>, view_h: i32, zoom: f64) {
-        fill_rect(fb, 0, view_h, fb.width() as i32, STATUS_HEIGHT, STATUS_BG);
+        let theme = theme::current();
+        fill_rect(
+            fb,
+            0,
+            view_h,
+            fb.width() as i32,
+            STATUS_HEIGHT,
+            theme.chrome,
+        );
         let label = self.status_text(zoom);
         let clip = full_clip(fb);
-        draw_str_clipped(fb, 8, view_h + 4, &label, STATUS_FG, STATUS_BG, &clip);
+        draw_str_clipped(fb, 8, view_h + 4, &label, theme.text, theme.chrome, &clip);
     }
 
     fn status_text(&self, zoom: f64) -> String {
@@ -234,7 +213,7 @@ impl WindowedApp for ImageViewer {
         let view_h = self.view_height(fb);
         let view_w = fb.width() as i32;
         let zoom = self.active_zoom(view_w, view_h);
-        self.draw_checkerboard(fb, view_h);
+        checker::draw(fb, view_h);
 
         match self.loaded {
             Ok(ref image) => {
@@ -263,9 +242,12 @@ impl WindowedApp for ImageViewer {
                 }
             }
             Err(ref message) => {
+                let theme = theme::current();
                 let clip = full_clip(fb);
-                draw_str_clipped(fb, 16, 16, "Could not load image", ERROR_FG, BG, &clip);
-                draw_str_clipped(fb, 16, 34, message, STATUS_FG, BG, &clip);
+                fill_rect(fb, 0, 0, fb.width() as i32, view_h, theme.surface);
+                let error = "Could not load image";
+                draw_str_clipped(fb, 16, 16, error, theme.danger, theme.surface, &clip);
+                draw_str_clipped(fb, 16, 34, message, theme.text, theme.surface, &clip);
             }
         }
 

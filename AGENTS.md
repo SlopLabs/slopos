@@ -942,6 +942,26 @@ loader searches `$HOME/.local/lib`, then `/usr/local/lib`, after `/lib`,
 neither `AT_SECURE` nor uid 0's, so nothing a person puts in either reaches a
 program holding more than they do.
 
+**The desktop draws with one theme.** `theme-core`, host-tested under `just
+test-host`, holds the tokens appkit and the compositor read: colour roles in
+one dark table with hover and pressed derived from them, a categorical
+`series`, text roles, a 4 px spacing scale with named insets, radii and
+shadows. Its tests hold body and secondary text to WCAG's 4.5:1 on every
+surface they sit on, hovered and selected rows included, status tones on
+plain surfaces, and edges, focus and disabled text to 3:1. appkit hands its
+widgets the theme through `ctx` (`StyleSheet::theme`), and an app names a
+`Tone`, a `Surface` or a `SegmentFill::Series`, never a colour, a code
+view's syntax spans aside, or reads `theme::current()` when it draws itself;
+`userland/src/theme.rs` is the compositor's chrome geometry over the same
+tokens. `scripts/check_ui_literals.sh`, from `check-framekernel-gates`,
+fails an app — a file under `apps/`, or a module of `userland/src/apps/` that
+implements `App` or calls `run_app` — that constructs or derives a colour or
+names a theme table, sizes its own text or gives a spacing or an inset a
+number, and appkit for constructing a colour; a
+file whose colours are its content, as the editor's syntax palette, is
+exempt from that one check by a line of `scripts/gates/ui-literals.txt`,
+which fails once the line matches nothing.
+
 **The guest installs what it builds.** `/bin/bootctl` (privd's
 `org.slopos.boot.*` and `org.slopos.base.*` actions, run as uid 0 with
 `RawBlock` for the raw disk and partition and `Power` for the loader's

@@ -117,14 +117,9 @@ impl Widget for TabBarWidget {
         let rect = self.layout_rect();
         let tab_height = self.tab_height;
         let underline_height = 3;
+        let theme = ctx.theme();
 
-        ctx.fill_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            tab_height,
-            ctx.style.bg_secondary,
-        );
+        ctx.fill_rect(rect.x, rect.y, rect.width, tab_height, theme.surface_sunken);
 
         let layout = self.tab_layout(rect.width);
         let text_h = ctx.text_height();
@@ -133,14 +128,14 @@ impl Widget for TabBarWidget {
             let abs_x = rect.x + tab_x;
 
             if i == self.active {
-                ctx.fill_rect(abs_x, rect.y, *tab_w, tab_height, ctx.style.bg_primary);
+                ctx.fill_rect(abs_x, rect.y, *tab_w, tab_height, theme.surface);
 
                 ctx.fill_rect(
                     abs_x,
                     rect.y + tab_height - underline_height,
                     *tab_w,
                     underline_height,
-                    ctx.style.bg_accent,
+                    theme.accent,
                 );
             }
 
@@ -150,20 +145,14 @@ impl Widget for TabBarWidget {
             let ty = rect.y + (tab_height - text_h) / 2;
 
             let fg = if i == self.active {
-                ctx.style.text_primary
+                theme.text
             } else {
-                ctx.style.text_secondary
+                theme.text_secondary
             };
             ctx.draw_text_transparent(tx, ty, label, fg);
         }
 
-        ctx.fill_rect(
-            rect.x,
-            rect.y + tab_height,
-            rect.width,
-            1,
-            ctx.style.border_divider,
-        );
+        ctx.fill_rect(rect.x, rect.y + tab_height, rect.width, 1, theme.border);
 
         // A panel taller than the area left for it must not draw over the tabs.
         if let Some(panel) = self.content.get(self.active) {

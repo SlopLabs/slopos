@@ -1,4 +1,4 @@
-use slopos_abi::draw::Color32;
+use slopos_theme_core::Surface;
 
 use crate::constraints::{
     BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, MAX_EXTENT, Rect, Size,
@@ -602,15 +602,15 @@ impl Widget for ExpandWidget {
 
 pub struct BackgroundWidget {
     core: WidgetCore,
-    color: Color32,
+    surface: Surface,
     child: Box<dyn Widget>,
 }
 
 impl BackgroundWidget {
-    pub fn new(color: Color32, child: Box<dyn Widget>) -> Self {
+    pub fn new(surface: Surface, child: Box<dyn Widget>) -> Self {
         Self {
             core: WidgetCore::new(),
-            color,
+            surface,
             child,
         }
     }
@@ -631,7 +631,8 @@ impl Widget for BackgroundWidget {
     }
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, self.color);
+        let fill = ctx.theme().fill(self.surface);
+        ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, fill);
         self.child.paint(ctx);
     }
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {

@@ -1640,9 +1640,8 @@ fn test_text_field_types_a_space() {
 fn test_card_gives_its_child_the_whole_rect() {
     let child = Box::new(FixedSizeWidget::new(40, 20));
     let mut card = super::widgets::card::CardWidget::new(
-        slopos_abi::draw::Color32::BLACK,
-        None,
-        6,
+        slopos_theme_core::Surface::Raised,
+        false,
         true,
         child,
     );

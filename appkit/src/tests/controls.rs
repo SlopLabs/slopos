@@ -3,6 +3,7 @@ use std::any::Any;
 use slopos_abi::draw::Color32;
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::DrawBuffer;
+use slopos_theme_core::{Tone, space};
 
 use super::{FixedSizeWidget, key};
 use crate::constraints::{BoxConstraints, CrossAxisAlignment, Rect, Size, TextAlignment};
@@ -89,7 +90,7 @@ fn chosen(sink: &mut MessageSink) -> Vec<usize> {
 /// under its label.
 pub(super) fn test_radio_group_stacks_its_options() {
     let style = StyleSheet::dark();
-    let line = crate::text::ui::line_height(style.font_size as u16);
+    let line = crate::text::ui::line_height(crate::text::BODY.size);
     let label = style.checkbox_size.max(line);
     let mut group = radio_group(
         vec![
@@ -100,20 +101,20 @@ pub(super) fn test_radio_group_stacks_its_options() {
         Some(0),
     );
     let size = group.measured_size();
-    assert_eq!(size.height, label * 3 + line + style.spacing_sm * 2);
+    assert_eq!(size.height, label * 3 + line + space::SM * 2);
     assert!(size.width > style.checkbox_size + style.checkbox_gap);
     assert_eq!(
         group.layout_rect(),
         Rect::new(10, 20, size.width, size.height)
     );
 
-    let detail_bottom = 20 + label * 2 + line + style.spacing_sm - 1;
+    let detail_bottom = 20 + label * 2 + line + space::SM - 1;
     let (consumed, mut sink) = deliver(&mut group, press(12, detail_bottom));
     assert!(consumed);
     assert_eq!(chosen(&mut sink), [1]);
     let (consumed, _) = deliver(&mut group, press(12, detail_bottom + 1));
     assert!(!consumed, "the gap between options is no option's");
-    let third_row = 20 + label * 2 + line + style.spacing_sm * 2;
+    let third_row = 20 + label * 2 + line + space::SM * 2;
     let (consumed, mut sink) = deliver(&mut group, press(12, third_row + 1));
     assert!(consumed);
     assert_eq!(chosen(&mut sink), [2]);
@@ -123,7 +124,7 @@ pub(super) fn test_radio_group_stacks_its_options() {
 /// A disabled option takes no click, and the press goes no further.
 pub(super) fn test_radio_group_click_on_a_disabled_option_chooses_nothing() {
     let style = StyleSheet::dark();
-    let line = crate::text::ui::line_height(style.font_size as u16);
+    let line = crate::text::ui::line_height(crate::text::BODY.size);
     let label = style.checkbox_size.max(line);
     let mut group = radio_group(
         vec![
@@ -132,7 +133,7 @@ pub(super) fn test_radio_group_click_on_a_disabled_option_chooses_nothing() {
         ],
         Some(0),
     );
-    let (consumed, mut sink) = deliver(&mut group, press(12, 20 + label + style.spacing_sm + 1));
+    let (consumed, mut sink) = deliver(&mut group, press(12, 20 + label + space::SM + 1));
     assert!(consumed);
     assert!(chosen(&mut sink).is_empty());
     assert_eq!(group.selected(), Some(0));
@@ -533,7 +534,7 @@ pub(super) fn test_label_beside_a_styled_label_shares_its_baseline() {
                 )),
                 Box::new(StyledLabelWidget::new(
                     String::from("hill"),
-                    style.text_secondary,
+                    Tone::Secondary,
                     TextAlignment::Start,
                 )),
             ],
@@ -592,7 +593,7 @@ pub(super) fn test_a_baseline_row_lines_up_text_of_different_heights() {
             )),
             Box::new(StyledLabelWidget::new(
                 String::from("hill"),
-                Color32::WHITE,
+                Tone::Accent,
                 TextAlignment::Start,
             )),
         ],
@@ -617,7 +618,8 @@ pub(super) fn test_a_baseline_row_lines_up_text_of_different_heights() {
 /// parted by a line, and the highlighted one is ringed.
 pub(super) fn test_partition_bar_paints_fills_hatch_and_highlight() {
     let style = StyleSheet::dark();
-    let fill = Color32::rgb(0x20, 0x60, 0xa0);
+    let theme = style.theme;
+    let fill = theme.series(5);
     let segment = |size, fill| BarSegment {
         label: String::new(),
         size,
@@ -625,9 +627,9 @@ pub(super) fn test_partition_bar_paints_fills_hatch_and_highlight() {
     };
     let mut bar = PartitionBarWidget::new(
         vec![
-            segment(1, SegmentFill::Solid(fill)),
+            segment(1, SegmentFill::Series(5)),
             segment(1, SegmentFill::Hatched),
-            segment(1, SegmentFill::Solid(fill)),
+            segment(1, SegmentFill::Series(5)),
         ],
         Some(2),
     );
@@ -648,15 +650,15 @@ pub(super) fn test_partition_bar_paints_fills_hatch_and_highlight() {
     let encode = |c: Color32| PixelFormat::Argb8888.encode(c).to_u32();
     let mid = bar_h / 2;
     assert_eq!(pixel(&data, width, 40, mid), encode(fill));
-    assert_eq!(pixel(&data, width, 80, mid), encode(style.bg_primary));
+    assert_eq!(pixel(&data, width, 80, mid), encode(theme.surface));
     let hatch: Vec<u32> = (81..159).map(|x| pixel(&data, width, x, mid)).collect();
-    assert!(hatch.contains(&encode(style.bg_secondary)));
-    assert!(hatch.contains(&encode(style.bg_tertiary)));
-    assert_eq!(pixel(&data, width, 160, mid), encode(style.text_primary));
-    assert_eq!(pixel(&data, width, 161, mid), encode(style.text_primary));
+    assert!(hatch.contains(&encode(theme.surface_sunken)));
+    assert!(hatch.contains(&encode(theme.border)));
+    assert_eq!(pixel(&data, width, 160, mid), encode(theme.text));
+    assert_eq!(pixel(&data, width, 161, mid), encode(theme.text));
     assert_eq!(pixel(&data, width, 200, mid), encode(fill));
-    assert_eq!(pixel(&data, width, 200, 1), encode(style.text_primary));
-    assert_eq!(pixel(&data, width, 0, mid), encode(style.border_default));
+    assert_eq!(pixel(&data, width, 200, 1), encode(theme.text));
+    assert_eq!(pixel(&data, width, 0, mid), encode(theme.border));
 }
 
 /// The indeterminate block is a quarter of the bar, goes across and back
@@ -854,13 +856,13 @@ pub(super) fn test_a_scroll_view_hands_pointer_input_to_its_content() {
     deliver(&mut view, release);
 }
 
-/// A bar with no value draws a quarter of itself in its colour, wherever the
+/// A bar with no value draws a quarter of itself in its tone, wherever the
 /// clock has the block.
 pub(super) fn test_indeterminate_progress_paints_its_block() {
     use crate::widgets::progress_bar::ProgressBarWidget;
     let style = StyleSheet::dark();
-    let color = Color32::rgb(0x12, 0x9a, 0x56);
-    let mut bar = ProgressBarWidget::new(None, String::new(), Some(color));
+    let color = style.theme.success;
+    let mut bar = ProgressBarWidget::new(None, String::new(), Tone::Success);
     let (width, height) = (200usize, 40usize);
     lay_out(
         &mut bar,
@@ -928,22 +930,21 @@ fn luma(pixel: u32) -> u32 {
     (299 * r as u32 + 587 * g as u32 + 114 * b as u32) / 1000
 }
 
-/// A label is drawn whole in a segment it fits and not at all in one it does
-/// not, dark over a light fill and light over a dark one.
+/// A label is drawn whole, in the ink for an accent fill, in a segment it
+/// fits and not at all in one it does not.
 pub(super) fn test_partition_bar_labels_fit_whole_in_a_readable_ink() {
     let style = StyleSheet::dark();
-    let light = Color32::rgb(0xe0, 0xe0, 0xa0);
-    let dark = Color32::rgb(0x20, 0x20, 0x50);
-    let segment = |label: &str, size, color| BarSegment {
+    let theme = style.theme;
+    let segment = |label: &str, size, n| BarSegment {
         label: String::from(label),
         size,
-        fill: SegmentFill::Solid(color),
+        fill: SegmentFill::Series(n),
     };
     let mut bar = PartitionBarWidget::new(
         vec![
-            segment("Windows", 10, light),
-            segment("data", 10, dark),
-            segment("SlopOS root 200 GiB", 1, light),
+            segment("Windows", 10, 4),
+            segment("data", 10, 5),
+            segment("SlopOS root 200 GiB", 1, 0),
         ],
         None,
     );
@@ -972,10 +973,13 @@ pub(super) fn test_partition_bar_labels_fit_whole_in_a_readable_ink() {
     let second = band(widths[0], widths[0] + widths[1]);
     let third = band(widths[0] + widths[1], width as i32);
     let fill = |c: Color32| PixelFormat::Argb8888.encode(c).to_u32();
-    assert!(first.iter().any(|&p| luma(p) + 80 < luma(fill(light))));
-    assert!(second.iter().any(|&p| luma(p) > luma(fill(dark)) + 80));
+    let ink = fill(theme.text_on_accent);
+    for (band, n) in [(&first, 4), (&second, 5)] {
+        assert!(band.contains(&ink), "series {n}");
+        assert!(band.iter().all(|&p| luma(p) <= luma(fill(theme.series(n)))));
+    }
     assert!(
-        third.iter().all(|&p| p == fill(light)),
+        third.iter().all(|&p| p == fill(theme.series(0))),
         "a label that does not fit"
     );
 }

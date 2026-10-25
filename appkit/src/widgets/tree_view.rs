@@ -8,7 +8,7 @@
 
 use std::any::Any;
 
-use slopos_abi::draw::Color32;
+use slopos_theme_core::{State, with_alpha};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
@@ -347,7 +347,7 @@ pub fn elide(text: &str, budget: i32, width: impl Fn(&str) -> i32) -> String {
 impl TreeViewWidget {
     fn paint_rows(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let style = ctx.style;
+        let theme = ctx.theme();
         let icon = self.icon_size();
         let text_h = ctx.text_height();
 
@@ -359,15 +359,23 @@ impl TreeViewWidget {
             }
 
             let selected = self.selected == Some(absolute);
+            let wash = if selected && self.focused {
+                Some(theme.selection)
+            } else if selected || self.hovered == Some(absolute) {
+                Some(theme.overlay(State::Hover))
+            } else {
+                None
+            };
+            if let Some(wash) = wash {
+                ctx.fill_rect_blended(rect.x, y, rect.width, self.row_height, wash);
+            }
             if selected {
-                let bg = if self.focused {
-                    style.bg_selected
+                let edge = if self.focused {
+                    theme.accent
                 } else {
-                    style.bg_hover
+                    theme.text_disabled
                 };
-                ctx.fill_rect(rect.x, y, rect.width, self.row_height, bg);
-            } else if self.hovered == Some(absolute) {
-                ctx.fill_rect(rect.x, y, rect.width, self.row_height, style.bg_hover);
+                ctx.fill_rect(rect.x, y, super::SELECTED_EDGE, self.row_height, edge);
             }
 
             let indent = rect.x + PAD_LEFT + row.depth as i32 * INDENT;
@@ -385,15 +393,15 @@ impl TreeViewWidget {
                     x,
                     icon_y,
                     icon,
-                    style.text_secondary,
+                    theme.text_secondary,
                 );
             }
             x += icon + ICON_GAP / 2;
 
             let glyph_color = if row.is_dir {
-                style.text_accent
+                theme.accent
             } else {
-                style.text_secondary
+                theme.text_secondary
             };
             draw_icon(
                 ctx,
@@ -413,12 +421,10 @@ impl TreeViewWidget {
             );
             x += icon + ICON_GAP;
 
-            let label_color = if row.active {
-                style.text_primary
-            } else if row.is_dir {
-                style.text_primary
+            let label_color = if row.active || row.is_dir {
+                theme.text
             } else {
-                style.text_secondary
+                theme.text_secondary
             };
             let label_y = y + (self.row_height - text_h) / 2;
             let budget = rect.x + rect.width - x - 16;
@@ -432,7 +438,7 @@ impl TreeViewWidget {
                     rect.x + rect.width - icon - 6,
                     icon_y,
                     icon,
-                    style.text_accent,
+                    theme.accent,
                 );
             }
         }
@@ -445,7 +451,7 @@ impl TreeViewWidget {
                 thumb.y,
                 thumb.width,
                 thumb.height,
-                Color32::new(0xc8, 0xcc, 0xd4, alpha),
+                with_alpha(theme.text_secondary, alpha),
             );
         }
     }

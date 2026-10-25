@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use slopos_abi::draw::Color32;
+use slopos_appkit::theme::{inset, space};
 use slopos_appkit::{
-    Action, App, AppSender, BarSegment, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, Node,
-    RadioOption, ScrollDirection, ScrollbarVisibility, SegmentFill, SliderGrab, SliderInput,
-    TextAlignment,
+    Action, App, AppSender, BarSegment, ButtonStyle, CrossAxisAlignment, Length, Node, RadioOption,
+    ScrollDirection, ScrollbarVisibility, SegmentFill, SliderGrab, SliderInput, TextAlignment,
+    Tone,
 };
 
 #[derive(Clone, Debug)]
@@ -86,12 +86,12 @@ impl WidgetGalleryApp {
             size,
             fill,
         };
-        let solid = |r, g, b| SegmentFill::Solid(Color32::rgb(r, g, b));
+        let series = SegmentFill::Series;
         let free = DISK - 3 - 1 - self.root;
         Node::Padding {
-            padding: EdgeInsets::all(16),
+            padding: inset::CARD,
             child: Box::new(Node::VStack {
-                spacing: 8,
+                spacing: space::SM,
                 align: CrossAxisAlignment::Stretch,
                 children: vec![
                     Self::label("How should SlopOS be installed?"),
@@ -123,23 +123,23 @@ impl WidgetGalleryApp {
                     Self::label("Now"),
                     Node::PartitionBar {
                         segments: vec![
-                            segment("EFI", 1, solid(0x98, 0xc3, 0x79)),
-                            segment("Windows 380 GiB", 380, solid(0x61, 0xaf, 0xef)),
-                            segment("data 131 GiB", 131, solid(0xc6, 0x78, 0xdd)),
+                            segment("EFI", 1, series(1)),
+                            segment("Windows 380 GiB", 380, series(4)),
+                            segment("data 131 GiB", 131, series(5)),
                         ],
                         highlight: None,
                     },
                     Self::label("After"),
                     Node::PartitionBar {
                         segments: vec![
-                            segment("EFI", 1, solid(0x98, 0xc3, 0x79)),
-                            segment("boot", 2, solid(0xe5, 0xc0, 0x7b)),
+                            segment("EFI", 1, series(1)),
+                            segment("boot", 2, series(2)),
                             segment(
                                 &format!("SlopOS root {} GiB", self.root),
                                 self.root,
-                                solid(0x74, 0xad, 0xe8),
+                                series(0),
                             ),
-                            segment("crash", 1, solid(0xd0, 0x72, 0x77)),
+                            segment("crash", 1, series(3)),
                             segment(&format!("free {free} GiB"), free, SegmentFill::Hatched),
                         ],
                         highlight: Some(2),
@@ -156,19 +156,19 @@ impl WidgetGalleryApp {
             Job::Running(n) => (Some(n), format!("{n}%")),
         };
         Node::Padding {
-            padding: EdgeInsets::all(16),
+            padding: inset::CARD,
             child: Box::new(Node::VStack {
-                spacing: 8,
+                spacing: space::SM,
                 align: CrossAxisAlignment::Stretch,
                 children: vec![
                     Self::label("A job on a thread of its own, sending its progress"),
                     Node::ProgressBar {
                         value,
                         label,
-                        color: Some(Color32::rgb(0x74, 0xad, 0xe8)),
+                        tone: Tone::Accent,
                     },
                     Node::HStack {
-                        spacing: 8,
+                        spacing: space::SM,
                         align: CrossAxisAlignment::Center,
                         children: vec![
                             Node::Button {
@@ -184,7 +184,7 @@ impl WidgetGalleryApp {
                     Node::ProgressBar {
                         value: None,
                         label: String::new(),
-                        color: None,
+                        tone: Tone::Accent,
                     },
                 ],
             }),
@@ -209,9 +209,9 @@ impl WidgetGalleryApp {
 
     fn basics_tab(&self) -> Node<GalleryMsg> {
         Node::Padding {
-            padding: EdgeInsets::all(16),
+            padding: inset::CARD,
             child: Box::new(Node::VStack {
-                spacing: 8,
+                spacing: space::SM,
                 align: CrossAxisAlignment::Start,
                 children: vec![
                     Node::Label {
@@ -222,7 +222,7 @@ impl WidgetGalleryApp {
                     },
                     Node::Divider,
                     Node::HStack {
-                        spacing: 8,
+                        spacing: space::SM,
                         align: CrossAxisAlignment::Center,
                         children: vec![
                             Node::Button {
@@ -252,7 +252,7 @@ impl WidgetGalleryApp {
                         enabled: true,
                     },
                     Node::Spacer {
-                        size: Length::Px(16),
+                        size: Length::Px(space::LG),
                     },
                     Node::Label {
                         text: format!("Button clicked {} times", self.counter),
@@ -267,9 +267,9 @@ impl WidgetGalleryApp {
 
     fn input_tab(&self) -> Node<GalleryMsg> {
         Node::Padding {
-            padding: EdgeInsets::all(16),
+            padding: inset::CARD,
             child: Box::new(Node::VStack {
-                spacing: 8,
+                spacing: space::SM,
                 align: CrossAxisAlignment::Start,
                 children: vec![
                     Node::Label {
@@ -307,9 +307,9 @@ impl WidgetGalleryApp {
             .collect();
 
         Node::Padding {
-            padding: EdgeInsets::all(16),
+            padding: inset::CARD,
             child: Box::new(Node::VStack {
-                spacing: 8,
+                spacing: space::SM,
                 align: CrossAxisAlignment::Start,
                 children: vec![
                     Node::Label {
@@ -325,7 +325,7 @@ impl WidgetGalleryApp {
                         on_scroll: None,
                         follow_end: false,
                         child: Box::new(Node::VStack {
-                            spacing: 4,
+                            spacing: space::XS,
                             align: CrossAxisAlignment::Start,
                             children: items,
                         }),

@@ -21,6 +21,7 @@ use slopos_chrome_core::toggle::{TOGGLE_OFF, TOGGLE_ON, toggle_geometry};
 use slopos_gfx::canvas_ops::rounded_rect_filled;
 use slopos_net_core::Ipv4;
 use slopos_net_core::render::iface_kind;
+use slopos_theme_core::{radius, space};
 
 use crate::gfx::{DamageRect, DrawBuffer};
 use crate::syscall::process;
@@ -32,47 +33,33 @@ use std::time::Instant;
 /// [`draw_fitted`] rather than run under the panel edge.
 const PANEL_WIDTH: i32 = 320;
 
-/// The base spacing unit. Every gap in the panel is `U * k` for `k` in 1..=4.
-///
-/// Four, because every fixed dimension the panel inherits is already a multiple
-/// of it, and because the panel needs a group gap exactly three times its row
-/// gap, which 12:4 gives and an 8-only scale cannot. `k >= 5` is excluded: 16 to
-/// 20 is +25%, at the just-noticeable-difference floor, so a 20 beside a 16
-/// reads as a mistake rather than a decision.
-const U: i32 = 4;
-const SPACE_1: i32 = U;
-const SPACE_2: i32 = 2 * U;
-const SPACE_3: i32 = 3 * U;
-const SPACE_4: i32 = 4 * U;
-
 /// Padding inside the panel, on all four edges equally.
-const PANEL_PAD: i32 = SPACE_3;
+const PANEL_PAD: i32 = space::MD;
 
 /// Diameter of the per-interface status dot. Ink, not a gap.
-const DOT_D: i32 = SPACE_2;
+const DOT_D: i32 = space::SM;
 
 /// The step from the panel's own rail to the interface rail. One indivisible
 /// rail step, not `DOT_D + something`: the dot merely happens to live in the
 /// first half of it.
-const DOT_GUTTER: i32 = SPACE_4;
+const DOT_GUTTER: i32 = space::LG;
 
 /// The panel's one hairline weight, for its edge and for the header rule.
 const RULE_H: i32 = 1;
 
-/// Corner radius: the shelf's pill.
-const PANEL_RADIUS: i32 = SHELF_PILL_RADIUS;
+const PANEL_RADIUS: i32 = radius::CARD;
 
 /// Gap between the bar's border row and the top of the panel.
-const PANEL_GAP_Y: i32 = SPACE_2;
+const PANEL_GAP_Y: i32 = space::SM;
 
 /// The switch's track. Ink, and at the hit-target minimum.
-const SWITCH_W: i32 = 10 * U;
-const SWITCH_H: i32 = 5 * U;
+const SWITCH_W: i32 = 10 * space::XS;
+const SWITCH_H: i32 = 5 * space::XS;
 
 /// One line box: the text's line plus a little air, so a menu row is a
 /// comfortable target.
 fn line_h() -> i32 {
-    ui::line_height(TEXT_PX) + SPACE_1
+    ui::line_height(TEXT_PX) + space::XS
 }
 
 /// Text centred in the line box whose top is `y`.
@@ -92,7 +79,7 @@ fn draw_text(
         TEXT_PX,
         ui::Weight::Regular,
         fg,
-        PANEL_BG_OPAQUE,
+        CARD_BG,
         clip,
     );
 }
@@ -127,22 +114,25 @@ fn layout(model: &NetPanelModel) -> Layout {
 
     // A rule with nothing beneath it is a seam, not a division.
     let has_rule = n >= 1 || gw;
-    let rule_y = header_end + SPACE_3;
+    let rule_y = header_end + space::MD;
     let body_y = if has_rule {
-        rule_y + RULE_H + SPACE_3
+        rule_y + RULE_H + space::MD
     } else {
         header_end
     };
 
-    let row_pitch = 2 * lh + SPACE_1;
+    let row_pitch = 2 * lh + space::XS;
     let rows_y = body_y;
-    // n rows of 2 lines with SPACE_1 between them, not after the last.
     let rows_end = if n >= 1 {
-        rows_y + n * row_pitch - SPACE_1
+        rows_y + n * 2 * lh + (n - 1) * space::XS
     } else {
         rows_y
     };
-    let gateway_y = if n >= 1 { rows_end + SPACE_3 } else { rows_end };
+    let gateway_y = if n >= 1 {
+        rows_end + space::MD
+    } else {
+        rows_end
+    };
     let content_end = if gw { gateway_y + lh } else { rows_end };
 
     Layout {
@@ -178,7 +168,7 @@ fn draw_fitted(
         ui::Weight::Regular,
         max_w,
         fg,
-        PANEL_BG_OPAQUE,
+        CARD_BG,
         clip,
     );
 }
@@ -188,9 +178,9 @@ fn draw_fitted(
 fn dot_colour(state: IfaceState) -> slopos_abi::draw::Color32 {
     match state {
         IfaceState::Off => TEXT_SECONDARY,
-        IfaceState::NoCarrier => SIGNAL_CLOSE,
-        IfaceState::NoAddress => SIGNAL_MINIMIZE,
-        IfaceState::Up => SIGNAL_EXPAND,
+        IfaceState::NoCarrier => DANGER,
+        IfaceState::NoAddress => WARNING,
+        IfaceState::Up => SUCCESS,
     }
 }
 
@@ -474,9 +464,9 @@ impl Popover {
     fn switch_hit(rect: Rect, l: &Layout) -> Rect {
         let track = Self::switch_track(rect, l);
         Rect::new(
-            track.x - SPACE_2,
+            track.x - space::SM,
             rect.y + PANEL_PAD,
-            track.w + SPACE_2 + PANEL_PAD,
+            track.w + space::SM + PANEL_PAD,
             line_h(),
         )
     }
@@ -643,9 +633,9 @@ impl Popover {
         let rail1 = rect.x + PANEL_PAD;
         let rail2 = rail1 + DOT_GUTTER;
         let content_w = rect.w - 2 * PANEL_PAD;
-        let header_text_w = content_w - SWITCH_W - SPACE_3;
+        let header_text_w = content_w - SWITCH_W - space::MD;
         let row_text_w = content_w - DOT_GUTTER;
-        let gw_value_x = rail1 + ui::width(GATEWAY_LABEL, TEXT_PX) + SPACE_3;
+        let gw_value_x = rail1 + ui::width(GATEWAY_LABEL, TEXT_PX) + space::MD;
         let gw_value_w = rect.x + rect.w - PANEL_PAD - gw_value_x;
 
         buf.with_scissor(*clip, |buf| {
@@ -679,10 +669,10 @@ impl Popover {
             // not yet confirmed" rather than showing a position the kernel has
             // not agreed to.
             let track = Self::switch_track(rect, &l);
-            // Busy keeps the target's own track colour and dims only the knob: a
-            // grey track under an on-position knob reads as a disabled control
-            // rather than a moving one.
-            let track_colour = if on { SIGNAL_EXPAND } else { SIGNAL_INACTIVE };
+            // Busy keeps the target's own track colour and changes only the
+            // knob: a grey track under an on-position knob reads as a disabled
+            // control rather than a moving one.
+            let track_colour = if on { ACCENT } else { DIVIDER };
             if offered {
                 rounded_rect_filled(
                     buf,
@@ -695,6 +685,11 @@ impl Popover {
                 );
             }
             let geometry = toggle_geometry(track, if on { TOGGLE_ON } else { TOGGLE_OFF });
+            let knob_colour = match (busy, on) {
+                (false, _) => TEXT_PRIMARY,
+                (true, true) => TEXT_ON_ACCENT,
+                (true, false) => TEXT_SECONDARY,
+            };
             if offered && !geometry.knob.is_empty() {
                 rounded_rect_filled(
                     buf,
@@ -703,7 +698,7 @@ impl Popover {
                     geometry.knob.w,
                     geometry.knob.h,
                     geometry.knob.w / 2,
-                    if busy { TEXT_SECONDARY } else { TEXT_PRIMARY },
+                    knob_colour,
                 );
             }
 
@@ -711,15 +706,7 @@ impl Popover {
             // the panel's edges runs into the corner arcs and reads as a window
             // seam instead of a group division.
             if l.has_rule {
-                rounded_rect_filled(
-                    buf,
-                    rail1,
-                    rect.y + l.rule_y,
-                    content_w,
-                    RULE_H,
-                    0,
-                    SHELF_SEPARATOR,
-                );
+                rounded_rect_filled(buf, rail1, rect.y + l.rule_y, content_w, RULE_H, 0, DIVIDER);
             }
 
             // State is a coloured dot and a plain word, never an RFC 2863
@@ -794,15 +781,7 @@ impl Popover {
 /// blends its corner arcs against the fill's own antialiased boundary and
 /// fades out across each corner.
 fn draw_frame(buf: &mut DrawBuffer, rect: Rect) {
-    rounded_rect_filled(
-        buf,
-        rect.x,
-        rect.y,
-        rect.w,
-        rect.h,
-        PANEL_RADIUS,
-        SHELF_SEPARATOR,
-    );
+    rounded_rect_filled(buf, rect.x, rect.y, rect.w, rect.h, PANEL_RADIUS, CARD_EDGE);
     rounded_rect_filled(
         buf,
         rect.x + RULE_H,
@@ -810,7 +789,7 @@ fn draw_frame(buf: &mut DrawBuffer, rect: Rect) {
         rect.w - 2 * RULE_H,
         rect.h - 2 * RULE_H,
         PANEL_RADIUS - RULE_H,
-        PANEL_BG_OPAQUE,
+        CARD_BG,
     );
 }
 

@@ -27,11 +27,6 @@ use crate::init_control::{self, Command};
 use crate::theme::*;
 
 const CARD_W: i32 = 420;
-const PAD: i32 = 16;
-const GAP: i32 = 8;
-const FIELD_H: i32 = 28;
-const RADIUS: i32 = 12;
-const BORDER: i32 = 1;
 /// More keys than a hand holds down at once.
 const TAKEN_MAX: usize = 16;
 const NAME_MAX: usize = slopos_accounts_core::NAME_MAX;
@@ -336,7 +331,7 @@ impl Gate {
             DESKTOP_BG,
         );
         let line = ui::line_height(TEXT_PX);
-        let w = CARD_W.min(screen_w as i32 - 2 * PAD);
+        let w = CARD_W.min(screen_w as i32 - 2 * CARD_PAD);
         let (title, hint) = match &self.role {
             Role::Greeter => (
                 format!("Log in: {}", self.people.join(", ")),
@@ -351,40 +346,40 @@ impl Gate {
             Role::Greeter => &[Field::Name, Field::Password],
             Role::Desktop { .. } => &[Field::Password],
         };
-        let h = PAD
+        let h = CARD_PAD
             + line
-            + GAP
-            + fields.len() as i32 * (line + FIELD_H + GAP)
-            + 2 * (line + GAP)
-            + PAD;
+            + CARD_GAP
+            + fields.len() as i32 * (line + CONTROL_H + CARD_GAP)
+            + 2 * (line + CARD_GAP)
+            + CARD_PAD;
         let x = (screen_w as i32 - w) / 2;
         let mut y = ((screen_h as i32 - h) / 2).max(0);
-        rounded_rect_filled(buf, x, y, w, h, RADIUS, SHELF_SEPARATOR);
+        rounded_rect_filled(buf, x, y, w, h, CARD_RADIUS, CARD_EDGE);
         rounded_rect_filled(
             buf,
-            x + BORDER,
-            y + BORDER,
-            w - 2 * BORDER,
-            h - 2 * BORDER,
-            RADIUS - BORDER,
-            PANEL_BG_OPAQUE,
+            x + EDGE_W,
+            y + EDGE_W,
+            w - 2 * EDGE_W,
+            h - 2 * EDGE_W,
+            CARD_RADIUS - EDGE_W,
+            CARD_BG,
         );
         let text = |buf: &mut DrawBuffer, y: i32, s: &str, colour| {
             ui::draw_clipped(
                 buf,
-                x + PAD,
+                x + CARD_PAD,
                 y,
                 s,
                 TEXT_PX,
                 ui::Weight::Regular,
                 colour,
-                PANEL_BG_OPAQUE,
+                CARD_BG,
                 clip,
             );
         };
-        y += PAD;
+        y += CARD_PAD;
         text(buf, y, &title, TEXT_PRIMARY);
-        y += line + GAP;
+        y += line + CARD_GAP;
         for &field in fields {
             let label = match field {
                 Field::Name => "Name",
@@ -393,42 +388,42 @@ impl Gate {
             text(buf, y, label, TEXT_SECONDARY);
             y += line;
             let edge = match self.field == field {
-                true => SIGNAL_EXPAND,
-                false => SHELF_SEPARATOR,
+                true => FOCUS,
+                false => FIELD_EDGE,
             };
-            let fw = w - 2 * PAD;
-            rounded_rect_filled(buf, x + PAD, y, fw, FIELD_H, RADIUS / 2, edge);
+            let fw = w - 2 * CARD_PAD;
+            rounded_rect_filled(buf, x + CARD_PAD, y, fw, CONTROL_H, FIELD_RADIUS, edge);
             rounded_rect_filled(
                 buf,
-                x + PAD + BORDER,
-                y + BORDER,
-                fw - 2 * BORDER,
-                FIELD_H - 2 * BORDER,
-                RADIUS / 2 - BORDER,
-                PANEL_BG_OPAQUE,
+                x + CARD_PAD + EDGE_W,
+                y + EDGE_W,
+                fw - 2 * EDGE_W,
+                CONTROL_H - 2 * EDGE_W,
+                FIELD_RADIUS - EDGE_W,
+                FIELD_BG,
             );
             let shown = match field {
                 Field::Name => self.name.clone(),
                 Field::Password => {
-                    let room = (fw - 2 * PAD) / ui::width(ui::BULLET, TEXT_PX).max(1);
+                    let room = (fw - 2 * CARD_PAD) / ui::width(ui::BULLET, TEXT_PX).max(1);
                     ui::BULLET.repeat(self.secret.chars().min(room.max(0) as usize))
                 }
             };
             ui::draw_clipped(
                 buf,
-                x + 2 * PAD,
-                ui::centred_top(y, FIELD_H, TEXT_PX),
+                x + 2 * CARD_PAD,
+                ui::centred_top(y, CONTROL_H, TEXT_PX),
                 &shown,
                 TEXT_PX,
                 ui::Weight::Regular,
                 TEXT_PRIMARY,
-                PANEL_BG_OPAQUE,
+                FIELD_BG,
                 clip,
             );
-            y += FIELD_H + GAP;
+            y += CONTROL_H + CARD_GAP;
         }
         text(buf, y, &self.status, TEXT_PRIMARY);
-        y += line + GAP;
+        y += line + CARD_GAP;
         text(buf, y, &hint, TEXT_SECONDARY);
     }
 }

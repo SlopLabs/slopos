@@ -1,6 +1,7 @@
 use std::any::Any;
 
 use slopos_abi::draw::Color32;
+use slopos_theme_core::{ColorRole, State, Theme, inset, radius};
 
 use crate::constraints::{BoxConstraints, Size};
 use crate::event::{
@@ -8,7 +9,7 @@ use crate::event::{
 };
 use crate::node::ButtonStyle;
 use crate::paint::PaintContext;
-use crate::style::StyleSheet;
+use crate::text::BODY;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -54,52 +55,22 @@ impl ButtonWidget {
     }
 }
 
-fn lighten(c: Color32, amount: u8) -> Color32 {
-    Color32::new(
-        c.red().saturating_add(amount),
-        c.green().saturating_add(amount),
-        c.blue().saturating_add(amount),
-        c.alpha(),
-    )
-}
-
-fn darken(c: Color32, amount: u8) -> Color32 {
-    Color32::new(
-        c.red().saturating_sub(amount),
-        c.green().saturating_sub(amount),
-        c.blue().saturating_sub(amount),
-        c.alpha(),
-    )
-}
-
 /// Returns (background, foreground) for the given style and state.
-fn button_colors(style: &StyleSheet, bs: ButtonStyle, state: ButtonState) -> (Color32, Color32) {
-    match (bs, state) {
-        (ButtonStyle::Primary, ButtonState::Idle) => (style.bg_accent, style.text_on_accent),
-        (ButtonStyle::Primary, ButtonState::Hovered) => {
-            (lighten(style.bg_accent, 20), style.text_on_accent)
-        }
-        (ButtonStyle::Primary, ButtonState::Pressed) => {
-            (darken(style.bg_accent, 20), style.text_on_accent)
-        }
-
-        (ButtonStyle::Secondary, ButtonState::Idle) => (style.bg_secondary, style.text_primary),
-        (ButtonStyle::Secondary, ButtonState::Hovered) => (style.bg_tertiary, style.text_primary),
-        (ButtonStyle::Secondary, ButtonState::Pressed) => {
-            (darken(style.bg_secondary, 10), style.text_primary)
-        }
-
-        (ButtonStyle::Destructive, ButtonState::Idle) => {
-            (style.bg_destructive, style.text_on_accent)
-        }
-        (ButtonStyle::Destructive, ButtonState::Hovered) => {
-            (lighten(style.bg_destructive, 20), style.text_on_accent)
-        }
-        (ButtonStyle::Destructive, ButtonState::Pressed) => {
-            (darken(style.bg_destructive, 20), style.text_on_accent)
-        }
-
-        (_, ButtonState::Disabled) => (style.bg_secondary, style.text_disabled),
+fn button_colors(theme: &Theme, bs: ButtonStyle, state: ButtonState) -> (Color32, Color32) {
+    let fill = match bs {
+        ButtonStyle::Primary => ColorRole::Accent,
+        ButtonStyle::Secondary => ColorRole::SurfaceRaised,
+        ButtonStyle::Destructive => ColorRole::Danger,
+    };
+    let ink = match bs {
+        ButtonStyle::Secondary => theme.text,
+        _ => theme.text_on_accent,
+    };
+    match state {
+        ButtonState::Idle => (theme.color(fill), ink),
+        ButtonState::Hovered => (theme.state(fill, State::Hover), ink),
+        ButtonState::Pressed => (theme.state(fill, State::Pressed), ink),
+        ButtonState::Disabled => (theme.surface_raised, theme.text_disabled),
     }
 }
 
@@ -114,9 +85,8 @@ impl Widget for ButtonWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         // The proportional metrics, because `paint` draws with them.
         let text_w = ctx.text_width(&self.label);
-        let text_h = ctx.text_height();
-        let w = (text_w + ctx.style.button_padding_h * 2).max(ctx.style.button_min_width);
-        let h = text_h + ctx.style.button_padding_v * 2;
+        let w = (text_w + inset::CONTROL.horizontal()).max(ctx.style.button_min_width);
+        let h = BODY.line_height + inset::CONTROL.vertical();
         let size = constraints.constrain(Size::new(w, h));
         // `paint` centres the label's line in the button.
         self.baseline = ctx.baseline_in(size.height);
@@ -133,16 +103,9 @@ impl Widget for ButtonWidget {
             }
             other => other,
         };
-        let (bg, fg) = button_colors(ctx.style, self.style, state);
+        let (bg, fg) = button_colors(ctx.theme(), self.style, state);
 
-        ctx.fill_rounded_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            ctx.style.corner_radius,
-            bg,
-        );
+        ctx.fill_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius::CONTROL, bg);
         // A secondary button's fill is barely off its surround, so the edge is
         // what says it is a control rather than a label.
         if matches!(self.style, ButtonStyle::Secondary) {
@@ -151,8 +114,8 @@ impl Widget for ButtonWidget {
                 rect.y,
                 rect.width,
                 rect.height,
-                ctx.style.corner_radius,
-                ctx.style.border_default,
+                radius::CONTROL,
+                ctx.theme().border_strong,
             );
         }
 

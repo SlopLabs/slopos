@@ -217,18 +217,18 @@ impl Widget for SliderWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let style = ctx.style;
+        let theme = ctx.theme();
         let (left, width) = self.track();
         let mid = rect.y + rect.height / 2;
         let bar = 4;
         let cx = self.thumb_x();
         let knob = self.knob();
         let (fill, thumb) = if self.enabled {
-            (style.bg_accent, style.text_primary)
+            (theme.accent, theme.text)
         } else {
-            (style.text_disabled, style.text_disabled)
+            (theme.text_disabled, theme.text_disabled)
         };
-        ctx.fill_rounded_rect(left, mid - bar / 2, width, bar, bar / 2, style.bg_tertiary);
+        ctx.fill_rounded_rect(left, mid - bar / 2, width, bar, bar / 2, theme.border);
         ctx.fill_rounded_rect(left, mid - bar / 2, cx - left, bar, bar / 2, fill);
 
         ctx.fill_rounded_rect(
@@ -246,7 +246,7 @@ impl Widget for SliderWidget {
                 knob.width,
                 knob.height,
                 knob.width / 2,
-                style.border_default,
+                theme.border_strong,
             );
         }
         if self.focused {

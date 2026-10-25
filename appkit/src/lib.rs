@@ -78,5 +78,8 @@ pub use traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId};
 pub use slopos_windowing::{ControlFlow, WindowedApp};
 pub use slopos_windowing::{ProtocolHandle, UiQueue, UiSender};
 
+pub use slopos_theme_core as theme;
+pub use slopos_theme_core::{Surface, TextRole, Tone};
+
 pub use slopos_gfx::image::ImageSampling;
 pub use slopos_gfx::{RenderError, RenderSurface};

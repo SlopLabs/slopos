@@ -2,16 +2,16 @@ use std::format;
 use std::string::String;
 
 use slopos_abi::PAGE_SIZE;
-use slopos_abi::draw::Color32;
 use slopos_net_core::{Ipv4, Mac};
 use slopos_slibc::mem::malloc::heap_stats;
 
 use crate::syscall::process as sys_proc;
 use slopos_abi::signal::SIGKILL;
+use slopos_appkit::theme::space;
 use slopos_appkit::{
     Action, App, ButtonStyle, ContextMenuAt, CrossAxisAlignment, EdgeInsets, Key, Length, MenuItem,
     MenuItemKind, Modifiers, NamedKey, Node, ScrollDirection, ScrollbarVisibility, SortIndicator,
-    TableColumn, TableColumnWidth, TextAlignment,
+    TableColumn, TableColumnWidth, TextAlignment, Tone,
 };
 
 mod format;
@@ -22,11 +22,6 @@ pub(crate) use format::*;
 pub(crate) use state::{ContextMenu, KillOutcome, SortColumn, SysmonApp, Tab};
 
 const MENU_KILL: usize = 0;
-
-pub(crate) const COLOR_DIM: Color32 = Color32::rgb(0x60, 0x68, 0x70);
-pub(crate) const COLOR_STATE_RUN: Color32 = Color32::rgb(0x44, 0xCC, 0x44);
-pub(crate) const COLOR_STATE_BLOCK: Color32 = Color32::rgb(0xCC, 0xAA, 0x44);
-pub(crate) const COLOR_STATE_READY: Color32 = Color32::rgb(0xCC, 0xCC, 0xCC);
 
 pub(crate) const MAX_CPUS: usize = 64;
 pub(crate) const REFRESH_INTERVAL_MS: u64 = 1000;
@@ -210,7 +205,7 @@ impl SysmonApp {
             format_uptime(self.last_refresh_ms)
         )));
         children.push(Node::Spacer {
-            size: Length::Px(8),
+            size: Length::Px(space::SM),
         });
 
         children.push(label("CPU"));
@@ -223,11 +218,11 @@ impl SysmonApp {
                     "CPU{} {} {:>3}%  {} MHz",
                     self.percpu[i].cpu_id, self.cpu_type[i], pct, mhz
                 ),
-                color: None,
+                tone: load_tone(pct),
             });
         }
         children.push(Node::Spacer {
-            size: Length::Px(8),
+            size: Length::Px(space::SM),
         });
 
         children.push(label("MEMORY"));
@@ -247,10 +242,10 @@ impl SysmonApp {
                 format_bytes_mib(total_bytes),
                 mem_pct
             ),
-            color: None,
+            tone: load_tone(mem_pct),
         });
         children.push(Node::Spacer {
-            size: Length::Px(8),
+            size: Length::Px(space::SM),
         });
 
         children.push(label("TASKS"));
@@ -267,15 +262,15 @@ impl SysmonApp {
             self.task_count, active, ready, blocked
         )));
         children.push(Node::Spacer {
-            size: Length::Px(8),
+            size: Length::Px(space::SM),
         });
 
         children.push(label("NETWORK"));
         children.push(label("RX: 0.0 MiB (0 pkts)  TX: 0.0 MiB (0 pkts)"));
         Node::Padding {
-            padding: EdgeInsets::all(10),
+            padding: EdgeInsets::all(space::MD),
             child: Box::new(Node::VStack {
-                spacing: 2,
+                spacing: space::XS,
                 align: CrossAxisAlignment::Stretch,
                 children,
             }),
@@ -339,7 +334,7 @@ impl SysmonApp {
                 continue;
             };
             let task = &self.tasks[idx];
-            let (state_str, _) = task_state(task.state);
+            let state_str = task_state(task.state);
             rows.push(vec![
                 cell(&format!("{}", task.task_id)),
                 cell(&truncate_name(&task_name_string(task), 16)),
@@ -435,27 +430,27 @@ impl SysmonApp {
 
     /// Footer: the outcome of the last kill, else the available gestures.
     fn view_status_line(&self) -> Node<SysmonMsg> {
-        let (text, color) = match &self.last_kill {
+        let (text, tone) = match &self.last_kill {
             Some(KillOutcome::Sent { name }) => {
-                (format!("Sent SIGKILL to '{}'", name), COLOR_STATE_RUN)
+                (format!("Sent SIGKILL to '{}'", name), Tone::Success)
             }
             Some(KillOutcome::Failed { name, errno }) => (
                 format!("Could not kill '{}': {}", name, errno_label(*errno)),
-                COLOR_STATE_BLOCK,
+                Tone::Warning,
             ),
             Some(KillOutcome::Vanished { name }) => {
-                (format!("'{}' had already exited", name), COLOR_STATE_BLOCK)
+                (format!("'{}' had already exited", name), Tone::Warning)
             }
             None => (
                 String::from("Right-click or Menu key for actions"),
-                COLOR_DIM,
+                Tone::Secondary,
             ),
         };
         Node::Padding {
-            padding: EdgeInsets::symmetric(6, 4),
+            padding: EdgeInsets::symmetric(space::SM, space::XS),
             child: Box::new(Node::StyledLabel {
                 text,
-                color,
+                tone,
                 alignment: TextAlignment::Start,
                 wrap: false,
             }),
@@ -500,7 +495,7 @@ impl SysmonApp {
                 format_bytes_mib(total_bytes),
                 mem_pct
             ),
-            color: None,
+            tone: load_tone(mem_pct),
         });
         children.push(kv_row(
             "Total",
@@ -590,14 +585,22 @@ impl SysmonApp {
             on_scroll: Some(SysmonMsg::HwScroll),
             follow_end: false,
             child: Box::new(Node::Padding {
-                padding: EdgeInsets::all(10),
+                padding: EdgeInsets::all(space::MD),
                 child: Box::new(Node::VStack {
-                    spacing: 2,
+                    spacing: space::XS,
                     align: CrossAxisAlignment::Stretch,
                     children,
                 }),
             }),
         }
+    }
+}
+
+fn load_tone(pct: u32) -> Tone {
+    match pct {
+        0..50 => Tone::Success,
+        50..80 => Tone::Warning,
+        _ => Tone::Danger,
     }
 }
 
@@ -631,7 +634,7 @@ fn kv_row(key: &str, value: &str) -> Node<SysmonMsg> {
                 max_lines: None,
             },
             Node::Spacer {
-                size: Length::Px(8),
+                size: Length::Px(space::SM),
             },
             Node::Label {
                 text: String::from(value),

@@ -1,4 +1,5 @@
 use slopos_abi::draw::Color32;
+use slopos_theme_core::radius;
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
@@ -64,6 +65,7 @@ impl Widget for CheckboxWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let style = ctx.style;
+        let theme = ctx.theme();
         let cb_size = style.checkbox_size;
         let gap = style.checkbox_gap;
         let text_h = ctx.text_height();
@@ -77,26 +79,26 @@ impl Widget for CheckboxWidget {
                 box_y,
                 cb_size,
                 cb_size,
-                style.corner_radius.min(cb_size / 4),
+                radius::CONTROL.min(cb_size / 4),
                 if self.enabled {
-                    style.bg_accent
+                    theme.accent
                 } else {
-                    style.text_disabled
+                    theme.text_disabled
                 },
             );
-            draw_checkmark(ctx, box_x, box_y, cb_size, Color32::WHITE);
+            draw_checkmark(ctx, box_x, box_y, cb_size, theme.text_on_accent);
         } else {
             let border_color = if self.enabled {
-                style.border_default
+                theme.border_strong
             } else {
-                style.text_disabled
+                theme.text_disabled
             };
             ctx.draw_rounded_rect(
                 box_x,
                 box_y,
                 cb_size,
                 cb_size,
-                style.corner_radius.min(cb_size / 4),
+                radius::CONTROL.min(cb_size / 4),
                 border_color,
             );
         }
@@ -104,9 +106,9 @@ impl Widget for CheckboxWidget {
         let text_x = rect.x + cb_size + gap;
         let text_y = rect.y + (rect.height - text_h) / 2;
         let fg = if self.enabled {
-            style.text_primary
+            theme.text
         } else {
-            style.text_disabled
+            theme.text_disabled
         };
         ctx.draw_text_transparent(text_x, text_y, &self.label, fg);
 

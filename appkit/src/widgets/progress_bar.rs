@@ -1,8 +1,9 @@
-use slopos_abi::draw::Color32;
+use slopos_theme_core::{Tone, space};
 
-use crate::constraints::{BoxConstraints, Size};
+use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
+use crate::text::BODY;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 const SWEEP_MS: u64 = 2000;
@@ -27,29 +28,16 @@ pub struct ProgressBarWidget {
     core: WidgetCore,
     value: Option<u32>,
     label: String,
-    color: Option<Color32>,
+    tone: Tone,
 }
 
 impl ProgressBarWidget {
-    pub fn new(value: Option<u32>, label: String, color: Option<Color32>) -> Self {
+    pub fn new(value: Option<u32>, label: String, tone: Tone) -> Self {
         Self {
             core: WidgetCore::new(),
             value: value.map(|v| v.min(100)),
             label,
-            color,
-        }
-    }
-
-    fn fill_color(&self, value: u32) -> Color32 {
-        if let Some(c) = self.color {
-            return c;
-        }
-        if value < 50 {
-            Color32::rgb(46, 170, 78)
-        } else if value < 80 {
-            Color32::rgb(204, 170, 34)
-        } else {
-            Color32::rgb(204, 51, 51)
+            tone,
         }
     }
 }
@@ -63,7 +51,7 @@ impl Widget for ProgressBarWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let height = ctx.style.line_height + 4;
+        let height = BODY.line_height + space::XS;
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {
@@ -75,41 +63,35 @@ impl Widget for ProgressBarWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
 
+        let theme = ctx.theme();
         ctx.fill_rect(
             rect.x,
             rect.y,
             rect.width,
             rect.height,
-            ctx.style.bg_tertiary,
+            theme.surface_sunken,
         );
 
-        match self.value {
-            Some(value) => {
-                let fill_w = rect.width * value as i32 / 100;
-                if fill_w > 0 {
-                    ctx.fill_rect(rect.x, rect.y, fill_w, rect.height, self.fill_color(value));
-                }
-            }
-            None => {
-                let (at, len) = sweep(rect.width, slopos_windowing::get_time_ms());
-                let color = self.color.unwrap_or(ctx.style.bg_accent);
-                ctx.fill_rect(rect.x + at, rect.y, len, rect.height, color);
-            }
-        }
-
-        ctx.draw_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            ctx.style.border_default,
-        );
-
+        let (at, len) = match self.value {
+            Some(value) => (0, rect.width * value as i32 / 100),
+            None => sweep(rect.width, slopos_windowing::get_time_ms()),
+        };
+        let filled = Rect::new(rect.x + at, rect.y, len, rect.height);
         let tw = ctx.text_width(&self.label);
-        let th = ctx.text_height();
         let tx = rect.x + (rect.width - tw) / 2;
-        let ty = rect.y + (rect.height - th) / 2;
-        ctx.draw_text_transparent(tx, ty, &self.label, ctx.style.text_primary);
+        let ty = rect.y + (rect.height - ctx.text_height()) / 2;
+        ctx.draw_text_transparent(tx, ty, &self.label, theme.text);
+        ctx.with_clip(filled, |ctx| {
+            ctx.fill_rect(
+                filled.x,
+                filled.y,
+                filled.width,
+                filled.height,
+                theme.ink(self.tone),
+            );
+            ctx.draw_text_transparent(tx, ty, &self.label, theme.text_on_accent);
+        });
+        ctx.draw_rect(rect.x, rect.y, rect.width, rect.height, theme.border);
     }
 
     fn event(

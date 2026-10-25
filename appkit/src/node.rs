@@ -2,6 +2,8 @@ use slopos_abi::draw::Color32;
 use slopos_gfx::image::ImageSampling;
 use std::sync::Arc;
 
+use slopos_theme_core::{Surface, Tone};
+
 use super::constraints::Orientation;
 use super::constraints::{
     CrossAxisAlignment, EdgeInsets, ImageScale, Length, ScrollDirection, ScrollbarVisibility,
@@ -93,7 +95,8 @@ pub struct RadioOption {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SegmentFill {
-    Solid(Color32),
+    /// The theme's `n`th categorical colour.
+    Series(usize),
     /// Diagonal stripes, as free space is drawn.
     Hatched,
 }
@@ -171,7 +174,7 @@ pub enum Node<M> {
         /// the app animates by answering its tick with [`Action::Repaint`].
         value: Option<u32>,
         label: String,
-        color: Option<Color32>,
+        tone: Tone,
     },
     /// Segments of a whole in proportion, as a disk's partitions; a sliver of
     /// one still shows.
@@ -179,10 +182,10 @@ pub enum Node<M> {
         segments: Vec<BarSegment>,
         highlight: Option<usize>,
     },
-    /// Label with explicit foreground color (bypasses the theme).
+    /// Label in a tone other than the body text's.
     StyledLabel {
         text: String,
-        color: Color32,
+        tone: Tone,
         alignment: TextAlignment,
         wrap: bool,
     },
@@ -270,14 +273,13 @@ pub enum Node<M> {
     },
 
     Background {
-        color: Color32,
+        surface: Surface,
         child: Box<Node<M>>,
     },
     /// A floating surface: filled, rounded, optionally bordered, with a shadow.
     Card {
-        color: Color32,
-        border: Option<Color32>,
-        radius: i32,
+        surface: Surface,
+        border: bool,
         shadow: bool,
         child: Box<Node<M>>,
     },

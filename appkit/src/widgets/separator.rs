@@ -48,7 +48,7 @@ impl Widget for SeparatorWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let color = ctx.style.border_divider;
+        let color = ctx.theme().border;
         ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, color);
     }
 

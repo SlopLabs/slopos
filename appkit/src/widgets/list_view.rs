@@ -1,5 +1,7 @@
 use std::any::Any;
 
+use slopos_theme_core::State;
+
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
@@ -121,6 +123,7 @@ impl Widget for ListViewWidget {
         let first = self.first_visible();
         let last = self.last_visible().min(self.items.len());
 
+        let theme = ctx.theme();
         ctx.with_clip(rect, |ctx| {
             for i in first..last {
                 let y = rect.y + i as i32 * self.item_height - self.scroll_offset;
@@ -129,27 +132,27 @@ impl Widget for ListViewWidget {
                 if self.selected == Some(i) {
                     // Tinted with an accent edge, not a solid bar: the label
                     // stays in the ordinary text colour.
-                    ctx.fill_rect(
+                    ctx.fill_rect_blended(
                         item_rect.x,
                         item_rect.y,
                         item_rect.width,
                         item_rect.height,
-                        ctx.style.bg_selected,
+                        theme.selection,
                     );
                     ctx.fill_rect(
                         item_rect.x,
                         item_rect.y,
-                        2,
+                        super::SELECTED_EDGE,
                         item_rect.height,
-                        ctx.style.text_accent,
+                        theme.accent,
                     );
                 } else if self.hovered == Some(i) {
-                    ctx.fill_rect(
+                    ctx.fill_rect_blended(
                         item_rect.x,
                         item_rect.y,
                         item_rect.width,
                         item_rect.height,
-                        ctx.style.bg_hover,
+                        theme.overlay(State::Hover),
                     );
                 }
 

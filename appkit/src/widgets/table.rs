@@ -10,7 +10,7 @@ use crate::traits::{
     FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
 };
 
-use slopos_abi::draw::Color32;
+use slopos_theme_core::State;
 
 const CELL_PADDING: i32 = 4;
 
@@ -317,7 +317,7 @@ impl Widget for TableWidget {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let style = ctx.style;
+        let theme = ctx.theme();
         let rect = self.layout_rect();
 
         ctx.fill_rect(
@@ -325,7 +325,7 @@ impl Widget for TableWidget {
             rect.y,
             rect.width,
             self.header_height,
-            style.bg_secondary,
+            theme.surface_raised,
         );
 
         let text_y = rect.y + (self.header_height - ctx.text_height()) / 2;
@@ -345,7 +345,7 @@ impl Widget for TableWidget {
                 }
                 None => col.label.clone(),
             };
-            ctx.draw_text_transparent(hx + CELL_PADDING, text_y, &label, style.text_primary);
+            ctx.draw_text_transparent(hx + CELL_PADDING, text_y, &label, theme.text);
             hx += cw;
         }
 
@@ -354,7 +354,7 @@ impl Widget for TableWidget {
             rect.y + self.header_height - 1,
             rect.width,
             1,
-            style.border_divider,
+            theme.border,
         );
 
         let body_rect = Rect::new(
@@ -370,39 +370,24 @@ impl Widget for TableWidget {
                 let y =
                     rect.y + self.header_height + i as i32 * self.row_height - self.scroll_offset;
 
-                let bg = if self.selected == Some(i) {
-                    Color32::new(
-                        style.bg_accent.red(),
-                        style.bg_accent.green(),
-                        style.bg_accent.blue(),
-                        100,
-                    )
+                ctx.fill_rect(rect.x, y, rect.width, self.row_height, theme.surface);
+                let wash = if self.selected == Some(i) {
+                    Some(theme.selection)
                 } else if self.hovered_row == Some(i) {
-                    style.bg_tertiary
-                } else if i % 2 == 0 {
-                    style.bg_primary
+                    Some(theme.overlay(State::Hover))
                 } else {
-                    // Zebra striping: odd rows sit slightly lighter.
-                    Color32::rgb(
-                        style.bg_primary.red().saturating_add(5),
-                        style.bg_primary.green().saturating_add(5),
-                        style.bg_primary.blue().saturating_add(5),
-                    )
+                    None
                 };
-
-                if self.selected == Some(i) {
-                    ctx.fill_rect_blended(rect.x, y, rect.width, self.row_height, bg);
-                } else {
-                    ctx.fill_rect(rect.x, y, rect.width, self.row_height, bg);
+                if let Some(wash) = wash {
+                    ctx.fill_rect_blended(rect.x, y, rect.width, self.row_height, wash);
                 }
-
-                if self.hovered_row == Some(i) && self.selected != Some(i) {
-                    ctx.fill_rect_blended(
+                if self.selected == Some(i) {
+                    ctx.fill_rect(
                         rect.x,
                         y,
-                        rect.width,
+                        super::SELECTED_EDGE,
                         self.row_height,
-                        Color32::new(255, 255, 255, 15),
+                        theme.accent,
                     );
                 }
 
@@ -418,14 +403,14 @@ impl Widget for TableWidget {
                 track.y,
                 track.width,
                 track.height,
-                style.bg_secondary,
+                theme.surface_sunken,
             );
             ctx.fill_rect(
                 thumb.x,
                 thumb.y,
                 thumb.width,
                 thumb.height,
-                style.bg_tertiary,
+                theme.border_strong,
             );
         }
 

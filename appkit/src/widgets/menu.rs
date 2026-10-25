@@ -1,5 +1,7 @@
 use std::any::Any;
 
+use slopos_theme_core::{radius, space};
+
 use crate::constraints::{BoxConstraints, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::node::{MenuItem, MenuItemKind};
@@ -107,7 +109,7 @@ impl Widget for MenuWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let item_h = ctx.style.menu_item_height;
         self.item_height = item_h;
-        let padding_h = ctx.style.spacing_md;
+        let padding_h = space::MD;
 
         let mut max_label_w = 0i32;
         let mut max_shortcut_w = 0i32;
@@ -126,11 +128,7 @@ impl Widget for MenuWidget {
             }
         }
 
-        let shortcut_gap = if max_shortcut_w > 0 {
-            ctx.style.spacing_lg
-        } else {
-            0
-        };
+        let shortcut_gap = if max_shortcut_w > 0 { space::LG } else { 0 };
         let w = (padding_h * 2 + max_label_w + shortcut_gap + max_shortcut_w)
             .max(ctx.style.menu_min_width);
         let h = self.items.len() as i32 * item_h;
@@ -141,8 +139,9 @@ impl Widget for MenuWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let item_h = self.item_height;
-        let padding_h = ctx.style.spacing_md;
-        let radius = ctx.style.corner_radius;
+        let padding_h = space::MD;
+        let radius = radius::CONTROL;
+        let theme = ctx.theme();
 
         super::card::draw_shadow(ctx, rect);
         ctx.fill_rounded_rect(
@@ -151,7 +150,7 @@ impl Widget for MenuWidget {
             rect.width,
             rect.height,
             radius,
-            ctx.style.bg_elevated,
+            theme.surface_raised,
         );
         ctx.draw_rounded_rect(
             rect.x,
@@ -159,7 +158,7 @@ impl Widget for MenuWidget {
             rect.width,
             rect.height,
             radius,
-            ctx.style.border_default,
+            theme.border,
         );
 
         let text_h = ctx.text_height();
@@ -175,20 +174,20 @@ impl Widget for MenuWidget {
                         line_y,
                         rect.width - padding_h * 2,
                         1,
-                        ctx.style.border_divider,
+                        theme.border,
                     );
                 }
                 MenuItemKind::Action | MenuItemKind::Submenu(_) => {
                     if self.hovered_index == Some(i) && item.enabled {
-                        ctx.fill_rect(rect.x + 1, y, rect.width - 2, item_h, ctx.style.bg_accent);
+                        ctx.fill_rect(rect.x + 1, y, rect.width - 2, item_h, theme.accent);
                     }
 
                     let fg = if !item.enabled {
-                        ctx.style.text_disabled
+                        theme.text_disabled
                     } else if self.hovered_index == Some(i) {
-                        ctx.style.text_on_accent
+                        theme.text_on_accent
                     } else {
-                        ctx.style.text_primary
+                        theme.text
                     };
 
                     let label_x = rect.x + padding_h;
@@ -199,9 +198,9 @@ impl Widget for MenuWidget {
                         let sc_w = ctx.text_width(sc);
                         let sc_x = rect.x + rect.width - padding_h - sc_w;
                         let sc_fg = if self.hovered_index == Some(i) && item.enabled {
-                            ctx.style.text_on_accent
+                            theme.text_on_accent
                         } else {
-                            ctx.style.text_secondary
+                            theme.text_secondary
                         };
                         ctx.draw_text_transparent(sc_x, label_y, sc, sc_fg);
                     }

@@ -60,8 +60,8 @@ fn ink_color(ink: Ink) -> slopos_abi::draw::Color32 {
 fn draw_badge(buf: &mut DrawBuffer, badge: Badge, x: i32, y: i32, scale: i32) {
     match badge {
         Badge::None => {}
-        Badge::Warn => draw_dot_badge(buf, x, y, scale, SIGNAL_MINIMIZE),
-        Badge::Error => draw_dot_badge(buf, x, y, scale, SIGNAL_CLOSE),
+        Badge::Warn => draw_dot_badge(buf, x, y, scale, WARNING),
+        Badge::Error => draw_dot_badge(buf, x, y, scale, DANGER),
         Badge::Slash => draw_slash(buf, x, y, scale),
     }
 }
@@ -79,7 +79,7 @@ fn draw_dot_badge(
     let cx = x + glyph_width(scale) - BADGE_MOAT_RADIUS;
     let cy = y + glyph_height(scale) - BADGE_MOAT_RADIUS;
 
-    circle_filled(buf, cx, cy, BADGE_MOAT_RADIUS, PANEL_BG_OPAQUE);
+    circle_filled(buf, cx, cy, BADGE_MOAT_RADIUS, BAR_INK_BG);
     circle_filled(buf, cx, cy, BADGE_RADIUS, color);
     circle_aa(buf, cx, cy, BADGE_RADIUS, color);
 }
@@ -94,7 +94,7 @@ fn draw_slash(buf: &mut DrawBuffer, x: i32, y: i32, scale: i32) {
     let y1 = y + glyph_height(scale);
 
     for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-        line_aa(buf, x0 + dx, y0 + dy, x1 + dx, y1 + dy, PANEL_BG_OPAQUE);
+        line_aa(buf, x0 + dx, y0 + dy, x1 + dx, y1 + dy, BAR_INK_BG);
     }
     line_aa(buf, x0, y0, x1, y1, TEXT_SECONDARY);
 }

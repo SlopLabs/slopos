@@ -22,7 +22,6 @@ pub const PUNCTUATION: Color32 = Color32::rgb(0xb2, 0xb9, 0xc6);
 pub const PROPERTY: Color32 = Color32::rgb(0xd0, 0x72, 0x77);
 pub const EMPHASIS: Color32 = Color32::rgb(0xbf, 0x95, 0x6a);
 pub const LINK: Color32 = Color32::rgb(0x73, 0xad, 0xe9);
-pub const TEXT: Color32 = Color32::rgb(0xac, 0xb2, 0xbe);
 
 pub fn token_color(kind: TokenKind) -> Color32 {
     match kind {
@@ -40,6 +39,6 @@ pub fn token_color(kind: TokenKind) -> Color32 {
         TokenKind::Property => PROPERTY,
         TokenKind::Emphasis => EMPHASIS,
         TokenKind::Link => LINK,
-        TokenKind::Text => TEXT,
+        TokenKind::Text => slopos_appkit::theme::current().text_secondary,
     }
 }

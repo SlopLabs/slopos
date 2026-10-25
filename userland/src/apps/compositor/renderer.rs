@@ -1,4 +1,4 @@
-use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
+use slopos_abi::draw::{Canvas, EncodedPixel};
 use slopos_abi::pixel::PixelFormat;
 use slopos_appkit::text::ui;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
@@ -16,7 +16,6 @@ use super::popover::Popover;
 use super::region::Region;
 use super::surface_cache::ClientSurfaceCache;
 
-const COLOR_WINDOW_PLACEHOLDER: Color32 = Color32::rgb(0x20, 0x20, 0x30);
 const DEFAULT_WALLPAPER: &str = "/usr/share/slopos/wallpapers/default.png";
 const WALLPAPER_SCREEN_DIVISOR: u32 = 3;
 
@@ -423,8 +422,6 @@ impl Renderer {
             [0,0,0,0,0,0,1,1,0,0,0,0],
         ];
 
-        const BORDER: Color32 = Color32::rgb(0x00, 0x00, 0x00);
-
         for row in 0..H {
             let py = my + row as i32;
             let mut col = 0;
@@ -434,7 +431,7 @@ impl Renderer {
                     col += 1;
                     continue;
                 }
-                let color = if pixel == 1 { BORDER } else { COLOR_CURSOR };
+                let color = if pixel == 1 { CURSOR_EDGE } else { CURSOR_FILL };
                 let start = col;
                 while col < W && ARROW[row][col] == pixel {
                     col += 1;
@@ -456,14 +453,14 @@ impl Renderer {
         const BEAM_HEIGHT: i32 = 16;
         const SERIF_WIDTH: i32 = 5;
         let top = my - BEAM_HEIGHT / 2;
-        gfx::fill_rect_clipped(buf, mx, top, 1, BEAM_HEIGHT, COLOR_CURSOR, clip);
+        gfx::fill_rect_clipped(buf, mx, top, 1, BEAM_HEIGHT, CURSOR_FILL, clip);
         gfx::fill_rect_clipped(
             buf,
             mx - SERIF_WIDTH / 2,
             top,
             SERIF_WIDTH,
             1,
-            COLOR_CURSOR,
+            CURSOR_FILL,
             clip,
         );
         gfx::fill_rect_clipped(
@@ -472,7 +469,7 @@ impl Renderer {
             top + BEAM_HEIGHT - 1,
             SERIF_WIDTH,
             1,
-            COLOR_CURSOR,
+            CURSOR_FILL,
             clip,
         );
     }
@@ -631,7 +628,6 @@ impl Renderer {
         bitmap: &[[u8; W]; H],
         clip: &DamageRect,
     ) {
-        const BORDER: Color32 = Color32::rgb(0x00, 0x00, 0x00);
         for row in 0..H {
             let py = oy + row as i32;
             let mut col = 0;
@@ -641,7 +637,7 @@ impl Renderer {
                     col += 1;
                     continue;
                 }
-                let color = if pixel == 1 { BORDER } else { COLOR_CURSOR };
+                let color = if pixel == 1 { CURSOR_EDGE } else { CURSOR_FILL };
                 let start = col;
                 while col < W && bitmap[row][col] == pixel {
                     col += 1;
@@ -668,7 +664,7 @@ impl Renderer {
 
         // Quadratic falloff; alpha[d-1] is the shadow alpha at distance d.
         let spread_sq = (spread * spread) as u32;
-        let mut inv_alpha = [0u32; 12]; // 255 - alpha, for fast black-shadow blend
+        let mut inv_alpha = [0u32; SHADOW_SPREAD as usize];
         for d in 1..=spread {
             let t = (spread - d) as u32;
             let a = (SHADOW_MAX_ALPHA as u32 * t * t) / spread_sq;
@@ -870,7 +866,7 @@ impl Renderer {
                     strip.y0,
                     strip.x1 - strip.x0 + 1,
                     strip.y1 - strip.y0 + 1,
-                    COLOR_WINDOW_PLACEHOLDER,
+                    TITLE_BAR,
                     clip,
                 );
             }
@@ -889,7 +885,7 @@ impl Renderer {
                     strip.y0,
                     strip.x1 - strip.x0 + 1,
                     strip.y1 - strip.y0 + 1,
-                    COLOR_WINDOW_PLACEHOLDER,
+                    TITLE_BAR,
                     clip,
                 );
             }
@@ -914,12 +910,12 @@ impl Renderer {
         let ww = window.effective_width() as i32;
         let wh = window.effective_height() as i32;
 
-        gfx::fill_rect_clipped(buf, wx, wy, ww, wh, COLOR_WINDOW_PLACEHOLDER, clip);
+        gfx::fill_rect_clipped(buf, wx, wy, ww, wh, TITLE_BAR, clip);
 
-        gfx::fill_rect_clipped(buf, wx, wy, ww, 1, TITLE_BAR_UNFOCUSED, clip);
-        gfx::fill_rect_clipped(buf, wx, wy + wh - 1, ww, 1, TITLE_BAR_UNFOCUSED, clip);
-        gfx::fill_rect_clipped(buf, wx, wy, 1, wh, TITLE_BAR_UNFOCUSED, clip);
-        gfx::fill_rect_clipped(buf, wx + ww - 1, wy, 1, wh, TITLE_BAR_UNFOCUSED, clip);
+        gfx::fill_rect_clipped(buf, wx, wy, ww, 1, DIVIDER, clip);
+        gfx::fill_rect_clipped(buf, wx, wy + wh - 1, ww, 1, DIVIDER, clip);
+        gfx::fill_rect_clipped(buf, wx, wy, 1, wh, DIVIDER, clip);
+        gfx::fill_rect_clipped(buf, wx + ww - 1, wy, 1, wh, DIVIDER, clip);
 
         let text = "Window content pending migration";
         let text_x = wx + 10;
@@ -931,8 +927,8 @@ impl Renderer {
             text,
             TEXT_PX,
             ui::Weight::Regular,
-            COLOR_TEXT,
-            COLOR_WINDOW_PLACEHOLDER,
+            TEXT_PRIMARY,
+            TITLE_BAR,
             clip,
         );
     }

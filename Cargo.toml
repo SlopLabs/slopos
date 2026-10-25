@@ -34,6 +34,7 @@ members = [
   "terminal-core",
   "keymap-core",
   "chrome-core",
+  "theme-core",
   "net-core",
   "nvme-core",
   "rtl8168-core",
@@ -131,6 +132,7 @@ slopos-slibc-core = { path = "slibc-core" }
 slopos-terminal-core = { path = "terminal-core" }
 slopos-keymap-core = { path = "keymap-core" }
 slopos-chrome-core = { path = "chrome-core" }
+slopos-theme-core = { path = "theme-core" }
 slopos-net-core = { path = "net-core" }
 slopos-nvme-core = { path = "nvme-core" }
 slopos-rtl8168-core = { path = "rtl8168-core" }

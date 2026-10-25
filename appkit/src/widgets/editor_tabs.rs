@@ -7,6 +7,8 @@
 
 use std::any::Any;
 
+use slopos_theme_core::{ColorRole, State};
+
 use crate::constraints::{BoxConstraints, Size};
 use crate::event::{EventPhase, EventResponse, MessageSink, PointerButton, WidgetEvent};
 use crate::paint::PaintContext;
@@ -139,8 +141,7 @@ impl Widget for EditorTabsWidget {
         } else {
             MAX_TAB_WIDTH * self.tabs.len() as i32
         };
-        let font = ctx.style.font_size as u16;
-        self.compute_widths(width, |t| crate::text::ui::width(t, font));
+        self.compute_widths(width, |t| ctx.text_width(t));
         constraints.constrain(Size::new(width, self.height))
     }
 
@@ -148,8 +149,14 @@ impl Widget for EditorTabsWidget {
         let rect = self.layout_rect();
         // A tab row narrower than its tabs still draws only inside itself.
         ctx.with_clip(rect, |ctx| {
-            let style = ctx.style;
-            ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, style.bg_secondary);
+            let theme = ctx.theme();
+            ctx.fill_rect(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                theme.surface_sunken,
+            );
 
             let text_h = ctx.text_height();
             let mut x = rect.x;
@@ -164,23 +171,18 @@ impl Widget for EditorTabsWidget {
                 let hovered = pointer_tab == Some(index);
 
                 if active {
-                    ctx.fill_rect(x, rect.y, width, rect.height, style.code_bg);
-                    ctx.fill_rect(x, rect.y, width, 2, style.text_accent);
+                    ctx.fill_rect(x, rect.y, width, rect.height, theme.surface);
+                    ctx.fill_rect(x, rect.y, width, 2, theme.accent);
                 } else if hovered {
-                    ctx.fill_rect(x, rect.y, width, rect.height, style.bg_hover);
+                    let hover = theme.state(ColorRole::SurfaceSunken, State::Hover);
+                    ctx.fill_rect(x, rect.y, width, rect.height, hover);
                 }
-                ctx.fill_rect(
-                    x + width - 1,
-                    rect.y + 6,
-                    1,
-                    rect.height - 12,
-                    style.border_divider,
-                );
+                ctx.fill_rect(x + width - 1, rect.y + 6, 1, rect.height - 12, theme.border);
 
                 let label_color = if active {
-                    style.text_primary
+                    theme.text
                 } else {
-                    style.text_secondary
+                    theme.text_secondary
                 };
                 let label_budget = width - TAB_PAD_H * 2 - CLOSE_GAP - CLOSE_SIZE;
                 let label = elide(&tab.title, label_budget, |t| ctx.text_width(t));
@@ -191,14 +193,7 @@ impl Widget for EditorTabsWidget {
                 let icon_y = rect.y + (rect.height - CLOSE_SIZE) / 2;
                 // One slot: the dot gives way to the close affordance on hover.
                 if tab.modified && !hovered {
-                    draw_icon(
-                        ctx,
-                        IconKind::Dot,
-                        icon_x,
-                        icon_y,
-                        CLOSE_SIZE,
-                        style.text_accent,
-                    );
+                    draw_icon(ctx, IconKind::Dot, icon_x, icon_y, CLOSE_SIZE, theme.accent);
                 } else if hovered || active {
                     draw_icon(
                         ctx,
@@ -206,7 +201,7 @@ impl Widget for EditorTabsWidget {
                         icon_x,
                         icon_y,
                         CLOSE_SIZE,
-                        style.text_secondary,
+                        theme.text_secondary,
                     );
                 }
 
@@ -219,7 +214,7 @@ impl Widget for EditorTabsWidget {
                     rect.y,
                     rect.x + rect.width - x,
                     rect.height,
-                    style.bg_secondary,
+                    theme.surface_sunken,
                 );
             }
             ctx.fill_rect(
@@ -227,7 +222,7 @@ impl Widget for EditorTabsWidget {
                 rect.y + rect.height - 1,
                 rect.width,
                 1,
-                style.border_divider,
+                theme.border,
             );
         });
     }

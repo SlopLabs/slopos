@@ -16,6 +16,7 @@
 use std::any::Any;
 
 use slopos_abi::draw::Color32;
+use slopos_theme_core::{ColorRole, State, with_alpha};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
@@ -318,7 +319,7 @@ impl CodeViewWidget {
     }
 
     fn paint_line_text(&self, ctx: &mut PaintContext, line: &CodeLine, y: i32, clip: Rect) {
-        let default_fg = ctx.style.code_fg;
+        let default_fg = ctx.theme().text_secondary;
         let mut display = 0usize;
         let right_edge = clip.x + clip.width;
 
@@ -424,13 +425,8 @@ impl CodeViewWidget {
             return;
         };
         let alpha = if self.scroll_dragging { 0x8c } else { 0x4c };
-        ctx.fill_rect_blended(
-            thumb.x,
-            thumb.y,
-            thumb.width,
-            thumb.height,
-            Color32::new(0xc8, 0xcc, 0xd4, alpha),
-        );
+        let ink = with_alpha(ctx.theme().text_secondary, alpha);
+        ctx.fill_rect_blended(thumb.x, thumb.y, thumb.width, thumb.height, ink);
     }
 }
 
@@ -457,9 +453,11 @@ impl Widget for CodeViewWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let style = ctx.style;
-        ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, style.code_bg);
+        let theme = ctx.theme();
+        ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, theme.surface);
 
+        let current_line = theme.state(ColorRole::Surface, State::Hover);
+        let found = with_alpha(theme.warning, 0x4d);
         let gutter = self.gutter();
         let content = Rect::new(
             rect.x + gutter,
@@ -477,7 +475,7 @@ impl Widget for CodeViewWidget {
             let is_cursor_line = cursor_line == Some(line.number);
 
             if is_cursor_line && self.selection.is_none() {
-                ctx.fill_rect(rect.x, y, rect.width, self.line_h, style.line_highlight);
+                ctx.fill_rect(rect.x, y, rect.width, self.line_h, current_line);
             }
 
             if let Some((start, end)) = self.selection_on_line(line.number, &line.text) {
@@ -487,7 +485,7 @@ impl Widget for CodeViewWidget {
                     + (end.saturating_sub(self.first_col) as i32) * self.cell_w;
                 if end > self.first_col && x1 > x0 {
                     ctx.with_clip(content, |ctx| {
-                        ctx.fill_rect_blended(x0, y, x1 - x0, self.line_h, style.selection_bg);
+                        ctx.fill_rect_blended(x0, y, x1 - x0, self.line_h, theme.selection);
                     });
                 }
             }
@@ -501,7 +499,7 @@ impl Widget for CodeViewWidget {
                     self.text_origin_x() + (de.saturating_sub(self.first_col) as i32) * self.cell_w;
                 if de > self.first_col && x1 > x0 {
                     ctx.with_clip(content, |ctx| {
-                        ctx.fill_rect_blended(x0, y, x1 - x0, self.line_h, style.match_highlight);
+                        ctx.fill_rect_blended(x0, y, x1 - x0, self.line_h, found);
                     });
                 }
             }
@@ -511,9 +509,9 @@ impl Widget for CodeViewWidget {
                 let width = number.chars().count() as i32 * self.cell_w;
                 let nx = rect.x + gutter - GUTTER_PAD - width;
                 let color = if is_cursor_line {
-                    style.gutter_fg_active
+                    theme.text
                 } else {
-                    style.gutter_fg
+                    theme.text_disabled
                 };
                 ctx.draw_mono_text(nx, y, &number, color, Color32::TRANSPARENT);
             }
@@ -537,11 +535,11 @@ impl Widget for CodeViewWidget {
                         // claiming the keyboard: hollow rather than solid.
                         if self.focused {
                             ctx.with_clip(content, |ctx| {
-                                ctx.fill_rect(x, y, CARET_WIDTH, self.line_h, style.cursor_color);
+                                ctx.fill_rect(x, y, CARET_WIDTH, self.line_h, theme.accent);
                             });
                         } else {
                             ctx.with_clip(content, |ctx| {
-                                ctx.draw_rect(x, y, self.cell_w, self.line_h, style.gutter_fg);
+                                ctx.draw_rect(x, y, self.cell_w, self.line_h, theme.text_disabled);
                             });
                         }
                     }

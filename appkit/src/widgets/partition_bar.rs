@@ -1,9 +1,10 @@
-use slopos_abi::draw::Color32;
+use slopos_theme_core::{inset, space};
 
 use crate::constraints::{BoxConstraints, Size};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::node::{BarSegment, SegmentFill};
 use crate::paint::PaintContext;
+use crate::text::BODY;
 use crate::traits::{MeasureCtx, Widget, WidgetCore};
 
 /// The narrowest a segment is drawn, so a partition a thousandth of the disk
@@ -48,16 +49,6 @@ pub fn segment_widths(sizes: &[u64], width: i32) -> Vec<i32> {
     widths
 }
 
-/// The readable text colour over `fill`.
-fn ink(fill: Color32, ctx: &PaintContext) -> Color32 {
-    let luma = 299 * fill.red() as u32 + 587 * fill.green() as u32 + 114 * fill.blue() as u32;
-    if luma > 128 * 1000 {
-        ctx.style.text_on_accent
-    } else {
-        ctx.style.text_primary
-    }
-}
-
 /// A disk drawn as proportional segments, one of which may be highlighted.
 pub struct PartitionBarWidget {
     core: WidgetCore,
@@ -75,8 +66,9 @@ impl PartitionBarWidget {
     }
 
     fn hatch(ctx: &mut PaintContext, x: i32, y: i32, w: i32, h: i32) {
-        ctx.fill_rect(x, y, w, h, ctx.style.bg_secondary);
-        let stripe = ctx.style.bg_tertiary;
+        let theme = ctx.theme();
+        ctx.fill_rect(x, y, w, h, theme.surface_sunken);
+        let stripe = theme.border;
         for row in 0..h {
             let mut col = (HATCH_PERIOD - row % HATCH_PERIOD) % HATCH_PERIOD;
             while col < w {
@@ -96,7 +88,7 @@ impl Widget for PartitionBarWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let height = ctx.text_height() + ctx.style.field_padding_v * 2;
+        let height = BODY.line_height + inset::CONTROL.vertical();
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {
@@ -110,14 +102,15 @@ impl Widget for PartitionBarWidget {
         let sizes: Vec<u64> = self.segments.iter().map(|s| s.size).collect();
         let widths = segment_widths(&sizes, rect.width);
         let text_h = ctx.text_height();
-        let pad = ctx.style.spacing_xs;
+        let pad = space::XS;
+        let theme = ctx.theme();
 
         ctx.fill_rect(
             rect.x,
             rect.y,
             rect.width,
             rect.height,
-            ctx.style.bg_tertiary,
+            theme.surface_sunken,
         );
         let mut x = rect.x;
         for (i, (segment, &w)) in self.segments.iter().zip(&widths).enumerate() {
@@ -125,17 +118,17 @@ impl Widget for PartitionBarWidget {
                 continue;
             }
             let fg = match segment.fill {
-                SegmentFill::Solid(color) => {
-                    ctx.fill_rect(x, rect.y, w, rect.height, color);
-                    ink(color, ctx)
+                SegmentFill::Series(n) => {
+                    ctx.fill_rect(x, rect.y, w, rect.height, theme.series(n));
+                    theme.text_on_accent
                 }
                 SegmentFill::Hatched => {
                     Self::hatch(ctx, x, rect.y, w, rect.height);
-                    ctx.style.text_secondary
+                    theme.text_secondary
                 }
             };
             if i > 0 {
-                ctx.fill_rect(x, rect.y, 1, rect.height, ctx.style.bg_primary);
+                ctx.fill_rect(x, rect.y, 1, rect.height, theme.surface);
             }
             let tw = ctx.text_width(&segment.label);
             if tw <= w - pad * 2 {
@@ -145,13 +138,7 @@ impl Widget for PartitionBarWidget {
             x += w;
         }
 
-        ctx.draw_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            ctx.style.border_default,
-        );
+        ctx.draw_rect(rect.x, rect.y, rect.width, rect.height, theme.border);
         let mut x = rect.x;
         for (i, &w) in widths.iter().enumerate() {
             if self.highlight == Some(i) {
@@ -161,7 +148,7 @@ impl Widget for PartitionBarWidget {
                         rect.y + k,
                         w - k * 2,
                         rect.height - k * 2,
-                        ctx.style.text_primary,
+                        theme.text,
                     );
                 }
             }

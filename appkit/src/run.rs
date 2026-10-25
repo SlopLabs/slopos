@@ -27,7 +27,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
         win.set_app_id(id);
     }
     super::clipboard::install(handle.clone());
-    let style = StyleSheet::dark();
+    let style = StyleSheet::with_theme(slopos_theme_core::current());
     let mut focus = FocusManager::new();
     let mut overlays = OverlayManager::new();
 
@@ -251,7 +251,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
             let pointer = win.pointer();
             if let Some(mut fb) = win.renderer_mut().frame() {
                 let fmt = fb.pixel_format();
-                fb.clear_canvas(fmt.encode(style.bg_primary));
+                fb.clear_canvas(fmt.encode(style.theme.surface));
                 let mut ctx = PaintContext::new(&mut fb, &style);
                 ctx.focus_visible = focus.is_focus_visible();
                 ctx.pointer = pointer;

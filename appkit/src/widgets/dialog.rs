@@ -1,4 +1,4 @@
-use slopos_abi::draw::Color32;
+use slopos_theme_core::{TextRole, radius, space};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
@@ -113,8 +113,8 @@ impl DialogWidget {
     }
 }
 
-const CARD_PADDING: i32 = 16;
-const ACTION_SPACING: i32 = 8;
+const CARD_PADDING: i32 = slopos_theme_core::inset::CARD.top;
+const ACTION_SPACING: i32 = space::SM;
 const CARD_MAX_WIDTH: i32 = 300;
 
 impl Widget for DialogWidget {
@@ -126,7 +126,7 @@ impl Widget for DialogWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.title_height = crate::text::ui::line_height(ctx.style.font_size_heading as u16);
+        self.title_height = crate::text::ui::line_height(TextRole::Title.style().size);
         let inner_w = self.inner_width(constraints.max_width);
 
         let content_constraints = BoxConstraints {
@@ -172,46 +172,32 @@ impl Widget for DialogWidget {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let style = ctx.style;
+        let theme = ctx.theme();
         let rect = self.layout_rect();
 
-        ctx.fill_rect_blended(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            Color32::new(0, 0, 0, 128),
-        );
+        ctx.fill_rect_blended(rect.x, rect.y, rect.width, rect.height, theme.scrim);
 
         ctx.fill_rounded_rect(
             self.card_rect.x,
             self.card_rect.y,
             self.card_rect.width,
             self.card_rect.height,
-            style.corner_radius,
-            style.bg_secondary,
+            radius::CARD,
+            theme.surface_raised,
         );
         ctx.draw_rounded_rect(
             self.card_rect.x,
             self.card_rect.y,
             self.card_rect.width,
             self.card_rect.height,
-            style.corner_radius,
-            style.border_default,
+            radius::CARD,
+            theme.border,
         );
 
-        let heading = style.font_size_heading;
-        let text_h = crate::text::ui::line_height(heading as u16);
+        let text_h = crate::text::ui::line_height(TextRole::Title.style().size);
         let title_x = self.card_rect.x + CARD_PADDING;
         let title_y = self.card_rect.y + (CARD_PADDING + self.title_height - text_h) / 2;
-        ctx.draw_text_styled(
-            title_x,
-            title_y,
-            &self.title,
-            heading,
-            crate::text::ui::Weight::Semibold,
-            style.text_primary,
-        );
+        ctx.draw_text_in(title_x, title_y, &self.title, TextRole::Title, theme.text);
 
         let selected = self.focused_action;
         ctx.with_clip(self.card_rect, |ctx| {
@@ -225,8 +211,8 @@ impl Widget for DialogWidget {
                         r.y - 2,
                         r.width + 4,
                         r.height + 4,
-                        style.corner_radius,
-                        style.focus_ring_color,
+                        radius::CONTROL,
+                        theme.focus,
                     );
                 }
             }

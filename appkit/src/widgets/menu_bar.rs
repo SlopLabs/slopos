@@ -8,6 +8,8 @@
 
 use std::any::Any;
 
+use slopos_theme_core::{ColorRole, State, space};
+
 use crate::constraints::{BoxConstraints, Size};
 use crate::event::{EventPhase, EventResponse, MessageSink, PointerButton, WidgetEvent};
 use crate::paint::PaintContext;
@@ -87,7 +89,7 @@ impl Widget for MenuBarWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.height = ctx.style.menu_item_height + ctx.style.spacing_xs;
+        self.height = ctx.style.menu_item_height + space::XS;
         self.widths = self
             .titles
             .iter()
@@ -104,7 +106,7 @@ impl Widget for MenuBarWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let style = ctx.style;
+        let theme = ctx.theme();
         let text_h = ctx.text_height();
         let mut x = rect.x;
 
@@ -118,7 +120,7 @@ impl Widget for MenuBarWidget {
                     width - 4,
                     rect.height - 4,
                     4,
-                    style.bg_selected,
+                    theme.state(ColorRole::Chrome, State::Pressed),
                 );
             } else if self.hovered == Some(index) {
                 ctx.fill_rounded_rect(
@@ -127,13 +129,13 @@ impl Widget for MenuBarWidget {
                     width - 4,
                     rect.height - 4,
                     4,
-                    style.bg_hover,
+                    theme.state(ColorRole::Chrome, State::Hover),
                 );
             }
             let color = if is_open {
-                style.text_primary
+                theme.text
             } else {
-                style.text_secondary
+                theme.text_secondary
             };
             ctx.draw_text_transparent(
                 x + ITEM_PAD_H,

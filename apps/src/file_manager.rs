@@ -6,30 +6,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::string::String;
 
+use slopos_appkit::theme::space;
 use slopos_appkit::{
     Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Key, Length, Modifiers, NamedKey,
-    Node, TableColumn, TableColumnWidth, TextAlignment,
+    Node, Surface, TableColumn, TableColumnWidth, TextAlignment, Tone,
 };
 
-mod theme {
-    use slopos_abi::draw::Color32;
-
-    pub const FM_COLOR_BG: Color32 = Color32::rgb(0x1E, 0x1E, 0x20);
-    pub const FM_DIR_COLOR: Color32 = Color32::rgb(0x60, 0x9C, 0xF0);
-    pub const FM_ERROR_COLOR: Color32 = Color32::rgb(0xE0, 0x50, 0x50);
-    pub const FM_FILE_COLOR: Color32 = Color32::rgb(0xD0, 0xD0, 0xD0);
-    pub const FM_ITEM_HEIGHT: i32 = 22;
-    pub const FM_NAV_BG: Color32 = Color32::rgb(0x25, 0x25, 0x28);
-    pub const FM_SIDEBAR_BG: Color32 = Color32::rgb(0x1A, 0x1A, 0x1C);
-    pub const FM_SIDEBAR_HEADING: Color32 = Color32::rgb(0x70, 0x70, 0x74);
-    pub const FM_SIDEBAR_ITEM_HEIGHT: i32 = 22;
-    pub const FM_SIDEBAR_TEXT: Color32 = Color32::rgb(0xB0, 0xB0, 0xB0);
-    pub const FM_SIDEBAR_WIDTH: i32 = 140;
-    pub const FM_SIZE_COLOR: Color32 = Color32::rgb(0x80, 0x80, 0x84);
-    pub const FM_STATUS_BG: Color32 = Color32::rgb(0x22, 0x22, 0x24);
-    pub const FM_STATUS_TEXT: Color32 = Color32::rgb(0x90, 0x90, 0x94);
-    pub const TEXT_PRIMARY: Color32 = Color32::rgb(0xE0, 0xE0, 0xE0);
-}
+const ITEM_HEIGHT: i32 = 22;
+const SIDEBAR_ITEM_HEIGHT: i32 = 22;
+const SIDEBAR_WIDTH: i32 = 140;
 
 #[derive(Clone, Debug)]
 pub enum FileMsg {
@@ -226,10 +211,10 @@ impl FileManagerApp {
         let active_idx = self.active_bookmark_index();
 
         let heading = Node::Padding {
-            padding: EdgeInsets::new(6, 8, 2, 8),
+            padding: EdgeInsets::new(space::SM, space::SM, space::XS, space::SM),
             child: Box::new(Node::StyledLabel {
                 text: String::from("Places"),
-                color: theme::FM_SIDEBAR_HEADING,
+                tone: Tone::Secondary,
                 alignment: TextAlignment::Start,
                 wrap: false,
             }),
@@ -240,27 +225,27 @@ impl FileManagerApp {
             .enumerate()
             .map(|(i, bm)| {
                 let is_active = active_idx == Some(i);
-                let text_color = if is_active {
-                    theme::TEXT_PRIMARY
+                let tone = if is_active {
+                    Tone::Normal
                 } else {
-                    theme::FM_SIDEBAR_TEXT
+                    Tone::Secondary
                 };
 
                 Node::Padding {
-                    padding: EdgeInsets::new(0, 10, 0, 4),
+                    padding: EdgeInsets::new(0, space::SM, 0, space::XS),
                     child: Box::new(Node::HStack {
-                        spacing: 6,
+                        spacing: space::SM,
                         align: CrossAxisAlignment::Center,
                         children: vec![
                             Node::StyledLabel {
                                 text: String::from(bm.icon),
-                                color: theme::FM_DIR_COLOR,
+                                tone: Tone::Secondary,
                                 alignment: TextAlignment::Start,
                                 wrap: false,
                             },
                             Node::StyledLabel {
                                 text: String::from(bm.label),
-                                color: text_color,
+                                tone,
                                 alignment: TextAlignment::Start,
                                 wrap: false,
                             },
@@ -271,17 +256,17 @@ impl FileManagerApp {
             .collect();
 
         let bookmark_list = Node::ListView {
-            item_height: theme::FM_SIDEBAR_ITEM_HEIGHT,
+            item_height: SIDEBAR_ITEM_HEIGHT,
             selected: active_idx,
             on_select: Some(FileMsg::Bookmark),
             items,
         };
 
         Node::SizedBox {
-            width: Some(Length::Px(theme::FM_SIDEBAR_WIDTH)),
+            width: Some(Length::Px(SIDEBAR_WIDTH)),
             height: None,
             child: Box::new(Node::Background {
-                color: theme::FM_SIDEBAR_BG,
+                surface: Surface::Sunken,
                 child: Box::new(Node::VStack {
                     spacing: 0,
                     align: CrossAxisAlignment::Stretch,
@@ -301,11 +286,11 @@ impl FileManagerApp {
         };
 
         Node::Background {
-            color: theme::FM_NAV_BG,
+            surface: Surface::Chrome,
             child: Box::new(Node::Padding {
-                padding: EdgeInsets::new(4, 4, 4, 4),
+                padding: EdgeInsets::all(space::XS),
                 child: Box::new(Node::HStack {
-                    spacing: 2,
+                    spacing: space::XS,
                     align: CrossAxisAlignment::Center,
                     children: vec![
                         Node::Button {
@@ -327,11 +312,11 @@ impl FileManagerApp {
                             enabled: true,
                         },
                         Node::Spacer {
-                            size: Length::Px(8),
+                            size: Length::Px(space::SM),
                         },
                         Node::StyledLabel {
                             text: display_path,
-                            color: theme::TEXT_PRIMARY,
+                            tone: Tone::Normal,
                             alignment: TextAlignment::Start,
                             wrap: false,
                         },
@@ -342,10 +327,10 @@ impl FileManagerApp {
     }
 
     fn build_file_row(&self, entry: &FileEntry) -> Vec<Node<FileMsg>> {
-        let (name_text, name_color) = if entry.is_directory {
-            (format!("[D] {}", entry.name), theme::FM_DIR_COLOR)
+        let name_text = if entry.is_directory {
+            format!("[D] {}", entry.name)
         } else {
-            (format!("    {}", entry.name), theme::FM_FILE_COLOR)
+            format!("    {}", entry.name)
         };
 
         let size_text = if entry.is_directory {
@@ -357,13 +342,13 @@ impl FileManagerApp {
         vec![
             Node::StyledLabel {
                 text: name_text,
-                color: name_color,
+                tone: Tone::Normal,
                 alignment: TextAlignment::Start,
                 wrap: false,
             },
             Node::StyledLabel {
                 text: size_text,
-                color: theme::FM_SIZE_COLOR,
+                tone: Tone::Secondary,
                 alignment: TextAlignment::End,
                 wrap: false,
             },
@@ -373,24 +358,24 @@ impl FileManagerApp {
     fn build_content(&self) -> Node<FileMsg> {
         let content_node = match self.load_state {
             LoadState::Error => Node::Background {
-                color: theme::FM_COLOR_BG,
+                surface: Surface::Base,
                 child: Box::new(Node::Padding {
-                    padding: EdgeInsets::all(16),
+                    padding: EdgeInsets::all(space::LG),
                     child: Box::new(Node::StyledLabel {
                         text: self.error_msg.clone(),
-                        color: theme::FM_ERROR_COLOR,
+                        tone: Tone::Danger,
                         alignment: TextAlignment::Center,
                         wrap: false,
                     }),
                 }),
             },
             LoadState::Empty => Node::Background {
-                color: theme::FM_COLOR_BG,
+                surface: Surface::Base,
                 child: Box::new(Node::Padding {
-                    padding: EdgeInsets::all(16),
+                    padding: EdgeInsets::all(space::LG),
                     child: Box::new(Node::StyledLabel {
                         text: String::from("Empty directory"),
-                        color: theme::FM_SIZE_COLOR,
+                        tone: Tone::Secondary,
                         alignment: TextAlignment::Center,
                         wrap: false,
                     }),
@@ -416,7 +401,7 @@ impl FileManagerApp {
                         },
                     ],
                     rows,
-                    row_height: theme::FM_ITEM_HEIGHT,
+                    row_height: ITEM_HEIGHT,
                     selected: self.selected,
                     on_select: Some(FileMsg::FileSelect),
                     on_header_click: None,
@@ -463,12 +448,12 @@ impl FileManagerApp {
         };
 
         Node::Background {
-            color: theme::FM_STATUS_BG,
+            surface: Surface::Chrome,
             child: Box::new(Node::Padding {
-                padding: EdgeInsets::new(3, 6, 3, 6),
+                padding: EdgeInsets::symmetric(space::SM, space::XS),
                 child: Box::new(Node::StyledLabel {
                     text,
-                    color: theme::FM_STATUS_TEXT,
+                    tone: Tone::Secondary,
                     alignment: TextAlignment::Start,
                     wrap: false,
                 }),
@@ -506,6 +491,7 @@ impl App for FileManagerApp {
                             self.build_navbar(),
                             Node::Divider,
                             self.build_content(),
+                            Node::Divider,
                             self.build_status_bar(),
                         ],
                     }),

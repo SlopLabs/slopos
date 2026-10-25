@@ -1,7 +1,7 @@
-use slopos_abi::draw::Color32;
+use slopos_appkit::theme::{inset, space};
 use slopos_appkit::{
-    BarSegment, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, LineEditInput, Node,
-    RadioOption, ScrollDirection, ScrollbarVisibility, SegmentFill, TextAlignment,
+    BarSegment, ButtonStyle, CrossAxisAlignment, Length, LineEditInput, Node, RadioOption,
+    ScrollDirection, ScrollbarVisibility, SegmentFill, TextAlignment, Tone,
 };
 use slopos_boot_core::install::Role;
 use slopos_installer_core::wizard::{Kind, Page, Row, StepState, words};
@@ -10,17 +10,11 @@ use slopos_installer_core::{Contents, DEFAULT_REMOTE, Layout, Piece, Tag, human,
 use super::{Field, InstallerApp, Msg, typed_size};
 
 const MIB: u64 = 1 << 20;
-const ACCENT: Color32 = Color32::rgb(0x74, 0xad, 0xe8);
-const GREEN: Color32 = Color32::rgb(0x98, 0xc3, 0x79);
-const YELLOW: Color32 = Color32::rgb(0xe5, 0xc0, 0x7b);
-const RED: Color32 = Color32::rgb(0xe0, 0x6c, 0x75);
-const MUTED: Color32 = Color32::rgb(0xa9, 0xaf, 0xbc);
-const FAINT: Color32 = Color32::rgb(0x6b, 0x71, 0x7d);
-const OTHER_SYSTEMS: [Color32; 3] = [
-    Color32::rgb(0xc6, 0x78, 0xdd),
-    Color32::rgb(0x56, 0xb6, 0xc2),
-    Color32::rgb(0xd1, 0x9a, 0x66),
-];
+const ROOT: usize = 0;
+const ESP: usize = 1;
+const BOOT: usize = 2;
+const CRASH: usize = 3;
+const OTHER_SYSTEMS: [usize; 3] = [4, 5, 6];
 
 fn label(text: impl Into<String>) -> Node<Msg> {
     Node::Label {
@@ -31,19 +25,19 @@ fn label(text: impl Into<String>) -> Node<Msg> {
     }
 }
 
-fn wrapped(text: impl Into<String>, color: Color32) -> Node<Msg> {
+fn wrapped(text: impl Into<String>, tone: Tone) -> Node<Msg> {
     Node::StyledLabel {
         text: text.into(),
-        color,
+        tone,
         alignment: TextAlignment::Start,
         wrap: true,
     }
 }
 
-fn colored(text: impl Into<String>, color: Color32) -> Node<Msg> {
+fn toned(text: impl Into<String>, tone: Tone) -> Node<Msg> {
     Node::StyledLabel {
         text: text.into(),
-        color,
+        tone,
         alignment: TextAlignment::Start,
         wrap: false,
     }
@@ -60,7 +54,7 @@ fn column(spacing: i32, children: Vec<Node<Msg>>) -> Node<Msg> {
 fn row(children: Vec<Node<Msg>>) -> Node<Msg> {
     Node::HStack {
         children,
-        spacing: 8,
+        spacing: space::SM,
         align: CrossAxisAlignment::Center,
     }
 }
@@ -82,10 +76,10 @@ fn wide(width: i32, child: Node<Msg>) -> Node<Msg> {
 
 /// A subject and what it says of it, the subjects in one column, each on the
 /// first line of its text however that wraps.
-fn pair(subject: &str, color: Color32, text: impl Into<String>) -> Node<Msg> {
+fn pair(subject: &str, tone: Tone, text: impl Into<String>) -> Node<Msg> {
     Node::HStack {
-        children: vec![wide(100, colored(subject, color)), expand(label(text))],
-        spacing: 8,
+        children: vec![wide(100, toned(subject, tone)), expand(label(text))],
+        spacing: space::SM,
         align: CrossAxisAlignment::Baseline,
     }
 }
@@ -141,14 +135,14 @@ fn bar(layout: &Layout, highlight_root: bool, holding: &str) -> Node<Msg> {
         .map(|(i, segment)| {
             let fill = match &segment.piece {
                 Piece::Free { .. } => SegmentFill::Hatched,
-                Piece::Partition { role, .. } => SegmentFill::Solid(match role {
-                    Some(Role::Esp) => GREEN,
-                    Some(Role::Boot) => YELLOW,
+                Piece::Partition { role, .. } => SegmentFill::Series(match role {
+                    Some(Role::Esp) => ESP,
+                    Some(Role::Boot) => BOOT,
                     Some(Role::Root) => {
                         highlight = highlight_root.then_some(i);
-                        ACCENT
+                        ROOT
                     }
-                    Some(Role::Crash) => RED,
+                    Some(Role::Crash) => CRASH,
                     None => {
                         others += 1;
                         OTHER_SYSTEMS[(others - 1) % OTHER_SYSTEMS.len()]
@@ -208,23 +202,23 @@ fn strip(page: Page) -> Node<Msg> {
     let mut children = Vec::new();
     for (i, step) in ["Disk", "How", "Review", "Install"].into_iter().enumerate() {
         if i > 0 {
-            children.push(colored("·", FAINT));
+            children.push(toned("·", Tone::Disabled));
         }
-        let color = match at {
-            Some(at) if i == at => ACCENT,
-            Some(at) if i < at => MUTED,
-            _ => FAINT,
+        let tone = match at {
+            Some(at) if i == at => Tone::Accent,
+            Some(at) if i < at => Tone::Secondary,
+            _ => Tone::Disabled,
         };
-        children.push(colored(step, color));
+        children.push(toned(step, tone));
     }
     row(children)
 }
 
 fn header(app: &InstallerApp) -> Node<Msg> {
     Node::Padding {
-        padding: EdgeInsets::symmetric(24, 12),
+        padding: inset::SECTION,
         child: Box::new(row(vec![
-            expand(colored("Install SlopOS", MUTED)),
+            expand(toned("Install SlopOS", Tone::Secondary)),
             strip(app.page),
         ])),
     }
@@ -264,10 +258,14 @@ fn footer(app: &InstallerApp) -> Node<Msg> {
         Page::Install => None,
     };
     let status = match (&app.restart_refused, app.page) {
-        (Some(why), _) => wrapped(format!("The restart was refused: {why}"), RED),
-        (None, _) if app.asking => wrapped("Allow the install in the dialog to go on", MUTED),
-        (None, Page::Welcome) if w.waiting() => wrapped("Starting the installer…", MUTED),
-        (None, Page::Disk | Page::Error) if w.waiting() => wrapped("Reading the disks…", MUTED),
+        (Some(why), _) => wrapped(format!("The restart was refused: {why}"), Tone::Danger),
+        (None, _) if app.asking => {
+            wrapped("Allow the install in the dialog to go on", Tone::Secondary)
+        }
+        (None, Page::Welcome) if w.waiting() => wrapped("Starting the installer…", Tone::Secondary),
+        (None, Page::Disk | Page::Error) if w.waiting() => {
+            wrapped("Reading the disks…", Tone::Secondary)
+        }
         _ => Node::Empty,
     };
     let style = match app.page {
@@ -281,13 +279,13 @@ fn footer(app: &InstallerApp) -> Node<Msg> {
         children.push(button(w.primary_label(), Msg::Next, style, enabled));
     }
     Node::Padding {
-        padding: EdgeInsets::symmetric(24, 12),
+        padding: inset::SECTION,
         child: Box::new(row(children)),
     }
 }
 
 fn note(app: &InstallerApp) -> Option<Node<Msg>> {
-    app.wizard.note().map(|note| wrapped(note, YELLOW))
+    app.wizard.note().map(|note| wrapped(note, Tone::Warning))
 }
 
 fn welcome(app: &InstallerApp) -> Vec<Node<Msg>> {
@@ -310,7 +308,7 @@ fn welcome(app: &InstallerApp) -> Vec<Node<Msg>> {
         page.push(Node::ProgressBar {
             value: None,
             label: String::new(),
-            color: Some(ACCENT),
+            tone: Tone::Accent,
         });
     }
     page
@@ -320,9 +318,13 @@ fn disk(app: &InstallerApp) -> Vec<Node<Msg>> {
     let w = &app.wizard;
     let rows = w.disks();
     let mut page = vec![label("Which disk should SlopOS be installed on?")];
-    page.extend(w.medium_notes().into_iter().map(|n| wrapped(n, YELLOW)));
+    page.extend(
+        w.medium_notes()
+            .into_iter()
+            .map(|n| wrapped(n, Tone::Warning)),
+    );
     if rows.is_empty() {
-        page.push(wrapped("No disk was found.", YELLOW));
+        page.push(wrapped("No disk was found.", Tone::Warning));
     } else {
         page.push(choices(
             &rows,
@@ -336,7 +338,7 @@ fn disk(app: &InstallerApp) -> Vec<Node<Msg>> {
         ButtonStyle::Secondary,
         !w.waiting(),
     )]));
-    page.extend(w.issue().map(|issue| wrapped(words(issue), RED)));
+    page.extend(w.issue().map(|issue| wrapped(words(issue), Tone::Danger)));
     page.extend(note(app));
     page
 }
@@ -358,16 +360,16 @@ fn how(app: &InstallerApp) -> Vec<Node<Msg>> {
     ));
     let regions = w.region_rows();
     if !regions.is_empty() {
-        page.push(colored("Free region", MUTED));
+        page.push(toned("Free region", Tone::Secondary));
         page.push(choices(&regions, place(&regions, w.region()), Msg::Region));
     }
     if answers.kind == Kind::Reuse {
         let roots = w.root_rows();
-        page.push(colored("Partition for the root", MUTED));
+        page.push(toned("Partition for the root", Tone::Secondary));
         page.push(choices(&roots, place(&roots, answers.root), Msg::Root));
     }
     if let Some(listing) = w.system().and_then(|s| s.disk(&answers.disk)?.listing()) {
-        page.push(colored("Now", MUTED));
+        page.push(toned("Now", Tone::Secondary));
         let holding = match &listing.contents {
             Contents::Blank => "blank".into(),
             other => other.holding(),
@@ -375,13 +377,13 @@ fn how(app: &InstallerApp) -> Vec<Node<Msg>> {
         page.push(bar(&listing.layout, false, &holding));
     }
     if let Some(Ok((_, proposal))) = w.last_answer().map(|p| &p.answer) {
-        page.push(colored("After", MUTED));
+        page.push(toned("After", Tone::Secondary));
         page.push(bar(&proposal.after, true, ""));
     }
     if let (Some(span), Some(size)) = (w.root_span(), w.root_size()) {
         page.push(pair(
             "Root size",
-            MUTED,
+            Tone::Secondary,
             format!("{} – {}", human(span.min), human(span.max)),
         ));
         page.push(row(vec![
@@ -397,7 +399,7 @@ fn how(app: &InstallerApp) -> Vec<Node<Msg>> {
             wide(120, line_edit(app, Field::Size, "Size")),
         ]));
     }
-    page.push(colored("Options", MUTED));
+    page.push(toned("Options", Tone::Secondary));
     if w.system().is_some_and(|s| s.medium.source) {
         page.push(label("Where /src/slopos fetches from and pushes to"));
         page.push(line_edit(app, Field::Remote, DEFAULT_REMOTE));
@@ -408,16 +410,16 @@ fn how(app: &InstallerApp) -> Vec<Node<Msg>> {
         on_toggle: Some(Msg::First),
         enabled: true,
     });
-    page.extend(w.issue().map(|issue| wrapped(words(issue), RED)));
+    page.extend(w.issue().map(|issue| wrapped(words(issue), Tone::Danger)));
     page
 }
 
-fn tag_color(tag: Tag) -> Color32 {
+fn tag_tone(tag: Tag) -> Tone {
     match tag {
-        Tag::Erase | Tag::Format | Tag::Reuse => RED,
-        Tag::New => GREEN,
-        Tag::Share => YELLOW,
-        Tag::Keep => MUTED,
+        Tag::Erase | Tag::Format | Tag::Reuse => Tone::Danger,
+        Tag::New => Tone::Success,
+        Tag::Share => Tone::Warning,
+        Tag::Keep => Tone::Secondary,
     }
 }
 
@@ -429,25 +431,25 @@ fn review(app: &InstallerApp) -> Vec<Node<Msg>> {
     let summary = w
         .summary_lines()
         .into_iter()
-        .map(|(subject, text)| pair(subject, MUTED, text));
+        .map(|(subject, text)| pair(subject, Tone::Secondary, text));
     let actions = proposal
         .action_lines()
         .into_iter()
-        .map(|(tag, text)| pair(tag.word(), tag_color(tag), text));
+        .map(|(tag, text)| pair(tag.word(), tag_tone(tag), text));
     let mut page = vec![
         label("Review the install"),
-        column(4, summary.collect()),
-        colored("What happens to each partition", MUTED),
-        column(4, actions.collect()),
+        column(space::XS, summary.collect()),
+        toned("What happens to each partition", Tone::Secondary),
+        column(space::XS, actions.collect()),
     ];
-    page.extend(proposal.left_out().map(|line| wrapped(line, YELLOW)));
+    page.extend(proposal.left_out().map(|line| wrapped(line, Tone::Warning)));
     page.push(Node::Checkbox {
         checked: w.confirmed(),
         label: w.confirmation(),
         on_toggle: Some(Msg::Confirm),
         enabled: true,
     });
-    page.extend(w.issue().map(|issue| wrapped(words(issue), RED)));
+    page.extend(w.issue().map(|issue| wrapped(words(issue), Tone::Danger)));
     page
 }
 
@@ -460,16 +462,16 @@ fn steps(app: &InstallerApp) -> Node<Msg> {
         .steps()
         .into_iter()
         .map(|(title, state)| {
-            let (said, color) = match state {
-                StepState::Pending => ("", FAINT),
-                StepState::Running => ("now", ACCENT),
-                StepState::Done => ("done", GREEN),
-                StepState::Failed => ("failed", RED),
+            let (said, tone) = match state {
+                StepState::Pending => ("", Tone::Disabled),
+                StepState::Running => ("now", Tone::Accent),
+                StepState::Done => ("done", Tone::Success),
+                StepState::Failed => ("failed", Tone::Danger),
             };
-            pair(said, color, title)
+            pair(said, tone, title)
         })
         .collect();
-    column(4, rows)
+    column(space::XS, rows)
 }
 
 fn log(app: &InstallerApp) -> Node<Msg> {
@@ -504,17 +506,20 @@ fn install(app: &InstallerApp) -> Vec<Node<Msg>> {
     let mut page: Vec<Node<Msg>> = w.outcome().into_iter().map(label).collect();
     page.push(if app.show_log { log(app) } else { steps(app) });
     let progress = w.progress();
-    page.push(colored(progress.detail.clone().unwrap_or_default(), MUTED));
+    page.push(toned(
+        progress.detail.clone().unwrap_or_default(),
+        Tone::Secondary,
+    ));
     page.push(match progress.bytes {
         Some((done, total)) => Node::ProgressBar {
             value: Some((done.saturating_mul(100) / total.max(1)) as u32),
             label: format!("{} of {} copied", human(done), human(total)),
-            color: Some(ACCENT),
+            tone: Tone::Accent,
         },
         None => Node::ProgressBar {
             value: None,
             label: String::new(),
-            color: Some(ACCENT),
+            tone: Tone::Accent,
         },
     });
     page.push(Node::Checkbox {
@@ -536,7 +541,7 @@ fn error(app: &InstallerApp) -> Vec<Node<Msg>> {
     let mut page = Vec::new();
     let mut lines = outcome.into_iter();
     page.extend(lines.next().map(label));
-    page.extend(lines.map(|line| wrapped(line, RED)));
+    page.extend(lines.map(|line| wrapped(line, Tone::Danger)));
     page.extend(note(app));
     page.push(log(app));
     page
@@ -553,8 +558,8 @@ pub(super) fn window(app: &InstallerApp) -> Node<Msg> {
         Page::Error => (error(app), false),
     };
     let body = Node::Padding {
-        padding: EdgeInsets::symmetric(24, 16),
-        child: Box::new(column(12, body)),
+        padding: inset::PAGE,
+        child: Box::new(column(space::MD, body)),
     };
     let body = if scrolls {
         Node::ScrollView {

@@ -1,12 +1,9 @@
 use std::format;
 use std::string::String;
 
-use slopos_abi::draw::Color32;
 use slopos_abi::task::{TaskPriority, TaskStatus};
 
 use crate::syscall::UserTaskEntry;
-
-use super::{COLOR_DIM, COLOR_STATE_BLOCK, COLOR_STATE_READY, COLOR_STATE_RUN};
 
 pub(crate) fn task_name_bytes(task: &UserTaskEntry) -> &[u8] {
     let end = task
@@ -39,15 +36,15 @@ fn task_name_from_slice(bytes: &[u8]) -> String {
 
 /// No wildcard arm on purpose: a change to the ABI's [`TaskStatus`]
 /// discriminants must be a build error here.
-pub(crate) fn task_state(state: u8) -> (&'static str, Color32) {
+pub(crate) fn task_state(state: u8) -> &'static str {
     match TaskStatus::from_u8(state) {
-        TaskStatus::Running => ("Run", COLOR_STATE_RUN),
-        TaskStatus::Blocked => ("Block", COLOR_STATE_BLOCK),
-        TaskStatus::Ready => ("Ready", COLOR_STATE_READY),
-        TaskStatus::Stopped => ("Stop", COLOR_STATE_BLOCK),
-        TaskStatus::Zombie => ("Zombie", COLOR_DIM),
-        TaskStatus::Terminated => ("Dead", COLOR_DIM),
-        TaskStatus::Invalid => ("--", COLOR_DIM),
+        TaskStatus::Running => "Run",
+        TaskStatus::Blocked => "Block",
+        TaskStatus::Ready => "Ready",
+        TaskStatus::Stopped => "Stop",
+        TaskStatus::Zombie => "Zombie",
+        TaskStatus::Terminated => "Dead",
+        TaskStatus::Invalid => "--",
     }
 }
 

@@ -1,8 +1,9 @@
-use slopos_abi::draw::Color32;
+use slopos_theme_core::Tone;
 
 use crate::constraints::{BoxConstraints, Size, TextAlignment};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
+use crate::text::BODY;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 pub struct LabelWidget {
@@ -11,7 +12,7 @@ pub struct LabelWidget {
     alignment: TextAlignment,
     wrap: bool,
     max_lines: Option<u32>,
-    color: Option<Color32>,
+    tone: Tone,
     baseline: i32,
 }
 
@@ -23,13 +24,13 @@ impl LabelWidget {
             alignment,
             wrap,
             max_lines,
-            color: None,
+            tone: Tone::Normal,
             baseline: 0,
         }
     }
 
-    pub fn with_color(mut self, color: Color32) -> Self {
-        self.color = Some(color);
+    pub fn with_tone(mut self, tone: Tone) -> Self {
+        self.tone = tone;
         self
     }
 
@@ -81,7 +82,7 @@ impl Widget for LabelWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let line_height = ctx.style.line_height;
+        let line_height = BODY.line_height;
         self.baseline = ctx.baseline_in(line_height);
 
         if !self.wrap {
@@ -141,14 +142,14 @@ impl Widget for LabelWidget {
         }
     }
 
-    /// Each line in a line box of `style.line_height` from the top, its text
+    /// Each line in a line box of [`BODY`]'s height from the top, its text
     /// on that box's baseline: the row a [`StyledLabelWidget`] of one line
     /// puts its text on, so the two line up side by side.
     ///
     /// [`StyledLabelWidget`]: super::styled_label::StyledLabelWidget
     fn paint(&self, ctx: &mut PaintContext) {
-        let fg = self.color.unwrap_or(ctx.style.text_primary);
-        let line_height = ctx.style.line_height;
+        let fg = ctx.theme().ink(self.tone);
+        let line_height = BODY.line_height;
         let rect = self.layout_rect();
         let first = rect.y + ctx.baseline_in(line_height);
         let draw = |ctx: &mut PaintContext, i: usize, line: &str| {

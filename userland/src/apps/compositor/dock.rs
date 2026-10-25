@@ -1,10 +1,10 @@
 //! Launcher shelf (dock) — rendering, layout, magnification, and hit-testing
 //! for the bottom launcher bar.
 
-use slopos_abi::draw::Color32;
 use slopos_appkit::text::ui;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_image::{DecodeOptions, Image};
+use slopos_theme_core::{TextRole, TextStyle};
 
 use crate::app_entry::AppEntry;
 use crate::gfx::{self, DamageRect, DrawBuffer};
@@ -18,10 +18,9 @@ const MAX_ENTRIES: usize = 16;
 const ICON_PIXELS_MAX: usize = 256 * 256;
 const ICON_BYTES_MAX: u64 = 1 << 20;
 
-/// Font size for the hover label tooltip.
-const LABEL_FONT_SIZE: u16 = 11;
-
-const ICON_LABEL_FONT_SIZE: u16 = 20;
+const LABEL: TextStyle = TextRole::Label.style();
+/// The letter on an app's tile when it has no icon.
+const LETTER: TextStyle = TextRole::Title.style();
 
 pub struct ShelfEntry {
     pub name: String,
@@ -315,12 +314,6 @@ impl LauncherShelf {
         } = geo;
         self.hovered_index = hovered;
 
-        let shelf_bg = Color32::new(
-            SHELF_BG.red(),
-            SHELF_BG.green(),
-            SHELF_BG.blue(),
-            SHELF_BG_ALPHA,
-        );
         slopos_gfx::canvas_ops::rounded_rect_filled(
             buf,
             pill_x,
@@ -328,24 +321,18 @@ impl LauncherShelf {
             pill_w,
             pill_h,
             SHELF_PILL_RADIUS,
-            shelf_bg,
+            DOCK_BG,
         );
 
         if has_separator {
             let sep_centered_y = icons_bottom - (SHELF_ICON_SIZE + SHELF_SEPARATOR_HEIGHT) / 2;
-            let sep_color = Color32::new(
-                SHELF_SEPARATOR.red(),
-                SHELF_SEPARATOR.green(),
-                SHELF_SEPARATOR.blue(),
-                SHELF_SEPARATOR_ALPHA,
-            );
             gfx::fill_rect_clipped(
                 buf,
                 separator_x,
                 sep_centered_y,
                 SHELF_SEPARATOR_WIDTH,
                 SHELF_SEPARATOR_HEIGHT,
-                sep_color,
+                DIVIDER,
                 &clip_rect,
             );
         }
@@ -377,13 +364,7 @@ impl LauncherShelf {
             if entry.running {
                 let dot_cx = l.center_x;
                 let dot_cy = pill_y + pill_h + SHELF_DOT_MARGIN_Y + SHELF_DOT_DIAMETER / 2;
-                let dot_color = Color32::new(
-                    SHELF_DOT_ACTIVE.red(),
-                    SHELF_DOT_ACTIVE.green(),
-                    SHELF_DOT_ACTIVE.blue(),
-                    SHELF_DOT_ACTIVE_ALPHA,
-                );
-                gfx::draw_circle_filled(buf, dot_cx, dot_cy, SHELF_DOT_DIAMETER / 2, dot_color);
+                gfx::draw_circle_filled(buf, dot_cx, dot_cy, SHELF_DOT_DIAMETER / 2, TEXT_PRIMARY);
             }
         }
 
@@ -393,21 +374,8 @@ impl LauncherShelf {
             let l = &layouts[hi];
             let name = entry.name.as_str();
             if !name.is_empty() {
-                let label_bg = Color32::new(
-                    SHELF_LABEL_BG.red(),
-                    SHELF_LABEL_BG.green(),
-                    SHELF_LABEL_BG.blue(),
-                    SHELF_LABEL_BG_ALPHA,
-                );
-                let text_color = Color32::new(
-                    TEXT_PRIMARY.red(),
-                    TEXT_PRIMARY.green(),
-                    TEXT_PRIMARY.blue(),
-                    TEXT_PRIMARY_ALPHA,
-                );
-
-                let lbl_w = ui::width(name, LABEL_FONT_SIZE) + 2 * SHELF_LABEL_PADDING_X;
-                let lbl_h = ui::line_height(LABEL_FONT_SIZE) + 2 * SHELF_LABEL_PADDING_Y;
+                let lbl_w = ui::width(name, LABEL.size) + 2 * SHELF_LABEL_PADDING_X;
+                let lbl_h = ui::line_height(LABEL.size) + 2 * SHELF_LABEL_PADDING_Y;
                 let lbl_x = l.center_x - lbl_w / 2;
                 let lbl_y = pill_y - SHELF_LABEL_GAP_Y - lbl_h;
                 label = Some(bounds(lbl_x, lbl_y, lbl_w, lbl_h));
@@ -419,17 +387,17 @@ impl LauncherShelf {
                     lbl_w,
                     lbl_h,
                     SHELF_LABEL_RADIUS,
-                    label_bg,
+                    TOOLTIP_BG,
                 );
                 ui::draw_clipped(
                     buf,
                     lbl_x + SHELF_LABEL_PADDING_X,
                     lbl_y + SHELF_LABEL_PADDING_Y,
                     name,
-                    LABEL_FONT_SIZE,
-                    ui::Weight::Regular,
-                    text_color,
-                    label_bg,
+                    LABEL.size,
+                    LABEL.weight,
+                    TEXT_PRIMARY,
+                    TOOLTIP_BG,
                     &clip_rect,
                 );
             }
@@ -529,7 +497,6 @@ fn draw_letter_icon(
     icon_y: i32,
     clip: &DamageRect,
 ) {
-    let c = argb(ICON_DEFAULT, ICON_DEFAULT_ALPHA);
     slopos_gfx::canvas_ops::rounded_rect_filled(
         buf,
         icon_x,
@@ -537,7 +504,7 @@ fn draw_letter_icon(
         l.size,
         l.size,
         SHELF_ICON_CORNER_RADIUS,
-        Color32(c),
+        ACCENT,
     );
     let letter = entry
         .name
@@ -546,23 +513,17 @@ fn draw_letter_icon(
         .map_or('?', |c| c.to_ascii_uppercase());
     let mut utf8 = [0u8; 4];
     let s = letter.encode_utf8(&mut utf8);
-    let text_color = Color32::new(
-        TEXT_PRIMARY.red(),
-        TEXT_PRIMARY.green(),
-        TEXT_PRIMARY.blue(),
-        TEXT_PRIMARY_ALPHA,
-    );
-    let tx = icon_x + (l.size - ui::width(s, ICON_LABEL_FONT_SIZE)) / 2;
-    let ty = ui::centred_top(icon_y, l.size, ICON_LABEL_FONT_SIZE);
+    let tx = icon_x + (l.size - ui::width_weighted(s, LETTER.size, LETTER.weight)) / 2;
+    let ty = ui::centred_top(icon_y, l.size, LETTER.size);
     ui::draw_clipped(
         buf,
         tx,
         ty,
         s,
-        ICON_LABEL_FONT_SIZE,
-        ui::Weight::Regular,
-        text_color,
-        Color32(c),
+        LETTER.size,
+        LETTER.weight,
+        TEXT_ON_ACCENT,
+        ACCENT,
         clip,
     );
 }

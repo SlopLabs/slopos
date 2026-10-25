@@ -260,6 +260,7 @@ impl Widget for ScrollViewWidget {
 
         let sb_width = ctx.style.scrollbar_width;
         let thumb_min = ctx.style.scrollbar_thumb_min;
+        let theme = ctx.theme();
 
         if self.needs_vertical_scrollbar() {
             let (track, thumb) = self.vertical_scrollbar_rects(sb_width, thumb_min);
@@ -269,13 +270,13 @@ impl Widget for ScrollViewWidget {
                 track.y,
                 track.width,
                 track.height,
-                ctx.style.bg_secondary,
+                theme.surface_sunken,
             );
 
             let thumb_color = if self.thumb_hovered || self.thumb_dragging {
-                ctx.style.border_default
+                theme.border_strong
             } else {
-                ctx.style.bg_tertiary
+                theme.border
             };
             ctx.fill_rect(thumb.x, thumb.y, thumb.width, thumb.height, thumb_color);
         }
@@ -285,7 +286,7 @@ impl Widget for ScrollViewWidget {
             let track_y = viewport.y + viewport.height - sb_width;
             let track_w = viewport.width;
 
-            ctx.fill_rect(track_x, track_y, track_w, sb_width, ctx.style.bg_secondary);
+            ctx.fill_rect(track_x, track_y, track_w, sb_width, theme.surface_sunken);
 
             let max_off = self.max_offset_x();
             let thumb_size = if max_off > 0 && self.content_size.width > 0 {
@@ -308,7 +309,7 @@ impl Widget for ScrollViewWidget {
                 track_y,
                 thumb_size,
                 sb_width,
-                ctx.style.bg_tertiary,
+                theme.border,
             );
         }
 

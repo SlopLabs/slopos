@@ -10,11 +10,14 @@
 
 use std::any::Any;
 
+use slopos_theme_core::{inset, radius};
+
 use crate::constraints::{BoxConstraints, Size};
 use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
 };
 use crate::paint::PaintContext;
+use crate::text::BODY;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 use super::icon::{IconKind, draw_icon};
@@ -52,7 +55,6 @@ pub struct LineEditWidget {
     invalid: bool,
     tab_stop: bool,
     on_input: Option<InputCallback>,
-    font_size: i32,
     padding_h: i32,
 }
 
@@ -79,7 +81,6 @@ impl LineEditWidget {
             invalid,
             tab_stop: false,
             on_input,
-            font_size: 14,
             padding_h: 8,
         }
     }
@@ -100,12 +101,12 @@ impl LineEditWidget {
     }
 
     fn icon_size(&self) -> i32 {
-        (self.font_size + 2).clamp(10, 20)
+        (BODY.size as i32 + 2).clamp(10, 20)
     }
 
     fn prefix_width(&self, chars: usize) -> i32 {
         let prefix: String = self.text.chars().take(chars).collect();
-        crate::text::ui::width(&prefix, self.font_size.max(1) as u16)
+        crate::text::ui::width(&prefix, BODY.size)
     }
 
     /// Width of the content area, inside the padding, the icon and the suffix.
@@ -114,7 +115,7 @@ impl LineEditWidget {
         let suffix = if self.suffix.is_empty() {
             0
         } else {
-            crate::text::ui::width(&self.suffix, self.font_size.max(1) as u16) + self.padding_h
+            crate::text::ui::width(&self.suffix, BODY.size) + self.padding_h
         };
         (rect.x + rect.width - self.text_x() - self.padding_h - suffix).max(0)
     }
@@ -143,13 +144,7 @@ impl LineEditWidget {
         // renderer accumulates fractional advances and rounds once at the end,
         // so a per-character sum over-counts by up to a pixel a glyph and the
         // caret would drift further right of the click the longer the text got.
-        let size = self.font_size.max(1) as u16;
-        let byte = crate::text::ui::prefix_fitting(
-            &self.text,
-            size,
-            local,
-            crate::text::ui::Weight::Regular,
-        );
+        let byte = crate::text::ui::prefix_fitting(&self.text, BODY.size, local, BODY.weight);
         let col = self.text[..byte].chars().count();
         let before = self.prefix_width(col);
         let after = self.prefix_width(col + 1);
@@ -180,9 +175,8 @@ impl Widget for LineEditWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.font_size = ctx.style.font_size;
         self.padding_h = ctx.style.field_padding_h;
-        let height = ctx.text_height() + ctx.style.field_padding_v * 2;
+        let height = BODY.line_height + inset::CONTROL.vertical();
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {
@@ -193,8 +187,8 @@ impl Widget for LineEditWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let style = ctx.style;
-        let radius = style.corner_radius;
+        let theme = ctx.theme();
+        let radius = radius::CONTROL;
 
         ctx.fill_rounded_rect(
             rect.x,
@@ -202,14 +196,14 @@ impl Widget for LineEditWidget {
             rect.width,
             rect.height,
             radius,
-            style.bg_primary,
+            theme.surface_sunken,
         );
         let border = if self.invalid {
-            style.bg_destructive
+            theme.danger
         } else if self.focused {
-            style.border_focused
+            theme.focus
         } else {
-            style.border_default
+            theme.border_strong
         };
         ctx.draw_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius, border);
 
@@ -221,7 +215,7 @@ impl Widget for LineEditWidget {
                 rect.x + self.padding_h,
                 rect.y + (rect.height - size) / 2,
                 size,
-                style.text_secondary,
+                theme.text_secondary,
             );
         }
 
@@ -234,13 +228,13 @@ impl Widget for LineEditWidget {
 
         ctx.with_clip(content, |ctx| {
             if self.text.is_empty() {
-                ctx.draw_text_transparent(text_x, text_y, &self.placeholder, style.text_disabled);
+                ctx.draw_text_transparent(text_x, text_y, &self.placeholder, theme.text_secondary);
             } else {
-                ctx.draw_text_transparent(text_x, text_y, &self.text, style.text_primary);
+                ctx.draw_text_transparent(text_x, text_y, &self.text, theme.text);
             }
             if self.focused {
                 let caret_x = text_x + self.prefix_width(self.caret);
-                ctx.fill_rect(caret_x, text_y, 2, text_h, style.cursor_color);
+                ctx.fill_rect(caret_x, text_y, 2, text_h, theme.accent);
             }
         });
 
@@ -250,7 +244,7 @@ impl Widget for LineEditWidget {
                 rect.x + rect.width - self.padding_h - w,
                 text_y,
                 &self.suffix,
-                style.text_secondary,
+                theme.text_secondary,
             );
         }
     }

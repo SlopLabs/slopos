@@ -1,10 +1,13 @@
 use std::any::Any;
 
+use slopos_theme_core::{inset, radius};
+
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
 };
 use crate::paint::PaintContext;
+use crate::text::BODY;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 pub struct TextFieldWidget {
@@ -19,9 +22,8 @@ pub struct TextFieldWidget {
     scroll_offset: i32,
     focused: bool,
     blink_on: bool,
-    /// Font size and padding from the last measure. Pixel-to-character mapping
-    /// must use what paint used, or a click lands on the wrong character.
-    font_size: i32,
+    /// Padding from the last measure. Pixel-to-character mapping must use
+    /// what paint used, or a click lands on the wrong character.
     padding_h: i32,
 }
 
@@ -45,7 +47,6 @@ impl TextFieldWidget {
             scroll_offset: 0,
             focused: false,
             blink_on: false,
-            font_size: 14,
             padding_h: 8,
         }
     }
@@ -89,7 +90,7 @@ impl TextFieldWidget {
     /// Pixel x-offset of the cursor at char index `idx` relative to text start.
     fn char_x_offset(&self, idx: usize) -> i32 {
         let prefix: String = self.text.chars().take(idx).collect();
-        crate::text::ui::width(&prefix, self.font_size.max(1) as u16)
+        crate::text::ui::width(&prefix, BODY.size)
     }
 
     fn ensure_cursor_visible(&mut self) {
@@ -194,7 +195,7 @@ impl TextFieldWidget {
 
     fn content_rect(&self, style: &crate::style::StyleSheet) -> Rect {
         let ph = style.field_padding_h;
-        let pv = style.field_padding_v;
+        let pv = inset::CONTROL.top;
         Rect::new(
             self.rect().x + ph,
             self.rect().y + pv,
@@ -213,9 +214,7 @@ impl Widget for TextFieldWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.font_size = ctx.style.font_size;
         self.padding_h = ctx.style.field_padding_h;
-        let text_h = ctx.text_height();
         let natural = ctx.text_width(&self.text) + ctx.style.field_padding_h * 2;
         let width = if constraints.is_width_bounded() {
             constraints.max_width
@@ -223,7 +222,7 @@ impl Widget for TextFieldWidget {
             natural
         }
         .max(ctx.style.field_min_width);
-        let height = text_h + ctx.style.field_padding_v * 2;
+        let height = BODY.line_height + inset::CONTROL.vertical();
         constraints.constrain(Size::new(width, height))
     }
 
@@ -233,9 +232,9 @@ impl Widget for TextFieldWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let style = ctx.style;
-        let radius = style.corner_radius;
+        let theme = ctx.theme();
+        let radius = radius::CONTROL;
         let ph = style.field_padding_h;
-        let pv = style.field_padding_v;
 
         ctx.fill_rounded_rect(
             self.rect().x,
@@ -243,13 +242,13 @@ impl Widget for TextFieldWidget {
             self.rect().width,
             self.rect().height,
             radius,
-            style.bg_secondary,
+            theme.surface_sunken,
         );
 
         let border_color = if self.focused {
-            style.border_focused
+            theme.focus
         } else {
-            style.border_default
+            theme.border_strong
         };
         ctx.draw_rounded_rect(
             self.rect().x,
@@ -261,7 +260,7 @@ impl Widget for TextFieldWidget {
         );
 
         let content = self.content_rect(style);
-        let text_y = self.rect().y + pv;
+        let text_y = self.rect().y + (self.rect().height - ctx.text_height()) / 2;
         let text_x = self.rect().x + ph - self.scroll_offset;
 
         ctx.with_clip(content, |ctx| {
@@ -269,30 +268,18 @@ impl Widget for TextFieldWidget {
                 let sel_x = text_x + self.char_x_offset(start);
                 let sel_end_x = text_x + self.char_x_offset(end);
                 let sel_w = sel_end_x - sel_x;
-                let sel_color = slopos_abi::draw::Color32::new(0, 122, 255, 100);
-                ctx.fill_rect_blended(sel_x, text_y, sel_w, ctx.text_height(), sel_color);
+                ctx.fill_rect_blended(sel_x, text_y, sel_w, ctx.text_height(), theme.selection);
             }
 
             if self.text.is_empty() && !self.focused {
-                ctx.draw_text_transparent(
-                    text_x,
-                    text_y,
-                    &self.placeholder,
-                    ctx.style.text_secondary,
-                );
+                ctx.draw_text_transparent(text_x, text_y, &self.placeholder, theme.text_secondary);
             } else {
-                ctx.draw_text_transparent(text_x, text_y, &self.text, ctx.style.text_primary);
+                ctx.draw_text_transparent(text_x, text_y, &self.text, theme.text);
             }
 
             if self.focused && self.blink_on {
                 let cursor_x = text_x + self.char_x_offset(self.cursor);
-                ctx.fill_rect(
-                    cursor_x,
-                    text_y,
-                    2,
-                    ctx.text_height(),
-                    ctx.style.text_primary,
-                );
+                ctx.fill_rect(cursor_x, text_y, 2, ctx.text_height(), theme.accent);
             }
         });
 

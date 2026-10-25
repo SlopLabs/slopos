@@ -267,15 +267,9 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                 erased,
             ))
         }
-        Node::ProgressBar {
-            value,
-            label,
-            color,
-        } => Box::new(widgets::progress_bar::ProgressBarWidget::new(
-            *value,
-            label.clone(),
-            *color,
-        )),
+        Node::ProgressBar { value, label, tone } => Box::new(
+            widgets::progress_bar::ProgressBarWidget::new(*value, label.clone(), *tone),
+        ),
         Node::PartitionBar {
             segments,
             highlight,
@@ -285,21 +279,20 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
         )),
         Node::StyledLabel {
             text,
-            color,
+            tone,
             alignment,
             wrap: true,
         } => Box::new(
-            widgets::label::LabelWidget::new(text.clone(), *alignment, true, None)
-                .with_color(*color),
+            widgets::label::LabelWidget::new(text.clone(), *alignment, true, None).with_tone(*tone),
         ),
         Node::StyledLabel {
             text,
-            color,
+            tone,
             alignment,
             wrap: false,
         } => Box::new(widgets::styled_label::StyledLabelWidget::new(
             text.clone(),
-            *color,
+            *tone,
             *alignment,
         )),
         Node::VStack {
@@ -342,22 +335,20 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             let child_widget = build_widget_tree(child);
             Box::new(super::layout::ExpandWidget::new(*weight, child_widget))
         }
-        Node::Background { color, child } => {
+        Node::Background { surface, child } => {
             let child_widget = build_widget_tree(child);
-            Box::new(super::layout::BackgroundWidget::new(*color, child_widget))
+            Box::new(super::layout::BackgroundWidget::new(*surface, child_widget))
         }
         Node::Card {
-            color,
+            surface,
             border,
-            radius,
             shadow,
             child,
         } => {
             let child_widget = build_widget_tree(child);
             Box::new(widgets::card::CardWidget::new(
-                *color,
+                *surface,
                 *border,
-                *radius,
                 *shadow,
                 child_widget,
             ))

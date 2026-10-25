@@ -98,6 +98,7 @@ dependencies = [
  "slopos-gfx",
  "slopos-keymap-core",
  "slopos-protocol",
+ "slopos-theme-core",
  "slopos-windowing",
 ]
 
@@ -574,6 +575,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-theme-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+]
+
+[[package]]
 name = "slopos-tls-core"
 version = "0.1.0"
 dependencies = [
@@ -618,6 +626,7 @@ dependencies = [
  "slopos-slibc",
  "slopos-slibc-core",
  "slopos-terminal-core",
+ "slopos-theme-core",
  "slopos-tls-core",
  "slopos-tree-core",
  "slopos-vt",

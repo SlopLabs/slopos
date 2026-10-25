@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use slopos_abi::draw::Color32;
+use slopos_theme_core::space;
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
@@ -112,7 +112,7 @@ impl Widget for RadioGroupWidget {
         let mut width = 0;
         for (i, option) in self.options.iter().enumerate() {
             if i > 0 {
-                y += style.spacing_sm;
+                y += space::SM;
             }
             let mut height = self.label_height;
             let mut text_w = ctx.text_width(&option.label);
@@ -130,6 +130,7 @@ impl Widget for RadioGroupWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let style = ctx.style;
+        let theme = ctx.theme();
         let size = style.checkbox_size;
         let text_h = ctx.text_height();
         let cursor = self.selected.or_else(|| self.step(None, true));
@@ -138,9 +139,9 @@ impl Widget for RadioGroupWidget {
             let row_y = rect.y + top;
             let dot = Rect::new(rect.x, row_y + (self.label_height - size) / 2, size, size);
             let (ring, fill) = if option.enabled {
-                (style.border_default, style.bg_accent)
+                (theme.border_strong, theme.accent)
             } else {
-                (style.text_disabled, style.text_disabled)
+                (theme.text_disabled, theme.text_disabled)
             };
             if self.selected == Some(i) {
                 ctx.fill_rounded_rect(dot.x, dot.y, size, size, size / 2, fill);
@@ -152,7 +153,7 @@ impl Widget for RadioGroupWidget {
                     inner,
                     inner,
                     inner / 2,
-                    Color32::WHITE,
+                    theme.text_on_accent,
                 );
             } else {
                 ctx.draw_rounded_rect(dot.x, dot.y, size, size, size / 2, ring);
@@ -160,9 +161,9 @@ impl Widget for RadioGroupWidget {
 
             let text_x = rect.x + size + style.checkbox_gap;
             let label_fg = if option.enabled {
-                style.text_primary
+                theme.text
             } else {
-                style.text_disabled
+                theme.text_disabled
             };
             let label_y = row_y + (self.label_height - text_h) / 2;
             ctx.draw_text_transparent(text_x, label_y, &option.label, label_fg);
@@ -171,7 +172,7 @@ impl Widget for RadioGroupWidget {
                     text_x,
                     row_y + self.label_height,
                     &option.detail,
-                    style.text_secondary,
+                    theme.text_secondary,
                 );
             }
 

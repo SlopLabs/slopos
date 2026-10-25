@@ -7,7 +7,6 @@
 //! Hover repaints nothing here — [`super::hover::HoverRegistry`] already emits
 //! both the old and the new rect when a hover flips.
 
-use slopos_abi::draw::Color32;
 use slopos_appkit::text::ui;
 use slopos_chrome_core::status::{StatusLayout, hit_status_item, layout_status_items};
 
@@ -18,13 +17,6 @@ use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::theme::*;
 
 const ICON_RADIUS: i32 = SYSTEM_BAR_ICON_SIZE / 2;
-
-const BAR_BG: Color32 = Color32::new(
-    PANEL_BG.red(),
-    PANEL_BG.green(),
-    PANEL_BG.blue(),
-    PANEL_BG_ALPHA,
-);
 
 /// Damage rects [`SystemBar::take_damage`] can emit in one frame: one per
 /// item, or the single spanning rect a layout change produces.
@@ -100,7 +92,7 @@ impl SystemBar {
         let clip = clip.unwrap_or(full_clip);
 
         gfx::fill_rect_blended_clipped(buf, 0, 0, sw, bar_h, BAR_BG, &clip);
-        gfx::fill_rect_clipped(buf, 0, bar_h, sw, 1, PANEL_BORDER, &clip);
+        gfx::fill_rect_clipped(buf, 0, bar_h, sw, 1, DIVIDER, &clip);
 
         let layout = self.layout(screen_width, cursor_x, cursor_y);
 
@@ -108,7 +100,7 @@ impl SystemBar {
 
         let icon_cx = cursor + ICON_RADIUS;
         let icon_cy = bar_h / 2;
-        gfx::draw_circle_filled(buf, icon_cx, icon_cy, ICON_RADIUS, SIGNAL_EXPAND);
+        gfx::draw_circle_filled(buf, icon_cx, icon_cy, ICON_RADIUS, ACCENT);
         cursor += SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP;
 
         let name = if active_app_name.is_empty() {
@@ -129,7 +121,7 @@ impl SystemBar {
                 ui::Weight::Regular,
                 name_budget,
                 TEXT_PRIMARY,
-                PANEL_BG_OPAQUE,
+                BAR_INK_BG,
                 &clip,
             );
         }

@@ -463,6 +463,7 @@ slopos-appkit = { workspace = true }
 slopos-apps = { workspace = true, optional = true }
 slopos-editor-core = { workspace = true }
 slopos-chrome-core = { workspace = true }
+slopos-theme-core = { workspace = true }
 slopos-font = { workspace = true }
 slopos-http-core = { workspace = true }
 slopos-boot-core = { workspace = true }

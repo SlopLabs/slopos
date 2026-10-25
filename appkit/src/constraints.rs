@@ -73,57 +73,7 @@ impl Rect {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct EdgeInsets {
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
-    pub left: i32,
-}
-
-impl EdgeInsets {
-    pub const ZERO: Self = Self {
-        top: 0,
-        right: 0,
-        bottom: 0,
-        left: 0,
-    };
-
-    pub const fn all(v: i32) -> Self {
-        Self {
-            top: v,
-            right: v,
-            bottom: v,
-            left: v,
-        }
-    }
-
-    pub const fn symmetric(horizontal: i32, vertical: i32) -> Self {
-        Self {
-            top: vertical,
-            right: horizontal,
-            bottom: vertical,
-            left: horizontal,
-        }
-    }
-
-    pub const fn new(top: i32, right: i32, bottom: i32, left: i32) -> Self {
-        Self {
-            top,
-            right,
-            bottom,
-            left,
-        }
-    }
-
-    pub const fn horizontal(&self) -> i32 {
-        self.left + self.right
-    }
-
-    pub const fn vertical(&self) -> i32 {
-        self.top + self.bottom
-    }
-}
+pub use slopos_theme_core::EdgeInsets;
 
 /// The extent that stands in for "unbounded" in a constraint or a rect.
 ///
