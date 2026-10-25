@@ -34,17 +34,6 @@ pub fn cell_height() -> i32 {
     atlas().map_or(FALLBACK_CELL_H, |a| a.cell_height())
 }
 
-pub fn draw_char<T: Canvas>(
-    target: &mut T,
-    x: i32,
-    y: i32,
-    ch: u8,
-    fg: Color32,
-    bg: Color32,
-) -> Option<DamageRect> {
-    atlas()?.draw_char(target, x, y, ch as u32, fg, bg)
-}
-
 /// Draw a glyph by Unicode codepoint; non-ASCII codepoints fall back to the
 /// atlas replacement glyph.
 pub fn draw_glyph<T: Canvas>(
@@ -69,40 +58,6 @@ pub fn draw_string<T: Canvas>(
     atlas()?.draw_str(target, x, y, text, fg, bg)
 }
 
-pub fn draw_str_clipped<T: Canvas>(
-    target: &mut T,
-    x: i32,
-    y: i32,
-    text: &str,
-    fg: Color32,
-    bg: Color32,
-    clip: &DamageRect,
-) {
-    if let Some(a) = atlas() {
-        a.draw_str_clipped(target, x, y, text, fg, bg, clip);
-    }
-}
-
-pub fn draw_char_clipped<T: Canvas>(
-    target: &mut T,
-    x: i32,
-    y: i32,
-    ch: u8,
-    fg: Color32,
-    bg: Color32,
-    clip: &DamageRect,
-) {
-    if let Some(a) = atlas() {
-        a.draw_char_clipped(target, x, y, ch as u32, fg, bg, clip);
-    }
-}
-
 pub fn string_width(text: &str) -> i32 {
     atlas().map_or(text.len() as i32 * FALLBACK_CELL_W, |a| a.str_width(text))
-}
-
-pub fn string_height(text: &str) -> i32 {
-    atlas().map_or(FALLBACK_CELL_H, |a| {
-        a.bytes_lines(text.as_bytes()) * a.cell_height()
-    })
 }

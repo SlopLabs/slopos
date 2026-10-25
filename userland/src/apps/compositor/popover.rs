@@ -9,9 +9,10 @@
 use core::fmt::Write;
 use std::string::String;
 
+use slopos_appkit::text::ui;
 use slopos_chrome_core::netstate::{
     GATEWAY_LABEL, IFACE_NO_CARRIER_LABEL, IFACE_OFF_LABEL, IFACE_SEPARATOR, IfaceState,
-    NO_ADDRESS_LABEL, NetPanelModel, PANEL_TITLE, TRUNCATION, iface_state, indicator_label,
+    NO_ADDRESS_LABEL, NetPanelModel, PANEL_TITLE, iface_state, indicator_label,
     indicator_state_for,
 };
 use slopos_chrome_core::positioner::{Positioner, Rect, Size, position};
@@ -21,14 +22,14 @@ use slopos_gfx::canvas_ops::rounded_rect_filled;
 use slopos_net_core::Ipv4;
 use slopos_net_core::render::iface_kind;
 
-use crate::gfx::{self, DamageRect, DrawBuffer};
+use crate::gfx::{DamageRect, DrawBuffer};
 use crate::syscall::process;
 use crate::theme::*;
 use std::time::Instant;
 
-/// Width of the network panel. The widest line the model can produce — a detail
-/// row of 26 cells — fits the 280 px budget from the second rail; anything
-/// longer is truncated by [`fit`] rather than run under the panel edge.
+/// Width of the network panel. The widest line the model can produce fits the
+/// 280 px budget from the second rail; anything longer is cut short by
+/// [`draw_fitted`] rather than run under the panel edge.
 const PANEL_WIDTH: i32 = 320;
 
 /// The base spacing unit. Every gap in the panel is `U * k` for `k` in 1..=4.
@@ -68,10 +69,32 @@ const PANEL_GAP_Y: i32 = SPACE_2;
 const SWITCH_W: i32 = 10 * U;
 const SWITCH_H: i32 = 5 * U;
 
-/// One line of text. No floor of its own: [`gfx::cell_height`] already answers
-/// its own fallback when no atlas is loaded.
+/// One line box: the text's line plus a little air, so a menu row is a
+/// comfortable target.
 fn line_h() -> i32 {
-    gfx::cell_height()
+    ui::line_height(TEXT_PX) + SPACE_1
+}
+
+/// Text centred in the line box whose top is `y`.
+fn draw_text(
+    buf: &mut DrawBuffer,
+    x: i32,
+    y: i32,
+    s: &str,
+    fg: slopos_abi::draw::Color32,
+    clip: &DamageRect,
+) {
+    ui::draw_clipped(
+        buf,
+        x,
+        ui::centred_top(y, line_h(), TEXT_PX),
+        s,
+        TEXT_PX,
+        ui::Weight::Regular,
+        fg,
+        PANEL_BG_OPAQUE,
+        clip,
+    );
 }
 
 /// Where every element sits, computed once: a `header_h`/`row_h`/`footer_h`
@@ -136,27 +159,28 @@ fn layout(model: &NetPanelModel) -> Layout {
     }
 }
 
-/// Fit `s` into `max_w`, truncating with [`TRUNCATION`] if it does not. The
-/// result borrows `out` alone, so a caller can compose into one `String` field
-/// and fit into another without borrowing the same one twice.
-fn fit<'a>(out: &'a mut String, s: &str, max_w: i32) -> &'a str {
-    out.clear();
-    if gfx::font::string_width(s) <= max_w {
-        out.push_str(s);
-        return out.as_str();
-    }
-    let budget = max_w - gfx::font::string_width(TRUNCATION);
-    if budget > 0 {
-        for ch in s.chars() {
-            out.push(ch);
-            if gfx::font::string_width(out.as_str()) > budget {
-                out.pop();
-                break;
-            }
-        }
-        out.push_str(TRUNCATION);
-    }
-    out.as_str()
+/// [`draw_text`] of `s` cut short with [`ui::ELLIPSIS`] to fit `max_w`.
+fn draw_fitted(
+    buf: &mut DrawBuffer,
+    x: i32,
+    y: i32,
+    s: &str,
+    max_w: i32,
+    fg: slopos_abi::draw::Color32,
+    clip: &DamageRect,
+) {
+    ui::draw_elided(
+        buf,
+        x,
+        ui::centred_top(y, line_h(), TEXT_PX),
+        s,
+        TEXT_PX,
+        ui::Weight::Regular,
+        max_w,
+        fg,
+        PANEL_BG_OPAQUE,
+        clip,
+    );
 }
 
 /// The dot's colour for each row state; every one clears 3:1 against the panel,
@@ -251,8 +275,6 @@ pub struct Popover {
     issued_at: Option<Instant>,
     /// Composition buffer for a line being built.
     line: String,
-    /// Output buffer for [`fit`], separate from `line`.
-    fitted: String,
     /// The item the panel was anchored under, kept so a resize re-anchors to
     /// the same place instead of to a synthesised rect one pixel off.
     anchor: Rect,
@@ -279,7 +301,6 @@ impl Popover {
             issued_at: None,
             switch_dirty: false,
             line: String::new(),
-            fitted: String::new(),
             anchor: Rect::EMPTY,
             restart_wanted: false,
             restart_armed_at: None,
@@ -384,8 +405,8 @@ impl Popover {
                 };
                 let text_w = Choice::ALL
                     .iter()
-                    .map(|choice| gfx::font::string_width(choice.label()))
-                    .fold(gfx::font::string_width(note), i32::max);
+                    .map(|choice| ui::width(choice.label(), TEXT_PX))
+                    .fold(ui::width(note, TEXT_PX), i32::max);
                 Size {
                     w: text_w + 2 * PANEL_PAD,
                     h: self.system_lines() * line_h() + 2 * PANEL_PAD,
@@ -584,24 +605,22 @@ impl Popover {
             buf.with_scissor(*clip, |buf| {
                 draw_frame(buf, rect);
                 if note {
-                    gfx::draw_str_clipped(
+                    draw_text(
                         buf,
                         rect.x + PANEL_PAD,
                         rect.y + PANEL_PAD,
                         RESTART_NOTE,
                         TEXT_SECONDARY,
-                        PANEL_BG_OPAQUE,
                         clip,
                     );
                 }
                 for (i, choice) in Choice::ALL.iter().enumerate() {
-                    gfx::draw_str_clipped(
+                    draw_text(
                         buf,
                         rect.x + PANEL_PAD,
                         choices_y + i as i32 * line_h(),
                         choice.label(),
                         TEXT_PRIMARY,
-                        PANEL_BG_OPAQUE,
                         clip,
                     );
                 }
@@ -616,9 +635,9 @@ impl Popover {
         let busy = self.pending.is_some();
         let offered = self.switch_offered;
         let l = layout(model);
-        // Split borrows: the closure composes into `line` and fits into
-        // `fitted`, so it cannot hold `&self`.
-        let Self { line, fitted, .. } = self;
+        // Split borrow: the closure composes into `line`, so it cannot hold
+        // `&self`.
+        let Self { line, .. } = self;
 
         // rail1 is where the panel speaks about itself, rail2 about an interface.
         let rail1 = rect.x + PANEL_PAD;
@@ -626,39 +645,33 @@ impl Popover {
         let content_w = rect.w - 2 * PANEL_PAD;
         let header_text_w = content_w - SWITCH_W - SPACE_3;
         let row_text_w = content_w - DOT_GUTTER;
-        let gw_value_x = rail1 + gfx::font::string_width(GATEWAY_LABEL) + SPACE_3;
+        let gw_value_x = rail1 + ui::width(GATEWAY_LABEL, TEXT_PX) + SPACE_3;
         let gw_value_w = rect.x + rect.w - PANEL_PAD - gw_value_x;
 
         buf.with_scissor(*clip, |buf| {
             draw_frame(buf, rect);
 
             // The colour rule, panel-wide: TEXT_PRIMARY names the thing,
-            // TEXT_SECONDARY describes it. With one font size and no weight
-            // axis, colour is the only channel that can say "this matters more".
+            // TEXT_SECONDARY describes it. With one text size and one weight,
+            // colour is the only channel that can say "this matters more".
             // The title is the dimmer of the two; the sentence underneath is
             // what someone who clicked the network indicator came for.
-            let text = fit(fitted, PANEL_TITLE, header_text_w);
-            gfx::draw_str_clipped(
+            draw_fitted(
                 buf,
                 rail1,
                 rect.y + l.title_y,
-                text,
+                PANEL_TITLE,
+                header_text_w,
                 TEXT_SECONDARY,
-                PANEL_BG_OPAQUE,
                 clip,
             );
-            let text = fit(
-                fitted,
-                indicator_label(indicator_state_for(model)),
-                header_text_w,
-            );
-            gfx::draw_str_clipped(
+            draw_fitted(
                 buf,
                 rail1,
                 rect.y + l.status_y,
-                text,
+                indicator_label(indicator_state_for(model)),
+                header_text_w,
                 TEXT_PRIMARY,
-                PANEL_BG_OPAQUE,
                 clip,
             );
 
@@ -728,14 +741,13 @@ impl Popover {
                     dot_colour(state),
                 );
 
-                let text = fit(fitted, iface.name_str(), row_text_w);
-                gfx::draw_str_clipped(
+                draw_fitted(
                     buf,
                     rail2,
                     row_top,
-                    text,
+                    iface.name_str(),
+                    row_text_w,
                     TEXT_PRIMARY,
-                    PANEL_BG_OPAQUE,
                     clip,
                 );
 
@@ -752,14 +764,13 @@ impl Popover {
                 // Never dimmed by state: a disabled grey measures 2.5:1 on
                 // exactly the line someone opens this panel to read when
                 // something is wrong. The dot's hue carries the fault instead.
-                let text = fit(fitted, line, row_text_w);
-                gfx::draw_str_clipped(
+                draw_fitted(
                     buf,
                     rail2,
                     row_top + line_h(),
-                    text,
+                    line,
+                    row_text_w,
                     TEXT_SECONDARY,
-                    PANEL_BG_OPAQUE,
                     clip,
                 );
             }
@@ -768,29 +779,12 @@ impl Popover {
             // permanently empty dot gutter reads as an orphaned row.
             if l.has_gateway {
                 let y = rect.y + l.gateway_y;
-                gfx::draw_str_clipped(
-                    buf,
-                    rail1,
-                    y,
-                    GATEWAY_LABEL,
-                    TEXT_SECONDARY,
-                    PANEL_BG_OPAQUE,
-                    clip,
-                );
+                draw_text(buf, rail1, y, GATEWAY_LABEL, TEXT_SECONDARY, clip);
                 line.clear();
                 let _ = write!(line, "{}", Ipv4(model.gateway));
                 // A fixed key column, not a right rail: right-aligning would open
                 // a trough that changes width with the address.
-                let text = fit(fitted, line, gw_value_w);
-                gfx::draw_str_clipped(
-                    buf,
-                    gw_value_x,
-                    y,
-                    text,
-                    TEXT_PRIMARY,
-                    PANEL_BG_OPAQUE,
-                    clip,
-                );
+                draw_fitted(buf, gw_value_x, y, line, gw_value_w, TEXT_PRIMARY, clip);
             }
         });
     }

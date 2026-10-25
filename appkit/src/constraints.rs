@@ -307,6 +307,9 @@ pub enum CrossAxisAlignment {
     Center,
     End,
     Stretch,
+    /// A row's children share their first baseline, and a child without text
+    /// stands on it; a column takes it as [`Start`](Self::Start).
+    Baseline,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]

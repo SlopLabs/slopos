@@ -31,6 +31,13 @@ impl MeasureCtx<'_> {
     pub fn text_height(&self) -> i32 {
         super::text::ui::line_height(self.style.font_size as u16)
     }
+
+    /// Baseline of body text in a box `height` tall, from the box's top: its
+    /// line centred in the box. A one-line text widget's box is one line box,
+    /// `style.line_height` tall, so every label puts its text on the same row.
+    pub fn baseline_in(&self, height: i32) -> i32 {
+        super::text::ui::baseline_in(height, self.style.font_size as u16)
+    }
 }
 
 /// Identity and geometry every widget carries, owned by the framework.
@@ -174,6 +181,14 @@ pub trait Widget {
     /// then.
     fn reveal(&mut self, rect: Rect, _sink: &mut MessageSink) -> Rect {
         rect
+    }
+
+    /// Distance from the top of the box [`measure`](Widget::measure) returned
+    /// to the baseline of the widget's first line of text, for a row that
+    /// aligns its children by baseline. `None` for a widget without text,
+    /// which such a row stands on its bottom edge.
+    fn baseline(&self) -> Option<i32> {
+        None
     }
 
     /// Proportional share of leftover stack space; 0 means non-flexible.

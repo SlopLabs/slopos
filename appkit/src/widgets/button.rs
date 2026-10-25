@@ -27,6 +27,7 @@ pub struct ButtonWidget {
     enabled: bool,
     state: ButtonState,
     focused: bool,
+    baseline: i32,
 }
 
 impl ButtonWidget {
@@ -48,6 +49,7 @@ impl ButtonWidget {
                 ButtonState::Disabled
             },
             focused: false,
+            baseline: 0,
         }
     }
 }
@@ -115,7 +117,10 @@ impl Widget for ButtonWidget {
         let text_h = ctx.text_height();
         let w = (text_w + ctx.style.button_padding_h * 2).max(ctx.style.button_min_width);
         let h = text_h + ctx.style.button_padding_v * 2;
-        constraints.constrain(Size::new(w, h))
+        let size = constraints.constrain(Size::new(w, h));
+        // `paint` centres the label's line in the button.
+        self.baseline = ctx.baseline_in(size.height);
+        size
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
@@ -253,6 +258,10 @@ impl Widget for ButtonWidget {
 
     fn accessible_name(&self) -> Option<&str> {
         Some(&self.label)
+    }
+
+    fn baseline(&self) -> Option<i32> {
+        Some(self.baseline)
     }
 
     /// A disabled control is not a tab stop: it answers nothing, draws no ring,

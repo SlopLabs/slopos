@@ -4,81 +4,80 @@ use slopos_ostd::KVec;
 
 use crate::rasterizer::RasterizedGlyph;
 
-const MAX_CACHE_SIZE: usize = 512;
+/// Four quarter-pixel phases of the glyphs a few screens of text use.
+const MAX_CACHE_SIZE: usize = 1024;
 
-/// Cache key: (codepoint, size_px).
-type CacheKey = (u32, u16);
+/// Codepoint, size in pixels and quarter-pixel phase.
+pub type CacheKey = (u32, u16, u8);
 
 struct CacheEntry {
     key: CacheKey,
     glyph: RasterizedGlyph,
-    access_count: u64,
+    last_used: u64,
 }
 
-/// A fixed-capacity LRU glyph cache.
+/// A fixed-capacity LRU glyph cache, kept sorted by key: every glyph of every
+/// drawn run looks itself up, so a lookup is a binary search.
 pub struct GlyphCache {
     entries: KVec<CacheEntry>,
-    access_counter: u64,
+    clock: u64,
 }
 
 impl GlyphCache {
     pub fn new() -> Self {
         Self {
-            entries: KVec::with_capacity(64).expect("GlyphCache: alloc"),
-            access_counter: 0,
+            entries: KVec::new(),
+            clock: 0,
         }
     }
 
-    pub fn get(&mut self, codepoint: u32, size_px: u16) -> Option<&RasterizedGlyph> {
-        let key = (codepoint, size_px);
-        self.access_counter += 1;
+    fn find(&self, key: CacheKey) -> Result<usize, usize> {
+        self.entries
+            .as_slice()
+            .binary_search_by(|entry| entry.key.cmp(&key))
+    }
 
-        for entry in self.entries.iter_mut() {
-            if entry.key == key {
-                entry.access_count = self.access_counter;
-                // Return a reference — need to re-search for borrow checker
-                break;
-            }
-        }
-
-        for entry in self.entries.iter() {
-            if entry.key == key {
-                return Some(&entry.glyph);
-            }
-        }
-
-        None
+    pub fn get(&mut self, key: CacheKey) -> Option<&RasterizedGlyph> {
+        let at = self.find(key).ok()?;
+        self.clock += 1;
+        let entry = &mut self.entries.as_mut_slice()[at];
+        entry.last_used = self.clock;
+        Some(&entry.glyph)
     }
 
     /// Insert a rasterized glyph into the cache, evicting the LRU entry if full.
-    pub fn insert(&mut self, codepoint: u32, size_px: u16, glyph: RasterizedGlyph) {
-        let key = (codepoint, size_px);
-        self.access_counter += 1;
-
-        for entry in self.entries.iter_mut() {
-            if entry.key == key {
+    pub fn insert(&mut self, key: CacheKey, glyph: RasterizedGlyph) {
+        self.clock += 1;
+        let mut at = match self.find(key) {
+            Ok(at) => {
+                let entry = &mut self.entries.as_mut_slice()[at];
                 entry.glyph = glyph;
-                entry.access_count = self.access_counter;
+                entry.last_used = self.clock;
                 return;
             }
-        }
+            Err(at) => at,
+        };
 
         if self.entries.len() >= MAX_CACHE_SIZE {
-            let mut min_access = u64::MAX;
-            let mut min_idx = 0;
-            for (i, entry) in self.entries.iter().enumerate() {
-                if entry.access_count < min_access {
-                    min_access = entry.access_count;
-                    min_idx = i;
-                }
+            let oldest = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map_or(0, |(index, _)| index);
+            self.entries.remove(oldest);
+            if oldest < at {
+                at -= 1;
             }
-            self.entries.swap_remove(min_idx);
         }
 
-        let _ = self.entries.push(CacheEntry {
-            key,
-            glyph,
-            access_count: self.access_counter,
-        });
+        let _ = self.entries.insert(
+            at,
+            CacheEntry {
+                key,
+                glyph,
+                last_used: self.clock,
+            },
+        );
     }
 }

@@ -40,6 +40,14 @@ struct StackWidget {
     cross_align: CrossAxisAlignment,
     vertical: bool,
     child_sizes: Vec<Size>,
+    /// The shared baseline, from the top, of a row aligned by baseline.
+    baseline: i32,
+}
+
+/// Where a child of a baseline-aligned row puts its baseline: its text's, or
+/// its bottom edge when it has none.
+fn child_baseline(child: &dyn Widget, size: Size) -> i32 {
+    child.baseline().unwrap_or(size.height)
 }
 
 impl StackWidget {
@@ -56,7 +64,12 @@ impl StackWidget {
             cross_align: align,
             vertical,
             child_sizes: Vec::new(),
+            baseline: 0,
         }
+    }
+
+    fn aligns_baselines(&self) -> bool {
+        !self.vertical && self.cross_align == CrossAxisAlignment::Baseline
     }
 
     fn measure_impl(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
@@ -134,6 +147,17 @@ impl StackWidget {
 
         total_main = total_main.saturating_add(spacing_total);
 
+        if self.aligns_baselines() {
+            let (mut above, mut below) = (0, 0);
+            for (child, &size) in self.children.iter().zip(&self.child_sizes) {
+                let baseline = child_baseline(child.as_ref(), size);
+                above = above.max(baseline);
+                below = below.max(size.height - baseline);
+            }
+            self.baseline = above;
+            max_cross = above + below;
+        }
+
         let size = if v {
             Size::new(max_cross, total_main)
         } else {
@@ -178,7 +202,10 @@ impl StackWidget {
             let child_cross = cross_axis(self.child_sizes[i], v);
 
             let cross_pos = match self.cross_align {
-                CrossAxisAlignment::Start => 0,
+                CrossAxisAlignment::Baseline if self.aligns_baselines() => {
+                    self.baseline - child_baseline(self.children[i].as_ref(), self.child_sizes[i])
+                }
+                CrossAxisAlignment::Start | CrossAxisAlignment::Baseline => 0,
                 CrossAxisAlignment::Center => (avail_cross - child_cross) / 2,
                 CrossAxisAlignment::End => avail_cross - child_cross,
                 CrossAxisAlignment::Stretch => 0,
@@ -299,6 +326,13 @@ impl Widget for VStackWidget {
     fn core_mut(&mut self) -> &mut WidgetCore {
         &mut self.inner.core
     }
+    /// The first child's, which sits at the column's top.
+    fn baseline(&self) -> Option<i32> {
+        self.inner
+            .children
+            .first()
+            .and_then(|child| child.baseline())
+    }
     fn children(&self) -> &[Box<dyn Widget>] {
         &self.inner.children
     }
@@ -337,6 +371,9 @@ impl Widget for HStackWidget {
     }
     fn core_mut(&mut self) -> &mut WidgetCore {
         &mut self.inner.core
+    }
+    fn baseline(&self) -> Option<i32> {
+        self.inner.aligns_baselines().then_some(self.inner.baseline)
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         &self.inner.children
@@ -460,6 +497,9 @@ impl Widget for PaddingWidget {
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
         self.child.event(e, p, sink)
     }
+    fn baseline(&self) -> Option<i32> {
+        self.child.baseline().map(|b| b + self.insets.top)
+    }
     fn children(&self) -> &[Box<dyn Widget>] {
         core::slice::from_ref(&self.child)
     }
@@ -546,6 +586,9 @@ impl Widget for ExpandWidget {
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
         self.child.event(e, p, sink)
     }
+    fn baseline(&self) -> Option<i32> {
+        self.child.baseline()
+    }
     fn flex_weight(&self) -> u16 {
         self.weight
     }
@@ -593,6 +636,9 @@ impl Widget for BackgroundWidget {
     }
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
         self.child.event(e, p, sink)
+    }
+    fn baseline(&self) -> Option<i32> {
+        self.child.baseline()
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         core::slice::from_ref(&self.child)
@@ -660,6 +706,9 @@ impl Widget for SizedBoxWidget {
     }
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
         self.child.event(e, p, sink)
+    }
+    fn baseline(&self) -> Option<i32> {
+        self.child.baseline()
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         core::slice::from_ref(&self.child)

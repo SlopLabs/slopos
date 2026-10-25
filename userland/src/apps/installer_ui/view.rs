@@ -80,12 +80,14 @@ fn wide(width: i32, child: Node<Msg>) -> Node<Msg> {
     }
 }
 
-/// A subject and what it says of it, the subjects in one column.
+/// A subject and what it says of it, the subjects in one column, each on the
+/// first line of its text however that wraps.
 fn pair(subject: &str, color: Color32, text: impl Into<String>) -> Node<Msg> {
-    row(vec![
-        wide(100, colored(subject, color)),
-        expand(label(text)),
-    ])
+    Node::HStack {
+        children: vec![wide(100, colored(subject, color)), expand(label(text))],
+        spacing: 8,
+        align: CrossAxisAlignment::Baseline,
+    }
 }
 
 fn button(text: impl Into<String>, msg: Msg, style: ButtonStyle, enabled: bool) -> Node<Msg> {

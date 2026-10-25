@@ -2,7 +2,7 @@
 //! for the bottom launcher bar.
 
 use slopos_abi::draw::Color32;
-use slopos_font::FontRenderer;
+use slopos_appkit::text::ui;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_image::{DecodeOptions, Image};
 
@@ -18,7 +18,7 @@ const MAX_ENTRIES: usize = 16;
 const ICON_PIXELS_MAX: usize = 256 * 256;
 const ICON_BYTES_MAX: u64 = 1 << 20;
 
-/// Font size for the hover label tooltip (the bitmap fallback uses cell size).
+/// Font size for the hover label tooltip.
 const LABEL_FONT_SIZE: u16 = 11;
 
 const ICON_LABEL_FONT_SIZE: u16 = 20;
@@ -286,7 +286,6 @@ impl LauncherShelf {
         screen_height: u32,
         cursor_x: i32,
         cursor_y: i32,
-        mut font: Option<&mut FontRenderer>,
         clip: Option<DamageRect>,
     ) {
         if self.entries.len() == 0 {
@@ -372,15 +371,7 @@ impl LauncherShelf {
                     &clip_rect,
                 );
             } else {
-                draw_letter_icon(
-                    buf,
-                    font.as_deref_mut(),
-                    entry,
-                    l,
-                    icon_x,
-                    icon_y,
-                    &clip_rect,
-                );
+                draw_letter_icon(buf, entry, l, icon_x, icon_y, &clip_rect);
             }
 
             if entry.running {
@@ -415,50 +406,32 @@ impl LauncherShelf {
                     TEXT_PRIMARY_ALPHA,
                 );
 
-                if let Some(ref mut f) = font {
-                    let (tw, th) = f.measure_text(name, LABEL_FONT_SIZE);
-                    let lbl_w = tw + 2 * SHELF_LABEL_PADDING_X;
-                    let lbl_h = th + 2 * SHELF_LABEL_PADDING_Y;
-                    let lbl_x = l.center_x - lbl_w / 2;
-                    let lbl_y = pill_y - SHELF_LABEL_GAP_Y - lbl_h;
-                    label = Some(bounds(lbl_x, lbl_y, lbl_w, lbl_h));
+                let lbl_w = ui::width(name, LABEL_FONT_SIZE) + 2 * SHELF_LABEL_PADDING_X;
+                let lbl_h = ui::line_height(LABEL_FONT_SIZE) + 2 * SHELF_LABEL_PADDING_Y;
+                let lbl_x = l.center_x - lbl_w / 2;
+                let lbl_y = pill_y - SHELF_LABEL_GAP_Y - lbl_h;
+                label = Some(bounds(lbl_x, lbl_y, lbl_w, lbl_h));
 
-                    slopos_gfx::canvas_ops::rounded_rect_filled(
-                        buf,
-                        lbl_x,
-                        lbl_y,
-                        lbl_w,
-                        lbl_h,
-                        SHELF_LABEL_RADIUS,
-                        label_bg,
-                    );
-                    f.draw_text(
-                        buf,
-                        lbl_x + SHELF_LABEL_PADDING_X,
-                        lbl_y + SHELF_LABEL_PADDING_Y,
-                        name,
-                        LABEL_FONT_SIZE,
-                        text_color,
-                        label_bg,
-                    );
-                } else {
-                    let lbl_w = gfx::font::string_width(name) + 2 * SHELF_LABEL_PADDING_X;
-                    let lbl_h = gfx::font::string_height(name) + 2 * SHELF_LABEL_PADDING_Y;
-                    let lbl_x = l.center_x - lbl_w / 2;
-                    let lbl_y = pill_y - SHELF_LABEL_GAP_Y - lbl_h;
-                    label = Some(bounds(lbl_x, lbl_y, lbl_w, lbl_h));
-
-                    gfx::fill_rect_blended(buf, lbl_x, lbl_y, lbl_w, lbl_h, label_bg);
-                    gfx::draw_str_clipped(
-                        buf,
-                        lbl_x + SHELF_LABEL_PADDING_X,
-                        lbl_y + SHELF_LABEL_PADDING_Y,
-                        name,
-                        text_color,
-                        label_bg,
-                        &clip_rect,
-                    );
-                }
+                slopos_gfx::canvas_ops::rounded_rect_filled(
+                    buf,
+                    lbl_x,
+                    lbl_y,
+                    lbl_w,
+                    lbl_h,
+                    SHELF_LABEL_RADIUS,
+                    label_bg,
+                );
+                ui::draw_clipped(
+                    buf,
+                    lbl_x + SHELF_LABEL_PADDING_X,
+                    lbl_y + SHELF_LABEL_PADDING_Y,
+                    name,
+                    LABEL_FONT_SIZE,
+                    ui::Weight::Regular,
+                    text_color,
+                    label_bg,
+                    &clip_rect,
+                );
             }
         }
 
@@ -550,7 +523,6 @@ impl LauncherShelf {
 /// first letter on a square.
 fn draw_letter_icon(
     buf: &mut DrawBuffer,
-    font: Option<&mut FontRenderer>,
     entry: &ShelfEntry,
     l: &IconLayout,
     icon_x: i32,
@@ -580,16 +552,19 @@ fn draw_letter_icon(
         TEXT_PRIMARY.blue(),
         TEXT_PRIMARY_ALPHA,
     );
-    if let Some(f) = font {
-        let (tw, th) = f.measure_text(s, ICON_LABEL_FONT_SIZE);
-        let tx = icon_x + (l.size - tw) / 2;
-        let ty = icon_y + (l.size - th) / 2;
-        f.draw_text(buf, tx, ty, s, ICON_LABEL_FONT_SIZE, text_color, Color32(c));
-    } else {
-        let tx = icon_x + (l.size - gfx::font::string_width(s)) / 2;
-        let ty = icon_y + (l.size - gfx::font::string_height(s)) / 2;
-        gfx::draw_str_clipped(buf, tx, ty, s, text_color, Color32(c), clip);
-    }
+    let tx = icon_x + (l.size - ui::width(s, ICON_LABEL_FONT_SIZE)) / 2;
+    let ty = ui::centred_top(icon_y, l.size, ICON_LABEL_FONT_SIZE);
+    ui::draw_clipped(
+        buf,
+        tx,
+        ty,
+        s,
+        ICON_LABEL_FONT_SIZE,
+        ui::Weight::Regular,
+        text_color,
+        Color32(c),
+        clip,
+    );
 }
 
 #[inline]

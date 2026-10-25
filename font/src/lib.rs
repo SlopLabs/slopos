@@ -140,8 +140,9 @@ impl<'a> FontRenderer<'a> {
 
     /// Draw a text string onto a canvas at the given position.
     ///
-    /// `(x, y)` is the top-left corner of the text. `bg` is the background
-    /// colour for anti-alias blending; pass an opaque colour for MMIO/write-only
+    /// `(x, y)` is the top-left corner of the text's line: its baseline lands
+    /// on row `y + ascent(size_px)`. `bg` is the background colour for
+    /// anti-alias blending; pass an opaque colour for MMIO/write-only
     /// surfaces, or `Color32::TRANSPARENT` to composite over existing content
     /// (requires a readable surface). Returns the damage rectangle covering all
     /// rendered glyphs.
@@ -190,60 +191,42 @@ impl<'a> FontRenderer<'a> {
         bg: Color32,
         clip: Option<DamageRect>,
     ) -> Option<DamageRect> {
-        let upem = self.font.units_per_em() as f32;
-        if upem == 0.0 {
-            return None;
-        }
-        let scale = size_px as f32 / upem;
-
-        let hhea = self.font.hhea();
-        let ascender = libm::roundf(hhea.ascender as f32 * scale) as i32;
-
-        let mut cursor_x = x as f32;
+        let scale = scale(&self.font, size_px);
+        let baseline = y + self.ascent(size_px);
         let mut damage: Option<DamageRect> = None;
 
-        for ch in text.chars() {
-            let codepoint = ch as u32;
+        for placed in Run::new(&self.font, text, size_px) {
+            // Pen and bitmap round once, together, to the nearest quarter
+            // pixel: the whole pixel places the bitmap, the quarter picks the
+            // phase it was rasterised at.
+            let quarters = libm::floorf((x as f32 + placed.pen) * 4.0 + 0.5) as i32;
+            let column = quarters.div_euclid(4);
+            let key = (placed.codepoint, size_px, quarters.rem_euclid(4) as u8);
 
-            if self.cache.get(codepoint, size_px).is_none() {
-                if let Some(glyph) = self.rasterize_glyph(codepoint, size_px, scale, ascender) {
-                    self.cache.insert(codepoint, size_px, glyph);
+            if self.cache.get(key).is_none() {
+                if let Some(glyph) = rasterize_glyph(&self.font, placed.codepoint, scale, key.2) {
+                    self.cache.insert(key, glyph);
                 }
             }
-
-            // Full float precision; the cached glyph's advance is pixel-rounded.
-            let true_advance = advance_px(&self.font, codepoint, scale, size_px);
-
-            let gx_base = libm::roundf(cursor_x) as i32;
             // The cache borrow is held across the blit rather than cloning the
             // coverage: a clone here is one heap allocation per glyph per frame.
-            let glyph_damage = match self.cache.get(codepoint, size_px) {
-                Some(g) => Self::draw_glyph_coverage_clipped(
+            let glyph_damage = self.cache.get(key).and_then(|g| {
+                Self::draw_glyph_coverage_clipped(
                     target,
-                    gx_base + g.bearing_x as i32,
-                    y + ascender - g.bearing_y as i32,
+                    column + g.bearing_x as i32,
+                    baseline - g.bearing_y as i32,
                     g.width as i32,
                     g.height as i32,
                     g.coverage.as_slice(),
                     color,
                     bg,
                     clip.as_ref(),
-                ),
-                None => None,
-            };
-
+                )
+            });
             damage = match (damage, glyph_damage) {
-                (Some(d), Some(g)) => Some(DamageRect {
-                    x0: d.x0.min(g.x0),
-                    y0: d.y0.min(g.y0),
-                    x1: d.x1.max(g.x1),
-                    y1: d.y1.max(g.y1),
-                }),
-                (None, g) => g,
-                (d, None) => d,
+                (Some(d), Some(g)) => Some(d.union(&g)),
+                (d, g) => d.or(g),
             };
-
-            cursor_x += true_advance;
         }
 
         if let Some(d) = damage {
@@ -257,18 +240,14 @@ impl<'a> FontRenderer<'a> {
         metrics::measure_text(&self.font, text, size_px)
     }
 
-    /// Advance width of `text` at `size_px`, in pixels.
+    /// Advance width of `text` at `size_px`, kerning included, in pixels.
     pub fn text_width(&self, text: &str, size_px: u16) -> i32 {
         metrics::measure_text(&self.font, text, size_px).0
     }
 
     /// Baseline offset from the top of a line box at `size_px`.
     pub fn ascent(&self, size_px: u16) -> i32 {
-        let upem = self.font.units_per_em() as f32;
-        if upem == 0.0 {
-            return size_px as i32;
-        }
-        libm::roundf(self.font.hhea().ascender as f32 * (size_px as f32 / upem)) as i32
+        libm::roundf(self.font.hhea().ascender as f32 * scale(&self.font, size_px)) as i32
     }
 
     /// Ascender-to-descender height of one line at `size_px`.
@@ -278,96 +257,15 @@ impl<'a> FontRenderer<'a> {
 
     /// Longest prefix of `text` whose advance fits in `budget` pixels, in bytes.
     pub fn prefix_fitting(&self, text: &str, size_px: u16, budget: i32) -> usize {
-        let upem = self.font.units_per_em() as f32;
-        if upem == 0.0 || budget <= 0 {
+        if budget <= 0 {
             return 0;
         }
-        let scale = size_px as f32 / upem;
-        let mut width = 0.0f32;
-        for (offset, ch) in text.char_indices() {
-            width += advance_px(&self.font, ch as u32, scale, size_px);
-            if libm::ceilf(width) as i32 > budget {
-                return offset;
+        for placed in Run::new(&self.font, text, size_px) {
+            if libm::ceilf(placed.pen + placed.advance) as i32 > budget {
+                return placed.offset;
             }
         }
         text.len()
-    }
-
-    /// Rasterize a single glyph at the given size.
-    pub(crate) fn rasterize_glyph(
-        &self,
-        codepoint: u32,
-        _size_px: u16,
-        scale: f32,
-        _ascender: i32,
-    ) -> Option<RasterizedGlyph> {
-        let glyph_id = self.font.glyph_index(codepoint)?;
-        if glyph_id == 0 && codepoint != 0 {
-            // .notdef for non-null codepoint
-            return None;
-        }
-
-        let hm = self.font.h_metrics(glyph_id)?;
-        let outline = self.font.glyph_outline(glyph_id);
-
-        let scaled_advance = libm::roundf(hm.advance_width as f32 * scale) as u16;
-
-        match outline {
-            Some(ref out) if !out.contours.is_empty() => {
-                // +1 for anti-aliasing margin (ceilf already rounds up).
-                let glyph_width =
-                    libm::ceilf((out.x_max as f32 - out.x_min as f32) * scale) as i32 + 1;
-                let glyph_height =
-                    libm::ceilf((out.y_max as f32 - out.y_min as f32) * scale) as i32 + 1;
-
-                if glyph_width <= 0 || glyph_height <= 0 {
-                    return None;
-                }
-
-                // Use left_side_bearing from hmtx (the font's intended spacing),
-                // not x_min from the outline (visual bbox edge).
-                let bearing_x = libm::roundf(hm.left_side_bearing as f32 * scale) as i16;
-                let bearing_y = libm::roundf(out.y_max as f32 * scale) as i16;
-
-                // Offset edges so the glyph bitmap starts at pixel (0, 0).
-                let x_offset = -(out.x_min as f32 * scale);
-                let y_offset = out.y_max as f32 * scale;
-
-                let edges = outline_to_edges(out, scale, y_offset);
-
-                let shifted_edges: slopos_ostd::KVec<outline::Edge> =
-                    slopos_ostd::KVec::from_iter_fallible(edges.iter().map(|e| outline::Edge {
-                        x0: e.x0 + x_offset,
-                        y0: e.y0,
-                        x1: e.x1 + x_offset,
-                        y1: e.y1,
-                    }))
-                    .expect("shifted_edges: alloc");
-
-                let coverage =
-                    rasterize(&shifted_edges, glyph_width as usize, glyph_height as usize)?;
-
-                Some(RasterizedGlyph {
-                    width: glyph_width as u16,
-                    height: glyph_height as u16,
-                    bearing_x,
-                    bearing_y,
-                    advance: scaled_advance,
-                    coverage,
-                })
-            }
-            _ => {
-                // Space or empty glyph: advance only.
-                Some(RasterizedGlyph {
-                    width: 0,
-                    height: 0,
-                    bearing_x: 0,
-                    bearing_y: 0,
-                    advance: scaled_advance,
-                    coverage: slopos_ostd::KVec::new(),
-                })
-            }
-        }
     }
 
     /// Draw a coverage bitmap onto a canvas.
@@ -448,19 +346,143 @@ impl<'a> FontRenderer<'a> {
     }
 }
 
-/// Advance of one codepoint in pixels, with the same half-em fallback for a
-/// codepoint the font has no glyph for that the draw path uses — so a measured
-/// width and a drawn run agree even on missing glyphs.
+/// Pixels per font unit at `size_px`. `TtfFont::parse` refuses a zero
+/// `unitsPerEm`, so this never divides by zero.
 #[inline]
-pub(crate) fn advance_px(font: &TtfFont<'_>, codepoint: u32, scale: f32, size_px: u16) -> f32 {
+pub(crate) fn scale(font: &TtfFont<'_>, size_px: u16) -> f32 {
+    size_px as f32 / font.units_per_em() as f32
+}
+
+/// The glyph a codepoint draws with. `.notdef` is "no glyph": measuring its
+/// advance while refusing to draw it is how a measured width and a drawn run
+/// would disagree on exactly the codepoints the half-em fallback exists for.
+#[inline]
+fn drawable_glyph(font: &TtfFont<'_>, codepoint: u32) -> Option<u16> {
     font.glyph_index(codepoint)
-        // `.notdef` is "no glyph", and `rasterize_glyph` refuses it — so
-        // measuring its advance is how a measured width and a drawn run
-        // disagree on exactly the codepoints this fallback exists for.
         .filter(|&gid| gid != 0 || codepoint == 0)
-        .and_then(|gid| font.h_metrics(gid))
-        .map(|hm| hm.advance_width as f32 * scale)
-        .unwrap_or(size_px as f32 * 0.5)
+}
+
+/// One glyph of a laid-out run.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Placed {
+    /// Byte offset of its character in the text.
+    pub offset: usize,
+    pub codepoint: u32,
+    /// Where its origin sits, in pixels from the run's, kerning included.
+    pub pen: f32,
+    pub advance: f32,
+}
+
+/// A run's glyphs in order, each at its unrounded pen. Measuring, fitting and
+/// drawing all walk this one layout, so what is measured is what is drawn.
+pub(crate) struct Run<'f, 'a, 't> {
+    font: &'f TtfFont<'a>,
+    chars: core::str::CharIndices<'t>,
+    scale: f32,
+    size_px: u16,
+    pen: f32,
+    previous: Option<u16>,
+}
+
+impl<'f, 'a, 't> Run<'f, 'a, 't> {
+    pub(crate) fn new(font: &'f TtfFont<'a>, text: &'t str, size_px: u16) -> Self {
+        Self {
+            font,
+            chars: text.char_indices(),
+            scale: scale(font, size_px),
+            size_px,
+            pen: 0.0,
+            previous: None,
+        }
+    }
+}
+
+impl Iterator for Run<'_, '_, '_> {
+    type Item = Placed;
+
+    fn next(&mut self) -> Option<Placed> {
+        let (offset, ch) = self.chars.next()?;
+        let codepoint = ch as u32;
+        let glyph = drawable_glyph(self.font, codepoint);
+        if let (Some(left), Some(right)) = (self.previous, glyph) {
+            self.pen += self.font.kerning(left, right) as f32 * self.scale;
+        }
+        let advance = glyph
+            .and_then(|gid| self.font.h_metrics(gid))
+            .map_or(self.size_px as f32 * 0.5, |hm| {
+                hm.advance_width as f32 * self.scale
+            });
+        let placed = Placed {
+            offset,
+            codepoint,
+            pen: self.pen,
+            advance,
+        };
+        self.pen += advance;
+        self.previous = glyph;
+        Some(placed)
+    }
+}
+
+/// Width of `text`'s run at `size_px`, unrounded.
+pub(crate) fn run_width(font: &TtfFont<'_>, text: &str, size_px: u16) -> f32 {
+    Run::new(font, text, size_px)
+        .last()
+        .map_or(0.0, |last| last.pen + last.advance)
+}
+
+/// Rasterize one glyph with its origin `phase` quarter pixels right of a pixel
+/// boundary.
+///
+/// The bitmap's box is whole pixels: its top is `ceil(y_max · scale)` above
+/// the baseline and its left `floor(x_min · scale + phase / 4)` right of the
+/// origin, with the outline drawn at its exact offset inside. The baseline
+/// therefore falls on a row boundary in every glyph, so a run's glyphs share
+/// one bottom edge.
+pub(crate) fn rasterize_glyph(
+    font: &TtfFont<'_>,
+    codepoint: u32,
+    scale: f32,
+    phase: u8,
+) -> Option<RasterizedGlyph> {
+    let glyph_id = drawable_glyph(font, codepoint)?;
+    let hm = font.h_metrics(glyph_id)?;
+    let empty = RasterizedGlyph {
+        width: 0,
+        height: 0,
+        bearing_x: 0,
+        bearing_y: 0,
+        advance: libm::roundf(hm.advance_width as f32 * scale) as u16,
+        coverage: slopos_ostd::KVec::new(),
+    };
+    let Some(outline) = font
+        .glyph_outline(glyph_id)
+        .filter(|outline| !outline.contours.is_empty())
+    else {
+        return Some(empty);
+    };
+
+    let shift = phase as f32 * 0.25;
+    let left = libm::floorf(outline.x_min as f32 * scale + shift);
+    let right = libm::ceilf(outline.x_max as f32 * scale + shift);
+    let top = libm::ceilf(outline.y_max as f32 * scale);
+    let bottom = libm::floorf(outline.y_min as f32 * scale);
+    let width = (right - left) as i32;
+    let height = (top - bottom) as i32;
+    if width <= 0 || height <= 0 {
+        return Some(empty);
+    }
+
+    let edges = outline_to_edges(&outline, scale, shift - left, top);
+    let coverage = rasterize(&edges, width as usize, height as usize)?;
+    Some(RasterizedGlyph {
+        width: width as u16,
+        height: height as u16,
+        bearing_x: left as i16,
+        bearing_y: top as i16,
+        coverage,
+        ..empty
+    })
 }
 
 #[cfg(test)]
@@ -711,5 +733,198 @@ mod tests {
             glyph.iter().all(|&b| b == 0),
             "space glyph should be all zeros"
         );
+    }
+
+    impl TestCanvas {
+        fn clear(&mut self) {
+            self.data.iter_mut().for_each(|b| *b = 0);
+        }
+
+        /// Coverage of white ink drawn over an opaque black background.
+        fn ink(&self, x: u32, y: u32) -> u32 {
+            self.read_pixel(x, y).red() as u32
+        }
+
+        fn row_has_ink(&self, y: u32) -> bool {
+            (0..self.width).any(|x| self.ink(x, y) != 0)
+        }
+
+        /// Total ink per column.
+        fn columns(&self) -> slopos_ostd::KVec<u32> {
+            slopos_ostd::KVec::from_iter_fallible(
+                (0..self.width).map(|x| (0..self.height).map(|y| self.ink(x, y)).sum()),
+            )
+            .expect("test alloc")
+        }
+    }
+
+    /// Ink-weighted mean column, pixel centres at `x + 0.5`.
+    fn centroid(columns: &[u32]) -> f32 {
+        let total: u32 = columns.iter().sum();
+        let moment: f32 = columns
+            .iter()
+            .enumerate()
+            .map(|(x, &ink)| (x as f32 + 0.5) * ink as f32)
+            .sum();
+        moment / total as f32
+    }
+
+    #[test]
+    fn every_glyph_standing_on_the_baseline_ends_exactly_on_it() {
+        let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
+        let mut standing = 0usize;
+        for size in 11u16..=24 {
+            let mut canvas = TestCanvas::new(96, 64);
+            let (x, y) = (8, 8);
+            let baseline = (y + renderer.ascent(size)) as u32;
+            for slot in 0..GLYPH_COUNT {
+                let cp = slot_codepoint(slot).unwrap();
+                let Some(gid) = drawable_glyph(&renderer.font, cp) else {
+                    continue;
+                };
+                let Some(outline) = renderer.font.glyph_outline(gid) else {
+                    continue;
+                };
+                if outline.y_min != 0 || outline.contours.is_empty() {
+                    continue;
+                }
+                standing += 1;
+                let ch = char::from_u32(cp).unwrap();
+                let mut text = [0u8; 4];
+                canvas.clear();
+                renderer.draw_text(
+                    &mut canvas,
+                    x,
+                    y,
+                    ch.encode_utf8(&mut text),
+                    size,
+                    Color32::WHITE,
+                    Color32::BLACK,
+                );
+                assert!(
+                    canvas.row_has_ink(baseline - 1),
+                    "U+{cp:04X} at {size} px leaves the row above its baseline empty"
+                );
+                for row in baseline..canvas.height {
+                    assert!(
+                        !canvas.row_has_ink(row),
+                        "U+{cp:04X} at {size} px inks row {} below its baseline",
+                        row - baseline
+                    );
+                }
+            }
+        }
+        assert!(standing > 14 * 100, "only {standing} glyphs checked");
+    }
+
+    #[test]
+    fn a_runs_ink_stays_within_a_quarter_pixel_of_its_pen() {
+        let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
+        let font = TtfFont::parse(INTER_TTF).unwrap();
+        let origin = 8;
+        for size in 11u16..=24 {
+            let scale = size as f32 / font.units_per_em() as f32;
+            let mut canvas = TestCanvas::new(560, 48);
+            for text in [
+                "l l l l l l l l l l l l l l",
+                "s t a r t e d",
+                "t h e v o l u m e",
+                "A V W a v e s",
+            ] {
+                // The ideal pen, straight from the font's tables.
+                let mut expected = slopos_ostd::KVec::new();
+                let mut pen = origin as f32;
+                let mut previous = None;
+                for ch in text.chars() {
+                    let gid = font.glyph_index(ch as u32).unwrap();
+                    if let Some(left) = previous {
+                        pen += font.kerning(left, gid) as f32 * scale;
+                    }
+                    if ch != ' ' {
+                        canvas.clear();
+                        let mut one = [0u8; 4];
+                        renderer.draw_text(
+                            &mut canvas,
+                            origin,
+                            8,
+                            ch.encode_utf8(&mut one),
+                            size,
+                            Color32::WHITE,
+                            Color32::BLACK,
+                        );
+                        let alone = centroid(canvas.columns().as_slice()) - origin as f32;
+                        expected.push((ch, pen + alone)).unwrap();
+                    }
+                    pen += font.h_metrics(gid).unwrap().advance_width as f32 * scale;
+                    previous = Some(gid);
+                }
+
+                canvas.clear();
+                renderer.draw_text(
+                    &mut canvas,
+                    origin,
+                    8,
+                    text,
+                    size,
+                    Color32::WHITE,
+                    Color32::BLACK,
+                );
+                let columns = canvas.columns();
+                let mut blobs = slopos_ostd::KVec::new();
+                let mut start = None;
+                for (x, &ink) in columns.iter().enumerate().chain([(columns.len(), &0)]) {
+                    match (start, ink != 0) {
+                        (None, true) => start = Some(x),
+                        (Some(from), false) => {
+                            let mut blob = slopos_ostd::KVec::<u32>::zeroed(columns.len()).unwrap();
+                            blob[from..x].copy_from_slice(&columns[from..x]);
+                            blobs.push(centroid(blob.as_slice())).unwrap();
+                            start = None;
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(blobs.len(), expected.len(), "{text:?} at {size} px");
+                for (&drawn, &(ch, ideal)) in blobs.iter().zip(expected.iter()) {
+                    assert!(
+                        (drawn - ideal).abs() <= 0.25,
+                        "{ch:?} in {text:?} at {size} px is drawn at {drawn:.3}, its pen puts it at {ideal:.3}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kerned_pairs_measure_narrower_than_their_glyphs() {
+        let renderer = FontRenderer::new(INTER_TTF).unwrap();
+        for size in 11u16..=24 {
+            for (pair, left, right) in [("To", "T", "o"), ("AV", "A", "V")] {
+                let together = run_width(&renderer.font, pair, size);
+                let apart =
+                    run_width(&renderer.font, left, size) + run_width(&renderer.font, right, size);
+                assert!(
+                    together < apart,
+                    "{pair:?} at {size} px is {together} wide, its glyphs {apart}"
+                );
+            }
+        }
+        assert!(
+            renderer.text_width("To", 24)
+                < renderer.text_width("T", 24) + renderer.text_width("o", 24)
+        );
+    }
+
+    #[test]
+    fn fitting_and_measuring_agree_on_a_kerned_run() {
+        let renderer = FontRenderer::new(INTER_TTF).unwrap();
+        let text = "AVATAR Today";
+        for size in 11u16..=24 {
+            let width = renderer.text_width(text, size);
+            assert_eq!(renderer.prefix_fitting(text, size, width), text.len());
+            let short = renderer.prefix_fitting(text, size, width - 1);
+            assert!(short < text.len());
+            assert!(renderer.text_width(&text[..short], size) <= width - 1);
+        }
     }
 }

@@ -3,13 +3,11 @@
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::Color32;
-use slopos_font::FontRenderer;
+use slopos_appkit::text::ui;
 use slopos_gfx::canvas_ops::{circle_filled, line_aa};
 
 use crate::gfx::{self, DrawBuffer};
 use crate::theme;
-
-const TITLE_FONT_SIZE: u16 = 14;
 
 /// Half-length of the close/expand cross/plus glyph arms.
 const GLYPH_HALF: i32 = theme::SIGNAL_GLYPH_SIZE / 2;
@@ -27,7 +25,6 @@ pub fn draw_window_decorations(
     title: &str,
     focused: bool,
     signal_hovered: bool,
-    font: Option<&mut FontRenderer>,
     clip: Option<DamageRect>,
 ) {
     let full_clip = DamageRect {
@@ -40,9 +37,7 @@ pub fn draw_window_decorations(
 
     draw_title_bar_background(buf, window_x, window_y, window_w, window_h, focused, &clip);
     draw_signal_buttons(buf, window_x, window_y, focused, signal_hovered, &clip);
-    draw_title_text(
-        buf, window_x, window_y, window_w, title, focused, font, &clip,
-    );
+    draw_title_text(buf, window_x, window_y, window_w, title, focused, &clip);
 }
 
 /// Hit-test the signal button group: `Some(0)` = close, `Some(1)` = minimize,
@@ -359,7 +354,6 @@ fn draw_title_text(
     window_w: u32,
     title: &str,
     focused: bool,
-    font: Option<&mut FontRenderer>,
     clip: &DamageRect,
 ) {
     if title.is_empty() {
@@ -377,161 +371,21 @@ fn draw_title_text(
         return;
     }
 
-    if let Some(font) = font {
-        draw_title_text_ttf(
-            buf, window_x, window_y, window_w, title, text_color, bg_color, font, max_text_w, clip,
-        );
-    } else {
-        draw_title_text_bitmap(
-            buf, window_x, window_y, window_w, title, text_color, bg_color, max_text_w, clip,
-        );
-    }
-}
-
-fn draw_title_text_ttf(
-    buf: &mut DrawBuffer,
-    window_x: i32,
-    window_y: i32,
-    window_w: u32,
-    title: &str,
-    text_color: Color32,
-    bg_color: Color32,
-    font: &mut FontRenderer,
-    max_text_w: i32,
-    _clip: &DamageRect,
-) {
-    let (measured_w, measured_h) = font.measure_text(title, TITLE_FONT_SIZE);
-
-    let (display_title, needs_ellipsis) = if measured_w > max_text_w {
-        truncate_title_for_width(title, font, max_text_w)
-    } else {
-        (title, false)
-    };
-
-    let display_w = if needs_ellipsis {
-        let (base_w, _) = font.measure_text(display_title, TITLE_FONT_SIZE);
-        let (dots_w, _) = font.measure_text("...", TITLE_FONT_SIZE);
-        base_w + dots_w
-    } else {
-        measured_w.min(max_text_w)
-    };
-
-    let text_x = window_x + (window_w as i32 - display_w) / 2;
-    let text_y = window_y + (theme::TITLE_BAR_HEIGHT - measured_h.min(TITLE_FONT_SIZE as i32)) / 2;
-
-    font.draw_text(
+    let size = theme::TITLE_TEXT_PX;
+    let weight = ui::Weight::Regular;
+    let text_w = ui::elided_width(title, size, weight, max_text_w);
+    ui::draw_elided(
         buf,
-        text_x,
-        text_y,
-        display_title,
-        TITLE_FONT_SIZE,
+        window_x + (window_w as i32 - text_w) / 2,
+        ui::centred_top(window_y, theme::TITLE_BAR_HEIGHT, size),
+        title,
+        size,
+        weight,
+        max_text_w,
         text_color,
         bg_color,
+        clip,
     );
-    if needs_ellipsis {
-        let (base_w, _) = font.measure_text(display_title, TITLE_FONT_SIZE);
-        font.draw_text(
-            buf,
-            text_x + base_w,
-            text_y,
-            "...",
-            TITLE_FONT_SIZE,
-            text_color,
-            bg_color,
-        );
-    }
-}
-
-/// Draw title text using the bitmap (VGA 8x16) fallback font.
-fn draw_title_text_bitmap(
-    buf: &mut DrawBuffer,
-    window_x: i32,
-    window_y: i32,
-    window_w: u32,
-    title: &str,
-    text_color: Color32,
-    bg_color: Color32,
-    max_text_w: i32,
-    clip: &DamageRect,
-) {
-    let cell_w = gfx::font::cell_width();
-    let cell_h = gfx::font::cell_height();
-
-    let max_chars = if cell_w > 0 {
-        (max_text_w / cell_w) as usize
-    } else {
-        return;
-    };
-
-    if max_chars == 0 {
-        return;
-    }
-
-    let title_bytes = title.as_bytes();
-    let title_len = title_bytes.len();
-    let (display_len, needs_ellipsis) = if title_len > max_chars {
-        (max_chars.saturating_sub(3), true)
-    } else {
-        (title_len, false)
-    };
-
-    let display_w = if needs_ellipsis {
-        (display_len + 3) as i32 * cell_w
-    } else {
-        display_len as i32 * cell_w
-    };
-
-    let text_x = window_x + (window_w as i32 - display_w) / 2;
-    let text_y = window_y + (theme::TITLE_BAR_HEIGHT - cell_h) / 2;
-
-    let safe_end = find_utf8_boundary(title, display_len);
-    let display_str = &title[..safe_end];
-
-    gfx::draw_str_clipped(buf, text_x, text_y, display_str, text_color, bg_color, clip);
-
-    if needs_ellipsis {
-        let dots_x = text_x + safe_end as i32 * cell_w;
-        gfx::draw_str_clipped(buf, dots_x, text_y, "...", text_color, bg_color, clip);
-    }
-}
-
-/// Truncate `title` so its rendered width with "..." appended fits `max_w`
-/// pixels at `TITLE_FONT_SIZE`. Returns `(truncated_slice, needs_ellipsis)`.
-fn truncate_title_for_width<'a>(
-    title: &'a str,
-    font: &FontRenderer,
-    max_w: i32,
-) -> (&'a str, bool) {
-    let (dots_w, _) = font.measure_text("...", TITLE_FONT_SIZE);
-    let target_w = (max_w - dots_w).max(0);
-
-    let mut end = 0;
-    for (i, ch) in title.char_indices() {
-        let next = i + ch.len_utf8();
-        let (w, _) = font.measure_text(&title[..next], TITLE_FONT_SIZE);
-        if w > target_w {
-            break;
-        }
-        end = next;
-    }
-
-    if end == 0 && !title.is_empty() {
-        // At least show the ellipsis alone.
-        return ("", true);
-    }
-    (&title[..end], true)
-}
-
-/// Find a UTF-8-safe byte boundary at or before `target` in `s`.
-fn find_utf8_boundary(s: &str, target: usize) -> usize {
-    if target >= s.len() {
-        return s.len();
-    }
-    let mut pos = target;
-    while pos > 0 && !s.is_char_boundary(pos) {
-        pos -= 1;
-    }
-    pos
 }
 
 /// Integer square root (floor).

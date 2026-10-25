@@ -14,6 +14,7 @@ use slopos_abi::input::keycode::{
     KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_KP_ENTER, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP,
 };
 use slopos_abi::syscall::{F_GETFD, MSG_NOSIGNAL};
+use slopos_appkit::text::ui;
 use slopos_gfx::blend::fill_rect_blended;
 use slopos_gfx::canvas_ops::rounded_rect_filled;
 use slopos_priv_core::INIT;
@@ -22,7 +23,7 @@ use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 
 use crate::apps::privd::CONSENT_FD;
-use crate::gfx::{self, DamageRect, DrawBuffer};
+use crate::gfx::{DamageRect, DrawBuffer};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, core as sys_core, fs, net};
 use crate::theme::*;
 
@@ -99,7 +100,7 @@ fn wrap(text: &str, max_w: i32) -> Vec<String> {
     for ch in text.chars() {
         let line = lines.last_mut().expect("never empty");
         line.push(ch);
-        if line.chars().count() > 1 && gfx::font::string_width(line) > max_w {
+        if line.chars().count() > 1 && ui::width(line, TEXT_PX) > max_w {
             line.pop();
             lines.push(ch.to_string());
         }
@@ -108,7 +109,7 @@ fn wrap(text: &str, max_w: i32) -> Vec<String> {
 }
 
 fn layout(dialog: &Dialog, screen_w: u32, screen_h: u32) -> Layout {
-    let line = gfx::cell_height();
+    let line = ui::line_height(TEXT_PX);
     let w = CARD_W.min(screen_w as i32 - 2 * PAD);
     let text_w = w - 2 * PAD;
     let mut paragraphs = vec![
@@ -464,7 +465,17 @@ impl Consent {
             PANEL_BG_OPAQUE,
         );
         for (text, colour, y) in &at.lines {
-            gfx::draw_str_clipped(buf, card.x0 + PAD, *y, text, *colour, PANEL_BG_OPAQUE, clip);
+            ui::draw_clipped(
+                buf,
+                card.x0 + PAD,
+                *y,
+                text,
+                TEXT_PX,
+                ui::Weight::Regular,
+                *colour,
+                PANEL_BG_OPAQUE,
+                clip,
+            );
         }
         if let Some(field) = &at.field {
             let (w, h) = (field.x1 - field.x0 + 1, field.y1 - field.y0 + 1);
@@ -482,14 +493,16 @@ impl Consent {
                 RADIUS / 2 - BORDER,
                 PANEL_BG_OPAQUE,
             );
-            let room = (w - 2 * PAD) / gfx::font::string_width("*").max(1);
-            let masked = "*".repeat(dialog.typed_chars().min(room.max(0) as usize));
-            let text_y = field.y0 + (h - gfx::cell_height()) / 2;
-            gfx::draw_str_clipped(
+            let room = (w - 2 * PAD) / ui::width(ui::BULLET, TEXT_PX).max(1);
+            let masked = ui::BULLET.repeat(dialog.typed_chars().min(room.max(0) as usize));
+            let text_y = ui::centred_top(field.y0, h, TEXT_PX);
+            ui::draw_clipped(
                 buf,
                 field.x0 + PAD,
                 text_y,
                 &masked,
+                TEXT_PX,
+                ui::Weight::Regular,
                 TEXT_PRIMARY,
                 PANEL_BG_OPAQUE,
                 clip,
@@ -514,9 +527,19 @@ impl Consent {
                 BUTTON_H / 2,
                 fill,
             );
-            let label_x = r.x0 + (BUTTON_W - gfx::font::string_width(label)) / 2;
-            let label_y = r.y0 + (BUTTON_H - gfx::cell_height()) / 2;
-            gfx::draw_str_clipped(buf, label_x, label_y, label, TEXT_PRIMARY, fill, clip);
+            let label_x = r.x0 + (BUTTON_W - ui::width(label, TEXT_PX)) / 2;
+            let label_y = ui::centred_top(r.y0, BUTTON_H, TEXT_PX);
+            ui::draw_clipped(
+                buf,
+                label_x,
+                label_y,
+                label,
+                TEXT_PX,
+                ui::Weight::Regular,
+                TEXT_PRIMARY,
+                fill,
+                clip,
+            );
         }
     }
 }

@@ -16,11 +16,18 @@ pub struct Edge {
     pub y1: f32,
 }
 
-/// Convert a glyph outline from font units to pixel-space edges.
+/// Convert a glyph outline from font units to pixel-space edges, each point at
+/// `(x_offset + x · scale, y_offset − y · scale)`.
 ///
 /// The Y axis is flipped on the way: TTF is Y-up, the screen is Y-down.
-pub fn outline_to_edges(outline: &GlyphOutline, scale: f32, y_offset: f32) -> KVec<Edge> {
+pub fn outline_to_edges(
+    outline: &GlyphOutline,
+    scale: f32,
+    x_offset: f32,
+    y_offset: f32,
+) -> KVec<Edge> {
     let mut edges: KVec<Edge> = KVec::new();
+    let at = |p: &OutlinePoint| (x_offset + p.x as f32 * scale, y_offset - p.y as f32 * scale);
 
     for contour in &outline.contours {
         if contour.points.is_empty() {
@@ -40,10 +47,8 @@ pub fn outline_to_edges(outline: &GlyphOutline, scale: f32, y_offset: f32) -> KV
             let p1 = &expanded[(i + 1) % n];
 
             if p1.on_curve {
-                let x0 = p0.x as f32 * scale;
-                let y0 = y_offset - p0.y as f32 * scale;
-                let x1 = p1.x as f32 * scale;
-                let y1 = y_offset - p1.y as f32 * scale;
+                let (x0, y0) = at(p0);
+                let (x1, y1) = at(p1);
 
                 if (y0 - y1).abs() > 0.001 {
                     edges.push(Edge { x0, y0, x1, y1 }).expect("edges: alloc");
@@ -52,16 +57,10 @@ pub fn outline_to_edges(outline: &GlyphOutline, scale: f32, y_offset: f32) -> KV
             } else {
                 // Quadratic Bézier: p0 (on) -> p1 (off) -> p2 (on)
                 let p2 = &expanded[(i + 2) % n];
-
-                flatten_quadratic_bezier(
-                    p0.x as f32 * scale,
-                    y_offset - p0.y as f32 * scale,
-                    p1.x as f32 * scale,
-                    y_offset - p1.y as f32 * scale,
-                    p2.x as f32 * scale,
-                    y_offset - p2.y as f32 * scale,
-                    &mut edges,
-                );
+                let (x0, y0) = at(p0);
+                let (cx, cy) = at(p1);
+                let (x1, y1) = at(p2);
+                flatten_quadratic_bezier(x0, y0, cx, cy, x1, y1, &mut edges);
                 i += 2;
             }
         }

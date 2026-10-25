@@ -5,7 +5,8 @@ use slopos_ostd::KVec;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
-use crate::{FontRenderer, FontSource};
+use crate::FontSource;
+use crate::ttf_parser::TtfFont;
 
 use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT, boxdraw, glyph_slot, slot_codepoint};
 
@@ -119,13 +120,9 @@ impl AtlasBuilder {
 impl GlyphAtlas {
     /// Create a new atlas by pre-rasterizing the whole glyph set at `size_px`.
     pub fn new(font_data: &[u8], size_px: u16) -> Option<Self> {
-        let renderer = FontRenderer::new(font_data)?;
-        let upem = renderer.font.units_per_em() as f32;
-        if upem == 0.0 {
-            return None;
-        }
-        let scale = size_px as f32 / upem;
-        let hhea = renderer.font.hhea();
+        let font = TtfFont::parse(font_data)?;
+        let scale = crate::scale(&font, size_px);
+        let hhea = font.hhea();
         let ascender = libm::ceilf(hhea.ascender as f32 * scale) as i32;
         let descender = libm::floorf(hhea.descender as f32 * scale) as i32;
         let line_gap = libm::roundf(hhea.line_gap as f32 * scale) as i32;
@@ -135,8 +132,8 @@ impl GlyphAtlas {
         // cell geometry the terminal grid is sized from; wider glyphs are clipped.
         let mut max_advance: u16 = 0;
         for cp in ASCII_FIRST..=ASCII_LAST {
-            if let Some(gid) = renderer.font.glyph_index(cp) {
-                if let Some(hm) = renderer.font.h_metrics(gid) {
+            if let Some(gid) = font.glyph_index(cp) {
+                if let Some(hm) = font.h_metrics(gid) {
                     let adv = libm::ceilf(hm.advance_width as f32 * scale) as u16;
                     if adv > max_advance {
                         max_advance = adv;
@@ -165,12 +162,14 @@ impl GlyphAtlas {
             }
             // Keyed on the cmap, not on empty coverage: a space legitimately
             // rasterizes to nothing. An uncovered codepoint answers glyph 0.
-            if !matches!(renderer.font.glyph_index(cp), Some(gid) if gid != 0) {
+            if !matches!(font.glyph_index(cp), Some(gid) if gid != 0) {
                 fill_replacement(cell, cw, ch);
                 continue;
             }
 
-            if let Some(rg) = renderer.rasterize_glyph(cp, size_px, scale, ascender) {
+            // Rasterised at phase 0 on the cell's whole-pixel pen, so the
+            // baseline is row `ascender` of every cell.
+            if let Some(rg) = crate::rasterize_glyph(&font, cp, scale, 0) {
                 let glyph_advance = rg.advance as i32;
                 let x_center = (cell_w as i32 - glyph_advance) / 2;
                 let gx_start = x_center + rg.bearing_x as i32;

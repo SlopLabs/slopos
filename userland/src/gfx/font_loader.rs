@@ -1,9 +1,6 @@
 const FONT_DIR: &str = "/usr/share/fonts";
 
-const FONT_MAP: &[(&str, &str)] = &[
-    ("mono", "JetBrainsMono-Regular.ttf"),
-    ("sans", "Inter-Regular.ttf"),
-];
+const FONT_MAP: &[(&str, &str)] = &[("mono", "JetBrainsMono-Regular.ttf")];
 
 pub fn load_font(name: &str) -> Option<&'static [u8]> {
     let filename = FONT_MAP
@@ -26,8 +23,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn font_map_contains_mono_and_sans() {
+    fn font_map_contains_mono() {
         assert!(FONT_MAP.iter().any(|(k, _)| *k == "mono"));
-        assert!(FONT_MAP.iter().any(|(k, _)| *k == "sans"));
     }
 }

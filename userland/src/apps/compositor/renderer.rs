@@ -1,6 +1,6 @@
 use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
 use slopos_abi::pixel::PixelFormat;
-use slopos_font::FontRenderer;
+use slopos_appkit::text::ui;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_image::{DecodeOptions, Image};
 
@@ -152,8 +152,6 @@ pub struct Renderer {
     pub output_height: u32,
     pub output_bytes_pp: u8,
     pub output_pitch: usize,
-    ttf_font: Option<FontRenderer<'static>>,
-    ttf_init_attempted: bool,
     wallpaper: WallpaperCache,
 }
 
@@ -164,21 +162,7 @@ impl Renderer {
             output_height: 0,
             output_bytes_pp: 4,
             output_pitch: 0,
-            ttf_font: None,
-            ttf_init_attempted: false,
             wallpaper: WallpaperCache::new(),
-        }
-    }
-
-    fn ensure_font(&mut self) {
-        if self.ttf_init_attempted {
-            return;
-        }
-        self.ttf_init_attempted = true;
-
-        if let Some(data) = crate::gfx::font_loader::load_font("sans") {
-            self.ttf_font =
-                FontRenderer::new_with_source(data, slopos_font::FontSource::Filesystem);
         }
     }
 
@@ -220,8 +204,6 @@ impl Renderer {
         frame_damage: &Region,
         hw_cursor: bool,
     ) {
-        self.ensure_font();
-
         let output_rect = full_screen_clip(buf);
         // Clip damage to the output; the region is already disjoint so blended
         // primitives (shadows) never touch a pixel twice.
@@ -306,7 +288,6 @@ impl Renderer {
                     title,
                     focused,
                     sig_hovered,
-                    self.ttf_font.as_mut(),
                     Some(*rect),
                 );
                 buf.set_scissor(None);
@@ -330,7 +311,6 @@ impl Renderer {
                 self.output_height,
                 mouse_x,
                 mouse_y,
-                self.ttf_font.as_mut(),
                 Some(*rect),
             );
             if intersect_rect(rect, &bar_rect).is_some() {
@@ -340,7 +320,6 @@ impl Renderer {
                     active_app_name,
                     mouse_x,
                     mouse_y,
-                    self.ttf_font.as_mut(),
                     Some(*rect),
                 );
             }
@@ -944,12 +923,14 @@ impl Renderer {
 
         let text = "Window content pending migration";
         let text_x = wx + 10;
-        let text_y = wy + wh / 2 - 8;
-        gfx::draw_str_clipped(
+        let text_y = ui::centred_top(wy, wh, TEXT_PX);
+        ui::draw_clipped(
             buf,
             text_x,
             text_y,
             text,
+            TEXT_PX,
+            ui::Weight::Regular,
             COLOR_TEXT,
             COLOR_WINDOW_PLACEHOLDER,
             clip,

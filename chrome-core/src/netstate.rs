@@ -100,21 +100,16 @@ pub const PANEL_LABELS: &[&str] = &[
     IFACE_SEPARATOR,
     IFACE_OFF_LABEL,
     IFACE_NO_CARRIER_LABEL,
-    TRUNCATION,
 ];
 
 pub const GATEWAY_LABEL: &str = "Gateway";
 
-/// U+00B7 MIDDLE DOT, which the atlas covers (Latin-1), leaving the hyphen to
-/// mean only range or minus.
+/// U+00B7 MIDDLE DOT, leaving the hyphen to mean only range or minus.
 pub const IFACE_SEPARATOR: &str = " \u{B7} ";
 
 pub const IFACE_OFF_LABEL: &str = "off";
 
 pub const IFACE_NO_CARRIER_LABEL: &str = "unplugged";
-
-/// Two periods, not an ellipsis: the atlas has no U+2026.
-pub const TRUNCATION: &str = "..";
 
 /// What a panel row is currently doing, as one ordered decision the dot's
 /// colour and the status word both render. `carrier` on its own is not that

@@ -21,6 +21,10 @@ pub const SYSTEM_BAR_CLOCK_GAP: i32 = slopos_chrome_core::BAR_ITEM_GAP;
 /// boundary.
 pub const STATUS_GLYPH_SCALE: i32 = 1;
 
+pub const TEXT_PX: u16 = 14;
+pub const BAR_TEXT_PX: u16 = 13;
+pub const TITLE_TEXT_PX: u16 = 14;
+
 pub const TITLE_BAR_HEIGHT: i32 = 28;
 pub const WINDOW_CORNER_RADIUS: i32 = 8;
 pub const TITLE_MAX_TEXT_WIDTH_MARGIN: i32 = 140;

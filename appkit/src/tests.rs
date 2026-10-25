@@ -1822,6 +1822,14 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             controls::test_partition_bar_paints_fills_hatch_and_highlight,
         ),
         (
+            "label_beside_a_styled_label_shares_its_baseline",
+            controls::test_label_beside_a_styled_label_shares_its_baseline,
+        ),
+        (
+            "a_baseline_row_lines_up_text_of_different_heights",
+            controls::test_a_baseline_row_lines_up_text_of_different_heights,
+        ),
+        (
             "indeterminate_progress_sweeps_to_and_fro",
             controls::test_indeterminate_progress_sweeps_to_and_fro,
         ),

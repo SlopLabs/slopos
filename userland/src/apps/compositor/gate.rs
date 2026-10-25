@@ -18,10 +18,11 @@ use slopos_abi::input::keycode::{
     KEY_LEFTCTRL, KEY_RIGHTALT, KEY_RIGHTCTRL, KEY_TAB, KEY_UP,
 };
 use slopos_abi::input::{MODIFIER_ALT, MODIFIER_CTRL};
+use slopos_appkit::text::ui;
 use slopos_gfx::canvas_ops::rounded_rect_filled;
 use slopos_priv_core::consent::Secret;
 
-use crate::gfx::{self, DamageRect, DrawBuffer};
+use crate::gfx::{DamageRect, DrawBuffer};
 use crate::init_control::{self, Command};
 use crate::theme::*;
 
@@ -334,7 +335,7 @@ impl Gate {
             0,
             DESKTOP_BG,
         );
-        let line = gfx::cell_height();
+        let line = ui::line_height(TEXT_PX);
         let w = CARD_W.min(screen_w as i32 - 2 * PAD);
         let (title, hint) = match &self.role {
             Role::Greeter => (
@@ -369,7 +370,17 @@ impl Gate {
             PANEL_BG_OPAQUE,
         );
         let text = |buf: &mut DrawBuffer, y: i32, s: &str, colour| {
-            gfx::draw_str_clipped(buf, x + PAD, y, s, colour, PANEL_BG_OPAQUE, clip);
+            ui::draw_clipped(
+                buf,
+                x + PAD,
+                y,
+                s,
+                TEXT_PX,
+                ui::Weight::Regular,
+                colour,
+                PANEL_BG_OPAQUE,
+                clip,
+            );
         };
         y += PAD;
         text(buf, y, &title, TEXT_PRIMARY);
@@ -399,15 +410,17 @@ impl Gate {
             let shown = match field {
                 Field::Name => self.name.clone(),
                 Field::Password => {
-                    let room = (fw - 2 * PAD) / gfx::font::string_width("*").max(1);
-                    "*".repeat(self.secret.chars().min(room.max(0) as usize))
+                    let room = (fw - 2 * PAD) / ui::width(ui::BULLET, TEXT_PX).max(1);
+                    ui::BULLET.repeat(self.secret.chars().min(room.max(0) as usize))
                 }
             };
-            gfx::draw_str_clipped(
+            ui::draw_clipped(
                 buf,
                 x + 2 * PAD,
-                y + (FIELD_H - line) / 2,
+                ui::centred_top(y, FIELD_H, TEXT_PX),
                 &shown,
+                TEXT_PX,
+                ui::Weight::Regular,
                 TEXT_PRIMARY,
                 PANEL_BG_OPAQUE,
                 clip,

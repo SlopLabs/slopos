@@ -11,6 +11,7 @@ pub struct StyledLabelWidget {
     text: String,
     color: Color32,
     alignment: TextAlignment,
+    baseline: i32,
 }
 
 impl StyledLabelWidget {
@@ -20,6 +21,7 @@ impl StyledLabelWidget {
             text,
             color,
             alignment,
+            baseline: 0,
         }
     }
 }
@@ -34,8 +36,10 @@ impl Widget for StyledLabelWidget {
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let text_w = ctx.text_width(&self.text);
-        let line_height = ctx.style.line_height;
-        constraints.constrain(Size::new(text_w, line_height))
+        let size = constraints.constrain(Size::new(text_w, ctx.style.line_height));
+        // `paint` centres the line in whatever height it is given.
+        self.baseline = ctx.baseline_in(size.height);
+        size
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
@@ -48,9 +52,10 @@ impl Widget for StyledLabelWidget {
         };
         // Centred in the rect, not parked at its top: a label in a bar taller
         // than one line — a status bar, a header — gets the bar's height, and
-        // drawing at `rect.y` leaves the text riding high in it.
-        let y = rect.y + (rect.height - ctx.text_height()) / 2;
-        ctx.draw_text_transparent(x, y, &self.text, self.color);
+        // drawing at `rect.y` leaves the text riding high in it. In a rect one
+        // line box tall this is the baseline a `LabelWidget` uses.
+        let baseline = rect.y + ctx.baseline_in(rect.height);
+        ctx.draw_text_on_baseline(x, baseline, &self.text, self.color);
     }
 
     fn event(
@@ -68,6 +73,10 @@ impl Widget for StyledLabelWidget {
 
     fn accessible_name(&self) -> Option<&str> {
         Some(&self.text)
+    }
+
+    fn baseline(&self) -> Option<i32> {
+        Some(self.baseline)
     }
 
     fn focus_policy(&self) -> FocusPolicy {

@@ -489,7 +489,7 @@ tests replace any test that pins an exact wording.
 
 Each phase ends with something that runs, and lands as commits of its own.
 
-### Phase 1: Text on its line
+### Phase 1: Text on its line (done)
 
 - Snap the baseline in `FontRenderer` and in the atlas.
 - Add quarter-pixel phases and `GPOS` pair kerning.

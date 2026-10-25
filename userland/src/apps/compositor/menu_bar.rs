@@ -8,17 +8,14 @@
 //! both the old and the new rect when a hover flips.
 
 use slopos_abi::draw::Color32;
+use slopos_appkit::text::ui;
 use slopos_chrome_core::status::{StatusLayout, hit_status_item, layout_status_items};
-use slopos_font::FontRenderer;
 
 use super::hover::HOVER_STATUS_ITEM_BASE;
 use super::popover::Panel;
 use super::status_item::{STATUS_ITEM_COUNT, StatusItems, hover_rect};
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::theme::*;
-
-/// Font size used when rendering with the TrueType font renderer.
-const BAR_FONT_SIZE: u16 = 13;
 
 const ICON_RADIUS: i32 = SYSTEM_BAR_ICON_SIZE / 2;
 
@@ -28,8 +25,6 @@ const BAR_BG: Color32 = Color32::new(
     PANEL_BG.blue(),
     PANEL_BG_ALPHA,
 );
-
-const ELLIPSIS: &str = "...";
 
 /// Damage rects [`SystemBar::take_damage`] can emit in one frame: one per
 /// item, or the single spanning rect a layout change produces.
@@ -91,7 +86,6 @@ impl SystemBar {
         active_app_name: &str,
         cursor_x: i32,
         cursor_y: i32,
-        font: Option<&mut FontRenderer>,
         clip: Option<DamageRect>,
     ) {
         let sw = screen_width as i32;
@@ -122,15 +116,22 @@ impl SystemBar {
         } else {
             active_app_name
         };
-        let text_y = (bar_h - BAR_FONT_SIZE as i32) / 2;
+        let text_y = ui::centred_top(0, bar_h, BAR_TEXT_PX);
         let name_budget = (layout.app_name_limit - cursor).min(SYSTEM_BAR_MAX_APP_NAME_WIDTH);
 
         if name_budget > 0 {
-            if let Some(font) = font {
-                draw_name_ttf(buf, font, cursor, text_y, name, name_budget);
-            } else {
-                draw_name_bitmap(buf, cursor, text_y, name, name_budget, &clip);
-            }
+            ui::draw_elided(
+                buf,
+                cursor,
+                text_y,
+                name,
+                BAR_TEXT_PX,
+                ui::Weight::Regular,
+                name_budget,
+                TEXT_PRIMARY,
+                PANEL_BG_OPAQUE,
+                &clip,
+            );
         }
 
         for (index, slot) in layout.slots().iter().enumerate() {
@@ -296,116 +297,4 @@ fn push(out: &mut [DamageRect], count: &mut usize, rect: DamageRect) {
         out[*count] = rect;
         *count += 1;
     }
-}
-
-fn draw_name_ttf(
-    buf: &mut DrawBuffer,
-    font: &mut FontRenderer,
-    x: i32,
-    y: i32,
-    name: &str,
-    max_w: i32,
-) {
-    let (full_w, _) = font.measure_text(name, BAR_FONT_SIZE);
-
-    if full_w <= max_w {
-        font.draw_text(
-            buf,
-            x,
-            y,
-            name,
-            BAR_FONT_SIZE,
-            TEXT_PRIMARY,
-            PANEL_BG_OPAQUE,
-        );
-        return;
-    }
-
-    let (ell_w, _) = font.measure_text(ELLIPSIS, BAR_FONT_SIZE);
-    let budget = max_w - ell_w;
-    let prefix_len = find_prefix_len(font, name, budget);
-    let prefix = &name[..prefix_len];
-
-    font.draw_text(
-        buf,
-        x,
-        y,
-        prefix,
-        BAR_FONT_SIZE,
-        TEXT_PRIMARY,
-        PANEL_BG_OPAQUE,
-    );
-    let (pw, _) = font.measure_text(prefix, BAR_FONT_SIZE);
-    font.draw_text(
-        buf,
-        x + pw,
-        y,
-        ELLIPSIS,
-        BAR_FONT_SIZE,
-        TEXT_PRIMARY,
-        PANEL_BG_OPAQUE,
-    );
-}
-
-fn find_prefix_len(font: &FontRenderer, name: &str, budget: i32) -> usize {
-    let mut best = 0;
-    for (i, _) in name.char_indices() {
-        if i == 0 {
-            continue;
-        }
-        let (w, _) = font.measure_text(&name[..i], BAR_FONT_SIZE);
-        if w > budget {
-            break;
-        }
-        best = i;
-    }
-    best
-}
-
-fn draw_name_bitmap(
-    buf: &mut DrawBuffer,
-    x: i32,
-    y: i32,
-    name: &str,
-    max_w: i32,
-    clip: &DamageRect,
-) {
-    let full_w = gfx::font::string_width(name);
-
-    if full_w <= max_w {
-        gfx::draw_str_clipped(buf, x, y, name, TEXT_PRIMARY, PANEL_BG_OPAQUE, clip);
-        return;
-    }
-
-    let ell_w = gfx::font::string_width(ELLIPSIS);
-    let budget = max_w - ell_w;
-    let prefix_len = find_bitmap_prefix_len(name, budget);
-    let prefix = &name[..prefix_len];
-
-    gfx::draw_str_clipped(buf, x, y, prefix, TEXT_PRIMARY, PANEL_BG_OPAQUE, clip);
-    let pw = gfx::font::string_width(prefix);
-    gfx::draw_str_clipped(
-        buf,
-        x + pw,
-        y,
-        ELLIPSIS,
-        TEXT_PRIMARY,
-        PANEL_BG_OPAQUE,
-        clip,
-    );
-}
-
-fn find_bitmap_prefix_len(name: &str, budget: i32) -> usize {
-    let mut best = 0;
-    for (i, _) in name.char_indices() {
-        if i == 0 {
-            continue;
-        }
-        let w = gfx::font::string_width(&name[..i]);
-        if w > budget {
-            break;
-        }
-        best = i;
-    }
-    best
 }

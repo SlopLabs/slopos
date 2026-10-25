@@ -12,6 +12,7 @@ pub struct LabelWidget {
     wrap: bool,
     max_lines: Option<u32>,
     color: Option<Color32>,
+    baseline: i32,
 }
 
 impl LabelWidget {
@@ -23,6 +24,7 @@ impl LabelWidget {
             wrap,
             max_lines,
             color: None,
+            baseline: 0,
         }
     }
 
@@ -80,6 +82,7 @@ impl Widget for LabelWidget {
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let line_height = ctx.style.line_height;
+        self.baseline = ctx.baseline_in(line_height);
 
         if !self.wrap {
             let text_w = ctx.text_width(&self.text);
@@ -138,39 +141,38 @@ impl Widget for LabelWidget {
         }
     }
 
+    /// Each line in a line box of `style.line_height` from the top, its text
+    /// on that box's baseline: the row a [`StyledLabelWidget`] of one line
+    /// puts its text on, so the two line up side by side.
+    ///
+    /// [`StyledLabelWidget`]: super::styled_label::StyledLabelWidget
     fn paint(&self, ctx: &mut PaintContext) {
         let fg = self.color.unwrap_or(ctx.style.text_primary);
         let line_height = ctx.style.line_height;
         let rect = self.layout_rect();
+        let first = rect.y + ctx.baseline_in(line_height);
+        let draw = |ctx: &mut PaintContext, i: usize, line: &str| {
+            let tw = ctx.text_width(line);
+            let x = match self.alignment {
+                TextAlignment::Start => rect.x,
+                TextAlignment::Center => rect.x + (rect.width - tw) / 2,
+                TextAlignment::End => rect.x + rect.width - tw,
+            };
+            ctx.draw_text_on_baseline(x, first + i as i32 * line_height, line, fg);
+        };
 
-        if !self.wrap {
-            let lines: Vec<&str> = self.text.split('\n').collect();
-            let max = self
-                .max_lines
-                .map(|m| m as usize)
-                .unwrap_or(lines.len())
-                .min(lines.len());
-            for (i, line) in lines[..max].iter().enumerate() {
-                let tw = ctx.text_width(line);
-                let x = match self.alignment {
-                    TextAlignment::Start => rect.x,
-                    TextAlignment::Center => rect.x + (rect.width - tw) / 2,
-                    TextAlignment::End => rect.x + rect.width - tw,
-                };
-                let y = rect.y + i as i32 * line_height;
-                ctx.draw_text_transparent(x, y, line, fg);
+        if self.wrap {
+            for (i, line) in self
+                .wrap_lines(&self.text, rect.width, ctx)
+                .iter()
+                .enumerate()
+            {
+                draw(ctx, i, line);
             }
         } else {
-            let lines = self.wrap_lines(&self.text, rect.width, ctx);
-            for (i, line) in lines.iter().enumerate() {
-                let tw = ctx.text_width(line);
-                let x = match self.alignment {
-                    TextAlignment::Start => rect.x,
-                    TextAlignment::Center => rect.x + (rect.width - tw) / 2,
-                    TextAlignment::End => rect.x + rect.width - tw,
-                };
-                let y = rect.y + i as i32 * line_height;
-                ctx.draw_text_transparent(x, y, line, fg);
+            let max = self.max_lines.map_or(usize::MAX, |m| m as usize);
+            for (i, line) in self.text.split('\n').take(max).enumerate() {
+                draw(ctx, i, line);
             }
         }
     }
@@ -190,6 +192,10 @@ impl Widget for LabelWidget {
 
     fn accessible_name(&self) -> Option<&str> {
         Some(&self.text)
+    }
+
+    fn baseline(&self) -> Option<i32> {
+        Some(self.baseline)
     }
 
     fn focus_policy(&self) -> FocusPolicy {

@@ -111,6 +111,13 @@ impl<'a> PaintContext<'a> {
         self.draw_text(x, y, text, fg, Color32::TRANSPARENT);
     }
 
+    /// UI text at the style sheet's body size whose baseline lands on row
+    /// `baseline`, composited over what is there.
+    pub fn draw_text_on_baseline(&mut self, x: i32, baseline: i32, text: &str, fg: Color32) {
+        let top = baseline - crate::text::ui::ascent(self.style.font_size as u16);
+        self.draw_text(x, top, text, fg, Color32::TRANSPARENT);
+    }
+
     /// UI text at an explicit size and weight, composited over what is there.
     pub fn draw_text_styled(
         &mut self,
@@ -158,6 +165,11 @@ impl<'a> PaintContext<'a> {
     /// Line height of UI text at the style sheet's body size.
     pub fn text_height(&self) -> i32 {
         crate::text::ui::line_height(self.style.font_size as u16)
+    }
+
+    /// See [`MeasureCtx::baseline_in`](crate::traits::MeasureCtx::baseline_in).
+    pub fn baseline_in(&self, height: i32) -> i32 {
+        crate::text::ui::baseline_in(height, self.style.font_size as u16)
     }
 
     pub fn mono_cell_width(&self) -> i32 {

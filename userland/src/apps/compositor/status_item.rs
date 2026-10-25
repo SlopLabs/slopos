@@ -6,24 +6,21 @@
 //!
 //! Index order is right-to-left: [`CLOCK_INDEX`] is 0 and therefore rightmost.
 
+use slopos_appkit::text::ui;
 use slopos_chrome_core::{NetIndicatorState, StatusItemSpec, StatusKind, StatusSlot, glyph_for};
 use slopos_gfx::canvas_ops::rounded_rect_filled;
 
 use super::net_glyph;
-use crate::gfx::{self, DamageRect, DrawBuffer};
+use crate::gfx::{DamageRect, DrawBuffer};
 use crate::theme::*;
 
 pub const CLOCK_INDEX: usize = 0;
 pub const NETWORK_INDEX: usize = 1;
 pub const STATUS_ITEM_COUNT: usize = 2;
 
-const BAR_FONT_SIZE: i32 = 13;
-
 const HOVER_PAD_X: i32 = 4;
 const HOVER_INSET_Y: i32 = 2;
 const HOVER_RADIUS: i32 = 4;
-
-const CLOCK_TEXT_Y: i32 = (SYSTEM_BAR_HEIGHT - BAR_FONT_SIZE) / 2;
 
 const GLYPH_Y: i32 = (SYSTEM_BAR_HEIGHT - net_glyph::glyph_height(STATUS_GLYPH_SCALE)) / 2;
 
@@ -77,7 +74,7 @@ impl StatusItems {
             return;
         }
         self.clock = text;
-        let width = gfx::font::string_width(clock_str(&self.clock));
+        let width = ui::width(clock_str(&self.clock), BAR_TEXT_PX);
         let spec = &mut self.specs[CLOCK_INDEX];
         spec.present = true;
         spec.width = width;
@@ -110,8 +107,8 @@ impl StatusItems {
                 STATUS_ITEM_HOVER_BG,
             );
         }
-        // Glyph cells are painted with their background, so hovered text must
-        // blend towards the highlight or every character punches the backdrop
+        // Text is blended towards the background it is given, so hovered text
+        // must blend towards the highlight or its edges punch the backdrop
         // back out.
         let text_bg = if hovered {
             STATUS_ITEM_HOVER_BG
@@ -120,11 +117,13 @@ impl StatusItems {
         };
 
         match slot.kind {
-            StatusKind::Clock => gfx::draw_str_clipped(
+            StatusKind::Clock => ui::draw_clipped(
                 buf,
                 slot.x,
-                CLOCK_TEXT_Y,
+                ui::centred_top(0, SYSTEM_BAR_HEIGHT, BAR_TEXT_PX),
                 clock_str(&self.clock),
+                BAR_TEXT_PX,
+                ui::Weight::Regular,
                 TEXT_PRIMARY,
                 text_bg,
                 clip,

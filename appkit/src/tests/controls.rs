@@ -5,19 +5,22 @@ use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::DrawBuffer;
 
 use super::{FixedSizeWidget, key};
-use crate::constraints::{BoxConstraints, CrossAxisAlignment, Rect, Size};
+use crate::constraints::{BoxConstraints, CrossAxisAlignment, Rect, Size, TextAlignment};
 use crate::event::{EventPhase, MessageSink, NamedKey, PointerButton, WidgetEvent};
 use crate::focus::FocusManager;
-use crate::layout::VStackWidget;
-use crate::node::{BarSegment, RadioOption, SegmentFill};
+use crate::layout::{HStackWidget, VStackWidget};
+use crate::node::{BarSegment, ButtonStyle, RadioOption, SegmentFill};
 use crate::paint::PaintContext;
 use crate::sender::AppSender;
 use crate::style::StyleSheet;
 use crate::traits::{FocusPolicy, MeasureCtx, Widget, WidgetId, measure_widget, place_widget};
+use crate::widgets::button::ButtonWidget;
+use crate::widgets::label::LabelWidget;
 use crate::widgets::partition_bar::{MIN_SEGMENT_WIDTH, PartitionBarWidget, segment_widths};
 use crate::widgets::progress_bar::sweep;
 use crate::widgets::radio_group::RadioGroupWidget;
 use crate::widgets::slider::{Range, SliderGrab, SliderInput, SliderWidget};
+use crate::widgets::styled_label::StyledLabelWidget;
 use slopos_windowing::UiQueue;
 
 const GIB: u64 = 1 << 30;
@@ -501,6 +504,113 @@ pub(super) fn test_partition_bar_widths_keep_a_floor_and_add_up() {
 fn pixel(data: &[u8], width: usize, x: i32, y: i32) -> u32 {
     let at = (y as usize * width + x as usize) * 4;
     u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
+}
+
+/// The lowest row holding ink in columns `x0..x1`.
+fn lowest_ink_row(data: &[u8], width: usize, height: usize, x0: i32, x1: i32) -> Option<i32> {
+    (0..height as i32)
+        .rev()
+        .find(|&y| (x0..x1).any(|x| pixel(data, width, x, y) != 0))
+}
+
+/// A label beside a styled label puts its text on the same row, whatever the
+/// row's alignment. "hill" stands on the baseline and does not cross it, so
+/// its lowest ink is the row above the baseline each widget reports.
+pub(super) fn test_label_beside_a_styled_label_shares_its_baseline() {
+    let style = StyleSheet::dark();
+    for align in [
+        CrossAxisAlignment::Start,
+        CrossAxisAlignment::Center,
+        CrossAxisAlignment::Baseline,
+    ] {
+        let mut row = HStackWidget::new(
+            vec![
+                Box::new(LabelWidget::new(
+                    String::from("hill"),
+                    TextAlignment::Start,
+                    false,
+                    None,
+                )),
+                Box::new(StyledLabelWidget::new(
+                    String::from("hill"),
+                    style.text_secondary,
+                    TextAlignment::Start,
+                )),
+            ],
+            16,
+            align,
+        );
+        let (width, height) = (200usize, 40usize);
+        lay_out(
+            &mut row,
+            BoxConstraints::loose(Size::new(width as i32, height as i32)),
+            (0, 0),
+        );
+        let mut data = vec![0u8; width * height * 4];
+        {
+            let mut buffer =
+                DrawBuffer::new(&mut data, width as u32, height as u32, width * 4, 4).unwrap();
+            let mut ctx = PaintContext::new(&mut buffer, &style);
+            row.paint(&mut ctx);
+        }
+        for child in row.children() {
+            let rect = child.layout_rect();
+            let ink = lowest_ink_row(&data, width, height, rect.x, rect.x + rect.width);
+            let baseline = rect.y + child.baseline().expect("text has a baseline");
+            assert_eq!(ink, Some(baseline - 1), "{align:?}");
+        }
+        let [label, styled] = row.children() else {
+            unreachable!("two children were built")
+        };
+        assert_eq!(
+            label.layout_rect().y + label.baseline().unwrap(),
+            styled.layout_rect().y + styled.baseline().unwrap(),
+            "{align:?}"
+        );
+    }
+}
+
+/// A row aligned by baseline puts a button's label, the first line of a
+/// two-line label and a styled label on one row, stands a widget without text
+/// on it, and is as tall as the most any child reaches above it plus the most
+/// any reaches below.
+pub(super) fn test_a_baseline_row_lines_up_text_of_different_heights() {
+    let mut row = HStackWidget::new(
+        vec![
+            Box::new(FixedSizeWidget::new(12, 40)),
+            Box::new(ButtonWidget::new(
+                String::from("Hill"),
+                None,
+                ButtonStyle::Primary,
+                true,
+            )),
+            Box::new(LabelWidget::new(
+                String::from("hill\nhill"),
+                TextAlignment::Start,
+                false,
+                None,
+            )),
+            Box::new(StyledLabelWidget::new(
+                String::from("hill"),
+                Color32::WHITE,
+                TextAlignment::Start,
+            )),
+        ],
+        8,
+        CrossAxisAlignment::Baseline,
+    );
+    let size = lay_out(&mut row, BoxConstraints::UNBOUNDED, (5, 7));
+    let shared = row.baseline().expect("a row aligned by baseline has one");
+    let (mut above, mut below) = (0, 0);
+    for child in row.children() {
+        let rect = child.layout_rect();
+        let own = child.baseline().unwrap_or(rect.height);
+        assert_eq!(rect.y + own, 7 + shared);
+        above = above.max(own);
+        below = below.max(rect.height - own);
+    }
+    assert_eq!(shared, above);
+    assert_eq!(size.height, above + below);
 }
 
 /// A solid segment is its colour, free space is striped, segments are
