@@ -1,7 +1,24 @@
 # SlopOS Known Issues
 
-Last updated: 2026-10-11
+Last updated: 2026-10-25
 
+
+---
+
+## An install from the live ISO at 512 MiB aborts writing the slots
+
+**Status**: Open
+**Severity**: Medium (the default `just boot-live` machine cannot install)
+**Component**: `userland/src/apps/installer/` (step 5), `mm/src/process_vm.rs:2709`
+
+`ROULETTE=0 just iso`, booted as `boot-live` boots it (`QEMU_MEM=512M`) with
+the ISO in the CD drive and a blank 32 GiB NVMe disk, erases and installs
+through the window up to step 5, *writing both kernel slots and the base*;
+the engine then dies of `SIGABRT` right after the kernel logs
+`process_vm_mmap: Failed to insert VMA`, and the window says *the installer
+stopped before it said how the install ended*. The base it writes is 27.5 MB.
+Not yet known whether the VMA map's insert failed for memory or for another
+reason, nor whether more guest memory avoids it.
 
 ---
 
