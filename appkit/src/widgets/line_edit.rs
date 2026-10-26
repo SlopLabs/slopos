@@ -10,7 +10,7 @@
 
 use std::any::Any;
 
-use slopos_theme_core::{inset, radius};
+use slopos_theme_core::inset;
 
 use crate::constraints::{BoxConstraints, Size};
 use crate::event::{
@@ -188,24 +188,15 @@ impl Widget for LineEditWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let theme = ctx.theme();
-        let radius = radius::CONTROL;
 
-        ctx.fill_rounded_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            radius,
-            theme.surface_sunken,
-        );
-        let border = if self.invalid {
+        let edge = if self.invalid {
             theme.danger
         } else if self.focused {
             theme.focus
         } else {
             theme.border_strong
         };
-        ctx.draw_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius, border);
+        super::field_frame(ctx, rect, self.focused, edge);
 
         if let Some(icon) = self.icon {
             let size = self.icon_size();

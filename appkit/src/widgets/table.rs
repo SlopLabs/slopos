@@ -382,13 +382,7 @@ impl Widget for TableWidget {
                     ctx.fill_rect_blended(rect.x, y, rect.width, self.row_height, wash);
                 }
                 if self.selected == Some(i) {
-                    ctx.fill_rect(
-                        rect.x,
-                        y,
-                        super::SELECTED_EDGE,
-                        self.row_height,
-                        theme.accent,
-                    );
+                    super::selected_edge(ctx, rect.x, y, self.row_height, self.focused);
                 }
 
                 for cell in &self.rows[i] {

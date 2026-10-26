@@ -945,8 +945,8 @@ program holding more than they do.
 **The desktop draws with one theme.** `theme-core`, host-tested under `just
 test-host`, holds the tokens appkit and the compositor read: colour roles in
 one dark table with hover and pressed derived from them, a categorical
-`series`, text roles, a 4 px spacing scale with named insets, radii and
-shadows. Its tests hold body and secondary text to WCAG's 4.5:1 on every
+`series`, text roles, a 4 px spacing scale with named insets, edge widths,
+radii and shadows. Its tests hold body and secondary text to WCAG's 4.5:1 on every
 surface they sit on, hovered and selected rows included, status tones on
 plain surfaces, and edges, focus and disabled text to 3:1. appkit hands its
 widgets the theme through `ctx` (`StyleSheet::theme`), and an app names a

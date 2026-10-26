@@ -672,7 +672,7 @@ impl Popover {
             // Busy keeps the target's own track colour and changes only the
             // knob: a grey track under an on-position knob reads as a disabled
             // control rather than a moving one.
-            let track_colour = if on { ACCENT } else { DIVIDER };
+            let track_colour = if on { ACCENT } else { SWITCH_OFF };
             if offered {
                 rounded_rect_filled(
                     buf,

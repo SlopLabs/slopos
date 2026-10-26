@@ -463,7 +463,8 @@ Grading:
 
 `theme-core` holds the dark table's colour roles, with hover and pressed
 derived, the categorical `series`, the text roles, the 4 px scale and its
-page, section, card and control insets, radii and two shadows; its host tests
+page, section, card and control insets, edge widths, radii and two shadows;
+its host tests
 hold the contrast floors. appkit reads the theme through `ctx`, and `Node`
 names a `Tone`, a `Surface` or a series where it took a colour. Every app
 palette and appkit's own colours are roles, and `userland/src/theme.rs` is the
@@ -600,7 +601,10 @@ Grading:
 - **A state shows.** Hover sits at least 1.1:1 from idle and pressed further,
   and a fill mixes the ink drawn on it, so a light accent button darkens as
   libadwaita's does. A selected row also carries an edge, accent while its
-  list has focus, since its wash alone sits too close to a hovered row's.
+  list has focus, since its wash alone sits too close to a hovered row's. A
+  focused field's edge is `stroke::FOCUS`, twice an idle one's, since `focus`
+  and `border_strong` differ in hue far more than in contrast. A disabled
+  button is edged in `text_disabled`, as a disabled checkbox is.
 - **Apps reach text only by role.** `text::ui` takes pixel sizes for appkit
   and the compositor; an app that calls it, or names a `font_size`, fails the
   gate. appkit's fixed-cell atlas is drawn at the `mono` role.

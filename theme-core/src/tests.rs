@@ -10,8 +10,6 @@ const PLAIN: [ColorRole; 4] = [
     ColorRole::Chrome,
 ];
 
-/// Every surface body and secondary text may sit on: each plain one,
-/// hovered, and with a selected row's wash on it.
 fn reading_surfaces(t: &Theme) -> Vec<(&'static str, Color32)> {
     let mut out = Vec::new();
     for role in PLAIN {
@@ -136,6 +134,13 @@ fn edges_focus_and_disabled_text_reach_three_to_one() {
     }
 }
 
+/// The inner pixels of a focused field's edge go from its fill to `focus`.
+#[test]
+fn a_focused_edge_changes_more_than_its_hue() {
+    assert!(stroke::FOCUS > stroke::EDGE);
+    assert_floor(DARK.focus, DARK.surface_sunken, NON_TEXT, "a focused edge");
+}
+
 /// A disabled control's edge is told from an enabled one's, and its tick
 /// shows on its disabled fill.
 #[test]
@@ -155,16 +160,10 @@ fn a_disabled_control_reads_as_one() {
 }
 
 #[test]
-fn the_old_disabled_text_fails_the_floor() {
-    assert!(ratio(Color32::rgb(0x6b, 0x71, 0x7d), DARK.surface) < NON_TEXT);
-}
-
-#[test]
 fn chrome_is_the_surface_so_frame_and_content_read_as_one() {
     assert_eq!(DARK.chrome, DARK.surface);
 }
 
-/// Each state shows: hovered at least 1.1:1 from idle, pressed further.
 #[test]
 fn states_move_visibly_away_from_the_base_and_keep_its_alpha() {
     let t = &DARK;

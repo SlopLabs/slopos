@@ -387,19 +387,19 @@ impl Gate {
             };
             text(buf, y, label, TEXT_SECONDARY);
             y += line;
-            let edge = match self.field == field {
-                true => FOCUS,
-                false => FIELD_EDGE,
+            let (edge, ew) = match self.field == field {
+                true => (FOCUS, FOCUS_W),
+                false => (FIELD_EDGE, EDGE_W),
             };
             let fw = w - 2 * CARD_PAD;
             rounded_rect_filled(buf, x + CARD_PAD, y, fw, CONTROL_H, FIELD_RADIUS, edge);
             rounded_rect_filled(
                 buf,
-                x + CARD_PAD + EDGE_W,
-                y + EDGE_W,
-                fw - 2 * EDGE_W,
-                CONTROL_H - 2 * EDGE_W,
-                FIELD_RADIUS - EDGE_W,
+                x + CARD_PAD + ew,
+                y + ew,
+                fw - 2 * ew,
+                CONTROL_H - 2 * ew,
+                FIELD_RADIUS - ew,
                 FIELD_BG,
             );
             let shown = match field {

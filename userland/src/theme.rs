@@ -2,7 +2,9 @@
 //! the names its drawing code reads.
 
 use slopos_abi::draw::Color32;
-use slopos_theme_core::{ColorRole, DARK, State, TextRole, inset, radius, space, with_alpha};
+use slopos_theme_core::{
+    ColorRole, DARK, State, TextRole, inset, radius, space, stroke, with_alpha,
+};
 
 // Owned by `slopos_chrome_core::status`, which computes the bar's damage rects
 // and hit regions; a second declaration would drift an item's pixels away from
@@ -86,7 +88,8 @@ pub const CARD_PAD: i32 = space::LG;
 pub const CARD_GAP: i32 = space::SM;
 pub const CARD_RADIUS: i32 = radius::CARD;
 pub const FIELD_RADIUS: i32 = radius::CONTROL;
-pub const EDGE_W: i32 = 1;
+pub const EDGE_W: i32 = stroke::EDGE;
+pub const FOCUS_W: i32 = stroke::FOCUS;
 pub const CONTROL_H: i32 = TextRole::Body.style().line_height + inset::CONTROL.vertical();
 
 pub const DIVIDER: Color32 = DARK.border;
@@ -97,6 +100,7 @@ pub const SIGNAL_CLOSE: Color32 = DARK.danger;
 pub const SIGNAL_MINIMIZE: Color32 = DARK.warning;
 pub const SIGNAL_EXPAND: Color32 = DARK.success;
 pub const SIGNAL_INACTIVE: Color32 = DARK.border_strong;
+pub const SWITCH_OFF: Color32 = DARK.border_strong;
 pub const SIGNAL_GLYPH: Color32 = DARK.text_on_accent;
 
 pub const TEXT_PRIMARY: Color32 = DARK.text;

@@ -130,8 +130,6 @@ impl Widget for ListViewWidget {
                 let item_rect = Rect::new(rect.x, y, rect.width, self.item_height);
 
                 if self.selected == Some(i) {
-                    // Tinted with an accent edge, not a solid bar: the label
-                    // stays in the ordinary text colour.
                     ctx.fill_rect_blended(
                         item_rect.x,
                         item_rect.y,
@@ -139,12 +137,12 @@ impl Widget for ListViewWidget {
                         item_rect.height,
                         theme.selection,
                     );
-                    ctx.fill_rect(
+                    super::selected_edge(
+                        ctx,
                         item_rect.x,
                         item_rect.y,
-                        super::SELECTED_EDGE,
                         item_rect.height,
-                        theme.accent,
+                        self.focused,
                     );
                 } else if self.hovered == Some(i) {
                     ctx.fill_rect_blended(

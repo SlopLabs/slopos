@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use slopos_theme_core::{inset, radius};
+use slopos_theme_core::inset;
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
@@ -233,31 +233,14 @@ impl Widget for TextFieldWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let style = ctx.style;
         let theme = ctx.theme();
-        let radius = radius::CONTROL;
         let ph = style.field_padding_h;
 
-        ctx.fill_rounded_rect(
-            self.rect().x,
-            self.rect().y,
-            self.rect().width,
-            self.rect().height,
-            radius,
-            theme.surface_sunken,
-        );
-
-        let border_color = if self.focused {
+        let edge = if self.focused {
             theme.focus
         } else {
             theme.border_strong
         };
-        ctx.draw_rounded_rect(
-            self.rect().x,
-            self.rect().y,
-            self.rect().width,
-            self.rect().height,
-            radius,
-            border_color,
-        );
+        super::field_frame(ctx, self.rect(), self.focused, edge);
 
         let content = self.content_rect(style);
         let text_y = self.rect().y + (self.rect().height - ctx.text_height()) / 2;

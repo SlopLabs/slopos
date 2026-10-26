@@ -370,12 +370,7 @@ impl TreeViewWidget {
                 ctx.fill_rect_blended(rect.x, y, rect.width, self.row_height, wash);
             }
             if selected {
-                let edge = if self.focused {
-                    theme.accent
-                } else {
-                    theme.text_disabled
-                };
-                ctx.fill_rect(rect.x, y, super::SELECTED_EDGE, self.row_height, edge);
+                super::selected_edge(ctx, rect.x, y, self.row_height, self.focused);
             }
 
             let indent = rect.x + PAD_LEFT + row.depth as i32 * INDENT;

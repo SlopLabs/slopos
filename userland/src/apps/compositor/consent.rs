@@ -478,18 +478,18 @@ impl Consent {
         }
         if let Some(field) = &at.field {
             let (w, h) = (field.x1 - field.x0 + 1, field.y1 - field.y0 + 1);
-            let edge = match dialog.focus() {
-                Focus::Field => FOCUS,
-                _ => FIELD_EDGE,
+            let (edge, ew) = match dialog.focus() {
+                Focus::Field => (FOCUS, FOCUS_W),
+                _ => (FIELD_EDGE, EDGE_W),
             };
             rounded_rect_filled(buf, field.x0, field.y0, w, h, FIELD_RADIUS, edge);
             rounded_rect_filled(
                 buf,
-                field.x0 + EDGE_W,
-                field.y0 + EDGE_W,
-                w - 2 * EDGE_W,
-                h - 2 * EDGE_W,
-                FIELD_RADIUS - EDGE_W,
+                field.x0 + ew,
+                field.y0 + ew,
+                w - 2 * ew,
+                h - 2 * ew,
+                FIELD_RADIUS - ew,
                 FIELD_BG,
             );
             let room = (w - 2 * CARD_PAD) / ui::width(ui::BULLET, TEXT_PX).max(1);

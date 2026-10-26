@@ -206,8 +206,8 @@ fn strip(page: Page) -> Node<Msg> {
         }
         let tone = match at {
             Some(at) if i == at => Tone::Accent,
-            Some(at) if i < at => Tone::Secondary,
-            _ => Tone::Disabled,
+            Some(at) if i < at => Tone::Normal,
+            _ => Tone::Secondary,
         };
         children.push(toned(step, tone));
     }

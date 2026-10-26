@@ -12,22 +12,25 @@
 #
 # Checks:
 #   1 colour     a `Color32` constructor (`::rgb`, `::new`, `::WHITE`,
-#                `::BLACK`, the tuple) or alias, an `EncodedPixel`; in an app
-#                also a colour derived by `with_alpha` or `mix`, or a theme
-#                table named (`DARK`) rather than `theme::current()`.
+#                `::BLACK`, the tuple) or alias (`as`, `type`), an
+#                `EncodedPixel`; in an app also a colour derived by
+#                `with_alpha` or `mix`, or a theme table named (`DARK`,
+#                `StyleSheet::dark().theme`) rather than `theme::current()`.
 #                `Color32::TRANSPARENT` is no colour.
-#   2 font-size  text sized by hand: a `text::ui` sizing call or its import,
-#                a `font_size` or `size_px`, a `TextStyle` literal.
-#   3 spacing    a stack's `spacing:` or a spacer's `Length::Px` holding an
-#                integer literal other than 0.
+#   2 font-size  text sized by hand: a `text::ui` sizing call, its import or
+#                the module's under another name, a `font_size` or
+#                `size_px`, a `TextStyle` literal.
+#   3 spacing    a stack's `spacing:`, over as many lines as its value takes,
+#                or a spacer's `Length::Px` holding an integer literal other
+#                than 0.
 #   4 inset      `EdgeInsets::{all,symmetric,new}` whose arguments, over as
 #                many lines as the call takes, hold an integer literal other
 #                than 0, or an `EdgeInsets { .. }` literal.
 #   5 allowlist  an entry in scripts/gates/ui-literals.txt that matches no
 #                finding: a dead exemption.
 #
-# It reads spellings, not values: a number reached through a constant or a
-# helper's parameter passes. A file whose colours are its content (a syntax
+# It reads spellings, not values: a number reached through a constant, a
+# binding or a helper's parameter passes. A file whose colours are its content (a syntax
 # palette, a checkerboard) is exempt from one check by a line in the
 # allowlist, with its reason.
 
@@ -40,7 +43,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 gate_parse_args check_ui_literals "$@"
 
 ALLOWLIST="$REPO_ROOT/scripts/gates/ui-literals.txt"
-APP_MARK='impl(<[^>]*>)?[[:space:]]+([A-Za-z_]+::)*App(<[^>]*>)?[[:space:]]+for|run_app[[:space:]]*\('
+APP_MARK='impl(<[^>]*>)?[[:space:]]+([A-Za-z_]+::)*App(<[^>]*>)?[[:space:]]+for|run_app[[:space:]]*(::[[:space:]]*<[^>]*>[[:space:]]*)?\('
 
 # `<scope>\t<path>` for each file in scope: `app` or `kit`.
 classify() {
@@ -95,6 +98,27 @@ scan_sources() {
                     if (lit != "") return 1
                 }
                 return 0
+            }
+            # Takes a field value from `s` until a `,` or a closing bracket
+            # outside any it opened, and answers what of `s` is left after it.
+            function take(s,   i, c) {
+                for (i = 1; i <= length(s); i++) {
+                    c = substr(s, i, 1)
+                    if (c == "(" || c == "{" || c == "[") sdepth++
+                    else if (c == ")" || c == "}" || c == "]") {
+                        if (sdepth == 0) break
+                        sdepth--
+                    } else if (c == "," && sdepth == 0) break
+                    svalue = svalue c
+                }
+                if (i <= length(s)) {
+                    if (nonzero(svalue) && spacing_hit != spacing_at) {
+                        hit(3, "spacing", spacing_at, spacing_text)
+                        spacing_hit = spacing_at
+                    }
+                    spacing_open = 0
+                }
+                return substr(s, i)
             }
             # Feeds `s` to the open call until its parentheses close, and
             # answers what of `s` is left after it.
@@ -175,12 +199,14 @@ scan_sources() {
             }
             line ~ /Color32::(rgb|new|WHITE|BLACK)([^A-Za-z0-9_]|$)/ \
                 || line ~ /(^|[^A-Za-z0-9_])(Color32|EncodedPixel)[[:space:]]*\(/ \
-                || line ~ /(^|[^A-Za-z0-9_])Color32[[:space:]]+as[[:space:]]/ {
+                || line ~ /(^|[^A-Za-z0-9_])Color32[[:space:]]+as[[:space:]]/ \
+                || line ~ /(^|[^A-Za-z0-9_])type[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*([A-Za-z_]+::)*Color32[[:space:]]*;/ {
                 hit(1, "colour", NR, text)
             }
             scope != "app" { next }
             line ~ /(^|[^A-Za-z0-9_])(with_alpha|mix)[[:space:]]*\(/ \
-                || line ~ /(^|[^A-Za-z0-9_])(DARK([^A-Za-z0-9_]|$)|contrast::)/ { hit(1, "colour", NR, text) }
+                || line ~ /(^|[^A-Za-z0-9_])(DARK([^A-Za-z0-9_]|$)|contrast::)/ \
+                || line ~ /StyleSheet::dark[[:space:]]*\([[:space:]]*\)[[:space:]]*\.[[:space:]]*theme/ { hit(1, "colour", NR, text) }
             line ~ "(^|[^A-Za-z0-9_])ui::" SIZING "[[:space:]]*[(]" \
                 || line ~ /(^|[^A-Za-z0-9_])(font_size|size_px)([^A-Za-z0-9_]|$)/ \
                 || line ~ /(^|[^A-Za-z0-9_])TextStyle[[:space:]]*\{/ { hit(2, "font-size", NR, text) }
@@ -194,7 +220,8 @@ scan_sources() {
                 import = import " " line
                 if (index(line, ";")) {
                     importing = 0
-                    if (import ~ /(^|[^A-Za-z0-9_])ui::/ \
+                    if (import ~ /(^|[^A-Za-z0-9_])ui[[:space:]]+as[[:space:]]/ \
+                        || import ~ /(^|[^A-Za-z0-9_])ui::/ \
                         && (import ~ /ui::[[:space:]]*\*/ \
                             || import ~ "(^|[^A-Za-z0-9_])" SIZING "([^A-Za-z0-9_]|$)")) {
                         hit(2, "font-size", import_at, import_text)
@@ -203,14 +230,14 @@ scan_sources() {
             }
             {
                 rest = line
-                while (match(rest, /(^|[^A-Za-z0-9_])spacing:/)) {
-                    value = substr(rest, RSTART + RLENGTH)
-                    rest = value
-                    sub(/[,}].*$/, "", value)
-                    if (nonzero(value)) {
-                        hit(3, "spacing", NR, text)
-                        break
-                    }
+                if (spacing_open) rest = take(rest)
+                while (!spacing_open && match(rest, /(^|[^A-Za-z0-9_])spacing:/)) {
+                    spacing_open = 1
+                    sdepth = 0
+                    svalue = ""
+                    spacing_at = NR
+                    spacing_text = text
+                    rest = take(substr(rest, RSTART + RLENGTH))
                 }
             }
             line ~ /(^|[^A-Za-z0-9_])size:[[:space:]]*Length::Px[[:space:]]*\(/ {
@@ -348,6 +375,19 @@ use slopos_appkit::text::{self, ui::line_height};
 const AD: &str = r#"a"b"#;
 const AE: Color32 = Color32::rgb(1, 2, 3);
 fn af() { let a = Node::VStack { spacing: 0, children }; let b = Node::HStack { spacing: 6, children }; }
+type Ag = Color32;
+fn ah() -> Color32 { StyleSheet::dark().theme.danger }
+use slopos_appkit::text::ui as t;
+fn ai(compact: bool) {
+    Node::VStack {
+        spacing: if compact {
+            4
+        } else {
+            space::SM
+        },
+        children,
+    };
+}
 FIXTURE
 
     cat > "$(gate_fixture apps/src/themed.rs)" <<'FIXTURE'
@@ -386,6 +426,19 @@ fn o() -> &'static str { "Color32::rgb(1, 2, 3) spacing: 8 EdgeInsets::all(16)" 
 const P: &str = "a string that runs on: \
     spacing: 8, Color32::WHITE";
 fn q() -> char { '\'' }
+fn r(compact: bool) -> i32 {
+    Node::VStack {
+        spacing: if compact {
+            space::XS
+        } else {
+            space::SM
+        },
+        children,
+    };
+    let spacing: i32 = space::SM;
+    StyleSheet::dark().row_height
+}
+type Px = i32;
 FIXTURE
 
     cat > "$(gate_fixture userland/src/apps/demo/mod.rs)" <<'FIXTURE'
@@ -401,6 +454,12 @@ FIXTURE
     cat > "$(gate_fixture userland/src/apps/gallery.rs)" <<'FIXTURE'
 pub fn main() -> ! { slopos_appkit::run_app(Gallery, 1, 1) }
 fn a() { Node::VStack { spacing: 4, children, align }; }
+FIXTURE
+    cat > "$(gate_fixture userland/src/apps/turbo/mod.rs)" <<'FIXTURE'
+pub fn main() -> ! { slopos_appkit::run_app::<Turbo>(Turbo, 1, 1) }
+FIXTURE
+    cat > "$(gate_fixture userland/src/apps/turbo/view.rs)" <<'FIXTURE'
+const A: Color32 = Color32::rgb(1, 2, 3);
 FIXTURE
     cat > "$(gate_fixture userland/src/apps/compositor/frame.rs)" <<'FIXTURE'
 const A: Color32 = Color32::rgb(1, 2, 3);
@@ -431,13 +490,13 @@ FIXTURE
     gate_expect_enumerator "$GATE_FIXTURE_ROOT" "$fixture_files"
     GATE_FINDINGS="$(run_gate "$GATE_FIXTURE_ROOT" "$fixture_files" "$fixture_allowlist")"
 
-    gate_expect 1 18 "constructors, a deref, an alias, a raw pixel, a derived colour, a theme table and contrast maths in apps, after a string holding /*, //, a quote, a lifetime or a raw string's quote, one in each appkit app's module, one in appkit"
-    gate_expect 2 8 "a ui:: sizing call, importing one or all of them on one line, over several or nested, font_size, size_px and a TextStyle literal"
-    gate_expect 3 7 "a number, token arithmetic, hex, the second stack on a line and a spacer's size in an app, a single-file appkit app, and the allowlisted file's other check"
+    gate_expect 1 21 "constructors, a deref, two aliases, a raw pixel, a derived colour, two theme tables and contrast maths in apps, after a string holding /*, //, a quote, a lifetime or a raw string's quote, one in each appkit app's module, one in appkit"
+    gate_expect 2 9 "a ui:: sizing call, importing one or all of them on one line, over several or nested, the module renamed, font_size, size_px and a TextStyle literal"
+    gate_expect 3 8 "a number, token arithmetic, hex, the second stack on a line, a value over several lines and a spacer's size in an app, a single-file appkit app, and the allowlisted file's other check"
     gate_expect 4 7 "all, new, hex, a split symmetric, a split new with a nested call, the second call on a line, and a struct literal"
     gate_expect 5 1 "the entry for a file that no longer exists"
     gate_expect_silent 'themed\.rs|compositor/|appkit/src/tests/|painter\.rs:2|palette\.rs:1:' \
-        "comments, nested ones, strings, raw ones, roles, the current theme, TRANSPARENT, zero, tokens, sizes, a list of numbers, the ellipsis and bullet, non-app modules, appkit's own geometry and tests, and the allowlisted check"
+        "comments, nested ones, strings, raw ones, roles, tokens over several lines, a type alias that is no colour, the dark sheet's geometry, the current theme, TRANSPARENT, zero, tokens, sizes, a list of numbers, the ellipsis and bullet, non-app modules, appkit's own geometry and tests, and the allowlisted check"
 
     gate_selftest_end
 fi

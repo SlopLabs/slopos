@@ -265,6 +265,13 @@ pub mod inset {
     pub const CONTROL: EdgeInsets = EdgeInsets::symmetric(MD, XS);
 }
 
+/// Edge widths; a focused control's is thicker, so focus shows by more than
+/// a change of hue.
+pub mod stroke {
+    pub const EDGE: i32 = 1;
+    pub const FOCUS: i32 = 2;
+}
+
 pub mod radius {
     pub const CONTROL: i32 = 6;
     pub const CARD: i32 = 10;

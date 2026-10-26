@@ -1,4 +1,4 @@
-use slopos_theme_core::{DARK, Theme, space};
+use slopos_theme_core::{DARK, Theme, space, stroke};
 
 /// The theme widgets draw with, and the toolkit's own control dimensions.
 pub struct StyleSheet {
@@ -35,8 +35,8 @@ impl StyleSheet {
         Self {
             theme,
 
-            border_width: 1,
-            focus_ring_width: 2,
+            border_width: stroke::EDGE,
+            focus_ring_width: stroke::FOCUS,
             focus_ring_offset: 1,
 
             button_min_width: 64,

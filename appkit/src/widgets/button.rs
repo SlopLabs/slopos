@@ -105,17 +105,22 @@ impl Widget for ButtonWidget {
         };
         let (bg, fg) = button_colors(ctx.theme(), self.style, state);
 
+        let edge = match (state, self.style) {
+            (ButtonState::Disabled, _) => Some(ctx.theme().text_disabled),
+            // A secondary button's fill is barely off its surround, so the edge
+            // is what says it is a control rather than a label.
+            (_, ButtonStyle::Secondary) => Some(ctx.theme().border_strong),
+            _ => None,
+        };
         ctx.fill_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius::CONTROL, bg);
-        // A secondary button's fill is barely off its surround, so the edge is
-        // what says it is a control rather than a label.
-        if matches!(self.style, ButtonStyle::Secondary) {
+        if let Some(edge) = edge {
             ctx.draw_rounded_rect(
                 rect.x,
                 rect.y,
                 rect.width,
                 rect.height,
                 radius::CONTROL,
-                ctx.theme().border_strong,
+                edge,
             );
         }
 
