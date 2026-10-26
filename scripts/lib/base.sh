@@ -7,7 +7,7 @@
 BASE_PROGRAMS="init privd shell coreutils terminal compositor roulette halt bootctl installer installer-ui sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted kconsole prof tree-install session login extctl users authcheck priv"
 
 # The apps outside the base, the tree `apps` every root holds at /usr/local.
-APPS="editor file_manager image_viewer"
+APPS="editor file_manager image_viewer widget_gallery"
 
 # The multicall utility binary's installed names. `/bin/<name>` is a symlink to
 # `/bin/coreutils`, which dispatches on `argv[0]` — one binary rather than

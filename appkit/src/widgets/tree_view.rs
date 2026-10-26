@@ -17,7 +17,7 @@ use crate::event::{
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
-use super::icon::{IconKind, draw_icon};
+use slopos_theme_core::Icon;
 
 /// Indent per depth level, in pixels.
 const INDENT: i32 = 14;
@@ -211,7 +211,7 @@ impl Widget for TreeViewWidget {
         // A deeply indented label has a negative budget left and elides to
         // nothing, but a long one at shallow depth can still reach the edge;
         // the clip is what keeps the sidebar's text out of the code surface.
-        ctx.with_clip(rect, |ctx| self.paint_rows(ctx));
+        ctx.with_viewport(rect, |ctx| self.paint_rows(ctx));
     }
 
     fn event(
@@ -378,12 +378,11 @@ impl TreeViewWidget {
             let mut x = indent;
 
             if row.is_dir {
-                draw_icon(
-                    ctx,
+                ctx.draw_icon(
                     if row.expanded {
-                        IconKind::ChevronDown
+                        Icon::ChevronDown
                     } else {
-                        IconKind::ChevronRight
+                        Icon::ChevronRight
                     },
                     x,
                     icon_y,
@@ -398,16 +397,15 @@ impl TreeViewWidget {
             } else {
                 theme.text_secondary
             };
-            draw_icon(
-                ctx,
+            ctx.draw_icon(
                 if row.is_dir {
                     if row.expanded {
-                        IconKind::FolderOpen
+                        Icon::FolderOpen
                     } else {
-                        IconKind::Folder
+                        Icon::Folder
                     }
                 } else {
-                    IconKind::File
+                    Icon::File
                 },
                 x,
                 icon_y,
@@ -427,9 +425,8 @@ impl TreeViewWidget {
             ctx.draw_text_transparent(x, label_y, &label, label_color);
 
             if row.modified {
-                draw_icon(
+                super::modified_dot(
                     ctx,
-                    IconKind::Dot,
                     rect.x + rect.width - icon - 6,
                     icon_y,
                     icon,

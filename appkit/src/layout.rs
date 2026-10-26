@@ -1,5 +1,6 @@
 use slopos_theme_core::Surface;
 
+use crate::audit::Arrangement;
 use crate::constraints::{
     BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, MAX_EXTENT, Rect, Size,
 };
@@ -15,10 +16,13 @@ fn cross_axis(size: Size, vertical: bool) -> i32 {
     if vertical { size.width } else { size.height }
 }
 
-fn child_constraints(bc: &BoxConstraints, vertical: bool) -> BoxConstraints {
+/// Only a stretching stack passes its cross-axis minimum on: a child it
+/// aligns otherwise is as tall, or as wide, as it asks to be.
+fn child_constraints(bc: &BoxConstraints, vertical: bool, stretch: bool) -> BoxConstraints {
+    let floor = |min: i32| if stretch { min } else { 0 };
     if vertical {
         BoxConstraints {
-            min_width: bc.min_width,
+            min_width: floor(bc.min_width),
             max_width: bc.max_width,
             min_height: 0,
             max_height: MAX_EXTENT,
@@ -27,7 +31,7 @@ fn child_constraints(bc: &BoxConstraints, vertical: bool) -> BoxConstraints {
         BoxConstraints {
             min_width: 0,
             max_width: MAX_EXTENT,
-            min_height: bc.min_height,
+            min_height: floor(bc.min_height),
             max_height: bc.max_height,
         }
     }
@@ -74,7 +78,8 @@ impl StackWidget {
 
     fn measure_impl(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let v = self.vertical;
-        let loose = child_constraints(&constraints, v);
+        let stretch = self.cross_align == CrossAxisAlignment::Stretch;
+        let loose = child_constraints(&constraints, v, stretch);
         let max_main = if v {
             constraints.max_height
         } else {
@@ -375,6 +380,13 @@ impl Widget for HStackWidget {
     fn baseline(&self) -> Option<i32> {
         self.inner.aligns_baselines().then_some(self.inner.baseline)
     }
+    fn arrangement(&self) -> Arrangement {
+        let aligned = matches!(
+            self.inner.cross_align,
+            CrossAxisAlignment::Center | CrossAxisAlignment::Baseline
+        );
+        Arrangement::Row { aligned }
+    }
     fn children(&self) -> &[Box<dyn Widget>] {
         &self.inner.children
     }
@@ -421,10 +433,23 @@ impl Widget for ZStackWidget {
             place_widget(child.as_mut(), rect);
         }
     }
+    /// What a modal layer covers shows no hover: the pointer is on the layer.
     fn paint(&self, ctx: &mut PaintContext) {
-        for child in &self.children {
-            child.paint(ctx);
+        let modal = self.children.iter().rposition(|c| c.is_modal());
+        let pointer = ctx.pointer;
+        for (i, child) in self.children.iter().enumerate() {
+            if modal.is_some_and(|m| i < m) {
+                ctx.pointer = (-1, -1);
+            }
+            match i {
+                0 => child.paint(ctx),
+                _ => ctx.with_layer(child.id(), |ctx| child.paint(ctx)),
+            }
+            ctx.pointer = pointer;
         }
+    }
+    fn arrangement(&self) -> Arrangement {
+        Arrangement::Layers
     }
     fn event(
         &mut self,

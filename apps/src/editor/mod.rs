@@ -1660,28 +1660,6 @@ impl EditorApp {
         }
     }
 
-    fn handle_dialog_key(&mut self, key: Key) -> bool {
-        let Some(dialog) = self.dialog.clone() else {
-            return false;
-        };
-        match key {
-            Key::Named(NamedKey::Escape) => {
-                self.dialog = None;
-                true
-            }
-            Key::Named(NamedKey::Enter) => {
-                match dialog {
-                    Dialog::About => self.dialog = None,
-                    // The safe answer: overwriting is said deliberately.
-                    Dialog::ConfirmOverwrite { .. } => self.dialog_action(1),
-                    Dialog::ConfirmClose { .. } | Dialog::ConfirmQuit => self.dialog_action(0),
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
     fn dialog_action(&mut self, index: usize) {
         let Some(dialog) = self.dialog.take() else {
             return;
@@ -1776,7 +1754,6 @@ impl EditorApp {
             }
             CodeInput::Key { key, modifiers } => {
                 if self.dialog.is_some() {
-                    self.handle_dialog_key(key);
                     return;
                 }
                 if let Some(command) = self.global_command(key, modifiers) {
@@ -1933,6 +1910,10 @@ impl App for EditorApp {
     fn app_id(&self) -> &str {
         "org.slopos.editor"
     }
+
+    fn window(&self) -> slopos_appkit::WindowSpec {
+        slopos_appkit::WindowSpec::new(view::DEFAULT_WIDTH, view::DEFAULT_HEIGHT)
+    }
 }
 
 /// The bodies the three `App` entry points above wrap, so the refresh they all
@@ -1988,9 +1969,6 @@ impl EditorApp {
 
     fn dispatch_key(&mut self, key: Key, mods: Modifiers) -> Action {
         // Reached only when no widget claimed the key.
-        if self.handle_dialog_key(key) {
-            return Action::Rebuild;
-        }
         if self.dialog.is_some() {
             return Action::None;
         }
@@ -2030,7 +2008,7 @@ impl EditorApp {
 pub fn editor_main() -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let app = EditorApp::new(&args);
-    slopos_appkit::run_app(app, view::DEFAULT_WIDTH as u32, view::DEFAULT_HEIGHT as u32)
+    slopos_appkit::run_app(app)
 }
 
 /// What a find readout was counted against; see `EditorApp::find_stamp`.

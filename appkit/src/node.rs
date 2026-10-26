@@ -2,19 +2,19 @@ use slopos_abi::draw::Color32;
 use slopos_gfx::image::ImageSampling;
 use std::sync::Arc;
 
-use slopos_theme_core::{Surface, Tone};
+use slopos_theme_core::{Icon, Surface, TextRole, Tone};
+
+use super::components::{ButtonRow, Disclosure, IconButton, List, Tag, Text, WindowSpec};
 
 use super::constraints::Orientation;
 use super::constraints::{
     CrossAxisAlignment, EdgeInsets, ImageScale, Length, ScrollDirection, ScrollbarVisibility,
-    TextAlignment,
 };
 use super::event::{Key, Modifiers};
 use super::sender::AppSender;
 use super::widgets::code_view::{CodeInput, CodeLine};
 use super::widgets::drag_handle::DragInput;
 use super::widgets::editor_tabs::{EditorTab, TabInput};
-use super::widgets::icon::IconKind;
 use super::widgets::line_edit::LineEditInput;
 use super::widgets::menu_bar::MenuBarInput;
 use super::widgets::slider::{SliderGrab, SliderInput};
@@ -119,12 +119,14 @@ pub struct TableColumn {
 /// Declarative tree an app builds in `view()`; the framework diffs it against
 /// the previous one to update retained widgets.
 pub enum Node<M> {
-    Label {
-        text: String,
-        alignment: TextAlignment,
-        wrap: bool,
-        max_lines: Option<u32>,
+    Text(Text),
+    /// A glyph of the icon font, at the size of text in `role`.
+    Icon {
+        icon: Icon,
+        role: TextRole,
+        tone: Tone,
     },
+    IconButton(IconButton<M>),
     Button {
         label: String,
         /// `None` leaves the button non-interactive; `Some` emits on click.
@@ -182,13 +184,12 @@ pub enum Node<M> {
         segments: Vec<BarSegment>,
         highlight: Option<usize>,
     },
-    /// Label in a tone other than the body text's.
-    StyledLabel {
-        text: String,
-        tone: Tone,
-        alignment: TextAlignment,
-        wrap: bool,
-    },
+    ButtonRow(ButtonRow<M>),
+    /// Rows of a name and its value; see [`crate::PropertyList`].
+    PropertyList(Vec<(String, Node<M>)>),
+    List(List<M>),
+    Tag(Tag),
+    Disclosure(Box<Disclosure<M>>),
 
     ScrollView {
         child: Box<Node<M>>,
@@ -230,11 +231,15 @@ pub enum Node<M> {
         /// Emitted on secondary click and on Menu / Shift+F10, after selection
         /// has moved to the row.
         on_context_menu: Option<fn(ContextMenuAt) -> M>,
+        /// What the rows are of: a table that shows another starts at the top.
+        shows: u64,
     },
+    /// A question over the page, which it covers for the pointer and the
+    /// keyboard alike.
     Dialog {
         title: String,
         content: Box<Node<M>>,
-        actions: Vec<Node<M>>,
+        footer: ButtonRow<M>,
         on_dismiss: Option<M>,
     },
     /// Child floated at an absolute window position, clamped on-screen. A click
@@ -348,7 +353,7 @@ pub enum Node<M> {
         /// Caret position, in characters.
         caret: usize,
         focused: bool,
-        icon: Option<IconKind>,
+        icon: Option<Icon>,
         /// Drawn right-aligned inside the field: a match count, a hint.
         suffix: String,
         invalid: bool,
@@ -427,6 +432,11 @@ pub trait App {
     /// Read once at startup.
     fn title(&self) -> &str {
         "SlopOS App"
+    }
+
+    /// Read once at startup.
+    fn window(&self) -> WindowSpec {
+        WindowSpec::default()
     }
 
     /// App ID for the compositor (e.g. "org.slopos.sysmon").

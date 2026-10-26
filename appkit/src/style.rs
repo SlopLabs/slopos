@@ -24,6 +24,9 @@ pub struct StyleSheet {
 
     pub checkbox_size: i32,
     pub checkbox_gap: i32,
+
+    /// The least a control is across, so a pointer finds it.
+    pub min_target: i32,
 }
 
 impl StyleSheet {
@@ -54,6 +57,8 @@ impl StyleSheet {
 
             checkbox_size: 16,
             checkbox_gap: space::SM,
+
+            min_target: 28,
         }
     }
 }

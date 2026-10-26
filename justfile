@@ -459,6 +459,18 @@ boot-debug:
 boot-live: iso
     just _qemu-boot "interactive" "${VIDEO:-1}" {{iso}} {{fs_image}} QEMU_NO_ROOT_DISK=1 {{net_env}}
 
+ui_shots_width  := env("UI_SHOTS_WIDTH", "1280")
+ui_shots_height := env("UI_SHOTS_HEIGHT", "800")
+
+[doc("Boot the live ISO and save a PNG of every surface under builddir/ui-shots; name scenes to take only those, --no-install to stop the installer at review")]
+ui-shots *ARGS:
+    ROULETTE=0 QEMU_FB_AUTO=0 QEMU_FB_WIDTH={{ui_shots_width}} QEMU_FB_HEIGHT={{ui_shots_height}} just iso
+    QEMU_BIN={{qemu_bin}} QEMU_SMP={{qemu_smp}} QEMU_MEM=2G QEMU_ACCEL={{qemu_accel}} \
+    QEMU_CPU={{qemu_cpu}} GPU={{gpu}} OVMF_DIR={{ovmf_dir}} \
+    QEMU_FB_AUTO=0 QEMU_FB_WIDTH={{ui_shots_width}} QEMU_FB_HEIGHT={{ui_shots_height}} \
+        python3 scripts/ui_shots.py --iso {{iso}} --out {{build_dir}}/ui-shots \
+        --width {{ui_shots_width}} --height {{ui_shots_height}} {{ARGS}}
+
 [doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics and one that aborts, each leaving its crash record; then install a base, which runs at once and a reboot keeps, roll it back, which runs at once too, and install one the kernel does not serve, which it passes over for the previous; across the reboots of one QEMU, with the ESP untouched")]
 test-install:
     #!/usr/bin/env bash

@@ -465,6 +465,7 @@ impl InputHandler {
                     p.set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
                 }
             }
+            2 if window.fixed_size => {}
             2 => {
                 const WINDOW_STATE_MAXIMIZED: u8 = 2;
                 if window.state == WINDOW_STATE_MAXIMIZED {
@@ -504,6 +505,9 @@ impl InputHandler {
                     let max_h =
                         (fb_height - SYSTEM_BAR_HEIGHT - TITLE_BAR_HEIGHT - shelf_height) as u32;
                     if let Some(p) = proto.as_deref_mut() {
+                        let (w, h) =
+                            p.clamp_window_size(window.task_id, max_w as i32, max_h as i32);
+                        let (max_w, max_h) = (w as u32, h as u32);
                         p.set_window_position(window.task_id, 0, max_y);
                         p.set_window_size(window.task_id, max_w, max_h);
                         p.set_window_state(window.task_id, WINDOW_STATE_MAXIMIZED);
@@ -635,18 +639,14 @@ impl InputHandler {
         }
 
         // Clamping keeps the anchored corner fixed.
-        if new_w < MIN_WINDOW_WIDTH {
-            if self.resize_edges.has_left() {
-                new_x -= MIN_WINDOW_WIDTH - new_w;
-            }
-            new_w = MIN_WINDOW_WIDTH;
+        let (w, h) = self.limit_size(proto.as_deref(), new_w, new_h);
+        if self.resize_edges.has_left() {
+            new_x -= w - new_w;
         }
-        if new_h < MIN_WINDOW_HEIGHT {
-            if self.resize_edges.has_top() {
-                new_y -= MIN_WINDOW_HEIGHT - new_h;
-            }
-            new_h = MIN_WINDOW_HEIGHT;
+        if self.resize_edges.has_top() {
+            new_y -= h - new_h;
         }
+        let (new_w, new_h) = (w, h);
 
         if let Some(p) = proto {
             p.set_window_position(self.resize_task, new_x, new_y);
@@ -668,6 +668,12 @@ impl InputHandler {
         }
     }
 
+    /// `(w, h)` held to the compositor's floor and the window's own limits.
+    fn limit_size(&self, proto: Option<&ProtocolBridge>, w: i32, h: i32) -> (i32, i32) {
+        let (w, h) = (w.max(MIN_WINDOW_WIDTH), h.max(MIN_WINDOW_HEIGHT));
+        proto.map_or((w, h), |p| p.clamp_window_size(self.resize_task, w, h))
+    }
+
     fn stop_resize(&mut self, proto: Option<&mut ProtocolBridge>) {
         if self.resize_task != 0 {
             let dx = self.mouse_x - self.resize_grab_mouse_x;
@@ -686,12 +692,7 @@ impl InputHandler {
             if self.resize_edges.has_top() {
                 final_h -= dy;
             }
-            if final_w < MIN_WINDOW_WIDTH {
-                final_w = MIN_WINDOW_WIDTH;
-            }
-            if final_h < MIN_WINDOW_HEIGHT {
-                final_h = MIN_WINDOW_HEIGHT;
-            }
+            let (final_w, final_h) = self.limit_size(proto.as_deref(), final_w, final_h);
             if let Some(p) = proto {
                 p.send_configure_for_task(
                     self.resize_task,
@@ -751,7 +752,7 @@ impl InputHandler {
 
             // The resize grab zone is the shadow around the frame; state 2 is
             // maximized, which has none.
-            if w.state != 2 {
+            if w.state != 2 && !w.fixed_size {
                 let edge = decorations::hit_test_resize_edge(
                     w.x,
                     w.y,

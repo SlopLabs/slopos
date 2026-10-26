@@ -14,8 +14,8 @@ use crate::event::{EventPhase, EventResponse, MessageSink, PointerButton, Widget
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
-use super::icon::{IconKind, draw_icon};
 use super::tree_view::elide;
+use slopos_theme_core::Icon;
 
 const TAB_PAD_H: i32 = 12;
 const CLOSE_SIZE: i32 = 12;
@@ -193,16 +193,9 @@ impl Widget for EditorTabsWidget {
                 let icon_y = rect.y + (rect.height - CLOSE_SIZE) / 2;
                 // One slot: the dot gives way to the close affordance on hover.
                 if tab.modified && !hovered {
-                    draw_icon(ctx, IconKind::Dot, icon_x, icon_y, CLOSE_SIZE, theme.accent);
+                    super::modified_dot(ctx, icon_x, icon_y, CLOSE_SIZE, theme.accent);
                 } else if hovered || active {
-                    draw_icon(
-                        ctx,
-                        IconKind::Close,
-                        icon_x,
-                        icon_y,
-                        CLOSE_SIZE,
-                        theme.text_secondary,
-                    );
+                    ctx.draw_icon(Icon::X, icon_x, icon_y, CLOSE_SIZE, theme.text_secondary);
                 }
 
                 x += width;

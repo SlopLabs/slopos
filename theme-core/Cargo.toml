@@ -16,3 +16,6 @@ doctest = false
 
 [dependencies]
 slopos-abi = { workspace = true }
+
+[dev-dependencies]
+slopos-font = { workspace = true }

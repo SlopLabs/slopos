@@ -791,9 +791,9 @@ install_base() {
     if [ -d "$FONTS_DIR" ]; then
         mkdir_p /usr/share/fonts
 
-        # The OFL license texts ship beside the fonts they cover: the license
+        # The license texts ship beside the fonts they cover: each license
         # requires each copy of the font to carry its notice.
-        for font in "$FONTS_DIR"/*.ttf "$FONTS_DIR"/*-OFL.txt; do
+        for font in "$FONTS_DIR"/*.ttf "$FONTS_DIR"/*-OFL.txt "$FONTS_DIR"/*-LICENSE.txt; do
             [ -f "$font" ] || continue
             fname="$(basename "$font")"
             install_file "$font" "/usr/share/fonts/$fname"

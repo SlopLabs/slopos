@@ -56,6 +56,14 @@ impl Window {
         let _ = client.toplevel_set_app_id(toplevel_id, app_id.as_bytes());
     }
 
+    /// The sizes the window can be laid out at; a `max` equal to `min` keeps
+    /// it from being resized at all.
+    pub fn set_size_limits(&self, min: (u32, u32), max: (u32, u32)) {
+        let toplevel_id = self.surface.toplevel_id();
+        let mut client = self.handle.borrow_client();
+        let _ = client.toplevel_set_size_limits(toplevel_id, min, max);
+    }
+
     /// Resize the window's backing surface; called automatically on `Event::Configure`.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         self.renderer.resize(width, height)?;

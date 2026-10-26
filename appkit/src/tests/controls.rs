@@ -6,7 +6,8 @@ use slopos_gfx::DrawBuffer;
 use slopos_theme_core::{Tone, space};
 
 use super::{FixedSizeWidget, key};
-use crate::constraints::{BoxConstraints, CrossAxisAlignment, Rect, Size, TextAlignment};
+use crate::components::Text;
+use crate::constraints::{BoxConstraints, CrossAxisAlignment, Rect, Size};
 use crate::event::{EventPhase, MessageSink, NamedKey, PointerButton, WidgetEvent};
 use crate::focus::FocusManager;
 use crate::layout::{HStackWidget, VStackWidget};
@@ -16,12 +17,11 @@ use crate::sender::AppSender;
 use crate::style::StyleSheet;
 use crate::traits::{FocusPolicy, MeasureCtx, Widget, WidgetId, measure_widget, place_widget};
 use crate::widgets::button::ButtonWidget;
-use crate::widgets::label::LabelWidget;
 use crate::widgets::partition_bar::{MIN_SEGMENT_WIDTH, PartitionBarWidget, segment_widths};
 use crate::widgets::progress_bar::sweep;
 use crate::widgets::radio_group::RadioGroupWidget;
 use crate::widgets::slider::{Range, SliderGrab, SliderInput, SliderWidget};
-use crate::widgets::styled_label::StyledLabelWidget;
+use crate::widgets::text::TextWidget;
 use slopos_windowing::UiQueue;
 
 const GIB: u64 = 1 << 30;
@@ -91,7 +91,7 @@ fn chosen(sink: &mut MessageSink) -> Vec<usize> {
 pub(super) fn test_radio_group_stacks_its_options() {
     let style = StyleSheet::dark();
     let line = crate::text::ui::line_height(crate::text::BODY.size);
-    let label = style.checkbox_size.max(line);
+    let label = style.checkbox_size.max(line).max(style.min_target);
     let mut group = radio_group(
         vec![
             option("Erase", "", true),
@@ -101,20 +101,20 @@ pub(super) fn test_radio_group_stacks_its_options() {
         Some(0),
     );
     let size = group.measured_size();
-    assert_eq!(size.height, label * 3 + line + space::SM * 2);
+    assert_eq!(size.height, label * 3 + line + space::XS * 2);
     assert!(size.width > style.checkbox_size + style.checkbox_gap);
     assert_eq!(
         group.layout_rect(),
         Rect::new(10, 20, size.width, size.height)
     );
 
-    let detail_bottom = 20 + label * 2 + line + space::SM - 1;
+    let detail_bottom = 20 + label * 2 + line + space::XS - 1;
     let (consumed, mut sink) = deliver(&mut group, press(12, detail_bottom));
     assert!(consumed);
     assert_eq!(chosen(&mut sink), [1]);
     let (consumed, _) = deliver(&mut group, press(12, detail_bottom + 1));
     assert!(!consumed, "the gap between options is no option's");
-    let third_row = 20 + label * 2 + line + space::SM * 2;
+    let third_row = 20 + label * 2 + line + space::XS * 2;
     let (consumed, mut sink) = deliver(&mut group, press(12, third_row + 1));
     assert!(consumed);
     assert_eq!(chosen(&mut sink), [2]);
@@ -125,7 +125,7 @@ pub(super) fn test_radio_group_stacks_its_options() {
 pub(super) fn test_radio_group_click_on_a_disabled_option_chooses_nothing() {
     let style = StyleSheet::dark();
     let line = crate::text::ui::line_height(crate::text::BODY.size);
-    let label = style.checkbox_size.max(line);
+    let label = style.checkbox_size.max(line).max(style.min_target);
     let mut group = radio_group(
         vec![
             option("Erase", "", true),
@@ -133,7 +133,7 @@ pub(super) fn test_radio_group_click_on_a_disabled_option_chooses_nothing() {
         ],
         Some(0),
     );
-    let (consumed, mut sink) = deliver(&mut group, press(12, 20 + label + space::SM + 1));
+    let (consumed, mut sink) = deliver(&mut group, press(12, 20 + label + space::XS + 1));
     assert!(consumed);
     assert!(chosen(&mut sink).is_empty());
     assert_eq!(group.selected(), Some(0));
@@ -292,9 +292,10 @@ pub(super) fn test_slider_lays_its_track_inside_its_width() {
     let half = style.checkbox_size / 2;
     let s = slider(25, None);
     assert_eq!(s.measured_size().width, 200 + style.checkbox_size);
+    let ring = style.focus_ring_width + style.focus_ring_offset;
     assert_eq!(
         s.measured_size().height,
-        style.checkbox_size + (style.focus_ring_width + style.focus_ring_offset) * 2
+        (style.checkbox_size + ring * 2).max(style.min_target)
     );
     assert_eq!(s.thumb_x(), half + 50);
     assert_eq!(slider(0, None).thumb_x(), half);
@@ -361,8 +362,9 @@ pub(super) fn test_slider_drag_holds_the_knob_where_it_was_taken() {
     let width = 200 + StyleSheet::dark().checkbox_size;
     lay_out(&mut s, BoxConstraints::loose(Size::new(width, 100)), (0, 0));
     let x = s.thumb_x() + 5;
+    let mid = s.layout_rect().height / 2;
     assert_ne!(s.value_at(x), 25);
-    let (consumed, mut sink) = deliver(&mut s, press(x, 5));
+    let (consumed, mut sink) = deliver(&mut s, press(x, mid));
     assert!(consumed);
     assert_eq!(inputs(&mut sink), [SliderInput::Begin(25, SliderGrab(5))]);
     assert!(moves(&mut s, &[x]).is_empty());
@@ -514,10 +516,10 @@ fn lowest_ink_row(data: &[u8], width: usize, height: usize, x0: i32, x1: i32) ->
         .find(|&y| (x0..x1).any(|x| pixel(data, width, x, y) != 0))
 }
 
-/// A label beside a styled label puts its text on the same row, whatever the
-/// row's alignment. "hill" stands on the baseline and does not cross it, so
+/// Text beside text in another tone puts its text on the same row, whatever
+/// the row's alignment. "hill" stands on the baseline and does not cross it, so
 /// its lowest ink is the row above the baseline each widget reports.
-pub(super) fn test_label_beside_a_styled_label_shares_its_baseline() {
+pub(super) fn test_text_beside_toned_text_shares_its_baseline() {
     let style = StyleSheet::dark();
     for align in [
         CrossAxisAlignment::Start,
@@ -526,17 +528,8 @@ pub(super) fn test_label_beside_a_styled_label_shares_its_baseline() {
     ] {
         let mut row = HStackWidget::new(
             vec![
-                Box::new(LabelWidget::new(
-                    String::from("hill"),
-                    TextAlignment::Start,
-                    false,
-                    None,
-                )),
-                Box::new(StyledLabelWidget::new(
-                    String::from("hill"),
-                    Tone::Secondary,
-                    TextAlignment::Start,
-                )),
+                Box::new(TextWidget::new(&Text::new("hill"))),
+                Box::new(TextWidget::new(&Text::new("hill").tone(Tone::Secondary))),
             ],
             16,
             align,
@@ -585,17 +578,8 @@ pub(super) fn test_a_baseline_row_lines_up_text_of_different_heights() {
                 ButtonStyle::Primary,
                 true,
             )),
-            Box::new(LabelWidget::new(
-                String::from("hill\nhill"),
-                TextAlignment::Start,
-                false,
-                None,
-            )),
-            Box::new(StyledLabelWidget::new(
-                String::from("hill"),
-                Tone::Accent,
-                TextAlignment::Start,
-            )),
+            Box::new(TextWidget::new(&Text::new("hill\nhill"))),
+            Box::new(TextWidget::new(&Text::new("hill").tone(Tone::Accent))),
         ],
         8,
         CrossAxisAlignment::Baseline,
@@ -1127,8 +1111,13 @@ pub(super) fn test_a_control_reached_by_tab_is_scrolled_into_view() {
     let mut sink = MessageSink::new();
     crate::focus::reveal(&mut view, field, &mut sink);
     let shown = rect_of(&view, 1);
-    assert_eq!(shown.y + shown.height, 120, "{shown:?}");
-    assert_eq!(sink.drain_typed::<i32>(), [300 + shown.height - 120]);
+    let room = crate::focus::RING_ROOM;
+    assert_eq!(
+        shown.y + shown.height + room,
+        120,
+        "room for its ring: {shown:?}"
+    );
+    assert_eq!(sink.drain_typed::<i32>(), [300 + shown.height + room - 120]);
 
     let mut sink = MessageSink::new();
     crate::focus::reveal(&mut view, field, &mut sink);

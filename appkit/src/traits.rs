@@ -1,5 +1,6 @@
+use super::audit::Arrangement;
 use super::constraints::{BoxConstraints, Rect, Size};
-use super::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use super::event::{EventPhase, EventResponse, Key, MessageSink, Modifiers, WidgetEvent};
 use super::paint::PaintContext;
 use super::style::StyleSheet;
 use super::text::BODY;
@@ -197,11 +198,72 @@ pub trait Widget {
         0
     }
 
+    /// How this widget places its children, for [`crate::audit`].
+    fn arrangement(&self) -> Arrangement {
+        Arrangement::Flow
+    }
+
+    /// What the pointer resting at `(x, y)` on this widget shows: the whole of
+    /// a text it had to cut short, or the name of a control that shows only an
+    /// icon.
+    fn tooltip(&self, x: i32, y: i32) -> Option<&str> {
+        let _ = (x, y);
+        None
+    }
+
+    /// A key no widget took, offered to each widget of the modal layer in turn
+    /// before the application hears it: Enter for a default button, Escape
+    /// for a cancel one. Answers whether it was taken.
+    fn take_unhandled_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        sink: &mut MessageSink,
+    ) -> bool {
+        let _ = (key, modifiers, sink);
+        false
+    }
+
+    /// What of this widget the keyboard is on, which a scroll view around it
+    /// keeps in view.
+    fn focus_rect(&self) -> Rect {
+        self.layout_rect()
+    }
+
+    /// Where this widget has scrolled to, when the app does not keep it, so a
+    /// rebuild can hand it to the widget built in its place to show the same.
+    fn kept_scroll(&self) -> Option<Scrolled> {
+        None
+    }
+
+    fn keep_scroll(&mut self, offset: (i32, i32)) {
+        let _ = offset;
+    }
+
+    /// Whether this widget covers what is beneath it for the pointer: nothing
+    /// under it hears a press or shows a tooltip.
+    fn covers(&self) -> bool {
+        self.is_modal()
+    }
+
+    /// Whether this widget covers what is beneath it for the keyboard as well
+    /// as the pointer: Tab moves only among its own controls.
+    fn is_modal(&self) -> bool {
+        false
+    }
+
     fn is_dirty(&self) -> bool {
         true
     }
 
     fn mark_dirty(&mut self) {}
+}
+
+/// Where a widget has scrolled to, and what it shows there.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Scrolled {
+    pub shows: u64,
+    pub offset: (i32, i32),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -222,6 +284,9 @@ pub enum Role {
     MenuItem,
     Separator,
     Group,
+    /// Buttons in a row the arrow keys move along, as Tab does: a
+    /// `ButtonRow`.
+    Toolbar,
     Window,
 }
 

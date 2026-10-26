@@ -27,6 +27,10 @@ path = "src/bin/file_manager.rs"
 name = "image_viewer"
 path = "src/bin/image_viewer.rs"
 
+[[bin]]
+name = "widget_gallery"
+path = "src/bin/widget_gallery.rs"
+
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-appkit = { workspace = true }

@@ -429,11 +429,11 @@ images at `/usr/share/licenses/ca-certificates/MPL-2.0.txt`.
 
 ### Fonts
 
-Both families are shipped unmodified as `.ttf` files in `/usr/share/fonts/`,
-bundled alongside SlopOS rather than merged into it. Neither declares a Reserved
-Font Name. Each family's full SIL Open Font License 1.1 text travels with it, in
-[`assets/fonts/`](assets/fonts/) and on the installed images, and covers every
-weight of that family shipped beside it.
+Every font is shipped unmodified as a `.ttf` file in `/usr/share/fonts/`,
+bundled alongside SlopOS rather than merged into it, and loaded at run time.
+Each family's licence text travels with it, in [`assets/fonts/`](assets/fonts/)
+and on the installed images, and covers every weight of that family shipped
+beside it. Neither OFL family declares a Reserved Font Name.
 
 - **Inter** (Regular, SemiBold) — `Copyright (c) 2016 The Inter Project Authors
   (https://github.com/rsms/inter)` — SIL OFL 1.1, full text in
@@ -442,6 +442,12 @@ weight of that family shipped beside it.
   Project Authors (https://github.com/JetBrains/JetBrainsMono)` — SIL OFL 1.1,
   full text in
   [`assets/fonts/JetBrainsMono-OFL.txt`](assets/fonts/JetBrainsMono-OFL.txt)
+- **Lucide**, the icon font — `Copyright (c) 2026 Lucide Icons and
+  Contributors (https://lucide.dev)` — ISC, with the icons it derives from
+  Feather `Copyright (c) 2013-present Cole Bemis` under the MIT licence; both
+  texts in [`assets/fonts/Lucide-LICENSE.txt`](assets/fonts/Lucide-LICENSE.txt).
+  `font/lucide.ttf` of npm's `lucide-static` 1.61.0, whose tarball's
+  integrity is `sha512-yLAiQB3MWUJEstsEDAwenSA3m7vr1tdLvgnC16Q/XMxRRma0DWwMs8M2bWlvgShrIs1m2mWMJ+0AiahqQO4GrA==`.
 
 ## Host tooling — not distributed with SlopOS
 

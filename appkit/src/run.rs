@@ -6,7 +6,7 @@ use slopos_windowing::Event;
 use slopos_windowing::connection;
 use slopos_windowing::{EVENT_BUF_LEN, Window};
 
-use super::event::{self, HitTestResult, MessageSink, PointerButton, WidgetEvent};
+use super::event::{self, EventResponse, HitTestResult, MessageSink, PointerButton, WidgetEvent};
 use super::focus::FocusManager;
 use super::input::translate_event;
 use super::node::{Action, App};
@@ -17,11 +17,20 @@ use super::style::StyleSheet;
 use super::traits::{FocusPolicy, Widget};
 use super::tree;
 
-/// Run a widget-framework-driven application.
-pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
+/// Run a widget-framework-driven application in a window as
+/// [`App::window`] describes it.
+pub fn run_app<A: App>(mut app: A) -> ! {
+    let spec = app.window();
+    let (width, height) = (
+        spec.size.width.max(1) as u32,
+        spec.size.height.max(1) as u32,
+    );
     let handle = connection::connect().expect("compositor not running");
     let mut win = Window::new(handle.clone(), width, height).expect("failed to create window");
     win.set_title(app.title());
+    let (min, max) = spec.limits();
+    let pair = |s: super::constraints::Size| (s.width.max(0) as u32, s.height.max(0) as u32);
+    win.set_size_limits(pair(min), max.map_or((0, 0), pair));
     let id = app.app_id();
     if !id.is_empty() {
         win.set_app_id(id);
@@ -54,8 +63,10 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
     // The compositor reports modifiers only with key events; a pointer press
     // takes the most recent snapshot, which is what shift-click is.
     let mut modifiers = super::event::Modifiers::default();
+    let mut tip = Tip::default();
 
     loop {
+        let mut key_taken = false;
         handle.flush_pending_destroys();
         handle.drain_ui_queue();
 
@@ -125,6 +136,9 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
             let (px, py) = win.pointer();
             let widget_event = fill_pointer_state(widget_event, px, py, modifiers);
+            if tip.note(&widget_event, (px, py), slopos_windowing::get_time_ms()) {
+                needs_repaint = true;
+            }
 
             gesture.note(&widget_event, slopos_windowing::get_time_ms());
             match &widget_event {
@@ -157,11 +171,19 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 event::dispatch_event(root.as_mut(), &dummy_hit, &widget_event, &mut sink)
             };
 
+            let blocked = resp == EventResponse::Blocked;
             if resp.is_consumed() {
                 needs_repaint = true;
-            } else if let WidgetEvent::KeyDown {
-                key, modifiers: m, ..
-            } = &widget_event
+            }
+            key_taken |= resp.is_consumed()
+                && !blocked
+                && matches!(widget_event, WidgetEvent::KeyDown { .. });
+            if let (
+                true,
+                WidgetEvent::KeyDown {
+                    key, modifiers: m, ..
+                },
+            ) = (!resp.is_consumed() || blocked, &widget_event)
             {
                 // An editor indents with Tab, so focus only gets what nothing
                 // claimed.
@@ -177,7 +199,14 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
                         super::focus::reveal(root.as_mut(), id, &mut sink);
                     }
                     needs_repaint = true;
-                } else {
+                } else if tree::offer_unhandled(root.as_mut(), *key, *m, &mut sink) {
+                    needs_repaint = true;
+                } else if let Some(next) = arrow_along_toolbar(root.as_ref(), &focus, *key, *m) {
+                    let previous = focus.focused();
+                    focus.set_focused(Some(next));
+                    move_focus_events(root.as_mut(), previous, Some(next), &mut sink);
+                    needs_repaint = true;
+                } else if !blocked {
                     unhandled_keys.push((*key, *m));
                 }
             }
@@ -209,20 +238,28 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
             }
         }
         needs_rebuild |= gesture.released(slopos_windowing::get_time_ms());
+        if tip.ripe(slopos_windowing::get_time_ms()) {
+            tip.shown = super::tooltip::find(root.as_ref(), tip.at.0, tip.at.1);
+            needs_repaint |= tip.shown.is_some();
+        }
 
         if needs_rebuild {
             let node = app.view();
+            let mut scrolled = Vec::new();
             if app.page_key() != page_key {
                 page_key = app.page_key();
-                focus.set_focused(None);
+                focus.leave_page();
+            } else {
+                tree::kept_scrolls(root.as_ref(), &mut scrolled);
             }
             root = tree::build_widget_tree(&node);
+            tree::restore_scrolls(root.as_mut(), &scrolled);
             tree::layout_tree(root.as_mut(), window_size, &style);
             // A rebuild replaces every widget, so whoever holds focus has to
             // be told again. The application's answer comes first: a widget it
             // built focused *is* the focused one, and only when it names none
             // does the remembered chain position apply.
-            let declared = find_declared_focus(root.as_ref());
+            let declared = find_declared_focus(super::focus::modal_layer(root.as_ref()));
             let restored = focus.rebuild_tab_chain(root.as_ref());
             let target = match declared {
                 Some(id) => {
@@ -235,7 +272,7 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 // Its own sink: anything emitted here would be applied after
                 // the rebuild that caused it.
                 let mut focus_sink = MessageSink::new();
-                send_to_id(
+                tree::send_to_id(
                     root.as_mut(),
                     id,
                     &WidgetEvent::FocusGained,
@@ -243,6 +280,16 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 );
             }
             needs_rebuild = false;
+            needs_repaint = true;
+        }
+
+        if let Some(id) = focus.focused().filter(|_| key_taken) {
+            let mut sink = MessageSink::new();
+            super::focus::reveal(root.as_mut(), id, &mut sink);
+            for msg in sink.drain_typed::<A::Message>() {
+                let action = app.update(msg);
+                process_action(action, &mut needs_rebuild, &mut needs_repaint);
+            }
             needs_repaint = true;
         }
 
@@ -257,6 +304,9 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 ctx.pointer = pointer;
                 tree::paint_tree(root.as_ref(), &mut ctx);
                 overlays.paint(&mut ctx);
+                if let Some(text) = &tip.shown {
+                    super::tooltip::paint(&mut ctx, text, tip.at, window_size);
+                }
             }
             win.renderer_mut().present();
             needs_repaint = false;
@@ -279,11 +329,17 @@ pub fn run_app<A: App>(mut app: A, width: u32, height: u32) -> ! {
         } else {
             -1
         };
-        let timeout_ms = match gesture.wait_ms(slopos_windowing::get_time_ms()) {
-            Some(held) if timeout_ms < 0 => held as i64,
-            Some(held) => timeout_ms.min(held as i64),
-            None => timeout_ms,
-        };
+        let now = slopos_windowing::get_time_ms();
+        let timeout_ms = [gesture.wait_ms(now), tip.wait_ms(now)]
+            .into_iter()
+            .flatten()
+            .fold(timeout_ms, |t, wait| {
+                if t < 0 {
+                    wait as i64
+                } else {
+                    t.min(wait as i64)
+                }
+            });
         handle.wait_events(timeout_ms);
     }
 }
@@ -397,10 +453,10 @@ fn move_focus_events(
         return;
     }
     if let Some(id) = previous {
-        send_to_id(root, id, &WidgetEvent::FocusLost, sink);
+        tree::send_to_id(root, id, &WidgetEvent::FocusLost, sink);
     }
     if let Some(id) = next {
-        send_to_id(root, id, &WidgetEvent::FocusGained, sink);
+        tree::send_to_id(root, id, &WidgetEvent::FocusGained, sink);
     }
 }
 
@@ -418,24 +474,6 @@ fn find_declared_focus(widget: &dyn Widget) -> Option<super::traits::WidgetId> {
     found
 }
 
-fn send_to_id(
-    widget: &mut dyn Widget,
-    id: super::traits::WidgetId,
-    event: &WidgetEvent,
-    sink: &mut MessageSink,
-) -> bool {
-    if widget.id() == id {
-        widget.event(event, super::event::EventPhase::Target, sink);
-        return true;
-    }
-    for child in widget.children_mut() {
-        if send_to_id(child.as_mut(), id, event, sink) {
-            return true;
-        }
-    }
-    false
-}
-
 fn find_focus_policy(widget: &dyn Widget, id: super::traits::WidgetId) -> FocusPolicy {
     if widget.id() == id {
         return widget.focus_policy();
@@ -447,4 +485,64 @@ fn find_focus_policy(widget: &dyn Widget, id: super::traits::WidgetId) -> FocusP
         }
     }
     FocusPolicy::None
+}
+
+fn arrow_along_toolbar(
+    root: &dyn Widget,
+    focus: &FocusManager,
+    key: super::event::Key,
+    modifiers: super::event::Modifiers,
+) -> Option<super::traits::WidgetId> {
+    use super::event::{Key, NamedKey};
+    if modifiers.ctrl || modifiers.alt || modifiers.shift {
+        return None;
+    }
+    let forward = match key {
+        Key::Named(NamedKey::Right) => true,
+        Key::Named(NamedKey::Left) => false,
+        _ => return None,
+    };
+    super::focus::beside_in_toolbar(root, focus.focused()?, forward)
+}
+
+/// Where the pointer rests, since when, and the tooltip shown there.
+#[derive(Default)]
+struct Tip {
+    at: (i32, i32),
+    since_ms: u64,
+    /// Waiting for the pointer to rest; a press or a key ends the wait until
+    /// it moves again.
+    armed: bool,
+    shown: Option<String>,
+}
+
+impl Tip {
+    /// Answers whether a shown tooltip went away.
+    fn note(&mut self, event: &WidgetEvent, at: (i32, i32), now_ms: u64) -> bool {
+        let rest = match event {
+            WidgetEvent::PointerMove { .. } if at != self.at => true,
+            WidgetEvent::PointerDown { .. }
+            | WidgetEvent::KeyDown { .. }
+            | WidgetEvent::Scroll { .. }
+            | WidgetEvent::PointerLeave => false,
+            _ => return false,
+        };
+        self.at = at;
+        self.since_ms = now_ms;
+        self.armed = rest;
+        self.shown.take().is_some()
+    }
+
+    fn ripe(&mut self, now_ms: u64) -> bool {
+        if self.armed && now_ms.saturating_sub(self.since_ms) >= super::tooltip::DELAY_MS {
+            self.armed = false;
+            return true;
+        }
+        false
+    }
+
+    fn wait_ms(&self, now_ms: u64) -> Option<u64> {
+        self.armed
+            .then(|| (self.since_ms + super::tooltip::DELAY_MS).saturating_sub(now_ms))
+    }
 }

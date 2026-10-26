@@ -484,7 +484,7 @@ impl Widget for CodeViewWidget {
                 let x1 = self.text_origin_x()
                     + (end.saturating_sub(self.first_col) as i32) * self.cell_w;
                 if end > self.first_col && x1 > x0 {
-                    ctx.with_clip(content, |ctx| {
+                    ctx.with_viewport(content, |ctx| {
                         ctx.fill_rect_blended(x0, y, x1 - x0, self.line_h, theme.selection);
                     });
                 }
@@ -498,7 +498,7 @@ impl Widget for CodeViewWidget {
                 let x1 =
                     self.text_origin_x() + (de.saturating_sub(self.first_col) as i32) * self.cell_w;
                 if de > self.first_col && x1 > x0 {
-                    ctx.with_clip(content, |ctx| {
+                    ctx.with_viewport(content, |ctx| {
                         ctx.fill_rect_blended(x0, y, x1 - x0, self.line_h, found);
                     });
                 }
@@ -516,7 +516,7 @@ impl Widget for CodeViewWidget {
                 ctx.draw_mono_text(nx, y, &number, color, Color32::TRANSPARENT);
             }
 
-            ctx.with_clip(content, |ctx| {
+            ctx.with_viewport(content, |ctx| {
                 self.paint_line_text(ctx, line, y, content);
             });
         }
@@ -534,11 +534,11 @@ impl Widget for CodeViewWidget {
                         // A blurred surface shows where the caret is without
                         // claiming the keyboard: hollow rather than solid.
                         if self.focused {
-                            ctx.with_clip(content, |ctx| {
+                            ctx.with_viewport(content, |ctx| {
                                 ctx.fill_rect(x, y, CARET_WIDTH, self.line_h, theme.accent);
                             });
                         } else {
-                            ctx.with_clip(content, |ctx| {
+                            ctx.with_viewport(content, |ctx| {
                                 ctx.draw_rect(x, y, self.cell_w, self.line_h, theme.text_disabled);
                             });
                         }

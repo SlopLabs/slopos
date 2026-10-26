@@ -1,72 +1,53 @@
-use slopos_theme_core::{TextRole, radius, space};
+use slopos_theme_core::{EdgeInsets, inset, radius, space};
 
-use crate::constraints::{BoxConstraints, Rect, Size};
+use super::card::draw_shadow;
+use super::scroll_view::ScrollViewWidget;
+use crate::constraints::{
+    BoxConstraints, MAX_EXTENT, Rect, ScrollDirection, ScrollbarVisibility, Size,
+};
 use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
+    EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
+    route,
 };
+use crate::focus::RING_ROOM;
+use crate::layout::PaddingWidget;
 use crate::paint::PaintContext;
-use crate::traits::{
-    FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
-};
+use crate::traits::{MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget};
 
-/// A centered card over a dimming backdrop. The widget fills its parent, so the
-/// backdrop covers everything and no click reaches the tree underneath.
+const MAX_WIDTH: i32 = 480;
+const MARGIN: i32 = space::XL;
+
+/// A card over a scrim, holding a title, its content and the buttons that
+/// answer it. It covers the page for the pointer and the keyboard: a click
+/// outside it dismisses it, and Tab moves only among its controls. Content
+/// taller than the window scrolls.
 pub struct DialogWidget {
     core: WidgetCore,
-    title: String,
-    content: Box<dyn Widget>,
-    actions: Vec<Box<dyn Widget>>,
+    /// The title, the content in a scroll view, and the footer.
+    parts: Vec<Box<dyn Widget>>,
     on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
+    content_height: i32,
     card_rect: Rect,
-    /// Title-row height from the last measure; `layout` and `paint` run without
-    /// a style, and a card whose title band disagreed with paint's would place
-    /// its content over the title.
-    title_height: i32,
-    /// `None` until Tab or an arrow key names one, so a stray Enter cannot fire
-    /// a confirm dialog's typically-destructive first action.
-    focused_action: Option<usize>,
 }
 
 impl DialogWidget {
     pub fn new(
-        title: String,
+        title: Box<dyn Widget>,
         content: Box<dyn Widget>,
-        actions: Vec<Box<dyn Widget>>,
+        footer: Box<dyn Widget>,
         on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     ) -> Self {
+        let content = ScrollViewWidget::new(
+            Box::new(PaddingWidget::new(EdgeInsets::all(RING_ROOM), content)),
+            ScrollDirection::Vertical,
+            ScrollbarVisibility::WhenNeeded,
+        );
         Self {
             core: WidgetCore::new(),
-            title,
-            content,
-            actions,
+            parts: vec![title, Box::new(content), footer],
             on_dismiss,
+            content_height: 0,
             card_rect: Rect::ZERO,
-            title_height: 0,
-            focused_action: None,
-        }
-    }
-
-    fn cycle_action(&mut self, forward: bool, sink: &mut MessageSink) {
-        let len = self.actions.len();
-        if len == 0 {
-            return;
-        }
-        let previous = self.focused_action;
-        let next = match self.focused_action {
-            Some(i) if forward => (i + 1) % len,
-            Some(i) => (i + len - 1) % len,
-            None if forward => 0,
-            None => len - 1,
-        };
-        self.focused_action = Some(next);
-        // The framework never tells these buttons anything, and one never
-        // told it has focus answers no key. The caller's sink, or a message
-        // emitted here is dropped.
-        if let Some(action) = previous.and_then(|i| self.actions.get_mut(i)) {
-            action.event(&WidgetEvent::FocusLost, EventPhase::Target, sink);
-        }
-        if let Some(action) = self.actions.get_mut(next) {
-            action.event(&WidgetEvent::FocusGained, EventPhase::Target, sink);
         }
     }
 
@@ -74,48 +55,46 @@ impl DialogWidget {
         self.card_rect
     }
 
-    fn card_width(&self, available: i32) -> i32 {
-        CARD_MAX_WIDTH.min(available)
+    fn card_width(available: i32) -> i32 {
+        MAX_WIDTH.min(available - MARGIN * 2).max(0)
     }
 
-    fn inner_width(&self, available: i32) -> i32 {
-        (self.card_width(available) - CARD_PADDING * 2).max(0)
+    fn inner_width(available: i32) -> i32 {
+        (Self::card_width(available) - inset::CARD.horizontal()).max(0)
     }
 
-    fn actions_width(&self) -> i32 {
-        let mut total = 0;
-        for (i, action) in self.actions.iter().enumerate() {
-            if i > 0 {
-                total += ACTION_SPACING;
+    fn gaps() -> [i32; 2] {
+        [space::SM, space::XL]
+    }
+
+    /// Everything but the content.
+    fn frame_height(&self) -> i32 {
+        let ends = self.parts[0].measured_size().height + self.parts[2].measured_size().height;
+        ends + Self::gaps().iter().sum::<i32>() + inset::CARD.vertical()
+    }
+
+    fn dismiss(&self, sink: &mut MessageSink) {
+        if let Some(f) = &self.on_dismiss {
+            sink.emit_raw(f());
+        }
+    }
+
+    fn paint_card(&self, ctx: &mut PaintContext) {
+        let theme = ctx.theme();
+        let rect = self.layout_rect();
+        let card = self.card_rect;
+        ctx.fill_rect_blended(rect.x, rect.y, rect.width, rect.height, theme.scrim);
+        draw_shadow(ctx, card);
+        let (x, y, w, h) = (card.x, card.y, card.width, card.height);
+        ctx.fill_rounded_rect(x, y, w, h, radius::CARD, theme.surface_raised);
+        ctx.draw_rounded_rect(x, y, w, h, radius::CARD, theme.border);
+        ctx.with_clip(card, |ctx| {
+            for part in &self.parts {
+                part.paint(ctx);
             }
-            total += action.measured_size().width;
-        }
-        total
-    }
-
-    fn actions_height(&self) -> i32 {
-        self.actions
-            .iter()
-            .map(|a| a.measured_size().height)
-            .max()
-            .unwrap_or(0)
-    }
-
-    fn card_height(&self) -> i32 {
-        let title_h = self.title_height + CARD_PADDING;
-        let content_h = self.content.measured_size().height;
-        let actions_h = self.actions_height();
-        let mut h = title_h + content_h + CARD_PADDING;
-        if actions_h > 0 {
-            h += actions_h + CARD_PADDING;
-        }
-        h
+        });
     }
 }
-
-const CARD_PADDING: i32 = slopos_theme_core::inset::CARD.top;
-const ACTION_SPACING: i32 = space::SM;
-const CARD_MAX_WIDTH: i32 = 300;
 
 impl Widget for DialogWidget {
     fn core(&self) -> &WidgetCore {
@@ -126,97 +105,58 @@ impl Widget for DialogWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.title_height = crate::text::ui::line_height(TextRole::Title.style().size);
-        let inner_w = self.inner_width(constraints.max_width);
-
-        let content_constraints = BoxConstraints {
-            min_width: inner_w,
-            max_width: inner_w,
+        let inner = Self::inner_width(constraints.max_width);
+        let each = BoxConstraints {
+            min_width: inner,
+            max_width: inner,
             min_height: 0,
-            max_height: crate::constraints::MAX_EXTENT,
+            max_height: MAX_EXTENT,
         };
-        measure_widget(self.content.as_mut(), content_constraints, ctx);
-
-        let action_constraints = BoxConstraints::loose(Size::new(inner_w, constraints.max_height));
-        for action in &mut self.actions {
-            measure_widget(action.as_mut(), action_constraints, ctx);
-        }
-
+        measure_widget(self.parts[0].as_mut(), each, ctx);
+        measure_widget(self.parts[2].as_mut(), each, ctx);
+        let room = (constraints.max_height - MARGIN * 2 - self.frame_height()).max(0);
+        let outset = BoxConstraints {
+            min_width: inner + RING_ROOM * 2,
+            max_width: inner + RING_ROOM * 2,
+            min_height: 0,
+            max_height: room + RING_ROOM * 2,
+        };
+        let content = &mut self.parts[1];
+        measure_widget(content.as_mut(), outset, ctx);
+        let scrolled = content.children()[0].measured_size().height - RING_ROOM * 2;
+        self.content_height = scrolled.min(room);
         constraints.constrain(constraints.max_size())
     }
 
     fn layout(&mut self, rect: Rect) {
-        let card_w = self.card_width(rect.width);
-        let inner_w = self.inner_width(rect.width);
-        let card_h = self.card_height().min(rect.height);
-
+        let card_w = Self::card_width(rect.width);
+        let card_h = self.frame_height() + self.content_height;
         let card_x = rect.x + (rect.width - card_w) / 2;
         let card_y = rect.y + (rect.height - card_h) / 2;
         self.card_rect = Rect::new(card_x, card_y, card_w, card_h);
 
-        let title_h = self.title_height + CARD_PADDING;
-        let content_h = self.content.measured_size().height;
-        place_widget(
-            self.content.as_mut(),
-            Rect::new(card_x + CARD_PADDING, card_y + title_h, inner_w, content_h),
-        );
-
-        let actions_h = self.actions_height();
-        let actions_row_y = card_y + card_h - CARD_PADDING - actions_h;
-        let mut ax = card_x + (card_w - self.actions_width()) / 2;
-        for action in &mut self.actions {
-            let aw = action.measured_size().width;
-            place_widget(action.as_mut(), Rect::new(ax, actions_row_y, aw, actions_h));
-            ax += aw + ACTION_SPACING;
+        let inner_w = Self::inner_width(rect.width);
+        let x = card_x + inset::CARD.left;
+        let mut y = card_y + inset::CARD.top;
+        let heights = [
+            self.parts[0].measured_size().height,
+            self.content_height,
+            self.parts[2].measured_size().height,
+        ];
+        let gaps = Self::gaps();
+        for (i, part) in self.parts.iter_mut().enumerate() {
+            let at = Rect::new(x, y, inner_w, heights[i]);
+            let at = match i {
+                1 => at.inflate(RING_ROOM),
+                _ => at,
+            };
+            place_widget(part.as_mut(), at);
+            y += heights[i] + gaps.get(i).copied().unwrap_or(0);
         }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let theme = ctx.theme();
-        let rect = self.layout_rect();
-
-        ctx.fill_rect_blended(rect.x, rect.y, rect.width, rect.height, theme.scrim);
-
-        ctx.fill_rounded_rect(
-            self.card_rect.x,
-            self.card_rect.y,
-            self.card_rect.width,
-            self.card_rect.height,
-            radius::CARD,
-            theme.surface_raised,
-        );
-        ctx.draw_rounded_rect(
-            self.card_rect.x,
-            self.card_rect.y,
-            self.card_rect.width,
-            self.card_rect.height,
-            radius::CARD,
-            theme.border,
-        );
-
-        let text_h = crate::text::ui::line_height(TextRole::Title.style().size);
-        let title_x = self.card_rect.x + CARD_PADDING;
-        let title_y = self.card_rect.y + (CARD_PADDING + self.title_height - text_h) / 2;
-        ctx.draw_text_in(title_x, title_y, &self.title, TextRole::Title, theme.text);
-
-        let selected = self.focused_action;
-        ctx.with_clip(self.card_rect, |ctx| {
-            self.content.paint(ctx);
-            for (i, action) in self.actions.iter().enumerate() {
-                action.paint(ctx);
-                if selected == Some(i) {
-                    let r = action.layout_rect();
-                    ctx.draw_rounded_rect(
-                        r.x - 2,
-                        r.y - 2,
-                        r.width + 4,
-                        r.height + 4,
-                        radius::CONTROL,
-                        theme.focus,
-                    );
-                }
-            }
-        });
+        ctx.with_layer(self.id(), |ctx| self.paint_card(ctx));
     }
 
     fn event(
@@ -228,102 +168,21 @@ impl Widget for DialogWidget {
         if phase != EventPhase::Target && phase != EventPhase::Bubble {
             return EventResponse::Ignored;
         }
-
         match event {
-            WidgetEvent::KeyDown {
-                key: Key::Named(NamedKey::Escape),
+            WidgetEvent::PointerDown {
+                x,
+                y,
+                button: PointerButton::Left,
                 ..
-            } => {
-                if let Some(f) = &self.on_dismiss {
-                    sink.emit_raw(f());
-                }
+            } if !self.card_rect.contains(*x, *y) => {
+                self.dismiss(sink);
                 EventResponse::Consumed
             }
-
-            WidgetEvent::PointerDown { x, y, button, .. }
-            | WidgetEvent::PointerUp { x, y, button } => {
-                if *button == PointerButton::Left
-                    && matches!(event, WidgetEvent::PointerDown { .. })
-                    && !self.card_rect.contains(*x, *y)
-                {
-                    if let Some(f) = &self.on_dismiss {
-                        sink.emit_raw(f());
-                    }
-                    return EventResponse::Consumed;
-                }
-
-                // Offering it to each in turn would let "Cancel" fire "Kill".
-                for action in &mut self.actions {
-                    if action.layout_rect().contains(*x, *y) {
-                        let resp = action.event(event, EventPhase::Target, sink);
-                        if resp.is_consumed() {
-                            return resp;
-                        }
-                    }
-                }
-                // Or the one pressed stays drawn pressed. A button ignores a
-                // release outside its rect, so this cannot fire one.
-                if matches!(event, WidgetEvent::PointerUp { .. }) {
-                    for action in &mut self.actions {
-                        if !action.layout_rect().contains(*x, *y) {
-                            action.event(event, EventPhase::Target, sink);
-                        }
-                    }
-                }
-                if self.content.layout_rect().contains(*x, *y) {
-                    let resp = self.content.event(event, EventPhase::Target, sink);
-                    if resp.is_consumed() {
-                        return resp;
-                    }
-                }
-                EventResponse::Consumed
-            }
-
-            WidgetEvent::KeyDown { key, modifiers, .. } => {
-                match key {
-                    Key::Named(NamedKey::Tab) => {
-                        self.cycle_action(!modifiers.shift, sink);
-                        return EventResponse::Consumed;
-                    }
-                    Key::Named(NamedKey::Right) | Key::Named(NamedKey::Down) => {
-                        self.cycle_action(true, sink);
-                        return EventResponse::Consumed;
-                    }
-                    Key::Named(NamedKey::Left) | Key::Named(NamedKey::Up) => {
-                        self.cycle_action(false, sink);
-                        return EventResponse::Consumed;
-                    }
-                    _ => {}
-                }
-
-                if let Some(action) = self.focused_action.and_then(|i| self.actions.get_mut(i)) {
-                    let resp = action.event(event, EventPhase::Target, sink);
-                    if resp.is_consumed() {
-                        return resp;
-                    }
-                }
-                let resp = self.content.event(event, phase, sink);
-                if resp.is_consumed() {
-                    resp
-                } else {
-                    // Modal: the app underneath must not act on a key aimed at the dialog.
-                    EventResponse::Consumed
-                }
-            }
-
-            // Stops here: the catch-all below would mark every action focused
-            // and each would draw a ring.
             WidgetEvent::FocusGained | WidgetEvent::FocusLost => EventResponse::Ignored,
-
-            _ => {
-                for action in &mut self.actions {
-                    let resp = action.event(event, phase, sink);
-                    if resp.is_consumed() {
-                        return resp;
-                    }
-                }
-                self.content.event(event, phase, sink)
-            }
+            _ => match route(&mut self.parts, event, phase, sink) {
+                EventResponse::Ignored => EventResponse::Blocked,
+                taken => taken,
+            },
         }
     }
 
@@ -331,15 +190,38 @@ impl Widget for DialogWidget {
         Role::Group
     }
 
-    fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::StrongFocus
+    fn accessible_name(&self) -> Option<&str> {
+        self.parts[0].accessible_name()
+    }
+
+    fn is_modal(&self) -> bool {
+        true
+    }
+
+    /// Enter and Escape reach the footer; Escape dismisses when the footer
+    /// has no button to go back with.
+    fn take_unhandled_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        sink: &mut MessageSink,
+    ) -> bool {
+        if self.parts[2].take_unhandled_key(key, modifiers, sink) {
+            return true;
+        }
+        let plain = !(modifiers.ctrl || modifiers.alt || modifiers.shift);
+        if key != Key::Named(NamedKey::Escape) || !plain || self.on_dismiss.is_none() {
+            return false;
+        }
+        self.dismiss(sink);
+        true
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
-        &self.actions
+        &self.parts
     }
 
     fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
-        &mut self.actions
+        &mut self.parts
     }
 }

@@ -308,7 +308,7 @@ fn layout(
 
     let assets = root.join("assets");
     for (name, path) in listing(&assets.join("fonts"), |n| {
-        n.ends_with(".ttf") || n.ends_with("-OFL.txt")
+        n.ends_with(".ttf") || n.ends_with("-OFL.txt") || n.ends_with("-LICENSE.txt")
     })? {
         add(format!("/usr/share/fonts/{name}"), MODE_DATA, read(&path)?);
     }

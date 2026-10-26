@@ -5,6 +5,7 @@ const FONT_MAP: &[(&str, &str)] = &[
     ("mono-bold", "JetBrainsMono-Bold.ttf"),
     ("sans", "Inter-Regular.ttf"),
     ("sans-semibold", "Inter-SemiBold.ttf"),
+    ("icons", "Lucide.ttf"),
 ];
 
 pub fn load_font(name: &str) -> Option<&'static [u8]> {

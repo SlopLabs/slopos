@@ -122,6 +122,10 @@ pub enum EventResponse {
     CapturePointer,
     /// Release a previous pointer capture.
     ReleasePointer,
+    /// Not taken, and not to reach what is beneath: a modal layer's answer to
+    /// what none of its controls took. Such a key still reaches Tab and the
+    /// layer's default and cancel buttons.
+    Blocked,
 }
 
 impl EventResponse {
@@ -217,6 +221,42 @@ impl Default for MessageSink {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Routes `event` among children that do not overlap: a press or a wheel to
+/// the one under the pointer; a move or a release to every one, since a drag
+/// leaves the child it began in; anything else to each in turn until one
+/// takes it.
+pub(crate) fn route(
+    children: &mut [Box<dyn super::traits::Widget>],
+    event: &WidgetEvent,
+    phase: EventPhase,
+    sink: &mut MessageSink,
+) -> EventResponse {
+    let at = match event {
+        WidgetEvent::PointerDown { x, y, .. } | WidgetEvent::Scroll { x, y, .. } => Some((*x, *y)),
+        WidgetEvent::PointerMove { .. } | WidgetEvent::PointerUp { .. } => {
+            let mut response = EventResponse::Ignored;
+            for child in children {
+                let r = child.event(event, phase, sink);
+                if r.is_consumed() && response != EventResponse::CapturePointer {
+                    response = r;
+                }
+            }
+            return response;
+        }
+        _ => None,
+    };
+    for child in children {
+        if at.is_some_and(|(x, y)| !child.layout_rect().contains(x, y)) {
+            continue;
+        }
+        let r = child.event(event, phase, sink);
+        if r.is_consumed() {
+            return r;
+        }
+    }
+    EventResponse::Ignored
 }
 
 /// Containers route to their own children, so the hit test result is only the

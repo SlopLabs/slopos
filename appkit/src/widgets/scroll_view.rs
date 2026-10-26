@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::hash::{Hash, Hasher};
 
 use crate::constraints::{
     BoxConstraints, MAX_EXTENT, Rect, ScrollDirection, ScrollbarVisibility, Size,
@@ -6,7 +7,7 @@ use crate::constraints::{
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::traits::{
-    FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
+    FocusPolicy, MeasureCtx, Role, Scrolled, Widget, WidgetCore, measure_widget, place_widget,
 };
 
 pub struct ScrollViewWidget {
@@ -254,7 +255,7 @@ impl Widget for ScrollViewWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let viewport = self.layout_rect();
 
-        ctx.with_clip(viewport, |ctx| {
+        ctx.with_viewport(viewport, |ctx| {
             self.child.paint(ctx);
         });
 
@@ -314,7 +315,7 @@ impl Widget for ScrollViewWidget {
         }
 
         if self.focused {
-            ctx.draw_focus_ring(viewport);
+            ctx.draw_inner_focus_ring(viewport);
         }
     }
 
@@ -334,6 +335,10 @@ impl Widget for ScrollViewWidget {
             WidgetEvent::Scroll {
                 delta_x, delta_y, ..
             } => {
+                let inner = self.child.event(event, phase, sink);
+                if inner.is_consumed() {
+                    return inner;
+                }
                 let can_scroll_v = matches!(
                     self.direction,
                     ScrollDirection::Vertical | ScrollDirection::Both
@@ -499,8 +504,46 @@ impl Widget for ScrollViewWidget {
         Role::ScrollArea
     }
 
+    /// What it shows is known by the first name in it: a page's first
+    /// heading, a list's first row.
+    fn kept_scroll(&self) -> Option<Scrolled> {
+        fn first_name(widget: &dyn Widget) -> Option<&str> {
+            let inner = || {
+                widget
+                    .children()
+                    .iter()
+                    .find_map(|c| first_name(c.as_ref()))
+            };
+            widget.accessible_name().or_else(inner)
+        }
+        if self.on_scroll.is_some() {
+            return None;
+        }
+        let mut shows = std::hash::DefaultHasher::new();
+        first_name(self.child.as_ref()).hash(&mut shows);
+        Some(Scrolled {
+            shows: shows.finish(),
+            offset: (self.offset_x, self.offset_y),
+        })
+    }
+
+    fn keep_scroll(&mut self, (x, y): (i32, i32)) {
+        if self.on_scroll.is_none() {
+            (self.offset_x, self.offset_y) = (x, y);
+        }
+    }
+
+    /// A tab stop only while there is something to scroll to.
     fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::TabFocus
+        if self.max_offset_x() > 0 || self.max_offset_y() > 0 {
+            FocusPolicy::TabFocus
+        } else {
+            FocusPolicy::None
+        }
+    }
+
+    fn arrangement(&self) -> crate::audit::Arrangement {
+        crate::audit::Arrangement::Scroll
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {

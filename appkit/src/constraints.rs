@@ -43,6 +43,16 @@ impl Rect {
         }
     }
 
+    /// `by` larger on every side, or smaller for a negative `by`.
+    pub const fn inflate(&self, by: i32) -> Self {
+        Self::new(
+            self.x - by,
+            self.y - by,
+            self.width + by * 2,
+            self.height + by * 2,
+        )
+    }
+
     pub const fn contains(&self, px: i32, py: i32) -> bool {
         px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
     }

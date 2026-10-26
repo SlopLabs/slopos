@@ -84,7 +84,7 @@ impl Widget for PopupWidget {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        self.child.paint(ctx);
+        ctx.with_layer(self.id(), |ctx| self.child.paint(ctx));
     }
 
     fn event(
@@ -163,6 +163,14 @@ impl Widget for PopupWidget {
     /// so nothing else would. A declarer inside the popup still wins: the
     /// search takes the last in depth-first order.
     fn declares_focus(&self) -> bool {
+        true
+    }
+
+    fn arrangement(&self) -> crate::audit::Arrangement {
+        crate::audit::Arrangement::Layers
+    }
+
+    fn covers(&self) -> bool {
         true
     }
 

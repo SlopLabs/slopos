@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::hash::{Hash, Hasher};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
@@ -7,7 +8,7 @@ use crate::event::{
 use crate::node::{ContextMenuAt, SortIndicator, TableColumn, TableColumnWidth};
 use crate::paint::PaintContext;
 use crate::traits::{
-    FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
+    FocusPolicy, MeasureCtx, Role, Scrolled, Widget, WidgetCore, measure_widget, place_widget,
 };
 
 use slopos_theme_core::State;
@@ -26,6 +27,7 @@ pub struct TableWidget {
     on_header_click: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     on_context_menu: Option<Box<dyn Fn(ContextMenuAt) -> Box<dyn Any>>>,
     scroll_offset: i32,
+    shows: u64,
     header_height: i32,
     col_widths: Vec<i32>,
     focused: bool,
@@ -71,6 +73,7 @@ impl TableWidget {
             on_header_click,
             on_context_menu,
             scroll_offset: 0,
+            shows: 0,
             header_height: row_height,
             col_widths: vec![0; col_count],
             focused: false,
@@ -78,6 +81,12 @@ impl TableWidget {
             sb_width: 8,
             thumb_min: 20,
         }
+    }
+
+    /// What the rows are of; see [`Node::Table`](crate::Node::Table).
+    pub fn showing(mut self, shows: u64) -> Self {
+        self.shows = shows;
+        self
     }
 
     fn row_count(&self) -> usize {
@@ -365,7 +374,7 @@ impl Widget for TableWidget {
         );
         let (vis_start, vis_end) = self.visible_range();
 
-        ctx.with_clip(body_rect, |ctx| {
+        ctx.with_viewport(body_rect, |ctx| {
             for i in vis_start..vis_end.min(self.rows.len()) {
                 let y =
                     rect.y + self.header_height + i as i32 * self.row_height - self.scroll_offset;
@@ -653,6 +662,43 @@ impl Widget for TableWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
+    }
+
+    /// The chosen row, as far as the body shows it.
+    fn focus_rect(&self) -> Rect {
+        let rect = self.layout_rect();
+        let Some(row) = self.selected else {
+            return rect;
+        };
+        let (x, bottom) = self.row_anchor(row);
+        let top = (bottom - self.row_height).max(rect.y + self.header_height);
+        Rect::new(x, top, rect.width, bottom - top)
+    }
+
+    fn tooltip(&self, x: i32, y: i32) -> Option<&str> {
+        if y < self.layout_rect().y + self.header_height {
+            return None;
+        }
+        let mut cells = self.rows.iter().flatten();
+        cells
+            .find(|cell| cell.layout_rect().contains(x, y))?
+            .tooltip(x, y)
+    }
+
+    fn kept_scroll(&self) -> Option<Scrolled> {
+        let mut shows = std::hash::DefaultHasher::new();
+        for column in &self.columns {
+            column.label.hash(&mut shows);
+        }
+        self.shows.hash(&mut shows);
+        Some(Scrolled {
+            shows: shows.finish(),
+            offset: (0, self.scroll_offset),
+        })
+    }
+
+    fn keep_scroll(&mut self, (_, y): (i32, i32)) {
+        self.scroll_offset = y;
     }
 }
 

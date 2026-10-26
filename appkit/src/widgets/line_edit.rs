@@ -20,7 +20,7 @@ use crate::paint::PaintContext;
 use crate::text::BODY;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
-use super::icon::{IconKind, draw_icon};
+use slopos_theme_core::Icon;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LineEditInput {
@@ -48,7 +48,7 @@ pub struct LineEditWidget {
     /// Caret position in characters.
     caret: usize,
     focused: bool,
-    icon: Option<IconKind>,
+    icon: Option<Icon>,
     /// Drawn on the right: a match counter, a hint, an error.
     suffix: String,
     /// Red when the content is not usable — a search with no match.
@@ -65,7 +65,7 @@ impl LineEditWidget {
         placeholder: String,
         caret: usize,
         focused: bool,
-        icon: Option<IconKind>,
+        icon: Option<Icon>,
         suffix: String,
         invalid: bool,
         on_input: Option<InputCallback>,
@@ -200,8 +200,7 @@ impl Widget for LineEditWidget {
 
         if let Some(icon) = self.icon {
             let size = self.icon_size();
-            draw_icon(
-                ctx,
+            ctx.draw_icon(
                 icon,
                 rect.x + self.padding_h,
                 rect.y + (rect.height - size) / 2,
@@ -217,7 +216,7 @@ impl Widget for LineEditWidget {
         let content =
             crate::constraints::Rect::new(self.text_x(), rect.y, self.content_width(), rect.height);
 
-        ctx.with_clip(content, |ctx| {
+        ctx.with_viewport(content, |ctx| {
             if self.text.is_empty() {
                 ctx.draw_text_transparent(text_x, text_y, &self.placeholder, theme.text_secondary);
             } else {

@@ -81,7 +81,7 @@ impl Widget for ProgressBarWidget {
         let tx = rect.x + (rect.width - tw) / 2;
         let ty = rect.y + (rect.height - ctx.text_height()) / 2;
         ctx.draw_text_transparent(tx, ty, &self.label, theme.text);
-        ctx.with_clip(filled, |ctx| {
+        ctx.with_viewport(filled, |ctx| {
             ctx.fill_rect(
                 filled.x,
                 filled.y,

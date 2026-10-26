@@ -206,7 +206,8 @@ impl Widget for SliderWidget {
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         self.thumb = ctx.style.checkbox_size;
-        let height = self.thumb + (ctx.style.focus_ring_width + ctx.style.focus_ring_offset) * 2;
+        let ring = ctx.style.focus_ring_width + ctx.style.focus_ring_offset;
+        let height = (self.thumb + ring * 2).max(ctx.style.min_target);
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {

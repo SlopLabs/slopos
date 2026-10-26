@@ -343,10 +343,10 @@ impl Consent {
     pub fn take_dirty(&mut self) -> bool {
         if let Some(dialog) = self.showing.as_mut()
             && dialog.drawn(sys_core::get_time_ms())
-            && protocol::says_shown(self.speaks)
         {
+            eprintln!("COMPOSITOR: shown a question");
             let id = dialog.ask().id;
-            if !self.write(&protocol::shown_frame(id)) {
+            if protocol::says_shown(self.speaks) && !self.write(&protocol::shown_frame(id)) {
                 self.close();
             }
         }

@@ -387,13 +387,14 @@ fn a_changed_file_is_not_silently_overwritten() -> bool {
     if app.dialog().is_none() {
         return false;
     }
-    // Cancel: the file on disk is untouched and the buffer is still dirty.
-    key(&mut app, Key::Named(NamedKey::Enter), Modifiers::default());
-    let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
-    on_disk
-        == "somebody else was here
-" && app.documents()[app.active_index()].is_modified()
-        && app.dialog().is_none()
+    let untouched =
+        || std::fs::read_to_string(&path).unwrap_or_default() == "somebody else was here\n";
+    dispatch::press(&mut app, Key::Named(NamedKey::Enter), Modifiers::default());
+    if app.dialog().is_none() || !untouched() {
+        return false;
+    }
+    dispatch::press(&mut app, Key::Named(NamedKey::Escape), Modifiers::default());
+    untouched() && app.documents()[app.active_index()].is_modified() && app.dialog().is_none()
 }
 
 /// Driving the real widget tree, not `App::on_key`.
@@ -402,7 +403,9 @@ fn a_changed_file_is_not_silently_overwritten() -> bool {
 /// with what nothing consumed, so a case calling `on_key` directly tests the
 /// fallback and never sees a widget steal the key on the way.
 mod dispatch {
-    use slopos_appkit::event::{EventPhase, Key, MessageSink, Modifiers, WidgetEvent};
+    use slopos_appkit::event::{
+        EventPhase, EventResponse, Key, MessageSink, Modifiers, WidgetEvent,
+    };
     use slopos_appkit::traits::Widget;
     use slopos_appkit::{App, StyleSheet, constraints::Size, tree};
     use slopos_apps::editor::{EditorApp, EditorMsg};
@@ -419,21 +422,28 @@ mod dispatch {
         root
     }
 
-    /// Sends `key` the way `run_app` does and applies whatever came back.
-    /// Answers whether a widget consumed it.
+    /// Sends `key` the way `run_app` does and applies whatever came back:
+    /// to the widget tree, then to a page's or dialog's buttons, then, unless
+    /// a dialog covers the page, to the app. Answers whether a widget took it.
     pub fn press(app: &mut EditorApp, key: Key, modifiers: Modifiers) -> bool {
-        let consumed = send(
-            app,
-            WidgetEvent::KeyDown {
-                key,
-                modifiers,
-                repeat: false,
-            },
-        );
-        if !consumed {
+        let mut root = layout(app);
+        let mut sink = MessageSink::new();
+        let event = WidgetEvent::KeyDown {
+            key,
+            modifiers,
+            repeat: false,
+        };
+        let response = root.event(&event, EventPhase::Target, &mut sink);
+        let blocked = response == EventResponse::Blocked;
+        let taken = (response.is_consumed() && !blocked)
+            || tree::offer_unhandled(root.as_mut(), key, modifiers, &mut sink);
+        for msg in sink.drain_typed::<EditorMsg>() {
+            app.update(msg);
+        }
+        if !taken && !blocked {
             app.on_key(key, modifiers);
         }
-        consumed
+        taken
     }
 
     /// An ordinary printable character. `translate_event` turns one into

@@ -257,7 +257,7 @@ impl Window {
     fn texts(&self) -> Vec<String> {
         let mut texts = Vec::new();
         walk(&self.view(), &mut |node| match node {
-            Node::Label { text, .. } | Node::StyledLabel { text, .. } => texts.push(text.clone()),
+            Node::Text(text) => texts.push(text.text.clone()),
             Node::RadioGroup { options, .. } => {
                 for option in options {
                     texts.extend([option.label.clone(), option.detail.clone()]);
@@ -294,7 +294,10 @@ impl Window {
                 stops(child.as_ref(), roles);
             }
         }
-        let tree = slopos_appkit::tree::build_widget_tree(&self.view());
+        // Laid out in the window: a page is a tab stop only while it scrolls.
+        let mut tree = slopos_appkit::tree::build_widget_tree(&self.view());
+        let window = Size::new(WIDTH, HEIGHT);
+        slopos_appkit::tree::layout_tree(tree.as_mut(), window, &StyleSheet::dark());
         let mut roles = Vec::new();
         stops(tree.as_ref(), &mut roles);
         roles
@@ -321,7 +324,7 @@ impl Window {
                 .any(|child| press(child.as_mut(), role, sink))
         }
         let mut tree = slopos_appkit::tree::build_widget_tree(&self.view());
-        let window = Size::new(WIDTH as i32, HEIGHT as i32);
+        let window = Size::new(WIDTH, HEIGHT);
         slopos_appkit::tree::layout_tree(tree.as_mut(), window, &StyleSheet::dark());
         let mut sink = MessageSink::new();
         if !press(tree.as_mut(), role, &mut sink) {

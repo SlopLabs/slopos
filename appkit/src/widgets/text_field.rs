@@ -246,7 +246,7 @@ impl Widget for TextFieldWidget {
         let text_y = self.rect().y + (self.rect().height - ctx.text_height()) / 2;
         let text_x = self.rect().x + ph - self.scroll_offset;
 
-        ctx.with_clip(content, |ctx| {
+        ctx.with_viewport(content, |ctx| {
             if let Some((start, end)) = self.selection_range() {
                 let sel_x = text_x + self.char_x_offset(start);
                 let sel_end_x = text_x + self.char_x_offset(end);
@@ -265,10 +265,6 @@ impl Widget for TextFieldWidget {
                 ctx.fill_rect(cursor_x, text_y, 2, ctx.text_height(), theme.accent);
             }
         });
-
-        if self.focused {
-            ctx.draw_focus_ring(self.rect());
-        }
     }
 
     fn event(

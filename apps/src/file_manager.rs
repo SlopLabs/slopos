@@ -3,13 +3,14 @@
 //! Nautilus-inspired file browser using the declarative widget toolkit.
 
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::string::String;
 
 use slopos_appkit::theme::space;
 use slopos_appkit::{
     Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Key, Length, Modifiers, NamedKey,
-    Node, Surface, TableColumn, TableColumnWidth, TextAlignment, Tone,
+    Node, Surface, TableColumn, TableColumnWidth, Text, TextAlignment, Tone, WindowSpec,
 };
 
 const ITEM_HEIGHT: i32 = 22;
@@ -212,12 +213,11 @@ impl FileManagerApp {
 
         let heading = Node::Padding {
             padding: EdgeInsets::new(space::SM, space::SM, space::XS, space::SM),
-            child: Box::new(Node::StyledLabel {
-                text: String::from("Places"),
-                tone: Tone::Secondary,
-                alignment: TextAlignment::Start,
-                wrap: false,
-            }),
+            child: Box::new(
+                Text::new(String::from("Places"))
+                    .tone(Tone::Secondary)
+                    .into(),
+            ),
         };
 
         let items: Vec<Node<FileMsg>> = BOOKMARKS
@@ -237,18 +237,10 @@ impl FileManagerApp {
                         spacing: space::SM,
                         align: CrossAxisAlignment::Center,
                         children: vec![
-                            Node::StyledLabel {
-                                text: String::from(bm.icon),
-                                tone: Tone::Secondary,
-                                alignment: TextAlignment::Start,
-                                wrap: false,
-                            },
-                            Node::StyledLabel {
-                                text: String::from(bm.label),
-                                tone,
-                                alignment: TextAlignment::Start,
-                                wrap: false,
-                            },
+                            Text::new(String::from(bm.icon))
+                                .tone(Tone::Secondary)
+                                .into(),
+                            Text::new(String::from(bm.label)).tone(tone).into(),
                         ],
                     }),
                 }
@@ -314,12 +306,7 @@ impl FileManagerApp {
                         Node::Spacer {
                             size: Length::Px(space::SM),
                         },
-                        Node::StyledLabel {
-                            text: display_path,
-                            tone: Tone::Normal,
-                            alignment: TextAlignment::Start,
-                            wrap: false,
-                        },
+                        Text::new(display_path).tone(Tone::Normal).into(),
                     ],
                 }),
             }),
@@ -340,18 +327,11 @@ impl FileManagerApp {
         };
 
         vec![
-            Node::StyledLabel {
-                text: name_text,
-                tone: Tone::Normal,
-                alignment: TextAlignment::Start,
-                wrap: false,
-            },
-            Node::StyledLabel {
-                text: size_text,
-                tone: Tone::Secondary,
-                alignment: TextAlignment::End,
-                wrap: false,
-            },
+            Text::new(name_text).tone(Tone::Normal).into(),
+            Text::new(size_text)
+                .tone(Tone::Secondary)
+                .align(TextAlignment::End)
+                .into(),
         ]
     }
 
@@ -361,24 +341,24 @@ impl FileManagerApp {
                 surface: Surface::Base,
                 child: Box::new(Node::Padding {
                     padding: EdgeInsets::all(space::LG),
-                    child: Box::new(Node::StyledLabel {
-                        text: self.error_msg.clone(),
-                        tone: Tone::Danger,
-                        alignment: TextAlignment::Center,
-                        wrap: false,
-                    }),
+                    child: Box::new(
+                        Text::new(self.error_msg.clone())
+                            .tone(Tone::Danger)
+                            .align(TextAlignment::Center)
+                            .into(),
+                    ),
                 }),
             },
             LoadState::Empty => Node::Background {
                 surface: Surface::Base,
                 child: Box::new(Node::Padding {
                     padding: EdgeInsets::all(space::LG),
-                    child: Box::new(Node::StyledLabel {
-                        text: String::from("Empty directory"),
-                        tone: Tone::Secondary,
-                        alignment: TextAlignment::Center,
-                        wrap: false,
-                    }),
+                    child: Box::new(
+                        Text::new(String::from("Empty directory"))
+                            .tone(Tone::Secondary)
+                            .align(TextAlignment::Center)
+                            .into(),
+                    ),
                 }),
             },
             LoadState::Ok => {
@@ -406,6 +386,11 @@ impl FileManagerApp {
                     on_select: Some(FileMsg::FileSelect),
                     on_header_click: None,
                     on_context_menu: None,
+                    shows: {
+                        let mut directory = DefaultHasher::new();
+                        self.current_path.hash(&mut directory);
+                        directory.finish()
+                    },
                 }
             }
         };
@@ -451,12 +436,7 @@ impl FileManagerApp {
             surface: Surface::Chrome,
             child: Box::new(Node::Padding {
                 padding: EdgeInsets::symmetric(space::SM, space::XS),
-                child: Box::new(Node::StyledLabel {
-                    text,
-                    tone: Tone::Secondary,
-                    alignment: TextAlignment::Start,
-                    wrap: false,
-                }),
+                child: Box::new(Text::new(text).tone(Tone::Secondary).into()),
             }),
         }
     }
@@ -553,9 +533,13 @@ impl App for FileManagerApp {
     fn app_id(&self) -> &str {
         "org.slopos.files"
     }
+
+    fn window(&self) -> WindowSpec {
+        WindowSpec::new(640, 392)
+    }
 }
 
 pub fn file_manager_main() -> ! {
     let app = FileManagerApp::new();
-    slopos_appkit::run_app(app, 640, 392)
+    slopos_appkit::run_app(app)
 }

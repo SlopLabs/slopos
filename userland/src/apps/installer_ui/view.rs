@@ -1,7 +1,7 @@
 use slopos_appkit::theme::{inset, space};
 use slopos_appkit::{
     BarSegment, ButtonStyle, CrossAxisAlignment, Length, LineEditInput, Node, RadioOption,
-    ScrollDirection, ScrollbarVisibility, SegmentFill, TextAlignment, Tone,
+    ScrollDirection, ScrollbarVisibility, SegmentFill, Text, Tone,
 };
 use slopos_boot_core::install::Role;
 use slopos_installer_core::wizard::{Kind, Page, Row, StepState, words};
@@ -17,30 +17,15 @@ const CRASH: usize = 3;
 const OTHER_SYSTEMS: [usize; 3] = [4, 5, 6];
 
 fn label(text: impl Into<String>) -> Node<Msg> {
-    Node::Label {
-        text: text.into(),
-        alignment: TextAlignment::Start,
-        wrap: true,
-        max_lines: None,
-    }
+    Text::new(text).wrap().into()
 }
 
 fn wrapped(text: impl Into<String>, tone: Tone) -> Node<Msg> {
-    Node::StyledLabel {
-        text: text.into(),
-        tone,
-        alignment: TextAlignment::Start,
-        wrap: true,
-    }
+    Text::new(text).tone(tone).wrap().into()
 }
 
 fn toned(text: impl Into<String>, tone: Tone) -> Node<Msg> {
-    Node::StyledLabel {
-        text: text.into(),
-        tone,
-        alignment: TextAlignment::Start,
-        wrap: false,
-    }
+    Text::new(text).tone(tone).into()
 }
 
 fn column(spacing: i32, children: Vec<Node<Msg>>) -> Node<Msg> {
@@ -480,12 +465,7 @@ fn log(app: &InstallerApp) -> Node<Msg> {
         .progress()
         .log
         .iter()
-        .map(|line| Node::Label {
-            text: line.clone(),
-            alignment: TextAlignment::Start,
-            wrap: false,
-            max_lines: Some(1),
-        })
+        .map(|line| Text::new(line.clone()).into())
         .collect();
     Node::SizedBox {
         width: None,

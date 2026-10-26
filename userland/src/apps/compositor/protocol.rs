@@ -28,6 +28,8 @@ const MAX_PENDING_DAMAGE: usize = 8;
 const MAX_CHILDREN: usize = 8;
 
 const MAX_SURFACE_BUFFERS: usize = 2;
+/// Past any screen, and small enough that no frame arithmetic overflows.
+const SIZE_LIMIT_MAX: u32 = 1 << 14;
 /// `current_buffer` sentinel: no buffer has been committed yet.
 const NO_BUFFER: u8 = u8::MAX;
 
@@ -102,6 +104,8 @@ struct ProtocolSurface {
     acked_serial: u32,
     title: [u8; MAX_STRING_LEN],
     app_id: [u8; MAX_STRING_LEN],
+    /// The client's `(min, max)` sizes; 0 is no limit.
+    size_limits: ((u32, u32), (u32, u32)),
     cursor_shape: u8,
     last_enter_serial: u32,
     has_pointer: bool,
@@ -150,6 +154,7 @@ impl ProtocolSurface {
             acked_serial: 0,
             title: [0u8; MAX_STRING_LEN],
             app_id: [0u8; MAX_STRING_LEN],
+            size_limits: ((0, 0), (0, 0)),
             cursor_shape: 0,
             last_enter_serial: 0,
             has_pointer: false,
@@ -434,6 +439,21 @@ impl ProtocolBridge {
             } => {
                 self.handle_set_cursor_shape(client_idx, surface, serial, shape);
             }
+            Request::ToplevelSetSizeLimits {
+                toplevel,
+                min_width,
+                min_height,
+                max_width,
+                max_height,
+            } => {
+                if let Some(idx) = self.find_surface_by_toplevel(client_idx, toplevel) {
+                    let cap = |v: u32| v.min(SIZE_LIMIT_MAX);
+                    self.surfaces[idx].size_limits = (
+                        (cap(min_width), cap(min_height)),
+                        (cap(max_width), cap(max_height)),
+                    );
+                }
+            }
             Request::InteractiveMove { toplevel, serial } => {
                 self.handle_interactive_move(client_idx, toplevel, serial);
             }
@@ -579,8 +599,11 @@ impl ProtocolBridge {
                 surface.shm_token = slot.fd as u32;
                 surface.width = slot.width;
                 surface.height = slot.height;
-                if surface.width > 0 && surface.height > 0 {
+                if surface.width > 0 && surface.height > 0 && !surface.visible {
                     surface.visible = true;
+                    if surface.role == SurfaceRole::Toplevel {
+                        eprintln!("COMPOSITOR: shown {}", printable(&surface.app_id));
+                    }
                 }
             }
 
@@ -1170,6 +1193,8 @@ impl ProtocolBridge {
             info.cursor_shape = s.cursor_shape;
             info.frame_width = s.frame_width;
             info.frame_height = s.frame_height;
+            let ((min_w, min_h), (max_w, max_h)) = s.size_limits;
+            info.fixed_size = min_w > 0 && min_h > 0 && (min_w, min_h) == (max_w, max_h);
             info.title.copy_from_slice(&s.title[..32]);
             let mut aid = [0u8; 32];
             aid.copy_from_slice(&s.app_id[..32]);
@@ -1219,6 +1244,19 @@ impl ProtocolBridge {
             self.surfaces[idx].frame_width = w;
             self.surfaces[idx].frame_height = h;
         }
+    }
+
+    /// `(w, h)` held to the window's own limits.
+    pub fn clamp_window_size(&self, task_id: u32, w: i32, h: i32) -> (i32, i32) {
+        let Some(idx) = self.task_id_to_surface_idx(task_id) else {
+            return (w, h);
+        };
+        let ((min_w, min_h), (max_w, max_h)) = self.surfaces[idx].size_limits;
+        let clamp = |v: i32, min: u32, max: u32| {
+            let v = if max > 0 { v.min(max as i32) } else { v };
+            v.max(min as i32)
+        };
+        (clamp(w, min_w, max_w), clamp(h, min_h, max_h))
     }
 
     pub fn set_window_state(&mut self, task_id: u32, state: u8) {
@@ -1385,4 +1423,13 @@ impl ProtocolBridge {
 
         self.surfaces[idx] = ProtocolSurface::empty();
     }
+}
+
+/// A name a client sent, up to its NUL, with every byte that is not visible
+/// ASCII shown as `?`, so a log line carrying it stays one line of ours.
+fn printable(name: &[u8]) -> String {
+    name.iter()
+        .take_while(|&&b| b != 0)
+        .map(|&b| if b.is_ascii_graphic() { b as char } else { '?' })
+        .collect()
 }

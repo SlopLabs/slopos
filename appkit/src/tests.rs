@@ -8,6 +8,7 @@ use super::paint::PaintContext;
 use super::style::StyleSheet;
 use super::traits::{FocusPolicy, MeasureCtx, Widget, WidgetCore, measure_widget, place_widget};
 
+mod components;
 mod controls;
 
 /// Fixed measure size, so layout tests need no font.
@@ -56,61 +57,6 @@ impl Widget for FixedSizeWidget {
     }
     fn focus_policy(&self) -> FocusPolicy {
         self.focus
-    }
-}
-
-/// A button stand-in that records which one was pressed.
-struct ProbeButton {
-    core: WidgetCore,
-    name: &'static str,
-    size: Size,
-}
-
-impl ProbeButton {
-    fn new(name: &'static str, width: i32, height: i32) -> Self {
-        Self {
-            core: WidgetCore::new(),
-            name,
-            size: Size::new(width, height),
-        }
-    }
-}
-
-impl Widget for ProbeButton {
-    fn core(&self) -> &WidgetCore {
-        &self.core
-    }
-    fn core_mut(&mut self) -> &mut WidgetCore {
-        &mut self.core
-    }
-    fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
-        constraints.constrain(self.size)
-    }
-    fn paint(&self, _ctx: &mut PaintContext) {}
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        _phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        let activated = match event {
-            WidgetEvent::PointerDown { .. } => true,
-            WidgetEvent::KeyDown { key, .. } => matches!(
-                key,
-                super::event::Key::Named(super::event::NamedKey::Enter)
-                    | super::event::Key::Named(super::event::NamedKey::Space)
-            ),
-            _ => false,
-        };
-        if activated {
-            sink.emit_raw(Box::new(String::from(self.name)) as Box<dyn std::any::Any>);
-            EventResponse::Consumed
-        } else {
-            EventResponse::Ignored
-        }
-    }
-    fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::StrongFocus
     }
 }
 
@@ -668,17 +614,23 @@ fn test_popup_swallows_unhandled_events() {
     assert!(resp.is_consumed());
 }
 
+use super::components::{Button, ButtonRow};
 use super::widgets::dialog::DialogWidget;
 
-/// A dialog laid out in `window`, with two 80x30 actions and a 200x40 body.
+/// A dialog laid out in `window` over a 200x40 body, answered by *Cancel*,
+/// which Escape presses, and a destructive *Kill*.
 fn dialog_in(window: Size) -> DialogWidget {
+    let footer: ButtonRow<String> = ButtonRow::new()
+        .cancel(Button::new("Cancel").on_press(String::from("cancel")))
+        .destructive(Button::new("Kill").on_press(String::from("kill")));
+    dialog_with(footer, window)
+}
+
+fn dialog_with(footer: ButtonRow<String>, window: Size) -> DialogWidget {
     let mut dialog = DialogWidget::new(
-        String::from("Kill task?"),
+        Box::new(FixedSizeWidget::new(120, 24)),
         Box::new(FixedSizeWidget::new(200, 40)),
-        vec![
-            Box::new(ProbeButton::new("kill", 80, 30)) as Box<dyn Widget>,
-            Box::new(ProbeButton::new("cancel", 80, 30)) as Box<dyn Widget>,
-        ],
+        super::tree::build_button_row(&footer, true),
         Some(Box::new(|| {
             Box::new(String::from("dismiss")) as Box<dyn std::any::Any>
         })),
@@ -690,41 +642,44 @@ fn dialog_in(window: Size) -> DialogWidget {
     dialog
 }
 
+/// The footer's buttons, *Cancel* then *Kill*.
+fn footer_buttons(dialog: &DialogWidget) -> (Rect, Rect) {
+    let buttons = dialog.children()[2].children();
+    (buttons[0].layout_rect(), buttons[1].layout_rect())
+}
+
+fn within(outer: Rect, inner: Rect) -> bool {
+    inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.x + inner.width <= outer.x + outer.width
+        && inner.y + inner.height <= outer.y + outer.height
+}
+
 fn test_dialog_places_children_inside_card() {
     let window = Size::new(640, 444);
     let dialog = dialog_in(window);
     let card = dialog.card_rect();
-
     assert!(
         card.width > 0 && card.height > 0,
         "card degenerate: {card:?}"
     );
-    assert!(
-        card.x >= 0 && card.y >= 0,
-        "card starts off-screen: {card:?}"
-    );
-    assert!(
-        card.x + card.width <= window.width && card.y + card.height <= window.height,
-        "card overflows the window: {card:?}"
-    );
-
-    for action in dialog.children() {
-        let r = action.layout_rect();
+    assert!(within(Rect::new(0, 0, window.width, window.height), card));
+    for part in dialog.children() {
         assert!(
-            r.x >= card.x
-                && r.y >= card.y
-                && r.x + r.width <= card.x + card.width
-                && r.y + r.height <= card.y + card.height,
-            "action {r:?} outside card {card:?}"
+            within(card, part.layout_rect()),
+            "{part:?} outside {card:?}",
+            part = part.layout_rect()
         );
     }
+    let (cancel, kill) = footer_buttons(&dialog);
+    assert!(within(card, cancel) && within(card, kill));
+    assert!(cancel.x < kill.x, "the destructive button ends the row");
 }
 
 fn test_dialog_card_height_covers_content() {
     let dialog = dialog_in(Size::new(640, 444));
     let card = dialog.card_rect();
-    // title row + 40px content + 30px actions + padding.
-    assert!(card.height >= 40 + 30, "card too short: {card:?}");
+    assert!(card.height >= 24 + 40 + 28, "card too short: {card:?}");
 }
 
 fn test_dialog_card_is_centered() {
@@ -735,17 +690,22 @@ fn test_dialog_card_is_centered() {
     assert_eq!(card.y, (window.height - card.height) / 2);
 }
 
+fn release(x: i32, y: i32) -> WidgetEvent {
+    WidgetEvent::PointerUp {
+        x,
+        y,
+        button: super::event::PointerButton::Left,
+    }
+}
+
 fn test_dialog_click_routes_to_action_under_pointer() {
     let mut dialog = dialog_in(Size::new(640, 444));
-    let second = dialog.children()[1].layout_rect();
-    let (cx, cy) = (second.x + second.width / 2, second.y + second.height / 2);
-
+    let (cancel, _) = footer_buttons(&dialog);
+    let (cx, cy) = (cancel.x + cancel.width / 2, cancel.y + cancel.height / 2);
     let mut sink = MessageSink::new();
-    dialog.event(
-        &press(cx, cy, super::event::PointerButton::Left),
-        EventPhase::Target,
-        &mut sink,
-    );
+    let left = super::event::PointerButton::Left;
+    dialog.event(&press(cx, cy, left), EventPhase::Target, &mut sink);
+    dialog.event(&release(cx, cy), EventPhase::Target, &mut sink);
     assert_eq!(sink.drain_typed::<String>(), vec![String::from("cancel")]);
 }
 
@@ -786,31 +746,48 @@ fn key(named: super::event::NamedKey, shift: bool) -> WidgetEvent {
     }
 }
 
+/// Enter with no control focused presses nothing: the row's only filled
+/// button destroys, so it is no default. The key stops at the dialog.
 fn test_dialog_enter_without_selection_fires_nothing() {
     let mut dialog = dialog_in(Size::new(640, 444));
     let mut sink = MessageSink::new();
-    dialog.event(
+    let resp = dialog.event(
         &key(super::event::NamedKey::Enter, false),
         EventPhase::Target,
         &mut sink,
     );
+    assert_eq!(resp, EventResponse::Blocked);
+    let footer = &mut dialog.children_mut()[2];
+    let enter = super::event::Key::Named(super::event::NamedKey::Enter);
+    assert!(!footer.take_unhandled_key(enter, Modifiers::default(), &mut sink));
     assert!(sink.drain_typed::<String>().is_empty());
 }
 
+/// Tab reaches the framework, which moves focus among the dialog's controls
+/// alone; the one focused answers Enter.
 fn test_dialog_keyboard_selects_then_activates() {
-    let mut dialog = dialog_in(Size::new(640, 444));
+    let mut page = FixedSizeWidget::focusable(10, 10);
+    place_widget(&mut page, Rect::new(0, 0, 10, 10));
+    let mut layers = super::layout::ZStackWidget::new(vec![
+        Box::new(page),
+        Box::new(dialog_in(Size::new(640, 444))),
+    ]);
+    let chain = FocusManager::tab_chain_of(&layers);
+    let buttons: Vec<_> = layers.children()[1].children()[2]
+        .children()
+        .iter()
+        .map(|b| b.id())
+        .collect();
+    assert_eq!(chain, buttons);
+
     let mut sink = MessageSink::new();
-    dialog.event(
-        &key(super::event::NamedKey::Tab, false),
-        EventPhase::Target,
-        &mut sink,
+    let tab = key(super::event::NamedKey::Tab, false);
+    assert_eq!(
+        layers.event(&tab, EventPhase::Target, &mut sink),
+        EventResponse::Blocked
     );
-    dialog.event(
-        &key(super::event::NamedKey::Tab, false),
-        EventPhase::Target,
-        &mut sink,
-    );
-    dialog.event(
+    super::tree::send_to_id(&mut layers, chain[0], &WidgetEvent::FocusGained, &mut sink);
+    layers.event(
         &key(super::event::NamedKey::Enter, false),
         EventPhase::Target,
         &mut sink,
@@ -818,17 +795,34 @@ fn test_dialog_keyboard_selects_then_activates() {
     assert_eq!(sink.drain_typed::<String>(), vec![String::from("cancel")]);
 }
 
-/// Escape dismisses rather than activating whatever is selected.
-fn test_dialog_escape_dismisses() {
-    let mut dialog = dialog_in(Size::new(640, 444));
-    let mut sink = MessageSink::new();
-    let resp = dialog.event(
-        &key(super::event::NamedKey::Escape, false),
-        EventPhase::Target,
-        &mut sink,
+/// Escape presses the footer's cancel, does nothing while that is disabled,
+/// and dismisses a dialog whose footer has none.
+fn test_dialog_escape_cancels_or_dismisses() {
+    let escape = |mut dialog: DialogWidget| {
+        let mut sink = MessageSink::new();
+        let named = super::event::NamedKey::Escape;
+        let resp = dialog.event(&key(named, false), EventPhase::Target, &mut sink);
+        assert_eq!(resp, EventResponse::Blocked);
+        let plain = super::event::Modifiers::default();
+        assert!(dialog.take_unhandled_key(super::event::Key::Named(named), plain, &mut sink));
+        sink.drain_typed::<String>()
+    };
+    let window = Size::new(640, 444);
+    assert_eq!(escape(dialog_in(window)), vec![String::from("cancel")]);
+    let close = ButtonRow::new().confirm(Button::new("Close").on_press(String::from("close")));
+    assert_eq!(
+        escape(dialog_with(close, window)),
+        vec![String::from("dismiss")]
     );
-    assert!(resp.is_consumed());
-    assert_eq!(sink.drain_typed::<String>(), vec![String::from("dismiss")]);
+    let held = ButtonRow::new().cancel(
+        Button::new("Cancel")
+            .on_press(String::from("cancel"))
+            .enabled(false),
+    );
+    assert!(
+        escape(dialog_with(held, window)).is_empty(),
+        "a disabled cancel holds"
+    );
 }
 
 fn test_unbounded_extent_survives_padding_arithmetic() {
@@ -1821,8 +1815,132 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             controls::test_partition_bar_paints_fills_hatch_and_highlight,
         ),
         (
-            "label_beside_a_styled_label_shares_its_baseline",
-            controls::test_label_beside_a_styled_label_shares_its_baseline,
+            "audit_finds_text_past_its_widget",
+            components::test_audit_finds_text_past_its_widget,
+        ),
+        (
+            "audit_finds_overlap_and_escape",
+            components::test_audit_finds_overlap_and_escape,
+        ),
+        (
+            "audit_finds_a_row_off_its_baseline",
+            components::test_audit_finds_a_row_off_its_baseline,
+        ),
+        (
+            "audit_finds_focus_that_does_not_show",
+            components::test_audit_finds_focus_that_does_not_show,
+        ),
+        (
+            "audit_finds_text_that_does_not_read",
+            components::test_audit_finds_text_that_does_not_read,
+        ),
+        (
+            "every_catalogue_page_passes_the_audit",
+            components::test_every_catalogue_page_passes_the_audit,
+        ),
+        (
+            "the_catalogue_window_passes_the_audit",
+            components::test_the_catalogue_window_passes_the_audit,
+        ),
+        (
+            "the_catalogue_filter_narrows_its_pages",
+            components::test_the_catalogue_filter_narrows_its_pages,
+        ),
+        (
+            "text_keeps_to_its_box",
+            components::test_text_keeps_to_its_box,
+        ),
+        (
+            "list_leaves_enter_to_the_page",
+            components::test_list_leaves_enter_to_the_page,
+        ),
+        (
+            "arrows_move_along_a_button_row",
+            components::test_arrows_move_along_a_button_row,
+        ),
+        (
+            "no_tooltip_through_a_scrim",
+            components::test_no_tooltip_through_a_scrim,
+        ),
+        (
+            "a_tall_dialog_scrolls",
+            components::test_a_tall_dialog_scrolls,
+        ),
+        (
+            "a_dialog_takes_focus_from_the_page",
+            components::test_a_dialog_takes_focus_from_the_page,
+        ),
+        (
+            "a_rebuild_keeps_what_was_scrolled",
+            components::test_a_rebuild_keeps_what_was_scrolled,
+        ),
+        (
+            "the_wheel_moves_the_innermost_view",
+            components::test_the_wheel_moves_the_innermost_view,
+        ),
+        (
+            "long_choices_end_in_an_ellipsis",
+            components::test_long_choices_end_in_an_ellipsis,
+        ),
+        (
+            "a_page_shows_the_chosen_row",
+            components::test_a_page_shows_the_chosen_row,
+        ),
+        (
+            "a_dialog_shows_its_controls_whole",
+            components::test_a_dialog_shows_its_controls_whole,
+        ),
+        (
+            "a_table_names_a_cut_cell",
+            components::test_a_table_names_a_cut_cell,
+        ),
+        (
+            "a_cut_heading_shows_whole",
+            components::test_a_cut_heading_shows_whole,
+        ),
+        (
+            "a_drag_follows_the_pointer_out_of_its_part",
+            components::test_a_drag_follows_the_pointer_out_of_its_part,
+        ),
+        (
+            "button_row_answers_enter_and_escape",
+            components::test_button_row_answers_enter_and_escape,
+        ),
+        (
+            "button_row_stacks_when_narrow",
+            components::test_button_row_stacks_when_narrow,
+        ),
+        (
+            "list_skips_what_cannot_be_chosen",
+            components::test_list_skips_what_cannot_be_chosen,
+        ),
+        (
+            "list_rows_pass_the_audit",
+            components::test_list_rows_pass_the_audit,
+        ),
+        (
+            "property_list_lines_names_and_values_up",
+            components::test_property_list_lines_names_and_values_up,
+        ),
+        (
+            "text_wraps_or_ends_in_an_ellipsis",
+            components::test_text_wraps_or_ends_in_an_ellipsis,
+        ),
+        (
+            "disclosure_opens_and_closes",
+            components::test_disclosure_opens_and_closes,
+        ),
+        (
+            "tooltip_names_an_icon_button",
+            components::test_tooltip_names_an_icon_button,
+        ),
+        (
+            "window_spec_fixes_or_floors_the_size",
+            components::test_window_spec_fixes_or_floors_the_size,
+        ),
+        (
+            "text_beside_toned_text_shares_its_baseline",
+            controls::test_text_beside_toned_text_shares_its_baseline,
         ),
         (
             "a_baseline_row_lines_up_text_of_different_heights",
@@ -1985,7 +2103,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             "dialog_keyboard_selects_then_activates",
             test_dialog_keyboard_selects_then_activates,
         ),
-        ("dialog_escape_dismisses", test_dialog_escape_dismisses),
+        (
+            "dialog_escape_cancels_or_dismisses",
+            test_dialog_escape_cancels_or_dismisses,
+        ),
     ]
 }
 
@@ -2207,7 +2328,7 @@ mod cfg_tests {
         test_dialog_keyboard_selects_then_activates();
     }
     #[test]
-    fn dialog_escape_dismisses() {
-        test_dialog_escape_dismisses();
+    fn dialog_escape_cancels_or_dismisses() {
+        test_dialog_escape_cancels_or_dismisses();
     }
 }

@@ -124,7 +124,7 @@ impl Widget for ListViewWidget {
         let last = self.last_visible().min(self.items.len());
 
         let theme = ctx.theme();
-        ctx.with_clip(rect, |ctx| {
+        ctx.with_viewport(rect, |ctx| {
             for i in first..last {
                 let y = rect.y + i as i32 * self.item_height - self.scroll_offset;
                 let item_rect = Rect::new(rect.x, y, rect.width, self.item_height);
@@ -318,6 +318,10 @@ impl Widget for ListViewWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
+    }
+
+    fn arrangement(&self) -> crate::audit::Arrangement {
+        crate::audit::Arrangement::Scroll
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {

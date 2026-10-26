@@ -1,6 +1,11 @@
+use slopos_theme_core::stroke;
+
 use super::constraints::Rect;
 use super::event::MessageSink;
 use super::traits::{Role, Widget, WidgetId};
+
+/// Room round a control for its focus ring, which a view showing it keeps.
+pub(crate) const RING_ROOM: i32 = stroke::FOCUS * 2;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FocusScopeId(pub u32);
@@ -25,6 +30,12 @@ struct Stop {
     name: Option<String>,
 }
 
+struct Beneath {
+    index: Option<usize>,
+    chain_len: Option<usize>,
+    stop: Option<(Stop, usize)>,
+}
+
 pub struct FocusManager {
     focused: Option<WidgetId>,
     /// Where `focused` sits in the tab chain.
@@ -41,6 +52,10 @@ pub struct FocusManager {
     tab_stops: Vec<Stop>,
     /// `focused`'s stop in the global chain, and how many like it precede it.
     focused_stop: Option<(Stop, usize)>,
+    /// The modal layer the chain was built from, when one covers the page.
+    layer: Option<Stop>,
+    /// Where focus sat on the page when a layer covered it, to go back to.
+    beneath: Option<Beneath>,
     /// Empty means the global chain is active.
     scope_stack: Vec<FocusScope>,
     /// Navigating by keyboard; drives focus-ring visibility.
@@ -57,6 +72,8 @@ impl FocusManager {
             tab_chain: Vec::new(),
             tab_stops: Vec::new(),
             focused_stop: None,
+            layer: None,
+            beneath: None,
             scope_stack: Vec::new(),
             keyboard_active: false,
             next_scope_id: 1,
@@ -79,6 +96,12 @@ impl FocusManager {
         let index = id.and_then(|id| self.active_chain().iter().position(|&c| c == id));
         self.focused = id;
         self.set_index(index);
+    }
+
+    /// Nothing focused, nor waiting beneath a dialog: the page is another.
+    pub fn leave_page(&mut self) {
+        self.set_focused(None);
+        self.beneath = None;
     }
 
     fn set_index(&mut self, index: Option<usize>) {
@@ -106,11 +129,38 @@ impl FocusManager {
     ///
     /// Answers the id that should now be told it has focus, when that is a
     /// different widget from the one that held it before — which after a
-    /// rebuild it always is, because every widget is new.
+    /// rebuild it always is, because every widget is new. A dialog that opens
+    /// starts with nothing focused; one that closes gives the page its focus
+    /// back.
     pub fn rebuild_tab_chain(&mut self, root: &dyn Widget) -> Option<WidgetId> {
         self.tab_chain.clear();
         self.tab_stops.clear();
-        Self::collect_focusable(root, &mut self.tab_chain, &mut self.tab_stops);
+        let layer = modal_layer(root);
+        Self::collect_focusable(layer, &mut self.tab_chain, &mut self.tab_stops);
+        let layer = (layer.id() != root.id()).then(|| Stop {
+            role: layer.role(),
+            name: layer.accessible_name().map(String::from),
+        });
+        if layer != self.layer {
+            if self.layer.is_none() {
+                self.beneath = Some(Beneath {
+                    index: self.focused_index,
+                    chain_len: self.chain_len_at_focus,
+                    stop: self.focused_stop.clone(),
+                });
+            }
+            let closed = layer.is_none();
+            self.layer = layer;
+            self.focused = None;
+            self.set_index(None);
+            let back = self.beneath.take_if(|_| closed);
+            let Some(back) = back else {
+                return None;
+            };
+            self.focused_index = back.index;
+            self.chain_len_at_focus = back.chain_len;
+            self.focused_stop = back.stop;
+        }
         let Some(index) = self.focused_index else {
             // `focused` names a widget the rebuild destroyed; leaving it makes
             // `move_focus_next` jump back to the first control.
@@ -142,6 +192,13 @@ impl FocusManager {
         self.focused = restored;
         self.set_index(restored.and(index));
         restored
+    }
+
+    /// The tab stops of `root`'s modal layer, in order.
+    pub fn tab_chain_of(root: &dyn Widget) -> Vec<WidgetId> {
+        let mut chain = Vec::new();
+        Self::collect_focusable(modal_layer(root), &mut chain, &mut Vec::new());
+        chain
     }
 
     fn collect_focusable(widget: &dyn Widget, chain: &mut Vec<WidgetId>, stops: &mut Vec<Stop>) {
@@ -241,13 +298,79 @@ impl Default for FocusManager {
     }
 }
 
+/// The last modal widget in depth-first order, or `root` when none is: the
+/// layer the keyboard reaches.
+pub(crate) fn modal_layer(root: &dyn Widget) -> &dyn Widget {
+    fn last<'w>(widget: &'w dyn Widget, found: &mut Option<&'w dyn Widget>) {
+        if widget.is_modal() {
+            *found = Some(widget);
+        }
+        for child in widget.children() {
+            last(child.as_ref(), found);
+        }
+    }
+    let mut found = None;
+    last(root, &mut found);
+    found.unwrap_or(root)
+}
+
+/// The control beside `id` along the toolbar that holds it, wrapping round,
+/// when a toolbar does.
+pub(crate) fn beside_in_toolbar(
+    root: &dyn Widget,
+    id: WidgetId,
+    forward: bool,
+) -> Option<WidgetId> {
+    fn holds(widget: &dyn Widget, id: WidgetId) -> bool {
+        widget.id() == id || widget.children().iter().any(|c| holds(c.as_ref(), id))
+    }
+    fn toolbar(widget: &dyn Widget, id: WidgetId) -> Option<&dyn Widget> {
+        let inner = widget
+            .children()
+            .iter()
+            .find_map(|c| toolbar(c.as_ref(), id));
+        inner.or_else(|| (widget.role() == Role::Toolbar && holds(widget, id)).then_some(widget))
+    }
+    let toolbar = toolbar(modal_layer(root), id)?;
+    let mut stops = Vec::new();
+    FocusManager::collect_focusable(toolbar, &mut stops, &mut Vec::new());
+    let at = stops.iter().position(|&stop| stop == id)?;
+    let step = if forward { 1 } else { stops.len() - 1 };
+    Some(stops[(at + step) % stops.len()])
+}
+
+pub(crate) fn holds(widget: &dyn Widget, id: WidgetId) -> bool {
+    widget.id() == id || widget.children().iter().any(|c| holds(c.as_ref(), id))
+}
+
+/// [`modal_layer`], mutably.
+pub(crate) fn modal_layer_mut(root: &mut dyn Widget) -> &mut dyn Widget {
+    fn path(widget: &dyn Widget, at: &mut Vec<usize>, best: &mut Option<Vec<usize>>) {
+        if widget.is_modal() {
+            *best = Some(at.clone());
+        }
+        for (i, child) in widget.children().iter().enumerate() {
+            at.push(i);
+            path(child.as_ref(), at, best);
+            at.pop();
+        }
+    }
+    let mut best = None;
+    path(root, &mut Vec::new(), &mut best);
+    let mut layer = root;
+    for i in best.unwrap_or_default() {
+        layer = layer.children_mut()[i].as_mut();
+    }
+    layer
+}
+
 pub(crate) fn reveal(
     widget: &mut dyn Widget,
     id: WidgetId,
     sink: &mut MessageSink,
 ) -> Option<Rect> {
     if widget.id() == id {
-        return Some(widget.layout_rect());
+        return Some(widget.focus_rect().inflate(RING_ROOM));
     }
     let mut found = None;
     for child in widget.children_mut() {

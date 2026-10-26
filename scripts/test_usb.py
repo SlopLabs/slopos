@@ -19,12 +19,10 @@ the i8042, and motion with none the newest usb-mouse, or the PS/2 mouse once
 both are pulled."""
 
 import argparse
-import json
 import os
 import re
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -33,6 +31,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import ext4_profile  # noqa: E402
+from qmp import Qmp, axis, button, key  # noqa: E402
 
 CONTROLLERS = {
     "xhci1": ("qemu-xhci", "1b36:000d", ""),
@@ -48,8 +47,6 @@ KEPT = ("kept", b"fsynced before the pull\n")
 SEEDED = ("seeded", b"written by the host\n")
 COLD_BYTES = 1 << 20
 DISPLAY = "video0"
-# An event a guest poll has not taken yet merges with the next.
-PACE = 0.15
 
 
 class Device(NamedTuple):
@@ -151,87 +148,6 @@ def device_args(build_dir):
     return args
 
 
-class Qmp:
-    def __init__(self, path, deadline, qemu):
-        while True:
-            try:
-                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                self.sock.connect(path)
-                break
-            except OSError:
-                self.sock.close()
-                if qemu.poll() is not None:
-                    raise RuntimeError(f"QEMU exited {qemu.returncode} before opening QMP")
-                if time.monotonic() > deadline:
-                    raise RuntimeError(f"no QMP socket at {path}")
-                time.sleep(0.2)
-        self.file = self.sock.makefile("rw")
-        self.events = []
-        self._read()
-        self.execute("qmp_capabilities")
-
-    def _read(self):
-        line = self.file.readline()
-        if not line:
-            raise RuntimeError("QMP closed")
-        return json.loads(line)
-
-    def execute(self, command, **arguments):
-        message = {"execute": command}
-        if arguments:
-            message["arguments"] = arguments
-        self.file.write(json.dumps(message) + "\n")
-        self.file.flush()
-        while True:
-            reply = self._read()
-            if "event" in reply:
-                self.events.append(reply)
-                continue
-            if "error" in reply:
-                raise RuntimeError(f"{command}: {reply['error']}")
-            return reply.get("return")
-
-    def wait_deleted(self, ids, deadline):
-        pending = set(ids)
-        while pending:
-            pending -= {
-                e.get("data", {}).get("device")
-                for e in self.events
-                if e.get("event") == "DEVICE_DELETED"
-            }
-            if not pending:
-                break
-            if time.monotonic() > deadline:
-                raise RuntimeError(f"never deleted: {sorted(pending)}")
-            self.sock.settimeout(max(0.1, deadline - time.monotonic()))
-            try:
-                self.events.append(self._read())
-            except OSError:
-                raise RuntimeError(f"never deleted: {sorted(pending)}")
-            finally:
-                self.sock.settimeout(None)
-
-    def send(self, *events, display=False):
-        """One `input-send-event` per call, paced so the guest takes each."""
-        arguments = {"events": list(events)}
-        if display:
-            arguments["device"] = DISPLAY
-        self.execute("input-send-event", **arguments)
-        time.sleep(PACE)
-
-
-def key(qcode, down):
-    return {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": qcode}}}
-
-
-def button(down):
-    return {"type": "btn", "data": {"down": down, "button": "left"}}
-
-
-def axis(kind, name, value):
-    return {"type": kind, "data": {"axis": name, "value": value}}
-
-
 class Bench:
     """What is plugged, and how often each device came and went."""
 
@@ -294,42 +210,42 @@ class Bench:
             case ["pull", "keyboard", where]:
                 self.pull([self.device_at(where)], timeout)
             case ["hold", "x"]:
-                qmp.send(key("x", True), display=True)
+                qmp.send(key("x", True), device=DISPLAY)
             case ["release", "x"]:
-                qmp.send(key("x", False), display=True)
+                qmp.send(key("x", False), device=DISPLAY)
             case ["ps2", "repeat", "x"]:
                 for down in (True, True, False):
                     qmp.send(key("x", down))
             case ["caps"]:
-                qmp.send(key("caps_lock", True), display=True)
-                qmp.send(key("caps_lock", False), display=True)
+                qmp.send(key("caps_lock", True), device=DISPLAY)
+                qmp.send(key("caps_lock", False), device=DISPLAY)
             case ["sysrq", command]:
                 for qcode, down in (("alt", True), ("print", True), ("print", False), ("alt", False)):
-                    qmp.send(key(qcode, down), display=True)
-                qmp.send(key(command, True), display=True)
-                qmp.send(key(command, False), display=True)
+                    qmp.send(key(qcode, down), device=DISPLAY)
+                qmp.send(key(command, True), device=DISPLAY)
+                qmp.send(key(command, False), device=DISPLAY)
             case ["tablet", "press" | "release" as edge]:
-                qmp.send(button(edge == "press"), display=True)
+                qmp.send(button(edge == "press"), device=DISPLAY)
             case ["mouse", "press" | "release" as edge]:
                 qmp.send(button(edge == "press"))
             case ["tablet", x, y]:
-                qmp.send(axis("abs", "x", int(x)), axis("abs", "y", int(y)), display=True)
+                qmp.send(axis("abs", "x", int(x)), axis("abs", "y", int(y)), device=DISPLAY)
             case ["mouse" | "ps2", *rest] if rest[-2:] and all(re.fullmatch(r"-?\d+", v) for v in rest[-2:]):
                 dx, dy = rest[-2:]
                 qmp.send(axis("rel", "x", int(dx)), axis("rel", "y", int(dy)))
             case ["hold", "shift"]:
-                qmp.send(key("shift", True), display=True)
+                qmp.send(key("shift", True), device=DISPLAY)
                 qmp.send(key("shift", True))
             case ["ps2", "release", "shift"]:
                 qmp.send(key("shift", False))
             case ["hold", "usb", "shift"]:
-                qmp.send(key("shift", True), display=True)
+                qmp.send(key("shift", True), device=DISPLAY)
             case ["type", *_]:
                 # One command per keystroke: the guest may power off on Enter's
                 # press, so nothing may follow it on QMP.
                 for ch in TYPED:
                     qcode = QCODES.get(ch, ch)
-                    qmp.send(key(qcode, True), key(qcode, False), display=True)
+                    qmp.send(key(qcode, True), key(qcode, False), device=DISPLAY)
             case _:
                 return False
         return True

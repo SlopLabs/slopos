@@ -35,8 +35,7 @@ USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-unknown-slopos.j
 USERLAND_TRIPLE="$(basename "$USERLAND_TARGET" .json)"
 
 . "$SCRIPT_DIR/lib/base.sh"
-# The base's programs and the one demo no base ships.
-BINS="$BASE_PROGRAMS widget_gallery"
+BINS="$BASE_PROGRAMS"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Cargo fingerprints `-Zbuild-std` units by compiler version, not by the

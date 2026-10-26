@@ -11,8 +11,8 @@ use slopos_appkit::widgets::code_view::{CodeLine, StyledSpan};
 use slopos_appkit::widgets::editor_tabs::EditorTab;
 use slopos_appkit::widgets::tree_view::TreeRow;
 use slopos_appkit::{
-    ButtonStyle, CrossAxisAlignment, EdgeInsets, IconKind, Length, MenuItem, MenuItemKind, Node,
-    Orientation, Surface, TextAlignment, Tone,
+    Button, ButtonRow, CrossAxisAlignment, EdgeInsets, Icon, IconButton, Length, MenuItem,
+    MenuItemKind, Node, Orientation, Surface, Text, TextAlignment, Tone,
 };
 
 use slopos_editor_core::document::{Document, file_name};
@@ -332,7 +332,7 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
                     placeholder: String::from("Find"),
                     caret: query.caret,
                     focused: app.focus == Focus::Prompt && !*on_replace,
-                    icon: Some(IconKind::Search),
+                    icon: Some(Icon::Search),
                     suffix,
                     invalid: !query.text.is_empty() && *total == 0,
                     tab_stop: false,
@@ -354,37 +354,33 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
                         on_input: Some(EditorMsg::PromptReplace),
                     }),
                 });
-                fields.push(Node::Button {
-                    label: String::from("All"),
-                    on_press: Some(EditorMsg::Run(Command::ReplaceAll)),
-                    style: ButtonStyle::Secondary,
-                    enabled: true,
-                });
+                fields.push(
+                    Button::new("Replace all")
+                        .on_press(EditorMsg::Run(Command::ReplaceAll))
+                        .into(),
+                );
             }
-            fields.push(Node::Button {
-                label: String::from("<"),
-                on_press: Some(EditorMsg::Run(Command::FindPrev)),
-                style: ButtonStyle::Secondary,
-                enabled: true,
-            });
-            fields.push(Node::Button {
-                label: String::from(">"),
-                on_press: Some(EditorMsg::Run(Command::FindNext)),
-                style: ButtonStyle::Secondary,
-                enabled: true,
-            });
+            fields.push(
+                IconButton::new(Icon::ChevronUp, "Previous match")
+                    .on_press(EditorMsg::Run(Command::FindPrev))
+                    .into(),
+            );
+            fields.push(
+                IconButton::new(Icon::ChevronDown, "Next match")
+                    .on_press(EditorMsg::Run(Command::FindNext))
+                    .into(),
+            );
         }
         other => {
             let (text, caret) = match other.input_text() {
                 Some(pair) => pair,
                 None => (String::new(), 0),
             };
-            fields.push(Node::StyledLabel {
-                text: format!("{}:", other.title()),
-                tone: Tone::Secondary,
-                alignment: TextAlignment::Start,
-                wrap: false,
-            });
+            fields.push(
+                Text::new(format!("{}:", other.title()))
+                    .tone(Tone::Secondary)
+                    .into(),
+            );
             fields.push(Node::Expand {
                 weight: 1,
                 child: Box::new(Node::LineEdit {
@@ -461,19 +457,14 @@ fn status_bar(app: &EditorApp) -> Node<EditorMsg> {
                                 children: vec![
                                     Node::Expand {
                                         weight: 1,
-                                        child: Box::new(Node::StyledLabel {
-                                            text: left,
-                                            tone: Tone::Secondary,
-                                            alignment: TextAlignment::Start,
-                                            wrap: false,
-                                        }),
+                                        child: Box::new(
+                                            Text::new(left).tone(Tone::Secondary).into(),
+                                        ),
                                     },
-                                    Node::StyledLabel {
-                                        text: right,
-                                        tone: Tone::Secondary,
-                                        alignment: TextAlignment::End,
-                                        wrap: false,
-                                    },
+                                    Text::new(right)
+                                        .tone(Tone::Secondary)
+                                        .align(TextAlignment::End)
+                                        .into(),
                                 ],
                             }),
                         }),
@@ -573,7 +564,7 @@ fn overlay_prompt(app: &EditorApp) -> Node<EditorMsg> {
                         placeholder: app.prompt.placeholder().to_string(),
                         caret,
                         focused: true,
-                        icon: Some(IconKind::Search),
+                        icon: Some(Icon::Search),
                         suffix: String::new(),
                         invalid: false,
                         tab_stop: false,
@@ -620,19 +611,12 @@ fn palette_row(command: &Command, selected: bool) -> Node<EditorMsg> {
             children: vec![
                 Node::Expand {
                     weight: 1,
-                    child: Box::new(Node::StyledLabel {
-                        text: command.label().to_string(),
-                        tone,
-                        alignment: TextAlignment::Start,
-                        wrap: false,
-                    }),
+                    child: Box::new(Text::new(command.label().to_string()).tone(tone).into()),
                 },
-                Node::StyledLabel {
-                    text: command.shortcut().unwrap_or("").to_string(),
-                    tone: Tone::Secondary,
-                    alignment: TextAlignment::End,
-                    wrap: false,
-                },
+                Text::new(command.shortcut().unwrap_or("").to_string())
+                    .tone(Tone::Secondary)
+                    .align(TextAlignment::End)
+                    .into(),
             ],
         }),
     }
@@ -658,20 +642,10 @@ fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
             spacing: space::SM,
             align: CrossAxisAlignment::Center,
             children: vec![
-                Node::StyledLabel {
-                    text: name.to_string(),
-                    tone,
-                    alignment: TextAlignment::Start,
-                    wrap: false,
-                },
+                Text::new(name.to_string()).tone(tone).into(),
                 Node::Expand {
                     weight: 1,
-                    child: Box::new(Node::StyledLabel {
-                        text: context.to_string(),
-                        tone: Tone::Secondary,
-                        alignment: TextAlignment::Start,
-                        wrap: false,
-                    }),
+                    child: Box::new(Text::new(context.to_string()).tone(Tone::Secondary).into()),
                 },
             ],
         }),
@@ -682,22 +656,16 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
     match dialog {
         Dialog::About => Node::Dialog {
             title: String::from("Sloped"),
-            content: Box::new(Node::Label {
-                text: String::from(
+            content: Box::new(
+                Text::new(String::from(
                     "The SlopOS editor.\n\nTabs, a file tree, syntax highlighting, \
                      find and replace, a command palette — and every edit undoable.\n\n\
                      Ctrl+Shift+P opens the command palette; every command lists its chord.",
-                ),
-                alignment: TextAlignment::Start,
-                wrap: true,
-                max_lines: None,
-            }),
-            actions: vec![Node::Button {
-                label: String::from("Close"),
-                on_press: Some(EditorMsg::Dialog(0)),
-                style: ButtonStyle::Primary,
-                enabled: true,
-            }],
+                ))
+                .wrap()
+                .into(),
+            ),
+            footer: ButtonRow::new().confirm(Button::new("Close").on_press(EditorMsg::Dialog(0))),
             on_dismiss: Some(EditorMsg::Dialog(2)),
         },
         Dialog::ConfirmClose { index } => {
@@ -708,87 +676,53 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
                 .unwrap_or_default();
             Node::Dialog {
                 title: String::from("Unsaved changes"),
-                content: Box::new(Node::Label {
-                    text: format!("{name} has changes that have not been saved."),
-                    alignment: TextAlignment::Start,
-                    wrap: true,
-                    max_lines: None,
-                }),
-                actions: vec![
-                    Node::Button {
-                        label: String::from("Save"),
-                        on_press: Some(EditorMsg::Dialog(0)),
-                        style: ButtonStyle::Primary,
-                        enabled: true,
-                    },
-                    Node::Button {
-                        label: String::from("Discard"),
-                        on_press: Some(EditorMsg::Dialog(1)),
-                        style: ButtonStyle::Destructive,
-                        enabled: true,
-                    },
-                    Node::Button {
-                        label: String::from("Cancel"),
-                        on_press: Some(EditorMsg::Dialog(2)),
-                        style: ButtonStyle::Secondary,
-                        enabled: true,
-                    },
-                ],
+                content: Box::new(
+                    Text::new(format!("{name} has changes that have not been saved."))
+                        .wrap()
+                        .into(),
+                ),
+                footer: ButtonRow::new()
+                    .aside(
+                        Button::new("Discard")
+                            .on_press(EditorMsg::Dialog(1))
+                            .destructive(),
+                    )
+                    .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(2)))
+                    .confirm(Button::new("Save").on_press(EditorMsg::Dialog(0))),
                 on_dismiss: Some(EditorMsg::Dialog(2)),
             }
         }
         Dialog::ConfirmOverwrite { detail, .. } => Node::Dialog {
             title: String::from("Overwrite?"),
-            content: Box::new(Node::Label {
-                text: format!("{detail}\n\nSaving replaces it with this tab's contents."),
-                alignment: TextAlignment::Start,
-                wrap: true,
-                max_lines: None,
-            }),
-            actions: vec![
-                Node::Button {
-                    label: String::from("Overwrite"),
-                    on_press: Some(EditorMsg::Dialog(0)),
-                    style: ButtonStyle::Destructive,
-                    enabled: true,
-                },
-                Node::Button {
-                    label: String::from("Cancel"),
-                    on_press: Some(EditorMsg::Dialog(1)),
-                    style: ButtonStyle::Secondary,
-                    enabled: true,
-                },
-            ],
+            content: Box::new(
+                Text::new(format!(
+                    "{detail}\n\nSaving replaces it with this tab's contents."
+                ))
+                .wrap()
+                .into(),
+            ),
+            footer: ButtonRow::new()
+                .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(1)))
+                .destructive(Button::new("Overwrite").on_press(EditorMsg::Dialog(0))),
             on_dismiss: Some(EditorMsg::Dialog(1)),
         },
         Dialog::ConfirmQuit => Node::Dialog {
             title: String::from("Unsaved changes"),
-            content: Box::new(Node::Label {
-                text: String::from("Some buffers have changes that have not been saved."),
-                alignment: TextAlignment::Start,
-                wrap: true,
-                max_lines: None,
-            }),
-            actions: vec![
-                Node::Button {
-                    label: String::from("Save all"),
-                    on_press: Some(EditorMsg::Dialog(0)),
-                    style: ButtonStyle::Primary,
-                    enabled: true,
-                },
-                Node::Button {
-                    label: String::from("Quit anyway"),
-                    on_press: Some(EditorMsg::Dialog(1)),
-                    style: ButtonStyle::Destructive,
-                    enabled: true,
-                },
-                Node::Button {
-                    label: String::from("Cancel"),
-                    on_press: Some(EditorMsg::Dialog(2)),
-                    style: ButtonStyle::Secondary,
-                    enabled: true,
-                },
-            ],
+            content: Box::new(
+                Text::new(String::from(
+                    "Some buffers have changes that have not been saved.",
+                ))
+                .wrap()
+                .into(),
+            ),
+            footer: ButtonRow::new()
+                .aside(
+                    Button::new("Quit anyway")
+                        .on_press(EditorMsg::Dialog(1))
+                        .destructive(),
+                )
+                .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(2)))
+                .confirm(Button::new("Save all").on_press(EditorMsg::Dialog(0))),
             on_dismiss: Some(EditorMsg::Dialog(2)),
         },
     }

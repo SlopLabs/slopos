@@ -28,4 +28,3 @@ pub mod sysmon;
 pub mod terminal;
 pub mod tree_install;
 pub mod users;
-pub mod widget_gallery;

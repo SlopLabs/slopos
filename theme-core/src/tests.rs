@@ -251,3 +251,41 @@ fn a_control_inset_makes_a_body_line_a_full_target() {
     let height = TextRole::Body.style().line_height + inset::CONTROL.vertical();
     assert!(height >= 28, "{height}");
 }
+
+#[test]
+fn every_icon_is_a_glyph_of_the_shipped_font() {
+    let data = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../assets/fonts/Lucide.ttf"
+    ))
+    .expect("the icon font ships in assets/fonts");
+    let font = slopos_font::ttf_parser::TtfFont::parse(&data).expect("the icon font parses");
+    for icon in Icon::ALL {
+        let glyph = font
+            .glyph_index(icon.codepoint() as u32)
+            .unwrap_or_else(|| panic!("{} has no glyph", icon.name()));
+        let outline = font
+            .glyph_outline(glyph)
+            .unwrap_or_else(|| panic!("{} has no outline", icon.name()));
+        assert!(
+            !outline.contours.is_empty(),
+            "{} draws nothing",
+            icon.name()
+        );
+    }
+}
+
+#[test]
+fn icons_are_named_once_and_listed_once() {
+    for (i, icon) in Icon::ALL.iter().enumerate() {
+        assert_eq!(*icon as usize, i, "{} is out of place", icon.name());
+    }
+    assert_eq!(Icon::ALL.len(), Icon::ZoomOut as usize + 1);
+    for (i, a) in Icon::ALL.iter().enumerate() {
+        for b in &Icon::ALL[i + 1..] {
+            assert_ne!(a, b);
+            assert_ne!(a.name(), b.name());
+            assert_ne!(a.codepoint(), b.codepoint());
+        }
+    }
+}

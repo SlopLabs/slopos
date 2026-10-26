@@ -1,7 +1,7 @@
 use slopos_abi::draw::Color32;
-use slopos_theme_core::radius;
+use slopos_theme_core::{TextRole, radius};
 
-use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::constraints::{BoxConstraints, Size};
 use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
@@ -16,6 +16,8 @@ pub struct CheckboxWidget {
     enabled: bool,
     hovered: bool,
     focused: bool,
+    /// From the box's left edge to the label.
+    indent: i32,
 }
 
 impl CheckboxWidget {
@@ -33,6 +35,7 @@ impl CheckboxWidget {
             enabled,
             hovered: false,
             focused: false,
+            indent: 0,
         }
     }
 
@@ -54,11 +57,12 @@ impl Widget for CheckboxWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let cb_size = ctx.style.checkbox_size;
         let gap = ctx.style.checkbox_gap;
+        self.indent = cb_size + gap;
         let text_w = ctx.text_width(&self.label);
         let text_h = ctx.text_height();
 
-        let width = cb_size + gap + text_w;
-        let height = cb_size.max(text_h);
+        let width = self.indent + text_w;
+        let height = cb_size.max(text_h).max(ctx.style.min_target);
         constraints.constrain(Size::new(width, height))
     }
 
@@ -67,7 +71,6 @@ impl Widget for CheckboxWidget {
         let style = ctx.style;
         let theme = ctx.theme();
         let cb_size = style.checkbox_size;
-        let gap = style.checkbox_gap;
         let text_h = ctx.text_height();
 
         let box_y = rect.y + (rect.height - cb_size) / 2;
@@ -103,21 +106,26 @@ impl Widget for CheckboxWidget {
             );
         }
 
-        let text_x = rect.x + cb_size + gap;
+        let text_x = rect.x + self.indent;
         let text_y = rect.y + (rect.height - text_h) / 2;
         let fg = if self.enabled {
             theme.text
         } else {
             theme.text_disabled
         };
-        ctx.draw_text_transparent(text_x, text_y, &self.label, fg);
+        let room = rect.x + rect.width - text_x;
+        ctx.draw_text_fitted(text_x, text_y, &self.label, TextRole::Body, room, fg);
 
-        let box_rect = Rect::new(box_x, box_y, cb_size, cb_size);
         // `focus_visible` only means the keyboard is in use, so it rings every
         // checkbox in the window on its own.
         if self.focused {
-            ctx.draw_focus_ring(box_rect);
+            ctx.draw_focus_ring(rect);
         }
+    }
+
+    fn tooltip(&self, _x: i32, _y: i32) -> Option<&str> {
+        let room = self.layout_rect().width - self.indent;
+        (crate::text::ui::role_width(&self.label, TextRole::Body) > room).then_some(&self.label)
     }
 
     fn event(

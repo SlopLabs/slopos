@@ -7,16 +7,16 @@
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use slopos_appkit::{App, Action, Node, run_app};
+//! use slopos_appkit::{App, Action, Node, Text, run_app};
 //!
 //! struct MyApp;
 //! impl App for MyApp {
 //!     type Message = MyMsg;
-//!     fn view(&self) -> Node<MyMsg> { Node::Label { text: "Hello".into(), .. } }
+//!     fn view(&self) -> Node<MyMsg> { Text::new("Hello").into() }
 //!     fn update(&mut self, msg: MyMsg) -> Action { Action::None }
 //! }
 //!
-//! pub fn main() -> ! { run_app(MyApp, 640, 480) }
+//! pub fn main() -> ! { run_app(MyApp) }
 //! ```
 
 // Widget fields are read by run_app and tree reconciliation, not by the impls.
@@ -25,7 +25,10 @@
 pub mod platform;
 pub mod text;
 
+pub mod audit;
+pub mod catalogue;
 pub mod clipboard;
+pub mod components;
 pub mod constraints;
 pub mod dirty;
 pub mod event;
@@ -39,10 +42,15 @@ pub mod run;
 pub mod sender;
 pub mod style;
 pub mod tests;
+mod tooltip;
 pub mod traits;
 pub mod tree;
 pub mod widgets;
 
+pub use components::{
+    Button, ButtonRow, Disclosure, EmptyState, IconButton, List, ListRow, Notice, Page,
+    PropertyList, SearchField, Section, Sidebar, Tag, Text, Toolbar, WindowSpec, Wrap,
+};
 pub use node::{
     Action, App, BarSegment, ButtonStyle, ContextMenuAt, ImageData, MenuItem, MenuItemKind, Node,
     RadioOption, SegmentFill, SortIndicator, TableColumn, TableColumnWidth,
@@ -54,7 +62,6 @@ pub use widgets::code_view::{
 };
 pub use widgets::drag_handle::DragInput;
 pub use widgets::editor_tabs::{EditorTab, TabInput};
-pub use widgets::icon::IconKind;
 pub use widgets::line_edit::{LineEditInput, LineInput};
 pub use widgets::menu_bar::MenuBarInput;
 pub use widgets::slider::{SliderGrab, SliderInput};
@@ -79,7 +86,7 @@ pub use slopos_windowing::{ControlFlow, WindowedApp};
 pub use slopos_windowing::{ProtocolHandle, UiQueue, UiSender};
 
 pub use slopos_theme_core as theme;
-pub use slopos_theme_core::{Surface, TextRole, Tone};
+pub use slopos_theme_core::{Icon, Surface, TextRole, Tone};
 
 pub use slopos_gfx::image::ImageSampling;
 pub use slopos_gfx::{RenderError, RenderSurface};

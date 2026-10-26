@@ -16,7 +16,7 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
-| `ui-overhaul.md` | The desktop's look, words and toolkit, its text and theme landed: semantic components so apps cannot look bad, a permission dialog that names the app and says what happens, polished window chrome, lock and login screens, one voice and glossary, and `just ui-shots` with a layout audit to see the result |
+| `ui-overhaul.md` | The desktop's look, words and toolkit, its text, theme, components, icon font, layout audit and `just ui-shots` landed: a permission dialog that names the app and says what happens, polished window chrome, lock and login screens, one voice and glossary, and the installer and apps rebuilt from the components |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive the

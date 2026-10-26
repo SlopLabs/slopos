@@ -138,10 +138,6 @@ name = "priv"
 path = "src/bin/priv.rs"
 
 [[bin]]
-name = "widget_gallery"
-path = "src/bin/widget_gallery.rs"
-
-[[bin]]
 name = "fork_test"
 path = "src/bin/tests/fork_test.rs"
 [[bin]]

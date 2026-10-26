@@ -9,9 +9,9 @@ use crate::syscall::process as sys_proc;
 use slopos_abi::signal::SIGKILL;
 use slopos_appkit::theme::space;
 use slopos_appkit::{
-    Action, App, ButtonStyle, ContextMenuAt, CrossAxisAlignment, EdgeInsets, Key, Length, MenuItem,
-    MenuItemKind, Modifiers, NamedKey, Node, ScrollDirection, ScrollbarVisibility, SortIndicator,
-    TableColumn, TableColumnWidth, TextAlignment, Tone,
+    Action, App, Button, ButtonRow, ContextMenuAt, CrossAxisAlignment, EdgeInsets, Key, Length,
+    MenuItem, MenuItemKind, Modifiers, NamedKey, Node, ScrollDirection, ScrollbarVisibility,
+    SortIndicator, TableColumn, TableColumnWidth, Text, Tone, WindowSpec,
 };
 
 mod format;
@@ -43,7 +43,7 @@ impl App for SysmonApp {
     type Message = SysmonMsg;
 
     fn view(&self) -> Node<SysmonMsg> {
-        Node::TabBar {
+        let tabs = Node::TabBar {
             tabs: vec![
                 String::from("Overview"),
                 String::from("Processes"),
@@ -60,7 +60,10 @@ impl App for SysmonApp {
                 self.view_processes(),
                 self.view_hardware(),
             ],
-        }
+        };
+        let mut layers = vec![tabs];
+        layers.extend(self.view_kill_dialog());
+        Node::ZStack { children: layers }
     }
 
     fn update(&mut self, msg: SysmonMsg) -> Action {
@@ -147,29 +150,15 @@ impl App for SysmonApp {
     }
 
     fn on_key(&mut self, key: Key, _modifiers: Modifiers) -> Action {
-        // Only reached when no widget consumed the key, so an open dialog's own
-        // Escape handling still wins.
-        match key {
-            Key::Named(NamedKey::Delete) if self.active_tab == Tab::Processes => {
-                if self.confirm_kill.is_some() {
-                    return Action::None;
-                }
-                self.context_menu = None;
-                self.last_kill = None;
-                self.confirm_kill = self
-                    .target_for_selection()
-                    .filter(|target| self.is_killable(target.pid()));
-                Action::Rebuild
-            }
-            Key::Named(NamedKey::Escape) => {
-                if self.context_menu.is_none() && self.confirm_kill.is_none() {
-                    return Action::None;
-                }
-                self.dismiss_transients();
-                Action::Rebuild
-            }
-            _ => Action::None,
+        if key != Key::Named(NamedKey::Delete) || self.active_tab != Tab::Processes {
+            return Action::None;
         }
+        self.context_menu = None;
+        self.last_kill = None;
+        self.confirm_kill = self
+            .target_for_selection()
+            .filter(|target| self.is_killable(target.pid()));
+        Action::Rebuild
     }
 
     fn tick_interval_ms(&self) -> Option<u64> {
@@ -187,6 +176,10 @@ impl App for SysmonApp {
 
     fn app_id(&self) -> &str {
         "org.slopos.sysmon"
+    }
+
+    fn window(&self) -> WindowSpec {
+        WindowSpec::new(640, 480)
     }
 }
 
@@ -356,6 +349,7 @@ impl SysmonApp {
             on_select: Some(SysmonMsg::SelectRow),
             on_header_click: Some(SysmonMsg::SortColumn),
             on_context_menu: Some(SysmonMsg::OpenContextMenu),
+            shows: 0,
         };
 
         let body = Node::VStack {
@@ -370,16 +364,12 @@ impl SysmonApp {
             ],
         };
 
-        // Layers, not siblings: both cover the whole area, which in a VStack
-        // would displace the table rather than overlay it.
-        let mut layers: Vec<Node<SysmonMsg>> = vec![body];
-        if let Some(menu) = &self.context_menu {
-            layers.push(self.view_context_menu(menu));
-        }
-        if let Some(dialog) = self.view_kill_dialog() {
-            layers.push(dialog);
-        }
-
+        let mut layers = vec![body];
+        layers.extend(
+            self.context_menu
+                .as_ref()
+                .map(|m| self.view_context_menu(m)),
+        );
         Node::ZStack { children: layers }
     }
 
@@ -404,26 +394,14 @@ impl SysmonApp {
         let target = self.confirm_kill.as_ref()?;
         Some(Node::Dialog {
             title: format!("Kill task '{}' (PID {})?", target.name, target.pid()),
-            content: Box::new(Node::Label {
-                text: String::from("The task is terminated immediately and cannot save state."),
-                alignment: TextAlignment::Center,
-                wrap: true,
-                max_lines: None,
-            }),
-            actions: vec![
-                Node::Button {
-                    label: String::from("Kill"),
-                    on_press: Some(SysmonMsg::Kill),
-                    style: ButtonStyle::Destructive,
-                    enabled: true,
-                },
-                Node::Button {
-                    label: String::from("Cancel"),
-                    on_press: Some(SysmonMsg::Cancel),
-                    style: ButtonStyle::Secondary,
-                    enabled: true,
-                },
-            ],
+            content: Box::new(
+                Text::new("The task is terminated immediately and cannot save state.")
+                    .wrap()
+                    .into(),
+            ),
+            footer: ButtonRow::new()
+                .cancel(Button::new("Cancel").on_press(SysmonMsg::Cancel))
+                .destructive(Button::new("Kill").on_press(SysmonMsg::Kill)),
             on_dismiss: Some(SysmonMsg::Cancel),
         })
     }
@@ -448,12 +426,7 @@ impl SysmonApp {
         };
         Node::Padding {
             padding: EdgeInsets::symmetric(space::SM, space::XS),
-            child: Box::new(Node::StyledLabel {
-                text,
-                tone,
-                alignment: TextAlignment::Start,
-                wrap: false,
-            }),
+            child: Box::new(Text::new(text).tone(tone).into()),
         }
     }
 
@@ -605,21 +578,11 @@ fn load_tone(pct: u32) -> Tone {
 }
 
 fn label(text: &str) -> Node<SysmonMsg> {
-    Node::Label {
-        text: String::from(text),
-        alignment: TextAlignment::Start,
-        wrap: false,
-        max_lines: None,
-    }
+    Text::new(text).into()
 }
 
 fn cell(text: &str) -> Node<SysmonMsg> {
-    Node::Label {
-        text: String::from(text),
-        alignment: TextAlignment::Start,
-        wrap: false,
-        max_lines: None,
-    }
+    Text::new(text).into()
 }
 
 fn kv_row(key: &str, value: &str) -> Node<SysmonMsg> {
@@ -627,26 +590,15 @@ fn kv_row(key: &str, value: &str) -> Node<SysmonMsg> {
         spacing: 0,
         align: CrossAxisAlignment::Center,
         children: vec![
-            Node::Label {
-                text: String::from(key),
-                alignment: TextAlignment::Start,
-                wrap: false,
-                max_lines: None,
-            },
+            Text::new(key).into(),
             Node::Spacer {
                 size: Length::Px(space::SM),
             },
-            Node::Label {
-                text: String::from(value),
-                alignment: TextAlignment::Start,
-                wrap: false,
-                max_lines: None,
-            },
+            Text::new(value).into(),
         ],
     }
 }
 
 pub fn sysmon_main() -> ! {
-    let app = SysmonApp::new();
-    slopos_appkit::run_app(app, 640, 480)
+    slopos_appkit::run_app(SysmonApp::new())
 }

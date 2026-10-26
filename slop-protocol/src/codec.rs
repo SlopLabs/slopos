@@ -153,6 +153,7 @@ const REQ_CLIPBOARD_PASTE: u8 = 14;
 const REQ_INTERACTIVE_MOVE: u8 = 15;
 const REQ_INTERACTIVE_RESIZE: u8 = 16;
 const REQ_CLIPBOARD_READ: u8 = 17;
+const REQ_TOPLEVEL_SET_SIZE_LIMITS: u8 = 18;
 
 const EVT_HELLO: u8 = 0;
 const EVT_OBJECT_DESTROYED: u8 = 1;
@@ -299,6 +300,20 @@ impl Encode for Request {
                 let p = put_u32(buf, p, toplevel.raw())?;
                 let p = put_u32(buf, p, *serial)?;
                 put_u32(buf, p, *edges)
+            }
+            Request::ToplevelSetSizeLimits {
+                toplevel,
+                min_width,
+                min_height,
+                max_width,
+                max_height,
+            } => {
+                let p = put_u8(buf, 0, REQ_TOPLEVEL_SET_SIZE_LIMITS)?;
+                let p = put_u32(buf, p, toplevel.raw())?;
+                let p = put_u32(buf, p, *min_width)?;
+                let p = put_u32(buf, p, *min_height)?;
+                let p = put_u32(buf, p, *max_width)?;
+                put_u32(buf, p, *max_height)
             }
         }
     }
@@ -507,6 +522,23 @@ impl Decode for Request {
                         toplevel: ToplevelId::from_raw(toplevel),
                         serial,
                         edges,
+                    },
+                    p,
+                ))
+            }
+            REQ_TOPLEVEL_SET_SIZE_LIMITS => {
+                let (toplevel, p) = get_u32(buf, p)?;
+                let (min_width, p) = get_u32(buf, p)?;
+                let (min_height, p) = get_u32(buf, p)?;
+                let (max_width, p) = get_u32(buf, p)?;
+                let (max_height, p) = get_u32(buf, p)?;
+                Ok((
+                    Request::ToplevelSetSizeLimits {
+                        toplevel: ToplevelId::from_raw(toplevel),
+                        min_width,
+                        min_height,
+                        max_width,
+                        max_height,
                     },
                     p,
                 ))

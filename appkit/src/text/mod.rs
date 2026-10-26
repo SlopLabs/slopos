@@ -10,7 +10,8 @@
 //! what lets a code view map a pixel to a column by dividing.
 //!
 //! Both fall back to the same atlas when a font file is missing, so a caller
-//! never has to ask which one it got.
+//! never has to ask which one it got. **Icons** are glyphs of a third font,
+//! [`icons`], which draws nothing when it is missing.
 
 mod loader;
 
@@ -122,6 +123,7 @@ pub mod ui {
     use slopos_abi::damage::DamageRect;
     use slopos_abi::draw::{Canvas, Color32};
     use slopos_font::{FontRenderer, FontSource};
+    use slopos_theme_core::TextRole;
 
     /// What every cut-short text ends with; Inter draws it.
     pub const ELLIPSIS: &str = "\u{2026}";
@@ -136,6 +138,7 @@ pub mod ui {
     thread_local! {
         static REGULAR: RefCell<Option<FontRenderer<'static>>> = RefCell::new(load("sans"));
         static SEMIBOLD: RefCell<Option<FontRenderer<'static>>> = RefCell::new(load("sans-semibold"));
+        static MONO: RefCell<Option<FontRenderer<'static>>> = RefCell::new(load("mono"));
     }
 
     fn load(name: &str) -> Option<FontRenderer<'static>> {
@@ -160,6 +163,80 @@ pub mod ui {
             let mut slot = cell.borrow_mut();
             slot.as_mut().map(|r| (f.take().expect("one call"))(r))
         })
+    }
+
+    /// Runs `f` against the face `role` is set in: the fixed-cell face for
+    /// [`TextRole::Mono`], whose advances still line columns up, Inter in the
+    /// role's weight otherwise.
+    fn with_role<R>(role: TextRole, f: impl FnOnce(&mut FontRenderer<'static>) -> R) -> Option<R> {
+        if role != TextRole::Mono {
+            return with(role.style().weight, f);
+        }
+        MONO.with(|cell| cell.borrow_mut().as_mut().map(f))
+    }
+
+    pub fn role_width(text: &str, role: TextRole) -> i32 {
+        let size = role.style().size;
+        with_role(role, |r| r.text_width(text, size)).unwrap_or_else(|| super::string_width(text))
+    }
+
+    /// Distance from the top of a line of `role` text to its baseline.
+    pub fn role_ascent(role: TextRole) -> i32 {
+        let size = role.style().size;
+        with_role(role, |r| r.ascent(size)).unwrap_or_else(|| super::cell_height() * 4 / 5)
+    }
+
+    /// The font's own line height for `role`, at most the role's line box.
+    pub fn role_line_height(role: TextRole) -> i32 {
+        let size = role.style().size;
+        with_role(role, |r| r.line_height(size)).unwrap_or_else(super::cell_height)
+    }
+
+    /// Longest prefix of `text` in `role` that fits `budget` pixels, in bytes.
+    pub fn role_prefix_fitting(text: &str, role: TextRole, budget: i32) -> usize {
+        let size = role.style().size;
+        with_role(role, |r| r.prefix_fitting(text, size, budget)).unwrap_or_else(|| {
+            let cw = super::cell_width().max(1);
+            let chars = (budget.max(0) / cw) as usize;
+            text.char_indices()
+                .nth(chars)
+                .map(|(b, _)| b)
+                .unwrap_or(text.len())
+        })
+    }
+
+    /// What of `text` in `role` fits `max_w`, as [`elide_end`] answers it.
+    pub fn role_elide_end(text: &str, role: TextRole, max_w: i32) -> (&str, bool) {
+        if role_width(text, role) <= max_w {
+            return (text, false);
+        }
+        let room = max_w - role_width(ELLIPSIS, role);
+        if room < 0 {
+            return ("", false);
+        }
+        let keep = role_prefix_fitting(text, role, room);
+        (text[..keep].trim_end(), true)
+    }
+
+    /// Draws `text` in `role` with its line's top-left at `(x, y)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_role<T: Canvas>(
+        target: &mut T,
+        x: i32,
+        y: i32,
+        text: &str,
+        role: TextRole,
+        fg: Color32,
+        bg: Color32,
+        clip: &DamageRect,
+    ) {
+        let size = role.style().size;
+        let drawn = with_role(role, |r| {
+            r.draw_text_clipped(target, x, y, text, size, fg, bg, clip);
+        });
+        if drawn.is_none() {
+            super::draw_str_clipped(target, x, y, text, fg, bg, clip);
+        }
     }
 
     /// True when a proportional font is installed; false means every call here
@@ -283,5 +360,43 @@ pub mod ui {
         if drawn.is_none() {
             super::draw_str_clipped(target, x, y, text, fg, bg, clip);
         }
+    }
+}
+
+/// The icon font's glyphs, drawn by the renderer UI text uses.
+pub mod icons {
+    use std::cell::RefCell;
+
+    use slopos_abi::damage::DamageRect;
+    use slopos_abi::draw::{Canvas, Color32};
+    use slopos_font::{FontRenderer, FontSource};
+    use slopos_theme_core::Icon;
+
+    thread_local! {
+        static FONT: RefCell<Option<FontRenderer<'static>>> = RefCell::new(
+            super::loader::load_font("icons")
+                .and_then(|data| FontRenderer::new_with_source(data, FontSource::Filesystem)),
+        );
+    }
+
+    /// Draws `icon` in the `size × size` box at `(x, y)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_clipped<T: Canvas>(
+        target: &mut T,
+        x: i32,
+        y: i32,
+        icon: Icon,
+        size: i32,
+        color: Color32,
+        clip: &DamageRect,
+    ) {
+        let mut glyph = [0u8; 4];
+        let glyph = icon.codepoint().encode_utf8(&mut glyph);
+        FONT.with(|cell| {
+            if let Some(font) = cell.borrow_mut().as_mut() {
+                let px = size.clamp(1, u16::MAX as i32) as u16;
+                font.draw_text_clipped(target, x, y, glyph, px, color, Color32::TRANSPARENT, clip);
+            }
+        });
     }
 }

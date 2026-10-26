@@ -13,6 +13,7 @@ extern crate std;
 
 pub mod contrast;
 mod dark;
+mod icon;
 mod insets;
 mod text;
 
@@ -22,6 +23,7 @@ pub use dark::DARK;
 pub fn current() -> &'static Theme {
     &DARK
 }
+pub use icon::Icon;
 pub use insets::EdgeInsets;
 pub use slopos_abi::draw::Color32;
 pub use text::{TextRole, TextStyle, Weight};

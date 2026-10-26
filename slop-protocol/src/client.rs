@@ -196,6 +196,21 @@ impl Client {
         })
     }
 
+    pub fn toplevel_set_size_limits(
+        &mut self,
+        toplevel: ToplevelId,
+        min: (u32, u32),
+        max: (u32, u32),
+    ) -> Result<(), ProtocolError> {
+        self.conn.send(&Request::ToplevelSetSizeLimits {
+            toplevel,
+            min_width: min.0,
+            min_height: min.1,
+            max_width: max.0,
+            max_height: max.1,
+        })
+    }
+
     pub fn toplevel_destroy(&mut self, toplevel: ToplevelId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::ToplevelDestroy { toplevel })
     }

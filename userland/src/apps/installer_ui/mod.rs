@@ -13,7 +13,7 @@ mod view;
 use slopos_abi::signal::SIGPIPE;
 use slopos_appkit::{
     Action, App, AppSender, Key, LineEditInput, LineInput, Modifiers, NamedKey, Node, SliderGrab,
-    SliderInput,
+    SliderInput, WindowSpec,
 };
 use slopos_installer_core::protocol::Reply;
 use slopos_installer_core::wizard::{Input, Out, Page, Wizard};
@@ -23,8 +23,8 @@ pub use link::{Link, Privd, relay};
 
 use crate::syscall::{core as sys_core, process};
 
-pub const WIDTH: u32 = 900;
-pub const HEIGHT: u32 = 540;
+pub const WIDTH: i32 = 900;
+pub const HEIGHT: i32 = 540;
 
 /// The argument init opens the window with on a live boot, whose first page
 /// asks whether to try SlopOS or install it; without it the window asks
@@ -381,6 +381,10 @@ impl App for InstallerApp {
     fn app_id(&self) -> &str {
         "org.slopos.installer"
     }
+
+    fn window(&self) -> WindowSpec {
+        WindowSpec::new(WIDTH, HEIGHT)
+    }
 }
 
 pub fn installer_ui_main() {
@@ -391,5 +395,5 @@ pub fn installer_ui_main() {
     process::ignore_signal(SIGPIPE);
     let welcome = std::env::args().nth(1).as_deref() == Some(WELCOME);
     let app = InstallerApp::new(Box::new(Privd::default()), welcome);
-    slopos_appkit::run_app(app, WIDTH, HEIGHT);
+    slopos_appkit::run_app(app);
 }

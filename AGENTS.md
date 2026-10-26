@@ -890,10 +890,13 @@ the newest, a client's first request is a `Hello` naming the version it
 speaks, which the compositor answers in or refuses with `VersionMismatch`
 before closing, and a client accepts any compositor at its version or newer.
 The two `Hello`s never change encoding, and raising the minimum is a
-decision with a stated reason.
+decision with a stated reason. Version 4 added a toplevel's size limits
+(`ToplevelSetSizeLimits`, xdg-shell's minimum and maximum size, a maximum
+equal to the minimum being a window that does not resize), which the
+compositor holds an interactive resize and a zoom to.
 
-**The apps live outside the base.** The editor, the file manager and the
-image viewer are `slopos-apps` (`apps/`), built as `cargo build` builds a
+**The apps live outside the base.** The editor, the file manager, the image
+viewer and the widget gallery are `slopos-apps` (`apps/`), built as `cargo build` builds a
 program for this target — the target's std and panic strategy, linked
 dynamically against `libc.so` by the line the clang driver writes — and staged
 by `build_userland.sh` with their app entries and icons as `builddir/apps`:
@@ -961,6 +964,46 @@ number, and appkit for constructing a colour; a
 file whose colours are its content, as the editor's syntax palette, is
 exempt from that one check by a line of `scripts/gates/ui-literals.txt`,
 which fails once the line matches nothing.
+
+**Apps are built from components.** appkit's components
+(`appkit/src/components.rs`) — `Text` in a role and a tone, `Page`, `Section`,
+`PropertyList`, `Notice`, `ButtonRow`, a `List` of `ListRow`s, `Sidebar`, a
+`Toolbar` of `IconButton`s, `SearchField`, `Tag`, `EmptyState`, `Disclosure`,
+and `Node::Dialog`, which a `ButtonRow` ends — own their spacing, roles and
+states: a line too long ends in `…` and shows whole as a tooltip, focus is
+one ring around the control, every control is at least 28 px across, Enter
+and Escape no control took go to the `ButtonRow` that ends the modal layer's
+`Page` or dialog (its confirming button, never a destructive one, and its
+back or cancel one; Escape dismisses a dialog without one) before the app's
+`on_key`, Left and Right move along a `ButtonRow`, a scroll view is a tab
+stop only while it scrolls and keeps its offset through a rebuild that shows
+the same (`Widget::kept_scroll`), the wheel goes to the innermost view that
+can move, and a dialog is modal for Tab, the pointer and tooltips
+(`Widget::is_modal`, `Widget::covers`, `EventResponse::Blocked`), giving
+focus back when it closes and scrolling its content when the window is too
+short for it. Icons are glyphs of Lucide
+(`/usr/share/fonts/Lucide.ttf`), named by `theme-core::Icon`, whose host test
+holds every variant to a glyph of the shipped font, and drawn by the UI text
+renderer at a role's size. `App::window` is a `WindowSpec` — the size a
+window opens at, the least it lays out at and whether it resizes — which
+`run_app` sends the compositor. `appkit::audit` lays a tree out, paints it
+off screen and reports text cut by an edge on any side rather than an
+ellipsis (a viewport, `PaintContext::with_viewport`, cuts nothing short),
+siblings that overlap, a child outside its parent or text over text of its
+own layer, a centred or baseline row whose texts' painted baselines differ, a
+control whose focus does not show all the way round, one under 28 px, and
+text under its contrast floor against the colour behind it;
+`appkit_test` holds every component and each page of `appkit::catalogue`
+(every component in each of its states, which `widget_gallery --page <name>`
+shows) to it at 360, 640 and 960 px, having planted each violation to see it
+found. `just ui-shots` boots the live ISO with a USB tablet, a blank disk and
+a QMP socket (`scripts/ui_shots.py`, `scripts/lib/qmp.py`), plays scenes of
+keys, clicks and commands typed at the serial console's shell, waiting on
+`COMPOSITOR: shown <app id>` and on the screen holding still, and saves a
+PNG of each installer page, the consent dialog, the lock and login screens,
+the system menu, each app and each catalogue page under
+`builddir/ui-shots/`; nothing compares them. `appkit/GUIDE.md` is what to
+read before writing an app.
 
 **The guest installs what it builds.** `/bin/bootctl` (privd's
 `org.slopos.boot.*` and `org.slopos.base.*` actions, run as uid 0 with
@@ -2479,7 +2522,8 @@ from; a third-party crate takes an entry in `slibc/NOTICE`, which ships with the
 licence texts in `/usr/share/licenses/slibc/`.
 
 **Fonts load at runtime; never `include_bytes!` one into a shipped binary.**
-`assets/fonts/*.ttf` are SIL OFL 1.1 and ship as separate files in
+`assets/fonts/*.ttf` — the text faces SIL OFL 1.1, the icon font Lucide ISC
+with MIT for the icons it derives from Feather — ship as separate files in
 `/usr/share/fonts/`, which is aggregation and imposes nothing on the kernel.
 Baking a font into `kernel.elf` or a userland binary would put OFL §5 ("must be
 distributed entirely under this license") in direct conflict with GPLv3 §5(c)

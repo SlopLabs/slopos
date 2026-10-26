@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use slopos_theme_core::space;
+use slopos_theme_core::{TextRole, space};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
@@ -24,6 +24,8 @@ pub struct RadioGroupWidget {
     /// height, from the last measure.
     rows: Vec<(i32, i32)>,
     label_height: i32,
+    /// From the group's left edge to its text.
+    indent: i32,
 }
 
 impl RadioGroupWidget {
@@ -41,6 +43,7 @@ impl RadioGroupWidget {
             focused: false,
             rows: Vec::new(),
             label_height: 0,
+            indent: 0,
         }
     }
 
@@ -104,15 +107,16 @@ impl Widget for RadioGroupWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let style = ctx.style;
         let text_h = ctx.text_height();
-        self.label_height = style.checkbox_size.max(text_h);
+        self.label_height = style.checkbox_size.max(text_h).max(style.min_target);
         let indent = style.checkbox_size + style.checkbox_gap;
+        self.indent = indent;
 
         self.rows.clear();
         let mut y = 0;
         let mut width = 0;
         for (i, option) in self.options.iter().enumerate() {
             if i > 0 {
-                y += space::SM;
+                y += space::XS;
             }
             let mut height = self.label_height;
             let mut text_w = ctx.text_width(&option.label);
@@ -135,7 +139,7 @@ impl Widget for RadioGroupWidget {
         let text_h = ctx.text_height();
         let cursor = self.selected.or_else(|| self.step(None, true));
 
-        for (i, (option, &(top, _))) in self.options.iter().zip(&self.rows).enumerate() {
+        for (i, (option, &(top, height))) in self.options.iter().zip(&self.rows).enumerate() {
             let row_y = rect.y + top;
             let dot = Rect::new(rect.x, row_y + (self.label_height - size) / 2, size, size);
             let (ring, fill) = if option.enabled {
@@ -159,27 +163,61 @@ impl Widget for RadioGroupWidget {
                 ctx.draw_rounded_rect(dot.x, dot.y, size, size, size / 2, ring);
             }
 
-            let text_x = rect.x + size + style.checkbox_gap;
+            let text_x = rect.x + self.indent;
+            let room = rect.width - self.indent;
             let label_fg = if option.enabled {
                 theme.text
             } else {
                 theme.text_disabled
             };
             let label_y = row_y + (self.label_height - text_h) / 2;
-            ctx.draw_text_transparent(text_x, label_y, &option.label, label_fg);
+            ctx.draw_text_fitted(
+                text_x,
+                label_y,
+                &option.label,
+                TextRole::Body,
+                room,
+                label_fg,
+            );
             if !option.detail.is_empty() {
-                ctx.draw_text_transparent(
+                let detail_fg = if option.enabled {
+                    theme.text_secondary
+                } else {
+                    theme.text_disabled
+                };
+                let detail_y = row_y + self.label_height;
+                ctx.draw_text_fitted(
                     text_x,
-                    row_y + self.label_height,
+                    detail_y,
                     &option.detail,
-                    theme.text_secondary,
+                    TextRole::Body,
+                    room,
+                    detail_fg,
                 );
             }
 
             if self.focused && cursor == Some(i) {
-                ctx.draw_focus_ring(dot);
+                ctx.draw_focus_ring(Rect::new(rect.x, row_y, rect.width, height));
             }
         }
+    }
+
+    fn focus_rect(&self) -> Rect {
+        let rect = self.layout_rect();
+        let cursor = self.selected.or_else(|| self.step(None, true));
+        match cursor.and_then(|i| self.rows.get(i)) {
+            Some(&(top, height)) => Rect::new(rect.x, rect.y + top, rect.width, height),
+            None => rect,
+        }
+    }
+
+    fn tooltip(&self, x: i32, y: i32) -> Option<&str> {
+        let option = &self.options[self.row_at(x, y)?];
+        let room = self.layout_rect().width - self.indent;
+        let cut = |text: &str| crate::text::ui::role_width(text, TextRole::Body) > room;
+        [option.label.as_str(), option.detail.as_str()]
+            .into_iter()
+            .find(|text| cut(text))
     }
 
     fn event(

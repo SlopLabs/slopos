@@ -83,6 +83,8 @@ pub struct WindowInfo {
     pub frame_width: u32,
     /// Frame height set by compositor during resize (0 = same as height).
     pub frame_height: u32,
+    /// Asked not to be resized: no edge resizes it and zoom does nothing.
+    pub fixed_size: bool,
 }
 
 impl WindowInfo {
@@ -169,6 +171,7 @@ impl Default for WindowInfo {
             app_id: AppId::EMPTY,
             frame_width: 0,
             frame_height: 0,
+            fixed_size: false,
         }
     }
 }

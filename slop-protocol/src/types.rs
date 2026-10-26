@@ -1,7 +1,7 @@
 //! Core protocol types: Request, Event, ProtocolError, OutputInfo.
 
 /// The newest version this tree speaks. A change to the wire adds a version.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The oldest version a compositor built from this tree still serves.
 /// Raising it cuts off every client built against an older one, so it rises
@@ -219,6 +219,18 @@ pub enum Request {
         len: u32,
         serial: u32,
         buffer_fd: Option<OwnedFd>,
+    },
+
+    /// The smallest and largest size the window can lay itself out at, in
+    /// pixels, as xdg-shell's `set_min_size` and `set_max_size`: 0 is no
+    /// limit, and a maximum equal to the minimum is a window that does not
+    /// resize. Version 4.
+    ToplevelSetSizeLimits {
+        toplevel: ToplevelId,
+        min_width: u32,
+        min_height: u32,
+        max_width: u32,
+        max_height: u32,
     },
 
     /// Start an interactive window move. Serial must match a recent pointer event.

@@ -40,21 +40,15 @@ System Monitor, the system menu and the lock screen.
 
 ### Toolkit
 
-- `Node` has no heading, caption or body role, so page titles are body text:
-  "Welcome to SlopOS" and "Which disk should SlopOS be installed on?" are the
-  same size as the paragraph under them. Only `Dialog` sets a title role.
-- `LineEdit` and `TextField` share a role, a fill and an edge but differ in
-  caret blink and focus ring. Focus is shown four different
-  ways: a ring on a button, a ring around the checkbox square, a ring around
-  the radio dot only, and a 1 px line on a scroll view.
-- A disabled radio option dims its title and not its reason.
-- Only `TreeView` elides with `…`. `Label` and `Button` clip silently, and
-  Files truncates a path by byte index (`build_navbar`), which panics
-  on a multi-byte path.
-- Icons are eight shapes drawn from rectangles (`widgets/icon.rs`). Files
-  shows `[D] bin` for a folder, uses the letters `/ ~ T D B S` for its places,
-  and labels its navigation buttons `<`, `>` and `^`. The dock shows letter
-  tiles, 64 × 64 PNGs of `E F I M T`.
+- The installer, Files, the editor and System Monitor build their pages from
+  stacks and body `Text` rather than appkit's components, so page titles are
+  body text: "Welcome to SlopOS" and "Which disk should SlopOS be installed
+  on?" are the same size as the paragraph under them.
+- Files truncates a path by byte index (`build_navbar`), which panics on a
+  multi-byte path.
+- Files shows `[D] bin` for a folder, uses the letters `/ ~ T D B S` for its
+  places, and labels its navigation buttons `<`, `>` and `^`. The dock shows
+  letter tiles, 64 × 64 PNGs of `E F I M T`.
 
 ### Compositor chrome
 
@@ -240,12 +234,11 @@ ring around the whole control, a row included. Hit targets are at least
 28 px. Enter activates the default button and Escape cancels or goes back,
 as `ButtonRow` declares. `LineEdit` and `TextField` share one chrome.
 
-**Icons are a font.** A permissive icon font (Lucide, ISC, or Phosphor,
-MIT) ships at `/usr/share/fonts/` with its licence beside it and a
-`NOTICE.md` entry, as Inter does. `Icon::Folder`, `Icon::Warning` and so on
-name glyphs in it, drawn at the role's size and coloured by tone. App icons
-for the dock are drawn on one template, a tinted rounded square with a glyph,
-and shipped at 64 and 128 px.
+**Icons are a font.** Lucide (ISC) ships at `/usr/share/fonts/` with its
+licence beside it and a `NOTICE.md` entry, as Inter does. `Icon::Folder`,
+`Icon::TriangleAlert` and so on name glyphs in it, drawn at the role's size
+and coloured by tone. App icons for the dock are drawn on one template, a
+tinted rounded square with a glyph, and shipped at 64 and 128 px.
 
 **Windows describe themselves.** `App::window()` returns a `WindowSpec`
 with a default and minimum size and whether the window resizes. The dock and
@@ -267,11 +260,12 @@ accepted forms, and runs from `check-framekernel-gates`.
 - text clipped without an ellipsis;
 - siblings that overlap, or a child outside its parent;
 - a row whose texts do not share a baseline;
-- a focusable control with no visible focus;
+- a focusable control with no visible focus, or one under 28 px across;
 - a text and surface pair under the contrast floor.
 
 `appkit_test` builds each component, and each page of the widget gallery, at
-several widths and fails on any finding.
+several widths and fails on any finding. `appkit/GUIDE.md` says which
+component to use when.
 
 ### 4. The compositor
 
@@ -473,25 +467,19 @@ chrome's geometry over theme-core's tokens, its alias block, the dead
 gone. `scripts/check_ui_literals.sh`, with its self-test and
 `scripts/gates/ui-literals.txt`, runs from `check-framekernel-gates`.
 
-### Phase 3: Components, icons, audit and screenshots
+### Phase 3: Components, icons, audit and screenshots (done)
 
-- Add the text roles, the components, `WindowSpec` and the icon font, and
-  rebuild `Dialog` on them.
-- Add `appkit::audit` and run it in `appkit_test` over every component and
-  gallery page.
-- Make the widget gallery the catalogue: every component in every state.
-- Add `just ui-shots` (`scripts/ui_shots.py`). It boots the live ISO with a
-  QMP socket and a USB tablet for absolute pointer moves. It follows a scene
-  script of keys and clicks, waits for serial markers, and writes PNGs to
-  `builddir/ui-shots/`: each gallery page, each installer page driven against
-  a blank scratch disk, the consent dialog, the lock and
-  login screens, the system menu, and each app's main window.
-- Write `appkit/GUIDE.md`: the components, when to use each, the voice and
-  glossary, and the screenshot loop. This is what an agent or a person reads
-  before writing an app.
-
-Grading: `appkit_test` with the audit, and `just ui-shots` producing every
-scene. The screenshots are for review and are not compared to goldens.
+appkit's `Text` takes a role and a tone and replaced `Label` and
+`StyledLabel`. `Page`, `Section`, `PropertyList`, `Notice`, `ButtonRow`, a
+`List` of `ListRow`s, `Sidebar`, a `Toolbar` of `IconButton`s, `SearchField`,
+`Tag`, `EmptyState` and `Disclosure` are its components, and `Dialog` is a
+modal layer of a title, content and a `ButtonRow`. Lucide's glyphs are
+`theme-core::Icon`, shipped at `/usr/share/fonts/Lucide.ttf`. `App::window`
+is a `WindowSpec`, which protocol version 4 hands the compositor as size
+limits. `appkit::audit` holds every component and each page of
+`appkit::catalogue`, which `widget_gallery --page <name>` shows, to its rules
+at three widths in `appkit_test`. `just ui-shots` saves every surface this
+plan names, and `appkit/GUIDE.md` is what to read before writing an app.
 
 ### Phase 4: The permission dialog
 
@@ -530,10 +518,10 @@ the dock, shrunk to fit). The `ui-shots` scenes show the result.
 - Rewrite `installer-core`'s words, issues and proposal lines to the voice and
   glossary, and build the installer's pages from `Page`, `PropertyList`,
   `ListRow`, `Notice` and `Disclosure`. The log moves under *Show details*.
-- Rebuild Files with a `Sidebar`, `Toolbar`, icons and `EmptyState`. Give the
-  editor its one name and its errors a next step. Give the image viewer the
-  same. Fix System Monitor's network row and task counts, and use sentence
-  case for its headings. Give the terminal an inner margin.
+- Rebuild Files with a `Sidebar`, `Toolbar`, icons and `EmptyState`. Give
+  the editor its one name and its errors a next step. Give the image viewer the same. Fix System Monitor's network
+  row and task counts, and use sentence case for its headings. Give the
+  terminal an inner margin.
 - Give every app entry, title and About box one name.
 
 Grading:
@@ -638,6 +626,52 @@ Grading:
   a broken ellipsis reaching a screen.
 - **Screenshots are for people.** `just ui-shots` gives a person or an agent
   something to look at. The audit and the tests are the gate.
+- **The audit judges what was painted.** It records each line of text as
+  `PaintContext` draws it, with the colour that was under it, and compares
+  painted pixels with focus on and off, so a widget is held to what it put
+  on screen rather than to what it says of itself. Each rule is first shown
+  to fire on a planted violation, as every gate's self-test is.
+- **A control is at least 28 px across**, and the audit holds every tab stop
+  to it.
+- **A modal layer owns the keyboard and the pointer.** A dialog marks itself
+  modal: Tab moves only among its controls, a key none of them took is
+  `Blocked` from the page beneath while Enter and Escape still reach its
+  `ButtonRow`, and nothing beneath shows a tooltip. Escape presses its cancel
+  button, and dismisses it only when it has none. The compositor's own
+  dialogs, built from the same components, inherit this.
+- **Enter never destroys.** Enter presses the confirming button and Escape
+  the back or cancel one; a destructive button is pressed only by a click
+  or by Enter once it has focus, as macOS and GNOME have it.
+- **Only a footer answers Enter and Escape.** The keys reach the `ButtonRow`
+  that ends a `Page` or a dialog, never one inside the content, and a list
+  with nothing to open leaves Enter to it. Left and Right move along a
+  `ButtonRow`, as along an ARIA toolbar.
+- **A scroll view is a tab stop only while it scrolls.** A page or a dialog
+  that fits adds no stop between its controls.
+- **A scroll view keeps its place while it shows the same.** A rebuild
+  hands each view the offset of the one before it that showed the same, a
+  page or a list by its first name, a table by its columns and what the
+  app says its rows are of (`shows`, as React's `key`), so a message, a
+  tick or a dialog over it moves nothing and another page or directory
+  starts at the top. The wheel goes to the innermost view that can still
+  move, and a key that moves a list's choice scrolls it into view, as
+  GTK's focus adjustments do.
+- **Focus comes back when a dialog closes.** One that opens starts with
+  nothing focused; the page's focus waits beneath it.
+- **The catalogue is the toolkit's.** Every component's states live in
+  `appkit::catalogue`, so the gallery a person opens and the pages the audit
+  grades are one source. The gallery is a loose app, so the live ISO carries
+  it.
+- **The icon font ships whole and unmodified.** All of Lucide costs under a
+  megabyte and needs no subsetting tool; an icon is a variant naming its
+  codepoint, and a host test holds every variant to the shipped font.
+- **A window's limits are the compositor's to hold.** A client states its
+  minimum and maximum size as xdg-shell does, and the compositor clamps
+  resizes, zoom and, later, placement to them.
+- **A row aligns its children; it stretches them only when asked.** A stack
+  passes its cross-axis minimum to its children only under `Stretch`, as a
+  flex layout does, so a centred or baseline row never makes a child taller
+  than it asked to be.
 
 ## Constraints
 
