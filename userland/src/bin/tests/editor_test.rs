@@ -11,7 +11,7 @@ use slopos_appkit::widgets::code_view::CodeInput;
 use slopos_appkit::widgets::editor_tabs::TabInput;
 use slopos_appkit::widgets::tree_view::TreeInput;
 use slopos_appkit::{App, Key, Modifiers, NamedKey};
-use slopos_apps::editor::{Command, EditorApp, EditorMsg};
+use slopos_apps::editor::{Command, EditorApp, EditorMsg, said};
 
 const DIR: &str = "/home/editor_test";
 
@@ -189,8 +189,8 @@ fn an_unopenable_argument_still_starts() -> bool {
     if std::fs::write(&binary, [0x7f, b'E', b'L', b'F', 0, 1, 2, 0]).is_err() {
         return false;
     }
-    let app = EditorApp::new(&[binary]);
-    app.documents().len() == 1 && app.status().contains("binary")
+    let app = EditorApp::new(&[binary.clone()]);
+    app.documents().len() == 1 && app.status() == said::not_text(&binary)
 }
 
 /// F3 finds with the bar closed, which is what the documentation promises.
@@ -258,7 +258,54 @@ fn refuses_a_binary_file() -> bool {
     let mut app = app_with(DIR);
     let before = app.documents().len();
     app.open(&path);
-    app.documents().len() == before && app.status().contains("binary")
+    app.documents().len() == before && app.status() == said::not_text(&path)
+}
+
+/// The window is titled by the document in front, then the app's one name.
+fn the_title_names_the_document() -> bool {
+    let mut app = app_with(&format!("{DIR}/sample.rs"));
+    let first = app.title() == format!("sample.rs — {}", said::NAME);
+    app.open(&format!("{DIR}/notes.md"));
+    first && app.title() == format!("notes.md — {}", said::NAME)
+}
+
+/// Every error says what happened, then what to do, in the desktop's voice.
+fn every_error_says_what_to_do_next() -> bool {
+    use std::io::ErrorKind;
+    let path = "/home/user/notes.txt";
+    let errors = [
+        said::unreadable(path, ErrorKind::NotFound),
+        said::unreadable(path, ErrorKind::PermissionDenied),
+        said::unreadable(path, ErrorKind::Other),
+        said::unlisted(path, ErrorKind::PermissionDenied),
+        said::unlisted(path, ErrorKind::Other),
+        said::folder(path),
+        said::too_large(path, 9 << 20),
+        said::not_text(path),
+        said::too_many_lines(path),
+        said::unsaved(path, ErrorKind::PermissionDenied),
+        said::unsaved(path, ErrorKind::StorageFull),
+        said::unsaved(path, ErrorKind::Other),
+        said::open_elsewhere(path),
+        said::not_a_folder(path),
+        said::line_limit(),
+        said::not_a_line("x", 4),
+        said::not_a_line("", 4),
+        said::index_full(64),
+        said::no_manual(),
+        said::unnamed_left(),
+        said::tree_full(64),
+        said::TAB_GONE.into(),
+        said::NOT_SAVED_YET.into(),
+    ];
+    errors.iter().all(|said| {
+        let sentences = said.split(". ").count();
+        let kept = slopos_theme_core::words::sentence(said, &[]).is_ok() && sentences >= 2;
+        if !kept {
+            eprintln!("editor_test: {said:?}");
+        }
+        kept
+    })
 }
 
 /// The view builds against the real font metrics, for every pane the editor has.
@@ -602,6 +649,11 @@ fn main() {
         (
             "a_changed_file_is_not_silently_overwritten",
             a_changed_file_is_not_silently_overwritten,
+        ),
+        ("the_title_names_the_document", the_title_names_the_document),
+        (
+            "every_error_says_what_to_do_next",
+            every_error_says_what_to_do_next,
         ),
     ]);
 

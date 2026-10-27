@@ -1,13 +1,16 @@
-use slopos_appkit::theme::{inset, space};
+use slopos_appkit::theme::space;
 use slopos_appkit::{
-    BarSegment, ButtonStyle, CrossAxisAlignment, Length, LineEditInput, Node, RadioOption,
-    ScrollDirection, ScrollbarVisibility, SegmentFill, Text, Tone,
+    BarSegment, Button, ButtonRow, CrossAxisAlignment, Disclosure, Icon, Length, LineEditInput,
+    List, ListRow, Node, Notice, Page, PropertyList, ScrollDirection, ScrollbarVisibility, Section,
+    SegmentFill, Tag as TagChip, Text, TextRole, Tone,
 };
 use slopos_boot_core::install::Role;
-use slopos_installer_core::wizard::{Kind, Page, Row, StepState, words};
-use slopos_installer_core::{Contents, DEFAULT_REMOTE, Layout, Piece, Tag, human, short};
+use slopos_installer_core::wizard::{Note, Page as Step, Row, Severity, StepState, holding, say};
+use slopos_installer_core::{
+    DEFAULT_REMOTE, Layout, Piece, Tag, disk_size, human, parse_disk_size,
+};
 
-use super::{Field, InstallerApp, Msg, typed_size};
+use super::{Field, InstallerApp, Msg};
 
 const MIB: u64 = 1 << 20;
 const ROOT: usize = 0;
@@ -15,18 +18,6 @@ const ESP: usize = 1;
 const BOOT: usize = 2;
 const CRASH: usize = 3;
 const OTHER_SYSTEMS: [usize; 3] = [4, 5, 6];
-
-fn label(text: impl Into<String>) -> Node<Msg> {
-    Text::new(text).wrap().into()
-}
-
-fn wrapped(text: impl Into<String>, tone: Tone) -> Node<Msg> {
-    Text::new(text).tone(tone).wrap().into()
-}
-
-fn toned(text: impl Into<String>, tone: Tone) -> Node<Msg> {
-    Text::new(text).tone(tone).into()
-}
 
 fn column(spacing: i32, children: Vec<Node<Msg>>) -> Node<Msg> {
     Node::VStack {
@@ -44,6 +35,14 @@ fn row(children: Vec<Node<Msg>>) -> Node<Msg> {
     }
 }
 
+fn caption(text: impl Into<String>) -> Node<Msg> {
+    Text::new(text)
+        .role(TextRole::Caption)
+        .tone(Tone::Secondary)
+        .wrap()
+        .into()
+}
+
 fn expand(child: Node<Msg>) -> Node<Msg> {
     Node::Expand {
         weight: 1,
@@ -51,51 +50,41 @@ fn expand(child: Node<Msg>) -> Node<Msg> {
     }
 }
 
-fn wide(width: i32, child: Node<Msg>) -> Node<Msg> {
-    Node::SizedBox {
-        width: Some(Length::Px(width)),
-        height: None,
-        child: Box::new(child),
-    }
+fn notice(note: Note) -> Node<Msg> {
+    let tone = match note.severity {
+        Severity::Info => Tone::Info,
+        Severity::Warning => Tone::Warning,
+        Severity::Danger => Tone::Danger,
+    };
+    Notice::new(tone, note.title).body(note.body).into()
 }
 
-/// A subject and what it says of it, the subjects in one column, each on the
-/// first line of its text however that wraps.
-fn pair(subject: &str, tone: Tone, text: impl Into<String>) -> Node<Msg> {
-    Node::HStack {
-        children: vec![wide(100, toned(subject, tone)), expand(label(text))],
-        spacing: space::SM,
-        align: CrossAxisAlignment::Baseline,
-    }
+fn notes(app: &InstallerApp) -> impl Iterator<Item = Node<Msg>> {
+    app.wizard.notes().into_iter().map(notice)
 }
 
-fn button(text: impl Into<String>, msg: Msg, style: ButtonStyle, enabled: bool) -> Node<Msg> {
-    Node::Button {
-        label: text.into(),
-        on_press: Some(msg),
-        style,
-        enabled,
-    }
-}
-
-fn choices<K>(rows: &[Row<K>], selected: Option<usize>, on: fn(usize) -> Msg) -> Node<Msg> {
-    Node::RadioGroup {
-        options: rows
-            .iter()
-            .map(|r| RadioOption {
-                label: r.label.clone(),
-                detail: r.detail.clone(),
-                enabled: r.enabled,
-            })
-            .collect(),
-        selected,
-        on_select: Some(on),
-    }
-}
-
-fn place<K: PartialEq>(rows: &[Row<K>], key: Option<K>) -> Option<usize> {
-    let key = key?;
-    rows.iter().position(|r| r.key == key)
+/// A page's choices as a list, each row that cannot be chosen saying why.
+fn choices<K: PartialEq>(
+    rows: &[Row<K>],
+    key: Option<K>,
+    icon: impl Fn(&Row<K>) -> Option<Icon>,
+    on: fn(usize) -> Msg,
+) -> Node<Msg> {
+    let list_rows = rows
+        .iter()
+        .map(|r| {
+            let mut list_row = ListRow::new(r.title.clone()).detail(r.detail.clone());
+            if let Some(icon) = icon(r) {
+                list_row = list_row.icon(icon);
+            }
+            match &r.reason {
+                Some(reason) => list_row.disabled(reason.clone()),
+                None => list_row,
+            }
+        })
+        .collect();
+    let selected = key.and_then(|key| rows.iter().position(|r| r.key == key));
+    List::new(list_rows).selected(selected).on_select(on).into()
 }
 
 /// `layout` in proportion, or the whole disk as `holding` when it lays out
@@ -104,7 +93,7 @@ fn bar(layout: &Layout, highlight_root: bool, holding: &str) -> Node<Msg> {
     if layout.segments.is_empty() {
         return Node::PartitionBar {
             segments: vec![BarSegment {
-                label: format!("{holding} {}", human(layout.capacity)),
+                label: format!("{holding} · {}", disk_size(layout.capacity)),
                 size: layout.capacity.max(1),
                 fill: SegmentFill::Hatched,
             }],
@@ -155,7 +144,7 @@ fn line_edit(app: &InstallerApp, field: Field, placeholder: &str) -> Node<Msg> {
             (Field::Size, Some(typed)) => (
                 &typed.text,
                 typed.caret,
-                typed_size(&typed.text).is_none(),
+                parse_disk_size(&typed.text).is_none(),
                 Msg::SizeText,
             ),
             (Field::Size, None) => {
@@ -176,155 +165,59 @@ fn line_edit(app: &InstallerApp, field: Field, placeholder: &str) -> Node<Msg> {
     }
 }
 
-fn strip(page: Page) -> Node<Msg> {
-    let at = match page {
-        Page::Welcome => None,
-        Page::Disk => Some(0),
-        Page::How => Some(1),
-        Page::Review => Some(2),
-        Page::Install | Page::Done | Page::Error => Some(3),
-    };
-    let mut children = Vec::new();
-    for (i, step) in ["Disk", "How", "Review", "Install"].into_iter().enumerate() {
-        if i > 0 {
-            children.push(toned("·", Tone::Disabled));
-        }
-        let tone = match at {
-            Some(at) if i == at => Tone::Accent,
-            Some(at) if i < at => Tone::Normal,
-            _ => Tone::Secondary,
-        };
-        children.push(toned(step, tone));
-    }
-    row(children)
-}
-
-fn header(app: &InstallerApp) -> Node<Msg> {
-    Node::Padding {
-        padding: inset::SECTION,
-        child: Box::new(row(vec![
-            expand(toned("Install SlopOS", Tone::Secondary)),
-            strip(app.page),
-        ])),
-    }
-}
-
-fn footer(app: &InstallerApp) -> Node<Msg> {
-    let w = &app.wizard;
-    let left = match app.page {
-        Page::Welcome => Some(button(
-            if app.welcome { "Try SlopOS" } else { "Close" },
-            Msg::Close,
-            ButtonStyle::Secondary,
-            true,
-        )),
-        Page::Disk | Page::How | Page::Review => Some(button(
-            "Back",
-            Msg::Back,
-            ButtonStyle::Secondary,
-            w.can_go_back(),
-        )),
-        Page::Done => Some(button(
-            if app.welcome {
-                "Keep using the live system"
-            } else {
-                "Close"
+fn waiting(said: &str) -> Node<Msg> {
+    column(
+        space::SM,
+        vec![
+            Node::ProgressBar {
+                value: None,
+                label: String::new(),
+                tone: Tone::Accent,
             },
-            Msg::Close,
-            ButtonStyle::Secondary,
-            true,
-        )),
-        Page::Error => Some(button(
-            "Restart",
-            Msg::Restart,
-            ButtonStyle::Secondary,
-            true,
-        )),
-        Page::Install => None,
-    };
-    let status = match (&app.restart_refused, app.page) {
-        (Some(why), _) => wrapped(format!("The restart was refused: {why}"), Tone::Danger),
-        (None, _) if app.asking => {
-            wrapped("Allow the install in the dialog to go on", Tone::Secondary)
-        }
-        (None, Page::Welcome) if w.waiting() => wrapped("Starting the installer…", Tone::Secondary),
-        (None, Page::Disk | Page::Error) if w.waiting() => {
-            wrapped("Reading the disks…", Tone::Secondary)
-        }
-        _ => Node::Empty,
-    };
-    let style = match app.page {
-        Page::Review => ButtonStyle::Destructive,
-        _ => ButtonStyle::Primary,
-    };
-    let mut children: Vec<Node<Msg>> = left.into_iter().collect();
-    children.push(expand(status));
-    if app.page != Page::Install {
-        let enabled = w.can_advance() && !app.restarting;
-        children.push(button(w.primary_label(), Msg::Next, style, enabled));
-    }
-    Node::Padding {
-        padding: inset::SECTION,
-        child: Box::new(row(children)),
-    }
+            caption(said),
+        ],
+    )
 }
 
-fn note(app: &InstallerApp) -> Option<Node<Msg>> {
-    app.wizard.note().map(|note| wrapped(note, Tone::Warning))
+/// What the window waits on: privd's question, the engine starting, or the
+/// engine reading the disks.
+fn busy(app: &InstallerApp) -> Option<Node<Msg>> {
+    let w = &app.wizard;
+    if app.asking {
+        Some(Notice::new(Tone::Info, say::ASKING).into())
+    } else if w.starting() {
+        Some(waiting(say::STARTING))
+    } else {
+        w.waiting().then(|| waiting(say::READING))
+    }
 }
 
 fn welcome(app: &InstallerApp) -> Vec<Node<Msg>> {
-    let mut page = if app.welcome {
-        vec![
-            label("Welcome to SlopOS"),
-            label(
-                "This system runs from the medium it started from, and keeps nothing you do. \
-                 Try it as it is, or install it on a disk of this machine.",
-            ),
-        ]
-    } else {
-        vec![label(
-            "SlopOS installs from the medium it started from onto a disk of this machine. \
-             Nothing is written before you have reviewed what the install does.",
-        )]
-    };
-    page.extend(note(app));
-    if app.wizard.waiting() {
-        page.push(Node::ProgressBar {
-            value: None,
-            label: String::new(),
-            tone: Tone::Accent,
-        });
-    }
+    let mut page: Vec<Node<Msg>> = notes(app).collect();
+    page.extend(busy(app));
     page
+}
+
+fn disk_icon(row: &Row<String>) -> Option<Icon> {
+    let usb = row.key.starts_with("/dev/sd");
+    Some(if usb { Icon::Usb } else { Icon::HardDrive })
 }
 
 fn disk(app: &InstallerApp) -> Vec<Node<Msg>> {
     let w = &app.wizard;
+    let mut page: Vec<Node<Msg>> = notes(app).collect();
     let rows = w.disks();
-    let mut page = vec![label("Which disk should SlopOS be installed on?")];
-    page.extend(
-        w.medium_notes()
-            .into_iter()
-            .map(|n| wrapped(n, Tone::Warning)),
-    );
-    if rows.is_empty() {
-        page.push(wrapped("No disk was found.", Tone::Warning));
-    } else {
+    if !rows.is_empty() {
         page.push(choices(
             &rows,
-            place(&rows, w.disk().map(String::from)),
+            w.disk().map(String::from),
+            disk_icon,
             Msg::Disk,
         ));
     }
-    page.push(row(vec![button(
-        "Rescan",
-        Msg::Rescan,
-        ButtonStyle::Secondary,
-        !w.waiting(),
-    )]));
-    page.extend(w.issue().map(|issue| wrapped(words(issue), Tone::Danger)));
-    page.extend(note(app));
+    if w.waiting() {
+        page.push(waiting(say::READING));
+    }
     page
 }
 
@@ -333,71 +226,72 @@ fn how(app: &InstallerApp) -> Vec<Node<Msg>> {
     let Some(answers) = w.answers() else {
         return Vec::new();
     };
-    let mut page = vec![label(format!(
-        "How should SlopOS be installed on {}?",
-        short(&answers.disk)
-    ))];
-    let tiles = w.tile_rows();
-    page.push(choices(
-        &tiles,
-        place(&tiles, Some(answers.kind)),
+    let mut page = vec![choices(
+        &w.tile_rows(),
+        Some(answers.kind),
+        |_| None,
         Msg::Tile,
-    ));
+    )];
     let regions = w.region_rows();
     if !regions.is_empty() {
-        page.push(toned("Free region", Tone::Secondary));
-        page.push(choices(&regions, place(&regions, w.region()), Msg::Region));
+        let list = choices(&regions, w.region(), |_| None, Msg::Region);
+        page.push(Section::new(say::FREE_SPACE, list).into());
     }
-    if answers.kind == Kind::Reuse {
-        let roots = w.root_rows();
-        page.push(toned("Partition for the root", Tone::Secondary));
-        page.push(choices(&roots, place(&roots, answers.root), Msg::Root));
+    if answers.kind == slopos_installer_core::wizard::Kind::Reuse {
+        let list = choices(&w.root_rows(), answers.root, |_| None, Msg::Root);
+        page.push(Section::new(say::PARTITION, list).into());
+    }
+    page.extend(notes(app));
+    if let (Some(range), Some(size), Some(span)) = (w.size_range(), w.root_size(), w.root_span()) {
+        let slider = Node::Slider {
+            value: size,
+            min: span.min,
+            max: span.max,
+            step: MIB,
+            enabled: true,
+            grab: app.grab,
+            on_input: Some(Msg::Size),
+        };
+        let field = Node::SizedBox {
+            width: Some(Length::Px(SIZE_FIELD)),
+            height: None,
+            child: Box::new(line_edit(app, Field::Size, say::SIZE)),
+        };
+        let content = column(
+            space::XS,
+            vec![row(vec![expand(slider), field]), caption(range)],
+        );
+        page.push(Section::new(say::SIZE, content).into());
     }
     if let Some(listing) = w.system().and_then(|s| s.disk(&answers.disk)?.listing()) {
-        page.push(toned("Now", Tone::Secondary));
-        let holding = match &listing.contents {
-            Contents::Blank => "blank".into(),
-            other => other.holding(),
-        };
-        page.push(bar(&listing.layout, false, &holding));
+        let holding = holding(listing);
+        page.push(Section::new(say::NOW, bar(&listing.layout, false, &holding)).into());
     }
     if let Some(Ok((_, proposal))) = w.last_answer().map(|p| &p.answer) {
-        page.push(toned("After", Tone::Secondary));
-        page.push(bar(&proposal.after, true, ""));
+        page.push(Section::new(say::AFTER, bar(&proposal.after, true, "")).into());
     }
-    if let (Some(span), Some(size)) = (w.root_span(), w.root_size()) {
-        page.push(pair(
-            "Root size",
-            Tone::Secondary,
-            format!("{} – {}", human(span.min), human(span.max)),
-        ));
-        page.push(row(vec![
-            expand(Node::Slider {
-                value: size,
-                min: span.min,
-                max: span.max,
-                step: MIB,
-                enabled: true,
-                grab: app.grab,
-                on_input: Some(Msg::Size),
-            }),
-            wide(120, line_edit(app, Field::Size, "Size")),
-        ]));
-    }
-    page.push(toned("Options", Tone::Secondary));
+    let mut options = Vec::new();
     if w.system().is_some_and(|s| s.medium.source) {
-        page.push(label("Where /src/slopos fetches from and pushes to"));
-        page.push(line_edit(app, Field::Remote, DEFAULT_REMOTE));
+        let field = line_edit(app, Field::Remote, DEFAULT_REMOTE);
+        let remote = PropertyList::new().row_with(
+            say::REMOTE,
+            column(space::XS, vec![field, caption(say::REMOTE_CAPTION)]),
+        );
+        options.push(remote.into());
     }
-    page.push(Node::Checkbox {
+    options.push(Node::Checkbox {
         checked: answers.first,
-        label: "Put SlopOS first in the firmware boot order".into(),
+        label: say::FIRST.into(),
         on_toggle: Some(Msg::First),
         enabled: true,
     });
-    page.extend(w.issue().map(|issue| wrapped(words(issue), Tone::Danger)));
+    page.push(Section::new(say::OPTIONS, column(space::SM, options)).into());
     page
 }
+
+/// What the size box is as wide as: a size such as `99.9 GB` and the
+/// field's own padding.
+const SIZE_FIELD: i32 = 15 * space::SM;
 
 fn tag_tone(tag: Tag) -> Tone {
     match tag {
@@ -416,30 +310,35 @@ fn review(app: &InstallerApp) -> Vec<Node<Msg>> {
     let summary = w
         .summary_lines()
         .into_iter()
-        .map(|(subject, text)| pair(subject, Tone::Secondary, text));
+        .fold(PropertyList::new(), |list, (name, value)| {
+            list.row(name, value)
+        });
     let actions = proposal
         .action_lines()
         .into_iter()
-        .map(|(tag, text)| pair(tag.word(), tag_tone(tag), text));
-    let mut page = vec![
-        label("Review the install"),
-        column(space::XS, summary.collect()),
-        toned("What happens to each partition", Tone::Secondary),
-        column(space::XS, actions.collect()),
-    ];
-    page.extend(proposal.left_out().map(|line| wrapped(line, Tone::Warning)));
+        .map(|(tag, line)| Node::HStack {
+            children: vec![
+                TagChip::new(tag.word(), tag_tone(tag)).into(),
+                expand(Text::new(line).wrap().into()),
+            ],
+            spacing: space::SM,
+            align: CrossAxisAlignment::Baseline,
+        })
+        .collect();
+    let mut page: Vec<Node<Msg>> = notes(app).collect();
+    page.push(Section::new(say::SUMMARY, summary).into());
+    page.push(Section::new(say::PARTITIONS, column(space::XS, actions)).into());
     page.push(Node::Checkbox {
         checked: w.confirmed(),
         label: w.confirmation(),
         on_toggle: Some(Msg::Confirm),
         enabled: true,
     });
-    page.extend(w.issue().map(|issue| wrapped(words(issue), Tone::Danger)));
     page
 }
 
-/// As tall as the steps, which the log takes the place of.
-const LOG_HEIGHT: i32 = 212;
+/// As tall as the steps, which the log is read beside.
+const LOG_HEIGHT: i32 = 26 * space::SM;
 
 fn steps(app: &InstallerApp) -> Node<Msg> {
     let rows = app
@@ -447,13 +346,24 @@ fn steps(app: &InstallerApp) -> Node<Msg> {
         .steps()
         .into_iter()
         .map(|(title, state)| {
-            let (said, tone) = match state {
-                StepState::Pending => ("", Tone::Disabled),
-                StepState::Running => ("now", Tone::Accent),
-                StepState::Done => ("done", Tone::Success),
-                StepState::Failed => ("failed", Tone::Danger),
+            let (icon, tone) = match state {
+                StepState::Pending => (Icon::Circle, Tone::Disabled),
+                StepState::Running => (Icon::Dot, Tone::Accent),
+                StepState::Done => (Icon::CircleCheck, Tone::Success),
+                StepState::Failed => (Icon::CircleX, Tone::Danger),
             };
-            pair(said, tone, title)
+            let text_tone = match state {
+                StepState::Pending => Tone::Secondary,
+                _ => Tone::Normal,
+            };
+            row(vec![
+                Node::Icon {
+                    icon,
+                    role: TextRole::Body,
+                    tone,
+                },
+                Text::new(title).tone(text_tone).into(),
+            ])
         })
         .collect();
     column(space::XS, rows)
@@ -465,7 +375,7 @@ fn log(app: &InstallerApp) -> Node<Msg> {
         .progress()
         .log
         .iter()
-        .map(|line| Text::new(line.clone()).into())
+        .map(|line| Text::new(line.clone()).role(TextRole::Mono).into())
         .collect();
     Node::SizedBox {
         width: None,
@@ -481,16 +391,23 @@ fn log(app: &InstallerApp) -> Node<Msg> {
     }
 }
 
+/// What a page holds for the person who wants more: `before` it, then the
+/// install's log.
+fn details(app: &InstallerApp, mut before: Vec<Node<Msg>>) -> Node<Msg> {
+    let title = match app.details {
+        true => say::HIDE_DETAILS,
+        false => say::SHOW_DETAILS,
+    };
+    before.push(log(app));
+    Disclosure::new(title, column(space::SM, before))
+        .expanded(app.details)
+        .on_toggle(Msg::Details)
+        .into()
+}
+
 fn install(app: &InstallerApp) -> Vec<Node<Msg>> {
-    let w = &app.wizard;
-    let mut page: Vec<Node<Msg>> = w.outcome().into_iter().map(label).collect();
-    page.push(if app.show_log { log(app) } else { steps(app) });
-    let progress = w.progress();
-    page.push(toned(
-        progress.detail.clone().unwrap_or_default(),
-        Tone::Secondary,
-    ));
-    page.push(match progress.bytes {
+    let progress = app.wizard.progress();
+    let bar = match progress.bytes {
         Some((done, total)) => Node::ProgressBar {
             value: Some((done.saturating_mul(100) / total.max(1)) as u32),
             label: format!("{} of {} copied", human(done), human(total)),
@@ -501,66 +418,106 @@ fn install(app: &InstallerApp) -> Vec<Node<Msg>> {
             label: String::new(),
             tone: Tone::Accent,
         },
-    });
-    page.push(Node::Checkbox {
-        checked: app.show_log,
-        label: "Show the log".into(),
-        on_toggle: Some(Msg::ShowLog),
-        enabled: true,
-    });
-    page
+    };
+    vec![
+        Section::new(say::STEPS, steps(app)).into(),
+        bar,
+        details(app, Vec::new()),
+    ]
+}
+
+fn restart_refused(app: &InstallerApp) -> Option<Node<Msg>> {
+    app.restart_refused
+        .then(|| Notice::new(Tone::Danger, say::NOT_RESTARTED).into())
 }
 
 fn done(app: &InstallerApp) -> Vec<Node<Msg>> {
-    app.wizard.outcome().into_iter().map(label).collect()
-}
-
-fn error(app: &InstallerApp) -> Vec<Node<Msg>> {
-    let w = &app.wizard;
-    let outcome = w.outcome();
-    let mut page = Vec::new();
-    let mut lines = outcome.into_iter();
-    page.extend(lines.next().map(label));
-    page.extend(lines.map(|line| wrapped(line, Tone::Danger)));
-    page.extend(note(app));
-    page.push(log(app));
+    let mut page: Vec<Node<Msg>> = notes(app).collect();
+    page.extend(restart_refused(app));
+    let where_to = app
+        .wizard
+        .done_lines()
+        .into_iter()
+        .fold(PropertyList::new(), |list, (name, value)| {
+            list.row(name, value)
+        });
+    page.push(details(app, vec![where_to.into()]));
     page
 }
 
+fn error(app: &InstallerApp) -> Vec<Node<Msg>> {
+    let mut page: Vec<Node<Msg>> = notes(app).collect();
+    page.extend(restart_refused(app));
+    page.extend(busy(app));
+    let why = app.wizard.failure().map(|failure| {
+        Text::new(failure.message.clone())
+            .role(TextRole::Mono)
+            .wrap_anywhere()
+            .into()
+    });
+    page.push(details(app, why.into_iter().collect()));
+    page
+}
+
+fn footer(app: &InstallerApp) -> Option<ButtonRow<Msg>> {
+    let w = &app.wizard;
+    let next = Button::new(w.primary_label())
+        .on_press(Msg::Next)
+        .enabled(w.can_advance() && !app.restarting);
+    let back = || {
+        Button::new(say::BACK)
+            .on_press(Msg::Back)
+            .enabled(w.can_go_back())
+    };
+    let close = |label| Button::new(label).on_press(Msg::Close);
+    Some(match app.page {
+        Step::Welcome => ButtonRow::new()
+            .aside(close(if app.welcome { say::TRY } else { say::CLOSE }))
+            .confirm(next),
+        Step::Disk => ButtonRow::new()
+            .back(back())
+            .aside(
+                Button::new(say::SCAN)
+                    .on_press(Msg::Rescan)
+                    .enabled(!w.waiting()),
+            )
+            .confirm(next),
+        Step::How => ButtonRow::new().back(back()).confirm(next),
+        Step::Review => ButtonRow::new().back(back()).destructive(next),
+        Step::Install => return None,
+        Step::Done => ButtonRow::new()
+            .aside(close(if app.welcome {
+                say::KEEP_TRYING
+            } else {
+                say::CLOSE
+            }))
+            .destructive(next),
+        Step::Error => ButtonRow::new()
+            .aside(
+                Button::new(say::RESTART)
+                    .on_press(Msg::Restart)
+                    .enabled(!app.restarting),
+            )
+            .confirm(next),
+    })
+}
+
 pub(super) fn window(app: &InstallerApp) -> Node<Msg> {
-    let (body, scrolls) = match app.page {
-        Page::Welcome => (welcome(app), false),
-        Page::Disk => (disk(app), true),
-        Page::How => (how(app), true),
-        Page::Review => (review(app), true),
-        Page::Install => (install(app), false),
-        Page::Done => (done(app), false),
-        Page::Error => (error(app), false),
+    let heading = app.wizard.heading(app.welcome);
+    let content = match app.page {
+        Step::Welcome => welcome(app),
+        Step::Disk => disk(app),
+        Step::How => how(app),
+        Step::Review => review(app),
+        Step::Install => install(app),
+        Step::Done => done(app),
+        Step::Error => error(app),
     };
-    let body = Node::Padding {
-        padding: inset::PAGE,
-        child: Box::new(column(space::MD, body)),
-    };
-    let body = if scrolls {
-        Node::ScrollView {
-            child: Box::new(body),
-            direction: ScrollDirection::Vertical,
-            show_scrollbar: ScrollbarVisibility::WhenNeeded,
-            scroll_y: app.page_scroll,
-            on_scroll: Some(Msg::PageScroll),
-            follow_end: false,
-        }
-    } else {
-        body
-    };
-    column(
-        0,
-        vec![
-            header(app),
-            Node::Divider,
-            expand(body),
-            Node::Divider,
-            footer(app),
-        ],
-    )
+    let page = Page::new(heading.title)
+        .subtitle(heading.subtitle)
+        .content(column(space::XL, content));
+    match footer(app) {
+        Some(footer) => page.footer(footer).into(),
+        None => page.into(),
+    }
 }

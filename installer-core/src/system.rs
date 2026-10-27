@@ -33,13 +33,31 @@ pub struct Medium {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Disk {
     pub node: String,
+    /// What its maker calls it, as `/dev/disk/by-id` names it.
+    pub model: Option<String>,
     pub state: DiskState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The disk the installer itself started from.
+    Medium,
+    ReadOnly,
+}
+
+impl Refusal {
+    pub fn words(self) -> &'static str {
+        match self {
+            Refusal::Medium => "This disk holds the SlopOS installer.",
+            Refusal::ReadOnly => "This disk is read-only.",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiskState {
-    /// Never offered, and why: the medium, or write-protected.
-    Refused(String),
+    /// Never offered.
+    Refused(Refusal),
     /// Offered, but it could not be read.
     Unreadable(String),
     Listed(Listing),
@@ -111,27 +129,33 @@ pub struct MbrPartition {
 }
 
 impl Contents {
-    /// What erasing the disk loses, if anything.
+    /// What the disk holds, which erasing it loses: `None` when it is blank.
     pub fn holds(&self) -> Option<String> {
         match self {
-            Contents::Gpt => Some("a GUID partition table".into()),
+            Contents::Gpt => Some("partitions".into()),
             Contents::Blank => None,
-            Contents::Mbr(parts) => Some(format!(
-                "an MBR partition table with {} partition(s)",
-                parts.len()
-            )),
+            Contents::Mbr(parts) => Some(match parts.len() {
+                1 => "1 partition in an older kind of partition table".into(),
+                n => format!("{n} partitions in an older kind of partition table"),
+            }),
             Contents::UnreadableGpt => Some(format!(
-                "a GUID partition table this installer cannot read: over {} entries, or damaged in both copies",
+                "a partition table SlopOS can't read, with over {} entries or damaged in both copies",
                 gpt::MAX_ENTRIES
             )),
-            Contents::Ext4 => Some("an ext4 volume across the whole disk".into()),
-            Contents::Data => Some("data that starts no partition table".into()),
+            Contents::Ext4 => Some("one ext4 filesystem across the whole disk".into()),
+            Contents::Data => Some("data in no partition table".into()),
         }
     }
 
-    /// What the disk holds, in words: `nothing` when it is blank.
-    pub fn holding(&self) -> String {
-        self.holds().unwrap_or_else(|| "nothing".into())
+    /// Why only erasing the disk installs onto it, as a sentence.
+    pub fn only_erase(&self) -> &'static str {
+        match self {
+            Contents::Gpt => "SlopOS can only be installed by erasing this disk.",
+            Contents::Blank => "This disk is empty.",
+            Contents::Mbr(_) => "This disk has an older kind of partition table.",
+            Contents::UnreadableGpt => "SlopOS can't read this disk's partition table.",
+            Contents::Ext4 | Contents::Data => "This disk isn't divided into partitions.",
+        }
     }
 }
 

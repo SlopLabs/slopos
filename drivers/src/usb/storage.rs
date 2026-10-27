@@ -5,6 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use slopos_boot_core::disk_id::DiskId;
 use slopos_fs::blockdev::BlockDevice;
 use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
@@ -13,20 +14,22 @@ use slopos_ostd::{
     KArc, KBox, klog_info, lock_class, write_array_field, write_field, write_init_field,
 };
 use slopos_usb_core::bus::Path;
-use slopos_usb_core::device::descriptor::{Configuration, TransferType};
+use slopos_usb_core::device::descriptor::{Configuration, DeviceDescriptor, TransferType};
 use slopos_usb_core::device::request::Setup;
+use slopos_usb_core::device::string;
 use slopos_usb_core::storage::bot::{CBW_LEN, MAX_LUN};
 use slopos_usb_core::storage::scsi::{self, Capacity, CapacityAnswer, Command, Inquiry, sense_key};
 use slopos_usb_core::storage::transport::{
     Buffer, CBW_AT, CSW_AT, Counts, Done, Interface, Outcome, Pipe, PipeCommand, QUEUE, SCRATCH_AT,
     SCRATCH_LEN, SENSE_AT, Stepped, TAG_MS, Target, Transport, Wire,
 };
+use slopos_usb_core::storage::usb_id;
 use slopos_usb_core::storage::{CLASS, PROTOCOL_BULK_ONLY, SUBCLASS_SCSI};
 use slopos_usb_core::xhci::ring::{CommandResult, SubmitError, Ticket};
 use slopos_usb_core::xhci::transfer::{MAX_TD_PAGES, PushError, Transfer, TransferResult};
 
 use super::bus::{BoundUsbDevice, UsbFunction, UsbMatch};
-use super::xhci::device::{STREAM_IN, STREAM_OUT, Stream, TransferSink, Translator};
+use super::xhci::device::{Control, STREAM_IN, STREAM_OUT, Stream, TransferSink, Translator};
 use crate::block::engine::{BlkError, Engine, Op, QueueOps, Request, RequestPages};
 use crate::block::{self, DiskName, EngineDisk};
 use crate::driver_core::bus::{ProbeError, ProbeOutcome, Removal};
@@ -344,13 +347,14 @@ impl QueueOps for Queue {
         let shift = req.ns.block_shift;
         let command = match req.op {
             Op::Flush => Command::synchronize_cache(),
-            op => Command::transfer(
-                op == Op::Write,
+            Op::Read | Op::Write => Command::transfer(
+                req.op == Op::Write,
                 req.offset >> shift,
                 (req.len >> shift) as u32,
                 1 << shift,
             )
             .ok_or(BlkError::BadRequest)?,
+            Op::Identify => return Err(BlkError::Unsupported),
         };
         let span = pages.span(req.len);
         let mut phys = [0u64; MAX_TD_PAGES];
@@ -603,11 +607,78 @@ fn bulk_pair(config: &Configuration<'_>, interface: u8) -> Option<(u8, u8)> {
     Some((bulk(true)?, bulk(false)?))
 }
 
+struct Ident {
+    control: Option<KArc<Control>>,
+    /// Read once: a device whose language goes unanswered costs one timeout.
+    language: Option<u16>,
+    device: DeviceDescriptor,
+    serial: [u8; string::MAX_CHARS],
+    serial_len: Option<usize>,
+}
+
+impl Ident {
+    #[inline(never)]
+    fn read(control: Option<KArc<Control>>, device: DeviceDescriptor) -> Self {
+        let mut bytes = [0; string::MAX_LEN as usize];
+        let mut serial = [0; string::MAX_CHARS];
+        let language = control.as_deref().and_then(Control::language);
+        let serial_len = control
+            .as_deref()
+            .zip(language)
+            .and_then(|(control, language)| {
+                control.string_in(device.serial_string, language, &mut bytes)
+            })
+            .and_then(|descriptor| string::identity(descriptor, &mut serial));
+        Self {
+            control,
+            language,
+            device,
+            serial,
+            serial_len,
+        }
+    }
+
+    #[inline(never)]
+    fn of(&self, inquiry: &Inquiry, lun: u8) -> Option<DiskId> {
+        let device = &self.device;
+        let mut vendor = [0; usb_id::STRING_MAX];
+        let mut product = [0; usb_id::STRING_MAX];
+        let vendor = self.part(
+            &inquiry.vendor,
+            device.manufacturer_string,
+            device.vendor,
+            &mut vendor,
+        );
+        let product = self.part(
+            &inquiry.product,
+            device.product_string,
+            device.product,
+            &mut product,
+        );
+        let serial = self.serial_len.map(|len| &self.serial[..len]);
+        DiskId::usb(vendor, product, serial, lun)
+    }
+
+    fn part<'a>(
+        &self,
+        field: &'a [u8],
+        index: u8,
+        id: u16,
+        out: &'a mut [u8; usb_id::STRING_MAX],
+    ) -> &'a [u8] {
+        let mut bytes = [0; string::MAX_LEN as usize];
+        let descriptor = match (self.control.as_deref(), self.language) {
+            (Some(control), Some(language)) if usb_id::blank(field) => {
+                control.string_in(index, language, &mut bytes)
+            }
+            _ => None,
+        };
+        usb_id::part(field, descriptor, id, out)
+    }
+}
+
 /// A device that stalls the request has one LUN (Bulk-Only §3.2).
-fn max_lun(bound: &mut BoundUsbDevice<'_>, interface: u8) -> u8 {
-    let Ok(control) = bound.control() else {
-        return 0;
-    };
+fn max_lun(control: &Control, interface: u8) -> u8 {
     let mut answer = [0u8; 1];
     match control.read(Setup::get_max_lun(interface), &mut answer) {
         Ok(1) if answer[0] <= MAX_LUN => answer[0],
@@ -624,7 +695,17 @@ fn probe(bound: &mut BoundUsbDevice<'_>) -> Result<ProbeOutcome, ProbeError> {
     else {
         return Ok(ProbeOutcome::Declined);
     };
-    let luns = max_lun(bound, interface).saturating_add(1);
+    let control = bound.control().ok();
+    let luns = control
+        .as_deref()
+        .map_or(0, |control| max_lun(control, interface))
+        .saturating_add(1);
+    let device = bound.device_descriptor().unwrap_or(DeviceDescriptor {
+        vendor: info.vendor,
+        product: info.product,
+        ..DeviceDescriptor::default()
+    });
+    let ident = Ident::read(control, device);
     let stream = bound
         .stream(bulk_in, bulk_out)
         .map_err(|_| ProbeError::DeviceFault)?;
@@ -661,7 +742,7 @@ fn probe(bound: &mut BoundUsbDevice<'_>) -> Result<ProbeOutcome, ProbeError> {
         storage.retire();
         return Err(ProbeError::OutOfMemory);
     }
-    serve_luns(&storage, luns);
+    serve_luns(&storage, luns, &ident);
     if storage.disks.lock().iter().all(Option::is_none) {
         storage.retire();
         return Ok(ProbeOutcome::Declined);
@@ -724,9 +805,9 @@ fn attach(
 }
 
 #[inline(never)]
-fn serve_luns(storage: &Storage, luns: u8) {
+fn serve_luns(storage: &Storage, luns: u8, ident: &Ident) {
     for lun in 0..luns.min(MAX_LUNS as u8) {
-        match probe_lun(storage, lun) {
+        match probe_lun(storage, lun, ident) {
             Lun::Disk(disk) => {
                 if let Some(name) = register_lun(storage, lun, disk) {
                     storage.disks.lock()[usize::from(lun)] = Some(name);
@@ -756,7 +837,7 @@ enum Lun {
 
 /// A LUN as a disk, once it says what it is, is ready and has a capacity.
 #[inline(never)]
-fn probe_lun(storage: &Storage, lun: u8) -> Lun {
+fn probe_lun(storage: &Storage, lun: u8, ident: &Ident) -> Lun {
     let shared = &storage.shared;
     let mut data = [0u8; SCRATCH_LEN];
     let say = |why: &str| {
@@ -787,9 +868,10 @@ fn probe_lun(storage: &Storage, lun: u8) -> Lun {
             return Lun::Silent;
         }
     }
-    if !Inquiry::parse(&data[..inquiry.moved as usize]).is_some_and(|i| i.is_disk()) {
+    let Some(inquiry) = Inquiry::parse(&data[..inquiry.moved as usize]).filter(Inquiry::is_disk)
+    else {
         return decline("not a disk");
-    }
+    };
     if let Err(why) = ready(shared, lun) {
         return decline(why);
     }
@@ -810,7 +892,8 @@ fn probe_lun(storage: &Storage, lun: u8) -> Lun {
         capacity.block_size,
         bytes,
         true,
-    );
+    )
+    .identified(ident.of(&inquiry, lun));
     Lun::Disk(if protected { disk.protected() } else { disk })
 }
 

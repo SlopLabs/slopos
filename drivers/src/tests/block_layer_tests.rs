@@ -2,18 +2,20 @@
 //! read back by a table re-read into partition nodes and `/dev/disk/by-*`
 //! links, and the claims that keep a mounted partition's window from moving.
 //!
-//! Destructive, so only the NVMe scratch namespaces, one with 512-byte and one
-//! with 4096-byte logical blocks. The table takes the first and last blocks;
-//! the windows sit below the regions the engine tests write.
+//! Destructive, so only the scratch disks: the NVMe namespaces, one with
+//! 512-byte and one with 4096-byte logical blocks, and for by-id names the
+//! virtio disk and the stick. The table takes the first and last blocks; the
+//! windows sit below the regions the engine tests write.
 
 use slopos_abi::fs::block_ioctl;
 use slopos_boot_core::Guid;
+use slopos_boot_core::disk_id::DiskId;
 use slopos_fs::blockdev::BlockDevice;
 use slopos_fs::devfs::{
     BlockIoctlReply, DEV_NAME_MAX, devfs_block_ioctl, devfs_resolve_block_source,
 };
 use slopos_fs::partition::PARTUUID_TEXT_MAX;
-use slopos_fs::vfs::{FileSystem, FileType, VfsError};
+use slopos_fs::vfs::{FileSystem, FileType, InodeId, VfsError};
 use slopos_ostd::KVec;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -57,7 +59,7 @@ fn node_capacity(name: &[u8]) -> Option<u64> {
 }
 
 #[inline(never)]
-fn partitioned_disk(disk: &[u8], disk_tag: u8) -> TestResult {
+fn partitioned_disk(disk: &[u8], disk_tag: u8, by_id: &[u8]) -> TestResult {
     let Some(device) = block::disk(disk) else {
         return fail!("scratch disk {} not attached", show(disk));
     };
@@ -94,7 +96,7 @@ fn partitioned_disk(disk: &[u8], disk_tag: u8) -> TestResult {
         "partition 2's node must be its window"
     );
 
-    let verdict = check_links(&p2, disk_tag);
+    let verdict = check_links(&p2, disk_tag, by_id);
     if !matches!(verdict, TestResult::Pass) {
         return verdict;
     }
@@ -125,9 +127,10 @@ fn partitioned_disk(disk: &[u8], disk_tag: u8) -> TestResult {
     pass!()
 }
 
-/// Partition 2 resolves by `PARTUUID=` and through its by-partuuid link.
+/// Partition 2 resolves by `PARTUUID=`, through its by-partuuid link and
+/// through its by-id one, its disk's with `-part2`.
 #[inline(never)]
-fn check_links(p2: &DiskName, disk_tag: u8) -> TestResult {
+fn check_links(p2: &DiskName, disk_tag: u8, by_id: &[u8]) -> TestResult {
     let text: [u8; PARTUUID_TEXT_MAX] = Guid(unique_guid(disk_tag, 2)).spelling();
     let mut spec = [0u8; 9 + PARTUUID_TEXT_MAX];
     spec[..9].copy_from_slice(b"PARTUUID=");
@@ -143,6 +146,17 @@ fn check_links(p2: &DiskName, disk_tag: u8) -> TestResult {
     match devfs_resolve_block_source(&link, &mut resolved) {
         Ok(len) if resolved[..len] == *p2.as_bytes() => {}
         other => return fail!("the by-partuuid link resolved to {:?}", other),
+    }
+    let mut spec = [0u8; 128];
+    let parts: [&[u8]; 3] = [b"/dev/disk/by-id/", by_id, b"-part2"];
+    let mut len = 0;
+    for part in parts {
+        spec[len..len + part.len()].copy_from_slice(part);
+        len += part.len();
+    }
+    match devfs_resolve_block_source(&spec[..len], &mut resolved) {
+        Ok(at) if resolved[..at] == *p2.as_bytes() => {}
+        other => return fail!("the by-id partition link resolved to {:?}", other),
     }
 
     pass!()
@@ -259,11 +273,178 @@ fn check_read_claims(disk: &[u8], p1: &DiskName) -> TestResult {
 }
 
 pub fn test_block_partitions_on_512_byte_blocks() -> TestResult {
-    partitioned_disk(b"nvme0n2", 0xA5)
+    partitioned_disk(b"nvme0n2", 0xA5, b"nvme-QEMU_NVMe_Ctrl_slopos-root_2")
 }
 
 pub fn test_block_partitions_on_4096_byte_blocks() -> TestResult {
-    partitioned_disk(b"nvme1n2", 0x4C)
+    partitioned_disk(b"nvme1n2", 0x4C, b"nvme-QEMU_NVMe_Ctrl_slopos-4kn_2")
+}
+
+/// QEMU's disks are named under `/dev/disk/by-id` by the `serial=` the
+/// harness gives each: an NVMe namespace by its controller's model and serial
+/// and its namespace, the first namespace by the two alone as well; a virtio
+/// disk by its ID string; the stick by INQUIRY's vendor and product, its
+/// serial string and its LUN. Each is listed, links to its node, and names it
+/// as a mount source.
+pub fn test_block_by_id_names() -> TestResult {
+    const LINKS: [(&[u8], &[u8]); 7] = [
+        (b"nvme-QEMU_NVMe_Ctrl_slopos-root_1", b"nvme0n1"),
+        (b"nvme-QEMU_NVMe_Ctrl_slopos-root", b"nvme0n1"),
+        (b"nvme-QEMU_NVMe_Ctrl_slopos-root_2", b"nvme0n2"),
+        (b"nvme-QEMU_NVMe_Ctrl_slopos-4kn_1", b"nvme1n1"),
+        (b"virtio-slopos-verified", b"vda"),
+        (b"virtio-slopos-scratch", b"vdb"),
+        (b"usb-QEMU_QEMU_HARDDISK_slopos-usb-0:0", b"sda"),
+    ];
+    let fs = slopos_fs::vfs::init::vfs_devfs_instance();
+    let Some(by_id) = by_id_dir(fs) else {
+        return fail!("/dev/disk/by-id is missing");
+    };
+    for (link, node) in LINKS {
+        let verdict = by_id_link(fs, by_id, link, node);
+        if !matches!(verdict, TestResult::Pass) {
+            return verdict;
+        }
+    }
+    assert_eq_test!(
+        links_to(fs, by_id, b"nvme0n2"),
+        Some(1),
+        "namespace 2 has no shorter name"
+    );
+    pass!()
+}
+
+/// A partition of the virtio disk and of the stick is named by its disk's
+/// by-id name with `-part<N>`, until a re-read finds it gone.
+pub fn test_block_by_id_partition_names() -> TestResult {
+    let disks: [(&[u8], &[u8], &[u8]); 2] = [
+        (b"vdb", b"virtio-slopos-scratch-part1", b"vdb1"),
+        (
+            b"sda",
+            b"usb-QEMU_QEMU_HARDDISK_slopos-usb-0:0-part1",
+            b"sda1",
+        ),
+    ];
+    for (disk, link, node) in disks {
+        let verdict = by_id_partition(disk, link, node);
+        if !matches!(verdict, TestResult::Pass) {
+            return verdict;
+        }
+    }
+    pass!()
+}
+
+#[inline(never)]
+fn by_id_partition(disk: &[u8], link: &[u8], node: &[u8]) -> TestResult {
+    let laid = block::claim(disk)
+        .map_err(|_| "claim")
+        .and_then(|whole| {
+            let entry = gpt_fixture::Entry {
+                type_guid: Guid([0x11; 16]),
+                unique: Guid([0x1D; 16]),
+                start: P1.0,
+                len: P1.1,
+            };
+            gpt_fixture::install(whole.as_ref(), Guid([0x1E; 16]), &[entry])
+        })
+        .and_then(|()| block::reread(disk).map_err(|_| "re-read"));
+    let fs = slopos_fs::vfs::init::vfs_devfs_instance();
+    let verdict = match (laid, by_id_dir(fs)) {
+        (Ok(()), Some(by_id)) => by_id_link(fs, by_id, link, node),
+        (Ok(()), None) => fail!("/dev/disk/by-id is missing"),
+        (Err(why), _) => fail!("partitioning {}: {}", show(disk), why),
+    };
+    let wiped = block::claim(disk)
+        .map_err(|_| "claim")
+        .and_then(|whole| gpt_fixture::wipe(whole.as_ref()))
+        .and_then(|()| block::reread(disk).map_err(|_| "re-read"));
+    match (verdict, wiped) {
+        (TestResult::Pass, Err(why)) => fail!("wiping {}: {}", show(disk), why),
+        (TestResult::Pass, Ok(())) if resolve_by_id(link).is_ok() => {
+            fail!("{} outlived its partition", show(link))
+        }
+        (verdict, _) => verdict,
+    }
+}
+
+fn by_id_dir(fs: &dyn FileSystem) -> Option<InodeId> {
+    let disk = fs.lookup(fs.root_inode(), b"disk").ok()?;
+    fs.lookup(disk, b"by-id").ok()
+}
+
+/// `link` is listed, links to `node` and names it as a mount source.
+#[inline(never)]
+fn by_id_link(fs: &dyn FileSystem, by_id: InodeId, link: &[u8], node: &[u8]) -> TestResult {
+    let mut listed = false;
+    let walked = fs.readdir(by_id, 0, &mut |name, _, kind| {
+        listed |= name == link && kind == FileType::Symlink;
+        true
+    });
+    if walked.is_err() || !listed {
+        return fail!("/dev/disk/by-id does not list {}", show(link));
+    }
+    let Ok(inode) = fs.lookup(by_id, link) else {
+        return fail!("/dev/disk/by-id/{} is missing", show(link));
+    };
+    let mut target = [0u8; 32];
+    match fs.readlink(inode, &mut target) {
+        Ok(len) if target[..len].strip_prefix(b"../../") == Some(node) => {}
+        other => return fail!("{} points at {:?}", show(link), other),
+    }
+    match resolve_by_id(link) {
+        Ok(resolved) if resolved.as_bytes() == node => pass!(),
+        other => fail!(
+            "/dev/disk/by-id/{} resolved to {:?}",
+            show(link),
+            other.map(|name| name.len)
+        ),
+    }
+}
+
+struct Resolved {
+    buf: [u8; DEV_NAME_MAX],
+    len: usize,
+}
+
+impl Resolved {
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+fn resolve_by_id(link: &[u8]) -> Result<Resolved, VfsError> {
+    const DIR: &[u8] = b"/dev/disk/by-id/";
+    let mut spec = [0u8; 128];
+    let len = DIR.len() + link.len();
+    spec[..DIR.len()].copy_from_slice(DIR);
+    spec[DIR.len()..len].copy_from_slice(link);
+    let mut resolved = Resolved {
+        buf: [0; DEV_NAME_MAX],
+        len: 0,
+    };
+    resolved.len = devfs_resolve_block_source(&spec[..len], &mut resolved.buf)?;
+    Ok(resolved)
+}
+
+/// How many of `/dev/disk/by-id`'s links point at `node`.
+#[inline(never)]
+fn links_to(fs: &dyn FileSystem, by_id: InodeId, node: &[u8]) -> Option<usize> {
+    let mut links = [0; 64];
+    let mut found = 0;
+    fs.readdir(by_id, 0, &mut |_, inode, kind| {
+        if kind == FileType::Symlink && found < links.len() {
+            links[found] = inode;
+            found += 1;
+        }
+        true
+    })
+    .ok()?;
+    let mut target = [0u8; 32];
+    let points = |inode: &&InodeId| {
+        fs.readlink(**inode, &mut target)
+            .is_ok_and(|len| target[..len].strip_prefix(b"../../") == Some(node))
+    };
+    Some(links[..found].iter().filter(points).count())
 }
 
 /// The labelled volume the harness attaches resolves by label and by UUID,
@@ -396,9 +577,10 @@ pub fn test_block_disk_names() -> TestResult {
 
 /// A USB disk takes the lowest free `sd` letter, gives it back when its
 /// device leaves, and a claim on the disk that left never releases its
-/// successor's; it reports the write protection its device does, and is
-/// never the disk `root=auto` takes.
+/// successor's; its by-id link leaves and comes back with it; it reports the
+/// write protection its device does, and is never the disk `root=auto` takes.
 pub fn test_block_usb_disks_come_and_go() -> TestResult {
+    const LINK: &[u8] = b"usb-Test_Come_And_Go_comego-0:0";
     let Some(scratch) = block::disk(b"nvme1n2") else {
         return fail!("nvme1n2 is not registered");
     };
@@ -412,9 +594,11 @@ pub fn test_block_usb_disks_come_and_go() -> TestResult {
                 scratch.capacity(),
                 false,
             )
-            .protected(),
+            .protected()
+            .identified(DiskId::usb(b"Test", b"Come And Go", Some(b"comego"), 0)),
         )
     };
+    let named = |name: DiskName| resolve_by_id(LINK).is_ok_and(|r| r.as_bytes() == name.as_bytes());
     let Ok(first) = view() else {
         return fail!("no memory for a disk");
     };
@@ -422,6 +606,7 @@ pub fn test_block_usb_disks_come_and_go() -> TestResult {
         return fail!("the USB disk was not registered");
     };
     assert_test!(name.as_bytes().starts_with(b"sd"), "a USB disk is sd");
+    assert_test!(named(name), "its by-id link names it");
     assert_test!(
         block::first_fixed_disk().is_some_and(|d| d.as_bytes() == b"nvme0n1"),
         "root=auto's disk stays nvme0n1"
@@ -445,11 +630,16 @@ pub fn test_block_usb_disks_come_and_go() -> TestResult {
         fs.lookup(fs.root_inode(), name.as_bytes()).is_err(),
         "its node is gone"
     );
+    assert_test!(
+        matches!(resolve_by_id(LINK), Err(VfsError::NotFound)),
+        "its by-id link is gone"
+    );
     let Ok(second) = view() else {
         return fail!("no memory for a disk");
     };
     let again = block::register_usb_disk(second);
     assert_test!(again == Some(name), "the letter is reused");
+    assert_test!(named(name), "its by-id link is back");
     let successor = match block::claim(name.as_bytes()) {
         Ok(c) => c,
         Err(e) => return fail!("claiming the successor failed: {:?}", e),
@@ -475,5 +665,7 @@ slopos_testing::stest!(
     suite = block_layer
 );
 slopos_testing::stest!(name = test_block_volume_links, suite = block_layer);
+slopos_testing::stest!(name = test_block_by_id_names, suite = block_layer);
+slopos_testing::stest!(name = test_block_by_id_partition_names, suite = block_layer);
 slopos_testing::stest!(name = test_block_ioctls, suite = block_layer);
 slopos_testing::stest!(name = test_block_usb_disks_come_and_go, suite = block_layer);

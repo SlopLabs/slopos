@@ -12,12 +12,12 @@ mod view;
 
 use slopos_abi::signal::SIGPIPE;
 use slopos_appkit::{
-    Action, App, AppSender, Key, LineEditInput, LineInput, Modifiers, NamedKey, Node, SliderGrab,
-    SliderInput, WindowSpec,
+    Action, App, AppSender, Key, LineEditInput, LineInput, NamedKey, Node, SliderGrab, SliderInput,
+    WindowSpec,
 };
 use slopos_installer_core::protocol::Reply;
 use slopos_installer_core::wizard::{Input, Out, Page, Wizard};
-use slopos_installer_core::{parse_size, size_text};
+use slopos_installer_core::{disk_size, parse_disk_size};
 
 pub use link::{Link, Privd, relay};
 
@@ -45,7 +45,10 @@ pub enum EngineSays {
 #[derive(Clone, Debug)]
 pub enum Msg {
     Engine(EngineSays),
-    RestartRefused(String),
+    /// The restart did not happen; the person refused it when `by_person`.
+    RestartRefused {
+        by_person: bool,
+    },
     /// A row of the list on the page, by its place.
     Disk(usize),
     Tile(usize),
@@ -61,8 +64,7 @@ pub enum Msg {
     Back,
     Close,
     Restart,
-    ShowLog,
-    PageScroll(i32),
+    Details,
     LogScroll(i32),
 }
 
@@ -80,13 +82,12 @@ pub struct InstallerApp {
     page: Page,
     asking: bool,
     restarting: bool,
-    restart_refused: Option<String>,
+    restart_refused: bool,
     grab: Option<SliderGrab>,
     size_typed: Option<LineInput>,
     remote: LineInput,
     field: Option<Field>,
-    show_log: bool,
-    page_scroll: i32,
+    details: bool,
     log_scroll: i32,
 }
 
@@ -100,13 +101,12 @@ impl InstallerApp {
             page: Page::Welcome,
             asking: false,
             restarting: false,
-            restart_refused: None,
+            restart_refused: false,
             grab: None,
             size_typed: None,
             remote: LineInput::new(),
             field: None,
-            show_log: false,
-            page_scroll: 0,
+            details: false,
             log_scroll: i32::MAX,
         }
     }
@@ -131,7 +131,7 @@ impl InstallerApp {
                 Out::Send(request) => self.link.send(&request),
                 Out::Restart if !self.restarting => {
                     self.restarting = true;
-                    self.restart_refused = None;
+                    self.restart_refused = false;
                     if let Some(sender) = &self.sender {
                         self.link.restart(sender);
                     }
@@ -142,11 +142,10 @@ impl InstallerApp {
         }
         if self.wizard.page() != self.page {
             self.page = self.wizard.page();
-            self.page_scroll = 0;
             self.log_scroll = i32::MAX;
             self.field = None;
             self.size_typed = None;
-            self.restart_refused = None;
+            self.restart_refused = false;
         }
         if self.wizard.page() != Page::How || self.wizard.root_span().is_none() {
             self.grab = None;
@@ -231,11 +230,12 @@ impl InstallerApp {
             LineEditInput::Text { character } => line.insert(character),
             LineEditInput::Caret { col } => line.set_caret(col),
             LineEditInput::Key { key, modifiers } if !line.handle_key(key, modifiers) => {
-                let unread = field == Field::Size && typed_size(&line.text).is_none();
-                if unread && key == Key::Named(NamedKey::Enter) {
-                    return Action::Rebuild;
-                }
-                return self.on_key(key, modifiers);
+                let unread = field == Field::Size && parse_disk_size(&line.text).is_none();
+                return match key {
+                    Key::Named(NamedKey::Enter) if !unread => self.on(Input::Next),
+                    Key::Named(NamedKey::Escape) => self.on(Input::Back),
+                    _ => Action::Rebuild,
+                };
             }
             _ => {}
         }
@@ -245,15 +245,23 @@ impl InstallerApp {
         let text = line.text.clone();
         match field {
             Field::Remote => self.on(Input::Remote(text)),
-            Field::Size => match typed_size(&text) {
-                Some(bytes) => self.resize(bytes),
+            Field::Size => match parse_disk_size(&text) {
+                Some(bytes) => self.resize(self.as_shown(bytes)),
                 None => Action::Rebuild,
             },
         }
     }
 
+    /// A typed size that reads as the end the box showed is that end.
+    fn as_shown(&self, bytes: u64) -> u64 {
+        match self.wizard.root_span() {
+            Some(span) if disk_size(bytes) == disk_size(span.max) => span.max,
+            _ => bytes,
+        }
+    }
+
     fn size_shown(&self) -> String {
-        self.wizard.root_size().map(size_text).unwrap_or_default()
+        self.wizard.root_size().map(disk_size).unwrap_or_default()
     }
 
     fn indeterminate(&self) -> bool {
@@ -263,16 +271,6 @@ impl InstallerApp {
             _ => false,
         }
     }
-}
-
-/// A size as the box takes one: [`parse_size`]'s in either case, spaces
-/// ignored, and a bare number in GiB, which is what a root is sized in.
-fn typed_size(text: &str) -> Option<u64> {
-    let text: String = text.split_whitespace().collect();
-    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
-        return parse_size(&format!("{text}G"));
-    }
-    parse_size(&text.to_ascii_uppercase().replace("IB", "iB"))
 }
 
 impl App for InstallerApp {
@@ -293,9 +291,9 @@ impl App for InstallerApp {
     fn update(&mut self, msg: Msg) -> Action {
         match msg {
             Msg::Engine(said) => self.engine(said),
-            Msg::RestartRefused(why) => {
+            Msg::RestartRefused { by_person } => {
                 self.restarting = false;
-                self.restart_refused = Some(why);
+                self.restart_refused = !by_person;
                 Action::Rebuild
             }
             Msg::Disk(row) => match self.wizard.disks().get(row) {
@@ -327,31 +325,15 @@ impl App for InstallerApp {
             Msg::Back => self.on(Input::Back),
             Msg::Close => self.on(Input::Close),
             Msg::Restart => self.on(Input::Restart),
-            Msg::ShowLog => {
-                self.show_log = !self.show_log;
+            Msg::Details => {
+                self.details = !self.details;
                 self.log_scroll = i32::MAX;
                 Action::Rebuild
-            }
-            Msg::PageScroll(y) => {
-                self.page_scroll = y;
-                Action::None
             }
             Msg::LogScroll(y) => {
                 self.log_scroll = y;
                 Action::None
             }
-        }
-    }
-
-    /// Enter is not the primary button on Review, whose button erases, nor on
-    /// Done, whose button restarts the machine before the medium may be out.
-    fn on_key(&mut self, key: Key, _modifiers: Modifiers) -> Action {
-        match key {
-            Key::Named(NamedKey::Escape) if self.page != Page::Install => self.on(Input::Back),
-            Key::Named(NamedKey::Enter) if !matches!(self.page, Page::Review | Page::Done) => {
-                self.on(Input::Next)
-            }
-            _ => Action::None,
         }
     }
 
@@ -374,8 +356,8 @@ impl App for InstallerApp {
         }
     }
 
-    fn title(&self) -> &str {
-        "Install SlopOS"
+    fn title(&self) -> String {
+        "Install SlopOS".into()
     }
 
     fn app_id(&self) -> &str {
@@ -389,7 +371,9 @@ impl App for InstallerApp {
 
 pub fn installer_ui_main() {
     if !crate::privd::on_the_medium() {
-        eprintln!("installer-ui: SlopOS installs from the medium it booted; boot the SlopOS ISO");
+        eprintln!(
+            "installer-ui: SlopOS installs from its own USB stick or DVD; start the computer from it"
+        );
         sys_core::exit_with_code(1);
     }
     process::ignore_signal(SIGPIPE);

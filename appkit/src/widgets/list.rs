@@ -334,7 +334,7 @@ impl Widget for ListWidget {
                 }
                 None => EventResponse::Ignored,
             },
-            WidgetEvent::KeyDown { key, .. } if self.focused => {
+            WidgetEvent::KeyDown { key, modifiers, .. } if self.focused && !modifiers.alt => {
                 let cursor = self.cursor();
                 let target = match key {
                     Key::Named(NamedKey::Down) => self.step(cursor, true),

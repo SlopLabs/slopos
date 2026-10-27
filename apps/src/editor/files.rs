@@ -11,41 +11,34 @@ use std::os::unix::fs::PermissionsExt;
 use slopos_editor_core::document::DiskStamp;
 use slopos_editor_core::filetree::DirEntry;
 
+use super::said;
+
 /// Largest file the editor opens. Past it the buffer's per-line `String` vector
 /// is no longer the right shape and the read alone would hold the UI; refusing
 /// says so instead of appearing to hang.
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The editor's own documentation, as the image installs it.
-pub const DOC_PATH: &str = "/usr/share/slopos/doc/sloped.md";
+pub const DOC_PATH: &str = "/usr/share/slopos/doc/editor.md";
 
 /// Bytes examined when deciding whether a file is text.
 const SNIFF_BYTES: usize = 8192;
 
 pub fn read_file(path: &str) -> Result<String, String> {
     match fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => return Err(format!("{path} is a directory")),
-        Ok(meta) if meta.len() > MAX_FILE_BYTES => {
-            return Err(format!(
-                "{path} is {} MiB; the editor opens up to {} MiB",
-                meta.len() / (1024 * 1024),
-                MAX_FILE_BYTES / (1024 * 1024)
-            ));
-        }
+        Ok(meta) if meta.is_dir() => return Err(said::folder(path)),
+        Ok(meta) if meta.len() > MAX_FILE_BYTES => return Err(said::too_large(path, meta.len())),
         _ => {}
     }
-    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let bytes = fs::read(path).map_err(|e| said::unreadable(path, e.kind()))?;
     // The metadata above is a separate syscall; the read is what decides.
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(format!(
-            "{path} is larger than the {} MiB the editor opens",
-            MAX_FILE_BYTES / (1024 * 1024)
-        ));
+        return Err(said::too_large(path, bytes.len() as u64));
     }
     // Opening it would produce replacement characters that a save then writes
     // back over the file.
     if bytes[..bytes.len().min(SNIFF_BYTES)].contains(&0) {
-        return Err(format!("{path} is a binary file"));
+        return Err(said::not_text(path));
     }
     // Lossy: a text file with one stray byte is still worth opening.
     Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -64,12 +57,12 @@ pub fn write_file(path: &str, text: &str) -> Result<(), String> {
         .ok()
         .map(|meta| meta.permissions().mode() & 0o7777);
     let temp = temp_path(path);
+    let unsaved = |e: std::io::Error| said::unsaved(path, e.kind());
     let write = || -> Result<(), String> {
-        let mut file = fs::File::create(&temp).map_err(|e| format!("{temp}: {e}"))?;
-        file.write_all(text.as_bytes())
-            .map_err(|e| format!("{temp}: {e}"))?;
-        file.flush().map_err(|e| format!("{temp}: {e}"))?;
-        file.sync_all().map_err(|e| format!("{temp}: {e}"))?;
+        let mut file = fs::File::create(&temp).map_err(unsaved)?;
+        file.write_all(text.as_bytes()).map_err(unsaved)?;
+        file.flush().map_err(unsaved)?;
+        file.sync_all().map_err(unsaved)?;
         Ok(())
     };
     if let Err(message) = write() {
@@ -81,7 +74,7 @@ pub fn write_file(path: &str, text: &str) -> Result<(), String> {
     }
     if let Err(e) = fs::rename(&temp, path) {
         let _ = fs::remove_file(&temp);
-        return Err(format!("{path}: {e}"));
+        return Err(unsaved(e));
     }
     Ok(())
 }
@@ -94,7 +87,7 @@ fn temp_path(path: &str) -> String {
         Some(at) => (&path[..at + 1], &path[at + 1..]),
         None => ("", path),
     };
-    let suffix = format!(".sloped-{}", std::process::id());
+    let suffix = format!(".editor-{}", std::process::id());
     // The original name is what gets shortened, so the decoration cannot be
     // what pushes a file that saved yesterday over the name limit.
     let room = slopos_abi::fs::USER_NAME_MAX.saturating_sub(suffix.len() + 1);
@@ -114,7 +107,7 @@ pub const MAX_DIR_ENTRIES: usize = 20_000;
 
 pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, String> {
     let mut out = Vec::new();
-    let entries = fs::read_dir(path).map_err(|e| format!("{path}: {e}"))?;
+    let entries = fs::read_dir(path).map_err(|e| said::unlisted(path, e.kind()))?;
     for entry in entries {
         if out.len() >= MAX_DIR_ENTRIES {
             break;

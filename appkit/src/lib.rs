@@ -55,7 +55,7 @@ pub use components::{
 };
 pub use node::{
     Action, App, BarSegment, ButtonStyle, ContextMenuAt, ImageData, MenuItem, MenuItemKind, Node,
-    RadioOption, SegmentFill, SortIndicator, TableColumn, TableColumnWidth,
+    RadioOption, SegmentFill, SortIndicator, TableColumn, TableColumnWidth, document_title,
 };
 pub use run::run_app;
 pub use sender::AppSender;

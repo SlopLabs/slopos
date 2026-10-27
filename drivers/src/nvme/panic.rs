@@ -123,7 +123,7 @@ impl PanicSession<'_> {
         if self.ring.wedged {
             return Err(BlkError::Timeout);
         }
-        let cmd: Command = io::build(req, &self.queue.pages).ok_or(BlkError::BadRequest)?;
+        let cmd: Command = io::build(req, &self.queue.pages)?;
         let polled = &mut *self.ring;
         let cid = polled.next_cid;
         polled.next_cid = (cid + 1) & 0x7FFF;

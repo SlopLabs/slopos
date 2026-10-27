@@ -1,6 +1,7 @@
-//! The apps outside the base, run as the session runs them: each program at
-//! `/usr/local/bin` is dynamically linked against `libc.so`, loads, finds its
-//! session's compositor and names its window with the id its dock entry has.
+//! The apps, run as the session runs them: each program at `/usr/local/bin`
+//! is dynamically linked against `libc.so`, and every app, the base's among
+//! them, loads, finds its session's compositor and names its window with the
+//! id and the name its dock entry has.
 //!
 //! The compositor here is this test, serving the session's socket through
 //! the protocol's own server: under `tests=on` init starts none, and a
@@ -46,7 +47,26 @@ const APPS: &[(&str, &str)] = &[
     ("/usr/local/bin/editor", "org.slopos.editor"),
     ("/usr/local/bin/file_manager", "org.slopos.files"),
     ("/usr/local/bin/image_viewer", "org.slopos.image-viewer"),
+    ("/bin/sysmon", "org.slopos.sysmon"),
+    ("/bin/terminal", "org.slopos.terminal"),
 ];
+
+/// Where the apps' entries are: the base's for its own programs, else the
+/// share they were installed with.
+fn entry_name(program: &str, id: &str) -> Option<String> {
+    let dir = match program.starts_with("/usr/local/") {
+        true => "/usr/local/share",
+        false => "/usr/share",
+    };
+    let share = slopos_userland::app_entry::Share {
+        dir: dir.into(),
+        only: None,
+    };
+    slopos_userland::app_entry::read(&[share], false)
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.name)
+}
 
 /// The program's `PT_INTERP`, read from its ELF header and program headers.
 fn interpreter(program: &str) -> Result<Vec<u8>, String> {
@@ -84,8 +104,9 @@ fn exited(child: &mut Child) -> Option<String> {
     }
 }
 
-/// Serve `program` as its compositor until it names its window's app id.
-fn app_id_of(program: &str) -> Result<String, String> {
+/// Serve `program` as its compositor until it names its window's app id:
+/// that id, and the title it gave the window before it.
+fn app_id_of(program: &str) -> Result<(String, String), String> {
     let path = slopos_protocol::socket_path(slopos_userland::syscall::process::geteuid());
     let shown = String::from_utf8_lossy(&path).into_owned();
     let _ = std::fs::remove_file(&shown);
@@ -102,7 +123,8 @@ fn app_id_of(program: &str) -> Result<String, String> {
     answer.map_err(|e| format!("{program}: {e}"))
 }
 
-fn serve(server: &mut Server, child: &mut Child) -> Result<String, String> {
+fn serve(server: &mut Server, child: &mut Child) -> Result<(String, String), String> {
+    let mut title = String::new();
     let start = Instant::now();
     let client = loop {
         match server.accept() {
@@ -141,8 +163,14 @@ fn serve(server: &mut Server, child: &mut Child) -> Result<String, String> {
                     .map_err(|e| format!("describing the output: {e:?}"))?;
                 server.flush_clients();
             }
+            Ok(Some(Request::ToplevelSetTitle {
+                title: said, len, ..
+            })) => {
+                title = String::from_utf8_lossy(&said[..len as usize]).into_owned();
+            }
             Ok(Some(Request::ToplevelSetAppId { app_id, len, .. })) => {
-                return Ok(String::from_utf8_lossy(&app_id[..len as usize]).into_owned());
+                let id = String::from_utf8_lossy(&app_id[..len as usize]).into_owned();
+                return Ok((id, title));
             }
             Ok(Some(_)) => {}
             Ok(None) => {
@@ -158,24 +186,33 @@ fn serve(server: &mut Server, child: &mut Child) -> Result<String, String> {
 }
 
 fn run(program: &str, want: &str) -> bool {
-    match interpreter(program) {
-        Ok(interp) if interp == INTERP => {}
-        Ok(interp) => {
+    let loose = program.starts_with("/usr/local/");
+    match loose.then(|| interpreter(program)) {
+        None => {}
+        Some(Ok(interp)) if interp == INTERP => {}
+        Some(Ok(interp)) => {
             eprintln!(
                 "apps_test: {program} names the interpreter {:?}",
                 String::from_utf8_lossy(&interp)
             );
             return false;
         }
-        Err(e) => {
+        Some(Err(e)) => {
             eprintln!("apps_test: {e}");
             return false;
         }
     }
+    let Some(name) = entry_name(program, want) else {
+        eprintln!("apps_test: no app entry {want}");
+        return false;
+    };
+    let one_name = |title: &str| title == name || title.ends_with(&format!(" — {name}"));
     match app_id_of(program) {
-        Ok(id) if id == want => true,
-        Ok(id) => {
-            eprintln!("apps_test: {program} named its window {id:?}, not {want:?}");
+        Ok((id, title)) if id == want && one_name(&title) => true,
+        Ok((id, title)) => {
+            eprintln!(
+                "apps_test: {program} named its window {id:?}, titled {title:?}, not {want:?} and {name:?}"
+            );
             false
         }
         Err(e) => {
@@ -197,10 +234,20 @@ fn the_image_viewer_runs() -> bool {
     run(APPS[2].0, APPS[2].1)
 }
 
+fn the_system_monitor_runs() -> bool {
+    run(APPS[3].0, APPS[3].1)
+}
+
+fn the_terminal_runs() -> bool {
+    run(APPS[4].0, APPS[4].1)
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("the_editor_runs", the_editor_runs),
     ("the_file_manager_runs", the_file_manager_runs),
     ("the_image_viewer_runs", the_image_viewer_runs),
+    ("the_system_monitor_runs", the_system_monitor_runs),
+    ("the_terminal_runs", the_terminal_runs),
 ];
 
 const TREES: &str = "--trees";

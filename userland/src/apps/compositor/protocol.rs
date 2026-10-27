@@ -1293,7 +1293,9 @@ impl ProtocolBridge {
             info.frame_height = s.frame_height;
             let ((min_w, min_h), (max_w, max_h)) = s.size_limits;
             info.fixed_size = min_w > 0 && min_h > 0 && (min_w, min_h) == (max_w, max_h);
-            info.title.copy_from_slice(&s.title[..32]);
+            let head = &s.title[..info.title.len().min(s.title.len())];
+            let fits = core::str::from_utf8(head).map_or_else(|e| e.valid_up_to(), |_| head.len());
+            info.title[..fits].copy_from_slice(&head[..fits]);
             let mut aid = [0u8; 32];
             aid.copy_from_slice(&s.app_id[..32]);
             info.app_id = AppId(aid);

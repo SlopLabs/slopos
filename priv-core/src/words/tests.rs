@@ -1,4 +1,5 @@
 use super::*;
+use alloc::format;
 use alloc::string::ToString;
 
 #[test]

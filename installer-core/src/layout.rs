@@ -6,7 +6,7 @@ use slopos_boot_core::Guid;
 use slopos_boot_core::gpt::Header;
 use slopos_boot_core::install::{self, ROLES, Role};
 
-use crate::{human, name_of, partition_node, type_name};
+use crate::{capitalised, disk_size, name_of, partition_node, role_words, type_name};
 
 /// What a disk's table lays out, lowest first: its partitions and the free
 /// regions a new partition may go into. Bytes between them hold the table
@@ -45,18 +45,17 @@ fn role_of(type_guid: &Guid) -> Option<Role> {
 }
 
 impl Segment {
-    /// Its name on a partition bar: a role, a kind and size, or free.
+    /// Its name on a partition bar: what SlopOS takes it for, else its own
+    /// name or type, and its size.
     pub fn label(&self) -> String {
-        let size = human(self.bytes);
+        let size = disk_size(self.bytes);
         match &self.piece {
-            Piece::Free { .. } => format!("free {size}"),
+            Piece::Free { .. } => format!("Free {size}"),
             Piece::Partition {
                 role, kind, name, ..
             } => match role {
-                Some(Role::Esp) => "EFI".into(),
-                Some(Role::Boot) => "boot".into(),
-                Some(Role::Root) => format!("SlopOS root {size}"),
-                Some(Role::Crash) => "crash".into(),
+                Some(Role::Root) => format!("SlopOS {size}"),
+                Some(role) => capitalised(role_words(*role)),
                 None if name.is_empty() => format!("{kind} {size}"),
                 None => format!("{name} {size}"),
             },

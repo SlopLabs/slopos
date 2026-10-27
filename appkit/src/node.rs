@@ -231,6 +231,8 @@ pub enum Node<M> {
         row_height: i32,
         selected: Option<usize>,
         on_select: Option<fn(usize) -> M>,
+        /// Emitted by Enter and by a click on the row already chosen.
+        on_activate: Option<fn(usize) -> M>,
         /// `None` leaves headers unclickable; `Some` emits with the column index.
         on_header_click: Option<fn(usize) -> M>,
         /// Emitted on secondary click and on Menu / Shift+F10, after selection
@@ -438,9 +440,10 @@ pub trait App {
         Action::None
     }
 
-    /// Read once at startup.
-    fn title(&self) -> &str {
-        "SlopOS App"
+    /// The window's title, read again after every rebuild; a window showing
+    /// a document is titled by [`document_title`].
+    fn title(&self) -> String {
+        String::from("SlopOS App")
     }
 
     /// Read once at startup.
@@ -452,6 +455,11 @@ pub trait App {
     fn app_id(&self) -> &str {
         ""
     }
+}
+
+/// A window's title that names its document: `notes.txt — Editor`.
+pub fn document_title(document: &str, app: &str) -> String {
+    format!("{document} — {app}")
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

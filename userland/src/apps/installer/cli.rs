@@ -5,7 +5,8 @@
 use std::io::{Write, stdin, stdout};
 
 use slopos_installer_core::{
-    Choices, DEFAULT_REMOTE, Event, FIRST_PERSON, Issue, Mode, Person, human, parse_size,
+    Choices, DEFAULT_REMOTE, Event, FIRST_PERSON, Issue, Mode, Person, capitalised, human,
+    parse_size,
 };
 
 use super::disk::Disk;
@@ -45,20 +46,23 @@ const USAGE: &str = "usage: installer [--disk /dev/<disk>] [--mode erase|free|re
   --disk         the disk to install onto
   --mode         erase: a new partition table over the whole disk
                  free: SlopOS's partitions in free space, beside the others
-                 reuse: the root over --root, the rest where the disk has them
-  --region       the free region new partitions go into (default: the largest)
-  --root-size    how large a new root is, as 20G or 512M (default: all the
-                 region gives); the crash partition follows it and the rest
-                 stays free
-  --root         the partition reuse puts the root on
-  --keep-root    keep the SlopOS root reuse finds there, updating /usr/local
-  --format-root  format it instead
-  --remote       the URL /src/slopos fetches from and pushes to
-  --first        put SlopOS first in the firmware's boot order
+                 reuse: SlopOS on the partition --root names, the rest where
+                 the disk has them
+  --region       the free space new partitions go into, by its number in the
+                 disk's listing (default: the largest)
+  --root-size    how large SlopOS's partition is, as 20GB or 512MB (default:
+                 all the free space gives); the crash record partition
+                 follows it and the rest stays free
+  --root         the partition reuse installs SlopOS on
+  --keep-root    keep the SlopOS that partition holds, its accounts and their
+                 files, updating /usr/local
+  --format-root  erase it instead
+  --remote       the address /src/slopos fetches from and pushes to
+  --first        put SlopOS first in the startup order
   --not-first    leave it where it stands, or after the systems there
-  --person       the name of the person the new root is for (default: user)
-  --no-password  give them no password, where one is otherwise typed
-  --cmdline      what the installed kernel boots with
+  --person       the name of the first account (default: user)
+  --no-password  give it no password, where one is otherwise typed
+  --cmdline      what the installed kernel starts with
   --yes          write the disk without asking";
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -86,13 +90,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .parse()
                     .ok()
                     .filter(|&n| n > 0)
-                    .ok_or_else(|| format!("--region {text}: a region's number, from 1"))?;
+                    .ok_or_else(|| format!("--region {text}: a free space's number, from 1"))?;
                 opts.region = Some(n - 1);
             }
             "--root-size" => {
                 let text = value()?;
                 opts.root_size = Some(parse_size(&text).ok_or_else(|| {
-                    format!("--root-size {text}: a size such as 20G, 512M or bytes")
+                    format!("--root-size {text}: a size such as 20GB, 512MB or 20GiB")
                 })?);
             }
             "--root" => opts.root = Some(value()?),
@@ -123,7 +127,7 @@ fn ask(question: &str, default: Option<&str>, flag: &str) -> Result<String, Stri
     let mut line = String::new();
     match stdin().read_line(&mut line) {
         Ok(0) => Err(format!(
-            "no answer to \"{question}\"; pass {flag} to answer it"
+            "No answer to “{question}”. Pass {flag} to answer it."
         )),
         Ok(_) => match (line.trim(), default) {
             ("", Some(d)) => Ok(d.to_owned()),
@@ -139,7 +143,7 @@ fn ask_yes(question: &str, default: bool, flag: &str) -> Result<bool, String> {
         match ask(question, Some(if default { "yes" } else { "no" }), flag)?.as_str() {
             "y" | "yes" => return Ok(true),
             "n" | "no" => return Ok(false),
-            _ => println!("yes or no"),
+            _ => println!("Answer yes or no."),
         }
     }
 }
@@ -150,17 +154,17 @@ fn choose_disk(system: &System) -> Result<String, String> {
     for found in &system.disks {
         let node = &found.node;
         if let State::Refused(why) = found.state {
-            println!("{node}: {why}, not offered");
+            println!("{node}: {} It isn't offered.", why.words());
             continue;
         }
         match found.disk() {
-            Ok(disk) => print!("{}", disk.describe()),
+            Ok(disk) => print!("{}", disk.describe(found.model.as_deref())),
             Err(why) => println!("{node}: {why}"),
         }
         offered.push(node.as_str());
     }
     let default = match offered.as_slice() {
-        [] => return Err("no disk to install onto".to_owned()),
+        [] => return Err("There's no disk to install onto.".to_owned()),
         [only] => Some(*only),
         _ => None,
     };
@@ -179,15 +183,15 @@ fn disk_node(named: String) -> String {
 fn choose_kind(disk: &Disk) -> Result<Kind, String> {
     if disk.table.is_none() {
         println!(
-            "{} holds {}, so only erase can install onto it.",
+            "{}: {} SlopOS is installed by erasing it.",
             disk.node,
-            disk.contents.holding()
+            disk.contents.only_erase()
         );
         return Ok(Kind::Erase);
     }
     loop {
         let answer = ask(
-            "erase the whole disk, install into free space beside the rest, or reuse a partition as the root (erase/free/reuse)",
+            "Erase the whole disk, install in free space beside the rest, or install on a partition (erase/free/reuse)",
             Some("free"),
             "--mode",
         )?;
@@ -195,7 +199,7 @@ fn choose_kind(disk: &Disk) -> Result<Kind, String> {
             "erase" => return Ok(Kind::Erase),
             "free" => return Ok(Kind::Free),
             "reuse" => return Ok(Kind::Reuse),
-            _ => println!("erase, free or reuse"),
+            _ => println!("Answer erase, free or reuse."),
         }
     }
 }
@@ -207,7 +211,7 @@ fn choose_region(disk: &Disk, given: Option<usize>, ask_it: bool) -> Result<Opti
     }
     let largest = disk.largest_region().unwrap_or(0);
     let answer = ask(
-        "Free region for the new partitions",
+        "Free space for the new partitions",
         Some(&(largest + 1).to_string()),
         "--region",
     )?;
@@ -216,7 +220,7 @@ fn choose_region(disk: &Disk, given: Option<usize>, ask_it: bool) -> Result<Opti
         .ok()
         .filter(|&n| (1..=regions.len()).contains(&n))
         .map(|n| Some(n - 1))
-        .ok_or_else(|| format!("{answer}: no free region of that number"))
+        .ok_or_else(|| format!("{answer}: the disk lists no free space of that number"))
 }
 
 /// The new root's first person, an administrator the desktop logs in, with
@@ -225,7 +229,7 @@ fn choose_person(named: Option<String>, no_password: bool) -> Result<Person, Str
     let name = match named {
         Some(name) => name,
         None => ask(
-            "Name of the person this machine is for",
+            "Name of the first account on this computer",
             Some(FIRST_PERSON),
             "--person",
         )?,
@@ -244,16 +248,16 @@ fn choose_person(named: Option<String>, no_password: bool) -> Result<Person, Str
     }
     let _quiet = crate::secret::quiet()?;
     let typed = crate::secret::read(&format!("Password for {name}, or nothing for none: "))?
-        .ok_or("no password typed; pass --no-password for none")?;
+        .ok_or("No password was typed. Pass --no-password for none.")?;
     if typed.is_empty() {
         return Ok(Person {
             name,
             password: None,
         });
     }
-    let again = crate::secret::read("Again: ")?.ok_or("no password typed again")?;
+    let again = crate::secret::read("Again: ")?.ok_or("The password wasn't typed again.")?;
     if again != typed {
-        return Err("the two passwords differ; nothing was written".into());
+        return Err("The two passwords differ. Nothing was written.".into());
     }
     Ok(Person {
         name,
@@ -274,13 +278,13 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
     let open = system.opened(&node).map_err(issue)?;
     let disk = &open.disk;
     if !interactive {
-        print!("{}", disk.describe());
+        print!("{}", disk.describe(system.model(&node)));
     }
     let kind = match opts.mode {
         Some(kind) => kind,
         None if opts.yes => {
             return Err(format!(
-                "--yes needs --mode: with nobody asked, nothing chooses what happens to {node}"
+                "--yes needs --mode: with nobody asked, nothing chooses what happens to {node}."
             ));
         }
         None => choose_kind(disk)?,
@@ -291,7 +295,7 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
     if kind != Kind::Erase && disk.table.is_none() {
         return Err(issue(Issue::OnlyErase {
             node,
-            holds: disk.contents.holding(),
+            contents: disk.contents.clone(),
         }));
     }
     let asked = opts.mode.is_none();
@@ -303,7 +307,7 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
         Kind::Reuse => {
             let named = match opts.root {
                 Some(named) => named,
-                None => ask("Partition for the root", None, "--root")?,
+                None => ask("Partition to install SlopOS on", None, "--root")?,
             };
             Mode::Reuse {
                 root: disk.partition_named(&named)?.entry.number,
@@ -335,7 +339,7 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
             Some(keep) => keep,
             None if slopos => ask_yes(
                 &format!(
-                    "{} holds a SlopOS root: keep what it holds, updating /usr/local",
+                    "{} holds SlopOS: keep its accounts and their files, updating /usr/local",
                     open.node(*root).map_err(issue)?
                 ),
                 true,
@@ -349,7 +353,7 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
         choices.remote = Some(match opts.remote {
             Some(url) => url,
             None => ask(
-                "Where /src/slopos fetches from and pushes to",
+                "Address /src/slopos fetches from and pushes to",
                 Some(DEFAULT_REMOTE),
                 "--remote",
             )?,
@@ -358,7 +362,7 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
     choices.first = match opts.first {
         Some(first) => first,
         None => ask_yes(
-            "Put SlopOS first in the firmware's boot order",
+            "Put SlopOS first in the startup order",
             false,
             "--first or --not-first",
         )?,
@@ -366,7 +370,8 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
     choices.person = match keep_root {
         true if opts.person.is_some() || opts.no_password => {
             return Err(
-                "--person and --no-password are a new root's; a kept root keeps its people".into(),
+                "--person and --no-password set up a new SlopOS; a kept one keeps its accounts."
+                    .into(),
             );
         }
         true => None,
@@ -398,7 +403,7 @@ fn confirm(p: &Settled) -> Result<(), String> {
     if answer == want {
         Ok(())
     } else {
-        Err("nothing was written".to_owned())
+        Err("Nothing was written.".to_owned())
     }
 }
 
@@ -415,7 +420,7 @@ impl Events for Lines {
                 index,
                 total,
                 title,
-            } => println!("installer: [{index}/{total}] {title}"),
+            } => println!("installer: [{index}/{total}] {}", capitalised(&title)),
             Event::Log { line } => println!("installer:   {line}"),
             Event::Progress { done, total } => {
                 if done < self.reported {
@@ -441,13 +446,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut system = System::probe().map_err(|issue| issue.to_string())?;
     if let Some(node) = &system.medium.unmounted_payload {
         println!(
-            "installer: {node} carries the medium's payload, which the kernel did not mount; its log says why"
+            "installer: {node} holds the installer's developer tools, which weren't read; the system log says why"
         );
     }
     let (choices, proposal) = settle(opts, &mut system)?;
     let summary = system
         .install(&choices, &proposal, &mut Lines::default())
         .map_err(|failure| failure.message)?;
-    println!("installer: {summary}; take the medium out and restart");
+    println!("installer: {summary} Remove the USB stick or DVD, then restart.");
     Ok(())
 }

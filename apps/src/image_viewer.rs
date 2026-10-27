@@ -1,25 +1,79 @@
+//! Image Viewer: one picture, fitted to the window or zoomed and panned.
+
 use std::env;
+use std::io::ErrorKind;
 use std::path::Path;
 
 mod checker;
 
 use slopos_abi::damage::DamageRect;
-use slopos_appkit::text::draw_str_clipped;
-use slopos_appkit::theme;
+use slopos_appkit::embed::Embedded;
+use slopos_appkit::theme::space;
+use slopos_appkit::{
+    EdgeInsets, EmptyState, Icon, Node, Rect, Size, Surface, Text, TextRole, Tone, document_title,
+};
 use slopos_gfx::DrawBuffer;
-use slopos_gfx::canvas_ops::fill_rect;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
-use slopos_image::{DecodeOptions, Image};
+use slopos_image::{DecodeOptions, Image, ImageError, PngError};
 use slopos_windowing::{ControlFlow, Event, Window, WindowedApp};
 
+/// The app's name, as its dock entry and its window give it.
+pub const NAME: &str = "Image Viewer";
+
 const DEFAULT_IMAGE: &str = "/usr/share/slopos/wallpapers/default.png";
-const STATUS_HEIGHT: i32 = 22;
 const MIN_ZOOM: f64 = 0.05;
 const MAX_ZOOM: f64 = 32.0;
 
+/// Why a picture is not shown, and what to do about it.
+struct Unshown {
+    title: &'static str,
+    body: String,
+}
+
+fn unshown(name: &str, error: &ImageError) -> Unshown {
+    let (title, body) = match error {
+        ImageError::Io(e) if e.kind() == ErrorKind::NotFound => (
+            "This picture isn't there",
+            format!("{name} was moved or deleted. Open it again from where it is now."),
+        ),
+        ImageError::Io(e) if e.kind() == ErrorKind::PermissionDenied => (
+            "You can't open this picture",
+            format!("{name} belongs to someone else. Ask them to share it with you."),
+        ),
+        ImageError::Io(_) => (
+            "This picture couldn't be read",
+            format!("Something went wrong reading {name}. Try opening it again."),
+        ),
+        ImageError::Png(PngError::BadSignature) => (
+            "This isn't a PNG picture",
+            format!(
+                "{NAME} opens PNG pictures, and {name} is another kind of file. Open a PNG picture instead."
+            ),
+        ),
+        ImageError::Png(PngError::Unsupported(_)) => (
+            "This PNG can't be shown yet",
+            format!("{name} uses a kind of PNG {NAME} can't show. Save it again as a plain PNG."),
+        ),
+        ImageError::Png(PngError::OutputOverflow | PngError::ResourceLimitExceeded) => (
+            "This picture is too large",
+            format!("{name} is larger than {NAME} can show. Open a smaller picture."),
+        ),
+        ImageError::Png(_) => (
+            "This picture is damaged",
+            format!("{name} is incomplete or damaged. Open another copy of it."),
+        ),
+    };
+    Unshown { title, body }
+}
+
+fn embed(fb: &mut DrawBuffer<'_>, node: &Node<()>, rect: Rect) {
+    Embedded::new(node, rect).paint(fb, rect);
+}
+
 struct ImageViewer {
     path: String,
-    loaded: Result<Image, String>,
+    loaded: Result<Image, Unshown>,
+    status_height: i32,
     fit_mode: bool,
     zoom: f64,
     pan_x: i32,
@@ -31,11 +85,17 @@ struct ImageViewer {
 
 impl ImageViewer {
     fn new(path: String) -> Self {
-        let loaded =
-            slopos_image::load_path(&path, DecodeOptions::default()).map_err(|e| format!("{}", e));
+        let loaded = slopos_image::load_path(&path, DecodeOptions::default()).map_err(|e| {
+            eprintln!("image_viewer: {path}: {e}");
+            unshown(file_name(&path), &e)
+        });
+        let status_height =
+            Embedded::natural_size(&status_bar(String::new()), Size::new(i32::MAX, i32::MAX))
+                .height;
         Self {
             path,
             loaded,
+            status_height,
             fit_mode: true,
             zoom: 1.0,
             pan_x: 0,
@@ -47,7 +107,7 @@ impl ImageViewer {
     }
 
     fn view_height(&self, fb: &DrawBuffer) -> i32 {
-        (fb.height() as i32 - STATUS_HEIGHT).max(1)
+        (fb.height() as i32 - self.status_height).max(1)
     }
 
     fn fit_zoom_for(&self, view_w: i32, view_h: i32) -> f64 {
@@ -110,49 +170,52 @@ impl ImageViewer {
         self.pan_y = py - base_y - (image_y * self.zoom).round() as i32;
     }
 
-    fn draw_status(&self, fb: &mut DrawBuffer<'_>, view_h: i32, zoom: f64) {
-        let theme = theme::current();
-        fill_rect(
-            fb,
-            0,
-            view_h,
-            fb.width() as i32,
-            STATUS_HEIGHT,
-            theme.chrome,
-        );
-        let label = self.status_text(zoom);
-        let clip = full_clip(fb);
-        draw_str_clipped(fb, 8, view_h + 4, &label, theme.text, theme.chrome, &clip);
-    }
-
     fn status_text(&self, zoom: f64) -> String {
-        let name = Path::new(&self.path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&self.path);
-        match self.loaded {
-            Ok(ref image) => format!(
-                "{}  {}x{}  {}%",
-                name,
+        match &self.loaded {
+            Ok(image) => format!(
+                "{} · {} × {} · {}%",
+                file_name(&self.path),
                 image.width,
                 image.height,
                 (zoom * 100.0).round() as i32
             ),
-            Err(_) => format!("{}  load failed", name),
+            Err(_) => String::from(file_name(&self.path)),
         }
+    }
+}
+
+fn file_name(path: &str) -> &str {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+}
+
+fn status_bar(text: String) -> Node<()> {
+    Node::Background {
+        surface: Surface::Chrome,
+        child: Box::new(Node::Padding {
+            padding: EdgeInsets::symmetric(space::SM, space::XS),
+            child: Box::new(
+                Text::new(text)
+                    .role(TextRole::Caption)
+                    .tone(Tone::Secondary)
+                    .into(),
+            ),
+        }),
     }
 }
 
 impl WindowedApp for ImageViewer {
     fn init(&mut self, win: &mut Window) {
-        win.set_title("Image Viewer");
+        win.set_title(&document_title(file_name(&self.path), NAME));
         win.set_app_id("org.slopos.image-viewer");
         win.request_redraw();
     }
 
     fn on_event(&mut self, win: &mut Window, event: Event) -> ControlFlow {
         let view_w = win.width() as i32;
-        let view_h = (win.height() as i32 - STATUS_HEIGHT).max(1);
+        let view_h = (win.height() as i32 - self.status_height).max(1);
         match event {
             Event::CloseRequest => ControlFlow::Exit,
             Event::Configure { .. } => {
@@ -241,17 +304,23 @@ impl WindowedApp for ImageViewer {
                     );
                 }
             }
-            Err(ref message) => {
-                let theme = theme::current();
-                let clip = full_clip(fb);
-                fill_rect(fb, 0, 0, fb.width() as i32, view_h, theme.surface);
-                let error = "Could not load image";
-                draw_str_clipped(fb, 16, 16, error, theme.danger, theme.surface, &clip);
-                draw_str_clipped(fb, 16, 34, message, theme.text, theme.surface, &clip);
+            Err(ref unshown) => {
+                let state =
+                    EmptyState::<()>::new(Icon::Image, unshown.title).body(unshown.body.clone());
+                let state = Node::Background {
+                    surface: Surface::Base,
+                    child: Box::new(state.into()),
+                };
+                embed(fb, &state, Rect::new(0, 0, view_w, view_h));
             }
         }
 
-        self.draw_status(fb, view_h, zoom);
+        let status = status_bar(self.status_text(zoom));
+        embed(
+            fb,
+            &status,
+            Rect::new(0, view_h, view_w, self.status_height),
+        );
     }
 }
 
@@ -264,13 +333,4 @@ pub fn image_viewer_main() {
 
 fn scaled_len(value: u32, zoom: f64) -> i32 {
     ((value as f64 * zoom).round() as i32).max(1)
-}
-
-fn full_clip(fb: &DrawBuffer<'_>) -> DamageRect {
-    DamageRect {
-        x0: 0,
-        y0: 0,
-        x1: fb.width() as i32 - 1,
-        y1: fb.height() as i32 - 1,
-    }
 }

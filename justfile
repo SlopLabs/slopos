@@ -797,9 +797,9 @@ test-installer *DISKS:
         # The stick is sda beside the disk and never offered: write-protected,
         # but on the blank disk's install a writable copy, which only its GPT
         # disk GUID excludes and which must come back as it was built.
-        medium="stick:{{iso_installer}}" writable=0 passed_over="write-protected"
+        medium="stick:{{iso_installer}}" writable=0 passed_over="ReadOnly"
         if [ "$kind" = blank ]; then
-            stick="{{build_dir}}/installer-stick.img" writable=1 passed_over="the install medium"
+            stick="{{build_dir}}/installer-stick.img" writable=1 passed_over="Medium"
             medium="stick:$stick"
             cp {{iso_installer}} "$stick"
         fi
@@ -846,7 +846,7 @@ test-installer *DISKS:
             # The firmware boots SlopOS first now; a person picks the stick
             # from its boot menu, which a fresh varstore stands in for.
             rm -f "$vars"
-            markers=("INSTALLER-NOT-OFFERED /dev/sda: write-protected"
+            markers=("INSTALLER-NOT-OFFERED /dev/sda: ReadOnly"
                 "INSTALLER-LEFT-SLOT-BASE /boot/a/base.img"
                 "INSTALLER-RESCUED /dev/" "INSTALLER-RESCUED at a terminal"
                 "removed /boot/a/base.img, a base the disk kept per slot"

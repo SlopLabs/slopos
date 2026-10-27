@@ -16,6 +16,7 @@ mod dark;
 mod icon;
 mod insets;
 mod text;
+pub mod words;
 
 pub use dark::DARK;
 

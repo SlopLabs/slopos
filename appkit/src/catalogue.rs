@@ -809,8 +809,8 @@ impl App for Catalogue {
         Action::Repaint
     }
 
-    fn title(&self) -> &str {
-        "Widget Gallery"
+    fn title(&self) -> String {
+        "Widget Gallery".into()
     }
 
     fn app_id(&self) -> &str {

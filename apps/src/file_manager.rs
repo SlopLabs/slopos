@@ -1,533 +1,467 @@
-//! File Manager Application
-//!
-//! Nautilus-inspired file browser using the declarative widget toolkit.
+//! Files: the folders of the computer, a place at a time.
 
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::PathBuf;
-use std::string::String;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 use slopos_appkit::theme::space;
 use slopos_appkit::{
-    Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Key, Length, Modifiers, NamedKey,
-    Node, Surface, TableColumn, TableColumnWidth, Text, TextAlignment, Tone, WindowSpec,
+    Action, App, Button, CrossAxisAlignment, EdgeInsets, EmptyState, Icon, IconButton, Key, List,
+    ListRow, Modifiers, NamedKey, Node, Sidebar, Surface, TableColumn, TableColumnWidth, Text,
+    TextAlignment, TextRole, Tone, Toolbar, WindowSpec, document_title,
 };
 
-const ITEM_HEIGHT: i32 = 22;
-const SIDEBAR_ITEM_HEIGHT: i32 = 22;
-const SIDEBAR_WIDTH: i32 = 140;
+/// The app's name, as its dock entry and its window give it.
+pub const NAME: &str = "Files";
+
+/// A table row tall enough for an icon and the least a control may be.
+const ROW_HEIGHT: i32 = 7 * space::XS;
+/// The size column, as wide as `1023.9 KiB`.
+const SIZE_WIDTH: i32 = 12 * space::SM;
 
 #[derive(Clone, Debug)]
 pub enum FileMsg {
-    NavBack,
-    NavForward,
-    NavUp,
-    FileSelect(usize),
-    Bookmark(usize),
+    Back,
+    Forward,
+    Up,
+    Reload,
+    Root,
+    Select(usize),
+    Open(usize),
+    Place(usize),
 }
 
-struct Bookmark {
-    icon: &'static str,
-    label: &'static str,
-    path: &'static str,
+struct Place {
+    icon: Icon,
+    name: &'static str,
+    /// Where it is; the person's home when `None`.
+    path: Option<&'static str>,
 }
 
-const BOOKMARKS: &[Bookmark] = &[
-    Bookmark {
-        icon: "/",
-        label: "Root",
-        path: "/",
+impl Place {
+    fn path(&self) -> PathBuf {
+        self.path.map_or_else(home, PathBuf::from)
+    }
+}
+
+fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(slopos_abi::fs::SESSION_HOME))
+}
+
+const PLACES: &[Place] = &[
+    Place {
+        icon: Icon::Home,
+        name: "Home",
+        path: None,
     },
-    Bookmark {
-        icon: "~",
-        label: "Home",
-        path: "/home",
+    Place {
+        icon: Icon::HardDrive,
+        name: "Computer",
+        path: Some("/"),
     },
-    Bookmark {
-        icon: "T",
-        label: "Temp",
-        path: "/tmp",
+    Place {
+        icon: Icon::Clock,
+        name: "Temporary files",
+        path: Some("/tmp"),
     },
-    Bookmark {
-        icon: "D",
-        label: "Devices",
-        path: "/dev",
-    },
-    Bookmark {
-        icon: "B",
-        label: "Programs",
-        path: "/bin",
-    },
-    Bookmark {
-        icon: "S",
-        label: "System",
-        path: "/sys",
+    Place {
+        icon: Icon::Usb,
+        name: "Devices",
+        path: Some("/dev"),
     },
 ];
 
-struct FileEntry {
+struct Entry {
     name: String,
-    is_directory: bool,
-    size: u32,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LoadState {
-    Ok,
-    Empty,
-    Error,
+    folder: bool,
+    size: u64,
 }
 
 pub struct FileManagerApp {
-    current_path: PathBuf,
-    entries: Vec<FileEntry>,
-    load_state: LoadState,
-    error_msg: String,
-    history_back: Vec<PathBuf>,
-    history_forward: Vec<PathBuf>,
+    path: PathBuf,
+    entries: Result<Vec<Entry>, ErrorKind>,
+    back: Vec<PathBuf>,
+    forward: Vec<PathBuf>,
     selected: Option<usize>,
 }
 
 impl FileManagerApp {
     fn new() -> Self {
         let mut app = Self {
-            current_path: PathBuf::from("/"),
-            entries: Vec::new(),
-            load_state: LoadState::Ok,
-            error_msg: String::new(),
-            history_back: Vec::new(),
-            history_forward: Vec::new(),
+            path: home(),
+            entries: Ok(Vec::new()),
+            back: Vec::new(),
+            forward: Vec::new(),
             selected: None,
         };
-        app.refresh();
+        app.reload();
         app
     }
 
-    fn refresh(&mut self) {
-        self.entries.clear();
-        self.error_msg.clear();
-
-        let read_dir = match fs::read_dir(&self.current_path) {
-            Ok(rd) => rd,
-            Err(e) => {
-                self.load_state = LoadState::Error;
-                self.error_msg = format!("{}", e);
-                return;
-            }
-        };
-
-        for dir_entry in read_dir {
-            let dir_entry = match dir_entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-
-            let name = match dir_entry.file_name().into_string() {
-                Ok(name) => name,
-                Err(_) => continue,
-            };
-            if name == "." || name == ".." {
-                continue;
-            }
-
-            let (is_directory, size) = match dir_entry.metadata() {
-                Ok(meta) => (meta.is_dir(), meta.len() as u32),
-                Err(_) => (false, 0),
-            };
-
-            self.entries.push(FileEntry {
-                name,
-                is_directory,
-                size,
-            });
-        }
-
-        self.entries.sort_by(|a, b| {
-            b.is_directory.cmp(&a.is_directory).then_with(|| {
-                a.name
-                    .to_ascii_lowercase()
-                    .cmp(&b.name.to_ascii_lowercase())
-            })
-        });
-
-        self.load_state = if self.entries.is_empty() {
-            LoadState::Empty
-        } else {
-            LoadState::Ok
-        };
-    }
-
-    fn navigate_to(&mut self, path: PathBuf) {
-        self.history_back.push(self.current_path.clone());
-        self.history_forward.clear();
-        self.current_path = path;
+    fn reload(&mut self) {
         self.selected = None;
-        self.refresh();
+        self.entries = fs::read_dir(&self.path).map_err(|e| e.kind()).map(|dir| {
+            let mut entries: Vec<Entry> = dir
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let name = entry.file_name().into_string().ok()?;
+                    let meta = entry.metadata().ok();
+                    Some(Entry {
+                        name,
+                        folder: meta.as_ref().is_some_and(|m| m.is_dir()),
+                        size: meta.map_or(0, |m| m.len()),
+                    })
+                })
+                .collect();
+            entries.sort_by(|a, b| {
+                b.folder
+                    .cmp(&a.folder)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+            entries
+        });
     }
 
-    fn navigate_up(&mut self) {
-        let mut parent = self.current_path.clone();
-        if parent.pop() && !parent.as_os_str().is_empty() {
-            self.navigate_to(parent);
-        } else if self.current_path.as_os_str() != "/" {
-            self.navigate_to(PathBuf::from("/"));
+    fn go(&mut self, path: PathBuf) {
+        if path == self.path {
+            return;
+        }
+        self.back.push(core::mem::replace(&mut self.path, path));
+        self.forward.clear();
+        self.reload();
+    }
+
+    fn go_back(&mut self) {
+        if let Some(path) = self.back.pop() {
+            self.forward.push(core::mem::replace(&mut self.path, path));
+            self.reload();
         }
     }
 
-    fn navigate_back(&mut self) {
-        if let Some(prev) = self.history_back.pop() {
-            self.history_forward.push(self.current_path.clone());
-            self.current_path = prev;
-            self.selected = None;
-            self.refresh();
+    fn go_forward(&mut self) {
+        if let Some(path) = self.forward.pop() {
+            self.back.push(core::mem::replace(&mut self.path, path));
+            self.reload();
         }
     }
 
-    fn navigate_forward(&mut self) {
-        if let Some(next) = self.history_forward.pop() {
-            self.history_back.push(self.current_path.clone());
-            self.current_path = next;
-            self.selected = None;
-            self.refresh();
+    fn go_up(&mut self) {
+        if let Some(parent) = self.path.parent().map(Path::to_path_buf) {
+            self.go(parent);
         }
     }
 
     fn open_selected(&mut self) {
-        if let Some(idx) = self.selected {
-            if idx < self.entries.len() && self.entries[idx].is_directory {
-                let name = self.entries[idx].name.clone();
-                let mut next = self.current_path.clone();
-                next.push(&name);
-                self.navigate_to(next);
-            }
+        let Ok(entries) = &self.entries else {
+            return;
+        };
+        if let Some(entry) = self.selected.and_then(|i| entries.get(i))
+            && entry.folder
+        {
+            let next = self.path.join(&entry.name);
+            self.go(next);
         }
     }
 
-    fn active_bookmark_index(&self) -> Option<usize> {
-        let path_str = self.current_path.to_string_lossy();
-        BOOKMARKS.iter().position(|bm| path_str == bm.path)
+    fn place(&self) -> Option<usize> {
+        PLACES.iter().position(|place| place.path() == self.path)
     }
 
-    fn build_sidebar(&self) -> Node<FileMsg> {
-        let active_idx = self.active_bookmark_index();
+    /// The folder as the person knows it: its place's name, or its own.
+    fn folder_name(&self) -> String {
+        match self.place() {
+            Some(i) => PLACES[i].name.into(),
+            None => self
+                .path
+                .file_name()
+                .map_or_else(|| "/".into(), |n| n.to_string_lossy().into_owned()),
+        }
+    }
 
-        let heading = Node::Padding {
-            padding: EdgeInsets::new(space::SM, space::SM, space::XS, space::SM),
-            child: Box::new(
-                Text::new(String::from("Places"))
-                    .tone(Tone::Secondary)
-                    .into(),
-            ),
-        };
-
-        let items: Vec<Node<FileMsg>> = BOOKMARKS
+    fn sidebar(&self) -> Node<FileMsg> {
+        let rows = PLACES
             .iter()
-            .enumerate()
-            .map(|(i, bm)| {
-                let is_active = active_idx == Some(i);
-                let tone = if is_active {
-                    Tone::Normal
-                } else {
-                    Tone::Secondary
-                };
-
-                Node::Padding {
-                    padding: EdgeInsets::new(0, space::SM, 0, space::XS),
-                    child: Box::new(Node::HStack {
-                        spacing: space::SM,
-                        align: CrossAxisAlignment::Center,
-                        children: vec![
-                            Text::new(String::from(bm.icon))
-                                .tone(Tone::Secondary)
-                                .into(),
-                            Text::new(String::from(bm.label)).tone(tone).into(),
-                        ],
-                    }),
-                }
-            })
+            .map(|place| ListRow::new(place.name).icon(place.icon))
             .collect();
+        let places = List::sectioned(vec![("Places".into(), rows)])
+            .selected(self.place())
+            .on_select(FileMsg::Place);
+        Sidebar::new(places).into()
+    }
 
-        let bookmark_list = Node::ListView {
-            item_height: SIDEBAR_ITEM_HEIGHT,
-            selected: active_idx,
-            on_select: Some(FileMsg::Bookmark),
-            items,
-        };
+    fn toolbar(&self) -> Node<FileMsg> {
+        Toolbar::new()
+            .start(
+                IconButton::new(Icon::ArrowLeft, "Back")
+                    .on_press(FileMsg::Back)
+                    .enabled(!self.back.is_empty()),
+            )
+            .start(
+                IconButton::new(Icon::ArrowRight, "Forward")
+                    .on_press(FileMsg::Forward)
+                    .enabled(!self.forward.is_empty()),
+            )
+            .start(
+                IconButton::new(Icon::ArrowUp, "Enclosing folder")
+                    .on_press(FileMsg::Up)
+                    .enabled(self.path.parent().is_some()),
+            )
+            .end(IconButton::new(Icon::RefreshCw, "Reload").on_press(FileMsg::Reload))
+            .into()
+    }
 
-        Node::SizedBox {
-            width: Some(Length::Px(SIDEBAR_WIDTH)),
-            height: None,
-            child: Box::new(Node::Background {
-                surface: Surface::Sunken,
-                child: Box::new(Node::VStack {
-                    spacing: 0,
-                    align: CrossAxisAlignment::Stretch,
-                    children: vec![heading, bookmark_list],
-                }),
+    /// The folder's name and where it is.
+    fn location(&self) -> Node<FileMsg> {
+        Node::Padding {
+            padding: EdgeInsets::symmetric(space::LG, space::SM),
+            child: Box::new(Node::VStack {
+                children: vec![
+                    Text::new(self.folder_name()).role(TextRole::Heading).into(),
+                    Text::new(self.path.display().to_string())
+                        .role(TextRole::Caption)
+                        .tone(Tone::Secondary)
+                        .into(),
+                ],
+                spacing: 0,
+                align: CrossAxisAlignment::Stretch,
             }),
         }
     }
 
-    fn build_navbar(&self) -> Node<FileMsg> {
-        let path_str = self.current_path.display().to_string();
-        let display_path = if path_str.len() > 50 {
-            let start = path_str.len() - 47;
-            format!("...{}", &path_str[start..])
+    fn row(entry: &Entry) -> Vec<Node<FileMsg>> {
+        let icon = if entry.folder {
+            Icon::Folder
         } else {
-            path_str
+            Icon::File
         };
-
-        Node::Background {
-            surface: Surface::Chrome,
-            child: Box::new(Node::Padding {
-                padding: EdgeInsets::all(space::XS),
-                child: Box::new(Node::HStack {
-                    spacing: space::XS,
-                    align: CrossAxisAlignment::Center,
-                    children: vec![
-                        Node::Button {
-                            label: String::from(" < "),
-                            on_press: Some(FileMsg::NavBack),
-                            style: ButtonStyle::Secondary,
-                            enabled: !self.history_back.is_empty(),
-                        },
-                        Node::Button {
-                            label: String::from(" > "),
-                            on_press: Some(FileMsg::NavForward),
-                            style: ButtonStyle::Secondary,
-                            enabled: !self.history_forward.is_empty(),
-                        },
-                        Node::Button {
-                            label: String::from(" ^ "),
-                            on_press: Some(FileMsg::NavUp),
-                            style: ButtonStyle::Secondary,
-                            enabled: true,
-                        },
-                        Node::Spacer {
-                            size: Length::Px(space::SM),
-                        },
-                        Text::new(display_path).tone(Tone::Normal).into(),
-                    ],
-                }),
-            }),
-        }
-    }
-
-    fn build_file_row(&self, entry: &FileEntry) -> Vec<Node<FileMsg>> {
-        let name_text = if entry.is_directory {
-            format!("[D] {}", entry.name)
-        } else {
-            format!("    {}", entry.name)
+        let name = Node::HStack {
+            children: vec![
+                Node::Icon {
+                    icon,
+                    role: TextRole::Body,
+                    tone: Tone::Secondary,
+                },
+                Text::new(entry.name.clone()).into(),
+            ],
+            spacing: space::SM,
+            align: CrossAxisAlignment::Center,
         };
-
-        let size_text = if entry.is_directory {
-            String::from("--")
-        } else {
-            format_size(entry.size)
+        let size = match entry.folder {
+            true => String::new(),
+            false => file_size(entry.size),
         };
-
         vec![
-            Text::new(name_text).tone(Tone::Normal).into(),
-            Text::new(size_text)
+            name,
+            Text::new(size)
                 .tone(Tone::Secondary)
                 .align(TextAlignment::End)
                 .into(),
         ]
     }
 
-    fn build_content(&self) -> Node<FileMsg> {
-        let content_node = match self.load_state {
-            LoadState::Error => Node::Background {
-                surface: Surface::Base,
-                child: Box::new(Node::Padding {
-                    padding: EdgeInsets::all(space::LG),
-                    child: Box::new(
-                        Text::new(self.error_msg.clone())
-                            .tone(Tone::Danger)
-                            .align(TextAlignment::Center)
-                            .into(),
-                    ),
-                }),
-            },
-            LoadState::Empty => Node::Background {
-                surface: Surface::Base,
-                child: Box::new(Node::Padding {
-                    padding: EdgeInsets::all(space::LG),
-                    child: Box::new(
-                        Text::new(String::from("Empty directory"))
-                            .tone(Tone::Secondary)
-                            .align(TextAlignment::Center)
-                            .into(),
-                    ),
-                }),
-            },
-            LoadState::Ok => {
-                let rows: Vec<Vec<Node<FileMsg>>> = self
-                    .entries
-                    .iter()
-                    .map(|e| self.build_file_row(e))
-                    .collect();
-                Node::Table {
-                    columns: vec![
-                        TableColumn {
-                            label: String::from("Name"),
-                            width: TableColumnWidth::Flex(3),
-                            sort_indicator: None,
-                        },
-                        TableColumn {
-                            label: String::from("Size"),
-                            width: TableColumnWidth::Fixed(80),
-                            sort_indicator: None,
-                        },
-                    ],
-                    rows,
-                    row_height: ITEM_HEIGHT,
-                    selected: self.selected,
-                    on_select: Some(FileMsg::FileSelect),
-                    on_header_click: None,
-                    on_context_menu: None,
-                    shows: {
-                        let mut directory = DefaultHasher::new();
-                        self.current_path.hash(&mut directory);
-                        directory.finish()
-                    },
-                }
+    fn content(&self) -> Node<FileMsg> {
+        let entries = match &self.entries {
+            Err(kind) => return self.unreadable(*kind),
+            Ok(entries) if entries.is_empty() => {
+                return EmptyState::new(Icon::FolderOpen, "This folder is empty")
+                    .body("Files and folders you put in it will show up here.")
+                    .into();
             }
+            Ok(entries) => entries,
         };
-
-        Node::Expand {
-            weight: 1,
-            child: Box::new(content_node),
+        let mut shows = DefaultHasher::new();
+        self.path.hash(&mut shows);
+        Node::Table {
+            columns: vec![
+                TableColumn {
+                    label: "Name".into(),
+                    width: TableColumnWidth::Flex(1),
+                    sort_indicator: None,
+                },
+                TableColumn {
+                    label: "Size".into(),
+                    width: TableColumnWidth::Fixed(SIZE_WIDTH),
+                    sort_indicator: None,
+                },
+            ],
+            rows: entries.iter().map(Self::row).collect(),
+            row_height: ROW_HEIGHT,
+            selected: self.selected,
+            on_select: Some(FileMsg::Select),
+            on_activate: Some(FileMsg::Open),
+            on_header_click: None,
+            on_context_menu: None,
+            shows: shows.finish(),
         }
     }
 
-    fn build_status_bar(&self) -> Node<FileMsg> {
-        let text = match self.load_state {
-            LoadState::Error => String::from("Error"),
-            LoadState::Empty => String::from("0 items"),
-            LoadState::Ok => {
-                let dir_count = self.entries.iter().filter(|e| e.is_directory).count();
-                let file_count = self.entries.len() - dir_count;
-                let base = if dir_count > 0 && file_count > 0 {
-                    format!("{} folders, {} files", dir_count, file_count)
-                } else if dir_count > 0 {
-                    format!("{} folders", dir_count)
-                } else {
-                    format!("{} files", file_count)
-                };
-                if let Some(sel) = self.selected {
-                    if sel < self.entries.len() {
-                        let e = &self.entries[sel];
-                        if e.is_directory {
-                            format!("{} | \"{}\"", base, e.name)
-                        } else {
-                            format!("{} | \"{}\" ({})", base, e.name, format_size(e.size))
-                        }
-                    } else {
-                        base
-                    }
-                } else {
-                    base
-                }
-            }
+    /// Why the folder could not be listed, and the way out.
+    fn unreadable(&self, kind: ErrorKind) -> Node<FileMsg> {
+        let name = self.folder_name();
+        let (title, body) = match kind {
+            ErrorKind::PermissionDenied => (
+                "You can't open this folder",
+                format!("{name} belongs to someone else. Ask them to share it with you."),
+            ),
+            ErrorKind::NotFound => (
+                "This folder isn't there",
+                match self.back.is_empty() {
+                    false => format!(
+                        "{name} was moved or deleted. Go back, or choose a place on the left."
+                    ),
+                    true => format!("{name} was moved or deleted. Choose a place on the left."),
+                },
+            ),
+            _ => (
+                "This folder couldn't be read",
+                format!("Something went wrong reading {name}. Try again."),
+            ),
         };
+        let action = match (kind, self.back.is_empty()) {
+            (ErrorKind::PermissionDenied | ErrorKind::NotFound, false) => {
+                Button::new("Go back").on_press(FileMsg::Back)
+            }
+            (ErrorKind::PermissionDenied | ErrorKind::NotFound, true) => {
+                Button::new("Open Computer").on_press(FileMsg::Root)
+            }
+            _ => Button::new("Try again").on_press(FileMsg::Reload),
+        };
+        EmptyState::new(Icon::CircleAlert, title)
+            .body(body)
+            .action(action)
+            .into()
+    }
 
+    fn status(&self) -> String {
+        let Ok(entries) = &self.entries else {
+            return String::new();
+        };
+        if let Some(entry) = self.selected.and_then(|i| entries.get(i)) {
+            return match entry.folder {
+                true => format!("“{}” selected", entry.name),
+                false => format!("“{}” selected, {}", entry.name, file_size(entry.size)),
+            };
+        }
+        let folders = entries.iter().filter(|e| e.folder).count();
+        let files = entries.len() - folders;
+        let count = |n: usize, one: &str, many: &str| match n {
+            1 => format!("1 {one}"),
+            n => format!("{n} {many}"),
+        };
+        match (folders, files) {
+            (0, _) => count(files, "file", "files"),
+            (_, 0) => count(folders, "folder", "folders"),
+            _ => format!(
+                "{} and {}",
+                count(folders, "folder", "folders"),
+                count(files, "file", "files")
+            ),
+        }
+    }
+
+    fn status_bar(&self) -> Node<FileMsg> {
         Node::Background {
             surface: Surface::Chrome,
             child: Box::new(Node::Padding {
                 padding: EdgeInsets::symmetric(space::SM, space::XS),
-                child: Box::new(Text::new(text).tone(Tone::Secondary).into()),
+                child: Box::new(
+                    Text::new(self.status())
+                        .role(TextRole::Caption)
+                        .tone(Tone::Secondary)
+                        .into(),
+                ),
             }),
         }
     }
 }
 
-fn format_size(size: u32) -> String {
-    if size < 1024 {
-        format!("{} B", size)
-    } else if size < 1024 * 1024 {
-        format!("{} K", size / 1024)
-    } else {
-        format!("{:.1} M", size as f64 / (1024.0 * 1024.0))
+/// A file's size in binary units, as the file manager lists it.
+fn file_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+    if bytes < 1024 {
+        return match bytes {
+            1 => "1 byte".into(),
+            n => format!("{n} bytes"),
+        };
     }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1023.95 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 impl App for FileManagerApp {
     type Message = FileMsg;
 
     fn view(&self) -> Node<FileMsg> {
-        Node::HStack {
+        let main = Node::VStack {
+            children: vec![
+                self.toolbar(),
+                self.location(),
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(self.content()),
+                },
+                Node::Divider,
+                self.status_bar(),
+            ],
             spacing: 0,
             align: CrossAxisAlignment::Stretch,
+        };
+        Node::HStack {
             children: vec![
-                self.build_sidebar(),
+                self.sidebar(),
                 Node::Divider,
                 Node::Expand {
                     weight: 1,
-                    child: Box::new(Node::VStack {
-                        spacing: 0,
-                        align: CrossAxisAlignment::Stretch,
-                        children: vec![
-                            self.build_navbar(),
-                            Node::Divider,
-                            self.build_content(),
-                            Node::Divider,
-                            self.build_status_bar(),
-                        ],
-                    }),
+                    child: Box::new(main),
                 },
             ],
+            spacing: 0,
+            align: CrossAxisAlignment::Stretch,
         }
     }
 
     fn update(&mut self, msg: FileMsg) -> Action {
         match msg {
-            FileMsg::NavBack => {
-                self.navigate_back();
-                Action::Rebuild
-            }
-            FileMsg::NavForward => {
-                self.navigate_forward();
-                Action::Rebuild
-            }
-            FileMsg::NavUp => {
-                self.navigate_up();
-                Action::Rebuild
-            }
-            FileMsg::FileSelect(idx) => {
-                // Re-selecting the selected row is the double-click gesture.
-                if self.selected == Some(idx) {
-                    self.open_selected();
-                } else {
-                    self.selected = Some(idx);
-                }
-                Action::Rebuild
-            }
-            FileMsg::Bookmark(idx) => {
-                if idx < BOOKMARKS.len() {
-                    self.navigate_to(PathBuf::from(BOOKMARKS[idx].path));
-                }
-                Action::Rebuild
-            }
-        }
-    }
-
-    fn on_key(&mut self, key: Key, _modifiers: Modifiers) -> Action {
-        match key {
-            Key::Named(NamedKey::Enter) => {
+            FileMsg::Back => self.go_back(),
+            FileMsg::Forward => self.go_forward(),
+            FileMsg::Up => self.go_up(),
+            FileMsg::Reload => self.reload(),
+            FileMsg::Root => self.go(PathBuf::from("/")),
+            FileMsg::Select(i) => self.selected = Some(i),
+            FileMsg::Open(i) => {
+                self.selected = Some(i);
                 self.open_selected();
-                Action::Rebuild
             }
-            Key::Named(NamedKey::Backspace) => {
-                self.navigate_up();
-                Action::Rebuild
+            FileMsg::Place(i) => {
+                if let Some(place) = PLACES.get(i) {
+                    self.go(place.path());
+                }
             }
-            _ => Action::None,
         }
+        Action::Rebuild
     }
 
-    fn title(&self) -> &str {
-        "File Manager"
+    fn on_key(&mut self, key: Key, modifiers: Modifiers) -> Action {
+        match (key, modifiers.alt) {
+            (Key::Named(NamedKey::Enter), _) => self.open_selected(),
+            (Key::Named(NamedKey::Backspace), _) | (Key::Named(NamedKey::Up), true) => self.go_up(),
+            (Key::Named(NamedKey::Left), true) => self.go_back(),
+            (Key::Named(NamedKey::Right), true) => self.go_forward(),
+            _ => return Action::None,
+        }
+        Action::Rebuild
+    }
+
+    fn title(&self) -> String {
+        document_title(&self.folder_name(), NAME)
     }
 
     fn app_id(&self) -> &str {
@@ -535,11 +469,10 @@ impl App for FileManagerApp {
     }
 
     fn window(&self) -> WindowSpec {
-        WindowSpec::new(640, 392)
+        WindowSpec::new(720, 480)
     }
 }
 
 pub fn file_manager_main() -> ! {
-    let app = FileManagerApp::new();
-    slopos_appkit::run_app(app)
+    slopos_appkit::run_app(FileManagerApp::new())
 }

@@ -326,6 +326,7 @@ impl SimStorage {
                 let mut inquiry = vec![0u8; 36];
                 inquiry[1] = 0x80;
                 inquiry[4] = 31;
+                inquiry[8..32].copy_from_slice(b"QEMU    QEMU HARDDISK   ");
                 self.data_in(inquiry);
             }
             0x25 => {

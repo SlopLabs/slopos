@@ -19,3 +19,6 @@ fixtures = []
 [dependencies]
 slopos-boot-core = { workspace = true }
 slopos-remote-core = { workspace = true }
+
+[dev-dependencies]
+slopos-theme-core = { workspace = true }

@@ -48,15 +48,15 @@ impl IoQueue {
 
 /// The command for `req`, its data described by PRPs over the slot's pages.
 /// A transfer of more than two pages lists the rest in the slot's own page.
-pub fn build(req: &Request, pages: &RequestPages) -> Option<Command> {
+pub fn build(req: &Request, pages: &RequestPages) -> Result<Command, BlkError> {
     let shift = req.ns.block_shift;
     let lba = req.offset >> shift;
-    let blocks = u16::try_from(req.len >> shift).ok()?;
-    if req.op != Op::Flush && (blocks == 0 || req.len.div_ceil(PAGE_SIZE) > pages.data.len()) {
-        return None;
-    }
+    let blocks = u16::try_from(req.len >> shift).map_err(|_| BlkError::BadRequest)?;
+    let fits = blocks != 0 && req.len.div_ceil(PAGE_SIZE) <= pages.data.len();
     let cmd = match req.op {
-        Op::Flush => return Some(Command::flush(req.ns.nsid)),
+        Op::Flush => return Ok(Command::flush(req.ns.nsid)),
+        Op::Identify => return Err(BlkError::Unsupported),
+        Op::Read | Op::Write if !fits => return Err(BlkError::BadRequest),
         Op::Read => Command::read(req.ns.nsid, lba, blocks),
         Op::Write => Command::write(req.ns.nsid, lba, blocks),
     };
@@ -68,11 +68,11 @@ pub fn build(req: &Request, pages: &RequestPages) -> Option<Command> {
     let phys = &phys[..data.len()];
     for (i, entry) in command::prp_list(phys).iter().enumerate() {
         if !pages.aux.write_at(i * 8, entry) {
-            return None;
+            return Err(BlkError::BadRequest);
         }
     }
     let (prp1, prp2) = command::prp_pair(phys, pages.aux.phys_u64());
-    Some(cmd.with_prp(prp1, prp2))
+    Ok(cmd.with_prp(prp1, prp2))
 }
 
 /// What a completion's status means for its request.
@@ -91,7 +91,7 @@ impl QueueOps for IoQueue {
         if self.ring.full() {
             return Err(BlkError::Busy);
         }
-        let cmd = build(req, pages).ok_or(BlkError::BadRequest)?;
+        let cmd = build(req, pages)?;
         let cid = self.allocate_cid().ok_or(BlkError::Busy)?;
         if !self.ring.push(&cmd.with_cid(cid)) {
             self.free_cid(cid);

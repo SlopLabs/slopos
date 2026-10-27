@@ -17,7 +17,7 @@ use slopos_boot_core::layout::{
 use slopos_boot_core::{Guid, bli};
 use slopos_installer_core::{
     self as view, Choices, DEFAULT_CMDLINE, DEFAULT_REMOTE, Event, FIRST_PERSON, Failure,
-    FirstPerson, Issue, Mode, Opened, Person, Planned, Proposal, STEPS, Setup, Summary,
+    FirstPerson, Issue, Mode, Opened, Person, Planned, Proposal, Refusal, STEPS, Setup, Summary,
     Table as TableView, human,
 };
 
@@ -26,8 +26,8 @@ use super::disk::{self, Disk};
 use super::medium::Medium;
 use super::root;
 use crate::boot_disk::{
-    ListedOption, boot_order, listed_options, not_installable, open_fat, partition_node,
-    whole_disks,
+    ListedOption, boot_order, listed_options, model_of as boot_disk_model, not_installable,
+    open_fat, partition_node, whole_disks,
 };
 
 const CHECKING_THE_ROOT: u32 = 8;
@@ -143,7 +143,7 @@ impl OpenDisk {
 
 pub enum State {
     /// Never offered, and why.
-    Refused(&'static str),
+    Refused(Refusal),
     /// Offered, but it could not be read.
     Unreadable(String),
     Listed(Disk),
@@ -153,6 +153,7 @@ pub enum State {
 
 pub struct Found {
     pub node: String,
+    pub model: Option<String>,
     pub state: State,
 }
 
@@ -165,16 +166,18 @@ impl Found {
                 Err(why) => State::Unreadable(why),
             },
         };
-        Found { node, state }
+        Found {
+            model: boot_disk_model(&node),
+            node,
+            state,
+        }
     }
 
     /// The disk, unless it is never offered or could not be read.
     pub fn disk(&self) -> Result<&Disk, Issue> {
         let node = &self.node;
         match &self.state {
-            State::Refused(why) => Err(Issue::Disk(format!(
-                "{node} is {why}; nothing is installed onto it"
-            ))),
+            State::Refused(why) => Err(Issue::Disk(format!("{node}: {}", why.words()))),
             State::Unreadable(why) => Err(Issue::Disk(why.clone())),
             State::Listed(disk) => Ok(disk),
             State::Opened(open) => Ok(&open.disk),
@@ -271,6 +274,11 @@ impl System {
             })
     }
 
+    pub fn model(&self, node: &str) -> Option<&str> {
+        let found = self.disks.iter().find(|found| found.node == node)?;
+        found.model.as_deref()
+    }
+
     pub fn opened(&self, node: &str) -> Result<&OpenDisk, Issue> {
         let found = &self.disks[self.index(node)?];
         match &found.state {
@@ -320,7 +328,7 @@ impl System {
         } else {
             let table = disk.table.as_ref().ok_or_else(|| Issue::OnlyErase {
                 node: node.clone(),
-                holds: disk.contents.holding(),
+                contents: disk.contents.clone(),
             })?;
             (table.header.grown(), table.array.clone())
         };
@@ -485,8 +493,9 @@ impl System {
             .iter()
             .map(|found| view::Disk {
                 node: found.node.clone(),
+                model: found.model.clone(),
                 state: match &found.state {
-                    State::Refused(why) => view::DiskState::Refused((*why).to_owned()),
+                    State::Refused(why) => view::DiskState::Refused(*why),
                     State::Unreadable(why) => view::DiskState::Unreadable(why.clone()),
                     State::Listed(disk) => view::DiskState::Listed(listing(disk, None)),
                     State::Opened(open) => {
@@ -543,11 +552,9 @@ impl System {
             Some((_, fit)) => fit.clone(),
             None if open.disk.table.is_none() => Err(Issue::OnlyErase {
                 node: node.clone(),
-                holds: open.disk.contents.holding(),
+                contents: open.disk.contents.clone(),
             }),
-            None => Err(Issue::Disk(format!(
-                "{node} has no partition the root could go on"
-            ))),
+            None => Err(Issue::NoRoot(node.clone())),
         };
         let reinstall = open
             .parts
@@ -668,7 +675,10 @@ impl System {
         choices: &Choices,
         reviewed: &Settled,
     ) -> Result<Summary, String> {
-        let unwritten = |issue: Issue| format!("{issue}; nothing was written");
+        let unwritten = |issue: Issue| {
+            let said = issue.to_string();
+            format!("{}; nothing was written", said.trim_end_matches('.'))
+        };
         let open = self
             .index(&choices.disk)
             .and_then(|index| self.reopen(index))

@@ -20,6 +20,7 @@ pub mod bli;
 pub mod crash;
 pub mod crc32;
 pub mod device_path;
+pub mod disk_id;
 pub mod gpt;
 pub mod guid;
 pub mod install;

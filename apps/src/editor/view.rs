@@ -21,7 +21,7 @@ use slopos_editor_core::search::{self, SearchOptions};
 use super::commands::{Command, MENUS, MenuEntry};
 use super::prompt::Prompt;
 use super::syntax;
-use super::{Dialog, EditorApp, EditorMsg, Focus};
+use super::{Dialog, EditorApp, EditorMsg, Focus, Overwrite, said};
 
 pub const DEFAULT_WIDTH: i32 = 1180;
 pub const DEFAULT_HEIGHT: i32 = 760;
@@ -655,13 +655,15 @@ fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
 fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
     match dialog {
         Dialog::About => Node::Dialog {
-            title: String::from("Sloped"),
+            title: String::from(said::NAME),
             icon: None,
             content: Box::new(
-                Text::new(String::from(
-                    "The SlopOS editor.\n\nTabs, a file tree, syntax highlighting, \
-                     find and replace, a command palette — and every edit undoable.\n\n\
-                     Ctrl+Shift+P opens the command palette; every command lists its chord.",
+                Text::new(format!(
+                    "The SlopOS text editor: tabs, a file tree, syntax highlighting, \
+                     find and replace, a command palette, and every edit undoable.\n\n\
+                     {} ({}) lists every command with its keys.",
+                    said::choose(Command::CommandPalette),
+                    Command::CommandPalette.shortcut().unwrap_or_default()
                 ))
                 .wrap()
                 .into(),
@@ -677,16 +679,16 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
                 .map(|d| d.title().to_string())
                 .unwrap_or_default();
             Node::Dialog {
-                title: String::from("Unsaved changes"),
+                title: format!("Save the changes to {name}?"),
                 icon: None,
                 content: Box::new(
-                    Text::new(format!("{name} has changes that have not been saved."))
+                    Text::new("If you close it without saving, the changes are lost.")
                         .wrap()
                         .into(),
                 ),
                 footer: ButtonRow::new()
                     .aside(
-                        Button::new("Discard")
+                        Button::new("Don't save")
                             .on_press(EditorMsg::Dialog(1))
                             .destructive(),
                     )
@@ -696,35 +698,33 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
                 anchor: None,
             }
         }
-        Dialog::ConfirmOverwrite { detail, .. } => Node::Dialog {
-            title: String::from("Overwrite?"),
-            icon: None,
-            content: Box::new(
-                Text::new(format!(
-                    "{detail}\n\nSaving replaces it with this tab's contents."
-                ))
-                .wrap()
-                .into(),
-            ),
-            footer: ButtonRow::new()
-                .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(1)))
-                .destructive(Button::new("Overwrite").on_press(EditorMsg::Dialog(0))),
-            on_dismiss: Some(EditorMsg::Dialog(1)),
-            anchor: None,
-        },
+        Dialog::ConfirmOverwrite { path, found, .. } => {
+            let (title, body) = said::overwrite(path, *found);
+            let cancel = Button::new("Cancel").on_press(EditorMsg::Dialog(1));
+            let save = |label| Button::new(label).on_press(EditorMsg::Dialog(0));
+            Node::Dialog {
+                title,
+                icon: None,
+                content: Box::new(Text::new(body).wrap().into()),
+                footer: match found {
+                    Overwrite::Gone => ButtonRow::new().cancel(cancel).confirm(save("Save")),
+                    _ => ButtonRow::new().cancel(cancel).destructive(save("Replace")),
+                },
+                on_dismiss: Some(EditorMsg::Dialog(1)),
+                anchor: None,
+            }
+        }
         Dialog::ConfirmQuit => Node::Dialog {
-            title: String::from("Unsaved changes"),
+            title: String::from("Save your changes before quitting?"),
             icon: None,
             content: Box::new(
-                Text::new(String::from(
-                    "Some buffers have changes that have not been saved.",
-                ))
-                .wrap()
-                .into(),
+                Text::new("Some files have changes that aren't saved. If you quit without saving, they're lost.")
+                    .wrap()
+                    .into(),
             ),
             footer: ButtonRow::new()
                 .aside(
-                    Button::new("Quit anyway")
+                    Button::new("Quit without saving")
                         .on_press(EditorMsg::Dialog(1))
                         .destructive(),
                 )

@@ -1,4 +1,4 @@
-//! Sloped — the SlopOS editor.
+//! Editor — the SlopOS text editor.
 //!
 //! A tab per open file, a file tree beside them, a menu bar above and a status
 //! bar below: the shape every editor has had since the nineties, drawn with
@@ -15,6 +15,7 @@
 mod commands;
 mod files;
 mod prompt;
+pub mod said;
 mod syntax;
 mod view;
 
@@ -67,9 +68,20 @@ pub enum Dialog {
     ConfirmOverwrite {
         index: usize,
         path: String,
-        detail: String,
+        found: Overwrite,
     },
     About,
+}
+
+/// What a save would write over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overwrite {
+    /// The file changed on disk since the tab read it.
+    Changed,
+    /// The file the tab read is gone.
+    Gone,
+    /// Another file has the name a Save as chose.
+    Exists,
 }
 
 #[derive(Clone, Debug)]
@@ -423,7 +435,7 @@ impl EditorApp {
 
     fn new_document(&mut self) {
         self.untitled_count += 1;
-        let title = format!("untitled-{}", self.untitled_count);
+        let title = format!("Untitled {}", self.untitled_count);
         self.docs.push(Document::empty(title));
         self.active = self.docs.len() - 1;
         self.focus = Focus::Editor;
@@ -468,9 +480,7 @@ impl EditorApp {
                     self.status = format!("Opened {path}");
                     self.reveal_in_tree(path);
                 }
-                Err(_) => {
-                    self.status = format!("{path}: too many lines to open");
-                }
+                Err(_) => self.status = said::too_many_lines(path),
             },
             Err(message) => self.status = message,
         }
@@ -479,7 +489,7 @@ impl EditorApp {
 
     fn save_document(&mut self, index: usize, path: Option<String>) {
         let Some(doc) = self.docs.get(index) else {
-            self.status = String::from("Nothing to save: that tab is gone");
+            self.status = said::TAB_GONE.into();
             return;
         };
         let target = match path.or_else(|| doc.path().map(str::to_string)) {
@@ -504,28 +514,26 @@ impl EditorApp {
             .enumerate()
             .any(|(i, d)| i != index && d.path().is_some_and(|p| p == target))
         {
-            self.status = format!("{target} is already open in another tab");
+            self.status = said::open_elsewhere(&target);
             return;
         }
         // Writing over what this tab did not read takes somebody's work with
         // it.
         let on_disk = files::disk_stamp(&target);
-        let detail = if doc.path() == Some(target.as_str()) {
+        let found = if doc.path() == Some(target.as_str()) {
             match (doc.disk_stamp(), on_disk) {
-                (Some(known), Some(now)) if known != now => {
-                    Some(format!("{target} has changed on disk since it was opened."))
-                }
-                (Some(_), None) => Some(format!("{target} is no longer there.")),
+                (Some(known), Some(now)) if known != now => Some(Overwrite::Changed),
+                (Some(_), None) => Some(Overwrite::Gone),
                 _ => None,
             }
         } else {
-            on_disk.map(|_| format!("{target} already exists."))
+            on_disk.map(|_| Overwrite::Exists)
         };
-        if let Some(detail) = detail {
+        if let Some(found) = found {
             self.dialog = Some(Dialog::ConfirmOverwrite {
                 index,
                 path: target,
-                detail,
+                found,
             });
             return;
         }
@@ -535,7 +543,7 @@ impl EditorApp {
     /// The write itself, past every question `save_document` asks.
     fn write_document(&mut self, index: usize, target: String) {
         let Some(doc) = self.docs.get(index) else {
-            self.status = String::from("Nothing to save: that tab is gone");
+            self.status = said::TAB_GONE.into();
             return;
         };
         let text = doc.text();
@@ -612,7 +620,7 @@ impl EditorApp {
                 core::cmp::Ordering::Equal => {
                     self.prompt = Prompt::None;
                     self.focus = Focus::Editor;
-                    self.status = String::from("Save As cancelled: that tab was closed");
+                    self.status = said::TAB_GONE.into();
                 }
                 core::cmp::Ordering::Greater => *index -= 1,
                 core::cmp::Ordering::Less => {}
@@ -658,7 +666,7 @@ impl EditorApp {
                     }
                 };
                 if !complete {
-                    self.status = tree_full_message();
+                    self.status = said::tree_full(slopos_editor_core::filetree::MAX_NODES);
                 }
             }
         }
@@ -679,8 +687,7 @@ impl EditorApp {
             }
             for index in unread {
                 if read >= MAX_DIRS {
-                    self.status =
-                        format!("Indexed {MAX_DIRS} directories; the finder is offering what fits");
+                    self.status = said::index_full(MAX_DIRS);
                     return;
                 }
                 let Some(path) = self.tree.node(index).map(|n| n.path.clone()) else {
@@ -693,7 +700,7 @@ impl EditorApp {
                     Err(_) => self.tree.populate(index, Vec::new()),
                 };
                 if !complete {
-                    self.status = tree_full_message();
+                    self.status = said::tree_full(slopos_editor_core::filetree::MAX_NODES);
                     return;
                 }
             }
@@ -742,7 +749,7 @@ impl EditorApp {
 
     fn open_folder(&mut self, path: &str) {
         if !files::is_dir(path) {
-            self.status = format!("{path} is not a folder");
+            self.status = said::not_a_folder(path);
             return;
         }
         self.tree = FileTree::new(path);
@@ -830,7 +837,7 @@ impl EditorApp {
 
     fn insert_text(&mut self, text: &str) {
         if !self.doc_mut().insert_text(text) && !text.is_empty() {
-            self.status = String::from("Refused: that would take the file past its line limit");
+            self.status = said::line_limit();
         }
         self.sync_viewport();
     }
@@ -957,7 +964,7 @@ impl EditorApp {
                 self.sync_viewport();
                 self.refresh_find();
             }
-            None => self.status = format!("No match for \"{query}\""),
+            None => self.status = format!("No match for “{query}”"),
         }
     }
 
@@ -1110,7 +1117,10 @@ impl EditorApp {
                         self.doc_mut().goto_line(line);
                         self.sync_viewport();
                     }
-                    _ => self.status = format!("Not a line number: {}", input.text),
+                    _ => {
+                        let lines = self.doc().buffer.line_count();
+                        self.status = said::not_a_line(input.text.trim(), lines);
+                    }
                 }
                 self.focus = Focus::Editor;
             }
@@ -1371,7 +1381,7 @@ impl EditorApp {
                     self.reveal_in_tree(&path);
                     self.sync_viewport();
                 } else {
-                    self.status = String::from("This buffer has no file yet");
+                    self.status = said::NOT_SAVED_YET.into();
                 }
             }
             Command::KeyboardShortcuts => {
@@ -1379,7 +1389,7 @@ impl EditorApp {
                 if files::is_file(&path) {
                     self.open_path(&path);
                 } else {
-                    self.status = format!("{path} is not installed");
+                    self.status = said::no_manual();
                 }
             }
             Command::About => self.dialog = Some(Dialog::About),
@@ -1693,7 +1703,13 @@ impl EditorApp {
                     if !self.any_modified() {
                         std::process::exit(0);
                     }
-                    self.status = String::from("Some buffers have no file yet — save them first");
+                    let unsaved_named = self
+                        .docs
+                        .iter()
+                        .any(|d| d.is_modified() && d.path().is_some());
+                    if !unsaved_named && self.dialog.is_none() {
+                        self.status = said::unnamed_left();
+                    }
                 }
                 1 => std::process::exit(0),
                 _ => {}
@@ -1903,8 +1919,8 @@ impl App for EditorApp {
         Action::Rebuild
     }
 
-    fn title(&self) -> &str {
-        "Sloped"
+    fn title(&self) -> String {
+        slopos_appkit::document_title(self.doc().title(), said::NAME)
     }
 
     fn app_id(&self) -> &str {
@@ -2019,14 +2035,6 @@ struct FindStamp {
     anchor: slopos_editor_core::buffer::Position,
     query: String,
     options: SearchOptions,
-}
-
-/// Said when a directory read stopped at [`filetree::MAX_NODES`].
-fn tree_full_message() -> String {
-    format!(
-        "Folder has more than {} entries; the tree is showing what fits",
-        slopos_editor_core::filetree::MAX_NODES
-    )
 }
 
 /// A chord's key with its letter folded to lower case.

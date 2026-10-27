@@ -17,4 +17,5 @@ doctest = false
 slopos-abi = { workspace = true }
 slopos-accounts-core = { workspace = true }
 slopos-remote-core = { workspace = true }
+slopos-theme-core = { workspace = true }
 slopos-tls-core = { workspace = true }

@@ -295,7 +295,7 @@ impl Renderer {
                 continue;
             }
             let sig_hovered = w.task_id == signal_hovered_task;
-            let title = title_to_str(&w.title);
+            let title = w.title_str();
             let outline = frame::outline(&w);
             for rect in content_vis[k].rects() {
                 buf.set_scissor(Some(*rect));
@@ -805,14 +805,6 @@ fn intersect_rect(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
     } else {
         None
     }
-}
-
-fn title_to_str(title: &[u8; 32]) -> &str {
-    let len = title.iter().position(|&b| b == 0).unwrap_or(32);
-    if len == 0 {
-        return "";
-    }
-    core::str::from_utf8(&title[..len]).unwrap_or("<invalid>")
 }
 
 fn cursor_bounds(mx: i32, my: i32, cursor_shape: u8) -> DamageRect {

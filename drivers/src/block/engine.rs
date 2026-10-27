@@ -46,6 +46,15 @@ pub enum Op {
     Read,
     Write,
     Flush,
+    /// virtio-blk's `GET_ID`: the device writes its ID into the first page.
+    Identify,
+}
+
+impl Op {
+    /// Waits behind a write a timeout abandoned.
+    fn fenced(self) -> bool {
+        matches!(self, Op::Write | Op::Flush)
+    }
 }
 
 /// What one queue's requests address: a namespace and the logical block its
@@ -753,7 +762,7 @@ impl Engine {
             drop(state);
             return Err((BlkError::NotReady, pages));
         }
-        if req.op != Op::Read && state.owes_abandoned_write(Some(req.ns.nsid)) {
+        if req.op.fenced() && state.owes_abandoned_write(Some(req.ns.nsid)) {
             drop(state);
             return Err((BlkError::Busy, pages));
         }
@@ -978,7 +987,7 @@ impl Engine {
         drain: &mut dyn FnMut(&RequestPages) -> bool,
     ) -> Result<(), BlkError> {
         self.reap_quarantine();
-        if req.op != Op::Read {
+        if req.op.fenced() {
             self.await_abandoned_writes(req.ns.nsid)?;
         }
         let (idx, pages) = self.acquire_live_slot()?;
@@ -1259,6 +1268,25 @@ impl Engine {
             len: 0,
         };
         self.run(&req, &mut |_| true, &mut |_| true)
+    }
+
+    /// What the device calls `ns`, into `dst`; bytes it did not write stay
+    /// zero.
+    pub fn identify<const N: usize>(
+        &self,
+        ns: Namespace,
+        dst: &mut [u8; N],
+    ) -> Result<(), BlkError> {
+        const { assert!(N <= PAGE_SIZE) };
+        let req = Request {
+            op: Op::Identify,
+            ns,
+            offset: 0,
+            len: 1 << ns.block_shift,
+        };
+        self.run(&req, &mut |pages| pages.copy_in(0, &[0; N]), &mut |pages| {
+            pages.copy_out(0, dst)
+        })
     }
 }
 

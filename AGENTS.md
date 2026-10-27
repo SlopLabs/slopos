@@ -965,7 +965,15 @@ names a theme table, sizes its own text or gives a spacing or an inset a
 number, and appkit for constructing a colour; a
 file whose colours are its content, as the editor's syntax palette, is
 exempt from that one check by a line of `scripts/gates/ui-literals.txt`,
-which fails once the line matches nothing.
+which fails once the line matches nothing. `theme-core::words` is the voice
+where words are data: the glossary — computer, disk, installer, partition,
+restart, power off, administrator, log out, switch user, app and startup
+order, each beside what a screen never says in its place — and the shapes
+a label (`label`) and a sentence (`sentence`) take, neither naming a flag,
+three dots or a glossary word (`plain`). Each surface holds its words to
+them in a host test, beside the trade words it keeps to its details:
+`priv-core::words` for the policy, installer-core's copy tests for every
+page of every fixture.
 
 **Apps are built from components.** appkit's components
 (`appkit/src/components.rs`) — `Text` in a role and a tone, `Page`, `Section`,
@@ -977,10 +985,12 @@ one ring around the control, every control is at least 28 px across, Enter
 and Escape no control took go to the `ButtonRow` that ends the modal layer's
 `Page` or dialog (its confirming button, never a destructive one, and its
 back or cancel one; Escape dismisses a dialog without one) before the app's
-`on_key`, Left and Right move along a `ButtonRow`, a scroll view is a tab
-stop only while it scrolls and keeps its offset through a rebuild that shows
-the same (`Widget::kept_scroll`), the wheel goes to the innermost view that
-can move, and a dialog is modal for Tab, the pointer and tooltips
+`on_key`, Left and Right move along a `ButtonRow`, a list or a table
+leaves an Alt chord to the app, a table's chosen row opens on Enter or a
+second click (`on_activate`), a scroll view is a tab stop only while it
+scrolls and keeps its offset through a rebuild that shows the same
+(`Widget::kept_scroll`), the wheel goes to the innermost view that can
+move, and a dialog is modal for Tab, the pointer and tooltips
 (`Widget::is_modal`, `Widget::covers`, `EventResponse::Blocked`), giving
 focus back when it closes and scrolling its content when the window is too
 short for it. Icons are glyphs of Lucide
@@ -988,8 +998,12 @@ short for it. Icons are glyphs of Lucide
 holds every variant to a glyph of the shipped font, and drawn by the UI text
 renderer at a role's size. `App::window` is a `WindowSpec` — the size a
 window opens at, the least it lays out at and whether it resizes — which
-`run_app` sends the compositor. `appkit::audit` lays a tree out, paints it
-off screen and reports text cut by an edge on any side rather than an
+`run_app` sends the compositor; `App::title` is read again after every
+rebuild and sent when it changes, a window showing a document titled
+`document_title`'s `<document> — <App>`, and an app's name is its dock
+entry's, its About box's and its windows' alike, which `apps_test` holds.
+`appkit::audit` lays a tree out, paints it off screen and reports text cut
+by an edge on any side rather than an
 ellipsis (a viewport, `PaintContext::with_viewport`, cuts nothing short),
 siblings that overlap, a child outside its parent or text over text of its
 own layer, a centred or baseline row whose texts' painted baselines differ, a
@@ -1185,14 +1199,23 @@ under `just test-host`, is what the engine and a driver agree on: the
 machine and each opened disk as views, every choice on an opened disk
 proposed with the engine's defaults, the proposal — the disk before and
 after, an action per partition tagged erase, new, format, share, keep or
-reuse, the root's size range — its issues worded as the CLI says them, the
-events, the protocol's codec, and the `Wizard` whose pages, lists and words
-a window renders. `/bin/installer-ui`, in every base and refusing to start
-off the medium, is that window: an appkit app holding nothing, which asks
-privd for `installer --serve` on two pipes when the person presses *Install
-SlopOS*, reads the engine's frames on a thread of its own and refuses to
-close while it installs; `installer_ui_test` drives it with scripted engine
-frames through that reader. On a live boot — the medium's, onto a RAM root —
+reuse, the root's size range — its issues, each a fact and what to do
+instead, in the glossary's words for a window (`Issue::words`, with the
+sizes and nodes as its `detail`) and naming the flag that changes it for
+the CLI (`Display`), the events, the protocol's codec, and the `Wizard`
+whose pages, lists and words a window renders. A disk is named by the model
+its `/dev/disk/by-id` names give (`model_of`) and sized in decimal units, as
+its label is (`disk_size`), with its node in the caption, and a typed size
+is read in the units the box shows. Its copy tests hold every word each
+page of every fixture shows, and the CLI's issues, to `theme-core::words`.
+`/bin/installer-ui`, in every base and refusing to start off the medium, is
+that window, built of `Page`s, `ListRow`s, `PropertyList`s and `Notice`s
+with the engine's log under *Show details*: an appkit app holding nothing,
+which asks privd for `installer --serve` on two pipes when the person
+presses *Install SlopOS*, reads the engine's frames on a thread of its own
+and refuses to close while it installs; `installer_ui_test` drives it with
+scripted engine frames through that reader. On a live boot — the medium's,
+onto a RAM root —
 the boot's own desktop opens it with `--welcome`, whose first page asks
 whether to try SlopOS or install it, in place of its terminal; the base's
 *Install SlopOS* entry, `boot=medium`, starts it without, so it asks privd at
@@ -1343,7 +1366,31 @@ name; block nodes answer `BLKGETSIZE64`, `BLKGETSIZE`, `BLKSSZGET`,
 something first names the node by one — a listing, a lookup, a `LABEL=` or
 `UUID=` — and again only once a write claim that wrote is released, which no
 unprivileged task can cause; a probe the disk did not answer is retried after
-five seconds.
+five seconds. `/dev/disk/by-id` names a disk as systemd's
+`60-persistent-storage` rules and `usb_id` do, through `boot_core::disk_id`
+(host-tested under `just test-host`), each part cut at its first NUL and
+every byte that is no ASCII letter, digit, one of `#+-.:=@_` or part of a
+character systemd's `unichar_is_valid` takes written `_`, a `/` or `\x`
+udev keeps included: an NVMe namespace `nvme-<model>_<serial>_<nsid>` from
+Identify Controller, namespace 1 also `nvme-<model>_<serial>`, each part
+losing its trailing whitespace and keeping every other whitespace byte as
+an `_` of its own; a virtio disk `virtio-<serial>` from
+`VIRTIO_BLK_T_GET_ID`, which the engine carries as `Op::Identify`, a read no
+abandoned write fences; a USB LUN `usb-<vendor>_<product>_<serial>-0:<lun>`,
+its vendor and product INQUIRY's as Linux sanitises them, a blank one
+falling back to the iManufacturer or iProduct string decoded as Linux
+decodes it and cut at 63 bytes, then to the id in hex when that string is
+absent, unreadable or empty (`usb_core::storage::usb_id`), and the serial
+string as `usb_id` takes it (`usb_core::device::string::identity`), left out
+when there is none — the parts of both trimmed and each run of whitespace
+one `_`; and a partition its disk's names with `-part<N>`. A driver hands
+the id over on its `EngineDisk` (`identified`), whose partitions share it,
+and an NVMe or virtio disk with an empty part, or a name past 192 bytes,
+gets no link. A name two nodes share is the first's, every link reads
+`../../<node>`, and a `/dev/disk/by-id/` path is a mount source like the
+others. QEMU's test disks carry `serial=` values, so
+`test_block_by_id_names` and `test_block_by_id_partition_names` hold the
+names on NVMe, virtio and USB.
 
 **NVMe is the disk QEMU attaches.** `drivers/src/nvme` runs an admin queue,
 one interrupt-driven I/O queue pair every namespace shares, and a polled pair
@@ -2427,12 +2474,13 @@ wants to …" as a verb phrase in lower case, `detail` is a sentence of what
 follows from allowing it, `verb` names the allowing button (`Allow` when
 none) and `destructive` fills it with the danger tone, all held by
 `slopos_priv_core::words` to naming no capability, none of the policy's own
-words (requester, mechanism, slot, base, uid…) or those the glossary
-replaces, no flag and no `...`, and a verb one of `words::VERBS`, none of
-which says what another control of the dialog says or reads as refusing;
-the base's policy is held to them as it parses and an extension's when it
-goes in, so one installed before the words tighten still activates. What
-privd answers is a sentence to the person who asked (`consent::Refusal`,
+words (requester, mechanism, slot, base, uid…) or those
+`theme-core::words`' glossary replaces, no flag and no `...`, and a verb
+one of `words::VERBS`, none of which says what another control of the
+dialog says or reads as refusing; the base's policy is held to them as it
+parses and an extension's when it goes in, so one installed before the
+words tighten still activates. What privd answers is a sentence to the
+person who asked (`consent::Refusal`,
 `policy::Refused`, `consent::WRONG_PASSWORD`, `words::privd`), which a
 requester prints after its own name; the detail a developer needs goes to
 privd's log beside it.

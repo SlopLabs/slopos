@@ -5,6 +5,7 @@
 use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use slopos_boot_core::disk_id::DiskId;
 use slopos_fs::blockdev::BlockDevice;
 use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::mm::AllocError;
@@ -32,6 +33,9 @@ const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
 /// Valid only once `VIRTIO_BLK_F_FLUSH` has been negotiated.
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
+/// The device writes its ID string: NUL-padded, unterminated at full length.
+const VIRTIO_BLK_T_GET_ID: u32 = 8;
+const VIRTIO_BLK_ID_BYTES: usize = 20;
 const VIRTIO_BLK_S_OK: u8 = 0;
 const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 /// Written before submission: reading back as this means the device never
@@ -130,8 +134,9 @@ impl QueueOps for VirtioBlkQueue {
         let (type_, sector) = match req.op {
             Op::Read => (VIRTIO_BLK_T_IN, req.offset / SECTOR_SIZE),
             Op::Write => (VIRTIO_BLK_T_OUT, req.offset / SECTOR_SIZE),
-            // The flush sector field must be zero.
+            // The flush and ID sector fields must be zero.
             Op::Flush => (VIRTIO_BLK_T_FLUSH, 0),
+            Op::Identify => (VIRTIO_BLK_T_GET_ID, 0),
         };
         let header = VirtioBlkReqHeader {
             type_,
@@ -146,7 +151,11 @@ impl QueueOps for VirtioBlkQueue {
             return Err(BlkError::BadRequest);
         }
 
-        let data = pages.span(req.len);
+        let len = match req.op {
+            Op::Identify => VIRTIO_BLK_ID_BYTES,
+            _ => req.len,
+        };
+        let data = pages.span(len);
         let count = 2 + data.len();
         let descs = self.alloc_chain(count).ok_or(BlkError::Busy)?;
         let req_phys = pages.aux.phys_u64();
@@ -160,16 +169,15 @@ impl QueueOps for VirtioBlkQueue {
             },
         );
         for (i, page) in data.iter().enumerate() {
-            let flags = if req.op == Op::Read {
-                VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT
-            } else {
-                VIRTQ_DESC_F_NEXT
+            let flags = match req.op {
+                Op::Read | Op::Identify => VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
+                Op::Write | Op::Flush => VIRTQ_DESC_F_NEXT,
             };
             self.vq.write_desc(
                 descs[1 + i],
                 VirtqDesc {
                     addr: page.phys_u64(),
-                    len: (req.len - i * engine::PAGE_SIZE).min(engine::PAGE_SIZE) as u32,
+                    len: (len - i * engine::PAGE_SIZE).min(engine::PAGE_SIZE) as u32,
                     flags,
                     next: descs[2 + i],
                 },
@@ -354,12 +362,26 @@ fn virtio_blk_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
 
     let (capacity, block_size) = start_queue(&engine, caps, features, msix_state)?;
     let flushes = features & VIRTIO_BLK_F_FLUSH != 0;
-    let disk = EngineDisk::new(engine, 0, block_size, capacity, flushes);
+    let disk = identified_disk(engine, block_size, capacity, flushes);
     let name = register(disk)?;
     klog_info!("virtio-blk: {} irq {:?}", name, irq_mode);
     #[cfg(feature = "test-hooks")]
     test_hooks::record_msix(name, msix_for_tests);
     Ok(ProbeOutcome::Bound)
+}
+
+#[inline(never)]
+fn identified_disk(
+    engine: KArc<Engine>,
+    block_size: u32,
+    capacity: u64,
+    flushes: bool,
+) -> EngineDisk {
+    let disk = EngineDisk::new(engine, 0, block_size, capacity, flushes);
+    let mut serial = [0u8; VIRTIO_BLK_ID_BYTES];
+    let identified = disk.engine().identify(disk.namespace(), &mut serial);
+    let id = identified.ok().and_then(|()| DiskId::virtio(&serial));
+    disk.identified(id)
 }
 
 #[inline(never)]

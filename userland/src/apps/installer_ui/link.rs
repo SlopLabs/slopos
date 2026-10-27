@@ -5,6 +5,7 @@ use slopos_abi::fs::O_RDWR;
 use slopos_abi::syscall::O_CLOEXEC;
 use slopos_appkit::AppSender;
 use slopos_installer_core::protocol::{self, Reply, Request};
+use slopos_installer_core::wizard::say;
 use slopos_priv_core::wire::{Reply as PrivdReply, Request as PrivdRequest};
 
 use super::{EngineSays, Msg};
@@ -20,7 +21,7 @@ pub trait Link {
     /// back as [`Msg::Engine`].
     fn start(&mut self, sender: &AppSender<Msg>);
     fn send(&mut self, request: &Request);
-    /// Ask privd to restart the machine; a refusal comes back as
+    /// Ask privd to restart the computer; a refusal comes back as
     /// [`Msg::RestartRefused`].
     fn restart(&mut self, sender: &AppSender<Msg>);
 }
@@ -36,7 +37,7 @@ impl Link for Privd {
         let pipe = || fs::pipe2(O_CLOEXEC as u32).map_err(|e| format!("pipe: {e}"));
         let ((engine_in, to), (from, engine_out)) = match pipe().and_then(|a| Ok((a, pipe()?))) {
             Ok(pipes) => pipes,
-            Err(why) => return sender.send(Msg::Engine(EngineSays::Refused(why))),
+            Err(why) => return refuse(sender, NotStarted::Broke(why)),
         };
         self.to = Some(to);
         let sender = sender.clone();
@@ -45,7 +46,7 @@ impl Link for Privd {
                 relay(from, &sender);
                 drop(connection);
             }
-            Err(why) => sender.send(Msg::Engine(EngineSays::Refused(why))),
+            Err(not) => refuse(&sender, not),
         });
     }
 
@@ -70,11 +71,17 @@ impl Link for Privd {
             let ran = null().map_err(privd::NotRun::from).and_then(|null| {
                 privd::run_feeding(REBOOT, &["reboot"], &[], null.raw(), null.raw())
             });
-            let why = match ran {
-                Ok(status) => format!("the restart exited {status}"),
-                Err(not) => not.reason,
+            let by_person = match ran {
+                Ok(status) => {
+                    eprintln!("installer-ui: the restart exited {status}");
+                    false
+                }
+                Err(not) => {
+                    eprintln!("installer-ui: no restart: {}", not.reason);
+                    not.by_person
+                }
             };
-            sender.send(Msg::RestartRefused(why));
+            sender.send(Msg::RestartRefused { by_person });
         });
     }
 }
@@ -85,13 +92,37 @@ fn null() -> Result<OwnedFd, String> {
     fs::open_cstr(c"/dev/null", O_RDWR).map_err(|e| format!("/dev/null: {e}"))
 }
 
+/// Why the engine did not start: what privd told the person, or what broke,
+/// which goes to the log.
+enum NotStarted {
+    Said(String),
+    Broke(String),
+}
+
+impl From<String> for NotStarted {
+    fn from(why: String) -> NotStarted {
+        NotStarted::Broke(why)
+    }
+}
+
+fn refuse(sender: &AppSender<Msg>, not: NotStarted) {
+    let said = match not {
+        NotStarted::Said(said) => said,
+        NotStarted::Broke(why) => {
+            eprintln!("installer-ui: the engine did not start: {why}");
+            say::NOT_STARTED.into()
+        }
+    };
+    sender.send(Msg::Engine(EngineSays::Refused(said)));
+}
+
 /// Waits on the person's consent; the connection is held while the engine
 /// runs.
 fn ask(
     engine_in: OwnedFd,
     engine_out: OwnedFd,
     sender: &AppSender<Msg>,
-) -> Result<Connection, String> {
+) -> Result<Connection, NotStarted> {
     let mut connection = Connection::open_within(privd::RESTART_WAIT)
         .map_err(|why| format!("cannot reach privd: {why}"))?;
     let request = PrivdRequest {
@@ -111,12 +142,14 @@ fn ask(
                 sender.send(Msg::Engine(EngineSays::Started));
                 return Ok(connection);
             }
-            Some(PrivdReply::Denied { reason, .. }) => return Err(reason),
-            Some(PrivdReply::Exited(_)) => return Err("the installer exited at once".into()),
-            Some(PrivdReply::Prompt { .. }) => {
-                return Err("privd asked for a password at a terminal".into());
+            Some(PrivdReply::Denied { reason, .. }) => return Err(NotStarted::Said(reason)),
+            Some(PrivdReply::Exited(_)) => {
+                return Err(String::from("the installer exited at once").into());
             }
-            None => return Err("privd closed the connection".into()),
+            Some(PrivdReply::Prompt { .. }) => {
+                return Err(String::from("privd asked for a password at a terminal").into());
+            }
+            None => return Err(String::from("privd closed the connection").into()),
         }
     }
 }

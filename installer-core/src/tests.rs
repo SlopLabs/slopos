@@ -4,7 +4,6 @@ use alloc::vec::Vec;
 use std::string::ToString;
 
 use slopos_boot_core::install::{self, Mode as PlanMode, Role};
-use slopos_boot_core::layout::{ESP_NAME, ROOT_NAME};
 
 use crate::fixtures::{Case, GIB, LINUX, MIB, foreign, installed, table};
 
@@ -27,8 +26,11 @@ fn amounts_are_shown_in_binary_units() {
 }
 
 #[test]
-fn sizes_are_read_in_binary_units() {
+fn sizes_are_read_in_the_units_given() {
     assert_eq!(parse_size("4096"), Some(4096));
+    assert_eq!(parse_size("20GB"), Some(20_000_000_000));
+    assert_eq!(parse_size("512MB"), Some(512_000_000));
+    assert_eq!(parse_size("17.2GB"), Some(17_200_000_000));
     assert_eq!(parse_size("4096B"), Some(4096));
     assert_eq!(parse_size("20G"), Some(20 * GIB));
     assert_eq!(parse_size("20GiB"), Some(20 * GIB));
@@ -42,34 +44,13 @@ fn sizes_are_read_in_binary_units() {
         "-1G",
         "20g",
         "20 G",
-        "20GB",
+        "20gb",
         "20iB",
         "5KiBiB",
         "5BiB",
         "16777216T",
     ] {
         assert_eq!(parse_size(bad), None, "{bad:?}");
-    }
-}
-
-#[test]
-fn a_size_is_written_as_it_is_read() {
-    assert_eq!(size_text(200 * GIB), "200G");
-    assert_eq!(size_text(1536 * MIB), "1536M");
-    assert_eq!(size_text(2 << 40), "2T");
-    assert_eq!(size_text(4097), "4097B");
-    assert_eq!(size_text(0), "0B");
-    for bytes in [
-        0,
-        1,
-        4097,
-        3 * MIB,
-        7 * GIB,
-        7 * GIB + MIB,
-        5 << 40,
-        u64::MAX,
-    ] {
-        assert_eq!(parse_size(&size_text(bytes)), Some(bytes), "{bytes}");
     }
 }
 
@@ -138,10 +119,7 @@ fn an_erase_loses_the_whole_disk() {
     assert_eq!(p.after.regions().count(), 0);
     assert_eq!(p.root.min, GIB);
     assert_eq!(p.root.chosen, p.root.max);
-    assert_eq!(
-        p.review()[0],
-        "a new partition table: EVERYTHING on /dev/nvme0n1 is lost"
-    );
+    assert!(p.review()[0].contains("deleting everything on /dev/nvme0n1"));
 }
 
 #[test]
@@ -181,24 +159,23 @@ fn free_space_shares_the_esp_and_keeps_every_other_partition() {
         Target::Other(Part::Existing { number: 2, node, kind, bytes })
             if node == "/dev/nvme0n1p2" && kind == "Linux filesystem" && *bytes == 512 * MIB
     ));
-    assert_eq!(
-        p.review(),
-        [
-            "new entries in its partition table; every other partition stays as it is",
-            "EFI system partition: partition 1 (EFI system, 100.0 MiB), shared: SlopOS writes \\EFI\\SlopOS\\ only",
-            "SlopOS boot: new, 1.0 GiB at 613.0 MiB",
-            &std::format!("SlopOS root: new, {} at 1.6 GiB", human(p.root.chosen)),
-            &std::format!(
-                "SlopOS crash: new, 4.0 MiB at {}",
-                human(1637 * MIB + p.root.chosen)
-            ),
-            "/usr/local: the toolchain the medium carries",
-            "/src/slopos: the medium's clone, fetching from https://github.com/SlopLabs/slopos",
-            "user: its first administrator, logged in by the desktop, with no password",
-            "boots with: panic=reboot",
-            "firmware entry \"SlopOS\": where it stands in the boot order, or after the systems there",
-        ]
-    );
+    let review = p.review();
+    assert_eq!(review.len(), 10, "{review:?}");
+    assert!(review[1].contains("shared") && review[1].contains("\\EFI\\SlopOS\\"));
+    for (line, at) in review[2..5]
+        .iter()
+        .zip([613 * MIB, 1637 * MIB, 1637 * MIB + p.root.chosen])
+    {
+        assert!(line.contains("new, "), "{line}");
+        assert!(
+            line.ends_with(&std::format!("at {}", disk_size(at))),
+            "{line}"
+        );
+    }
+    assert!(review[6].contains(DEFAULT_REMOTE));
+    assert!(review[7].starts_with("user:") && review[7].contains("no password"));
+    assert!(review[8].ends_with(DEFAULT_CMDLINE));
+    assert!(review[9].starts_with("Startup order:"));
 }
 
 #[test]
@@ -207,13 +184,9 @@ fn the_systems_a_menu_leaves_out_are_said_with_why() {
     p.setup.left_out = vec!["Twin".into()];
     p.setup.removed = vec!["Gone".into()];
     let lines: Vec<String> = p.left_out().collect();
-    assert_eq!(
-        lines,
-        [
-            "leaving \"Twin\" out of the menu: an entry there collides with it",
-            "leaving \"Gone\" out of the menu: the install removes its loader",
-        ]
-    );
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("“Twin”") && lines[0].contains("same name"));
+    assert!(lines[1].contains("“Gone”") && lines[1].contains("erases"));
 }
 
 #[test]
@@ -283,10 +256,8 @@ fn a_reused_partition_is_formatted_and_its_size_is_the_root_s() {
             chosen: 10 * GIB
         }
     );
-    assert_eq!(
-        p.review()[3],
-        "SlopOS root: partition 1 (Linux filesystem, 10.0 GiB), FORMATTED"
-    );
+    assert!(p.review()[3].starts_with("SlopOS partition: partition 1 (Linux filesystem"));
+    assert!(p.review()[3].ends_with(", formatted"));
     assert!(!p.keeps_root());
 }
 
@@ -306,14 +277,17 @@ fn a_reinstall_keeps_every_partition_and_the_root_s_people() {
     assert!(p.keeps_root());
     p.setup.person = None;
     let review = p.review();
-    assert_eq!(
-        review[1],
-        "EFI system partition: partition 1 (EFI system, 260.0 MiB), made by an earlier install"
+    assert!(
+        review[1].ends_with("made by an earlier install"),
+        "{}",
+        review[1]
     );
-    assert!(review.iter().any(|l| l == "people: the root's own"));
-    assert!(review.iter().any(|l| {
-        l.starts_with("/src/slopos: the root's own if it has one, else the medium's clone")
-    }));
+    assert!(review.iter().any(|l| l.starts_with("Accounts:")));
+    assert!(
+        review
+            .iter()
+            .any(|l| l.contains("the installed system's own if it has one"))
+    );
 }
 
 #[test]
@@ -335,48 +309,54 @@ fn a_reinstall_that_formats_formats_the_root_and_the_crash_records() {
             (Tag::Format, Some(Role::Crash)),
         ]
     );
-    let names = [ESP_NAME, "SlopOS boot", ROOT_NAME, "SlopOS crash"];
-    for (line, name) in p.review()[1..5].iter().zip(names) {
-        assert!(line.starts_with(name), "{line}");
+    for (line, role) in p.review()[1..5].iter().zip(install::ROLES) {
+        assert!(line.starts_with(&capitalised(role_words(role))), "{line}");
     }
+    assert!(p.review()[3].ends_with(", formatted"));
 }
 
 #[test]
-fn issues_read_as_the_cli_says_them() {
+fn the_cli_names_the_flag_the_window_leaves_out() {
     let plan = |error| Issue::Plan {
         error,
         node: "/dev/vda".into(),
         root: Some("/dev/vda3".into()),
     };
-    assert_eq!(
-        plan(install::PlanError::Installed(3)).to_string(),
-        "SlopOS is on /dev/vda already (partition 3); install over it with --mode reuse --root /dev/vda3"
+    let installed = plan(install::PlanError::Installed(3));
+    assert!(
+        installed
+            .to_string()
+            .ends_with("--mode reuse --root /dev/vda3.")
     );
-    assert_eq!(
-        Issue::Plan {
-            error: install::PlanError::RootElsewhere(3),
-            node: "/dev/vda".into(),
-            root: None,
-        }
-        .to_string(),
-        "SlopOS's root is partition 3 of /dev/vda; reinstall over it with --root 3"
+    assert!(
+        installed
+            .words()
+            .ends_with("Choose Reinstall SlopOS instead.")
     );
-    assert_eq!(
-        Issue::OnlyErase {
-            node: "/dev/vda".into(),
-            holds: Contents::Blank.holding(),
-        }
-        .to_string(),
-        "/dev/vda holds nothing; only --mode erase installs onto it"
-    );
-    assert_eq!(
-        Summary {
-            disk: "/dev/vda".into(),
-            entry: 0x1f
-        }
-        .to_string(),
-        "SlopOS is installed on /dev/vda, booted by the firmware entry Boot001F"
-    );
+    let elsewhere = Issue::Plan {
+        error: install::PlanError::RootElsewhere(3),
+        node: "/dev/vda".into(),
+        root: None,
+    };
+    assert!(elsewhere.to_string().ends_with("--root 3."));
+    let only = Issue::OnlyErase {
+        node: "/dev/vda".into(),
+        contents: Contents::Blank,
+    };
+    assert!(only.to_string().starts_with("/dev/vda: "));
+    assert!(only.to_string().contains("--mode erase"));
+    assert!(!only.words().contains("--"));
+    let room = plan(install::PlanError::NoRoom {
+        needed: 2_500_000_000,
+        available: 31_000_000,
+    });
+    assert!(room.words().contains("2.5 GB") && !room.words().contains("31 MB"));
+    assert!(room.to_string().contains("31 MB"));
+    let summary = Summary {
+        disk: "/dev/vda".into(),
+        entry: 0x1f,
+    };
+    assert!(summary.to_string().contains("/dev/vda") && summary.to_string().contains("Boot001F"));
 }
 
 #[test]
@@ -386,10 +366,98 @@ fn every_step_is_named_from_one() {
         Event::Step {
             index: 1,
             total: 9,
-            title: "writing the partition table".into()
+            title: STEPS[0].into()
         }
     );
-    assert!(
-        matches!(Event::step(9), Event::Step { title, .. } if title == "registering the firmware entry")
+    assert!(matches!(Event::step(9), Event::Step { title, .. } if title == STEPS[8]));
+}
+
+#[test]
+fn a_disk_s_size_is_said_as_its_label_says_it() {
+    assert_eq!(disk_size(999), "999 bytes");
+    assert_eq!(disk_size(1_000_204_886_016), "1 TB");
+    assert_eq!(disk_size(16 * GIB), "17.2 GB");
+    assert_eq!(disk_size(512 * 1_000_000), "512 MB");
+    assert_eq!(disk_size(2_500_000_000), "2.5 GB");
+    assert_eq!(disk_size(100 * MIB), "105 MB");
+    assert_eq!(disk_size(999_600_000_000), "1 TB");
+    assert_eq!(disk_size(999_950_000), "1 GB");
+    assert_eq!(disk_size(1), "1 byte");
+}
+
+#[test]
+fn a_typed_size_is_read_in_the_units_the_box_shows() {
+    assert_eq!(parse_disk_size("20"), Some(20_000_000_000));
+    assert_eq!(parse_disk_size("20 GB"), Some(20_000_000_000));
+    assert_eq!(parse_disk_size("17.2 gb"), Some(17_200_000_000));
+    assert_eq!(parse_disk_size("512MB"), Some(512_000_000));
+    assert_eq!(parse_disk_size("1.5 TB"), Some(1_500_000_000_000));
+    assert_eq!(parse_disk_size("9 GiB"), Some(9 * GIB));
+    assert_eq!(parse_disk_size(&disk_size(16 * GIB)), Some(17_200_000_000));
+    let huge = "340282366920938463463374607431768211455.5 B";
+    for bad in [
+        "",
+        "GB",
+        "1.2.3",
+        "x",
+        "20 parsecs",
+        ".5",
+        "1.0000000001",
+        huge,
+    ] {
+        assert_eq!(parse_disk_size(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn a_disk_s_model_is_read_back_from_the_names_devfs_gives_it() {
+    use slopos_boot_core::disk_id::{DISK_ID_MAX, DiskId};
+    let model = |id: Option<DiskId>| {
+        let id = id.expect("a name");
+        let names: Vec<String> = [false, true]
+            .into_iter()
+            .filter_map(|alias| {
+                let mut out = [0u8; DISK_ID_MAX];
+                let len = id.write(alias, None, &mut out)?;
+                String::from_utf8(out[..len].to_vec()).ok()
+            })
+            .collect();
+        model_of(names.iter().map(String::as_str))
+    };
+    let kingston = DiskId::nvme(b"KINGSTON SNV3S1000G   ", b"50026B7382A1B2C3  ", 1);
+    assert_eq!(model(kingston), Some("KINGSTON SNV3S1000G".into()));
+    let spaced = DiskId::nvme(b"Model X", b"  S4EW123", 2);
+    assert_eq!(model(spaced), Some("Model X".into()));
+    let stick = DiskId::usb(b"SanDisk ", b"Ultra Fit       ", Some(b"4C530001"), 0);
+    assert_eq!(model(stick), Some("SanDisk Ultra Fit".into()));
+    let unnamed = DiskId::usb(b"", b"Flash Disk", Some(b"4C530001"), 0);
+    assert_eq!(model(unnamed), Some("Flash Disk".into()));
+}
+
+#[test]
+fn a_disk_s_model_is_read_from_the_names_udev_gives_it() {
+    let nvme = [
+        "nvme-QEMU_NVMe_Ctrl_slopos-root_1",
+        "nvme-QEMU_NVMe_Ctrl_slopos-root",
+    ];
+    assert_eq!(model_of(nvme), Some("QEMU NVMe Ctrl".into()));
+    assert_eq!(
+        model_of(nvme.into_iter().rev()),
+        Some("QEMU NVMe Ctrl".into())
     );
+    assert_eq!(
+        model_of(["nvme-KINGSTON_SNV3S1000G_50026B7382A1B2C3_2"]),
+        Some("KINGSTON SNV3S1000G".into())
+    );
+    assert_eq!(
+        model_of(["usb-QEMU_QEMU_HARDDISK_slopos-usb-0:0"]),
+        Some("QEMU QEMU HARDDISK".into())
+    );
+    assert_eq!(
+        model_of(["nvme-Model_X___S4EW123_2"]),
+        Some("Model X".into())
+    );
+    assert_eq!(model_of(["virtio-slopos-verified"]), None);
+    assert_eq!(model_of(["nvme-nothing"]), None);
+    assert_eq!(model_of([]), None);
 }

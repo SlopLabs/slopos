@@ -16,6 +16,7 @@ use slopos_usb_core::bus::{
 use slopos_usb_core::device::Speed;
 use slopos_usb_core::device::descriptor::{self, Configuration, Function};
 use slopos_usb_core::device::request::Setup;
+use slopos_usb_core::device::string;
 use slopos_usb_core::xhci::context::{
     ContextLayout, EndpointContext, InputControlContext, MAX_READDED, SlotContext, endpoint_state,
     read_context, write_input, write_readded,
@@ -1294,6 +1295,10 @@ pub struct Control {
     device: KArc<Device>,
 }
 
+fn string_descriptor(index: u8, language: u16) -> Setup {
+    Setup::get_descriptor(descriptor::kind::STRING, index, language, string::MAX_LEN)
+}
+
 impl Control {
     pub(crate) fn new(device: KArc<Device>) -> Self {
         Self { device }
@@ -1301,6 +1306,38 @@ impl Control {
 
     pub fn read(&self, setup: Setup, into: &mut [u8]) -> Result<usize, UsbError> {
         self.device.request(setup, None, Some(into))
+    }
+
+    /// The language the device's strings are read in; `None` when it is to be
+    /// asked for none.
+    pub fn language(&self) -> Option<u16> {
+        let mut into = [0; string::MAX_LEN as usize];
+        let answered = self.read(string_descriptor(0, 0), &mut into).ok()?;
+        string::language(&into[..answered])
+    }
+
+    /// String descriptor `index` in `language`; `None` when the device names
+    /// none there.
+    pub fn string_in<'b>(
+        &self,
+        index: u8,
+        language: u16,
+        into: &'b mut [u8; string::MAX_LEN as usize],
+    ) -> Option<&'b [u8]> {
+        if index == 0 {
+            return None;
+        }
+        let read = self.read(string_descriptor(index, language), into).ok()?;
+        Some(&into[..read])
+    }
+
+    /// String descriptor `index` in the device's language.
+    pub fn string<'b>(
+        &self,
+        index: u8,
+        into: &'b mut [u8; string::MAX_LEN as usize],
+    ) -> Option<&'b [u8]> {
+        self.string_in(index, self.language()?, into)
     }
 
     pub fn write(&self, mut setup: Setup, data: &[u8]) -> Result<(), UsbError> {

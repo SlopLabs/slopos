@@ -3,6 +3,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use slopos_boot_core::disk_id::DiskId;
 use slopos_ostd::{KArc, klog_info};
 use slopos_testing::{TestResult, fail};
 
@@ -198,9 +199,20 @@ pub fn test_devfs_disk_links() -> TestResult {
             names[0],
             labelled,
             BlockNodeKind::Disk { partitioned: false },
+            None,
         ),
-        devfs_register_block_node(names[1], part, BlockNodeKind::Partition { uuid }),
-        devfs_register_block_node(names[2], table, BlockNodeKind::Disk { partitioned: true }),
+        devfs_register_block_node(
+            names[1],
+            part,
+            BlockNodeKind::Partition { uuid, number: 3 },
+            None,
+        ),
+        devfs_register_block_node(
+            names[2],
+            table,
+            BlockNodeKind::Disk { partitioned: true },
+            None,
+        ),
     ];
     let verdict = if registered.iter().all(Result::is_ok) {
         links_body(names)
@@ -461,6 +473,120 @@ impl BlockDevice for FailingReads {
     }
 }
 
+/// `/dev/disk/by-id` lists each node's name and then its shorter one, both
+/// links to the node, resumed between the two; a partition takes its disk's
+/// with `-part<N>`; a lookup and a mount source find either; a name two
+/// nodes share is the first's, listed once.
+pub fn test_devfs_by_id_links() -> TestResult {
+    let names: [&[u8]; 4] = [b"volidbyid0", b"volidbyid1", b"volidbyid2", b"volidbyid3"];
+    let (Some(first), Some(clash), Some(other), Some(part)) =
+        (node(|_| {}), node(|_| {}), node(|_| {}), node(|_| {}))
+    else {
+        return fail!("no memory for the fixture");
+    };
+    let id =
+        |serial: &[u8]| DiskId::nvme(b"Test Disk", serial, 1).and_then(|id| KArc::try_new(id).ok());
+    let disk = id(b"byid-a");
+    let whole = BlockNodeKind::Disk { partitioned: true };
+    let uuid = PartUuid::Mbr {
+        signature: 0x0B1D_0B1D,
+        number: 2,
+    };
+    let registered = [
+        devfs_register_block_node(names[0], first, whole, disk.clone()),
+        devfs_register_block_node(names[1], clash, whole, id(b"byid-a")),
+        devfs_register_block_node(names[2], other, whole, id(b"byid-b")),
+        devfs_register_block_node(
+            names[3],
+            part,
+            BlockNodeKind::Partition { uuid, number: 2 },
+            disk,
+        ),
+    ];
+    let verdict = if registered.iter().all(Result::is_ok) {
+        by_id_body(names)
+    } else {
+        fail!("registration failed: {:?}", registered)
+    };
+    for name in names {
+        let _ = devfs_unregister_block_node(name);
+    }
+    verdict
+}
+
+#[inline(never)]
+fn by_id_body(names: [&[u8]; 4]) -> TestResult {
+    const LONG: &[u8] = b"nvme-Test_Disk_byid-a_1";
+    const SHORT: &[u8] = b"nvme-Test_Disk_byid-a";
+    let mut out = [0u8; DEV_NAME_MAX];
+    for spec in [
+        &b"/dev/disk/by-id/nvme-Test_Disk_byid-a_1"[..],
+        b"/dev/disk/by-id/nvme-Test_Disk_byid-a",
+    ] {
+        match devfs_resolve_block_source(spec, &mut out) {
+            Ok(len) if out[..len] == *names[0] => {}
+            other => return fail!("a by-id source resolved to {:?}", other),
+        }
+    }
+    let others: [(&[u8], &[u8]); 3] = [
+        (b"/dev/disk/by-id/nvme-Test_Disk_byid-b", names[2]),
+        (b"/dev/disk/by-id/nvme-Test_Disk_byid-a_1-part2", names[3]),
+        (b"/dev/disk/by-id/nvme-Test_Disk_byid-a-part2", names[3]),
+    ];
+    for (spec, node) in others {
+        match devfs_resolve_block_source(spec, &mut out) {
+            Ok(len) if out[..len] == *node => {}
+            other => return fail!("a by-id source resolved to {:?}", other),
+        }
+    }
+    let fs = DevFs::new();
+    let Ok(disk) = fs.lookup(fs.root_inode(), b"disk") else {
+        return fail!("/dev/disk missing");
+    };
+    let Ok(by_id) = fs.lookup(disk, b"by-id") else {
+        return fail!("/dev/disk/by-id missing");
+    };
+    let (Ok(long), Ok(short)) = (fs.lookup(by_id, LONG), fs.lookup(by_id, SHORT)) else {
+        return fail!("the by-id links are missing");
+    };
+    let mut target = [0u8; 32];
+    for link in [long, short] {
+        match fs.readlink(link, &mut target) {
+            Ok(len) if target[..len] == *b"../../volidbyid0" => {}
+            other => return fail!("a by-id link points at {:?}", other),
+        }
+    }
+    let mut seen = [0usize; 3];
+    let mut first_cookie = None;
+    let listed = fs.readdir_cookie(by_id, 0, &mut |cookie, name, _, kind| {
+        if kind == FileType::Symlink && name == LONG {
+            seen[0] += 1;
+            first_cookie = Some(cookie);
+        }
+        seen[1] += usize::from(name == SHORT);
+        seen[2] += usize::from(name == b"nvme-Test_Disk_byid-b");
+        true
+    });
+    if listed.is_err() || seen != [1, 1, 1] {
+        return fail!("by-id listed {:?}: {:?}", seen, listed);
+    }
+    let Some(after_long) = first_cookie else {
+        return fail!("no cookie after the long name");
+    };
+    let mut resumed = None;
+    let _ = fs.readdir_cookie(by_id, after_long, &mut |_, name, _, _| {
+        resumed.get_or_insert_with(|| name == SHORT);
+        false
+    });
+    match resumed {
+        Some(true) => TestResult::Pass,
+        other => fail!(
+            "resuming after a node's name gave {:?}, not its shorter one",
+            other
+        ),
+    }
+}
+
 slopos_testing::stest!(name = test_volume_id_ext, suite = fs);
 slopos_testing::stest!(name = test_volume_id_vfat, suite = fs);
 slopos_testing::stest!(name = test_volume_id_vfat_root_past_the_end, suite = fs);
@@ -469,3 +595,4 @@ slopos_testing::stest!(name = test_devfs_disk_links, suite = fs);
 slopos_testing::stest!(name = test_devfs_link_names_follow_udev, suite = fs);
 slopos_testing::stest!(name = test_devfs_identity_of_an_unreadable_disk, suite = fs);
 slopos_testing::stest!(name = test_devfs_identity_read_once_per_change, suite = fs);
+slopos_testing::stest!(name = test_devfs_by_id_links, suite = fs);

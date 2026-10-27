@@ -58,7 +58,7 @@ use slopos_boot_core::install::Role;
 use slopos_boot_core::layout::{self, ESP_TYPE, ROOT_TYPE};
 use slopos_boot_core::{base, bli, device_path, load_option, variables};
 use slopos_installer_core::protocol::{self, Reply as EngineReply, Request as EngineRequest};
-use slopos_installer_core::{Choices, Event, Issue, Mode, Part, Tag, root_min};
+use slopos_installer_core::{Choices, Event, Issue, Mode, Part, STEPS, Tag, root_min};
 use slopos_priv_core::wire::{Exit, Reply as PrivdReply, Request as PrivdRequest};
 use slopos_remote_core::Deframer;
 use slopos_slibc::test_harness::note;
@@ -189,7 +189,7 @@ fn target() -> Result<(String, Kind, Vec<Partition>), String> {
     let mut disks = Vec::new();
     for node in whole_disks()? {
         match not_installable(&node, medium) {
-            Some(why) => println!("INSTALLER-NOT-OFFERED {node}: {why}"),
+            Some(why) => println!("INSTALLER-NOT-OFFERED {node}: {why:?}"),
             None => disks.push(node),
         }
     }
@@ -1159,11 +1159,11 @@ fn install_log(disk: &str, kept: bool) -> Result<(), String> {
     let wanted = [
         format!("SlopOS will be installed on {disk}:"),
         if kept {
-            "  people: the root's own".to_owned()
+            "  Accounts: ".to_owned()
         } else {
-            "its first administrator".to_owned()
+            "the first administrator".to_owned()
         },
-        "[7/9] making slot a the default".to_owned(),
+        format!("[7/{}] {}", STEPS.len(), STEPS[6]),
         "  LoaderEntryDefault is slopos-a".to_owned(),
     ];
     match wanted.iter().find(|line| !log.contains(line.as_str())) {

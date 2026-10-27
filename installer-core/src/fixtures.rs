@@ -11,12 +11,14 @@ use slopos_boot_core::layout::{BOOT_TYPE, CRASH_TYPE, ESP_NAME, ESP_TYPE, ROOT_T
 
 use crate::{
     Contents, DEFAULT_CMDLINE, DEFAULT_REMOTE, Disk, DiskState, FIRST_PERSON, FirstPerson, Fit,
-    Issue, Layout, Listing, Medium, Opened, Planned, Proposal, Reinstall, Setup, System, Table,
+    Issue, Layout, Listing, Medium, Opened, Planned, Proposal, Refusal, Reinstall, Setup, System,
+    Table,
 };
 
 pub const MIB: u64 = 1 << 20;
 pub const GIB: u64 = 1 << 30;
 pub const NODE: &str = "/dev/nvme0n1";
+pub const MODEL: &str = "QEMU NVMe Ctrl";
 pub const LINUX: Guid = Guid::from_spelling("0fc63daf-8483-4772-8e79-3d69d8477de4");
 const DISK: Guid = Guid::from_spelling("0f0e0d0c-0b0a-4908-8706-050403020100");
 const UNIQUES: [Guid; 4] = [Guid([1; 16]), Guid([2; 16]), Guid([3; 16]), Guid([4; 16])];
@@ -219,10 +221,12 @@ pub fn machine(opened: Option<Opened>) -> System {
         disks: vec![
             Disk {
                 node: "/dev/sda".into(),
-                state: DiskState::Refused("the install medium".into()),
+                model: Some("QEMU QEMU HARDDISK".into()),
+                state: DiskState::Refused(Refusal::Medium),
             },
             Disk {
                 node: NODE.into(),
+                model: Some(MODEL.into()),
                 state: DiskState::Listed(Listing {
                     capacity: 16 * GIB,
                     block: 512,
@@ -233,6 +237,7 @@ pub fn machine(opened: Option<Opened>) -> System {
             },
             Disk {
                 node: "/dev/vda".into(),
+                model: None,
                 state: DiskState::Listed(Listing {
                     capacity: 16 * GIB,
                     block: 512,

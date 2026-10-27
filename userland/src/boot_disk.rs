@@ -17,6 +17,7 @@ use slopos_boot_core::load_option::LoadOption;
 use slopos_boot_core::variables::{self, BootVariable, Held, PERSISTENT, Placement};
 use slopos_boot_core::{Guid, bli, device_path, layout, load_option};
 use slopos_fat_core::{Device, Error as FatError, Volume};
+use slopos_installer_core::Refusal;
 
 use crate::syscall::efi::{efivar_get, efivar_set};
 use crate::syscall::error::SyscallError;
@@ -199,15 +200,32 @@ pub fn medium_disk_guid() -> Result<Option<Guid>, String> {
 
 /// Why nothing may be installed onto the whole disk `node`: it refuses
 /// writes, or it is the medium whose GPT disk GUID is `medium`.
-pub fn not_installable(node: &str, medium: Option<Guid>) -> Option<&'static str> {
+pub fn not_installable(node: &str, medium: Option<Guid>) -> Option<Refusal> {
     let protected = File::open(node)
         .ok()
         .and_then(|file| crate::syscall::fs::read_only(file.as_raw_fd()).ok())
         .unwrap_or(false);
     if protected {
-        return Some("write-protected");
+        return Some(Refusal::ReadOnly);
     }
-    (medium.is_some() && disk_guid_of(node) == medium).then_some("the install medium")
+    (medium.is_some() && disk_guid_of(node) == medium).then_some(Refusal::Medium)
+}
+
+const BY_ID: &str = "/dev/disk/by-id";
+
+/// What the maker of the whole disk `node` calls it, from the names
+/// `/dev/disk/by-id` gives it.
+pub fn model_of(node: &str) -> Option<String> {
+    let target = format!("../../{}", node.rsplit('/').next().unwrap_or(node));
+    let names: Vec<String> = std::fs::read_dir(BY_ID)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            std::fs::read_link(entry.path()).is_ok_and(|link| link.as_os_str() == target.as_str())
+        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    slopos_installer_core::model_of(names.iter().map(String::as_str))
 }
 
 /// A node's partitions, if it holds a GPT.

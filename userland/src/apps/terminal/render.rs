@@ -18,8 +18,17 @@ use slopos_terminal_core::damage::CellDamage;
 
 /// Matches the grid's default cell background.
 const WINDOW_BG: Color32 = Color32::rgb(0x1E, 0x1E, 0x1E);
+
+/// Between the window's edges and the cells, in the cells' background.
+pub const MARGIN: i32 = slopos_theme_core::space::SM;
+
 /// Matches the shell's selection blue.
 const SELECTION_BG: Color32 = Color32::rgb(0x26, 0x4F, 0x78);
+
+/// How many cells of `cell` pixels fit across `pixels` within the margins.
+pub fn cells_in(pixels: i32, cell: i32, max: usize) -> u16 {
+    ((pixels - 2 * MARGIN) / cell.max(1)).clamp(1, max as i32) as u16
+}
 
 #[inline]
 fn cell_width() -> i32 {
@@ -45,8 +54,8 @@ fn draw_cell_at(
     fg: Color32,
     bg: Color32,
 ) {
-    let x = col as i32 * cell_width();
-    let y = row as i32 * cell_height();
+    let x = MARGIN + col as i32 * cell_width();
+    let y = MARGIN + row as i32 * cell_height();
     font::draw_glyph(buf, x, y, cell.glyph(), fg, bg);
 }
 
@@ -61,10 +70,10 @@ fn damage_bounds(damage: &CellDamage) -> Option<DamageRect> {
             continue;
         };
         let rect = DamageRect {
-            x0: span.first as i32 * cw,
-            y0: row as i32 * ch,
-            x1: (span.last as i32 + 1) * cw - 1,
-            y1: (row as i32 + 1) * ch - 1,
+            x0: MARGIN + span.first as i32 * cw,
+            y0: MARGIN + row as i32 * ch,
+            x1: MARGIN + (span.last as i32 + 1) * cw - 1,
+            y1: MARGIN + (row as i32 + 1) * ch - 1,
         };
         out = Some(match out {
             Some(acc) => acc.union(&rect),
@@ -114,8 +123,6 @@ pub fn render_full(grid: &TerminalGrid, selection: &Selection, cursor_on: bool) 
     let cols = grid.cols as usize;
 
     surface::draw(|buf| {
-        // Partial-cell remainder pixels, left when the pixel dims are not a
-        // clean multiple of the cell size, must match the theme.
         let w = buf.width() as i32;
         let h = buf.height() as i32;
         crate::gfx::fill_rect(buf, 0, 0, w, h, WINDOW_BG);

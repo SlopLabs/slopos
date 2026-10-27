@@ -13,6 +13,7 @@ pub use panic::{PanicQueue, PanicSession};
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use slopos_boot_core::disk_id::DiskId;
 use slopos_mm::mmio::MmioRegion;
 use slopos_nvme_core::command::{Command, SQE_BYTES, cns};
 use slopos_nvme_core::completion::CQE_BYTES;
@@ -671,13 +672,18 @@ fn register_namespace(controller: &KArc<Controller>, nsid: u32) {
             return;
         }
     };
-    let Ok(disk) = KArc::try_new(EngineDisk::new(
-        KArc::clone(&controller.engine),
-        nsid,
-        ns.block_size(),
-        ns.capacity_bytes(),
-        controller.info.volatile_write_cache,
-    )) else {
+    let info = &controller.info;
+    let by_id = DiskId::nvme(&info.model, &info.serial, nsid);
+    let Ok(disk) = KArc::try_new(
+        EngineDisk::new(
+            KArc::clone(&controller.engine),
+            nsid,
+            ns.block_size(),
+            ns.capacity_bytes(),
+            info.volatile_write_cache,
+        )
+        .identified(by_id),
+    ) else {
         return;
     };
     klog_info!(

@@ -44,8 +44,8 @@ impl App for About {
         }
     }
 
-    fn title(&self) -> &str {
-        "About"
+    fn title(&self) -> String {
+        "About".into()
     }
 
     fn app_id(&self) -> &str {
@@ -69,6 +69,10 @@ whose offset the app does not keep holds its place while it shows the same
 thing, and starts at the top when it shows something else. A table cannot
 tell that by itself, so give `Node::Table` a `shows` that changes when its
 rows are of something else, such as the directory a file manager lists.
+
+`title` is read again after every rebuild. A window that shows a document
+is titled `document_title(document, app)`, as `notes.txt — Editor`; any other
+is titled with the app's name alone.
 
 `WindowSpec` gives the size the window opens at and the smallest size it can
 be laid out at. `.fixed()` makes a window that cannot be resized. The
@@ -132,7 +136,9 @@ shows every component in each of its states. Its pages are
   content, such as a syntax palette, needs a line in
   `scripts/gates/ui-literals.txt` that says why.
 - **One name per app.** The app entry's `name`, the window title and the About
-  box all use the same name.
+  box all use the same name, and `apps_test` holds each title to its entry.
+- **Errors say what to do next.** A message about a failure is what happened,
+  then what the person can do about it, each a sentence.
 - **Icons come from the font.** Name a glyph with `Icon::Folder`, `Icon::Trash`
   and so on. The font is Lucide, at `/usr/share/fonts/Lucide.ttf`. To add an
   icon, add a variant that names the codepoint from Lucide's

@@ -27,11 +27,11 @@ use slopos_remote_core::{Deframer, Fields, MAX_PAYLOAD, frame};
 
 use crate::{
     Action, Choices, Contents, Disk, DiskState, Event, Failure, FirstPerson, Fit, Issue, Layout,
-    Listing, MbrPartition, Medium, Mode, Opened, Part, Person, Piece, Proposal, Reinstall, Segment,
-    Setup, Span, Summary, System, Tag, Target,
+    Listing, MbrPartition, Medium, Mode, Opened, Part, Person, Piece, Proposal, Refusal, Reinstall,
+    Segment, Setup, Span, Summary, System, Tag, Target,
 };
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// No request comes near it.
 pub const MAX_REQUEST: usize = 64 * 1024;
 
@@ -478,15 +478,16 @@ fn encode_issue(issue: &Issue) -> W {
         Issue::Probe(why) => w.text("issue", "probe").text("text", why),
         Issue::Disk(why) => w.text("issue", "disk").text("text", why),
         Issue::NothingToKeep(node) => w.text("issue", "nothing-to-keep").text("text", node),
+        Issue::NoRoot(node) => w.text("issue", "no-root").text("text", node),
         Issue::Esp(why) => w.text("issue", "esp").text("text", why),
         Issue::Person(why) => w.text("issue", "person").text("text", why),
         Issue::Menu(why) => w.text("issue", "menu").text("text", why),
         Issue::Remote(url) => w.text("issue", "remote").text("text", url),
         Issue::RootSize => w.text("issue", "root-size"),
-        Issue::OnlyErase { node, holds } => w
+        Issue::OnlyErase { node, contents } => w
             .text("issue", "only-erase")
             .text("node", node)
-            .text("holds", holds),
+            .nest("contents", encode_contents(contents)),
         Issue::Plan { error, node, root } => {
             let w = w
                 .text("issue", "plan")
@@ -526,7 +527,7 @@ fn decode_issue(bytes: &[u8]) -> Result<Issue, Malformed> {
             "issue",
             "text",
             "node",
-            "holds",
+            "contents",
             "root",
             "error",
             "needed",
@@ -541,7 +542,7 @@ fn decode_issue(bytes: &[u8]) -> Result<Issue, Malformed> {
         let all = [
             "text",
             "node",
-            "holds",
+            "contents",
             "root",
             "error",
             "needed",
@@ -562,6 +563,7 @@ fn decode_issue(bytes: &[u8]) -> Result<Issue, Malformed> {
         "probe" => text(Issue::Probe)?,
         "disk" => text(Issue::Disk)?,
         "nothing-to-keep" => text(Issue::NothingToKeep)?,
+        "no-root" => text(Issue::NoRoot)?,
         "esp" => text(Issue::Esp)?,
         "person" => text(Issue::Person)?,
         "menu" => text(Issue::Menu)?,
@@ -571,10 +573,10 @@ fn decode_issue(bytes: &[u8]) -> Result<Issue, Malformed> {
             Issue::RootSize
         }
         "only-erase" => {
-            only(&["node", "holds"])?;
+            only(&["node", "contents"])?;
             Issue::OnlyErase {
                 node: r.text("node")?.into(),
-                holds: r.text("holds")?.into(),
+                contents: decode_contents(r.nested("contents")?)?,
             }
         }
         "plan" => {
@@ -840,9 +842,11 @@ fn encode_system(system: &System) -> W {
             .opt_text("unmounted_payload", m.unmounted_payload.as_deref()),
     );
     for disk in &system.disks {
-        let d = W::new().text("node", &disk.node);
+        let d = W::new()
+            .text("node", &disk.node)
+            .opt_text("model", disk.model.as_deref());
         let d = match &disk.state {
-            DiskState::Refused(why) => d.text("state", "refused").text("why", why),
+            DiskState::Refused(why) => d.text("state", "refused").text("why", refusal_name(*why)),
             DiskState::Unreadable(why) => d.text("state", "unreadable").text("why", why),
             DiskState::Listed(listing) => {
                 let d = d
@@ -890,14 +894,15 @@ fn decode_system(bytes: &[u8]) -> Result<System, Malformed> {
                 let d = R::of(
                     bytes,
                     &[
-                        "node", "state", "why", "capacity", "block", "contents", "layout", "opened",
+                        "node", "model", "state", "why", "capacity", "block", "contents", "layout",
+                        "opened",
                     ],
                 )?;
                 let listed = ["capacity", "block", "contents", "layout", "opened"];
                 let state = match d.text("state")? {
                     "refused" => {
                         d.absent(&listed)?;
-                        DiskState::Refused(d.text("why")?.into())
+                        DiskState::Refused(refusal_named(d.text("why")?)?)
                     }
                     "unreadable" => {
                         d.absent(&listed)?;
@@ -917,6 +922,7 @@ fn decode_system(bytes: &[u8]) -> Result<System, Malformed> {
                 };
                 Ok(Disk {
                     node: d.text("node")?.into(),
+                    model: d.opt_text("model")?.map(String::from),
                     state,
                 })
             })
@@ -932,6 +938,21 @@ fn decode_system(bytes: &[u8]) -> Result<System, Malformed> {
         medium,
         disks,
         others,
+    })
+}
+
+fn refusal_name(refusal: Refusal) -> &'static str {
+    match refusal {
+        Refusal::Medium => "medium",
+        Refusal::ReadOnly => "read-only",
+    }
+}
+
+fn refusal_named(name: &str) -> Result<Refusal, Malformed> {
+    Ok(match name {
+        "medium" => Refusal::Medium,
+        "read-only" => Refusal::ReadOnly,
+        _ => return Err(Malformed),
     })
 }
 

@@ -561,6 +561,70 @@ fn test_table_menu_key_without_selection_is_inert() {
     assert!(sink.drain_typed::<ContextMenuAt>().is_empty());
 }
 
+fn alt_key(named: super::event::NamedKey) -> WidgetEvent {
+    WidgetEvent::KeyDown {
+        key: super::event::Key::Named(named),
+        modifiers: Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    }
+}
+
+/// The chosen row opens on a second click and on Enter; a key that leaves the
+/// choice where it is says nothing.
+fn test_table_activates_the_chosen_row() {
+    let mut table = context_table(Some(0)).activating(Some(Box::new(|i: usize| {
+        Box::new(i as i64) as Box<dyn std::any::Any>
+    })));
+    let mut sink = MessageSink::new();
+    table.event(
+        &key(super::event::NamedKey::Home, false),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(sink.drain_typed::<usize>().is_empty());
+    table.event(
+        &press(10, 45, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert_eq!(sink.drain_typed::<usize>(), vec![1]);
+    assert!(sink.drain_typed::<i64>().is_empty());
+    table.event(
+        &press(10, 45, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    table.event(
+        &key(super::event::NamedKey::Enter, false),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert_eq!(sink.drain_typed::<i64>(), vec![1, 1]);
+}
+
+/// An Alt chord is the app's, as Alt+Up is a file manager's way up.
+fn test_table_leaves_an_alt_chord_to_the_app() {
+    let mut table = context_table(Some(1));
+    let mut sink = MessageSink::new();
+    let up = table.event(
+        &alt_key(super::event::NamedKey::Up),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(!up.is_consumed());
+    assert!(sink.drain_typed::<usize>().is_empty());
+    let up = table.event(
+        &key(super::event::NamedKey::Up, false),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(up.is_consumed());
+    assert_eq!(sink.drain_typed::<usize>(), vec![0]);
+}
+
 fn popup_at(x: i32, y: i32, w: i32, h: i32) -> PopupWidget {
     let mut popup = PopupWidget::new(
         x,
@@ -2112,6 +2176,14 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             test_table_menu_key_without_selection_is_inert,
         ),
         (
+            "table_activates_the_chosen_row",
+            test_table_activates_the_chosen_row,
+        ),
+        (
+            "table_leaves_an_alt_chord_to_the_app",
+            test_table_leaves_an_alt_chord_to_the_app,
+        ),
+        (
             "popup_places_child_at_anchor",
             test_popup_places_child_at_anchor,
         ),
@@ -2330,6 +2402,14 @@ mod cfg_tests {
     #[test]
     fn table_menu_key_without_selection_is_inert() {
         test_table_menu_key_without_selection_is_inert();
+    }
+    #[test]
+    fn table_activates_the_chosen_row() {
+        test_table_activates_the_chosen_row();
+    }
+    #[test]
+    fn table_leaves_an_alt_chord_to_the_app() {
+        test_table_leaves_an_alt_chord_to_the_app();
     }
     #[test]
     fn popup_places_child_at_anchor() {

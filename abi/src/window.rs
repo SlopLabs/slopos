@@ -58,6 +58,9 @@ impl Default for AppId {
     }
 }
 
+/// The longest window title, as slop-protocol's longest string.
+pub const WINDOW_TITLE_MAX: usize = 128;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct WindowInfo {
@@ -77,7 +80,7 @@ pub struct WindowInfo {
     /// the cache folds this in to stop a reused slot aliasing the prior mapping.
     pub buffer_generation: u32,
     pub damage_regions: [DamageRect; MAX_WINDOW_DAMAGE_REGIONS],
-    pub title: [u8; 32],
+    pub title: [u8; WINDOW_TITLE_MAX],
     pub app_id: AppId,
     /// Frame width set by compositor during resize (0 = same as width).
     pub frame_width: u32,
@@ -98,14 +101,16 @@ impl WindowInfo {
         self.damage_count == u8::MAX
     }
 
-    #[inline]
+    /// The title up to its first NUL, less a character a cut split.
     pub fn title_str(&self) -> &str {
         let len = self
             .title
             .iter()
             .position(|&b| b == 0)
             .unwrap_or(self.title.len());
-        core::str::from_utf8(&self.title[..len]).unwrap_or("<invalid>")
+        let title = &self.title[..len];
+        core::str::from_utf8(title)
+            .unwrap_or_else(|e| core::str::from_utf8(&title[..e.valid_up_to()]).unwrap_or(""))
     }
 
     #[inline]
@@ -167,7 +172,7 @@ impl Default for WindowInfo {
             shm_token: 0,
             buffer_generation: 0,
             damage_regions: [DamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS],
-            title: [0; 32],
+            title: [0; WINDOW_TITLE_MAX],
             app_id: AppId::EMPTY,
             frame_width: 0,
             frame_height: 0,

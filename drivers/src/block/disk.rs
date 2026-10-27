@@ -2,6 +2,7 @@
 //! logical blocks one namespace of an [`Engine`] serves. A span that starts or
 //! ends inside a block is completed through a read-modify-write of that block.
 
+use slopos_boot_core::disk_id::DiskId;
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, WriteTicket, stats};
 use slopos_ostd::KArc;
 
@@ -13,6 +14,7 @@ pub struct EngineDisk {
     capacity: u64,
     flushes: bool,
     write_protected: bool,
+    id: Option<KArc<DiskId>>,
 }
 
 fn total_seg_len(segs: &[&[u8]]) -> Result<usize, BlkError> {
@@ -41,6 +43,7 @@ impl EngineDisk {
             capacity,
             flushes,
             write_protected: false,
+            id: None,
         }
     }
 
@@ -48,6 +51,16 @@ impl EngineDisk {
     pub fn protected(mut self) -> Self {
         self.write_protected = true;
         self
+    }
+
+    /// Named under `/dev/disk/by-id` as `id` says, memory allowing.
+    pub fn identified(mut self, id: Option<DiskId>) -> Self {
+        self.id = id.and_then(|id| KArc::try_new(id).ok());
+        self
+    }
+
+    pub fn id(&self) -> Option<KArc<DiskId>> {
+        self.id.clone()
     }
 
     pub fn engine(&self) -> &KArc<Engine> {

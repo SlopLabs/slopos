@@ -7,9 +7,7 @@
 //! allowing it. `verb` names the button that allows it, from [`VERBS`].
 //! `label` holds any other name a control or a heading shows.
 
-use alloc::format;
-use alloc::string::String;
-use alloc::vec::Vec;
+use slopos_theme_core::words;
 
 use crate::CAPABILITIES;
 
@@ -59,9 +57,9 @@ pub const VERBS: [&str; 31] = [
     "Use",
 ];
 
-/// The policy's vocabulary, and the words the glossary puts another in
-/// place of on screen: a word, or the word and an `s`.
-const JARGON: [&str; 18] = [
+/// The policy's vocabulary, which no screen shows, beside the desktop's
+/// glossary.
+const JARGON: [&str; 8] = [
     "requester",
     "mechanism",
     "principal",
@@ -70,24 +68,6 @@ const JARGON: [&str; 18] = [
     "base",
     "sealed",
     "uid",
-    "machine",
-    "medium",
-    "admin",
-    "reboot",
-    "halt",
-    "volume",
-    "region",
-    "drive",
-    "program",
-    "client",
-];
-
-const PHRASES: [&str; 5] = [
-    "shut down",
-    "boot order",
-    "firmware entry",
-    "end session",
-    "switch person",
 ];
 
 pub fn describe(text: &str) -> Result<(), &'static str> {
@@ -123,37 +103,19 @@ pub fn verb(text: &str) -> Result<(), &'static str> {
 /// The words of a button, a menu entry, a heading or a passing status: a
 /// capital first and no full stop.
 pub fn label(text: &str) -> Result<(), &'static str> {
-    if !text.starts_with(|c: char| c.is_ascii_uppercase()) {
-        return Err("a label starts with a capital");
-    }
-    if text.ends_with('.') {
-        return Err("a label ends without a full stop");
-    }
+    words::label(text, &[])?;
     plain(text)
 }
 
 fn plain(text: &str) -> Result<(), &'static str> {
-    if text.contains("--") {
-        return Err("the words name no flag");
-    }
-    if text.contains("...") {
-        return Err("the words hold no three dots");
-    }
-    let words: Vec<String> = text
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect();
-    let jargon = |word: &String| {
-        let word = word.as_str();
-        JARGON
-            .iter()
-            .any(|&j| word == j || word.strip_suffix('s') == Some(j))
-    };
-    let phrase = |pair: &[String]| PHRASES.contains(&format!("{} {}", pair[0], pair[1]).as_str());
-    if words.iter().any(jargon) || words.windows(2).any(phrase) {
-        return Err("the words use the policy's own, or one the glossary replaces");
-    }
+    words::plain(text, &JARGON).map_err(|why| match why {
+        words::TRADE => "the words use the policy's own, which no part of the dialog names",
+        why => why,
+    })?;
+    no_capability(text)
+}
+
+fn no_capability(text: &str) -> Result<(), &'static str> {
     let capability = text
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())

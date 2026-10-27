@@ -73,12 +73,12 @@ impl Medium {
             dir_and_fs(dir).is_some_and(|(_, stats)| stats.f_type == slopos_abi::fs::BASEFS_MAGIC);
         if !served {
             return Err(format!(
-                "no install medium at {dir}; boot the SlopOS ISO to install"
+                "{dir} holds no installer; start the computer from the SlopOS USB stick or DVD to install"
             ));
         }
         let disk_guid = medium_disk_guid()?.ok_or_else(|| {
             format!(
-                "no install medium: {dir}/{} is missing; boot the SlopOS ISO to install",
+                "{dir}/{} is missing; start the computer from the SlopOS USB stick or DVD to install",
                 layout::MEDIUM_DISK_GUID
             )
         })?;
@@ -102,7 +102,7 @@ impl Medium {
         ] {
             if !medium.has(file) {
                 return Err(format!(
-                    "no install medium: {} is missing; boot the SlopOS ISO to install",
+                    "{} is missing; start the computer from the SlopOS USB stick or DVD to install",
                     medium.path(file).display()
                 ));
             }

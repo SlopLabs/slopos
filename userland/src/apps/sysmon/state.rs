@@ -6,11 +6,12 @@ use std::string::String;
 /// `process_list` truncates to this many entries.
 pub(crate) const MAX_TASKS: usize = 256;
 
-use crate::apps::cpufreq::sample::{Usage, type_name};
+use crate::apps::cpufreq::sample::Usage;
 use crate::syscall::{
     UserCpuInfo, UserCpuPerf, UserCpuPerfInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry,
     core as sys_core,
 };
+use slopos_cpufreq_core::CoreType;
 
 use super::selection::{self, TaskKey};
 use super::{MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes, task_name_string};
@@ -23,29 +24,39 @@ pub(crate) struct NetSummary {
     pub(crate) mac: [u8; 6],
     pub(crate) addr: [u8; 4],
     pub(crate) prefix_len: u8,
+    pub(crate) rx_bytes: u64,
+    pub(crate) rx_packets: u64,
+    pub(crate) tx_bytes: u64,
+    pub(crate) tx_packets: u64,
 }
 
 impl NetSummary {
-    /// The first non-loopback interface, and the first global address on it.
-    ///
-    /// `None` means the query failed or there is no such interface; the panel
-    /// renders that as "unavailable" rather than as "offline".
-    fn fetch() -> Option<Self> {
+    /// The first non-loopback interface, and the first global address on it;
+    /// `None` when there is none, and an error when the query failed.
+    fn fetch() -> Result<Option<Self>, ()> {
         use slopos_abi::net::{
             NET_ADDR_SCOPE_GLOBAL, NET_IFINDEX_NONE, NET_IFKIND_LOOPBACK, NET_Q_ADDRS,
             NET_Q_IFACES, UserAddr, UserIface,
         };
-        let ifaces = crate::net_query::fetch::<UserIface>(NET_Q_IFACES, NET_IFINDEX_NONE).ok()?;
-        let iface = ifaces
+        let ifaces =
+            crate::net_query::fetch::<UserIface>(NET_Q_IFACES, NET_IFINDEX_NONE).map_err(|_| ())?;
+        let Some(iface) = ifaces
             .records
             .iter()
-            .find(|i| i.kind != NET_IFKIND_LOOPBACK)?;
+            .find(|i| i.kind != NET_IFKIND_LOOPBACK)
+        else {
+            return Ok(None);
+        };
 
         let mut out = Self {
             oper_state: iface.oper_state,
             mac: iface.mac,
             addr: [0; 4],
             prefix_len: 0,
+            rx_bytes: iface.rx_bytes,
+            rx_packets: iface.rx_packets,
+            tx_bytes: iface.tx_bytes,
+            tx_packets: iface.tx_packets,
         };
         if let Ok(addrs) = crate::net_query::fetch::<UserAddr>(NET_Q_ADDRS, iface.ifindex)
             && let Some(addr) = addrs
@@ -56,7 +67,7 @@ impl NetSummary {
             out.addr = addr.addr;
             out.prefix_len = addr.prefix_len;
         }
-        Some(out)
+        Ok(Some(out))
     }
 }
 
@@ -116,7 +127,7 @@ pub(crate) struct SysmonApp {
     pub(crate) task_count: usize,
     pub(crate) percpu: [UserPerCpuStats; MAX_CPUS],
     pub(crate) cpu_count: usize,
-    pub(crate) net: Option<NetSummary>,
+    pub(crate) net: Result<Option<NetSummary>, ()>,
     pub(crate) prev_tasks: [UserTaskEntry; MAX_TASKS],
     pub(crate) prev_task_count: usize,
     pub(crate) prev_percpu: [UserPerCpuStats; MAX_CPUS],
@@ -127,9 +138,11 @@ pub(crate) struct SysmonApp {
     pub(crate) perf_count: usize,
     pub(crate) prev_perf: [UserCpuPerf; MAX_CPUS],
     pub(crate) prev_perf_count: usize,
-    /// By `percpu` index: `P`, `E` or `-`, and the busy-weighted clock since
-    /// the last refresh, `None` where the CPU does not report it.
+    /// By `percpu` index: a hybrid part's kind of core in words, empty where
+    /// the part reports none.
     pub(crate) cpu_type: [&'static str; MAX_CPUS],
+    /// By `percpu` index: the busy-weighted clock since the last refresh,
+    /// `None` where the CPU does not report it.
     pub(crate) cpu_eff_mhz: [Option<u64>; MAX_CPUS],
     /// The selected task, not the row it occupies: the table re-sorts on every
     /// refresh, so a row index would slide the highlight onto another task.
@@ -141,7 +154,6 @@ pub(crate) struct SysmonApp {
     pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) last_kill: Option<KillOutcome>,
     pub(crate) sorted_indices: [usize; MAX_TASKS],
-    pub(crate) hardware_scroll_y: i32,
     /// This process's own id, so sysmon cannot be asked to kill itself.
     pub(crate) self_pid: u32,
 }
@@ -156,7 +168,7 @@ impl SysmonApp {
             task_count: 0,
             percpu: [UserPerCpuStats::default(); MAX_CPUS],
             cpu_count: 0,
-            net: None,
+            net: Ok(None),
             prev_tasks: [UserTaskEntry::default(); MAX_TASKS],
             prev_task_count: 0,
             prev_percpu: [UserPerCpuStats::default(); MAX_CPUS],
@@ -167,7 +179,7 @@ impl SysmonApp {
             perf_count: 0,
             prev_perf: [UserCpuPerf::default(); MAX_CPUS],
             prev_perf_count: 0,
-            cpu_type: ["-"; MAX_CPUS],
+            cpu_type: [""; MAX_CPUS],
             cpu_eff_mhz: [None; MAX_CPUS],
             selected: None,
             sort_column: SortColumn::CpuPct,
@@ -177,7 +189,6 @@ impl SysmonApp {
             context_menu: None,
             last_kill: None,
             sorted_indices: [0; MAX_TASKS],
-            hardware_scroll_y: 0,
             self_pid: crate::syscall::process::getpid(),
         };
         app.refresh_data();
@@ -364,7 +375,11 @@ impl SysmonApp {
             let id = self.percpu[i].cpu_id;
             let now = current.iter().find(|c| c.cpu == id && c.online != 0);
             let before = previous.iter().find(|c| c.cpu == id && c.online != 0);
-            self.cpu_type[i] = now.map_or("-", type_name);
+            self.cpu_type[i] = now.map_or("", |cpu| match CoreType::from_raw(cpu.core_type) {
+                CoreType::Core => "performance core",
+                CoreType::Atom => "efficiency core",
+                CoreType::Unreported | CoreType::Other(_) => "",
+            });
             self.cpu_eff_mhz[i] = now
                 .zip(before)
                 .and_then(|(now, before)| Usage::of_samples(before, now).eff_mhz(&self.perf_info));

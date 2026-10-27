@@ -17,7 +17,6 @@ use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KVec, klog_info, lock_class, write_field};
 use slopos_usb_core::bus::Path;
 use slopos_usb_core::cdc::{self, Model, Notification, capability, filter, ntb};
-use slopos_usb_core::device::descriptor::kind;
 use slopos_usb_core::device::request::Setup;
 use slopos_usb_core::device::string;
 use slopos_usb_core::xhci::memory::PAGE_SIZE;
@@ -448,20 +447,7 @@ fn declined(info: &UsbFunction, why: impl core::fmt::Display) -> Result<ProbeOut
 #[inline(never)]
 fn mac_of(control: &Control, index: u8) -> Option<MacAddr> {
     let mut bytes = [0u8; string::MAX_LEN as usize];
-    let read = control
-        .read(
-            Setup::get_descriptor(kind::STRING, 0, 0, string::MAX_LEN),
-            &mut bytes,
-        )
-        .ok()?;
-    let language = string::first_language(&bytes[..read]).unwrap_or(string::ENGLISH);
-    let read = control
-        .read(
-            Setup::get_descriptor(kind::STRING, index, language, string::MAX_LEN),
-            &mut bytes,
-        )
-        .ok()?;
-    cdc::mac_address(&bytes[..read]).map(MacAddr)
+    cdc::mac_address(control.string(index, &mut bytes)?).map(MacAddr)
 }
 
 /// GET_NTB_PARAMETERS, and the device held to NTB-16 IN blocks of the size

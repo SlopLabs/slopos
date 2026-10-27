@@ -5,6 +5,7 @@
 pub mod bot;
 pub mod scsi;
 pub mod transport;
+pub mod usb_id;
 
 #[cfg(test)]
 mod tests;

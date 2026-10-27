@@ -132,6 +132,27 @@ pub struct Inquiry {
     /// The peripheral qualifier says a device is attached at this LUN.
     pub present: bool,
     pub device_type: u8,
+    /// T10 vendor identification as Linux's sysfs `vendor` attribute reads
+    /// it: what the answer lacks, every byte from a NUL on and every byte
+    /// outside 0x20..=0x7e a space.
+    pub vendor: [u8; 8],
+    /// Product identification, likewise.
+    pub product: [u8; 16],
+}
+
+fn sanitised<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
+    let mut field = [0u8; N];
+    let got = bytes.get(at..).unwrap_or_default();
+    let got = &got[..got.len().min(N)];
+    field[..got.len()].copy_from_slice(got);
+    let mut ended = false;
+    for byte in &mut field {
+        ended |= *byte == 0;
+        if ended || !(0x20..=0x7e).contains(byte) {
+            *byte = b' ';
+        }
+    }
+    field
 }
 
 impl Inquiry {
@@ -142,6 +163,8 @@ impl Inquiry {
         Some(Self {
             present: peripheral >> 5 == 0,
             device_type: peripheral & 0x1f,
+            vendor: sanitised(bytes, 8),
+            product: sanitised(bytes, 16),
         })
     }
 
@@ -353,6 +376,32 @@ mod tests {
             "no device at the LUN"
         );
         assert_eq!(Inquiry::parse(&[]), None);
+
+        let mut answer = [0u8; 36];
+        answer[8..16].copy_from_slice(b"QEMU    ");
+        answer[16..32].copy_from_slice(b"QEMU HARDDISK   ");
+        answer[32..36].copy_from_slice(b"2.5+");
+        let named = Inquiry::parse(&answer).unwrap();
+        assert_eq!(
+            (&named.vendor, &named.product),
+            (b"QEMU    ", b"QEMU HARDDISK   ")
+        );
+        let cut = Inquiry::parse(&answer[..20]).unwrap();
+        assert_eq!(
+            (&cut.vendor, &cut.product),
+            (b"QEMU    ", b"QEMU            "),
+            "a short answer keeps what it holds"
+        );
+        let vendor = |field: &[u8]| {
+            let mut answer = [0u8; 36];
+            answer[8..8 + field.len()].copy_from_slice(field);
+            Inquiry::parse(&answer).unwrap().vendor
+        };
+        assert_eq!(&vendor(&[0xff; 8]), b"        ");
+        assert_eq!(&vendor(b"ACME\x7f"), b"ACME    ");
+        assert_eq!(&vendor(b"AB\x01 CD"), b"AB  CD  ");
+        assert_eq!(&vendor("Café".as_bytes()), b"Caf     ");
+        assert_eq!(&vendor(b"AB\0CDEF"), b"AB      ", "nothing past a NUL");
 
         assert_eq!(write_protected(&[3, 0, 0x80, 0]), Some(true));
         assert_eq!(write_protected(&[3, 0, 0x10, 0]), Some(false));

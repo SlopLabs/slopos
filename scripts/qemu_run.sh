@@ -302,6 +302,7 @@ ADD_NO_REBOOT=0
 #   sda      test mode: a blank scratch on a USB stick behind a qemu-xhci at
 #            a fixed address past every other device, so usb-storage stays
 #            graded and adding it moves nothing else on the bus.
+# Each test-mode disk has a `serial=`, which `/dev/disk/by-id` names it by.
 ADD_SCRATCH_DISK=0
 ADD_VERIFIED_DISK=0
 ADD_CAPACITY_DISK=0
@@ -675,16 +676,16 @@ if [ "$ADD_VERIFIED_DISK" = "1" ]; then
     # be trusted.
     QEMU_ARGS+=(
         -drive "file=$VERIFIED_IMG,if=none,id=verified-disk,format=raw,snapshot=on"
-        -device "virtio-blk-pci,drive=verified-disk,disable-legacy=on"
+        -device "virtio-blk-pci,drive=verified-disk,disable-legacy=on,serial=slopos-verified"
     )
 fi
 if [ "$ADD_SCRATCH_DISK" = "1" ]; then
     QEMU_ARGS+=(
         -drive "file=$SCRATCH_DIR/scratch-virtio.img,if=none,id=scratch-virtio,format=raw"
-        -device "virtio-blk-pci,drive=scratch-virtio,disable-legacy=on"
+        -device "virtio-blk-pci,drive=scratch-virtio,disable-legacy=on,serial=slopos-scratch"
         -device "qemu-xhci,id=xhci-test,bus=pcie.0,addr=0x10"
         -blockdev "driver=raw,node-name=scratch-usb,file.driver=file,file.filename=$SCRATCH_DIR/scratch-usb.img"
-        -device "usb-storage,bus=xhci-test.0,drive=scratch-usb"
+        -device "usb-storage,bus=xhci-test.0,drive=scratch-usb,serial=slopos-usb"
     )
 fi
 QEMU_ARGS+=(

@@ -38,13 +38,13 @@ fn task_name_from_slice(bytes: &[u8]) -> String {
 /// discriminants must be a build error here.
 pub(crate) fn task_state(state: u8) -> &'static str {
     match TaskStatus::from_u8(state) {
-        TaskStatus::Running => "Run",
-        TaskStatus::Blocked => "Block",
+        TaskStatus::Running => "Running",
+        TaskStatus::Blocked => "Waiting",
         TaskStatus::Ready => "Ready",
-        TaskStatus::Stopped => "Stop",
-        TaskStatus::Zombie => "Zombie",
-        TaskStatus::Terminated => "Dead",
-        TaskStatus::Invalid => "--",
+        TaskStatus::Stopped => "Stopped",
+        TaskStatus::Zombie => "Ending",
+        TaskStatus::Terminated => "Ended",
+        TaskStatus::Invalid => "Unknown",
     }
 }
 
@@ -62,15 +62,6 @@ pub(crate) fn priority_label(priority: u8) -> &'static str {
 /// userland spawn calls with that priority.
 pub(crate) fn is_idle_task(task: &UserTaskEntry) -> bool {
     TaskPriority::from_u8(task.priority) == TaskPriority::Idle
-}
-
-/// Reader-facing text for a negative syscall return, e.g. `-1` →
-/// `"Operation not permitted (EPERM)"`.
-pub(crate) fn errno_label(rc: i32) -> String {
-    match slopos_abi::errno::Errno::from_raw(rc) {
-        core::option::Option::Some(e) => format!("{} ({})", e.description(), e.name()),
-        core::option::Option::None => format!("unknown error {}", rc),
-    }
 }
 
 pub(crate) fn trim_ascii(bytes: &[u8]) -> String {

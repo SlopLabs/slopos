@@ -24,6 +24,7 @@ pub use disk::EngineDisk;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_boot_core::Guid;
+use slopos_boot_core::disk_id::DiskId;
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
 use slopos_fs::devfs::{
     BlockNodeKind, DEV_NAME_MAX, devfs_block_contents_changed, devfs_register_block_node,
@@ -316,6 +317,7 @@ fn register(
     name: impl FnOnce(&KVec<Disk>) -> Option<DiskName>,
 ) -> Option<DiskName> {
     let generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
+    let id = device.id();
     let name = {
         let mut disks = disks();
         let name = name(&disks).filter(|_| disks.len() < MAX_DISKS)?;
@@ -350,6 +352,7 @@ fn register(
         name.as_bytes(),
         KArc::clone(&reader),
         BlockNodeKind::Disk { partitioned: false },
+        id.clone(),
     ) {
         klog_info!("BLOCK: /dev/{} not published: {:?}", name, e);
     }
@@ -357,7 +360,7 @@ fn register(
         klog_info!("BLOCK: {} partition table unusable: {:?}", name, e);
         (PartitionScheme::None, KVec::new())
     });
-    publish_partitions(&name, &reader, &partitions);
+    publish_partitions(&name, id.as_ref(), &reader, &partitions);
     finish_scan(&name, generation, scheme, partitions);
     Some(name)
 }
@@ -415,6 +418,7 @@ fn scan(
 
 fn publish_partitions(
     name: &DiskName,
+    id: Option<&KArc<DiskId>>,
     reader: &KArc<dyn BlockDevice + Send + Sync>,
     partitions: &[Partition],
 ) {
@@ -435,7 +439,11 @@ fn publish_partitions(
         if let Err(e) = devfs_register_block_node(
             part_name.as_bytes(),
             window,
-            BlockNodeKind::Partition { uuid: entry.uuid },
+            BlockNodeKind::Partition {
+                uuid: entry.uuid,
+                number: entry.number,
+            },
+            id.cloned(),
         ) {
             klog_info!("BLOCK: /dev/{} not published: {:?}", part_name, e);
         }
@@ -774,6 +782,7 @@ pub fn reread(name: &[u8]) -> Result<(), RereadError> {
     for part in old.iter() {
         let _ = devfs_unregister_block_node(part.as_bytes());
     }
+    let id = device.id();
     let reader: KArc<dyn BlockDevice + Send + Sync> = match KArc::try_new(DiskReader(device)) {
         Ok(reader) => reader,
         Err(_) => {
@@ -789,7 +798,7 @@ pub fn reread(name: &[u8]) -> Result<(), RereadError> {
             return Err(RereadError::Table);
         }
     };
-    publish_partitions(&whole, &reader, &partitions);
+    publish_partitions(&whole, id.as_ref(), &reader, &partitions);
     finish_scan(&whole, generation, scheme, partitions);
     Ok(())
 }

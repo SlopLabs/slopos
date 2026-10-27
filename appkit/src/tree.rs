@@ -182,6 +182,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             row_height,
             selected,
             on_select,
+            on_activate,
             on_header_click,
             on_context_menu,
             shows,
@@ -200,6 +201,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                     erase_with(*on_header_click),
                     erase_with(*on_context_menu),
                 )
+                .activating(erase_with(*on_activate))
                 .showing(*shows),
             )
         }

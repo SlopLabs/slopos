@@ -27,7 +27,8 @@ pub fn run_app<A: App>(mut app: A) -> ! {
     );
     let handle = connection::connect().expect("compositor not running");
     let mut win = Window::new(handle.clone(), width, height).expect("failed to create window");
-    win.set_title(app.title());
+    let mut title = app.title();
+    win.set_title(&title);
     let (min, max) = spec.limits();
     let pair = |s: super::constraints::Size| (s.width.max(0) as u32, s.height.max(0) as u32);
     win.set_size_limits(pair(min), max.map_or((0, 0), pair));
@@ -245,6 +246,11 @@ pub fn run_app<A: App>(mut app: A) -> ! {
 
         if needs_rebuild {
             let node = app.view();
+            let now = app.title();
+            if now != title {
+                win.set_title(&now);
+                title = now;
+            }
             let mut scrolled = Vec::new();
             if app.page_key() != page_key {
                 page_key = app.page_key();

@@ -287,7 +287,8 @@ impl WindowManager {
                 // A pure restack changes no geometry but changes occlusion, so
                 // the covered/revealed area must be repainted.
                 let restacked = prev_idx != i;
-                if geometry_changed || restacked {
+                let retitled = self.prev_windows[prev_idx].title != window.title;
+                if geometry_changed || restacked || retitled {
                     self.add_bounds_damage(&old);
                     self.add_bounds_damage(&curr_bounds);
                 }

@@ -354,6 +354,7 @@ version = "0.1.0"
 dependencies = [
  "slopos-boot-core",
  "slopos-remote-core",
+ "slopos-theme-core",
 ]
 
 [[package]]
@@ -453,6 +454,7 @@ dependencies = [
  "slopos-abi",
  "slopos-accounts-core",
  "slopos-remote-core",
+ "slopos-theme-core",
  "slopos-tls-core",
 ]
 

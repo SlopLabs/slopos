@@ -429,7 +429,9 @@ fn a_disk_answers_the_probe_commands() {
     assert_eq!((inquiry.outcome, inquiry.moved), (Outcome::Ok, 36));
     let mut bytes = [0u8; 36];
     b.page.read_bytes(SCRATCH_AT, &mut bytes);
-    assert!(scsi::Inquiry::parse(&bytes).unwrap().is_disk());
+    let inquiry = scsi::Inquiry::parse(&bytes).unwrap();
+    assert!(inquiry.is_disk());
+    assert_eq!(&inquiry.product, b"QEMU HARDDISK   ");
     for _ in 0..2 {
         let ready = b.direct(Command::test_unit_ready());
         assert_eq!(ready.outcome, Outcome::Retry);

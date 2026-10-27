@@ -16,7 +16,7 @@ use slopos_boot_core::gpt::{self, Geometry, Header, Location, Partition, Piece};
 use slopos_boot_core::install::Region;
 use slopos_boot_core::layout;
 use slopos_boot_core::{Guid, install};
-use slopos_installer_core::{Contents, Layout, MbrPartition, human, name_of, type_name};
+use slopos_installer_core::{Contents, Layout, MbrPartition, disk_size, name_of, type_name};
 
 use super::engine::Events;
 use crate::boot_disk::{BlockFile, Table, geometry_of, partition_node, table_of};
@@ -98,13 +98,19 @@ impl Disk {
         }
     }
 
-    pub fn describe(&self) -> String {
-        let mut out = format!("{} — {}", self.node, human(self.geometry.capacity()));
+    /// The disk as the CLI lists it: its node, its maker's name and its
+    /// size, then what it holds.
+    pub fn describe(&self, model: Option<&str>) -> String {
+        let size = disk_size(self.geometry.capacity());
+        let mut out = match model {
+            Some(model) => format!("{} — {model}, {size}", self.node),
+            None => format!("{} — {size}", self.node),
+        };
         match &self.table {
             None => {
                 out.push_str(&format!(
                     ", {}\n",
-                    self.contents.holds().unwrap_or_else(|| "blank".to_owned())
+                    self.contents.holds().unwrap_or_else(|| "empty".to_owned())
                 ));
                 if let Contents::Mbr(parts) = &self.contents {
                     for part in parts {
@@ -112,7 +118,7 @@ impl Disk {
                             "  MBR partition {}: type {:#04x}, {}\n",
                             part.index + 1,
                             part.kind,
-                            human(part.bytes)
+                            disk_size(part.bytes)
                         ));
                     }
                 }
@@ -124,20 +130,20 @@ impl Disk {
                         "  partition {}: {}, {} at {}{}\n",
                         p.entry.number,
                         type_name(&p.entry.type_guid),
-                        human(p.len),
-                        human(p.start),
+                        disk_size(p.len),
+                        disk_size(p.start),
                         match name_of(&p) {
                             name if name.is_empty() => String::new(),
-                            name => format!(", \"{name}\""),
+                            name => format!(", “{name}”"),
                         }
                     ));
                 }
                 for (i, r) in self.regions().iter().enumerate() {
                     out.push_str(&format!(
-                        "  free region {}: {} at {}\n",
+                        "  free space {}: {} at {}\n",
                         i + 1,
-                        human(r.blocks() * self.geometry.block()),
-                        human(r.first_lba * self.geometry.block())
+                        disk_size(r.blocks() * self.geometry.block()),
+                        disk_size(r.first_lba * self.geometry.block())
                     ));
                 }
             }

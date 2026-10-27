@@ -7,7 +7,9 @@ use slopos_boot_core::gpt::{Header, Partition};
 use slopos_boot_core::install::{Place, Plan, ROLES, Role};
 use slopos_boot_core::layout::{self, ALIGN_BYTES, ROOT_TYPE};
 
-use crate::{Contents, Layout, human, partition_node, short, type_name};
+use crate::{
+    Contents, Layout, capitalised, disk_size, partition_node, role_words, short, type_name,
+};
 
 /// An install as it would be done: the disk before and after, what happens
 /// to each partition, and what the install sets up beside them. The same
@@ -48,15 +50,15 @@ pub enum Tag {
 }
 
 impl Tag {
-    /// What the partition comes to, as the review's list tags it.
+    /// What the partition comes to, as the review's list tags it: another
+    /// system's partition taken as the root is formatted like any other.
     pub fn word(self) -> &'static str {
         match self {
             Tag::Erase => "Erased",
             Tag::New => "New",
-            Tag::Format => "Formatted",
+            Tag::Format | Tag::Reuse => "Formatted",
             Tag::Share => "Shared",
             Tag::Keep => "Kept",
-            Tag::Reuse => "Reused",
         }
     }
 }
@@ -275,40 +277,42 @@ impl Proposal {
         matches!(self.role(Role::Root), Some((Tag::Keep, _)))
     }
 
-    /// Each action's partition as the review's list names it.
+    /// Each action's partition as the review's list names it: what it is,
+    /// its node and its size.
     pub fn action_lines(&self) -> Vec<(Tag, String)> {
-        let part = |part: &Part| match part {
-            Part::New { node, bytes, .. } => format!("{}, {}", short(node), human(*bytes)),
-            Part::Existing {
-                node, kind, bytes, ..
-            } if kind.is_empty() => format!("{}, {}", short(node), human(*bytes)),
-            Part::Existing {
-                node, kind, bytes, ..
-            } => format!("{}, {kind}, {}", short(node), human(*bytes)),
+        let part = |what: String, part: &Part| {
+            let (node, bytes) = match part {
+                Part::New { node, bytes, .. } | Part::Existing { node, bytes, .. } => {
+                    (node, *bytes)
+                }
+            };
+            format!("{what} · {} · {}", short(node), disk_size(bytes))
         };
         self.actions
             .iter()
             .map(|action| {
                 let said = match &action.target {
-                    Target::Disk => match self.contents.holds() {
-                        Some(what) => format!("{}, which holds {what}", short(&self.disk)),
-                        None => format!("{}, which is blank", short(&self.disk)),
-                    },
-                    Target::Role(role, p) => format!("{}: {}", role.name(), part(p)),
-                    Target::Other(p) => part(p),
+                    Target::Disk => format!("Everything on {}", short(&self.disk)),
+                    Target::Role(role, p) => part(capitalised(role_words(*role)), p),
+                    Target::Other(p @ Part::Existing { kind, .. }) if !kind.is_empty() => {
+                        part(kind.clone(), p)
+                    }
+                    Target::Other(p) => part("Partition".into(), p),
                 };
                 (action.tag, said)
             })
             .collect()
     }
 
-    /// The other systems the boot menu leaves out, a line each.
+    /// The other systems the startup menu leaves out, a sentence each.
     pub fn left_out(&self) -> impl Iterator<Item = String> + '_ {
         let colliding = self.setup.left_out.iter().map(|title| {
-            format!("leaving \"{title}\" out of the menu: an entry there collides with it")
+            format!(
+                "The startup menu won't offer “{title}”, since an entry there has the same name."
+            )
         });
         let removed = self.setup.removed.iter().map(|title| {
-            format!("leaving \"{title}\" out of the menu: the install removes its loader")
+            format!("The startup menu won't offer “{title}”, since this install erases its startup files.")
         });
         colliding.chain(removed)
     }
@@ -317,35 +321,38 @@ impl Proposal {
     /// say it.
     pub fn review(&self) -> Vec<String> {
         let mut lines = vec![if self.erase {
-            format!("a new partition table: EVERYTHING on {} is lost", self.disk)
+            format!(
+                "A new partition table, deleting everything on {}",
+                self.disk
+            )
         } else {
-            "new entries in its partition table; every other partition stays as it is".into()
+            "New partitions in free space, every other partition kept as it is".into()
         }];
         for action in &self.actions {
             if let Target::Role(role, part) = &action.target {
                 lines.push(format!(
-                    "{}: {}",
-                    role.name(),
+                    "{} partition: {}",
+                    capitalised(role_words(*role)),
                     describe(*role, part, action.tag)
                 ));
             }
         }
         let setup = &self.setup;
         if setup.toolchain {
-            lines.push("/usr/local: the toolchain the medium carries".into());
+            lines.push("Developer tools at /usr/local, from the installer".into());
         }
         match &setup.remote {
             Some(url) if self.keeps_root() => lines.push(format!(
-                "/src/slopos: the root's own if it has one, else the medium's clone, fetching from {url}"
+                "Source code at /src/slopos: the installed system's own if it has one, else the installer's copy, fetching from {url}"
             )),
             Some(url) => lines.push(format!(
-                "/src/slopos: the medium's clone, fetching from {url}"
+                "Source code at /src/slopos: the installer's copy, fetching from {url}"
             )),
             None => {}
         }
         lines.push(match &setup.person {
             Some(person) => format!(
-                "{}: its first administrator, logged in by the desktop, {}",
+                "{}: the first administrator, logged in automatically, {}",
                 person.name,
                 if person.password {
                     "with the password typed"
@@ -353,16 +360,16 @@ impl Proposal {
                     "with no password"
                 }
             ),
-            None => "people: the root's own".into(),
+            None => "Accounts: the installed system's own".into(),
         });
-        lines.push(format!("boots with: {}", setup.cmdline));
+        lines.push(format!("Kernel command line: {}", setup.cmdline));
         lines.push(format!(
-            "firmware entry \"{}\": {}",
+            "Startup order: “{}” {}",
             layout::FIRMWARE_ENTRY,
             if setup.first {
-                "first in the boot order"
+                "first"
             } else {
-                "where it stands in the boot order, or after the systems there"
+                "where it stands, or after the systems already on this computer"
             }
         ));
         lines
@@ -371,7 +378,9 @@ impl Proposal {
 
 fn describe(role: Role, part: &Part, tag: Tag) -> String {
     match part {
-        Part::New { start, bytes, .. } => format!("new, {} at {}", human(*bytes), human(*start)),
+        Part::New { start, bytes, .. } => {
+            format!("new, {} at {}", disk_size(*bytes), disk_size(*start))
+        }
         Part::Existing {
             number,
             kind,
@@ -381,13 +390,15 @@ fn describe(role: Role, part: &Part, tag: Tag) -> String {
             let what = if kind.is_empty() {
                 format!("partition {number}")
             } else {
-                format!("partition {number} ({kind}, {})", human(*bytes))
+                format!("partition {number} ({kind}, {})", disk_size(*bytes))
             };
             match (role, tag) {
-                (Role::Esp, Tag::Format) => format!("{what}, FORMATTED: it holds no volume yet"),
+                (Role::Esp, Tag::Format) => {
+                    format!("{what}, formatted, since it holds no filesystem yet")
+                }
                 (Role::Esp, Tag::Keep) => format!("{what}, made by an earlier install"),
-                (_, Tag::Share) => format!("{what}, shared: SlopOS writes \\EFI\\SlopOS\\ only"),
-                (_, Tag::Format | Tag::Reuse) => format!("{what}, FORMATTED"),
+                (_, Tag::Share) => format!("{what}, shared: SlopOS writes only \\EFI\\SlopOS\\"),
+                (_, Tag::Format | Tag::Reuse) => format!("{what}, formatted"),
                 _ => format!("{what}, kept"),
             }
         }

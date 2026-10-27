@@ -389,25 +389,28 @@ placeholder and its debug write are gone. `appkit_test` holds the chrome's
 surfaces to the audit and `dock_test` the icons' sizes; `ui-shots` adds the
 clock and the power-off question.
 
-### Phase 6: Words and apps
+### Phase 6: Words and apps (done)
 
-- Publish `/dev/disk/by-id` from the block layer.
-- Rewrite `installer-core`'s words, issues and proposal lines to the voice and
-  glossary, and build the installer's pages from `Page`, `PropertyList`,
-  `ListRow`, `Notice` and `Disclosure`. The log moves under *Show details*.
-- Rebuild Files with a `Sidebar`, `Toolbar`, icons and `EmptyState`. Give
-  the editor its one name and its errors a next step. Give the image viewer the same. Fix System Monitor's network
-  row and task counts, and use sentence case for its headings. Give the
-  terminal an inner margin.
-- Give every app entry, title and About box one name.
-
-Grading:
-
-- `installer-core`'s copy rules over every fixture.
-- `installer_ui_test` and `just test-installer`, whose grep of the CLI's
-  output lines moves with the CLI's wording in the same commit.
-- `apps_test` and `editor_test`.
-- A `devfs` test for the `by-id` names on QEMU's NVMe, virtio and USB disks.
+devfs publishes `/dev/disk/by-id` in udev's naming (`boot_core::disk_id`) —
+`nvme-<model>_<serial>_<nsid>` with namespace 1's shorter alias,
+`virtio-<serial>` and `usb-<vendor>_<product>_<serial>-0:<lun>`, each
+partition with `-part<N>` — and the installer names a disk by the model it
+reads there, sized in decimal units. `theme-core::words` holds the glossary
+and the shapes of a label and a sentence, which `priv-core::words` and
+installer-core's copy tests share; those hold every page of every fixture,
+and the CLI's issues, to them. An issue gives a window a fact and a next step
+and the CLI the flag that changes it, and the protocol, version 2, carries a
+disk's model and why it is not offered. The installer's pages are `Page`s of
+`ListRow`s, `PropertyList`s, `Notice`s and `Tag`s, the engine's log under
+*Show details*. Files has a `Sidebar` of places, a `Toolbar`, icons and
+`EmptyState`s; the editor is *Editor* and the image viewer *Image Viewer*
+everywhere, each error saying what to do next, and a window showing a
+document is titled `<document> — <App>`. System Monitor counts real traffic
+and tasks by state under sentence-case headings, and the terminal keeps an
+inner margin. `apps_test` holds every app's entry and title to one name,
+`editor_test` its errors to a next step, `installer_ui_test` each page to the
+audit, and a devfs test the `by-id` names on QEMU's NVMe, virtio and USB
+disks.
 
 ## Grading
 
@@ -645,6 +648,40 @@ Grading:
   series colour is a hash of the person's name and a fallback icon's of the
   app's id, or its title when it gives none (`theme-core::series_of`), as
   libadwaita's avatars are, so each stays the same in every place and boot.
+- **One glossary, stated once.** `theme-core::words` holds it with the
+  shapes of a label and a sentence; a surface adds only the trade words it
+  keeps to its details, so the policy and the installer cannot drift apart.
+- **The window and the CLI speak from one source.** An issue's `words` are
+  the window's fact and next step, its `Display` the CLI's with the flag
+  that changes it, and one test holds both to the rules with the flags
+  stripped.
+- **A disk's model is read from its by-id names.** installer-core takes it
+  from the names devfs already publishes, so no call is added to the base
+  interface. A serial is the last `_` part of such a name, as every NVMe and
+  Bulk-Only serial is.
+- **by-id follows systemd's current rules, per bus.** An NVMe namespace's
+  name ends in its nsid, namespace 1 keeping the older name as an alias, and
+  keeps each whitespace byte as an `_`, as `string_escape=replace` does; a
+  USB or virtio part is trimmed and each run of whitespace one `_`, as
+  `udev_replace_whitespace` does. The rules live in `boot_core::disk_id`,
+  where a host test holds them; a `/` udev keeps is an `_` here, since a
+  name is one directory entry.
+- **A title names the document, then the app.** `<document> — <App>`, read
+  again after every rebuild, as GNOME and Windows title their windows.
+- **An error says what happened, then what to do.** None ends at the fact.
+- **A test interface names variants, not words.** The installer's markers
+  print `Refusal`'s variant, so the wording moves without moving a grep.
+- **The engine's log is a developer's.** Its lines keep the engine's own
+  terms and sit under *Show details*; the voice holds what a page says.
+- **A bare size is GB.** The size box shows decimal units, as a disk is
+  sized, and reads a number without one as gigabytes. The CLI takes `kB` to
+  `TB` as its listing gives them, `K` to `T` as binary, and a bare number
+  as bytes, which scripts pass.
+- **An Alt chord is the app's.** A list or a table moves its choice with
+  the arrows alone, so Alt+Up reaches the app, as a file manager's way up.
+- **A row opens on Enter or a second click.** A table's `on_activate` is
+  separate from its choice, so a key that leaves the choice where it is
+  opens nothing.
 
 ## Constraints
 

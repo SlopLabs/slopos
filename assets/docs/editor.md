@@ -1,6 +1,6 @@
-# Sloped
+# Editor
 
-The SlopOS editor. Tabs, a file tree, syntax highlighting, find and replace,
+The SlopOS text editor. Tabs, a file tree, syntax highlighting, find and replace,
 a command palette, and every edit undoable.
 
 Start it from the dock, or from a shell:

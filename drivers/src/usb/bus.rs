@@ -7,9 +7,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, SpinLock};
 use slopos_ostd::{AllocError, KArc, KVec, KVecDeque, klog_info, lock_class};
-use slopos_usb_core::bus::{Candidate, Node, Path, STORE_CONFIGURATION};
+use slopos_usb_core::bus::{Candidate, Node, Path, STORE_CONFIGURATION, STORE_DEVICE};
 use slopos_usb_core::device::Speed;
-use slopos_usb_core::device::descriptor::{Configuration, Function, MAX_FUNCTIONS};
+use slopos_usb_core::device::descriptor::{
+    Configuration, DEVICE_LEN, DeviceDescriptor, Function, MAX_FUNCTIONS,
+};
 
 use super::xhci::device::{
     Bind, BindState, Control, Device, Pipe, Posted, Queue, ReportSink, Reports, STREAM_IN,
@@ -568,6 +570,14 @@ impl<'d> BoundDevice<'d, UsbBus> {
         let handle = KArc::try_new(value).map_err(|_| BoundError::OutOfMemory)?;
         self.attach(KArc::clone(&handle))?;
         Ok(handle)
+    }
+
+    pub fn device_descriptor(&self) -> Option<DeviceDescriptor> {
+        let device = self.device().ok()?;
+        device.stored(|b| {
+            let bytes = b.get(STORE_DEVICE..STORE_DEVICE + DEVICE_LEN)?;
+            DeviceDescriptor::parse(bytes).ok()
+        })
     }
 
     pub fn descriptors<R>(&self, read: impl FnOnce(&Configuration<'_>) -> R) -> Option<R> {

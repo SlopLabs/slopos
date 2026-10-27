@@ -184,7 +184,7 @@ impl LauncherShelf {
         }
 
         for win in &windows[..(count as usize).min(windows.len())] {
-            let title = title_str(&win.title);
+            let title = win.title_str();
             let app_id = win.app_id.as_str();
             let same_app = |entry: &ShelfEntry| match app_id.is_empty() {
                 true => names_match(&entry.name, title),
@@ -556,15 +556,6 @@ fn full_screen_clip(w: u32, h: u32) -> DamageRect {
         y0: 0,
         x1: w as i32 - 1,
         y1: h as i32 - 1,
-    }
-}
-
-/// The title up to the first NUL, less a character the cut split.
-fn title_str(title: &[u8; 32]) -> &str {
-    let len = title.iter().position(|&b| b == 0).unwrap_or(title.len());
-    match core::str::from_utf8(&title[..len]) {
-        Ok(title) => title,
-        Err(e) => core::str::from_utf8(&title[..e.valid_up_to()]).unwrap_or(""),
     }
 }
 

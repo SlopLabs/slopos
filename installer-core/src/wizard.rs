@@ -4,20 +4,18 @@
 //!
 //! Welcome → Disk → How → Review → Install → Done or Error. Every change on
 //! How proposes again, one proposal in flight at a time; Back keeps every
-//! answer; Error's *Back to review* probes, opens the disk and proposes the
-//! same choices again, landing on How when the disk no longer takes them.
+//! answer; Error's *Try again* probes, opens the disk and proposes the same
+//! choices again, landing on How when the disk no longer takes them.
 
 use alloc::collections::VecDeque;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
-
-use slopos_boot_core::install::Role;
 
 use crate::protocol::{Reply, Request, VERSION};
 use crate::{
-    Choices, Event, Failure, Fit, Issue, Mode, Opened, Part, Proposal, STEPS, Summary, System, Tag,
-    short,
+    Choices, Event, Failure, Fit, Issue, Mode, Opened, Proposal, STEPS, Summary, System, Tag,
+    capitalised,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,9 +62,9 @@ pub enum Input {
     /// The primary button.
     Next,
     Back,
-    /// *Restart*, beside *Back to review* on the Error page.
+    /// *Restart*, beside *Try again* on the Error page.
     Restart,
-    /// *Try SlopOS* or *Keep using the live system*, or the window's close.
+    /// *Try SlopOS* or *Keep trying SlopOS*, or the window's close.
     Close,
 }
 
@@ -117,8 +115,6 @@ pub struct Progress {
     pub step: u32,
     /// The copy under way: its bytes so far and its total.
     pub bytes: Option<(u64, u64)>,
-    /// The step's last log line.
-    pub detail: Option<String>,
     pub log: Vec<String>,
 }
 
@@ -147,7 +143,7 @@ pub struct Wizard {
     progress: Progress,
     summary: Option<Summary>,
     failure: Option<Failure>,
-    /// Error's *Back to review* under way.
+    /// Error's *Try again* under way.
     resume: bool,
 }
 
@@ -287,19 +283,20 @@ impl Wizard {
             Page::Install => {
                 self.failure = Some(Failure {
                     step: self.progress.step,
-                    message: "the installer stopped before it said how the install ended".into(),
+                    message: STOPPED.into(),
                 });
                 self.page = Page::Error;
             }
             Page::Error if self.resume => {
                 self.resume = false;
-                self.note = Some("the installer stopped before the review".into());
+                self.note = Some("The installer stopped before the review. Try again.".into());
             }
             Page::Done | Page::Error => {}
             _ => {
                 self.page = Page::Welcome;
-                self.note
-                    .get_or_insert_with(|| "the installer stopped; it starts again".into());
+                self.note.get_or_insert_with(|| {
+                    "The installer stopped. Choose Install SlopOS to start it again.".into()
+                });
             }
         }
     }
@@ -358,13 +355,9 @@ impl Wizard {
                     Event::Step { index, .. } => {
                         self.progress.step = index;
                         self.progress.bytes = None;
-                        self.progress.detail = None;
                     }
                     Event::Progress { done, total } => self.progress.bytes = Some((done, total)),
-                    Event::Log { line } => {
-                        self.progress.detail = Some(line.clone());
-                        self.progress.log.push(line);
-                    }
+                    Event::Log { line } => self.progress.log.push(line),
                 }
             }
             return Vec::new();
@@ -374,9 +367,7 @@ impl Wizard {
         };
         match (asked, reply) {
             (Asked::Hello, Reply::Hello { version }) if version != VERSION => {
-                self.note = Some(format!(
-                    "the installer speaks version {version} of its protocol, and this window version {VERSION}"
-                ));
+                self.note = Some(MISMATCHED.into());
                 self.asked.clear();
                 self.page = Page::Welcome;
                 Vec::new()
@@ -391,11 +382,11 @@ impl Wizard {
             (Asked::Probe | Asked::Open(_), Reply::Issue(issue)) => {
                 if self.resume {
                     self.resume = false;
-                    self.note = Some(issue.to_string());
+                    self.note = Some(issue.words());
                 } else if self.page == Page::Disk {
                     self.refused = Some(issue);
                 } else {
-                    self.note = Some(issue.to_string());
+                    self.note = Some(issue.words());
                     self.page = Page::Welcome;
                 }
                 Vec::new()
@@ -419,7 +410,7 @@ impl Wizard {
                 Vec::new()
             }
             _ => {
-                self.note = Some("the installer answered out of turn".into());
+                self.note = Some("The installer answered out of turn. Try again.".into());
                 Vec::new()
             }
         }
@@ -599,7 +590,7 @@ impl Wizard {
     }
 
     /// What the window says beside the page: why privd or the engine would
-    /// not go on, or what stopped *Back to review*.
+    /// not go on, or what stopped *Try again*.
     pub fn note(&self) -> Option<&str> {
         self.note.as_deref()
     }
@@ -607,6 +598,11 @@ impl Wizard {
     /// Whether the window waits on privd or the engine.
     pub fn waiting(&self) -> bool {
         !self.idle()
+    }
+
+    /// Whether the engine has been asked for and has not yet started.
+    pub fn starting(&self) -> bool {
+        self.starting
     }
 
     pub fn system(&self) -> Option<&System> {
@@ -700,13 +696,14 @@ impl Wizard {
         &self.progress
     }
 
-    pub fn steps(&self) -> Vec<(&'static str, StepState)> {
+    /// Each step with how far it went, as the Install page lists them.
+    pub fn steps(&self) -> Vec<(String, StepState)> {
         let at = self.progress.step;
         let failed = self.failure.as_ref().map(|f| f.step);
         STEPS
             .iter()
             .zip(1u32..)
-            .map(|(&title, index)| {
+            .map(|(&step, index)| {
                 let state = match self.page {
                     Page::Done => StepState::Done,
                     _ if failed == Some(index) => StepState::Failed,
@@ -714,7 +711,7 @@ impl Wizard {
                     Page::Install if index == at => StepState::Running,
                     _ => StepState::Pending,
                 };
-                (title, state)
+                (capitalised(step), state)
             })
             .collect()
     }
@@ -766,19 +763,13 @@ impl Wizard {
             Page::How => "Review".into(),
             Page::Review => self.scenario(),
             Page::Install => String::new(),
-            Page::Done => "Restart now".into(),
-            Page::Error => "Back to review".into(),
+            Page::Done => "Restart".into(),
+            Page::Error => "Try again".into(),
         }
     }
 
     fn kind(&self) -> Option<Kind> {
         self.answers.as_ref().map(|a| a.kind)
-    }
-
-    fn root_node(&self) -> Option<&str> {
-        match self.proposal()?.role(Role::Root)?.1 {
-            Part::Existing { node, .. } | Part::New { node, .. } => Some(short(node)),
-        }
     }
 
     /// Whether the install formats a partition the disk holds.
@@ -793,41 +784,34 @@ impl Wizard {
 
     /// The Review page's primary button, named by what it does.
     fn scenario(&self) -> String {
-        let disk = self.answers.as_ref().map_or("", |a| short(&a.disk));
-        let root = self.root_node().unwrap_or("");
         match self.kind() {
-            Some(Kind::Erase) | None => format!("Erase {disk} and install"),
+            Some(Kind::Erase) | None => Kind::Erase.title().into(),
             Some(Kind::Free) => match self.proposal().and_then(|p| p.setup.beside.first()) {
                 Some(other) => format!("Install beside {other}"),
-                None => format!("Install in the free space on {disk}"),
+                None => "Install".into(),
             },
-            Some(Kind::Reuse) => format!("Format {root} and install"),
-            Some(Kind::Reinstall) if self.keeps_root() => "Reinstall SlopOS".into(),
-            Some(Kind::Reinstall) => format!("Format {root} and reinstall SlopOS"),
+            Some(Kind::Reuse) => "Erase partition and install".into(),
+            Some(Kind::Reinstall) if self.keeps_root() => Kind::Reinstall.title().into(),
+            Some(Kind::Reinstall) => "Erase and reinstall SlopOS".into(),
         }
     }
 
     /// The Review page's checkbox, worded by the damage the install does.
     pub fn confirmation(&self) -> String {
-        let disk = self.answers.as_ref().map_or("", |a| short(&a.disk));
-        let root = self.root_node().unwrap_or("");
-        match self.kind() {
-            Some(Kind::Erase) | None => {
-                format!("I understand that everything on {disk} will be erased")
+        let said = match self.kind() {
+            Some(Kind::Erase) | None => "everything on this disk will be deleted",
+            Some(Kind::Free) if self.formats() => {
+                "new partitions will be made in free space, and the partitions marked Formatted will be erased"
             }
-            Some(Kind::Free) if self.formats() => format!(
-                "I understand that new partitions will be created in free space on {disk}, and what the review says is formatted"
-            ),
-            Some(Kind::Free) => format!(
-                "I understand that new partitions will be created in free space on {disk}, and nothing else on it changes"
-            ),
-            Some(Kind::Reinstall) if self.keeps_root() => format!(
-                "I understand that SlopOS on {disk} will be replaced, keeping what {root} holds"
-            ),
-            Some(Kind::Reuse | Kind::Reinstall) => {
-                format!("I understand that {root} will be formatted")
+            Some(Kind::Free) => {
+                "new partitions will be made in free space, and nothing else on the disk changes"
             }
-        }
+            Some(Kind::Reinstall) if self.keeps_root() => {
+                "SlopOS will be replaced, and its accounts and their files kept"
+            }
+            Some(Kind::Reuse | Kind::Reinstall) => "what's marked Formatted will be erased",
+        };
+        format!("I understand that {said}")
     }
 }
 
@@ -863,9 +847,13 @@ fn fitting_roots(opened: &Opened) -> Vec<u32> {
         .collect()
 }
 
+/// What an install that ended before it said how fails with.
+const STOPPED: &str = "the installer stopped before it said how the install ended";
+const MISMATCHED: &str = "This window doesn't match the installer. Restart the computer from the installer, then try again.";
+
 mod words;
 
-pub use words::{Row, words};
+pub use words::{Heading, Note, Row, Severity, holding, say};
 
 #[cfg(test)]
 mod tests;

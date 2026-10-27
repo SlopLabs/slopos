@@ -37,14 +37,23 @@ fn issues() -> Vec<Issue> {
         root: None,
     };
     vec![
-        Issue::Medium("no install medium at /media/install".into()),
+        Issue::Medium("/media/install holds no installer".into()),
         Issue::Probe("/dev: gone".into()),
         Issue::Disk("".into()),
         Issue::OnlyErase {
             node: "/dev/vda".into(),
-            holds: "nothing".into(),
+            contents: Contents::Mbr(vec![MbrPartition {
+                index: 1,
+                kind: 0x07,
+                bytes: GIB,
+            }]),
+        },
+        Issue::OnlyErase {
+            node: "/dev/vda".into(),
+            contents: Contents::Blank,
         },
         Issue::NothingToKeep("/dev/vda3".into()),
+        Issue::NoRoot("/dev/vda".into()),
         Issue::Esp("full".into()),
         Issue::Person("bad".into()),
         Issue::Menu("no".into()),
@@ -90,14 +99,22 @@ fn system() -> System {
         disks: vec![
             Disk {
                 node: "/dev/sda".into(),
-                state: DiskState::Refused("the install medium".into()),
+                model: Some("QEMU QEMU HARDDISK".into()),
+                state: DiskState::Refused(Refusal::Medium),
+            },
+            Disk {
+                node: "/dev/sdb".into(),
+                model: None,
+                state: DiskState::Refused(Refusal::ReadOnly),
             },
             Disk {
                 node: "/dev/sdc".into(),
+                model: None,
                 state: DiskState::Unreadable("/dev/sdc: I/O error".into()),
             },
             Disk {
                 node: "/dev/vda".into(),
+                model: None,
                 state: DiskState::Listed(Listing {
                     capacity: 4 * GIB,
                     block: 4096,
@@ -119,6 +136,7 @@ fn system() -> System {
             },
             Disk {
                 node: "/dev/nvme0n1".into(),
+                model: Some("KINGSTON SNV3S1000G".into()),
                 state: DiskState::Listed(Listing {
                     capacity: 16 * GIB,
                     block: 512,

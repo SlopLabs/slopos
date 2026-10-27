@@ -22,8 +22,9 @@ use grid::TerminalGrid;
 use input::{CompositorEvent, KeyAction, KeyBytes, MouseEventKind, PointerState, Selection};
 use slopos_terminal_core::damage::{CellDamage, DamageHistory};
 
-const WINDOW_WIDTH: i32 = 640;
-const WINDOW_HEIGHT: i32 = 480;
+/// The grid a window opens with.
+const OPEN_COLS: i32 = 80;
+const OPEN_ROWS: i32 = 30;
 /// Buffers `SoftSurface` cycles. The damage history is sized to match so a
 /// recycled slot's age always resolves against a recorded frame.
 const SURFACE_BUFFERS: usize = 2;
@@ -50,7 +51,10 @@ pub fn terminal_user_main() {
     let handle = connection::connect().expect("compositor not running");
     surface::init_handle(handle.clone());
 
-    if !surface::init(WINDOW_WIDTH, WINDOW_HEIGHT) {
+    let (cw, ch) = cell_metrics();
+    let width = OPEN_COLS * cw + 2 * render::MARGIN;
+    let height = OPEN_ROWS * ch + 2 * render::MARGIN;
+    if !surface::init(width, height) {
         panic!("terminal: surface init failed");
     }
     surface::set_title("Terminal");
@@ -75,10 +79,8 @@ pub fn terminal_user_main() {
     };
 
     // The shell needs a sane TERM size before the first Configure arrives.
-    let cw = crate::gfx::font::cell_width().max(1);
-    let ch = crate::gfx::font::cell_height().max(1);
-    let cols = (WINDOW_WIDTH / cw).clamp(1, grid::MAX_COLS as i32) as u16;
-    let rows = (WINDOW_HEIGHT / ch).clamp(1, grid::MAX_ROWS as i32) as u16;
+    let cols = render::cells_in(width, cw, grid::MAX_COLS);
+    let rows = render::cells_in(height, ch, grid::MAX_ROWS);
     push_winsize(master_fd, rows, cols);
 
     spawn_shell_on_slave(slave_fd);
@@ -276,10 +278,9 @@ async fn event_loop(
                 }
                 CompositorEvent::Resize(w, h) => {
                     if surface::resize(w as u32, h as u32) {
-                        let cw = crate::gfx::font::cell_width().max(1);
-                        let ch = crate::gfx::font::cell_height().max(1);
-                        let cols = (w / cw).clamp(1, grid::MAX_COLS as i32) as u16;
-                        let rows = (h / ch).clamp(1, grid::MAX_ROWS as i32) as u16;
+                        let (cw, ch) = cell_metrics();
+                        let cols = render::cells_in(w, cw, grid::MAX_COLS);
+                        let rows = render::cells_in(h, ch, grid::MAX_ROWS);
                         // A width change re-wraps scrollback, so the selection
                         // endpoints go through the reflow to stay valid. A
                         // height change leaves absolute line numbering intact.
@@ -307,6 +308,7 @@ async fn event_loop(
                     return ExitReason::Closed;
                 }
                 CompositorEvent::PointerMotion(x, y) | CompositorEvent::PointerEnter(x, y) => {
+                    let (x, y) = (x - render::MARGIN, y - render::MARGIN);
                     // Only on enter is the focus serial that authorizes a
                     // cursor request current.
                     if matches!(evt, slopos_protocol::types::Event::PointerEnter { .. }) {

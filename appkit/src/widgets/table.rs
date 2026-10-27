@@ -24,6 +24,7 @@ pub struct TableWidget {
     selected: Option<usize>,
     hovered_row: Option<usize>,
     on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
+    on_activate: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     on_header_click: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     on_context_menu: Option<Box<dyn Fn(ContextMenuAt) -> Box<dyn Any>>>,
     scroll_offset: i32,
@@ -70,6 +71,7 @@ impl TableWidget {
             selected,
             hovered_row: None,
             on_select,
+            on_activate: None,
             on_header_click,
             on_context_menu,
             scroll_offset: 0,
@@ -200,15 +202,30 @@ impl TableWidget {
         (index < self.row_count()).then_some(index)
     }
 
+    /// Emitted by Enter and by a click on the row already chosen.
+    pub fn activating(mut self, on_activate: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>) -> Self {
+        self.on_activate = on_activate;
+        self
+    }
+
     /// Select `row` and emit, skipping the emit when it is already selected so
-    /// a repeated click does not churn the app's state.
+    /// a repeated key or click does not churn the app's state.
     fn select_row(&mut self, row: usize, sink: &mut MessageSink) {
-        if self.selected == Some(row) {
-            return;
-        }
+        let changed = self.selected != Some(row);
         self.selected = Some(row);
-        if let Some(cb) = &self.on_select {
+        self.scroll_to_selected();
+        if let Some(cb) = self.on_select.as_ref().filter(|_| changed) {
             sink.emit_raw(cb(row));
+        }
+    }
+
+    fn activate(&mut self, row: usize, sink: &mut MessageSink) -> EventResponse {
+        match &self.on_activate {
+            Some(cb) => {
+                sink.emit_raw(cb(row));
+                EventResponse::Consumed
+            }
+            None => EventResponse::Ignored,
         }
     }
 
@@ -462,6 +479,10 @@ impl Widget for TableWidget {
                 };
 
                 match button {
+                    PointerButton::Left if self.selected == Some(index) => {
+                        self.activate(index, sink);
+                        EventResponse::Consumed
+                    }
                     PointerButton::Left => {
                         self.select_row(index, sink);
                         EventResponse::Consumed
@@ -538,7 +559,7 @@ impl Widget for TableWidget {
             // Only when this widget holds the keyboard focus: a key is offered
             // to every widget in turn until one consumes, so answering one
             // unfocused takes it from whatever the user was actually aiming at.
-            WidgetEvent::KeyDown { key, modifiers, .. } if self.focused => {
+            WidgetEvent::KeyDown { key, modifiers, .. } if self.focused && !modifiers.alt => {
                 let rc = self.row_count();
                 if rc == 0 {
                     return EventResponse::Ignored;
@@ -561,84 +582,50 @@ impl Widget for TableWidget {
                 }
 
                 match key {
-                    Key::Named(NamedKey::Up) => {
-                        if let Some(sel) = self.selected {
-                            if sel > 0 {
-                                self.selected = Some(sel - 1);
-                                self.scroll_to_selected();
-                                if let Some(cb) = &self.on_select {
-                                    sink.emit_raw(cb(sel - 1));
-                                }
-                                return EventResponse::Consumed;
-                            }
-                        } else {
-                            self.selected = Some(0);
-                            self.scroll_to_selected();
-                            if let Some(cb) = &self.on_select {
-                                sink.emit_raw(cb(0));
-                            }
-                            return EventResponse::Consumed;
+                    Key::Named(NamedKey::Up) => match self.selected {
+                        Some(0) => EventResponse::Ignored,
+                        Some(sel) => {
+                            self.select_row(sel - 1, sink);
+                            EventResponse::Consumed
                         }
-                        EventResponse::Ignored
-                    }
-                    Key::Named(NamedKey::Down) => {
-                        if let Some(sel) = self.selected {
-                            if sel + 1 < rc {
-                                self.selected = Some(sel + 1);
-                                self.scroll_to_selected();
-                                if let Some(cb) = &self.on_select {
-                                    sink.emit_raw(cb(sel + 1));
-                                }
-                                return EventResponse::Consumed;
-                            }
-                        } else {
-                            self.selected = Some(0);
-                            self.scroll_to_selected();
-                            if let Some(cb) = &self.on_select {
-                                sink.emit_raw(cb(0));
-                            }
-                            return EventResponse::Consumed;
+                        None => {
+                            self.select_row(0, sink);
+                            EventResponse::Consumed
                         }
-                        EventResponse::Ignored
-                    }
+                    },
+                    Key::Named(NamedKey::Down) => match self.selected {
+                        Some(sel) if sel + 1 >= rc => EventResponse::Ignored,
+                        Some(sel) => {
+                            self.select_row(sel + 1, sink);
+                            EventResponse::Consumed
+                        }
+                        None => {
+                            self.select_row(0, sink);
+                            EventResponse::Consumed
+                        }
+                    },
                     Key::Named(NamedKey::Home) => {
-                        self.selected = Some(0);
-                        self.scroll_to_selected();
-                        if let Some(cb) = &self.on_select {
-                            sink.emit_raw(cb(0));
-                        }
+                        self.select_row(0, sink);
                         EventResponse::Consumed
                     }
                     Key::Named(NamedKey::End) => {
-                        self.selected = Some(rc - 1);
-                        self.scroll_to_selected();
-                        if let Some(cb) = &self.on_select {
-                            sink.emit_raw(cb(rc - 1));
-                        }
+                        self.select_row(rc - 1, sink);
                         EventResponse::Consumed
                     }
                     Key::Named(NamedKey::PageUp) => {
-                        let page = self.page_size();
                         let sel = self.selected.unwrap_or(0);
-                        let new_sel = sel.saturating_sub(page);
-                        self.selected = Some(new_sel);
-                        self.scroll_to_selected();
-                        if let Some(cb) = &self.on_select {
-                            sink.emit_raw(cb(new_sel));
-                        }
+                        self.select_row(sel.saturating_sub(self.page_size()), sink);
                         EventResponse::Consumed
                     }
                     Key::Named(NamedKey::PageDown) => {
-                        let page = self.page_size();
                         let sel = self.selected.unwrap_or(0);
-                        let new_sel = (sel + page).min(rc - 1);
-                        self.selected = Some(new_sel);
-                        self.scroll_to_selected();
-                        if let Some(cb) = &self.on_select {
-                            sink.emit_raw(cb(new_sel));
-                        }
+                        self.select_row((sel + self.page_size()).min(rc - 1), sink);
                         EventResponse::Consumed
                     }
+                    Key::Named(NamedKey::Enter) => match self.selected {
+                        Some(row) => self.activate(row, sink),
+                        None => EventResponse::Ignored,
+                    },
                     _ => EventResponse::Ignored,
                 }
             }
