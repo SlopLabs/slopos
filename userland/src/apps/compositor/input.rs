@@ -13,8 +13,8 @@ use super::MAX_WINDOWS;
 use super::decorations;
 use super::dock::LauncherShelf;
 use super::menu_bar::SystemBar;
-use super::output::WINDOW_STATE_MINIMIZED;
 use super::popover::Panel;
+use slopos_abi::surface::{WINDOW_STATE_MAXIMIZED, WINDOW_STATE_MINIMIZED};
 
 /// What a press on compositor chrome asks the frame loop to do.
 ///
@@ -315,19 +315,16 @@ impl InputHandler {
     }
 
     /// Ends any active grab at the position accumulated up to this event.
-    pub fn on_button_release(&mut self, button: u8, proto: Option<&mut ProtocolBridge>) -> bool {
+    pub fn on_button_release(&mut self, button: u8, proto: Option<&mut ProtocolBridge>) {
         self.mouse_buttons &= !button;
         if button & 0x01 == 0 {
-            return true;
+            return;
         }
         if self.dragging {
             self.stop_drag();
-            return false;
         } else if self.resizing {
             self.stop_resize(proto);
-            return false;
         }
-        true
     }
 
     /// Hit-tests at the pointer position accumulated up to this event, routing
@@ -339,7 +336,6 @@ impl InputHandler {
         button: u8,
         fb_width: i32,
         fb_height: i32,
-        shelf_height: i32,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
         shelf: &LauncherShelf,
@@ -405,7 +401,6 @@ impl InputHandler {
                     &window,
                     fb_width,
                     fb_height,
-                    shelf_height,
                     windows,
                     window_count,
                     &mut proto,
@@ -451,7 +446,6 @@ impl InputHandler {
         window: &UserWindowInfo,
         fb_width: i32,
         fb_height: i32,
-        shelf_height: i32,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
         proto: &mut Option<&mut ProtocolBridge>,
@@ -467,7 +461,6 @@ impl InputHandler {
             }
             2 if window.fixed_size => {}
             2 => {
-                const WINDOW_STATE_MAXIMIZED: u8 = 2;
                 if window.state == WINDOW_STATE_MAXIMIZED {
                     if let Some(geo) = self.restore_geometry.iter().find(|g| g.0 == window.task_id)
                     {
@@ -499,16 +492,15 @@ impl InputHandler {
                             window.effective_height(),
                         );
                     }
-                    // Fill the screen between the system bar and the shelf.
-                    let max_y = SYSTEM_BAR_HEIGHT + TITLE_BAR_HEIGHT;
-                    let max_w = fb_width as u32;
-                    let max_h =
-                        (fb_height - SYSTEM_BAR_HEIGHT - TITLE_BAR_HEIGHT - shelf_height) as u32;
+                    let area = work_area(fb_width as u32, fb_height as u32);
+                    let max_y = area.y + TITLE_BAR_HEIGHT;
+                    let max_w = area.w as u32;
+                    let max_h = (area.h - TITLE_BAR_HEIGHT) as u32;
                     if let Some(p) = proto.as_deref_mut() {
                         let (w, h) =
                             p.clamp_window_size(window.task_id, max_w as i32, max_h as i32);
                         let (max_w, max_h) = (w as u32, h as u32);
-                        p.set_window_position(window.task_id, 0, max_y);
+                        p.set_window_position(window.task_id, area.x, max_y);
                         p.set_window_size(window.task_id, max_w, max_h);
                         p.set_window_state(window.task_id, WINDOW_STATE_MAXIMIZED);
                         p.send_configure_for_task(
@@ -813,9 +805,8 @@ impl InputHandler {
         &self,
         hit: &CursorHit,
         windows: &[UserWindowInfo; MAX_WINDOWS],
-        focused_task: u32,
     ) -> u32 {
-        if focused_task == 0 || !hit.is_window() || hit.task_id != focused_task {
+        if !hit.is_window() {
             return 0;
         }
         let w = &windows[hit.window_idx];

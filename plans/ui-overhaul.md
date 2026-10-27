@@ -17,10 +17,6 @@ When this plan is done:
   `EmptyState`. Text overflow, focus, hover, disabled states and spacing are
   handled by the toolkit. A gate fails the build when an app draws with raw
   colours or sizes.
-- **Polished chrome.** Windows open centred or cascaded, frames and shadows
-  are rounded and anti-aliased, the clock shows the time of day, and the
-  system menu can restart and power off the computer. The lock screen and
-  login screen look like part of the same system.
 - **Plain words.** One voice and one glossary across the installer, the
   chrome and the apps, as privd and its dialog already speak. Host tests
   hold the rules wherever text is data.
@@ -32,8 +28,7 @@ When this plan is done:
 
 The evidence comes from `ROULETTE=0 just iso`, booted headless with a QMP
 socket at 1920 × 1080. `screendump` captured the welcome, every installer
-page, the dock, the terminal, Files, the editor,
-System Monitor, the system menu and the lock screen.
+page, the terminal, Files, the editor and System Monitor.
 
 ### Toolkit
 
@@ -44,29 +39,7 @@ System Monitor, the system menu and the lock screen.
 - Files truncates a path by byte index (`build_navbar`), which panics on a
   multi-byte path.
 - Files shows `[D] bin` for a folder, uses the letters `/ ~ T D B S` for its
-  places, and labels its navigation buttons `<`, `>` and `^`. The dock shows
-  letter tiles, 64 × 64 PNGs of `E F I M T`.
-
-### Compositor chrome
-
-- Title bars take `chrome`, which is the window's `surface`, but their top
-  corners are rounded without anti-aliasing (`decorations.rs`), the bottom
-  corners are square, and the shadow is a square halo. The three window
-  buttons are aliased circles.
-- Every window opens at (100, 100) (`compositor/protocol.rs:136`). The
-  terminal, Files and System Monitor stacked on the installer, and the
-  installer covered the wallpaper's logo.
-- The clock is uptime, not the time of day (`status_item.rs:74`), even though
-  `CLOCK_REALTIME` answers the wall clock the loader anchored.
-- The system menu offers *Lock*, *Switch person*, *Log out* and *Restart
-  session*, with no hover and no icons. There is no way to
-  restart or power off the computer from the desktop.
-- The lock screen reads "user's desktop is locked" above a field and the
-  hint "Enter: unlock  F2: switch person". It has no clock, no
-  wallpaper and no button. The login screen reads "Log in: a, b, c" above
-  "Up, Down: choose  Tab: next field  Enter: log in".
-- A reachable placeholder draws "Window content pending migration" and writes
-  `DEBUG: draw_window_placeholder called!` to stderr (`renderer.rs`).
+  places, and labels its navigation buttons `<`, `>` and `^`.
 
 ### Words
 
@@ -260,8 +233,8 @@ component to use when.
   *Switch user…* and *Log out…*, then *Restart…* and *Power off…*. The last
   two ask privd for `org.slopos.power.reboot` and `.poweroff`, which already
   allow `user alone`. When a new base changed the desktop, a notice at the
-  top reads "Restart the desktop to finish updating" with a *Restart desktop*
-  button, in place of a permanent *Restart session* entry.
+  top reads "Restart the desktop to finish updating" with a *Restart
+  desktop…* button, in place of a permanent *Restart session* entry.
 - **Lock and login screens.** These use the wallpaper, dimmed, with the time
   and date large, a circle with the person's initial, their name, a password
   field with the placeholder "Password", and an *Unlock* or *Log in* button.
@@ -392,18 +365,29 @@ dialog to the audit at three widths and names a base program, a copy in
 `/usr/local` and one whose `/usr/local` entry claims System Monitor;
 `extension_action_test` names an extension's own program.
 
-### Phase 5: Chrome
+### Phase 5: Chrome (done)
 
-- Rework window frames, shadows and placement.
-- Make the clock show wall time, and add power entries and the update notice
-  to the system menu.
-- Rebuild the lock and login screens and the popovers through the embedded
-  runner. Redraw the dock's icons.
-- Remove the placeholder.
-
-Grading: the compositor's existing tests, `apps_test` and `dock_test`, plus a
-`chrome-core` host test of the placement rule (centred, cascaded, never under
-the dock, shrunk to fit). The `ui-shots` scenes show the result.
+Frames are rounded at all four corners, their edges' coverage taken from
+`gfx::rounded`'s signed distance; the shadow follows the rounded rect, half
+as dark without focus, and the window buttons are anti-aliased discs, grey
+without focus, that show their colours and glyphs while the group is
+hovered. `chrome-core::placement` centres an app's first window between the
+menu bar and the dock and cascades its later ones, which the compositor
+applies when a toplevel first shows. The clock is `HH:MM` of
+`CLOCK_REALTIME` in UTC (`chrome-core::clock`), its date a click away, and
+the status items are icon-font glyphs. The lock and login screens, the
+system menu, the network and clock panels and the question each ending asks
+are appkit trees (`compositor::views`) over chrome-core's `gate` and `menu`
+models, drawn with appkit's new `Avatar` and theme-core's `Hero` role;
+*Restart…* and *Power off…* ask privd for `org.slopos.power.reboot` and
+`.poweroff`, *Restart desktop…* sits in the update notice, and an ending
+that did not happen says so where its question was. Every shipped app icon
+is `appkit::app_icon`'s template at 64 and 128 px, rendered by `just icons`
+and held to it by `tools/icons`' host test; the dock draws the 64 px one,
+and the template, tinted by app id, for an app that ships none. The
+placeholder and its debug write are gone. `appkit_test` holds the chrome's
+surfaces to the audit and `dock_test` the icons' sizes; `ui-shots` adds the
+clock and the power-off question.
 
 ### Phase 6: Words and apps
 
@@ -627,6 +611,40 @@ Grading:
 - **Words that are data are held where they are stated.** A refusal is a
   sentence a host test holds, and an in-guest test compares with that
   sentence rather than a copy of its words.
+- **Windows are placed per app.** An app's later window cascades from its
+  own latest, known by app id or else by client, as mutter places them, so
+  another app's windows never push it along; one too large for the area is
+  shrunk only as far as its minimum.
+- **A shadow keeps its reach.** Focus changes how dark it is, never how far
+  it goes, as libadwaita's do, so a change of focus repaints the same pixels;
+  where two shadows overlap both darken, as they would.
+- **A choice that ends something asks once and never counts down.**
+  *Restart desktop…*, *Log out…*, *Restart…* and *Power off…* ask with
+  Cancel focused. GNOME's sixty-second countdown is not taken: a question
+  that answers itself ends someone's work while they are away.
+- **An ending that did not happen says so.** Its question's place says what
+  did not happen and to try again, unless the person refused privd's
+  question themselves; why goes to the log, as a refusal's does.
+- **A panel the person opened takes the keyboard.** A key pressed while a
+  panel or the system menu is open is the panel's, as a GNOME Shell menu's
+  is, so nothing typed reaches the window beneath it unseen. The menu that
+  opens on its own to offer a restart takes none until the pointer reaches
+  it: whoever was typing goes on typing.
+- **What a person can type at a list chooses from it.** Typing on the login
+  screen's list chooses the first person whose name starts with what was
+  typed, as a GTK list does, so the keyboard's way in is still a name, Tab,
+  a password and Enter.
+- **Shipped icons are rendered, never drawn by hand.** One template renders
+  every icon the system ships and the dock's fallback; a host test holds the
+  PNGs to it, so a change to the template or the theme fails until `just
+  icons` renders them again. Each ships at 64 px and twice that. The dock
+  draws the 64 px one, which it never draws past, since its filter samples
+  two pixels a side and a larger source would skip pixels; the larger waits
+  for a scale factor.
+- **A colour that names something comes from its name.** An avatar's
+  series colour is a hash of the person's name and a fallback icon's of the
+  app's id, or its title when it gives none (`theme-core::series_of`), as
+  libadwaita's avatars are, so each stays the same in every place and boot.
 
 ## Constraints
 

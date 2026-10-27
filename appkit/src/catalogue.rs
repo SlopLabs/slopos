@@ -29,6 +29,7 @@ pub enum Msg {
     Size(LineEditInput),
     Select(usize),
     Place(usize),
+    Person(usize),
     /// Which disclosure.
     Expand(usize),
     OpenDialog,
@@ -94,6 +95,7 @@ pub struct Catalogue {
     filter: (LineInput, bool),
     row: Option<usize>,
     place: Option<usize>,
+    person: Option<usize>,
     expanded: [bool; 2],
     dialog: bool,
 }
@@ -114,6 +116,7 @@ impl Catalogue {
             filter: (LineInput::new(), false),
             row: Some(0),
             place: Some(1),
+            person: Some(0),
             expanded: [true, false],
             dialog: true,
         }
@@ -176,6 +179,7 @@ impl Catalogue {
 
     fn text(&self) -> Node<Msg> {
         let roles = [
+            (TextRole::Hero, "14:05"),
             (TextRole::Display, "Display, for a page that is one number"),
             (TextRole::Title, "Title, for a page or a dialog"),
             (TextRole::Heading, "Heading, for a section"),
@@ -467,6 +471,9 @@ impl Catalogue {
                 vec![ListRow::new("Root").icon(Icon::HardDrive)],
             ),
         ];
+        let people = ["ada", "grace", "Édouard"]
+            .map(|name| ListRow::new(name).avatar())
+            .to_vec();
         Self::sections(vec![
             Section::new(
                 "Rows with details",
@@ -478,6 +485,19 @@ impl Catalogue {
                 List::sectioned(places)
                     .selected(self.place)
                     .on_select(Msg::Place),
+            )
+            .into(),
+            Section::new(
+                "People",
+                Self::column(vec![
+                    Node::Avatar {
+                        name: String::from("Ada"),
+                    },
+                    List::new(people)
+                        .selected(self.person)
+                        .on_select(Msg::Person)
+                        .into(),
+                ]),
             )
             .into(),
         ])
@@ -771,6 +791,7 @@ impl App for Catalogue {
             Msg::Size(input) => edit(&mut self.size, input),
             Msg::Select(row) => self.row = Some(row),
             Msg::Place(row) => self.place = Some(row),
+            Msg::Person(row) => self.person = Some(row),
             Msg::Expand(i) => self.expanded[i] = !self.expanded[i],
             Msg::OpenDialog => self.dialog = true,
             Msg::CloseDialog => self.dialog = false,

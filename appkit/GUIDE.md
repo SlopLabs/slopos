@@ -88,7 +88,7 @@ last resort.
 | `Notice` | Something the person must know before going on. Its tone picks its icon: info, success, warning, danger. It can carry one action. |
 | `ButtonRow` | The buttons that end a page or a dialog. `.back()` and `.aside()` go on the left, and `.cancel()`, `.confirm()` and `.destructive()` on the right, in the order you add them; the one that finishes goes last. In a `Page`'s or a dialog's footer, Enter presses the confirming button and Escape presses back or cancel. Enter never reaches a destructive button through the footer: only one that has focus takes it. Left and Right move focus along the row. |
 | `Button` | A single button outside a row. A button is secondary unless you call `.primary()` or `.destructive()`. |
-| `List`, `ListRow` | Rows the person chooses from, such as disks, places or results. The whole list is one tab stop and the arrows move the choice. Enter opens the chosen row when the list has something to open, and otherwise reaches the page's `ButtonRow`. A row that cannot be chosen is built with `.disabled(reason)`, and the reason is shown in place of its detail. |
+| `List`, `ListRow` | Rows the person chooses from, such as disks, places or results. The whole list is one tab stop and the arrows move the choice. Enter opens the chosen row when the list has something to open, and otherwise reaches the page's `ButtonRow`. A row that cannot be chosen is built with `.disabled(reason)`, and the reason is shown in place of its detail. A row for a person leads with `.avatar()`. |
 | `Sidebar` | The places an app moves between, down its left side: a `List`, optionally in sections. `Sidebar::empty(reason)` says why there are none, as when a filter matches nothing. |
 | `Toolbar`, `IconButton` | Tools across the top of a view. An icon button's label is its tooltip, so always give it a label. |
 | `SearchField` | A field that filters what the view shows. |
@@ -96,8 +96,9 @@ last resort.
 | `EmptyState` | What a view shows when it has nothing to show: why it is empty, and what to do about it. |
 | `Disclosure` | More detail the person may open, such as a log or a command line. |
 | `Node::Dialog` | A question over the page. It covers the page for both the pointer and the keyboard until it is answered, and its footer is a `ButtonRow`. |
-| `Text` | Any text. `.role()` sets its size: `Title`, `Heading`, `Body`, `Label`, `Caption`, or `Mono` for code and command lines. `.tone()` sets its colour. `.wrap()` breaks prose at spaces, and `.wrap_anywhere()` breaks a path or command line anywhere so that none of it is lost. |
+| `Text` | Any text. `.role()` sets its size: `Title`, `Heading`, `Body`, `Label`, `Caption`, or `Mono` for code and command lines; `Hero` is the lock screen's clock and nothing else. `.tone()` sets its colour. `.wrap()` breaks prose at spaces, and `.wrap_anywhere()` breaks a path or command line anywhere so that none of it is lost. |
 | `Node::Icon` | A glyph of the icon font, at the size of a text role and in a tone. |
+| `Node::Avatar` | A person: the initial of their name in a circle of the colour their name picks. |
 
 The controls (`Node::TextField`, `Node::LineEdit`, `Node::Checkbox`,
 `Node::RadioGroup`, `Node::Slider`, `Node::ProgressBar`,

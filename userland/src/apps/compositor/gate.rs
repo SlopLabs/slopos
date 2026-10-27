@@ -1,35 +1,38 @@
-//! The login screen and the lock screen, drawn opaque over every surface.
-//! While either is up every key is its own and no pointer press reaches a
-//! client, so what is typed there reaches the mechanism privd runs alone:
-//! `org.slopos.login` lets a person in from the login screen, and
-//! `org.slopos.session.unlock` answers whether a locked desktop's own person
-//! typed their password. Ctrl+Alt+Delete, the secure attention key, is read
-//! here and nowhere else: on a desktop it locks it, so the screen that asks
-//! for a password after it is this one.
+//! The login screen and the lock screen, drawn over the dimmed wallpaper in
+//! place of every surface. While either is up every key is its own and no
+//! pointer press reaches a client, so what is typed there reaches the
+//! mechanism privd runs alone: `org.slopos.login` lets a person in from the
+//! login screen, and `org.slopos.session.unlock` answers whether a locked
+//! desktop's own person typed their password. Ctrl+Alt+Delete, the secure
+//! attention key, is read here and nowhere else: on a desktop it locks it,
+//! so the screen that asks for a password after it is this one.
 
 use std::string::String;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use slopos_abi::InputEvent;
 use slopos_abi::input::keycode::{
-    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_F2, KEY_KP_ENTER, KEY_LEFTALT,
-    KEY_LEFTCTRL, KEY_RIGHTALT, KEY_RIGHTCTRL, KEY_TAB, KEY_UP,
+    KEY_DELETE, KEY_LEFTALT, KEY_LEFTCTRL, KEY_RIGHTALT, KEY_RIGHTCTRL,
 };
 use slopos_abi::input::{MODIFIER_ALT, MODIFIER_CTRL};
-use slopos_appkit::text::ui;
-use slopos_gfx::canvas_ops::rounded_rect_filled;
-use slopos_priv_core::consent::Secret;
+use slopos_appkit::Rect;
+use slopos_appkit::embed::Embedded;
+use slopos_appkit::traits::Role as Shows;
+use slopos_chrome_core::Key;
+use slopos_chrome_core::clock::WallTime;
+use slopos_chrome_core::gate::{self as model, Asks, Checked, Focus, Target};
 
+use super::views;
 use crate::gfx::{DamageRect, DrawBuffer};
 use crate::init_control::{self, Command};
-use crate::theme::*;
+use crate::syscall::core as sys_core;
 
-const CARD_W: i32 = 420;
-/// More keys than a hand holds down at once.
-const TAKEN_MAX: usize = 16;
-const NAME_MAX: usize = slopos_accounts_core::NAME_MAX;
+/// How long the login screen says a desktop is starting before it starts
+/// over, should that desktop never come in front.
+const STARTING_FOR: Duration = Duration::from_secs(30);
 
 const LOGIN: &str = "org.slopos.login";
 const UNLOCK: &str = "org.slopos.session.unlock";
@@ -48,59 +51,99 @@ pub enum Role {
     Desktop { name: String },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Field {
-    Name,
-    Password,
-}
-
 pub struct Gate {
-    role: Role,
+    model: model::Gate,
     shown: bool,
-    name: String,
-    /// Whom the login screen lists, by name.
-    people: Vec<String>,
-    secret: Secret,
-    field: Field,
-    status: String,
+    /// What the screen draws, laid out on `screen` at `minute`; built afresh
+    /// once `stale`.
+    tree: Option<Embedded>,
+    screen: Rect,
+    minute: Option<i64>,
+    stale: bool,
     /// What the mechanism privd ran answered, while it runs.
-    asking: Option<Receiver<Result<(), String>>>,
+    asking: Option<Receiver<Checked>>,
     dirty: bool,
-    /// Keys pressed into the screen, whose releases no client may see.
-    taken: Vec<u16>,
+    /// When a login passed, while that person's desktop starts.
+    started: Option<Instant>,
+    /// Where the pointer is, which a tree built afresh lights up.
+    pointer: (i32, i32),
+    taken: slopos_chrome_core::key::Taken,
     ctrl: bool,
     alt: bool,
 }
 
 impl Gate {
     pub fn new(role: Role) -> Gate {
-        let shown = matches!(role, Role::Greeter);
+        let (model, shown) = match role {
+            Role::Greeter => (model::Gate::login(people()), true),
+            Role::Desktop { name } => (model::Gate::lock(name), false),
+        };
         Gate {
-            people: if shown { people() } else { Vec::new() },
-            role,
+            model,
             shown,
-            name: String::new(),
-            secret: Secret::default(),
-            field: Field::Name,
-            status: String::new(),
+            tree: None,
+            screen: Rect::new(0, 0, 0, 0),
+            minute: None,
+            stale: true,
             asking: None,
             dirty: true,
-            taken: Vec::new(),
+            started: None,
+            pointer: (-1, -1),
+            taken: slopos_chrome_core::key::Taken::default(),
             ctrl: false,
             alt: false,
         }
     }
 
     pub fn greeter(&self) -> bool {
-        matches!(self.role, Role::Greeter)
+        self.model.greeter()
     }
 
     pub fn shown(&self) -> bool {
         self.shown
     }
 
-    pub fn take_dirty(&mut self) -> bool {
+    /// The person whose desktop this is.
+    pub fn person(&self) -> Option<&str> {
+        match self.greeter() {
+            true => None,
+            false => self.model.person(),
+        }
+    }
+
+    /// Whether the screen changed since the last frame, laid out again on
+    /// `screen` when it did, or when the minute it shows went by.
+    pub fn take_dirty(&mut self, screen: Rect) -> bool {
+        if !self.shown {
+            self.tree = None;
+            return std::mem::take(&mut self.dirty);
+        }
+        let now = sys_core::realtime_secs().and_then(WallTime::from_unix);
+        let minute = now.map(|t| t.minute());
+        if self.stale || self.tree.is_none() || self.screen != screen || self.minute != minute {
+            let node = views::gate(&self.model, now.as_ref());
+            let mut tree = Embedded::new(&node, screen);
+            tree.hover(self.pointer.0, self.pointer.1);
+            self.tree = Some(tree);
+            let role = match self.model.focus() {
+                Focus::People => Shows::List,
+                Focus::Field => Shows::TextField,
+                Focus::Switch | Focus::Submit => Shows::Button,
+            };
+            if let Some(tree) = &mut self.tree {
+                tree.focus(role, views::gate_focus_name(&self.model));
+            }
+            self.screen = screen;
+            self.minute = minute;
+            self.stale = false;
+            self.dirty = true;
+        }
         std::mem::take(&mut self.dirty)
+    }
+
+    fn changed(&mut self) {
+        self.stale = true;
+        self.dirty = true;
     }
 
     /// Lock the desktop and tell init it is locked.
@@ -113,6 +156,14 @@ impl Gate {
         tell_locked();
     }
 
+    /// Brought in front by init: the login screen starts over, listing the
+    /// people as they are now.
+    pub fn in_front(&mut self) {
+        if self.greeter() && self.asking.is_none() {
+            self.reset();
+        }
+    }
+
     /// Unlocked by init: its person proved themselves at the login screen.
     pub fn unlocked(&mut self) {
         if !self.greeter() {
@@ -123,40 +174,39 @@ impl Gate {
     }
 
     fn reset(&mut self) {
-        self.secret.clear();
-        self.name.clear();
-        if self.greeter() {
-            self.people = people();
-        }
-        self.field = match self.role {
-            Role::Greeter => Field::Name,
-            Role::Desktop { .. } => Field::Password,
+        let listed = match self.greeter() {
+            true => people(),
+            false => Vec::new(),
         };
-        self.status.clear();
-        self.dirty = true;
+        self.model.reset(listed);
+        self.started = None;
+        self.changed();
     }
 
     /// Settle what the mechanism answered.
     pub fn poll(&mut self) {
+        if self.started.is_some_and(|at| at.elapsed() >= STARTING_FOR) {
+            self.reset();
+        }
         let Some(asking) = &self.asking else {
             return;
         };
-        let answered = match asking.try_recv() {
-            Ok(answered) => answered,
+        let checked = match asking.try_recv() {
+            Ok(checked) => checked,
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Err("the request was lost".into()),
+            Err(TryRecvError::Disconnected) => Checked::Unchecked,
         };
         self.asking = None;
-        self.secret.clear();
-        self.dirty = true;
-        match (answered, &self.role) {
-            (Ok(()), Role::Greeter) => self.status = format!("Starting {}'s desktop", self.name),
-            (Ok(()), Role::Desktop { .. }) => {
+        self.model.checked(checked);
+        match (checked, self.greeter()) {
+            (Checked::Passed, true) => self.started = Some(Instant::now()),
+            (Checked::Passed, false) => {
                 self.shown = false;
                 self.reset();
             }
-            (Err(why), _) => self.status = why,
+            _ => {}
         }
+        self.changed();
     }
 
     /// Whether a key press is the screen's, which then takes it: the secure
@@ -165,34 +215,63 @@ impl Gate {
     pub fn takes_press(&mut self, event: &InputEvent) -> bool {
         let keycode = event.key_keycode();
         self.track(keycode, true);
-        let held = self.taken.contains(&keycode);
-        let attention = keycode == KEY_DELETE && self.chord(event.key_modifiers());
-        if attention {
-            self.take(keycode);
+        if keycode == KEY_DELETE && self.chord(event.key_modifiers()) {
+            self.taken.take(event);
             match self.greeter() {
-                true => self.reset(),
+                true if self.asking.is_none() && self.started.is_none() => self.reset(),
+                true => {}
                 false => self.lock(),
             }
             return true;
         }
-        if self.shown || (held && event.key_is_repeat()) {
-            self.take(keycode);
-            self.key(event);
-            return true;
+        if !self.shown {
+            return self.taken.repeats(event);
         }
-        if held {
-            self.taken.retain(|&k| k != keycode);
+        self.taken.take(event);
+        if let Some(key) = Key::read(event) {
+            let asks = self.model.key(key);
+            self.changed();
+            self.act(asks);
         }
-        false
+        true
     }
 
     pub fn takes_release(&mut self, keycode: u16) -> bool {
         self.track(keycode, false);
-        let Some(at) = self.taken.iter().position(|&k| k == keycode) else {
-            return false;
+        self.taken.release(keycode)
+    }
+
+    /// The primary button went down or up at `(x, y)` over the screen.
+    pub fn click(&mut self, x: i32, y: i32, pressed: bool) {
+        let Some(tree) = self.tree.as_mut() else {
+            return;
         };
-        self.taken.remove(at);
-        true
+        let sent: Vec<Target> = tree.click(x, y, pressed);
+        self.dirty = true;
+        for target in sent {
+            let asks = self.model.click(target);
+            self.changed();
+            self.act(asks);
+        }
+    }
+
+    /// The wheel turned by `value_v120` over the screen: a person chosen
+    /// for each notch.
+    pub fn wheel(&mut self, value_v120: i32) {
+        if value_v120 == 0 {
+            return;
+        }
+        for _ in 0..(value_v120.unsigned_abs() / 120).max(1) {
+            self.model.scroll(value_v120 > 0);
+        }
+        self.changed();
+    }
+
+    pub fn hover(&mut self, x: i32, y: i32) {
+        self.pointer = (x, y);
+        if let Some(tree) = self.tree.as_mut() {
+            self.dirty |= tree.hover(x, y);
+        }
     }
 
     /// Ctrl and Alt as the modifiers say or as their keys were seen.
@@ -209,245 +288,82 @@ impl Gate {
         }
     }
 
-    fn take(&mut self, keycode: u16) {
-        if !self.taken.contains(&keycode) {
-            if self.taken.len() >= TAKEN_MAX {
-                self.taken.remove(0);
-            }
-            self.taken.push(keycode);
-        }
-    }
-
-    fn key(&mut self, event: &InputEvent) {
-        if self.asking.is_some() {
-            return;
-        }
-        let keycode = event.key_keycode();
-        if event.key_is_repeat() && keycode != KEY_BACKSPACE {
-            return;
-        }
-        self.dirty = true;
-        match keycode {
-            KEY_TAB if self.greeter() => {
-                self.field = match self.field {
-                    Field::Name => Field::Password,
-                    Field::Password => Field::Name,
-                };
-            }
-            KEY_ENTER | KEY_KP_ENTER if self.field == Field::Name => {
-                self.field = Field::Password;
-            }
-            KEY_ENTER | KEY_KP_ENTER => self.submit(),
-            KEY_BACKSPACE => match self.field {
-                Field::Name => {
-                    self.name.pop();
-                }
-                Field::Password => self.secret.pop(),
-            },
-            KEY_ESC => self.secret.clear(),
-            KEY_UP | KEY_DOWN if self.greeter() && !self.people.is_empty() => {
-                let at = self.people.iter().position(|p| *p == self.name);
-                let n = self.people.len();
-                let next = match (at, keycode == KEY_DOWN) {
-                    (None, _) => 0,
-                    (Some(i), true) => (i + 1) % n,
-                    (Some(i), false) => (i + n - 1) % n,
-                };
-                self.name = self.people[next].clone();
-                self.field = Field::Name;
-            }
-            KEY_F2 if !self.greeter() => tell_init(Command::Greeter),
-            _ => {
-                let Some(ch) = char::from_u32(event.key_codepoint()).filter(|ch| !ch.is_control())
-                else {
-                    return;
-                };
-                match self.field {
-                    Field::Name if self.name.len() < NAME_MAX => self.name.push(ch),
-                    Field::Name => {}
-                    Field::Password => {
-                        self.secret.push(ch);
-                    }
-                }
-            }
+    fn act(&mut self, asks: Option<Asks>) {
+        match asks {
+            Some(Asks::Check { person, secret }) => self.check(person, secret),
+            Some(Asks::SwitchUser) => super::ask_init(Command::Greeter),
+            None => {}
         }
     }
 
     /// Hand the password to the mechanism on a thread of its own, which
     /// answers once privd has.
-    fn submit(&mut self) {
-        let (action, args) = match &self.role {
-            Role::Greeter if self.name.is_empty() => {
-                self.field = Field::Name;
-                return;
-            }
-            Role::Greeter => (
-                LOGIN,
-                vec!["login".to_owned(), "desktop".into(), self.name.clone()],
-            ),
-            Role::Desktop { .. } => (UNLOCK, vec!["unlock".to_owned()]),
+    fn check(&mut self, person: String, secret: slopos_priv_core::consent::Secret) {
+        let (action, args) = match self.greeter() {
+            true => (LOGIN, vec!["login".to_owned(), "desktop".into(), person]),
+            false => (UNLOCK, vec!["unlock".to_owned()]),
         };
-        let mut input = self.secret.bytes().to_vec();
+        let mut input = secret.bytes().to_vec();
         input.push(b'\n');
-        self.secret.clear();
+        drop(secret);
         let unlock = !self.greeter();
         let (tx, rx) = mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("compositor-gate".into())
             .spawn(move || {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                let answered = asked(action, &args, &input);
+                let checked = asked(action, &args, &input);
                 slopos_tls_core::ct::wipe(&mut input);
-                let answered = answered.and_then(|()| match unlock {
-                    true => {
+                let checked = match (checked, unlock) {
+                    (Checked::Passed, true) => {
                         let _telling = TELLING.lock().unwrap_or_else(PoisonError::into_inner);
                         LOCKS.fetch_add(1, Ordering::SeqCst);
-                        init_control::ask(Command::Locked(false))
+                        match init_control::ask(Command::Locked(false)) {
+                            Ok(()) => Checked::Passed,
+                            Err(why) => {
+                                eprintln!("compositor: init: {why}");
+                                Checked::Unchecked
+                            }
+                        }
                     }
-                    false => Ok(()),
-                });
-                let _ = tx.send(answered);
+                    (checked, _) => checked,
+                };
+                let _ = tx.send(checked);
             });
         match spawned {
-            Ok(_) => {
-                self.status = "Checking".into();
-                self.asking = Some(rx);
-            }
-            Err(_) => self.status = "Nothing can check the password now".into(),
+            Ok(_) => self.asking = Some(rx),
+            Err(_) => self.model.checked(Checked::Unchecked),
         }
     }
 
-    pub fn draw(&self, buf: &mut DrawBuffer, screen_w: u32, screen_h: u32, clip: &DamageRect) {
-        if !self.shown {
+    pub fn draw(&self, buf: &mut DrawBuffer, clip: &DamageRect) {
+        let (true, Some(tree)) = (self.shown, &self.tree) else {
             return;
-        }
-        rounded_rect_filled(
-            buf,
+        };
+        let clip = Rect::new(
             clip.x0,
             clip.y0,
             clip.x1 - clip.x0 + 1,
             clip.y1 - clip.y0 + 1,
-            0,
-            DESKTOP_BG,
         );
-        let line = ui::line_height(TEXT_PX);
-        let w = CARD_W.min(screen_w as i32 - 2 * CARD_PAD);
-        let (title, hint) = match &self.role {
-            Role::Greeter => (
-                format!("Log in: {}", self.people.join(", ")),
-                "Up, Down: choose  Tab: next field  Enter: log in".to_owned(),
-            ),
-            Role::Desktop { name } => (
-                format!("{name}'s desktop is locked"),
-                "Enter: unlock  F2: switch person".to_owned(),
-            ),
-        };
-        let fields: &[Field] = match self.role {
-            Role::Greeter => &[Field::Name, Field::Password],
-            Role::Desktop { .. } => &[Field::Password],
-        };
-        let h = CARD_PAD
-            + line
-            + CARD_GAP
-            + fields.len() as i32 * (line + CONTROL_H + CARD_GAP)
-            + 2 * (line + CARD_GAP)
-            + CARD_PAD;
-        let x = (screen_w as i32 - w) / 2;
-        let mut y = ((screen_h as i32 - h) / 2).max(0);
-        rounded_rect_filled(buf, x, y, w, h, CARD_RADIUS, CARD_EDGE);
-        rounded_rect_filled(
-            buf,
-            x + EDGE_W,
-            y + EDGE_W,
-            w - 2 * EDGE_W,
-            h - 2 * EDGE_W,
-            CARD_RADIUS - EDGE_W,
-            CARD_BG,
-        );
-        let text = |buf: &mut DrawBuffer, y: i32, s: &str, colour| {
-            ui::draw_clipped(
-                buf,
-                x + CARD_PAD,
-                y,
-                s,
-                TEXT_PX,
-                ui::Weight::Regular,
-                colour,
-                CARD_BG,
-                clip,
-            );
-        };
-        y += CARD_PAD;
-        text(buf, y, &title, TEXT_PRIMARY);
-        y += line + CARD_GAP;
-        for &field in fields {
-            let label = match field {
-                Field::Name => "Name",
-                Field::Password => "Password",
-            };
-            text(buf, y, label, TEXT_SECONDARY);
-            y += line;
-            let (edge, ew) = match self.field == field {
-                true => (FOCUS, FOCUS_W),
-                false => (FIELD_EDGE, EDGE_W),
-            };
-            let fw = w - 2 * CARD_PAD;
-            rounded_rect_filled(buf, x + CARD_PAD, y, fw, CONTROL_H, FIELD_RADIUS, edge);
-            rounded_rect_filled(
-                buf,
-                x + CARD_PAD + ew,
-                y + ew,
-                fw - 2 * ew,
-                CONTROL_H - 2 * ew,
-                FIELD_RADIUS - ew,
-                FIELD_BG,
-            );
-            let shown = match field {
-                Field::Name => self.name.clone(),
-                Field::Password => {
-                    let room = (fw - 2 * CARD_PAD) / ui::width(ui::BULLET, TEXT_PX).max(1);
-                    ui::BULLET.repeat(self.secret.chars().min(room.max(0) as usize))
-                }
-            };
-            ui::draw_clipped(
-                buf,
-                x + 2 * CARD_PAD,
-                ui::centred_top(y, CONTROL_H, TEXT_PX),
-                &shown,
-                TEXT_PX,
-                ui::Weight::Regular,
-                TEXT_PRIMARY,
-                FIELD_BG,
-                clip,
-            );
-            y += CONTROL_H + CARD_GAP;
+        tree.paint(buf, clip);
+    }
+}
+
+/// How the mechanism answered: run, refused or not reached; why it was not
+/// reached goes to the log.
+fn asked(action: &str, args: &[&str], input: &[u8]) -> Checked {
+    let answered = crate::syscall::fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR)
+        .map_err(|e| crate::privd::NotRun::from(format!("/dev/null: {e}")))
+        .and_then(|null| crate::privd::run_feeding(action, args, input, null.raw(), 2));
+    match answered {
+        Ok(0) => Checked::Passed,
+        Ok(_) => Checked::Wrong,
+        Err(why) => {
+            eprintln!("compositor: {action}: {why}");
+            Checked::Unchecked
         }
-        text(buf, y, &self.status, TEXT_PRIMARY);
-        y += line + CARD_GAP;
-        text(buf, y, &hint, TEXT_SECONDARY);
     }
-}
-
-/// What the mechanism answered: run, or why not.
-fn asked(action: &str, args: &[&str], input: &[u8]) -> Result<(), String> {
-    let null = crate::syscall::fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR)
-        .map_err(|e| format!("/dev/null: {e}"))?;
-    match crate::privd::run_feeding(action, args, input, null.raw(), 2) {
-        Ok(0) => Ok(()),
-        Ok(_) => Err("The password is wrong".into()),
-        Err(why) => Err(why),
-    }
-}
-
-/// Tell init on a thread of its own, which init answers once it has acted.
-fn tell_init(command: Command) {
-    let _ = std::thread::Builder::new()
-        .name("compositor-init".into())
-        .spawn(move || {
-            if let Err(why) = init_control::ask(command) {
-                eprintln!("compositor: init: {why}");
-            }
-        });
 }
 
 /// Stop telling init of a lock and tell it the desktop is unlocked, after a

@@ -361,6 +361,29 @@ fn ask(action: &str, args: &[Vec<u8>], input: Input) -> Result<Asked, String> {
     run(&mut connection, request, input).map(Asked::Ran)
 }
 
+/// Why privd ran nothing.
+#[derive(Debug)]
+pub struct NotRun {
+    pub reason: String,
+    /// The person at the machine answered privd's question so.
+    pub by_person: bool,
+}
+
+impl From<String> for NotRun {
+    fn from(reason: String) -> NotRun {
+        NotRun {
+            reason,
+            by_person: false,
+        }
+    }
+}
+
+impl core::fmt::Display for NotRun {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 /// Have privd run `action` with `args`, the mechanism reading `input` and
 /// writing to `out`, its errors to `err`: its status, or why nothing ran.
 pub fn run_feeding(
@@ -369,12 +392,12 @@ pub fn run_feeding(
     input: &[u8],
     out: RawFd,
     err: RawFd,
-) -> Result<i32, String> {
+) -> Result<i32, NotRun> {
     let mut connection = Connection::open_within(RESTART_WAIT)
         .map_err(|why| format!("cannot reach privd: {why}"))?;
     let (read, write) = pipe()?;
     if fs::write_slice(write.raw(), input) != Ok(input.len()) {
-        return Err("what was typed does not fit a pipe".into());
+        return Err(String::from("what was typed does not fit a pipe").into());
     }
     drop(write);
     let request = Request {
@@ -391,9 +414,13 @@ pub fn run_feeding(
             Some(Reply::Asking { .. } | Reply::Started { .. }) => {}
             Some(Reply::Exited(Exit::Code(code))) => return Ok(code),
             Some(Reply::Exited(Exit::Signal(signal))) => return Ok(128 + i32::from(signal)),
-            Some(Reply::Denied { reason, .. }) => return Err(reason),
-            Some(Reply::Prompt { .. }) => return Err("privd asked for a terminal".into()),
-            None => return Err("privd closed the connection".into()),
+            Some(Reply::Denied { reason, by_person }) => {
+                return Err(NotRun { reason, by_person });
+            }
+            Some(Reply::Prompt { .. }) => {
+                return Err(String::from("privd asked for a terminal").into());
+            }
+            None => return Err(String::from("privd closed the connection").into()),
         }
     }
 }

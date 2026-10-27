@@ -230,6 +230,12 @@ pub trait Widget {
         self.layout_rect()
     }
 
+    /// Which of its parts the pointer at `(x, y)` lights up, for a widget
+    /// that lights up one part at a time, as a list does a row.
+    fn hover_part(&self, _x: i32, _y: i32) -> Option<usize> {
+        None
+    }
+
     /// Where this widget has scrolled to, when the app does not keep it, so a
     /// rebuild can hand it to the widget built in its place to show the same.
     fn kept_scroll(&self) -> Option<Scrolled> {

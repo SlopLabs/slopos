@@ -1,7 +1,7 @@
-use slopos_abi::draw::{Canvas, EncodedPixel};
+use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::pixel::PixelFormat;
-use slopos_appkit::text::ui;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
+use slopos_gfx::rounded::Rounded;
 use slopos_image::{DecodeOptions, Image};
 
 use crate::gfx::{self, DamageRect, DrawBuffer};
@@ -10,11 +10,12 @@ use crate::theme::*;
 
 use super::decorations;
 use super::dock::LauncherShelf;
+use super::frame::{self, draw_window_shadow, paint_in_outline, uncornered};
 use super::menu_bar::SystemBar;
-use super::output::WINDOW_STATE_MINIMIZED;
 use super::popover::Popover;
 use super::region::Region;
 use super::surface_cache::ClientSurfaceCache;
+use slopos_abi::surface::WINDOW_STATE_MINIMIZED;
 
 const DEFAULT_WALLPAPER: &str = "/usr/share/slopos/wallpapers/default.png";
 const WALLPAPER_SCREEN_DIVISOR: u32 = 3;
@@ -172,15 +173,15 @@ impl Renderer {
         self.output_pitch = pitch;
     }
 
-    /// Composite one frame into `buf`, repainting exactly the damaged,
-    /// non-occluded pixels in z-order.
+    /// Composite one frame into `buf`: every damaged pixel of `frame_damage`,
+    /// which must be disjoint, painted once per layer that shows there, bottom
+    /// to top.
     ///
-    /// Windows are walked front-to-back, each opaque content box carved out of
-    /// the still-exposed region.  A window's decorations are confined to that
-    /// region and its shadow to a separate shadow-availability region; both
-    /// already exclude every higher window, so a lower window's chrome can never
-    /// paint over one stacked above it.  `frame_damage` must be disjoint; a
-    /// full-output region drives a full redraw.
+    /// While the lock or login screen is up it is all that is drawn, over the
+    /// dimmed wallpaper. Otherwise each window's frame less its corners hides
+    /// what is beneath it, so a lower window paints only what no higher frame
+    /// covers whole, and its shadow and corners blend over what is drawn
+    /// before them.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -195,19 +196,51 @@ impl Renderer {
         surface_cache: &mut ClientSurfaceCache,
         system_bar: &SystemBar,
         shelf: &mut LauncherShelf,
-        popover: &mut Popover,
+        popover: &Popover,
+        asking: &super::confirm::Asking,
         consent: &super::consent::Consent,
         gate: &super::gate::Gate,
-        net_model: &slopos_chrome_core::NetPanelModel,
         active_app_name: &str,
         frame_damage: &Region,
         hw_cursor: bool,
     ) {
         let output_rect = full_screen_clip(buf);
-        // Clip damage to the output; the region is already disjoint so blended
-        // primitives (shadows) never touch a pixel twice.
         let frame_damage = frame_damage.intersect_rect(&output_rect);
         if frame_damage.is_empty() {
+            return;
+        }
+
+        if gate.shown() {
+            for rect in frame_damage.rects() {
+                if !self.draw_wallpaper(buf, rect) {
+                    gfx::fill_rect(
+                        buf,
+                        rect.x0,
+                        rect.y0,
+                        rect.x1 - rect.x0 + 1,
+                        rect.y1 - rect.y0 + 1,
+                        DESKTOP_BG,
+                    );
+                }
+                gfx::fill_rect_blended_clipped(
+                    buf,
+                    rect.x0,
+                    rect.y0,
+                    rect.x1 - rect.x0 + 1,
+                    rect.y1 - rect.y0 + 1,
+                    SCRIM,
+                    rect,
+                );
+                gate.draw(buf, rect);
+            }
+            self.draw_cursor_over(
+                buf,
+                &frame_damage,
+                mouse_x,
+                mouse_y,
+                cursor_shape,
+                hw_cursor,
+            );
             return;
         }
 
@@ -218,14 +251,7 @@ impl Renderer {
             }
         }
 
-        // Both accumulators are walked top→bottom.  `exposed` is the damaged
-        // pixels no opaque content box covers yet; `shadow_avail` is those no
-        // higher window has claimed a shadow or frame footprint over.  A shadow
-        // is a translucent black blend, so the topmost window owns shared gap
-        // pixels: subtracting each full shadow box keeps every `shadow_vis`
-        // disjoint and keeps a lower shadow off a higher window's content.
         let mut exposed = frame_damage.clone();
-        let mut shadow_avail = frame_damage.clone();
         let mut content_vis: Vec<Region> = Vec::with_capacity(order.len());
         let mut shadow_vis: Vec<Region> = Vec::with_capacity(order.len());
         content_vis.resize(order.len(), Region::new());
@@ -233,19 +259,13 @@ impl Renderer {
 
         for k in (0..order.len()).rev() {
             let w = &windows[order[k]];
-            let fbox = frame_box(w);
-            let cbox = content_box(w);
-            let sbox = shadow_bounds(w);
-
-            content_vis[k] = exposed.intersect_rect(&fbox);
-            // Minus its own content, which overwrites the halo: avoids the seam
-            // double-darken.
-            let mut sv = shadow_avail.intersect_rect(&sbox);
-            sv.subtract(&cbox);
-            shadow_vis[k] = sv;
-
-            shadow_avail.subtract(&sbox);
-            exposed.subtract(&cbox);
+            let opaque = frame::opaque(w);
+            content_vis[k] = exposed.intersect_rect(&frame::frame_box(w));
+            shadow_vis[k] = exposed.intersect_rect(&frame::bounds(w));
+            for part in &opaque {
+                shadow_vis[k].subtract(part);
+                exposed.subtract(part);
+            }
         }
         let background_visible = exposed;
 
@@ -265,29 +285,28 @@ impl Renderer {
         // Bottom→top: shadow first, then content and decorations.
         for k in 0..order.len() {
             let w = windows[order[k]];
-            for rect in shadow_vis[k].rects() {
-                self.draw_window_shadow(buf, &w, rect);
+            let focused = w.task_id == focused_task;
+            if let Some((caster, darkest)) = frame::shadow(&w, focused) {
+                for rect in shadow_vis[k].rects() {
+                    draw_window_shadow(buf, &caster, darkest, rect);
+                }
             }
             if content_vis[k].is_empty() {
                 continue;
             }
-            let focused = w.task_id == focused_task;
             let sig_hovered = w.task_id == signal_hovered_task;
             let title = title_to_str(&w.title);
-            let frame_y = w.y - TITLE_BAR_HEIGHT;
+            let outline = frame::outline(&w);
             for rect in content_vis[k].rects() {
                 buf.set_scissor(Some(*rect));
-                self.draw_window_content(buf, &w, rect, surface_cache);
+                self.draw_window_content(buf, &w, &outline, rect, surface_cache);
                 decorations::draw_window_decorations(
                     buf,
-                    w.x,
-                    frame_y,
-                    w.effective_width(),
-                    w.effective_height(),
+                    &outline,
                     title,
                     focused,
                     sig_hovered,
-                    Some(*rect),
+                    rect,
                 );
                 buf.set_scissor(None);
             }
@@ -324,18 +343,38 @@ impl Renderer {
             }
             // The popover holds a pointer grab while open, so anything drawn
             // over it would look clickable and not be.
-            popover.draw(buf, net_model, rect);
+            popover.draw(buf, rect);
+            asking.draw(buf, rect);
             consent.draw(buf, rect);
-            gate.draw(buf, self.output_width, self.output_height, rect);
             buf.set_scissor(None);
         }
 
-        if !hw_cursor {
-            let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
-            for rect in frame_damage.rects() {
-                if intersect_rect(rect, &cursor_rect).is_some() {
-                    self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, rect);
-                }
+        self.draw_cursor_over(
+            buf,
+            &frame_damage,
+            mouse_x,
+            mouse_y,
+            cursor_shape,
+            hw_cursor,
+        );
+    }
+
+    fn draw_cursor_over(
+        &self,
+        buf: &mut DrawBuffer,
+        frame_damage: &Region,
+        mouse_x: i32,
+        mouse_y: i32,
+        cursor_shape: u8,
+        hw_cursor: bool,
+    ) {
+        if hw_cursor {
+            return;
+        }
+        let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
+        for rect in frame_damage.rects() {
+            if intersect_rect(rect, &cursor_rect).is_some() {
+                self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, rect);
             }
         }
     }
@@ -655,282 +694,95 @@ impl Renderer {
         }
     }
 
-    fn draw_window_shadow(&self, buf: &mut DrawBuffer, window: &UserWindowInfo, clip: &DamageRect) {
-        let ww = window.effective_width() as i32;
-        let wh = window.effective_height() as i32 + TITLE_BAR_HEIGHT;
-        let sx = window.x;
-        let sy = window.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y;
-        let spread = SHADOW_SPREAD;
-
-        // Quadratic falloff; alpha[d-1] is the shadow alpha at distance d.
-        let spread_sq = (spread * spread) as u32;
-        let mut inv_alpha = [0u32; SHADOW_SPREAD as usize];
-        for d in 1..=spread {
-            let t = (spread - d) as u32;
-            let a = (SHADOW_MAX_ALPHA as u32 * t * t) / spread_sq;
-            inv_alpha[(d - 1) as usize] = 255 - a;
-        }
-
-        let buf_w = buf.width() as i32;
-        let buf_h = buf.height() as i32;
-        let bpp = buf.bytes_per_pixel() as usize;
-        let pitch = buf.pitch_bytes();
-
-        // For black shadow: out = dst * inv_alpha / 255, using the RB/AG trick.
-        #[inline(always)]
-        fn shadow_blend_pixel(buf: &mut DrawBuffer, off: usize, inv_a: u32) {
-            let dst = buf.read_encoded_at(off);
-            let rb = (dst & 0x00FF00FF) * inv_a + 0x00800080;
-            let ag = ((dst >> 8) & 0x00FF00FF) * inv_a + 0x00800080;
-            let result = (rb >> 8 & 0x00FF00FF) | (ag >> 8 & 0x00FF00FF) << 8;
-            buf.write_encoded_at(off, EncodedPixel(result));
-        }
-
-        // Four strips of `spread` pixels; the corners fall out of their overlap.
-        for d in 1..=spread {
-            let row = sy - d;
-            if row < clip.y0 || row > clip.y1 {
-                continue;
-            }
-            let ia = inv_alpha[(d - 1) as usize];
-            if ia == 255 {
-                continue; // fully transparent shadow at this distance
-            }
-            let x_start = (sx - d).max(clip.x0).max(0);
-            let x_end = (sx + ww - 1 + d).min(clip.x1).min(buf_w - 1);
-            if x_start > x_end {
-                continue;
-            }
-            let base = (row as usize) * pitch;
-            for px in x_start..=x_end {
-                shadow_blend_pixel(buf, base + (px as usize) * bpp, ia);
-            }
-        }
-
-        for d in 1..=spread {
-            let row = sy + wh + d - 1;
-            if row < clip.y0 || row > clip.y1 {
-                continue;
-            }
-            let ia = inv_alpha[(d - 1) as usize];
-            if ia == 255 {
-                continue;
-            }
-            let x_start = (sx - d).max(clip.x0).max(0);
-            let x_end = (sx + ww - 1 + d).min(clip.x1).min(buf_w - 1);
-            if x_start > x_end {
-                continue;
-            }
-            let base = (row as usize) * pitch;
-            for px in x_start..=x_end {
-                shadow_blend_pixel(buf, base + (px as usize) * bpp, ia);
-            }
-        }
-
-        for row in sy.max(clip.y0)..=(sy + wh - 1).min(clip.y1).min(buf_h - 1) {
-            let base = (row as usize) * pitch;
-            for d in 1..=spread {
-                let col = sx - d;
-                if col < clip.x0 || col > clip.x1 || col < 0 || col >= buf_w {
-                    continue;
-                }
-                let ia = inv_alpha[(d - 1) as usize];
-                if ia == 255 {
-                    continue;
-                }
-                shadow_blend_pixel(buf, base + (col as usize) * bpp, ia);
-            }
-        }
-
-        for row in sy.max(clip.y0)..=(sy + wh - 1).min(clip.y1).min(buf_h - 1) {
-            let base = (row as usize) * pitch;
-            for d in 1..=spread {
-                let col = sx + ww - 1 + d;
-                if col < clip.x0 || col > clip.x1 || col < 0 || col >= buf_w {
-                    continue;
-                }
-                let ia = inv_alpha[(d - 1) as usize];
-                if ia == 255 {
-                    continue;
-                }
-                shadow_blend_pixel(buf, base + (col as usize) * bpp, ia);
-            }
-        }
-    }
-
+    /// The window's content inside `outline`: its last committed buffer,
+    /// cut to the frame, and where the frame has grown past the buffer, the
+    /// window's surface colour; a window whose buffer cannot be mapped yet
+    /// shows that colour alone.
     fn draw_window_content(
         &self,
         buf: &mut DrawBuffer,
         window: &UserWindowInfo,
+        outline: &Rounded,
         clip: &DamageRect,
         surface_cache: &mut ClientSurfaceCache,
     ) {
         let bytes_pp = self.output_bytes_pp as usize;
-
         // Buffer, not frame, dimensions: during a resize the frame may be larger
         // than the SHM buffer, and using it as the pitch would corrupt the blit.
-        let buf_w = window.width;
-        let buf_h = window.height;
+        let (buf_w, buf_h) = (window.width as i32, window.height as i32);
         let src_pitch = (buf_w as usize) * bytes_pp;
-        let buffer_size = src_pitch * (buf_h as usize);
-
-        let frame_w = window.effective_width() as i32;
-        let frame_h = window.effective_height() as i32;
-
-        let cache_index = match surface_cache.get_or_create_index(
-            window.task_id,
-            window.buffer_generation,
-            window.buffer_id,
-            window.shm_token,
-            buffer_size,
-        ) {
-            Some(idx) => idx,
-            None => {
-                self.draw_window_placeholder(buf, window, clip);
-                return;
-            }
-        };
-
-        let src_data = match surface_cache.get_slice(cache_index) {
-            Some(slice) => slice,
-            None => {
-                self.draw_window_placeholder(buf, window, clip);
-                return;
-            }
-        };
-
-        let dst_pitch = self.output_pitch;
-        let out_w = buf.width() as i32;
-        let out_h = buf.height() as i32;
-
-        let frame_rect = DamageRect {
+        let (frame_w, frame_h) = (
+            window.effective_width() as i32,
+            window.effective_height() as i32,
+        );
+        let content = DamageRect {
             x0: window.x,
             y0: window.y,
             x1: window.x + frame_w - 1,
             y1: window.y + frame_h - 1,
         };
-
-        // Always show the last committed buffer, clipped to the frame: a shrink
-        // crops, a grow leaves a placeholder gap, and no timing-dependent
-        // "resizing" flag can expose an inconsistent state.
-        let visible_w = (buf_w as i32).min(frame_w);
-        let visible_h = (buf_h as i32).min(frame_h);
-
-        let content_rect = DamageRect {
-            x0: window.x,
-            y0: window.y,
-            x1: window.x + visible_w - 1,
-            y1: window.y + visible_h - 1,
+        let Some(content) = intersect_rect(clip, &content) else {
+            return;
         };
 
-        if let Some(draw_rect) = intersect_rect(clip, &content_rect) {
-            let x0 = draw_rect.x0.max(0);
-            let y0 = draw_rect.y0.max(0);
-            let x1 = (draw_rect.x1 + 1).min(out_w);
-            let y1 = (draw_rect.y1 + 1).min(out_h);
+        let src = surface_cache
+            .get_or_create_index(
+                window.task_id,
+                window.buffer_generation,
+                window.buffer_id,
+                window.shm_token,
+                src_pitch * buf_h.max(0) as usize,
+            )
+            .and_then(|index| surface_cache.get_slice(index));
+        // Always show the last committed buffer, clipped to the frame: a shrink
+        // crops, a grow shows the surface colour in the gap, and no
+        // timing-dependent "resizing" flag can expose an inconsistent state.
+        let shown = DamageRect {
+            x0: window.x,
+            y0: window.y,
+            x1: window.x + buf_w.min(frame_w) - 1,
+            y1: window.y + buf_h.min(frame_h) - 1,
+        };
+        let shown = src.and_then(|_| intersect_rect(&content, &shown));
 
-            if x0 < x1 && y0 < y1 {
-                let src_start_x = (x0 - window.x) as usize;
-                let src_start_y = (y0 - window.y) as usize;
-                let dst_data = buf.data_mut();
-
-                for row in 0..(y1 - y0) as usize {
-                    let src_row = src_start_y + row;
-                    let dst_row = (y0 as usize) + row;
-
-                    let src_off = src_row * src_pitch + src_start_x * bytes_pp;
-                    let dst_off = dst_row * dst_pitch + (x0 as usize) * bytes_pp;
-                    let copy_width = ((x1 - x0) as usize) * bytes_pp;
-
-                    let src_end = src_off + copy_width;
-                    let dst_end = dst_off + copy_width;
-
-                    if src_end <= src_data.len() && dst_end <= dst_data.len() {
-                        dst_data[dst_off..dst_end].copy_from_slice(&src_data[src_off..src_end]);
-                    }
+        let mut gap = Region::from_rect(content);
+        if let Some(shown) = shown {
+            gap.subtract(&shown);
+        }
+        for part in gap.rects() {
+            paint_in_outline(buf, outline, part, SURFACE);
+        }
+        let (Some(src), Some(shown)) = (src, shown) else {
+            return;
+        };
+        let format = buf.pixel_format();
+        let pixel = |x: i32, y: i32| {
+            let off = (y - window.y) as usize * src_pitch + (x - window.x) as usize * bytes_pp;
+            let raw = src
+                .get(off..off + 4)
+                .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            let ink = format.decode(raw);
+            Color32::new(ink.red(), ink.green(), ink.blue(), 0xff)
+        };
+        let dst_pitch = self.output_pitch;
+        for whole in uncornered(outline, &shown).rects() {
+            let dst = buf.data_mut();
+            let width = (whole.x1 - whole.x0 + 1) as usize * bytes_pp;
+            for y in whole.y0..=whole.y1 {
+                let src_off =
+                    (y - window.y) as usize * src_pitch + (whole.x0 - window.x) as usize * bytes_pp;
+                let dst_off = y as usize * dst_pitch + whole.x0 as usize * bytes_pp;
+                if let (Some(from), Some(to)) = (
+                    src.get(src_off..src_off + width),
+                    dst.get_mut(dst_off..dst_off + width),
+                ) {
+                    to.copy_from_slice(from);
                 }
             }
         }
-
-        if frame_w > buf_w as i32 {
-            let strip = DamageRect {
-                x0: window.x + buf_w as i32,
-                y0: window.y,
-                x1: window.x + frame_w - 1,
-                y1: window.y + frame_h - 1,
-            };
-            if intersect_rect(clip, &strip).is_some() {
-                gfx::fill_rect_clipped(
-                    buf,
-                    strip.x0,
-                    strip.y0,
-                    strip.x1 - strip.x0 + 1,
-                    strip.y1 - strip.y0 + 1,
-                    TITLE_BAR,
-                    clip,
-                );
-            }
+        for corner in outline.corners() {
+            outline.fill(buf, &corner, &shown, pixel);
         }
-        if frame_h > buf_h as i32 {
-            let strip = DamageRect {
-                x0: window.x,
-                y0: window.y + buf_h as i32,
-                x1: window.x + frame_w - 1,
-                y1: window.y + frame_h - 1,
-            };
-            if intersect_rect(clip, &strip).is_some() {
-                gfx::fill_rect_clipped(
-                    buf,
-                    strip.x0,
-                    strip.y0,
-                    strip.x1 - strip.x0 + 1,
-                    strip.y1 - strip.y0 + 1,
-                    TITLE_BAR,
-                    clip,
-                );
-            }
-        }
-
-        let _ = frame_rect;
-    }
-
-    fn draw_window_placeholder(
-        &self,
-        buf: &mut DrawBuffer,
-        window: &UserWindowInfo,
-        clip: &DamageRect,
-    ) {
-        static PH_LOGGED: core::sync::atomic::AtomicBool =
-            core::sync::atomic::AtomicBool::new(false);
-        if !PH_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {
-            crate::syscall::tty::write(b"DEBUG: draw_window_placeholder called!\n");
-        }
-        let wx = window.x;
-        let wy = window.y;
-        let ww = window.effective_width() as i32;
-        let wh = window.effective_height() as i32;
-
-        gfx::fill_rect_clipped(buf, wx, wy, ww, wh, TITLE_BAR, clip);
-
-        gfx::fill_rect_clipped(buf, wx, wy, ww, 1, DIVIDER, clip);
-        gfx::fill_rect_clipped(buf, wx, wy + wh - 1, ww, 1, DIVIDER, clip);
-        gfx::fill_rect_clipped(buf, wx, wy, 1, wh, DIVIDER, clip);
-        gfx::fill_rect_clipped(buf, wx + ww - 1, wy, 1, wh, DIVIDER, clip);
-
-        let text = "Window content pending migration";
-        let text_x = wx + 10;
-        let text_y = ui::centred_top(wy, wh, TEXT_PX);
-        ui::draw_clipped(
-            buf,
-            text_x,
-            text_y,
-            text,
-            TEXT_PX,
-            ui::Weight::Regular,
-            TEXT_PRIMARY,
-            TITLE_BAR,
-            clip,
-        );
     }
 }
 
@@ -961,47 +813,6 @@ fn title_to_str(title: &[u8; 32]) -> &str {
         return "";
     }
     core::str::from_utf8(&title[..len]).unwrap_or("<invalid>")
-}
-
-fn shadow_bounds(window: &UserWindowInfo) -> DamageRect {
-    let sx = window.x;
-    let sy = window.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y;
-    let ww = window.effective_width() as i32;
-    let wh = window.effective_height() as i32 + TITLE_BAR_HEIGHT;
-    DamageRect {
-        x0: sx - SHADOW_SPREAD,
-        y0: sy - SHADOW_SPREAD,
-        x1: sx + ww - 1 + SHADOW_SPREAD,
-        y1: sy + wh - 1 + SHADOW_SPREAD,
-    }
-}
-
-/// The opaque content area of a window, below the title bar.  Composited by
-/// overwrite, so it is the window's occluder box.
-fn content_box(window: &UserWindowInfo) -> DamageRect {
-    let ew = window.effective_width() as i32;
-    let eh = window.effective_height() as i32;
-    DamageRect {
-        x0: window.x,
-        y0: window.y,
-        x1: window.x + ew - 1,
-        y1: window.y + eh - 1,
-    }
-}
-
-/// The full window frame: title bar (above `window.y`) plus content area, and
-/// the bound on where content and decorations may paint.  The title bar is
-/// deliberately not opaque — its rounded corners let the backdrop through — so
-/// only [`content_box`] is subtracted during occlusion.
-pub(super) fn frame_box(window: &UserWindowInfo) -> DamageRect {
-    let ew = window.effective_width() as i32;
-    let eh = window.effective_height() as i32;
-    DamageRect {
-        x0: window.x,
-        y0: window.y - TITLE_BAR_HEIGHT,
-        x1: window.x + ew - 1,
-        y1: window.y + eh - 1,
-    }
 }
 
 fn cursor_bounds(mx: i32, my: i32, cursor_shape: u8) -> DamageRect {

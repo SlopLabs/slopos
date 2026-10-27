@@ -5,6 +5,7 @@
 //! `describe` completes "{App} wants to …": a verb phrase in lower case,
 //! without a full stop. `detail` is one sentence about what follows from
 //! allowing it. `verb` names the button that allows it, from [`VERBS`].
+//! `label` holds any other name a control or a heading shows.
 
 use alloc::format;
 use alloc::string::String;
@@ -117,6 +118,18 @@ pub fn verb(text: &str) -> Result<(), &'static str> {
         true => Ok(()),
         false => Err("verb is one of slopos_priv_core::words::VERBS: Allow, Install, Run…"),
     }
+}
+
+/// The words of a button, a menu entry, a heading or a passing status: a
+/// capital first and no full stop.
+pub fn label(text: &str) -> Result<(), &'static str> {
+    if !text.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return Err("a label starts with a capital");
+    }
+    if text.ends_with('.') {
+        return Err("a label ends without a full stop");
+    }
+    plain(text)
 }
 
 fn plain(text: &str) -> Result<(), &'static str> {

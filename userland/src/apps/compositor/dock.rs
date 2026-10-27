@@ -1,10 +1,14 @@
 //! Launcher shelf (dock) — rendering, layout, magnification, and hit-testing
 //! for the bottom launcher bar.
 
+use std::path::Path;
+
+use slopos_appkit::app_icon;
 use slopos_appkit::text::ui;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
+use slopos_gfx::rounded::Rounded;
 use slopos_image::{DecodeOptions, Image};
-use slopos_theme_core::{TextRole, TextStyle};
+use slopos_theme_core::{Icon, TextRole, TextStyle};
 
 use crate::app_entry::AppEntry;
 use crate::gfx::{self, DamageRect, DrawBuffer};
@@ -19,8 +23,6 @@ const ICON_PIXELS_MAX: usize = 256 * 256;
 const ICON_BYTES_MAX: u64 = 1 << 20;
 
 const LABEL: TextStyle = TextRole::Label.style();
-/// The letter on an app's tile when it has no icon.
-const LETTER: TextStyle = TextRole::Title.style();
 
 pub struct ShelfEntry {
     pub name: String,
@@ -29,36 +31,63 @@ pub struct ShelfEntry {
     pub pinned: bool,
     pub running: bool,
     pub task_id: u32,
-    icon: Option<Image>,
+    /// The icon the entry names, or the template drawn for an app that
+    /// ships none.
+    picture: Image,
+    has_icon: bool,
 }
+
+/// The smaller size an icon ships at, which the dock never draws past.
+const PICTURE_PX: u32 = app_icon::SIZES[0];
 
 impl ShelfEntry {
     pub fn has_icon(&self) -> bool {
-        self.icon.is_some()
+        self.has_icon
+    }
+
+    pub fn picture(&self) -> &Image {
+        &self.picture
     }
 
     fn pinned(entry: AppEntry) -> Self {
-        let icon = entry
-            .icon
-            .as_deref()
-            .and_then(|path| crate::app_entry::read_bounded(path, ICON_BYTES_MAX))
-            .and_then(|bytes| {
-                let options = DecodeOptions {
-                    max_pixels: ICON_PIXELS_MAX,
-                    ..DecodeOptions::default()
-                };
-                slopos_image::decode(&bytes, options).ok()
+        let icon = entry.icon.as_deref().and_then(decode);
+        Self::new(entry.name, entry.exec, entry.id, true, icon)
+    }
+
+    fn new(name: String, exec: String, app_id: String, pinned: bool, icon: Option<Image>) -> Self {
+        let has_icon = icon.is_some();
+        let picture = icon.unwrap_or_else(|| {
+            let tint = slopos_theme_core::series_of(match app_id.is_empty() {
+                true => &name,
+                false => &app_id,
             });
+            Image {
+                width: PICTURE_PX,
+                height: PICTURE_PX,
+                pixels: app_icon::render(PICTURE_PX, tint, Icon::AppWindow),
+            }
+        });
         Self {
-            name: entry.name,
-            exec: entry.exec,
-            app_id: entry.id,
-            pinned: true,
+            name,
+            exec,
+            app_id,
+            pinned,
             running: false,
             task_id: 0,
-            icon,
+            picture,
+            has_icon,
         }
     }
+}
+
+/// The PNG at `path`, read as the share's files are read.
+fn decode(path: &Path) -> Option<Image> {
+    let bytes = crate::app_entry::read_bounded(path, ICON_BYTES_MAX)?;
+    let options = DecodeOptions {
+        max_pixels: ICON_PIXELS_MAX,
+        ..DecodeOptions::default()
+    };
+    slopos_image::decode(&bytes, options).ok()
 }
 
 #[derive(Clone, Copy)]
@@ -128,15 +157,27 @@ impl LauncherShelf {
         &self.entries
     }
 
+    /// The name the dock's entry for `app_id` gives the app.
+    pub fn app_name(&self, app_id: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|e| e.pinned && !app_id.is_empty() && e.app_id == app_id)
+            .map(|e| e.name.as_str())
+    }
+
     /// Synchronize running state from the current window list; running apps
     /// that match no pinned entry are appended after the pinned group.
     pub fn sync_running_apps(&mut self, windows: &[UserWindowInfo], count: u32) {
-        let before: Vec<(bool, u32)> = self
-            .entries
-            .iter()
-            .map(|e| (e.running, e.task_id))
-            .collect();
-        self.entries.retain(|entry| entry.pinned);
+        let shown = |entries: &[ShelfEntry]| -> Vec<(bool, u32, String)> {
+            entries
+                .iter()
+                .map(|e| (e.running, e.task_id, e.name.clone()))
+                .collect()
+        };
+        let before = shown(&self.entries);
+        let (pinned, mut loose): (Vec<ShelfEntry>, Vec<ShelfEntry>) =
+            self.entries.drain(..).partition(|entry| entry.pinned);
+        self.entries = pinned;
         for entry in &mut self.entries {
             entry.running = false;
             entry.task_id = 0;
@@ -145,31 +186,28 @@ impl LauncherShelf {
         for win in &windows[..(count as usize).min(windows.len())] {
             let title = title_str(&win.title);
             let app_id = win.app_id.as_str();
-            let pinned = if app_id.is_empty() {
-                self.entries
-                    .iter_mut()
-                    .find(|entry| names_match(&entry.name, title))
-            } else {
-                self.entries.iter_mut().find(|entry| entry.app_id == app_id)
+            let same_app = |entry: &ShelfEntry| match app_id.is_empty() {
+                true => names_match(&entry.name, title),
+                false => entry.app_id == app_id,
             };
-            if let Some(entry) = pinned {
+            if let Some(entry) = self.entries.iter_mut().find(|e| same_app(e)) {
                 entry.running = true;
                 entry.task_id = win.task_id;
             } else if self.entries.len() < MAX_ENTRIES {
-                self.entries.push(ShelfEntry {
-                    name: title.to_string(),
-                    exec: String::new(),
-                    app_id: app_id.to_string(),
-                    pinned: false,
-                    running: true,
-                    task_id: win.task_id,
-                    icon: None,
-                });
+                let mut entry = match loose.iter().position(|e| same_app(e)) {
+                    Some(at) => loose.swap_remove(at),
+                    None => {
+                        ShelfEntry::new(title.into(), String::new(), app_id.into(), false, None)
+                    }
+                };
+                entry.name = title.into();
+                entry.running = true;
+                entry.task_id = win.task_id;
+                self.entries.push(entry);
             }
         }
 
-        let after = self.entries.iter().map(|e| (e.running, e.task_id));
-        if !before.iter().copied().eq(after) {
+        if before != shown(&self.entries) {
             self.content_dirty = true;
         }
     }
@@ -194,8 +232,9 @@ impl LauncherShelf {
         let base_total_w = self.base_content_width(pinned_count, has_separator);
         let base_pill_w = base_total_w + 2 * SHELF_PILL_PADDING_X;
         let base_pill_x = (screen_width as i32 - base_pill_w) / 2;
-        let base_pill_y =
-            screen_height as i32 - SHELF_BOTTOM_MARGIN - SHELF_ICON_SIZE - 2 * SHELF_PILL_PADDING_Y;
+        let pill_bottom =
+            screen_height as i32 - SHELF_BOTTOM_MARGIN - SHELF_DOT_DIAMETER - SHELF_DOT_MARGIN_Y;
+        let base_pill_y = pill_bottom - SHELF_ICON_SIZE - 2 * SHELF_PILL_PADDING_Y;
         let shelf_top = base_pill_y;
 
         let in_y_proximity =
@@ -226,7 +265,7 @@ impl LauncherShelf {
         let max_icon_size = max_in_slice(&icon_sizes, self.entries.len());
         let pill_h = max_icon_size + 2 * SHELF_PILL_PADDING_Y;
         let pill_x = (screen_width as i32 - pill_w) / 2;
-        let pill_y = screen_height as i32 - SHELF_BOTTOM_MARGIN - pill_h;
+        let pill_y = pill_bottom - pill_h;
 
         let icons_bottom = pill_y + pill_h - SHELF_PILL_PADDING_Y;
 
@@ -343,9 +382,8 @@ impl LauncherShelf {
             let icon_x = l.center_x - l.size / 2;
             let icon_y = l.top_y;
 
-            if let Some(icon) = &entry.icon
-                && let Some(bitmap) = BitmapRef::new(icon.width, icon.height, &icon.pixels)
-            {
+            let icon = entry.picture();
+            if let Some(bitmap) = BitmapRef::new(icon.width, icon.height, &icon.pixels) {
                 slopos_gfx::image::draw_image_clipped(
                     buf,
                     bitmap,
@@ -357,14 +395,15 @@ impl LauncherShelf {
                     ImageSampling::for_resize(icon.width, icon.height, l.size, l.size),
                     &clip_rect,
                 );
-            } else {
-                draw_letter_icon(buf, entry, l, icon_x, icon_y, &clip_rect);
             }
 
             if entry.running {
-                let dot_cx = l.center_x;
-                let dot_cy = pill_y + pill_h + SHELF_DOT_MARGIN_Y + SHELF_DOT_DIAMETER / 2;
-                gfx::draw_circle_filled(buf, dot_cx, dot_cy, SHELF_DOT_DIAMETER / 2, TEXT_PRIMARY);
+                let dot = Rounded::circle(
+                    l.center_x - SHELF_DOT_DIAMETER / 2,
+                    pill_y + pill_h + SHELF_DOT_MARGIN_Y,
+                    SHELF_DOT_DIAMETER,
+                );
+                dot.fill(buf, &dot.bounds(), &clip_rect, |_, _| TEXT_PRIMARY);
             }
         }
 
@@ -485,47 +524,6 @@ impl LauncherShelf {
         }
         w
     }
-}
-
-/// An entry without an icon, and a running app no entry names: its name's
-/// first letter on a square.
-fn draw_letter_icon(
-    buf: &mut DrawBuffer,
-    entry: &ShelfEntry,
-    l: &IconLayout,
-    icon_x: i32,
-    icon_y: i32,
-    clip: &DamageRect,
-) {
-    slopos_gfx::canvas_ops::rounded_rect_filled(
-        buf,
-        icon_x,
-        icon_y,
-        l.size,
-        l.size,
-        SHELF_ICON_CORNER_RADIUS,
-        ACCENT,
-    );
-    let letter = entry
-        .name
-        .chars()
-        .next()
-        .map_or('?', |c| c.to_ascii_uppercase());
-    let mut utf8 = [0u8; 4];
-    let s = letter.encode_utf8(&mut utf8);
-    let tx = icon_x + (l.size - ui::width_weighted(s, LETTER.size, LETTER.weight)) / 2;
-    let ty = ui::centred_top(icon_y, l.size, LETTER.size);
-    ui::draw_clipped(
-        buf,
-        tx,
-        ty,
-        s,
-        LETTER.size,
-        LETTER.weight,
-        TEXT_ON_ACCENT,
-        ACCENT,
-        clip,
-    );
 }
 
 #[inline]

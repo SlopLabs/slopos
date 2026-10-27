@@ -17,6 +17,8 @@ pub struct TextStyle {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TextRole {
+    /// The time on the lock and login screens.
+    Hero,
     Display,
     Title,
     Heading,
@@ -28,7 +30,8 @@ pub enum TextRole {
 }
 
 impl TextRole {
-    pub const ALL: [TextRole; 7] = [
+    pub const ALL: [TextRole; 8] = [
+        TextRole::Hero,
         TextRole::Display,
         TextRole::Title,
         TextRole::Heading,
@@ -40,6 +43,7 @@ impl TextRole {
 
     pub const fn style(self) -> TextStyle {
         let (size, weight, line_height, icon) = match self {
+            TextRole::Hero => (64, Weight::Semibold, 80, 64),
             TextRole::Display => (24, Weight::Semibold, 32, 32),
             TextRole::Title => (18, Weight::Semibold, 24, 20),
             TextRole::Heading => (15, Weight::Semibold, 20, 18),

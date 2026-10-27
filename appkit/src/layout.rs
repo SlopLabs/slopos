@@ -557,9 +557,15 @@ impl Widget for SpacerWidget {
     fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
         let px = match self.length {
             Length::Px(n) => n,
-            Length::Fill(_) => 0, // fill handled by parent flex
+            Length::Fill(_) => 0,
         };
         constraints.constrain(Size::new(px, px))
+    }
+    fn flex_weight(&self) -> u16 {
+        match self.length {
+            Length::Fill(weight) => weight,
+            Length::Px(_) => 0,
+        }
     }
     fn paint(&self, _ctx: &mut PaintContext) {}
     fn event(

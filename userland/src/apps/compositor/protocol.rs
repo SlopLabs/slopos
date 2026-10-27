@@ -9,6 +9,8 @@ use std::os::unix::ffi::OsStrExt;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::window::{AppId, MAX_WINDOW_DAMAGE_REGIONS, WindowInfo};
+use slopos_chrome_core::placement;
+use slopos_chrome_core::positioner::{Rect, Size};
 use slopos_protocol::server::{MAX_CLIENTS, Server};
 use slopos_protocol::types::{
     Event, MAX_STRING_LEN, OwnedFd, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId,
@@ -18,6 +20,7 @@ use slopos_protocol::types::{
 use crate::ring::slopfut::sync::Notify;
 use crate::syscall::CachedShmMapping;
 use crate::syscall::tty;
+use crate::theme::TITLE_BAR_HEIGHT;
 
 /// Hard ceiling on a single clipboard payload: a hostile or runaway selection
 /// cannot exhaust memory.
@@ -106,6 +109,8 @@ struct ProtocolSurface {
     app_id: [u8; MAX_STRING_LEN],
     /// The client's `(min, max)` sizes; 0 is no limit.
     size_limits: ((u32, u32), (u32, u32)),
+    /// When the window was placed, counted across windows; 0 until it is.
+    placed_at: u64,
     cursor_shape: u8,
     last_enter_serial: u32,
     has_pointer: bool,
@@ -137,8 +142,8 @@ impl ProtocolSurface {
             committed_damage: [DamageRect::invalid(); MAX_PENDING_DAMAGE],
             committed_damage_count: 0,
             dirty: false,
-            window_x: 100,
-            window_y: 100,
+            window_x: 0,
+            window_y: 0,
             z_order: 0,
             visible: false,
             window_state: 0,
@@ -155,6 +160,7 @@ impl ProtocolSurface {
             title: [0u8; MAX_STRING_LEN],
             app_id: [0u8; MAX_STRING_LEN],
             size_limits: ((0, 0), (0, 0)),
+            placed_at: 0,
             cursor_shape: 0,
             last_enter_serial: 0,
             has_pointer: false,
@@ -183,6 +189,10 @@ pub struct ProtocolBridge {
     display_height: u32,
     display_format: u32,
     display_pitch: u32,
+    /// Where windows are placed: the screen between the menu bar and the dock.
+    work_area: Rect,
+    /// Source of `placed_at` values (never reused).
+    placements: u64,
     configure_serial: u32,
     /// Per-slot connection generation. Slot indices and fd numbers are recycled
     /// across disconnect→reconnect, so without this a stale per-client task
@@ -219,6 +229,8 @@ impl ProtocolBridge {
             display_height: 0,
             display_format: 0,
             display_pitch: 0,
+            work_area: Rect::EMPTY,
+            placements: 0,
             configure_serial: 0,
             client_gen: [0u64; MAX_CLIENTS],
             next_gen: 1,
@@ -231,6 +243,86 @@ impl ProtocolBridge {
         self.display_height = height;
         self.display_format = format;
         self.display_pitch = pitch;
+    }
+
+    pub fn set_work_area(&mut self, area: Rect) {
+        self.work_area = area;
+    }
+
+    /// The frame of the surface at `idx`, title bar included.
+    fn frame_of(&self, idx: usize) -> Rect {
+        let s = &self.surfaces[idx];
+        let width = if s.frame_width > 0 {
+            s.frame_width
+        } else {
+            s.width
+        };
+        let height = if s.frame_height > 0 {
+            s.frame_height
+        } else {
+            s.height
+        };
+        Rect::new(
+            s.window_x,
+            s.window_y - TITLE_BAR_HEIGHT,
+            width as i32,
+            height as i32 + TITLE_BAR_HEIGHT,
+        )
+    }
+
+    /// Place the toplevel at `idx` as it first shows, by chrome-core's
+    /// placement rule: cascaded from the app's latest window, by app id or,
+    /// with none, by client, or centred when the app has none; shrunk to
+    /// fit, which the client hears as a configure.
+    fn place(&mut self, idx: usize) {
+        self.placements += 1;
+        if self.work_area.is_empty() {
+            self.surfaces[idx].placed_at = self.placements;
+            return;
+        }
+        let me = &self.surfaces[idx];
+        let same_app = |other: &ProtocolSurface| match me.app_id[0] {
+            0 => other.client_idx == me.client_idx,
+            _ => other.app_id == me.app_id,
+        };
+        let latest = (0..MAX_SURFACES)
+            .filter(|&i| i != idx)
+            .filter(|&i| {
+                let other = &self.surfaces[i];
+                other.active
+                    && other.visible
+                    && other.role == SurfaceRole::Toplevel
+                    && other.placed_at > 0
+                    && same_app(other)
+            })
+            .max_by_key(|&i| self.surfaces[i].placed_at)
+            .map(|i| self.frame_of(i));
+        let ((min_w, min_h), _) = me.size_limits;
+        let wanted = self.frame_of(idx);
+        let min = Size {
+            w: (min_w as i32).max(1),
+            h: (min_h as i32).max(1) + TITLE_BAR_HEIGHT,
+        };
+        let frame = placement::place(
+            self.work_area,
+            TITLE_BAR_HEIGHT,
+            Size {
+                w: wanted.w,
+                h: wanted.h,
+            },
+            min,
+            latest,
+        );
+        let surface = &mut self.surfaces[idx];
+        surface.placed_at = self.placements;
+        surface.window_x = frame.x;
+        surface.window_y = frame.y + TITLE_BAR_HEIGHT;
+        if (frame.w, frame.h) != (wanted.w, wanted.h) {
+            let (w, h) = (frame.w as u32, (frame.h - TITLE_BAR_HEIGHT) as u32);
+            surface.frame_width = w;
+            surface.frame_height = h;
+            self.send_configure(idx, w, h, slopos_protocol::toplevel_state::ACTIVATED);
+        }
     }
 
     fn greet_client(&mut self, idx: usize) {
@@ -599,11 +691,8 @@ impl ProtocolBridge {
                 surface.shm_token = slot.fd as u32;
                 surface.width = slot.width;
                 surface.height = slot.height;
-                if surface.width > 0 && surface.height > 0 && !surface.visible {
+                if surface.width > 0 && surface.height > 0 {
                     surface.visible = true;
-                    if surface.role == SurfaceRole::Toplevel {
-                        eprintln!("COMPOSITOR: shown {}", printable(&surface.app_id));
-                    }
                 }
             }
 
@@ -619,6 +708,15 @@ impl ProtocolBridge {
                 None
             }
         };
+
+        let surface = &self.surfaces[idx];
+        if surface.visible && surface.role == SurfaceRole::Toplevel && surface.placed_at == 0 {
+            self.place(idx);
+            eprintln!(
+                "COMPOSITOR: shown {}",
+                printable(&self.surfaces[idx].app_id)
+            );
+        }
 
         if let Some(prev) = release_prev {
             let _ = self.server.queue_event(

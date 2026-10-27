@@ -220,7 +220,7 @@ fn tones_and_surfaces_name_their_roles() {
 
 #[test]
 fn text_roles_descend_and_fit_their_line() {
-    let sizes: Vec<u16> = TextRole::ALL[..6].iter().map(|r| r.style().size).collect();
+    let sizes: Vec<u16> = TextRole::ALL[..7].iter().map(|r| r.style().size).collect();
     assert!(sizes.windows(2).all(|w| w[0] > w[1]), "{sizes:?}");
     for role in TextRole::ALL {
         let s = role.style();
@@ -288,4 +288,16 @@ fn icons_are_named_once_and_listed_once() {
             assert_ne!(a.codepoint(), b.codepoint());
         }
     }
+}
+
+#[test]
+fn a_name_keeps_its_series_and_names_spread_over_them() {
+    assert_eq!(series_of("carol"), series_of("carol"));
+    let mut seen = [false; SERIES];
+    for name in [
+        "user", "bob", "carol", "dave", "alice", "erin", "frank", "grace",
+    ] {
+        seen[series_of(name)] = true;
+    }
+    assert!(seen.iter().filter(|&&s| s).count() >= 4, "{seen:?}");
 }

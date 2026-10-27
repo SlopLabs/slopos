@@ -6,7 +6,7 @@
 
 use slopos_gfx::DrawBuffer;
 
-use crate::constraints::{BoxConstraints, Rect};
+use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{self, MessageSink, PointerButton, WidgetEvent};
 use crate::node::Node;
 use crate::paint::PaintContext;
@@ -20,7 +20,7 @@ pub struct Embedded {
     rect: Rect,
     pointer: (i32, i32),
     focused: Option<WidgetId>,
-    hovered: Option<WidgetId>,
+    hovered: Option<(WidgetId, Option<usize>)>,
 }
 
 impl Embedded {
@@ -53,10 +53,19 @@ impl Embedded {
 
     fn place(&mut self) {
         let mut ctx = MeasureCtx { style: &self.style };
-        let size = crate::constraints::Size::new(self.rect.width, self.rect.height);
+        let size = Size::new(self.rect.width, self.rect.height);
         let constraints = BoxConstraints::tight(size);
         measure_widget(self.root.as_mut(), constraints, &mut ctx);
         place_widget(self.root.as_mut(), self.rect);
+    }
+
+    /// The size `node` lays out at within `max`, for a holder that sizes a
+    /// surface to what it holds.
+    pub fn natural_size<M: Clone + 'static>(node: &Node<M>, max: Size) -> Size {
+        let mut root = tree::build_widget_tree(node);
+        let style = StyleSheet::with_theme(slopos_theme_core::current());
+        let mut ctx = MeasureCtx { style: &style };
+        measure_widget(root.as_mut(), BoxConstraints::loose(max), &mut ctx)
     }
 
     pub(crate) fn root(&self) -> &dyn Widget {
@@ -133,16 +142,20 @@ impl Embedded {
         sink.drain_typed::<M>()
     }
 
-    /// The pointer is at `(x, y)`: whether the control under it changed,
-    /// which changes what is drawn.
+    /// The pointer is at `(x, y)`: whether the control under it, or the
+    /// part of it lit, changed, which changes what is drawn.
     pub fn hover(&mut self, x: i32, y: i32) -> bool {
         self.pointer = (x, y);
-        let control = event::hit_test(self.root.as_ref(), x, y).and_then(|hit| {
-            let root = self.root.as_ref();
-            hit.chain.into_iter().find(|&id| focusable(root, id))
+        let root = self.root.as_ref();
+        let lit = event::hit_test(root, x, y).and_then(|hit| {
+            hit.chain
+                .into_iter()
+                .filter_map(|id| widget(root, id))
+                .find(|w| w.focus_policy().is_focusable())
+                .map(|w| (w.id(), w.hover_part(x, y)))
         });
-        let changed = control != self.hovered;
-        self.hovered = control;
+        let changed = lit != self.hovered;
+        self.hovered = lit;
         changed
     }
 
@@ -166,12 +179,11 @@ fn find(widget: &dyn Widget, matches: &dyn Fn(&dyn Widget) -> bool) -> Option<Wi
         .find_map(|child| find(child.as_ref(), matches))
 }
 
-fn focusable(widget: &dyn Widget, id: WidgetId) -> bool {
-    if widget.id() == id {
-        return widget.focus_policy().is_focusable();
+fn widget(root: &dyn Widget, id: WidgetId) -> Option<&dyn Widget> {
+    if root.id() == id {
+        return Some(root);
     }
-    widget
-        .children()
+    root.children()
         .iter()
-        .any(|child| focusable(child.as_ref(), id))
+        .find_map(|child| widget(child.as_ref(), id))
 }

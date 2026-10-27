@@ -936,7 +936,8 @@ it is installed (`slopos_userland::tree::scan`), its identity a digest of every
 entry; the toolchain's comes with the payload, written by the host. The
 dock pins the app entries — `share/slopos/apps/<id>.app`, `key=value` lines
 naming the `id`, a `name`, the program it `exec`s, an `icon` PNG in that
-share's `slopos/icons/`, and `boot=medium` for one shown only on a boot from
+share's `slopos/icons/`, drawn from the `<icon>@2x.png` beside it when there
+is one, and `boot=medium` for one shown only on a boot from
 the install medium (`slopos_userland::app_entry`) — read at session start
 from `/usr/share`, `/usr/local/share` and `~/.local/share`, a later one
 replacing an earlier with its id as the XDG data directories rank, in name
@@ -1001,10 +1002,62 @@ found. `just ui-shots` boots the live ISO with a USB tablet, a blank disk and
 a QMP socket (`scripts/ui_shots.py`, `scripts/lib/qmp.py`), plays scenes of
 keys, clicks and commands typed at the serial console's shell, waiting on
 `COMPOSITOR: shown <app id>` and on the screen holding still, and saves a
-PNG of each installer page, the consent dialog, the lock and login screens,
-the system menu, each app and each catalogue page under
+PNG of each installer page, the consent dialog, the system menu, the
+question *Power off…* asks, the clock's date, the lock and login screens,
+each app and each catalogue page under
 `builddir/ui-shots/`; nothing compares them. `appkit/GUIDE.md` is what to
 read before writing an app.
+
+**The compositor's chrome is drawn over the same tokens.** Frames and the dock
+paint every frame and stay hand-drawn: a frame is rounded at all four corners
+at the window radius, its edge's coverage taken from `gfx::rounded`'s signed
+distance, and square once maximized; its shadow follows the rounded rect,
+reaches as far whatever has focus and is half as dark without it; overlapping
+shadows darken each other; and the close, minimise and zoom buttons are discs
+that are grey on a window without focus and show their colours and glyphs
+while the pointer is over the group. A toplevel is placed at its first commit
+as one (`chrome-core::placement`, host-tested): the first window of an app,
+known by its app id or else by its client, is centred in the area between the
+menu bar and the dock, a later one cascades from the app's latest by the title
+bar's height and wraps to the area's top before its frame would cross the
+dock, and one larger than the area is shrunk to its minimum size or the area,
+whichever is larger, which the client hears as a configure. The menu bar names
+the focused window's app in `heading`, by the dock's entry for its app id or
+else by its title, and shows the time as `HH:MM` from `CLOCK_REALTIME`, in UTC
+(`chrome-core::clock`), repainting when the minute changes in a width kept for
+the widest time; a click on it shows the date, and the network item is a glyph
+of the icon font. The compositor's own surfaces — the lock and login screens,
+the system menu, the network and clock panels, and the question a choice that
+ends something asks (`compositor::views`) — are appkit trees painted through
+`appkit::embed`, which takes the pointer, while every key goes to the
+host-tested model behind the surface (`chrome-core::gate`, `::menu`, `::key`),
+which says what has focus; on the lock and login screens, in the system menu
+and in a question, Tab, the arrows, Space and Enter work as in any form. A
+question, and a panel the person opened or has since reached with the pointer,
+takes every key, and no window hears the pointer, or shapes it, while the lock
+or login screen or a question is up; a button's release goes only to the
+surface its press reached. The lock and login screens dim the wallpaper and
+show the time and date, the person's initial in a circle and their name, or
+the people as rows, five at a time around the one chosen, whom the arrows, the
+wheel and typing move, typing choosing the first whose name starts with what
+was typed; what they say back sits on a notice. The login screen takes nothing
+more once a password has passed, and starts over each time it comes in front
+or when that desktop has not after thirty seconds. The system menu names the
+person and offers *Lock screen*, *Switch user…* and *Log out…*, then
+*Restart…* and *Power off…*, led by *Restart desktop…* under the notice
+*Restart the desktop to finish updating* once a new base changed the desktop;
+each that ends something asks first, Cancel focused. Log out and Restart
+desktop are init's to carry out, and Restart and Power off privd's
+`org.slopos.power.reboot` and `.poweroff`; one that does not happen, unless
+the person answered privd's question so, says so in the question's place, and
+why goes to the log. An app's icon is appkit's template (`appkit::app_icon`):
+a rounded square in the theme's series colour with a glyph of the icon font on
+it, which `just icons` (`tools/icons`) renders into the icons the system and
+the apps ship, at 64 px and as `<id>@2x.png` at 128 px, and whose host test
+holds them to it. The dock draws the 64 px icon, never drawing past it, since
+its filter samples two pixels a side; the 128 px one waits for a scale factor.
+It draws an app that ships none on the template, tinted by its app id, and a
+dot under each app that runs.
 
 **The guest installs what it builds.** `/bin/bootctl` (privd's
 `org.slopos.boot.*` and `org.slopos.base.*` actions, run as uid 0 with
@@ -2156,8 +2209,9 @@ new base is paired or not, ends what the old broker ran whenever the pairing
 changes — `SIGTERM` and `SIGCONT`, `SIGKILL` to what is left after five
 seconds, and only then the new remoted — and re-executes itself once it may
 when `/sbin/init` changed; a changed
-compositor or terminal is the compositor's to offer, as a session restart
-in its system menu, and never forced. Init is single-threaded,
+compositor or terminal is the compositor's to offer, as the notice
+*Restart the desktop to finish updating* atop its system menu, and never
+forced. Init is single-threaded,
 waiting on a poll of pidfds, its ready pipes, the consent ends of sides not
 running, the base monitor and `/run/init`. A session
 ends as systemd's `KillMode` stops a unit: `SIGTERM` to every live process

@@ -25,6 +25,7 @@
 pub mod platform;
 pub mod text;
 
+pub mod app_icon;
 pub mod audit;
 pub mod catalogue;
 pub mod clipboard;

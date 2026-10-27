@@ -48,44 +48,6 @@ impl CompositorOutput {
     }
 }
 
-use crate::syscall::UserWindowInfo;
-use crate::theme::{SHADOW_OFFSET_Y, SHADOW_SPREAD, TITLE_BAR_HEIGHT};
-
-pub const WINDOW_STATE_MINIMIZED: u8 = 1;
-
-#[derive(Copy, Clone, Default)]
-pub struct WindowBounds {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub visible: bool,
-}
-
-impl WindowBounds {
-    pub fn from_window(w: &UserWindowInfo) -> Self {
-        Self {
-            x: w.x,
-            y: w.y,
-            width: w.effective_width(),
-            height: w.effective_height(),
-            visible: w.state != WINDOW_STATE_MINIMIZED,
-        }
-    }
-
-    pub fn to_damage_rect(&self) -> DamageRect {
-        if !self.visible {
-            return DamageRect::invalid();
-        }
-        DamageRect {
-            x0: self.x - SHADOW_SPREAD,
-            y0: self.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y - SHADOW_SPREAD,
-            x1: self.x + self.width as i32 - 1 + SHADOW_SPREAD,
-            y1: self.y + self.height as i32 - 1 + SHADOW_OFFSET_Y + SHADOW_SPREAD,
-        }
-    }
-}
-
 const FRAME_METRICS_WINDOW: usize = 128;
 
 pub struct FrameMetrics {

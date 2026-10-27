@@ -457,6 +457,7 @@ impl<M> From<Notice<M>> for Node<M> {
 #[derive(Clone, Debug, Default)]
 pub struct ListRow {
     pub icon: Option<Icon>,
+    pub avatar: bool,
     pub title: String,
     pub detail: String,
     pub trailing: String,
@@ -473,6 +474,12 @@ impl ListRow {
 
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Lead with the initial of its title, as a person is shown.
+    pub fn avatar(mut self) -> Self {
+        self.avatar = true;
         self
     }
 

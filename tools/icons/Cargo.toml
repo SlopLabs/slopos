@@ -1,0 +1,22 @@
+[package]
+name = "slopos-icons"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Renders the app icons the system and the apps ship from appkit's template, and holds the shipped ones to it"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "icons"
+path = "src/main.rs"
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-appkit = { workspace = true }
+slopos-theme-core = { workspace = true }
+
+[dev-dependencies]
+slopos-image = { workspace = true }

@@ -127,6 +127,11 @@ pub enum Node<M> {
         tone: Tone,
     },
     IconButton(IconButton<M>),
+    /// A person, by the initial of their name on a circle a colour of the
+    /// theme's series, the same for a name wherever it is shown.
+    Avatar {
+        name: String,
+    },
     Button {
         label: String,
         /// `None` leaves the button non-interactive; `Some` emits on click.

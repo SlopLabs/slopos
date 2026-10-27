@@ -1,11 +1,12 @@
+mod confirm;
 pub mod consent;
 pub mod decorations;
 pub mod dock;
+mod frame;
 mod gate;
 mod hover;
 mod input;
 pub mod menu_bar;
-mod net_glyph;
 mod output;
 mod popover;
 pub mod protocol;
@@ -13,8 +14,10 @@ mod region;
 mod renderer;
 mod status_item;
 mod surface_cache;
+pub mod views;
 
 use crate::gfx::DamageRect;
+use crate::init_control::Command;
 use crate::net_query;
 use crate::ring::{Ring, slopfut};
 use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, process, tty, window};
@@ -26,6 +29,8 @@ use slopos_abi::net::{
     UserAddr, UserIface, UserNetGlobal,
 };
 use slopos_abi::syscall::POLLIN;
+use slopos_chrome_core::clock::WallTime;
+use slopos_chrome_core::menu::{Choice, Ending};
 use slopos_chrome_core::status::MAX_STATUS_ITEMS;
 use slopos_chrome_core::{
     IfaceKind, IfaceRow, NetIndicatorState, NetPanelModel, indicator_state_for,
@@ -34,14 +39,13 @@ use slopos_protocol::server::MAX_CLIENTS;
 use std::time::Instant;
 use std::vec::Vec;
 
+use frame::WindowBounds;
 use hover::HoverRegistry;
 use input::InputHandler;
-use output::{
-    CompositorOutput, FrameMetrics, RenderMode, WINDOW_STATE_MINIMIZED, WindowBounds,
-    estimate_present_bytes,
-};
+use output::{CompositorOutput, FrameMetrics, RenderMode, estimate_present_bytes};
 use protocol::ProtocolBridge;
 use renderer::Renderer;
+use slopos_abi::surface::WINDOW_STATE_MINIMIZED;
 use surface_cache::ClientSurfaceCache;
 
 const MAX_WINDOWS: usize = 32;
@@ -61,6 +65,12 @@ struct WindowManager {
     shelf: dock::LauncherShelf,
     /// Compositor-owned chrome; holds a pointer grab while open.
     popover: popover::Popover,
+    /// What a choice that ends something asks first, while it is up.
+    asking: confirm::Asking,
+    /// Endings the person went ahead with that did not happen, for
+    /// [`confirm::Asking::failed`] to say so.
+    undone: std::sync::mpsc::Receiver<Ending>,
+    undone_tx: std::sync::mpsc::Sender<Ending>,
     /// privd's question, while one is up: above everything, and the only
     /// thing input reaches.
     consent: consent::Consent,
@@ -138,6 +148,7 @@ impl WindowManager {
             true => None,
             false => ProtocolBridge::new().map(Box::new),
         };
+        let (undone_tx, undone) = std::sync::mpsc::channel();
         Self {
             windows: [UserWindowInfo::default(); MAX_WINDOWS],
             window_count: 0,
@@ -149,7 +160,13 @@ impl WindowManager {
             surface_cache: ClientSurfaceCache::new(),
             system_bar: menu_bar::SystemBar::new(),
             shelf,
-            popover: popover::Popover::new(net_toggle_unasked()),
+            popover: popover::Popover::new(
+                net_toggle_unasked(),
+                gate.person().unwrap_or_default().to_owned(),
+            ),
+            asking: confirm::Asking::new(),
+            undone,
+            undone_tx,
             consent,
             gate,
             behind: false,
@@ -266,11 +283,7 @@ impl WindowManager {
 
             if let Some(prev_idx) = prev {
                 let old = saved_bounds[prev_idx];
-                let geometry_changed = old.x != curr_bounds.x
-                    || old.y != curr_bounds.y
-                    || old.width != curr_bounds.width
-                    || old.height != curr_bounds.height
-                    || old.visible != curr_bounds.visible;
+                let geometry_changed = old != curr_bounds;
                 // A pure restack changes no geometry but changes occlusion, so
                 // the covered/revealed area must be repainted.
                 let restacked = prev_idx != i;
@@ -278,7 +291,7 @@ impl WindowManager {
                     self.add_bounds_damage(&old);
                     self.add_bounds_damage(&curr_bounds);
                 }
-            } else if curr_bounds.visible {
+            } else if curr_bounds.rect().is_valid() {
                 self.force_full_redraw = true;
             }
 
@@ -401,7 +414,7 @@ impl WindowManager {
     }
 
     fn add_bounds_damage(&mut self, bounds: &WindowBounds) {
-        let rect = bounds.to_damage_rect();
+        let rect = bounds.rect();
         if rect.is_valid() {
             self.output_damage
                 .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
@@ -412,7 +425,7 @@ impl WindowManager {
     /// processed against the input state accumulated up to that event, so a
     /// press is hit-tested at its own pointer position rather than at the
     /// end-of-batch one.
-    fn process_input_events(&mut self, fb_width: i32, fb_height: i32, shelf_height: i32) {
+    fn process_input_events(&mut self, fb_width: i32, fb_height: i32) {
         use slopos_abi::InputEventType;
 
         // Taken out so it can be passed mutably into `InputHandler` methods
@@ -422,6 +435,7 @@ impl WindowManager {
         for i in 0..self.input.raw_event_count {
             let event = self.input.raw_event_buf[i];
             let time = event.timestamp_ms as u32;
+            let primary = event.data.data0 & 0x01 != 0;
             let gated = match event.event_type {
                 InputEventType::KeyPress => self.gate.takes_press(&event),
                 InputEventType::KeyRelease => self.gate.takes_release(event.key_keycode()),
@@ -432,8 +446,25 @@ impl WindowManager {
                 continue;
             }
             if self.gate.shown() {
-                if event.event_type == InputEventType::PointerMotion {
-                    self.input.apply_motion(&event);
+                self.popover.dismiss();
+                self.asking.withdraw();
+                match event.event_type {
+                    InputEventType::PointerMotion => {
+                        self.input.apply_motion(&event);
+                        self.gate.hover(self.input.mouse_x, self.input.mouse_y);
+                    }
+                    InputEventType::PointerButtonPress if primary => {
+                        self.gate
+                            .click(self.input.mouse_x, self.input.mouse_y, true);
+                    }
+                    InputEventType::PointerButtonRelease if primary => {
+                        self.gate
+                            .click(self.input.mouse_x, self.input.mouse_y, false);
+                    }
+                    InputEventType::PointerAxis if event.axis_id() == POINTER_AXIS_VERTICAL => {
+                        self.gate.wheel(event.axis_value_v120());
+                    }
+                    _ => {}
                 }
                 if !matches!(
                     event.event_type,
@@ -443,8 +474,17 @@ impl WindowManager {
                 }
             }
             let taken = match event.event_type {
-                InputEventType::KeyPress => self.consent.takes_press(&event),
-                InputEventType::KeyRelease => self.consent.takes_release(event.key_keycode()),
+                InputEventType::KeyPress => {
+                    self.consent.takes_press(&event)
+                        || self.asking.takes_press(&event)
+                        || self.popover.takes_press(&event)
+                }
+                InputEventType::KeyRelease => {
+                    let keycode = event.key_keycode();
+                    self.consent.takes_release(keycode)
+                        | self.asking.takes_release(keycode)
+                        | self.popover.takes_release(keycode)
+                }
                 _ => false,
             };
             if taken {
@@ -459,7 +499,6 @@ impl WindowManager {
                 continue;
             }
             if self.consent.active() {
-                let primary = event.data.data0 & 0x01 != 0;
                 match event.event_type {
                     InputEventType::PointerMotion => {
                         self.input.apply_motion(&event);
@@ -492,10 +531,32 @@ impl WindowManager {
                     }
                     _ => {}
                 }
+            } else if self.asking.active() {
+                match event.event_type {
+                    InputEventType::PointerMotion => {
+                        self.input.apply_motion(&event);
+                        self.asking.hover(self.input.mouse_x, self.input.mouse_y);
+                        continue;
+                    }
+                    InputEventType::PointerButtonPress => {
+                        if primary {
+                            self.asking
+                                .click(self.input.mouse_x, self.input.mouse_y, true);
+                        }
+                        continue;
+                    }
+                    InputEventType::PointerButtonRelease if primary => {
+                        self.asking
+                            .click(self.input.mouse_x, self.input.mouse_y, false);
+                    }
+                    InputEventType::PointerAxis => continue,
+                    _ => {}
+                }
             }
             match event.event_type {
                 InputEventType::PointerMotion => {
                     self.input.apply_motion(&event);
+                    self.popover.hover(self.input.mouse_x, self.input.mouse_y);
                     self.input.apply_grab_motion(proto_box.as_deref_mut());
                     self.sync_pointer_focus(proto_box.as_deref_mut());
                     let target = self.pointer_target(proto_box.as_deref());
@@ -518,7 +579,6 @@ impl WindowManager {
                         button,
                         fb_width,
                         fb_height,
-                        shelf_height,
                         &self.windows,
                         self.window_count,
                         &self.shelf,
@@ -527,6 +587,9 @@ impl WindowManager {
                         &self.system_bar,
                         proto_box.as_deref_mut(),
                     );
+                    if let Some(request) = self.input.take_chrome_request() {
+                        self.apply_chrome_request(request);
+                    }
                     // Self-heals a grab left over from a release the kernel
                     // queue dropped under a motion flood, as the input layer's
                     // own drag and resize grabs do.
@@ -558,28 +621,18 @@ impl WindowManager {
                 }
                 InputEventType::PointerButtonRelease => {
                     let button = event.data.data0 as u8;
-                    let should_forward = self
-                        .input
+                    if primary && self.popover.rect().is_some() {
+                        self.popover
+                            .click(self.input.mouse_x, self.input.mouse_y, false);
+                    }
+                    self.input
                         .on_button_release(button, proto_box.as_deref_mut());
-                    // The press was forwarded, so the release is owed to the
-                    // same surface — and to nobody else. A grab whose holder is
-                    // gone leaves the release with no owner: the surface under
-                    // the pointer now never saw the press, and may be the one
-                    // that took the dead grab's slot.
-                    let held_grab = self.protocol_pointer_grab != 0;
-                    let grab = self.live_pointer_grab(proto_box.as_deref());
-                    let target = if grab != 0 {
-                        grab
-                    } else if should_forward && !held_grab {
-                        self.protocol_pointer_focus
-                    } else {
-                        0
-                    };
-                    if target != 0 {
+                    let pressed_on = self.live_pointer_grab(proto_box.as_deref());
+                    if pressed_on != 0 {
                         if let Some(p) = proto_box.as_deref_mut() {
                             self.protocol_serial = self.protocol_serial.wrapping_add(1);
                             p.send_pointer_button_for_task(
-                                target,
+                                pressed_on,
                                 self.protocol_serial,
                                 time,
                                 event.data.data0,
@@ -633,6 +686,18 @@ impl WindowManager {
         self.protocol = proto_box;
     }
 
+    fn apply_chrome_request(&mut self, request: input::ChromeRequest) {
+        match request {
+            input::ChromeRequest::PopoverToggle(panel) => {
+                if let Some(item) = self.system_bar.item_rect(self.renderer.output_width, panel) {
+                    self.popover.toggle(panel, item);
+                }
+            }
+            input::ChromeRequest::PopoverDismiss => self.popover.dismiss(),
+            input::ChromeRequest::PopoverPress { x, y } => self.popover.click(x, y, true),
+        }
+    }
+
     /// Recompute pointer focus and emit protocol enter/leave events on
     /// transitions. Decorations and the desktop belong to the compositor, so a
     /// non-`Content` hit drops focus to none.
@@ -669,6 +734,12 @@ impl WindowManager {
         self.protocol_pointer_grab_gen = 0;
     }
 
+    /// Whether the lock or login screen or a question is over every window,
+    /// so the pointer reaches none.
+    fn covered(&self) -> bool {
+        self.gate.shown() || self.consent.active() || self.asking.active()
+    }
+
     fn sync_pointer_focus(&mut self, proto: Option<&mut ProtocolBridge>) {
         // Leaving the window mid-drag is the ordinary way to drag, not a
         // reason to hand the pointer to the window underneath.
@@ -684,7 +755,7 @@ impl WindowManager {
             &self.system_bar,
         );
         let new_ptr_focus = match hit.part {
-            input::CursorPart::Content => hit.task_id,
+            input::CursorPart::Content if !self.covered() => hit.task_id,
             _ => 0,
         };
         if new_ptr_focus == self.protocol_pointer_focus {
@@ -737,11 +808,7 @@ impl WindowManager {
                 .position(|w| w.task_id == task_id);
             if let Some(j) = prev_idx {
                 let p = pre_bounds[j];
-                let geometry_changed = p.x != curr_bounds.x
-                    || p.y != curr_bounds.y
-                    || p.width != curr_bounds.width
-                    || p.height != curr_bounds.height
-                    || p.visible != curr_bounds.visible;
+                let geometry_changed = p != curr_bounds;
                 // A raise/lower happens during input processing, so a restack
                 // is only visible here, in the post-input re-fetch.
                 let restacked = j != i;
@@ -780,23 +847,26 @@ impl WindowManager {
         self.output_damage.add_rect(x - 9, y - 9, x + 12, y + 17);
     }
 
-    /// Targeted focus-change damage, in place of a full-screen redraw.
-    fn add_title_bar_damage_for_task(&mut self, task_id: u32) {
-        if task_id == 0 {
+    /// What a change of focus repaints of the window `task_id`: its title
+    /// bar and its shadow, which darkens with focus, and the corners of its
+    /// content, which blend over the shadow.
+    fn add_focus_damage_for_task(&mut self, task_id: u32) {
+        let Some(w) = self.windows[..self.window_count as usize]
+            .iter()
+            .find(|w| task_id != 0 && w.task_id == task_id)
+        else {
             return;
-        }
-        for i in 0..self.window_count as usize {
-            if self.windows[i].task_id == task_id {
-                let w = &self.windows[i];
-                let frame_y = w.y - TITLE_BAR_HEIGHT;
-                self.output_damage.add_rect(
-                    w.x - SHADOW_SPREAD,
-                    frame_y - SHADOW_SPREAD,
-                    w.x + w.width as i32 - 1 + SHADOW_SPREAD,
-                    w.y - 1,
-                );
-                return;
-            }
+        };
+        let interior = DamageRect {
+            x0: w.x,
+            y0: w.y,
+            x1: w.x + w.effective_width() as i32 - 1,
+            y1: w.y + w.effective_height() as i32 - 1 - WINDOW_CORNER_RADIUS,
+        };
+        let mut changed = Region::from_rect(frame::bounds(w));
+        changed.subtract(&interior);
+        for rect in changed.rects() {
+            self.output_damage.add(*rect);
         }
     }
 
@@ -810,13 +880,13 @@ impl WindowManager {
     /// Whether the question changed since the last frame, laid out on the
     /// screen over the window of the app that asks, when it has one shown.
     fn consent_dirty(&mut self, fb_info: &DisplayInfo) -> bool {
-        let screen = slopos_appkit::Rect::new(0, 0, fb_info.width as i32, fb_info.height as i32);
+        let screen = screen_rect(fb_info);
         let windows = &self.windows[..self.window_count as usize];
         let anchor = self.consent.asker().and_then(|pid| {
             let w = windows
                 .iter()
                 .find(|w| w.task_id == pid && w.state != WINDOW_STATE_MINIMIZED)?;
-            let frame = renderer::frame_box(w);
+            let frame = frame::frame_box(w);
             Some(slopos_appkit::Rect::new(
                 frame.x0,
                 frame.y0,
@@ -845,7 +915,7 @@ impl WindowManager {
         wm.input.drain_events();
         wm.refresh_windows();
         wm.gate.poll();
-        if wm.consent_dirty(fb_info) | wm.gate.take_dirty() {
+        if wm.consent_dirty(fb_info) | wm.gate.take_dirty(screen_rect(fb_info)) {
             wm.force_full_redraw = true;
         }
         // Snapshot before any input processing so a change from any source —
@@ -860,14 +930,31 @@ impl WindowManager {
         );
         wm.input
             .process_pending_close_requests(&wm.windows, wm.window_count);
-        let shelf_h = SHELF_ICON_SIZE
-            + 2 * SHELF_PILL_PADDING_Y
-            + SHELF_BOTTOM_MARGIN
-            + SHELF_DOT_DIAMETER
-            + SHELF_DOT_MARGIN_Y;
-
-        wm.process_input_events(fb_info.width as i32, fb_info.height as i32, shelf_h);
-        if wm.consent_dirty(fb_info) | wm.gate.take_dirty() {
+        wm.process_input_events(fb_info.width as i32, fb_info.height as i32);
+        match wm.popover.take_choice() {
+            Some(Choice::Lock) => wm.gate.lock(),
+            Some(Choice::SwitchUser) => ask_init(Command::Greeter),
+            Some(choice) => {
+                if let Some(ending) = choice.ending() {
+                    wm.asking.ask(ending);
+                }
+            }
+            None => {}
+        }
+        if let Some(ending) = wm.asking.take_answer() {
+            carry_out(ending, wm.undone_tx.clone());
+        }
+        if !wm.asking.active()
+            && !wm.gate.shown()
+            && let Ok(ending) = wm.undone.try_recv()
+        {
+            wm.asking.failed(ending);
+        }
+        if wm.gate.shown() {
+            wm.popover.dismiss();
+            wm.asking.withdraw();
+        }
+        if wm.consent_dirty(fb_info) | wm.gate.take_dirty(screen_rect(fb_info)) {
             wm.force_full_redraw = true;
         }
 
@@ -883,10 +970,13 @@ impl WindowManager {
             wm.renderer.output_width,
             &wm.system_bar,
         );
-        let cursor_shape = wm.input.cursor_shape_for(&cursor_hit, &wm.windows);
-        let signal_hovered_task =
-            wm.input
-                .signal_hovered_task(&cursor_hit, &wm.windows, wm.input.focused_task());
+        let (cursor_shape, signal_hovered_task) = match wm.covered() {
+            true => (slopos_abi::window::CURSOR_SHAPE_DEFAULT, 0),
+            false => (
+                wm.input.cursor_shape_for(&cursor_hit, &wm.windows),
+                wm.input.signal_hovered_task(&cursor_hit, &wm.windows),
+            ),
+        };
 
         if cursor_shape != wm.prev_cursor_shape {
             wm.add_cursor_damage_at(wm.input.mouse_x, wm.input.mouse_y);
@@ -907,8 +997,8 @@ impl WindowManager {
 
         let focus_after = wm.input.focused_task();
         if focus_after != focus_before {
-            wm.add_title_bar_damage_for_task(focus_before);
-            wm.add_title_bar_damage_for_task(focus_after);
+            wm.add_focus_damage_for_task(focus_before);
+            wm.add_focus_damage_for_task(focus_after);
             // The bar names the focused application and nothing else in the
             // frame touches the bar strip, so its name would otherwise stay
             // stale until an unrelated change repainted it.
@@ -928,47 +1018,24 @@ impl WindowManager {
             wm.refresh_from_kernel();
         }
 
-        // Not applied in the input dispatch: that path is handed an immutable
-        // view of the chrome.
-        if let Some(request) = wm.input.take_chrome_request() {
-            let screen_w = output.width;
-            let screen_h = output.height;
-            match request {
-                input::ChromeRequest::PopoverToggle(panel) => {
-                    if let Some(item) = wm.system_bar.item_rect(screen_w, panel) {
-                        // Read out first: `toggle` sizes the panel from it and
-                        // borrows `wm` mutably.
-                        let model = wm.net_cache;
-                        wm.popover.toggle(panel, item, &model, screen_w, screen_h);
-                    }
-                }
-                input::ChromeRequest::PopoverDismiss => wm.popover.dismiss(),
-                // A press the panel does not claim is swallowed by the grab
-                // rather than falling through to a window.
-                input::ChromeRequest::PopoverPress { x, y } => {
-                    let _ = wm.popover.press(x, y, &wm.net_cache);
-                }
-            }
-        }
-        match wm.popover.take_choice() {
-            Some(popover::Choice::Lock) => wm.gate.lock(),
-            Some(choice) => ask_init(choice.command()),
-            None => {}
-        }
-        if std::mem::take(&mut wm.restart_offer_due)
+        let undisturbed =
+            !wm.gate.shown() && !wm.behind && !wm.consent.active() && !wm.asking.active();
+        if undisturbed
+            && std::mem::take(&mut wm.restart_offer_due)
             && let Some(item) = wm
                 .system_bar
                 .item_rect(output.width, popover::Panel::System)
         {
-            let model = wm.net_cache;
-            wm.popover
-                .offer_restart(item, &model, output.width, output.height);
+            wm.popover.offer_restart(item);
         }
-        // Before the panel is measured, so a switch request that timed out
+        // Before the panel is laid out, so a switch request that timed out
         // this frame reverts in the same frame rather than one later.
         wm.popover.settle(&wm.net_cache);
         wm.popover
-            .fit_to(&wm.net_cache, output.width, output.height);
+            .refresh(&wm.net_cache, output.width, output.height);
+        if wm.asking.take_dirty(screen_rect(fb_info)) {
+            wm.force_full_redraw = true;
+        }
 
         let mut popover_damage = [DamageRect::invalid(); 2];
         let popover_damage_count = wm.popover.take_damage(&mut popover_damage);
@@ -977,11 +1044,11 @@ impl WindowManager {
                 .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
         }
 
-        let uptime_secs = time_origin.elapsed().as_secs();
+        let now = sys_core::realtime_secs().and_then(WallTime::from_unix);
         let mut bar_damage = [DamageRect::invalid(); menu_bar::MAX_BAR_DAMAGE];
         let bar_damage_count =
             wm.system_bar
-                .take_damage(output.width, uptime_secs, &mut bar_damage);
+                .take_damage(output.width, now.as_ref(), &mut bar_damage);
         for rect in &bar_damage[..bar_damage_count] {
             wm.output_damage
                 .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
@@ -1008,8 +1075,12 @@ impl WindowManager {
             if let Some(mut buf) = output.draw_buffer() {
                 buf.set_pixel_format(pixel_format);
 
-                let active_app_name =
-                    active_window_title(&wm.windows, wm.window_count, wm.input.focused_task());
+                let active_app_name = active_app_name(
+                    &wm.windows,
+                    wm.window_count,
+                    wm.input.focused_task(),
+                    &wm.shelf,
+                );
 
                 wm.renderer.render(
                     &mut buf,
@@ -1023,11 +1094,11 @@ impl WindowManager {
                     &mut wm.surface_cache,
                     &wm.system_bar,
                     &mut wm.shelf,
-                    &mut wm.popover,
+                    &wm.popover,
+                    &wm.asking,
                     &wm.consent,
                     &wm.gate,
-                    &wm.net_cache,
-                    active_app_name,
+                    &active_app_name,
                     &frame_damage,
                     hw_cursor,
                 );
@@ -1111,6 +1182,7 @@ impl WindowManager {
     fn told(&mut self, line: &[u8]) {
         match line {
             b"front" | b"front unlock" => {
+                self.gate.in_front();
                 if line == b"front unlock" {
                     self.gate.unlocked();
                 }
@@ -1121,6 +1193,7 @@ impl WindowManager {
             b"behind" => {
                 self.gate.lock();
                 self.popover.dismiss();
+                self.asking.withdraw();
                 self.behind = true;
             }
             b"lock" => self.gate.lock(),
@@ -1239,6 +1312,7 @@ pub fn compositor_user_main() {
             fb_info.format as u32,
             output.pitch as u32,
         );
+        proto.set_work_area(work_area(output.width, output.height));
     }
 
     let pixel_format = fb_info.format;
@@ -1299,8 +1373,61 @@ fn net_toggle_unasked() -> bool {
     action.admits(&requester, &people) == Verdict::Run
 }
 
+fn screen_rect(fb_info: &DisplayInfo) -> slopos_appkit::Rect {
+    slopos_appkit::Rect::new(0, 0, fb_info.width as i32, fb_info.height as i32)
+}
+
+/// How an ending the person went ahead with did not happen.
+enum Undone {
+    /// The person answered privd's question so.
+    Refused,
+    Failed(String),
+}
+
+/// Carry `ending` out on a thread of its own: init logs out or restarts the
+/// desktop, privd restarts or powers off the computer. `undone` hears of
+/// one that did not happen but for the person's own no; why goes to the
+/// log.
+fn carry_out(ending: Ending, undone: std::sync::mpsc::Sender<Ending>) {
+    let report = undone.clone();
+    let spawned = std::thread::Builder::new()
+        .name("compositor-ending".into())
+        .spawn(move || {
+            let done = match ending {
+                Ending::RestartDesktop => init(Command::RestartSession),
+                Ending::LogOut => init(Command::EndSession),
+                Ending::Restart => privd("org.slopos.power.reboot", "reboot"),
+                Ending::PowerOff => privd("org.slopos.power.poweroff", "poweroff"),
+            };
+            if let Err(Undone::Failed(why)) = done {
+                eprintln!("compositor: {}: {why}", ending.verb());
+                let _ = undone.send(ending);
+            }
+        });
+    if let Err(why) = spawned {
+        eprintln!("compositor: {}: {why}", ending.verb());
+        let _ = report.send(ending);
+    }
+}
+
+fn init(command: Command) -> Result<(), Undone> {
+    crate::init_control::ask(command).map_err(Undone::Failed)
+}
+
+/// privd's `action` with `arg`, once it has run or refused.
+fn privd(action: &str, arg: &str) -> Result<(), Undone> {
+    let null = crate::syscall::fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR)
+        .map_err(|e| Undone::Failed(format!("/dev/null: {e}")))?;
+    match crate::privd::run_feeding(action, &[arg], b"", null.raw(), 2) {
+        Ok(0) => Ok(()),
+        Ok(code) => Err(Undone::Failed(format!("{action} exited {code}"))),
+        Err(not) if not.by_person => Err(Undone::Refused),
+        Err(not) => Err(Undone::Failed(format!("{action}: {not}"))),
+    }
+}
+
 /// Ask init on a thread of its own, which init answers once it has acted.
-fn ask_init(command: crate::init_control::Command) {
+pub(super) fn ask_init(command: Command) {
     let _ = std::thread::Builder::new()
         .name("compositor-init".into())
         .spawn(move || {
@@ -1714,20 +1841,22 @@ fn read_net_model() -> Option<NetPanelModel> {
     Some(model)
 }
 
-fn active_window_title(
+/// What the menu bar names the focused window by: its app's name in the
+/// dock when an entry there names the app, else its title.
+fn active_app_name(
     windows: &[UserWindowInfo; MAX_WINDOWS],
     count: u32,
     focused_task: u32,
-) -> &str {
-    if focused_task == 0 {
-        return "";
-    }
-    for i in 0..count as usize {
-        if windows[i].task_id == focused_task {
-            let title = &windows[i].title;
-            let len = title.iter().position(|&b| b == 0).unwrap_or(32);
-            return core::str::from_utf8(&title[..len]).unwrap_or("");
-        }
-    }
-    ""
+    shelf: &dock::LauncherShelf,
+) -> String {
+    let Some(window) = windows[..count as usize]
+        .iter()
+        .find(|w| focused_task != 0 && w.task_id == focused_task)
+    else {
+        return String::new();
+    };
+    shelf
+        .app_name(window.app_id.as_str())
+        .unwrap_or_else(|| window.title_str())
+        .to_owned()
 }

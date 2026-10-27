@@ -20,6 +20,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
         Node::Icon { icon, role, tone } => {
             Box::new(widgets::icon::IconWidget::new(*icon, *role, *tone))
         }
+        Node::Avatar { name } => Box::new(widgets::avatar::AvatarWidget::new(name.clone())),
         Node::IconButton(b) => Box::new(widgets::icon_button::IconButtonWidget::new(
             b.icon,
             b.label.clone(),

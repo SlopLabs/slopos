@@ -146,8 +146,8 @@ class Guest:
             self.cursor = len(self.text)
 
     def settle(self, timeout, still=2.0, changed=False):
-        """Waits until the screen below the menu bar, whose clock ticks every
-        second, has not changed for `still` seconds, and with `changed` until
+        """Waits until the screen below the menu bar, whose clock moves on
+        its own, has not changed for `still` seconds, and with `changed` until
         it is no longer the last shot's."""
         probe = os.path.join(self.out, ".probe.ppm")
         deadline = time.monotonic() + timeout
@@ -260,11 +260,21 @@ def run_app(g, name, command, app_id):
 def chrome(g):
     g.click(12, 12)
     g.shot("system-menu", changed=True)
+    # Up from no entry is the last, Power off…, which asks first.
+    g.press("up")
+    g.press("ret")
+    g.shot("power-off-question", changed=True)
+    g.press("esc")
+    g.click(g.width - 20, 12)
+    g.shot("clock", changed=True)
     g.press("esc")
     g.press("ctrl", "alt", "delete")
     g.shot("lock-screen", changed=True)
-    g.press("f2")
+    # Tab from the password field reaches Switch user….
+    g.press("tab")
+    g.press("ret")
     g.shot("login-screen", changed=True)
+    # Typing chooses the person, Enter moves to the password, Enter logs in.
     g.type_keys("user\n\n")
     g.settle(60)
 

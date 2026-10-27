@@ -1,10 +1,10 @@
-//! Title bars with rounded corners, the signal buttons
-//! (close / minimize / expand) and the hit-tests that map a cursor onto them.
+//! Title bars, the signal buttons (close / minimize / expand) and the
+//! hit-tests that map a cursor onto them.
 
 use slopos_abi::damage::DamageRect;
-use slopos_abi::draw::Color32;
 use slopos_appkit::text::ui;
-use slopos_gfx::canvas_ops::{circle_filled, line_aa};
+use slopos_gfx::canvas_ops::line_aa;
+use slopos_gfx::rounded::Rounded;
 
 use crate::gfx::{self, DrawBuffer};
 use crate::theme;
@@ -13,31 +13,30 @@ use crate::theme;
 const GLYPH_HALF: i32 = theme::SIGNAL_GLYPH_SIZE / 2;
 const MINIMIZE_DASH_HALF: i32 = 4;
 
-/// Render the title bar, signal buttons, and window frame for one window.
+/// The title bar of the window whose frame is `outline`: its background,
+/// rounded with the frame's top corners, its signal buttons and its title.
 ///
-/// `signal_hovered` is whether the cursor is inside the signal-button group box.
+/// The buttons show their glyphs while `signal_hovered`, the cursor being
+/// in their group, and are grey on a window without focus otherwise.
 pub fn draw_window_decorations(
     buf: &mut DrawBuffer,
-    window_x: i32,
-    window_y: i32,
-    window_w: u32,
-    window_h: u32,
+    outline: &Rounded,
     title: &str,
     focused: bool,
     signal_hovered: bool,
-    clip: Option<DamageRect>,
+    clip: &DamageRect,
 ) {
-    let full_clip = DamageRect {
-        x0: 0,
-        y0: 0,
-        x1: buf.width() as i32 - 1,
-        y1: buf.height() as i32 - 1,
-    };
-    let clip = clip.unwrap_or(full_clip);
-
-    draw_title_bar_background(buf, window_x, window_y, window_w, window_h, &clip);
-    draw_signal_buttons(buf, window_x, window_y, focused, signal_hovered, &clip);
-    draw_title_text(buf, window_x, window_y, window_w, title, focused, &clip);
+    draw_title_bar_background(buf, outline, clip);
+    draw_signal_buttons(buf, outline.x, outline.y, focused, signal_hovered, clip);
+    draw_title_text(
+        buf,
+        outline.x,
+        outline.y,
+        outline.w as u32,
+        title,
+        focused,
+        clip,
+    );
 }
 
 /// Hit-test the signal button group: `Some(0)` = close, `Some(1)` = minimize,
@@ -89,7 +88,7 @@ pub fn hit_test_resize_edge(
     let frame_x1 = window_x + ww - 1;
     let frame_y1 = window_y + wh - 1;
 
-    let spread = theme::SHADOW_SPREAD;
+    let spread = theme::RESIZE_REACH;
     let ext_x0 = frame_x0 - spread;
     let ext_y0 = frame_y0 - spread;
     let ext_x1 = frame_x1 + spread;
@@ -141,60 +140,17 @@ pub fn hit_test_resize_edge(
     ResizeEdge::NONE
 }
 
-/// Draw the opaque title-bar background with rounded top corners.
-///
-/// The corner pixels are never written, so whatever is already in the
-/// framebuffer stays visible through the rounded corner.
-fn draw_title_bar_background(
-    buf: &mut DrawBuffer,
-    window_x: i32,
-    window_y: i32,
-    window_w: u32,
-    _window_h: u32,
-    clip: &DamageRect,
-) {
+fn draw_title_bar_background(buf: &mut DrawBuffer, outline: &Rounded, clip: &DamageRect) {
     let bg = theme::TITLE_BAR;
-    let w = window_w as i32;
-    let bar_rect = DamageRect {
-        x0: window_x,
-        y0: window_y,
-        x1: window_x + w - 1,
-        y1: window_y + theme::TITLE_BAR_HEIGHT - 1,
-    };
-    if !rects_intersect(&bar_rect, clip) {
-        return;
-    }
-
-    let r = theme::WINDOW_CORNER_RADIUS
-        .max(0)
-        .min(theme::TITLE_BAR_HEIGHT);
-
-    if r > 0 && 2 * r <= w {
-        let cy = window_y + r;
-        let r_sq = r * r;
-        for row in 0..r {
-            let y = window_y + row;
-            if y < clip.y0 || y > clip.y1 {
-                continue;
-            }
-            let dy = cy - y;
-            let x_off = isqrt_i32(r_sq - dy * dy);
-            let fill_x0 = (window_x + r - x_off).max(clip.x0);
-            let fill_x1 = (window_x + w - 1 - r + x_off).min(clip.x1);
-            if fill_x0 <= fill_x1 {
-                gfx::fill_rect(buf, fill_x0, y, fill_x1 - fill_x0 + 1, 1, bg);
-            }
-        }
-    }
-
-    let body_y0 = window_y + r;
-    let body_y1 = window_y + theme::TITLE_BAR_HEIGHT - 1;
-    if body_y0 <= body_y1 {
-        gfx::fill_rect_clipped(buf, window_x, body_y0, w, body_y1 - body_y0 + 1, bg, clip);
+    let (x, y, w) = (outline.x, outline.y, outline.w);
+    let r = outline.radius.clamp(0, theme::TITLE_BAR_HEIGHT.min(w / 2));
+    gfx::fill_rect_clipped(buf, x + r, y, w - 2 * r, r, bg, clip);
+    gfx::fill_rect_clipped(buf, x, y + r, w, theme::TITLE_BAR_HEIGHT - r, bg, clip);
+    for corner in &outline.corners()[..2] {
+        outline.fill(buf, corner, clip, |_, _| bg);
     }
 }
 
-/// Draw the three signal buttons (close, minimize, expand).
 fn draw_signal_buttons(
     buf: &mut DrawBuffer,
     window_x: i32,
@@ -203,51 +159,24 @@ fn draw_signal_buttons(
     signal_hovered: bool,
     clip: &DamageRect,
 ) {
-    let button_cy = window_y + theme::SIGNAL_BUTTON_CY;
-
-    let (close_color, min_color, expand_color) = if focused {
-        (
-            theme::SIGNAL_CLOSE,
-            theme::SIGNAL_MINIMIZE,
-            theme::SIGNAL_EXPAND,
-        )
-    } else {
-        (
-            theme::SIGNAL_INACTIVE,
-            theme::SIGNAL_INACTIVE,
-            theme::SIGNAL_INACTIVE,
-        )
-    };
-
-    let buttons: [(i32, Color32); 3] = [
-        (window_x + theme::SIGNAL_BUTTON_1_CX, close_color),
-        (window_x + theme::SIGNAL_BUTTON_2_CX, min_color),
-        (window_x + theme::SIGNAL_BUTTON_3_CX, expand_color),
+    let cy = window_y + theme::SIGNAL_BUTTON_CY;
+    let lit = focused || signal_hovered;
+    let buttons = [
+        (theme::SIGNAL_BUTTON_1_CX, theme::SIGNAL_CLOSE),
+        (theme::SIGNAL_BUTTON_2_CX, theme::SIGNAL_MINIMIZE),
+        (theme::SIGNAL_BUTTON_3_CX, theme::SIGNAL_EXPAND),
     ];
-
-    for &(cx, color) in &buttons {
-        let bx0 = cx - theme::SIGNAL_BUTTON_RADIUS;
-        let by0 = button_cy - theme::SIGNAL_BUTTON_RADIUS;
-        let bx1 = cx + theme::SIGNAL_BUTTON_RADIUS;
-        let by1 = button_cy + theme::SIGNAL_BUTTON_RADIUS;
-        let btn_rect = DamageRect {
-            x0: bx0,
-            y0: by0,
-            x1: bx1,
-            y1: by1,
-        };
-        if !rects_intersect(&btn_rect, clip) {
-            continue;
-        }
-        circle_filled(buf, cx, button_cy, theme::SIGNAL_BUTTON_RADIUS, color);
+    let r = theme::SIGNAL_BUTTON_RADIUS;
+    for (cx, color) in buttons {
+        let color = if lit { color } else { theme::SIGNAL_INACTIVE };
+        let circle = Rounded::circle(window_x + cx - r, cy - r, 2 * r + 1);
+        circle.fill(buf, &circle.bounds(), clip, |_, _| color);
     }
-
-    if focused && signal_hovered {
+    if signal_hovered {
         draw_signal_glyphs(buf, window_x, window_y, clip);
     }
 }
 
-/// Draw the interior glyphs on the signal buttons (X, -, +).
 fn draw_signal_glyphs(buf: &mut DrawBuffer, window_x: i32, window_y: i32, clip: &DamageRect) {
     let glyph_color = theme::SIGNAL_GLYPH;
     let cy = window_y + theme::SIGNAL_BUTTON_CY;
@@ -323,7 +252,6 @@ fn draw_signal_glyphs(buf: &mut DrawBuffer, window_x: i32, window_y: i32, clip: 
     }
 }
 
-/// Draw the title text, centered in the title bar.
 fn draw_title_text(
     buf: &mut DrawBuffer,
     window_x: i32,
@@ -364,20 +292,6 @@ fn draw_title_text(
         bg_color,
         clip,
     );
-}
-
-/// Integer square root (floor).
-fn isqrt_i32(n: i32) -> i32 {
-    if n <= 0 {
-        return 0;
-    }
-    let mut x = n;
-    let mut y = (x + 1) / 2;
-    while y < x {
-        x = y;
-        y = (x + n / x) / 2;
-    }
-    x
 }
 
 fn rects_intersect(a: &DamageRect, b: &DamageRect) -> bool {

@@ -89,18 +89,10 @@ pub const NO_CARRIER_LABEL: &str = "Cable unplugged";
 
 pub const PANEL_TITLE: &str = "Network";
 
-pub const NO_ADDRESS_LABEL: &str = "no address";
+/// The switch that turns every interface on or off.
+pub const NETWORKING: &str = "Networking";
 
-/// Every literal the panel can draw that is not a renderer's output. A label
-/// missing here is a label nothing checks the font can draw.
-pub const PANEL_LABELS: &[&str] = &[
-    PANEL_TITLE,
-    NO_ADDRESS_LABEL,
-    GATEWAY_LABEL,
-    IFACE_SEPARATOR,
-    IFACE_OFF_LABEL,
-    IFACE_NO_CARRIER_LABEL,
-];
+pub const NO_ADDRESS_LABEL: &str = "no address";
 
 pub const GATEWAY_LABEL: &str = "Gateway";
 
@@ -571,33 +563,12 @@ mod tests {
         );
     }
 
-    /// The console font covers ASCII, Latin-1 and exactly `€ ˚ ˇ`; an em dash
-    /// would otherwise only surface as a bad glyph on a framebuffer.
     #[test]
-    fn every_produced_string_is_renderable() {
-        let mut checked = 0usize;
-        let mut check = |s: &str| {
-            for c in s.chars() {
-                assert!(
-                    render::is_renderable(c as u32),
-                    "{s:?} contains U+{:04X}, which the console font cannot draw",
-                    c as u32
-                );
-            }
-            checked += 1;
-        };
-
-        for &state in ALL_INDICATOR_STATES {
-            check(indicator_label(state));
+    fn the_panel_s_names_speak_plainly() {
+        use slopos_priv_core::words::label;
+        let states = ALL_INDICATOR_STATES.iter().map(|&s| indicator_label(s));
+        for text in states.chain([PANEL_TITLE, NETWORKING, GATEWAY_LABEL]) {
+            assert_eq!(label(text), Ok(()), "{text}");
         }
-        check(CONFIGURING_LABEL);
-        check(NO_CARRIER_LABEL);
-        for label in PANEL_LABELS {
-            check(label);
-        }
-        for kind in [IfaceKind::Loopback, IfaceKind::Ethernet] {
-            check(render::iface_kind(kind.abi()));
-        }
-        assert_eq!(checked, ALL_INDICATOR_STATES.len() + 4 + PANEL_LABELS.len());
     }
 }

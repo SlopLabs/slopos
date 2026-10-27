@@ -77,11 +77,12 @@ impl ListWidget {
     }
 
     fn icon_room(&self) -> i32 {
-        if self.rows.iter().any(|r| r.icon.is_some()) {
-            TITLE.style().icon + space::SM
-        } else {
-            0
-        }
+        let lead = match self.rows.iter().any(|r| r.avatar) {
+            true => super::avatar::ROW.0,
+            false if self.rows.iter().any(|r| r.icon.is_some()) => TITLE.style().icon,
+            false => return 0,
+        };
+        lead + space::SM
     }
 
     fn trailing_room(row: &ListRow) -> i32 {
@@ -209,6 +210,11 @@ impl ListWidget {
 }
 
 impl Widget for ListWidget {
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        self.row_at(x, y)
+            .filter(|&at| self.choosable() && self.rows.get(at).is_some_and(ListRow::enabled))
+    }
+
     fn core(&self) -> &WidgetCore {
         &self.core
     }
@@ -258,7 +264,11 @@ impl Widget for ListWidget {
             let (ink, quiet) = Self::inks(theme, row.enabled());
             let mut x = rect.x + PAD;
             let top = rect.y + PAD;
-            if let Some(icon) = row.icon {
+            if row.avatar {
+                let top = top + (TITLE.style().line_height - super::avatar::ROW.0) / 2;
+                super::avatar::paint(ctx, &row.title, x, top, super::avatar::ROW);
+                x += self.icon_room();
+            } else if let Some(icon) = row.icon {
                 let size = TITLE.style().icon;
                 let icon_top = top + (TITLE.style().line_height - size) / 2;
                 ctx.draw_icon(icon, x, icon_top, size, quiet);

@@ -172,6 +172,9 @@ version = "0.1.0"
 dependencies = [
  "slopos-abi",
  "slopos-net-core",
+ "slopos-priv-core",
+ "slopos-slibc-core",
+ "slopos-theme-core",
 ]
 
 [[package]]
@@ -318,6 +321,16 @@ version = "0.1.0"
 [[package]]
 name = "slopos-http-core"
 version = "0.1.0"
+
+[[package]]
+name = "slopos-icons"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-appkit",
+ "slopos-image",
+ "slopos-theme-core",
+]
 
 [[package]]
 name = "slopos-image"

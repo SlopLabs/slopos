@@ -199,6 +199,49 @@ fn test_spacer_measure() {
     assert_eq!(size, Size::new(16, 16));
 }
 
+/// Spacers that fill share the room their stack has left, so one either
+/// side of a child centres it.
+fn test_fill_spacers_share_the_room_left() {
+    let children: Vec<Box<dyn Widget>> = vec![
+        Box::new(SpacerWidget::new(Length::FILL)),
+        Box::new(FixedSizeWidget::new(50, 30)),
+        Box::new(SpacerWidget::new(Length::FILL)),
+    ];
+    let mut stack = VStackWidget::new(children, 0, CrossAxisAlignment::Start);
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut stack,
+        BoxConstraints::tight(Size::new(100, 130)),
+        &mut ctx,
+    );
+    place_widget(&mut stack, Rect::new(0, 0, 100, 130));
+    let child = stack.children()[1].layout_rect();
+    assert_eq!((child.y, child.height), (50, 30));
+}
+
+/// Moving from one row of a list to the next changes what is drawn, though
+/// the list is one control.
+fn test_hover_moves_between_a_list_s_rows() {
+    use super::components::{List, ListRow};
+    use super::embed::Embedded;
+    let list = |rows: usize| -> crate::Node<usize> {
+        List::new(
+            (0..rows)
+                .map(|i| ListRow::new(format!("Row {i}")))
+                .collect(),
+        )
+        .on_select(|i| i)
+        .into()
+    };
+    let tall = |rows| Embedded::natural_size(&list(rows), Size::new(200, 400)).height;
+    let (one, two) = (tall(1), tall(2));
+    let mut tree = Embedded::new(&list(3), Rect::new(0, 0, 200, 400));
+    assert!(tree.hover(20, one / 2));
+    assert!(!tree.hover(30, one / 2 + 1));
+    assert!(tree.hover(20, two - one / 2));
+}
+
 fn test_focus_next() {
     let a = FixedSizeWidget::focusable(10, 10);
     let b = FixedSizeWidget::focusable(10, 10);
@@ -1940,6 +1983,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             components::test_list_rows_pass_the_audit,
         ),
         (
+            "avatars_show_an_initial_and_pass_the_audit",
+            components::test_avatars_show_an_initial_and_pass_the_audit,
+        ),
+        (
             "property_list_lines_names_and_values_up",
             components::test_property_list_lines_names_and_values_up,
         ),
@@ -2019,6 +2066,14 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         ("hstack_measure", test_hstack_measure),
         ("padding_measure", test_padding_measure),
         ("spacer_measure", test_spacer_measure),
+        (
+            "fill_spacers_share_the_room_left",
+            test_fill_spacers_share_the_room_left,
+        ),
+        (
+            "hover_moves_between_a_list_s_rows",
+            test_hover_moves_between_a_list_s_rows,
+        ),
         ("focus_next", test_focus_next),
         ("focus_prev", test_focus_prev),
         ("focus_wrap", test_focus_wrap),
@@ -2207,6 +2262,14 @@ mod cfg_tests {
     #[test]
     fn spacer_measure() {
         test_spacer_measure();
+    }
+    #[test]
+    fn fill_spacers_share_the_room_left() {
+        test_fill_spacers_share_the_room_left();
+    }
+    #[test]
+    fn hover_moves_between_a_list_s_rows() {
+        test_hover_moves_between_a_list_s_rows();
     }
     #[test]
     fn focus_next() {

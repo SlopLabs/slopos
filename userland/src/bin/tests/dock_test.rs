@@ -1,17 +1,20 @@
 //! The dock holds to the app entries: it pins exactly the apps the root's
-//! entries name, each launching the program its entry names, an entry the
-//! person adds replaces the system's with its id, and the installer's shows
-//! only on a boot from the install medium.
+//! entries name, each launching the program its entry names and drawn from
+//! its smaller icon, an entry the person adds replaces
+//! the system's with its id, and the installer's shows only on a boot from
+//! the install medium.
 
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
+use slopos_abi::window::AppId;
 use slopos_slibc::ffi::syscalls::mkfifo;
 
 use slopos_userland::app_entry::{self, AppEntry};
 use slopos_userland::apps::compositor::dock::LauncherShelf;
+use slopos_userland::syscall::UserWindowInfo;
 
 const HOME: &str = "/var/tmp/dock_test";
 
@@ -69,6 +72,94 @@ fn the_shelf_pins_every_installed_app() -> bool {
         }
         runs && held.has_icon()
     })
+}
+
+/// The icon `path` names, decoded, and its size.
+fn icon_size(path: &Path) -> Option<(u32, u32)> {
+    let bytes = fs::read(path).ok()?;
+    let icon = slopos_image::decode(&bytes, slopos_image::DecodeOptions::default()).ok()?;
+    Some((icon.width, icon.height))
+}
+
+/// Every app the system installs ships its icon at 64 and at 128 px, and the
+/// dock draws the 64 px one, which it never draws past; an app no entry
+/// names is drawn from the template at that size, tinted by its app id, so
+/// one whose title changes looks the same and two windows of it are one
+/// entry.
+fn every_app_is_drawn_from_its_smaller_icon() -> bool {
+    let (entries, mut shelf) = pinned(None, false);
+    let mut held = true;
+    for entry in &entries {
+        let Some(icon) = entry.icon.as_deref() else {
+            eprintln!("dock_test: {} names no icon", entry.id);
+            held = false;
+            continue;
+        };
+        let larger = icon.with_file_name(format!(
+            "{}@2x.png",
+            icon.file_stem().unwrap_or_default().to_string_lossy()
+        ));
+        let sizes = (icon_size(icon), icon_size(&larger));
+        if sizes != (Some((64, 64)), Some((128, 128))) {
+            eprintln!("dock_test: {}'s icons are {sizes:?}", entry.id);
+            held = false;
+        }
+    }
+    if let Some(large) = shelf.entries().iter().find(|e| e.picture().width != 64) {
+        eprintln!(
+            "dock_test: the dock draws {} from {} px",
+            large.app_id,
+            large.picture().width
+        );
+        held = false;
+    }
+
+    let window = |task_id: u32, title: &[u8]| {
+        let mut window = UserWindowInfo::default();
+        window.task_id = task_id;
+        window.app_id = AppId::from_str("org.example.unlisted");
+        window.title[..title.len()].copy_from_slice(title);
+        window
+    };
+    let drawn = |shelf: &LauncherShelf| -> Vec<(bool, bool, String, Vec<u32>)> {
+        shelf
+            .entries()
+            .iter()
+            .filter(|e| e.app_id == "org.example.unlisted")
+            .map(|e| {
+                let picture = e.picture();
+                let ink: u64 = picture.pixels.iter().map(|p| u64::from(p.0)).sum();
+                (
+                    e.running,
+                    e.has_icon(),
+                    e.name.clone(),
+                    vec![picture.width, ink as u32],
+                )
+            })
+            .collect()
+    };
+    shelf.sync_running_apps(&[window(77, b"~/src - sh")], 1);
+    let first = drawn(&shelf);
+    shelf.sync_running_apps(&[window(77, b"vim notes"), window(78, b"vim more")], 2);
+    let renamed = drawn(&shelf);
+    shelf.sync_running_apps(&[], 0);
+    let gone = drawn(&shelf);
+    let picture = |seen: &[(bool, bool, String, Vec<u32>)]| seen.first().map(|s| s.3.clone());
+    let as_expected = first.len() == 1
+        && first[0].0
+        && !first[0].1
+        && first[0].3[0] == 64
+        && renamed.len() == 1
+        && renamed[0].2 == "vim notes"
+        && picture(&first) == picture(&renamed)
+        && gone.is_empty();
+    if !as_expected {
+        eprintln!(
+            "dock_test: an unlisted app was drawn {first:?}, then {renamed:?}, then {gone:?}"
+        );
+        held = false;
+    }
+    held
 }
 
 fn write(path: &str, text: &str) -> bool {
@@ -352,6 +443,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_shelf_pins_every_installed_app",
         the_shelf_pins_every_installed_app,
+    ),
+    (
+        "every_app_is_drawn_from_its_smaller_icon",
+        every_app_is_drawn_from_its_smaller_icon,
     ),
     (
         "the_persons_entries_come_last",

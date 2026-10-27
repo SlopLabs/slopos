@@ -8,7 +8,10 @@
 //! both the old and the new rect when a hover flips.
 
 use slopos_appkit::text::ui;
+use slopos_chrome_core::clock::WallTime;
 use slopos_chrome_core::status::{StatusLayout, hit_status_item, layout_status_items};
+use slopos_gfx::rounded::Rounded;
+use slopos_theme_core::{TextRole, TextStyle};
 
 use super::hover::HOVER_STATUS_ITEM_BASE;
 use super::popover::Panel;
@@ -16,7 +19,8 @@ use super::status_item::{STATUS_ITEM_COUNT, StatusItems, hover_rect};
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::theme::*;
 
-const ICON_RADIUS: i32 = SYSTEM_BAR_ICON_SIZE / 2;
+/// The focused app's name.
+const NAME: TextStyle = TextRole::Heading.style();
 
 /// Damage rects [`SystemBar::take_damage`] can emit in one frame: one per
 /// item, or the single spanning rect a layout change produces.
@@ -69,7 +73,8 @@ impl SystemBar {
 
     /// Render the system bar onto the buffer.
     ///
-    /// `active_app_name`: title of the focused window, or "SlopOS" if none.
+    /// `active_app_name`: the focused window's app, or "SlopOS" if none, in
+    /// the heading role.
     /// `cursor_x` / `cursor_y`: the pointer, for the hovered item's backdrop.
     pub fn draw(
         &self,
@@ -98,9 +103,12 @@ impl SystemBar {
 
         let mut cursor = SYSTEM_BAR_PADDING_X;
 
-        let icon_cx = cursor + ICON_RADIUS;
-        let icon_cy = bar_h / 2;
-        gfx::draw_circle_filled(buf, icon_cx, icon_cy, ICON_RADIUS, ACCENT);
+        let mark = Rounded::circle(
+            cursor,
+            (bar_h - SYSTEM_BAR_ICON_SIZE) / 2,
+            SYSTEM_BAR_ICON_SIZE,
+        );
+        mark.fill(buf, &mark.bounds(), &clip, |_, _| ACCENT);
         cursor += SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP;
 
         let name = if active_app_name.is_empty() {
@@ -108,7 +116,7 @@ impl SystemBar {
         } else {
             active_app_name
         };
-        let text_y = ui::centred_top(0, bar_h, BAR_TEXT_PX);
+        let text_y = ui::centred_top(0, bar_h, NAME.size);
         let name_budget = (layout.app_name_limit - cursor).min(SYSTEM_BAR_MAX_APP_NAME_WIDTH);
 
         if name_budget > 0 {
@@ -117,8 +125,8 @@ impl SystemBar {
                 cursor,
                 text_y,
                 name,
-                BAR_TEXT_PX,
-                ui::Weight::Regular,
+                NAME.size,
+                NAME.weight,
                 name_budget,
                 TEXT_PRIMARY,
                 BAR_INK_BG,
@@ -217,9 +225,9 @@ impl SystemBar {
         }
     }
 
-    /// Fold `uptime_secs` into the clock and report what changed since the
-    /// previous call. Returns how many rects were written to `out`, which must
-    /// hold at least [`MAX_BAR_DAMAGE`].
+    /// Show `now` on the clock and report what changed since the previous
+    /// call. Returns how many rects were written to `out`, which must hold at
+    /// least [`MAX_BAR_DAMAGE`].
     ///
     /// A layout change — an item appeared, vanished, changed width, or the
     /// screen resized — moves everything left of it, so it emits one rect from
@@ -228,10 +236,10 @@ impl SystemBar {
     pub fn take_damage(
         &mut self,
         screen_width: u32,
-        uptime_secs: u64,
+        now: Option<&WallTime>,
         out: &mut [DamageRect],
     ) -> usize {
-        self.items.set_uptime(uptime_secs);
+        self.items.set_time(now);
 
         let sw = screen_width as i32;
         let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);

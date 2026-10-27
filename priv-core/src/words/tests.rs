@@ -39,6 +39,27 @@ fn a_detail_is_one_sentence() {
 }
 
 #[test]
+fn a_label_is_capitalised_and_unstopped() {
+    for good in [
+        "Log out…",
+        "Restart the desktop to finish updating",
+        "Power off the computer?",
+    ] {
+        assert_eq!(label(good), Ok(()), "{good}");
+    }
+    for bad in [
+        "log out",
+        "Log out.",
+        "Log out...",
+        "Switch person",
+        "Reboot now",
+        "",
+    ] {
+        assert!(label(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
 fn a_verb_is_one_the_dialog_knows() {
     for good in ["Install", "Power off", "Go back", "Allow"] {
         assert_eq!(verb(good), Ok(()), "{good}");

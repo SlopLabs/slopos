@@ -888,6 +888,33 @@ pub(super) fn test_list_rows_pass_the_audit() {
     assert_clean("a list", audit_node(&list, &[200, 360, 640], 400));
 }
 
+/// A person shows as their initial, in capitals, on a circle: alone as a
+/// portrait and at the head of a list row, which pass the audit.
+pub(super) fn test_avatars_show_an_initial_and_pass_the_audit() {
+    let people: Node<usize> = Node::VStack {
+        children: vec![
+            Node::Avatar {
+                name: String::from("carol"),
+            },
+            List::new(vec![
+                ListRow::new("carol").avatar(),
+                ListRow::new("ölund").avatar().detail("Logged in"),
+            ])
+            .selected(Some(1))
+            .on_select(|i| i)
+            .into(),
+        ],
+        spacing: slopos_theme_core::space::SM,
+        align: CrossAxisAlignment::Center,
+    };
+    assert_clean("people", audit_node(&people, &WIDTHS, 400));
+    let size = Size::new(200, 200);
+    let root = built(people, size);
+    let runs = crate::audit::paint_recording(root.as_ref(), size, &style());
+    let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["C", "C", "carol", "Ö", "ölund", "Logged in"]);
+}
+
 /// The names stand in one column, as wide as the widest, and each value's
 /// first line shares its name's baseline.
 pub(super) fn test_property_list_lines_names_and_values_up() {

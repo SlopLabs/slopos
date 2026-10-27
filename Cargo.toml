@@ -66,6 +66,7 @@ members = [
   "verification",
   "tools/bootdisk",
   "tools/extension",
+  "tools/icons",
   "tools/initramfs",
   "tools/kallsyms"
 ]

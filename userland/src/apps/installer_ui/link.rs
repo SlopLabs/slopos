@@ -67,12 +67,12 @@ impl Link for Privd {
     fn restart(&mut self, sender: &AppSender<Msg>) {
         let sender = sender.clone();
         std::thread::spawn(move || {
-            let ran = null().and_then(|null| {
+            let ran = null().map_err(privd::NotRun::from).and_then(|null| {
                 privd::run_feeding(REBOOT, &["reboot"], &[], null.raw(), null.raw())
             });
             let why = match ran {
                 Ok(status) => format!("the restart exited {status}"),
-                Err(why) => why,
+                Err(not) => not.reason,
             };
             sender.send(Msg::RestartRefused(why));
         });

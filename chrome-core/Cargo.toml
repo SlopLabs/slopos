@@ -3,7 +3,7 @@ name = "slopos-chrome-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Desktop-chrome core: system-bar status-item layout, indicator geometry and the network indicator model, host-testable"
+description = "Desktop-chrome core: the system bar's items, window placement, the clock, the system menu and the lock and login screens, host-testable"
 
 [lints]
 workspace = true
@@ -17,3 +17,6 @@ doctest = false
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-net-core = { workspace = true }
+slopos-priv-core = { workspace = true }
+slopos-slibc-core = { workspace = true }
+slopos-theme-core = { workspace = true }

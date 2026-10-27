@@ -15,6 +15,10 @@
 
 mod loader;
 
+/// Draw with the fonts in `dir`, as a host tool rendering what the desktop
+/// draws does, rather than `/usr/share/fonts`; only before any text is drawn.
+pub use loader::fonts_in;
+
 use std::sync::OnceLock;
 
 use slopos_abi::damage::DamageRect;

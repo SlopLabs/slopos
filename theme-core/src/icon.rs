@@ -40,6 +40,7 @@ pub enum Icon {
     FolderPlus,
     Gauge,
     HardDrive,
+    HardDriveDownload,
     Home,
     Image,
     Inbox,
@@ -81,6 +82,7 @@ pub enum Icon {
     Trash,
     TriangleAlert,
     Undo,
+    Unplug,
     Upload,
     Usb,
     User,
@@ -92,7 +94,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 85] = [
+    pub const ALL: [Icon; 87] = [
         Icon::Activity,
         Icon::AppWindow,
         Icon::ArrowDown,
@@ -129,6 +131,7 @@ impl Icon {
         Icon::FolderPlus,
         Icon::Gauge,
         Icon::HardDrive,
+        Icon::HardDriveDownload,
         Icon::Home,
         Icon::Image,
         Icon::Inbox,
@@ -170,6 +173,7 @@ impl Icon {
         Icon::Trash,
         Icon::TriangleAlert,
         Icon::Undo,
+        Icon::Unplug,
         Icon::Upload,
         Icon::Usb,
         Icon::User,
@@ -227,6 +231,7 @@ impl Icon {
             Icon::FolderPlus => ("folder-plus", '\u{e0d9}'),
             Icon::Gauge => ("gauge", '\u{e1bf}'),
             Icon::HardDrive => ("hard-drive", '\u{e0ed}'),
+            Icon::HardDriveDownload => ("hard-drive-download", '\u{e4e5}'),
             Icon::Home => ("house", '\u{e0f5}'),
             Icon::Image => ("image", '\u{e0f6}'),
             Icon::Inbox => ("inbox", '\u{e0f7}'),
@@ -268,6 +273,7 @@ impl Icon {
             Icon::Trash => ("trash-2", '\u{e18e}'),
             Icon::TriangleAlert => ("triangle-alert", '\u{e193}'),
             Icon::Undo => ("undo-2", '\u{e2a1}'),
+            Icon::Unplug => ("unplug", '\u{e45d}'),
             Icon::Upload => ("upload", '\u{e19e}'),
             Icon::Usb => ("usb", '\u{e356}'),
             Icon::User => ("user", '\u{e19f}'),

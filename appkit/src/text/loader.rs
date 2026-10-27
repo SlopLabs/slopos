@@ -1,4 +1,12 @@
+use std::sync::OnceLock;
+
 const FONT_DIR: &str = "/usr/share/fonts";
+
+static ELSEWHERE: OnceLock<&'static str> = OnceLock::new();
+
+pub fn fonts_in(dir: &'static str) {
+    let _ = ELSEWHERE.set(dir);
+}
 
 const FONT_MAP: &[(&str, &str)] = &[
     ("mono", "JetBrainsMono-Regular.ttf"),
@@ -15,7 +23,8 @@ pub fn load_font(name: &str) -> Option<&'static [u8]> {
         .map(|(_, v)| *v)
         .unwrap_or(name);
 
-    let path = std::format!("{}/{}", FONT_DIR, filename);
+    let dir = ELSEWHERE.get().copied().unwrap_or(FONT_DIR);
+    let path = std::format!("{dir}/{filename}");
     let data = std::fs::read(&path).ok()?;
     if data.is_empty() {
         return None;

@@ -128,6 +128,15 @@ pub struct Shadow {
 /// a chart's series.
 pub const SERIES: usize = 7;
 
+/// The series colour a thing known by `name` is shown in, the same wherever
+/// it is shown: FNV-1a of the name.
+pub fn series_of(name: &str) -> usize {
+    let hash = name.bytes().fold(0x811c_9dc5u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    });
+    hash as usize % SERIES
+}
+
 pub struct Theme {
     pub surface: Color32,
     pub surface_raised: Color32,
