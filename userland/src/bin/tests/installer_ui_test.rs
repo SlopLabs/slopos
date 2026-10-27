@@ -26,6 +26,7 @@ use slopos_installer_core::{
     Choices, Contents, DiskState, Event, Failure, Layout, Mode, Opened, Proposal, Reinstall,
     Summary, System,
 };
+use slopos_priv_core::consent::Refusal;
 use slopos_slibc::test_harness::note;
 use slopos_userland::apps::installer_ui::{
     EngineSays, HEIGHT, InstallerApp, Link, Msg, WIDTH, relay,
@@ -474,7 +475,7 @@ fn a_refusal_leaves_the_person_at_welcome() -> bool {
     let mut w = Window::new();
     w.press("Install SlopOS");
     w.asked();
-    let why = "the person at the machine refused";
+    let why = &Refusal::Refused.to_string();
     w.app.update(Msg::Engine(EngineSays::Refused(why.into())));
     if w.page() != Page::Welcome || !w.shows(why) {
         return fail("the refusal is not shown at Welcome");
@@ -498,7 +499,7 @@ fn the_dock_s_entry_asks_privd_at_once() -> bool {
     if w.button("Try SlopOS").is_some() || says_keeps_nothing {
         return fail("the dock's window offers to try a system that may keep what is done");
     }
-    let why = "the person at the machine refused";
+    let why = &Refusal::Refused.to_string();
     w.app.update(Msg::Engine(EngineSays::Refused(why.into())));
     if !w.shows(why) || !w.enabled("Install SlopOS") || !w.asked().is_empty() {
         return fail("the refusal is not left to the person at Welcome");

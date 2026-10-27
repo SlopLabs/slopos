@@ -4,6 +4,7 @@
 //! nothing, and a test boot runs no compositor, so one that needs the person
 //! is refused for want of anyone to ask.
 
+use slopos_priv_core::Refused;
 use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -99,7 +100,7 @@ fn declaration(name: &str, caps: &str, unasked: &str) -> String {
     );
     if !unasked.is_empty() {
         text.push_str(&format!(
-            "action act\n  program /opt/{name}/bin/probe\n  args act\n  caps {unasked}\n  allow user\n  describe \"Act\"\n"
+            "action act\n  program /opt/{name}/bin/probe\n  args act\n  caps {unasked}\n  allow user\n  describe \"act\"\n"
         ));
     }
     text
@@ -240,7 +241,7 @@ fn a_first_install_asks_and_grants_what_it_read() -> bool {
         return false;
     };
     let asked = extctl(USER, &["install", &path]);
-    if asked.code != Some(STATUS_REFUSED) || !asked.says("neither on the screen") {
+    if asked.code != Some(STATUS_REFUSED) || !asked.says(&Refused::Unreached.to_string()) {
         return fail(format!("the session's first install: {}", asked.shown()));
     }
     if record("ext-first").is_some() {

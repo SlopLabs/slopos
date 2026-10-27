@@ -8,7 +8,7 @@ use super::components::{ButtonRow, Disclosure, IconButton, List, Tag, Text, Wind
 
 use super::constraints::Orientation;
 use super::constraints::{
-    CrossAxisAlignment, EdgeInsets, ImageScale, Length, ScrollDirection, ScrollbarVisibility,
+    CrossAxisAlignment, EdgeInsets, ImageScale, Length, Rect, ScrollDirection, ScrollbarVisibility,
 };
 use super::event::{Key, Modifiers};
 use super::sender::AppSender;
@@ -238,9 +238,13 @@ pub enum Node<M> {
     /// keyboard alike.
     Dialog {
         title: String,
+        /// Drawn beside the title.
+        icon: Option<Box<Node<M>>>,
         content: Box<Node<M>>,
         footer: ButtonRow<M>,
         on_dismiss: Option<M>,
+        /// What the card centres over, where it fits; the page when none.
+        anchor: Option<Rect>,
     },
     /// Child floated at an absolute window position, clamped on-screen. A click
     /// outside it or an Escape press emits `on_dismiss`, leaving the app's own

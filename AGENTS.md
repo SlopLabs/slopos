@@ -813,8 +813,9 @@ only a requester running that file of the activation whose label
 (`SO_PEEREXTENSION`) names the extension and the digest its record installed,
 and never `root`. privd reads a requester's label before its program, so one
 that lapses between the two reads is no program; uid 0 running an extension's
-program is no `root`. The question names the extension after the action's
-`describe`. Init remembers what the actions privd read were read from — each
+program is no `root`. The question names the extension in its details, and to
+a dialog of an earlier consent version after the action's `describe`. Init
+remembers what the actions privd read were read from — each
 extension's name, image digest and activation — and on `extensions`, and
 whenever it reads the store again, sends privd `SIGHUP` when that changes,
 once a privd it started has said it is ready, so privd never leaves its socket
@@ -2341,8 +2342,10 @@ desktop is in front and unlocked, a click only from the person whose desktop
 it is, so anyone else types their password and one without a password, who
 confirms by a click where it would be typed, cannot; or, for a console
 session's own person, a prompt privd sends the requester (`Reply::Prompt`),
-which reads their password at its terminal with echo off and sends it back,
-whatever the level; any other request that asks is refused, and a desktop
+which shows a line saying what is asked, `<App> wants to <describe>.`,
+naming the extension that runs it when one does,
+reads their password at `Password for <name>: ` with echo off and sends it
+back, whatever the level; any other request that asks is refused, and a desktop
 that goes behind or locks has what it was asked refused. `user alone` runs
 it while no other person is logged in at a desktop or a terminal, and is
 `admin` otherwise; `greeter alone` runs it while nobody is. A person no line
@@ -2365,10 +2368,42 @@ starts, as sudo's covers a terminal, and nothing else in their session; it is
 forgotten when privd reads the extensions' actions again and
 never kept for a requester carrying no login tag; a mechanism leaves who may
 ask to privd.
+What an action says is what the person reads: `describe` completes "{App}
+wants to …" as a verb phrase in lower case, `detail` is a sentence of what
+follows from allowing it, `verb` names the allowing button (`Allow` when
+none) and `destructive` fills it with the danger tone, all held by
+`slopos_priv_core::words` to naming no capability, none of the policy's own
+words (requester, mechanism, slot, base, uid…) or those the glossary
+replaces, no flag and no `...`, and a verb one of `words::VERBS`, none of
+which says what another control of the dialog says or reads as refusing;
+the base's policy is held to them as it parses and an extension's when it
+goes in, so one installed before the words tighten still activates. What
+privd answers is a sentence to the person who asked (`consent::Refusal`,
+`policy::Refused`, `consent::WRONG_PASSWORD`, `words::privd`), which a
+requester prints after its own name; the detail a developer needs goes to
+privd's log beside it.
+The app a question names is what no process can write: the base's own app
+entry (`/usr/share/slopos/apps`) whose `exec` is the attested base program,
+else that program's file name; for an extension's program, its extension,
+*The <name> extension* (`consent::named_extension`), whose name only the
+activation gives, and no icon, so nothing it ships passes it off as another
+app; for anything else, none, which the dialog calls *An unidentified
+program* (`consent::UNIDENTIFIED`). An entry under
+`/usr/local` or `~/.local` is never read for it. The name, and the entry's
+icon when it is a PNG of that share, ride in the question,
+and `ASKING` names it to the requester, as a dialog of the channel's third
+version shows it.
 An action marked `medium` exists only on a boot the kernel says served the
 install medium (`BOOT_FLAG_MEDIUM` in `sys_info`): off it privd answers it as
 no action, and so does a requester's own reading of the policy
-(`slopos_userland::privd::policy`).
+(`slopos_userland::privd::policy`, `Policy::read`), which may be of another
+base than its own and so passes over a setting it does not know and holds no
+words; a requester likewise passes over a reply's field it does not know.
+A requester of a base from before the words refuses the policy that carries
+them and the replies that name the app, so across a live switch to one it
+asks nothing until it starts again, and a rollback to such a base stops each
+extension whose declaration says more than `describe`, which `extctl enable`
+under a newer base brings back.
 argv outside the action's shapes, a request carrying other than its
 descriptors, a requester whose process has exited — before the question and
 after it — and every lookup that fails are refusals. A connection serves its
@@ -2427,15 +2462,37 @@ words, so a desktop older than a live base switch still confirms and refuses
 what needs a password until its session restarts; from the second on a
 question says what answers it and whose request it is, the compositor says
 `SHOWN` once it is on screen, which is when the requester hears it is being
-asked, and an answer carries the password typed and whose. The compositor
-draws one question at a time over every surface, naming the person asking,
-the whole command line and its directory wrapped (privd asks about neither
-past 320 escaped bytes), Deny focused, or the password field of a question
-that takes one, masked, with Up and Down choosing among the administrators
-listed; Allow by a click, or by Enter once Tab, or Left or Right between the
-buttons, has moved to it, and a question that takes a password only once one
-is typed, which Enter in the field also allows; input is ignored for 750 ms
-after the frame that first shows the question and after each move. No client
+asked, and an answer carries the password typed and whose; from the third on
+a question names the app that asks and its icon, the action's `detail`,
+`verb` and `destructive`, and the extension whose action it is, which a
+question to the second tells by appending it to `describe`. The compositor
+draws one question at a time over every surface, a dialog of appkit's
+components (`Node::Dialog`, its card centred over the asking app's window
+when the requester's pid has one shown) that `slopos_appkit::embed` lays
+out and paints into its buffer and hands the pointer, the keys staying with
+`consent::Dialog`, priv-core's model of the question: the headline
+`<App> wants to <describe>.` beside the app's icon, the detail, a list of
+the administrators listed when there are several, the password field of a
+question that takes one, masked, and the details shown — who asks, the whole
+command line and its directory wrapped by character, never cut (privd asks
+about neither past 320 escaped bytes), and the extension — which *Show less*
+hides; Cancel has focus first, or the password field, and focus is a ring,
+never a fill, while the allowing button, named by `verb`, is filled with the
+accent or for a destructive action the danger tone whatever has focus. Tab
+moves through the field, the details' toggle, Cancel and the allowing button,
+Left and Right between the buttons and Up and Down among the administrators;
+the allowing button answers a click, or Enter once Tab, or Left or Right
+between the buttons, has moved to it, and a question that takes a password
+only once one is typed, which Enter in the field also allows but for a
+destructive action, where it moves focus to the allowing button; input is
+ignored for 750 ms after the frame that first shows the question and after
+each move, after the details are shown or hidden, which moves the buttons,
+and after the screen changes size, and a click counts only from a press made
+since and let go where the question shows, not over the lock or login screen.
+The card's place is taken once, when the
+question is first laid out, so the asking app's window cannot move it, and a
+question taller than the screen scrolls, under the wheel and to the control
+that has focus. No client
 sees what is typed there: no key pressed while a question is up, or after
 one that takes a password goes unanswered until no key has been pressed for
 1.5 s, reaches a client, nor does any pointer press or motion while one is

@@ -106,14 +106,14 @@ fn ask(
     drop((engine_in, engine_out));
     loop {
         match connection.reply(request.id)? {
-            Some(PrivdReply::Asking) => sender.send(Msg::Engine(EngineSays::Asking)),
+            Some(PrivdReply::Asking { .. }) => sender.send(Msg::Engine(EngineSays::Asking)),
             Some(PrivdReply::Started { .. }) => {
                 sender.send(Msg::Engine(EngineSays::Started));
                 return Ok(connection);
             }
             Some(PrivdReply::Denied { reason, .. }) => return Err(reason),
             Some(PrivdReply::Exited(_)) => return Err("the installer exited at once".into()),
-            Some(PrivdReply::Prompt(_)) => {
+            Some(PrivdReply::Prompt { .. }) => {
                 return Err("privd asked for a password at a terminal".into());
             }
             None => return Err("privd closed the connection".into()),

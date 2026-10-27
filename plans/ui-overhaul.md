@@ -17,16 +17,13 @@ When this plan is done:
   `EmptyState`. Text overflow, focus, hover, disabled states and spacing are
   handled by the toolkit. A gate fails the build when an app draws with raw
   colours or sizes.
-- **A trustworthy permission dialog.** It names the app asking, with its icon
-  and the name from its app entry. It says in one plain sentence what will
-  happen. It keeps the command line visible as a detail, and its button
-  colours mean what they say.
 - **Polished chrome.** Windows open centred or cascaded, frames and shadows
   are rounded and anti-aliased, the clock shows the time of day, and the
   system menu can restart and power off the computer. The lock screen and
   login screen look like part of the same system.
-- **Plain words.** One voice and one glossary across the installer, privd,
-  the chrome and the apps. Host tests hold the rules wherever text is data.
+- **Plain words.** One voice and one glossary across the installer, the
+  chrome and the apps, as privd and its dialog already speak. Host tests
+  hold the rules wherever text is data.
 - **A way to look.** `just ui-shots` boots the live system and saves a PNG of
   every surface, and appkit's layout audit catches clipped text, misaligned
   baselines, overlaps and low contrast without anyone looking.
@@ -34,8 +31,8 @@ When this plan is done:
 ## Where it stands
 
 The evidence comes from `ROULETTE=0 just iso`, booted headless with a QMP
-socket at 1920 × 1080. `screendump` captured the welcome, the consent
-dialog, every installer page, the dock, the terminal, Files, the editor,
+socket at 1920 × 1080. `screendump` captured the welcome, every installer
+page, the dock, the terminal, Files, the editor,
 System Monitor, the system menu and the lock screen.
 
 ### Toolkit
@@ -71,36 +68,6 @@ System Monitor, the system menu and the lock screen.
 - A reachable placeholder draws "Window content pending migration" and writes
   `DEBUG: draw_window_placeholder called!` to stderr (`renderer.rs`).
 
-### The permission dialog
-
-The screenshot when the installer asks for its engine:
-
-```
-Allow: Install SlopOS onto whichever disk the reques
-ter names, erasing what it says to?
-Asked by /bin/installer-ui, as user, pid 18
-Runs /bin/installer --serve
-In /
-                                     [ Deny ] [ Allow ]
-```
-
-- The headline is `format!("Allow: {}?", describe)` (`consent.rs`, `layout`)
-  over a policy sentence written for the policy's reader. `wrap` breaks
-  every line by character, so prose breaks mid-word ("reques/ter").
-- The requester is a path, a uid's name and a pid (`priv-core`
-  `Dialog::requester`). Nothing names the app the person sees on screen.
-- The focused button is filled with `accent`, so with the default focus
-  *Deny* is the filled button: focus is shown by fill, not by a ring.
-- The dialog has no icon, title or shadow.
-- 33 `describe` lines in `assets/privd/actions` leak the policy's vocabulary:
-  capability names ("RawBlock, Mount or DacOverride gives it the machine"),
-  "requester", "slot", "base", "ceilings", "every file not sealed". "Restart
-  the machine" appears twice, for two actions.
-- privd's terminal prompt is `"{action}: {whose}'s password: "`
-  (`privd/mod.rs:1072`), so a person reads
-  `org.slopos.accounts.password: alice's password:`. Refusals repeat "the
-  person at the machine" five times (`priv-core/src/consent.rs`).
-
 ### Words
 
 The installer's pages, from the screenshots and `installer-core`:
@@ -131,16 +98,16 @@ The installer's pages, from the screenshots and `installer-core`:
   headings in capitals.
 
 An audit of the string sources counts roughly 95 problem strings in the
-installer, 40 in privd and the dialog, 25 in the chrome, 70 in the editor and
-25 in the smaller apps.
+installer, 25 in the chrome, 70 in the editor and 25 in the smaller apps.
 
 ## What the prior art settles
 
 | Source | What it shows | Taken here |
 |---|---|---|
 | FreeType ([glyph metrics](https://freetype.org/freetype2/docs/glyphs/glyphs-3.html)), stb_truetype ([`stbtt_GetCodepointBitmapBoxSubpixel`](https://github.com/nothings/stb/blob/master/stb_truetype.h)) | A bitmap's box is integer: `bitmap_top` and the box's `iy0` are whole pixels, and the outline is rasterised with its fractional offset inside that box. Horizontal subpixel position is a shift passed to the rasteriser, not a rounding of the bitmap. | baseline on a pixel boundary; quarter-pixel horizontal phases |
-| Windows UAC ([how it works](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/how-it-works)) | The prompt names the program and its verified publisher, asks one question, and puts the path and command line under *Show more details*. | app name and icon from a trusted source; the command line as a detail |
-| polkit ([polkit(8)](https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html)) | Each action carries a `message` written for the person ("Authentication is required to power off the system"), separate from its id. | the policy's sentence is written for the person; the id is never shown |
+| Windows UAC ([how it works](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/how-it-works)) | The prompt names the program and its verified publisher, asks one question, and puts the path and command line under *Show more details*. A program with no verified publisher is "an unknown publisher" in yellow. | app name and icon from a trusted source; the command line as a detail |
+| polkit ([polkit(8)](https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html)), GNOME Shell's agent ([`polkitAgent.js`](https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/ui/components/polkitAgent.js)) | Each action carries a `message` written for the person ("Authentication is required to power off the system"), separate from its id. GNOME's agent shows that message, *Cancel* and *Authenticate*, and hides the action id and command line. | the policy's sentence is written for the person; the id is never shown, the command line is |
+| sudo ([sudoers(5)](https://man.archlinux.org/man/sudoers.5.en)), Redox ([`sudo.rs`](https://gitlab.redox-os.org/redox-os/userutils/-/blob/master/src/bin/sudo.rs)) | A terminal asks `[sudo] password for alice:` and refuses with "Sorry, try again."; Redox prints the same prompt and has no graphical elevation prompt. | `Password for alice: ` after a line saying what it allows |
 | GNOME HIG ([writing style](https://developer.gnome.org/hig/guidelines/writing-style.html)), Apple HIG ([writing](https://developer.apple.com/design/human-interface-guidelines/writing)) | Short, direct, second person. Buttons are verbs. An ellipsis marks a command that asks something further. Errors say what happened and what to do next. | the voice guide and the copy rules |
 | WCAG 2.2 ([contrast minimum](https://www.w3.org/TR/WCAG22/#contrast-minimum)) | 4.5:1 for body text and 3:1 for large text and control boundaries. | a host test over every text and surface token pair |
 | Lucide ([licence](https://lucide.dev/license)), Phosphor ([repository](https://github.com/phosphor-icons/homepage)) | Complete icon sets on one grid and stroke weight, shipped as TrueType fonts under ISC and MIT. | an icon font loaded at runtime like Inter, drawn by the same renderer |
@@ -306,80 +273,7 @@ component to use when.
   and tooltips use `label`.
 - **Gone.** The pending-migration placeholder and its debug write.
 
-### 5. The permission dialog
-
-**Who is asking.** privd resolves the requester's attested program to an
-app entry. Only sources the person cannot write are used:
-
-| Attested as | Name and icon from |
-|---|---|
-| a base program | an entry in the base's `/usr/share/slopos/apps` whose `exec` is that path |
-| an extension's program | an entry in that activation's `share/slopos/apps` |
-| anything else | "An unidentified program", with its path shown in the details |
-
-Entries under `/usr/local` and `~/.local` are never used here: a person can
-write them, so any program could take another's name. The name and the icon's
-path go to the compositor in the question, which is a new version of the
-consent frame. Both sides keep speaking the older version, as `READY`'s
-version already allows across a live base switch.
-
-**What it says.** Each action gains two settings and changes one:
-
-- `describe` becomes a verb phrase in lower case that completes "{App} wants
-  to …", for example "erase a disk and install SlopOS on it". It is at most
-  72 characters.
-- `detail` is optional: one sentence about the consequence, for example
-  "Everything on the disk you choose will be deleted."
-- `verb` names the allow button, for example *Install*, *Restart* or
-  *Power off*. It defaults to *Allow*.
-
-`priv-core`'s `describe` parser, which extension declarations share, refuses
-capability names and the words "requester", "mechanism", "principal",
-"privd", "slot", "base", "sealed" and "uid". A host test runs every action in
-`assets/privd/actions` through it, and `extctl` refuses an extension whose
-`describe` breaks the same rules. The extension's name stops being appended
-to `describe`, because the app line already says whose program it is.
-
-**How it looks.**
-
-```
-┌──────────────────────────────────────────────────────────┐
-│ [icon]  Install SlopOS wants to erase a disk and install │
-│         SlopOS on it.                                    │
-│         Everything on the disk you choose will be        │
-│         deleted.                                         │
-│                                                          │
-│         Password for user  [••••••••            ]        │
-│                                                          │
-│ ▾ Details                                                │
-│   /bin/installer-ui as user                              │
-│   /bin/installer --serve   in /                          │
-│                                        [Cancel] [Install]│
-└──────────────────────────────────────────────────────────┘
-```
-
-- The headline is `title`, the detail `body`, and the details `mono` in
-  `caption`. Prose wraps at word boundaries; the command line wraps by
-  character and is never cut.
-- *Details* is shown expanded, so the whole command line and directory stay
-  in view, as `AGENTS.md`'s privd paragraph requires. *Show less* collapses
-  them.
-- *Cancel* is focused first. Focus is shown by the focus ring, never by fill.
-  The allow button is filled with `accent`, or `danger` for an action marked
-  `destructive`, whichever has focus.
-- The dialog centres over the requesting app's window when the compositor
-  can tie the requester's pid to a surface, and over the screen otherwise.
-  The scrim dims everything else.
-- These do not change: one question at a time, the 750 ms arming, the 1.5 s
-  quiet period for keys, keys never reaching a client, and the 320-byte cap.
-
-**What privd says back.** Refusals are short sentences addressed to the
-person running the command: "You didn't allow this.", "Nobody answered in
-time.", "Wrong password.", "Another request is waiting. Try again in a
-moment.", "Restart the desktop, then try again." The terminal prompt is
-`Password for alice: `, after a line that gives the action's sentence.
-
-### 6. Words
+### 5. Words
 
 **Voice.** Plain, short sentences in the second person. No implementation
 terms on a screen a person must act on; device names, sizes in bytes and
@@ -481,23 +375,22 @@ limits. `appkit::audit` holds every component and each page of
 at three widths in `appkit_test`. `just ui-shots` saves every surface this
 plan names, and `appkit/GUIDE.md` is what to read before writing an app.
 
-### Phase 4: The permission dialog
+### Phase 4: The permission dialog (done)
 
-- Add app identity resolution in privd, the new consent frame version, and
-  the `describe`, `detail`, `verb` and `destructive` settings with their
-  validator.
-- Rewrite all 33 actions. Extension declarations share the validator.
-- Build the dialog from components through the embedded runner.
-- Rewrite the refusals and the terminal prompt.
-
-Grading:
-
-- `priv-core` host tests: the validator, and every action in the base policy.
-- `privd_test` and `extension_action_test` keep answering through `test_key`.
-  The frames they check gain the app name.
-- A new case asks from a program with no base entry and from one whose
-  `/usr/local` entry claims another app's name. The dialog must say "An
-  unidentified program" for both.
+Every action's `describe` completes "{App} wants to …", beside an optional
+`detail`, `verb` and `destructive`, all held by `priv-core::words`; the 33
+base actions are rewritten, and an extension's words are held as it goes
+in, a verb being one of `words::VERBS`. privd names the requester
+from the base's app entries, else by the attested program's file name, an
+extension's program as its extension, else *An unidentified program*, and
+sends the name and icon in consent version 3 and the name in `ASKING`. The
+compositor builds the dialog from appkit's components and paints it through
+`appkit::embed`, centred over the asking app's window; Cancel has focus
+first, focus is a ring, the details stay shown until *Show less*. Refusals
+and the terminal prompt are sentences to the person. `privd_test` holds the
+dialog to the audit at three widths and names a base program, a copy in
+`/usr/local` and one whose `/usr/local` entry claims System Monitor;
+`extension_action_test` names an extension's own program.
 
 ### Phase 5: Chrome
 
@@ -672,6 +565,68 @@ Grading:
   passes its cross-axis minimum to its children only under `Stretch`, as a
   flex layout does, so a centred or baseline row never makes a child taller
   than it asked to be.
+
+- **A program the system attests is named even without an entry.** A base
+  program that no app entry runs is named by its file name: the base is as
+  hard to write as an entry in it. Only a program the kernel attests as none
+  of the system's is *An unidentified program*, and its path is not shown,
+  since the kernel attests none.
+- **An extension's program is named as its extension.** *The <name>
+  extension*, with no icon: an extension's entries are its author's words
+  and art, so one that named itself Terminal could ask for a base action as
+  Terminal, while its name is the activation's, the kernel's.
+- **A command keeps its own spelling.** A name is a proper noun, so a
+  headline that starts with `bootctl` starts in lower case rather than
+  misnaming it.
+- **A refusal is a sentence; why goes to the log.** What privd tells a
+  requester is a sentence the person can act on, the same for every cause
+  they cannot tell apart; the detail a developer needs is in privd's log
+  beside it.
+- **What an installed extension says stays.** The copy rules hold what an
+  extension says when it goes in, by a person or a key, and never as it
+  parses, so an image installed before the rules tighten still activates,
+  saying what it said; a verb they no longer take shows as *Allow*.
+- **The extension is named in the details.** An extension's action names it
+  in the dialog's details, and to a dialog of an older consent version by
+  `describe`, so a person always sees whose mechanism runs.
+- **The model holds the keys; the tree is the view.** The compositor's own
+  surfaces are appkit trees laid out and painted by `appkit::embed`, which
+  takes the pointer and answers with messages; keys go to the host-tested
+  model behind the surface, which says what has focus, so the trusted path's
+  rules stay in one place a test reads.
+- **Focus is found by what a control says.** The model names the focused
+  control by role and label, so no label repeats: no verb says *Cancel*,
+  *Show details* or *Show less*.
+- **A verb is one the dialog knows.** `words::VERBS` lists what an allowing
+  button may say, since a denylist cannot foresee *Disallow* or *Show more*
+  beside *Show less*: an extension's button says one of them or *Allow*.
+- **A requester hears the name the dialog shows.** `ASKING` carries it, so a
+  program, and a test, know what the person was told.
+- **A question stays where it first appeared.** Its card's place is taken
+  when it is first laid out, so the window of the app that asks cannot move
+  it under the person's pointer; a screen that changes size moves it, and
+  input waits again as it does after a move.
+- **A click is judged at its press.** A button answers when it is let go,
+  so a press made while input waits, or before the dialog moved, answers
+  nothing: the person began it on what was there before. A release over the
+  lock or login screen ends the press unanswered.
+- **Enter in a destructive question's field moves to its button.** The
+  danger button is pressed only by a click or by Enter once it has focus.
+- **A requester reads a policy as it is written.** privd holds its own
+  base's policy to every setting and to the words; a requester, which may
+  read another base's after a live switch, passes over a setting it does not
+  know and holds no words. A requester of a base from before this one
+  refuses a policy carrying the new settings, so it asks nothing across a
+  live switch until it starts again, and a rollback to such a base stops
+  each extension whose declaration uses them until `extctl enable` brings it
+  back.
+- **A reply can say more without a version.** A requester passes over a
+  reply's field it does not know. Requesters of earlier bases read none, so
+  one still running across a live switch to this base fails a request that
+  asks the person, once.
+- **Words that are data are held where they are stated.** A refusal is a
+  sentence a host test holds, and an in-guest test compares with that
+  sentence rather than a copy of its words.
 
 ## Constraints
 

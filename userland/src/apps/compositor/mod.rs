@@ -1,4 +1,4 @@
-mod consent;
+pub mod consent;
 pub mod decorations;
 pub mod dock;
 mod gate;
@@ -20,6 +20,7 @@ use crate::ring::{Ring, slopfut};
 use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, process, tty, window};
 use crate::theme::*;
 use region::Region;
+use slopos_abi::input::POINTER_AXIS_VERTICAL;
 use slopos_abi::net::{
     NET_EVENT_LEN, NET_IFINDEX_NONE, NET_MON_DEFAULT, NET_Q_ADDRS, NET_Q_GLOBAL, NET_Q_IFACES,
     UserAddr, UserIface, UserNetGlobal,
@@ -458,21 +459,37 @@ impl WindowManager {
                 continue;
             }
             if self.consent.active() {
+                let primary = event.data.data0 & 0x01 != 0;
                 match event.event_type {
                     InputEventType::PointerMotion => {
                         self.input.apply_motion(&event);
+                        self.consent.hover(self.input.mouse_x, self.input.mouse_y);
                         continue;
                     }
                     InputEventType::PointerButtonPress => {
-                        self.consent.press(
-                            self.input.mouse_x,
-                            self.input.mouse_y,
-                            fb_width as u32,
-                            fb_height as u32,
-                        );
+                        if primary {
+                            self.consent
+                                .click(self.input.mouse_x, self.input.mouse_y, true);
+                        }
                         continue;
                     }
-                    InputEventType::PointerAxis => continue,
+                    InputEventType::PointerButtonRelease if primary && self.gate.shown() => {
+                        self.consent.release_unseen();
+                    }
+                    InputEventType::PointerButtonRelease if primary => {
+                        self.consent
+                            .click(self.input.mouse_x, self.input.mouse_y, false);
+                    }
+                    InputEventType::PointerAxis => {
+                        if event.axis_id() == POINTER_AXIS_VERTICAL {
+                            self.consent.wheel(
+                                self.input.mouse_x,
+                                self.input.mouse_y,
+                                event.axis_value_v120(),
+                            );
+                        }
+                        continue;
+                    }
                     _ => {}
                 }
             }
@@ -790,6 +807,26 @@ impl WindowManager {
             || !self.output_damage.is_empty()
     }
 
+    /// Whether the question changed since the last frame, laid out on the
+    /// screen over the window of the app that asks, when it has one shown.
+    fn consent_dirty(&mut self, fb_info: &DisplayInfo) -> bool {
+        let screen = slopos_appkit::Rect::new(0, 0, fb_info.width as i32, fb_info.height as i32);
+        let windows = &self.windows[..self.window_count as usize];
+        let anchor = self.consent.asker().and_then(|pid| {
+            let w = windows
+                .iter()
+                .find(|w| w.task_id == pid && w.state != WINDOW_STATE_MINIMIZED)?;
+            let frame = renderer::frame_box(w);
+            Some(slopos_appkit::Rect::new(
+                frame.x0,
+                frame.y0,
+                frame.x1 - frame.x0 + 1,
+                frame.y1 - frame.y0 + 1,
+            ))
+        });
+        self.consent.take_dirty(screen, anchor)
+    }
+
     /// The synchronous per-frame work the timer arm invokes: gather input,
     /// refresh window state, render+present if dirty, emit frame_done, reap
     /// disconnected clients and flush. Accept and pacing live in the driver.
@@ -808,7 +845,7 @@ impl WindowManager {
         wm.input.drain_events();
         wm.refresh_windows();
         wm.gate.poll();
-        if wm.consent.take_dirty() | wm.gate.take_dirty() {
+        if wm.consent_dirty(fb_info) | wm.gate.take_dirty() {
             wm.force_full_redraw = true;
         }
         // Snapshot before any input processing so a change from any source —
@@ -830,7 +867,7 @@ impl WindowManager {
             + SHELF_DOT_MARGIN_Y;
 
         wm.process_input_events(fb_info.width as i32, fb_info.height as i32, shelf_h);
-        if wm.consent.take_dirty() | wm.gate.take_dirty() {
+        if wm.consent_dirty(fb_info) | wm.gate.take_dirty() {
             wm.force_full_redraw = true;
         }
 

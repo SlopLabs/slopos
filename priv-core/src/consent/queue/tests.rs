@@ -15,6 +15,12 @@ fn ask(n: u32) -> Ask {
         kind: Kind::Confirm,
         person: None,
         admins: vec![],
+        app: None,
+        icon: None,
+        detail: None,
+        verb: None,
+        destructive: false,
+        extension: None,
     }
 }
 

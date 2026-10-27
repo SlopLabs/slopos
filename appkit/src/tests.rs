@@ -10,6 +10,7 @@ use super::traits::{FocusPolicy, MeasureCtx, Widget, WidgetCore, measure_widget,
 
 mod components;
 mod controls;
+mod embed;
 
 /// Fixed measure size, so layout tests need no font.
 struct FixedSizeWidget {
@@ -1865,6 +1866,26 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         (
             "a_tall_dialog_scrolls",
             components::test_a_tall_dialog_scrolls,
+        ),
+        (
+            "an_embedded_tree_answers_a_click_with_its_message",
+            embed::test_an_embedded_tree_answers_a_click_with_its_message,
+        ),
+        (
+            "an_embedded_tree_shows_focus_where_it_is_told",
+            embed::test_an_embedded_tree_shows_focus_where_it_is_told,
+        ),
+        (
+            "hover_counts_only_between_controls",
+            embed::test_hover_counts_only_between_controls,
+        ),
+        (
+            "a_dialog_centres_over_its_anchor_where_it_fits",
+            embed::test_a_dialog_centres_over_its_anchor_where_it_fits,
+        ),
+        (
+            "a_dialog_with_an_icon_reads_at_every_width",
+            embed::test_a_dialog_with_an_icon_reads_at_every_width,
         ),
         (
             "a_dialog_takes_focus_from_the_page",

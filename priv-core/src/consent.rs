@@ -4,7 +4,11 @@
 //! An agent's `READY` names the version it speaks, none for the first. A
 //! question to one of the first version asks only for a click, in the first
 //! version's words; from the second on a question says what answers it, the
-//! agent says when it is on screen, and an answer may carry a password.
+//! agent says when it is on screen, and an answer may carry a password; from
+//! the third on it names the app that asks and its icon, what follows from
+//! allowing it, the allowing button's verb, whether it destroys, and the
+//! extension whose action it is, which an earlier question tells by its
+//! `describe` instead.
 
 mod dialog;
 mod queue;
@@ -31,7 +35,18 @@ pub const EXPIRY_MS: u64 = 120_000;
 /// the person sees all of it or is not asked.
 pub const MAX_SHOWN: usize = 320;
 /// The version of the channel this side speaks.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
+/// What the dialog calls a program the kernel attests as none of the
+/// system's.
+pub const UNIDENTIFIED: &str = "An unidentified program";
+/// The longest app name a question carries.
+pub const APP_MAX: usize = 64;
+const ICON_PATH_MAX: usize = 255;
+
+/// What the dialog calls a program of the extension `name`.
+pub fn named_extension(name: &str) -> String {
+    format!("The {name} extension")
+}
 
 /// Whether an agent of `version` is asked for more than a click.
 pub fn asks_more(version: u32) -> bool {
@@ -43,9 +58,14 @@ pub fn says_shown(version: u32) -> bool {
     version >= 2
 }
 
-/// The base interface from which privd speaks [`VERSION`]. A privd from
-/// before ends an agent whose `READY` names any version, so a compositor
-/// names one only to a privd of such a base.
+/// Whether an agent of `version` names the app that asks.
+pub fn names_app(version: u32) -> bool {
+    version >= 3
+}
+
+/// The base interface from which privd reads a version in `READY`, at least
+/// the second. A privd from before ends an agent whose `READY` names any
+/// version, so a compositor names one only to a privd of such a base.
 pub const SINCE_INTERFACE: u32 = 8;
 /// The most administrators a question lists.
 pub const MAX_ADMINS: usize = 32;
@@ -269,16 +289,33 @@ pub struct Ask {
     pub person: Option<String>,
     /// Who may answer a [`Kind::Admin`] question.
     pub admins: Vec<String>,
+    /// What the dialog names as asking: the base's app entry, the attested
+    /// program's file name or its extension; `None` for [`UNIDENTIFIED`].
+    pub app: Option<String>,
+    /// That entry's icon, a PNG of the same share.
+    pub icon: Option<String>,
+    pub detail: Option<String>,
+    /// What the allowing button says, which every question from the third
+    /// version on names: one without is from a privd before it, whose words
+    /// the dialog keeps.
+    pub verb: Option<String>,
+    pub destructive: bool,
+    /// The extension whose action it is.
+    pub extension: Option<String>,
 }
 
 impl Ask {
     /// The question as an agent of `version` reads it; one of the first
     /// version is asked nothing but to confirm.
     pub fn frame(&self, version: u32) -> Vec<u8> {
+        let describe = match (&self.extension, names_app(version)) {
+            (Some(extension), false) => format!("{} (extension {extension})", self.describe),
+            _ => self.describe.clone(),
+        };
         let mut fields = Fields::new()
             .with("id", self.id.to_string())
             .with("action", &self.action)
-            .with("describe", &self.describe)
+            .with("describe", describe)
             .with("uid", self.uid.to_string())
             .with("pid", self.pid.to_string())
             .with("cwd", &self.cwd);
@@ -297,6 +334,23 @@ impl Ask {
                 fields.push("admin", admin);
             }
         }
+        if names_app(version) {
+            let optional = [
+                ("app", &self.app),
+                ("icon", &self.icon),
+                ("detail", &self.detail),
+                ("extension", &self.extension),
+            ];
+            for (key, value) in optional {
+                if let Some(value) = value {
+                    fields.push(key, value);
+                }
+            }
+            fields.push("verb", self.verb.as_deref().unwrap_or(crate::words::VERB));
+            if self.destructive {
+                fields.push("destructive", "1");
+            }
+        }
         frame(kind::ASK, &fields.encode())
     }
 
@@ -304,8 +358,23 @@ impl Ask {
         let fields = known(
             payload,
             &[
-                "id", "action", "describe", "uid", "pid", "cwd", "program", "arg", "kind",
-                "person", "admin",
+                "id",
+                "action",
+                "describe",
+                "uid",
+                "pid",
+                "cwd",
+                "program",
+                "arg",
+                "kind",
+                "person",
+                "admin",
+                "app",
+                "icon",
+                "detail",
+                "verb",
+                "destructive",
+                "extension",
             ],
         )?;
         let text = |key| match (fields.text(key), fields.all(key).count()) {
@@ -353,6 +422,25 @@ impl Ask {
         if !listed || (kind == Kind::Password && person.is_none()) {
             return Err(Malformed);
         }
+        let shown = |key, valid: fn(&str) -> bool| match fields.all(key).count() {
+            0 => Ok(None),
+            _ => Some(text(key)?)
+                .filter(|t| valid(t))
+                .map(Some)
+                .ok_or(Malformed),
+        };
+        let app = shown("app", valid_app)?;
+        let icon = shown("icon", icon_path)?;
+        let detail = shown("detail", |t| printable(t, crate::words::DETAIL_MAX))?;
+        let verb = shown("verb", |t| printable(t, crate::words::VERB_MAX))?;
+        let extension = shown("extension", |t| {
+            slopos_abi::extension::valid_name(t.as_bytes())
+        })?;
+        let destructive = match (fields.get("destructive"), fields.all("destructive").count()) {
+            (None, _) => false,
+            (Some(b"1"), 1) => true,
+            _ => return Err(Malformed),
+        };
         let ask = Ask {
             id: number(&fields, "id")?,
             action,
@@ -365,6 +453,12 @@ impl Ask {
             kind,
             person,
             admins,
+            app,
+            icon,
+            detail,
+            verb,
+            destructive,
+            extension,
         };
         if !ask.fits() {
             return Err(Malformed);
@@ -396,6 +490,61 @@ impl Ask {
         quote(self.cwd.as_bytes(), &mut out);
         out
     }
+}
+
+fn printable(text: &str, max: usize) -> bool {
+    !text.is_empty() && text.len() <= max && text.bytes().all(|b| (0x20..0x7f).contains(&b))
+}
+
+/// A name the dialog may show as asking: nothing that could restyle,
+/// reorder or hide what is written.
+pub fn valid_app(name: &str) -> bool {
+    !name.is_empty() && name.len() <= APP_MAX && reads_as_written(name)
+}
+
+/// No control character, and none of Unicode's format characters that
+/// reorder, join or hide text: the bidirectional overrides, isolates and
+/// marks, the zero-width ones and the interlinear annotations.
+pub(crate) fn reads_as_written(text: &str) -> bool {
+    !text.chars().any(|c| {
+        c.is_control()
+            || matches!(c,
+                '\u{061c}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}')
+    })
+}
+
+/// An icon's path in a share the person cannot write: the base's
+/// `/usr/share/slopos/icons/` or an extension's
+/// `/opt/<name>/share/slopos/icons/`, a PNG by name.
+pub fn icon_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    let canonical = parts.iter().all(|part| {
+        !part.is_empty()
+            && *part != "."
+            && *part != ".."
+            && part.bytes().all(|b| b.is_ascii_graphic())
+    });
+    let share = match parts.as_slice() {
+        ["usr", "share", "slopos", "icons", file] => Some(file),
+        ["opt", name, "share", "slopos", "icons", file]
+            if slopos_abi::extension::valid_name(name.as_bytes()) =>
+        {
+            Some(file)
+        }
+        _ => None,
+    };
+    path.len() <= ICON_PATH_MAX
+        && canonical
+        && share.is_some_and(|file| file.len() > ".png".len() && file.ends_with(".png"))
 }
 
 /// The person's answer: an allowing one to a question that takes a
@@ -530,6 +679,9 @@ pub fn decode_cancel(payload: &[u8]) -> Result<u64, Malformed> {
     number(&known(payload, &["id"])?, "id")
 }
 
+/// What privd answers a request whose password was typed wrong.
+pub const WRONG_PASSWORD: &str = "Wrong password.";
+
 /// Why a question has no allowing answer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
@@ -554,18 +706,14 @@ impl Refusal {
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Refusal::NoAgent => "it needs the person at the machine, and nothing can ask them",
-            Refusal::Outdated => {
-                "it needs a password, which the desktop takes once its session has restarted"
-            }
-            Refusal::Busy => "too many questions are waiting for the person at the machine",
-            Refusal::Declined => "the person at the machine has just refused a request",
-            Refusal::Refused => "the person at the machine did not allow it",
-            Refusal::Expired => "the person at the machine did not answer",
-            Refusal::Withdrawn => "the requester withdrew the request",
-            Refusal::Interrupted => {
-                "the question went from the screen before the person at the machine answered"
-            }
+            Refusal::NoAgent => "This needs your permission, and no desktop is there to ask you.",
+            Refusal::Outdated => "Restart the desktop, then try again.",
+            Refusal::Busy => "Another request is waiting. Try again in a moment.",
+            Refusal::Declined => "You just refused a request. Try again in a moment.",
+            Refusal::Refused => "You didn't allow this.",
+            Refusal::Expired => "Nobody answered in time.",
+            Refusal::Withdrawn => "The request was withdrawn.",
+            Refusal::Interrupted => "The question closed before it was answered. Try again.",
         })
     }
 }

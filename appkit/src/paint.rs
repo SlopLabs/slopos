@@ -12,8 +12,8 @@ use super::traits::WidgetId;
 
 /// Paint target handed to each widget; the framework sets the clip rect before
 /// calling `paint()`, and widgets may only paint within it.
-pub struct PaintContext<'a> {
-    pub buffer: &'a mut DrawBuffer<'a>,
+pub struct PaintContext<'a, 'b> {
+    pub buffer: &'a mut DrawBuffer<'b>,
     /// Window coordinates.
     pub clip: Rect,
     /// The clip less every viewport's: an edge that cuts text short.
@@ -36,8 +36,8 @@ pub struct PaintContext<'a> {
     runs: Option<&'a mut Vec<TextRun>>,
 }
 
-impl<'a> PaintContext<'a> {
-    pub fn new(buffer: &'a mut DrawBuffer<'a>, style: &'a StyleSheet) -> Self {
+impl<'a, 'b> PaintContext<'a, 'b> {
+    pub fn new(buffer: &'a mut DrawBuffer<'b>, style: &'a StyleSheet) -> Self {
         let w = buffer.width() as i32;
         let h = buffer.height() as i32;
         Self {
@@ -57,7 +57,7 @@ impl<'a> PaintContext<'a> {
 
     /// A context that also notes every line of text drawn into `runs`.
     pub fn recording(
-        buffer: &'a mut DrawBuffer<'a>,
+        buffer: &'a mut DrawBuffer<'b>,
         style: &'a StyleSheet,
         runs: &'a mut Vec<TextRun>,
     ) -> Self {
@@ -343,7 +343,7 @@ impl<'a> PaintContext<'a> {
     }
 
     /// Run `f` with the clip rect intersected against `new_clip`.
-    pub fn with_clip<F: FnOnce(&mut PaintContext<'_>)>(&mut self, new_clip: Rect, f: F) {
+    pub fn with_clip<F: FnOnce(&mut PaintContext<'_, '_>)>(&mut self, new_clip: Rect, f: F) {
         let (old_clip, old_fixed) = (self.clip, self.fixed);
         self.clip = self.clip.intersect(&new_clip).unwrap_or(Rect::ZERO);
         self.fixed = self.fixed.intersect(&new_clip).unwrap_or(Rect::ZERO);
@@ -353,7 +353,7 @@ impl<'a> PaintContext<'a> {
 
     /// Run `f` clipped to `rect`, a view onto content that goes on past it,
     /// as a scroll view's or a field's: what its edge cuts is not cut short.
-    pub fn with_viewport<F: FnOnce(&mut PaintContext<'_>)>(&mut self, rect: Rect, f: F) {
+    pub fn with_viewport<F: FnOnce(&mut PaintContext<'_, '_>)>(&mut self, rect: Rect, f: F) {
         let (old_clip, old_fixed, old_viewport) = (self.clip, self.fixed, self.viewport);
         self.clip = self.clip.intersect(&rect).unwrap_or(Rect::ZERO);
         self.fixed = Rect::new(i32::MIN / 4, i32::MIN / 4, i32::MAX / 2, i32::MAX / 2);
@@ -364,14 +364,19 @@ impl<'a> PaintContext<'a> {
 
     /// Run `f` as the layer `root` paints over what was painted before,
     /// which its text may lie over.
-    pub fn with_layer<F: FnOnce(&mut PaintContext<'_>)>(&mut self, root: WidgetId, f: F) {
+    pub fn with_layer<F: FnOnce(&mut PaintContext<'_, '_>)>(&mut self, root: WidgetId, f: F) {
         let old = self.layer;
         self.layer = root;
         f(self);
         self.layer = old;
     }
 
-    pub fn with_scroll_offset<F: FnOnce(&mut PaintContext<'_>)>(&mut self, dx: i32, dy: i32, f: F) {
+    pub fn with_scroll_offset<F: FnOnce(&mut PaintContext<'_, '_>)>(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        f: F,
+    ) {
         let old_x = self.scroll_offset_x;
         let old_y = self.scroll_offset_y;
         self.scroll_offset_x += dx;

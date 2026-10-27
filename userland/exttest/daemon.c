@@ -218,7 +218,8 @@ static void field(const unsigned char *at, size_t len, const char *key, char *ou
     }
 }
 
-/* How the request just sent went: `EXIT <code>`, `ASKED` or `DENIED <why>`. */
+/* How the request just sent went: `EXIT <code>`, `ASKED <app>` or
+ * `DENIED <why>`. */
 static void reply_to(int privd, char *out, size_t size) {
     static unsigned char payload[4096];
     for (;;) {
@@ -243,7 +244,8 @@ static void reply_to(int privd, char *out, size_t size) {
             snprintf(out, size, "DENIED %s\n", value);
             return;
         case 0x13:
-            snprintf(out, size, "ASKED\n");
+            field(payload, len, "app", value, sizeof value);
+            snprintf(out, size, "ASKED %s\n", value);
             return;
         default:
             break;

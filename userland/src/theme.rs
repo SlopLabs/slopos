@@ -77,12 +77,11 @@ pub const BAR_INK_BG: Color32 = DARK.chrome;
 pub const BAR_HOVER_BG: Color32 = DARK.state(ColorRole::Chrome, State::Hover);
 pub const TOOLTIP_BG: Color32 = DARK.surface_raised;
 
-/// Popovers, the consent question and the lock screen.
+/// Popovers and the lock screen.
 pub const CARD_BG: Color32 = DARK.surface_raised;
 pub const CARD_EDGE: Color32 = DARK.border;
 pub const FIELD_BG: Color32 = DARK.surface_sunken;
 pub const FIELD_EDGE: Color32 = DARK.border_strong;
-pub const SCRIM: Color32 = DARK.scrim;
 
 pub const CARD_PAD: i32 = space::LG;
 pub const CARD_GAP: i32 = space::SM;

@@ -28,6 +28,8 @@ pub struct DialogWidget {
     on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     content_height: i32,
     card_rect: Rect,
+    anchor: Option<Rect>,
+    name: Option<String>,
 }
 
 impl DialogWidget {
@@ -48,7 +50,21 @@ impl DialogWidget {
             on_dismiss,
             content_height: 0,
             card_rect: Rect::ZERO,
+            anchor: None,
+            name: None,
         }
+    }
+
+    /// Centres the card over `anchor` where it fits.
+    pub fn anchored(mut self, anchor: Option<Rect>) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
+    /// Names the dialog `name`, for a title that is more than its text.
+    pub fn named(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
     }
 
     pub fn card_rect(&self) -> Rect {
@@ -131,8 +147,12 @@ impl Widget for DialogWidget {
     fn layout(&mut self, rect: Rect) {
         let card_w = Self::card_width(rect.width);
         let card_h = self.frame_height() + self.content_height;
-        let card_x = rect.x + (rect.width - card_w) / 2;
-        let card_y = rect.y + (rect.height - card_h) / 2;
+        let over = self.anchor.and_then(|a| a.intersect(&rect)).unwrap_or(rect);
+        let centred = |start: i32, extent: i32, size: i32, lo: i32, room: i32| {
+            (start + (extent - size) / 2).clamp(lo, (lo + room - size).max(lo))
+        };
+        let card_x = centred(over.x, over.width, card_w, rect.x, rect.width);
+        let card_y = centred(over.y, over.height, card_h, rect.y, rect.height);
         self.card_rect = Rect::new(card_x, card_y, card_w, card_h);
 
         let inner_w = Self::inner_width(rect.width);
@@ -191,7 +211,9 @@ impl Widget for DialogWidget {
     }
 
     fn accessible_name(&self) -> Option<&str> {
-        self.parts[0].accessible_name()
+        self.name
+            .as_deref()
+            .or_else(|| self.parts[0].accessible_name())
     }
 
     fn is_modal(&self) -> bool {

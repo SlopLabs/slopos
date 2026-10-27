@@ -31,6 +31,7 @@ pub mod clipboard;
 pub mod components;
 pub mod constraints;
 pub mod dirty;
+pub mod embed;
 pub mod event;
 pub mod focus;
 pub mod input;

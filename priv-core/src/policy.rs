@@ -13,7 +13,9 @@
 //!   allow    root
 //!   allow    admin confirm
 //!   allow    paired
-//!   describe "Install a kernel into a boot slot"
+//!   describe "install a new kernel beside the one that starts by default"
+//!   detail   "The kernel that starts by default stays, so you can go back to it."
+//!   verb     "Install"
 //! ```
 //!
 //! `args` repeats, one shape each: fixed leading words, then `*` for any
@@ -43,14 +45,14 @@ use core::fmt;
 use slopos_abi::extension::Label;
 
 use crate::consent::Kind;
-use crate::{DELEGABLE, REQUESTER_CEILING};
+use crate::{DELEGABLE, REQUESTER_CEILING, words};
 
 /// The one program whose connections a pairing speaks through.
 pub const REMOTED: &str = "/bin/remoted";
 
 const MAX_NAME: usize = 64;
 const MAX_WORD: usize = 64;
-const MAX_DESCRIBE: usize = 120;
+const MAX_SETTING: usize = crate::words::DETAIL_MAX;
 const MAX_PATH: usize = 255;
 /// The longest an answer is kept, as sudo's timestamps commonly last.
 pub const MAX_KEEP: u32 = 900;
@@ -70,6 +72,9 @@ pub struct Action {
     pub runs_as: RunsAs,
     pub allows: Vec<Allow>,
     pub describe: String,
+    pub detail: Option<String>,
+    pub verb: Option<String>,
+    pub destructive: bool,
     pub cwd: bool,
     pub exclusive: Option<String>,
     /// Seconds an answer is kept for the same session, parent process,
@@ -262,10 +267,10 @@ impl People {
             | (Reach::Screen { theirs: true }, false, false) => Kind::Confirm,
             (_, _, true) => Kind::Password,
             (Reach::Screen { theirs: false }, _, false) => {
-                return Verdict::Refuse(Refused::Away(person.name.clone()));
+                return Verdict::Refuse(Refused::Away);
             }
             (Reach::Terminal, _, false) => {
-                return Verdict::Refuse(Refused::NoPasswordToType(person.name.clone()));
+                return Verdict::Refuse(Refused::NoPasswordToType);
             }
         };
         Verdict::Ask(Question {
@@ -327,13 +332,13 @@ pub enum Refused {
     NoAdminPassword,
     /// The person must answer at another's screen, and has no password to
     /// type there.
-    Away(String),
+    Away,
     /// The requester's session is not on the screen, unlocked, nor at a
     /// terminal of its own.
     Unreached,
     /// The person's session is a terminal's, where only a password answers,
     /// and they have none.
-    NoPasswordToType(String),
+    NoPasswordToType,
     /// Only an administrator may allow it, which a terminal never asks.
     AdminAtTerminal,
 }
@@ -341,25 +346,22 @@ pub enum Refused {
 impl fmt::Display for Refused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Refused::NotAllowed => f.write_str("the policy allows the requester nothing here"),
+            Refused::NotAllowed => f.write_str("You aren't allowed to do this."),
             Refused::NoAdminPassword => {
-                f.write_str("it needs an administrator's password, and no administrator has one")
+                f.write_str("This needs an administrator's password, and no administrator has one.")
             }
-            Refused::Away(name) => write!(
-                f,
-                "only {name} can allow it, and the screen is not theirs and they have no password"
-            ),
+            Refused::Away => {
+                f.write_str("Without a password, you can allow this only from your own desktop.")
+            }
             Refused::Unreached => f.write_str(
-                "it needs the person asking, and their session is neither on the screen and \
-                 unlocked nor at a terminal",
+                "This needs your permission. Unlock your desktop or use a terminal, then try \
+                 again.",
             ),
-            Refused::NoPasswordToType(name) => write!(
-                f,
-                "only {name}'s password allows it at a terminal, and they have none"
-            ),
+            Refused::NoPasswordToType => {
+                f.write_str("This needs your password, and you haven't set one.")
+            }
             Refused::AdminAtTerminal => f.write_str(
-                "it needs an administrator's password, which is typed only into the desktop's \
-                 dialog",
+                "This needs an administrator's password, which only the desktop can ask for.",
             ),
         }
     }
@@ -416,6 +418,14 @@ impl Action {
         })
     }
 
+    /// What the allowing button says: one the words take, else theirs.
+    pub fn verb(&self) -> &str {
+        self.verb
+            .as_deref()
+            .filter(|verb| words::verb(verb).is_ok())
+            .unwrap_or(words::VERB)
+    }
+
     /// The group whose mechanisms run one at a time, if the action has one.
     pub fn exclusive_group(&self) -> Option<&str> {
         self.exclusive.as_deref()
@@ -460,8 +470,48 @@ impl Shape {
     }
 }
 
+/// How a policy is read: as privd holds its own base's, or as a requester
+/// reads whatever base is current, which may be another's than its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// Every setting known and what the person reads held to
+    /// [`crate::words`].
+    Held,
+    /// A setting this reader does not know passed over, and the words as
+    /// they stand.
+    Lenient,
+}
+
+const SETTINGS: [&str; 13] = [
+    "program",
+    "args",
+    "caps",
+    "uid",
+    "allow",
+    "keep",
+    "describe",
+    "detail",
+    "verb",
+    "destructive",
+    "cwd",
+    "medium",
+    "exclusive",
+];
+
 impl Policy {
+    /// `text` as privd holds its own base's policy.
     pub fn parse(text: &str) -> Result<Policy, PolicyError> {
+        Self::parse_as(text, Reading::Held)
+    }
+
+    /// `text` as a requester reads the current base's policy, which may be
+    /// another base's: a setting it does not know is passed over, and the
+    /// words are not held.
+    pub fn read(text: &str) -> Result<Policy, PolicyError> {
+        Self::parse_as(text, Reading::Lenient)
+    }
+
+    fn parse_as(text: &str, reading: Reading) -> Result<Policy, PolicyError> {
         let mut actions: Vec<Action> = Vec::new();
         let mut current: Option<(usize, Draft)> = None;
         for (index, raw) in text.lines().enumerate() {
@@ -491,7 +541,10 @@ impl Policy {
             let Some((_, draft)) = current.as_mut() else {
                 return Err(fail("a setting outside an action"));
             };
-            draft.set(keyword, rest).map_err(fail)?;
+            if reading == Reading::Lenient && !SETTINGS.contains(&keyword) {
+                continue;
+            }
+            draft.set(keyword, rest, reading).map_err(fail)?;
         }
         if let Some((start, draft)) = current {
             actions.push(draft.finish(start)?);
@@ -534,6 +587,9 @@ struct Draft {
     runs_as: Option<RunsAs>,
     allows: Vec<Allow>,
     describe: Option<String>,
+    detail: Option<String>,
+    verb: Option<String>,
+    destructive: bool,
     cwd: bool,
     exclusive: Option<String>,
     keep: Option<u32>,
@@ -548,7 +604,11 @@ impl Draft {
         }
     }
 
-    fn set(&mut self, keyword: &str, rest: &str) -> Result<(), &'static str> {
+    fn set(&mut self, keyword: &str, rest: &str, reading: Reading) -> Result<(), &'static str> {
+        let held = |rule| match reading {
+            Reading::Held => said(rest, rule),
+            Reading::Lenient => quoted(rest),
+        };
         let mut words = rest.split_ascii_whitespace();
         match keyword {
             "program" => {
@@ -596,7 +656,10 @@ impl Draft {
                 Ok(())
             }
             "keep" => once(&mut self.keep, keep(rest)?),
-            "describe" => once(&mut self.describe, describe(rest)?),
+            "describe" => once(&mut self.describe, held(words::describe)?),
+            "detail" => once(&mut self.detail, held(words::detail)?),
+            "verb" => once(&mut self.verb, held(words::verb)?),
+            "destructive" if rest.is_empty() => flag(&mut self.destructive),
             "cwd" if rest.is_empty() => flag(&mut self.cwd),
             "medium" if rest.is_empty() => flag(&mut self.medium),
             "exclusive" => {
@@ -644,6 +707,9 @@ impl Draft {
             caps,
             runs_as,
             describe: self.describe.ok_or(fail("the action has no describe"))?,
+            detail: self.detail,
+            verb: self.verb,
+            destructive: self.destructive,
             name: self.name,
             shapes: self.shapes,
             allows: self.allows,
@@ -765,19 +831,26 @@ pub fn valid_name(name: &str) -> bool {
         })
 }
 
-/// A `describe` line's one quoted line of printable ASCII.
-pub fn describe(rest: &str) -> Result<String, &'static str> {
+/// One quoted line of printable ASCII, the shape `describe`, `detail` and
+/// `verb` take; [`crate::words`] holds what it says.
+pub fn quoted(rest: &str) -> Result<String, &'static str> {
     let text = rest
         .strip_prefix('"')
         .and_then(|r| r.strip_suffix('"'))
-        .ok_or("describe takes one quoted line")?;
+        .ok_or("the setting takes one quoted line")?;
     if text.is_empty()
-        || text.len() > MAX_DESCRIBE
+        || text.len() > MAX_SETTING
         || !text.bytes().all(|b| (0x20..0x7f).contains(&b) && b != b'"')
     {
-        return Err("describe is printable ASCII, without quotes inside");
+        return Err("the setting is printable ASCII, without quotes inside");
     }
     Ok(text.to_string())
+}
+
+fn said(rest: &str, rule: fn(&str) -> Result<(), &'static str>) -> Result<String, &'static str> {
+    let text = quoted(rest)?;
+    rule(&text)?;
+    Ok(text)
 }
 
 pub fn valid_word(word: &str) -> bool {

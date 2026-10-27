@@ -1,9 +1,10 @@
 //! A request to privd from a child of the test, at the uid, login tag and
-//! directory the test names, which says on its stdout how it went: `asked`
-//! once the question is on screen, then `ran <code>` or `denied[ by the
-//! person] <reason>`. With a desktop up the test answers the question with
-//! keys the kernel delivers to the compositor as a keyboard's, which only a
-//! test boot takes. Each test binary includes it and uses what it needs.
+//! directory the test names, which says on its stdout how it went: `asked by
+//! <app>` once the question is on screen, naming the app the dialog does,
+//! then `ran <code>` or `denied[ by the person] <reason>`. With a desktop up
+//! the test answers the question with keys the kernel delivers to the
+//! compositor as a keyboard's, which only a test boot takes. Each test binary
+//! includes it and uses what it needs.
 
 #![allow(dead_code)]
 
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 use slopos_abi::input::keycode::{KEY_ENTER, KEY_ESC, KEY_TAB};
 use slopos_abi::syscall::{O_CLOEXEC, POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
-use slopos_priv_core::consent::ARMING_MS;
+use slopos_priv_core::consent::{ARMING_MS, UNIDENTIFIED};
 use slopos_priv_core::wire::{Exit, Reply, Request};
 use slopos_userland::privd::{Connection, request_id};
 use slopos_userland::syscall::core::test_key;
@@ -30,7 +31,7 @@ pub const REQUEST: &str = "--request";
 pub struct Child {
     pid: u32,
     out: OwnedFd,
-    _stdin: OwnedFd,
+    stdin: OwnedFd,
     seen: Vec<u8>,
     reaped: bool,
 }
@@ -80,10 +81,15 @@ impl Child {
         Some(Child {
             pid: pid as u32,
             out,
-            _stdin: stdin_end,
+            stdin: stdin_end,
             seen: Vec::new(),
             reaped: false,
         })
+    }
+
+    pub fn tell(&self, line: &str) -> bool {
+        let line = format!("{line}\n");
+        fs::write_slice(self.stdin.raw(), line.as_bytes()).is_ok_and(|n| n == line.len())
     }
 
     /// The next line it says, `None` once `within` has passed or it ended.
@@ -138,6 +144,8 @@ impl Drop for Child {
     }
 }
 
+const ASKED_BY: &str = "asked by ";
+
 /// How long a request may take to be asked, answered or refused.
 pub const DEADLINE: Duration = Duration::from_secs(60);
 
@@ -156,18 +164,26 @@ impl Asker<'_> {
     /// with: `answer` is run once its question is on screen, and without one
     /// the request is withdrawn there and `asked` is what it ended with.
     pub fn ask(&self, request: &[&str], answer: Option<fn()>) -> String {
+        self.ask_naming(request, answer).0
+    }
+
+    /// [`ask`](Self::ask), and the app the dialog named once it asked.
+    pub fn ask_naming(&self, request: &[&str], answer: Option<fn()>) -> (String, Option<String>) {
         let mut args = vec![REQUEST, if self.with_cwd { "cwd" } else { "-" }];
         args.extend_from_slice(request);
         let Some(mut child) = Child::start(self.path, self.uid, self.login, self.cwd, &args) else {
-            return "did not start".into();
+            return ("did not start".into(), None);
         };
         let said = child.line(DEADLINE).unwrap_or_default();
+        let Some(app) = said.strip_prefix(ASKED_BY).map(str::to_owned) else {
+            return (said, None);
+        };
         match answer {
-            Some(answer) if said == "asked" => {
+            Some(answer) => {
                 answer();
-                child.line(DEADLINE).unwrap_or_default()
+                (child.line(DEADLINE).unwrap_or_default(), Some(app))
             }
-            _ => said,
+            None => ("asked".into(), Some(app)),
         }
     }
 }
@@ -204,7 +220,9 @@ pub fn request_child(args: &[String]) -> i32 {
     let mut out = std::io::stdout();
     loop {
         let said = match privd.reply(request.id) {
-            Ok(Some(Reply::Asking)) => "asked".to_owned(),
+            Ok(Some(Reply::Asking { app })) => {
+                format!("{ASKED_BY}{}", app.as_deref().unwrap_or(UNIDENTIFIED))
+            }
             Ok(Some(Reply::Started { .. })) => continue,
             Ok(Some(Reply::Exited(Exit::Code(code)))) => format!("ran {code}"),
             Ok(Some(Reply::Exited(Exit::Signal(signal)))) => format!("signalled {signal}"),
@@ -214,7 +232,7 @@ pub fn request_child(args: &[String]) -> i32 {
             }
             other => format!("lost {other:?}"),
         };
-        let ends = said != "asked";
+        let ends = !said.starts_with(ASKED_BY);
         if writeln!(out, "{said}").and_then(|()| out.flush()).is_err() || ends {
             return 0;
         }

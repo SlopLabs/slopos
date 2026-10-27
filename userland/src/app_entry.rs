@@ -120,6 +120,15 @@ pub fn parse(id: &str, text: &str, icons: &Path) -> Option<AppEntry> {
     })
 }
 
+/// The entry of the base's own share that runs `path`, whatever boot it is
+/// shown on. The base is sealed, so no process can give a program another's
+/// name here.
+pub fn of_base(path: &str) -> Option<AppEntry> {
+    read(&[Share::all("/usr/share")], true)
+        .into_iter()
+        .find(|entry| entry.exec == path)
+}
+
 /// The entries the dock pins on this boot for the person whose home is
 /// `home`.
 pub fn pinned(home: Option<&str>) -> Vec<AppEntry> {

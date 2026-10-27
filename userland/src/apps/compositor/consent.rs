@@ -9,29 +9,39 @@
 use std::string::String;
 
 use slopos_abi::InputEvent;
-use slopos_abi::draw::Color32;
 use slopos_abi::input::keycode::{
     KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_KP_ENTER, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP,
 };
 use slopos_abi::syscall::{F_GETFD, MSG_NOSIGNAL};
+use slopos_appkit::embed::Embedded;
 use slopos_appkit::text::ui;
-use slopos_gfx::blend::fill_rect_blended;
-use slopos_gfx::canvas_ops::rounded_rect_filled;
-use slopos_priv_core::INIT;
-use slopos_priv_core::consent::{self as protocol, Ask, Dialog, Focus, Inbound, Key, Link, kind};
+use slopos_appkit::traits::Role;
+use slopos_appkit::{
+    Button, ButtonRow, CrossAxisAlignment, Disclosure, ImageData, ImageScale, Length, List,
+    ListRow, Node, PropertyList, Rect, Text,
+};
+use slopos_gfx::image::ImageSampling;
+use slopos_image::DecodeOptions;
+use slopos_priv_core::consent::{
+    self as protocol, Ask, Dialog, Focus, Inbound, Key, Kind, Link, kind,
+};
+use slopos_priv_core::{INIT, words};
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
+use slopos_theme_core::{Icon, TextRole, Tone, space};
 
 use crate::apps::privd::CONSENT_FD;
 use crate::gfx::{DamageRect, DrawBuffer};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, core as sys_core, fs, net};
-use crate::theme::*;
 
-const CARD_W: i32 = 560;
-const BUTTON_W: i32 = 96;
-const LEADING: i32 = 2;
 /// More keys than a hand holds down at once.
 const TAKEN_MAX: usize = 16;
+/// Well past the size an icon is drawn at, so a huge one is refused before
+/// it is decoded.
+const ICON_PIXELS_MAX: usize = 256 * 256;
+const ICON_BYTES_MAX: u64 = 1 << 20;
+const PASSWORD: &str = "Password";
+const ADMIN_NEEDED: &str = "This needs an administrator's password.";
 /// How long after its last key a password question that went unanswered
 /// keeps taking keys, so the rest of a password typed into it reaches no
 /// client.
@@ -42,6 +52,14 @@ pub struct Consent {
     frames: Deframer,
     link: Link,
     showing: Option<Dialog>,
+    /// The question on screen as the tree that draws it, built afresh once
+    /// it is `stale`.
+    tree: Option<Embedded>,
+    stale: bool,
+    icon: Option<ImageData>,
+    /// The screen and anchor the question was first laid out on, kept so the
+    /// window of the app that asks cannot move it under the person's pointer.
+    placed: Option<(Rect, Option<Rect>)>,
     /// The compositor can draw a question.
     drawing: bool,
     /// privd may send a question: a `READY` went since the last one came.
@@ -51,11 +69,12 @@ pub struct Consent {
     /// release names its key, and so would spell a password typed there.
     taken: Vec<u16>,
     quiet_until: Option<u64>,
-    /// The version privd reads, which this side names in `READY`.
+    /// The version this side names in `READY`.
     speaks: u32,
 }
 
-/// The version the running base's privd reads.
+/// The version to name in `READY`: this side's to a privd that reads one
+/// there, which asks in the older of its own and that.
 fn privd_reads() -> u32 {
     let interface = std::fs::read(slopos_boot_core::base::INTERFACE_PATH)
         .ok()
@@ -66,102 +85,133 @@ fn privd_reads() -> u32 {
     }
 }
 
-struct Layout {
-    card: DamageRect,
-    deny: DamageRect,
-    allow: DamageRect,
-    field: Option<DamageRect>,
-    lines: Vec<(String, Color32, i32)>,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Msg {
+    Press(Focus),
+    Pick(usize),
 }
 
-fn rect(x: i32, y: i32, w: i32, h: i32) -> DamageRect {
-    DamageRect {
-        x0: x,
-        y0: y,
-        x1: x + w - 1,
-        y1: y + h - 1,
+/// The question as the person sees it: a dialog of appkit's components,
+/// centred over `anchor` where that fits.
+pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> Node<Msg> {
+    let ask = dialog.ask();
+    let mut content: Vec<Node<Msg>> = Vec::new();
+    if let Some(detail) = &ask.detail {
+        content.push(Text::new(detail.clone()).wrap().into());
     }
-}
-
-fn contains(r: &DamageRect, x: i32, y: i32) -> bool {
-    x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1
-}
-
-/// `text` in lines no wider than `max_w`, every character kept: what the
-/// person is asked about is never cut short.
-fn wrap(text: &str, max_w: i32) -> Vec<String> {
-    let mut lines = vec![String::new()];
-    for ch in text.chars() {
-        let line = lines.last_mut().expect("never empty");
-        line.push(ch);
-        if line.chars().count() > 1 && ui::width(line, TEXT_PX) > max_w {
-            line.pop();
-            lines.push(ch.to_string());
-        }
+    if ask.kind == Kind::Admin {
+        content.push(Text::new(ADMIN_NEEDED).wrap().into());
     }
-    lines
-}
-
-fn layout(dialog: &Dialog, screen_w: u32, screen_h: u32) -> Layout {
-    let line = ui::line_height(TEXT_PX);
-    let w = CARD_W.min(screen_w as i32 - 2 * CARD_PAD);
-    let text_w = w - 2 * CARD_PAD;
-    let mut paragraphs = vec![
-        (format!("Allow: {}?", dialog.ask().describe), TEXT_PRIMARY),
-        (format!("Asked by {}", dialog.requester()), TEXT_SECONDARY),
-        (
-            format!("Runs {}", dialog.ask().command_line()),
-            TEXT_SECONDARY,
-        ),
-        (format!("In {}", dialog.ask().directory()), TEXT_SECONDARY),
-    ];
-    paragraphs.extend(dialog.prompt().map(|prompt| (prompt, TEXT_PRIMARY)));
-    if let Some((admin, count)) = dialog.admin() {
-        let choose = match count {
-            1 => String::new(),
-            n => format!(", one of {n}: Up and Down choose"),
+    if ask.admins.len() > 1 {
+        let rows = ask
+            .admins
+            .iter()
+            .map(|name| ListRow::new(name.clone()).icon(Icon::User))
+            .collect();
+        content.push(
+            List::new(rows)
+                .selected(dialog.admin())
+                .on_select(Msg::Pick)
+                .into(),
+        );
+    }
+    if let Some(label) = dialog.field_label() {
+        let field = Node::LineEdit {
+            text: ui::BULLET.repeat(dialog.typed_chars()),
+            placeholder: String::from(PASSWORD),
+            caret: dialog.typed_chars(),
+            focused: false,
+            icon: Some(Icon::KeyRound),
+            suffix: String::new(),
+            invalid: false,
+            tab_stop: true,
+            on_input: Some(|_| Msg::Press(Focus::Field)),
         };
-        paragraphs.push((format!("Administrator: {admin}{choose}"), TEXT_PRIMARY));
+        content.push(Node::VStack {
+            children: vec![Text::new(label).role(TextRole::Label).wrap().into(), field],
+            spacing: space::XS,
+            align: CrossAxisAlignment::Stretch,
+        });
     }
-    let mut lines = Vec::new();
-    let mut y = CARD_PAD;
-    for (i, (text, colour)) in paragraphs.into_iter().enumerate() {
-        if i > 0 {
-            y += CARD_GAP - LEADING;
+    let shown = |text: String| {
+        Text::new(text)
+            .role(TextRole::Mono)
+            .tone(Tone::Secondary)
+            .wrap_anywhere()
+    };
+    let mut details = PropertyList::new()
+        .row_with("Asked by", shown(dialog.requester()))
+        .row_with("Runs", shown(ask.command_line()))
+        .row_with("In", shown(ask.directory()));
+    if let Some(extension) = &ask.extension {
+        details = details.row_with("Extension", shown(extension.clone()));
+    }
+    let toggle = match dialog.expanded() {
+        true => words::SHOW_LESS,
+        false => words::SHOW_DETAILS,
+    };
+    content.push(
+        Disclosure::new(toggle, details)
+            .expanded(dialog.expanded())
+            .on_toggle(Msg::Press(Focus::Details))
+            .into(),
+    );
+    let cancel = Button::new(words::CANCEL).on_press(Msg::Press(Focus::Deny));
+    let allow = Button::new(dialog.verb()).on_press(Msg::Press(Focus::Allow));
+    let footer = match ask.destructive {
+        true => ButtonRow::new().cancel(cancel).destructive(allow),
+        false => ButtonRow::new().cancel(cancel).confirm(allow),
+    };
+    let size = TextRole::Display.style().icon;
+    let mark = match icon {
+        Some(image) => Node::SizedBox {
+            width: Some(Length::Px(size)),
+            height: Some(Length::Px(size)),
+            child: Box::new(Node::Image {
+                image: image.clone(),
+                scale: ImageScale::Fit,
+                sampling: ImageSampling::for_resize(image.width, image.height, size, size),
+            }),
+        },
+        None => {
+            let (icon, tone) = match (dialog.names_app(), &ask.app) {
+                (false, _) => (Icon::Shield, Tone::Secondary),
+                (true, Some(_)) => (Icon::AppWindow, Tone::Secondary),
+                (true, None) => (Icon::TriangleAlert, Tone::Warning),
+            };
+            Node::Icon {
+                icon,
+                role: TextRole::Display,
+                tone,
+            }
         }
-        for piece in wrap(&text, text_w) {
-            lines.push((piece, colour, y));
-            y += line + LEADING;
-        }
+    };
+    Node::Dialog {
+        title: dialog.headline(),
+        icon: Some(Box::new(mark)),
+        content: Box::new(Node::VStack {
+            children: content,
+            spacing: space::MD,
+            align: CrossAxisAlignment::Stretch,
+        }),
+        footer,
+        on_dismiss: None,
+        anchor,
     }
-    let field_y = y - LEADING + CARD_GAP;
-    if dialog.ask().kind.takes_secret() {
-        y = field_y + CONTROL_H + LEADING;
+}
+
+/// The icon at `path`, which privd named from a share no process writes.
+fn load_icon(path: &str) -> Option<ImageData> {
+    if !protocol::icon_path(path) {
+        return None;
     }
-    let h = y - LEADING + CARD_PAD + CONTROL_H + CARD_PAD;
-    let x = (screen_w as i32 - w) / 2;
-    let top = ((screen_h as i32 - h) / 2).max(0);
-    for (_, _, line_y) in &mut lines {
-        *line_y += top;
-    }
-    let buttons_y = top + h - CARD_PAD - CONTROL_H;
-    let allow_x = x + w - CARD_PAD - BUTTON_W;
-    Layout {
-        card: rect(x, top, w, h),
-        allow: rect(allow_x, buttons_y, BUTTON_W, CONTROL_H),
-        deny: rect(
-            allow_x - CARD_GAP - BUTTON_W,
-            buttons_y,
-            BUTTON_W,
-            CONTROL_H,
-        ),
-        field: dialog
-            .ask()
-            .kind
-            .takes_secret()
-            .then(|| rect(x + CARD_PAD, top + field_y, text_w, CONTROL_H)),
-        lines,
-    }
+    let bytes = crate::app_entry::read_bounded(std::path::Path::new(path), ICON_BYTES_MAX)?;
+    let options = DecodeOptions {
+        max_pixels: ICON_PIXELS_MAX,
+        ..DecodeOptions::default()
+    };
+    let image = slopos_image::decode(&bytes, options).ok()?;
+    ImageData::new(image.width, image.height, image.pixels)
 }
 
 impl Consent {
@@ -185,6 +235,10 @@ impl Consent {
             frames: slopos_priv_core::wire::deframer(),
             link: Link::new(crate::privd::request_id()),
             showing: None,
+            tree: None,
+            stale: false,
+            icon: None,
+            placed: None,
             drawing: false,
             offered: false,
             dirty: false,
@@ -271,7 +325,10 @@ impl Consent {
                 Ok(Inbound::Frame(kind::ASK, payload)) => match Ask::decode(&payload) {
                     Ok(ask) => {
                         self.offered = false;
+                        self.icon = ask.icon.as_deref().and_then(load_icon);
                         self.showing = Some(Dialog::new(ask));
+                        self.placed = None;
+                        self.stale = true;
                         self.dirty = true;
                     }
                     Err(_) => return self.close(),
@@ -300,6 +357,7 @@ impl Consent {
         let Some(dialog) = self.showing.take() else {
             return;
         };
+        self.tree = None;
         self.dirty = true;
         if dialog.ask().kind.takes_secret() {
             self.quiet_until = Some(sys_core::get_time_ms() + QUIET_MS);
@@ -337,20 +395,68 @@ impl Consent {
         self.showing.is_some()
     }
 
+    /// The pid of who asks the question on screen, whose window it centres
+    /// over.
+    pub fn asker(&self) -> Option<u32> {
+        self.showing.as_ref().map(|dialog| dialog.ask().pid)
+    }
+
     /// Whether the dialog appeared, changed or went since the last frame,
-    /// which the frame about to be composed shows. privd hears when a
-    /// question first goes on screen.
-    pub fn take_dirty(&mut self) -> bool {
-        if let Some(dialog) = self.showing.as_mut()
-            && dialog.drawn(sys_core::get_time_ms())
-        {
-            eprintln!("COMPOSITOR: shown a question");
+    /// which shows it on `screen` over the `anchor` it was first laid out
+    /// on. A screen that changed moves it, and input waits again; privd
+    /// hears when a question first goes on screen.
+    pub fn take_dirty(&mut self, screen: Rect, anchor: Option<Rect>) -> bool {
+        let Some(dialog) = self.showing.as_mut() else {
+            return std::mem::take(&mut self.dirty);
+        };
+        let now = sys_core::get_time_ms();
+        let placed = match self.placed {
+            None => (screen, anchor),
+            Some((was, kept)) if was == screen => (was, kept),
+            Some((_, kept)) => {
+                dialog.moved(now);
+                (screen, kept)
+            }
+        };
+        if dialog.drawn(now) {
+            eprintln!(
+                "COMPOSITOR: shown a question from {}",
+                printable(dialog.app())
+            );
             let id = dialog.ask().id;
             if protocol::says_shown(self.speaks) && !self.write(&protocol::shown_frame(id)) {
                 self.close();
+                return std::mem::take(&mut self.dirty);
             }
         }
+        if self.stale || self.tree.is_none() || self.placed != Some(placed) {
+            self.lay_out(placed);
+        }
         std::mem::take(&mut self.dirty)
+    }
+
+    fn lay_out(&mut self, (screen, anchor): (Rect, Option<Rect>)) {
+        let Some(dialog) = &self.showing else {
+            return;
+        };
+        let node = view(dialog, self.icon.as_ref(), anchor);
+        match &mut self.tree {
+            Some(tree) => tree.rebuild(&node, screen),
+            None => self.tree = Some(Embedded::new(&node, screen)),
+        }
+        let (role, name) = match dialog.focus() {
+            Focus::Field => (Role::TextField, PASSWORD),
+            Focus::Details if dialog.expanded() => (Role::Button, words::SHOW_LESS),
+            Focus::Details => (Role::Button, words::SHOW_DETAILS),
+            Focus::Deny => (Role::Button, words::CANCEL),
+            Focus::Allow => (Role::Button, dialog.verb()),
+        };
+        if let Some(tree) = &mut self.tree {
+            tree.focus(role, name);
+        }
+        self.placed = Some((screen, anchor));
+        self.stale = false;
+        self.dirty = true;
     }
 
     /// Whether the release of `keycode` is the dialog's, which took its press.
@@ -395,31 +501,63 @@ impl Consent {
             },
         };
         let answer = dialog.key(key, now);
+        self.stale = true;
         self.dirty = true;
         if let Some(answer) = answer {
             self.answer(answer);
         }
     }
 
-    pub fn press(&mut self, x: i32, y: i32, screen_w: u32, screen_h: u32) {
-        let Some(dialog) = self.showing.as_mut() else {
+    /// The primary button went down or up at `(x, y)`: what the control
+    /// there answers, for a press made while the dialog was armed.
+    pub fn click(&mut self, x: i32, y: i32, pressed: bool) {
+        let (Some(tree), Some(dialog)) = (self.tree.as_mut(), self.showing.as_mut()) else {
             return;
         };
-        let at = layout(dialog, screen_w, screen_h);
-        let target = if contains(&at.allow, x, y) {
-            Focus::Allow
-        } else if contains(&at.deny, x, y) {
-            Focus::Deny
-        } else if at.field.as_ref().is_some_and(|f| contains(f, x, y)) {
-            Focus::Field
-        } else {
+        let now = sys_core::get_time_ms();
+        if pressed && !dialog.pointer_down(now) {
             return;
-        };
-        let focus = dialog.focus();
-        let answer = dialog.click(target, sys_core::get_time_ms());
-        self.dirty |= dialog.focus() != focus;
-        if let Some(answer) = answer {
-            self.answer(answer);
+        }
+        let sent: Vec<Msg> = tree.click(x, y, pressed);
+        self.dirty = true;
+        for msg in sent {
+            let Some(dialog) = self.showing.as_mut() else {
+                return;
+            };
+            let answer = match msg {
+                Msg::Press(target) => dialog.click(target, now),
+                Msg::Pick(admin) => {
+                    dialog.pick(admin, now);
+                    None
+                }
+            };
+            self.stale = true;
+            if let Some(answer) = answer {
+                self.answer(answer);
+            }
+        }
+    }
+
+    /// The primary button went up over the lock or login screen, which hides
+    /// the question: whatever it pressed answers nothing.
+    pub fn release_unseen(&mut self) {
+        if let Some(tree) = self.tree.as_mut() {
+            tree.release_unseen();
+        }
+    }
+
+    /// A turn of the wheel at `(x, y)`, which scrolls what the question
+    /// holds when it is taller than the screen.
+    pub fn wheel(&mut self, x: i32, y: i32, value_v120: i32) {
+        if let Some(tree) = self.tree.as_mut() {
+            let _: Vec<Msg> = tree.wheel(x, y, value_v120);
+            self.dirty = true;
+        }
+    }
+
+    pub fn hover(&mut self, x: i32, y: i32) {
+        if let Some(tree) = self.tree.as_mut() {
+            self.dirty |= tree.hover(x, y);
         }
     }
 
@@ -427,6 +565,7 @@ impl Consent {
         if self.showing.take().is_none() {
             return;
         }
+        self.tree = None;
         self.dirty = true;
         let mut frame = answer.frame();
         drop(answer);
@@ -437,110 +576,23 @@ impl Consent {
         self.offer();
     }
 
-    /// Dim `clip` and draw the question over it.
-    pub fn draw(&self, buf: &mut DrawBuffer, screen_w: u32, screen_h: u32, clip: &DamageRect) {
-        let Some(dialog) = &self.showing else {
+    pub fn draw(&self, buf: &mut DrawBuffer, clip: &DamageRect) {
+        let (Some(_), Some(tree)) = (&self.showing, &self.tree) else {
             return;
         };
-        fill_rect_blended(
-            buf,
+        let clip = Rect::new(
             clip.x0,
             clip.y0,
             clip.x1 - clip.x0 + 1,
             clip.y1 - clip.y0 + 1,
-            SCRIM,
         );
-        let at = layout(dialog, screen_w, screen_h);
-        let card = &at.card;
-        let (w, h) = (card.x1 - card.x0 + 1, card.y1 - card.y0 + 1);
-        rounded_rect_filled(buf, card.x0, card.y0, w, h, CARD_RADIUS, CARD_EDGE);
-        rounded_rect_filled(
-            buf,
-            card.x0 + EDGE_W,
-            card.y0 + EDGE_W,
-            w - 2 * EDGE_W,
-            h - 2 * EDGE_W,
-            CARD_RADIUS - EDGE_W,
-            CARD_BG,
-        );
-        for (text, colour, y) in &at.lines {
-            ui::draw_clipped(
-                buf,
-                card.x0 + CARD_PAD,
-                *y,
-                text,
-                TEXT_PX,
-                ui::Weight::Regular,
-                *colour,
-                CARD_BG,
-                clip,
-            );
-        }
-        if let Some(field) = &at.field {
-            let (w, h) = (field.x1 - field.x0 + 1, field.y1 - field.y0 + 1);
-            let (edge, ew) = match dialog.focus() {
-                Focus::Field => (FOCUS, FOCUS_W),
-                _ => (FIELD_EDGE, EDGE_W),
-            };
-            rounded_rect_filled(buf, field.x0, field.y0, w, h, FIELD_RADIUS, edge);
-            rounded_rect_filled(
-                buf,
-                field.x0 + ew,
-                field.y0 + ew,
-                w - 2 * ew,
-                h - 2 * ew,
-                FIELD_RADIUS - ew,
-                FIELD_BG,
-            );
-            let room = (w - 2 * CARD_PAD) / ui::width(ui::BULLET, TEXT_PX).max(1);
-            let masked = ui::BULLET.repeat(dialog.typed_chars().min(room.max(0) as usize));
-            let text_y = ui::centred_top(field.y0, h, TEXT_PX);
-            ui::draw_clipped(
-                buf,
-                field.x0 + CARD_PAD,
-                text_y,
-                &masked,
-                TEXT_PX,
-                ui::Weight::Regular,
-                TEXT_PRIMARY,
-                FIELD_BG,
-                clip,
-            );
-        }
-        for (button, label, r) in [
-            (Focus::Deny, "Deny", &at.deny),
-            (Focus::Allow, "Allow", &at.allow),
-        ] {
-            let focused = dialog.focus() == button;
-            let (edge, fill, ink) = if focused {
-                (ACCENT, ACCENT, TEXT_ON_ACCENT)
-            } else {
-                (FIELD_EDGE, CARD_BG, TEXT_PRIMARY)
-            };
-            let (w, h) = (r.x1 - r.x0 + 1, r.y1 - r.y0 + 1);
-            rounded_rect_filled(buf, r.x0, r.y0, w, h, CONTROL_H / 2, edge);
-            rounded_rect_filled(
-                buf,
-                r.x0 + EDGE_W,
-                r.y0 + EDGE_W,
-                w - 2 * EDGE_W,
-                h - 2 * EDGE_W,
-                CONTROL_H / 2 - EDGE_W,
-                fill,
-            );
-            let label_x = r.x0 + (BUTTON_W - ui::width(label, TEXT_PX)) / 2;
-            let label_y = ui::centred_top(r.y0, CONTROL_H, TEXT_PX);
-            ui::draw_clipped(
-                buf,
-                label_x,
-                label_y,
-                label,
-                TEXT_PX,
-                ui::Weight::Regular,
-                ink,
-                fill,
-                clip,
-            );
-        }
+        tree.paint(buf, clip);
     }
+}
+
+/// `text` with every control character shown as `?`, for a log line.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
 }

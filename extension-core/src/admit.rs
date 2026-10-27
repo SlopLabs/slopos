@@ -114,6 +114,7 @@ pub fn install<S: Source>(
         return Ok(admitted);
     }
     within_base(&declared, bounds.ceiling)?;
+    image.declaration.words().or_else(refuse)?;
     clashes(&release.name, &declared, others)?;
     symbols::check_image(image, bounds.libc).map_err(|e| Refusal(e.to_string()))?;
     Ok(Admitted::Install(Installed {

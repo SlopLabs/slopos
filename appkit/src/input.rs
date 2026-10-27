@@ -64,15 +64,13 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             })
         }
         Event::PointerAxis { value_v120, .. } => {
-            let delta_lines = *value_v120 / 120;
-            let delta_px = delta_lines * 20; // ~line_height
             Some(WidgetEvent::Scroll {
                 // Filled in by `fill_pointer_state`, which is the only place
                 // that knows where the pointer is.
                 x: 0,
                 y: 0,
                 delta_x: 0,
-                delta_y: delta_px,
+                delta_y: wheel_px(*value_v120),
             })
         }
         Event::KeyPress {
@@ -127,4 +125,10 @@ fn pointer_button(button: u8) -> super::event::PointerButton {
         0x04 => super::event::PointerButton::Middle,
         _ => super::event::PointerButton::Left,
     }
+}
+
+/// How far a turn of the wheel, in 120ths of a notch, scrolls: a line a
+/// notch.
+pub(crate) fn wheel_px(value_v120: i32) -> i32 {
+    value_v120 / 120 * slopos_theme_core::TextRole::Body.style().line_height
 }

@@ -325,7 +325,7 @@ impl Renderer {
             // The popover holds a pointer grab while open, so anything drawn
             // over it would look clickable and not be.
             popover.draw(buf, net_model, rect);
-            consent.draw(buf, self.output_width, self.output_height, rect);
+            consent.draw(buf, rect);
             gate.draw(buf, self.output_width, self.output_height, rect);
             buf.set_scissor(None);
         }
@@ -993,7 +993,7 @@ fn content_box(window: &UserWindowInfo) -> DamageRect {
 /// the bound on where content and decorations may paint.  The title bar is
 /// deliberately not opaque — its rounded corners let the backdrop through — so
 /// only [`content_box`] is subtracted during occlusion.
-fn frame_box(window: &UserWindowInfo) -> DamageRect {
+pub(super) fn frame_box(window: &UserWindowInfo) -> DamageRect {
     let ew = window.effective_width() as i32;
     let eh = window.effective_height() as i32;
     DamageRect {

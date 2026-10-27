@@ -70,7 +70,10 @@ fn a_request_outside_the_protocol_is_malformed() {
 #[test]
 fn replies_round_trip_with_the_id_they_answer() {
     for reply in [
-        Reply::Asking,
+        Reply::Asking { app: None },
+        Reply::Asking {
+            app: Some("Install SlopOS".into()),
+        },
         Reply::Started { pid: 42 },
         Reply::Exited(Exit::Code(0)),
         Reply::Exited(Exit::Code(-1)),
@@ -185,7 +188,9 @@ fn mutated_requests_decode_or_are_malformed() {
             Reply::Started { pid: 7 },
             Reply::Exited(Exit::Code(3)),
             Reply::denied("x"),
-            Reply::Asking,
+            Reply::Asking {
+                app: Some("Files".into()),
+            },
         ] {
             let (_, good) = payload(&reply.frame(9));
             for at in 0..good.len() {
@@ -200,19 +205,52 @@ fn mutated_requests_decode_or_are_malformed() {
 
 #[test]
 fn a_prompt_and_its_secret_round_trip_and_nothing_else_does() {
-    let (kind, body) = payload(&Reply::Prompt("user's password:".into()).frame(9));
-    assert_eq!(kind, kind::PROMPT);
-    assert_eq!(
-        Reply::decode(kind, &body),
-        Ok((9, Reply::Prompt("user's password:".into())))
-    );
+    for prompt in [
+        Reply::Prompt {
+            about: None,
+            prompt: "Password for user: ".into(),
+        },
+        Reply::Prompt {
+            about: Some("bootctl wants to install a new kernel.".into()),
+            prompt: "Password for user: ".into(),
+        },
+    ] {
+        let (kind, body) = payload(&prompt.frame(9));
+        assert_eq!(kind, kind::PROMPT);
+        assert_eq!(Reply::decode(kind, &body), Ok((9, prompt)));
+    }
     for bad in ["\x1b[2J", "a\nb"] {
         let fields = Fields::new().with("id", "9").with("prompt", bad);
         assert_eq!(
             Reply::decode(kind::PROMPT, &fields.encode()),
             Err(Malformed)
         );
+        let about = Fields::new()
+            .with("id", "9")
+            .with("prompt", "Password: ")
+            .with("about", bad);
+        assert_eq!(Reply::decode(kind::PROMPT, &about.encode()), Err(Malformed));
     }
+    let newer = Fields::new()
+        .with("id", "9")
+        .with("prompt", "Password: ")
+        .with("hint", "said by a newer privd");
+    assert_eq!(
+        Reply::decode(kind::PROMPT, &newer.encode()),
+        Ok((
+            9,
+            Reply::Prompt {
+                about: None,
+                prompt: "Password: ".into()
+            }
+        )),
+        "a field the requester does not know is passed over"
+    );
+    let unnamed = Fields::new().with("id", "9").with("app", "");
+    assert_eq!(
+        Reply::decode(kind::ASKING, &unnamed.encode()),
+        Err(Malformed)
+    );
     let long = "x".repeat(MAX_PROMPT + 1);
     let fields = Fields::new().with("id", "9").with("prompt", long);
     assert_eq!(

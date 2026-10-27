@@ -204,17 +204,33 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
         }
         Node::Dialog {
             title,
+            icon,
             content,
             footer,
             on_dismiss,
+            anchor,
         } => {
-            let title = Text::new(title.clone()).role(TextRole::Title).wrap();
-            Box::new(widgets::dialog::DialogWidget::new(
-                Box::new(widgets::text::TextWidget::new(&title)),
-                build_widget_tree(content),
-                build_button_row(footer, true),
-                erase(on_dismiss),
-            ))
+            let heading_text = Text::new(title.clone()).role(TextRole::Title).wrap();
+            let mut heading: Box<dyn Widget> =
+                Box::new(widgets::text::TextWidget::new(&heading_text));
+            if let Some(icon) = icon {
+                let beside = super::layout::ExpandWidget::new(1, heading);
+                heading = Box::new(super::layout::HStackWidget::new(
+                    vec![build_widget_tree(icon), Box::new(beside)],
+                    slopos_theme_core::space::MD,
+                    super::constraints::CrossAxisAlignment::Start,
+                ));
+            }
+            Box::new(
+                widgets::dialog::DialogWidget::new(
+                    heading,
+                    build_widget_tree(content),
+                    build_button_row(footer, true),
+                    erase(on_dismiss),
+                )
+                .anchored(*anchor)
+                .named(title.clone()),
+            )
         }
         Node::Popup {
             x,

@@ -30,11 +30,12 @@ use slopos_abi::fs::{ADMIN_GID, DEFAULT_PATH};
 use slopos_abi::syscall::{O_CLOEXEC, POLLIN, UserPollFd, UserWinsize};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::REQUESTER_CEILING;
+use slopos_priv_core::consent::WRONG_PASSWORD;
 use slopos_priv_core::wire::{Exit, Reply, Request};
 use slopos_slibc::process::ids::{getgroups, getresgid, getresuid};
 use slopos_slibc::test_harness::note;
 use slopos_userland::init_control::{self, Command as InitCommand};
-use slopos_userland::privd::{Connection, STATUS_REFUSED, request_id};
+use slopos_userland::privd::{Connection, STATUS_REFUSED, WAITING, request_id};
 use slopos_userland::root_layout;
 use slopos_userland::sealed::{is_sealed, set_sealed};
 use slopos_userland::syscall::core::caps_drop;
@@ -50,7 +51,6 @@ const PROBE: &str = "--probe";
 /// to be interrupted.
 const LINGER: &str = "--linger";
 const LINGERING: &str = "lingering";
-const ASKING: &str = "asking the person at this machine";
 const ALICE: &str = "priv-alice";
 const ALICE_PASSWORD: &str = "alice-pw";
 const BOB: &str = "priv-bob";
@@ -338,7 +338,7 @@ fn root_runs_a_command_unasked_holding_the_ceiling() -> bool {
     };
     let login = init_control::login_of(std::process::id()).unwrap_or(u32::MAX);
     let (code, said) = run.end();
-    if code != Some(0) || said.contains(ASKING) {
+    if code != Some(0) || said.contains(WAITING) {
         return fail(format!("priv {SELF} {PROBE} as root: {code:?} {said:?}"));
     }
     said_lines(&said, &probed(0, &[0], login, "/tmp")).map_or_else(fail, |()| true)
@@ -356,7 +356,7 @@ fn a_requester_holding_the_ceiling_runs_it_itself() -> bool {
     };
     let login = init_control::login_of(std::process::id()).unwrap_or(u32::MAX);
     let (code, said) = run.end();
-    if code != Some(0) || said.contains(ASKING) {
+    if code != Some(0) || said.contains(WAITING) {
         return fail(format!("priv holding the ceiling: {code:?} {said:?}"));
     }
     said_lines(&said, &probed(USER, &[], login, "/tmp")).map_or_else(fail, |()| true)
@@ -699,7 +699,7 @@ fn a_desktop_asks_the_first_person() -> bool {
     }
     until(|| {
         Run::start(person(USER, Some(desktop())), "/", &[SELF, PROBE], &[], "")
-            .is_some_and(|mut run| run.says(ASKING, Duration::from_secs(30)))
+            .is_some_and(|mut run| run.says(WAITING, Duration::from_secs(30)))
     }) || fail("the desktop never asked the person")
 }
 
@@ -712,7 +712,7 @@ fn the_first_person_s_click_runs_it_as_them_and_is_kept() -> bool {
     let Some(mut run) = Run::start(me, "/tmp", &[SELF, PROBE], &[], "") else {
         return false;
     };
-    if !run.says(ASKING, SAID_WITHIN) {
+    if !run.says(WAITING, SAID_WITHIN) {
         return fail("the first person was not asked");
     }
     asking::tab_and_enter();
@@ -726,7 +726,7 @@ fn the_first_person_s_click_runs_it_as_them_and_is_kept() -> bool {
     let (code, said) = Run::start(me, "/tmp", &[SELF, PROBE], &[], "")
         .map(Run::end)
         .unwrap_or_default();
-    if code != Some(0) || said.contains(ASKING) {
+    if code != Some(0) || said.contains(WAITING) {
         return fail(format!("the same command again: {code:?} {said:?}"));
     }
     let line = format!("{PRIV} {SELF} {PROBE}; exit $?");
@@ -734,7 +734,7 @@ fn the_first_person_s_click_runs_it_as_them_and_is_kept() -> bool {
         let Some(mut run) = run else {
             return false;
         };
-        if !run.says(ASKING, SAID_WITHIN) {
+        if !run.says(WAITING, SAID_WITHIN) {
             return fail(format!("{from}, the person was not asked again"));
         }
         asking::escape();
@@ -758,7 +758,7 @@ fn a_shell_is_asked_for_every_time() -> bool {
     let Some(mut first) = Run::start(me, "/tmp", &["sh"], &[], "echo SHELL-RAN\n") else {
         return false;
     };
-    if !first.says(ASKING, SAID_WITHIN) {
+    if !first.says(WAITING, SAID_WITHIN) {
         return fail("priv sh was not asked for");
     }
     asking::tab_and_enter();
@@ -769,7 +769,7 @@ fn a_shell_is_asked_for_every_time() -> bool {
     let Some(mut again) = Run::start(me, "/tmp", &["sh"], &[], "echo SHELL-RAN\n") else {
         return false;
     };
-    if !again.says(ASKING, SAID_WITHIN) {
+    if !again.says(WAITING, SAID_WITHIN) {
         return fail("priv sh was not asked for again");
     }
     asking::escape();
@@ -822,11 +822,11 @@ fn priv_s_edits_etc_and_is_refused_what_the_ceiling_leaves_out() -> bool {
     else {
         return false;
     };
-    if !run.says("priv: asking the person", SAID_WITHIN) {
+    if !run.says(&format!("priv: {WAITING}"), SAID_WITHIN) {
         return fail("priv -s was not asked for");
     }
     asking::tab_and_enter();
-    if !run.says("bootctl: asking the person", SAID_WITHIN) {
+    if !run.says(&format!("bootctl: {WAITING}"), SAID_WITHIN) {
         return fail(format!(
             "bootctl from priv -s was not asked for: {:?}",
             String::from_utf8_lossy(&run.seen)
@@ -890,7 +890,7 @@ fn a_standard_user_s_command_is_answered_by_an_administrator() -> bool {
     };
     let answered = |cwd: &str, answer: fn()| {
         let mut run = Run::start(person(bob, Some(desktop())), cwd, &[SELF, PROBE], &[], "")?;
-        if !run.says(ASKING, SAID_WITHIN) {
+        if !run.says(WAITING, SAID_WITHIN) {
             return None;
         }
         answer();
@@ -916,7 +916,7 @@ fn a_standard_user_s_command_is_answered_by_an_administrator() -> bool {
         asking::key(slopos_abi::input::keycode::KEY_ENTER, 0);
     })
     .unwrap_or_default();
-    code == Some(126) && said.contains("password typed was wrong")
+    code == Some(126) && said.contains(WRONG_PASSWORD)
         || fail(format!("a wrong password: {code:?} {said:?}"))
 }
 

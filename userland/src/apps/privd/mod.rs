@@ -48,10 +48,14 @@ use slopos_abi::syscall::{
 };
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_extension_core::declare::mount_point;
-use slopos_priv_core::consent::{Ask, EXPIRY_MS, Kind, Refusal, Secret};
+use slopos_priv_core::consent::{
+    Ask, Dialog, EXPIRY_MS, Kind, Refusal, Secret, WRONG_PASSWORD, icon_path, named_extension,
+    valid_app,
+};
 use slopos_priv_core::policy::{Principal, REMOTED};
 use slopos_priv_core::sessions::LINKS;
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request, kind};
+use slopos_priv_core::words::privd as said;
 use slopos_priv_core::{
     Action, ENV_ACTION, ENV_UID, INIT, MECHANISM_LANG, MECHANISM_PATH, POLICY, People, Policy,
     Question, Reach, Refused, Requester, RunsAs, SOCKET, Verdict, elf_interpreted,
@@ -62,10 +66,10 @@ use slopos_slibc::pal::{Pal, Sys};
 use self::answers::{Asked, Checks, Kept};
 use self::consent::{Broker, Waiting};
 use self::sessions::Seen;
-use crate::init_control;
 use crate::readiness::ReadinessNotifier;
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, net, pidfd};
+use crate::{app_entry, init_control};
 
 /// Init's readiness notifier is fd 3. An init that keeps one desktop hands
 /// privd its one link at `CONSENT_FD`; one that keeps sessions leaves that
@@ -284,13 +288,13 @@ pub fn privd_main() -> ! {
             Ok(peer) => peer,
             Err(why) => {
                 log!("privd: a connection whose peer is unknown: {why}");
-                let denial = Reply::denied(format!("who is asking is unknown: {why}"));
+                let denial = Reply::denied(said::FAULT);
                 let _ = send(&fd, &denial, CONNECTION);
                 continue;
             }
         };
         let Some(admitted) = Admitted::take(daemon, &peer, daemon.paired) else {
-            let denial = Reply::denied("privd is serving too many connections");
+            let denial = Reply::denied(said::CROWDED);
             let _ = send(&fd, &denial, CONNECTION);
             continue;
         };
@@ -460,8 +464,10 @@ impl Attested {
     }
 }
 
-const LAPSED: &str = "the requester no longer runs the program it connected as";
-const RESTARTING: &str = "privd is restarting for a new base; ask again";
+fn fault(said: &str, why: impl std::fmt::Display) -> Reply {
+    log!("privd: {why}");
+    Reply::denied(said)
+}
 
 /// What the peer at `fd` runs now.
 fn attested(fd: &OwnedFd) -> Result<Attested, String> {
@@ -668,10 +674,11 @@ impl Conn {
     }
 
     /// What the person typed at the requester's terminal for request `id`
-    /// once privd asked with `prompt`, waiting as long as the dialog would.
-    fn typed(&mut self, peer: &Peer, id: u64, prompt: String) -> Result<Secret, Reply> {
+    /// once privd asked with `prompt`, a [`Reply::Prompt`], waiting as long
+    /// as the dialog would.
+    fn typed(&mut self, peer: &Peer, id: u64, prompt: Reply) -> Result<Secret, Reply> {
         self.secret = None;
-        self.reply(&Reply::Prompt(prompt), id);
+        self.reply(&prompt, id);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(EXPIRY_MS);
         loop {
             still_wanted(peer, self, id)?;
@@ -730,7 +737,7 @@ fn serve(daemon: &Daemon, peer: &Peer, fd: OwnedFd) {
             Ok(Some((request, fds, withdrawn))) => {
                 IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
                 if DRAINING.load(Ordering::SeqCst) {
-                    let denial = Reply::denied(RESTARTING);
+                    let denial = Reply::denied(said::RESTARTING);
                     conn.reply(&denial, request.id);
                     IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
                     return;
@@ -741,7 +748,7 @@ fn serve(daemon: &Daemon, peer: &Peer, fd: OwnedFd) {
             Ok(None) => return,
             Err(why) => {
                 log!("privd: {}: {why}", peer.describe());
-                conn.reply(&Reply::denied(why), CONNECTION);
+                conn.reply(&Reply::denied(said::UNREADABLE), CONNECTION);
                 return;
             }
         }
@@ -765,22 +772,20 @@ impl Drop for Claim<'_> {
 }
 
 fn claim<'a>(daemon: &'a Daemon, action: &Action) -> Result<Claim<'a>, Reply> {
-    let busy = || {
-        Reply::denied(format!(
-            "another {} is running",
-            action.exclusive_group().unwrap_or(&action.name)
-        ))
-    };
     let group = action.exclusive_group().map(str::to_owned);
-    if group.is_some() && daemon.inherited_runs() {
-        return Err(Reply::denied(
-            "a mechanism an earlier privd started is still running",
-        ));
+    if let Some(group) = &group
+        && daemon.inherited_runs()
+    {
+        let why = format_args!("what a predecessor started may hold {group}");
+        return Err(fault(said::INHERITED, why));
     }
-    let mut running = daemon.running.lock().map_err(|_| busy())?;
+    let mut running = daemon
+        .running
+        .lock()
+        .map_err(|_| fault(said::FAULT, "the exclusive groups' lock is poisoned"))?;
     if let Some(group) = &group {
         if running.contains(group) {
-            return Err(busy());
+            return Err(fault(said::BUSY, format_args!("{group} is running")));
         }
         running.push(group.clone());
     }
@@ -819,11 +824,15 @@ struct Pending<'a> {
     peer: &'a Peer,
     conn: &'a mut Conn,
     id: u64,
+    app: Option<String>,
 }
 
 impl Waiting for Pending<'_> {
     fn shown(&mut self) {
-        self.conn.reply(&Reply::Asking, self.id);
+        let asking = Reply::Asking {
+            app: self.app.clone(),
+        };
+        self.conn.reply(&asking, self.id);
     }
 
     fn withdrawn(&mut self) -> bool {
@@ -835,10 +844,13 @@ impl Waiting for Pending<'_> {
 /// connected as, or has withdrawn request `id`.
 fn still_wanted(peer: &Peer, conn: &mut Conn, id: u64) -> Result<(), Reply> {
     if !peer.alive() {
-        return Err(Reply::denied("the requester has exited"));
+        return Err(fault(said::LAPSED, "the requester has exited"));
     }
     if !peer.still_runs(&conn.fd) {
-        return Err(Reply::denied(LAPSED));
+        return Err(fault(
+            said::LAPSED,
+            "the requester runs another program than it connected as",
+        ));
     }
     if conn.signals(id).is_none_or(|s| !s.is_empty()) {
         return Err(Reply::denied(Refusal::Withdrawn.to_string()));
@@ -855,27 +867,32 @@ fn run(
 ) -> Result<Exit, Reply> {
     let loaded = daemon
         .loaded()
-        .map_err(|why| Reply::denied(format!("privd has no policy: {why}")))?;
-    let action = loaded
-        .policy
-        .action(&request.action)
-        .ok_or_else(|| Reply::denied(format!("no action {}", request.action)))?;
+        .map_err(|why| fault(said::FAULT, format_args!("no policy: {why}")))?;
+    let action = loaded.policy.action(&request.action).ok_or_else(|| {
+        fault(
+            said::NO_ACTION,
+            format_args!("no action {}", request.action),
+        )
+    })?;
     if !action.accepts(&request.args()) {
-        return Err(Reply::denied(format!(
+        let why = format_args!(
             "{} is not an argument list {} takes",
             shown(&request.args),
             action.name
-        )));
+        );
+        return Err(fault(said::NOT_THAT_WAY, why));
     }
     if request.cwd != action.cwd {
-        return Err(Reply::denied(if action.cwd {
-            "the action runs in the requester's working directory, which was not sent"
-        } else {
-            "the action takes no working directory"
+        return Err(Reply::denied(match action.cwd {
+            true => said::NO_FOLDER,
+            false => said::UNWANTED_FOLDER,
         }));
     }
     if !peer.still_runs(&conn.fd) {
-        return Err(Reply::denied(LAPSED));
+        return Err(fault(
+            said::LAPSED,
+            "the requester runs another program than it connected as",
+        ));
     }
     let as_requester = action.runs_as == RunsAs::Requester;
     let tasks = (action.names_people() || as_requester)
@@ -897,15 +914,10 @@ fn run(
         Verdict::Run => None,
         Verdict::Ask(question) => Some(question),
         Verdict::Refuse(Refused::NotAllowed) => {
-            let unknown = people
-                .err()
-                .map(|why| format!(": {why}"))
-                .unwrap_or_default();
-            return Err(Reply::denied(format!(
-                "{} may not ask for {}{unknown}",
-                peer.describe(),
-                action.name
-            )));
+            if let Err(why) = people {
+                log!("privd: {}: the people are unknown: {why}", action.name);
+            }
+            return Err(Reply::denied(Refused::NotAllowed.to_string()));
         }
         Verdict::Refuse(why) => return Err(Reply::denied(why.to_string())),
     };
@@ -942,27 +954,22 @@ fn run(
             .as_ref()
             .is_some_and(|(asked, keep)| daemon.kept.holds(asked, *keep, &question.admins))
         {
+            let ask = ask_about(action, peer, &question, origin, cwd.clone(), command);
             let by = match (reach, link) {
                 (Reach::Terminal, _) => {
-                    typed_answer(daemon, peer, conn, request.id, action, &question)?;
+                    let runs_it = origin
+                        .map(|o| named_extension(&o.extension))
+                        .filter(|runs_it| ask.app.as_ref() != Some(runs_it));
+                    let headline = Dialog::new(ask).headline();
+                    let about = match runs_it {
+                        Some(runs_it) => format!("{headline} {runs_it} runs it."),
+                        None => headline,
+                    };
+                    let asked = (action.name.as_str(), about.as_str());
+                    typed_answer(daemon, peer, conn, request.id, asked, &question)?;
                     None
                 }
-                (_, Some(link)) => {
-                    let ask = Ask {
-                        id: 0,
-                        action: action.name.clone(),
-                        describe: action.describe.clone(),
-                        program: peer.program.path().map(str::to_owned),
-                        uid: peer.uid,
-                        pid: peer.pid,
-                        cwd: cwd.clone(),
-                        command,
-                        kind: question.kind,
-                        person: Some(question.person.name.clone()),
-                        admins: question.admins.clone(),
-                    };
-                    answer(daemon, peer, conn, request.id, link, ask)?
-                }
+                (_, Some(link)) => answer(daemon, peer, conn, request.id, link, ask)?,
                 (_, None) => return Err(Reply::denied(Refused::Unreached.to_string())),
             };
             judged_again(daemon, peer, request, action, &question, by.as_deref())?;
@@ -976,7 +983,7 @@ fn run(
     still_wanted(peer, conn, request.id)?;
     if let Some(origin) = origin {
         crate::activation::holds(&origin.extension, origin.generation, &action.program)
-            .map_err(Reply::denied)?;
+            .map_err(|why| fault(said::EXTENSION_CHANGED, why))?;
     }
     let runs_as = match action.runs_as {
         RunsAs::Uid(uid) => Identity {
@@ -987,12 +994,10 @@ fn run(
         RunsAs::Requester => requester_identity(daemon, peer, tasks.as_ref())?,
     };
     if DRAINING.load(Ordering::SeqCst) {
-        return Err(Reply::denied(RESTARTING));
+        return Err(Reply::denied(said::RESTARTING));
     }
     if fds.get(wire::STDIO).is_some_and(|dir| !still_at(dir, &cwd)) {
-        return Err(Reply::denied(
-            "the working directory sent was moved while it was asked about",
-        ));
+        return Err(Reply::denied(said::FOLDER_MOVED));
     }
     let pid = spawn(
         action,
@@ -1012,6 +1017,64 @@ fn run(
     Ok(wait(conn, pid, request.id))
 }
 
+fn ask_about(
+    action: &Action,
+    peer: &Peer,
+    question: &Question,
+    origin: Option<&Origin>,
+    cwd: String,
+    command: Vec<Vec<u8>>,
+) -> Ask {
+    let (app, icon) = named(&peer.program);
+    Ask {
+        id: 0,
+        action: action.name.clone(),
+        describe: action.describe.clone(),
+        program: peer.program.path().map(str::to_owned),
+        uid: peer.uid,
+        pid: peer.pid,
+        cwd,
+        command,
+        kind: question.kind,
+        person: Some(question.person.name.clone()),
+        admins: question.admins.clone(),
+        app,
+        icon,
+        detail: action.detail.clone(),
+        verb: Some(action.verb().to_owned()),
+        destructive: action.destructive,
+        extension: origin.map(|o| o.extension.clone()),
+    }
+}
+
+/// What the dialog names a requester running `program`, and its icon: the
+/// base's app entry that runs it, else its file name; an extension's program
+/// as its extension, with neither a name nor an icon its own entries could
+/// borrow from another app; nothing for a program the kernel attests as none
+/// of the system's.
+fn named(program: &Attested) -> (Option<String>, Option<String>) {
+    match program {
+        Attested::Base(path) => match app_entry::of_base(path).filter(|e| valid_app(&e.name)) {
+            Some(entry) => {
+                let icon = entry
+                    .icon
+                    .and_then(|icon| icon.into_os_string().into_string().ok())
+                    .filter(|icon| icon_path(icon));
+                (Some(entry.name), icon)
+            }
+            None => {
+                let file = path.rsplit('/').next().filter(|file| valid_app(file));
+                (file.map(str::to_owned), None)
+            }
+        },
+        Attested::Extension(_, label) => {
+            let extension = String::from_utf8_lossy(label.name());
+            (Some(named_extension(&extension)), None)
+        }
+        Attested::Other => (None, None),
+    }
+}
+
 /// Put `ask` to the person at the machine and hold what they answer to what
 /// it takes: a click, or the password of the person it names; the
 /// administrator who answered, for a question an administrator answers.
@@ -1024,12 +1087,15 @@ fn answer(
     ask: Ask,
 ) -> Result<Option<String>, Reply> {
     if !ask.fits() {
-        return Err(Reply::denied(
-            "the command is too long to show the person at the machine",
-        ));
+        return Err(Reply::denied(said::TOO_LONG));
     }
     let (action, kind, person) = (ask.action.clone(), ask.kind, ask.person.clone());
-    let mut pending = Pending { peer, conn, id };
+    let mut pending = Pending {
+        peer,
+        conn,
+        id,
+        app: ask.app.clone(),
+    };
     let broker = daemon
         .consent
         .get(usize::from(link))
@@ -1042,36 +1108,40 @@ fn answer(
         })?;
     let whose = match kind {
         Kind::Confirm => return Ok(None),
-        Kind::Password => person.ok_or_else(|| Reply::denied("the question named nobody"))?,
+        Kind::Password => person.ok_or_else(|| Reply::denied(said::INCOMPLETE))?,
         Kind::Admin => answer
             .admin
             .clone()
-            .ok_or_else(|| Reply::denied("no administrator answered"))?,
+            .ok_or_else(|| fault(said::INCOMPLETE, "no administrator answered"))?,
     };
     let secret = answer
         .secret
-        .ok_or_else(|| Reply::denied("no password was typed"))?;
+        .ok_or_else(|| fault(said::INCOMPLETE, "no password was typed"))?;
     checked(daemon, peer, &action, &whose, &secret)?;
     Ok(answer.admin)
 }
 
-/// The person's own password, typed at the requester's terminal: a console
-/// session's question, which no dialog shows.
+/// The person's own password, typed at the requester's terminal after a line
+/// saying what it allows: a console session's question, which no dialog
+/// shows.
 fn typed_answer(
     daemon: &Daemon,
     peer: &Peer,
     conn: &mut Conn,
     id: u64,
-    action: &Action,
+    (action, about): (&str, &str),
     question: &Question,
 ) -> Result<(), Reply> {
     if question.kind != Kind::Password {
         return Err(Reply::denied(Refused::Unreached.to_string()));
     }
     let whose = &question.person.name;
-    let prompt = format!("{}: {whose}'s password: ", action.name);
+    let prompt = Reply::Prompt {
+        about: Some(about.to_owned()),
+        prompt: format!("Password for {whose}: "),
+    };
     let secret = conn.typed(peer, id, prompt)?;
-    checked(daemon, peer, &action.name, whose, &secret)
+    checked(daemon, peer, action, whose, &secret)
 }
 
 fn checked(
@@ -1090,12 +1160,13 @@ fn checked(
             Ok(())
         }
         Ok(false) => Err(Reply::Denied {
-            reason: "the password typed was wrong".into(),
+            reason: WRONG_PASSWORD.into(),
             by_person: true,
         }),
-        Err(why) => Err(Reply::denied(format!(
-            "the password could not be checked: {why}"
-        ))),
+        Err(why) => {
+            log!("privd: {whose}'s password could not be checked: {why}");
+            Err(Reply::denied(said::UNCHECKED))
+        }
     }
 }
 
@@ -1125,8 +1196,7 @@ fn judged_again(
     by: Option<&str>,
 ) -> Result<(), Reply> {
     let tasks = init_control::Tasks::try_read();
-    let people = people::now(tasks.as_ref(), daemon.seen)
-        .map_err(|why| Reply::denied(format!("the answer cannot be held to the people: {why}")))?;
+    let people = people::now(tasks.as_ref(), daemon.seen).map_err(|why| fault(said::FAULT, why))?;
     let (reach, _) = reach(daemon, peer, tasks.as_ref(), request.terminal);
     let requester = peer.requester(daemon.paired).reached(reach);
     match action.admits(&requester, &people) {
@@ -1138,9 +1208,7 @@ fn judged_again(
         {
             Ok(())
         }
-        _ => Err(Reply::denied(
-            "who may allow it changed while the person was asked",
-        )),
+        _ => Err(Reply::denied(said::ANSWERED_ELSEWHERE)),
     }
 }
 
@@ -1158,19 +1226,13 @@ fn directory_of(daemon: &Daemon, dir: &OwnedFd) -> Result<String, Reply> {
     let _held = daemon
         .cwd
         .lock()
-        .map_err(|_| Reply::denied("privd's directory lock is poisoned"))?;
+        .map_err(|_| fault(said::FAULT, "the directory lock is poisoned"))?;
     match Sys::fchdir(dir.raw()) {
         Ok(()) => {}
         Err(e) if e.raw() == -slopos_abi::Errno::ESTALE.raw() => {
-            return Err(Reply::denied(
-                "the working directory sent is no longer in the tree",
-            ));
+            return Err(Reply::denied(said::FOLDER_GONE));
         }
-        Err(_) => {
-            return Err(Reply::denied(
-                "the working directory sent is not a directory",
-            ));
-        }
+        Err(_) => return Err(Reply::denied(said::NOT_A_FOLDER)),
     }
     let path = std::env::current_dir()
         .ok()
@@ -1179,7 +1241,7 @@ fn directory_of(daemon: &Daemon, dir: &OwnedFd) -> Result<String, Reply> {
         log!("privd: cannot return to /");
     }
     path.filter(|p| p.starts_with('/'))
-        .ok_or_else(|| Reply::denied("the working directory has no path"))
+        .ok_or_else(|| fault(said::FAULT, "the working directory has no path"))
 }
 
 /// Whether `path` still leads to the directory `dir`, the one the request
@@ -1210,16 +1272,14 @@ fn requester_identity(
 ) -> Result<Identity, Reply> {
     let login = tasks
         .and_then(|tasks| tasks.login_of(peer.pid))
-        .ok_or_else(|| Reply::denied("the requester's session is unknown"))?;
+        .ok_or_else(|| fault(said::FAULT, "the requester's session is unknown"))?;
     let admin = match peer.uid {
         0 => false,
         uid => {
             people::now(tasks, daemon.seen)
-                .map_err(Reply::denied)?
+                .map_err(|why| fault(said::FAULT, why))?
                 .person(uid)
-                .ok_or_else(|| {
-                    Reply::denied("the requester is no longer a person the machine knows")
-                })?
+                .ok_or_else(|| Reply::denied(said::NO_ACCOUNT))?
                 .admin
         }
     };
@@ -1246,11 +1306,10 @@ fn spawn(
     cwd: &str,
 ) -> Result<u32, Reply> {
     let name = action.program.rsplit('/').next().unwrap_or(&action.program);
-    let mut argv = vec![CString::new(name).map_err(|_| Reply::denied("bad program name"))?];
+    let mut argv =
+        vec![CString::new(name).map_err(|_| fault(said::FAULT, "a program name holds NUL"))?];
     for arg in args {
-        argv.push(
-            CString::new(arg.as_slice()).map_err(|_| Reply::denied("an argument holds NUL"))?,
-        );
+        argv.push(CString::new(arg.as_slice()).map_err(|_| Reply::denied(said::NOT_THAT_WAY))?);
     }
     let path = match extension {
         Some(origin) => format!("{MECHANISM_PATH}:{}/bin", mount_point(&origin.extension)),
@@ -1290,11 +1349,12 @@ fn spawn(
         },
     );
     if pid <= 0 {
-        return Err(Reply::denied(format!(
+        let why = format_args!(
             "{} could not be started: {}",
             action.program,
             SyscallError::from_errno(-pid)
-        )));
+        );
+        return Err(fault(said::FAULT, why));
     }
     Ok(pid as u32)
 }

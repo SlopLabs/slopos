@@ -19,8 +19,10 @@ mod sessions;
 
 use slopos_abi::input::keycode::KEY_ENTER;
 use slopos_abi::syscall::BOOT_FLAG_MEDIUM;
-use slopos_priv_core::consent::Refusal;
+use slopos_priv_core::Refused;
+use slopos_priv_core::consent::{DECLINED_MS, Refusal, UNIDENTIFIED, WRONG_PASSWORD};
 use slopos_priv_core::wire::{self, Exit, Reply, Request};
+use slopos_priv_core::words;
 use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy};
 use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, STATUS_REFUSED, request_id};
@@ -29,8 +31,10 @@ use slopos_userland::syscall::{OwnedFd, RawFd, fs, net, process};
 
 use self::asking::{Asker, Child};
 
+use std::fs::Permissions;
 use std::io::Read;
 use std::os::fd::FromRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -226,22 +230,26 @@ fn argv_outside_the_action_is_refused() -> bool {
         (
             "org.slopos.net.toggle",
             &["net", "flap"][..],
-            "argument list",
+            words::privd::NOT_THAT_WAY,
         ),
         (
             "org.slopos.boot.status",
             &["status", "--all"],
-            "argument list",
+            words::privd::NOT_THAT_WAY,
         ),
         (
             "org.slopos.boot.install",
             &["--boot", "/dev/vda", "install"],
-            "argument list",
+            words::privd::NOT_THAT_WAY,
         ),
-        ("org.slopos.no-such-action", &["status"], "no action"),
+        (
+            "org.slopos.no-such-action",
+            &["status"],
+            words::privd::NO_ACTION,
+        ),
     ] {
         let replies = ask(&mut privd, action, args, devnull.raw());
-        if !denied(&replies).is_some_and(|reason| reason.contains(why)) || replies.len() != 1 {
+        if denied(&replies) != Some(why) || replies.len() != 1 {
             note(&format!("{action} {args:?}: {replies:?}"));
             return false;
         }
@@ -356,8 +364,8 @@ fn crowd() -> i32 {
         let _ = send(&privd, &request, devnull.raw());
         let replies = replies(&mut privd, request.id);
         seen.push(match denied(&replies) {
-            Some(reason) if reason.contains("may not ask") => 'a',
-            Some(reason) if reason.contains("too many") => 'r',
+            Some(reason) if reason == Refused::NotAllowed.to_string() => 'a',
+            Some(reason) if reason == words::privd::CROWDED => 'r',
             _ => '?',
         });
         held.push(privd);
@@ -419,7 +427,7 @@ fn the_working_directory_is_the_descriptor_sent() -> bool {
     if !nowhere
         .as_deref()
         .and_then(denied)
-        .is_some_and(|reason| reason.contains("no longer in the tree"))
+        .is_some_and(|reason| reason == words::privd::FOLDER_GONE)
     {
         note(&format!(
             "bootctl install in a removed directory: {nowhere:?}"
@@ -432,7 +440,7 @@ fn the_working_directory_is_the_descriptor_sent() -> bool {
     let unsent = request("org.slopos.boot.install", &["install"]);
     let _ = send(&privd, &unsent, devnull.raw());
     let replies = replies(&mut privd, unsent.id);
-    if !denied(&replies).is_some_and(|reason| reason.contains("was not sent")) {
+    if denied(&replies) != Some(words::privd::NO_FOLDER) {
         note(&format!(
             "bootctl install with no directory sent: {replies:?}"
         ));
@@ -443,17 +451,17 @@ fn the_working_directory_is_the_descriptor_sent() -> bool {
             "org.slopos.boot.install",
             &["install"][..],
             devnull.raw(),
-            "not a directory",
+            words::privd::NOT_A_FOLDER,
         ),
         (
             "org.slopos.prof",
             &["status"],
             tmp.raw(),
-            "no working directory",
+            words::privd::UNWANTED_FOLDER,
         ),
     ] {
         let replies = with_dir(action, args, dir).unwrap_or_default();
-        if !denied(&replies).is_some_and(|reason| reason.contains(why)) {
+        if denied(&replies) != Some(why) {
             note(&format!("{action} with a directory: {replies:?}"));
             return false;
         }
@@ -550,7 +558,7 @@ fn session() -> i32 {
         &["link", "set", "lo", "up"],
         devnull.raw(),
     );
-    if !denied(&replies).is_some_and(|why| why.contains("neither on the screen")) {
+    if !denied(&replies).is_some_and(|why| why == Refused::Unreached.to_string()) {
         note(&format!("net.configure with nobody to ask: {replies:?}"));
         return 6;
     }
@@ -631,7 +639,7 @@ fn outside() -> i32 {
         return 3;
     }
     let lapsed = ask(&mut privd, "org.slopos.prof", &["status"], devnull.raw());
-    if !denied(&lapsed).is_some_and(|why| why.contains("no longer runs")) {
+    if denied(&lapsed) != Some(words::privd::LAPSED) {
         note(&format!(
             "prof status on the connection made as root: {lapsed:?}"
         ));
@@ -641,7 +649,7 @@ fn outside() -> i32 {
         return 5;
     };
     let refused = ask(&mut fresh, "org.slopos.prof", &["status"], devnull.raw());
-    if !denied(&refused).is_some_and(|why| why.contains("may not ask")) {
+    if !denied(&refused).is_some_and(|why| why == Refused::NotAllowed.to_string()) {
         note(&format!(
             "prof status from outside the base as uid 0: {refused:?}"
         ));
@@ -840,7 +848,7 @@ fn the_rescue_shell_is_offered_only_on_the_medium() -> bool {
     };
     let devnull = null();
     let replies = ask(&mut privd, RESCUE, &["--rescue"], devnull.raw());
-    if !denied(&replies).is_some_and(|reason| reason.contains("no action")) {
+    if denied(&replies) != Some(words::privd::NO_ACTION) {
         note(&format!("{RESCUE} off the medium: {replies:?}"));
         return false;
     }
@@ -861,6 +869,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_policy_is_the_bases_and_parses",
         the_policy_is_the_bases_and_parses,
+    ),
+    (
+        "every_question_reads_whole_at_every_width",
+        every_question_reads_whole_at_every_width,
     ),
     (
         "root_runs_an_action_holding_its_capabilities",
@@ -933,6 +945,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_first_person_s_click_allows_and_escape_denies",
         the_first_person_s_click_allows_and_escape_denies,
+    ),
+    (
+        "the_dialog_names_the_app_only_from_what_no_process_can_write",
+        the_dialog_names_the_app_only_from_what_no_process_can_write,
     ),
     (
         "an_administrator_s_password_answers_for_a_standard_user",
@@ -1010,7 +1026,7 @@ fn a_standard_user_is_refused_while_no_administrator_has_a_password() -> bool {
         return false;
     };
     let said = as_person(bob, None).ask(&CONFIGURE, None);
-    if !said.contains("no administrator has one") {
+    if !said.ends_with(&Refused::NoAdminPassword.to_string()) {
         note(&format!(
             "{BOB}'s net.configure with no administrator's password: {said}"
         ));
@@ -1087,7 +1103,7 @@ fn logged_in_at_a_console(name: &str, password: &str) -> Option<OwnedFd> {
 fn alone_beside_another(bob: u32) -> bool {
     let keymap = ["org.slopos.console.keymap", "list"];
     let beside = as_person(bob, None).ask(&keymap, None);
-    if !beside.contains("no administrator has one") {
+    if !beside.ends_with(&Refused::NoAdminPassword.to_string()) {
         note(&format!(
             "{BOB}'s keymap list beside the first person: {beside}"
         ));
@@ -1095,7 +1111,7 @@ fn alone_beside_another(bob: u32) -> bool {
     }
     let poweroff = ["org.slopos.power.poweroff", "halt"];
     let off = as_person(bob, None).ask(&poweroff, None);
-    if !off.contains("no administrator has one") {
+    if !off.ends_with(&Refused::NoAdminPassword.to_string()) {
         note(&format!("{BOB}'s power-off beside the first person: {off}"));
         return false;
     }
@@ -1138,6 +1154,170 @@ fn the_first_person_s_click_allows_and_escape_denies() -> bool {
     true
 }
 
+/// The dialog the compositor draws, for each shape of question, passes the
+/// layout audit at a phone's, a laptop's and a monitor's width: nothing cut,
+/// nothing over anything else, focus shown all the way round, and every
+/// line of text against what is behind it.
+fn every_question_reads_whole_at_every_width() -> bool {
+    use slopos_priv_core::consent::{ARMING_MS, Ask, Dialog, Focus, Kind, MAX_ADMINS, MAX_SHOWN};
+    let ask = Ask {
+        id: 1,
+        action: "org.slopos.install".into(),
+        describe: "install SlopOS on a disk".into(),
+        program: Some("/bin/installer-ui".into()),
+        uid: USER,
+        pid: 18,
+        cwd: "/".into(),
+        command: vec![b"/bin/installer".to_vec(), b"--serve".to_vec()],
+        kind: Kind::Confirm,
+        person: Some("user".into()),
+        admins: Vec::new(),
+        app: Some("Install SlopOS".into()),
+        icon: None,
+        detail: Some("It can delete everything on the disk you choose.".into()),
+        verb: Some("Install".into()),
+        destructive: true,
+        extension: None,
+    };
+    let long = vec![b"/bin/bootctl".to_vec(), vec![b'x'; 300]];
+    let shapes = [
+        ask.clone(),
+        Ask {
+            kind: Kind::Password,
+            app: None,
+            detail: None,
+            verb: None,
+            destructive: false,
+            ..ask.clone()
+        },
+        Ask {
+            kind: Kind::Admin,
+            person: Some(BOB.into()),
+            admins: vec![ALICE.into(), "carol".into(), "dave".into()],
+            extension: Some("act".into()),
+            command: long.clone(),
+            ..ask.clone()
+        },
+        Ask {
+            kind: Kind::Admin,
+            person: Some(BOB.into()),
+            admins: vec![ALICE.into()],
+            ..ask.clone()
+        },
+        Ask {
+            kind: Kind::Admin,
+            person: Some(BOB.into()),
+            admins: (0..MAX_ADMINS).map(|n| format!("admin{n}")).collect(),
+            command: long,
+            cwd: format!("/{}", "d".repeat(MAX_SHOWN - 3)),
+            ..ask.clone()
+        },
+    ];
+    let mut clean = true;
+    for shape in shapes {
+        let mut dialogs = vec![Dialog::new(shape.clone())];
+        let mut hidden = Dialog::new(shape);
+        hidden.drawn(0);
+        hidden.pointer_down(ARMING_MS);
+        hidden.click(Focus::Details, ARMING_MS);
+        if hidden.expanded() {
+            note("the details did not hide");
+            return false;
+        }
+        dialogs.push(hidden);
+        for dialog in dialogs {
+            let node = slopos_userland::apps::compositor::consent::view(&dialog, None, None);
+            let mut found = slopos_appkit::audit::audit_node(&node, &[360, 640, 960], 720);
+            found.extend(slopos_appkit::audit::audit_node(&node, &[640], 480));
+            if !found.is_empty() {
+                note(&format!("{}:\n  {}", dialog.headline(), found.join("\n  ")));
+                clean = false;
+            }
+        }
+    }
+    clean
+}
+
+/// A copy of this binary outside the base, which the kernel attests as no
+/// program of the system's.
+const LOCAL_COPY: &str = "/usr/local/bin/privd-test-probe";
+const LOCAL_APPS: &str = "/usr/local/share/slopos/apps";
+
+/// The dialog names a base program with no app entry by its file name, and a
+/// program outside the base as an unidentified one, whatever an entry in
+/// `/usr/local`, which the session can write, claims for either. It first
+/// waits out the refusal the case before it ended on.
+fn the_dialog_names_the_app_only_from_what_no_process_can_write() -> bool {
+    std::thread::sleep(Duration::from_millis(DECLINED_MS + 500));
+    let outcome = named_from_what_no_process_can_write();
+    for entry in ["privd-test-base", "privd-test-copy"] {
+        let _ = std::fs::remove_file(format!("{LOCAL_APPS}/org.slopos.{entry}.app"));
+    }
+    let _ = std::fs::remove_file(LOCAL_COPY);
+    outcome
+}
+
+fn named_from_what_no_process_can_write() -> bool {
+    let front = sessions::front_tag();
+    let named = |path| {
+        let asker = Asker {
+            path,
+            ..as_person(USER, front)
+        };
+        asker.ask_naming(&CONFIGURE, Some(asking::tab_and_enter))
+    };
+    let from_the_base = named(SELF);
+    let copied = std::fs::create_dir_all("/usr/local/bin")
+        .and_then(|()| std::fs::copy(SELF, LOCAL_COPY))
+        .and_then(|_| std::fs::set_permissions(LOCAL_COPY, Permissions::from_mode(0o755)));
+    if let Err(e) = copied {
+        note(&format!("{LOCAL_COPY}: {e}"));
+        return false;
+    }
+    let unlisted = named(LOCAL_COPY);
+    let claim = |entry: &str, exec: &str| {
+        let text = format!("id=org.slopos.{entry}\nname=System Monitor\nexec={exec}\n");
+        std::fs::write(format!("{LOCAL_APPS}/org.slopos.{entry}.app"), text)
+    };
+    let claimed = std::fs::create_dir_all(LOCAL_APPS)
+        .and_then(|()| claim("privd-test-base", SELF))
+        .and_then(|()| claim("privd-test-copy", LOCAL_COPY));
+    if let Err(e) = claimed {
+        note(&format!("{LOCAL_APPS}: {e}"));
+        return false;
+    }
+    let claimed_base = named(SELF);
+    let claimed_copy = named(LOCAL_COPY);
+    let expected = [
+        (&from_the_base, "privd_test", "a base program with no entry"),
+        (&unlisted, UNIDENTIFIED, "a program outside the base"),
+        (
+            &claimed_base,
+            "privd_test",
+            "a base program /usr/local names System Monitor",
+        ),
+        (
+            &claimed_copy,
+            UNIDENTIFIED,
+            "a program /usr/local names System Monitor",
+        ),
+    ];
+    for ((said, app), want, who) in expected {
+        if said != "ran 0" || app.as_deref() != Some(want) {
+            note(&format!("{who} was named {app:?} and ended {said}"));
+            return false;
+        }
+    }
+    let sysmon = slopos_userland::app_entry::of_base("/bin/sysmon");
+    let icon = Some("/usr/share/slopos/icons/org.slopos.sysmon.png".into());
+    let found = sysmon.as_ref().map(|e| (e.name.as_str(), e.icon.clone()));
+    if found != Some(("System Monitor", icon)) {
+        note(&format!("the base's entry for /bin/sysmon: {sysmon:?}"));
+        return false;
+    }
+    true
+}
+
 /// A standard user's request is answered by an administrator typing their
 /// own password into the dialog, which privd checks through authcheck, and
 /// is refused by a wrong one.
@@ -1155,7 +1335,7 @@ fn an_administrator_s_password_answers_for_a_standard_user() -> bool {
         ));
         return false;
     }
-    if !wrong.starts_with("denied by the person") || !wrong.contains("password typed was wrong") {
+    if !wrong.starts_with("denied by the person") || !wrong.ends_with(WRONG_PASSWORD) {
         note(&format!(
             "{BOB}'s request answered by a wrong password: {wrong}"
         ));
@@ -1278,10 +1458,10 @@ fn consent(hold: bool) -> i32 {
         return 1;
     }
     match privd.reply(request.id) {
-        Ok(Some(Reply::Asking)) => {}
+        Ok(Some(Reply::Asking { .. })) => {}
         Ok(Some(Reply::Denied { reason, .. }))
-            if reason.contains("nothing can ask them")
-                || reason.contains("neither on the screen") =>
+            if reason == Refusal::NoAgent.to_string()
+                || reason == Refused::Unreached.to_string() =>
         {
             return NOBODY;
         }

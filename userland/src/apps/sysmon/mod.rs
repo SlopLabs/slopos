@@ -394,6 +394,7 @@ impl SysmonApp {
         let target = self.confirm_kill.as_ref()?;
         Some(Node::Dialog {
             title: format!("Kill task '{}' (PID {})?", target.name, target.pid()),
+            icon: None,
             content: Box::new(
                 Text::new("The task is terminated immediately and cannot save state.")
                     .wrap()
@@ -403,6 +404,7 @@ impl SysmonApp {
                 .cancel(Button::new("Cancel").on_press(SysmonMsg::Cancel))
                 .destructive(Button::new("Kill").on_press(SysmonMsg::Kill)),
             on_dismiss: Some(SysmonMsg::Cancel),
+            anchor: None,
         })
     }
 

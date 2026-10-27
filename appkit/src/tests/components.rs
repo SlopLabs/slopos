@@ -417,11 +417,13 @@ fn dialog_over(page: Node<()>) -> Node<()> {
             page,
             Node::Dialog {
                 title: String::from("Erase this disk?"),
+                icon: None,
                 content: Box::new(Text::new("Everything on it goes.").into()),
                 footer: ButtonRow::new()
                     .cancel(Button::new("Cancel").on_press(()))
                     .destructive(Button::new("Erase").on_press(())),
                 on_dismiss: None,
+                anchor: None,
             },
         ],
     }
@@ -466,9 +468,11 @@ pub(super) fn test_a_tall_dialog_scrolls() {
     let long = "A sentence that goes on. ".repeat(80);
     let dialog: Node<()> = Node::Dialog {
         title: String::from("Read this first"),
+        icon: None,
         content: Box::new(Text::new(long).wrap().into()),
         footer: ButtonRow::new().confirm(Button::new("Close").on_press(())),
         on_dismiss: None,
+        anchor: None,
     };
     assert_clean("a tall dialog", audit_node(&dialog, &WIDTHS, 400));
     let root = built(dialog, Size::new(640, 400));
@@ -727,9 +731,11 @@ pub(super) fn test_a_dialog_shows_its_controls_whole() {
             page,
             Node::Dialog {
                 title: String::from("Install"),
+                icon: None,
                 content: Box::new(content),
                 footer: ButtonRow::new().confirm(Button::new("Close").on_press(())),
                 on_dismiss: None,
+                anchor: None,
             },
         ],
     };
@@ -1012,9 +1018,11 @@ pub(super) fn test_a_drag_follows_the_pointer_out_of_its_part() {
     }
     let in_dialog = Node::Dialog {
         title: String::from("Size"),
+        icon: None,
         content: Box::new(slider()),
         footer: ButtonRow::new().confirm(Button::new("Done").on_press(SliderInput::End)),
         on_dismiss: None,
+        anchor: None,
     };
     let in_list = PropertyList::new().row_with("Root size", slider()).into();
     for (holder, node) in [("dialog", in_dialog), ("property list", in_list)] {

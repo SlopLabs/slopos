@@ -20,7 +20,10 @@ action org.slopos.boot.install
   allow    root
   allow    admin confirm
   allow    paired
-  describe \"Install a kernel into a boot slot\"
+  describe \"install a new kernel beside the one that starts by default\"
+  detail   \"The kernel that starts by default stays, so you can go back to it.\"
+  verb     \"Install\"
+  destructive
 
 action org.slopos.net.toggle
   program /bin/ip
@@ -30,7 +33,7 @@ action org.slopos.net.toggle
   allow program /bin/compositor
   allow user password
   exclusive
-  describe \"Turn networking on or off\"
+  describe \"turn networking on or off\"
 ";
 
 fn args(words: &[&'static str]) -> Vec<&'static [u8]> {
@@ -106,7 +109,16 @@ fn the_example_parses_into_what_it_says() {
     assert!(install.cwd);
     assert_eq!(install.exclusive_group(), Some("boot-slots"));
     assert_eq!(install.keep, Some(300));
-    assert_eq!(install.describe, "Install a kernel into a boot slot");
+    assert_eq!(
+        install.describe,
+        "install a new kernel beside the one that starts by default"
+    );
+    assert_eq!(
+        install.detail.as_deref(),
+        Some("The kernel that starts by default stays, so you can go back to it.")
+    );
+    assert_eq!(install.verb(), "Install");
+    assert!(install.destructive);
     assert_eq!(
         install.shapes,
         vec![
@@ -138,6 +150,8 @@ fn the_example_parses_into_what_it_says() {
         ]
     );
     let toggle = policy.action("org.slopos.net.toggle").unwrap();
+    assert_eq!((toggle.detail.as_deref(), toggle.verb()), (None, "Allow"));
+    assert!(!toggle.destructive);
     assert!(!toggle.cwd);
     assert_eq!(toggle.keep, None);
     assert_eq!(toggle.exclusive_group(), Some("org.slopos.net.toggle"));
@@ -365,7 +379,7 @@ fn a_person_answers_for_themselves_by_a_click_at_their_screen_or_their_password(
     );
     assert_eq!(
         confirm.admits(&shell(CAROL), &people),
-        Verdict::Refuse(Refused::Away("carol".into()))
+        Verdict::Refuse(Refused::Away)
     );
     assert_eq!(
         asks(password.admits(&shell(USER), &people)),
@@ -382,7 +396,7 @@ fn a_person_answers_for_themselves_by_a_click_at_their_screen_or_their_password(
     );
     assert_eq!(
         password.admits(&shell(CAROL), &people),
-        Verdict::Refuse(Refused::Away("carol".into()))
+        Verdict::Refuse(Refused::Away)
     );
     assert_eq!(
         asks(confirm.admits(&at(ALICE, ALICE), &people)),
@@ -594,6 +608,15 @@ fn every_rule_of_the_grammar_refuses() {
         ("  uid requester", "the setting is given twice"),
         ("  caps Power", "the setting is given twice"),
         ("  describe \"y\"", "the setting is given twice"),
+        (
+            "  detail \"It goes.\"\n  detail \"It goes.\"",
+            "the setting is given twice",
+        ),
+        (
+            "  verb \"Run\"\n  verb \"Run\"",
+            "the setting is given twice",
+        ),
+        ("  destructive\n  destructive", "the setting is given twice"),
         ("  cwd\n  cwd", "the setting is given twice"),
         ("  exclusive\n  exclusive", "the setting is given twice"),
         ("  medium\n  medium", "the setting is given twice"),
@@ -717,6 +740,13 @@ fn values_outside_their_grammar_refuse() {
         ("describe \"a\"b\"", "describe"),
         ("describe \"tab\there\"", "describe"),
         ("describe \"caf\u{e9}\"", "describe"),
+        ("describe \"Restart the computer\"", "describe"),
+        ("describe \"restart the machine\"", "describe"),
+        ("detail \"it goes.\"", "detail"),
+        ("detail \"It holds RawBlock.\"", "detail"),
+        ("verb \"install\"", "verb"),
+        ("verb \"Install.\"", "verb"),
+        ("destructive x", "destructive"),
     ] {
         let text = format!("action org.slopos.x\n  {}\n", line);
         let err = Policy::parse(&text);
@@ -727,10 +757,65 @@ fn values_outside_their_grammar_refuse() {
         assert!(err.is_err(), "{line} parsed");
         assert_eq!(err.unwrap_err().line, 2, "{line}");
     }
-    let long = format!("describe \"{}\"", "x".repeat(MAX_DESCRIBE + 1));
+    let long = format!("describe \"{}\"", "x".repeat(MAX_SETTING + 1));
     assert_eq!(refusal(&with(&long)).line, 8);
     let long_name = format!("action org.{}\n", "x".repeat(MAX_NAME));
     assert_eq!(refusal(&long_name).line, 1);
+}
+
+/// A requester reads a policy of another base than its own: one from before
+/// the words were held, or one that names a setting it does not know.
+/// privd holds its own to both.
+#[test]
+fn a_requester_reads_what_privd_would_hold_to_more() {
+    let older = "action org.slopos.boot.install\n  program /bin/bootctl\n  args install *\n  \
+                 caps Power\n  uid 0\n  allow root\n  \
+                 describe \"Install a kernel into a boot slot\"\n";
+    let newer = "action org.slopos.boot.install\n  program /bin/bootctl\n  args install *\n  \
+                 caps Power\n  uid 0\n  allow root\n  describe \"install a kernel\"\n  \
+                 glow brightly\n";
+    for text in [older, newer] {
+        let read = Policy::read(text).expect(text);
+        assert_eq!(read.actions()[0].program, "/bin/bootctl");
+        assert!(Policy::parse(text).is_err(), "{text}");
+    }
+    let broken = "action org.slopos.x\n  program /bin/x\n  args *\n  caps Power\n  uid 0\n  \
+                  allow root\n  describe \"x\"\n  cwd please\n";
+    assert!(
+        Policy::read(broken).is_err(),
+        "a known setting is still read whole"
+    );
+}
+
+/// What each shipped action says passes the copy rules, and only the install
+/// that can erase a disk is marked as destroying something.
+#[test]
+fn the_shipped_policy_speaks_to_the_person() {
+    let policy = Policy::parse(SHIPPED).unwrap();
+    assert_eq!(policy.actions().len(), 33);
+    for action in policy.actions() {
+        let name = &action.name;
+        assert_eq!(crate::words::describe(&action.describe), Ok(()), "{name}");
+        if let Some(detail) = &action.detail {
+            assert_eq!(crate::words::detail(detail), Ok(()), "{name}");
+        }
+        assert_eq!(crate::words::verb(action.verb()), Ok(()), "{name}");
+    }
+    let destructive: Vec<&str> = policy
+        .actions()
+        .iter()
+        .filter(|a| a.destructive)
+        .map(|a| a.name.as_str())
+        .collect();
+    assert_eq!(destructive, ["org.slopos.install"]);
+    let mut said: Vec<&str> = policy
+        .actions()
+        .iter()
+        .map(|a| a.describe.as_str())
+        .collect();
+    said.sort_unstable();
+    said.dedup();
+    assert_eq!(said.len(), 33, "two actions say the same");
 }
 
 #[test]
@@ -1167,7 +1252,7 @@ fn a_person_is_asked_only_where_their_session_is_reached() {
     );
     assert_eq!(
         confirm.admits(&terminal(USER), &people),
-        Verdict::Refuse(Refused::NoPasswordToType("user".into()))
+        Verdict::Refuse(Refused::NoPasswordToType)
     );
     assert_eq!(
         admin.admits(&terminal(BOB), &people),

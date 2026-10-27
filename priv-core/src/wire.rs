@@ -140,8 +140,11 @@ pub enum Exit {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Reply {
-    /// The person at the machine is being asked.
-    Asking,
+    /// The person at the machine is being asked, the dialog naming the
+    /// requester `app`, as [`Ask::app`](crate::consent::Ask::app) does.
+    Asking {
+        app: Option<String>,
+    },
     Started {
         pid: u32,
     },
@@ -151,9 +154,13 @@ pub enum Reply {
         reason: String,
         by_person: bool,
     },
-    /// Ask the person at the requester's terminal for their password, and
-    /// send it back in a [`secret_frame`].
-    Prompt(String),
+    /// Ask the person at the requester's terminal for their password after
+    /// showing them `about`, what they are asked to allow, and send it back
+    /// in a [`secret_frame`].
+    Prompt {
+        about: Option<String>,
+        prompt: String,
+    },
 }
 
 impl Reply {
@@ -175,7 +182,13 @@ impl Reply {
     pub fn frame(&self, id: u64) -> Vec<u8> {
         let fields = Fields::new().with("id", id.to_string());
         match self {
-            Reply::Asking => frame(kind::ASKING, &fields.encode()),
+            Reply::Asking { app } => {
+                let mut fields = fields;
+                if let Some(app) = app {
+                    fields.push("app", app);
+                }
+                frame(kind::ASKING, &fields.encode())
+            }
             Reply::Started { pid } => {
                 frame(kind::STARTED, &fields.with("pid", pid.to_string()).encode())
             }
@@ -194,24 +207,33 @@ impl Reply {
                 }
                 frame(kind::DENIED, &fields.encode())
             }
-            Reply::Prompt(prompt) => frame(kind::PROMPT, &fields.with("prompt", prompt).encode()),
+            Reply::Prompt { about, prompt } => {
+                let mut fields = fields.with("prompt", prompt);
+                if let Some(about) = about {
+                    fields.push("about", about);
+                }
+                frame(kind::PROMPT, &fields.encode())
+            }
         }
     }
 
-    /// A reply and the id of the request it answers.
+    /// A reply and the id of the request it answers. A field this side does
+    /// not know is passed over, so a privd of a newer base can say more to a
+    /// requester of an older one.
     pub fn decode(kind: u8, payload: &[u8]) -> Result<(u64, Reply), Malformed> {
         let reply = match kind {
             kind::ASKING => {
-                let fields = known(payload, &["id"])?;
-                (number(&fields, "id")?, Reply::Asking)
+                let fields = reply_fields(payload)?;
+                let app = optional(&fields, "app", crate::consent::valid_app)?;
+                (number(&fields, "id")?, Reply::Asking { app })
             }
             kind::STARTED => {
-                let fields = known(payload, &["id", "pid"])?;
+                let fields = reply_fields(payload)?;
                 let pid = number(&fields, "pid")?;
                 (number(&fields, "id")?, Reply::Started { pid })
             }
             kind::EXITED => {
-                let fields = known(payload, &["id", "code", "signal"])?;
+                let fields = reply_fields(payload)?;
                 let exit = match (fields.get("code"), fields.get("signal")) {
                     (Some(_), None) => Exit::Code(number(&fields, "code")?),
                     (None, Some(_)) => Exit::Signal(number(&fields, "signal")?),
@@ -220,7 +242,7 @@ impl Reply {
                 (number(&fields, "id")?, Reply::Exited(exit))
             }
             kind::DENIED => {
-                let fields = known(payload, &["id", "reason", "person"])?;
+                let fields = reply_fields(payload)?;
                 let reason = fields
                     .text("reason")
                     .filter(|r| r.len() <= MAX_REASON && fields.all("reason").count() == 1)
@@ -237,13 +259,20 @@ impl Reply {
                 (number(&fields, "id")?, reply)
             }
             kind::PROMPT => {
-                let fields = known(payload, &["id", "prompt"])?;
+                let fields = reply_fields(payload)?;
                 let prompt = fields
                     .text("prompt")
                     .filter(|p| p.len() <= MAX_PROMPT && fields.all("prompt").count() == 1)
                     .filter(|p| p.bytes().all(|b| (0x20..0x7f).contains(&b)))
                     .ok_or(Malformed)?;
-                (number(&fields, "id")?, Reply::Prompt(prompt.to_string()))
+                let about = optional(&fields, "about", |a| {
+                    !a.is_empty() && a.len() <= MAX_PROMPT && crate::consent::reads_as_written(a)
+                })?;
+                let reply = Reply::Prompt {
+                    about,
+                    prompt: prompt.to_string(),
+                };
+                (number(&fields, "id")?, reply)
             }
             _ => return Err(Malformed),
         };
@@ -305,6 +334,10 @@ pub fn decode_signal(payload: &[u8]) -> Result<(u64, u8), Malformed> {
     }
 }
 
+fn reply_fields(payload: &[u8]) -> Result<Fields, Malformed> {
+    Fields::decode(payload).map_err(|_| Malformed)
+}
+
 /// `payload` as fields carrying no key outside `keys`.
 pub(crate) fn known(payload: &[u8], keys: &[&str]) -> Result<Fields, Malformed> {
     let fields = Fields::decode(payload).map_err(|_| Malformed)?;
@@ -312,6 +345,19 @@ pub(crate) fn known(payload: &[u8], keys: &[&str]) -> Result<Fields, Malformed> 
         return Err(Malformed);
     }
     Ok(fields)
+}
+
+/// A field that occurs at most once and, when it does, is text `valid` takes.
+fn optional(
+    fields: &Fields,
+    key: &str,
+    valid: fn(&str) -> bool,
+) -> Result<Option<String>, Malformed> {
+    match (fields.text(key), fields.all(key).count()) {
+        (None, 0) => Ok(None),
+        (Some(text), 1) if valid(text) => Ok(Some(text.to_string())),
+        _ => Err(Malformed),
+    }
 }
 
 /// A field that occurs once and is a decimal number with no sign or padding.

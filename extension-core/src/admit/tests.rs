@@ -19,6 +19,18 @@ fn libc() -> Vec<u8> {
 /// `hello` at `version`, its daemon holding `caps` and binding `imports`,
 /// with an unasked action holding `unasked` when that is not empty.
 fn image(version: u64, caps: &str, unasked: &str, imports: &[&str]) -> Vec<u8> {
+    saying(
+        version,
+        caps,
+        unasked,
+        imports,
+        "describe \"act on the network\"",
+    )
+}
+
+/// An image whose unasked action says `said`, its settings of what a person
+/// reads.
+fn saying(version: u64, caps: &str, unasked: &str, imports: &[&str], said: &str) -> Vec<u8> {
     let mut packer = Packer::default();
     let program = build(
         Kind::Executable,
@@ -33,7 +45,7 @@ fn image(version: u64, caps: &str, unasked: &str, imports: &[&str]) -> Vec<u8> {
         alloc::format!("user\nservice hellod\n  program /opt/hello/bin/hellod\n  caps {caps}\n");
     if !unasked.is_empty() {
         declare.push_str(&alloc::format!(
-            "action act\n  program /opt/hello/libexec/act\n  args act\n  caps {unasked}\n  allow user\n  describe \"Act\"\n"
+            "action act\n  program /opt/hello/libexec/act\n  args act\n  caps {unasked}\n  allow user\n  {said}\n"
         ));
     }
     packer
@@ -380,6 +392,31 @@ fn an_activation_holds_the_image_to_its_record_and_its_key() {
         activation(&record, &mut image, None, &owner.bounds()).map(|()| Admitted::Current),
         "signature is not in the store",
     );
+}
+
+/// What an action says is held to the copy rules when the image goes in, by
+/// a person or a key, and not when an image installed before activates.
+#[test]
+fn an_install_holds_what_an_action_says_and_an_activation_does_not() {
+    let owner = Owner::new(CEILING, caps::POWER);
+    for said in [
+        "describe \"Act on the network\"",
+        "describe \"act on the machine\"",
+        "describe \"use RawBlock\"",
+        "describe \"act\"\n  verb \"Disallow\"",
+        "describe \"act\"\n  detail \"it acts\"",
+    ] {
+        let bytes = saying(1, "NetAdmin", "Power", &["puts"], said);
+        refused(owner.signed(None, &bytes), "its action act");
+        let mut asked = grant(caps::NET_ADMIN | caps::POWER);
+        asked.unasked = vec!["act".into()];
+        refused(owner.approved(None, &bytes, &asked), "its action act");
+        let mut record = Record::new("hello");
+        let mut before = installed(owner.signed(None, &image(1, "NetAdmin", "Power", &["puts"])));
+        before.sha256 = Image::check(&bytes[..]).unwrap().digest;
+        record.install(before);
+        assert_eq!(owner.runs(&record, &bytes), Ok(()), "{said}");
+    }
 }
 
 #[test]

@@ -6,6 +6,10 @@
 # line whose principal matches the requester decides, at its level; a person no
 # line matches is answered by an administrator's password where an admin line
 # stands.
+#
+# What a person reads is held to slopos_priv_core::words: describe completes
+# "{App} wants to ...", detail says what follows from allowing it, and verb
+# names the button that allows it.
 
 action org.slopos.power.poweroff
   program  /bin/halt
@@ -19,7 +23,9 @@ action org.slopos.power.poweroff
   allow    user alone
   allow    admin
   allow    paired
-  describe "Power off the machine"
+  describe "power off the computer"
+  detail   "Anything that isn't saved will be lost."
+  verb     "Power off"
 
 action org.slopos.power.reboot
   program  /bin/halt
@@ -31,7 +37,9 @@ action org.slopos.power.reboot
   allow    user alone
   allow    admin
   allow    paired
-  describe "Restart the machine"
+  describe "restart the computer"
+  detail   "Anything that isn't saved will be lost."
+  verb     "Restart"
 
 action org.slopos.boot.status
   program  /bin/bootctl
@@ -41,7 +49,7 @@ action org.slopos.boot.status
   allow    root
   allow    user
   allow    paired
-  describe "Show what each boot slot and base holds and what boots"
+  describe "show which kernels and systems are installed and which one starts"
 
 action org.slopos.boot.install
   program  /bin/bootctl
@@ -53,7 +61,9 @@ action org.slopos.boot.install
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Install a kernel into a boot slot"
+  describe "install a new kernel beside the one that starts by default"
+  detail   "The kernel that starts by default stays, so you can go back to it."
+  verb     "Install"
 
 action org.slopos.boot.clone
   program  /bin/bootctl
@@ -64,7 +74,9 @@ action org.slopos.boot.clone
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Copy one boot slot's kernel into another"
+  describe "copy one installed kernel over the other"
+  detail   "The kernel it copies over is replaced."
+  verb     "Copy"
 
 action org.slopos.base.install
   program  /bin/bootctl
@@ -76,7 +88,9 @@ action org.slopos.base.install
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Replace the base every boot slot boots, and the one running now"
+  describe "install a new version of the system"
+  detail   "The version that last ran is kept, so you can go back to it."
+  verb     "Install"
 
 action org.slopos.base.rollback
   program  /bin/bootctl
@@ -87,7 +101,9 @@ action org.slopos.base.rollback
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Go back to the base that ran before, now"
+  describe "go back to the version of the system that ran before"
+  detail   "The version running now is kept, so you can return to it."
+  verb     "Go back"
 
 action org.slopos.boot.oneshot
   program  /bin/bootctl
@@ -98,7 +114,8 @@ action org.slopos.boot.oneshot
   allow    root
   allow    admin
   allow    paired
-  describe "Boot an entry once, on the next restart"
+  describe "choose the kernel that starts at the next restart"
+  detail   "It starts only once, and then the usual kernel starts again."
 
 action org.slopos.boot.set-default
   program  /bin/bootctl
@@ -109,7 +126,8 @@ action org.slopos.boot.set-default
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Change which boot entry starts by default"
+  describe "change which kernel starts by default"
+  verb     "Change"
 
 action org.slopos.boot.commit
   program  /bin/bootctl
@@ -120,7 +138,8 @@ action org.slopos.boot.commit
   allow    root
   allow    admin
   allow    paired
-  describe "Keep the system that booted as the default"
+  describe "keep the kernel that started this time as the default"
+  verb     "Keep"
 
 action org.slopos.boot.spare
   program  /bin/bootctl
@@ -130,7 +149,7 @@ action org.slopos.boot.spare
   allow    root
   allow    user
   allow    paired
-  describe "Name the boot slot a new system goes into"
+  describe "find where a new kernel would be installed"
 
 action org.slopos.boot.reboot
   program  /bin/bootctl
@@ -142,7 +161,9 @@ action org.slopos.boot.reboot
   allow    user alone
   allow    admin
   allow    paired
-  describe "Restart the machine"
+  describe "restart the computer with the kernel chosen for the next start"
+  detail   "Anything that isn't saved will be lost."
+  verb     "Restart"
 
 action org.slopos.extension.install
   program  /bin/extctl
@@ -154,7 +175,9 @@ action org.slopos.extension.install
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Install an extension, granting it what the command names; RawBlock, Mount or DacOverride gives it the machine"
+  describe "install an extension and give it what it asks for"
+  detail   "If it asks for the disks or every file, it can take over the whole computer."
+  verb     "Install"
 
 action org.slopos.extension.install-signed
   program  /bin/extctl
@@ -166,7 +189,9 @@ action org.slopos.extension.install-signed
   allow    root
   allow    admin
   allow    paired
-  describe "Install or update an extension signed by a trusted key, within that key's ceilings"
+  describe "install or update an extension signed by a key you trust"
+  detail   "It gets no more than that key is trusted to give."
+  verb     "Install"
 
 action org.slopos.extension.trust
   program  /bin/extctl
@@ -178,7 +203,9 @@ action org.slopos.extension.trust
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Trust a key to install extensions within the ceilings named; RawBlock, Mount or DacOverride is the machine"
+  describe "change which keys may install extensions"
+  detail   "Extensions a trusted key signs go in without asking, within the limits shown."
+  verb     "Change"
 
 action org.slopos.extension.manage
   program  /bin/extctl
@@ -192,7 +219,7 @@ action org.slopos.extension.manage
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Turn an extension on or off, remove it, or go back to the version it had before"
+  describe "turn an extension on or off, remove it or go back to its last version"
 
 action org.slopos.extension.config
   program  /bin/extctl
@@ -204,7 +231,9 @@ action org.slopos.extension.config
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Install a file of an extension's configuration in /etc, which restarts what reads it"
+  describe "change an extension's settings"
+  detail   "What reads those settings restarts."
+  verb     "Change"
 
 action org.slopos.extension.config-signed
   program  /bin/extctl
@@ -216,7 +245,8 @@ action org.slopos.extension.config-signed
   allow    root
   allow    admin
   allow    paired
-  describe "Install an extension's configuration signed by the key that installed it"
+  describe "change an extension's settings, signed by the key that installed it"
+  verb     "Change"
 
 action org.slopos.software.install
   program  /bin/tree-install
@@ -228,7 +258,9 @@ action org.slopos.software.install
   allow    root
   allow    admin confirm
   allow    paired
-  describe "Install software in /usr/local for everyone, in place of what that tree's last install put there"
+  describe "install software for everyone on this computer"
+  detail   "It replaces what its last install put there."
+  verb     "Install"
 
 action org.slopos.accounts.password
   program  /bin/users
@@ -238,7 +270,8 @@ action org.slopos.accounts.password
   exclusive accounts
   allow    root
   allow    user confirm
-  describe "Change your own password, typing the current one first"
+  describe "change your password"
+  verb     "Change"
 
 action org.slopos.accounts.manage
   program  /bin/users
@@ -255,7 +288,7 @@ action org.slopos.accounts.manage
   exclusive accounts
   allow    root
   allow    admin confirm
-  describe "Add, remove or rename a person, set their password, or change who administers the machine or is logged in by itself"
+  describe "add, remove or change the users of this computer"
 
 action org.slopos.cpufreq.set
   program  /bin/cpufreq
@@ -265,7 +298,8 @@ action org.slopos.cpufreq.set
   allow    root
   allow    admin
   allow    paired
-  describe "Change how fast the CPUs run and where tasks go"
+  describe "change how fast the processors run"
+  verb     "Change"
 
 action org.slopos.kconsole
   program  /bin/kconsole
@@ -275,7 +309,7 @@ action org.slopos.kconsole
   allow    root
   allow    admin
   allow    paired
-  describe "Run the diagnostic console's informational commands"
+  describe "read the kernel's diagnostic information"
 
 action org.slopos.prof
   program  /bin/prof
@@ -285,7 +319,7 @@ action org.slopos.prof
   allow    root
   allow    admin
   allow    paired
-  describe "Start, stop or report the kernel's sampling profiler"
+  describe "measure where the computer spends its time"
 
 action org.slopos.console.keymap
   program  /bin/keymap
@@ -296,7 +330,8 @@ action org.slopos.console.keymap
   allow    user alone
   allow    admin
   allow    paired
-  describe "Change the keyboard layout"
+  describe "change the keyboard layout"
+  verb     "Change"
 
 action org.slopos.net.toggle
   program  /bin/ip
@@ -306,7 +341,7 @@ action org.slopos.net.toggle
   uid      0
   allow    root
   allow    admin
-  describe "Turn networking on or off"
+  describe "turn networking on or off"
 
 action org.slopos.net.configure
   program  /bin/ip
@@ -315,7 +350,8 @@ action org.slopos.net.configure
   uid      0
   allow    root
   allow    admin confirm
-  describe "Change the network configuration"
+  describe "change the network settings"
+  verb     "Change"
 
 action org.slopos.install
   program  /bin/installer
@@ -325,7 +361,10 @@ action org.slopos.install
   exclusive
   allow    root
   allow    admin confirm
-  describe "Install SlopOS onto whichever disk the requester names, erasing what it says to"
+  describe "install SlopOS on a disk"
+  detail   "It can delete everything on the disk you choose."
+  verb     "Install"
+  destructive
 
 action org.slopos.rescue
   program  /bin/shell
@@ -335,7 +374,9 @@ action org.slopos.rescue
   medium
   allow    root
   allow    admin confirm
-  describe "Open a rescue shell holding everything privd can give, which can read and change every disk"
+  describe "open a rescue shell that can read and change every disk"
+  detail   "Anything typed into it can change anything on this computer."
+  verb     "Open"
 
 action org.slopos.priv
   program  /bin/priv
@@ -346,7 +387,9 @@ action org.slopos.priv
   keep     300
   allow    root
   allow    admin confirm
-  describe "Run a command as the person asking, with power over mounts, the network, the clock and every file not sealed"
+  describe "run a command that can read and change every file"
+  detail   "It can also mount disks and change the network and the clock."
+  verb     "Run"
 
 action org.slopos.priv.shell
   program  /bin/priv
@@ -356,7 +399,9 @@ action org.slopos.priv.shell
   cwd
   allow    root
   allow    admin confirm
-  describe "Open a shell as the person asking, with power over mounts, the network, the clock and every file not sealed"
+  describe "open a shell that can read and change every file"
+  detail   "Anything typed into it can also mount disks and change the network and the clock."
+  verb     "Open"
 
 action org.slopos.login
   program  /bin/session
@@ -367,7 +412,7 @@ action org.slopos.login
   exclusive login
   allow    root
   allow    greeter
-  describe "Log a person in, by their password, at the login screen or a terminal"
+  describe "log a user in"
 
 action org.slopos.session.unlock
   program  /bin/session
@@ -377,4 +422,4 @@ action org.slopos.session.unlock
   exclusive unlock
   allow    root
   allow    program /bin/compositor
-  describe "Unlock your own desktop by your password"
+  describe "unlock the screen"

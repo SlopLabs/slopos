@@ -31,10 +31,16 @@
 //!   keep     300                an answer kept for the same command and directory
 //!   allow    admin confirm      admin [confirm|password], user [alone|
 //!   allow    program /bin/x     confirm|password], paired, program <path>
-//!   describe "Greet the network"
+//!   describe "greet the network"  completes "{App} wants to ..."
+//!   detail   "Everyone on it sees the greeting."
+//!   verb     "Send"              the allowing button
+//!   destructive                 the allowing button in the danger tone
 //! ```
 //!
 //! An action is `ext.<name>.<action>` to privd, and never allows `root`.
+//! What an action says is held to [`slopos_priv_core::words`] when the
+//! extension goes in ([`crate::admit::install`]) and not as it parses, so
+//! one installed before the words tighten keeps activating.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -43,6 +49,7 @@ use alloc::vec::Vec;
 use slopos_abi::extension::Label;
 pub use slopos_priv_core::Level;
 use slopos_priv_core::policy::{self, Shape};
+use slopos_priv_core::words;
 
 use crate::grant::Grant;
 use crate::words::{LineError, caps_words, flag, lines, once, single, valid_word};
@@ -112,6 +119,9 @@ pub struct Action {
     pub keep: Option<u32>,
     pub allows: Vec<Allow>,
     pub describe: String,
+    pub detail: Option<String>,
+    pub verb: Option<String>,
+    pub destructive: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -149,6 +159,13 @@ impl Action {
         self.name.rsplit('.').next().unwrap_or(&self.name)
     }
 
+    /// Whether what it says passes [`slopos_priv_core::words`].
+    pub fn words(&self) -> Result<(), &'static str> {
+        words::describe(&self.describe)?;
+        self.detail.as_deref().map_or(Ok(()), words::detail)?;
+        self.verb.as_deref().map_or(Ok(()), words::verb)
+    }
+
     /// What privd runs for it: its program as `uid`, the extension's first
     /// user, holding what it declares within `held`, its `program` lines
     /// meaning programs of the activation `label` names.
@@ -181,7 +198,10 @@ impl Action {
             caps: self.caps & held,
             runs_as: policy::RunsAs::Uid(uid),
             allows,
-            describe: format!("{} (extension {extension})", self.describe),
+            describe: self.describe.clone(),
+            detail: self.detail.clone(),
+            verb: self.verb.clone(),
+            destructive: self.destructive,
             cwd: self.cwd,
             exclusive: self.exclusive.clone(),
             keep: self.keep,
@@ -191,6 +211,17 @@ impl Action {
 }
 
 impl Declaration {
+    /// Whether what every action says passes [`slopos_priv_core::words`], as
+    /// an install holds it to.
+    pub fn words(&self) -> Result<(), String> {
+        for action in &self.actions {
+            action
+                .words()
+                .map_err(|why| format!("its action {}: {why}", action.short()))?;
+        }
+        Ok(())
+    }
+
     /// `text` as the declaration of the extension `name`.
     pub fn parse(name: &str, text: &str) -> Result<Declaration, LineError> {
         let mut out = Declaration::default();
@@ -666,6 +697,9 @@ struct ActionDraft {
     keep: Option<u32>,
     allows: Vec<Allow>,
     describe: Option<String>,
+    detail: Option<String>,
+    verb: Option<String>,
+    destructive: bool,
 }
 
 impl ActionDraft {
@@ -680,6 +714,9 @@ impl ActionDraft {
             keep: None,
             allows: Vec::new(),
             describe: None,
+            detail: None,
+            verb: None,
+            destructive: false,
         }
     }
 
@@ -726,7 +763,10 @@ impl ActionDraft {
                 Ok(())
             }
             "keep" => once(&mut self.keep, policy::keep(rest)?),
-            "describe" => once(&mut self.describe, policy::describe(rest)?),
+            "describe" => once(&mut self.describe, policy::quoted(rest)?),
+            "detail" => once(&mut self.detail, policy::quoted(rest)?),
+            "verb" => once(&mut self.verb, policy::quoted(rest)?),
+            "destructive" => flag(&mut self.destructive, rest),
             _ => Err("unknown action setting"),
         }
     }
@@ -758,6 +798,9 @@ impl ActionDraft {
             keep: self.keep,
             allows: self.allows,
             describe: self.describe.ok_or("the action has no describe")?,
+            detail: self.detail,
+            verb: self.verb,
+            destructive: self.destructive,
         })
     }
 }

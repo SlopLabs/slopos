@@ -656,6 +656,7 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
     match dialog {
         Dialog::About => Node::Dialog {
             title: String::from("Sloped"),
+            icon: None,
             content: Box::new(
                 Text::new(String::from(
                     "The SlopOS editor.\n\nTabs, a file tree, syntax highlighting, \
@@ -667,6 +668,7 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
             ),
             footer: ButtonRow::new().confirm(Button::new("Close").on_press(EditorMsg::Dialog(0))),
             on_dismiss: Some(EditorMsg::Dialog(2)),
+            anchor: None,
         },
         Dialog::ConfirmClose { index } => {
             let name = app
@@ -676,6 +678,7 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
                 .unwrap_or_default();
             Node::Dialog {
                 title: String::from("Unsaved changes"),
+                icon: None,
                 content: Box::new(
                     Text::new(format!("{name} has changes that have not been saved."))
                         .wrap()
@@ -690,10 +693,12 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
                     .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(2)))
                     .confirm(Button::new("Save").on_press(EditorMsg::Dialog(0))),
                 on_dismiss: Some(EditorMsg::Dialog(2)),
+                anchor: None,
             }
         }
         Dialog::ConfirmOverwrite { detail, .. } => Node::Dialog {
             title: String::from("Overwrite?"),
+            icon: None,
             content: Box::new(
                 Text::new(format!(
                     "{detail}\n\nSaving replaces it with this tab's contents."
@@ -705,9 +710,11 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
                 .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(1)))
                 .destructive(Button::new("Overwrite").on_press(EditorMsg::Dialog(0))),
             on_dismiss: Some(EditorMsg::Dialog(1)),
+            anchor: None,
         },
         Dialog::ConfirmQuit => Node::Dialog {
             title: String::from("Unsaved changes"),
+            icon: None,
             content: Box::new(
                 Text::new(String::from(
                     "Some buffers have changes that have not been saved.",
@@ -724,6 +731,7 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
                 .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(2)))
                 .confirm(Button::new("Save all").on_press(EditorMsg::Dialog(0))),
             on_dismiss: Some(EditorMsg::Dialog(2)),
+            anchor: None,
         },
     }
 }

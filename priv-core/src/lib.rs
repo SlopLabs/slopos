@@ -7,7 +7,9 @@
 //!
 //! ```text
 //! client REQUEST{id, action, arg.., cwd?}  + stdin, stdout, stderr[, cwd]
-//!   privd  ASKING{id}                      the person at the machine is asked
+//!   privd  ASKING{id, app?}                the person at the machine is asked
+//!   privd  PROMPT{id, prompt, about?}      or its terminal, for a password
+//!   client SECRET{id, secret}
 //!   privd  DENIED{id, reason, person?}
 //!   privd  STARTED{id, pid}
 //!   client SIGNAL{id, signo}..             relayed, or withdraws what has not started
@@ -21,7 +23,8 @@
 //! ```text
 //! agent READY{version?}                 it can draw a dialog
 //! privd ASK{id, action, describe, program?, uid, pid, cwd, arg..,
-//!           kind, person?, admin..}
+//!           kind, person?, admin.., app?, icon?, detail?, verb,
+//!           destructive?, extension?}
 //!   agent SHOWN{id}                     on screen
 //!   agent ANSWER{id, allow, secret?, as?}
 //!   privd CANCEL{id}                    expired
@@ -38,6 +41,7 @@ pub mod consent;
 pub mod policy;
 pub mod sessions;
 pub mod wire;
+pub mod words;
 
 pub use policy::{
     Action, Allow, Level, People, Person, Policy, PolicyError, Principal, Question, Reach, Refused,

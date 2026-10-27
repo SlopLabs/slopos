@@ -27,7 +27,7 @@ use slopos_abi::syscall::{
     POLLIN, POLLOUT, TIOCSPTLCK, UserPollFd, UserTermios,
 };
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request};
-use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy, RunsAs, SOCKET};
+use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy, PolicyError, RunsAs, SOCKET};
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -54,6 +54,9 @@ pub const RESTART_WAIT: Duration = Duration::from_secs(2);
 /// How long a program whose requests may span a base switch waits for the
 /// new base's privd, which starts once its predecessor has drained.
 pub const SWITCH_WAIT: Duration = Duration::from_secs(60);
+
+/// What a requester says while the dialog asks its person.
+pub const WAITING: &str = "waiting for you to allow this on the screen";
 
 /// Exit statuses for a request that ran nothing, as pkexec gives them.
 pub const STATUS_REFUSED_BY_PERSON: i32 = 126;
@@ -236,16 +239,21 @@ pub fn takes_connection(program: &str) -> bool {
     program == SHELL || is_mechanism(program)
 }
 
-/// The base's policy, every action of it.
+/// The base's policy, every action of it, held as privd holds its own.
 pub fn whole_policy() -> Result<Policy, String> {
-    let text = std::fs::read_to_string(POLICY).map_err(|e| format!("{POLICY}: {e}"))?;
-    Policy::parse(&text).map_err(|e| format!("{POLICY}: {e}"))
+    policy_as(Policy::parse)
 }
 
-/// The base's policy as it stands on this boot: an action marked `medium`
-/// exists only when the kernel serves the install medium it booted from.
+fn policy_as(parse: fn(&str) -> Result<Policy, PolicyError>) -> Result<Policy, String> {
+    let text = std::fs::read_to_string(POLICY).map_err(|e| format!("{POLICY}: {e}"))?;
+    parse(&text).map_err(|e| format!("{POLICY}: {e}"))
+}
+
+/// The base's policy as it stands on this boot, as a requester reads it
+/// ([`Policy::read`]): an action marked `medium` exists only when the kernel
+/// serves the install medium it booted from.
 pub fn policy() -> Result<Policy, String> {
-    Ok(whole_policy()?.for_boot(on_the_medium()))
+    Ok(policy_as(Policy::read)?.for_boot(on_the_medium()))
 }
 
 pub fn on_the_medium() -> bool {
@@ -380,11 +388,11 @@ pub fn run_feeding(
     drop(read);
     loop {
         match connection.reply(request.id)? {
-            Some(Reply::Asking | Reply::Started { .. }) => {}
+            Some(Reply::Asking { .. } | Reply::Started { .. }) => {}
             Some(Reply::Exited(Exit::Code(code))) => return Ok(code),
             Some(Reply::Exited(Exit::Signal(signal))) => return Ok(128 + i32::from(signal)),
             Some(Reply::Denied { reason, .. }) => return Err(reason),
-            Some(Reply::Prompt(_)) => return Err("privd asked for a terminal".into()),
+            Some(Reply::Prompt { .. }) => return Err("privd asked for a terminal".into()),
             None => return Err("privd closed the connection".into()),
         }
     }
@@ -664,10 +672,13 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
                         stdio.raw = RawTerminal::enter();
                     }
                 }
-                Some(Reply::Asking) => {
-                    eprintln!("{program}: asking the person at this machine to allow it");
+                Some(Reply::Asking { .. }) => {
+                    eprintln!("{program}: {WAITING}");
                 }
-                Some(Reply::Prompt(prompt)) => {
+                Some(Reply::Prompt { about, prompt }) => {
+                    if let Some(about) = about {
+                        eprintln!("{about}");
+                    }
                     let typed = crate::secret::read(&prompt)?;
                     let secret = typed.as_ref().map_or(&[][..], |typed| typed.bytes());
                     let mut frame = wire::secret_frame(request.id, secret);
@@ -685,7 +696,7 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
                     if let Some(signal) = withdrawn_by {
                         return Ok(128 + i32::from(signal));
                     }
-                    eprintln!("{program}: privd refused {}: {reason}", request.action);
+                    eprintln!("{program}: {reason}");
                     return Ok(if by_person {
                         STATUS_REFUSED_BY_PERSON
                     } else {

@@ -24,9 +24,11 @@ use slopos_abi::fs::{OWNERS_RECORD, SESSION_HOME, SESSION_UID};
 use slopos_abi::pixel::PixelFormat;
 use slopos_abi::syscall::{O_CLOEXEC, POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
+use slopos_priv_core::consent::Refusal;
 use slopos_protocol::{Event, PROTOCOL_VERSION, Request, Server};
 use slopos_tree_core::MANIFEST_DIR;
 use slopos_userland::init_control::{self, Command as InitCommand};
+use slopos_userland::privd::WAITING;
 use slopos_userland::root_layout::{self, search_path};
 use slopos_userland::syscall::process::{self, Endowment};
 use slopos_userland::syscall::{OwnedFd, fs as sys_fs, net};
@@ -214,7 +216,6 @@ const EVERYONE_ALIAS: &str = "apps-everyone-too";
 const EVERYONE_LOADER: &str = "apps-everyone-loads";
 const OWN_COMMAND: &str = "apps-own";
 const LIBRARY: &str = "libdlsearch.so";
-const ASKING: &str = "asking the person at this machine";
 
 fn fail(why: impl std::fmt::Display) -> bool {
     eprintln!("apps_test: {why}");
@@ -538,12 +539,12 @@ fn install_for_everyone(name: &str, tree: &Path) -> (Option<i32>, String) {
         ) else {
             return (None, "tree-install did not start".into());
         };
-        if run.says(ASKING, asking::DEADLINE) {
+        if run.says(WAITING, asking::DEADLINE) {
             asking::tab_and_enter();
             return run.end();
         }
         let (_, said) = run.end();
-        if !said.contains("nothing can ask them") || Instant::now() >= deadline {
+        if !said.contains(&Refusal::NoAgent.to_string()) || Instant::now() >= deadline {
             return (None, format!("the first person was not asked: {said}"));
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -623,7 +624,7 @@ fn the_first_person_installs_their_own_holding_nothing() -> bool {
     )
     .map(Run::end)
     .unwrap_or_default();
-    if code != Some(0) || said.contains(ASKING) {
+    if code != Some(0) || said.contains(WAITING) {
         return fail(format!("installing into {dest}: {code:?} {said:?}"));
     }
     let manifest = format!("{dest}/share/slopos/trees/{OWN}");

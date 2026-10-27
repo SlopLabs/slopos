@@ -36,14 +36,14 @@ action greet
   exclusive lane
   allow    user
   allow    program /bin/compositor
-  describe \"Greet\"
+  describe \"greet\"
 action reset
   program  /opt/hello/libexec/reset
   args     reset
   caps     Mount
   allow    admin confirm
   allow    paired
-  describe \"Reset\"
+  describe \"reset\"
 ";
 
 #[test]
@@ -190,6 +190,10 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
         (&action("  keep 60\n  keep 60\n"), 7),
         (&action("  allow program /opt/other/bin/x\n"), 6),
         (&action("  allow user extra words\n"), 6),
+        (&action("  detail \"It goes.\"\n  detail \"It goes.\"\n"), 7),
+        (&action("  verb \"Run\"\n  verb \"Run\"\n"), 7),
+        (&action("  destructive now\n"), 6),
+        (&action("  destructive\n  destructive\n"), 7),
         (
             "action a\n  program /opt/hello/bin/a\n  args a\n  caps Power\n  describe \"A\"\n",
             1,
@@ -341,13 +345,16 @@ action greet
   allow    user
   allow    program /bin/compositor
   allow    paired
-  describe \"Greet\"
+  describe \"greet\"
+  detail   \"Everyone on it sees the greeting.\"
+  verb     \"Send\"
+  destructive
 action calm
   program  /opt/hello/libexec/greet
   args     calm
   caps     Power
   allow    user alone
-  describe \"Calm\"
+  describe \"calm\"
 ";
     let d = Declaration::parse("hello", declare).unwrap();
     let label = Label::new(b"hello", [3; 32]).unwrap();
@@ -359,7 +366,16 @@ action calm
     assert!(greet.cwd);
     assert_eq!(greet.keep, Some(60));
     assert_eq!(greet.exclusive_group(), Some("ext.hello.lane"));
-    assert_eq!(greet.describe, "Greet (extension hello)");
+    assert_eq!(greet.describe, "greet");
+    assert_eq!(
+        (greet.detail.as_deref(), greet.verb(), greet.destructive),
+        (Some("Everyone on it sees the greeting."), "Send", true)
+    );
+    let calm = d.actions[1].for_privd(105, caps::POWER, label);
+    assert_eq!(
+        (calm.detail.as_deref(), calm.verb(), calm.destructive),
+        (None, "Allow", false)
+    );
     assert_eq!(
         greet
             .allows

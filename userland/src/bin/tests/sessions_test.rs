@@ -44,12 +44,14 @@ const PASTE: &str = "--paste";
 /// refused, then copies that exit unreaped until it is refused again, says
 /// how many of each it made, and lingers.
 const BOMB: &str = "--bomb";
-/// What the person asking with no session in front is refused with.
-const UNREACHED: &str = "neither on the screen";
 const CONFIGURE: [&str; 5] = ["org.slopos.net.configure", "link", "set", "lo", "up"];
 /// Longer than the lock screen waits, after a wrong password, before it
 /// takes keys again.
 const AFTER_A_WRONG_PASSWORD: Duration = Duration::from_secs(6);
+
+fn unreached() -> String {
+    slopos_priv_core::Refused::Unreached.to_string()
+}
 
 fn note(why: &str) {
     eprintln!("sessions_test: {why}");
@@ -304,7 +306,7 @@ fn a_request_from_the_session_behind_is_refused() -> bool {
         with_cwd: false,
     };
     let behind = asker(SESSION_UID, first).ask(&CONFIGURE, None);
-    if !behind.contains(UNREACHED) {
+    if !behind.contains(&unreached()) {
         note(&format!("the request from the desktop behind: {behind}"));
         return false;
     }
@@ -360,7 +362,7 @@ fn a_locked_session_refuses_a_wrong_password() -> bool {
         with_cwd: false,
     }
     .ask(&CONFIGURE, None);
-    if !asked.contains(UNREACHED) {
+    if !asked.contains(&unreached()) {
         note(&format!("the request from a locked desktop: {asked}"));
         return false;
     }
@@ -521,7 +523,7 @@ fn a_console_login_starts_a_shell_of_its_own() -> bool {
             return false;
         }
         console.type_line("priv /bin/true; echo status=$?");
-        if !console.wait_for("password: ", SESSION_DEADLINE) {
+        if !console.wait_for(&format!("Password for {CAROL}: "), SESSION_DEADLINE) {
             return false;
         }
         console.type_line(CAROL_PASSWORD);

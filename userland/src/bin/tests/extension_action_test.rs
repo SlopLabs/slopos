@@ -20,6 +20,7 @@
 #[path = "support/asking.rs"]
 mod asking;
 
+use slopos_priv_core::Refused;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
@@ -41,6 +42,7 @@ use slopos_extension_core::record::Record;
 use slopos_extension_core::sidecar::Sidecar;
 use slopos_extension_core::{NAMESPACE, RECORD, STORE, generation, hex, sha256};
 use slopos_priv_core::wire::{Exit, Reply, Request};
+use slopos_priv_core::words;
 use slopos_priv_core::{DELEGABLE, ENV_FD};
 use slopos_slibc::test_harness::note;
 use slopos_tls_core::ed25519::SigningKey;
@@ -187,15 +189,15 @@ fn declaration(version: u64) -> String {
          service watch\n  program /opt/{NAME}/bin/daemon\n  args serve {}\n  \
          reads /etc/{NAME}/act.conf\n  listen tcp {PORT}\n\
          action greet\n  program /opt/{NAME}/bin/daemon\n  args {who}\n  caps SysInspect\n  \
-         allow {greet}\n  describe \"Say who it runs as\"\n\
+         allow {greet}\n  describe \"say who it runs as\"\n\
          action careful\n  program /opt/{NAME}/bin/daemon\n  args {who}\n  caps SysInspect\n  \
-         allow user confirm\n  describe \"Say who it runs as, once allowed\"\n\
+         allow user confirm\n  describe \"say who it runs as, once allowed\"\n\
          action own\n  program /opt/{NAME}/bin/daemon\n  args {who}\n  caps\n  \
-         allow program /opt/{NAME}/bin/client\n  describe \"Answer its own client\"\n\
+         allow program /opt/{NAME}/bin/client\n  describe \"answer its own app\"\n\
          action linger\n  program /opt/{NAME}/bin/daemon\n  args {LINGER}\n  caps\n  \
-         allow user\n  describe \"Run until ended\"\n\
+         allow user\n  describe \"run until ended\"\n\
          action kept\n  program /opt/{NAME}/bin/daemon\n  args who *\n  caps SysInspect\n  \
-         cwd\n  keep 300\n  allow user confirm\n  describe \"Say who it runs as, allowed for a while\"\n",
+         cwd\n  keep 300\n  allow user confirm\n  describe \"say who it runs as, allowed for a while\"\n",
         caps_drop()
     )
 }
@@ -339,7 +341,7 @@ fn ask_privd_with(privd: &mut Connection, action: &str, args: &[&str]) -> Outcom
     loop {
         match privd.reply(request.id) {
             Ok(Some(Reply::Started { .. })) => {}
-            Ok(Some(Reply::Asking)) => return Outcome::Asked,
+            Ok(Some(Reply::Asking { .. })) => return Outcome::Asked,
             Ok(Some(Reply::Exited(exit))) => {
                 let mut said = String::new();
                 // SAFETY: `out` is a pipe end this function owns.
@@ -351,11 +353,11 @@ fn ask_privd_with(privd: &mut Connection, action: &str, args: &[&str]) -> Outcom
                 };
                 return Outcome::Ran(code, said.trim().to_owned());
             }
-            Ok(Some(Reply::Denied { reason, .. })) if reason.contains("neither on the screen") => {
+            Ok(Some(Reply::Denied { reason, .. })) if reason == Refused::Unreached.to_string() => {
                 return Outcome::Asked;
             }
             Ok(Some(Reply::Denied { reason, .. })) => return Outcome::Denied(reason),
-            Ok(Some(Reply::Prompt(_))) => {
+            Ok(Some(Reply::Prompt { .. })) => {
                 return Outcome::Lost("privd asked for a terminal".into());
             }
             Ok(None) => return Outcome::Lost("privd closed the connection".into()),
@@ -456,7 +458,7 @@ fn the_app_asks_its_extension_s_actions() -> bool {
         return fail(format!("careful, asked by the app: {careful}"));
     }
     let as_root = Connection::open().map(|mut privd| ask_privd(&mut privd, "ext.act.greet"));
-    matches!(&as_root, Ok(Outcome::Denied(why)) if why.contains("may not ask"))
+    matches!(&as_root, Ok(Outcome::Denied(why)) if *why == Refused::NotAllowed.to_string())
         || fail(format!("greet, asked by root: {as_root:?}"))
 }
 
@@ -501,7 +503,7 @@ fn its_own_program_is_a_principal_until_it_maps_foreign_code() -> bool {
     if mapped != "mapped" {
         return fail(format!("the client could not map {foreign}: {mapped}"));
     }
-    lapsed.starts_with("DENIED") && lapsed.contains("no longer runs")
+    lapsed == format!("DENIED {}", words::privd::LAPSED)
         || fail(format!(
             "own, once the client mapped foreign code: {lapsed}"
         ))
@@ -662,7 +664,7 @@ fn a_configuration_edited_or_signed_restarts_what_reads_it() -> bool {
     };
     let installed = format!("/etc/{NAME}/act.conf");
     let by_person = edit(USER);
-    if by_person.code != Some(STATUS_REFUSED) || !by_person.says("neither on the screen") {
+    if by_person.code != Some(STATUS_REFUSED) || !by_person.says(&Refused::Unreached.to_string()) {
         return fail(format!("the person's edit: {}", by_person.shown()));
     }
     if Path::new(&installed).exists() {
@@ -811,7 +813,7 @@ fn a_rescue_shell_s_extctl_reaches_a_root_it_mounted() -> bool {
     }
     let outcome = (|| {
         let without = extctl(ROOT, &["--root", RESCUED, "disable", NAME]);
-        if !refused(&without, "not an argument list") {
+        if !refused(&without, words::privd::NOT_THAT_WAY) {
             return false;
         }
         let disable = rescued(&["--root", RESCUED, "disable", NAME]);
@@ -889,13 +891,15 @@ fn removing_takes_its_actions_and_command_away() -> bool {
         said = Connection::open()
             .ok()
             .map(|mut privd| ask_privd(&mut privd, "ext.act.greet"));
-        matches!(&said, Some(Outcome::Denied(why)) if why.contains("no action"))
+        matches!(&said, Some(Outcome::Denied(why)) if why == words::privd::NO_ACTION)
     }) || fail(format!("greet once removed: {said:?}"))
 }
 
 /// A kept answer runs the same command from the same directory unasked in
 /// the session that gave it, and nothing wider: from another directory, or
-/// with another argument, the person is asked again.
+/// with another argument, the person is asked again. The dialog names the
+/// base program that asks by its file name, having no app entry for it, and
+/// the extension's own program as its extension.
 fn a_kept_answer_covers_its_command_and_directory_alone() -> bool {
     let calls = caps_drop();
     if let Err(why) = init_control::ask(init_control::Command::RestartSession) {
@@ -920,10 +924,11 @@ fn a_kept_answer_covers_its_command_and_directory_alone() -> bool {
     let kept = ["ext.act.kept", "who", calls.as_str()];
     let other = ["ext.act.kept", "who", calls.as_str(), "again"];
     let up = until(|| here.ask(&other, None) == "asked");
-    let first = here.ask(&kept, Some(asking::tab_and_enter));
+    let (first, named) = here.ask_naming(&kept, Some(asking::tab_and_enter));
     let again = here.ask(&kept, None);
     let moved = elsewhere.ask(&kept, None);
     let changed = here.ask(&other, None);
+    let its_own = named_as_its_extension(front);
     let ended = init_control::ask(init_control::Command::EndSession);
     if !up {
         return fail("the desktop never asked the person");
@@ -931,12 +936,33 @@ fn a_kept_answer_covers_its_command_and_directory_alone() -> bool {
     if (first.as_str(), again.as_str()) != ("ran 0", "ran 0") {
         return fail(format!("allowed once, then again: {first}, {again}"));
     }
+    if named.as_deref() != Some("extension_action_test") {
+        return fail(format!("the dialog named the base's program {named:?}"));
+    }
     if (moved.as_str(), changed.as_str()) != ("asked", "asked") {
         return fail(format!(
             "elsewhere, or with another argument: {moved}, {changed}"
         ));
     }
+    if its_own.as_deref() != Some(format!("The {NAME} extension").as_str()) {
+        return fail(format!(
+            "the dialog named the extension's client {its_own:?}"
+        ));
+    }
     ended.is_ok() || fail(format!("end-session: {ended:?}"))
+}
+
+/// What the dialog called the extension's client as it asked, as the person
+/// carrying `login`; the question is withdrawn once it is.
+fn named_as_its_extension(login: Option<u32>) -> Option<String> {
+    let caps = caps_drop();
+    let client = format!("/opt/{NAME}/bin/client");
+    let mut client = asking::Child::start(&client, USER, login, "/", &["client", &caps])?;
+    let said = client
+        .tell("ask ext.act.careful")
+        .then(|| client.line(asking::DEADLINE))
+        .flatten();
+    said?.strip_prefix("ASKED ").map(str::to_owned)
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[

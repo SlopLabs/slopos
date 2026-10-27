@@ -626,6 +626,7 @@ impl Catalogue {
     fn dialog_node(&self) -> Node<Msg> {
         Node::Dialog {
             title: String::from("Erase this disk?"),
+            icon: None,
             content: Box::new(
                 Text::new("Everything on KINGSTON SNV3S1000G will be deleted.")
                     .wrap()
@@ -635,6 +636,7 @@ impl Catalogue {
                 .cancel(Button::new("Cancel").on_press(Msg::CloseDialog))
                 .destructive(Button::new("Erase").on_press(Msg::CloseDialog)),
             on_dismiss: Some(Msg::CloseDialog),
+            anchor: None,
         }
     }
 
